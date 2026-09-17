@@ -40,18 +40,9 @@ __pycache__/
 # built or copied right before `tauri build`, never committed.
 crates/zerocode-shell/bin/
 
-# Design notes, measurements, captures and benches. They carry this machine's
-# paths, the accounts signed in on it, and the names of company systems the
-# work was measured against — a published repository is the wrong place for
-# any of it, and no build or test reads them. The files stay on disk; git
-# simply stops carrying them.
-docs/
-
-# Working notes and agent instructions: meeting jottings, the PRD draft, and
-# the orchestration briefings this machine runs on. They are notes about the
-# work, not the work; a published repository carries the source and its README.
+# Working notes: meeting jottings and the PRD draft. They are notes about the
+# work, not the work, and nothing in the tree reads them.
 /PRD.md
-/AGENTS.md
 /CLAUDE.md
 /untitled.md
 /untitled-2.md
