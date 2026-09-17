@@ -75,6 +75,15 @@ message either: a later report of the same session keeps the path to the
 conversation the window already knew. The composer's model and command popups
 stay inside the window.
 
+Every place Jev sits is a row on the same card. Settings → API routers →
+TypeSafe paints the use table itself, so the recall rerank, the stall sweep
+and worker placement are switches a person can reach rather than keys to edit
+in `~/.zo/settings.json` by hand — two of the five seats were reachable
+before. Each row says where it stands and offers the same words, off, record
+only, apply and auto, with the hint below it spelling out what applying would
+mean there; a seat with no apply stage offers no way to apply. A seat added to
+the table arrives on the card with it.
+
 Every request to TypeSafe's Jev now passes one door: a key, the switch, the
 person's consent for the workspace (`smart.jev.workspaces`), an optional daily
 budget, and lines that may carry a credential withheld before anything is
