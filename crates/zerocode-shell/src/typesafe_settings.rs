@@ -15,7 +15,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use zerocode_core::jev::{BROWSER, JevMode, JevUse, ROUTING, SMART_SETTINGS_KEY};
+use zerocode_core::jev::{JEV_USES, JevMode, JevUse, SMART_SETTINGS_KEY, jev_use};
 use zerocode_harness::{SERVICE_KEYCHAIN_SERVICE_PREFIX, TYPESAFE_API_KEY_ENV};
 
 use crate::api_routers::{RouterKeys, RouterRefusal};
@@ -52,21 +52,34 @@ impl ModeChoice {
     }
 }
 
+/// One place Jev sits, as the pane paints it: the use's own name — which is
+/// also the switch's element id and the key its words are looked up under —
+/// the settings key it writes, where it stands now, and the modes it offers.
+///
+/// There is one of these per row of [`JEV_USES`] and no field named after any
+/// single use, so a seat added to the table arrives on the card with it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchRow {
+    pub id: &'static str,
+    pub setting: &'static str,
+    pub mode: &'static str,
+    pub modes: Vec<ModeChoice>,
+}
+
 /// What the pane paints: whether a key could be kept here, whether one is
-/// saved — never the key itself — and each switch as its reader reads it, with
-/// the modes it offers in the table's order.
+/// saved — never the key itself — and every switch as its reader reads it,
+/// with the modes it offers in the table's order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypeSafeSettings {
     pub keys_kept_here: bool,
     pub key_saved: bool,
-    pub decision_shadow: &'static str,
-    pub decision_modes: Vec<ModeChoice>,
-    /// The window's own switch: whether a stopped browser walk may ask which
-    /// control to press — the use table's browser row, the same ladder as the
-    /// router's, because a person reads them on one card.
-    pub browser_action: &'static str,
-    pub browser_modes: Vec<ModeChoice>,
+    /// Every row of the use table, in the table's order — zo's two and the
+    /// window's three on one card, because a person reads them together and
+    /// the question each asks is the same: does anything go to the vendor,
+    /// and may it change what the product does.
+    pub switches: Vec<SwitchRow>,
 }
 
 /// The pane's state, read from the keychain and zo's settings file.
@@ -85,10 +98,15 @@ pub fn read_settings(
     Ok(TypeSafeSettings {
         keys_kept_here,
         key_saved,
-        decision_shadow: mode_in(&root, &ROUTING).key(),
-        decision_modes: choices(&ROUTING),
-        browser_action: mode_in(&root, &BROWSER).key(),
-        browser_modes: choices(&BROWSER),
+        switches: JEV_USES
+            .iter()
+            .map(|row| SwitchRow {
+                id: row.id,
+                setting: row.setting,
+                mode: mode_in(&root, row).key(),
+                modes: choices(row),
+            })
+            .collect(),
     })
 }
 
@@ -128,22 +146,20 @@ pub fn remove_key(keys: &dyn RouterKeys) -> Result<(), RouterRefusal> {
     keys.delete(&typesafe_keychain_service())
 }
 
-/// Set `smart.decisionShadow` in zo's settings file to one of the modes the
-/// routing row offers, leaving every other key as it stood.
+/// Set the switch named `use_id` in zo's settings file to one of the modes
+/// that use offers, leaving every other key as it stood.
+///
+/// One door for every seat, because the pane sends the row's own name back:
+/// a use the table does not name is refused rather than written, so a stale
+/// card cannot create a switch nothing reads.
 ///
 /// # Errors
-/// A word that is not one of the row's modes, a `smart` value that is not an
-/// object (refused rather than overwritten), or an unreadable or unwritable file.
-pub fn set_decision_shadow(path: &Path, mode: &str) -> Result<(), String> {
-    set_mode(path, &ROUTING, mode)
-}
-
-/// Set the window's browser recovery to one of the modes the browser row offers.
-///
-/// # Errors
-/// The same three as [`set_decision_shadow`].
-pub fn set_browser_action(path: &Path, mode: &str) -> Result<(), String> {
-    set_mode(path, &BROWSER, mode)
+/// A use the table does not name, a word that is not one of that use's modes,
+/// a `smart` value that is not an object (refused rather than overwritten), or
+/// an unreadable or unwritable file.
+pub fn set_use_mode(path: &Path, use_id: &str, mode: &str) -> Result<(), String> {
+    let row = jev_use(use_id).ok_or_else(|| format!("알 수 없는 판단 자리입니다: {use_id}"))?;
+    set_mode(path, row, mode)
 }
 
 /// Write one of a row's own words to its switch under `smart`.
@@ -265,17 +281,21 @@ mod tests {
         std::fs::write(&path, before.to_string()).expect("write");
         let keys = HeldKeys::default();
         let read = || read_settings(&path, &keys, true).expect("settings");
-        assert_eq!(read().decision_shadow, JevMode::Off.key());
-        assert_eq!(read().browser_action, JevMode::Off.key());
+        let seat = |state: &TypeSafeSettings, id: &str| {
+            state
+                .switches
+                .iter()
+                .find(|row| row.id == id)
+                .unwrap_or_else(|| panic!("the card has no {id} row"))
+                .mode
+        };
+        for row in &JEV_USES {
+            assert_eq!(seat(&read(), row.id), JevMode::Off.key(), "{}", row.id);
+        }
 
-        type Writer = fn(&Path, &str) -> Result<(), String>;
-        let switches: [(&JevUse, Writer); 2] = [
-            (&ROUTING, set_decision_shadow),
-            (&BROWSER, set_browser_action),
-        ];
-        for (row, write) in switches {
+        for row in &JEV_USES {
             for mode in row.modes.iter().rev() {
-                write(&path, mode.key()).expect("a mode the row offers");
+                set_use_mode(&path, row.id, mode.key()).expect("a mode the row offers");
                 let after: Value =
                     serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
                         .expect("json");
@@ -283,21 +303,26 @@ mod tests {
                 assert_eq!(after["smart"]["plan"], before["smart"]["plan"]);
                 assert_eq!(after["providers"], before["providers"]);
                 assert_eq!(after["model"], before["model"]);
-                let state = read();
-                let read_back = if row.id == ROUTING.id {
-                    state.decision_shadow
-                } else {
-                    state.browser_action
-                };
-                assert_eq!(read_back, mode.key(), "{}", row.id);
+                assert_eq!(seat(&read(), row.id), mode.key(), "{}", row.id);
             }
-            assert!(write(&path, "actual").is_err(), "only the row's words");
+            assert!(
+                set_use_mode(&path, row.id, "actual").is_err(),
+                "{} takes only its row's words",
+                row.id
+            );
         }
         assert!(
-            set_browser_action(&path, JevMode::Off.key()).is_ok()
-                && read().decision_shadow == JevMode::Off.key(),
-            "one switch never moves the other"
+            set_use_mode(&path, "a seat the table does not name", JevMode::Off.key()).is_err(),
+            "a use the table does not name writes nothing"
         );
+
+        // Every seat now stands at the last word its row offered. Moving one
+        // back to off leaves every other exactly where it was.
+        let before_move: Vec<&str> = JEV_USES.iter().map(|row| seat(&read(), row.id)).collect();
+        set_use_mode(&path, JEV_USES[0].id, JevMode::Off.key()).expect("off");
+        for (row, stood) in JEV_USES.iter().zip(&before_move).skip(1) {
+            assert_eq!(seat(&read(), row.id), *stood, "one switch moved {}", row.id);
+        }
     }
 
     /// Each switch reads as its reader reads it: a mode its row offers, in any
@@ -305,7 +330,7 @@ mod tests {
     /// refused rather than overwritten.
     #[test]
     fn the_switch_reads_as_zo_reads_it_and_refuses_to_overwrite_a_stranger() {
-        for row in [&ROUTING, &BROWSER] {
+        for row in &JEV_USES {
             let read = |value: Value| {
                 let root = serde_json::json!({ SMART_SETTINGS_KEY: { row.setting: value } });
                 mode_in(root.as_object().expect("object"), row)
@@ -321,8 +346,13 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("settings.json");
         std::fs::write(&path, r#"{"smart": "fast"}"#).expect("write");
-        assert!(set_decision_shadow(&path, JevMode::Shadow.key()).is_err());
-        assert!(set_browser_action(&path, JevMode::On.key()).is_err());
+        for row in &JEV_USES {
+            assert!(
+                set_use_mode(&path, row.id, row.modes[1].key()).is_err(),
+                "{}",
+                row.id
+            );
+        }
         assert_eq!(
             std::fs::read_to_string(&path).expect("read"),
             r#"{"smart": "fast"}"#,
@@ -369,10 +399,15 @@ mod tests {
             true,
         )
         .expect("settings");
-        for (row, offered) in [
-            (&ROUTING, &state.decision_modes),
-            (&BROWSER, &state.browser_modes),
-        ] {
+        assert_eq!(
+            state.switches.len(),
+            JEV_USES.len(),
+            "the card carries every seat the table names"
+        );
+        for (row, painted) in JEV_USES.iter().zip(&state.switches) {
+            assert_eq!(painted.id, row.id, "the card keeps the table's order");
+            assert_eq!(painted.setting, row.setting, "{}", row.id);
+            let offered = &painted.modes;
             let words: Vec<&str> = offered.iter().map(|choice| choice.mode).collect();
             let expected: Vec<&str> = row.modes.iter().map(|mode| mode.key()).collect();
             assert_eq!(
@@ -391,15 +426,23 @@ mod tests {
             }
         }
 
+        // Every seat has a row on the card, named by the use's own id, and no
+        // row lists a mode of its own — the options are built from what the
+        // backend answered.
         let page = include_str!("../../../ui/index.html");
-        for select_id in ["typesafe-shadow-select", "typesafe-browser-select"] {
+        for row in &JEV_USES {
+            let select_id = format!("typesafe-{}-select", row.id);
             let select = &page[page
                 .find(&format!("id=\"{select_id}\""))
-                .expect("the switch")..];
+                .unwrap_or_else(|| panic!("the card has no {select_id}"))..];
             let select = &select[..select.find("</select>").expect("the switch closes")];
             assert!(
                 !select.contains("<option"),
                 "{select_id} lists no mode of its own: {select}"
+            );
+            assert!(
+                select.contains(&format!("data-jev-seat=\"{}\"", row.id)),
+                "{select_id} does not say which seat it moves"
             );
         }
 
@@ -413,8 +456,7 @@ mod tests {
             "typesafe_settings",
             "save_typesafe_key",
             "remove_typesafe_key",
-            "set_decision_shadow",
-            "set_browser_action",
+            "set_jev_mode",
             "check_typesafe_key",
         ] {
             assert!(
@@ -428,37 +470,57 @@ mod tests {
         }
     }
 
-    /// The settings harness's fake backend answers both switches with the modes
-    /// the table gives them, so the pane is driven by the words and meanings it
-    /// will read.
+    /// The settings harness's fake backend answers every seat the table names,
+    /// with the settings key it writes and the modes it offers, so the pane is
+    /// driven by the words and meanings it will read. A seat added to the table
+    /// turns this red until the fixture carries it too.
     #[test]
     fn the_settings_harness_mirrors_the_rows() {
         let harness = include_str!("../../../ui/tests/settings.mjs");
-        let list = &harness[harness
-            .find("const TYPESAFE_DECISION_MODES")
-            .expect("the fixture")..];
+        let list = &harness[harness.find("const JEV_SEATS").expect("the fixture")..];
         let list = &list[..list.find("]);").expect("the fixture closes")];
         let mirrored: Vec<&str> = list
             .lines()
             .map(str::trim)
+            .filter(|line| line.contains("id:"))
+            .collect();
+        let expected: Vec<String> = JEV_USES
+            .iter()
+            .map(|row| {
+                let modes: Vec<&str> = row.modes.iter().map(|mode| mode.key()).collect();
+                format!(
+                    "Object.freeze({{ id: \"{}\", setting: \"{}\", modes: \"{}\" }}),",
+                    row.id,
+                    row.setting,
+                    modes.join(" ")
+                )
+            })
+            .collect();
+        assert_eq!(mirrored, expected);
+
+        // And the meanings behind those words, which the fixture keeps once.
+        let meanings = &harness[harness
+            .find("const TYPESAFE_DECISION_MODES")
+            .expect("the mode list")..];
+        let meanings = &meanings[..meanings.find("]);").expect("the mode list closes")];
+        let said: Vec<&str> = meanings
+            .lines()
+            .map(str::trim)
             .filter(|line| line.contains("mode:"))
             .collect();
-        for row in [&ROUTING, &BROWSER] {
-            let expected: Vec<String> = row
-                .modes
-                .iter()
-                .map(|mode| {
-                    format!(
-                        "Object.freeze({{ mode: \"{}\", asks: {}, applies: {}, automatic: {} }}),",
-                        mode.key(),
-                        mode.asks(),
-                        mode.applies(),
-                        mode.automatic()
-                    )
-                })
-                .collect();
-            assert_eq!(mirrored, expected, "{}", row.id);
-        }
+        let every: Vec<String> = JevMode::ALL
+            .iter()
+            .map(|mode| {
+                format!(
+                    "Object.freeze({{ mode: \"{}\", asks: {}, applies: {}, automatic: {} }}),",
+                    mode.key(),
+                    mode.asks(),
+                    mode.applies(),
+                    mode.automatic()
+                )
+            })
+            .collect();
+        assert_eq!(said, every);
     }
 
     /// A mode word is spelled in the Jev use table and nowhere its readers
@@ -552,16 +614,20 @@ mod tests {
                     "\n/* ---- ",
                 ),
             ),
-            (
-                "pane routing switch",
-                between(page, "id=\"typesafe-shadow-select\"", "</select>"),
-            ),
-            (
-                "pane browser switch",
-                between(page, "id=\"typesafe-browser-select\"", "</select>"),
-            ),
         ];
-        for (reader, source) in readers {
+        let switches: Vec<(String, &str)> = JEV_USES
+            .iter()
+            .map(|row| {
+                let id = format!("typesafe-{}-select", row.id);
+                let cut = between(page, &format!("id=\"{id}\""), "</select>");
+                (format!("pane {} switch", row.id), cut)
+            })
+            .collect();
+        let named = readers
+            .iter()
+            .map(|(reader, source)| ((*reader).to_string(), *source))
+            .chain(switches);
+        for (reader, source) in named {
             for mode in JevMode::ALL {
                 assert!(
                     !source.contains(&format!("\"{}\"", mode.key())),

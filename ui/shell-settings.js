@@ -5026,84 +5026,61 @@ function initTypeSafeEvents() {
   el("typesafe-check-btn")?.addEventListener("click", () => {
     void checkTypeSafeKey();
   });
-  el("typesafe-shadow-select")?.addEventListener("change", (event) => {
-    const mode = event.target.value;
-    void runTypeSafe(() => invoke("set_decision_shadow", { mode }), (state) => {
-      const choice = typesafeModeChoice(state);
-      if (!choice?.asks) {
-        return t("settings.typesafe.shadowTurnedOff", "판단 모드를 껐습니다.");
-      }
-      if (choice.applies) {
-        return t("settings.typesafe.actualTurnedOn", "실제 적용을 켰습니다. 다음 라우팅 판단부터 반영합니다.");
-      }
-      if (choice.automatic) {
-        return t("settings.typesafe.autoTurnedOn", "자동을 켰습니다. 근거가 서기 전까지 다음 라우팅 판단부터 원장에 기록만 합니다.");
-      }
-      return t("settings.typesafe.shadowTurnedOn", "기록만을 켰습니다. 다음 라우팅 판단부터 원장에 기록합니다.");
+  for (const select of document.querySelectorAll("[data-jev-seat]")) {
+    select.addEventListener("change", (event) => {
+      const seat = event.target.dataset.jevSeat;
+      const mode = event.target.value;
+      void runTypeSafe(() => invoke("set_jev_mode", { use: seat, mode }), (state) =>
+        jevSwitchSaid(state, seat));
     });
-  });
-  el("typesafe-browser-select")?.addEventListener("change", (event) => {
-    const mode = event.target.value;
-    void runTypeSafe(() => invoke("set_browser_action", { mode }), (state) => {
-      const choice = state.browserModes?.find((one) => one.mode === state.browserAction) ?? null;
-      if (!choice?.asks) {
-        return t("settings.typesafe.browserTurnedOff", "브라우저 복구를 껐습니다.");
-      }
-      if (choice.applies) {
-        return t("settings.typesafe.browserTurnedOn", "브라우저 복구를 켰습니다. 다음에 멈추는 걷기부터 눌러 봅니다.");
-      }
-      if (choice.automatic) {
-        return t("settings.typesafe.browserTurnedAuto", "브라우저 복구를 자동으로 켰습니다. 기록만 하고, 누르기는 사람이 켤 때만 합니다.");
-      }
-      return t("settings.typesafe.browserTurnedShadow", "브라우저 복구를 기록만으로 켰습니다. 걷기는 오늘처럼 멈춥니다.");
-    });
-  });
-}
-
-/* The mode the switch is in, as the backend's list describes it. The words
- * are the Jev use table's (`zerocode_core::jev::ROUTING`); this page reads
- * what a mode does — asks, applies, automatic — and spells none of them. */
-function typesafeModeChoice(state) {
-  return state.decisionModes?.find((choice) => choice.mode === state.decisionShadow) ?? null;
-}
-
-/* The browser switch's options, as the router's are built below: one per mode
- * the backend offers for the browser row, each named by what it does — a
- * record-only `auto` included, since nothing promotes a press. */
-function paintBrowserModes(select, choices) {
-  select.replaceChildren();
-  for (const choice of choices) {
-    const option = document.createElement("option");
-    option.value = choice.mode;
-    if (!choice.asks) {
-      option.textContent = t("settings.typesafe.browserOff", "끔");
-    } else if (choice.applies) {
-      option.textContent = t("settings.typesafe.browserOn", "실제 적용 — 눌러 보고 다시 걷기");
-    } else if (choice.automatic) {
-      option.textContent = t("settings.typesafe.browserAuto", "자동 — 기록만, 누르기는 사람이 켤 때만");
-    } else {
-      option.textContent = t("settings.typesafe.browserShadow", "기록만 — 멈춘 자리 그대로");
-    }
-    select.appendChild(option);
   }
 }
 
-/* The switch's options, one per mode the backend offers, each named by what
- * it does in the language in force. Rebuilt on every paint — the list is four
- * rows — and the chosen value is set after, so a repaint never moves it. */
-function paintTypeSafeModes(select, choices) {
+/* One seat's row of the backend's answer, by the use's own name. The words a
+ * mode is spelled with are the Jev use table's; this page reads only what a
+ * mode does — asks, applies, automatic — and spells none of them. */
+function jevSeat(state, seat) {
+  return state.switches?.find((row) => row.id === seat) ?? null;
+}
+
+/* What a seat now stands at, as its own row describes it. */
+function jevSeatChoice(state, seat) {
+  const row = jevSeat(state, seat);
+  return row?.modes?.find((choice) => choice.mode === row.mode) ?? null;
+}
+
+/* What moving a switch did, said the same way for every seat: the row above
+ * the switch names the seat, so these words name only what the mode does. */
+function jevSwitchSaid(state, seat) {
+  const choice = jevSeatChoice(state, seat);
+  if (!choice?.asks) return t("settings.typesafe.turnedOff", "껐습니다.");
+  if (choice.applies) {
+    return t("settings.typesafe.turnedApply", "실제 적용을 켰습니다. 다음 판단부터 반영합니다.");
+  }
+  if (choice.automatic) {
+    return t("settings.typesafe.turnedAuto", "자동을 켰습니다. 근거가 서기 전까지 원장에 기록만 합니다.");
+  }
+  return t("settings.typesafe.turnedRecord", "기록만을 켰습니다. 다음 판단부터 원장에 기록합니다.");
+}
+
+/* A switch's options, one per mode its row offers, each named by what it does
+ * in the language in force. The seat itself is named by the label above the
+ * switch and spelled out by the hint below it, so these four words are the
+ * same on every row of the card. Rebuilt on every paint — a row is four
+ * options — and the chosen value is set after, so a repaint never moves it. */
+function paintJevModes(select, choices) {
   select.replaceChildren();
   for (const choice of choices) {
     const option = document.createElement("option");
     option.value = choice.mode;
     if (!choice.asks) {
-      option.textContent = t("settings.typesafe.shadowOff", "끔");
+      option.textContent = t("settings.typesafe.modeOff", "끔");
     } else if (choice.applies) {
-      option.textContent = t("settings.typesafe.actualOn", "실제 적용 — 라우팅에 반영");
+      option.textContent = t("settings.typesafe.modeApply", "실제 적용");
     } else if (choice.automatic) {
-      option.textContent = t("settings.typesafe.autoOn", "자동 — 근거가 서기 전까지 기록만");
+      option.textContent = t("settings.typesafe.modeAuto", "자동 — 근거가 서기 전까지 기록만");
     } else {
-      option.textContent = t("settings.typesafe.shadowOn", "기록만 — 라우팅은 그대로");
+      option.textContent = t("settings.typesafe.modeRecord", "기록만");
     }
     select.appendChild(option);
   }
@@ -5137,17 +5114,15 @@ function paintTypeSafe(state) {
     const button = el(id);
     if (button) button.disabled = typesafeBusy || !state.keySaved;
   }
-  const select = el("typesafe-shadow-select");
-  if (select) {
-    paintTypeSafeModes(select, state.decisionModes ?? []);
-    select.value = state.decisionShadow;
+  for (const select of document.querySelectorAll("[data-jev-seat]")) {
+    const row = jevSeat(state, select.dataset.jevSeat);
+    // A card row the backend no longer names is a seat that left the table:
+    // hide it rather than leave a switch that writes nothing.
+    select.closest("[data-jev-row]")?.toggleAttribute("hidden", !row);
+    if (!row) continue;
+    paintJevModes(select, row.modes ?? []);
+    select.value = row.mode;
     select.disabled = typesafeBusy;
-  }
-  const browser = el("typesafe-browser-select");
-  if (browser) {
-    paintBrowserModes(browser, state.browserModes ?? []);
-    browser.value = state.browserAction;
-    browser.disabled = typesafeBusy;
   }
   paintTypeSafeSave();
 }

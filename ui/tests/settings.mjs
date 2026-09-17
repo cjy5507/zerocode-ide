@@ -48,6 +48,20 @@ const TYPESAFE_DECISION_MODES = Object.freeze([
   Object.freeze({ mode: "on", asks: true, applies: true, automatic: false }),
   Object.freeze({ mode: "auto", asks: true, applies: false, automatic: true }),
 ]);
+/* Every seat of `zerocode_core::jev::JEV_USES`, in the table's order, with the
+   settings key it writes and the modes it offers — a seat with no apply stage
+   offers no `on`. `typesafe_settings.rs` holds this list against the table. */
+const JEV_SEATS = Object.freeze([
+  Object.freeze({ id: "routing", setting: "decisionShadow", modes: "off shadow on auto" }),
+  Object.freeze({ id: "recall", setting: "rerankShadow", modes: "off shadow auto" }),
+  Object.freeze({ id: "browser", setting: "browserAction", modes: "off shadow on auto" }),
+  Object.freeze({ id: "stall", setting: "stallCause", modes: "off shadow auto" }),
+  Object.freeze({ id: "placement", setting: "workerPlacement", modes: "off shadow auto" }),
+]);
+const jevSeat = (id) => JEV_SEATS.find((seat) => seat.id === id) ?? null;
+const jevSeatModes = (seat) =>
+  seat.modes.split(" ").map((word) =>
+    TYPESAFE_DECISION_MODES.find((choice) => choice.mode === word));
 const ROUTER_PRESETS_CATALOG = Object.freeze(JSON.parse(
   await readFile(
     resolve(UI, "..", "crates", "zerocode-shell", "src", "api-routers.json"),
@@ -2497,24 +2511,16 @@ class StatefulBackend {
       case "remove_typesafe_key":
         this.keychain.delete(TYPESAFE_SERVICE);
         return this.typesafeSettings();
-      case "set_decision_shadow": {
+      case "set_jev_mode": {
         if (this.typesafeSetFailure) {
-          throw { kind: "failed", message: "fixture refused decision mode" };
+          throw { kind: "failed", message: "fixture refused the switch" };
         }
-        if (!TYPESAFE_DECISION_MODES.some((choice) => choice.mode === args.mode)) {
-          throw { kind: "failed", message: `not a decision mode: ${args.mode}` };
+        const seat = jevSeat(String(args.use ?? ""));
+        if (!seat) throw { kind: "failed", message: `not a seat: ${args.use}` };
+        if (!seat.modes.split(" ").includes(args.mode)) {
+          throw { kind: "failed", message: `not a mode of ${seat.id}: ${args.mode}` };
         }
-        this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), decisionShadow: args.mode };
-        return this.typesafeSettings();
-      }
-      case "set_browser_action": {
-        if (this.typesafeSetFailure) {
-          throw { kind: "failed", message: "fixture refused browser recovery" };
-        }
-        if (!TYPESAFE_DECISION_MODES.some((choice) => choice.mode === args.mode)) {
-          throw { kind: "failed", message: `not a decision mode: ${args.mode}` };
-        }
-        this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), browserAction: args.mode };
+        this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), [seat.setting]: args.mode };
         return this.typesafeSettings();
       }
       case "check_typesafe_key": return clone(this.typesafeCheck);
@@ -2525,19 +2531,22 @@ class StatefulBackend {
   }
 
   typesafeSettings() {
-    /* Both switches read their row's words — the same list today — and
-       anything else is off: `typesafe_settings.rs` `mode_in`. */
-    const mode = (given) => {
+    /* Every switch reads its own row's words and anything else is off:
+       `typesafe_settings.rs` `mode_in`. */
+    const mode = (seat, given) => {
       const word = String(given ?? "").trim().toLowerCase();
-      return (TYPESAFE_DECISION_MODES.find((choice) => choice.mode === word) ?? TYPESAFE_DECISION_MODES[0]).mode;
+      const offered = seat.modes.split(" ");
+      return offered.includes(word) ? word : offered[0];
     };
     return {
       keysKeptHere: !this.routerKeychainUnavailable,
       keySaved: Boolean(this.keychain.get(TYPESAFE_SERVICE)?.trim()),
-      decisionShadow: mode(this.zoSettings.smart?.decisionShadow),
-      decisionModes: clone(TYPESAFE_DECISION_MODES),
-      browserAction: mode(this.zoSettings.smart?.browserAction),
-      browserModes: clone(TYPESAFE_DECISION_MODES),
+      switches: JEV_SEATS.map((seat) => ({
+        id: seat.id,
+        setting: seat.setting,
+        mode: mode(seat, this.zoSettings.smart?.[seat.setting]),
+        modes: clone(jevSeatModes(seat)),
+      })),
     };
   }
 }
@@ -3916,20 +3925,20 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   for (const id of ["#typesafe-check-btn", "#typesafe-remove-btn", "#typesafe-save-btn"]) {
     assert(await pageA.locator(id).isDisabled(), `${id} was offered with no key saved`);
   }
-  assertEqual(await pageA.locator("#typesafe-shadow-select").inputValue(), "off", "the switch did not read zo's default");
+  assertEqual(await pageA.locator("#typesafe-routing-select").inputValue(), "off", "the switch did not read zo's default");
   // The options are the backend's modes, in its order, each named by what it does.
   assertEqual(
-    await pageA.locator("#typesafe-shadow-select option").evaluateAll((options) => options.map((option) => option.value)),
+    await pageA.locator("#typesafe-routing-select option").evaluateAll((options) => options.map((option) => option.value)),
     TYPESAFE_DECISION_MODES.map((choice) => choice.mode),
     "the switch did not list the backend's modes",
   );
   assertEqual(
-    await pageA.locator("#typesafe-shadow-select option").evaluateAll((options) => options.map((option) => option.textContent)),
+    await pageA.locator("#typesafe-routing-select option").evaluateAll((options) => options.map((option) => option.textContent)),
     [
-      await said("settings.typesafe.shadowOff", "끔"),
-      await said("settings.typesafe.shadowOn", "기록만 — 라우팅은 그대로"),
-      await said("settings.typesafe.actualOn", "실제 적용 — 라우팅에 반영"),
-      await said("settings.typesafe.autoOn", "자동 — 근거가 서기 전까지 기록만"),
+      await said("settings.typesafe.modeOff", "끔"),
+      await said("settings.typesafe.modeRecord", "기록만"),
+      await said("settings.typesafe.modeApply", "실제 적용"),
+      await said("settings.typesafe.modeAuto", "자동 — 근거가 서기 전까지 기록만"),
     ],
     "an option is not named by what its mode does",
   );
@@ -3967,50 +3976,50 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   // The switch writes zo's word and moves nothing else of zo's settings.
   const routers = clone(backend.zoSettings.providers);
   const switchedAt = backend.calls.length;
-  await pageA.selectOption("#typesafe-shadow-select", "shadow");
-  assertEqual((await backend.waitForCall("A", "set_decision_shadow", switchedAt)).args.mode, "shadow");
+  await pageA.selectOption("#typesafe-routing-select", "shadow");
+  assertEqual((await backend.waitForCall("A", "set_jev_mode", switchedAt)).args.mode, "shadow");
   await pageA.waitForFunction(
     (words) => document.getElementById("typesafe-status")?.textContent === words,
-    await said("settings.typesafe.shadowTurnedOn", "기록만을 켰습니다. 다음 라우팅 판단부터 원장에 기록합니다."),
+    await said("settings.typesafe.turnedRecord", "기록만을 켰습니다. 다음 판단부터 원장에 기록합니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.decisionShadow, "shadow");
   assertEqual(backend.zoSettings.providers, routers, "turning the shadow on moved the router rows");
   await pageA.evaluate(() => refreshApiRouters());
-  assertEqual(await pageA.locator("#typesafe-shadow-select").inputValue(), "shadow", "a reopened pane lost record-only mode");
+  assertEqual(await pageA.locator("#typesafe-routing-select").inputValue(), "shadow", "a reopened pane lost record-only mode");
 
   const activeAt = backend.calls.length;
-  await pageA.selectOption("#typesafe-shadow-select", "on");
-  assertEqual((await backend.waitForCall("A", "set_decision_shadow", activeAt)).args.mode, "on");
+  await pageA.selectOption("#typesafe-routing-select", "on");
+  assertEqual((await backend.waitForCall("A", "set_jev_mode", activeAt)).args.mode, "on");
   await pageA.waitForFunction(
     (words) => document.getElementById("typesafe-status")?.textContent === words,
-    await said("settings.typesafe.actualTurnedOn", "실제 적용을 켰습니다. 다음 라우팅 판단부터 반영합니다."),
+    await said("settings.typesafe.turnedApply", "실제 적용을 켰습니다. 다음 판단부터 반영합니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.decisionShadow, "on");
   assertEqual(backend.zoSettings.providers, routers, "turning actual use on moved the router rows");
   await pageA.evaluate(() => refreshApiRouters());
-  assertEqual(await pageA.locator("#typesafe-shadow-select").inputValue(), "on", "a reopened pane lost actual-use mode");
+  assertEqual(await pageA.locator("#typesafe-routing-select").inputValue(), "on", "a reopened pane lost actual-use mode");
 
   const autoAt = backend.calls.length;
-  await pageA.selectOption("#typesafe-shadow-select", "auto");
-  assertEqual((await backend.waitForCall("A", "set_decision_shadow", autoAt)).args.mode, "auto");
+  await pageA.selectOption("#typesafe-routing-select", "auto");
+  assertEqual((await backend.waitForCall("A", "set_jev_mode", autoAt)).args.mode, "auto");
   await pageA.waitForFunction(
     (words) => document.getElementById("typesafe-status")?.textContent === words,
-    await said("settings.typesafe.autoTurnedOn", "자동을 켰습니다. 근거가 서기 전까지 다음 라우팅 판단부터 원장에 기록만 합니다."),
+    await said("settings.typesafe.turnedAuto", "자동을 켰습니다. 근거가 서기 전까지 원장에 기록만 합니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.decisionShadow, "auto");
   await pageA.evaluate(() => refreshApiRouters());
-  assertEqual(await pageA.locator("#typesafe-shadow-select").inputValue(), "auto", "a reopened pane lost auto mode");
+  assertEqual(await pageA.locator("#typesafe-routing-select").inputValue(), "auto", "a reopened pane lost auto mode");
   // Back to actual use, answered before the refusal below is tried: a switch
   // still waiting on its answer takes no second one.
   const backToOn = backend.calls.length;
-  await pageA.selectOption("#typesafe-shadow-select", "on");
-  await backend.waitForCall("A", "set_decision_shadow", backToOn);
+  await pageA.selectOption("#typesafe-routing-select", "on");
+  await backend.waitForCall("A", "set_jev_mode", backToOn);
   await pageA.waitForFunction(
     (words) => document.getElementById("typesafe-status")?.textContent === words,
-    await said("settings.typesafe.actualTurnedOn", "실제 적용을 켰습니다. 다음 라우팅 판단부터 반영합니다."),
+    await said("settings.typesafe.turnedApply", "실제 적용을 켰습니다. 다음 판단부터 반영합니다."),
     { timeout: UI_TIMEOUT },
   );
 
@@ -4023,10 +4032,10 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   );
   const browserAt = backend.calls.length;
   await pageA.selectOption("#typesafe-browser-select", "on");
-  assertEqual((await backend.waitForCall("A", "set_browser_action", browserAt)).args.mode, "on");
+  assertEqual((await backend.waitForCall("A", "set_jev_mode", browserAt)).args.mode, "on");
   await pageA.waitForFunction(
     (words) => document.getElementById("typesafe-status")?.textContent === words,
-    await said("settings.typesafe.browserTurnedOn", "브라우저 복구를 켰습니다. 다음에 멈추는 걷기부터 눌러 봅니다."),
+    await said("settings.typesafe.turnedApply", "실제 적용을 켰습니다. 다음 판단부터 반영합니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.browserAction, "on");
@@ -4043,7 +4052,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   try {
     const browserRefusedAt = backend.calls.length;
     await pageA.selectOption("#typesafe-browser-select", "off");
-    await backend.waitForCall("A", "set_browser_action", browserRefusedAt);
+    await backend.waitForCall("A", "set_jev_mode", browserRefusedAt);
     await pageA.waitForFunction(
       () => document.getElementById("typesafe-browser-select")?.value === "on",
       null,
@@ -4061,19 +4070,50 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   assertEqual(
     await pageA.locator("#typesafe-browser-select option").evaluateAll((options) => options.map((option) => option.textContent)),
     [
-      await said("settings.typesafe.browserOff", "끔"),
-      await said("settings.typesafe.browserShadow", "기록만 — 멈춘 자리 그대로"),
-      await said("settings.typesafe.browserOn", "실제 적용 — 눌러 보고 다시 걷기"),
-      await said("settings.typesafe.browserAuto", "자동 — 기록만, 누르기는 사람이 켤 때만"),
+      await said("settings.typesafe.modeOff", "끔"),
+      await said("settings.typesafe.modeRecord", "기록만"),
+      await said("settings.typesafe.modeApply", "실제 적용"),
+      await said("settings.typesafe.modeAuto", "자동 — 근거가 서기 전까지 기록만"),
     ],
     "a browser option is not named by what its mode does",
   );
+
+  // Every seat Jev sits in has a row on this one card, and a seat with no
+  // apply stage offers no way to apply: its switch lists three words, not four.
+  for (const [seat, offers] of [
+    ["routing", 4],
+    ["recall", 3],
+    ["browser", 4],
+    ["stall", 3],
+    ["placement", 3],
+  ]) {
+    assertEqual(
+      await pageA.locator(`#typesafe-${seat}-select option`).count(),
+      offers,
+      `the ${seat} switch does not offer its row's modes`,
+    );
+    assert(
+      await pageA.locator(`#typesafe-${seat}-select`).isVisible(),
+      `the ${seat} switch is not on the card`,
+    );
+  }
+  const recallAt = backend.calls.length;
+  await pageA.selectOption("#typesafe-recall-select", "shadow");
+  const asked = await backend.waitForCall("A", "set_jev_mode", recallAt);
+  assertEqual(asked.args.use, "recall", "the card did not say which seat moved");
+  assertEqual(asked.args.mode, "shadow");
+  assertEqual(backend.zoSettings.smart.rerankShadow, "shadow");
+  assertEqual(
+    backend.zoSettings.smart.decisionShadow,
+    "on",
+    "the recall switch moved the router's",
+  );
   const browserAutoAt = backend.calls.length;
   await pageA.selectOption("#typesafe-browser-select", "auto");
-  assertEqual((await backend.waitForCall("A", "set_browser_action", browserAutoAt)).args.mode, "auto");
+  assertEqual((await backend.waitForCall("A", "set_jev_mode", browserAutoAt)).args.mode, "auto");
   await pageA.waitForFunction(
     (words) => document.getElementById("typesafe-status")?.textContent === words,
-    await said("settings.typesafe.browserTurnedAuto", "브라우저 복구를 자동으로 켰습니다. 기록만 하고, 누르기는 사람이 켤 때만 합니다."),
+    await said("settings.typesafe.turnedAuto", "자동을 켰습니다. 근거가 서기 전까지 원장에 기록만 합니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.browserAction, "auto");
@@ -4082,10 +4122,10 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   backend.typesafeSetFailure = true;
   try {
     const refusedAt = backend.calls.length;
-    await pageA.selectOption("#typesafe-shadow-select", "off");
-    await backend.waitForCall("A", "set_decision_shadow", refusedAt);
+    await pageA.selectOption("#typesafe-routing-select", "off");
+    await backend.waitForCall("A", "set_jev_mode", refusedAt);
     await pageA.waitForFunction(
-      () => document.getElementById("typesafe-shadow-select")?.value === "on",
+      () => document.getElementById("typesafe-routing-select")?.value === "on",
       null,
       { timeout: UI_TIMEOUT },
     );
@@ -4095,11 +4135,11 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   }
 
   const offAt = backend.calls.length;
-  await pageA.selectOption("#typesafe-shadow-select", "off");
-  await backend.waitForCall("A", "set_decision_shadow", offAt);
+  await pageA.selectOption("#typesafe-routing-select", "off");
+  await backend.waitForCall("A", "set_jev_mode", offAt);
   await pageA.waitForFunction(
     (words) => document.getElementById("typesafe-status")?.textContent === words,
-    await said("settings.typesafe.shadowTurnedOff", "판단 모드를 껐습니다."),
+    await said("settings.typesafe.turnedOff", "껐습니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.decisionShadow, "off");

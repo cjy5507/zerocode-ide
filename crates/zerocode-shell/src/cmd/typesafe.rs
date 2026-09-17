@@ -1,4 +1,4 @@
-//! TypeSafe (Jev) settings IPC — the key and the decision shadow's switch.
+//! TypeSafe (Jev) settings IPC — the key and every seat's switch.
 use crate::api_routers::{self, Keychain, RouterRefusal};
 use crate::typesafe_settings::{self, TypeSafeCheck, TypeSafeSettings};
 
@@ -32,17 +32,11 @@ pub(crate) fn remove_typesafe_key() -> Result<TypeSafeSettings, RouterRefusal> {
     settings_now()
 }
 
-/// Turn the decision shadow on (`shadow`) or off (`off`) in zo's settings.
+/// Move one seat's switch — the card sends back the use's own name, so every
+/// row of the table is turned on and off through this one door.
 #[tauri::command(async)]
-pub(crate) fn set_decision_shadow(mode: String) -> Result<TypeSafeSettings, RouterRefusal> {
-    typesafe_settings::set_decision_shadow(&settings_path()?, &mode)?;
-    settings_now()
-}
-
-/// Turn the window's browser recovery off, to record only, or on.
-#[tauri::command(async)]
-pub(crate) fn set_browser_action(mode: String) -> Result<TypeSafeSettings, RouterRefusal> {
-    typesafe_settings::set_browser_action(&settings_path()?, &mode)?;
+pub(crate) fn set_jev_mode(r#use: String, mode: String) -> Result<TypeSafeSettings, RouterRefusal> {
+    typesafe_settings::set_use_mode(&settings_path()?, &r#use, &mode)?;
     settings_now()
 }
 

@@ -137,8 +137,7 @@ pub(crate) use api_routers::{
 
 pub(crate) mod typesafe;
 pub(crate) use typesafe::{
-    check_typesafe_key, remove_typesafe_key, save_typesafe_key, set_browser_action,
-    set_decision_shadow, typesafe_settings,
+    check_typesafe_key, remove_typesafe_key, save_typesafe_key, set_jev_mode, typesafe_settings,
 };
 
 pub(crate) use github_pr::{github_pr_file_diff, github_set_reviewers};
