@@ -1,6 +1,11 @@
 # Changelog
 
-## [1.3.111] — 2026-09-18
+## [1.0.0] — 2026-09-18
+
+ZeroCode's first release from this repository. The program itself is not new —
+this is the tree the 1.3 line reached, published as 1.0.0 from a repository
+that begins here. The notes for the builds before it are kept below under the
+version numbers those builds carried.
 
 zo reads the router keys the window keeps — TypeSafe's among them — from the
 window's keychain, once per process. A read the keychain could not answer was
@@ -13,13 +18,13 @@ answer is no longer remembered — the next caller that needs the key asks once
 more. An item that is genuinely absent, a platform that keeps no router keys
 and the keychain kill switch are answers, and are still asked only once.
 
-v1.3.110 did not reach anyone. Its first release run went red on a test of
-this repository's own — one that read a JSON map's keys in whatever order the
-build happened to hand them back — and its second passed every gate but could
-not be pushed, because the repository's history was rewritten while it built.
-Everything listed under 1.3.110 ships here.
-
-## [1.3.110] — 2026-09-18
+A browser pane no longer reports the same cookie import failure for ever.
+Cookies brought in from another browser wait in a staging file until a pane of
+that profile can lay them down, and any refusal kept the whole file for a
+retry — but 519 of the 2,245 waiting on one machine here carried an expiry
+that had already passed, which a cookie store refuses every time it is asked.
+A cookie that can never be laid down is now dropped instead of retried, so the
+staging empties and the notice stops.
 
 The terminal keeps up on a slow machine. A pane no longer queues screens the
 webview has not drawn yet: the screen pulls the latest frame when it can
@@ -94,6 +99,9 @@ tree that was already green, or a check that cannot fail, no longer clears the
 publish gate. And where a newly started worker should stand can be put to Jev
 as a fifth use (`smart.workerPlacement`, off unless switched on), recorded
 beside the measured rule that still places every worker.
+
+_The sections below describe builds this program shipped before this
+repository began again on 2026-09-18._
 
 ## [1.3.109] — 2026-09-17
 
