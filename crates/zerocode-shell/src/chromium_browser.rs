@@ -25,7 +25,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{
     AppState, ShellStateExt,
-    browser_cookie_import::StagedCookie,
+    browser_cookie_import::{self, StagedCookie},
     browser_cookies::SameSite,
     browser_runtime::{BrowserDownload, BrowserNav, BrowserPopup, BrowserTitle, browsable_target},
 };
@@ -449,6 +449,24 @@ impl BrowserPane {
         url: tauri::Url,
     ) -> Result<(), String> {
         if cookies.is_empty() {
+            return self.navigate(url);
+        }
+        // 저장소가 몇 번을 물어도 같은 답을 줄 쿠키는 시도하지 않는다.
+        // 시도하면 실패로 세어지고, 실패가 있으면 스테이징이 보관되어
+        // 판이 설 때마다 같은 알림이 돌아온다.
+        let staged = cookies.len();
+        let (cookies, dropped) =
+            browser_cookie_import::keep_acceptable(cookies, browser_cookie_import::now_unix());
+        if !dropped.is_empty() {
+            eprintln!(
+                "zerocode-shell: Chromium profile {profile_id} cookie staging dropped {} of {staged} that can never be laid down ({dropped})",
+                dropped.total()
+            );
+        }
+        if cookies.is_empty() {
+            // 앉힐 것이 하나도 남지 않았다 — 붙들고 있어도 다음 판이 받을
+            // 답은 같다.
+            browser_cookie_import::discard_staged_cookies(&config_root, &profile_id);
             return self.navigate(url);
         }
         let cookies = cookies

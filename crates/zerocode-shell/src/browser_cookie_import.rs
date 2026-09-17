@@ -819,6 +819,148 @@ pub fn peek_staged_cookies(config_root: &Path, profile_id: &str) -> Vec<StagedCo
     serde_json::from_str(&text).unwrap_or_default()
 }
 
+/// 스테이징 쿠키가 **몇 번을 시도해도** 앉지 못하는 이유.
+///
+/// 이런 쿠키를 거절한 저장소는 실패한 게 아니라 답한 것이다. 그래서
+/// 재시도 목록에 남기지 않고 사람에게 알리지도 않는다 — 알려 봤자 손쓸
+/// 것이 없고, 남겨 두면 판이 설 때마다 같은 알림이 돌아온다.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unacceptable {
+    /// 만료가 이미 지났다 — 앉히는 일이 곧 지우는 일이다.
+    Expired,
+    /// 이름이나 도메인이 없다 — 쓸 것이 없다.
+    Nameless,
+    /// `__Host-` 는 출처 하나를 약속한다: secure, path `/`, 그리고 Domain
+    /// 속성 없음(우리 모양에서는 앞에 점이 붙지 않은 호스트 하나).
+    HostPrefix,
+    /// `__Secure-` 는 https 를 약속한다.
+    SecurePrefix,
+}
+
+/// 접두사가 약속을 거는 두 이름 — 규칙은 RFC 6265bis §4.1.3.
+const HOST_PREFIX: &str = "__Host-";
+const SECURE_PREFIX: &str = "__Secure-";
+
+/// 지금 이 쿠키를 앉힐 수 없는 이유 — 없으면 앉힐 수 있다.
+///
+/// `now_unix` 를 받는 것은 만료 판정이 시계에 달려 있기 때문이다: 시험은
+/// 제 시각을 주고, 부르는 쪽은 진짜 시계를 준다.
+#[must_use]
+pub fn unacceptable(cookie: &StagedCookie, now_unix: i64) -> Option<Unacceptable> {
+    if cookie.name.is_empty() || cookie.domain.is_empty() {
+        return Some(Unacceptable::Nameless);
+    }
+    // 만료 0(또는 없음)은 세션 쿠키다 — 지난 시각이 아니다.
+    if cookie
+        .expires_unix
+        .is_some_and(|at| at > 0 && at <= now_unix)
+    {
+        return Some(Unacceptable::Expired);
+    }
+    let path_is_root = cookie.path.is_empty() || cookie.path == "/";
+    if cookie.name.starts_with(HOST_PREFIX)
+        && (!cookie.secure || !path_is_root || cookie.domain.starts_with('.'))
+    {
+        return Some(Unacceptable::HostPrefix);
+    }
+    if cookie.name.starts_with(SECURE_PREFIX) && !cookie.secure {
+        return Some(Unacceptable::SecurePrefix);
+    }
+    None
+}
+
+/// 한 번의 주입에서 버려진 쿠키의 수 — 로그 한 줄이 말하는 숫자들이다.
+/// 이름도 값도 도메인도 세지 않는다.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Dropped {
+    pub expired: usize,
+    pub nameless: usize,
+    pub host_prefix: usize,
+    pub secure_prefix: usize,
+}
+
+impl Dropped {
+    /// 버려진 전부.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.expired + self.nameless + self.host_prefix + self.secure_prefix
+    }
+
+    /// 아무것도 버리지 않았다.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.total() == 0
+    }
+
+    fn count(&mut self, reason: Unacceptable) {
+        match reason {
+            Unacceptable::Expired => self.expired += 1,
+            Unacceptable::Nameless => self.nameless += 1,
+            Unacceptable::HostPrefix => self.host_prefix += 1,
+            Unacceptable::SecurePrefix => self.secure_prefix += 1,
+        }
+    }
+}
+
+impl std::fmt::Display for Dropped {
+    /// 로그 한 줄에 들어가는 모양 — 0인 이유는 적지 않는다.
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut first = true;
+        for (count, word) in [
+            (self.expired, "expired"),
+            (self.nameless, "nameless"),
+            (self.host_prefix, "__Host- rule"),
+            (self.secure_prefix, "__Secure- rule"),
+        ] {
+            if count == 0 {
+                continue;
+            }
+            if !first {
+                write!(out, ", ")?;
+            }
+            write!(out, "{count} {word}")?;
+            first = false;
+        }
+        if first {
+            write!(out, "none")?;
+        }
+        Ok(())
+    }
+}
+
+/// 만료 판정이 묻는 시계. 부르는 쪽이 저마다 시각을 만들지 않도록 여기
+/// 하나만 둔다 — 시계가 에포크 이전이면 0을 답하고, 그러면 아무것도
+/// 만료로 버리지 않는다(잘못 버리느니 한 번 더 시도한다).
+#[must_use]
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+/// 지금 앉힐 수 있는 쿠키들과, 버린 것의 수.
+///
+/// 버려진 쿠키는 다시 시도되지 않는다: 만료는 시간이 지나도 돌아오지 않고,
+/// 접두사 규칙은 다음 판에서도 같은 답을 받는다. 스테이징을 통째로 붙들고
+/// 재시도하던 길이 알림 하나를 영영 되풀이하게 만든 자리다.
+#[must_use]
+pub fn keep_acceptable(cookies: Vec<StagedCookie>, now_unix: i64) -> (Vec<StagedCookie>, Dropped) {
+    let mut dropped = Dropped::default();
+    let kept = cookies
+        .into_iter()
+        .filter(|cookie| match unacceptable(cookie, now_unix) {
+            Some(reason) => {
+                dropped.count(reason);
+                false
+            }
+            None => true,
+        })
+        .collect();
+    (kept, dropped)
+}
+
 /// 주입이 끝난 스테이징을 소거한다 — 두 번 주입되는 쿠키는 한 번의 사실이
 /// 아니다. 프로필의 저장소가 이미 쿠키를 들었으니 다음 판은 저장소에서
 /// 그대로 만난다.
@@ -1038,6 +1180,106 @@ mod tests {
         assert_eq!(out.cookies.len(), 1);
         assert_eq!(out.cookies[0].expires_unix, Some(1_893_456_000));
         assert_eq!(out.partition_skipped, 1);
+    }
+
+    /// 한 벌의 쿠키 — 이름만 바꾸며 쓴다.
+    fn staged(name: &str) -> StagedCookie {
+        StagedCookie {
+            url: "https://example.com/".into(),
+            name: name.into(),
+            value: "v".into(),
+            domain: "example.com".into(),
+            path: "/".into(),
+            secure: true,
+            http_only: false,
+            same_site: None,
+            expires_unix: None,
+        }
+    }
+
+    /// 저장소가 **몇 번을 물어도** 같은 답을 주는 쿠키는 실패가 아니라
+    /// 답이다. 2026-09-15 의 스테이징 파일(쿠키 2,245개)이 그 증거다:
+    /// 그중 519개는 만료가 지나 있었고, 하나라도 거절되면 스테이징이
+    /// 보관되므로 브라우저 판이 설 때마다 같은 알림이 돌아왔다.
+    #[test]
+    fn a_cookie_that_can_never_be_laid_down_is_not_kept_for_retry() {
+        let now = 1_700_000_000;
+
+        // 만료가 지난 것 — 앉히는 일이 곧 지우는 일이다.
+        let mut expired = staged("old");
+        expired.expires_unix = Some(now - 1);
+        assert_eq!(unacceptable(&expired, now), Some(Unacceptable::Expired));
+        // 만료가 앞으로면 앉힌다. 0과 없음은 세션 쿠키다.
+        let mut live = staged("live");
+        live.expires_unix = Some(now + 1);
+        assert_eq!(unacceptable(&live, now), None);
+        let mut zero = staged("session");
+        zero.expires_unix = Some(0);
+        assert_eq!(unacceptable(&zero, now), None);
+        assert_eq!(unacceptable(&staged("plain"), now), None);
+
+        // 이름이나 도메인이 없으면 쓸 것이 없다.
+        let mut nameless = staged("");
+        nameless.name = String::new();
+        assert_eq!(unacceptable(&nameless, now), Some(Unacceptable::Nameless));
+        let mut homeless = staged("x");
+        homeless.domain = String::new();
+        assert_eq!(unacceptable(&homeless, now), Some(Unacceptable::Nameless));
+
+        // `__Host-` 는 출처 하나를 약속한다: 앞에 점 붙은 도메인, 하위
+        // 경로, secure 아님은 모두 저장소가 영영 거절한다. 반면 점 없는
+        // 호스트 하나에 path `/`, secure 면 정상이다 — 2026-09-15 표본의
+        // 접두사 쿠키 31개가 모두 이 모양이었다.
+        assert_eq!(unacceptable(&staged("__Host-ok"), now), None);
+        let mut dotted = staged("__Host-dotted");
+        dotted.domain = ".example.com".into();
+        assert_eq!(unacceptable(&dotted, now), Some(Unacceptable::HostPrefix));
+        let mut deep = staged("__Host-deep");
+        deep.path = "/app".into();
+        assert_eq!(unacceptable(&deep, now), Some(Unacceptable::HostPrefix));
+        let mut plain = staged("__Host-plain");
+        plain.secure = false;
+        assert_eq!(unacceptable(&plain, now), Some(Unacceptable::HostPrefix));
+
+        // `__Secure-` 는 https 하나만 약속한다.
+        let mut insecure = staged("__Secure-plain");
+        insecure.secure = false;
+        assert_eq!(
+            unacceptable(&insecure, now),
+            Some(Unacceptable::SecurePrefix)
+        );
+        assert_eq!(unacceptable(&staged("__Secure-ok"), now), None);
+    }
+
+    /// 거르기는 남길 것과 버린 수를 함께 답한다. 버린 것만 남은 스테이징은
+    /// 앉힐 것이 없다 — 부르는 쪽은 그걸 보고 파일을 지운다.
+    #[test]
+    fn the_filter_says_what_it_kept_and_what_it_dropped() {
+        let now = 1_700_000_000;
+        let mut expired = staged("old");
+        expired.expires_unix = Some(now - 60);
+        let mut dotted = staged("__Host-dotted");
+        dotted.domain = ".example.com".into();
+        let (kept, dropped) = keep_acceptable(vec![staged("a"), expired, dotted, staged("b")], now);
+        assert_eq!(kept.len(), 2);
+        assert_eq!(kept[0].name, "a");
+        assert_eq!(kept[1].name, "b");
+        assert_eq!(dropped.expired, 1);
+        assert_eq!(dropped.host_prefix, 1);
+        assert_eq!(dropped.total(), 2);
+        assert!(!dropped.is_empty());
+        assert_eq!(dropped.to_string(), "1 expired, 1 __Host- rule");
+
+        let mut only_dead = staged("dead");
+        only_dead.expires_unix = Some(now - 1);
+        let (kept, dropped) = keep_acceptable(vec![only_dead], now);
+        assert!(kept.is_empty(), "앉힐 것이 없다");
+        assert_eq!(dropped.total(), 1);
+
+        let (kept, dropped) = keep_acceptable(vec![staged("a")], now);
+        assert_eq!(kept.len(), 1);
+        assert!(dropped.is_empty());
+        assert_eq!(dropped.to_string(), "none");
     }
 
     /// 스테이징 왕복 — 읽는 순간 파일이 사라진다(한 번의 주입).

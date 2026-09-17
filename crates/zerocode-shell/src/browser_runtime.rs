@@ -460,13 +460,13 @@ pub(super) fn inject_staged_cookies(
     if staged.is_empty() {
         return;
     }
-    let mut refused = 0usize;
     let total = staged.len();
+    // 저장소가 영영 거절할 쿠키는 시도하지 않는다 — 같은 판단을 CEF 쪽도
+    // 쓴다(`chromium_browser::navigate_after_cookies`).
+    let (staged, dropped) =
+        browser_cookie_import::keep_acceptable(staged, browser_cookie_import::now_unix());
+    let mut refused = 0usize;
     for cookie in staged {
-        if cookie.name.is_empty() || cookie.domain.is_empty() {
-            refused += 1;
-            continue;
-        }
         let mut built = tauri::webview::cookie::CookieBuilder::new(cookie.name, cookie.value)
             .domain(cookie.domain)
             .path(if cookie.path.is_empty() {
@@ -486,11 +486,12 @@ pub(super) fn inject_staged_cookies(
         }
     }
     browser_cookie_import::discard_staged_cookies(config_root, profile_id);
-    let applied = total - refused;
+    let applied = total - refused - dropped.total();
     note_window_event(
         local_data_root,
         &format!(
-            "cookie staging: applied {applied}/{total} for profile {profile_id} ({refused} refused)"
+            "cookie staging: applied {applied}/{total} for profile {profile_id} ({refused} refused, dropped {})",
+            dropped
         ),
     );
 }
