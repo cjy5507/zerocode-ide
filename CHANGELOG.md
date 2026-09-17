@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.3.111] — 2026-09-18
+
+zo reads the router keys the window keeps — TypeSafe's among them — from the
+window's keychain, once per process. A read the keychain could not answer was
+remembered as the answer "this machine keeps no such key": `security` never
+running, an interaction this session does not have, a lock another process
+holds, all filed as absence. zo then went without a key the machine does have
+for as long as the process lived, and every routing judgment after it recorded
+`no_key` beside a keychain item sitting right there. A read that is not an
+answer is no longer remembered — the next caller that needs the key asks once
+more. An item that is genuinely absent, a platform that keeps no router keys
+and the keychain kill switch are answers, and are still asked only once.
+
+v1.3.110 did not reach anyone. Its first release run went red on a test of
+this repository's own — one that read a JSON map's keys in whatever order the
+build happened to hand them back — and its second passed every gate but could
+not be pushed, because the repository's history was rewritten while it built.
+Everything listed under 1.3.110 ships here.
+
 ## [1.3.110] — 2026-09-18
 
 The terminal keeps up on a slow machine. A pane no longer queues screens the
