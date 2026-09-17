@@ -46,25 +46,34 @@ fn the_question_offers_every_cause_and_nothing_else() {
     let transcript = vec![SUMMARY.to_string()];
     let asked = ask(&a_look("❯ ", &transcript)).expect("a screen and a record ask");
 
-    let offered: Vec<&str> = asked.questions[QUESTION]["criteria"]
+    // Both sides sorted: which order a `serde_json::Map` hands its keys back in
+    // is a property of the build, not of this question. `zerocode-shell` and
+    // `zerocode-hookd` ask serde_json for `preserve_order`, and in a workspace
+    // build Cargo's feature unification hands it to this crate too — so the
+    // same code answers in insertion order there and in sorted order when this
+    // crate is built alone. What the question promises is every cause and
+    // nothing else.
+    let mut offered: Vec<&str> = asked.questions[QUESTION]["criteria"]
         .as_object()
         .expect("the criteria")
         .keys()
         .map(String::as_str)
         .collect();
+    offered.sort_unstable();
     let mut expected: Vec<&str> = Cause::ALL.iter().map(|cause| cause.word()).collect();
     expected.sort_unstable();
     assert_eq!(offered, expected);
     assert_eq!(asked.questions[QUESTION]["type"], "choice");
     assert_eq!(asked.questions[QUESTION]["instructions"], INSTRUCTIONS);
 
-    let keys: Vec<&str> = asked
+    let mut keys: Vec<&str> = asked
         .state
         .as_object()
         .expect("the state")
         .keys()
         .map(String::as_str)
         .collect();
+    keys.sort_unstable();
     let mut state_keys = STATE_KEYS.to_vec();
     state_keys.sort_unstable();
     assert_eq!(keys, state_keys);

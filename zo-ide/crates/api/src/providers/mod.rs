@@ -5,6 +5,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 use crate::types::{ContentBlockDelta, EffortLevel, StreamEvent};
+use anthropic::keychain::KeychainAnswer;
 
 pub mod anthropic;
 pub(crate) mod aws_sigv4;
@@ -4030,12 +4031,23 @@ fn window_keychain_key(key: &str) -> Option<String> {
     if !asked.insert(key.to_string()) {
         return adopted_table_key(key);
     }
-    let value = (keychain.read)(&format!("{}{key}", keychain.service_prefix))?;
-    adopted_launch_keys()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(key.to_string(), value.clone());
-    Some(value)
+    match (keychain.read)(&format!("{}{key}", keychain.service_prefix)) {
+        KeychainAnswer::Found(value) => {
+            adopted_launch_keys()
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(key.to_string(), value.clone());
+            Some(value)
+        }
+        KeychainAnswer::Absent => None,
+        // Not an answer, so it is not one to remember: the next caller that
+        // needs this key asks the keychain again rather than going without one
+        // the machine has.
+        KeychainAnswer::Unanswered => {
+            asked.remove(key);
+            None
+        }
+    }
 }
 
 /// Move every environment variable named with `prefix` out of the process
@@ -4091,7 +4103,7 @@ impl WindowKeyNames {
 struct WindowKeychain {
     names: WindowKeyNames,
     service_prefix: String,
-    read: fn(&str) -> Option<String>,
+    read: fn(&str) -> KeychainAnswer,
 }
 
 fn window_keychains() -> &'static RwLock<Vec<WindowKeychain>> {
@@ -4099,8 +4111,9 @@ fn window_keychains() -> &'static RwLock<Vec<WindowKeychain>> {
     KEYCHAINS.get_or_init(Default::default)
 }
 
-/// The variables already asked of the window's keychain — found or not, each
-/// is asked once per process.
+/// The variables the window's keychain has answered about — found or absent,
+/// each is asked once per process. A read it could not answer is not recorded
+/// here, so it is asked again ([`window_keychain_key`]).
 fn asked_window_keychain() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
     static ASKED: OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = OnceLock::new();
     ASKED.get_or_init(Default::default)
@@ -4143,7 +4156,7 @@ pub fn find_service_keys_in_keychain(names: &[&str], service_prefix: &str) {
     );
 }
 
-fn install_window_keychain(names: WindowKeyNames, service_prefix: &str, read: fn(&str) -> Option<String>) {
+fn install_window_keychain(names: WindowKeyNames, service_prefix: &str, read: fn(&str) -> KeychainAnswer) {
     window_keychains()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -6463,16 +6476,19 @@ mod tests {
 
     /// A keychain holding one router key and one service key, under the
     /// services their tests name.
-    fn fake_keychain(service: &str) -> Option<String> {
+    fn fake_keychain(service: &str) -> super::KeychainAnswer {
         KEYCHAIN_ASKED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .push(service.to_string());
-        matches!(
+        if matches!(
             service,
             "test.router.ZO_TEST_KC_HELD" | "test.key.ZO_TEST_SERVICE_KEY" | "test.key.TYPESAFE_API_KEY"
-        )
-        .then(|| "dummy-keychain-value".to_string())
+        ) {
+            super::KeychainAnswer::Found("dummy-keychain-value".to_string())
+        } else {
+            super::KeychainAnswer::Absent
+        }
     }
 
     /// TypeSafe's key is saved in the window's settings under its own variable
@@ -6542,6 +6558,59 @@ mod tests {
         assert!(
             crate::SystemOneConfig::from_env().is_ok(),
             "the key the window keeps configures the client"
+        );
+
+        super::forget_adopted_launch_keys_for_test();
+    }
+
+    /// How many times [`flaky_keychain`] has been asked.
+    static FLAKY_ASKS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+
+    /// A keychain whose first read cannot be answered and whose second finds
+    /// the key.
+    fn flaky_keychain(_service: &str) -> super::KeychainAnswer {
+        let mut asks = FLAKY_ASKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        *asks += 1;
+        if *asks > 1 {
+            super::KeychainAnswer::Found("dummy-keychain-value".to_string())
+        } else {
+            super::KeychainAnswer::Unanswered
+        }
+    }
+
+    /// A read the keychain could not answer — `security` never ran, an
+    /// interaction this session may not have, a lock another process holds —
+    /// is not the answer "this machine keeps no such key". Remembered as one,
+    /// zo goes without a key it does have for as long as the process lives,
+    /// which is how a routing judgment writes `no_key` beside a keychain item
+    /// that is sitting right there. An item that is genuinely absent is still
+    /// asked once (`a_router_key_zo_was_not_handed_…`).
+    #[test]
+    fn a_keychain_read_that_could_not_be_answered_is_asked_again() {
+        let _lock = crate::test_env_lock();
+        let named = "ZO_TEST_FLAKY_KEY";
+        let _named = EnvVarGuard::set(named, None);
+        super::forget_adopted_launch_keys_for_test();
+        *FLAKY_ASKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = 0;
+        super::install_window_keychain(
+            super::WindowKeyNames::Exactly(vec![named.to_string()]),
+            "test.key.",
+            flaky_keychain,
+        );
+
+        assert!(
+            super::read_env_non_empty(named).expect("readable").is_none(),
+            "the first read could not be answered, so nothing is configured yet"
+        );
+        assert_eq!(
+            super::read_env_non_empty(named).expect("readable").as_deref(),
+            Some("dummy-keychain-value"),
+            "a read that failed is asked again, and this one finds the key"
+        );
+        assert_eq!(
+            *FLAKY_ASKS.lock().unwrap_or_else(std::sync::PoisonError::into_inner),
+            2,
+            "asked again exactly once, not on a loop"
         );
 
         super::forget_adopted_launch_keys_for_test();

@@ -707,30 +707,75 @@ fn read_keychain_blob() -> Option<Value> {
 /// One keychain item's secret, parsed; absent when the item is missing,
 /// refused, or not a document.
 fn read_keychain_service_blob(service: &str) -> Option<Value> {
-    parse_keychain_blob(&read_keychain_service_secret(service)?)
+    parse_keychain_blob(&read_keychain_service_secret(service).found()?)
 }
 
 /// One keychain item's secret as `security find-generic-password -w` prints
 /// it, trimmed; absent when the item is missing, refused or empty.
-fn read_keychain_service_secret(service: &str) -> Option<String> {
-    let output = Command::new("security")
+/// `security`'s exit status for an item this machine does not keep
+/// (`errSecItemNotFound`). Every other failing status is the tool refusing or
+/// failing, not the machine answering.
+const KEYCHAIN_ITEM_NOT_FOUND: i32 = 44;
+
+/// What the keychain said about one service.
+///
+/// The distinction is the whole point: [`Self::Absent`] is an answer — this
+/// machine keeps no such item, and asking again this second will not change
+/// that — while [`Self::Unanswered`] is the tool never running, an interaction
+/// this session may not have, or a lock another process holds. A caller that
+/// remembers the second as the first goes without a key it does have.
+pub(crate) enum KeychainAnswer {
+    Found(String),
+    Absent,
+    Unanswered,
+}
+
+impl KeychainAnswer {
+    /// The secret, when there was one — for callers that do not retry.
+    pub(crate) fn found(self) -> Option<String> {
+        match self {
+            Self::Found(secret) => Some(secret),
+            Self::Absent | Self::Unanswered => None,
+        }
+    }
+}
+
+fn read_keychain_service_secret(service: &str) -> KeychainAnswer {
+    let Ok(output) = Command::new("security")
         .args(["find-generic-password", "-s", service, "-w"])
         .output()
-        .ok()?;
+    else {
+        return KeychainAnswer::Unanswered;
+    };
     if !output.status.success() {
-        return None;
+        return if output.status.code() == Some(KEYCHAIN_ITEM_NOT_FOUND) {
+            KeychainAnswer::Absent
+        } else {
+            KeychainAnswer::Unanswered
+        };
     }
-    let raw = String::from_utf8(output.stdout).ok()?;
+    // An item that holds nothing readable is an item all the same: reading it
+    // again answers the same, so it is absent rather than unanswered.
+    let Ok(raw) = String::from_utf8(output.stdout) else {
+        return KeychainAnswer::Absent;
+    };
     let secret = raw.trim();
-    (!secret.is_empty()).then(|| secret.to_string())
+    if secret.is_empty() {
+        KeychainAnswer::Absent
+    } else {
+        KeychainAnswer::Found(secret.to_string())
+    }
 }
 
 /// A router key the window's router pane keeps under `service` — read only
 /// on macOS, the one platform where the window keeps router keys, and never
 /// under the keychain kill switch (`ZO_DISABLE_KEYCHAIN`).
-pub(crate) fn read_router_key(service: &str) -> Option<String> {
+pub(crate) fn read_router_key(service: &str) -> KeychainAnswer {
+    // Neither is a read that failed: this platform keeps no router keys, and
+    // the kill switch means this process may not look. Both are settled, so a
+    // caller is right to remember them and stop asking.
     if !cfg!(target_os = "macos") || std::env::var_os(DISABLE_KEYCHAIN_ENV).is_some() {
-        return None;
+        return KeychainAnswer::Absent;
     }
     read_keychain_service_secret(service)
 }
