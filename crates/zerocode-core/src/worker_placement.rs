@@ -1,0 +1,292 @@
+//! Where a worker the window just started should stand.
+//!
+//! The measured rule (`tilePlacement`, `ui/shell-term.js`) answers what the
+//! layout can be asked: given that a pane is being cut, which way, and
+//! whether there is room left to cut one at all. It cannot answer the
+//! question a person actually has an opinion about — whether THIS worker is
+//! one they want beside what they are already reading, or one that should
+//! start and stay out of the way. That depends on why it was summoned, and
+//! the layout does not know why.
+//!
+//! So this is a closed choice over the rooms the window can actually put a
+//! worker in, and only the ones it can do RIGHT NOW: a question that offers
+//! `split` to a window with four panes already open is a question whose
+//! answer nobody could carry out. The caller hands in what it can honestly
+//! report, and gets back the question it may ask and the set that answer will
+//! be judged against — the two travel together so they cannot drift apart at
+//! a call site.
+//!
+//! Nothing acts on the answer. [`crate::jev::PLACEMENT`] offers no mode that
+//! applies; the rule places every worker and the judgment is a row beside it.
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use serde_json::{Map, Value};
+
+use crate::jev::{PLACEMENT_BRIEF_CHAR_CAP, PLACEMENT_OPTIONS};
+
+/// The one question's name — the caller's key for reading the answer back.
+/// The endpoint never shows a question's name to the model.
+const QUESTION: &str = "placement";
+
+/// The words of the question. They are ours: a summons's own text reaches the
+/// model as state, never as an instruction.
+const INSTRUCTIONS: &str = "An agent has just been started to do the work described in `brief`. Choose where its window should stand for the person described in the rest of the state. Judge only what would serve someone working right now: whether they would want to watch this agent beside what they are already looking at, glance at it later, or not have it take the screen at all.";
+
+/// What each room means, as a situation rather than as a degree — every
+/// option is judged on its own words.
+const TAB_MEANS: &str = "Its own tab, behind the one in front. The person can go to it when they want it, and nothing they are looking at moves.";
+const SPLIT_MEANS: &str = "Beside what is in front of them, sharing the screen. The work in front and this agent's work are the same piece of work, and seeing both at once is the point.";
+const BACKGROUND_MEANS: &str = "Started with no window on the stage at all. Nobody is waiting on it, and a window would only be something to close.";
+
+/// The state's keys, in the order the fingerprint reads them.
+const STATE_KEYS: [&str; 5] = ["brief", "startedBy", "inFront", "sameWorkspace", "panes"];
+
+/// The version of the words above. Bump it when any of them changes: a
+/// judgment read under one wording is not evidence about another. The test
+/// `the_version_is_pinned_to_the_words` holds it to [`rubric_fingerprint`],
+/// so changing a word without bumping the version is a red test rather than a
+/// quiet drift.
+pub const WORKER_PLACEMENT_RUBRIC_VERSION: u32 = 1;
+
+/// Who started this worker. The one fact that most changes the answer and the
+/// one the window always knows for certain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StartedBy {
+    /// Somebody pressed something. They are at the keyboard now.
+    Person,
+    /// A schedule, a hook or a coordinator fired it. Nobody is waiting.
+    Schedule,
+}
+
+impl StartedBy {
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Person => "person",
+            Self::Schedule => "schedule",
+        }
+    }
+}
+
+/// What is on the stage when the worker starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InFront {
+    /// A terminal tab — the only surface a worker can be tiled into.
+    Terminal,
+    /// A browser page or a document; a shell cannot tile into either.
+    Page,
+    /// Nothing is on the stage.
+    Nothing,
+}
+
+impl InFront {
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::Page => "page",
+            Self::Nothing => "nothing",
+        }
+    }
+}
+
+/// What the window can honestly report about a worker it is about to place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlacementLook<'a> {
+    /// Why this worker was summoned, in the summoner's own words.
+    pub brief: &'a str,
+    pub started_by: StartedBy,
+    pub in_front: InFront,
+    /// Whether the worker's checkout is the one whose tabs the stage is
+    /// drawing. The stage draws one checkout, so a worker belonging to
+    /// another cannot be a pane of what is in front.
+    pub same_workspace: bool,
+    /// How many panes the tab in front already holds.
+    pub panes: usize,
+    /// Whether the measured rule would have room to cut a pane at all. The
+    /// caller decides this, because the cap and the sides are the rule's.
+    pub may_split: bool,
+}
+
+/// A room a worker can be put in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    Tab,
+    Split,
+    Background,
+}
+
+impl Placement {
+    /// The option word, as the question offers it.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Tab => "tab",
+            Self::Split => "split",
+            Self::Background => "background",
+        }
+    }
+
+    /// The room an option names, if it names one this file knows.
+    #[must_use]
+    pub fn of(option: &str) -> Option<Self> {
+        match option {
+            "tab" => Some(Self::Tab),
+            "split" => Some(Self::Split),
+            "background" => Some(Self::Background),
+            _ => None,
+        }
+    }
+
+    fn means(self) -> &'static str {
+        match self {
+            Self::Tab => TAB_MEANS,
+            Self::Split => SPLIT_MEANS,
+            Self::Background => BACKGROUND_MEANS,
+        }
+    }
+}
+
+/// One question and the set its answer is judged against.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementAsk {
+    /// The request's `state`.
+    pub state: Value,
+    /// The request's `questions`.
+    pub questions: Value,
+    /// The rooms offered, in the order they were offered.
+    offered: Vec<Placement>,
+}
+
+/// A validated answer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacementChoice {
+    pub chosen: Placement,
+    pub probabilities: BTreeMap<String, f64>,
+    pub confidence: f64,
+}
+
+/// The words that define the question, as one string. The version is pinned
+/// to this, not to a date or to a reviewer's memory.
+#[must_use]
+pub fn rubric_words() -> String {
+    let mut words = String::new();
+    words.push_str(INSTRUCTIONS);
+    for room in [Placement::Tab, Placement::Split, Placement::Background] {
+        words.push('\n');
+        words.push_str(room.key());
+        words.push('\n');
+        words.push_str(room.means());
+    }
+    words.push('\n');
+    words.push_str(&STATE_KEYS.join(","));
+    words
+}
+
+/// The first sixteen hex digits of the words' SHA-256.
+#[must_use]
+pub fn rubric_fingerprint() -> String {
+    crate::jev::words_fingerprint(&rubric_words())
+}
+
+/// The question this look asks.
+///
+/// `split` is offered only where the window could carry it out; the other two
+/// rooms are always reachable. The brief is cut to the table's cap here as
+/// well as at the door, so the state a caller records beside the answer is the
+/// state that was asked about.
+#[must_use]
+pub fn ask(look: &PlacementLook<'_>) -> PlacementAsk {
+    let mut offered = vec![Placement::Tab];
+    if look.may_split && look.same_workspace && look.in_front == InFront::Terminal {
+        offered.push(Placement::Split);
+    }
+    offered.push(Placement::Background);
+
+    let mut criteria = Map::new();
+    for room in &offered {
+        criteria.insert(room.key().to_string(), Value::from(room.means()));
+    }
+    let state = Value::Object(Map::from_iter([
+        (
+            "brief".to_string(),
+            Value::from(crate::jev::door::cut(
+                look.brief,
+                crate::jev::Cap::Chars(PLACEMENT_BRIEF_CHAR_CAP),
+            )),
+        ),
+        ("startedBy".to_string(), Value::from(look.started_by.key())),
+        ("inFront".to_string(), Value::from(look.in_front.key())),
+        (
+            "sameWorkspace".to_string(),
+            Value::from(look.same_workspace),
+        ),
+        ("panes".to_string(), Value::from(look.panes)),
+    ]));
+    let questions = Value::Object(Map::from_iter([(
+        QUESTION.to_string(),
+        Value::Object(Map::from_iter([
+            ("instructions".to_string(), Value::from(INSTRUCTIONS)),
+            ("criteria".to_string(), Value::Object(criteria)),
+        ])),
+    )]));
+    PlacementAsk {
+        state,
+        questions,
+        offered,
+    }
+}
+
+impl PlacementAsk {
+    /// The rooms this question offered, in order.
+    #[must_use]
+    pub fn offered(&self) -> &[Placement] {
+        &self.offered
+    }
+
+    /// The option words this question offered.
+    #[must_use]
+    pub fn options(&self) -> Vec<String> {
+        self.offered
+            .iter()
+            .map(|room| room.key().to_string())
+            .collect()
+    }
+
+    /// What `answers` says about the question that was asked.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::jev::choice::ChoiceRefusal`] names the first rule the answer
+    /// broke. An option word the table knows but this question did not offer
+    /// is already refused by the reader, which is judged against the offered
+    /// set and nothing wider.
+    pub fn read(
+        &self,
+        answers: &Value,
+    ) -> Result<PlacementChoice, crate::jev::choice::ChoiceRefusal> {
+        let offered: BTreeSet<String> = self.options().into_iter().collect();
+        let choice = crate::jev::choice::read(answers, QUESTION, &offered)?;
+        let chosen = Placement::of(&choice.chosen)
+            .ok_or(crate::jev::choice::ChoiceRefusal::UnknownOption)?;
+        Ok(PlacementChoice {
+            chosen,
+            probabilities: choice.probabilities,
+            confidence: choice.confidence,
+        })
+    }
+}
+
+/// Every room, in the order the table spells them — what a reader of
+/// [`PLACEMENT_OPTIONS`] gets as typed values.
+#[must_use]
+pub fn every_room() -> Vec<Placement> {
+    PLACEMENT_OPTIONS
+        .iter()
+        .filter_map(|word| Placement::of(word))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests;

@@ -1,0 +1,5 @@
+--- a/js/handoff.mjs
++++ b/js/handoff.mjs
+@@ -1 +1 @@
+-export const status = "pending";
++export const status = "verified";

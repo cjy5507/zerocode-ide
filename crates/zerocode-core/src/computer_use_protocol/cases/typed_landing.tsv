@@ -1,0 +1,13 @@
+# The one case table of `text_field::judge_typed` — keys typed into a
+# field, read back after the settle — run by the Rust core and the Swift
+# helper's mirror alike (TextReplaceOutcomeTests.swift reads this file).
+# Columns: before, expected, after → outcome. `<unread>` is a field that
+# could not be read; `<empty>` is the empty string.
+# before	expected	after	outcome
+<empty>	hi	hi	verified
+ab	abhi	abhi	verified
+ab	abhi	ab	value_unchanged
+<empty>	hi	<empty>	readback_unsupported
+ab	abhi	abHI	value_mismatch
+<empty>	hi	prompt$ hi	value_mismatch
+ab	abhi	<unread>	readback_unsupported

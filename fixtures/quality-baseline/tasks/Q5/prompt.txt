@@ -1,0 +1,1 @@
+Fix the page status to Build verified, inspect its DOM with zerocode-browser and save an evidence PNG.

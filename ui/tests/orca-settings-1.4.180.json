@@ -1,0 +1,191 @@
+{
+  "schema_version": 1,
+  "reference": {
+    "product": "Orca",
+    "version": "1.4.180",
+    "platform": "macOS",
+    "measured_at": "2026-08-14"
+  },
+  "states": {
+    "live": "The ZeroCode pane has a persisted backend and a runtime consumer.",
+    "partial": "The pane is live, but at least one measured Orca contract is still absent.",
+    "blocked": "No product pane is shipped until a real backend contract exists."
+  },
+  "terminal_theme_contract": {
+    "dark_default": "Ghostty Default Style Dark",
+    "light_default": "Builtin Tango Light",
+    "separate_light_default": true,
+    "built_in_theme_count": 30,
+    "bold_override_application": "preserved_not_applied",
+    "color_override_keys": [
+      "foreground", "background", "cursor", "cursorAccent",
+      "selectionBackground", "selectionForeground", "bold",
+      "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+      "brightBlack", "brightRed", "brightGreen", "brightYellow",
+      "brightBlue", "brightMagenta", "brightCyan", "brightWhite"
+    ]
+  },
+  "terminal_option_as_alt_contract": {
+    "platform": "macOS",
+    "default": "auto",
+    "modes": ["auto", "true", "left", "right", "false"],
+    "auto_us_input_source_ids": [
+      "com.apple.keylayout.us",
+      "com.apple.keylayout.usinternational-pc"
+    ],
+    "auto_non_us_or_unknown": "compose",
+    "readline_meta_codes": ["KeyB", "KeyF", "KeyD"]
+  },
+  "terminal_jis_yen_to_backslash_contract": {
+    "platform": "macOS",
+    "default": false,
+    "code": "IntlYen",
+    "key": "¥",
+    "ime_key_code": 229,
+    "replacement": "\\",
+    "modifiers": "none",
+    "suppressed_phases": ["keypress", "keyup"]
+  },
+  "terminal_osc52_clipboard_contract": {
+    "default": true,
+    "max_base64_chars": 131072,
+    "selection_pattern": "^[cpqs0-7]+$",
+    "empty_selection": "c",
+    "query": "consumed_without_readback",
+    "invalid_or_empty": "consumed_without_write",
+    "replay": "blocked_silently",
+    "coalescing": "latest_pending_write_per_terminal",
+    "transports": ["local", "lane", "ssh"]
+  },
+  "terminal_windows_powershell_contract": {
+    "platform": "Windows",
+    "default": "auto",
+    "implementations": ["auto", "powershell.exe", "pwsh.exe"],
+    "auto_preference": ["pwsh.exe", "powershell.exe"],
+    "explicit_pwsh_removed_fallback": "powershell.exe",
+    "applies_to": "new_local_terminal_panes"
+  },
+  "terminal_windows_shell_contract": {
+    "platform": "Windows",
+    "default": "powershell.exe",
+    "shells": ["powershell.exe", "cmd.exe", "git-bash"],
+    "git_bash_visibility": "installed_or_selected",
+    "removed_git_bash_fallback": "powershell.exe",
+    "applies_to": "new_local_terminal_panes"
+  },
+  "browser_link_routing_contract": {
+    "open_links_in_app_default": false,
+    "modifier_inverts_default": false,
+    "sources": ["terminal", "markdown", "editor"],
+    "schemes": ["http", "https"],
+    "default_modifier_destination": "system_browser",
+    "invert_modifier": "shift_plus_platform_primary"
+  },
+  "setup_script_launch_contract": {
+    "default": "new-tab",
+    "modes": ["new-tab", "split-vertical", "split-horizontal"],
+    "new_tab_focus": "background",
+    "split_focus": "existing_terminal",
+    "title": "Setup",
+    "applies_to": "new_workspace_repository_setup_script"
+  },
+  "terminal_shortcut_policy_contract": {
+    "default": "orca-first",
+    "modes": ["orca-first", "terminal-first"],
+    "terminal_first_allows": ["terminal_scope", "allow_in_terminal"],
+    "terminal_first_yields": "potential_application_shortcut_conflicts",
+    "applies_to": "focused_terminal"
+  },
+  "primary_selection_middle_click_paste_contract": {
+    "stored_default": null,
+    "platform_defaults": {
+      "linux": true,
+      "macos": true,
+      "windows": false
+    },
+    "linux_source": "system_primary_selection",
+    "other_source": "private_window_buffer",
+    "max_code_units": 65536,
+    "max_bytes": 262144,
+    "capture_delay_ms": 100,
+    "target_ttl_ms": 750,
+    "targets": ["terminal", "input", "textarea", "contenteditable", "codemirror"],
+    "mouse_tracking": "program_owns_gesture"
+  },
+  "source_control_group_order_contract": {
+    "default": "changes-first",
+    "presets": {
+      "changes-first": ["changed", "staged", "untracked"],
+      "staged-first": ["staged", "changed", "untracked"],
+      "untracked-first": ["untracked", "changed", "staged"]
+    },
+    "conflicts": "pinned-first"
+  },
+  "default_compare_base_contract": {
+    "stored_key": "sourceControlCompareAgainstUpstream",
+    "default": "repository-default",
+    "options": ["repository-default", "branch-upstream"],
+    "priority": ["worktree", "repository", "branch-upstream", "repository-default"],
+    "consumer": "committed-change-comparison",
+    "worktree_override": "git-panel",
+    "unaffected": ["pull-request-target", "rebase-target"]
+  },
+  "keep_local_main_up_to_date_contract": {
+    "default": false,
+    "applies_to": "new-workspace-remote-base",
+    "fetch_before_refresh": true,
+    "matching_local_branch": true,
+    "tracked_changes": "skip",
+    "untracked_files": "preserve",
+    "local_only_commits": "skip",
+    "unchecked_out_update": "compare-and-swap",
+    "checked_out_update": "clean-hard-reset-to-fetched-oid"
+  },
+  "running_terminal_close_confirm_contract": {
+    "default_skip": false,
+    "measurement": "foreground-process-with-agent-hook-fallback",
+    "probe_timeout_ms": 4000,
+    "remembered_answer": "canonical-settings-snapshot",
+    "legacy_local_storage": "migrate-after-canonical-write",
+    "targets": ["terminal-tab", "split-terminal-pane"]
+  },
+  "panes": [
+    { "group": "AI Capabilities", "orca": "Agents", "zerocode": "agents", "state": "partial" },
+    { "group": "AI Capabilities", "orca": "AI Provider Accounts", "zerocode": "provider-accounts", "state": "live" },
+    { "group": "AI Capabilities", "orca": "Orchestration", "zerocode": "orchestration", "state": "partial" },
+    { "group": "AI Capabilities", "orca": "Computer Use", "zerocode": "computer-use", "state": "live" },
+    { "group": "AI Capabilities", "orca": "Voice", "zerocode": null, "state": "blocked" },
+
+    { "group": "Set Up", "orca": "Orca Account", "zerocode": null, "state": "blocked" },
+    { "group": "Set Up", "orca": "Onboarding", "zerocode": "onboarding", "state": "live" },
+    { "group": "Set Up", "orca": "General", "zerocode": "general", "state": "partial" },
+    { "group": "Set Up", "orca": "Integrations", "zerocode": "integrations", "state": "partial" },
+    { "group": "Set Up", "orca": "Mobile", "zerocode": null, "state": "blocked" },
+
+    { "group": "Workflows", "orca": "Automations", "zerocode": "automations", "state": "live" },
+    { "group": "Workflows", "orca": "Artifacts", "zerocode": null, "state": "blocked" },
+    { "group": "Workflows", "orca": "Git & Source Control", "zerocode": "git", "state": "partial" },
+    { "group": "Workflows", "orca": "Task Sources", "zerocode": "tasks", "state": "partial" },
+    { "group": "Workflows", "orca": "Terminal", "zerocode": "terminal", "state": "partial" },
+    { "group": "Workflows", "orca": "Quick Commands", "zerocode": "quick-commands", "state": "live" },
+    { "group": "Workflows", "orca": "Browser", "zerocode": "browser", "state": "partial" },
+    { "group": "Workflows", "orca": "Mobile Emulator", "zerocode": null, "state": "blocked" },
+    { "group": "Workflows", "orca": "Floating Workspace", "zerocode": null, "state": "blocked" },
+
+    { "group": "Interface", "orca": "Appearance", "zerocode": "appearance", "state": "partial" },
+    { "group": "Interface", "orca": "Input & Editing", "zerocode": "editing", "state": "live" },
+    { "group": "Interface", "orca": "Notifications", "zerocode": "notifications", "state": "live" },
+    { "group": "Interface", "orca": "Shortcuts", "zerocode": "shortcuts", "state": "partial" },
+    { "group": "Interface", "orca": "Stats & Usage", "zerocode": "stats", "state": "partial" },
+
+    { "group": "Remote Hosts", "orca": "SSH Hosts", "zerocode": "ssh-hosts", "state": "partial" },
+    { "group": "Remote Hosts", "orca": "Remote Orca Servers", "zerocode": "remote-servers", "state": "partial" },
+    { "group": "Privacy & Security", "orca": "Privacy & Telemetry", "zerocode": null, "state": "blocked" },
+    { "group": "Privacy & Security", "orca": "macOS Permissions", "zerocode": "macos-permissions", "state": "partial" },
+    { "group": "Advanced", "orca": "Advanced", "zerocode": null, "state": "blocked" },
+    { "group": "Experimental", "orca": "Experimental", "zerocode": null, "state": "blocked" },
+    { "group": "Experimental", "orca": "Plugins", "zerocode": null, "state": "blocked" },
+    { "group": "Dynamic", "orca": "Project", "zerocode": "project", "state": "live" },
+    { "group": "Conditional", "orca": "Linear", "zerocode": null, "state": "blocked" }
+  ]
+}

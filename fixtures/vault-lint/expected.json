@@ -1,0 +1,53 @@
+{
+  "index_gaps": [
+    "wiki/index-gap.md",
+    "wiki/orphan.md"
+  ],
+  "ghost_links": [
+    {
+      "target": "never-written",
+      "from": [
+        "wiki/hub.md"
+      ]
+    }
+  ],
+  "orphans": [
+    "wiki/orphan.md"
+  ],
+  "missing_frontmatter": [
+    {
+      "page": "wiki/no-source.md",
+      "missing": [
+        "source"
+      ]
+    }
+  ],
+  "undeclared_relations": [
+    {
+      "page": "wiki/hub.md",
+      "targets": [
+        "wiki/linked-target.md"
+      ]
+    }
+  ],
+  "unlogged_raw": [
+    "raw/unlogged.md"
+  ],
+  "contradictions": 1,
+  "superseded": [
+    "wiki/old-note.md"
+  ],
+  "merge_candidates": [],
+  "counts": {
+    "index_gaps": 2,
+    "ghost_links": 1,
+    "orphans": 1,
+    "missing_frontmatter": 1,
+    "undeclared_relations": 1,
+    "unlogged_raw": 1,
+    "contradictions": 1,
+    "superseded": 1,
+    "merge_candidates": 0
+  },
+  "findings": 7
+}

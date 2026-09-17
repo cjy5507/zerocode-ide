@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "native/ios-emulator-helper/LICENSE-APACHE-2.0": "native/ios-emulator-helper/LICENSE-APACHE-2.0",
+      "native/ios-emulator-helper/LICENSE-IDB-MIT": "native/ios-emulator-helper/LICENSE-IDB-MIT",
+      "native/ios-emulator-helper/NOTICE.md": "native/ios-emulator-helper/NOTICE.md",
+      "native/computer-use-macos/.build/release/ZeroCode Computer Use.app": "ZeroCode Computer Use.app"
+    }
+  }
+}

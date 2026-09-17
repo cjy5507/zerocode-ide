@@ -1,0 +1,43 @@
+# The one case table of `keys::chord_writes`, run by the Rust core and the
+# Swift helper's mirror alike (KeyboardInputSafetyTests.swift reads the macOS
+# rows). Columns: the --key as sent, the platform → what it writes into the
+# focused field: nothing, a character, or the clipboard's text. Parsed the way
+# the key is posted: split on `+`, lowercased.
+# key	platform	writes
+a	macos	character
+A	macos	character
+shift+a	macos	character
+option+e	macos	character
+alt+shift+9	macos	character
+space	macos	character
+1	macos	character
+.	macos	character
+cmd+a	macos	nothing
+ctrl+a	macos	nothing
+cmd+v	macos	clipboard
+Command+V	macos	clipboard
+super+v	macos	clipboard
+win+v	macos	clipboard
+meta+v	macos	clipboard
+cmdorctrl+v	macos	clipboard
+cmd+shift+v	macos	clipboard
+cmd+option+shift+v	macos	clipboard
+ctrl+v	macos	nothing
+return	macos	nothing
+tab	macos	nothing
+shift+tab	macos	nothing
+backspace	macos	nothing
+escape	macos	nothing
+ctrl+v	windows	clipboard
+cmdorctrl+v	windows	clipboard
+ctrl+shift+v	windows	clipboard
+shift+insert	windows	clipboard
+insert	windows	nothing
+cmd+v	windows	nothing
+win+v	windows	nothing
+a	windows	character
+shift+a	windows	character
+alt+a	windows	nothing
+ctrl+a	windows	nothing
+space	windows	character
+return	windows	nothing

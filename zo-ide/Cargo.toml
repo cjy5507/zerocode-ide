@@ -1,0 +1,89 @@
+# zo-ide — zerocode IDE 전용 CLI의 독립 워크스페이스.
+#
+# forge-code(zo)에서 "코어"만 가져왔다: 대화 런타임(runtime)·툴(tools)·제공자/인증
+# (api)·타입(core-types)·슬래시 카탈로그(commands)와 그 잎 의존(plugins·telemetry·
+# decision-core·codegraph). TUI(ratatui App·HUD·모달)·attach/serve 클라이언트·
+# remote_control·self_improve 등 표면/자동화 계층은 가져오지 않는다 — 표면은
+# crates/zo-ide 가 처음부터 새로 쓴다(계획서 §03).
+#
+# [workspace.dependencies]·프로파일·린트는 forge-code 원본을 그대로 유지한다:
+# 멤버 크레이트들이 `*.workspace = true` 로 참조하고 있고, unsafe 금지·pedantic
+# clippy가 이 트리의 clean-code 규율이다.
+
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "1.3.110"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+thiserror = "2"
+
+# Async runtime / HTTP
+# Base feature set is empty — each crate enables only the tokio features
+# it actually uses via additive `features = [...]`. Same pattern for reqwest:
+# `json` + `rustls-tls` is the shared baseline; `stream` is enabled only
+# where streaming responses are consumed (e.g. runtime SSE).
+tokio = { version = "1" }
+tokio-util = { version = "0.7", features = ["rt"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["limit", "sensitive-headers", "trace"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
+futures-util = "0.3"
+
+# Crypto
+sha2 = "0.10"
+qrcode = { version = "0.14", default-features = false }
+rand = "0.9"
+ring = "0.17"
+base64 = "0.22"
+
+# Storage — SQLite event/artifact store. `bundled` compiles SQLite from
+# source so there is no system libsqlite3 dependency (portable release builds).
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# Host-side workspace freshness.
+gix = { version = "=0.84.0", default-features = false, features = ["status", "sha1", "parallel"] }
+notify = "=8.2.0"
+
+# Test harness
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
+
+[profile.dev]
+opt-level = 1
+incremental = false
+
+[profile.test]
+incremental = false
+
+[profile.fast-release]
+inherits = "release"
+lto = "thin"
+codegen-units = 8
+strip = "symbols"
+opt-level = 2
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+opt-level = 3
+panic = "unwind"

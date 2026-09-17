@@ -1,0 +1,5 @@
+# Brand/product names that read as CamelCase identifiers to clippy's
+# `doc_markdown` lint but are prose, not code, so they should not require
+# backticks in doc comments. `..` keeps clippy's built-in allowlist
+# (OAuth, GitHub, TypeScript, ...).
+doc-valid-idents = ["ChatGPT", "OpenAI", "OpenCode", "Codex", "TypeSafe", ".."]

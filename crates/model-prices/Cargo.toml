@@ -1,0 +1,16 @@
+[package]
+name = "model-prices"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The price of a token, per model — one JSON table and the matcher that reads
+# it. Two trees bill against it (the window's token scanners and zo's plan
+# scorer), and they are separate cargo workspaces, so this crate is deliberately
+# leaf-shaped: serde to parse the table, and nothing else. A dependency here
+# would have to be carried by both.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

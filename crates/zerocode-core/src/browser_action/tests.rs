@@ -1,0 +1,216 @@
+//! What the question promises and what an answer must be to be one.
+
+use super::*;
+
+/// One marks item as the browser door and the desktop look both speak it.
+fn item(mark: usize, role: &str, label: &str) -> Value {
+    json!({
+        "mark": mark,
+        "role": role,
+        "tag": "button",
+        "label": label,
+        "selector": "#save > button.primary",
+        "x": 400.0,
+        "y": 80.0,
+        "width": 24.0,
+        "height": 16.0,
+        "centerX": 412.0,
+        "centerY": 88.0,
+    })
+}
+
+fn a_look<'a>(items: &'a [Value], tried: &'a [usize]) -> ActionLook<'a> {
+    ActionLook {
+        goal: "checkout smoke",
+        stopped: "step_failed",
+        step: "click",
+        refusal: "the selector matched nothing",
+        host: "shop.example",
+        path: "/cart",
+        tried,
+        items,
+    }
+}
+
+/// An answer in the contract's shape, spreading the rest evenly.
+fn answered(asked: &ActionAsk, choice: &str, confidence: f64) -> Value {
+    let options = asked.options();
+    let share = 1.0 / options.len() as f64;
+    let mut probabilities = Map::new();
+    for name in &options {
+        probabilities.insert(name.clone(), json!(share));
+    }
+    // Make it sum to exactly one despite the division.
+    let drift = 1.0 - share * options.len() as f64;
+    probabilities.insert(options[0].clone(), json!(share + drift));
+    json!({
+        "action": {
+            "type": "choice",
+            "choice": choice,
+            "probabilities": Value::Object(probabilities),
+            "confidence": confidence,
+        }
+    })
+}
+
+#[test]
+fn the_question_offers_the_numbers_the_look_saw_and_nothing_else() {
+    let items = [item(1, "button", "저장"), item(2, "link", "취소")];
+    let asked = ask(&a_look(&items, &[])).expect("a look with controls asks");
+
+    assert_eq!(asked.marks(), [1, 2]);
+    assert_eq!(asked.options(), ["mark:1", "mark:2", GIVE_UP]);
+
+    let criteria = asked.questions["action"]["criteria"]
+        .as_object()
+        .expect("criteria is an object");
+    let mut named: Vec<&String> = criteria.keys().collect();
+    named.sort();
+    assert_eq!(named, [GIVE_UP, "mark:1", "mark:2"]);
+    assert_eq!(asked.questions["action"]["type"], json!("choice"));
+}
+
+#[test]
+fn a_look_with_no_control_asks_nothing() {
+    assert!(ask(&a_look(&[], &[])).is_none());
+    // Items the legend cannot render are not options either.
+    let unreadable = [json!({ "role": "button" })];
+    assert!(ask(&a_look(&unreadable, &[])).is_none());
+}
+
+#[test]
+fn a_number_this_recovery_already_spent_is_not_offered_again() {
+    let items = [item(1, "button", "저장"), item(2, "link", "취소")];
+    let asked = ask(&a_look(&items, &[1])).expect("one control is left");
+
+    assert_eq!(asked.marks(), [2]);
+    assert_eq!(asked.options(), ["mark:2", GIVE_UP]);
+    assert_eq!(asked.state["alreadyTried"], json!([1]));
+
+    // Every number spent: there is nothing left to ask about.
+    assert!(ask(&a_look(&items, &[1, 2])).is_none());
+}
+
+#[test]
+fn the_slice_that_is_cut_is_the_slice_that_may_be_chosen() {
+    let items: Vec<Value> = (1..=MAX_ACTION_CANDIDATES + 5)
+        .map(|mark| item(mark, "button", "행"))
+        .collect();
+    let asked = ask(&a_look(&items, &[])).expect("a long look still asks");
+
+    assert_eq!(asked.marks().len(), MAX_ACTION_CANDIDATES);
+    assert_eq!(asked.marks().last(), Some(&MAX_ACTION_CANDIDATES));
+    let criteria = asked.questions["action"]["criteria"].as_object().unwrap();
+    assert_eq!(criteria.len(), MAX_ACTION_CANDIDATES + 1);
+    assert_eq!(
+        asked.state["candidates"].as_array().unwrap().len(),
+        MAX_ACTION_CANDIDATES
+    );
+    // A number past the cut is refused, not quietly honoured.
+    let past = answered(&asked, GIVE_UP, 0.5);
+    let mut wrong = past.clone();
+    wrong["action"]["choice"] = json!(format!("mark:{}", MAX_ACTION_CANDIDATES + 1));
+    assert_eq!(asked.read(&wrong), Err(ActionRefusal::UnknownOption));
+}
+
+#[test]
+fn the_state_carries_the_page_but_never_a_selector_or_a_typed_value() {
+    let items = [item(1, "button", "저장")];
+    let asked = ask(&a_look(&items, &[])).expect("asks");
+    let sent = format!("{}{}", asked.state, asked.questions);
+
+    assert!(sent.contains("shop.example") && sent.contains("/cart"));
+    assert!(sent.contains("저장"), "the label a person reads is state");
+    for tool_only in [
+        "#save",
+        "button.primary",
+        "elementIndex",
+        "windowId",
+        "\"tag\"",
+    ] {
+        assert!(
+            !sent.contains(tool_only),
+            "`{tool_only}` is the tool's, not the model's: {sent}"
+        );
+    }
+    // The step reaches the model as its verb alone.
+    assert_eq!(asked.state["step"], json!("click"));
+}
+
+#[test]
+fn a_well_formed_answer_reads_as_the_number_it_chose() {
+    let items = [item(1, "button", "저장"), item(7, "button", "다시 시도")];
+    let asked = ask(&a_look(&items, &[])).expect("asks");
+
+    let read = asked
+        .read(&answered(&asked, "mark:7", 0.62))
+        .expect("valid");
+    assert_eq!(read.chosen, Chosen::Mark(7));
+    assert!((read.confidence - 0.62).abs() < f64::EPSILON);
+    assert_eq!(read.probabilities.len(), 3);
+
+    let gave_up = asked.read(&answered(&asked, GIVE_UP, 0.4)).expect("valid");
+    assert_eq!(gave_up.chosen, Chosen::GiveUp);
+}
+
+#[test]
+fn every_broken_rule_discards_the_answer_whole() {
+    let items = [item(1, "button", "저장")];
+    let asked = ask(&a_look(&items, &[])).expect("asks");
+    let good = answered(&asked, "mark:1", 0.5);
+
+    let mut missing = good.clone();
+    missing.as_object_mut().unwrap().remove("action");
+    assert_eq!(asked.read(&missing), Err(ActionRefusal::NoAnswer));
+
+    let mut wrong_kind = good.clone();
+    wrong_kind["action"]["type"] = json!("score");
+    assert_eq!(asked.read(&wrong_kind), Err(ActionRefusal::NotAChoice));
+
+    let mut invented = good.clone();
+    invented["action"]["choice"] = json!("mark:99");
+    assert_eq!(asked.read(&invented), Err(ActionRefusal::UnknownOption));
+
+    let mut not_a_mark = good.clone();
+    not_a_mark["action"]["choice"] = json!("click the blue one");
+    assert_eq!(asked.read(&not_a_mark), Err(ActionRefusal::UnknownOption));
+
+    let mut short_keys = good.clone();
+    short_keys["action"]["probabilities"] = json!({ "mark:1": 1.0 });
+    assert_eq!(asked.read(&short_keys), Err(ActionRefusal::Keys));
+
+    let mut stranger_key = good.clone();
+    stranger_key["action"]["probabilities"] = json!({ "mark:1": 0.5, "mark:4": 0.5 });
+    assert_eq!(asked.read(&stranger_key), Err(ActionRefusal::Keys));
+
+    let mut unbalanced = good.clone();
+    unbalanced["action"]["probabilities"] = json!({ "mark:1": 0.2, GIVE_UP: 0.2 });
+    assert_eq!(asked.read(&unbalanced), Err(ActionRefusal::NotOne));
+
+    let mut out_of_range = good.clone();
+    out_of_range["action"]["probabilities"] = json!({ "mark:1": 1.4, GIVE_UP: -0.4 });
+    assert_eq!(asked.read(&out_of_range), Err(ActionRefusal::OutOfRange));
+
+    let mut not_a_number = good.clone();
+    not_a_number["action"]["probabilities"] = json!({ "mark:1": "많이", GIVE_UP: 0.0 });
+    assert_eq!(asked.read(&not_a_number), Err(ActionRefusal::OutOfRange));
+
+    let mut no_confidence = good.clone();
+    no_confidence["action"]
+        .as_object_mut()
+        .unwrap()
+        .remove("confidence");
+    assert_eq!(asked.read(&no_confidence), Err(ActionRefusal::OutOfRange));
+
+    let mut wild_confidence = good;
+    wild_confidence["action"]["confidence"] = json!(1.5);
+    assert_eq!(asked.read(&wild_confidence), Err(ActionRefusal::OutOfRange));
+}
+
+#[test]
+fn the_version_is_pinned_to_the_words() {
+    // Changing a word of the question without bumping the version turns this
+    // red: a judgment read under one wording is not evidence about another.
+    assert_eq!(BROWSER_ACTION_RUBRIC_VERSION, 1);
+    assert_eq!(rubric_fingerprint(), "ce089bd3cc6c95cd");
+}

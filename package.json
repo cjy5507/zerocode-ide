@@ -1,0 +1,27 @@
+{
+  "name": "zerocode-ui-tests",
+  "private": true,
+  "scripts": {
+    "build:ui-dist": "node scripts/build-ui-dist.mjs",
+    "check:ui-dist": "node scripts/build-ui-dist.mjs --check",
+    "check:package": "node scripts/check-package-artifacts.mjs",
+    "test:package-contract": "node --test scripts/package-contract.test.mjs",
+    "tauri:release": "npm run build:ui-dist && node scripts/stage-zo.mjs && node scripts/stage-chromium.mjs && cd crates/zerocode-shell && tauri build --config tauri.release.conf.json",
+    "test:settings": "node ui/tests/settings.mjs",
+    "test:window": "node ui/tests/window.mjs",
+    "test:task-board": "node ui/tests/task-board.mjs",
+    "test:workspace-board": "node ui/tests/workspace-board.mjs",
+    "test:agent-conversation": "node ui/tests/agent-conversation.mjs",
+    "test:pane-conversation": "node ui/tests/pane-conversation.mjs",
+    "test:browser-recovery": "node ui/tests/browser-recovery.mjs",
+    "test:coordinator-panel": "node ui/tests/coordinator-panel.mjs",
+    "test:native-folder-picker": "node ui/tests/native-folder-picker.mjs",
+    "test:agent-relations": "node ui/tests/agent-relations.mjs",
+    "test:agent-relations-adversarial": "node ui/tests/agent-relations-adversarial.mjs"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@tauri-apps/cli": "2.11.4",
+    "playwright": "1.58.2"
+  }
+}

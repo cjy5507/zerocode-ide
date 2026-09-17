@@ -1,0 +1,45 @@
+[package]
+name = "api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+model-fit-hints = []
+
+[dependencies]
+core-types = { path = "../core-types" }
+memchr = "2"
+# The window's price table, at the top of this repository — one crate both
+# cargo workspaces compile, so the plan scorer and the window's token scanners
+# cannot come to disagree about what a turn cost (t-4290).
+model-prices = { path = "../../../crates/model-prices" }
+reqwest.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+ring.workspace = true
+base64.workspace = true
+telemetry = { package = "zo-telemetry", path = "../telemetry" }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+# The ChatGPT backend's Responses WebSocket transport; the same crate and
+# feature set `runtime` already carries for MCP over WebSockets.
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+
+[target.'cfg(unix)'.dependencies]
+# `nix::libc::O_NOFOLLOW` for symlink-safe prompt-cache writes; workspace lints
+# forbid direct unsafe libc calls, so we reuse the same safe wrapper the runtime
+# crate depends on rather than a raw `libc` dependency.
+nix = { version = "0.29", features = ["fs"] }
+
+[dev-dependencies]
+# Panic-safe temp dirs for credential-store test isolation; auto-removed on drop,
+# so the shared `CredentialEnvIsolation` helper no longer hand-rolls a timestamp
+# path plus manual `remove_dir_all`. Uses the workspace-pinned version.
+tempfile.workspace = true
+
+[lints]
+workspace = true

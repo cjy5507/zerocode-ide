@@ -1,0 +1,25 @@
+[package]
+name = "zerocode-hookd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+zerocode-core = { workspace = true }
+axum = { workspace = true }
+base64 = { workspace = true }
+serde = { workspace = true }
+# `preserve_order` because the installers REWRITE files the user owns
+# (~/.claude/settings.json and friends): a merge that alphabetizes somebody's
+# settings has edited every line of a file it touched one key of.
+serde_json = { workspace = true, features = ["preserve_order"] }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+http-body-util = { workspace = true }
+tempfile = { workspace = true }
+tokio-stream = { workspace = true }
+tower = { workspace = true }

@@ -1,0 +1,21 @@
+[package]
+name = "asar-reader"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+# `preserve_order` so the packed header's keys come out in the order they were
+# written — which is the order a real Electron bundle has (`size` before
+# `offset`, measured). Named here rather than inherited: cargo unifies features
+# across a workspace, so this crate's byte layout used to depend on whether some
+# OTHER crate happened to ask for it. It did, and turning it on for the hook
+# installers silently changed this crate's output.
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

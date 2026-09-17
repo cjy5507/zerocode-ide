@@ -1,0 +1,13 @@
+# Zo formatting policy — deliberate, do not "fix" casually.
+#
+# The tree is intentionally NOT rustfmt-clean: the committed style (compact
+# single-line `if`/`else`, hand-ordered imports) predates the current stable
+# rustfmt and a bulk reformat is forbidden by repo policy (see
+# .github/workflows/ci.yml). Without this file, `cargo fmt` reformats ~85% of
+# the workspace against that style, producing a huge noise diff that buries real
+# changes — a footgun for humans and AI assistants alike.
+#
+# `disable_all_formatting` turns `cargo fmt` into a guaranteed no-op across every
+# crate, so running it can never mangle the tree. Match the surrounding style by
+# hand when editing.
+disable_all_formatting = true

@@ -1,0 +1,1 @@
+Fix inclusive_count so the failing singleton test passes without regressions.

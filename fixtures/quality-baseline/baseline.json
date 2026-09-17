@@ -1,0 +1,97 @@
+{
+  "Fields": [
+    "task",
+    "surface",
+    "build",
+    "protocol",
+    "model",
+    "account",
+    "host",
+    "verified",
+    "interventions",
+    "elapsed_ms",
+    "first_visible_ms",
+    "stream",
+    "tokens",
+    "cost_usd",
+    "rss_peak_mb",
+    "disk_delta_mb",
+    "lane",
+    "seed",
+    "repeat",
+    "reason"
+  ],
+  "Grid": [
+    {
+      "requested": "claude-fable-5-1",
+      "effort": "xhigh"
+    },
+    {
+      "requested": "claude-opus-4-6",
+      "effort": null
+    },
+    {
+      "requested": "gpt-6-astra",
+      "effort": "xhigh"
+    },
+    {
+      "requested": "claude-sonnet-4-6",
+      "effort": null
+    }
+  ],
+  "Limits": {
+    "default_repeat": 2,
+    "max_repeat": 10,
+    "timeout_ms": 30000,
+    "seed": 2515,
+    "real_spend_cap_usd": 25,
+    "deterministic_spend_cap_usd": 0,
+    "interrupt_park_seconds": 2,
+    "paint_percentile": 95,
+    "bytes_per_mb": 1048576,
+    "pane_samples": 8,
+    "pane_burst_frames": 4,
+    "probe_off_iterations": 10000000,
+    "probe_off_rounds": 5,
+    "probe_poll_ms": 10
+  },
+  "Tasks": {
+    "Q1": {
+      "allowed": [
+        "src/lib.rs"
+      ],
+      "surface": "zo"
+    },
+    "Q2": {
+      "allowed": [
+        "js/alpha.mjs",
+        "js/beta.mjs"
+      ],
+      "surface": "zo"
+    },
+    "Q3": {
+      "allowed": [
+        "src/lib.rs"
+      ],
+      "surface": "window"
+    },
+    "Q4": {
+      "allowed": [
+        "src/lib.rs"
+      ],
+      "surface": "zo"
+    },
+    "Q5": {
+      "allowed": [
+        "js/page.html"
+      ],
+      "surface": "window"
+    },
+    "Q6": {
+      "allowed": [
+        "js/handoff.mjs"
+      ],
+      "surface": "window"
+    }
+  }
+}

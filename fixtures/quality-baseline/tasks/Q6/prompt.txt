@@ -1,0 +1,1 @@
+Fix handoff status, send worker_done and task-update --result with the actual changed file set.

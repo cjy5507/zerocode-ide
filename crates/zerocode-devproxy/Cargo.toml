@@ -1,0 +1,23 @@
+[package]
+name = "zerocode-devproxy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# The label formula, the route registry and the loopback vocabulary. This crate
+# is the socket half of what that module deliberately left without one.
+zerocode-core = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+# The tests stand up real upstream servers and talk to the proxy over real
+# sockets, because half of what is asserted here is bytes on a wire.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }

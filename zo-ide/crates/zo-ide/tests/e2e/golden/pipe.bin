@@ -1,0 +1,18 @@
+[?2004hzo v{VERSION}
+--------
+[1mworkdir:[0m /private<path>
+[1mmodel:[0m anthropic-latest
+[1mprovider:[0m anthropic
+[1mapproval:[0m danger-full-access
+[1msandbox:[0m danger-full-access
+[1mreasoning effort:[0m high
+[1mreasoning summaries:[0m none
+[1msession id:[0m session-<id>
+--------
+[36muser[0m
+PARITY_SCENARIO:streaming_text pipe deterministic turn
+[35m[3mcodex[0m[0m
+Mock streaming says hello from the parity harness.
+[2mtokens used[0m
+19
+[?2004l

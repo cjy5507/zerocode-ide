@@ -1,0 +1,2460 @@
+/* ZeroCode design tokens — the single source of truth for every visual value.
+ *
+ * Rationale lives in docs/design/direction.md. The rule that keeps this file
+ * small: colour is functional. Hue answers "which agent", treatment answers
+ * "what state". Everything else belongs to the titanium material ramp or a
+ * 1px rule. */
+
+:root {
+  --computer-permission-granted-mark: "✓";
+  --computer-permission-denied-mark: "○";
+  --computer-permission-recovery-top: 4rem;
+  --computer-permission-recovery-width: 30rem;
+  --computer-permission-recovery-layer: 60;
+  color-scheme: dark;
+  --ui-zoom-factor: 1;
+
+  /* 2026-08-26 — obsidian atelier.
+   *
+   * Orca remains the structural baseline, not the visual ceiling. ZeroCode's
+   * chrome now reads as blackened glass with a restrained mint/copper light
+   * source: neutral enough for long sessions, but recognisable before a logo
+   * is visible. Hue still carries meaning; the ambient mixes below only turn
+   * that existing semantic palette into material and depth. */
+
+  /* Surfaces, ink and structure. Orca's compiled stylesheet established the
+   * roles and their restraint; ZeroCode's screen-pixel comparison established
+   * these dark bindings. The light treatment below keeps its separately
+   * measured paper ramp. Lane, state, diff and terminal colours remain
+   * semantic systems of their own. */
+  --surface-abyss: #06090b;
+  --surface-deck: #0d1418;
+  --surface-raised: #172229;
+
+  /* Material helpers. They are deliberately derived from semantic tokens so
+   * light mode keeps the same hierarchy without a second decorative palette. */
+  --surface-glass: color-mix(in srgb, var(--surface-deck) 90%, transparent);
+  --edge-glint: color-mix(in srgb, var(--ink-chalk) 16%, transparent);
+  --ambient-mint: color-mix(in srgb, var(--lane-1) 10%, transparent);
+  --ambient-copper: color-mix(in srgb, var(--lane-3) 8%, transparent);
+  --shadow-soft: 0 18px 54px rgb(0 0 0 / 34%);
+  --shadow-nav-edge: 18px 0 48px rgb(0 0 0 / 12%);
+
+  /* A RECESS inside a panel — a search field, a code block, a count pill, a
+   * quoted command. It sits below the deck but just above the window floor,
+   * so nested controls read without becoming black holes.
+   *
+   * Two dozen such elements were painted with `--surface-abyss` directly, and
+   * it worked here by luck: dark's floor is a step BELOW the card, so
+   * anything wearing it sank. The luck ran out the moment the light floor
+   * became white — floor and card are one colour there (as they are in Orca),
+   * so every one of those elements went invisible on paper while looking
+   * perfect in the dark. A role neither treatment has to think about is the
+   * only thing that survives both.
+   *
+   * Orca makes the same distinction and spells it the same way: recessed
+   * things are `bg-background` where that is dark and `bg-muted` where the
+   * background is white. Keeping the role separate lets each treatment
+   * preserve the recess instead of depending on an accidental equality. */
+  --surface-well: #091015;
+
+  /* The left column is a LAYER OF ITS OWN, not the card surface.
+   *
+   * Measured: Orca's whole left sidebar wears `bg-worktree-sidebar`
+   * (`App-BaqTRjaA.js:21139` — the container holding the nav, the header, the
+   * worktree list and the toolbar), and that token is **not** `--sidebar`.
+   * `--sidebar` is #171717 and `--worktree-sidebar` is **#2a2a2a**
+   * (I18nProvider-0D3bXbhN.css:24100) — a step LIGHTER than the card in the
+   * dark treatment, and in the light one #f5f5f5 against a #fafafa `--sidebar`,
+   * a step darker. Either way it is deliberately its own plane.
+   *
+   * This window drew that column with `--surface-deck`, so the one surface a
+   * person looks at all day was flat against the panels beside it — the
+   * hierarchy Orca builds by lightening the column was simply absent.
+   *
+   * The whole family comes with it, because the point of a distinct plane is
+   * that what sits ON it is measured against it: the accent for a row that is
+   * chosen, the ink, the rule, and the ring. Reusing `--surface-raised` for a
+   * selected row would confuse content elevation with navigation state. The
+   * latest dark binding preserves that hierarchy on a cooler,
+   * deliberately tighter 24→39 ramp instead of copying Orca's 42→53 literals. */
+  --nav-plane: #0b1216;
+  --nav-plane-accent: #16252a;
+  --nav-plane-accent-ink: #f0faf7;
+  --nav-plane-ink: #e7f3ef;
+  --nav-plane-rule: rgb(206 239 231 / 10%);
+  --nav-plane-ring: #80a9a0;
+
+  /* Ink */
+  --ink-chalk: #eef8f5;
+  --ink-mist: #8fa49f;
+
+  /* The chevron a `<select>` wears, as an image rather than a mask.
+   *
+   * lucide's `chevron-down`, the same geometry every other quiet mark in
+   * this window uses. It lives here, beside the ink it is drawn in, because
+   * a data URI cannot reach a custom property: the stroke below has to BE
+   * `--ink-mist`'s value, and the only way to keep the two from drifting is
+   * to declare them next to each other. Change one, change the other.
+   *
+   * An image and not a mask because a select cannot hold a pseudo-element,
+   * and a mark drawn on the row instead lands wherever the ROW ends —
+   * measured 16px past the control on the usage plan card, which is the
+   * detached chevron in the report. On the control's own background it
+   * cannot come off. */
+  --chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%238fa49f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+
+  /* Two quieter steps, as ROLES rather than as the alpha that produced them.
+   *
+   * Orca's shortcut row is label `/60` to glyph `/30` — the glyph at half the
+   * label's presence (`App-BaqTRjaA.js:8758-8763`) — and its section title is
+   * `text-muted-foreground/80`. Those alphas were written straight into the
+   * rules first, and that is the bug they caused: fading light ink over a dark
+   * panel still leaves a shape, while fading mid-grey ink over a near-white
+   * one collapses it. Measured in the light treatment, the glyph landed at
+   * **1.93:1** and the title at **3.14:1** — an icon nobody can see and a
+   * label under the 4.5:1 that 12px text needs.
+   *
+   * So each treatment answers for its own numbers. What carries across is the
+   * relationship — glyph quieter than the label, label a step under the rows
+   * it names — not the percentage that happened to express it in the dark. */
+  /* 60%, not Orca's own 50%: half of THIS panel's mist over THIS panel
+   * measured 2.69:1, under the 3:1 a graphic needs. The relationship holds
+   * either way — the glyph stays well under the label's 4.88:1 — and only the
+   * fraction moved, because the palette it fades against is not Orca's. */
+  --ink-glyph: color-mix(in srgb, var(--ink-mist) 60%, transparent);
+  --ink-label: color-mix(in srgb, var(--ink-mist) 80%, transparent);
+  /* A figure meant to be READ rather than glanced past — the status bar's
+   * usage numbers and the words that stand in their place. One step above the
+   * muted ink the bar is set in, short of the chalk live text wears: chalk at
+   * 12px bloomed against the dark chrome, and mist was reported unreadable
+   * (2026-09-02 「가독성이 떨어짐」). */
+  --ink-figure: color-mix(in srgb, var(--ink-chalk) 60%, var(--ink-mist));
+
+  /* The divider between things — translucent near-white, following Orca's
+   * compositing rule but borrowing this palette's cool ink rather than pure
+   * white.
+   * That is why its rules sit correctly on every surface instead of being one
+   * grey that is slightly wrong on all of them. Use it in `border`, never as
+   * a fill: 8% near-white painted as a shape is a shape nobody can see. */
+  --edge-rule: rgb(206 239 231 / 10%);
+
+  /* Default repository badge. Components read this role; they never invent a
+   * colour from a filesystem path. It tracks the titanium ring instead of
+   * retaining an unrelated neutral literal. */
+  --repo-badge: #73928c;
+
+  /* The AI-action accent — the violet Orca reserves for "an agent will act
+   * here" affordances (`--ai-action-accent: var(--color-violet-400)`,
+   * I18nProvider-DPbv01TU.css:23656; the ramp value itself at :160). The one
+   * hue in the window that means neither a lane nor a state, and it stays
+   * that narrow: never decoration, never a second accent. */
+  --ai-accent: #74e0c1;
+
+  /* A hairline or dot drawn as a SHAPE rather than as an edge — the scrollbar
+   * thumb, the titlebar separator, an exited lane's rail, an idle worktree's
+   * dot. Opaque by construction because it has to read on its own, and mixed
+   * from the two measured values above so it tracks both themes without a
+   * third literal to keep in step. */
+  /* 62%, not 35%. This role draws SHAPES — a resting workspace's dot, an
+   * exited lane's rail — and at 35% both measured **1.93:1** against the panel
+   * behind them, under the 3:1 a graphic needs. The light treatment had
+   * already been pushed further down for exactly this reason; dark needed the
+   * same push up and had never been measured. 62% puts them at 3.41:1. */
+  --edge-mark: color-mix(in srgb, var(--ink-mist) 62%, var(--surface-deck));
+
+  /* Row state, as three steps of one ink rather than as three surfaces.
+   *
+   * A surface cannot say this in both treatments. `--surface-raised` is
+   * #262626 over a #171717 panel in dark — a step you can see — and #f5f5f5
+   * over #fafafa in light, which is a 2% step you cannot. Every rule painted
+   * with it therefore lost its mark the moment the light treatment became
+   * reachable, and the column ended up with hover on its lower half only.
+   * Mixed from --ink-mist instead, one declaration darkens a light panel and
+   * lightens a dark one, and the three steps stay apart in both.
+   *
+   * Hover < selected < active, in the order a person's attention was asked
+   * for. They compose: an action inside an already-hovered row takes
+   * --row-hover again and lands a step above its parent without a fourth
+   * value existing to be kept in step. */
+  --row-hover: color-mix(in srgb, var(--ink-mist) 8%, transparent);
+  --row-selected: color-mix(in srgb, var(--ink-mist) 14%, transparent);
+  --row-active: color-mix(in srgb, var(--ink-mist) 20%, transparent);
+
+  /* Disabled ink. `opacity` fades a control toward whatever is behind it,
+   * which on a light panel is nearly white — the disabled `＋` measured at
+   * 0.38 had almost no glyph left. Fading the ink keeps the shape. */
+  --ink-disabled: color-mix(in srgb, var(--ink-mist) 55%, transparent);
+
+  /* A METER — the track a proportion is drawn in, and the quiet fill inside
+   * it before a threshold gives that fill a state colour.
+   *
+   * Two surfaces draw this and they must not drift: the status bar's 28×5px
+   * plan bar and the 6px rows inside the usage popover behind it, which is
+   * literally the same measurement at two sizes. Both wrote the pair inline —
+   * `--ink-mist` at 20% and at 40% — so the panel and the bar that opens it
+   * were one edit away from disagreeing about what "the part you have not
+   * spent" looks like. Mixed off the mist for the reason the row states above
+   * are: one declaration darkens a light panel and lightens a dark one, so
+   * neither treatment needs a second value.
+   *
+   * The fill is only ever this quiet grey while a meter is UNDER its warning
+   * threshold. `--signal-wait` from 60 and `--signal-halt` from 80 replace it
+   * outright — a state, not a shade of one. */
+  --meter-track: color-mix(in srgb, var(--ink-mist) 20%, transparent);
+  --meter-fill: color-mix(in srgb, var(--ink-mist) 40%, transparent);
+
+  /* Lane identity ramp: five stops at matched luminance, assigned in order as
+   * lanes are created. Never used decoratively. */
+  --lane-1: #6dd6bd;
+  --lane-2: #8cbef0;
+  --lane-3: #f1b66c;
+  --lane-4: #a5d582;
+  --lane-5: #ee8f82;
+
+  /* Workspace status. Orca uses green for active/completed and amber when a
+   * person is needed; these are state semantics, not lane identities.
+   *
+   * The amber was already Orca's own amber-500. The green was not: this had
+   * green-500 (#22c55e) where Orca's `--status-success` is **#86efac**
+   * (:24069) — green-**300**, three stops lighter. That is not a preference,
+   * it is what a status colour has to be to sit on #0a0a0a: at 500 the mark
+   * measured 6.0:1 against the stage, at 300 it measures 14.1:1, and the
+   * difference on screen is a green you notice versus a green you look for. */
+  --signal-ready: #83e6b7;
+  --signal-wait: #f6bd68;
+
+  /* The one exception to the ramp: destructive actions only. Orca's
+   * `--destructive` (:24065), which is a step brighter and a step cooler than
+   * the brick this used to carry. */
+  --signal-halt: #ff746f;
+
+  /* 심각도의 램프(SCA의 CVSS 등급, 지식 그래프 P4) — 신호색과 다른 뜻이라 제 이름으로 선다. 값은 재서
+   * 고른 것이다(09-17): 바탕 #0d1418에서 심각 5.4 · 높음 4.9 · 보통 8.7 · 낮음 14.9:1, 그리고 제2색맹·
+   * 제1색맹 모의에서 안개 회색(등급 없음)까지 다섯 짝의 CIELAB 거리가 30.9 이상. 정지 신호(#ff746f)를
+   * 높음에 빌리면 등급 없음의 회색과 제2색맹에서 11.8로 붙었다. 보통은 보드의 호박(#f59e0b)과 같은 값이다. */
+  --severity-critical: #d946ef;
+  --severity-high: #ef4444;
+  --severity-medium: var(--workspace-board-amber);
+  --severity-low: #fde68a;
+
+  /* The same halt, for words that sit ON a halt-tinted ground.
+   *
+   * On this floor there is no difference — #0a0a0a is dark enough that the
+   * tint barely moves the contrast, so the ink IS the signal colour and one
+   * value is honest. The light block below is where the two part; the reason
+   * is written there. */
+  --signal-halt-ink: var(--signal-halt);
+
+  /* And the same for the amber, for the same arithmetic (1-t385).
+   *
+   * A count or a word set in the warning colour ON a warning-tinted ground is
+   * the pairing that fails first, because the tint lifts the ground toward the
+   * ink. Here it does not: measured on the graph's standing 「확인 필요」 chip —
+   * #f6bd68 over a 12% amber wash on this floor — the painted pixels come out
+   * at **8.9:1**, so the ink is the signal colour and one value is honest. */
+  --signal-wait-ink: var(--signal-wait);
+
+  /* The PR lanes' own tones (main.css:188-190 — Orca repeats the same three
+   * values verbatim in both modes, so both blocks here do too): the sidebar's
+   * PR grouping wears these on its lane dots. Done is the odd tan on purpose —
+   * it is the one lane whose work is over, and the original keeps it from
+   * reading as a live signal. */
+  --pr-lane-done: #c7a594;
+  --pr-lane-review: #16a34a;
+  --pr-lane-progress: #d4a300;
+
+  /* User-defined workspace-board lane colours. These are the swatch roles
+   * persisted by id (`blue`, `sky`, …); the stylesheet consumes only the
+   * roles so a future palette correction has one owner. */
+  --workspace-board-blue: #3b82f6;
+  --workspace-board-sky: #0ea5e9;
+  --workspace-board-violet: #8b5cf6;
+  --workspace-board-amber: #f59e0b;
+  --workspace-board-emerald: #10b981;
+  --workspace-board-rose: #f43f5e;
+  --workspace-board-zinc: #71717a;
+
+  /* "Finished" is not "healthy", and the board is where that shows.
+   *
+   * A card that has completed wears emerald-500 (`border-emerald-500/40
+   * bg-emerald-500/[0.06]`, `AgentKanbanBoard-CzEPAxZN.js:179`) — a different
+   * green from the status ramp above, and the two are used side by side: a
+   * dot saying "this agent is alive" and a card saying "this work is done".
+   * Folding them onto one token is what made the board read as monochrome
+   * green. Kept as its own role so the ramp above can move without repainting
+   * the board. */
+  --signal-done: #10b981;
+
+  /* Diff is the second place a hue answers something other than "which
+   * agent", and it earns it: the +/- sign alone cannot be read at a glance
+   * down a hunk. Desaturated to sit inside the graphite palette rather than
+   * shout across it, and used in the diff surface and nowhere else. */
+  --diff-add: #7fb896;
+  --diff-del: #d9877f;
+  --diff-add-surface: color-mix(in srgb, var(--diff-add) 14%, transparent);
+  --diff-del-surface: color-mix(in srgb, var(--diff-del) 14%, transparent);
+
+  /* Modal scrim. Always a darkening layer, never a tint of the surface: a
+   * permission dialog has to focus attention on itself while leaving the lane
+   * behind it readable, and a light-tinted scrim erases that context. On the
+   * neutral axis like every other grey here — the blue cast this used to
+   * carry was the old palette's, not Orca's. */
+  --scrim: rgb(7 10 14 / 66%);
+
+  /* ---- the glass material ----
+   *
+   * The panel colours above, as something with a thickness. Both treatments
+   * carry the set so the rules that wear it are written once and read tokens;
+   * see the light block for why the veil composites to exactly the opaque
+   * `--surface-deck` beside it.
+   *
+   * Dark's veil is the panel over the stage rather than white over a tint.
+   * At 72% the desktop owned more than a quarter of the final colour and a
+   * bright wallpaper lifted chrome to #4e4e4f. At 94% the wallpaper supplies
+   * depth and blur, not the palette; opaque mode and glass mode now read as
+   * the same material. */
+  --glass-veil: rgb(16 21 28 / 94%);
+  /* THE FLOATING SURFACE, at Orca's own recipe rather than near it.
+   *
+   * `DialogContent` is `bg-[rgba(23,23,23,0.96)] backdrop-blur-2xl`
+   * (`dialog-BT-jXU9a.js:45`), and Popover, DropdownMenu, ContextMenu and
+   * Command all repeat it. Two things were off by a step each: the veil was
+   * 38/88% — a LIGHTER panel at LOWER opacity, so a dialog read as a grey
+   * card rather than as the card surface with a thickness — and the blur was
+   * 22px where `backdrop-blur-2xl` is **40**. Under 40px the room behind the
+   * glass stops being legible shapes and becomes colour, which is the whole
+   * difference between a translucent panel and a frosted one. */
+  --glass-veil-raised: rgb(20 25 33 / 97%);
+  /* No `saturate()`. It was doing real work under a 22px blur, and it is the
+   * one part of this material Orca does not have — the utility is not in the
+   * bundle at all. At 40px there is little chroma left to rescue, and keeping
+   * it here would tint every floating surface a step warmer than the opaque
+   * panel beside it, which is exactly the near-miss the veil above fixes. */
+  --glass-blur: blur(40px);
+  /* `--glass-sheen` used to sit here and is gone deliberately. It drew the
+   * lit top edge as a brighter `border-top-color`, which was a second
+   * mechanism for the thing `--shadow-float`'s `inset 0 1px 0` now does — and
+   * the two disagreed the moment the edge below went to 14%, because the
+   * "lit" edge was 10% and therefore DARKER than the three sides it was
+   * supposed to catch light against. One mechanism, Orca's own. */
+
+  /* The edge of a floating surface is roughly twice the window's own rule.
+   *
+   * `--edge-rule` is 8% near-white, right for a divider inside a panel and
+   * wrong for the boundary of something hovering over it: at that weight the
+   * dialog had
+   * no silhouette against the scrim behind it. Orca draws this one at 14%
+   * (`border-white/14`, and `border-black/14` in the light treatment). */
+  --glass-edge: rgb(237 242 247 / 14%);
+
+  /* Type — Orca's own stacks, measured from its APP token block rather than
+   * from tailwind's default layer.
+   *
+   * The last reading of this said Orca ships no brand face, citing
+   * `--font-sans: ui-sans-serif, system-ui, …`. That line is tailwind's OWN
+   * fallback (I18nProvider-DPbv01TU.css:103); the app overrides it further
+   * down: `--app-font-family: "Geist", -apple-system, BlinkMacSystemFont,
+   * "Segoe UI", sans-serif` (:23531), backed by a bundled Geist-Variable
+   * @font-face (:23510). So Geist leads here too. The FILE does not come
+   * across — a woff2 is an asset and assets never ship (repo rule); the name
+   * resolves where Geist is installed and falls to the same system faces
+   * Orca names where it is not. The Korean fallback is ours, appended
+   * because nothing in the measured stack carries Hangul. */
+  --font-ui: var(--font-ui-choice, "Geist"), -apple-system, BlinkMacSystemFont, "Segoe UI",
+    "Apple SD Gothic Neo", sans-serif;
+  --font-display: var(--font-ui);
+  /* The measured mono (:23533), verbatim — then the Nerd Font tail.
+   *
+   * The tail is not decoration. A prompt built by starship, p10k or oh-my-zsh
+   * and every agent TUI's icon row draw from the private use area
+   * (U+E000-F8FF and the two supplementary planes), which NOTHING in the
+   * measured stack carries — so every one of those glyphs came out tofu, and
+   * that is the first thing a person sees when the terminal opens.
+   *
+   * Orca closes this by BUNDLING `SymbolsNerdFontMono-Regular.woff2` (1.18MB)
+   * and pinning it to the PUA with `unicode-range`
+   * (I18nProvider-0D3bXbhN.css:23900-23907). The file cannot come across — a
+   * woff2 is an asset and assets never ship (the same repo rule that keeps
+   * Geist to a name above); whether to make this rule's first exception is a
+   * decision left open in the ledger (1-em), not one taken here.
+   *
+   * The names still buy most of it back: anyone who has installed a patched
+   * face gets their prompt rendered today, and anyone who has not is exactly
+   * where they already were. Placed AFTER the Latin faces and before
+   * `monospace` on purpose — these are fallbacks for the codepoints the faces
+   * above do not cover, never the face that draws ordinary text. The symbols-
+   * only face leads the tail because it is the one that carries nothing but
+   * those codepoints and so can never capture a letter. */
+  --font-mono: "SF Mono", SFMono-Regular, ui-monospace, "Cascadia Code",
+    Menlo, Consolas, "Liberation Mono", "Symbols Nerd Font Mono",
+    "MesloLGS NF", "JetBrainsMono Nerd Font", "Hack Nerd Font", monospace;
+
+  /* Type scale */
+  /* The scale had no step below 11px, so every dense surface was assigned one
+   * size too large — measured against Orca, whose explorer rows are 10–11px,
+   * status bar 11px and terminal 12px (docs/reverse/orca-ui-inventory.md 1-c).
+   * The values here were never wrong; the assignment was, and the missing
+   * bottom step is why. Roles, smallest first:
+   *
+   *   3xs  a badge, a count, a second line — read only when looked for
+   *   2xs  a list row, the surface every panel is mostly made of
+   *   xs   a section label, the terminal, and body copy
+   *   sm   dialog prose, which is read rather than scanned
+   *
+   * A label is bigger than the rows under it on purpose: it is a landmark,
+   * and Orca sets its section titles a step above its rows for the same
+   * reason. */
+  --text-3xs: 10px;
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-md: 15px;
+  --text-lg: 18px;
+  --text-xl: 24px;
+  --leading-body: 1.55;
+  --leading-tight: 1.25;
+  --tracking-label: 0.08em;
+
+  /* A row in a list is not a paragraph. `--leading-body` is the measure for
+   * prose, and spending it on a 12px row inside a 280px column turns a list
+   * into a ladder — which is most of why this panel read as unfinished beside
+   * Orca's, whose explorer rows measure 18–28px at 10–11px type
+   * (docs/reverse/orca-ui-inventory.md 1-c). One height for every navigable
+   * row, so a project, its worktrees and their sessions share one rhythm. */
+  --leading-ui: 1.25;
+  --row-height: 24px;
+
+  /* One icon size for the window. 14px is what Orca draws its sidebar and
+   * explorer glyphs at (`size-3.5`, measured — docs/reverse/orca-ui-inventory
+   * .md 1-f), and it is the size at which a 1.5px stroke still reads as a
+   * shape rather than as a smudge beside 12px text. */
+  --icon-size: 14px;
+
+  /* The disclosure chevron, a step under the glyph beside it. A folder is the
+   * thing; the chevron is only the control that opens it, and drawn at the
+   * same weight it competes with the name it belongs to. */
+  --icon-size-sm: 12px;
+
+  /* The left column's rail.
+   *
+   * Every navigable row there — the two shortcuts, a repository, a workspace,
+   * the "hiding N" report — starts its glyph at --nav-inset, so the column
+   * reads as one list instead of four lists that happen to be stacked. It had
+   * four different insets (0, 4, 6 and 10px) and that is most of what
+   * "정렬이 어색하다" was pointing at.
+   *
+   * RE-MEASURED against Orca 1.4.164's own nav row, which is one string:
+   * `gap-2 px-2 rounded-md text-[13px]` with a `size-4` glyph
+   * (`App-BaqTRjaA.js:8921,8923`). Four values here were each a step off in a
+   * different direction — inset 10 against 8, gutter 6 against 8, glyph 14
+   * against 16, type 12 against 13. The earlier reading took 10px off the
+   * repository HEADER, which is a different row from the one it was applied
+   * to; the row this token governs is `px-2`. Four near-misses summed on the
+   * one surface a person reads all day is most of what "비슷한데 다른 앱"
+   * means.
+   *
+   * What the note above defends is unchanged — one inset for the whole
+   * column, a child indenting under its parent's name — and only the numbers
+   * it is built from moved. */
+  --nav-inset: 8px;
+  --nav-gutter: 8px;
+
+  /* The glyph on a navigable row is `size-4` = 16px, a step ABOVE the
+   * window's 14px default. Deliberately its own token rather than a nudge to
+   * `--icon-size`: the same 14px still draws the disclosure twist and the
+   * file tree, and the tab strip's kind glyph is smaller still. A row a
+   * person aims at all day is the one place that earns the larger mark. */
+  --nav-icon-size: 16px;
+
+  /* A child list indents by 18px per level, which is Orca's own
+   * `getWorktreeCardContentIndent` (:4603) rather than a sum of ours.
+   *
+   * This WAS derived — glyph plus gutter — and the derivation is what broke:
+   * with the corrected 16px glyph and 8px gutter it would now compute 24px,
+   * a third more per level than the app it is cloning, and four levels deep
+   * that is a column of names starting a quarter of the way in. Orca's
+   * indent is a measured constant, not a consequence, so it is typed. */
+  --nav-indent: 18px;
+
+  /* A section title sits one inset further in than the rows it names —
+   * Orca's `px-2` container plus the title's own `pl-2` (`:8074`). Written as
+   * the construction rather than as 16px so it cannot drift from the inset it
+   * is doubled from. */
+  --nav-title-inset: calc(var(--nav-inset) * 2);
+
+  /* A section header, at Orca's own height for one: `SidebarHeader` is `h-8`
+   * (docs/reverse/orca-ui-inventory.md 1-f). A step above the rows it labels,
+   * because it is a landmark rather than the first of them. */
+  --head-height: 32px;
+
+  /* Spacing */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  /* Shape — Orca's own scale, measured: `--radius: .625rem` with `sm` at 60%
+   * and `xs` at `.125rem` (I18nProvider-DPbv01TU.css). We had 3px on the
+   * argument that a ledger is not a card stack; the instruction is to clone
+   * the design, and 3px against 10px is exactly the near-miss that makes a
+   * clone read as an imitation.
+   *
+   * The mapping follows what each element *is* in Orca's own vocabulary: a
+   * small control (button, input, row, badge) takes `md`, and a surface that
+   * floats over the window takes the full radius.
+   *
+   * THE SCALE HAD A HOLE IN THE MIDDLE. Orca's full ladder is
+   * `xs 2 / sm 6 / md 8 / lg 10 / xl 14 / 2xl 18` (:233~236, :4856~4876) and
+   * the rung it actually stands on is **md**: counted across five of its
+   * bundles, `rounded-md` appears **338** times — more than every other named
+   * radius put together — against 106 for `lg` and 90 for `sm`. This file had
+   * no `md` at all, so `--radius-edge`, the role every button, input, nav row
+   * and menu item reads, fell through to `sm`. Seventy-three elements were
+   * each one rung too square. Individually invisible; side by side it is the
+   * first reason the window read as "close but not it".
+   *
+   * `--radius` stays the name of the 10px rung rather than gaining an `lg`
+   * alias — it is already spelled that way everywhere a surface floats. */
+  --radius: 10px;
+  --radius-xl: 14px;
+  --radius-md: 8px;
+  --radius-sm: 6px;
+  --radius-xs: 2px;
+  --radius-edge: var(--radius-md);
+  --rule-width: 1px;
+
+  /* Two rungs that are not on the ladder, because Orca's menu is not on it
+   * either: `rounded-[11px]` on the panel and `rounded-[7px]` on the items
+   * inside it (`dropdown-menu-CshySeVW.js:313,326`). A menu is the one surface
+   * whose corner is cut against the corners nested one pixel inside it, and
+   * Orca tuned that pair by hand. Named as the roles they are so nobody
+   * "corrects" them back onto the scale. */
+  --radius-menu: 11px;
+  --radius-menu-item: 7px;
+
+  /* A lane's colour is drawn as a rail on the row that carries it. Three
+   * pixels because it has to read at a glance without becoming a second
+   * border — the window already has one rule width and does not want two. */
+  --rail-width: 3px;
+
+  /* Panel geometry. These are **defaults a person will be able to drag**, not
+   * constants — which is exactly why they are named here rather than written
+   * into a rule. The measured three are Orca's own store values, and its
+   * store is where a user's drag lands too (`sidebarWidth: 280`,
+   * `rightSidebarWidth: 350`, `STATUS_BAR_RESERVE_HEIGHT = 24`;
+   * docs/reverse/orca-ui-inventory.md 1-c). The folded pair is ours: a narrow
+   * window keeps every destination reachable instead of deleting one. */
+  --sidebar-width: 280px;
+  --sidebar-width-folded: 240px;
+  --aside-width: 350px;
+  --aside-width-folded: 180px;
+  --statusbar-height: 24px;
+  --panel-folded-height: 26vh;
+
+  /* A status dot — the smallest mark that still reads as deliberate. */
+  --dot-size: 5px;
+  /* 상태를 나르는 점의 치수. `--dot-size`와 다른 이름인 이유는 다른 것을
+   * 말하기 때문이다 — 저것은 "봐야 할 것이 있다"는 알림 점이고, 이것은 켜짐과
+   * 꺼짐 사이의 상태를 형태로 나르는 점이라 속을 비울 수 있어야 한다. 창 안의
+   * `.wt-agent-dot`·`.scm-filter-dot`도 같은 6px을 따로 적고 있으므로, 전면
+   * 정리 때 이 이름으로 모인다. */
+  --status-dot: 6px;
+  --status-dot-ring: 1.5px;
+
+  /* The stage's tab strip, measured from Orca's own leaf strip
+   * (docs/reverse/orca-ui-inventory.md 1-e): a tab between 88 and 280px on a
+   * 180px basis that widens on a wide window, and a 2px rule marking the
+   * active one.
+   *
+   * The HEIGHT was the one value in this group that was read short. Orca's
+   * strip is `h-[32px]` (`Terminal-C-wPg97C.js:2052`) and its own hit-test
+   * constant agrees — `tabStripHeightPx: 32`, which is the number the drag
+   * code trusts, so it cannot be a stale class. 28px here made every tab four
+   * pixels shallower than the row it is quoting. */
+  --tabstrip-height: 32px;
+
+  /* A tab is padded by 6px, not 12 (`px-1.5`,
+   * `file-preview-BNViqF3u.js:4851`). At `--space-3` the label inside an
+   * 88px-minimum tab lost a quarter of its measure to gutters, which is why
+   * names truncated here that do not truncate in Orca. */
+  --tab-inset: 6px;
+
+  /* How far the strip's overflow fades before the edge (`mask-image` with the
+   * stop at `1.5rem`, :24493~24506). A strip that simply clips reads as
+   * broken; one that fades reads as continuing. */
+  --tab-fade: 1.5rem;
+  --tab-min-width: 88px;
+  --tab-max-width: 280px;
+  --tab-basis: 180px;
+  --tab-basis-wide: 220px;
+
+  /* The thicker mark that says "this one" — under the active tab, down the
+   * edge of a changed line. One measure so those never disagree. Orca marks
+   * its active tab with exactly this. */
+  --accent-rule: 2px;
+
+  /* Surfaces that float over the window. The terminal's size is a default a
+   * person will drag; the dialog width is one measure shared by every modal,
+   * so widening one cannot leave the others behind. */
+  --term-float-width: min(760px, calc(100vw - 120px));
+  --term-float-height: min(440px, calc(100vh - 200px));
+  /* File manager: two columns on desktop, stacked at the compact breakpoint. */
+  --sftp-editor-width: min(1120px, calc(100vw - var(--space-6)));
+  --sftp-editor-height: min(800px, calc(100vh - 2 * var(--space-6)));
+  --sftp-panel-min-height: 240px;
+  --sftp-queue-max-height: 26vh;
+  --sftp-layer: 20;
+  --sftp-dialog-layer: 32;
+  --sftp-confirm-layer: 34;
+  --dialog-width: min(560px, calc(100% - var(--space-6)));
+
+  /* The finder is WIDER than a dialog, which reverses what this file used to
+   * argue.
+   *
+   * The old reasoning — a short measure is what makes a column scannable —
+   * is right for prose and wrong for these rows: every one of them is a path,
+   * and a path truncated in the middle is the one string a short measure
+   * destroys rather than tightens. Orca's command palette is `w-[660px]`
+   * capped at `max-w-[90vw]` (`command-Bebjnv1d.js:485`), 27% wider than the
+   * 480px here, and it sits at `top-[20%]` rather than centred. */
+  --palette-width: min(660px, 90vw);
+  /* Orca's own `top-[20%]`, replacing a 12vh that put the finder higher than
+   * the surface it searches. */
+  --palette-drop: 20%;
+  /* `h-12` on the input and `max-h-[min(400px,60vh)]` on the list
+   * (`command-Bebjnv1d.js:499,539`). The list bound was read as a flat 288px
+   * off a `max-h-72` belonging to a different list entirely — logged in the
+   * audit as a misattribution, corrected here. */
+  --palette-input-height: 48px;
+  --palette-list-height: min(400px, 60vh);
+  /* The path browser's row (t-2982): the finder row's 42px measure plus its
+   * 2px margins, as ONE fixed height — the list windows its rows and needs a
+   * number the stylesheet and the script agree on. */
+  --pb-row-height: 46px;
+
+  /* The board stops growing at 1280px and centres (`mx-auto w-full
+   * max-w-[1280px]`, `AgentKanbanBoard-CzEPAxZN.js:1362`). Ours stretched to
+   * whatever the window was, so on a wide display four columns each grew past
+   * the 264px they are designed around and the cards inside them turned into
+   * banners. A column count is a layout; a column WIDTH is a reading measure. */
+  /* Agent ontology graph. Geometry lives here so the renderer measures the
+   * actual DOM and never carries a second pixel vocabulary in JavaScript. */
+  --agent-graph-context-width: 116px;
+  --agent-graph-agent-width: 172px;
+  --agent-graph-inspector-width: 300px;
+  --agent-graph-layer-gap: 20px;
+  --agent-graph-row-gap: var(--space-3);
+  --agent-graph-row-min-height: 64px;
+  --agent-graph-search-width: 320px;
+  --agent-graph-inspector-stack-min-height: 220px;
+  /* The measured lanes above are the baseline: the width Orca hands a node
+   * that carries a title and one line under it. This surface's agent card also
+   * carries a live wire — three tool calls, each a verb and a path — and a path
+   * clipped at 172px says nothing at all. So the DRAWN lane is the measured one
+   * times a density, and the measure stays the measure: the widening is a
+   * number somebody can read and argue with rather than a redefinition.
+   *
+   * The zoom multiplies the same measures a second time, and the tokens that
+   * DO that multiplication live on `.agent-graph-surface` rather than here —
+   * see the note there. Only the measures are here, where a measure belongs. */
+  --agent-graph-density: 1.55;
+  --agent-graph-band-head-height: 34px;
+  --agent-graph-lane-height: 22px;
+  /* 「지금 무엇을 하는가」가 쓰는 수들 (t-2374). 여덟 칸의 띠와 가는 미터는
+   * 이 표면에만 있는 모양이라 제 토큰을 갖는다 — `--space-*`가 맞는 자리는
+   * 그것을 쓴다. 여덟이라는 **개수**는 여기 없다: 그것은 데이터의 양이라
+   * `AGENT_GRAPH_TICKER_KEEP`이 든다. */
+  /* ---- 세 티어의 문턱 (t-2374) ----
+   *
+   * 컨테이너 쿼리의 조건에는 `var()`가 들어가지 못한다. 그래서 이 세 수는
+   * `shell.css`의 `@container` 조건에 한 번 더 적혀 있고, 그 한 곳에만 주석이
+   * 달려 있다 — 브라우저가 강제하는, 「같은 수를 두 곳에 적지 않는다」의
+   * 유일한 예외다. JS는 여기서 `getComputedStyle`로 읽으므로 세 번째 사본은
+   * 없다(`agentGraphTierWidths`).
+   *
+   * 1100 은 그림이 인스펙터를 곁에 두고도 세 레인을 온전히 담는 폭이고,
+   * 700 은 세 레인이 밀도의 바닥에서도 담기지 않아 가로 스크롤로 넘어가는
+   * 폭이며(실측: 267px × 3 + 간격 + 여백 = 608px이 560px 판에 들어가지
+   * 못한다), 400 은 카드 하나와 그 곁의 낱말만 남는 폭이다. */
+  /* ---- 그림의 배율과 그 범위 (t-2374) ----
+   *
+   * 여섯 다 JS에 손으로 적힌 수였다 — 그리고 그 여섯은 CSS가 정한 밀도와
+   * 글자 바닥에서 나온 수였으므로, 이 파일이 움직이면 함께 움직여야 하는데
+   * 아무도 그것을 강제하지 않았다. 이제 `agentGraphTuning`이 뷰 생성 때
+   * 한 번 여기서 읽는다.
+   *
+   * 바닥 0.45는 낱말이 아니라 **모양**을 보는 자리이고(사람이 청해야 간다),
+   * 1.6 위로는 노드가 커지기만 한다. 저절로 앉는 판의 바닥 0.65는 밀도의
+   * 역수 — 카드가 도구 호출의 경로를 담으려고 덧입은 것을 도로 내어놓는
+   * 자리이며, 실측 레인 172px보다 좁아지는 일은 하지 않는다.
+   *
+   * `unitless` 라 `px`가 붙지 않는다: 배율은 길이가 아니다. `--agent-graph-edge-stub`
+   * 만 길이이고, 그것은 간선이 카드를 비껴 도는 거리다. */
+  --agent-graph-zoom-min: 0.45;
+  --agent-graph-zoom-max: 1.6;
+  --agent-graph-zoom-step: 0.15;
+  --agent-graph-lod: 0.6;
+  --agent-graph-fit-floor: 0.65;
+  --agent-graph-edge-stub: 12px;
+  --agent-graph-tier-side: 1100px;
+  --agent-graph-tier-list: 700px;
+  --agent-graph-tier-tight: 400px;
+  --agent-graph-drawer-width: 320px;
+  --agent-graph-sheet-height: 52%;
+  --agent-graph-sheet-min-height: 240px;
+  --agent-graph-search-icon: 28px;
+  /* ---- 보드 고유의 리듬 (t-2374) ----
+   *
+   * `--space-*`가 맞는 자리는 그것을 쓴다. 아래는 그 사다리에 없는, 이 표면만의
+   * 수들이다 — 카드 안의 6px 줄 간격(칸이 아니라 **줄** 사이라 8px은 넓다),
+   * 알약 칩의 1px/6px 안쪽, 캔버스 모눈의 24px 눈금, 그리고 낱말이 더 줄지
+   * 않는 세 바닥. 마지막 셋이 토큰인 것은 저절로 앉는 맞춤의 바닥
+   * (`--agent-graph-fit-floor`)이 바로 그 셋에서 나온 수이기 때문이다: 두
+   * 곳에 적혀 있으면 한쪽만 움직이는 날 그림이 읽을 수 없게 된다. */
+  --agent-graph-gap: 6px;
+  --agent-graph-gap-tight: 2px;
+  --agent-graph-chip-inset: 1px 6px;
+  --agent-graph-grid: 24px;
+  --agent-graph-text-floor-title: 10px;
+  --agent-graph-text-floor-line: 9px;
+  --agent-graph-text-floor-fine: 8px;
+  /* 선의 굵기 셋. 이 그림의 관계선은 카드보다 얇아야 하고(1.5), 짚은 것만
+   * 굵어지며(2), 오버레이의 맥박은 그보다 한 단 더 간다(4). */
+  --agent-graph-edge-stroke: 1.5px;
+  --agent-graph-edge-stroke-lit: 2px;
+  --agent-graph-edge-stroke-pulse: 4px;
+  --radius-pill: 999px;
+  --agent-graph-tick-size: 9px;
+  --agent-graph-tick-gap: 3px;
+  --agent-graph-meter-height: 3px;
+  --agent-graph-mark-size: 6px;
+  /* ---- round three: 원장처럼 읽히는 판 ----
+   *
+   * 머리 한 줄의 높이와 그 안의 조작들의 높이, 카드의 반경·안쪽·아이콘 타일,
+   * 인스펙터 연대기의 상한, 그리고 인스펙터 카드가 드는 화면 꼬리의 줄 수와
+   * 글자. 마지막 둘이 `--card-screen-*`와 따로 있는 것은 그 둘이 사이드바
+   * 카드의 수이기 때문이다 — 인스펙터는 그 카드보다 넓고, 사람이 「지금
+   * 무엇을 찍고 있는가」를 읽으러 오는 자리라 더 많은 줄을 더 큰 글자로 든다.
+   *
+   * 머리 높이는 t-3818부터 세 뷰의 마스트헤드와 한 수다 — 지식·작업·워크스페이스를
+   * 오갈 때 머리가 8px씩 뛰면 한 작업대가 아니라 세 앱으로 읽힌다. */
+  --agent-graph-head-height: var(--workbench-head-min-height);
+  --agent-graph-control-height: 28px;
+  --agent-graph-edge-hit-width: 16px;
+  --agent-relations-card-width: 340px;
+  /* 시안의 사이드바를 보드 안 레일로 (t-4145). 넓은 판의 172, 서랍 티어의
+   * 155는 시안(agent-relations-preview-20260914/preview.css)의 그 수이고,
+   * 목록 티어 아래에서 레일은 접힌다 — 범위 선택은 툴바에 남는다. */
+  --agent-relations-rail-width: 172px;
+  --agent-relations-rail-width-drawer: 155px;
+  --agent-graph-card-radius: var(--radius-md);
+  --agent-graph-card-inset: var(--space-3) var(--space-4) var(--space-3) var(--space-4);
+  --agent-graph-icon-tile: 24px;
+  --agent-graph-stream-height: 320px;
+  --agent-graph-screen-rows: 9;
+  --agent-graph-screen-text: 11px;
+
+  /* ---- the toast layer ----
+   *
+   * This window's rule is that a result belongs beside the thing it happened
+   * to, and that rule stands — the inline summaries stay exactly where they
+   * are. What was missing is the layer for the cases Orca uses one for: a
+   * result whose origin has already gone off screen.
+   *
+   * Orca's sonner defaults, measured: the app radius, `min(26rem, 100vw-2rem)`
+   * (≤416px), `14px 16px` of padding, 13px type, and a 2.5rem lift off the
+   * bottom edge so it clears the status bar rather than sitting on it. */
+  --toast-width: min(26rem, calc(100vw - 2rem));
+  --toast-inset: 14px 16px;
+  --toast-lift: 2.5rem;
+
+  /* The 이름/내용 switch above the file search. One row of the file panel's
+   * own rhythm, so the panel does not gain a second vertical beat. */
+  --segment-height: 24px;
+
+  /* Folding a side panel. Long enough to read as the panel moving rather
+   * than blinking out, short enough that the pty's resize debounce (120ms)
+   * still lands after the geometry has settled. */
+  --panel-fold-duration: 110ms;
+
+  /* The line-number column in a content hit. Four digits and a gutter: past
+   * that the number matters less than the line it points at. */
+  --hit-line-width: 38px;
+
+  /* A lane's colour where it appears on a row — one rail width for
+   * both, so the window's one signature is quoted rather than restated. */
+  --rail-lane: var(--rail-width);
+
+  /* Scrollbars. The platform's own are bright and wide, and on a panel the
+   * height of this window that made them the strongest vertical line on
+   * screen — louder than a row rail, which is the line that is supposed
+   * to be. The inset is transparent padding around the thumb, so the bar
+   * reads as thin without becoming hard to grab. */
+   * Orca's `.scrollbar-sleek` is 12px wide with a 3px transparent border —
+   * a **6px** thumb — and the thumb is a SQUARE bar, `border-radius: 0`
+   * (:24249~24281). Ours was 10/3 (a 4px thumb) rounded to a pill: thinner,
+   * softer, and reading as a decoration rather than as a position. The pill
+   * was the part that gave it away, because nothing else in this window is
+   * capsule-shaped except a count badge. */
+  --scrollbar-size: 12px;
+  --scrollbar-inset: 3px;
+  --scrollbar-radius: 0;
+
+  /* The left column gets Orca's second scrollbar rather than the window's.
+   * `.worktree-sidebar-scrollbar` is 8px and appears only on hover — a column
+   * of names is read as a shape, and a permanent bar down its edge competes
+   * with the rails inside it. */
+  --scrollbar-size-nav: 8px;
+
+  /* Everything that floats above the window sits on one shadow, so depth
+   * means a single thing.
+   *
+   * Orca's is `0 24px 72px rgba(0,0,0,0.55)` with an `inset 0 1px 0
+   * rgba(255,255,255,0.06)` riding on it (`dialog-BT-jXU9a.js:45`). Ours was
+   * 64px at 45% and carried no inset at all — a shadow a step tighter and a
+   * step weaker, under a surface with no lit top edge. The inset is the half
+   * that matters: it is the hairline that tells you the glass has a top,
+   * which is why a dialog without one reads as a hole rather than as a pane.
+   * The titanium treatment lengthens the falloff and deepens the alpha so a
+   * near-black popover still separates from near-black chrome. */
+  --shadow-float: 0 28px 88px rgb(0 0 0 / 62%),
+    inset 0 1px 0 rgb(255 255 255 / 7%);
+
+  /* A menu or popover is not a dialog. It is dropped rather than floated, so
+   * Orca gives it its own shallower pair — `0 20px 44px rgba(0,0,0,0.42)`
+   * with a fainter `…04` inset (`dropdown-menu-CshySeVW.js:326`). These wore
+   * `--shadow-3` (a 4px control shadow) and so had no depth at all. */
+  --shadow-drop: 0 22px 52px rgb(0 0 0 / 48%),
+    inset 0 1px 0 rgb(255 255 255 / 6%);
+
+  /* Motion, measured. Orca drives every state change through ONE pair —
+   * `--default-transition-duration: .15s` on
+   * `cubic-bezier(.4, 0, .2, 1)` — and its overlays enter through
+   * `animate-in fade-in-0 zoom-in-95` at the same .15s
+   * (I18nProvider-0D3bXbhN.css: .transition, .animate-in, .fade-in-0,
+   * .zoom-in-95). One duration and one curve is why a window feels like one
+   * instrument instead of forty widgets. */
+  --motion-fast: 150ms;
+  /* Ambient work indication stays slower and quieter than an attention cue. */
+  --worktree-flow-period: 5s;
+  --worktree-flow-ink: color-mix(in srgb, var(--ink-mist) 55%, transparent);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --enter-scale: 0.95;
+
+  /* A dialog is the one surface that enters slower. Orca writes `duration-200`
+   * on `DialogContent` and nowhere else in the overlay family
+   * (`dialog-BT-jXU9a.js:45`); everything smaller keeps the .15s default. The
+   * extra 50ms is the difference between a decision arriving and a decision
+   * appearing. */
+  /* 아직 오지 않은 것의 자리. 값은 `.usage-blank`가 이미 쓰던 것이고, 두
+   * 번째 쓰는 곳이 생겼으므로 이름을 얻는다 — 에뮬레이터 화면의 스켈레톤이
+   * 사용량 카드의 것과 다른 박자로 뛰면 한 창으로 읽히지 않는다. */
+  --skeleton-fill: color-mix(in srgb, var(--ink-mist) 14%, transparent);
+  --skeleton-period: 1.6s;
+
+  --motion-dialog: 200ms;
+
+  /* The curve an ENTRANCE rides, which is not the curve a state change rides.
+   *
+   * `.animate-in` resolves `var(--tw-ease, ease)` (:4015) — plain `ease`,
+   * `cubic-bezier(.25,.1,.25,1)` — and only `.transition` gets the
+   * `(.4,0,.2,1)` above. We had spent the standard curve on both. They differ
+   * where it shows: `ease` leaves faster and settles longer, which is what
+   * makes a panel read as arriving rather than as being switched on. */
+  --ease-enter: ease;
+
+  /* Leaving. Orca's overlays close through `animate-out fade-out-0
+   * zoom-out-95` at the same .15s they arrive on; this window toggled
+   * `hidden` and they blinked out of existence. A surface that appears with a
+   * motion and vanishes without one reads as a crash, not as a dismissal. */
+  --exit-scale: 0.95;
+
+  /* The 8px a popover or menu travels from the edge it is anchored to
+   * (`slide-in-from-*-2`, tailwind's `2` = .5rem). Direction is the rule's;
+   * the distance is one measure so four sides cannot disagree. */
+  --enter-slide: 8px;
+
+  /* Depth, measured: tailwind's compiled ramp in the same sheet. Controls
+   * wear 1 (`.shadow-xs`) and raised surfaces 2 (`.shadow-sm`).
+   *
+   * Tier 3 (`.shadow-md`) is gone. It was the menu tier, and its three
+   * surfaces — the context menu and the two popovers — now wear
+   * `--shadow-drop`, which is the shadow Orca actually writes on a dropdown
+   * (`0 20px 44px` at 42% with an inset hairline) rather than tailwind's
+   * generic `md`. The value was measured correctly and simply had nothing
+   * left to sit on; a tier with no surface is the dead weight the depth gate
+   * exists to catch, so it is taken out rather than kept for symmetry. */
+  --shadow-1: 0 1px 2px 0 rgb(0 0 0 / 5%);
+  --shadow-2: 0 1px 3px 0 rgb(0 0 0 / 10%), 0 1px 2px -1px rgb(0 0 0 / 10%);
+  /* The same tier thrown UPWARD, for a surface that floats over content from
+   * the bottom edge — tailwind's `shadow-lg` mirrored, which is the shadow
+   * Orca's bulk action bar wears (bulk-action-bar.tsx). A direction is a role
+   * here: a downward shadow on a bar pinned to the bottom falls inside itself
+   * and reads as nothing. */
+  --shadow-lift: 0 -4px 6px -1px rgb(0 0 0 / 10%), 0 -2px 4px -2px rgb(0 0 0 / 10%);
+
+  /* The board's cards, which sit on the graph paper rather than on a panel.
+   * These are cast in plain black like the tiers above and NOT defined again
+   * in the light block, because a cast shadow is the absence of light and
+   * that does not invert with the floor.
+   *
+   * They were written inline as `--surface-abyss` — the app's own floor,
+   * which IS a role that flips: near-black in the dark treatment and #ffffff
+   * in the light one. A card on the light board therefore cast a WHITE shadow
+   * onto a white floor and had no depth at all. A surface role is not a
+   * shadow role, and the two only looked interchangeable while the floor
+   * happened to be dark. */
+  --shadow-node: 0 1px 0 rgb(0 0 0 / 25%), 0 10px 22px -18px rgb(0 0 0 / 70%);
+  --shadow-node-raised: 0 14px 30px -20px rgb(0 0 0 / 70%);
+  /* And the bar that floats over an address while it is being edited. */
+  --shadow-overlay-bar: 0 10px 24px rgb(0 0 0 / 18%);
+
+  /* Focus, measured: a 3px ring at half presence
+   * (`focus-visible:ring-[3px]` with `ring-ring/50`; --ring
+   * I18nProvider-0D3bXbhN.css:24071 dark, :23955 light). */
+  --ring: #778596;
+  --ring-width: 3px;
+
+  /* macOS frameless window: the top strip is draggable and must clear the
+   * traffic lights. 36px is the height Orca's own shell uses for this strip
+   * (measured: `h-[36px]`), which is the smallest that still centres the
+   * lights without a second bar's worth of chrome. */
+  --titlebar-height: 36px;
+  --traffic-light-inset: 78px;
+
+  /* Terminal screen — content, not chrome. The programs inside paint for a
+   * dark terminal, so this surface does NOT flip with the app theme; these
+   * two literals deliberately restate the dark abyss/chalk pair. Terminal
+   * theme import (Warp/Ghostty, docs/reverse/orca-ui-inventory.md 4절) will
+   * replace this block wholesale. */
+  --term-screen-bg: #282c34;
+  --term-screen-fg: #ffffff;
+  --term-cursor: #ffffff;
+  --term-cursor-accent: #282c34;
+  --term-selection-bg: #5a7898;
+  --term-selection-fg: #ffffff;
+
+  /* 에뮬레이터 베젤 밖 하드웨어 버튼(전원·볼륨)의 플라스틱 — 기기의
+   * 물성이라 앱 테마와 무관하게 검다(Orca 실측 bg-black/80). */
+  --device-key: color-mix(in srgb, #000 80%, transparent);
+
+  /* 기기의 나머지 물성. 하드웨어 버튼과 같은 이유로 앱 테마를 따르지 않는다:
+   * 화면 안의 iOS가 제 밝기를 정하고, 그 둘레는 그 기기의 플라스틱이다.
+   *
+   * 이 자리는 값이 없어 무너져 있었다 — 베젤과 판이 `--term-bg-solid`를
+   * 불렀는데 그 토큰은 `.term {}` 안에서만 정의되고(ui/shell.css) 에뮬레이터
+   * 판은 터미널의 자손이 아니다. 미정의 var()는 배경을 투명으로 만들고,
+   * 그래서 껍데기가 보이지 않았다.
+   *
+   * 원본은 껍데기를 `bg-black shadow-lg ring-1 ring-black/25` 한 겹으로 둔다
+   * (emulator-device-frame.tsx:375). 어두운 테마에서 그 검정은 판과 붙어
+   * 기기의 윤곽을 잃으므로, 위쪽 모서리의 빛 한 줄로 두께를 남긴다. */
+  --device-shell: #0b0b0c;
+  --device-shell-sheen: color-mix(in srgb, #ffffff 9%, transparent);
+  /* 빛이 닿는 깊이. 껍데기 높이의 비율이 아니라 고정 길이인 이유는 이것이
+   * 광원까지의 거리이기 때문이다 — 큰 기기라고 빛이 더 깊이 들어오지 않는다. */
+  --device-shell-sheen-depth: 96px;
+  --device-shell-edge: color-mix(in srgb, #000000 55%, transparent);
+  --device-shell-shadow: 0 18px 44px -14px color-mix(in srgb, #000000 62%, transparent);
+  /* 기기가 판 가장자리에 닿지 않도록 두는 여유(원본 `px-3 py-6`,
+   * EmulatorPane.tsx:67). 판이 이 값을 padding으로 입고, 레이아웃은 그
+   * padding을 빼고 남은 자리를 잰다 — 값이 사는 곳은 여기 하나다. */
+  --device-stage-inset-x: 12px;
+  --device-stage-inset-y: 24px;
+  /* 껍데기와 화면의 둥글기. 원본이 스트림 크기를 모를 때 세우는 폴백 실측값
+   * (`rounded-[54px]` 껍데기 / `rounded-[44px]` 화면,
+   * emulator-device-frame.tsx:372-383)이고, 태블릿은 같은 자리의 유한 모서리다.
+   * 레이아웃이 픽셀을 잰 뒤에는 인라인이 이 값을 대신한다 — 여기 있는 것은
+   * 아직 재지 못한 한 박자와, 판이 재기에 너무 작을 때의 답이다. */
+  --device-radius-shell: 54px;
+  --device-radius-shell-tablet: 24px;
+  --device-radius-screen: 44px;
+  --device-radius-screen-tablet: var(--radius-md);
+  --device-bezel-pad: 10px;
+  --device-bezel-pad-tablet: 14px;
+  /* 옆 버튼: 눌리면 들어가고, 손이 얹히면 밝아진다. 밝기 필터가 아니라 색인
+   * 이유는 필터가 그림자까지 함께 밝혀 버튼이 떠 보이기 때문이다. */
+  --device-key-lit: color-mix(in srgb, #3d3d3d 80%, transparent);
+  --device-key-pressed: color-mix(in srgb, #000000 92%, transparent);
+  --device-key-gap: 2px;
+  /* 기기 고르는 상자의 너비 — 원본 실측 `w-[180px]`. */
+  --device-pick-width: 180px;
+  /* 도구모음 안에 앉는 작은 컨트롤의 높이. 원본의 `h-7`이고, 이 창의
+   * `.skills-pick`이 이미 같은 28px로 서 있다 — 그 두 곳이 같은 수를 따로
+   * 적고 있던 것을 여기 한 번 적는다. */
+  --control-height-sm: 28px;
+  /* 눌림은 150ms로는 늦다. 손가락이 떼어지기 전에 끝나야 눌린 것이지,
+   * 눌리고 나서 따라오면 응답이 아니라 애니메이션으로 읽힌다. */
+  --motion-press: 80ms;
+  /* 화면 표면. 그림이 오기 전에도, 그림이 레터박스로 남긴 자리에도 이 검정이
+   * 선다 — 원본의 `bg-black ring-1 ring-white/10`(emulator-screen-surface.tsx:63)
+   * 과 같은 자리이며, 그것이 없으면 판 배경이 화면 자리로 비친다. */
+  --device-screen: #000000;
+  --device-screen-edge: color-mix(in srgb, #ffffff 10%, transparent);
+
+  /* The terminal cell, as ONE measure.
+   *
+   * The glyph size and the row box have to agree or the grid drifts: the
+   * window measures a cell out of the DOM and hands those numbers to the pty,
+   * so a row box sized from a different step means the columns the child
+   * paints for are not the columns on screen. They were 12px text in a 13px
+   * box until this was named — two rules deciding one thing, which is the
+   * arrangement a token exists to end.
+   *
+   * 14px is Orca's terminal, from the option it actually hands xterm —
+   * `terminalFontSize: 14` (store-BgJxB0hr.js:3586). An earlier reading put
+   * 12px here off a UI class; the store default is the one that renders,
+   * and the correction is logged (docs/reverse/orca-ui-inventory.md 1-an).
+   * Deliberately NOT a UI-scale step: the terminal is content, and the one
+   * surface someone stares at all day does not shrink because a sidebar
+   * wanted denser rows. The leading is the terminal's own, not the UI's: a
+   * screen of cells wants tighter than prose and looser than a list row.
+   *
+   * 1.15 IS ORCA'S `terminalLineHeight: 1`, in the unit CSS actually uses.
+   *
+   * This read as the biggest visual gap in the terminal — Orca ships 1 and we
+   * shipped 1.4, ~15% more row per line — and the obvious fix, copying the 1
+   * across, is wrong, because the two numbers do not multiply the same thing.
+   * xterm never sets `line-height` at all: it measures a character's rendered
+   * box (`CharSizeService`, which reads `line-height: normal`) and multiplies
+   * THAT by the option. For this stack at 14px the normal box measures 16px,
+   * so Orca's row is 16px. CSS multiplies the FONT SIZE, so `1` here would be
+   * a 14px row — two pixels tighter than the thing being copied. 16/14 =
+   * 1.143, and 1.15 puts our row at 16.1px: a tenth of a pixel off Orca's.
+   *
+   * The floor agrees from the other side. Measured ink at 14px in this stack:
+   * Latin descenders (g j q y p) run 10.64 over the baseline and 3.01 under;
+   * Hangul runs 11.26 over and 1.02 under; the font box is 13+3. Solving for
+   * the row that contains its own glyphs, the binding constraint is the LATIN
+   * descender, not Hangul — at 1.0 it hangs 1.01px out of its row box, at 1.1
+   * 0.31px, and at 1.15 everything fits with 0.04px to spare. So Hangul was
+   * never what 1.4 was protecting (it clears 1.0 on its own), and 1.15 is
+   * both the smallest leading that clips nothing and Orca's own row height.
+   * Measured, not reasoned: `the_row_box_contains_its_own_glyphs`. */
+  --term-font-size: 14px;
+  --term-leading: 1.15;
+  /* Body weight, as a variable rather than a rule, because it is one of the
+   * terminal settings a person can change (1-en) and the settings screen
+   * writes them onto the root. The defaults are Orca's
+   * `terminalFontWeight: 500` and its derived bold floor of 700. */
+  --term-weight: 500;
+  --term-bold-weight: 700;
+
+  /* The board card's own screen — the tail of what an agent is printing.
+   *
+   * Its own size rather than the terminal's: a card is a summary standing
+   * beside seven others, and 14px would make the screen the largest thing on
+   * it. The row count that fills this box is the backend's `TERM_PREVIEW_ROWS`
+   * and the two are read together — a box shorter than the rows it is sent
+   * simply crops, which is why this is a max and not a height. */
+  --card-screen-font-size: 10px;
+  --card-screen-leading: 1.35;
+  --card-screen-max-rows: 6;
+
+  /* The terminal's own scrollbar. 7px is Orca's (`scrollbar: { width: 7 }`,
+   * terminal-shortcut-policy-BK9MulHK.js) and deliberately narrower than this
+   * window's 12px chrome bar: it floats OVER the screen rather than taking a
+   * column beside it, so it has to be slighter to stay out of the way of the
+   * text it overlaps. Its colours are the window's own. */
+  --term-scrollbar-size: 7px;
+
+  /* Terminal ANSI palette — content colour, not chrome. A program's output
+   * owns these; the UI never borrows them. Tuned to sit on the dark terminal
+   * screen instead of shipping xterm's neon defaults, with the reds anchored
+   * to --signal-halt and 4–6 anchored to the lane ramp so the window stays
+   * one family of colour. Like the screen pair, they do not flip with the
+   * app theme. */
+  --term-0: #1d1f21;
+  --term-1: #cc6666;
+  --term-2: #b5bd68;
+  --term-3: #f0c674;
+  --term-4: #81a2be;
+  --term-5: #b294bb;
+  --term-6: #8abeb7;
+  --term-7: #c5c8c6;
+  --term-8: #666666;
+  --term-9: #d54e53;
+  --term-10: #b9ca4a;
+  --term-11: #e7c547;
+  --term-12: #7aa6da;
+  --term-13: #c397d8;
+  --term-14: #70c0b1;
+  --term-15: #eaeaea;
+  /* xterm's indexed cube and grey ramp are engine input, not application
+   * roles. Declaring them once lets terminal runs select a parsed colour by
+   * class instead of manufacturing an inline rgb() value on every frame. */
+  --term-16: rgb(0 0 0);
+  --term-17: rgb(0 0 95);
+  --term-18: rgb(0 0 135);
+  --term-19: rgb(0 0 175);
+  --term-20: rgb(0 0 215);
+  --term-21: rgb(0 0 255);
+  --term-22: rgb(0 95 0);
+  --term-23: rgb(0 95 95);
+  --term-24: rgb(0 95 135);
+  --term-25: rgb(0 95 175);
+  --term-26: rgb(0 95 215);
+  --term-27: rgb(0 95 255);
+  --term-28: rgb(0 135 0);
+  --term-29: rgb(0 135 95);
+  --term-30: rgb(0 135 135);
+  --term-31: rgb(0 135 175);
+  --term-32: rgb(0 135 215);
+  --term-33: rgb(0 135 255);
+  --term-34: rgb(0 175 0);
+  --term-35: rgb(0 175 95);
+  --term-36: rgb(0 175 135);
+  --term-37: rgb(0 175 175);
+  --term-38: rgb(0 175 215);
+  --term-39: rgb(0 175 255);
+  --term-40: rgb(0 215 0);
+  --term-41: rgb(0 215 95);
+  --term-42: rgb(0 215 135);
+  --term-43: rgb(0 215 175);
+  --term-44: rgb(0 215 215);
+  --term-45: rgb(0 215 255);
+  --term-46: rgb(0 255 0);
+  --term-47: rgb(0 255 95);
+  --term-48: rgb(0 255 135);
+  --term-49: rgb(0 255 175);
+  --term-50: rgb(0 255 215);
+  --term-51: rgb(0 255 255);
+  --term-52: rgb(95 0 0);
+  --term-53: rgb(95 0 95);
+  --term-54: rgb(95 0 135);
+  --term-55: rgb(95 0 175);
+  --term-56: rgb(95 0 215);
+  --term-57: rgb(95 0 255);
+  --term-58: rgb(95 95 0);
+  --term-59: rgb(95 95 95);
+  --term-60: rgb(95 95 135);
+  --term-61: rgb(95 95 175);
+  --term-62: rgb(95 95 215);
+  --term-63: rgb(95 95 255);
+  --term-64: rgb(95 135 0);
+  --term-65: rgb(95 135 95);
+  --term-66: rgb(95 135 135);
+  --term-67: rgb(95 135 175);
+  --term-68: rgb(95 135 215);
+  --term-69: rgb(95 135 255);
+  --term-70: rgb(95 175 0);
+  --term-71: rgb(95 175 95);
+  --term-72: rgb(95 175 135);
+  --term-73: rgb(95 175 175);
+  --term-74: rgb(95 175 215);
+  --term-75: rgb(95 175 255);
+  --term-76: rgb(95 215 0);
+  --term-77: rgb(95 215 95);
+  --term-78: rgb(95 215 135);
+  --term-79: rgb(95 215 175);
+  --term-80: rgb(95 215 215);
+  --term-81: rgb(95 215 255);
+  --term-82: rgb(95 255 0);
+  --term-83: rgb(95 255 95);
+  --term-84: rgb(95 255 135);
+  --term-85: rgb(95 255 175);
+  --term-86: rgb(95 255 215);
+  --term-87: rgb(95 255 255);
+  --term-88: rgb(135 0 0);
+  --term-89: rgb(135 0 95);
+  --term-90: rgb(135 0 135);
+  --term-91: rgb(135 0 175);
+  --term-92: rgb(135 0 215);
+  --term-93: rgb(135 0 255);
+  --term-94: rgb(135 95 0);
+  --term-95: rgb(135 95 95);
+  --term-96: rgb(135 95 135);
+  --term-97: rgb(135 95 175);
+  --term-98: rgb(135 95 215);
+  --term-99: rgb(135 95 255);
+  --term-100: rgb(135 135 0);
+  --term-101: rgb(135 135 95);
+  --term-102: rgb(135 135 135);
+  --term-103: rgb(135 135 175);
+  --term-104: rgb(135 135 215);
+  --term-105: rgb(135 135 255);
+  --term-106: rgb(135 175 0);
+  --term-107: rgb(135 175 95);
+  --term-108: rgb(135 175 135);
+  --term-109: rgb(135 175 175);
+  --term-110: rgb(135 175 215);
+  --term-111: rgb(135 175 255);
+  --term-112: rgb(135 215 0);
+  --term-113: rgb(135 215 95);
+  --term-114: rgb(135 215 135);
+  --term-115: rgb(135 215 175);
+  --term-116: rgb(135 215 215);
+  --term-117: rgb(135 215 255);
+  --term-118: rgb(135 255 0);
+  --term-119: rgb(135 255 95);
+  --term-120: rgb(135 255 135);
+  --term-121: rgb(135 255 175);
+  --term-122: rgb(135 255 215);
+  --term-123: rgb(135 255 255);
+  --term-124: rgb(175 0 0);
+  --term-125: rgb(175 0 95);
+  --term-126: rgb(175 0 135);
+  --term-127: rgb(175 0 175);
+  --term-128: rgb(175 0 215);
+  --term-129: rgb(175 0 255);
+  --term-130: rgb(175 95 0);
+  --term-131: rgb(175 95 95);
+  --term-132: rgb(175 95 135);
+  --term-133: rgb(175 95 175);
+  --term-134: rgb(175 95 215);
+  --term-135: rgb(175 95 255);
+  --term-136: rgb(175 135 0);
+  --term-137: rgb(175 135 95);
+  --term-138: rgb(175 135 135);
+  --term-139: rgb(175 135 175);
+  --term-140: rgb(175 135 215);
+  --term-141: rgb(175 135 255);
+  --term-142: rgb(175 175 0);
+  --term-143: rgb(175 175 95);
+  --term-144: rgb(175 175 135);
+  --term-145: rgb(175 175 175);
+  --term-146: rgb(175 175 215);
+  --term-147: rgb(175 175 255);
+  --term-148: rgb(175 215 0);
+  --term-149: rgb(175 215 95);
+  --term-150: rgb(175 215 135);
+  --term-151: rgb(175 215 175);
+  --term-152: rgb(175 215 215);
+  --term-153: rgb(175 215 255);
+  --term-154: rgb(175 255 0);
+  --term-155: rgb(175 255 95);
+  --term-156: rgb(175 255 135);
+  --term-157: rgb(175 255 175);
+  --term-158: rgb(175 255 215);
+  --term-159: rgb(175 255 255);
+  --term-160: rgb(215 0 0);
+  --term-161: rgb(215 0 95);
+  --term-162: rgb(215 0 135);
+  --term-163: rgb(215 0 175);
+  --term-164: rgb(215 0 215);
+  --term-165: rgb(215 0 255);
+  --term-166: rgb(215 95 0);
+  --term-167: rgb(215 95 95);
+  --term-168: rgb(215 95 135);
+  --term-169: rgb(215 95 175);
+  --term-170: rgb(215 95 215);
+  --term-171: rgb(215 95 255);
+  --term-172: rgb(215 135 0);
+  --term-173: rgb(215 135 95);
+  --term-174: rgb(215 135 135);
+  --term-175: rgb(215 135 175);
+  --term-176: rgb(215 135 215);
+  --term-177: rgb(215 135 255);
+  --term-178: rgb(215 175 0);
+  --term-179: rgb(215 175 95);
+  --term-180: rgb(215 175 135);
+  --term-181: rgb(215 175 175);
+  --term-182: rgb(215 175 215);
+  --term-183: rgb(215 175 255);
+  --term-184: rgb(215 215 0);
+  --term-185: rgb(215 215 95);
+  --term-186: rgb(215 215 135);
+  --term-187: rgb(215 215 175);
+  --term-188: rgb(215 215 215);
+  --term-189: rgb(215 215 255);
+  --term-190: rgb(215 255 0);
+  --term-191: rgb(215 255 95);
+  --term-192: rgb(215 255 135);
+  --term-193: rgb(215 255 175);
+  --term-194: rgb(215 255 215);
+  --term-195: rgb(215 255 255);
+  --term-196: rgb(255 0 0);
+  --term-197: rgb(255 0 95);
+  --term-198: rgb(255 0 135);
+  --term-199: rgb(255 0 175);
+  --term-200: rgb(255 0 215);
+  --term-201: rgb(255 0 255);
+  --term-202: rgb(255 95 0);
+  --term-203: rgb(255 95 95);
+  --term-204: rgb(255 95 135);
+  --term-205: rgb(255 95 175);
+  --term-206: rgb(255 95 215);
+  --term-207: rgb(255 95 255);
+  --term-208: rgb(255 135 0);
+  --term-209: rgb(255 135 95);
+  --term-210: rgb(255 135 135);
+  --term-211: rgb(255 135 175);
+  --term-212: rgb(255 135 215);
+  --term-213: rgb(255 135 255);
+  --term-214: rgb(255 175 0);
+  --term-215: rgb(255 175 95);
+  --term-216: rgb(255 175 135);
+  --term-217: rgb(255 175 175);
+  --term-218: rgb(255 175 215);
+  --term-219: rgb(255 175 255);
+  --term-220: rgb(255 215 0);
+  --term-221: rgb(255 215 95);
+  --term-222: rgb(255 215 135);
+  --term-223: rgb(255 215 175);
+  --term-224: rgb(255 215 215);
+  --term-225: rgb(255 215 255);
+  --term-226: rgb(255 255 0);
+  --term-227: rgb(255 255 95);
+  --term-228: rgb(255 255 135);
+  --term-229: rgb(255 255 175);
+  --term-230: rgb(255 255 215);
+  --term-231: rgb(255 255 255);
+  --term-232: rgb(8 8 8);
+  --term-233: rgb(18 18 18);
+  --term-234: rgb(28 28 28);
+  --term-235: rgb(38 38 38);
+  --term-236: rgb(48 48 48);
+  --term-237: rgb(58 58 58);
+  --term-238: rgb(68 68 68);
+  --term-239: rgb(78 78 78);
+  --term-240: rgb(88 88 88);
+  --term-241: rgb(98 98 98);
+  --term-242: rgb(108 108 108);
+  --term-243: rgb(118 118 118);
+  --term-244: rgb(128 128 128);
+  --term-245: rgb(138 138 138);
+  --term-246: rgb(148 148 148);
+  --term-247: rgb(158 158 158);
+  --term-248: rgb(168 168 168);
+  --term-249: rgb(178 178 178);
+  --term-250: rgb(188 188 188);
+  --term-251: rgb(198 198 198);
+  --term-252: rgb(208 208 208);
+  --term-253: rgb(218 218 218);
+  --term-254: rgb(228 228 228);
+  --term-255: rgb(238 238 238);
+
+  /* ---- the commit graph's ink ----
+   *
+   * Orca's eight `--git-graph-*` tokens (I18nProvider-DPbv01TU.css), value
+   * for value: three pinned refs — the checked-out branch, its upstream,
+   * and the base — then five lane colours the layout rotates through for
+   * every branch the log opens. A colour-blind-safe set, which is why lane
+   * 5 repeats the remote's purple rather than inventing a sixth hue. */
+  --git-graph-ref: #3794ff;
+  --git-graph-remote-ref: #b66dff;
+  --git-graph-base-ref: #ea5c00;
+  --git-graph-lane-1: #ffb000;
+  --git-graph-lane-2: #dc267f;
+  --git-graph-lane-3: #ce9178;
+  --git-graph-lane-4: #40b0a6;
+  --git-graph-lane-5: #b66dff;
+
+  /* ---- 지식 그래프 비주얼 토큰 (Knowledge Graph Visual Tokens) ----
+   * 색상은 임의의 하드코딩이 아닌 의미론적 레인 램프와 표면 토큰에서 파생된다. */
+  --knowledge-ground: var(--surface-deck);
+  --knowledge-node-muted-weight: 72%;
+  --knowledge-edge-muted-weight: 82%;
+  --knowledge-node-stroke: 1;
+  --knowledge-node-selected-stroke: 2;
+  --knowledge-edge-lit-width: 1.5;
+  /* The hub halo is a soft disc, not a ring: a radial gradient from this
+   * opacity at the centre to nothing at the rim — Obsidian's dark glow without
+   * an SVG filter. `lift` is how much it grows under the pointer. */
+  --knowledge-halo-core: 0.85;
+  --knowledge-halo-lift: 1.12;
+  /* One nebula per cluster (3차): a gradient disc behind the members, sized
+   * from their spread. Core opacity in graph paint, scale and pad in graph
+   * units — the nebula belongs to the picture, so it zooms with it. */
+  --knowledge-nebula-core: 0.14;
+  --knowledge-nebula-scale: 1;
+  --knowledge-nebula-pad: 18;
+  /* 원반의 테두리 한 올. 빛 번짐 대신 선 하나로 경계를 말한다 — 흐릿한
+     그라데이션만으로는 「여기까지가 이 주제」가 읽히지 않았다. */
+  --knowledge-nebula-edge-weight: 30%;
+  --knowledge-nebula-edge-width: 1;
+  /* The cluster's name over its nebula: screen pixels, like every label. It
+   * steps back once the person has zoomed this far past the fit — by then the
+   * page names are what is being read. A zoom factor, not an absolute scale:
+   * a 35-page vault already fits above the label LOD's absolute thresholds. */
+  --knowledge-cluster-label-px: 15;
+  --knowledge-cluster-label-opacity: 0.96;
+  --knowledge-cluster-label-tracking: 0.04em;
+  --knowledge-cluster-label-until: 4;
+  /* 군집 이름은 원반의 **위**에 선다 — 가운데에 세우면 대표 페이지의 점과 그
+     이름표를 덮는다. 원반 반지름에 이만큼(그림 단위) 더 올린 자리. 그 아래의
+     작은 줄이 「쪽 n · 이름 접힘 +m」이다. */
+  --knowledge-cluster-label-lift: 22;
+  --knowledge-cluster-count-px: 11;
+  /* 이름판 안의 대표 지식은 점 곁의 이름표보다 짧게 끊는다 — 이름판의 폭은 이
+     한 줄이 정하고, 그 폭이 넓을수록 자리를 못 찾는 주제가 는다. */
+  --knowledge-cluster-lead-max: 13;
+  --knowledge-cluster-lead-gap: 19;
+  --knowledge-cluster-count-gap: 34;
+  /* A page's name under its point is cut here (with an ellipsis); the whole
+   * title lives in the card. Real titles are sentences — 35 of them at once
+   * were a fog over the picture. */
+  --knowledge-label-max: 17;
+  /* `related` is the weakest typed relation — undirected, and the most common
+   * (57 of 173 links in the real vault): at full ink it was the picture. */
+  --knowledge-edge-related-opacity: 0.6;
+  /* 지식 그래프의 흐림·유령·유리·치수 — 2026-09-06 shell.css의 리터럴을 여기로.
+   * 한 뜻은 한 토큰: 짚는 중 물러선 점·선(far), 검색·스포트라이트에서 물러선
+   * 것(dim), 유령·출처의 잉크 무게(muted), 범례·인스펙터의 유리와 치수. */
+  --knowledge-far-node-opacity: 0.4;
+  --knowledge-far-edge-opacity: 0.25;
+  --knowledge-far-edge-ink-weight: 10%;
+  --knowledge-dim-opacity: 0.22;
+  --knowledge-dim-edge-opacity: 0.15;
+  --knowledge-muted-ink-weight: 34%;
+  --knowledge-source-stroke-weight: 45%;
+  --knowledge-node-ghost-dash: 2.5 2.5;
+  --knowledge-node-ghost-stroke: 1.5;
+  --knowledge-edge-ghost-dash: 3 3;
+  --knowledge-edge-label-halo: 3;
+  --knowledge-node-match-stroke: 2;
+  /* ---- GL 페인터의 둘 (6차 P2) ----
+   * 그림의 수는 위의 토큰들이 이미 말한다. GL이 더 드는 것은 「그리는 손」의 수
+   * 둘뿐이다: SDF 가장자리가 부드러워지는 폭과, 활동 고리가 점의 몸에서 떨어지는
+   * 거리. SVG에서는 그 둘을 안티에일리어싱과 `--knowledge-halo-scale`(배수)이
+   * 말했고, 셰이더는 픽셀로 말한다. */
+  --knowledge-3d-feather: 1;
+  --knowledge-3d-ring-gap: 3;
+  /* 기기 픽셀의 상한. 레티나에서 2배까지만 그린다 — 3배 판에서 만 쪽의 채우는
+     픽셀은 두 배 반이 되고 눈이 얻는 것은 없다. */
+  --knowledge-3d-pixel-cap: 2;
+  --knowledge-glass-blur: blur(16px);
+  --knowledge-inspector-blur: blur(12px);
+  --knowledge-inspector-veil-weight: 94%;
+  --knowledge-inspector-max-height: 38%;
+  --knowledge-focus-offset: -2px;
+  --knowledge-zoom-label-min-width: 40px;
+  --knowledge-legend-node-px: 12px;
+  --knowledge-legend-edge-px: 22px;
+  --knowledge-legend-edge-height: 2px;
+  --knowledge-legend-edge-weight: 26%;
+  --knowledge-prose-line-height: 1.6;
+  --knowledge-empty-measure: 44ch;
+  --knowledge-error-measure: 60ch;
+  --knowledge-error-edge-weight: 40%;
+  /* Motion (3차). The settle is spread over this many frames so a person sees
+   * the picture find its shape; `fly` is the camera tween; `drag-budget` is
+   * how many force ticks a pointer move re-arms so neighbours follow a held
+   * point. `arrive` fades a freshly built topology in — one animation on a
+   * layer, never one per point. */
+  --knowledge-settle-frames: 48;
+  --knowledge-fly-ms: 420;
+  --knowledge-drag-budget: 40;
+  --knowledge-arrive: 480ms;
+  /* The live layer (t-2931). A page recalled within the backend's window
+   * wears a ring on its halo; a point or line the last answer brought pulses
+   * once (a blink, `dip` deep, `pulse-ms` long); a merge candidate is a dashed
+   * question in the wait signal's ink; the bus log's five kinds each own one
+   * dot ink. No new literal: every colour is a role the window already keeps
+   * in both themes. */
+  --knowledge-activity-ring: var(--signal-ready);
+  --knowledge-activity-ring-width: 1.5;
+  --knowledge-activity-ring-dash: 3 2;
+  --knowledge-pulse-ms: 1200;
+  --knowledge-pulse-dip: 0.2;
+  /* More fresh elements than this is not a change but a new picture — it
+   * arrives as one layer fade (`--knowledge-arrive`) instead of a thousand
+   * animations in one frame (measured: 1,020 pages + 1,734 edges pulsing
+   * together cost a 540 ms frame). */
+  --knowledge-pulse-max: 64;
+  --knowledge-merge-ink: color-mix(in srgb, var(--signal-wait) 70%, var(--ink-mist));
+  --knowledge-edge-merge-width: 1.5;
+  --knowledge-edge-merge-dash: 5 4;
+  --knowledge-bus-created: var(--signal-ready);
+  --knowledge-bus-updated: var(--ink-mist);
+  --knowledge-bus-linked: var(--knowledge-typed-related);
+  --knowledge-bus-recalled: var(--knowledge-activity-ring);
+  --knowledge-bus-ingested: var(--knowledge-hue-0);
+  /* The light a lit or hub point is mixed toward. A role, not a literal: on
+   * the light stage that light is the figure ink, or a white glow would
+   * vanish into the white ground. */
+  --knowledge-highlight: var(--ink-chalk);
+  --knowledge-hue-0: var(--git-graph-lane-1);
+  --knowledge-hue-1: var(--git-graph-lane-2);
+  --knowledge-hue-2: var(--git-graph-lane-3);
+  --knowledge-hue-3: var(--git-graph-lane-4);
+  --knowledge-hue-4: var(--git-graph-lane-5);
+  /* Three more cells for the cluster palette (3차: colour is the community,
+   * and a vault has more than five). Still no new literal: the signals are
+   * roles the window already keeps in both themes, and the eighth is the
+   * teal and the violet met halfway — distinct from both on either ground. */
+  --knowledge-hue-5: var(--signal-ready);
+  --knowledge-hue-6: var(--signal-halt);
+  --knowledge-hue-7: color-mix(in srgb, var(--knowledge-hue-3) 50%, var(--knowledge-hue-4));
+  --knowledge-hue-0-center: color-mix(in srgb, var(--knowledge-hue-0) 62%, var(--knowledge-highlight));
+  --knowledge-hue-1-center: color-mix(in srgb, var(--knowledge-hue-1) 62%, var(--knowledge-highlight));
+  --knowledge-hue-2-center: color-mix(in srgb, var(--knowledge-hue-2) 62%, var(--knowledge-highlight));
+  --knowledge-hue-3-center: color-mix(in srgb, var(--knowledge-hue-3) 62%, var(--knowledge-highlight));
+  --knowledge-hue-4-center: color-mix(in srgb, var(--knowledge-hue-4) 62%, var(--knowledge-highlight));
+  --knowledge-hue-5-center: color-mix(in srgb, var(--knowledge-hue-5) 62%, var(--knowledge-highlight));
+  --knowledge-hue-6-center: color-mix(in srgb, var(--knowledge-hue-6) 62%, var(--knowledge-highlight));
+  --knowledge-hue-7-center: color-mix(in srgb, var(--knowledge-hue-7) 62%, var(--knowledge-highlight));
+  --knowledge-typed-related: color-mix(in srgb, var(--edge-mark) var(--knowledge-edge-muted-weight), var(--knowledge-hue-3));
+  --knowledge-typed-implements: color-mix(in srgb, var(--edge-mark) var(--knowledge-edge-muted-weight), var(--knowledge-hue-0));
+  --knowledge-typed-depends-on: color-mix(in srgb, var(--edge-mark) var(--knowledge-edge-muted-weight), var(--knowledge-hue-4));
+  --knowledge-typed-supersedes: color-mix(in srgb, var(--edge-mark) var(--knowledge-edge-muted-weight), var(--knowledge-hue-2));
+  --knowledge-typed-contradicts: color-mix(in srgb, var(--edge-mark) var(--knowledge-edge-muted-weight), var(--knowledge-hue-1));
+  /* 공급망 층(P4, docs/design/knowledge-supply-chain-20260917.md §4). 선 `affects`는 볼트의 타입
+   * 관계와 같은 옅은 잉크에 정지 신호를 섞는다 — 관계가 아니라 경보라는 것이 색에 남는다
+   * (다크 3.8:1 · 라이트 5.3:1). */
+  --knowledge-typed-affects: color-mix(in srgb, var(--edge-mark) var(--knowledge-edge-muted-weight), var(--signal-halt));
+  /* 구성요소(■)의 잉크는 생태계다 — 볼트의 군집 색(원)과 같은 뜻을 지지 않도록 램프 밖의 둘을
+   * 빌린다: Cargo는 ref의 파랑(6.0:1), npm은 보드의 보라(4.4:1). 멤버는 두꺼운 테두리와 속이
+   * 옅은 몸이다 — 색이 아니라 모양의 차이라 색을 못 보는 눈에도 남는다. */
+  --knowledge-ecosystem-cargo: var(--git-graph-ref);
+  --knowledge-ecosystem-npm: var(--workspace-board-violet);
+  --knowledge-member-stroke: 2.5;
+  --knowledge-member-fill-weight: 38%;
+  /* 취약점(▲)의 잉크는 심각도의 램프(`--severity-*`, 값과 잰 수는 그 자리)다. 등급 없음은 안개
+   * 회색(7.1:1). `none`(CVSS 0.0)은 `unknown`과 한 칸이다: 둘 다 「매긴 위협이 없다」이고, 둘의
+   * 차이는 카드의 낱말(점수 0 / 점수 없음)이 말한다. 정보성 권고(유지 중단·불건전·공지)는 속이 옅고
+   * 테두리가 그 잉크다. */
+  --knowledge-severity-critical: var(--severity-critical);
+  --knowledge-severity-high: var(--severity-high);
+  --knowledge-severity-medium: var(--severity-medium);
+  --knowledge-severity-low: var(--severity-low);
+  --knowledge-severity-unknown: var(--ink-mist);
+  --knowledge-severity-none: var(--knowledge-severity-unknown);
+  --knowledge-informational-fill-weight: 30%;
+  --knowledge-informational-stroke: 1.5;
+  --knowledge-edge-mentions-ink: color-mix(in srgb, var(--ink-mist) 28%, transparent);
+  --knowledge-edge-mentions-width: 1;
+  /* 군집 안의 본문 링크와 군집 사이의 본문 링크(09-16). 안쪽은 군집의 모양을
+     그리는 실이라 옅어도 되고, 바깥쪽은 더 옅다 — 주제 사이를 건너는 선 중
+     읽혀야 하는 것은 프론트매터가 이름을 준 관계이지 스쳐 지나간 대괄호가
+     아니다. 이름 있는 관계는 이 규칙 밖에서 제 색과 화살표를 그대로 지킨다. */
+  --knowledge-edge-intra-weight: 34%;
+  --knowledge-edge-inter-weight: 15%;
+  --knowledge-edge-typed-width: 1;
+  --knowledge-edge-depends-dash: 6 3;
+  --knowledge-edge-supersedes-dash: 7 2 1 2;
+  --knowledge-edge-contradicts-dash: 2 2;
+  --knowledge-node-radius-min: 3;
+  --knowledge-node-radius-max: 6;
+  --knowledge-node-radius-degree: 0.55;
+  /* 위계의 세 크기(성좌 배치, 09-16). PNP 15쪽의 큰 중심 · 중간 점 · 작은 잎을
+     우리 데이터로 옮긴 것이다: 군집의 대표 페이지(core)가 가장 크고, 그 다음이
+     군집 안에서 연결이 많은 대표 지식(major)이며, 나머지 잎은 위의 √차수 램프를
+     따른다. 세 값의 비(5 : 2.7 : 1)가 「무엇이 주제의 중심인가」를 배율을 읽지
+     않고도 말한다. */
+  --knowledge-core-radius: 15;
+  --knowledge-major-radius: 8;
+  /* 군집마다 몇 쪽이 대표 지식으로 설 수 있는가 — 멤버의 몫과 절대 상한 중 작은
+     쪽. 열네 군집의 볼트에서 상한 넷은 「대표 지식 ≤ 56」이고, 그만큼은 기본
+     배율에서 이름이 선다. */
+  --knowledge-major-share: 0.2;
+  --knowledge-major-max: 4;
+  --knowledge-halo-scale: 1.8;
+  --knowledge-label-px: 11;
+  --knowledge-label-gap: 4;
+  --knowledge-label-outline-px: 2;
+  --knowledge-label-edge-px: 10;
+  --knowledge-marker-px: 7;
+  --knowledge-fit-ratio: 0.72;
+  --knowledge-margin: 36;
+  /* 주변 탐색의 고리(시안 이식, 09-14). 이웃 사이 호의 길이(그림 단위) — 고리의
+     반지름은 점의 수 × 이것 ÷ 2π 아래로 내려가지 않는다; 첫 고리의 최소 반지름;
+     고리 사이 간격; 세로 눌림(시안의 285:225). */
+  --knowledge-ring-pitch: 64;
+  --knowledge-ring-min: 180;
+  --knowledge-ring-gap: 150;
+  --knowledge-ring-squash: 0.8;
+  --knowledge-ring-label-room: 176;
+  /* ---- 성좌 배치 (09-16) ----
+     전체 지도는 하나의 털뭉치가 아니라 「군집 원반 여럿 + 그 사이의 여백」이다.
+     원반의 반지름은 멤버 수의 제곱근 × pitch이고(넓이가 멤버 수에 비례한다),
+     원반끼리는 gap만큼 떨어질 때까지 서로를 민다 — 여백은 장식이 아니라 「어느
+     점이 어느 주제인가」를 색 없이도 가르는 두 번째 단서다.
+     link·sweeps는 원반 배치의 이완: 군집 사이 링크가 많을수록 가깝게 끌고,
+     sweeps 번 훑고 멈춘다(열네 개짜리 그래프라 µs). pull은 점이 제 원반의 홈으로
+     끌리는 힘, hold는 원반 밖으로 나간 점을 테두리로 되당기는 힘이다. */
+  --knowledge-cluster-pitch: 17;
+  --knowledge-cluster-min-radius: 58;
+  --knowledge-cluster-gap: 150;
+  --knowledge-cluster-sweeps: 320;
+  --knowledge-cluster-link: 0.02;
+  --knowledge-cluster-pull: 0.05;
+  --knowledge-cluster-hold: 0.16;
+  /* 군집 안의 씨앗: 중심에서 k단 떨어진 점이 k번째 고리에 앉는다. 첫 고리의
+     반지름과 고리 사이 간격(그림 단위) — 뉴런의 가지가 여기서 나온다. */
+  --knowledge-core-ring: 52;
+  --knowledge-core-ring-gap: 42;
+  /* ---- 이름표 격자 (09-16) ----
+     이름표는 화면 좌표의 격자에 자리를 예약하고, 자리를 못 얻은 이름은 서지
+     않는다(글자를 줄이지 않는다 — 접는다). cell은 격자 한 칸의 픽셀, pad는
+     이름표 상자에 더하는 여백, budget은 한 판에 설 수 있는 이름표의 수다.
+     좁은 판일수록 budget이 작다: 작은 화면은 「같은 것을 작게」가 아니라
+     「더 적게」 본다. */
+  /* 세 줄짜리 주제 이름판(이름 · 대표 지식 · 쪽 수)을 감당하는 캔버스의 폭.
+     그 아래에서는 이름 한 줄만 서고 나머지 둘은 인스펙터와 군집 범례가 말한다. */
+  --knowledge-plate-wide: 520;
+  --knowledge-label-cell: 14;
+  --knowledge-label-pad-x: 6;
+  --knowledge-label-pad-y: 4;
+  --knowledge-label-budget: 46;
+  --knowledge-label-budget-middle: 34;
+  --knowledge-label-budget-compact: 22;
+  --knowledge-label-budget-tiny: 12;
+  /* 한글은 한 글자가 한 몸, 로마자는 그 절반 남짓 — 이름표의 폭을 DOM에 묻지
+     않고 글자에서 어림하는 계수(em). 재기 위해 레이아웃을 강제하면 한 프레임에
+     사백 번의 동기 리플로가 된다. */
+  --knowledge-label-em-wide: 1;
+  --knowledge-label-em-narrow: 0.56;
+  /* 주변 탐색의 옷(시안 이식, 09-14): 선의 잉크·굵기, 중심의 바퀴살 잉크, 중심 점의
+     배율·채움·후광, 중심 이름표의 배율·내림, 둘째 고리의 물러섬. 머리·범례의 폭도 여기. */
+  --knowledge-edge-local-ink: color-mix(in srgb, var(--ink-mist) 30%, transparent);
+  --knowledge-edge-local-width: 1;
+  --knowledge-edge-context-opacity: 0.16;
+  --knowledge-edge-spoke-opacity: 0.65;
+  --knowledge-edge-spoke-ink: color-mix(in srgb, var(--nav-plane-ring) 65%, transparent);
+  --knowledge-centre-scale: 2.2;
+  --knowledge-centre-fill-weight: 35%;
+  --knowledge-centre-halo-opacity: 0.35;
+  --knowledge-centre-label-scale: 1.25;
+  --knowledge-centre-label-shift: 12px;
+  --knowledge-local-far-opacity: 0.55;
+  --knowledge-segment-pad: 2px;
+  --knowledge-search-max-width: 390px;
+  --knowledge-legend-max-width: 360px;
+  --knowledge-cluster-legend-max: 60%;
+  --knowledge-zoom-min: 0.35;
+  --knowledge-zoom-max: 6;
+  --knowledge-zoom-step: 0.25;
+  --knowledge-hub-degree: 4;
+  --knowledge-chip-dot: 7px;
+  --knowledge-search-width: 200px;
+  /* 검색 후보 목록이 커질 수 있는 높이(t-4140 S3) — 그 뒤는 스크롤. */
+  --knowledge-candidates-max-height: 300px;
+  --knowledge-tag-chip-max-width: 92px;
+  /* 아티팩트 뷰 (t-2720). 숫자는 전부 여기 — 창은 판을 지을 때 읽는다. 색은
+     기존 잉크·면 토큰을 빌리므로 두 테마 모두에 값이 있고 hex는 없다. */
+  --artifact-card-min: 224;
+  --artifact-card-height: 234;
+  --artifact-card-gap: 12;
+  --artifact-overscan: 1;
+  --artifact-drawer-min: 320;
+  --artifact-tier-wide: 880;
+  --artifact-tier-compact: 560;
+  --artifact-thumb-cache: 120;
+  --artifact-search-debounce: 120;
+  --artifact-search-width: 220px;
+  /* 카드 폭이 변해도 얼굴은 4:3, 가상화 행 높이도 같은 비율로 변한다. */
+  --artifact-face-ratio: 0.75;
+  --artifact-doc-lines: 7;
+  --artifact-emoji-size: 32px;
+  --artifact-strip-bg: var(--surface-well);
+  --artifact-strip-ink: var(--ink-chalk);
+  --artifact-strip-ink-soft: var(--ink-mist);
+  --artifact-strip-version-inset: calc(var(--space-1) / 2);
+  --artifact-origin-scrim: color-mix(in srgb, var(--surface-abyss) 72%, transparent);
+  --artifact-card-bg: var(--surface-raised);
+  --artifact-card-edge: var(--edge-rule);
+  --artifact-card-ink: var(--ink-chalk);
+  --artifact-card-ink-soft: var(--ink-mist);
+  --artifact-face-bg: var(--surface-well);
+  --artifact-selected-edge: var(--knowledge-highlight);
+  --artifact-drawer-bg: var(--surface-deck);
+  --artifact-kind-report: var(--knowledge-hue-0);
+  --artifact-kind-screenshot: var(--knowledge-hue-1);
+  --artifact-kind-evidence: var(--knowledge-hue-2);
+  --artifact-kind-export: var(--knowledge-hue-3);
+  --artifact-kind-transcript: var(--knowledge-hue-4);
+  --artifact-kind-other: var(--ink-mist);
+  --artifact-kind-page: var(--knowledge-hue-3);
+  --artifact-kind-document: var(--knowledge-hue-2);
+  /* The artifact studio expresses the existing material palette. These
+   * bindings remain theme-aware and never redefine provider/lane identity. */
+  --artifact-studio-accent: var(--knowledge-hue-0);
+  --artifact-studio-max-share: 55%;
+  /* Both creation and catalog remain scrollable in short split leaves. */
+  --artifact-head-max-share: 35%;
+  --artifact-gallery-min-share: 20%;
+  --artifact-studio-radius: 12px;
+  --artifact-studio-focus-width: calc(var(--rule-width) * 2);
+  --artifact-studio-weight: 650;
+  /* A display title for the requested expressive creation surface. */
+  --artifact-studio-title-size: 28px;
+  --artifact-studio-title-leading: 1.2;
+  --artifact-studio-title-tracking: -0.035em;
+  --artifact-studio-tracking: 0.14em;
+  --artifact-studio-copy-leading: 1.55;
+  --artifact-studio-orbit-side: 42px;
+  --artifact-studio-orbit-glyph: 20px;
+  --artifact-studio-orbit-angle: -12deg;
+  --artifact-studio-glyph-side: 30px;
+  --artifact-studio-choice-min: 120px;
+  --artifact-studio-brief-min: 72px;
+  --artifact-studio-edge: color-mix(in srgb, var(--knowledge-hue-0) 24%, var(--edge-mark));
+  --artifact-studio-background: radial-gradient(ellipse at 100% 0%, color-mix(in srgb, var(--knowledge-hue-1) 18%, transparent), transparent 65%), radial-gradient(ellipse at 0% 100%, color-mix(in srgb, var(--knowledge-hue-3) 12%, transparent), transparent 60%), var(--surface-deck);
+  --artifact-studio-shadow: 0 8px 24px color-mix(in srgb, var(--surface-abyss) 24%, transparent);
+  --artifact-studio-choice-background: color-mix(in srgb, var(--surface-raised) 76%, transparent);
+  --artifact-studio-face-background: radial-gradient(ellipse at 100% 0%, color-mix(in srgb, var(--knowledge-hue-0) 13%, transparent), transparent 75%), var(--artifact-face-bg);
+  /* ---- the connected workbench (t-3818) ----
+   *
+   * Knowledge, tasks, workspaces and artifacts are four maps of one bench, and
+   * the September 12 brief extends the studio's expressive material to them.
+   * Each view keeps a PURPOSE HUE aliased from a ramp that already flips for
+   * paper, so no second palette exists: the hue names the view wherever that
+   * view is named — its masthead mark, its tab in the shared nav, a related
+   * action that leads there, and the one row that view has selected. State
+   * keeps its own signals and never wears a view hue.
+   *
+   * The mixes that consume `--workbench-accent` are resolved on the element
+   * that binds it (the tail of this file), for the studio tiles' reason. */
+  --workbench-accent: var(--ink-mist);
+  --workbench-hue-knowledge: var(--knowledge-hue-3);
+  --workbench-hue-tasks: var(--git-graph-ref);
+  --workbench-hue-workspaces: var(--knowledge-hue-2);
+  --workbench-hue-artifacts: var(--artifact-studio-accent);
+  --workbench-card-radius: var(--radius);
+  /* One masthead height for the three views: a 28px control row between two
+   * 12px gutters, written as that construction rather than as 52px. */
+  --workbench-head-min-height: calc(var(--control-height-sm) + var(--space-3) * 2);
+  /* The segment track's inner gap — the studio's `--agent-graph-gap-tight`
+   * measure, named for the controls that share it. */
+  --workbench-track-inset: 2px;
+  --workbench-mark-size: var(--space-2);
+  --workbench-title-size: var(--text-md);
+  --workbench-title-weight: 650;
+  --workbench-title-tracking: -0.015em;
+  --workbench-eyebrow-tracking: 0.12em;
+  --workbench-ambient-weight: 16%;
+  --workbench-tint-weight: 10%;
+  --workbench-tint-hover-weight: 18%;
+  --workbench-edge-weight: 34%;
+  /* How much of the hue survives when it is set as words: the rest is chalk,
+   * which lifts it on the dark deck (knowledge teal 7.1:1 → higher). */
+  --workbench-ink-weight: 72%;
+  --workbench-thumb: var(--surface-raised);
+  /* A lit top edge on a resting card, the titanium light source. */
+  --workbench-sheen: color-mix(in srgb, var(--ink-chalk) 4%, transparent);
+  --knowledge-tags-popover-width: 220px;
+  --knowledge-stat-tile-bg: color-mix(in srgb, var(--ink-mist) 5%, transparent);
+  --knowledge-meter-ink: var(--row-hover);
+  /* A cluster's row dyes its share bar with the cluster's own hue at this
+   * weight — enough to be the canvas's colour, quiet enough for chalk words
+   * to sit on it in both treatments (t-3818). */
+  --knowledge-meter-tint-weight: 22%;
+  --knowledge-meter-row-height: 22px;
+  --knowledge-inspector-width: 304px;
+  --knowledge-inspector-padding: var(--space-4);
+  --knowledge-inspector-stack-min-height: 180px;
+  /* Container-query grammar cannot consume var(). These three unitless values
+   * are also read once by knowledgeTuning; the matching query literals live
+   * together in the sole responsive block in shell.css. */
+  --knowledge-tier-wide: 900;
+  --knowledge-toolbar-wide: 1100;
+  --knowledge-tier-compact: 600;
+  --knowledge-tier-tiny: 300;
+  --knowledge-y-scale-middle: 0.72;
+  --knowledge-y-scale-compact: 0.5;
+
+  /* ---- the four shares of a usage bar ----
+   *
+   * Aliases, not new colour. The usage chart stacks four things a reader
+   * already has a colour for elsewhere in this window, and minting four more
+   * hues for one screen is how a palette stops meaning anything: 입력 borrows
+   * the ref blue (what is pointed AT), 출력 the done green (what came back),
+   * 캐시 읽기 the wait amber (something held and re-read), 캐시 쓰기 the lane
+   * violet (something laid down). Each one flips per treatment through the
+   * token it borrows, so the light block below needs no second copy.
+   *
+   * Orca picks sky/emerald/amber/fuchsia for the same four
+   * (ClaudeUsageDailyChart.tsx:60-81); these are the nearest roles this
+   * palette already owns. */
+  --usage-input: var(--git-graph-ref);
+  --usage-output: var(--signal-done);
+  --usage-cache-read: var(--signal-wait);
+  --usage-cache-write: var(--git-graph-lane-5);
+
+  /* ---- the chart ramp ----
+   *
+   * Orca's five, measured: `--chart-1 … --chart-5` are blue **300 / 500 / 600
+   * / 700 / 800** — one hue, five steps, not five hues
+   * (I18nProvider-*.css; the ramp values at the same file's `@theme` block).
+   * That choice is the point of the token: a chart whose series are five
+   * different hues competes with the four colours in this window that already
+   * MEAN something (the lane ramp, the halt signal, the diff pair, the AI
+   * accent). A single-hue ramp says "this is one measurement, cut five ways",
+   * which is what a treemap of one disk is.
+   *
+   * Both themes carry the same five. The blues were picked against a dark
+   * ground, so on paper they only get more contrast, not less — and the
+   * surfaces that consume them mix each step into the CARD, which is what
+   * actually decides how a tile reads. */
+  --chart-1: oklch(80.9% 0.105 251.813); /* blue-300 */
+  --chart-2: oklch(62.3% 0.214 259.815); /* blue-500 */
+  --chart-3: oklch(54.6% 0.245 262.881); /* blue-600 */
+  --chart-4: oklch(48.8% 0.243 264.376); /* blue-700 */
+  --chart-5: oklch(42.4% 0.199 265.638); /* blue-800 */
+
+  /* ---- the thirteen that were never carried across ----
+   *
+   * All present in Orca, all absent here (`grep -c` = 0 for every one), and
+   * each of them is the colour of a fact this window ALREADY draws — which is
+   * why their absence showed as something else being wrong. Every value below
+   * is read out of `I18nProvider-0D3bXbhN.css`, `.dark` block for these and
+   * the `:root` block for the light pairs further down.
+   *
+   * They are declared WITH their consumers wired in shell.css. A token nobody
+   * reads is worse than a missing one: it looks like the value is honoured. */
+
+  /* The editor floor is a step ABOVE the card, not the same as it. Orca's
+   * `--editor-surface` is #1e1e1e against a #171717 `--card` (:24053), and
+   * that step is what separates a document being read from the panel holding
+   * it. Ours drew both in `--surface-deck`, so a diff had no floor of its
+   * own. The current value re-derives that step inside the titanium ramp;
+   * keeping #1e1e1e would reintroduce a warm neutral rectangle in its centre. */
+  --editor-surface: #1b222b;
+
+  /* ---- the syntax ramp ----
+   *
+   * THIS IS WHERE WE BEAT ORCA, AND IT COST US ALMOST NOTHING.
+   *
+   * Measured: Orca calls `defineTheme` exactly zero times. Every editor
+   * surface it has picks between Monaco's two stock themes with a boolean —
+   * `theme: isDark ? "vs-dark" : "vs"` in `MonacoEditor-Bm0niIbS.js:1004`,
+   * `DiffViewer:425`, `large-diff-section-content:178`, `IpynbViewer:558`,
+   * `MonacoCodeExcerpt:42` — and there is no bridge from its design tokens to
+   * Monaco's colours anywhere in the bundle. The direction is the reverse of
+   * ours: its `--editor-surface: #1e1e1e` is Monaco's `vs-dark` background
+   * hardcoded into the app's CSS so the CHROME matches the EDITOR.
+   *
+   * So a white-label that stops at the editor's edge is a white-label with
+   * Visual Studio Code showing through the middle of it. These fifteen values
+   * are what closes that.
+   *
+   * The hues are this window's own. Each one sits on the axis of a stop in
+   * the lane ramp above at a luminance chosen for THIS floor — the lane
+   * tokens themselves are identity and are never borrowed to mean something
+   * else, which is the same rule that moved the git letters off `--lane-3`.
+   *
+   * Every value is measured against `--editor-surface`, the plane it is
+   * actually drawn on, not against the stage. AA is 4.5:1 and the whole ramp
+   * clears it: keyword 7.77, string 9.63, number 8.20, function 7.46, type
+   * 9.60, variable 12.34, constant 7.01, operator 6.45, invalid 5.81. Comment
+   * is the floor of the set at 5.23 and is meant to be — the dimmest role a
+   * person still has to be able to read. */
+  --syntax-keyword: #c8a2e8;
+  --syntax-string: #a7d189;
+  --syntax-number: #e8a87c;
+  --syntax-comment: #8a9199;
+  --syntax-function: #7fb2e5;
+  --syntax-type: #7fd4c1;
+  --syntax-variable: #d8dee9;
+  --syntax-constant: #e58fa8;
+  --syntax-operator: #a1a1a1;
+  --syntax-punctuation: #a1a1a1;
+  --syntax-tag: #7fb2e5;
+  --syntax-attribute: #e8a87c;
+  --syntax-meta: #8a9199;
+  --syntax-link: #7fb2e5;
+  --syntax-invalid: #ff6568;
+
+  /* The editor's own furniture, in the same two treatments.
+   *
+   * Monaco's stock themes do not carry these either — cursor, selection, line
+   * numbers and the current-line band all fall through to `registerColor()`
+   * defaults there, which is why Orca's editor has a VS Code blue selection
+   * on a window that has no blue in it. Ours are mixed from ink this window
+   * already declares, so they follow both treatments without a second table.
+   *
+   * The search pair is NOT declared here: `--markdown-search-match` and
+   * `--markdown-search-match-active` above already mean "a hit" and "the hit
+   * you are on", which is exactly what a find bar needs. A second pair
+   * meaning the same thing is the duplication that lets two surfaces disagree
+   * about what yellow means. */
+  --editor-cursor: var(--ink-chalk);
+  /* The editor's selection is the SAME solid highlight the terminal paints —
+   * so selecting prose in a `.md` file looks like selecting it in Codex CLI
+   * running in the terminal, not a washed-out 30% accent tint that left the
+   * text unreadable (live report 2026-09-09 "codex cli처럼"). It follows the
+   * user's terminal-selection setting, and re-mixes per theme because
+   * `--term-selection-bg` is itself theme-scoped. */
+  --editor-selection: var(--term-selection-bg);
+  --editor-line-band: color-mix(in srgb, var(--ink-mist) 8%, transparent);
+  --editor-gutter-ink: color-mix(in srgb, var(--ink-mist) 55%, transparent);
+  --editor-gutter-ink-active: var(--ink-chalk);
+  --editor-bracket: color-mix(in srgb, var(--syntax-function) 55%, transparent);
+  --editor-fold-ink: var(--ink-mist);
+
+  /* Git's own decoration ramp, which is VS Code's and which Orca inherits
+   * whole (:24128~24134). Our file tree painted every porcelain letter in one
+   * colour — `--lane-3`, an identity hue borrowed to mean "changed" — so a
+   * deleted file and an added one were the same amber. These are the colours
+   * a person already knows from every other git client. */
+  --git-decoration-added: #81b88b;
+  --git-decoration-modified: #e2c08d;
+  --git-decoration-deleted: #c74e39;
+  --git-decoration-renamed: #73c991;
+  --git-decoration-untracked: #73c991;
+  --git-decoration-copied: #73c991;
+  --git-decoration-ignored: #6e6e6e;
+
+  /* A search hit, and the one the cursor is on. Two colours because a list of
+   * matches with no current member is a list you cannot walk (:24144~24145 —
+   * these two are the only pair in the group that do NOT change between
+   * treatments, so they are declared once here). */
+  --markdown-search-match: #facc15;
+  --markdown-search-match-active: #fb923c;
+
+  /* A line somebody has written a note on (:24143). Distinct from the search
+   * pair on purpose: a match is transient and a note is a thing a person
+   * made. */
+  --annotation-highlight: #fbbf24;
+
+  /* The seam between two split panes, at rest and under the pointer
+   * (:24146~24147). Ours borrowed `--edge-mark` and `--ink-mist` — the
+   * scrollbar's colours — so the divider you drag looked like the bar you
+   * do not. */
+  --tab-group-split-divider: #71717a;
+  --tab-group-split-divider-strong: #a1a1aa;
+
+  /* 에이전트 탭 = Codex 데스크톱 채팅(t-2973, docs/design/agent-tab-codex-
+   * desktop-style.md). 바닥 하나, 라벨 없는 말풍선, 코드 칩, 둥근 입력 상자,
+   * 「동안 작업」 줄 아래 괘선 하나, 흰 원형 보내기 — 헬퍼 페이지의 색은 전부
+   * 이 묶음에서 온다. 값은 이미 있는 역할에서 섞으므로 라이트 블록이 같은
+   * 이름을 제 값으로 다시 맨다. 기하(반경·단 폭·크기·줄간)는 색이 아니라
+   * 여기 한 번만 선다. */
+  --chat-ground: var(--surface-deck);
+  --chat-bubble: var(--surface-raised);
+  --chat-bubble-ink: var(--ink-chalk);
+  --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
+  --chat-composer-bg: var(--surface-raised);
+  --chat-composer-edge: var(--edge-glint);
+  --chat-divider: var(--edge-rule);
+  --chat-work-ink: var(--ink-mist);
+  --chat-send-bg: var(--ink-chalk);
+  --chat-send-ink: var(--surface-abyss);
+  --chat-link: var(--ai-accent);
+  --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 6%, transparent);
+  /* The conversation's grammar is Claude Code's (2026-09-15): a 10px bubble,
+   * 13px prose at 1.5, an 8px composer — and one accent per agent, worn by the
+   * page through `data-agent` (`--chat-accent` is what the rules read). */
+  --chat-radius-bubble: 10px;
+  --chat-bubble-pad-x: 12px;
+  --chat-radius-composer: 8px;
+  --chat-col: 900px;
+  --chat-bubble-max: 70%;
+  --chat-prose-size: var(--text-sm);
+  --chat-prose-leading: 1.5;
+  --chat-dot: 8px;
+  --chat-dot-halo: 3px;
+  --chat-gutter: 22px;
+  --chat-accent: var(--ai-accent);
+  --agent-accent-claude: #d97757;
+  --agent-accent-codex: #10a37f;
+  --agent-accent-zo: #8b7cf6;
+  --agent-accent-antigravity: #4e8cf7;
+  --chat-chip-size: 0.92em;
+  --chat-send-size: 32px;
+  --chat-pill-height: var(--control-height-sm);
+  --chat-composer-max-rows: 8;
+  --chat-preview-mark: 36px;
+  --chat-fold-max: 360px;
+}
+
+/* The light treatment, which this product draws as GLASS.
+ *
+ * Dark is still the default the design was proven on — every review render in
+ * docs/design and .re-scratch/shots is the dark binding — and following the OS
+ * made a light-mode desktop open a window whose lane formulas washed out. The
+ * theme setting sets this attribute (`applyTheme`, ui/shell.js) and
+ * `prefers-color-scheme` feeds that setting's "시스템 설정" option; the OS never
+ * drives directly.
+ *
+ * HOW THIS BLOCK RELATES TO THE MEASUREMENT. Orca's light theme is
+ * #ffffff/#fafafa/#f5f5f5/#0a0a0a on a pure-neutral axis (`:root`,
+ * I18nProvider-DPbv01TU.css:23536~23596). Two of its raw values fail as a
+ * screen somebody reads for eight hours — measured: panels at **1.04:1**
+ * against the stage (no edges at all) and the muted role at **4.54:1** (AA by
+ * four hundredths) — and the glass material the user asked for instead of
+ * plain light mode needs a stage the panels can be translucent AGAINST, which
+ * pure white cannot be.
+ *
+ * So the white-label keeps Orca's HUE and its ARRANGEMENT and re-derives only
+ * lightness where the raw values measurably fail. Every grey below sits on
+ * Orca's own neutral axis (R = G = B, the family #fafafa/#f5f5f5/#e5e5e5/
+ * #171717 come from); the panels stay a step ABOVE the stage because the
+ * stage is what glass is seen against; and an earlier blue-tinted palette
+ * that lived here — a deliberate departure — is reversed. Every number below
+ * is measured against the surface it is drawn on. */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  /* THE FLOOR IS WHITE, which reverses the three values this block opened
+   * with.
+   *
+   * The old set — stage #e4e4e4, panel #f5f5f5, raised #fafafa — was argued
+   * from a real problem: glass needs something to be translucent AGAINST, and
+   * 62% white over pure white is not a material. The argument was sound and
+   * the conclusion was still wrong, because it solved a glass problem by
+   * moving the floor of the entire application. Side by side with Orca the
+   * grey stage is the single most obvious difference in the light treatment —
+   * before any panel, any rule, any control: the window simply opens dimmer.
+   *
+   * Orca's own light floor is `--background: #fff` with `--card: #fff` and
+   * `--muted: #f5f5f5` (:23936~23990) — stage and panel are the SAME white,
+   * and nothing is separated by fill at all. What separates them there is the
+   * rule between them, and what makes glass legible is the 14% edge and the
+   * cast shadow the floating surfaces carry, not a darkened room.
+   *
+   * So the floor comes across whole and the separation moves to where Orca
+   * puts it: `--edge-rule` below, `--glass-edge` and `--shadow-float` on
+   * anything that hovers. Re-measured on this white floor, every ink role in
+   * this block went UP rather than down — mist 5.86:1 → 6.39:1, label 7.51 →
+   * 8.19, glyph 3.94 → 4.29, chalk 16.4 → 17.93 — because each was tuned
+   * against the darker panel that is now gone. */
+  --surface-abyss: #ffffff;
+  /* Orca's `--card`/`--sidebar` white. Kept OPAQUE for the reason the old
+   * note gave and which still holds: half a dozen roles below mix into this
+   * one, and a translucent reference would hand a scrollbar thumb and a
+   * workspace dot an alpha of their own. */
+  --surface-deck: #ffffff;
+  /* Orca's own light `--muted` (:23549), a step DOWN from the panel where it
+   * used to be a step up. On a white floor the raised role is the one that
+   * has to darken — there is nowhere above white to go. */
+  --surface-raised: #f5f5f5;
+  /* And the recess DOES NOT follow the floor here, which is the whole reason
+   * it is a role. On white, a well has to be the step below the card rather
+   * than the card's own colour — Orca's `bg-muted` for exactly these
+   * elements. Left tracking `--surface-abyss` it would paint a search field
+   * white on a white panel. */
+  --surface-well: #f5f5f5;
+  /* Orca's dark-panel grey, standing as light ink: **16.4:1** on the panel,
+   * **14.1:1** on the stage. Past AAA with room, and clear of the 18.97:1
+   * halation that #0a0a0a-on-white measures. */
+  --ink-chalk: #171717;
+  /* 5.86:1 on the panel and 5.02:1 on the stage. Orca's own #737373 measures
+   * **4.35:1** on this panel — the same four-hundredths-from-AA failure it
+   * has on white — so the hue stays and the lightness answers for itself. */
+  --ink-mist: #5f5f5f;
+  /* Same geometry, this theme's ink — see the note in the dark block. */
+  --chevron-down: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235f5f5f' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+
+  /* The two quiet steps, answered for THIS treatment.
+   *
+   * - the glyph is a graphic, so 3:1 is its bar: **3.94:1** on the panel and
+   *   **3.38:1** on the stage, and it still reads quieter than the label
+   *   beside it.
+   * - the label is 12px text, so 4.5:1 is its bar: **7.51:1** on the panel,
+   *   a real step under the ink rather than an alias of the muted role. */
+  --ink-glyph: #7a7a7a;
+  --ink-label: #4f4f4f;
+  --ink-figure: color-mix(in srgb, var(--ink-chalk) 60%, var(--ink-mist));
+  /* Translucent ink rather than Orca's solid grey, so one declaration holds
+   * its line over the stage and over the lighter panels both. Composites to
+   * #dadada on the panel — **1.28:1**, where Orca's solid light border was
+   * 1.21:1 against a panel that was itself invisible. And the panels have a
+   * step of their own again: **1.17:1**, where #fafafa on #ffffff was
+   * 1.04:1. */
+  --edge-rule: rgb(23 23 23 / 12%);
+
+  /* The measured light `--ai-action-accent`: violet-500 (:23557, ramp at
+   * :161). A step deeper than dark's violet-400 for the same reason Orca
+   * steps it — 400 is tuned to sit on near-black. */
+  --ai-accent: oklch(60.6% 0.25 292.717);
+
+  /* The left column's own plane, light treatment (:23984-23989). The direction
+   * REVERSES here: #f5f5f5 against a #fafafa `--sidebar` is a step DARKER,
+   * where the dark treatment lightens. Which is the point — the column is
+   * separated from what is beside it, and "separated" is not "lighter".
+   *
+   * The rule and the ring are solid greys here rather than translucent white:
+   * `#ffffff12` over a near-white plane is nothing at all. Orca's own values. */
+  --nav-plane: #f5f5f5;
+  --nav-plane-accent: #eaeaea;
+  /* Orca's own light accent-foreground IS #171717 (main.css:199) — the one
+   * member of this family whose original value needs no halation step. */
+  --nav-plane-accent-ink: #171717;
+  /* Orca's own value here is #0a0a0a; this is #171717 for the reason
+   * `--ink-chalk` is — near-black on a near-white plane measures 18.97:1 and
+   * halates. On this plane #171717 is **16.4:1**, past AAA with room. */
+  --nav-plane-ink: #171717;
+  --nav-plane-rule: #e5e5e5;
+  --nav-plane-ring: #a1a1a1;
+
+  /* ---- the glass itself ----
+   *
+   * Orca has this feature and ships it Windows-only: a `windowBackgroundBlur`
+   * setting that becomes `backgroundMaterial: "acrylic"` on win32 and nothing
+   * anywhere else (`createMainWindow`, out/main/index.js:205024). The chrome
+   * that wears these is in ui/shell.css; what is here is the material.
+   *
+   * `--glass-veil` is the white the panels are washed with. 62% over the
+   * stage is what `--surface-deck` above was composited from, so the opaque
+   * and the translucent panel are the same colour — turning the blur off
+   * changes the depth, never the palette. */
+  --glass-veil: rgb(255 255 255 / 62%);
+  /* Orca's `bg-background/96` — the light half of the same declaration whose
+   * dark half is `rgba(23,23,23,0.96)`. */
+  --glass-veil-raised: rgb(255 255 255 / 96%);
+  --glass-blur: blur(40px);
+  /* `border-black/14`. Ink rather than white here for the obvious reason: on
+   * a white floor the boundary of a floating surface can only be drawn by
+   * darkening, and the lit edge is carried by the inset in `--shadow-float`
+   * instead. */
+  --glass-edge: rgb(0 0 0 / 14%);
+
+  /* The one mix that needs a different weight here. Dark gets its contrast by
+   * rising off #171717; a light treatment has to reach further down for the
+   * marks this role draws as shapes — an idle workspace's dot, a scrollbar
+   * thumb. 62% measured **2.33:1**, under the 3:1 a graphic needs.
+   *
+   * 85% is kept from the treatment this replaces, and it has to clear the bar
+   * on two surfaces rather than one: the panel AND the stage, which is not
+   * white. **4.17:1** and **3.57:1** on the neutral pair. */
+  --edge-mark: color-mix(in srgb, var(--ink-mist) 85%, var(--surface-deck));
+
+  /* Depth is cast onto the window, so it is the one value that cannot be
+   * derived. 55% black under a 72px blur is a bruise on a white canvas —
+   * which is why Orca writes the light half of this declaration separately
+   * too: `0 20px 60px rgba(0,0,0,0.28)` with a BRIGHTER inset than dark's,
+   * `rgba(255,255,255,0.08)` (`dialog-BT-jXU9a.js:45`, the base class before
+   * the `dark:` override). Same construction, half the bruise. */
+  --shadow-float: 0 20px 60px rgb(0 0 0 / 28%),
+    inset 0 1px 0 rgb(255 255 255 / 8%);
+
+  /* Orca ships no light dropdown shadow — its menu shadow is written once,
+   * for dark. Derived rather than measured, and marked as such: the geometry
+   * is Orca's `0 20px 44px`, and the alpha is scaled by the ratio its OWN two
+   * dialog shadows use between the treatments (0.28/0.55 ≈ 0.51), so a menu
+   * sits under a dialog in light by the same margin it does in dark. */
+  --shadow-drop: 0 20px 44px rgb(0 0 0 / 21%),
+    inset 0 1px 0 rgb(255 255 255 / 8%);
+
+  /* The measured light ring (I18nProvider-0D3bXbhN.css:23955). */
+  --ring: #a1a1a1;
+
+  /* Orca's agent rows are neutral; colour is reserved for state. Keep our
+   * one identifying rail, but derive every lane from this single quiet role. */
+  /* 82%: at 52% the rail down a lane row measured **1.99:1** on this panel —
+   * a 2px mark carrying which agent owns the row, invisible. Now **3.94:1**,
+   * the muted role it mixes from having moved down with everything else. */
+  --agent-rail: color-mix(in srgb, var(--ink-mist) 82%, var(--surface-deck));
+  --lane-1: var(--agent-rail);
+  --lane-2: var(--agent-rail);
+  --lane-3: var(--agent-rail);
+  --lane-4: var(--agent-rail);
+  --lane-5: var(--agent-rail);
+
+  /* Orca answers for its own light treatment here, and where it does, its
+   * numbers are used. Re-measured against the WHITE floor this block now has
+   * (every figure below is the ratio against #ffffff):
+   *
+   *   --status-success light  #15803d (:23957)  **5.02:1**  ✓ 4.5
+   *   --destructive   light   #e40014 (:23949)  **4.87:1**  ✓ 4.5
+   *
+   * Both clear the 4.5:1 that text needs, so both come across verbatim —
+   * this reverses the earlier #047857/#b91c1c, which were ours because the
+   * previous reading had measured Orca's 500-weights rather than the light
+   * tokens it actually ships.
+   *
+   * The amber stays OURS. Orca's light `--status-warning` is amber-500, which
+   * measures 1.54:1 on white — invisible — and it has no darker light value
+   * to read. #b45309 is amber-700 and measures **5.02:1** here. */
+  --signal-ready: #15803d;
+  --signal-wait: #b45309;
+  --signal-halt: #e40014;
+
+  /* …and here they part. #e40014 measures 4.87:1 on white — it clears text's
+   * 4.5:1 by 0.37, which is nothing. Tint a ground with that same colour and
+   * the words on it fall through the floor: measured by axe on the accounts
+   * pane, a 10px badge on the 10% mix came out at **3.6:1** and an 11px
+   * subtitle on the 5% mix at **4.29:1**.
+   *
+   * So the tinted ground gets its own ink, one step darker: #b3000f measures
+   * **5.39:1** on the badge's ground and **7.22:1** on the row's. Same hue,
+   * same meaning, and the pairing now passes where the verbatim one could
+   * not.
+   *
+   * Orca's own pairing (`text-destructive` on `bg-destructive/5`) would fail
+   * this audit for the same arithmetic, so this is a deliberate divergence —
+   * and the precedent is three lines up: the amber is ours too, because
+   * theirs measured 1.54:1 and a warning nobody can read is not a warning. */
+  --signal-halt-ink: #b3000f;
+
+  /* …and the amber parts here too, one ramp stop later than the halt.
+   *
+   * #b45309 clears 5.02:1 on white, which is what the line above it was chosen
+   * for. It is not chosen for a GROUND, and the graph's standing 「확인 필요」
+   * chip is one: a 12% amber wash over the head band paints #ede1d8, and the
+   * same #b45309 read off that measures **3.91:1** — under the 4.5:1 an 11px
+   * count needs. Amber-800 is the next stop and the first that clears it:
+   * measured on those same painted pixels, **5.52:1**. Same hue, same ramp,
+   * same reasoning as `--signal-halt-ink` three lines up. */
+  --signal-wait-ink: #92400e; /* amber-800 — 5.52:1 on the 12% amber ground */
+
+  /* PR lane tones — the original's light block repeats the dark values
+   * verbatim (main.css:296-298), and so does this one: the mark stands
+   * beside its own label, so it identifies rather than carries the word. */
+  --pr-lane-done: #c7a594;
+  --pr-lane-review: #16a34a;
+  --pr-lane-progress: #d4a300;
+
+  /* The board's completed card, CORRECTED rather than copied.
+   *
+   * Orca's emerald-500 is the one value in this group that does not survive
+   * the trip to a light floor: #10b981 measures **2.54:1** on white, under
+   * even the 3:1 a state mark needs and well under the 4.5:1 asked of this
+   * set. Walking the emerald ramp, 600 (#059669) is still short at 3.77:1 and
+   * 700 is the first stop that clears it. Taken rather than a hand-mixed
+   * near-value: #078761 is the literal nearest passing point on the 500→700
+   * line (4.52:1) but it is not a colour this palette has anywhere else, and
+   * a one-off hex is how a ramp stops being a ramp. */
+  --signal-done: #047857; /* emerald-700 — 5.48:1 on white */
+
+  /* Monaco's light diff defaults bundled by Orca 1.4.164. The UI consumes
+   * these roles; no diff component owns a colour literal. */
+  --diff-add: #9ccc2c;
+  --diff-del: #ff0000;
+  --diff-add-surface: #9bb95533;
+  --diff-del-surface: #ff000033;
+  --scrim: rgb(10 10 10 / 34%);
+
+  /* The terminal screen, flipped WHOLE.
+   *
+   * It used to stay dark here, on the reasoning that programs paint for a dark
+   * terminal. Orca does not do that: `terminalBackground` resolves from
+   * `effectiveAppearance?.theme?.background`
+   * (`OnboardingInlineCommandTerminal-Caul4Dbw.js`) and its settings carry a
+   * whole separate light catalogue — `getTerminalLightThemeSearchEntries()`
+   * beside `getTerminalDarkThemeSearchEntries()` (`Settings-Db2c7R7D.js:5798`).
+   * A light appearance gets a light screen; the on-dark/on-light pane-title
+   * token families exist because either can happen, not because the screen is
+   * frozen.
+   *
+   * The old rule against touching this was really a rule against HALF a flip,
+   * and it was right: a screen that turns white while its palette stays tuned
+   * for black is worse than either. So all eighteen move together, and the
+   * gate now enforces that rather than forbidding the flip.
+   *
+   * 7 and 15 are the counterintuitive ones. On a light screen the "white" and
+   * "bright white" slots have to render DARK or a program that asks for white
+   * writes invisibly — which is what every light terminal theme does, and the
+   * reason this block is not the dark one with two values swapped. */
+  --term-screen-bg: #ffffff;
+  --term-screen-fg: #2e3434;
+  --term-cursor: #2e3434;
+  --term-cursor-accent: #ffffff;
+  --term-selection-bg: #accef7;
+  --term-selection-fg: #2e3434;
+  --term-0: #2e3436;
+  --term-1: #cc0000;
+  --term-2: #4e9a06;
+  --term-3: #8e7700;
+  --term-4: #3465a4;
+  --term-5: #75507b;
+  --term-6: #05727e;
+  --term-7: #6a6a6a;
+  --term-8: #555753;
+  --term-9: #ef2929;
+  --term-10: #1b7a1b;
+  --term-11: #6d5a00;
+  --term-12: #204a87;
+  --term-13: #ad7fa8;
+  --term-14: #034b50;
+  --term-15: #3d3d3d;
+
+  /* The graph's ink on paper: two of the eight change — the ref blue
+   * deepens to #007acc and lane 3's tan darkens to a readable brown; the
+   * other six hold their value in both themes (I18nProvider-DPbv01TU.css). */
+  --git-graph-ref: #007acc;
+  --git-graph-lane-3: #994f00;
+  /* A nebula on a white ground needs less paint to be seen. */
+  --knowledge-nebula-core: 0.1;
+  /* 종이 위에서는 테두리 한 올이 더 일해야 원반의 경계가 읽힌다. */
+  --knowledge-nebula-edge-weight: 42%;
+  --knowledge-highlight: var(--ink-figure);
+  /* 라이트 판의 다섯 색은 어두운 잉크를 섞어 바닥(#f5f5f5)에서 3:1을 넘긴다.
+   * 비율이 색마다 다른 것은 램프의 다섯이 밝기가 다르기 때문이고, 그 다섯 수는
+   * 재서 얻은 것이다(하네스가 두 테마에서 픽셀로 잰다): 62%의 앰버는 3.19로
+   * 문턱에 붙어 있었다 — 58%에서 3.44. */
+  --knowledge-hue-0: color-mix(in srgb, var(--git-graph-lane-1) 58%, var(--ink-figure));
+  --knowledge-hue-1: color-mix(in srgb, var(--git-graph-lane-2) 72%, var(--ink-figure));
+  --knowledge-hue-2: color-mix(in srgb, var(--git-graph-lane-3) 68%, var(--ink-figure));
+  --knowledge-hue-3: color-mix(in srgb, var(--git-graph-lane-4) 62%, var(--ink-figure));
+  --knowledge-hue-4: color-mix(in srgb, var(--git-graph-lane-5) 72%, var(--ink-figure));
+  /* 종이 위의 심각도 램프(지식 그래프 P4). 흰 바탕에서 3:1을 넘기려면 다섯 모두 L* 62 아래여야 해서
+   * 밝기만으로는 갈리지 않는다 — 색상과 밝기를 함께 벌려 고른 값이다: 심각 4.7 · 높음 3.8 · 보통 3.6 ·
+   * 낮음 6.9 · 등급 없음 6.4:1, 제2색맹·제1색맹 모의에서 짝의 거리 17.5 이상(보통을 호박 #b45309로
+   * 두면 높음과 제2색맹에서 5.1로 붙었다). 생태계의 둘은 다크의 값이 이미 넘는다(Cargo #007acc 4.5,
+   * npm 4.2:1). */
+  --severity-critical: #c026d3;
+  --severity-high: #ef4444;
+  --severity-medium: #ea580c;
+  --severity-low: #854d0e;
+  /* The connected workbench on paper (t-3818). The hues already flip through
+   * their sources; what changes is how much paint they need. A glow on white
+   * reads at less, and words keep 40% of the #171717 ink so the lightest of
+   * the four (the artifact amber, 3.75:1 alone) clears 4.5:1. The thumb of a
+   * segment is the white card, because the raised role is the track's own
+   * #f5f5f5 here; there is no top light to catch on a white card. */
+  --workbench-ambient-weight: 10%;
+  --workbench-tint-weight: 7%;
+  --workbench-tint-hover-weight: 12%;
+  --workbench-ink-weight: 60%;
+  --workbench-thumb: var(--surface-deck);
+  --workbench-sheen: transparent;
+
+  /* The light halves of the thirteen (Orca's `:root` block, :23937 and
+   * :24012~24031). Ten of them move; the search pair does not, so it is
+   * declared once in the dark block and inherited here.
+   *
+   * The decoration ramp INVERTS rather than lightens — VS Code's light git
+   * colours are deeper and more saturated than its dark ones, because on
+   * paper a status letter has to hold its own against black text instead of
+   * glowing against a dark panel. `ignored` is the one that goes the other
+   * way (#8c8c8c here against #6e6e6e in dark), which is correct and looks
+   * like a transcription error until it is measured: a dimmed row must fade
+   * TOWARD its background, and the backgrounds are opposite. */
+  --editor-surface: #ffffff;
+
+  /* The syntax ramp's light half. It is not the dark set lightened — it is
+   * the same hues DEEPENED, for the reason the git ramp below inverts: on
+   * paper a coloured token has to hold its own against near-black text rather
+   * than glow against a dark panel, and a pastel that reads as "string" on
+   * #1e1e1e reads as "nearly gone" on white.
+   *
+   * Measured against `--editor-surface: #ffffff`, the plane these are drawn
+   * on: keyword 5.70, string 6.06, number 5.41, function 6.45, type 5.47,
+   * variable 17.93, constant 6.11, operator 6.39, invalid 7.47. Comment is
+   * again the floor and again on purpose — 4.83, which clears AA with less
+   * room than the rest because a comment that competes with code is a comment
+   * drawn wrong.
+   *
+   * The furniture above is mixed rather than fixed, so it follows this block
+   * without being restated: the gutter inks re-mix from the light `--ink-*`.
+   * (`--editor-selection` now tracks `--term-selection-bg` instead, so it
+   * takes the light selection colour with the terminal's.) */
+  --syntax-keyword: #7c3aed;
+  --syntax-string: #2f6f3f;
+  --syntax-number: #9a5b12;
+  --syntax-comment: #6b7280;
+  --syntax-function: #1d5fa8;
+  --syntax-type: #0f766e;
+  --syntax-variable: #171717;
+  --syntax-constant: #b03060;
+  --syntax-operator: #5f5f5f;
+  --syntax-punctuation: #5f5f5f;
+  --syntax-tag: #1d5fa8;
+  --syntax-attribute: #9a5b12;
+  --syntax-meta: #6b7280;
+  --syntax-link: #1d5fa8;
+  --syntax-invalid: #ad0707;
+
+  --git-decoration-added: #587c0c;
+  --git-decoration-modified: #895503;
+  --git-decoration-deleted: #ad0707;
+  --git-decoration-renamed: #007acc;
+  --git-decoration-untracked: #007100;
+  --git-decoration-copied: #007acc;
+  --git-decoration-ignored: #8c8c8c;
+  --annotation-highlight: #f59e0b;
+  --tab-group-split-divider: #868690;
+  --tab-group-split-divider-strong: #71717a;
+
+  /* 채팅 페이지의 색, 종이 위에서(t-2973). 상자는 흰 바닥에 괘선 한 줄, 칩과
+   * 알약은 더 옅게, 보내기는 검은 원에 흰 화살 — 기하는 다크 블록의 것을
+   * 그대로 물려받는다. */
+  --chat-ground: var(--surface-deck);
+  --chat-bubble: var(--surface-raised);
+  --chat-bubble-ink: var(--ink-chalk);
+  --chat-chip-bg: color-mix(in srgb, var(--ink-chalk) 7%, transparent);
+  --chat-composer-bg: var(--surface-deck);
+  --chat-composer-edge: var(--edge-rule);
+  --chat-divider: var(--edge-rule);
+  --chat-work-ink: var(--ink-mist);
+  --chat-send-bg: var(--ink-chalk);
+  --chat-send-ink: var(--surface-deck);
+  --chat-link: var(--ai-accent);
+  --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 5%, transparent);
+  --chat-accent: var(--ai-accent);
+  --agent-accent-claude: #c8643a;
+  --agent-accent-codex: #0e8a6c;
+  --agent-accent-zo: #6b5fd6;
+  --agent-accent-antigravity: #2f6fdb;
+}
+
+/* Skill library geometry; colours inherit the semantic palette in both themes. */
+:root {
+  --skills-detail-min: 320px;
+  --skills-detail-share: 1fr;
+  --skills-card-height: 124px;
+  --skills-line: 1px;
+  --skills-list-share: 1.15fr;
+  --skills-title-size: 26px;
+  --skills-meta-size: 12px;
+  --skills-body-size: 14px;
+  --skills-bundle-width: 680px;
+  --skills-output-height: 130px;
+  --skills-focus: var(--lane-1);
+  --skills-alert: var(--ink-chalk);
+  --skills-detail-bg: var(--surface-well);
+}
+
+/* Resolve material colors where the purpose accent is bound, not on :root. */
+.artifacts-studio-choice,
+.artifacts-studio-orbit-tile {
+  --artifact-studio-tile-background: linear-gradient(145deg, color-mix(in srgb, var(--artifact-studio-accent) 28%, var(--surface-raised)), var(--surface-well));
+  --artifact-studio-choice-selected: color-mix(in srgb, var(--artifact-studio-accent) 13%, var(--surface-raised));
+  --artifact-studio-choice-shadow: inset 0 0 0 1px color-mix(in srgb, var(--artifact-studio-accent) 12%, transparent);
+  --artifact-studio-glyph-background: color-mix(in srgb, var(--artifact-studio-accent) 10%, transparent);
+}
+
+/* The connected workbench (t-3818): a view binds its purpose hue on itself,
+ * and so does any hook that names another view, so a related action inside
+ * the task inspector wears the hue of the place it leads to. */
+.knowledge-view,
+[data-workbench-view="knowledge"],
+.workbench-related-knowledge {
+  --workbench-accent: var(--workbench-hue-knowledge);
+}
+
+.file-view:has(.agent-graph-layout),
+[data-workbench-view="tasks"],
+.knowledge-inspector-request,
+.workspace-board-tasks {
+  --workbench-accent: var(--workbench-hue-tasks);
+}
+
+.workspace-board,
+[data-workbench-view="workspaces"],
+.workbench-related-workspace,
+.workbench-context {
+  --workbench-accent: var(--workbench-hue-workspaces);
+}
+
+.artifacts-view,
+[data-workbench-view="artifacts"],
+.workbench-related-artifacts {
+  --workbench-accent: var(--workbench-hue-artifacts);
+}
+
+:root,
+.knowledge-view,
+.file-view:has(.agent-graph-layout),
+.workspace-board,
+.artifacts-view,
+.workbench-context,
+[data-workbench-view],
+.workbench-related-knowledge,
+.workbench-related-workspace,
+.workbench-related-artifacts,
+.knowledge-inspector-request,
+.workspace-board-tasks {
+  --workbench-accent-ink: color-mix(in srgb, var(--workbench-accent) var(--workbench-ink-weight), var(--ink-chalk));
+  --workbench-tint: color-mix(in srgb, var(--workbench-accent) var(--workbench-tint-weight), transparent);
+  --workbench-tint-hover: color-mix(in srgb, var(--workbench-accent) var(--workbench-tint-hover-weight), transparent);
+  --workbench-edge: color-mix(in srgb, var(--workbench-accent) var(--workbench-edge-weight), var(--edge-rule));
+  /* Two throws of the same light: across a wide, short masthead from its
+   * leading corner, and down a tall inspector from its crown. */
+  --workbench-ambient: radial-gradient(ellipse 70% 180% at 0% 0%, color-mix(in srgb, var(--workbench-accent) var(--workbench-ambient-weight), transparent), transparent 72%);
+  --workbench-ambient-crown: radial-gradient(ellipse 130% 38% at 50% 0%, color-mix(in srgb, var(--workbench-accent) var(--workbench-ambient-weight), transparent), transparent 70%);
+}
+
+/* A window or split this low spends its height on content: the mastheads
+ * drop to a control row between two 8px gutters (t-3818). */
+@media (max-height: 480px) {
+  :root {
+    --workbench-head-min-height: calc(var(--control-height-sm) + var(--space-2) * 2);
+  }
+}

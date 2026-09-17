@@ -1,0 +1,16 @@
+# The one case table of `validate::text_entry_plan`, run by the Rust core and
+# the Swift helper's mirror alike. Columns: the text (\t \r \n \\ spelled
+# out), whether the focus is a multi-line text area → the pieces it is typed
+# in, joined by `|`, or `refused:<why>`.
+# text	multi_line	plan
+alice\thunter2	false	alice\t|hunter2
+plain	false	plain
+a\tb\tc	false	a\t|b\t|c
+trailing\t	false	trailing\t
+user\npass	false	refused:line_break
+done\r	false	refused:line_break
+line one\nline two	true	line one\nline two
+col\tcol\r\nrow	true	col\tcol\r\nrow
+ls -la\n	true	ls -la\n
+	false	
+	true	

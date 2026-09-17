@@ -1,0 +1,33 @@
+[package]
+name = "zerocode-pty"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+base64 = { workspace = true }
+portable-pty = { workspace = true }
+# The search bar's pattern toggle. Searching lives grid-side because the
+# window only holds the rows it is painting — so the pattern engine does too.
+regex = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
+vte = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# The ConPTY has no foreground process group; the lane reads the process
+# tree (Toolhelp) and image names (QueryFullProcessImageNameW) instead.
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Threading"] }
+
+[dev-dependencies]
+criterion = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+
+[[bench]]
+name = "pty_hotpath"
+harness = false

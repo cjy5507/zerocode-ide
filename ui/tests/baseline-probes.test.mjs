@@ -1,0 +1,10 @@
+import assert from "node:assert/strict";
+import { paintSamples, percentile } from "./baseline-probes.mjs";
+const mark = { name: "baseline-pane-0", ph: "I", ts: 1000, pid: 1, tid: 2 };
+const paint = { name: "Paint", ph: "X", ts: 2000, dur: 500, pid: 1, tid: 2 };
+assert.deepEqual(paintSamples([mark, { ...paint, pid: 9, dur: 100000 }, paint]), [{ pid: 1, paint_ms: 1.5 }]);
+assert.throws(() => paintSamples([mark]), /no engine paint/);
+assert.throws(() => paintSamples([]), /missing pane/);
+assert.equal(percentile([4, 1, 3, 2], 75), 3);
+assert.equal(percentile([4], 95), 4);
+console.log("PASS baseline trace correlation and nearest-rank percentile");

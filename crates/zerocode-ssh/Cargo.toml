@@ -1,0 +1,23 @@
+[package]
+name = "zerocode-ssh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+russh = { workspace = true }
+russh-sftp = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs"] }
+zeroize = { workspace = true }
+zerocode-core = { workspace = true }
+zerocode-lane = { workspace = true }
+zerocode-pty = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+rand = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }

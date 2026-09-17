@@ -1,0 +1,5 @@
+Parity fixture for t-2877 axis J (fork fidelity).
+SECRET=ossifrage
+COUNT=8317
+COLOR=vermilion
+Nothing else in this file matters.

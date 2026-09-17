@@ -1,0 +1,1 @@
+Delegate the two JS defects to two Agents, wait for both receipts, and cite both completions.

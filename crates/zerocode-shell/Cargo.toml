@@ -1,0 +1,294 @@
+[package]
+name = "zerocode-shell"
+autobins = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The window. Kept out of `zerocode-app` so the terminal entry point — and the
+# headless test gate with it — never has to build a webview.
+[[bin]]
+name = "zerocode-shell"
+path = "src/main.rs"
+
+# Cargo discovers these too, but packaging must carry every helper explicitly.
+[[bin]]
+name = "zerocode-mirror"
+path = "src/bin/zerocode-mirror.rs"
+
+[[bin]]
+name = "zerocode-pick"
+path = "src/bin/zerocode-pick.rs"
+
+# CEF subprocess entry point. On macOS the release bundler wraps this binary in
+# the four Chromium helper app bundles under Contents/Frameworks.
+[[bin]]
+name = "zerocode-cef-helper"
+path = "src/bin/zerocode-cef-helper.rs"
+required-features = ["chromium-browser"]
+
+[features]
+default = ["chromium-browser"]
+chromium-browser = ["dep:cef"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# The identity stamp hashes the shipped UI with the same function the rest of
+# the workspace uses, so the number in the binary and the number a person
+# computes by hand are the same number.
+sha2 = { workspace = true }
+
+[dependencies]
+# `macos-private-api` is what a transparent window on macOS costs, and a
+# transparent window is what the blurred material needs something to show
+# through. Named here because `tauri.conf.json` asks for it and the build
+# script refuses a mismatch — the two have to agree.
+# `unstable` is multi-webview: the browser pane is a real child webview the
+# window positions over its own surface (Orca hosts guest WebContents the
+# same way), and `add_child` ships behind this flag.
+# `devtools` keeps the inspector in RELEASE builds — Orca ships an
+# "Open browser devtools" button on every browser toolbar, and ours is a
+# button too, not a debug-only accident.
+tauri = { version = "2", features = ["macos-private-api", "unstable", "devtools", "tray-icon"] }
+model-prices = { workspace = true }
+zerocode-core = { workspace = true }
+zerocode-harness = { workspace = true }
+zerocode-hookd = { workspace = true }
+zerocode-lane = { workspace = true }
+zerocode-orchestrator = { workspace = true }
+zerocode-pty = { workspace = true }
+zerocode-ssh = { workspace = true }
+zerocode-shell-state = { workspace = true }
+zerocode-shell-cmd-jira = { workspace = true }
+zerocode-shell-cmd-linear = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["preserve_order"] }
+serde_yaml_ng = { workspace = true }
+ignore = { workspace = true }
+regex = { workspace = true }
+sys-locale = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+dirs = { workspace = true }
+# The native file panel, for the `zerocode-pick` helper binary ONLY (t-2982).
+# The window itself opens no panel: `NSOpenPanel` is a remote view that holds
+# the thread which opens it while `openAndSavePanelService` comes up, and on
+# the window's main thread that was a force quit three times. The helper is a
+# `[[bin]]` of this crate, so it shares this dependency list and is bundled
+# beside the window as `zerocode-mirror` is. Same version, same features as
+# the tauri dialog plugin this replaces, so the lock does not grow a second
+# copy of anything.
+rfd = { version = "0.16", default-features = false, features = ["common-controls-v6"] }
+tauri-plugin-notification = "2.3.3"
+tauri-plugin-clipboard-manager = "=2.3.2"
+# Already in the lock through the pty layer; named here for the one call that
+# asks this process how much memory it is holding.
+libc = { workspace = true }
+# Already in the lock through tauri; named here for the image viewer, which
+# hands the webview a `data:` URL. The CSP already admits one (`img-src 'self'
+# data:`) and an asset protocol would be a second doorway to every file on the
+# disk, opened for one surface that shows five extensions.
+base64 = { workspace = true }
+# Jira and Linear — see the workspace note beside this dependency.
+reqwest = { workspace = true }
+# Names one Jira site-and-account pair as a file name. Already in the lock
+# through the core crate's script-approval hash; named here because this file
+# hashes something of its own.
+sha2 = { workspace = true }
+# Loopback, browser and team capabilities come directly from the operating
+# system's CSPRNG. Keep the implementation portable and the version reviewed
+# at the workspace boundary.
+rand = { workspace = true }
+# `SO_REUSEADDR` on the Google OAuth loopback seat, which has to be set before
+# the bind: the redirect port is fixed by the OAuth client's registration, so
+# a `TIME_WAIT` left by the last sign-in would refuse the next one and there is
+# no other port to fall back to (`google_login`).
+socket2 = { workspace = true }
+# Native vault reads necessarily allocate short-lived byte buffers. Ensure
+# cleanup writes cannot be optimized away after migration/promotion.
+zeroize = "1.9"
+uuid = { workspace = true }
+url = { workspace = true }
+# A Computer Use screenshot leaves the provider as PNG, bounded to the same
+# byte budget on every platform (`computer_use/screenshot_png.rs`). Already
+# in the lock through tray-icon; named here because this crate encodes.
+png = "0.18"
+# One window per profile. A second launch clobbers the hook endpoint file a
+# fresh boot writes (`hooks::start`), leaving the first window's agents
+# reporting to a process about to quit — Orca's single-instance lock exists
+# for its two discovery files for the same reason (single-instance-lock.ts:22).
+# The `semver` feature stays OFF on purpose: it keys the lock to the version,
+# and an upgrade would then run beside the build it replaces, clobbering away.
+tauri-plugin-single-instance = "2.4.3"
+trash = "5.2.6"
+# Browser cookie import (browser_cookies.rs): Chromium values arrive in the
+# three shapes its os_crypt writes them — AES-128-CBC under a PBKDF2-SHA1 key
+# on macOS/Linux, AES-256-GCM under the DPAPI-held key on Windows (orca
+# browser-cookie-import.ts:827-1231). All five are already in the lock through
+# the SSH stack; named here at those exact versions.
+aes = "0.9.2"
+cbc = "0.2.1"
+aes-gcm = "0.11.0"
+pbkdf2 = "0.13.0"
+sha1 = "0.11.0"
+# The import's readers (browser_cookie_import.rs): Chromium and Firefox keep
+# cookies in SQLite. Bundled, because the read must not depend on whichever
+# libsqlite3 a Linux distro shipped — the file format is the contract here.
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Android's bounded `uiautomator dump` is XML. Keep the existing Tauri-resolved
+# parser version explicit so this security boundary is not a hand-rolled parser.
+quick-xml = "=0.41.0"
+# Versioned updates (t-3191, docs/design/versioned-auto-update.md §2.2): the
+# window asks a signed static `latest.json` at a GitHub release asset and the
+# plugin verifies the minisign signature of what it downloads. Only `check`
+# and `download` are used — the plugin's `install` deletes the running app's
+# directory and renames over it, and this window swaps by `mv` on the one
+# restart road instead (deploy-overwrite-kills-running-binary). Neither
+# plugin is granted to any webview: the window reaches them through five
+# commands, and `relaunch_window` stays the one restart road.
+tauri-plugin-updater = "2.11.0"
+tauri-plugin-process = "2.3.1"
+# The version judgement (announced vs running, the skipped version, the
+# bundled zo against the installed one) is semver, not string order — 1.3.0
+# follows the older zo's 1.2.7 (design §2.7). Already in the lock through tauri.
+semver = "1"
+# The downloaded `.app.tar.gz` is unpacked beside the running bundle by this
+# crate (`update_store::stage_beside`), not by the plugin's `install`. Both
+# are in the lock through the plugin, at the versions it uses.
+tar = "0.4"
+flate2 = "1"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+# The app selects one native store explicitly instead of relying on keyring's
+# process-global default. This keeps backend choice deterministic and lets
+# tests inject an in-memory implementation without touching a user's vault.
+keyring-core = "=1.0.0"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# The built-in browsing surface uses CEF on macOS. Keep the exact binary
+# distribution pinned: the Rust wrapper, Chromium framework and sandbox helper
+# must all come from the same CEF build.
+cef = { version = "=152.0.0+152.0.5", optional = true, features = ["sandbox"] }
+apple-native-keyring-store = { version = "=1.0.1", default-features = false, features = ["keychain"] }
+# InputSource Services is the native fact behind Terminal → Option as Alt.
+# Keep it target-only: other platforms neither show nor consult that setting.
+core-foundation = "0.10"
+# The browser markup's capture door: wry exposes no page-snapshot API, but
+# tauri's `with_webview` hands over the raw WKWebView, and
+# `takeSnapshotWithConfiguration:` is how WebKit itself answers "what does
+# this page look like". All four crates are already compiled into this binary
+# through wry — these lines only add the handful of class features wry does
+# not enable (WKSnapshotConfiguration, NSImage, NSBitmapImageRep).
+objc2 = "0.6"
+block2 = "0.6"
+objc2-web-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "objc2-app-kit",
+    "block2",
+    "WKWebView",
+    "WKWebViewConfiguration",
+    "WKUserContentController",
+    "WKUserScript",
+    "WKSnapshotConfiguration",
+] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSImage",
+    "NSImageRep",
+    "NSBitmapImageRep",
+    "NSRunningApplication",
+    "NSPasteboard",
+    "objc2-core-graphics",
+    # The `zerocode-pick` helper asks to be the active application before its
+    # panel opens (`NSApplication`, which needs its `NSResponder` parent), and
+    # the window brings that helper forward by pid (`NSRunningApplication`,
+    # above). Both classes are compiled into this binary through wry already.
+    "NSApplication",
+    "NSResponder",
+    # The hang report's view census walks the main window's `NSView` tree and
+    # counts its `NSTrackingArea`s (`view_census.rs`); all three classes are
+    # already compiled into this binary through wry.
+    "NSWindow",
+    "NSView",
+    "NSTrackingArea",
+    # `runningApplicationWithProcessIdentifier` takes a `pid_t`, which the
+    # crate gates behind its `libc` feature; `libc` itself is already a
+    # dependency of this crate.
+    "libc",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSData",
+    "NSDictionary",
+    "NSArray",
+    "NSError",
+    "NSString",
+    "NSValue",
+] }
+# The emulator pane's fast road: the window server will hand over the picture
+# the Simulator is already drawing for a tenth of what CoreSimulator charges
+# for a fresh screenshot. Both crates are compiled into this binary already —
+# these lines add the two window features nothing else needed.
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGWindow",
+    "CGImage",
+    "CGGeometry",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "CFArray",
+    "CFDictionary",
+    "CFNumber",
+    "CFString",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# The helper's panel on Linux, through GTK — the backend the tauri dialog
+# plugin defaulted to here before the helper took the panel over.
+rfd = { version = "0.16", default-features = false, features = ["gtk3"] }
+# Tauri's ordinary clipboard plugin deliberately exposes only the explicit
+# copy/paste clipboard. Linux middle-click paste is the separate PRIMARY
+# selection, so this target-only dependency owns that one native boundary.
+arboard = { version = "=3.6.1", default-features = false, features = ["wayland-data-control"] }
+
+[target.'cfg(windows)'.dependencies]
+# `std::fs::rename` cannot replace an existing destination on Windows. The
+# durable stores use MoveFileExW to keep replacement atomic there as well.
+# `Win32_System_Power` carries SetThreadExecutionState — the Windows half of
+# keeping the machine awake while agents run (`awake.rs`).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Power"] }
+windows-native-keyring-store = "=1.1.0"
+# The Windows Computer Use provider (`computer_use/windows`): UI Automation
+# through COM, window enumeration and capture, synthetic input, the
+# clipboard, process identity. The same `windows` 0.61 that tauri, tao, wry
+# and webview2-com already compile into this binary — these lines add only
+# the feature gates nothing else needed. Kept off `windows-sys` on purpose:
+# UI Automation is a COM interface family, and hand-written vtables for it
+# would be the second, unreviewed copy of what this crate generates.
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_Storage_Xps",
+    "Win32_System_Com",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+zerocode-shell-state = { workspace = true, features = ["test-memory"] }

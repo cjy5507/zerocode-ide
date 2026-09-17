@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "unit": "USD per million tokens",
+  "openai": {
+    "source": "Orca codex-model-pricing.ts:13-81, the only witness for these rows: they are OpenAI's models, so the vendor reference this tree can check against does not cover them. A wrong row here produces a plausible dollar figure no test can catch. `long_context_threshold_tokens` is LONG_CONTEXT_THRESHOLD_TOKENS (codex-model-pricing.ts:11) and is a property of ONE request, which is why the surcharge is applied per turn. `reasoning_tiers` are the effort words an id may wear (REASONING_TIER_SUFFIXES, :83); they say nothing about its price. Matching: an id is normalised (tier stripped), then the row whose `ids` entry equals it or is a `-`-segment prefix of it answers, longest first; `exact` names an alias a row prices only when spelled exactly, never as a prefix — the bare gpt-5.6 routes to Sol, and a gpt-5.6- prefix would swallow terra, luna and any cheaper variant the vendor ships next.",
+    "long_context_threshold_tokens": 272000,
+    "reasoning_tiers": ["minimal", "low", "medium", "high", "xhigh", "auto", "none"],
+    "rows": [
+      { "exact": ["gpt-5", "gpt-5-codex"], "input": 1.25, "cached_input": 0.125, "output": 10.0 },
+      { "ids": ["gpt-5.1"], "input": 1.25, "cached_input": 0.125, "output": 10.0 },
+      { "ids": ["gpt-5.1-codex"], "input": 1.25, "cached_input": 0.125, "output": 10.0 },
+      { "ids": ["gpt-5.1-codex-max"], "input": 1.25, "cached_input": 0.125, "output": 10.0 },
+      { "ids": ["gpt-5.2"], "input": 1.75, "cached_input": 0.175, "output": 14.0 },
+      { "ids": ["gpt-5.2-codex"], "input": 1.75, "cached_input": 0.175, "output": 14.0 },
+      { "ids": ["gpt-5.3"], "input": 1.75, "cached_input": 0.175, "output": 14.0 },
+      { "ids": ["gpt-5.3-codex"], "input": 1.75, "cached_input": 0.175, "output": 14.0 },
+      { "ids": ["gpt-5.3-codex-spark"], "input": 1.75, "cached_input": 0.175, "output": 14.0 },
+      { "ids": ["gpt-5.4-mini"], "input": 0.75, "cached_input": 0.075, "output": 4.5 },
+      { "ids": ["gpt-5.4-nano"], "input": 0.2, "cached_input": 0.02, "output": 1.25 },
+      { "ids": ["gpt-5.4"], "input": 2.5, "cached_input": 0.25, "output": 15.0, "long": { "input": 5.0, "cached_input": 0.5, "output": 22.5 } },
+      { "ids": ["gpt-5.4-pro"], "input": 30.0, "cached_input": 30.0, "output": 180.0, "long": { "input": 60.0, "cached_input": 60.0, "output": 270.0 } },
+      { "ids": ["gpt-5.5"], "input": 5.0, "cached_input": 0.5, "output": 30.0, "long": { "input": 10.0, "cached_input": 1.0, "output": 45.0 } },
+      { "ids": ["gpt-5.5-pro"], "input": 30.0, "cached_input": 30.0, "output": 180.0, "long": { "input": 60.0, "cached_input": 60.0, "output": 270.0 } },
+      { "ids": ["gpt-5.6-sol"], "exact": ["gpt-5.6"], "input": 5.0, "cached_input": 0.5, "output": 30.0, "long": { "input": 10.0, "cached_input": 1.0, "output": 45.0 } },
+      { "ids": ["gpt-5.6-terra"], "input": 2.5, "cached_input": 0.25, "output": 15.0, "long": { "input": 5.0, "cached_input": 0.5, "output": 22.5 } },
+      { "ids": ["gpt-5.6-luna"], "input": 1.0, "cached_input": 0.1, "output": 6.0, "long": { "input": 2.0, "cached_input": 0.2, "output": 9.0 } }
+    ]
+  },
+  "anthropic": {
+    "source": "Cross-checked twice: Orca claude-model-pricing.ts:22-50 and the claude-api reference's current-models table agree on every row. Only `input` and `output` are listed per row; the cache rates are DEFINED as multiples of input (claude-api skill, shared/prompt-caching.md:141: reads ~0.1x, five-minute writes 1.25x, hour-long writes 2x) and are written once here instead of per row, where two more numbers per row would be two more places to drift. Orca carries a single cacheWrite and prices every cache-creation token at the five-minute rate, 37.5% under on hour-long writes, which are 70% of this machine's corpus. Matching: an id is lowercased, an anthropic/ or anthropic: prefix dropped and dots turned to dashes; the row whose family key (its id without claude-) the id names, followed by a non-digit, answers, longest first; a `legacy_base` row answers only for its strict shapes (bare, -thinking, -20YYMMDD, @20YYMMDD); and `prices_unknown_members_of` names the family whose point releases nobody has taught this table about bill at that row — the current rate, because three times too much (the legacy Opus 4 rate) is a worse answer than a little too little.",
+    "cache_read_rate": 0.1,
+    "cache_write_5m_rate": 1.25,
+    "cache_write_1h_rate": 2.0,
+    "rows": [
+      { "ids": ["claude-fable-5-1"], "input": 10.0, "output": 50.0, "cache_read_rate": 0.025, "note": "Reads a cached prefix at $0.25 per million, a fortieth of input and a quarter of Fable 5's rate (claude-api skill, shared/model-migration.md, Migrating to Claude Fable 5.1 -> Pricing)." },
+      { "ids": ["claude-fable-5"], "input": 10.0, "output": 50.0 },
+      { "ids": ["claude-opus-5"], "input": 5.0, "output": 25.0 },
+      { "ids": ["claude-opus-4-8"], "input": 5.0, "output": 25.0, "prices_unknown_members_of": ["opus-4"] },
+      { "ids": ["claude-opus-4-7"], "input": 5.0, "output": 25.0 },
+      { "ids": ["claude-opus-4-6"], "input": 5.0, "output": 25.0 },
+      { "ids": ["claude-opus-4-5"], "input": 5.0, "output": 25.0 },
+      { "ids": ["claude-opus-4-1"], "input": 15.0, "output": 75.0 },
+      { "ids": ["claude-opus-4"], "input": 15.0, "output": 75.0, "legacy_base": true, "note": "The ORIGINAL Opus 4 bills at three times the modern Opus rate (claude-model-pricing.ts:31-32); an old id normalised onto the modern row would under-report by two thirds, and a future point release matched here would be over-charged three times, so the shape is strict." },
+      { "ids": ["claude-sonnet-5"], "input": 3.0, "output": 15.0, "intro": { "input": 2.0, "output": 10.0, "through": "2026-08-31" }, "note": "The one row with a date on it: $2/$10 through 2026-08-31 is the vendor's own launch price, billed on the day a message was sent. After the window closes the row stops applying by itself." },
+      { "ids": ["claude-sonnet-4-6"], "input": 3.0, "output": 15.0, "prices_unknown_members_of": ["sonnet-4"] },
+      { "ids": ["claude-sonnet-4-5"], "input": 3.0, "output": 15.0 },
+      { "ids": ["claude-haiku-4-5"], "input": 1.0, "output": 5.0 }
+    ]
+  },
+  "typesafe": {
+    "source": "TypeSafe's launch post for its System One models (https://typesafe.ai/blog/introducing-system-one-models-and-jev, 2026-09-15), re-read 2026-09-17 for docs/design/jev-decision-shadow-20260917.md: input $0.042 per million tokens, output free. A System One call writes no prose and bills input only, and the post names no cache rates, so none are written here. `announced` sits beside the price because an early-access price is the kind that moves. Matching: the exact id, case-insensitive — a dated or pinned id no row names is unpriced, never billed at a neighbour's rate.",
+    "rows": [
+      { "ids": ["jev-latest"], "input": 0.042, "output": 0.0, "announced": "2026-09-15" }
+    ]
+  }
+}

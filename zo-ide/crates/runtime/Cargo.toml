@@ -1,0 +1,61 @@
+[package]
+name = "runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# Off by default. Dense semantic memory recall via local ONNX embeddings
+# (fastembed + ort/ONNX Runtime — a heavy native dependency). Strictly opt-in so
+# the default build stays lean and lexical-only; enable with
+# `--features memory-embed` to add embedding-backed recall + RRF fusion.
+memory-embed = ["dep:fastembed"]
+
+[dependencies]
+api = { path = "../api" }
+base64.workspace = true
+core-types = { path = "../core-types" }
+decision-core = { path = "../decision-core" }
+fastembed = { version = "5", optional = true }
+futures-util.workspace = true
+# Image dimension guard/downscale for the provider wire boundary (Anthropic
+# rejects an image over its dimension ceiling — 2000px once a request carries
+# many images). Narrow codec set, no default features.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+thiserror.workspace = true
+sha2.workspace = true
+glob = "0.3"
+ignore = "0.4"
+plugins = { path = "../plugins" }
+regex = "1"
+shlex = "1.3"
+reqwest = { workspace = true, features = ["stream"] }
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+telemetry = { package = "zo-telemetry", path = "../telemetry" }
+tempfile = "3"
+tokio = { workspace = true, features = ["io-util", "macros", "net", "process", "rt", "rt-multi-thread", "time"] }
+zerocode-core = { path = "../../../crates/zerocode-core" }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+pdf-extract = "0.10.0"
+
+[target.'cfg(unix)'.dependencies]
+# Safe Unix signal wrappers; workspace lints forbid direct unsafe libc calls.
+nix = { version = "0.29", features = ["fs", "process", "signal"] }
+rustix = { version = "1", features = ["fs", "process"] }
+
+[target.'cfg(windows)'.dependencies]
+# `cap-std` walks relative to retained directory handles on Windows; the
+# extension exposes no-follow opens so junctions and symlinks are refused.
+cap-fs-ext = "4.0.3"
+cap-std = "4.0.3"
+process-wrap = { version = "9.1.0", default-features = false, features = ["std", "creation-flags", "job-object"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+
+[dev-dependencies]
+session-corpus = { path = "../session-corpus" }
+
+[lints]
+workspace = true

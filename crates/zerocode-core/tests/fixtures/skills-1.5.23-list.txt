@@ -1,0 +1,28 @@
+⠙[1G[0K⠹[1G[0K⠸[1G[0K⠼[1G[0K⠴[1G[0K⠦[1G[0K⠧[1G[0K⠇[1G[0K⠏[1G[0K⠋[1G[0K⠙[1G[0K⠹[1G[0K
+│
+●   codex  Agent detected — installing non-interactively
+[?25l│
+◇  Source: /tmp/t-2721-cli-fixture
+[?25h[?25l│
+◇  Local path validated
+[?25h[?25l│
+◇  Found 2 skills
+[?25h
+│
+◇  Available Skills
+Web Tools
+│
+│    web-design
+│
+│      Design pages.
+
+General
+│
+│    rust-review
+│
+│      Review Rust code.
+
+│
+└  Use --skill <name> to install specific skills
+
+⠙[1G[0K

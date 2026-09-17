@@ -1,0 +1,1147 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>결 아틀리에</title>
+<!--
+  결 아틀리에 — 한 원고를 세 가지 결(편집·공간·색인)로 보여 주는 디자인 시연.
+  아트 디렉션: 한지 위의 먹과 주칠. 따뜻한 종이 바탕, 깊은 먹색 활자, 옻칠 붉은 한 점과 청자색 보조로 층을 쌓는다.
+  원칙: 시각 값은 #studio-core 의 토큰에서 한 번만 정의한다. 원고·시안·조절판은 스크립트의 한 정의에서 그린다.
+  #studio-core 는 내보낸 HTML 에 그대로 복사되고, 선택값은 #studio-choices 한 규칙으로만 덧씌운다.
+-->
+<style id="studio-core">
+/* ── 1 · 디자인 토큰 — 모든 시각 값의 원본 ───────────────────────── */
+:root {
+  color-scheme: light dark;
+
+  /* 팔레트: light-dark(라이트, 다크) 한 줄에 두 테마 */
+  --paper:      light-dark(#f4eee4, #13100e);
+  --paper-2:    light-dark(#ebe2d3, #1c1815);
+  --paper-3:    light-dark(#fffbf4, #262019);
+  --ink:        light-dark(#1d1813, #f0e9dd);
+  --ink-2:      light-dark(#584e44, #b9ad9c);
+  --ink-3:      light-dark(#857868, #8a7e6e);
+  --rule:       light-dark(#d5c9b6, #3b332b);
+  --accent:     light-dark(#b0381f, #ff7d57);   /* 주칠 */
+  --accent-2:   light-dark(#2a7a70, #6cd3c2);   /* 청자 */
+  --accent-3:   light-dark(#a8771c, #e9b85c);   /* 황토 */
+  --on-accent:  light-dark(#fffbf4, #1b0f0a);
+  --glass:      light-dark(rgb(255 251 244 / .64), rgb(38 32 25 / .58));
+  --glass-edge: light-dark(rgb(255 255 255 / .85), rgb(255 255 255 / .1));
+  --shade:      light-dark(rgb(64 40 18 / .16), rgb(0 0 0 / .55));
+  --focus:      var(--accent-2);
+  --tint-accent:   color-mix(in oklab, var(--accent) 14%, transparent);
+  --tint-accent-2: color-mix(in oklab, var(--accent-2) 16%, transparent);
+  --tint-ink:      color-mix(in oklab, var(--ink) 6%, transparent);
+  --tint-watermark: color-mix(in oklab, var(--accent) 8%, transparent);
+  --stage-sp-a: light-dark(#f7e3d3, #2a1712);
+  --stage-sp-b: light-dark(#dcebe6, #0f2421);
+  --stage-sp-c: light-dark(#fbf6ee, #120f0d);
+
+  /* 질감 */
+  --grain: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='1 0 0 0 0 1 0 0 0 0 1 0 0 0 0 0 0 0 .55 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  --grain-alpha: .42;
+  --dim: .52;            /* 강조 밖 원칙의 불투명도 */
+
+  /* 글꼴 — 모두 기기 글꼴, 외부 의존 없음 */
+  --font-sans:  "Pretendard", "Apple SD Gothic Neo", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
+  --font-serif: "AppleMyungjo", "Nanum Myeongjo", "Noto Serif KR", "Batang", serif;
+  --font-mono:  ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+
+  /* 조절판이 움직이는 두 손잡이 (기본값의 유일한 원본) */
+  --density: 1;
+  --type-scale: 1;
+
+  /* 모션: 0 이면 모든 지속 시간이 0 */
+  --motion: 1;
+
+  /* 곡률·선·그림자 */
+  --radius-1: 6px;
+  --radius-2: 14px;
+  --radius-3: 28px;
+  --radius-pill: 999px;
+  --hair: 1px;
+  --ring-w: 2px;
+  --shadow-1: 0 1px 2px var(--shade);
+  --shadow-2: 0 2px 6px var(--shade), 0 18px 40px -18px var(--shade);
+  --shadow-3: 0 40px 90px -40px var(--shade), 0 10px 30px -14px var(--shade);
+  --blur: 18px;
+  --lift: -3px;
+  --stroke-hair: 1.5;
+  --stroke-arc: 6;
+  --stroke-arc-on: 11;
+
+  /* 레이아웃 */
+  --measure: 36em;
+  --panel-w: 21rem;
+  --gutter: max(16px, 2.5vw);
+  --ease: cubic-bezier(.2, .7, .2, 1);
+  --lh-tight: 1.08;
+  --lh-snug: 1.35;
+  --lh-body: 1.72;
+  --track-label: .14em;
+  --track-display: -.03em;
+  --ed-column-min: 14rem;
+}
+
+/* 파생 토큰 — 루트와 각 시안이 자기 손잡이 값으로 다시 계산한다 */
+:root, .variant {
+  --fs-0: calc(1rem * var(--type-scale));
+  --type-ratio: 1.25;
+  --fs--2: calc(var(--fs--1) / var(--type-ratio));
+  --fs--1: calc(var(--fs-0) / var(--type-ratio));
+  --fs-1: calc(var(--fs-0) * var(--type-ratio));
+  --fs-2: calc(var(--fs-1) * var(--type-ratio));
+  --fs-3: calc(var(--fs-2) * var(--type-ratio));
+  --fs-4: calc(var(--fs-3) * var(--type-ratio));
+  --fs-5: calc(var(--fs-4) * var(--type-ratio));
+  --fs-6: calc(var(--fs-5) * var(--type-ratio));
+  --fs-display: clamp(var(--fs-4), calc(8.5cqi * var(--type-scale)), calc(var(--fs-6) * 1.5));
+  --fs-glyph:   clamp(var(--fs-5), calc(22cqi * var(--type-scale)), calc(var(--fs-6) * 3));
+
+  --s-1: calc(.5rem * var(--density));
+  --s-2: calc(var(--s-1) * 2);
+  --s-3: calc(var(--s-1) * 3);
+  --s-4: calc(var(--s-1) * 4);
+  --s-6: calc(var(--s-1) * 6);
+  --s-8: calc(var(--s-1) * 8);
+  --s-12: calc(var(--s-1) * 12);
+
+  --dur-1: calc(160ms * var(--motion));
+  --dur-2: calc(340ms * var(--motion));
+  --dur-3: calc(900ms * var(--motion));
+}
+
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"]  { color-scheme: dark; }
+:root[data-motion="reduce"] { --motion: 0; }
+@media (prefers-reduced-motion: reduce) { :root { --motion: 0; } }
+
+/* ── 2 · 바탕 ─────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  font: 400 var(--fs-0) / var(--lh-body) var(--font-sans);
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+  background:
+    radial-gradient(60rem 40rem at 92% -12%, var(--tint-accent), transparent 62%),
+    radial-gradient(52rem 38rem at -12% 108%, var(--tint-accent-2), transparent 62%),
+    var(--paper);
+  background-attachment: fixed;
+}
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image: var(--grain);
+  opacity: var(--grain-alpha);
+  mix-blend-mode: soft-light;
+}
+h1, h2, h3, p, ol, ul, dl, dd, figure, blockquote { margin: 0; }
+ol, ul { padding: 0; list-style: none; }
+button, input, select, textarea { font: inherit; color: inherit; }
+button { cursor: pointer; }
+:focus-visible { outline: var(--ring-w) solid var(--focus); outline-offset: 3px; border-radius: var(--radius-1); }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+.num { font-variant-numeric: tabular-nums; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.glyph { width: 1em; height: 1em; flex: none; fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: round; }
+.glyph .solid { fill: currentColor; stroke: none; }
+.sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+.sprite .stop-a { stop-color: var(--accent); }
+.sprite .stop-b { stop-color: var(--accent-3); }
+.sprite .stop-c { stop-color: var(--accent-2); }
+
+/* 원칙 강조: 하나를 고르면 나머지는 한 걸음 물러난다 */
+:root[data-focus] .variant [data-key]:not([data-on]) { opacity: var(--dim); }
+.variant [data-key] { transition: opacity var(--dur-2) var(--ease); }
+
+/* ── 3 · 시안 공통 ───────────────────────────────────────────────── */
+.variant-frame { container-type: inline-size; min-width: 0; }
+.variant { position: relative; isolation: isolate; color: var(--ink); font-size: var(--fs-0); line-height: var(--lh-body); }
+.variant button { -webkit-tap-highlight-color: transparent; }
+.kicker {
+  font: 600 var(--fs--1) / var(--lh-snug) var(--font-mono);
+  letter-spacing: var(--track-label);
+  color: var(--accent);
+}
+.pick-reset { appearance: none; margin: 0; border: 0; background: none; padding: 0; text-align: start; }
+.practice { display: flex; gap: var(--s-1); align-items: baseline; color: var(--ink-2); font-size: var(--fs--1); }
+.practice b { font: 600 var(--fs--2) / 1 var(--font-mono); letter-spacing: var(--track-label); color: var(--accent-2); flex: none; }
+
+/* ── 3a · 편집: 잡지 펼침면 ─────────────────────────────────────── */
+.v-editorial {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  gap: var(--s-8) var(--s-8);
+  padding: var(--s-8) var(--s-6) var(--s-4);
+  background: var(--paper-3);
+  border-radius: var(--radius-1);
+  box-shadow: var(--shadow-3), inset 0 0 0 var(--hair) var(--rule);
+}
+.ed-left { display: grid; align-content: start; gap: var(--s-4); }
+.ed-seal {
+  display: grid; place-items: center;
+  width: 2.6em; height: 2.6em;
+  font: 700 var(--fs-1) / 1 var(--font-serif);
+  color: var(--on-accent);
+  background: var(--accent);
+  border-radius: var(--radius-1);
+  box-shadow: var(--shadow-2);
+  rotate: -4deg;
+}
+.ed-title {
+  font: 700 var(--fs-display) / var(--lh-tight) var(--font-serif);
+  letter-spacing: var(--track-display);
+  text-wrap: balance;
+}
+.ed-title mark { background: none; color: var(--accent); }
+.ed-lead { color: var(--ink-2); max-width: var(--measure); text-wrap: pretty; }
+.ed-lead::first-letter {
+  float: left;
+  font: 700 calc(var(--fs-0) * 3.2) / .92 var(--font-serif);
+  color: var(--accent);
+  margin: .08em var(--s-1) 0 0;
+}
+.ed-quote {
+  padding-left: var(--s-2);
+  border-left: var(--ring-w) solid var(--accent);
+  font: 600 var(--fs-2) / var(--lh-snug) var(--font-serif);
+}
+.ed-right {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--ed-column-min)), 1fr));
+  gap: var(--s-6) var(--s-6);
+  align-items: start;
+}
+.ed-right::before {
+  content: "";
+  position: absolute;
+  inset-block: calc(var(--s-8) * -1) calc(var(--s-4) * -1);
+  left: calc(var(--s-8) * -.5 - var(--s-2));
+  width: var(--s-4);
+  background: linear-gradient(90deg, var(--tint-ink), transparent);
+  pointer-events: none;
+}
+.ed-item { position: relative; display: grid; gap: var(--s-2); padding-top: var(--s-2); border-top: var(--hair) solid var(--rule); }
+.ed-item:nth-child(even) { margin-top: var(--s-8); }
+.ed-hanja {
+  position: absolute; z-index: -1;
+  top: calc(var(--s-2) * -1); right: 0;
+  font: 700 var(--fs-glyph) / 1 var(--font-serif);
+  color: var(--tint-watermark);
+  pointer-events: none;
+}
+.ed-pick { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-2); width: 100%; }
+.ed-no, .ed-name, .ed-en { white-space: nowrap; flex-shrink: 0; }
+.ed-no { font: 600 var(--fs--1) / 1 var(--font-mono); color: var(--accent); font-variant-numeric: tabular-nums; }
+.ed-name { position: relative; font: 700 var(--fs-3) / var(--lh-tight) var(--font-serif); }
+.ed-name::after {
+  content: ""; position: absolute; left: 0; right: 0; bottom: -.12em; height: var(--ring-w);
+  background: var(--accent); transform: scaleX(0); transform-origin: left;
+  transition: transform var(--dur-2) var(--ease);
+}
+.ed-pick:hover .ed-name::after, .ed-pick[aria-pressed="true"] .ed-name::after { transform: scaleX(1); }
+.ed-en { font: 500 var(--fs--2) / 1 var(--font-mono); letter-spacing: var(--track-label); color: var(--ink-3); margin-left: auto; }
+.ed-line { font: 600 var(--fs-1) / var(--lh-snug) var(--font-serif); text-wrap: balance; }
+.ed-body { color: var(--ink-2); text-wrap: pretty; }
+.ed-folio {
+  grid-column: 1 / -1;
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s-2);
+  padding-top: var(--s-2);
+  border-top: var(--hair) solid var(--rule);
+  font: 500 var(--fs--2) / var(--lh-snug) var(--font-mono);
+  letter-spacing: var(--track-label);
+  color: var(--ink-3);
+}
+@container (max-width: 46rem) {
+  .v-editorial { grid-template-columns: minmax(0, 1fr); padding: var(--s-6) var(--s-3) var(--s-3); gap: var(--s-6); }
+  .ed-right::before { display: none; }
+}
+@container (max-width: 30rem) {
+  .ed-right { grid-template-columns: minmax(0, 1fr); }
+  .ed-item:nth-child(even) { margin-top: 0; }
+}
+
+/* ── 3b · 공간: 겹친 유리 무대 ──────────────────────────────────── */
+.v-spatial {
+  padding: var(--s-6);
+  border-radius: var(--radius-3);
+  overflow: hidden;
+  background:
+    radial-gradient(70% 55% at 12% 8%, var(--stage-sp-a), transparent 72%),
+    radial-gradient(60% 60% at 92% 96%, var(--stage-sp-b), transparent 72%),
+    var(--stage-sp-c);
+  box-shadow: var(--shadow-3), inset 0 0 0 var(--hair) var(--glass-edge);
+}
+.sp-aura { position: absolute; inset: 0; z-index: -1; pointer-events: none; }
+.sp-aura::before, .sp-aura::after {
+  content: ""; position: absolute; border-radius: 50%; filter: blur(calc(var(--blur) * 3));
+}
+.sp-aura::before { width: 46%; aspect-ratio: 1; left: 30%; top: 26%; background: var(--tint-accent); }
+.sp-aura::after  { width: 34%; aspect-ratio: 1; right: 4%; top: 4%; background: var(--tint-accent-2); }
+.sp-head { position: relative; z-index: 2; display: grid; gap: var(--s-2); max-width: var(--measure); }
+.sp-title {
+  font: 800 var(--fs-display) / var(--lh-tight) var(--font-sans);
+  letter-spacing: var(--track-display);
+  text-wrap: balance;
+}
+.sp-title mark {
+  background: linear-gradient(100deg, var(--accent), var(--accent-3));
+  -webkit-background-clip: text; background-clip: text;
+  color: transparent;
+}
+.sp-lead { color: var(--ink-2); text-wrap: pretty; }
+.sp-field {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: calc(var(--s-12) + 16cqi);
+  row-gap: var(--s-12);
+  margin-top: var(--s-8);
+  padding-block: var(--s-4);
+}
+.sp-orbit {
+  position: absolute; z-index: 0;
+  left: 50%; top: 50%;
+  width: min(100%, 36rem);
+  translate: -50% -50%;
+  overflow: visible;
+}
+.sp-ring { fill: none; stroke: var(--rule); stroke-width: var(--stroke-hair); }
+.sp-arc {
+  fill: none; stroke: url(#grad-arc); stroke-width: var(--stroke-arc); stroke-linecap: round;
+  stroke-dasharray: 1 1; stroke-dashoffset: calc(1 - var(--arc));
+  transition: stroke-dashoffset var(--dur-3) var(--ease), stroke-width var(--dur-2) var(--ease);
+}
+.sp-dot { fill: var(--paper-3); stroke: var(--accent); stroke-width: var(--stroke-hair); }
+.sp-g { transform-box: view-box; transform-origin: 50% 50%; rotate: var(--turn); }
+.sp-g:nth-of-type(1) { --arc: .58; --turn: -100deg; }
+.sp-g:nth-of-type(2) { --arc: .44; --turn: 10deg; }
+.sp-g:nth-of-type(3) { --arc: .32; --turn: 150deg; }
+.sp-g:nth-of-type(4) { --arc: .22; --turn: 230deg; }
+.sp-g[data-on] .sp-arc { stroke-dashoffset: 0; stroke-width: var(--stroke-arc-on); }
+.sp-core { font: 700 120px / 1 var(--font-serif); fill: var(--ink); text-anchor: middle; dominant-baseline: central; }
+.sp-core-sub { font: 600 15px / 1 var(--font-mono); letter-spacing: var(--track-label); fill: var(--ink-3); text-anchor: middle; }
+.sp-card {
+  position: relative; z-index: 1;
+  display: grid; gap: var(--s-1); align-content: start;
+  max-width: 24rem; width: 100%;
+  padding: var(--s-3);
+  border: var(--hair) solid var(--glass-edge);
+  border-radius: var(--radius-2);
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(1.4);
+  backdrop-filter: blur(var(--blur)) saturate(1.4);
+  box-shadow: var(--shadow-2);
+  transition: translate var(--dur-2) var(--ease), box-shadow var(--dur-2) var(--ease), border-color var(--dur-2) var(--ease), opacity var(--dur-2) var(--ease);
+}
+.sp-card:nth-of-type(even) { justify-self: end; }
+.sp-card:nth-of-type(2) { margin-top: var(--s-8); }
+.sp-card:nth-of-type(3) { margin-top: calc(var(--s-6) * -1); }
+.sp-card:hover { translate: 0 calc(var(--lift) * var(--motion)); box-shadow: var(--shadow-3); }
+.sp-card[aria-pressed="true"] { border-color: var(--accent); box-shadow: var(--shadow-3), 0 0 0 var(--hair) var(--accent); }
+.sp-top { display: flex; align-items: center; gap: var(--s-2); }
+.sp-badge {
+  display: grid; place-items: center;
+  width: 2.4em; height: 2.4em; flex: none;
+  border-radius: 50%;
+  font-size: var(--fs-1);
+  color: var(--accent);
+  background: var(--tint-accent);
+  transition: background var(--dur-2) var(--ease), color var(--dur-2) var(--ease);
+}
+.sp-card[aria-pressed="true"] .sp-badge { background: var(--accent); color: var(--on-accent); }
+.sp-name { font: 800 var(--fs-2) / var(--lh-tight) var(--font-sans); }
+.sp-card:nth-of-type(1) .sp-name, .sp-card:nth-of-type(4) .sp-name { font-size: var(--fs-3); }
+.sp-en { display: block; font: 500 var(--fs--2) / 1.4 var(--font-mono); letter-spacing: var(--track-label); color: var(--ink-3); }
+.sp-line { color: var(--ink-2); }
+.sp-more, .ix-body { display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows var(--dur-2) var(--ease), visibility 0s linear var(--dur-2); }
+.sp-more > span { overflow: hidden; }
+.sp-more .practice { padding-top: var(--s-1); }
+.sp-card[aria-pressed="true"] .sp-more, .ix-trigger[aria-expanded="true"] + .ix-body { grid-template-rows: 1fr; visibility: visible; transition-delay: 0s; }
+@container (max-width: 46rem) {
+  .v-spatial { padding: var(--s-4) var(--s-3); border-radius: var(--radius-2); }
+  .sp-field { column-gap: var(--s-2); row-gap: var(--s-2); margin-top: var(--s-4); }
+  .sp-orbit { position: relative; left: auto; top: auto; translate: none; grid-column: 1 / -1; justify-self: center; width: min(100%, 20rem); }
+  .sp-card, .sp-card:nth-of-type(n) { margin-top: 0; justify-self: stretch; max-width: none; }
+}
+@container (max-width: 26rem) {
+  .sp-field { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ── 3c · 색인: 스위스 목록 ─────────────────────────────────────── */
+.v-index {
+  --ix-no: 2.75rem;
+  --ix-cols: var(--ix-no) minmax(7rem, 1fr) minmax(0, 1.6fr) minmax(0, 1.6fr) 1.25rem;
+  padding: var(--s-6);
+  background: var(--paper-3);
+  border: var(--hair) solid var(--rule);
+  border-radius: var(--radius-1);
+  box-shadow: var(--shadow-1);
+}
+.ix-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2.4fr);
+  gap: var(--s-2) var(--s-6);
+  padding-bottom: var(--s-4);
+  border-bottom: calc(var(--hair) * 3) solid var(--ink);
+}
+.ix-meta { display: grid; align-content: start; gap: var(--s-1); font: 500 var(--fs--2) / var(--lh-snug) var(--font-mono); letter-spacing: var(--track-label); color: var(--ink-3); }
+.ix-meta .kicker { font-size: inherit; }
+.ix-title { font: 700 var(--fs-4) / var(--lh-tight) var(--font-sans); letter-spacing: var(--track-display); text-wrap: balance; }
+.ix-title mark { background: var(--tint-accent); color: inherit; padding-inline: .08em; }
+.ix-lead { grid-column: 2; color: var(--ink-2); max-width: var(--measure); font-size: var(--fs--1); }
+.ix-cols, .ix-trigger { display: grid; grid-template-columns: var(--ix-cols); column-gap: var(--s-3); align-items: baseline; }
+.ix-cols {
+  padding-block: var(--s-1);
+  border-bottom: var(--hair) solid var(--ink);
+  font: 600 var(--fs--2) / var(--lh-snug) var(--font-mono);
+  letter-spacing: var(--track-label);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+.ix-row { border-bottom: var(--hair) solid var(--rule); }
+.ix-row[data-on] { background: linear-gradient(90deg, var(--tint-accent), transparent 70%); }
+.ix-trigger { width: 100%; padding-block: var(--s-2); transition: background var(--dur-1) var(--ease); }
+.ix-trigger:hover { background: var(--tint-ink); }
+.ix-no { font: 600 var(--fs--1) / 1 var(--font-mono); color: var(--accent); font-variant-numeric: tabular-nums; }
+.ix-name { font-weight: 700; }
+.ix-name .ix-en { display: block; font: 500 var(--fs--2) / 1.5 var(--font-mono); letter-spacing: var(--track-label); color: var(--ink-3); }
+.ix-line { font-size: var(--fs--1); }
+.ix-practice-cell { font-size: var(--fs--1); color: var(--ink-2); }
+.ix-chev { color: var(--ink-3); transition: rotate var(--dur-2) var(--ease); }
+.ix-trigger[aria-expanded="true"] .ix-chev { rotate: 180deg; color: var(--accent); }
+.ix-body > div { overflow: hidden; display: grid; grid-template-columns: var(--ix-cols); column-gap: var(--s-3); }
+.ix-body p { grid-column: 3 / 5; padding-bottom: var(--s-2); color: var(--ink-2); max-width: var(--measure); }
+.ix-body .practice { display: none; }
+.ix-foot {
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s-2);
+  padding-top: var(--s-2);
+  font: 500 var(--fs--2) / var(--lh-snug) var(--font-mono);
+  letter-spacing: var(--track-label);
+  color: var(--ink-3);
+}
+@container (max-width: 44rem) {
+  .v-index { --ix-cols: var(--ix-no) minmax(0, 1fr) 1.25rem; padding: var(--s-4) var(--s-3); }
+  .ix-head { grid-template-columns: minmax(0, 1fr); }
+  .ix-lead { grid-column: auto; }
+  .ix-cols span:nth-child(n+3):not(:last-child), .ix-practice-cell { display: none; }
+  .ix-no, .ix-name, .ix-chev { grid-row: 1; }
+  .ix-chev { grid-column: 3; }
+  .ix-line { grid-column: 2; grid-row: 2; color: var(--ink-2); }
+  .ix-body p { grid-column: 2 / 3; }
+  .ix-body .practice { display: flex; grid-column: 2 / 3; padding-bottom: var(--s-2); }
+}
+
+/* ── 5 · 내보낸 한 장 ─────────────────────────────────────────────── */
+.export-page { position: relative; z-index: 1; max-width: 80rem; margin-inline: auto; padding: var(--gutter); }
+</style>
+<style id="studio-chrome">
+/* ── 4 · 작업대 (내보내기에는 들어가지 않는다) ───────────────────── */
+.studio { position: relative; z-index: 1; max-width: 100rem; margin-inline: auto; padding-inline: var(--gutter); padding-block: var(--s-3) var(--s-6); }
+.masthead {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s-2) var(--s-6);
+  padding-block: var(--s-2) var(--s-4);
+}
+.brand { display: flex; align-items: center; gap: var(--s-2); }
+.brand-mark { width: 3rem; height: 3rem; flex: none; }
+.brand-mark .bm-ring { fill: none; stroke: var(--rule); stroke-width: 2; }
+.brand-mark .bm-arc { fill: none; stroke: url(#grad-arc); stroke-width: 5; stroke-linecap: round; }
+.brand-mark text { font: 700 20px / 1 var(--font-serif); fill: var(--ink); text-anchor: middle; dominant-baseline: central; }
+.brand h1 { font: 700 var(--fs-3) / var(--lh-tight) var(--font-serif); letter-spacing: var(--track-display); }
+.eyebrow {
+  display: inline-flex; align-items: center; gap: var(--s-1);
+  padding: .1em var(--s-1);
+  border: var(--hair) solid var(--rule);
+  border-radius: var(--radius-pill);
+  font: 600 var(--fs--2) / 1.6 var(--font-mono);
+  letter-spacing: var(--track-label);
+  color: var(--ink-2);
+  background: var(--glass);
+}
+.eyebrow::before { content: ""; width: .5em; height: .5em; border-radius: 50%; background: var(--accent); }
+.direction { max-width: 46ch; color: var(--ink-2); font-size: var(--fs--1); line-height: var(--lh-snug); }
+.direction strong { color: var(--ink); font-weight: 600; }
+.actions { display: flex; flex-wrap: wrap; gap: var(--s-1); justify-content: end; }
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: var(--s-1);
+  min-height: 2.5rem;
+  padding: 0 var(--s-2);
+  border: var(--hair) solid var(--rule);
+  border-radius: var(--radius-pill);
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(var(--blur)); backdrop-filter: blur(var(--blur));
+  font-size: var(--fs--1); font-weight: 600;
+  transition: background var(--dur-1) var(--ease), border-color var(--dur-1) var(--ease), translate var(--dur-1) var(--ease);
+}
+.btn:hover { border-color: var(--ink-3); translate: 0 calc(var(--lift) * .5 * var(--motion)); }
+.btn .glyph { font-size: 1.1em; stroke-width: 4; }
+.btn-primary { background: var(--ink); color: var(--paper); border-color: var(--ink); box-shadow: var(--shadow-2); }
+.btn-primary:hover { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+kbd {
+  display: inline-block; min-width: 1.6em; padding: 0 .35em;
+  border: var(--hair) solid var(--rule); border-bottom-width: calc(var(--hair) * 2);
+  border-radius: var(--radius-1);
+  font: 600 var(--fs--2) / 1.6 var(--font-mono); text-align: center;
+  background: var(--paper-3);
+}
+
+.workbench {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--panel-w);
+  gap: var(--s-4);
+  align-items: start;
+}
+.studio[data-panel="closed"] .workbench { grid-template-columns: minmax(0, 1fr); }
+.studio[data-panel="closed"] .panel { display: none; }
+.panel-open { display: none; }
+.studio[data-panel="closed"] .panel-open { display: inline-flex; }
+
+.stage { grid-column: 1; grid-row: 1; min-width: 0; display: grid; gap: var(--s-2); }
+.stage-bar {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s-1) var(--s-3);
+  font-size: var(--fs--1); color: var(--ink-2);
+}
+.stage-bar strong { font: 700 var(--fs-1) / var(--lh-tight) var(--font-serif); color: var(--ink); }
+.stage-bar .mono { font-size: var(--fs--2); letter-spacing: var(--track-label); color: var(--ink-3); }
+.canvas { display: grid; gap: var(--s-4); view-transition-name: stage-canvas; }
+:root[data-view="compare"] .canvas { grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr)); align-items: start; }
+.frame-cap { display: none; }
+:root[data-view="compare"] .frame-cap {
+  display: flex; flex-wrap: wrap; align-items: center; gap: var(--s-1) var(--s-2);
+  margin-bottom: var(--s-2);
+}
+.frame-cap strong { font: 700 var(--fs-1) / 1 var(--font-serif); }
+.frame-cap span { font-size: var(--fs--1); color: var(--ink-3); }
+.frame-cap .btn { margin-left: auto; min-height: 2rem; }
+.frame-cap .is-current { display: none; font: 600 var(--fs--2) / 1.6 var(--font-mono); letter-spacing: var(--track-label); color: var(--accent); }
+.variant-frame[data-current] .frame-cap .is-current { display: inline; }
+:root[data-view="compare"] .variant-frame[data-current] > .variant { outline: var(--ring-w) solid var(--accent); outline-offset: var(--s-1); }
+::view-transition-group(stage-canvas) { animation-duration: var(--dur-2); animation-timing-function: var(--ease); }
+::view-transition-old(stage-canvas), ::view-transition-new(stage-canvas) { animation-duration: var(--dur-2); }
+
+.panel {
+  grid-column: 2; grid-row: 1;
+  position: sticky; top: var(--s-2);
+  display: grid; gap: var(--s-3);
+  max-height: calc(100vh - var(--s-4));
+  overflow: auto;
+  padding: var(--s-3);
+  border: var(--hair) solid var(--glass-edge);
+  border-radius: var(--radius-3);
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(1.3); backdrop-filter: blur(var(--blur)) saturate(1.3);
+  box-shadow: var(--shadow-3);
+}
+.panel-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
+.panel-head h2 { font: 700 var(--fs-1) / 1 var(--font-serif); }
+.panel-head .btn { min-height: 2rem; }
+.controls { display: grid; gap: var(--s-3); }
+.control { border: 0; margin: 0; padding: 0; min-width: 0; display: grid; gap: var(--s-1); }
+.control legend, .control > label, .control-label {
+  display: flex; justify-content: space-between; gap: var(--s-1);
+  width: 100%; padding: 0;
+  font: 600 var(--fs--2) / 1.6 var(--font-mono);
+  letter-spacing: var(--track-label);
+  color: var(--ink-3);
+}
+.seg { display: grid; grid-template-columns: repeat(auto-fit, minmax(4.5rem, 1fr)); gap: var(--s-1); }
+.seg label { position: relative; display: block; }
+.seg input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; }
+.seg .opt {
+  display: grid; gap: .1em; place-items: center; text-align: center;
+  min-height: 2.5rem; padding: var(--s-1);
+  border: var(--hair) solid var(--rule);
+  border-radius: var(--radius-2);
+  background: var(--paper-3);
+  font-size: var(--fs--1); font-weight: 600;
+  transition: border-color var(--dur-1) var(--ease), background var(--dur-1) var(--ease), color var(--dur-1) var(--ease);
+}
+.seg label:hover .opt { border-color: var(--ink-3); }
+.seg input:checked + .opt { border-color: var(--ink); background: var(--ink); color: var(--paper); }
+.seg input:focus-visible + .opt { outline: var(--ring-w) solid var(--focus); outline-offset: 2px; }
+.seg-variant { grid-template-columns: minmax(0, 1fr); }
+.seg-variant .opt { grid-template-columns: 4.5rem minmax(0, 1fr); place-items: center start; text-align: start; gap: var(--s-2); padding: var(--s-1); }
+.seg-variant .opt small { display: block; font-weight: 400; color: inherit; opacity: .72; font-size: var(--fs--2); }
+.thumb { width: 4.5rem; height: 3rem; border-radius: var(--radius-1); background: var(--paper-2); }
+.thumb .t-ink { fill: currentColor; opacity: .55; }
+.thumb .t-acc { fill: var(--accent); }
+.thumb .t-line { stroke: currentColor; stroke-width: 1.5; opacity: .5; fill: none; }
+.thumb .t-arc { stroke: var(--accent); stroke-width: 2.5; fill: none; }
+.seg input:checked + .opt .thumb { background: color-mix(in oklab, var(--paper) 16%, transparent); }
+.range { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: var(--s-2); }
+.range input { width: 100%; accent-color: var(--accent); margin: 0; min-height: 2rem; }
+.range output { font: 600 var(--fs--1) / 1 var(--font-mono); font-variant-numeric: tabular-nums; min-width: 5ch; text-align: end; }
+.range-note { font-size: var(--fs--2); color: var(--ink-3); }
+.axes-wrap { display: grid; gap: var(--s-1); }
+.axes { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-1) var(--s-2); padding: var(--s-2); border-radius: var(--radius-2); background: var(--tint-ink); font-size: var(--fs--1); }
+.axes dt { font: 600 var(--fs--2) / 1.8 var(--font-mono); letter-spacing: var(--track-label); color: var(--ink-3); }
+.axes-title { font: 700 var(--fs-0) / 1.3 var(--font-serif); }
+.hint { font-size: var(--fs--2); color: var(--ink-3); line-height: 2; }
+.panel-open { position: fixed; right: var(--gutter); bottom: var(--gutter); z-index: 5; box-shadow: var(--shadow-3); }
+
+.colophon {
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: var(--s-2);
+  margin-top: var(--s-6); padding-top: var(--s-2);
+  border-top: var(--hair) solid var(--rule);
+  font-size: var(--fs--2); color: var(--ink-3);
+}
+
+.export-dialog {
+  width: min(44rem, calc(100vw - 2 * var(--gutter)));
+  max-height: calc(100vh - 2 * var(--gutter));
+  padding: 0;
+  border: var(--hair) solid var(--glass-edge);
+  border-radius: var(--radius-3);
+  color: var(--ink);
+  background: var(--paper-3);
+  box-shadow: var(--shadow-3);
+}
+.export-dialog::backdrop { background: color-mix(in oklab, var(--paper) 55%, transparent); -webkit-backdrop-filter: blur(var(--blur)); backdrop-filter: blur(var(--blur)); }
+.export-dialog form { display: grid; gap: var(--s-2); padding: var(--s-4); }
+.export-dialog h2 { font: 700 var(--fs-2) / var(--lh-tight) var(--font-serif); }
+.export-dialog p { color: var(--ink-2); font-size: var(--fs--1); }
+.export-summary { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--s-1) var(--s-2); font-size: var(--fs--1); }
+.export-summary dt { font: 600 var(--fs--2) / 1.8 var(--font-mono); letter-spacing: var(--track-label); color: var(--ink-3); }
+.export-dialog textarea {
+  width: 100%; min-height: 10rem; resize: vertical;
+  padding: var(--s-2);
+  border: var(--hair) solid var(--rule); border-radius: var(--radius-2);
+  background: var(--paper-2);
+  font: 400 var(--fs--2) / 1.5 var(--font-mono);
+  word-break: break-all;
+}
+.export-status { min-height: 1.6em; font-size: var(--fs--1); font-weight: 600; color: var(--accent-2); }
+.export-status[data-tone="warn"] { color: var(--accent); }
+.dialog-actions { display: flex; flex-wrap: wrap; gap: var(--s-1); justify-content: end; }
+
+@media (max-width: 64rem) {
+  .masthead { grid-template-columns: minmax(0, 1fr) auto; }
+  .direction { grid-column: 1 / -1; grid-row: 2; max-width: none; }
+  .workbench { grid-template-columns: minmax(0, 1fr); }
+  .panel { grid-column: 1; grid-row: auto; position: static; max-height: none; }
+  .stage { grid-row: auto; }
+  .seg-variant { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .seg-variant .opt { grid-template-columns: minmax(0, 1fr); place-items: center; text-align: center; gap: var(--s-1); }
+  .seg-variant .thumb { width: 100%; max-width: 4.5rem; }
+}
+@media (max-width: 30rem) {
+  .masthead { grid-template-columns: minmax(0, 1fr); }
+  .actions { justify-content: start; }
+}
+</style>
+<style id="studio-choices"></style>
+</head>
+<body>
+<!-- 도형 원본: 원칙 기호·그라데이션은 여기서 한 번 정의하고 <use>로 참조한다 (내보내기에도 복사된다) -->
+<svg class="sprite" id="sprite" aria-hidden="true" focusable="false">
+  <defs>
+    <linearGradient id="grad-arc" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" class="stop-a"/><stop offset=".55" class="stop-b"/><stop offset="1" class="stop-c"/>
+    </linearGradient>
+    <symbol id="g-hierarchy" viewBox="0 0 64 64"><rect class="solid" x="8" y="10" width="48" height="12" rx="3"/><rect class="solid" x="8" y="28" width="32" height="8" rx="2"/><rect class="solid" x="8" y="42" width="20" height="5" rx="2"/><rect class="solid" x="8" y="52" width="20" height="5" rx="2"/></symbol>
+    <symbol id="g-rhythm" viewBox="0 0 64 64"><path d="M10 14v36M20 14v36M30 14v36M40 22v20M50 14v36"/></symbol>
+    <symbol id="g-contrast" viewBox="0 0 64 64"><circle cx="32" cy="32" r="22"/><path class="solid" d="M32 10a22 22 0 0 1 0 44z"/></symbol>
+    <symbol id="g-space" viewBox="0 0 64 64"><rect x="8" y="8" width="48" height="48" rx="6"/><rect class="solid" x="16" y="16" width="10" height="10" rx="2"/></symbol>
+    <symbol id="g-chevron" viewBox="0 0 64 64"><path d="M18 26l14 14 14-14"/></symbol>
+    <symbol id="g-reset" viewBox="0 0 64 64"><path d="M16 32a16 16 0 1 0 5-11.6M16 14v8h8"/></symbol>
+    <symbol id="g-export" viewBox="0 0 64 64"><path d="M32 12v28M20 28l12 12 12-12M14 48h36"/></symbol>
+    <symbol id="g-panel" viewBox="0 0 64 64"><rect x="10" y="12" width="44" height="40" rx="6"/><path d="M40 12v40"/></symbol>
+  </defs>
+</svg>
+
+<div class="studio" id="studio">
+  <header class="masthead">
+    <div class="brand">
+      <svg class="brand-mark" viewBox="0 0 48 48" aria-hidden="true">
+        <circle class="bm-ring" cx="24" cy="24" r="20"/>
+        <circle class="bm-arc" cx="24" cy="24" r="20" pathLength="1" stroke-dasharray=".62 1" transform="rotate(-100 24 24)"/>
+        <text x="24" y="25">결</text>
+      </svg>
+      <div>
+        <p class="eyebrow">디자인 시연</p>
+        <h1>결 아틀리에</h1>
+      </div>
+    </div>
+    <p class="direction"><strong>한 원고, 세 가지 결.</strong> 같은 문장을 잡지 펼침면·겹친 유리 무대·스위스 목록으로 짜 보고 밀도·글자·테마를 바꿔 비교합니다. 아트 디렉션은 한지 위의 먹과 주칠 — 따뜻한 종이, 깊은 먹색 활자, 붉은 한 점과 청자색 보조.</p>
+    <div class="actions">
+      <button type="button" class="btn" id="reset"><svg class="glyph" aria-hidden="true"><use href="#g-reset"/></svg>초기화</button>
+      <button type="button" class="btn btn-primary" id="export"><svg class="glyph" aria-hidden="true"><use href="#g-export"/></svg>HTML 내보내기</button>
+    </div>
+  </header>
+
+  <main class="workbench">
+    <aside class="panel" id="panel" aria-labelledby="panel-title">
+      <div class="panel-head">
+        <h2 id="panel-title">조절판</h2>
+        <button type="button" class="btn" id="panel-close" aria-controls="panel" aria-expanded="true"><svg class="glyph" aria-hidden="true"><use href="#g-panel"/></svg>접기</button>
+      </div>
+      <form class="controls" id="controls" aria-label="표현 조절"></form>
+      <section class="axes-wrap" aria-labelledby="axes-title">
+        <h3 class="axes-title" id="axes-title"></h3>
+        <dl class="axes" id="axes"></dl>
+      </section>
+      <p class="hint"><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> 시안 전환 · <kbd>C</kbd> 나란히 보기 · 선택지 안에서는 <kbd>←</kbd><kbd>→</kbd></p>
+    </aside>
+
+    <section class="stage" aria-labelledby="stage-name">
+      <div class="stage-bar" id="stage-bar"></div>
+      <p class="sr-only" id="announce" role="status" aria-live="polite"></p>
+      <div class="canvas" id="canvas"></div>
+      <noscript><p>이 시연은 내장 스크립트로 원고를 그립니다. 스크립트를 켜면 세 시안이 나타납니다.</p></noscript>
+    </section>
+  </main>
+
+  <footer class="colophon">
+    <p id="colophon-note"></p>
+    <p>외부 글꼴·이미지·라이브러리 없이 한 파일로 동작합니다.</p>
+  </footer>
+
+  <button type="button" class="btn btn-primary panel-open" id="panel-open" aria-controls="panel" aria-expanded="false"><svg class="glyph" aria-hidden="true"><use href="#g-panel"/></svg>조절판 열기</button>
+</div>
+
+<dialog class="export-dialog" id="export-dialog" aria-labelledby="export-title">
+  <form method="dialog">
+    <h2 id="export-title">독립 HTML로 내보내기</h2>
+    <p>지금 고른 시안 하나를 선택값이 CSS에 새겨진 한 파일로 만듭니다. 조절판은 빠지고, 원칙을 누르는 상호작용과 테마는 그대로 남습니다.</p>
+    <dl class="export-summary" id="export-summary"></dl>
+    <label class="sr-only" for="export-code">내보낼 HTML 원문</label>
+    <textarea id="export-code" readonly spellcheck="false"></textarea>
+    <p class="export-status" id="export-status" role="status" aria-live="polite"></p>
+    <div class="dialog-actions">
+      <button type="button" class="btn" id="export-copy">원문 복사</button>
+      <button type="button" class="btn btn-primary" id="export-save">파일로 저장</button>
+      <button type="submit" class="btn" value="close">닫기</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- 원고: 세 시안이 모두 이 한 벌을 읽는다 -->
+<script type="application/json" id="manuscript">
+{
+  "kicker": "디자인 시연용 원고 · 한 원고를 세 가지 결로",
+  "title": "화면에 결을 내는 네 가지 방법",
+  "mark": "결",
+  "lead": "같은 문장도 어디에, 어떤 크기로, 어떤 간격으로 놓이느냐에 따라 다르게 읽힙니다. 이 원고는 위계·리듬·대비·여백 네 가지를 짚습니다. 내용은 그대로 두고 구성과 활자만 바꿔 차이를 비교해 보세요.",
+  "quote": "내용은 그대로, 결만 바꾼다.",
+  "note": "이 페이지의 문구는 디자인 시연을 위해 쓴 것입니다. 성능·효과·사용자 수에 관한 주장은 담지 않았습니다.",
+  "principles": [
+    { "key": "hierarchy", "hanja": "位", "name": "위계", "en": "Hierarchy",
+      "line": "무엇을 먼저 읽을지 크기와 무게로 정합니다.",
+      "body": "눈은 가장 크고 진한 것부터 읽습니다. 제목·요지·근거가 같은 크기로 서 있으면 독자가 순서를 직접 찾아야 합니다. 단계 사이를 확실히 벌려야 위계가 보입니다.",
+      "practice": "크기 단계는 세 칸 이상 벌리고, 한 화면의 주인공은 하나만 둡니다." },
+    { "key": "rhythm", "hanja": "律", "name": "리듬", "en": "Rhythm",
+      "line": "되풀이되는 간격이 읽는 속도를 만듭니다.",
+      "body": "같은 간격이 되풀이되면 눈이 박자를 탑니다. 박자가 일정할수록 예외 하나가 또렷해집니다. 간격은 한 기준 단위의 배수로만 고릅니다.",
+      "practice": "간격은 기준 단위의 배수만 쓰고, 끊고 싶은 곳에서만 박자를 바꿉니다." },
+    { "key": "contrast", "hanja": "對", "name": "대비", "en": "Contrast",
+      "line": "다른 것은 확실히 다르게 둡니다.",
+      "body": "비슷하지만 조금 다른 두 요소는 실수처럼 보입니다. 크기·색·무게 가운데 하나를 골라 분명히 벌리고, 나머지는 같게 둡니다.",
+      "practice": "강조색은 한 점에만 쓰고, 본문과 바탕의 명도 차는 넉넉히 둡니다." },
+    { "key": "space", "hanja": "白", "name": "여백", "en": "Space",
+      "line": "비워 둔 자리가 내용을 묶고 나눕니다.",
+      "body": "여백은 남은 공간이 아니라 관계를 말하는 재료입니다. 가까운 것은 한 묶음으로, 먼 것은 다른 이야기로 읽힙니다.",
+      "practice": "묶음 안의 간격보다 묶음 사이의 간격을 두 배 이상 넓힙니다." }
+  ]
+}
+</script>
+<script>
+"use strict";
+const root = document.documentElement;
+const $ = (sel, el = document) => el.querySelector(sel);
+const M = JSON.parse($("#manuscript").textContent);
+
+/* ── 그리기 도우미 ── */
+const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+const esc = (s) => String(s).replace(/[&<>"']/g, (ch) => ESC[ch]);
+const pad = (i) => String(i + 1).padStart(2, "0");
+const glyph = (key, cls = "glyph") => `<svg class="${cls}" aria-hidden="true" focusable="false"><use href="#g-${key}"/></svg>`;
+const markTitle = (m) => esc(m.title).replace(esc(m.mark), `<mark>${esc(m.mark)}</mark>`);
+const practice = (p) => `<span class="practice"><b>실천</b><span>${esc(p.practice)}</span></span>`;
+
+/* 공간 시안의 고리 도형 좌표 (SVG 좌표계의 그림 데이터) */
+const ORBIT = { size: 600, r0: 118, step: 46, dot: 7, coreDy: -10, subDy: 72 };
+function orbit(m) {
+  const c = ORBIT.size / 2;
+  const rings = m.principles.map((p, i) => {
+    const r = ORBIT.r0 + i * ORBIT.step;
+    return `<g class="sp-g" data-key="${p.key}"><circle class="sp-ring" cx="${c}" cy="${c}" r="${r}"/><circle class="sp-arc" cx="${c}" cy="${c}" r="${r}" pathLength="1"/><circle class="sp-dot" cx="${c + r}" cy="${c}" r="${ORBIT.dot}"/></g>`;
+  }).join("");
+  return `<svg class="sp-orbit" viewBox="0 0 ${ORBIT.size} ${ORBIT.size}" role="img" aria-label="네 원칙을 네 겹의 고리로 그린 도형. 원칙을 고르면 그 고리가 한 바퀴를 채웁니다.">${rings}`
+    + `<text class="sp-core" x="${c}" y="${c + ORBIT.coreDy}">${esc(m.mark)}</text>`
+    + `<text class="sp-core-sub" x="${c}" y="${c + ORBIT.subDy}">원칙 ${m.principles.length}</text></svg>`;
+}
+
+/* ── 시안 정의: 이름·차이·썸네일·그리기가 한 곳에 ── */
+const AXES = ["구조", "활자", "밀도", "상호작용"];
+const VARIANTS = [
+  {
+    id: "editorial", name: "편집", sub: "잡지 펼침면",
+    axes: ["펼침면 두 쪽, 비대칭 단과 어긋난 행", "명조 대형 제목, 첫 글자 장식, 한자 워터마크", "넉넉한 읽기 폭, 본문을 모두 펼침", "원칙 이름을 눌러 밑줄 강조"],
+    thumb: '<rect class="t-acc" x="6" y="6" width="6" height="6" rx="1"/><rect class="t-ink" x="6" y="16" width="22" height="5" rx="1"/><rect class="t-ink" x="6" y="24" width="16" height="5" rx="1"/><path class="t-line" d="M6 36h22M6 41h18M34 6v36M40 10h12M56 16h12M40 28h12M56 34h12"/>',
+    render: (m, v) => `
+<article class="variant v-editorial" aria-label="${v.name} 시안">
+  <div class="ed-left">
+    <span class="ed-seal" aria-hidden="true">${esc(m.mark)}</span>
+    <p class="kicker">${esc(m.kicker)}</p>
+    <h2 class="ed-title">${markTitle(m)}</h2>
+    <p class="ed-lead">${esc(m.lead)}</p>
+    <blockquote class="ed-quote">${esc(m.quote)}</blockquote>
+  </div>
+  <ol class="ed-right">${m.principles.map((p, i) => `
+    <li class="ed-item" data-key="${p.key}">
+      <span class="ed-hanja" aria-hidden="true">${esc(p.hanja)}</span>
+      <button type="button" class="pick-reset ed-pick" data-pick="${p.key}" aria-pressed="false"><span class="ed-no">${pad(i)}</span><span class="ed-name">${esc(p.name)}</span><span class="ed-en">${esc(p.en)}</span></button>
+      <p class="ed-line">${esc(p.line)}</p>
+      <p class="ed-body">${esc(p.body)}</p>
+      ${practice(p)}
+    </li>`).join("")}
+  </ol>
+  <p class="ed-folio"><span>결 아틀리에 — ${v.name} 시안</span><span class="num">원칙 ${m.principles.length}</span></p>
+</article>`,
+  },
+  {
+    id: "spatial", name: "공간", sub: "겹친 유리 무대",
+    axes: ["중심 도형 둘레에 크기가 다른 유리판", "굵은 고딕 제목, 그라데이션 강조, 고정폭 라벨", "요지만 먼저, 실천은 고를 때 펼침", "판을 누르면 그 고리가 한 바퀴를 채움"],
+    thumb: '<circle class="t-line" cx="36" cy="28" r="14"/><path class="t-arc" d="M36 14a14 14 0 0 1 14 14"/><rect class="t-ink" x="6" y="5" width="26" height="5" rx="1"/><rect class="t-line" x="6" y="17" width="17" height="11" rx="2"/><rect class="t-line" x="49" y="22" width="17" height="11" rx="2"/><rect class="t-line" x="10" y="33" width="15" height="10" rx="2"/>',
+    render: (m, v) => `
+<article class="variant v-spatial" aria-label="${v.name} 시안">
+  <div class="sp-aura" aria-hidden="true"></div>
+  <header class="sp-head">
+    <p class="kicker">${esc(m.kicker)}</p>
+    <h2 class="sp-title">${markTitle(m)}</h2>
+    <p class="sp-lead">${esc(m.lead)}</p>
+  </header>
+  <div class="sp-field">
+    ${orbit(m)}${m.principles.map((p, i) => `
+    <button type="button" class="pick-reset sp-card" data-pick="${p.key}" data-key="${p.key}" aria-pressed="false">
+      <span class="sp-top"><span class="sp-badge">${glyph(p.key)}</span><span><span class="sp-name">${esc(p.name)}</span><span class="sp-en">${pad(i)} · ${esc(p.en)}</span></span></span>
+      <span class="sp-line">${esc(p.line)}</span>
+      <span class="sp-more"><span>${practice(p)}</span></span>
+    </button>`).join("")}
+  </div>
+</article>`,
+  },
+  {
+    id: "index", name: "색인", sub: "스위스 목록",
+    axes: ["번호·원칙·요지·실천 네 열의 격자", "고딕 본문과 고정폭 라벨, 굵은 괘선", "촘촘한 행, 본문은 펼칠 때만", "행을 눌러 본문을 펼치고 접음"],
+    thumb: '<rect class="t-ink" x="6" y="5" width="30" height="5" rx="1"/><rect class="t-ink" x="6" y="14" width="60" height="2"/><rect class="t-acc" x="6" y="20" width="4" height="4"/><rect class="t-acc" x="6" y="28" width="4" height="4"/><rect class="t-acc" x="6" y="36" width="4" height="4"/><path class="t-line" d="M14 22h14M32 22h34M14 30h14M32 30h34M14 38h14M32 38h34M6 44h60"/>',
+    render: (m, v) => `
+<article class="variant v-index" aria-label="${v.name} 시안">
+  <header class="ix-head">
+    <div class="ix-meta"><span class="kicker">${esc(m.kicker)}</span><span class="num">원칙 ${m.principles.length}</span></div>
+    <h2 class="ix-title">${markTitle(m)}</h2>
+    <p class="ix-lead">${esc(m.lead)}</p>
+  </header>
+  <div class="ix-cols" aria-hidden="true"><span>번호</span><span>원칙</span><span>요지</span><span>실천</span><span></span></div>
+  <ol class="ix-list">${m.principles.map((p, i) => `
+    <li class="ix-row" data-key="${p.key}">
+      <button type="button" class="pick-reset ix-trigger" data-pick="${p.key}" aria-expanded="false" aria-controls="ix-${p.key}">
+        <span class="ix-no">${pad(i)}</span>
+        <span class="ix-name">${esc(p.name)}<span class="ix-en">${esc(p.en)}</span></span>
+        <span class="ix-line">${esc(p.line)}</span>
+        <span class="ix-practice-cell">${esc(p.practice)}</span>
+        ${glyph("chevron", "glyph ix-chev")}
+      </button>
+      <div class="ix-body" id="ix-${p.key}"><div><p>${esc(p.body)}</p>${practice(p)}</div></div>
+    </li>`).join("")}
+  </ol>
+  <p class="ix-foot"><span>${esc(m.note)}</span><span>${v.name} 시안</span></p>
+</article>`,
+  },
+];
+const variantOf = (id) => VARIANTS.find((v) => v.id === id) || VARIANTS[0];
+
+/* ── 조절판 정의: 폼·상태·저장·내보내기가 모두 이 표를 읽는다 ──
+   token 은 기본값을 CSS 토큰에서 읽고, attr 는 initial 을 쓴다. */
+const CONTROLS = [
+  { id: "variant", label: "시안", kind: "attr", attr: "data-variant", initial: VARIANTS[0].id, className: "seg-variant",
+    options: VARIANTS.map((v) => ({ value: v.id, label: v.name, sub: v.sub, thumb: v.thumb })) },
+  { id: "view", label: "보기", kind: "attr", attr: "data-view", initial: "single", exported: false,
+    options: [{ value: "single", label: "하나씩" }, { value: "compare", label: "나란히" }] },
+  { id: "density", label: "밀도", kind: "token", token: "--density", min: 0.7, max: 1.4, step: 0.05, unit: "×",
+    describe: () => "간격 단위에 곱함" },
+  { id: "type", label: "글자 크기", kind: "token", token: "--type-scale", min: 0.85, max: 1.3, step: 0.025, unit: "×",
+    describe: () => { const px = measureBodyPx(); return px ? `본문 ${px}px` : ""; } },
+  { id: "theme", label: "테마", kind: "attr", attr: "data-theme", initial: "",
+    options: [{ value: "", label: "시스템" }, { value: "light", label: "라이트" }, { value: "dark", label: "다크" }] },
+  { id: "motion", label: "모션", kind: "attr", attr: "data-motion", initial: "",
+    options: [{ value: "", label: "시스템" }, { value: "reduce", label: "줄임" }] },
+  { id: "focus", label: "강조 원칙", kind: "attr", attr: "data-focus", initial: "", ui: false,
+    options: [{ value: "", label: "없음" }, ...M.principles.map((p) => ({ value: p.key, label: p.name }))] },
+];
+const control = (id) => CONTROLS.find((c) => c.id === id);
+const optionLabel = (c, value) => (c.options.find((o) => o.value === value) || {}).label || "";
+const readToken = (name) => Number.parseFloat(getComputedStyle(root).getPropertyValue(name));
+
+/* 원본값: #studio-choices 가 비어 있는 지금 CSS 토큰을 읽는다. 초기화는 이 값으로 돌아간다. */
+const BASE = Object.fromEntries(CONTROLS.map((c) => [c.id, c.kind === "token" ? readToken(c.token) : c.initial]));
+
+function normalize(c, raw) {
+  if (c.kind === "token") {
+    const n = Number.parseFloat(raw);
+    return Number.isFinite(n) ? Math.min(c.max, Math.max(c.min, n)) : BASE[c.id];
+  }
+  return c.options.some((o) => o.value === raw) ? raw : BASE[c.id];
+}
+
+/* 선택값 → CSS 한 규칙. 화면과 내보내기가 같은 함수를 쓴다. */
+function choicesCSS(s) {
+  const decls = CONTROLS.filter((c) => c.kind === "token" && s[c.id] !== BASE[c.id]).map((c) => `${c.token}: ${s[c.id]};`);
+  return decls.length ? `.variant { ${decls.join(" ")} }` : "";
+}
+function choiceLine(s, { forExport = false } = {}) {
+  return CONTROLS
+    .filter((c) => c.ui !== false && c.id !== "variant" && !(forExport && c.exported === false))
+    .map((c) => `${c.label} ${c.kind === "token" ? s[c.id].toFixed(2) + c.unit : optionLabel(c, s[c.id])}`)
+    .join(" · ");
+}
+
+/* ── 원칙 강조: 내보낸 파일에도 이 두 함수의 원문이 그대로 들어간다 ── */
+function syncPicks(key) {
+  for (const el of document.querySelectorAll("[data-pick]")) {
+    el.setAttribute(el.hasAttribute("aria-expanded") ? "aria-expanded" : "aria-pressed", String(el.dataset.pick === key));
+  }
+  for (const el of document.querySelectorAll(".variant [data-key]")) el.toggleAttribute("data-on", el.dataset.key === key);
+}
+function studioPick(event) {
+  const btn = event.target.closest && event.target.closest("[data-pick]");
+  if (!btn) return undefined;
+  const html = document.documentElement;
+  const key = html.dataset.focus === btn.dataset.pick ? "" : btn.dataset.pick;
+  if (key) html.dataset.focus = key; else delete html.dataset.focus;
+  syncPicks(key);
+  return key;
+}
+
+/* ── 작업대 ── */
+const studio = $("#studio");
+const canvas = $("#canvas");
+const form = $("#controls");
+const choicesStyle = $("#studio-choices");
+const dialog = $("#export-dialog");
+const STORE_KEY = "gyeol-atelier:v1";
+let state = { ...BASE };
+
+function controlHTML(c) {
+  if (c.ui === false) return "";
+  if (c.kind === "token") {
+    return `
+    <div class="control">
+      <label for="c-${c.id}"><span>${c.label}</span><span class="range-note" id="n-${c.id}"></span></label>
+      <div class="range"><input type="range" id="c-${c.id}" name="${c.id}" min="${c.min}" max="${c.max}" step="${c.step}" aria-describedby="n-${c.id}"><output for="c-${c.id}" id="o-${c.id}"></output></div>
+    </div>`;
+  }
+  return `
+    <fieldset class="control"><legend>${c.label}</legend>
+      <div class="seg ${c.className || ""}">${c.options.map((o) => `
+        <label><input type="radio" name="${c.id}" value="${esc(o.value)}"><span class="opt">${o.thumb ? `<svg class="thumb" viewBox="0 0 72 48" aria-hidden="true">${o.thumb}</svg>` : ""}<span>${esc(o.label)}${o.sub ? `<small>${esc(o.sub)}</small>` : ""}</span></span></label>`).join("")}
+      </div>
+    </fieldset>`;
+}
+
+function measureBodyPx() {
+  const el = $(".variant-frame:not([hidden]) .variant", canvas);
+  return el ? Number.parseFloat(getComputedStyle(el).fontSize).toFixed(1) : "";
+}
+
+function syncForm() {
+  for (const c of CONTROLS) {
+    if (c.ui === false) continue;
+    if (c.kind === "token") {
+      const text = `${state[c.id].toFixed(2)}${c.unit}`;
+      const input = form.elements[c.id];
+      input.value = String(state[c.id]);
+      input.setAttribute("aria-valuetext", text);
+      $(`#o-${c.id}`).textContent = text;
+      $(`#n-${c.id}`).textContent = c.describe ? c.describe() : "";
+    } else {
+      for (const radio of form.querySelectorAll(`input[name="${c.id}"]`)) radio.checked = radio.value === state[c.id];
+    }
+  }
+}
+
+function syncReadouts() {
+  const v = variantOf(state.variant);
+  $("#stage-bar").innerHTML = `<strong id="stage-name">${esc(v.name)}</strong><span>${esc(v.sub)}</span><span class="mono">${esc(choiceLine(state))}</span>`;
+  $("#axes-title").textContent = `${v.name} — 무엇이 다른가`;
+  $("#axes").innerHTML = AXES.map((a, i) => `<dt>${a}</dt><dd>${esc(v.axes[i])}</dd>`).join("");
+}
+
+function save() {
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch { /* 저장소가 막혀도 화면은 그대로 */ }
+}
+function load() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
+    if (!raw || typeof raw !== "object") return {};
+    return Object.fromEntries(CONTROLS.filter((c) => c.id in raw).map((c) => [c.id, normalize(c, raw[c.id])]));
+  } catch { return {}; }
+}
+
+function apply(next) {
+  state = next;
+  for (const c of CONTROLS) {
+    if (c.kind !== "attr") continue;
+    if (state[c.id]) root.setAttribute(c.attr, state[c.id]); else root.removeAttribute(c.attr);
+  }
+  choicesStyle.textContent = choicesCSS(state);
+  for (const frame of canvas.children) {
+    const current = frame.dataset.frame === state.variant;
+    frame.toggleAttribute("data-current", current);
+    frame.hidden = state.view !== "compare" && !current;
+  }
+  syncPicks(state.focus);
+  syncForm();
+  syncReadouts();
+  save();
+}
+
+const motionOn = () => readToken("--motion") !== 0;
+/* 상태는 즉시 확정하고, 화면 반영만 전환 안에서 한다 — 전환 도중 들어온 입력도 잃지 않는다. */
+function update(patch) {
+  const prev = state;
+  state = { ...state, ...patch };
+  const moved = state.variant !== prev.variant || state.view !== prev.view;
+  if (moved) {
+    const v = variantOf(state.variant);
+    $("#announce").textContent = `${v.name} 시안, ${optionLabel(control("view"), state.view)} 보기`;
+  }
+  if (moved && motionOn() && document.startViewTransition) document.startViewTransition(() => apply(state));
+  else apply(state);
+}
+
+/* ── 내보내기: 같은 원본 CSS + 선택값 규칙 + 고른 시안 하나 ── */
+function exportDocument() {
+  const v = variantOf(state.variant);
+  const attrs = CONTROLS
+    .filter((c) => c.kind === "attr" && c.exported !== false && state[c.id])
+    .map((c) => ` ${c.attr}="${esc(state[c.id])}"`).join("");
+  const piece = $(`[data-frame="${v.id}"] > .variant`, canvas).cloneNode(true);
+  return [
+    "<!doctype html>",
+    `<html lang="ko"${attrs}>`,
+    "<head>",
+    '<meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>결 아틀리에 · ${esc(v.name)} 시안</title>`,
+    `<style id="studio-core">${$("#studio-core").textContent}</style>`,
+    `<style id="studio-choices">${choicesCSS(state)}</style>`,
+    "</head>",
+    "<body>",
+    $("#sprite").outerHTML,
+    `<main class="export-page"><div class="variant-frame">${piece.outerHTML}</div></main>`,
+    `<script>\n${syncPicks}\n${studioPick}\ndocument.addEventListener("click", studioPick);\n<\/script>`,
+    "</body>",
+    "</html>",
+    "",
+  ].join("\n");
+}
+
+let exported = null;
+function setStatus(tone, text) {
+  const el = $("#export-status");
+  el.dataset.tone = tone;
+  el.textContent = text;
+}
+function openExport() {
+  const v = variantOf(state.variant);
+  const html = exportDocument();
+  exported = { html, name: `gyeol-atelier-${v.id}.html` };
+  $("#export-code").value = html;
+  const rows = [
+    ["파일", exported.name],
+    ["시안", `${v.name} — ${v.sub}`],
+    ["선택값", choiceLine(state, { forExport: true })],
+    ["크기", `${(new Blob([html]).size / 1024).toFixed(1)} KB · 외부 파일 없음`],
+  ];
+  $("#export-summary").innerHTML = rows.map(([k, val]) => `<dt>${k}</dt><dd>${esc(val)}</dd>`).join("");
+  setStatus("", "");
+  dialog.showModal();
+}
+function saveExport() {
+  const url = URL.createObjectURL(new Blob([exported.html], { type: "text/html;charset=utf-8" }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: exported.name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+  setStatus("", `${exported.name} 저장을 브라우저에 요청했습니다. 저장되지 않았다면 이 화면이 다운로드를 막은 것이니 ‘원문 복사’를 쓰세요.`);
+}
+async function copyExport() {
+  const size = exported.html.length.toLocaleString("ko-KR");
+  try {
+    await navigator.clipboard.writeText(exported.html);
+    setStatus("ok", `클립보드에 복사했습니다 (${size}자). 빈 .html 파일에 붙여 넣으면 됩니다.`);
+  } catch {
+    const code = $("#export-code");
+    code.focus();
+    code.select();
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch { ok = false; }
+    if (ok) setStatus("ok", `클립보드에 복사했습니다 (${size}자).`);
+    else setStatus("warn", "이 화면에서는 클립보드가 막혀 있습니다. 원문을 모두 선택해 두었으니 ⌘C 또는 Ctrl+C로 복사하세요.");
+  }
+}
+
+function setPanel(open) {
+  studio.dataset.panel = open ? "open" : "closed";
+  for (const id of ["#panel-close", "#panel-open"]) $(id).setAttribute("aria-expanded", String(open));
+  $(open ? "#panel-close" : "#panel-open").focus();
+}
+
+/* ── 연결 ── */
+form.addEventListener("input", (e) => {
+  const c = control(e.target.name);
+  if (c) update({ [c.id]: normalize(c, e.target.value) });
+});
+form.addEventListener("submit", (e) => e.preventDefault());
+document.addEventListener("click", (e) => {
+  const key = studioPick(e);
+  if (key !== undefined) { state = { ...state, focus: key }; save(); return; }
+  const choose = e.target.closest("[data-choose]");
+  if (choose) update({ variant: choose.dataset.choose, view: "single" });
+});
+document.addEventListener("keydown", (e) => {
+  if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || dialog.open) return;
+  if (e.target.closest("textarea, select, [contenteditable], input:not([type='radio']):not([type='range'])")) return;
+  const n = Number(e.key);
+  if (Number.isInteger(n) && n >= 1 && n <= VARIANTS.length) {
+    e.preventDefault();
+    update({ variant: VARIANTS[n - 1].id });
+  } else if (["c", "C", "ㅊ"].includes(e.key)) {
+    e.preventDefault();
+    update({ view: state.view === "compare" ? "single" : "compare" });
+  }
+});
+$("#reset").addEventListener("click", () => update({ ...BASE }));
+$("#export").addEventListener("click", openExport);
+$("#export-save").addEventListener("click", saveExport);
+$("#export-copy").addEventListener("click", copyExport);
+$("#panel-close").addEventListener("click", () => setPanel(false));
+$("#panel-open").addEventListener("click", () => setPanel(true));
+
+/* ── 시작 ── */
+canvas.innerHTML = VARIANTS.map((v) => `
+  <section class="variant-frame" data-frame="${v.id}">
+    <div class="frame-cap"><strong>${esc(v.name)}</strong><span>${esc(v.sub)}</span><span class="is-current">지금 선택</span><button type="button" class="btn" data-choose="${v.id}">이 시안 크게 보기</button></div>
+    ${v.render(M, v)}
+  </section>`).join("");
+form.innerHTML = CONTROLS.map(controlHTML).join("");
+$("#colophon-note").textContent = M.note;
+apply({ ...BASE, ...load() });
+</script>
+</body>
+</html>

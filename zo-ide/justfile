@@ -1,0 +1,67 @@
+# zo-ide 게이트 — 파이프 없이 종료코드를 그대로 본다.
+# 부모 Zo 프로세스의 실제 TeamInbox store를 어떤 레시피에도 물려주지 않는다.
+# `unexport`와 recipe `env`는 shell이 아니라 just가 처리하므로 Windows/Unix에서 같다.
+unexport ZO_TEAM_INBOX_STORE
+
+default: check
+
+check:
+    cargo check --workspace
+
+fmt:
+    cargo fmt --all --check
+
+fmt-check:
+    cargo fmt -p zo-ide --check
+
+# `--workspace --lib --tests` 는 워크스페이스의 모든 크레이트의 lib 과 시험
+# 대상(lib test·bin test·통합 시험)을 함께 본다. 이 줄이 없던 동안 zo-ide 밖
+# 크레이트의 시험 코드에 pedantic 지적 42개가 조용히 쌓였다 — `cargo clippy
+# --workspace --all-targets` 만 보던 것들이다. 앞의 두 줄은 그대로 둔다:
+# zo-ide 의 bin 과 e2e_hermetic 을 이름으로 못박아 둔 계약이다.
+clippy:
+    cargo clippy -p zo-ide --lib --bins --no-deps -- -D warnings && cargo clippy -p zo-ide --test e2e_hermetic --no-deps -- -D warnings && cargo clippy --workspace --lib --tests --no-deps -- -D warnings
+
+# --no-fail-fast (here and in e2e): a flake in one test binary must not hide
+# the rest — the release lane re-runs only the names that failed.
+[env("ZO_DISABLE_KEYCHAIN", "1")]
+test:
+    # The costly workflow lane has its own warning-only CI job. Its schema stays covered.
+    cargo test --workspace --lib --bins --tests --no-fail-fast -- --skip lane_a_repeats_have_identical_verdicts
+
+e2e:
+    ZO_DISABLE_KEYCHAIN=1 cargo test -p zo-ide --test e2e_hermetic --no-fail-fast -- --test-threads=1
+
+# 병렬 플레이크 자 — 런타임 스위트를 두 번 연속 돌린다. 한 번 초록은 운일 수
+# 있고, 두 번 연속 초록이 아니면 env 경주가 남아 있다는 뜻이다(r45).
+test-twice:
+    cargo test -p runtime --lib && cargo test -p runtime --lib
+
+# rustdoc 게이트 — 공개 문서가 비공개 항목을 [`이렇게`] 가리키면 링크가 풀리지
+# 않고 rustdoc 이 `private_intra_doc_links` 를 낸다. 루트 크레이트들은 그 자리를
+# 코드 스팬으로 적는 규칙을 이미 따르는데(3691cae8, d948d638) zo-ide 에는 이
+# 자를 대는 사람이 없어 조용히 쌓였다. 릴리즈 문서 레시피가 뒤늦게 빨개지는 대신
+# 여기서 걸린다.
+doc:
+    RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+
+verify: fmt-check doc clippy test e2e win-check-if-available
+
+gate: fmt clippy test
+
+# Windows 교차 검증 — `cfg(not(unix))` 코드는 여기서만 컴파일된다.
+#
+# macOS 에서 이 워크스페이스를 Windows 로 컴파일하려면 둘이 필요하다:
+# `cargo install cargo-xwin` (MSVC 헤더·라이브러리를 받아 온다) 와
+# `brew install llvm` (`ring` 의 C 를 묶는 `llvm-lib`). 그 둘 없이는
+# `assert.h` 또는 `llvm-lib` 에서 멈추는데, 그건 소스가 아니라 툴체인 문제다.
+#
+# 이 레시피가 없으면 `cfg(windows)` 분기는 아무도 컴파일하지 않는 죽은 글이
+# 되고, 실제로 그렇게 세 개가 썩어 있었다.
+win-check:
+    PATH="/opt/homebrew/opt/llvm/bin:$PATH" cargo xwin check --workspace --all-targets --target x86_64-pc-windows-msvc
+
+# `verify` member: the cross-compile where the tools exist, a loud SKIPPED where
+# they do not (a CI macOS runner; the Windows leg compiles for real there).
+win-check-if-available:
+    if ! command -v cargo-xwin >/dev/null 2>&1 || [ ! -x /opt/homebrew/opt/llvm/bin/llvm-lib ]; then echo "win-check SKIPPED: cargo-xwin or llvm-lib not installed (the Windows CI leg compiles this for real)"; elif [ ! -d "${CARGO_TARGET_DIR:-target}/x86_64-pc-windows-msvc" ]; then echo "win-check SKIPPED: cold Windows target — a fresh checkout would cross-compile every dependency (the release lane's scratch clone sat in it for 2 h on 2026-09-10); run \`just win-check\` once to warm this checkout"; else just win-check; fi

@@ -1,0 +1,21 @@
+{
+  "sha": "abc1234bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "phase": "sweep",
+  "started_at": "2026-09-07T08:40:00Z",
+  "updated_at": "2026-09-07T08:51:12Z",
+  "phases": [
+    { "name": "archive", "rc": 0, "secs": 4 },
+    { "name": "gate-root", "rc": 0, "secs": 241 },
+    { "name": "gate-zo", "rc": 0, "secs": 302 },
+    { "name": "flakes", "rc": 0, "secs": 0 },
+    { "name": "push", "rc": 0, "secs": 3 },
+    { "name": "build-app", "rc": 0, "secs": 288 },
+    { "name": "swap-app", "rc": 0, "secs": 1 },
+    { "name": "build-zo", "rc": 0, "secs": 119 },
+    { "name": "swap-zo", "rc": 0, "secs": 0 },
+    { "name": "sweep", "rc": 0, "secs": 2 }
+  ],
+  "disk_free_gb": 23,
+  "outcome": "green",
+  "reason": null
+}

@@ -1,0 +1,45 @@
+# Known load flakes the release lane judges solo ×3 instead of calling red.
+# One test per line, `root:` for the root gate (just verify at the repo root),
+# `zo:` for the zo gate (zo-ide/just verify). A red naming anything NOT listed
+# here is red for real (design §3.5). Matching is by substring of the failing
+# test path in cargo's `failures:` block, so a bare name covers every module.
+# History: memory zerocode-repo-tooling-traps 80/93, t-2863 (the sidecar
+# contract), the old ~/.local/share/zerocode/release/release-judge.sh.
+root:codex_queue::tests::installed_codex_starts_and_cleans_an_explicit_worker_sidecar
+# 2026-09-14 (coordinator gate for t-3993 on a loaded machine, load 11-19): the sidecar probe read `Unknown` where
+# `Confirmed` was expected in one of three full `--bins` runs, green solo x3 — the same codex-sidecar timing family as
+# the line above; the two fake-Codex nudge tests below flaked in the other two runs, also green solo x3.
+root:codex_queue::tests::bound_queue_process_receives_the_fixed_pointer_and_minimal_environment
+zo:preferences::tests::persisted_fast_models_are_normalized_to_the_bare_family
+zo:a_pane_shrunk_without_sigwinch_loses_no_rows
+zo:opening_a_pane_uses_its_private_events_channel
+# 2026-09-14 v1.3.62 root gate (load 26 while two worker builds ran beside it):
+# the same zerocode-lane supervisor test (crates/zerocode-lane/tests/supervisor.rs)
+# read PaneChannelNotReady{waited: 2s} — the root workspace runs it too, and the
+# zo: prefix above does not cover the root lane. Same timing family; judge solo ×3.
+root:opening_a_pane_uses_its_private_events_channel
+zo:todo_lifecycle_hooks
+zo:a_pane_grown_without_sigwinch
+# 2026-09-07 first lane run (3e97e3f9): the zo e2e waits for R34_FOLLOW_UP_DONE and timed out while the root
+# and zo gates ran in parallel for the first time; the same name flaked in rel-zo-0bbc7260/2d4ac0e5/310f200a.
+# A timing wait under load, not a regression — judged solo x3 like the other pane timings.
+# 2026-09-07 second lane run (2f83aedb, gates still side by side): three more deadline waits under load —
+# the fake-Codex nudge deadline (restart_nudge_runtime.rs:478) and zo's SIGTERM hand-back within TEST_TIMEOUT
+# (e2e_hermetic.rs:2507). Judged solo x3; the lane now runs the gates one after the other (PARALLEL_GATES=0).
+root:restart_nudge_runtime::tests::a_codex_resume_that_banners_mcp_warnings_before_its_prompt_still_submits
+root:restart_nudge_runtime::tests::a_fake_codex_resume_receives_the_nudge_on_stdin_and_yields_one_log_line
+zo:e2e_sigterm_ends_the_session_and_hands_the_terminal_back
+# 2026-09-10 local gates run side by side again (root+zo+xwin, load 13–17): the scheduler e2e's ninety-second
+# wakeup wait missed its deadline (e2e_hermetic.rs:5946) and passed solo in 53 s. A deadline wait under load.
+zo:e2e_schedule_wakeup_fires_once_inside_ninety_seconds
+# 2026-09-11 01:54 lane (c8627a49): the machine sat at load 30 with fseventsd at 93% CPU for hours after the
+# day's gates and cross-compiles churned ~60 GB of target output; six pty e2e tests timed out "waiting for
+# the terminal to settle" (e2e/harness.rs:57) and the gate took 6 h. All six passed solo in 75 s once load
+# fell to 2. Terminal-settle waits under load, like the pane timings above.
+zo:e2e_a_context_trim_stands_on_the_status_row_and_never_in_the_transcript
+zo:e2e_background_exit_reaches_next_boundary_and_persisted_task_output
+zo:e2e_capabilities_report_real_build_and_keep_launch_immutable_across_session_changes
+zo:e2e_compaction_after_a_tool_turn_died_sends_a_valid_summary_request
+zo:e2e_continue_after_a_tool_turn_died_mid_flight_sends_a_valid_request
+zo:e2e_continue_replays_two_completed_turns_from_the_same_session
+

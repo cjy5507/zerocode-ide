@@ -1,0 +1,10 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,6 +1,6 @@
+ /// Inclusive end of a range, including a singleton.
+ pub fn inclusive_count(start: u32, end: u32) -> u32 {
+-    end.saturating_sub(start)
++    if end < start { 0 } else { end - start + 1 }
+ }
+ 
+ #[cfg(test)]

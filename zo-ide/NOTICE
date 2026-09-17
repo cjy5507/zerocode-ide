@@ -1,0 +1,28 @@
+zo
+Copyright (c) 2026 cjy5507
+Licensed under the MIT License (see LICENSE).
+
+================================================================================
+Trademarks and non-affiliation
+================================================================================
+
+zo is an independent, community project. It is NOT affiliated with,
+sponsored by, endorsed by, or otherwise connected to Anthropic, OpenAI,
+Google, or any other model provider.
+
+All product names, logos, and brands are the property of their respective
+owners. Their use in this project is for identification and interoperability
+purposes only and does not imply endorsement.
+
+  - "Claude", "Anthropic", "Opus", "Sonnet", and "Haiku" are trademarks of
+    Anthropic, PBC.
+  - "OpenAI", "GPT", and "ChatGPT" are trademarks of OpenAI.
+  - "Gemini" and "Google" are trademarks of Google LLC.
+  - "Grok" and "xAI" are trademarks of X.AI Corp.
+
+zo communicates with these providers' public APIs using credentials that
+you supply. You are responsible for complying with each provider's terms of
+service and usage policies when you use zo with their APIs.
+
+This project bundles third-party Rust crates under their respective licenses;
+see `Cargo.toml` / `Cargo.lock` and each crate's license for details.

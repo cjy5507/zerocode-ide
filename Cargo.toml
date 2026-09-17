@@ -1,0 +1,135 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/model-prices",
+    "crates/zerocode-core",
+    "crates/zerocode-devproxy",
+    "crates/zerocode-hookd",
+    "crates/zerocode-harness",
+    "crates/zerocode-ssh",
+    "crates/zerocode-pty",
+    "crates/zerocode-lane",
+    "crates/zerocode-orchestrator",
+    "crates/zerocode-app",
+    "crates/zerocode-shell-state",
+    "crates/zerocode-shell-cmd-jira",
+    "crates/zerocode-shell-cmd-linear",
+    "crates/zerocode-shell",
+    "tools/asar-reader",
+]
+
+[workspace.package]
+version = "1.3.110"
+edition = "2024"
+rust-version = "1.94"
+license = "MIT"
+publish = false
+
+# What a SHIPPED build is compiled like. Absent until now, which meant every
+# release ran at Cargo's defaults — sixteen codegen units and no link-time
+# optimisation — while the hot path this product is judged on (bytes off a pty,
+# through the parser, into a frame) crosses crate boundaries on every glyph.
+# Those are exactly the calls a single unit and LTO can see through.
+#
+# `panic` is deliberately LEFT at unwind. `zerocode-ssh`'s spawner catches a
+# panicking connect rather than taking the window down with it
+# (`crates/zerocode-ssh/src/spawner.rs:59,62`), and the shell recovers poisoned
+# locks in dozens of places instead of dying — `abort` would turn both into a
+# crash. The build-time cost of `lto`/`codegen-units` is paid by release CI
+# once per tag, not by `cargo run`, which keeps its own profile.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+
+[workspace.dependencies]
+model-prices = { path = "crates/model-prices" }
+zerocode-core = { path = "crates/zerocode-core" }
+zerocode-devproxy = { path = "crates/zerocode-devproxy" }
+zerocode-pty = { path = "crates/zerocode-pty" }
+zerocode-lane = { path = "crates/zerocode-lane" }
+zerocode-harness = { path = "crates/zerocode-harness" }
+zerocode-hookd = { path = "crates/zerocode-hookd" }
+zerocode-orchestrator = { path = "crates/zerocode-orchestrator" }
+zerocode-ssh = { path = "crates/zerocode-ssh" }
+zerocode-shell-state = { path = "crates/zerocode-shell-state" }
+zerocode-shell-cmd-jira = { path = "crates/zerocode-shell-cmd-jira" }
+zerocode-shell-cmd-linear = { path = "crates/zerocode-shell-cmd-linear" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Warp theme import is a local YAML compatibility boundary. Keep the maintained
+# serde fork pinned so duplicate-key/parser behaviour cannot drift underneath
+# an otherwise identical desktop build.
+serde_yaml_ng = "=0.10.0"
+# A Cargo.lock is TOML, and the supply-chain layer reads it with a real parser
+# rather than a hand-rolled one (`zerocode_core::supply_chain`). This 1.x line
+# is already in this lock under tauri-utils; zo-ide builds the core crate too,
+# and its lock gained the same six packages at the same versions. Only the
+# reading half is compiled — no writer, no order-preserving tables.
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
+base64 = "0.22"
+# SHA-256, and only where a vendor computes one we have to match byte for byte
+# (Codex's hook trust hash). Already in the tree transitively; named here so the
+# crate that depends on it says so.
+sha2 = "0.10"
+# Project file search follows ignore files instead of maintaining a second,
+# incomplete list of generated directories.
+ignore = "0.4"
+# Terminal and project search both need Unicode-aware case folding. Full
+# `regex` rather than regex-lite because its (?i) matches the JS `i` flag the
+# original leans on; the lite crate folds ASCII only and would quietly unmatch
+# 한글/été.
+regex = "1.11"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2.5"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "process"] }
+axum = "0.8"
+# The label proxy speaks HTTP/1.1 on both sides of one hop and has to hand a
+# socket over intact for a websocket upgrade, so it uses hyper's connection
+# API directly rather than a router or a pooling client — both of those decide
+# framing and headers, and a transparent proxy may decide neither. Already in
+# the tree beneath axum and reqwest; named here so the crate that uses it says
+# so.
+hyper = { version = "1.11", features = ["server", "client", "http1"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }
+tokio-stream = "0.1"
+http-body-util = "0.1"
+libc = "0.2"
+# One socket in this workspace has to be configured BEFORE it is bound
+# (`SO_REUSEADDR` on the fixed OAuth loopback seat), which the standard
+# library's `TcpListener::bind` cannot express. Already in the lock through
+# the async stack; named here so the version is reviewed at this boundary.
+socket2 = "0.6"
+portable-pty = "0.9"
+vte = "0.14"
+unicode-width = "0.2"
+unicode-segmentation = "1"
+# Reads the operating system's ordered UI-language preference. Pin the small
+# platform adapter: locale selection is startup behaviour, not an API whose
+# native implementation should drift between otherwise identical builds.
+sys-locale = "=0.3.2"
+# Tauri 2.11 resolves its desktop config/data/cache roots through dirs 6. The
+# headless CLI uses the same crate so both binaries agree without duplicating
+# platform environment-variable rules.
+dirs = "=6.0.0"
+tempfile = "3"
+# The performance witnesses. "Rust must outperform" is this product's charter
+# line, and a charter without a measuring stick regresses one refactor at a
+# time — the benches under crates/*/benches are the stick. Reports without
+# plotters: a terminal number is the deliverable, not an HTML gallery.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+# The outbound HTTP road used by Jira and Linear, which cannot borrow an
+# authenticated CLI the way `gh.rs` does. `rustls` here is reqwest 0.13's
+# own default TLS, which verifies
+# against the platform trust store (`rustls-platform-verifier`): a self-hosted
+# Jira behind a corporate CA is the common case and a bundled root list would
+# refuse it.
+reqwest = { version = "0.13", default-features = false, features = ["json", "http2", "charset", "rustls"] }
+# SSH is a protocol boundary rather than an implementation detail of a lane.
+# Pin both halves so key verification, authentication, and SFTP speak one
+# reviewed API across otherwise identical builds.
+russh = "=0.62.6"
+russh-sftp = "=2.4.0"
+zeroize = "=1.9.0"
+rand = "=0.10.2"

@@ -1,0 +1,17 @@
+[package]
+name = "session-corpus"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "Synthetic zo session corpus — the generator behind the session-search measurements and pins (t-2947)."
+
+[[bin]]
+name = "session-corpus"
+path = "src/main.rs"
+
+[dependencies]
+core-types = { path = "../core-types" }
+
+[lints]
+workspace = true

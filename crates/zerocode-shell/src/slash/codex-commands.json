@@ -1,0 +1,302 @@
+{
+  "agent": "codex",
+  "source": "https://learn.chatgpt.com/docs/developer-commands?surface=cli",
+  "fetched_at": "2026-09-15T07:57:53+00:00",
+  "cli_version_observed": "0.154.0",
+  "commands": [
+    {
+      "name": "/permissions",
+      "args": "",
+      "about": "Set what Codex can do without asking first."
+    },
+    {
+      "name": "/ide",
+      "args": "",
+      "about": "Include open files, current selection, and other IDE context."
+    },
+    {
+      "name": "/keymap",
+      "args": "",
+      "about": "Remap TUI keyboard shortcuts."
+    },
+    {
+      "name": "/vim",
+      "args": "",
+      "about": "Toggle Vim mode for the composer."
+    },
+    {
+      "name": "/setup-default-sandbox",
+      "args": "",
+      "about": "Set up the elevated agent sandbox (Windows only)."
+    },
+    {
+      "name": "/sandbox-add-read-dir",
+      "args": "",
+      "about": "Grant sandbox read access to an extra directory (Windows only)."
+    },
+    {
+      "name": "/agent",
+      "args": "",
+      "about": "Switch the active agent thread.",
+      "aliases": [
+        "/subagents"
+      ]
+    },
+    {
+      "name": "/apps",
+      "args": "",
+      "about": "Browse apps (connectors) and insert them into your prompt."
+    },
+    {
+      "name": "/plugins",
+      "args": "",
+      "about": "Browse installed and discoverable plugins."
+    },
+    {
+      "name": "/hooks",
+      "args": "",
+      "about": "View and manage lifecycle hooks."
+    },
+    {
+      "name": "/clear",
+      "args": "",
+      "about": "Clear the terminal and start a fresh chat."
+    },
+    {
+      "name": "/rename",
+      "args": "",
+      "about": "Rename the current chat."
+    },
+    {
+      "name": "/archive",
+      "args": "",
+      "about": "Archive the current session and exit Codex."
+    },
+    {
+      "name": "/delete",
+      "args": "",
+      "about": "Permanently delete the current session and exit Codex."
+    },
+    {
+      "name": "/compact",
+      "args": "",
+      "about": "Summarize the visible chat to free tokens."
+    },
+    {
+      "name": "/copy",
+      "args": "",
+      "about": "Copy the latest completed Codex output."
+    },
+    {
+      "name": "/diff",
+      "args": "",
+      "about": "Show the Git diff, including files Git isn't tracking yet."
+    },
+    {
+      "name": "/exit",
+      "args": "",
+      "about": "Exit the CLI (same as /quit)."
+    },
+    {
+      "name": "/experimental",
+      "args": "",
+      "about": "Toggle experimental features."
+    },
+    {
+      "name": "/approve",
+      "args": "",
+      "about": "Approve one retry of a recent auto review denial."
+    },
+    {
+      "name": "/memories",
+      "args": "",
+      "about": "Configure memory use and generation."
+    },
+    {
+      "name": "/skills",
+      "args": "",
+      "about": "Browse and use skills."
+    },
+    {
+      "name": "/import",
+      "args": "",
+      "about": "Import Claude Code or Cursor setup, projects, and chats."
+    },
+    {
+      "name": "/feedback",
+      "args": "",
+      "about": "Send logs to the Codex maintainers."
+    },
+    {
+      "name": "/init",
+      "args": "",
+      "about": "Generate an AGENTS.md scaffold in the current directory."
+    },
+    {
+      "name": "/logout",
+      "args": "",
+      "about": "Sign out of Codex."
+    },
+    {
+      "name": "/mcp",
+      "args": "",
+      "about": "List configured Model Context Protocol (MCP) tools."
+    },
+    {
+      "name": "/mention",
+      "args": "",
+      "about": "Attach a file to the chat."
+    },
+    {
+      "name": "/model",
+      "args": "",
+      "about": "Choose the active model (and reasoning effort, when available)."
+    },
+    {
+      "name": "/fast",
+      "args": "",
+      "about": "Toggle a Fast service tier when the model catalog exposes one."
+    },
+    {
+      "name": "/plan",
+      "args": "",
+      "about": "Switch to plan mode and optionally send a prompt."
+    },
+    {
+      "name": "/goal",
+      "args": "",
+      "about": "Set, edit, pause, resume, view, or clear a task goal."
+    },
+    {
+      "name": "/personality",
+      "args": "",
+      "about": "Choose a communication style for responses."
+    },
+    {
+      "name": "/ps",
+      "args": "",
+      "about": "Show background terminals and their recent output."
+    },
+    {
+      "name": "/stop",
+      "args": "",
+      "about": "Stop all background terminals."
+    },
+    {
+      "name": "/fork",
+      "args": "",
+      "about": "Fork the current chat into a new chat."
+    },
+    {
+      "name": "/app",
+      "args": "",
+      "about": "Continue the current session in the ChatGPT desktop app."
+    },
+    {
+      "name": "/side",
+      "args": "",
+      "about": "Start an ephemeral side chat.",
+      "aliases": [
+        "/btw"
+      ]
+    },
+    {
+      "name": "/raw",
+      "args": "",
+      "about": "Toggle raw scrollback mode."
+    },
+    {
+      "name": "/resume",
+      "args": "",
+      "about": "Resume a saved chat from your session list."
+    },
+    {
+      "name": "/new",
+      "args": "",
+      "about": "Start a new chat inside the same CLI session."
+    },
+    {
+      "name": "/quit",
+      "args": "",
+      "about": "Exit the CLI."
+    },
+    {
+      "name": "/review",
+      "args": "",
+      "about": "Ask Codex to review your working tree."
+    },
+    {
+      "name": "/status",
+      "args": "",
+      "about": "Display session configuration and token usage."
+    },
+    {
+      "name": "/usage",
+      "args": "",
+      "about": "View account token usage or use a rate-limit reset."
+    },
+    {
+      "name": "/debug-config",
+      "args": "",
+      "about": "Print config layer and requirements diagnostics."
+    },
+    {
+      "name": "/statusline",
+      "args": "",
+      "about": "Configure TUI status-line fields interactively."
+    },
+    {
+      "name": "/title",
+      "args": "",
+      "about": "Configure terminal window or tab title fields interactively."
+    },
+    {
+      "name": "/theme",
+      "args": "",
+      "about": "Choose a syntax-highlighting theme."
+    },
+    {
+      "name": "/pets",
+      "args": "",
+      "about": "Choose or hide a terminal pet.",
+      "aliases": [
+        "/pet"
+      ]
+    },
+    {
+      "name": "/cloud",
+      "args": "",
+      "about": "Run the chat in the cloud, when cloud execution is available."
+    },
+    {
+      "name": "/cloud-environment",
+      "args": "",
+      "about": "Choose the cloud environment for the chat."
+    },
+    {
+      "name": "/ide-context",
+      "args": "",
+      "about": "Turn automatic IDE context on or off."
+    },
+    {
+      "name": "/local",
+      "args": "",
+      "about": "Run the chat in your local workspace."
+    },
+    {
+      "name": "/project",
+      "args": "",
+      "about": "Choose a project for new chats."
+    },
+    {
+      "name": "/reasoning",
+      "args": "",
+      "about": "Choose the reasoning effort for the current chat."
+    },
+    {
+      "name": "/worktree",
+      "args": "",
+      "about": "Run the chat in a new Git worktree."
+    }
+  ]
+}

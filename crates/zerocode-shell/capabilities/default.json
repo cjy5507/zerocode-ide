@@ -1,0 +1,13 @@
+{
+  "identifier": "default",
+  "description": "This app's OWN webviews talk to their own backend: invoke the app's commands, listen to its lane events, drive their own chrome. Nothing wider. The board pop-out is named too — it runs the same document and reads the same commands, so a capability that skipped it would be a window with no events. Named as webviews rather than windows on purpose: a windows grant covers every webview OF the window, and the main window now hosts browser panes showing other people's pages — the one audience this capability must never reach.",
+  "webviews": ["main", "board-popout"],
+  "permissions": [
+    "core:default",
+    "notification:default",
+    "clipboard-manager:allow-read-text",
+    "clipboard-manager:allow-write-text",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize"
+  ]
+}

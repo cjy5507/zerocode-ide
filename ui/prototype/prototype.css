@@ -1,0 +1,655 @@
+/* ZeroCode main-window prototype.
+ *
+ * Every value here comes from ui/tokens.css. The one place colour is
+ * allowed to be chromatic is the spine (and the lane tick that echoes it);
+ * everything else is five neutrals separated by 1px rules. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: var(--surface-abyss);
+  color: var(--ink-chalk);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  /* Korean copy must break on word boundaries. Never undo this with a blanket
+   * overflow-wrap rule. */
+  word-break: keep-all;
+  -webkit-font-smoothing: antialiased;
+}
+
+.sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+:focus-visible {
+  outline: 2px solid var(--ink-chalk);
+  outline-offset: 2px;
+}
+
+kbd {
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-edge);
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+/* Lane hue: set once per element, consumed by the spine and the ledger tick. */
+.lane-1 { --lane: var(--lane-1); }
+.lane-2 { --lane: var(--lane-2); }
+.lane-3 { --lane: var(--lane-3); }
+.lane-4 { --lane: var(--lane-4); }
+.lane-5 { --lane: var(--lane-5); }
+
+/* ---------------------------------------------------------------- window */
+
+.window {
+  position: relative;
+  height: 100%;
+  display: grid;
+  grid-template-rows: var(--titlebar-height) 1fr;
+  overflow: hidden;
+}
+
+.titlebar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding-left: var(--traffic-light-inset);
+  padding-right: var(--space-4);
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+  background: var(--surface-deck);
+  /* -webkit-app-region: drag lives here in the real shell. */
+}
+
+.traffic {
+  position: absolute;
+  left: var(--space-4);
+  display: flex;
+  gap: 8px;
+}
+
+.traffic i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--edge-rule);
+}
+
+.wordmark {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: var(--text-sm);
+  letter-spacing: var(--tracking-label);
+}
+
+.project {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--ink-chalk);
+}
+
+.branch,
+.titlebar-right .attention {
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+}
+
+.branch::before {
+  content: "";
+  display: inline-block;
+  width: var(--rule-width);
+  height: 11px;
+  background: var(--edge-rule);
+  margin-right: var(--space-3);
+  vertical-align: -2px;
+}
+
+.titlebar-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.attention {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.attention-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--lane-2);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--lane-2) 18%, transparent);
+}
+
+.body {
+  display: grid;
+  grid-template-columns: var(--spine-width) minmax(0, 1fr) 300px;
+  min-height: 0;
+}
+
+/* ------------------------------------------------------------- the spine */
+
+.spine {
+  display: flex;
+  flex-direction: column;
+  border-right: var(--rule-width) solid var(--edge-rule);
+  background: var(--surface-abyss);
+}
+
+.seg {
+  position: relative;
+  flex: 1;
+  border: 0;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+}
+
+/* The rails of adjacent segments touch, so the column reads as one unbroken
+ * line from the top of the window to the bottom. */
+.rail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: var(--spine-rail);
+  transform: translateX(-50%);
+  background: var(--lane);
+}
+
+.glyph {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  background: var(--surface-abyss);
+  padding: var(--space-1) 0;
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  color: color-mix(in srgb, var(--ink-mist) 70%, var(--surface-abyss));
+}
+
+/* The lane you are looking at carries a heavier stroke, so "where am I" is
+ * answered by weight before colour. */
+.seg[aria-current="true"] .rail {
+  width: calc(var(--spine-rail) * 2);
+}
+
+.seg--idle .rail {
+  opacity: 0.22;
+}
+
+.seg--streaming .rail {
+  background-image: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--lane) 25%, transparent) 0%,
+    var(--lane) 45%,
+    color-mix(in srgb, var(--lane) 25%, transparent) 100%
+  );
+  background-size: 100% 220%;
+  animation: spine-flow 2.4s linear infinite;
+}
+
+@keyframes spine-flow {
+  from { background-position: 0 -120%; }
+  to { background-position: 0 120%; }
+}
+
+/* Waiting is the only state that changes SHAPE — two hairlines with a gap —
+ * so it survives both a colour-blind reader and a glance from across a desk. */
+.seg--waiting .rail,
+.seg--waiting[aria-current="true"] .rail {
+  width: 11px;
+  background: linear-gradient(
+    90deg,
+    var(--lane) 0 4px,
+    transparent 4px 7px,
+    var(--lane) 7px 11px
+  );
+}
+
+.seg--waiting .glyph {
+  color: var(--ink-chalk);
+}
+
+.seg--blocked .rail {
+  background: var(--ink-mist);
+}
+
+/* The notch: the line is cut and capped, so "stopped" survives a greyscale
+ * screenshot. */
+.seg--blocked .rail::after {
+  content: "";
+  position: absolute;
+  left: -6px;
+  right: -6px;
+  top: calc(50% - 30px);
+  height: 14px;
+  background: var(--surface-abyss);
+  border-top: var(--rule-width) solid var(--ink-mist);
+  border-bottom: var(--rule-width) solid var(--ink-mist);
+}
+
+.seg--exited .rail {
+  background: var(--edge-rule);
+}
+
+.seg[aria-current="true"] .glyph {
+  color: var(--ink-chalk);
+}
+
+/* ---------------------------------------------------------------- stage */
+
+.stage {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  min-width: 0;
+  border-right: var(--rule-width) solid var(--edge-rule);
+}
+
+.lane-head {
+  padding: var(--space-4) var(--space-5) var(--space-3);
+  /* The active lane's hue leaves the spine and underlines its own header —
+   * one stroke connecting "where I am" to "where that is". */
+  border-bottom: 2px solid var(--lane);
+  background: var(--surface-deck);
+}
+
+.lane-id {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.agent {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  color: var(--ink-mist);
+}
+
+.state {
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-edge);
+  padding: 1px var(--space-2);
+}
+
+.state--waiting {
+  color: var(--ink-chalk);
+  border-color: var(--ink-mist);
+}
+
+.task {
+  margin: var(--space-2) 0 var(--space-3);
+  font-family: var(--font-ui);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-5);
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+.meta div {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.meta dt {
+  color: var(--ink-mist);
+}
+
+.meta dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+}
+
+.add { color: var(--ink-chalk); }
+.del { color: var(--ink-mist); }
+
+.terminal {
+  overflow: auto;
+  padding: var(--space-4) var(--space-3);
+  background: var(--surface-abyss);
+}
+
+.terminal pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  white-space: pre-wrap;
+  word-break: keep-all;
+}
+
+.terminal .dim { color: var(--ink-mist); }
+.terminal .ok { color: var(--ink-chalk); }
+.terminal .path { text-decoration: underline; text-underline-offset: 3px; }
+
+.cursor {
+  color: var(--ink-chalk);
+  animation: blink 1.1s steps(2, start) infinite;
+}
+
+@keyframes blink {
+  50% { opacity: 0; }
+}
+
+.composer {
+  display: flex;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  border-top: var(--rule-width) solid var(--edge-rule);
+  background: var(--surface-deck);
+}
+
+.composer input {
+  flex: 1;
+  min-width: 0;
+  background: var(--surface-abyss);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-edge);
+  color: var(--ink-chalk);
+  font: inherit;
+  padding: var(--space-2) var(--space-3);
+}
+
+.composer input::placeholder {
+  color: var(--ink-mist);
+}
+
+.composer button {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: none;
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-edge);
+  color: var(--ink-chalk);
+  font: inherit;
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+}
+
+/* --------------------------------------------------------------- ledger */
+
+.ledger {
+  padding: var(--space-4);
+  overflow: auto;
+  background: var(--surface-deck);
+  min-width: 0;
+}
+
+.ledger-title {
+  margin: 0 0 var(--space-3);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  color: var(--ink-mist);
+}
+
+.ledger-title + .ledger-grid + .ledger-title {
+  margin-top: var(--space-5);
+}
+
+/* One grid owns the tracks so every row's columns line up — no per-row
+ * min-height or padding fudging. */
+.ledger-grid {
+  display: grid;
+  grid-template-columns: 3px auto minmax(0, 1fr) auto;
+  align-items: baseline;
+  column-gap: var(--space-2);
+}
+
+.row {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  grid-template-areas: "tick who what when" ". how how how";
+  padding: var(--space-2) 0;
+  border-bottom: var(--rule-width) solid var(--edge-rule);
+}
+
+.tick {
+  grid-area: tick;
+  align-self: stretch;
+  background: var(--lane);
+}
+
+.is-idle .tick { opacity: 0.22; }
+.is-blocked .tick { background: var(--ink-mist); }
+.is-exited .tick { background: var(--edge-rule); }
+.is-waiting .tick { box-shadow: 0 0 0 2px color-mix(in srgb, var(--lane) 25%, transparent); }
+
+.who {
+  grid-area: who;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+}
+
+.what {
+  grid-area: what;
+  font-size: var(--text-xs);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.is-active .what,
+.is-active .who {
+  color: var(--ink-chalk);
+}
+
+.how {
+  grid-area: how;
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+}
+
+.when {
+  grid-area: when;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+}
+
+.hint {
+  margin: 0;
+  font-size: var(--text-2xs);
+  color: var(--ink-mist);
+}
+
+/* ---------------------------------------------------------- permission */
+
+.no-modal .scrim {
+  display: none;
+}
+
+.scrim {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--scrim);
+}
+
+.permission {
+  width: min(560px, calc(100% - var(--space-6)));
+  background: var(--surface-deck);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-edge);
+  padding: var(--space-5);
+  box-shadow: 0 24px 64px rgb(0 0 0 / 45%);
+}
+
+.perm-agent {
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  letter-spacing: var(--tracking-label);
+  color: var(--ink-mist);
+  border-left: 2px solid var(--lane);
+  padding-left: var(--space-2);
+}
+
+.permission h2 {
+  margin: var(--space-3) 0 var(--space-4);
+  font-size: var(--text-md);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+}
+
+.perm-cmd {
+  margin: 0 0 var(--space-3);
+  padding: var(--space-3);
+  background: var(--surface-abyss);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-edge);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.perm-why {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--ink-mist);
+}
+
+.perm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  background: none;
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-edge);
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-xs);
+  padding: var(--space-2) var(--space-3);
+  cursor: pointer;
+}
+
+.btn:hover {
+  border-color: var(--ink-mist);
+}
+
+.btn--primary {
+  background: var(--ink-chalk);
+  border-color: var(--ink-chalk);
+  color: var(--surface-abyss);
+  font-weight: 600;
+}
+
+.btn--primary kbd {
+  color: var(--surface-abyss);
+  border-color: color-mix(in srgb, var(--surface-abyss) 30%, transparent);
+}
+
+.btn--halt {
+  color: var(--signal-halt);
+  border-color: color-mix(in srgb, var(--signal-halt) 45%, var(--edge-rule));
+}
+
+.btn--halt-quiet {
+  color: var(--ink-mist);
+  margin-left: auto;
+}
+
+/* -------------------------------------------------------------- responsive
+ * Narrow windows fold panels; they never delete a destination. */
+
+@media (max-width: 1080px) {
+  .body {
+    grid-template-columns: var(--spine-width) minmax(0, 1fr) 260px;
+  }
+}
+
+@media (max-width: 900px) {
+  .body {
+    grid-template-columns: var(--spine-width) minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .ledger {
+    grid-column: 1 / -1;
+    border-top: var(--rule-width) solid var(--edge-rule);
+    max-height: 40vh;
+  }
+}
+
+@media (max-width: 720px) {
+  .titlebar {
+    padding-left: var(--space-4);
+    gap: var(--space-2);
+  }
+
+  .traffic {
+    display: none; /* macOS chrome only; not a destination. */
+  }
+
+  .meta {
+    gap: var(--space-1) var(--space-3);
+  }
+
+  .composer {
+    flex-wrap: wrap;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .seg--streaming .rail {
+    animation: none;
+    /* Static two-tone stands in for the flow so the state is still legible. */
+    background-image: linear-gradient(180deg, var(--lane) 50%, color-mix(in srgb, var(--lane) 35%, transparent) 50%);
+    background-size: 100% 16px;
+  }
+
+  .cursor {
+    animation: none;
+  }
+}

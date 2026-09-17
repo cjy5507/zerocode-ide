@@ -1,0 +1,15 @@
+import { readFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+const read = (path) => readFileSync(new URL('../../' + path, import.meta.url), 'utf8');
+const settings = read('ui/shell-settings.js');
+assert(!settings.includes('function skillMatches('), 'Settings must delegate skills, not own a duplicate scanner/list');
+const runtime = read('crates/zerocode-shell/src/skills_runtime.rs');
+assert(runtime.includes('scan_incremental'), 'runtime reuses the bounded core scanner');
+assert(runtime.includes('trait EvidenceAdapter'), 'one interface for both usage adapters');
+const cmd = read('crates/zerocode-shell/src/cmd/skills.rs');
+for (const name of ['skills_list', 'skill_detail', 'skill_install_plan', 'skills_rescan', 'skill_reveal']) assert(cmd.includes('fn ' + name + '('), name);
+assert(!cmd.includes('send_prompt') && !cmd.includes('type_prompt_at_term'), 'install goes to a shell tab');
+const doc = read('ui/shell-doc.js');
+assert(doc.includes('function buildSkillsView(') && doc.includes('function paintSkillsStage('), 'skills doc kind');
+assert(doc.includes('paintMarkdown('), 'reuse markdown renderer');
+console.log('Skills source contracts passed');

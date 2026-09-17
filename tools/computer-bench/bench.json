@@ -1,0 +1,515 @@
+{
+  "schema": 1,
+  "wilson_z": {
+    "value": 1.96,
+    "why": "A two-sided 95% interval around each success rate."
+  },
+  "median_change_pct": {
+    "value": 20,
+    "why": "The starting bar for flagging a median (tool calls, wall time, tokens) as moved; replaced after the first table by twice its measured median-absolute-deviation ratio, so the bar is itself a measured number."
+  },
+  "median_min_n": {
+    "value": 5,
+    "why": "A median is compared only when both sides have at least this many runs; fewer is noise."
+  },
+  "human_step_ms": {
+    "value": 300,
+    "why": "The user's 200 APM floor for Computer Use read as one step every 300 ms; the stage table's x-human column is this over the median step, flygym's x-realtime."
+  },
+  "runs_per_scenario": {
+    "value": 5,
+    "why": "The first table: 3 scenarios x 5 = 15 live runs, pooled Wilson width about +-0.2. Per-scenario claims need n >= 10; raised once the first table prices a run's tokens."
+  },
+  "hands_lane_runs": {
+    "value": 3,
+    "why": "A scenario's live rate counts only after its own reference path passes this many times in the same session: it catches a flaky setup or oracle, and hands runs take seconds."
+  },
+  "countdown_s": {
+    "value": 10,
+    "why": "Time to read the line that names the stop chord and lift your hands; any keyboard or mouse input during it cancels the start."
+  },
+  "countdown_idle_tolerance_s": {
+    "value": 1,
+    "why": "HIDIdleTime at the end of the countdown must be at least countdown_s minus this: a key or a nudge in the countdown means the person is still here."
+  },
+  "status_poll_s": {
+    "value": 1.0,
+    "why": "How often the runner reads status and the run's step log while zo runs: how fast a stop ends the run. status is a look and costs no action."
+  },
+  "kill_grace_s": {
+    "value": 15,
+    "why": "Past the scenario's budget, zo's own turn deadline should have ended it; this covers the last-message and NDJSON flush, and a Computer call the shim bounds at 65 s."
+  },
+  "sigkill_after_s": {
+    "value": 5,
+    "why": "After SIGTERM to zo's process group, this long before SIGKILL."
+  },
+  "idle_before_scheduled_start_s": {
+    "value": 900,
+    "why": "A scheduled start only after 15 min with no keyboard or mouse input, so someone reading without typing is not taken over. Run now skips it: the person has decided."
+  },
+  "inter_run_quiet_s": {
+    "value": 5,
+    "why": "Between runs the runner makes no operator call for this long, then requires HIDIdleTime to be at least it: a person who came back ends the bench."
+  },
+  "setup_timeout_ms": {
+    "value": 15000,
+    "why": "Handed to the window's own wait-for (capped at COMPUTER_WAIT_FOR_MAX_MS): 15 s covers a cold app launch."
+  },
+  "quit_wait_ms": {
+    "value": 5000,
+    "why": "After a graceful quit, how long the window waits for the window to go before --force."
+  },
+  "question_wait_ms": {
+    "value": 605000,
+    "why": "COMPUTER_HANDOFF_TIMEOUT_MS + COMPUTER_BRIDGE_GRACE_MS (the core's COMPUTER_LONGEST_DEADLINE_MS): the longest a question the model left open — a press's confirmation (120 s) or a handoff (600 s) — stays on the person's screen, and status.confirming counts both. After zo ends, the runner waits for it to reach 0 (bounded by this) before the oracle looks and teardown moves anything; a question still open past it ends the bench with the desk left as it is."
+  },
+  "budget_fraction_max": {
+    "value": 0.8,
+    "why": "The helper's session action budget used above this refuses a start; lifting it is the person's decision."
+  },
+  "flush_last": {
+    "value": 1,
+    "why": "`evidence --last N` after a run: an evidence read waits for the window's writer to hand over every answered step."
+  },
+  "allowed_tools": {
+    "value": [
+      "Computer"
+    ],
+    "why": "The bench measures desktop dexterity: zo runs with --allowed-tools <these>, so no other tool is advertised and a call to one is refused before it runs. A call to any other tool is still counted as off-road and fails the run even when the oracle passes."
+  },
+  "forbid_verbs": {
+    "value": [
+      "run",
+      "resume",
+      "stop"
+    ],
+    "why": "The Computer tool's own program runner is off-road; a model's stop or resume would take the person's one hand. Either fails the run, and a stop or resume in the step log ends the bench."
+  },
+  "zo_flags": {
+    "value": [
+      "--json",
+      "--no-spawn",
+      "--permission-mode",
+      "danger-full-access"
+    ],
+    "why": "--json gives the NDJSON the tokens, tool calls and wire model are read from (zo-ide render.rs); --no-spawn keeps every tool call and step in one run; the Computer tool needs danger-full-access. --allowed-tools (from allowed_tools), --cwd and --last-message are added per run."
+  },
+  "zo_env": {
+    "value": {
+      "ZO_PROFILE_DISABLE_HOOK_REPORTER": "1",
+      "ZEROCODE_SECOND_BRAIN": "off",
+      "ZO_DREAM": "0",
+      "ZO_AUTO_VERIFY": "0"
+    },
+    "why": "Without the reporter switch the child zo's Done would complete the bench's own automation run. The vault is the person's: `off` keeps zo from reading it or filling a blank value from settings, and ZO_DREAM=0 keeps the session's end from writing memory or vault pages. Auto-verify is the person's too. Per run the runner adds ZEROCODE_RUN_EVIDENCE_DIR, ZO_TURN_DEADLINE_SECS and ZO_SESSION_ROOT."
+  },
+  "configs": {
+    "value": [
+      {
+        "id": "default",
+        "model": null,
+        "effort": null
+      },
+      {
+        "id": "marks",
+        "model": null,
+        "effort": null,
+        "env": {
+          "ZO_COMPUTER_MARKS": "1"
+        }
+      }
+    ],
+    "why": "null is zo's own default; each run records the resolved wire model, and comparisons stay within one (wire model, effort) pair. `run` uses the first config; --config default --config marks is the A/B of numbered looks (COMPUTER_MARKS_ENV): the same zo whose looks carry marks and a `mark` field, taking turns run by run. A key a config's env sets is never inherited from the runner's own environment, so the default side is the core's switch as built. Once the table turns the switch on, the A/B's other side is a config that sets it to 0."
+  },
+  "self_result_pattern": {
+    "value": "^RESULT:\\s*(PASS|FAIL)\\b",
+    "why": "The live lane's self-report, read from the last matching line of the last message. It is only ever `claimed`: the oracle decides success, and claim != oracle measures overclaiming."
+  },
+  "preamble": {
+    "value": "You are operating this Mac's desktop through the Computer tool only: no shell, no file or code tools, and not the Computer tool's run action. The person is away and nobody will answer. If the Computer tool says the operator is stopped, end your reply at once; never call resume or stop. When you are finished, end your reply with one line: RESULT: PASS, or RESULT: FAIL <why>.",
+    "why": "One line before every prompt (zo headless reads stdin a line at a time)."
+  },
+  "work_root_name": {
+    "value": "zerocode-computer-bench",
+    "why": "Fixtures live under $TMPDIR/<this>, far from the person's files; teardown's removal is fenced to it."
+  },
+  "runner_dir": {
+    "value": "runner",
+    "why": "The runner's own shim calls log into <top>/runner/, so run folders hold only the operator's steps and tally --bench skips it."
+  },
+  "scenarios": {
+    "value": [
+      {
+        "id": "textedit-replace-save",
+        "surface": "TextEdit: select all, typing, save, close",
+        "apps_not_running": [
+          "TextEdit"
+        ],
+        "stale_window_titles": [
+          "note.txt"
+        ],
+        "fixtures": [
+          {
+            "kind": "text",
+            "path": "note.txt",
+            "text": "PLACEHOLDER TEXT\n"
+          }
+        ],
+        "setup": [
+          {
+            "kind": "open_fresh",
+            "app": "TextEdit",
+            "path": "note.txt"
+          },
+          {
+            "kind": "wait_window",
+            "app": "TextEdit",
+            "title": "note.txt",
+            "own": true
+          }
+        ],
+        "prompt": "In TextEdit the document note.txt is open. Replace its whole content with exactly this sentence: The quick brown fox jumps over 13 lazy dogs. Then save it as plain text under the same name and place, and close its window.",
+        "budget_s": 180,
+        "oracle": [
+          {
+            "kind": "file_text",
+            "path": "note.txt",
+            "expect": "The quick brown fox jumps over 13 lazy dogs."
+          },
+          {
+            "kind": "no_window",
+            "app": "TextEdit",
+            "title": "note.txt"
+          }
+        ],
+        "reference": [
+          [
+            "activate",
+            "--app",
+            "TextEdit"
+          ],
+          [
+            "key",
+            "--key",
+            "cmd+a"
+          ],
+          [
+            "type",
+            "--text",
+            "The quick brown fox jumps over 13 lazy dogs."
+          ],
+          [
+            "key",
+            "--key",
+            "cmd+s"
+          ],
+          [
+            "key",
+            "--key",
+            "cmd+w"
+          ],
+          [
+            "wait-for",
+            "--app",
+            "TextEdit",
+            "--window",
+            "note.txt",
+            "--absent",
+            "--timeout-ms",
+            "5000"
+          ]
+        ],
+        "teardown": [
+          {
+            "kind": "quit",
+            "app": "TextEdit",
+            "title": "note.txt"
+          }
+        ]
+      },
+      {
+        "id": "calculator-multiply",
+        "surface": "Calculator: keys or control presses, reading a display",
+        "apps_not_running": [
+          "Calculator"
+        ],
+        "stale_window_titles": [],
+        "fixtures": [],
+        "setup": [
+          {
+            "kind": "open_fresh",
+            "app": "Calculator"
+          },
+          {
+            "kind": "wait_window",
+            "app": "Calculator",
+            "title": "Calculator",
+            "own": true
+          },
+          {
+            "kind": "read_lacks",
+            "app": "Calculator",
+            "words": [
+              "sin",
+              "AND",
+              "RPN"
+            ]
+          },
+          {
+            "kind": "clear",
+            "app": "Calculator",
+            "key": "escape",
+            "times": 3
+          },
+          {
+            "kind": "expect_display",
+            "app": "Calculator",
+            "digits": "0"
+          },
+          {
+            "kind": "display_lacks",
+            "app": "Calculator",
+            "digits": "7006652"
+          }
+        ],
+        "prompt": "Calculator is open. Use it to work out 1234 x 5678, leave the answer showing on Calculator's display, and tell me the answer.",
+        "budget_s": 180,
+        "oracle": [
+          {
+            "kind": "display_digits",
+            "app": "Calculator",
+            "expect": "7006652"
+          },
+          {
+            "kind": "answer_digits",
+            "expect": "7006652"
+          }
+        ],
+        "reference": [
+          [
+            "activate",
+            "--app",
+            "Calculator"
+          ],
+          [
+            "type",
+            "--text",
+            "1234*5678="
+          ]
+        ],
+        "teardown": [
+          {
+            "kind": "quit",
+            "app": "Calculator",
+            "title": "Calculator"
+          }
+        ]
+      },
+      {
+        "id": "finder-file-tidy",
+        "surface": "Finder: a new folder, selecting, moving",
+        "apps_not_running": [],
+        "stale_window_titles": [
+          "bench-inbox",
+          "bench-receipts",
+          "finder-tidy"
+        ],
+        "tabbing_sensitive": true,
+        "fixtures": [
+          {
+            "kind": "pdf",
+            "path": "finder-tidy/bench-inbox/zc-bench-receipt-1.pdf",
+            "title": "receipt 1"
+          },
+          {
+            "kind": "pdf",
+            "path": "finder-tidy/bench-inbox/zc-bench-receipt-2.pdf",
+            "title": "receipt 2"
+          },
+          {
+            "kind": "pdf",
+            "path": "finder-tidy/bench-inbox/zc-bench-receipt-3.pdf",
+            "title": "receipt 3"
+          },
+          {
+            "kind": "text",
+            "path": "finder-tidy/bench-inbox/zc-bench-notes.txt",
+            "text": "notes\n"
+          },
+          {
+            "kind": "png1",
+            "path": "finder-tidy/bench-inbox/zc-bench-photo.png"
+          }
+        ],
+        "setup": [
+          {
+            "kind": "open_path",
+            "path": "finder-tidy/bench-inbox"
+          },
+          {
+            "kind": "wait_window",
+            "app": "Finder",
+            "title": "bench-inbox"
+          }
+        ],
+        "prompt": "A Finder window shows the folder bench-inbox. Inside its parent folder finder-tidy, next to bench-inbox, create a new folder named bench-receipts, and move the three PDF files from bench-inbox into bench-receipts. Leave the other two files in bench-inbox and do not touch any other folder.",
+        "budget_s": 300,
+        "oracle": [
+          {
+            "kind": "tree",
+            "root": "finder-tidy",
+            "expect": {
+              "bench-inbox": "dir",
+              "bench-inbox/zc-bench-notes.txt": "fixture:finder-tidy/bench-inbox/zc-bench-notes.txt",
+              "bench-inbox/zc-bench-photo.png": "fixture:finder-tidy/bench-inbox/zc-bench-photo.png",
+              "bench-receipts": "dir",
+              "bench-receipts/zc-bench-receipt-1.pdf": "fixture:finder-tidy/bench-inbox/zc-bench-receipt-1.pdf",
+              "bench-receipts/zc-bench-receipt-2.pdf": "fixture:finder-tidy/bench-inbox/zc-bench-receipt-2.pdf",
+              "bench-receipts/zc-bench-receipt-3.pdf": "fixture:finder-tidy/bench-inbox/zc-bench-receipt-3.pdf"
+            }
+          }
+        ],
+        "reference": [
+          [
+            "activate",
+            "--app",
+            "Finder"
+          ],
+          [
+            "key",
+            "--key",
+            "cmd+up"
+          ],
+          [
+            "wait-for",
+            "--app",
+            "Finder",
+            "--window",
+            "finder-tidy",
+            "--timeout-ms",
+            "5000"
+          ],
+          [
+            "key",
+            "--key",
+            "cmd+shift+n"
+          ],
+          [
+            "type",
+            "--text",
+            "bench-receipts"
+          ],
+          [
+            "key",
+            "--key",
+            "return"
+          ],
+          {
+            "for": "i",
+            "in": [
+              "1",
+              "2",
+              "3"
+            ],
+            "do": [
+              [
+                "type",
+                "--text",
+                "bench-inbox"
+              ],
+              [
+                "key",
+                "--key",
+                "cmd+down"
+              ],
+              [
+                "wait-for",
+                "--app",
+                "Finder",
+                "--window",
+                "bench-inbox",
+                "--timeout-ms",
+                "5000"
+              ],
+              [
+                "type",
+                "--text",
+                "zc-bench-receipt-{i}"
+              ],
+              [
+                "key",
+                "--key",
+                "cmd+c"
+              ],
+              [
+                "key",
+                "--key",
+                "cmd+up"
+              ],
+              [
+                "wait-for",
+                "--app",
+                "Finder",
+                "--window",
+                "finder-tidy",
+                "--timeout-ms",
+                "5000"
+              ],
+              [
+                "type",
+                "--text",
+                "bench-receipts"
+              ],
+              [
+                "key",
+                "--key",
+                "cmd+down"
+              ],
+              [
+                "wait-for",
+                "--app",
+                "Finder",
+                "--window",
+                "bench-receipts",
+                "--timeout-ms",
+                "5000"
+              ],
+              [
+                "key",
+                "--key",
+                "cmd+option+v"
+              ],
+              [
+                "key",
+                "--key",
+                "cmd+up"
+              ],
+              [
+                "wait-for",
+                "--app",
+                "Finder",
+                "--window",
+                "finder-tidy",
+                "--timeout-ms",
+                "5000"
+              ]
+            ]
+          }
+        ],
+        "teardown": [
+          {
+            "kind": "close_windows",
+            "app": "Finder",
+            "titles": [
+              "bench-inbox",
+              "bench-receipts",
+              "finder-tidy"
+            ]
+          }
+        ]
+      }
+    ],
+    "why": "The first three run on apps that ship with macOS, judged by oracles outside the model (file bytes, a tree, Calculator's display). Safari holds the person's tabs and logins: wave 2, behind a guard. Calculator restores its last value on launch, so setup clears it (escape, three times) and requires 0 showing and not the answer: a model that only states the product cannot pass. The runner keeps the person's whole clipboard (every item and type) for the bench and clears it before each run, so no scenario saves it."
+  }
+}

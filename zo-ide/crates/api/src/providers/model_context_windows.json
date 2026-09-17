@@ -1,0 +1,565 @@
+{
+  "version": 1,
+  "models": [
+    {
+      "provider": "openai",
+      "ids": [
+        "gpt-5.6-sol"
+      ],
+      "context_window": 258000,
+      "max_output_tokens": 128000,
+      "class": "frontier",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "speed_tiers": [
+        "fast"
+      ],
+      "capabilities": [
+        "imagegen"
+      ],
+      "source": "User-directed 2026-07-14: GPT-family effective context capped at 258k (matching gpt-5.5) — sessions past ~256k showed degraded behavior on the Codex backend, so the declared 353k (Codex cache 372k at 95%) is not treated as usable. Prior: Official Codex model cache fetched 2026-07-09: 372k context at 95% effective; rounded down to 353k. Declared 'Latest frontier agentic coding model', priority 1 — supersedes gpt-5.5 as the top rung."
+    },
+    {
+      "provider": "openai",
+      "ids": [
+        "gpt-5.6-terra"
+      ],
+      "context_window": 258000,
+      "max_output_tokens": 128000,
+      "class": "balanced",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "speed_tiers": [
+        "fast"
+      ],
+      "capabilities": [
+        "imagegen"
+      ],
+      "source": "User-directed 2026-07-14: GPT-family effective context capped at 258k (matching gpt-5.5) — sessions past ~256k showed degraded behavior on the Codex backend, so the declared 353k (Codex cache 372k at 95%) is not treated as usable. Prior: Official Codex model cache fetched 2026-07-09: 372k context at 95% effective; rounded down to 353k. Declared 'Balanced agentic coding model for everyday work', priority 2."
+    },
+    {
+      "provider": "openai",
+      "ids": [
+        "gpt-5.6-luna"
+      ],
+      "context_window": 258000,
+      "max_output_tokens": 128000,
+      "class": "fast",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "speed_tiers": [
+        "fast"
+      ],
+      "capabilities": [
+        "imagegen"
+      ],
+      "source": "User-directed 2026-07-14: GPT-family effective context capped at 258k (matching gpt-5.5) — sessions past ~256k showed degraded behavior on the Codex backend, so the declared 353k (Codex cache 372k at 95%) is not treated as usable. Prior: Official Codex model cache fetched 2026-07-09: 372k context at 95% effective; rounded down to 353k. Declared 'Fast and affordable agentic coding model', priority 3."
+    },
+    {
+      "provider": "openai",
+      "ids": [
+        "gpt",
+        "gpt-5.5",
+        "gpt-5.5-fast",
+        "gpt-5.5-2026-04-23"
+      ],
+      "context_window": 258000,
+      "max_output_tokens": 128000,
+      "class": "balanced",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "speed_tiers": [
+        "fast"
+      ],
+      "fast_pair": {
+        "base": "gpt-5.5",
+        "fast": "gpt-5.5-fast"
+      },
+      "demotes_to": "terra",
+      "wire": "gpt-5.5",
+      "source": "User-confirmed GPT and GPT-5.5 effective context window: 258k tokens. Superseded as frontier by gpt-5.6-sol (Codex model cache 2026-07-09 declares sol 'Latest frontier agentic coding model', priority 1); gpt-5.5 was the prior default ('Frontier', priority 0)."
+    },
+    {
+      "provider": "openai",
+      "ids": [
+        "gpt-5.3-codex-spark"
+      ],
+      "context_window": 122000,
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "capabilities": [
+        "streaming_only",
+        "no_vision"
+      ],
+      "source": "User-confirmed Codex Spark context window: 122k tokens. Codex Spark does not support image inputs (text/code only)."
+    },
+    {
+      "provider": "deepseek",
+      "ids": [
+        "deepseek-v4-pro",
+        "deepseek-v4-flash",
+        "deepseek-chat",
+        "deepseek-reasoner"
+      ],
+      "context_window": 1000000,
+      "max_output_tokens": 384000,
+      "source": "DeepSeek pricing (api-docs.deepseek.com/quick_start/pricing): V4 Pro/Flash 1M context, 384K max output. Legacy deepseek-chat/deepseek-reasoner are v4-flash modes (deprecated 2026/07/24)."
+    },
+    {
+      "provider": "anthropic",
+      "ids": [
+        "claude-fable-5-1",
+        "claude-fable-5"
+      ],
+      "context_window": 1000000,
+      "max_request_bytes": 33554432,
+      "class": "frontier",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "source": "Anthropic public positioning: Fable 5.1 (2026-08-28) heads the Mythos-class tier above Opus; Fable 5 stays served beside it. Fable 5.1 refuses forced tool_choice, binds thinking blocks to model+prefix (thinking.block_binding), and reads its cache at $0.25/MTok. context_window is LIVE: context_window_for_canonical consults the declared sources (custom-provider declaration, then this catalog) before the name-shape guesses, so this row is authoritative. Its value equals what the legacy claude-family guess returned, so the reorder moved no built-in window. | Request BODY byte ceiling (NOT the token context window): Anthropic Messages API documents a 32MB maximum request size; a 413 request_too_large is returned above it. PROVENANCE: assistant knowledge, NOT user-confirmed — correct this figure if the documented limit differs. Consumed by request_too_large_preflight in providers/anthropic.rs to reject an oversized body before upload; an absent value simply disables the preflight."
+    },
+    {
+      "provider": "anthropic",
+      "ids": [
+        "claude-opus-5",
+        "claude-opus-4-8"
+      ],
+      "context_window": 1000000,
+      "max_request_bytes": 33554432,
+      "class": "balanced",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "source": "Superseded flagship: Fable-5 supersedes Opus as Anthropic's frontier tier; Opus is repositioned as an executor model per the user-declared hierarchy (frontier = fable-5/gpt-5.6-sol; executors = opus/sonnet/terra/everything else). context_window/max_output_tokens are informational only — see claude-fable-5 entry note. | Request BODY byte ceiling (NOT the token context window): Anthropic Messages API documents a 32MB maximum request size; a 413 request_too_large is returned above it. PROVENANCE: assistant knowledge, NOT user-confirmed — correct this figure if the documented limit differs. Consumed by request_too_large_preflight in providers/anthropic.rs to reject an oversized body before upload; an absent value simply disables the preflight."
+    },
+    {
+      "provider": "anthropic",
+      "ids": [
+        "claude-sonnet-5"
+      ],
+      "context_window": 1000000,
+      "max_request_bytes": 33554432,
+      "class": "balanced",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "source": "Executor tier per the user-declared hierarchy (frontier = fable-5/gpt-5.6-sol; executors = opus/sonnet/terra/everything else). context_window/max_output_tokens are informational only — see claude-fable-5 entry note. | Request BODY byte ceiling (NOT the token context window): Anthropic Messages API documents a 32MB maximum request size; a 413 request_too_large is returned above it. PROVENANCE: assistant knowledge, NOT user-confirmed — correct this figure if the documented limit differs. Consumed by request_too_large_preflight in providers/anthropic.rs to reject an oversized body before upload; an absent value simply disables the preflight."
+    },
+    {
+      "provider": "anthropic",
+      "ids": [
+        "claude-haiku-4-5-20251001"
+      ],
+      "context_window": 258000,
+      "max_request_bytes": 33554432,
+      "class": "fast",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "source": "Executor tier per the user-declared hierarchy. context_window/max_output_tokens are informational only — see claude-fable-5 entry note. | Request BODY byte ceiling (NOT the token context window): Anthropic Messages API documents a 32MB maximum request size; a 413 request_too_large is returned above it. PROVENANCE: assistant knowledge, NOT user-confirmed — correct this figure if the documented limit differs. Consumed by request_too_large_preflight in providers/anthropic.rs to reject an oversized body before upload; an absent value simply disables the preflight."
+    },
+    {
+      "provider": "google",
+      "ids": [
+        "gemini-3.6-flash"
+      ],
+      "wire": {
+        "low": "gemini-3.6-flash-low",
+        "medium": "gemini-3.6-flash-medium",
+        "high": "gemini-3.6-flash-high"
+      },
+      "effort_levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "source": "Google Antigravity backend registry, read 2026-08-20 via cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels. That registry is the serving list: it publishes gemini-3.6-flash-low/-medium/-high, gemini-3.5-flash-extra-low/-low, gemini-3.1-pro-low, gemini-3-flash-agent and gemini-pro-agent, and carries NO bare gemini-3.6-flash / gemini-3.5-flash / gemini-3.x-pro id at all — the reasoning tier is part of the model id. Display names in that response map gemini-3-flash-agent to \"Gemini 3.5 Flash (High)\", and deprecatedModelIds redirects gemini-3.1-pro-high to gemini-pro-agent, which is why those two ids carry the high rung. No context window is declared here: the registry does not publish one, and inventing a figure is exactly what this catalog forbids."
+    },
+    {
+      "provider": "google",
+      "ids": [
+        "gemini-3.5-flash"
+      ],
+      "wire": {
+        "low": "gemini-3.5-flash-extra-low",
+        "medium": "gemini-3.5-flash-low",
+        "high": "gemini-3-flash-agent"
+      },
+      "effort_levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "source": "Google Antigravity backend registry, read 2026-08-20 via cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels. That registry is the serving list: it publishes gemini-3.6-flash-low/-medium/-high, gemini-3.5-flash-extra-low/-low, gemini-3.1-pro-low, gemini-3-flash-agent and gemini-pro-agent, and carries NO bare gemini-3.6-flash / gemini-3.5-flash / gemini-3.x-pro id at all — the reasoning tier is part of the model id. Display names in that response map gemini-3-flash-agent to \"Gemini 3.5 Flash (High)\", and deprecatedModelIds redirects gemini-3.1-pro-high to gemini-pro-agent, which is why those two ids carry the high rung. No context window is declared here: the registry does not publish one, and inventing a figure is exactly what this catalog forbids."
+    },
+    {
+      "provider": "google",
+      "ids": [
+        "gemini-3.1-pro-preview",
+        "gemini-3.1-pro-preview-customtools",
+        "gemini-3-pro-preview"
+      ],
+      "wire": {
+        "low": "gemini-3.1-pro-low",
+        "high": "gemini-pro-agent"
+      },
+      "effort_levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "source": "Google Antigravity backend registry, read 2026-08-20 via cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels. That registry is the serving list: it publishes gemini-3.6-flash-low/-medium/-high, gemini-3.5-flash-extra-low/-low, gemini-3.1-pro-low, gemini-3-flash-agent and gemini-pro-agent, and carries NO bare gemini-3.6-flash / gemini-3.5-flash / gemini-3.x-pro id at all — the reasoning tier is part of the model id. Display names in that response map gemini-3-flash-agent to \"Gemini 3.5 Flash (High)\", and deprecatedModelIds redirects gemini-3.1-pro-high to gemini-pro-agent, which is why those two ids carry the high rung. No context window is declared here: the registry does not publish one, and inventing a figure is exactly what this catalog forbids."
+    },
+    {
+      "provider": "google",
+      "ids": [
+        "gemini-3.1-flash-lite"
+      ],
+      "wire": "gemini-3.1-flash-lite",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "source": "Google Antigravity backend registry, read 2026-08-20 via cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels. That registry is the serving list: it publishes gemini-3.6-flash-low/-medium/-high, gemini-3.5-flash-extra-low/-low, gemini-3.1-pro-low, gemini-3-flash-agent and gemini-pro-agent, and carries NO bare gemini-3.6-flash / gemini-3.5-flash / gemini-3.x-pro id at all — the reasoning tier is part of the model id. Display names in that response map gemini-3-flash-agent to \"Gemini 3.5 Flash (High)\", and deprecatedModelIds redirects gemini-3.1-pro-high to gemini-pro-agent, which is why those two ids carry the high rung. No context window is declared here: the registry does not publish one, and inventing a figure is exactly what this catalog forbids."
+    },
+    {
+      "provider": "google",
+      "ids": [
+        "gemini-3-flash",
+        "gemini-3-flash-preview"
+      ],
+      "wire": "gemini-3-flash",
+      "effort_levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "source": "Google Antigravity backend registry, read 2026-08-20 via cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels. That registry is the serving list: it publishes gemini-3.6-flash-low/-medium/-high, gemini-3.5-flash-extra-low/-low, gemini-3.1-pro-low, gemini-3-flash-agent and gemini-pro-agent, and carries NO bare gemini-3.6-flash / gemini-3.5-flash / gemini-3.x-pro id at all — the reasoning tier is part of the model id. Display names in that response map gemini-3-flash-agent to \"Gemini 3.5 Flash (High)\", and deprecatedModelIds redirects gemini-3.1-pro-high to gemini-pro-agent, which is why those two ids carry the high rung. No context window is declared here: the registry does not publish one, and inventing a figure is exactly what this catalog forbids."
+    },
+    {
+      "provider": "openai",
+      "ids": [
+        "o1",
+        "o3",
+        "o4"
+      ],
+      "effort_levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "source": "OpenAI o-series reasoning models (o1, o3, o4 and their -mini/-pro members by segment prefix): on the Chat Completions wire they take reasoning_effort and max_completion_tokens and reject max_tokens, which is the only fact openai_compat::is_reasoning_model reads. Effort set per the o-series docs: low|medium|high. No context window or class is declared — the row exists so an OpenAI-compatible gateway serving these ids gets the reasoning wire shape without a name-prefix rule in code."
+    },
+    {
+      "provider": "openai",
+      "ids": [
+        "gpt-5"
+      ],
+      "effort_levels": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "source": "The bare gpt-5 release and its dated members (gpt-5-2025-08-07) by segment prefix: the same reasoning wire shape as the o-series. Later gpt-5.x releases carry their own rows (5.3 codex spark, 5.5, 5.6) and discovery publishes newer ones, so this row is only the base release."
+    }
+  ],
+  "aliases": [
+    {
+      "alias": "anthropic-latest",
+      "canonical": "claude-opus-5",
+      "provider": "anthropic"
+    },
+    {
+      "alias": "claude-latest",
+      "canonical": "claude-opus-5",
+      "provider": "anthropic"
+    },
+    {
+      "alias": "fable",
+      "canonical": "claude-fable-5-1",
+      "provider": "anthropic",
+      "orchestration_rank": 0,
+      "refusal_fallback": "opus"
+    },
+    {
+      "alias": "claude-fable",
+      "canonical": "claude-fable-5-1",
+      "provider": "anthropic"
+    },
+    {
+      "alias": "claude-fable-5",
+      "canonical": "claude-fable-5",
+      "provider": "anthropic"
+    },
+    {
+      "alias": "opus",
+      "canonical": "claude-opus-5",
+      "provider": "anthropic",
+      "demotes_to": "sonnet"
+    },
+    {
+      "alias": "opus[1m]",
+      "canonical": "claude-opus-5",
+      "provider": "anthropic"
+    },
+    {
+      "alias": "claude-opus-4-8",
+      "canonical": "claude-opus-4-8",
+      "provider": "anthropic"
+    },
+    {
+      "alias": "sonnet",
+      "canonical": "claude-sonnet-5",
+      "provider": "anthropic",
+      "demotes_to": "haiku"
+    },
+    {
+      "alias": "haiku",
+      "canonical": "claude-haiku-4-5-20251001",
+      "provider": "anthropic"
+    },
+    {
+      "alias": "claude-opus",
+      "canonical": "claude-opus-5",
+      "provider": "anthropic"
+    },
+    {
+      "alias": "claude-opus[1m]",
+      "canonical": "claude-opus-5",
+      "provider": "anthropic"
+    },
+    {
+      "alias": "claude-sonnet",
+      "canonical": "claude-sonnet-5",
+      "provider": "anthropic"
+    },
+    {
+      "alias": "claude-haiku",
+      "canonical": "claude-haiku-4-5-20251001",
+      "provider": "anthropic"
+    },
+    {
+      "alias": "openai-latest",
+      "canonical": "gpt-5.6-sol",
+      "provider": "openai",
+      "orchestration_rank": 1
+    },
+    {
+      "alias": "gpt-5.6-sol",
+      "canonical": "gpt-5.6-sol",
+      "provider": "openai"
+    },
+    {
+      "alias": "gpt-5.6-terra",
+      "canonical": "gpt-5.6-terra",
+      "provider": "openai"
+    },
+    {
+      "alias": "gpt-5.6-luna",
+      "canonical": "gpt-5.6-luna",
+      "provider": "openai"
+    },
+    {
+      "alias": "gpt-5.6",
+      "canonical": "gpt-5.6-terra",
+      "provider": "openai"
+    },
+    {
+      "alias": "sol",
+      "canonical": "gpt-5.6-sol",
+      "provider": "openai",
+      "demotes_to": "luna"
+    },
+    {
+      "alias": "terra",
+      "canonical": "gpt-5.6-terra",
+      "provider": "openai",
+      "demotes_to": "luna"
+    },
+    {
+      "alias": "luna",
+      "canonical": "gpt-5.6-luna",
+      "provider": "openai"
+    },
+    {
+      "alias": "spark",
+      "canonical": "gpt-5.3-codex-spark",
+      "provider": "openai"
+    },
+    {
+      "alias": "gpt-5.3-codex-spark",
+      "canonical": "gpt-5.3-codex-spark",
+      "provider": "openai"
+    },
+    {
+      "alias": "google-latest",
+      "canonical": "gemini-3.6-flash",
+      "provider": "google"
+    },
+    {
+      "alias": "gemini-3.6-flash",
+      "canonical": "gemini-3.6-flash",
+      "provider": "google"
+    },
+    {
+      "alias": "gemini-3.1-pro-preview",
+      "canonical": "gemini-3.1-pro-preview",
+      "provider": "google"
+    },
+    {
+      "alias": "gemini-3.1-pro-preview-customtools",
+      "canonical": "gemini-3.1-pro-preview-customtools",
+      "provider": "google"
+    },
+    {
+      "alias": "gemini-3-pro-preview",
+      "canonical": "gemini-3-pro-preview",
+      "provider": "google"
+    },
+    {
+      "alias": "gemini-3.5-flash",
+      "canonical": "gemini-3.5-flash",
+      "provider": "google"
+    },
+    {
+      "alias": "gemini-3-flash",
+      "canonical": "gemini-3-flash",
+      "provider": "google"
+    },
+    {
+      "alias": "gemini-3-flash-preview",
+      "canonical": "gemini-3-flash-preview",
+      "provider": "google"
+    },
+    {
+      "alias": "gemini-3.1-flash-lite",
+      "canonical": "gemini-3.1-flash-lite",
+      "provider": "google"
+    },
+    {
+      "alias": "gemini-pro",
+      "canonical": "gemini-3.1-pro-preview",
+      "provider": "google",
+      "demotes_to": "gemini-flash"
+    },
+    {
+      "alias": "gemini-flash",
+      "canonical": "gemini-3.6-flash",
+      "provider": "google"
+    },
+    {
+      "alias": "gemini-flash-lite",
+      "canonical": "gemini-3.1-flash-lite",
+      "provider": "google"
+    },
+    {
+      "alias": "gemini-3.5-pro",
+      "canonical": "gemini-3.1-pro-preview",
+      "provider": "google"
+    },
+    {
+      "alias": "xai-latest",
+      "canonical": "grok-3",
+      "provider": "xai"
+    },
+    {
+      "alias": "grok",
+      "canonical": "grok-3",
+      "provider": "xai"
+    },
+    {
+      "alias": "ollama",
+      "canonical": "ollama",
+      "provider": "ollama"
+    }
+  ],
+  "priors": {
+    "source": "Cold-start name-token guesses for a model no provider has positioned: read only when a row declares no `class` and the effort ceiling does not decide, and recorded as TiersProvenance::Fallback. A published layer (operator export, model-catalog.json, discovery) may declare any field; the first layer that fills a field wins and the rest come from here.",
+    "small_tokens": ["fast", "flash", "mini", "haiku", "nano", "lite", "spark"],
+    "small_parameter_billion_below": 12,
+    "frontier_family_tokens": ["claude", "gpt", "codex", "gemini", "grok", "deepseek", "qwen", "llama", "glm", "mistral", "mixtral", "ornith"],
+    "deep_flagship_tokens": ["opus", "pro", "reasoner", "reasoning", "thinking", "r1"],
+    "specialty_seed": {
+      "coding": ["gpt", "claude"],
+      "debugging": ["gpt", "claude"],
+      "analysis": ["claude", "gemini", "deepseek"],
+      "research": ["claude", "gemini", "deepseek"],
+      "judge": ["claude", "gemini", "deepseek"],
+      "synthesizer": ["claude", "gemini", "deepseek"],
+      "writing": ["claude", "gemini"],
+      "design": ["claude", "gemini"]
+    },
+    "plan": {
+      "source": "Cold-start figures for the plan scorer (runtime::score_plan); the verified outcome record replaces each as evidence accumulates (CONFIDENT_DECISIVE_SAMPLES). MEASURED: judge_output_tokens = median code-reviewer output in the zerocode store, 26.6k (docs/design/zo-orchestration-accuracy-and-learning.md §8, 2026-09-10); classify_output_tokens/classify_ms = the probe's own caps (tools smart_router probe_exec.rs, 512 tokens / 8 s); medium work turn = zo medians of the r50 bench's seven tasks, out 7,551 tok / 9 requests / 114 s (zo-ide/docs/analysis/turn-axis-r50.md §6, 2026-09-10). ESTIMATES awaiting a measurement: pass percents by band; judge_duration_ms; objective_check_ms; lane_brief_tokens; handover_tokens; the trivial/small/large/unknown turns (scaled from medium). A published layer may override any figure; the first layer that fills it wins.",
+      "pass_percent_top": 90,
+      "pass_percent_second": 80,
+      "pass_percent_rest": 70,
+      "judge_output_tokens": 26600,
+      "judge_duration_ms": 180000,
+      "objective_check_ms": 60000,
+      "classify_output_tokens": 512,
+      "classify_ms": 8000,
+      "lane_brief_tokens": 3000,
+      "handover_tokens": 400,
+      "by_complexity": {
+        "trivial": { "output_tokens": 1500, "requests": 2, "duration_ms": 20000 },
+        "small": { "output_tokens": 3800, "requests": 5, "duration_ms": 55000 },
+        "medium": { "output_tokens": 7551, "requests": 9, "duration_ms": 114000 },
+        "large": { "output_tokens": 15000, "requests": 16, "duration_ms": 240000 },
+        "unknown": { "output_tokens": 7551, "requests": 9, "duration_ms": 114000 }
+      }
+    }
+  },
+  "facts": {
+    "priors": "The router's cold-start tables: name tokens (small / frontier family / deep flagship), formerly literals in runtime::model_inventory, and the per-role specialty seed (route role key -> lineage families), formerly a literal table in runtime::model_router::policy; see the section's own `source`.",
+    "priors.plan": "The plan scorer's cold-start figures (pass rate per band, work-turn size per complexity, judge/check/classify/brief/handover costs); see that section's `source` for which are measured and which are estimates.",
+    "effort_levels": "Codex models_cache.json supported_reasoning_levels (2026-09-05) for OpenAI; Anthropic effort docs (xhigh on Fable/Opus/Sonnet 5, Haiku low|medium|high|max); Gemini 3 thinkingLevel low|medium|high.",
+    "speed_tiers": "Codex models_cache.json additional_speed_tiers.",
+    "capabilities": "imagegen: ChatGPT backend image generation on the current GPT lineup; streaming_only: Codex Spark cannot serve non-stream requests; no_vision: Model does not accept image inputs (text/code only, e.g. Codex Spark).",
+    "fast_pair": "Release-specific priority-tier spelling when it is not `<id>[fast]`.",
+    "demotes_to": "One-step rate-limit fallback for an id that is not a family alias's canonical.",
+    "refusal_fallback": "The family alias a safety-classifier refusal on this lineup retries on once (an alias row carries its family's; a model row carries a retired lineup's). Absent: a refusal is surfaced after one same-model retry. The runtime names no lineup for this."
+  }
+}

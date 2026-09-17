@@ -1,0 +1,44 @@
+[package]
+name = "zerocode-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# The per-repository script approval is pinned to a hash of what was approved,
+# so a repository whose setup script changed is asked about again.
+sha2 = { workspace = true }
+# A loopback address is decided by WHATWG canonicalization, not by pattern
+# matching: `http://localhost:80/` has no port once parsed, and
+# `http://2130706433:3000` is `127.0.0.1`. The localhost-label gate leans on
+# both, so the parser is a dependency of the rule rather than a convenience.
+url = { workspace = true }
+uuid = { workspace = true }
+unicode-segmentation = "1"
+# The supply-chain layer reads Cargo.lock — see the workspace note beside it.
+toml = { workspace = true }
+
+[dev-dependencies]
+# A fake `PATH` holding exactly the executables a test names, so agent presence
+# is measured against a directory this test made rather than against whatever
+# happens to be installed on the machine running it.
+tempfile = { workspace = true }
+criterion = { workspace = true }
+
+# The ledger's hot paths, measured. The bench target is named after what it
+# watches rather than after the tool watching it.
+[[bench]]
+name = "ledger"
+harness = false
+
+# The per-event hook readers, measured against their own history: every
+# reader parsing privately versus one parse borrowed by all of them
+# (`crate::payload::HookPayload`). Regressing this is how the repeat comes
+# back one convenient `&str` call at a time.
+[[bench]]
+name = "hook_payload"
+harness = false

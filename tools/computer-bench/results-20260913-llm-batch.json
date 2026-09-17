@@ -1,0 +1,336 @@
+{
+  "date": "2026-09-13",
+  "installed_version": "1.3.52 (lane installed 1.3.53 during the batch run)",
+  "controller": "this Claude Code session (Fable 5.1) choosing labels from each returned look",
+  "fixture": "owned AppKit APM fixture, alternate mode, oracle = fixture event file",
+  "note": "machine under the v1.3.53 release lane's build-app phase; batch run interrupted after its first call by an HID idle reset of unknown source",
+  "llm_per_step_semantic": {
+    "calls": 10,
+    "successful_actions": 10,
+    "all_correct": true,
+    "input_ms": 1576.172585,
+    "hand_wall_ms": 2118.965165,
+    "model_turns_ms": 84326.848959,
+    "loop_ms": 86445.814124,
+    "loop_apm": 6.940764062206011,
+    "status": "completed",
+    "rounds": [
+      {
+        "labels": [
+          "Amber"
+        ],
+        "input_path": "semantic",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 1,
+        "input_ms": 158.69875,
+        "wall_ms": 211.292458,
+        "between_calls_ms": 8884.059125,
+        "prepare_ms": 173.883708,
+        "verify_ms": 52.59370800000002,
+        "count_before": 0,
+        "count_after": 1,
+        "errors_after": 0
+      },
+      {
+        "labels": [
+          "Blue"
+        ],
+        "input_path": "semantic",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 1,
+        "input_ms": 158.989125,
+        "wall_ms": 208.960833,
+        "between_calls_ms": 12007.975417,
+        "prepare_ms": 174.683167,
+        "verify_ms": 49.97170800000001,
+        "count_before": 1,
+        "count_after": 2,
+        "errors_after": 0
+      },
+      {
+        "labels": [
+          "Amber"
+        ],
+        "input_path": "semantic",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 1,
+        "input_ms": 158.3105,
+        "wall_ms": 212.06325,
+        "between_calls_ms": 7018.098667,
+        "prepare_ms": 181.176291,
+        "verify_ms": 53.75275000000002,
+        "count_before": 2,
+        "count_after": 3,
+        "errors_after": 0
+      },
+      {
+        "labels": [
+          "Blue"
+        ],
+        "input_path": "semantic",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 1,
+        "input_ms": 157.644875,
+        "wall_ms": 212.109208,
+        "between_calls_ms": 8683.983959,
+        "prepare_ms": 174.944375,
+        "verify_ms": 54.46433299999998,
+        "count_before": 3,
+        "count_after": 4,
+        "errors_after": 0
+      },
+      {
+        "labels": [
+          "Amber"
+        ],
+        "input_path": "semantic",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 1,
+        "input_ms": 156.774292,
+        "wall_ms": 212.44125,
+        "between_calls_ms": 7258.389542,
+        "prepare_ms": 178.143875,
+        "verify_ms": 55.666957999999994,
+        "count_before": 4,
+        "count_after": 5,
+        "errors_after": 0
+      },
+      {
+        "labels": [
+          "Blue"
+        ],
+        "input_path": "semantic",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 1,
+        "input_ms": 159.235167,
+        "wall_ms": 215.119375,
+        "between_calls_ms": 6047.880791,
+        "prepare_ms": 184.737084,
+        "verify_ms": 55.884208,
+        "count_before": 5,
+        "count_after": 6,
+        "errors_after": 0
+      },
+      {
+        "labels": [
+          "Amber"
+        ],
+        "input_path": "semantic",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 1,
+        "input_ms": 163.780709,
+        "wall_ms": 214.72275,
+        "between_calls_ms": 7076.331125,
+        "prepare_ms": 187.444625,
+        "verify_ms": 50.94204099999999,
+        "count_before": 6,
+        "count_after": 7,
+        "errors_after": 0
+      },
+      {
+        "labels": [
+          "Blue"
+        ],
+        "input_path": "semantic",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 1,
+        "input_ms": 154.20425,
+        "wall_ms": 221.017125,
+        "between_calls_ms": 6598.519791,
+        "prepare_ms": 236.153667,
+        "verify_ms": 66.81287499999999,
+        "count_before": 7,
+        "count_after": 8,
+        "errors_after": 0
+      },
+      {
+        "labels": [
+          "Amber"
+        ],
+        "input_path": "semantic",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 1,
+        "input_ms": 152.375333,
+        "wall_ms": 204.389458,
+        "between_calls_ms": 7557.457333,
+        "prepare_ms": 168.799042,
+        "verify_ms": 52.01412499999998,
+        "count_before": 8,
+        "count_after": 9,
+        "errors_after": 0
+      },
+      {
+        "labels": [
+          "Blue"
+        ],
+        "input_path": "semantic",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 1,
+        "input_ms": 156.159584,
+        "wall_ms": 206.849458,
+        "between_calls_ms": 13194.153209,
+        "prepare_ms": 170.748125,
+        "verify_ms": 50.689874,
+        "count_before": 9,
+        "count_after": 10,
+        "errors_after": 0
+      }
+    ]
+  },
+  "llm_batch5_coordinate": {
+    "calls": 1,
+    "successful_actions": 5,
+    "all_correct": true,
+    "input_ms": 1049.945,
+    "hand_wall_ms": 1102.828916,
+    "model_turns_ms": 12355.292584,
+    "loop_ms": 13458.121500000001,
+    "loop_apm": 22.29137253665008,
+    "status": "interrupted",
+    "rounds": [
+      {
+        "labels": [
+          "Amber",
+          "Blue",
+          "Amber",
+          "Blue",
+          "Amber"
+        ],
+        "input_path": "coordinate",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 5,
+        "input_ms": 1049.945,
+        "wall_ms": 1102.828916,
+        "between_calls_ms": 12355.292584,
+        "prepare_ms": 197.821,
+        "verify_ms": 52.883916,
+        "count_before": 0,
+        "count_after": 5,
+        "errors_after": 0
+      }
+    ]
+  },
+  "llm_batch5_coordinate_run2": {
+    "calls": 1,
+    "successful_actions": 5,
+    "all_correct": true,
+    "input_ms": 1033.853042,
+    "hand_wall_ms": 1088.470375,
+    "model_turns_ms": 7913.116917,
+    "loop_ms": 9001.587292,
+    "loop_apm": 33.32745551072083,
+    "status": "interrupted",
+    "stopped_by": "HID idle reset during the fixture run; input source unknown",
+    "rounds": [
+      {
+        "labels": [
+          "Amber",
+          "Blue",
+          "Amber",
+          "Blue",
+          "Amber"
+        ],
+        "input_path": "coordinate",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 5,
+        "input_ms": 1033.853042,
+        "wall_ms": 1088.470375,
+        "between_calls_ms": 7913.116917,
+        "prepare_ms": 179.594208,
+        "verify_ms": 54.617333000000144,
+        "count_before": 0,
+        "count_after": 5,
+        "errors_after": 0
+      }
+    ]
+  },
+  "llm_batch20_coordinate": {
+    "calls": 1,
+    "successful_actions": 20,
+    "all_correct": true,
+    "input_ms": 4025.572875,
+    "hand_wall_ms": 4081.978208,
+    "model_turns_ms": 36135.734958,
+    "loop_ms": 40217.713166,
+    "loop_apm": 29.837599046145623,
+    "status": "interrupted",
+    "stopped_by": "HID idle reset during the fixture run; input source unknown",
+    "rounds": [
+      {
+        "labels": [
+          "Amber",
+          "Blue",
+          "Amber",
+          "Blue",
+          "Amber",
+          "Blue",
+          "Amber",
+          "Blue",
+          "Amber",
+          "Blue",
+          "Amber",
+          "Blue",
+          "Amber",
+          "Blue",
+          "Amber",
+          "Blue",
+          "Amber",
+          "Blue",
+          "Amber",
+          "Blue"
+        ],
+        "input_path": "coordinate",
+        "reuse_state": false,
+        "reused_before": false,
+        "reused_after": false,
+        "passed": true,
+        "successful_actions": 20,
+        "input_ms": 4025.572875,
+        "wall_ms": 4081.978208,
+        "between_calls_ms": 36135.734958,
+        "prepare_ms": 198.569667,
+        "verify_ms": 56.405333000000155,
+        "count_before": 0,
+        "count_after": 20,
+        "errors_after": 0
+      }
+    ]
+  },
+  "note_run2": "run 2 (desk idle): synthetic coordinate presses reset the system HID idle timer, and the bench's conservative watch stops the run at the next guard — so every coordinate batch measurement here is one call; the batch itself completed and the oracle passed"
+}

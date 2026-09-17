@@ -1,0 +1,14 @@
+{
+  "hit_cap": 200,
+  "max_file_bytes": 1048576,
+  "max_hit_line_chars": 200,
+  "search_timeout_ms": 2000,
+  "regex_size_limit": 1048576,
+  "history_cap": 100,
+  "move_cap": 200,
+  "hook_pending_cap": 100,
+  "name_debounce_ms": 200,
+  "text_debounce_ms": 280,
+  "toast_ms": 6000,
+  "hook_pending_ms": 30000
+}

@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ZeroCode — 메인 창 프로토타입</title>
+    <!-- 토큰 파일을 직접 링크한다. 프로토타입과 계약이 갈라질 수 없도록. -->
+    <link rel="stylesheet" href="../tokens.css" />
+    <link rel="stylesheet" href="./prototype.css" />
+    <script>
+      // Prototype-only switches so both themes and the un-obscured base layout
+      // can be reviewed: ?theme=light|dark and ?modal=0.
+      const params = new URLSearchParams(location.search);
+      const theme = params.get("theme");
+      if (theme === "light" || theme === "dark") {
+        document.documentElement.dataset.theme = theme;
+      }
+      if (params.get("modal") === "0") {
+        document.documentElement.classList.add("no-modal");
+      }
+    </script>
+  </head>
+  <body>
+    <div class="window">
+      <header class="titlebar">
+        <div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div>
+        <span class="wordmark">ZO</span>
+        <span class="project">forge-code</span>
+        <span class="branch">main</span>
+        <div class="titlebar-right">
+          <span class="attention" title="응답을 기다리는 레인">
+            <span class="attention-dot"></span>2개 대기
+          </span>
+          <kbd>⌘K</kbd>
+        </div>
+      </header>
+
+      <div class="body">
+        <nav class="spine" aria-label="레인 전환">
+          <button class="seg seg--streaming lane-1" aria-current="false">
+            <span class="rail"></span>
+            <span class="glyph">ZO</span>
+            <span class="sr">zo · 스트리밍 중</span>
+          </button>
+          <button class="seg seg--waiting lane-2" aria-current="true">
+            <span class="rail"></span>
+            <span class="glyph">CX</span>
+            <span class="sr">codex · 권한 대기</span>
+          </button>
+          <button class="seg seg--idle lane-3">
+            <span class="rail"></span>
+            <span class="glyph">AG</span>
+            <span class="sr">antigravity · 대기</span>
+          </button>
+          <button class="seg seg--blocked lane-4">
+            <span class="rail"></span>
+            <span class="glyph">DR</span>
+            <span class="sr">droid · 막힘</span>
+          </button>
+          <button class="seg seg--exited lane-5">
+            <span class="rail"></span>
+            <span class="glyph">CL</span>
+            <span class="sr">claude · 종료됨</span>
+          </button>
+        </nav>
+
+        <main class="stage lane-2">
+          <div class="lane-head">
+            <div class="lane-id">
+              <span class="agent">CODEX</span>
+              <span class="state state--waiting">권한 대기</span>
+            </div>
+            <h1 class="task">background bash 드레인 게이트 봉인 로직 리팩터링</h1>
+            <dl class="meta">
+              <div><dt>워크트리</dt><dd>wt/refactor-drain-gate</dd></div>
+              <div><dt>베이스</dt><dd>main · 3 커밋 앞</dd></div>
+              <div><dt>변경</dt><dd>4 파일 <span class="add">+128</span> <span class="del">−41</span></dd></div>
+            </dl>
+          </div>
+
+          <section class="terminal" aria-label="터미널 출력">
+<pre>  <span class="dim">$</span> cargo test -p runtime bash::drain
+  <span class="dim">   Compiling</span> runtime v0.1.0 (crates/runtime)
+  <span class="dim">    Finished</span> test profile in 12.44s
+  <span class="dim">     Running</span> unittests src/lib.rs
+
+  test bash::drain::seals_after_grace_expires ... <span class="ok">ok</span>
+  test bash::drain::rejects_append_after_completion ... <span class="ok">ok</span>
+  test bash::drain::records_truncation_in_the_log ... <span class="ok">ok</span>
+
+  <span class="dim">test result:</span> ok. 3 passed; 0 failed
+
+  드레인 게이트에 in-flight 카운터를 붙였습니다. 유예가 만료된 뒤
+  도착한 append는 이제 거부되고, 잘린 바이트 수가 로그에 남습니다.
+
+  다음으로 <span class="path">crates/runtime/src/bash.rs</span>의 워처가 종결 상태를
+  기록하기 전에 봉인을 호출하도록 순서를 바꾸겠습니다.
+
+  <span class="dim">→ 명령 실행 권한을 요청했습니다.</span>
+<span class="cursor">▊</span></pre>
+          </section>
+
+          <form class="composer" onsubmit="return false">
+            <label class="sr" for="steer">이 레인에 끼어들기</label>
+            <input id="steer" type="text" placeholder="끼어들기 — 스트리밍 중에도 한 줄 넣을 수 있습니다" />
+            <button type="submit">보내기 <kbd>⏎</kbd></button>
+          </form>
+        </main>
+
+        <aside class="ledger" aria-label="레인 목록">
+          <h2 class="ledger-title">레인</h2>
+          <div class="ledger-grid">
+            <div class="row lane-1 is-streaming">
+              <span class="tick"></span>
+              <span class="who">zo</span>
+              <span class="what">serve 프레임 판별 테스트 추가</span>
+              <span class="how">스트리밍</span>
+              <span class="when">0:42</span>
+            </div>
+            <div class="row lane-2 is-waiting is-active">
+              <span class="tick"></span>
+              <span class="who">codex</span>
+              <span class="what">드레인 게이트 봉인 리팩터링</span>
+              <span class="how">권한 대기</span>
+              <span class="when">3:11</span>
+            </div>
+            <div class="row lane-3 is-idle">
+              <span class="tick"></span>
+              <span class="who">antigravity</span>
+              <span class="what">릴리스 노트 초안</span>
+              <span class="how">대기</span>
+              <span class="when">—</span>
+            </div>
+            <div class="row lane-4 is-blocked">
+              <span class="tick"></span>
+              <span class="who">droid</span>
+              <span class="what">모델 카탈로그 중복 행 조사</span>
+              <span class="how">헬름 점유됨</span>
+              <span class="when">8:05</span>
+            </div>
+            <div class="row lane-5 is-exited">
+              <span class="tick"></span>
+              <span class="who">claude</span>
+              <span class="what">TUI 레인 레일 렌더러</span>
+              <span class="how">종료됨</span>
+              <span class="when">21:37</span>
+            </div>
+          </div>
+
+          <h2 class="ledger-title">주의</h2>
+          <p class="hint">
+            권한 대기는 응답이 없으면 하네스가 자동으로 거부합니다.
+            <kbd>⌘⇧P</kbd>로 대기 중인 레인으로 바로 이동합니다.
+          </p>
+        </aside>
+      </div>
+
+      <div class="scrim">
+        <section class="permission" role="dialog" aria-modal="true" aria-labelledby="perm-title">
+          <header>
+            <span class="perm-agent lane-2">CODEX · wt/refactor-drain-gate</span>
+            <h2 id="perm-title">이 명령을 실행할까요?</h2>
+          </header>
+          <pre class="perm-cmd">git -C wt/refactor-drain-gate commit -am "seal drain gate after grace"</pre>
+          <p class="perm-why">
+            이 레인은 워크트리 밖 파일을 건드리지 않습니다. 승인하면 이번 턴에서만 유효합니다.
+          </p>
+          <div class="perm-actions">
+            <button class="btn btn--primary">허용 <kbd>⏎</kbd></button>
+            <button class="btn">항상 허용</button>
+            <button class="btn btn--halt">거부 <kbd>esc</kbd></button>
+            <button class="btn btn--halt-quiet">항상 거부</button>
+          </div>
+        </section>
+      </div>
+    </div>
+  </body>
+</html>
