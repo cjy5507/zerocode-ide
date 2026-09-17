@@ -856,7 +856,9 @@ mod tests {
                 evidence: EvidenceLevel::Full,
                 fingerprint: Fingerprint {
                     apps: ["com.example.admin".to_string()].into_iter().collect(),
-                    hosts: ["stg-admin.example.internal".to_string()].into_iter().collect(),
+                    hosts: ["stg-admin.example.internal".to_string()]
+                        .into_iter()
+                        .collect(),
                     protocol: 3,
                     assets: Default::default(),
                 },
