@@ -21734,6 +21734,26 @@ button.worker-composer-pill:hover {
   min-width: 0;
 }
 
+/* A label with a sentence about it is a BLOCK, so the sentence is a second
+ * line rather than a clause the label runs into. Both are inline spans in the
+ * markup, which on a 1230px row put them side by side — measured on
+ * 「라이트 테마 따로 사용」, the hint began 123px in, level with the label —
+ * and once the words took a reading measure the pair wrapped mid-sentence
+ * instead: two ragged lines for two facts. The row grammar says left column
+ * [label + one line], and this is the two of them being two things. */
+.settings-check .settings-label,
+.settings-pane .settings-field .settings-label {
+  display: block;
+}
+
+/* And a hint INSIDE a row is already within the row's inset — the 16px it
+ * carries is for standing on its own under a card, and spent twice it puts
+ * the sentence one step further in than the label it belongs to. */
+.settings-check .settings-hint,
+.settings-pane .settings-field .settings-hint {
+  padding-inline: 0;
+}
+
 /* The words are read, so they carry a measure — the same 52ch
  * `.settings-subhead-desc` reads its sentences at, named once in
  * `tokens.css`. Only the words: a control in the left column is there
