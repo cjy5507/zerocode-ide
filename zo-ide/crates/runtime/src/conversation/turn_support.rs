@@ -41,6 +41,12 @@ const RECALL_AND_REMINDER_LIMIT: usize = DEFAULT_MEMORY_RECALL_LIMIT + MAX_REMIN
 /// `<kind>-<signature>` ([`decision_core::dreamer::slug_for`]), so the prefix
 /// is the cheap, IO-free way to tell "what this project learned" from a
 /// hand-filed note — and a hand-filed `gotcha-…` is exactly as much a lesson.
+///
+/// Both halves read the hits the recall seat handed back, so a note that seat
+/// left out is out of the reminder block too ([`crate::RecallSeat`]). That is
+/// the same answer given once rather than twice: a lesson a judgment read as
+/// bearing on nothing in the request is not a lesson this turn needs reminding
+/// of either.
 fn recall_and_reminder_sections(hits: &[core_types::MemoryHit]) -> Vec<String> {
     let rendered = &hits[..hits.len().min(MAX_RECALLED_ENTRIES)];
     let already: Vec<String> = rendered

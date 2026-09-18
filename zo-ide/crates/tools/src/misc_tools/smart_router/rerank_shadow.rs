@@ -1,14 +1,15 @@
 //! The memory rerank: every recall a turn performs is put to a System One
-//! judgment, and what that judgment would have reordered is written beside what
-//! recall chose. Under `shadow` and `auto` that is all that happens and the turn
-//! reads exactly what it would have read with the switch off; under `on` the
-//! judgment's order — after the vault's graph has had its say — is the order the
-//! turn reads.
+//! judgment, and what that judgment would have reordered — and what it would
+//! have left out altogether — is written beside what recall chose. Under
+//! `shadow` and `auto` that is all that happens and the turn reads exactly what
+//! it would have read with the switch off; under `on` the judgment's answer —
+//! after the vault's graph has had its say — is what the turn reads.
 //!
 //! The question, the checks on the reply, the rule that the vault's graph
-//! outranks the judgment, and the fold that proves an order a permutation before
-//! it changes anything all belong to `runtime::memory::rerank`. This file owns
-//! only what running it needs: the seat beside recall ([`RerankShadow`]), the
+//! outranks the judgment, the one ground on which a note is left out, and the
+//! fold that accounts for every note recall admitted before anything changes
+//! all belong to `runtime::memory::rerank`. This file owns only what running it
+//! needs: the seat beside recall ([`RerankShadow`]), the
 //! setting that says which road a recall takes, the call, the memo, and the
 //! ledger row — the same shape as the routing shadow next door
 //! (`decision_shadow.rs`), so a reader of one can read the other.
@@ -22,12 +23,12 @@
 //!
 //! # Nothing gets worse for asking
 //!
-//! The apply road can only ever hand back recall's own order or a proved
-//! permutation of it. A judgment that misses the wall, that the door refuses,
-//! that fails its checks, or whose order cannot be proved a permutation leaves
-//! recall's order standing, and the row says `applied: false` either way — so
-//! the ledger can be read back for how often the switch actually moved
-//! anything.
+//! The apply road can only ever hand back recall's own order, or an order whose
+//! two lists account for every note recall admitted exactly once. A judgment
+//! that misses the wall, that the door refuses, that fails its checks, or whose
+//! lists cannot be checked that far leaves recall's order standing, and the row
+//! says `applied: false` either way — so the ledger can be read back for how
+//! often the switch actually changed anything.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -180,13 +181,24 @@ pub struct Judged {
     /// Recall's own order — what the turn read unless `applied` says the
     /// judgment's is what it read instead.
     pub recalled: Vec<String>,
-    /// The judgment's order after the graph's rules.
+    /// The judgment's order after the graph's rules, without the notes
+    /// `dropped` names. Shorter than `recalled` whenever anything dropped.
     pub proposed: Vec<String>,
     pub moved: usize,
     pub top_changed: bool,
     /// Notes the graph pinned against the judgment. The number a later phase
     /// reads before letting a judgment reorder anything for real.
     pub held_by_graph: Vec<String>,
+    /// Notes the judgment put on the bottom level and the graph said nothing
+    /// about: left out of `proposed`, and out of what an applying turn reads.
+    /// Absent on a row from before the rule, which reads as what it was:
+    /// nothing dropped.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped: Vec<String>,
+    /// Notes that rule would have dropped, that the graph's claim kept. The
+    /// second number `dropped` has to be read with.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_by_graph: Vec<String>,
     /// Each note's `(normalised score, confidence)`, in recall's order.
     pub readings: Vec<(f64, f64)>,
 }
@@ -199,6 +211,8 @@ impl Judged {
             moved: comparison.moved,
             top_changed: comparison.top_changed,
             held_by_graph: comparison.held_by_graph,
+            dropped: comparison.dropped,
+            kept_by_graph: comparison.kept_by_graph,
             readings: readings
                 .iter()
                 .map(|reading| (reading.normalised, reading.confidence))
@@ -416,7 +430,7 @@ fn apply(cwd: &Path, query: &str, hits: Vec<MemoryHit>) -> Vec<MemoryHit> {
     let read = row
         .judged
         .as_ref()
-        .and_then(|judged| apply_order(&hits, &judged.proposed));
+        .and_then(|judged| apply_order(&hits, &judged.proposed, &judged.dropped));
     row.applied = read.is_some();
     let _ = append_shadow_row(&rerank_shadow_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
     read.unwrap_or(hits)
@@ -754,7 +768,7 @@ mod tests {
 
     #[test]
     fn an_answered_reading_writes_recalls_order_beside_the_judgments_and_what_the_graph_held() {
-        let mock = Mock::serving(200, reply_for(&[1, 3, 0]));
+        let mock = Mock::serving(200, reply_for(&[1, 3, 1]));
         let client = SystemOneClient::new(&mock.base_url, "test-key");
         let hits = [
             hit("wiki/new", "the current decision"),
@@ -1213,7 +1227,7 @@ mod tests {
     /// leaves says the order was applied.
     #[test]
     fn on_reads_the_judgments_order_and_its_row_says_so() {
-        let mock = Mock::serving(200, reply_for(&[0, 3, 1]));
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
         let hits = three();
 
         let (read, rows) = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
@@ -1254,9 +1268,21 @@ mod tests {
             assert_eq!(slugs(&read), slugs(&hits), "{} reads recall's order", mode.key());
             assert_eq!(rows.len(), 1, "{}", mode.key());
             assert!(!rows[0].applied, "{} records and acts on nothing", mode.key());
+            let judged = rows[0].judged.as_ref().expect("a judgment");
             assert!(
-                rows[0].judged.as_ref().expect("a judgment").top_changed,
+                judged.top_changed,
                 "{} still asked, and the judgment still disagreed",
+                mode.key()
+            );
+            assert_eq!(
+                judged.dropped,
+                ["wiki/a"],
+                "{} writes down the note it would have left out",
+                mode.key()
+            );
+            assert!(
+                read.iter().any(|hit| hit.entry.slug == "wiki/a"),
+                "{} wrote that down and the turn read the note anyway",
                 mode.key()
             );
         }
@@ -1327,14 +1353,358 @@ mod tests {
             moved: 3,
             top_changed: true,
             held_by_graph: Vec::new(),
+            dropped: Vec::new(),
+            kept_by_graph: Vec::new(),
             readings: vec![(0.0, 0.9); 3],
         });
 
         let read = row
             .judged
             .as_ref()
-            .and_then(|judged| apply_order(&hits, &judged.proposed));
+            .and_then(|judged| apply_order(&hits, &judged.proposed, &judged.dropped));
 
         assert_eq!(read, None, "a note recall never admitted folds nothing");
+    }
+
+    /// The apply road's whole point: a note the judgment read as bearing on
+    /// nothing is one the turn does not get, and the row names it.
+    #[test]
+    fn the_apply_road_leaves_the_bottom_level_out_of_the_turn() {
+        let mock = Mock::serving(200, reply_for(&[0, 3, 1]));
+        let hits = three();
+
+        let (read, rows) = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (row twelve)", hits.to_vec());
+            (read, rows(cwd))
+        });
+
+        assert_eq!(slugs(&read), ["wiki/b", "wiki/c"]);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].applied);
+        let judged = rows[0].judged.as_ref().expect("a judgment");
+        assert_eq!(judged.dropped, ["wiki/a"]);
+        assert_eq!(
+            judged.recalled.len(),
+            3,
+            "the row still says what recall handed over, or the drop is unreadable"
+        );
+    }
+
+    /// A recall the judgment read as noise all the way down leaves the turn no
+    /// recall section at all — the number this rule is really for.
+    #[test]
+    fn a_recall_read_as_noise_all_the_way_down_leaves_the_turn_nothing() {
+        let mock = Mock::serving(200, reply_for(&[0, 0, 0]));
+        let hits = three();
+
+        let (read, rows) = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (row thirteen)", hits.to_vec());
+            (read, rows(cwd))
+        });
+
+        assert!(read.is_empty());
+        assert!(rows[0].applied);
+        assert_eq!(
+            rows[0].judged.as_ref().expect("a judgment").dropped.len(),
+            3
+        );
+    }
+
+    /// A row written before the drop existed carries neither list, and reads as
+    /// what it was: a judgment that left everything in.
+    #[test]
+    fn a_row_from_before_the_rule_reads_as_nothing_dropped() {
+        let hits = three();
+        let before = serde_json::json!({
+            "recalled": slugs(&hits),
+            "proposed": ["wiki/b", "wiki/c", "wiki/a"],
+            "moved": 3,
+            "top_changed": true,
+            "held_by_graph": [],
+            "readings": [[0.0, 0.9], [1.0, 0.9], [0.3, 0.9]],
+        });
+
+        let judged: Judged = serde_json::from_value(before).expect("a row from before the rule");
+
+        assert!(judged.dropped.is_empty() && judged.kept_by_graph.is_empty());
+        assert!(
+            apply_order(&hits, &judged.proposed, &judged.dropped).is_some(),
+            "an order from before the rule still folds: nothing was dropped"
+        );
+    }
+
+    /// What the bottom-level drop removes, replayed over the rows this switch
+    /// has already written.
+    ///
+    /// The ledger keeps no query text and no summaries — by design — so this
+    /// replays what a row CAN answer: the applied order (`judged.proposed`,
+    /// after the graph has had its say), each note's reading, and the notes the
+    /// graph pinned. It reports what leaves and what the graph keeps.
+    ///
+    /// It does NOT say whether leaving them out was right. Scoring a Jev filter
+    /// with the same Jev readings the filter is made of would only show the two
+    /// agreeing with themselves; what a drop is worth is a question for a
+    /// measured comparison of turns, not for this.
+    ///
+    /// Three inexactnesses, named rather than smoothed over:
+    ///
+    /// * the shipped rule's exception is every note the vault's graph made a
+    ///   claim about, which a row does not carry. `held_by_graph`, which it
+    ///   does, is about PLACES — a claim the judgment already satisfied leaves
+    ///   it empty — so the notes it names are a FLOOR under what the graph
+    ///   keeps, and the drop count a ceiling.
+    /// * the section is re-rendered from the vault's pages as they stand now,
+    ///   not from the summaries recall rendered then, and a note whose page is
+    ///   gone (or was never a vault page) is left out of the token reading and
+    ///   counted as uncovered.
+    /// * a row written under this rule already removed some notes, and their
+    ///   places in its order are not recoverable. Its notes still count — the
+    ///   note columns do not care about order — but the entry and token
+    ///   columns, which are about the rendered FRONT of the order, skip it.
+    ///   That is what keeps this readable as rows accumulate under the rule
+    ///   instead of the sample collapsing to the rows from before it.
+    ///
+    /// It takes the ledger FILE rather than the project whose ledger it is,
+    /// because [`rerank_shadow_path`] maps a `cwd` through `project_slug`,
+    /// whose hash is a `DefaultHasher` — stable within a build and not across
+    /// them, so a ledger the installed zo wrote is not at the path this test
+    /// binary computes for the same directory. `rerank_shadow_path` is how to
+    /// find it; the path is how to read it.
+    ///
+    /// ```text
+    /// ZO_RERANK_REPLAY_LEDGER=~/.zo/projects/<slug>/state/smart-router/rerank-shadow.jsonl \
+    ///   ZEROCODE_SECOND_BRAIN=/Users/dev \
+    ///   cargo test -p tools --lib -- what_the_bottom_level_drop_removes --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "replays this machine's real ledger and vault; run deliberately"]
+    fn what_the_bottom_level_drop_removes() {
+        let ledger = std::env::var_os("ZO_RERANK_REPLAY_LEDGER")
+            .map(PathBuf::from)
+            .expect("point ZO_RERANK_REPLAY_LEDGER at a rerank-shadow.jsonl");
+        let vault = std::env::var_os("ZEROCODE_SECOND_BRAIN")
+            .map(PathBuf::from)
+            .expect("point ZEROCODE_SECOND_BRAIN at the vault");
+        let written = std::fs::read_to_string(&ledger)
+            .unwrap_or_else(|why| panic!("no ledger at {}: {why}", ledger.display()));
+        let (rows, readings) = distinct_readings(&written);
+        assert!(
+            readings.len() > 20,
+            "{} readings is too few to read anything off",
+            readings.len()
+        );
+
+        let reach = Reach::over(&readings, &vault_pages(&vault));
+        let turns = readings.len();
+        println!("\n  ledger: {}", ledger.display());
+        println!("  {rows} rows, {turns} distinct readings replayed");
+        if reach.ordered < turns {
+            println!(
+                "  {} of them were written under the rule: their notes count, their order does not",
+                turns - reach.ordered
+            );
+        }
+        println!("\n  judged notes               {}", reach.notes);
+        println!(
+            "  bottom level, dropped      {}  = {:5.1}%",
+            reach.dropped,
+            share(reach.dropped, reach.notes)
+        );
+        println!(
+            "  bottom level, graph kept   {}  (a floor; see the doc comment)",
+            reach.kept_by_graph
+        );
+        println!(
+            "  readings losing every note {}/{turns}  = {:5.1}%   <- the recall was noise whole",
+            reach.lost_whole,
+            share(reach.lost_whole, turns)
+        );
+        println!(
+            "\n  rendered entries           {} -> {}  (-{}, {:5.1}%)",
+            reach.entries_before,
+            reach.entries_after,
+            reach.entries_before - reach.entries_after,
+            share(reach.entries_before - reach.entries_after, reach.entries_before)
+        );
+        println!(
+            "  readings rendering fewer   {}/{}",
+            reach.fewer_entries, reach.ordered
+        );
+        println!(
+            "\n  section tokens             {} -> {}  (-{}, {:5.1}%)",
+            reach.tokens_before,
+            reach.tokens_after,
+            reach.tokens_before - reach.tokens_after,
+            share(reach.tokens_before - reach.tokens_after, reach.tokens_before)
+        );
+        println!(
+            "  over {}/{} readings whose rendered pages all still resolve in the vault",
+            reach.covered, reach.ordered
+        );
+        // The reserve does not move: it is the worst case for a full section,
+        // and a turn can still render one.
+        println!(
+            "\n  the preflight reserve is unchanged at {} tokens — the worst case for {} capped",
+            runtime::memory::recall::recall_section_reserve_tokens(),
+            runtime::memory::recall::MAX_RECALLED_ENTRIES
+        );
+        println!(
+            "  entries, and a turn can still render {}",
+            runtime::memory::recall::MAX_RECALLED_ENTRIES
+        );
+    }
+
+    /// A share of a sample the caller has already asserted is small.
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a share of a few hundred judged notes"
+    )]
+    fn share(part: usize, whole: usize) -> f64 {
+        100.0 * part as f64 / whole as f64
+    }
+
+    /// How many rows were read, and one judgment per distinct reading.
+    ///
+    /// One reading asked once. The memo answers every repeat of it, and a
+    /// memoed row would count the same notes twice.
+    fn distinct_readings(written: &str) -> (usize, Vec<Judged>) {
+        let mut asked: std::collections::BTreeSet<(u64, u64)> = std::collections::BTreeSet::new();
+        let mut replayed = Vec::new();
+        let mut rows = 0usize;
+        for line in written.lines().filter(|line| !line.trim().is_empty()) {
+            let Ok(row) = serde_json::from_str::<RerankShadowRow>(line) else {
+                continue;
+            };
+            rows += 1;
+            let Some(judged) = row.judged else { continue };
+            if asked.insert((row.query, row.notes)) {
+                replayed.push(judged);
+            }
+        }
+        (rows, replayed)
+    }
+
+    /// The vault's pages by slug, for re-rendering a section the ledger only
+    /// names.
+    fn vault_pages(vault: &Path) -> HashMap<String, runtime::MemoryEntry> {
+        runtime::second_brain::corpus::scan(&runtime::SecondBrain::at(vault))
+            .pages
+            .iter()
+            .map(|page| (page.entry().slug.clone(), page.entry().clone()))
+            .collect()
+    }
+
+    /// What the drop reaches across a replayed ledger.
+    #[derive(Debug, Default)]
+    struct Reach {
+        notes: usize,
+        dropped: usize,
+        kept_by_graph: usize,
+        /// Readings the drop empties: the recall was noise all the way down.
+        lost_whole: usize,
+        /// Readings whose order is known whole — the rows from before the
+        /// rule. The three columns below are about the rendered FRONT of an
+        /// order, so they count only these.
+        ordered: usize,
+        entries_before: usize,
+        entries_after: usize,
+        fewer_entries: usize,
+        tokens_before: usize,
+        tokens_after: usize,
+        /// Readings of those whose rendered pages all still resolve, so the
+        /// token columns are about the same readings on both sides.
+        covered: usize,
+    }
+
+    impl Reach {
+        fn over(readings: &[Judged], pages: &HashMap<String, runtime::MemoryEntry>) -> Self {
+            let mut reach = Self::default();
+            for judged in readings {
+                reach.add(judged, pages);
+            }
+            reach
+        }
+
+        fn add(&mut self, judged: &Judged, pages: &HashMap<String, runtime::MemoryEntry>) {
+            use runtime::memory::recall::MAX_RECALLED_ENTRIES;
+
+            let reading: HashMap<&str, f64> = judged
+                .recalled
+                .iter()
+                .map(String::as_str)
+                .zip(judged.readings.iter().map(|(normalised, _)| *normalised))
+                .collect();
+            let held: std::collections::BTreeSet<&str> =
+                judged.held_by_graph.iter().map(String::as_str).collect();
+            self.notes += judged.readings.len();
+
+            // Every note the reading admitted, whichever list the row filed it
+            // under. A row written under the rule has already removed some, so
+            // this is the only way to count what it was handed — and the
+            // order those removed notes sat in is what it cannot say.
+            let admitted: Vec<&str> = judged
+                .proposed
+                .iter()
+                .chain(&judged.dropped)
+                .map(String::as_str)
+                .collect();
+            let mut kept = Vec::with_capacity(admitted.len());
+            for slug in &admitted {
+                // The reading a row keeps is normalised; the cut is on the
+                // level scale, and sits off the wire's grid so the trip back
+                // cannot move a note across it.
+                let bottom = reading.get(slug).is_some_and(|normalised| {
+                    runtime::memory::rerank::reads_as_bottom_level(
+                        normalised * runtime::memory::rerank::RERANK_TOP_LEVEL,
+                    )
+                });
+                match (bottom, held.contains(slug)) {
+                    (true, false) => self.dropped += 1,
+                    (true, true) => self.kept_by_graph += 1,
+                    (false, _) => {}
+                }
+                if !bottom || held.contains(slug) {
+                    kept.push(*slug);
+                }
+            }
+            if kept.is_empty() {
+                self.lost_whole += 1;
+            }
+            if !judged.dropped.is_empty() {
+                return;
+            }
+            self.ordered += 1;
+            let (shown, left) = (
+                admitted.len().min(MAX_RECALLED_ENTRIES),
+                kept.len().min(MAX_RECALLED_ENTRIES),
+            );
+            self.entries_before += shown;
+            self.entries_after += left;
+            if left < shown {
+                self.fewer_entries += 1;
+            }
+            if let (Some(was), Some(now)) =
+                (section_tokens(&admitted, pages), section_tokens(&kept, pages))
+            {
+                self.tokens_before += was;
+                self.tokens_after += now;
+                self.covered += 1;
+            }
+        }
+    }
+
+    /// The section those pages render today, sized the way the compaction
+    /// preflight sizes it (`recall_section_reserve_tokens`' chars/4 + 1).
+    /// `None` when a page the order names is not in the vault.
+    fn section_tokens(order: &[&str], pages: &HashMap<String, runtime::MemoryEntry>) -> Option<usize> {
+        let hits: Option<Vec<MemoryHit>> = order
+            .iter()
+            .take(runtime::memory::recall::MAX_RECALLED_ENTRIES)
+            .map(|slug| pages.get(*slug).cloned().map(|entry| MemoryHit { entry, score: 0 }))
+            .collect();
+        Some(
+            runtime::render_recalled_memory_section(&hits?)
+                .map_or(0, |section| section.chars().count() / 4 + 1),
+        )
     }
 }

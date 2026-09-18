@@ -212,9 +212,13 @@ pub const ROUTING: JevUse = JevUse {
 /// that changes that much of what a turn reads is not one evidence should
 /// switch on by itself.
 ///
-/// The rule the apply keeps is the graph's, not the judgment's: a page a
-/// judgment cannot be shown to have merely permuted is a judgment recall's
-/// own order outlives (`runtime::memory::rerank`).
+/// The apply also LEAVES OUT the notes the judgment put on its bottom level —
+/// *nothing in it bears on the request* — which the same ledger says is 24.5%
+/// of what a turn was handed, and on 5 of those 74 recalls was all of it. The
+/// rule that survives both is the graph's, not the judgment's: a page the vault
+/// marked superseded or contradicted is never dropped, and a judgment that
+/// cannot account for every page recall admitted is one recall's own order
+/// outlives (`runtime::memory::rerank`).
 pub const RECALL: JevUse = JevUse {
     id: "recall",
     setting: "rerankShadow",

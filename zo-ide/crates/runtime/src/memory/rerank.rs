@@ -26,8 +26,10 @@
 //! * a superseded page never rises above the page that replaced it;
 //! * a contradicting pair is never split, because two answers to one question
 //!   read as one open question only while they are adjacent;
-//! * no id is invented and none is dropped — a judgment may only permute what
-//!   recall already admitted;
+//! * no id is invented, and a note is dropped only on the one ground below —
+//!   a judgment may otherwise only permute what recall already admitted;
+//! * a note the graph said anything about is never dropped, whatever the
+//!   judgment thinks of it, because that judgment is already made;
 //! * ties fall back to recall's own order, which already spells lexical
 //!   evidence, then the boost axis, then the slug.
 //!
@@ -36,8 +38,51 @@
 //! side by side ([`RerankComparison`]) so a reader can see how often the
 //! judgment wanted what the graph refused. Under `smart.rerankShadow: on` the
 //! graph-safe order is also what the turn reads — and [`apply_order`] folds it
-//! only when it can prove the order a permutation of what recall admitted, so
-//! the same discard rule holds at the moment it would change something.
+//! only when it can account for every note recall admitted, so the same discard
+//! rule holds at the moment it would change something.
+//!
+//! # The bottom level is not injected
+//!
+//! The one ground for removing a note: the judgment put it on the bottom level
+//! of [`RERANK_LEVELS`] — *the note is about some other subject; nothing in it
+//! bears on the request* — and the graph said nothing about it. That note is
+//! not reordered, it is left out of what the turn reads
+//! ([`RerankComparison::dropped`]).
+//!
+//! Removing rather than only reordering, because **a judgment that may only
+//! permute has a ceiling.** The notes it is shown are the judged head and the
+//! notes a turn reads are the rendered few at the front of it; a rerank can
+//! neither bring in a note recall did not admit nor send one away. So the whole
+//! of what perfect ordering can buy is the turns that have a useful page inside
+//! the head but outside the rendered front — and on a recall whose head holds
+//! nothing that bears on the request, it buys exactly nothing: the same useless
+//! pages, in a better order.
+//!
+//! How big that ceiling is, on this machine's vault: of 362 labelled lines of
+//! the vault's own log, 284 already have a labelled page inside the rendered
+//! five and 302 inside the judged eight (`memory::recall`'s
+//! `recall_miss_against_the_vaults_own_log`). Five points is the CEILING on
+//! reordering, not a result — and both counts are *at least one labelled page*
+//! read off prefixes of a single deep call rather than the retriever re-run at
+//! each depth, so they size the ceiling rather than measure it.
+//!
+//! What the readings say about the other end: of 580 notes this machine's
+//! ledger has judged across 74 distinct recalls, 26.0% read as the bottom level
+//! and another 54.7% as *shares background or vocabulary but answers no part of
+//! the request* — and the recall section is a prompt that tells an agent to open
+//! those pages first. On 5 of those 74 recalls the bottom level is every note
+//! there was. So the fix is a floor under the results, not a better order and
+//! not a wider net.
+//!
+//! Those readings are what this rule is made of, so they cannot also score it:
+//! what a drop is worth is a comparison of turns, which nothing here claims to
+//! have made. What the ledger CAN be replayed for — what leaves, and what the
+//! graph keeps — is `rerank_shadow`'s `what_the_bottom_level_drop_removes`.
+//!
+//! Only the bottom level, and only unspoken-for notes. The level above it —
+//! shared background — may well be worth a turn's attention, and which of the
+//! two a person is better off with is a question for a measured comparison
+//! rather than for this rule.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -103,6 +148,41 @@ pub const RERANK_REQUEST_CHAR_CAP: usize = zerocode_core::jev::RECALL_REQUEST_CH
 /// The most the wire's rounding can have moved any one number an answer
 /// carries: half of [`SYSTEMONE_ANSWER_STEP`].
 const WIRE_ROUNDING: f64 = SYSTEMONE_ANSWER_STEP / 2.0;
+
+/// The midpoint between the bottom level's number and the next one. Spelled
+/// beside [`RERANK_TOP_LEVEL`] for its reason: the levels are numbered 0, 1, 2,
+/// 3, so half of the first step is half of one.
+const HALF_A_LEVEL: f64 = 0.5;
+
+/// A reading below this reads as the bottom level — the one reading a judgment
+/// may act on by removing a note rather than moving it.
+///
+/// [`HALF_A_LEVEL`] is where conventional rounding puts the boundary, and this
+/// sits half a wire step below it so no number the wire can spell lands ON the
+/// cut: answers arrive on a grid of whole [`SYSTEMONE_ANSWER_STEP`]s and 0.5 is
+/// one of them, so a cut at the midpoint itself would have a double's last bit
+/// deciding whether a note a person reads off the row as the level above is
+/// dropped. At 0.495 every grid value up to 0.49 is the bottom level and 0.50
+/// is not, and a reading that made the round trip through
+/// [`RerankReading::normalised`] and back cannot have moved across it either.
+pub const RERANK_BOTTOM_LEVEL_CUT: f64 = HALF_A_LEVEL - WIRE_ROUNDING;
+const _: () = assert!(
+    RERANK_BOTTOM_LEVEL_CUT < HALF_A_LEVEL
+        && HALF_A_LEVEL - RERANK_BOTTOM_LEVEL_CUT < SYSTEMONE_ANSWER_STEP,
+    "the cut sits inside the last wire step below the midpoint, which is what \
+     keeps every grid value on one side of it or the other"
+);
+
+/// Whether a reading on the level scale is the bottom level's: *the note is
+/// about some other subject; nothing in it bears on the request*.
+///
+/// Takes the reading on the scale the levels are numbered on, so a reading kept
+/// normalised — as a ledger row keeps it — is multiplied by
+/// [`RERANK_TOP_LEVEL`] back onto that scale first.
+#[must_use]
+pub fn reads_as_bottom_level(score: f64) -> bool {
+    score < RERANK_BOTTOM_LEVEL_CUT
+}
 
 /// How far the level probabilities may sum from one before the answer is
 /// refused.
@@ -247,6 +327,15 @@ pub struct RerankReading {
     /// The same reading on 0 to 1, so scales of different lengths compare.
     pub normalised: f64,
     pub confidence: f64,
+}
+
+impl RerankReading {
+    /// Whether the judgment put this note on the bottom level. The one reading
+    /// [`compare`] may answer by leaving the note out of what the turn reads.
+    #[must_use]
+    pub fn reads_as_bottom_level(&self) -> bool {
+        reads_as_bottom_level(self.score)
+    }
 }
 
 /// Why a reply was thrown away. Every one of these discards the whole judgment:
@@ -413,56 +502,93 @@ fn read_answer(
     })
 }
 
-/// What a judgment would have done to recall's order, and what the graph
-/// refused to let it do.
+/// What a judgment would have done to recall's answer — reordered it, and left
+/// part of it out — and what the graph refused to let it do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RerankComparison {
     /// Recall's own order — what a turn reads, in shadow and until a later
     /// phase says otherwise.
     pub recalled: Vec<String>,
-    /// The judgment's order after the graph's rules are applied.
+    /// The judgment's order after the graph's rules are applied, with the
+    /// bottom-level notes of [`Self::dropped`] left out. Under the apply mode
+    /// this is what the turn reads, so it is shorter than [`Self::recalled`]
+    /// whenever the judgment dropped anything.
     pub proposed: Vec<String>,
-    /// Notes whose place differs between the two orders.
+    /// Notes whose place differs between the two orders, before anything is
+    /// dropped — how much the judgment REORDERED, kept apart from how much it
+    /// removed, so the two axes read separately down a ledger. What a turn
+    /// actually ended up with is [`Self::recalled`] against [`Self::proposed`].
     pub moved: usize,
-    /// Whether the two disagree about which note comes first.
+    /// Whether the two disagree about which note comes first, on the same
+    /// before-the-drop reading as [`Self::moved`].
     pub top_changed: bool,
     /// Notes the graph's rules pinned — where the judgment alone would have put
     /// them somewhere else. This is the number a later phase has to read before
     /// letting a judgment reorder anything for real.
     pub held_by_graph: Vec<String>,
+    /// Notes the judgment put on the bottom level of [`RERANK_LEVELS`], that
+    /// the graph said nothing about: not reordered, left out. In the
+    /// graph-safe order, so a row reads down the page.
+    pub dropped: Vec<String>,
+    /// Notes the bottom level would have dropped, that the graph's claim kept
+    /// — the second number that rule has to be read with, because a page a
+    /// person marked superseded or contradicted is one the graph already
+    /// decided about.
+    pub kept_by_graph: Vec<String>,
 }
 
-/// Fold a checked judgment into recall's order without breaking the graph.
+/// Fold a checked judgment into recall's answer without breaking the graph:
+/// the order it settles, and the bottom-level notes it leaves out.
 ///
 /// `None` when the notes cannot be ordered at all — the vault declaring two
 /// pages each other's successor is the one way that happens — in which case
-/// recall's order is the answer and nothing is reported as moved.
+/// recall's order is the answer, and nothing is reported as moved or dropped.
 #[must_use]
 pub fn compare(hits: &[MemoryHit], readings: &[RerankReading]) -> Option<RerankComparison> {
     let scores = scores_by_position(hits.len(), readings)?;
     let constraints = graph_constraints(hits);
-    let proposed = graph_safe_order(hits.len(), &scores, &constraints)?;
+    let ordered = graph_safe_order(hits.len(), &scores, &constraints)?;
     let ungoverned = judgment_only_order(hits.len(), &scores);
 
     let slug = |position: usize| hits[position].entry.slug.clone();
     let recalled: Vec<String> = (0..hits.len()).map(slug).collect();
-    let held_by_graph = proposed
+    let held_by_graph = ordered
         .iter()
         .zip(&ungoverned)
         .filter(|(governed, alone)| governed != alone)
         .map(|(governed, _)| slug(*governed))
         .collect();
-    let moved = proposed
+    let moved = ordered
         .iter()
         .enumerate()
         .filter(|(place, position)| place != &**position)
         .count();
+
+    // The drop is the last word, after the ordering rules have had theirs:
+    // `moved` and `held_by_graph` stay readings of the ordering alone, and
+    // what leaves is a filter over the order they settled.
+    let bottom: BTreeSet<usize> = readings
+        .iter()
+        .filter(|reading| reading.reads_as_bottom_level())
+        .map(|reading| reading.position)
+        .collect();
+    let spoken_for = constraints.spoken_for();
+    let leaves = |position: &usize| bottom.contains(position) && !spoken_for.contains(position);
+    let dropped = ordered.iter().filter(|at| leaves(at)).map(|at| slug(*at)).collect();
+    let kept_by_graph = ordered
+        .iter()
+        .filter(|at| bottom.contains(at) && !leaves(at))
+        .map(|at| slug(*at))
+        .collect();
+
     Some(RerankComparison {
-        top_changed: proposed.first() != Some(&0),
+        top_changed: ordered.first() != Some(&0),
         recalled,
-        proposed: proposed.into_iter().map(slug).collect(),
+        proposed: ordered.iter().filter(|at| !leaves(at)).map(|at| slug(*at)).collect(),
         moved,
         held_by_graph,
+        dropped,
+        kept_by_graph,
     })
 }
 
@@ -488,6 +614,25 @@ struct GraphConstraints {
     superseded_by: BTreeMap<usize, usize>,
     /// A note, and the note it disagrees with. The two travel together.
     contradicts: BTreeMap<usize, usize>,
+}
+
+impl GraphConstraints {
+    /// Every note the graph said something about, by its place in recall's
+    /// order. Both ends of every claim, because a claim is about a pair: a
+    /// fold reads as a dangling pointer once the page it names is gone, and
+    /// half a contradicting pair reads as the settled answer.
+    ///
+    /// This is what the drop rule asks before leaving a note out — not
+    /// [`RerankComparison::held_by_graph`], which is about places rather than
+    /// presence, and which a note can fall into by being shifted past one the
+    /// graph pinned.
+    fn spoken_for(&self) -> BTreeSet<usize> {
+        self.superseded_by
+            .iter()
+            .chain(&self.contradicts)
+            .flat_map(|(one, other)| [*one, *other])
+            .collect()
+    }
 }
 
 fn graph_constraints(hits: &[MemoryHit]) -> GraphConstraints {
@@ -608,24 +753,32 @@ fn stronger(candidate: &Group, against: &Group) -> bool {
     }
 }
 
-/// Recall's hits in the order a judgment settled on — the one place a judgment
-/// is allowed to change what a turn reads.
+/// Recall's hits as a judgment settled them — the one place a judgment is
+/// allowed to change what a turn reads.
 ///
-/// `proposed` is [`RerankComparison::proposed`]: the judged head, by name,
-/// after the graph has had its say. The head is the notes [`rerank_candidates`]
-/// built a question for — that same rule, so the two can never disagree about
-/// which notes were asked about — and the tail behind it was never asked, so it
-/// keeps recall's order.
+/// `proposed` and `dropped` are [`RerankComparison`]'s two lists: the judged
+/// head by name, after the graph has had its say, split into what the turn
+/// reads and what the bottom-level rule left out. The head is the notes
+/// [`rerank_candidates`] built a question for — that same rule, so the two can
+/// never disagree about which notes were asked about — and the tail behind it
+/// was never asked, so it keeps recall's order and is never dropped.
 ///
-/// `None` unless `proposed` is exactly that head's names in some order. The
-/// contract says a judgment may only permute what recall already admitted; an
-/// order that cannot be PROVED a permutation is one this refuses to fold, and
-/// the caller then reads recall's order. Two hits recalled under one name
-/// cannot be told apart, so they cannot be proved either.
+/// `None` unless the two lists together are exactly that head's names, each
+/// once. The contract lets a judgment permute what recall admitted and remove
+/// a note on one named ground; what this proves is the accounting — every note
+/// recall admitted is either ordered or SAID to have been dropped, so nothing
+/// goes missing unnamed. A judgment whose lists cannot be checked that far is
+/// one this refuses to fold, and the caller then reads recall's order. Two hits
+/// recalled under one name cannot be told apart, so they cannot be proved
+/// either.
 #[must_use]
-pub fn apply_order(hits: &[MemoryHit], proposed: &[String]) -> Option<Vec<MemoryHit>> {
+pub fn apply_order(
+    hits: &[MemoryHit],
+    proposed: &[String],
+    dropped: &[String],
+) -> Option<Vec<MemoryHit>> {
     let judged = hits.len().min(MAX_RERANK_CANDIDATES);
-    if judged == 0 || proposed.len() != judged {
+    if judged == 0 || proposed.len().saturating_add(dropped.len()) != judged {
         return None;
     }
     let head = &hits[..judged];
@@ -636,15 +789,21 @@ pub fn apply_order(hits: &[MemoryHit], proposed: &[String]) -> Option<Vec<Memory
         }
     }
     let mut taken = vec![false; head.len()];
+    // A name spelled twice across the two lists would read one note twice and
+    // account for another not at all, which is the same broken promise as
+    // inventing an id.
+    let mut claim = |name: &String| -> Option<usize> {
+        let position = *by_slug.get(name.as_str())?;
+        (!std::mem::replace(&mut taken[position], true)).then_some(position)
+    };
     let mut read = Vec::with_capacity(hits.len());
     for name in proposed {
-        let position = *by_slug.get(name.as_str())?;
-        // A name the order spells twice would read one note twice and drop
-        // another, which is the same broken promise as inventing an id.
-        if std::mem::replace(&mut taken[position], true) {
-            return None;
-        }
-        read.push(head[position].clone());
+        read.push(head[claim(name)?].clone());
+    }
+    // The dropped names are claimed and then left behind: claiming them is the
+    // whole of what makes their absence accounted for rather than silent.
+    for name in dropped {
+        claim(name)?;
     }
     read.extend_from_slice(&hits[judged..]);
     Some(read)
@@ -718,19 +877,26 @@ mod tests {
     /// the rounding left between the two.
     type RoundedCase = ([f64; RERANK_LEVELS.len()], f64, &'static str);
 
-    fn reply(levels: &[usize]) -> SystemOneResponse {
+    /// A reply whose answers are spelled out, for readings that sit between
+    /// two levels rather than on one.
+    fn reply_of(answers: &[Value]) -> SystemOneResponse {
         SystemOneResponse {
             model: "jev-test".to_string(),
-            answers: levels
+            answers: answers
                 .iter()
                 .enumerate()
-                .map(|(position, level)| (format!("n{position}"), answer(*level)))
+                .map(|(position, answer)| (format!("n{position}"), answer.clone()))
                 .collect(),
             usage: api::SystemOneUsage {
                 input_tokens: 0,
                 output_tokens: 0,
             },
         }
+    }
+
+    fn reply(levels: &[usize]) -> SystemOneResponse {
+        let answers: Vec<Value> = levels.iter().map(|level| answer(*level)).collect();
+        reply_of(&answers)
     }
 
     fn readings(hits: &[MemoryHit], levels: &[usize]) -> Vec<RerankReading> {
@@ -964,13 +1130,16 @@ mod tests {
             hit("wiki/b", "the answer"),
             hit("wiki/c", "background"),
         ];
-        let comparison = compare(&hits, &readings(&hits, &[0, 3, 1])).expect("an order");
+        // Levels 1 and up, so this stays a reading of the ORDER: the bottom
+        // level is the one reading that removes a note instead of moving it.
+        let comparison = compare(&hits, &readings(&hits, &[1, 3, 2])).expect("an order");
 
         assert_eq!(comparison.proposed, ["wiki/b", "wiki/c", "wiki/a"]);
         assert_eq!(comparison.recalled, ["wiki/a", "wiki/b", "wiki/c"]);
         assert!(comparison.top_changed);
         assert_eq!(comparison.moved, 3);
         assert!(comparison.held_by_graph.is_empty());
+        assert!(comparison.dropped.is_empty() && comparison.kept_by_graph.is_empty());
     }
 
     #[test]
@@ -1053,7 +1222,7 @@ mod tests {
             hit("wiki/a", "a claim · ⚠ contradicts [[wiki/absent]] (newer)"),
             hit("wiki/b", "liked most"),
         ];
-        let comparison = compare(&hits, &readings(&hits, &[0, 3])).expect("an order");
+        let comparison = compare(&hits, &readings(&hits, &[1, 3])).expect("an order");
 
         assert_eq!(comparison.proposed, ["wiki/b", "wiki/a"]);
         assert!(comparison.held_by_graph.is_empty());
@@ -1122,9 +1291,10 @@ mod tests {
             hit("wiki/b", "the answer"),
             hit("wiki/c", "background"),
         ];
-        let comparison = compare(&hits, &readings(&hits, &[0, 3, 1])).expect("an order");
+        let comparison = compare(&hits, &readings(&hits, &[1, 3, 2])).expect("an order");
 
-        let read = apply_order(&hits, &comparison.proposed).expect("a permutation folds");
+        let read = apply_order(&hits, &comparison.proposed, &comparison.dropped)
+            .expect("a permutation folds");
 
         assert_eq!(slugs(&read), comparison.proposed);
         assert_eq!(
@@ -1141,11 +1311,12 @@ mod tests {
             .map(|index| hit(&format!("wiki/p{index}"), "a claim"))
             .collect();
         let head = &hits[..MAX_RERANK_CANDIDATES];
-        let mut levels = vec![0usize; MAX_RERANK_CANDIDATES];
+        let mut levels = vec![1usize; MAX_RERANK_CANDIDATES];
         levels[MAX_RERANK_CANDIDATES - 1] = 3;
         let comparison = compare(head, &readings(head, &levels)).expect("an order");
 
-        let read = apply_order(&hits, &comparison.proposed).expect("a head permutation folds");
+        let read = apply_order(&hits, &comparison.proposed, &comparison.dropped)
+            .expect("a head permutation folds");
 
         assert_eq!(read.len(), hits.len());
         assert_eq!(read[0].entry.slug, format!("wiki/p{}", MAX_RERANK_CANDIDATES - 1));
@@ -1173,7 +1344,7 @@ mod tests {
                 "an order longer than the notes",
             ),
         ] {
-            assert_eq!(apply_order(&hits, &order), None, "{why}");
+            assert_eq!(apply_order(&hits, &order, &[]), None, "{why}");
         }
     }
 
@@ -1183,15 +1354,190 @@ mod tests {
     fn a_name_recall_returned_twice_folds_nothing() {
         let hits = [hit("wiki/a", "one"), hit("wiki/a", "again"), hit("wiki/b", "two")];
 
-        assert_eq!(apply_order(&hits, &names(&["wiki/b", "wiki/a", "wiki/a"])), None);
+        assert_eq!(apply_order(&hits, &names(&["wiki/b", "wiki/a", "wiki/a"]), &[]), None);
     }
 
     #[test]
     fn an_order_that_agrees_with_recall_is_recalls_order() {
         let hits = [hit("wiki/a", "one"), hit("wiki/b", "two")];
 
-        let read = apply_order(&hits, &slugs(&hits)).expect("a permutation folds");
+        let read = apply_order(&hits, &slugs(&hits), &[]).expect("a permutation folds");
 
         assert_eq!(read, hits);
+    }
+
+    #[test]
+    fn the_bottom_level_is_left_out_of_what_the_turn_reads() {
+        let hits = [
+            hit("wiki/a", "about some other subject"),
+            hit("wiki/b", "the answer"),
+            hit("wiki/c", "background"),
+        ];
+        let comparison = compare(&hits, &readings(&hits, &[0, 3, 1])).expect("an order");
+
+        assert_eq!(comparison.proposed, ["wiki/b", "wiki/c"]);
+        assert_eq!(comparison.dropped, ["wiki/a"]);
+        assert!(comparison.kept_by_graph.is_empty());
+        assert_eq!(
+            comparison.recalled,
+            ["wiki/a", "wiki/b", "wiki/c"],
+            "the row still says what recall handed over, or the drop is unreadable"
+        );
+        assert_eq!(
+            comparison.moved, 3,
+            "how much the judgment reordered is read before anything is dropped"
+        );
+
+        let read = apply_order(&hits, &comparison.proposed, &comparison.dropped)
+            .expect("a judgment that accounts for every note folds");
+
+        assert_eq!(slugs(&read), ["wiki/b", "wiki/c"]);
+    }
+
+    #[test]
+    fn the_level_above_the_bottom_is_not_this_rules_business() {
+        let hits = [
+            hit("wiki/a", "shares the vocabulary"),
+            hit("wiki/b", "the answer"),
+        ];
+        let comparison = compare(&hits, &readings(&hits, &[1, 3])).expect("an order");
+
+        assert!(
+            comparison.dropped.is_empty(),
+            "shared background may still be worth a turn's attention, and which of \
+             the two a person is better off with is a measured comparison"
+        );
+        assert_eq!(comparison.proposed, ["wiki/b", "wiki/a"]);
+    }
+
+    #[test]
+    fn a_page_the_graph_spoke_about_is_never_dropped() {
+        let hits = [
+            hit("wiki/new", "the current decision"),
+            hit("wiki/old", "superseded by [[wiki/new]]"),
+            hit("wiki/one", "the claim · ⚠ contradicts [[wiki/two]] (older)"),
+            hit("wiki/two", "the other claim · ⚠ contradicts [[wiki/one]] (newer)"),
+            hit("wiki/loose", "about some other subject"),
+        ];
+        // The judgment reads every one of them as the bottom level.
+        let comparison = compare(&hits, &readings(&hits, &[0, 0, 0, 0, 0])).expect("an order");
+
+        assert_eq!(comparison.dropped, ["wiki/loose"]);
+        assert_eq!(
+            comparison.kept_by_graph,
+            ["wiki/new", "wiki/old", "wiki/one", "wiki/two"],
+            "both ends of a fold and both halves of a pair are the graph's say, and \
+             it is already made"
+        );
+        assert_eq!(
+            comparison.proposed,
+            ["wiki/new", "wiki/old", "wiki/one", "wiki/two"]
+        );
+    }
+
+    #[test]
+    fn a_recall_the_judgment_read_as_nothing_but_noise_leaves_the_turn_nothing() {
+        let hits = [
+            hit("wiki/a", "about some other subject"),
+            hit("wiki/b", "and so is this one"),
+        ];
+        let comparison = compare(&hits, &readings(&hits, &[0, 0])).expect("an order");
+
+        assert!(comparison.proposed.is_empty());
+        assert_eq!(comparison.dropped, ["wiki/a", "wiki/b"]);
+
+        let read = apply_order(&hits, &comparison.proposed, &comparison.dropped)
+            .expect("a judgment that accounts for every note folds");
+
+        assert!(
+            read.is_empty(),
+            "a recall that answered no part of the request is a section the turn does not get"
+        );
+    }
+
+    #[test]
+    fn the_unjudged_tail_survives_a_head_that_drops_whole() {
+        let hits: Vec<MemoryHit> = (0..MAX_RERANK_CANDIDATES + 2)
+            .map(|index| hit(&format!("wiki/p{index}"), "a claim"))
+            .collect();
+        let head = &hits[..MAX_RERANK_CANDIDATES];
+        let levels = vec![0usize; MAX_RERANK_CANDIDATES];
+        let comparison = compare(head, &readings(head, &levels)).expect("an order");
+
+        let read = apply_order(&hits, &comparison.proposed, &comparison.dropped)
+            .expect("every judged note is accounted for");
+
+        assert_eq!(
+            slugs(&read),
+            slugs(&hits[MAX_RERANK_CANDIDATES..]),
+            "the tail was never asked about, so it is never dropped"
+        );
+    }
+
+    /// The fold's proof is an ACCOUNTING: every note recall admitted is either
+    /// ordered or named as dropped, exactly once. A judgment that cannot be
+    /// checked that far does not fold, and recall's order stands.
+    #[test]
+    fn a_judgment_that_does_not_account_for_every_note_folds_nothing() {
+        let hits = [
+            hit("wiki/a", "one"),
+            hit("wiki/b", "two"),
+            hit("wiki/c", "three"),
+        ];
+
+        for (proposed, dropped, why) in [
+            (
+                names(&["wiki/b"]),
+                names(&["wiki/c"]),
+                "a note neither ordered nor dropped",
+            ),
+            (
+                names(&["wiki/b", "wiki/a"]),
+                names(&["wiki/a"]),
+                "one note both ordered and dropped",
+            ),
+            (
+                names(&["wiki/b", "wiki/a"]),
+                names(&["wiki/z"]),
+                "a note recall never admitted, dropped",
+            ),
+            (
+                Vec::new(),
+                names(&["wiki/a", "wiki/b", "wiki/b"]),
+                "a dropped name spelled twice, leaving one unaccounted for",
+            ),
+        ] {
+            assert_eq!(apply_order(&hits, &proposed, &dropped), None, "{why}");
+        }
+    }
+
+    /// The cut between the bottom level and the next sits where no number the
+    /// wire can spell lands on it — the assert beside
+    /// [`RERANK_BOTTOM_LEVEL_CUT`] holds it there — so this is the two grid
+    /// values either side of it reading as the levels a person would read them
+    /// as, and the round trip through the normalised scale a ledger row keeps
+    /// not moving either of them across.
+    #[test]
+    fn the_cut_sits_where_no_answer_the_wire_can_spell_lands_on_it() {
+        // The two grid values either side of the midpoint, each spelled as the
+        // probability-weighted mean the contract says a score is.
+        let hits = [hit("wiki/a", "one"), hit("wiki/b", "two")];
+        let candidates = rerank_candidates(&hits);
+        let batch = reply_of(&[
+            spread([0.51, 0.49, 0.0, 0.0], 0.49, 0.6),
+            spread([0.5, 0.5, 0.0, 0.0], 0.5, 0.6),
+        ]);
+        let readings = validate_rerank(&candidates, &batch).expect("two well-formed answers");
+
+        assert!(readings[0].reads_as_bottom_level());
+        assert!(!readings[1].reads_as_bottom_level());
+        for reading in &readings {
+            assert_eq!(
+                reads_as_bottom_level(reading.normalised * RERANK_TOP_LEVEL),
+                reading.reads_as_bottom_level(),
+                "a ledger row keeps the normalised reading; reading it back must \
+                 not move a note across the cut"
+            );
+        }
     }
 }
