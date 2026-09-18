@@ -47,7 +47,7 @@ pub const DECISION_SHADOW_FILE: &str = zerocode_core::jev::ROUTING.ledger;
 /// other outcome is a failure token from [`SystemOneFailure`].
 ///
 /// The word is the door's, because the hedge rule's sample reads it out of
-/// this ledger ([`jev_gate::JevDoor::hedge_for`]) and a reader that spelled it
+/// this ledger (`JevDoor::hedge_for`) and a reader that spelled it
 /// differently from the writer would find no answers at all.
 pub const OUTCOME_ANSWERED: &str = zerocode_core::jev::door::ANSWERED_OUTCOME;
 

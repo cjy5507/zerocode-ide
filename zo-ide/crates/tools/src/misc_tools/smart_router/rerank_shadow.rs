@@ -63,7 +63,7 @@ pub const RERANK_SHADOW_FILE: &str = zerocode_core::jev::RECALL.ledger;
 /// into recall's order.
 ///
 /// The word is the door's, because the hedge rule's sample reads it out of
-/// this ledger ([`JevDoor::hedge_for`]) and a reader that spelled it
+/// this ledger (`JevDoor::hedge_for`) and a reader that spelled it
 /// differently from the writer would find no answers at all.
 pub const RERANK_OUTCOME_ANSWERED: &str = zerocode_core::jev::door::ANSWERED_OUTCOME;
 
@@ -134,7 +134,7 @@ pub struct RerankShadowRow {
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "redactedLines")]
     pub redacted_lines: Option<u32>,
     /// Which of the reply's rules refused it, on a row whose `outcome` is
-    /// `schema` — [`RerankRejection::rule`]'s word. One word for nine rules
+    /// `schema` — [`runtime::memory::rerank::RerankRejection::rule`]'s word. One word for nine rules
     /// says a reply was refused but not by what, and the ledger is where the
     /// cause has to be readable. Never a word of the reply, the notes or the
     /// request.
@@ -319,7 +319,7 @@ fn memo() -> &'static Mutex<HashMap<MemoKey, Remembered>> {
 /// The seat beside recall. Seated once per host at the project's `cwd`, where
 /// the setting and the ledger are; it reads that setting per recall and takes
 /// the road it names — asking nothing, asking off the turn's thread, or asking
-/// and waiting for the order the turn reads ([`settle`]).
+/// and waiting for the order the turn reads (`settle`).
 #[derive(Debug, Clone)]
 pub struct RerankShadow {
     cwd: PathBuf,

@@ -160,7 +160,7 @@ const HALF_A_LEVEL: f64 = 0.5;
 /// A reading below this reads as the bottom level — the one reading a judgment
 /// may act on by removing a note rather than moving it.
 ///
-/// [`HALF_A_LEVEL`] is where conventional rounding puts the boundary, and this
+/// `HALF_A_LEVEL` is where conventional rounding puts the boundary, and this
 /// sits half a wire step below it so no number the wire can spell lands ON the
 /// cut: answers arrive on a grid of whole [`SYSTEMONE_ANSWER_STEP`]s and 0.5 is
 /// one of them, so a cut at the midpoint itself would have a double's last bit
