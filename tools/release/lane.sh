@@ -54,7 +54,8 @@ APP_NAME=ZeroCode.app
 KILL_GRACE_SECS=2           # TERM to the children, then KILL after this long
 # The release (docs/design/versioned-auto-update.md §2.2·§2.6·§2.7). The lane
 # never raises the version — tools/release/bump.sh does, before the sha is queued.
-RELEASE_GITHUB_REPO=${RELEASE_GITHUB_REPO:-cjy5507/zerocode}   # the public release repo (§4.1); RELEASE_REPO below is this checkout's path
+# RELEASE_GITHUB_REPO is resolved from the checkout's own `origin` below, beside
+# RELEASE_REPO — see the note there. The environment still wins.
 RELEASE_PUBLISH=${RELEASE_PUBLISH:-0}          # 1 publishes the sha's release with gh — flipped per run by the coordinator, never here
 RELEASE_CHANNEL=${RELEASE_CHANNEL:-stable}     # stable | beta (a prerelease; the moving `beta` tag carries the feed)
 RELEASE_LEGACY_MANIFEST=${RELEASE_LEGACY_MANIFEST:-0}   # 1 sends the old zo CLI's manifest.txt·SHA256SUMS·zo-v<v>-<triple>×3·install.sh along — every target or refused (§2.7)
@@ -68,6 +69,10 @@ APP_SIBLING_BINS='zerocode-mirror zerocode-pick'   # helper executables beside t
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 RELEASE_REPO=${RELEASE_REPO:-$(cd "$SELF_DIR/../.." && pwd)}
+# The public release repo, read from RELEASE_REPO's own `origin` rather than
+# written here: a rename otherwise leaves the lane publishing against a
+# repository this history never had (zerocode -> zerocode-ide, 2026-09-18).
+RELEASE_GITHUB_REPO=${RELEASE_GITHUB_REPO:-$(git -C "$RELEASE_REPO" remote get-url origin 2>/dev/null | sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##')}
 RELEASE_HOME=${RELEASE_HOME:-$HOME/.local/share/zerocode/release}
 RELEASE_SCRATCH_ROOT=${RELEASE_SCRATCH_ROOT:-/private/tmp}
 RELEASE_APP_DIR=${RELEASE_APP_DIR:-/Applications}

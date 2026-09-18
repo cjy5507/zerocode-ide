@@ -27,13 +27,13 @@ CHANGELOG_TITLE="# Changelog"
 TAG_GLOB='v[0-9]*'                                # the tags that bound a section (vX.Y.Z, never `beta`)
 MAX_PER_PREFIX=20                                 # titles listed per prefix; the rest is counted
 PREFIX_ORDER="feat fix perf refactor docs test style chore release merge other"
-RELEASE_GITHUB_REPO=${RELEASE_GITHUB_REPO:-cjy5507/zerocode}  # asked whether v<next> already exists
 # -------------------------------------------------------------------------------
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$SELF_DIR/../.." && pwd)
 
 if [ "${1:-}" = "--table" ]; then
+  RELEASE_GITHUB_REPO=${RELEASE_GITHUB_REPO:-$(git -C "$REPO" remote get-url origin 2>/dev/null | sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##')}
   for k in ROOT_CARGO TAURI_CONF ZO_CARGO CHANGELOG CHANGELOG_TITLE TAG_GLOB MAX_PER_PREFIX PREFIX_ORDER RELEASE_GITHUB_REPO; do
     eval "printf \"%s='%s'\\n\" \"$k\" \"\$$k\""
   done
@@ -52,6 +52,18 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$part" ] || usage
 cd "$REPO" || exit 2
+
+# The repository the tags live on, read from this checkout's own `origin`
+# rather than written here. A rename leaves a written name asking the wrong
+# repository about its tags, and the refusal then reads as "v1.1.0 already
+# exists" about a tag on a repo this history never had (zerocode →
+# zerocode-ide, 2026-09-18). `RELEASE_GITHUB_REPO` in the environment still
+# wins, for a release cut against somewhere else on purpose.
+github_repo_of() {
+  git -C "$1" remote get-url origin 2>/dev/null |
+    sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##'
+}
+RELEASE_GITHUB_REPO=${RELEASE_GITHUB_REPO:-$(github_repo_of "$REPO")}
 
 refuse() { echo "bump: refused — $1"; exit 3; }
 
