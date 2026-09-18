@@ -23,8 +23,10 @@
 //! after the door, never here.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use serde::{Deserialize, Serialize};
 
 /// The public endpoint's origin.
@@ -281,12 +283,59 @@ impl SystemOneResponse {
 }
 
 /// How one call went: the answer or the failure, how many times it was
-/// re-sent, and how long it took end to end.
+/// re-sent, how long it took end to end, and what it really cost.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SystemOneCall {
+    /// The winning attempt's outcome, and the winner's own re-sends.
     pub outcome: Result<SystemOneResponse, SystemOneFailure>,
     pub retries: u32,
+    /// The whole call, first byte to the answer that was used.
     pub elapsed: Duration,
+    /// Requests that actually left, across every attempt this call made —
+    /// re-sends and a hedge's second copy alike, including one a dropped
+    /// loser had already sent.
+    ///
+    /// The client is the only thing that knows this number, so it says it.
+    /// A caller must not derive it from [`Self::retries`]: with a hedge, one
+    /// plus the winner's re-sends is no longer what the day was billed for.
+    pub requests: u32,
+    /// Present only when a second request actually left.
+    pub hedge: Option<HedgeRan>,
+}
+
+/// A hedge that fired: when its second request left, whether that copy won,
+/// and what the losing copy's own latency turned out to be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HedgeRan {
+    /// How long after the first request the second one was planned to leave,
+    /// which is also when it did.
+    pub delay: Duration,
+    /// Whether the second copy is the one that answered.
+    pub won: bool,
+    /// The loser's own latency, when it had already answered by the time the
+    /// winner was read; `None` when it was dropped still waiting, which is
+    /// the ordinary case — nothing waits on a loser.
+    ///
+    /// Every published hedge rests on the two copies being independent draws,
+    /// and the same literature warns they are not when one back-end is slow
+    /// for both. Nobody measures it, because nobody writes the loser down.
+    /// This is that column: winner and loser latencies side by side, so the
+    /// correlation can be read off a real ledger instead of assumed.
+    pub loser_ms: Option<u64>,
+}
+
+/// One attempt sequence: an outcome, its own re-sends, and its own latency —
+/// measured from its own first byte, not the call's, because a hedge's two
+/// copies are only comparable that way.
+struct Attempted {
+    outcome: Result<SystemOneResponse, SystemOneFailure>,
+    retries: u32,
+    elapsed: Duration,
+}
+
+/// A latency as the whole milliseconds a ledger column holds.
+fn millis(elapsed: Duration) -> u64 {
+    u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// A System One client bound to one origin and one key.
@@ -363,21 +412,112 @@ impl SystemOneClient {
     }
 
     /// Send a request body the door cleared, re-sending only after a 429 or
-    /// 529, never past `deadline`.
+    /// 529, never past `deadline`; with `hedge`, send a second copy of the
+    /// same bytes once that long has passed with no answer, and use whichever
+    /// answer comes first.
     ///
     /// The deadline bounds the whole call — every attempt and every wait. A
     /// backoff that would end past it is not taken: the call ends on the
     /// failure that asked for it, which is the truer account than a timeout
     /// nobody waited for. A retry re-sends these same bytes.
-    pub async fn decide_body(&self, body: Vec<u8>, deadline: Duration) -> SystemOneCall {
-        let started = Instant::now();
-        let finish = |outcome, retries| SystemOneCall { outcome, retries, elapsed: started.elapsed() };
+    ///
+    /// A hedge is not a retry, and the two are kept apart here because they
+    /// answer different questions. A retry waits for a failure and asks again
+    /// because the first answer said to; a hedge waits for nothing and asks
+    /// again because no answer came, which on this wire is its own condition
+    /// — the slowest routing judgment this machine has recorded, 6,798 ms,
+    /// carried the smallest body of them all. So each copy is a whole attempt
+    /// sequence, retries included, and `hedge` adds at most one such copy —
+    /// the rule's own `MAX_ATTEMPTS` is two, and there is no third.
+    ///
+    /// `None` is the road as it was: one attempt sequence, awaited.
+    ///
+    /// The loser is dropped where it stands. `reqwest` cancels a request its
+    /// future is dropped on, so the wire is released and only what the server
+    /// already did is billed — and nothing waits for it, which is the point.
+    ///
+    /// What finishes first is the call's, a failure included. The two copies
+    /// are the same bytes to the same endpoint, so a refusal of one is a
+    /// refusal of both, and where it is not — a connection that breaks under
+    /// one copy alone — the failure is the answer a single request would have
+    /// given anyway. A hedge is never worse than asking once.
+    pub async fn decide_body(
+        &self,
+        body: Vec<u8>,
+        deadline: Duration,
+        hedge: Option<Duration>,
+    ) -> SystemOneCall {
+        let opened = Instant::now();
+        // Shared, because a loser is dropped without being read: a copy that
+        // is thrown away has still spent what it sent, and the count of what
+        // left has to say so.
+        let requests = AtomicU32::new(0);
+        let done = |run: Attempted, ran: Option<HedgeRan>| SystemOneCall {
+            outcome: run.outcome,
+            retries: run.retries,
+            elapsed: opened.elapsed(),
+            requests: requests.load(Ordering::Relaxed),
+            hedge: ran,
+        };
+        let first = self.attempts(&body, deadline, opened, &requests);
+        tokio::pin!(first);
+        let Some(delay) = hedge else {
+            return done(first.await, None);
+        };
+        // An answer before the hedge's moment is one request, exactly as if
+        // no hedge had been planned. Biased so that an answer already in hand
+        // beats the delay it arrived on: at a tie, no second request leaves.
+        if let Some(run) = tokio::select! {
+            biased;
+            run = first.as_mut() => Some(run),
+            () = tokio::time::sleep(delay) => None,
+        } {
+            return done(run, None);
+        }
+        let second = self.attempts(&body, deadline, opened, &requests);
+        tokio::pin!(second);
+        // Whichever answers first is the call's answer. The loser is then
+        // read once without waiting: already finished, its latency is worth a
+        // column; still in flight, it is dropped here.
+        //
+        // Biased towards the copy that left first, so that two answers ready
+        // in the same breath name a winner the same way every time.
+        let (run, loser, won) = tokio::select! {
+            biased;
+            run = first.as_mut() => (run, second.as_mut().now_or_never(), false),
+            run = second.as_mut() => (run, first.as_mut().now_or_never(), true),
+        };
+        let ran = HedgeRan {
+            delay,
+            won,
+            loser_ms: loser.map(|loser| millis(loser.elapsed)),
+        };
+        done(run, Some(ran))
+    }
+
+    /// One attempt sequence: send `body`, re-send it after a 429 or 529, and
+    /// stop at `deadline` measured from `opened` — the whole call's origin, so
+    /// a second copy of a judgment is bounded by the same wall as the first
+    /// rather than given a fresh one.
+    ///
+    /// Every request that leaves is counted in `requests` before it is sent,
+    /// so the number holds even for a sequence nobody ever reads.
+    async fn attempts(
+        &self,
+        body: &[u8],
+        deadline: Duration,
+        opened: Instant,
+        requests: &AtomicU32,
+    ) -> Attempted {
+        let began = Instant::now();
+        let finish = |outcome, retries| Attempted { outcome, retries, elapsed: began.elapsed() };
         let mut retries = 0;
         loop {
-            let Some(remaining) = deadline.checked_sub(started.elapsed()) else {
+            let Some(remaining) = deadline.checked_sub(opened.elapsed()) else {
                 return finish(Err(SystemOneFailure::Timeout), retries);
             };
-            let failure = match tokio::time::timeout(remaining, self.send_once(&body)).await {
+            requests.fetch_add(1, Ordering::Relaxed);
+            let failure = match tokio::time::timeout(remaining, self.send_once(body)).await {
                 Err(_) => return finish(Err(SystemOneFailure::Timeout), retries),
                 Ok(Ok(response)) => return finish(Ok(response), retries),
                 Ok(Err(failure)) => failure,
@@ -385,7 +525,7 @@ impl SystemOneClient {
             let backoff = SYSTEMONE_RETRY_BASE_DELAY.saturating_mul(2u32.saturating_pow(retries));
             if !failure.retryable()
                 || retries >= SYSTEMONE_MAX_RETRIES
-                || started.elapsed() + backoff >= deadline
+                || opened.elapsed() + backoff >= deadline
             {
                 return finish(Err(failure), retries);
             }
@@ -553,13 +693,25 @@ mod tests {
     }
 
     async fn ask(mock: &MockSystemOne, deadline: Duration) -> SystemOneCall {
+        asking(mock, deadline, None).await
+    }
+
+    /// One call to `mock`, hedged as `hedge` says.
+    async fn asking(mock: &MockSystemOne, deadline: Duration, hedge: Option<Duration>) -> SystemOneCall {
         let questions = questions();
         let request = SystemOneRequest {
             state: "rotate the deploy credentials",
             model: SYSTEMONE_MODEL,
             questions: &questions,
         };
-        SystemOneClient::new(&mock.base_url, "test-key").decide_body(body_of(&request), deadline).await
+        SystemOneClient::new(&mock.base_url, "test-key")
+            .decide_body(body_of(&request), deadline, hedge)
+            .await
+    }
+
+    /// A reply `delay` from now.
+    fn slow(delay: Duration) -> Reply {
+        Reply { status: 200, body: contract_answer(), delay }
     }
 
     /// A typed request as the bytes the door would hand the wire.
@@ -574,6 +726,8 @@ mod tests {
 
         let response = call.outcome.expect("the documented success parses");
         assert_eq!(call.retries, 0);
+        assert_eq!(call.requests, 1, "one call, one request — the client says so itself");
+        assert_eq!(call.hedge, None, "an unhedged call has nothing to say about a second copy");
         assert_eq!(response.model, "jev-latest");
         assert_eq!(response.usage, SystemOneUsage { input_tokens: 212, output_tokens: 0 });
         let risk = response.choice_answer("risk").expect("answered").expect("choice-shaped");
@@ -687,6 +841,7 @@ mod tests {
         let call = ask(&mock, UNHURRIED).await;
         assert!(call.outcome.is_ok(), "{:?}", call.outcome);
         assert_eq!(call.retries, 1);
+        assert_eq!(call.requests, 2, "a re-send is a request that left");
         assert_eq!(mock.seen().len(), 2);
         assert!(call.elapsed >= SYSTEMONE_RETRY_BASE_DELAY, "the retry waited: {:?}", call.elapsed);
     }
@@ -697,6 +852,7 @@ mod tests {
         let call = ask(&mock, UNHURRIED).await;
         assert_eq!(call.outcome, Err(SystemOneFailure::Overloaded));
         assert_eq!(call.retries, SYSTEMONE_MAX_RETRIES);
+        assert_eq!(call.requests, SYSTEMONE_MAX_RETRIES + 1);
         assert_eq!(mock.seen().len(), usize::try_from(SYSTEMONE_MAX_RETRIES).unwrap() + 1);
         // Exponential: base, 2×base, 4×base, … — the sum of every wait.
         let waited: Duration = (0..SYSTEMONE_MAX_RETRIES)
@@ -719,12 +875,7 @@ mod tests {
     #[tokio::test]
     async fn an_answer_slower_than_the_deadline_is_a_timeout() {
         let deadline = Duration::from_millis(300);
-        let mock = MockSystemOne::serving(vec![Reply {
-            status: 200,
-            body: contract_answer(),
-            delay: deadline * 5,
-        }])
-        .await;
+        let mock = MockSystemOne::serving(vec![slow(deadline * 5)]).await;
         let call = ask(&mock, deadline).await;
         assert_eq!(call.outcome, Err(SystemOneFailure::Timeout));
         assert!(call.elapsed < deadline * 3, "the wall held: {:?}", call.elapsed);
@@ -785,9 +936,100 @@ mod tests {
         let client = config.into_client();
         let questions = questions();
         let request = SystemOneRequest { state: "x", model: SYSTEMONE_MODEL, questions: &questions };
-        assert!(client.decide_body(body_of(&request), UNHURRIED).await.outcome.is_ok());
+        assert!(client.decide_body(body_of(&request), UNHURRIED, None).await.outcome.is_ok());
         assert_eq!(mock.seen().len(), 1);
         assert!(!format!("{client:?}").contains("test-key"), "the key never prints");
+    }
+
+    /// A hedge planned but never reached is one request, and says so: an
+    /// answer inside the delay ends the call before the second copy's moment.
+    #[tokio::test]
+    async fn an_answer_before_the_hedges_moment_leaves_once() {
+        let hedge = Duration::from_millis(400);
+        let mock = MockSystemOne::serving(vec![Reply::now(200, contract_answer())]).await;
+        let call = asking(&mock, UNHURRIED, Some(hedge)).await;
+
+        assert!(call.outcome.is_ok(), "{:?}", call.outcome);
+        assert_eq!(call.requests, 1, "the second copy never left");
+        assert_eq!(call.hedge, None, "nothing to record about a hedge that did not fire");
+        assert_eq!(mock.seen().len(), 1);
+        assert!(call.elapsed < hedge, "the answer did not wait for the delay: {:?}", call.elapsed);
+    }
+
+    /// The bytes a hedge sends are the first request's, to the letter — the
+    /// same body, the same bearer, the same route. A second copy of a judgment
+    /// is a second copy, not a second question.
+    #[tokio::test]
+    async fn a_hedge_sends_the_same_bytes_and_the_first_answer_wins() {
+        let mock =
+            MockSystemOne::serving(vec![slow(Duration::from_millis(300)), slow(Duration::from_secs(3))])
+                .await;
+        let call = asking(&mock, UNHURRIED, Some(Duration::from_millis(60))).await;
+
+        assert!(call.outcome.is_ok(), "{:?}", call.outcome);
+        assert_eq!(call.requests, 2, "the first answer was late, so a second copy left");
+        let ran = call.hedge.expect("a hedge fired");
+        assert_eq!(ran.delay, Duration::from_millis(60));
+        assert!(!ran.won, "the first copy still answered first");
+        assert_eq!(ran.loser_ms, None, "a copy still in flight is dropped, not read");
+
+        let seen = mock.seen();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].body, seen[1].body, "the same bytes");
+        let heads: Vec<String> = seen.iter().map(|seen| seen.head.to_ascii_lowercase()).collect();
+        for head in &heads {
+            assert!(head.starts_with(&format!("post {SYSTEMONE_PATH} http/1.1")), "{head}");
+            assert!(head.contains("authorization: bearer test-key"), "{head}");
+        }
+        assert_eq!(call.retries, 0, "a hedge is not a retry");
+    }
+
+    /// The second copy wins, and the loser is dropped where it stands: the
+    /// call ends on the wall clock long before the first copy's own reply was
+    /// due. This is the whole point — 36.4% of this machine's routing
+    /// judgments were being thrown away for want of it.
+    #[tokio::test]
+    async fn a_second_copy_that_wins_does_not_wait_for_the_loser() {
+        let unanswerable = Duration::from_secs(5);
+        let mock = MockSystemOne::serving(vec![slow(unanswerable), Reply::now(200, contract_answer())])
+            .await;
+        let hedge = Duration::from_millis(60);
+        let call = asking(&mock, UNHURRIED, Some(hedge)).await;
+
+        assert!(call.outcome.is_ok(), "{:?}", call.outcome);
+        assert_eq!(call.requests, 2);
+        let ran = call.hedge.expect("a hedge fired");
+        assert!(ran.won, "the second copy answered first");
+        assert!(
+            call.elapsed < unanswerable / 2,
+            "the loser was dropped, not waited for: {:?} of {unanswerable:?}",
+            call.elapsed
+        );
+        assert!(call.elapsed >= hedge, "the second copy did leave at the delay: {:?}", call.elapsed);
+    }
+
+    /// The wall bounds both copies, not each of them: a second copy gets what
+    /// is left of the deadline, never a fresh one.
+    #[tokio::test]
+    async fn both_copies_end_at_the_one_deadline() {
+        let deadline = Duration::from_millis(400);
+        let mock = MockSystemOne::serving(vec![slow(deadline * 10)]).await;
+        let call = asking(&mock, deadline, Some(deadline / 4)).await;
+
+        assert_eq!(call.outcome, Err(SystemOneFailure::Timeout));
+        assert_eq!(call.requests, 2, "the second copy left and timed out too");
+        let ran = call.hedge.expect("a hedge fired");
+        assert!(
+            call.elapsed < deadline * 2,
+            "one wall for the pair, not one each: {:?}",
+            call.elapsed
+        );
+        // Both copies time out at the same instant, so the loser has often
+        // finished by the time the winner is read — which is exactly the
+        // column's case: a latency, never a wait.
+        if let Some(loser_ms) = ran.loser_ms {
+            assert!(loser_ms <= millis(deadline * 2), "the loser's own latency: {loser_ms} ms");
+        }
     }
 
     #[test]

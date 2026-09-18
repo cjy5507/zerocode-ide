@@ -437,6 +437,51 @@ fn the_door_counts_only_what_it_lets_through_and_the_last_place_goes_once() {
     assert!(pass(routing, true, &settings(None), Some(APP), &unkept).is_ok());
 }
 
+/// A judgment's second request is the person's money spent twice, so it takes
+/// a place in the day exactly as the first did — and a day with no place left
+/// refuses it, which is what stops the hedge from sending it.
+#[test]
+fn a_hedge_takes_the_days_place_before_it_may_leave() {
+    let home = tempfile::tempdir().expect("a config home");
+    let requests = count::requests_path(home.path(), "2026-09-17");
+    let capped = settings(Some(3));
+    let body = routing_body("rename a variable");
+    let routing = |asking: &Asking<'_>| may_send(&ROUTING, asking, body.clone());
+
+    assert!(pass(routing, true, &capped, Some(APP), &requests).is_ok());
+    assert!(
+        count_a_hedge(&capped, &requests).is_ok(),
+        "the day had room for the second copy"
+    );
+    assert_eq!(count::sent(&requests), 2, "one judgment, two places");
+
+    // The third place goes to a judgment; there is then nothing left for its
+    // hedge, and the refusal is what keeps the second copy off the wire.
+    assert!(pass(routing, true, &capped, Some(APP), &requests).is_ok());
+    assert_eq!(
+        count_a_hedge(&capped, &requests).err(),
+        Some(Refused::Budget)
+    );
+    assert_eq!(
+        count::sent(&requests),
+        4,
+        "a refused place is still spent, never unspent"
+    );
+
+    // Uncapped, a hedge is counted and never refused — the same as a first
+    // request under no budget.
+    let open = count::requests_path(home.path(), "2026-09-19");
+    assert!(count_a_hedge(&settings(None), &open).is_ok());
+    assert_eq!(count::sent(&open), 1);
+
+    // A count that cannot be kept refuses only where a budget needs keeping.
+    let blocked = home.path().join("another-file");
+    std::fs::write(&blocked, "").expect("a file where the directory should be");
+    let unkept = count::requests_path(&blocked, "2026-09-17");
+    assert_eq!(count_a_hedge(&capped, &unkept).err(), Some(Refused::Budget));
+    assert!(count_a_hedge(&settings(None), &unkept).is_ok());
+}
+
 #[test]
 fn a_day_file_counts_one_byte_per_request_and_forgets_earlier_days() {
     let home = tempfile::tempdir().expect("a config home");

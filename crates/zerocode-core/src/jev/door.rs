@@ -24,6 +24,12 @@
 //! [`may_send`] is pure. [`pass`] reads the day's count and counts the request
 //! the door lets through ([`super::count`]); reading the settings and writing a
 //! refusal's row belong to the program that asks.
+//!
+//! A judgment asked twice meets the fourth question twice. The second request
+//! ([`super::hedge`]) carries the bytes the door already cleared, so consent,
+//! the switch and the key have been answered for it; what has not is the day's
+//! budget, and [`count_a_hedge`] asks that one before the second request may
+//! leave.
 
 use std::path::Path;
 
@@ -51,6 +57,12 @@ pub const REQUESTS_KEY: &str = "requests";
 /// row written since the door carries it, so a row without it predates the
 /// door.
 pub const REDACTED_LINES_KEY: &str = "redactedLines";
+
+/// What a ledger row's `outcome` says when an answer arrived and passed the
+/// use's own checks. Every Jev ledger spells it this way, and one word is what
+/// lets a reader of somebody else's ledger — the hedge rule's sample of past
+/// latencies ([`super::hedge`]) — know an answer from a wall.
+pub const ANSWERED_OUTCOME: &str = "answered";
 
 /// What a withheld line reads as in what is sent.
 pub const WITHHELD_LINE: &str = MASK;
@@ -301,11 +313,39 @@ pub fn pass(
         sent_today: count::sent(requests),
     };
     let cleared = ask(&asking)?;
+    take_a_place(settings, requests).map(|()| cleared)
+}
+
+/// Take the day's place for a second request of a judgment already cleared —
+/// the hedge [`super::hedge::plan`] names, whose whole cost is that one extra
+/// request.
+///
+/// A hedge is not a second judgment: the door has already asked its four
+/// questions of these same bytes, and the only one that can answer
+/// differently for the second copy is the budget, because the second copy is
+/// the person's money spent twice. So this asks that one question, with the
+/// same primitive [`pass`] counts with, and a hedge it refuses must not be
+/// sent. Count first, send second: a hedge counted after it left is a budget
+/// that learns of the spending too late to stop it.
+///
+/// # Errors
+/// [`Refused::Budget`] when the day has no place left for it.
+pub fn count_a_hedge(settings: &JevSettings, requests: &Path) -> Result<(), Refused> {
+    take_a_place(settings, requests)
+}
+
+/// Count one request in the day and answer whether the day had room for it.
+///
+/// The count is written before the answer is known, so a request that lost
+/// the day's last place to one counted at the same moment is refused with its
+/// byte already spent: the count may say one more request than went out, and
+/// never one fewer, which is the direction a budget may err in.
+fn take_a_place(settings: &JevSettings, requests: &Path) -> Result<(), Refused> {
     match count::count_one(requests) {
-        Ok(place) if within_budget(settings, place.saturating_sub(1)) => Ok(cleared),
+        Ok(place) if within_budget(settings, place.saturating_sub(1)) => Ok(()),
         Ok(_) => Err(Refused::Budget),
         Err(_) if settings.daily_requests.is_some() => Err(Refused::Budget),
-        Err(_) => Ok(cleared),
+        Err(_) => Ok(()),
     }
 }
 

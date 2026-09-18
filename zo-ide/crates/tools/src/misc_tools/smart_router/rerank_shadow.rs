@@ -35,7 +35,10 @@ use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use api::{SystemOneClient, SystemOneConfig, SystemOneFailure, SystemOneRequest, SYSTEMONE_MODEL};
+use api::{
+    SystemOneCall, SystemOneClient, SystemOneConfig, SystemOneFailure, SystemOneRequest,
+    SYSTEMONE_MODEL,
+};
 use zerocode_core::jev::door::Refused;
 use zerocode_core::jev::RECALL;
 use runtime::memory::rerank::{
@@ -57,7 +60,11 @@ pub const RERANK_SHADOW_FILE: &str = zerocode_core::jev::RECALL.ledger;
 
 /// Outcome of a row whose judgment answered, checked out, and could be folded
 /// into recall's order.
-pub const RERANK_OUTCOME_ANSWERED: &str = "answered";
+///
+/// The word is the door's, because the hedge rule's sample reads it out of
+/// this ledger ([`JevDoor::hedge_for`]) and a reader that spelled it
+/// differently from the writer would find no answers at all.
+pub const RERANK_OUTCOME_ANSWERED: &str = zerocode_core::jev::door::ANSWERED_OUTCOME;
 
 /// Outcome of a row whose judgment checked out but could not be ordered: the
 /// vault named two pages each other's successor, and the rule is to invent no
@@ -136,6 +143,24 @@ pub struct RerankShadowRow {
     /// when the rule names no note of ours.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rejected_at: Option<usize>,
+    /// When a second request of this reading was planned to leave, on a road
+    /// that planned one. Absent where the rule named no delay — too few
+    /// samples, an ordinary answer already past the wall, or a day whose
+    /// budget could not carry a second request.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "hedgeDelayMs")]
+    pub hedge_delay_ms: Option<u64>,
+    /// Whether that second request actually left: no answer had come by the
+    /// delay.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "hedgeFired")]
+    pub hedge_fired: Option<bool>,
+    /// Whether the second copy is the one that answered.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "hedgeWon")]
+    pub hedge_won: Option<bool>,
+    /// The losing copy's own latency, when it had answered by the time the
+    /// winner was read — the column that lets two copies being slow together
+    /// be measured rather than assumed away.
+    #[serde(default, skip_serializing_if = "Option::is_none", rename = "loserMs")]
+    pub loser_ms: Option<u64>,
     /// What the judgment said, once it checked out and could be ordered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judged: Option<Judged>,
@@ -183,6 +208,26 @@ impl Judged {
 }
 
 impl RerankShadowRow {
+    /// What this row's call cost, as the client counted it — the same account
+    /// the routing row keeps (`decision_shadow::DecisionShadowRow::spent`),
+    /// so a reader of one ledger can read the other.
+    ///
+    /// `hedge` is the delay that was planned, whether or not a second request
+    /// reached it; `call.hedge` is the one that left.
+    fn spent(&mut self, call: &SystemOneCall, hedge: Option<Duration>, withheld: u32) {
+        self.elapsed_ms = jev_gate::millis(call.elapsed);
+        self.retries = call.retries;
+        // What left the machine, as the client counted it. One plus the
+        // retries stopped being that number the moment a judgment could be
+        // asked twice.
+        self.requests = Some(call.requests);
+        self.redacted_lines = Some(withheld);
+        self.hedge_delay_ms = hedge.map(jev_gate::millis);
+        self.hedge_fired = hedge.map(|_| call.hedge.is_some());
+        self.hedge_won = call.hedge.map(|ran| ran.won);
+        self.loser_ms = call.hedge.and_then(|ran| ran.loser_ms);
+    }
+
     fn new(key: MemoKey, candidates: usize, outcome: String) -> Self {
         Self {
             at: unix_millis(),
@@ -197,6 +242,10 @@ impl RerankShadowRow {
             model: None,
             input_tokens: None,
             requests: Some(0),
+            hedge_delay_ms: None,
+            hedge_fired: None,
+            hedge_won: None,
+            loser_ms: None,
             redacted_lines: Some(0),
             rejected: None,
             rejected_at: None,
@@ -381,7 +430,10 @@ async fn run(shot: Shot, answer: Option<RowSender>) {
         return;
     };
     let client = config.ok().map(SystemOneConfig::into_client);
-    let row = judge(&door, client.as_ref(), &query, &hits, deadline).await;
+    // A caller holding the other end of the rendezvous is a turn waiting for
+    // this order, and a wall it is waited inside is the one thing a second
+    // request can buy.
+    let row = judge(&door, client.as_ref(), &query, &hits, deadline, answer.is_some()).await;
     let Some(row) = kept(row, answer).await else {
         return;
     };
@@ -411,6 +463,7 @@ pub(super) async fn judge(
     query: &str,
     hits: &[MemoryHit],
     deadline: Duration,
+    waited: bool,
 ) -> RerankShadowRow {
     let candidates = rerank_candidates(hits);
     // The judgment is asked about at most the notes a question was built for,
@@ -448,10 +501,14 @@ pub(super) async fn judge(
         }
     };
     let withheld = u32::try_from(cleared.withheld_lines()).unwrap_or(u32::MAX);
-    let call = jev_gate::send(client, cleared, deadline).await;
-    let mut row = match call.outcome {
+    let hedge = door.hedge_now(&RECALL, deadline, waited);
+    let call = jev_gate::send(client, cleared, deadline, hedge).await;
+    // Read, not taken: the call is read for its answer here and for what it
+    // cost at the end, and a judgment asked twice has more to say about the
+    // cost than the answer does.
+    let mut row = match &call.outcome {
         Ok(response) => {
-            let checked = validate_rerank(&candidates, &response);
+            let checked = validate_rerank(&candidates, response);
             let mut row = match checked {
                 Ok(readings) => {
                     telemetry::attest_fired(telemetry::HarnessFeature::RerankShadow);
@@ -487,7 +544,7 @@ pub(super) async fn judge(
                 }
             };
             // An answer that arrived billed, whether or not it checked out.
-            row.model = Some(response.model);
+            row.model = Some(response.model.clone());
             row.input_tokens = Some(response.usage.input_tokens);
             row
         }
@@ -496,10 +553,7 @@ pub(super) async fn judge(
             RerankShadowRow::new(key, hits.len(), failure.ledger_token())
         }
     };
-    row.elapsed_ms = u64::try_from(call.elapsed.as_millis()).unwrap_or(u64::MAX);
-    row.retries = call.retries;
-    row.requests = Some(call.retries.saturating_add(1));
-    row.redacted_lines = Some(withheld);
+    row.spent(&call, hedge, withheld);
     row
 }
 
@@ -586,6 +640,41 @@ mod tests {
             Self { base_url, bodies }
         }
 
+        /// A port whose first answer is `delay` late and whose later answers
+        /// come at once — one judgment slow on the wire, its second copy not.
+        ///
+        /// Each connection is answered on its own thread, because a hedge
+        /// holds two of them open at the same moment and a server that
+        /// answered them in turn would be measuring itself.
+        fn slow_first(delay: Duration, body: String) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind the mock");
+            let base_url = format!("http://{}", listener.local_addr().expect("mock address"));
+            let bodies = Arc::new(Mutex::new(Vec::new()));
+            let recorder = Arc::clone(&bodies);
+            std::thread::spawn(move || {
+                for (nth, stream) in listener.incoming().enumerate() {
+                    let Ok(mut stream) = stream else { break };
+                    let recorder = Arc::clone(&recorder);
+                    let body = body.clone();
+                    std::thread::spawn(move || {
+                        let request = read_request(&mut stream);
+                        if let Ok(mut seen) = recorder.lock() {
+                            seen.push(request);
+                        }
+                        if nth == 0 {
+                            std::thread::sleep(delay);
+                        }
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        let _ = stream.write_all(response.as_bytes());
+                    });
+                }
+            });
+            Self { base_url, bodies }
+        }
+
         fn serving(status: u16, body: String) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind the mock");
             let base_url = format!("http://{}", listener.local_addr().expect("mock address"));
@@ -660,7 +749,7 @@ mod tests {
     fn judged(client: &SystemOneClient, query: &str, hits: &[MemoryHit]) -> RerankShadowRow {
         let home = tempfile::tempdir().expect("a config home");
         let door = door(&[WORKSPACE], home.path());
-        shared_agent_runtime().block_on(judge(&door, Some(client), query, hits, Duration::from_secs(5)))
+        shared_agent_runtime().block_on(judge(&door, Some(client), query, hits, Duration::from_secs(5), false))
     }
 
     #[test]
@@ -839,6 +928,7 @@ mod tests {
             "anything (row seven)",
             &[hit("wiki/a", "one")],
             Duration::from_secs(5),
+            false,
         ));
 
         assert_eq!(row.outcome, Refused::NotConsented.token());
@@ -865,6 +955,206 @@ mod tests {
         assert_eq!(row.redacted_lines, Some(2), "the request's line and the summary's");
         assert_eq!(row.requests, Some(1));
         assert_eq!(row.outcome, RERANK_OUTCOME_ANSWERED);
+    }
+
+    /// A door whose day may hold `budget` requests, with `home` as both the
+    /// count file's home and the ledger the hedge's sample is read from.
+    fn door_with(budget: Option<u64>, home: &Path) -> JevDoor {
+        let settings = zerocode_core::jev::door::JevSettings {
+            enabled: true,
+            workspaces: vec![WORKSPACE.to_string()],
+            daily_requests: budget,
+        };
+        JevDoor::at(settings, Path::new(WORKSPACE), home)
+    }
+
+    /// A ledger of answers that each took `ms`, written as this ledger's own
+    /// rows — so the sample the hedge rule reads is read out of what this
+    /// module actually writes, spelling included.
+    fn sampled(home: &Path, answers: &[u64]) {
+        let path = home.join(RECALL.ledger);
+        for ms in answers {
+            let mut row = RerankShadowRow::new(
+                MemoKey::for_reading("a past reading", &[]),
+                1,
+                RERANK_OUTCOME_ANSWERED.to_string(),
+            );
+            row.elapsed_ms = *ms;
+            row.requests = Some(1);
+            append_shadow_row(&path, &row, SHADOW_LEDGER_MAX_BYTES).expect("a sample row");
+        }
+    }
+
+    /// One reading on the road a turn waits on. `query` is each test's own,
+    /// because the memo is this process's and a reading asked twice under one
+    /// name is recalled rather than sent.
+    fn waited_on(client: &SystemOneClient, door: &JevDoor, wall: Duration, query: &str) -> RerankShadowRow {
+        shared_agent_runtime().block_on(judge(door, Some(client), query, &[hit("wiki/a", "one")], wall, true))
+    }
+
+    /// The day's count — one byte per request that left.
+    fn counted(home: &Path) -> u64 {
+        zerocode_core::jev::count::sent(&zerocode_core::jev::count::requests_path(home, "2026-09-17"))
+    }
+
+    /// A sample too small to name a rank is no plan at all: the judgment takes
+    /// the road it took before, one request, and the row says nothing about a
+    /// hedge it never had.
+    #[test]
+    fn too_few_past_answers_to_name_a_delay_asks_once() {
+        let mock = Mock::serving(200, reply_for(&[1]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let home = tempfile::tempdir().expect("a config home");
+        let thin = vec![300; zerocode_core::jev::hedge::MIN_SAMPLES - 1];
+        sampled(home.path(), &thin);
+
+        let row = waited_on(&client, &door_with(None, home.path()), Duration::from_secs(5), "too thin a sample");
+
+        assert_eq!(row.outcome, RERANK_OUTCOME_ANSWERED);
+        assert_eq!(row.requests, Some(1));
+        assert_eq!(row.hedge_delay_ms, None, "no plan, no column");
+        assert_eq!((row.hedge_fired, row.hedge_won, row.loser_ms), (None, None, None));
+        assert_eq!(mock.requests().len(), 1);
+        assert_eq!(counted(home.path()), 1, "one request, one place in the day");
+    }
+
+    /// A plan the first answer beats costs nothing: the delay is on the row,
+    /// `hedgeFired` says no, and one request left.
+    #[test]
+    fn a_plan_the_first_answer_beats_leaves_once() {
+        let mock = Mock::serving(200, reply_for(&[1]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let home = tempfile::tempdir().expect("a config home");
+        sampled(home.path(), &[400; 10]);
+
+        let row = waited_on(&client, &door_with(None, home.path()), Duration::from_secs(5), "a plan beaten to it");
+
+        assert_eq!(row.outcome, RERANK_OUTCOME_ANSWERED);
+        assert_eq!(row.hedge_delay_ms, Some(400), "the rank the sample holds");
+        assert_eq!(row.hedge_fired, Some(false), "the answer came first");
+        assert_eq!(row.requests, Some(1));
+        assert_eq!(mock.requests().len(), 1);
+        assert_eq!(counted(home.path()), 2, "the plan's place was taken before it could leave");
+    }
+
+    /// A judgment nobody answers: the second copy leaves at the delay, both
+    /// copies are on the wire, and the day is billed for both.
+    #[test]
+    fn a_hedge_that_fires_sends_twice_and_the_day_counts_twice() {
+        let mock = Mock::silent();
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let home = tempfile::tempdir().expect("a config home");
+        sampled(home.path(), &[100; 10]);
+        let wall = Duration::from_millis(600);
+
+        let row = waited_on(&client, &door_with(None, home.path()), wall, "a judgment nobody answers");
+
+        assert_eq!(row.outcome, SystemOneFailure::Timeout.ledger_token());
+        assert_eq!(row.hedge_delay_ms, Some(100));
+        assert_eq!(row.hedge_fired, Some(true), "no answer by the delay, so a second copy left");
+        assert_eq!(row.requests, Some(2), "what left, as the client counted it");
+        assert_eq!(row.retries, 0, "a hedge is not a retry");
+        assert_eq!(counted(home.path()), 2, "both requests took a place in the day");
+        assert!(row.elapsed_ms < jev_gate::millis(wall * 2), "one wall for the pair: {} ms", row.elapsed_ms);
+    }
+
+    /// The second copy answers first, and that is the judgment the row keeps:
+    /// an answer inside a wall the first copy was going to miss, which is the
+    /// whole reason for the second one.
+    #[test]
+    fn a_second_copy_that_answers_first_is_the_judgment_the_row_keeps() {
+        let mock = Mock::slow_first(Duration::from_secs(3), reply_for(&[1]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let home = tempfile::tempdir().expect("a config home");
+        sampled(home.path(), &[80; 10]);
+        let wall = Duration::from_secs(2);
+
+        let row = waited_on(&client, &door_with(None, home.path()), wall, "a slow first copy");
+
+        assert_eq!(row.outcome, RERANK_OUTCOME_ANSWERED, "an answer landed inside the wall");
+        assert_eq!(row.hedge_delay_ms, Some(80));
+        assert_eq!((row.hedge_fired, row.hedge_won), (Some(true), Some(true)));
+        assert_eq!(row.requests, Some(2));
+        assert!(row.judged.is_some(), "the order a turn would read");
+        assert!(
+            row.elapsed_ms < jev_gate::millis(wall),
+            "the first copy was not waited for: {} ms",
+            row.elapsed_ms
+        );
+        assert_eq!(counted(home.path()), 2);
+    }
+
+    /// A day that cannot carry a second request does not plan one — and the
+    /// first request still goes, and still answers.
+    #[test]
+    fn a_day_with_no_room_for_a_second_request_plans_none() {
+        let mock = Mock::serving(200, reply_for(&[1]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let home = tempfile::tempdir().expect("a config home");
+        sampled(home.path(), &[400; 10]);
+
+        let row = waited_on(&client, &door_with(Some(1), home.path()), Duration::from_secs(5), "a spent day");
+
+        assert_eq!(row.outcome, RERANK_OUTCOME_ANSWERED, "the judgment itself still went");
+        assert_eq!(row.requests, Some(1));
+        assert_eq!(row.hedge_delay_ms, None, "a plan the budget declined is no plan");
+        assert_eq!(mock.requests().len(), 1);
+        assert_eq!(counted(home.path()), 1);
+    }
+
+    /// The road where nothing waits plans nothing: a record-only reading is
+    /// read for no order, so a second copy of it would be money for nothing.
+    #[test]
+    fn the_record_only_road_never_asks_twice() {
+        let mock = Mock::serving(200, reply_for(&[1]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let home = tempfile::tempdir().expect("a config home");
+        sampled(home.path(), &[400; 10]);
+        let door = door_with(None, home.path());
+
+        let row = shared_agent_runtime().block_on(judge(
+            &door,
+            Some(&client),
+            "why was this decided (recorded)",
+            &[hit("wiki/a", "one")],
+            RERANK_SHADOW_DEADLINE,
+            false,
+        ));
+
+        assert_eq!(row.outcome, RERANK_OUTCOME_ANSWERED);
+        assert_eq!(row.hedge_delay_ms, None);
+        assert_eq!(row.requests, Some(1));
+        assert_eq!(counted(home.path()), 1);
+    }
+
+    /// A row from before the hedge reads back as one, and a row that carries
+    /// a hedge's four columns round-trips through the spelling every Jev
+    /// ledger uses.
+    #[test]
+    fn an_older_row_reads_back_without_the_hedges_columns() {
+        let before = serde_json::json!({
+            "at": 1, "query": 2, "notes": 3, "rubric_version": 1,
+            "outcome": RERANK_OUTCOME_ANSWERED, "candidates": 1,
+            "cached": false, "elapsed_ms": 641, "retries": 0,
+        });
+        let row: RerankShadowRow = serde_json::from_value(before).expect("a row from before the hedge");
+        assert_eq!(row.elapsed_ms, 641);
+        assert_eq!((row.hedge_delay_ms, row.hedge_fired, row.hedge_won, row.loser_ms), (None, None, None, None));
+
+        let mut hedged = row;
+        hedged.hedge_delay_ms = Some(864);
+        hedged.hedge_fired = Some(true);
+        hedged.hedge_won = Some(true);
+        hedged.loser_ms = Some(4_259);
+        let written = serde_json::to_value(&hedged).expect("a hedged row");
+        assert_eq!(written["hedgeDelayMs"], 864);
+        assert_eq!(written["hedgeFired"], true);
+        assert_eq!(written["hedgeWon"], true);
+        assert_eq!(written["loserMs"], 4_259);
+        assert_eq!(
+            serde_json::from_value::<RerankShadowRow>(written).expect("read back"),
+            hedged
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use api::{SystemOneClient, SystemOneConfig, SystemOneFailure, SYSTEMONE_MODEL};
+use api::{SystemOneCall, SystemOneClient, SystemOneConfig, SystemOneFailure, SYSTEMONE_MODEL};
 use zerocode_core::jev::door::Refused;
 use zerocode_core::jev::ROUTING;
 use runtime::{
@@ -45,7 +45,11 @@ pub const DECISION_SHADOW_FILE: &str = zerocode_core::jev::ROUTING.ledger;
 
 /// The outcome of a row whose judgment arrived and passed every check. Every
 /// other outcome is a failure token from [`SystemOneFailure`].
-pub const OUTCOME_ANSWERED: &str = "answered";
+///
+/// The word is the door's, because the hedge rule's sample reads it out of
+/// this ledger ([`jev_gate::JevDoor::hedge_for`]) and a reader that spelled it
+/// differently from the writer would find no answers at all.
+pub const OUTCOME_ANSWERED: &str = zerocode_core::jev::door::ANSWERED_OUTCOME;
 
 /// The record-only judgment wall. It matches the chat probe so the comparison
 /// ledger can say whether Jev would have arrived in time.
@@ -116,7 +120,9 @@ pub async fn check_system_one() -> SystemOneCheck {
     };
     let passed = JevDoor::for_key_check().pass_key_check(client.is_some(), &body);
     let call = match (passed, &client) {
-        (Ok(cleared), Some(client)) => jev_gate::send(client, cleared, DECISION_SHADOW_DEADLINE).await,
+        (Ok(cleared), Some(client)) => {
+            jev_gate::send(client, cleared, DECISION_SHADOW_DEADLINE, None).await
+        }
         // The door refuses a keyless check before anything else it asks.
         (passed, _) => return unsent(CheckFailure::Refused(passed.err().unwrap_or(Refused::NoKey))),
     };
@@ -217,6 +223,26 @@ pub struct DecisionShadowRow {
     /// carries it, which is how a row from before the door is told apart.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redacted_lines: Option<u32>,
+    /// When a second request of this judgment was planned to leave, on a road
+    /// that planned one. Absent where the rule named no delay — too few
+    /// samples, an ordinary answer already past the wall, or a day whose
+    /// budget could not carry a second request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hedge_delay_ms: Option<u64>,
+    /// Whether that second request actually left: no answer had come by the
+    /// delay. Written wherever a delay was planned, so the share of plans
+    /// that cost anything is readable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hedge_fired: Option<bool>,
+    /// Whether the second copy is the one that answered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hedge_won: Option<bool>,
+    /// The losing copy's own latency, when it had answered by the time the
+    /// winner was read. The column the published rules do not have: two
+    /// copies that are slow together make a hedge worthless, and this is what
+    /// lets that be read off a real ledger instead of assumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loser_ms: Option<u64>,
     /// The chat probe's actual result. Active rows use `not_run` when Jev
     /// answered or before a failed Jev judgment falls back.
     pub probe: ProbeCell,
@@ -249,6 +275,24 @@ impl DecisionShadowRow {
         Refused::from_token(&self.outcome).is_some()
     }
 
+    /// What this row's call cost, as the client counted it.
+    ///
+    /// `hedge` is the delay that was planned, whether or not a second request
+    /// reached it; `call.hedge` is the one that left.
+    fn spent(&mut self, call: &SystemOneCall, hedge: Option<Duration>, withheld: u32) {
+        self.elapsed_ms = jev_gate::millis(call.elapsed);
+        self.retries = call.retries;
+        // What left the machine, as the client counted it. One plus the
+        // retries stopped being that number the moment a judgment could be
+        // asked twice.
+        self.requests = Some(call.requests);
+        self.redacted_lines = Some(withheld);
+        self.hedge_delay_ms = hedge.map(jev_gate::millis);
+        self.hedge_fired = hedge.map(|_| call.hedge.is_some());
+        self.hedge_won = call.hedge.map(|ran| ran.won);
+        self.loser_ms = call.hedge.and_then(|ran| ran.loser_ms);
+    }
+
     fn new(
         task: u64,
         probe: ProbeCell,
@@ -270,6 +314,10 @@ impl DecisionShadowRow {
             route_use,
             requests: Some(0),
             redacted_lines: Some(0),
+            hedge_delay_ms: None,
+            hedge_fired: None,
+            hedge_won: None,
+            loser_ms: None,
             probe,
             jev: None,
         }
@@ -570,10 +618,14 @@ async fn judge(
         }
     };
     let withheld = u32::try_from(cleared.withheld_lines()).unwrap_or(u32::MAX);
-    let call = jev_gate::send(client, cleared, deadline).await;
-    let judged = match call.outcome {
-        Err(failure) => Err((failure, None)),
-        Ok(response) => match runtime::validate_decision(&response) {
+    let hedge = door.hedge_now(&ROUTING, deadline, active);
+    let call = jev_gate::send(client, cleared, deadline, hedge).await;
+    // Read, not taken: the call is read for its answer here and for what it
+    // cost at the end, and a judgment asked twice has more to say about the
+    // cost than the answer does.
+    let judged = match &call.outcome {
+        Err(failure) => Err((*failure, None)),
+        Ok(response) => match runtime::validate_decision(response) {
             Ok(verdict) => {
                 let jev = judged_axes(&verdict);
                 Ok((response, verdict, jev))
@@ -606,7 +658,7 @@ async fn judge(
                 OUTCOME_ANSWERED.to_string(),
                 route_use,
             );
-            row.model = Some(response.model);
+            row.model = Some(response.model.clone());
             row.input_tokens = Some(response.usage.input_tokens);
             row.jev = Some(jev);
             (row, assessment)
@@ -622,15 +674,12 @@ async fn judge(
             );
             // A response that arrived and failed its checks still billed.
             if let Some(response) = response {
-                row.model = Some(response.model);
+                row.model = Some(response.model.clone());
                 row.input_tokens = Some(response.usage.input_tokens);
             }
             (row, None)
         }
     };
-    row.elapsed_ms = u64::try_from(call.elapsed.as_millis()).unwrap_or(u64::MAX);
-    row.retries = call.retries;
-    row.requests = Some(call.retries.saturating_add(1));
-    row.redacted_lines = Some(withheld);
+    row.spent(&call, hedge, withheld);
     Judgment { task: shot.task, row, assessment }
 }

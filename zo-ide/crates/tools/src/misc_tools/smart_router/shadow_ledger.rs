@@ -21,10 +21,17 @@ pub const SHADOW_LEDGER_DIR: &str = "smart-router";
 /// evidence, not an archive; the rows that matter are the recent ones.
 pub const SHADOW_LEDGER_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Where a project's shadow ledgers live — the directory a reader that holds
+/// several of them keeps, so a ledger's name is the only thing it has to know.
+#[must_use]
+pub fn shadow_ledger_dir(cwd: &Path) -> PathBuf {
+    runtime::zo_project_state_dir(cwd).join(SHADOW_LEDGER_DIR)
+}
+
 /// Where a project's shadow ledger `file` lives.
 #[must_use]
 pub fn shadow_ledger_path(cwd: &Path, file: &str) -> PathBuf {
-    runtime::zo_project_state_dir(cwd).join(SHADOW_LEDGER_DIR).join(file)
+    shadow_ledger_dir(cwd).join(file)
 }
 
 /// One serialized line, one `O_APPEND` write — the same discipline as the
@@ -60,16 +67,56 @@ pub fn read_shadow_rows<T: DeserializeOwned>(path: &Path) -> Vec<T> {
 /// somehow outgrew it reads as a torn line rather than as a wrong one.
 const LAST_ROW_WINDOW_BYTES: u64 = 64 * 1024;
 
+/// Bytes a tail of several rows allows for each of them.
+///
+/// Measured on this machine 2026-09-18: the routing ledger's rows run to
+/// 700 B (p90 685) and the recall ledger's — which name a dozen notes and
+/// their readings — to 2,186 B (p90 1,775). 2.5 KiB holds the longest of
+/// either with room, so a window of this times the rows asked for holds them
+/// all and the reader never has to guess whether it saw the last of them.
+const TAIL_ROW_BYTES: u64 = 2_560;
+
 /// A ledger's last row, read from its end rather than the whole file: `None`
 /// for a missing or empty ledger.
 #[must_use]
 pub fn last_shadow_line(path: &Path) -> Option<String> {
-    let mut file = fs::File::open(path).ok()?;
-    let length = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(length.saturating_sub(LAST_ROW_WINDOW_BYTES))).ok()?;
+    last_shadow_lines(path, 1).pop()
+}
+
+/// A ledger's last `rows` rows, oldest first, read from its end rather than
+/// the whole file — a shadow ledger runs to megabytes and a reader of its
+/// recent past must not pay for its whole history.
+///
+/// A window that begins inside the file may begin inside a row, and half a
+/// row is not one, so the first line of such a window is dropped. Every line
+/// that comes back is a whole line as it was written; whether it parses is
+/// the caller's question.
+#[must_use]
+pub fn last_shadow_lines(path: &Path, rows: usize) -> Vec<String> {
+    let nothing = Vec::new();
+    let Ok(mut file) = fs::File::open(path) else {
+        return nothing;
+    };
+    let Ok(length) = file.metadata().map(|meta| meta.len()) else {
+        return nothing;
+    };
+    let window = LAST_ROW_WINDOW_BYTES.max(TAIL_ROW_BYTES.saturating_mul(u64::try_from(rows).unwrap_or(u64::MAX)));
+    let from = length.saturating_sub(window);
+    if file.seek(SeekFrom::Start(from)).is_err() {
+        return nothing;
+    }
     let mut tail = Vec::new();
-    file.read_to_end(&mut tail).ok()?;
-    String::from_utf8_lossy(&tail).lines().rev().map(str::trim).find(|line| !line.is_empty()).map(str::to_string)
+    if file.read_to_end(&mut tail).is_err() {
+        return nothing;
+    }
+    let text = String::from_utf8_lossy(&tail);
+    let whole: Vec<&str> = text
+        .lines()
+        .skip(usize::from(from > 0))
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    whole[whole.len().saturating_sub(rows)..].iter().map(|line| (*line).to_string()).collect()
 }
 
 /// Drop the older half of a ledger's lines, atomically (write beside, rename).
@@ -98,6 +145,45 @@ mod tests {
         append_shadow_row(&path, &serde_json::json!({"n": 1}), u64::MAX).unwrap();
         append_shadow_row(&path, &serde_json::json!({"n": 2}), u64::MAX).unwrap();
         assert_eq!(last_shadow_line(&path).as_deref(), Some(r#"{"n":2}"#));
+    }
+
+    #[test]
+    fn a_tail_reads_the_newest_whole_rows_and_no_more_than_it_was_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        assert!(last_shadow_lines(&path, 4).is_empty(), "a missing ledger is no rows");
+        for n in 1..=6 {
+            append_shadow_row(&path, &serde_json::json!({"n": n}), u64::MAX).unwrap();
+        }
+        assert_eq!(
+            last_shadow_lines(&path, 3),
+            vec![r#"{"n":4}"#, r#"{"n":5}"#, r#"{"n":6}"#],
+            "the newest three, oldest first"
+        );
+        assert_eq!(last_shadow_lines(&path, 99).len(), 6, "a ledger shorter than the window is all of it");
+    }
+
+    /// Past the window the read starts inside the file, and may start inside a
+    /// row: what comes back is whole rows or nothing.
+    #[test]
+    fn a_window_that_begins_mid_row_hands_back_no_half_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ledger.jsonl");
+        let padding = "x".repeat(1_024);
+        for n in 1..=200 {
+            append_shadow_row(&path, &serde_json::json!({"n": n, "pad": padding}), u64::MAX).unwrap();
+        }
+        assert!(
+            fs::metadata(&path).unwrap().len() > LAST_ROW_WINDOW_BYTES,
+            "the ledger outgrew one window, which is the case under test"
+        );
+        let tail = last_shadow_lines(&path, 3);
+        assert_eq!(tail.len(), 3);
+        let read: Vec<u64> = tail
+            .iter()
+            .map(|line| serde_json::from_str::<serde_json::Value>(line).expect("a whole row")["n"].as_u64().unwrap())
+            .collect();
+        assert_eq!(read, vec![198, 199, 200]);
     }
 
     #[test]
