@@ -251,10 +251,10 @@ fn the_rows_sit_beside_the_days_count() {
         Some(home.path().join("settings.json")),
     );
     assert_eq!(
-        ledger_path(&wire),
+        crate::systemone::ledger_of(&wire, &SUMMON),
         Some(
             home.path()
-                .join(count::REQUESTS_DIR)
+                .join(zerocode_core::jev::count::REQUESTS_DIR)
                 .join("summon-choice.jsonl")
         )
     );

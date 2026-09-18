@@ -700,6 +700,10 @@ mod tests {
             ),
             ("window wire", product(include_str!("systemone.rs"))),
             (
+                "window worker room",
+                product(include_str!("cmd/worker_room.rs")),
+            ),
+            (
                 "window stall cause",
                 product(include_str!("orchestration/stall_cause.rs")),
             ),

@@ -21,13 +21,12 @@
 //! asked off the beat ([`Host::off_the_beat`]); the summons has already been
 //! answered to its caller by then and nothing waits on this.
 
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
+use zerocode_core::jev::SUMMON;
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
-use zerocode_core::jev::{SUMMON, count};
 use zerocode_core::orchestration::{PreparedWorkerStart, SummonShadow};
 use zerocode_core::summon_choice::{self, SUMMON_CHOICE_RUBRIC_VERSION, SummonAsk};
 
@@ -53,32 +52,10 @@ const ANSWERED: &str = "answered";
 /// could have carried it, so there was no question to ask.
 const ONE_OPTION: &str = "one_option";
 
-/// Where the summon rows live: under zo's config home, in the folder the Jev
-/// door counts the day in — beside the settings that switch them on.
-fn ledger_path(wire: &Wire) -> Option<PathBuf> {
-    Some(
-        wire.config_home()?
-            .join(count::REQUESTS_DIR)
-            .join(SUMMON.ledger),
-    )
-}
-
-/// Append one row. A ledger that will not take it is said once on stderr and
-/// never raised: a record of a summons is not worth failing the summons.
+/// Append one row through the window's one Jev-ledger door
+/// ([`crate::systemone::append_rows`]).
 fn append(ledger: &Path, row: &Value) {
-    let written = ledger
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(ledger)
-        })
-        .and_then(|mut file| writeln!(file, "{row}"));
-    if let Err(why) = written {
-        eprintln!("orchestration: the summon-choice record was not written: {why}");
-    }
+    crate::systemone::append_rows(ledger, std::slice::from_ref(row));
 }
 
 /// Who the row is about: the reservation's own ids, which are the only part
@@ -149,7 +126,7 @@ pub(super) fn record(
         return;
     };
     let mode = SUMMON.mode_in(&wire.settings_root());
-    let Some(ledger) = ledger_path(&wire).filter(|_| mode.asks()) else {
+    let Some(ledger) = crate::systemone::ledger_of(&wire, &SUMMON).filter(|_| mode.asks()) else {
         return;
     };
     let mut row = opened(&Seat::of(prepared), &shadow, mode.key(), now_ms);

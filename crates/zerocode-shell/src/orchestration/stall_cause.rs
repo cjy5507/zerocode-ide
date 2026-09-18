@@ -23,14 +23,13 @@
 //! already looked at.
 
 use std::collections::HashSet;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
-use zerocode_core::jev::{JevMode, STALL, count};
+use zerocode_core::jev::{JevMode, STALL};
 use zerocode_core::orchestration::Ledger;
 use zerocode_core::stall_cause::{self, STALL_CAUSE_RUBRIC_VERSION, StallAsk, StallLook};
 
@@ -101,43 +100,6 @@ pub(super) struct StallBook {
     waiting: Option<(PathBuf, Vec<Waiting>)>,
 }
 
-/// Where the stall rows live: under zo's config home, in the folder the Jev
-/// door counts the day in — beside the settings that switch them on.
-fn ledger_path(wire: &Wire) -> Option<PathBuf> {
-    Some(
-        wire.config_home()?
-            .join(count::REQUESTS_DIR)
-            .join(STALL.ledger),
-    )
-}
-
-/// Append `rows` to the stall ledger. A ledger that will not take them is said
-/// once on stderr and never raised: a record of a silence is not worth
-/// failing the beat that saw it.
-fn append(ledger: &Path, rows: &[Value]) {
-    if rows.is_empty() {
-        return;
-    }
-    let mut said = String::new();
-    for row in rows {
-        said.push_str(&row.to_string());
-        said.push('\n');
-    }
-    let written = ledger
-        .parent()
-        .map_or(Ok(()), std::fs::create_dir_all)
-        .and_then(|()| {
-            std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(ledger)
-        })
-        .and_then(|mut file| file.write_all(said.as_bytes()));
-    if let Err(why) = written {
-        eprintln!("orchestration: the stall-cause record was not written: {why}");
-    }
-}
-
 /// Put each silence the sweep found that nobody has looked at yet to Jev,
 /// off the beat. `still_quiet` is every attempt the sweep found quiet this
 /// beat, whatever its cause: an attempt that is not among them has been heard
@@ -164,7 +126,7 @@ pub(super) fn ask_about(
         return;
     };
     let mode = STALL.mode_in(&wire.settings_root());
-    let Some(ledger) = ledger_path(&wire).filter(|_| mode.asks()) else {
+    let Some(ledger) = crate::systemone::ledger_of(&wire, &STALL).filter(|_| mode.asks()) else {
         return;
     };
     for one in fresh {
@@ -196,7 +158,7 @@ pub(super) fn ask_about(
         let book = Arc::clone(book);
         host.off_the_beat(Box::new(move || {
             let (row, waiting) = settle(&wire, question);
-            append(&ledger, &[row]);
+            crate::systemone::append_rows(&ledger, &[row]);
             // A book that has not read the ledger's tail yet reads this row
             // there; one that has takes it here, once.
             if let Some(waiting) = waiting {
@@ -324,7 +286,11 @@ pub(super) fn label(host: &dyn Host, book: &Arc<Mutex<StallBook>>, ledger: &Ledg
     let (path, labels) = {
         let mut held = book.lock().unwrap_or_else(|held| held.into_inner());
         if held.waiting.is_none() {
-            let Some(path) = host.jev_wire().as_ref().and_then(ledger_path) else {
+            let Some(path) = host
+                .jev_wire()
+                .as_ref()
+                .and_then(|wire| crate::systemone::ledger_of(wire, &STALL))
+            else {
                 return;
             };
             let rows = unlabeled_in(&path);
@@ -360,11 +326,13 @@ pub(super) fn label(host: &dyn Host, book: &Arc<Mutex<StallBook>>, ledger: &Ledg
         });
         (path.clone(), labels)
     };
-    append(&path, &labels);
+    crate::systemone::append_rows(&path, &labels);
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::Write as _;
+
     use super::*;
 
     /// A window that restarts reads the rows it left without a label back
@@ -378,7 +346,7 @@ mod tests {
             json!({ "at": 5, "stall": key, "run": "run-1", "worker": "w-2",
                     "dispatch": "dp-3", "outcome": outcome })
         };
-        append(
+        crate::systemone::append_rows(
             &ledger,
             &[
                 row("dp-3@1", ANSWERED),

@@ -392,6 +392,11 @@ mod tests {
                             // over the state, tested beside them with the two
                             // protocols' own messages and no child process.
                             | "wire_runtime.rs"
+                            // t-4781: the placement question's door is asked
+                            // across a real socket beside the row it writes —
+                            // the refusals, the option set it may not widen
+                            // and the apply it cannot claim are all one file's.
+                            | "cmd/worker_room.rs"
                     ),
                 "`{name}` acquired a test fence; only the shell and command crates \
                  may own source-contract fences"

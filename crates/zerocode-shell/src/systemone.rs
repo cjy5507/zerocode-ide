@@ -84,6 +84,54 @@ pub fn request_body(state: &Value, questions: &Value) -> Value {
     })
 }
 
+/// Where one use's rows live: under zo's config home, in the folder the Jev
+/// door counts the day in — beside the settings that switch them on.
+///
+/// One producer for every use the WINDOW asks, so the folder a reader looks
+/// in and the folder the door counts in cannot drift apart per seat.
+#[must_use]
+pub fn ledger_of(wire: &Wire, row: &JevUse) -> Option<PathBuf> {
+    Some(
+        wire.config_home()?
+            .join(count::REQUESTS_DIR)
+            .join(row.ledger),
+    )
+}
+
+/// Append `rows` to one use's ledger.
+///
+/// A ledger that will not take them is said once on stderr and never raised:
+/// a record of a decision is not worth failing the decision. Which record is
+/// named by the ledger file's own stem, so the sentence cannot name one use
+/// while the bytes go to another.
+pub fn append_rows(ledger: &Path, rows: &[Value]) {
+    if rows.is_empty() {
+        return;
+    }
+    let mut said = String::new();
+    for row in rows {
+        said.push_str(&row.to_string());
+        said.push('\n');
+    }
+    let written = ledger
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(ledger)
+        })
+        .and_then(|mut file| std::io::Write::write_all(&mut file, said.as_bytes()));
+    if let Err(why) = written {
+        let what = ledger.file_stem().map_or_else(
+            || ledger.to_string_lossy(),
+            std::ffi::OsStr::to_string_lossy,
+        );
+        eprintln!("orchestration: the {what} record was not written: {why}");
+    }
+}
+
 /// The origin to ask, honouring the test override.
 fn base_url() -> String {
     std::env::var(SYSTEMONE_BASE_URL_ENV)

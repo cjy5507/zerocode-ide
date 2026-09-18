@@ -6258,8 +6258,11 @@ impl Ledger {
             prompt,
             prompt_timeout_ms,
             // Filled by the verb, which is the road that DECIDED an agent;
-            // every other caller of this reservation is repeating one.
+            // every other caller of this reservation is repeating one. The
+            // placement half is the same: a reseat repeats a placement the
+            // person already has on their screen.
             summon_shadow: None,
+            placement_shadow: None,
             prior_binding,
             prior_binding_revision,
             binding_revision,
@@ -12879,6 +12882,30 @@ impl SummonShadow {
     }
 }
 
+/// The ledger's half of one worker's placement question (t-4781).
+///
+/// **Nothing reads this yet.** The seat it belongs to offers no mode that
+/// applies and nothing calls the door that would ask (`jev::PLACEMENT`,
+/// `cmd::worker_room`); this is the half a wiring would need, kept so that
+/// wiring is small if the evidence ever stands.
+///
+/// The rest of the look is the WINDOW's — what is on the stage, how many
+/// panes the tab in front holds, whether the layout's rule would cut one at
+/// all — so this carries only what the ledger knows and the window cannot:
+/// why the worker was summoned, and whether anybody is waiting on the run.
+/// The two halves meet in the window, which is where both are true.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlacementShadow {
+    /// The head of the summons' brief, cut to the use's cap.
+    pub brief: String,
+    /// Characters of the WHOLE brief, which the cut throws away.
+    pub brief_chars: usize,
+    /// Whether the run dispatches its own work — an armed run fires workers
+    /// with nobody waiting on them, which is half of `startedBy`; the window
+    /// holds the other half (its own focus).
+    pub armed: bool,
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedWorkerStart {
     /// The standing order that must still authorize the actual split.
@@ -12917,6 +12944,14 @@ pub struct PreparedWorkerStart {
     /// one — a restart's reseat, a receipt replayed — and whenever fewer than
     /// two agents could have carried it.
     pub summon_shadow: Option<SummonShadow>,
+    /// The placement question's ledger half, for the window to finish and
+    /// ask. `None` on every road that reserves a worker without deciding one
+    /// — a reseat repeats a placement the person already has on their screen
+    /// — and whenever the summons brought no words: what decides a room is
+    /// what the worker was summoned FOR, and a `--bare` pane says nothing
+    /// about that. Whether it is asked at all is the shell's to gate, on the
+    /// person's switch; nothing here leaves the process.
+    pub placement_shadow: Option<PlacementShadow>,
     prior_binding: Option<String>,
     prior_binding_revision: Option<u64>,
     binding_revision: u64,
@@ -15502,6 +15537,23 @@ fn plan_inner(
                     replaces_an_attempt: retry_of.is_some(),
                     carries_a_task: task.is_some(),
                     options: summonable(launcher, now_ms),
+                }
+            });
+            /* And the placement question's ledger half (t-4781), from the
+             * same words for the same reason: a room is decided by why the
+             * worker was summoned. `armed` is the run's own arming — an
+             * armed run dispatches its work itself, so nobody is waiting on
+             * the pane that opens — and the window folds it with the one
+             * fact only it holds, whether anybody is at the keyboard. */
+            prepared_worker_start.placement_shadow = said.map(|words| {
+                let (brief, brief_chars) = crate::jev::brief_shape(
+                    words,
+                    crate::jev::Cap::Chars(crate::jev::PLACEMENT_BRIEF_CHAR_CAP),
+                );
+                PlacementShadow {
+                    brief,
+                    brief_chars,
+                    armed: ledger.run(&run_id).is_some_and(|run| run.auto.is_some()),
                 }
             });
             // Start the TUI bare. The briefing is carried on the typed

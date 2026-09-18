@@ -319,11 +319,29 @@ pub const STALL: JevUse = JevUse {
 /// not take the stage at all; that depends on why it was summoned, and the
 /// layout does not know why.
 ///
-/// Recording only, and the rule keeps placing every worker. The rows are what
-/// a later stage would promote on, and unlike routing the labels cost nobody
-/// an afternoon: what the person did with the worker's window in the seconds
-/// after it appeared — closed it, moved it, never looked — is the answer to
-/// the question that was asked.
+/// Recording only, and deliberately so: the seat offers no mode that applies
+/// (t-4781). Two things are missing before it could, and the second is the
+/// one that matters.
+///
+/// The first is rooms. The window puts EVERY ledger worker in the same one —
+/// its own unfocused tab, `seatLedgerManagedTerm` — and a worker is the one
+/// pane road that never consults the layout's rule at all: the `split-window`
+/// a summons plans is the team table's bookkeeping, and `worker-start
+/// --horizontal` names a direction the birth event
+/// (`term:worker`) does not carry. So `split` and `background` are words
+/// nothing would carry out today; the surfaces exist (`tileTermPane`,
+/// `detachedAgents`) and nothing has been pointed at them.
+///
+/// The second is evidence, and there is none. What the window does now is
+/// decided by the checkout and the seat — facts it is certain of — and no row
+/// on this machine says a judgment would put a worker anywhere better. The
+/// question this use asks can be recorded and read
+/// (`crate::worker_placement`, `cmd::worker_room`); nothing calls it, and
+/// nothing should until those rows exist.
+///
+/// `promotes` stays false for the same reason it always did: the labels would
+/// be what the person did with the worker's window in the seconds after it
+/// appeared — closed it, moved it, never looked — and no stage reads them.
 pub const PLACEMENT: JevUse = JevUse {
     id: "placement",
     setting: "workerPlacement",
@@ -522,6 +540,17 @@ impl ClassifierMode {
     pub fn offered(word: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|mode| mode.key() == word)
     }
+}
+
+/// A brief's shape: its head, cut to `cap`, and the length of the whole of
+/// it.
+///
+/// One producer for every use that carries the head of somebody else's words,
+/// so the cut a row records and the cut a question carries are the same cut,
+/// and the count a reader compares them against is of the same thing.
+#[must_use]
+pub fn brief_shape(brief: &str, cap: Cap) -> (String, usize) {
+    (door::cut(brief, cap), brief.chars().count())
 }
 
 /// The first sixteen hex digits of the SHA-256 of a question's defining

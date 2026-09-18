@@ -141,6 +141,9 @@ pub(crate) use typesafe::{
     typesafe_settings,
 };
 
+pub(crate) mod worker_room;
+pub(crate) use worker_room::judge_worker_room;
+
 pub(crate) use github_pr::{github_pr_file_diff, github_set_reviewers};
 
 pub(crate) use repo_policy::{

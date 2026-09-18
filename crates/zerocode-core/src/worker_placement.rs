@@ -17,7 +17,13 @@
 //! a call site.
 //!
 //! Nothing acts on the answer. [`crate::jev::PLACEMENT`] offers no mode that
-//! applies; the rule places every worker and the judgment is a row beside it.
+//! applies, and the window keeps putting every worker in the one room it has
+//! always used — its own unfocused tab. The reason is not that the other two
+//! rooms are unreachable (`tileTermPane` and `detachedAgents` are both
+//! standing surfaces) but that no row anywhere says a judgment would place a
+//! worker better than the checkout and the seat already do. The question can
+//! be asked and recorded (`cmd::worker_room`); until those rows exist,
+//! nothing calls it.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -68,6 +74,22 @@ impl StartedBy {
             Self::Schedule => "schedule",
         }
     }
+
+    /// The reading a word names, if it names one this file knows.
+    ///
+    /// The window answers in these words rather than in a boolean, because
+    /// whether somebody is at the keyboard is the WINDOW's fact — it holds
+    /// the focus and the visibility the browser reports — while whether
+    /// anybody is waiting on the run is the LEDGER's. The two are folded into
+    /// one word where both are true, and this reads it back.
+    #[must_use]
+    pub fn of(word: &str) -> Option<Self> {
+        match word {
+            "person" => Some(Self::Person),
+            "schedule" => Some(Self::Schedule),
+            _ => None,
+        }
+    }
 }
 
 /// What is on the stage when the worker starts.
@@ -88,6 +110,17 @@ impl InFront {
             Self::Terminal => "terminal",
             Self::Page => "page",
             Self::Nothing => "nothing",
+        }
+    }
+
+    /// The surface a word names, if it names one this file knows.
+    #[must_use]
+    pub fn of(word: &str) -> Option<Self> {
+        match word {
+            "terminal" => Some(Self::Terminal),
+            "page" => Some(Self::Page),
+            "nothing" => Some(Self::Nothing),
+            _ => None,
         }
     }
 }

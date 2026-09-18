@@ -166,15 +166,11 @@ pub fn rubric_fingerprint() -> String {
     crate::jev::words_fingerprint(&rubric_words())
 }
 
-/// A brief's shape: its head, cut to the use's cap, and the length of the
-/// whole of it. One producer, so the cut a row records and the cut a question
-/// carries are the same cut.
+/// This summons' brief, shaped to the use's own cap
+/// ([`crate::jev::brief_shape`]).
 #[must_use]
 pub fn brief_shape(brief: &str) -> (String, usize) {
-    (
-        crate::jev::door::cut(brief, Cap::Chars(SUMMON_BRIEF_CHAR_CAP)),
-        brief.chars().count(),
-    )
+    crate::jev::brief_shape(brief, Cap::Chars(SUMMON_BRIEF_CHAR_CAP))
 }
 
 /// The question this summons asks of the agents it could actually start.
