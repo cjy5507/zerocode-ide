@@ -9,6 +9,7 @@ mod metadata;
 mod plan_shadow;
 mod planner;
 mod probe_exec;
+mod probe_gate;
 mod settings;
 mod shadow_ledger;
 mod rerank_shadow;

@@ -6,6 +6,7 @@ use crate::fanout::{fanout_width_for, MIN_FANOUT_SUBTASKS};
 use super::infer::{infer_route_role, mentions_design};
 use super::metadata::{classify_task_metadata, task_complexity_verb_matched, TaskMetadataInput};
 use super::planner::plan_agent_needs;
+use super::probe_gate::ProbeGate;
 use super::shape::select_route_shape;
 
 /// Smart-routing assessment of a whole turn (the user's prompt). The host
@@ -139,6 +140,32 @@ fn deterministic_assessment(
         complexity,
         intent: runtime::RouteTaskIntent::Other,
         provenance: runtime::RouteAssessmentProvenance::Deterministic,
+    }
+}
+
+/// Say what the probe gate answered, to both ledgers that record it: the
+/// process's attestation counters and the workspace's own durable row.
+///
+/// One place knows there are two sinks. Before this, each gate spelled its
+/// reason as a string literal beside its own `attest_` call, which is how the
+/// reason reached a ledger that dies with the process and no further — the
+/// question "why did the judgment never run here?" had no answer a day later.
+///
+/// `SettingsUnavailable` is the one that escalates: a cost gate and a user's
+/// own setting declining are normal operation, but a settings file that
+/// cannot be read is nobody's choice.
+fn note_gate(gate: ProbeGate) {
+    match gate {
+        ProbeGate::SettingsUnavailable => {
+            telemetry::attest_failed(telemetry::HarnessFeature::RoutingProbe, gate.token());
+        }
+        ProbeGate::Admitted => {}
+        ProbeGate::NotWorthIt | ProbeGate::ClassifierOff | ProbeGate::VerdictUnread => {
+            telemetry::attest_declined(telemetry::HarnessFeature::RoutingProbe, gate.token());
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        super::probe_gate::note(&cwd, gate);
     }
 }
 
@@ -382,18 +409,15 @@ pub fn assess_turn_probed(
     // escalates as a failure.
     let admission = probe_admission(metadata.complexity, &input, user_text);
     if admission == ProbeAdmission::Declined {
-        telemetry::attest_declined(telemetry::HarnessFeature::RoutingProbe, "not_worth_it");
+        note_gate(ProbeGate::NotWorthIt);
         return deterministic;
     }
     let Some(settings) = super::settings::read_smart_runtime_settings() else {
-        telemetry::attest_failed(
-            telemetry::HarnessFeature::RoutingProbe,
-            "settings_unavailable",
-        );
+        note_gate(ProbeGate::SettingsUnavailable);
         return deterministic;
     };
     if !settings.enabled || settings.auto_classifier == RouteAutoClassifierMode::Off {
-        telemetry::attest_declined(telemetry::HarnessFeature::RoutingProbe, "classifier_off");
+        note_gate(ProbeGate::ClassifierOff);
         return deterministic;
     }
     // The verdict is read by the deep-gate verify leg and the exec contract
@@ -405,9 +429,10 @@ pub fn assess_turn_probed(
     );
     let admission = admission_for_readers(admission, verdict_read);
     if admission == ProbeAdmission::Declined {
-        telemetry::attest_declined(telemetry::HarnessFeature::RoutingProbe, "verdict_unread");
+        note_gate(ProbeGate::VerdictUnread);
         return deterministic;
     }
+    note_gate(ProbeGate::Admitted);
     let inventory = runtime::connected_model_inventory(parent_model);
     let Some(probe) =
         super::probe_exec::route_probe_assessment(&inventory, parent_model, "", user_text, attempt)
