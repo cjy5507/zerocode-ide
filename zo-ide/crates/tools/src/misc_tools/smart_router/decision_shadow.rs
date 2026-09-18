@@ -427,6 +427,8 @@ struct Judgment {
 struct ShadowBatch {
     settings: runtime::ConfigLoader,
     cwd: PathBuf,
+    /// Resolved before the batch detaches — see `fire`.
+    ledger: PathBuf,
     config: Result<SystemOneConfig, SystemOneFailure>,
     attempt: Option<String>,
     deadline: Duration,
@@ -473,8 +475,14 @@ pub(super) fn fire(
         }
         return None;
     };
+    // Every path this batch will use is resolved NOW, while the process still
+    // stands where the caller does. The batch runs detached: by the time it
+    // writes, the environment that answers "where does this project's state
+    // live" may have been put back by whoever changed it — and a test's rows
+    // then land in a person's ledger. Thirty of them did (2026-09-19).
     let batch = ShadowBatch {
         settings: runtime::ConfigLoader::default_for(&cwd),
+        ledger: decision_shadow_path(&cwd),
         cwd,
         config: SystemOneConfig::from_env(),
         attempt: Some(attempt.trim()).filter(|attempt| !attempt.is_empty()).map(str::to_string),
@@ -494,7 +502,10 @@ pub(super) fn active_assessments(
     deadline: Duration,
 ) -> Option<Vec<Option<ProbeAssessment>>> {
     let cwd = std::env::current_dir().ok()?;
-    let mode = decision_shadow_mode_from(&runtime::ConfigLoader::default_for(&cwd))?;
+    let settings = runtime::ConfigLoader::default_for(&cwd);
+    let ledger = decision_shadow_path(&cwd);
+    let judged = super::settings::merged_settings_root_from(&settings);
+    let mode = decision_shadow_mode_from(&settings)?;
     // `auto` acts on the standing its own ledger recorded (§4): the judge
     // wrote a rise there when the window cleared every line, and reading it
     // back here is what makes `auto` a word that decides rather than a second
@@ -540,7 +551,7 @@ pub(super) fn active_assessments(
             judgment.row
         })
         .collect();
-    write_rows(&cwd, &rows);
+    write_rows(&ledger, judged.as_ref(), &rows);
     for (slot, (description, prompt)) in results.iter_mut().zip(tasks) {
         if description.trim().is_empty() && prompt.trim().is_empty() {
             continue;
@@ -555,10 +566,8 @@ pub(super) fn active_assessments(
 
 /// Read the setting, judge every shadow shot concurrently, and write the rows.
 async fn run_shadow_batch(batch: ShadowBatch) {
-    let ShadowBatch { settings, cwd, config, attempt, deadline, shots } = batch;
-    // The judgment that follows the write reads the person's settings, which
-    // are found from the working directory and not from the ledger's own path.
-    let here = cwd.clone();
+    let ShadowBatch { settings, cwd, ledger, config, attempt, deadline, shots } = batch;
+    let judged = super::settings::merged_settings_root_from(&settings);
     // The door opens only for a mode that asks: a switched-off shadow reads its
     // one setting and nothing else.
     let read = tokio::task::spawn_blocking(move || {
@@ -589,15 +598,14 @@ async fn run_shadow_batch(batch: ShadowBatch) {
     )
     .await;
     let rows: Vec<DecisionShadowRow> = judgments.into_iter().map(|judgment| judgment.row).collect();
-    let _ = tokio::task::spawn_blocking(move || write_rows(&here, &rows)).await;
+    let _ = tokio::task::spawn_blocking(move || write_rows(&ledger, judged.as_ref(), &rows)).await;
 }
 
-fn write_rows(cwd: &Path, rows: &[DecisionShadowRow]) {
-    let ledger = decision_shadow_path(cwd);
+fn write_rows(ledger: &Path, settings: Option<&serde_json::Value>, rows: &[DecisionShadowRow]) {
     for row in rows {
-        let _ = append_shadow_row(&ledger, row, SHADOW_LEDGER_MAX_BYTES);
+        let _ = append_shadow_row(ledger, row, SHADOW_LEDGER_MAX_BYTES);
     }
-    judge_and_record(cwd, now_ms());
+    judge_ledger(ledger, settings, now_ms());
 }
 
 /// Judge the seat on what it has just written, and write down a rise or a
@@ -608,14 +616,11 @@ fn write_rows(cwd: &Path, rows: &[DecisionShadowRow]) {
 /// window is the last twenty requests, the standing is the last transition
 /// this same file recorded, and nothing is written unless the answer changed —
 /// a ledger of "still recording" every twenty rows is a ledger nobody reads.
-pub fn judge_and_record(cwd: &Path, now_ms: i64) -> Option<Verdict> {
-    judge_ledger(&decision_shadow_path(cwd), super::settings::merged_settings_root(cwd).as_ref(), now_ms)
-}
-
-/// The same judgment asked of a ledger by its path, with the settings handed
-/// in — where the state directory and the settings chain are both answered by
-/// the environment, and a test that had to pin either would be racing every
-/// other test in this binary for it.
+///
+/// The ledger and the settings are handed in, both resolved before the batch
+/// that calls this detached: the environment that answers where either lives
+/// may have moved by now, and a test that had to pin it would be racing every
+/// other test in this binary.
 pub fn judge_ledger(
     ledger: &Path,
     settings: Option<&serde_json::Value>,

@@ -248,3 +248,25 @@ fn a_recording_seat_is_not_ended_by_fallbacks_it_never_acted_on() {
         "a seat that never rose was taken back from somewhere it had not been"
     );
 }
+
+#[test]
+fn nothing_the_detached_shadow_runs_resolves_a_path_of_its_own() {
+    // The batch runs after `fire` returns. Whoever set the environment that
+    // answers "where does this project's state live" — a test fixture, most
+    // often — may have put it back by then, and a path resolved at write time
+    // lands in a person's real ledger. Thirty rows of a unit test's `no_key`
+    // did (2026-09-19). Everything the batch uses is resolved in `fire`.
+    let shipped = include_str!("../decision_shadow.rs");
+    let from = shipped.find("async fn run_shadow_batch").expect("the batch");
+    let batch = &shipped[from..];
+    let batch = batch.split("\n/// ").next().unwrap_or(batch);
+    for reader in ["current_dir(", "decision_shadow_path(", "ConfigLoader::default_for("] {
+        assert!(
+            !batch.contains(reader),
+            "the detached batch resolves `{reader}` itself instead of taking what `fire` resolved"
+        );
+    }
+    let fires = shipped.find("pub(super) fn fire(").expect("fire");
+    let fire = &shipped[fires..from];
+    assert!(fire.contains("ledger: decision_shadow_path("), "fire no longer freezes the ledger");
+}

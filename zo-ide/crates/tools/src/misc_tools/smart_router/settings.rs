@@ -628,7 +628,11 @@ pub fn merged_settings_root(cwd: &Path) -> Option<Value> {
     merged_settings_root_from(&runtime::ConfigLoader::default_for(cwd))
 }
 
-fn merged_settings_root_from(loader: &runtime::ConfigLoader) -> Option<Value> {
+/// The same settings a use's mode is read from, off a loader already built —
+/// the form the detached shadow needs, because by the time it runs the
+/// environment that answers where settings live may have moved.
+#[must_use]
+pub(super) fn merged_settings_root_from(loader: &runtime::ConfigLoader) -> Option<Value> {
     let config = loader.load().ok()?;
     serde_json::from_str(&config.as_json().render()).ok()
 }
