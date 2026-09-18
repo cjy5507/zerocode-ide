@@ -43,6 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
+use crate::jev::choice;
 use crate::jev::{Cap, SUMMON_BRIEF_CHAR_CAP};
 
 /// The one question's name — the caller's key for reading the answer back.
@@ -208,16 +209,7 @@ pub fn ask(look: &SummonLook<'_>, summonable: &[Summonable]) -> Option<SummonAsk
         ),
         ("task".to_string(), Value::from(look.carries_a_task)),
     ]));
-    let questions = Value::Object(Map::from_iter([(
-        QUESTION.to_string(),
-        Value::Object(Map::from_iter([
-            // The endpoint reads a question's kind off this tag and refuses a
-            // body without it (`union_tag_not_found`, 422).
-            ("type".to_string(), Value::from("choice")),
-            ("instructions".to_string(), Value::from(INSTRUCTIONS)),
-            ("criteria".to_string(), Value::Object(criteria)),
-        ])),
-    )]));
+    let questions = choice::asked(QUESTION, INSTRUCTIONS, criteria);
     Some(SummonAsk {
         state,
         questions,

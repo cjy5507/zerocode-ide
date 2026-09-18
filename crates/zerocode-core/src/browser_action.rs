@@ -24,6 +24,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value, json};
 
 use crate::computer_use_protocol::marks::legend_line;
+use crate::jev::choice;
 /// Every way an answer fails to be one — the closed choice's own rules, which
 /// every Jev question with a closed answer space keeps (`crate::jev::choice`).
 pub use crate::jev::choice::ChoiceRefusal as ActionRefusal;
@@ -204,13 +205,7 @@ pub fn ask(look: &ActionLook<'_>) -> Option<ActionAsk> {
         STATE_KEYS[5]: look.tried,
         "candidates": candidates,
     });
-    let questions = json!({
-        QUESTION: {
-            "type": "choice",
-            "instructions": INSTRUCTIONS,
-            "criteria": Value::Object(criteria),
-        }
-    });
+    let questions = choice::asked(QUESTION, INSTRUCTIONS, criteria);
     Some(ActionAsk {
         state,
         questions,

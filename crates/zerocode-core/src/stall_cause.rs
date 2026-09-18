@@ -218,13 +218,7 @@ pub fn ask(look: &StallLook<'_>) -> Option<StallAsk> {
             STATE_KEYS[2]: screen,
             STATE_KEYS[3]: transcript,
         }),
-        questions: json!({
-            QUESTION: {
-                "type": "choice",
-                "instructions": INSTRUCTIONS,
-                "criteria": Value::Object(criteria),
-            }
-        }),
+        questions: choice::asked(QUESTION, INSTRUCTIONS, criteria),
     })
 }
 

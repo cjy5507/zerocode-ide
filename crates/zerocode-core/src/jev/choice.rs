@@ -1,7 +1,13 @@
-//! A closed choice's answer, read against the options that were offered —
-//! the one set of rules every Jev question with a closed answer space keeps:
-//! the browser's numbered controls (`crate::browser_action`) and a quiet
-//! worker's causes (`crate::stall_cause`).
+//! A closed choice, in both directions — the one set of rules every Jev
+//! question with a closed answer space keeps, whether it is being asked or
+//! being read: the browser's numbered controls (`crate::browser_action`), a
+//! quiet worker's causes (`crate::stall_cause`), a worker's room
+//! (`crate::worker_placement`) and a summons' agent (`crate::summon_choice`).
+//!
+//! [`asked`] builds the question. [`read`] reads the answer. Both spell the
+//! union tag from one constant here, and a source contract holds that no seat
+//! spells it again — the one that did spell it by hand, and forgot, sent
+//! nothing a reader ever saw.
 //!
 //! The endpoint's `choice` answer names one option, gives every option a
 //! probability, and adds a confidence. An answer that breaks any rule below is
@@ -10,13 +16,37 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 /// How far a set of probabilities may be from summing to one.
 pub const PROBABILITY_SUM_TOLERANCE: f64 = 1e-6;
 
-/// What the `type` of a closed choice's answer reads.
+/// The union tag a closed choice carries, in both directions: the endpoint
+/// reads a question's kind off it, and an answer names its own kind with the
+/// same word. One word, so the two can never disagree.
 const CHOICE: &str = "choice";
+
+/// The `questions` of a request asking one closed choice, named `question`.
+///
+/// Every closed choice this product asks is built here because the tag cannot
+/// be left off: a body whose question carries no `type` is refused whole by
+/// the endpoint (`union_tag_not_found`, 422), and the refusal names the body
+/// rather than the question, so a caller sees a request that failed and not a
+/// question that was malformed. Four seats used to spell this envelope by
+/// hand and one of them — the placement judgment — omitted the tag, which is
+/// why its ledger holds no rows at all: every request it ever sent was thrown
+/// away before it was read.
+#[must_use]
+pub fn asked(question: &str, instructions: &str, criteria: Map<String, Value>) -> Value {
+    Value::Object(Map::from_iter([(
+        question.to_string(),
+        Value::Object(Map::from_iter([
+            ("type".to_string(), Value::from(CHOICE)),
+            ("instructions".to_string(), Value::from(instructions)),
+            ("criteria".to_string(), Value::Object(criteria)),
+        ])),
+    )]))
+}
 
 /// A validated answer: the option it chose, every option's probability, and
 /// its confidence — which is the shape of the distribution, not a rate of
@@ -118,3 +148,6 @@ pub fn read(
         confidence,
     })
 }
+
+#[cfg(test)]
+mod tests;

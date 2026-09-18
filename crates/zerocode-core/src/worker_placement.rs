@@ -23,6 +23,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
+use crate::jev::choice;
 use crate::jev::{PLACEMENT_BRIEF_CHAR_CAP, PLACEMENT_OPTIONS};
 
 /// The one question's name — the caller's key for reading the answer back.
@@ -224,13 +225,7 @@ pub fn ask(look: &PlacementLook<'_>) -> PlacementAsk {
         ),
         ("panes".to_string(), Value::from(look.panes)),
     ]));
-    let questions = Value::Object(Map::from_iter([(
-        QUESTION.to_string(),
-        Value::Object(Map::from_iter([
-            ("instructions".to_string(), Value::from(INSTRUCTIONS)),
-            ("criteria".to_string(), Value::Object(criteria)),
-        ])),
-    )]));
+    let questions = choice::asked(QUESTION, INSTRUCTIONS, criteria);
     PlacementAsk {
         state,
         questions,
