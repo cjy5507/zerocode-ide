@@ -841,6 +841,13 @@ judge_sha() {
   for f in $root_fail; do known_flake root "$f" || log "unlisted red root:$f — judged solo"; done
   for f in $zo_fail; do known_flake zo "$f" || log "unlisted red zo:$f — judged solo"; done
   if [ "$root_rc" != 0 ] || [ "$zo_rc" != 0 ]; then
+    # The solo run is the judgment — flake or real — so it gets the calm
+    # machine a gate gets. It follows the zo gate immediately, and a 2px anchor
+    # or a poll count judged while that gate's compile is still flushing is not
+    # a judgment: on 2026-09-18 three window assertions failed in the gate at
+    # load 7.75, failed again in the solo right behind it, and were green every
+    # time they were asked on an idle machine.
+    heavy wait_for_calm flakes-solo
     for f in $root_fail; do for i in $(seq 1 "$SOLO_RUNS"); do
       rc=$(run_solo root "$f" "$i"); log "solo root $f $i/$SOLO_RUNS rc=$rc"
       [ "$rc" = 0 ] || { step_done flakes 1; red "solo root $f run $i rc=$rc"; return 1; }

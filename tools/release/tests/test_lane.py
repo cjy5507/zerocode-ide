@@ -719,6 +719,21 @@ class Cap(LaneCase):
 
 
 class Flakes(LaneCase):
+    def test_the_solo_judgment_waits_for_a_calm_machine_like_a_gate(self):
+        # The solo run is what decides flake or real, and it ran on a machine
+        # the lane itself refuses to start a gate on — right after the zo gate,
+        # with that gate's compile still flushing. On 2026-09-18 three window
+        # assertions (a 2px anchor, two poll counts) failed in the gate at load
+        # 7.75, failed again in the solo that followed it, and were green on an
+        # idle machine every time they were asked there.
+        self.lane.enqueue(SHA_A)
+        r = self.lane.run(GATE_ROOT_RC=101, GATE_ROOT_HARNESS="window", SOLO_RCS="0",
+                          LOAD1="?", LOAD15="?")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("flakes-solo: load unreadable — running without the calm check", r.stdout)
+        self.assertTrue(any("load-unknown flakes-solo" in l for l in self.lane.stub_lines()),
+                        "the solo judgment asks for a calm machine by its own name")
+
     def test_a_few_unlisted_reds_are_judged_solo_like_listed_ones(self):
         # Every run of the lane's first day died on a NEW timing wait; a real
         # regression fails solo too, so a small number of names is judged, not
