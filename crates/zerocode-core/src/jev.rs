@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 pub mod choice;
 pub mod count;
 pub mod door;
+pub mod hedge;
 
 /// The object zo's settings keep every Jev switch under.
 pub const SMART_SETTINGS_KEY: &str = "smart";
