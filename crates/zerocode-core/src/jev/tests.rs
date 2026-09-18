@@ -205,3 +205,125 @@ fn a_summon_question_sends_the_brief_and_nothing_else() {
     let sent: Vec<&str> = SUMMON.sends.iter().map(|sent| sent.at).collect();
     assert_eq!(sent, ["/state/brief"]);
 }
+
+/// The classifier's four words are zo's four words, and its absent-key answer
+/// is zo's.
+///
+/// The words live here now because the window puts them on a card; zo's own
+/// enum stays where it routes from. Both read one settings key, so this reads
+/// zo's file and holds the two together — a fifth word, a renamed one, or a
+/// changed default in zo is a red test here rather than a card offering a mode
+/// zo would read as something else.
+#[test]
+fn the_classifier_words_are_the_ones_zo_routes_on() {
+    let policy = include_str!("../../../../zo-ide/crates/runtime/src/model_router/policy.rs");
+    let zo = &policy[policy
+        .find("pub enum RouteAutoClassifierMode {")
+        .expect("zo's classifier enum")..];
+    let zo = &zo[..zo
+        .find("\nimpl RouteAutoClassifierMode")
+        .expect("the enum closes")];
+    for mode in ClassifierMode::ALL {
+        assert!(
+            policy.contains(&format!("value == \"{}\"", mode.key()))
+                || mode == ClassifierMode::Deterministic,
+            "zo does not read `{}`",
+            mode.key()
+        );
+    }
+    // Deterministic is zo's else-branch rather than a compared word, so it is
+    // named by the variant it falls through to.
+    assert!(
+        zo.matches("    Off,").count()
+            + zo.matches("    Deterministic,").count()
+            + zo.matches("    Assisted,").count()
+            + zo.matches("    Probed,").count()
+            == ClassifierMode::ALL.len(),
+        "zo offers a different number of classifier modes:\n{zo}"
+    );
+
+    // Absent means probed — zo's settings reader, not its enum default.
+    let settings =
+        include_str!("../../../../zo-ide/crates/tools/src/misc_tools/smart_router/settings.rs");
+    assert!(
+        settings.contains("None => RouteAutoClassifierMode::Probed"),
+        "zo no longer reads an absent `{CLASSIFIER_SETTING}` as probed"
+    );
+    assert_eq!(ClassifierMode::of(None), ClassifierMode::Probed);
+    assert_eq!(
+        ClassifierMode::of(Some(&json!(" PROBED "))),
+        ClassifierMode::Probed
+    );
+    assert_eq!(
+        ClassifierMode::of(Some(&json!("surprise"))),
+        ClassifierMode::Deterministic,
+        "a word nobody reads is the provider-free verdict, never the probing one"
+    );
+    assert_eq!(
+        ClassifierMode::of(Some(&json!(true))),
+        ClassifierMode::Deterministic
+    );
+    assert_eq!(
+        ClassifierMode::offered("probed"),
+        Some(ClassifierMode::Probed)
+    );
+    assert_eq!(
+        ClassifierMode::offered("PROBED"),
+        None,
+        "a writer is held to the word"
+    );
+    assert_eq!(
+        ClassifierMode::in_settings(&json!({ "smart": { "autoClassifier": "assisted" } })),
+        ClassifierMode::Assisted
+    );
+}
+
+/// Only the probing word asks the routing seat anything.
+///
+/// This is the fact the card has to say out loud, so it is held to zo's
+/// source: the decision shadow is fired from `probe_and_shadow` alone, and the
+/// probe is called only under `Probed`. If zo ever fires the shadow from
+/// somewhere else, the card's notice becomes a lie and this goes red first.
+#[test]
+fn the_routing_seat_is_only_asked_under_the_probing_word() {
+    let probe_exec =
+        include_str!("../../../../zo-ide/crates/tools/src/misc_tools/smart_router/probe_exec.rs");
+    let apply =
+        include_str!("../../../../zo-ide/crates/tools/src/misc_tools/smart_router/apply.rs");
+    let product = |source: &'static str| source.split("#[cfg(test)]").next().unwrap_or(source);
+    assert_eq!(
+        product(probe_exec)
+            .matches("decision_shadow::fire(")
+            .count(),
+        1,
+        "the shadow is fired from more than one place"
+    );
+    assert_eq!(
+        product(probe_exec)
+            .matches("decision_shadow::active_assessments(")
+            .count(),
+        1,
+        "the shadow's active road has more than one entrance"
+    );
+    for entry in ["route_probe_assessment(", "route_probe_assessments("] {
+        for at in product(apply).match_indices(entry).map(|(at, _)| at) {
+            let before = &product(apply)[..at];
+            let gate = before
+                .rfind("RouteAutoClassifierMode::Probed")
+                .expect("a probe call with no Probed gate above it");
+            assert!(
+                before.len() - gate < 800,
+                "a `{entry}` call is not under a Probed gate"
+            );
+        }
+    }
+    assert!(
+        ClassifierMode::ALL
+            .iter()
+            .filter(|mode| mode.probes())
+            .count()
+            == 1,
+        "more than one word claims to probe"
+    );
+    assert!(ROUTING.modes.iter().copied().any(JevMode::applies));
+}

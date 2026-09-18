@@ -408,6 +408,118 @@ pub fn jev_use(id: &str) -> Option<&'static JevUse> {
     JEV_USES.iter().find(|row| row.id == id)
 }
 
+/// ---- the gate in front of the routing seat --------------------------------
+///
+/// The key under [`SMART_SETTINGS_KEY`] that decides how a spawn's difficulty
+/// is classified — and, as a consequence nobody reading the routing row would
+/// guess, whether the routing seat is asked anything at all.
+///
+/// The chain, read in zo's own source: the decision shadow is fired only by
+/// `probe_and_shadow` (`smart_router/probe_exec.rs`), which is reached only
+/// through `route_probe_assessment(s)`, which `smart_router/apply.rs` calls
+/// only when this setting reads as [`ClassifierMode::Probed`]. So under the
+/// other three words `smart.decisionShadow` may say `on` and there is nothing
+/// the seat can ask — the switch a person CAN see promises a judgment the one
+/// they cannot see has already refused.
+///
+/// It lives here rather than beside zo's own `RouteAutoClassifierMode` for the
+/// reason this module exists: two programs now read it — zo to route, and the
+/// window to put it on the card beside the seat it gates — and a word spelled
+/// twice is a word that forks.
+pub const CLASSIFIER_SETTING: &str = "autoClassifier";
+
+/// How a spawn's difficulty is classified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassifierMode {
+    /// Not classified at all; smart routing does not run.
+    Off,
+    /// The keyword tables alone — no provider is asked anything.
+    Deterministic,
+    /// The keyword tables, plus the lane and shape markers a person wrote into
+    /// the task text. Still provider-free: it is a statement about whose words
+    /// to trust, not about asking anybody.
+    Assisted,
+    /// The keyword tables, plus one bounded Fast-tier probe (~200 output
+    /// tokens) whose verdict is fused on top of them — refining, never
+    /// replacing. The only word under which the routing seat is asked.
+    Probed,
+}
+
+impl ClassifierMode {
+    /// Every mode, in the order the setting offers them.
+    pub const ALL: [Self; 4] = [Self::Off, Self::Deterministic, Self::Assisted, Self::Probed];
+
+    /// The word a settings file holds.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Deterministic => "deterministic",
+            Self::Assisted => "assisted",
+            Self::Probed => "probed",
+        }
+    }
+
+    /// Whether the classifier runs at all.
+    #[must_use]
+    pub const fn runs(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    /// Whether markers a person wrote into the task text are read as evidence
+    /// (`smart_router/evidence.rs`, deliberately this mode only).
+    #[must_use]
+    pub const fn markers(self) -> bool {
+        matches!(self, Self::Assisted)
+    }
+
+    /// Whether a probe is called — which is also whether the routing seat is
+    /// ever asked.
+    #[must_use]
+    pub const fn probes(self) -> bool {
+        matches!(self, Self::Probed)
+    }
+
+    /// The mode `value` names: one of the four words, trimmed, in any case.
+    ///
+    /// An ABSENT value is [`Self::Probed`] and an unreadable one is
+    /// [`Self::Deterministic`] — zo's own split (`smart_router/settings.rs`:
+    /// "only its absence means probed", over
+    /// `RouteAutoClassifierMode::from_settings_value`, whose unknown-word
+    /// answer is deterministic). The two differ on purpose: nobody has chosen
+    /// yet, versus somebody wrote something this reader could not honour.
+    #[must_use]
+    pub fn of(value: Option<&Value>) -> Self {
+        let Some(value) = value else {
+            return Self::Probed;
+        };
+        value
+            .as_str()
+            .map(str::trim)
+            .and_then(|word| {
+                Self::ALL
+                    .into_iter()
+                    .find(|mode| mode.key().eq_ignore_ascii_case(word))
+            })
+            .unwrap_or(Self::Deterministic)
+    }
+
+    /// This setting's mode in a settings document (`smart.autoClassifier`).
+    #[must_use]
+    pub fn in_settings(root: &Value) -> Self {
+        Self::of(
+            root.get(SMART_SETTINGS_KEY)
+                .and_then(|smart| smart.get(CLASSIFIER_SETTING)),
+        )
+    }
+
+    /// The mode a writer was handed, spelled exactly as the setting offers it.
+    #[must_use]
+    pub fn offered(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|mode| mode.key() == word)
+    }
+}
+
 /// The first sixteen hex digits of the SHA-256 of a question's defining
 /// words — what a question's rubric version is pinned to, so a word changed
 /// without a version bump is a red test rather than a quiet drift.

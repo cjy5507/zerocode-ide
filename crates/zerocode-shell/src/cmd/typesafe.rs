@@ -40,6 +40,15 @@ pub(crate) fn set_jev_mode(r#use: String, mode: String) -> Result<TypeSafeSettin
     settings_now()
 }
 
+/// Move the routing classifier — the gate in front of the routing seat. Its
+/// own door, because it is zo's routing setting rather than a row of the use
+/// table, and its words are the classifier's own.
+#[tauri::command(async)]
+pub(crate) fn set_route_classifier(mode: String) -> Result<TypeSafeSettings, RouterRefusal> {
+    typesafe_settings::set_classifier(&settings_path()?, &mode)?;
+    settings_now()
+}
+
 /// Ask the installed zo whether System One answers with the key it would use:
 /// `zo decision-shadow check --json`, the shadow's own question about a task
 /// nobody wrote. A check nothing answered is still an answer (its failure

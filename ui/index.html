@@ -3971,6 +3971,42 @@
           </div>
         </div>
 
+        <!-- The gate in front of the routing seat.
+             `smart.autoClassifier` decides how a spawn's difficulty is read,
+             and — as nothing on this card used to say — whether the routing
+             seat below is asked anything at all: zo fires the decision shadow
+             only from inside the routing probe, and calls that probe only
+             under the probing word. The four words and the coupling are
+             `zerocode_core::jev`'s (`ClassifierMode`, `ClassifierRow.gates`);
+             this card spells neither. -->
+        <div class="settings-card" id="route-classifier-card">
+          <div class="settings-subhead">
+            <h3 class="settings-subhead-title" data-i18n="settings.classifier.title">라우팅 분류기</h3>
+            <p class="settings-subhead-desc" data-i18n="settings.classifier.about">
+              zo가 과업의 난이도를 무엇으로 정할지 고릅니다. 이 선택이 아래 「라우팅 판단」을 물을 수 있는지도 함께 정합니다.
+            </p>
+          </div>
+          <div class="settings-jev-row">
+            <label class="settings-field" data-field="md" for="route-classifier-select">
+              <span class="settings-field-copy">
+                <span class="settings-label" data-i18n="settings.classifier.label">난이도 분류</span>
+                <span class="settings-row-desc" data-i18n="settings.classifier.summary">
+                  낱말 표가 먼저 정하고, 고른 방식이 그 위에 무엇을 얹을지 정합니다.
+                </span>
+              </span>
+              <!-- The options are the classifier's own words, built from what
+                   `typesafe_settings` answers (`paintClassifierModes`). -->
+              <select class="settings-input" id="route-classifier-select"></select>
+            </label>
+            <details class="settings-fold">
+              <summary data-i18n="settings.status.evidence">자세히</summary>
+              <p data-i18n="settings.classifier.detail">
+                낱말 표는 어느 방식에서나 먼저 돌고, 어느 방식에서도 대체되지 않습니다. 「낱말만」은 거기서 끝냅니다. 「표식까지」는 과업 글에 사람이 적어 둔 레인·형태 표식을 함께 읽습니다 — 어디에도 묻지 않습니다. 「모델에게도」는 그 위에 빠른 등급 모델 프로브 하나(출력 200토큰 안팎)를 얹어 융합하며, 실패하거나 늦으면 낱말 표의 판정이 그대로 섭니다. zo가 라우팅 판단을 TypeSafe에 묻는 것도 이 프로브 안에서만 일어납니다. 「끔」은 자동 라우팅 자체를 쓰지 않습니다.
+              </p>
+            </details>
+          </div>
+        </div>
+
         <!-- Where Jev sits, one row per seat: the seat's name and a one-line
              summary on the left, the mode on the right, and the paragraph
              that spells out what is sent folded under 자세히. The rows a
@@ -4002,6 +4038,14 @@
                      built from what `typesafe_settings` answers (`paintJevModes`). -->
                 <select class="settings-input" id="typesafe-routing-select" data-jev-seat="routing"></select>
               </label>
+              <!-- Shown by `paintTypeSafe` when the classifier this seat sits
+                   behind calls no probe: the mode above it is then a mode
+                   nothing can reach. Which row carries it is the backend's
+                   answer (`classifier.gates`), not this file's. -->
+              <p class="settings-notice settings-notice--row" data-jev-unreachable
+                 data-i18n="settings.typesafe.routingUnreachable" hidden>
+                지금 분류기가 프로브를 부르지 않아 이 자리는 아무것도 묻지 않습니다. 위의 「라우팅 분류기」를 모델에게도 묻는 방식으로 바꾸세요.
+              </p>
               <details class="settings-fold">
                 <summary data-i18n="settings.status.evidence">자세히</summary>
                 <p data-i18n="settings.typesafe.shadowHint">

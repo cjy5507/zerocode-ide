@@ -60,6 +60,24 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "summon", setting: "summonChoice", modes: "off shadow auto" }),
 ]);
 const jevSeat = (id) => JEV_SEATS.find((seat) => seat.id === id) ?? null;
+/* The routing classifier's four words (`zerocode_core::jev::ClassifierMode`)
+   and what each one does. Only the probing word calls a probe, and the routing
+   seat is asked nothing under the other three — `typesafe_settings.rs` holds
+   this fixture to the table and to zo's own source. */
+const CLASSIFIER_SETTING = "autoClassifier";
+const CLASSIFIER_MODES = Object.freeze([
+  Object.freeze({ mode: "off", runs: false, markers: false, probes: false }),
+  Object.freeze({ mode: "deterministic", runs: true, markers: false, probes: false }),
+  Object.freeze({ mode: "assisted", runs: true, markers: true, probes: false }),
+  Object.freeze({ mode: "probed", runs: true, markers: false, probes: true }),
+]);
+/* An absent key is the probing word; anything nobody reads is the
+   provider-free one (`ClassifierMode::of`). */
+const classifierMode = (given) => {
+  if (given === undefined) return CLASSIFIER_MODES[3];
+  const word = String(given ?? "").trim().toLowerCase();
+  return CLASSIFIER_MODES.find((choice) => choice.mode === word) ?? CLASSIFIER_MODES[1];
+};
 const jevSeatModes = (seat) =>
   seat.modes.split(" ").map((word) =>
     TYPESAFE_DECISION_MODES.find((choice) => choice.mode === word));
@@ -2529,6 +2547,19 @@ class StatefulBackend {
         this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), [seat.setting]: args.mode };
         return this.typesafeSettings();
       }
+      case "set_route_classifier": {
+        if (this.typesafeSetFailure) {
+          throw { kind: "failed", message: "fixture refused the classifier" };
+        }
+        if (!CLASSIFIER_MODES.some((choice) => choice.mode === args.mode)) {
+          throw { kind: "failed", message: `not a classifier mode: ${args.mode}` };
+        }
+        this.zoSettings.smart = {
+          ...(this.zoSettings.smart ?? {}),
+          [CLASSIFIER_SETTING]: args.mode,
+        };
+        return this.typesafeSettings();
+      }
       case "check_typesafe_key": return clone(this.typesafeCheck);
       default:
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
@@ -2553,6 +2584,13 @@ class StatefulBackend {
         mode: mode(seat, this.zoSettings.smart?.[seat.setting]),
         modes: clone(jevSeatModes(seat)),
       })),
+      classifier: {
+        setting: CLASSIFIER_SETTING,
+        mode: classifierMode(this.zoSettings.smart?.[CLASSIFIER_SETTING]).mode,
+        probes: classifierMode(this.zoSettings.smart?.[CLASSIFIER_SETTING]).probes,
+        gates: JEV_SEATS[0].id,
+        modes: clone(CLASSIFIER_MODES),
+      },
     };
   }
 }
@@ -4190,6 +4228,111 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   }
   await pageA.evaluate(() => refreshApiRouters());
   assert(!(await pageA.locator("#typesafe-key-input").isDisabled()), "a machine with a keychain was left without the key field");
+});
+
+await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한다 — 분류기가 라우팅 자리 앞에 선다", async () => {
+  await openSettings(pageA, "api-routers");
+  backend.keychain.set(TYPESAFE_SERVICE, "apikey_fixture");
+  delete backend.zoSettings.smart;
+  await pageA.evaluate(() => refreshApiRouters());
+  await renderSettled(pageA);
+  const said = (key, fallback) => pageA.evaluate(([one, words]) => t(one, words), [key, fallback]);
+  const unreachable = pageA.locator("[data-jev-unreachable]");
+
+  // The gate is on the card, and it offers the four words the classifier has —
+  // named by what each does, never by the word it writes.
+  assertEqual(
+    await pageA.locator("#route-classifier-select option").evaluateAll((options) =>
+      options.map((option) => option.value)),
+    CLASSIFIER_MODES.map((choice) => choice.mode),
+    "the card does not offer the classifier's own words",
+  );
+  assertEqual(
+    await pageA.locator("#route-classifier-select option").evaluateAll((options) =>
+      options.map((option) => option.textContent)),
+    [
+      await said("settings.classifier.modeOff", "끔 — 자동 라우팅을 쓰지 않음"),
+      await said("settings.classifier.modeWords", "낱말만"),
+      await said("settings.classifier.modeMarkers", "낱말 + 과업에 적힌 표식"),
+      await said("settings.classifier.modeProbed", "낱말 + 모델에게도 물음"),
+    ],
+    "a classifier option is not named by what it does",
+  );
+  // Nothing written means the probing word, which is zo's own reading of an
+  // absent key — so an untouched machine reaches the seat.
+  assertEqual(
+    await pageA.locator("#route-classifier-select").inputValue(),
+    CLASSIFIER_MODES.at(-1).mode,
+    "an untouched settings file did not read as the probing word",
+  );
+
+  // A seat that asks while nothing calls a probe says so, on the row whose
+  // mode it is about — and which row that is, is the backend's answer.
+  const quiet = CLASSIFIER_MODES.find((choice) => choice.runs && !choice.probes).mode;
+  const chosenAt = backend.calls.length;
+  await pageA.selectOption("#route-classifier-select", quiet);
+  assertEqual((await backend.waitForCall("A", "set_route_classifier", chosenAt)).args.mode, quiet);
+  await pageA.waitForFunction(
+    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
+    await said("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 어디에도 묻지 않습니다."),
+    { timeout: UI_TIMEOUT },
+  );
+  assertEqual(backend.zoSettings.smart.autoClassifier, quiet, "the choice was not written to zo's settings");
+  assert(await unreachable.count() === 1, "exactly one row carries this warning");
+  assert(
+    await unreachable.isHidden(),
+    "a seat that asks nothing yet was warned about a mode it is not in",
+  );
+  assertEqual(
+    await unreachable.evaluate((node) =>
+      node.closest("[data-jev-row]").querySelector("[data-jev-seat]").dataset.jevSeat),
+    JEV_SEATS[0].id,
+    "the warning does not stand on the seat the classifier gates",
+  );
+
+  // Turn the gated seat on: now the card offers a judgment nothing can make,
+  // and says so.
+  const onAt = backend.calls.length;
+  await pageA.selectOption(`#typesafe-${JEV_SEATS[0].id}-select`, "on");
+  await backend.waitForCall("A", "set_jev_mode", onAt);
+  await pageA.waitForFunction(() => !document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
+  assertEqual(
+    (await unreachable.textContent()).trim(),
+    await said("settings.typesafe.routingUnreachable", "지금 분류기가 프로브를 부르지 않아 이 자리는 아무것도 묻지 않습니다. 위의 「라우팅 분류기」를 모델에게도 묻는 방식으로 바꾸세요."),
+    "the row does not say why its mode cannot be reached",
+  );
+
+  // Put the probing word back and the warning goes with it.
+  const probing = CLASSIFIER_MODES.at(-1).mode;
+  const backAt = backend.calls.length;
+  await pageA.selectOption("#route-classifier-select", probing);
+  await backend.waitForCall("A", "set_route_classifier", backAt);
+  await pageA.waitForFunction(() => document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
+  assertEqual(
+    await statusSaid(pageA, "typesafe-status"),
+    await said("settings.classifier.nowProbes", "이제 모델에게도 묻습니다 — 라우팅 판단도 여기서 물을 수 있습니다."),
+  );
+
+  // A refused change keeps the card as it stood.
+  backend.typesafeSetFailure = true;
+  try {
+    const refusedAt = backend.calls.length;
+    await pageA.selectOption("#route-classifier-select", quiet);
+    await backend.waitForCall("A", "set_route_classifier", refusedAt);
+    await pageA.waitForFunction(
+      (word) => document.getElementById("route-classifier-select")?.value === word,
+      probing,
+      { timeout: UI_TIMEOUT },
+    );
+    assertEqual(backend.zoSettings.smart.autoClassifier, probing, "a refused change mutated the backend");
+  } finally {
+    delete backend.typesafeSetFailure;
+  }
+
+  backend.keychain.delete(TYPESAFE_SERVICE);
+  delete backend.zoSettings.smart;
+  await pageA.evaluate(() => refreshApiRouters());
+  return `${CLASSIFIER_MODES.length} words · gate on ${JEV_SEATS[0].id}`;
 });
 
 await test("SSH targets are added by parsing what was typed, edited back, and removed on confirmation", async () => {

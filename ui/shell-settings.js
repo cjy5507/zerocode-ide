@@ -5138,6 +5138,13 @@ function initTypeSafeEvents() {
         jevSwitchSaid(state, seat));
     });
   }
+  el("route-classifier-select")?.addEventListener("change", (event) => {
+    const mode = event.target.value;
+    void runTypeSafe(() => invoke("set_route_classifier", { mode }), (state) =>
+      state.classifier?.probes
+        ? t("settings.classifier.nowProbes", "이제 모델에게도 묻습니다 — 라우팅 판단도 여기서 물을 수 있습니다.")
+        : t("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 어디에도 묻지 않습니다."));
+  });
 }
 
 /* One seat's row of the backend's answer, by the use's own name. The words a
@@ -5187,6 +5194,52 @@ function paintJevModes(select, choices) {
       option.textContent = t("settings.typesafe.modeRecord", "기록만");
     }
     select.appendChild(option);
+  }
+}
+
+/* The routing classifier's four choices, each named by what it DOES — the same
+ * rule the seat switches keep, and for the same reason: the words a classifier
+ * setting may hold live in `zerocode_core::jev::ClassifierMode` and are
+ * spelled nowhere else. What this page reads off a choice is whether the
+ * classifier runs at all, whether it reads markers a person wrote, and whether
+ * it calls a probe — and the last of those is also whether the routing seat
+ * below is ever asked anything. */
+function paintClassifierModes(select, choices) {
+  select.replaceChildren();
+  for (const choice of choices) {
+    const option = document.createElement("option");
+    option.value = choice.mode;
+    if (!choice.runs) {
+      option.textContent = t("settings.classifier.modeOff", "끔 — 자동 라우팅을 쓰지 않음");
+    } else if (choice.probes) {
+      option.textContent = t("settings.classifier.modeProbed", "낱말 + 모델에게도 물음");
+    } else if (choice.markers) {
+      option.textContent = t("settings.classifier.modeMarkers", "낱말 + 과업에 적힌 표식");
+    } else {
+      option.textContent = t("settings.classifier.modeWords", "낱말만");
+    }
+    select.appendChild(option);
+  }
+}
+
+/* The seat the classifier gates, as the backend names it, and whether the mode
+ * that seat stands at can reach anything at all. A row that asks while nothing
+ * calls a probe is a switch promising a judgment that is never made — which is
+ * the same sentence the use table already keeps for a seat with no apply
+ * stage, said one level up. */
+function paintClassifierGate(state) {
+  const classifier = state.classifier;
+  const select = el("route-classifier-select");
+  if (select && classifier) {
+    paintClassifierModes(select, classifier.modes ?? []);
+    select.value = classifier.mode;
+    select.disabled = typesafeBusy;
+  }
+  for (const notice of document.querySelectorAll("[data-jev-unreachable]")) {
+    const seat = notice.closest("[data-jev-row]")?.querySelector("[data-jev-seat]");
+    const gated = Boolean(classifier) && seat?.dataset.jevSeat === classifier.gates;
+    const asks = jevSeatChoice(state, seat?.dataset.jevSeat ?? "")?.asks ?? false;
+    notice.hidden = !(gated && asks && !classifier.probes);
   }
 }
 
@@ -5242,6 +5295,7 @@ function paintTypeSafe(state) {
   }
   const count = el("jev-uses-count");
   if (count) count.textContent = seats > 0 ? String(seats) : "";
+  paintClassifierGate(state);
   paintTypeSafeSave();
 }
 

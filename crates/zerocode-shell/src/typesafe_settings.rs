@@ -15,7 +15,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use zerocode_core::jev::{JEV_USES, JevMode, JevUse, SMART_SETTINGS_KEY, jev_use};
+use zerocode_core::jev::{
+    CLASSIFIER_SETTING, ClassifierMode, JEV_USES, JevMode, JevUse, ROUTING, SMART_SETTINGS_KEY,
+    jev_use,
+};
 use zerocode_harness::{SERVICE_KEYCHAIN_SERVICE_PREFIX, TYPESAFE_API_KEY_ENV};
 
 use crate::api_routers::{RouterKeys, RouterRefusal};
@@ -67,6 +70,50 @@ pub struct SwitchRow {
     pub modes: Vec<ModeChoice>,
 }
 
+/// One word the routing classifier may hold, as the pane lists it: the word it
+/// writes and what that word DOES. The pane words a choice by what it does, so
+/// no classifier word is spelled anywhere but the core table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifierChoice {
+    pub mode: &'static str,
+    pub runs: bool,
+    pub markers: bool,
+    pub probes: bool,
+}
+
+impl ClassifierChoice {
+    fn of(mode: ClassifierMode) -> Self {
+        Self {
+            mode: mode.key(),
+            runs: mode.runs(),
+            markers: mode.markers(),
+            probes: mode.probes(),
+        }
+    }
+}
+
+/// The gate in front of the routing seat, as the pane paints it: the settings
+/// key it writes, where it stands, whether where it stands reaches a probe at
+/// all, and the words it offers.
+///
+/// It is not a Jev use and has no row in that table — it is zo's own routing
+/// setting. It is answered here because it is the one fact the routing row
+/// cannot tell the truth without: `smart.decisionShadow` may say the seat
+/// applies while this says nothing is ever asked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClassifierRow {
+    pub setting: &'static str,
+    pub mode: &'static str,
+    pub probes: bool,
+    /// The seat this gate stands in front of, by that use's own name — so the
+    /// card reads which row to warn on rather than carrying a second copy of
+    /// the coupling.
+    pub gates: &'static str,
+    pub modes: Vec<ClassifierChoice>,
+}
+
 /// What the pane paints: whether a key could be kept here, whether one is
 /// saved — never the key itself — and every switch as its reader reads it,
 /// with the modes it offers in the table's order.
@@ -80,6 +127,9 @@ pub struct TypeSafeSettings {
     /// the question each asks is the same: does anything go to the vendor,
     /// and may it change what the product does.
     pub switches: Vec<SwitchRow>,
+    /// The routing classifier, which decides whether the routing seat is asked
+    /// anything at all.
+    pub classifier: ClassifierRow,
 }
 
 /// The pane's state, read from the keychain and zo's settings file.
@@ -95,6 +145,7 @@ pub fn read_settings(
         .read(&typesafe_keychain_service())?
         .is_some_and(|key| !key.trim().is_empty());
     let root = crate::api_routers::read_zo_settings_root(path)?;
+    let classifier = classifier_in(&root);
     Ok(TypeSafeSettings {
         keys_kept_here,
         key_saved,
@@ -107,7 +158,23 @@ pub fn read_settings(
                 modes: choices(row),
             })
             .collect(),
+        classifier: ClassifierRow {
+            setting: CLASSIFIER_SETTING,
+            mode: classifier.key(),
+            probes: classifier.probes(),
+            gates: ROUTING.id,
+            modes: ClassifierMode::ALL.map(ClassifierChoice::of).to_vec(),
+        },
     })
+}
+
+/// The classifier's word in a settings document, read by the core table's own
+/// parser — including its absence, which is not the same as its default.
+fn classifier_in(root: &Map<String, Value>) -> ClassifierMode {
+    ClassifierMode::of(
+        root.get(SMART_SETTINGS_KEY)
+            .and_then(|smart| smart.get(CLASSIFIER_SETTING)),
+    )
 }
 
 /// A use's switch under `smart`, read by the use's own row — the parser zo's
@@ -178,6 +245,39 @@ fn set_mode(path: &Path, row: &JevUse, mode: &str) -> Result<(), String> {
             ));
         };
         smart.insert(row.setting.to_string(), Value::String(word.to_string()));
+        Ok(())
+    })
+}
+
+/// Set the routing classifier to one of its four words, leaving every other
+/// key as it stood.
+///
+/// The seat switches have one door each ([`set_use_mode`]); this is its own,
+/// because it is not a seat and writes a different key with a different
+/// vocabulary. A word the table does not offer is refused rather than written:
+/// zo reads an unknown word as the provider-free verdict, so a typo here would
+/// quietly stop the routing seat being asked anything.
+///
+/// # Errors
+/// A word the classifier does not offer, a `smart` value that is not an object,
+/// or an unreadable or unwritable file.
+pub fn set_classifier(path: &Path, mode: &str) -> Result<(), String> {
+    let word = ClassifierMode::offered(mode)
+        .ok_or_else(|| format!("알 수 없는 분류기 모드입니다: {mode}"))?
+        .key();
+    crate::api_routers::update_zo_settings_root(path, |root| {
+        let smart = root
+            .entry(SMART_SETTINGS_KEY)
+            .or_insert_with(|| Value::Object(Map::new()));
+        let Value::Object(smart) = smart else {
+            return Err(format!(
+                "settings.json의 {SMART_SETTINGS_KEY}가 JSON 객체가 아니라 바꾸지 않았습니다"
+            ));
+        };
+        smart.insert(
+            CLASSIFIER_SETTING.to_string(),
+            Value::String(word.to_string()),
+        );
         Ok(())
     })
 }
@@ -457,6 +557,7 @@ mod tests {
             "save_typesafe_key",
             "remove_typesafe_key",
             "set_jev_mode",
+            "set_route_classifier",
             "check_typesafe_key",
         ] {
             assert!(
@@ -636,6 +737,183 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The gate in front of the routing seat is on the card, offers the four
+    /// words the core table has, and spells none of them.
+    ///
+    /// Everything this pane says about the classifier is a claim about zo's
+    /// routing, so the claim is held to zo's own source in
+    /// `zerocode_core::jev` (`the_routing_seat_is_only_asked_under_the_probing_word`);
+    /// what is held HERE is that the card reads that table rather than
+    /// carrying a second copy of it.
+    #[test]
+    fn the_classifier_stands_on_the_card_and_spells_no_word_of_its_own() {
+        let page = include_str!("../../../ui/index.html");
+        let select = &page[page
+            .find("id=\"route-classifier-select\"")
+            .expect("the card has no classifier switch")..];
+        let select = &select[..select.find("</select>").expect("the switch closes")];
+        assert!(
+            !select.contains("<option"),
+            "the classifier switch lists a word of its own: {select}"
+        );
+        // The row the gate stands in front of is named by the backend, so the
+        // page carries a warning with no seat written into it.
+        assert!(
+            page.contains("data-jev-unreachable"),
+            "no row can say its mode cannot be reached"
+        );
+        assert!(
+            !page.contains("data-jev-unreachable-routing"),
+            "the warning names its seat instead of being told which one"
+        );
+
+        // Each reader is cut to where the classifier is, because two of these
+        // four words are ordinary English elsewhere in the same file and one
+        // of them (`off`) is also a Jev mode word, which a different contract
+        // above already holds.
+        fn between<'a>(source: &'a str, from: &str, to: &str) -> &'a str {
+            let start = source.find(from).unwrap_or_else(|| panic!("no `{from}`"));
+            let rest = &source[start..];
+            let end = rest[from.len()..]
+                .find(to)
+                .unwrap_or_else(|| panic!("nothing ends `{from}` at `{to}`"));
+            &rest[..from.len() + end]
+        }
+        let script = include_str!("../../../ui/shell-settings.js");
+        let readers = [
+            (
+                "window settings",
+                include_str!("typesafe_settings.rs")
+                    .split("#[cfg(test)]")
+                    .next()
+                    .unwrap_or_default(),
+            ),
+            ("window commands", include_str!("cmd/typesafe.rs")),
+            (
+                "pane script",
+                between(script, "function paintClassifierModes(", "\nasync function"),
+            ),
+            (
+                "pane script gate",
+                between(
+                    script,
+                    "el(\"route-classifier-select\")?.addEventListener",
+                    "\n}",
+                ),
+            ),
+            (
+                "pane card",
+                between(page, "id=\"route-classifier-card\"", "\n        <!--"),
+            ),
+        ];
+        for (reader, source) in readers {
+            for mode in ClassifierMode::ALL {
+                assert!(
+                    !source.contains(&format!("\"{}\"", mode.key())),
+                    "{reader} spells the classifier word `{}` — read it from \
+                     zerocode_core::jev::ClassifierMode",
+                    mode.key()
+                );
+            }
+        }
+        assert_eq!(CLASSIFIER_SETTING, "autoClassifier");
+    }
+
+    /// The harness's fake backend answers the classifier the way the window
+    /// does: the four words, what each one does, and which seat it gates.
+    #[test]
+    fn the_settings_harness_mirrors_the_classifier() {
+        let harness = include_str!("../../../ui/tests/settings.mjs");
+        let list = &harness[harness.find("const CLASSIFIER_MODES").expect("the fixture")..];
+        let list = &list[..list.find("]);").expect("the fixture closes")];
+        let said: Vec<&str> = list
+            .lines()
+            .map(str::trim)
+            .filter(|line| line.contains("mode:"))
+            .collect();
+        let every: Vec<String> = ClassifierMode::ALL
+            .iter()
+            .map(|mode| {
+                format!(
+                    "Object.freeze({{ mode: \"{}\", runs: {}, markers: {}, probes: {} }}),",
+                    mode.key(),
+                    mode.runs(),
+                    mode.markers(),
+                    mode.probes()
+                )
+            })
+            .collect();
+        assert_eq!(said, every);
+        assert!(
+            harness.contains(&format!(
+                "const CLASSIFIER_SETTING = \"{CLASSIFIER_SETTING}\""
+            )),
+            "the fixture writes a different settings key"
+        );
+    }
+
+    /// The card's gate answers the file it reads, the seat it stands in front
+    /// of, and refuses a word the setting does not offer.
+    #[test]
+    fn the_gate_reads_its_file_and_refuses_a_word_zo_would_not_honour() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let keys = HeldKeys::default();
+        let read = || {
+            read_settings(&path, &keys, true)
+                .expect("settings")
+                .classifier
+        };
+
+        // Nothing written: zo reads that as the probing word, so the card says
+        // the seat below is reachable.
+        let untouched = read();
+        assert_eq!(untouched.setting, CLASSIFIER_SETTING);
+        assert_eq!(untouched.mode, ClassifierMode::Probed.key());
+        assert!(untouched.probes);
+        assert_eq!(
+            untouched.gates, ROUTING.id,
+            "the gate names the seat it gates"
+        );
+        assert_eq!(untouched.modes.len(), ClassifierMode::ALL.len());
+
+        // A word this setting does not offer is refused rather than written:
+        // zo would read it as the provider-free verdict and the seat would go
+        // quiet without anybody being told.
+        assert!(set_classifier(&path, "surprise").is_err());
+        assert!(set_classifier(&path, "PROBED").is_err());
+        assert_eq!(read().mode, ClassifierMode::Probed.key());
+
+        // A written word stands, and nothing else of the file moves.
+        std::fs::write(
+            &path,
+            br#"{"providers":[{"name":"keep"}],"smart":{"decisionShadow":"on"}}"#,
+        )
+        .expect("seed");
+        set_classifier(&path, ClassifierMode::Deterministic.key()).expect("set");
+        let quiet = read();
+        assert_eq!(quiet.mode, ClassifierMode::Deterministic.key());
+        assert!(!quiet.probes, "the provider-free word reaches no probe");
+        let root = crate::api_routers::read_zo_settings_root(&path).expect("root");
+        assert_eq!(
+            root.get("providers")
+                .and_then(|rows| rows.as_array())
+                .map(Vec::len),
+            Some(1),
+            "moving the gate moved the router rows"
+        );
+        assert_eq!(
+            read_settings(&path, &keys, true)
+                .expect("settings")
+                .switches
+                .iter()
+                .find(|row| row.id == ROUTING.id)
+                .map(|row| row.mode),
+            Some(JevMode::On.key()),
+            "moving the gate moved the seat it gates"
+        );
     }
 
     /// The failures the pane puts into words are tokens zo's check can print.
