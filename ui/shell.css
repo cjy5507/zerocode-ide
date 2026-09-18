@@ -3112,6 +3112,7 @@ svg.wt-agent-dot {
 
 .settings-check.wt-more > input {
   grid-column: 1;
+  order: 0;
 }
 
 .settings-check.wt-more > :not(input) {
@@ -18282,6 +18283,7 @@ button.worker-composer-pill:hover {
   font-size: var(--text-2xs);
   line-height: var(--leading-body);
   cursor: pointer;
+  transition: color 140ms ease;
 }
 
 .settings-fold > summary:hover {
