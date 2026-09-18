@@ -14603,3 +14603,59 @@ fn an_untyped_refusal_is_carried_whole_and_never_parsed_for_a_code() {
         ("{}\n", "", 0)
     );
 }
+
+/// The grace seats before it kills.
+///
+/// `expire_sleepers` announced every sleeper dead once the grace ran out, and
+/// nothing on that road had ever called `reseat_sleeping` — only a coordinator
+/// tab mounting in the renderer did. So a window could boot with a live
+/// coordinator team and sleepers on its run and end all of them without once
+/// asking that team to seat them. It happened on 2026-09-18: three workers,
+/// all of them finished, all announced dead, and a person had to notice.
+///
+/// Read from the shipped source rather than driven, because the sweep needs a
+/// live window, a live team table and a booted clock to run at all — three
+/// things a unit test would have to fake so thoroughly that it would be
+/// testing the fake. What is worth holding is the ORDER, and the order is
+/// visible in one function: the attempt to seat comes before the loop that
+/// ends them.
+#[test]
+fn the_grace_tries_to_seat_a_sleeper_before_it_ends_it() {
+    let shipped = include_str!("../orchestration.rs");
+    let start = shipped.find("fn expire_sleepers").expect("the grace sweep");
+    let body = shipped[start..]
+        .split_once("\nfn ")
+        .map_or(&shipped[start..], |(body, _)| body);
+
+    let seats = body
+        .find("seat_what_the_grace_would_kill(")
+        .expect("the grace must try to seat the sleepers it is about to end");
+    let ends = body
+        .find("sleeper_expired(")
+        .expect("the grace must still end a sleeper nothing could seat");
+    assert!(
+        seats < ends,
+        "the seating attempt has to come before the ending, or it seats nothing"
+    );
+
+    /* And the seating is the same road a returned coordinator tab takes —
+     * not a second copy of it, which would drift from the one that fills the
+     * vacated chair and adopts under the right generation. */
+    let helper = shipped
+        .find("fn seat_what_the_grace_would_kill")
+        .expect("the helper");
+    let helper_body = shipped[helper..]
+        .split_once("\nfn ")
+        .map_or(&shipped[helper..], |(body, _)| body);
+    assert!(
+        helper_body.contains("reseat_sleeping("),
+        "the grace must reuse reseat_sleeping, not a second seating road"
+    );
+    /* The overrides cell is handed back as it stands. `reseat_sleeping` writes
+     * whatever it is given into that cell, so a sweep passing an empty list
+     * would erase the launcher's stored overrides every beat. */
+    assert!(
+        helper_body.contains(".overrides") && helper_body.contains(".clone()"),
+        "the grace must hand the stored overrides back rather than clearing them"
+    );
+}

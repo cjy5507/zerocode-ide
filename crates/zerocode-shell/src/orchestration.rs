@@ -3178,6 +3178,43 @@ fn booted_at_ms() -> Option<i64> {
     BOOTED_AT_MS.get().copied()
 }
 
+/// Ask every live coordinator team to seat its own run's sleepers, once,
+/// before the grace kills them.
+///
+/// The overrides cell is handed back exactly as it stands: [`reseat_sleeping`]
+/// takes ownership of what a caller passes and writes it into the cell, so a
+/// sweep that passed an empty list would erase the launcher's stored
+/// overrides on its way past. Reading them out and handing them straight back
+/// makes this call a no-op for that cell.
+///
+/// `actor` is `None`: a beat has no provider conversation to name, so the run
+/// is resolved by the coordinator's seat, which is the road `reseat_sleeping`
+/// already falls back to.
+fn seat_what_the_grace_would_kill(host: &dyn Host, held: &RuntimeSeat) {
+    let leaders: Vec<u32> = {
+        let teams = crate::agent_teams::teams();
+        teams.values().map(|team| team.leader_term).collect()
+    };
+    for leader in leaders {
+        let overrides = held
+            .overrides
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone();
+        let seated = reseat_sleeping(host, overrides, leader, None);
+        if seated > 0
+            && let Some(root) = BLACKBOX.get()
+        {
+            crate::note_window_event(
+                root,
+                &format!(
+                    "orchestration: the grace seated {seated} sleeping worker(s) under                      leader term {leader} instead of ending them"
+                ),
+            );
+        }
+    }
+}
+
 /// The grace, on the beat (t-3058): a sleeper that nothing seated again —
 /// neither the ledger's own reseat nor a resumed pane as its witness —
 /// within [`RESEAT_GRACE_MS`] of this window's boot dies, announced to its
@@ -3188,7 +3225,19 @@ fn booted_at_ms() -> Option<i64> {
 /// window that stayed closed overnight has had none of it. A sleeper the
 /// beat finds under a window younger than the grace is left exactly as it
 /// is.
-fn expire_sleepers(now_ms: i64) {
+///
+/// The grace ends with one more attempt, not with the killing.
+/// [`reseat_sleeping`] is what a returned coordinator tab calls, and until
+/// now nothing else called it: a window could boot with a live coordinator
+/// team and three sleepers on its run, and the beat would announce all three
+/// dead without once asking that team to seat them. It happened
+/// (2026-09-18): the work was finished and committed in every one of them,
+/// and a person had to notice and say so. So the sweep now walks the live
+/// teams first and only expires what is still asleep afterwards. A reseat
+/// that seats nothing — no coordinator for that run, no empty chair — leaves
+/// the sleeper exactly where the killing finds it, which is the old
+/// behaviour and the right one.
+fn expire_sleepers(host: &dyn Host, now_ms: i64) {
     let Some(booted) = booted_at_ms() else {
         return;
     };
@@ -3198,6 +3247,7 @@ fn expire_sleepers(now_ms: i64) {
     let Some(held) = runtime() else {
         return;
     };
+    seat_what_the_grace_would_kill(host, &held);
     let Ok(image) = held.actor.view() else {
         return;
     };
@@ -4152,7 +4202,7 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // de-duplication and deliberately changes no lifecycle state.
     reconcile_pane_liveness(host, now_ms);
     // And the sleepers' grace, on the same beat (t-3058).
-    expire_sleepers(now_ms);
+    expire_sleepers(host, now_ms);
     /* And retention, on the same beat.
      *
      * The actor decides whether it is DUE — once an hour, judged against the
