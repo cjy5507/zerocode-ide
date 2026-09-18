@@ -26,7 +26,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use api::{SystemOneCall, SystemOneClient, SystemOneConfig, SystemOneFailure, SYSTEMONE_MODEL};
 use zerocode_core::jev::door::Refused;
-use zerocode_core::jev::ROUTING;
 use runtime::{
     DecisionVerdict, ProbeAssessment, RouteConfidence, RubricAxis,
     DECISION_RUBRIC_VERSION,
@@ -36,6 +35,11 @@ use serde::{Deserialize, Serialize};
 use super::jev_gate::{self, JevDoor};
 use super::probe_exec::{remember_bounded, ProbeSlot, PROBE_TIMEOUT};
 use super::settings::decision_shadow_mode_from;
+use zerocode_core::jev::ROUTING;
+use zerocode_core::jev::promote::{self, Verdict};
+use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+
+use super::jev_summary;
 use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
 use crate::misc_tools::agent_tools::shared_agent_runtime;
 
@@ -423,7 +427,6 @@ struct Judgment {
 struct ShadowBatch {
     settings: runtime::ConfigLoader,
     cwd: PathBuf,
-    ledger: PathBuf,
     config: Result<SystemOneConfig, SystemOneFailure>,
     attempt: Option<String>,
     deadline: Duration,
@@ -472,7 +475,6 @@ pub(super) fn fire(
     };
     let batch = ShadowBatch {
         settings: runtime::ConfigLoader::default_for(&cwd),
-        ledger: decision_shadow_path(&cwd),
         cwd,
         config: SystemOneConfig::from_env(),
         attempt: Some(attempt.trim()).filter(|attempt| !attempt.is_empty()).map(str::to_string),
@@ -538,7 +540,7 @@ pub(super) fn active_assessments(
             judgment.row
         })
         .collect();
-    write_rows(&decision_shadow_path(&cwd), &rows);
+    write_rows(&cwd, &rows);
     for (slot, (description, prompt)) in results.iter_mut().zip(tasks) {
         if description.trim().is_empty() && prompt.trim().is_empty() {
             continue;
@@ -553,7 +555,10 @@ pub(super) fn active_assessments(
 
 /// Read the setting, judge every shadow shot concurrently, and write the rows.
 async fn run_shadow_batch(batch: ShadowBatch) {
-    let ShadowBatch { settings, cwd, ledger, config, attempt, deadline, shots } = batch;
+    let ShadowBatch { settings, cwd, config, attempt, deadline, shots } = batch;
+    // The judgment that follows the write reads the person's settings, which
+    // are found from the working directory and not from the ledger's own path.
+    let here = cwd.clone();
     // The door opens only for a mode that asks: a switched-off shadow reads its
     // one setting and nothing else.
     let read = tokio::task::spawn_blocking(move || {
@@ -584,13 +589,99 @@ async fn run_shadow_batch(batch: ShadowBatch) {
     )
     .await;
     let rows: Vec<DecisionShadowRow> = judgments.into_iter().map(|judgment| judgment.row).collect();
-    let _ = tokio::task::spawn_blocking(move || write_rows(&ledger, &rows)).await;
+    let _ = tokio::task::spawn_blocking(move || write_rows(&here, &rows)).await;
 }
 
-fn write_rows(ledger: &Path, rows: &[DecisionShadowRow]) {
+fn write_rows(cwd: &Path, rows: &[DecisionShadowRow]) {
+    let ledger = decision_shadow_path(cwd);
     for row in rows {
-        let _ = append_shadow_row(ledger, row, SHADOW_LEDGER_MAX_BYTES);
+        let _ = append_shadow_row(&ledger, row, SHADOW_LEDGER_MAX_BYTES);
     }
+    judge_and_record(cwd, now_ms());
+}
+
+/// Judge the seat on what it has just written, and write down a rise or a
+/// fall (docs/design/jev-settings-20260917.md §4).
+///
+/// Once every [`JUDGED_EVERY_ROWS`] requests, not at the end of every turn: a
+/// bound that moved on every row would rise and fall on a single answer. The
+/// window is the last twenty requests, the standing is the last transition
+/// this same file recorded, and nothing is written unless the answer changed —
+/// a ledger of "still recording" every twenty rows is a ledger nobody reads.
+pub fn judge_and_record(cwd: &Path, now_ms: i64) -> Option<Verdict> {
+    judge_ledger(&decision_shadow_path(cwd), super::settings::merged_settings_root(cwd).as_ref(), now_ms)
+}
+
+/// The same judgment asked of a ledger by its path, with the settings handed
+/// in — where the state directory and the settings chain are both answered by
+/// the environment, and a test that had to pin either would be racing every
+/// other test in this binary for it.
+pub fn judge_ledger(
+    ledger: &Path,
+    settings: Option<&serde_json::Value>,
+    now_ms: i64,
+) -> Option<Verdict> {
+    let rows = super::jev_summary::read_rows(ledger);
+    let asked = rows.iter().filter(|row| jev_summary::asked_something(row).is_some()).count();
+    let stand = promote::stand_from(&rows);
+    let fallbacks_in_a_row = jev_summary::failures_in_a_row(&rows);
+    // Two clocks. The lines are judged once every window, because a bound that
+    // moved on every row would rise and fall on a single answer. The fallback
+    // rule is not one of those lines: three in a row is the wire, the key or
+    // the model, and the whole point of it is that an acting seat stops now
+    // rather than after nineteen more requests nobody will get an answer to.
+    let at_boundary = asked > 0 && asked % JUDGED_EVERY_ROWS == 0;
+    let ending_it = stand == promote::Stand::Applying
+        && fallbacks_in_a_row >= promote::FALLBACKS_THAT_END_IT;
+    if !at_boundary && !ending_it {
+        return None;
+    }
+    let window = jev_summary::summarize_last(&rows, JUDGED_EVERY_ROWS);
+    let verdict = promote::judge(
+        stand,
+        &promote::Evidence {
+            window: &window,
+            floor_permille: ROUTING.answer_floor_permille?,
+            deadline_ms: u64::try_from(DECISION_ACTIVE_DEADLINE.as_millis()).unwrap_or(u64::MAX),
+            labels: labels_standing(settings, &rows),
+            fallbacks_in_a_row,
+        },
+    );
+    if let Some(row) = promote::transition_row(now_ms, verdict, &window) {
+        let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
+    }
+    Some(verdict)
+}
+
+/// What the labels a person wrote say about both readers, when they named a
+/// file and it can be read. Absent labels are not a bad verdict: §4 holds the
+/// seat and the screen asks for twenty.
+fn labels_standing(
+    settings: Option<&serde_json::Value>,
+    rows: &[serde_json::Value],
+) -> Option<promote::Labels> {
+    let path = promote::labels_path_in(settings?)?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let judged: Vec<DecisionShadowRow> = rows
+        .iter()
+        .filter_map(|row| serde_json::from_value(row.clone()).ok())
+        .collect();
+    let evaluation = super::decision_report::evaluate_decision_labels(&text, &judged).ok()?;
+    Some(promote::Labels {
+        compared: evaluation.matched,
+        judgment_right: evaluation.axes.iter().map(|axis| axis.judgment.correct).sum(),
+        probe_right: evaluation.axes.iter().map(|axis| axis.probe.correct).sum(),
+    })
+}
+
+fn now_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX)
 }
 
 /// One task's row and reusable typed assessment: recalled from the memo,

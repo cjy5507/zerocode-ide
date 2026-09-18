@@ -104,7 +104,8 @@ fn a_seat_that_can_rise_has_a_stage_to_time_it() {
 
 #[test]
 fn a_seat_starts_recording_and_a_rise_row_in_its_own_ledger_makes_it_act() {
-    use zerocode_core::jev::promote::{ROSE, Stand, TRANSITION};
+    use zerocode_core::jev::promote::{ROSE, Stand};
+    use zerocode_core::jev::summary::TRANSITION;
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf()];
     let seat = &zerocode_core::jev::ROUTING;
@@ -118,7 +119,7 @@ fn a_seat_starts_recording_and_a_rise_row_in_its_own_ledger_makes_it_act() {
     write(
         home.path(),
         seat.ledger,
-        &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5}), json!({"at": 2, TRANSITION: ROSE})],
+        &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5}), json!({"at": 2, (TRANSITION.canonical): ROSE})],
     );
     let raised = super::one(seat, &roots, Some(&auto), 1_000, 0);
     assert_eq!(raised.stand, Stand::Applying);
@@ -142,7 +143,8 @@ fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
 
 #[test]
 fn the_routing_seat_reads_its_standing_from_the_ledger_it_writes() {
-    use zerocode_core::jev::promote::{FELL, ROSE, TRANSITION};
+    use zerocode_core::jev::promote::{FELL, ROSE};
+    use zerocode_core::jev::summary::TRANSITION;
     let work = tempfile::tempdir().expect("tmp");
     let ledger = work.path().join(zerocode_core::jev::ROUTING.ledger);
 
@@ -150,12 +152,99 @@ fn the_routing_seat_reads_its_standing_from_the_ledger_it_writes() {
         !super::super::decision_shadow::raised_at(&ledger),
         "a seat with no ledger has never risen"
     );
-    fs::write(&ledger, format!("{}\n", json!({"at": 1, TRANSITION: ROSE}))).expect("write");
+    fs::write(&ledger, format!("{}\n", json!({"at": 1, (TRANSITION.canonical): ROSE}))).expect("write");
     assert!(super::super::decision_shadow::raised_at(&ledger));
     fs::write(
         &ledger,
-        format!("{}\n{}\n", json!({"at": 1, TRANSITION: ROSE}), json!({"at": 2, TRANSITION: FELL})),
+        format!("{}\n{}\n", json!({"at": 1, (TRANSITION.canonical): ROSE}), json!({"at": 2, (TRANSITION.canonical): FELL})),
     )
     .expect("write");
     assert!(!super::super::decision_shadow::raised_at(&ledger), "a fall takes it back");
+}
+
+/// A ledger of `n` requests under a working directory the state root owns.
+fn ledger_with(home: &std::path::Path, rows: &[Value]) -> std::path::PathBuf {
+    let ledger = home.join(zerocode_core::jev::ROUTING.ledger);
+    fs::create_dir_all(home).expect("dir");
+    let text: String = rows.iter().map(|row| format!("{row}\n")).collect();
+    fs::write(&ledger, text).expect("write");
+    ledger
+}
+
+fn answered(at: i64) -> Value {
+    json!({"at": at, "outcome": "answered", "elapsedMs": 400, "requests": 1})
+}
+
+#[test]
+fn the_lines_are_judged_once_a_window_and_not_at_the_end_of_every_turn() {
+    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+    let work = tempfile::tempdir().expect("tmp");
+    let short: Vec<Value> = (0..JUDGED_EVERY_ROWS as i64 - 1).map(answered).collect();
+    let ledger = ledger_with(work.path(), &short);
+    assert_eq!(
+        super::super::decision_shadow::judge_ledger(&ledger, None, 9),
+        None,
+        "a window one row short was judged anyway"
+    );
+    let full: Vec<Value> = (0..JUDGED_EVERY_ROWS as i64).map(answered).collect();
+    let ledger = ledger_with(work.path(), &full);
+    assert!(
+        super::super::decision_shadow::judge_ledger(&ledger, None, 9).is_some(),
+        "a full window was not judged"
+    );
+}
+
+#[test]
+fn a_verdict_that_changed_nothing_writes_nothing_down() {
+    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+    let work = tempfile::tempdir().expect("tmp");
+    let full: Vec<Value> = (0..JUDGED_EVERY_ROWS as i64).map(answered).collect();
+    let ledger = ledger_with(work.path(), &full);
+    let before = fs::read_to_string(&ledger).expect("read");
+    // Clean rows, but nobody has labelled anything: §4 holds, and a hold is
+    // not news.
+    assert!(matches!(
+        super::super::decision_shadow::judge_ledger(&ledger, None, 9),
+        Some(zerocode_core::jev::promote::Verdict::Hold(_))
+    ));
+    assert_eq!(fs::read_to_string(&ledger).expect("read"), before, "a hold was written down");
+}
+
+#[test]
+fn three_fallbacks_in_a_row_take_an_acting_seat_back_without_waiting_for_a_window() {
+    use zerocode_core::jev::promote::{FELL, FALLBACKS_THAT_END_IT, ROSE, Verdict};
+    use zerocode_core::jev::summary::TRANSITION;
+    let work = tempfile::tempdir().expect("tmp");
+    let mut rows: Vec<Value> = vec![json!({"at": 1, (TRANSITION.canonical): ROSE})];
+    rows.extend((0..FALLBACKS_THAT_END_IT as i64).map(|at| {
+        json!({"at": 10 + at, "outcome": "timeout", "elapsedMs": 1_500, "requests": 1})
+    }));
+    let ledger = ledger_with(work.path(), &rows);
+    // Three requests, not twenty: the rule that ends it does not wait.
+    let verdict = super::super::decision_shadow::judge_ledger(&ledger, None, 99);
+    assert!(
+        matches!(verdict, Some(Verdict::Fall(_))),
+        "an acting seat kept acting through three fallbacks: {verdict:?}"
+    );
+    let written = fs::read_to_string(&ledger).expect("read");
+    assert!(written.contains(FELL), "the fall was not written down");
+    assert!(
+        !super::super::decision_shadow::raised_at(&ledger),
+        "the seat is still standing after its fall"
+    );
+}
+
+#[test]
+fn a_recording_seat_is_not_ended_by_fallbacks_it_never_acted_on() {
+    use zerocode_core::jev::promote::FALLBACKS_THAT_END_IT;
+    let work = tempfile::tempdir().expect("tmp");
+    let rows: Vec<Value> = (0..FALLBACKS_THAT_END_IT as i64 + 2)
+        .map(|at| json!({"at": at, "outcome": "timeout", "elapsedMs": 1_500}))
+        .collect();
+    let ledger = ledger_with(work.path(), &rows);
+    assert_eq!(
+        super::super::decision_shadow::judge_ledger(&ledger, None, 9),
+        None,
+        "a seat that never rose was taken back from somewhere it had not been"
+    );
 }

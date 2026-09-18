@@ -145,3 +145,61 @@ fn every_key_this_module_reads_names_its_canonical_spelling_first() {
         );
     }
 }
+
+#[test]
+fn the_judges_own_note_is_not_a_request_it_made() {
+    // A transition row lives in the same file as the rows it was decided on.
+    // Counted as a request it would have no outcome, so every judgment a seat
+    // earned would lower the share it was judged on.
+    let rows = [
+        json!({"at": 1, "outcome": "answered", "elapsedMs": 10}),
+        json!({"at": 2, (TRANSITION.canonical): "rise", "rows": 20}),
+        json!({"at": 3, "outcome": "answered", "elapsedMs": 20}),
+    ];
+    let tally = summarize(&rows, 0);
+    assert_eq!(
+        (tally.rows, tally.answered),
+        (2, 2),
+        "the note was counted as a request"
+    );
+    assert_eq!(tally.answered_share(), Some(1.0));
+    assert_eq!(asked_something(&rows[1]), None);
+    assert_eq!(asked_something(&rows[0]), Some("answered"));
+}
+
+#[test]
+fn the_judged_window_is_the_last_n_requests_and_not_the_last_n_lines() {
+    let mut rows: Vec<Value> = (0..30)
+        .map(|at| json!({"at": at, "outcome": if at < 10 { "timeout" } else { "answered" }, "elapsedMs": at}))
+        .collect();
+    rows.insert(15, json!({"at": 99, (TRANSITION.canonical): "rise"}));
+    let window = summarize_last(&rows, 20);
+    assert_eq!(
+        window.rows, 20,
+        "a note took a request's place in the window"
+    );
+    assert_eq!(
+        window.answered, 20,
+        "the window reached back past the answers"
+    );
+    assert_eq!(
+        summarize_last(&rows, 100).rows,
+        30,
+        "more asked for than exist"
+    );
+    assert_eq!(summarize_last(&[], 20).rows, 0);
+}
+
+#[test]
+fn failures_in_a_row_stop_at_the_first_answer_and_step_over_the_notes() {
+    let rows = [
+        json!({"at": 1, "outcome": "timeout"}),
+        json!({"at": 2, "outcome": "answered"}),
+        json!({"at": 3, "outcome": "timeout"}),
+        json!({"at": 4, (TRANSITION.canonical): "fall", "line": "latency"}),
+        json!({"at": 5, "outcome": "no_key"}),
+    ];
+    assert_eq!(failures_in_a_row(&rows), 2, "the note broke the run");
+    assert_eq!(failures_in_a_row(&rows[..2]), 0, "it ends on an answer");
+    assert_eq!(failures_in_a_row(&[]), 0);
+}

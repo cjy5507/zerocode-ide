@@ -14,7 +14,7 @@
 
 use serde_json::{Value, json};
 
-use crate::jev::summary::{AT, JUDGED_EVERY_ROWS, Tally};
+use crate::jev::summary::{AT, JUDGED_EVERY_ROWS, TRANSITION, Tally};
 
 /// The word every schema refusal's token is built from: zo writes it alone
 /// when a reply failed its checks, and [`crate::jev::choice::ChoiceRefusal`]
@@ -217,13 +217,7 @@ pub fn judge(stand: Stand, evidence: &Evidence) -> Verdict {
 #[cfg(test)]
 mod tests;
 
-/// The key a transition row carries. A seat's standing is not kept in a file
-/// of its own: it is the last transition its own ledger recorded, so the
-/// evidence and the decision made on it can never be found apart, and a
-/// deleted ledger takes the standing with it rather than leaving a seat
-/// acting on rows nobody can see.
-pub const TRANSITION: &str = "transition";
-/// What a rising row's [`TRANSITION`] says.
+/// What a rising row's [`TRANSITION`](crate::jev::summary::TRANSITION) says.
 pub const ROSE: &str = "rise";
 /// What a falling row's says.
 pub const FELL: &str = "fall";
@@ -281,6 +275,25 @@ impl Verdict {
     }
 }
 
+/// The settings key naming the file of labels a person wrote, under the Jev
+/// block ([`crate::jev::door::JEV_SETTINGS_KEY`]) — `smart.jev.labels`.
+///
+/// §4 will not raise a seat without labels, so the product has to know where
+/// they live; without this key the rule is a door with no handle, and the
+/// screen's "twenty labels are needed" names nothing a person can act on.
+pub const LABELS_KEY: &str = "labels";
+
+/// The labels file a person named, if they named one.
+#[must_use]
+pub fn labels_path_in(root: &Value) -> Option<&str> {
+    root.get(crate::jev::SMART_SETTINGS_KEY)?
+        .get(crate::jev::door::JEV_SETTINGS_KEY)?
+        .get(LABELS_KEY)?
+        .as_str()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+}
+
 /// Where a seat stands, read back from the transitions its ledger recorded.
 ///
 /// No transition means it has never risen, which is what `auto` starts as.
@@ -288,7 +301,7 @@ impl Verdict {
 pub fn stand_from(rows: &[Value]) -> Stand {
     rows.iter()
         .rev()
-        .find_map(|row| match row.get(TRANSITION).and_then(Value::as_str) {
+        .find_map(|row| match TRANSITION.read(row).and_then(Value::as_str) {
             Some(ROSE) => Some(Stand::Applying),
             Some(FELL) => Some(Stand::Recording),
             _ => None,
@@ -308,7 +321,7 @@ pub fn transition_row(now_ms: i64, verdict: Verdict, window: &Tally) -> Option<V
     };
     let mut row = json!({
         AT.canonical: now_ms,
-        TRANSITION: word,
+        (TRANSITION.canonical): word,
         "rows": window.rows,
         "answered": window.answered,
         "answeredLowerBoundPermille": window.answered_lower_bound().map(permille),

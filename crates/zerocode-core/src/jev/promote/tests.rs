@@ -283,13 +283,13 @@ fn a_seat_stands_where_its_last_transition_left_it() {
     );
     let rows = [
         json!({"at": 1, "outcome": "answered"}),
-        json!({"at": 2, TRANSITION: ROSE}),
+        json!({"at": 2, (TRANSITION.canonical): ROSE}),
         json!({"at": 3, "outcome": "answered"}),
     ];
     assert_eq!(stand_from(&rows), Stand::Applying);
     let rows = [
-        json!({"at": 2, TRANSITION: ROSE}),
-        json!({"at": 4, TRANSITION: FELL, ON_LINE: "latency"}),
+        json!({"at": 2, (TRANSITION.canonical): ROSE}),
+        json!({"at": 4, (TRANSITION.canonical): FELL, ON_LINE: "latency"}),
         json!({"at": 5, "outcome": "answered"}),
     ];
     assert_eq!(stand_from(&rows), Stand::Recording, "the last one decides");
@@ -305,7 +305,7 @@ fn only_a_change_is_written_down() {
     );
 
     let rose = transition_row(9, Verdict::Rise, &held).expect("a rise is written");
-    assert_eq!(rose[TRANSITION], ROSE);
+    assert_eq!(rose[TRANSITION.canonical], ROSE);
     assert_eq!(rose["rows"], 200);
     assert_eq!(
         rose[ON_LINE],
@@ -322,7 +322,7 @@ fn only_a_change_is_written_down() {
         &held,
     )
     .expect("a fall is written");
-    assert_eq!(fell[TRANSITION], FELL);
+    assert_eq!(fell[TRANSITION.canonical], FELL);
     assert_eq!(fell[ON_LINE], "latency");
 }
 
@@ -344,7 +344,7 @@ fn a_transition_row_carries_the_numbers_and_none_of_the_request() {
             "at",
             "p95Ms",
             "rows",
-            TRANSITION
+            TRANSITION.canonical
         ],
         "a closed set, in serde's order"
     );
@@ -410,4 +410,22 @@ fn a_verdict_and_its_row_call_a_rise_and_a_fall_the_same_thing() {
     assert_eq!(words.len(), 4, "two verdicts share a word");
     assert_eq!(Stand::Recording.token(), "recording");
     assert_eq!(Stand::Applying.token(), "applying");
+}
+
+#[test]
+fn the_labels_file_is_named_in_the_settings_or_nowhere() {
+    use serde_json::json;
+    assert_eq!(labels_path_in(&json!({})), None);
+    assert_eq!(labels_path_in(&json!({"smart": {}})), None);
+    assert_eq!(labels_path_in(&json!({"smart": {"jev": {}}})), None);
+    assert_eq!(
+        labels_path_in(&json!({"smart": {"jev": {"labels": "  "}}})),
+        None,
+        "blank is unnamed"
+    );
+    assert_eq!(
+        labels_path_in(&json!({"smart": {"jev": {"labels": " /a/labels.jsonl "}}})),
+        Some("/a/labels.jsonl"),
+        "a path is read without the spaces around it"
+    );
 }

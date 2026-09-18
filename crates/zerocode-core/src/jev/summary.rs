@@ -95,6 +95,13 @@ pub const INPUT_TOKENS: LedgerKey = LedgerKey {
     canonical: "inputTokens",
     also: &["input_tokens"],
 };
+/// The judge's own note rather than a request: a rise or a fall it wrote down
+/// (`crate::jev::promote`). It lives in the same file as the rows it was
+/// decided on, so a counter has to know it is not one of them.
+pub const TRANSITION: LedgerKey = LedgerKey {
+    canonical: "transition",
+    also: &[],
+};
 
 /// Every key this module reads, so a contract can walk them.
 pub const LEDGER_KEYS: &[LedgerKey] = &[
@@ -105,6 +112,7 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     REDACTED_LINES,
     CACHED,
     INPUT_TOKENS,
+    TRANSITION,
 ];
 
 /// The word a row carries when its judgment answered and passed its checks.
@@ -199,6 +207,53 @@ pub fn percentile(sorted: &[u64], share: f64) -> Option<u64> {
     sorted.get(rank.min(sorted.len()) - 1).copied()
 }
 
+/// Whether a row is a request this use made, and its outcome if so.
+///
+/// A ledger holds two kinds of line: the rows a use wrote when it asked
+/// something, and the notes the judge wrote about them. Counting the second
+/// kind as the first would lower every seat's answered share by the very act
+/// of judging it.
+#[must_use]
+pub fn asked_something(row: &Value) -> Option<&str> {
+    if TRANSITION.read(row).is_some() {
+        return None;
+    }
+    OUTCOME.read(row).and_then(Value::as_str)
+}
+
+/// The last `n` requests, counted — the window §4 judges on.
+///
+/// A count and not a clock: a seat asked twice a day and one asked twice a
+/// minute earn their promotion on the same amount of evidence, and a window
+/// measured in hours would hand the busy one a verdict off a hundred rows
+/// while the quiet one never filled its own.
+#[must_use]
+pub fn summarize_last(rows: &[Value], n: usize) -> Tally {
+    let asked: Vec<&Value> = rows
+        .iter()
+        .filter(|row| asked_something(row).is_some())
+        .collect();
+    let from = asked.len().saturating_sub(n);
+    let held: Vec<Value> = asked[from..].iter().map(|row| (*row).clone()).collect();
+    summarize(&held, i64::MIN)
+}
+
+/// How many requests at the end of the ledger did not answer, stopping at the
+/// first that did — §4's "in a row", read from the rows themselves rather
+/// than from a counter some other process would have to keep.
+#[must_use]
+pub fn failures_in_a_row(rows: &[Value]) -> u32 {
+    let mut held = 0;
+    for row in rows.iter().rev() {
+        match asked_something(row) {
+            None => continue,
+            Some(ANSWERED) => break,
+            Some(_) => held += 1,
+        }
+    }
+    held
+}
+
 /// Count the rows of one ledger whose `at` is at or after `since_ms`.
 ///
 /// Rows the door refused never reached the wire, so they are neither answers
@@ -211,6 +266,9 @@ pub fn summarize(rows: &[Value], since_ms: i64) -> Tally {
     let mut failures: BTreeMap<&str, usize> = BTreeMap::new();
     let mut elapsed: Vec<u64> = Vec::new();
     for row in rows {
+        if asked_something(row).is_none() {
+            continue;
+        }
         let at = AT.read(row).and_then(Value::as_i64).unwrap_or(0);
         if at < since_ms {
             continue;

@@ -24,7 +24,9 @@ use zerocode_core::jev::{JEV_USES, JevMode, JevUse};
 /// What a reader of this report needs from the table's own counter, re-said
 /// here so a caller does not have to take a dependency on the shared core to
 /// read an answer this crate already built.
-pub use zerocode_core::jev::summary::{JUDGED_EVERY_ROWS, Tally as SeatTally};
+pub use zerocode_core::jev::summary::{
+    JUDGED_EVERY_ROWS, Tally as SeatTally, asked_something, failures_in_a_row, summarize_last,
+};
 
 use super::shadow_ledger::shadow_ledger_dir;
 
