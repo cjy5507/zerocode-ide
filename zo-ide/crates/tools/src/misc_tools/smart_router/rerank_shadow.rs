@@ -1,24 +1,37 @@
-//! The memory rerank in shadow: every recall a turn performs is put to a System
-//! One judgment off the turn's thread, and what that judgment would have
-//! reordered is written beside what recall chose. The turn reads exactly what
-//! it would have read with the shadow off.
+//! The memory rerank: every recall a turn performs is put to a System One
+//! judgment, and what that judgment would have reordered is written beside what
+//! recall chose. Under `shadow` and `auto` that is all that happens and the turn
+//! reads exactly what it would have read with the switch off; under `on` the
+//! judgment's order — after the vault's graph has had its say — is the order the
+//! turn reads.
 //!
-//! The question, the checks on the reply, and the rule that the vault's graph
-//! outranks the judgment all belong to `runtime::memory::rerank`. This file owns
-//! only what a shadow needs to run: the seat beside recall ([`RerankShadow`]),
-//! the setting that permits it, the detached call, the memo, and the ledger row
-//! — the same shape as the routing shadow next door (`decision_shadow.rs`), so a
-//! reader of one can read the other.
+//! The question, the checks on the reply, the rule that the vault's graph
+//! outranks the judgment, and the fold that proves an order a permutation before
+//! it changes anything all belong to `runtime::memory::rerank`. This file owns
+//! only what running it needs: the seat beside recall ([`RerankShadow`]), the
+//! setting that says which road a recall takes, the call, the memo, and the
+//! ledger row — the same shape as the routing shadow next door
+//! (`decision_shadow.rs`), so a reader of one can read the other.
 //!
 //! Putting a recall's notes to the judgment sends the vault's own summaries off
 //! the machine. That is a different thing to consent to than the routing
 //! shadow's task text, so it has its own switch, `smart.rerankShadow`, and is
-//! off unless a person writes one of its record-only modes (`shadow`, `auto`).
-//! Each request then goes through the Jev door (`jev_gate`), as the routing
-//! shadow's do: consent, budget, withheld lines and caps.
+//! off unless a person writes one of its other words. Each request then goes
+//! through the Jev door (`jev_gate`), as the routing shadow's do: consent,
+//! budget, withheld lines and caps.
+//!
+//! # Nothing gets worse for asking
+//!
+//! The apply road can only ever hand back recall's own order or a proved
+//! permutation of it. A judgment that misses the wall, that the door refuses,
+//! that fails its checks, or whose order cannot be proved a permutation leaves
+//! recall's order standing, and the row says `applied: false` either way — so
+//! the ledger can be read back for how often the switch actually moved
+//! anything.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -26,10 +39,10 @@ use api::{SystemOneClient, SystemOneConfig, SystemOneFailure, SystemOneRequest, 
 use zerocode_core::jev::door::Refused;
 use zerocode_core::jev::RECALL;
 use runtime::memory::rerank::{
-    compare, rerank_candidates, rerank_questions, rerank_state, validate_rerank, RerankComparison,
-    RerankReading, RERANK_RUBRIC_VERSION,
+    apply_order, compare, rerank_candidates, rerank_questions, rerank_state, validate_rerank,
+    RerankComparison, RerankReading, RERANK_RUBRIC_VERSION,
 };
-use runtime::{MemoryHit, RecallObserver};
+use runtime::{MemoryHit, RecallSeat};
 use serde::{Deserialize, Serialize};
 
 use super::jev_gate::{self, JevDoor};
@@ -51,9 +64,15 @@ pub const RERANK_OUTCOME_ANSWERED: &str = "answered";
 /// order for that. Kept apart from a failure because the judgment did its part.
 pub const RERANK_OUTCOME_UNORDERABLE: &str = "unorderable";
 
-/// The judgment's deadline. The same as the probe's: a recall's notes are a
-/// smaller state than a task's text, and nothing waits on this either way.
+/// The judgment's deadline on the record-only road. The same as the probe's: a
+/// recall's notes are a smaller state than a task's text, and nothing waits on
+/// this either way.
 pub const RERANK_SHADOW_DEADLINE: Duration = PROBE_TIMEOUT;
+
+/// The wall on the apply road, where a turn IS waiting. The routing judgment's
+/// own active wall, because it is the same question asked twice — how long a Jev
+/// answer may hold the thing it is deciding — and one answer to it.
+pub const RERANK_APPLY_DEADLINE: Duration = super::decision_shadow::DECISION_ACTIVE_DEADLINE;
 
 const FAIL_SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
 
@@ -109,13 +128,21 @@ pub struct RerankShadowRow {
     /// What the judgment said, once it checked out and could be ordered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judged: Option<Judged>,
+    /// Whether [`Judged::proposed`] is the order the turn actually read. False
+    /// on every record-only row, and false on an apply row whose judgment
+    /// missed the wall, was refused, failed its checks, or could not be proved a
+    /// permutation of what recall admitted. Absent on a row written before the
+    /// apply road existed, which read as what it was: not applied.
+    #[serde(default)]
+    pub applied: bool,
 }
 
 /// A checked judgment folded into recall's order, and the readings it came
 /// from.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Judged {
-    /// Recall's order — what the turn read.
+    /// Recall's own order — what the turn read unless `applied` says the
+    /// judgment's is what it read instead.
     pub recalled: Vec<String>,
     /// The judgment's order after the graph's rules.
     pub proposed: Vec<String>,
@@ -161,6 +188,7 @@ impl RerankShadowRow {
             requests: Some(0),
             redacted_lines: Some(0),
             judged: None,
+            applied: false,
         }
     }
 }
@@ -213,9 +241,9 @@ fn memo() -> &'static Mutex<HashMap<MemoKey, Remembered>> {
 }
 
 /// The seat beside recall. Seated once per host at the project's `cwd`, where
-/// the setting and the ledger are; it decides per recall whether the setting
-/// permits a judgment, and does so on the detached task, never on recall's
-/// thread.
+/// the setting and the ledger are; it reads that setting per recall and takes
+/// the road it names — asking nothing, asking off the turn's thread, or asking
+/// and waiting for the order the turn reads ([`settle`]).
 #[derive(Debug, Clone)]
 pub struct RerankShadow {
     cwd: PathBuf,
@@ -230,63 +258,136 @@ impl RerankShadow {
     }
 }
 
-impl RecallObserver for RerankShadow {
-    fn observe(&self, query: &str, hits: &[MemoryHit]) {
-        fire(&self.cwd, query, hits);
+impl RecallSeat for RerankShadow {
+    fn settle(&self, query: &str, hits: Vec<MemoryHit>) -> Vec<MemoryHit> {
+        settle(&self.cwd, query, hits)
     }
 }
 
-/// Everything one recall's shadow carries off the calling thread.
+/// Everything one recall's judgment carries off the calling thread.
 struct Shot {
-    settings: runtime::ConfigLoader,
     cwd: PathBuf,
     ledger: PathBuf,
     config: Result<SystemOneConfig, SystemOneFailure>,
     query: String,
     hits: Vec<MemoryHit>,
+    deadline: Duration,
 }
 
-/// Put one recall to the judgment, detached, and hand back its task. `None`
-/// when there is nothing to judge or when an ablation holds the shadow out.
-pub(super) fn fire(cwd: &Path, query: &str, hits: &[MemoryHit]) -> Option<tokio::task::JoinHandle<()>> {
+/// Where a waiting caller's row comes back. A rendezvous channel with no
+/// buffer, so a send that succeeds is one a caller is holding: that caller
+/// writes the row, and the `applied` it writes is the truth about what the turn
+/// read.
+type RowSender = SyncSender<RerankShadowRow>;
+
+/// One recall, on the road its mode names: nothing, a row beside what the turn
+/// read, or the order the turn reads.
+///
+/// The setting is read here, on the thread recall already runs on, because the
+/// answer decides whether anything is cloned or spawned at all — an `off`
+/// recall now copies no hits and starts no task.
+pub(super) fn settle(cwd: &Path, query: &str, hits: Vec<MemoryHit>) -> Vec<MemoryHit> {
+    let Some(mode) = asking_mode(cwd, query, &hits) else {
+        return hits;
+    };
+    if !mode.applies() {
+        fire(cwd, query, &hits, RERANK_SHADOW_DEADLINE, None);
+        return hits;
+    }
+    apply(cwd, query, hits)
+}
+
+/// The mode this recall is to be judged under, or `None` when it is not to be
+/// judged at all: nothing to judge, an ablation holding the judgment out, an
+/// unreadable setting, or a mode that asks nothing.
+fn asking_mode(cwd: &Path, query: &str, hits: &[MemoryHit]) -> Option<zerocode_core::jev::JevMode> {
     if hits.is_empty() || query.trim().is_empty() {
         return None;
     }
     if telemetry::attest_ablated(telemetry::HarnessFeature::RerankShadow) {
         return None;
     }
+    let Some(mode) = rerank_shadow_mode_from(&runtime::ConfigLoader::default_for(cwd)) else {
+        telemetry::attest_failed(telemetry::HarnessFeature::RerankShadow, FAIL_SETTINGS_UNAVAILABLE);
+        return None;
+    };
+    if !mode.asks() {
+        telemetry::attest_declined(telemetry::HarnessFeature::RerankShadow, mode.key());
+        return None;
+    }
+    Some(mode)
+}
+
+/// Put one recall to the judgment and hand back its task, telling it where to
+/// send the row if anyone is waiting for it.
+fn fire(
+    cwd: &Path,
+    query: &str,
+    hits: &[MemoryHit],
+    deadline: Duration,
+    answer: Option<RowSender>,
+) -> tokio::task::JoinHandle<()> {
     let shot = Shot {
-        settings: runtime::ConfigLoader::default_for(cwd),
         cwd: cwd.to_path_buf(),
         ledger: rerank_shadow_path(cwd),
         config: SystemOneConfig::from_env(),
         query: query.to_string(),
         hits: hits.to_vec(),
+        deadline,
     };
-    Some(shared_agent_runtime().spawn(run(shot)))
+    shared_agent_runtime().spawn(run(shot, answer))
 }
 
-/// Read the setting, open the door, judge the reading, write the row.
-async fn run(shot: Shot) {
-    let Shot { settings, cwd, ledger, config, query, hits } = shot;
-    // The door opens only for a mode that asks.
-    let read = tokio::task::spawn_blocking(move || {
-        rerank_shadow_mode_from(&settings).map(|mode| (mode, mode.asks().then(|| JevDoor::open(&cwd))))
-    })
-    .await
-    .ok()
-    .flatten();
-    let Some((mode, door)) = read else {
+/// A recall whose mode acts: the judgment is asked on the shared runtime and
+/// the turn waits for it up to [`RERANK_APPLY_DEADLINE`].
+///
+/// Recall's order is what comes back from every ending but one — a judgment
+/// that arrived in time, checked out, and could be proved a permutation of what
+/// recall admitted. The row is written by whoever is holding it when the wall
+/// passes, so a late judgment is still recorded, as one that did not apply.
+fn apply(cwd: &Path, query: &str, hits: Vec<MemoryHit>) -> Vec<MemoryHit> {
+    let (answer, judged) = sync_channel(0);
+    fire(cwd, query, &hits, RERANK_APPLY_DEADLINE, Some(answer));
+    let Ok(mut row) = judged.recv_timeout(RERANK_APPLY_DEADLINE) else {
+        return hits;
+    };
+    let read = row
+        .judged
+        .as_ref()
+        .and_then(|judged| apply_order(&hits, &judged.proposed));
+    row.applied = read.is_some();
+    let _ = append_shadow_row(&rerank_shadow_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+    read.unwrap_or(hits)
+}
+
+/// Open the door, judge the reading, and leave the row with whoever writes it.
+async fn run(shot: Shot, answer: Option<RowSender>) {
+    let Shot { cwd, ledger, config, query, hits, deadline } = shot;
+    let Ok(door) = tokio::task::spawn_blocking(move || JevDoor::open(&cwd)).await else {
         telemetry::attest_failed(telemetry::HarnessFeature::RerankShadow, FAIL_SETTINGS_UNAVAILABLE);
         return;
     };
-    let Some(door) = door else {
-        telemetry::attest_declined(telemetry::HarnessFeature::RerankShadow, mode.key());
+    let client = config.ok().map(SystemOneConfig::into_client);
+    let row = judge(&door, client.as_ref(), &query, &hits, deadline).await;
+    let Some(row) = kept(row, answer).await else {
         return;
     };
-    let client = config.ok().map(SystemOneConfig::into_client);
-    let row = judge(&door, client.as_ref(), &query, &hits, RERANK_SHADOW_DEADLINE).await;
     let _ = tokio::task::spawn_blocking(move || append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES)).await;
+}
+
+/// The row when this task is the one to write it, `None` when a caller waiting
+/// for the order took it instead.
+async fn kept(row: RerankShadowRow, answer: Option<RowSender>) -> Option<RerankShadowRow> {
+    let Some(answer) = answer else {
+        return Some(row);
+    };
+    // A blocking send, because the handoff is a rendezvous: it finishes when a
+    // caller takes the row, and fails — handing the row back — when the wall has
+    // already passed and that caller has gone.
+    tokio::task::spawn_blocking(move || answer.send(row).err().map(|returned| returned.0))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// One reading's row: recalled from the memo, refused at the door, or asked
@@ -450,6 +551,19 @@ mod tests {
     }
 
     impl Mock {
+        /// A port that accepts and never answers — a judgment that misses any
+        /// wall put in front of it.
+        fn silent() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind the mock");
+            let base_url = format!("http://{}", listener.local_addr().expect("mock address"));
+            let bodies = Arc::new(Mutex::new(Vec::new()));
+            std::thread::spawn(move || {
+                let held: Vec<std::net::TcpStream> = listener.incoming().flatten().collect();
+                drop(held);
+            });
+            Self { base_url, bodies }
+        }
+
         fn serving(status: u16, body: String) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind the mock");
             let base_url = format!("http://{}", listener.local_addr().expect("mock address"));
@@ -690,9 +804,183 @@ mod tests {
     }
 
     #[test]
-    fn nothing_to_judge_fires_nothing() {
+    fn nothing_to_judge_asks_nothing() {
         let dir = tempfile::tempdir().expect("a temp cwd");
-        assert!(fire(dir.path(), "a query", &[]).is_none());
-        assert!(fire(dir.path(), "   ", &[hit("wiki/a", "one")]).is_none());
+        assert_eq!(asking_mode(dir.path(), "a query", &[]), None);
+        assert_eq!(asking_mode(dir.path(), "   ", &[hit("wiki/a", "one")]), None);
+    }
+
+    /// The whole of what the seat reads: a config home holding one consented
+    /// workspace and the recall switch set to `mode`, a key, and a mock origin.
+    fn machine<T>(mode: &str, base_url: &str, body: impl FnOnce(&Path) -> T) -> T {
+        let home = tempfile::tempdir().expect("a config home");
+        let work = tempfile::tempdir().expect("a workspace");
+        // As the filesystem spells it, which is how the door spells a cwd.
+        let cwd = std::fs::canonicalize(work.path()).expect("the workspace resolved");
+        std::fs::write(
+            home.path().join("settings.json"),
+            serde_json::json!({
+                zerocode_core::jev::SMART_SETTINGS_KEY: {
+                    RECALL.setting: mode,
+                    "jev": {"enabled": true, "workspaces": [cwd.to_string_lossy()]},
+                }
+            })
+            .to_string(),
+        )
+        .expect("a settings file");
+        let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", &home.path().to_string_lossy())
+            .set_also("ZO_HOME", home.path())
+            .set_also("HOME", home.path())
+            .set_also(core_types::paths::ZO_STATE_DIR_ENV, home.path())
+            .set_also(api::SYSTEMONE_API_KEY_ENV, "test-key")
+            .set_also(api::SYSTEMONE_BASE_URL_ENV, base_url);
+        body(&cwd)
+    }
+
+    fn slugs(hits: &[MemoryHit]) -> Vec<String> {
+        hits.iter().map(|hit| hit.entry.slug.clone()).collect()
+    }
+
+    /// Rows this project's ledger holds, oldest first.
+    fn rows(cwd: &Path) -> Vec<RerankShadowRow> {
+        super::super::shadow_ledger::read_shadow_rows(&rerank_shadow_path(cwd))
+    }
+
+    /// Three notes recall put in a deliberately unhelpful order.
+    fn three() -> [MemoryHit; 3] {
+        [
+            hit("wiki/a", "barely on topic"),
+            hit("wiki/b", "the answer"),
+            hit("wiki/c", "background"),
+        ]
+    }
+
+    /// `on` is the one mode that changes what a turn reads, and the row it
+    /// leaves says the order was applied.
+    #[test]
+    fn on_reads_the_judgments_order_and_its_row_says_so() {
+        let mock = Mock::serving(200, reply_for(&[0, 3, 1]));
+        let hits = three();
+
+        let (read, rows) = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (row nine)", hits.to_vec());
+            (read, rows(cwd))
+        });
+
+        assert_eq!(slugs(&read), ["wiki/b", "wiki/c", "wiki/a"]);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].applied, "the row says the turn read the judgment's order");
+        assert_eq!(rows[0].outcome, RERANK_OUTCOME_ANSWERED);
+        assert_eq!(
+            rows[0].judged.as_ref().expect("a judgment").proposed,
+            slugs(&read),
+            "the order the row names is the order the turn read"
+        );
+    }
+
+    /// A record-only mode asks the same question and writes the same comparison,
+    /// and the turn reads recall's order all the same.
+    #[test]
+    fn a_record_only_mode_leaves_recalls_order_and_says_it_did_not_apply() {
+        for mode in [zerocode_core::jev::JevMode::Shadow, zerocode_core::jev::JevMode::Auto] {
+            let mock = Mock::serving(200, reply_for(&[0, 3, 1]));
+            let hits = three();
+
+            let (read, rows) = machine(mode.key(), &mock.base_url, |cwd| {
+                let read = settle(cwd, &format!("which note answers this ({})", mode.key()), hits.to_vec());
+                // The road is detached, so the row lands after the turn moved on.
+                let ledger = rerank_shadow_path(cwd);
+                let waited = std::time::Instant::now();
+                while !ledger.exists() && waited.elapsed() < Duration::from_secs(5) {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                (read, rows(cwd))
+            });
+
+            assert_eq!(slugs(&read), slugs(&hits), "{} reads recall's order", mode.key());
+            assert_eq!(rows.len(), 1, "{}", mode.key());
+            assert!(!rows[0].applied, "{} records and acts on nothing", mode.key());
+            assert!(
+                rows[0].judged.as_ref().expect("a judgment").top_changed,
+                "{} still asked, and the judgment still disagreed",
+                mode.key()
+            );
+        }
+    }
+
+    #[test]
+    fn off_asks_nothing_and_reads_recalls_order() {
+        let mock = Mock::serving(200, reply_for(&[0, 3, 1]));
+        let hits = three();
+
+        let (read, rows) = machine(zerocode_core::jev::JevMode::Off.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (row off)", hits.to_vec());
+            (read, rows(cwd))
+        });
+
+        assert_eq!(slugs(&read), slugs(&hits));
+        assert!(rows.is_empty() && mock.requests().is_empty());
+    }
+
+    /// A judgment that does not arrive inside the wall leaves recall's order,
+    /// and is recorded by the task it belongs to rather than lost.
+    #[test]
+    fn a_judgment_past_the_wall_leaves_recalls_order() {
+        let mock = Mock::silent();
+        let hits = three();
+
+        let read = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            settle(cwd, "which note answers this (row ten)", hits.to_vec())
+        });
+
+        assert_eq!(slugs(&read), slugs(&hits), "Jev never makes an order worse");
+    }
+
+    /// A reply that fails the contract's checks is discarded whole, on the
+    /// apply road as in shadow: recall's order stands and the row says so.
+    #[test]
+    fn a_reply_that_breaks_the_contract_leaves_recalls_order() {
+        let mut broken: serde_json::Value =
+            serde_json::from_str(&reply_for(&[0, 3, 1])).expect("json");
+        broken["answers"]["n1"]["score"] = serde_json::json!(0.0);
+        let mock = Mock::serving(200, broken.to_string());
+        let hits = three();
+
+        let (read, rows) = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (row eleven)", hits.to_vec());
+            (read, rows(cwd))
+        });
+
+        assert_eq!(slugs(&read), slugs(&hits));
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].applied && rows[0].judged.is_none());
+        assert_eq!(rows[0].outcome, SystemOneFailure::Schema.ledger_token());
+    }
+
+    /// An order that is not a permutation of what recall admitted folds
+    /// nothing, and the row that named it says it did not apply.
+    #[test]
+    fn an_order_the_fold_cannot_prove_leaves_recalls_order() {
+        let hits = three();
+        let mut row = RerankShadowRow::new(
+            MemoKey::for_reading("anything", &hits),
+            hits.len(),
+            RERANK_OUTCOME_ANSWERED.to_string(),
+        );
+        row.judged = Some(Judged {
+            recalled: slugs(&hits),
+            proposed: vec!["wiki/b".to_string(), "wiki/z".to_string(), "wiki/a".to_string()],
+            moved: 3,
+            top_changed: true,
+            held_by_graph: Vec::new(),
+            readings: vec![(0.0, 0.9); 3],
+        });
+
+        let read = row
+            .judged
+            .as_ref()
+            .and_then(|judged| apply_order(&hits, &judged.proposed));
+
+        assert_eq!(read, None, "a note recall never admitted folds nothing");
     }
 }

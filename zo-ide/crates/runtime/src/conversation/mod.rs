@@ -674,9 +674,9 @@ pub struct ConversationRuntime<C, T> {
     /// off the drive-loop thread (FREEZE-1). `recall` takes `&self`, so the
     /// shared handle is a drop-in for the prior owned box.
     memory_retriever: Option<Arc<dyn MemoryRetriever + Send + Sync>>,
-    /// Seated beside the retriever and shown every recall after it settles.
-    /// It cannot touch what the turn reads; see [`crate::RecallObserver`].
-    recall_observer: Option<Arc<dyn crate::RecallObserver>>,
+    /// Seated beside the retriever and shown every recall after it settles;
+    /// its answer is the order the turn reads. See [`crate::RecallSeat`].
+    recall_seat: Option<Arc<dyn crate::RecallSeat>>,
     max_iterations: usize,
     /// Optional wall-clock deadline for the turn. Two callers set it: spawned
     /// sub-agents bound a straggler that overran its caller's wait window, and
@@ -1643,7 +1643,7 @@ where
             inherited_attempt: None,
             attempt_cache_scope: None,
             memory_retriever: None,
-            recall_observer: None,
+            recall_seat: None,
             max_iterations: default_max_iterations(),
             deadline: None,
             deadline_extension: None,

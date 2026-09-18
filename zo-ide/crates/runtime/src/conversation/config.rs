@@ -305,9 +305,9 @@ where
     }
 
     /// Seat something beside recall that sees every recall's query and hits
-    /// after recall settles. It cannot change what the turn reads.
-    pub fn set_recall_observer(&mut self, observer: Option<Arc<dyn crate::RecallObserver>>) {
-        self.recall_observer = observer;
+    /// after recall settles and answers with the order the turn reads.
+    pub fn set_recall_seat(&mut self, seat: Option<Arc<dyn crate::RecallSeat>>) {
+        self.recall_seat = seat;
     }
 
     pub fn set_auto_compaction_enabled(&mut self, enabled: bool) {

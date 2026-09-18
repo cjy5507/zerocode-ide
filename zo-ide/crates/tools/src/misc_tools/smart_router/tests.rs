@@ -3382,12 +3382,13 @@ fn the_decision_mode_is_off_unless_a_person_writes_a_known_mode() {
     assert_eq!(DecisionShadowMode::default(), DecisionShadowMode::Off);
     assert!(!DecisionShadowMode::Auto.applies(), "auto records until something promotes it");
 
-    // Recall has no stage that acts: its switch takes the record-only modes,
-    // and the routing card's `on` written there reads as off (913f48fd).
+    // Recall reads the same four words its row offers (t-4676): `on` reorders
+    // what a turn reads, `auto` still records, because nothing promotes recall.
     for (word, expected) in [
-        ("on", DecisionShadowMode::Off),
+        ("on", DecisionShadowMode::On),
         ("shadow", DecisionShadowMode::Shadow),
         ("auto", DecisionShadowMode::Auto),
+        ("shadwo", DecisionShadowMode::Off),
     ] {
         let home = temp_config_home("rerank-mode");
         write_settings(&home, &json!({ "smart": { (super::settings::RERANK_SHADOW_SETTING): word } }));

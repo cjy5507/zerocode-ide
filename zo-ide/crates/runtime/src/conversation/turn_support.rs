@@ -356,19 +356,20 @@ where
         retriever: Option<Arc<dyn MemoryRetriever + Send + Sync>>,
         query: Option<String>,
         tracer: Option<SessionTracer>,
-        observer: Option<Arc<dyn crate::RecallObserver>>,
+        seat: Option<Arc<dyn crate::RecallSeat>>,
     ) -> Vec<String> {
         let (Some(retriever), Some(query)) = (retriever, query) else {
             return Vec::new();
         };
         let section = match tokio::task::spawn_blocking(move || {
             let hits = retriever.recall(&query, RECALL_AND_REMINDER_LIMIT);
-            // After recall has settled and before anything renders, so the
-            // observer sees exactly the order the turn reads — and gets a
-            // borrow, so it can change none of it.
-            if let Some(observer) = observer {
-                observer.observe(&query, &hits);
-            }
+            // After recall has settled and before anything renders, so the seat
+            // sees exactly what recall chose and its answer is what the turn
+            // reads. A seat in a record-only mode hands the same hits back.
+            let hits = match seat {
+                Some(seat) => seat.settle(&query, hits),
+                None => hits,
+            };
             recall_and_reminder_sections(&hits)
         })
         .await

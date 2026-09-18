@@ -261,6 +261,7 @@ mod tests {
                 requests: Some(0),
                 redacted_lines: Some(0),
                 judged: None,
+                applied: false,
             })
             .expect("a recall row"),
         )

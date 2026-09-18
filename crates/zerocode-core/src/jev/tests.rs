@@ -61,13 +61,18 @@ fn every_use_is_off_until_a_person_says_otherwise() {
     );
 }
 
-/// The routing card's `on` never reaches the recall judgment: recall has no
-/// stage that acts, so the word is not one of its own (913f48fd).
+/// Recall has an apply stage now (t-4676): `on` reorders what a turn reads,
+/// and `auto` still only records, because nothing promotes recall yet.
 #[test]
-fn recall_offers_nothing_that_acts() {
-    assert!(RECALL.modes.iter().all(|mode| !mode.applies()));
-    assert_eq!(RECALL.mode_of(Some(&json!("on"))), JevMode::Off);
+fn recall_acts_only_when_a_person_says_on() {
+    assert_eq!(RECALL.mode_of(Some(&json!("on"))), JevMode::On);
+    assert!(RECALL.mode_of(Some(&json!("on"))).applies());
     assert_eq!(RECALL.mode_of(Some(&json!("auto"))), JevMode::Auto);
+    assert!(!RECALL.mode_of(Some(&json!("auto"))).applies());
+    assert!(
+        !jev_use(RECALL.id).expect("the recall row").promotes,
+        "only a person moves recall off recording"
+    );
 }
 
 #[test]
@@ -114,7 +119,7 @@ fn a_writer_takes_exactly_the_words_a_use_offers() {
     assert_eq!(ROUTING.offered("shadow"), Some(JevMode::Shadow));
     assert_eq!(ROUTING.offered("auto"), Some(JevMode::Auto));
     assert_eq!(ROUTING.offered("Shadow"), None, "a writer spells the word");
-    assert_eq!(RECALL.offered("on"), None);
+    assert_eq!(RECALL.offered("on"), Some(JevMode::On));
     assert_eq!(BROWSER.offered("actual"), None);
 }
 

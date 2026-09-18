@@ -303,9 +303,12 @@ pub(super) struct SmartRuntimeSettings {
 /// How a Jev use is set (`smart.decisionShadow`, `smart.rerankShadow`) — the
 /// use table's modes. `off`, the default, sends nothing. `shadow` and `auto`
 /// record the judgment beside the product's own answer and act on nothing.
-/// `on` applies a validated routing judgment through the existing conservative
-/// fusion rules and falls back to the chat probe per task. Which words each
-/// switch takes is its row in `zerocode_core::jev::JEV_USES`, not this file's.
+/// `on` acts on a validated judgment — routing folds it through the existing
+/// conservative fusion rules and falls back to the chat probe per task, recall
+/// reads the judgment's graph-safe order — and every road back from a judgment
+/// that did not arrive or did not check out is the answer the product already
+/// had. Which words each switch takes is its row in
+/// `zerocode_core::jev::JEV_USES`, not this file's.
 pub type DecisionShadowMode = zerocode_core::jev::JevMode;
 
 /// The settings key the routing judgment's mode is read from, under `smart`.
@@ -327,8 +330,10 @@ pub fn decision_shadow_mode_from(loader: &runtime::ConfigLoader) -> Option<Decis
 pub const RERANK_SHADOW_SETTING: &str = zerocode_core::jev::RECALL.setting;
 
 /// `smart.rerankShadow` from the settings `loader` merges, on the same terms
-/// as [`decision_shadow_mode_from`]. Recall has no stage that acts, so its row
-/// offers no `on`: the routing card's `on` written here reads as off.
+/// as [`decision_shadow_mode_from`]. `on` is recall's apply stage: the
+/// judgment's graph-safe order is the order a turn reads
+/// (`rerank_shadow::settle`). `auto` still records, because nothing promotes
+/// recall — the row's `promotes` says so.
 #[must_use]
 pub fn rerank_shadow_mode_from(loader: &runtime::ConfigLoader) -> Option<DecisionShadowMode> {
     merged_settings_root_from(loader).map(|root| zerocode_core::jev::RECALL.mode_in(&root))

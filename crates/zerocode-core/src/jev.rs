@@ -9,7 +9,8 @@
 //! lives here, in the one crate both already read:
 //!
 //! - the words a use's setting may hold ([`JevMode`]), and which of them each
-//!   use offers — `recall` has nothing to apply, so its `on` reads as `off`;
+//!   use offers — a use with no apply stage, like `stall`, reads its `on` as
+//!   `off`;
 //! - what each request carries that the product did not write itself, and the
 //!   most of it one request may carry ([`Sent`]);
 //! - the ledger each use appends its rows to.
@@ -191,12 +192,23 @@ pub const ROUTING: JevUse = JevUse {
 };
 
 /// zo's recall rerank: how much each note a recall found helps with the
-/// request (docs/design/typesafe-judgment-expansion-20260917.md). It has no
-/// apply stage — the graph's order is the order a turn reads.
+/// request (docs/design/typesafe-judgment-expansion-20260917.md).
+///
+/// `on` is the apply stage: the judgment's order, after the vault's graph has
+/// had its say, is the order the turn reads. It stays a person's choice —
+/// `promotes` is false — because the 887 answered readings this machine has
+/// recorded say the judgment moves something on nearly every recall (a median
+/// of 7 notes reordered, the first note changed in 73% of them), and a use
+/// that changes that much of what a turn reads is not one evidence should
+/// switch on by itself.
+///
+/// The rule the apply keeps is the graph's, not the judgment's: a page a
+/// judgment cannot be shown to have merely permuted is a judgment recall's
+/// own order outlives (`runtime::memory::rerank`).
 pub const RECALL: JevUse = JevUse {
     id: "recall",
     setting: "rerankShadow",
-    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     sends: &[
         Sent {
             at: "/state/request",

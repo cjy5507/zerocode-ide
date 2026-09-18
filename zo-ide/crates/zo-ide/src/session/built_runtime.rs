@@ -13,10 +13,10 @@ pub(crate) struct RuntimePluginState {
     pub(crate) plugin_registry: PluginRegistry,
     pub(crate) memory_retriever: Option<Arc<dyn runtime::MemoryRetriever + Send + Sync>>,
     /// Seated beside the retriever and shown every recall after it settles;
-    /// it cannot change what a turn reads. Built here, where the project's
+    /// it answers with the order a turn reads. Built here, where the project's
     /// working directory is known, because that is where its setting and its
     /// ledger live.
-    pub(crate) recall_observer: Option<Arc<dyn runtime::RecallObserver>>,
+    pub(crate) recall_seat: Option<Arc<dyn runtime::RecallSeat>>,
     pub(crate) mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     pub(crate) lsp_state: Option<Arc<Mutex<RuntimeLspState>>>,
 }

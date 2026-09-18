@@ -6,7 +6,7 @@ pub mod embed_fastembed;
 pub mod model_tag;
 pub mod paths;
 pub mod recall;
-pub mod recall_observer;
+pub mod recall_seat;
 pub mod rerank;
 
 pub use classification::{

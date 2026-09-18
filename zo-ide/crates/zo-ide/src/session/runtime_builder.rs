@@ -89,9 +89,9 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         tool_registry,
         plugin_registry,
         memory_retriever,
-        // Seated whenever there is a retriever to sit beside; permitted per
-        // recall by `smart.rerankShadow`, checked on the shadow's own task.
-        recall_observer: Some(Arc::new(tools::RerankShadow::at(cwd))),
+        // Seated whenever there is a retriever to sit beside; what it may do
+        // per recall — record, or settle the order — is `smart.rerankShadow`.
+        recall_seat: Some(Arc::new(tools::RerankShadow::at(cwd))),
         mcp_state,
         lsp_state,
     })

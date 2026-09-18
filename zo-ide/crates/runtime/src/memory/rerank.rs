@@ -7,9 +7,11 @@
 //! reply into a THIRD ordering axis behind the two recall already spent.
 //!
 //! Nothing here calls anything. It builds the state and the questions, checks a
-//! reply against the questions it asked, and reports what that reply would have
-//! reordered. The executor that puts them on the wire and the ledger that keeps
-//! the comparison are the tools crate's
+//! reply against the questions it asked, reports what that reply would have
+//! reordered ([`compare`]), and folds a reported order back into recall's hits
+//! ([`apply_order`]) for the one mode allowed to act on it. The executor that
+//! puts them on the wire, the setting that permits acting, and the ledger that
+//! keeps the comparison are the tools crate's
 //! (`docs/design/typesafe-judgment-expansion-20260917.md` §6).
 //!
 //! # The graph outranks the judgment
@@ -31,8 +33,11 @@
 //!
 //! A reply that breaks any rule of the contract is not partly used: the whole
 //! judgment is discarded and recall's order stands. The two orders are reported
-//! side by side ([`RerankComparison`]) so a later phase can read how often the
-//! judgment wanted what the graph refused before anything reorders for real.
+//! side by side ([`RerankComparison`]) so a reader can see how often the
+//! judgment wanted what the graph refused. Under `smart.rerankShadow: on` the
+//! graph-safe order is also what the turn reads — and [`apply_order`] folds it
+//! only when it can prove the order a permutation of what recall admitted, so
+//! the same discard rule holds at the moment it would change something.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -506,6 +511,48 @@ fn stronger(candidate: &Group, against: &Group) -> bool {
     }
 }
 
+/// Recall's hits in the order a judgment settled on — the one place a judgment
+/// is allowed to change what a turn reads.
+///
+/// `proposed` is [`RerankComparison::proposed`]: the judged head, by name,
+/// after the graph has had its say. The head is the notes [`rerank_candidates`]
+/// built a question for — that same rule, so the two can never disagree about
+/// which notes were asked about — and the tail behind it was never asked, so it
+/// keeps recall's order.
+///
+/// `None` unless `proposed` is exactly that head's names in some order. The
+/// contract says a judgment may only permute what recall already admitted; an
+/// order that cannot be PROVED a permutation is one this refuses to fold, and
+/// the caller then reads recall's order. Two hits recalled under one name
+/// cannot be told apart, so they cannot be proved either.
+#[must_use]
+pub fn apply_order(hits: &[MemoryHit], proposed: &[String]) -> Option<Vec<MemoryHit>> {
+    let judged = hits.len().min(MAX_RERANK_CANDIDATES);
+    if judged == 0 || proposed.len() != judged {
+        return None;
+    }
+    let head = &hits[..judged];
+    let mut by_slug: BTreeMap<&str, usize> = BTreeMap::new();
+    for (position, hit) in head.iter().enumerate() {
+        if by_slug.insert(hit.entry.slug.as_str(), position).is_some() {
+            return None;
+        }
+    }
+    let mut taken = vec![false; head.len()];
+    let mut read = Vec::with_capacity(hits.len());
+    for name in proposed {
+        let position = *by_slug.get(name.as_str())?;
+        // A name the order spells twice would read one note twice and drop
+        // another, which is the same broken promise as inventing an id.
+        if std::mem::replace(&mut taken[position], true) {
+            return None;
+        }
+        read.push(head[position].clone());
+    }
+    read.extend_from_slice(&hits[judged..]);
+    Some(read)
+}
+
 /// The order the judgment alone would have produced, with no graph rule
 /// applied — the control [`RerankComparison::held_by_graph`] is measured
 /// against.
@@ -829,5 +876,93 @@ mod tests {
             .collect();
 
         assert_eq!(rerank_candidates(&hits).len(), MAX_RERANK_CANDIDATES);
+    }
+
+    fn slugs(hits: &[MemoryHit]) -> Vec<String> {
+        hits.iter().map(|hit| hit.entry.slug.clone()).collect()
+    }
+
+    fn names(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    #[test]
+    fn the_fold_reads_the_judgments_order_and_carries_every_hit_whole() {
+        let hits = [
+            hit("wiki/a", "barely on topic"),
+            hit("wiki/b", "the answer"),
+            hit("wiki/c", "background"),
+        ];
+        let comparison = compare(&hits, &readings(&hits, &[0, 3, 1])).expect("an order");
+
+        let read = apply_order(&hits, &comparison.proposed).expect("a permutation folds");
+
+        assert_eq!(slugs(&read), comparison.proposed);
+        assert_eq!(
+            read[0], hits[1],
+            "a fold moves a hit, it does not rebuild one"
+        );
+    }
+
+    /// Only the head is judged when recall admitted more notes than one
+    /// judgment may be asked about; the tail keeps recall's order behind it.
+    #[test]
+    fn notes_past_the_judged_head_keep_recalls_order_behind_it() {
+        let hits: Vec<MemoryHit> = (0..MAX_RERANK_CANDIDATES + 2)
+            .map(|index| hit(&format!("wiki/p{index}"), "a claim"))
+            .collect();
+        let head = &hits[..MAX_RERANK_CANDIDATES];
+        let mut levels = vec![0usize; MAX_RERANK_CANDIDATES];
+        levels[MAX_RERANK_CANDIDATES - 1] = 3;
+        let comparison = compare(head, &readings(head, &levels)).expect("an order");
+
+        let read = apply_order(&hits, &comparison.proposed).expect("a head permutation folds");
+
+        assert_eq!(read.len(), hits.len());
+        assert_eq!(read[0].entry.slug, format!("wiki/p{}", MAX_RERANK_CANDIDATES - 1));
+        assert_eq!(
+            slugs(&read[MAX_RERANK_CANDIDATES..]),
+            slugs(&hits[MAX_RERANK_CANDIDATES..]),
+            "the unjudged tail is not reordered and not dropped"
+        );
+    }
+
+    /// The contract is that a judgment may only PERMUTE what recall admitted.
+    /// A fold that cannot prove that of the order it was handed does not
+    /// happen, so recall's order stands.
+    #[test]
+    fn an_order_that_is_not_a_permutation_folds_nothing() {
+        let hits = [hit("wiki/a", "one"), hit("wiki/b", "two"), hit("wiki/c", "three")];
+
+        for (order, why) in [
+            (names(&["wiki/b", "wiki/a"]), "a note recall admitted was dropped"),
+            (names(&["wiki/b", "wiki/a", "wiki/z"]), "a note recall never admitted"),
+            (names(&["wiki/b", "wiki/b", "wiki/a"]), "one note put in twice"),
+            (Vec::new(), "no order at all"),
+            (
+                names(&["wiki/a", "wiki/b", "wiki/c", "wiki/c"]),
+                "an order longer than the notes",
+            ),
+        ] {
+            assert_eq!(apply_order(&hits, &order), None, "{why}");
+        }
+    }
+
+    /// Two notes recall returned under one name cannot be told apart, so the
+    /// order cannot be proved a permutation of them either.
+    #[test]
+    fn a_name_recall_returned_twice_folds_nothing() {
+        let hits = [hit("wiki/a", "one"), hit("wiki/a", "again"), hit("wiki/b", "two")];
+
+        assert_eq!(apply_order(&hits, &names(&["wiki/b", "wiki/a", "wiki/a"])), None);
+    }
+
+    #[test]
+    fn an_order_that_agrees_with_recall_is_recalls_order() {
+        let hits = [hit("wiki/a", "one"), hit("wiki/b", "two")];
+
+        let read = apply_order(&hits, &slugs(&hits)).expect("a permutation folds");
+
+        assert_eq!(read, hits);
     }
 }

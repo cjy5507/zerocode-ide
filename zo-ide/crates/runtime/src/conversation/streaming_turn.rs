@@ -1170,7 +1170,7 @@ where
                 self.memory_retriever.clone(),
                 self.recall_query_text().map(std::borrow::Cow::into_owned),
                 self.session_tracer.clone(),
-                self.recall_observer.clone(),
+                self.recall_seat.clone(),
             )
             .await;
             let recall_attached = !recall_section.is_empty();
