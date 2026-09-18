@@ -13509,7 +13509,7 @@ details.worker-command {
   flex-direction: column;
   gap: var(--space-3);
   margin: 0;
-  padding: var(--space-3) var(--helper-gutter, var(--space-4));
+  padding: var(--space-3) var(--helper-gutter, var(--space-4)) var(--space-6);
   overflow-y: auto;
   /* 앵커 보정은 스크립트가 한 벌로 한다(`syncHelperTurns`) — 브라우저의
    * 자동 앵커가 겹치면 한쪽이 거짓말이 된다. */
@@ -13547,12 +13547,19 @@ details.worker-command {
  * it. The answer's mark is the extension's bullet, a quiet dot; a tool row's
  * dot is the state of the call (below). The dot is the row's `::before`, so a
  * 400-turn page pays no node for it. */
-.helper-turn.is-assistant,
-.helper-turn.is-tool {
+.helper-turn.is-assistant {
   display: grid;
   grid-template-columns: var(--chat-gutter) minmax(0, 1fr);
   row-gap: var(--space-2);
   align-items: start;
+}
+
+.helper-turn.is-tool {
+  display: grid;
+  grid-template-columns: var(--chat-gutter) minmax(0, 1fr);
+  row-gap: 2px;
+  align-items: start;
+  margin: 1px 0;
 }
 
 .helper-turn.is-assistant > *,
@@ -13820,13 +13827,16 @@ details.worker-command {
   align-items: baseline;
   gap: var(--space-2);
   margin: 0;
-  line-height: var(--chat-prose-leading);
+  line-height: 1.4;
+  font-size: var(--text-xs);
   color: var(--ink-chalk);
 }
 
 .helper-tool-name {
   flex: none;
-  font-weight: 500;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  color: var(--chat-accent, var(--ink-figure));
 }
 
 .helper-tool-arg {
@@ -13837,7 +13847,7 @@ details.worker-command {
   white-space: nowrap;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  color: var(--chat-work-ink);
+  color: var(--ink-mist);
 }
 
 /* `└ 256 lines` — the first line of what came back. */
@@ -13847,9 +13857,10 @@ details.worker-command {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  line-height: var(--chat-prose-leading);
+  font-size: var(--text-2xs, 11px);
+  line-height: 1.3;
   color: var(--chat-work-ink);
+  opacity: 0.85;
 }
 
 .helper-tool-result::before {
@@ -14399,6 +14410,21 @@ button.worker-composer-pill:hover {
 .worker-composer-send .icon {
   width: var(--icon-size);
   height: var(--icon-size);
+}
+
+.worker-composer-send.is-stop {
+  background: var(--ink-figure);
+  color: var(--surface-abyss);
+  transition: transform var(--motion-fast) var(--ease-standard);
+}
+
+.worker-composer-send.is-stop:hover {
+  transform: scale(1.08);
+}
+
+.worker-composer-send.is-stop .icon {
+  width: 12px;
+  height: 12px;
 }
 
 /* 첨부(t-2993, docs/design/composer-attachments.md §2.2): textarea 위의 칩

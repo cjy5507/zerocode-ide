@@ -10382,14 +10382,13 @@ function tickWorkers() {
 
 function workerStatusWords(run) {
   const state = run.status === "running"
-    ? run.helper ? t("worker.live", "실행 중 — 새 기록이 도착하면 갱신됩니다.")
-      : t("worker.holds", "실행 중 — 출력은 부모 에이전트가 쥐고 있어, 끝나면 여기 표시됩니다.")
-    : run.status === "idle" ? t("worker.idle", "대기 중 — 보낼 말을 기다립니다.")
-      : run.status === "failed" ? t("worker.endedFailed", "실패로 끝났습니다.")
-        : run.status === "orphaned" ? t("worker.endedOrphaned", "부모 터미널이 종료되어 결과를 받지 못했습니다.")
-          : t("worker.ended", "끝났습니다.");
-  return run.helper?.skipped
-    ? `${state} ${t("worker.recordsSkipped", "큰 기록 일부를 생략했습니다. 전체 내용은 부모 터미널에서 확인할 수 있습니다.")}` : state;
+    ? t("worker.live", "실행 중")
+    : run.status === "idle" ? t("worker.idle", "대기 중")
+      : run.status === "failed" ? t("worker.endedFailed", "실패")
+        : run.status === "orphaned" ? t("worker.endedOrphaned", "종료됨")
+          : t("worker.ended", "완료");
+  const skipped = run.helper?.skipped ? t("worker.recordsSkipped", "") : "";
+  return skipped ? `${state} ${skipped}`.trim() : state;
 }
 
 /* ---- 헬퍼의 대화 페이지 ----
@@ -10850,6 +10849,7 @@ async function setPaneChat(term, on) {
   if (on && await handPaneToWire(term)) return;
   held.on = on;
   held.arriving = on ? "chat" : "term";
+  if (on) held.freshSwitch = true;
   updateStage();
   paintViewToggle();
   helperClock.sync();
@@ -10989,12 +10989,10 @@ function paintPaneChat(term) {
     held.pendingWire === true,
     t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간 세션(선)으로 이어집니다 — 그때부터 답이 낱말 단위로 흐릅니다."),
   );
-  // The view opened on a long transcript's tail: the turns above are in the
-  // pane's own screen and its session file, not here.
   noticeOnPaneChat(
     held,
     "worker.historyFolded",
-    run.helper.folded === true,
+    false,
     t("worker.historyFolded", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다."),
   );
 }
@@ -11147,7 +11145,19 @@ async function pollHelperPages() {
   // beat — the history a person asked for must not stream in as if it were
   // being said. Only while the cursor moves; a chunk that yielded nothing
   // (one oversized line) waits for the beat like any other.
-  if (more.more === true && (after === null || more.next > after)) queueMicrotask(() => void pollHelperPages());
+  if (more.more === true && (after === null || more.next > after)) {
+    queueMicrotask(() => void pollHelperPages());
+  } else if (activeHelperPage() === tab) {
+    const term = tab.worker?.term;
+    const working = term !== undefined && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)));
+    if ((working || (more?.turns?.length ?? 0) > 0) && !held.quickFollow) {
+      held.quickFollow = true;
+      setTimeout(() => {
+        held.quickFollow = false;
+        if (activeHelperPage() === tab) void pollHelperPages();
+      }, 160);
+    }
+  }
 }
 
 /* 어느 체크아웃의 무대에 앉힐지 — 그 체크아웃의 나무가 아는 자리 하나.
@@ -11254,12 +11264,7 @@ function toolWords(turn) {
   if (turn.role === "tool_result") return { name: turn.tool?.name ?? "", arg: "", input: "" };
   const head = turn.text.split("\n", 1)[0];
   const cut = head.indexOf(" · ");
-  // The target is what the transcript's own line shows after the name — the
-  // one argument a terminal shows (`tool_target`). The call record's `input`
-  // is the DETAIL behind the row: a shell command as typed, or the whole
-  // argument object as pretty JSON (an Edit's file, old and new strings), and
-  // its first line ("{") is no target.
-  const target = cut > 0 ? head.slice(cut + 3) : "";
+  let target = cut > 0 ? head.slice(cut + 3) : "";
   let name;
   let input;
   if (turn.tool?.name) {
@@ -11275,7 +11280,43 @@ function toolWords(turn) {
     name = t("worker.tool", "도구");
     input = turn.text;
   }
+
+  // CapabilityInvoke unwrap: CapabilityInvoke {"name":"WebSearch", "input":{...}}
+  // shows as "WebSearch · query" rather than generic wrapper clutter.
+  if ((name === "CapabilityInvoke" || name.startsWith("CapabilityInvoke ")) && input) {
+    try {
+      const parsed = typeof input === "object" ? input : JSON.parse(input.trim());
+      if (parsed?.name) {
+        name = parsed.name;
+        if (parsed.input && typeof parsed.input === "object") {
+          target = parsed.input.query || parsed.input.url || parsed.input.command || parsed.input.path || parsed.input.prompt || "";
+        }
+      }
+    } catch {}
+  }
+
+  // Extract clean target from JSON argument objects ({ "path": "...", "command": "...", "pattern": "..." })
+  if (!target && typeof input === "string" && input.trim().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(input.trim());
+      target = parsed.path || parsed.command || parsed.pattern || parsed.query || parsed.url || "";
+    } catch {}
+  }
+
+  if (target && target.length > 80) target = `${target.slice(0, 77)}…`;
+
   return { name, arg: target || input.split("\n", 1)[0], input };
+}
+
+function cleanseAssistantText(text) {
+  if (!text) return "";
+  return text
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/gi, "")
+    .replace(/<task-notification>[\s\S]*?<\/task-notification>/gi, "")
+    .replace(/<local-command-caveat>[\s\S]*?<\/local-command-caveat>/gi, "")
+    .replace(/\[earlier reasoning\][\s\S]*?(?=\n\n|\n[#A-Z]|$)/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /* One row per turn, whatever the turn is — the sync appends these in order
@@ -11299,7 +11340,8 @@ function helperTurnRowNode(run, turn, spoken) {
     said.textContent = turn.text;
   } else {
     row.className = `helper-turn is-${turn.role}`;
-    paintHelperProse(said, turn.text, helperBase(run));
+    const clean = turn.role === "assistant" ? cleanseAssistantText(turn.text) : turn.text;
+    paintHelperProse(said, clean || turn.text, helperBase(run));
   }
   row.appendChild(said);
   row.dataset.turn = String(turn.seq);
@@ -11660,10 +11702,21 @@ function dressLastAnswer(list, run, newest) {
   list.__lastAnswer = newest.row;
 }
 
+function scrollHelperToBottom(list) {
+  if (!list) return;
+  list.scrollTop = list.scrollHeight;
+  requestAnimationFrame(() => {
+    list.scrollTop = list.scrollHeight;
+    try {
+      list.lastElementChild?.scrollIntoView({ block: "end", behavior: "instant" });
+    } catch {}
+  });
+}
+
 /* 바닥 근처의 폭. 이 안에 있으면 새 턴을 따라가고, 위를 읽는 중이면 자리를
  * 지킨다. 그리는 픽셀이 아니라 스크롤 판정의 문턱이라 간격 스케일 밖의
  * px다. */
-const HELPER_FOLLOW_SLACK_PX = 48;
+const HELPER_FOLLOW_SLACK_PX = 160;
 
 /* 전사를 장부에 맞춘다 — 통째로 다시 세우지 않고.
  *
@@ -11747,32 +11800,42 @@ function syncHelperTurns(list, run) {
   // dressed at the tail (`dressLastAnswer`), and a streaming row standing in
   // front of the newest answer moved all three.
   //
-  // Only what arrives after the page has stood. Opening a conversation draws
-  // its history in one paint, as it always did: revealing a transcript's tail
-  // word by word would be minutes of old turns typing themselves out.
-  if (newest && !run.wire && list.__painted) {
+  // Only what arrives while the agent is actively working in a live pane.
+  // If the agent has already finished (idle), or if the user just switched/opened
+  // the conversation view, the turn already happened: render it immediately in
+  // full without any trailing typewriter reveal.
+  const term = run.term;
+  const working = (term !== undefined && term !== null && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)))) || run.status === "running";
+  const chatHeld = term !== undefined && term !== null ? paneChats.get(term) : null;
+  const fresh = chatHeld?.freshSwitch === true || list.__painted !== true;
+  if (chatHeld) chatHeld.freshSwitch = false;
+
+  if (newest && !run.wire && !fresh && working) {
     revealAnswerInPlace(newest.row, newest.turn.text, helperBase(run));
   }
   list.__painted = true;
   dressLastAnswer(list, run, newest);
   syncStreamingTurns(list, run);
-  if (follow) list.scrollTop = list.scrollHeight;
+  if (newest || follow) scrollHelperToBottom(list);
 }
 
 /* Put an answer that landed whole on screen a word at a time, in its own row.
  *
  * The wire's page has live text to pace; a transcript has only the finished
- * turn, so the pacing is done here against the clock at [`REVEAL_WORD_MS`],
- * repainting the row's prose from a growing prefix. The row is the turn's
- * own — its tail, its preview card and its place in the list are somebody
- * else's to write, and they all read the row rather than what is inside it. */
-function revealAnswerInPlace(row, text, base) {
+ * turn. To match the terminal's pace without stalling or stuttering, words are
+ * released with adaptive backlog acceleration (never dragging behind on longer
+ * answers) and rendered incrementally: settled blocks are painted once as
+ * markdown while only the actively revealed tail updates, avoiding the
+ * whole-subtree reparse and layout thrashing that made earlier versions drop
+ * frames and freeze mid-reveal. */
+function revealAnswerInPlace(row, rawText, base) {
   const said = row.querySelector(".helper-said");
   if (!said || row.__revealing) return;
   // A hidden tab stops `requestAnimationFrame`, so a reveal started there
   // would hold the answer at its first word until somebody came back. The row
   // already holds the whole turn; leave it standing.
   if (document.hidden) return;
+  const text = cleanseAssistantText(rawText) || rawText;
   // Prose only. A prefix of a table is not a shorter table, and a prefix of a
   // fence or an image is not a shorter one of those either: repainting them
   // part-written puts broken markup on screen for as long as the reveal runs.
@@ -11782,12 +11845,47 @@ function revealAnswerInPlace(row, text, base) {
   // One word is already one paint; two is the shortest thing worth revealing.
   if (ends.length < 2) return;
   row.__revealing = true;
+
+  // Adaptive pacing: scale total duration by word count so short answers feel
+  // natural (~160–250ms) while long answers accelerate smoothly (~400–600ms),
+  // keeping pace with the terminal rather than lagging many seconds behind.
+  const wordCount = ends.length;
+  const totalDuration = Math.min(600, Math.max(160, wordCount * 14));
   const start = performance.now();
-  // `paintHelperProse` appends, so each frame starts from an empty node.
-  const paint = (upto) => {
+
+  let settledDiv = said.querySelector(":scope > .helper-said-settled");
+  let tailP = said.querySelector(":scope > .helper-said-tail");
+  if (!settledDiv || !tailP) {
     said.replaceChildren();
-    paintHelperProse(said, text.slice(0, upto), base);
+    settledDiv = document.createElement("div");
+    settledDiv.className = "helper-said-settled";
+    tailP = document.createElement("p");
+    tailP.className = "helper-said-tail";
+    said.append(settledDiv, tailP);
+  }
+  let settledEnd = 0;
+  let lastUpto = 0;
+
+  const paintUpto = (upto) => {
+    if (upto === lastUpto) return;
+    lastUpto = upto;
+    const cut = settledCut(text, upto);
+    if (cut > settledEnd) {
+      settledDiv.replaceChildren();
+      paintHelperProse(settledDiv, text.slice(0, cut), base);
+      settledEnd = cut;
+    }
+    tailP.textContent = text.slice(settledEnd, upto);
+    scrollHelperToBottom(row.closest(".helper-turns"));
   };
+
+  const finish = () => {
+    said.replaceChildren();
+    paintHelperProse(said, text, base);
+    row.__revealing = false;
+    scrollHelperToBottom(row.closest(".helper-turns"));
+  };
+
   const step = (now) => {
     if (!row.isConnected) {
       row.__revealing = false;
@@ -11796,19 +11894,24 @@ function revealAnswerInPlace(row, text, base) {
     // Hidden mid-reveal: finish it, so coming back shows the answer rather
     // than the words it had reached when the tab went away.
     if (document.hidden) {
-      paint(text.length);
-      row.__revealing = false;
+      finish();
       return;
     }
-    const at = Math.min(ends.length - 1, Math.floor((now - start) / REVEAL_WORD_MS));
-    paint(ends[at]);
-    if (ends[at] >= text.length) {
-      row.__revealing = false;
+    const elapsed = now - start;
+    const progress = Math.min(1, elapsed / totalDuration);
+    const at = Math.min(ends.length - 1, Math.floor(progress * ends.length));
+    const upto = ends[at];
+
+    if (progress >= 1 || upto >= text.length) {
+      finish();
       return;
     }
+
+    paintUpto(upto);
     requestAnimationFrame(step);
   };
-  paint(ends[0]);
+
+  paintUpto(ends[0]);
   requestAnimationFrame(step);
 }
 
@@ -12240,6 +12343,20 @@ function workerComposerNode(run, owner = null) {
   send.disabled = Boolean(run.sendUncertain);
   send.setAttribute("aria-label", t("worker.send", "보내기"));
   send.appendChild(iconNode("arrow-up"));
+  send.addEventListener("click", async (event) => {
+    if (send.classList.contains("is-stop")) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (run.wire) {
+        void composerRoad(run).interrupt();
+      } else if (run.term !== undefined && run.term !== null) {
+        void invoke("term_key", { term: run.term, press: { key: "c", ctrl: true, alt: false } });
+      }
+      run.status = "idle";
+      run.sending = false;
+      syncWorkerComposers(run);
+    }
+  });
   right.appendChild(send);
   tools.appendChild(right);
   form.append(box, tools);
@@ -12315,7 +12432,23 @@ function paintWorkerComposerState(form, run, delivered = null) {
     form.__workerFit?.();
   }
   box.readOnly = Boolean(run.sending);
-  form.querySelector(".worker-composer-send").disabled = Boolean(run.sending || run.sendUncertain);
+  const send = form.querySelector(".worker-composer-send");
+  const term = run.term;
+  const working = (term !== undefined && term !== null && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)))) || run.status === "running";
+  const stopping = working && !run.sending && !run.sendUncertain;
+
+  if (stopping) {
+    send.disabled = false;
+    send.classList.add("is-stop");
+    send.setAttribute("aria-label", t("worker.stop", "중지"));
+    send.replaceChildren(iconNode("square"));
+  } else {
+    send.classList.remove("is-stop");
+    send.disabled = Boolean(run.sending || run.sendUncertain);
+    send.setAttribute("aria-label", t("worker.send", "보내기"));
+    send.replaceChildren(iconNode("arrow-up"));
+  }
+
   const spec = installedAgents().find((row) => row.id === run.agent) ?? null;
   const agentChip = form.querySelector(".worker-composer-agent");
   if (agentChip) paintComposerAgentChip(agentChip, run, agentModelLists.get(run.agent)?.rows ?? run.wireModels ?? null);
