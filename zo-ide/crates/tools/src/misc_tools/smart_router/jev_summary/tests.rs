@@ -270,3 +270,22 @@ fn nothing_the_detached_shadow_runs_resolves_a_path_of_its_own() {
     let fire = &shipped[fires..from];
     assert!(fire.contains("ledger: decision_shadow_path("), "fire no longer freezes the ledger");
 }
+
+#[test]
+fn a_windows_cost_is_read_from_the_judgment_rate_and_not_the_chat_table() {
+    // The two tables are kept apart on purpose: a judgment bills input only
+    // and is never a chat candidate the plan scorer ranks. Asked of the chat
+    // table this answered `None` for every seat, and the card drew no cost at
+    // all against a price written down since the launch post.
+    let rate = api::systemone_rate(api::SYSTEMONE_MODEL).expect("the judgment rate is written down");
+    assert_eq!(super::cost_of(0), Some(0.0), "no tokens is no cost, not an unpriced seat");
+    let million = super::cost_of(1_000_000).expect("priced");
+    assert!((million - rate.input).abs() < 1e-12, "a million tokens is one unit of the rate");
+    let some = super::cost_of(14_145).expect("priced");
+    assert!(some > 0.0 && some < million, "{some} is not between nothing and a million tokens");
+    assert_eq!(
+        super::super::plan_shadow::model_price_for(api::SYSTEMONE_MODEL),
+        None,
+        "the chat table now names the judgment model — say which table costs come from",
+    );
+}

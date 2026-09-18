@@ -199,13 +199,20 @@ pub fn start_of_day_ms(now_ms: i64, offset_s: i64) -> i64 {
     local - local.rem_euclid(MS_PER_DAY) - offset_s * 1000
 }
 
+/// What a window's billed input cost, at the rate of the model the seat asks
+/// for.
+///
+/// The System One rate table is read and not the chat one: a judgment call
+/// bills input only and is never a candidate the plan scorer could rank, and
+/// the two are kept apart on purpose (`api::systemone_rate`). Asked of the
+/// chat table this answered `None` for every seat and the card drew no cost at
+/// all, against a price that has been written down since the launch post.
+///
+/// Priced by the id the seat ASKS with, not the one the wire answers with: the
+/// bill is for the request, and a dated id no row names is unpriced rather
+/// than billed at a neighbour's rate.
 fn cost_of(input_tokens: u64) -> Option<f64> {
-    if input_tokens == 0 {
-        return Some(0.0);
-    }
-    let price = super::plan_shadow::model_price_for(api::SYSTEMONE_MODEL)?;
-    #[allow(clippy::cast_precision_loss)]
-    Some(price.input * input_tokens as f64)
+    Some(api::systemone_rate(api::SYSTEMONE_MODEL)?.input_cost_usd(input_tokens))
 }
 
 #[cfg(test)]
