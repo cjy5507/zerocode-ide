@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.1.0] — 2026-09-18
+
+_since v1.0.0 (18 commits)_
+
+### feat
+- feat(settings): the sixth seat joins the card in the row grammar, and the count of a seat's modes is read off the table instead of typed beside it
+- feat(routing): why the judgment did not run is written down — the reason existed, in memory, and died with the process that knew it
+- feat(settings): the gate in front of the routing seat stands on the card — a mode nothing can reach now says so on the row it is set on (t-4713)
+- feat(settings): a field is as wide as its value and the leftover width is the words — the API router pane, written as the grammar every pane inherits
+- feat(jev): a judgment's second request leaves, and the day counts it — the real routing ledger names an 864 ms delay, read in 495 us
+- feat(summon): which agent carries a summons becomes a judgment — the shadow writes what Jev would have chosen beside the three words the coordinator typed
+- feat(type-value): the seat that writes a typed value is chosen by measurement, and the measurement is the table — the 400 ms bar was not met, and one reading would have picked the wrong row
+- feat(jev): a judgment that has not answered yet is asked again, at a delay the wall sets — 63.6% of routing answers land in time, now 81.8%
+- feat(rerank): a refused judgment names the rule it broke, so `schema` stops being one word for nine
+- feat(jev): the recall judgment gets an exit — `on` reorders what a turn reads, and the routing judgment turns out never to be asked
+- feat(supply-chain): the picture says what is wrong and now the report says what to raise — one line per dependency a member declares, and everything raising it closes
+
+### fix
+- fix(chat): the tool turn's tight gap becomes a token, and a fallback nothing could ever reach stops being a second copy of 11px
+- fix(settings): a label with a sentence about it is two things, not one line — the switch rows' copy reads as [label + one line] now that the words have a measure
+- fix(jev): one envelope for every closed choice — a tag four seats spelled by hand, and the one that forgot it has never written a row
+- fix(rerank): the reply's checks allow for the rounding the wire does — 56.7% of judgments discarded, now 0%
+- fix(ui): optimize conversation rendering, auto-scroll and composer stop state
+
+### perf
+- perf(computer-use): one node, one call — the macOS tree walk asks for its attributes together instead of fourteen at a time
+
+### test
+- test(memory): what recall MISSES, measured against labels a person already wrote — the right page is in the eight 83.4% of the time
+
 ## [1.0.0] — 2026-09-18
 
 ZeroCode's first release from this repository. The program itself is not new —
