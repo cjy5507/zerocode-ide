@@ -495,6 +495,8 @@ pub fn low_disk_warning(dir: &std::path::Path) -> Option<String> {
     low_disk_warning_at(available, LOW_DISK_WARN_BYTES, &tightest)
 }
 
+pub mod reclaim;
+
 /// Below this floor the run is refused outright: work started here dies on
 /// ENOSPC mid-flight anyway, and the refusal names what to reclaim. The gap
 /// between the two thresholds separates "warn and continue" from hard-stop.
@@ -518,10 +520,18 @@ pub(crate) fn disk_critical_error(
 }
 
 /// Hard-stop preflight at the shared execution chokepoint.
-fn refuse_when_disk_critical(cwd: &std::path::Path) -> io::Result<()> {
+///
+/// `command` is admitted below the floor when it can only look or only free
+/// ([`reclaim::frees_or_looks`]). The refusal's own message names what to
+/// reclaim, and this chokepoint is every run a session has — without the
+/// exception the advice is unfollowable: no `df` to find the full disk, no
+/// `du` to find the big directory, no `rm` to remove it. A session at 126 MB
+/// was refused a bare `df -h` here and died on ENOSPC in the next breath.
+fn refuse_when_disk_critical(cwd: &std::path::Path, command: &str) -> io::Result<()> {
     match tightest_disk(cwd).and_then(|(available, tightest)| {
         disk_critical_error(available, HARD_MIN_DISK_BYTES, &tightest)
     }) {
+        Some(_) if reclaim::frees_or_looks(command) => Ok(()),
         Some(error) => Err(error),
         None => Ok(()),
     }
@@ -593,7 +603,7 @@ pub fn execute_bash_with_tasks(
     // build that would otherwise die on it — a warning with headroom left,
     // a refusal below the critical floor.
     let low_disk = low_disk_warning(&cwd);
-    refuse_when_disk_critical(&cwd)?;
+    refuse_when_disk_critical(&cwd, &input.command)?;
 
     // Captured before the background branch consumes `tasks`: the foreground
     // timeout reply below may only name `TaskOutput` when a registry is what
