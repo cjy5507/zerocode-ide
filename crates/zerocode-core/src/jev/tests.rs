@@ -351,3 +351,23 @@ fn the_routing_seat_is_only_asked_under_the_probing_word() {
     );
     assert!(ROUTING.modes.iter().copied().any(JevMode::applies));
 }
+
+#[test]
+fn only_auto_changes_its_mind_when_the_judge_speaks() {
+    // A person's word is theirs: `on` acts whatever a window says and `off`
+    // and `shadow` stay put. `auto` is the one mode evidence moves.
+    for mode in JevMode::ALL {
+        let quiet = mode.applies_with(false);
+        let raised = mode.applies_with(true);
+        assert_eq!(
+            quiet != raised,
+            mode == JevMode::Auto,
+            "{} moved={} ",
+            mode.key(),
+            quiet != raised
+        );
+        assert_eq!(mode.applies(), quiet, "{} reads as unraised without a judgment", mode.key());
+    }
+    assert!(JevMode::On.applies_with(false));
+    assert!(!JevMode::Shadow.applies_with(true));
+}

@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use zerocode_core::jev::count::REQUESTS_DIR;
+use zerocode_core::jev::promote::{self, Evidence, Stand, Verdict};
 use zerocode_core::jev::summary::{self, Tally};
 use zerocode_core::jev::{JEV_USES, JevMode, JevUse};
 
@@ -59,6 +60,13 @@ pub struct SeatReport {
     /// Whether the week's lower bound clears that line. `None` when the seat
     /// never rises or the window is empty.
     pub clears_rise_floor: Option<bool>,
+    /// Where the seat stands, read back from its own transitions.
+    pub stand: Stand,
+    /// What the judge says of the recent window — `None` for a seat whose
+    /// `auto` can never rise, which is not a seat with a bad verdict.
+    pub verdict: Option<Verdict>,
+    /// Whether the seat acts right now: its mode, and for `auto` its standing.
+    pub applies: bool,
 }
 
 impl SeatReport {
@@ -68,6 +76,19 @@ impl SeatReport {
     pub fn rows_to_next_judgment(&self) -> Option<usize> {
         self.rise_floor_permille.map(|_| self.week.rows_to_next_judgment())
     }
+}
+
+/// The deadline the seat's apply stage falls back on, read from that stage
+/// rather than written here.
+///
+/// A seat has one exactly when it has somewhere to act: today that is the
+/// routing judgment, whose 1.5 s the router already spells. A contract holds
+/// the two together, so a seat that gains a rise line without an apply stage
+/// to time it cannot slip through.
+#[must_use]
+pub fn deadline_ms_for(seat: &JevUse) -> Option<u64> {
+    (seat.id == zerocode_core::jev::ROUTING.id)
+        .then(|| u64::try_from(super::decision_shadow::DECISION_ACTIVE_DEADLINE.as_millis()).unwrap_or(u64::MAX))
 }
 
 /// Both roots a seat's ledger may live under, in the order they are asked.
@@ -119,6 +140,22 @@ fn one(
     let clears_rise_floor = seat.answer_floor_permille.and_then(|floor| {
         week.answered_lower_bound().map(|bound| clears(bound, floor))
     });
+    let stand = promote::stand_from(&rows);
+    let verdict = seat.answer_floor_permille.zip(deadline_ms_for(seat)).map(|(floor, deadline)| {
+        promote::judge(
+            stand,
+            &Evidence {
+                window: &week,
+                floor_permille: floor,
+                deadline_ms: deadline,
+                // Labels are a person's work and a command of their own
+                // (`zo decision-shadow eval --labels`); a summary that
+                // invented them would raise a seat on nothing.
+                labels: None,
+                fallbacks_in_a_row: 0,
+            },
+        )
+    });
     SeatReport {
         id: seat.id,
         setting: seat.setting,
@@ -130,6 +167,11 @@ fn one(
         cost_usd,
         rise_floor_permille: seat.answer_floor_permille,
         clears_rise_floor,
+        stand,
+        verdict,
+        applies: seat
+            .mode_in(settings.unwrap_or(&Value::Null))
+            .applies_with(stand == Stand::Applying),
     }
 }
 
@@ -166,3 +208,11 @@ fn cost_of(input_tokens: u64) -> Option<f64> {
 
 #[cfg(test)]
 mod tests;
+
+/// A line's own word, as a function a caller can hand to `map` — the word
+/// itself is the line's to say, and this only saves a reader from naming the
+/// core's path to reach it.
+#[must_use]
+pub fn line_token(line: promote::Line) -> &'static str {
+    line.token()
+}

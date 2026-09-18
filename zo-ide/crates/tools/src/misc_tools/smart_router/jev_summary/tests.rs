@@ -86,3 +86,76 @@ fn a_seat_that_never_rises_is_never_asked_to_clear_a_line() {
         assert_eq!(row.rows_to_next_judgment().is_some(), seat.promotes);
     }
 }
+
+#[test]
+fn a_seat_that_can_rise_has_a_stage_to_time_it() {
+    // A rise line with no deadline is a promotion nobody can fail on latency.
+    for seat in zerocode_core::jev::JEV_USES.iter() {
+        assert_eq!(
+            deadline_ms_for(seat).is_some(),
+            seat.promotes,
+            "{} promotes={} deadline={:?}",
+            seat.id,
+            seat.promotes,
+            deadline_ms_for(seat)
+        );
+    }
+}
+
+#[test]
+fn a_seat_starts_recording_and_a_rise_row_in_its_own_ledger_makes_it_act() {
+    use zerocode_core::jev::promote::{ROSE, Stand, TRANSITION};
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::ROUTING;
+    let auto = json!({ "smart": { seat.setting: "auto" } });
+
+    write(home.path(), seat.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5})]);
+    let quiet = super::one(seat, &roots, Some(&auto), 1_000, 0);
+    assert_eq!(quiet.stand, Stand::Recording);
+    assert!(!quiet.applies, "auto starts recording");
+
+    write(
+        home.path(),
+        seat.ledger,
+        &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5}), json!({"at": 2, TRANSITION: ROSE})],
+    );
+    let raised = super::one(seat, &roots, Some(&auto), 1_000, 0);
+    assert_eq!(raised.stand, Stand::Applying);
+    assert!(raised.applies, "a rise its own ledger recorded makes auto act");
+}
+
+#[test]
+fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
+    use zerocode_core::jev::promote::{Line, Verdict};
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::ROUTING;
+    write(home.path(), seat.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5})]);
+    let row = super::one(seat, &roots, None, 1_000, 0);
+    assert!(matches!(row.verdict, Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))));
+
+    // And a seat with no rise line is never judged at all.
+    let quiet = super::one(&zerocode_core::jev::STALL, &roots, None, 1_000, 0);
+    assert_eq!(quiet.verdict, None);
+}
+
+#[test]
+fn the_routing_seat_reads_its_standing_from_the_ledger_it_writes() {
+    use zerocode_core::jev::promote::{FELL, ROSE, TRANSITION};
+    let work = tempfile::tempdir().expect("tmp");
+    let ledger = work.path().join(zerocode_core::jev::ROUTING.ledger);
+
+    assert!(
+        !super::super::decision_shadow::raised_at(&ledger),
+        "a seat with no ledger has never risen"
+    );
+    fs::write(&ledger, format!("{}\n", json!({"at": 1, TRANSITION: ROSE}))).expect("write");
+    assert!(super::super::decision_shadow::raised_at(&ledger));
+    fs::write(
+        &ledger,
+        format!("{}\n{}\n", json!({"at": 1, TRANSITION: ROSE}), json!({"at": 2, TRANSITION: FELL})),
+    )
+    .expect("write");
+    assert!(!super::super::decision_shadow::raised_at(&ledger), "a fall takes it back");
+}

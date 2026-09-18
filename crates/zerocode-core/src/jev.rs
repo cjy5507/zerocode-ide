@@ -27,6 +27,7 @@ pub mod choice;
 pub mod count;
 pub mod door;
 pub mod hedge;
+pub mod promote;
 pub mod summary;
 
 /// The object zo's settings keep every Jev switch under.
@@ -166,11 +167,27 @@ impl JevMode {
         !matches!(self, Self::Off)
     }
 
-    /// Whether a use in this mode acts on what it is told. `auto` does not:
-    /// the judge that would promote it is a later stage (§4, J4).
+    /// Whether a use in this mode acts on what it is told, read without a
+    /// judgment to hand — `auto` reads as recording, which is where it starts
+    /// and where it stays until [`crate::jev::promote`] raises it.
     #[must_use]
     pub const fn applies(self) -> bool {
-        matches!(self, Self::On)
+        self.applies_with(false)
+    }
+
+    /// Whether a use acts, given what the judge last decided for it (§4).
+    ///
+    /// `raised` is the seat's standing, read back from the transitions its own
+    /// ledger recorded ([`crate::jev::promote::stand_from`]). A person's `on`
+    /// outranks it in both directions: they said act, and no window of rows
+    /// takes that back; `off` and `shadow` are theirs the same way.
+    #[must_use]
+    pub const fn applies_with(self, raised: bool) -> bool {
+        match self {
+            Self::On => true,
+            Self::Auto => raised,
+            Self::Off | Self::Shadow => false,
+        }
     }
 
     /// Whether evidence rather than a person decides when this mode acts.

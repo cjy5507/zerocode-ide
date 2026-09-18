@@ -115,6 +115,12 @@ fn render_json(seats: &[SeatReport]) -> Value {
                 "riseFloorPermille": seat.rise_floor_permille,
                 "clearsRiseFloor": seat.clears_rise_floor,
                 "rowsToNextJudgment": seat.rows_to_next_judgment(),
+                "stand": seat.stand.token(),
+                "applies": seat.applies,
+                "verdict": seat.verdict.map(|verdict| json!({
+                    "verdict": verdict.token(),
+                    "line": verdict.line().map(tools::jev_summary::line_token),
+                })),
             }))
             .collect::<Vec<Value>>(),
     })
@@ -124,8 +130,8 @@ fn render_text(seats: &[SeatReport]) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{:<10} {:<7} {:>7} {:>7} {:>8} {:>7} {:>7}  {}",
-        "seat", "mode", "today", "7d", "answered", "p50", "p95", "notes"
+        "{:<10} {:<7} {:<9} {:>7} {:>7} {:>8} {:>7} {:>7}  notes",
+        "seat", "mode", "stands", "today", "7d", "answered", "p50", "p95"
     );
     for seat in seats {
         let share = seat
@@ -141,26 +147,30 @@ fn render_text(seats: &[SeatReport]) -> String {
         {
             let _ = write!(
                 notes,
-                "{}rise {:.1}% needs {:.1}%{}",
+                "{}rise {:.1}% needs {:.1}%",
                 if notes.is_empty() { "" } else { " · " },
                 bound * 100.0,
                 f64::from(floor) / 10.0,
-                if seat.clears_rise_floor == Some(true) { " ✓" } else { "" }
+            );
+        }
+        if let Some(verdict) = seat.verdict {
+            let _ = write!(
+                notes,
+                "{}{}{}",
+                if notes.is_empty() { "" } else { " · " },
+                verdict.token(),
+                verdict.line().map_or_else(String::new, |line| format!(" ({})", line.token()))
             );
         }
         if let Some(owed) = seat.rows_to_next_judgment() {
-            let _ = write!(out, "");
-            let _ = write!(
-                notes,
-                "{}{owed} rows to judgment",
-                if notes.is_empty() { "" } else { " · " }
-            );
+            let _ = write!(notes, " · {owed} rows to judgment");
         }
         let _ = writeln!(
             out,
-            "{:<10} {:<7} {:>7} {:>7} {:>8} {:>7} {:>7}  {}",
+            "{:<10} {:<7} {:<9} {:>7} {:>7} {:>8} {:>7} {:>7}  {}",
             seat.id,
             seat.mode.key(),
+            if seat.applies { "applying" } else { seat.stand.token() },
             seat.today.rows,
             seat.week.rows,
             share,

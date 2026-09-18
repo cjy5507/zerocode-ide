@@ -66,6 +66,24 @@ const PROBE_NOT_RUN: &str = "not_run";
 /// Failure: the merged settings could not be read, so nothing was sent.
 const FAIL_SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
 
+/// Whether the routing seat has been raised to acting by its own evidence.
+///
+/// Read from the ledger it writes, so the rows a promotion was decided on and
+/// the promotion itself cannot be found apart.
+#[must_use]
+pub fn raised_here(cwd: &Path) -> bool {
+    raised_at(&decision_shadow_path(cwd))
+}
+
+/// The same question asked of a ledger by its path — where the project's
+/// state directory is answered by the environment, and a test that had to
+/// pin that would be racing every other test in this binary for it.
+#[must_use]
+pub fn raised_at(ledger: &Path) -> bool {
+    let rows = super::jev_summary::read_rows(ledger);
+    zerocode_core::jev::promote::stand_from(&rows) == zerocode_core::jev::promote::Stand::Applying
+}
+
 /// Where a project's decision shadow ledger lives.
 #[must_use]
 pub fn decision_shadow_path(cwd: &Path) -> PathBuf {
@@ -475,7 +493,11 @@ pub(super) fn active_assessments(
 ) -> Option<Vec<Option<ProbeAssessment>>> {
     let cwd = std::env::current_dir().ok()?;
     let mode = decision_shadow_mode_from(&runtime::ConfigLoader::default_for(&cwd))?;
-    if !mode.applies() {
+    // `auto` acts on the standing its own ledger recorded (§4): the judge
+    // wrote a rise there when the window cleared every line, and reading it
+    // back here is what makes `auto` a word that decides rather than a second
+    // spelling of `shadow`. A person's `on` needs no ledger to say so.
+    if !mode.applies_with(raised_here(&cwd)) {
         return None;
     }
     let mut results = vec![None; tasks.len()];

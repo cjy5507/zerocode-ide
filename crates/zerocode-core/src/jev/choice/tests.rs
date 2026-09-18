@@ -205,3 +205,26 @@ fn every_broken_rule_has_a_word_of_its_own() {
         );
     }
 }
+
+#[test]
+fn every_refusal_token_is_built_on_the_word_the_judge_recognises() {
+    // The promotion rule refuses to raise a seat while replies are arriving
+    // malformed, and it finds them by the word these tokens begin with. A
+    // seventh rule spelled without it would be a malformed reply the judge
+    // walked past.
+    for refusal in [
+        ChoiceRefusal::NoAnswer,
+        ChoiceRefusal::NotAChoice,
+        ChoiceRefusal::UnknownOption,
+        ChoiceRefusal::Keys,
+        ChoiceRefusal::NotOne,
+        ChoiceRefusal::OutOfRange,
+    ] {
+        assert!(
+            crate::jev::promote::names_a_schema_failure(refusal.token()),
+            "{} is not built on {}",
+            refusal.token(),
+            crate::jev::promote::SCHEMA
+        );
+    }
+}
