@@ -1,6 +1,6 @@
 //! A closed choice, in both directions — the one set of rules every Jev
 //! question with a closed answer space keeps, whether it is being asked or
-//! being read: the browser's numbered controls (`crate::browser_action`), a
+//! being read: the browser's numbered controls (`crate::screen_action`), a
 //! quiet worker's causes (`crate::stall_cause`), a worker's room
 //! (`crate::worker_placement`) and a summons' agent (`crate::summon_choice`).
 //!
@@ -18,8 +18,30 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
-/// How far a set of probabilities may be from summing to one.
-pub const PROBABILITY_SUM_TOLERANCE: f64 = 1e-6;
+/// How far a set of `options` probabilities may be from summing to one.
+///
+/// The contract says they sum to one, and they do — before the wire rounds
+/// them. Each arrives on the answer grid ([`crate::jev::ANSWER_STEP`]),
+/// carrying up to half a step, so a set of `options` of them can stand
+/// `options` half-steps from one.
+///
+/// The bound does not sit ON the grid. Both sides are whole numbers of steps,
+/// so the distance between them is one too, and a distance the grid lands on
+/// exactly is a distance a double's last bit decides — measured on a sibling
+/// check, 38 answers sat on such a bound and 17 passed while 21 were refused.
+/// So the bound is the last distance the grid can land on that rounding still
+/// explains, carried half a step further, where no last bit decides it.
+///
+/// This was a flat `1e-6` before, which refused answers that broke no rule: on
+/// this machine, against `jev-1.13.0` with fourteen options, 6 of 51 real
+/// calls (11.8%) summed to 0.99 and were thrown away whole (measured
+/// 2026-09-18, t-4774).
+#[must_use]
+pub fn probability_sum_tolerance(options: usize) -> f64 {
+    #[allow(clippy::cast_precision_loss)]
+    let steps = (options / 2) as f64;
+    steps * crate::jev::ANSWER_STEP + crate::jev::WIRE_ROUNDING
+}
 
 /// The union tag a closed choice carries, in both directions: the endpoint
 /// reads a question's kind off it, and an answer names its own kind with the
@@ -78,8 +100,26 @@ pub enum ChoiceRefusal {
 }
 
 impl ChoiceRefusal {
-    /// Why it was refused, for a message. The ledger writes `schema` for all
-    /// of these — a closed set of failure tokens is the point of that table.
+    /// The word a ledger row writes for this refusal: the wire's `schema`,
+    /// with the rule that broke after it.
+    ///
+    /// One word for all of them loses the cause the moment it is written, and
+    /// the cause is the whole value of the row — a sum that rounding explains
+    /// and an answer that named an option nobody offered are not the same
+    /// event. The set is closed and carries not one character of the answer.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::NoAnswer => "schema_no_answer",
+            Self::NotAChoice => "schema_not_a_choice",
+            Self::UnknownOption => "schema_unknown_option",
+            Self::Keys => "schema_keys",
+            Self::NotOne => "schema_not_one",
+            Self::OutOfRange => "schema_out_of_range",
+        }
+    }
+
+    /// Why it was refused, for a message.
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
@@ -132,7 +172,7 @@ pub fn read(
         total += share;
         probabilities.insert(name.clone(), share);
     }
-    if (total - 1.0).abs() > PROBABILITY_SUM_TOLERANCE {
+    if (total - 1.0).abs() > probability_sum_tolerance(offered.len()) {
         return Err(ChoiceRefusal::NotOne);
     }
     let confidence = answer

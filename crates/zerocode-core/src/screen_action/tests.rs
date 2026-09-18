@@ -22,11 +22,29 @@ fn item(mark: usize, role: &str, label: &str) -> Value {
 fn a_look<'a>(items: &'a [Value], tried: &'a [usize]) -> ActionLook<'a> {
     ActionLook {
         goal: "checkout smoke",
-        stopped: "step_failed",
-        step: "click",
-        refusal: "the selector matched nothing",
-        host: "shop.example",
-        path: "/cart",
+        errand: Errand::Clear {
+            stopped: "step_failed",
+            step: "click",
+            refusal: "the selector matched nothing",
+        },
+        at: Where::Page {
+            host: "shop.example",
+            path: "/cart",
+        },
+        tried,
+        items,
+    }
+}
+
+/// The same screen, asked about by a goal walk on the desktop.
+fn a_goal<'a>(items: &'a [Value], tried: &'a [usize]) -> ActionLook<'a> {
+    ActionLook {
+        goal: "홍길동에게 메시지 보내기",
+        errand: Errand::Goal,
+        at: Where::Desk {
+            app: "카카오톡",
+            window: "채팅",
+        },
         tried,
         items,
     }
@@ -211,6 +229,78 @@ fn every_broken_rule_discards_the_answer_whole() {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(BROWSER_ACTION_RUBRIC_VERSION, 1);
-    assert_eq!(rubric_fingerprint(), "ce089bd3cc6c95cd");
+    assert_eq!(SCREEN_ACTION_RUBRIC_VERSION, 2);
+    assert_eq!(rubric_fingerprint(), "8406a03f7deaaf42");
+}
+
+#[test]
+fn a_goal_walk_may_say_it_is_there_and_a_stopped_walk_may_not() {
+    let items = [item(1, "button", "보내기"), item(2, "link", "취소")];
+
+    let goal = ask(&a_goal(&items, &[])).expect("a screen with controls asks");
+    assert_eq!(goal.options(), ["mark:1", "mark:2", GIVE_UP, DONE]);
+    let criteria = goal.questions["action"]["criteria"]
+        .as_object()
+        .expect("criteria is an object");
+    assert!(criteria.contains_key(DONE), "a goal may answer `done`");
+    assert_eq!(
+        goal.read(&answered(&goal, DONE, 0.8))
+            .expect("a read")
+            .chosen,
+        Chosen::Done
+    );
+
+    // The errand that did not offer it cannot be answered with it: the
+    // document's own re-walk, not a judgment, says whether a stopped flow is
+    // finished.
+    let clear = ask(&a_look(&items, &[])).expect("a screen with controls asks");
+    assert_eq!(clear.options(), ["mark:1", "mark:2", GIVE_UP]);
+    assert!(
+        !clear.questions["action"]["criteria"]
+            .as_object()
+            .expect("criteria is an object")
+            .contains_key(DONE)
+    );
+    let mut said = answered(&clear, GIVE_UP, 0.8);
+    said["action"]["choice"] = json!(DONE);
+    assert_eq!(clear.read(&said), Err(ActionRefusal::UnknownOption));
+}
+
+#[test]
+fn a_goal_walk_says_where_it_is_by_the_surfaces_own_two_words() {
+    let items = [item(1, "button", "보내기")];
+
+    let desk = ask(&a_goal(&items, &[])).expect("a screen with controls asks");
+    assert_eq!(
+        desk.state["where"],
+        json!({ "app": "카카오톡", "window": "채팅" })
+    );
+    assert_eq!(desk.state["goal"], json!("홍길동에게 메시지 보내기"));
+    // Nothing failed, so the stopped walk's three keys are absent — a key a
+    // request does not carry sends nothing.
+    for key in ["stopped", "step", "refusal"] {
+        assert!(desk.state.get(key).is_none(), "a goal walk sends no {key}");
+    }
+
+    let page = ask(&a_look(&items, &[])).expect("a screen with controls asks");
+    assert_eq!(
+        page.state["where"],
+        json!({ "host": "shop.example", "path": "/cart" })
+    );
+    assert_eq!(page.state["stopped"], json!("step_failed"));
+}
+
+#[test]
+fn a_number_already_spent_on_this_screen_is_not_offered_again() {
+    let items = [
+        item(1, "button", "보내기"),
+        item(2, "link", "취소"),
+        item(3, "button", "닫기"),
+    ];
+    let asked = ask(&a_goal(&items, &[2])).expect("a screen with controls asks");
+    assert_eq!(asked.marks(), [1, 3]);
+    assert_eq!(asked.state["alreadyTried"], json!([2]));
+
+    // Every number spent and the question is not worth asking at all.
+    assert!(ask(&a_goal(&items, &[1, 2, 3])).is_none());
 }

@@ -46,17 +46,11 @@ pub const SYSTEMONE_RETRY_BASE_DELAY: Duration = Duration::from_millis(200);
 /// How many times one call may be re-sent after a 429 or 529.
 pub const SYSTEMONE_MAX_RETRIES: u32 = 3;
 
-/// The grid an answer's numbers arrive on: the contract rounds every
-/// probability and every score to two decimal places, so each one is a whole
-/// number of these steps and carries up to half a step of rounding.
-///
-/// It is here because it is a fact about the wire rather than about any
-/// question. A caller that rebuilds one of an answer's numbers from the others
-/// — a score from the spread it is the mean of — is comparing two rounded
-/// numbers, and derives from this how far apart the rounding alone can put
-/// them. Measured 2026-09-18 against `jev-1.13.0`: all 1,200 numbers of 240
-/// score answers were exact multiples of it, none finer.
-pub const SYSTEMONE_ANSWER_STEP: f64 = 0.01;
+// The grid an answer's numbers arrive on is a fact about the WIRE, and it is
+// spelled once for both programs in `zerocode_core::jev::ANSWER_STEP` — the
+// window's screen judgments derive their tolerances from the same rounding,
+// and a fact spelled twice is two facts that can disagree. Its reader here is
+// `runtime::memory::rerank`, which already reads that crate.
 
 /// The contract's "overloaded" status. It is not in the HTTP registry, so it
 /// has no name there.

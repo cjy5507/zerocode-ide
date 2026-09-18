@@ -4077,9 +4077,9 @@
             <div class="settings-jev-row" data-jev-row>
               <label class="settings-field" data-field="md" for="typesafe-browser-select">
                 <span class="settings-field-copy">
-                  <span class="settings-label" data-i18n="settings.typesafe.browser">브라우저 복구</span>
+                  <span class="settings-label" data-i18n="settings.typesafe.browser">브라우저 걷기</span>
                   <span class="settings-row-desc" data-i18n="settings.typesafe.browserSummary">
-                    화면이 바뀌어 멈춘 자동화에서 어느 단추를 누를지 고릅니다.
+                    페이지에서 다음에 누를 컨트롤을 고릅니다.
                   </span>
                 </span>
                 <!-- The options are this seat's own modes from the Jev use table,
@@ -4089,7 +4089,27 @@
               <details class="settings-fold">
                 <summary data-i18n="settings.status.evidence">자세히</summary>
                 <p data-i18n="settings.typesafe.browserHint">
-                  브라우저 자동화가 화면이 바뀌어 멈췄을 때, 그 화면의 버튼 목록과 멈춘 이유를 api.typesafe.ai로 보내 어느 것을 누를지 고릅니다. 페이지 본문·입력값·주소의 쿼리는 보내지 않습니다. 실제 적용은 한 번에 최대 두 번까지 눌러 보고, 답이 없거나 1.5초를 넘기면 오늘처럼 멈춥니다. 결제가 걸린 자동화는 복구하지 않습니다.
+                  페이지에서 다음에 누를 컨트롤 하나를 고릅니다. 두 자리에서 묻습니다 — 자동화가 화면이 바뀌어 멈췄을 때, 그리고 목표 하나를 주고 걷게 했을 때. 그 화면의 컨트롤 목록(최대 12개)과 목표 한 문장, 호스트·경로가 api.typesafe.ai로 갑니다. 페이지 본문·입력값·주소의 쿼리는 보내지 않습니다. 고를 수 있는 것은 화면이 이미 번호를 붙인 컨트롤뿐이라 판단이 주소·셀렉터·값을 지어낼 길이 없고, 누를 뿐 입력하지 않습니다. 멈춘 자동화는 최대 두 번 눌러 보고, 목표 걷기는 같은 화면이 두 번 안 움직이면 멈춥니다. 답이 1.5초를 넘기면 오늘처럼 멈춥니다. 결제가 걸린 자동화는 걷지 않습니다.
+                </p>
+              </details>
+            </div>
+
+            <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-desktop-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.desktop">데스크톱 걷기</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.desktopSummary">
+                    앱 화면에서 다음에 누를 컨트롤을 고릅니다.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-desktop-select" data-jev-seat="desktop"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.desktopHint">
+                  데스크톱 앱에서 다음에 누를 컨트롤 하나를 고릅니다. 브라우저와 다른 자리인 것은 나가는 것이 다른 종류이기 때문입니다 — 여기서 나가는 것은 앱 이름과 창 제목, 그리고 그 창의 컨트롤 목록(최대 12개)과 목표 한 문장입니다. 창 본문·입력값·화면 그림은 보내지 않습니다. 고를 수 있는 것은 접근성 트리가 이미 번호를 붙인 컨트롤뿐이고, 누를 뿐 입력하지 않습니다. 걷기는 목표에 닿았다고 직접 적어 둔 확인 문구가 화면에 보일 때, 또는 같은 화면이 두 번 안 움직일 때 멈추고, 걸음 수에도 상한이 있습니다. 답이 1.5초를 넘기면 그 걸음에서 멈춥니다. 결제가 걸린 자동화는 걷지 않습니다.
                 </p>
               </details>
             </div>

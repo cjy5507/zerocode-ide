@@ -89,8 +89,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use api::{
     SystemOneQuestion, SystemOneQuestionKind, SystemOneResponse, SystemOneScoreAnswer,
-    SYSTEMONE_ANSWER_STEP,
 };
+// The grid the wire answers on, from the one crate both programs read: the
+// window derives its own screen judgments' tolerances from the same rounding,
+// and this fact spelled in two places is two facts that can disagree.
+use zerocode_core::jev::ANSWER_STEP as SYSTEMONE_ANSWER_STEP;
 use core_types::text::truncate_on_char_boundary;
 use core_types::MemoryHit;
 use serde_json::{json, Value};

@@ -55,6 +55,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "routing", setting: "decisionShadow", modes: "off shadow on auto" }),
   Object.freeze({ id: "recall", setting: "rerankShadow", modes: "off shadow on auto" }),
   Object.freeze({ id: "browser", setting: "browserAction", modes: "off shadow on auto" }),
+  Object.freeze({ id: "desktop", setting: "desktopAction", modes: "off shadow on auto" }),
   Object.freeze({ id: "stall", setting: "stallCause", modes: "off shadow auto" }),
   Object.freeze({ id: "placement", setting: "workerPlacement", modes: "off shadow auto" }),
   Object.freeze({ id: "summon", setting: "summonChoice", modes: "off shadow auto" }),

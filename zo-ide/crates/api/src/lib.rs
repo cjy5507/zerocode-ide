@@ -121,7 +121,7 @@ pub use sse::{SseParser, parse_frame};
 pub use systemone::{
     HedgeRan, SystemOneCall, SystemOneChoiceAnswer, SystemOneClient, SystemOneConfig, SystemOneCriteria,
     SystemOneFailure, SystemOneQuestion, SystemOneQuestionKind, SystemOneRequest,
-    SystemOneResponse, SystemOneScoreAnswer, SystemOneUsage, SYSTEMONE_ANSWER_STEP,
+    SystemOneResponse, SystemOneScoreAnswer, SystemOneUsage,
     SYSTEMONE_API_KEY_ENV, SYSTEMONE_BASE_URL, SYSTEMONE_BASE_URL_ENV, SYSTEMONE_MAX_RETRIES,
     SYSTEMONE_MODEL, SYSTEMONE_PATH, SYSTEMONE_RETRY_BASE_DELAY,
 };

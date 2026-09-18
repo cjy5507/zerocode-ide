@@ -8,7 +8,7 @@ use super::super::{
     STALL_TRANSCRIPT_BYTE_CAP,
 };
 use super::*;
-use crate::browser_action::{ActionLook, ask};
+use crate::screen_action::{ActionLook, Errand, Where, ask};
 
 const APP: &str = "/work/app";
 
@@ -243,11 +243,15 @@ fn a_stopped_walks_question_leaves_no_credential_from_any_field_the_row_names() 
     ];
     let asked = ask(&ActionLook {
         goal: "sign in\npassword: hunter2",
-        stopped: "step_failed",
-        step: "type",
-        refusal: "Bearer abc.def was refused",
-        host: "app.local",
-        path: "/login",
+        errand: Errand::Clear {
+            stopped: "step_failed",
+            step: "type",
+            refusal: "Bearer abc.def was refused",
+        },
+        at: Where::Page {
+            host: "app.local",
+            path: "/login",
+        },
         tried: &[],
         items: &items,
     })

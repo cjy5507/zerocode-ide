@@ -2,9 +2,10 @@
 //! every place that asks (docs/design/jev-settings-20260917.md §2).
 //!
 //! Two programs ask. zo asks about a task it is routing and about the notes a
-//! recall found; the window asks about a browser walk that stopped and about a
-//! worker whose pane went quiet. Each keeps
-//! its own wire — the two Cargo workspaces carry different `reqwest` majors
+//! recall found; the window asks which control a walk should press next — on a
+//! page or on the desktop — about a worker whose pane went quiet, about where
+//! a worker's window belongs and about which agent a summons should start.
+//! Each keeps its own wire — the two Cargo workspaces carry different `reqwest` majors
 //! (docs/design/jev-browser-action-20260917.md §1.4) — so what must not fork
 //! lives here, in the one crate both already read:
 //!
@@ -46,10 +47,23 @@ pub const RECALL_NOTE_CAP: usize = 12;
 /// Bytes of one note's summary a recall judgment carries.
 pub const RECALL_SUMMARY_BYTE_CAP: usize = 320;
 
-/// Controls one stopped walk's question offers. The numbers themselves are
-/// capped at 99 by the look; a choice with ninety-nine options is not a
-/// question worth asking.
-pub const BROWSER_CANDIDATE_CAP: usize = 12;
+/// Controls one screen's question offers. The numbers themselves are capped
+/// at 99 by the look; a choice with ninety-nine options is not a question
+/// worth asking. One number, not one per surface: a page's controls and an
+/// app's are numbered by the same marks table and read by the same question,
+/// so two caps would be two answers to one question.
+pub const SCREEN_CANDIDATE_CAP: usize = 12;
+
+/// Characters of the goal a walk is given — the sentence that says what to
+/// reach, which is the whole of what a goal walk knows about why it is
+/// pressing.
+///
+/// The 436 sentences the recorded walks on this machine were handed
+/// (`--text`, `--reason`, `--note`, `--name` in their step logs, 2026-09-18)
+/// are at most 48 characters long (p50 9, p90 11). 400 holds every one of
+/// them and a goal written in a sentence or two; past that a goal is a plan,
+/// and a plan is a recipe with steps of its own, not one question's state.
+pub const GOAL_CHAR_CAP: usize = 400;
 
 /// Bytes of a quiet worker's screen one stall question carries: the newest
 /// lines, so the composer, the mode line and the last words above them are
@@ -67,6 +81,26 @@ pub const STALL_TRANSCRIPT_BYTE_CAP: usize = 4 * 1024;
 
 /// What a byte cap leaves after the cut, so a clipped text is visibly one.
 pub const CUT_MARK: &str = "…";
+
+/// The grid an answer's numbers arrive on: the contract rounds every
+/// probability and every score to two decimal places, so each one is a whole
+/// number of these steps and carries up to half a step of rounding.
+///
+/// It is here, in the one crate both programs read, because it is a fact
+/// about the WIRE rather than about any question — and because two copies of
+/// a fact are two facts. zo's client re-exports it under its own name
+/// (`api::SYSTEMONE_ANSWER_STEP`).
+///
+/// A caller that rebuilds one of an answer's numbers from the others — a
+/// score from the spread it is the mean of, a sum from the parts — is
+/// comparing two rounded numbers, and derives from this how far apart the
+/// rounding alone can put them. Measured 2026-09-18 against `jev-1.13.0`: all
+/// 1,200 numbers of 240 score answers were exact multiples of it, none finer.
+pub const ANSWER_STEP: f64 = 0.01;
+
+/// The most the wire's rounding can have moved any one number an answer
+/// carries: half of [`ANSWER_STEP`].
+pub const WIRE_ROUNDING: f64 = ANSWER_STEP / 2.0;
 
 /// Characters of a summons' brief one agent-choice judgment reads.
 ///
@@ -245,44 +279,109 @@ pub const RECALL: JevUse = JevUse {
     promotes: false,
 };
 
-/// The window's browser recovery: which numbered control on a stopped walk's
-/// screen to press (docs/design/jev-browser-action-20260917.md). Pressing is
-/// always a person's choice, so `auto` never rises to it.
+/// What every screen question carries, whichever surface answered it
+/// (`crate::screen_action`): the goal, the numbered controls, and the legend
+/// lines those controls are described by. Spelled once, because the two rows
+/// below ask the SAME question — what differs between them is the address
+/// (§`BROWSER`/`DESKTOP`) and nothing else, and a second copy of this list is
+/// how the two would drift.
+const SCREEN_SENDS: [Sent; 4] = [
+    Sent {
+        at: "/state/goal",
+        cap: Cap::Chars(GOAL_CHAR_CAP),
+    },
+    Sent {
+        at: "/state/candidates",
+        cap: Cap::Items(SCREEN_CANDIDATE_CAP),
+    },
+    Sent {
+        at: "/state/candidates/*",
+        cap: Cap::Uncut,
+    },
+    Sent {
+        at: "/questions/*/criteria/*",
+        cap: Cap::Uncut,
+    },
+];
+
+/// What a browser walk sends: its own address, then [`SCREEN_SENDS`] — named
+/// by index rather than written out again, so the shared list stays one list.
+/// A stopped walk fills the refusal; a goal walk leaves it out, and a key a
+/// request does not carry sends nothing.
+const BROWSER_SENDS: [Sent; 7] = [
+    Sent {
+        at: "/state/refusal",
+        cap: Cap::Uncut,
+    },
+    Sent {
+        at: "/state/where/host",
+        cap: Cap::Uncut,
+    },
+    Sent {
+        at: "/state/where/path",
+        cap: Cap::Uncut,
+    },
+    SCREEN_SENDS[0],
+    SCREEN_SENDS[1],
+    SCREEN_SENDS[2],
+    SCREEN_SENDS[3],
+];
+
+/// What a desktop walk sends: the app it is in and that app's window title,
+/// then [`SCREEN_SENDS`]. No path, because a desktop has none, and no
+/// refusal, because nothing failed.
+const DESKTOP_SENDS: [Sent; 6] = [
+    Sent {
+        at: "/state/where/app",
+        cap: Cap::Uncut,
+    },
+    Sent {
+        at: "/state/where/window",
+        cap: Cap::Uncut,
+    },
+    SCREEN_SENDS[0],
+    SCREEN_SENDS[1],
+    SCREEN_SENDS[2],
+    SCREEN_SENDS[3],
+];
+
+/// The window's browser walk: which numbered control on a page to press
+/// (docs/design/jev-browser-action-20260917.md). It answers two errands — a
+/// recorded walk that stopped, and a goal named in a person's words — and
+/// both of them press, so `auto` never rises to acting.
 pub const BROWSER: JevUse = JevUse {
     id: "browser",
     setting: "browserAction",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
-    sends: &[
-        Sent {
-            at: "/state/goal",
-            cap: Cap::Uncut,
-        },
-        Sent {
-            at: "/state/refusal",
-            cap: Cap::Uncut,
-        },
-        Sent {
-            at: "/state/page/host",
-            cap: Cap::Uncut,
-        },
-        Sent {
-            at: "/state/page/path",
-            cap: Cap::Uncut,
-        },
-        Sent {
-            at: "/state/candidates",
-            cap: Cap::Items(BROWSER_CANDIDATE_CAP),
-        },
-        Sent {
-            at: "/state/candidates/*",
-            cap: Cap::Uncut,
-        },
-        Sent {
-            at: "/questions/*/criteria/*",
-            cap: Cap::Uncut,
-        },
-    ],
+    sends: &BROWSER_SENDS,
     ledger: "browser-action.jsonl",
+    promotes: false,
+};
+
+/// The window's desktop walk: which numbered control of an app's
+/// accessibility tree to press (`computer_use::errand`, t-4774).
+///
+/// A row of its own rather than a wider browser row, for three reasons, each
+/// of which would be a lie told to a person if the two shared one switch:
+///
+/// 1. **What is sent is not the same thing.** A page's host and path name a
+///    place the person deliberately opened in a pane kept for automation. An
+///    app's name and window title name what they have open on their own
+///    desktop right now. Consenting to one is not consenting to the other.
+/// 2. **The switch would widen itself.** Somebody who turned browser recovery
+///    on months ago would, on the day this landed, have started sending their
+///    desktop — a safety line widened by an upgrade rather than by a person.
+/// 3. **The evidence would be one pile.** The two surfaces' accuracy is the
+///    open question this seat exists to answer, and a ledger that mixes them
+///    cannot answer it for either.
+///
+/// Pressing is a person's choice here too, so `auto` records and never rises.
+pub const DESKTOP: JevUse = JevUse {
+    id: "desktop",
+    setting: "desktopAction",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    sends: &DESKTOP_SENDS,
+    ledger: "desktop-action.jsonl",
     promotes: false,
 };
 
@@ -387,7 +486,7 @@ pub const SUMMON: JevUse = JevUse {
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 6] = [ROUTING, RECALL, BROWSER, STALL, PLACEMENT, SUMMON];
+pub static JEV_USES: [JevUse; 7] = [ROUTING, RECALL, BROWSER, DESKTOP, STALL, PLACEMENT, SUMMON];
 
 impl JevUse {
     /// The mode `value` names for this use: one of this use's own words,

@@ -3,7 +3,7 @@
 //! (t-4700).
 //!
 //! Every other judgment this product makes picks from a set somebody else laid
-//! out — a numbered control (`crate::browser_action`), a room
+//! out — a numbered control (`crate::screen_action`), a room
 //! (`crate::jev::PLACEMENT`), an order over notes. A `type` step is the one
 //! place with nothing to pick FROM: the flow stopped in front of an empty box
 //! and the next thing that has to exist is a string. Jev answers a closed

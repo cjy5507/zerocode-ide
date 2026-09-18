@@ -108,8 +108,11 @@ fn a_look_is_the_panes_own_marks_and_carries_the_address_it_was_given() {
     assert_eq!(screen.items.len(), 2);
     assert_eq!(screen.items[0]["mark"], json!(1));
     assert_eq!(
-        (screen.host.as_str(), screen.path.as_str()),
-        ("shop.example", "/cart")
+        screen.at,
+        Seen::Page {
+            host: "shop.example".into(),
+            path: "/cart".into()
+        }
     );
     assert_eq!(road.sent(), [["marks", "app", "--json"]]);
 }

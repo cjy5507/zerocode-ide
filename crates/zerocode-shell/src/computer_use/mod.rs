@@ -34,6 +34,7 @@ mod session;
 mod clipboard_formats;
 pub mod compare;
 pub mod confirm;
+pub mod errand;
 pub mod evidence;
 pub mod eye;
 #[cfg(any(target_os = "windows", test))]
@@ -45,7 +46,6 @@ pub mod marks;
 pub mod observe;
 pub mod recipe_run;
 pub mod recipes;
-pub mod recover;
 pub mod report;
 pub(crate) mod screenshot_png;
 pub mod sequence;

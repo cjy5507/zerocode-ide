@@ -127,15 +127,15 @@ fn a_writer_takes_exactly_the_words_a_use_offers() {
 #[test]
 fn the_builders_cut_at_the_tables_caps() {
     assert_eq!(
-        crate::browser_action::MAX_ACTION_CANDIDATES,
-        BROWSER_CANDIDATE_CAP
+        crate::screen_action::MAX_ACTION_CANDIDATES,
+        SCREEN_CANDIDATE_CAP
     );
     let caps = |row: &JevUse| -> Vec<Cap> { row.sends.iter().map(|sent| sent.cap).collect() };
     assert!(caps(&ROUTING).contains(&Cap::Chars(ROUTING_TASK_CHAR_CAP)));
     assert!(caps(&RECALL).contains(&Cap::Chars(RECALL_REQUEST_CHAR_CAP)));
     assert!(caps(&RECALL).contains(&Cap::Items(RECALL_NOTE_CAP)));
     assert!(caps(&RECALL).contains(&Cap::Bytes(RECALL_SUMMARY_BYTE_CAP)));
-    assert!(caps(&BROWSER).contains(&Cap::Items(BROWSER_CANDIDATE_CAP)));
+    assert!(caps(&BROWSER).contains(&Cap::Items(SCREEN_CANDIDATE_CAP)));
     assert!(caps(&STALL).contains(&Cap::Bytes(STALL_SCREEN_BYTE_CAP)));
     assert!(caps(&STALL).contains(&Cap::Bytes(STALL_TRANSCRIPT_BYTE_CAP)));
     assert!(caps(&PLACEMENT).contains(&Cap::Chars(PLACEMENT_BRIEF_CHAR_CAP)));

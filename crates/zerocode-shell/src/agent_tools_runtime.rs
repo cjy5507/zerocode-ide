@@ -2217,7 +2217,7 @@ pub(super) async fn computer_loop(
                     use zerocode_core::computer_use::ComputerMethod;
                     matches!(
                         command.method,
-                        ComputerMethod::Batch | ComputerMethod::RecipeRun
+                        ComputerMethod::Batch | ComputerMethod::RecipeRun | ComputerMethod::Walk
                     )
                 })
                 .cloned()
@@ -2256,65 +2256,75 @@ pub(super) async fn computer_loop(
                             run_evidence::fenced_dir(&root, evidence.as_deref())
                                 .or_else(session_folder_adopted)
                         });
-                        run_recipe(
-                            &command,
-                            deadline_ms,
-                            dir.as_deref(),
-                            cwd.as_deref().map(Path::new),
-                            RecipeRoads::new(
-                                |tool, step, logged| match tool {
-                                    zerocode_core::computer_recipe::RecipeTool::Computer => {
-                                        desktop_step(
-                                            &app,
-                                            &root,
-                                            evidence.as_deref(),
-                                            step,
-                                            logged,
-                                            Asking::HandBack,
-                                        )
-                                    }
-                                    zerocode_core::computer_recipe::RecipeTool::Browser => {
-                                        tauri::async_runtime::block_on(browser_step(
-                                            &app,
-                                            None,
-                                            dir.as_deref(),
-                                            step,
-                                            logged,
-                                        ))
-                                    }
-                                    zerocode_core::computer_recipe::RecipeTool::Emulator => {
-                                        tauri::async_runtime::block_on(emulator_step(
-                                            &app,
-                                            dir.as_deref(),
-                                            step,
-                                            logged,
-                                        ))
-                                    }
-                                },
-                                |step, logged, refusal| {
-                                    leave_step(
+                        // One set of roads for both walks: a recipe's steps
+                        // and a goal walk's presses reach a screen the same
+                        // way, so neither can acquire a road of its own.
+                        let roads = RecipeRoads::new(
+                            |tool, step, logged| match tool {
+                                zerocode_core::computer_recipe::RecipeTool::Computer => {
+                                    desktop_step(
                                         &app,
                                         &root,
                                         evidence.as_deref(),
                                         step,
                                         logged,
-                                        refusal,
+                                        Asking::HandBack,
                                     )
-                                },
-                                |level| {
-                                    if let Some(dir) = dir.as_deref() {
-                                        evidence_runtime::leave_walk_begin(dir, level);
-                                    }
-                                },
-                                |report| {
-                                    if let Some(dir) = dir.as_deref() {
-                                        evidence_runtime::leave_walk_report(dir, report);
-                                    }
-                                },
-                            ),
-                            || computer_use::recipe_run::LiveDesk::new().in_window(app.clone()),
-                            || !reply.is_closed(),
-                        )
+                                }
+                                zerocode_core::computer_recipe::RecipeTool::Browser => {
+                                    tauri::async_runtime::block_on(browser_step(
+                                        &app,
+                                        None,
+                                        dir.as_deref(),
+                                        step,
+                                        logged,
+                                    ))
+                                }
+                                zerocode_core::computer_recipe::RecipeTool::Emulator => {
+                                    tauri::async_runtime::block_on(emulator_step(
+                                        &app,
+                                        dir.as_deref(),
+                                        step,
+                                        logged,
+                                    ))
+                                }
+                            },
+                            |step, logged, refusal| {
+                                leave_step(&app, &root, evidence.as_deref(), step, logged, refusal)
+                            },
+                            |level| {
+                                if let Some(dir) = dir.as_deref() {
+                                    evidence_runtime::leave_walk_begin(dir, level);
+                                }
+                            },
+                            |report| {
+                                if let Some(dir) = dir.as_deref() {
+                                    evidence_runtime::leave_walk_report(dir, report);
+                                }
+                            },
+                        );
+                        let desk =
+                            || computer_use::recipe_run::LiveDesk::new().in_window(app.clone());
+                        if command.method == zerocode_core::computer_use::ComputerMethod::Walk {
+                            run_goal(
+                                &command,
+                                deadline_ms,
+                                dir.as_deref(),
+                                cwd.as_deref().map(Path::new),
+                                roads,
+                                desk,
+                            )
+                        } else {
+                            run_recipe(
+                                &command,
+                                deadline_ms,
+                                dir.as_deref(),
+                                cwd.as_deref().map(Path::new),
+                                roads,
+                                desk,
+                                || !reply.is_closed(),
+                            )
+                        }
                     };
                     let _ = reply.send(answer);
                 })
@@ -2853,8 +2863,9 @@ pub(super) fn run_recipe(
         // could press, and one of those numbers — chosen, never invented —
         // is pressed before the stopped step is walked again. Off by default,
         // and off is byte-for-byte today's walk.
-        let mode = computer_use::recover::mode_now();
-        if mode != computer_use::recover::Mode::Off {
+        let seat = computer_use::errand::seat_of(computer_use::errand::Surface::Page);
+        let mode = computer_use::errand::mode_now(seat);
+        if mode != computer_use::errand::Mode::Off {
             let lines = recipe_run::decide(command, &text)
                 .map(|(lines, _, _)| lines)
                 .unwrap_or_default();
@@ -2862,24 +2873,27 @@ pub(super) fn run_recipe(
             // and a walk's workspace is the folder it was asked from; asked
             // from nowhere known, the door refuses and the row says so
             // (docs/design/jev-settings-20260917.md §3).
-            let mut judge = computer_use::recover::live::LiveJudge::new(
+            let mut judge = computer_use::errand::live::LiveJudge::new(
                 &crate::api_routers::Keychain::of_this_machine(),
                 workspace,
+                seat,
             );
             // No key, nothing to ask — and so no reason to measure the page or
             // number its controls first.
             if let Some(read) =
-                computer_use::recover::read_report(&report, &lines).filter(|_| judge.armed())
+                computer_use::errand::read_report(&report, &lines).filter(|_| judge.armed())
             {
                 let flow = zerocode_core::computer_flow::parse_flow(&text)
                     .ok()
                     .flatten();
-                let at = computer_use::recover::Stopped {
+                let at = computer_use::errand::Errand {
                     goal: name,
-                    stop: read.stop,
-                    step: &read.step,
-                    refusal: &read.refusal,
-                    next: read.next,
+                    why: computer_use::errand::Why::Cleared {
+                        stop: read.stop,
+                        step: &read.step,
+                        refusal: &read.refusal,
+                        next: read.next,
+                    },
                     flow: flow.as_ref(),
                     moves_money: zerocode_core::computer_recipe::money_step(&lines)
                         .ok()
@@ -2890,13 +2904,13 @@ pub(super) fn run_recipe(
                 // deadline — a `marks` answer does not carry it.
                 let page = {
                     let mut desk = stage();
-                    computer_use::recover::walk::page_of(&desk.pages(), &read.pane)
+                    computer_use::errand::walk::page_of(&desk.pages(), &read.pane)
                 };
                 let spent = report["elapsedMs"].as_u64().unwrap_or_default();
                 let mut walk_again = |road: &mut _, left: u64, step: usize| {
                     round(road, stage(), left, Some(step)).ok()
                 };
-                let mut world = computer_use::recover::walk::WalkWorld::new(
+                let mut world = computer_use::errand::walk::WalkWorld::new(
                     &mut road,
                     &mut walk_again,
                     &read.pane,
@@ -2904,8 +2918,8 @@ pub(super) fn run_recipe(
                     deadline_ms,
                     spent,
                 );
-                let recovered = computer_use::recover::recover(mode, &at, &mut judge, &mut world);
-                computer_use::recover::write_rows(dir, &recovered.rows);
+                let recovered = computer_use::errand::run(mode, &at, &mut judge, &mut world);
+                computer_use::errand::write_rows(seat, dir, &recovered.rows);
                 if let Some(walked) = recovered.report {
                     report = walked;
                 }
@@ -2939,6 +2953,133 @@ pub(super) fn run_recipe(
         &caller_waits,
     );
     repeat_answer(command, &repeated)
+}
+
+/// A walk toward a goal (`walk`): the one step of a procedure whose next
+/// press cannot be written down in advance.
+///
+/// Everything the caller already knows the shape of belongs in a `batch`,
+/// which spends no judgment at all; this is where the screen decides, and it
+/// is the only place a judgment is asked. The loop owns it for the same
+/// reason it owns a batch and a recipe: it drives several commands down the
+/// lone command's road, and only here is the folder the walk was asked from
+/// known — which is the workspace the Jev door reads consent for.
+///
+/// The seat is the surface's, never the verb's: a walk at a browser pane is
+/// under the browser row of the Jev use table and a walk at an app is under
+/// the desktop row, so neither switch can turn the other's surface on.
+pub(super) fn run_goal(
+    command: &zerocode_core::computer_use::ComputerCommand,
+    deadline_ms: u64,
+    dir: Option<&Path>,
+    workspace: Option<&Path>,
+    roads: RecipeRoads<
+        impl FnMut(
+            zerocode_core::computer_recipe::RecipeTool,
+            &[String],
+            &[String],
+        ) -> zerocode_hookd::TeamAnswer,
+        impl FnMut(&[String], &[String], &zerocode_hookd::TeamAnswer),
+        impl FnMut(zerocode_core::computer_flow::EvidenceLevel),
+        impl FnMut(serde_json::Value),
+    >,
+    mut desk_of: impl computer_use::arena::DeskOf,
+) -> zerocode_hookd::TeamAnswer {
+    use computer_use::errand::{self, desk};
+    use computer_use::recipe_run::Desk as _;
+    let RecipeRoads { step, .. } = roads;
+    let mut road = step;
+    let said = |value: serde_json::Value| -> zerocode_hookd::TeamAnswer {
+        if command.json {
+            computer_said(format!(
+                "{}\n",
+                serde_json::json!({ "ok": true, "result": value })
+            ))
+        } else {
+            computer_said(format!("{}\n", goal_text(&value)))
+        }
+    };
+    // A stopped operator refuses a walk exactly as it refuses one press.
+    if let Some(door) = refused_at_the_door(command) {
+        return door;
+    }
+    let word = |key: &str| {
+        command
+            .params
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let goal = word("goal").unwrap_or_default();
+    let (aim, page) = match (word("pane"), word("app")) {
+        (Some(label), _) => {
+            // The pane's address, read once before the walk: a `marks` answer
+            // does not carry it, and a round trip for it inside the
+            // judgment's own deadline would spend the clock the walk needs.
+            let mut desk = desk_of.desk();
+            let (host, path) = errand::walk::page_of(&desk.pages(), &label);
+            (desk::Aim::Pane { label }, errand::Seen::Page { host, path })
+        }
+        (None, Some(name)) => (desk::Aim::App { name }, errand::Seen::default()),
+        // The parser already refuses neither and both; this is the shape the
+        // type system cannot be told about.
+        (None, None) => {
+            return computer_cli_error(
+                command.json,
+                zerocode_core::computer_use_protocol::error_code::INVALID_ARGUMENT,
+                "a walk looks at one screen: name --app <app> or --pane <browser pane>",
+            );
+        }
+    };
+    let seat = errand::seat_of(aim.surface());
+    let mode = errand::mode_now(seat);
+    let at = errand::Errand {
+        goal: &goal,
+        why: errand::Why::Goal {
+            steps: zerocode_core::computer_use::walk_steps(&command.params),
+        },
+        flow: None,
+        // A goal walk carries no document, so nothing here declares a money
+        // step. What keeps it off the money is the door every press goes
+        // through — the same guard, the same confirmation — and the fact that
+        // it can only press, never type an amount or a recipient.
+        moves_money: false,
+    };
+    let mut judge = errand::live::LiveJudge::new(
+        &crate::api_routers::Keychain::of_this_machine(),
+        workspace,
+        seat,
+    );
+    if mode == errand::Mode::Off || !judge.armed() {
+        // Off is today's product exactly: no look is taken, nothing is sent,
+        // and the answer says plainly that nothing walked.
+        return said(serde_json::json!({
+            "goal": goal,
+            "mode": mode.key(),
+            "pressed": 0,
+            "reached": false,
+            "steps": [],
+        }));
+    }
+    let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0);
+    let walked = errand::run(mode, &at, &mut judge, &mut world);
+    errand::write_rows(seat, dir, &walked.rows);
+    said(serde_json::json!({
+        "goal": goal,
+        "mode": mode.key(),
+        "pressed": walked.pressed,
+        "reached": walked.reached.unwrap_or_default(),
+        "steps": walked.rows,
+    }))
+}
+
+/// A walk's answer in words, for a caller that did not ask for JSON.
+fn goal_text(said: &serde_json::Value) -> String {
+    let pressed = said["pressed"].as_u64().unwrap_or_default();
+    let reached = said["reached"] == serde_json::Value::Bool(true);
+    let goal = said["goal"].as_str().unwrap_or_default();
+    let got = if reached { "reached" } else { "not reached" };
+    format!("{goal}: {got} after {pressed} press(es)")
 }
 
 /// One walk's answer: the report when it walked to its end, else the stop

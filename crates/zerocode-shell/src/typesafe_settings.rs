@@ -691,12 +691,12 @@ mod tests {
             ),
             ("window commands", product(include_str!("cmd/typesafe.rs"))),
             (
-                "window recovery",
-                product(include_str!("computer_use/recover.rs")),
+                "window errand",
+                product(include_str!("computer_use/errand.rs")),
             ),
             (
-                "window browser judge",
-                product(include_str!("computer_use/recover/live.rs")),
+                "window screen judge",
+                product(include_str!("computer_use/errand/live.rs")),
             ),
             ("window wire", product(include_str!("systemone.rs"))),
             (
@@ -709,7 +709,11 @@ mod tests {
             ),
             (
                 "window walk",
-                product(include_str!("computer_use/recover/walk.rs")),
+                product(include_str!("computer_use/errand/walk.rs")),
+            ),
+            (
+                "window goal walk",
+                product(include_str!("computer_use/errand/desk.rs")),
             ),
             (
                 "pane script",

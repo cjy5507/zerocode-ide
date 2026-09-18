@@ -11,10 +11,10 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
-use zerocode_core::browser_action::ActionAsk;
-use zerocode_core::jev::BROWSER;
+use zerocode_core::jev::JevUse;
+use zerocode_core::screen_action::ActionAsk;
 
-use super::{ActionJudge, BROWSER_ACTION_DEADLINE, Judged, Spent};
+use super::{ACTION_DEADLINE, ActionJudge, Judged, Spent};
 use crate::api_routers::RouterKeys;
 use crate::systemone::{SCHEMA, Wire, request_body};
 
@@ -31,7 +31,12 @@ pub fn read_body(ask: &ActionAsk, body: &str) -> Judged {
     };
     match ask.read(answers) {
         Ok(choice) => Judged::Chose(choice),
-        Err(_) => Judged::Refused(SCHEMA.to_string()),
+        // An answer that broke one of the closed choice's rules is refused by
+        // THAT rule's own word. One word for every refusal puts the cause out
+        // of reach of the row that records it, and the cause is the row's
+        // whole value: a sum the wire's rounding explains and an option nobody
+        // offered are not the same event, and only one of them is ours to fix.
+        Err(why) => Judged::Refused(why.token().to_string()),
     }
 }
 
@@ -44,30 +49,46 @@ pub fn request_of(ask: &ActionAsk) -> Value {
 /// Where a test points the door: zo's settings file and the workspace the
 /// stopped walk runs for.
 #[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Doorway {
     pub settings: Option<PathBuf>,
     pub workspace: Option<PathBuf>,
+    pub seat: &'static JevUse,
 }
 
-/// The judge that actually asks. Built once per recovery, so a walk that is
-/// barred or never stops does not read the keychain at all.
+#[cfg(test)]
+impl Default for Doorway {
+    fn default() -> Self {
+        Self {
+            settings: None,
+            workspace: None,
+            seat: &zerocode_core::jev::BROWSER,
+        }
+    }
+}
+
+/// The judge that actually asks. Built once per walk, so a walk that is
+/// barred or never asks does not read the keychain at all.
 pub struct LiveJudge {
     wire: Wire,
-    /// The workspace the stopped walk runs for — the folder it was asked
-    /// from, as the Computer Use door said it; `None` consents to nothing.
+    /// The workspace the walk runs for — the folder it was asked from, as the
+    /// Computer Use door said it; `None` consents to nothing.
     workspace: Option<PathBuf>,
+    /// The Jev use table's row for the surface being walked: whose consent
+    /// the door checks, and whose ledger the row lands in.
+    seat: &'static JevUse,
     spent: Option<Spent>,
 }
 
 impl LiveJudge {
     /// Read the key the settings pane keeps; the door reads zo's settings file
-    /// for the walk's `workspace`.
+    /// for the walk's `workspace`, and `seat` is the surface's own row.
     #[must_use]
-    pub fn new(keys: &dyn RouterKeys, workspace: Option<&Path>) -> Self {
+    pub fn new(keys: &dyn RouterKeys, workspace: Option<&Path>, seat: &'static JevUse) -> Self {
         Self {
             wire: Wire::new(keys),
             workspace: workspace.map(Path::to_path_buf),
+            seat,
             spent: None,
         }
     }
@@ -80,6 +101,7 @@ impl LiveJudge {
         Self {
             wire: Wire::at(base, key, doorway.settings),
             workspace: doorway.workspace,
+            seat: doorway.seat,
             spent: None,
         }
     }
@@ -95,10 +117,10 @@ impl LiveJudge {
 impl ActionJudge for LiveJudge {
     fn choose(&mut self, ask: &ActionAsk) -> Judged {
         let asked = self.wire.ask(
-            &BROWSER,
+            self.seat,
             self.workspace.as_deref(),
             request_of(ask),
-            BROWSER_ACTION_DEADLINE,
+            ACTION_DEADLINE,
         );
         self.spent = Some(asked.spent);
         match asked.answer {

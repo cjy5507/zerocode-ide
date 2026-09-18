@@ -7,14 +7,15 @@ use std::net::TcpListener;
 use std::time::Duration;
 
 use serde_json::json;
-use zerocode_core::browser_action::{ActionLook, Chosen, ask};
 use zerocode_core::computer_recipe::RecipeStop;
+use zerocode_core::jev::choice::ChoiceRefusal;
 use zerocode_core::jev::door::{REQUESTS_KEY, Refused};
+use zerocode_core::screen_action::{ActionLook, Chosen, Errand as Asked, Where, ask};
 
 use super::*;
 use crate::api_routers::HeldKeys;
-use crate::computer_use::recover::tests::{FakeWorld, stopped};
-use crate::computer_use::recover::{ActionJudge, Mode, recover};
+use crate::computer_use::errand::tests::{FakeWorld, stopped};
+use crate::computer_use::errand::{ActionJudge, Mode, run};
 use crate::systemone::tests::Endpoint;
 use crate::systemone::{
     INVALID_REQUEST, RATE_LIMITED, SYSTEMONE_MODEL, SYSTEMONE_PATH, TIMEOUT, TRANSPORT,
@@ -34,11 +35,15 @@ fn asked_about(goal: &str, label: &str) -> ActionAsk {
     ];
     ask(&ActionLook {
         goal,
-        stopped: "step_failed",
-        step: "click",
-        refusal: "nothing matched",
-        host: "app.local",
-        path: "/settings",
+        errand: Asked::Clear {
+            stopped: "step_failed",
+            step: "click",
+            refusal: "nothing matched",
+        },
+        at: Where::Page {
+            host: "app.local",
+            path: "/settings",
+        },
         tried: &[],
         items: &items,
     })
@@ -60,6 +65,7 @@ fn door_in(home: &tempfile::TempDir, consented: &str) -> Doorway {
     Doorway {
         settings: Some(settings),
         workspace: Some(work),
+        ..Doorway::default()
     }
 }
 
@@ -97,16 +103,25 @@ fn a_body_is_read_only_through_the_question_that_was_asked() {
     };
     assert_eq!(choice.chosen, Chosen::Mark(1));
 
-    for bad in [
-        "not json at all",
-        "{}",
-        &json!({ "answers": {} }).to_string(),
+    // A body nothing could read is the wire's own word; an answer that broke
+    // a rule of the closed choice names THAT rule, so a row can tell a sum
+    // the wire's rounding moved from a number nobody offered.
+    for (bad, refused) in [
+        ("not json at all".to_string(), SCHEMA),
+        ("{}".to_string(), SCHEMA),
+        (
+            json!({ "answers": {} }).to_string(),
+            ChoiceRefusal::NoAnswer.token(),
+        ),
         // A number the question never offered, in an otherwise perfect body.
-        &body_choosing("mark:9"),
+        (
+            body_choosing("mark:9"),
+            ChoiceRefusal::UnknownOption.token(),
+        ),
     ] {
         assert_eq!(
-            read_body(&asked, bad),
-            Judged::Refused(SCHEMA.to_string()),
+            read_body(&asked, &bad),
+            Judged::Refused(refused.to_string()),
             "this body should have said nothing: {bad}"
         );
     }
@@ -125,7 +140,7 @@ fn the_request_carries_the_questions_own_state_and_the_vendors_model() {
 #[test]
 fn without_a_key_nothing_is_sent() {
     let keys = HeldKeys::default();
-    let mut judge = LiveJudge::new(&keys, None);
+    let mut judge = LiveJudge::new(&keys, None, &zerocode_core::jev::BROWSER);
     assert!(!judge.armed());
 
     // A server that would answer, and is never reached.
@@ -144,7 +159,7 @@ fn a_key_the_pane_kept_is_the_key_the_wire_presents() {
     let keys = HeldKeys::default();
     crate::typesafe_settings::save_key("secret-key", &keys).expect("the fake keychain takes it");
 
-    let judge = LiveJudge::new(&keys, None);
+    let judge = LiveJudge::new(&keys, None, &zerocode_core::jev::BROWSER);
     assert!(judge.armed(), "the pane's key is the wire's key");
 }
 
@@ -190,14 +205,14 @@ fn a_refused_status_is_one_call_and_its_word() {
 
 #[test]
 fn a_server_slower_than_the_deadline_is_a_timeout_not_a_hang() {
-    let past = u64::try_from(BROWSER_ACTION_DEADLINE.as_millis()).unwrap_or(0) + 500;
+    let past = u64::try_from(ACTION_DEADLINE.as_millis()).unwrap_or(0) + 500;
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:1"), past);
     let (_home, mut judge) = consented_judge(&endpoint.base());
 
     let began = std::time::Instant::now();
     assert_eq!(judge.choose(&asked()), Judged::Refused(TIMEOUT.to_string()));
     assert!(
-        began.elapsed() < BROWSER_ACTION_DEADLINE + Duration::from_millis(400),
+        began.elapsed() < ACTION_DEADLINE + Duration::from_millis(400),
         "the deadline bounds the whole call: {:?}",
         began.elapsed()
     );
@@ -278,7 +293,7 @@ fn the_folder_a_walk_was_asked_from_is_the_workspace_the_door_consents_by() {
         },
     );
     let mut world = FakeWorld::showing(&[1, 2]);
-    let recovered = recover(Mode::On, &at, &mut judge, &mut world);
+    let recovered = run(Mode::On, &at, &mut judge, &mut world);
     assert_eq!(endpoint.asked().len(), 1, "one request left the door");
     assert_eq!(world.presses, [1]);
     assert_eq!(recovered.rows.len(), 1, "{:?}", recovered.rows);
@@ -297,7 +312,7 @@ fn the_folder_a_walk_was_asked_from_is_the_workspace_the_door_consents_by() {
         },
     );
     let mut world = FakeWorld::showing(&[1, 2]);
-    let recovered = recover(Mode::On, &at, &mut judge, &mut world);
+    let recovered = run(Mode::On, &at, &mut judge, &mut world);
     assert!(endpoint.asked().is_empty(), "nothing left the door");
     assert!(world.presses.is_empty(), "nothing was pressed");
     assert_eq!(recovered.rows.len(), 1, "{:?}", recovered.rows);
@@ -342,5 +357,119 @@ fn a_credential_on_the_screen_never_reaches_the_wire() {
             requests: 1,
             redacted_lines: 3
         })
+    );
+}
+
+/// What one screen question costs and chooses against the real endpoint.
+///
+/// Not part of the gate — it spends a person's key and crosses the internet.
+/// It reads a real marked look from `ZEROCODE_JEV_BENCH_LOOK` (a
+/// `zerocode-computer observe --marks --json` answer, or a browser pane's
+/// `marks --json`), the goal from `ZEROCODE_JEV_BENCH_GOAL`, the key from
+/// `ZEROCODE_JEV_BENCH_KEY`, and how many rounds from
+/// `ZEROCODE_JEV_BENCH_ROUNDS`. It prints each round's milliseconds and what
+/// it chose, and asserts nothing about the answer: what a judgment picks on
+/// our own screens is the thing being measured, not a thing to assume.
+#[test]
+#[ignore = "spends a real key on the real endpoint"]
+fn what_one_screen_question_costs_against_the_real_endpoint() {
+    let look = std::env::var("ZEROCODE_JEV_BENCH_LOOK").expect("a marked look's json");
+    let goal = std::env::var("ZEROCODE_JEV_BENCH_GOAL").expect("a goal sentence");
+    let key = std::env::var("ZEROCODE_JEV_BENCH_KEY").expect("a TypeSafe key");
+    let rounds: usize = std::env::var("ZEROCODE_JEV_BENCH_ROUNDS")
+        .ok()
+        .and_then(|rounds| rounds.parse().ok())
+        .unwrap_or(5);
+    let cap: usize = std::env::var("ZEROCODE_JEV_BENCH_CANDIDATES")
+        .ok()
+        .and_then(|cap| cap.parse().ok())
+        .unwrap_or(0);
+
+    let said: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&look).expect("the look")).expect("json");
+    let said = said.get("result").unwrap_or(&said);
+    let (items, app, window) = match said.pointer("/marks/items") {
+        Some(items) => (
+            items.as_array().expect("items").clone(),
+            said.pointer("/marks/app")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            said.pointer("/tree/window/title")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        None => (
+            said["items"].as_array().expect("items").clone(),
+            String::new(),
+            String::new(),
+        ),
+    };
+    // A cap of the caller's own, so the cost of a wider question can be read
+    // off the same screen as the cost of today's.
+    let items = if cap > 0 && cap < items.len() {
+        items[..cap].to_vec()
+    } else {
+        items
+    };
+
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_in(&home, "work");
+    let asked = ask(&ActionLook {
+        goal: &goal,
+        errand: zerocode_core::screen_action::Errand::Goal,
+        at: Where::Desk {
+            app: &app,
+            window: &window,
+        },
+        tried: &[],
+        items: &items,
+    })
+    .expect("a screen with controls asks");
+    println!(
+        "screen: {} items, question offers {} + give_up + done",
+        items.len(),
+        asked.marks().len()
+    );
+
+    let base = std::env::var("ZO_SYSTEMONE_BASE_URL")
+        .unwrap_or_else(|_| "https://api.typesafe.ai".to_string());
+    // The wire itself rather than the judge, so a refusal can say WHICH rule
+    // the answer broke: the judge's ledger token is `schema` for all of them.
+    let wire = crate::systemone::Wire::at(&base, &key, door.settings.clone());
+    let mut millis = Vec::new();
+    for round in 1..=rounds {
+        let began = std::time::Instant::now();
+        let sent = wire.ask(
+            &zerocode_core::jev::DESKTOP,
+            door.workspace.as_deref(),
+            request_of(&asked),
+            ACTION_DEADLINE,
+        );
+        let took = began.elapsed().as_secs_f64() * 1_000.0;
+        millis.push(took);
+        let said = match &sent.answer {
+            Err(token) => format!("refused {token}"),
+            Ok(body) => {
+                let parsed: serde_json::Value =
+                    serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+                match asked.read(parsed.get("answers").unwrap_or(&serde_json::Value::Null)) {
+                    Ok(choice) => {
+                        format!("{:?} confidence {:.3}", choice.chosen, choice.confidence)
+                    }
+                    Err(why) => format!("schema · {} · {body}", why.reason()),
+                }
+            }
+        };
+        println!("round {round}: {took:.0} ms · {said}");
+    }
+    millis.sort_by(f64::total_cmp);
+    println!(
+        "{} rounds · min {:.0} ms · p50 {:.0} ms · max {:.0} ms",
+        millis.len(),
+        millis.first().copied().unwrap_or_default(),
+        millis[millis.len() / 2],
+        millis.last().copied().unwrap_or_default(),
     );
 }

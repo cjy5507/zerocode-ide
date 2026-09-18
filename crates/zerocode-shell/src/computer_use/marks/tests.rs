@@ -528,3 +528,68 @@ fn a_marked_look_keeps_the_clean_frame_for_the_diff() {
     assert_eq!(second["marks"]["sameAsLastLook"], true);
     assert_eq!(second["marks"]["lookId"], first["marks"]["lookId"]);
 }
+
+/// What the badges cost on a real frame — the work `--no-screenshot` skips.
+///
+/// Not part of the gate: it needs a frame a real look left on disk, named by
+/// `ZEROCODE_MARK_BENCH_PNG`, and how many badges to draw in
+/// `ZEROCODE_MARK_BENCH_MARKS`. Run it with `--ignored` beside a capture.
+#[test]
+#[ignore = "measures a real frame named by the environment"]
+fn what_drawing_the_badges_costs_on_a_real_frame() {
+    let Ok(path) = std::env::var("ZEROCODE_MARK_BENCH_PNG") else {
+        panic!("ZEROCODE_MARK_BENCH_PNG names a png a real marked look left");
+    };
+    let count: usize = std::env::var("ZEROCODE_MARK_BENCH_MARKS")
+        .ok()
+        .and_then(|marks| marks.parse().ok())
+        .unwrap_or(99);
+    let bytes = std::fs::read(&path).expect("the frame");
+    let rounds = 20;
+
+    let began = std::time::Instant::now();
+    for _ in 0..rounds {
+        crate::computer_use::compare::decode_png(&bytes).expect("a frame decodes");
+    }
+    let decode = began.elapsed() / rounds;
+
+    let clean = crate::computer_use::compare::decode_png(&bytes).expect("a frame decodes");
+    let marks: Vec<plan::PlacedMark> = (1..=count)
+        .map(|mark| {
+            #[allow(clippy::cast_precision_loss)]
+            let at = (mark % 30) as f64 * 24.0;
+            #[allow(clippy::cast_precision_loss)]
+            let down = (mark / 30) as f64 * 24.0;
+            plan::PlacedMark {
+                mark,
+                element_index: mark,
+                role: "button".into(),
+                label: None,
+                screen: Rect::new(at, down, 16.0, 16.0),
+                local: Rect::new(at, down, 16.0, 16.0),
+                signature: String::new(),
+                name: String::new(),
+                context: String::new(),
+                element_px: Rect::new(at, down, 16.0, 16.0),
+                badge_px: Rect::new(at, down, 14.0, 12.0),
+            }
+        })
+        .collect();
+
+    let began = std::time::Instant::now();
+    for _ in 0..rounds {
+        let mut picture = clean.clone();
+        draw(&mut picture, &marks);
+        picture.encode().expect("a marked frame encodes");
+    }
+    let drawn = began.elapsed() / rounds;
+
+    println!(
+        "frame {}x{} · {count} badges · decode {:.1} ms · clone+draw+encode {:.1} ms · both {:.1} ms",
+        clean.width,
+        clean.height,
+        decode.as_secs_f64() * 1_000.0,
+        drawn.as_secs_f64() * 1_000.0,
+        (decode + drawn).as_secs_f64() * 1_000.0,
+    );
+}

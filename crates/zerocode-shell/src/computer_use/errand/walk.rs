@@ -1,5 +1,9 @@
-//! The world a stopped walk recovers in: the roads it already drives
-//! (docs/design/jev-browser-action-20260917.md §7.1).
+//! The world a STOPPED walk recovers in: the roads it already drives
+//! (docs/design/jev-browser-action-20260917.md §7.1). A walk with no document
+//! behind it — a goal walk — has no step to resume and drives
+//! [`super::desk`]'s world instead; the two are separate because resuming a
+//! document is the only thing that differs, and it is the whole of this file
+//! that a goal walk would have had to leave empty.
 //!
 //! Nothing new reaches the browser from here. A look is the pane's own
 //! `marks`, a press is `click --mark <n>`, and walking again is the caller's
@@ -22,7 +26,7 @@ use zerocode_core::computer_recipe::RecipeTool;
 use zerocode_core::computer_use_protocol::marks::ITEMS_KEY;
 use zerocode_hookd::TeamAnswer;
 
-use super::{Recovery, Screen};
+use super::{Screen, Seen, World};
 
 /// The pane's host and path among the pages a desk sees (`Desk::pages`), or
 /// two empty strings when no page answers to that label. The query is
@@ -80,7 +84,7 @@ impl<'a, Road, Walk> WalkWorld<'a, Road, Walk> {
     }
 }
 
-impl<Road, Walk> Recovery for WalkWorld<'_, Road, Walk>
+impl<Road, Walk> World for WalkWorld<'_, Road, Walk>
 where
     Road: FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
     Walk: FnMut(&mut Road, u64, usize) -> Option<Value>,
@@ -94,8 +98,10 @@ where
         let said = serde_json::from_str::<Value>(answer.stdout.trim()).ok()?;
         let items = said.get(ITEMS_KEY)?.as_array()?.clone();
         Some(Screen {
-            host: self.host.clone(),
-            path: self.path.clone(),
+            at: Seen::Page {
+                host: self.host.clone(),
+                path: self.path.clone(),
+            },
             items,
         })
     }

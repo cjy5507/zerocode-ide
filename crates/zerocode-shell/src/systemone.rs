@@ -1,6 +1,6 @@
 //! The window's System One wire: the one socket every question the window
-//! asks Jev goes through — a stopped browser walk's recovery
-//! (`computer_use::recover::live`) and a quiet worker's cause
+//! asks Jev goes through — which control a walk presses next, on a page or on
+//! the desktop (`computer_use::errand::live`), and a quiet worker's cause
 //! (`orchestration::stall_cause`).
 //!
 //! zo has a System One client of its own (`zo-ide/crates/api/src/systemone.rs`)

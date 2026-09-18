@@ -42,7 +42,10 @@ pub const CWD_HEADER: &str = "x-zerocode-cwd";
 /// ([`CWD_HEADER`]): the ones the window judges by that folder. A recipe walk
 /// that stops is judged for the workspace it was asked from; no other verb
 /// reads the folder, so no other call spends two processes spelling it.
-pub const CWD_VERBS: &[&str] = &[ComputerMethod::RecipeRun.verb_name()];
+pub const CWD_VERBS: &[&str] = &[
+    ComputerMethod::RecipeRun.verb_name(),
+    ComputerMethod::Walk.verb_name(),
+];
 
 /// [`CWD_HEADER`]'s value for `cwd` — its UTF-8 bytes as lowercase hex, the
 /// spelling the door's `od` writes.
@@ -1595,6 +1598,37 @@ pub const FLOW_BASELINE_PROBE_MS: u64 = COMPUTER_WAIT_FOR_MIN_MS;
 /// whole wait has passed, so a trigger is one look a minute at most and the
 /// evidence log is not a poll's.
 pub const FLOW_TRIGGER_MS: u64 = COMPUTER_WAIT_FOR_MAX_MS;
+/// How many presses one `walk` spends when its caller names no number.
+///
+/// Measured, on this machine's own recorded walks (2026-09-18): of the 43
+/// Computer Use sessions under `computer-use/sessions`, 23 acted at all, and
+/// their acting steps run p50 8, p75 25, p90 40. Thirty covers 18 of those 23
+/// — all but two APM benches, whose hundreds of presses at random targets are
+/// not an errand, and three long operator sessions. The call's own deadline
+/// ([`COMPUTER_USE_DEADLINE_SECONDS`]) bounds the walk regardless, and the
+/// screen-did-not-move rule ends it before either.
+pub const WALK_STEPS_DEFAULT: usize = 30;
+
+/// The most presses a caller may ask one `walk` for: the p90 of those same 23
+/// sessions. Past a walk's own ninetieth percentile it is not reaching a
+/// goal, it is hunting, and hunting unattended is what the
+/// screen-did-not-move rule exists to end.
+pub const WALK_STEPS_MAX: usize = 40;
+
+/// How many presses this walk may spend: what the caller asked, clamped to
+/// [`WALK_STEPS_MAX`], or [`WALK_STEPS_DEFAULT`] when they asked for none.
+/// The parser refuses anything out of range, so this reads a checked value —
+/// it clamps so that the number the walk spends is never a number nobody
+/// wrote down.
+#[must_use]
+pub fn walk_steps(params: &Value) -> usize {
+    params
+        .get("steps")
+        .and_then(Value::as_u64)
+        .and_then(|steps| usize::try_from(steps).ok())
+        .map_or(WALK_STEPS_DEFAULT, |steps| steps.min(WALK_STEPS_MAX))
+}
+
 /// How many rounds of a repeat may fail in a row before it ends: the stuck
 /// rule's count (`COMPUTER_STUCK_REPEATS`) — the same failure this many
 /// times with nothing changing is a loop, not progress.
@@ -1763,6 +1797,14 @@ pub enum ComputerMethod {
     /// lone command's road, so it is stopped, paced, confirmed and logged as
     /// if alone.
     Batch,
+    /// The one step of a procedure whose next press cannot be written down in
+    /// advance (t-4774) — the window's, like a batch. Everything a caller
+    /// already knows the shape of belongs in a `batch`; this is where the
+    /// screen decides, and a judgment reads the controls it is showing and
+    /// picks one of their numbers. It presses and nothing else, and it ends
+    /// on the caller's own `--until` check, on the judgment saying it is
+    /// there, on a screen that will not move, or on its step budget.
+    Walk,
 }
 
 /// The provider methods the Windows provider answers today
@@ -1885,6 +1927,7 @@ impl ComputerMethod {
         Self::SoundWait,
         Self::Watch,
         Self::Batch,
+        Self::Walk,
     ];
 
     /// Where the verb stands on Windows, by the two tables.
@@ -1948,7 +1991,7 @@ impl ComputerMethod {
             Self::ListenStart => Some("listenStart"),
             Self::ListenStop => Some("listenStop"),
             Self::SoundRead => Some("soundRead"),
-            Self::SoundWait | Self::Watch | Self::Batch => None,
+            Self::SoundWait | Self::Watch | Self::Batch | Self::Walk => None,
         }
     }
 
@@ -2017,6 +2060,7 @@ impl ComputerMethod {
             Self::SoundWait => "sound-wait",
             Self::Watch => "watch",
             Self::Batch => "batch",
+            Self::Walk => "walk",
         }
     }
 
@@ -2083,6 +2127,7 @@ impl ComputerMethod {
                 | Self::ClipboardWrite
                 | Self::Batch
                 | Self::RecipeRun
+                | Self::Walk
         )
     }
 
@@ -2680,6 +2725,7 @@ pub fn verb_method(verb: &str) -> Option<ComputerMethod> {
         "sound-read" => ComputerMethod::SoundRead,
         "sound-wait" => ComputerMethod::SoundWait,
         "watch" => ComputerMethod::Watch,
+        "walk" => ComputerMethod::Walk,
         "batch" => ComputerMethod::Batch,
         _ => return None,
     })
@@ -2851,6 +2897,8 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ("look", "look"),
         ("until", "until"),
         ("arena", "arena"),
+        ("goal", "goal"),
+        ("pane", "pane"),
     ] {
         if let Some(value) = optional_string_allowing_empty(&flags, flag)? {
             params.insert(key.into(), Value::String(value));
@@ -3192,6 +3240,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::Verdict => &["json", "pass", "fail", "reason"],
         ComputerMethod::Observe => &[
             "json",
+            "no-screenshot",
             "app",
             "window-id",
             "window-index",
@@ -3216,6 +3265,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::SoundWait => &["json", "label", "min-confidence", "timeout-ms", "after"],
         ComputerMethod::Watch => &["json", "until", "timeout-ms", "display"],
         ComputerMethod::Batch => &["json", BATCH_COMMANDS_FLAG],
+        ComputerMethod::Walk => &["json", "goal", "app", "pane", "until", "steps"],
         ComputerMethod::Compare => &[
             "json", "baseline", "against", "region", "display", "max-diff",
         ],
@@ -3546,6 +3596,39 @@ fn validate(
                 return Err("--min-confidence is a share between 0 and 1".into());
             }
         }
+        ComputerMethod::Walk => {
+            let goal = params
+                .get("goal")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|goal| !goal.is_empty())
+                .ok_or("a walk needs --goal: one sentence saying what to reach")?;
+            if goal.chars().count() > crate::jev::GOAL_CHAR_CAP {
+                return Err(format!(
+                    "--goal is at most {} characters — past a sentence a goal is a plan, and a plan is a recipe",
+                    crate::jev::GOAL_CHAR_CAP
+                ));
+            }
+            let (app, pane) = (params.get("app"), params.get("pane"));
+            if app.is_some() == pane.is_some() {
+                return Err(
+                    "a walk looks at one screen: name --app <app> or --pane <browser pane>, not both and not neither"
+                        .into(),
+                );
+            }
+            if let Some(steps) = params.get("steps").and_then(Value::as_u64)
+                && (steps == 0 || steps > WALK_STEPS_MAX as u64)
+            {
+                return Err(format!("--steps is between 1 and {WALK_STEPS_MAX}"));
+            }
+            if params
+                .get("until")
+                .and_then(Value::as_str)
+                .is_some_and(|until| until.trim().is_empty())
+            {
+                return Err("--until is the text that is on screen when it worked".into());
+            }
+        }
         ComputerMethod::RecipeSave | ComputerMethod::RecipeShow | ComputerMethod::RecipeRun => {
             if params.get("start").and_then(Value::as_u64) == Some(0) {
                 return Err("--start counts steps from 1".into());
@@ -3850,6 +3933,7 @@ pub fn usage() -> String {
         "  zerocode-computer recipe-list [--json]",
         "  zerocode-computer recipe-show --name <name> [--json]",
         "  zerocode-computer recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--json]",
+        "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane>) [--until <text on screen when it worked>] [--steps N] [--json]",
         "      (walks the steps in one call, filling {{name}} from --params; stops at the person's turn or last step,",
         "       a step naming the saved screen's element or window, a check the screen fails, an act that changed",
         "       nothing, or a person's hand on the pointer — and answers the step to resume from; a guarded Flow's",
@@ -4371,7 +4455,7 @@ mod windows_shim_tests {
             "could not reach the window",
             "$env:ZEROCODE_RUN_EVIDENCE_DIR",
             "'x-zerocode-run-evidence', $evidence",
-            "if (@('recipe-run') -ccontains [string]$args[0]) {",
+            "if (@('recipe-run', 'walk') -ccontains [string]$args[0]) {",
             "(Get-Location).ProviderPath",
             "'x-zerocode-cwd', [BitConverter]::ToString([System.Text.Encoding]::UTF8.GetBytes($cwd)).Replace('-', '')",
             "zerocode-computer — inspect and operate local desktop apps",

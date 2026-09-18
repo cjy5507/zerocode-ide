@@ -1,13 +1,15 @@
 //! What the envelope promises: a question the endpoint will read, and a tag
 //! no seat can forget because no seat writes it.
 
+use serde_json::json;
+
 use super::*;
 
 /// The four seats that ask a closed choice, as source. A seat added to the
 /// table and not to this list is a seat this contract does not hold, so the
 /// list is named in [`the_union_tag_is_spelled_in_one_file`]'s own failure.
 const SEATS: [(&str, &str); 4] = [
-    ("browser_action", include_str!("../../browser_action.rs")),
+    ("screen_action", include_str!("../../screen_action.rs")),
     ("stall_cause", include_str!("../../stall_cause.rs")),
     (
         "worker_placement",
@@ -100,6 +102,106 @@ fn every_seat_builds_its_question_here() {
         assert!(
             source.contains("choice::asked("),
             "{name} does not build its question with `choice::asked`"
+        );
+    }
+}
+
+/// A sum the wire's rounding explains is not a broken rule; the next step out
+/// of the grid is.
+#[test]
+fn the_sum_rule_admits_the_roundings_own_distance_and_nothing_past_it() {
+    // Every number arrives on the grid, so every distance from one does too:
+    // the bound must sit BETWEEN the last distance rounding explains and the
+    // grid's next step, never on either.
+    for options in 2..=24_usize {
+        let bound = probability_sum_tolerance(options);
+        #[allow(clippy::cast_precision_loss)]
+        let explained = (options / 2) as f64 * crate::jev::ANSWER_STEP;
+        let next = explained + crate::jev::ANSWER_STEP;
+        assert!(
+            bound > explained && bound < next,
+            "{options} options: {bound} is not between {explained} and {next}"
+        );
+    }
+
+    // The worked case, as `jev-1.13.0` actually answered it on this machine
+    // (2026-09-18, t-4774): fourteen options, every number on the grid, the
+    // set summing to 0.99. The flat `1e-6` bound threw 6 of 51 real calls
+    // away whole for exactly this.
+    let said: [(&str, f64); 14] = [
+        ("give_up", 0.93),
+        ("mark:11", 0.03),
+        ("mark:1", 0.01),
+        ("mark:10", 0.01),
+        ("mark:9", 0.01),
+        ("done", 0.0),
+        ("mark:2", 0.0),
+        ("mark:3", 0.0),
+        ("mark:4", 0.0),
+        ("mark:5", 0.0),
+        ("mark:6", 0.0),
+        ("mark:7", 0.0),
+        ("mark:8", 0.0),
+        ("mark:12", 0.0),
+    ];
+    let offered: BTreeSet<String> = said.iter().map(|(name, _)| (*name).to_string()).collect();
+    let probabilities: Map<String, Value> = said
+        .iter()
+        .map(|(name, share)| ((*name).to_string(), json!(share)))
+        .collect();
+    let total: f64 = said.iter().map(|(_, share)| share).sum();
+    assert!(
+        (total - 1.0).abs() > 1e-6,
+        "the fixture is a sum the rounding moved"
+    );
+    let answers = json!({
+        "q": {
+            "type": "choice",
+            "choice": "give_up",
+            "probabilities": Value::Object(probabilities),
+            "confidence": 0.93,
+        }
+    });
+    assert!(
+        read(&answers, "q", &offered).is_ok(),
+        "a sum {total} the rounding explains is refused"
+    );
+
+    // And a set that misses by more than the rounding could is still refused.
+    let mut broken = answers.clone();
+    broken["q"]["probabilities"]["give_up"] = json!(0.5);
+    assert_eq!(
+        read(&broken, "q", &offered),
+        Err(ChoiceRefusal::NotOne),
+        "a sum no rounding explains is still a broken rule"
+    );
+}
+
+/// Each rule a closed choice can break says so in its own closed word, and no
+/// two of them say the same one.
+#[test]
+fn every_broken_rule_has_a_word_of_its_own() {
+    let words: BTreeSet<&str> = [
+        ChoiceRefusal::NoAnswer,
+        ChoiceRefusal::NotAChoice,
+        ChoiceRefusal::UnknownOption,
+        ChoiceRefusal::Keys,
+        ChoiceRefusal::NotOne,
+        ChoiceRefusal::OutOfRange,
+    ]
+    .into_iter()
+    .map(ChoiceRefusal::token)
+    .collect();
+    assert_eq!(words.len(), 6, "two rules share a word: {words:?}");
+    for word in &words {
+        assert!(
+            word.starts_with("schema"),
+            "{word} does not read as a schema failure"
+        );
+        assert!(
+            word.chars()
+                .all(|letter| letter.is_ascii_lowercase() || letter == '_'),
+            "{word} is not one closed word"
         );
     }
 }

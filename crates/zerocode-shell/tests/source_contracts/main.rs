@@ -528,19 +528,32 @@ mod tests {
             looped.contains("let cwd = request.cwd;"),
             "the loop drops the folder its request was asked from"
         );
-        let call = &looped[looped.find("run_recipe(").expect("the loop walks recipes")..];
-        let call = &call[..call.find("RecipeRoads::new(").expect("the walk's roads")];
-        assert!(
-            call.contains("cwd.as_deref()"),
-            "the walk is not handed its request's folder: {call}"
-        );
-        let recipe = block_after(shell, "fn run_recipe(");
-        let judge = &recipe[recipe.find("LiveJudge::new(").expect("the walk's judge")..];
-        let judge = &judge[..judge.find(");").expect("the judge's arguments")];
-        assert!(
-            judge.contains("workspace") && !judge.contains("None"),
-            "the walk's judge is not asked for its workspace: {judge}"
-        );
+        // Both walks the loop owns are handed it: a recipe's, and a goal's.
+        for walk in ["run_recipe(", "run_goal("] {
+            let call = &looped[looped
+                .find(walk)
+                .unwrap_or_else(|| panic!("the loop walks {walk}"))..];
+            let call = &call[..call.find("roads,").expect("the call's roads")];
+            assert!(
+                call.contains("cwd.as_deref()"),
+                "{walk} is not handed its request's folder: {call}"
+            );
+        }
+        for walk in ["fn run_recipe(", "fn run_goal("] {
+            let body = block_after(shell, walk);
+            let judge = &body[body.find("LiveJudge::new(").expect("the walk's judge")..];
+            let judge = &judge[..judge.find(");").expect("the judge's arguments")];
+            assert!(
+                judge.contains("workspace") && !judge.contains("None"),
+                "{walk}'s judge is not asked for its workspace: {judge}"
+            );
+            // And for the surface's own seat, never a name written here: a
+            // page's consent is not a desktop's.
+            assert!(
+                judge.contains("seat"),
+                "{walk}'s judge is not asked for its seat: {judge}"
+            );
+        }
     }
 
     /// A lone command and every step of a batch take one road: the evidence,
@@ -551,19 +564,26 @@ mod tests {
         let shell = shipped_backend();
         let looped = block_after(shell, "async fn computer_loop(");
         assert!(looped.contains("run_batch(") && looped.contains("run_recipe("));
-        // A batch asks the person about its presses; a recipe hands them back —
-        // its walk budgets no question (review, 2026-09-11).
+        // A batch asks the person about its presses; a walk hands them back —
+        // its steps budget no question (review, 2026-09-11). The two walks
+        // the loop owns, a recipe's and a goal's, share ONE set of roads, so
+        // the rule is read off that one block and neither can drift from it.
         let batched =
-            &looped[looped.find("run_batch(").unwrap()..looped.find("run_recipe(").unwrap()];
-        let recipe =
-            &looped[looped.find("run_recipe(").unwrap()..looped.find("LiveDesk::new()").unwrap()];
+            &looped[looped.find("run_batch(").unwrap()..looped.find("RecipeRoads::new(").unwrap()];
+        let roads =
+            &looped[looped.find("RecipeRoads::new(").unwrap()..looped.find("run_goal(").unwrap()];
         assert!(
             batched.contains("Asking::Person") && !batched.contains("Asking::HandBack"),
             "a batch's steps ask the person"
         );
         assert!(
-            recipe.contains("Asking::HandBack") && !recipe.contains("Asking::Person"),
-            "a recipe's steps hand a guarded press back"
+            roads.contains("Asking::HandBack") && !roads.contains("Asking::Person"),
+            "a walk's steps hand a guarded press back"
+        );
+        assert!(
+            looped.matches("RecipeRoads::new(").count() == 1
+                && looped.find("run_goal(") < looped.find("run_recipe("),
+            "the two walks take one set of roads, built once before either"
         );
         assert_eq!(
             looped.matches("desktop_step(").count(),
