@@ -10992,7 +10992,7 @@ function paintPaneChat(term) {
   noticeOnPaneChat(
     held,
     "worker.historyFolded",
-    false,
+    run.helper.folded === true,
     t("worker.historyFolded", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다."),
   );
 }
@@ -11706,6 +11706,11 @@ function scrollHelperToBottom(list) {
   if (!list) return;
   list.scrollTop = list.scrollHeight;
   requestAnimationFrame(() => {
+    // 늦게 도착한 프레임은 그 사이 일어난 일을 모른다: 이 줄을 예약할 때
+    // 바닥이던 사람이 프레임이 오기 전에 위를 읽기 시작했을 수 있고, 부하가
+    // 클수록 그 틈이 넓다. 다시 묻고 나서 옮긴다 — 방금 바닥으로 보낸 판은
+    // 여전히 바닥이므로 따라가던 사람은 그대로 따라간다.
+    if (!list.isConnected || !helperFollowsTail(list)) return;
     list.scrollTop = list.scrollHeight;
     try {
       list.lastElementChild?.scrollIntoView({ block: "end", behavior: "instant" });

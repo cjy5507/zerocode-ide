@@ -54435,7 +54435,12 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       // the pane on screen, not another's.
       let polled = 0;
       const answerLog = window.__ANSWER__.pane_log;
-      window.__ANSWER__.pane_log = (args) => { polled += 1; return answerLog(args); };
+      // 이 판의 읽기만 센다. 통이 창 전체를 세면 다른 판의 폴러가 늦게
+      // 닿은 것까지 「이 대화가 읽었다」로 읽히고, 그 지각은 부하가 정한다.
+      window.__ANSWER__.pane_log = (args) => {
+        if (args.term === term) polled += 1;
+        return answerLog(args);
+      };
       tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
       await settle();
       seen.hookPolled = polled === 1;
@@ -54452,13 +54457,24 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       await window.__PAINTED__();
       await settle();
       seen.busyAgain = chat.querySelector(".helper-status")?.hidden === false;
-      polled = 1;
+      // 쫓아 읽기를 멈춘 뒤에 센다. 일하는 판은 읽은 뒤 160 ms에 또 읽도록
+      // 예약하므로(`quickFollow`), 그 예약이 기다림 안에 들어오면 세는 것이
+      // 「이 사건이 시킨 읽기」가 아니라 「그 사이 몇 번 쫓아 읽었나」가 된다.
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-view", resumable: false });
+      await settle();
+      await settle();
+      await settle();
+      const beforeMine = polled;
       tell("hook:activity", { pane: `term:${term}`, activities: [{ verb: "Read", target: "a.rs", phase: "start" }] });
       await settle();
-      seen.activityPolled = polled === 2;
+      // 「지금 읽었나」만 묻는다 — 몇 번 읽었는지는 쫓아 읽기가 정하고,
+      // 그 수는 기계의 속도다. 남의 판 쪽은 아래에서 0으로 못 박는다.
+      seen.activityPolled = polled > beforeMine;
+      const beforeOther = polled;
       tell("hook:activity", { pane: `term:${term + 1}`, activities: [{ verb: "Read", target: "b.rs", phase: "start" }] });
+      await window.__PAINTED__();
       await settle();
-      seen.otherPaneQuiet = polled === 2;
+      seen.otherPaneQuiet = polled === beforeOther;
       window.__ANSWER__.pane_log = answerLog;
       // A question the hook DESCRIBED stays in the conversation as the
       // extension's card: the tool, its edit as a diff, allow / deny / say
@@ -54543,6 +54559,9 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       let reads = 0;
       let firstAfter;
       window.__ANSWER__.pane_log = (args) => {
+        // 같은 이유로 이 판의 읽기만 본다: 앞 판의 폴러는 아직 살아 있고,
+        // 그 폴이 먼저 닿으면 「이 판의 첫 읽기」가 남의 커서를 들고 온다.
+        if (args.term !== long) return answerLog(args);
         if (reads === 0) firstAfter = args.after;
         reads += 1;
         return chunks[Math.min(args.after ?? 0, 2)];
