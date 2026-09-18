@@ -88,6 +88,7 @@ pub mod stats_events;
 pub mod supply_chain;
 pub mod task;
 pub mod transcript;
+pub mod type_value;
 pub mod untrusted;
 pub mod usage_ledger;
 pub mod usage_limit;

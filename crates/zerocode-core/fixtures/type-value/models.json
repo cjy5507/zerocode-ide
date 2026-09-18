@@ -1,0 +1,363 @@
+{
+  "seat": "type-value",
+  "chosen": "haiku",
+  "deadlineMs": 1500,
+  "rows": [
+    {
+      "id": "haiku",
+      "model": "claude-haiku-4-5-20251001",
+      "road": "anthropic",
+      "reach": "every login this product already holds — the subscription token zo and the window ask everything else with, so this row needs nothing of a person",
+      "measured": {
+        "at": "2026-09-18",
+        "runs": [
+          {
+            "note": "run2-loaded",
+            "n": 9,
+            "p10Ms": 601,
+            "p50Ms": 641,
+            "p90Ms": 681,
+            "accepted": 9,
+            "thoughtFirst": 0,
+            "load1Min": 11.27,
+            "load1Max": 25.45
+          },
+          {
+            "note": "run3",
+            "n": 11,
+            "p10Ms": 600,
+            "p50Ms": 671,
+            "p90Ms": 715,
+            "accepted": 11,
+            "thoughtFirst": 0,
+            "load1Min": 15.37,
+            "load1Max": 23.9
+          },
+          {
+            "note": "run4",
+            "n": 11,
+            "p10Ms": 590,
+            "p50Ms": 617,
+            "p90Ms": 683,
+            "accepted": 11,
+            "thoughtFirst": 0,
+            "load1Min": 7.61,
+            "load1Max": 9.7
+          }
+        ],
+        "caveat": "The steadiest row read: 617-671 ms across four readings and loads from 7.6 to 25, and every answer was one this seat would type. It does NOT make the 400 ms bar, and nothing reachable by a person of this product did."
+      }
+    },
+    {
+      "id": "diffusiongemma",
+      "model": "google/diffusiongemma-26b-a4b-it",
+      "road": "openai-compat",
+      "baseUrl": "https://integrate.api.nvidia.com/v1",
+      "credentialKey": "NVIDIA_API_KEY",
+      "reach": "a custom provider row pointed at NVIDIA NIM — a key a person would have to go and get, so this row can be preferred but never defaulted to",
+      "measured": {
+        "at": "2026-09-18",
+        "runs": [
+          {
+            "note": "run2-loaded",
+            "n": 9,
+            "p10Ms": 592,
+            "p50Ms": 1363,
+            "p90Ms": 2204,
+            "accepted": 8,
+            "thoughtFirst": 0,
+            "load1Min": 11.27,
+            "load1Max": 25.66
+          },
+          {
+            "note": "run3",
+            "n": 11,
+            "p10Ms": 403,
+            "p50Ms": 1562,
+            "p90Ms": 3581,
+            "accepted": 10,
+            "thoughtFirst": 0,
+            "load1Min": 15.37,
+            "load1Max": 23.9
+          },
+          {
+            "note": "run4",
+            "n": 11,
+            "p10Ms": 1103,
+            "p50Ms": 3715,
+            "p90Ms": 5911,
+            "accepted": 10,
+            "thoughtFirst": 0,
+            "load1Min": 7.61,
+            "load1Max": 9.25
+          }
+        ],
+        "caveat": "A diffusion decoder, the family browser-use/jev-ultrafast reached for in inception/mercury-2.5, and the ONLY row that ever came under the bar: 393 ms in the pilot reading that sized this roster (before the probe filed its rows, so it is not in the ledger). The three ledger readings put it at 1,363, 1,562 and 3,715 ms — and the worst of them came at the LOWEST load of the four, so the variable is the free tier's queue, not this machine. A median that moves ninefold cannot be a walk's budget."
+      }
+    },
+    {
+      "id": "nemotron-lightning",
+      "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
+      "road": "openai-compat",
+      "baseUrl": "https://integrate.api.nvidia.com/v1",
+      "credentialKey": "NVIDIA_API_KEY",
+      "reach": "same custom provider row",
+      "measured": {
+        "at": "2026-09-18",
+        "runs": [
+          {
+            "note": "run2-loaded",
+            "n": 8,
+            "p10Ms": 915,
+            "p50Ms": 1690,
+            "p90Ms": 32297,
+            "accepted": 0,
+            "thoughtFirst": 8,
+            "load1Min": 11.27,
+            "load1Max": 25.66
+          }
+        ],
+        "caveat": "Refused on shape, not on speed: its first byte came at 538 ms, and all eight of them were the model narrating its plan. Not asked again."
+      }
+    },
+    {
+      "id": "gemini-flash-lite",
+      "model": "gemini-3.5-flash-lite",
+      "road": "code-assist",
+      "host": "daily-cloudcode-pa.googleapis.com",
+      "thinkingLevel": null,
+      "reach": "every Google login this product already holds",
+      "measured": {
+        "at": "2026-09-18",
+        "runs": [
+          {
+            "note": "run2-loaded",
+            "n": 9,
+            "p10Ms": 690,
+            "p50Ms": 945,
+            "p90Ms": 1146,
+            "accepted": 9,
+            "thoughtFirst": 0,
+            "load1Min": 10.77,
+            "load1Max": 38.08
+          },
+          {
+            "note": "run3",
+            "n": 11,
+            "p10Ms": 683,
+            "p50Ms": 817,
+            "p90Ms": 1178,
+            "accepted": 11,
+            "thoughtFirst": 0,
+            "load1Min": 15.37,
+            "load1Max": 23.9
+          },
+          {
+            "note": "run4",
+            "n": 11,
+            "p10Ms": 699,
+            "p50Ms": 890,
+            "p90Ms": 1092,
+            "accepted": 11,
+            "thoughtFirst": 0,
+            "load1Min": 7.61,
+            "load1Max": 9.7
+          }
+        ],
+        "caveat": "The Code Assist road with NO thinkingConfig at all — the floor of that road, and t-4701's control. Steady and always right, but 200-270 ms behind haiku on every reading."
+      }
+    },
+    {
+      "id": "gemini-flash-low",
+      "model": "gemini-3.8-flash-low",
+      "road": "code-assist",
+      "host": "daily-cloudcode-pa.googleapis.com",
+      "thinkingLevel": "low",
+      "reach": "the rung zo's own gemini requests are served under at effort low",
+      "measured": {
+        "at": "2026-09-18",
+        "runs": [
+          {
+            "note": "run2-loaded",
+            "n": 9,
+            "p10Ms": 1527,
+            "p50Ms": 1842,
+            "p90Ms": 3720,
+            "accepted": 9,
+            "thoughtFirst": 0,
+            "load1Min": 10.77,
+            "load1Max": 38.08
+          },
+          {
+            "note": "run3",
+            "n": 11,
+            "p10Ms": 1084,
+            "p50Ms": 1623,
+            "p90Ms": 2353,
+            "accepted": 11,
+            "thoughtFirst": 0,
+            "load1Min": 15.37,
+            "load1Max": 23.9
+          },
+          {
+            "note": "run4",
+            "n": 11,
+            "p10Ms": 1148,
+            "p50Ms": 1225,
+            "p90Ms": 1780,
+            "accepted": 11,
+            "thoughtFirst": 0,
+            "load1Min": 7.24,
+            "load1Max": 9.7
+          }
+        ],
+        "caveat": "t-4701: the LOWEST rung the backend publishes for this model still carries a 1,000-token thinking budget (fetchAvailableModels, 2026-09-18), and it costs 335-897 ms over the same road's no-thinking row on every reading."
+      }
+    },
+    {
+      "id": "gemini-flash-high",
+      "model": "gemini-3.8-flash-high",
+      "road": "code-assist",
+      "host": "daily-cloudcode-pa.googleapis.com",
+      "thinkingLevel": "high",
+      "reach": "the rung zo's own gemini requests are served under at effort high — t-4701's other control, not a candidate",
+      "measured": {
+        "at": "2026-09-18",
+        "runs": [
+          {
+            "note": "run2-loaded",
+            "n": 9,
+            "p10Ms": 1367,
+            "p50Ms": 2332,
+            "p90Ms": 3329,
+            "accepted": 1,
+            "thoughtFirst": 5,
+            "load1Min": 11.27,
+            "load1Max": 38.08
+          },
+          {
+            "note": "run3",
+            "n": 11,
+            "p10Ms": 1438,
+            "p50Ms": 1749,
+            "p90Ms": 2199,
+            "accepted": 0,
+            "thoughtFirst": 9,
+            "load1Min": 14.62,
+            "load1Max": 23.9
+          },
+          {
+            "note": "run4",
+            "n": 11,
+            "p10Ms": 1446,
+            "p50Ms": 1750,
+            "p90Ms": 5270,
+            "accepted": 0,
+            "thoughtFirst": 8,
+            "load1Min": 7.24,
+            "load1Max": 9.7
+          }
+        ],
+        "caveat": "Its thinking budget is unbounded, and this probe caps the answer at 32 tokens — so these numbers are the cost of thinking CUT OFF, a floor under what an uncapped turn pays. Even cut off it answered 1 of 31 times; the rest of the budget went on narration."
+      }
+    },
+    {
+      "id": "lan-qwen-4b",
+      "model": "qwen3-vl-4b",
+      "road": "openai-compat",
+      "baseUrl": "http://192.0.2.2:4000/v1",
+      "credentialKey": "GME_LLM_KEY",
+      "reach": "a custom provider row on this machine's own network — the reference for what a NEAR endpoint costs, not a road this product can ship",
+      "measured": {
+        "at": "2026-09-18",
+        "runs": [
+          {
+            "note": "run2-loaded",
+            "n": 9,
+            "p10Ms": 98,
+            "p50Ms": 129,
+            "p90Ms": 225,
+            "accepted": 9,
+            "thoughtFirst": 0,
+            "load1Min": 11.27,
+            "load1Max": 35.75
+          },
+          {
+            "note": "run3",
+            "n": 11,
+            "p10Ms": 76,
+            "p50Ms": 101,
+            "p90Ms": 227,
+            "accepted": 11,
+            "thoughtFirst": 0,
+            "load1Min": 14.62,
+            "load1Max": 23.9
+          },
+          {
+            "note": "run4",
+            "n": 11,
+            "p10Ms": 80,
+            "p50Ms": 106,
+            "p90Ms": 225,
+            "accepted": 11,
+            "thoughtFirst": 0,
+            "load1Min": 7.61,
+            "load1Max": 9.7
+          }
+        ],
+        "caveat": "The finding this whole table turns on: a 4B model one hop away answers in 101-129 ms and is right every time, six times faster than the best frontier-small row across the internet. For this seat the wait is the DISTANCE, not the model — which is why the road stays open for a person's own endpoint."
+      }
+    },
+    {
+      "id": "lan-qwen-35b-a3b",
+      "model": "qwen3.6-35b-a3b",
+      "road": "openai-compat",
+      "baseUrl": "http://192.0.2.2:4000/v1",
+      "credentialKey": "GME_LLM_KEY",
+      "reach": "same near endpoint, a mixture-of-experts row",
+      "measured": {
+        "at": "2026-09-18",
+        "runs": [
+          {
+            "note": "run2-loaded",
+            "n": 9,
+            "p10Ms": 104,
+            "p50Ms": 122,
+            "p90Ms": 216,
+            "accepted": 9,
+            "thoughtFirst": 0,
+            "load1Min": 11.27,
+            "load1Max": 35.75
+          }
+        ],
+        "caveat": "Read once, beside lan-qwen-4b: ten times the parameters over the same hop cost 7 ms. More evidence that the distance is the wait."
+      }
+    },
+    {
+      "id": "agentrouter-ds-flash",
+      "model": "deepseek-v4-flash",
+      "road": "openai-compat",
+      "baseUrl": "https://agentrouter.org/v1",
+      "keychainService": "dev.zerocode.router.ZEROCODE_ROUTER_AGENTROUTER_KEY",
+      "clientFingerprint": "claude-code",
+      "reach": "the router row the settings pane already writes",
+      "measured": {
+        "at": "2026-09-18",
+        "runs": [
+          {
+            "note": "run2-loaded",
+            "n": 7,
+            "p10Ms": 781,
+            "p50Ms": 1031,
+            "p90Ms": 1261,
+            "accepted": 0,
+            "thoughtFirst": 7,
+            "load1Min": 11.27,
+            "load1Max": 35.75
+          }
+        ],
+        "caveat": "Refused on shape like nemotron-lightning: every first byte was reasoning, no answer was a value, and two of nine calls came back content-blocked. Not asked again."
+      }
+    }
+  ]
+}

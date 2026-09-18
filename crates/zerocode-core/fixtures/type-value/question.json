@@ -1,0 +1,50 @@
+{
+  "rubricVersion": 1,
+  "instructions": "Write the value this one form field should hold so the goal can go on. Answer with the value alone: one line, no quotes, no label, no explanation.",
+  "state": [
+    { "key": "goal", "label": "goal" },
+    { "key": "label", "label": "field label" },
+    { "key": "placeholder", "label": "field placeholder" },
+    { "key": "near", "label": "text near the field" }
+  ],
+  "valueLine": "value:",
+  "valueCharCap": 200,
+  "cases": [
+    {
+      "id": "flight-from",
+      "goal": "Find a flight from Zurich to London on 3 October",
+      "field": { "label": "From", "placeholder": "City or airport", "near": "Departure airport" },
+      "accepts": ["zurich", "zürich", "zrh"]
+    },
+    {
+      "id": "flight-to",
+      "goal": "Find a flight from Zurich to London on 3 October",
+      "field": { "label": "To", "placeholder": "City or airport", "near": "Arrival airport" },
+      "accepts": ["london", "lhr", "lon"]
+    },
+    {
+      "id": "order-number",
+      "goal": "주문번호 GME-2026-00417 의 배송 상태를 조회한다",
+      "field": { "label": "주문번호", "placeholder": "예: GME-0000-00000", "near": "배송 조회" },
+      "accepts": ["gme-2026-00417"]
+    },
+    {
+      "id": "party-size",
+      "goal": "Book a table for four people at 7pm",
+      "field": { "label": "Party size", "placeholder": "2", "near": "Guests" },
+      "accepts": ["4", "four"]
+    },
+    {
+      "id": "sign-in-email",
+      "goal": "Sign in as ada@example.org",
+      "field": { "label": "Email", "placeholder": "you@example.com", "near": "Sign in to your account" },
+      "accepts": ["ada@example.org"]
+    },
+    {
+      "id": "repo-search",
+      "goal": "Find the release lane script in this repository",
+      "field": { "label": "Search", "placeholder": "Search or jump to…", "near": "Search this repository" },
+      "accepts": ["release lane", "release-lane", "release", "lane"]
+    }
+  ]
+}
