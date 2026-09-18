@@ -621,7 +621,10 @@ pub(super) fn read_smart_runtime_settings_for(cwd: &Path) -> Option<SmartRuntime
     })
 }
 
-fn merged_settings_root(cwd: &Path) -> Option<Value> {
+/// The settings a use's mode is read from — the global file merged with the
+/// project's, as every other reader of these words sees them.
+#[must_use]
+pub fn merged_settings_root(cwd: &Path) -> Option<Value> {
     merged_settings_root_from(&runtime::ConfigLoader::default_for(cwd))
 }
 

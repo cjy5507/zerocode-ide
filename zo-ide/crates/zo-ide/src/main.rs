@@ -77,6 +77,9 @@ fn run(
     if argv.first().is_some_and(|arg| arg == "decision-shadow") {
         return run_decision_shadow(&argv[1..]);
     }
+    if argv.first().is_some_and(|arg| arg == "jev") {
+        return run_jev(&argv[1..]);
+    }
     let mut launch = args::parse(&argv)?;
     if let Some(done) = run_without_a_session(&launch)? {
         return Ok(done);
@@ -244,6 +247,27 @@ fn run_scoreboard(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::er
 /// against a person's labels, from the workspace's shadow ledger; `check` asks
 /// System One once with the key zo would use. No session. A check nothing
 /// answered prints its reason where an answer would go, and exits 1.
+fn run_jev(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    let now_ms = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis(),
+    )
+    .unwrap_or(i64::MAX);
+    Ok(match zo_ide::jev_cli::run(args, &cwd, now_ms, zo_ide::local_offset_seconds()) {
+        Ok(report) => {
+            println!("{}", report.text);
+            success("jev")
+        }
+        Err(message) => {
+            eprintln!("zo jev: {message}");
+            ("jev-refused", 1)
+        }
+    })
+}
+
 fn run_decision_shadow(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     Ok(match zo_ide::decision_shadow_cli::run(args, &cwd) {

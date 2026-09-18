@@ -6,6 +6,7 @@ mod evidence;
 mod infer;
 mod jev_gate;
 mod metadata;
+pub mod jev_summary;
 mod plan_shadow;
 mod planner;
 mod probe_exec;
@@ -56,6 +57,7 @@ pub use settings::{
     smart_turn_routing_and_inventory_for, smart_turn_routing_for, DeepTierModelsSetting,
     HostOrchestration, PlanShadowSettings,
     SmartExecSwap, SmartSettingDefaults, SmartTurnRouting,
+    merged_settings_root,
 };
 pub use turn::{
     assess_agent_task, assess_turn_complexity, assess_turn_complexity_probed,

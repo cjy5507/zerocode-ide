@@ -85,6 +85,30 @@ fn auto_asks_and_records_but_acts_on_nothing_yet() {
 
 /// Promotion rises from `auto` to acting, so a use that promotes offers both.
 #[test]
+fn a_use_names_a_rise_line_exactly_when_auto_may_rise_for_it() {
+    // A floor on a seat that never rises is a number nobody reads; a rising
+    // seat with no floor is a promotion with nothing to pass. §4 gives the
+    // line to the use because the line is the use's own.
+    for row in JEV_USES {
+        assert_eq!(
+            row.promotes,
+            row.answer_floor_permille.is_some(),
+            "{} promotes={} floor={:?}",
+            row.id,
+            row.promotes,
+            row.answer_floor_permille
+        );
+        if let Some(floor) = row.answer_floor_permille {
+            assert!(
+                (500..=1000).contains(&floor),
+                "{} asks for a share of {floor} per thousand",
+                row.id
+            );
+        }
+    }
+}
+
+#[test]
 fn a_use_that_promotes_has_somewhere_to_rise_from_and_to() {
     for row in JEV_USES.iter().filter(|row| row.promotes) {
         assert!(row.modes.contains(&JevMode::Auto), "{}", row.id);

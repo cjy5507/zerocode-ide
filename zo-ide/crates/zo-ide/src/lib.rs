@@ -24,6 +24,7 @@ pub mod cli_tool_executor;
 pub mod conversation_support;
 pub mod cron_cli;
 pub mod decision_shadow_cli;
+pub mod jev_cli;
 pub mod scoreboard_cli;
 pub mod custom_provider_env;
 pub mod doctor;
@@ -82,6 +83,7 @@ pub use resume::{
 pub use status_format::{
     context_usage_percent, estimated_cost_usd, format_context_usage, format_cost_usd,
     format_estimated_cost, format_tokens, format_usage_status, usage_context_tokens,
+    local_offset_seconds,
 };
 
 #[cfg(test)]

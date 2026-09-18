@@ -1,0 +1,176 @@
+//! `zo jev summary` — every Jev seat's ledger, counted
+//! (docs/design/jev-settings-20260917.md §5).
+//!
+//! The window asks this rather than counting for itself: the window↔zo line
+//! is an exec boundary, and a screen that counted the rows would be a second
+//! reader of the same files, free to disagree with the judge that promotes a
+//! seat on them.
+
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
+
+use serde_json::{Value, json};
+use tools::jev_summary::{self, SeatReport};
+
+pub const USAGE: &str = "\
+zo jev summary [--cwd <dir>] [--json]
+
+  summary: count every Jev seat's ledger — today and the last seven days.
+  Per seat: its mode (off/shadow/on/auto), rows, how many answered and the
+  95% lower bound on that share, the p50 and p95 of the calls that went over
+  the wire (a memo hit answered without asking, so it is not one), the
+  refusal and failure tokens with their counts, the lines the door withheld,
+  what the billed tokens cost, and — for a seat whose `auto` may rise — the
+  share it must clear and how many rows stand before the next judgment.
+  A seat no ledger has been written for says so; it is not a seat that
+  answered nothing.
+";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Request {
+    cwd: Option<PathBuf>,
+    json: bool,
+}
+
+fn parse(args: &[String]) -> Result<Request, String> {
+    match args.first().map(String::as_str) {
+        Some("summary") => {}
+        Some("-h" | "--help") | None => return Err(USAGE.to_string()),
+        Some(other) => return Err(format!("unknown verb '{other}'\n\n{USAGE}")),
+    }
+    let mut request = Request { cwd: None, json: false };
+    let mut rest = args[1..].iter();
+    while let Some(arg) = rest.next() {
+        match arg.as_str() {
+            "--json" => request.json = true,
+            "--cwd" => {
+                let dir = rest.next().ok_or_else(|| "--cwd needs a directory".to_string())?;
+                request.cwd = Some(PathBuf::from(dir));
+            }
+            other => return Err(format!("unknown argument '{other}'\n\n{USAGE}")),
+        }
+    }
+    Ok(request)
+}
+
+/// What the command printed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Report {
+    pub text: String,
+}
+
+/// # Errors
+///
+/// The usage, or what was wrong with the arguments.
+pub fn run(args: &[String], cwd: &Path, now_ms: i64, offset_s: i64) -> Result<Report, String> {
+    let request = parse(args)?;
+    let cwd = request.cwd.clone().unwrap_or_else(|| cwd.to_path_buf());
+    let settings = tools::merged_settings_root(&cwd);
+    let roots = jev_summary::ledger_roots(&cwd);
+    let seats = jev_summary::report(&roots, settings.as_ref(), now_ms, offset_s);
+    Ok(Report {
+        text: if request.json {
+            render_json(&seats).to_string()
+        } else {
+            render_text(&seats)
+        },
+    })
+}
+
+fn tally_json(tally: &jev_summary::SeatTally) -> Value {
+    json!({
+        "rows": tally.rows,
+        "answered": tally.answered,
+        "answeredShare": tally.answered_share(),
+        "answeredLowerBound": tally.answered_lower_bound(),
+        "called": tally.called,
+        "requests": tally.requests,
+        "redactedLines": tally.redacted_lines,
+        "inputTokens": tally.input_tokens,
+        "p50Ms": tally.p50_ms,
+        "p95Ms": tally.p95_ms,
+        "failures": tally
+            .failures
+            .iter()
+            .map(|(token, count)| json!({ "token": token, "rows": count }))
+            .collect::<Vec<Value>>(),
+    })
+}
+
+fn render_json(seats: &[SeatReport]) -> Value {
+    json!({
+        "windowDays": jev_summary::WINDOW_DAYS,
+        "judgedEveryRows": jev_summary::JUDGED_EVERY_ROWS,
+        "seats": seats
+            .iter()
+            .map(|seat| json!({
+                "id": seat.id,
+                "setting": seat.setting,
+                "mode": seat.mode.key(),
+                "ledger": seat.ledger,
+                "found": seat.found.as_ref().map(|path| path.display().to_string()).map_or(Value::Null, Value::from),
+                "today": tally_json(&seat.today),
+                "week": tally_json(&seat.week),
+                "costUsd": seat.cost_usd,
+                "riseFloorPermille": seat.rise_floor_permille,
+                "clearsRiseFloor": seat.clears_rise_floor,
+                "rowsToNextJudgment": seat.rows_to_next_judgment(),
+            }))
+            .collect::<Vec<Value>>(),
+    })
+}
+
+fn render_text(seats: &[SeatReport]) -> String {
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "{:<10} {:<7} {:>7} {:>7} {:>8} {:>7} {:>7}  {}",
+        "seat", "mode", "today", "7d", "answered", "p50", "p95", "notes"
+    );
+    for seat in seats {
+        let share = seat
+            .week
+            .answered_share()
+            .map_or_else(|| "—".to_string(), |share| format!("{:.1}%", share * 100.0));
+        let mut notes = String::new();
+        if seat.found.is_none() {
+            notes.push_str("never asked");
+        }
+        if let (Some(floor), Some(bound)) =
+            (seat.rise_floor_permille, seat.week.answered_lower_bound())
+        {
+            let _ = write!(
+                notes,
+                "{}rise {:.1}% needs {:.1}%{}",
+                if notes.is_empty() { "" } else { " · " },
+                bound * 100.0,
+                f64::from(floor) / 10.0,
+                if seat.clears_rise_floor == Some(true) { " ✓" } else { "" }
+            );
+        }
+        if let Some(owed) = seat.rows_to_next_judgment() {
+            let _ = write!(out, "");
+            let _ = write!(
+                notes,
+                "{}{owed} rows to judgment",
+                if notes.is_empty() { "" } else { " · " }
+            );
+        }
+        let _ = writeln!(
+            out,
+            "{:<10} {:<7} {:>7} {:>7} {:>8} {:>7} {:>7}  {}",
+            seat.id,
+            seat.mode.key(),
+            seat.today.rows,
+            seat.week.rows,
+            share,
+            seat.week.p50_ms.map_or_else(|| "—".to_string(), |ms| format!("{ms}")),
+            seat.week.p95_ms.map_or_else(|| "—".to_string(), |ms| format!("{ms}")),
+            notes
+        );
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests;

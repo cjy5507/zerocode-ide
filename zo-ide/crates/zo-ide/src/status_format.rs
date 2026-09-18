@@ -349,7 +349,7 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 /// 에게 한 번 묻는다 — 못 물으면 UTC(0)로 떨어져 시각이 틀리게 보일지언정 카드가
 /// 사라지지는 않는다. `/status` 는 사람이 치는 명령이라 프로세스당 한 번의
 /// `date` 호출이 프레임을 붙잡지 않는다.
-fn local_offset_seconds() -> i64 {
+pub fn local_offset_seconds() -> i64 {
     static OFFSET: OnceLock<i64> = OnceLock::new();
     *OFFSET.get_or_init(|| {
         std::process::Command::new("date")

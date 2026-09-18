@@ -10,6 +10,7 @@ mod retrieve_output;
 mod session_recall;
 mod skill_tools;
 mod smart_router;
+pub use smart_router::jev_summary;
 mod specs;
 
 pub(crate) use dispatch::dispatch;
@@ -29,6 +30,7 @@ pub use smart_router::{
     DeepTierModelsSetting, HostOrchestration, HostPrelude, PlanShadowSettings, SmartExecSwap,
     SmartSettingDefaults, AssessmentReaders, SmartTurnRouting, TurnOrchestrationHint,
     TurnProbeAssessment,
+    merged_settings_root,
 };
 pub use smart_router::{
     basis_points, check_system_one, decision_shadow_mode_from, decision_shadow_path,

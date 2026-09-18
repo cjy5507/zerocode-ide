@@ -27,6 +27,7 @@ pub mod choice;
 pub mod count;
 pub mod door;
 pub mod hedge;
+pub mod summary;
 
 /// The object zo's settings keep every Jev switch under.
 pub const SMART_SETTINGS_KEY: &str = "smart";
@@ -219,6 +220,21 @@ pub struct JevUse {
     /// Whether `auto` may ever rise to acting for this use (§4). A use that
     /// never promotes stays record-only under `auto`.
     pub promotes: bool,
+    /// The share of rows that must answer, in parts per thousand — read as a
+    /// 95% Wilson lower bound over the judgment window
+    /// ([`summary::JUDGED_EVERY_ROWS`]) — before `auto` rises to acting (§4).
+    ///
+    /// Per thousand and not a float: this table is compared and hashed whole,
+    /// and a line a seat is promoted on should be a number two readers can
+    /// agree on exactly.
+    ///
+    /// It sits on the row rather than in the judge because the line is the
+    /// use's own: a seat whose answer a person waits on cannot afford the
+    /// same miss rate as one that quietly reorders a list. A use that does
+    /// not promote names no floor, and a contract holds the two together —
+    /// a floor on a seat that never rises is a number nobody reads, and a
+    /// rising seat with no floor is a promotion with nothing to pass.
+    pub answer_floor_permille: Option<u16>,
 }
 
 /// zo's routing judgment: a task's complexity, risk and intent beside the
@@ -233,6 +249,7 @@ pub const ROUTING: JevUse = JevUse {
     }],
     ledger: "decision-shadow.jsonl",
     promotes: true,
+    answer_floor_permille: Some(950),
 };
 
 /// zo's recall rerank: how much each note a recall found helps with the
@@ -277,6 +294,7 @@ pub const RECALL: JevUse = JevUse {
     ],
     ledger: "rerank-shadow.jsonl",
     promotes: false,
+    answer_floor_permille: None,
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -356,6 +374,7 @@ pub const BROWSER: JevUse = JevUse {
     sends: &BROWSER_SENDS,
     ledger: "browser-action.jsonl",
     promotes: false,
+    answer_floor_permille: None,
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -383,6 +402,7 @@ pub const DESKTOP: JevUse = JevUse {
     sends: &DESKTOP_SENDS,
     ledger: "desktop-action.jsonl",
     promotes: false,
+    answer_floor_permille: None,
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -406,6 +426,7 @@ pub const STALL: JevUse = JevUse {
     ],
     ledger: "stall-cause.jsonl",
     promotes: false,
+    answer_floor_permille: None,
 };
 
 /// The window's worker placement: which of [`PLACEMENT_OPTIONS`] a worker it
@@ -451,6 +472,7 @@ pub const PLACEMENT: JevUse = JevUse {
     }],
     ledger: "worker-placement.jsonl",
     promotes: false,
+    answer_floor_permille: None,
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -483,6 +505,7 @@ pub const SUMMON: JevUse = JevUse {
     }],
     ledger: "summon-choice.jsonl",
     promotes: false,
+    answer_floor_permille: None,
 };
 
 /// Every place this product asks Jev something.
