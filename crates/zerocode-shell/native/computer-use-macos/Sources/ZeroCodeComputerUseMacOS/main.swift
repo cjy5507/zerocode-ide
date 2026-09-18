@@ -2537,14 +2537,32 @@ private final class TreeRenderer {
     }
 }
 
+/// Reads one window's Accessibility tree, a node at a time.
+///
+/// A node's attributes arrive together: `SnapshotNodeAttributes.all` names
+/// them and `AXUIElementCopyMultipleAttributeValues` fetches the lot in one
+/// cross-process call, so reading a node afterwards touches the observed app
+/// no further. An attribute the table does not name still answers — through
+/// the single read below — which is why the table is free to be a statement
+/// about cost alone.
 private final class AXSnapshotReader {
     private enum CachedAttribute {
         case missing
         case found(CFTypeRef)
+
+        var value: CFTypeRef? {
+            switch self {
+            case .missing:
+                return nil
+            case let .found(value):
+                return value
+            }
+        }
     }
 
     private final class ElementCache {
         let element: AXUIElement
+        var prefetchedTable = false
         var loadedAttributeNames = false
         var advertisedAttributes: Set<String>?
         var attributes: [String: CachedAttribute] = [:]
@@ -2717,20 +2735,65 @@ private final class AXSnapshotReader {
     private func copyAttribute(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
         let cache = cache(for: element)
         if let cached = cache.attributes[attribute] {
-            switch cached {
-            case .missing:
-                return nil
-            case let .found(value):
-                return value
-            }
+            return cached.value
         }
+        prefetchTable(cache)
+        if let cached = cache.attributes[attribute] {
+            return cached.value
+        }
+        return copyOneAttribute(cache, attribute)
+    }
+
+    /// The node's whole table, once, in a single call into the observed app.
+    ///
+    /// The batch asks the element outright, without first reading its
+    /// attribute list. That list is the app's advertisement and some apps
+    /// keep it short: KakaoTalk answers `AXEnabled: false` for plain
+    /// containers it never lists, so the snapshot now says `(disabled)` on
+    /// four rows it used to fold away — the app's own word, and the Windows
+    /// provider already reads this way (`computer_use/windows/uia.rs` caches
+    /// what the renderer asks for and never asks an element what it
+    /// supports). Nothing a hand can reach moves: the same 26 controls take
+    /// the same numbers on that window, measured, because a bare container
+    /// was never a mark candidate.
+    ///
+    /// A read that does not come back whole — the call failed, or the answer
+    /// does not line up with the request — caches nothing, and every
+    /// attribute then falls back to the single read below, which is what the
+    /// walk did before this existed.
+    private func prefetchTable(_ cache: ElementCache) {
+        guard !cache.prefetchedTable else { return }
+        cache.prefetchedTable = true
+        let attributes = SnapshotNodeAttributes.all
+        var answered: CFArray?
+        // No `.stopOnError`: one attribute the element cannot answer must
+        // come back as one absent value, not cut the other fifteen short.
+        guard AXUIElementCopyMultipleAttributeValues(
+            cache.element,
+            attributes as CFArray,
+            [],
+            &answered
+        ) == .success,
+            let values = answered as? [CFTypeRef],
+            let decoded = SnapshotAttributeBatch.decode(attributes: attributes, values: values)
+        else {
+            return
+        }
+        for (attribute, value) in decoded {
+            cache.attributes[attribute] = value.map(CachedAttribute.found) ?? .missing
+        }
+    }
+
+    private func copyOneAttribute(_ cache: ElementCache, _ attribute: String) -> CFTypeRef? {
         if let advertisedAttributes = advertisedAttributes(cache),
            !SnapshotRenderHeuristics.supportsAttribute(attribute, advertisedAttributes: advertisedAttributes) {
             cache.attributes[attribute] = .missing
             return nil
         }
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success, let value else {
+        guard AXUIElementCopyAttributeValue(cache.element, attribute as CFString, &value) == .success,
+              let value
+        else {
             cache.attributes[attribute] = .missing
             return nil
         }
