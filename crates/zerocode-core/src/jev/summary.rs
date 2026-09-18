@@ -54,7 +54,6 @@ impl LedgerKey {
 
     /// Every spelling, canonical first — what a contract checks a writer
     /// against and what a reader is allowed to look for.
-    #[must_use]
     pub fn spellings(&self) -> impl Iterator<Item = &'static str> + '_ {
         std::iter::once(self.canonical).chain(self.also.iter().copied())
     }

@@ -366,7 +366,12 @@ fn only_auto_changes_its_mind_when_the_judge_speaks() {
             mode.key(),
             quiet != raised
         );
-        assert_eq!(mode.applies(), quiet, "{} reads as unraised without a judgment", mode.key());
+        assert_eq!(
+            mode.applies(),
+            quiet,
+            "{} reads as unraised without a judgment",
+            mode.key()
+        );
     }
     assert!(JevMode::On.applies_with(false));
     assert!(!JevMode::Shadow.applies_with(true));

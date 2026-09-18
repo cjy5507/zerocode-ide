@@ -1,6 +1,6 @@
 //! TypeSafe (Jev) settings IPC — the key and every seat's switch.
 use crate::api_routers::{self, Keychain, RouterRefusal};
-use crate::typesafe_settings::{self, TypeSafeCheck, TypeSafeSettings};
+use crate::typesafe_settings::{self, SeatNumbers, TypeSafeCheck, TypeSafeSettings};
 
 fn settings_path() -> Result<std::path::PathBuf, RouterRefusal> {
     api_routers::zo_settings_path()
@@ -69,6 +69,35 @@ pub(crate) async fn check_typesafe_key() -> Result<TypeSafeCheck, String> {
             format!(
                 "zo {} exited {}: {}",
                 typesafe_settings::ZO_KEY_CHECK_ARGS.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Ask the installed zo what every seat's ledger says: `zo jev summary
+/// --json` (docs/design/jev-settings-20260917.md §5). A zo too old to know
+/// the verb answers nothing this reader understands, and the card draws its
+/// switches without numbers rather than refusing to draw at all.
+#[tauri::command]
+pub(crate) async fn jev_summary() -> Result<Vec<SeatNumbers>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
+        let bin = crate::zo_companion::zo_path_under(&home);
+        if !bin.exists() {
+            return Err(format!("zo not installed at {}", bin.display()));
+        }
+        let output = crate::proc::quiet_command(&bin)
+            .args(typesafe_settings::ZO_JEV_SUMMARY_ARGS)
+            .output()
+            .map_err(|error| error.to_string())?;
+        typesafe_settings::read_summary(&output.stdout).ok_or_else(|| {
+            format!(
+                "zo {} exited {}: {}",
+                typesafe_settings::ZO_JEV_SUMMARY_ARGS.join(" "),
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             )

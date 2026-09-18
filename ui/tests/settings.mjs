@@ -692,6 +692,9 @@ class StatefulBackend {
     this.routerKeychainUnavailable = false;
     // What `zo decision-shadow check --json` answers next — a test swaps it.
     this.typesafeCheck = { answered: true, model: "jev-1.13.0", elapsedMs: 612 };
+    // What `zo jev summary --json` answers next. `null` is a zo too old to
+    // know the verb: the switches must still stand, without numbers.
+    this.jevSummary = null;
     // 어느 에이전트의 전역 지시문 쓰기가 실패하는가 — 시험이 끼워 넣는다.
     this.secondBrainLinkFailure = null;
     this.secondBrain = {
@@ -2562,6 +2565,9 @@ class StatefulBackend {
         return this.typesafeSettings();
       }
       case "check_typesafe_key": return clone(this.typesafeCheck);
+      case "jev_summary":
+        if (this.jevSummary === null) throw new Error("unknown argument 'jev'");
+        return clone(this.jevSummary);
       default:
         this.unknown.push({ window_id: windowId, command, args: clone(args) });
         throw new Error(`unknown command: ${command}`);
@@ -4059,6 +4065,50 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   assertEqual(backend.zoSettings.providers, routers, "turning actual use on moved the router rows");
   await pageA.evaluate(() => refreshApiRouters());
   assertEqual(await pageA.locator("#typesafe-routing-select").inputValue(), "on", "a reopened pane lost actual-use mode");
+
+  // The ledgers' numbers stand under the seat they belong to, and a zo too
+  // old to count them leaves the switches standing without any.
+  const numbersOf = (seat) => pageA.evaluate(
+    (id) => document.querySelector(`[data-jev-seat="${id}"]`)
+      ?.closest("[data-jev-row]")?.querySelector("[data-jev-numbers]")?.textContent ?? null,
+    seat,
+  );
+  assertEqual(await numbersOf("routing"), null, "an unanswered summary drew numbers anyway");
+  const window7 = (rows, answered, p95Ms) => ({
+    rows, answered, answeredShare: rows ? answered / rows : null,
+    answeredLowerBound: rows ? 0.71 : null, called: rows, requests: rows,
+    redactedLines: 0, inputTokens: 0, p50Ms: p95Ms, p95Ms, failures: [],
+  });
+  backend.jevSummary = JEV_SEATS.map((seat) => ({
+    id: seat.id, setting: seat.setting, mode: "auto", ledger: `${seat.id}.jsonl`,
+    found: null, today: window7(0, 0, null), week: window7(0, 0, null),
+    costUsd: 0, riseFloorPermille: null, clearsRiseFloor: null,
+    rowsToNextJudgment: null, stand: "recording", applies: false, verdict: null,
+  }));
+  const routingNumbers = backend.jevSummary.find((seat) => seat.id === "routing");
+  routingNumbers.today = window7(1, 1, 616);
+  routingNumbers.week = window7(26, 23, 4847);
+  routingNumbers.riseFloorPermille = 950;
+  routingNumbers.rowsToNextJudgment = 14;
+  routingNumbers.verdict = { verdict: "hold", line: "answered" };
+  await pageA.evaluate(() => refreshApiRouters());
+  const held = [
+    await said("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}} 답함",
+      { today: 1, rows: 26, answered: 23 }),
+    await said("settings.typesafe.seatP95", "p95 {{ms}} ms", { ms: 4847 }),
+    await said("settings.typesafe.seatHolding", "아직 기록만 합니다 — {{because}}",
+      { because: await said("settings.typesafe.lineAnswered", "답한 비율이 모자랍니다") }),
+  ].join(" · ");
+  await pageA.waitForFunction(
+    (words) => document.querySelector('[data-jev-seat="routing"]')
+      ?.closest("[data-jev-row]")?.querySelector("[data-jev-numbers]")?.textContent === words,
+    held, { timeout: UI_TIMEOUT },
+  );
+  assertEqual(
+    await numbersOf("summon"),
+    await said("settings.typesafe.seatNeverAsked", "아직 아무것도 묻지 않았습니다."),
+    "a seat nothing has asked read as a seat that answered nothing",
+  );
 
   const autoAt = backend.calls.length;
   await pageA.selectOption("#typesafe-routing-select", "auto");

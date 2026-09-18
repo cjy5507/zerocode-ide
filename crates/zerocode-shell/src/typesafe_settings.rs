@@ -26,6 +26,13 @@ use crate::api_routers::{RouterKeys, RouterRefusal};
 /// The zo command line that checks the saved key (`zo decision-shadow check`).
 pub const ZO_KEY_CHECK_ARGS: [&str; 3] = ["decision-shadow", "check", "--json"];
 
+/// The zo command line that counts every seat's ledger (`zo jev summary`).
+///
+/// The window asks rather than counting: these files are zo's to read, the
+/// judge that promotes a seat reads them the same way (§4), and a card that
+/// counted for itself would be free to disagree with the seat it is drawing.
+pub const ZO_JEV_SUMMARY_ARGS: [&str; 3] = ["jev", "summary", "--json"];
+
 /// The keychain item the key lives in.
 #[must_use]
 pub fn typesafe_keychain_service() -> String {
@@ -951,4 +958,129 @@ mod tests {
             "zo no longer documents `{documented}`"
         );
     }
+
+    #[test]
+    fn a_summary_is_read_seat_by_seat_and_a_seat_nobody_asked_keeps_its_empties() {
+        let stdout = br#"{"windowDays":7,"judgedEveryRows":20,"seats":[
+          {"id":"routing","setting":"decisionShadow","mode":"on","ledger":"decision-shadow.jsonl",
+           "found":"/x/decision-shadow.jsonl",
+           "today":{"rows":1,"answered":1,"answeredShare":1.0,"answeredLowerBound":0.2,"called":1,
+                    "requests":1,"redactedLines":2,"inputTokens":9,"p50Ms":616,"p95Ms":616,"failures":[]},
+           "week":{"rows":26,"answered":23,"answeredShare":0.8846,"answeredLowerBound":0.7102,"called":26,
+                   "requests":26,"redactedLines":30,"inputTokens":90,"p50Ms":616,"p95Ms":4847,
+                   "failures":[{"token":"no_key","rows":3}]},
+           "costUsd":null,"riseFloorPermille":950,"clearsRiseFloor":false,"rowsToNextJudgment":14,
+           "stand":"recording","applies":true,"verdict":{"verdict":"hold","line":"answered"}},
+          {"id":"summon","setting":"summonChoice","mode":"auto","ledger":"summon-choice.jsonl",
+           "found":null,
+           "today":{"rows":0,"answered":0,"answeredShare":null,"answeredLowerBound":null,"called":0,
+                    "requests":0,"redactedLines":0,"inputTokens":0,"p50Ms":null,"p95Ms":null,"failures":[]},
+           "week":{"rows":0,"answered":0,"answeredShare":null,"answeredLowerBound":null,"called":0,
+                   "requests":0,"redactedLines":0,"inputTokens":0,"p50Ms":null,"p95Ms":null,"failures":[]},
+           "costUsd":0.0,"riseFloorPermille":null,"clearsRiseFloor":null,"rowsToNextJudgment":null,
+           "stand":"recording","applies":false,"verdict":null}
+        ]}"#;
+        let seats = read_summary(stdout).expect("a summary");
+        assert_eq!(seats.len(), 2);
+
+        let routing = &seats[0];
+        assert_eq!(routing.id, "routing");
+        assert_eq!(routing.week.rows, 26);
+        assert_eq!(routing.week.p95_ms, Some(4_847));
+        assert_eq!(routing.week.redacted_lines, 30);
+        assert_eq!(routing.rise_floor_permille, Some(950));
+        assert_eq!(routing.rows_to_next_judgment, Some(14));
+        assert!(
+            routing.applies,
+            "a person's `on` acts whatever the judge says"
+        );
+        let verdict = routing.verdict.as_ref().expect("a judged seat");
+        assert_eq!(
+            (verdict.verdict.as_str(), verdict.line.as_deref()),
+            ("hold", Some("answered"))
+        );
+
+        let summon = &seats[1];
+        assert_eq!(
+            summon.week.answered_share, None,
+            "never asked is not zero percent"
+        );
+        assert_eq!(summon.week.p95_ms, None);
+        assert_eq!(
+            summon.verdict, None,
+            "a seat that never rises is never judged"
+        );
+        assert!(!summon.applies);
+    }
+
+    #[test]
+    fn an_answer_this_reader_does_not_understand_is_no_answer() {
+        assert_eq!(read_summary(b""), None);
+        assert_eq!(read_summary(b"zo: unknown argument 'jev'"), None);
+        assert_eq!(read_summary(br#"{"seats":"soon"}"#), None);
+        assert_eq!(
+            read_summary(br#"{"windowDays":7}"#),
+            None,
+            "no seats is not an empty card"
+        );
+        assert_eq!(read_summary(br#"{"seats":[]}"#), Some(Vec::new()));
+    }
+}
+
+/// One seat's numbers, as `zo jev summary --json` reports them and the card
+/// draws them beside that seat's switch.
+///
+/// Every field is optional in the answer and stays optional here: a seat
+/// nothing has asked yet has no share and no p95, and a card that drew those
+/// as zero would be telling a person their seat is failing.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatNumbers {
+    pub id: String,
+    /// Where the seat stands, and whether it acts right now.
+    pub stand: String,
+    pub applies: bool,
+    #[serde(default)]
+    pub verdict: Option<SeatVerdict>,
+    #[serde(default)]
+    pub rows_to_next_judgment: Option<usize>,
+    #[serde(default)]
+    pub rise_floor_permille: Option<u16>,
+    pub today: SeatWindow,
+    pub week: SeatWindow,
+    #[serde(default)]
+    pub cost_usd: Option<f64>,
+}
+
+/// What the judge said of a seat's recent window.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatVerdict {
+    pub verdict: String,
+    #[serde(default)]
+    pub line: Option<String>,
+}
+
+/// One window of a seat's ledger, counted.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatWindow {
+    pub rows: usize,
+    pub answered: usize,
+    #[serde(default)]
+    pub answered_share: Option<f64>,
+    #[serde(default)]
+    pub answered_lower_bound: Option<f64>,
+    #[serde(default)]
+    pub p95_ms: Option<u64>,
+    #[serde(default)]
+    pub redacted_lines: u64,
+}
+
+/// What `zo jev summary --json` said, or `None` when it printed nothing this
+/// reader understands — an older zo, or one that failed before it answered.
+#[must_use]
+pub fn read_summary(stdout: &[u8]) -> Option<Vec<SeatNumbers>> {
+    let value: Value = serde_json::from_slice(stdout).ok()?;
+    serde_json::from_value(value.get("seats")?.clone()).ok()
 }
