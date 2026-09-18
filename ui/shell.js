@@ -11718,6 +11718,16 @@ function scrollHelperToBottom(list) {
  * px다. */
 const HELPER_FOLLOW_SLACK_PX = 160;
 
+/* 읽는 사람이 꼬리를 따라가는 중인가 — 판정은 이 한 곳에서만 한다.
+ *
+ * 새 턴이 왔다는 것은 스크롤을 빼앗을 이유가 되지 못한다: 09-18의 자동 스크롤
+ * 최적화가 이 조건을 잃고 `newest || follow`로 부르면서, 위를 읽던 사람을 폴
+ * 마다 바닥으로 끌어내렸고 앞쪽이 잘릴 때의 자리 보정까지 덮어썼다. 창 하네스
+ * 둘(`heldPlace`·`anchorHeld`)이 그날부터 그것을 말하고 있었다. */
+function helperFollowsTail(list) {
+  return !!list && list.scrollHeight - list.scrollTop - list.clientHeight <= HELPER_FOLLOW_SLACK_PX;
+}
+
 /* 전사를 장부에 맞춘다 — 통째로 다시 세우지 않고.
  *
  * 폴마다 400턴을 `replaceChildren`으로 재생성하던 것이 이 페이지의 무게였다:
@@ -11737,8 +11747,7 @@ function syncHelperTurns(list, run) {
     return;
   }
   const first = held[0].seq;
-  const follow =
-    list.scrollHeight - list.scrollTop - list.clientHeight <= HELPER_FOLLOW_SLACK_PX;
+  const follow = helperFollowsTail(list);
   const beforeHeight = list.scrollHeight;
   const beforeTop = list.scrollTop;
   let dropped = false;
@@ -11816,7 +11825,7 @@ function syncHelperTurns(list, run) {
   list.__painted = true;
   dressLastAnswer(list, run, newest);
   syncStreamingTurns(list, run);
-  if (newest || follow) scrollHelperToBottom(list);
+  if (follow) scrollHelperToBottom(list);
 }
 
 /* Put an answer that landed whole on screen a word at a time, in its own row.
@@ -11869,6 +11878,8 @@ function revealAnswerInPlace(row, rawText, base) {
   const paintUpto = (upto) => {
     if (upto === lastUpto) return;
     lastUpto = upto;
+    const list = row.closest(".helper-turns");
+    const follow = helperFollowsTail(list);
     const cut = settledCut(text, upto);
     if (cut > settledEnd) {
       settledDiv.replaceChildren();
@@ -11876,14 +11887,16 @@ function revealAnswerInPlace(row, rawText, base) {
       settledEnd = cut;
     }
     tailP.textContent = text.slice(settledEnd, upto);
-    scrollHelperToBottom(row.closest(".helper-turns"));
+    if (follow) scrollHelperToBottom(list);
   };
 
   const finish = () => {
+    const list = row.closest(".helper-turns");
+    const follow = helperFollowsTail(list);
     said.replaceChildren();
     paintHelperProse(said, text, base);
     row.__revealing = false;
-    scrollHelperToBottom(row.closest(".helper-turns"));
+    if (follow) scrollHelperToBottom(list);
   };
 
   const step = (now) => {
@@ -12095,7 +12108,7 @@ function paceTick(list, run) {
   const now = performance.now();
   const elapsed = list.__paceLast === undefined ? 16 : now - list.__paceLast;
   list.__paceLast = now;
-  const follow = list.scrollHeight - list.scrollTop - list.clientHeight <= HELPER_FOLLOW_SLACK_PX;
+  const follow = helperFollowsTail(list);
   let pending = false;
   for (const row of list.querySelectorAll(':scope > .is-streaming[data-role="assistant"]')) {
     const pace = row.__pace;

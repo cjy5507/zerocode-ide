@@ -35732,12 +35732,17 @@ const chatFace = await page.evaluate(async () => {
   seen.noWhereLine = face.querySelector(".worker-where") === null;
   const send = composer?.querySelector(".worker-composer-send");
   const sendStyle = send ? getComputedStyle(send) : null;
-  seen.sendNamed = send?.getAttribute("aria-label") === t("worker.send", "보내기") &&
+  // 작업 중이면 같은 자리에서 중지 버튼이 된다 — 이름은 모드를 따라가고,
+  // 둥근 아이콘 하나뿐이라는 약속은 어느 모드에서나 같다.
+  const sendStops = send?.classList.contains("is-stop") === true;
+  seen.sendNamed = send?.getAttribute("aria-label") ===
+      (sendStops ? t("worker.stop", "중지") : t("worker.send", "보내기")) &&
     Boolean(send?.querySelector(".icon use")) && send.textContent.trim() === "";
   seen.sendRound = sendStyle !== null &&
     Math.abs(parseFloat(sendStyle.width) - parseFloat(sendStyle.height)) <= 1 &&
     parseFloat(sendStyle.borderRadius) >= parseFloat(sendStyle.width) / 2;
-  seen.sendFromToken = sendStyle?.backgroundColor === probe("--chat-send-bg", "backgroundColor");
+  seen.sendFromToken = sendStyle?.backgroundColor ===
+    probe(sendStops ? "--chat-send-stop-bg" : "--chat-send-bg", "backgroundColor");
   const root = getComputedStyle(document.documentElement);
   seen.composerRadius = getComputedStyle(composer).borderRadius;
   seen.wantComposerRadius = root.getPropertyValue("--chat-radius-composer").trim();
@@ -54442,7 +54447,7 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       await window.__PAINTED__();
       await settle();
       seen.quietWhenDone = chat.querySelector(".helper-status")?.hidden === true &&
-        chat.querySelector(".worker-state")?.textContent === t("worker.idle", "대기 중 — 보낼 말을 기다립니다.");
+        chat.querySelector(".worker-state")?.textContent === t("worker.idle", "대기 중");
       tell("hook:agent", { term, state: "working", agent: "claude", session: "s-view", resumable: false });
       await window.__PAINTED__();
       await settle();
@@ -54635,7 +54640,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       seen.noDoor = !face?.querySelector(".worker-composer-door");
       seen.chipModel = face?.querySelector(".worker-composer-model-words")?.textContent ?? "";
       seen.idleWords = face?.querySelector(".worker-state")?.textContent ?? "";
-      seen.wantIdleWords = t("worker.idle", "대기 중 — 보낼 말을 기다립니다.");
+      seen.wantIdleWords = t("worker.idle", "대기 중");
       // Sending goes down the wire — one request, no pty.
       const box = face.querySelector(".worker-composer-box");
       box.value = "probe.txt를 만들어";

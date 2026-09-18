@@ -1960,6 +1960,8 @@
   --chat-work-ink: var(--ink-mist);
   --chat-send-bg: var(--ink-chalk);
   --chat-send-ink: var(--surface-abyss);
+  --chat-send-stop-bg: var(--ink-figure);
+  --chat-send-stop-ink: var(--surface-abyss);
   --chat-link: var(--ai-accent);
   --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 6%, transparent);
   /* The conversation's grammar is Claude Code's (2026-09-15): a 10px bubble,
@@ -2408,6 +2410,8 @@
   --chat-work-ink: var(--ink-mist);
   --chat-send-bg: var(--ink-chalk);
   --chat-send-ink: var(--surface-deck);
+  --chat-send-stop-bg: var(--ink-figure);
+  --chat-send-stop-ink: var(--surface-abyss);
   --chat-link: var(--ai-accent);
   --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 5%, transparent);
   --chat-accent: var(--ai-accent);

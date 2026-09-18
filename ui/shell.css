@@ -14428,8 +14428,8 @@ button.worker-composer-pill:hover {
 }
 
 .worker-composer-send.is-stop {
-  background: var(--ink-figure);
-  color: var(--surface-abyss);
+  background: var(--chat-send-stop-bg);
+  color: var(--chat-send-stop-ink);
   transition: transform var(--motion-fast) var(--ease-standard);
 }
 
