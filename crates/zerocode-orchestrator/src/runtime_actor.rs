@@ -1283,11 +1283,28 @@ pub enum RuntimeError {
 }
 
 impl RuntimeError {
+    /// Whether this ends the actor, or is answered and survived.
+    ///
+    /// [`Self::StoreUnavailable`] is NOT fatal, and the write road next door
+    /// says why: a refused write poisons the runtime and the next request
+    /// takes the disk's word for it, "so a passing failure does not cost a
+    /// restart". A store that could not be OPENED deserves the same reading,
+    /// and more easily — a connection that never opened read nothing and
+    /// wrote nothing, so this actor's state is exactly what it was. Treating
+    /// it as fatal promoted a passing condition into a permanent one: a full
+    /// disk stopped one sqlite open, the actor returned, and the ledger
+    /// stayed shut after the disk was freed, with the window still running
+    /// and the database intact (2026-09-18 — `integrity_check: ok`, WAL 0
+    /// bytes, nothing left to reopen it but a restart nobody but a person can
+    /// order).
+    ///
+    /// The three that remain are the ones where continuing would be a lie:
+    /// the store's rows are unreadable, the ledger under this actor is not
+    /// the one it owns, or two effects are in flight at once.
     const fn fatal(self) -> bool {
         matches!(
             self,
-            Self::StoreUnavailable
-                | Self::StoreCorrupt
+            Self::StoreCorrupt
                 | Self::AuthorityChanged
                 | Self::MultipleInFlightEffects
                 | Self::Panicked
@@ -4746,6 +4763,49 @@ fn random_instance_digest() -> String {
 mod tests {
     use super::*;
     use zerocode_core::orchestration::{Auto, NoLauncher};
+
+    /// A store that could not be opened is answered, not the end of the actor.
+    ///
+    /// The write road already says how a passing failure should be read: a
+    /// refused write poisons the runtime and the next request takes the
+    /// disk's word for it, "so a passing failure does not cost a restart". A
+    /// connection that never opened deserves the same and needs less — it
+    /// read nothing and wrote nothing, so this actor's state is untouched.
+    ///
+    /// It was fatal, and that promoted a passing condition into a permanent
+    /// one: on 2026-09-18 a full disk refused one sqlite open, the actor
+    /// returned, and the ledger stayed shut long after the disk was freed —
+    /// window still running, database intact, and nothing able to reopen it
+    /// but a restart only a person can order.
+    #[test]
+    fn a_store_that_could_not_be_opened_is_answered_and_the_actor_lives() {
+        assert!(
+            !RuntimeError::StoreUnavailable.fatal(),
+            "a store this actor could not open right now is not a store it has lost"
+        );
+
+        /* The ones that stay fatal are the ones where carrying on would be a
+         * lie about what this actor is holding. */
+        for ending in [
+            RuntimeError::StoreCorrupt,
+            RuntimeError::AuthorityChanged,
+            RuntimeError::MultipleInFlightEffects,
+            RuntimeError::Panicked,
+        ] {
+            assert!(ending.fatal(), "{ending} must still end the actor");
+        }
+
+        /* And the ordinary refusals were never fatal; naming them here keeps
+         * the set from growing by accident. */
+        for answered in [
+            RuntimeError::NotDurable,
+            RuntimeError::InvalidInput,
+            RuntimeError::UnknownTeam,
+            RuntimeError::RevisionMismatch,
+        ] {
+            assert!(!answered.fatal(), "{answered} must be answered, not fatal");
+        }
+    }
 
     /// The door takes a command at its bound and refuses the one past it.
     ///
