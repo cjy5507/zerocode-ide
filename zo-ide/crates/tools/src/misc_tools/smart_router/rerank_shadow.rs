@@ -125,6 +125,17 @@ pub struct RerankShadowRow {
     /// the door carries, spelled as every Jev ledger spells it.
     #[serde(default, skip_serializing_if = "Option::is_none", rename = "redactedLines")]
     pub redacted_lines: Option<u32>,
+    /// Which of the reply's rules refused it, on a row whose `outcome` is
+    /// `schema` — [`RerankRejection::rule`]'s word. One word for nine rules
+    /// says a reply was refused but not by what, and the ledger is where the
+    /// cause has to be readable. Never a word of the reply, the notes or the
+    /// request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected: Option<String>,
+    /// Which note the rule broke on, by its place in recall's order. Absent
+    /// when the rule names no note of ours.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rejected_at: Option<usize>,
     /// What the judgment said, once it checked out and could be ordered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub judged: Option<Judged>,
@@ -187,6 +198,8 @@ impl RerankShadowRow {
             input_tokens: None,
             requests: Some(0),
             redacted_lines: Some(0),
+            rejected: None,
+            rejected_at: None,
             judged: None,
             applied: false,
         }
@@ -438,36 +451,45 @@ pub(super) async fn judge(
     let call = jev_gate::send(client, cleared, deadline).await;
     let mut row = match call.outcome {
         Ok(response) => {
-            if let Ok(readings) = validate_rerank(&candidates, &response) {
-                telemetry::attest_fired(telemetry::HarnessFeature::RerankShadow);
-                let (outcome, judged) = compare(hits, &readings).map_or(
-                    (RERANK_OUTCOME_UNORDERABLE, None),
-                    |comparison| {
-                        (RERANK_OUTCOME_ANSWERED, Some(Judged::from_comparison(comparison, &readings)))
-                    },
-                );
-                if let Ok(mut memo) = memo().lock() {
-                    remember_bounded(
-                        &mut memo,
-                        vec![(
-                            key,
-                            Remembered { model: response.model.clone(), outcome, judged: judged.clone() },
-                        )],
+            let checked = validate_rerank(&candidates, &response);
+            let mut row = match checked {
+                Ok(readings) => {
+                    telemetry::attest_fired(telemetry::HarnessFeature::RerankShadow);
+                    let (outcome, judged) = compare(hits, &readings).map_or(
+                        (RERANK_OUTCOME_UNORDERABLE, None),
+                        |comparison| {
+                            (RERANK_OUTCOME_ANSWERED, Some(Judged::from_comparison(comparison, &readings)))
+                        },
                     );
+                    if let Ok(mut memo) = memo().lock() {
+                        remember_bounded(
+                            &mut memo,
+                            vec![(
+                                key,
+                                Remembered { model: response.model.clone(), outcome, judged: judged.clone() },
+                            )],
+                        );
+                    }
+                    let mut row = RerankShadowRow::new(key, hits.len(), outcome.to_string());
+                    row.judged = judged;
+                    row
                 }
-                let mut row = RerankShadowRow::new(key, hits.len(), outcome.to_string());
-                row.model = Some(response.model);
-                row.input_tokens = Some(response.usage.input_tokens);
-                row.judged = judged;
-                row
-            } else {
-                telemetry::attest_failed(telemetry::HarnessFeature::RerankShadow, SystemOneFailure::Schema.token());
-                let mut row = RerankShadowRow::new(key, hits.len(), SystemOneFailure::Schema.ledger_token());
-                // A response that arrived and failed its checks still billed.
-                row.model = Some(response.model);
-                row.input_tokens = Some(response.usage.input_tokens);
-                row
-            }
+                Err(refused) => {
+                    telemetry::attest_failed(
+                        telemetry::HarnessFeature::RerankShadow,
+                        SystemOneFailure::Schema.token(),
+                    );
+                    let mut row =
+                        RerankShadowRow::new(key, hits.len(), SystemOneFailure::Schema.ledger_token());
+                    row.rejected = Some(refused.rule().to_string());
+                    row.rejected_at = refused.position();
+                    row
+                }
+            };
+            // An answer that arrived billed, whether or not it checked out.
+            row.model = Some(response.model);
+            row.input_tokens = Some(response.usage.input_tokens);
+            row
         }
         Err(failure) => {
             telemetry::attest_failed(telemetry::HarnessFeature::RerankShadow, failure.token());
@@ -716,6 +738,48 @@ mod tests {
         assert_eq!(row.outcome, SystemOneFailure::Schema.ledger_token());
         assert!(row.judged.is_none());
         assert_eq!(row.input_tokens, Some(321), "an answer that arrived and failed still billed");
+    }
+
+    /// `schema` is one word for nine rules. A row that says only that leaves a
+    /// reader to guess which check refused the reply, so it names the rule and
+    /// the note the rule broke on — and still not one word of the reply.
+    #[test]
+    fn a_schema_row_names_the_rule_it_broke_and_the_note_it_broke_on() {
+        let mut broken: serde_json::Value =
+            serde_json::from_str(&reply_for(&[1, 1, 1])).expect("json");
+        broken["answers"]["n2"]["score"] = serde_json::json!(3.0);
+        let mock = Mock::serving(200, broken.to_string());
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+        let hits = [
+            hit("wiki/a", "SUMMARY-SENTINEL-ALPHA"),
+            hit("wiki/b", "SUMMARY-SENTINEL-BETA"),
+            hit("wiki/c", "SUMMARY-SENTINEL-GAMMA"),
+        ];
+
+        let row = judged(&client, "QUERY-SENTINEL (row nine)", &hits);
+
+        assert_eq!(row.outcome, SystemOneFailure::Schema.ledger_token());
+        assert_eq!(row.rejected.as_deref(), Some("score_mismatch"));
+        assert_eq!(row.rejected_at, Some(2), "the third note in recall's order");
+        let line = serde_json::to_string(&row).expect("a ledger line");
+        for sentinel in ["QUERY-SENTINEL", "SUMMARY-SENTINEL", "/Users/"] {
+            assert!(!line.contains(sentinel), "{sentinel} must not be in the ledger: {line}");
+        }
+    }
+
+    /// A row that is not a refused reply carries no rule at all — the key is
+    /// absent rather than empty, so a reader counting rules counts refusals.
+    #[test]
+    fn a_row_nothing_refused_names_no_rule() {
+        let mock = Mock::serving(200, reply_for(&[1, 3]));
+        let client = SystemOneClient::new(&mock.base_url, "test-key");
+
+        let row = judged(&client, "why (row ten)", &[hit("wiki/a", "one"), hit("wiki/b", "two")]);
+
+        assert_eq!(row.outcome, RERANK_OUTCOME_ANSWERED);
+        assert_eq!((row.rejected.as_deref(), row.rejected_at), (None, None));
+        let line = serde_json::to_string(&row).expect("a ledger line");
+        assert!(!line.contains("rejected"), "an answered row keeps no refusal key: {line}");
     }
 
     #[test]

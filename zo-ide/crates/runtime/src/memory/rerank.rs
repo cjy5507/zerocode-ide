@@ -102,6 +102,17 @@ pub const SCORE_MEAN_TOLERANCE: f64 = 0.02;
 /// cut leaves it byte for byte as it was.
 const TRUNCATION_MARKER: &str = zerocode_core::jev::CUT_MARK;
 
+/// The letter a question id opens with, so what comes back is named rather
+/// than numbered. Spelled once: [`rerank_candidates`] writes ids with it and
+/// [`RerankRejection::position`] reads them back through it.
+const QUESTION_ID_PREFIX: &str = "n";
+
+/// The note a question id names, by its place in the state, or `None` when the
+/// id is not one this module wrote.
+fn position_of(question_id: &str) -> Option<usize> {
+    question_id.strip_prefix(QUESTION_ID_PREFIX)?.parse().ok()
+}
+
 /// One note put to the judgment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RerankCandidate {
@@ -131,7 +142,7 @@ pub fn rerank_candidates(hits: &[MemoryHit]) -> Vec<RerankCandidate> {
         .enumerate()
         .take(MAX_RERANK_CANDIDATES)
         .map(|(position, hit)| RerankCandidate {
-            question_id: format!("n{position}"),
+            question_id: format!("{QUESTION_ID_PREFIX}{position}"),
             position,
             slug: hit.entry.slug.clone(),
             summary: truncate_on_char_boundary(
@@ -219,6 +230,49 @@ pub enum RerankRejection {
     ScoreMismatch(String),
     /// `confidence` outside `[0, 1]`.
     ConfidenceRange(String),
+}
+
+impl RerankRejection {
+    /// The rule's own word.
+    ///
+    /// A closed set of nine, so a ledger row can say which check refused a
+    /// reply — `schema` is one word for all nine, and a reader of it cannot
+    /// tell a malformed answer from an arithmetic one. None of these words
+    /// comes from the reply, the notes or the request.
+    #[must_use]
+    pub const fn rule(&self) -> &'static str {
+        match self {
+            Self::MissingAnswer(_) => "missing_answer",
+            Self::UnknownAnswer(_) => "unknown_answer",
+            Self::NotAScore(_) => "not_a_score",
+            Self::LevelKeys(_) => "level_keys",
+            Self::ProbabilityRange(_) => "probability_range",
+            Self::ProbabilitySum(_) => "probability_sum",
+            Self::ScoreRange(_) => "score_range",
+            Self::ScoreMismatch(_) => "score_mismatch",
+            Self::ConfidenceRange(_) => "confidence_range",
+        }
+    }
+
+    /// Which note the rule broke on, by its place in recall's order.
+    ///
+    /// A number, never the id itself: [`Self::UnknownAnswer`] carries what the
+    /// reply called its answer, which is the model's word and names no note of
+    /// ours, so it reads as no place at all.
+    #[must_use]
+    pub fn position(&self) -> Option<usize> {
+        match self {
+            Self::UnknownAnswer(_) => None,
+            Self::MissingAnswer(id)
+            | Self::NotAScore(id)
+            | Self::LevelKeys(id)
+            | Self::ProbabilityRange(id)
+            | Self::ProbabilitySum(id)
+            | Self::ScoreRange(id)
+            | Self::ScoreMismatch(id)
+            | Self::ConfidenceRange(id) => position_of(id),
+        }
+    }
 }
 
 /// Check a reply against the questions [`rerank_questions`] asked.
@@ -586,8 +640,9 @@ mod tests {
     const LEVEL_NUMBERS: [f64; RERANK_LEVELS.len()] = [0.0, 1.0, 2.0, 3.0];
 
     /// One way a reply breaks the contract: what to spoil in a well-formed
-    /// answer, and the refusal that has to come back.
-    type BrokenCase = (fn(&mut Value), RerankRejection);
+    /// answer, the refusal that has to come back, and the word a ledger row
+    /// keeps it under.
+    type BrokenCase = (fn(&mut Value), RerankRejection, &'static str);
 
     /// A score answer whose probability sits entirely on one level, with the
     /// legend the contract echoes back.
@@ -672,45 +727,89 @@ mod tests {
         let hits = [hit("wiki/a", "one"), hit("wiki/b", "two")];
         let candidates = rerank_candidates(&hits);
         // Each case takes one well-formed answer and breaks exactly one rule.
-        let broken: [BrokenCase; 6] = [
+        let broken: [BrokenCase; 7] = [
             (
                 |answer| answer["type"] = json!("choice"),
                 RerankRejection::NotAScore("n1".into()),
+                "not_a_score",
             ),
             (
                 |answer| answer["probabilities"] = json!({"0": 0.0, "1": 1.0}),
                 RerankRejection::LevelKeys("n1".into()),
+                "level_keys",
+            ),
+            (
+                |answer| answer["probabilities"]["1"] = json!(-0.5),
+                RerankRejection::ProbabilityRange("n1".into()),
+                "probability_range",
             ),
             (
                 |answer| answer["probabilities"]["1"] = json!(0.5),
                 RerankRejection::ProbabilitySum("n1".into()),
+                "probability_sum",
             ),
             (
                 |answer| answer["score"] = json!(9.0),
                 RerankRejection::ScoreRange("n1".into()),
+                "score_range",
             ),
             (
                 |answer| answer["score"] = json!(3.0),
                 RerankRejection::ScoreMismatch("n1".into()),
+                "score_mismatch",
             ),
             (
                 |answer| answer["confidence"] = json!(4.0),
                 RerankRejection::ConfidenceRange("n1".into()),
+                "confidence_range",
             ),
         ];
-        for (break_one_rule, expected) in broken {
+        for (break_one_rule, expected, rule) in broken {
             let mut batch = reply(&[3, 1]);
             let mut answer = batch.answers["n1"].clone();
             break_one_rule(&mut answer);
             batch.answers.insert("n1".to_string(), answer);
-            assert_eq!(validate_rerank(&candidates, &batch), Err(expected));
+            let refused = validate_rerank(&candidates, &batch).expect_err("one rule was broken");
+            assert_eq!(refused, expected);
+            assert_eq!(
+                (refused.rule(), refused.position()),
+                (rule, Some(1)),
+                "a row says which rule refused the reply and which note it broke on"
+            );
         }
 
         let mut missing = reply(&[3, 1]);
         missing.answers.remove("n1");
+        let refused = validate_rerank(&candidates, &missing).expect_err("a note went unanswered");
+        assert_eq!(refused, RerankRejection::MissingAnswer("n1".into()));
+        assert_eq!((refused.rule(), refused.position()), ("missing_answer", Some(1)));
+    }
+
+    /// The rule words are what a ledger row and a counter read, so they are a
+    /// closed set of distinct words — and none of them is a word of the reply.
+    #[test]
+    fn every_rule_has_its_own_word_and_an_id_of_the_replys_own_is_no_place_of_ours() {
+        let id = "n2".to_string();
+        let every: [RerankRejection; 9] = [
+            RerankRejection::MissingAnswer(id.clone()),
+            RerankRejection::UnknownAnswer(id.clone()),
+            RerankRejection::NotAScore(id.clone()),
+            RerankRejection::LevelKeys(id.clone()),
+            RerankRejection::ProbabilityRange(id.clone()),
+            RerankRejection::ProbabilitySum(id.clone()),
+            RerankRejection::ScoreRange(id.clone()),
+            RerankRejection::ScoreMismatch(id.clone()),
+            RerankRejection::ConfidenceRange(id),
+        ];
+        let words: BTreeSet<&str> = every.iter().map(RerankRejection::rule).collect();
+        assert_eq!(words.len(), every.len(), "two rules would be one row: {words:?}");
+
+        let stray = RerankRejection::UnknownAnswer("whatever the reply called it".into());
+        assert_eq!(stray.position(), None, "an id nobody asked under names no note");
         assert_eq!(
-            validate_rerank(&candidates, &missing),
-            Err(RerankRejection::MissingAnswer("n1".into()))
+            RerankRejection::ScoreRange("not-an-id".into()).position(),
+            None,
+            "a place is read back from the one spelling this module writes"
         );
     }
 

@@ -260,6 +260,8 @@ mod tests {
                 input_tokens: None,
                 requests: Some(0),
                 redacted_lines: Some(0),
+                rejected: None,
+                rejected_at: None,
                 judged: None,
                 applied: false,
             })
