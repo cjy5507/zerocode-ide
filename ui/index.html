@@ -4000,6 +4000,18 @@
             방금 띄운 워커를 탭·분할·배경 중 어디에 둘지 묻습니다. 브리핑 앞 400자만 보냅니다 — 자리를 정하는 것은 그 워커를 왜 불렀는지이고, 그 뒤는 과업의 세부라 자리와 무관합니다. 답으로는 아무것도 하지 않고, 지금 쓰는 배치 규칙이 그대로 자리를 정합니다.
           </p>
           </div>
+
+          <div data-jev-row>
+          <label class="settings-field" for="typesafe-summon-select">
+            <span class="settings-label" data-i18n="settings.typesafe.summon">워커를 부를 에이전트</span>
+            <!-- The options are this seat's own modes from the Jev use table,
+                 built from what `typesafe_settings` answers (`paintJevModes`). -->
+            <select class="settings-input" id="typesafe-summon-select" data-jev-seat="summon"></select>
+          </label>
+          <p class="settings-hint" data-i18n="settings.typesafe.summonHint">
+            워커를 부를 때, 그 일을 어느 에이전트가 맡아야 할지 묻습니다. 보내는 것은 브리핑 앞 1,200자와 형상 넷(브리핑 전체 길이·워크트리인가·재시도인가·과업을 지녔는가)뿐이고, 코디네이터가 이미 적은 에이전트는 보내지 않습니다 — 답을 보여 주고 묻는 것은 두 번째 의견이 아닙니다. 보기는 지금 여유가 있는 에이전트뿐이라 쿼터가 찬 것은 들어가지 않습니다. 답으로는 아무것도 하지 않고, 실제로 부른 것 옆에 한 줄로 적습니다.
+          </p>
+          </div>
         </div>
         </section>
 

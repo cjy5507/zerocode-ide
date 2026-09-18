@@ -139,6 +139,7 @@ fn the_builders_cut_at_the_tables_caps() {
     assert!(caps(&STALL).contains(&Cap::Bytes(STALL_SCREEN_BYTE_CAP)));
     assert!(caps(&STALL).contains(&Cap::Bytes(STALL_TRANSCRIPT_BYTE_CAP)));
     assert!(caps(&PLACEMENT).contains(&Cap::Chars(PLACEMENT_BRIEF_CHAR_CAP)));
+    assert!(caps(&SUMMON).contains(&Cap::Chars(SUMMON_BRIEF_CHAR_CAP)));
 }
 
 /// A stall's answer is a row beside what the coordinator did, never an act:
@@ -180,4 +181,27 @@ fn the_placement_options_are_the_three_the_window_can_actually_do() {
         "the window has exactly these roads: a tab of its own, a division of \
          what is in front, or no stage at all"
     );
+}
+
+/// Which agent carries a summons is a judgment about the work, and the
+/// coordinator's three typed words are what it is written down beside. The
+/// use offers nothing that applies: a worker is summoned by what the caller
+/// asked for, and the row is evidence, not a substitution.
+#[test]
+fn a_summon_question_offers_nothing_that_acts() {
+    assert!(SUMMON.modes.iter().all(|mode| !mode.applies()));
+    const { assert!(!SUMMON.promotes) };
+    assert_eq!(SUMMON.mode_of(Some(&json!("on"))), JevMode::Off);
+    assert_eq!(SUMMON.mode_of(Some(&json!("auto"))), JevMode::Auto);
+    assert_eq!(jev_use("summon"), Some(&SUMMON));
+}
+
+/// The one text a summons' question carries is the head of the brief. The
+/// agent the coordinator typed is not in the table's `sends` because it is
+/// not in the state at all — a question that shows the answer somebody
+/// already wrote down is not a second opinion.
+#[test]
+fn a_summon_question_sends_the_brief_and_nothing_else() {
+    let sent: Vec<&str> = SUMMON.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(sent, ["/state/brief"]);
 }

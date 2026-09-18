@@ -6257,6 +6257,9 @@ impl Ledger {
             inherit_checkout,
             prompt,
             prompt_timeout_ms,
+            // Filled by the verb, which is the road that DECIDED an agent;
+            // every other caller of this reservation is repeating one.
+            summon_shadow: None,
             prior_binding,
             prior_binding_revision,
             binding_revision,
@@ -11966,21 +11969,80 @@ fn quota_gate(
     }
 }
 
+/// One installed agent as the quota gate's look at this machine left it: its
+/// gauge as this window's cache last read it, and whether that reading puts
+/// it at its wall right now.
+///
+/// The ONE pass over the machine, so that the sentence a refusal prints and
+/// the set a judgment is closed over cannot disagree about which agents have
+/// room. `None` is "nobody read a gauge", which is not a wall and not room:
+/// it is unknown, and the two readers below say so in their own way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AgentRoom {
+    id: String,
+    gauge: Option<Headroom>,
+    at_wall: bool,
+}
+
+/// Every installed agent, with the gauge this window has for it. `None` when
+/// nobody looked at the machine at all, which is a different sentence from
+/// "nothing is installed".
+fn installed_rooms(launcher: &dyn Launcher, now_ms: i64) -> Option<Vec<AgentRoom>> {
+    Some(
+        launcher
+            .presence()?
+            .iter()
+            .filter(|row| row.installed)
+            .map(|row| {
+                let gauge = launcher.provider_headroom(row.id, None);
+                AgentRoom {
+                    id: row.id.to_string(),
+                    at_wall: gauge
+                        .as_ref()
+                        .is_some_and(|held| read_gauge(held, now_ms).at_wall),
+                    gauge,
+                }
+            })
+            .collect(),
+    )
+}
+
+/// The agents a summons could actually land on this minute — installed, and
+/// not at their wall — for a judgment that has to choose between things it
+/// can carry out ([`crate::summon_choice`]).
+///
+/// An agent whose gauge nobody has read is here: unread is not a wall, and
+/// the quota gate itself lets such a summons through. Its option says so in
+/// its own words rather than borrowing a number nobody measured.
+#[must_use]
+pub fn summonable(launcher: &dyn Launcher, now_ms: i64) -> Vec<crate::summon_choice::Summonable> {
+    installed_rooms(launcher, now_ms)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|room| !room.at_wall)
+        .map(|room| crate::summon_choice::Summonable {
+            id: room.id,
+            spent_percent: room.gauge.as_ref().map(|held| held.used_percent),
+            window: room.gauge.as_ref().map(|held| held.window.as_str()),
+        })
+        .collect()
+}
+
 /// "installed agents with headroom: claude 61% (weekly), kimi 12% (session)"
 /// — every installed agent whose gauge this window has read and which is
 /// under the wall; the agents whose gauge nobody read are counted, not listed
 /// as having room.
 fn agents_with_headroom(launcher: &dyn Launcher, now_ms: i64) -> String {
-    let Some(present) = launcher.presence() else {
+    let Some(rooms) = installed_rooms(launcher, now_ms) else {
         return "which installed agents have room was not measured".to_string();
     };
     let mut roomy = Vec::new();
     let mut unread = 0usize;
-    for row in present.iter().filter(|row| row.installed) {
-        match launcher.provider_headroom(row.id, None) {
-            Some(gauge) if !read_gauge(&gauge, now_ms).at_wall => roomy.push(format!(
+    for room in &rooms {
+        match &room.gauge {
+            Some(gauge) if !room.at_wall => roomy.push(format!(
                 "{} {}% ({})",
-                row.id,
+                room.id,
                 gauge.used_percent,
                 gauge.window.as_str()
             )),
@@ -12768,6 +12830,55 @@ struct WorkerStartRequest<'a> {
     now_ms: i64,
 }
 
+/// What the judgment was asked, beside what the coordinator typed (t-4711).
+///
+/// Carried rather than asked here: the ledger has no socket and holds the
+/// whole runtime while it plans. Its half is the two things only it can say —
+/// the shape of the summons that was decided, and the set of agents that
+/// could have carried it, taken from the same pass the quota gate's own
+/// refusal reads ([`summonable`]). The window asks, off the beat, and writes
+/// the row.
+///
+/// Recorded, never acted on: [`crate::jev::SUMMON`] offers no mode that
+/// applies, and the three words below summoned this worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummonShadow {
+    /// The three words this summons landed on, after the quota gate had its
+    /// say — what the judgment's own answer is written down beside.
+    pub pinned: Pinned,
+    /// Whether the summons named a model itself.
+    ///
+    /// A model a person pinned in their own turn nails the spawn down, so an
+    /// apply stage would leave such a summons alone. The shadow asks anyway
+    /// and records the flag: a row nobody would have acted on is still
+    /// evidence about the judgment, and separating the two is the reader's
+    /// job, not the asker's.
+    pub model_was_pinned: bool,
+    /// The head of the summons' brief, cut to the use's cap.
+    pub brief: String,
+    /// Characters of the WHOLE brief, which the cut throws away.
+    pub brief_chars: usize,
+    pub worktree: bool,
+    pub replaces_an_attempt: bool,
+    pub carries_a_task: bool,
+    /// The agents this window could have summoned this minute.
+    pub options: Vec<crate::summon_choice::Summonable>,
+}
+
+impl SummonShadow {
+    /// The shape this summons puts to the judgment.
+    #[must_use]
+    pub fn look(&self) -> crate::summon_choice::SummonLook<'_> {
+        crate::summon_choice::SummonLook {
+            brief: &self.brief,
+            brief_chars: self.brief_chars,
+            worktree: self.worktree,
+            replaces_an_attempt: self.replaces_an_attempt,
+            carries_a_task: self.carries_a_task,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct PreparedWorkerStart {
     /// The standing order that must still authorize the actual split.
@@ -12801,6 +12912,11 @@ pub struct PreparedWorkerStart {
     /// agent composer.
     pub prompt: String,
     pub prompt_timeout_ms: u32,
+    /// The judgment's half of this summons, for the window to ask and write
+    /// down. `None` on every road that reserves a worker without deciding
+    /// one — a restart's reseat, a receipt replayed — and whenever fewer than
+    /// two agents could have carried it.
+    pub summon_shadow: Option<SummonShadow>,
     prior_binding: Option<String>,
     prior_binding_revision: Option<u64>,
     binding_revision: u64,
@@ -15325,7 +15441,7 @@ fn plan_inner(
             } else {
                 None
             };
-            let (started, prepared_worker_start) =
+            let (started, mut prepared_worker_start) =
                 ledger.prepare_worker_start(WorkerStartRequest {
                     run_id: &run_id,
                     agent: &agent,
@@ -15350,6 +15466,44 @@ fn plan_inner(
                     },
                     now_ms,
                 })?;
+            /* The judgment's half, carried for the window to ask off the
+             * beat and write down (t-4711). Nothing here changes what is
+             * summoned: the three words above already did that, and the use
+             * offers no mode that applies. What travels is the shape of the
+             * summons — the head of its own brief, never the briefing this
+             * road wraps around it — and the agents that could have carried
+             * it, from the SAME pass the quota refusal's sentence reads.
+             *
+             * A federated summons never reaches here: which agent a borrowed
+             * seat runs is the server window's judgment, on the server
+             * window's gauges. */
+            //
+            // The summons' own words, and the task's title when it brought no
+            // words of its own. A pane summoned with neither — `--bare`, an
+            // operator opening an agent to work with by hand — describes no
+            // work, and a judgment asked about nothing is a row that says
+            // nothing: it gets no question at all.
+            let said = match asked.is_empty() {
+                false => Some(asked),
+                true => task_title.as_deref(),
+            };
+            prepared_worker_start.summon_shadow = said.map(|words| {
+                let (brief, brief_chars) = crate::summon_choice::brief_shape(words);
+                SummonShadow {
+                    pinned: Pinned {
+                        agent: agent.clone(),
+                        model: model.clone(),
+                        effort: effort.clone(),
+                    },
+                    model_was_pinned: model.is_some(),
+                    brief,
+                    brief_chars,
+                    worktree: isolated,
+                    replaces_an_attempt: retry_of.is_some(),
+                    carries_a_task: task.is_some(),
+                    options: summonable(launcher, now_ms),
+                }
+            });
             // Start the TUI bare. The briefing is carried on the typed
             // reservation and delivered only after the PTY observes the
             // agent's readiness signal; putting task text on argv both leaked

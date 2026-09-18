@@ -13172,6 +13172,127 @@ fn a_summons_at_the_quota_wall_is_refused_before_anything_is_written() {
     assert!(said["quotaNotice"]["usedPercent"].is_null());
 }
 
+/// The summons carries a judgment's half beside what the coordinator
+/// typed — and the set it would be judged over is the set that can
+/// actually be summoned THIS minute.
+///
+/// An agent at its wall is the whole point of the red: it is installed,
+/// it is in the catalog, and offering it would be offering an answer
+/// nobody could carry out. The set comes from the same pass the refusal's
+/// own sentence is printed from, so what a coordinator is told when it is
+/// refused and what a judgment is asked cannot disagree.
+#[test]
+fn a_summons_is_judged_over_the_agents_that_could_carry_it_this_minute() {
+    const NOW: i64 = 5_000_000;
+    let machine = Gauged {
+        machine: Looked::at(&["claude", "codex", "kimi"]),
+        gauges: vec![
+            // Spent: installed, in the catalog, and not an option.
+            ("codex", gauge("codex", 100, NOW - 1_000, None)),
+            ("claude", gauge("claude", 61, NOW - 60_000, None)),
+            // kimi: installed, no gauge read. Unread is not a wall.
+        ],
+    };
+    let mut ledger = Ledger::new();
+    let mut team = Team::new("team-1", "token", 7);
+    let opened = planned_on(&mut ledger, &mut team, &machine, "run-create --name s", NOW);
+    assert_eq!(opened.reply.exit_code, 0, "{}", opened.reply.stderr);
+    let summoned = planned_on(
+        &mut ledger,
+        &mut team,
+        &machine,
+        "worker-start --agent claude --model claude-opus-5 --effort max --worktree \
+         --prompt measure-the-frame-time-again-and-put-the-numbers-in-the-commit",
+        NOW + 1,
+    );
+    assert_eq!(summoned.reply.exit_code, 0, "{}", summoned.reply.stderr);
+    let shadow = summoned
+        .prepared_worker_start
+        .as_ref()
+        .expect("the reservation")
+        .summon_shadow
+        .as_ref()
+        .expect("a judgment's half");
+
+    let offered: Vec<&str> = shadow
+        .options
+        .iter()
+        .map(|agent| agent.id.as_str())
+        .collect();
+    assert_eq!(
+        offered,
+        ["claude", "kimi"],
+        "codex is at its wall — an option nobody could carry out is not a closed choice"
+    );
+    assert_eq!(shadow.options[0].spent_percent, Some(61));
+    assert_eq!(shadow.options[0].window, Some("weekly"));
+    assert_eq!(
+        (shadow.options[1].spent_percent, shadow.options[1].window),
+        (None, None),
+        "an unread gauge says so rather than borrowing a number"
+    );
+
+    // What the judgment is written down beside, and the shape it is asked
+    // about — the brief's head, never the briefing this road wraps around
+    // it, and never the agent already typed.
+    assert_eq!(
+        shadow.pinned,
+        pinned("claude", Some("claude-opus-5"), Some("max"))
+    );
+    assert!(shadow.model_was_pinned);
+    assert!(shadow.brief.starts_with("measure-the-frame-time"));
+    assert_eq!(shadow.brief_chars, shadow.brief.chars().count());
+    assert!(shadow.worktree && !shadow.replaces_an_attempt && !shadow.carries_a_task);
+    let asked = crate::summon_choice::ask(&shadow.look(), &shadow.options)
+        .expect("two agents are a question");
+    assert_eq!(asked.options(), ["claude", "kimi"]);
+    assert!(!asked.state.to_string().contains("opus"));
+
+    // A pane summoned to work with by hand describes no work, so there is
+    // nothing to judge and no question is carried at all.
+    let bare = planned_on(
+        &mut ledger,
+        &mut team,
+        &machine,
+        "worker-start --agent claude --bare",
+        NOW + 2,
+    );
+    assert_eq!(bare.reply.exit_code, 0, "{}", bare.reply.stderr);
+    assert!(
+        bare.prepared_worker_start
+            .as_ref()
+            .expect("the reservation")
+            .summon_shadow
+            .is_none(),
+        "a summons with no work described was still put to a judgment"
+    );
+
+    // One agent left standing is no question at all, and the summons is
+    // untouched by that: the coordinator's own words still summon it.
+    let alone = Gauged {
+        machine: Looked::at(&["claude", "codex"]),
+        gauges: vec![("codex", gauge("codex", 100, NOW - 1_000, None))],
+    };
+    let lone = planned_on(
+        &mut ledger,
+        &mut team,
+        &alone,
+        "worker-start --agent claude --prompt measure-it",
+        NOW + 3,
+    );
+    assert_eq!(lone.reply.exit_code, 0, "{}", lone.reply.stderr);
+    let shadow = lone
+        .prepared_worker_start
+        .as_ref()
+        .expect("the reservation")
+        .summon_shadow
+        .as_ref()
+        .expect("a judgment's half");
+    assert_eq!(shadow.options.len(), 1);
+    assert!(!shadow.model_was_pinned);
+    assert!(crate::summon_choice::ask(&shadow.look(), &shadow.options).is_none());
+}
+
 /// `agent-list` says, per INSTALLED agent, the three numbers a
 /// coordinator picks by — and `null` for a gauge nobody read, which is
 /// not the same row as an agent at 0%.

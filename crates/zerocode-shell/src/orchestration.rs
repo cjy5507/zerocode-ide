@@ -27,6 +27,7 @@
 
 pub(crate) mod coordinator_handover;
 mod stall_cause;
+mod summon_choice;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -6525,6 +6526,15 @@ fn carried(
                             prepared.resumed,
                         );
                         return answer(decided.reply);
+                    }
+                    /* The judgment's row, beside what was actually summoned
+                     * (t-4711). Here rather than at the plan, because a
+                     * summons whose split was refused is not a decision
+                     * anybody made — and the checkout the pane landed in is
+                     * the workspace the Jev door asks consent for. Off the
+                     * beat, and nothing below waits on it. */
+                    if let Some(prepared) = decided.prepared_worker_start.as_ref() {
+                        summon_choice::record(host, prepared, seated.as_deref(), now_ms);
                     }
                     /* The seat report lands beside the receipt, best-effort:
                      * the pane is open and the answer below stands whatever

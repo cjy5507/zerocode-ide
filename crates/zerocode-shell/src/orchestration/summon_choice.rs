@@ -1,0 +1,226 @@
+//! Which agent a summons would have been given, asked of Jev beside the three
+//! words the coordinator typed (t-4711, docs/design/jev-settings-20260917.md
+//! §2).
+//!
+//! `worker-start` lands on exactly the `--agent`, `--model` and `--effort` it
+//! was given; nothing here changes that, and the Jev use table's summon row
+//! (`zerocode_core::jev::SUMMON`, `smart.summonChoice`) offers no mode that
+//! applies. Under a person's `shadow` or `auto` this module puts the summons'
+//! SHAPE to Jev once, after the pane really opened: the head of the brief and
+//! four facts about the ask, closed over the agents the quota gate says could
+//! have carried it this minute. The answer is one row in
+//! `summon-choice.jsonl`, beside what was actually summoned and whether the
+//! two agreed.
+//!
+//! Asked after the pane opened, and only then: a summons whose split was
+//! refused is not a decision anybody made, and a row about it would be
+//! evidence about nothing. The checkout the pane landed in is the workspace
+//! the door asks consent for — the words travel with the work.
+//!
+//! A question waits up to [`SUMMON_CHOICE_DEADLINE`] for its answer, so it is
+//! asked off the beat ([`Host::off_the_beat`]); the summons has already been
+//! answered to its caller by then and nothing waits on this.
+
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use serde_json::{Value, json};
+use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
+use zerocode_core::jev::{SUMMON, count};
+use zerocode_core::orchestration::{PreparedWorkerStart, SummonShadow};
+use zerocode_core::summon_choice::{self, SUMMON_CHOICE_RUBRIC_VERSION, SummonAsk};
+
+use crate::agent_teams::Host;
+use crate::systemone::{SCHEMA, Wire, request_body};
+
+/// How long one summons question may wait for its answer.
+///
+/// Record-only today, but the rows are evidence for a stage that would hold a
+/// summons while it asked — a person is watching a pane open — so the
+/// question is put under a wall a summons could actually wait behind rather
+/// than under the generous one a background sweep can afford. zo's routing
+/// judgment answered its slowest in 6,798 ms
+/// (docs/design/jev-token-diet-20260917.md §1.5); ten seconds keeps that tail
+/// and calls anything past it `timeout`, which says the service was slow as
+/// plainly as a missing row would not.
+pub(crate) const SUMMON_CHOICE_DEADLINE: Duration = Duration::from_secs(10);
+
+/// The row's outcome for a question Jev answered in shape.
+const ANSWERED: &str = "answered";
+
+/// The row's outcome for a summons with nothing to choose between: one agent
+/// could have carried it, so there was no question to ask.
+const ONE_OPTION: &str = "one_option";
+
+/// Where the summon rows live: under zo's config home, in the folder the Jev
+/// door counts the day in — beside the settings that switch them on.
+fn ledger_path(wire: &Wire) -> Option<PathBuf> {
+    Some(
+        wire.config_home()?
+            .join(count::REQUESTS_DIR)
+            .join(SUMMON.ledger),
+    )
+}
+
+/// Append one row. A ledger that will not take it is said once on stderr and
+/// never raised: a record of a summons is not worth failing the summons.
+fn append(ledger: &Path, row: &Value) {
+    let written = ledger
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(ledger)
+        })
+        .and_then(|mut file| writeln!(file, "{row}"));
+    if let Err(why) = written {
+        eprintln!("orchestration: the summon-choice record was not written: {why}");
+    }
+}
+
+/// Who the row is about: the reservation's own ids, which are the only part
+/// of a summons this file needs from it.
+struct Seat<'a> {
+    run: &'a str,
+    worker: &'a str,
+    dispatch: Option<&'a str>,
+    task: Option<&'a str>,
+}
+
+impl<'a> Seat<'a> {
+    fn of(prepared: &'a PreparedWorkerStart) -> Self {
+        Self {
+            run: &prepared.run,
+            worker: &prepared.worker,
+            dispatch: prepared.dispatch.as_deref(),
+            task: prepared.task.as_deref(),
+        }
+    }
+}
+
+/// Everything the row says before an answer comes back — the summons as the
+/// ledger decided it.
+fn opened(seat: &Seat<'_>, shadow: &SummonShadow, mode: &str, now_ms: i64) -> Value {
+    json!({
+        "at": now_ms,
+        // One summons, one row: the worker is the name every later reader
+        // already has for this attempt.
+        "summon": seat.worker,
+        "run": seat.run,
+        "worker": seat.worker,
+        "dispatch": seat.dispatch,
+        "task": seat.task,
+        "mode": mode,
+        "rubricVersion": SUMMON_CHOICE_RUBRIC_VERSION,
+        // What the coordinator's three words came to, after the quota gate
+        // had its say — the thing the judgment is written down beside.
+        "agent": shadow.pinned.agent,
+        "model": shadow.pinned.model,
+        "effort": shadow.pinned.effort,
+        "modelWasPinned": shadow.model_was_pinned,
+        // The shape that was asked about, so a reader of the row never has to
+        // trust that the question carried what this says it did.
+        "briefChars": shadow.brief_chars,
+        "worktree": shadow.worktree,
+        "replaces": shadow.replaces_an_attempt,
+        "carriesATask": shadow.carries_a_task,
+        REQUESTS_KEY: 0,
+        REDACTED_LINES_KEY: 0,
+    })
+}
+
+/// Put one summons to Jev, off the beat, and write down what came of it.
+///
+/// `checkout` is where the pane actually landed — the workspace the door asks
+/// the person's consent for. Called once per summons that really opened.
+pub(super) fn record(
+    host: &dyn Host,
+    prepared: &PreparedWorkerStart,
+    checkout: Option<&str>,
+    now_ms: i64,
+) {
+    let Some(shadow) = prepared.summon_shadow.clone() else {
+        return;
+    };
+    let Some(wire) = host.jev_wire() else {
+        return;
+    };
+    let mode = SUMMON.mode_in(&wire.settings_root());
+    let Some(ledger) = ledger_path(&wire).filter(|_| mode.asks()) else {
+        return;
+    };
+    let mut row = opened(&Seat::of(prepared), &shadow, mode.key(), now_ms);
+    let Some(ask) = summon_choice::ask(&shadow.look(), &shadow.options) else {
+        row["outcome"] = json!(ONE_OPTION);
+        row["options"] = json!(agent_ids(&shadow));
+        append(&ledger, &row);
+        return;
+    };
+    let checkout = checkout.map(PathBuf::from);
+    host.off_the_beat(Box::new(move || {
+        append(
+            &ledger,
+            &settle(&wire, row, &ask, &shadow, checkout.as_deref()),
+        );
+    }));
+}
+
+/// The option words a question that was never asked would have offered.
+fn agent_ids(shadow: &SummonShadow) -> Vec<String> {
+    shadow
+        .options
+        .iter()
+        .map(|agent| agent.id.clone())
+        .collect()
+}
+
+/// Ask once and finish the row: what it cost, what came back, and whether the
+/// judgment landed on the agent the summons already had.
+fn settle(
+    wire: &Wire,
+    mut row: Value,
+    ask: &SummonAsk,
+    shadow: &SummonShadow,
+    checkout: Option<&Path>,
+) -> Value {
+    // The set the answer will be judged against, written down before it is
+    // asked: a row whose options came from the answer would prove nothing.
+    row["options"] = json!(ask.options());
+    let began = Instant::now();
+    let answer = wire.ask(
+        &SUMMON,
+        checkout,
+        request_body(&ask.state, &ask.questions),
+        SUMMON_CHOICE_DEADLINE,
+    );
+    row["elapsedMs"] = json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
+    row["requestBytes"] = json!(answer.request_bytes);
+    row[REQUESTS_KEY] = json!(answer.spent.requests);
+    row[REDACTED_LINES_KEY] = json!(answer.spent.redacted_lines);
+    let read = answer.answer.and_then(|body| {
+        serde_json::from_str::<Value>(&body)
+            .ok()
+            .and_then(|parsed| ask.read(parsed.get("answers")?).ok())
+            .ok_or_else(|| SCHEMA.to_string())
+    });
+    match read {
+        Ok(pick) => {
+            row["outcome"] = json!(ANSWERED);
+            row["chosen"] = json!(pick.chosen);
+            // The one number this ledger exists to produce: how often the
+            // coordinator's typing and a judgment of the work land on the
+            // same agent.
+            row["agreed"] = json!(pick.chosen == shadow.pinned.agent);
+            row["probabilities"] = json!(pick.probabilities);
+            row["confidence"] = json!(pick.confidence);
+        }
+        Err(token) => row["outcome"] = json!(token),
+    }
+    row
+}
+
+#[cfg(test)]
+mod tests;

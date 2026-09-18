@@ -53,10 +53,11 @@ const TYPESAFE_DECISION_MODES = Object.freeze([
    offers no `on`. `typesafe_settings.rs` holds this list against the table. */
 const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "routing", setting: "decisionShadow", modes: "off shadow on auto" }),
-  Object.freeze({ id: "recall", setting: "rerankShadow", modes: "off shadow auto" }),
+  Object.freeze({ id: "recall", setting: "rerankShadow", modes: "off shadow on auto" }),
   Object.freeze({ id: "browser", setting: "browserAction", modes: "off shadow on auto" }),
   Object.freeze({ id: "stall", setting: "stallCause", modes: "off shadow auto" }),
   Object.freeze({ id: "placement", setting: "workerPlacement", modes: "off shadow auto" }),
+  Object.freeze({ id: "summon", setting: "summonChoice", modes: "off shadow auto" }),
 ]);
 const jevSeat = (id) => JEV_SEATS.find((seat) => seat.id === id) ?? null;
 const jevSeatModes = (seat) =>

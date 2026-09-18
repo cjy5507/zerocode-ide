@@ -68,6 +68,15 @@ pub const STALL_TRANSCRIPT_BYTE_CAP: usize = 4 * 1024;
 /// What a byte cap leaves after the cut, so a clipped text is visibly one.
 pub const CUT_MARK: &str = "…";
 
+/// Characters of a summons' brief one agent-choice judgment reads.
+///
+/// The head of a brief is what bands it — routing's cap already says so — and
+/// a summons says what it wants before it starts listing the constraints it
+/// wants it done under. 1,200 characters holds 69.7% of the 532 task specs
+/// this machine's orchestration ledger carries whole (2026-09-18; p50 662,
+/// p75 1,415, p90 2,318, max 7,748) and the opening of the rest.
+pub const SUMMON_BRIEF_CHAR_CAP: usize = 1_200;
+
 /// Characters of a worker's brief one placement judgment reads.
 ///
 /// The question is which of three rooms a worker belongs in, and what decides
@@ -323,8 +332,40 @@ pub const PLACEMENT: JevUse = JevUse {
     promotes: false,
 };
 
+/// The summons' agent choice: which of the agents this window could start
+/// right now should carry the work a `worker-start` describes
+/// (`crate::summon_choice`, t-4711).
+///
+/// Every other launch fact a summons carries is checked against a measured
+/// table before anything is minted — the agent exists, its CLI takes the
+/// dial, its provider has room. The one fact nothing checks is the one a
+/// person actually asked for: WHICH agent, on which model, at which effort.
+/// The coordinator writes those three words by hand, and on run-4275 all
+/// twenty-two workers were decided that way.
+///
+/// The set to choose from is not computed here and is not computed twice: it
+/// is the set the quota gate already builds to name the agents still holding
+/// room when it refuses one (`orchestration::summonable`), so an agent at its
+/// wall cannot be offered as an answer nobody could carry out.
+///
+/// Recording only, and the coordinator's own words keep summoning every
+/// worker. `auto` records too: what a later stage would promote on is the row
+/// beside what the summons actually did and what became of that worker, and
+/// no such judge exists yet.
+pub const SUMMON: JevUse = JevUse {
+    id: "summon",
+    setting: "summonChoice",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    sends: &[Sent {
+        at: "/state/brief",
+        cap: Cap::Chars(SUMMON_BRIEF_CHAR_CAP),
+    }],
+    ledger: "summon-choice.jsonl",
+    promotes: false,
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 5] = [ROUTING, RECALL, BROWSER, STALL, PLACEMENT];
+pub static JEV_USES: [JevUse; 6] = [ROUTING, RECALL, BROWSER, STALL, PLACEMENT, SUMMON];
 
 impl JevUse {
     /// The mode `value` names for this use: one of this use's own words,
