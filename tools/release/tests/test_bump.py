@@ -25,9 +25,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 RELEASE = REPO / "tools" / "release"
 BUMP = RELEASE / "bump.sh"
-# The fixture checkout's own `origin`: bump.sh reads the repository off it, so
-# a fixture without one asks `repos//git/ref/tags/...`, which answers 404 for
-# every tag there is and reads back as "the tag is free".
+# The repository the fixture's own feed points at: bump.sh asks lane.sh's table
+# for the release repo and the table reads it off the shipped updater endpoint,
+# so a fixture whose config carries none asks `repos//git/ref/tags/...`, which
+# answers 404 for every tag there is and reads back as "the tag is free".
 FIXTURE_REPO = "zerocode-tests/bump-fixture"
 
 ROOT_CARGO = """[workspace]
@@ -67,6 +68,8 @@ TAURI_CONF = {
     "version": None,
     "identifier": "dev.zerocode.app",
     "bundle": {"active": True, "targets": ["app", "dmg"]},
+    "plugins": {"updater": {"endpoints": [
+        f"https://github.com/{FIXTURE_REPO}/releases/latest/download/latest.json"]}},
 }
 
 SECTION = re.compile(r"^## \[(\d+\.\d+\.\d+)\] — (\d{4}-\d\d-\d\d)$", re.M)
@@ -94,8 +97,6 @@ class Fixture:
         }
         self.env = git_env
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True, env=git_env)
-        subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin",
-                        f"git@github.com:{FIXTURE_REPO}.git"], check=True, env=git_env)
         self.write_versions(version, version, version)
         self.commit("chore: the first commit")
 
@@ -300,8 +301,9 @@ class ThreeFiles(BumpCase):
         # `repos//git/ref/tags/v0.1.1` is a 404 for every tag there is, so a
         # probe against a nameless repository reads as "free" and lets a
         # duplicate tag through. The bump says so instead of asking.
-        subprocess.run(["git", "-C", str(self.fx.repo), "remote", "remove", "origin"],
-                       check=True, env=self.fx.env)
+        conf = json.loads(self.fx.tauri_conf.read_text())
+        del conf["plugins"]
+        self.fx.tauri_conf.write_text(json.dumps(conf, indent=2) + "\n")
         r = self.fx.bump("patch")
         self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
         self.assertIn("origin", r.stdout + r.stderr)

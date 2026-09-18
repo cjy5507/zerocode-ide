@@ -69,33 +69,22 @@ APP_SIBLING_BINS='zerocode-mirror zerocode-pick'   # helper executables beside t
 
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 RELEASE_REPO=${RELEASE_REPO:-$(cd "$SELF_DIR/../.." && pwd)}
-# The public release repo, read from RELEASE_REPO's own `origin` rather than
-# written here: a rename otherwise leaves the lane publishing against a
-# repository this history never had (zerocode -> zerocode-ide, 2026-09-18).
+# The repository a release goes TO — which is not the one this source lives
+# in. The feed has to be reachable without a token, so it is served from the
+# public distribution repo while the source stays private (design
+# versioned-auto-update.md §2.2), and reading it off this checkout's `origin`
+# sent the publish to the source repo instead — where no installed app is
+# looking (2026-09-18).
 #
-# Every gate runs in a clone OF that checkout, and a clone's `origin` is a
-# path, not a name — read from it alone the lane published to
-# `https://github.com//Users/dev/...` and four of its own tests said so
-# (2026-09-18). So a local origin is followed up to the clone that names
-# GitHub, and a remote that names neither leaves the value empty.
-github_repo_of() { # DIR -> owner/name
-  local url dir=$1 hop=0
-  while [ "$hop" -lt 8 ]; do
-    url=$(git -C "$dir" remote get-url origin 2>/dev/null) || return 1
-    case $url in
-      https://github.com/*|git@github.com:*|ssh://git@github.com/*)
-        printf '%s' "$url" |
-          sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##'
-        return 0 ;;
-      file://*) dir=${url#file://} ;;
-      /*) dir=$url ;;
-      *) return 1 ;;
-    esac
-    hop=$((hop + 1))
-  done
-  return 1
+# The app ships the address it will poll in tauri.conf.json, so the lane reads
+# the owner and name out of that same endpoint rather than keeping a second
+# copy of them: the two hands cannot then disagree about where an update comes
+# from. `RELEASE_GITHUB_REPO` in the environment still wins, for a release cut
+# somewhere else on purpose.
+github_repo_of() { # TAURI_CONF -> owner/name
+  sed -n 's#.*https://github\.com/\([^/"]*\)/\([^/"]*\)/releases/.*#\1/\2#p' "$1" 2>/dev/null | head -1
 }
-RELEASE_GITHUB_REPO=${RELEASE_GITHUB_REPO:-$(github_repo_of "$RELEASE_REPO")}
+RELEASE_GITHUB_REPO=${RELEASE_GITHUB_REPO:-$(github_repo_of "$RELEASE_REPO/crates/zerocode-shell/tauri.conf.json")}
 RELEASE_HOME=${RELEASE_HOME:-$HOME/.local/share/zerocode/release}
 RELEASE_SCRATCH_ROOT=${RELEASE_SCRATCH_ROOT:-/private/tmp}
 RELEASE_APP_DIR=${RELEASE_APP_DIR:-/Applications}
