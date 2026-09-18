@@ -1888,7 +1888,9 @@ fn a_wake_is_chased_for_one_frame_instead_of_waiting_out_a_tick() {
 #[test]
 fn only_the_shells_a_window_is_reading_are_watched() {
     let read = |windows: &HashMap<String, HashSet<TermId>>| {
-        readers_by_term(windows).into_keys().collect::<HashSet<TermId>>()
+        readers_by_term(windows)
+            .into_keys()
+            .collect::<HashSet<TermId>>()
     };
     let mut windows: HashMap<String, HashSet<TermId>> = HashMap::new();
     assert!(
@@ -2147,7 +2149,10 @@ fn a_chase_ends_on_the_answer_to_its_write_not_on_other_output() {
     // key — is chased for one chase's span and no longer: it must not keep
     // every later wake chasing too.
     let mut round = ChaseRound::default();
-    round.saw(pumped(0, false, Some(now)), now + CHASE_INTERVAL * CHASE_ROUNDS);
+    round.saw(
+        pumped(0, false, Some(now)),
+        now + CHASE_INTERVAL * CHASE_ROUNDS,
+    );
     assert_eq!(
         round.chase_left(CHASE_ROUNDS, true),
         0,
@@ -5518,7 +5523,8 @@ fn browser_type_refuses_a_password_field_and_value_stdin_uses_the_setter_only() 
         TYPE_VALUE_FLAG, TYPE_VALUE_STDIN_FLAG, arity_ok, shim_script, shim_script_powershell,
     };
     use zerocode_core::computer_use_protocol::validate::SecretEntryVerdict;
-    let words = |list: &[&str]| -> Vec<String> { list.iter().map(|word| (*word).to_string()).collect() };
+    let words =
+        |list: &[&str]| -> Vec<String> { list.iter().map(|word| (*word).to_string()).collect() };
     let refused = typed_report(
         serde_json::json!({ "method": "held", "secureField": true }),
         TypeRoad::Keys,
@@ -5529,7 +5535,10 @@ fn browser_type_refuses_a_password_field_and_value_stdin_uses_the_setter_only() 
         page_failure(&serde_json::json!({ "code": SecretEntryVerdict::PersonsEntry.as_str() })),
         "the refusal is the failure table's persons_entry sentence"
     );
-    assert!(refused.contains(TYPE_VALUE_STDIN_FLAG), "the sentence names the way in");
+    assert!(
+        refused.contains(TYPE_VALUE_STDIN_FLAG),
+        "the sentence names the way in"
+    );
     let typed = typed_report(
         serde_json::json!({ "method": "editing-command", "secureField": false }),
         TypeRoad::Keys,
@@ -6612,7 +6621,10 @@ fn the_binary_says_which_ui_it_carries() {
     // commit. This is the same refusal, at the shell's own test gate.
     let markup = std::fs::read_to_string(root.join("ui/index.html")).expect("the window's page");
     let mut loaded: Vec<String> = Vec::new();
-    for tag in markup.split('<').filter(|tag| tag.starts_with("script") || tag.starts_with("link")) {
+    for tag in markup
+        .split('<')
+        .filter(|tag| tag.starts_with("script") || tag.starts_with("link"))
+    {
         let Some(at) = tag.find("src=\"").or_else(|| tag.find("href=\"")) else {
             continue;
         };
@@ -9357,7 +9369,8 @@ fn the_board_popout_is_one_window_of_one_document_tied_to_the_main_one() {
         peeking.contains(
             r#"if (isPopout) void invoke("ack_board_agent", { pane: card.pane }).catch(() => {});"#
         ) && peeking.contains("const answer = floor ?? await awaitTermPull();")
-            && peeking.contains(r#"el("peek-closed").hidden = !(answer?.missing ?? []).includes(term);"#),
+            && peeking
+                .contains(r#"el("peek-closed").hidden = !(answer?.missing ?? []).includes(term);"#),
         "the pop-out's preview starts blind, or forgets to say when there \
          is no shell behind the card:\n{peeking}"
     );
@@ -9821,7 +9834,10 @@ fn a_row_edit_moves_the_signal_the_shell_waits_for() {
     let caps = edited.capabilities();
     assert_eq!(ready_signal_of(&caps), ReadySignal::Prompt('\u{203a}'));
     assert_eq!(caps.steer.clear, ComposerClear::Keys);
-    assert_eq!(caps.startup.quiet_ms, None, "the edit touched only what it named");
+    assert_eq!(
+        caps.startup.quiet_ms, None,
+        "the edit touched only what it named"
+    );
 }
 
 /// t-4530: a Claude Code briefing goes in only once its composer stands —
@@ -13161,7 +13177,11 @@ fn second_brain_explore_roundtrip_in_settings() {
 
     // An empty table is not written at all — the document stays the size it was.
     doc.second_brain_explore.remove(vault);
-    assert!(!serde_json::to_string(&doc).unwrap().contains("second_brain_explore"));
+    assert!(
+        !serde_json::to_string(&doc)
+            .unwrap()
+            .contains("second_brain_explore")
+    );
 }
 
 /// Which folder the knowledge graph reads, and which it refuses.
@@ -16993,7 +17013,10 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
             "function dressToolTurn(row, turn, run, spoken) {",
             vec!["worker.moreLines"],
         ),
-        ("function thoughtTurnNode(run, turn) {", vec!["worker.thought"]),
+        (
+            "function thoughtTurnNode(run, turn) {",
+            vec!["worker.thought"],
+        ),
         ("function agentVoice(id) {", vec!["worker.busy"]),
         (
             "function helperTailNode(run, turn) {",
@@ -17061,6 +17084,7 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "gutter",
         "composer-max-rows",
         "preview-mark",
+        "tool-gap",
     ] {
         let declared = format!("\n  --chat-{name}:");
         assert_eq!(
@@ -18498,7 +18522,10 @@ fn a_transcript_log_says_whether_the_file_goes_on() {
     let lines = 3_000;
     std::fs::write(&path, line.repeat(lines)).expect("written");
     let size = std::fs::metadata(&path).expect("size").len();
-    assert!(size > crate::shell_runtime::SUBAGENT_LOG_CHUNK, "the fixture spans chunks");
+    assert!(
+        size > crate::shell_runtime::SUBAGENT_LOG_CHUNK,
+        "the fixture spans chunks"
+    );
 
     let first = crate::cmd::terminal::transcript_log_at(&path, Some(0)).expect("read");
     assert!(first.more, "the first chunk of a long file says it goes on");
@@ -18509,7 +18536,10 @@ fn a_transcript_log_says_whether_the_file_goes_on() {
     // above it declared folded — a view opened hours into a session shows the
     // end at once instead of streaming the whole past in.
     let tail = crate::cmd::terminal::transcript_log_at(&path, None).expect("read");
-    assert!(tail.folded && !tail.more, "the tail read folds what stands above it and ends at the end");
+    assert!(
+        tail.folded && !tail.more,
+        "the tail read folds what stands above it and ends at the end"
+    );
     assert_eq!(tail.next, size);
     assert!(
         !tail.turns.is_empty() && tail.turns.len() < lines,
@@ -18539,11 +18569,17 @@ fn a_transcript_log_says_whether_the_file_goes_on() {
         assert!(reads < 64, "a 3000-line file is a handful of chunks");
     }
     assert_eq!(after, size, "the last chunk ends at the file's end");
-    assert_eq!(turns, lines, "the chunks, followed to the end, hold every line");
+    assert_eq!(
+        turns, lines,
+        "the chunks, followed to the end, hold every line"
+    );
 
     std::fs::write(&path, line.repeat(3)).expect("rewritten short");
     let short = crate::cmd::terminal::transcript_log_at(&path, Some(0)).expect("read");
-    assert!(!short.more && short.turns.len() == 3, "a short file is read whole");
+    assert!(
+        !short.more && short.turns.len() == 3,
+        "a short file is read whole"
+    );
     let short_tail = crate::cmd::terminal::transcript_log_at(&path, None).expect("read");
     assert!(
         !short_tail.folded && short_tail.turns.len() == 3,
@@ -18566,7 +18602,10 @@ fn a_hand_over_is_typed_as_a_line_and_verified_before_the_wire_stands() {
         "while state.terminals().contains_key(&term) {",
         "started.elapsed() >= HAND_OVER_EXIT_WAIT",
     ] {
-        assert!(hand.contains(needed), "the hand-over lost `{needed}`:\n{hand}");
+        assert!(
+            hand.contains(needed),
+            "the hand-over lost `{needed}`:\n{hand}"
+        );
     }
     assert!(
         !hand.contains("human_write") && !hand.contains("\\r\")"),
@@ -18579,7 +18618,10 @@ fn a_hand_over_is_typed_as_a_line_and_verified_before_the_wire_stands() {
         "if let Err(reason) = outcome {",
         "wires.stop(session.id)",
     ] {
-        assert!(start.contains(needed), "wire_start lost `{needed}`:\n{start}");
+        assert!(
+            start.contains(needed),
+            "wire_start lost `{needed}`:\n{start}"
+        );
     }
     // The answer card walks the same road: one walker, one door.
     let answer = block_after(backend, "fn answer_ask(");
@@ -18627,7 +18669,8 @@ mod dock_launched_usage_probes {
 
     /// The test that runs a scan inside the stand-in window, by the full name
     /// the harness takes with `--exact`.
-    const STAND_IN_TEST: &str = "tests::dock_launched_usage_probes::a_scan_inside_the_stand_in_window";
+    const STAND_IN_TEST: &str =
+        "tests::dock_launched_usage_probes::a_scan_inside_the_stand_in_window";
 
     /// Set only in the stand-in window's environment: the config root its scan
     /// reads, and which provider it scans. Absent, that test does nothing.

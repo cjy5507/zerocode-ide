@@ -13567,7 +13567,7 @@ details.worker-command {
 .helper-turn.is-tool {
   display: grid;
   grid-template-columns: var(--chat-gutter) minmax(0, 1fr);
-  row-gap: 2px;
+  row-gap: var(--chat-tool-gap);
   align-items: start;
   margin: 1px 0;
 }
@@ -13867,7 +13867,11 @@ details.worker-command {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: var(--text-2xs, 11px);
+  /* The token, without the copy of its value behind it: `ui/index.html` is the
+   * only document that loads this stylesheet and it loads `tokens.css` first,
+   * so the fallback could never fire — it was a second 11px that nothing would
+   * have updated when `--text-2xs` moved. */
+  font-size: var(--text-2xs);
   line-height: 1.3;
   color: var(--chat-work-ink);
   opacity: 0.85;

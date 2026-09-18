@@ -1986,6 +1986,13 @@
   --chat-composer-max-rows: 8;
   --chat-preview-mark: 36px;
   --chat-fold-max: 360px;
+
+  /* A tool turn is two rows — what was called, and what it answered — and
+   * they belong to each other, so the gap between them is tighter than the
+   * gap between turns. It was written as a bare `2px` in the rule, which is
+   * the one thing `the_helper_page_speaks_from_its_catalogs_and_paints_from
+   * _its_tokens` exists to catch, and it had been red on `main` for it. */
+  --chat-tool-gap: 2px;
 }
 
 /* The light treatment, which this product draws as GLASS.
