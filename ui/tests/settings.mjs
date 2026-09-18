@@ -4136,23 +4136,22 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
     "a browser option is not named by what its mode does",
   );
 
-  // Every seat Jev sits in has a row on this one card, and a seat with no
-  // apply stage offers no way to apply: its switch lists three words, not four.
-  for (const [seat, offers] of [
-    ["routing", 4],
-    ["recall", 3],
-    ["browser", 4],
-    ["stall", 3],
-    ["placement", 3],
-  ]) {
+  // Every seat Jev sits in has a row on this one card, offering its own row's
+  // modes and no others — a seat with no apply stage offers no way to apply.
+  //
+  // How many each offers is read off the table rather than typed a second
+  // time. It WAS typed a second time, and the copy went stale the day `recall`
+  // gained an apply stage: the fixture said four words, the list beside it
+  // still said three, and this suite was red on main for it.
+  for (const seat of JEV_SEATS) {
     assertEqual(
-      await pageA.locator(`#typesafe-${seat}-select option`).count(),
-      offers,
-      `the ${seat} switch does not offer its row's modes`,
+      await pageA.locator(`#typesafe-${seat.id}-select option`).count(),
+      seat.modes.split(" ").length,
+      `the ${seat.id} switch does not offer its row's modes`,
     );
     assert(
-      await pageA.locator(`#typesafe-${seat}-select`).isVisible(),
-      `the ${seat} switch is not on the card`,
+      await pageA.locator(`#typesafe-${seat.id}-select`).isVisible(),
+      `the ${seat.id} switch is not on the card`,
     );
   }
   const recallAt = backend.calls.length;
