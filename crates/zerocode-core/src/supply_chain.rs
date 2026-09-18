@@ -894,6 +894,23 @@ pub enum Severity {
     Critical,
 }
 
+impl Severity {
+    /// The rating's one word — the same word the wire carries, so a document
+    /// and a payload can never spell one rating two ways
+    /// (`a_severitys_word_is_its_wire_word` holds them together).
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::None => "none",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+}
+
 /// CVSS v3.1 §5, Table 14: each rating's lowest score, most severe first. A
 /// score below the last row is 0.0, rated "None".
 const CVSS_RATINGS: [(f64, Severity); 4] = [
@@ -1240,6 +1257,11 @@ pub enum SupplyEdgeKind {
     /// Vulnerability → component.
     Affects,
 }
+
+/// Reading a graph as work: what to raise, and what raising it closes.
+pub mod report;
+
+pub use report::{ReportAdvisory, ReportRaise, SupplyReport, markdown, report};
 
 /// One relation, as indices: `from` and `to` index
 /// [`SupplyGraph::components`], except an `affects` edge's `from`, which

@@ -523,8 +523,19 @@ function buildKnowledgeSupplyOverview() {
   recheck.className = "btn knowledge-supply-recheck";
   recheck.dataset.i18n = "knowledge.supplyRecheck";
   recheck.textContent = t("knowledge.supplyRecheck", "다시 확인");
+  /* 그림은 「무엇이 잘못됐나」를 삼각형 하나씩 답한다. 보고서는 나머지 반쪽 —
+   * 권고마다 멤버가 올릴 직접 의존, 그 의존마다 올리면 닫히는 것들 — 을 파일
+   * 하나로 내놓는다. 판정은 코어의 순수 함수라 문서와 그림이 어긋날 수 없다. */
+  const report = document.createElement("button");
+  report.type = "button";
+  report.className = "btn knowledge-supply-report";
+  report.dataset.i18n = "knowledge.supplyReport";
+  report.textContent = t("knowledge.supplyReport", "보고서");
+  const wrote = document.createElement("p");
+  wrote.className = "settings-hint knowledge-supply-wrote";
+  wrote.hidden = true;
   head.after(lookup, counts);
-  box.append(lockfiles, recheck);
+  box.append(lockfiles, recheck, report, wrote);
   return box;
 }
 
@@ -540,6 +551,8 @@ function paintKnowledgeSupplyOverview(layout, box) {
   writeAttribute(lookup, "data-lookup-reason", line.reason);
   say(lookup, line.words);
   section.querySelector(".knowledge-supply-recheck").disabled = knowledgeSupplyAsking;
+  const reportButton = section.querySelector(".knowledge-supply-report");
+  if (reportButton) reportButton.disabled = knowledgeSupplyAsking || knowledgeSupplyAnswer === null;
   const answer = knowledgeSupplyAnswer;
   const counts = section.querySelector(".knowledge-supply-counts");
   counts.hidden = answer === null;
@@ -820,7 +833,38 @@ function knowledgeSupplyInspectorClick(view, event) {
     void refreshKnowledgeSupply({ force: true, refresh: true });
     return true;
   }
+  if (event.target.closest(".knowledge-supply-report")) {
+    void writeKnowledgeSupplyReport();
+    return true;
+  }
   return false;
+}
+
+/* 보고서 한 장을 쓴다. 명령이 워크스페이스의 output/ 에 파일을 남기고 어디에
+ * 남겼는지 답하므로, 창은 그 줄만 말한다. 실패는 같은 자리에 그대로 적는다 —
+ * 보고서 하나 때문에 그림이 사라지지는 않는다. */
+async function writeKnowledgeSupplyReport() {
+  const view = document.querySelector(".knowledge-view");
+  const wrote = view === null ? null : view.querySelector(".knowledge-supply-wrote");
+  const button = view === null ? null : view.querySelector(".knowledge-supply-report");
+  if (button !== null) button.disabled = true;
+  try {
+    const written = await invoke("supply_chain_report", {});
+    if (wrote !== null) {
+      wrote.hidden = false;
+      say(wrote, t("knowledge.supplyReportWrote", "보고서를 {path} 에 썼습니다 — 권고 {advisories}건, 올릴 곳 {raise}곳")
+        .replace("{path}", written.path)
+        .replace("{advisories}", String(written.advisories))
+        .replace("{raise}", String(written.raise)));
+    }
+  } catch (error) {
+    if (wrote !== null) {
+      wrote.hidden = false;
+      say(wrote, t("knowledge.supplyReportFailed", "보고서를 쓰지 못했습니다") + ` — ${error}`);
+    }
+  } finally {
+    if (button !== null) button.disabled = false;
+  }
 }
 
 /* 공급망의 단(P4) — 멤버와 취약점은 대표 지식의 크기와 이름표 우선순위로 선다. 잎의 크기(3 px)로는

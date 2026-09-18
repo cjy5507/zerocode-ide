@@ -235,7 +235,7 @@ pub(crate) use second_brain::{
     set_second_brain_weekly_review,
 };
 
-pub(crate) use supply_chain::supply_chain_graph;
+pub(crate) use supply_chain::{supply_chain_graph, supply_chain_report};
 
 pub(crate) use artifacts::{
     artifact_copy_path, artifact_counts, artifact_delete, artifact_import_transcripts,
