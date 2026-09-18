@@ -42,13 +42,15 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use api::{SystemOneQuestion, SystemOneQuestionKind, SystemOneResponse, SystemOneScoreAnswer};
+use api::{
+    SystemOneQuestion, SystemOneQuestionKind, SystemOneResponse, SystemOneScoreAnswer,
+    SYSTEMONE_ANSWER_STEP,
+};
 use core_types::text::truncate_on_char_boundary;
 use core_types::MemoryHit;
 use serde_json::{json, Value};
 
 use super::recall::{wikilink_target, RECALL_CONTRADICTS_MARK, RECALL_SUPERSEDED_PREFIX};
-use crate::model_router::PROBABILITY_SUM_TOLERANCE;
 
 /// Bumped whenever a level description, the instructions or the state's shape
 /// changes. A comparison row carries it, so a reading taken under other words
@@ -74,9 +76,15 @@ pub const RERANK_LEVELS: [&str; 4] = [
 /// to a float, and this scale is never worth a lossy conversion. The assert is
 /// what keeps the two in step.
 pub const RERANK_TOP_LEVEL: f64 = 3.0;
+
+/// How many levels there are, and the level numbers added up. Spelled beside
+/// [`RERANK_TOP_LEVEL`] for its reason, and held to the table by its assert.
+const RERANK_LEVEL_COUNT: f64 = 4.0;
+const RERANK_LEVEL_NUMBER_SUM: f64 = 6.0;
 const _: () = assert!(
     RERANK_LEVELS.len() == 4,
-    "RERANK_TOP_LEVEL is the last level's number"
+    "RERANK_TOP_LEVEL is the last level's number, RERANK_LEVEL_COUNT is how many \
+     there are, and RERANK_LEVEL_NUMBER_SUM is 0 + 1 + 2 + 3"
 );
 
 /// Notes one judgment may be asked about. Recall renders at most
@@ -92,10 +100,44 @@ pub const RERANK_SUMMARY_MAX_BYTES: usize = zerocode_core::jev::RECALL_SUMMARY_B
 /// Characters of the request the state carries, on a character boundary.
 pub const RERANK_REQUEST_CHAR_CAP: usize = zerocode_core::jev::RECALL_REQUEST_CHAR_CAP;
 
+/// The most the wire's rounding can have moved any one number an answer
+/// carries: half of [`SYSTEMONE_ANSWER_STEP`].
+const WIRE_ROUNDING: f64 = SYSTEMONE_ANSWER_STEP / 2.0;
+
+/// How far the level probabilities may sum from one before the answer is
+/// refused.
+///
+/// The contract says they sum to one, and they do — before the wire rounds
+/// them. Four of them arrive rounded, half a step each at the most, so their
+/// sum can stand four half-steps from one: 4 × 0.005 = 0.02. The bound sits
+/// one more half-step out, and not on 0.02 itself, for the reason
+/// [`SCORE_MEAN_TOLERANCE`] gives: a distance the grid lands on exactly is a
+/// distance a double's last bit decides.
+pub const SPREAD_SUM_TOLERANCE: f64 = RERANK_LEVEL_COUNT * WIRE_ROUNDING + WIRE_ROUNDING;
+
 /// How far a score may sit from the probability-weighted mean of its levels
-/// before the answer is refused. The contract says the two are the same number;
-/// this is the room two decimal places leave.
-pub const SCORE_MEAN_TOLERANCE: f64 = 0.02;
+/// before the answer is refused.
+///
+/// The contract says the two are the same number, and they are — before the
+/// wire rounds them. The rounding reaches this comparison twice:
+///
+/// * through the probabilities, because the mean is rebuilt from four numbers
+///   each up to half a step out, and a level's own number multiplies its
+///   error: 0.005 × (0 + 1 + 2 + 3) = 0.03;
+/// * through the score, which was rounded too: 0.005.
+///
+/// The first term is the widest gap the rounding alone can open, and it lands
+/// ON the grid — both sides of the comparison are whole numbers of steps, so
+/// the distance between them is one too. The second term is what carries the
+/// bound half a step past the last distance it admits, where no double's last
+/// bit decides a gap the contract allows.
+///
+/// This was guessed at 0.02 before, which is a distance the grid lands on
+/// exactly. Of 240 answers `jev-1.13.0` gave on 2026-09-18, 38 sat exactly
+/// there, and the comparison admitted 17 of them and refused 21; two more sat
+/// at 0.03. That refused 23 answers in 240, and because one batch asks about
+/// eight notes and one refusal discards the batch whole, 17 batches in 30.
+pub const SCORE_MEAN_TOLERANCE: f64 = RERANK_LEVEL_NUMBER_SUM * WIRE_ROUNDING + WIRE_ROUNDING;
 
 /// Marker the state's truncations leave, so a clipped summary is visibly one —
 /// the table's own, so the door's byte cap re-cutting a summary this already
@@ -222,7 +264,7 @@ pub enum RerankRejection {
     LevelKeys(String),
     /// A probability outside `[0, 1]`, or not a number at all.
     ProbabilityRange(String),
-    /// The probabilities do not sum to one within [`PROBABILITY_SUM_TOLERANCE`].
+    /// The probabilities do not sum to one within [`SPREAD_SUM_TOLERANCE`].
     ProbabilitySum(String),
     /// `score` is missing, not finite, or outside the scale.
     ScoreRange(String),
@@ -345,7 +387,7 @@ fn read_answer(
         total += probability;
         number += 1.0;
     }
-    if (total - 1.0).abs() > PROBABILITY_SUM_TOLERANCE {
+    if (total - 1.0).abs() > SPREAD_SUM_TOLERANCE {
         return Err(RerankRejection::ProbabilitySum(id.clone()));
     }
     let top = RERANK_TOP_LEVEL;
@@ -353,8 +395,9 @@ fn read_answer(
         return Err(RerankRejection::ScoreRange(id.clone()));
     }
     // The contract says the score IS the weighted mean. Checking it is how a
-    // reply built for some other scale, or rounded from one, is caught before
-    // it orders anything.
+    // reply built for some other scale is caught before it orders anything —
+    // within what the wire's rounding can account for, which is the whole of
+    // SCORE_MEAN_TOLERANCE and nothing more.
     if (answer.score - weighted).abs() > SCORE_MEAN_TOLERANCE {
         return Err(RerankRejection::ScoreMismatch(id.clone()));
     }
@@ -644,28 +687,36 @@ mod tests {
     /// keeps it under.
     type BrokenCase = (fn(&mut Value), RerankRejection, &'static str);
 
-    /// A score answer whose probability sits entirely on one level, with the
-    /// legend the contract echoes back.
-    fn answer(level: usize) -> Value {
-        let probabilities: serde_json::Map<String, Value> = (0..RERANK_LEVELS.len())
-            .map(|index| {
-                (
-                    index.to_string(),
-                    json!(if index == level { 1.0 } else { 0.0 }),
-                )
-            })
-            .collect();
+    /// One score answer as the wire spells one: a probability for every level,
+    /// the score, the confidence, and the legend the contract echoes back.
+    fn spread(probabilities: [f64; RERANK_LEVELS.len()], score: f64, confidence: f64) -> Value {
         let legend: serde_json::Map<String, Value> = (0..RERANK_LEVELS.len())
             .map(|index| (index.to_string(), json!(RERANK_LEVELS[index])))
             .collect();
+        let probabilities: serde_json::Map<String, Value> = probabilities
+            .iter()
+            .enumerate()
+            .map(|(index, probability)| (index.to_string(), json!(probability)))
+            .collect();
         json!({
             "type": "score",
-            "score": LEVEL_NUMBERS[level],
-            "confidence": 1.0,
+            "score": score,
+            "confidence": confidence,
             "legend": legend,
             "probabilities": probabilities,
         })
     }
+
+    /// A score answer whose probability sits entirely on one level.
+    fn answer(level: usize) -> Value {
+        let mut probabilities = [0.0; RERANK_LEVELS.len()];
+        probabilities[level] = 1.0;
+        spread(probabilities, LEVEL_NUMBERS[level], 1.0)
+    }
+
+    /// One answer the wire actually carried: its spread, its score, and what
+    /// the rounding left between the two.
+    type RoundedCase = ([f64; RERANK_LEVELS.len()], f64, &'static str);
 
     fn reply(levels: &[usize]) -> SystemOneResponse {
         SystemOneResponse {
@@ -811,6 +862,85 @@ mod tests {
             None,
             "a place is read back from the one spelling this module writes"
         );
+    }
+
+    /// Jev answers on a grid: every probability and every score it gives is a
+    /// whole number of hundredths, rounded from a full-precision one. These
+    /// four are answers it actually gave (2026-09-18, jev-1.13.0), copied
+    /// digit for digit. In each, that rounding is the only thing standing
+    /// between the score and the mean of the spread beside it, and the checks
+    /// have to admit them: at eight notes a batch, refusing one answer in ten
+    /// throws away half the judgments asked for.
+    #[test]
+    fn an_answer_only_the_wires_rounding_moved_is_not_a_broken_contract() {
+        let hits = [hit("wiki/a", "one")];
+        let candidates = rerank_candidates(&hits);
+        let rounded: [RoundedCase; 4] = [
+            ([0.88, 0.11, 0.01, 0.0], 0.16, "the spread's mean reads 0.13 — three hundredths"),
+            ([0.96, 0.03, 0.01, 0.0], 0.08, "the spread's mean reads 0.05 — three hundredths"),
+            ([0.67, 0.23, 0.07, 0.03], 0.48, "the mean reads 0.46 — two hundredths"),
+            ([0.09, 0.54, 0.28, 0.08], 1.35, "the spread sums to 0.99"),
+        ];
+        for (probabilities, score, rounding) in rounded {
+            let mut batch = reply(&[0]);
+            batch.answers.insert("n0".to_string(), spread(probabilities, score, 0.5));
+            let readings = validate_rerank(&candidates, &batch).unwrap_or_else(|refused| {
+                panic!("{} refused an answer where {rounding}", refused.rule())
+            });
+            assert_eq!(readings.len(), 1);
+            assert!((0.0..=1.0).contains(&readings[0].normalised));
+        }
+    }
+
+    /// Each bound admits every distance the wire's rounding can open and
+    /// nothing the grid can put past it. Between those two is the only place a
+    /// bound can sit: on the grid, a double's last bit decides it instead of
+    /// the contract.
+    #[test]
+    fn each_bound_sits_between_the_roundings_reach_and_the_next_step_of_the_grid() {
+        for (bound, widest, what) in [
+            (
+                SCORE_MEAN_TOLERANCE,
+                RERANK_LEVEL_NUMBER_SUM * WIRE_ROUNDING,
+                "a score against the mean of its spread",
+            ),
+            (
+                SPREAD_SUM_TOLERANCE,
+                RERANK_LEVEL_COUNT * WIRE_ROUNDING,
+                "a spread against one",
+            ),
+        ] {
+            assert!(bound > widest, "{what}: {bound} refuses a gap the rounding opens");
+            assert!(
+                bound < widest + SYSTEMONE_ANSWER_STEP,
+                "{what}: {bound} admits a gap the rounding cannot reach"
+            );
+        }
+    }
+
+    /// What the rounding cannot reach is still refused. The check is what
+    /// keeps a reply built for some other scale, or a spread that is not a
+    /// distribution, from ordering a single note.
+    #[test]
+    fn a_reply_no_rounding_explains_is_still_refused() {
+        let hits = [hit("wiki/a", "one")];
+        let candidates = rerank_candidates(&hits);
+        let outside: [RoundedCase; 3] = [
+            // The first spread above, one hundredth further out than four
+            // roundings and the score's own can open between them.
+            ([0.88, 0.11, 0.01, 0.0], 0.17, "score_mismatch"),
+            // A score read off some other scale entirely.
+            ([0.88, 0.11, 0.01, 0.0], 2.0, "score_mismatch"),
+            // Not a distribution: a twentieth of the mass never arrived.
+            ([0.80, 0.10, 0.04, 0.01], 0.25, "probability_sum"),
+        ];
+        for (probabilities, score, rule) in outside {
+            let mut batch = reply(&[0]);
+            batch.answers.insert("n0".to_string(), spread(probabilities, score, 0.5));
+            let refused = validate_rerank(&candidates, &batch)
+                .expect_err("an answer outside what the rounding explains");
+            assert_eq!(refused.rule(), rule, "{probabilities:?} answered {score}");
+        }
     }
 
     #[test]
