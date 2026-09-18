@@ -514,6 +514,12 @@ fn every_bench_command_is_one_the_cli_accepts() {
             "--timeout-ms",
             &quit_ms,
         ],
+        // Both places a walk may name, because the usage offers both and the
+        // gate took only one: `--pane` was refused, so the seat that judges a
+        // browser walk was unreachable and its ledger stayed empty
+        // (2026-09-19).
+        vec!["walk", "--goal", "pay", "--app", "Safari"],
+        vec!["walk", "--goal", "pay", "--pane", "browser-13"],
         vec!["read", "--app", "Calculator"],
         vec!["read", "--app", "Calculator", "--ocr"],
         vec!["quit", "--app", "TextEdit"],

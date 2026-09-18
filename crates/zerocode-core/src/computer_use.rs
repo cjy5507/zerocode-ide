@@ -3320,12 +3320,20 @@ fn validate(
     let by_mark = method == ComputerMethod::Click && has("mark");
     // A control named by what it reads is found on a fresh tree at the press.
     let by_query = method == ComputerMethod::Click && QUERY_CLICK_KEYS.iter().any(|key| has(key));
+    // A method that offers `--pane` names its place that way instead of by an
+    // app, and the flag table above is what says which ones do. Read from a
+    // second list here, the walk's browser form was in the usage and refused
+    // by the gate, so the seat that judges a browser walk could not be reached
+    // at all — its ledger had no rows because nothing could call it
+    // (2026-09-19).
+    let by_pane = allowed(method).contains(&"pane") && has("pane");
     if !matches!(
         method,
         ComputerMethod::Capabilities | ComputerMethod::ListApps | ComputerMethod::Permissions
     ) && !method.is_desktop()
         && !has("app")
         && !by_mark
+        && !by_pane
     {
         return Err("missing required --app".into());
     }
@@ -7108,5 +7116,40 @@ mod tests {
         for shown in ["--repeat [--until <HH:MM|N>]", "--arena <evidence dir>"] {
             assert!(usage.contains(shown), "{shown} is not in the manual");
         }
+    }
+
+    #[test]
+    fn a_walk_names_its_place_by_a_pane_as_readily_as_by_an_app() {
+        // The usage offered `walk --goal … --pane <browser pane>` and the gate
+        // refused it, so the seat that judges a browser walk had never been
+        // asked anything — its ledger was empty because nothing could reach it
+        // (2026-09-19).
+        let argv = |words: &[&str]| {
+            words
+                .iter()
+                .map(|word| (*word).to_string())
+                .collect::<Vec<_>>()
+        };
+        let walked = parse_command(&argv(&["walk", "--goal", "pay", "--pane", "browser-13"]))
+            .expect("a walk named by its pane");
+        assert_eq!(walked.method, ComputerMethod::Walk);
+        assert_eq!(
+            walked.params.get("pane").and_then(Value::as_str),
+            Some("browser-13")
+        );
+        parse_command(&argv(&["walk", "--goal", "pay", "--app", "Safari"]))
+            .expect("a walk named by its app");
+        assert_eq!(
+            parse_command(&argv(&["walk", "--goal", "pay"])).unwrap_err(),
+            "missing required --app",
+            "a walk that names no place at all still has to name one"
+        );
+        // And a method the flag table gives no `pane` is not let through by
+        // one: the gate reads that table rather than a list of its own.
+        assert!(!allowed(ComputerMethod::Screenshot).contains(&"pane"));
+        assert_eq!(
+            parse_command(&argv(&["screenshot", "--pane", "browser-13"])).unwrap_err(),
+            "unknown flag --pane",
+        );
     }
 }
