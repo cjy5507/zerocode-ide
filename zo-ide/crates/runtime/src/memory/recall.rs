@@ -3781,28 +3781,33 @@ mod tests {
             cases.len()
         );
 
-        let retriever = LexicalMemoryRetriever::from_index_markdown("# Zo memory\n")
-            .with_corpus(scan);
-        let mut ranks: Vec<Option<usize>> = Vec::with_capacity(cases.len());
-        for (query, labels) in &cases {
-            let hits = retriever.recall(query, DEEP);
-            ranks.push(
-                hits.iter()
-                    .position(|hit| labels.contains(&hit.entry.slug)),
-            );
-        }
+        let retriever =
+            LexicalMemoryRetriever::from_index_markdown("# Zo memory\n").with_corpus(scan);
+        let total = cases.len();
+        // One `recall(query, k)` per k. Slicing a single deep call would
+        // measure a list nobody is served: the retriever truncates to `k`
+        // FIRST and only then reads superseders and pairs contradictions
+        // among what survived, so the first eight of a k = 60 call are not
+        // the eight a k = 8 call returns.
+        let hit_at: Vec<(usize, usize)> = [1, 5, 8, 12, 20, DEEP]
+            .into_iter()
+            .map(|within| {
+                let hit = cases
+                    .iter()
+                    .filter(|(query, labels)| {
+                        retriever
+                            .recall(query, within)
+                            .iter()
+                            .any(|hit| labels.contains(&hit.entry.slug))
+                    })
+                    .count();
+                (within, hit)
+            })
+            .collect();
 
-        let found = |within: usize| {
-            ranks
-                .iter()
-                .filter(|rank| rank.is_some_and(|rank| rank < within))
-                .count()
-        };
-        let total = ranks.len();
         println!("\n  labelled lines: {total}   vault pages: {}", known.len());
-        println!("  (a line's best-ranked labelled page, in the retriever's own order)\n");
-        for within in [1, 5, 8, 12, 20, DEEP] {
-            let hit = found(within);
+        println!("  (Hit@k: recall(query, k) returned ANY page that line linked)\n");
+        for (within, hit) in &hit_at {
             let note = match within {
                 5 => "  <- what a turn renders",
                 8 => "  <- what the judgment is shown",
@@ -3810,24 +3815,25 @@ mod tests {
                 _ => "",
             };
             println!(
-                "  recall@{within:<3} {hit:4}/{total}  = {:5.1}%{note}",
-                share(hit, total)
+                "  Hit@{within:<3} {hit:4}/{total}  = {:5.1}%{note}",
+                share(*hit, total)
             );
         }
-        let missed = ranks.iter().filter(|rank| rank.is_none()).count();
+        let deepest = hit_at.last().map_or(0, |(_, hit)| *hit);
         println!(
-            "\n  not in the top {DEEP} at all: {missed}/{total} = {:5.1}%",
-            share(missed, total)
+            "\n  no linked page in the top {DEEP}: {}/{total} = {:5.1}%",
+            total - deepest,
+            share(total - deepest, total)
         );
-        let mut deep: Vec<usize> = ranks
-            .iter()
-            .filter_map(|rank| rank.filter(|rank| *rank >= 8))
-            .collect();
-        deep.sort_unstable();
+        /* What a judgment that may only permute could buy: at best, every
+         * line whose page is inside the eight also has it inside the five. */
+        let at_five = hit_at.iter().find(|(k, _)| *k == 5).map_or(0, |(_, h)| *h);
+        let at_eight = hit_at.iter().find(|(k, _)| *k == 8).map_or(0, |(_, h)| *h);
         println!(
-            "  ranked past the eight shown: {} lines, ranks {:?}",
-            deep.len(),
-            &deep[..deep.len().min(20)]
+            "  a perfect REORDER of the eight could move Hit@5 by at most {:.1} points \
+             ({at_five} -> {at_eight}); it can never drop a note, so a line with no \
+             linked page among the eight keeps its five useless ones",
+            share(at_eight, total) - share(at_five, total)
         );
     }
 }
