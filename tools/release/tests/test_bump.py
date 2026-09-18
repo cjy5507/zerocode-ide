@@ -25,6 +25,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 RELEASE = REPO / "tools" / "release"
 BUMP = RELEASE / "bump.sh"
+# The fixture checkout's own `origin`: bump.sh reads the repository off it, so
+# a fixture without one asks `repos//git/ref/tags/...`, which answers 404 for
+# every tag there is and reads back as "the tag is free".
+FIXTURE_REPO = "zerocode-tests/bump-fixture"
 
 ROOT_CARGO = """[workspace]
 members = []
@@ -90,6 +94,8 @@ class Fixture:
         }
         self.env = git_env
         subprocess.run(["git", "init", "-q", "-b", "main", str(self.repo)], check=True, env=git_env)
+        subprocess.run(["git", "-C", str(self.repo), "remote", "add", "origin",
+                        f"git@github.com:{FIXTURE_REPO}.git"], check=True, env=git_env)
         self.write_versions(version, version, version)
         self.commit("chore: the first commit")
 
@@ -284,10 +290,22 @@ class ThreeFiles(BumpCase):
         self.assertIn("v0.1.1", r.stdout + r.stderr)
         self.assertEqual(self.fx.versions(), ("0.1.0", "0.1.0", "0.1.0"))
         asked = log.read_text()
-        self.assertIn("repos/cjy5507/zerocode/git/ref/tags/v0.1.1", asked, "the probe names the table's repo and the tag")
+        self.assertIn(f"repos/{FIXTURE_REPO}/git/ref/tags/v0.1.1", asked,
+                      "the probe names the checkout's own repo and the tag")
         r = self.fx.bump("minor")
         self.assertEqual(r.returncode, 0, "a tag the repo does not have goes through: " + r.stdout + r.stderr)
         self.assertEqual(self.fx.versions(), ("0.2.0", "0.2.0", "0.2.0"))
+
+    def test_a_checkout_that_names_no_repository_refuses(self):
+        # `repos//git/ref/tags/v0.1.1` is a 404 for every tag there is, so a
+        # probe against a nameless repository reads as "free" and lets a
+        # duplicate tag through. The bump says so instead of asking.
+        subprocess.run(["git", "-C", str(self.fx.repo), "remote", "remove", "origin"],
+                       check=True, env=self.fx.env)
+        r = self.fx.bump("patch")
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertIn("origin", r.stdout + r.stderr)
+        self.assertEqual(self.fx.versions(), ("0.1.0", "0.1.0", "0.1.0"))
 
     def test_a_probe_that_fails_for_another_reason_refuses(self):
         # A network error is not "the tag is free": the person retries.

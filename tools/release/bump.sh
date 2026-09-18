@@ -32,8 +32,20 @@ PREFIX_ORDER="feat fix perf refactor docs test style chore release merge other"
 SELF_DIR=$(cd "$(dirname "$0")" && pwd)
 REPO=$(cd "$SELF_DIR/../.." && pwd)
 
+# The repository the tags live on is lane.sh's table to name — asked for here
+# rather than spelled a second time, so the two hands of one release can never
+# disagree about where it goes. A written name asks the wrong repository about
+# its tags after a rename, and the refusal then reads as "v1.1.0 already
+# exists" about a tag on a repo this history never had (zerocode ->
+# zerocode-ide, 2026-09-18). `RELEASE_GITHUB_REPO` in the environment still
+# wins, for a release cut against somewhere else on purpose.
+release_github_repo() { # DIR -> owner/name
+  RELEASE_REPO=$1 bash "$SELF_DIR/lane.sh" --table |
+    sed -n "s/^RELEASE_GITHUB_REPO='\(.*\)'$/\1/p"
+}
+
 if [ "${1:-}" = "--table" ]; then
-  RELEASE_GITHUB_REPO=${RELEASE_GITHUB_REPO:-$(git -C "$REPO" remote get-url origin 2>/dev/null | sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##')}
+  RELEASE_GITHUB_REPO=${RELEASE_GITHUB_REPO:-$(release_github_repo "$REPO")}
   for k in ROOT_CARGO TAURI_CONF ZO_CARGO CHANGELOG CHANGELOG_TITLE TAG_GLOB MAX_PER_PREFIX PREFIX_ORDER RELEASE_GITHUB_REPO; do
     eval "printf \"%s='%s'\\n\" \"$k\" \"\$$k\""
   done
@@ -53,17 +65,7 @@ done
 [ -n "$part" ] || usage
 cd "$REPO" || exit 2
 
-# The repository the tags live on, read from this checkout's own `origin`
-# rather than written here. A rename leaves a written name asking the wrong
-# repository about its tags, and the refusal then reads as "v1.1.0 already
-# exists" about a tag on a repo this history never had (zerocode →
-# zerocode-ide, 2026-09-18). `RELEASE_GITHUB_REPO` in the environment still
-# wins, for a release cut against somewhere else on purpose.
-github_repo_of() {
-  git -C "$1" remote get-url origin 2>/dev/null |
-    sed -E 's#^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)##; s#\.git$##'
-}
-RELEASE_GITHUB_REPO=${RELEASE_GITHUB_REPO:-$(github_repo_of "$REPO")}
+RELEASE_GITHUB_REPO=${RELEASE_GITHUB_REPO:-$(release_github_repo "$REPO")}
 
 refuse() { echo "bump: refused — $1"; exit 3; }
 
@@ -102,6 +104,11 @@ tag="v$next"
 
 # ------------------------------------------------------------------ the tag --
 [ -z "$(git tag -l "$tag")" ] || refuse "tag $tag already exists here"
+# A checkout whose `origin` names no GitHub repository cannot be asked about
+# the tag: `repos//git/ref/tags/...` is a 404 for every tag there is, and that
+# reads back as "the tag is free" — which is how a duplicate gets cut.
+[ -n "$RELEASE_GITHUB_REPO" ] \
+  || refuse "origin names no GitHub repository in $REPO — set RELEASE_GITHUB_REPO to name the one $tag goes on"
 if command -v gh > /dev/null 2>&1; then
   probe=$(gh api "repos/$RELEASE_GITHUB_REPO/git/ref/tags/$tag" 2>&1); rc=$?
   if [ "$rc" = 0 ]; then refuse "tag $tag already exists on $RELEASE_GITHUB_REPO"

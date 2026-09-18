@@ -29,6 +29,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -49,7 +50,16 @@ PHASES = [
     "build-app", "swap-app", "build-zo", "swap-zo", "bundle-updater", "publish", "sweep",
 ]
 ZO_BUILD_TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu"]
-GITHUB_REPO = "cjy5507/zerocode"
+# The release repository is the checkout's own `origin`, never a name written
+# here: it was renamed once already (zerocode -> zerocode-ide, 2026-09-18) and
+# a written one then had four tests below asking the old repository about the
+# new one's releases. Read independently of lane.sh, which follows a local
+# origin up; this one only reads the checkout's.
+GITHUB_REPO = re.sub(
+    r"^(https://github\.com/|git@github\.com:|ssh://git@github\.com/)", "",
+    subprocess.run(["git", "-C", str(REPO), "remote", "get-url", "origin"],
+                   capture_output=True, text=True).stdout.strip(),
+).removesuffix(".git")
 VERSION = "0.1.0"  # the dry-run stub's version (RELEASE_STUB_VERSION)
 
 
@@ -305,6 +315,30 @@ class Syntax(LaneCase):
         self.assertEqual(table["UPDATER_ARCH"], "aarch64")
         self.assertEqual(table["ZO_BUILD_TARGETS"].split(), ZO_BUILD_TARGETS)
         self.assertIn("python3", table["TOOLS"].split(), "latest.json is rendered by python3")
+
+    def test_the_github_repo_is_read_through_a_clone_of_a_clone(self):
+        # Every gate runs in a clone OF the checkout, and a clone's `origin` is
+        # a path, not a name. Read from that path alone the lane published to
+        # `https://github.com//Users/dev/2026/zerocode/...` — four tests in this
+        # file said so on 2026-09-18 — so a local origin is followed up to the
+        # clone that names GitHub.
+        def git(*args, cwd):
+            r = subprocess.run(["git", *args], cwd=str(cwd), capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
+        upstream = self.lane.tmp / "upstream"
+        upstream.mkdir()
+        git("init", "-q", cwd=upstream)
+        git("remote", "add", "origin", f"git@github.com:{GITHUB_REPO}.git", cwd=upstream)
+        scratch = self.lane.tmp / "scratch"
+        git("clone", "-q", str(upstream), str(scratch), cwd=self.lane.tmp)
+        env = self.lane.env()
+        env["RELEASE_REPO"] = str(scratch)
+        out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        table = {k: v.strip("'") for k, v in
+                 (line.split("=", 1) for line in out.stdout.splitlines() if "=" in line)}
+        self.assertEqual(table["RELEASE_GITHUB_REPO"], GITHUB_REPO)
 
     def test_the_default_table_key_is_under_the_release_home(self):
         out = subprocess.run(["bash", str(LANE), "--table"], capture_output=True, text=True,
