@@ -3103,9 +3103,19 @@ svg.wt-agent-dot {
 }
 
 /* 두 클래스로 잡는다: `.settings-check > input`이 같은 무게(0-1-1)로 뒤에
-   있어서, 이 규칙이 한 무게 위에 서지 않으면 파일 순서가 이긴다. */
+   있어서, 이 규칙이 한 무게 위에 서지 않으면 파일 순서가 이긴다.
+   행 문법이 격자가 된 뒤로는 순서가 아니라 자리를 맞바꿔 적는다 — 공통
+   문법은 컨트롤을 오른쪽 칸에 놓고, 이 줄만 둘을 한 덩어리로 둔다. */
+.settings-check.wt-more {
+  grid-template-columns: auto minmax(0, 1fr);
+}
+
 .settings-check.wt-more > input {
-  order: 0;
+  grid-column: 1;
+}
+
+.settings-check.wt-more > :not(input) {
+  grid-column: 2;
 }
 
 .wt-advanced {
@@ -15506,6 +15516,15 @@ button.worker-composer-pill:hover {
   padding-inline: 32px;
 }
 
+/* And the rows inside it ask the COLUMN how wide it is, not the window. The
+ * rail takes 280px before this pane sees any, so a window-width question
+ * would be answered 280px late — and the same pane stands in a 1280px window
+ * and in a 2000px one. Named so the one query that reads it says what it is
+ * asking about. */
+.settings-pane {
+  container: settings / inline-size;
+}
+
 /* The one-line helpers under a field are sentences too, so they keep a measure
  * now that the column around them has none. Scoped to the settings screen: the
  * same two classes stand in dialogs whose own width is already the bound. */
@@ -18218,6 +18237,102 @@ button.worker-composer-pill:hover {
   margin: var(--space-3) var(--space-4) 0;
 }
 
+/* ---- one status line, and one fold under it --------------------------
+ *
+ * What a card that asked a server something has to say: where it now stands,
+ * one sentence of ours, and — when a server said something — a fold holding
+ * what it said.
+ *
+ * Measured on the pane this was written for: a refused API key arrived as
+ * `서버 오류: HTTP 401 — 无效的令牌 (request id: 20260918…)`, 120 characters
+ * that wrapped to two lines at this measure, in a third language, as the
+ * FIRST thing a person read. Two lines of a server's own words above zero
+ * lines of ours. The fold puts that at zero lines until it is asked for and
+ * gives the first line back to a sentence somebody can act on. */
+.settings-status {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+  margin: var(--space-2) var(--space-4) 0;
+}
+
+/* Nothing to report is not a gap in the card. */
+.settings-status:empty {
+  display: none;
+}
+
+.settings-status-said {
+  max-width: var(--field-copy);
+  margin: 0;
+  color: var(--ink-chalk);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-body);
+  word-break: var(--prose-word-break);
+}
+
+/* The evidence door, shared by the status line and by the long paragraph a
+ * Jev seat carries. Both hold the same kind of thing — the words you want
+ * exactly once, when you go looking for them. */
+.settings-fold > summary {
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-body);
+  cursor: pointer;
+}
+
+.settings-fold > summary:hover {
+  color: var(--ink-chalk);
+}
+
+.settings-fold > :not(summary) {
+  max-width: 60ch;
+  margin: var(--space-1) 0 0;
+  color: var(--ink-mist);
+  font-size: var(--text-2xs);
+  line-height: var(--leading-body);
+  word-break: var(--prose-word-break);
+}
+
+/* A server's own words are quoted, so they are set in the face a quotation is
+ * set in and they keep their own line breaks. `anywhere` because a refusal
+ * body is as likely to be one unbroken token as a sentence. */
+.settings-status-body,
+.settings-status-id {
+  font-family: var(--font-mono);
+}
+
+.settings-status-body {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ---- the seats Jev sits in, one row each -----------------------------
+ *
+ * Five seats stood as five [label, switch, paragraph] stacks, and the five
+ * paragraphs were 616px of the 844px card. A row is now the seat's name, one
+ * line saying what it sends, and the mode — and the paragraph is behind the
+ * same fold the status line uses. The rows, and their order, are what the use
+ * table answered (`paintTypeSafe` reads `switches`), so `order` has to be
+ * something this box honours. */
+.settings-jev-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.settings-jev-row {
+  display: grid;
+  gap: 2px;
+  padding-block: var(--space-2);
+}
+
+.settings-jev-row + .settings-jev-row {
+  border-top: var(--rule-width) solid var(--edge-rule);
+}
+
+.settings-jev-row > .settings-fold {
+  padding-inline: var(--space-4);
+}
+
 @media (max-width: 720px) {
   .settings-section-head--scoped {
     grid-template-columns: minmax(0, 1fr);
@@ -18627,11 +18742,18 @@ button.worker-composer-pill:hover {
 /* The Google row has no radio to press — one machine has one Google login, so
  * there is nothing to choose — and its body fills the row the way
  * `.account-pick` does for the two lists that DO choose. Same geometry, no
- * pressed state and no pointer, because nothing here is pressable. */
+ * pressed state and no pointer, because nothing here is pressable.
+ *
+ * `align-items` is NOT copied across with the rest of it. `.account-pick` is a
+ * flex ROW and centres its children on the line; this box keeps
+ * `.agent-row-body`'s column, where the cross axis is the horizontal one — so
+ * `center` centred the name over the subtitle in the middle of the card, and
+ * took the full width away from the topline that a long name truncates
+ * against. Both rows that use this class stack a name over a sentence, which
+ * is the stretch the column already had. */
 .account-row .account-body {
   display: flex;
   flex: 1;
-  align-items: center;
   gap: var(--space-3);
   min-width: 0;
 }
@@ -21528,6 +21650,137 @@ button.worker-composer-pill:hover {
   padding: 0 var(--space-4);
 }
 
+/* ---- one row grammar, and both kinds of row read it -------------------
+ *
+ * A settings row is two things: the words, and the control that answers
+ * them. The switch rows have said it that way since the toggles were moved
+ * to the end of their line — "Two-column row grammar: left min-w-0
+ * label+description, right shrink-0 control" is the original's own sentence
+ * for it (`SettingsFormControls.tsx:51`). A FIELD said it by stacking its
+ * label over a control that then filled the whole column, and that is the
+ * band of nothing this pane was reported for: in a 2000px window the API
+ * key box measured 1598px and held a nine-character value.
+ *
+ * So the two say it once, here. The left column carries the words and keeps
+ * the reading measure the rest of this screen keeps; the right column is as
+ * wide as the control asked to be (`--field-w`), and `justify-content`
+ * spreads the two to the ends of the row, which is what `space-between` did
+ * for the switch rows before this.
+ *
+ * The control is placed on the FIRST row of the grid on purpose: a field may
+ * carry a one-line description under its label, and the control belongs
+ * against the label rather than against the middle of a paragraph. A field
+ * whose control is not a `.settings-input` — a colour well, a segmented
+ * choice, a preset strip — puts everything in the left column and stacks
+ * exactly as it did before, because those controls ARE the column. */
+.settings-check,
+.settings-pane .settings-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  justify-content: space-between;
+  align-items: center;
+  column-gap: var(--space-4);
+  row-gap: var(--space-1);
+  padding: var(--space-1) var(--space-4);
+}
+
+.settings-check > input,
+.settings-pane .settings-field > .settings-input {
+  grid-column: 2;
+  grid-row: 1;
+}
+
+/* In the right column the rung IS the width. The track is sized to whatever
+ * stands in it, so `min(100%, rung)` there would be a percentage of itself —
+ * measured: every control resolved to its own content instead, which made a
+ * `<select>` 126px and the input beside it 149px in the same row. Stacked
+ * (below), the column is the pane's and the `min()` is what keeps a 34ch box
+ * out of a 300px column. Every field on this screen carries a rung, so there
+ * is no un-runged case here to fall back for. */
+.settings-pane .settings-field > .settings-input {
+  width: var(--field-w);
+}
+
+/* A control that genuinely IS the column takes the whole row and leaves no
+ * second one — a table, a segmented strip, a text area somebody writes a
+ * paragraph into. */
+.settings-pane .settings-field[data-field="full"] {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.settings-pane .settings-field[data-field="full"] > .settings-input {
+  grid-column: 1;
+  grid-row: auto;
+  width: 100%;
+}
+
+.settings-check > :not(input),
+.settings-pane .settings-field > :not(.settings-input) {
+  grid-column: 1;
+  min-width: 0;
+}
+
+/* The words are read, so they carry a measure — the same 52ch
+ * `.settings-subhead-desc` reads its sentences at, named once in
+ * `tokens.css`. Only the words: a control in the left column is there
+ * because it is the column. */
+.settings-check > :not(input),
+.settings-pane .settings-field > .settings-label,
+.settings-pane .settings-field > .settings-hint,
+.settings-pane .settings-field > .settings-row-desc,
+.settings-pane .settings-field > .settings-field-copy {
+  max-width: var(--field-copy);
+}
+
+/* A column with no room for two things side by side stacks them instead,
+ * which is what this screen did at every width until now. A switch never
+ * stacks: it is 36px wide and its words fit beside it at any width this
+ * window opens to. */
+@container settings (max-width: 619px) {
+  .settings-pane .settings-field {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-pane .settings-field > .settings-input {
+    grid-column: 1;
+    grid-row: auto;
+    width: min(100%, var(--field-w));
+  }
+}
+
+/* The label and its one-line description are one member of the row, so a
+ * field that carries both wraps them and the control still rides the first
+ * grid row rather than the second. */
+.settings-field-copy {
+  display: grid;
+  row-gap: 2px;
+}
+
+/* Every field on this screen holds a VALUE, so the default rung is the one
+ * a key, a URL or a path fits in, and a control that genuinely is the
+ * column says so (`data-field="full"`). The rungs are `tokens.css`'s and
+ * this is the only place the attribute is read, so a pane names a rung and
+ * no pane names a number. */
+.settings-pane .settings-field {
+  --field-w: var(--field-lg);
+}
+
+.settings-field[data-field="sm"] {
+  --field-w: var(--field-sm);
+}
+
+.settings-field[data-field="md"] {
+  --field-w: var(--field-md);
+}
+
+.settings-field[data-field="lg"] {
+  --field-w: var(--field-lg);
+}
+
+.settings-field[data-field="full"] {
+  --field-w: var(--field-full);
+}
+
 /* Orca keeps the common history sizes one click away, then reveals the same
  * canonical numeric field only for a value outside those presets. The group
  * stays inside the settings column at the 720px locale gate. */
@@ -21638,47 +21891,16 @@ button.worker-composer-pill:hover {
 }
 
 /* A switch and what it switches, on one line — the label is beside the box
- * rather than above it, because unlike the fields above this the control is
- * the smaller of the two things and the words are what is being read.
+ * rather than above it, because unlike a field the control is the smaller of
+ * the two things and the words are what is being read.
  *
- * And the two halves take the two ENDS of that line. The original states the
- * grammar in its own words — "Two-column row grammar: left min-w-0
- * label+description, right shrink-0 control" (`SettingsFormControls.tsx:51`,
- * `flex gap-4` + `items-center justify-between`) — and it is the row every
- * settings pane there is built from. This window had the switch first and both
- * halves hugging the left edge, which a 620px column hid. Measured at a 910px
- * column: every toggle row in 일반·터미널·모양 ended 543-770px short of its own
- * right edge, which is the band of nothing beside every setting.
- *
- * The `<label>` keeps the input as its first child — that is what makes the
- * whole row a hit target — so the switch takes the end of the line by `order`
- * rather than by moving in the markup. */
+ * The row itself is the shared grammar above; what is left here is the one
+ * thing only a switch row has, which is that the whole row is a hit target.
+ * The `<label>` keeps the input as its first child — that is what makes it
+ * one — so the switch takes the right column by placement rather than by
+ * moving in the markup. */
 .settings-check {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-4);
-  padding: var(--space-1) var(--space-4);
   cursor: pointer;
-}
-
-.settings-check > input {
-  order: 2;
-}
-
-/* Everything that is not the switch reads before it, in the order it was
- * written — so a row that carries a badge after its words keeps them in that
- * order, with the switch still last. */
-.settings-check > :not(input) {
-  order: 1;
-  min-width: 0;
-}
-
-/* The words are what takes the room the switch leaves (the original's
- * `min-w-0 flex-1`). Only the child directly after the box: a badge or a
- * second mark beside it stays its own size. */
-.settings-check > input + * {
-  flex: 1;
 }
 
 /* `.qo input` above claims every field on this surface with `width: 100%` and
@@ -21757,7 +21979,12 @@ button.worker-composer-pill:hover {
 .artifacts-view .settings-input,
 .auto-view .settings-input {
   appearance: none;
-  width: 100%;
+  /* As wide as the value it holds, never wider than the room it is given.
+   * `--field-w` is the rung the FIELD picked (`[data-field]` below); a field
+   * that picked none falls through to `--field-full`, which is 100% — the
+   * width every control on this surface had before the rungs existed, so
+   * nothing moves until a pane opts in. */
+  width: min(100%, var(--field-w, var(--field-full)));
   padding: var(--space-2) 0;
   /* The fill only: `background: none` also reset background-IMAGE, which is
    * where a select's chevron now lives — one shorthand and this surface's

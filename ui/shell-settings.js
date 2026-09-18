@@ -4857,6 +4857,98 @@ function googleLoginMoved() {
   void refreshProviderUsage(usageProvider("antigravity"), true);
 }
 
+/* ---- where a card stands, in four words ----
+ *
+ * Every card on this screen that asks something of a server can be in one of
+ * four standings, and until now each card invented its own vocabulary for
+ * them: the TypeSafe card was the only one wearing a badge at all, and the
+ * two words it wore (키 저장됨 / 키 없음) were about a keychain rather than
+ * about a connection, so the router card beside it said nothing and a person
+ * had to read a status line to find out whether it worked.
+ *
+ * One table, four rows, each naming the badge face it wears. Nothing else in
+ * this file spells one of these words — `paintSettingsStanding` is the only
+ * reader, and a card names a row's id. */
+const SETTINGS_STANDINGS = [
+  { id: "connected", state: "connected", key: "settings.standing.connected", word: "연결됨" },
+  { id: "keySaved", state: "available", key: "settings.standing.keySaved", word: "키 저장됨" },
+  { id: "unchecked", state: "unchecked", key: "settings.standing.unchecked", word: "확인 안 됨" },
+  { id: "failed", state: "error", key: "settings.standing.failed", word: "연결 실패" },
+];
+
+function settingsStanding(id) {
+  return SETTINGS_STANDINGS.find((row) => row.id === id) ?? null;
+}
+
+/* A card's head says where it stands. */
+function paintSettingsStanding(host, id) {
+  const row = settingsStanding(id);
+  if (!host || !row) return;
+  host.dataset.state = row.state;
+  host.textContent = t(row.key, row.word);
+}
+
+/* ---- one status line, for every card that asks a server something ----
+ *
+ * The standing as a badge, one sentence of ours, and — only when a server
+ * actually said something — a fold holding what it said with the request id
+ * it named.
+ *
+ * What this replaces: the server's own words as the first line a person read.
+ * A refused key came back here as `서버 오류: HTTP 401 — 无效的令牌 (request
+ * id: …)` — a 120-character line that wrapped to two, in a language neither
+ * the window nor the reader had chosen, with a 23-digit id in the middle of
+ * it. None of that says what to do next; all of it is what a support thread
+ * needs. So it moves one fold down and our sentence takes the first line. */
+function paintSettingsStatus(host, said, { standing = null, raw = null } = {}) {
+  if (!host) return;
+  host.replaceChildren();
+  if (!said) return;
+  if (standing) {
+    const badge = document.createElement("span");
+    badge.className = "settings-state";
+    paintSettingsStanding(badge, standing);
+    host.appendChild(badge);
+  }
+  const words = document.createElement("p");
+  words.className = "settings-status-said";
+  words.textContent = said;
+  host.appendChild(words);
+  const evidence = serverEvidence(raw);
+  if (evidence) host.appendChild(evidence);
+}
+
+/* What the server said, word for word, under a fold that opens on demand —
+ * with the request id pulled onto its own line, because that is the one token
+ * in a refusal a person is ever asked to quote back. */
+function serverEvidence(raw) {
+  const said = String(raw ?? "").trim();
+  if (!said) return null;
+  const fold = document.createElement("details");
+  fold.className = "settings-fold settings-status-raw";
+  const summary = document.createElement("summary");
+  summary.textContent = t("settings.status.evidence", "자세히");
+  fold.appendChild(summary);
+  const id = requestIdIn(said);
+  if (id) {
+    const line = document.createElement("p");
+    line.className = "settings-status-id";
+    line.textContent = t("settings.status.requestId", "요청 id — {{id}}", { id });
+    fold.appendChild(line);
+  }
+  const body = document.createElement("pre");
+  body.className = "settings-status-body";
+  body.textContent = said;
+  fold.appendChild(body);
+  return fold;
+}
+
+/* `request id: 2026…`, `request_id=…`, `"x-request-id": "…"` — the one part of
+ * a refusal body that reads the same whatever language the rest of it is in. */
+function requestIdIn(said) {
+  return said.match(/request[ _-]?id["'\s:=]+([A-Za-z0-9_-]{6,64})/i)?.[1] ?? null;
+}
+
 /* ---- API Routers (OpenRouter, AgentRouter, Custom) ----
  *
  * §1.0 contract:
@@ -4880,9 +4972,15 @@ let routerDraftGeneration = 0;
 
 function routerDraftChanged() {
   routerDraftGeneration += 1;
-  const status = el("router-test-status");
-  if (status) status.textContent = "";
+  clearRouterStatus();
   updateRouterSaveButtonState();
+}
+
+/* An edited draft has not been tried, so the card goes back to saying so and
+ * the line it said it on is taken away — one card, one standing. */
+function clearRouterStatus() {
+  paintSettingsStatus(el("router-test-status"), "");
+  paintSettingsStanding(el("router-card-state"), "unchecked");
 }
 
 /* A model list belongs to the connection that answered it. Editing that
@@ -4896,8 +4994,7 @@ function invalidateRouterProbe() {
   el("router-models-tbody")?.replaceChildren();
   const section = el("router-models-section");
   if (section) section.hidden = true;
-  const status = el("router-test-status");
-  if (status) status.textContent = "";
+  clearRouterStatus();
   const test = el("router-test-btn");
   if (test) {
     test.disabled = false;
@@ -5011,6 +5108,11 @@ function paintRouterKeyStore(kept) {
 let typesafeState = null;
 let typesafeBusy = false;
 let typesafeInitialized = false;
+/* What the last CHECK answered, which is the only thing that can say
+ * 연결됨 or 연결 실패 about this key — a saved key is a saved key until
+ * somebody asks TypeSafe. `null` means nobody has asked since it was saved,
+ * and the standing is read off the key itself. */
+let typesafeChecked = null;
 
 function initTypeSafeEvents() {
   if (typesafeInitialized) return;
@@ -5020,8 +5122,10 @@ function initTypeSafeEvents() {
     void saveTypeSafeKey();
   });
   el("typesafe-remove-btn")?.addEventListener("click", () => {
-    void runTypeSafe(() => invoke("remove_typesafe_key"), () =>
-      t("settings.typesafe.removed", "저장된 키를 지웠습니다."));
+    void runTypeSafe(() => {
+      typesafeChecked = null;
+      return invoke("remove_typesafe_key");
+    }, () => t("settings.typesafe.removed", "저장된 키를 지웠습니다."));
   });
   el("typesafe-check-btn")?.addEventListener("click", () => {
     void checkTypeSafeKey();
@@ -5091,18 +5195,20 @@ async function refreshTypeSafe() {
   try {
     paintTypeSafe(await invoke("typesafe_settings"));
   } catch (error) {
-    paintTypeSafeStatus(typesafeRefusal(error));
+    paintTypeSafeStatus(typesafeRefusal(error), typesafeRefusalEvidence(error));
   }
+}
+
+/* Where the card stands: what the last check answered if anything has been
+ * asked since the key was saved, and otherwise whether there is a key at all.
+ * A saved key is a saved key until somebody asks TypeSafe about it. */
+function typesafeStanding(state) {
+  return typesafeChecked ?? (state.keySaved ? "keySaved" : "unchecked");
 }
 
 function paintTypeSafe(state) {
   typesafeState = state;
-  const badge = el("typesafe-key-state");
-  if (badge) {
-    badge.textContent = state.keySaved
-      ? t("settings.typesafe.keySaved", "키 저장됨")
-      : t("settings.typesafe.keyMissing", "키 없음");
-  }
+  paintSettingsStanding(el("typesafe-key-state"), typesafeStanding(state));
   const input = el("typesafe-key-input");
   if (input) {
     input.disabled = typesafeBusy || !state.keysKeptHere;
@@ -5114,16 +5220,28 @@ function paintTypeSafe(state) {
     const button = el(id);
     if (button) button.disabled = typesafeBusy || !state.keySaved;
   }
+  // The use table is the card's running order, not this page's. A seat the
+  // backend no longer names is hidden rather than left as a switch that
+  // writes nothing, and the seats it does name stand in the order it named
+  // them — `order` rather than a re-append, so nothing that has focus moves
+  // in the document while somebody is using it.
+  let seats = 0;
   for (const select of document.querySelectorAll("[data-jev-seat]")) {
-    const row = jevSeat(state, select.dataset.jevSeat);
-    // A card row the backend no longer names is a seat that left the table:
-    // hide it rather than leave a switch that writes nothing.
-    select.closest("[data-jev-row]")?.toggleAttribute("hidden", !row);
+    const at = (state.switches ?? []).findIndex((held) => held.id === select.dataset.jevSeat);
+    const row = at < 0 ? null : state.switches[at];
+    const line = select.closest("[data-jev-row]");
+    if (line) {
+      line.toggleAttribute("hidden", !row);
+      line.style.order = row ? String(at) : "";
+    }
     if (!row) continue;
+    seats += 1;
     paintJevModes(select, row.modes ?? []);
     select.value = row.mode;
     select.disabled = typesafeBusy;
   }
+  const count = el("jev-uses-count");
+  if (count) count.textContent = seats > 0 ? String(seats) : "";
   paintTypeSafeSave();
 }
 
@@ -5135,9 +5253,8 @@ function paintTypeSafeSave() {
   }
 }
 
-function paintTypeSafeStatus(text) {
-  const status = el("typesafe-status");
-  if (status) status.textContent = text;
+function paintTypeSafeStatus(text, evidence = {}) {
+  paintSettingsStatus(el("typesafe-status"), text, evidence);
 }
 
 /* One backend step, then the page the answer describes. A refused step keeps
@@ -5150,11 +5267,13 @@ async function runTypeSafe(step, said) {
     const state = await step();
     typesafeBusy = false;
     paintTypeSafe(state);
-    paintTypeSafeStatus(said(state));
+    // The line says where the card now stands as well as what just happened:
+    // one component, and the standing is the same one its head wears.
+    paintTypeSafeStatus(said(state), { standing: typesafeStanding(state) });
   } catch (error) {
     typesafeBusy = false;
     if (typesafeState) paintTypeSafe(typesafeState);
-    paintTypeSafeStatus(typesafeRefusal(error));
+    paintTypeSafeStatus(typesafeRefusal(error), typesafeRefusalEvidence(error));
   }
 }
 
@@ -5163,6 +5282,9 @@ async function saveTypeSafeKey() {
   const key = input?.value.trim() ?? "";
   if (!key) return;
   await runTypeSafe(async () => {
+    // A different key is a different question: what the last check answered
+    // was about the key that is being replaced.
+    typesafeChecked = null;
     const state = await invoke("save_typesafe_key", { key });
     if (input) input.value = "";
     return state;
@@ -5176,6 +5298,7 @@ async function checkTypeSafeKey() {
   paintTypeSafeStatus(t("settings.typesafe.checking", "TypeSafe에 묻는 중…"));
   try {
     const check = await invoke("check_typesafe_key");
+    typesafeChecked = check.answered ? "connected" : "failed";
     paintTypeSafeStatus(
       check.answered
         ? t("settings.typesafe.answered", "응답했습니다 — {{model}}, {{ms}} ms", {
@@ -5183,9 +5306,14 @@ async function checkTypeSafeKey() {
           ms: check.elapsedMs,
         })
         : typesafeCheckFailure(check.failure),
+      { standing: typesafeChecked, raw: check.answered ? null : check.failure },
     );
   } catch (error) {
-    paintTypeSafeStatus(String(error));
+    typesafeChecked = "failed";
+    paintTypeSafeStatus(
+      t("settings.typesafe.unreachable", "확인하지 못했습니다 — zo가 답하지 않았습니다."),
+      { standing: "failed", raw: String(error) },
+    );
   } finally {
     typesafeBusy = false;
     if (typesafeState) paintTypeSafe(typesafeState);
@@ -5194,8 +5322,8 @@ async function checkTypeSafeKey() {
 
 /* zo names why nothing answered with its closed failure table
  * (`api::SystemOneFailure::token`). The two a person acts on get words; any
- * other is named by its token, which is also what the shadow's ledger rows and
- * `zo --doctor` say. */
+ * other is a token, which belongs under the fold beside the rest of the
+ * evidence rather than in the middle of our own sentence. */
 function typesafeCheckFailure(token) {
   if (token === "unauthorized") {
     return t("settings.typesafe.unauthorized", "키가 거절되었습니다 — 키를 다시 확인하세요.");
@@ -5203,7 +5331,7 @@ function typesafeCheckFailure(token) {
   if (token === "no_key") {
     return t("settings.typesafe.noKey", "zo가 키를 찾지 못했습니다 — 키를 저장한 뒤 다시 확인하세요.");
   }
-  return t("settings.typesafe.unanswered", "응답하지 않았습니다 — {{reason}}", { reason: token });
+  return t("settings.typesafe.unanswered", "응답하지 않았습니다.");
 }
 
 /* A refused step, in the reader's language when the backend named why — the
@@ -5216,6 +5344,14 @@ function typesafeRefusal(error) {
       "이 컴퓨터에는 API 키를 보관할 키체인이 없어 저장하지 않았습니다.",
     )
     : failure.message;
+}
+
+/* A refused step says our sentence and keeps the backend's under the fold —
+ * except when the refusal already IS our sentence, which is the one kind this
+ * pane translates. */
+function typesafeRefusalEvidence(error) {
+  const failure = failureOf(error);
+  return failure.kind === "keychain-unavailable" ? {} : { raw: failure.message };
 }
 
 function populateRouterPresets() {
@@ -5338,7 +5474,12 @@ async function runRouterTestConnection() {
   const baseUrl = urlInput?.value.trim() ?? "";
   const key = keyInput?.value.trim() ?? "";
   if (!baseUrl) {
-    if (statusEl) statusEl.textContent = t("settings.apiRouters.testFailed", "연결 실패: URL이 비어 있습니다", { error: "URL이 비어 있습니다" });
+    paintSettingsStatus(
+      statusEl,
+      t("settings.apiRouters.needBaseUrl", "기본 URL이 비어 있습니다 — 라우터의 주소를 적으세요."),
+      { standing: "failed" },
+    );
+    paintSettingsStanding(el("router-card-state"), "failed");
     return;
   }
 
@@ -5356,7 +5497,9 @@ async function runRouterTestConnection() {
     testBtn.disabled = true;
     testBtn.textContent = t("settings.apiRouters.testing", "연결 시험 중…");
   }
-  if (statusEl) statusEl.textContent = t("settings.apiRouters.testing", "연결 시험 중…");
+  // No badge while the question is still out: a standing is an answer, and
+  // the button already says the asking is under way.
+  paintSettingsStatus(statusEl, t("settings.apiRouters.testing", "연결 시험 중…"));
 
   try {
     const models = await fetchRouterModels({
@@ -5401,16 +5544,23 @@ async function runRouterTestConnection() {
     }
 
     if (modelsSection) modelsSection.hidden = false;
-    if (statusEl) {
-      statusEl.textContent = t("settings.apiRouters.testSuccess", "연결 성공 — 사용할 모델을 선택하세요");
-    }
+    paintSettingsStatus(
+      statusEl,
+      t("settings.apiRouters.testSuccess", "연결 성공 — 사용할 모델을 선택하세요"),
+      { standing: "connected" },
+    );
+    paintSettingsStanding(el("router-card-state"), "connected");
     updateRouterSaveButtonState();
   } catch (error) {
     if (generation !== routerProbeGeneration) return;
-    if (statusEl) {
-      const msg = error?.message ?? String(error);
-      statusEl.textContent = t("settings.apiRouters.testFailed", "연결 실패: {{error}}", { error: msg });
-    }
+    // Ours first, the server's under the fold: what it said is evidence for a
+    // support thread, not an instruction to the person reading this pane.
+    paintSettingsStatus(
+      statusEl,
+      t("settings.apiRouters.testRefused", "연결하지 못했습니다 — 기본 URL과 API 키를 확인하세요."),
+      { standing: "failed", raw: error?.message ?? String(error) },
+    );
+    paintSettingsStanding(el("router-card-state"), "failed");
     if (saveBtn) saveBtn.disabled = true;
     if (modelsSection) modelsSection.hidden = true;
   } finally {
@@ -5479,14 +5629,19 @@ async function saveApiRouterEntry() {
     })) ?? [];
 
     paintConfiguredRouters();
-    if (statusEl && generation === routerDraftGeneration) {
-      statusEl.textContent = t("settings.apiRouters.saved", "저장되었습니다");
+    if (generation === routerDraftGeneration) {
+      paintSettingsStatus(statusEl, t("settings.apiRouters.saved", "저장되었습니다"), {
+        standing: "connected",
+      });
     }
   } catch (error) {
     // Said beside the button that was pressed, not only in a toast: a key
     // this machine cannot keep is a thing to act on here.
     const reason = routerSaveRefusal(error);
-    if (statusEl && generation === routerDraftGeneration) statusEl.textContent = reason;
+    if (generation === routerDraftGeneration) {
+      paintSettingsStatus(statusEl, reason, { standing: "failed" });
+      paintSettingsStanding(el("router-card-state"), "failed");
+    }
     showError(reason);
   } finally {
     routerSaving = false;

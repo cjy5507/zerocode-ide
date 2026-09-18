@@ -496,6 +496,42 @@
   --space-5: 24px;
   --space-6: 32px;
 
+  /* ---- how wide a field is -------------------------------------------
+   *
+   * A field had no width of its own: it filled whatever column it was put
+   * in. Measured on the API router pane in a 2000px window, the API key
+   * box was 1598px wide and the longest key anybody types into it is about
+   * fifty characters — a box eight times the value it holds, with the same
+   * box drawn again for the name and again for the base URL, so the pane
+   * read as three identical empty bands.
+   *
+   * The column was right to fill (`shell.css`, the settings frame): what
+   * was missing is that the thing filling it should be the WORDS, and a
+   * control should be as wide as what it holds. So the measure moves onto
+   * the control, in `ch` — the unit of "how many characters" — and a field
+   * picks a rung rather than typing a number:
+   *
+   *   sm   18ch  a port, a count, a timeout — a value read at a glance
+   *   md   26ch  a name, a host, a picked mode
+   *   lg   34ch  a key, a URL, a path a person checks by eye
+   *   full 100%  the column, for a control that genuinely is the column
+   *              (a table, a segmented row) — and the default, so a field
+   *              that names no rung keeps exactly the width it had.
+   *
+   * `ch` rides the control's own font, which on this surface is mono: a
+   * 34ch key box holds 34 key characters in every language the window
+   * speaks, which a px number cannot promise. */
+  --field-sm: 18ch;
+  --field-md: 26ch;
+  --field-lg: 34ch;
+  --field-full: 100%;
+
+  /* And the words beside it keep the measure the settings screen already
+   * reads sentences at — `.settings-subhead-desc`'s 52ch. Named here
+   * because two rules now share it: the label column of a field row and
+   * the label of a switch row. */
+  --field-copy: 52ch;
+
   /* Shape — Orca's own scale, measured: `--radius: .625rem` with `sm` at 60%
    * and `xs` at `.125rem` (I18nProvider-DPbv01TU.css). We had 3px on the
    * argument that a ledger is not a card stack; the instruction is to clone

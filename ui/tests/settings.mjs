@@ -2410,6 +2410,11 @@ class StatefulBackend {
       case "api_router_presets": return clone(this.routerPresets);
       case "api_router_providers": return clone(this.zoSettings.providers);
       case "test_router_connection": {
+        /* `api_routers::test_router_endpoint` hands a refusal back as one
+           string: its own prefix, the status, and whatever the server put in
+           the body — which is the shape the pane has to keep off its first
+           line. */
+        if (this.routerProbeRefusal) throw new Error(this.routerProbeRefusal);
         const url = `${args.baseUrl.replace(/\/+$/, "")}${args.modelsPath || "/models"}`;
         const headers = { ...(args.headers ?? {}) };
         if (args.key) {
@@ -3804,6 +3809,16 @@ await test("라우터 저장 중 이름이나 모델을 바꾸면 옛 저장 응
 
 /* One router row as a person adds it: preset (or custom), name, key, test,
  * save — and the save call it made. */
+/* What a card's status line says in OUR words: the sentence, not the standing
+ * badge beside it and not the server's own words folded under it. */
+const statusSaid = (page, id) => page.locator(`#${id} .settings-status-said`).textContent();
+
+/* The four words a card's head can wear, as the one table spells them. */
+const standingWord = (page, id) => page.evaluate((wanted) => {
+  const row = SETTINGS_STANDINGS.find((held) => held.id === wanted);
+  return t(row.key, row.word);
+}, id);
+
 async function addRouterRow(page, { preset, name, key }) {
   await page.selectOption("#router-preset-select", preset);
   await page.fill("#router-name-input", name);
@@ -3821,7 +3836,7 @@ async function addRouterRow(page, { preset, name, key }) {
   // The test step left its own words in the status line; the save's replace
   // them once the save has landed and the list is repainted.
   await page.waitForFunction(
-    () => document.getElementById("router-test-status")?.textContent
+    () => document.querySelector("#router-test-status .settings-status-said")?.textContent
       === t("settings.apiRouters.saved", "저장되었습니다"),
     null,
     { timeout: UI_TIMEOUT },
@@ -3919,10 +3934,14 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await pageA.evaluate(() => refreshApiRouters());
   await renderSettled(pageA);
   const said = (key, fallback, vars) => pageA.evaluate(([one, words, values]) => t(one, words, values), [key, fallback, vars]);
-  const status = () => pageA.locator("#typesafe-status").textContent();
+  const status = () => statusSaid(pageA, "typesafe-status");
 
   // Nothing saved: the badge says so, and nothing but typing a key is offered.
-  assertEqual(await pageA.locator("#typesafe-key-state").textContent(), await said("settings.typesafe.keyMissing", "키 없음"));
+  assertEqual(
+    await pageA.locator("#typesafe-key-state").textContent(),
+    await standingWord(pageA, "unchecked"),
+    "a card with nothing checked does not wear the table's word for it",
+  );
   for (const id of ["#typesafe-check-btn", "#typesafe-remove-btn", "#typesafe-save-btn"]) {
     assert(await pageA.locator(id).isDisabled(), `${id} was offered with no key saved`);
   }
@@ -3953,7 +3972,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   assertEqual(save.args.key, "apikey_fixture", "the key left the page untrimmed");
   await pageA.waitForFunction(
     (words) => document.getElementById("typesafe-key-state")?.textContent === words,
-    await said("settings.typesafe.keySaved", "키 저장됨"),
+    await standingWord(pageA, "keySaved"),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.keychain.get(TYPESAFE_SERVICE), "apikey_fixture");
@@ -3966,12 +3985,12 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
 
   // The check is zo's answer: a model and its latency, or the failure named.
   await pageA.click("#typesafe-check-btn");
-  await pageA.waitForFunction(() => document.getElementById("typesafe-status")?.textContent.includes("jev-1.13.0"), null, { timeout: UI_TIMEOUT });
+  await pageA.waitForFunction(() => document.querySelector("#typesafe-status .settings-status-said")?.textContent.includes("jev-1.13.0"), null, { timeout: UI_TIMEOUT });
   assertEqual(await status(), await said("settings.typesafe.answered", "응답했습니다 — {{model}}, {{ms}} ms", { model: "jev-1.13.0", ms: 612 }));
   backend.typesafeCheck = { answered: false, failure: "unauthorized", elapsedMs: 515 };
   const refused = await said("settings.typesafe.unauthorized", "키가 거절되었습니다 — 키를 다시 확인하세요.");
   await pageA.click("#typesafe-check-btn");
-  await pageA.waitForFunction((words) => document.getElementById("typesafe-status")?.textContent === words, refused, { timeout: UI_TIMEOUT });
+  await pageA.waitForFunction((words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words, refused, { timeout: UI_TIMEOUT });
   backend.typesafeCheck = { answered: true, model: "jev-1.13.0", elapsedMs: 612 };
 
   // The switch writes zo's word and moves nothing else of zo's settings.
@@ -3980,7 +3999,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await pageA.selectOption("#typesafe-routing-select", "shadow");
   assertEqual((await backend.waitForCall("A", "set_jev_mode", switchedAt)).args.mode, "shadow");
   await pageA.waitForFunction(
-    (words) => document.getElementById("typesafe-status")?.textContent === words,
+    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
     await said("settings.typesafe.turnedRecord", "기록만을 켰습니다. 다음 판단부터 원장에 기록합니다."),
     { timeout: UI_TIMEOUT },
   );
@@ -3993,7 +4012,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await pageA.selectOption("#typesafe-routing-select", "on");
   assertEqual((await backend.waitForCall("A", "set_jev_mode", activeAt)).args.mode, "on");
   await pageA.waitForFunction(
-    (words) => document.getElementById("typesafe-status")?.textContent === words,
+    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
     await said("settings.typesafe.turnedApply", "실제 적용을 켰습니다. 다음 판단부터 반영합니다."),
     { timeout: UI_TIMEOUT },
   );
@@ -4006,7 +4025,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await pageA.selectOption("#typesafe-routing-select", "auto");
   assertEqual((await backend.waitForCall("A", "set_jev_mode", autoAt)).args.mode, "auto");
   await pageA.waitForFunction(
-    (words) => document.getElementById("typesafe-status")?.textContent === words,
+    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
     await said("settings.typesafe.turnedAuto", "자동을 켰습니다. 근거가 서기 전까지 원장에 기록만 합니다."),
     { timeout: UI_TIMEOUT },
   );
@@ -4019,7 +4038,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await pageA.selectOption("#typesafe-routing-select", "on");
   await backend.waitForCall("A", "set_jev_mode", backToOn);
   await pageA.waitForFunction(
-    (words) => document.getElementById("typesafe-status")?.textContent === words,
+    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
     await said("settings.typesafe.turnedApply", "실제 적용을 켰습니다. 다음 판단부터 반영합니다."),
     { timeout: UI_TIMEOUT },
   );
@@ -4035,7 +4054,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await pageA.selectOption("#typesafe-browser-select", "on");
   assertEqual((await backend.waitForCall("A", "set_jev_mode", browserAt)).args.mode, "on");
   await pageA.waitForFunction(
-    (words) => document.getElementById("typesafe-status")?.textContent === words,
+    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
     await said("settings.typesafe.turnedApply", "실제 적용을 켰습니다. 다음 판단부터 반영합니다."),
     { timeout: UI_TIMEOUT },
   );
@@ -4113,7 +4132,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await pageA.selectOption("#typesafe-browser-select", "auto");
   assertEqual((await backend.waitForCall("A", "set_jev_mode", browserAutoAt)).args.mode, "auto");
   await pageA.waitForFunction(
-    (words) => document.getElementById("typesafe-status")?.textContent === words,
+    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
     await said("settings.typesafe.turnedAuto", "자동을 켰습니다. 근거가 서기 전까지 원장에 기록만 합니다."),
     { timeout: UI_TIMEOUT },
   );
@@ -4139,7 +4158,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await pageA.selectOption("#typesafe-routing-select", "off");
   await backend.waitForCall("A", "set_jev_mode", offAt);
   await pageA.waitForFunction(
-    (words) => document.getElementById("typesafe-status")?.textContent === words,
+    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
     await said("settings.typesafe.turnedOff", "껐습니다."),
     { timeout: UI_TIMEOUT },
   );
@@ -4151,7 +4170,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await backend.waitForCall("A", "remove_typesafe_key", removedAt);
   await pageA.waitForFunction(
     (words) => document.getElementById("typesafe-key-state")?.textContent === words,
-    await said("settings.typesafe.keyMissing", "키 없음"),
+    await standingWord(pageA, "unchecked"),
     { timeout: UI_TIMEOUT },
   );
   assert(!backend.keychain.has(TYPESAFE_SERVICE), "the key outlived its removal");
@@ -9330,6 +9349,205 @@ await test("Blank starts a deliberately plain terminal", async () => {
   await pageB.evaluate(() => openTermTab({ placement: "tab" }));
   const opened = await backend.waitForCall("B", "open_term_tab", from);
   assert(opened.args.plain === true, "Blank fell through to the configured terminal command", opened);
+});
+
+await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · 실패는 우리 말로 접어서 · 머리는 네 낱말", async () => {
+  /* The pane the grammar is written on, read at a width where the old pane's
+     complaint is visible: a 2000px window gives this column 1720px, and every
+     control in it used to be 1598px wide. */
+  await pageA.setViewportSize({ width: 2000, height: 1200 });
+  try {
+    await openSettings(pageA, "api-routers");
+    backend.keychain.delete(TYPESAFE_SERVICE);
+    delete backend.zoSettings.smart;
+    backend.zoSettings.providers = [];
+    await pageA.evaluate(() => refreshApiRouters());
+    await renderSettled(pageA);
+    const said = (key, fallback, vars) =>
+      pageA.evaluate(([one, words, values]) => t(one, words, values), [key, fallback, vars]);
+    const box = (selector) => pageA.locator(selector).boundingBox();
+
+    // ---- 1. a field is as wide as its value, and it names a rung ----------
+    const rungs = await pageA.evaluate(() => {
+      const root = getComputedStyle(document.documentElement);
+      return ["sm", "md", "lg", "full"].map((rung) => root.getPropertyValue(`--field-${rung}`).trim());
+    });
+    assertEqual(rungs, ["18ch", "26ch", "34ch", "100%"], "the field rungs are not four scale tokens");
+    const pane = await box('.settings-pane[data-pane="api-routers"]');
+    const key = await box("#router-key-input");
+    assert(pane.width > 1200, "the pane was not read at a width where this matters", pane.width);
+    assert(
+      key.width < pane.width / 4,
+      "the API key box still fills the column instead of holding a key",
+      { key: Math.round(key.width), pane: Math.round(pane.width) },
+    );
+    // Every field on the pane picks a rung, and no field carries a width in px.
+    const widths = await pageA.evaluate(() => [...document
+      .querySelectorAll('.settings-pane[data-pane="api-routers"] .settings-field')]
+      .map((field) => ({
+        rung: field.dataset.field ?? null,
+        inline: field.getAttribute("style") ?? "",
+      })));
+    assert(widths.length > 0, "the pane has no fields to read");
+    assertEqual(
+      widths.filter((field) => field.rung === null || field.inline.includes("px")),
+      [],
+      "a field on this pane sets its own width instead of naming a rung",
+    );
+
+    // ---- 2. the leftover width belongs to the words ----------------------
+    const label = await box('label[for="router-base-url-input"] .settings-label');
+    const url = await box("#router-base-url-input");
+    assert(
+      label.y < url.y + url.height && url.y < label.y + label.height,
+      "the label and its control are not on one line at this width",
+      { label, url },
+    );
+    assert(label.x + label.width <= url.x + 1, "the words run under the control", { label, url });
+    const rowEnd = await pageA.evaluate(() => {
+      const field = document.querySelector('label[for="router-base-url-input"]');
+      const style = getComputedStyle(field);
+      return field.getBoundingClientRect().right - parseFloat(style.paddingRight);
+    });
+    assert(
+      Math.abs(url.x + url.width - rowEnd) < 1.5,
+      "the control does not take the end of the row",
+      { control: url.x + url.width, rowEnd },
+    );
+    const copy = await pageA.evaluate(() => {
+      const first = document.querySelector('.settings-pane[data-pane="api-routers"] .settings-field-copy');
+      return { width: first.getBoundingClientRect().width, max: getComputedStyle(first).maxWidth };
+    });
+    assert(copy.max.endsWith("px") && parseFloat(copy.max) > 0, "the words carry no measure", copy);
+    assert(copy.width <= parseFloat(copy.max) + 1, "the words outran their measure", copy);
+
+    // And a column too narrow for two things stacks them, as it always did.
+    // The COLUMN is narrowed rather than the window: that is the claim — the
+    // rail takes 280px before the pane sees any, so the pane's own width is
+    // what the row can be asked about.
+    const narrow = await pageA.evaluate(() => {
+      const pane = document.querySelector('.settings-pane[data-pane="api-routers"]');
+      pane.style.maxWidth = "560px";
+      return pane.getBoundingClientRect().width;
+    });
+    await renderSettled(pageA);
+    assert(narrow < 620, "the narrow reading was not taken below the gate", narrow);
+    const stackedLabel = await box('label[for="router-base-url-input"] .settings-label');
+    const stackedUrl = await box("#router-base-url-input");
+    assert(
+      stackedUrl.y >= stackedLabel.y + stackedLabel.height - 1,
+      "a narrow column did not stack the field",
+      { stackedLabel, stackedUrl },
+    );
+    await pageA.evaluate(() => {
+      document.querySelector('.settings-pane[data-pane="api-routers"]').style.maxWidth = "";
+    });
+    await renderSettled(pageA);
+
+    // ---- 3. a refusal says ours first and folds the server's away --------
+    const body = '서버 오류: HTTP 401 Unauthorized — 无效的令牌 (request id: 20260918103344512345678901234)';
+    backend.routerProbeRefusal = body;
+    try {
+      await pageA.fill("#router-base-url-input", origin);
+      await pageA.fill("#router-name-input", "refused");
+      const testedAt = backend.calls.length;
+      await pageA.click("#router-test-btn");
+      await backend.waitForCall("A", "test_router_connection", testedAt);
+      await pageA.waitForSelector("#router-test-status .settings-status-said", { timeout: UI_TIMEOUT });
+      assertEqual(
+        await statusSaid(pageA, "router-test-status"),
+        await said("settings.apiRouters.testRefused", "연결하지 못했습니다 — 기본 URL과 API 키를 확인하세요."),
+        "the refusal did not lead with our own sentence",
+      );
+      const fold = pageA.locator("#router-test-status .settings-status-raw");
+      assert(await fold.count() === 1, "the server's words are not behind a fold");
+      assert(
+        !(await pageA.locator("#router-test-status .settings-status-body").isVisible()),
+        "the server's words are open before anybody asked for them",
+      );
+      assertEqual(
+        await pageA.locator("#router-test-status .settings-status-body").textContent(),
+        body,
+        "the fold does not hold what the server actually said",
+      );
+      assertEqual(
+        await pageA.locator("#router-test-status .settings-status-id").textContent(),
+        await said("settings.status.requestId", "요청 id — {{id}}", { id: "20260918103344512345678901234" }),
+        "the request id was left inside the prose",
+      );
+      // Ours is one line at this measure; the server's used to be two.
+      const line = await pageA.locator("#router-test-status .settings-status-said").boundingBox();
+      const leading = await pageA.evaluate(() =>
+        parseFloat(getComputedStyle(document.querySelector("#router-test-status .settings-status-said")).lineHeight));
+      assertEqual(Math.round(line.height / leading), 1, "our sentence does not fit one line");
+    } finally {
+      delete backend.routerProbeRefusal;
+    }
+
+    // ---- 4. the card head says where it stands, in the one table's words --
+    assertEqual(
+      await pageA.locator("#router-card-state").textContent(),
+      await standingWord(pageA, "failed"),
+      "a card that could not connect does not say so in its head",
+    );
+    const table = await pageA.evaluate(() => SETTINGS_STANDINGS.map((row) => row.id));
+    assertEqual(table, ["connected", "keySaved", "unchecked", "failed"], "the standings are not one four-row table");
+    assertEqual(
+      await pageA.locator("#typesafe-key-state").textContent(),
+      await standingWord(pageA, "unchecked"),
+      "the TypeSafe card head does not read from the same table",
+    );
+
+    // ---- 5. five seats, one row each, the paragraph folded ---------------
+    const seats = await pageA.evaluate(() => [...document.querySelectorAll("[data-jev-row]")]
+      .filter((row) => !row.hidden)
+      .map((row) => ({
+        order: Number(row.style.order),
+        seat: row.querySelector("[data-jev-seat]")?.dataset.jevSeat ?? null,
+        name: row.querySelector(".settings-label")?.textContent.trim() ?? "",
+        summary: row.querySelector(".settings-row-desc")?.textContent.trim() ?? "",
+        folded: row.querySelector("details.settings-fold")?.open === false,
+        paragraph: row.querySelector("details.settings-fold p")?.textContent.trim().length ?? 0,
+      })));
+    assertEqual(
+      seats.map((row) => row.seat),
+      JEV_SEATS.map((seat) => seat.id),
+      "the card's rows are not the use table's rows, in its order",
+    );
+    assertEqual(seats.map((row) => row.order), JEV_SEATS.map((_, at) => at), "a row does not take the table's place");
+    assertEqual(
+      seats.filter((row) => row.name === "" || row.summary === "" || !row.folded || row.paragraph < 80),
+      [],
+      "a seat is not [name · mode · one line] with its paragraph folded away",
+    );
+    assertEqual(
+      await pageA.locator("#jev-uses-count").textContent(),
+      String(JEV_SEATS.length),
+      "the card does not count the seats the table named",
+    );
+
+    // ---- 6. one thing to finish, and it is the only filled button --------
+    for (const [card, finish] of [["router-card", "router-save-btn"], ["typesafe-card", "typesafe-save-btn"]]) {
+      const bottom = await pageA.evaluate((id) => {
+        const box = document.getElementById(id);
+        const last = box.lastElementChild;
+        const filled = [...box.querySelectorAll(".btn--primary")].map((one) => one.id);
+        return {
+          actions: last.className,
+          buttonsOutside: [...box.querySelectorAll(".btn")]
+            .filter((one) => one.closest(".settings-action-row") !== last).map((one) => one.id),
+          filled,
+        };
+      }, card);
+      assert(bottom.actions.includes("settings-action-row"), `${card} does not end in its actions`, bottom);
+      assertEqual(bottom.buttonsOutside, [], `${card} leaves a button loose above its footer`);
+      assertEqual(bottom.filled, [finish], `${card} does not fill exactly the one thing to finish`);
+    }
+    return `key ${Math.round(key.width)}px in a ${Math.round(pane.width)}px column`;
+  } finally {
+    await pageA.setViewportSize({ width: 1280, height: 860 });
+    await renderSettled(pageA);
+  }
 });
 
 await test("the stateful backend refused every command the fixture did not define", async () => {
