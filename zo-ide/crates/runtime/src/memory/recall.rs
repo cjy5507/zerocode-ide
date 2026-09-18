@@ -3692,4 +3692,142 @@ mod tests {
         assert!(section.contains("local override endpoint body"));
         assert!(!section.contains("durable endpoint body"));
     }
+
+    /// What recall MISSES, measured against labels a person wrote.
+    ///
+    /// Every other reading of recall on this machine has been a precision
+    /// reading: of the notes it returned, how relevant did the judgment find
+    /// them. That measurement said 80.3% of what a turn is handed answers no
+    /// part of the request — but it cannot say whether a better note was
+    /// sitting in the vault unretrieved, and that is the question that decides
+    /// whether the fix is a floor under the results or a better retriever.
+    ///
+    /// The vault already holds the labels. `wiki/log.md` is one line per piece
+    /// of work: prose describing what was done, and the `[[wikilinks]]` to the
+    /// pages it produced. So the prose is the query and the links are the
+    /// answer — written by a person, for another purpose, before anyone
+    /// thought of measuring retrieval with it. The links are stripped out of
+    /// the query, or the slug's own words would be handed to the retriever as
+    /// the question; what is left is Korean prose asked against
+    /// English-slugged pages, which is the cross-language case this vault
+    /// actually has.
+    ///
+    /// Ignored because it reads the person's real vault, which is not checked
+    /// in. Run it deliberately:
+    ///
+    /// ```text
+    /// ZEROCODE_SECOND_BRAIN=/Users/dev \
+    ///   cargo test -p runtime --lib -- recall_miss_against_the_vaults_own_log --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "reads the person's real vault; run deliberately with ZEROCODE_SECOND_BRAIN"]
+    fn recall_miss_against_the_vaults_own_log() {
+        /// How deep to look before calling a labelled page unretrievable.
+        const DEEP: usize = 60;
+
+        /// A share of a sample this harness has already asserted is small.
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "a share of a few hundred labelled lines"
+        )]
+        fn share(part: usize, whole: usize) -> f64 {
+            100.0 * part as f64 / whole as f64
+        }
+
+        let root = std::env::var_os("ZEROCODE_SECOND_BRAIN")
+            .map(std::path::PathBuf::from)
+            .expect("point ZEROCODE_SECOND_BRAIN at the vault");
+        let vault = crate::second_brain::SecondBrain::at(&root);
+        let scan = crate::second_brain::corpus::scan(&vault);
+        let known: std::collections::BTreeSet<String> = scan
+            .pages
+            .iter()
+            .map(|page| page.entry().slug.clone())
+            .collect();
+        assert!(known.len() > 50, "a vault this small is not worth reading");
+
+        let log = fs::read_to_string(root.join("wiki").join("log.md")).expect("the vault's log");
+        let mut cases: Vec<(String, Vec<String>)> = Vec::new();
+        for line in log.lines().filter(|line| line.starts_with("- ")) {
+            let mut labels = Vec::new();
+            let mut query = String::with_capacity(line.len());
+            let mut rest = line;
+            while let Some(open) = rest.find("[[") {
+                query.push_str(&rest[..open]);
+                let after = &rest[open + 2..];
+                let Some(close) = after.find("]]") else { break };
+                let target = after[..close].split(['|', '#']).next().unwrap_or("").trim();
+                let slug = if target.starts_with("wiki/") {
+                    target.to_string()
+                } else {
+                    format!("wiki/{target}")
+                };
+                if known.contains(&slug) {
+                    labels.push(slug);
+                }
+                rest = &after[close + 2..];
+            }
+            query.push_str(rest);
+            // A line whose links all point at pages nobody wrote labels
+            // nothing, and a line with no prose left asks nothing.
+            if labels.is_empty() || query.trim().len() < 20 {
+                continue;
+            }
+            cases.push((query, labels));
+        }
+        assert!(
+            cases.len() > 30,
+            "the log yielded too few labelled lines: {}",
+            cases.len()
+        );
+
+        let retriever = LexicalMemoryRetriever::from_index_markdown("# Zo memory\n")
+            .with_corpus(scan);
+        let mut ranks: Vec<Option<usize>> = Vec::with_capacity(cases.len());
+        for (query, labels) in &cases {
+            let hits = retriever.recall(query, DEEP);
+            ranks.push(
+                hits.iter()
+                    .position(|hit| labels.contains(&hit.entry.slug)),
+            );
+        }
+
+        let found = |within: usize| {
+            ranks
+                .iter()
+                .filter(|rank| rank.is_some_and(|rank| rank < within))
+                .count()
+        };
+        let total = ranks.len();
+        println!("\n  labelled lines: {total}   vault pages: {}", known.len());
+        println!("  (a line's best-ranked labelled page, in the retriever's own order)\n");
+        for within in [1, 5, 8, 12, 20, DEEP] {
+            let hit = found(within);
+            let note = match within {
+                5 => "  <- what a turn renders",
+                8 => "  <- what the judgment is shown",
+                12 => "  <- the judgment's cap",
+                _ => "",
+            };
+            println!(
+                "  recall@{within:<3} {hit:4}/{total}  = {:5.1}%{note}",
+                share(hit, total)
+            );
+        }
+        let missed = ranks.iter().filter(|rank| rank.is_none()).count();
+        println!(
+            "\n  not in the top {DEEP} at all: {missed}/{total} = {:5.1}%",
+            share(missed, total)
+        );
+        let mut deep: Vec<usize> = ranks
+            .iter()
+            .filter_map(|rank| rank.filter(|rank| *rank >= 8))
+            .collect();
+        deep.sort_unstable();
+        println!(
+            "  ranked past the eight shown: {} lines, ranks {:?}",
+            deep.len(),
+            &deep[..deep.len().min(20)]
+        );
+    }
 }
