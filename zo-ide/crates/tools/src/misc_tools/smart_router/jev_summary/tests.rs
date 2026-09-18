@@ -289,3 +289,25 @@ fn a_windows_cost_is_read_from_the_judgment_rate_and_not_the_chat_table() {
         "the chat table now names the judgment model — say which table costs come from",
     );
 }
+
+#[test]
+fn a_draft_is_the_shape_the_label_reader_takes_and_only_when_it_was_asked_for() {
+    // Nobody could label a seat's work: the ledger keeps fingerprints and the
+    // transcripts kept none of the ten judged tasks (2026-09-19). The draft is
+    // written where the words still are.
+    let shipped = include_str!("../decision_shadow.rs");
+    let from = shipped.find("fn draft_labels(").expect("the drafter");
+    let body = &shipped[from..shipped[from..].find("\n/// ").map_or(shipped.len(), |at| from + at)];
+    assert!(
+        body.contains("promote::label_drafts_wanted"),
+        "the drafter writes a person's prompts without being asked to"
+    );
+    assert!(body.contains("already.contains(&task)"), "a filled-in draft can be buried by a blank one");
+    assert!(
+        body.contains("runtime::judged_axes()"),
+        "the axes are spelled here instead of read from the rubric"
+    );
+    for word in ["\"description\"", "\"prompt\"", "\"task\""] {
+        assert!(body.contains(word), "the draft is missing {word}, which the label reader joins on");
+    }
+}

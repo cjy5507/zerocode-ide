@@ -475,6 +475,7 @@ pub(super) fn fire(
         }
         return None;
     };
+    draft_labels(&cwd, tasks, &shots);
     // Every path this batch will use is resolved NOW, while the process still
     // stands where the caller does. The batch runs detached: by the time it
     // writes, the environment that answers "where does this project's state
@@ -606,6 +607,51 @@ fn write_rows(ledger: &Path, settings: Option<&serde_json::Value>, rows: &[Decis
         let _ = append_shadow_row(ledger, row, SHADOW_LEDGER_MAX_BYTES);
     }
     judge_ledger(ledger, settings, now_ms());
+}
+
+/// The file label drafts are appended to, beside the ledger they will be
+/// joined to.
+pub const LABEL_DRAFTS_FILE: &str = "decision-labels.draft.jsonl";
+
+/// Write down the words each judged task was judged on, for a person to put
+/// labels against (`smart.jev.labelDrafts`).
+///
+/// Here and nowhere else, because this is the last place the words exist: the
+/// ledger keeps a fingerprint and no text, on purpose, and the transcripts on
+/// this machine held none of the ten judged tasks either. Each line is already
+/// the shape `zo decision-shadow eval --labels` reads — the task as the probe
+/// read it, and one empty slot per judged axis, named from the rubric so a new
+/// axis arrives in the draft with it.
+///
+/// A fingerprint already drafted is not drafted again: a person's filled-in
+/// answer must not be buried under a second blank copy of the same task.
+fn draft_labels(cwd: &Path, tasks: &[(&str, &str)], shots: &[Shot]) {
+    let Some(root) = super::settings::merged_settings_root(cwd) else {
+        return;
+    };
+    if !promote::label_drafts_wanted(&root) {
+        return;
+    }
+    let drafts = shadow_ledger_path(cwd, LABEL_DRAFTS_FILE);
+    let already: std::collections::HashSet<u64> = super::jev_summary::read_rows(&drafts)
+        .iter()
+        .filter_map(|row| row.get("task").and_then(serde_json::Value::as_u64))
+        .collect();
+    for (description, prompt) in tasks {
+        let task = super::probe_exec::task_fingerprint(description, prompt);
+        if already.contains(&task) || !shots.iter().any(|shot| shot.task == task) {
+            continue;
+        }
+        let mut row = serde_json::json!({
+            "task": task,
+            "description": description,
+            "prompt": prompt,
+        });
+        for axis in runtime::judged_axes() {
+            row[axis.name] = serde_json::Value::String(String::new());
+        }
+        let _ = append_shadow_row(&drafts, &row, SHADOW_LEDGER_MAX_BYTES);
+    }
 }
 
 /// Judge the seat on what it has just written, and write down a rise or a

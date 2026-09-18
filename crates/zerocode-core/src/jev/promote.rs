@@ -283,6 +283,32 @@ impl Verdict {
 /// screen's "twenty labels are needed" names nothing a person can act on.
 pub const LABELS_KEY: &str = "labels";
 
+/// The settings key that turns on label drafts (`smart.jev.labelDrafts`).
+///
+/// §4 will not raise a seat until labels say its judgment is at least as right
+/// as the probe's, and the labels join the ledger by a task's fingerprint. But
+/// the ledger carries no words — deliberately — and neither, it turns out, do
+/// the transcripts: on this machine not one of the ten judged tasks could be
+/// matched back to the text it was judged on (measured 2026-09-19). So the
+/// rule had no road to it at all: a person could see that a seat wanted twenty
+/// labels and had nothing to write them against.
+///
+/// With this on, each judged task is drafted where it is asked — the one place
+/// the words are still in hand — for a person to fill the axes in. Off by
+/// default and named for what it does, because it writes their own prompts to
+/// a file, which the ledger beside it goes out of its way not to do.
+pub const LABEL_DRAFTS_KEY: &str = "labelDrafts";
+
+/// Whether the person asked for label drafts.
+#[must_use]
+pub fn label_drafts_wanted(root: &Value) -> bool {
+    root.get(crate::jev::SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(crate::jev::door::JEV_SETTINGS_KEY))
+        .and_then(|jev| jev.get(LABEL_DRAFTS_KEY))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 /// The labels file a person named, if they named one.
 #[must_use]
 pub fn labels_path_in(root: &Value) -> Option<&str> {

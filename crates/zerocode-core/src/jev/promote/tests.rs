@@ -429,3 +429,24 @@ fn the_labels_file_is_named_in_the_settings_or_nowhere() {
         "a path is read without the spaces around it"
     );
 }
+
+#[test]
+fn label_drafts_are_off_until_a_person_says_otherwise() {
+    use serde_json::json;
+    // It writes a person's own prompts to a file the ledger beside it refuses
+    // to write, so nothing but a plain `true` turns it on.
+    assert!(!label_drafts_wanted(&json!({})));
+    assert!(!label_drafts_wanted(&json!({"smart": {"jev": {}}})));
+    assert!(!label_drafts_wanted(
+        &json!({"smart": {"jev": {"labelDrafts": "yes"}}})
+    ));
+    assert!(!label_drafts_wanted(
+        &json!({"smart": {"jev": {"labelDrafts": 1}}})
+    ));
+    assert!(!label_drafts_wanted(
+        &json!({"smart": {"jev": {"labelDrafts": false}}})
+    ));
+    assert!(label_drafts_wanted(
+        &json!({"smart": {"jev": {"labelDrafts": true}}})
+    ));
+}
