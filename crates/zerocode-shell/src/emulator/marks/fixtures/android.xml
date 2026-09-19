@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<hierarchy rotation="0">
+  <node class="android.widget.FrameLayout" text="설정" content-desc="" resource-id="settings.root" package="com.example.settings" clickable="false" enabled="true" bounds="[0,0][1080,2340]">
+    <node class="android.widget.Button" text="일반" content-desc="일반 설정" resource-id="settings.general" package="com.example.settings" clickable="true" enabled="true" bounds="[20,80][140,124]" />
+  </node>
+</hierarchy>

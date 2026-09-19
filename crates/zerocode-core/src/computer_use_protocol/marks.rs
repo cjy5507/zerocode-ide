@@ -487,6 +487,20 @@ pub struct PlacedMark {
     pub badge_px: Rect,
 }
 
+impl PlacedMark {
+    /// The identity and geometry this mark must prove at the press boundary.
+    #[must_use]
+    pub fn pin(&self, tolerance: f64) -> Pin {
+        Pin {
+            signature: self.signature.clone(),
+            name: self.name.clone(),
+            context: self.context.clone(),
+            frame: self.local,
+            tolerance,
+        }
+    }
+}
+
 /// A look's marks: the ones placed, how many controls qualified, and how many
 /// of those got no badge (no free place, or past the cap).
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -540,10 +554,34 @@ struct Candidate<'a> {
     px: Rect,
 }
 
+/// Whether role, state and size qualify a face as a possible mark. Visibility,
+/// clipping and the provider's additional proof are checked by the plan.
+#[must_use]
+pub fn is_mark_candidate(face: &ElementFace, window: Rect) -> bool {
+    face.width >= MARK_MIN_SIDE_POINTS
+        && face.height >= MARK_MIN_SIDE_POINTS
+        && !face
+            .traits
+            .iter()
+            .any(|word| MARK_SKIP_TRAITS.contains(&word.as_str()))
+        && !MARK_NEVER_ROLES.contains(&face.role.as_str())
+        && (MARK_ROLES.contains(&face.role.as_str()) || presses(face))
+        && (TEXT_ENTRY_ROLES.contains(&face.role.as_str())
+            || face.local().area() <= MARK_MAX_WINDOW_SHARE * window.area())
+}
+
 /// Choose, number and place a window's marks. Pure and deterministic: the
 /// same faces and frame always give the same numbers in the same places.
 #[must_use]
 pub fn plan(input: &MarkInput<'_>) -> MarkPlan {
+    plan_where(input, |_| true)
+}
+
+/// The shared plan with an additional provider eligibility check. All faces
+/// remain in the identity census, including ones this check refuses: hiding
+/// an uncertain face must not make its look-alike appear unique.
+#[must_use]
+pub fn plan_where(input: &MarkInput<'_>, may_mark: impl Fn(&ElementFace) -> bool) -> MarkPlan {
     let frame = input.frame;
     let picture_px = Rect::new(
         0.0,
@@ -560,23 +598,11 @@ pub fn plan(input: &MarkInput<'_>) -> MarkPlan {
             frame.length_to_point(picture_px.height),
         )
     };
-    let window_area = input.window.area();
     // 1. Select what a person could press on this picture.
     let mut chosen: Vec<Candidate<'_>> = input
         .faces
         .iter()
-        .filter(|face| {
-            face.width >= MARK_MIN_SIDE_POINTS
-                && face.height >= MARK_MIN_SIDE_POINTS
-                && !face
-                    .traits
-                    .iter()
-                    .any(|word| MARK_SKIP_TRAITS.contains(&word.as_str()))
-                && !MARK_NEVER_ROLES.contains(&face.role.as_str())
-                && (MARK_ROLES.contains(&face.role.as_str()) || presses(face))
-                && (TEXT_ENTRY_ROLES.contains(&face.role.as_str())
-                    || face.local().area() <= MARK_MAX_WINDOW_SHARE * window_area)
-        })
+        .filter(|face| is_mark_candidate(face, input.window) && may_mark(face))
         .filter_map(|face| {
             let local = face.local();
             let screen = Rect::new(
@@ -723,8 +749,22 @@ pub struct MarkedWindow {
 /// in the picture's pixels with no code of its own).
 #[must_use]
 pub fn answer(plan: &MarkPlan, window: &MarkedWindow) -> Value {
-    let items: Vec<Value> = plan
-        .marks
+    json!({
+        SPACE_KEY: SCREEN_SPACE,
+        LOOK_ID_KEY: window.look_id,
+        "app": window.app,
+        "pid": window.pid,
+        "windowId": window.window_id,
+        ITEMS_KEY: items(plan),
+        "candidates": plan.candidates,
+        "omitted": plan.omitted,
+    })
+}
+
+/// The tool's geometry for each number, shared by desktop and mobile looks.
+#[must_use]
+pub fn items(plan: &MarkPlan) -> Vec<Value> {
+    plan.marks
         .iter()
         .map(|mark| {
             json!({
@@ -740,17 +780,7 @@ pub fn answer(plan: &MarkPlan, window: &MarkedWindow) -> Value {
                 "centerY": mark.screen.mid_y(),
             })
         })
-        .collect();
-    json!({
-        SPACE_KEY: SCREEN_SPACE,
-        LOOK_ID_KEY: window.look_id,
-        "app": window.app,
-        "pid": window.pid,
-        "windowId": window.window_id,
-        ITEMS_KEY: items,
-        "candidates": plan.candidates,
-        "omitted": plan.omitted,
-    })
+        .collect()
 }
 
 /// One legend line: `7 button Save @412,88` — the number, the role, the

@@ -716,12 +716,16 @@ pub(super) fn still_frame(
 }
 
 pub(super) fn accessibility_tree(udid: &str) -> Result<serde_json::Value, String> {
+    normalize_accessibility_tree(&accessibility_roots(udid)?)
+}
+
+/// Marks need the raw AX frame, before the display tree rounds it to 0..1.
+pub(super) fn accessibility_roots(udid: &str) -> Result<Vec<serde_json::Value>, String> {
     let json = client_for(udid)?
         .request(&InputRequest::Ax)?
         .ok_or("iOS 접근성 트리가 비어 있습니다")?;
-    let roots: Vec<serde_json::Value> = serde_json::from_str(&json)
-        .map_err(|error| format!("iOS 접근성 트리를 읽지 못했습니다: {error}"))?;
-    normalize_accessibility_tree(&roots)
+    serde_json::from_str(&json)
+        .map_err(|error| format!("iOS 접근성 트리를 읽지 못했습니다: {error}"))
 }
 
 #[derive(Clone, Copy)]

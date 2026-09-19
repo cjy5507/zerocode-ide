@@ -92,6 +92,8 @@ pub fn refusal_code(stderr: &str) -> Option<String> {
 /// The error codes a provider may answer with. A skill recovers by code, so
 /// the spelling is the contract (`skills/computer-use/SKILL.md` § Recovery).
 pub mod error_code {
+    /// A mobile mark no longer names the same pressable control on that look.
+    pub const PIN_BROKEN: &str = "pin_broken";
     pub const INVALID_ARGUMENT: &str = "invalid_argument";
     pub const APP_NOT_FOUND: &str = "app_not_found";
     pub const APP_BLOCKED: &str = "app_blocked";

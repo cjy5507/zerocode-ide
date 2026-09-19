@@ -1,0 +1,23 @@
+[
+  {
+    "AXLabel": "설정",
+    "AXValue": null,
+    "AXUniqueId": "com.example.settings",
+    "role_description": "application",
+    "type": "Application",
+    "enabled": true,
+    "frame": {"x": 0, "y": 0, "width": 390, "height": 844},
+    "children": [
+      {
+        "AXLabel": "일반",
+        "AXValue": null,
+        "AXUniqueId": "settings.general",
+        "role_description": "button",
+        "type": "Button",
+        "enabled": true,
+        "frame": {"x": 20, "y": 80, "width": 120, "height": 44},
+        "children": []
+      }
+    ]
+  }
+]

@@ -66,29 +66,22 @@ impl AndroidAxNode {
 }
 
 pub(super) fn snapshot(adb: &Path, serial: &str) -> Result<AndroidAxNode, String> {
-    run(
+    // Concurrent tree reads must never read or remove another request's dump.
+    let dump_path = format!("{DEVICE_DUMP_PATH}.{}", uuid::Uuid::new_v4());
+    let dumped = run(
         adb,
-        &[
-            "-s",
-            serial,
-            "shell",
-            "uiautomator",
-            "dump",
-            DEVICE_DUMP_PATH,
-        ],
-        None,
-    )?;
-    let xml = run(
-        adb,
-        &["-s", serial, "exec-out", "cat", DEVICE_DUMP_PATH],
-        Some(MAX_XML_BYTES),
-    )?;
-    let _ = run(
-        adb,
-        &["-s", serial, "shell", "rm", "-f", DEVICE_DUMP_PATH],
+        &["-s", serial, "shell", "uiautomator", "dump", &dump_path],
         None,
     );
-    let text = String::from_utf8(xml).map_err(|_| "Android 접근성 트리가 UTF-8이 아닙니다")?;
+    let xml = dumped.and_then(|_| {
+        run(
+            adb,
+            &["-s", serial, "exec-out", "cat", &dump_path],
+            Some(MAX_XML_BYTES),
+        )
+    });
+    let _ = run(adb, &["-s", serial, "shell", "rm", "-f", &dump_path], None);
+    let text = String::from_utf8(xml?).map_err(|_| "Android 접근성 트리가 UTF-8이 아닙니다")?;
     parse(&text)
 }
 
@@ -150,23 +143,20 @@ pub(super) fn parse(xml: &str) -> Result<AndroidAxNode, String> {
         match reader.read_event() {
             Ok(Event::Start(start)) => {
                 if stack.len() >= MAX_DEPTH {
-                    return Err("Android 접근성 트리 깊이가 제한을 넘었습니다".to_string());
+                    return Err(limit_exceeded("depth", MAX_DEPTH));
                 }
                 if start.name().as_ref() == b"node" {
-                    elements += 1;
-                    if elements > MAX_ELEMENTS {
-                        return Err("Android 접근성 요소 수가 제한을 넘었습니다".to_string());
-                    }
+                    count_element(&mut elements)?;
                     stack.push(Some(read_node(&start)?));
                 } else {
                     stack.push(None);
                 }
             }
             Ok(Event::Empty(start)) if start.name().as_ref() == b"node" => {
-                elements += 1;
-                if elements > MAX_ELEMENTS {
-                    return Err("Android 접근성 요소 수가 제한을 넘었습니다".to_string());
+                if stack.len() >= MAX_DEPTH {
+                    return Err(limit_exceeded("depth", MAX_DEPTH));
                 }
+                count_element(&mut elements)?;
                 attach(read_node(&start)?, &mut stack, &mut roots);
             }
             Ok(Event::End(_)) => {
@@ -186,6 +176,21 @@ pub(super) fn parse(xml: &str) -> Result<AndroidAxNode, String> {
         return Err("Android 접근성 XML이 완전하지 않습니다".to_string());
     }
     Ok(AndroidAxNode::root(roots))
+}
+
+fn limit_exceeded(kind: &str, maximum: usize) -> String {
+    format!(
+        "Android accessibility tree exceeds {kind} limit {maximum}; refused a truncated tree (no partial marks)"
+    )
+}
+
+fn count_element(elements: &mut usize) -> Result<(), String> {
+    *elements += 1;
+    if *elements > MAX_ELEMENTS {
+        Err(limit_exceeded("elements", MAX_ELEMENTS))
+    } else {
+        Ok(())
+    }
 }
 
 fn attach(
@@ -256,6 +261,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn android_xml_faces_preserve_every_supported_field() {
+        use zerocode_core::computer_use::EmulatorPlatform;
+        let tree = parse(include_str!("../marks/fixtures/android.xml")).unwrap();
+        let faces = crate::emulator::marks::faces(
+            EmulatorPlatform::Android,
+            &serde_json::to_value(tree).unwrap(),
+        );
+        let face = &faces[1];
+        assert_eq!(face.index, 2);
+        assert_eq!(face.role, "android.widget.Button");
+        assert_eq!(face.name.as_deref(), Some("일반 설정"));
+        assert_eq!(face.placeholder, None);
+        assert_eq!(face.traits, Vec::<String>::new());
+        assert_eq!(face.actions, vec!["AXPress"]);
+        assert_eq!(face.x, 20.0);
+        assert_eq!(face.y, 80.0);
+        assert_eq!(face.width, 120.0);
+        assert_eq!(face.height, 44.0);
+        assert!(face.signature.contains("settings.general"));
+        assert_eq!(face.visible, None);
+        assert_eq!(face.context.as_deref(), Some("설정"));
+    }
+
+    #[test]
     fn realistic_uiautomator_xml_maps_fields_entities_bounds_and_children() {
         let tree = parse(
             r#"<?xml version='1.0'?><hierarchy><node class="android.widget.FrameLayout" enabled="true" bounds="[0,0][1080,2340]"><node text="Tom &amp; Jerry" content-desc="Search" clickable="true" /></node></hierarchy>"#,
@@ -281,7 +310,16 @@ mod tests {
             "<node>".repeat(MAX_DEPTH + 1),
             "</node>".repeat(MAX_DEPTH + 1)
         );
-        assert!(parse(&deep).is_err());
+        assert!(parse(&deep).unwrap_err().contains("truncated"));
+        let wide = format!(
+            "<hierarchy>{}</hierarchy>",
+            "<node/>".repeat(MAX_ELEMENTS + 1)
+        );
+        assert!(
+            parse(&wide)
+                .unwrap_err()
+                .contains(&format!("elements limit {MAX_ELEMENTS}"))
+        );
     }
 
     #[test]

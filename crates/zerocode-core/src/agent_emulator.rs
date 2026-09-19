@@ -26,8 +26,8 @@ pub const EMULATOR_SWIPE_MS_MAX: u32 = 3_000;
 
 /// How long one emulator command may hold a walk: the swipe ceiling — the
 /// longest any gesture takes, and a comfortable bound on the round trip to
-/// the device backend for the reads and the photograph too. Every verb of
-/// this door is a single device round trip held by it; none is a check.
+/// the device backend for reads and photographs too. Mark clicks re-read
+/// the tree before input; they keep this same policy. None is a check.
 pub const EMULATOR_HOLD_MS: u64 = EMULATOR_SWIPE_MS_MAX as u64;
 
 /// The one table of the emulator door's verbs (`EmulatorMethod`, the words
@@ -37,10 +37,12 @@ pub const EMULATOR_HOLD_MS: u64 = EMULATOR_SWIPE_MS_MAX as u64;
 /// walk, and whether it acts on the device — the gestures do, the reads and
 /// the photograph do not, and none answers a check a Flow judges. The type
 /// and the readers are `agent_browser`'s, shared, never copied.
-pub const EMULATOR_VERBS: [BrowserVerb; 9] = [
+pub const EMULATOR_VERBS: [BrowserVerb; 11] = [
     verb("list", 0, 1, EMULATOR_HOLD_MS),
     verb("open", 2, 5, EMULATOR_HOLD_MS),
     verb("tree", 4, 5, EMULATOR_HOLD_MS),
+    verb("marks", 4, 5, EMULATOR_HOLD_MS),
+    act_verb("click", 8, 9, EMULATOR_HOLD_MS),
     act_verb("tap", 8, 9, EMULATOR_HOLD_MS),
     act_verb("swipe", 12, 15, EMULATOR_HOLD_MS),
     act_verb("text", 6, 7, EMULATOR_HOLD_MS),
@@ -90,6 +92,27 @@ mod tests {
         line.iter().map(|word| (*word).to_string()).collect()
     }
 
+    #[test]
+    fn emulator_marks_and_click_share_the_verb_table_contract() {
+        for (word, min, max, acts) in [("marks", 4, 5, false), ("click", 8, 9, true)] {
+            let row = emulator_verb(word).expect("the mobile marks door is registered");
+            assert_eq!((row.arity.min, row.arity.max), (min, max));
+            assert_eq!(holds_ms(word), Some(EMULATOR_HOLD_MS));
+            assert_eq!(super::acts(word), acts);
+            assert!(!is_check(word));
+            for count in [min, max] {
+                let mut line = vec![word.to_string()];
+                line.extend(std::iter::repeat_n("argument".to_string(), count));
+                assert!(arity_ok(&line).is_ok());
+            }
+            for count in [min - 1, max + 1] {
+                let mut line = vec![word.to_string()];
+                line.extend(std::iter::repeat_n("argument".to_string(), count));
+                assert!(arity_ok(&line).is_err());
+            }
+        }
+    }
+
     /// One table says what every emulator verb is — how many words it takes,
     /// how long it may hold a walk, whether it acts on the device and whether
     /// it is a check — and it is read by the very functions the browser
@@ -121,7 +144,7 @@ mod tests {
                 agent_browser::acts_in(&EMULATOR_VERBS, row.word)
             );
         }
-        assert_eq!(EMULATOR_VERBS.len(), 9);
+        assert_eq!(EMULATOR_VERBS.len(), 11);
         assert_eq!(holds_ms("nope"), None);
         assert_eq!(EMULATOR_CLI, "zerocode-emulator");
         assert_eq!(EMULATOR_HOLD_MS, u64::from(EMULATOR_SWIPE_MS_MAX));

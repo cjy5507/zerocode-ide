@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use super::{BinaryChannel, EmulatorPlatform, EmulatorStream};
@@ -80,6 +80,10 @@ pub(super) struct SessionControl {
     wake: Condvar,
     child: Mutex<Option<Child>>,
     screen_size: Mutex<Option<(u32, u32)>>,
+    /// A marked press holds this from its fresh tree through input so another
+    /// input in this window cannot slip between the proof and the tap. The
+    /// registry shares it by actual device, across stream modes and restarts.
+    input: Arc<Mutex<()>>,
     /// The longest edge this stream's viewer can actually paint, in the device
     /// pixels it will paint with. Zero means nobody has said.
     ///
@@ -105,7 +109,7 @@ pub(super) struct SessionControl {
 }
 
 impl SessionControl {
-    pub fn new() -> Arc<Self> {
+    fn with_input(input: Arc<Mutex<()>>) -> Arc<Self> {
         Arc::new(Self {
             alive: AtomicBool::new(true),
             paused: AtomicBool::new(false),
@@ -118,16 +122,31 @@ impl SessionControl {
             wake: Condvar::new(),
             child: Mutex::new(None),
             screen_size: Mutex::new(None),
+            input,
             viewport_long_edge: AtomicU32::new(0),
             cleanup: Mutex::new(None),
             frames: Mutex::new(None),
         })
     }
 
-    pub fn with_cleanup(cleanup: impl FnOnce() + Send + 'static) -> Arc<Self> {
-        let control = Self::new();
-        *held(&control.cleanup) = Some(Box::new(cleanup));
-        control
+    #[cfg(test)]
+    fn new() -> Arc<Self> {
+        Self::with_input(Arc::default())
+    }
+
+    pub fn set_cleanup(&self, cleanup: impl FnOnce() + Send + 'static) {
+        *held(&self.cleanup) = Some(Box::new(cleanup));
+    }
+
+    pub fn input(&self) -> Result<SessionInput<'_>, String> {
+        let guard = held(&self.input);
+        if !self.is_alive() {
+            return Err("이 기기 스트림은 실행 중이 아닙니다".into());
+        }
+        Ok(SessionInput {
+            control: self,
+            _guard: guard,
+        })
     }
 
     pub fn is_alive(&self) -> bool {
@@ -397,16 +416,38 @@ impl SessionControl {
         self.notify();
     }
 
-    pub fn stop(&self) {
-        if !self.alive.swap(false, Ordering::AcqRel) {
-            return;
+    fn cancel(&self) -> bool {
+        self.alive.swap(false, Ordering::AcqRel)
+    }
+
+    #[cfg(test)]
+    fn stop(&self) {
+        if self.cancel() {
+            self.finish_stop();
         }
+    }
+
+    fn finish_stop(&self) {
         held(&self.posted).clear();
         self.kill_child();
         self.notify();
         if let Some(cleanup) = held(&self.cleanup).take() {
             cleanup();
         }
+    }
+}
+
+/// One device's input gate, retaining the exact stream that acquired it.
+/// Stopping a stream revokes it without waiting for a slow tree read; a new
+/// stream still shares the gate until every in-flight input has left it.
+pub(super) struct SessionInput<'control> {
+    control: &'control SessionControl,
+    _guard: MutexGuard<'control, ()>,
+}
+
+impl SessionInput<'_> {
+    pub fn is_alive(&self) -> bool {
+        self.control.is_alive()
     }
 }
 
@@ -421,6 +462,7 @@ struct RegistryState {
     sessions: HashMap<String, SessionEntry>,
     active: HashMap<SessionKey, String>,
     starting: HashSet<SessionKey>,
+    inputs: HashMap<(EmulatorPlatform, String), Weak<Mutex<()>>>,
 }
 
 #[derive(Default)]
@@ -473,6 +515,24 @@ impl Drop for StartLease {
 }
 
 impl SessionRegistry {
+    pub fn new_control(&self, descriptor: &EmulatorStream) -> Arc<SessionControl> {
+        let mut state = held(&self.state);
+        // A stopped stream may still own a pending Pin. Its strong handle
+        // keeps the device gate alive for any replacement stream. Dead weak
+        // entries are pruned rather than retaining every past device forever.
+        state.inputs.retain(|_, gate| gate.strong_count() > 0);
+        let gate = state
+            .inputs
+            .entry((descriptor.platform, descriptor.udid.clone()))
+            .or_default();
+        let input = gate.upgrade().unwrap_or_else(|| {
+            let input = Arc::default();
+            *gate = Arc::downgrade(&input);
+            input
+        });
+        SessionControl::with_input(input)
+    }
+
     pub fn claim(&'static self, key: SessionKey) -> Result<StartClaim, String> {
         let deadline = Instant::now() + START_LEASE_TIMEOUT;
         let mut state = held(&self.state);
@@ -531,11 +591,15 @@ impl SessionRegistry {
     }
 
     pub fn stop(&self, stream: &str) -> bool {
-        let entry = {
+        let (entry, first) = {
             let mut state = held(&self.state);
             let Some(entry) = state.sessions.remove(stream) else {
                 return false;
             };
+            // Revoke before another claim can publish a replacement. Cleanup
+            // remains outside this short registry lock and never waits on the
+            // device input gate held during a potentially slow AX read.
+            let first = entry.control.cancel();
             if state
                 .active
                 .get(&entry.key)
@@ -543,9 +607,11 @@ impl SessionRegistry {
             {
                 state.active.remove(&entry.key);
             }
-            entry
+            (entry, first)
         };
-        entry.control.stop();
+        if first {
+            entry.control.finish_stop();
+        }
         self.changed.notify_all();
         true
     }
@@ -610,10 +676,11 @@ impl SessionRegistry {
                 .sessions
                 .drain()
                 .map(|(_, entry)| entry)
+                .filter(|entry| entry.control.cancel())
                 .collect::<Vec<_>>()
         };
         for entry in entries {
-            entry.control.stop();
+            entry.control.finish_stop();
         }
         self.changed.notify_all();
     }
@@ -691,6 +758,79 @@ mod tests {
 
         assert!(registry.stop("stream-1"));
         assert_eq!(registry.counts(), (0, 0, 0));
+    }
+
+    fn registered_control(
+        registry: &'static SessionRegistry,
+        key: SessionKey,
+        stream: &str,
+    ) -> Arc<SessionControl> {
+        let StartClaim::Acquired(lease) = registry.claim(key).expect("new stream") else {
+            panic!("unexpected existing stream");
+        };
+        let descriptor = descriptor(stream);
+        let control = registry.new_control(&descriptor);
+        lease.activate(descriptor, control.clone());
+        control
+    }
+
+    #[test]
+    fn device_input_excludes_another_stream_mode_and_a_reopened_stream() {
+        for reopen in [false, true] {
+            let registry = Box::leak(Box::<SessionRegistry>::default());
+            // Android frame claims use an AVD name; video claims use its
+            // serial. The descriptors name the same actual device in both.
+            let frames = SessionKey::frames(EmulatorPlatform::Android, "avd");
+            let old = registered_control(registry, frames.clone(), "old");
+            let _snapshot_to_tap = held(&old.input);
+            let key = if reopen {
+                assert!(registry.stop("old"));
+                frames
+            } else {
+                SessionKey::video(EmulatorPlatform::Android, "device")
+            };
+            let new = registered_control(registry, key, "new");
+            assert!(
+                matches!(
+                    new.input.try_lock(),
+                    Err(std::sync::TryLockError::WouldBlock)
+                ),
+                "new input can cross an in-flight Pin proof (reopen={reopen})"
+            );
+        }
+    }
+
+    #[test]
+    fn stopping_revokes_a_held_input_without_waiting_for_the_device_gate() {
+        let registry = Box::leak(Box::<SessionRegistry>::default());
+        let key = SessionKey::frames(EmulatorPlatform::Android, "avd");
+        let old = registered_control(registry, key.clone(), "old");
+        let input = old.input().expect("live input");
+        assert!(registry.stop("old"));
+        assert!(!input.is_alive());
+        let new = registered_control(registry, key, "new");
+        assert!(matches!(
+            new.input.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ));
+        drop(input);
+        assert!(old.input().is_err(), "a revoked stream regained input");
+        assert!(new.input().is_ok());
+    }
+
+    #[test]
+    fn input_gates_are_per_actual_device_and_dead_entries_are_reclaimed() {
+        let registry = SessionRegistry::default();
+        let first = registry.new_control(&descriptor("first"));
+        let _input = first.input().expect("first device");
+        let mut other = descriptor("other");
+        other.udid.push_str("-other");
+        let second = registry.new_control(&other);
+        assert!(second.input().is_ok(), "different devices share a gate");
+        drop(second);
+        let next = registry.new_control(&descriptor("next"));
+        assert_eq!(held(&registry.state).inputs.len(), 1);
+        assert!(Arc::ptr_eq(&first.input, &next.input));
     }
 
     #[test]

@@ -112,7 +112,8 @@ pub fn fenced_dir(local_data_root: &Path, presented: Option<&str>) -> Option<Pat
 #[must_use]
 pub fn captures(tool: &str, verb: &str) -> Option<bool> {
     match (tool, verb) {
-        ("emulator", "tap" | "swipe" | "text" | "button" | "rotate" | "screenshot")
+        ("emulator", verb) if zerocode_core::agent_emulator::acts(verb) => Some(true),
+        ("emulator", "screenshot")
         | (
             "browser",
             "goto" | "click" | "type" | "eval" | "wait" | "screenshot" | "viewport" | "scroll"
@@ -156,7 +157,7 @@ pub fn captures(tool: &str, verb: &str) -> Option<bool> {
         // `marks` numbers the controls; the line stays in the log, but the
         // picture with the numbers on it is `screenshot --marks`, so nothing
         // is framed after the marks line itself.
-        ("emulator" | "browser", "open") | ("browser", "close" | "marks") => Some(false),
+        ("emulator" | "browser", "open" | "marks") | ("browser", "close") => Some(false),
         // The one hand's own words are worth a line — a stop in the log says
         // why the actions end — and so are the checks, the pauses, the
         // person's turn, the ears and a hover (the menu a later click needs):
@@ -381,6 +382,16 @@ fn walk_files(dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_emulator_action_is_evidence_and_marks_leave_a_line_without_a_picture() {
+        for row in zerocode_core::agent_emulator::EMULATOR_VERBS {
+            if zerocode_core::agent_emulator::acts(row.word) {
+                assert_eq!(captures("emulator", row.word), Some(true), "{}", row.word);
+            }
+        }
+        assert_eq!(captures("emulator", "marks"), Some(false));
+    }
 
     /// A refused step keeps its code even when its refusal is longer than the
     /// line keeps; a plain sentence and an answered step carry none, and the

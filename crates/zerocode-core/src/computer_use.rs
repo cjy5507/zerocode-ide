@@ -2273,6 +2273,8 @@ pub enum EmulatorMethod {
     List,
     Open,
     Tree,
+    Marks,
+    Click,
     Tap,
     Swipe,
     Text,
@@ -2326,6 +2328,8 @@ pub struct EmulatorCommand {
     pub name: Option<String>,
     pub rotation: Option<u32>,
     pub out: Option<String>,
+    pub mark: Option<usize>,
+    pub look: Option<String>,
     pub json: bool,
 }
 
@@ -2343,6 +2347,8 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         "list" => EmulatorMethod::List,
         "open" => EmulatorMethod::Open,
         "tree" => EmulatorMethod::Tree,
+        "marks" => EmulatorMethod::Marks,
+        "click" => EmulatorMethod::Click,
         "tap" => EmulatorMethod::Tap,
         "swipe" => EmulatorMethod::Swipe,
         "text" => EmulatorMethod::Text,
@@ -2360,7 +2366,8 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
     let allowed: &[&str] = match method {
         EmulatorMethod::List => &["json"],
         EmulatorMethod::Open => &["json", "platform", "device"],
-        EmulatorMethod::Tree => &["json", "platform", "device"],
+        EmulatorMethod::Tree | EmulatorMethod::Marks => &["json", "platform", "device"],
+        EmulatorMethod::Click => &["json", "platform", "device", "mark", "look"],
         EmulatorMethod::Tap => &["json", "platform", "device", "x", "y"],
         EmulatorMethod::Swipe => &["json", "platform", "device", "x1", "y1", "x2", "y2", "ms"],
         EmulatorMethod::Text => &["json", "platform", "device", "text"],
@@ -2411,6 +2418,15 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         .map(|value| u32::try_from(value).map_err(|_| "--rotation is too large".to_string()))
         .transpose()?;
     let out = optional_string(&flags, "out")?;
+    let mark = optional_non_negative_integer(&flags, "mark")?
+        .map(|value| {
+            usize::try_from(value)
+                .ok()
+                .filter(|value| (1..=MARK_CAP).contains(value))
+                .ok_or_else(|| format!("--mark must be between 1 and {MARK_CAP}"))
+        })
+        .transpose()?;
+    let look = optional_string(&flags, "look")?;
 
     if method != EmulatorMethod::List && platform.is_none() {
         return Err("missing required --platform".into());
@@ -2419,6 +2435,10 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         return Err("missing required --device".into());
     }
     match method {
+        EmulatorMethod::Click => {
+            mark.ok_or("missing required --mark")?;
+            look.as_ref().ok_or("missing required --look")?;
+        }
         EmulatorMethod::Tap if x.is_none() || y.is_none() => {
             return Err("tap needs both --x and --y".into());
         }
@@ -2456,6 +2476,8 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         name,
         rotation,
         out,
+        mark,
+        look,
         json: flags.contains_key("json"),
     })
 }
@@ -4011,6 +4033,8 @@ pub fn emulator_usage() -> String {
         "  zerocode-emulator list [--json]",
         "  zerocode-emulator open --platform ios|android [--device <id>] [--json]",
         "  zerocode-emulator tree --platform ios|android --device <id> [--json]",
+        "  zerocode-emulator marks --platform ios|android --device <id> [--json]",
+        "  zerocode-emulator click --platform ios|android --device <id> --mark <n> --look <id> [--json]",
         "  zerocode-emulator tap --platform ios|android --device <id> --x <0..1> --y <0..1> [--json]",
         "  zerocode-emulator swipe --platform ios|android --device <id> --x1 N --y1 N --x2 N --y2 N [--ms N] [--json]",
         "  zerocode-emulator text --platform ios|android --device <id> (--text <text>|--text-stdin) [--json]",
@@ -5722,6 +5746,76 @@ mod tests {
         ] {
             assert!(parse_command(&argv).is_err(), "accepted {argv:?}");
         }
+    }
+
+    #[test]
+    fn emulator_marks_and_click_parse_with_their_look() {
+        for platform in ["ios", "android"] {
+            for args in [
+                vec![
+                    "marks",
+                    "--platform",
+                    platform,
+                    "--device",
+                    "phone",
+                    "--json",
+                ],
+                vec![
+                    "click",
+                    "--platform",
+                    platform,
+                    "--device",
+                    "phone",
+                    "--mark",
+                    "1",
+                    "--look",
+                    "L1",
+                ],
+                vec![
+                    "click",
+                    "--platform",
+                    platform,
+                    "--device",
+                    "phone",
+                    "--mark",
+                    "99",
+                    "--look",
+                    "L2",
+                    "--json",
+                ],
+            ] {
+                assert!(parse_emulator_command(&words(&args)).is_ok(), "{args:?}");
+            }
+        }
+        let usage = emulator_usage();
+        for word in ["marks", "click", "--mark", "--look"] {
+            assert!(usage.contains(word), "missing usage for {word}");
+        }
+    }
+
+    #[test]
+    fn emulator_click_refuses_zero_mark_by_name() {
+        emulator_click_refusal(&["--mark", "0", "--look", "L1"], "--mark");
+    }
+
+    #[test]
+    fn emulator_click_refuses_mark_over_cap_by_name() {
+        emulator_click_refusal(&["--mark", "100", "--look", "L1"], "--mark");
+    }
+
+    #[test]
+    fn emulator_click_refuses_missing_look_by_name() {
+        emulator_click_refusal(&["--mark", "1"], "--look");
+    }
+
+    fn emulator_click_refusal(tail: &[&str], flag: &str) {
+        let mut args = words(&["click", "--platform", "ios", "--device", "phone"]);
+        args.extend(words(tail));
+        let error = parse_emulator_command(&args).unwrap_err();
+        assert!(
+            error.starts_with(&format!("{flag} ")) || error == format!("missing required {flag}"),
+            "{error}"
+        );
     }
 
     #[test]

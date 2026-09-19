@@ -24,7 +24,7 @@ use zerocode_core::computer_use::{
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
 use zerocode_core::computer_use_protocol::marks::{
     self as plan, DesktopWindow, ELEMENT_FRAMES_KEY, ELEMENTS_KEY, EVERY_LAYER_KEY, ElementFace,
-    MarkInput, MarkedWindow, Pin, PlacedMark,
+    MarkInput, MarkedWindow, PlacedMark,
 };
 use zerocode_core::computer_use_protocol::render::Rect;
 use zerocode_core::computer_use_protocol::{cache, error_code};
@@ -504,14 +504,7 @@ pub fn pinned_click(params: &Value) -> Result<PinnedClick, ComputerUseError> {
     helper.insert("elementIndex".into(), placed.element_index.into());
     helper.insert("session".into(), MARK_SNAPSHOT_SESSION.into());
     helper.insert("noScreenshot".into(), true.into());
-    Pin {
-        signature: placed.signature.clone(),
-        name: placed.name.clone(),
-        context: placed.context.clone(),
-        frame: placed.local,
-        tolerance: MARK_PIN_TOLERANCE_POINTS,
-    }
-    .write(&mut helper);
+    placed.pin(MARK_PIN_TOLERANCE_POINTS).write(&mut helper);
     for key in ["mouseButton", "clickCount", "modifiers", "confirming"] {
         if let Some(value) = params.get(key) {
             helper.insert(key.into(), value.clone());

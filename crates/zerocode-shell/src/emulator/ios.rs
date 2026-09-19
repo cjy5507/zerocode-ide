@@ -1010,18 +1010,6 @@ pub(crate) async fn start_emulator_stream(
         // whole of it as blank pane. `release` is safe on a udid that was
         // never retained, so the cleanup can be attached before anything is.
         let release_udid = chosen.udid.clone();
-        let control = SessionControl::with_cleanup(move || {
-            #[cfg(target_os = "macos")]
-            super::ios_hid::release(&release_udid);
-        });
-        // The door goes to the session, not to the pump: it can be replaced
-        // under a running pump when a second pane opens the same device.
-        control.hand_frames_to(on_frame);
-        // Before the pump exists, so the FIRST picture is already cut to the
-        // pane rather than to the default and then re-cut a heartbeat later.
-        if let Some(viewport) = viewport {
-            control.set_viewport_long_edge(viewport.long_edge_px);
-        }
         let stream_id = crate::hooks::random_token().ok_or("스트림 id를 만들 수 없습니다")?;
         let descriptor = EmulatorStream {
             stream: stream_id.clone(),
@@ -1033,6 +1021,19 @@ pub(crate) async fn start_emulator_stream(
             interactive: false,
             reused: false,
         };
+        let control = registry().new_control(&descriptor);
+        control.set_cleanup(move || {
+            #[cfg(target_os = "macos")]
+            super::ios_hid::release(&release_udid);
+        });
+        // The door goes to the session, not to the pump: it can be replaced
+        // under a running pump when a second pane opens the same device.
+        control.hand_frames_to(on_frame);
+        // Before the pump exists, so the FIRST picture is already cut to the
+        // pane rather than to the default and then re-cut a heartbeat later.
+        if let Some(viewport) = viewport {
+            control.set_viewport_long_edge(viewport.long_edge_px);
+        }
         crate::note_window_event(
             app.state::<crate::AppState>().local_data_root(),
             &format!(
@@ -1175,6 +1176,8 @@ pub(crate) async fn open_mobile_emulator_direct(udid: Option<String>) -> Result<
 
 #[cfg(target_os = "macos")]
 fn run_ios_input(udid: &str, request: super::ios_hid::InputRequest) -> Result<(), String> {
+    let control = ios_control(udid)?;
+    let _input = control.input()?;
     super::ios_hid::send(udid, request)
 }
 
@@ -1253,6 +1256,51 @@ pub(crate) async fn ios_tap_direct(udid: String, x: f64, y: f64) -> Result<(), S
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+pub(super) async fn marks_snapshot_direct(udid: String) -> Result<super::marks::Snapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _control = ios_control(&udid)?;
+        marks_snapshot(&udid)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn marks_snapshot(udid: &str) -> Result<super::marks::Snapshot, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let tree = serde_json::Value::Array(super::ios_hid::accessibility_roots(udid)?);
+        super::marks::Snapshot::ios(&tree)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = udid;
+        Err("iOS 접근성 트리는 macOS에서만 지원됩니다".into())
+    }
+}
+
+pub(super) async fn click_mark_direct(
+    udid: String,
+    request: super::marks::PinnedTap,
+) -> Result<(), zerocode_core::computer_use_protocol::ProviderError> {
+    use super::marks::backend_error;
+    tauri::async_runtime::spawn_blocking(move || {
+        let control = ios_control(&udid).map_err(backend_error)?;
+        let input = control.input().map_err(backend_error)?;
+        let snapshot = marks_snapshot(&udid).map_err(backend_error)?;
+        request.perform_in(&input, &snapshot.faces, snapshot.screen, |x, y| {
+            #[cfg(target_os = "macos")]
+            super::ios_hid::send(&udid, super::ios_hid::InputRequest::Tap { x, y })
+                .map_err(backend_error)?;
+            #[cfg(not(target_os = "macos"))]
+            let _ = (x, y, run_ios_input(&udid, ()).map_err(backend_error)?);
+            control.notify();
+            Ok(())
+        })
+    })
+    .await
+    .map_err(backend_error)?
 }
 
 #[tauri::command]

@@ -3237,6 +3237,9 @@ pub(super) async fn answer_emulator_command(
     let platform = command.platform;
     let device = command.device.clone();
     let result: Result<serde_json::Value, String> = match command.method {
+        EmulatorMethod::Marks | EmulatorMethod::Click => {
+            return answer_emulator_marks(command).await;
+        }
         EmulatorMethod::List => {
             let (ios, android) =
                 tokio::join!(mobile_emulators_direct(), android_emulators_direct());
@@ -3348,12 +3351,75 @@ pub(super) async fn answer_emulator_command(
         }
     };
 
+    emulator_answer(
+        command.method,
+        command.json,
+        result.map_err(crate::emulator::marks::backend_error),
+    )
+}
+
+async fn answer_emulator_marks(
+    command: zerocode_core::computer_use::EmulatorCommand,
+) -> zerocode_hookd::TeamAnswer {
+    use crate::emulator::marks;
+    use zerocode_core::computer_use::{EmulatorMethod, EmulatorPlatform};
+    let result = async {
+        let platform = command.platform.ok_or_else(|| {
+            zerocode_core::computer_use_protocol::ProviderError::invalid_argument(
+                "missing --platform",
+            )
+        })?;
+        let device = command.device.ok_or_else(|| {
+            zerocode_core::computer_use_protocol::ProviderError::invalid_argument(
+                "missing --device",
+            )
+        })?;
+        let device = match platform {
+            EmulatorPlatform::Android => active_android_serial(&device)
+                .await
+                .map_err(marks::backend_error)?,
+            EmulatorPlatform::Ios => device,
+        };
+        match command.method {
+            EmulatorMethod::Marks => marks::observe(platform, device).await,
+            _ => {
+                marks::click(
+                    platform,
+                    device,
+                    command.mark.unwrap_or_default(),
+                    command.look.as_deref().unwrap_or_default(),
+                )
+                .await
+            }
+        }
+    }
+    .await;
+    emulator_answer(command.method, command.json, result)
+}
+
+pub(super) fn emulator_answer(
+    method: zerocode_core::computer_use::EmulatorMethod,
+    json: bool,
+    result: Result<serde_json::Value, zerocode_core::computer_use_protocol::ProviderError>,
+) -> zerocode_hookd::TeamAnswer {
+    use zerocode_core::computer_use::EmulatorMethod;
+    let marked = matches!(method, EmulatorMethod::Marks | EmulatorMethod::Click);
     match result {
-        Ok(result) if command.json => {
+        Ok(mut result) if json => {
+            if marked {
+                result[zerocode_core::untrusted::JSON_FLAG] = true.into();
+            }
             computer_said(format!("{}\n", json!({ "ok": true, "result": result })))
         }
-        Ok(result) => computer_said(format!("{}\n", emulator_pretty(command.method, &result))),
-        Err(error) => emulator_cli_error(command.json, "emulator_error", &error),
+        Ok(result) => {
+            let text = emulator_pretty(method, &result);
+            computer_said(if marked {
+                zerocode_core::untrusted::fence("emulator", &text, text.len())
+            } else {
+                format!("{text}\n")
+            })
+        }
+        Err(error) => emulator_cli_error(json, &error.code, &error.message),
     }
 }
 
@@ -4052,6 +4118,14 @@ pub(super) fn emulator_pretty(
 ) -> String {
     use zerocode_core::computer_use::EmulatorMethod;
     match method {
+        EmulatorMethod::Marks | EmulatorMethod::Click => {
+            use zerocode_core::computer_use_protocol::marks::{LEGEND_KEY, LOOK_ID_KEY};
+            format!(
+                "{LOOK_ID_KEY}: {}\n{}",
+                value[LOOK_ID_KEY].as_str().unwrap_or_default(),
+                value[LEGEND_KEY].as_str().unwrap_or_default()
+            )
+        }
         EmulatorMethod::Open => "Opening in ZeroCode's built-in emulator pane…".into(),
         EmulatorMethod::Tap
         | EmulatorMethod::Swipe

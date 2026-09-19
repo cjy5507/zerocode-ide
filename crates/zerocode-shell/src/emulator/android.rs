@@ -1029,7 +1029,7 @@ pub(crate) async fn start_android_stream(
             interactive: true,
             reused: false,
         };
-        let control = SessionControl::new();
+        let control = registry().new_control(&descriptor);
         control.hand_frames_to(on_frame);
         let descriptor = lease.activate(descriptor, control.clone());
         crate::note_window_event(
@@ -1314,7 +1314,7 @@ pub(crate) async fn start_emulator_video(
             interactive: true,
             reused: false,
         };
-        let control = SessionControl::new();
+        let control = registry().new_control(&descriptor);
         control.hand_frames_to(on_video);
         let descriptor = lease.activate(descriptor, control.clone());
         let pump_app = app.clone();
@@ -1396,7 +1396,7 @@ fn bounded_video_dimensions(width: u32, height: u32) -> Option<(u32, u32)> {
     Some((even(width), even(height)))
 }
 
-fn device_point(x: f64, y: f64, size: (u32, u32)) -> (u32, u32) {
+pub(super) fn device_point(x: f64, y: f64, size: (u32, u32)) -> (u32, u32) {
     let (width, height) = size;
     (
         (x.clamp(0.0, 1.0) * f64::from(width.saturating_sub(1))).round() as u32,
@@ -1405,6 +1405,12 @@ fn device_point(x: f64, y: f64, size: (u32, u32)) -> (u32, u32) {
 }
 
 fn android_input(sdk: &AndroidSdk, serial: &str, args: &[&str]) -> Result<(), String> {
+    let (_, control) = android_control(serial)?;
+    let _input = control.input()?;
+    android_input_unlocked(sdk, serial, args)
+}
+
+fn android_input_unlocked(sdk: &AndroidSdk, serial: &str, args: &[&str]) -> Result<(), String> {
     let mut command = vec!["-s", serial, "shell", "input"];
     command.extend_from_slice(args);
     let out = crate::proc::quiet_command(&sdk.adb)
@@ -1432,13 +1438,73 @@ pub(crate) async fn android_tap(
 pub(crate) async fn android_tap_direct(serial: String, x: f64, y: f64) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (sdk, control) = android_control(&serial)?;
-        let (x, y) = device_point(x, y, android_screen_size(&sdk, &serial, &control)?);
-        android_input(&sdk, &serial, &["tap", &x.to_string(), &y.to_string()])?;
-        registry().nudge(EmulatorPlatform::Android, &serial);
-        Ok(())
+        let _input = control.input()?;
+        tap_at(
+            &sdk,
+            &serial,
+            x,
+            y,
+            android_screen_size(&sdk, &serial, &control)?,
+        )
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+fn tap_at(sdk: &AndroidSdk, serial: &str, x: f64, y: f64, size: (u32, u32)) -> Result<(), String> {
+    let (x, y) = device_point(x, y, size);
+    android_input_unlocked(sdk, serial, &["tap", &x.to_string(), &y.to_string()])?;
+    registry().nudge(EmulatorPlatform::Android, serial);
+    Ok(())
+}
+
+fn marks_snapshot(
+    sdk: &AndroidSdk,
+    serial: &str,
+) -> Result<(super::marks::Snapshot, (u32, u32)), String> {
+    let size = read_android_screen_size(sdk, serial)?;
+    let tree = serde_json::to_value(accessibility::snapshot(&sdk.adb, serial)?)
+        .map_err(|error| error.to_string())?;
+    let screen = zerocode_core::computer_use_protocol::render::Rect::new(
+        0.0,
+        0.0,
+        f64::from(size.0),
+        f64::from(size.1),
+    );
+    super::marks::Snapshot::new(
+        zerocode_core::computer_use::EmulatorPlatform::Android,
+        &tree,
+        screen,
+    )
+    .map(|snapshot| (snapshot, size))
+}
+
+pub(super) async fn marks_snapshot_direct(
+    serial: String,
+) -> Result<super::marks::Snapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (sdk, _control) = android_control(&serial)?;
+        marks_snapshot(&sdk, &serial).map(|(snapshot, _)| snapshot)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+pub(super) async fn click_mark_direct(
+    serial: String,
+    request: super::marks::PinnedTap,
+) -> Result<(), zerocode_core::computer_use_protocol::ProviderError> {
+    use super::marks::backend_error;
+    tauri::async_runtime::spawn_blocking(move || {
+        let (sdk, control) = android_control(&serial).map_err(backend_error)?;
+        let input = control.input().map_err(backend_error)?;
+        let (snapshot, size) = marks_snapshot(&sdk, &serial).map_err(backend_error)?;
+        request.perform_in(&input, &snapshot.faces, snapshot.screen, |x, y| {
+            tap_at(&sdk, &serial, x, y, size).map_err(backend_error)
+        })
+    })
+    .await
+    .map_err(backend_error)?
 }
 
 #[tauri::command]
@@ -1571,6 +1637,7 @@ pub(crate) async fn android_rotate(
 pub(crate) async fn android_rotate_direct(serial: String, rotation: u32) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (sdk, control) = android_control(&serial)?;
+        let _input = control.input()?;
         let put = |key: &str, value: &str| -> Result<(), String> {
             let out = crate::proc::quiet_command(&sdk.adb)
                 .args([

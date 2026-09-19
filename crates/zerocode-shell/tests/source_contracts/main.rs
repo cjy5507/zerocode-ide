@@ -8176,8 +8176,14 @@ mod tests {
 
         // Every input wakes that device's shared control so a polling fallback
         // captures the result without waiting out its idle cadence.
+        for road in ["fn android_tap_direct(", "fn click_mark_direct("] {
+            assert!(
+                block_after(android_emulator, road).contains("tap_at("),
+                "{road} bypassed the shared tap and its frame wake"
+            );
+        }
         for road in [
-            "fn android_tap_direct(",
+            "fn tap_at(",
             "fn android_swipe_direct(",
             "fn android_text_direct(",
             "fn android_button_direct(",

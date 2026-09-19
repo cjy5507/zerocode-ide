@@ -184,6 +184,9 @@ final class AccessibilityBridge: NSObject {
             root["children"] = children
         }
 
+        // A full budget cannot prove that the unseen tail was empty. Marks
+        // must not number a tree whose missing peers could defeat identity.
+        if remainingElements == 0 { root["truncated"] = true }
         let json: [Any] = [root]
         return try JSONSerialization.data(withJSONObject: json)
     }
@@ -472,6 +475,7 @@ final class AccessibilityBridge: NSObject {
                     childDicts.append(childDict)
                 }
             }
+            if childDicts.count < children.count { dict["truncated"] = true }
         }
 
         // Record this element. Only true leaves block the grid — anything

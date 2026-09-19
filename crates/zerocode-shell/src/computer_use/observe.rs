@@ -33,13 +33,13 @@ struct LastFrame {
 /// the last frames, one per place (`OBSERVE_FRAMES_MAX`), and the marked
 /// looks' numbers, one per look (`MARK_LOOKS_KEPT`).
 #[derive(Debug)]
-pub(super) struct Kept<T> {
+pub(crate) struct Kept<T> {
     held: Vec<(String, T)>,
     cap: usize,
 }
 
 impl<T> Kept<T> {
-    pub(super) const fn new(cap: usize) -> Self {
+    pub(crate) const fn new(cap: usize) -> Self {
         Self {
             held: Vec::new(),
             cap,
@@ -52,7 +52,7 @@ impl<T> Kept<T> {
         Some(self.held.remove(at).1)
     }
 
-    pub(super) fn get(&self, key: &str) -> Option<&T> {
+    pub(crate) fn get(&self, key: &str) -> Option<&T> {
         self.held
             .iter()
             .find(|(held, _)| held == key)
@@ -66,7 +66,7 @@ impl<T> Kept<T> {
 
     /// Remember `value` for `key`, replacing that key's older one and
     /// forgetting the oldest key once the table is full.
-    pub(super) fn keep(&mut self, key: String, value: T) {
+    pub(crate) fn keep(&mut self, key: String, value: T) {
         self.held.retain(|(held, _)| held != &key);
         self.held.push((key, value));
         while self.held.len() > self.cap {
