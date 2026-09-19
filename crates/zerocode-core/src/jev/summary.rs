@@ -22,7 +22,8 @@ use serde_json::Value;
 /// enough that one slow answer cannot carry it.
 pub const JUDGED_EVERY_ROWS: usize = 20;
 
-/// The z for the 95% one-sided Wilson bound the rise line is read against
+/// The z for the lower endpoint of a two-sided 95% Wilson interval, which
+/// the rise line is read against
 /// (§4). Spelled once: a bound computed with a different z is a different
 /// promise, and the screen's words name this one.
 pub const WILSON_Z_95: f64 = 1.959_963_984_540_054;
