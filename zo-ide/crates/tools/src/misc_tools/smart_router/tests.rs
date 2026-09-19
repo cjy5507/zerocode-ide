@@ -1412,7 +1412,9 @@
     #[test]
     fn custom_role_name_collision_uses_task_write_intent() {
         let config_home = temp_config_home("custom-role-name-collision");
-        write_settings(&config_home, &json!({"smart": {"enabled": true}}));
+        // This case holds the deterministic custom-role policy. A live probe
+        // may legitimately raise complexity and is tested over its own mock.
+        write_settings(&config_home, &json!({"smart": {"enabled": true, "autoClassifier": "deterministic"}}));
         let definitions = config_home.join("agents");
         fs::create_dir_all(&definitions).expect("custom definitions directory");
         fs::write(

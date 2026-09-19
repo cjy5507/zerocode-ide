@@ -555,10 +555,10 @@ mod live_path_tests {
     use super::PROBE_BASE_URL_ENV;
 
     /// `PROBE_BASE_URL_ENV` is process-global and the probe memo is too, so the
-    /// live-path cases run one at a time.
+    /// live-path cases must exclude every other process-environment user,
+    /// including routing tests that can read this endpoint by default.
     fn env_lock() -> MutexGuard<'static, ()> {
-        static LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+        crate::tests::env_lock()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -586,6 +586,16 @@ mod live_path_tests {
                 None => std::env::remove_var(PROBE_BASE_URL_ENV),
             }
         }
+    }
+
+    #[test]
+    fn probe_override_excludes_other_process_environment_users() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("fixture endpoint");
+        let _env = ProbeEnv::pointing_at(listener.local_addr().expect("fixture address"));
+        assert!(
+            matches!(crate::tests::env_lock().try_lock(), Err(std::sync::TryLockError::WouldBlock)),
+            "another environment user can read this fixture's probe endpoint"
+        );
     }
 
     /// A blocking HTTP/1.1 mock that answers every request with the same canned
@@ -856,7 +866,6 @@ mod live_path_tests {
         use std::ffi::OsString;
         use std::net::SocketAddr;
         use std::path::PathBuf;
-        use std::sync::{MutexGuard, PoisonError};
         use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
         use runtime::{
@@ -926,12 +935,12 @@ mod live_path_tests {
             ledger: PathBuf,
             previous: Vec<(&'static str, Option<OsString>)>,
             _probe: ProbeEnv,
-            _lock: MutexGuard<'static, ()>,
         }
 
         impl ShadowEnv {
             fn new(probe: SocketAddr, judgment: SocketAddr, key: Option<&str>) -> Self {
-                let lock = crate::tests::env_lock().lock().unwrap_or_else(PoisonError::into_inner);
+                // ProbeEnv owns the one process-wide lock for every override
+                // below; acquiring it twice would deadlock this combined case.
                 let probe = ProbeEnv::pointing_at(probe);
                 let home = tempfile::tempdir().expect("a config home");
                 let state = tempfile::tempdir().expect("a state dir");
@@ -954,7 +963,7 @@ mod live_path_tests {
                 }
                 std::env::set_var(api::SYSTEMONE_BASE_URL_ENV, format!("http://{judgment}"));
                 let ledger = decision_shadow_path(&std::env::current_dir().expect("cwd"));
-                Self { home, _state: state, ledger, previous, _probe: probe, _lock: lock }
+                Self { home, _state: state, ledger, previous, _probe: probe }
             }
 
             /// Write `smart.decisionShadow`, or leave it unset, with the working
