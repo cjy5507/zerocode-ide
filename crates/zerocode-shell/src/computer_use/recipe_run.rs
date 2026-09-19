@@ -227,7 +227,18 @@ pub fn decide(
         .and_then(Value::as_u64)
         .and_then(|start| usize::try_from(start).ok())
         .unwrap_or(1);
-    let decided = preflight(&lines, start, &values_of(command)).map_err(Refused::invalid)?;
+    let end = command
+        .params
+        .get("end")
+        .and_then(Value::as_u64)
+        .and_then(|n| usize::try_from(n).ok())
+        .unwrap_or(lines.len());
+    if end < start || end > lines.len() {
+        return Err(Refused::invalid(
+            "--end must name a recipe step at or after --start".into(),
+        ));
+    }
+    let decided = preflight(&lines[..end], start, &values_of(command)).map_err(Refused::invalid)?;
     Ok((lines, start, decided))
 }
 
@@ -688,11 +699,18 @@ fn live_fingerprint(desk: &mut impl Desk) -> Fingerprint {
 #[must_use]
 pub fn verdict_of(report: &Value) -> Option<(bool, Option<String>)> {
     let verdict = report.pointer("/flow/verdict")?;
-    let pass = verdict.get("pass")?.as_bool()? && report["done"] == Value::Bool(true);
+    let pass = verdict.get("pass")?.as_bool()?
+        && report["done"] == Value::Bool(true)
+        && report
+            .get("complete")
+            .is_none_or(|complete| complete == &Value::Bool(true));
     if pass {
         return Some((true, None));
     }
     let mut why: Vec<String> = Vec::new();
+    if report.get("complete") == Some(&Value::Bool(false)) && report["done"] == Value::Bool(true) {
+        why.push("only the selected recipe range ran".into());
+    }
     if let Some(stop) = report.get("stop").filter(|stop| !stop.is_null()) {
         why.push(format!(
             "stopped at step {} ({})",
@@ -1012,7 +1030,10 @@ fn check_walk<'c>(
         |check: &&Check, argv| recipe_line_holds_ms(check.tool, argv),
         |_, check| Next::Run(check_argv(check, budget_ms)),
         |n, check, argv| {
-            let answer = step(check.tool, argv, argv);
+            let answer =
+                crate::run_evidence::observing(json!({"judgment": {"asked": false}}), || {
+                    step(check.tool, argv, argv)
+                });
             lines.left(check.tool, argv);
             observed.insert(check.id, presence_of(check, &answer));
             (json!({ "n": n }), None)
@@ -1155,7 +1176,10 @@ fn walk_lines(
             }
             let seed = region.and_then(|region| desk.borrow_mut().picture(region));
             let acting = elapsed();
-            let answer = step(tool, argv, &recipe_line_argv(tool, &line.argv, framed));
+            let answer =
+                crate::run_evidence::observing(json!({"judgment": {"asked": false}}), || {
+                    step(tool, argv, &recipe_line_argv(tool, &line.argv, framed))
+                });
             phases.act = elapsed().saturating_sub(acting);
             let evidence_n = lines.left(tool, argv);
             let envelope = match tool {
@@ -1366,6 +1390,9 @@ fn report(
         "start": start,
         "ran": steps,
         "done": walked.finished(),
+        "complete": walked.finished() && start == 1
+            && command.params.get("end").and_then(Value::as_u64)
+                .is_none_or(|end| usize::try_from(end).ok() == Some(lines.len())),
         "stoppedAt": stopped_at,
         "stop": stop,
         "next": next,
@@ -2217,6 +2244,34 @@ mod tests {
             Some(0),
             "a caller gone gets no steps"
         );
+    }
+
+    #[test]
+    fn a_single_step_retry_walks_only_that_line_and_cannot_pass_the_whole_flow() {
+        let bench = Bench::new();
+        let text = doc(&["key --key a", "key --key b", "key --key c"]);
+        let mut pressed = Vec::new();
+        let report = run_lines(
+            &command(&["--start", "2", "--end", "2"]),
+            ("f.md", &text),
+            DEADLINE,
+            |_, argv| {
+                pressed.push(argv.to_vec());
+                ok()
+            },
+            |_, _, _| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap();
+        assert_eq!(pressed.len(), 1);
+        assert_eq!(report["ran"][0]["step"], 2);
+        assert_eq!(report["complete"], false);
+        let mut with_verdict = report;
+        with_verdict["flow"] = json!({ "verdict": { "pass": true, "lines": [] } });
+        assert_eq!(verdict_of(&with_verdict).map(|(pass, _)| pass), Some(false));
+        assert!(decide(&command(&["--start", "3", "--end", "2"]), &text).is_err());
+        assert!(decide(&command(&["--end", "9"]), &text).is_err());
     }
 
     #[test]

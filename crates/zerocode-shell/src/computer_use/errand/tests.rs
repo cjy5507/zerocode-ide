@@ -63,6 +63,7 @@ impl ActionJudge for FakeJudge {
 pub(super) struct FakeWorld {
     screen: Option<Screen>,
     pub(super) presses: Vec<usize>,
+    observed: Vec<Option<Value>>,
     press_takes: bool,
     walked_from: Vec<usize>,
     /// The step each re-walk says it stopped at; `None` means it finished.
@@ -86,6 +87,7 @@ impl FakeWorld {
                 items: marks.iter().map(|mark| control(*mark, "저장")).collect(),
             }),
             presses: Vec::new(),
+            observed: Vec::new(),
             press_takes: true,
             walked_from: Vec::new(),
             walks: vec![None],
@@ -109,6 +111,7 @@ impl World for FakeWorld {
         self.screen.clone()
     }
     fn press(&mut self, mark: usize) -> bool {
+        self.observed.push(crate::run_evidence::observation());
         self.presses.push(mark);
         if self.press_takes
             && self.moves
@@ -871,4 +874,18 @@ fn two_looks_are_the_same_screen_when_the_question_would_read_the_same_words() {
     assert!(desk("카카오톡").same_as(&desk("카카오톡")));
     assert!(!desk("카카오톡").same_as(&desk("Finder")));
     assert!(!desk("카카오톡").same_as(&page("a.local", "보내기")));
+}
+
+#[test]
+fn the_actual_goal_press_carries_its_judgment_and_restores_the_recording_context() {
+    let mut world = FakeWorld::showing(&[1]);
+    let mut judge = FakeJudge::chose(&[1]);
+    run(Mode::On, &goal(1), &mut judge, &mut world);
+    assert_eq!(world.observed.len(), 1);
+    let observed = world.observed[0].as_ref().unwrap();
+    assert_eq!(observed["judgment"]["asked"], true);
+    assert_eq!(observed["judgment"]["confidence"], 0.7);
+    assert!(observed["judgment"]["ms"].is_u64());
+    assert!(observed["look_ms"].is_u64());
+    assert!(crate::run_evidence::observation().is_none());
 }

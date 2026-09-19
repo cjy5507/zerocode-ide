@@ -2039,8 +2039,31 @@ mod tests {
         ]))
         .expect("parsed");
         assert_eq!(confirmed.params["confirm"], json!("TXN-1"));
+        let range = parse_command(&words(&[
+            "recipe-run",
+            "--name",
+            "pay",
+            "--start",
+            "2",
+            "--end",
+            "2",
+        ]))
+        .unwrap();
+        assert_eq!(range.params["end"], json!(2));
+        assert!(parse_command(&words(&["recipe-run", "--name", "pay", "--end", "0"])).is_err());
+        assert!(
+            parse_command(&words(&[
+                "recipe-run",
+                "--name",
+                "pay",
+                "--end",
+                "2",
+                "--repeat"
+            ]))
+            .is_err()
+        );
         assert!(usage().contains(
-            "recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--json]"
+            "recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--end N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--json]"
         ));
         assert!(
             parse_command(&words(&["recipe-show", "--name", "pay", "--confirm", "x"])).is_err()

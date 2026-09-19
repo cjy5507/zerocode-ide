@@ -516,12 +516,14 @@ pub fn run(
             ));
             return walked;
         }
+        let looking = std::time::Instant::now();
         let Some(screen) = world.look() else {
             walked
                 .rows
                 .push(row(mode, at, attempt, json!({ "outcome": "no_look" })));
             return walked;
         };
+        let look_ms = u64::try_from(looking.elapsed().as_millis()).unwrap_or(u64::MAX);
         match before.as_ref() {
             Some(was) if was.same_as(&screen) => {
                 still += 1;
@@ -556,7 +558,9 @@ pub fn run(
         before = Some(screen);
 
         let candidates = asked.marks().len();
+        let judging = std::time::Instant::now();
         let judged = judge.choose(&asked);
+        let judgment_ms = u64::try_from(judging.elapsed().as_millis()).unwrap_or(u64::MAX);
         let spent = judge.spent();
         let choice = match judged {
             Judged::Chose(choice) => choice,
@@ -616,7 +620,14 @@ pub fn run(
             return walked;
         }
 
-        if !world.press(chosen) {
+        let pressed = crate::run_evidence::observing(
+            json!({
+                "look_ms": look_ms,
+                "judgment": { "asked": true, "ms": judgment_ms, "confidence": choice.confidence },
+            }),
+            || world.press(chosen),
+        );
+        if !pressed {
             note(&mut said, "routeUse", json!(USE_FALLBACK));
             note(&mut said, "pressed", json!(false));
             walked.rows.push(row(mode, at, attempt, said));

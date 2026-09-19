@@ -35076,3 +35076,24 @@ fn a_pane_conversations_notices_are_keyed_by_what_they_say_and_speak_four_locale
         );
     }
 }
+
+#[test]
+fn the_flow_console_checks_the_main_webview_before_reading_or_executing() {
+    let source = include_str!("../../src/flow_console.rs");
+    for command in source.split("#[tauri::command").skip(1) {
+        assert!(command.contains("webview: tauri::Webview"));
+        let gate = command
+            .find("from_the_main_webview(&webview)?")
+            .expect("a guest must not read evidence or submit a Flow");
+        let access = command
+            .find("evidence_in(")
+            .or_else(|| command.find("COMPUTER.get()"));
+        assert!(gate < access.unwrap());
+    }
+    let writer = include_str!("../../src/run_evidence.rs");
+    assert!(writer.contains("get_webview(crate::MAIN_WINDOW_LABEL)"));
+    assert!(
+        !writer.contains("app.emit("),
+        "evidence must not be broadcast to guest listeners"
+    );
+}

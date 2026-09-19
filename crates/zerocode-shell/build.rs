@@ -135,6 +135,7 @@ const UI_FILES: &[&str] = &[
     "shell-boot.js",
     "shell-browser.js",
     "shell-computer.js",
+    "shell-flow.js",
     "shell-doc.js",
     "shell-i18n.js",
     "shell-input.js",

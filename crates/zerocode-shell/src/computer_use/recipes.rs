@@ -670,6 +670,7 @@ mod tests {
             acts: false,
             shot: None,
             frame: None,
+            observation: None,
             frame_skipped: None,
         }
     }

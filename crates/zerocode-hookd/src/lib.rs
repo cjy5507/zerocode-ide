@@ -544,6 +544,14 @@ impl BridgeState {
         self
     }
 
+    /// The window's own UI submits through the same consumer as authenticated
+    /// CLI requests. This in-process handle exposes no capability token and
+    /// does not skip the consumer's sequence, permission or action guards.
+    #[must_use]
+    pub fn computer_requests(&self) -> mpsc::UnboundedSender<ComputerRequest> {
+        self.computer.clone()
+    }
+
     pub fn new_with_computer(
         token: impl Into<String>,
         browser_token: impl Into<String>,

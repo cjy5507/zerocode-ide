@@ -50,6 +50,7 @@
     <script defer src="./shell-update.js"></script>
     <script defer src="./shell-computer.js"></script>
     <script defer src="./shell-settings.js"></script>
+    <script defer src="./shell-flow.js"></script>
     <script defer src="./shell-remote.js"></script>
     <script defer src="./shell-sftp.js"></script>
     <script defer src="./shell.js"></script>
@@ -1329,6 +1330,12 @@
            zo TUI가 그대로 뜬다. 구조화 채널은 권한 모달·상태바
            숫자 같은 신호에만 쓴다. -->
       <main class="stage" id="stage">
+        <section id="flow-console" class="flow-console" hidden aria-labelledby="flow-console-title">
+          <header><h2 id="flow-console-title" data-i18n="flow.live.title">Flow 실행</h2><select id="flow-console-mirror" aria-label="브라우저 · 기기 화면" data-i18n-aria="flow.live.mirror"></select><button id="flow-console-close" class="btn" type="button" data-i18n="app.close">닫기</button></header>
+          <div class="flow-console-body"><div class="flow-console-stream"><p id="flow-console-status"></p><div id="flow-console-steps" role="log" aria-live="polite"></div><button id="flow-console-report" class="btn" type="button" hidden></button></div>
+          <aside><h3 id="flow-console-queue-title" data-i18n="flow.live.queue">큐 · 지난 실행</h3><div id="flow-console-queue"></div></aside></div>
+          <form id="flow-goal-form"><input id="flow-goal" class="settings-input" autocomplete="off"><button id="flow-goal-submit" class="btn" type="submit" data-i18n="flow.run">지금 걷기</button></form>
+        </section>
         <!-- The first leaf of the stage's split tree. Orca's centre is a
              split tree and every leaf carries its own tab strip
              (docs/reverse/orca-ui-inventory.md 1-e, 1-bu); this is group 0,
@@ -5941,6 +5948,7 @@
         <div class="settings-card flow-card" id="flow-card" hidden>
           <div class="settings-subhead">
             <h3 class="settings-subhead-title" data-i18n="flow.title">Flow</h3>
+            <button class="btn" type="button" id="flow-console-open" data-i18n="flow.live.title">Flow 실행</button>
             <p class="settings-subhead-desc" data-i18n="flow.about">한 번 걷고 recipe-save로 남긴 뒤, 성공 조건을 담은 Flow·Checks 절을 말로 붙이면 여기 섭니다. 이 카드는 문서를 읽고 되쓸 뿐이고, 무엇을 어디에 누르는지는 레시피가 쥡니다.</p>
           </div>
           <p class="settings-hint flow-empty" id="flow-empty" hidden data-i18n="flow.empty">아직 Flow가 없습니다. 한 번 걷고 recipe-save로 남긴 뒤, Flow·Checks 절을 말로 붙이세요.</p>

@@ -3414,17 +3414,11 @@ async function flowSet(slug, change) {
   }
 }
 
-/* Run it now on the existing road: a plain terminal with `recipe-run --name`
- * in it — no new runner. */
+/* The console submits recipe-run to the existing window dispatcher. */
 async function flowRun() {
   const flow = flowBySlug(flowSelected);
   if (!flow) return;
-  try {
-    const term = await invoke("open_term_tab", { rows: 24, cols: 96, plain: true });
-    mountTermTab(term);
-    await invoke("term_text", { term, text: `zerocode-computer recipe-run --name ${flow.slug}` });
-    setSettingsOpen(false);
-  } catch (error) { showError(error); }
+  await flowLaunch(["recipe-run", "--name", flow.slug], flow.name);
 }
 
 el("flow-run").addEventListener("click", () => void flowRun());
@@ -6091,6 +6085,7 @@ function setLocale(code) {
   // The schedule screen builds its own words too: the pickers' options, each
   // row's next-run line, and the sentence under the form.
   paintAutoPickers();
+  if (!el("flow-console").hidden) paintFlowConsole();
   // The TypeSafe switch builds its options from the backend's list of modes,
   // so `applyLocale` has no key on them to sweep.
   if (typesafeState) paintTypeSafe(typesafeState);

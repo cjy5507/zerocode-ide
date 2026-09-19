@@ -39104,3 +39104,29 @@ body.sftp-active #ask-scrim { z-index: var(--sftp-confirm-layer); }
     align-items: flex-start;
   }
 }
+
+/* The stage itself is the left mirror; its existing viewport observer follows
+   this padding. There is no duplicate canvas, stream or screenshot clock. */
+.stage.has-flow-console { padding-right: 66%; }
+/* The implicit grid column otherwise keeps the browser toolbar’s min-content
+   width and gives the native view a rectangle extending over the cards. */
+.stage.has-flow-console .pane { grid-template-columns: minmax(0, 1fr); }
+.flow-console { position: absolute; inset: 0 0 0 34%; display: flex; flex-direction: column; min-width: 0; background: var(--surface-deck); color: var(--ink-chalk); border-left: var(--rule-width) solid var(--edge-rule); z-index: 3; }
+.flow-console[hidden] { display: none; }
+.flow-console header, #flow-goal-form { display: flex; align-items: center; gap: 8px; padding: 12px; }
+.flow-console header h2 { flex: 1; margin: 0; font-size: 15px; }
+.flow-console-body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 30%); min-height: 0; flex: 1; }
+.flow-console-stream, .flow-console aside { overflow: auto; min-width: 0; padding: 12px; }
+.flow-console aside { border-left: var(--rule-width) solid var(--edge-rule); }
+.flow-console aside h3 { font-size: 12px; }
+#flow-console-queue, .flow-console-saved { display: flex; flex-direction: column; gap: 8px; }
+#flow-console-queue button { white-space: normal; overflow-wrap: anywhere; }
+.flow-step { padding: 12px; margin-bottom: 8px; border: var(--rule-width) solid var(--edge-rule); border-radius: 8px; overflow-wrap: anywhere; }
+.flow-step p { margin: 6px 0; font-size: 12px; }
+#flow-goal { flex: 1; min-width: 0; }
+@media (max-width: 900px) {
+  .stage.has-flow-console { padding-right: 0; padding-bottom: 60vh; }
+  .flow-console { inset: 40% 0 0; }
+}
+
+#flow-console-mirror { min-width: 0; max-width: 42%; color: inherit; background-color: var(--surface-deck); border: var(--rule-width) solid var(--edge-rule); border-radius: 6px; padding: 6px; padding-inline-end: var(--select-room); }

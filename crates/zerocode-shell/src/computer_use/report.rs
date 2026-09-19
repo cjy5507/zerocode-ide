@@ -299,6 +299,10 @@ pub(crate) fn write(dir: &Path) -> Result<Option<PathBuf>, String> {
         crate::update_store::write_then_rename(path, bytes)
             .map_err(|error| format!("could not write {}: {error}", path.display()))?;
     }
+    run_evidence::emit(
+        "flow:report",
+        serde_json::json!({"dir": dir, "report": report}),
+    );
     Ok(Some(report))
 }
 

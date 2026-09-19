@@ -8,7 +8,8 @@
 //! word. A run that did not ask has no folder, and nothing here runs.
 
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, OnceLock, PoisonError};
+use tauri::Manager as _;
 
 use serde::{Deserialize, Serialize};
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
@@ -37,6 +38,10 @@ pub struct Step {
     pub verb: String,
     pub argv: Vec<String>,
     pub ok: bool,
+    /// Measurements taken by the road that performed this step. Absent in
+    /// old logs and when the road did not observe them; never inferred by UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// A refused step's code, read from the whole refusal before `error` is
@@ -240,6 +245,79 @@ pub fn redacted_chars(word: &str) -> Option<usize> {
 /// sequence instead of both taking the same next number.
 static WRITING: Mutex<()> = Mutex::new(());
 
+static WINDOW: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+/// Bind the existing writer to this window. Emission is best effort and
+/// happens only after a complete append, under the writer's ordering lock.
+pub fn install_window(app: tauri::AppHandle) {
+    let _ = WINDOW.set(app);
+}
+
+/// Deliver only into the trusted main webview. Tauri's plain `listen()` uses
+/// an Any target, which can defeat emit filters (see `dirty_event_for`).
+/// JSON is parsed as data in that one webview, never broadcast to guests.
+pub fn emit<T: Serialize>(event: &str, value: T) {
+    let Some(webview) = WINDOW
+        .get()
+        .and_then(|app| app.get_webview(crate::MAIN_WINDOW_LABEL))
+    else {
+        return;
+    };
+    let Ok(payload) = serde_json::to_string(&(event, value)) else {
+        return;
+    };
+    let Ok(quoted) = serde_json::to_string(&payload) else {
+        return;
+    };
+    let _ = webview.eval(format!(
+        "(()=>{{const [name,payload]=JSON.parse({quoted});window.dispatchEvent(new CustomEvent(name,{{detail:payload}}));}})()"
+    ));
+}
+
+thread_local! {
+    static OBSERVATION: std::cell::RefCell<Option<serde_json::Value>> = const { std::cell::RefCell::new(None) };
+}
+
+/// The synchronous recipe/goal road's measured context. A road entering an
+/// async operation copies it before awaiting, so another task cannot own it.
+pub fn observation() -> Option<serde_json::Value> {
+    OBSERVATION.with(|held| held.borrow().clone())
+}
+
+/// Scope a measured look/judgment to the press it caused. Unwinding restores
+/// the previous context as well, so a failed press cannot label a later one.
+pub fn observing<T>(value: serde_json::Value, run: impl FnOnce() -> T) -> T {
+    struct Restore(Option<serde_json::Value>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            OBSERVATION.with(|held| *held.borrow_mut() = self.0.take());
+        }
+    }
+    let _restore = Restore(OBSERVATION.with(|held| held.replace(Some(value))));
+    run()
+}
+
+/// Add the time measured around the actual door call. Verb classification
+/// stays with the existing core tables; a read is never labelled a press.
+pub fn measured(
+    mut observed: Option<serde_json::Value>,
+    tool: &str,
+    argv: &[String],
+    elapsed: std::time::Duration,
+) -> Option<serde_json::Value> {
+    let verb = argv.first().map_or("", String::as_str);
+    let acts = match tool {
+        "browser" => zerocode_core::agent_browser::acts(verb),
+        "emulator" => zerocode_core::agent_emulator::acts(verb),
+        _ => zerocode_core::computer_use::parse_command(argv)
+            .is_ok_and(|command| command.method.acts()),
+    };
+    let key = if acts { "act_ms" } else { "elapsed_ms" };
+    let value = observed.get_or_insert_with(|| serde_json::json!({}));
+    value[key] = serde_json::json!(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX));
+    observed
+}
+
 /// Write one step: its line, and its frame when there is one — or why there
 /// is none. Answers the frame's file name. Best effort throughout —
 /// evidence that could not be written is a gap in the log, never a refused
@@ -252,13 +330,48 @@ pub fn record(
     outcome: Result<(), &str>,
     frame: Framing<'_>,
 ) -> Option<String> {
+    record_measured(dir, (at_epoch_ms, None), tool, argv, outcome, frame)
+}
+
+/// The same recorder, with the actual road's observation attached.
+pub fn record_measured(
+    dir: &Path,
+    observed_at: (i64, Option<serde_json::Value>),
+    tool: &str,
+    argv: &[String],
+    outcome: Result<(), &str>,
+    frame: Framing<'_>,
+) -> Option<String> {
+    record_with(dir, observed_at, tool, argv, outcome, frame, |dir, step| {
+        emit("flow:step", (dir, step));
+    })
+}
+
+fn record_with(
+    dir: &Path,
+    (at_epoch_ms, observation): (i64, Option<serde_json::Value>),
+    tool: &str,
+    argv: &[String],
+    outcome: Result<(), &str>,
+    frame: Framing<'_>,
+    emitted: impl FnOnce(&Path, &Step),
+) -> Option<String> {
     let verb = argv.first().map_or("?", String::as_str);
     let _writing = WRITING.lock().unwrap_or_else(PoisonError::into_inner);
     let steps = dir.join(STEPS_FILE);
-    let n = std::fs::read_to_string(&steps)
-        .map(|held| held.lines().filter(|line| !line.trim().is_empty()).count())
-        .unwrap_or(0)
-        + 1;
+    let (n, separated) = match std::fs::read(&steps) {
+        Ok(held) => (
+            held.split(|byte| *byte == b'\n')
+                .filter(|line| !line.iter().all(u8::is_ascii_whitespace))
+                .count()
+                + 1,
+            held.is_empty() || held.last() == Some(&b'\n'),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (1, true),
+        // A log we cannot read cannot be numbered honestly. Evidence may
+        // be missing; it must not overwrite a previous step's frame.
+        Err(_) => return None,
+    };
     let (shot, meta, skipped) = match frame {
         Framing::Picture { png, placed } if png.starts_with(PNG_SIGNATURE) => {
             let name = format!("{n:0width$}-{tool}-{verb}.png", width = NUMBER_WIDTH);
@@ -290,6 +403,7 @@ pub fn record(
         verb: verb.to_string(),
         argv: redacted(tool, argv),
         ok: outcome.is_ok(),
+        observation,
         error: outcome
             .err()
             .map(|error| error.trim().chars().take(ERROR_CHARS).collect()),
@@ -303,14 +417,22 @@ pub fn record(
         frame: meta,
         frame_skipped: skipped,
     };
-    if let Ok(json) = serde_json::to_string(&line) {
+    if let Ok(mut json) = serde_json::to_string(&line) {
         use std::io::Write as _;
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&steps)
         {
-            let _ = writeln!(file, "{json}");
+            // A previous best-effort append may have stopped mid-line or
+            // mid-codepoint. Start a fresh line before publishing this one.
+            if !separated {
+                json.insert(0, '\n');
+            }
+            json.push('\n');
+            if file.write_all(json.as_bytes()).is_ok() {
+                emitted(dir, &line);
+            }
         }
     }
     shot
@@ -319,10 +441,10 @@ pub fn record(
 /// The step log read back, in order; a line that does not parse is skipped.
 #[must_use]
 pub fn steps_in(dir: &Path) -> Vec<Step> {
-    std::fs::read_to_string(dir.join(STEPS_FILE))
+    std::fs::read(dir.join(STEPS_FILE))
         .map(|held| {
-            held.lines()
-                .filter_map(|line| serde_json::from_str(line).ok())
+            held.split(|byte| *byte == b'\n')
+                .filter_map(|line| serde_json::from_slice(line).ok())
                 .collect()
         })
         .unwrap_or_default()
@@ -341,6 +463,7 @@ pub fn record_walk(dir: &Path, report: &serde_json::Value) -> Result<PathBuf, St
     let body = serde_json::to_vec_pretty(report).map_err(|error| error.to_string())?;
     std::fs::write(&file, body)
         .map_err(|error| format!("could not write {}: {error}", file.display()))?;
+    emit("flow:walk", (dir, report));
     Ok(file)
 }
 
@@ -391,6 +514,142 @@ mod tests {
             }
         }
         assert_eq!(captures("emulator", "marks"), Some(false));
+    }
+
+    #[test]
+    fn live_steps_are_the_written_redacted_values_and_preserve_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let emitted = Mutex::new(Vec::new());
+        std::thread::scope(|scope| {
+            for at in 0..12 {
+                let dir = dir.path();
+                let emitted = &emitted;
+                scope.spawn(move || {
+                    record_with(
+                        dir,
+                        (
+                            at,
+                            Some(
+                                serde_json::json!({ "act_ms": 7, "judgment": { "asked": false } }),
+                            ),
+                        ),
+                        "computer",
+                        &words(&["type", "--text", "secret"]),
+                        Ok(()),
+                        Framing::None,
+                        |folder, step| {
+                            let written = steps_in(folder);
+                            assert_eq!(
+                                serde_json::to_value(written.last().unwrap()).unwrap(),
+                                serde_json::to_value(step).unwrap()
+                            );
+                            emitted
+                                .lock()
+                                .unwrap()
+                                .push(serde_json::to_value(step).unwrap());
+                        },
+                    );
+                });
+            }
+        });
+        let emitted = emitted.into_inner().unwrap();
+        assert_eq!(
+            emitted,
+            serde_json::to_value(steps_in(dir.path()))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+        assert!(!serde_json::to_string(&emitted).unwrap().contains("secret"));
+        assert_eq!(emitted[0]["observation"]["act_ms"], 7);
+        crate::computer_use::report::write(dir.path()).unwrap();
+        assert!(crate::computer_use::report::verify(dir.path()).reproduced);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
+
+    #[test]
+    fn a_judged_press_keeps_its_measurements_and_a_later_read_is_not_a_press() {
+        let dir = tempfile::tempdir().unwrap();
+        observing(
+            serde_json::json!({"look_ms": 12, "judgment": {"asked": true, "ms": 34, "confidence": 0.7}}),
+            || {
+                let observed = measured(
+                    observation(),
+                    "browser",
+                    &words(&["click", "page", "#ok"]),
+                    std::time::Duration::from_millis(8),
+                );
+                record_with(
+                    dir.path(),
+                    (1, observed),
+                    "browser",
+                    &words(&["click", "page", "#ok"]),
+                    Ok(()),
+                    Framing::None,
+                    |_, step| {
+                        assert_eq!(
+                            step.observation.as_ref().unwrap()["judgment"]["confidence"],
+                            0.7
+                        )
+                    },
+                );
+            },
+        );
+        assert!(observation().is_none());
+        let read = measured(
+            None,
+            "browser",
+            &words(&["marks", "page"]),
+            std::time::Duration::from_millis(5),
+        )
+        .unwrap();
+        assert_eq!(read["elapsed_ms"], 5);
+        assert!(read.get("act_ms").is_none());
+        assert!(read.get("judgment").is_none());
+    }
+
+    #[test]
+    fn live_steps_stay_readable_after_a_partial_utf8_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(STEPS_FILE), b"{\"n\":1,\"verb\":\"\xe2").unwrap();
+        record_with(
+            dir.path(),
+            (2, None),
+            "browser",
+            &words(&["click", "page", "#ok"]),
+            Ok(()),
+            Framing::None,
+            |folder, emitted| {
+                let read = steps_in(folder);
+                assert_eq!(
+                    read.len(),
+                    1,
+                    "the incomplete line must not hide a later complete one"
+                );
+                assert_eq!(
+                    serde_json::to_value(&read[0]).unwrap(),
+                    serde_json::to_value(emitted).unwrap()
+                );
+                assert_eq!(emitted.n, 2);
+            },
+        );
+    }
+
+    #[test]
+    fn live_steps_never_emit_an_unwritten_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join(STEPS_FILE)).unwrap();
+        let shot = record_with(
+            dir.path(),
+            (1, None),
+            "computer",
+            &words(&["key", "--key", "a"]),
+            Ok(()),
+            Framing::None,
+            |_, _| panic!("a failed append must not emit"),
+        );
+        assert!(shot.is_none());
     }
 
     /// A refused step keeps its code even when its refusal is longer than the

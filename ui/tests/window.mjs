@@ -33,6 +33,7 @@ import { testConnectedWorkbench } from "./connected-workbench.mjs";
 import { testWorkbenchResponsive } from "./workbench-responsive.mjs";
 import { testStartupProjects } from "./startup-projects.mjs";
 import { testWorkspaceBoard } from "./workspace-board.mjs";
+import { testFlowConsole } from "./flow-console.mjs";
 import { testWorktreeEvidence } from "./worktree-evidence.mjs";
 import { testAgentConversation } from "./agent-conversation.mjs";
 import { testBrowserRecovery } from "./browser-recovery.mjs";
@@ -176,6 +177,7 @@ suite("connected-workbench", ({ browser, origin, ok }) => testConnectedWorkbench
 suite("workbench-responsive", ({ browser, origin, ok }) => testWorkbenchResponsive(browser, origin, ok));
 suite("startup-projects", ({ browser, origin, ok }) => testStartupProjects(browser, origin, ok));
 suite("workspace-board", ({ browser, origin, ok }) => testWorkspaceBoard(browser, origin, ok));
+suite("flow-console", ({ browser, origin, ok }) => testFlowConsole(browser, origin, ok));
 suite("worktree-evidence", ({ browser, origin, ok }) => testWorktreeEvidence(browser, origin, ok));
 suite("agent-conversation", ({ browser, origin, ok }) => testAgentConversation(browser, origin, ok));
 suite("browser-recovery", ({ browser, origin, ok }) => testBrowserRecovery(browser, origin, ok));

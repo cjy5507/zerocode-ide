@@ -101,6 +101,7 @@ mod file_tree_hooks;
 mod file_tree_io;
 mod file_tree_ops;
 mod file_watch;
+mod flow_console;
 mod gh;
 mod ghostty_import;
 mod glab;
@@ -2913,6 +2914,8 @@ fn main() -> ExitCode {
             list_run_evidence,
             reveal_run_evidence,
             flow_list,
+            flow_console::flow_evidence,
+            flow_console::flow_execute,
             flow_set,
             artifacts_list,
             artifact_search,
@@ -3073,6 +3076,7 @@ fn main() -> ExitCode {
         ])
         .setup(move |app| {
             computer_use::initialize(app.path().resource_dir().ok());
+            run_evidence::install_window(app.handle().clone());
             let resolved = app_paths::resolve(app).map_err(std::io::Error::other)?;
             let (paths, legacy_authority) =
                 match state_migration::migrate_if_needed(&resolved) {

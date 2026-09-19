@@ -84,6 +84,7 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
         "shell-settings.js",
         include_str!("../../../ui/shell-settings.js"),
     ),
+    ("shell-flow.js", include_str!("../../../ui/shell-flow.js")),
     (
         "shell-remote.js",
         include_str!("../../../ui/shell-remote.js"),

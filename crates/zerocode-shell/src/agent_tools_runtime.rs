@@ -2294,7 +2294,14 @@ pub(super) async fn computer_loop(
                             },
                             |level| {
                                 if let Some(dir) = dir.as_deref() {
-                                    evidence_runtime::leave_walk_begin(dir, level);
+                                    evidence_runtime::leave_walk_begin(
+                                        dir,
+                                        level,
+                                        serde_json::json!({
+                                            "dir": dir, "name": command.params.get("name"),
+                                            "kind": command.method.verb_name(),
+                                        }),
+                                    );
                                 }
                             },
                             |report| {
@@ -2411,6 +2418,7 @@ pub(super) fn desktop_step(
     logged: &[String],
     asking: computer_use::confirm::Asking,
 ) -> zerocode_hookd::TeamAnswer {
+    let began = std::time::Instant::now();
     // A command that panicked is answered and left like any refusal: its
     // line, the operator's memory and the band still hear of it.
     let answer = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2422,13 +2430,24 @@ pub(super) fn desktop_step(
             crate::system_runtime::panic_payload(panic.as_ref())
         ))
     });
-    leave_step(
-        app,
-        local_data_root,
-        presented_evidence,
-        argv,
-        logged,
-        &answer,
+    run_evidence::observing(
+        run_evidence::measured(
+            run_evidence::observation(),
+            "computer",
+            argv,
+            began.elapsed(),
+        )
+        .unwrap_or_default(),
+        || {
+            leave_step(
+                app,
+                local_data_root,
+                presented_evidence,
+                argv,
+                logged,
+                &answer,
+            )
+        },
     );
     answer
 }
@@ -2455,7 +2474,13 @@ pub(super) fn leave_step(
         .flatten();
     let capped = run_dir.is_none();
     if let Some(dir) = run_dir.or(session_dir) {
-        evidence_runtime::leave_computer_evidence(&dir, logged, answer, capped);
+        evidence_runtime::leave_computer_evidence(
+            &dir,
+            logged,
+            answer,
+            capped,
+            run_evidence::observation(),
+        );
     }
     // The band: an action just happened (or was refused), here is where
     // the operator stands.
@@ -2526,9 +2551,17 @@ pub(super) async fn browser_step(
     argv: &[String],
     logged: &[String],
 ) -> zerocode_hookd::TeamAnswer {
+    let observation = run_evidence::observation();
+    let began = std::time::Instant::now();
     let answer = answer_browser_command(app, argv, pane).await;
     if let Some(dir) = dir {
-        evidence_runtime::leave_browser_evidence(app, dir, logged, &answer);
+        evidence_runtime::leave_browser_evidence(
+            app,
+            dir,
+            logged,
+            &answer,
+            run_evidence::measured(observation, "browser", argv, began.elapsed()),
+        );
     }
     answer
 }
@@ -2545,9 +2578,16 @@ pub(super) async fn emulator_step(
     argv: &[String],
     logged: &[String],
 ) -> zerocode_hookd::TeamAnswer {
+    let observation = run_evidence::observation();
+    let began = std::time::Instant::now();
     let answer = answer_emulator_command(app, argv).await;
     if let Some(dir) = dir {
-        evidence_runtime::leave_emulator_evidence(dir, logged, &answer);
+        evidence_runtime::leave_emulator_evidence(
+            dir,
+            logged,
+            &answer,
+            run_evidence::measured(observation, "emulator", argv, began.elapsed()),
+        );
     }
     answer
 }
@@ -2863,6 +2903,9 @@ pub(super) fn run_recipe(
         // could press, and one of those numbers — chosen, never invented —
         // is pressed before the stopped step is walked again. Off by default,
         // and off is byte-for-byte today's walk.
+        if command.params.get("end").is_some() {
+            return recipe_answer(command, &report);
+        }
         let seat = computer_use::errand::seat_of(computer_use::errand::Surface::Page);
         let mode = computer_use::errand::mode_now(seat);
         if mode != computer_use::errand::Mode::Off {
@@ -2987,9 +3030,25 @@ pub(super) fn run_goal(
 ) -> zerocode_hookd::TeamAnswer {
     use computer_use::errand::{self, desk};
     use computer_use::recipe_run::Desk as _;
-    let RecipeRoads { step, .. } = roads;
+    let RecipeRoads {
+        step,
+        mut begun,
+        mut ended,
+        ..
+    } = roads;
     let mut road = step;
-    let said = |value: serde_json::Value| -> zerocode_hookd::TeamAnswer {
+    begun(zerocode_core::computer_flow::EvidenceLevel::Full);
+    let mut said = |value: serde_json::Value| -> zerocode_hookd::TeamAnswer {
+        let mut report = value.clone();
+        report["kind"] = serde_json::json!("walk");
+        report["at_epoch_ms"] = serde_json::json!(now_epoch_ms());
+        ended(report);
+        if let Some(dir) = dir {
+            tauri::async_runtime::block_on(evidence_runtime::written());
+            if let Err(why) = computer_use::report::write(dir) {
+                eprintln!("walk: the report was not written: {why}");
+            }
+        }
         if command.json {
             computer_said(format!(
                 "{}\n",

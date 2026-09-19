@@ -252,6 +252,7 @@ pub fn start(local_data_root: &Path) -> Option<HookBridgeReceivers> {
      * moment of the knock. */
     let state = state.with_artifacts(std::sync::Arc::new(crate::artifact_runtime::ArtifactDoor));
     let state = state.with_pointer_mailbox(crate::orchestration_pointer_mailbox::mailbox());
+    let computer_sender = state.computer_requests();
     let addr = tauri::async_runtime::block_on(async {
         zerocode_hookd::serve(state, 0)
             .await
@@ -300,6 +301,7 @@ pub fn start(local_data_root: &Path) -> Option<HookBridgeReceivers> {
                 .join(delivery_epoch),
         })
         .ok()?;
+    crate::flow_console::install_sender(computer_sender);
     Some((events, teams, browser, computer, federation))
 }
 

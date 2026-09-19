@@ -2863,6 +2863,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ("last", "last"),
         ("after", "after"),
         ("start", "start"),
+        ("end", "end"),
         ("mark", "mark"),
     ] {
         if let Some(value) = optional_non_negative_integer(&flags, flag)? {
@@ -3279,7 +3280,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::RecipeList => BASIC,
         ComputerMethod::RecipeShow => &["json", "name"],
         ComputerMethod::RecipeRun => &[
-            "json", "name", "params", "start", "confirm", "repeat", "until", "arena",
+            "json", "name", "params", "start", "end", "confirm", "repeat", "until", "arena",
         ],
         ComputerMethod::ListenStart => APP,
         ComputerMethod::ListenStop => BASIC,
@@ -3660,8 +3661,13 @@ fn validate(
             }
         }
         ComputerMethod::RecipeSave | ComputerMethod::RecipeShow | ComputerMethod::RecipeRun => {
-            if params.get("start").and_then(Value::as_u64) == Some(0) {
-                return Err("--start counts steps from 1".into());
+            for flag in ["start", "end"] {
+                if params.get(flag).and_then(Value::as_u64) == Some(0) {
+                    return Err(format!("--{flag} counts steps from 1"));
+                }
+            }
+            if has("end") && has("repeat") {
+                return Err("--end selects a partial walk and cannot be repeated".into());
             }
             let name = params
                 .get("name")
@@ -3962,7 +3968,7 @@ pub fn usage() -> String {
         "      (this session's walked steps as a document a person can read and edit; next time, walk the recipe first)",
         "  zerocode-computer recipe-list [--json]",
         "  zerocode-computer recipe-show --name <name> [--json]",
-        "  zerocode-computer recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--json]",
+        "  zerocode-computer recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--end N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--json]",
         "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane>) [--until <text on screen when it worked>] [--steps N] [--json]",
         "      (walks the steps in one call, filling {{name}} from --params; stops at the person's turn or last step,",
         "       a step naming the saved screen's element or window, a check the screen fails, an act that changed",

@@ -151,6 +151,7 @@ struct Job<S> {
     argv: Vec<String>,
     refusal: Option<String>,
     at_epoch_ms: i64,
+    observation: Option<serde_json::Value>,
     at: tokio::time::Instant,
     frame: Frame<S>,
 }
@@ -162,6 +163,7 @@ impl<S: Surface> Job<S> {
         argv: &[String],
         answer: &zerocode_hookd::TeamAnswer,
         frame: Frame<S>,
+        observation: Option<serde_json::Value>,
     ) -> Self {
         Self {
             dir: dir.to_path_buf(),
@@ -169,6 +171,7 @@ impl<S: Surface> Job<S> {
             argv: argv.to_vec(),
             refusal: (answer.exit_code != 0).then(|| answer.stderr.clone()),
             at_epoch_ms: now_epoch_ms(),
+            observation,
             at: tokio::time::Instant::now(),
             frame,
         }
@@ -195,6 +198,7 @@ enum Message<S> {
     WalkBegin {
         dir: PathBuf,
         framed: bool,
+        identity: serde_json::Value,
     },
     /// A walk ended: its record, written after the lines before it in the
     /// queue as the folder's next `walk-NNN.json`.
@@ -265,7 +269,12 @@ async fn write_in_order<S: Surface>(mut messages: UnboundedReceiver<Message<S>>,
                 let _ = done.send(());
                 continue;
             }
-            Message::WalkBegin { dir, framed } => {
+            Message::WalkBegin {
+                dir,
+                framed,
+                identity,
+            } => {
+                run_evidence::emit("flow:begin", identity);
                 if framed {
                     unframed.remove(&dir);
                 } else {
@@ -291,6 +300,7 @@ async fn write_in_order<S: Surface>(mut messages: UnboundedReceiver<Message<S>>,
             argv,
             refusal,
             at_epoch_ms,
+            observation,
             at,
             frame,
         } = job;
@@ -339,7 +349,14 @@ async fn write_in_order<S: Surface>(mut messages: UnboundedReceiver<Message<S>>,
                 Err(Some(why)) => Framing::Skipped(*why),
                 Err(None) => Framing::None,
             };
-            run_evidence::record(&dir, at_epoch_ms, tool, &argv, outcome, framing);
+            run_evidence::record_measured(
+                &dir,
+                (at_epoch_ms, observation),
+                tool,
+                &argv,
+                outcome,
+                framing,
+            );
         })
         .await;
     }
@@ -405,6 +422,7 @@ pub(super) fn leave_browser_evidence(
     dir: &Path,
     argv: &[String],
     answer: &zerocode_hookd::TeamAnswer,
+    observation: Option<serde_json::Value>,
 ) {
     let verb = argv.first().map_or("", String::as_str);
     let Some(framed) = run_evidence::captures("browser", verb) else {
@@ -424,7 +442,14 @@ pub(super) fn leave_browser_evidence(
         }),
         _ => Frame::None,
     };
-    send(Message::Step(Job::new(dir, "browser", argv, answer, frame)));
+    send(Message::Step(Job::new(
+        dir,
+        "browser",
+        argv,
+        answer,
+        frame,
+        observation,
+    )));
 }
 
 /// The frame a step on the desktop or emulator road leaves, from its answer
@@ -468,6 +493,7 @@ pub(super) fn leave_emulator_evidence(
     dir: &Path,
     argv: &[String],
     answer: &zerocode_hookd::TeamAnswer,
+    observation: Option<serde_json::Value>,
 ) {
     let verb = argv.first().map_or("", String::as_str);
     let Some(frames) = run_evidence::captures("emulator", verb) else {
@@ -475,7 +501,12 @@ pub(super) fn leave_emulator_evidence(
     };
     let frame = frame_of(dir, frames, false, answer, |_| emulator_capture(argv));
     send(Message::Step(Job::new(
-        dir, "emulator", argv, answer, frame,
+        dir,
+        "emulator",
+        argv,
+        answer,
+        frame,
+        observation,
     )));
 }
 
@@ -489,6 +520,7 @@ pub(super) fn leave_computer_evidence(
     argv: &[String],
     answer: &zerocode_hookd::TeamAnswer,
     capped: bool,
+    observation: Option<serde_json::Value>,
 ) {
     let verb = match argv.first().map(String::as_str) {
         Some("ssh") | Some("emulator") | None => return,
@@ -501,7 +533,12 @@ pub(super) fn leave_computer_evidence(
         Some(desktop_capture(result))
     });
     send(Message::Step(Job::new(
-        dir, "computer", argv, answer, frame,
+        dir,
+        "computer",
+        argv,
+        answer,
+        frame,
+        observation,
     )));
 }
 
@@ -509,10 +546,15 @@ pub(super) fn leave_computer_evidence(
 /// framed is its Flow's evidence level — `full` frames, `verdict-only` and
 /// `off` do not. The walk's record and the verdict are written whatever the
 /// level. A lone command outside a walk is framed as before.
-pub(super) fn leave_walk_begin(dir: &Path, level: zerocode_core::computer_flow::EvidenceLevel) {
+pub(super) fn leave_walk_begin(
+    dir: &Path,
+    level: zerocode_core::computer_flow::EvidenceLevel,
+    identity: serde_json::Value,
+) {
     send(Message::WalkBegin {
         dir: dir.to_path_buf(),
         framed: level.frames(),
+        identity,
     });
 }
 
@@ -546,6 +588,7 @@ pub(super) fn leave_arena_evidence(
         argv,
         answer,
         Frame::None,
+        run_evidence::observation(),
     )));
 }
 
@@ -583,6 +626,7 @@ mod tests {
             &[verb.to_string()],
             &answered(true),
             frame,
+            None,
         ))
     }
 
@@ -621,6 +665,7 @@ mod tests {
             &["click".to_string()],
             &answered(false),
             Frame::None,
+            None,
         ));
         writer.send(refused).unwrap();
         let (done, told) = tokio::sync::oneshot::channel();
@@ -775,6 +820,7 @@ mod tests {
                 .send(Message::WalkBegin {
                     dir: folder.path().to_path_buf(),
                     framed,
+                    identity: serde_json::Value::Null,
                 })
                 .unwrap();
             for _ in 0..20 {
@@ -788,6 +834,7 @@ mod tests {
                         &click,
                         answer,
                         frame,
+                        None,
                     )))
                     .unwrap();
             }
@@ -944,6 +991,7 @@ mod tests {
             .send(Message::WalkBegin {
                 dir: dir.path().to_path_buf(),
                 framed: EvidenceLevel::Off.frames(),
+                identity: serde_json::Value::Null,
             })
             .unwrap();
         for (verb, frame) in [
