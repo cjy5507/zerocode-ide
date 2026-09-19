@@ -230,8 +230,8 @@ fn send(message: Message<Capture>) {
 }
 
 /// Whether a verb reads or writes the step log — and so waits for the steps
-/// already answered to be written first. A recipe walk counts the lines its
-/// steps will take from where the folder stands (`evidence_n`, plan D4).
+/// already answered to be written first. Recipe evidence is linked by the
+/// identity carried with each actual step, never by a predicted row count.
 pub(super) fn reads_the_log(method: ComputerMethod) -> bool {
     matches!(
         method,
@@ -976,6 +976,47 @@ mod tests {
         assert_eq!(run_evidence::steps_in(dir.path()).len(), 3);
         drop(writer);
         written.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn flow_retry_identity_follows_the_existing_queue_and_sealed_report() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(run_evidence::STEPS_FILE), b"{\xff").unwrap();
+        let (writer, messages) = unbounded_channel::<Message<Fixed>>();
+        for (id, origin) in [
+            (Some("first"), Some(1)),
+            (None, None),
+            (Some("second"), Some(3)),
+        ] {
+            let observation = id.map(|id| {
+                serde_json::json!({"evidence_id": id,
+                "retry": {"name": "recipe", "step": origin, "cwd": "/original"}})
+            });
+            writer
+                .send(Message::Step(Job::new(
+                    dir.path(),
+                    "computer",
+                    &["key", "--key", "tab"].map(String::from),
+                    &answered(true),
+                    Frame::None,
+                    observation,
+                )))
+                .unwrap();
+        }
+        writer.send(Message::Walk { dir: dir.path().to_path_buf(), report: serde_json::json!({
+            "kind": "recipe-run", "name": "recipe", "evidence_ids": true, "ran": [
+                {"step": 1, "evidence_id": "first"}, {"step": 2, "evidence_id": "unwritten"},
+                {"step": 3, "evidence_id": "second"},
+            ]
+        })}).unwrap();
+        drop(writer);
+        write_in_order(messages, Duration::ZERO).await;
+        let walk = &run_evidence::walks_in(dir.path())[0].1;
+        assert_eq!(walk["ran"][0]["evidence_n"], 2);
+        assert!(walk["ran"][1].get("evidence_n").is_none());
+        assert_eq!(walk["ran"][2]["evidence_n"], 4);
+        computer_use::report::write(dir.path()).unwrap().unwrap();
+        assert!(computer_use::report::verify(dir.path()).reproduced);
     }
 
     /// A walk whose Flow says `evidence: off` (or `verdict-only`) frames

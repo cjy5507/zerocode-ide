@@ -461,7 +461,7 @@ mod tests {
                     file: "f.md",
                     text,
                     deadline_ms,
-                    evidence_from: None,
+                    cwd: None,
                     evidence_dir: None,
                 },
                 &mut **step,

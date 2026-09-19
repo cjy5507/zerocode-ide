@@ -28,7 +28,7 @@ use zerocode_hookd::TeamAnswer;
 use super::recipe_run::Desk;
 use crate::agent_tools_runtime::{browser_refused, browser_said, computer_refused, computer_said};
 use crate::cmd::browser::WAIT_TIMED_OUT;
-use crate::run_evidence::{Step, captures, redacted, steps_in, walks_in};
+use crate::run_evidence::{captures, redacted, steps_in, walks_in};
 
 /// The word an arena walk's record carries as its `kind` — and the suffix of
 /// the folder its evidence lands in (`evidence::arena_dir`).
@@ -93,10 +93,7 @@ impl Arena {
         if !dir.is_dir() {
             return Err(format!("{} is not a folder", dir.display()));
         }
-        let lines: BTreeMap<usize, Step> = steps_in(dir)
-            .into_iter()
-            .map(|line| (line.n, line))
-            .collect();
+        let lines = steps_in(dir);
         let (_, walk) = walks_in(dir)
             .into_iter()
             .rev()
@@ -117,13 +114,29 @@ impl Arena {
                     .and_then(|step| usize::try_from(step).ok())
                     .is_some_and(|step| step >= start)
             })
-            .filter_map(|ran| {
-                let n = usize::try_from(ran.get("evidence_n")?.as_u64()?).ok()?;
-                let line = lines.get(&n)?;
+            .filter(|ran| {
+                captures(
+                    ran["tool"].as_str().unwrap_or_default(),
+                    ran["verb"].as_str().unwrap_or_default(),
+                )
+                .is_some()
+            })
+            .map(|ran| {
+                let line = crate::run_evidence::step_with_id(
+                    &lines,
+                    ran.get("evidence_id").and_then(Value::as_str),
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "no unique recorded evidence for recipe step {}",
+                        ran["step"]
+                    )
+                })?;
                 let tool = RecipeTool::ALL
                     .into_iter()
-                    .find(|tool| tool.as_str() == line.tool)?;
-                Some(Recorded {
+                    .find(|tool| tool.as_str() == line.tool)
+                    .ok_or_else(|| format!("unknown recorded tool: {}", line.tool))?;
+                Ok(Recorded {
                     tool,
                     argv: line.argv.clone(),
                     refusal: (!line.ok).then(|| {
@@ -136,7 +149,7 @@ impl Arena {
                     }),
                 })
             })
-            .collect();
+            .collect::<Result<_, String>>()?;
         let flow = walk
             .get("flow")
             .cloned()
@@ -562,9 +575,12 @@ mod tests {
         let mut ran = Vec::new();
         for (at, (tool, argv, outcome)) in lines.iter().enumerate() {
             let refused = outcome.err().map(refusal);
-            crate::run_evidence::record(
+            crate::run_evidence::record_measured(
                 dir,
-                1_000 + at as i64,
+                (
+                    1_000 + at as i64,
+                    Some(json!({"evidence_id": format!("fixture-{at}")})),
+                ),
                 tool.as_str(),
                 argv,
                 refused.as_deref().map_or(Ok(()), Err),
@@ -572,7 +588,7 @@ mod tests {
             );
             ran.push(json!({
                 "step": at + 1, "shown": at + 1, "tool": tool.as_str(), "verb": argv[0],
-                "ok": outcome.is_ok(), "ms": 1, "evidence_n": at + 1,
+                "ok": outcome.is_ok(), "ms": 1, "evidence_id": format!("fixture-{at}"),
             }));
         }
         let mut walk = json!({
@@ -584,6 +600,29 @@ mod tests {
             walk["flow"] = serde_json::to_value(flow).unwrap();
         }
         crate::run_evidence::record_walk(dir, &walk).unwrap();
+    }
+
+    #[test]
+    fn flow_retry_arena_refuses_a_missing_record_instead_of_shifting_identical_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let lines = vec![
+            (
+                RecipeTool::Computer,
+                words(&["key", "--key", "tab"]),
+                Ok(())
+            );
+            2
+        ];
+        recorded(dir.path(), &lines, None);
+        let steps = steps_in(dir.path());
+        // Only the second of two identical calls survived its append.
+        std::fs::write(
+            dir.path().join(crate::run_evidence::STEPS_FILE),
+            format!("{}\n", serde_json::to_string(&steps[1]).unwrap()),
+        )
+        .unwrap();
+        assert!(Arena::read(dir.path(), 1).is_err());
+        assert!(Arena::read(dir.path(), 2).is_ok());
     }
 
     fn present(count: Option<usize>) -> Presence {

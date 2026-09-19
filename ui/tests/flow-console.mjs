@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { openWindowTestPage } from "./window-boot.mjs";
 
 export async function testFlowConsole(browser, origin, ok) {
@@ -16,7 +17,7 @@ export async function testFlowConsole(browser, origin, ok) {
       window.__FLOW_EMIT__ = (name, payload) => window.dispatchEvent(new CustomEvent(name, { detail: payload }));
       const emit = window.__FLOW_EMIT__;
       emit("flow:begin", { dir: "/evidence/a", name: "sample", kind: "recipe-run", cwd: activeWorktreePath });
-      for (const n of [3, 1, 2, 2]) emit("flow:step", ["/evidence/a", { n, tool: "browser", verb: "click", argv: ["click", "page", "#ok"], ok: true, observation: { act_ms: 7, judgment: { asked: false } } }]);
+      for (const n of [3, 1, 2, 2]) emit("flow:step", ["/evidence/a", { n, tool: "browser", verb: "click", argv: ["click", "page", "#ok"], ok: true, observation: { act_ms: 7, judgment: { asked: false }, retry: { name: "sample", step: n + 3, cwd: activeWorktreePath } } }]);
       emit("flow:step", ["/evidence/b", { n: 1, tool: "browser", verb: "type", argv: ["<img src=x>"], ok: false }]);
     });
     await page.waitForSelector('.flow-step[data-n="3"]');
@@ -99,9 +100,10 @@ export async function testFlowConsole(browser, origin, ok) {
       retryContext.workspace === retryContext.original, JSON.stringify(retryContext));
     const legacyRetryDisabled = await page.evaluate(async () => {
       const run = flowRuns.get("/evidence/a");
-      window.__ANSWER__.flow_evidence = () => ({ dir: "/legacy", report: "/legacy/report.html", steps: [...run.steps.values()], walk: { ...run.walk } });
+      window.__ANSWER__.flow_evidence = () => ({ dir: "/legacy", report: "/legacy/report.html", steps: [...run.steps.values()].map((step) => ({ ...step, observation: { ...step.observation, retry: undefined } })), walk: { ...run.walk } });
       await readFlowEvidence("/legacy/report.html");
-      const disabled = el("flow-console-steps").querySelector('.flow-step[data-n="2"] .flow-step-retry').disabled;
+      const retry = el("flow-console-steps").querySelector('.flow-step[data-n="2"] .flow-step-retry');
+      const disabled = !retry || retry.disabled;
       flowRunDir = "/evidence/a"; paintFlowConsole();
       return disabled;
     });
@@ -131,7 +133,8 @@ export async function testFlowConsole(browser, origin, ok) {
     });
     await page.waitForSelector('.flow-step[data-n="5"]');
     ok("An oracle card shows its recorded command duration without inventing a look or press", await page.locator('.flow-step[data-n="5"]').textContent().then((text) => text.includes("명령 11 ms") && text.includes("판단 없음")));
-    await page.screenshot({ path: "/tmp/t4849-flow-console.png" });
+    await testRecordedRetry(page, ok);
+    await page.screenshot({ path: process.env.FLOW_CONSOLE_SCREENSHOT ?? "/tmp/t4849-flow-console.png" });
     const newerRunWins = await page.evaluate(async () => {
       let finish;
       window.__ANSWER__.flow_evidence = () => new Promise((resolve) => { finish = resolve; });
@@ -146,4 +149,55 @@ export async function testFlowConsole(browser, origin, ok) {
     ok("Flow console closes without a second mirror stream", await page.locator("#flow-console").isHidden());
     ok("Flow console has no renderer faults", faults.length === 0, faults.join(" | "));
   } finally { await page.close(); }
+}
+
+/* These optional fixtures are produced by the real runner -> recorder Rust
+ * regression. The default cases also keep the UI gate independently useful. */
+async function testRecordedRetry(page, ok) {
+  const retry = (name, step, cwd) => ({ name, step, cwd });
+  const row = (n, origin) => ({ n, tool: "computer", verb: "key", argv: ["key", "--key", "tab"], ok: true, observation: origin ? { retry: origin } : {} });
+  const origins = [retry("first", 1, "/original"), retry("first", 3, "/original"), retry("second", 2, "/other")];
+  const defaults = [{
+    case: "shared folder retains each actual origin", dir: "/provenance", steps: [row(2, origins[0]), row(3), row(4, origins[1]), row(5, origins[2])],
+    walk: { name: "second", cwd: "/other", kind: "recipe-run", ran: [{ evidence_n: 2, step: 2 }, { evidence_n: 3, step: 1 }] },
+    expected: [2, 4, 5].map((n, at) => ({ n, retry: origins[at] })),
+  }];
+  const fixtures = process.env.FLOW_RETRY_FIXTURES
+    ? JSON.parse(await readFile(process.env.FLOW_RETRY_FIXTURES, "utf8")) : defaults;
+  for (const fixture of fixtures) {
+    for (const history of [false, true]) {
+      const sent = await page.evaluate(async ({ fixture, history }) => {
+        const calls = [];
+        window.__ANSWER__.flow_execute = (args) => { calls.push(args); return { done: true }; };
+        flowRuns.delete(fixture.dir);
+        if (history) {
+          window.__ANSWER__.flow_evidence = () => ({ ...fixture, report: `${fixture.dir}/report.html` });
+          await readFlowEvidence(`${fixture.dir}/report.html`);
+        } else {
+          window.__FLOW_EMIT__("flow:begin", { dir: fixture.dir, name: fixture.walk.name, cwd: fixture.walk.cwd });
+          for (const step of fixture.steps) window.__FLOW_EMIT__("flow:step", [fixture.dir, step]);
+          window.__FLOW_EMIT__("flow:walk", [fixture.dir, fixture.walk]);
+          paintFlowConsole();
+        }
+        const result = [];
+        for (const step of fixture.steps) {
+          const button = el("flow-console-steps").querySelector(`.flow-step[data-n="${step.n}"] .flow-step-retry`);
+          if (!button || button.disabled) continue;
+          const count = calls.length;
+          button.click(); await flowLaunchTail;
+          for (const call of calls.slice(count)) result.push({ n: step.n, ...call });
+        }
+        return result;
+      }, { fixture, history });
+      const expected = fixture.expected.map(({ n, retry: origin }) => ({ n,
+        argv: ["recipe-run", "--name", origin.name, "--start", String(origin.step), "--end", String(origin.step)], worktree: origin.cwd }));
+      ok(`Retry ${history ? "history" : "live"}: ${fixture.case} uses only the recorded line/name/cwd`, JSON.stringify(sent) === JSON.stringify(expected), JSON.stringify({ sent, expected }));
+    }
+  }
+  const blocked = await page.evaluate(() => {
+    const origins = [undefined, {}, { name: "r", step: 1 }, { name: "r", step: 0, cwd: "/a" }, { name: "r", step: 1.5, cwd: "/a" }, { name: "", step: 1, cwd: "/a" }, { name: "r", step: 1, cwd: "" }];
+    const run = { name: "r", cwd: "/a", walk: { ran: [{ evidence_n: 1, step: 2 }] } };
+    return origins.every((retry) => !flowStepCard(run, { n: 1, tool: "browser", verb: "find", observation: { retry } }).querySelector(".flow-step-retry"));
+  });
+  ok("Unknown, partial and invalid retry provenance cannot borrow a walk's mapping", blocked);
 }

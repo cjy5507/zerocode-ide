@@ -97,6 +97,8 @@ struct WalkRecord {
     #[serde(default)]
     ran: Vec<Ran>,
     #[serde(default)]
+    evidence_ids: bool,
+    #[serde(default)]
     flow: Option<Value>,
 }
 
@@ -126,6 +128,8 @@ struct Ran {
     /// In the order written — `act`, `settle`, `verify`, `pointer`.
     #[serde(default)]
     phases: serde_json::Map<String, Value>,
+    #[serde(default)]
+    evidence_id: Option<String>,
     #[serde(default)]
     evidence_n: Option<usize>,
     #[serde(default)]
@@ -252,11 +256,12 @@ impl Folder {
             .find_map(|(_, walk)| walk.flow_record())
     }
 
-    /// Each step's line in a walk's record, by step number: the number the
-    /// walk wrote (`evidence_n`), else the k-th step at or after the walk
-    /// began, in order.
+    /// New walks attach metadata only to the actual call's recorded identity.
+    /// The legacy branch reproduces old sealed HTML, including its old display
+    /// associations. It supplies no retry/arena authority; those require origin.
     fn ran_by_step(&self) -> BTreeMap<usize, (&WalkRecord, &Ran)> {
         let mut by_step = BTreeMap::new();
+        let legacy = self.walks.iter().all(|(_, walk)| !walk.evidence_ids);
         for (_, walk) in &self.walks {
             let mut after_start = self
                 .steps
@@ -264,7 +269,13 @@ impl Folder {
                 .filter(|step| walk.at_epoch_ms.is_some_and(|at| step.at_epoch_ms >= at))
                 .map(|step| step.n);
             for ran in &walk.ran {
-                if let Some(n) = ran.evidence_n.or_else(|| after_start.next()) {
+                let n = if !legacy {
+                    crate::run_evidence::step_with_id(&self.steps, ran.evidence_id.as_deref())
+                        .map(|step| step.n)
+                } else {
+                    ran.evidence_n.or_else(|| after_start.next())
+                };
+                if let Some(n) = n {
                     by_step.insert(n, (walk, ran));
                 }
             }
@@ -892,6 +903,39 @@ mod tests {
             walk["flow"] = serde_json::to_value(flow).unwrap();
         }
         walk
+    }
+
+    #[test]
+    fn flow_retry_reports_link_only_recorded_ids_without_changing_legacy_display() {
+        let dir = tempfile::tempdir().unwrap();
+        record(
+            dir.path(),
+            1_000,
+            "computer",
+            &words(&["key", "--key", "tab"]),
+            Ok(()),
+            Framing::None,
+        );
+        let legacy = walk_of(1, None);
+        record_walk(dir.path(), &legacy).unwrap();
+        let old = Folder::read(dir.path()).unwrap();
+        assert_eq!(
+            old.ran_by_step().len(),
+            1,
+            "legacy HTML keeps its historic association"
+        );
+        let before = render(dir.path()).unwrap();
+        write(dir.path()).unwrap();
+        assert!(verify(dir.path()).reproduced);
+        assert_eq!(before.html, render(dir.path()).unwrap().html);
+        let mut strict = legacy;
+        strict["evidence_ids"] = json!(true);
+        strict["ran"][0]["evidence_id"] = json!("unwritten");
+        record_walk(dir.path(), &strict).unwrap();
+        assert!(
+            Folder::read(dir.path()).unwrap().ran_by_step().is_empty(),
+            "a guessed number and timestamp cannot link a new-format row"
+        );
     }
 
     /// Every step is a card; a framed step shows its frame after (and the

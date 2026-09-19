@@ -52,7 +52,6 @@ use zerocode_hookd::TeamAnswer;
 
 use super::guarded::{self, By, Ledger, Line, Refusal, State, Transaction};
 use crate::cmd::browser::{WAIT_TIMED_OUT, pressed_rect};
-use crate::run_evidence::captures;
 
 /// What a walk reads from the desk besides the steps it runs — each a seam a
 /// test replaces.
@@ -178,9 +177,8 @@ impl Refused {
 
 /// One walk as the caller asks for it: the command with its values and
 /// start, the recipe (the file it was read from, and its text), the bridge's
-/// deadline, and — when the walk has an evidence folder — the number the
-/// folder's next step line takes, so every step can name the line it left
-/// (`evidence_n`, plan D4) without reading the log behind the writer.
+/// deadline, and the workspace the request came from. Evidence identity is
+/// attached to the actual step call, never predicted from the folder's length.
 pub struct Run<'a> {
     pub command: &'a ComputerCommand,
     /// An internal recovery cursor, within the original requested range.
@@ -189,7 +187,7 @@ pub struct Run<'a> {
     pub file: &'a str,
     pub text: &'a str,
     pub deadline_ms: u64,
-    pub evidence_from: Option<usize>,
+    pub cwd: Option<&'a Path>,
     /// The evidence folder, when the walk has one — named in a money
     /// ledger's lines, so a transaction points at its proof.
     pub evidence_dir: Option<&'a Path>,
@@ -276,26 +274,6 @@ pub fn first_act(command: &ComputerCommand, text: &str) -> Option<(Vec<String>, 
         .flatten()
 }
 
-/// The lines a walk's steps take in the evidence folder, counted from where
-/// the folder stood when the walk began: a step leaves a line when its verb
-/// is evidence of anything (`captures`), refused or not — the writer keeps
-/// the order the steps happened in.
-struct EvidenceLines {
-    next: Option<usize>,
-}
-
-impl EvidenceLines {
-    /// The line this step takes, if the walk has a folder and the step
-    /// leaves one.
-    fn left(&mut self, tool: RecipeTool, argv: &[String]) -> Option<usize> {
-        let verb = argv.first().map_or("", String::as_str);
-        captures(tool.as_str(), verb)?;
-        let n = self.next?;
-        self.next = Some(n + 1);
-        Some(n)
-    }
-}
-
 /// The terms a walk goes under (plan D8·D10): the fingerprint its acts are
 /// bound to when its recipe is a Flow, and whether the one evidence writer
 /// keeps a frame of each step — its evidence level's word, which decides the
@@ -306,6 +284,8 @@ struct Terms<'f> {
     framed: bool,
     /// The gate before the Flow's money step, when it has one (design §2–§4).
     money: Option<&'f MoneyGate>,
+    /// Only a live recipe with a known origin can offer a one-line retry.
+    retry: Option<(&'f str, &'f Path)>,
 }
 
 /// The evidence level a walk keeps (plan D10): its Flow's, or the default —
@@ -578,9 +558,6 @@ pub fn run(
     let level = walk_level(flow.as_ref());
     begin(level);
     let mut phases = json!({ "resolve": elapsed().saturating_sub(began) });
-    let mut lines_left = EvidenceLines {
-        next: run.evidence_from,
-    };
     // The baseline (D8): every event line asked once with no wait, so an
     // event that already holds is known to be stale, not this run's.
     let mut baseline: BTreeMap<usize, Presence> = BTreeMap::new();
@@ -597,7 +574,6 @@ pub fn run(
             &mut step,
             &desk,
             &caller_waits,
-            &mut lines_left,
         ) {
             if let Observed::Seen(presence) = seen {
                 baseline.insert(id, presence);
@@ -616,8 +592,14 @@ pub fn run(
             bound: flow.as_ref().map(|spec| &spec.fingerprint),
             framed: level.frames(),
             money: gate.as_ref(),
+            retry: run
+                .cwd
+                .filter(|_| run.command.params.get("arena").is_none())
+                .and_then(|cwd| {
+                    let name = run.command.params.get("name")?.as_str()?;
+                    (!name.is_empty() && !cwd.as_os_str().is_empty()).then_some((name, cwd))
+                }),
         },
-        &mut lines_left,
     );
     if let Some((n, kind)) = walked.halted
         && matches!(kind, RecipeStop::PersonsTurn | RecipeStop::PersonsLastStep)
@@ -658,7 +640,6 @@ pub fn run(
             &mut step,
             &desk,
             &caller_waits,
-            &mut lines_left,
         );
         phases["oracle"] = json!(elapsed().saturating_sub(verifying));
         let verdict = judge(&spec.checks, &baseline, &observed);
@@ -680,6 +661,7 @@ pub fn run(
         run.deadline_ms,
     );
     report["kind"] = json!("recipe-run");
+    report["evidence_ids"] = json!(true);
     report["at_epoch_ms"] = json!(at_epoch_ms);
     report["handWatched"] = Value::Bool(watched);
     // The run's whole time, its verification included: speed is verified
@@ -1054,7 +1036,6 @@ fn check_walk<'c>(
     step: &mut impl FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
     desk: &RefCell<impl Desk>,
     caller_waits: &impl Fn() -> bool,
-    lines: &mut EvidenceLines,
 ) -> BTreeMap<usize, Observed> {
     let checks: Vec<&Check> = checks.collect();
     let mut observed = BTreeMap::new();
@@ -1071,7 +1052,6 @@ fn check_walk<'c>(
                 crate::run_evidence::observing(json!({"judgment": {"asked": false}}), || {
                     step(check.tool, argv, argv)
                 });
-            lines.left(check.tool, argv);
             observed.insert(check.id, presence_of(check, &answer));
             (json!({ "n": n }), None)
         },
@@ -1108,7 +1088,6 @@ pub fn ask(
         step,
         desk,
         caller_waits,
-        &mut EvidenceLines { next: None },
     )
     .remove(&check.id)
     .unwrap_or_else(|| Observed::NotEvaluable("the check was not asked".to_string()))
@@ -1132,12 +1111,12 @@ fn walk_lines(
     desk: &RefCell<impl Desk>,
     caller_waits: &impl Fn() -> bool,
     terms: Terms<'_>,
-    lines: &mut EvidenceLines,
 ) -> (Walked<RecipeStop>, bool) {
     let Terms {
         bound,
         framed,
         money: gate,
+        retry,
     } = terms;
     let expected: RefCell<Option<(f64, f64)>> = RefCell::new(desk.borrow_mut().pointer());
     let watched = expected.borrow().is_some();
@@ -1199,7 +1178,6 @@ fn walk_lines(
                             step,
                             desk,
                             caller_waits,
-                            lines,
                         )
                     },
                     at_epoch_ms,
@@ -1213,12 +1191,19 @@ fn walk_lines(
             }
             let seed = region.and_then(|region| desk.borrow_mut().picture(region));
             let acting = elapsed();
-            let answer =
-                crate::run_evidence::observing(json!({"judgment": {"asked": false}}), || {
-                    step(tool, argv, &recipe_line_argv(tool, &line.argv, framed))
-                });
+            // This token travels with the one observation the road hands to
+            // the writer. A lost append loses its mapping, not the next line's.
+            let evidence_id = uuid::Uuid::new_v4().to_string();
+            let mut observed = json!({"judgment": {"asked": false}, "evidence_id": evidence_id});
+            if !(check || tool == RecipeTool::Browser && agent_browser::is_check(verb))
+                && let Some((name, cwd)) = retry
+            {
+                observed["retry"] = json!({"name": name, "step": line.step, "cwd": cwd});
+            }
+            let answer = crate::run_evidence::observing(observed, || {
+                step(tool, argv, &recipe_line_argv(tool, &line.argv, framed))
+            });
             phases.act = elapsed().saturating_sub(acting);
-            let evidence_n = lines.left(tool, argv);
             let envelope = match tool {
                 // The emulator door, asked with `--json`, answers the same
                 // `{ok,result}` envelope the desktop does.
@@ -1239,9 +1224,7 @@ fn walk_lines(
             let result = report
                 .as_object_mut()
                 .and_then(|report| report.remove("result"));
-            if let Some(evidence_n) = evidence_n {
-                report["evidence_n"] = json!(evidence_n);
-            }
+            report["evidence_id"] = json!(evidence_id);
             if let Some(gate_ms) = gate_ms {
                 report["gate"] = json!(gate_ms);
             }
@@ -1636,7 +1619,7 @@ pub(crate) mod bench {
             file: "f.md",
             text,
             deadline_ms: DEADLINE,
-            evidence_from: None,
+            cwd: None,
             evidence_dir: None,
         }
     }
@@ -1722,7 +1705,7 @@ mod tests {
                 file,
                 text,
                 deadline_ms,
-                evidence_from: None,
+                cwd: None,
                 evidence_dir: None,
             },
             |_, argv, logged| step(argv, logged),
@@ -2610,12 +2593,47 @@ mod tests {
             .map(String::as_str)
     }
 
+    #[test]
+    fn flow_retry_requires_a_live_recipe_and_its_original_workspace() {
+        for extra in [vec![], vec!["--arena", "/recorded"]] {
+            for cwd in [None, Some(Path::new("/original"))] {
+                let command = command(&extra);
+                let text = doc(&["key --key tab", "wait-for --app Mail --text ready"]);
+                let mut walk = walk_of(&command, &text);
+                walk.cwd = cwd;
+                let bench = Bench::new();
+                let mut observations = Vec::new();
+                run(
+                    &walk,
+                    |_, _, _| {
+                        observations.push(crate::run_evidence::observation().unwrap());
+                        ok()
+                    },
+                    |_, _, _| {},
+                    |_| {},
+                    bench.desk(false, None),
+                    || true,
+                )
+                .unwrap();
+                assert_eq!(
+                    observations[0].get("retry").is_some(),
+                    extra.is_empty() && cwd.is_some()
+                );
+                assert!(
+                    observations[1].get("retry").is_none(),
+                    "a check is not a retry action"
+                );
+                assert!(crate::run_evidence::observation().is_none());
+            }
+        }
+    }
+
     /// Every walked step reports what it spent where — the act's round trip
     /// down the road, the settle looked through after a press, the read-back
     /// judged, the pointer read — in the four phases, whose sum never exceeds
     /// the walk's own `ms` for the step; the walk says when it began and what
     /// it spent before and after its steps; and each step names the evidence
-    /// line it left, counted from where the folder stood.
+    /// identity its actual call passed to the writer.
     #[test]
     fn each_walked_step_reports_its_phases_and_the_walk_keeps_ms() {
         let bench = Bench::at(Some((5.0, 5.0)));
@@ -2630,8 +2648,7 @@ mod tests {
         let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
         let text = doc(&refs);
         let command = command(&[]);
-        let mut walk = walk_of(&command, &text);
-        walk.evidence_from = Some(4);
+        let walk = walk_of(&command, &text);
         let report = run(
             &walk,
             |_, argv, _| {
@@ -2659,7 +2676,7 @@ mod tests {
         let ran = report["ran"].as_array().expect("steps");
         assert_eq!(ran.len(), 20);
         let (mut phases_total, mut ms_total) = (0, 0);
-        for (at, step) in ran.iter().enumerate() {
+        for step in ran {
             assert_eq!(step["tool"], "computer");
             let phases = step["phases"].as_object().expect("phases");
             assert_eq!(
@@ -2674,7 +2691,10 @@ mod tests {
                 phases["act"].as_u64().unwrap() >= 7,
                 "the act is the road's round trip: {step}"
             );
-            assert_eq!(step["evidence_n"], json!(4 + at), "{step}");
+            assert!(
+                step["evidence_id"].is_string() && step.get("evidence_n").is_none(),
+                "{step}"
+            );
             phases_total += spent;
             ms_total += ms;
         }
@@ -2926,13 +2946,15 @@ mod tests {
         let command = command(&[]);
         let bench = Bench::new().showing(&[("browser-1", "https://stg.example/")]);
         let mut sent: Vec<Vec<String>> = Vec::new();
+        let mut observations = Vec::new();
         // Already there before the walk: the event is not this run's.
         let mut walk = walk_of(&command, &text);
-        walk.evidence_from = Some(1);
+        walk.cwd = Some(Path::new("/original"));
         let report = run(
             &walk,
             |_, argv, _| {
                 sent.push(argv.to_vec());
+                observations.push(crate::run_evidence::observation().unwrap());
                 match argv[0].as_str() {
                     "find" => browser_said(r#"{"count":2,"index":1}"#),
                     _ => ok(),
@@ -2966,10 +2988,25 @@ mod tests {
             flag_value(&sent[5], "--timeout-ms"),
             Some(FLOW_VERIFY_MS.to_string().as_str())
         );
+        assert!(report["ran"][0]["evidence_id"].is_string());
+        assert!(
+            report["ran"][0].get("evidence_n").is_none(),
+            "the writer assigns the physical row"
+        );
         assert_eq!(
-            report["ran"][0]["evidence_n"], 3,
-            "the probes left their lines before the first step: {}",
-            report["ran"][0]
+            observations[2]["retry"],
+            json!({"name": "test", "step": 1, "cwd": "/original"})
+        );
+        assert!(
+            observations
+                .iter()
+                .enumerate()
+                .all(|(at, observation)| at == 2 || observation.get("retry").is_none()),
+            "baseline and oracle are not recipe lines"
+        );
+        assert!(
+            crate::run_evidence::observation().is_none(),
+            "retry origin cannot leak into recovery or a later call"
         );
         let flow = &report["flow"];
         let baseline = flow["baseline"].as_object().expect("the baseline");
@@ -3320,7 +3357,7 @@ mod tests {
             file,
             text,
             deadline_ms: DEADLINE,
-            evidence_from: None,
+            cwd: None,
             evidence_dir: Some(dir),
         }
     }

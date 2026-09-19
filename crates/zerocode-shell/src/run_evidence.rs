@@ -38,8 +38,8 @@ pub struct Step {
     pub verb: String,
     pub argv: Vec<String>,
     pub ok: bool,
-    /// Measurements taken by the road that performed this step. Absent in
-    /// old logs and when the road did not observe them; never inferred by UI.
+    /// Measurements and recipe origin supplied by the actual step call.
+    /// Absent in old logs; neither timing nor retry origin is inferred by UI.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observation: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -452,6 +452,22 @@ pub fn steps_in(dir: &Path) -> Vec<Step> {
         .unwrap_or_default()
 }
 
+/// The one actual row carrying this call's identity. Missing or duplicate
+/// provenance cannot borrow a neighbouring row, even if the commands match.
+pub fn step_with_id<'a>(steps: &'a [Step], id: Option<&str>) -> Option<&'a Step> {
+    let id = id.filter(|id| !id.is_empty())?;
+    let mut matches = steps.iter().filter(|step| {
+        step.observation
+            .as_ref()
+            .and_then(|value| value.get("evidence_id"))
+            .and_then(serde_json::Value::as_str)
+            == Some(id)
+    });
+    let step = matches.next()?;
+    (matches.next().is_none() && steps.iter().filter(|other| other.n == step.n).count() == 1)
+        .then_some(step)
+}
+
 /// Write a walk's record beside its steps as the folder's next
 /// `walk-NNN.json` — under the one writer's lock, so two walks never take
 /// one number. Answers the file written.
@@ -462,7 +478,30 @@ pub fn record_walk(dir: &Path, report: &serde_json::Value) -> Result<PathBuf, St
         "{WALK_FILE_PREFIX}{n:0width$}.{WALK_FILE_EXTENSION}",
         width = NUMBER_WIDTH
     ));
-    let body = serde_json::to_vec_pretty(report).map_err(|error| error.to_string())?;
+    // The existing queue places this record after its steps. Resolve only
+    // identities the writer actually persisted; failed writes stay unlinked.
+    let mut report = report.clone();
+    let steps = steps_in(dir);
+    if report.get("evidence_ids") == Some(&serde_json::Value::Bool(true))
+        && let Some(ran) = report
+            .get_mut("ran")
+            .and_then(serde_json::Value::as_array_mut)
+    {
+        for row in ran {
+            let n = step_with_id(
+                &steps,
+                row.get("evidence_id").and_then(serde_json::Value::as_str),
+            )
+            .map(|step| step.n);
+            if let Some(row) = row.as_object_mut() {
+                row.remove("evidence_n");
+                if let Some(n) = n {
+                    row.insert("evidence_n".into(), serde_json::json!(n));
+                }
+            }
+        }
+    }
+    let body = serde_json::to_vec_pretty(&report).map_err(|error| error.to_string())?;
     std::fs::write(&file, body)
         .map_err(|error| format!("could not write {}: {error}", file.display()))?;
     emit("flow:walk", (dir, report));
@@ -516,6 +555,42 @@ mod tests {
         {
             assert_eq!(captures("emulator", row.word), Some(false));
         }
+    }
+
+    #[test]
+    fn flow_retry_links_refuse_missing_duplicate_and_legacy_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let put = |id: Option<&str>| {
+            record_measured(
+                dir.path(),
+                (1, id.map(|id| serde_json::json!({"evidence_id": id}))),
+                "computer",
+                &words(&["key", "--key", "tab"]),
+                Ok(()),
+                Framing::None,
+            )
+        };
+        put(None);
+        put(Some("actual"));
+        let steps = steps_in(dir.path());
+        assert_eq!(step_with_id(&steps, Some("actual")).unwrap().n, 2);
+        assert!(step_with_id(&steps, None).is_none());
+        assert!(step_with_id(&steps, Some("missing")).is_none());
+        put(Some("actual"));
+        assert!(step_with_id(&steps_in(dir.path()), Some("actual")).is_none());
+        let report = serde_json::json!({"evidence_ids": true, "ran": [
+            {"step": 1, "evidence_id": "actual", "evidence_n": 2},
+            {"step": 2, "evidence_n": 1},
+        ]});
+        record_walk(dir.path(), &report).unwrap();
+        let written = walks_in(dir.path());
+        assert!(
+            written[0].1["ran"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|row| row.get("evidence_n").is_none())
+        );
     }
 
     #[test]

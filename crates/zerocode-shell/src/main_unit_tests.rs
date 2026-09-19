@@ -18112,6 +18112,207 @@ pub(crate) mod computer_desktop_wait {
         assert_eq!(envelope(&done)["result"]["done"], true);
     }
 
+    /// The real runner hands each road's observation to the existing writer.
+    /// A missing/foreign physical row cannot change which recipe line a card retries.
+    #[test]
+    fn flow_retry_provenance_survives_recording_gaps_and_shared_folders() {
+        use crate::run_evidence::{self, Framing, STEPS_FILE};
+        use serde_json::{Value, json};
+        let _hand = ONE_HAND
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let root = tempfile::tempdir().unwrap();
+        crate::computer_use::evidence::set_root(root.path());
+        let recipes = root.path().join(crate::computer_use::recipes::RECIPES_DIR);
+        std::fs::create_dir_all(&recipes).unwrap();
+        let script = "# Retry\n\n## Steps\n\n1. `zerocode-computer key --key tab`\n2. `zerocode-computer key --key tab`\n3. `zerocode-computer key --key return`\n";
+        for name in ["first", "second"] {
+            std::fs::write(recipes.join(format!("{name}.md")), script).unwrap();
+        }
+        let mut fixtures = Vec::new();
+        for fault in [
+            "partial_tail",
+            "missing_write",
+            "interleaved",
+            "repeated",
+            "different_walk",
+        ] {
+            let dir = root.path().join(fault);
+            std::fs::create_dir(&dir).unwrap();
+            if fault == "partial_tail" {
+                std::fs::write(dir.join(STEPS_FILE), b"{\xff").unwrap();
+            }
+            let mut expected = Vec::new();
+            for round in 0..if matches!(fault, "repeated" | "different_walk") {
+                2
+            } else {
+                1
+            } {
+                let name = if fault == "different_walk" && round == 1 {
+                    "second"
+                } else {
+                    "first"
+                };
+                let cwd = if round == 0 {
+                    "/original-checkout"
+                } else {
+                    "/other-checkout"
+                };
+                let command = zerocode_core::computer_use::parse_command(
+                    &["recipe-run", "--name", name, "--json"].map(String::from),
+                )
+                .unwrap();
+                let mut line = 0;
+                let answer = crate::agent_tools_runtime::run_recipe(
+                    &command,
+                    60_000,
+                    Some(&dir),
+                    Some(std::path::Path::new(cwd)),
+                    crate::agent_tools_runtime::RecipeRoads::new(
+                        |tool, _, logged| {
+                            line += 1;
+                            let steps = dir.join(STEPS_FILE);
+                            let backup = dir.join("saved-steps");
+                            let failed = fault == "missing_write" && line == 2;
+                            if failed {
+                                std::fs::rename(&steps, &backup).unwrap();
+                                std::fs::create_dir(&steps).unwrap();
+                            }
+                            run_evidence::record_measured(
+                                &dir,
+                                (line as i64, run_evidence::observation()),
+                                tool.as_str(),
+                                logged,
+                                Ok(()),
+                                Framing::None,
+                            );
+                            if failed {
+                                std::fs::remove_dir(&steps).unwrap();
+                                std::fs::rename(&backup, &steps).unwrap();
+                            } else {
+                                let n = run_evidence::steps_in(&dir).last().unwrap().n;
+                                expected.push(json!({"n": n, "retry": {"name": name, "step": line, "cwd": cwd}}));
+                            }
+                            if fault == "interleaved" && line == 1 {
+                                run_evidence::record(
+                                    &dir,
+                                    1,
+                                    "browser",
+                                    &["click", "p", "#foreign"].map(String::from),
+                                    Ok(()),
+                                    Framing::None,
+                                );
+                            }
+                            zerocode_hookd::TeamAnswer {
+                                stdout: "{\"ok\":true,\"result\":{}}".into(),
+                                stderr: String::new(),
+                                exit_code: 0,
+                            }
+                        },
+                        |_, _, _| {},
+                        |_| {},
+                        |mut report| {
+                            report["cwd"] = json!(cwd);
+                            run_evidence::record_walk(&dir, &report).unwrap();
+                        },
+                    ),
+                    || BlindDesk(std::time::Instant::now()),
+                    || true,
+                );
+                assert_eq!(answer.exit_code, 0, "{fault}: {}", answer.stderr);
+            }
+            crate::computer_use::report::write(&dir).unwrap().unwrap();
+            if let Some(path) = std::env::var_os("FLOW_RETRY_FIXTURES") {
+                let saved = std::path::Path::new(&path).with_extension("").join(fault);
+                std::fs::create_dir_all(&saved).unwrap();
+                for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                    std::fs::copy(entry.path(), saved.join(entry.file_name())).unwrap();
+                }
+            }
+            assert!(crate::computer_use::report::verify(&dir).reproduced);
+            let steps = run_evidence::steps_in(&dir);
+            let walks = run_evidence::walks_in(&dir);
+            fixtures.push(json!({"case": fault, "dir": dir, "steps": steps,
+                "walk": walks.last().unwrap().1, "walks": walks, "expected": expected}));
+        }
+        // Optional raw hand-off to the existing UI harness; ordinary tests stay in tempdir.
+        if let Some(path) = std::env::var_os("FLOW_RETRY_FIXTURES") {
+            std::fs::write(path, serde_json::to_vec_pretty(&fixtures).unwrap()).unwrap();
+        }
+        for fixture in fixtures {
+            let actual: Vec<Value> = fixture["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|step| step["tool"] == "computer")
+                .map(|step| json!({"n": step["n"], "retry": step.pointer("/observation/retry")}))
+                .collect();
+            assert_eq!(
+                actual,
+                *fixture["expected"].as_array().unwrap(),
+                "{}: each actual Step owns its recipe and cwd",
+                fixture["case"]
+            );
+            for (_, walk) in
+                serde_json::from_value::<Vec<(String, Value)>>(fixture["walks"].clone()).unwrap()
+            {
+                for ran in walk["ran"].as_array().unwrap() {
+                    let expected_n = fixture["expected"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .find(|row| {
+                            row["retry"]["step"] == ran["step"]
+                                && row["retry"]["name"] == walk["name"]
+                                && row["retry"]["cwd"] == walk["cwd"]
+                        })
+                        .map(|row| row["n"].clone());
+                    assert_eq!(
+                        ran.get("evidence_n").cloned(),
+                        expected_n,
+                        "a written call keeps its actual number; a gap stays absent"
+                    );
+                    if let Some(n) = ran["evidence_n"].as_u64() {
+                        let step = fixture["steps"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|step| step["n"] == n)
+                            .unwrap();
+                        assert_eq!(step.pointer("/observation/retry/step"), ran.get("step"));
+                        assert_eq!(step.pointer("/observation/retry/name"), walk.get("name"));
+                        assert_eq!(step.pointer("/observation/retry/cwd"), walk.get("cwd"));
+                    }
+                }
+            }
+        }
+    }
+
+    /// A supplied pre-change sealed folder is read only. Run explicitly with
+    /// FLOW_RETRY_LEGACY pointing to preserved evidence, never regenerate it.
+    #[test]
+    #[ignore = "requires a pre-change sealed folder in FLOW_RETRY_LEGACY"]
+    fn flow_retry_legacy_seal_is_read_only_and_does_not_authorize_arena() {
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("FLOW_RETRY_LEGACY").expect("preserved legacy folder"),
+        );
+        let before: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| (entry.path(), std::fs::read(entry.path()).unwrap()))
+            .collect();
+        let verified = crate::computer_use::report::verify(&dir);
+        assert!(verified.reproduced, "{verified:?}");
+        assert!(crate::computer_use::arena::Arena::read(&dir, 1).is_err());
+        for (path, bytes) in before {
+            assert_eq!(
+                bytes,
+                std::fs::read(path).unwrap(),
+                "verification never rewrites an old seal"
+            );
+        }
+    }
+
     /// A run prints what the program printed, says how it ended, and is
     /// killed at its budget rather than holding the turn.
     #[test]

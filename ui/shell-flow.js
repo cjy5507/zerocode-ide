@@ -108,7 +108,6 @@ function flowMs(value) {
 function flowStepCard(run, step) {
   const card = flowText("article", "", "flow-step");
   card.dataset.n = step.n;
-  const walked = run.walk?.ran?.find((row) => row.evidence_n === step.n);
   card.append(flowText("strong", `${step.n} · ${step.tool} ${step.verb}`));
   card.append(flowText("p", step.argv?.join(" ") ?? "", "flow-step-command"));
   if (step.error) card.append(flowText("p", step.error, "orch-error"));
@@ -121,11 +120,13 @@ function flowStepCard(run, step) {
       ms: flowMs(observed.judgment?.ms), conf: observed.judgment?.confidence ?? t("flow.live.unmeasured", "미측정"),
     })));
   card.append(flowText("p", t("flow.live.act", "누름 {{ms}}", { ms: flowMs(observed.act_ms) })));
-  if (run.walk?.stop && Number.isSafeInteger(walked?.step) && run.walk.stoppedAt === walked.step) card.append(flowText("p", run.walk.stop.kind));
-  if (run.name && Number.isSafeInteger(walked?.step)) {
-    const retry = flowButton(t("flow.live.retry", "이 걸음만 다시"), () => void flowLaunch(["recipe-run", "--name", run.name, "--start", String(walked.step), "--end", String(walked.step)], `${run.name} · ${t("flow.live.retry", "이 걸음만 다시")}`, run.cwd), "btn flow-step-retry");
-    retry.disabled = !run.walk || typeof run.cwd !== "string" || !run.cwd;
-    card.append(retry);
+  // The row owns its origin. A shared folder's newest walk (or a guessed
+  // evidence_n) cannot lend its recipe, line or workspace to an older card.
+  const origin = observed.retry;
+  if (typeof origin?.name === "string" && origin.name
+    && Number.isSafeInteger(origin.step) && origin.step > 0
+    && typeof origin.cwd === "string" && origin.cwd) {
+    card.append(flowButton(t("flow.live.retry", "이 걸음만 다시"), () => void flowLaunch(["recipe-run", "--name", origin.name, "--start", String(origin.step), "--end", String(origin.step)], `${origin.name} · ${t("flow.live.retry", "이 걸음만 다시")}`, origin.cwd), "btn flow-step-retry"));
   }
   return card;
 }

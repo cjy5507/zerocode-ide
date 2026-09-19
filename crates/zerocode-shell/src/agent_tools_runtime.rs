@@ -2806,8 +2806,7 @@ pub(super) fn run_recipe(
         None => Stage::Live(desk_of.desk()),
     };
     // One round: the door (a stopped operator refuses a walk that acts; an
-    // arena acts on nothing), the folder's next line once the writer has
-    // caught up (`reads_the_log`), the walk, and the folder's own words after
+    // arena acts on nothing), the walk, and the folder's own words after
     // it — the verdict first, the record, the report from the files.
     let mut round = |road: &mut _,
                      desk: Stage<_>,
@@ -2827,12 +2826,7 @@ pub(super) fn run_recipe(
             }
             return Err(door);
         }
-        // An internal resume keeps the person's original request range.
-        // Its cursor comes from the stopped report, not another CLI request.
-        let evidence_from = dir.map(|dir| {
-            tauri::async_runtime::block_on(evidence_runtime::written());
-            run_evidence::steps_in(dir).len() + 1
-        });
+        // An internal resume keeps the original request range and its own cursor.
         let mut report = recipe_run::run(
             &Run {
                 command,
@@ -2840,7 +2834,7 @@ pub(super) fn run_recipe(
                 file: &file,
                 text: &text,
                 deadline_ms,
-                evidence_from,
+                cwd: workspace,
                 evidence_dir: dir,
             },
             &mut *road,
