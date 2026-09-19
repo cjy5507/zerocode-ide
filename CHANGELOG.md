@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.1.1] — 2026-09-19
+
+_since v1.1.0 (22 commits)_
+
+### feat
+- feat(jev): a judged task can be labelled, because the words are written down where they still exist
+- feat(jev): the judge runs — a seat's own ledger is judged as it fills, and a rise or a fall is written where the rows are
+- feat(settings): each Jev seat carries its own ledger's numbers, and the card asks zo for them rather than counting
+- feat(jev): `auto` decides — a seat rises on its own evidence, falls on the line it breaks, and says which one
+- feat(jev): every seat's ledger is counted by one reader, natively — the numbers a seat is promoted on are now the numbers a person can read
+- feat(jev): a walk asks only where the road forks — and the look, not the judgment, was the price: 262 ms of every step went to badges nobody opens
+- feat(jev): the placement question gets a door and a row of its own, and nothing knocks on it — one room is implemented and no row says a judgment would choose a better one
+- feat(memory): the bottom level is not injected — a note the judgment says bears on nothing is one the turn does not get, and 5 of 74 recalls were nothing else
+
+### fix
+- fix(computer-use): a walk may name its place by a pane, which the usage has always offered and the gate refused
+- fix(jev): a seat's cost is read from the judgment rate table, which has had a price since the launch post
+- fix(jev): the shadow freezes every path before it detaches — a unit test's rows were landing in a person's real ledger
+- fix(ui): a late frame asks again before it moves the reader, the folded history says so once more, and a count that the chase decides stops being a verdict
+- fix(release): the judgment that decides flake or real gets the calm machine a gate gets — it was running on the heat the zo gate had just left
+- fix(ui): a new turn stops taking the reader's scroll, and the words the window ships are the words its tests and translations carry
+- fix(release): a release goes where the app is looking — read off this checkout's origin it went to the source repository, which is private and which nothing polls
+- fix(zo): public documentation stops pointing at items only its own crate can see — the doc gate was red on five links and no release could pass it
+- fix(release): the repository a release goes to is read through the clone the gate runs in — read from the checkout alone it named a path, and the lane published nowhere
+- fix(orchestration): a store this actor could not open is answered, not the end of it — a full disk shut the ledger and freeing the disk did not reopen it
+- fix(settings): the fold's summary eases into its hover and 더 만들기's switch names its order — two contracts the narrowed gate walked past
+- fix(orchestration): the grace asks the live teams to seat a sleeper before it ends one — three finished workers were announced dead with a coordinator sitting right there
+- fix(bash): a full disk stops the work, not the hands — the floor now admits a command that can only look or only free
+- fix(memory): the vault reading is Hit@k, and each k is its own call — renaming it costs the claim it was quoted for, and the path fix costs one line
+
 ## [1.1.0] — 2026-09-18
 
 _since v1.0.0 (18 commits)_
