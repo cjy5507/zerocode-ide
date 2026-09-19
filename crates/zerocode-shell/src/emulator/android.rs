@@ -2,6 +2,10 @@
 
 mod accessibility;
 mod capabilities;
+mod display;
+
+#[cfg(all(test, unix))]
+mod geometry_tests;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
@@ -1343,39 +1347,17 @@ fn android_control(serial: &str) -> Result<(AndroidSdk, Arc<SessionControl>), St
     Ok((sdk, control))
 }
 
-fn android_screen_size(
-    sdk: &AndroidSdk,
-    serial: &str,
-    control: &SessionControl,
-) -> Result<(u32, u32), String> {
-    if let Some(size) = control.cached_screen_size() {
-        return Ok(size);
-    }
-    let size = read_android_screen_size(sdk, serial)?;
-    control.cache_screen_size(Some(size));
-    Ok(size)
+fn read_android_screen_size(sdk: &AndroidSdk, serial: &str) -> Result<(u32, u32), String> {
+    read_android_display(sdk, serial).map(|display| display.size)
 }
 
-fn read_android_screen_size(sdk: &AndroidSdk, serial: &str) -> Result<(u32, u32), String> {
-    let out = crate::proc::quiet_command(&sdk.adb)
-        .args(["-s", serial, "shell", "wm", "size"])
-        .output()
-        .map_err(|error| error.to_string())?;
-    if !out.status.success() {
-        return Err("화면 크기를 읽지 못했습니다".to_string());
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let read = |label: &str| {
-        text.lines()
-            .find_map(|line| line.trim().strip_prefix(label))
-            .and_then(|rest| rest.trim().split_once('x'))
-            .and_then(|(width, height)| {
-                Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
-            })
-    };
-    read("Override size:")
-        .or_else(|| read("Physical size:"))
-        .ok_or_else(|| "화면 크기를 읽지 못했습니다".to_string())
+fn read_android_display(sdk: &AndroidSdk, serial: &str) -> Result<display::Geometry, String> {
+    let bytes = accessibility::run(
+        &sdk.adb,
+        &["-s", serial, "shell", "dumpsys", "input"],
+        Some(accessibility::MAX_OUTPUT_BYTES),
+    )?;
+    display::parse(&String::from_utf8_lossy(&bytes))
 }
 
 fn bounded_video_size(sdk: &AndroidSdk, serial: &str) -> Option<String> {
@@ -1439,16 +1421,14 @@ pub(crate) async fn android_tap_direct(serial: String, x: f64, y: f64) -> Result
     tauri::async_runtime::spawn_blocking(move || {
         let (sdk, control) = android_control(&serial)?;
         let _input = control.input()?;
-        tap_at(
-            &sdk,
-            &serial,
-            x,
-            y,
-            android_screen_size(&sdk, &serial, &control)?,
-        )
+        tap_normalized(&sdk, &serial, x, y)
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+fn tap_normalized(sdk: &AndroidSdk, serial: &str, x: f64, y: f64) -> Result<(), String> {
+    tap_at(sdk, serial, x, y, read_android_screen_size(sdk, serial)?)
 }
 
 fn tap_at(sdk: &AndroidSdk, serial: &str, x: f64, y: f64, size: (u32, u32)) -> Result<(), String> {
@@ -1462,9 +1442,13 @@ fn marks_snapshot(
     sdk: &AndroidSdk,
     serial: &str,
 ) -> Result<(super::marks::Snapshot, (u32, u32)), String> {
-    let size = read_android_screen_size(sdk, serial)?;
+    let display = read_android_display(sdk, serial)?;
     let tree = serde_json::to_value(accessibility::snapshot(&sdk.adb, serial)?)
         .map_err(|error| error.to_string())?;
+    if read_android_display(sdk, serial)? != display {
+        return Err("Android display changed while reading the tree; run marks again".into());
+    }
+    let size = display.size;
     let screen = zerocode_core::computer_use_protocol::render::Rect::new(
         0.0,
         0.0,
@@ -1533,27 +1517,38 @@ pub(crate) async fn android_swipe_direct(
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (sdk, control) = android_control(&serial)?;
-        let size = android_screen_size(&sdk, &serial, &control)?;
-        let (x1, y1) = device_point(x1, y1, size);
-        let (x2, y2) = device_point(x2, y2, size);
-        let duration = ms.unwrap_or(300).clamp(50, 3_000).to_string();
-        android_input(
-            &sdk,
-            &serial,
-            &[
-                "swipe",
-                &x1.to_string(),
-                &y1.to_string(),
-                &x2.to_string(),
-                &y2.to_string(),
-                &duration,
-            ],
-        )?;
-        registry().nudge(EmulatorPlatform::Android, &serial);
-        Ok(())
+        let _input = control.input()?;
+        swipe_normalized(&sdk, &serial, (x1, y1), (x2, y2), ms)
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+fn swipe_normalized(
+    sdk: &AndroidSdk,
+    serial: &str,
+    from: (f64, f64),
+    to: (f64, f64),
+    ms: Option<u32>,
+) -> Result<(), String> {
+    let size = read_android_screen_size(sdk, serial)?;
+    let (x1, y1) = device_point(from.0, from.1, size);
+    let (x2, y2) = device_point(to.0, to.1, size);
+    let duration = ms.unwrap_or(300).clamp(50, 3_000).to_string();
+    android_input_unlocked(
+        sdk,
+        serial,
+        &[
+            "swipe",
+            &x1.to_string(),
+            &y1.to_string(),
+            &x2.to_string(),
+            &y2.to_string(),
+            &duration,
+        ],
+    )?;
+    registry().nudge(EmulatorPlatform::Android, serial);
+    Ok(())
 }
 
 #[tauri::command]
@@ -1653,7 +1648,6 @@ pub(crate) async fn android_rotate_direct(serial: String, rotation: u32) -> Resu
         };
         put("accelerometer_rotation", "0")?;
         put("user_rotation", &(rotation % 4).to_string())?;
-        control.cache_screen_size(None);
         registry().nudge(EmulatorPlatform::Android, &serial);
         Ok(())
     })

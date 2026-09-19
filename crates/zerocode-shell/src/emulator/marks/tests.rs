@@ -73,6 +73,59 @@ fn android_compound_rows_preserve_their_descendant_words_and_pin_them() {
 }
 
 #[test]
+fn android_landscape_marks_and_pins_share_the_logical_input_coordinates() {
+    // Unmodified CLI response from t-4836's 2400x1080 Display & touch
+    // reproduction; the old wm-size frame (1080x2400) issued only one mark.
+    let response: Value =
+        serde_json::from_str(include_str!("fixtures/android-landscape.json")).unwrap();
+    let tree = &response["result"];
+    let physical = Rect::new(0.0, 0.0, 1080.0, 2400.0);
+    let screen = Rect::new(0.0, 0.0, 2400.0, 1080.0);
+    let snapshot = Snapshot::new(EmulatorPlatform::Android, tree, screen).unwrap();
+    assert_eq!(numbered(&snapshot.faces, physical).marks.len(), 1);
+    let table = Table {
+        platform: EmulatorPlatform::Android,
+        device: "fixture".into(),
+        plan: numbered(&snapshot.faces, screen),
+        screen,
+        made: Instant::now(),
+    };
+    let items = shared::items(&table.plan);
+    // The existing overlap policy withholds the switch whose centre is
+    // inside its clickable parent row: seven clickable nodes, six marks.
+    assert_eq!(items.len(), 6);
+    assert!(
+        items
+            .iter()
+            .any(|item| item["label"] == "Display size and text")
+    );
+    for item in items {
+        let mark = item["mark"].as_u64().unwrap() as usize;
+        let request = table.request(table.platform, &table.device, mark).unwrap();
+        let mut taps = Vec::new();
+        request
+            .perform(&snapshot.faces, screen, |x, y| {
+                taps.push(super::super::android::device_point(x, y, (2400, 1080)));
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            taps,
+            vec![(
+                item["centerX"].as_f64().unwrap().round() as u32,
+                item["centerY"].as_f64().unwrap().round() as u32
+            )]
+        );
+        let error = request
+            .perform(&snapshot.faces, physical, |_, _| {
+                panic!("a pin from a different display geometry was pressed")
+            })
+            .unwrap_err();
+        assert_eq!(error.code, error_code::PIN_BROKEN);
+    }
+}
+
+#[test]
 fn mobile_pin_refuses_changed_tree_before_the_tap() {
     let original = faces(EmulatorPlatform::Ios, &ios_tree());
     let face = &original[1];

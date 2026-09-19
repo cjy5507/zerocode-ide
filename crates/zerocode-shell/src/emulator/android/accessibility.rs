@@ -11,7 +11,7 @@ use serde::Serialize;
 
 const DEVICE_DUMP_PATH: &str = "/sdcard/window_dump.xml";
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(6);
-const MAX_XML_BYTES: u64 = 4 * 1024 * 1024;
+pub(super) const MAX_OUTPUT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ELEMENTS: usize = 500;
 const MAX_DEPTH: usize = 80;
 
@@ -77,7 +77,7 @@ pub(super) fn snapshot(adb: &Path, serial: &str) -> Result<AndroidAxNode, String
         run(
             adb,
             &["-s", serial, "exec-out", "cat", &dump_path],
-            Some(MAX_XML_BYTES),
+            Some(MAX_OUTPUT_BYTES),
         )
     });
     let _ = run(adb, &["-s", serial, "shell", "rm", "-f", &dump_path], None);
@@ -85,7 +85,7 @@ pub(super) fn snapshot(adb: &Path, serial: &str) -> Result<AndroidAxNode, String
     parse(&text)
 }
 
-fn run(binary: &Path, args: &[&str], max_bytes: Option<u64>) -> Result<Vec<u8>, String> {
+pub(super) fn run(binary: &Path, args: &[&str], max_bytes: Option<u64>) -> Result<Vec<u8>, String> {
     let output_path = std::env::temp_dir().join(format!(
         "zerocode-android-ax-{}-{}",
         std::process::id(),

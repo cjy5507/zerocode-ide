@@ -79,7 +79,6 @@ pub(super) struct SessionControl {
     signal: Mutex<bool>,
     wake: Condvar,
     child: Mutex<Option<Child>>,
-    screen_size: Mutex<Option<(u32, u32)>>,
     /// A marked press holds this from its fresh tree through input so another
     /// input in this window cannot slip between the proof and the tap. The
     /// registry shares it by actual device, across stream modes and restarts.
@@ -121,7 +120,6 @@ impl SessionControl {
             signal: Mutex::new(false),
             wake: Condvar::new(),
             child: Mutex::new(None),
-            screen_size: Mutex::new(None),
             input,
             viewport_long_edge: AtomicU32::new(0),
             cleanup: Mutex::new(None),
@@ -389,14 +387,6 @@ impl SessionControl {
         };
         let _ = child.kill();
         let _ = child.wait();
-    }
-
-    pub fn cached_screen_size(&self) -> Option<(u32, u32)> {
-        *held(&self.screen_size)
-    }
-
-    pub fn cache_screen_size(&self, size: Option<(u32, u32)>) {
-        *held(&self.screen_size) = size;
     }
 
     pub fn viewport_long_edge(&self) -> Option<u32> {
