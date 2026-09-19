@@ -574,14 +574,23 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn fail_fast_rate_limit_marks_cooldown_without_runtime_retry() {
+    #[test]
+    fn fail_fast_rate_limit_marks_cooldown_without_runtime_retry() {
+        // This observer mutates the same process-wide quota state as the
+        // foreground test. Hold its shared guard outside the async runtime,
+        // and keep test marks away from the person's account-global file.
+        let _quota_serial = api::quota::rate_limit_test_guard();
+        api::quota::isolate_rate_limit_state_for_tests();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
         let model = "claude-sonnet-4-5";
         let kind = api::detect_provider_kind(model);
         let attempts = std::cell::Cell::new(0u32);
         let observed_errors = std::cell::Cell::new(0u32);
         let notices = std::cell::Cell::new(0u32);
-        let result: Result<(), String> = retry_async(
+        let result: Result<(), String> = runtime.block_on(retry_async(
             "test",
             None,
             Some(0),
@@ -594,8 +603,7 @@ mod tests {
                 attempts.set(attempt + 1);
                 async move { Err::<(), String>("HTTP 429 Too Many Requests".to_string()) }
             },
-        )
-        .await;
+        ));
         assert!(result.is_err());
         assert_eq!(attempts.get(), 1, "fail-fast must return the first 429");
         assert_eq!(

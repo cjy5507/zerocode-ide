@@ -1320,7 +1320,7 @@
     #[test]
     fn workflow_general_purpose_implementation_records_effective_coding_role() {
         let config_home = temp_config_home("workflow-effective-coding-role");
-        write_settings(&config_home, &json!({"smart": {"enabled": true}}));
+        write_settings(&config_home, &json!({"smart": {"enabled": true, "autoClassifier": "deterministic"}}));
         with_config_home(&config_home, || {
             let mut input = agent_input(Some("general-purpose"));
             input.description = "workflow phase `implement` item 0".to_string();
@@ -1347,7 +1347,7 @@
     #[test]
     fn effective_implementation_role_controls_weak_large_signals() {
         let config_home = temp_config_home("effective-coding-complexity");
-        write_settings(&config_home, &json!({"smart": {"enabled": true}}));
+        write_settings(&config_home, &json!({"smart": {"enabled": true, "autoClassifier": "deterministic"}}));
         with_config_home(&config_home, || {
             let mut input = agent_input(Some("general-purpose"));
             input.description = "service task".to_string();
@@ -1386,7 +1386,7 @@
         write_settings(
             &config_home,
             &json!({
-                "smart": {"enabled": true},
+                "smart": {"enabled": true, "autoClassifier": "deterministic"},
                 "modelRouter": {
                     "roles": {
                         "coding": {"mode": "pinned", "model": "claude-fable-5"}
