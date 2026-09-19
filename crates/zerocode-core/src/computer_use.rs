@@ -2270,6 +2270,8 @@ pub struct ComputerCommand {
 /// ZeroCode emulator pane.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmulatorMethod {
+    Find,
+    Foreground,
     List,
     Open,
     Tree,
@@ -2315,6 +2317,7 @@ impl std::str::FromStr for EmulatorPlatform {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EmulatorCommand {
     pub method: EmulatorMethod,
+    pub app: Option<String>,
     pub platform: Option<EmulatorPlatform>,
     pub device: Option<String>,
     pub x: Option<f64>,
@@ -2344,6 +2347,8 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         return Err(emulator_usage());
     }
     let method = match verb {
+        "find" => EmulatorMethod::Find,
+        "foreground" => EmulatorMethod::Foreground,
         "list" => EmulatorMethod::List,
         "open" => EmulatorMethod::Open,
         "tree" => EmulatorMethod::Tree,
@@ -2370,7 +2375,8 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         EmulatorMethod::Click => &["json", "platform", "device", "mark", "look"],
         EmulatorMethod::Tap => &["json", "platform", "device", "x", "y"],
         EmulatorMethod::Swipe => &["json", "platform", "device", "x1", "y1", "x2", "y2", "ms"],
-        EmulatorMethod::Text => &["json", "platform", "device", "text"],
+        EmulatorMethod::Text | EmulatorMethod::Find => &["json", "platform", "device", "text"],
+        EmulatorMethod::Foreground => &["json", "platform", "device", "app"],
         EmulatorMethod::Button => &["json", "platform", "device", "name"],
         EmulatorMethod::Rotate => &["json", "platform", "device", "rotation"],
         EmulatorMethod::Screenshot => &["json", "platform", "device", "out"],
@@ -2413,6 +2419,7 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         ));
     }
     let text = optional_string_allowing_empty(&flags, "text")?;
+    let app = optional_string(&flags, "app")?;
     let name = optional_string(&flags, "name")?;
     let rotation = optional_non_negative_integer(&flags, "rotation")?
         .map(|value| u32::try_from(value).map_err(|_| "--rotation is too large".to_string()))
@@ -2435,6 +2442,18 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         return Err("missing required --device".into());
     }
     match method {
+        EmulatorMethod::Find => {
+            let value = text.as_deref().ok_or("missing required --text")?;
+            if value.trim().is_empty() {
+                return Err("--text must not be empty".into());
+            }
+        }
+        EmulatorMethod::Foreground => {
+            let value = app.as_deref().ok_or("missing required --app")?;
+            if value.trim().is_empty() {
+                return Err("--app must not be empty".into());
+            }
+        }
         EmulatorMethod::Click => {
             mark.ok_or("missing required --mark")?;
             look.as_ref().ok_or("missing required --look")?;
@@ -2463,6 +2482,7 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
 
     Ok(EmulatorCommand {
         method,
+        app,
         platform,
         device,
         x,
@@ -4040,6 +4060,10 @@ pub fn emulator_usage() -> String {
         "  zerocode-emulator open --platform ios|android [--device <id>] [--json]",
         "  zerocode-emulator tree --platform ios|android --device <id> [--json]",
         "  zerocode-emulator marks --platform ios|android --device <id> [--json]",
+        "  zerocode-emulator find --platform ios|android --device <id> --text <fragment> [--json]",
+        "  zerocode-emulator foreground --platform ios|android --device <id> --app <package|bundle> [--json]",
+        "    Checks answer count (0 means absent). find matches a case-insensitive name fragment.",
+        "    foreground requires an exported app package; unavailable metadata is an error (including iOS).",
         "  zerocode-emulator click --platform ios|android --device <id> --mark <n> --look <id> [--json]",
         "  zerocode-emulator tap --platform ios|android --device <id> --x <0..1> --y <0..1> [--json]",
         "  zerocode-emulator swipe --platform ios|android --device <id> --x1 N --y1 N --x2 N --y2 N [--ms N] [--json]",
@@ -5751,6 +5775,29 @@ mod tests {
             words(&["hotkey", "--app", "Finder", "--key", "Return"]),
         ] {
             assert!(parse_command(&argv).is_err(), "accepted {argv:?}");
+        }
+    }
+
+    #[test]
+    fn emulator_checks_parse_and_require_their_subject() {
+        for platform in ["ios", "android"] {
+            for (verb, flag, value) in [
+                ("find", "--text", "완료"),
+                ("foreground", "--app", "com.example.app"),
+            ] {
+                let base = [verb, "--platform", platform, "--device", "phone"];
+                let mut args = words(&base);
+                args.extend(words(&[flag, value, "--json"]));
+                assert!(parse_emulator_command(&args).is_ok(), "{args:?}");
+                assert!(emulator_usage().contains(&format!("zerocode-emulator {verb} ")));
+                let error = parse_emulator_command(&words(&base)).unwrap_err();
+                assert_eq!(error, format!("missing required {flag}"));
+                for empty in ["", "   "] {
+                    let mut args = words(&base);
+                    args.extend(words(&[flag, empty]));
+                    assert!(parse_emulator_command(&args).is_err(), "{args:?}");
+                }
+            }
         }
     }
 

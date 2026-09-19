@@ -313,8 +313,8 @@ fn witnesses(line: &RecipeLine, txn: &Transaction) -> Result<Vec<(String, Check)
                 ])
                 .collect()
         }
-        // The emulator door answers no check this wave (its Flow parser refuses
-        // an emulator check line), so a money step there has no witness: closed.
+        // Mobile presence checks do not establish amount/recipient witnesses.
+        // The money path remains closed until that separate contract exists.
         RecipeTool::Emulator => {
             return Err(
                 "the money step is on the emulator door, which has no witness yet".to_string(),

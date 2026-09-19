@@ -10,7 +10,8 @@
 //! so no counter, budget or check-teller is written twice.
 
 use crate::agent_browser::{
-    BrowserVerb, act_verb, acts_in, arity_ok_in, holds_ms_in, is_check_in, verb, verb_in,
+    BrowserVerb, act_verb, acts_in, arity_ok_in, check_verb, holds_ms_in, is_check_in, verb,
+    verb_in,
 };
 
 /// The shim's name on every pane's PATH — the word a recipe line starts with
@@ -27,7 +28,7 @@ pub const EMULATOR_SWIPE_MS_MAX: u32 = 3_000;
 /// How long one emulator command may hold a walk: the swipe ceiling — the
 /// longest any gesture takes, and a comfortable bound on the round trip to
 /// the device backend for reads and photographs too. Mark clicks re-read
-/// the tree before input; they keep this same policy. None is a check.
+/// the tree before input; deterministic checks keep this same policy.
 pub const EMULATOR_HOLD_MS: u64 = EMULATOR_SWIPE_MS_MAX as u64;
 
 /// The one table of the emulator door's verbs (`EmulatorMethod`, the words
@@ -35,13 +36,15 @@ pub const EMULATOR_HOLD_MS: u64 = EMULATOR_SWIPE_MS_MAX as u64;
 /// how many words each takes after itself (its flags and their values, a
 /// preflight count the door's parser then confirms), how long it may hold a
 /// walk, and whether it acts on the device — the gestures do, the reads and
-/// the photograph do not, and none answers a check a Flow judges. The type
+/// the photograph do not. The find and foreground reads answer checks a Flow judges. The type
 /// and the readers are `agent_browser`'s, shared, never copied.
-pub const EMULATOR_VERBS: [BrowserVerb; 11] = [
+pub const EMULATOR_VERBS: [BrowserVerb; 13] = [
     verb("list", 0, 1, EMULATOR_HOLD_MS),
     verb("open", 2, 5, EMULATOR_HOLD_MS),
     verb("tree", 4, 5, EMULATOR_HOLD_MS),
     verb("marks", 4, 5, EMULATOR_HOLD_MS),
+    check_verb("find", 6, 7, EMULATOR_HOLD_MS),
+    check_verb("foreground", 6, 7, EMULATOR_HOLD_MS),
     act_verb("click", 8, 9, EMULATOR_HOLD_MS),
     act_verb("tap", 8, 9, EMULATOR_HOLD_MS),
     act_verb("swipe", 12, 15, EMULATOR_HOLD_MS),
@@ -64,8 +67,7 @@ pub fn holds_ms(verb: &str) -> Option<u64> {
     holds_ms_in(&EMULATOR_VERBS, verb)
 }
 
-/// Whether a verb's answer is a check a Flow may judge (none of this door's,
-/// this wave — the mobile oracle is a later parity).
+/// Whether a verb's deterministic observation is a check a Flow may judge.
 #[must_use]
 pub fn is_check(verb: &str) -> bool {
     is_check_in(&EMULATOR_VERBS, verb)
@@ -90,6 +92,17 @@ mod tests {
 
     fn argv(line: &[&str]) -> Vec<String> {
         line.iter().map(|word| (*word).to_string()).collect()
+    }
+
+    #[test]
+    fn emulator_checks_are_reads_with_the_shared_arity_and_hold_policy() {
+        for word in ["find", "foreground"] {
+            let row = emulator_verb(word).expect("mobile check registered");
+            assert!(is_check(word));
+            assert!(!acts(word));
+            assert_eq!((row.arity.min, row.arity.max), (6, 7));
+            assert_eq!(holds_ms(word), Some(EMULATOR_HOLD_MS));
+        }
     }
 
     #[test]
@@ -124,10 +137,9 @@ mod tests {
         for row in &EMULATOR_VERBS {
             assert!(seen.insert(row.word), "`{}` twice in the table", row.word);
             assert!(row.arity.min <= row.arity.max, "{row:?}");
-            // Every gesture holds the device at most the swipe ceiling, and no
-            // verb of this wave is a check the Flow judges.
+            // Reads and gestures share the device hold ceiling.
             assert_eq!(row.hold_ms, EMULATOR_HOLD_MS, "{row:?}");
-            assert!(!row.check, "{row:?}");
+            assert!(!row.check || !row.acts, "checks never act: {row:?}");
             // The door's readers are the browser's, given this table: one
             // implementation, never a second.
             assert_eq!(holds_ms(row.word), Some(row.hold_ms));
@@ -144,7 +156,7 @@ mod tests {
                 agent_browser::acts_in(&EMULATOR_VERBS, row.word)
             );
         }
-        assert_eq!(EMULATOR_VERBS.len(), 11);
+        assert_eq!(EMULATOR_VERBS.len(), 13);
         assert_eq!(holds_ms("nope"), None);
         assert_eq!(EMULATOR_CLI, "zerocode-emulator");
         assert_eq!(EMULATOR_HOLD_MS, u64::from(EMULATOR_SWIPE_MS_MAX));

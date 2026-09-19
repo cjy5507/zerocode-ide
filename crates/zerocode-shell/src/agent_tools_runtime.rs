@@ -3287,8 +3287,11 @@ pub(super) async fn answer_emulator_command(
     let platform = command.platform;
     let device = command.device.clone();
     let result: Result<serde_json::Value, String> = match command.method {
-        EmulatorMethod::Marks | EmulatorMethod::Click => {
-            return answer_emulator_marks(command).await;
+        EmulatorMethod::Marks
+        | EmulatorMethod::Click
+        | EmulatorMethod::Find
+        | EmulatorMethod::Foreground => {
+            return answer_emulator_observation(command).await;
         }
         EmulatorMethod::List => {
             let (ios, android) =
@@ -3408,7 +3411,7 @@ pub(super) async fn answer_emulator_command(
     )
 }
 
-async fn answer_emulator_marks(
+async fn answer_emulator_observation(
     command: zerocode_core::computer_use::EmulatorCommand,
 ) -> zerocode_hookd::TeamAnswer {
     use crate::emulator::marks;
@@ -3435,6 +3438,20 @@ async fn answer_emulator_marks(
         };
         match command.method {
             EmulatorMethod::Marks => marks::observe(platform, device).await,
+            EmulatorMethod::Find | EmulatorMethod::Foreground => {
+                crate::emulator::checks::observe(
+                    platform,
+                    device,
+                    command.method,
+                    if command.method == EmulatorMethod::Find {
+                        command.text.as_deref()
+                    } else {
+                        command.app.as_deref()
+                    }
+                    .unwrap_or_default(),
+                )
+                .await
+            }
             _ => {
                 marks::click(
                     platform,
@@ -3456,17 +3473,23 @@ pub(super) fn emulator_answer(
     result: Result<serde_json::Value, zerocode_core::computer_use_protocol::ProviderError>,
 ) -> zerocode_hookd::TeamAnswer {
     use zerocode_core::computer_use::EmulatorMethod;
-    let marked = matches!(method, EmulatorMethod::Marks | EmulatorMethod::Click);
+    let device_data = matches!(
+        method,
+        EmulatorMethod::Marks
+            | EmulatorMethod::Click
+            | EmulatorMethod::Find
+            | EmulatorMethod::Foreground
+    );
     match result {
         Ok(mut result) if json => {
-            if marked {
+            if device_data {
                 result[zerocode_core::untrusted::JSON_FLAG] = true.into();
             }
             computer_said(format!("{}\n", json!({ "ok": true, "result": result })))
         }
         Ok(result) => {
             let text = emulator_pretty(method, &result);
-            computer_said(if marked {
+            computer_said(if device_data {
                 zerocode_core::untrusted::fence("emulator", &text, text.len())
             } else {
                 format!("{text}\n")
@@ -4208,7 +4231,10 @@ pub(super) fn emulator_pretty(
                 || "Screenshot saved.".to_string(),
                 |path| format!("Screenshot: {path}"),
             ),
-        EmulatorMethod::List | EmulatorMethod::Tree => {
+        EmulatorMethod::List
+        | EmulatorMethod::Tree
+        | EmulatorMethod::Find
+        | EmulatorMethod::Foreground => {
             serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
         }
     }

@@ -204,6 +204,8 @@ fn node_frame(platform: EmulatorPlatform, node: &Value) -> Option<Rect> {
 pub(super) struct Snapshot {
     pub faces: Vec<ElementFace>,
     pub screen: Rect,
+    /// Keep exported metadata alongside the folded faces; never infer it from a label.
+    pub raw: Value,
 }
 
 impl Snapshot {
@@ -226,7 +228,11 @@ impl Snapshot {
             face.x -= screen.x;
             face.y -= screen.y;
         }
-        Ok(Self { faces, screen })
+        Ok(Self {
+            faces,
+            screen,
+            raw: tree.clone(),
+        })
     }
 
     #[cfg(any(target_os = "macos", test))]
@@ -432,19 +438,27 @@ pub(crate) fn backend_error(error: impl ToString) -> ProviderError {
     ProviderError::new("emulator_error", error.to_string())
 }
 
-/// Number the device's current tree without capturing or drawing a picture.
-pub(crate) async fn observe(
+/// The same fresh, complete, geometry-checked observation for marks and checks.
+pub(super) async fn snapshot(
     platform: EmulatorPlatform,
-    device: Device,
-) -> Result<Value, ProviderError> {
-    let snapshot = match platform {
+    device: &Device,
+) -> Result<Snapshot, ProviderError> {
+    match platform {
         EmulatorPlatform::Ios => super::ios::marks_snapshot_direct(device.address.clone()).await,
         EmulatorPlatform::Android => {
             super::android::marks_snapshot_direct(device.address.clone(), device.identity.clone())
                 .await
         }
     }
-    .map_err(backend_error)?;
+    .map_err(backend_error)
+}
+
+/// Number the device's current tree without capturing or drawing a picture.
+pub(crate) async fn observe(
+    platform: EmulatorPlatform,
+    device: Device,
+) -> Result<Value, ProviderError> {
+    let snapshot = snapshot(platform, &device).await?;
     let table = Table {
         platform,
         device,

@@ -8,6 +8,7 @@
 
 mod android;
 mod capability;
+pub(crate) mod checks;
 mod ios;
 #[cfg(target_os = "macos")]
 mod ios_hid;

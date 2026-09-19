@@ -1016,10 +1016,17 @@ fn check_command(tool: RecipeTool, argv: &[String]) -> Result<(), String> {
             agent_emulator::arity_ok(argv)?;
             if !agent_emulator::is_check(verb) {
                 return Err(format!(
-                    "`{verb}` is not a check: the emulator door answers none a Flow judges"
+                    "`{verb}` is not a check: {}",
+                    words_of(
+                        agent_emulator::EMULATOR_VERBS
+                            .iter()
+                            .filter(|row| row.check)
+                            .map(|row| row.word),
+                        |word| word
+                    )
                 ));
             }
-            Ok(())
+            crate::computer_use::parse_emulator_command(argv).map(drop)
         }
     }
 }
@@ -1245,6 +1252,24 @@ mod tests {
             .find(|line| line.id == id)
             .unwrap_or_else(|| panic!("line {id} judged: {verdict:?}"))
             .status
+    }
+
+    #[test]
+    fn emulator_checks_parse_in_a_flow_and_reject_malformed_subjects() {
+        for (verb, flag, value) in [
+            ("find", "--text", "완료"),
+            ("foreground", "--app", "com.example.app"),
+        ] {
+            let base = document("dry");
+            let text = format!(
+                "{}{}\n\n1. `zerocode-emulator {verb} --platform android --device phone {flag} {value}` — state, required\n",
+                base.split(FLOW_HEADING_CHECKS).next().unwrap(),
+                FLOW_HEADING_CHECKS
+            );
+            let spec = parse_flow(&text).unwrap().unwrap();
+            assert_eq!(spec.checks[0].tool, RecipeTool::Emulator);
+            assert!(parse_flow(&text.replace(&format!("{flag} {value}"), "--bogus no")).is_err());
+        }
     }
 
     #[test]

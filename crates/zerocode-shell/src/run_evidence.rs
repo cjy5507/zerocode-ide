@@ -118,6 +118,8 @@ pub fn fenced_dir(local_data_root: &Path, presented: Option<&str>) -> Option<Pat
 pub fn captures(tool: &str, verb: &str) -> Option<bool> {
     match (tool, verb) {
         ("emulator", verb) if zerocode_core::agent_emulator::acts(verb) => Some(true),
+        // Deterministic AX checks leave a line; their verdict needs no picture.
+        ("emulator", verb) if zerocode_core::agent_emulator::is_check(verb) => Some(false),
         ("emulator", "screenshot")
         | (
             "browser",
@@ -505,6 +507,16 @@ fn walk_files(dir: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emulator_checks_leave_evidence_without_capturing_a_picture() {
+        for row in zerocode_core::agent_emulator::EMULATOR_VERBS
+            .iter()
+            .filter(|row| row.check)
+        {
+            assert_eq!(captures("emulator", row.word), Some(false));
+        }
+    }
 
     #[test]
     fn every_emulator_action_is_evidence_and_marks_leave_a_line_without_a_picture() {

@@ -303,9 +303,7 @@ fn check_verb(tool: RecipeTool, verb: &str) -> bool {
             verb_method(verb).is_some_and(|method| RECIPE_CHECKS.contains(&method))
         }
         RecipeTool::Browser => agent_browser::is_check(verb),
-        // The emulator door answers no check this wave (its Flow parser refuses
-        // an emulator check line).
-        RecipeTool::Emulator => false,
+        RecipeTool::Emulator => zerocode_core::agent_emulator::is_check(verb),
     }
 }
 
@@ -315,8 +313,14 @@ fn check_verb(tool: RecipeTool, verb: &str) -> bool {
 /// with another or none. A browser check keeps its verb, pane and subject.
 fn same_check(tool: RecipeTool, asked: &[String], recorded: &[String]) -> bool {
     match tool {
-        // No wait to leave out on the emulator door: the words are the line.
-        RecipeTool::Emulator => asked == recorded,
+        RecipeTool::Emulator => {
+            let normalized = |argv: &[String]| {
+                let mut command = zerocode_core::computer_use::parse_emulator_command(argv).ok()?;
+                command.json = false;
+                Some(command)
+            };
+            normalized(asked).is_some_and(|asked| Some(asked) == normalized(recorded))
+        }
         RecipeTool::Computer => {
             let without_wait = |argv: &[String]| {
                 let command = parse_command(argv).ok()?;
@@ -366,12 +370,13 @@ fn recorded_answer(tool: RecipeTool, refusal: Option<&(String, String)>) -> Team
 /// its named refusal, a `find` the count.
 fn presence_answer(tool: RecipeTool, verb: &str, seen: &Observed) -> TeamAnswer {
     match (tool, seen) {
-        (RecipeTool::Computer | RecipeTool::Emulator, Observed::Seen(presence))
-            if presence.present =>
-        {
+        (RecipeTool::Emulator, Observed::Seen(presence)) => said_answer(json!({
+            "count": presence.count.unwrap_or(usize::from(presence.present))
+        })),
+        (RecipeTool::Computer, Observed::Seen(presence)) if presence.present => {
             said_answer(json!({}))
         }
-        (RecipeTool::Computer | RecipeTool::Emulator, Observed::Seen(_)) => {
+        (RecipeTool::Computer, Observed::Seen(_)) => {
             refused_answer(error_code::TIMEOUT, "the recording saw nothing there")
         }
         (RecipeTool::Computer | RecipeTool::Emulator, Observed::NotEvaluable(why)) => {
@@ -631,6 +636,98 @@ mod tests {
             baseline,
             observed,
             verdict,
+        }
+    }
+
+    #[test]
+    fn emulator_checks_arena_answers_the_recorded_baseline_and_final_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let query = [
+            "find",
+            "--platform",
+            "ios",
+            "--device",
+            "phone",
+            "--text",
+            "Done",
+        ];
+        let flow = flow_record(
+            vec![check(1, CheckKind::Event, RecipeTool::Emulator, &query)],
+            BTreeMap::from([(
+                1,
+                Presence {
+                    present: false,
+                    count: Some(0),
+                },
+            )]),
+            BTreeMap::from([(1, Observed::Seen(present(Some(1))))]),
+        );
+        let step = [
+            "button",
+            "--platform",
+            "ios",
+            "--device",
+            "phone",
+            "--name",
+            "home",
+        ];
+        recorded(
+            dir.path(),
+            &[(RecipeTool::Emulator, words(&step), Ok(()))],
+            Some(&flow),
+        );
+        let mut arena = Arena::read(dir.path(), 1).unwrap();
+        let mut asked = words(&query);
+        asked.push("--json".into());
+        let before = arena.answer(RecipeTool::Emulator, &asked, &asked);
+        assert_eq!(
+            serde_json::from_str::<Value>(&before.stdout).unwrap()["result"]["count"],
+            0
+        );
+        arena.answer(RecipeTool::Emulator, &words(&step), &words(&step));
+        let after = arena.answer(RecipeTool::Emulator, &asked, &asked);
+        assert_eq!(
+            serde_json::from_str::<Value>(&after.stdout).unwrap()["result"]["count"],
+            1
+        );
+    }
+
+    #[test]
+    fn emulator_checks_replay_counts_and_match_the_json_transport() {
+        for (verb, flag, subject) in [
+            ("find", "--text", "Done"),
+            ("foreground", "--app", "com.example.wallet"),
+        ] {
+            let recorded = words(&[
+                verb,
+                "--platform",
+                "android",
+                "--device",
+                "phone",
+                flag,
+                subject,
+            ]);
+            let mut asked = recorded.clone();
+            asked.push("--json".into());
+            assert!(check_verb(RecipeTool::Emulator, verb));
+            assert!(same_check(RecipeTool::Emulator, &asked, &recorded));
+            asked[6] = "Another".into();
+            assert!(!same_check(RecipeTool::Emulator, &asked, &recorded));
+            for count in [0, 2] {
+                let answer = presence_answer(
+                    RecipeTool::Emulator,
+                    verb,
+                    &Observed::Seen(Presence {
+                        present: count > 0,
+                        count: Some(count),
+                    }),
+                );
+                assert_eq!(answer.exit_code, 0);
+                assert_eq!(
+                    serde_json::from_str::<Value>(&answer.stdout).unwrap()["result"]["count"],
+                    count
+                );
+            }
         }
     }
 

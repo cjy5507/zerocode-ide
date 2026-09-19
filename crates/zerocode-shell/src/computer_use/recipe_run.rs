@@ -764,8 +764,8 @@ pub fn verdict_of(report: &Value) -> Option<(bool, Option<String>)> {
 /// failed.
 fn stop_for(tool: RecipeTool, code: &str, check: bool) -> RecipeStop {
     match (tool, code) {
-        // The browser and the emulator hand nothing back and judge no check:
-        // refused, the step failed.
+        // Browser and emulator checks are judged in the oracle pass;
+        // a refusal in the ordinary steps means that step failed.
         (RecipeTool::Browser | RecipeTool::Emulator, _) => RecipeStop::StepFailed,
         (_, error_code::CONFIRMATION_REQUIRED) => RecipeStop::PersonsLastStep,
         // A password field: the person types it, then the walk goes on.
@@ -957,8 +957,7 @@ fn check_argv(check: &Check, budget_ms: u64) -> Vec<String> {
             }
             argv
         }
-        // The emulator door answers no check this wave; a Flow's parser
-        // refuses an emulator check line, so this is never a live check.
+        // Mobile checks use the same JSON envelope as every emulator step.
         RecipeTool::Emulator => recipe_line_argv(RecipeTool::Emulator, &argv, false),
     }
 }
@@ -1018,11 +1017,29 @@ fn presence_of(check: &Check, answer: &TeamAnswer) -> Observed {
                 }),
             }
         }
-        // The emulator door answers no check a Flow judges (the parser refuses
-        // one); reached only if a record from elsewhere carried an emulator
-        // check line — not evaluable, never a pass.
         RecipeTool::Emulator => {
-            Observed::NotEvaluable("the emulator door answers no check".to_string())
+            let envelope = answer_envelope(&answer.stdout, &answer.stderr);
+            let count = envelope
+                .as_ref()
+                .filter(|value| {
+                    answer.exit_code == 0 && value.get("ok").and_then(Value::as_bool) == Some(true)
+                })
+                .and_then(|value| value.pointer("/result/count"))
+                .and_then(Value::as_u64)
+                .and_then(|count| usize::try_from(count).ok());
+            count.map_or_else(
+                || {
+                    Observed::NotEvaluable(
+                        envelope
+                            .as_ref()
+                            .and_then(|value| value.pointer("/error/message"))
+                            .and_then(Value::as_str)
+                            .unwrap_or("the mobile check answered no count")
+                            .to_string(),
+                    )
+                },
+                |count| seen(count > 0, Some(count)),
+            )
         }
     }
 }
@@ -2494,6 +2511,94 @@ mod tests {
             required,
             tool,
             argv: words(line),
+        }
+    }
+
+    #[test]
+    fn emulator_checks_distinguish_absence_from_an_unreadable_answer() {
+        for verb in ["find", "foreground"] {
+            let check = check(1, CheckKind::State, true, RecipeTool::Emulator, &[verb]);
+            for count in [0, 1, 3] {
+                let answer = said(&json!({"count": count}));
+                assert_eq!(
+                    presence_of(&check, &answer),
+                    Observed::Seen(Presence {
+                        present: count > 0,
+                        count: Some(count)
+                    })
+                );
+            }
+            for answer in [
+                said(&json!({})),
+                said(&json!({"count": -1})),
+                refused("emulator_error"),
+            ] {
+                assert!(matches!(
+                    presence_of(&check, &answer),
+                    Observed::NotEvaluable(_)
+                ));
+            }
+            assert!(check_argv(&check, 500).contains(&"--json".to_string()));
+        }
+    }
+
+    #[test]
+    fn emulator_checks_judge_after_two_mobile_steps_and_rejudge_the_record() {
+        for count in [0, 1] {
+            let spec = flow(vec![check(
+                1,
+                CheckKind::State,
+                true,
+                RecipeTool::Emulator,
+                &[
+                    "find",
+                    "--platform",
+                    "ios",
+                    "--device",
+                    "phone",
+                    "--text",
+                    "Done",
+                ],
+            )]);
+            let text = flow_doc(
+                &[
+                    (
+                        RecipeTool::Emulator,
+                        "button --platform ios --device phone --name home",
+                    ),
+                    (
+                        RecipeTool::Emulator,
+                        "button --platform ios --device phone --name home",
+                    ),
+                ],
+                &spec,
+            );
+            let command = command(&[]);
+            let bench = Bench::new();
+            let mut sent = Vec::new();
+            let report = run(
+                &walk_of(&command, &text),
+                |tool, argv, _| {
+                    assert_eq!(tool, RecipeTool::Emulator);
+                    sent.push(argv[0].clone());
+                    if argv[0] == "find" {
+                        said(&json!({"count": count}))
+                    } else {
+                        ok()
+                    }
+                },
+                |_, _, _| {},
+                |_| {},
+                bench.desk(false, None),
+                || true,
+            )
+            .unwrap();
+            assert_eq!(sent, ["button", "button", "find"]);
+            assert_eq!(report["done"], true);
+            assert_eq!(report["flow"]["verdict"]["pass"], count > 0);
+            let record: zerocode_core::computer_flow::FlowRecord =
+                serde_json::from_value(report["flow"].clone()).unwrap();
+            assert_eq!(record.rejudged(), record.verdict);
         }
     }
 
