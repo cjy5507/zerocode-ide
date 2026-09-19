@@ -3976,6 +3976,7 @@ fn an_existing_checkout_is_not_cut_again_and_the_requested_tuning_survives() {
     });
     assert!(ledger.worker_seated(("team-old", "%2"), "/wt/existing"));
     assert_eq!(ledger.window_restarted(2_000).sleeping, 1);
+    assert!(ledger.coordinator_returned(&run, "team-new/%1", None, 2_001));
     let before = ledger.export();
     let mut team = Team::new("team-new", "token", 70);
 
@@ -10782,6 +10783,11 @@ fn a_restarted_claude_worker_keeps_its_run_and_worker_peer_name() {
     assert_eq!(bench.ledger.window_restarted(2_000).sleeping, 1);
 
     let mut replacement_team = Team::new("team-after-restart", "token", 72);
+    assert!(
+        bench
+            .ledger
+            .coordinator_returned(&run, "team-after-restart/%1", None, 2_001)
+    );
     let resumed = bench
         .ledger
         .prepare_worker_reseat(

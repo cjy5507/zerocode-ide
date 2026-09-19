@@ -7930,6 +7930,91 @@ mod tests {
         reopened.shutdown().expect("join reopened combined actor");
     }
 
+    fn assert_reseat_refused_for_native_leader(worker_history: bool) {
+        let fixture = Fixture::new();
+        let mut ledger = Ledger::rebuild(a_seated_legacy()).expect("the fixture ledger");
+        let run = ledger.runs()[0].id.clone();
+        let worker = ledger.runs()[0].workers[0].id.clone();
+        assert!(ledger.worker_seated(("team-1", "%2"), "/wt/reseat-authority"));
+        if worker_history {
+            // A historical worker may now look like a native leader, but
+            // its row still prevents it from becoming a coordinator.
+            ledger
+                .start_worker(&run, "codex", ("team-other", "%1"), None, 7)
+                .expect("the leader's worker history");
+        }
+        assert_eq!(ledger.window_restarted(8).sleeping, 1);
+        if !worker_history {
+            ledger
+                .seat_coordinator(&run, "team-1/%1", None, 9)
+                .expect("the legitimate coordinator");
+        }
+        let table = TableFixture::holding(Team::new("team-other", "token", 70));
+        let native = table.clone();
+        let actor = start_with(
+            &fixture,
+            cutover(Some(ledger.export()), 10),
+            table,
+            Box::new(AnsweringLauncher),
+        );
+        let (bound, _) = actor
+            .plan(
+                PlanCommand::checked(
+                    vec![
+                        "run-use".into(),
+                        run.clone(),
+                        "--retry-request".into(),
+                        "bind-reseat".into(),
+                    ],
+                    "team-other",
+                    "%1",
+                    capability_of("%1"),
+                    Some(format!("actor-v1:{}", "b".repeat(64))),
+                    11,
+                )
+                .expect("the other leader's command"),
+            )
+            .expect("a binding is allowed");
+        assert_eq!(bound.reply.exit_code, 0, "{}", bound.reply.stderr);
+        let bound: serde_json::Value = serde_json::from_str(&bound.reply.stdout).unwrap();
+        assert_eq!(bound["seated"], false, "{bound}");
+        assert!(
+            !actor
+                .coordinator_returned(&run, "team-other", "%1", None, 12)
+                .expect("the native return witness")
+                .0
+        );
+        let before = actor.view().expect("before refusal");
+        let next_pane = native.teams.lock().unwrap()["team-other"].clone();
+
+        let planned = actor
+            .prepare_worker_reseat(&run, &worker, "team-other", "%1", 70, "continue")
+            .expect("a valid native leader request");
+        assert!(
+            planned.is_err(),
+            "a refused coordinator planned a split (worker history: {worker_history})"
+        );
+        let after = actor.view().expect("after refusal");
+        assert_eq!(after.revision(), before.revision());
+        assert_eq!(after.projection(), before.projection());
+        assert_eq!(
+            native.teams.lock().unwrap()["team-other"],
+            next_pane,
+            "refusal allocated a pane"
+        );
+        actor.shutdown().expect("join private actor");
+    }
+
+    #[test]
+    fn a_native_leader_cannot_plan_a_reseat_after_the_coordinator_refuses_it() {
+        assert_reseat_refused_for_native_leader(false);
+    }
+
+    #[test]
+    fn a_former_worker_cannot_plan_a_reseat_after_the_coordinator_refuses_it() {
+        assert_reseat_refused_for_native_leader(true);
+    }
+
     /// The durable reseat is not merely an in-memory routing update. It crosses
     /// the real authority SQLite store and reopens with the same attempt under
     /// the replacement team's pane.

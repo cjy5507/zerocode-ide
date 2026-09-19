@@ -10275,7 +10275,7 @@ fn a_sleeping_worker_waits_for_its_bound_coordinator_without_spending_an_attempt
 /// reported session — the shape every t-3058 scenario below starts from.
 /// Answers the run's team, the task id and the worker id.
 fn a_seated_worker_with_a_session(
-    host: &Seating,
+    host: &dyn Host,
     leader_term: u32,
     worker_term: u32,
     session_id: &str,
@@ -10548,6 +10548,263 @@ fn a_sleeper_nobody_resumed_dies_on_the_beat_after_the_grace() {
         "{}",
         told[0]
     );
+}
+
+/// Records only fake host effects; every authority write still uses the
+/// private window's real actor and temporary SQLite store.
+struct RestorationHost {
+    checkout: String,
+    returned_actor: Option<(u32, String)>,
+    next: std::sync::atomic::AtomicU32,
+    commands: Mutex<Vec<String>>,
+}
+
+impl Host for RestorationHost {
+    fn split(
+        &self,
+        _team: &str,
+        _leader_term: u32,
+        _from_term: u32,
+        _pane: &str,
+        _direction: zerocode_core::agent_teams::Direction,
+        command: &str,
+        token: &str,
+    ) -> Option<u32> {
+        let _ = crate::agent_teams::take_worker_host_ask(token);
+        crate::agent_teams::place_seat_checkout(token, self.checkout.clone());
+        self.commands.lock().unwrap().push(command.to_string());
+        Some(self.next.fetch_add(1, std::sync::atomic::Ordering::SeqCst))
+    }
+    fn send(&self, _term: u32, _text: &str) -> bool {
+        true
+    }
+    fn capture(&self, _term: u32) -> Option<String> {
+        Some(String::new())
+    }
+    fn focus(&self, _term: u32) -> bool {
+        true
+    }
+    fn close(&self, _term: u32) {}
+    fn actor_for(&self, term: u32) -> Option<String> {
+        self.returned_actor
+            .as_ref()
+            .filter(|(returned, _)| *returned == term)
+            .map(|(_, actor)| actor.clone())
+            .or_else(|| Some(test_actor(term)))
+    }
+}
+
+#[test]
+fn the_grace_reseats_a_worker_under_its_returned_coordinator_without_a_seat_binding() {
+    const OLD_LEADER: u32 = 193_500;
+    const OLD_WORKER: u32 = 193_501;
+    const NEW_WORKER: u32 = 193_502;
+    const NEW_LEADER: u32 = 193_510;
+    for through_beat in [false, true] {
+        let (_window, _store) = PrivateWindow::boot();
+        let _beat = one_beat_at_a_time();
+        let checkout = tempfile::tempdir().expect("the worker's checkout");
+        let host = RestorationHost {
+            checkout: checkout.path().to_string_lossy().into_owned(),
+            returned_actor: Some((NEW_LEADER, test_actor(OLD_LEADER))),
+            next: std::sync::atomic::AtomicU32::new(OLD_WORKER),
+            commands: Mutex::new(Vec::new()),
+        };
+        let (old_team, task, worker) =
+            a_seated_worker_with_a_session(&host, OLD_LEADER, OLD_WORKER, "session-grace-reseat");
+        let run_id = super::bound_run(&old_team, "%1", Some(&test_actor(OLD_LEADER)))
+            .expect("the actor's run");
+        assert_eq!(
+            super::runtime()
+                .unwrap()
+                .actor
+                .window_restarted(clock())
+                .expect("restart the private window")
+                .0
+                .sleeping,
+            1
+        );
+        crate::agent_teams::forget_term(OLD_WORKER);
+        crate::agent_teams::forget_term(OLD_LEADER);
+        let new_team = format!("team-grace-returned-{NEW_LEADER}");
+        seat_a_team(&new_team, NEW_LEADER);
+        let held = super::runtime().expect("the private runtime");
+        assert!(
+            held.actor
+                .coordinator_returned(
+                    &run_id,
+                    &new_team,
+                    "%1",
+                    Some(test_actor(OLD_LEADER)),
+                    clock(),
+                )
+                .expect("native coordinator return")
+                .0
+        );
+        let before = the_rows();
+        let sleeping = before.workers.iter().find(|row| row.id == worker).unwrap();
+        assert_eq!(sleeping.state, WorkerState::Sleeping);
+        assert!(
+            before
+                .bound
+                .iter()
+                .any(|row| row.caller.as_str() == test_actor(OLD_LEADER) && row.run == run_id)
+        );
+        assert!(
+            !before
+                .bound
+                .iter()
+                .any(|row| row.caller.as_str() == format!("{new_team}/%1"))
+        );
+        host.commands.lock().unwrap().clear();
+
+        if through_beat {
+            let _old = BootedHere::at(clock() - RESEAT_GRACE_MS - 1);
+            super::tick(&host, &[], clock());
+            super::tick(&host, &[], clock());
+        } else {
+            assert_eq!(
+                super::reseat_sleeping(
+                    &host,
+                    Vec::new(),
+                    NEW_LEADER,
+                    Some(&test_actor(OLD_LEADER))
+                ),
+                1
+            );
+        }
+        let after = the_rows();
+        let restored = after.workers.iter().find(|row| row.id == worker).unwrap();
+        assert_eq!(
+            restored.state,
+            WorkerState::Active,
+            "through beat: {through_beat}"
+        );
+        assert_eq!(restored.dispatch, sleeping.dispatch);
+        assert_eq!(restored.session, sleeping.session);
+        assert_eq!(restored.team, new_team);
+        assert_eq!(
+            restored.adopted_by,
+            before.runs[0]
+                .coordinator
+                .as_ref()
+                .map(|seat| seat.generation)
+        );
+        assert_eq!(after.dispatches, before.dispatches);
+        assert_eq!(after.tasks, before.tasks);
+        assert_eq!(after.runs[0].coordinator, before.runs[0].coordinator);
+        assert_eq!(
+            after
+                .tasks
+                .iter()
+                .find(|row| row.id == task)
+                .unwrap()
+                .failures,
+            0
+        );
+        assert!(worker_died_bodies(&after).is_empty());
+        let commands = host.commands.lock().unwrap();
+        assert_eq!(commands.len(), 1, "duplicate or missing restoration");
+        assert!(
+            commands[0].contains("session-grace-reseat"),
+            "{}",
+            commands[0]
+        );
+        drop(commands);
+        assert_eq!(
+            super::reseat_sleeping(&host, Vec::new(), NEW_LEADER, Some(&test_actor(OLD_LEADER))),
+            0
+        );
+        assert_eq!(host.commands.lock().unwrap().len(), 1);
+        crate::agent_teams::forget_term(NEW_WORKER);
+        crate::agent_teams::forget_term(NEW_LEADER);
+    }
+}
+
+fn assert_other_coordinators_sleeper_is_untouched(checkout_exists: bool) {
+    const OLD_LEADER: u32 = 193_520;
+    const OLD_WORKER: u32 = 193_521;
+    const NEW_LEADER: u32 = 193_530;
+    let (_window, _store) = PrivateWindow::boot();
+    let checkout = tempfile::tempdir().expect("the worker's checkout");
+    let host = RestorationHost {
+        checkout: checkout.path().to_string_lossy().into_owned(),
+        returned_actor: None,
+        next: std::sync::atomic::AtomicU32::new(OLD_WORKER),
+        commands: Mutex::new(Vec::new()),
+    };
+    let (old_team, _task, _worker) =
+        a_seated_worker_with_a_session(&host, OLD_LEADER, OLD_WORKER, "session-stranger-reseat");
+    let run_id = super::bound_run(&old_team, "%1", Some(&test_actor(OLD_LEADER))).unwrap();
+    assert_eq!(
+        super::runtime()
+            .unwrap()
+            .actor
+            .window_restarted(clock())
+            .expect("restart the private window")
+            .0
+            .sleeping,
+        1
+    );
+    crate::agent_teams::forget_term(OLD_WORKER);
+    let held = super::runtime().unwrap();
+    assert!(
+        held.actor
+            .coordinator_returned(
+                &run_id,
+                &old_team,
+                "%1",
+                Some(test_actor(OLD_LEADER)),
+                clock(),
+            )
+            .unwrap()
+            .0
+    );
+    let new_team = format!("team-reseat-stranger-{NEW_LEADER}");
+    seat_a_team(&new_team, NEW_LEADER);
+    let bound = run(
+        &host,
+        Vec::new(),
+        &new_team,
+        "%1",
+        TEST_CAPABILITY,
+        &words(&format!("run-use {run_id}")),
+        clock(),
+    );
+    assert_eq!(bound.exit_code, 0, "{}", bound.stderr);
+    let bound: serde_json::Value = serde_json::from_str(&bound.stdout).unwrap();
+    assert_eq!(bound["seated"], false);
+    let before = the_rows();
+    host.commands.lock().unwrap().clear();
+    if !checkout_exists {
+        checkout.close().expect("remove only the private checkout");
+    }
+
+    assert_eq!(
+        super::reseat_sleeping(&host, Vec::new(), NEW_LEADER, Some(&test_actor(NEW_LEADER))),
+        0
+    );
+    assert!(
+        host.commands.lock().unwrap().is_empty(),
+        "a stranger cut a pane"
+    );
+    assert_eq!(
+        the_rows(),
+        before,
+        "a refused coordinator changed the attempt or seat"
+    );
+    crate::agent_teams::forget_term(NEW_LEADER);
+    crate::agent_teams::forget_term(OLD_LEADER);
+}
+
+#[test]
+fn a_bound_native_leader_cannot_restore_another_coordinators_sleepers() {
+    assert_other_coordinators_sleeper_is_untouched(true);
+}
+
+#[test]
+fn a_bound_native_leader_cannot_end_another_coordinators_sleeper() {
+    assert_other_coordinators_sleeper_is_untouched(false);
 }
 
 /// The core bench proves that a report works after somebody has already
@@ -14631,12 +14888,9 @@ fn an_untyped_refusal_is_carried_whole_and_never_parsed_for_a_code() {
 /// asking that team to seat them. It happened on 2026-09-18: three workers,
 /// all of them finished, all announced dead, and a person had to notice.
 ///
-/// Read from the shipped source rather than driven, because the sweep needs a
-/// live window, a live team table and a booted clock to run at all — three
-/// things a unit test would have to fake so thoroughly that it would be
-/// testing the fake. What is worth holding is the ORDER, and the order is
-/// visible in one function: the attempt to seat comes before the loop that
-/// ends them.
+/// Supplements the private-window grace fixture above with the shared-road
+/// and launch-override contracts: the attempt precedes expiry and carries the
+/// stored overrides unchanged.
 #[test]
 fn the_grace_tries_to_seat_a_sleeper_before_it_ends_it() {
     let shipped = include_str!("../orchestration.rs");

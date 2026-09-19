@@ -378,15 +378,16 @@ pub(crate) fn reseat_sleeping(
      * first reads its own pane inbox until somebody types `run-takeover`
      * (t-2512). Asked before the walk below so the sleepers it seats are
      * adopted under the generation that seated them. */
-    if let Ok((moved, _)) = held.actor.coordinator_returned(
+    let Ok((moved, _)) = held.actor.coordinator_returned(
         &run_id,
         &team,
         &pane,
         actor.map(str::to_string),
         crate::now_epoch_ms(),
-    ) {
-        rang(moved);
-    }
+    ) else {
+        return 0;
+    };
+    rang(moved);
     let image = match held.actor.view() {
         Ok(image) => image,
         Err(_) => return 0,
@@ -395,6 +396,14 @@ pub(crate) fn reseat_sleeping(
         Ok(ledger) => ledger,
         Err(_) => return 0,
     };
+    // A binding identifies the run; only its live seat may restore or end
+    // its sleepers. A refused return must not reach either transition.
+    let Some(run) = ledger
+        .run(&run_id)
+        .filter(|run| run.seat_is_coordinator(&seat) == Some(true))
+    else {
+        return 0;
+    };
     // Sleeping rows, and orphans the window has CONFIRMED have no pane. Not
     // every orphan: a leader's exit leaves its children running in panes
     // that are still there, and cutting a second pane for an agent already
@@ -402,10 +411,9 @@ pub(crate) fn reseat_sleeping(
     // reconciler's — five beats without the pane, written on the row by the
     // ledger as `pane_missing_since_ms` — and it is read here, at the
     // moment of the decision, off the ledger as it stands.
-    let mut sleeping: Vec<(i64, String, String, Option<String>, bool)> = ledger
-        .run(&run_id)
-        .into_iter()
-        .flat_map(|run| run.workers.iter())
+    let mut sleeping: Vec<(i64, String, String, Option<String>, bool)> = run
+        .workers
+        .iter()
         .filter(|worker| match worker.state {
             WorkerState::Sleeping => true,
             WorkerState::Orphaned => worker.pane_missing_since_ms.is_some(),
@@ -3202,9 +3210,8 @@ fn booted_at_ms() -> Option<i64> {
 /// overrides on its way past. Reading them out and handing them straight back
 /// makes this call a no-op for that cell.
 ///
-/// `actor` is `None`: a beat has no provider conversation to name, so the run
-/// is resolved by the coordinator's seat, which is the road `reseat_sleeping`
-/// already falls back to.
+/// The native host supplies the returned conversation's actor, just as it
+/// does for a mounted tab. A new team need not have a seat binding yet.
 fn seat_what_the_grace_would_kill(host: &dyn Host, held: &RuntimeSeat) {
     let leaders: Vec<u32> = {
         let teams = crate::agent_teams::teams();
@@ -3216,7 +3223,8 @@ fn seat_what_the_grace_would_kill(host: &dyn Host, held: &RuntimeSeat) {
             .lock()
             .unwrap_or_else(|held| held.into_inner())
             .clone();
-        let seated = reseat_sleeping(host, overrides, leader, None);
+        let actor = host.actor_for(leader);
+        let seated = reseat_sleeping(host, overrides, leader, actor.as_deref());
         if seated > 0
             && let Some(root) = BLACKBOX.get()
         {

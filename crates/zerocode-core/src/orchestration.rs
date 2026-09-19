@@ -9651,6 +9651,11 @@ impl Ledger {
         resume_nudge: &str,
     ) -> Result<Decided, String> {
         let run = self.run(run_id).ok_or_else(|| unknown_run(run_id))?;
+        if run.seat_is_coordinator(&format!("{}/{}", team.id, coordinator_pane)) != Some(true) {
+            return Err(format!(
+                "only the live coordinator of run {run_id} can restore its workers"
+            ));
+        }
         let worker = run
             .worker(worker_id)
             .ok_or_else(|| format!("unknown worker: {worker_id}"))?;
