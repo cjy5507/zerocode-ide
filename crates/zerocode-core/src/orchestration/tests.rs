@@ -8205,6 +8205,209 @@ fn an_acknowledgement_the_waiter_never_heard_back_from_can_be_given_again() {
 
 /// A task a live attempt is carrying cannot be made claimable again.
 ///
+#[test]
+fn a_task_without_an_attempt_cannot_be_marked_dispatched() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name no-carrier");
+    let task = bench.json("task-create --spec audit")["taskId"]
+        .as_str()
+        .expect("task id")
+        .to_string();
+    let before = bench.ledger.export();
+    let answer = bench.run(&format!(
+        "task-update --task {task} --status dispatched --result overwritten"
+    ));
+    assert_eq!(answer.reply.exit_code, 1, "{:?}", answer.reply);
+    assert!(matches!(answer.effect, Effect::None));
+    assert_eq!(bench.ledger.export().tasks, before.tasks);
+    assert_eq!(bench.ledger.export().dispatches, before.dispatches);
+    bench
+        .ledger
+        .validate_loaded()
+        .expect("a refused verb still rebuilds");
+}
+
+#[test]
+fn boot_repair_respects_unfinished_failed_and_missing_dependencies() {
+    for dependency_status in [
+        Some(TaskStatus::Ready),
+        Some(TaskStatus::Failed),
+        None,
+        Some(TaskStatus::Completed),
+    ] {
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("repair", 1);
+        let dependency_run = if dependency_status.is_none() {
+            ledger.create_run("elsewhere", 2)
+        } else {
+            run.clone()
+        };
+        let dependency = ledger
+            .create_task(
+                &dependency_run,
+                "dependency".into(),
+                "dependency".into(),
+                Vec::new(),
+                None,
+                3,
+            )
+            .unwrap();
+        ledger
+            .update_task(
+                &dependency_run,
+                &dependency,
+                Some(dependency_status.unwrap_or(TaskStatus::Completed)),
+                None,
+            )
+            .unwrap();
+        let task = ledger
+            .create_task(
+                &run,
+                "work".into(),
+                "work".into(),
+                vec![dependency.clone()],
+                None,
+                4,
+            )
+            .unwrap();
+        let expected = if dependency_status == Some(TaskStatus::Completed) {
+            TaskStatus::Ready
+        } else {
+            TaskStatus::Pending
+        };
+        assert_eq!(
+            ledger.run(&run).unwrap().task(&task).unwrap().status,
+            expected
+        );
+        let mut projection = ledger.export();
+        projection
+            .tasks
+            .iter_mut()
+            .find(|row| row.id == task)
+            .unwrap()
+            .status = TaskStatus::Dispatched;
+        assert_eq!(
+            repair_unattempted_dispatched_tasks(&mut projection).len(),
+            1
+        );
+        let status = projection
+            .tasks
+            .iter()
+            .find(|row| row.id == task)
+            .unwrap()
+            .status;
+        let mut rebuilt = Ledger::rebuild(projection).unwrap();
+        let before = rebuilt.export();
+        let started = rebuilt.start_worker(&run, "codex", ("team", "%2"), Some(&task), 5);
+        assert_eq!(
+            started.is_ok(),
+            expected == TaskStatus::Ready,
+            "dependency {dependency_status:?}: boot repair let the worker skip its dependency: {started:?}"
+        );
+        assert_eq!(status, expected);
+        if expected == TaskStatus::Pending {
+            assert_eq!(rebuilt.export(), before, "refused start changed the ledger");
+            if dependency_run == run {
+                rebuilt
+                    .update_task(&run, &dependency, Some(TaskStatus::Completed), None)
+                    .unwrap();
+                rebuilt
+                    .start_worker(&run, "codex", ("team", "%2"), Some(&task), 6)
+                    .expect("normal dependency completion frees the repaired task");
+            }
+        }
+    }
+}
+
+#[test]
+fn boot_repair_preserves_result_values_and_never_logs_their_prose() {
+    for prior in [
+        "private plain text",
+        "",
+        "null",
+        "[1,2]",
+        r#"{"note":"private note","ok":false,"nested":{"x":1}}"#,
+        r#"{"note":{"private":true},"ok":false}"#,
+    ] {
+        let mut bench = Bench::new();
+        bench.json("run-create --name results");
+        bench.json("task-create --spec work");
+        let mut projection = bench.ledger.export();
+        projection.tasks[0].status = TaskStatus::Dispatched;
+        projection.tasks[0].result = prior.into();
+        let notes = repair_unattempted_dispatched_tasks(&mut projection);
+        assert_eq!(notes.len(), 1);
+        assert!(!notes[0].contains("private"));
+        let result: serde_json::Value =
+            serde_json::from_str(projection.tasks[0].result.as_str()).unwrap();
+        if let Ok(serde_json::Value::Object(mut before)) = serde_json::from_str(prior) {
+            if let Some(old_note) = before.remove("note") {
+                if let Some(text) = old_note.as_str() {
+                    assert!(result["note"].as_str().unwrap().starts_with(text));
+                } else {
+                    assert_eq!(result["note"][0], old_note);
+                }
+            }
+            for (key, value) in before {
+                assert_eq!(result[&key], value);
+            }
+        } else {
+            assert_eq!(result["previousResult"], prior);
+        }
+        let repaired = projection.clone();
+        assert!(repair_unattempted_dispatched_tasks(&mut projection).is_empty());
+        assert_eq!(projection, repaired);
+        Ledger::rebuild(projection).expect("only a legal repaired ledger may be written");
+    }
+}
+
+#[test]
+fn task_updates_and_rebuild_agree_on_each_status_and_attempt_count() {
+    for (status, allowed) in [
+        (TaskStatus::Pending, [true, false]),
+        (TaskStatus::Ready, [true, false]),
+        (TaskStatus::Dispatched, [false, true]),
+        (TaskStatus::Completed, [true, true]),
+        (TaskStatus::Failed, [true, true]),
+        (TaskStatus::Blocked, [true, true]),
+    ] {
+        for (carrying, expected) in allowed.into_iter().enumerate() {
+            let mut bench = Bench::new();
+            bench.json("run-create --name status-contract");
+            let task = bench.json("task-create --spec work")["taskId"]
+                .as_str()
+                .expect("task id")
+                .to_string();
+            if carrying == 1 {
+                bench.seat(&format!("worker-start --agent claude --task {task}"));
+            }
+            let before = bench.ledger.export();
+            let mut candidate = before.clone();
+            candidate.tasks[0].status = status;
+            assert_eq!(
+                Ledger::rebuild(candidate).is_ok(),
+                expected,
+                "{status:?}/{carrying}"
+            );
+            let answer = bench.run(&format!(
+                "task-update --task {task} --status {}",
+                status.as_str()
+            ));
+            assert_eq!(
+                answer.reply.exit_code == 0,
+                expected,
+                "{status:?}/{carrying}: {:?}",
+                answer.reply
+            );
+            assert_eq!(bench.ledger.export().dispatches, before.dispatches);
+            bench
+                .ledger
+                .validate_loaded()
+                .expect("verb leaves a valid ledger");
+        }
+    }
+}
+
 /// The hole this closes: `task-update --status ready` wrote the status
 /// straight through, so a coordinator could set a carried task Ready and
 /// the next `worker-start --task X` would find it and take it. Two panes,

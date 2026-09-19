@@ -106,6 +106,33 @@ impl TaskStatus {
     pub const fn is_final(self) -> bool {
         matches!(self, Self::Completed | Self::Failed)
     }
+
+    /// The status/attempt contract shared by live corrections and rebuild.
+    /// A manual ending may leave its worker carrying the one open attempt.
+    fn validate_open_attempts(self, run: &str, task: &str, carrying: usize) -> Result<(), String> {
+        let (allowed, reason): (&[usize], &str) = match self {
+            Self::Dispatched => (
+                &[1],
+                "a task somebody has is carried by exactly one attempt",
+            ),
+            Self::Ready | Self::Pending => (
+                &[0],
+                "a task nobody has is carried by none, or the next beat sends a \
+                 second agent at work already being done",
+            ),
+            Self::Completed | Self::Failed | Self::Blocked => {
+                (&[0, 1], "a task is carried by one attempt or by none")
+            }
+        };
+        if allowed.contains(&carrying) {
+            Ok(())
+        } else {
+            Err(format!(
+                "in run {run} task {task} is {} and {carrying} open attempts carry it — {reason}",
+                self.as_str()
+            ))
+        }
+    }
 }
 
 /// Parsed through the standard trait, so `"ready".parse()` works and the
@@ -2922,10 +2949,17 @@ impl Run {
     /// task waiting on a name nobody wrote down should stay waiting and be
     /// visible, not quietly become ready.
     pub fn deps_met(&self, task: &Task) -> bool {
-        task.deps.iter().all(|dep| {
-            self.task(dep)
-                .is_some_and(|held| held.status == TaskStatus::Completed)
-        })
+        Self::dependencies_met(&task.deps, |dep| self.task(dep).map(|held| held.status))
+    }
+
+    // Both live runs and boot projections resolve names within their run.
+    fn dependencies_met(
+        dependencies: &[String],
+        status_of: impl Fn(&str) -> Option<TaskStatus>,
+    ) -> bool {
+        dependencies
+            .iter()
+            .all(|dep| status_of(dep) == Some(TaskStatus::Completed))
     }
 
     /// The dependencies that have ENDED without completing.
@@ -5776,29 +5810,15 @@ impl Ledger {
             .iter()
             .position(|task| task.id == task_id)
             .ok_or_else(|| format!("unknown task: {task_id}"))?;
-        /* A task somebody is carrying cannot be handed out again.
-         *
-         * `--status ready` on a task with an open dispatch used to be written
-         * straight through, and the next `worker-start --task X` then found a
-         * Ready task and took it: two panes, two agents, one piece of work,
-         * and whichever reported second overwrote the first. The claim in
-         * `start_worker` closed the door from its side; this is the same door
-         * from the other.
-         *
-         * Only the transitions that make a task CLAIMABLE are refused. A
-         * coordinator marking a carried task completed or failed is ending it
-         * by hand, which is a decision it is allowed to make. */
-        if let Some(TaskStatus::Ready | TaskStatus::Pending) = status
-            && let Some(carrying) = run
+        // Refuse before either field changes. A verb must not write a status
+        // that the same window refuses to rebuild on its next boot.
+        if let Some(asked) = status {
+            let carrying = run
                 .dispatches
                 .iter()
-                .find(|one| one.task == task_id && one.is_open())
-                .map(|one| one.id.clone())
-        {
-            return Err(format!(
-                "task {task_id} is carried by dispatch {carrying} — end that attempt \
-                 before making it claimable again"
-            ));
+                .filter(|one| one.task == task_id && one.is_open())
+                .count();
+            asked.validate_open_attempts(run_id, task_id, carrying)?;
         }
         /* A pending gate is a decision nobody has made yet, and `--status` is
          * not the making of it. Written through, a `--status ready` would free
@@ -7598,29 +7618,8 @@ impl Ledger {
                     .iter()
                     .filter(|held| held.is_open() && held.task == task.id)
                     .count();
-                let allowed: &[usize] = match task.status {
-                    TaskStatus::Dispatched => &[1],
-                    TaskStatus::Ready | TaskStatus::Pending => &[0],
-                    // Ended by hand while somebody was still carrying it, or
-                    // ended the ordinary way and the attempt closed with it.
-                    TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Blocked => &[0, 1],
-                };
-                if !allowed.contains(&carrying) {
-                    return Err(format!(
-                        "in run {} task {} is {} and {carrying} open attempts carry it — {}",
-                        run.id,
-                        task.id,
-                        task.status.as_str(),
-                        match task.status {
-                            TaskStatus::Dispatched =>
-                                "a task somebody has is carried by exactly one attempt",
-                            TaskStatus::Ready | TaskStatus::Pending =>
-                                "a task nobody has is carried by none, or the next beat sends a \
-                                 second agent at work already being done",
-                            _ => "a task is carried by one attempt or by none",
-                        }
-                    ));
-                }
+                task.status
+                    .validate_open_attempts(&run.id, &task.id, carrying)?;
             }
             let mut addresses: HashSet<&str> = HashSet::new();
             for (address, inbox) in &run.inboxes {
@@ -17059,6 +17058,90 @@ pub fn tombstone_unverifiable_legacy_receipts(projection: &mut LedgerProjectionV
         }
     }
     repaired
+}
+
+/// Repair the historical `task-update` wound: dispatched with no attempt at
+/// all. A closed attempt or a pending gate carries a decision this repair
+/// cannot infer. Unmet dependencies keep the task pending. Other contradictions
+/// still have to pass [`Ledger::rebuild`]
+/// before the caller may publish any of these changes.
+///
+/// Each returned note is also kept in the task's result, for durable history.
+/// Notes contain identifiers and the shared invariant, never prior result text.
+pub fn repair_unattempted_dispatched_tasks(projection: &mut LedgerProjectionV1) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+
+    let attempted: HashSet<_> = projection
+        .dispatches
+        .iter()
+        .map(|row| (row.run.as_str(), row.task.as_str()))
+        .collect();
+    let gated: HashSet<_> = projection
+        .gates
+        .iter()
+        .filter(|row| row.status == GateStatus::Pending)
+        .map(|row| (row.run.as_str(), row.task.as_str()))
+        .collect();
+    // Share the live run's dependency rule, using an immutable view before
+    // any repair. Only the targeted rows below may change their status.
+    let deps_met: Vec<_> = {
+        let statuses: HashMap<_, _> = projection
+            .tasks
+            .iter()
+            .map(|task| ((task.run.as_str(), task.id.as_str()), task.status))
+            .collect();
+        projection
+            .tasks
+            .iter()
+            .map(|task| {
+                Run::dependencies_met(&task.deps, |dep| {
+                    statuses.get(&(task.run.as_str(), dep)).copied()
+                })
+            })
+            .collect()
+    };
+    let mut repairs = Vec::new();
+    for (task, deps_met) in projection.tasks.iter_mut().zip(deps_met) {
+        let key = (task.run.as_str(), task.id.as_str());
+        if task.status != TaskStatus::Dispatched || attempted.contains(&key) || gated.contains(&key)
+        {
+            continue;
+        }
+        let Err(why) = task.status.validate_open_attempts(&task.run, &task.id, 0) else {
+            continue;
+        };
+        task.status = if deps_met {
+            TaskStatus::Ready
+        } else {
+            TaskStatus::Pending
+        };
+        let note = format!("Boot repair: {why}; reset to {}.", task.status.as_str());
+        task.result = result_with_repair_note(task.result.as_str(), &note);
+        repairs.push(note);
+    }
+    repairs
+}
+
+fn result_with_repair_note(prior: &str, note: &str) -> Text {
+    // Keep JSON result fields usable by review/status readers. Non-object
+    // results retain their exact original bytes under previousResult, and a
+    // non-string note retains its value beside the added explanation.
+    let mut fields = match serde_json::from_str(prior) {
+        Ok(serde_json::Value::Object(fields)) => fields,
+        _ => serde_json::Map::from_iter([(
+            "previousResult".to_string(),
+            serde_json::Value::String(prior.to_string()),
+        )]),
+    };
+    let note = match fields.remove("note") {
+        None => serde_json::Value::String(note.to_string()),
+        Some(serde_json::Value::String(before)) => {
+            serde_json::Value::String(format!("{before}\n{note}"))
+        }
+        Some(before) => serde_json::json!([before, note]),
+    };
+    fields.insert("note".to_string(), note);
+    serde_json::Value::Object(fields).to_string().into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

@@ -5208,6 +5208,24 @@ fn a_ledger_that_is_missing_is_not_a_ledger_that_is_damaged() {
     );
 }
 
+#[test]
+fn authority_diagnostics_explain_copy_validation_and_atomic_replacement() {
+    let said = authority_is_unavailable("its runtime found a ledger content invariant violation");
+    for part in [
+        "ledger content invariant",
+        "authority-before-",
+        "backup",
+        "WAL",
+        "integrity_check",
+        "Ledger::rebuild",
+        "copy",
+        "atomic",
+        "closed",
+    ] {
+        assert!(said.contains(part), "missing {part}: {said}");
+    }
+}
+
 /// The sentence a degraded window says is one sentence.
 ///
 /// Raised by the Codex session against the first cut, where the message was

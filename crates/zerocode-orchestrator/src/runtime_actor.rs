@@ -27,8 +27,8 @@ use zerocode_core::ProviderSession;
 use zerocode_core::agent_teams::{Effect, Team};
 use zerocode_core::orchestration::{
     Decided, Launcher, Ledger, LedgerProjectionV1, MAX_LIST, MAX_NAME, MAX_PROSE,
-    PROJECTION_SCHEMA, ReceiptKey, Sweep, Waiting, WorkerState,
-    tombstone_unverifiable_legacy_receipts,
+    PROJECTION_SCHEMA, RebuildError, ReceiptKey, Sweep, Waiting, WorkerState,
+    repair_unattempted_dispatched_tasks, tombstone_unverifiable_legacy_receipts,
 };
 
 use crate::ledger_store;
@@ -1183,6 +1183,7 @@ pub struct RuntimeImage {
     revision: u64,
     projection: Arc<LedgerProjectionV1>,
     recoveries: Vec<RuntimeRecovery>,
+    repairs: Vec<String>,
 }
 
 impl std::fmt::Debug for RuntimeImage {
@@ -1198,6 +1199,7 @@ impl std::fmt::Debug for RuntimeImage {
             .field("messages", &self.projection.messages.len())
             .field("receipts", &self.projection.served.len())
             .field("recovery_count", &self.recoveries.len())
+            .field("repair_count", &self.repairs.len())
             .field("recoveries", &self.recoveries)
             .finish()
     }
@@ -1220,9 +1222,15 @@ impl RuntimeImage {
     pub fn recoveries(&self) -> &[RuntimeRecovery] {
         &self.recoveries
     }
+
+    /// Repairs committed by this boot, for the window's diagnostic log.
+    #[must_use]
+    pub fn repairs(&self) -> &[String] {
+        &self.repairs
+    }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RuntimeError {
     #[error("the runtime mailbox capacity is outside its bound")]
     InvalidMailboxCapacity,
@@ -1236,8 +1244,12 @@ pub enum RuntimeError {
     SpawnFailed,
     #[error("the authority store is unavailable")]
     StoreUnavailable,
-    #[error("the authority store is corrupt")]
+    #[error(
+        "the authority store failed storage integrity validation (SQLite rows, byte count, or table digests)"
+    )]
     StoreCorrupt,
+    #[error("the authority store's ledger content violates an invariant: {0}")]
+    LedgerInvariant(RebuildError),
     #[error("the runtime request is invalid")]
     InvalidInput,
     #[error("the runtime does not know this team")]
@@ -1298,13 +1310,13 @@ impl RuntimeError {
     /// bytes, nothing left to reopen it but a restart nobody but a person can
     /// order).
     ///
-    /// The three that remain are the ones where continuing would be a lie:
-    /// the store's rows are unreadable, the ledger under this actor is not
-    /// the one it owns, or two effects are in flight at once.
-    const fn fatal(self) -> bool {
+    /// Continuing would be a lie when stored bytes or ledger content are
+    /// invalid, ownership changed, or two effects are in flight at once.
+    const fn fatal(&self) -> bool {
         matches!(
             self,
             Self::StoreCorrupt
+                | Self::LedgerInvariant(_)
                 | Self::AuthorityChanged
                 | Self::MultipleInFlightEffects
                 | Self::Panicked
@@ -1335,7 +1347,7 @@ enum ActorCommand {
     Close,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 enum TerminalState {
     Running,
     Closed,
@@ -1370,10 +1382,10 @@ impl Terminal {
                 .wait(current)
                 .unwrap_or_else(|held| held.into_inner());
         }
-        match *current {
+        match &*current {
             TerminalState::Running => unreachable!(),
             TerminalState::Closed => RuntimeError::Closed,
-            TerminalState::Failed(error) => error,
+            TerminalState::Failed(error) => error.clone(),
             TerminalState::Panicked => RuntimeError::Panicked,
         }
     }
@@ -1438,7 +1450,7 @@ impl RuntimeActor {
                         Ok(image)
                     }
                     Ok(Err(error)) => {
-                        thread_terminal.finish(TerminalState::Failed(error));
+                        thread_terminal.finish(TerminalState::Failed(error.clone()));
                         Err(error)
                     }
                     Err(_) => {
@@ -2420,30 +2432,33 @@ struct RuntimeState {
     /// showing somebody an effect that never happened — reads included.
     poison: Option<RuntimeError>,
     recovery_permits: Vec<EffectPermit>,
+    repairs: Vec<String>,
 }
 
-/// Rebuild one durable generation, repairing only the legacy wound whose
-/// safe answer is uniquely determined.
+/// Rebuild one durable generation, repairing only named historical wounds.
 ///
 /// A pre-retention check receipt has no `filed_ms`. If its delivery history
 /// disappeared during a disk-full rewrite, its old answer cannot be replayed
 /// and its retry key cannot be freed. Core turns exactly those rows into
 /// tombstones. A stale derived byte count is accepted only beside at least
 /// one such repair; every other mismatch still fails closed. The canonical
-/// generation is written before the actor answers its first request.
+/// generation is written before the actor answers its first request. Task
+/// repairs never excuse byte-count or digest damage, and neither repair may
+/// waive another content invariant or an unsettled host effect.
 fn rebuild_stored_ledger(
     journal: &EffectJournal,
     lease: &AuthorityLease,
     mut held: ledger_store::Held,
     now_ms: i64,
-) -> Result<(Ledger, u64), RuntimeError> {
-    let repaired = tombstone_unverifiable_legacy_receipts(&mut held.projection);
-    if !held.bytes_match && repaired == 0 {
+) -> Result<(Ledger, u64, Vec<String>), RuntimeError> {
+    let receipts = tombstone_unverifiable_legacy_receipts(&mut held.projection);
+    if !held.bytes_match && receipts == 0 {
         return Err(RuntimeError::StoreCorrupt);
     }
-    let ledger = Ledger::rebuild(held.projection).map_err(|_| RuntimeError::StoreCorrupt)?;
-    if repaired == 0 {
-        return Ok((ledger, held.revision));
+    let repairs = repair_unattempted_dispatched_tasks(&mut held.projection);
+    let ledger = Ledger::rebuild(held.projection).map_err(RuntimeError::LedgerInvariant)?;
+    if receipts == 0 && repairs.is_empty() {
+        return Ok((ledger, held.revision, repairs));
     }
 
     journal
@@ -2453,7 +2468,7 @@ fn rebuild_stored_ledger(
         .revision
         .checked_add(1)
         .ok_or(RuntimeError::RevisionMismatch)?;
-    Ok((ledger, revision))
+    Ok((ledger, revision, repairs))
 }
 
 impl RuntimeState {
@@ -2483,7 +2498,7 @@ impl RuntimeState {
             .as_ref()
             .map_or(0, |held| held.updated_at_ms)
             .max(boot_now_ms(&boot));
-        let (ledger, revision) = match (held, boot) {
+        let (ledger, revision, repairs) = match (held, boot) {
             /* A fresh start that adopted somebody's ledger is how work
              * disappears without anybody being told. */
             #[cfg(test)]
@@ -2495,7 +2510,7 @@ impl RuntimeState {
                 let ledger = Ledger::new();
                 ledger_store::write(&connection, &ledger_id, 0, 1, &ledger.export(), now_ms)
                     .map_err(runtime_error)?;
-                (ledger, 1)
+                (ledger, 1, Vec::new())
             }
             #[cfg(test)]
             (None, RuntimeBoot::Reopen) => return Err(RuntimeError::MissingLedger),
@@ -2529,7 +2544,7 @@ impl RuntimeState {
                 journal
                     .import_legacy(&lease, &ledger.export(), &legacy_digest, now_ms)
                     .map_err(runtime_error)?;
-                (ledger, 0)
+                (ledger, 0, Vec::new())
             }
             (
                 None,
@@ -2547,7 +2562,7 @@ impl RuntimeState {
                 journal
                     .initialize_fresh(&lease, &ledger.export(), now_ms)
                     .map_err(runtime_error)?;
-                (ledger, 0)
+                (ledger, 0, Vec::new())
             }
         };
         drop(connection);
@@ -2568,6 +2583,7 @@ impl RuntimeState {
             walking: None,
             poison: None,
             recovery_permits,
+            repairs,
         })
     }
 
@@ -2591,6 +2607,7 @@ impl RuntimeState {
                 .iter()
                 .map(RuntimeRecovery::from_permit)
                 .collect(),
+            repairs: self.repairs.clone(),
         }
     }
 
@@ -2669,13 +2686,15 @@ impl RuntimeState {
          * tried once here on the next request so a passing failure does not
          * cost a restart.
          */
-        if let Some(why) = self.poison {
+        if let Some(why) = self.poison.clone() {
             /* An authority violation found during recovery keeps its own name:
              * it is not "the write did not land", it is "this is not the
              * ledger this actor owns", and the caller must be able to tell
              * those apart. */
             self.take_the_disks_word(why).map_err(|found| match found {
-                RuntimeError::AuthorityChanged | RuntimeError::StoreCorrupt => found,
+                RuntimeError::AuthorityChanged
+                | RuntimeError::StoreCorrupt
+                | RuntimeError::LedgerInvariant(_) => found,
                 _ => RuntimeError::NotDurable,
             })?;
         }
@@ -4585,9 +4604,9 @@ impl RuntimeState {
     /// that failed, which is the point: it never happened as far as anything
     /// outside this thread was told.
     fn take_the_disks_word(&mut self, why: RuntimeError) -> Result<(), RuntimeError> {
-        let connection = self.store.connection().map_err(|_| why)?;
+        let connection = self.store.connection().map_err(|_| why.clone())?;
         let held = ledger_store::read(&connection, &self.ledger_id, PROJECTION_SCHEMA)
-            .map_err(|_| why)?
+            .map_err(|_| why.clone())?
             .ok_or(why)?;
         self.stamp = self.stamp.max(held.updated_at_ms);
         /* Confirm, do not adopt.
@@ -4611,7 +4630,7 @@ impl RuntimeState {
         if held.revision != self.revision {
             return Err(RuntimeError::AuthorityChanged);
         }
-        let ledger = Ledger::rebuild(held.projection).map_err(|_| RuntimeError::StoreCorrupt)?;
+        let ledger = Ledger::rebuild(held.projection).map_err(RuntimeError::LedgerInvariant)?;
         self.ledger = ledger;
         /* Clearing this is a cost, not a correctness: a runtime that forgot to
          * would simply read the store again on every request and answer the
@@ -4635,12 +4654,12 @@ fn actor_main(
     let mut state = match RuntimeState::boot(store, ledger_id, boot, panes, launcher) {
         Ok(state) => state,
         Err(error) => {
-            let _ = boot_reply.send(Err(error));
+            let _ = boot_reply.send(Err(error.clone()));
             return Err(error);
         }
     };
     if let Err(error) = state.verify_authority() {
-        let _ = boot_reply.send(Err(error));
+        let _ = boot_reply.send(Err(error.clone()));
         return Err(error);
     }
     let image = state.image();
@@ -4658,7 +4677,7 @@ fn actor_main(
                     let _ = reply.send(Ok(answer));
                 }
                 Err(error) if error.fatal() => {
-                    let _ = reply.send(Err(error));
+                    let _ = reply.send(Err(error.clone()));
                     return Err(error);
                 }
                 Err(error) => {
@@ -4667,7 +4686,7 @@ fn actor_main(
             },
             ActorCommand::Shutdown { reply } => {
                 if let Err(error) = state.verify_authority() {
-                    let _ = reply.send(Err(error));
+                    let _ = reply.send(Err(error.clone()));
                     return Err(error);
                 }
                 let image = state.image();
@@ -4688,7 +4707,7 @@ fn actor_main(
                         }
                     })
                 {
-                    let _ = reply.send(Err(error));
+                    let _ = reply.send(Err(error.clone()));
                     return Err(error);
                 }
                 let _ = reply.send(Ok(image.clone()));
@@ -7229,8 +7248,305 @@ mod tests {
         held
     }
 
-    /// Boot repairs the one historical wound with a unique safe outcome:
-    /// an unstamped check receipt whose delivery rows disappeared becomes a
+    fn an_unattempted_dispatched_legacy() -> LedgerProjectionV1 {
+        use zerocode_core::orchestration::TaskStatus;
+
+        let mut ledger = Ledger::new();
+        let run = ledger.create_run("repair", 1);
+        let task = ledger
+            .create_task(&run, "work".into(), "work".into(), Vec::new(), None, 2)
+            .expect("task");
+        ledger
+            .update_task(
+                &run,
+                &task,
+                None,
+                Some(r#"{"note":"original","ok":false}"#.into()),
+            )
+            .expect("prior result");
+        let other = ledger
+            .create_task(&run, "other".into(), "other".into(), Vec::new(), None, 3)
+            .expect("unrelated task");
+        ledger
+            .start_worker(&run, "codex", ("team-1", "%2"), Some(&other), 4)
+            .expect("an unrelated live attempt");
+        let mut projection = ledger.export();
+        // Reproduce a historical verb's output, without requiring the fixed
+        // live verb to accept it or touching any real authority store.
+        projection.tasks[0].status = TaskStatus::Dispatched;
+        projection
+    }
+
+    #[test]
+    fn boot_repairs_only_a_dispatched_task_without_an_attempt_once() {
+        use zerocode_core::orchestration::TaskStatus;
+
+        for dependent in [false, true] {
+            let fixture = Fixture::new();
+            let mut projection = an_unattempted_dispatched_legacy();
+            let expected_status = if dependent {
+                let dependency = projection.tasks[1].id.clone();
+                projection.tasks[0].deps.push(dependency);
+                TaskStatus::Pending
+            } else {
+                TaskStatus::Ready
+            };
+            let connection = fixture.store.connection().expect("private store");
+            ledger_store::write(&connection, "main-ledger", 0, 7, &projection, 4)
+                .expect("historical generation");
+            let held = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+                .expect("SQLite and digests are valid")
+                .expect("stored ledger");
+            assert!(held.bytes_match);
+            assert!(Ledger::rebuild(held.projection).is_err());
+            drop(connection);
+
+            let actor = start_with(
+                &fixture,
+                RuntimeBoot::Reopen,
+                a_seated_table(),
+                Box::new(NoLauncher),
+            );
+            let repaired = actor.view().expect("repaired boot");
+            assert_eq!(repaired.revision(), 8);
+            assert_eq!(repaired.repairs().len(), 1);
+            assert!(repaired.repairs()[0].contains(&projection.tasks[0].id));
+            assert!(!repaired.repairs()[0].contains("original"));
+            let row = &repaired.projection().tasks[0];
+            assert_eq!(row.status, expected_status);
+            let result: serde_json::Value =
+                serde_json::from_str(row.result.as_str()).expect("JSON result");
+            assert_eq!(result["ok"], false);
+            assert!(result["note"].as_str().expect("note").contains("original"));
+            assert!(row.result.contains("dispatched"));
+            assert!(row.result.contains("attempt"));
+            projection.tasks[0].status = expected_status;
+            projection.tasks[0].result = row.result.clone();
+            assert_eq!(*repaired.projection(), projection, "other rows changed");
+            actor.shutdown().expect("join repaired actor");
+
+            let connection = fixture.store.connection().expect("private store");
+            let held = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+                .expect("strict read after repair")
+                .expect("stored ledger");
+            Ledger::rebuild(held.projection).expect("repaired generation rebuilds");
+            drop(connection);
+            let actor = start_with(
+                &fixture,
+                RuntimeBoot::Reopen,
+                a_seated_table(),
+                Box::new(NoLauncher),
+            );
+            let reopened = actor.view().expect("second boot");
+            assert_eq!(reopened.revision(), repaired.revision());
+            assert_eq!(reopened.projection(), repaired.projection());
+            assert!(reopened.repairs().is_empty());
+            actor.shutdown().expect("join reopened actor");
+        }
+    }
+
+    #[test]
+    fn boot_does_not_publish_a_repair_when_another_content_invariant_fails() {
+        use zerocode_core::orchestration::TaskStatus;
+
+        let fixture = Fixture::new();
+        let mut projection = an_unattempted_dispatched_legacy();
+        projection.tasks[1].status = TaskStatus::Ready;
+        let connection = fixture.store.connection().unwrap();
+        ledger_store::write(&connection, "main-ledger", 0, 7, &projection, 7).unwrap();
+        let error = RuntimeActor::start(
+            &fixture.store,
+            "main-ledger",
+            RuntimeBoot::Reopen,
+            4,
+            a_seated_table(),
+            Box::new(NoLauncher),
+        )
+        .expect_err("a second violation still prevents boot");
+        assert!(matches!(error, RuntimeError::LedgerInvariant(_)));
+        assert!(error.to_string().contains(&projection.tasks[1].id));
+        assert!(error.fatal());
+        let after = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.revision, 7);
+        assert_eq!(after.projection, projection);
+    }
+
+    #[test]
+    fn boot_repair_does_not_waive_byte_counts_or_table_digests() {
+        for damage in [
+            "UPDATE orchestration_ledger_heads SET bytes_held = bytes_held + 1",
+            "UPDATE ledger_tasks SET result = 'tampered' WHERE ordinal = 0",
+        ] {
+            let fixture = Fixture::new();
+            let projection = an_unattempted_dispatched_legacy();
+            let connection = fixture.store.connection().expect("private store");
+            ledger_store::write(&connection, "main-ledger", 0, 7, &projection, 7)
+                .expect("historical generation");
+            connection
+                .execute(damage, [])
+                .expect("private corruption fixture");
+            let error = RuntimeActor::start(
+                &fixture.store,
+                "main-ledger",
+                RuntimeBoot::Reopen,
+                4,
+                a_seated_table(),
+                Box::new(NoLauncher),
+            )
+            .expect_err("byte corruption is not a task repair");
+            assert_eq!(error, RuntimeError::StoreCorrupt, "{damage}");
+            assert_eq!(
+                ledger_store::head_revision(&connection, "main-ledger").unwrap(),
+                Some(7)
+            );
+        }
+    }
+
+    #[test]
+    fn boot_repair_preserves_pending_gates_and_closed_attempt_history() {
+        use zerocode_core::orchestration::TaskStatus;
+
+        for gated in [false, true] {
+            let fixture = Fixture::new();
+            let mut projection = if gated {
+                let mut held = an_unattempted_dispatched_legacy();
+                held.tasks[0].status = TaskStatus::Ready;
+                let run = held.tasks[0].run.clone();
+                let task = held.tasks[0].id.clone();
+                let mut ledger = Ledger::rebuild(held).expect("valid fixture before gate");
+                ledger
+                    .create_gate(&run, &task, "decision".into(), Vec::new(), 6)
+                    .expect("pending gate");
+                ledger.export()
+            } else {
+                a_finished_legacy()
+            };
+            projection.tasks[0].status = TaskStatus::Dispatched;
+            let connection = fixture.store.connection().expect("private store");
+            ledger_store::write(&connection, "main-ledger", 0, 7, &projection, 7)
+                .expect("historical generation");
+            RuntimeActor::start(
+                &fixture.store,
+                "main-ledger",
+                RuntimeBoot::Reopen,
+                4,
+                a_seated_table(),
+                Box::new(NoLauncher),
+            )
+            .expect_err("a different contradiction needs its own decision");
+            let after = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+                .expect("valid bytes remain")
+                .expect("ledger");
+            assert_eq!(after.revision, 7);
+            assert_eq!(after.projection, projection);
+        }
+    }
+
+    #[test]
+    fn boot_repair_cannot_advance_past_an_unsettled_host_effect() {
+        let fixture = Fixture::new();
+        let projection = an_unattempted_dispatched_legacy();
+        let journal = EffectJournal::new(&fixture.store);
+        let lease = journal
+            .claim_authority("main-ledger", &digest(0xf5), 1)
+            .unwrap();
+        journal
+            .import_legacy(&lease, &Ledger::new().export(), &digest(0xaa), 2)
+            .unwrap();
+        let request = EffectRequest::new(
+            "main-ledger",
+            digest(0x11),
+            digest(0x21),
+            digest(0xb1),
+            digest(0xe1),
+            HostEffectKind::Split,
+        )
+        .unwrap();
+        let BeginEffect::Execute(permit) = journal
+            .prepare(&lease, 0, &projection, &request, 7)
+            .unwrap()
+        else {
+            panic!("fixture effect was not prepared");
+        };
+        permit.abandon("leave an unfinished fixture effect for boot");
+        drop(lease);
+        let connection = fixture.store.connection().unwrap();
+        let before: String = connection
+            .query_row(
+                "SELECT effect_state FROM host_effect_operations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let error = RuntimeActor::start(
+            &fixture.store,
+            "main-ledger",
+            RuntimeBoot::Reopen,
+            4,
+            a_seated_table(),
+            Box::new(NoLauncher),
+        )
+        .expect_err("repair must respect the effect fence");
+        assert_eq!(error, RuntimeError::EffectInFlight);
+        let after = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+            .unwrap()
+            .unwrap();
+        assert_eq!(after.revision, 1);
+        assert_eq!(after.projection, projection);
+        let state: String = connection
+            .query_row(
+                "SELECT effect_state FROM host_effect_operations",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn boot_names_an_unrepairable_content_invariant_apart_from_store_corruption() {
+        use zerocode_core::orchestration::TaskStatus;
+
+        let fixture = Fixture::new();
+        let mut projection = a_seated_legacy();
+        projection.tasks[0].status = TaskStatus::Ready;
+        let connection = fixture.store.connection().expect("private store");
+        ledger_store::write(&connection, "main-ledger", 0, 7, &projection, 7)
+            .expect("valid bytes, invalid content");
+        let before = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+            .expect("valid digests")
+            .expect("ledger");
+        let expected = Ledger::rebuild(before.projection.clone()).expect_err("invalid content");
+        drop(connection);
+        let error = match RuntimeActor::start(
+            &fixture.store,
+            "main-ledger",
+            RuntimeBoot::Reopen,
+            4,
+            a_seated_table(),
+            Box::new(NoLauncher),
+        ) {
+            Ok(actor) => {
+                let _ = actor.shutdown();
+                panic!("unrelated invariant was repaired");
+            }
+            Err(error) => error,
+        };
+        let diagnostic = error.to_string();
+        assert!(diagnostic.contains("invariant"), "{diagnostic}");
+        assert!(diagnostic.contains(&expected.to_string()), "{diagnostic}");
+        assert_ne!(diagnostic, RuntimeError::StoreCorrupt.to_string());
+        let connection = fixture.store.connection().expect("private store");
+        let after = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+            .expect("still readable")
+            .expect("still present");
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(after.projection, before.projection);
+    }
+
+    /// An unstamped check receipt whose delivery rows disappeared becomes a
     /// tombstone, while its retry key remains spent. The stale derived byte
     /// count is rewritten in the same canonical generation before the actor
     /// answers anything.

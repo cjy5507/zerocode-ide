@@ -2131,7 +2131,17 @@ fn authority_is_unavailable(why: &str) -> String {
             "orchestration is unavailable in this window because the durable ",
             "authority {why}. The ledger file has been left exactly as it was ",
             "— nothing has been written over it. Restart the window; if this ",
-            "repeats, the authority store beside the ledger file needs repair.",
+            "repeats, the authority store beside the ledger file needs repair. ",
+            "With all windows using that store closed, preserve authority.sqlite ",
+            "and its WAL/SHM files as an authority-before-<UTC timestamp>.sqlite ",
+            "backup set. Work on a separate consistent SQLite backup copy. ",
+            "Validate the copy with PRAGMA integrity_check, a strict ",
+            "ledger_store::read (byte counts and table digests), and Ledger::rebuild. ",
+            "Apply only a supported content repair and repeat those checks; ",
+            "raw SQL updates invalidate the table digests. After checkpointing and ",
+            "closing the verified copy, replace the original by an atomic ",
+            "rename in the same directory, with old sidecars kept with the backup ",
+            "and no windows running. Keep the backup until restart succeeds.",
         ),
         why = why
     )
@@ -2260,7 +2270,7 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
         Err(why) => {
             stand_down(
                 local_data_root,
-                authority_is_unavailable(&format!("its store could not be opened ({why:?})")),
+                authority_is_unavailable(&format!("its SQLite store could not be opened ({why})")),
             );
             return Restarted::default();
         }
@@ -2299,7 +2309,12 @@ fn open_with_headroom(local_data_root: &Path, now_ms: i64, headroom: HeadroomSou
      * settled `NotStarted` for the world this window can see, and the sweep
      * puts down whatever rows the old attempt had already written. */
     let recoveries = match actor.view() {
-        Ok(image) => image.recoveries().len(),
+        Ok(image) => {
+            for note in image.repairs() {
+                crate::note_window_event(local_data_root, &format!("orchestration: {note}"));
+            }
+            image.recoveries().len()
+        }
         Err(why) => {
             stand_down(
                 local_data_root,
