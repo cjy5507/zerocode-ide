@@ -27,7 +27,10 @@ fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
     assert_eq!(SUMMON_CHOICE_RUBRIC_VERSION, 1);
-    assert_eq!(rubric_fingerprint(), "b234b271756b5778");
+    assert_eq!(
+        crate::jev::rubric_fingerprint(rubric_words),
+        "b234b271756b5778"
+    );
 }
 
 /// A choice between one agent is not a choice. A summons on a machine with

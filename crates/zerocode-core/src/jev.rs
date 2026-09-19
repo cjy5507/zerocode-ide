@@ -696,8 +696,8 @@ pub fn brief_shape(brief: &str, cap: Cap) -> (String, usize) {
 /// words — what a question's rubric version is pinned to, so a word changed
 /// without a version bump is a red test rather than a quiet drift.
 #[must_use]
-pub fn words_fingerprint(words: &str) -> String {
-    Sha256::digest(words.as_bytes())
+pub fn rubric_fingerprint(words: impl FnOnce() -> String) -> String {
+    Sha256::digest(words().as_bytes())
         .iter()
         .take(8)
         .map(|byte| format!("{byte:02x}"))

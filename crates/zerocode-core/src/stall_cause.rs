@@ -41,7 +41,7 @@ const STATE_KEYS: [&str; 4] = ["agent", "quietSeconds", "screen", "transcript"];
 
 /// The version of the words in this module. Bump it when any of them changes:
 /// a judgment read under one wording is not evidence about another. The test
-/// `the_version_is_pinned_to_the_words` holds it to [`rubric_fingerprint`].
+/// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`].
 pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 1;
 
 /// How long after a silence was asked about its label waits for what
@@ -156,12 +156,6 @@ pub fn rubric_words() -> String {
     words.push('\n');
     words.push_str(&STATE_KEYS.join(","));
     words
-}
-
-/// The first sixteen hex digits of the words' SHA-256.
-#[must_use]
-pub fn rubric_fingerprint() -> String {
-    crate::jev::words_fingerprint(&rubric_words())
 }
 
 /// The silence a question is about, as the window found it.

@@ -230,7 +230,10 @@ fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
     assert_eq!(SCREEN_ACTION_RUBRIC_VERSION, 2);
-    assert_eq!(rubric_fingerprint(), "8406a03f7deaaf42");
+    assert_eq!(
+        crate::jev::rubric_fingerprint(rubric_words),
+        "8406a03f7deaaf42"
+    );
 }
 
 #[test]

@@ -20,7 +20,7 @@ const RUBRIC_V1: &str = "af0edebd59fe41c0";
 fn the_version_is_pinned_to_the_words() {
     assert_eq!(asked().rubric_version, 1, "the version moved");
     assert_eq!(
-        rubric_fingerprint(),
+        crate::jev::rubric_fingerprint(rubric_words),
         RUBRIC_V1,
         "the question's words changed without a version bump — a reading taken \
          under the old wording is not evidence about the new one"

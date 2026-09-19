@@ -101,7 +101,7 @@ pub struct Field {
 pub struct Question {
     /// The version of the words. A judgment read under one wording is not
     /// evidence about another, and `the_version_is_pinned_to_the_words` holds
-    /// this to [`rubric_fingerprint`].
+    /// this to [`crate::jev::rubric_fingerprint`].
     pub rubric_version: u32,
     pub instructions: String,
     pub state: Vec<StateKey>,
@@ -405,12 +405,6 @@ pub fn rubric_words() -> String {
     words.push('\n');
     words.push_str(&question.value_line);
     words
-}
-
-/// The first sixteen hex digits of the words' SHA-256.
-#[must_use]
-pub fn rubric_fingerprint() -> String {
-    crate::jev::words_fingerprint(&rubric_words())
 }
 
 #[cfg(test)]

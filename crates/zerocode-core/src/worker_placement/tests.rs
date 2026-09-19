@@ -20,7 +20,10 @@ fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
     assert_eq!(WORKER_PLACEMENT_RUBRIC_VERSION, 1);
-    assert_eq!(rubric_fingerprint(), "da5b36e59acebce8");
+    assert_eq!(
+        crate::jev::rubric_fingerprint(rubric_words),
+        "da5b36e59acebce8"
+    );
 }
 
 /// A closed choice is only closed if every option the caller could be told to

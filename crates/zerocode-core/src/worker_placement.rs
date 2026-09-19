@@ -51,7 +51,7 @@ const STATE_KEYS: [&str; 5] = ["brief", "startedBy", "inFront", "sameWorkspace",
 
 /// The version of the words above. Bump it when any of them changes: a
 /// judgment read under one wording is not evidence about another. The test
-/// `the_version_is_pinned_to_the_words` holds it to [`rubric_fingerprint`],
+/// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`],
 /// so changing a word without bumping the version is a red test rather than a
 /// quiet drift.
 pub const WORKER_PLACEMENT_RUBRIC_VERSION: u32 = 1;
@@ -216,12 +216,6 @@ pub fn rubric_words() -> String {
     words.push('\n');
     words.push_str(&STATE_KEYS.join(","));
     words
-}
-
-/// The first sixteen hex digits of the words' SHA-256.
-#[must_use]
-pub fn rubric_fingerprint() -> String {
-    crate::jev::words_fingerprint(&rubric_words())
 }
 
 /// The question this look asks.

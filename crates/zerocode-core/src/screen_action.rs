@@ -108,7 +108,7 @@ const CANDIDATES_KEY: &str = "candidates";
 /// The version of the words above. Bump it when any of them changes: a
 /// judgment read under one wording is not evidence about another. The test
 /// `the_version_is_pinned_to_the_words` holds it to
-/// [`rubric_fingerprint`], so changing a word without bumping the version is
+/// [`crate::jev::rubric_fingerprint`], so changing a word without bumping the version is
 /// a red test rather than a quiet drift.
 ///
 /// One version covers both errands' words. A row says which errand it was
@@ -296,12 +296,6 @@ pub fn rubric_words() -> String {
     words.push('\n');
     words.push_str(CANDIDATES_KEY);
     words
-}
-
-/// The first sixteen hex digits of the words' SHA-256.
-#[must_use]
-pub fn rubric_fingerprint() -> String {
-    crate::jev::words_fingerprint(&rubric_words())
 }
 
 /// The question this look asks, or `None` when there is nothing left to

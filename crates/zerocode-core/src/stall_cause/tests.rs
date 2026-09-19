@@ -132,7 +132,10 @@ fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
     assert_eq!(STALL_CAUSE_RUBRIC_VERSION, 1);
-    assert_eq!(rubric_fingerprint(), "848d39f562adc8f9");
+    assert_eq!(
+        crate::jev::rubric_fingerprint(rubric_words),
+        "848d39f562adc8f9"
+    );
 }
 
 /// The screen's newest lines are kept, blank ends are dropped, and what is
