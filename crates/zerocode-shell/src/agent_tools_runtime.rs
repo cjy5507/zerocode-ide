@@ -5457,12 +5457,13 @@ pub(super) async fn answer_browser_command(
                 Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
             };
             match cmd::browser::automate_marks(app, &state, &command.label).await {
-                // The labels are the page's own words: fenced like `read`.
-                // `--marks` picks the machine-readable items over the legend.
-                Ok(marks) if command.json => page_said(
-                    &command.label,
-                    format!("{}\n", cmd::browser::marks_json(&marks)),
-                ),
+                // The labels are the page's own words. The legend is fenced
+                // like `read`; the `--json` answer carries the fence's flag
+                // instead, because a program reads that one and marker lines
+                // make it unparseable (`marks_json`).
+                Ok(marks) if command.json => {
+                    browser_said(format!("{}\n", cmd::browser::marks_json(&marks)))
+                }
                 Ok(marks) => page_said(&command.label, cmd::browser::marks_lines(&marks)),
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }

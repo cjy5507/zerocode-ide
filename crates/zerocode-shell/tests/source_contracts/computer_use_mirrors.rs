@@ -548,6 +548,44 @@ fn every_bench_command_is_one_the_cli_accepts() {
     }
 }
 
+/// An answer a program reads carries the fence's flag, not its marker lines.
+///
+/// The fence is a label for a model; a `--json` answer has a program for a
+/// reader, and `untrusted::JSON_FLAG` exists so such an answer can say where
+/// its words came from and still parse. `marks --json` wore the markers, and
+/// the browser walk — which looks at a pane by running exactly that and
+/// parsing what comes back — read every look as nothing. Every walk ended at
+/// its first step and the seat that judges one has no rows to show for it
+/// (2026-09-19).
+#[test]
+fn a_json_answer_a_program_reads_wears_the_flag_and_not_the_markers() {
+    let browser = std::fs::read_to_string("src/cmd/browser.rs").expect("the browser commands");
+    let marks = browser
+        .split("pub(crate) fn marks_json")
+        .nth(1)
+        .and_then(|rest| rest.split("\n}").next())
+        .expect("marks_json");
+    assert!(
+        marks.contains("untrusted::JSON_FLAG"),
+        "the machine-readable marks answer does not say its words came from outside"
+    );
+
+    let runtime = std::fs::read_to_string("src/agent_tools_runtime.rs").expect("the agent tools");
+    let branch = runtime
+        .split("Ok(marks) if command.json =>")
+        .nth(1)
+        .and_then(|rest| rest.split("Ok(marks) =>").next())
+        .expect("the json branch");
+    assert!(
+        branch.contains("browser_said"),
+        "the json marks answer is fenced, so no program can parse it"
+    );
+    assert!(
+        !branch.contains("page_said"),
+        "the json marks answer is fenced, so no program can parse it"
+    );
+}
+
 /// The marks (C1): the presses a mark counts on are the helper's own click
 /// path, the pin's words are the core's, and the roles a click focuses
 /// rather than confirms are the core's text-entry table.

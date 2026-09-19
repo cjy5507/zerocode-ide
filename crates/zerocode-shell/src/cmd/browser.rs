@@ -2548,10 +2548,20 @@ pub(crate) fn marks_lines(marks: &[BrowserMark]) -> String {
 }
 
 /// The marks answer as a machine reads it (`--json`): the items under the
-/// marks' own `items` key and their count.
+/// marks' own `items` key, their count, and the fence's own word for words
+/// that came from outside.
+///
+/// The flag and not the markers, because this answer has a program for a
+/// reader: the walk looks at a pane by running exactly this and parsing what
+/// comes back (`errand::desk::look`). Wrapped in marker lines it parsed as
+/// nothing at all, so every browser walk ended at its first look and the seat
+/// that judges one has no rows to show for it (2026-09-19). `diagnose --json`
+/// already answers this way for the same reason.
 pub(crate) fn marks_json(marks: &[BrowserMark]) -> serde_json::Value {
     use zerocode_core::computer_use_protocol::marks::ITEMS_KEY;
-    serde_json::json!({ ITEMS_KEY: marks_items(marks), "count": marks.len() })
+    let mut answer = serde_json::json!({ ITEMS_KEY: marks_items(marks), "count": marks.len() });
+    answer[zerocode_core::untrusted::JSON_FLAG] = serde_json::Value::Bool(true);
+    answer
 }
 
 /// `click <label> --mark N`: press the control numbered N on the pane's last
