@@ -183,6 +183,9 @@ impl Refused {
 /// (`evidence_n`, plan D4) without reading the log behind the writer.
 pub struct Run<'a> {
     pub command: &'a ComputerCommand,
+    /// An internal recovery cursor, within the original requested range.
+    /// The caller's command remains unchanged; a resumed tail is not a new request.
+    pub resume_from: Option<usize>,
     pub file: &'a str,
     pub text: &'a str,
     pub deadline_ms: u64,
@@ -207,6 +210,15 @@ fn values_of(command: &ComputerCommand) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
+fn requested_start(command: &ComputerCommand) -> usize {
+    command
+        .params
+        .get("start")
+        .and_then(Value::as_u64)
+        .and_then(|start| usize::try_from(start).ok())
+        .unwrap_or(1)
+}
+
 /// A recipe read and decided from `command`'s start with its values — what
 /// runs, before anything moves.
 pub fn decide(
@@ -221,12 +233,7 @@ pub fn decide(
     Refused,
 > {
     let lines = recipe_lines(text).map_err(Refused::invalid)?;
-    let start = command
-        .params
-        .get("start")
-        .and_then(Value::as_u64)
-        .and_then(|start| usize::try_from(start).ok())
-        .unwrap_or(1);
+    let start = requested_start(command);
     let end = command
         .params
         .get("end")
@@ -546,7 +553,20 @@ pub fn run(
             "--confirm confirms a Flow's money step; this recipe has no money line".into(),
         ));
     }
-    let (lines, start, decided) = decide(run.command, run.text)?;
+    if run
+        .resume_from
+        .is_some_and(|step| step < requested_start(run.command))
+    {
+        return Err(Refused::invalid(
+            "a recovery cannot resume before the requested range".into(),
+        ));
+    }
+    let resumed = run.resume_from.map(|step| {
+        let mut command = run.command.clone();
+        command.params["start"] = json!(step);
+        command
+    });
+    let (lines, start, decided) = decide(resumed.as_ref().unwrap_or(run.command), run.text)?;
     if let Some(spec) = &flow {
         spec.fingerprint
             .matches(&live_fingerprint(&mut *desk.borrow_mut()))
@@ -1390,7 +1410,7 @@ fn report(
         "start": start,
         "ran": steps,
         "done": walked.finished(),
-        "complete": walked.finished() && start == 1
+        "complete": walked.finished() && requested_start(command) == 1
             && command.params.get("end").and_then(Value::as_u64)
                 .is_none_or(|end| usize::try_from(end).ok() == Some(lines.len())),
         "stoppedAt": stopped_at,
@@ -1595,6 +1615,7 @@ pub(crate) mod bench {
     pub(crate) fn walk_of<'a>(command: &'a ComputerCommand, text: &'a str) -> Run<'a> {
         Run {
             command,
+            resume_from: None,
             file: "f.md",
             text,
             deadline_ms: DEADLINE,
@@ -1680,6 +1701,7 @@ mod tests {
         run(
             &Run {
                 command,
+                resume_from: None,
                 file,
                 text,
                 deadline_ms,
@@ -2243,6 +2265,113 @@ mod tests {
             report["ran"].as_array().map(Vec::len),
             Some(0),
             "a caller gone gets no steps"
+        );
+    }
+
+    #[test]
+    fn an_automatic_resume_completes_the_original_full_request() {
+        let host = "example.test";
+        let page = format!("https://{host}");
+        let mut spec = flow(vec![check(
+            1,
+            CheckKind::State,
+            true,
+            RecipeTool::Browser,
+            &["find", "page", "Done"],
+        )]);
+        spec.fingerprint.hosts.insert(host.into());
+        let text = flow_doc(
+            &[
+                (RecipeTool::Browser, "click page #first"),
+                (RecipeTool::Browser, "click page #second"),
+            ],
+            &spec,
+        );
+        let given = command(&[]);
+        let bench = Bench::new().showing(&[("page", &page)]);
+        let mut sent = Vec::new();
+        let first = run(
+            &walk_of(&given, &text),
+            |_, argv, _| {
+                sent.push(argv.to_vec());
+                if argv[0] == "find" {
+                    browser_said(r#"{"count":0}"#)
+                } else if argv[2] == "#second" {
+                    browser_refused("missing")
+                } else {
+                    browser_said("clicked")
+                }
+            },
+            |_, _, _| {},
+            |_| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap();
+        assert_eq!(first["done"], false);
+        assert_eq!(first["stoppedAt"], 2);
+        assert!(!verdict_of(&first).unwrap().0);
+
+        // The recovery cursor is separate from the person's full request.
+        let resumed = Run {
+            resume_from: Some(2),
+            ..walk_of(&given, &text)
+        };
+        let second = run(
+            &resumed,
+            |_, argv, _| {
+                sent.push(argv.to_vec());
+                if argv[0] == "find" {
+                    browser_said(r#"{"count":1}"#)
+                } else {
+                    browser_said("clicked")
+                }
+            },
+            |_, _, _| {},
+            |_| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap();
+        assert_eq!(second["done"], true);
+        assert_eq!(second["flow"]["verdict"]["pass"], true);
+        assert_eq!(sent.iter().filter(|argv| argv[0] == "find").count(), 2);
+        assert_eq!(second["complete"], true);
+        assert!(verdict_of(&second).unwrap().0);
+        assert!(given.params.get("start").is_none());
+
+        let tail = command(&["--start", "2"]);
+        let manual = run(
+            &walk_of(&tail, &text),
+            |_, argv, _| {
+                if argv[0] == "find" {
+                    browser_said(r#"{"count":1}"#)
+                } else {
+                    browser_said("clicked")
+                }
+            },
+            |_, _, _| {},
+            |_| {},
+            bench.desk(false, None),
+            || true,
+        )
+        .unwrap();
+        assert_eq!(manual["done"], true);
+        assert_eq!(manual["complete"], false);
+        assert!(!verdict_of(&manual).unwrap().0);
+        assert!(
+            run(
+                &Run {
+                    resume_from: Some(1),
+                    ..walk_of(&tail, &text)
+                },
+                |_, _, _| panic!("an out-of-range recovery must not act"),
+                |_, _, _| {},
+                |_| {},
+                bench.desk(false, None),
+                || true,
+            )
+            .is_err()
         );
     }
 
@@ -3082,6 +3211,7 @@ mod tests {
     ) -> Run<'a> {
         Run {
             command,
+            resume_from: None,
             file,
             text,
             deadline_ms: DEADLINE,

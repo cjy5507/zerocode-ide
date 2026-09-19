@@ -2827,20 +2827,8 @@ pub(super) fn run_recipe(
             }
             return Err(door);
         }
-        // Walking again from a step is the same walk with another `--start`;
-        // the resume point is the stopped report's own, never a new one.
-        let resumed;
-        let command = match start {
-            Some(step) => {
-                let mut with = command.clone();
-                if let Some(params) = with.params.as_object_mut() {
-                    params.insert("start".to_string(), serde_json::json!(step));
-                }
-                resumed = with;
-                &resumed
-            }
-            None => command,
-        };
+        // An internal resume keeps the person's original request range.
+        // Its cursor comes from the stopped report, not another CLI request.
         let evidence_from = dir.map(|dir| {
             tauri::async_runtime::block_on(evidence_runtime::written());
             run_evidence::steps_in(dir).len() + 1
@@ -2848,6 +2836,7 @@ pub(super) fn run_recipe(
         let mut report = recipe_run::run(
             &Run {
                 command,
+                resume_from: start,
                 file: &file,
                 text: &text,
                 deadline_ms,

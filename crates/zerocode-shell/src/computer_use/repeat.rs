@@ -457,6 +457,7 @@ mod tests {
             run(
                 &Run {
                     command,
+                    resume_from: None,
                     file: "f.md",
                     text,
                     deadline_ms,
