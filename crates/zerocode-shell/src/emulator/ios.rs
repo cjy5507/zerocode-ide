@@ -1289,14 +1289,16 @@ pub(super) async fn click_mark_direct(
         let control = ios_control(&udid).map_err(backend_error)?;
         let input = control.input().map_err(backend_error)?;
         let snapshot = marks_snapshot(&udid).map_err(backend_error)?;
-        request.perform_in(&input, &snapshot.faces, snapshot.screen, |x, y| {
-            #[cfg(target_os = "macos")]
-            super::ios_hid::send(&udid, super::ios_hid::InputRequest::Tap { x, y })
-                .map_err(backend_error)?;
-            #[cfg(not(target_os = "macos"))]
-            let _ = (x, y, run_ios_input(&udid, ()).map_err(backend_error)?);
-            control.notify();
-            Ok(())
+        request.on_device(&udid, || {
+            request.perform_in(&input, &snapshot.faces, snapshot.screen, |x, y| {
+                #[cfg(target_os = "macos")]
+                super::ios_hid::send(&udid, super::ios_hid::InputRequest::Tap { x, y })
+                    .map_err(backend_error)?;
+                #[cfg(not(target_os = "macos"))]
+                let _ = (x, y, run_ios_input(&udid, ()).map_err(backend_error)?);
+                control.notify();
+                Ok(())
+            })
         })
     })
     .await

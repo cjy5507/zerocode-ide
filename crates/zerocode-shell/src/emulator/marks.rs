@@ -14,6 +14,14 @@ use zerocode_core::computer_use_protocol::{ProviderError, cache, error_code};
 
 use crate::computer_use::observe::Kept;
 
+/// A transport address is not a persistent device identity: Android can
+/// reuse the same emulator serial for a different AVD after a restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Device {
+    pub address: String,
+    pub identity: String,
+}
+
 /// Fold either backend's tree once, retaining its preorder indexes and the
 /// nearest named ancestor. Both marks and the last-moment check read this.
 pub(crate) fn faces(platform: EmulatorPlatform, tree: &Value) -> Vec<ElementFace> {
@@ -275,9 +283,21 @@ pub(super) struct PinnedTap {
     screen: Rect,
     platform: EmulatorPlatform,
     made: Instant,
+    identity: String,
 }
 
 impl PinnedTap {
+    pub fn on_device<T>(
+        &self,
+        identity: &str,
+        press: impl FnOnce() -> Result<T, ProviderError>,
+    ) -> Result<T, ProviderError> {
+        if self.identity != identity {
+            return Err(wrong_device());
+        }
+        press()
+    }
+
     /// The device gate spans the caller's fresh snapshot and this tap. The
     /// captured stream must still be alive at the last input boundary; a
     /// replacement stream cannot authorize the old stream's pending press.
@@ -350,7 +370,7 @@ impl PinnedTap {
 
 struct Table {
     platform: EmulatorPlatform,
-    device: String,
+    device: Device,
     plan: MarkPlan,
     screen: Rect,
     made: Instant,
@@ -360,17 +380,14 @@ impl Table {
     fn request(
         &self,
         platform: EmulatorPlatform,
-        device: &str,
+        device: &Device,
         mark: usize,
     ) -> Result<PinnedTap, ProviderError> {
         if self.platform != platform
-            || self.device != device
+            || self.device != *device
             || cache::is_expired(self.made, Instant::now())
         {
-            return Err(ProviderError::new(
-                error_code::PIN_BROKEN,
-                "the look belongs to another device or has expired; run marks again",
-            ));
+            return Err(wrong_device());
         }
         let placed = self
             .plan
@@ -386,6 +403,7 @@ impl Table {
             screen: self.screen,
             platform,
             made: self.made,
+            identity: self.device.identity.clone(),
         })
     }
 
@@ -403,6 +421,13 @@ impl Table {
 
 static TABLES: Mutex<Kept<Table>> = Mutex::new(Kept::new(MARK_LOOKS_KEPT));
 
+fn wrong_device() -> ProviderError {
+    ProviderError::new(
+        error_code::PIN_BROKEN,
+        "the look belongs to another device or has expired; run marks again",
+    )
+}
+
 pub(crate) fn backend_error(error: impl ToString) -> ProviderError {
     ProviderError::new("emulator_error", error.to_string())
 }
@@ -410,11 +435,14 @@ pub(crate) fn backend_error(error: impl ToString) -> ProviderError {
 /// Number the device's current tree without capturing or drawing a picture.
 pub(crate) async fn observe(
     platform: EmulatorPlatform,
-    device: String,
+    device: Device,
 ) -> Result<Value, ProviderError> {
     let snapshot = match platform {
-        EmulatorPlatform::Ios => super::ios::marks_snapshot_direct(device.clone()).await,
-        EmulatorPlatform::Android => super::android::marks_snapshot_direct(device.clone()).await,
+        EmulatorPlatform::Ios => super::ios::marks_snapshot_direct(device.address.clone()).await,
+        EmulatorPlatform::Android => {
+            super::android::marks_snapshot_direct(device.address.clone(), device.identity.clone())
+                .await
+        }
     }
     .map_err(backend_error)?;
     let table = Table {
@@ -436,7 +464,7 @@ pub(crate) async fn observe(
 /// Recall the exact look, then let the backend prove the pin before input.
 pub(crate) async fn click(
     platform: EmulatorPlatform,
-    device: String,
+    device: Device,
     mark: usize,
     look: &str,
 ) -> Result<Value, ProviderError> {
@@ -464,8 +492,10 @@ pub(crate) async fn click(
         (request, legend)
     };
     match platform {
-        EmulatorPlatform::Ios => super::ios::click_mark_direct(device, request).await?,
-        EmulatorPlatform::Android => super::android::click_mark_direct(device, request).await?,
+        EmulatorPlatform::Ios => super::ios::click_mark_direct(device.address, request).await?,
+        EmulatorPlatform::Android => {
+            super::android::click_mark_direct(device.address, request).await?
+        }
     }
     Ok(json!({ "performed": true, "mark": mark, LOOK_ID_KEY: look, LEGEND_KEY: legend }))
 }

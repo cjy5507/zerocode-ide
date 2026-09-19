@@ -2,6 +2,13 @@ use super::*;
 use serde_json::json;
 use zerocode_core::computer_use::MARK_PIN_TOLERANCE_POINTS;
 
+fn device(name: &str) -> Device {
+    Device {
+        address: name.into(),
+        identity: name.into(),
+    }
+}
+
 fn ios_tree() -> Value {
     serde_json::from_str(include_str!("fixtures/ios.json")).unwrap()
 }
@@ -55,7 +62,7 @@ fn android_compound_rows_preserve_their_descendant_words_and_pin_them() {
     );
     let table = Table {
         platform: EmulatorPlatform::Android,
-        device: "phone".into(),
+        device: device("phone"),
         plan: numbered(&original.faces, screen),
         screen,
         made: Instant::now(),
@@ -85,7 +92,7 @@ fn android_landscape_marks_and_pins_share_the_logical_input_coordinates() {
     assert_eq!(numbered(&snapshot.faces, physical).marks.len(), 1);
     let table = Table {
         platform: EmulatorPlatform::Android,
-        device: "fixture".into(),
+        device: device("fixture"),
         plan: numbered(&snapshot.faces, screen),
         screen,
         made: Instant::now(),
@@ -142,6 +149,7 @@ fn mobile_pin_refuses_changed_tree_before_the_tap() {
         screen,
         platform: EmulatorPlatform::Ios,
         made: Instant::now(),
+        identity: "phone".into(),
     };
     let mut changed = original.clone();
     changed[1].name = Some("삭제".into());
@@ -174,13 +182,16 @@ fn a_stream_replaced_after_the_snapshot_cannot_finish_its_old_marked_tap() {
     let registry = Box::leak(Box::<SessionRegistry>::default());
     let descriptor = |stream: &str| crate::emulator::EmulatorStream {
         stream: stream.into(),
-        udid: table.device.clone(),
-        name: table.device.clone(),
+        udid: table.device.address.clone(),
+        name: table.device.identity.clone(),
         platform: crate::emulator::EmulatorPlatform::Ios,
         interactive: true,
         reused: false,
     };
-    let key = SessionKey::frames(crate::emulator::EmulatorPlatform::Ios, &table.device);
+    let key = SessionKey::frames(
+        crate::emulator::EmulatorPlatform::Ios,
+        &table.device.address,
+    );
     let StartClaim::Acquired(lease) = registry.claim(key.clone()).unwrap() else {
         panic!("expected a new stream");
     };
@@ -235,7 +246,7 @@ fn table() -> (Table, Vec<ElementFace>) {
     (
         Table {
             platform: EmulatorPlatform::Ios,
-            device: "phone".into(),
+            device: device("phone"),
             plan: numbered(&snapshot.faces, snapshot.screen),
             screen: snapshot.screen,
             made: Instant::now(),
@@ -324,11 +335,58 @@ fn looks_are_bound_to_the_device_platform_age_and_their_own_numbers() {
             .request(EmulatorPlatform::Android, &table.device, 1)
             .is_err()
     );
-    assert!(table.request(table.platform, "another-phone", 1).is_err());
+    assert!(
+        table
+            .request(table.platform, &device("another-phone"), 1)
+            .is_err()
+    );
     assert!(table.request(table.platform, &table.device, 0).is_err());
     assert!(table.request(table.platform, &table.device, 2).is_err());
     table.made -= cache::MAX_AGE + std::time::Duration::from_secs(1);
     assert!(table.request(table.platform, &table.device, 1).is_err());
+}
+
+#[test]
+fn an_android_serial_reused_by_another_avd_cannot_inherit_a_look() {
+    let devices = |avd| json!([{"avd": avd, "serial": "emulator-5554", "booted": true}]);
+    let resolve = crate::agent_tools_runtime::android_mark_target;
+    let before = resolve(&devices("first-avd"), "first-avd").unwrap();
+    let after = resolve(&devices("second-avd"), "emulator-5554").unwrap();
+    assert_eq!(before.address, after.address);
+    let (mut table, _) = table();
+    table.platform = EmulatorPlatform::Android;
+    table.device = before;
+    let error = table
+        .request(table.platform, &after, 1)
+        .err()
+        .expect("a different AVD cannot inherit the old look");
+    assert_eq!(error.code, error_code::PIN_BROKEN);
+    assert!(resolve(&devices("second-avd"), "first-avd").is_err());
+    assert!(resolve(&devices(""), "emulator-5554").is_err());
+    let moved = resolve(
+        &json!([{"avd": "first-avd", "serial": "emulator-5556", "booted": true}]),
+        "first-avd",
+    )
+    .unwrap();
+    assert!(
+        table.request(table.platform, &moved, 1).is_err(),
+        "stable AVD identity must not discard the observed transport binding"
+    );
+}
+
+#[test]
+fn a_device_replaced_after_resolution_cannot_reach_the_marked_tap() {
+    let (table, faces) = table();
+    let request = table.request(table.platform, &table.device, 1).unwrap();
+    let mut taps = 0;
+    let result = request.on_device("another-device", || {
+        request.perform(&faces, table.screen, |_, _| {
+            taps += 1;
+            Ok(())
+        })
+    });
+    assert_eq!(result.unwrap_err().code, error_code::PIN_BROKEN);
+    assert_eq!(taps, 0);
 }
 
 #[test]

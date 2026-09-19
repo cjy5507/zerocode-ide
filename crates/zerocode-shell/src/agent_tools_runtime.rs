@@ -3375,10 +3375,13 @@ async fn answer_emulator_marks(
             )
         })?;
         let device = match platform {
-            EmulatorPlatform::Android => active_android_serial(&device)
+            EmulatorPlatform::Android => active_android_mark_target(&device)
                 .await
                 .map_err(marks::backend_error)?,
-            EmulatorPlatform::Ios => device,
+            EmulatorPlatform::Ios => marks::Device {
+                identity: device.clone(),
+                address: device,
+            },
         };
         match command.method {
             EmulatorMethod::Marks => marks::observe(platform, device).await,
@@ -3461,19 +3464,35 @@ pub(super) async fn capture_emulator_screenshot(
 /// after the built-in pane has started it, and never start a headless/external
 /// emulator behind the pane's back.
 pub(super) async fn active_android_serial(device: &str) -> Result<String, String> {
+    active_android_mark_target(device)
+        .await
+        .map(|target| target.address)
+}
+
+async fn active_android_mark_target(
+    device: &str,
+) -> Result<crate::emulator::marks::Device, String> {
     let devices = serde_json::to_value(android_emulators_direct().await?)
         .map_err(|error| error.to_string())?;
+    android_mark_target(&devices, device)
+}
+
+pub(super) fn android_mark_target(
+    devices: &serde_json::Value,
+    device: &str,
+) -> Result<crate::emulator::marks::Device, String> {
     devices
         .as_array()
         .and_then(|devices| {
             devices.iter().find_map(|candidate| {
-                let avd = candidate.get("avd").and_then(serde_json::Value::as_str);
-                let serial = candidate.get("serial").and_then(serde_json::Value::as_str);
-                if avd == Some(device) || serial == Some(device) {
-                    serial.map(str::to_string)
-                } else {
-                    None
-                }
+                let avd = candidate.get("avd")?.as_str()?.trim();
+                let serial = candidate.get("serial")?.as_str()?.trim();
+                (candidate.get("booted")?.as_bool()? && !avd.is_empty() && !serial.is_empty()
+                    && (avd == device || serial == device))
+                    .then(|| crate::emulator::marks::Device {
+                        address: serial.to_string(),
+                        identity: avd.to_string(),
+                    })
             })
         })
         .ok_or_else(|| {

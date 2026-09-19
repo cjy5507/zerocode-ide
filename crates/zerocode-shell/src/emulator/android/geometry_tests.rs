@@ -21,6 +21,7 @@ printf '%s\n' "$*" >> commands
 case "$*" in
   '-s fixture shell wm size') printf 'Physical size: 1080x2400\n' ;;
   '-s fixture shell dumpsys input') cat display ;;
+  '-s fixture emu avd name') cat avd-name ;;
   '-s fixture shell input '*) exit 0 ;;
   '-s fixture shell uiautomator dump '*)
     if [ -f next-display ]; then cp next-display display; fi ;;
@@ -50,6 +51,20 @@ esac
             ),
         )
         .unwrap();
+    }
+}
+
+#[test]
+fn avd_identity_is_reread_and_missing_or_ambiguous_names_are_refused() {
+    let fixture = Fixture::new();
+    let path = fixture.directory.path().join("avd-name");
+    for name in ["first-avd", "second-avd"] {
+        std::fs::write(&path, format!("{name}\r\nOK\r\n")).unwrap();
+        assert_eq!(android_avd_name(&fixture.sdk.adb, "fixture").unwrap(), name);
+    }
+    for invalid in ["OK\n", "first-avd\nsecond-avd\nOK\n"] {
+        std::fs::write(&path, invalid).unwrap();
+        assert!(android_avd_name(&fixture.sdk.adb, "fixture").is_err());
     }
 }
 

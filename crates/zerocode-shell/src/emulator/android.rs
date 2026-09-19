@@ -508,22 +508,28 @@ fn android_running(adb: &Path) -> Vec<(String, String)> {
             if state != "device" || !serial.starts_with("emulator-") {
                 return None;
             }
-            let avd = crate::proc::quiet_command(adb)
-                .args(["-s", serial, "emu", "avd", "name"])
-                .output()
-                .ok()
-                .filter(|answer| answer.status.success())
-                .and_then(|answer| {
-                    String::from_utf8_lossy(&answer.stdout)
-                        .lines()
-                        .map(str::trim)
-                        .find(|line| !line.is_empty() && *line != "OK")
-                        .map(str::to_string)
-                })
-                .unwrap_or_default();
+            let avd = android_avd_name(adb, serial).unwrap_or_default();
             Some((serial.to_string(), avd))
         })
         .collect()
+}
+
+fn android_avd_name(adb: &Path, serial: &str) -> Result<String, String> {
+    let bytes = accessibility::run(
+        adb,
+        &["-s", serial, "emu", "avd", "name"],
+        Some(accessibility::MAX_OUTPUT_BYTES),
+    )?;
+    let text = String::from_utf8(bytes).map_err(|error| error.to_string())?;
+    let mut names = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && *line != "OK");
+    let name = names.next().ok_or("Android AVD identity is unavailable")?;
+    if names.next().is_some() {
+        return Err("Android AVD identity is ambiguous".into());
+    }
+    Ok(name.to_string())
 }
 
 fn recovered_managed_record(
@@ -1465,10 +1471,15 @@ fn marks_snapshot(
 
 pub(super) async fn marks_snapshot_direct(
     serial: String,
+    identity: String,
 ) -> Result<super::marks::Snapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let (sdk, _control) = android_control(&serial)?;
-        marks_snapshot(&sdk, &serial).map(|(snapshot, _)| snapshot)
+        let (snapshot, _) = marks_snapshot(&sdk, &serial)?;
+        if android_avd_name(&sdk.adb, &serial)? != identity {
+            return Err("Android device changed while reading the tree; run marks again".into());
+        }
+        Ok(snapshot)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1483,8 +1494,11 @@ pub(super) async fn click_mark_direct(
         let (sdk, control) = android_control(&serial).map_err(backend_error)?;
         let input = control.input().map_err(backend_error)?;
         let (snapshot, size) = marks_snapshot(&sdk, &serial).map_err(backend_error)?;
-        request.perform_in(&input, &snapshot.faces, snapshot.screen, |x, y| {
-            tap_at(&sdk, &serial, x, y, size).map_err(backend_error)
+        let identity = android_avd_name(&sdk.adb, &serial).map_err(backend_error)?;
+        request.on_device(&identity, || {
+            request.perform_in(&input, &snapshot.faces, snapshot.screen, |x, y| {
+                tap_at(&sdk, &serial, x, y, size).map_err(backend_error)
+            })
         })
     })
     .await
