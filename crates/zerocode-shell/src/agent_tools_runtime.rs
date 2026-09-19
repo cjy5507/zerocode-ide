@@ -2300,12 +2300,14 @@ pub(super) async fn computer_loop(
                                         serde_json::json!({
                                             "dir": dir, "name": command.params.get("name"),
                                             "kind": command.method.verb_name(),
+                                            "cwd": cwd,
                                         }),
                                     );
                                 }
                             },
-                            |report| {
+                            |mut report| {
                                 if let Some(dir) = dir.as_deref() {
+                                    report["cwd"] = serde_json::json!(cwd);
                                     evidence_runtime::leave_walk_report(dir, report);
                                 }
                             },

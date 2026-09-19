@@ -13,7 +13,7 @@ const flowPending = [];
 
 function flowRunView(dir) {
   if (!flowRuns.has(dir)) {
-    flowRuns.set(dir, { dir, steps: new Map(), report: null, walk: null });
+    flowRuns.set(dir, { dir, steps: new Map(), report: null, walk: null, cwd: null });
     if (flowRuns.size > FLOW_LIVE_RUNS) flowRuns.delete(flowRuns.keys().next().value);
   }
   return flowRuns.get(dir);
@@ -42,7 +42,8 @@ window.addEventListener("flow:step", ({ detail: payload }) => {
 window.addEventListener("flow:walk", ({ detail: payload }) => {
   const [dir, walk] = payload ?? [];
   if (!dir || !walk) return;
-  Object.assign(flowRunView(dir), { walk, name: walk.name, kind: walk.kind });
+  const run = flowRunView(dir);
+  Object.assign(run, { walk, name: walk.name, kind: walk.kind, cwd: walk.cwd ?? run.cwd });
   scheduleFlowConsole();
 });
 window.addEventListener("flow:report", ({ detail: payload }) => {
@@ -122,8 +123,8 @@ function flowStepCard(run, step) {
   card.append(flowText("p", t("flow.live.act", "누름 {{ms}}", { ms: flowMs(observed.act_ms) })));
   if (run.walk?.stop && Number.isSafeInteger(walked?.step) && run.walk.stoppedAt === walked.step) card.append(flowText("p", run.walk.stop.kind));
   if (run.name && Number.isSafeInteger(walked?.step)) {
-    const retry = flowButton(t("flow.live.retry", "이 걸음만 다시"), () => void flowLaunch(["recipe-run", "--name", run.name, "--start", String(walked.step), "--end", String(walked.step)], `${run.name} · ${t("flow.live.retry", "이 걸음만 다시")}`), "btn flow-step-retry");
-    retry.disabled = !run.walk;
+    const retry = flowButton(t("flow.live.retry", "이 걸음만 다시"), () => void flowLaunch(["recipe-run", "--name", run.name, "--start", String(walked.step), "--end", String(walked.step)], `${run.name} · ${t("flow.live.retry", "이 걸음만 다시")}`, run.cwd), "btn flow-step-retry");
+    retry.disabled = !run.walk || typeof run.cwd !== "string" || !run.cwd;
     card.append(retry);
   }
   return card;
@@ -181,26 +182,26 @@ async function readFlowEvidence(report) {
     if (reading !== flowConsoleReading) return;
     const run = flowRunView(held.dir);
     for (const step of held.steps.slice(-FLOW_LIVE_STEPS)) run.steps.set(step.n, step);
-    Object.assign(run, { report: held.report, walk: held.walk, name: held.walk?.name, kind: held.walk?.kind });
+    Object.assign(run, { report: held.report, walk: held.walk, name: held.walk?.name, kind: held.walk?.kind, cwd: held.walk?.cwd ?? null });
     flowRunDir = held.dir;
     paintFlowConsole();
   } catch (error) { showError(error); }
 }
 /* Requests wait in this view, then take the window's existing ComputerRequest
  * queue. Completion is the runner's reply, not a command typed into a shell. */
-function flowLaunch(argv, label = argv[2]) {
-  const item = { argv, label };
+function flowLaunch(argv, label = argv[2], worktree = activeWorktreePath) {
+  const item = { argv, label, worktree };
   flowPending.push(item);
   openFlowConsole();
-  const launch = flowLaunchTail.then(() => sendFlowCommand(argv));
+  const launch = flowLaunchTail.then(() => sendFlowCommand(argv, worktree));
   flowLaunchTail = launch.catch(() => {});
   return launch.finally(() => {
     flowPending.splice(flowPending.indexOf(item), 1);
     scheduleFlowConsole();
   });
 }
-async function sendFlowCommand(argv) {
-  try { await invoke("flow_execute", { argv }); }
+async function sendFlowCommand(argv, worktree) {
+  try { await invoke("flow_execute", { argv, worktree }); }
   catch (error) { showError(error); }
 }
 el("flow-console-open").addEventListener("click", openFlowConsole);

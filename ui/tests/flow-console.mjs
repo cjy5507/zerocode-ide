@@ -15,7 +15,7 @@ export async function testFlowConsole(browser, origin, ok) {
       openFlowConsole();
       window.__FLOW_EMIT__ = (name, payload) => window.dispatchEvent(new CustomEvent(name, { detail: payload }));
       const emit = window.__FLOW_EMIT__;
-      emit("flow:begin", { dir: "/evidence/a", name: "sample", kind: "recipe-run" });
+      emit("flow:begin", { dir: "/evidence/a", name: "sample", kind: "recipe-run", cwd: activeWorktreePath });
       for (const n of [3, 1, 2, 2]) emit("flow:step", ["/evidence/a", { n, tool: "browser", verb: "click", argv: ["click", "page", "#ok"], ok: true, observation: { act_ms: 7, judgment: { asked: false } } }]);
       emit("flow:step", ["/evidence/b", { n: 1, tool: "browser", verb: "type", argv: ["<img src=x>"], ok: false }]);
     });
@@ -64,6 +64,48 @@ export async function testFlowConsole(browser, origin, ok) {
       return { before, middle, after: flowPending.length };
     });
     ok("The queue waits for the actual runner reply before submitting the next Flow", queued.before.sent === 1 && queued.before.pending === 2 && queued.middle.sent === 2 && queued.middle.pending === 1 && queued.after === 0, JSON.stringify(queued));
+    const context = await page.evaluate(async () => {
+      const original = activeWorktreePath;
+      const sent = []; const release = [];
+      window.__ANSWER__.flow_execute = ({ argv, worktree }) => new Promise((done) => {
+        sent.push({ argv, workspace: worktree ?? activeWorktreePath }); release.push(done);
+      });
+      const first = flowLaunch(["recipe-run", "--name", "first"], "First");
+      const second = flowLaunch(["recipe-run", "--name", "second"], "Second");
+      await new Promise((done) => setTimeout(done, 0));
+      activeWorktreePath = "/different-worktree";
+      release[0]({ done: true });
+      await new Promise((done) => setTimeout(done, 0));
+      release[1]({ done: true }); await Promise.all([first, second]);
+      activeWorktreePath = original;
+      return { original, sent };
+    });
+    ok("A queued Flow keeps the worktree whose Jev consent the person selected",
+      context.sent.length === 2 && context.sent.every((sent) => sent.workspace === context.original), JSON.stringify(context));
+    const retryContext = await page.evaluate(async () => {
+      const original = activeWorktreePath;
+      const run = flowRuns.get("/evidence/a");
+      flowRunDir = run.dir;
+      activeWorktreePath = "/different-worktree";
+      paintFlowConsole();
+      let workspace;
+      window.__ANSWER__.flow_execute = ({ worktree }) => { workspace = worktree ?? activeWorktreePath; return { done: true }; };
+      el("flow-console-steps").querySelector('.flow-step[data-n="2"] .flow-step-retry').click();
+      await flowLaunchTail;
+      activeWorktreePath = original;
+      return { original, workspace };
+    });
+    ok("Retry retains the recorded run's worktree after a project switch",
+      retryContext.workspace === retryContext.original, JSON.stringify(retryContext));
+    const legacyRetryDisabled = await page.evaluate(async () => {
+      const run = flowRuns.get("/evidence/a");
+      window.__ANSWER__.flow_evidence = () => ({ dir: "/legacy", report: "/legacy/report.html", steps: [...run.steps.values()], walk: { ...run.walk } });
+      await readFlowEvidence("/legacy/report.html");
+      const disabled = el("flow-console-steps").querySelector('.flow-step[data-n="2"] .flow-step-retry').disabled;
+      flowRunDir = "/evidence/a"; paintFlowConsole();
+      return disabled;
+    });
+    ok("History without a recorded worktree cannot borrow the current project for retry", legacyRetryDisabled);
     await page.evaluate(() => {
       locale = "ko";
       window.__FLOW_EMIT__("flow:step", ["/evidence/a", {

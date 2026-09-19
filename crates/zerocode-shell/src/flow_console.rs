@@ -52,6 +52,7 @@ pub(crate) async fn flow_execute(
     webview: tauri::Webview,
     state: tauri::State<'_, AppState>,
     argv: Vec<String>,
+    worktree: String,
 ) -> Result<Value, String> {
     from_the_main_webview(&webview)?;
     let sender = COMPUTER
@@ -61,6 +62,7 @@ pub(crate) async fn flow_execute(
         sender,
         argv,
         state.active_root().to_string_lossy().into_owned(),
+        &worktree,
     )
     .await
 }
@@ -84,7 +86,17 @@ async fn execute(
     sender: &ComputerSender,
     mut argv: Vec<String>,
     cwd: String,
+    worktree: &str,
 ) -> Result<Value, String> {
+    // The requested root is a precondition, never a new execution directory.
+    // Keep the native snapshot after this check so another tab switch cannot
+    // change the workspace used by the queued walk's Jev consent door.
+    if Path::new(&cwd) != Path::new(worktree) {
+        return Err(
+            "the active worktree changed; return to the original worktree before running this Flow"
+                .into(),
+        );
+    }
     validate(&argv)?;
     if !argv.iter().any(|word| word == "--json") {
         argv.push("--json".into());
@@ -191,17 +203,46 @@ mod tests {
                 })
                 .unwrap();
         };
-        let (answer, ()) = tokio::join!(execute(&sender, argv, "/fixture".into()), acting);
+        let (answer, ()) = tokio::join!(
+            execute(&sender, argv, "/fixture".into(), "/fixture"),
+            acting
+        );
         assert_eq!(answer.unwrap()["result"]["done"], true);
+    }
+
+    #[tokio::test]
+    async fn a_queued_flow_cannot_borrow_another_worktrees_consent() {
+        let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
+        for asked in ["/first-worktree", ""] {
+            assert!(
+                execute(
+                    &sender,
+                    vec!["recipe-run".into(), "--name".into(), "sample".into()],
+                    "/second-worktree".into(),
+                    asked,
+                )
+                .await
+                .is_err()
+            );
+            assert!(matches!(
+                requests.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+        }
     }
 
     #[tokio::test]
     async fn the_console_refuses_non_flow_commands_before_the_queue() {
         let (sender, mut requests) = tokio::sync::mpsc::unbounded_channel();
         assert!(
-            execute(&sender, vec!["status".into()], "/fixture".into())
-                .await
-                .is_err()
+            execute(
+                &sender,
+                vec!["status".into()],
+                "/fixture".into(),
+                "/fixture"
+            )
+            .await
+            .is_err()
         );
         assert!(
             execute(
@@ -213,7 +254,8 @@ mod tests {
                     "--pane".into(),
                     "p".into()
                 ],
-                "/fixture".into()
+                "/fixture".into(),
+                "/fixture",
             )
             .await
             .is_err()
