@@ -536,6 +536,11 @@ pub(super) fn active_assessments(
     if shots.is_empty() {
         return Some(results);
     }
+    // Both roads draft, because both judge: a seat in `on` never reaches
+    // `fire` at all, and drafting only there left a person who had turned the
+    // seat up with no labels to write — the one mode that makes the rule
+    // matter was the one mode it did not run in (2026-09-19).
+    draft_labels(&cwd, tasks, &shots);
     let attempt = Some(attempt.trim()).filter(|attempt| !attempt.is_empty());
     let door = JevDoor::open(&cwd);
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);

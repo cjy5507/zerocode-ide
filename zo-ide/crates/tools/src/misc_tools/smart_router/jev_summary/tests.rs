@@ -322,6 +322,23 @@ fn a_draft_is_the_shape_the_label_reader_takes_and_only_when_it_was_asked_for() 
         body.contains("runtime::judged_axes()"),
         "the axes are spelled here instead of read from the rubric"
     );
+    // Both roads that judge must draft. A seat in `on` never reaches `fire`,
+    // and drafting only there left the one mode that makes the rule matter
+    // with no labels to write.
+    let judging: Vec<&str> = ["pub(super) fn fire(", "pub(super) fn active_assessments("]
+        .iter()
+        .map(|head| {
+            let at = shipped.find(head).unwrap_or_else(|| panic!("{head} is gone"));
+            let rest = &shipped[at..];
+            &rest[..rest.find("\n}\n").map_or(rest.len(), |end| end)]
+        })
+        .collect();
+    for road in judging {
+        assert!(
+            road.contains("draft_labels("),
+            "a road that judges does not draft the words it judged"
+        );
+    }
     for word in ["\"description\"", "\"prompt\"", "\"task\""] {
         assert!(body.contains(word), "the draft is missing {word}, which the label reader joins on");
     }
