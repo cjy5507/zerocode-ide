@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.2] — 2026-09-19
+
+_since v1.1.1 (2 commits)_
+
+### fix
+- fix(jev): both roads that judge draft the words they judged — the one mode that makes labels matter was the one that wrote none
+- fix(browser): the marks answer a program reads carries the fence's flag instead of its marker lines
+
 ## [1.1.1] — 2026-09-19
 
 _since v1.1.0 (22 commits)_
