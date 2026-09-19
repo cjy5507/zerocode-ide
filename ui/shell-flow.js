@@ -18,6 +18,15 @@ function flowRunView(dir) {
   }
   return flowRuns.get(dir);
 }
+function rememberFlowSteps(run, steps) {
+  for (const step of steps) {
+    if (Number.isSafeInteger(step?.n) && step.n > 0) run.steps.set(step.n, step);
+  }
+  const excess = run.steps.size - FLOW_LIVE_STEPS;
+  if (excess > 0) {
+    for (const n of [...run.steps.keys()].sort((a, b) => a - b).slice(0, excess)) run.steps.delete(n);
+  }
+}
 function scheduleFlowConsole() {
   if (el("flow-console").hidden || flowConsoleFrame !== null) return;
   flowConsoleFrame = requestAnimationFrame(() => { flowConsoleFrame = null; paintFlowConsole(); });
@@ -33,10 +42,9 @@ window.addEventListener("flow:begin", ({ detail: payload }) => {
 });
 window.addEventListener("flow:step", ({ detail: payload }) => {
   const [dir, step] = payload ?? [];
-  if (typeof dir !== "string" || !Number.isSafeInteger(step?.n) || step.n < 1) return;
+  if (typeof dir !== "string") return;
   const run = flowRunView(dir);
-  run.steps.set(step.n, step);
-  if (run.steps.size > FLOW_LIVE_STEPS) run.steps.delete(Math.min(...run.steps.keys()));
+  rememberFlowSteps(run, [step]);
   scheduleFlowConsole();
 });
 window.addEventListener("flow:walk", ({ detail: payload }) => {
@@ -182,7 +190,7 @@ async function readFlowEvidence(report) {
     const held = await invoke("flow_evidence", { report });
     if (reading !== flowConsoleReading) return;
     const run = flowRunView(held.dir);
-    for (const step of held.steps.slice(-FLOW_LIVE_STEPS)) run.steps.set(step.n, step);
+    rememberFlowSteps(run, held.steps.slice(-FLOW_LIVE_STEPS));
     Object.assign(run, { report: held.report, walk: held.walk, name: held.walk?.name, kind: held.walk?.kind, cwd: held.walk?.cwd ?? null });
     flowRunDir = held.dir;
     paintFlowConsole();

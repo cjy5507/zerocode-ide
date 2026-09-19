@@ -41,6 +41,7 @@ export async function testFlowConsole(browser, origin, ok) {
       window.__FLOW_EMIT__("flow:walk", ["/evidence/a", { name: "sample", kind: "recipe-run", done: false, stop: { kind: "needs_a_look" }, stoppedAt: 5, ran: [{ evidence_n: 2, step: 5, phases: { act: 9, verify: 4 } }] }]);
     });
     await page.waitForSelector('.flow-step[data-n="2"] .flow-step-retry');
+    await page.waitForFunction(() => el("flow-console-status").textContent === "needs_a_look");
     ok("Flow console paints the existing RecipeStop and its exact replay line",
       await page.locator("#flow-console").textContent().then((text) => text.includes("needs_a_look")) && await page.locator('.flow-step[data-n="2"] .flow-step-retry').isVisible());
     const replay = await page.evaluate(async () => {
@@ -135,6 +136,23 @@ export async function testFlowConsole(browser, origin, ok) {
     ok("An oracle card shows its recorded command duration without inventing a look or press", await page.locator('.flow-step[data-n="5"]').textContent().then((text) => text.includes("명령 11 ms") && text.includes("판단 없음")));
     await testRecordedRetry(page, ok);
     await page.screenshot({ path: process.env.FLOW_CONSOLE_SCREENSHOT ?? "/tmp/t4849-flow-console.png" });
+    const boundedHistory = await page.evaluate(async () => {
+      const dir = "/bounded-history";
+      const step = (n) => ({ n, tool: "browser", verb: "click", argv: [], ok: true });
+      const snapshot = Array.from({ length: FLOW_LIVE_STEPS }, (_, n) => step(n + 1));
+      for (const row of snapshot) window.__FLOW_EMIT__("flow:step", [dir, row]);
+      let finish;
+      window.__ANSWER__.flow_evidence = () => new Promise((resolve) => { finish = resolve; });
+      const reading = readFlowEvidence(`${dir}/report.html`);
+      for (let n = 1; n <= 3; n += 1) window.__FLOW_EMIT__("flow:step", [dir, step(FLOW_LIVE_STEPS + n)]);
+      finish({ dir, report: `${dir}/report.html`, steps: snapshot, walk: null });
+      await reading;
+      const numbers = [...flowRuns.get(dir).steps.keys()];
+      return { count: numbers.length, first: Math.min(...numbers), last: Math.max(...numbers), cap: FLOW_LIVE_STEPS };
+    });
+    ok("A late history snapshot keeps the cache bounded and retains newer live steps",
+      boundedHistory.count === boundedHistory.cap && boundedHistory.first === 4
+        && boundedHistory.last === boundedHistory.cap + 3, JSON.stringify(boundedHistory));
     const newerRunWins = await page.evaluate(async () => {
       let finish;
       window.__ANSWER__.flow_evidence = () => new Promise((resolve) => { finish = resolve; });
