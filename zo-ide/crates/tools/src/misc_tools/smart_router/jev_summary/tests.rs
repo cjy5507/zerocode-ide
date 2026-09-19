@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::fs;
 
 use serde_json::json;
@@ -6,7 +7,10 @@ use super::*;
 
 fn write(dir: &std::path::Path, name: &str, rows: &[Value]) {
     fs::create_dir_all(dir).expect("dir");
-    let text: String = rows.iter().map(|row| format!("{row}\n")).collect();
+    let mut text = String::new();
+    for row in rows {
+        let _ = writeln!(text, "{row}");
+    }
     fs::write(dir.join(name), text).expect("write");
 }
 
@@ -73,6 +77,10 @@ fn a_seat_that_never_rises_is_never_asked_to_clear_a_line() {
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf(), home.path().join("other")];
     let answered = [json!({"at": 10, "outcome": "answered", "elapsedMs": 1})];
+    // `.iter()` and not the table itself: `JEV_USES` is a static array of a
+    // `Copy` type, so walking it by value hands out copies and these take a
+    // `&'static JevUse`.
+    #[allow(clippy::explicit_iter_loop)]
     for seat in zerocode_core::jev::JEV_USES.iter() {
         write(home.path(), seat.ledger, &answered);
         let row = super::one(seat, &roots, None, 1_000, 0);
@@ -90,6 +98,10 @@ fn a_seat_that_never_rises_is_never_asked_to_clear_a_line() {
 #[test]
 fn a_seat_that_can_rise_has_a_stage_to_time_it() {
     // A rise line with no deadline is a promotion nobody can fail on latency.
+    // `.iter()` and not the table itself: `JEV_USES` is a static array of a
+    // `Copy` type, so walking it by value hands out copies and these take a
+    // `&'static JevUse`.
+    #[allow(clippy::explicit_iter_loop)]
     for seat in zerocode_core::jev::JEV_USES.iter() {
         assert_eq!(
             deadline_ms_for(seat).is_some(),
@@ -166,7 +178,10 @@ fn the_routing_seat_reads_its_standing_from_the_ledger_it_writes() {
 fn ledger_with(home: &std::path::Path, rows: &[Value]) -> std::path::PathBuf {
     let ledger = home.join(zerocode_core::jev::ROUTING.ledger);
     fs::create_dir_all(home).expect("dir");
-    let text: String = rows.iter().map(|row| format!("{row}\n")).collect();
+    let mut text = String::new();
+    for row in rows {
+        let _ = writeln!(text, "{row}");
+    }
     fs::write(&ledger, text).expect("write");
     ledger
 }
@@ -179,14 +194,14 @@ fn answered(at: i64) -> Value {
 fn the_lines_are_judged_once_a_window_and_not_at_the_end_of_every_turn() {
     use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
     let work = tempfile::tempdir().expect("tmp");
-    let short: Vec<Value> = (0..JUDGED_EVERY_ROWS as i64 - 1).map(answered).collect();
+    let short: Vec<Value> = (0..i64::try_from(JUDGED_EVERY_ROWS).expect("a window fits") - 1).map(answered).collect();
     let ledger = ledger_with(work.path(), &short);
     assert_eq!(
         super::super::decision_shadow::judge_ledger(&ledger, None, 9),
         None,
         "a window one row short was judged anyway"
     );
-    let full: Vec<Value> = (0..JUDGED_EVERY_ROWS as i64).map(answered).collect();
+    let full: Vec<Value> = (0..i64::try_from(JUDGED_EVERY_ROWS).expect("a window fits")).map(answered).collect();
     let ledger = ledger_with(work.path(), &full);
     assert!(
         super::super::decision_shadow::judge_ledger(&ledger, None, 9).is_some(),
@@ -198,7 +213,7 @@ fn the_lines_are_judged_once_a_window_and_not_at_the_end_of_every_turn() {
 fn a_verdict_that_changed_nothing_writes_nothing_down() {
     use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
     let work = tempfile::tempdir().expect("tmp");
-    let full: Vec<Value> = (0..JUDGED_EVERY_ROWS as i64).map(answered).collect();
+    let full: Vec<Value> = (0..i64::try_from(JUDGED_EVERY_ROWS).expect("a window fits")).map(answered).collect();
     let ledger = ledger_with(work.path(), &full);
     let before = fs::read_to_string(&ledger).expect("read");
     // Clean rows, but nobody has labelled anything: §4 holds, and a hold is
@@ -216,7 +231,7 @@ fn three_fallbacks_in_a_row_take_an_acting_seat_back_without_waiting_for_a_windo
     use zerocode_core::jev::summary::TRANSITION;
     let work = tempfile::tempdir().expect("tmp");
     let mut rows: Vec<Value> = vec![json!({"at": 1, (TRANSITION.canonical): ROSE})];
-    rows.extend((0..FALLBACKS_THAT_END_IT as i64).map(|at| {
+    rows.extend((0..i64::from(FALLBACKS_THAT_END_IT)).map(|at| {
         json!({"at": 10 + at, "outcome": "timeout", "elapsedMs": 1_500, "requests": 1})
     }));
     let ledger = ledger_with(work.path(), &rows);
@@ -238,7 +253,7 @@ fn three_fallbacks_in_a_row_take_an_acting_seat_back_without_waiting_for_a_windo
 fn a_recording_seat_is_not_ended_by_fallbacks_it_never_acted_on() {
     use zerocode_core::jev::promote::FALLBACKS_THAT_END_IT;
     let work = tempfile::tempdir().expect("tmp");
-    let rows: Vec<Value> = (0..FALLBACKS_THAT_END_IT as i64 + 2)
+    let rows: Vec<Value> = (0..i64::from(FALLBACKS_THAT_END_IT) + 2)
         .map(|at| json!({"at": at, "outcome": "timeout", "elapsedMs": 1_500}))
         .collect();
     let ledger = ledger_with(work.path(), &rows);

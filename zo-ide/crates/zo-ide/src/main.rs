@@ -57,28 +57,42 @@ fn main() -> ExitCode {
     }
 }
 
+/// What a verb answers with: the name the exit is recorded under and its code,
+/// or why it could not.
+type Answered = Result<(&'static str, u8), Box<dyn std::error::Error>>;
+
+/// The verbs that answer without opening a session, and what each takes.
+///
+/// A table rather than a ladder of `if`s: the ladder reached five and pushed
+/// `run` one line past the length the lint keeps, which is the lint doing its
+/// job — five spellings of "is the first word this" is a shape, and a shape
+/// belongs in one place.
+///
+/// Diagnosis stays independent of session startup: `--doctor` must answer
+/// without credentials, a trusted workspace or a provider runtime, and the
+/// others reach programs of their own for the same reason.
+fn answered_before_a_session(argv: &[String]) -> Option<Answered> {
+    let verb = argv.first()?.as_str();
+    let rest = &argv[1..];
+    match verb {
+        "--doctor" => Some(std::env::current_dir().map_err(Into::into).map(|cwd| {
+            println!("{}", zo_ide::doctor::run(&cwd));
+            success("doctor")
+        })),
+        "cron" => Some(run_cron(rest)),
+        "scoreboard" => Some(run_scoreboard(rest)),
+        "decision-shadow" => Some(run_decision_shadow(rest)),
+        "jev" => Some(run_jev(rest)),
+        _ => None,
+    }
+}
+
 fn run(
     process_exit: &mut zo_ide::session::process_lifecycle::ProcessExitGuard,
 ) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
     let argv: Vec<String> = std::env::args().skip(1).collect();
-    // Keep diagnosis independent from session startup: `--doctor` must work
-    // without credentials, a trusted workspace, or a provider runtime.
-    if argv.first().is_some_and(|arg| arg == "--doctor") {
-        let cwd = std::env::current_dir()?;
-        println!("{}", zo_ide::doctor::run(&cwd));
-        return Ok(success("doctor"));
-    }
-    if argv.first().is_some_and(|arg| arg == "cron") {
-        return run_cron(&argv[1..]);
-    }
-    if argv.first().is_some_and(|arg| arg == "scoreboard") {
-        return run_scoreboard(&argv[1..]);
-    }
-    if argv.first().is_some_and(|arg| arg == "decision-shadow") {
-        return run_decision_shadow(&argv[1..]);
-    }
-    if argv.first().is_some_and(|arg| arg == "jev") {
-        return run_jev(&argv[1..]);
+    if let Some(answered) = answered_before_a_session(&argv) {
+        return answered;
     }
     let mut launch = args::parse(&argv)?;
     if let Some(done) = run_without_a_session(&launch)? {
