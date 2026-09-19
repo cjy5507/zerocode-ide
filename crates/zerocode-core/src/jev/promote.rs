@@ -2,7 +2,7 @@
 //! that is acting has lost it (docs/design/jev-settings-20260917.md §4).
 //!
 //! `auto` says a seat records until its own evidence promotes it. Until this
-//! module there was nothing that promoted: [`JevUse::promotes`] was a field
+//! module there was nothing that promoted: [`crate::jev::JevUse::promotes`] was a field
 //! only tests had ever read, so every `auto` in the product was `shadow` under
 //! a name that promised otherwise. A switch that says it will decide and never
 //! does is worse than one that says it will not.
@@ -217,7 +217,7 @@ pub fn judge(stand: Stand, evidence: &Evidence) -> Verdict {
 #[cfg(test)]
 mod tests;
 
-/// What a rising row's [`TRANSITION`](crate::jev::summary::TRANSITION) says.
+/// What a rising row's [`TRANSITION`] says.
 pub const ROSE: &str = "rise";
 /// What a falling row's says.
 pub const FELL: &str = "fall";

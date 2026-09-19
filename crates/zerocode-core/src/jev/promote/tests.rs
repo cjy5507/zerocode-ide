@@ -330,24 +330,27 @@ fn only_a_change_is_written_down() {
 fn a_transition_row_carries_the_numbers_and_none_of_the_request() {
     let held = window(40, 38, Some(700));
     let row = transition_row(9, Verdict::Rise, &held).expect("row");
-    let keys: Vec<&str> = row
+    // Sorted before it is compared: whether a JSON map keeps insertion order
+    // is a feature the WORKSPACE turns on and not a promise this crate makes,
+    // so the same row comes back one way here and another in the gate
+    // (trap 316).
+    let mut keys: Vec<&str> = row
         .as_object()
         .expect("object")
         .keys()
         .map(String::as_str)
         .collect();
-    assert_eq!(
-        keys,
-        [
-            "answered",
-            "answeredLowerBoundPermille",
-            "at",
-            "p95Ms",
-            "rows",
-            TRANSITION.canonical
-        ],
-        "a closed set, in serde's order"
-    );
+    keys.sort_unstable();
+    let mut wanted = vec![
+        "answered",
+        "answeredLowerBoundPermille",
+        "at",
+        "p95Ms",
+        "rows",
+        TRANSITION.canonical,
+    ];
+    wanted.sort_unstable();
+    assert_eq!(keys, wanted, "a closed set, whatever order the build keeps");
 }
 
 #[test]
