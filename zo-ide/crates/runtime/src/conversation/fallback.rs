@@ -731,6 +731,75 @@ where
         self.decide_quota_escape_with_gate(error, ::api::quota::quota_fallback_permitted)
     }
 
+    /// Whether a deep-gate PLAN / VERIFY / EXEC-implementer leg owns the client
+    /// this turn is streaming on. A capacity wall there belongs to that leg's
+    /// provider, not the main model's window, so both the escape decider and the
+    /// retry cap in front of it stand aside — from one reading, so they cannot
+    /// come to disagree about which legs count.
+    fn deep_leg_owns_the_wire(&self) -> bool {
+        self.deep_plan_leg_active || self.deep_verify_leg_active || self.exec_impl_leg_active
+    }
+
+    /// How many capacity retries the MAIN turn's stream may spend before the
+    /// error propagates so [`Self::decide_quota_escape`] can run. `None` keeps
+    /// the full `RATE_LIMIT_MAX_ELAPSED` wall-clock budget — the right patience
+    /// when riding the wall out is the only recovery there is. `Some` is
+    /// `retry::MAIN_TURN_CAPACITY_BURST`, which carries the measurement.
+    ///
+    /// The answer is decided by whether an escape EXISTS, read from the same
+    /// state `decide_quota_escape` answers on, because that decider only ever
+    /// sees the error once this cap has already let it through:
+    ///
+    /// * a cross-provider quota fallback client is installed
+    ///   ([`QuotaEscape::Fallback`]), or
+    /// * the model on the wire has a lighter rung left on its own provider's
+    ///   ladder ([`QuotaEscape::Lighter`]);
+    /// * and neither a deep-gate leg nor a turn already running on the fallback
+    ///   is in the way — `decide_quota_escape` returns [`QuotaEscape::None`]
+    ///   there whatever the error says, so there is nothing to hand over to.
+    ///
+    /// [`QuotaEscape::Wait`] is deliberately not counted. Whether the window
+    /// resets inside the band is a fact about the refusal itself, unknowable
+    /// before it arrives — and a *named* reset the budget cannot reach is
+    /// already handed over on the first refusal by `classify_for_retry`. Once
+    /// the cap does hand over, the wait rule runs unchanged: a reset inside the
+    /// band still waits on the main model instead of swapping.
+    pub(super) fn main_turn_rate_limit_retry_cap(&self) -> Option<u32> {
+        self.main_turn_rate_limit_retry_cap_with_gate(::api::quota::quota_fallback_permitted)
+    }
+
+    pub(super) fn main_turn_rate_limit_retry_cap_with_gate(
+        &self,
+        fallback_permitted: impl FnOnce(::api::ProviderKind) -> bool,
+    ) -> Option<u32> {
+        if self.deep_leg_owns_the_wire() {
+            return None;
+        }
+        if self.quota_fallback_active {
+            return None;
+        }
+        // One rung down the same provider — the overload escape, which the
+        // account gate never applies to.
+        let lighter_rung = !self.overload_demoted_this_turn
+            && self
+                .effective_request_model()
+                .or(self.context_model.as_deref())
+                .and_then(::api::starvation_demotion_model)
+                .is_some();
+        // The cross-provider swap, read through the SAME utilization gate
+        // `decide_quota_escape` puts in front of it. A gate that refuses turns
+        // an account 429 back into "burst pressure, ride it out" — the escape
+        // would answer [`QuotaEscape::None`], so capping here would only shorten
+        // the wall into a dead turn.
+        let swap_ready = self.quota_fallback_client.is_some()
+            && self
+                .context_model
+                .as_deref()
+                .map(::api::detect_provider_kind)
+                .is_none_or(fallback_permitted);
+        (lighter_rung || swap_ready).then_some(crate::retry::MAIN_TURN_CAPACITY_BURST)
+    }
+
     pub(super) fn decide_quota_escape_with_gate(
         &mut self,
         error: &RuntimeError,
@@ -744,7 +813,7 @@ where
         // onto a fallback chosen for the wrong provider. PLAN/VERIFY have
         // their own candidate handling; EXEC transport failures return to the
         // deep driver's bounded attempt loop.
-        if self.deep_plan_leg_active || self.deep_verify_leg_active || self.exec_impl_leg_active {
+        if self.deep_leg_owns_the_wire() {
             return QuotaEscape::None;
         }
         if self.quota_fallback_active {

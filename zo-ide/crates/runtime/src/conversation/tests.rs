@@ -2310,6 +2310,91 @@ impl AsyncApiClient for NoopAsyncApiClient {
     }
 }
 
+/// The main turn only shortens its capacity retries when the wall has somewhere
+/// to go. `decide_quota_escape` is consulted *after* the stream gives up, so an
+/// uncapped turn pays the whole account budget in front of an escape that was
+/// available at the first refusal (t-5499: 240 s of backoff, then a fallback
+/// that answered the same prompt in 4.6 s). With no escape the cap stays `None`
+/// and the wall is ridden out as before — that is still the only recovery there.
+#[test]
+fn the_main_turn_caps_capacity_retries_only_when_an_escape_exists() {
+    let runtime_on = |model: &str| {
+        let mut runtime = ConversationRuntime::new(
+            Session::new(),
+            NoopApiClient,
+            StaticToolExecutor::new(),
+            PermissionPolicy::new(PermissionMode::DangerFullAccess),
+            vec!["system".to_string()],
+        );
+        runtime.set_context_model(model);
+        runtime
+    };
+    let burst = Some(crate::retry::MAIN_TURN_CAPACITY_BURST);
+
+    // Bottom of its provider's ladder, so the cross-provider client is the only
+    // escape there can be and its presence alone decides the cap.
+    let bottom = "claude-haiku-4-5-20251001";
+    assert!(
+        api::starvation_demotion_model(bottom).is_none(),
+        "fixture premise: {bottom} has no lighter rung to demote onto"
+    );
+    let mut walled = runtime_on(bottom);
+    assert_eq!(
+        walled.main_turn_rate_limit_retry_cap_with_gate(|_| true),
+        None,
+        "nowhere to hand over to: ride the full wall-clock budget as before"
+    );
+    walled.set_quota_fallback_client(Some((
+        Arc::new(NoopAsyncApiClient),
+        "gpt-5.6-sol".to_string(),
+    )));
+    assert_eq!(
+        walled.main_turn_rate_limit_retry_cap_with_gate(|_| true),
+        burst,
+        "an installed fallback turns the wall into a short burst and a handover"
+    );
+    // The same gate `decide_quota_escape` puts in front of the swap: when it
+    // refuses, the escape answers `None`, so capping would only shorten the wall
+    // into a dead turn.
+    assert_eq!(
+        walled.main_turn_rate_limit_retry_cap_with_gate(|_| false),
+        None,
+        "a blocked swap is not an escape"
+    );
+    // Once the turn IS on the fallback there is nothing further to hand to.
+    walled.quota_fallback_active = true;
+    assert_eq!(
+        walled.main_turn_rate_limit_retry_cap_with_gate(|_| true),
+        None
+    );
+
+    // A lighter rung on the same provider is an escape by itself — no client,
+    // and the account gate never applies to it.
+    let mut laddered = runtime_on("claude-opus-5");
+    assert!(api::starvation_demotion_model("claude-opus-5").is_some());
+    assert_eq!(
+        laddered.main_turn_rate_limit_retry_cap_with_gate(|_| false),
+        burst,
+        "the overload demotion is reachable without a fallback client"
+    );
+    laddered.overload_demoted_this_turn = true;
+    assert_eq!(
+        laddered.main_turn_rate_limit_retry_cap_with_gate(|_| false),
+        None,
+        "the ladder is one step per turn; spent, it is no longer an escape"
+    );
+
+    // Inside a deep-gate leg the escape returns `None` whatever the error says,
+    // so the main-turn cap stands aside and the leg's own cap governs.
+    let mut leg = runtime_on("claude-opus-5");
+    leg.set_quota_fallback_client(Some((
+        Arc::new(NoopAsyncApiClient),
+        "gpt-5.6-sol".to_string(),
+    )));
+    leg.deep_verify_leg_active = true;
+    assert_eq!(leg.main_turn_rate_limit_retry_cap_with_gate(|_| true), None);
+}
+
 /// Every switch the turn makes reaches the switch observer with its door:
 /// the overload demotion (starvation), the cross-provider quota fallback
 /// (quota), and the refusal fallback (refusal) — each naming the model it
