@@ -2,6 +2,12 @@ use super::*;
 use crate::jev::choice::ChoiceRefusal;
 use crate::jev::summary::Tally;
 
+/// The rows a floor of 950 per thousand can be cleared on — what the clean
+/// window is sized to, and what a thin one is one short of.
+fn wanted() -> usize {
+    rows_that_can_clear(950)
+}
+
 fn window(rows: usize, answered: usize, p95_ms: Option<u64>) -> Tally {
     Tally {
         rows,
@@ -19,6 +25,11 @@ fn clean() -> Evidence<'static> {
         window: WINDOW.get_or_init(|| window(200, 200, Some(600))),
         floor_permille: 950,
         deadline_ms: 1_500,
+        agreement_floor_permille: 800,
+        agreement: Agreement {
+            compared: 60,
+            agreed: 57,
+        },
         labels: Some(Labels {
             compared: 40,
             judgment_right: 34,
@@ -71,7 +82,7 @@ fn a_clean_window_rises_and_an_acting_seat_keeps() {
 
 #[test]
 fn a_thin_window_holds_but_never_takes_back_a_seat_that_already_earned_its_place() {
-    let thin = window(JUDGED_EVERY_ROWS - 1, JUDGED_EVERY_ROWS - 1, Some(10));
+    let thin = window(wanted() - 1, wanted() - 1, Some(10));
     let evidence = Evidence {
         window: &thin,
         ..clean()
@@ -79,8 +90,8 @@ fn a_thin_window_holds_but_never_takes_back_a_seat_that_already_earned_its_place
     assert_eq!(
         judge(Stand::Recording, &evidence),
         Verdict::Hold(Line::TooFewRows {
-            rows: JUDGED_EVERY_ROWS - 1,
-            wanted: JUDGED_EVERY_ROWS
+            rows: wanted() - 1,
+            wanted: wanted()
         })
     );
     assert_eq!(
@@ -91,23 +102,66 @@ fn a_thin_window_holds_but_never_takes_back_a_seat_that_already_earned_its_place
 }
 
 #[test]
-fn the_share_is_read_as_a_bound_so_a_perfect_thin_window_does_not_carry_a_seat() {
-    let twenty = window(JUDGED_EVERY_ROWS, JUDGED_EVERY_ROWS, Some(10));
-    let evidence = Evidence {
-        window: &twenty,
-        ..clean()
-    };
+fn the_window_is_as_wide_as_its_floor_needs_so_a_perfect_one_can_clear_it() {
+    // The share is read as a bound, and twenty of twenty bound at 0.839: a
+    // window of the judgment's cadence could never clear a floor of 0.95, and
+    // the routing seat was held to exactly that for three days. The window
+    // is sized to the floor, so a perfect window of that size rises and one
+    // row short of it is named short of rows, never short of answers.
+    assert!(
+        wanted() > JUDGED_EVERY_ROWS,
+        "0.95 needs more than a cadence"
+    );
+    let full = window(wanted(), wanted(), Some(10));
+    assert_eq!(
+        judge(
+            Stand::Recording,
+            &Evidence {
+                window: &full,
+                ..clean()
+            }
+        ),
+        Verdict::Rise
+    );
+    let one_miss = window(wanted(), wanted() - 1, Some(10));
     let Verdict::Hold(Line::Answered {
         bound_permille,
         floor_permille,
-    }) = judge(Stand::Recording, &evidence)
+    }) = judge(
+        Stand::Recording,
+        &Evidence {
+            window: &one_miss,
+            ..clean()
+        },
+    )
     else {
-        panic!("twenty of twenty rose on a share of one");
+        panic!("one miss in the smallest window that clears rose anyway");
     };
     assert_eq!(floor_permille, 950);
     assert!(
-        bound_permille < 850,
+        bound_permille < 950,
         "bounded at {bound_permille} per thousand"
+    );
+}
+
+#[test]
+fn a_door_refusal_is_not_a_row_the_seat_was_asked() {
+    // Three rows of a missing key beside 25 answers held the routing seat at
+    // a bound of 0.728 (2026-09-20). The door's refusals sit in `rows` for the
+    // screen and outside the population the line is read over.
+    let mut refused = window(wanted() + 3, wanted(), Some(10));
+    refused.refused = 3;
+    refused.failures = vec![("no_key".to_string(), 3)];
+    assert_eq!(
+        judge(
+            Stand::Recording,
+            &Evidence {
+                window: &refused,
+                ..clean()
+            }
+        ),
+        Verdict::Rise,
+        "a key the person had not saved was held against the seat"
     );
 }
 
@@ -153,32 +207,103 @@ fn a_seat_falls_on_the_line_it_breaks_and_the_first_one_is_the_one_named() {
 }
 
 #[test]
-fn agreement_alone_never_carries_a_seat_up() {
-    // §4: matching the probe is not evidence of being right, so a seat with
-    // no labels holds however clean the rest of its window is.
-    let evidence = Evidence {
+fn with_no_labels_a_seat_rises_on_its_route_change_budget_and_holds_under_it() {
+    // Nobody labelled anything, and nobody has to: a clean window whose
+    // judgment names what the probe names four times in five rises.
+    let unlabelled = Evidence {
         labels: None,
         ..clean()
     };
+    assert_eq!(judge(Stand::Recording, &unlabelled), Verdict::Rise);
+    // Too few rows where both readers answered say nothing yet — the probe
+    // times out on a third of them (11 of 28 on this machine) — and a seat
+    // already acting is not taken back on a thin comparison.
+    let thin = Evidence {
+        labels: None,
+        agreement: Agreement {
+            compared: JUDGED_EVERY_ROWS - 1,
+            agreed: JUDGED_EVERY_ROWS - 1,
+        },
+        ..clean()
+    };
     assert_eq!(
-        judge(Stand::Recording, &evidence),
-        Verdict::Hold(Line::NoLabels {
+        judge(Stand::Recording, &thin),
+        Verdict::Hold(Line::TooFewCompared {
+            compared: JUDGED_EVERY_ROWS - 1,
             wanted: JUDGED_EVERY_ROWS
         })
     );
-    let thin = Evidence {
+    assert_eq!(judge(Stand::Applying, &thin), Verdict::Keep);
+    // Half the axes: the seat this machine has (53% over 30 axes) — a
+    // different router, not a faster probe. It holds, and an acting one falls.
+    let half = Evidence {
+        labels: None,
+        agreement: Agreement {
+            compared: 30,
+            agreed: 16,
+        },
+        ..clean()
+    };
+    let Verdict::Hold(Line::Agreement {
+        bound_permille,
+        floor_permille: 800,
+    }) = judge(Stand::Recording, &half)
+    else {
+        panic!("half agreement rose");
+    };
+    assert!(bound_permille < 800, "bounded at {bound_permille}");
+    assert!(matches!(
+        judge(Stand::Applying, &half),
+        Verdict::Fall(Line::Agreement { .. })
+    ));
+    // Twenty of twenty bound at 0.839: the budget is one a single judgment
+    // window can clear, unlike the answered floor.
+    let twenty = Evidence {
+        labels: None,
+        agreement: Agreement {
+            compared: JUDGED_EVERY_ROWS,
+            agreed: JUDGED_EVERY_ROWS,
+        },
+        ..clean()
+    };
+    assert_eq!(judge(Stand::Recording, &twenty), Verdict::Rise);
+}
+
+#[test]
+fn a_persons_labels_outrank_agreement_and_thin_ones_fall_through_to_it() {
+    // Labels are the one comparison that says a reader is right: a window's
+    // worth of them decide, whatever the agreement says, and fewer than that
+    // leave the agreement to decide.
+    let disagreeing_but_right = Evidence {
+        agreement: Agreement {
+            compared: 30,
+            agreed: 16,
+        },
+        ..clean()
+    };
+    assert_eq!(
+        judge(Stand::Recording, &disagreeing_but_right),
+        Verdict::Rise,
+        "labels said it is righter than the probe it disagrees with"
+    );
+    let thin_labels = Evidence {
         labels: Some(Labels {
             compared: JUDGED_EVERY_ROWS - 1,
             judgment_right: 19,
             probe_right: 0,
         }),
+        agreement: Agreement {
+            compared: 30,
+            agreed: 16,
+        },
         ..clean()
     };
-    assert_eq!(
-        judge(Stand::Recording, &thin),
-        Verdict::Hold(Line::NoLabels {
-            wanted: JUDGED_EVERY_ROWS
-        })
+    assert!(
+        matches!(
+            judge(Stand::Recording, &thin_labels),
+            Verdict::Hold(Line::Agreement { .. })
+        ),
+        "nineteen labels are not yet a word, and the agreement held"
     );
     let worse = Evidence {
         labels: Some(Labels {
@@ -212,8 +337,8 @@ fn agreement_alone_never_carries_a_seat_up() {
 
 #[test]
 fn a_seat_that_never_had_labels_keeps_acting_but_a_worse_one_falls() {
-    // Labels going missing is not the seat getting worse; labels saying the
-    // probe is righter is.
+    // Labels going missing is not the seat getting worse: it is judged on its
+    // agreement instead. Labels saying the probe is righter is.
     assert_eq!(
         judge(
             Stand::Applying,
@@ -369,7 +494,14 @@ fn every_line_names_itself_with_a_word_that_carries_nothing_of_the_ask() {
             deadline_ms: 2,
         },
         Line::Schema { rows: 1 },
-        Line::NoLabels { wanted: 20 },
+        Line::TooFewCompared {
+            compared: 1,
+            wanted: 20,
+        },
+        Line::Agreement {
+            bound_permille: 1,
+            floor_permille: 800,
+        },
         Line::Labels {
             judgment_right: 1,
             probe_right: 2,
@@ -396,8 +528,15 @@ fn a_verdict_and_its_row_call_a_rise_and_a_fall_the_same_thing() {
     assert_eq!(Verdict::Rise.line(), None);
     assert_eq!(Verdict::Keep.line(), None);
     assert_eq!(
-        Verdict::Hold(Line::NoLabels { wanted: 20 }).line(),
-        Some(Line::NoLabels { wanted: 20 })
+        Verdict::Hold(Line::TooFewCompared {
+            compared: 1,
+            wanted: 20
+        })
+        .line(),
+        Some(Line::TooFewCompared {
+            compared: 1,
+            wanted: 20
+        })
     );
     let mut words: Vec<&str> = [
         Verdict::Hold(Line::Schema { rows: 1 }),

@@ -255,7 +255,25 @@ pub struct JevUse {
     /// Minimum confidence for a screen press, distinct from the answer-rate
     /// promotion floor. None means this seat has no authority to press.
     pub press_floor_permille: Option<u16>,
+    /// The share of compared axes on which the judgment must bound above in
+    /// naming what the reader it replaces named, per thousand, before `auto`
+    /// rises with no labels to hand (§4) — a route-change budget. A use that
+    /// does not promote names none; a contract holds it to the rise line.
+    pub agreement_floor_permille: Option<u16>,
 }
+
+/// The routing seat's route-change budget: four compared axes in five must
+/// agree with the chat probe, as a 95% lower bound.
+///
+/// A policy line, not a calibrated accuracy claim, like
+/// [`SCREEN_PRESS_FLOOR_PERMILLE`]. Where it sits: on this machine's 25
+/// answered rows the judgment agreed with the probe on 53% of all axes and
+/// 77% of the axes it was at least half sure of (2026-09-20) — under the
+/// line, which is the point: a seat that disagrees with the router it would
+/// replace on every other turn is not one that should replace it unasked.
+/// Twenty comparisons that all agree bound at 0.839, so the line is one a
+/// single judgment window can clear.
+pub const ROUTE_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 
 /// Initial conservative screen-press floor, above the observed wrong choice
 /// at confidence 0.29. This is a policy line, not a calibrated accuracy claim.
@@ -275,6 +293,7 @@ pub const ROUTING: JevUse = JevUse {
     promotes: true,
     answer_floor_permille: Some(950),
     press_floor_permille: None,
+    agreement_floor_permille: Some(ROUTE_AGREEMENT_FLOOR_PERMILLE),
 };
 
 /// zo's recall rerank: how much each note a recall found helps with the
@@ -321,6 +340,7 @@ pub const RECALL: JevUse = JevUse {
     promotes: false,
     answer_floor_permille: None,
     press_floor_permille: None,
+    agreement_floor_permille: None,
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -402,6 +422,7 @@ pub const BROWSER: JevUse = JevUse {
     promotes: false,
     answer_floor_permille: None,
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
+    agreement_floor_permille: None,
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -431,6 +452,7 @@ pub const DESKTOP: JevUse = JevUse {
     promotes: false,
     answer_floor_permille: None,
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
+    agreement_floor_permille: None,
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
@@ -457,6 +479,7 @@ pub const EMULATOR: JevUse = JevUse {
     promotes: false,
     answer_floor_permille: None,
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
+    agreement_floor_permille: None,
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -482,6 +505,7 @@ pub const STALL: JevUse = JevUse {
     promotes: false,
     answer_floor_permille: None,
     press_floor_permille: None,
+    agreement_floor_permille: None,
 };
 
 /// The window's worker placement: which of [`PLACEMENT_OPTIONS`] a worker it
@@ -529,6 +553,7 @@ pub const PLACEMENT: JevUse = JevUse {
     promotes: false,
     answer_floor_permille: None,
     press_floor_permille: None,
+    agreement_floor_permille: None,
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -563,6 +588,7 @@ pub const SUMMON: JevUse = JevUse {
     promotes: false,
     answer_floor_permille: None,
     press_floor_permille: None,
+    agreement_floor_permille: None,
 };
 
 /// Every place this product asks Jev something.

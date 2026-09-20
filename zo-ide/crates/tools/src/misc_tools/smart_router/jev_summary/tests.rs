@@ -146,11 +146,67 @@ fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
     let seat = &zerocode_core::jev::ROUTING;
     write(home.path(), seat.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5})]);
     let row = super::one(seat, &roots, None, 1_000, 0);
-    assert!(matches!(row.verdict, Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))));
+    assert!(matches!(row.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))));
 
     // And a seat with no rise line is never judged at all.
     let quiet = super::one(&zerocode_core::jev::STALL, &roots, None, 1_000, 0);
-    assert_eq!(quiet.verdict, None);
+    assert_eq!(quiet.verdict(), None);
+}
+
+/// A routing row as the executor writes one, with the probe's answer beside
+/// the judgment's.
+fn compared(at: i64, jev: [&str; 3], probe: Option<[&str; 3]>) -> Value {
+    let axis = |choice: &str| json!({"choice": choice, "probabilities": {}, "confidence": 0.9});
+    let mut row = json!({
+        "at": at, "task": format!("{at:016x}"), "rubricVersion": 1, "outcome": "answered",
+        "elapsedMs": 400, "retries": 0, "cached": false, "requests": 1,
+        "jev": {"complexity": axis(jev[0]), "risk": axis(jev[1]), "intent": axis(jev[2])},
+    });
+    row["probe"] = probe.map_or_else(
+        || json!("timeout"),
+        |probe| json!({"complexity": probe[0], "risk": probe[1], "intent": probe[2], "confidence": "high"}),
+    );
+    row
+}
+
+#[test]
+fn agreement_is_one_comparison_per_axis_where_both_readers_answered() {
+    use zerocode_core::jev::promote::Agreement;
+    let rows = [
+        compared(1, ["large", "low", "analysis"], Some(["large", "low", "analysis"])),
+        compared(2, ["large", "high", "other"], Some(["trivial", "low", "other"])),
+        compared(3, ["small", "low", "other"], None),
+        json!({"at": 4, "outcome": "no_key"}),
+    ];
+    let held: Vec<&Value> = rows.iter().collect();
+    assert_eq!(
+        super::super::decision_shadow::agreement_in(&held),
+        Agreement { compared: 6, agreed: 4 },
+        "two rows both answered (six axes, four the same); a timeout and a refusal compare nothing"
+    );
+    assert_eq!(super::super::decision_shadow::agreement_in(&[]), Agreement::default());
+}
+
+#[test]
+fn the_screen_and_the_judge_read_one_window() {
+    // The summary once judged the week with no labels while the judge judged
+    // the last twenty with them, and the two could say different things of
+    // the same file. The seat's report now carries the judge's own reading.
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::ROUTING;
+    let rows: Vec<Value> = (0..30)
+        .map(|at| compared(at, ["large", "low", "analysis"], Some(["large", "low", "analysis"])))
+        .collect();
+    write(home.path(), seat.ledger, &rows);
+    let report = super::one(seat, &roots, None, i64::MAX / 2, 0);
+    let judged = report.judged.as_ref().expect("the routing seat is judged");
+    assert_eq!(Some(judged.clone()), super::super::decision_shadow::judge_rows(&rows, None));
+    assert_eq!(judged.window.rows, 30, "the window is the last rows the floor can be cleared on");
+    assert_eq!(judged.agreement.compared, 90);
+    assert_eq!(report.asked_ever, 30);
+    assert_eq!(report.rows_to_next_judgment(), Some(10), "cadence counts every request, not the week's");
+    assert_eq!(report.verdict(), judged.verdict.into());
 }
 
 #[test]

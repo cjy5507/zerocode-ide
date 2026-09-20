@@ -3,6 +3,7 @@
 use serde_json::json;
 
 use super::*;
+use crate::jev::summary;
 
 #[test]
 fn screen_press_confidence_is_distinct_from_the_promotion_answer_rate() {
@@ -143,10 +144,29 @@ fn a_use_names_a_rise_line_exactly_when_auto_may_rise_for_it() {
             row.promotes,
             row.answer_floor_permille
         );
-        if let Some(floor) = row.answer_floor_permille {
+        assert_eq!(
+            row.promotes,
+            row.agreement_floor_permille.is_some(),
+            "{} promotes={} agreement floor={:?}: a seat that rises with no labels needs its route-change budget",
+            row.id,
+            row.promotes,
+            row.agreement_floor_permille
+        );
+        for floor in [row.answer_floor_permille, row.agreement_floor_permille]
+            .into_iter()
+            .flatten()
+        {
+            // Under a thousand: a floor of a thousand has no window that
+            // clears it (`summary::rows_that_can_clear`), and a line no
+            // evidence can reach is `shadow` under another name.
             assert!(
-                (500..=1000).contains(&floor),
+                (500..1000).contains(&floor),
                 "{} asks for a share of {floor} per thousand",
+                row.id
+            );
+            assert!(
+                summary::rows_that_can_clear(floor) < usize::MAX,
+                "{} names a floor no window clears",
                 row.id
             );
         }

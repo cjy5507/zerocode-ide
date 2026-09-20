@@ -51,7 +51,7 @@ pub use agent_route::{
 pub use completion::{completion_ceiling_for, completion_loop_step, CompletionStep};
 pub use decision::{
     axis_metrics, decision_questions, decision_request, judged_axes, validate_decision,
-    AxisMetrics, AxisReading, AxisSample, DecisionAnswer, DecisionRejection, DecisionVerdict,
+    AxisMetrics, AxisReading, AxisSample, DecisionAnswer, DecisionRejection, DecisionVerdict, ROUTE_TRUST_FLOOR,
     CALIBRATION_BINS, PROBABILITY_SUM_TOLERANCE,
 };
 pub use learned::{LearnedSpecialtyEntry, LearnedSpecialtyHint};

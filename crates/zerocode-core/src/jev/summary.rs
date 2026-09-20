@@ -126,6 +126,15 @@ pub struct Tally {
     pub rows: usize,
     /// Rows whose judgment answered and passed its checks.
     pub answered: usize,
+    /// Rows the door refused before anything was sent — no key, Jev off, a
+    /// workspace nobody consented to, a spent budget
+    /// ([`crate::jev::door::Refused`]). They are in `rows` and named in
+    /// `failures`, and they are left out of the answered share: a refusal
+    /// says something about the person's key or consent and nothing about
+    /// whether the seat answers when it is asked. Counted against the seat,
+    /// three rows of a missing key held the routing seat at a bound of 0.728
+    /// on a week it answered 25 of the 25 requests that left (2026-09-20).
+    pub refused: usize,
     /// Rows whose judgment went over the wire — the latency population. A
     /// memo hit answered without asking, so it is counted as an answer and
     /// not as a call.
@@ -145,15 +154,24 @@ pub struct Tally {
 }
 
 impl Tally {
-    /// The share of rows that answered, or `None` when the window is empty —
-    /// which is not zero, and a screen that drew it as zero would be lying
-    /// about a seat nobody has used yet.
+    /// Rows the seat was actually asked: every row but the ones the door
+    /// refused. The population the answered share and its bound are read
+    /// over.
+    #[must_use]
+    pub const fn asked(&self) -> usize {
+        self.rows.saturating_sub(self.refused)
+    }
+
+    /// The share of asked rows that answered, or `None` when nothing was
+    /// asked — which is not zero, and a screen that drew it as zero would be
+    /// lying about a seat nobody has used yet, or one the door has refused
+    /// every time.
     #[must_use]
     pub fn answered_share(&self) -> Option<f64> {
-        (self.rows > 0).then(|| {
+        (self.asked() > 0).then(|| {
             #[allow(clippy::cast_precision_loss)]
             {
-                self.answered as f64 / self.rows as f64
+                self.answered as f64 / self.asked() as f64
             }
         })
     }
@@ -163,7 +181,7 @@ impl Tally {
     /// out of twenty bound at 0.839, not at 1.0.
     #[must_use]
     pub fn answered_lower_bound(&self) -> Option<f64> {
-        (self.rows > 0).then(|| wilson_lower(self.answered, self.rows, WILSON_Z_95))
+        (self.asked() > 0).then(|| wilson_lower(self.answered, self.asked(), WILSON_Z_95))
     }
 
     /// How many more rows this use owes before its next auto judgment (§4).
@@ -191,6 +209,35 @@ pub fn wilson_lower(successes: usize, trials: usize, z: f64) -> f64 {
     let centre = share + z2 / (2.0 * trials);
     let spread = z * ((share * (1.0 - share) + z2 / (4.0 * trials)) / trials).sqrt();
     ((centre - spread) / (1.0 + z2 / trials)).clamp(0.0, 1.0)
+}
+
+/// The fewest rows a window must hold before a floor can be cleared on it at
+/// all — never fewer than [`JUDGED_EVERY_ROWS`].
+///
+/// A Wilson bound on a window of `n` rows that all answered is `1 / (1 +
+/// z² / n)`, so a floor of 0.95 needs 73 rows and a window of twenty can
+/// never clear it: the routing seat was judged on its last twenty rows against
+/// that floor from 2026-09-17 until this was written, and the perfect window
+/// it was asked for bounded at 0.839 (measured on the 28 rows it had). The
+/// window is derived from the floor here, once, so a seat is never held to a
+/// line no evidence can reach. A floor of a thousand per thousand has no such
+/// window and returns [`usize::MAX`]; the use table's contract keeps floors
+/// under it.
+#[must_use]
+pub fn rows_that_can_clear(floor_permille: u16) -> usize {
+    if floor_permille >= 1000 {
+        return usize::MAX;
+    }
+    let share = f64::from(floor_permille) / 1000.0;
+    let z2 = WILSON_Z_95 * WILSON_Z_95;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let mut rows = ((z2 * share / (1.0 - share)).ceil() as usize).max(JUDGED_EVERY_ROWS);
+    // The closed form is exact; the bound is compared in the floor's own
+    // units after flooring, so one more row covers a last-bit disagreement.
+    while crate::jev::promote::permille(wilson_lower(rows, rows, WILSON_Z_95)) < floor_permille {
+        rows += 1;
+    }
+    rows
 }
 
 /// The nearest-rank percentile of an already sorted population.
@@ -230,18 +277,31 @@ pub fn asked_something(row: &Value) -> Option<&str> {
 /// while the quiet one never filled its own.
 #[must_use]
 pub fn summarize_last(rows: &[Value], n: usize) -> Tally {
+    summarize_rows(last_asked(rows, n), i64::MIN)
+}
+
+/// The last `n` requests themselves, oldest first — the rows a window is
+/// counted from, for a reader that needs more of them than the tally keeps
+/// (what each answered, beside what the probe answered).
+#[must_use]
+pub fn last_asked(rows: &[Value], n: usize) -> Vec<&Value> {
     let asked: Vec<&Value> = rows
         .iter()
         .filter(|row| asked_something(row).is_some())
         .collect();
     let from = asked.len().saturating_sub(n);
-    let held: Vec<Value> = asked[from..].iter().map(|row| (*row).clone()).collect();
-    summarize(&held, i64::MIN)
+    asked[from..].to_vec()
 }
 
 /// How many requests at the end of the ledger did not answer, stopping at the
 /// first that did — §4's "in a row", read from the rows themselves rather
 /// than from a counter some other process would have to keep.
+///
+/// A row the door refused is stepped over, not counted: nothing was sent, so
+/// nothing fell back on the wire. A key that goes missing for an afternoon
+/// would otherwise take an acting seat down on the third refusal and make it
+/// earn its place again from nothing once the key is back — the door's rule
+/// is the person's to lift, and the seat is not what it says anything about.
 #[must_use]
 pub fn failures_in_a_row(rows: &[Value]) -> u32 {
     let mut held = 0;
@@ -249,10 +309,17 @@ pub fn failures_in_a_row(rows: &[Value]) -> u32 {
         match asked_something(row) {
             None => continue,
             Some(ANSWERED) => break,
+            Some(token) if is_refusal(token) => continue,
             Some(_) => held += 1,
         }
     }
     held
+}
+
+/// Whether an outcome token is the door's — a request that was never sent.
+#[must_use]
+pub fn is_refusal(token: &str) -> bool {
+    crate::jev::door::Refused::from_token(token).is_some()
 }
 
 /// Count the rows of one ledger whose `at` is at or after `since_ms`.
@@ -263,6 +330,13 @@ pub fn failures_in_a_row(rows: &[Value]) -> u32 {
 /// a workspace is not consented must not read as a seat that is working.
 #[must_use]
 pub fn summarize(rows: &[Value], since_ms: i64) -> Tally {
+    summarize_rows(rows.iter(), since_ms)
+}
+
+/// [`summarize`] over rows already picked out — the last `n` of a ledger, or
+/// a window some other reader holds by reference.
+#[must_use]
+pub fn summarize_rows<'a>(rows: impl IntoIterator<Item = &'a Value>, since_ms: i64) -> Tally {
     let mut tally = Tally::default();
     let mut failures: BTreeMap<&str, usize> = BTreeMap::new();
     let mut elapsed: Vec<u64> = Vec::new();
@@ -289,6 +363,7 @@ pub fn summarize(rows: &[Value], since_ms: i64) -> Tally {
             tally.answered += 1;
         } else if let Some(token) = OUTCOME.read(row).and_then(Value::as_str) {
             *failures.entry(token).or_default() += 1;
+            tally.refused += usize::from(is_refusal(token));
         }
         let cached = CACHED.read(row).and_then(Value::as_bool).unwrap_or(false);
         if let Some(ms) = ELAPSED_MS

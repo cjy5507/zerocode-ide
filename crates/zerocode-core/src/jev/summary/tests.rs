@@ -89,7 +89,49 @@ fn a_door_refusal_is_counted_by_its_own_token_and_never_as_an_answer() {
         ],
         "most frequent first, then by token"
     );
-    assert!((tally.answered_share().expect("rows") - 0.25).abs() < f64::EPSILON);
+    // The two refusals sent nothing, so the seat was asked twice and answered
+    // once: a share of a half, not a quarter.
+    assert_eq!(tally.refused, 2);
+    assert_eq!(tally.asked(), 2);
+    assert!((tally.answered_share().expect("rows") - 0.5).abs() < f64::EPSILON);
+    let all_refused = summarize(&rows[..2], 0);
+    assert_eq!(all_refused.rows, 2);
+    assert_eq!(
+        all_refused.answered_share(),
+        None,
+        "a seat the door refused every time is not a seat that answered nothing"
+    );
+    assert_eq!(all_refused.answered_lower_bound(), None);
+}
+
+#[test]
+fn the_window_a_floor_needs_is_the_smallest_a_perfect_one_clears_it_on() {
+    // 1 / (1 + z²/n) ≥ 0.95 ⇔ n ≥ 19 z² = 72.99.
+    assert_eq!(rows_that_can_clear(950), 73);
+    for floor in [500, 800, 950, 990] {
+        let rows = rows_that_can_clear(floor);
+        assert!(rows >= JUDGED_EVERY_ROWS, "{floor}: never under a cadence");
+        assert!(
+            crate::jev::promote::permille(wilson_lower(rows, rows, WILSON_Z_95)) >= floor,
+            "{floor}: {rows} perfect rows do not clear it"
+        );
+        assert!(
+            rows == JUDGED_EVERY_ROWS
+                || crate::jev::promote::permille(wilson_lower(rows - 1, rows - 1, WILSON_Z_95))
+                    < floor,
+            "{floor}: {rows} is not the smallest"
+        );
+    }
+    assert_eq!(
+        rows_that_can_clear(800),
+        JUDGED_EVERY_ROWS,
+        "twenty of twenty bound at 0.839"
+    );
+    assert_eq!(
+        rows_that_can_clear(1000),
+        usize::MAX,
+        "no window clears a share of one"
+    );
 }
 
 #[test]
@@ -199,7 +241,26 @@ fn failures_in_a_row_stop_at_the_first_answer_and_step_over_the_notes() {
         json!({"at": 4, (TRANSITION.canonical): "fall", "line": "latency"}),
         json!({"at": 5, "outcome": "no_key"}),
     ];
-    assert_eq!(failures_in_a_row(&rows), 2, "the note broke the run");
+    // The `no_key` at the end was never sent: the door's refusal is stepped
+    // over like the note, and the run is the one timeout before the answer.
+    assert_eq!(
+        failures_in_a_row(&rows),
+        1,
+        "a refusal or the note broke the run"
+    );
     assert_eq!(failures_in_a_row(&rows[..2]), 0, "it ends on an answer");
+    assert_eq!(failures_in_a_row(&rows[..1]), 1);
     assert_eq!(failures_in_a_row(&[]), 0);
+    assert!(is_refusal("no_key") && is_refusal("budget") && !is_refusal("timeout"));
+}
+
+#[test]
+fn the_last_rows_are_handed_out_as_they_are_and_counted_the_same() {
+    let rows: Vec<Value> = (0..5)
+        .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": at}))
+        .collect();
+    let last = last_asked(&rows, 2);
+    assert_eq!(last.len(), 2);
+    assert_eq!(last[0]["at"], 3, "oldest first");
+    assert_eq!(summarize_rows(last, i64::MIN), summarize_last(&rows, 2));
 }

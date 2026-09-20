@@ -226,7 +226,7 @@ pub use model_router::{
     rubric_task_text, rubric_task_whole, RubricAxis, COMPLEXITY_AXIS, CONFIDENCE_AXIS, DECISION_RUBRIC_VERSION,
     INTENT_AXIS, RISK_AXIS, ROUTING_RUBRIC, RUBRIC_TASK_CHAR_CAP,
     axis_metrics, decision_questions, decision_request, judged_axes, validate_decision,
-    AxisMetrics, AxisReading, AxisSample, DecisionAnswer, DecisionRejection, DecisionVerdict,
+    AxisMetrics, AxisReading, AxisSample, DecisionAnswer, DecisionRejection, DecisionVerdict, ROUTE_TRUST_FLOOR,
     CALIBRATION_BINS, PROBABILITY_SUM_TOLERANCE,
     read_route_outcome_summary, read_route_outcomes, read_route_outcomes_across_projects,
     recommend_auto_assignments,

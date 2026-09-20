@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use zerocode_core::jev::count::REQUESTS_DIR;
-use zerocode_core::jev::promote::{self, Evidence, Stand, Verdict};
+use zerocode_core::jev::promote::{self, Stand, Verdict};
 use zerocode_core::jev::summary::{self, Tally};
 use zerocode_core::jev::{JEV_USES, JevMode, JevUse};
 
@@ -59,24 +59,39 @@ pub struct SeatReport {
     /// The share the seat's answers must bound above before `auto` may rise
     /// (§4), in parts per thousand — `None` for a seat that never rises.
     pub rise_floor_permille: Option<u16>,
-    /// Whether the week's lower bound clears that line. `None` when the seat
-    /// never rises or the window is empty.
+    /// Whether the judged window's lower bound clears that line. `None` when
+    /// the seat never rises or the window is empty.
     pub clears_rise_floor: Option<bool>,
+    /// The window the judge read — the last requests the seat's floor can be
+    /// cleared on — with how often the judgment agreed with the probe over it.
+    /// `None` for a seat that never rises. It is not the week: the week is
+    /// a clock and the window is a count, and the numbers a seat is promoted
+    /// on are these.
+    pub judged: Option<super::decision_shadow::Judged>,
+    /// Every request the ledger holds, whatever its age — what the judgment's
+    /// cadence counts.
+    pub asked_ever: usize,
     /// Where the seat stands, read back from its own transitions.
     pub stand: Stand,
-    /// What the judge says of the recent window — `None` for a seat whose
-    /// `auto` can never rise, which is not a seat with a bad verdict.
-    pub verdict: Option<Verdict>,
     /// Whether the seat acts right now: its mode, and for `auto` its standing.
     pub applies: bool,
 }
 
 impl SeatReport {
+    /// What the judge says of the judged window — `None` for a seat whose
+    /// `auto` can never rise, which is not a seat with a bad verdict.
+    #[must_use]
+    pub fn verdict(&self) -> Option<Verdict> {
+        self.judged.as_ref().map(|judged| judged.verdict)
+    }
+
     /// How many more rows before the next auto judgment (§4), for a seat that
-    /// can rise at all.
+    /// can rise at all — counted on every request the ledger holds, which is
+    /// the count the judge's cadence runs on.
     #[must_use]
     pub fn rows_to_next_judgment(&self) -> Option<usize> {
-        self.rise_floor_permille.map(|_| self.week.rows_to_next_judgment())
+        self.rise_floor_permille
+            .map(|_| JUDGED_EVERY_ROWS - self.asked_ever % JUDGED_EVERY_ROWS)
     }
 }
 
@@ -139,25 +154,16 @@ fn one(
     let today = summary::summarize(&rows, start_of_day_ms(now_ms, offset_s));
     let week = summary::summarize(&rows, now_ms - WINDOW_DAYS * MS_PER_DAY);
     let cost_usd = cost_of(week.input_tokens);
+    let asked_ever = rows.iter().filter(|row| asked_something(row).is_some()).count();
+    // The judge's own reading of the same rows, for the one seat that rises;
+    // not a second Evidence built here from the week.
+    let judged = (seat.id == zerocode_core::jev::ROUTING.id)
+        .then(|| super::decision_shadow::judge_rows(&rows, settings))
+        .flatten();
     let clears_rise_floor = seat.answer_floor_permille.and_then(|floor| {
-        week.answered_lower_bound().map(|bound| clears(bound, floor))
+        judged.as_ref()?.window.answered_lower_bound().map(|bound| clears(bound, floor))
     });
     let stand = promote::stand_from(&rows);
-    let verdict = seat.answer_floor_permille.zip(deadline_ms_for(seat)).map(|(floor, deadline)| {
-        promote::judge(
-            stand,
-            &Evidence {
-                window: &week,
-                floor_permille: floor,
-                deadline_ms: deadline,
-                // Labels are a person's work and a command of their own
-                // (`zo decision-shadow eval --labels`); a summary that
-                // invented them would raise a seat on nothing.
-                labels: None,
-                fallbacks_in_a_row: 0,
-            },
-        )
-    });
     SeatReport {
         id: seat.id,
         setting: seat.setting,
@@ -169,8 +175,9 @@ fn one(
         cost_usd,
         rise_floor_permille: seat.answer_floor_permille,
         clears_rise_floor,
+        judged,
+        asked_ever,
         stand,
-        verdict,
         applies: seat
             .mode_in(settings.unwrap_or(&Value::Null))
             .applies_with(stand == Stand::Applying),

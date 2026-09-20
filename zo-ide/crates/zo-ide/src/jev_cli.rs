@@ -81,6 +81,7 @@ fn tally_json(tally: &jev_summary::SeatTally) -> Value {
     json!({
         "rows": tally.rows,
         "answered": tally.answered,
+        "refused": tally.refused,
         "answeredShare": tally.answered_share(),
         "answeredLowerBound": tally.answered_lower_bound(),
         "called": tally.called,
@@ -115,9 +116,21 @@ fn render_json(seats: &[SeatReport]) -> Value {
                 "riseFloorPermille": seat.rise_floor_permille,
                 "clearsRiseFloor": seat.clears_rise_floor,
                 "rowsToNextJudgment": seat.rows_to_next_judgment(),
+                // The window the verdict was read on, and the agreement over
+                // it — the numbers a seat is promoted on, which are not the
+                // week's.
+                "judged": seat.judged.as_ref().map(|judged| json!({
+                    "window": tally_json(&judged.window),
+                    "windowWanted": judged.window_wanted,
+                    "agreement": {
+                        "compared": judged.agreement.compared,
+                        "agreed": judged.agreement.agreed,
+                        "lowerBound": judged.agreement.lower_bound(),
+                    },
+                })),
                 "stand": seat.stand.token(),
                 "applies": seat.applies,
-                "verdict": seat.verdict.map(|verdict| json!({
+                "verdict": seat.verdict().map(|verdict| json!({
                     "verdict": verdict.token(),
                     "line": verdict.line().map(tools::jev_summary::line_token),
                 })),
@@ -142,18 +155,26 @@ fn render_text(seats: &[SeatReport]) -> String {
         if seat.found.is_none() {
             notes.push_str("never asked");
         }
-        if let (Some(floor), Some(bound)) =
-            (seat.rise_floor_permille, seat.week.answered_lower_bound())
-        {
+        if let (Some(floor), Some(judged)) = (seat.rise_floor_permille, seat.judged.as_ref()) {
             let _ = write!(
                 notes,
-                "{}rise {:.1}% needs {:.1}%",
+                "{}rise {} needs {:.1}% over {}/{} rows",
                 if notes.is_empty() { "" } else { " · " },
-                bound * 100.0,
+                judged
+                    .window
+                    .answered_lower_bound()
+                    .map_or_else(|| "—".to_string(), |bound| format!("{:.1}%", bound * 100.0)),
                 f64::from(floor) / 10.0,
+                judged.window.asked(),
+                judged.window_wanted,
+            );
+            let _ = write!(
+                notes,
+                " · agrees {} of {}",
+                judged.agreement.agreed, judged.agreement.compared
             );
         }
-        if let Some(verdict) = seat.verdict {
+        if let Some(verdict) = seat.verdict() {
             let _ = write!(
                 notes,
                 "{}{}{}",

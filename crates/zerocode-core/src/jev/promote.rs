@@ -8,13 +8,27 @@
 //! does is worse than one that says it will not.
 //!
 //! The judgment is pure. What it needs from outside — the window's tally, the
-//! apply stage's own deadline, whether labels exist and what they said — is
-//! handed in, because each of those is owned somewhere else and a judge that
-//! went and read them would be a second copy of all three.
+//! apply stage's own deadline, how often the judgment named what the probe
+//! named, whether labels exist and what they said — is handed in, because
+//! each of those is owned somewhere else and a judge that went and read them
+//! would be a second copy of all four.
+//!
+//! Nobody has to label anything for a seat to rise (2026-09-20). The first
+//! judge held every seat until a person had written twenty labels, and no
+//! person had: the one seat that promotes sat at "labels are needed" for three
+//! days, on a window whose floor its width could not reach. What carries a
+//! seat up now is its own ledger — that it answers, in time, well-formed, and
+//! that when it is asked the same question as the probe it is replacing, it
+//! says what the probe says often enough that applying it changes few routes
+//! (a route-change budget, [`crate::jev::JevUse::agreement_floor_permille`]).
+//! Labels a person did write still outrank that: they are the only evidence
+//! of being right rather than merely the same.
 
 use serde_json::{Value, json};
 
-use crate::jev::summary::{AT, JUDGED_EVERY_ROWS, TRANSITION, Tally};
+use crate::jev::summary::{
+    AT, JUDGED_EVERY_ROWS, TRANSITION, Tally, WILSON_Z_95, rows_that_can_clear, wilson_lower,
+};
 
 /// The word every schema refusal's token is built from: zo writes it alone
 /// when a reply failed its checks, and [`crate::jev::choice::ChoiceRefusal`]
@@ -49,11 +63,41 @@ pub enum Stand {
     Applying,
 }
 
+/// How often the judgment named what the probe it would replace named, over
+/// the window's rows where both answered — every judged axis of every such
+/// row is one comparison.
+///
+/// Not evidence of being right: two readers saying the same thing says
+/// nothing about whether either is. It is evidence of something narrower and
+/// enough to act on — that applying the judgment in the probe's place moves
+/// few routes. A seat that agrees with the probe four times in five and
+/// answers in a tenth of the time is a faster probe; one that agrees half the
+/// time is a different router nobody measured. Measured on this machine's 25
+/// answered rows (2026-09-20): 53% over every axis, 77% over the axes the
+/// judgment was at least half sure of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Agreement {
+    /// Axes compared: rows where both answered, times the judged axes.
+    pub compared: usize,
+    /// Of those, the ones where the judgment's choice was the probe's.
+    pub agreed: usize,
+}
+
+impl Agreement {
+    /// The 95% Wilson lower bound on the agreed share, `None` when nothing
+    /// was compared.
+    #[must_use]
+    pub fn lower_bound(&self) -> Option<f64> {
+        (self.compared > 0).then(|| wilson_lower(self.agreed, self.compared, WILSON_Z_95))
+    }
+}
+
 /// What the evidence says about labels, when a person has written any.
 ///
-/// Agreement with the probe is deliberately not enough: two readers saying the
-/// same thing is not evidence that either is right, and §4 says so. Only a
-/// comparison against labels a person wrote can carry a seat up.
+/// Labels outrank agreement: they are the one comparison that says a reader
+/// is right and not merely the same as the other one. Fewer than a window's
+/// worth of them say nothing yet, and the seat is judged on agreement
+/// instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Labels {
     /// Labelled rows compared.
@@ -82,7 +126,13 @@ pub struct Evidence<'window> {
     /// The apply stage's deadline in milliseconds — the same constant the
     /// stage falls back on, read and not respelled.
     pub deadline_ms: u64,
-    /// What labels said, when any exist.
+    /// The use's own route-change budget, per thousand: the share of compared
+    /// axes on which the judgment must bound above in naming what the probe
+    /// named.
+    pub agreement_floor_permille: u16,
+    /// How often it did, over the window.
+    pub agreement: Agreement,
+    /// What labels said, when a person wrote any.
     pub labels: Option<Labels>,
     /// Fallbacks in a row while applying.
     pub fallbacks_in_a_row: u32,
@@ -102,8 +152,14 @@ pub enum Line {
     Latency { p95_ms: u64, deadline_ms: u64 },
     /// Replies arrived malformed in the window.
     Schema { rows: usize },
-    /// Nobody has labelled enough rows to say whether it is right.
-    NoLabels { wanted: usize },
+    /// Too few rows where both the judgment and the probe answered to say
+    /// how often they agree.
+    TooFewCompared { compared: usize, wanted: usize },
+    /// The agreed share's lower bound is under the use's route-change budget.
+    Agreement {
+        bound_permille: u16,
+        floor_permille: u16,
+    },
     /// Labels say the probe is righter.
     Labels {
         judgment_right: usize,
@@ -151,10 +207,14 @@ pub fn schema_rows(window: &Tally) -> usize {
 #[must_use]
 pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
     let window = evidence.window;
-    if window.rows < JUDGED_EVERY_ROWS {
+    // The window a floor can be cleared on, not the judgment's cadence: a
+    // seat judged every twenty rows on the last twenty could never bound
+    // twenty answers above 0.95 (2026-09-17..20).
+    let wanted = rows_that_can_clear(evidence.floor_permille);
+    if window.asked() < wanted {
         return Some(Line::TooFewRows {
-            rows: window.rows,
-            wanted: JUDGED_EVERY_ROWS,
+            rows: window.asked(),
+            wanted,
         });
     }
     let bound = permille(window.answered_lower_bound().unwrap_or(0.0));
@@ -174,19 +234,29 @@ pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
     if malformed > 0 {
         return Some(Line::Schema { rows: malformed });
     }
-    match evidence.labels {
-        None => Some(Line::NoLabels {
-            wanted: JUDGED_EVERY_ROWS,
-        }),
-        Some(labels) if labels.compared < JUDGED_EVERY_ROWS => Some(Line::NoLabels {
-            wanted: JUDGED_EVERY_ROWS,
-        }),
-        Some(labels) if !labels.judgment_at_least_as_right() => Some(Line::Labels {
+    // A person's labels, when there are a window's worth, are the last word;
+    // otherwise the seat is held to its route-change budget.
+    if let Some(labels) = evidence
+        .labels
+        .filter(|labels| labels.compared >= JUDGED_EVERY_ROWS)
+    {
+        return (!labels.judgment_at_least_as_right()).then_some(Line::Labels {
             judgment_right: labels.judgment_right,
             probe_right: labels.probe_right,
-        }),
-        Some(_) => None,
+        });
     }
+    let agreement = evidence.agreement;
+    if agreement.compared < JUDGED_EVERY_ROWS {
+        return Some(Line::TooFewCompared {
+            compared: agreement.compared,
+            wanted: JUDGED_EVERY_ROWS,
+        });
+    }
+    let bound = permille(agreement.lower_bound().unwrap_or(0.0));
+    (bound < evidence.agreement_floor_permille).then_some(Line::Agreement {
+        bound_permille: bound,
+        floor_permille: evidence.agreement_floor_permille,
+    })
 }
 
 /// Judge a seat on its window (§4).
@@ -209,7 +279,9 @@ pub fn judge(stand: Stand, evidence: &Evidence) -> Verdict {
         // A seat already acting is not held to the window's width: it earned
         // its place on a full one, and a fresh window is not evidence against
         // it. Only a line it actually breaks takes it back.
-        (Stand::Applying, Some(Line::TooFewRows { .. } | Line::NoLabels { .. })) => Verdict::Keep,
+        (Stand::Applying, Some(Line::TooFewRows { .. } | Line::TooFewCompared { .. })) => {
+            Verdict::Keep
+        }
         (Stand::Applying, Some(line)) => Verdict::Fall(line),
     }
 }
@@ -234,7 +306,8 @@ impl Line {
             Self::Answered { .. } => "answered",
             Self::Latency { .. } => "latency",
             Self::Schema { .. } => SCHEMA,
-            Self::NoLabels { .. } => "no_labels",
+            Self::TooFewCompared { .. } => "too_few_compared",
+            Self::Agreement { .. } => "agreement",
             Self::Labels { .. } => "labels",
             Self::Fallbacks { .. } => "fallbacks",
         }

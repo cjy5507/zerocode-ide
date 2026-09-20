@@ -27,7 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use api::{SystemOneCall, SystemOneClient, SystemOneConfig, SystemOneFailure, SYSTEMONE_MODEL};
 use zerocode_core::jev::door::Refused;
 use runtime::{
-    DecisionVerdict, ProbeAssessment, RouteConfidence, RubricAxis,
+    DecisionVerdict, ProbeAssessment, RubricAxis,
     DECISION_RUBRIC_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -397,14 +397,16 @@ fn memo() -> &'static Mutex<HashMap<MemoKey, Remembered>> {
 }
 
 /// Jev's distribution confidence is not calibrated accuracy. Active mode
-/// therefore gives every validated verdict the existing conservative Medium
-/// fusion authority: risk cannot fall, complexity cannot fall, and complexity
-/// can rise by at most one band.
+/// therefore gives a validated verdict at most the conservative Medium fusion
+/// authority — risk cannot fall, complexity cannot fall, and complexity can
+/// rise by at most one band — and only when the verdict is more likely than
+/// not on every axis ([`runtime::ROUTE_TRUST_FLOOR`]); under that it is a
+/// guess the reader does not back, and the deterministic assessment stands.
 fn active_assessment(verdict: &DecisionVerdict) -> ProbeAssessment {
     ProbeAssessment {
         complexity: verdict.complexity.choice,
         risk: verdict.risk.choice,
-        confidence: RouteConfidence::Medium,
+        confidence: verdict.route_confidence(),
         intent: verdict.intent.choice,
     }
 }
@@ -664,9 +666,11 @@ fn draft_labels(cwd: &Path, tasks: &[(&str, &str)], shots: &[Shot]) {
 ///
 /// Once every [`JUDGED_EVERY_ROWS`] requests, not at the end of every turn: a
 /// bound that moved on every row would rise and fall on a single answer. The
-/// window is the last twenty requests, the standing is the last transition
-/// this same file recorded, and nothing is written unless the answer changed —
-/// a ledger of "still recording" every twenty rows is a ledger nobody reads.
+/// window is the last requests a floor of the seat's can be cleared on
+/// ([`zerocode_core::jev::summary::rows_that_can_clear`]), the standing is the
+/// last transition this same file recorded, and nothing is written unless the
+/// answer changed — a ledger of "still recording" every twenty rows is a
+/// ledger nobody reads.
 ///
 /// The ledger and the settings are handed in, both resolved before the batch
 /// that calls this detached: the environment that answers where either lives
@@ -692,21 +696,81 @@ pub fn judge_ledger(
     if !at_boundary && !ending_it {
         return None;
     }
-    let window = jev_summary::summarize_last(&rows, JUDGED_EVERY_ROWS);
-    let verdict = promote::judge(
-        stand,
-        &promote::Evidence {
-            window: &window,
-            floor_permille: ROUTING.answer_floor_permille?,
-            deadline_ms: u64::try_from(DECISION_ACTIVE_DEADLINE.as_millis()).unwrap_or(u64::MAX),
-            labels: labels_standing(settings, &rows),
-            fallbacks_in_a_row,
-        },
-    );
-    if let Some(row) = promote::transition_row(now_ms, verdict, &window) {
+    let judged = judge_rows(&rows, settings)?;
+    if let Some(row) = promote::transition_row(now_ms, judged.verdict, &judged.window) {
         let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
     }
-    Some(verdict)
+    Some(judged.verdict)
+}
+
+/// What the judge said of a ledger's rows, and the window it said it on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Judged {
+    pub verdict: Verdict,
+    /// The window the lines were read over: the last requests the seat's
+    /// answer floor can be cleared on.
+    pub window: jev_summary::SeatTally,
+    /// How many requests that window wants before the floor can be cleared
+    /// at all (`rows_that_can_clear`), for a screen that says "17 of 73".
+    pub window_wanted: usize,
+    /// How often, over that window, the judgment named what the probe named.
+    pub agreement: promote::Agreement,
+}
+
+/// Judge the routing seat on a ledger's rows — the one reading of the
+/// evidence, which the judge that writes transitions and the summary that
+/// shows a person the same numbers both take, so the screen cannot say "hold"
+/// on one window while the ledger rose on another (it did: the summary
+/// judged the week with no labels, the judge the last twenty with them,
+/// 2026-09-20). `None` for a ledger of a seat that never rises.
+#[must_use]
+pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Value>) -> Option<Judged> {
+    let floor = ROUTING.answer_floor_permille?;
+    let agreement_floor = ROUTING.agreement_floor_permille?;
+    let window_wanted = zerocode_core::jev::summary::rows_that_can_clear(floor);
+    let held = zerocode_core::jev::summary::last_asked(rows, window_wanted);
+    let window = zerocode_core::jev::summary::summarize_rows(held.iter().copied(), i64::MIN);
+    let agreement = agreement_in(&held);
+    let verdict = promote::judge(
+        promote::stand_from(rows),
+        &promote::Evidence {
+            window: &window,
+            floor_permille: floor,
+            deadline_ms: u64::try_from(DECISION_ACTIVE_DEADLINE.as_millis()).unwrap_or(u64::MAX),
+            agreement_floor_permille: agreement_floor,
+            agreement,
+            labels: labels_standing(settings, rows),
+            fallbacks_in_a_row: jev_summary::failures_in_a_row(rows),
+        },
+    );
+    Some(Judged { verdict, window, window_wanted, agreement })
+}
+
+/// How often the judgment named what the chat probe named, over the rows
+/// where both answered — one comparison per judged axis of each such row.
+///
+/// Read from the rows the window was counted from, so the share and the
+/// bound stand on the same requests. A row the probe timed out on (eleven of
+/// this machine's 28) compares nothing and counts nothing.
+#[must_use]
+pub fn agreement_in(rows: &[&serde_json::Value]) -> promote::Agreement {
+    let mut agreement = promote::Agreement::default();
+    for row in rows {
+        let Ok(row) = serde_json::from_value::<DecisionShadowRow>((*row).clone()) else {
+            continue;
+        };
+        let Some(jev) = row.jev.as_ref() else {
+            continue;
+        };
+        for axis in runtime::judged_axes() {
+            let (Some(probe), Some(judged)) = (row.probe.token(axis), jev.get(axis.name)) else {
+                continue;
+            };
+            agreement.compared += 1;
+            agreement.agreed += usize::from(judged.choice == probe);
+        }
+    }
+    agreement
 }
 
 /// What the labels a person wrote say about both readers, when they named a

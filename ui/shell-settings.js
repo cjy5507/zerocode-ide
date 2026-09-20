@@ -5332,7 +5332,8 @@ function jevLineWords(line) {
     case "answered": return t("settings.typesafe.lineAnswered", "답한 비율이 모자랍니다");
     case "latency": return t("settings.typesafe.lineLatency", "답이 너무 늦습니다");
     case "schema": return t("settings.typesafe.lineSchema", "형식이 깨진 답이 있었습니다");
-    case "no_labels": return t("settings.typesafe.lineNoLabels", "라벨이 필요합니다");
+    case "too_few_compared": return t("settings.typesafe.lineTooFewCompared", "프로브와 견줄 답이 더 쌓여야 합니다");
+    case "agreement": return t("settings.typesafe.lineAgreement", "프로브와 다른 답이 너무 잦습니다");
     case "labels": return t("settings.typesafe.lineLabels", "라벨이 프로브 쪽을 가리킵니다");
     case "fallbacks": return t("settings.typesafe.lineFallbacks", "연달아 되돌아갔습니다");
     default: return "";

@@ -1048,8 +1048,34 @@ pub struct SeatNumbers {
     pub rise_floor_permille: Option<u16>,
     pub today: SeatWindow,
     pub week: SeatWindow,
+    /// The window the judge read and the agreement over it, for a seat that
+    /// rises — absent from a zo that judged on the week.
+    #[serde(default)]
+    pub judged: Option<SeatJudged>,
     #[serde(default)]
     pub cost_usd: Option<f64>,
+}
+
+/// The numbers a seat is promoted on: the last requests its floor can be
+/// cleared on, and how often its judgment named what the probe named there.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatJudged {
+    pub window: SeatWindow,
+    #[serde(default)]
+    pub window_wanted: usize,
+    #[serde(default)]
+    pub agreement: SeatAgreement,
+}
+
+/// Comparisons with the probe over the judged window.
+#[derive(Debug, Clone, PartialEq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatAgreement {
+    pub compared: usize,
+    pub agreed: usize,
+    #[serde(default)]
+    pub lower_bound: Option<f64>,
 }
 
 /// What the judge said of a seat's recent window.
@@ -1067,6 +1093,10 @@ pub struct SeatVerdict {
 pub struct SeatWindow {
     pub rows: usize,
     pub answered: usize,
+    /// Rows the door refused before anything was sent; absent from a zo that
+    /// counted them as the seat's own failures.
+    #[serde(default)]
+    pub refused: usize,
     #[serde(default)]
     pub answered_share: Option<f64>,
     #[serde(default)]

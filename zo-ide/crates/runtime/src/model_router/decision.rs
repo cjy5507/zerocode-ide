@@ -14,8 +14,10 @@
 //! (`docs/design/jev-decision-shadow-20260917.md` §3).
 //!
 //! `confidence` is not a probability of being right: it is a statistic of the
-//! returned distribution's shape. It is kept as it came and never cut into the
-//! router's low/medium/high bands.
+//! returned distribution's shape. It is kept as it came, and the apply stage
+//! reads exactly one cut of it ([`ROUTE_TRUST_FLOOR`]): whether the answer is
+//! more likely than not, which is the one band that means the same thing
+//! whatever the statistic's calibration.
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
@@ -23,7 +25,7 @@ use std::sync::OnceLock;
 use api::{SystemOneQuestion, SystemOneQuestionKind, SystemOneRequest, SystemOneResponse};
 
 use super::outcome::rate;
-use super::policy::{RouteTaskComplexity, RouteTaskRisk};
+use super::policy::{RouteConfidence, RouteTaskComplexity, RouteTaskRisk};
 use super::probe::{RouteTaskIntent, RubricAxis, COMPLEXITY_AXIS, INTENT_AXIS, RISK_AXIS, ROUTING_RUBRIC};
 
 /// How far a choice answer's probabilities may sum from one: rounding in
@@ -79,6 +81,42 @@ pub struct DecisionVerdict {
     pub complexity: DecisionAnswer<RouteTaskComplexity>,
     pub risk: DecisionAnswer<RouteTaskRisk>,
     pub intent: DecisionAnswer<RouteTaskIntent>,
+}
+
+/// The least any axis of a verdict may be sure of before the apply stage lets
+/// the verdict move a route: more likely than not.
+///
+/// Not a calibration claim. The verdict's confidence is a statistic of its
+/// distribution's shape, and the only cut of it that means one thing whether
+/// or not it is calibrated is a half — the chosen token holding more of the
+/// distribution than every other token together. Under it the verdict is a
+/// guess the reader itself does not back, and the router's `Low` band is the
+/// word for that: trusted for nothing, the deterministic assessment stands.
+/// At or over it the verdict has the `Medium` authority every applied verdict
+/// had before this cut — intent read, risk raised but never lowered,
+/// complexity raised by at most one band — because that authority was chosen
+/// for a reader whose confidence is not accuracy, and that has not changed.
+///
+/// Measured on this machine's 25 answered routing rows (2026-09-20): the
+/// judgment agreed with the chat probe on 53% of all axes and on 77% of the
+/// axes it was at least this sure of; the rows it was under it on include a
+/// `large` at 0.07 the probe called `trivial`, which the old unconditional
+/// `Medium` would have raised a route on.
+pub const ROUTE_TRUST_FLOOR: f64 = 0.5;
+
+impl DecisionVerdict {
+    /// The authority the apply stage hands this verdict: `Medium` when every
+    /// axis is at least [`ROUTE_TRUST_FLOOR`] sure, `Low` otherwise. Never
+    /// `High`: lowering a route's complexity is the one move a verdict whose
+    /// confidence is not accuracy is not given.
+    #[must_use]
+    pub fn route_confidence(&self) -> RouteConfidence {
+        let sure = self
+            .readings()
+            .iter()
+            .all(|reading| reading.confidence >= ROUTE_TRUST_FLOOR);
+        if sure { RouteConfidence::Medium } else { RouteConfidence::Low }
+    }
 }
 
 /// One axis of a verdict without its enum — what a ledger writes and what the
@@ -379,6 +417,26 @@ mod tests {
             (DECISION_RUBRIC_VERSION, &digest[..16]),
             (1, "3163e6fbd84adff6"),
             "the rubric's words changed: bump DECISION_RUBRIC_VERSION and re-pin this digest"
+        );
+    }
+
+    #[test]
+    fn a_verdict_moves_a_route_only_when_every_axis_is_more_likely_than_not() {
+        let sure = validate_decision(&response(valid_answers())).expect("valid");
+        assert!((sure.risk.confidence - 0.41).abs() < f64::EPSILON, "the fixture's least sure axis");
+        assert_eq!(sure.route_confidence(), RouteConfidence::Low, "one axis under a half is a guess");
+        let mut answers = valid_answers();
+        answers["risk"] = choice("high", json!({"low": 0.1, "medium": 0.2, "high": 0.6, "critical": 0.1}), 0.5);
+        let at_the_line = validate_decision(&response(answers)).expect("valid");
+        assert_eq!(at_the_line.route_confidence(), RouteConfidence::Medium, "at the line is over it");
+        let mut answers = valid_answers();
+        for axis in ["complexity", "risk", "intent"] {
+            answers[axis]["confidence"] = json!(0.99);
+        }
+        assert_eq!(
+            validate_decision(&response(answers)).expect("valid").route_confidence(),
+            RouteConfidence::Medium,
+            "never High: a verdict is not given the move that lowers a route"
         );
     }
 
