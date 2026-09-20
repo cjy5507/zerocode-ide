@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.9] — 2026-09-21
+
+_since v1.1.8 (10 commits)_
+
+### feat
+- feat(jev): an acting routing seat runs the probe it skipped one turn in five as a control row
+- feat(jev): a screen question carries what was pressed and what the screen shows, a dead login is its own stall cause the coordinator hears, a summons option carries the ledger's history, and one pooled socket answers every question
+
+### fix
+- fix(computer-use,emulator): an app answers to its bundle's own name, the iOS exporter says what is on top at each centre, a dead HID helper is replaced before it is handed out (t-5518)
+- fix(runtime): hand a main-turn capacity wall to the quota escape after a burst, not after the account budget
+
+### docs
+- docs(jev): the seat accuracy wave — root causes, landings and the wire bench
+- docs(core): the app-name rule's link names the function, not the macro
+- docs(zo): zo 1.1.8 ↔ Codex CLI 0.155.1 gap table and closing plan (t-5506, analysis only)
+
 ## [1.1.8] — 2026-09-20
 
 _since v1.1.7 (1 commits)_
