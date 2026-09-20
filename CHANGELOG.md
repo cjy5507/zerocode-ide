@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.4] — 2026-09-20
+
+_since v1.1.3 (1 commits)_
+
+### fix
+- fix(jev): let the routing seat's auto rise on evidence a window can reach
+
 ## [1.1.3] — 2026-09-20
 
 _since v1.1.2 (24 commits)_
