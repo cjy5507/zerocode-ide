@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.1.3] — 2026-09-20
+
+_since v1.1.2 (24 commits)_
+
+### feat
+- feat(computer-use): add mobile Jev walks with guarded presses
+- feat(emulator): add deterministic mobile Flow checks
+- feat(flow): stream the recorded run in a live console
+- feat(emulator): number mobile controls and pin marked clicks
+
+### fix
+- fix(browser): invalidate find matches when page text changes
+- fix(jev): count request preparation against the call deadline
+- fix(tools): the one analysis script the gate imports loads on the python the gate actually finds
+- fix(flow): bound merged history and live step caches
+- fix(flow): bind retries and report links to recorded step origins
+- fix(orchestration): require the live seat when restoring sleepers
+- fix(flow): preserve the requested range during automatic recovery
+- fix(flow): retain the workspace selected before queueing
+- fix(orchestration): align task updates with safe boot repair
+- fix(emulator): bind mobile looks to device identity and address
+- fix(emulator): use logical Android display geometry for input
+
+### refactor
+- refactor(jev): share rubric fingerprints
+
+### docs
+- docs: record a51fa56a whole-gate results
+- docs: record main-only consolidation and remaining verification
+- docs(astro): record integrated mobile verification and final timings
+- docs(jev): distinguish judgment cadence from evidence window
+- docs(astro): the effort a summons carries is the task's difficulty, and the seat named for that choice keeps score rather than making it
+- docs(astro): the working document stands on today's ground, and the doc it called optional is the one that moved
+
+### test
+- test(zo): isolate cooldown writes and deterministic routing expectations
+- test(router): isolate probe endpoint overrides across routing tests
+
 ## [1.1.2] — 2026-09-19
 
 _since v1.1.1 (2 commits)_
