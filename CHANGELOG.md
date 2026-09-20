@@ -1,5 +1,15 @@
 # Changelog
 
+## [1.1.5] — 2026-09-20
+
+_since v1.1.4 (2 commits)_
+
+### fix
+- fix(orchestration): a taken-back batch tombstones the receipt that named it
+
+### release
+- release: publish the app installer beside the feed it reads
+
 ## [1.1.4] — 2026-09-20
 
 _since v1.1.3 (1 commits)_
