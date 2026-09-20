@@ -2220,7 +2220,7 @@ fn mail_a_released_worker_can_never_read_is_taken_back_by_its_run() {
             .run_mut(&run_id)
             .expect("the run")
             .take_back_stranded_mail(),
-        0
+        TakenBack::default()
     );
 
     // And what it left behind is a ledger that still loads. `validate_loaded`
@@ -18351,6 +18351,136 @@ fn an_unverifiable_legacy_receipt_becomes_a_tombstone_and_a_modern_one_does_not(
     assert!(repaired.expired, "the stale answer is still replayable");
     assert!(matches!(&repaired.answer, ServedAnswer::Inline(held) if held.is_empty()));
     Ledger::rebuild(legacy).expect("the tombstoned legacy ledger is coherent");
+}
+
+/// A released worker's open batch, taken home, leaves its `check` receipt a
+/// tombstone — in the same transition — so the ledger it leaves behind loads.
+///
+/// The batch the receipt named is gone from that address: not open, never
+/// acknowledged. Kept as it was, the receipt failed `validate_loaded` at the
+/// NEXT boot, and one of them refused a window's whole orchestration on
+/// 2026-09-20 ("a receipt for astro-ack-d4982 names a delivery worker:w-4837
+/// of run run-4275 has no record of"). The store validated fine while it
+/// ran — the invariant was stricter than the verb, which is a boot deadlock.
+#[test]
+fn a_taken_back_batch_tombstones_the_receipt_that_named_it_and_the_ledger_still_loads() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name stranded-receipt");
+    let (worker, worker_pane) = bench.seat("worker-start --agent codex");
+    let mailbox = worker_address(&worker);
+    bench.peer_message_to(
+        &mailbox,
+        MessageKind::Status,
+        "read-this",
+        "",
+        Priority::Normal,
+        "",
+    );
+    // The worker takes its batch under a retry key, so a receipt names it.
+    let handed = bench.json_at(&worker_pane, "check --retry-request worker-look");
+    let delivery = handed["deliveryId"]
+        .as_str()
+        .expect("a delivery id")
+        .to_string();
+
+    let at = bench.ledger.locate(&worker).expect("the worker");
+    bench.ledger.runs[at.0].workers[at.1].state = WorkerState::Released;
+    let taken = bench.json("check");
+    assert_eq!(
+        taken["messages"].as_array().map(Vec::len),
+        Some(1),
+        "the batch came home"
+    );
+
+    let receipt = bench
+        .ledger
+        .served
+        .iter()
+        .find(|held| held.request == "worker-look")
+        .expect("the retry key stays spent");
+    assert!(
+        receipt.is_tombstone(),
+        "the receipt still names a batch {delivery} nothing records"
+    );
+    assert!(matches!(&receipt.answer, ServedAnswer::Inline(held) if held.is_empty()));
+    // A retry of that look is refused, not handed a batch that is gone.
+    let retried = bench.at(&worker_pane, "check --retry-request worker-look");
+    assert_ne!(
+        retried.reply.exit_code, 0,
+        "a spent key answered again: {}",
+        retried.reply.stdout
+    );
+
+    Ledger::rebuild(bench.ledger.export()).expect("the ledger a take-back leaves behind loads");
+}
+
+/// A store written before the take-back tombstoned its own receipts is
+/// repaired at boot by the same narrow rule — and a live worker's missing
+/// batch is not, because that is still corruption.
+#[test]
+fn a_receipt_of_a_released_workers_taken_back_batch_is_repaired_on_load_and_a_live_ones_is_not() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name old-store");
+    let (worker, worker_pane) = bench.seat("worker-start --agent codex");
+    let mailbox = worker_address(&worker);
+    bench.peer_message_to(
+        &mailbox,
+        MessageKind::Status,
+        "read-this",
+        "",
+        Priority::Normal,
+        "",
+    );
+    let handed = bench.json_at(&worker_pane, "check --retry-request old-look");
+    assert!(handed["deliveryId"].is_string(), "{handed}");
+
+    // The wound as the old verb left it: the worker released and its open
+    // batch gone, the receipt untouched.
+    let mut wounded = bench.ledger.export();
+    for row in &mut wounded.workers {
+        if row.id == worker {
+            row.state = WorkerState::Released;
+        }
+    }
+    for inbox in &mut wounded.inboxes {
+        if inbox.address == mailbox {
+            inbox.open = None;
+        }
+    }
+    let mut untouched = wounded.clone();
+    assert!(
+        Ledger::rebuild(untouched.clone()).is_err(),
+        "the wound must still be an invariant"
+    );
+    let notes = tombstone_receipts_of_taken_back_batches(&mut untouched);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("old-look") && notes[0].contains(&mailbox),
+        "{}",
+        notes[0]
+    );
+    let repaired = untouched
+        .served
+        .iter()
+        .find(|receipt| receipt.request == "old-look")
+        .expect("the retry key remains");
+    assert!(repaired.expired);
+    Ledger::rebuild(untouched).expect("the repaired store loads");
+
+    // The same shape at a LIVE worker is corruption, and stays refused.
+    for row in &mut wounded.workers {
+        if row.id == worker {
+            row.state = WorkerState::Active;
+        }
+    }
+    assert!(
+        tombstone_receipts_of_taken_back_batches(&mut wounded).is_empty(),
+        "a live worker's batch was normalized away"
+    );
+    assert!(
+        Ledger::rebuild(wounded).is_err(),
+        "a live worker's missing batch stopped failing closed"
+    );
 }
 
 /// A large, entirely healthy ledger loads.

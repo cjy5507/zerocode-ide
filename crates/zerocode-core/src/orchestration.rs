@@ -2767,6 +2767,16 @@ pub fn handover_start_current(run: &Run, prepared: &PreparedWorkerStart) -> bool
             .is_some_and(|task| task.status == TaskStatus::Dispatched)
 }
 
+/// What [`Run::take_back_stranded_mail`] moved: how many rows came home, and
+/// which open batches were taken back to do it — named by address and
+/// delivery, because a `check` receipt may name exactly that batch and has
+/// to be tombstoned in the same transition ([`Ledger::take_back_stranded_mail`]).
+#[derive(Debug, Default, PartialEq, Eq)]
+struct TakenBack {
+    moved: usize,
+    deliveries: Vec<(String, String)>,
+}
+
 impl Run {
     pub fn task(&self, id: &str) -> Option<&Task> {
         self.tasks.iter().find(|task| task.id == id)
@@ -3140,7 +3150,7 @@ impl Run {
     /// deduplicated against what the run's own inbox already holds or has
     /// handed over, because a broadcast is already in more than one queue and
     /// `Ledger::validate_loaded` refuses a queue that holds a row twice.
-    fn take_back_stranded_mail(&mut self) -> usize {
+    fn take_back_stranded_mail(&mut self) -> TakenBack {
         #[cfg(test)]
         WORKER_ROWS.with(|count| count.set(count.get() + self.workers.len()));
         let released: std::collections::HashSet<&str> = self
@@ -3150,6 +3160,7 @@ impl Run {
             .map(|worker| worker.id.as_str())
             .collect();
         let mut rescued: Vec<String> = Vec::new();
+        let mut taken: Vec<(String, String)> = Vec::new();
         for (address, inbox) in &mut self.inboxes {
             if inbox.open.is_none() && inbox.pending.is_empty() {
                 continue;
@@ -3161,12 +3172,17 @@ impl Run {
                 continue;
             }
             if let Some(open) = inbox.open.take() {
+                /* Named, because a `check` receipt may name this batch: the
+                 * batch is about to have no record of, and the receipt has to
+                 * become a tombstone in the same transition, or the next boot
+                 * refuses the whole ledger (2026-09-20). */
+                taken.push((address.clone(), open.id.clone()));
                 rescued.extend(open.messages);
             }
             rescued.extend(inbox.pending.drain(..));
         }
         if rescued.is_empty() {
-            return 0;
+            return TakenBack::default();
         }
         let home = self.address();
         let home_at = match self
@@ -3219,7 +3235,10 @@ impl Run {
             .pending
             .make_contiguous()
             .sort_by_key(|id| age.get(id.as_str()).copied().unwrap_or(usize::MAX));
-        moved
+        TakenBack {
+            moved,
+            deliveries: taken,
+        }
     }
 
     /// The id of the newest message waiting for this address — the pointer's
@@ -5623,7 +5642,44 @@ impl Ledger {
         if self.run(run_id).is_none_or(|run| run.address() != address) {
             return 0;
         }
-        self.run_mut(run_id).map_or(0, Run::take_back_stranded_mail)
+        let taken = self
+            .run_mut(run_id)
+            .map(Run::take_back_stranded_mail)
+            .unwrap_or_default();
+        /* A batch taken home has no record any more — not open, never acked
+         * — and a `check` receipt that named it would fail
+         * `validate_loaded` the next time this ledger is read. That is what
+         * refused a whole window's orchestration on 2026-09-20: a released
+         * worker's batch came home during a coordinator's `check`, its
+         * receipt stayed, the store validated fine while it ran and the next
+         * boot found "a receipt … names a delivery … has no record of". The
+         * answer is gone, so the receipt becomes a tombstone here, in the
+         * transition that took the batch: the key stays spent, and a retry
+         * of that check is refused rather than handed a batch that no longer
+         * exists at that address. */
+        for (taken_address, delivery) in &taken.deliveries {
+            self.tombstone_receipts_naming(run_id, taken_address, delivery);
+        }
+        taken.moved
+    }
+
+    /// Turn every `check` receipt that names `delivery` at `address` of `run`
+    /// into a tombstone: the batch it answered with is gone.
+    fn tombstone_receipts_naming(&mut self, run_id: &str, address: &str, delivery: &str) {
+        for held in &mut self.served {
+            if held.is_tombstone() {
+                continue;
+            }
+            let ServedAnswer::Check(about) = &held.answer else {
+                continue;
+            };
+            if about.run == run_id
+                && about.address == address
+                && about.delivery.as_deref() == Some(delivery)
+            {
+                held.expire();
+            }
+        }
     }
 
     /// Retire a delivery. Anything else is refused rather than ignored: a
@@ -17063,6 +17119,87 @@ pub fn tombstone_unverifiable_legacy_receipts(projection: &mut LedgerProjectionV
         }
     }
     repaired
+}
+
+/// Tombstone the `check` receipts that name a batch a released worker's
+/// inbox no longer holds — the wound `Ledger::take_back_stranded_mail`
+/// left in every store written before it tombstoned them itself
+/// (2026-09-20: one such receipt refused a window's whole orchestration at
+/// boot, "a receipt for astro-ack-d4982 names a delivery worker:w-4837 of
+/// run run-4275 has no record of").
+///
+/// Narrow on purpose, unlike a normalization: only a stamped receipt whose
+/// run is here, whose address is a worker this run recorded as `Released`
+/// (or has no row for at all), and whose delivery is neither open at that
+/// inbox nor acknowledged there. That is exactly the batch the take-back
+/// moves, and nothing else produces the shape: a receipt is written by the
+/// transition that opens the batch it names, so a live worker's missing
+/// batch is still corruption and still fails [`Ledger::validate_loaded`].
+///
+/// Returns one note per receipt repaired, for the window's diagnostic log.
+#[must_use]
+pub fn tombstone_receipts_of_taken_back_batches(
+    projection: &mut LedgerProjectionV1,
+) -> Vec<String> {
+    use std::collections::{HashMap, HashSet};
+
+    let runs: HashSet<&str> = projection.runs.iter().map(|run| run.id.as_str()).collect();
+    let live_workers: HashSet<(&str, &str)> = projection
+        .workers
+        .iter()
+        .filter(|worker| worker.state != WorkerState::Released)
+        .map(|worker| (worker.run.as_str(), worker.id.as_str()))
+        .collect();
+    let mut carried: HashMap<(&str, &str, &str), ()> = HashMap::new();
+    for inbox in &projection.inboxes {
+        if let Some(open) = &inbox.open {
+            carried.insert(
+                (inbox.run.as_str(), inbox.address.as_str(), open.id.as_str()),
+                (),
+            );
+        }
+    }
+    for spent in &projection.acked {
+        carried.insert(
+            (
+                spent.run.as_str(),
+                spent.address.as_str(),
+                spent.delivery.as_str(),
+            ),
+            (),
+        );
+    }
+
+    let mut notes = Vec::new();
+    for receipt in &mut projection.served {
+        if receipt.filed_ms.is_none() || receipt.expired {
+            continue;
+        }
+        let ServedAnswer::Check(about) = &receipt.answer else {
+            continue;
+        };
+        let Some(delivery) = about.delivery.as_deref() else {
+            continue;
+        };
+        let Some(worker) = about.address.strip_prefix(WORKER_ADDRESS_PREFIX) else {
+            continue;
+        };
+        if !runs.contains(about.run.as_str())
+            || live_workers.contains(&(about.run.as_str(), worker))
+            || carried.contains_key(&(about.run.as_str(), about.address.as_str(), delivery))
+        {
+            continue;
+        }
+        notes.push(format!(
+            "receipt {} named delivery {delivery} of {} in {}, taken back when that worker was released — tombstoned, the retry key stays spent",
+            receipt.request.as_str(),
+            about.address,
+            about.run
+        ));
+        receipt.answer = ServedAnswer::Inline(String::new());
+        receipt.expired = true;
+    }
+    notes
 }
 
 /// Repair the historical `task-update` wound: dispatched with no attempt at

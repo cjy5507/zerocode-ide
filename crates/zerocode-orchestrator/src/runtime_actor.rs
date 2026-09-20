@@ -28,7 +28,8 @@ use zerocode_core::agent_teams::{Effect, Team};
 use zerocode_core::orchestration::{
     Decided, Launcher, Ledger, LedgerProjectionV1, MAX_LIST, MAX_NAME, MAX_PROSE,
     PROJECTION_SCHEMA, RebuildError, ReceiptKey, Sweep, Waiting, WorkerState,
-    repair_unattempted_dispatched_tasks, tombstone_unverifiable_legacy_receipts,
+    repair_unattempted_dispatched_tasks, tombstone_receipts_of_taken_back_batches,
+    tombstone_unverifiable_legacy_receipts,
 };
 
 use crate::ledger_store;
@@ -2455,7 +2456,12 @@ fn rebuild_stored_ledger(
     if !held.bytes_match && receipts == 0 {
         return Err(RuntimeError::StoreCorrupt);
     }
-    let repairs = repair_unattempted_dispatched_tasks(&mut held.projection);
+    let mut repairs = repair_unattempted_dispatched_tasks(&mut held.projection);
+    // A store written before the take-back tombstoned its own receipts
+    // (2026-09-20) is repaired by the same narrow rule, and says so.
+    repairs.extend(tombstone_receipts_of_taken_back_batches(
+        &mut held.projection,
+    ));
     let ledger = Ledger::rebuild(held.projection).map_err(RuntimeError::LedgerInvariant)?;
     if receipts == 0 && repairs.is_empty() {
         return Ok((ledger, held.revision, repairs));
