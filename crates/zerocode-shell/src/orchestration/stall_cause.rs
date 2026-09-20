@@ -22,7 +22,7 @@
 //! socket, and never reads a screen or a transcript for a silence it has
 //! already looked at.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -46,7 +46,8 @@ use crate::systemone::{SCHEMA, Wire, request_body};
 /// 8 s. Thirty seconds is a sixth of the 180 s the pane already stood quiet
 /// before it was asked about (`QUIET_GRACE_MS`); an answer slower than that is
 /// the row's `timeout`, which says the service was slow as plainly.
-pub(crate) const STALL_CAUSE_DEADLINE: Duration = Duration::from_secs(30);
+pub(crate) const STALL_CAUSE_DEADLINE: Duration =
+    Duration::from_millis(zerocode_core::jev::STALL_APPLY_DEADLINE_MS);
 
 /// The row's outcome for a question Jev answered in shape.
 const ANSWERED: &str = "answered";
@@ -85,6 +86,9 @@ struct Waiting {
     worker: String,
     dispatch: String,
     asked_ms: i64,
+    /// The cause the answer named, so its label can say whether what
+    /// followed was what that cause leads to (`agreed`).
+    cause: stall_cause::Cause,
 }
 
 /// What this window remembers about the silences it asked about.
@@ -94,6 +98,10 @@ pub(super) struct StallBook {
     /// while its worker stays quiet, so a silence is looked at once, when it
     /// is first seen; the next silence of the same attempt is a new one.
     seen: HashSet<String>,
+    /// The cause the seat named for an attempt still quiet, by dispatch —
+    /// what the sweep acts on when the seat acts ([`acting_cause`]). Kept
+    /// exactly as long as `seen` keeps the silence.
+    answered: HashMap<String, stall_cause::Cause>,
     /// The ledger the rows go to, and the answered rows without a label yet.
     /// `None` until a beat has read that ledger's tail, so the rows a window
     /// restart left unlabeled are labeled too.
@@ -114,6 +122,8 @@ pub(super) fn ask_about(
     let fresh: Vec<Silence> = {
         let mut held = book.lock().unwrap_or_else(|held| held.into_inner());
         held.seen.retain(|dispatch| still_quiet.contains(dispatch));
+        held.answered
+            .retain(|dispatch, _| still_quiet.contains(dispatch));
         silences
             .into_iter()
             .filter(|one| held.seen.insert(one.dispatch.clone()))
@@ -158,11 +168,13 @@ pub(super) fn ask_about(
         let book = Arc::clone(book);
         host.off_the_beat(Box::new(move || {
             let (row, waiting) = settle(&wire, question);
-            crate::systemone::append_rows(&ledger, &[row]);
+            crate::systemone::record_rows(&STALL, &ledger, &[row], now_ms);
             // A book that has not read the ledger's tail yet reads this row
             // there; one that has takes it here, once.
             if let Some(waiting) = waiting {
                 let mut held = book.lock().unwrap_or_else(|held| held.into_inner());
+                held.answered
+                    .insert(waiting.dispatch.clone(), waiting.cause);
                 if let Some((_, rows)) = &mut held.waiting
                     && !rows.iter().any(|row| row.key == waiting.key)
                 {
@@ -237,6 +249,7 @@ fn settle(wire: &Wire, question: Question) -> (Value, Option<Waiting>) {
                 worker: silence.worker,
                 dispatch: silence.dispatch,
                 asked_ms,
+                cause: choice.cause,
             };
             (row, Some(waiting))
         }
@@ -245,6 +258,23 @@ fn settle(wire: &Wire, question: Question) -> (Value, Option<Waiting>) {
             (row, None)
         }
     }
+}
+
+/// The cause the seat named for `dispatch`, when the seat ACTS — a person's
+/// `on`, or `auto` raised by the judge its own ledger recorded — and the
+/// attempt is still the silence it was asked about. `None` otherwise: a
+/// recording seat's answer is a row, never an order.
+pub(super) fn acting_cause(
+    host: &dyn Host,
+    book: &Arc<Mutex<StallBook>>,
+    dispatch: &str,
+) -> Option<stall_cause::Cause> {
+    let wire = host.jev_wire()?;
+    if !crate::systemone::applies(&wire, &STALL) {
+        return None;
+    }
+    let held = book.lock().unwrap_or_else(|held| held.into_inner());
+    held.answered.get(dispatch).copied()
 }
 
 /// The answered rows in the tail of `ledger` that no label row names yet.
@@ -273,6 +303,12 @@ fn unlabeled_in(ledger: &Path) -> Vec<Waiting> {
                 worker: row["worker"].as_str()?.to_string(),
                 dispatch: row["dispatch"].as_str()?.to_string(),
                 asked_ms: row["at"].as_i64()?,
+                // A row an older window wrote without its cause is labeled
+                // without a mark, as `unknown` is.
+                cause: row["cause"]
+                    .as_str()
+                    .and_then(stall_cause::Cause::from_word)
+                    .unwrap_or(stall_cause::Cause::Unknown),
             })
         })
         .collect()
@@ -312,7 +348,7 @@ pub(super) fn label(host: &dyn Host, book: &Arc<Mutex<StallBook>>, ledger: &Ledg
             else {
                 return true;
             };
-            labels.push(json!({
+            let mut label = json!({
                 "at": now_ms,
                 "label": one.key,
                 "run": one.run,
@@ -321,12 +357,20 @@ pub(super) fn label(host: &dyn Host, book: &Arc<Mutex<StallBook>>, ledger: &Ledg
                 "followed": what.word(),
                 "followedAtMs": at,
                 "afterMs": at.saturating_sub(one.asked_ms),
-            }));
+            });
+            // The mark the judge counts (§4): a cause that leads somewhere
+            // was right when that is what followed. A cause that leads
+            // nowhere in particular (`unknown`) leaves no mark rather than a
+            // false one.
+            if let Some(expected) = stall_cause::expected_followed(one.cause) {
+                label[zerocode_core::jev::summary::AGREED.canonical] = json!(expected == what);
+            }
+            labels.push(label);
             false
         });
         (path.clone(), labels)
     };
-    crate::systemone::append_rows(&path, &labels);
+    crate::systemone::record_rows(&STALL, &path, &labels, now_ms);
 }
 
 #[cfg(test)]

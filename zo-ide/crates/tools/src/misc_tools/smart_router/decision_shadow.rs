@@ -61,7 +61,8 @@ pub(super) const DECISION_SHADOW_DEADLINE: Duration = PROBE_TIMEOUT;
 
 /// The shorter wall for a judgment that is allowed to delay routing. All
 /// unique tasks run concurrently, so a batch pays at most this wall once.
-pub(super) const DECISION_ACTIVE_DEADLINE: Duration = Duration::from_millis(1_500);
+pub(super) const DECISION_ACTIVE_DEADLINE: Duration =
+    Duration::from_millis(zerocode_core::jev::ROUTING_APPLY_DEADLINE_MS);
 
 /// An active row uses this probe cell when no chat probe ran. It is an explicit
 /// absence, not a fabricated chat-model verdict, and comparison metrics skip it.
@@ -703,19 +704,9 @@ pub fn judge_ledger(
     Some(judged.verdict)
 }
 
-/// What the judge said of a ledger's rows, and the window it said it on.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Judged {
-    pub verdict: Verdict,
-    /// The window the lines were read over: the last requests the seat's
-    /// answer floor can be cleared on.
-    pub window: jev_summary::SeatTally,
-    /// How many requests that window wants before the floor can be cleared
-    /// at all (`rows_that_can_clear`), for a screen that says "17 of 73".
-    pub window_wanted: usize,
-    /// How often, over that window, the judgment named what the probe named.
-    pub agreement: promote::Agreement,
-}
+/// What the judge said of a ledger's rows — the core's own reading, so the
+/// window's seats and this one carry the same shape to the screen.
+pub use zerocode_core::jev::promote::Judged;
 
 /// Judge the routing seat on a ledger's rows — the one reading of the
 /// evidence, which the judge that writes transitions and the summary that
@@ -727,6 +718,7 @@ pub struct Judged {
 pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Value>) -> Option<Judged> {
     let floor = ROUTING.answer_floor_permille?;
     let agreement_floor = ROUTING.agreement_floor_permille?;
+    let deadline_ms = ROUTING.apply_deadline_ms?;
     let window_wanted = zerocode_core::jev::summary::rows_that_can_clear(floor);
     let held = zerocode_core::jev::summary::last_asked(rows, window_wanted);
     let window = zerocode_core::jev::summary::summarize_rows(held.iter().copied(), i64::MIN);
@@ -736,7 +728,7 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
         &promote::Evidence {
             window: &window,
             floor_permille: floor,
-            deadline_ms: u64::try_from(DECISION_ACTIVE_DEADLINE.as_millis()).unwrap_or(u64::MAX),
+            deadline_ms,
             agreement_floor_permille: agreement_floor,
             agreement,
             labels: labels_standing(settings, rows),

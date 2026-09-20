@@ -12945,8 +12945,50 @@ listen("term:cwd", (event) => {
   followPaneIntoWorktree(term, cwd);
 });
 
-listen("term:worker", (event) => {
-  const { parent, term, worktree, agent, resumed, helper } = event.payload ?? {};
+/* Where a fresh worker's pane goes, when the placement seat acts.
+ *
+ * The seat is asked with what this surface knows — how many panes the
+ * coordinator's tab holds, whether the layout rule would cut one, what is in
+ * front, whether anybody is at the keyboard — and the words the backend sent
+ * with the event (the summons' brief, its ids). The door records the row
+ * either way; only an answer from a seat that ACTS (`applied`) moves the
+ * pane, and any failure on this road seats the pane as a tab, which is what
+ * every worker got before the seat existed (2026-09-20, "전부 자동 기록하며
+ * 실제 적용되어야"). */
+async function roomForWorker({ parent, worktree, seat }) {
+  if (!seat || typeof seat.brief !== "string" || seat.brief.length === 0) return "tab";
+  const host = tabs.find((tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(parent)) ?? null;
+  const front = tabs.find((tab) => tab.id === activeTabId) ?? null;
+  const shape = activePaneShape(host);
+  const sameWorkspace = Boolean(host && host.worktree === activeWorktreePath);
+  const placement = host
+    ? tilePlacement({ sameWorktree: sameWorkspace, activeIsTermTab: front?.kind === "term", ...shape })
+    : { tab: true };
+  const look = {
+    brief: seat.brief,
+    briefChars: seat.briefChars ?? seat.brief.length,
+    startedBy: document.hasFocus() ? "person" : "schedule",
+    inFront: front?.kind === "term" ? "terminal" : front ? "page" : "nothing",
+    sameWorkspace,
+    panes: shape.paneCount,
+    maySplit: Boolean(placement.split),
+    run: seat.run,
+    worker: seat.worker,
+    dispatch: seat.dispatch ?? null,
+    task: seat.task ?? null,
+    checkout: worktree,
+  };
+  try {
+    const judged = await invoke("judge_worker_room", { look });
+    if (judged?.applied && typeof judged.chosen === "string") return judged.chosen;
+  } catch {
+    // A backend without the door, or a door that refused: the tab it is.
+  }
+  return "tab";
+}
+
+listen("term:worker", async (event) => {
+  const { parent, term, worktree, agent, resumed, helper, seat } = event.payload ?? {};
   if (
     typeof parent !== "number" ||
     typeof term !== "number" ||
@@ -12967,7 +13009,23 @@ listen("term:worker", (event) => {
   // term→worktree edge that `paintWorktreeAgents` reads when the refresh
   // materializes it. Refreshing first leaves one frame with no owner and, if
   // no hook follows, leaves it that way indefinitely.
-  seatLedgerManagedTerm(term, worktree, agent);
+  //
+  // Which seat: the placement seat's, when it acts. `split` puts the pane
+  // beside its coordinator the way `term:split` does; `background` parks it
+  // as a detached agent — the roster row is its door back; anything else,
+  // and every failure on that road, is the tab every worker got before.
+  const room = await roomForWorker({ parent, worktree, seat });
+  const host = tabs.find((tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(parent)) ?? null;
+  if (room === "split" && host) {
+    const onStage = host.id === activeTabId && host.worktree === activeWorktreePath;
+    tileTermPane(host, term, agent ? { agent: agentSaidName(agent) } : {}, "down", onStage, parent);
+    schedulePaneAlignment(host);
+  } else if (room === "background") {
+    detachedAgents.set(term, worktree);
+    dropTermScreen(term);
+  } else {
+    seatLedgerManagedTerm(term, worktree, agent);
+  }
   void (async () => {
     try {
       await refreshWorktrees();

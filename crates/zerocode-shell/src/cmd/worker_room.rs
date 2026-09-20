@@ -48,7 +48,8 @@ use crate::systemone::{SCHEMA, Wire, request_body};
 /// p90 612, p95 633, max 649), so it costs nothing a measured answer would
 /// have arrived inside; past it the row says `timeout`, which names a slow
 /// service as plainly as a missing row would not.
-const WORKER_ROOM_DEADLINE: Duration = Duration::from_millis(2_000);
+const WORKER_ROOM_DEADLINE: Duration =
+    Duration::from_millis(zerocode_core::jev::PLACEMENT_APPLY_DEADLINE_MS);
 
 /// The row's outcome for a question Jev answered in shape.
 const ANSWERED: &str = "answered";
@@ -97,8 +98,10 @@ pub(crate) struct WorkerRoomJudged {
     outcome: String,
     /// The room the judgment named, when one came back whole.
     chosen: Option<String>,
-    /// Whether anything was DONE about it. False on every row this seat can
-    /// write: the use offers no mode that applies.
+    /// Whether the seat acts right now — a person's `on`, or `auto` raised by
+    /// the judge its own ledger recorded — so the surface that asked seats
+    /// the worker where the answer says (`ui/shell.js`, `term:worker`) and
+    /// otherwise only records what it would have done.
     applied: bool,
     /// The rooms the question offered, in the order it offered them.
     offered: Vec<String>,
@@ -190,7 +193,7 @@ fn judged(wire: &Wire, look: &WorkerRoomLook, now_ms: i64) -> WorkerRoomJudged {
         // Whether anything was done about the answer. `false` on every row
         // this seat can write, and here rather than inferred from the mode so
         // a reader of the ledger alone can separate the two populations.
-        "applied": mode.applies(),
+        "applied": crate::systemone::applies(wire, &PLACEMENT),
         REQUESTS_KEY: 0,
         REDACTED_LINES_KEY: 0,
     });
@@ -220,7 +223,7 @@ fn judged(wire: &Wire, look: &WorkerRoomLook, now_ms: i64) -> WorkerRoomJudged {
             WorkerRoomJudged {
                 outcome: ANSWERED.to_string(),
                 chosen: Some(pick.chosen.key().to_string()),
-                applied: mode.applies(),
+                applied: crate::systemone::applies(wire, &PLACEMENT),
                 offered,
             }
         }
@@ -229,7 +232,7 @@ fn judged(wire: &Wire, look: &WorkerRoomLook, now_ms: i64) -> WorkerRoomJudged {
             WorkerRoomJudged::unanswered(&token, offered)
         }
     };
-    crate::systemone::append_rows(&ledger, std::slice::from_ref(&row));
+    crate::systemone::record_rows(&PLACEMENT, &ledger, std::slice::from_ref(&row), now_ms);
     judged
 }
 
@@ -538,17 +541,17 @@ mod tests {
         assert_eq!(PLACEMENT.ledger, "worker-placement.jsonl");
     }
 
-    /// The seat this door belongs to promises no apply, and the door's answer
-    /// cannot claim one. Said as a test rather than as a comment because the two
-    /// halves are in different crates: a mode added to the table would otherwise
-    /// start moving panes through a road nothing has pointed at a surface yet.
+    /// The seat offers a mode that applies (2026-09-20: every seat records
+    /// under `auto` and acts once its evidence stands), and the door's answer
+    /// says whether it does right now, so the surface that seats the worker
+    /// reads one word rather than the table and the ledger both.
     #[test]
-    fn the_seat_promises_no_apply_while_nothing_carries_one_out() {
+    fn the_seat_offers_apply_and_the_answer_says_whether_it_acts() {
         assert!(
-            !PLACEMENT.modes.iter().any(|mode| mode.applies()),
-            "the placement seat offers a mode that applies, and the window still \
-             puts every worker in one room: {:?}",
+            PLACEMENT.modes.iter().any(|mode| mode.applies()),
+            "{:?}",
             PLACEMENT.modes
         );
+        const { assert!(PLACEMENT.promotes) };
     }
 }

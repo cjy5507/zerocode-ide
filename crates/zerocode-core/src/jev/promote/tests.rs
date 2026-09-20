@@ -592,3 +592,61 @@ fn label_drafts_are_off_until_a_person_says_otherwise() {
         &json!({"smart": {"jev": {"labelDrafts": true}}})
     ));
 }
+
+/// The table-driven judge: an orchestration seat rises on its own rows —
+/// enough of them, answered, in time, and marked `agreed` with what the
+/// coordinator or the window's rule did — and is due every twenty requests.
+#[test]
+fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
+    use serde_json::json;
+    let seat = &crate::jev::SUMMON;
+    let floor = seat.answer_floor_permille.expect("summon rises");
+    let wanted = rows_that_can_clear(floor);
+    let row = |at: i64, agreed: bool| json!({"at": at, "outcome": "answered", "elapsedMs": 600, "requests": 1, "agreed": agreed});
+    // Thin: held short of rows, and not yet due.
+    let thin: Vec<serde_json::Value> = (0..3).map(|at| row(at, true)).collect();
+    let judged = judge_seat(seat, &thin).expect("a promoting seat is judged");
+    assert_eq!(judged.window_wanted, wanted);
+    assert!(matches!(
+        judged.verdict,
+        Verdict::Hold(Line::TooFewRows { rows: 3, .. })
+    ));
+    assert!(!judgment_due(&thin));
+    assert!(judgment_due(
+        &(0..JUDGED_EVERY_ROWS as i64)
+            .map(|at| row(at, true))
+            .collect::<Vec<_>>()
+    ));
+    // Full and agreeing: rises.
+    let full: Vec<serde_json::Value> = (0..wanted as i64).map(|at| row(at, true)).collect();
+    let judged = judge_seat(seat, &full).expect("judged");
+    assert_eq!(judged.verdict, Verdict::Rise, "{judged:?}");
+    assert_eq!(judged.agreement.compared, wanted);
+    // Full but disagreeing with the coordinator every other time (this
+    // machine's summon seat: 0 of 13): holds on the agreement line.
+    let half: Vec<serde_json::Value> = (0..wanted as i64).map(|at| row(at, at % 2 == 0)).collect();
+    assert!(matches!(
+        judge_seat(seat, &half).expect("judged").verdict,
+        Verdict::Hold(Line::Agreement { .. })
+    ));
+    // A label row's mark counts too, and only from the window's first row on.
+    let mut labelled: Vec<serde_json::Value> = (0..wanted as i64)
+        .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 600, "requests": 1}))
+        .collect();
+    labelled.extend(
+        (0..wanted as i64).map(|at| json!({"at": at, "label": format!("k{at}"), "agreed": true})),
+    );
+    labelled.push(json!({"at": -5, "label": "old", "agreed": false}));
+    let judged = judge_seat(seat, &labelled).expect("judged");
+    assert_eq!(
+        judged.agreement,
+        Agreement {
+            compared: wanted,
+            agreed: wanted
+        },
+        "the old mark is outside the window"
+    );
+    assert_eq!(judged.verdict, Verdict::Rise);
+    // A seat the table says never rises is not judged.
+    assert_eq!(judge_seat(&crate::jev::RECALL, &full), None);
+}

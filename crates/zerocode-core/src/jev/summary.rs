@@ -103,6 +103,15 @@ pub const TRANSITION: LedgerKey = LedgerKey {
     canonical: "transition",
     also: &[],
 };
+/// Whether the judgment named what the reader it would replace named — the
+/// coordinator's pinned agent, the room the layout rule chose, what followed
+/// a silence. Written by the seat that knows both, on the request's own row
+/// or on a later label row; the judge counts every row that carries it
+/// ([`agreement_since`]).
+pub const AGREED: LedgerKey = LedgerKey {
+    canonical: "agreed",
+    also: &[],
+};
 
 /// Every key this module reads, so a contract can walk them.
 pub const LEDGER_KEYS: &[LedgerKey] = &[
@@ -114,6 +123,7 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     CACHED,
     INPUT_TOKENS,
     TRANSITION,
+    AGREED,
 ];
 
 /// The word a row carries when its judgment answered and passed its checks.
@@ -314,6 +324,25 @@ pub fn failures_in_a_row(rows: &[Value]) -> u32 {
         }
     }
     held
+}
+
+/// How often, at or after `since_ms`, a row said the judgment agreed with the
+/// reader it would replace — one comparison per row that carries
+/// [`AGREED`], asked rows and label rows alike.
+#[must_use]
+pub fn agreement_since(rows: &[Value], since_ms: i64) -> crate::jev::promote::Agreement {
+    let mut agreement = crate::jev::promote::Agreement::default();
+    for row in rows {
+        let Some(agreed) = AGREED.read(row).and_then(Value::as_bool) else {
+            continue;
+        };
+        if AT.read(row).and_then(Value::as_i64).unwrap_or(0) < since_ms {
+            continue;
+        }
+        agreement.compared += 1;
+        agreement.agreed += usize::from(agreed);
+    }
+    agreement
 }
 
 /// Whether an outcome token is the door's — a request that was never sent.

@@ -11071,6 +11071,21 @@ pub trait Launcher {
         Err(format!("this launcher cannot resume {agent}"))
     }
 
+    /// The agent the summon seat chooses for a summons typed `--agent auto`,
+    /// among `options` — the agents this machine could start right now —
+    /// for the work `look` describes. `None` when the seat does not act
+    /// (its mode is not `on`, or `auto` not yet raised by its own evidence,
+    /// docs/design/jev-settings-20260917.md §4), when the door refuses, or
+    /// when nothing came back whole; the summons is then refused by name
+    /// rather than landed on a guess. The default is a launcher with no seat.
+    fn choose_agent(
+        &self,
+        _look: &crate::summon_choice::SummonLook<'_>,
+        _options: &[crate::summon_choice::Summonable],
+    ) -> Option<String> {
+        None
+    }
+
     /// What this machine actually has, one row per agent the catalog knows.
     ///
     /// The ledger cannot look for itself — it reads no `PATH` and stats no
@@ -11455,7 +11470,8 @@ pub const RESUME_NOT_SUBMITTED: &str = "not_submitted";
 /// the conversation — the table refuses one with a prompt after it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransientErrorMarker {
-    /// Where the words were read: `transcript` (Claude), `rollout` (Codex).
+    /// Where the words were read: `transcript` (Claude), `rollout` (Codex),
+    /// or [`JEV_MARKER_SOURCE`] — the stall seat's own answer, when it acts.
     pub source: String,
     /// The provider's sentence as the agent recorded it.
     pub line: Text,
@@ -11463,6 +11479,13 @@ pub struct TransientErrorMarker {
     /// `turn_id` — so one error is typed at once however many beats see it.
     pub key: String,
 }
+
+/// The marker source that names the stall seat's answer rather than a
+/// provider's sentence. A seat that acts (`on`, or `auto` raised on its own
+/// evidence — docs/design/jev-settings-20260917.md §4) is the standing order
+/// for the continuation it asks for, so [`resume_plan`] does not also ask for
+/// `--on-transient-error resume`; every other line of the plan still holds.
+pub const JEV_MARKER_SOURCE: &str = "jev";
 
 /// One continuation the beat may type now — what [`resume_plan`] makes of a
 /// quiet worker, its marker and the run's declared order.
@@ -11543,11 +11566,12 @@ pub fn resume_plan(
     now_ms: i64,
 ) -> Result<ResumePlan, NotResumed> {
     let refused = |why: String| Err(NotResumed::Refused(why));
-    if run
-        .handover
-        .as_ref()
-        .and_then(|policy| policy.on_transient_error)
-        != Some(OnTransientError::Resume)
+    if marker.source != JEV_MARKER_SOURCE
+        && run
+            .handover
+            .as_ref()
+            .and_then(|policy| policy.on_transient_error)
+            != Some(OnTransientError::Resume)
     {
         return refused("no standing order says --on-transient-error resume".into());
     }
@@ -12904,6 +12928,11 @@ struct WorkerStartRequest<'a> {
 ///
 /// Recorded, never acted on: [`crate::jev::SUMMON`] offers no mode that
 /// applies, and the three words below summoned this worker.
+/// The agent word that hands a summons to the summon seat: `worker-start
+/// --agent auto`. Not an agent id — the catalog has none by this name — so
+/// the road that resolves it is the only road it can take.
+pub const SUMMON_AUTO_AGENT: &str = "auto";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SummonShadow {
     /// The three words this summons landed on, after the quota gate had its
@@ -12917,6 +12946,10 @@ pub struct SummonShadow {
     /// evidence about the judgment, and separating the two is the reader's
     /// job, not the asker's.
     pub model_was_pinned: bool,
+    /// Whether the seat itself chose the agent (`--agent auto`): the row then
+    /// carries no `agreed` mark, because there was no coordinator's word to
+    /// agree with — the seat's answer WAS the word.
+    pub auto: bool,
     /// The head of the summons' brief, cut to the use's cap.
     pub brief: String,
     /// Characters of the WHOLE brief, which the cut throws away.
@@ -15308,6 +15341,42 @@ fn plan_inner(
                      worker's quota is the server window's to judge"
                     .to_string());
             }
+            /* `--agent auto`: the summon seat picks. Resolved HERE, before the
+             * quota gate and the mint, so everything below — the gauge, the
+             * catalog, the receipt — sees the agent that will actually run
+             * and the selection contract's "exactly the agent it was given"
+             * still holds: what it was given is the seat's word, and the
+             * receipt says so (`SummonShadow::auto`). A seat that does not
+             * act refuses the summons by name rather than landing a guess:
+             * a worker nobody chose is the one thing this road may not
+             * produce. */
+            let (agent, agent_by_seat) = if agent == SUMMON_AUTO_AGENT {
+                let brief_words = match asked.is_empty() {
+                    false => asked,
+                    true => task_title.as_deref().unwrap_or_default(),
+                };
+                let (brief, brief_chars) = crate::summon_choice::brief_shape(brief_words);
+                let look = crate::summon_choice::SummonLook {
+                    brief: &brief,
+                    brief_chars,
+                    worktree: words.has("--worktree"),
+                    replaces_an_attempt: words.value("--retry-of").is_some(),
+                    carries_a_task: task.is_some(),
+                };
+                let chosen = launcher
+                    .choose_agent(&look, &summonable(launcher, now_ms))
+                    .ok_or_else(|| {
+                        format!(
+                            "--agent {SUMMON_AUTO_AGENT}: the summon seat chose nothing — it \
+                             acts under `on`, or under `auto` once its own evidence stands \
+                             (smart.{}); name the agent",
+                            crate::jev::SUMMON.setting
+                        )
+                    })?;
+                (chosen, true)
+            } else {
+                (agent, false)
+            };
             let requested = Pinned {
                 agent: agent.clone(),
                 model,
@@ -15591,6 +15660,7 @@ fn plan_inner(
                         effort: effort.clone(),
                     },
                     model_was_pinned: model.is_some(),
+                    auto: agent_by_seat,
                     brief,
                     brief_chars,
                     worktree: isolated,

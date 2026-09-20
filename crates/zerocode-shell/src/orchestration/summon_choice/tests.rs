@@ -20,6 +20,7 @@ fn shadow() -> SummonShadow {
             effort: Some("max".to_string()),
         },
         model_was_pinned: true,
+        auto: false,
         brief: "measure the terminal's frame time again and put the numbers in the commit"
             .to_string(),
         brief_chars: 2_480,

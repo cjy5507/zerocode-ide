@@ -219,3 +219,28 @@ fn the_transcript_tail_is_the_boards_turns_one_line_each() {
             .is_some_and(|line| line.starts_with("assistant: turn 499 "))
     );
 }
+
+/// Every cause that leads somewhere names where; `unknown` leaves no mark.
+/// A cause added to the table without a follow-up here would let a label row
+/// carry no `agreed` mark for it, silently, and the judge would never see
+/// that seat's answers to it.
+#[test]
+fn every_cause_but_unknown_names_what_follows_it() {
+    for cause in Cause::ALL {
+        assert_eq!(
+            expected_followed(cause).is_some(),
+            cause != Cause::Unknown,
+            "{}",
+            cause.word()
+        );
+    }
+    assert_eq!(expected_followed(Cause::QuotaWall), Some(Followed::Resumed));
+    assert_eq!(
+        expected_followed(Cause::WaitingOnOwnCliQuestion),
+        Some(Followed::Mail)
+    );
+    assert_eq!(
+        expected_followed(Cause::FinishedWithoutReport),
+        Some(Followed::WorkerDone)
+    );
+}

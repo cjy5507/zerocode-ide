@@ -290,6 +290,25 @@ fn newest_within<S: AsRef<str>>(lines: &[S], cap: usize) -> String {
         .join("\n")
 }
 
+/// What a cause leads to, when it leads anywhere in particular — the mark a
+/// label row carries for the judge (§4 of the settings design): the answer
+/// was right when what followed the silence is what its cause leads to. A
+/// transient error and a quota wall lead to a continuation or a handover
+/// (`Resumed`); a worker waiting on its own CLI's question needs a word from
+/// its coordinator (`Mail`); one that finished without reporting reports when
+/// asked (`WorkerDone`); a long tool and a person at the keyboard lead to
+/// nothing the ledger does. `Unknown` leads nowhere, so it leaves no mark.
+#[must_use]
+pub const fn expected_followed(cause: Cause) -> Option<Followed> {
+    match cause {
+        Cause::TransientApiError | Cause::QuotaWall => Some(Followed::Resumed),
+        Cause::WaitingOnOwnCliQuestion => Some(Followed::Mail),
+        Cause::FinishedWithoutReport => Some(Followed::WorkerDone),
+        Cause::LongRunningTool | Cause::HumanTookOver => Some(Followed::Nothing),
+        Cause::Unknown => None,
+    }
+}
+
 /// What followed a silence — the first of these the ledger holds after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Followed {

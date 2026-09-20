@@ -37,6 +37,11 @@ pub const ZO_JEV_SUMMARY_ARGS: [&str; 3] = ["jev", "summary", "--json"];
 /// evidence — without it the card read all three as "never asked" with rows
 /// on disk (2026-09-20).
 pub const ZO_JEV_SUMMARY_SESSIONS_FLAG: &str = "--computer-use";
+/// The flag that names the project whose ledgers zo counts. Without it zo
+/// counted the window process's own working directory — never a project —
+/// and the card said "nothing asked yet" of a routing seat with 28 rows
+/// (2026-09-20, the person's screenshot).
+pub const ZO_JEV_SUMMARY_CWD_FLAG: &str = "--cwd";
 
 /// The keychain item the key lives in.
 #[must_use]
@@ -965,6 +970,10 @@ mod tests {
         assert!(
             zo.contains(&format!("[{ZO_JEV_SUMMARY_SESSIONS_FLAG} <sessions-dir>]")),
             "zo no longer documents `{ZO_JEV_SUMMARY_SESSIONS_FLAG}`"
+        );
+        assert!(
+            zo.contains(&format!("[{ZO_JEV_SUMMARY_CWD_FLAG} <dir>]")),
+            "zo no longer documents `{ZO_JEV_SUMMARY_CWD_FLAG}`"
         );
     }
 

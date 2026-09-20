@@ -355,6 +355,10 @@ pub(super) struct TermWorker {
     /// helper's own tab stood unreached (2026-09-13, "implement#0 눌러도
     /// 안 보임").
     pub(super) helper: Option<String>,
+    /// What the placement seat is asked about, for a fresh summons — the
+    /// surface asks the door and seats the pane where the answer says when
+    /// the seat acts (`judge_worker_room`); `None` seats it as a tab.
+    pub(super) seat: Option<agent_teams::WorkerSeatWords>,
 }
 
 /// The window carrying out what a team asked for.
@@ -757,6 +761,7 @@ impl agent_teams::Host for TeamWindow {
          * never happened does not leave an empty checkout behind. */
         let worker_host = agent_teams::take_worker_host_ask(token);
         let worker_surface = worker_host.is_some();
+        let seat_words = worker_host.as_ref().and_then(|ask| ask.seat.clone());
         let restored = worker_host.as_ref().and_then(|ask| ask.resumed);
         let placement = worker_host
             .as_ref()
@@ -1187,6 +1192,7 @@ impl agent_teams::Host for TeamWindow {
                     agent: named.map(String::from),
                     resumed: restored.map(|one| one.as_str()),
                     helper,
+                    seat: seat_words,
                 },
             );
         } else {
@@ -1262,6 +1268,7 @@ impl agent_teams::Host for TeamWindow {
                 agent: Some(agent.to_string()),
                 resumed: Some(resumed.as_str()),
                 helper,
+                seat: None,
             },
         );
     }

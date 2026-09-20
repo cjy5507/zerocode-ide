@@ -181,9 +181,15 @@ fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
     let row = super::one(seat, &roots, None, None, 1_000, 0);
     assert!(matches!(row.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))));
 
-    // And a seat with no rise line is never judged at all.
-    let quiet = super::one(&zerocode_core::jev::STALL, &roots, None, None, 1_000, 0);
+    // And a seat with no rise line is never judged at all. Recall, not an
+    // orchestration seat: those rise now (2026-09-20), on the table's lines.
+    let quiet = super::one(&zerocode_core::jev::RECALL, &roots, None, None, 1_000, 0);
     assert_eq!(quiet.verdict(), None);
+    // An orchestration seat is judged by the table on its own rows: thin here.
+    write(home.path(), zerocode_core::jev::SUMMON.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5, "agreed": true})]);
+    let summon = super::one(&zerocode_core::jev::SUMMON, &roots, None, None, 1_000, 0);
+    assert!(matches!(summon.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))), "{:?}", summon.verdict());
+    assert_eq!(summon.judged.as_ref().map(|judged| judged.agreement.compared), Some(1));
 }
 
 /// A routing row as the executor writes one, with the probe's answer beside

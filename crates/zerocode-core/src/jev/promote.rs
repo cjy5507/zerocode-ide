@@ -26,9 +26,86 @@
 
 use serde_json::{Value, json};
 
+use crate::jev::JevUse;
+
 use crate::jev::summary::{
     AT, JUDGED_EVERY_ROWS, TRANSITION, Tally, WILSON_Z_95, rows_that_can_clear, wilson_lower,
 };
+
+/// What the judge said of a ledger's rows, and the window it said it on —
+/// the one reading a judge that writes transitions and a screen that shows
+/// the numbers both take.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Judged {
+    pub verdict: Verdict,
+    /// The window the lines were read over: the last requests the seat's
+    /// answer floor can be cleared on.
+    pub window: Tally,
+    /// How many requests that window wants before the floor can be cleared
+    /// at all, for a screen that says "17 of 73".
+    pub window_wanted: usize,
+    /// How often, over that window, the judgment named what the reader it
+    /// would replace named.
+    pub agreement: Agreement,
+}
+
+/// Judge a seat on its own ledger rows, by the table's lines alone: the
+/// window the seat's answer floor can be cleared on, the seat's apply wall,
+/// and the [`crate::jev::summary::AGREED`] marks its rows carry. `None` for
+/// a seat the table says never rises.
+///
+/// The orchestration seats are judged here, in the process that writes their
+/// rows (the window) and in the counter that shows them (`zo jev summary`),
+/// from one function. zo's routing seat keeps its own reading of agreement —
+/// the probe's answer beside the judgment's, axis by axis — and hands the
+/// rest to the same [`judge`].
+#[must_use]
+pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
+    let floor = seat.answer_floor_permille?;
+    let agreement_floor = seat.agreement_floor_permille?;
+    let deadline_ms = seat.apply_deadline_ms?;
+    let window_wanted = rows_that_can_clear(floor);
+    let held = crate::jev::summary::last_asked(rows, window_wanted);
+    let since_ms = held
+        .first()
+        .and_then(|row| AT.read(row).and_then(Value::as_i64))
+        .unwrap_or(i64::MIN);
+    let window = crate::jev::summary::summarize_rows(held.iter().copied(), i64::MIN);
+    let agreement = crate::jev::summary::agreement_since(rows, since_ms);
+    let verdict = judge(
+        stand_from(rows),
+        &Evidence {
+            window: &window,
+            floor_permille: floor,
+            deadline_ms,
+            agreement_floor_permille: agreement_floor,
+            agreement,
+            labels: None,
+            fallbacks_in_a_row: crate::jev::summary::failures_in_a_row(rows),
+        },
+    );
+    Some(Judged {
+        verdict,
+        window,
+        window_wanted,
+        agreement,
+    })
+}
+
+/// Whether the rows say a judgment is due: every [`JUDGED_EVERY_ROWS`]
+/// requests, or at once for an acting seat that has fallen back
+/// [`FALLBACKS_THAT_END_IT`] times running (§4).
+#[must_use]
+pub fn judgment_due(rows: &[Value]) -> bool {
+    let asked = rows
+        .iter()
+        .filter(|row| crate::jev::summary::asked_something(row).is_some())
+        .count();
+    let at_boundary = asked > 0 && asked % JUDGED_EVERY_ROWS == 0;
+    let ending_it = stand_from(rows) == Stand::Applying
+        && crate::jev::summary::failures_in_a_row(rows) >= FALLBACKS_THAT_END_IT;
+    at_boundary || ending_it
+}
 
 /// The word every schema refusal's token is built from: zo writes it alone
 /// when a reply failed its checks, and [`crate::jev::choice::ChoiceRefusal`]

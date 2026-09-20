@@ -171,11 +171,48 @@ pub(crate) enum WorkerHostPlacement {
     Existing(String),
 }
 
+/// What the placement seat is asked about when this pane is seated: the
+/// summons' own words, cut to the seat's cap, and the ids its row is about.
+/// Carried on the `term:worker` event so the surface that seats the pane
+/// (`ui/shell.js`) can ask the door with what it knows — panes, the room in
+/// front, whether anybody is at the keyboard — and the words it does not.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkerSeatWords {
+    pub(crate) run: String,
+    pub(crate) worker: String,
+    pub(crate) dispatch: Option<String>,
+    pub(crate) task: Option<String>,
+    pub(crate) brief: String,
+    pub(crate) brief_chars: usize,
+}
+
+impl WorkerSeatWords {
+    /// The words of a fresh summons, cut to the placement seat's cap.
+    pub(crate) fn of(prepared: &zerocode_core::orchestration::PreparedWorkerStart) -> Self {
+        Self {
+            run: prepared.run.clone(),
+            worker: prepared.worker.clone(),
+            dispatch: prepared.dispatch.clone(),
+            task: prepared.task.clone(),
+            brief: zerocode_core::jev::door::cut(
+                &prepared.prompt,
+                zerocode_core::jev::Cap::Chars(zerocode_core::jev::PLACEMENT_BRIEF_CHAR_CAP),
+            )
+            .to_string(),
+            brief_chars: prepared.prompt.chars().count(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkerHostSpec {
     pub(crate) placement: WorkerHostPlacement,
     pub(crate) prompt: String,
     pub(crate) timeout_ms: u32,
+    /// The placement seat's question, for a fresh summons; a restart's
+    /// reseat asks nothing — the pane goes back where it was.
+    pub(crate) seat: Option<WorkerSeatWords>,
     /// Present only for a restart restoration. The production host withholds
     /// `term:worker` until the durable reseat succeeds, then publishes this
     /// birth fact with the event.

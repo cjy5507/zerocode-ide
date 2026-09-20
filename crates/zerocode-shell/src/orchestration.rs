@@ -3914,7 +3914,29 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
         let transient = asked
             .then(|| host.provider_session(one.term)?.transcript_path)
             .flatten()
-            .and_then(|path| crate::quota_wall::transient_error_for(&one.agent, Path::new(&path)));
+            .and_then(|path| crate::quota_wall::transient_error_for(&one.agent, Path::new(&path)))
+            /* The stall seat's own answer, when the seat acts (§4): a silence
+             * the provider's words did not name, that the seat read as a
+             * transient error, is typed a continuation exactly as a marker
+             * would be — the same plan, the same receipts — with the seat as
+             * the standing order (`JEV_MARKER_SOURCE`). Keyed by the silence,
+             * so one answer is typed once however many beats see it. */
+            .or_else(|| {
+                (stall_cause::acting_cause(host, &held.stalls, &one.dispatch)
+                    == Some(zerocode_core::stall_cause::Cause::TransientApiError))
+                .then(|| zerocode_core::orchestration::TransientErrorMarker {
+                    source: zerocode_core::orchestration::JEV_MARKER_SOURCE.to_string(),
+                    line: zerocode_core::stall_cause::Cause::TransientApiError
+                        .word()
+                        .into(),
+                    key: format!(
+                        "{}:{}@{}",
+                        zerocode_core::orchestration::JEV_MARKER_SOURCE,
+                        one.dispatch,
+                        one.since_ms
+                    ),
+                })
+            });
         match transient {
             Some(marker) => stopped.push((one, marker)),
             None => {
@@ -5607,6 +5629,14 @@ impl Catalog {
 }
 
 impl Launcher for Catalog {
+    fn choose_agent(
+        &self,
+        look: &zerocode_core::summon_choice::SummonLook<'_>,
+        options: &[zerocode_core::summon_choice::Summonable],
+    ) -> Option<String> {
+        summon_choice::choose(look, options)
+    }
+
     fn command_for(&self, agent: &str, prompt: &str, tuning: &[String]) -> Result<String, String> {
         let Some(spec) = agent_spec(agent) else {
             return Err(format!("no agent is called {agent}"));
@@ -6146,6 +6176,7 @@ fn carried(
                     prompt: prepared.prompt.clone(),
                     timeout_ms: prepared.prompt_timeout_ms,
                     resumed: None,
+                    seat: Some(crate::agent_teams::WorkerSeatWords::of(prepared)),
                 })
                 .or_else(|| {
                     reseating
@@ -6157,6 +6188,7 @@ fn carried(
                             prompt: prepared.prompt.clone(),
                             timeout_ms: prepared.prompt_timeout_ms,
                             resumed: Some(prepared.resumed),
+                            seat: None,
                         })
                 });
             let _worker_host = worker_host

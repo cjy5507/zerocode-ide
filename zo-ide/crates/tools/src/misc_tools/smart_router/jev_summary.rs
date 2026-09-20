@@ -63,11 +63,11 @@ pub struct SeatReport {
     /// the seat never rises or the window is empty.
     pub clears_rise_floor: Option<bool>,
     /// The window the judge read — the last requests the seat's floor can be
-    /// cleared on — with how often the judgment agreed with the probe over it.
-    /// `None` for a seat that never rises. It is not the week: the week is
-    /// a clock and the window is a count, and the numbers a seat is promoted
-    /// on are these.
-    pub judged: Option<super::decision_shadow::Judged>,
+    /// cleared on — with how often the judgment agreed with the reader it
+    /// would replace over it. `None` for a seat that never rises. It is not
+    /// the week: the week is a clock and the window is a count, and the
+    /// numbers a seat is promoted on are these.
+    pub judged: Option<promote::Judged>,
     /// Every request the ledger holds, whatever its age — what the judgment's
     /// cadence counts.
     pub asked_ever: usize,
@@ -104,8 +104,7 @@ impl SeatReport {
 /// to time it cannot slip through.
 #[must_use]
 pub fn deadline_ms_for(seat: &JevUse) -> Option<u64> {
-    (seat.id == zerocode_core::jev::ROUTING.id)
-        .then(|| u64::try_from(super::decision_shadow::DECISION_ACTIVE_DEADLINE.as_millis()).unwrap_or(u64::MAX))
+    seat.apply_deadline_ms
 }
 
 /// Both roots a seat's ledger may live under, in the order they are asked.
@@ -184,11 +183,15 @@ fn one(
     let week = summary::summarize(&rows, now_ms - WINDOW_DAYS * MS_PER_DAY);
     let cost_usd = cost_of(week.input_tokens);
     let asked_ever = rows.iter().filter(|row| asked_something(row).is_some()).count();
-    // The judge's own reading of the same rows, for the one seat that rises;
-    // not a second Evidence built here from the week.
-    let judged = (seat.id == zerocode_core::jev::ROUTING.id)
-        .then(|| super::decision_shadow::judge_rows(&rows, settings))
-        .flatten();
+    // The judge's own reading of the same rows, not a second Evidence built
+    // here from the week: routing reads its agreement off the probe beside
+    // the judgment, every other rising seat off the `agreed` marks its own
+    // writer left (the window's orchestration seats).
+    let judged = if seat.id == zerocode_core::jev::ROUTING.id {
+        super::decision_shadow::judge_rows(&rows, settings)
+    } else {
+        promote::judge_seat(seat, &rows)
+    };
     let clears_rise_floor = seat.answer_floor_permille.and_then(|floor| {
         judged.as_ref()?.window.answered_lower_bound().map(|bound| clears(bound, floor))
     });

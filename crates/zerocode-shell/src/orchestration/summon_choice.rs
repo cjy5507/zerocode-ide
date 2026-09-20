@@ -43,7 +43,8 @@ use crate::systemone::{SCHEMA, Wire, request_body};
 /// (docs/design/jev-token-diet-20260917.md §1.5); ten seconds keeps that tail
 /// and calls anything past it `timeout`, which says the service was slow as
 /// plainly as a missing row would not.
-pub(crate) const SUMMON_CHOICE_DEADLINE: Duration = Duration::from_secs(10);
+pub(crate) const SUMMON_CHOICE_DEADLINE: Duration =
+    Duration::from_millis(zerocode_core::jev::SUMMON_APPLY_DEADLINE_MS);
 
 /// The row's outcome for a question Jev answered in shape.
 const ANSWERED: &str = "answered";
@@ -53,9 +54,10 @@ const ANSWERED: &str = "answered";
 const ONE_OPTION: &str = "one_option";
 
 /// Append one row through the window's one Jev-ledger door
-/// ([`crate::systemone::append_rows`]).
-fn append(ledger: &Path, row: &Value) {
-    crate::systemone::append_rows(ledger, std::slice::from_ref(row));
+/// ([`crate::systemone::record_rows`]) — which also judges the seat when a
+/// judgment is due, on the `agreed` marks these rows carry.
+fn append(ledger: &Path, row: &Value, now_ms: i64) {
+    crate::systemone::record_rows(&SUMMON, ledger, std::slice::from_ref(row), now_ms);
 }
 
 /// Who the row is about: the reservation's own ids, which are the only part
@@ -133,7 +135,7 @@ pub(super) fn record(
     let Some(ask) = summon_choice::ask(&shadow.look(), &shadow.options) else {
         row["outcome"] = json!(ONE_OPTION);
         row["options"] = json!(agent_ids(&shadow));
-        append(&ledger, &row);
+        append(&ledger, &row, now_ms);
         return;
     };
     let checkout = checkout.map(PathBuf::from);
@@ -141,6 +143,7 @@ pub(super) fn record(
         append(
             &ledger,
             &settle(&wire, row, &ask, &shadow, checkout.as_deref()),
+            now_ms,
         );
     }));
 }
@@ -190,7 +193,12 @@ fn settle(
             // The one number this ledger exists to produce: how often the
             // coordinator's typing and a judgment of the work land on the
             // same agent.
-            row["agreed"] = json!(pick.chosen == shadow.pinned.agent);
+            // No mark on a summons the seat itself chose for: there was no
+            // coordinator's word to agree with, and a row that agreed with
+            // its own answer would be a judge grading itself.
+            if !shadow.auto {
+                row["agreed"] = json!(pick.chosen == shadow.pinned.agent);
+            }
             row["probabilities"] = json!(pick.probabilities);
             row["confidence"] = json!(pick.confidence);
         }
@@ -201,3 +209,25 @@ fn settle(
 
 #[cfg(test)]
 mod tests;
+
+/// The seat's own pick for a summons typed `--agent auto`
+/// ([`zerocode_core::orchestration::Launcher::choose_agent`]): asked on the
+/// beat, because the summons waits for it, and only when the seat acts —
+/// a person's `on`, or `auto` raised by the judge its own ledger recorded.
+/// `None` is a refusal the caller names; a guess is never handed back.
+pub(crate) fn choose(
+    look: &zerocode_core::summon_choice::SummonLook<'_>,
+    options: &[zerocode_core::summon_choice::Summonable],
+) -> Option<String> {
+    let wire = Wire::of_this_machine();
+    if !crate::systemone::applies(&wire, &SUMMON) {
+        return None;
+    }
+    let ask = summon_choice::ask(look, options)?;
+    let body = crate::systemone::request_body(&ask.state, &ask.questions);
+    let answer = wire.ask(&SUMMON, None, body, SUMMON_CHOICE_DEADLINE);
+    let parsed: Value = serde_json::from_str(&answer.answer.ok()?).ok()?;
+    ask.read(parsed.get("answers")?)
+        .ok()
+        .map(|pick| pick.chosen)
+}

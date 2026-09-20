@@ -98,6 +98,63 @@ pub fn ledger_of(wire: &Wire, row: &JevUse) -> Option<PathBuf> {
     )
 }
 
+/// Append `rows` to one use's ledger, and judge the seat on them when a
+/// judgment is due (§4): every twenty requests, or at once for an acting seat
+/// that has fallen back three times running. A rise or a fall is written
+/// beside the rows it was decided on, so the seat's standing and the rows it
+/// was earned on cannot be found apart — the same road zo's routing seat
+/// walks (`decision_shadow::judge_ledger`).
+///
+/// This is the one road a window seat's rows take: the writer that appended
+/// is the one that judges, so a seat that only ever recorded could not have
+/// been left at `auto` with nothing deciding (2026-09-20, "전부 자동 기록하며
+/// 실제 적용되어야").
+pub fn record_rows(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64) {
+    append_rows(ledger, rows);
+    if !seat.promotes {
+        return;
+    }
+    let held = read_rows(ledger);
+    if !zerocode_core::jev::promote::judgment_due(&held) {
+        return;
+    }
+    let Some(judged) = zerocode_core::jev::promote::judge_seat(seat, &held) else {
+        return;
+    };
+    if let Some(row) =
+        zerocode_core::jev::promote::transition_row(now_ms, judged.verdict, &judged.window)
+    {
+        append_rows(ledger, std::slice::from_ref(&row));
+    }
+}
+
+/// Every row of one use's ledger, newest last — the same reader zo's counter
+/// uses, so a judgment here and a number on the screen read one file one way.
+#[must_use]
+pub fn read_rows(ledger: &Path) -> Vec<Value> {
+    let Ok(text) = std::fs::read_to_string(ledger) else {
+        return Vec::new();
+    };
+    text.lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect()
+}
+
+/// Whether a seat acts right now: a person's `on`, or `auto` raised by the
+/// judge its own ledger recorded (§4). Read where the seat is about to act,
+/// so the answer and the standing come from the same file.
+#[must_use]
+pub fn applies(wire: &Wire, seat: &JevUse) -> bool {
+    let mode = seat.mode_in(&wire.settings_root());
+    let raised = ledger_of(wire, seat)
+        .map(|ledger| {
+            zerocode_core::jev::promote::stand_from(&read_rows(&ledger))
+                == zerocode_core::jev::promote::Stand::Applying
+        })
+        .unwrap_or(false);
+    mode.applies_with(raised)
+}
+
 /// Append `rows` to one use's ledger.
 ///
 /// A ledger that will not take them is said once on stderr and never raised:

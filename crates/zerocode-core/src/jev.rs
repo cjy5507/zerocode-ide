@@ -260,6 +260,11 @@ pub struct JevUse {
     /// rises with no labels to hand (§4) — a route-change budget. A use that
     /// does not promote names none; a contract holds it to the rise line.
     pub agreement_floor_permille: Option<u16>,
+    /// The wall the apply stage waits for an answer, in milliseconds — the
+    /// latency line a rising seat is judged against (§4), spelled once here
+    /// so the stage that waits and the judge that reads the wait cannot
+    /// disagree. A use that does not promote names none.
+    pub apply_deadline_ms: Option<u64>,
 }
 
 /// The routing seat's route-change budget: four compared axes in five must
@@ -294,7 +299,34 @@ pub const ROUTING: JevUse = JevUse {
     answer_floor_permille: Some(950),
     press_floor_permille: None,
     agreement_floor_permille: Some(ROUTE_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(ROUTING_APPLY_DEADLINE_MS),
 };
+
+/// The wall zo's routing waits for a judgment when the seat acts: the batch
+/// pays it at most once, every unique task running concurrently, and a task
+/// past it falls back to the chat probe (`decision_shadow`).
+pub const ROUTING_APPLY_DEADLINE_MS: u64 = 1_500;
+
+/// What an orchestration seat's answers must bound above to rise (§4):
+/// nine in ten. Lower than routing's line because a seat that does not answer
+/// costs nothing — the coordinator's own choice stands, as it did before the
+/// seat existed — where a routing miss holds a turn for its whole wall.
+pub const ORCHESTRATION_ANSWER_FLOOR_PERMILLE: u16 = 900;
+
+/// The orchestration seats' agreement line (§4): four in five of the
+/// judgments must have named what the coordinator, or the window's own rule,
+/// did — the summon's pinned agent, the room the layout rule chose, what
+/// followed a silence. The same budget as routing's, for the same reason: a
+/// seat that would have overruled the person every other time is not one to
+/// hand the decision to unasked.
+pub const ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
+
+/// The walls the window waits for the orchestration seats' answers — read
+/// by the seats that wait (`stall_cause`, `worker_room`, `summon_choice`)
+/// and by the judge, from here.
+pub const STALL_APPLY_DEADLINE_MS: u64 = 30_000;
+pub const PLACEMENT_APPLY_DEADLINE_MS: u64 = 2_000;
+pub const SUMMON_APPLY_DEADLINE_MS: u64 = 10_000;
 
 /// zo's recall rerank: how much each note a recall found helps with the
 /// request (docs/design/typesafe-judgment-expansion-20260917.md).
@@ -341,6 +373,7 @@ pub const RECALL: JevUse = JevUse {
     answer_floor_permille: None,
     press_floor_permille: None,
     agreement_floor_permille: None,
+    apply_deadline_ms: None,
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -423,6 +456,7 @@ pub const BROWSER: JevUse = JevUse {
     answer_floor_permille: None,
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
     agreement_floor_permille: None,
+    apply_deadline_ms: None,
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -453,6 +487,7 @@ pub const DESKTOP: JevUse = JevUse {
     answer_floor_permille: None,
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
     agreement_floor_permille: None,
+    apply_deadline_ms: None,
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
@@ -480,6 +515,7 @@ pub const EMULATOR: JevUse = JevUse {
     answer_floor_permille: None,
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
     agreement_floor_permille: None,
+    apply_deadline_ms: None,
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -490,7 +526,7 @@ pub const EMULATOR: JevUse = JevUse {
 pub const STALL: JevUse = JevUse {
     id: "stall",
     setting: "stallCause",
-    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     sends: &[
         Sent {
             at: "/state/screen",
@@ -502,10 +538,11 @@ pub const STALL: JevUse = JevUse {
         },
     ],
     ledger: "stall-cause.jsonl",
-    promotes: false,
-    answer_floor_permille: None,
+    promotes: true,
+    answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
     press_floor_permille: None,
-    agreement_floor_permille: None,
+    agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(STALL_APPLY_DEADLINE_MS),
 };
 
 /// The window's worker placement: which of [`PLACEMENT_OPTIONS`] a worker it
@@ -544,16 +581,17 @@ pub const STALL: JevUse = JevUse {
 pub const PLACEMENT: JevUse = JevUse {
     id: "placement",
     setting: "workerPlacement",
-    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     sends: &[Sent {
         at: "/state/brief",
         cap: Cap::Chars(PLACEMENT_BRIEF_CHAR_CAP),
     }],
     ledger: "worker-placement.jsonl",
-    promotes: false,
-    answer_floor_permille: None,
+    promotes: true,
+    answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
     press_floor_permille: None,
-    agreement_floor_permille: None,
+    agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(PLACEMENT_APPLY_DEADLINE_MS),
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -579,16 +617,17 @@ pub const PLACEMENT: JevUse = JevUse {
 pub const SUMMON: JevUse = JevUse {
     id: "summon",
     setting: "summonChoice",
-    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     sends: &[Sent {
         at: "/state/brief",
         cap: Cap::Chars(SUMMON_BRIEF_CHAR_CAP),
     }],
     ledger: "summon-choice.jsonl",
-    promotes: false,
-    answer_floor_permille: None,
+    promotes: true,
+    answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
     press_floor_permille: None,
-    agreement_floor_permille: None,
+    agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(SUMMON_APPLY_DEADLINE_MS),
 };
 
 /// Every place this product asks Jev something.

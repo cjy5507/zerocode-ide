@@ -83,6 +83,17 @@ fn review_facts_read_only_what_a_coordinator_wrote() {
 struct Catalog(&'static [&'static str]);
 
 impl Launcher for Catalog {
+    /// The test seat picks the first agent this catalog knows — a seat that
+    /// acts, so `--agent auto` has a road to land on; a launcher with no seat
+    /// keeps the trait's default and refuses.
+    fn choose_agent(
+        &self,
+        _look: &crate::summon_choice::SummonLook<'_>,
+        _options: &[crate::summon_choice::Summonable],
+    ) -> Option<String> {
+        self.0.first().map(|agent| (*agent).to_string())
+    }
+
     fn command_for(&self, agent: &str, prompt: &str, tuning: &[String]) -> Result<String, String> {
         if !self.0.contains(&agent) {
             return Err(format!("no agent here is called {agent}"));
@@ -2129,6 +2140,36 @@ fn a_lease_says_who_took_it_and_when_and_moves_to_the_holder_that_answers_now() 
     let behind = bench.json_at("%9", &format!("check --run {run_id}"));
     assert_eq!(behind["count"], 1);
     assert_eq!(behind["messages"][0]["body"], "and-this");
+}
+
+/// `worker-start --agent auto` lands on the agent the summon seat chose, and
+/// the receipt says the seat chose it; a launcher with no seat refuses the
+/// summons by name rather than landing a guess (2026-09-20, "전부 자동 기록
+/// 하며 실제 적용되어야").
+#[test]
+fn an_auto_summons_lands_on_the_seats_choice_and_says_so() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name auto-summons");
+    let (worker, _pane) = bench.seat("worker-start --agent auto --prompt look-at-this");
+    let at = bench.ledger.locate(&worker).expect("the worker");
+    let seated = &bench.ledger.runs[at.0].workers[at.1];
+    assert_eq!(seated.agent, "claude", "the test seat's first agent");
+    assert_ne!(
+        seated.agent, SUMMON_AUTO_AGENT,
+        "the word is never an agent"
+    );
+
+    let planned = bench.at(
+        agent_teams::LEADER_PANE,
+        "worker-start --agent auto --prompt again",
+    );
+    let shadow = planned
+        .prepared_worker_start
+        .as_ref()
+        .and_then(|prepared| prepared.summon_shadow.as_ref())
+        .expect("a summons with words is judged");
+    assert!(shadow.auto, "the receipt says the seat chose");
+    assert_eq!(shadow.pinned.agent, "claude");
 }
 
 /// Mail a released worker can never read is taken back by the run that

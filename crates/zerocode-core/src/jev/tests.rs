@@ -234,11 +234,17 @@ fn the_builders_cut_at_the_tables_caps() {
 /// A stall's answer is a row beside what the coordinator did, never an act:
 /// the use offers nothing that applies, and so nothing it could rise to.
 #[test]
-fn a_stall_question_offers_nothing_that_acts() {
-    assert!(STALL.modes.iter().all(|mode| !mode.applies()));
-    const { assert!(!STALL.promotes) };
-    assert_eq!(STALL.mode_of(Some(&json!("on"))), JevMode::Off);
+fn a_stall_question_acts_under_on_and_under_auto_once_its_evidence_stands() {
+    // 2026-09-20: "전부 자동 기록하며 실제 적용되어야" — a seat that only
+    // ever records is `shadow` under another name. `on` acts on a person's
+    // word; `auto` records until the judge raises it (§4) and acts after.
+    assert!(STALL.modes.contains(&JevMode::On));
+    const { assert!(STALL.promotes) };
+    assert_eq!(STALL.mode_of(Some(&json!("on"))), JevMode::On);
     assert_eq!(STALL.mode_of(Some(&json!("auto"))), JevMode::Auto);
+    assert!(STALL.mode_of(Some(&json!("on"))).applies());
+    assert!(!STALL.mode_of(Some(&json!("auto"))).applies_with(false));
+    assert!(STALL.mode_of(Some(&json!("auto"))).applies_with(true));
     assert_eq!(jev_use("stall"), Some(&STALL));
 }
 
@@ -251,11 +257,17 @@ fn a_stall_question_offers_nothing_that_acts() {
 /// would have chosen beside what the rule chose and what the person then did
 /// with it.
 #[test]
-fn a_placement_question_offers_nothing_that_acts() {
-    assert!(PLACEMENT.modes.iter().all(|mode| !mode.applies()));
-    const { assert!(!PLACEMENT.promotes) };
-    assert_eq!(PLACEMENT.mode_of(Some(&json!("on"))), JevMode::Off);
+fn a_placement_question_acts_under_on_and_under_auto_once_its_evidence_stands() {
+    // 2026-09-20: "전부 자동 기록하며 실제 적용되어야" — a seat that only
+    // ever records is `shadow` under another name. `on` acts on a person's
+    // word; `auto` records until the judge raises it (§4) and acts after.
+    assert!(PLACEMENT.modes.contains(&JevMode::On));
+    const { assert!(PLACEMENT.promotes) };
+    assert_eq!(PLACEMENT.mode_of(Some(&json!("on"))), JevMode::On);
     assert_eq!(PLACEMENT.mode_of(Some(&json!("auto"))), JevMode::Auto);
+    assert!(PLACEMENT.mode_of(Some(&json!("on"))).applies());
+    assert!(!PLACEMENT.mode_of(Some(&json!("auto"))).applies_with(false));
+    assert!(PLACEMENT.mode_of(Some(&json!("auto"))).applies_with(true));
     assert_eq!(jev_use("placement"), Some(&PLACEMENT));
 }
 
@@ -277,11 +289,17 @@ fn the_placement_options_are_the_three_the_window_can_actually_do() {
 /// use offers nothing that applies: a worker is summoned by what the caller
 /// asked for, and the row is evidence, not a substitution.
 #[test]
-fn a_summon_question_offers_nothing_that_acts() {
-    assert!(SUMMON.modes.iter().all(|mode| !mode.applies()));
-    const { assert!(!SUMMON.promotes) };
-    assert_eq!(SUMMON.mode_of(Some(&json!("on"))), JevMode::Off);
+fn a_summon_question_acts_under_on_and_under_auto_once_its_evidence_stands() {
+    // 2026-09-20: "전부 자동 기록하며 실제 적용되어야" — a seat that only
+    // ever records is `shadow` under another name. `on` acts on a person's
+    // word; `auto` records until the judge raises it (§4) and acts after.
+    assert!(SUMMON.modes.contains(&JevMode::On));
+    const { assert!(SUMMON.promotes) };
+    assert_eq!(SUMMON.mode_of(Some(&json!("on"))), JevMode::On);
     assert_eq!(SUMMON.mode_of(Some(&json!("auto"))), JevMode::Auto);
+    assert!(SUMMON.mode_of(Some(&json!("on"))).applies());
+    assert!(!SUMMON.mode_of(Some(&json!("auto"))).applies_with(false));
+    assert!(SUMMON.mode_of(Some(&json!("auto"))).applies_with(true));
     assert_eq!(jev_use("summon"), Some(&SUMMON));
 }
 

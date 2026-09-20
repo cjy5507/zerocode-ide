@@ -3,7 +3,7 @@ use crate::api_routers::{self, Keychain, RouterRefusal};
 use crate::typesafe_settings::{self, SeatNumbers, TypeSafeCheck, TypeSafeSettings};
 use tauri::State;
 
-use crate::AppState;
+use crate::*;
 
 fn settings_path() -> Result<std::path::PathBuf, RouterRefusal> {
     api_routers::zo_settings_path()
@@ -93,6 +93,10 @@ pub(crate) async fn jev_summary(state: State<'_, AppState>) -> Result<Vec<SeatNu
     let sessions = state
         .local_data_root()
         .join(crate::computer_use::evidence::SESSIONS_DIR);
+    // The project whose ledgers are counted: zo's routing and recall seats
+    // append under the project's own state directory, so the card asks about
+    // the checkout the person is looking at, not the window's cwd.
+    let project = state.active_root();
     tauri::async_runtime::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
         let bin = crate::zo_companion::zo_path_under(&home);
@@ -101,6 +105,8 @@ pub(crate) async fn jev_summary(state: State<'_, AppState>) -> Result<Vec<SeatNu
         }
         let output = crate::proc::quiet_command(&bin)
             .args(typesafe_settings::ZO_JEV_SUMMARY_ARGS)
+            .arg(typesafe_settings::ZO_JEV_SUMMARY_CWD_FLAG)
+            .arg(&project)
             .arg(typesafe_settings::ZO_JEV_SUMMARY_SESSIONS_FLAG)
             .arg(&sessions)
             .output()
