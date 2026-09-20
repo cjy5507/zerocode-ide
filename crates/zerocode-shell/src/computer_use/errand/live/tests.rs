@@ -211,10 +211,11 @@ fn a_server_slower_than_the_deadline_is_a_timeout_not_a_hang() {
 
     let began = std::time::Instant::now();
     assert_eq!(judge.choose(&asked()), Judged::Refused(TIMEOUT.to_string()));
+    let elapsed = began.elapsed();
+    println!("judgment call elapsed: {elapsed:?}");
     assert!(
-        began.elapsed() < ACTION_DEADLINE + Duration::from_millis(400),
-        "the deadline bounds the whole call: {:?}",
-        began.elapsed()
+        elapsed < ACTION_DEADLINE + Duration::from_millis(400),
+        "the deadline bounds the whole call: {elapsed:?}"
     );
 }
 

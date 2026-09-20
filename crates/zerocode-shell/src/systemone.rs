@@ -26,7 +26,7 @@
 //! the day's count.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 use zerocode_core::jev::door::{self, Cleared, JevSettings, Refused};
@@ -301,6 +301,7 @@ impl Wire {
         body: Value,
         deadline: Duration,
     ) -> Asked {
+        let deadline = Instant::now() + deadline;
         let refused = |refusal: Refused| Asked {
             answer: Err(refusal.token().to_string()),
             spent: Spent {
@@ -339,15 +340,23 @@ impl Wire {
         &self,
         key: &str,
         cleared: Cleared,
-        deadline: Duration,
+        deadline: Instant,
     ) -> Result<String, String> {
+        if Instant::now() >= deadline {
+            return Err(TIMEOUT.to_string());
+        }
         let client = reqwest::Client::builder()
-            .timeout(deadline)
             .build()
             .map_err(|_| TRANSPORT.to_string())?;
         let url = format!("{}{SYSTEMONE_PATH}", self.base.trim_end_matches('/'));
+        // Key/consent checks, runtime startup and client construction spend
+        // this call's budget too; the socket never starts a fresh deadline.
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or_else(|| TIMEOUT.to_string())?;
         let answer = client
             .post(&url)
+            .timeout(remaining)
             .header("Authorization", format!("Bearer {key}"))
             .header("Content-Type", "application/json")
             .body(cleared.into_bytes())

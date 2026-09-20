@@ -101,6 +101,30 @@ fn a_status_is_refused_by_the_one_table_of_words() {
     assert_eq!(token_for(500), "http_500");
 }
 
+#[test]
+fn an_expired_call_opens_no_socket() {
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", "{}".to_string(), 0);
+    let wire = Wire::at(&endpoint.base(), "test-key", None);
+    let settings = JevSettings::from_root(&Value::Null);
+    let cleared = door::may_check_key(
+        &door::Asking {
+            key: true,
+            settings: &settings,
+            workspace: None,
+            sent_today: 0,
+        },
+        &json!({}),
+    )
+    .expect("a key check carries no workspace words");
+
+    let answer = tauri::async_runtime::block_on(wire.ask_once("test-key", cleared, Instant::now()));
+    assert_eq!(answer, Err(TIMEOUT.to_string()));
+    assert!(
+        endpoint.asked().is_empty(),
+        "expiry cannot authorize a POST"
+    );
+}
+
 /// The window's System One requests carry the door's bytes: the wire's only
 /// POST sends a cleared body, and no other product file names the route.
 #[test]
