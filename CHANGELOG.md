@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.8] — 2026-09-20
+
+_since v1.1.7 (1 commits)_
+
+### fix
+- fix(window): seat a worker as a tab first and move it only on the placement seat's answer
+
 ## [1.1.7] — 2026-09-20
 
 _since v1.1.6 (1 commits)_
