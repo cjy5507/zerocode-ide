@@ -10432,8 +10432,19 @@ function holdHelperTurns(held, turns) {
         continue;
       }
     }
+    // A thought lasted until the next thing happened — the extension's
+    // 「Thought for 3s」. Only between stamps of one kind: the file's own
+    // clock and the window's are not the same clock.
+    // A length of nothing is no length: turns held in one read share one
+    // clock reading, and a file can stamp two lines alike.
+    const last = held.turns.at(-1);
+    const fromClock = turn.at_ms === undefined;
+    if (last?.role === "thinking" && last.thoughtMs === undefined && last.fromClock === fromClock) {
+      const lasted = (turn.at_ms ?? now) - last.at;
+      if (lasted > 0) last.thoughtMs = lasted;
+    }
     held.turns.push({ role: turn.role, text: turn.text, tool: turn.tool ?? null,
-      seq: held.seq, at: turn.at_ms ?? now });
+      seq: held.seq, at: turn.at_ms ?? now, fromClock });
     held.seq += 1;
   }
   if (held.turns.length > HELPER_TURN_CAP) {
@@ -10849,7 +10860,6 @@ async function setPaneChat(term, on) {
   if (on && await handPaneToWire(term)) return;
   held.on = on;
   held.arriving = on ? "chat" : "term";
-  if (on) held.freshSwitch = true;
   updateStage();
   paintViewToggle();
   helperClock.sync();
@@ -11339,7 +11349,9 @@ function helperTurnRowNode(run, turn, spoken) {
     if (briefing) row.dataset.tip = who;
     said.textContent = turn.text;
   } else {
-    row.className = `helper-turn is-${turn.role}`;
+    // The agent's rows stand on the timeline rail (`is-step`); a system line
+    // stands off it, the way the extension's meta messages do.
+    row.className = turn.role === "assistant" ? "helper-turn is-assistant is-step" : `helper-turn is-${turn.role}`;
     const clean = turn.role === "assistant" ? cleanseAssistantText(turn.text) : turn.text;
     paintHelperProse(said, clean || turn.text, helperBase(run));
   }
@@ -11357,7 +11369,7 @@ function helperTurnRowNode(run, turn, spoken) {
  * failed (halt). */
 function toolTurnNode(run, turn, spoken) {
   const row = document.createElement("article");
-  row.className = "helper-turn is-tool";
+  row.className = "helper-turn is-tool is-step";
   const call = document.createElement("p");
   call.className = "helper-tool-call";
   const name = document.createElement("span");
@@ -11494,12 +11506,26 @@ function thoughtTitle(text) {
   return bold.length > CHAT_FOLD_LIMIT ? `${bold.slice(0, CHAT_FOLD_LIMIT - 1)}…` : bold;
 }
 
+/* The fold's label: 「3초 동안 생각」 once the next thing happened (the
+ * extension's 「Thought for 3s」), the bare word until then. */
+function thoughtLabel(turn) {
+  if (turn.thoughtMs !== undefined) {
+    return t("worker.thoughtFor", "{{s}}초 동안 생각", { s: Math.max(1, Math.round(turn.thoughtMs / 1000)) });
+  }
+  return t("worker.thought", "생각");
+}
+
+function dressThoughtRow(row, turn) {
+  writeTextContent(row.querySelector(":scope > .helper-cap > .helper-who"), thoughtLabel(turn));
+}
+
 function thoughtTurnNode(run, turn) {
   const body = document.createElement("div");
   body.className = "helper-thought-body";
-  const row = foldCardNode("helper-turn is-thinking",
-    [foldWhoNode(t("worker.thought", "생각")), foldCueNode(thoughtTitle(turn.text))], body);
+  const row = foldCardNode("helper-turn is-thinking is-step",
+    [foldWhoNode(thoughtLabel(turn)), foldCueNode(thoughtTitle(turn.text))], body);
   row.dataset.turn = String(turn.seq);
+  row.__turn = turn;
   row.addEventListener("toggle", () => {
     if (row.open && !body.hasChildNodes()) paintHelperProse(body, turn.text, helperBase(run));
   });
@@ -11525,11 +11551,50 @@ function helperStatusNode(run) {
   return line;
 }
 
+/* The spinner's own cadence: Claude Code's panel and its TUI both turn the
+ * mark every 120 ms through `·✢*✶✻✽` and back (`agent_voice.glyph_cycle`). */
+const STATUS_CYCLE_MS = 120;
+
 function updateHelperStatus(line, run) {
   const voice = agentVoice(run.agent);
-  writeTextContent(line.querySelector(".helper-status-mark"), voice.glyph);
+  const shown = run.status === "running";
+  writeHidden(line, !shown);
+  const mark = line.querySelector(".helper-status-mark");
   writeTextContent(line.querySelector(".helper-status-word"), voice.busy_word);
-  writeHidden(line, run.status !== "running");
+  // Forward and back, as the CLI plays it; a console with one mark keeps it.
+  const cycle = shown && voice.glyph_cycle.length > 1
+    ? [...voice.glyph_cycle, ...[...voice.glyph_cycle].reverse()]
+    : [];
+  const key = cycle.join("");
+  if (line.__cycleKey === key) {
+    if (!key) writeTextContent(mark, voice.glyph);
+    return;
+  }
+  stopStatusCycle(line);
+  line.__cycleKey = key;
+  if (!key) {
+    writeTextContent(mark, voice.glyph);
+    mark.classList.remove("is-cycling");
+    return;
+  }
+  mark.classList.add("is-cycling");
+  let at = Math.max(0, cycle.indexOf(voice.glyph));
+  writeTextContent(mark, cycle[at]);
+  line.__cycle = window.setInterval(() => {
+    if (!line.isConnected) {
+      stopStatusCycle(line);
+      return;
+    }
+    if (document.hidden) return;
+    at = (at + 1) % cycle.length;
+    writeTextContent(mark, cycle[at]);
+  }, STATUS_CYCLE_MS);
+}
+
+function stopStatusCycle(line) {
+  if (line.__cycle) clearInterval(line.__cycle);
+  line.__cycle = null;
+  line.__cycleKey = undefined;
 }
 
 /* The agent's prose, drawn as the document viewer draws markdown — the one
@@ -11772,20 +11837,15 @@ function syncHelperTurns(list, run) {
   // What was last said, by either voice: a call after it is still out.
   const spoken = held.findLast((turn) => turn.role === "user" || turn.role === "assistant")?.seq ?? -1;
   let newest = null;
-  const revealing = list.querySelector(':scope > .is-streaming[data-role="assistant"]');
   for (const turn of held) {
     if (turn.seq <= drawn) continue;
     const row = helperTurnRowNode(run, turn, spoken);
     list.insertBefore(row, streaming);
-    if (turn.role === "assistant") {
-      newest = { row, turn };
-      // The answer closed while its words were still being revealed: the
-      // revealing row finishes at its pace and then hands over to this one,
-      // so the reader never sees the rest land in a lump or the text twice.
-      if (revealing?.__pace && paceUnfinished(revealing.__pace) && !revealing.__handover) {
-        row.hidden = true;
-        revealing.__handover = row;
-      }
+    if (turn.role === "assistant") newest = { row, turn };
+    // The thought before this turn now knows how long it lasted.
+    const before = row.previousElementSibling;
+    if (before?.classList.contains("is-thinking") && before.__turn?.thoughtMs !== undefined) {
+      dressThoughtRow(before, before.__turn);
     }
   }
   // A result that joined its call after the row stood, a word that closed
@@ -11794,152 +11854,27 @@ function syncHelperTurns(list, run) {
   for (const row of list.querySelectorAll(":scope > .is-tool.is-live")) {
     dressToolTurn(row, row.__turn, run, spoken);
   }
-  // A run with no wire has no live text to stream: its answer arrives whole,
-  // on the poll that brought the turn. Release its words at the same pace the
-  // wire's page reveals at, so a pane whose agent has no wire (zo, Codex —
-  // anything the voice table gives no `wire`) reads as a panel rather than as
-  // a terminal putting up a paragraph at once.
-  //
-  // Only what arrives after the page has stood. Opening a conversation draws
-  // its history in one paint, as it always did: revealing a transcript's tail
-  // word by word would be minutes of old turns typing themselves out.
-  // A run with no wire has no live text to stream: its answer arrives whole,
-  // on the poll that brought the turn. Release its words at the same pace the
-  // wire's page reveals at, so a pane whose agent has no wire (zo, Codex —
-  // anything the voice table gives no `wire`) reads as a panel rather than as
-  // a terminal putting up a paragraph at once.
-  //
-  // In the row that already holds them, never behind a second one: this
-  // transcript's rows are counted against a ceiling, indexed by position and
-  // dressed at the tail (`dressLastAnswer`), and a streaming row standing in
-  // front of the newest answer moved all three.
-  //
-  // Only what arrives while the agent is actively working in a live pane.
-  // If the agent has already finished (idle), or if the user just switched/opened
-  // the conversation view, the turn already happened: render it immediately in
-  // full without any trailing typewriter reveal.
-  const term = run.term;
-  const working = (term !== undefined && term !== null && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)))) || run.status === "running";
-  const chatHeld = term !== undefined && term !== null ? paneChats.get(term) : null;
-  const fresh = chatHeld?.freshSwitch === true || list.__painted !== true;
-  if (chatHeld) chatHeld.freshSwitch = false;
-
-  if (newest && !run.wire && !fresh && working) {
-    revealAnswerInPlace(newest.row, newest.turn.text, helperBase(run));
-  }
-  list.__painted = true;
+  // A turn that arrived stands whole, the moment it arrived — the terminal
+  // already showed these words as they were said, and a page that released
+  // them again a word at a time (09-16 → 09-20) only lagged behind it. The
+  // wire's page streams the words themselves (`syncStreamingTurns`).
   dressLastAnswer(list, run, newest);
   syncStreamingTurns(list, run);
   if (follow) scrollHelperToBottom(list);
 }
 
-/* Put an answer that landed whole on screen a word at a time, in its own row.
- *
- * The wire's page has live text to pace; a transcript has only the finished
- * turn. To match the terminal's pace without stalling or stuttering, words are
- * released with adaptive backlog acceleration (never dragging behind on longer
- * answers) and rendered incrementally: settled blocks are painted once as
- * markdown while only the actively revealed tail updates, avoiding the
- * whole-subtree reparse and layout thrashing that made earlier versions drop
- * frames and freeze mid-reveal. */
-function revealAnswerInPlace(row, rawText, base) {
-  const said = row.querySelector(".helper-said");
-  if (!said || row.__revealing) return;
-  // A hidden tab stops `requestAnimationFrame`, so a reveal started there
-  // would hold the answer at its first word until somebody came back. The row
-  // already holds the whole turn; leave it standing.
-  if (document.hidden) return;
-  const text = cleanseAssistantText(rawText) || rawText;
-  // Prose only. A prefix of a table is not a shorter table, and a prefix of a
-  // fence or an image is not a shorter one of those either: repainting them
-  // part-written puts broken markup on screen for as long as the reveal runs.
-  if (/```|!\[|^\s*\||<[a-zA-Z]/m.test(text)) return;
-  const ends = [];
-  for (const word of text.matchAll(/\S+\s*/g)) ends.push(word.index + word[0].length);
-  // One word is already one paint; two is the shortest thing worth revealing.
-  if (ends.length < 2) return;
-  row.__revealing = true;
-
-  // Adaptive pacing: scale total duration by word count so short answers feel
-  // natural (~160–250ms) while long answers accelerate smoothly (~400–600ms),
-  // keeping pace with the terminal rather than lagging many seconds behind.
-  const wordCount = ends.length;
-  const totalDuration = Math.min(600, Math.max(160, wordCount * 14));
-  const start = performance.now();
-
-  let settledDiv = said.querySelector(":scope > .helper-said-settled");
-  let tailP = said.querySelector(":scope > .helper-said-tail");
-  if (!settledDiv || !tailP) {
-    said.replaceChildren();
-    settledDiv = document.createElement("div");
-    settledDiv.className = "helper-said-settled";
-    tailP = document.createElement("p");
-    tailP.className = "helper-said-tail";
-    said.append(settledDiv, tailP);
-  }
-  let settledEnd = 0;
-  let lastUpto = 0;
-
-  const paintUpto = (upto) => {
-    if (upto === lastUpto) return;
-    lastUpto = upto;
-    const list = row.closest(".helper-turns");
-    const follow = helperFollowsTail(list);
-    const cut = settledCut(text, upto);
-    if (cut > settledEnd) {
-      settledDiv.replaceChildren();
-      paintHelperProse(settledDiv, text.slice(0, cut), base);
-      settledEnd = cut;
-    }
-    tailP.textContent = text.slice(settledEnd, upto);
-    if (follow) scrollHelperToBottom(list);
-  };
-
-  const finish = () => {
-    const list = row.closest(".helper-turns");
-    const follow = helperFollowsTail(list);
-    said.replaceChildren();
-    paintHelperProse(said, text, base);
-    row.__revealing = false;
-    if (follow) scrollHelperToBottom(list);
-  };
-
-  const step = (now) => {
-    if (!row.isConnected) {
-      row.__revealing = false;
-      return;
-    }
-    // Hidden mid-reveal: finish it, so coming back shows the answer rather
-    // than the words it had reached when the tab went away.
-    if (document.hidden) {
-      finish();
-      return;
-    }
-    const elapsed = now - start;
-    const progress = Math.min(1, elapsed / totalDuration);
-    const at = Math.min(ends.length - 1, Math.floor(progress * ends.length));
-    const upto = ends[at];
-
-    if (progress >= 1 || upto >= text.length) {
-      finish();
-      return;
-    }
-
-    paintUpto(upto);
-    requestAnimationFrame(step);
-  };
-
-  paintUpto(ends[0]);
-  requestAnimationFrame(step);
-}
-
-/* The words the agent is saying right now, under the last turn — the row
+/* The words the agent is saying right now, under the last turn — the rows
  * Claude Code's own panel streams into. One row per voice, a thought and
  * then the answer, each updated in place as the wire's live text grows
  * (`wire_log.live`), and gone the moment the words close into a turn: the
  * poll that brings the turn brings the empty live list, so the swap is one
- * paint. A page fed from a transcript has no live text — the vendor writes
- * its file a message at a time — and draws nothing here. */
+ * paint. What has arrived is on screen by the next frame — the terminal's
+ * pace and the extension's, which append each delta to the message and
+ * repaint (2.1.278 webview, `content_block_delta` → `text +=`). The
+ * word-paced reveal of 09-16 held words back at 60 → 33 ms each and fell
+ * seconds behind a fast model; the person asked for the terminal's own
+ * timing (09-20). A page fed from a transcript has no live text — the
+ * vendor writes its file a message at a time — and draws nothing here. */
 function syncStreamingTurns(list, run) {
   const live = run.wire ? run.wireLog?.live ?? [] : [];
   const rows = [...list.querySelectorAll(":scope > .is-streaming")];
@@ -11960,99 +11895,18 @@ function syncStreamingTurns(list, run) {
       writeTextContent(row.querySelector(".helper-cue"), thoughtTitle(piece.text));
       writeTextContent(row.querySelector(".helper-thought-body"), piece.text);
     } else {
-      // An answer is not painted as its deltas land: its words are released
-      // at the reveal's pace by the list's frame clock (`paceTick`).
-      paceReceive(row.__pace, piece.text, true);
-      paceArm(list, run);
+      paintLiveAnswer(row, piece.text, run);
     }
   });
-  // Rows the live list no longer names: a thought's goes; an answer's stays
-  // until its reveal has drained, then hands over to the turn that closed it.
-  for (const stale of rows.slice(live.length)) {
-    if (stale.__pace && paceUnfinished(stale.__pace)) {
-      paceReceive(stale.__pace, stale.__pace.target, false);
-      paceArm(list, run);
-      continue;
-    }
-    stale.__handover?.removeAttribute("hidden");
-    stale.remove();
-  }
-}
-
-/* ---- the reveal's pace ----------------------------------------------------
- *
- * Deltas arrive in lumps — a burst of words, a pause, another burst — and a
- * page that paints each lump as it lands reads as 「뚝뚝」 even when the deltas
- * come thirty times a second. So a streaming answer's words are released one
- * at a time, REVEAL_WORD_MS apart, tightening to REVEAL_WORD_FAST_MS while a
- * backlog waits, each fading in over REVEAL_FADE_MS — the pace Paseo's
- * word-stream reveals at (its paced reveal measured a chars-per-frame CV of
- * 1.3–1.5 against 2.7 for deltas painted as they land; the design is theirs,
- * github.com/getpaseo/paseo, Apache-2.0; the code here is this window's), and
- * the way Claude Code's own panel fades words in. A late frame is not credit
- * to reveal several words at once. */
-const REVEAL_WORD_MS = 60;
-const REVEAL_WORD_FAST_MS = 33;
-const REVEAL_BACKLOG_MS = 150;
-const REVEAL_FADE_MS = 150;
-
-function wordPaceOf() {
-  return { target: "", shown: 0, scanned: 0, ends: [], next: 0, dueIn: 0, interval: REVEAL_WORD_MS };
-}
-
-/* The text so far. While it streams, a word is complete only when the space
- * after it has arrived — a network boundary never ends a word; when the
- * stream closes the rest is released too. Text that does not extend what was
- * received is a replacement, shown whole. */
-function paceReceive(pace, text, streaming) {
-  if (!text.startsWith(pace.target)) {
-    Object.assign(pace, { target: text, shown: text.length, scanned: text.length, ends: [], next: 0, dueIn: 0 });
-    return;
-  }
-  pace.target = text;
-  if (pace.next >= pace.ends.length) {
-    pace.ends = [];
-    pace.next = 0;
-  }
-  let end = pace.scanned;
-  for (const word of text.slice(pace.scanned).matchAll(/\S+\s+|\s+/gu)) {
-    end = pace.scanned + word.index + word[0].length;
-    pace.ends.push(end);
-  }
-  pace.scanned = end;
-  if (!streaming && end < text.length) {
-    pace.ends.push(text.length);
-    pace.scanned = text.length;
-  }
-}
-
-function pacePending(pace) {
-  return pace.next < pace.ends.length;
-}
-
-/* Words still to be released, or a last word the stream has not finished —
- * either way the reveal is not done with this text. */
-function paceUnfinished(pace) {
-  return pacePending(pace) || pace.shown < pace.target.length;
-}
-
-/* One frame of the reveal: true when a word was released. */
-function paceAdvance(pace, elapsedMs) {
-  if (!pacePending(pace)) return false;
-  pace.dueIn -= Math.min(250, Math.max(0, elapsedMs));
-  if (pace.dueIn > 0) return false;
-  pace.shown = pace.ends[pace.next];
-  pace.next += 1;
-  const backlog = pace.ends.length - pace.next;
-  pace.interval = Math.max(REVEAL_WORD_FAST_MS, Math.min(REVEAL_WORD_MS, REVEAL_BACKLOG_MS / Math.max(1, backlog)));
-  pace.dueIn = pacePending(pace) ? pace.interval : 0;
-  return true;
+  // Rows the live list no longer names: the words closed into a turn, which
+  // the same paint stood above them.
+  for (const stale of rows.slice(live.length)) stale.remove();
 }
 
 /* Where the settled part of a streaming answer ends: after the last blank
  * line before `upTo` that is not inside a fence, and never inside the line
  * still being written. What lies before it is painted as markdown once and
- * left alone; the rest is the tail the words fade into. */
+ * left alone; the rest is the block being written. */
 function settledCut(text, upTo) {
   const lines = text.slice(0, upTo).split("\n");
   let cut = 0;
@@ -12068,95 +11922,67 @@ function settledCut(text, upTo) {
   return cut;
 }
 
-/* Paint what the pace has released: the settled blocks as markdown (repainted
- * only when a block closes), the tail as text with each released word fading
- * in. */
-function paintStreamingAnswer(row, run) {
-  const pace = row.__pace;
+/* Paint what the agent has said so far into its streaming row, coalesced to
+ * the frame: thirty deltas a second arrive, and the DOM is touched at most
+ * once per frame, with the newest text. */
+function paintLiveAnswer(row, text, run) {
+  row.__live = text;
+  if (row.__liveFrame !== undefined) return;
+  row.__liveFrame = requestAnimationFrame(() => {
+    row.__liveFrame = undefined;
+    if (row.isConnected) paintLiveAnswerNow(row, row.__live, run);
+  });
+}
+
+/* The blocks that closed (a blank line outside a fence, `settledCut`) as
+ * markdown, painted once each; the block still being written as markdown
+ * too, repainted with each frame that brought a delta — a paragraph at
+ * most, so the repaint is cheap, and never behind what arrived. */
+function paintLiveAnswerNow(row, text, run) {
   const said = row.querySelector(".helper-said");
   let settled = said.querySelector(":scope > .helper-said-settled");
   let tail = said.querySelector(":scope > .helper-said-tail");
   if (!settled) {
     settled = document.createElement("div");
     settled.className = "helper-said-settled";
-    tail = document.createElement("p");
+    tail = document.createElement("div");
     tail.className = "helper-said-tail";
     said.append(settled, tail);
     row.__settledEnd = 0;
-    row.__tailEnd = 0;
+    row.__tailText = "";
   }
-  const cut = settledCut(pace.target, pace.shown);
+  const list = row.closest(".helper-turns");
+  const follow = helperFollowsTail(list);
+  const cut = settledCut(text, text.length);
   if (cut > row.__settledEnd) {
     settled.replaceChildren();
-    paintHelperProse(settled, pace.target.slice(0, cut), helperBase(run));
+    paintHelperProse(settled, text.slice(0, cut), helperBase(run));
     row.__settledEnd = cut;
+  }
+  const rest = text.slice(row.__settledEnd);
+  if (rest !== row.__tailText) {
+    row.__tailText = rest;
     tail.replaceChildren();
-    // Words already on screen move into the tail as they were — no second fade.
-    if (pace.shown > cut) tail.appendChild(document.createTextNode(pace.target.slice(cut, pace.shown)));
-    row.__tailEnd = pace.shown;
-    return;
-  }
-  if (pace.shown > row.__tailEnd) {
-    const word = document.createElement("span");
-    word.className = "helper-word";
-    word.textContent = pace.target.slice(row.__tailEnd, pace.shown);
-    tail.appendChild(word);
-    row.__tailEnd = pace.shown;
-  }
-}
-
-/* The list's frame clock while an answer is being revealed: each frame
- * releases what is due on every revealing row, follows the bottom if the
- * reader was there, and hands a drained row over to the turn that closed it.
- * Stops when nothing is pending; armed again by the next delta. */
-function paceTick(list, run) {
-  const now = performance.now();
-  const elapsed = list.__paceLast === undefined ? 16 : now - list.__paceLast;
-  list.__paceLast = now;
-  const follow = helperFollowsTail(list);
-  let pending = false;
-  for (const row of list.querySelectorAll(':scope > .is-streaming[data-role="assistant"]')) {
-    const pace = row.__pace;
-    if (paceAdvance(pace, elapsed)) paintStreamingAnswer(row, run);
-    if (pacePending(pace)) {
-      pending = true;
-    } else if (row.__handover) {
-      row.__handover.removeAttribute("hidden");
-      row.__handover = null;
-      row.remove();
-    }
+    if (rest.trim() !== "") paintHelperProse(tail, rest, helperBase(run));
   }
   if (follow) list.scrollTop = list.scrollHeight;
-  if (pending) {
-    list.__paceFrame = requestAnimationFrame(() => paceTick(list, run));
-  } else {
-    list.__paceFrame = null;
-    list.__paceLast = undefined;
-  }
-}
-
-function paceArm(list, run) {
-  if (list.__paceFrame !== null && list.__paceFrame !== undefined) return;
-  list.__paceLast = undefined;
-  list.__paceFrame = requestAnimationFrame(() => paceTick(list, run));
 }
 
 /* The row a voice streams into: an answer's row before it closes (the same
- * grid and dot as the answer it becomes), or a thought's fold, open while it
+ * rail and dot as the answer it becomes), or a thought's fold, open while it
  * is being thought and closed by the turn that replaces it. */
 function streamingTurnNode(role) {
   if (role === "thinking") {
     const body = document.createElement("div");
     body.className = "helper-thought-body";
-    const row = foldCardNode("helper-turn is-thinking is-streaming",
-      [foldWhoNode(t("worker.thought", "생각")), foldCueNode("")], body, true);
+    const row = foldCardNode("helper-turn is-thinking is-step is-streaming",
+      [foldWhoNode(t("worker.thinking", "생각 중…")), foldCueNode("")], body, true);
     row.dataset.role = role;
     return row;
   }
   const row = document.createElement("article");
-  row.className = "helper-turn is-assistant is-streaming";
+  row.className = "helper-turn is-assistant is-step is-streaming";
   row.dataset.role = role;
-  row.__pace = wordPaceOf();
   const said = document.createElement("div");
   said.className = "helper-said";
   row.appendChild(said);

@@ -63,10 +63,9 @@ export async function testAgentConversation(browser, origin, ok) {
       await first;
       window.__ANSWER__.subagent_log = () => ({ found: true, next: 99, turns: [] });
       setActiveTab(tab.id);
-      // The answer landed whole and is released a word at a time
-      // (`revealAnswerInPlace`). What this asks is that it was kept and drawn,
-      // not that it was drawn in one frame.
-      await new Promise((settle) => setTimeout(settle, 1200));
+      // The answer landed whole and stands whole on the next paint. What
+      // this asks is that it was kept and drawn after the tab came back.
+      await new Promise((settle) => setTimeout(settle, 200));
       return { reads, next: helper.next, kept: helper.turns.at(-1).text,
         painted: document.querySelector(".helper-turns").textContent.includes("숨은 동안 도착한 결과") };
     });

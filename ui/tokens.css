@@ -1958,32 +1958,53 @@
   --chat-composer-edge: var(--edge-glint);
   --chat-divider: var(--edge-rule);
   --chat-work-ink: var(--ink-mist);
-  --chat-send-bg: var(--ink-chalk);
-  --chat-send-ink: var(--surface-abyss);
+  /* The extension's send button is the agent's own colour with ivory on it;
+   * its dots are one green and one red whatever the theme. */
+  --chat-send-bg: var(--chat-accent);
+  --chat-send-ink: #faf9f5;
   --chat-send-stop-bg: var(--ink-figure);
   --chat-send-stop-ink: var(--surface-abyss);
   --chat-link: var(--ai-accent);
   --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 6%, transparent);
+  --chat-dot-done: #74c991;
+  --chat-dot-failed: #c74e39;
+  --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 4%, transparent);
+  --chat-code-bg: color-mix(in srgb, var(--ink-chalk) 8%, transparent);
   /* The conversation's grammar is Claude Code's (2026-09-15): a 10px bubble,
    * 13px prose at 1.5, an 8px composer — and one accent per agent, worn by the
    * page through `data-agent` (`--chat-accent` is what the rules read). */
-  --chat-radius-bubble: 10px;
-  --chat-bubble-pad-x: 12px;
+  /* Read off the extension's own stylesheet (2.1.278 webview): the person's
+   * words in a 6px bordered box padded 4×6, every step of the agent's on a
+   * timeline — a 7px dot at x 9 / y 7 inside an 8px row pad, a 1px rail at
+   * x 12 — and a 30px left gutter for the rail (2026-09-20). */
+  --chat-radius-bubble: 6px;
+  --chat-bubble-pad-x: 6px;
+  --chat-bubble-pad-y: 4px;
+  --chat-bubble-gap: 4px;
   --chat-radius-composer: 8px;
   --chat-col: 900px;
-  --chat-bubble-max: 70%;
+  --chat-bubble-max: 100%;
   --chat-prose-size: var(--text-sm);
   --chat-prose-leading: 1.5;
-  --chat-dot: 8px;
+  --chat-dot: 7px;
   --chat-dot-halo: 3px;
-  --chat-gutter: 22px;
+  --chat-gutter: 30px;
+  --chat-row-pad: 8px;
+  --chat-rail-x: 12px;
+  --chat-rail-dot-x: 9px;
+  --chat-rail-dot-y: 7px;
+  --chat-radius-send: 5px;
+  --chat-radius-tool: 5px;
+  --chat-tool-label: 40px;
+  --chat-mono-size: 0.85em;
+  --chat-focus-ring: 3px;
   --chat-accent: var(--ai-accent);
   --agent-accent-claude: #d97757;
   --agent-accent-codex: #10a37f;
   --agent-accent-zo: #8b7cf6;
   --agent-accent-antigravity: #4e8cf7;
   --chat-chip-size: 0.92em;
-  --chat-send-size: 32px;
+  --chat-send-size: 26px;
   --chat-pill-height: var(--control-height-sm);
   --chat-composer-max-rows: 8;
   --chat-preview-mark: 36px;
@@ -2408,12 +2429,16 @@
   --chat-composer-edge: var(--edge-rule);
   --chat-divider: var(--edge-rule);
   --chat-work-ink: var(--ink-mist);
-  --chat-send-bg: var(--ink-chalk);
-  --chat-send-ink: var(--surface-deck);
+  --chat-send-bg: var(--chat-accent);
+  --chat-send-ink: #faf9f5;
   --chat-send-stop-bg: var(--ink-figure);
   --chat-send-stop-ink: var(--surface-abyss);
   --chat-link: var(--ai-accent);
   --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 5%, transparent);
+  --chat-dot-done: #3f9a5f;
+  --chat-dot-failed: #c74e39;
+  --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 3%, transparent);
+  --chat-code-bg: color-mix(in srgb, var(--ink-chalk) 6%, transparent);
   --chat-accent: var(--ai-accent);
   --agent-accent-claude: #c8643a;
   --agent-accent-codex: #0e8a6c;

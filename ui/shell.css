@@ -13518,7 +13518,9 @@ details.worker-command {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: var(--space-3);
+  /* No gap: a step's rail runs through its own row pad to the next step's,
+   * and the rows off the rail carry their own margins. */
+  gap: 0;
   margin: 0;
   padding: var(--space-3) var(--helper-gutter, var(--space-4)) var(--space-6);
   overflow-y: auto;
@@ -13553,43 +13555,57 @@ details.worker-command {
   white-space: pre-wrap;
 }
 
-/* Every turn the agent makes is one row of the same grid — the Claude Code
- * extension's panel: a mark in the gutter (`--chat-gutter`), the words beside
- * it. The answer's mark is the extension's bullet, a quiet dot; a tool row's
- * dot is the state of the call (below). The dot is the row's `::before`, so a
- * 400-turn page pays no node for it. */
-.helper-turn.is-assistant {
-  display: grid;
-  grid-template-columns: var(--chat-gutter) minmax(0, 1fr);
-  row-gap: var(--space-2);
-  align-items: start;
+/* Every step the agent takes stands on one timeline — the extension's
+ * panel (2.1.278 `timelineMessage`): the row padded left for the rail, a dot
+ * in the gutter at the first line, and a 1px rail from the dot down to the
+ * next step's, so a turn's steps read as one thread. The answer's dot is the
+ * quiet one; a tool row's dot is the state of the call (below). Dot and
+ * rail are the row's pseudo-elements, so a 400-turn page pays no node for
+ * them. The rail starts at the first step's dot, ends a dot's reach below
+ * the last step's, and a lone step has none. */
+.helper-turn.is-step {
+  position: relative;
+  padding: var(--chat-row-pad) 0 var(--chat-row-pad) var(--chat-gutter);
 }
 
-.helper-turn.is-tool {
-  display: grid;
-  grid-template-columns: var(--chat-gutter) minmax(0, 1fr);
-  row-gap: var(--chat-tool-gap);
-  align-items: start;
-  margin: 1px 0;
-}
-
-.helper-turn.is-assistant > *,
-.helper-turn.is-tool > * {
-  grid-column: 2;
-  min-width: 0;
-}
-
-.helper-turn.is-assistant::before,
-.helper-turn.is-tool::before {
+.helper-turn.is-step::before {
   content: "";
-  grid-column: 1;
-  grid-row: 1;
+  position: absolute;
+  left: var(--chat-rail-dot-x);
+  top: calc(var(--chat-row-pad) + var(--chat-rail-dot-y));
+  z-index: 1;
   width: var(--chat-dot);
   height: var(--chat-dot);
-  /* Centred on the first line of the words beside it. */
-  margin-top: calc((var(--chat-prose-size) * var(--chat-prose-leading) - var(--chat-dot)) / 2);
   border-radius: 50%;
   background: var(--chat-work-ink);
+}
+
+.helper-turn.is-step::after {
+  content: "";
+  position: absolute;
+  left: var(--chat-rail-x);
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--chat-divider);
+}
+
+.helper-turn.is-step:not(.helper-turn.is-step + .helper-turn.is-step)::after {
+  top: calc(var(--chat-row-pad) + var(--chat-rail-dot-y) + var(--chat-dot) / 2);
+}
+
+.helper-turn.is-step:not(:has(+ .helper-turn.is-step))::after {
+  bottom: auto;
+  height: calc(var(--chat-row-pad) + var(--chat-rail-dot-y) + var(--chat-dot) / 2);
+}
+
+.helper-turn.is-step:not(.helper-turn.is-step + .helper-turn.is-step):not(:has(+ .helper-turn.is-step))::after {
+  display: none;
+}
+
+/* A line off the rail — a system word — keeps the row's rhythm. */
+.helper-turn:not(.is-step):not(.is-user) {
+  padding: var(--chat-row-pad) 0;
 }
 
 /* Rendered markdown flows as prose; the pre-wrap above is for words typed
@@ -13603,6 +13619,15 @@ details.worker-command {
 
 .helper-turn.is-assistant .helper-said > :last-child {
   margin-bottom: 0;
+}
+
+/* A code block in an answer: the extension's well (`codeBlockWrapper pre`)
+ * — the code ground, 4px corners, one step of padding. */
+.is-chat-page .helper-said pre {
+  margin: var(--space-2) 0;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--chat-code-bg);
 }
 
 /* 인라인 코드는 둥근 칩 — 블록(`pre`) 안의 코드는 제 우물의 옷을 입는다. */
@@ -13778,13 +13803,17 @@ details.worker-command {
  * is the aria-label). The side is the reader's bearing: what they typed sits
  * under their hand, and the agent's answers keep the left margin they are
  * read down. The briefing wears the same bubble. */
+/* What the person said: the extension's box — on the left with everything
+ * else, sized to its words, a 1px edge in the input's colour on the input's
+ * ground, 6px corners (2.1.278 `userMessage`). */
 .helper-turn.is-user {
-  align-self: flex-end;
-  max-width: min(var(--chat-bubble-max), 44rem);
-  padding: var(--space-2) var(--chat-bubble-pad-x);
-  border: 0;
+  align-self: flex-start;
+  max-width: var(--chat-bubble-max);
+  margin: var(--chat-bubble-gap) 0;
+  padding: var(--chat-bubble-pad-y) var(--chat-bubble-pad-x);
+  border: 1px solid var(--chat-composer-edge);
   border-radius: var(--chat-radius-bubble);
-  background: var(--chat-bubble);
+  background: var(--chat-composer-bg);
   color: var(--chat-bubble-ink);
   font-size: var(--chat-prose-size);
   line-height: var(--chat-prose-leading);
@@ -13805,7 +13834,6 @@ details.worker-command {
  * the halt ink when the call failed. */
 .helper-turn.is-tool {
   min-width: 0;
-  padding: 0;
   border: 0;
   background: none;
   font-size: var(--chat-prose-size);
@@ -13813,41 +13841,45 @@ details.worker-command {
 }
 
 .helper-turn.is-tool.is-done::before {
-  background: var(--signal-done);
+  background: var(--chat-dot-done);
 }
 
 .helper-turn.is-tool.is-failed::before {
-  background: var(--signal-halt);
+  background: var(--chat-dot-failed);
 }
 
+/* A call still out: the agent's accent with its halo, blinking at the
+ * extension's beat (`dotProgress`: 1s, linear). */
 .helper-turn.is-tool.is-live::before {
   background: var(--chat-accent);
   box-shadow: 0 0 0 var(--chat-dot-halo) color-mix(in srgb, var(--chat-accent) 18%, transparent);
-  animation: helper-live-pulse 1.6s var(--ease-standard) infinite;
+  animation: helper-live-pulse 1s linear infinite;
 }
 
 @keyframes helper-live-pulse {
-  0%, 100% { opacity: 0.45; }
-  50% { opacity: 1; }
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
 }
 
-/* The call line: the tool's own name, then its target in mono, cut with an
- * ellipsis — the transcript never widens the page. */
+/* The call line, as the extension writes it: the tool's own name in bold
+ * (`toolNameText`), then its target in mono a step smaller, in the link's
+ * colour (`toolNameTextSecondary`), cut with an ellipsis — the transcript
+ * never widens the page. */
 .helper-tool-call {
   display: flex;
   align-items: baseline;
-  gap: var(--space-2);
+  gap: var(--space-1);
   margin: 0;
-  line-height: 1.4;
-  font-size: var(--text-xs);
+  line-height: var(--chat-prose-leading);
+  font-size: var(--chat-prose-size);
   color: var(--ink-chalk);
 }
 
 .helper-tool-name {
   flex: none;
-  font-weight: 600;
-  font-family: var(--font-mono);
-  color: var(--chat-accent, var(--ink-figure));
+  font-weight: 700;
+  font-family: var(--font-ui);
+  color: var(--ink-chalk);
 }
 
 .helper-tool-arg {
@@ -13857,30 +13889,21 @@ details.worker-command {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: var(--text-xs);
-  color: var(--ink-mist);
+  font-size: var(--chat-mono-size);
+  color: var(--chat-link);
 }
 
-/* `└ 256 lines` — the first line of what came back. */
+/* What came back, in one line under the call — the extension's secondary
+ * line (`secondaryLine`): the window's type in the quieter ink. */
 .helper-tool-result {
   margin: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-family: var(--font-mono);
-  /* The token, without the copy of its value behind it: `ui/index.html` is the
-   * only document that loads this stylesheet and it loads `tokens.css` first,
-   * so the fallback could never fire — it was a second 11px that nothing would
-   * have updated when `--text-2xs` moved. */
-  font-size: var(--text-2xs);
-  line-height: 1.3;
+  font-family: var(--font-ui);
+  font-size: var(--chat-prose-size);
+  line-height: var(--chat-prose-leading);
   color: var(--chat-work-ink);
-  opacity: 0.85;
-}
-
-.helper-tool-result::before {
-  content: "└ ";
-  color: var(--ink-label);
 }
 
 .helper-turn.is-tool.is-failed .helper-tool-result {
@@ -13888,10 +13911,11 @@ details.worker-command {
 }
 
 /* The rest — an input past its first line, an output past its first line —
- * behind one fold, in the window's words on the cap and the machine's in the
- * wells. */
+ * behind one fold, in the window's words on the cap; opened, the wells are
+ * the extension's tool body (`toolBody`): one bordered box, a row per
+ * side, each with its label (`IN` / `OUT`) in a mono column at the left. */
 .helper-tool-more {
-  font-size: var(--text-xs);
+  font-size: var(--chat-prose-size);
   color: var(--chat-work-ink);
 }
 
@@ -13901,8 +13925,42 @@ details.worker-command {
 
 .helper-tool-more-body {
   display: grid;
-  gap: var(--space-2);
+  gap: 0;
   min-width: 0;
+  margin-top: var(--space-1);
+  overflow: hidden;
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--chat-radius-tool);
+  background: var(--chat-tool-bg);
+}
+
+.helper-tool-more-body > .helper-fold-body {
+  display: grid;
+  grid-template-columns: var(--chat-tool-label) minmax(0, 1fr);
+  margin: 0;
+  padding: var(--space-1) var(--space-2) var(--space-1) 0;
+}
+
+.helper-tool-more-body > .helper-fold-body + .helper-fold-body {
+  border-top: 1px solid var(--chat-composer-edge);
+}
+
+.helper-tool-input::before,
+.helper-tool-output::before {
+  padding: 0 var(--space-2) 0 var(--space-1);
+  color: var(--chat-work-ink);
+  opacity: 0.5;
+  font-family: var(--font-mono);
+  font-size: var(--chat-mono-size);
+  white-space: normal;
+}
+
+.helper-tool-input::before {
+  content: "IN";
+}
+
+.helper-tool-output::before {
+  content: "OUT";
 }
 
 .helper-tool-input[hidden],
@@ -13944,21 +14002,55 @@ details.worker-command {
   width: 4ch;
 }
 
-/* A thought, folded behind its own heading in the gutter's column; its body
- * is prose a shade quieter than an answer. */
+/* A thought: the extension's fold (`thinkingV2`) — 「생각 중…」 while it is
+ * thought, 「3초 동안 생각」 once the next thing happened, the chevron right
+ * after the label turning down when open, the thought's own first line as
+ * the cue, and the body in the quieter ink. */
 .helper-turn.is-thinking {
-  padding-left: var(--chat-gutter);
-  font-size: var(--text-xs);
+  font-size: var(--chat-prose-size);
   color: var(--chat-work-ink);
 }
 
+.helper-turn.is-thinking > .helper-cap {
+  display: inline-flex;
+  gap: var(--space-1);
+  opacity: 0.8;
+}
+
+.helper-turn.is-thinking[open] > .helper-cap,
+.helper-turn.is-thinking > .helper-cap:hover {
+  opacity: 1;
+}
+
+.helper-turn.is-thinking > .helper-cap .helper-who {
+  font-size: var(--chat-prose-size);
+  font-weight: 400;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--chat-work-ink);
+}
+
+/* Label, chevron, then the thought's own first line. */
 .helper-turn.is-thinking > .helper-cap .helper-cue {
+  order: 2;
   font-family: var(--font-ui);
+  color: var(--ink-label);
+}
+
+.helper-turn.is-thinking > .helper-cap::after {
+  content: "›";
+  order: 1;
+  margin-left: 0;
+  color: var(--chat-work-ink);
+}
+
+.helper-turn.is-thinking[open] > .helper-cap::after {
+  transform: rotate(90deg);
 }
 
 .helper-thought-body {
-  margin: var(--space-2) 0 0;
-  color: var(--ink-label);
+  margin: var(--space-1) 0 0;
+  color: var(--chat-work-ink);
   font-size: var(--chat-prose-size);
   line-height: var(--chat-prose-leading);
 }
@@ -13969,25 +14061,16 @@ details.worker-command {
   white-space: pre-wrap;
 }
 
-/* An answer being revealed (`paintStreamingAnswer`): the settled blocks are
- * the answer's own markdown; the tail is text, and each word the pace
- * releases fades in over the reveal's fade (`REVEAL_FADE_MS`). */
+/* An answer being streamed (`paintLiveAnswer`): the closed blocks above, the
+ * block being written below — both the answer's own markdown, nothing held
+ * back and nothing faded in. */
 .helper-said-tail {
   margin: 0;
 }
 
-.helper-word {
-  animation: helper-word-fade 150ms linear both;
-}
-
-@keyframes helper-word-fade {
-  from {
-    opacity: 0;
-  }
-
-  to {
-    opacity: 1;
-  }
+.helper-said-settled > :last-child,
+.helper-said-tail > :last-child {
+  margin-bottom: 0;
 }
 
 .helper-tool-took {
@@ -14016,6 +14099,16 @@ details.worker-command {
 .helper-status-mark {
   color: var(--chat-accent);
   animation: helper-live-pulse 1.6s var(--ease-standard) infinite;
+}
+
+/* A mark that turns through the CLI's own cycle (`updateHelperStatus`)
+ * moves enough; it does not also breathe. */
+.helper-status-mark.is-cycling {
+  animation: none;
+}
+
+.helper-status-word {
+  font-weight: 500;
 }
 
 /* 접힘의 요약 줄: 라벨, 발췌, 제 상태를 말하는 셰브런. 네 접힘(도구의 나머지·
@@ -14138,6 +14231,11 @@ details[open] > .helper-cap::after {
 .worker-composer:hover,
 .worker-composer:focus-within {
   border-color: var(--chat-accent);
+}
+
+/* Focused, the extension's ring: the accent's edge with its soft halo. */
+.worker-composer:focus-within {
+  box-shadow: 0 0 0 var(--chat-focus-ring) color-mix(in srgb, var(--chat-accent) 12%, transparent);
 }
 
 /* 고정 뼈대에서는 붙일 필요가 없다 — 입력줄이 원래 바닥의 단이다. 상자만
@@ -14416,7 +14514,9 @@ button.worker-composer-pill:hover {
   height: var(--chat-send-size);
   padding: 0;
   border: 0;
-  border-radius: 50%;
+  /* The extension's send: a 26px square with 5px corners in the agent's
+   * colour, ivory on it (2.1.278 `sendButton`). */
+  border-radius: var(--chat-radius-send);
   background: var(--chat-send-bg);
   color: var(--chat-send-ink);
   cursor: pointer;
@@ -14606,8 +14706,7 @@ button.worker-composer-pill:hover {
   }
 
   .helper-turn.is-tool.is-live::before,
-  .helper-status-mark,
-  .helper-word {
+  .helper-status-mark {
     animation: none;
   }
 }

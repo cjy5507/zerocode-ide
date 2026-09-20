@@ -1462,6 +1462,10 @@ pub struct AgentPresence {
     /// window's conversation view speaks in these, never in words of its own;
     /// empty where the catalog knows no console for the agent.
     pub glyph: &'static str,
+    /// The marks the CLI's own spinner cycles through while it works, in
+    /// order (Claude Code: `·✢*✶✻✽` and back, one every 120 ms); empty for a
+    /// console whose mark stands still.
+    pub glyph_cycle: &'static [&'static str],
     pub busy_word: &'static str,
     pub models_provider: Option<&'static str>,
     pub model_command: Option<&'static str>,
@@ -1507,6 +1511,10 @@ pub struct SlashRoad {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct AgentVoice {
     pub glyph: &'static str,
+    /// The spinner's marks in order, played forward and back while the CLI
+    /// works — Claude Code's own `·✢*✶✻✽` (its panel and its TUI both cycle
+    /// them at 120 ms). Empty where the mark stands still.
+    pub glyph_cycle: &'static [&'static str],
     pub busy_word: &'static str,
     /// The provider whose models this CLI drives, as zo's live catalog names
     /// its rows (`zo models --json`, `provider`): the composer's model menu
@@ -1539,6 +1547,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
         "claude",
         AgentVoice {
             glyph: "✻",
+            glyph_cycle: &["·", "✢", "*", "✶", "✻", "✽"],
             busy_word: "Pondering…",
             models_provider: Some("claude"),
             model_slash: Some(SlashRoad {
@@ -1573,6 +1582,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
         "codex",
         AgentVoice {
             glyph: "◎",
+            glyph_cycle: &[],
             busy_word: "Thinking…",
             models_provider: Some("openai"),
             model_slash: Some(SlashRoad {
@@ -1596,6 +1606,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
         "zo",
         AgentVoice {
             glyph: "◐",
+            glyph_cycle: &[],
             busy_word: "Working…",
             models_provider: None,
             model_slash: Some(SlashRoad {
@@ -1611,6 +1622,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
         "antigravity",
         AgentVoice {
             glyph: "✦",
+            glyph_cycle: &[],
             busy_word: "Thinking…",
             models_provider: Some("google"),
             // Gemini CLI's `/model` opens its manage dialog; `set <id>` is
@@ -1635,6 +1647,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
 /// The silent console — no mark, no word, no roads.
 const SILENT_CONSOLE: AgentVoice = AgentVoice {
     glyph: "",
+    glyph_cycle: &[],
     busy_word: "",
     models_provider: None,
     model_slash: None,
@@ -1718,6 +1731,7 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                 takes_a_paste: spec.takes_a_paste(),
                 ready: spec.ready,
                 glyph: agent_voice(spec.id).glyph,
+                glyph_cycle: agent_voice(spec.id).glyph_cycle,
                 busy_word: agent_voice(spec.id).busy_word,
                 models_provider: agent_voice(spec.id).models_provider,
                 model_command: agent_voice(spec.id).model_slash.map(|road| road.command),
@@ -1763,6 +1777,13 @@ mod tests {
             assert!(
                 !console.glyph.is_empty() && !console.busy_word.is_empty(),
                 "{id}"
+            );
+            // A spinner that cycles comes back to the mark the head wears.
+            assert!(
+                console.glyph_cycle.is_empty() || console.glyph_cycle.contains(&console.glyph),
+                "{id}: the cycle {:?} never shows {}",
+                console.glyph_cycle,
+                console.glyph
             );
             if let Some(road) = console.model_slash {
                 assert!(road.command.starts_with('/'), "{id}: {}", road.command);

@@ -16997,6 +16997,8 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.openInApp",
         "worker.copyAnswer",
         "worker.preview",
+        "worker.thoughtFor",
+        "worker.thinking",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -17013,10 +17015,14 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
             "function dressToolTurn(row, turn, run, spoken) {",
             vec!["worker.moreLines"],
         ),
+        // The fold's label lives in `thoughtLabel` (the bare word, or the
+        // extension's 「Thought for Ns」 once the thought's length is known);
+        // the row a thought streams into says 「Thinking…」 itself.
         (
-            "function thoughtTurnNode(run, turn) {",
-            vec!["worker.thought"],
+            "function thoughtLabel(turn) {",
+            vec!["worker.thought", "worker.thoughtFor"],
         ),
+        ("function streamingTurnNode(role) {", vec!["worker.thinking"]),
         ("function agentVoice(id) {", vec!["worker.busy"]),
         (
             "function helperTailNode(run, turn) {",

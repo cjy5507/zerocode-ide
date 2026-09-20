@@ -35565,7 +35565,7 @@ const thoughtRows = await page.evaluate(async () => {
 ok(
   "a thought is a folded row of the transcript — the window's label and its bold heading on the cap, prose born on the first opening, never a paragraph and never the passport label — the call after it is its own row under the CLI's name, and the composer's textarea wears no second ring when focused",
   JSON.stringify(thoughtRows.shape) === JSON.stringify([
-    "helper-turn is-user is-briefing", "helper-turn is-thinking", "helper-turn is-tool", "helper-turn is-assistant",
+    "helper-turn is-user is-briefing", "helper-turn is-thinking is-step", "helper-turn is-tool is-step", "helper-turn is-assistant is-step",
   ]) &&
     thoughtRows.thoughtFolded &&
     thoughtRows.who !== "" && thoughtRows.who === thoughtRows.whoExpected &&
@@ -35621,10 +35621,10 @@ const chatFace = await page.evaluate(async () => {
   };
   const turns = [...face.querySelectorAll(".helper-turn")];
   seen.count = turns.length;
-  // The first user turn is the briefing bubble — on the right, with every
-  // other thing the person said, whole.
+  // The first user turn is the briefing box — on the left like the
+  // extension's, with every other thing the person said, whole.
   seen.briefingBubble = turns[0]?.tagName === "ARTICLE" &&
-    turns[0]?.classList.contains("is-briefing") && getComputedStyle(turns[0]).alignSelf === "flex-end";
+    turns[0]?.classList.contains("is-briefing") && getComputedStyle(turns[0]).alignSelf === "flex-start";
   seen.briefingSaid = turns[0]?.querySelector(".helper-said")?.textContent?.split("\n", 1)[0];
   seen.briefingWho = turns[0]?.querySelector(".helper-who") === null
     ? turns[0]?.getAttribute("aria-label")
@@ -35740,9 +35740,11 @@ const chatFace = await page.evaluate(async () => {
   seen.sendNamed = send?.getAttribute("aria-label") ===
       (sendStops ? t("worker.stop", "중지") : t("worker.send", "보내기")) &&
     Boolean(send?.querySelector(".icon use")) && send.textContent.trim() === "";
-  seen.sendRound = sendStyle !== null &&
+  // The extension's send: a square with the token's corners in the agent's
+  // colour (2.1.278 `sendButton`: 26px, 5px, clay orange).
+  seen.sendSquare = sendStyle !== null &&
     Math.abs(parseFloat(sendStyle.width) - parseFloat(sendStyle.height)) <= 1 &&
-    parseFloat(sendStyle.borderRadius) >= parseFloat(sendStyle.width) / 2;
+    sendStyle.borderRadius === getComputedStyle(document.documentElement).getPropertyValue("--chat-radius-send").trim();
   seen.sendFromToken = sendStyle?.backgroundColor ===
     probe(sendStops ? "--chat-send-stop-bg" : "--chat-send-bg", "backgroundColor");
   const root = getComputedStyle(document.documentElement);
@@ -35778,7 +35780,7 @@ ok(
     chatFace.briefingWho === chatFace.wantBriefing &&
     chatFace.briefingTip === chatFace.wantBriefing &&
     chatFace.proseFont &&
-    JSON.stringify(chatFace.toolRows) === JSON.stringify(["helper-turn is-tool is-live", "helper-turn is-tool is-live"]) &&
+    JSON.stringify(chatFace.toolRows) === JSON.stringify(["helper-turn is-tool is-step is-live", "helper-turn is-tool is-step is-live"]) &&
     chatFace.dumpName === chatFace.wantDumpName && chatFace.dumpArg === "line 0" &&
     chatFace.moreFolded && chatFace.moreWords === chatFace.wantMoreWords &&
     chatFace.wellHolds && chatFace.wellScrolls &&
@@ -35790,7 +35792,8 @@ ok(
   "the page wears its agent: data-agent picks the accent, the head and the chip carry the agent's own mark, and the status line under the transcript says the CLI's own busy word while the run is out",
   chatFace.agent === "claude" && chatFace.pageAccent !== "" &&
     chatFace.headMark === chatFace.statusVoice.glyph && chatFace.headMark !== "" && chatFace.headMarkAccent &&
-    chatFace.statusShown && chatFace.statusMark === chatFace.statusVoice.glyph &&
+    chatFace.statusShown &&
+    (chatFace.statusMark === chatFace.statusVoice.glyph || chatFace.statusVoice.glyph_cycle.includes(chatFace.statusMark)) &&
     chatFace.statusWord === chatFace.statusVoice.busy_word && chatFace.statusWord === "Pondering…" &&
     chatFace.focusEdge && chatFace.modelMark === chatFace.statusVoice.glyph,
   JSON.stringify(chatFace),
@@ -36007,9 +36010,10 @@ const toolStates = await page.evaluate(async () => {
   const after = [...list.querySelectorAll(".helper-turn.is-tool")];
   seen.sameRow = after[4] === out && after.length === 5;
   seen.doneDot = out.classList.contains("is-done") && !out.classList.contains("is-live") &&
-    dotOf(out).backgroundColor === probe("--signal-done", "backgroundColor") && dotOf(out).boxShadow === "none";
+    dotOf(out).backgroundColor === probe("--chat-dot-done", "backgroundColor") && dotOf(out).boxShadow === "none";
   const result = out.querySelector(".helper-tool-result");
   seen.resultLine = result?.textContent;
+  // The extension's secondary line: no glyph before it, the window's type.
   seen.resultLead = result ? getComputedStyle(result, "::before").content : "";
   seen.resultMono = result ? /mono/i.test(getComputedStyle(result).fontFamily) : false;
   const more = out.querySelector(".helper-tool-more");
@@ -36028,7 +36032,7 @@ const toolStates = await page.evaluate(async () => {
   const failed = list.lastElementChild;
   seen.failedRow = failed.classList.contains("is-tool") && failed.classList.contains("is-failed") &&
     !failed.classList.contains("is-done") && !failed.classList.contains("is-live") &&
-    dotOf(failed).backgroundColor === probe("--signal-halt", "backgroundColor");
+    dotOf(failed).backgroundColor === probe("--chat-dot-failed", "backgroundColor");
   seen.failedLine = failed.querySelector(".helper-tool-result")?.textContent;
   seen.failedInk = failed.querySelector(".helper-tool-result")
     ? getComputedStyle(failed.querySelector(".helper-tool-result")).color === probe("--signal-halt-ink")
@@ -36094,10 +36098,11 @@ ok(
   "a tool row's dot is the call's state: calls the answer closed stand plain under the CLI's names, the one still out wears the accent and a halo while the status line says the CLI's word, a result joining by call id turns the same row green with `└ first line` and the rest behind its fold, a failed result wears the halt ink, an edit's row wears the inline diff cut from its input (the review rows and word marks, blank gutters for a snippet, the rows past the ceiling counted, no input well, a path over each file of a patch), a quiet paint touches nothing, and the roster's done takes the accent and the status away",
   toolStates.rowsTotal === 8 && toolStates.toolCount === 5 &&
     toolStates.fourNames === "Read,Grep,Edit,Bash" && toolStates.fourPlain &&
-    toolStates.oneLive && toolStates.statusShown && toolStates.statusMark === toolStates.voice.glyph &&
+    toolStates.oneLive && toolStates.statusShown &&
+    (toolStates.statusMark === toolStates.voice.glyph || toolStates.voice.glyph_cycle.includes(toolStates.statusMark)) &&
     toolStates.statusWord === toolStates.voice.busy_word && toolStates.statusWord === "Pondering…" &&
     toolStates.sameRow && toolStates.doneDot &&
-    toolStates.resultLine === "12 lines" && toolStates.resultLead === '"└ "' && toolStates.resultMono &&
+    toolStates.resultLine === "12 lines" && toolStates.resultLead === "none" && !toolStates.resultMono &&
     toolStates.outWords === "Read · /repo/c.rs" &&
     toolStates.moreWords === toolStates.wantMoreWords && toolStates.moreOutput === "12 lines\nfn main() {}" &&
     toolStates.moreInput &&
@@ -36415,7 +36420,7 @@ ok(
   chatFace.boxIsTextarea && chatFace.shiftEnterKeeps && chatFace.enterSends &&
     chatFace.enterSent && chatFace.grows &&
     chatFace.doorWords === chatFace.wantDoor && chatFace.doorLeads && chatFace.noWhereLine &&
-    chatFace.sendNamed && chatFace.sendRound && chatFace.sendFromToken &&
+    chatFace.sendNamed && chatFace.sendSquare && chatFace.sendFromToken &&
     chatFace.composerRadius === chatFace.wantComposerRadius &&
     chatFace.composerRadius !== "" && chatFace.col === "900px" &&
     chatFace.modelWords === chatFace.wantModel && chatFace.wantModel !== null,
@@ -36566,11 +36571,11 @@ const flatTranscript = await page.evaluate(async () => {
   document.body.appendChild(probe);
   seen.inkFromToken = proseStyle.color === getComputedStyle(probe).color;
   probe.remove();
-  // 브리핑도 그 뒤 사람의 말도 같은 오른쪽 말풍선(t-2973) — 라벨 없이,
-  // 테두리 없이, 이름은 aria-label이 말한다.
+  // 브리핑도 그 뒤 사람의 말도 같은 왼쪽 상자(확장 2.1.278의 `userMessage`)
+  // — 라벨 없이, 1px 테두리, 이름은 aria-label이 말한다.
   const brief = list.querySelector(".helper-turn.is-briefing");
   const briefStyle = getComputedStyle(brief);
-  seen.briefingBubble = briefStyle.alignSelf === "flex-end" &&
+  seen.briefingBubble = briefStyle.alignSelf === "flex-start" &&
     briefStyle.backgroundColor !== "rgba(0, 0, 0, 0)" &&
     brief.getBoundingClientRect().width < list.clientWidth;
   const person = list.querySelector(".helper-turn.is-user:not(.is-briefing)");
@@ -36578,7 +36583,7 @@ const flatTranscript = await page.evaluate(async () => {
   seen.userQuiet = personStyle.alignSelf === briefStyle.alignSelf &&
     personStyle.backgroundColor === briefStyle.backgroundColor &&
     personStyle.borderRadius === briefStyle.borderRadius &&
-    personStyle.borderLeftWidth === "0px" && briefStyle.borderLeftWidth === "0px" &&
+    personStyle.borderLeftWidth === "1px" && briefStyle.borderLeftWidth === "1px" &&
     person.className === brief.className.replace(" is-briefing", "") &&
     !brief.querySelector(".helper-who") && !person.querySelector(".helper-who") &&
     brief.getAttribute("aria-label") === t("worker.briefing", "브리핑") &&
@@ -36590,7 +36595,7 @@ const flatTranscript = await page.evaluate(async () => {
   seen.toolFolded = lone !== null && lone.querySelector(".helper-tool-more") === null &&
     lone.querySelector(".helper-tool-result") === null;
   const toolRow = lone?.querySelector(".helper-tool-call") ?? null;
-  seen.toolLine = toolRow !== null && getComputedStyle(lone).display === "grid" &&
+  seen.toolLine = toolRow !== null && Number.parseFloat(getComputedStyle(lone).paddingLeft) > 0 &&
     getComputedStyle(toolRow).display === "flex" && getComputedStyle(lone, "::before").content !== "none";
   seen.toolVerb = lone?.querySelector(".helper-tool-name")?.textContent;
   seen.wantToolVerb = "Read";
@@ -54745,14 +54750,15 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       seen.streamingCue = streaming[0]?.querySelector(".helper-cue")?.textContent ?? "";
       seen.streamingOpen = streaming[0]?.open === true;
       const liveRow = streaming[1];
-      // A word is released at the reveal's pace, not painted as it lands.
-      seen.streamingText = (await until(() => liveRow?.textContent === "Reading ")) ? liveRow.textContent : (liveRow?.textContent ?? "");
+      // What arrived is on screen by the next frame, as the terminal draws it.
+      seen.streamingText = (await until(() => liveRow?.textContent.trim() === "Reading")) ? liveRow.textContent.trim() : (liveRow?.textContent ?? "");
       seen.streamingBelowTurns = streaming[0]?.previousElementSibling?.dataset.turn !== undefined;
       log = { ...log, live: [{ role: "thinking", text: "Look at it." }, { role: "assistant", text: "Reading it now." }] };
       await pollHelperPages();
       await window.__PAINTED__();
-      // "it " is a whole word and is released; "now." waits for the close.
-      seen.streamingGrewInPlace = (await until(() => liveRow.textContent === "Reading it ")) &&
+      // The same row grows in place with everything that arrived — nothing
+      // waits for a word boundary or for the close.
+      seen.streamingGrewInPlace = (await until(() => liveRow.textContent.trim() === "Reading it now.")) &&
         face.querySelectorAll(".helper-turn.is-streaming")[1] === liveRow;
       // The session's own news (`wire:update`) reads at once — this wire's,
       // not another's — and news during a read is read right after it.
@@ -54776,10 +54782,10 @@ suite("wire-session", async ({ browser, origin, ok }) => {
         turns: [...log.turns, { role: "thinking", text: "Look at it." }, { role: "assistant", text: "Reading it now." }],
       };
       await pollHelperPages();
-      // The close: the answer's row stands hidden while the reveal releases
-      // the last word, then takes the revealing row's place.
+      // The close: the answer's row stands at once, shown, in the paint that
+      // took the streaming row away — no hidden row waiting on a reveal.
       const closedAnswer = () => [...face.querySelectorAll(".helper-turn.is-assistant:not(.is-streaming)")].at(-1);
-      seen.handoverHidden = closedAnswer()?.hidden === true;
+      seen.closedAtOnce = closedAnswer()?.hidden === false;
       seen.streamingGone = await until(() => face.querySelectorAll(".helper-turn.is-streaming").length === 0);
       seen.closedShown = closedAnswer()?.hidden === false && closedAnswer()?.textContent.includes("Reading it now.");
       seen.closedRows = face.querySelectorAll(".helper-turn").length - seen.rowsBeforeStream;
@@ -54815,7 +54821,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
       return seen;
     });
     ok(
-      "a CLI driven on its wire is a conversation tab: opened for the checkout with the CLI's name, a composer that sends down the wire and no parent door, turns arriving through the poll with the live dot and the busy line, a question standing as the card with the wire's own options (the window's words for their kinds) and the pick going back with its id, the card left alone by a quiet poll and gone when the agent moves on, idle words between turns, the live text streaming as a thought's open fold and the answer's row that grow in place under the last turn and close into turns in one paint, the session's own news read at once and read again when it came mid-read, the wire's models in the chip menu and a pick sent down the wire, the palette naming the session and its commands, and the tab's close stopping the wire",
+      "a CLI driven on its wire is a conversation tab: opened for the checkout with the CLI's name, a composer that sends down the wire and no parent door, turns arriving through the poll with the live dot and the busy line, a question standing as the card with the wire's own options (the window's words for their kinds) and the pick going back with its id, the card left alone by a quiet poll and gone when the agent moves on, idle words between turns, the live text streaming as a thought's open fold and the answer's row that grow in place under the last turn with everything that arrived and close into turns in one paint, the session's own news read at once and read again when it came mid-read, the wire's models in the chip menu and a pick sent down the wire, the palette naming the session and its commands, and the tab's close stopping the wire",
       seen.opened && seen.startArgs === seen.wantStartArgs && seen.head === seen.wantHead && seen.composer &&
         seen.placeholder === seen.wantPlaceholder && seen.noDoor && seen.chipModel === " · gpt-5.6-sol" &&
         seen.idleWords === seen.wantIdleWords && seen.sent === seen.wantSent && seen.boxCleared &&
@@ -54823,9 +54829,9 @@ suite("wire-session", async ({ browser, origin, ok }) => {
         seen.cardActs === seen.wantCardActs && seen.cardKinds === "is-allow|is-allow|is-deny" && seen.cardQuietPoll === 0 &&
         seen.answered === seen.wantAnswered && seen.cardGone && seen.doneRow && seen.busyGone && seen.idleAgain &&
         seen.streamingRows === "thinking|assistant" && seen.streamingThought === "Look at it." &&
-        seen.streamingCue === "Look at it." && seen.streamingOpen && seen.streamingText === "Reading " &&
+        seen.streamingCue === "Look at it." && seen.streamingOpen && seen.streamingText === "Reading" &&
         seen.streamingBelowTurns && seen.streamingGrewInPlace && seen.eventPolled && seen.otherWireIgnored &&
-        seen.newsDuringReadReadAgain && seen.handoverHidden && seen.streamingGone && seen.closedShown &&
+        seen.newsDuringReadReadAgain && seen.closedAtOnce && seen.streamingGone && seen.closedShown &&
         seen.closedRows === 2 && seen.closedThoughtShut &&
         seen.menuModels === "GPT-5.6 Sol,GPT-6 Astra" && seen.modelSet === seen.wantModelSet &&
         seen.paletteHead === seen.wantPaletteHead && seen.paletteRows === "/help,/artifact" &&
@@ -54972,110 +54978,77 @@ suite("pane-hands-over-to-wire", async ({ browser, origin, ok }) => {
  * are delivered in lumps as real models arrive; the page must paint them as a
  * steady front of single words, and hand over to the closed turn only after
  * the reveal has drained. */
-suite("wire-paced-reveal", async ({ browser, origin, ok }) => {
+suite("wire-live-stream", async ({ browser, origin, ok }) => {
   const { page } = await openWindowTestPage(browser, origin);
   try {
     const seen = await page.evaluate(async () => {
-      const settle = (ms = 60) => new Promise((done) => setTimeout(done, ms));
+      const settle = (ms = 30) => new Promise((done) => setTimeout(done, ms));
       const frame = () => new Promise((done) => requestAnimationFrame(() => done(performance.now())));
+      const flat = (text) => text.replace(/\s+/g, " ").trim();
       const seen = {};
       let live = "";
       const log = () => ({
         found: true, skipped: false, next: 1, turns: [{ role: "user", text: "go" }], status: "working", asks: [],
         live: live ? [{ role: "assistant", text: live }] : [], agent: "claude", protocol: "claude-stream",
-        models: [], modes: [], commands: [], version: "2.1.273",
+        models: [], modes: [], commands: [], version: "2.1.278",
       });
-      window.__ANSWER__.wire_start = (args) => ({ id: 21, agent: args.agent, protocol: "claude-stream", version: "2.1.273", model: null, session: null });
+      window.__ANSWER__.wire_start = (args) => ({ id: 21, agent: args.agent, protocol: "claude-stream", version: "2.1.278", model: null, session: null });
       window.__ANSWER__.wire_log = (args) => { const held = log(); return { ...held, turns: held.turns.slice(args.after), next: held.turns.length }; };
       window.__ANSWER__.wire_stop = () => null;
       await openWirePage("claude", "/tmp/zerocode-window-test");
       await pollHelperPages();
       await window.__PAINTED__();
       const face = document.querySelector("#worker-view");
-      const revealing = () => face.querySelector('.is-streaming[data-role="assistant"]');
-      const words = ("the quick brown fox jumps over the lazy dog while the paced reveal keeps one front of words moving " +
-        "at a steady rate instead of painting each lump as it lands on the page").split(" ");
+      const streaming = () => face.querySelector('.is-streaming[data-role="assistant"]');
+      const words = ("the quick brown fox jumps over the lazy dog while every delta that lands is on the page by the " +
+        "next frame the way the terminal and the extension both draw it").split(" ");
       const bursts = [3, 9, 1, 12, 2, 7, 5];
-      const delivered = [];
-      const samples = [];
-      let sampling = true;
-      const sampler = (async () => {
-        while (sampling) {
-          const at = await frame();
-          samples.push({ at, len: revealing()?.textContent.length ?? 0 });
-        }
-      })();
+      // Each burst is the wire's news; the page must show all of it by the
+      // frame after the poll that brought it — never a word held back.
+      const lags = [];
       let taken = 0;
       for (const count of bursts) {
         const chunk = `${words.slice(taken, taken + count).join(" ")} `;
         taken += count;
         live += chunk;
-        delivered.push(chunk.length);
         await pollHelperPages();
-        await settle(90);
-      }
-      const drainStart = performance.now();
-      while ((revealing()?.textContent.length ?? 0) !== live.length && performance.now() - drainStart < 4000) await frame();
-      sampling = false;
-      await sampler;
-      const growth = [];
-      const gaps = [];
-      let lastLen = 0;
-      let lastGrewAt = null;
-      for (const sample of samples) {
-        const grew = sample.len - lastLen;
-        if (grew > 0) {
-          growth.push(grew);
-          if (lastGrewAt !== null) gaps.push(sample.at - lastGrewAt);
-          lastGrewAt = sample.at;
+        let frames = 0;
+        while (flat(streaming()?.textContent ?? "") !== flat(live) && frames < 6) {
+          await frame();
+          frames += 1;
         }
-        lastLen = sample.len;
+        lags.push(frames);
+        await settle();
       }
-      const cv = (xs) => {
-        const mean = xs.reduce((a, b) => a + b, 0) / xs.length;
-        const variance = xs.reduce((a, b) => a + (b - mean) ** 2, 0) / xs.length;
-        return mean ? Math.sqrt(variance) / mean : 0;
-      };
-      const p95 = (xs) => {
-        const sorted = [...xs].sort((a, b) => a - b);
-        return sorted[Math.min(sorted.length - 1, Math.floor(0.95 * (sorted.length - 1)))] ?? 0;
-      };
-      seen.frames = samples.length;
-      seen.growthFrames = growth.length;
-      seen.pacedCv = +cv(growth).toFixed(2);
-      seen.deliveredCv = +cv(delivered).toFixed(2);
-      seen.maxCharsInOneFrame = Math.max(...growth);
-      seen.longestWord = Math.max(...words.map((word) => word.length + 1));
-      seen.oneWordPerFrame = seen.maxCharsInOneFrame <= seen.longestWord;
-      seen.gapP95 = Math.round(p95(gaps));
-      seen.revealed = revealing()?.textContent.length === live.length;
-      seen.fadedWords = face.querySelectorAll(".is-streaming .helper-word").length;
-      // The close arrives with the last word still unreleased: the closed
-      // turn's row stands hidden until the reveal drains, never both visible.
-      live += "done.";
+      seen.lags = lags;
+      seen.everyBurstWithinAFrame = lags.every((frames) => frames <= 1);
+      seen.shownWhole = flat(streaming()?.textContent ?? "") === flat(live);
+      seen.noFade = face.querySelectorAll(".is-streaming .helper-word").length === 0;
+      seen.onRail = streaming()?.classList.contains("is-step") === true;
+      // The closed block and the open one are both the answer's own markdown.
+      live += "\n\n**bold** tail";
       await pollHelperPages();
+      await frame();
+      seen.settledIsMarkdown = streaming()?.querySelector(".helper-said-settled p") !== null;
+      seen.tailIsMarkdown = streaming()?.querySelector(".helper-said-tail strong")?.textContent === "bold";
+      // The close: the turn's row stands and the streaming row goes in one
+      // paint — never both, never a hidden row waiting on a reveal.
       const closed = { ...log(), status: "idle", live: [], turns: [{ role: "user", text: "go" }, { role: "assistant", text: live.trim() }] };
       window.__ANSWER__.wire_log = (args) => ({ ...closed, turns: closed.turns.slice(args.after), next: closed.turns.length });
       await pollHelperPages();
-      const committed = () => [...face.querySelectorAll(".helper-turn.is-assistant:not(.is-streaming)")].at(-1);
-      seen.handoverHidden = committed()?.hidden === true && revealing() !== null;
-      let bothVisible = false;
-      const handoverStart = performance.now();
-      while (revealing() && performance.now() - handoverStart < 3000) {
-        if (committed() && !committed().hidden) bothVisible = true;
-        await frame();
-      }
-      seen.neverBoth = !bothVisible;
-      seen.committedShown = committed()?.hidden === false && committed()?.textContent.includes("done.");
-      seen.streamingGone = face.querySelector(".is-streaming") === null;
+      const committed = [...face.querySelectorAll(".helper-turn.is-assistant:not(.is-streaming)")].at(-1) ?? null;
+      seen.swappedInOnePaint = committed !== null && committed.hidden === false && streaming() === null;
+      seen.committedWhole = committed?.textContent.includes("bold") === true && flat(committed?.textContent ?? "").startsWith("the quick brown");
+      seen.saidOnce = face.querySelector(".helper-turns").innerText.split("the quick brown").length - 1 === 1;
       for (const name of ["wire_start", "wire_log", "wire_stop"]) delete window.__ANSWER__[name];
       for (const held of [...tabs]) dropTab(held.id);
       return seen;
     });
     ok(
-      "a streaming answer is revealed a word at a time at a steady pace — the characters painted per frame vary less than the lumps delivered, no frame paints more than one word, the text never sits still past a quarter second mid-stream, released words fade in, and when the answer closes the reveal drains before the turn's row takes over, the two never visible together",
-      seen.pacedCv < seen.deliveredCv && seen.oneWordPerFrame && seen.gapP95 <= 250 && seen.revealed && seen.fadedWords > 0 &&
-        seen.handoverHidden && seen.neverBoth && seen.committedShown && seen.streamingGone,
+      "a streaming answer is on screen by the frame after its delta arrives — every burst within one frame, whole, nothing held back and nothing faded in, on the rail, the closed blocks and the open one both drawn as markdown, and when the answer closes the turn's row replaces the streaming row in one paint with the words shown once",
+      seen.everyBurstWithinAFrame && seen.shownWhole && seen.noFade && seen.onRail &&
+        seen.settledIsMarkdown && seen.tailIsMarkdown &&
+        seen.swappedInOnePaint && seen.committedWhole && seen.saidOnce,
       JSON.stringify(seen),
     );
   } finally {

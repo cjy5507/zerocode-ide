@@ -2,10 +2,11 @@
  *
  * This is the surface a person reaches for on an agent that has no wire (zo,
  * Codex, anything the voice table gives `wire: None`): the transcript view.
- * The wire's page streams; this one used to wait for a turn to close and then
- * put the whole answer on screen at once, because every streaming road was
- * gated behind `run.wire`. These pin the two things that made it read as a
- * terminal rather than as a chat panel. */
+ * The wire's page streams what is being said; this one gets a turn when the
+ * vendor writes it, and stands it whole the moment it arrives — the terminal
+ * already said those words, and releasing them again a word at a time (the
+ * 09-16 reveal) only lagged behind it (09-20). These pin the box the person's
+ * words wear and that an answer is on screen by the next frame, once. */
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
@@ -69,42 +70,34 @@ export async function testPaneConversation(browser, origin, ok) {
         answerLeftGap: Math.round(answerBox.left - listBox.left),
       };
     });
-    ok("what the person said sits on the right, and what the agent said stays on the left",
-      placed.alignSelf === "flex-end" &&
-      placed.userRightGap < placed.userLeftGap &&
+    ok("what the person said is the extension's box on the left, sized to its words, and what the agent said stands on the rail beside it",
+      placed.alignSelf === "flex-start" &&
+      placed.userLeftGap < placed.userRightGap &&
       placed.answerLeftGap <= placed.userLeftGap,
       JSON.stringify(placed));
 
-    // ------------------------------------------------------ revealed, not dumped
-    const reveal = await page.evaluate(async (text) => {
+    // ------------------------------------------------------- whole, by the next frame
+    const arrival = await page.evaluate(async (text) => {
       const list = document.querySelector(".helper-turns");
-      // `innerText`, not `textContent`: the turn's own row is in the DOM the
-      // whole time, hidden behind the reveal, and `textContent` would read it
-      // and call the lump a pass.
-      const at = () => list.innerText;
       window.__LOG__ = { next: 2, turns: [{ role: "assistant", text }] };
+      const t0 = performance.now();
       await pollHelperPages();
       window.__LOG__ = { next: 2, turns: [] };
-      const held = window.__CHAT__.worker.helper.turns.length;
-      // Two frames: enough for the reveal to have started, far too few for a
-      // hundred-odd characters at one word per 60 ms.
-      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
-      const early = at();
-      const rows = list.querySelectorAll("[data-turn]").length;
-      await new Promise((r) => setTimeout(r, 4000));
+      await new Promise((r) => requestAnimationFrame(r));
+      const ms = +(performance.now() - t0).toFixed(1);
+      const said = list.innerText;
       return {
-        held,
-        rows,
-        earlyHasWhole: early.includes(text),
-        earlyTail: early.slice(-40),
-        lateHasWhole: at().includes(text),
-        doubled: at().split(text.slice(0, 20)).length - 1,
+        ms,
+        shown: said.includes(text),
+        rows: list.querySelectorAll("[data-turn]").length,
+        held: window.__CHAT__.worker.helper.turns.length,
+        once: said.split(text.slice(0, 20)).length - 1,
+        streamingRows: list.querySelectorAll(".is-streaming").length,
       };
     }, ARRIVING);
-    ok("an answer that arrived whole is released word by word, not put up in one lump",
-      !reveal.earlyHasWhole && reveal.rows === reveal.held, JSON.stringify(reveal));
-    ok("and the whole answer is there when the reveal drains, exactly once",
-      reveal.lateHasWhole && reveal.doubled === 1, JSON.stringify(reveal));
+    ok("an answer that arrived whole stands whole by the next frame — the terminal already said it — once, with no streaming row left behind",
+      arrival.shown && arrival.rows === arrival.held && arrival.once === 1 && arrival.streamingRows === 0,
+      JSON.stringify(arrival));
 
     // A pane nobody has sent a model-bearing hook for still knows what it is
     // on, because its own transcript says so. The chip itself is this exact
