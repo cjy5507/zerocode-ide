@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.7] — 2026-09-20
+
+_since v1.1.6 (1 commits)_
+
+### feat
+- feat(jev): every seat records under auto and acts once its evidence stands
+
 ## [1.1.6] — 2026-09-20
 
 _since v1.1.5 (3 commits)_
