@@ -47,6 +47,11 @@ pub struct Judged {
     /// How often, over that window, the judgment named what the reader it
     /// would replace named.
     pub agreement: Agreement,
+    /// Control rows the agreement was read over beside the window's own —
+    /// the routing seat's probe run once more for a sampled active turn
+    /// ([`crate::jev::summary::CONTROL`]), joined to the window by task.
+    /// Zero for a seat that has no such sample.
+    pub control_rows: usize,
 }
 
 /// Judge a seat on its own ledger rows, by the table's lines alone: the
@@ -89,6 +94,7 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
         window,
         window_wanted,
         agreement,
+        control_rows: 0,
     })
 }
 

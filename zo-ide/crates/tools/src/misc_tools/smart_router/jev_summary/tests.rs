@@ -368,17 +368,29 @@ fn nothing_the_detached_shadow_runs_resolves_a_path_of_its_own() {
     // did (2026-09-19). Everything the batch uses is resolved in `fire`.
     let shipped = include_str!("../decision_shadow.rs");
     let from = shipped.find("async fn run_shadow_batch").expect("the batch");
-    let batch = &shipped[from..];
-    let batch = batch.split("\n/// ").next().unwrap_or(batch);
-    for reader in ["current_dir(", "decision_shadow_path(", "ConfigLoader::default_for("] {
-        assert!(
-            !batch.contains(reader),
-            "the detached batch resolves `{reader}` itself instead of taking what `fire` resolved"
-        );
+    // The control sample's batch detaches the same way, and takes the
+    // ledger the active road resolved before it wrote its rows.
+    for head in ["async fn run_shadow_batch", "async fn run_control_batch"] {
+        let at = shipped.find(head).unwrap_or_else(|| panic!("{head} is gone"));
+        let batch = &shipped[at..];
+        let batch = batch.split("\n/// ").next().unwrap_or(batch);
+        for reader in ["current_dir(", "decision_shadow_path(", "ConfigLoader::default_for("] {
+            assert!(
+                !batch.contains(reader),
+                "the detached batch `{head}` resolves `{reader}` itself instead of taking what the road resolved"
+            );
+        }
     }
     let fires = shipped.find("pub(super) fn fire(").expect("fire");
     let fire = &shipped[fires..from];
     assert!(fire.contains("ledger: decision_shadow_path("), "fire no longer freezes the ledger");
+    let actives = shipped.find("pub(super) fn active_assessments(").expect("the active road");
+    let active = &shipped[actives..];
+    let active = &active[..active.find("\n}\n").map_or(active.len(), |end| end)];
+    assert!(
+        active.contains("let ledger = decision_shadow_path(") && active.contains("ControlBatch {\n        ledger,"),
+        "the active road no longer hands the ledger it resolved to its control batch"
+    );
 }
 
 #[test]
@@ -434,7 +446,123 @@ fn a_draft_is_the_shape_the_label_reader_takes_and_only_when_it_was_asked_for() 
             "a road that judges does not draft the words it judged"
         );
     }
-    for word in ["\"description\"", "\"prompt\"", "\"task\""] {
+    // The fingerprint's key is spelled once for the file (`TASK`): the draft
+    // writes it and the judge joins control rows by it.
+    for word in ["\"description\"", "\"prompt\"", "TASK: task"] {
         assert!(body.contains(word), "the draft is missing {word}, which the label reader joins on");
     }
+    assert!(shipped.contains("const TASK: &str = \"task\";"), "the task key is no longer spelled once");
+}
+
+#[test]
+fn the_control_sample_is_one_task_in_five_and_the_same_ones_every_time() {
+    use zerocode_core::jev::summary::{JUDGED_EVERY_ROWS, rows_that_can_clear};
+    use super::super::decision_shadow::{PROBE_CONTROL_EVERY, control_sampled};
+    /// The probe answered this many of this machine's rows (2026-09-20).
+    const PROBE_ANSWERED_ROWS: usize = 17;
+    const PROBE_ROWS: usize = 28;
+    // Decided on the fingerprint, so a task is in the sample or out of it for
+    // good: a retry, a memo hit and a test all get the same answer.
+    for task in [0_u64, 1, 4, 5, 6, 0x62e7_5100_5eed_a222, u64::MAX] {
+        assert_eq!(control_sampled(task), control_sampled(task));
+        assert_eq!(control_sampled(task), task % PROBE_CONTROL_EVERY == 0, "{task}");
+    }
+    let rounds = 40_u64;
+    let picked = (0..PROBE_CONTROL_EVERY * rounds).filter(|task| control_sampled(*task)).count();
+    assert_eq!(picked, usize::try_from(rounds).expect("fits"), "one in {PROBE_CONTROL_EVERY}");
+
+    // The rate is sized to the judge's line. The window is the rows the
+    // routing floor can be cleared on; the probe answered 17 of this
+    // machine's 28 rows (2026-09-20). One in five leaves the twenty compared
+    // axes with a row to spare; one in ten never reaches them.
+    let window = rows_that_can_clear(zerocode_core::jev::ROUTING.answer_floor_permille.expect("routing rises"));
+    let axes = runtime::judged_axes().count();
+    let compared_axes = |every: u64| {
+        let control_rows = window / usize::try_from(every).expect("fits");
+        control_rows * PROBE_ANSWERED_ROWS / PROBE_ROWS * axes
+    };
+    assert!(
+        compared_axes(PROBE_CONTROL_EVERY) >= JUDGED_EVERY_ROWS,
+        "one in {PROBE_CONTROL_EVERY} compares {} axes a window, under the {JUDGED_EVERY_ROWS} the judge wants",
+        compared_axes(PROBE_CONTROL_EVERY)
+    );
+    assert!(
+        compared_axes(PROBE_CONTROL_EVERY * 2) < JUDGED_EVERY_ROWS,
+        "a sample half as dense would still fill the line — the rate is coarser than it needs to be"
+    );
+}
+
+/// An active row as the executor writes one: the judgment acted on and the
+/// probe not run.
+fn active(at: i64, task: &str, jev: [&str; 3]) -> Value {
+    let mut row = compared(at, jev, None);
+    row["task"] = json!(task);
+    row["routeUse"] = json!("applied");
+    row["probe"] = json!("not_run");
+    row
+}
+
+/// The control row drawn beside it: the probe's answer, the judgment copied.
+fn control(at: i64, task: &str, jev: [&str; 3], probe: [&str; 3]) -> Value {
+    use zerocode_core::jev::summary::CONTROL;
+    let mut row = compared(at, jev, Some(probe));
+    row["task"] = json!(task);
+    row["routeUse"] = json!(CONTROL);
+    row["outcome"] = json!(CONTROL);
+    row["requests"] = json!(0);
+    row["elapsedMs"] = json!(0);
+    row
+}
+
+#[test]
+fn a_control_row_is_compared_beside_its_windows_row_and_counted_nowhere_else() {
+    use zerocode_core::jev::promote::{Agreement, Line, Verdict};
+    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::ROUTING;
+    let jev = ["large", "low", "analysis"];
+    // Twenty-five active rows compare nothing on their own. Two of their
+    // tasks have a control row — one agreeing on every axis, one on two —
+    // and a third control row belongs to a task no row of the window holds.
+    let mut rows: Vec<Value> = (0..25).map(|at| active(at, &format!("task-{at}"), jev)).collect();
+    rows.push(control(100, "task-3", jev, ["large", "low", "analysis"]));
+    rows.push(control(101, "task-4", jev, ["large", "high", "analysis"]));
+    rows.push(control(102, "task-gone", jev, ["large", "low", "analysis"]));
+    write(home.path(), seat.ledger, &rows);
+
+    let judged = super::super::decision_shadow::judge_rows(&rows, None).expect("routing is judged");
+    assert_eq!(judged.window.rows, 25, "a control row was counted in the window");
+    assert_eq!(judged.window.answered, 25);
+    assert_eq!(judged.window.p95_ms, Some(400), "a control row's zero elapsed joined the latency");
+    assert_eq!(judged.agreement, Agreement { compared: 6, agreed: 5 }, "two control rows, three axes each");
+    assert_eq!(judged.control_rows, 2, "the control row of a task outside the window was joined");
+    assert!(
+        matches!(judged.verdict, Verdict::Hold(Line::TooFewRows { rows: 25, .. })),
+        "{:?}",
+        judged.verdict
+    );
+
+    // A clock just past the rows, so the day and the week both hold them.
+    let report = super::one(seat, &roots, None, None, 1_000, 0);
+    assert_eq!(report.judged, Some(judged));
+    assert_eq!(report.asked_ever, 25, "the cadence counted a control row");
+    assert_eq!(report.rows_to_next_judgment(), Some(JUDGED_EVERY_ROWS - 25 % JUDGED_EVERY_ROWS));
+    assert_eq!((report.today.rows, report.week.rows), (25, 25), "the day or the week counted a control row");
+
+    // Without the control rows the same window compares nothing at all.
+    let bare: Vec<Value> = rows.iter().take(25).cloned().collect();
+    let bare = super::super::decision_shadow::judge_rows(&bare, None).expect("judged");
+    assert_eq!((bare.agreement, bare.control_rows), (Agreement::default(), 0));
+}
+
+#[test]
+fn an_orchestration_seat_has_no_control_rows_to_borrow() {
+    // The window's seats read agreement off their own `agreed` marks; the
+    // column is theirs too, so one shape reaches the screen, and it is zero.
+    let rows: Vec<Value> = (0..3)
+        .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 5, "agreed": true}))
+        .collect();
+    let judged = zerocode_core::jev::promote::judge_seat(&zerocode_core::jev::SUMMON, &rows).expect("judged");
+    assert_eq!((judged.agreement.compared, judged.control_rows), (3, 0));
 }

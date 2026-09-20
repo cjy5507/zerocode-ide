@@ -64,6 +64,31 @@ enum ProbeCallOutcome {
     ProviderFailure,
 }
 
+/// Which road a probe batch runs on. The call, the memo, the wall and the
+/// route tax are the same on both; what differs is where the verdict goes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ProbeUse {
+    /// The turn's own probe: its verdict routes, and the attestation counter
+    /// that answers "did a probe verdict route a turn" says so.
+    Routing,
+    /// The decision shadow's control sample: the same call made once more
+    /// after an active turn, for a ledger row the judge compares
+    /// (`decision_shadow::PROBE_CONTROL_EVERY`). Its verdict routes nothing,
+    /// so that counter is left alone — the row is its record, failure token
+    /// and all.
+    Control,
+}
+
+impl ProbeUse {
+    /// The road's word in the `ZO_ROUTE_DEBUG` echo.
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Routing => "routing",
+            Self::Control => "control",
+        }
+    }
+}
+
 /// What the probe said about one non-empty task — its assessment, or the
 /// failure token of why it said nothing — beside the task's fingerprint. The
 /// routing results are these verdicts with the failures dropped; the decision
@@ -88,17 +113,32 @@ fn route_debug_enabled() -> bool {
     std::env::var(ROUTE_DEBUG_ENV).is_ok()
 }
 
-/// Attest one probe firing — a verdict that actually reached the router.
-fn attest_probe_fired() {
-    telemetry::attest_fired(telemetry::HarnessFeature::RoutingProbe);
+/// Attest one probe firing — a verdict that actually reached the router. A
+/// control verdict reached a ledger row instead, and is not one.
+fn attest_probe_fired(road: ProbeUse) {
+    if road == ProbeUse::Routing {
+        telemetry::attest_fired(telemetry::HarnessFeature::RoutingProbe);
+    }
+}
+
+/// Attest one probe failure the router felt. The control road's failure is
+/// its row's probe cell, where the judge reads it.
+fn attest_probe_failed(road: ProbeUse, reason: &'static str) {
+    if road == ProbeUse::Routing {
+        telemetry::attest_failed(telemetry::HarnessFeature::RoutingProbe, reason);
+    }
 }
 
 /// Record one per-task failure on both surfaces: the attestation counter
-/// (always) and the `ZO_ROUTE_DEBUG` echo (only when enabled).
-fn probe_failed(fingerprint: u64, model: &str, reason: &'static str) {
-    telemetry::attest_failed(telemetry::HarnessFeature::RoutingProbe, reason);
+/// (always, on the routing road) and the `ZO_ROUTE_DEBUG` echo (only when
+/// enabled).
+fn probe_failed(road: ProbeUse, fingerprint: u64, model: &str, reason: &'static str) {
+    attest_probe_failed(road, reason);
     if route_debug_enabled() {
-        eprintln!("[ROUTE_PROBE] task={fingerprint:016x} model={model} result={reason}");
+        eprintln!(
+            "[ROUTE_PROBE] task={fingerprint:016x} model={model} road={} result={reason}",
+            road.word()
+        );
     }
 }
 
@@ -108,6 +148,7 @@ fn record_probe_outcome(
     model: &str,
     outcome: Result<(ProbeCallOutcome, u64), tokio::task::JoinError>,
     attempt: &str,
+    road: ProbeUse,
 ) -> Result<ProbeAssessment, &'static str> {
     // Transport failures are not memoized: a later turn may recover.
     let response = match outcome {
@@ -119,16 +160,16 @@ fn record_probe_outcome(
             // A probe the wall cut off is `stopped`, not `failed`: nothing
             // about the call says the model would have answered wrongly.
             record_route_tax(attempt, model, runtime::OUTCOME_STOPPED, elapsed_ms, 0);
-            probe_failed(fingerprint, model, FAIL_TIMEOUT);
+            probe_failed(road, fingerprint, model, FAIL_TIMEOUT);
             return Err(FAIL_TIMEOUT);
         }
         Ok((ProbeCallOutcome::ProviderFailure, elapsed_ms)) => {
             record_route_tax(attempt, model, runtime::OUTCOME_FAILED, elapsed_ms, 0);
-            probe_failed(fingerprint, model, FAIL_PROVIDER_FAILURE);
+            probe_failed(road, fingerprint, model, FAIL_PROVIDER_FAILURE);
             return Err(FAIL_PROVIDER_FAILURE);
         }
         Err(_) => {
-            probe_failed(fingerprint, model, FAIL_JOIN_FAILURE);
+            probe_failed(road, fingerprint, model, FAIL_JOIN_FAILURE);
             return Err(FAIL_JOIN_FAILURE);
         }
     };
@@ -143,16 +184,19 @@ fn record_probe_outcome(
     let assessment = parse_probe_response(&text);
     match assessment {
         Some(assessment) => {
-            attest_probe_fired();
+            attest_probe_fired(road);
             if route_debug_enabled() {
                 eprintln!(
-                    "[ROUTE_PROBE] task={fingerprint:016x} model={model} result=success \
+                    "[ROUTE_PROBE] task={fingerprint:016x} model={model} road={} result=success \
                      complexity={:?} confidence={:?} intent={:?}",
-                    assessment.complexity, assessment.confidence, assessment.intent
+                    road.word(),
+                    assessment.complexity,
+                    assessment.confidence,
+                    assessment.intent
                 );
             }
         }
-        None => probe_failed(fingerprint, model, FAIL_MALFORMED),
+        None => probe_failed(road, fingerprint, model, FAIL_MALFORMED),
     }
     // An arrived malformed response is stable enough to memoize: retrying the
     // same task would spend tokens on the same invalid answer.
@@ -297,7 +341,8 @@ pub(super) fn route_probe_assessments(
 
 /// [`route_probe_assessments`] with the decision shadow's batch handed back
 /// rather than detached — the one seam a test holds to await the shadow it
-/// fired, and to give it a shorter wall.
+/// fired, and to give it a shorter wall. On the active road the batch handed
+/// back is the control sample's, when the batch drew one.
 pub(super) fn probe_and_shadow(
     inventory: &ModelInventory,
     parent_model: &str,
@@ -317,18 +362,24 @@ pub(super) fn probe_and_shadow(
     if let Some(active) = super::decision_shadow::active_assessments(tasks, attempt, active_deadline) {
         let fallback_tasks: Vec<(&str, &str)> = tasks
             .iter()
-            .zip(&active)
+            .zip(&active.assessments)
             .map(|(task, assessment)| if assessment.is_some() { ("", "") } else { *task })
             .collect();
-        let fallback = probe_slots(inventory, parent_model, &fallback_tasks, attempt);
+        let fallback = probe_slots(inventory, parent_model, &fallback_tasks, attempt, ProbeUse::Routing);
         let results = active
+            .assessments
             .into_iter()
             .zip(fallback)
             .map(|(assessment, slot)| assessment.or_else(|| slot.and_then(|slot| slot.verdict.ok())))
             .collect();
-        return (results, None);
+        // Routing is settled; the control sample leaves now, off the turn's
+        // clock, for the rows the judge compares.
+        let control = active
+            .control
+            .map(|batch| super::decision_shadow::fire_control(batch, inventory, parent_model));
+        return (results, control);
     }
-    let slots = probe_slots(inventory, parent_model, tasks, attempt);
+    let slots = probe_slots(inventory, parent_model, tasks, attempt, ProbeUse::Routing);
     let shadow = super::decision_shadow::fire(tasks, &slots, attempt, shadow_deadline);
     let results = slots
         .iter()
@@ -339,11 +390,16 @@ pub(super) fn probe_and_shadow(
 
 /// The probe's verdict for each task, aligned with `tasks`: `None` for an
 /// empty task (never probed), else what the probe said or why it said nothing.
-fn probe_slots(
+///
+/// `road` says whose verdicts these are — the turn's, or the decision
+/// shadow's control sample, which makes the same call for a row rather than
+/// a route.
+pub(super) fn probe_slots(
     inventory: &ModelInventory,
     parent_model: &str,
     tasks: &[(&str, &str)],
     attempt: &str,
+    road: ProbeUse,
 ) -> Vec<Option<ProbeSlot>> {
     type ProbeJoin = (usize, u64, tokio::task::JoinHandle<(ProbeCallOutcome, u64)>);
     let is_empty = |description: &str, prompt: &str| description.trim().is_empty() && prompt.trim().is_empty();
@@ -353,12 +409,9 @@ fn probe_slots(
         let Ok(cache) = probe_cache().lock() else {
             // Batch-wide bail-out: no fingerprint is resolved yet, so this is
             // the one failure attributed to the batch rather than to a task.
-            telemetry::attest_failed(
-                telemetry::HarnessFeature::RoutingProbe,
-                FAIL_CACHE_UNAVAILABLE,
-            );
+            attest_probe_failed(road, FAIL_CACHE_UNAVAILABLE);
             if route_debug_enabled() {
-                eprintln!("[ROUTE_PROBE] result={FAIL_CACHE_UNAVAILABLE}");
+                eprintln!("[ROUTE_PROBE] road={} result={FAIL_CACHE_UNAVAILABLE}", road.word());
             }
             for (slot, (description, prompt)) in slots.iter_mut().zip(tasks) {
                 if !is_empty(description, prompt) {
@@ -387,17 +440,14 @@ fn probe_slots(
                     // reply stays a failure, since no verdict reached the
                     // router.
                     let result = if memoized.is_some() {
-                        attest_probe_fired();
+                        attest_probe_fired(road);
                         "cached_success"
                     } else {
-                        telemetry::attest_failed(
-                            telemetry::HarnessFeature::RoutingProbe,
-                            FAIL_CACHED_MALFORMED,
-                        );
+                        attest_probe_failed(road, FAIL_CACHED_MALFORMED);
                         FAIL_CACHED_MALFORMED
                     };
                     if route_debug_enabled() {
-                        eprintln!("[ROUTE_PROBE] task={fingerprint:016x} result={result}");
+                        eprintln!("[ROUTE_PROBE] task={fingerprint:016x} road={} result={result}", road.word());
                     }
                 }
                 None => misses.push((index, fingerprint)),
@@ -417,7 +467,7 @@ fn probe_slots(
         // credential-less environment should read as "every probe gave up",
         // which is what the count then says.
         for (index, fingerprint) in &misses {
-            probe_failed(*fingerprint, &model, FAIL_CLIENT_UNAVAILABLE);
+            probe_failed(road, *fingerprint, &model, FAIL_CLIENT_UNAVAILABLE);
             slots[*index] = Some(ProbeSlot {
                 fingerprint: *fingerprint,
                 verdict: Err(FAIL_CLIENT_UNAVAILABLE),
@@ -460,7 +510,7 @@ fn probe_slots(
     let responses = api::sync_bridge::run_blocking(collect_all);
     let mut fresh: Vec<(u64, Option<ProbeAssessment>)> = Vec::with_capacity(responses.len());
     for (index, fingerprint, outcome) in responses {
-        let verdict = record_probe_outcome(&mut fresh, fingerprint, &model, outcome, attempt);
+        let verdict = record_probe_outcome(&mut fresh, fingerprint, &model, outcome, attempt, road);
         slots[index] = Some(ProbeSlot { fingerprint, verdict });
     }
     if let Ok(mut cache) = probe_cache().lock() {
@@ -876,8 +926,9 @@ mod live_path_tests {
         use zerocode_core::jev::door::Refused;
 
         use super::super::super::decision_shadow::{
-            check_system_one, decision_shadow_path, fire, CheckFailure, DecisionRouteUse,
-            DecisionShadowRow, ProbeCell, KEY_CHECK_TASK,
+            check_system_one, control_sampled, decision_shadow_path, fire, CheckFailure,
+            DecisionRouteUse, DecisionShadowRow, ProbeCell, KEY_CHECK_TASK, OUTCOME_CONTROL,
+            PROBE_CONTROL_EVERY,
         };
         use super::super::{probe_and_shadow, task_fingerprint, ProbeSlot};
         use super::{inventory, responses_sse, MockCodex, ProbeEnv};
@@ -919,10 +970,32 @@ mod live_path_tests {
         }
 
         /// A task no other case has probed or judged — both memos are
-        /// process-wide.
+        /// process-wide — and one the control sample leaves alone under an
+        /// empty description, so a case that counts probe requests on the
+        /// active road is not one time in five a case about the control.
         fn unique(label: &str) -> String {
-            let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_nanos());
-            format!("decision shadow case {label} {nanos}")
+            unique_for("", label)
+        }
+
+        /// [`unique`] for a task probed under `description`: the sample is
+        /// drawn on the fingerprint of both fields.
+        fn unique_for(description: &str, label: &str) -> String {
+            fresh_task(label, |task| !control_sampled(task_fingerprint(description, task)))
+        }
+
+        /// A fresh task the control sample picks under `description`.
+        fn sampled_for(description: &str, label: &str) -> String {
+            fresh_task(label, |task| control_sampled(task_fingerprint(description, task)))
+        }
+
+        fn fresh_task(label: &str, wanted: impl Fn(&str) -> bool) -> String {
+            loop {
+                let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |since| since.as_nanos());
+                let task = format!("decision shadow case {label} {nanos}");
+                if wanted(&task) {
+                    return task;
+                }
+            }
         }
 
         /// The settings, key, endpoints and state directory one case runs
@@ -1283,7 +1356,7 @@ mod live_path_tests {
             let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
             env.set_mode(Some("on"));
 
-            let task = unique("active-success");
+            let task = unique_for("a description", "active-success");
             let (results, _) = funnel(&[("a description", task.as_str())], UNHURRIED);
             let assessment = results[0].expect("validated Jev assessment");
             assert_eq!(
@@ -1487,6 +1560,92 @@ mod live_path_tests {
             assert_eq!(rows[1].route_use, DecisionRouteUse::Applied);
             assert!(rows[1].cached);
             assert_eq!(rows[2].route_use, DecisionRouteUse::Fallback);
+        }
+
+        /// One active task in five runs the chat probe it skipped — after the
+        /// turn, detached — and writes a control row beside the judgment it
+        /// was routed on. The other four spend nothing on the probe.
+        #[test]
+        fn one_active_task_in_five_runs_the_probe_as_a_control_row_after_the_turn() {
+            let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
+            let judgment = judging(judgment_answer());
+            let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
+            env.set_mode(Some("on"));
+            let picked = sampled_for("", "control-picked");
+            let passed: Vec<String> = (1..PROBE_CONTROL_EVERY)
+                .map(|index| unique(&format!("control-passed-{index}")))
+                .collect();
+            let mut tasks: Vec<(&str, &str)> = vec![("", picked.as_str())];
+            tasks.extend(passed.iter().map(|prompt| ("", prompt.as_str())));
+
+            let before = env.rows().len();
+            let (results, _) = funnel(&tasks, UNHURRIED);
+
+            assert!(
+                results.iter().all(|result| result.is_some_and(|assessment| assessment.complexity == RouteTaskComplexity::Large)),
+                "the control moved routing: {results:?}"
+            );
+            assert_eq!(judgment.requests().len(), tasks.len(), "one judgment per task, none for the control");
+            assert_eq!(probe.requests().len(), 1, "one probe for five active tasks: the sampled one's control");
+
+            let rows = env.rows();
+            assert_eq!(rows.len() - before, tasks.len() + 1, "five active rows and one control row");
+            let picked_task = format!("{:016x}", task_fingerprint("", &picked));
+            let active = rows
+                .iter()
+                .find(|row| row.task == picked_task && row.route_use == DecisionRouteUse::Applied)
+                .expect("the sampled task's active row");
+            let control = rows.last().expect("a row");
+            assert_eq!(control.route_use, DecisionRouteUse::Control, "{control:?}");
+            assert_eq!(control.outcome, OUTCOME_CONTROL);
+            assert!(!control.answered() && !control.called(), "a control row is not a request");
+            assert_eq!(control.task, active.task, "the control stands beside the row it was drawn from");
+            assert_eq!((control.requests, control.cached, control.elapsed_ms), (Some(0), false, 0));
+            assert_eq!(control.jev, active.jev, "the judgment is copied, never asked again");
+            assert_eq!(
+                [
+                    control.probe.token(&runtime::COMPLEXITY_AXIS),
+                    control.probe.token(&runtime::RISK_AXIS),
+                    control.probe.token(&runtime::INTENT_AXIS)
+                ],
+                [Some("medium"), Some("low"), Some("implementation")],
+                "the probe's answer, where `not_run` stood"
+            );
+            assert!(
+                rows.iter().filter(|row| row.route_use == DecisionRouteUse::Applied).all(|row| row.probe == ProbeCell::Failed("not_run".to_string())),
+                "an active row's own probe cell is still `not_run`"
+            );
+            // The counter leaves it out; the judge reads it for agreement and
+            // for nothing else. This judgment names none of the probe's
+            // three answers.
+            let ledger = super::super::super::jev_summary::read_rows(&env.ledger);
+            assert_eq!(
+                ledger.iter().filter(|row| super::super::super::jev_summary::asked_something(row).is_some()).count(),
+                before + tasks.len()
+            );
+            let judged = super::super::super::decision_shadow::judge_rows(&ledger, None).expect("routing is judged");
+            assert_eq!((judged.agreement.compared, judged.agreement.agreed, judged.control_rows), (3, 0, 1));
+            eprintln!("[decision-shadow control] {}", serde_json::to_string(control).expect("a row serializes"));
+        }
+
+        /// A sampled task the judgment failed on has no control row: there is
+        /// nothing for the probe to stand beside, and the fallback probe
+        /// already ran for routing.
+        #[test]
+        fn a_sampled_task_the_judgment_failed_on_draws_no_control_row() {
+            let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
+            let judgment = MockCodex::serving("HTTP/1.1 500 Internal Server Error", "application/json", "{}".to_string());
+            let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
+            env.set_mode(Some("on"));
+            let picked = sampled_for("", "control-failed");
+
+            let (results, _) = funnel(&[("", picked.as_str())], UNHURRIED);
+
+            assert_eq!(results[0].expect("the probe's fallback").complexity, RouteTaskComplexity::Medium);
+            assert_eq!(probe.requests().len(), 1, "the routing fallback, and no control after it");
+            let rows = env.rows();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].route_use, DecisionRouteUse::Fallback);
         }
 
         #[test]

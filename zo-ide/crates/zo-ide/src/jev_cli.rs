@@ -133,6 +133,11 @@ fn render_json(seats: &[SeatReport]) -> Value {
                         "compared": judged.agreement.compared,
                         "agreed": judged.agreement.agreed,
                         "lowerBound": judged.agreement.lower_bound(),
+                        // Control rows joined to the window for the
+                        // comparison — the probe run once more beside a
+                        // judgment an active turn acted on. They are in no
+                        // other number here.
+                        "controlRows": judged.control_rows,
                     },
                 })),
                 "stand": seat.stand.token(),
@@ -180,6 +185,16 @@ fn render_text(seats: &[SeatReport]) -> String {
                 " · agrees {} of {}",
                 judged.agreement.agreed, judged.agreement.compared
             );
+            // The rows that comparison borrowed from the control sample, when
+            // it borrowed any: an acting seat's own rows compare nothing.
+            if judged.control_rows > 0 {
+                let _ = write!(
+                    notes,
+                    " ({} control row{})",
+                    judged.control_rows,
+                    if judged.control_rows == 1 { "" } else { "s" }
+                );
+            }
         }
         if let Some(verdict) = seat.verdict() {
             let _ = write!(
