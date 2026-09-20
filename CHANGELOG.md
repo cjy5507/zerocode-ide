@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.1.6] — 2026-09-20
+
+_since v1.1.5 (3 commits)_
+
+### feat
+- feat(window): draw the conversation view as the Claude Code extension does and stream every delta by the next frame
+- feat(jev): count the screen seats — stamp their rows and read every session's ledger
+
+### fix
+- fix(window): log where a worker pane is seated beside its spawn line
+
 ## [1.1.5] — 2026-09-20
 
 _since v1.1.4 (2 commits)_
