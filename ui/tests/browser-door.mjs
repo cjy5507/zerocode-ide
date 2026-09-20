@@ -11,6 +11,9 @@
  * typed into a field nobody reads, and timed a `wait` out with the control on
  * screen the whole time.
  *
+ * The shared find highlighter is also exercised against a changing DOM: a
+ * Flow must not reuse an earlier text count after its preceding action.
+ *
  *   node ui/tests/browser-door.mjs
  */
 
@@ -21,6 +24,8 @@ import { chromium } from "./playwright-chromium.mjs";
 
 const UI = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DOOR = await readFile(resolve(UI, "../crates/zerocode-shell/src/cmd/browser.rs"), "utf8");
+const RUNTIME = await readFile(resolve(UI, "../crates/zerocode-shell/src/browser_runtime.rs"), "utf8");
+const FIND_INSTALL = RUNTIME.match(/const BROWSER_FIND_INSTALL: &str = r##"([\s\S]*?)"##;/)[1];
 const HELPERS = DOOR.match(/const BROWSER_AUTOMATION_HELPERS: &str = r#"([\s\S]*?)"#;/)[1];
 const CLICK_BODY = DOOR.match(/const CLICK_BODY: &str = r#"([\s\S]*?)"#;/)[1];
 // The wait's body is written inline in `automate_wait`; it is the raw string
@@ -123,6 +128,58 @@ await test("click presses the visible twin and refuses when every match is hidde
   assert(!ghost.ok && ghost.code === "element_not_visible", "an all-hidden match is not refused as not visible", ghost);
   return `pressed ${log} refused ${ghost.code}`;
 });
+
+/* A Flow asks the same question after its page changes. Reusing detached
+ * highlight nodes must not turn yesterday's answer into today's oracle. */
+async function findFixture(runCase) {
+  const findPage = await browser.newPage();
+  try {
+    await findPage.setContent('<p id="status">Ready</p><div id="added"></div>');
+    await findPage.evaluate(FIND_INSTALL);
+    await runCase(findPage);
+  } finally { await findPage.close(); }
+}
+
+await test("find rechecks replaced page text with the same query in the same task", () => findFixture(async (findPage) => {
+  const counts = await findPage.evaluate(() => {
+    const find = window.__zerocodeFind;
+    const before = find.run("Ready", true, false).count;
+    document.getElementById("status").textContent = "Working";
+    return [before, find.run("Ready", true, false).count];
+  });
+  assert(JSON.stringify(counts) === "[1,0]", "a removed match remained present", counts);
+}));
+
+await test("find discovers new matches after an empty same-query result", () => findFixture(async (findPage) => {
+  const counts = await findPage.evaluate(() => {
+    const find = window.__zerocodeFind;
+    const before = find.run("Finished", true, false).count;
+    document.getElementById("added").appendChild(document.createTextNode("Finished"));
+    return [before, find.run("Finished", true, false).count];
+  });
+  assert(JSON.stringify(counts) === "[0,1]", "an added match stayed absent", counts);
+}));
+
+await test("find invalidates edited characters and mutations delivered between calls", () => findFixture(async (findPage) => {
+  await findPage.evaluate(() => {
+    window.__zerocodeFind.run("Ready", true, false);
+    document.querySelector("mark").firstChild.nodeValue = "Working";
+  });
+  const result = await findPage.evaluate(() => window.__zerocodeFind.run("Ready", true, false));
+  assert(result.count === 0 && result.index === 0, "edited characters stayed matched", result);
+}));
+
+await test("find still cycles both ways on unchanged text and clears only its own marks", () => findFixture(async (findPage) => {
+  const state = await findPage.evaluate(() => {
+    const find = window.__zerocodeFind;
+    document.getElementById("status").textContent = "Ready Ready";
+    const hits = [find.run("Ready", true, false), find.run("Ready", true, false), find.run("Ready", false, false)];
+    find.clear();
+    return { hits, text: document.getElementById("status").textContent, marks: document.querySelectorAll("[data-zc-find]").length };
+  });
+  assert(JSON.stringify(state.hits.map((hit) => hit.index)) === "[1,2,1]" && state.hits.every((hit) => hit.count === 2), "unchanged matches no longer cycle", state);
+  assert(state.text === "Ready Ready" && state.marks === 0, "clear damaged the page", state);
+}));
 
 await browser.close();
 
