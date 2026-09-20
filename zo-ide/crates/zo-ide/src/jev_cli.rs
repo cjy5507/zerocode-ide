@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tools::jev_summary::{self, SeatReport};
 
 pub const USAGE: &str = "\
-zo jev summary [--cwd <dir>] [--json]
+zo jev summary [--cwd <dir>] [--computer-use <sessions-dir>] [--json]
 
   summary: count every Jev seat's ledger — today and the last seven days.
   Per seat: its mode (off/shadow/on/auto), rows, how many answered and the
@@ -23,12 +23,15 @@ zo jev summary [--cwd <dir>] [--json]
   what the billed tokens cost, and — for a seat whose `auto` may rise — the
   share it must clear and how many rows stand before the next judgment.
   A seat no ledger has been written for says so; it is not a seat that
-  answered nothing.
+  answered nothing. --computer-use names the window's Computer Use sessions
+  folder, where the screen seats append beside each walk's evidence
+  (<dir>/<session>/<ledger>); every session's rows are counted.
 ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Request {
     cwd: Option<PathBuf>,
+    sessions: Option<PathBuf>,
     json: bool,
 }
 
@@ -38,7 +41,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
         Some("-h" | "--help") | None => return Err(USAGE.to_string()),
         Some(other) => return Err(format!("unknown verb '{other}'\n\n{USAGE}")),
     }
-    let mut request = Request { cwd: None, json: false };
+    let mut request = Request { cwd: None, sessions: None, json: false };
     let mut rest = args[1..].iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -46,6 +49,10 @@ fn parse(args: &[String]) -> Result<Request, String> {
             "--cwd" => {
                 let dir = rest.next().ok_or_else(|| "--cwd needs a directory".to_string())?;
                 request.cwd = Some(PathBuf::from(dir));
+            }
+            "--computer-use" => {
+                let dir = rest.next().ok_or_else(|| "--computer-use needs a directory".to_string())?;
+                request.sessions = Some(PathBuf::from(dir));
             }
             other => return Err(format!("unknown argument '{other}'\n\n{USAGE}")),
         }
@@ -67,7 +74,7 @@ pub fn run(args: &[String], cwd: &Path, now_ms: i64, offset_s: i64) -> Result<Re
     let cwd = request.cwd.clone().unwrap_or_else(|| cwd.to_path_buf());
     let settings = tools::merged_settings_root(&cwd);
     let roots = jev_summary::ledger_roots(&cwd);
-    let seats = jev_summary::report(&roots, settings.as_ref(), now_ms, offset_s);
+    let seats = jev_summary::report(&roots, request.sessions.as_deref(), settings.as_ref(), now_ms, offset_s);
     Ok(Report {
         text: if request.json {
             render_json(&seats).to_string()

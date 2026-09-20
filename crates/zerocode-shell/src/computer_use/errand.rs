@@ -52,6 +52,7 @@ use serde_json::{Value, json};
 use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
+use zerocode_core::jev::summary::{AT, ELAPSED_MS};
 use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse};
 use zerocode_core::screen_action::{
     ActionAsk, ActionChoice, ActionLook, Chosen, SCREEN_ACTION_RUBRIC_VERSION, Where, ask,
@@ -609,19 +610,21 @@ pub fn run(
                     mode,
                     at,
                     attempt,
-                    with_spent(
+                    stamped(
                         json!({
                             "outcome": token,
                             "candidates": candidates,
                             "routeUse": USE_FALLBACK,
                         }),
                         spent,
+                        judgment_ms,
+                        crate::project_runtime::now_epoch_ms(),
                     ),
                 ));
                 return walked;
             }
         };
-        let mut said = with_spent(
+        let mut said = stamped(
             json!({
                 "outcome": "answered",
                 "candidates": candidates,
@@ -629,6 +632,8 @@ pub fn run(
                 "probabilities": choice.probabilities,
             }),
             spent,
+            judgment_ms,
+            crate::project_runtime::now_epoch_ms(),
         );
         let chosen = match choice.chosen {
             Chosen::Mark(mark) => mark,
@@ -745,12 +750,23 @@ pub fn write_rows(seat: &JevUse, dir: Option<&std::path::Path>, rows: &[Value]) 
     }
 }
 
-/// A row's words with what the judgment cost at the Jev door, when the judge
-/// says — under the keys every Jev ledger spells them with.
-fn with_spent(mut said: Value, spent: Option<Spent>) -> Value {
-    if let (Some(spent), Some(fields)) = (spent, said.as_object_mut()) {
-        fields.insert(REQUESTS_KEY.to_string(), json!(spent.requests));
-        fields.insert(REDACTED_LINES_KEY.to_string(), json!(spent.redacted_lines));
+/// A row's words with when it was asked, how long the judgment took, and what
+/// it cost at the Jev door when the judge says — under the keys every Jev
+/// ledger spells them with, so the one counter that reads every seat
+/// (`zo jev summary`) counts this seat too.
+///
+/// The clock and the wall time were missing until 2026-09-20: the walk timed
+/// its judgment and threw the number away, and a row with no `at` fell
+/// outside every "today" and "7d" window, so the three screen seats read as
+/// "never asked" on the settings card with 41 rows on disk.
+fn stamped(mut said: Value, spent: Option<Spent>, elapsed_ms: u64, now_ms: i64) -> Value {
+    if let Some(fields) = said.as_object_mut() {
+        fields.insert(AT.canonical.to_string(), json!(now_ms));
+        fields.insert(ELAPSED_MS.canonical.to_string(), json!(elapsed_ms));
+        if let Some(spent) = spent {
+            fields.insert(REQUESTS_KEY.to_string(), json!(spent.requests));
+            fields.insert(REDACTED_LINES_KEY.to_string(), json!(spent.redacted_lines));
+        }
     }
     said
 }

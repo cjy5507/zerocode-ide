@@ -135,22 +135,51 @@ pub fn read_rows(path: &Path) -> Vec<Value> {
 #[must_use]
 pub fn report(
     roots: &[PathBuf],
+    sessions: Option<&Path>,
     settings: Option<&Value>,
     now_ms: i64,
     offset_s: i64,
 ) -> Vec<SeatReport> {
-    JEV_USES.iter().map(|seat| one(seat, roots, settings, now_ms, offset_s)).collect()
+    JEV_USES.iter().map(|seat| one(seat, roots, sessions, settings, now_ms, offset_s)).collect()
+}
+
+/// Every ledger file a seat has under a folder of Computer Use sessions —
+/// `<sessions>/<session>/<seat.ledger>`, oldest session first.
+///
+/// The window's screen seats (browser, desktop, emulator) append beside each
+/// walk's evidence rather than under one root, and a counter that looked
+/// only under the roots read all three as "never asked" with 41 rows on this
+/// machine (2026-09-20). Session folders are named by their start time, so
+/// their name order is their time order.
+#[must_use]
+pub fn session_ledgers(sessions: &Path, ledger: &str) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(sessions) else {
+        return Vec::new();
+    };
+    let mut found: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join(ledger))
+        .filter(|path| path.is_file())
+        .collect();
+    found.sort();
+    found
 }
 
 fn one(
     seat: &'static JevUse,
     roots: &[PathBuf],
+    sessions: Option<&Path>,
     settings: Option<&Value>,
     now_ms: i64,
     offset_s: i64,
 ) -> SeatReport {
-    let found = roots.iter().map(|root| root.join(seat.ledger)).find(|path| path.is_file());
-    let rows = found.as_deref().map(read_rows).unwrap_or_default();
+    let under_roots = roots.iter().map(|root| root.join(seat.ledger)).find(|path| path.is_file());
+    let per_session = sessions.map(|dir| session_ledgers(dir, seat.ledger)).unwrap_or_default();
+    let found = under_roots.clone().or_else(|| per_session.first().cloned());
+    let mut rows = under_roots.as_deref().map(read_rows).unwrap_or_default();
+    for ledger in &per_session {
+        rows.extend(read_rows(ledger));
+    }
     let today = summary::summarize(&rows, start_of_day_ms(now_ms, offset_s));
     let week = summary::summarize(&rows, now_ms - WINDOW_DAYS * MS_PER_DAY);
     let cost_usd = cost_of(week.input_tokens);

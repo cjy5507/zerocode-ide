@@ -56,7 +56,7 @@ fn every_seat_in_the_table_gets_a_row_whether_or_not_it_has_a_ledger() {
     );
     let seats: Vec<SeatReport> = zerocode_core::jev::JEV_USES
         .iter()
-        .map(|seat| super::one(seat, &roots, None, 1_000, 0))
+        .map(|seat| super::one(seat, &roots, None, None, 1_000, 0))
         .collect();
     assert_eq!(seats.len(), zerocode_core::jev::JEV_USES.len());
     let routing = seats.iter().find(|seat| seat.id == "routing").expect("routing");
@@ -73,6 +73,39 @@ fn every_seat_in_the_table_gets_a_row_whether_or_not_it_has_a_ledger() {
 }
 
 #[test]
+fn a_screen_seats_rows_are_counted_across_its_session_folders() {
+    // The window's screen seats append beside each walk's evidence:
+    // <sessions>/<session>/<ledger>. Counted from every folder, oldest first,
+    // and named by the first — never "never asked" with rows on disk.
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().join("nowhere")];
+    let sessions = home.path().join("computer-use").join("sessions");
+    let seat = &zerocode_core::jev::BROWSER;
+    write(&sessions.join("20260920-065957-3951"), seat.ledger, &[json!({"at": 10, "outcome": "answered", "elapsedMs": 40, "requests": 1})]);
+    write(
+        &sessions.join("20260919-040538-16330"),
+        seat.ledger,
+        &[json!({"at": 5, "outcome": "no_look"}), json!({"at": 6, "outcome": "answered", "elapsedMs": 60, "requests": 1})],
+    );
+    write(&sessions.join("20260918-000000-1"), "unrelated.txt", &[json!({"at": 1})]);
+    let report = super::one(seat, &roots, Some(&sessions), None, 1_000, 0);
+    assert_eq!(report.week.rows, 3, "every session folder's rows");
+    assert_eq!(report.week.answered, 2);
+    assert_eq!(report.week.p95_ms, Some(60));
+    assert_eq!(
+        report.found.as_deref(),
+        Some(sessions.join("20260919-040538-16330").join(seat.ledger).as_path()),
+        "named by the oldest session that has the file"
+    );
+    assert_eq!(
+        super::one(seat, &roots, None, None, 1_000, 0).found,
+        None,
+        "without a sessions folder the seat is as unread as before"
+    );
+    assert!(super::session_ledgers(&home.path().join("missing"), seat.ledger).is_empty());
+}
+
+#[test]
 fn a_seat_that_never_rises_is_never_asked_to_clear_a_line() {
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf(), home.path().join("other")];
@@ -83,7 +116,7 @@ fn a_seat_that_never_rises_is_never_asked_to_clear_a_line() {
     #[allow(clippy::explicit_iter_loop)]
     for seat in zerocode_core::jev::JEV_USES.iter() {
         write(home.path(), seat.ledger, &answered);
-        let row = super::one(seat, &roots, None, 1_000, 0);
+        let row = super::one(seat, &roots, None, None, 1_000, 0);
         assert_eq!(
             row.clears_rise_floor.is_some(),
             seat.promotes,
@@ -124,7 +157,7 @@ fn a_seat_starts_recording_and_a_rise_row_in_its_own_ledger_makes_it_act() {
     let auto = json!({ "smart": { seat.setting: "auto" } });
 
     write(home.path(), seat.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5})]);
-    let quiet = super::one(seat, &roots, Some(&auto), 1_000, 0);
+    let quiet = super::one(seat, &roots, None, Some(&auto), 1_000, 0);
     assert_eq!(quiet.stand, Stand::Recording);
     assert!(!quiet.applies, "auto starts recording");
 
@@ -133,7 +166,7 @@ fn a_seat_starts_recording_and_a_rise_row_in_its_own_ledger_makes_it_act() {
         seat.ledger,
         &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5}), json!({"at": 2, (TRANSITION.canonical): ROSE})],
     );
-    let raised = super::one(seat, &roots, Some(&auto), 1_000, 0);
+    let raised = super::one(seat, &roots, None, Some(&auto), 1_000, 0);
     assert_eq!(raised.stand, Stand::Applying);
     assert!(raised.applies, "a rise its own ledger recorded makes auto act");
 }
@@ -145,11 +178,11 @@ fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
     let roots = [home.path().to_path_buf()];
     let seat = &zerocode_core::jev::ROUTING;
     write(home.path(), seat.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5})]);
-    let row = super::one(seat, &roots, None, 1_000, 0);
+    let row = super::one(seat, &roots, None, None, 1_000, 0);
     assert!(matches!(row.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))));
 
     // And a seat with no rise line is never judged at all.
-    let quiet = super::one(&zerocode_core::jev::STALL, &roots, None, 1_000, 0);
+    let quiet = super::one(&zerocode_core::jev::STALL, &roots, None, None, 1_000, 0);
     assert_eq!(quiet.verdict(), None);
 }
 
@@ -199,7 +232,7 @@ fn the_screen_and_the_judge_read_one_window() {
         .map(|at| compared(at, ["large", "low", "analysis"], Some(["large", "low", "analysis"])))
         .collect();
     write(home.path(), seat.ledger, &rows);
-    let report = super::one(seat, &roots, None, i64::MAX / 2, 0);
+    let report = super::one(seat, &roots, None, None, i64::MAX / 2, 0);
     let judged = report.judged.as_ref().expect("the routing seat is judged");
     assert_eq!(Some(judged.clone()), super::super::decision_shadow::judge_rows(&rows, None));
     assert_eq!(judged.window.rows, 30, "the window is the last rows the floor can be cleared on");

@@ -24,7 +24,7 @@ fn an_unknown_word_is_refused_with_the_usage_rather_than_guessed_at() {
 
 #[test]
 fn the_flags_are_read_in_either_order() {
-    let want = Request { cwd: Some(std::path::PathBuf::from("/tmp/x")), json: true };
+    let want = Request { cwd: Some(std::path::PathBuf::from("/tmp/x")), sessions: None, json: true };
     let one = parse(&["summary".into(), "--json".into(), "--cwd".into(), "/tmp/x".into()]);
     let two = parse(&["summary".into(), "--cwd".into(), "/tmp/x".into(), "--json".into()]);
     assert_eq!(one.as_ref(), Ok(&want));
@@ -32,10 +32,20 @@ fn the_flags_are_read_in_either_order() {
 }
 
 #[test]
+fn the_sessions_folder_is_read_off_its_flag() {
+    let want = Request { cwd: None, sessions: Some(std::path::PathBuf::from("/tmp/cu")), json: false };
+    assert_eq!(parse(&["summary".into(), "--computer-use".into(), "/tmp/cu".into()]).as_ref(), Ok(&want));
+    assert_eq!(
+        parse(&["summary".to_string(), "--computer-use".to_string()]).unwrap_err(),
+        "--computer-use needs a directory"
+    );
+}
+
+#[test]
 fn every_seat_the_table_names_reaches_the_json_with_its_own_numbers() {
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf()];
-    let seats = tools::jev_summary::report(&roots, None, 1_000, 0);
+    let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
     let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
     let seats = value["seats"].as_array().expect("seats");
     assert_eq!(seats.len(), zerocode_core::jev::JEV_USES.len());
@@ -59,7 +69,7 @@ fn every_seat_the_table_names_reaches_the_json_with_its_own_numbers() {
 fn the_text_answer_names_every_seat_once() {
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf()];
-    let text = render_text(&tools::jev_summary::report(&roots, None, 1_000, 0));
+    let text = render_text(&tools::jev_summary::report(&roots, None, None, 1_000, 0));
     let report = Report { text };
     for seat in zerocode_core::jev::JEV_USES {
         assert_eq!(

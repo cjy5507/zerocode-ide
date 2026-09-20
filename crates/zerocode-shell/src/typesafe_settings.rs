@@ -32,6 +32,11 @@ pub const ZO_KEY_CHECK_ARGS: [&str; 3] = ["decision-shadow", "check", "--json"];
 /// judge that promotes a seat reads them the same way (§4), and a card that
 /// counted for itself would be free to disagree with the seat it is drawing.
 pub const ZO_JEV_SUMMARY_ARGS: [&str; 3] = ["jev", "summary", "--json"];
+/// The flag that hands zo the window's Computer Use sessions folder, where the
+/// screen seats (browser, desktop, emulator) append beside each walk's
+/// evidence — without it the card read all three as "never asked" with rows
+/// on disk (2026-09-20).
+pub const ZO_JEV_SUMMARY_SESSIONS_FLAG: &str = "--computer-use";
 
 /// The keychain item the key lives in.
 #[must_use]
@@ -946,6 +951,21 @@ mod tests {
                 "the pane no longer words `{token}`"
             );
         }
+    }
+
+    /// The summary flag the window passes is one zo's CLI documents.
+    #[test]
+    fn the_summary_sessions_flag_is_the_one_zo_documents() {
+        let zo = include_str!("../../../zo-ide/crates/zo-ide/src/jev_cli.rs");
+        let documented = format!("zo {}", ZO_JEV_SUMMARY_ARGS[..2].join(" "));
+        assert!(
+            zo.contains(&documented),
+            "zo no longer documents `{documented}`"
+        );
+        assert!(
+            zo.contains(&format!("[{ZO_JEV_SUMMARY_SESSIONS_FLAG} <sessions-dir>]")),
+            "zo no longer documents `{ZO_JEV_SUMMARY_SESSIONS_FLAG}`"
+        );
     }
 
     /// The command line the window execs is the one zo's CLI documents.

@@ -1,6 +1,9 @@
 //! TypeSafe (Jev) settings IPC — the key and every seat's switch.
 use crate::api_routers::{self, Keychain, RouterRefusal};
 use crate::typesafe_settings::{self, SeatNumbers, TypeSafeCheck, TypeSafeSettings};
+use tauri::State;
+
+use crate::AppState;
 
 fn settings_path() -> Result<std::path::PathBuf, RouterRefusal> {
     api_routers::zo_settings_path()
@@ -83,8 +86,14 @@ pub(crate) async fn check_typesafe_key() -> Result<TypeSafeCheck, String> {
 /// the verb answers nothing this reader understands, and the card draws its
 /// switches without numbers rather than refusing to draw at all.
 #[tauri::command]
-pub(crate) async fn jev_summary() -> Result<Vec<SeatNumbers>, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub(crate) async fn jev_summary(state: State<'_, AppState>) -> Result<Vec<SeatNumbers>, String> {
+    // The screen seats append beside each walk's evidence under this
+    // window's Computer Use sessions, not under a root zo knows; handed over
+    // on the exec boundary so one counter counts every seat.
+    let sessions = state
+        .local_data_root()
+        .join(crate::computer_use::evidence::SESSIONS_DIR);
+    tauri::async_runtime::spawn_blocking(move || {
         let home = dirs::home_dir().ok_or_else(|| "no home directory".to_string())?;
         let bin = crate::zo_companion::zo_path_under(&home);
         if !bin.exists() {
@@ -92,6 +101,8 @@ pub(crate) async fn jev_summary() -> Result<Vec<SeatNumbers>, String> {
         }
         let output = crate::proc::quiet_command(&bin)
             .args(typesafe_settings::ZO_JEV_SUMMARY_ARGS)
+            .arg(typesafe_settings::ZO_JEV_SUMMARY_SESSIONS_FLAG)
+            .arg(&sessions)
             .output()
             .map_err(|error| error.to_string())?;
         typesafe_settings::read_summary(&output.stdout).ok_or_else(|| {
