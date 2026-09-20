@@ -73,7 +73,7 @@ pub fn matches(
     matches_any(query, name, bundle_id, executable_stem)
 }
 
-/// [`matches`] with every other name the platform read off the app.
+/// [`matches()`] with every other name the platform read off the app.
 #[must_use]
 pub fn matches_any<'a>(
     query: &str,
