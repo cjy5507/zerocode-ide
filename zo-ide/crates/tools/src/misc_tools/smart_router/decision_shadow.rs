@@ -18,6 +18,14 @@
 //! names the refusal and sends nothing, and what is sent has lost every line
 //! that may carry a credential. A memo answer sends nothing and so meets no
 //! door.
+//!
+//! An acting seat skips the chat probe, so its rows alone can never say how
+//! often the judgment agrees with it. One active turn in
+//! [`PROBE_CONTROL_EVERY`] therefore runs the probe once more after its answer
+//! is written — detached, like the shadow — and appends a control row: the
+//! same shape, the judgment copied from the row it acted on, the probe's
+//! answer where `not_run` stood. The judge reads it for agreement and for
+//! nothing else ([`zerocode_core::jev::summary::CONTROL`]).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -33,11 +41,11 @@ use runtime::{
 use serde::{Deserialize, Serialize};
 
 use super::jev_gate::{self, JevDoor};
-use super::probe_exec::{remember_bounded, ProbeSlot, PROBE_TIMEOUT};
+use super::probe_exec::{remember_bounded, ProbeSlot, ProbeUse, PROBE_TIMEOUT};
 use super::settings::decision_shadow_mode_from;
 use zerocode_core::jev::ROUTING;
 use zerocode_core::jev::promote::{self, Verdict};
-use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+use zerocode_core::jev::summary::{self as jev_ledger, JUDGED_EVERY_ROWS};
 
 use super::jev_summary;
 use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
@@ -67,6 +75,44 @@ pub(super) const DECISION_ACTIVE_DEADLINE: Duration =
 /// An active row uses this probe cell when no chat probe ran. It is an explicit
 /// absence, not a fabricated chat-model verdict, and comparison metrics skip it.
 const PROBE_NOT_RUN: &str = "not_run";
+
+/// The outcome a control row carries — the counter's word, read from where
+/// the counter that leaves such a row out of every window spells it.
+pub const OUTCOME_CONTROL: &str = jev_ledger::CONTROL;
+
+/// The key a row's task fingerprint is written under, for a reader that joins
+/// rows by it without deserializing them whole.
+const TASK: &str = "task";
+
+/// One active turn in this many runs the chat probe it skipped, detached and
+/// after its answer is written, and appends a control row.
+///
+/// Why any: an acting seat writes `not_run` for the probe on every row, so
+/// the agreement line — which needs rows where both readers answered — stops
+/// filling the moment the seat acts, and an `auto` that rose could never be
+/// shown to still agree (this machine's last seven rows, every one `applied`
+/// with `not_run`, 2026-09-21).
+///
+/// Why five. The judge wants [`JUDGED_EVERY_ROWS`] compared axes over the
+/// window its floor can be cleared on
+/// ([`zerocode_core::jev::summary::rows_that_can_clear`]: 73 rows for
+/// routing's 0.95). One turn in five is 14 control rows a window, three
+/// judged axes each — 42 compared if the probe answers every time; at the
+/// probe's measured share of timeouts (11 rows of 28, 2026-09-20) eight still
+/// answer, 24 axes, clear of the twenty with a row to spare. One in ten would
+/// be seven rows, four answering, twelve axes: under the line every window.
+/// The cost is one probe call per five active turns, off the turn's clock;
+/// the sample's arithmetic is pinned by a test beside the judge's line.
+pub const PROBE_CONTROL_EVERY: u64 = 5;
+
+/// Whether a task's turn is the one in [`PROBE_CONTROL_EVERY`] that runs the
+/// control probe. Decided on the fingerprint, so the same task is always the
+/// same answer: a fan-out retry or a memo hit does not move the sample, and a
+/// test can pick a task that is in it or out of it.
+#[must_use]
+pub fn control_sampled(task: u64) -> bool {
+    task.is_multiple_of(PROBE_CONTROL_EVERY)
+}
 
 /// Failure: the merged settings could not be read, so nothing was sent.
 const FAIL_SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
@@ -207,6 +253,10 @@ pub enum DecisionRouteUse {
     RecordOnly,
     Applied,
     Fallback,
+    /// The control sample: the probe run once more, after the turn, beside a
+    /// judgment an `applied` row already acted on. It routed nothing and its
+    /// outcome is `OUTCOME_CONTROL`, not a judgment's.
+    Control,
 }
 
 /// One task of the decision judgment ledger.
@@ -267,7 +317,9 @@ pub struct DecisionShadowRow {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub loser_ms: Option<u64>,
     /// The chat probe's actual result. Active rows use `not_run` when Jev
-    /// answered or before a failed Jev judgment falls back.
+    /// answered or before a failed Jev judgment falls back; a control row is
+    /// where that probe's answer lands, one active turn in
+    /// `PROBE_CONTROL_EVERY`.
     pub probe: ProbeCell,
     /// The typed judgment, axis by axis, when it answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -438,6 +490,40 @@ struct ShadowBatch {
     shots: Vec<Shot>,
 }
 
+/// One sampled task of an active batch, owned: the words the probe reads and
+/// the judgment the turn already acted on, copied from its row — never asked
+/// again.
+struct ControlShot {
+    task: u64,
+    description: String,
+    prompt: String,
+    jev: BTreeMap<String, JudgedAxis>,
+}
+
+/// Everything one active batch's control sample carries off the calling
+/// thread. As with `ShadowBatch`, every path is resolved before it detaches.
+pub(super) struct ControlBatch {
+    ledger: PathBuf,
+    attempt: Option<String>,
+    shots: Vec<ControlShot>,
+}
+
+/// What the active road hands back: one assessment per original slot, and
+/// the control sample it drew from the rows it just wrote.
+pub(super) struct Active {
+    /// Failed slots are left empty for the caller's unchanged chat-probe
+    /// fallback.
+    pub(super) assessments: Vec<Option<ProbeAssessment>>,
+    /// The tasks whose probe is to run once more, detached, beside the
+    /// judgment they were routed on. `None` when the batch drew none.
+    pub(super) control: Option<ControlBatch>,
+}
+
+/// A task slot the funnel filled in for nothing — never probed, never judged.
+fn is_blank_task(description: &str, prompt: &str) -> bool {
+    description.trim().is_empty() && prompt.trim().is_empty()
+}
+
 /// Fire the shadow for one probe batch, detached, and hand back its task.
 ///
 /// `probed` holds the probe's verdicts aligned with `tasks`; an empty task (a
@@ -499,12 +585,14 @@ pub(super) fn fire(
 /// In actual-use mode, judge all unique non-empty tasks concurrently and
 /// return one assessment per original slot. `None` means this is not `on`
 /// mode; `Some` means active mode owned the attempt, with failed slots left
-/// empty for the caller's unchanged chat-probe fallback.
+/// empty for the caller's unchanged chat-probe fallback — and with the
+/// control sample the caller fires once routing is settled
+/// ([`fire_control`]).
 pub(super) fn active_assessments(
     tasks: &[(&str, &str)],
     attempt: &str,
     deadline: Duration,
-) -> Option<Vec<Option<ProbeAssessment>>> {
+) -> Option<Active> {
     let cwd = std::env::current_dir().ok()?;
     let settings = runtime::ConfigLoader::default_for(&cwd);
     let ledger = decision_shadow_path(&cwd);
@@ -519,13 +607,13 @@ pub(super) fn active_assessments(
     }
     let mut results = vec![None; tasks.len()];
     if telemetry::attest_ablated(telemetry::HarnessFeature::DecisionShadow) {
-        return Some(results);
+        return Some(Active { assessments: results, control: None });
     }
     let mut named = HashSet::with_capacity(tasks.len());
     let shots: Vec<Shot> = tasks
         .iter()
         .filter_map(|(description, prompt)| {
-            if description.trim().is_empty() && prompt.trim().is_empty() {
+            if is_blank_task(description, prompt) {
                 return None;
             }
             let task = super::probe_exec::task_fingerprint(description, prompt);
@@ -537,7 +625,7 @@ pub(super) fn active_assessments(
         })
         .collect();
     if shots.is_empty() {
-        return Some(results);
+        return Some(Active { assessments: results, control: None });
     }
     // Both roads draft, because both judge: a seat in `on` never reaches
     // `fire` at all, and drafting only there left a person who had turned the
@@ -553,16 +641,25 @@ pub(super) fn active_assessments(
             .map(|shot| judge(&door, client.as_ref(), shot, attempt, deadline, true)),
     ));
     let mut by_task = HashMap::with_capacity(judgments.len());
+    // The sample is drawn from what was judged, not from what was asked: a
+    // control row compares the probe with a judgment, and a task the judgment
+    // failed on has nothing for it to stand beside.
+    let mut sampled: HashMap<u64, BTreeMap<String, JudgedAxis>> = HashMap::new();
     let rows: Vec<DecisionShadowRow> = judgments
         .into_iter()
         .map(|judgment| {
             by_task.insert(judgment.task, judgment.assessment);
+            if control_sampled(judgment.task) {
+                if let Some(jev) = judgment.row.jev.clone() {
+                    sampled.insert(judgment.task, jev);
+                }
+            }
             judgment.row
         })
         .collect();
     write_rows(&ledger, judged.as_ref(), &rows);
     for (slot, (description, prompt)) in results.iter_mut().zip(tasks) {
-        if description.trim().is_empty() && prompt.trim().is_empty() {
+        if is_blank_task(description, prompt) {
             continue;
         }
         *slot = by_task
@@ -570,7 +667,28 @@ pub(super) fn active_assessments(
             .copied()
             .flatten();
     }
-    Some(results)
+    // The words leave with the sample, because this is the last place they
+    // are in hand (the ledger keeps fingerprints); `remove` is what judges a
+    // task the batch named twice once here too.
+    let control_shots: Vec<ControlShot> = tasks
+        .iter()
+        .filter_map(|(description, prompt)| {
+            let task = super::probe_exec::task_fingerprint(description, prompt);
+            let jev = sampled.remove(&task)?;
+            Some(ControlShot {
+                task,
+                description: (*description).to_string(),
+                prompt: (*prompt).to_string(),
+                jev,
+            })
+        })
+        .collect();
+    let control = (!control_shots.is_empty()).then(|| ControlBatch {
+        ledger,
+        attempt: attempt.map(str::to_string),
+        shots: control_shots,
+    });
+    Some(Active { assessments: results, control })
 }
 
 /// Read the setting, judge every shadow shot concurrently, and write the rows.
@@ -610,6 +728,68 @@ async fn run_shadow_batch(batch: ShadowBatch) {
     let _ = tokio::task::spawn_blocking(move || write_rows(&ledger, judged.as_ref(), &rows)).await;
 }
 
+/// Fire an active batch's control sample, detached, and hand back its task.
+///
+/// Called by the funnel once routing is settled, because the probe needs
+/// what the funnel has and the shadow does not: the inventory and the
+/// parent model the probe's own model is resolved from. The same detach as
+/// [`fire`]; the batch's ledger was resolved by the active road before it
+/// wrote its rows.
+pub(super) fn fire_control(
+    batch: ControlBatch,
+    inventory: &runtime::ModelInventory,
+    parent_model: &str,
+) -> tokio::task::JoinHandle<()> {
+    shared_agent_runtime().spawn(run_control_batch(batch, inventory.clone(), parent_model.to_string()))
+}
+
+/// Run the chat probe for the sampled tasks and append one control row each
+/// — the same call the routing road makes ([`super::probe_exec`], on its
+/// control road), then [`append_shadow_row`] as every other row. Nothing is
+/// judged here: the rows hold no request the seat was asked, and the judge
+/// reads them at its next boundary.
+async fn run_control_batch(
+    batch: ControlBatch,
+    inventory: runtime::ModelInventory,
+    parent_model: String,
+) {
+    let ControlBatch { ledger, attempt, shots } = batch;
+    let words: Vec<(String, String)> =
+        shots.iter().map(|shot| (shot.description.clone(), shot.prompt.clone())).collect();
+    let billed = attempt.clone().unwrap_or_default();
+    // The probe is a blocking executor — it bridges into the shared runtime
+    // itself — so it runs off this runtime's workers, as `write_rows` does.
+    let probed = tokio::task::spawn_blocking(move || {
+        let tasks: Vec<(&str, &str)> =
+            words.iter().map(|(description, prompt)| (description.as_str(), prompt.as_str())).collect();
+        super::probe_exec::probe_slots(&inventory, &parent_model, &tasks, &billed, ProbeUse::Control)
+    })
+    .await
+    .unwrap_or_default();
+    let rows: Vec<DecisionShadowRow> = shots
+        .into_iter()
+        .zip(probed)
+        .filter_map(|(shot, slot)| {
+            let slot = slot?;
+            let mut row = DecisionShadowRow::new(
+                shot.task,
+                ProbeCell::from_verdict(slot.verdict),
+                attempt.as_deref(),
+                OUTCOME_CONTROL.to_string(),
+                DecisionRouteUse::Control,
+            );
+            row.jev = Some(shot.jev);
+            Some(row)
+        })
+        .collect();
+    let _ = tokio::task::spawn_blocking(move || {
+        for row in &rows {
+            let _ = append_shadow_row(&ledger, row, SHADOW_LEDGER_MAX_BYTES);
+        }
+    })
+    .await;
+}
+
 fn write_rows(ledger: &Path, settings: Option<&serde_json::Value>, rows: &[DecisionShadowRow]) {
     for row in rows {
         let _ = append_shadow_row(ledger, row, SHADOW_LEDGER_MAX_BYTES);
@@ -643,7 +823,7 @@ fn draft_labels(cwd: &Path, tasks: &[(&str, &str)], shots: &[Shot]) {
     let drafts = shadow_ledger_path(cwd, LABEL_DRAFTS_FILE);
     let already: std::collections::HashSet<u64> = super::jev_summary::read_rows(&drafts)
         .iter()
-        .filter_map(|row| row.get("task").and_then(serde_json::Value::as_u64))
+        .filter_map(|row| row.get(TASK).and_then(serde_json::Value::as_u64))
         .collect();
     for (description, prompt) in tasks {
         let task = super::probe_exec::task_fingerprint(description, prompt);
@@ -651,7 +831,7 @@ fn draft_labels(cwd: &Path, tasks: &[(&str, &str)], shots: &[Shot]) {
             continue;
         }
         let mut row = serde_json::json!({
-            "task": task,
+            TASK: task,
             "description": description,
             "prompt": prompt,
         });
@@ -719,10 +899,11 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
     let floor = ROUTING.answer_floor_permille?;
     let agreement_floor = ROUTING.agreement_floor_permille?;
     let deadline_ms = ROUTING.apply_deadline_ms?;
-    let window_wanted = zerocode_core::jev::summary::rows_that_can_clear(floor);
-    let held = zerocode_core::jev::summary::last_asked(rows, window_wanted);
-    let window = zerocode_core::jev::summary::summarize_rows(held.iter().copied(), i64::MIN);
-    let agreement = agreement_in(&held);
+    let window_wanted = jev_ledger::rows_that_can_clear(floor);
+    let held = jev_ledger::last_asked(rows, window_wanted);
+    let window = jev_ledger::summarize_rows(held.iter().copied(), i64::MIN);
+    let (compared, control_rows) = with_control_rows(rows, &held);
+    let agreement = agreement_in(&compared);
     let verdict = promote::judge(
         promote::stand_from(rows),
         &promote::Evidence {
@@ -735,15 +916,48 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
             fallbacks_in_a_row: jev_summary::failures_in_a_row(rows),
         },
     );
-    Some(Judged { verdict, window, window_wanted, agreement })
+    Some(Judged { verdict, window, window_wanted, agreement, control_rows })
+}
+
+/// The window's rows and, after them, every control row of a task the window
+/// holds — the rows the agreement is read over — with how many of the second
+/// kind joined.
+///
+/// Joined by task and not taken whole: a control row stands for the active
+/// row it was drawn beside, and one whose row has left the window has left
+/// with it. A window of `applied` rows compares nothing on its own (its probe
+/// cell is `not_run`); these are where its comparisons come from.
+fn with_control_rows<'a>(
+    rows: &'a [serde_json::Value],
+    held: &[&'a serde_json::Value],
+) -> (Vec<&'a serde_json::Value>, usize) {
+    let tasks: HashSet<&str> = held
+        .iter()
+        .filter_map(|row| row.get(TASK).and_then(serde_json::Value::as_str))
+        .collect();
+    let mut compared = held.to_vec();
+    let mut joined = 0;
+    for row in rows {
+        if !jev_ledger::is_control_row(row) {
+            continue;
+        }
+        if row.get(TASK).and_then(serde_json::Value::as_str).is_some_and(|task| tasks.contains(task)) {
+            compared.push(row);
+            joined += 1;
+        }
+    }
+    (compared, joined)
 }
 
 /// How often the judgment named what the chat probe named, over the rows
 /// where both answered — one comparison per judged axis of each such row.
 ///
-/// Read from the rows the window was counted from, so the share and the
-/// bound stand on the same requests. A row the probe timed out on (eleven of
-/// this machine's 28) compares nothing and counts nothing.
+/// Read from the rows the window was counted from, and the control rows
+/// joined to them (`with_control_rows`), so the share and the bound stand
+/// on the same requests. A row the probe timed out on (eleven of this
+/// machine's 28) compares nothing and counts nothing, and so does an active
+/// row on its own: its probe cell is `not_run`, and its control row is where
+/// the comparison is.
 #[must_use]
 pub fn agreement_in(rows: &[&serde_json::Value]) -> promote::Agreement {
     let mut agreement = promote::Agreement::default();

@@ -82,3 +82,62 @@ fn the_text_answer_names_every_seat_once() {
     }
     assert!(report.text.contains("never asked"));
 }
+
+/// The routing seat with one active row and its control row: the judgment
+/// named what the probe named on every axis.
+fn routing_ledger_with_a_control_row(home: &std::path::Path) {
+    use zerocode_core::jev::summary::CONTROL;
+    let axis = |choice: &str| serde_json::json!({"choice": choice, "probabilities": {}, "confidence": 0.9});
+    let jev = serde_json::json!({"complexity": axis("large"), "risk": axis("low"), "intent": axis("analysis")});
+    let active = serde_json::json!({
+        "at": 1, "task": "0000000000000005", "rubricVersion": 1, "outcome": "answered", "elapsedMs": 400,
+        "retries": 0, "cached": false, "requests": 1, "routeUse": "applied", "probe": "not_run", "jev": jev,
+    });
+    let control = serde_json::json!({
+        "at": 2, "task": "0000000000000005", "rubricVersion": 1, "outcome": CONTROL, "elapsedMs": 0,
+        "retries": 0, "cached": false, "requests": 0, "routeUse": CONTROL,
+        "probe": {"complexity": "large", "risk": "low", "intent": "analysis", "confidence": "high"}, "jev": jev,
+    });
+    std::fs::write(
+        home.join(zerocode_core::jev::ROUTING.ledger),
+        format!("{active}\n{control}\n"),
+    )
+    .expect("write");
+}
+
+#[test]
+fn the_control_rows_the_agreement_borrowed_are_named_in_both_answers() {
+    let home = tempfile::tempdir().expect("tmp");
+    routing_ledger_with_a_control_row(home.path());
+    let roots = [home.path().to_path_buf()];
+    // A clock just past the rows, so the day holds them.
+    let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
+
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+    let routing = value["seats"]
+        .as_array()
+        .expect("seats")
+        .iter()
+        .find(|seat| seat["id"] == "routing")
+        .expect("routing");
+    assert_eq!(routing["judged"]["window"]["rows"], 1, "the control row was counted in the window");
+    assert_eq!(routing["today"]["rows"], 1, "the control row was counted in the day");
+    assert_eq!(routing["rowsToNextJudgment"], 19, "the control row moved the cadence");
+    assert_eq!(
+        routing["judged"]["agreement"],
+        serde_json::json!({
+            "compared": 3,
+            "agreed": 3,
+            "lowerBound": zerocode_core::jev::summary::wilson_lower(3, 3, zerocode_core::jev::summary::WILSON_Z_95),
+            "controlRows": 1,
+        })
+    );
+
+    let text = render_text(&seats);
+    let line = text.lines().find(|line| line.starts_with("routing")).expect("the routing line");
+    assert!(line.contains("agrees 3 of 3 (1 control row)"), "{line}");
+    assert!(line.contains("19 rows to judgment"), "{line}");
+    // A seat that borrowed nothing says nothing of it.
+    let summon = text.lines().find(|line| line.starts_with("summon")).expect("the summon line");
+    assert!(!summon.contains("control row"), "{summon}");
+}

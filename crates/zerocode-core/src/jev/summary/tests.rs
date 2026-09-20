@@ -264,3 +264,44 @@ fn the_last_rows_are_handed_out_as_they_are_and_counted_the_same() {
     assert_eq!(last[0]["at"], 3, "oldest first");
     assert_eq!(summarize_rows(last, i64::MIN), summarize_last(&rows, 2));
 }
+
+#[test]
+fn a_control_row_is_not_a_request_and_is_counted_nowhere_but_by_name() {
+    // The routing seat runs the probe it skipped once more for a sampled
+    // active turn and writes the result as a control row. It answered
+    // nothing the seat was asked — the judgment on it was answered on the
+    // row before — so it is out of the window, the share, the latency and
+    // the run of failures, and a reader that wants it asks for it by name.
+    let rows = [
+        json!({"at": 1, "outcome": "answered", "elapsedMs": 10, "requests": 1}),
+        json!({"at": 2, "outcome": CONTROL, "elapsedMs": 0, "requests": 0, "cached": false}),
+        json!({"at": 3, "outcome": "timeout", "elapsedMs": 1_500, "requests": 1}),
+        json!({"at": 4, "outcome": CONTROL, "elapsedMs": 0, "requests": 0}),
+    ];
+    assert_eq!(
+        asked_something(&rows[1]),
+        None,
+        "a control row was counted as a request"
+    );
+    assert!(is_control_row(&rows[1]) && !is_control_row(&rows[0]) && !is_control_row(&rows[2]));
+    let tally = summarize(&rows, 0);
+    assert_eq!((tally.rows, tally.answered, tally.called), (2, 1, 2));
+    assert_eq!(
+        tally.p95_ms,
+        Some(1_500),
+        "a control row's zero joined the latency"
+    );
+    let window = last_asked(&rows, 3);
+    assert_eq!(
+        window.len(),
+        2,
+        "a control row took a request's place in the window"
+    );
+    assert!(window.iter().all(|row| !is_control_row(row)));
+    assert_eq!(summarize_last(&rows, 1).rows, 1);
+    assert_eq!(
+        failures_in_a_row(&rows),
+        1,
+        "the control row at the end broke the run, or was counted in it"
+    );
+}

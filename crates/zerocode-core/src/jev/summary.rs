@@ -129,6 +129,19 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
 /// The word a row carries when its judgment answered and passed its checks.
 pub const ANSWERED: &str = "answered";
 
+/// The word a control row carries in place of an outcome.
+///
+/// An acting routing seat skips the chat probe — its rows say `not_run` for
+/// it — so the agreement line, which needs rows where both readers answered,
+/// never fills once the seat acts. zo's `decision_shadow` therefore runs the
+/// probe once more for a sample of its active turns, detached and after the
+/// answer, and writes the result beside the judgment that turn already acted
+/// on. That row is not a request the seat was asked: the judgment on it was
+/// answered on the row before, and counting it again would double the seat's
+/// answers and halve its latency. [`asked_something`] leaves it out of every
+/// window, share and latency; only the agreement reads it.
+pub const CONTROL: &str = "control";
+
 /// One use's ledger over one window, counted.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct Tally {
@@ -267,16 +280,30 @@ pub fn percentile(sorted: &[u64], share: f64) -> Option<u64> {
 
 /// Whether a row is a request this use made, and its outcome if so.
 ///
-/// A ledger holds two kinds of line: the rows a use wrote when it asked
-/// something, and the notes the judge wrote about them. Counting the second
-/// kind as the first would lower every seat's answered share by the very act
-/// of judging it.
+/// A ledger holds three kinds of line: the rows a use wrote when it asked
+/// something, the notes the judge wrote about them, and the control rows the
+/// routing seat writes when it runs the probe it skipped ([`CONTROL`]).
+/// Counting the second kind as the first would lower every seat's answered
+/// share by the very act of judging it; counting the third would raise it by
+/// the very act of checking it.
 #[must_use]
 pub fn asked_something(row: &Value) -> Option<&str> {
     if TRANSITION.read(row).is_some() {
         return None;
     }
-    OUTCOME.read(row).and_then(Value::as_str)
+    OUTCOME
+        .read(row)
+        .and_then(Value::as_str)
+        .filter(|outcome| *outcome != CONTROL)
+}
+
+/// Whether a row is a control row — the probe run once more beside a
+/// judgment already acted on ([`CONTROL`]). Read here, beside the counter
+/// that leaves such a row out, so the reader that joins it back in for the
+/// agreement spells the word the same way.
+#[must_use]
+pub fn is_control_row(row: &Value) -> bool {
+    OUTCOME.read(row).and_then(Value::as_str) == Some(CONTROL)
 }
 
 /// The last `n` requests, counted — the window §4 judges on.
