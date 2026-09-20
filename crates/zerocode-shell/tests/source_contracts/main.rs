@@ -17303,13 +17303,21 @@ mod tests {
             "a shell is no longer sized by the placement it will be seated by"
         );
         for (needle, count) in [
-            ("tilePlacement(", 2),
+            // Three: the division itself, the door that consults the rule,
+            // and the placement seat's look (`roomForWorker`, 2026-09-20),
+            // which READS the rule's answer to tell the door whether the
+            // layout would cut — a read, never a division of its own.
+            ("tilePlacement(", 3),
             // Four now: the division itself, the door that consults the rule,
             // the team listener, and Setup Script Location. The last two skip
             // the aspect rule intentionally: an orchestrating agent names the
             // pane it wants cut, while Setup names the exact axis a person
             // persisted. A fifth would be a road nobody accounted for.
-            ("tileTermPane(", 4),
+            // Five with the placement seat's re-seat (`reseatWorkerByAnswer`,
+            // 2026-09-20), which divides the coordinator's tab only on an
+            // answer from a seat that acts — the worker was seated as a tab
+            // first, and stays one on every other answer.
+            ("tileTermPane(", 5),
             ("TILE_PANE_CAP", 2),
             // Ten: a repository's declared `defaultTabs:`, the two doors
             // back into a conversation (the resume road — which the sidebar's
@@ -30301,8 +30309,20 @@ mod tests {
                 && reseating.contains("Object.assign(held, extra);")
                 && reseating.contains("{ focus: false, placement: \"tab\" }")
                 && persistence.contains("!tab.ledgerManaged")
-                && !mounting.contains("tileTermPane("),
+                && !mounting.contains("tileTermPane(")
+                && mounting.contains("void roomForWorker("),
             "a worker reshapes or focuses the coordinator tab instead of mounting under its checkout:\n{mounting}"
+        );
+        // The one road that may move it afterwards is the placement seat's,
+        // and only on an answer from a seat that acts (2026-09-20).
+        let reseating_by_answer = block_after(window, "function reseatWorkerByAnswer(");
+        let asking = block_after(window, "async function roomForWorker(");
+        assert!(
+            reseating_by_answer.contains("tileTermPane(")
+                && reseating_by_answer.contains("detachedAgents.set(term, worktree);")
+                && asking.contains("judged?.applied")
+                && asking.contains("return \"tab\";"),
+            "the placement seat's answer no longer moves the pane only when the seat acts:\n{asking}\n{reseating_by_answer}"
         );
         assert!(
             mounting.find("seatLedgerManagedTerm(term, worktree, agent);")

@@ -12987,7 +12987,32 @@ async function roomForWorker({ parent, worktree, seat }) {
   return "tab";
 }
 
-listen("term:worker", async (event) => {
+/* Move a just-seated worker to the room the placement seat named, when the
+ * seat acts. `split` puts the pane beside its coordinator the way
+ * `term:split` does — its own tab is dropped first, so the term is in one
+ * place; `background` parks it as a detached agent, whose roster row is its
+ * door back. `tab` and every failure on the road leave the tab as seated. */
+function reseatWorkerByAnswer(term, parent, worktree, agent, room) {
+  if (room !== "split" && room !== "background") return;
+  const own = tabOfTerm(term);
+  if (!own || paneLeaves(own.layout).length !== 1 || own.activePane !== term) return;
+  const host = tabs.find((tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(parent)) ?? null;
+  if (room === "split" && !host) return;
+  tabs.splice(tabs.indexOf(own), 1);
+  if (room === "split") {
+    const onStage = host.id === activeTabId && host.worktree === activeWorktreePath;
+    tileTermPane(host, term, agent ? { agent: agentSaidName(agent) } : {}, "down", onStage, parent);
+    schedulePaneAlignment(host);
+  } else {
+    detachedAgents.set(term, worktree);
+    dropTermScreen(term);
+  }
+  renderTabs();
+  updateStage();
+  scheduleAgentPaint(["cards", "board"]);
+}
+
+listen("term:worker", (event) => {
   const { parent, term, worktree, agent, resumed, helper, seat } = event.payload ?? {};
   if (
     typeof parent !== "number" ||
@@ -13009,23 +13034,11 @@ listen("term:worker", async (event) => {
   // term→worktree edge that `paintWorktreeAgents` reads when the refresh
   // materializes it. Refreshing first leaves one frame with no owner and, if
   // no hook follows, leaves it that way indefinitely.
-  //
-  // Which seat: the placement seat's, when it acts. `split` puts the pane
-  // beside its coordinator the way `term:split` does; `background` parks it
-  // as a detached agent — the roster row is its door back; anything else,
-  // and every failure on that road, is the tab every worker got before.
-  const room = await roomForWorker({ parent, worktree, seat });
-  const host = tabs.find((tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(parent)) ?? null;
-  if (room === "split" && host) {
-    const onStage = host.id === activeTabId && host.worktree === activeWorktreePath;
-    tileTermPane(host, term, agent ? { agent: agentSaidName(agent) } : {}, "down", onStage, parent);
-    schedulePaneAlignment(host);
-  } else if (room === "background") {
-    detachedAgents.set(term, worktree);
-    dropTermScreen(term);
-  } else {
-    seatLedgerManagedTerm(term, worktree, agent);
-  }
+  seatLedgerManagedTerm(term, worktree, agent);
+  // Then the placement seat, off this handler: the tab above is what every
+  // worker got before the seat existed and what it keeps unless a seat that
+  // ACTS names another room (`reseatWorkerByAnswer`).
+  void roomForWorker({ parent, worktree, seat }).then((room) => reseatWorkerByAnswer(term, parent, worktree, agent, room));
   void (async () => {
     try {
       await refreshWorktrees();
