@@ -434,6 +434,12 @@ final class AccessibilityBridge: NSObject {
             "width": frame.size.width,
             "height": frame.size.height,
         ]
+        // Whether the element's own centre is its to press. The walk proves
+        // no z-order — a floating search field's rectangle can hold a row's
+        // centre — so the exporter is asked what is on top there.
+        if let answered = centreAnswers(to: element, frame: frame, token: token) {
+            dict["hit_at_centre"] = answered
+        }
 
         // Role → "type" with the AX prefix stripped, matching SimulatorBridge.
         let rawRole = stringValue(element, key: "accessibilityRole")
@@ -491,6 +497,46 @@ final class AccessibilityBridge: NSObject {
         dict["children"] = childDicts
 
         return dict
+    }
+
+    /// What the exporter puts under this element's centre — asked with the
+    /// same point query the grid walk uses — judged by the desktop's rule for
+    /// a mark's hit-test (`MARK_HIT_DEPTH` in the core): the answer must be
+    /// the control, something inside it, or something around it. `true` when
+    /// it is, `false` when something else is on top there or the centre is off
+    /// the screen, `nil` when the question could not be asked (no frame, no
+    /// translator) or the answer has no frame to judge by.
+    ///
+    /// One point query per element, on top of the walk's own reads. Measured
+    /// 2026-09-21 on an iPhone simulator (iOS 26.5), the `ax` request alone
+    /// on a warm helper, best of three, twice: home (19 elements) 1,457 →
+    /// 1,521 ms; Settings (13 elements) 1,193 → 1,255 ms — about 4 ms an
+    /// element, against the grid walk's own budget of 600 such queries.
+    private func centreAnswers(to element: NSObject, frame: NSRect, token: String) -> Bool? {
+        guard frame.width > 0, frame.height > 0, let translator else { return nil }
+        let pointSel = NSSelectorFromString("objectAtPoint:displayId:bridgeDelegateToken:")
+        typealias PointFunc = @convention(c) (AnyObject, Selector, CGPoint, UInt32, NSString) -> AnyObject?
+        guard let pointIMP = translator.method(for: pointSel) else { return nil }
+        let objectAtPoint = unsafeBitCast(pointIMP, to: PointFunc.self)
+        let macSel = NSSelectorFromString("macPlatformElementFromTranslation:")
+        typealias MacFunc = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
+        guard let macIMP = translator.method(for: macSel) else { return nil }
+        let toMacElement = unsafeBitCast(macIMP, to: MacFunc.self)
+
+        let centre = CGPoint(x: frame.midX, y: frame.midY)
+        guard let translation = objectAtPoint(translator, pointSel, centre, 0, token as NSString) as? NSObject else {
+            return false
+        }
+        translation.setValue(token, forKey: "bridgeDelegateToken")
+        guard let hit = toMacElement(translator, macSel, translation) as? NSObject else {
+            return false
+        }
+        if hit === element { return true }
+        if let t = hit.value(forKey: "translation") as? NSObject {
+            t.setValue(token, forKey: "bridgeDelegateToken")
+        }
+        let hitFrame: NSRect = (hit as? NSAccessibilityElement)?.accessibilityFrame() ?? .zero
+        return AccessibilityCentre.answers(frame, hitFrame: hitFrame)
     }
 
     private func stringValue(_ obj: NSObject, key: String) -> String? {
@@ -594,6 +640,23 @@ final class AccessibilityBridge: NSObject {
             return nil
         }
         return cls.perform(NSSelectorFromString("emptyResponse"))?.takeUnretainedValue() as AnyObject?
+    }
+}
+
+/// The desktop's rule for what a hit-test may answer at a mark's centre —
+/// the control, something inside it, or something around it — read off
+/// frames, which is all the simulator's exporter hands back: a frame within
+/// the element's is inside it, one enclosing the element's is around it, and
+/// any other is something else on top. A point of slack absorbs the
+/// fractional wobble AX frames show between two fetches.
+enum AccessibilityCentre {
+    static let slack: CGFloat = 1
+
+    static func answers(_ frame: NSRect, hitFrame: NSRect) -> Bool? {
+        guard hitFrame.width > 0, hitFrame.height > 0 else { return nil }
+        let inside = frame.insetBy(dx: -slack, dy: -slack).contains(hitFrame)
+        let around = hitFrame.insetBy(dx: -slack, dy: -slack).contains(frame)
+        return inside || around
     }
 }
 

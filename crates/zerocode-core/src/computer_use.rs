@@ -2285,6 +2285,51 @@ pub enum EmulatorMethod {
     Screenshot,
 }
 
+impl EmulatorMethod {
+    /// Every verb, in the usage's order.
+    pub const ALL: [Self; 13] = [
+        Self::List,
+        Self::Open,
+        Self::Tree,
+        Self::Marks,
+        Self::Find,
+        Self::Foreground,
+        Self::Click,
+        Self::Tap,
+        Self::Swipe,
+        Self::Text,
+        Self::Button,
+        Self::Rotate,
+        Self::Screenshot,
+    ];
+
+    /// The CLI word for the method — what a person or a log calls it.
+    #[must_use]
+    pub const fn verb_name(self) -> &'static str {
+        match self {
+            Self::Find => "find",
+            Self::Foreground => "foreground",
+            Self::List => "list",
+            Self::Open => "open",
+            Self::Tree => "tree",
+            Self::Marks => "marks",
+            Self::Click => "click",
+            Self::Tap => "tap",
+            Self::Swipe => "swipe",
+            Self::Text => "text",
+            Self::Button => "button",
+            Self::Rotate => "rotate",
+            Self::Screenshot => "screenshot",
+        }
+    }
+}
+
+/// The emulator verbs whose request says where its caller stands
+/// ([`CWD_HEADER`]): the one that writes a file where it is told —
+/// `screenshot --out <path>` takes a relative path from the shell's own
+/// folder, as a person would.
+pub const EMULATOR_CWD_VERBS: &[&str] = &[EmulatorMethod::Screenshot.verb_name()];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EmulatorPlatform {
@@ -2346,26 +2391,14 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
     if matches!(verb, "-h" | "--help" | "help") {
         return Err(emulator_usage());
     }
-    let method = match verb {
-        "find" => EmulatorMethod::Find,
-        "foreground" => EmulatorMethod::Foreground,
-        "list" => EmulatorMethod::List,
-        "open" => EmulatorMethod::Open,
-        "tree" => EmulatorMethod::Tree,
-        "marks" => EmulatorMethod::Marks,
-        "click" => EmulatorMethod::Click,
-        "tap" => EmulatorMethod::Tap,
-        "swipe" => EmulatorMethod::Swipe,
-        "text" => EmulatorMethod::Text,
-        "button" => EmulatorMethod::Button,
-        "rotate" => EmulatorMethod::Rotate,
-        "screenshot" => EmulatorMethod::Screenshot,
-        _ => {
-            return Err(format!(
-                "unknown emulator command `{verb}`\n\n{}",
-                emulator_usage()
-            ));
-        }
+    let Some(method) = EmulatorMethod::ALL
+        .into_iter()
+        .find(|method| method.verb_name() == verb)
+    else {
+        return Err(format!(
+            "unknown emulator command `{verb}`\n\n{}",
+            emulator_usage()
+        ));
     };
     let flags = flags(&argv[1..])?;
     let allowed: &[&str] = match method {
@@ -4094,6 +4127,7 @@ pub fn emulator_usage() -> String {
         "  zerocode-emulator button --platform ios|android --device <id> --name <button> [--json]",
         "  zerocode-emulator rotate --platform ios|android --device <id> --rotation <0..3> [--json]",
         "  zerocode-emulator screenshot --platform ios|android --device <id> [--out <path>] [--json]",
+        "    A relative --out is taken from the shell's own folder; without --out, a private scratch file.",
     ]
     .join("\n")
 }
@@ -4104,8 +4138,7 @@ pub fn emulator_shim_script(
     hook_token_var: &str,
 ) -> String {
     let (manual, prefix) = (emulator_usage(), format!("emulator{ARGV_SEPARATOR}"));
-    computer_route_shim(
-        "zerocode-emulator",
+    emulator_door(
         &manual,
         &prefix,
         port_var,
@@ -4113,6 +4146,28 @@ pub fn emulator_shim_script(
         hook_token_var,
     )
     .render_posix()
+}
+
+/// The emulator door on the shared chassis: it says where its caller stands
+/// for the verbs that write where they are told ([`EMULATOR_CWD_VERBS`]).
+fn emulator_door<'a>(
+    manual: &'a str,
+    prefix: &'a str,
+    port_var: &'a str,
+    computer_token_var: &'a str,
+    hook_token_var: &'a str,
+) -> PowerShellBridgeShim<'a> {
+    PowerShellBridgeShim {
+        cwd_verbs: EMULATOR_CWD_VERBS,
+        ..computer_route_shim(
+            "zerocode-emulator",
+            manual,
+            prefix,
+            port_var,
+            computer_token_var,
+            hook_token_var,
+        )
+    }
 }
 
 /// The agent's road to this window's own terminals — local shells, saved SSH
@@ -4470,8 +4525,7 @@ pub fn emulator_shim_script_powershell(
     hook_token_var: &str,
 ) -> String {
     let (manual, prefix) = (emulator_usage(), format!("emulator{ARGV_SEPARATOR}"));
-    computer_route_shim(
-        "zerocode-emulator",
+    emulator_door(
         &manual,
         &prefix,
         port_var,
@@ -6030,9 +6084,9 @@ mod tests {
         ));
         std::fs::create_dir_all(&folder).expect("a folder with a hostile name");
         // The header file curl was handed for one call from the folder.
-        let headers_of = |argv: &[&str]| {
+        let headers_of_door = |shim: &std::path::Path, argv: &[&str]| {
             let run = std::process::Command::new("sh")
-                .arg(&shim)
+                .arg(shim)
                 .args(argv)
                 .current_dir(&folder)
                 .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
@@ -6049,6 +6103,7 @@ mod tests {
             );
             std::fs::read_to_string(&kept).expect("curl was handed its header file")
         };
+        let headers_of = |argv: &[&str]| headers_of_door(&shim, argv);
         let prefix = format!("header = \"{CWD_HEADER}: ");
 
         let walk = ComputerMethod::RecipeRun.verb_name();
@@ -6081,13 +6136,53 @@ mod tests {
         );
 
         for door in [
-            emulator_shim_script("P", "C", "H"),
             ssh_shim_script("P", "C", "H"),
-            emulator_shim_script_powershell("P", "C", "H"),
             ssh_shim_script_powershell("P", "C", "H"),
         ] {
             assert!(!door.contains(CWD_HEADER), "{door}");
         }
+
+        // The emulator door names the folder for the one verb that writes a
+        // file where it is told — `screenshot --out <relative>` — and for no
+        // other.
+        let emulator = bin.join("zerocode-emulator");
+        std::fs::write(
+            &emulator,
+            emulator_shim_script("PORT_V", "COMPUTER_V", "HOOK_V"),
+        )
+        .expect("emulator shim");
+        std::fs::set_permissions(&emulator, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let shot = headers_of_door(
+            &emulator,
+            &[
+                EmulatorMethod::Screenshot.verb_name(),
+                "--platform",
+                "ios",
+                "--device",
+                "d",
+                "--out",
+                "frame.png",
+            ],
+        );
+        assert_eq!(shot.lines().count(), 3, "{shot}");
+        let spelled = shot
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix.as_str())?.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("the emulator's screenshot named no directory:\n{shot}"));
+        assert_eq!(
+            std::fs::canonicalize(cwd_from_header(spelled).expect("reads back"))
+                .expect("the directory it names"),
+            std::fs::canonicalize(&folder).expect("the folder")
+        );
+        let look = headers_of_door(&emulator, &[EmulatorMethod::Marks.verb_name(), "--json"]);
+        assert_eq!(look.lines().count(), 2, "{look}");
+        assert!(!look.contains(CWD_HEADER), "{look}");
+        let powershell = emulator_shim_script_powershell("P", "C", "H");
+        assert!(
+            powershell.contains(CWD_HEADER) && powershell.contains("@('screenshot')"),
+            "{powershell}"
+        );
+        assert_eq!(EMULATOR_CWD_VERBS, ["screenshot"]);
     }
 
     /// A working directory reads back only from the spelling a door writes:

@@ -48,9 +48,21 @@ impl AppQuery {
     }
 }
 
-/// `matches`: the name or the identifier, case-insensitively. Windows adds
-/// the executable's file stem (`notepad` for `notepad.exe`) because that is
-/// the name a person knows a plain executable by.
+/// macOS: the `Info.plist` keys a bundle names itself by, unlocalized — the
+/// `Calculator` a person types while the running app calls itself `계산기`.
+/// The helper reads them in this order (`bundleNameKeys` in
+/// `DesktopApps.swift`; a source contract holds the spelling), and `launch`
+/// answers the first as `bundleName` so the next verb can ask by that word.
+pub const MACOS_BUNDLE_NAME_KEYS: &[&str] = &["CFBundleDisplayName", "CFBundleName"];
+
+/// `matches`: the name or the identifier, case-insensitively — or one of the
+/// other names a person knows the app by, read off the app itself and never
+/// guessed: on both platforms its executable's file stem (`notepad` for
+/// `notepad.exe`; `Calculator` for `Calculator.app/Contents/MacOS/Calculator`),
+/// and on macOS the bundle's own unlocalized names
+/// ([`MACOS_BUNDLE_NAME_KEYS`]). Never a fragment: `note` is not `Notes`.
+/// The Windows provider calls this with its stem; the macOS helper's
+/// `applicationAnswers` (`DesktopApps.swift`) is the same rule in Swift.
 #[must_use]
 pub fn matches(
     query: &str,
@@ -58,9 +70,22 @@ pub fn matches(
     bundle_id: Option<&str>,
     executable_stem: Option<&str>,
 ) -> bool {
+    matches_any(query, name, bundle_id, executable_stem)
+}
+
+/// [`matches`] with every other name the platform read off the app.
+#[must_use]
+pub fn matches_any<'a>(
+    query: &str,
+    name: &str,
+    bundle_id: Option<&str>,
+    other_names: impl IntoIterator<Item = &'a str>,
+) -> bool {
     name.eq_ignore_ascii_case(query)
         || bundle_id.is_some_and(|id| id.eq_ignore_ascii_case(query))
-        || executable_stem.is_some_and(|stem| stem.eq_ignore_ascii_case(query))
+        || other_names
+            .into_iter()
+            .any(|other| other.eq_ignore_ascii_case(query))
 }
 
 /// macOS: bundle identifiers the helper refuses.
@@ -215,6 +240,47 @@ mod tests {
             Some("com.apple.Notes"),
             Some("notes")
         ));
+    }
+
+    #[test]
+    fn a_macos_app_answers_to_its_bundles_own_names_and_its_executable_never_a_fragment() {
+        // `launch --app Calculator` answered name=계산기 (2026-09-21); the
+        // next verb asks by the word it typed, and is answered by the same app.
+        let calculator = ["Calculator", "Calculator"];
+        assert!(matches_any(
+            "calculator",
+            "계산기",
+            Some("com.apple.calculator"),
+            calculator
+        ));
+        assert!(matches_any(
+            "계산기",
+            "계산기",
+            Some("com.apple.calculator"),
+            calculator
+        ));
+        assert!(matches_any(
+            "electron",
+            "Visual Studio Code",
+            Some("com.microsoft.VSCode"),
+            ["Code", "Electron"]
+        ));
+        assert!(!matches_any(
+            "calc",
+            "계산기",
+            Some("com.apple.calculator"),
+            calculator
+        ));
+        assert!(!matches_any(
+            "calculator",
+            "계산기",
+            Some("com.apple.calculator"),
+            std::iter::empty()
+        ));
+        assert_eq!(
+            MACOS_BUNDLE_NAME_KEYS,
+            ["CFBundleDisplayName", "CFBundleName"]
+        );
     }
 
     #[test]

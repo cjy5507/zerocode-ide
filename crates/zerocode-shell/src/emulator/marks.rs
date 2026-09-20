@@ -7,7 +7,8 @@ use serde_json::{Value, json};
 use zerocode_core::computer_use::{EmulatorPlatform, MARK_LOOKS_KEPT, MARK_PIN_TOLERANCE_POINTS};
 use zerocode_core::computer_use_protocol::frame::ShotFrame;
 use zerocode_core::computer_use_protocol::marks::{
-    self as shared, ElementFace, ITEMS_KEY, LEGEND_KEY, LOOK_ID_KEY, MarkInput, MarkPlan, Pin,
+    self as shared, ElementFace, FaceFrame, ITEMS_KEY, LEGEND_KEY, LOOK_ID_KEY, MarkInput,
+    MarkPlan, Pin,
 };
 use zerocode_core::computer_use_protocol::render::Rect;
 use zerocode_core::computer_use_protocol::{ProviderError, cache, error_code};
@@ -99,6 +100,35 @@ pub(crate) fn faces(platform: EmulatorPlatform, tree: &Value) -> Vec<ElementFace
         };
         let enabled = node.get("enabled").and_then(Value::as_bool) == Some(true);
         let clickable = node.get("clickable").and_then(Value::as_bool) == Some(true);
+        // The iOS exporter hit-tests each element's centre (`hit_at_centre`,
+        // AccessibilityBridge.swift): true — what is on top there is the
+        // element, something inside it or around it, so the centre is its
+        // own; false — something else is on top (the floating search field
+        // over the last Settings row), or the centre is off the screen. The
+        // numbering reads one thing of `visible`: whether the centre is on it.
+        // So the centre's answer is carried as all of the frame, or none of
+        // it — the full frame is still not claimed hit-tested. Android's
+        // exporter answers no such question; its `visible` stays unknown and
+        // the numbering refuses any centre another candidate could hold.
+        let visible = match platform {
+            EmulatorPlatform::Ios => {
+                node.get(HIT_AT_CENTRE_KEY)
+                    .and_then(Value::as_bool)
+                    .map(|answered| {
+                        if answered {
+                            FaceFrame::from(frame)
+                        } else {
+                            FaceFrame {
+                                x: frame.x,
+                                y: frame.y,
+                                width: 0.0,
+                                height: 0.0,
+                            }
+                        }
+                    })
+            }
+            EmulatorPlatform::Android => None,
+        };
         result.push(ElementFace {
             index: at,
             role,
@@ -124,14 +154,16 @@ pub(crate) fn faces(platform: EmulatorPlatform, tree: &Value) -> Vec<ElementFace
             width: frame.width,
             height: frame.height,
             signature: Value::Array(lineage).to_string(),
-            // Neither tree reports clipping or an occlusion rectangle. Do
-            // not claim that the full frame was hit-tested by the exporter.
-            visible: None,
+            visible,
             context,
         });
     }
     result
 }
+
+/// The iOS exporter's answer for an element's centre — the key
+/// `AccessibilityBridge.swift` writes (a source contract holds the spelling).
+pub(crate) const HIT_AT_CENTRE_KEY: &str = "hit_at_centre";
 
 struct Fields {
     role: &'static str,
@@ -227,6 +259,10 @@ impl Snapshot {
         for face in &mut faces {
             face.x -= screen.x;
             face.y -= screen.y;
+            if let Some(seen) = &mut face.visible {
+                seen.x -= screen.x;
+                seen.y -= screen.y;
+            }
         }
         Ok(Self {
             faces,
@@ -266,10 +302,17 @@ fn numbered(faces: &[ElementFace], screen: Rect) -> MarkPlan {
             occluders: Vec::new(),
         },
         |face| {
-            // Neither exporter proves z-order. When another candidate
+            // A centre the exporter answered for (`visible`, from
+            // `hit_at_centre`) is judged by that answer alone. A tree that
+            // proves no z-order — Android's, an iOS tree before the exporter
+            // was asked — is judged as before: when another candidate
             // contains this centre, choosing which one receives the tap
-            // would invent that missing evidence (iOS floating search bar).
-            // Keep visible=None and refuse the ambiguous number instead.
+            // would invent that missing evidence (the floating search field
+            // over the last Settings row: 0 marks, 2026-09-21). Refuse the
+            // ambiguous number instead.
+            if face.visible.is_some() {
+                return true;
+            }
             let centre = face.local();
             !faces.iter().any(|other| {
                 other.index != face.index
