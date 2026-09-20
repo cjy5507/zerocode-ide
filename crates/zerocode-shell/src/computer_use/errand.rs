@@ -52,7 +52,7 @@ use serde_json::{Value, json};
 use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
-use zerocode_core::jev::{BROWSER, DESKTOP, JevMode, JevUse};
+use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse};
 use zerocode_core::screen_action::{
     ActionAsk, ActionChoice, ActionLook, Chosen, SCREEN_ACTION_RUBRIC_VERSION, Where, ask,
 };
@@ -82,6 +82,7 @@ pub const fn seat_of(surface: Surface) -> &'static JevUse {
     match surface {
         Surface::Page => &BROWSER,
         Surface::Desk => &DESKTOP,
+        Surface::Phone => &EMULATOR,
     }
 }
 
@@ -94,6 +95,8 @@ pub enum Surface {
     Page,
     /// The desktop's accessibility tree.
     Desk,
+    /// A mobile accessibility tree, with independent consent.
+    Phone,
 }
 
 /// What the person set for this surface's seat. The ladder is the routing
@@ -133,15 +136,37 @@ pub trait ActionJudge {
 /// the question reads is [`Where`]; this is what a world hands back.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Seen {
-    Page { host: String, path: String },
-    Desk { app: String, window: String },
+    Page {
+        host: String,
+        path: String,
+    },
+    Desk {
+        app: String,
+        window: String,
+    },
+    Phone {
+        platform: zerocode_core::computer_use::EmulatorPlatform,
+        device: String,
+    },
 }
 
 impl Seen {
+    const fn surface(&self) -> Surface {
+        match self {
+            Self::Page { .. } => Surface::Page,
+            Self::Desk { .. } => Surface::Desk,
+            Self::Phone { .. } => Surface::Phone,
+        }
+    }
+
     fn asked(&self) -> Where<'_> {
         match self {
             Self::Page { host, path } => Where::Page { host, path },
             Self::Desk { app, window } => Where::Desk { app, window },
+            Self::Phone { platform, device } => Where::Phone {
+                platform: platform.as_str(),
+                device,
+            },
         }
     }
 }
@@ -282,8 +307,8 @@ impl Errand<'_> {
     }
 }
 
-/// Why a walk was not judged at all. Each is a row the ledger writes rather
-/// than a silence, so a person can see the gate held.
+/// Why a walk did not proceed, before a judgment or before a press.
+/// Each is recorded so a person can see which gate held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Barred {
     /// Nobody asked for it.
@@ -300,6 +325,8 @@ pub enum Barred {
     NoBudget,
     /// The caller asked for no presses at all.
     NoSteps,
+    /// A valid choice does not meet its seat's screen-press confidence floor.
+    LowConfidence,
 }
 
 impl Barred {
@@ -313,6 +340,7 @@ impl Barred {
             Self::NoResume => "no_resume",
             Self::NoBudget => "no_budget",
             Self::NoSteps => "no_steps",
+            Self::LowConfidence => "low_confidence",
         }
     }
 }
@@ -524,6 +552,17 @@ pub fn run(
             return walked;
         };
         let look_ms = u64::try_from(looking.elapsed().as_millis()).unwrap_or(u64::MAX);
+        if let Some(reason) = barred(mode, at, world.left_ms()) {
+            walked.rows.push(row(
+                mode,
+                at,
+                attempt,
+                json!({
+                    "outcome": "barred", "barred": reason.as_str(), "look_ms": look_ms,
+                }),
+            ));
+            return walked;
+        }
         match before.as_ref() {
             Some(was) if was.same_as(&screen) => {
                 still += 1;
@@ -555,6 +594,7 @@ pub fn run(
                 .push(row(mode, at, attempt, json!({ "outcome": "no_candidate" })));
             return walked;
         };
+        let press_policy = seat_of(screen.at.surface());
         before = Some(screen);
 
         let candidates = asked.marks().len();
@@ -616,6 +656,14 @@ pub fn run(
         // nothing.
         if !mode.applies() {
             note(&mut said, "routeUse", json!(USE_SHADOW));
+            walked.rows.push(row(mode, at, attempt, said));
+            return walked;
+        }
+
+        if !press_policy.permits_press(choice.confidence) {
+            note(&mut said, "barred", json!(Barred::LowConfidence.as_str()));
+            note(&mut said, "pressed", json!(false));
+            note(&mut said, "routeUse", json!(USE_FALLBACK));
             walked.rows.push(row(mode, at, attempt, said));
             return walked;
         }

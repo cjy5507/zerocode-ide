@@ -5,6 +5,51 @@ use serde_json::json;
 use super::*;
 
 #[test]
+fn screen_press_confidence_is_distinct_from_the_promotion_answer_rate() {
+    for seat in [&BROWSER, &DESKTOP, &EMULATOR] {
+        let floor = seat.press_floor_permille.unwrap();
+        assert!(floor <= 1_000);
+        let boundary = f64::from(floor) / 1_000.0;
+        for (confidence, permitted) in [
+            (boundary, true),
+            (boundary - f64::EPSILON, false),
+            (0.29, false),
+            (1.0, true),
+            (1.01, false),
+            (f64::NAN, false),
+            (f64::INFINITY, false),
+            (-0.1, false),
+        ] {
+            assert_eq!(
+                seat.permits_press(confidence),
+                permitted,
+                "{} {confidence}",
+                seat.id
+            );
+        }
+    }
+    assert!(!ROUTING.permits_press(1.0));
+}
+
+#[test]
+fn mobile_screen_judgment_has_its_own_seat_and_consent_setting() {
+    let mobile = JEV_USES
+        .iter()
+        .find(|row| row.id == "emulator")
+        .expect("mobile seat");
+    assert_ne!(mobile.setting, BROWSER.setting);
+    assert_ne!(mobile.setting, DESKTOP.setting);
+    assert_ne!(mobile.ledger, BROWSER.ledger);
+    assert_ne!(mobile.ledger, DESKTOP.ledger);
+    assert!(!mobile.promotes);
+    assert_eq!(mobile.answer_floor_permille, None);
+    assert_eq!(
+        mobile.mode_in(&json!({"smart": {"browserAction": "on", "desktopAction": "on"}})),
+        JevMode::Off
+    );
+}
+
+#[test]
 fn every_use_reads_its_own_words_in_any_case_and_anything_else_as_off() {
     for row in &JEV_USES {
         for mode in JevMode::ALL {

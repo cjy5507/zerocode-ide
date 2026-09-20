@@ -23,9 +23,9 @@
 
 use std::time::Instant;
 
-use serde_json::Value;
-use zerocode_core::computer_recipe::RecipeTool;
-use zerocode_core::computer_use::FLOW_BASELINE_PROBE_MS;
+use serde_json::{Value, json};
+use zerocode_core::computer_recipe::{RecipeTool, recipe_line_holds_ms};
+use zerocode_core::computer_use::{EmulatorPlatform, FLOW_BASELINE_PROBE_MS};
 use zerocode_core::computer_use_protocol::marks::{ITEMS_KEY, LOOK_ID_KEY};
 use zerocode_hookd::TeamAnswer;
 
@@ -45,6 +45,46 @@ pub enum Aim {
     Pane { label: String },
     /// One app on the desktop, by its name.
     App { name: String },
+    /// One mobile device; every look, press and check retains this target.
+    Phone {
+        platform: EmulatorPlatform,
+        device: String,
+    },
+}
+
+fn phone_argv(verb: &str, platform: EmulatorPlatform, device: &str) -> Vec<String> {
+    [
+        verb,
+        "--platform",
+        platform.as_str(),
+        "--device",
+        device,
+        JSON_FLAG,
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
+fn answer_value(answer: &TeamAnswer) -> Option<Value> {
+    if answer.exit_code != 0 {
+        return None;
+    }
+    let said: Value = serde_json::from_str(answer.stdout.trim()).ok()?;
+    if said.get("ok") == Some(&Value::Bool(false)) {
+        return None;
+    }
+    Some(said.get("result").cloned().unwrap_or(said))
+}
+
+fn read_unjudged(
+    road: &mut impl FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
+    tool: RecipeTool,
+    argv: &[String],
+) -> TeamAnswer {
+    crate::run_evidence::observing(json!({"judgment": {"asked": false}}), || {
+        road(tool, argv, argv)
+    })
 }
 
 impl Aim {
@@ -54,6 +94,7 @@ impl Aim {
         match self {
             Self::Pane { .. } => Surface::Page,
             Self::App { .. } => Surface::Desk,
+            Self::Phone { .. } => Surface::Phone,
         }
     }
 
@@ -61,12 +102,14 @@ impl Aim {
         match self {
             Self::Pane { .. } => RecipeTool::Browser,
             Self::App { .. } => RecipeTool::Computer,
+            Self::Phone { .. } => RecipeTool::Emulator,
         }
     }
 
     fn look_argv(&self) -> Vec<String> {
         match self {
             Self::Pane { label } => vec!["marks".to_string(), label.clone(), JSON_FLAG.to_string()],
+            Self::Phone { platform, device } => phone_argv("marks", *platform, device),
             // `--no-screenshot`: a walk presses by number and never opens
             // the picture, and drawing ninety-nine badges on the frame and
             // encoding a PNG is 262 ms of a 645 ms look (measured 2026-09-18,
@@ -88,6 +131,16 @@ impl Aim {
     /// identity, so the browser door asks for no id.
     fn press_argv(&self, mark: usize, look: &str) -> Vec<String> {
         match self {
+            Self::Phone { platform, device } => {
+                let mut argv = phone_argv("click", *platform, device);
+                argv.extend([
+                    "--mark".into(),
+                    mark.to_string(),
+                    "--look".into(),
+                    look.into(),
+                ]);
+                argv
+            }
             Self::Pane { label } => vec![
                 "click".to_string(),
                 label.clone(),
@@ -110,6 +163,11 @@ impl Aim {
     /// no wait — the guarded money path's witness, asked the same way.
     fn reached_argv(&self, until: &str) -> Vec<String> {
         match self {
+            Self::Phone { platform, device } => {
+                let mut argv = phone_argv("find", *platform, device);
+                argv.extend(["--text".into(), until.into()]);
+                argv
+            }
             Self::Pane { label } => vec!["find".to_string(), label.clone(), until.to_string()],
             Self::App { name } => vec![
                 "wait-for".to_string(),
@@ -130,6 +188,22 @@ impl Aim {
 #[must_use]
 pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
     match aim {
+        Aim::Phone { platform, device } => {
+            let look = said.get(LOOK_ID_KEY)?.as_str()?.trim();
+            if look.is_empty() {
+                return None;
+            }
+            Some((
+                Screen {
+                    at: Seen::Phone {
+                        platform: *platform,
+                        device: device.clone(),
+                    },
+                    items: said.get(ITEMS_KEY)?.as_array()?.clone(),
+                },
+                look.to_string(),
+            ))
+        }
         Aim::Pane { .. } => Some((
             Screen {
                 // A pane's address is not in its `marks` answer, and a second
@@ -214,16 +288,12 @@ where
 {
     fn look(&mut self) -> Option<Screen> {
         let argv = self.aim.look_argv();
-        let answer = (self.road)(self.aim.tool(), &argv, &argv);
-        if answer.exit_code != 0 {
-            return None;
-        }
-        let said = serde_json::from_str::<Value>(answer.stdout.trim()).ok()?;
+        let answer = read_unjudged(self.road, self.aim.tool(), &argv);
+        let said = answer_value(&answer)?;
         // A CLI answer is `{ ok, result }` when it went through the door's
         // envelope and the bare answer when it did not; both are read here so
         // the walk is not one envelope's prisoner.
-        let said = said.get("result").unwrap_or(&said);
-        let (mut screen, look) = screen_of(&self.aim, said)?;
+        let (mut screen, look) = screen_of(&self.aim, &said)?;
         if matches!(self.aim, Aim::Pane { .. }) {
             screen.at = self.page.clone();
         }
@@ -236,13 +306,27 @@ where
         // element it handed that number to and refuses a press whose pin no
         // longer holds.
         let argv = self.aim.press_argv(mark, &self.look);
+        let holds = recipe_line_holds_ms(self.aim.tool(), &argv);
+        let left = self.left_ms();
+        if left == 0 || left < holds {
+            return false;
+        }
         (self.road)(self.aim.tool(), &argv, &argv).exit_code == 0
     }
 
     fn reached(&mut self) -> Option<bool> {
         let until = self.until.clone()?;
         let argv = self.aim.reached_argv(&until);
-        Some((self.road)(self.aim.tool(), &argv, &argv).exit_code == 0)
+        let answer = read_unjudged(self.road, self.aim.tool(), &argv);
+        if matches!(self.aim, Aim::App { .. }) {
+            Some(answer.exit_code == 0)
+        } else {
+            Some(
+                answer_value(&answer)
+                    .and_then(|value| value.get("count").and_then(Value::as_u64))
+                    .is_some_and(|count| count > 0),
+            )
+        }
     }
 
     fn left_ms(&mut self) -> u64 {

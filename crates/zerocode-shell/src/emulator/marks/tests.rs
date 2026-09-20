@@ -256,6 +256,47 @@ fn table() -> (Table, Vec<ElementFace>) {
 }
 
 #[test]
+fn mobile_marks_stop_before_a_persons_guarded_step() {
+    for kind in zerocode_core::computer_use::ConfirmKind::ALL {
+        let (mut held, mut faces) = table();
+        faces[1].name = Some(kind.words()[0].into());
+        held.plan = numbered(&faces, held.screen);
+        let pin = held
+            .request(EmulatorPlatform::Ios, &device("phone"), 1)
+            .unwrap();
+        let mut taps = 0;
+        let error = pin
+            .perform_with_policy(
+                &faces,
+                held.screen,
+                crate::computer_use::confirm::Policy::default(),
+                |_, _| {
+                    taps += 1;
+                    Ok(())
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, error_code::CONFIRMATION_REQUIRED);
+        assert_eq!(taps, 0);
+        pin.perform_with_policy(
+            &faces,
+            held.screen,
+            crate::computer_use::confirm::Policy {
+                payment: false,
+                transfer: false,
+                delete: false,
+            },
+            |_, _| {
+                taps += 1;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(taps, 1);
+    }
+}
+
+#[test]
 fn mobile_pin_rechecks_identity_geometry_eligibility_and_uniqueness() {
     let (table, original) = table();
     let request = table.request(table.platform, &table.device, 1).unwrap();

@@ -174,6 +174,34 @@ pub(super) fn goal(steps: usize) -> Errand<'static> {
 }
 
 #[test]
+fn mobile_and_other_surfaces_refuse_low_confidence() {
+    for seen in [
+        Seen::default(),
+        Seen::Desk {
+            app: "Settings".into(),
+            window: "General".into(),
+        },
+        Seen::Phone {
+            platform: zerocode_core::computer_use::EmulatorPlatform::Ios,
+            device: "phone".into(),
+        },
+    ] {
+        let mut judge = FakeJudge::chose(&[1]);
+        let Judged::Chose(choice) = &mut judge.answers[0] else {
+            unreachable!()
+        };
+        choice.confidence = 0.29;
+        let mut world = FakeWorld::showing(&[1]);
+        world.screen.as_mut().unwrap().at = seen;
+        let walked = run(Mode::On, &goal(1), &mut judge, &mut world);
+        assert!(world.presses.is_empty(), "low confidence must not press");
+        assert_eq!(walked.pressed, 0);
+        assert_eq!(walked.rows[0]["barred"], Barred::LowConfidence.as_str());
+        assert_eq!(walked.rows[0]["confidence"], 0.29);
+    }
+}
+
+#[test]
 fn off_asks_nothing_presses_nothing_and_writes_nothing() {
     let mut judge = FakeJudge::chose(&[1]);
     let mut world = FakeWorld::showing(&[1, 2]);

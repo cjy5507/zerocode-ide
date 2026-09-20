@@ -151,7 +151,8 @@ fn a_desktop_walk_looks_presses_and_checks_through_the_apps_own_door() {
 fn a_pane_walk_takes_the_browser_door_and_keeps_the_address_it_was_handed() {
     let road = Road::new(|verb| match verb {
         "marks" => ok(&pane_answer()),
-        "click" | "find" => ok(""),
+        "click" => ok(""),
+        "find" => ok(r#"{"count":1}"#),
         _ => refused(),
     });
     let mut road_fn = road.road();
@@ -181,6 +182,130 @@ fn a_pane_walk_takes_the_browser_door_and_keeps_the_address_it_was_handed() {
     assert_eq!(road.argv(0), ["marks", "browser-5", "--json"]);
     assert_eq!(road.argv(1), ["click", "browser-5", "--mark", "3"]);
     assert_eq!(road.argv(2), ["find", "browser-5", "보관함"]);
+}
+
+#[test]
+fn a_goal_check_does_not_confuse_zero_matches_with_success() {
+    let road = Road::new(|_| ok(r#"{"count":0}"#));
+    let mut send = road.road();
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::Pane {
+            label: "page".into(),
+        },
+        Seen::default(),
+        Some("Done".into()),
+        60_000,
+        0,
+    );
+    assert_eq!(world.reached(), Some(false));
+}
+
+#[test]
+fn mobile_goal_uses_the_same_device_and_its_look_for_every_road() {
+    for platform in [EmulatorPlatform::Ios, EmulatorPlatform::Android] {
+        let road = Road::new(|verb| match verb {
+            "marks" => ok(&json!({"ok": true, "result": {
+                "lookId": "mobile-look", "items": [{"mark": 2, "role": "button", "label": "일반"}]
+            }})
+            .to_string()),
+            "click" => ok(r#"{"ok":true}"#),
+            "find" => ok(r#"{"ok":true,"result":{"count":0}}"#),
+            _ => refused(),
+        });
+        let mut send = road.road();
+        let aim = Aim::Phone {
+            platform,
+            device: "phone".into(),
+        };
+        let mut world = GoalWorld::new(
+            &mut send,
+            aim.clone(),
+            Seen::default(),
+            Some("완료".into()),
+            60_000,
+            0,
+        );
+        let screen = world.look().unwrap();
+        assert_eq!(
+            screen.at,
+            Seen::Phone {
+                platform,
+                device: "phone".into()
+            }
+        );
+        assert_eq!(super::super::seat_of(aim.surface()).id, "emulator");
+        assert!(world.press(2));
+        assert_eq!(world.reached(), Some(false));
+        assert_eq!(road.tool(0), RecipeTool::Emulator);
+        assert_eq!(
+            road.argv(0),
+            [
+                "marks",
+                "--platform",
+                platform.as_str(),
+                "--device",
+                "phone",
+                "--json"
+            ]
+        );
+        assert_eq!(
+            road.argv(1),
+            [
+                "click",
+                "--platform",
+                platform.as_str(),
+                "--device",
+                "phone",
+                "--json",
+                "--mark",
+                "2",
+                "--look",
+                "mobile-look"
+            ]
+        );
+        assert_eq!(
+            road.argv(2),
+            [
+                "find",
+                "--platform",
+                platform.as_str(),
+                "--device",
+                "phone",
+                "--json",
+                "--text",
+                "완료"
+            ]
+        );
+        assert!(screen_of(&aim, &json!({"items": []})).is_none());
+    }
+}
+
+#[test]
+fn a_press_cannot_outlive_the_goal_budget_after_its_look() {
+    let road = Road::new(|verb| match verb {
+        "observe" => ok(&desktop_answer()),
+        _ => ok("{}"),
+    });
+    let mut send = road.road();
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::App {
+            name: "Settings".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    );
+    assert!(world.look().is_some());
+    world.spent_ms = world.deadline_ms;
+    assert!(!world.press(1));
+    assert_eq!(
+        road.said.borrow().len(),
+        1,
+        "an expired goal sends no input"
+    );
 }
 
 #[test]

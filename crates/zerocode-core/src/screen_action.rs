@@ -115,7 +115,7 @@ const CANDIDATES_KEY: &str = "candidates";
 /// ([`Errand::key`]), so evidence is read per errand; what a single version
 /// buys is that neither errand's words can change while the other's evidence
 /// silently keeps its number.
-pub const SCREEN_ACTION_RUBRIC_VERSION: u32 = 2;
+pub const SCREEN_ACTION_RUBRIC_VERSION: u32 = 3;
 
 /// What a walk is asking the screen about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +175,8 @@ pub enum Where<'a> {
     Page { host: &'a str, path: &'a str },
     /// The desktop: the app whose tree was numbered, and the window's title.
     Desk { app: &'a str, window: &'a str },
+    /// A mobile device, by the platform and identity the caller selected.
+    Phone { platform: &'a str, device: &'a str },
 }
 
 impl Where<'_> {
@@ -184,6 +186,7 @@ impl Where<'_> {
         match self {
             Self::Page { host, path } => json!({ "host": host, "path": path }),
             Self::Desk { app, window } => json!({ "app": app, "window": window }),
+            Self::Phone { platform, device } => json!({ "platform": platform, "device": device }),
         }
     }
 
@@ -192,6 +195,7 @@ impl Where<'_> {
         match self {
             Self::Page { .. } => ["host", "path"],
             Self::Desk { .. } => ["app", "window"],
+            Self::Phone { .. } => ["platform", "device"],
         }
     }
 }
@@ -295,6 +299,15 @@ pub fn rubric_words() -> String {
     );
     words.push('\n');
     words.push_str(CANDIDATES_KEY);
+    words.push('\n');
+    words.push_str(
+        &Where::Phone {
+            platform: "",
+            device: "",
+        }
+        .keys()
+        .join(","),
+    );
     words
 }
 

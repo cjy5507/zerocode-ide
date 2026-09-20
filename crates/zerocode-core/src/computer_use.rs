@@ -2942,6 +2942,8 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ("arena", "arena"),
         ("goal", "goal"),
         ("pane", "pane"),
+        ("platform", "platform"),
+        ("device", "device"),
     ] {
         if let Some(value) = optional_string_allowing_empty(&flags, flag)? {
             params.insert(key.into(), Value::String(value));
@@ -3308,7 +3310,9 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::SoundWait => &["json", "label", "min-confidence", "timeout-ms", "after"],
         ComputerMethod::Watch => &["json", "until", "timeout-ms", "display"],
         ComputerMethod::Batch => &["json", BATCH_COMMANDS_FLAG],
-        ComputerMethod::Walk => &["json", "goal", "app", "pane", "until", "steps"],
+        ComputerMethod::Walk => &[
+            "json", "goal", "app", "pane", "platform", "device", "until", "steps",
+        ],
         ComputerMethod::Compare => &[
             "json", "baseline", "against", "region", "display", "max-diff",
         ],
@@ -3370,6 +3374,7 @@ fn validate(
     // at all — its ledger had no rows because nothing could call it
     // (2026-09-19).
     let by_pane = allowed(method).contains(&"pane") && has("pane");
+    let by_device = allowed(method).contains(&"device") && (has("device") || has("platform"));
     if !matches!(
         method,
         ComputerMethod::Capabilities | ComputerMethod::ListApps | ComputerMethod::Permissions
@@ -3377,6 +3382,7 @@ fn validate(
         && !has("app")
         && !by_mark
         && !by_pane
+        && !by_device
     {
         return Err("missing required --app".into());
     }
@@ -3660,10 +3666,27 @@ fn validate(
                     crate::jev::GOAL_CHAR_CAP
                 ));
             }
-            let (app, pane) = (params.get("app"), params.get("pane"));
-            if app.is_some() == pane.is_some() {
+            if has("device") != has("platform") {
+                return Err("a mobile walk requires both --platform and --device".into());
+            }
+            if let Some(platform) = params.get("platform").and_then(Value::as_str) {
+                platform.parse::<EmulatorPlatform>()?;
+                if params
+                    .get("device")
+                    .and_then(Value::as_str)
+                    .is_none_or(|id| id.trim().is_empty())
+                {
+                    return Err("--device needs a device id".into());
+                }
+            }
+            if ["app", "pane", "device"]
+                .into_iter()
+                .filter(|key| has(key))
+                .count()
+                != 1
+            {
                 return Err(
-                    "a walk looks at one screen: name --app <app> or --pane <browser pane>, not both and not neither"
+                    "a walk looks at one screen: name --app <app>, --pane <browser pane>, or --platform <ios|android> --device <id>"
                         .into(),
                 );
             }
@@ -3989,7 +4012,7 @@ pub fn usage() -> String {
         "  zerocode-computer recipe-list [--json]",
         "  zerocode-computer recipe-show --name <name> [--json]",
         "  zerocode-computer recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--end N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--json]",
-        "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane>) [--until <text on screen when it worked>] [--steps N] [--json]",
+        "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane> | --platform <ios|android> --device <id>) [--until <text on screen when it worked>] [--steps N] [--json]",
         "      (walks the steps in one call, filling {{name}} from --params; stops at the person's turn or last step,",
         "       a step naming the saved screen's element or window, a check the screen fails, an act that changed",
         "       nothing, or a person's hand on the pointer — and answers the step to resume from; a guarded Flow's",
@@ -7263,6 +7286,41 @@ mod tests {
         for shown in ["--repeat [--until <HH:MM|N>]", "--arena <evidence dir>"] {
             assert!(usage.contains(shown), "{shown} is not in the manual");
         }
+    }
+
+    #[test]
+    fn a_mobile_goal_walk_names_one_platform_and_device() {
+        let words = |extra: &[&str]| {
+            ["walk", "--goal", "일반 화면 열기"]
+                .into_iter()
+                .chain(extra.iter().copied())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        };
+        for platform in ["ios", "android"] {
+            let parsed = parse_command(&words(&["--platform", platform, "--device", "phone"]))
+                .expect("a mobile goal has its own target");
+            assert_eq!(parsed.method, ComputerMethod::Walk);
+            assert_eq!(parsed.params["platform"], platform);
+            assert_eq!(parsed.params["device"], "phone");
+        }
+        for invalid in [
+            vec!["--platform", "ios"],
+            vec!["--device", "phone"],
+            vec!["--platform", "other", "--device", "phone"],
+            vec![
+                "--platform",
+                "ios",
+                "--device",
+                "phone",
+                "--app",
+                "Settings",
+            ],
+            vec!["--platform", "ios", "--device", "phone", "--pane", "page"],
+        ] {
+            assert!(parse_command(&words(&invalid)).is_err(), "{invalid:?}");
+        }
+        assert!(usage().contains("--platform <ios|android> --device <id>"));
     }
 
     #[test]

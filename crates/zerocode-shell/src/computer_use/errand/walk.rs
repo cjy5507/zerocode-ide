@@ -22,7 +22,7 @@
 use std::time::Instant;
 
 use serde_json::Value;
-use zerocode_core::computer_recipe::RecipeTool;
+use zerocode_core::computer_recipe::{RecipeTool, recipe_line_holds_ms};
 use zerocode_core::computer_use_protocol::marks::ITEMS_KEY;
 use zerocode_hookd::TeamAnswer;
 
@@ -115,6 +115,11 @@ where
             "--mark".to_string(),
             mark.to_string(),
         ];
+        let holds = recipe_line_holds_ms(RecipeTool::Browser, &argv);
+        let left = self.left_ms();
+        if left == 0 || left < holds {
+            return false;
+        }
         (self.road)(RecipeTool::Browser, &argv, &argv).exit_code == 0
     }
 

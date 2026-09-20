@@ -252,7 +252,14 @@ pub struct JevUse {
     /// a floor on a seat that never rises is a number nobody reads, and a
     /// rising seat with no floor is a promotion with nothing to pass.
     pub answer_floor_permille: Option<u16>,
+    /// Minimum confidence for a screen press, distinct from the answer-rate
+    /// promotion floor. None means this seat has no authority to press.
+    pub press_floor_permille: Option<u16>,
 }
+
+/// Initial conservative screen-press floor, above the observed wrong choice
+/// at confidence 0.29. This is a policy line, not a calibrated accuracy claim.
+pub const SCREEN_PRESS_FLOOR_PERMILLE: u16 = 500;
 
 /// zo's routing judgment: a task's complexity, risk and intent beside the
 /// chat probe's (docs/design/jev-decision-shadow-20260917.md).
@@ -267,6 +274,7 @@ pub const ROUTING: JevUse = JevUse {
     ledger: "decision-shadow.jsonl",
     promotes: true,
     answer_floor_permille: Some(950),
+    press_floor_permille: None,
 };
 
 /// zo's recall rerank: how much each note a recall found helps with the
@@ -312,6 +320,7 @@ pub const RECALL: JevUse = JevUse {
     ledger: "rerank-shadow.jsonl",
     promotes: false,
     answer_floor_permille: None,
+    press_floor_permille: None,
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -392,6 +401,7 @@ pub const BROWSER: JevUse = JevUse {
     ledger: "browser-action.jsonl",
     promotes: false,
     answer_floor_permille: None,
+    press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -420,6 +430,33 @@ pub const DESKTOP: JevUse = JevUse {
     ledger: "desktop-action.jsonl",
     promotes: false,
     answer_floor_permille: None,
+    press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
+};
+
+/// A mobile screen is a separate consent and evidence surface. Existing
+/// browser/desktop settings never enable it, and `auto` never promotes presses.
+pub const EMULATOR: JevUse = JevUse {
+    id: "emulator",
+    setting: "emulatorAction",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    sends: &[
+        Sent {
+            at: "/state/where/platform",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/where/device",
+            cap: Cap::Uncut,
+        },
+        SCREEN_SENDS[0],
+        SCREEN_SENDS[1],
+        SCREEN_SENDS[2],
+        SCREEN_SENDS[3],
+    ],
+    ledger: "emulator-action.jsonl",
+    promotes: false,
+    answer_floor_permille: None,
+    press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -444,6 +481,7 @@ pub const STALL: JevUse = JevUse {
     ledger: "stall-cause.jsonl",
     promotes: false,
     answer_floor_permille: None,
+    press_floor_permille: None,
 };
 
 /// The window's worker placement: which of [`PLACEMENT_OPTIONS`] a worker it
@@ -490,6 +528,7 @@ pub const PLACEMENT: JevUse = JevUse {
     ledger: "worker-placement.jsonl",
     promotes: false,
     answer_floor_permille: None,
+    press_floor_permille: None,
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -523,12 +562,23 @@ pub const SUMMON: JevUse = JevUse {
     ledger: "summon-choice.jsonl",
     promotes: false,
     answer_floor_permille: None,
+    press_floor_permille: None,
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 7] = [ROUTING, RECALL, BROWSER, DESKTOP, STALL, PLACEMENT, SUMMON];
+pub static JEV_USES: [JevUse; 8] = [
+    ROUTING, RECALL, BROWSER, DESKTOP, EMULATOR, STALL, PLACEMENT, SUMMON,
+];
 
 impl JevUse {
+    /// Whether a validated screen choice meets this seat's press policy.
+    #[must_use]
+    pub fn permits_press(&self, confidence: f64) -> bool {
+        self.press_floor_permille.is_some_and(|floor| {
+            (0.0..=1.0).contains(&confidence) && confidence >= f64::from(floor) / 1_000.0
+        })
+    }
+
     /// The mode `value` names for this use: one of this use's own words,
     /// trimmed, in any case. Anything else — a typo, a boolean, a mode this
     /// use does not offer — is `off`, so a slip never starts sending anything.

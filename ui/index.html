@@ -4122,6 +4122,26 @@
             </div>
 
             <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-emulator-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.emulator">모바일 걷기</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.emulatorSummary">
+                    iOS·Android 화면에서 다음에 누를 번호를 고릅니다.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-emulator-select" data-jev-seat="emulator"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.emulatorHint">
+                  번호가 붙은 컨트롤의 접근성 텍스트, 목표, 플랫폼과 기기 식별자가 api.typesafe.ai로 전송됩니다. 모바일 전용 설정을 명시적으로 켜야 동작하며 자동 승격하지 않습니다. 화면을 다시 확인한 번호만 누르고, 직접 지정한 확인 문구로 결과를 검사합니다.
+                </p>
+              </details>
+            </div>
+
+            <div class="settings-jev-row" data-jev-row>
               <label class="settings-field" data-field="md" for="typesafe-stall-select">
                 <span class="settings-field-copy">
                   <span class="settings-label" data-i18n="settings.typesafe.stall">멈춘 워커의 원인</span>

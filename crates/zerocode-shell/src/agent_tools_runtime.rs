@@ -3055,8 +3055,8 @@ pub(super) fn run_goal(
             .map(str::to_string)
     };
     let goal = word("goal").unwrap_or_default();
-    let (aim, page) = match (word("pane"), word("app")) {
-        (Some(label), _) => {
+    let (aim, page) = match (word("pane"), word("app"), word("device")) {
+        (Some(label), None, None) => {
             // The pane's address, read once before the walk: a `marks` answer
             // does not carry it, and a round trip for it inside the
             // judgment's own deadline would spend the clock the walk needs.
@@ -3064,14 +3064,27 @@ pub(super) fn run_goal(
             let (host, path) = errand::walk::page_of(&desk.pages(), &label);
             (desk::Aim::Pane { label }, errand::Seen::Page { host, path })
         }
-        (None, Some(name)) => (desk::Aim::App { name }, errand::Seen::default()),
+        (None, Some(name), None) => (desk::Aim::App { name }, errand::Seen::default()),
+        (None, None, Some(device)) => {
+            let Some(platform) = word("platform").and_then(|value| value.parse().ok()) else {
+                return computer_cli_error(
+                    command.json,
+                    zerocode_core::computer_use_protocol::error_code::INVALID_ARGUMENT,
+                    "a mobile walk needs --platform ios|android",
+                );
+            };
+            (
+                desk::Aim::Phone { platform, device },
+                errand::Seen::default(),
+            )
+        }
         // The parser already refuses neither and both; this is the shape the
         // type system cannot be told about.
-        (None, None) => {
+        _ => {
             return computer_cli_error(
                 command.json,
                 zerocode_core::computer_use_protocol::error_code::INVALID_ARGUMENT,
-                "a walk looks at one screen: name --app <app> or --pane <browser pane>",
+                "a walk looks at one screen: name --app, --pane, or --platform with --device",
             );
         }
     };

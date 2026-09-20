@@ -336,6 +336,16 @@ impl PinnedTap {
         screen: Rect,
         tap: impl FnOnce(f64, f64) -> Result<(), ProviderError>,
     ) -> Result<(), ProviderError> {
+        self.perform_with_policy(faces, screen, crate::computer_use::confirm::policy(), tap)
+    }
+
+    fn perform_with_policy(
+        &self,
+        faces: &[ElementFace],
+        screen: Rect,
+        policy: crate::computer_use::confirm::Policy,
+        tap: impl FnOnce(f64, f64) -> Result<(), ProviderError>,
+    ) -> Result<(), ProviderError> {
         let broken = || self.broken();
         if cache::is_expired(self.made, Instant::now()) || !self.screen.matches_within(&screen, 0.0)
         {
@@ -356,6 +366,14 @@ impl PinnedTap {
             .any(|mark| mark.element_index == self.index)
         {
             return Err(broken());
+        }
+        if let Some(kind) = zerocode_core::computer_use::confirm_kind_of(face.words())
+            .filter(|kind| policy.asks(*kind))
+        {
+            return Err(ProviderError::new(
+                error_code::CONFIRMATION_REQUIRED,
+                format!("{}: {}", kind.as_str(), face.words()),
+            ));
         }
         // Android's existing device_point uses the last pixel (size - 1),
         // while the iOS HID door consumes a fraction of the root AX frame.

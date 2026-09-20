@@ -66,6 +66,26 @@ export async function testFlowConsole(browser, origin, ok) {
       return { before, middle, after: flowPending.length };
     });
     ok("The queue waits for the actual runner reply before submitting the next Flow", queued.before.sent === 1 && queued.before.pending === 2 && queued.middle.sent === 2 && queued.middle.pending === 1 && queued.after === 0, JSON.stringify(queued));
+    const mobileGoals = await page.evaluate(async () => {
+      const original = currentTab().id;
+      const sent = [];
+      window.__ANSWER__.flow_execute = (args) => { sent.push(args); return { done: true }; };
+      for (const platform of ["ios", "android"]) {
+        const id = `emulator:goal-${platform}`;
+        openTab({ id, kind: "emulator", platform, deviceId: `${platform}-device`,
+          udid: "transport-address", working: false, live: false, interactive: false, emulatorEpoch: 0 });
+        setActiveTab(id);
+        el("flow-goal").value = "일반 화면 열기";
+        el("flow-goal-form").requestSubmit();
+        await flowLaunchTail;
+        closeTab(id);
+      }
+      setActiveTab(original);
+      return sent;
+    });
+    ok("Mobile goals retain the selected platform and stable device identity",
+      JSON.stringify(mobileGoals.map((call) => call.argv)) === JSON.stringify(["ios", "android"].map((platform) =>
+        ["walk", "--goal", "일반 화면 열기", "--platform", platform, "--device", `${platform}-device`])), JSON.stringify(mobileGoals));
     const context = await page.evaluate(async () => {
       const original = activeWorktreePath;
       const sent = []; const release = [];

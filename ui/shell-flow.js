@@ -224,9 +224,11 @@ el("flow-goal-form").addEventListener("submit", (event) => {
   const goal = el("flow-goal").value.trim();
   const tab = currentTab();
   const app = flowBySlug(flowSelected)?.fingerprint?.apps?.[0];
-  const target = tab?.kind === "browser" && tab.label ? ["--pane", tab.label] : app ? ["--app", app] : null;
+  const target = tab?.kind === "emulator"
+    ? tab.platform && tab.deviceId ? ["--platform", tab.platform, "--device", tab.deviceId] : null
+    : tab?.kind === "browser" && tab.label ? ["--pane", tab.label] : app ? ["--app", app] : null;
   if (goal && target) void flowLaunch(["walk", "--goal", goal, ...target], goal);
-  else showError(t("flow.live.target", "브라우저 판이나 Flow의 앱을 먼저 선택하세요."));
+  else showError(t("flow.live.target", "브라우저·기기 화면이나 Flow의 앱을 먼저 선택하세요."));
 });
 
 el("flow-console-mirror").addEventListener("change", (event) => {
