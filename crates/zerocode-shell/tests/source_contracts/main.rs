@@ -8503,8 +8503,13 @@ mod tests {
             "the launched-agent PATH lost one of its guarded Computer Use roads"
         );
         let router = block_after(shell, "async fn computer_loop(");
+        // Read without whitespace: rustfmt breaks the call across lines once
+        // it carries the asking shell's cwd (4d944fc3), and the road is the
+        // same road however the call is wrapped.
+        let squeezed: String = router.split_whitespace().collect();
         assert!(
-            router.contains(r#"word == "emulator""#) && router.contains("emulator_step(&steering"),
+            router.contains(r#"word == "emulator""#)
+                && squeezed.contains("emulator_step(&steering"),
             "mobile commands can fall through to desktop accessibility:\n{router}"
         );
         // The lone command and a walk's emulator steps take one road: the
