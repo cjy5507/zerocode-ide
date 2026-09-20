@@ -11,6 +11,7 @@ _since v1.1.8 (10 commits)_
 ### fix
 - fix(computer-use,emulator): an app answers to its bundle's own name, the iOS exporter says what is on top at each centre, a dead HID helper is replaced before it is handed out (t-5518)
 - fix(runtime): hand a main-turn capacity wall to the quota escape after a burst, not after the account budget
+- test(contracts): read the emulator road without whitespace (the v1.1.9 lane red)
 
 ### docs
 - docs(jev): the seat accuracy wave — root causes, landings and the wire bench
