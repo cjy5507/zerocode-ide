@@ -20,6 +20,11 @@ const OUTCOME: &str = include_str!(
 const MARK_PIN: &str = include_str!(
     "../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOSCore/MarkPin.swift"
 );
+const DESKTOP_APPS: &str = include_str!(
+    "../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOSCore/DesktopApps.swift"
+);
+const IOS_BRIDGE: &str = include_str!("../../native/ios-emulator-helper/AccessibilityBridge.swift");
+const MOBILE_MARKS: &str = include_str!("../../src/emulator/marks.rs");
 
 /// The quoted strings of the Swift array literal on the line that declares it
 /// (the value after `=`, whatever the type annotation holds).
@@ -685,4 +690,58 @@ fn the_helpers_element_faces_are_the_cores() {
         .collect();
     keys.sort();
     assert_eq!(written, keys, "the helper's face keys are the core's");
+}
+
+/// An app's other names are the core's table, read where the core says
+/// (`identity::MACOS_BUNDLE_NAME_KEYS`), and every verb that names a running
+/// app — `resolveApp` and `launch`'s lookup alike — asks by that one rule;
+/// `launch` answers the bundle's own name for the next verb to ask by.
+#[test]
+fn the_helpers_other_app_names_are_the_cores() {
+    use zerocode_core::computer_use_protocol::identity::MACOS_BUNDLE_NAME_KEYS;
+    let keys = swift_array(DESKTOP_APPS, "public let bundleNameKeys");
+    assert_eq!(
+        keys.iter().map(String::as_str).collect::<Vec<_>>(),
+        MACOS_BUNDLE_NAME_KEYS
+    );
+    let matches = HELPER
+        .split("private func matches(_ app: AppDescriptor, query: String) -> Bool {")
+        .nth(1)
+        .expect("the helper's matches");
+    assert!(
+        matches.trim_start().starts_with(
+            "applicationAnswers(to: query, name: app.name, bundleId: app.bundleId, otherNames: app.otherNames)"
+        ),
+        "the helper's matches spells a rule of its own"
+    );
+    let launch = HELPER
+        .split("static func resolveApplicationURL(")
+        .nth(1)
+        .expect("launch's lookup");
+    assert!(
+        launch.contains("running.first(where: { matches($0, query: query) })"),
+        "launch looks a running app up by a rule of its own"
+    );
+    assert!(
+        HELPER.contains(
+            r#""bundleName": jsonNullable(bundleName(info: Bundle(url: url)?.infoDictionary))"#
+        ),
+        "launch no longer answers the bundle's own name"
+    );
+}
+
+/// The iOS exporter's answer for an element's centre is read by the key it
+/// writes.
+#[test]
+fn the_ios_exporters_centre_answer_is_read_by_the_key_it_writes() {
+    let key = MOBILE_MARKS
+        .split("pub(crate) const HIT_AT_CENTRE_KEY: &str = \"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .expect("the marks key");
+    assert_eq!(key, "hit_at_centre");
+    assert!(
+        IOS_BRIDGE.contains(&format!("dict[\"{key}\"] = answered")),
+        "the bridge writes its answer under another key"
+    );
 }

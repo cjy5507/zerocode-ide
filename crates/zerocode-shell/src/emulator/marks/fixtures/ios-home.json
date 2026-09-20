@@ -1,0 +1,307 @@
+[
+ {
+  "frame": {
+   "x": 0,
+   "y": 0,
+   "width": 402,
+   "height": 874
+  },
+  "AXUniqueId": null,
+  "role_description": "application",
+  "type": "Application",
+  "AXValue": null,
+  "enabled": true,
+  "hit_at_centre": true,
+  "children": [
+   {
+    "hit_at_centre": false,
+    "enabled": true,
+    "AXLabel": "지도",
+    "role_description": "button",
+    "children": [],
+    "type": "Button",
+    "AXUniqueId": "지도",
+    "AXValue": "위젯",
+    "frame": {
+     "y": 88.00000000000001,
+     "width": 206.33333333333331,
+     "x": 4.666666666666629,
+     "height": 197
+    }
+   },
+   {
+    "AXLabel": "캘린더",
+    "enabled": true,
+    "children": [],
+    "type": "Button",
+    "role_description": "button",
+    "AXUniqueId": "캘린더",
+    "hit_at_centre": false,
+    "frame": {
+     "y": 88.00000000000001,
+     "height": 197,
+     "x": 190,
+     "width": 206.33333333333331
+    },
+    "AXValue": "위젯, 스택"
+   },
+   {
+    "AXLabel": "캘린더",
+    "AXValue": "9월 21일 월요일",
+    "children": [],
+    "type": "Button",
+    "AXUniqueId": "캘린더",
+    "frame": {
+     "width": 106,
+     "y": 288.6666666666667,
+     "height": 96.66666666666669,
+     "x": 8.333333333333314
+    },
+    "enabled": true,
+    "hit_at_centre": true,
+    "role_description": "button"
+   },
+   {
+    "enabled": true,
+    "children": [],
+    "AXUniqueId": "사진",
+    "role_description": "button",
+    "type": "Button",
+    "hit_at_centre": true,
+    "AXLabel": "사진",
+    "AXValue": null,
+    "frame": {
+     "width": 106,
+     "y": 288.6666666666667,
+     "height": 96.66666666666669,
+     "x": 100.66666666666669
+    }
+   },
+   {
+    "hit_at_centre": true,
+    "children": [],
+    "enabled": true,
+    "frame": {
+     "y": 288.6666666666667,
+     "height": 96.66666666666669,
+     "x": 193.66666666666663,
+     "width": 106
+    },
+    "AXValue": null,
+    "role_description": "button",
+    "AXUniqueId": "미리 알림",
+    "type": "Button",
+    "AXLabel": "미리 알림"
+   },
+   {
+    "enabled": true,
+    "hit_at_centre": true,
+    "frame": {
+     "x": 286.33333333333326,
+     "y": 288.6666666666667,
+     "width": 106,
+     "height": 96.66666666666669
+    },
+    "AXLabel": "News",
+    "children": [],
+    "AXUniqueId": "News",
+    "AXValue": null,
+    "type": "Button",
+    "role_description": "button"
+   },
+   {
+    "AXUniqueId": "지도",
+    "role_description": "button",
+    "AXValue": null,
+    "enabled": true,
+    "children": [],
+    "hit_at_centre": true,
+    "type": "Button",
+    "frame": {
+     "width": 106,
+     "y": 389,
+     "height": 96.66666666666669,
+     "x": 8.333333333333314
+    },
+    "AXLabel": "지도"
+   },
+   {
+    "hit_at_centre": true,
+    "frame": {
+     "height": 96.66666666666669,
+     "y": 389,
+     "x": 100.66666666666669,
+     "width": 106
+    },
+    "AXValue": null,
+    "type": "Button",
+    "children": [],
+    "enabled": true,
+    "AXUniqueId": "건강",
+    "AXLabel": "건강",
+    "role_description": "button"
+   },
+   {
+    "frame": {
+     "y": 389,
+     "height": 96.66666666666669,
+     "width": 106,
+     "x": 193.66666666666663
+    },
+    "AXValue": null,
+    "children": [],
+    "AXLabel": "지갑",
+    "role_description": "button",
+    "type": "Button",
+    "hit_at_centre": true,
+    "AXUniqueId": "지갑",
+    "enabled": true
+   },
+   {
+    "hit_at_centre": true,
+    "children": [],
+    "type": "Button",
+    "frame": {
+     "x": 286,
+     "width": 106,
+     "y": 389,
+     "height": 96.66666666666669
+    },
+    "AXUniqueId": "설정",
+    "AXLabel": "설정",
+    "role_description": "button",
+    "AXValue": null,
+    "enabled": true
+   },
+   {
+    "hit_at_centre": true,
+    "type": "Slider",
+    "AXValue": "총 2페이지 중 1페이지",
+    "role_description": "slider",
+    "enabled": true,
+    "children": [],
+    "frame": {
+     "width": 58.66666666666666,
+     "height": 30,
+     "x": 171.66666666666666,
+     "y": 703.6666666666667
+    },
+    "AXUniqueId": "spotlight-pill",
+    "AXLabel": "검색"
+   },
+   {
+    "type": "Button",
+    "AXLabel": "Safari",
+    "children": [],
+    "AXUniqueId": "Safari",
+    "role_description": "button",
+    "hit_at_centre": true,
+    "frame": {
+     "height": 68,
+     "y": 771.3333333333333,
+     "width": 68,
+     "x": 123
+    },
+    "AXValue": null,
+    "enabled": true
+   },
+   {
+    "enabled": true,
+    "AXLabel": "메시지",
+    "type": "Button",
+    "frame": {
+     "height": 68,
+     "y": 771.3333333333333,
+     "x": 211,
+     "width": 68
+    },
+    "AXValue": null,
+    "AXUniqueId": "메시지",
+    "hit_at_centre": true,
+    "role_description": "button",
+    "children": []
+   },
+   {
+    "AXLabel": "오전 1:12",
+    "enabled": true,
+    "role_description": "text",
+    "type": "StaticText",
+    "AXUniqueId": null,
+    "AXValue": null,
+    "children": [],
+    "hit_at_centre": true,
+    "frame": {
+     "x": 58.333333333333336,
+     "width": 31.666666666666664,
+     "y": 22.333333333333336,
+     "height": 20.333333333333336
+    }
+   },
+   {
+    "frame": {
+     "y": 13.999999999999996,
+     "width": 125.33333333333334,
+     "height": 36.66666666666666,
+     "x": 138.33333333333334
+    },
+    "AXValue": null,
+    "AXLabel": "Dynamic Island, 비어 있음",
+    "children": [],
+    "role_description": "",
+    "hit_at_centre": true,
+    "type": "GenericElement",
+    "enabled": true,
+    "AXUniqueId": null
+   },
+   {
+    "frame": {
+     "width": 19.333333333333314,
+     "height": 12.333333333333332,
+     "x": 288.3333333333333,
+     "y": 26.333333333333332
+    },
+    "role_description": "",
+    "AXUniqueId": null,
+    "children": [],
+    "type": "GenericElement",
+    "hit_at_centre": true,
+    "AXLabel": "셀룰러",
+    "AXValue": "신호 없음",
+    "enabled": true
+   },
+   {
+    "AXValue": "SSID, 총 3개의 Wi‑Fi 막대 중 3개",
+    "enabled": true,
+    "AXUniqueId": "총 3개의 Wi‑Fi 막대 중 3개",
+    "hit_at_centre": true,
+    "type": "GenericElement",
+    "AXLabel": null,
+    "frame": {
+     "height": 12.333333333333332,
+     "y": 26.333333333333332,
+     "width": 17,
+     "x": 315
+    },
+    "role_description": "",
+    "children": []
+   },
+   {
+    "frame": {
+     "y": 26,
+     "x": 339.3333333333333,
+     "width": 27.333333333333314,
+     "height": 13
+    },
+    "AXUniqueId": null,
+    "type": "GenericElement",
+    "hit_at_centre": true,
+    "AXLabel": "배터리 전원 100%",
+    "role_description": "",
+    "enabled": true,
+    "children": [],
+    "AXValue": "충전 중 아님"
+   }
+  ],
+  "AXLabel": " "
+ }
+]

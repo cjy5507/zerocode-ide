@@ -312,9 +312,28 @@ fn frame_socket_path() -> PathBuf {
     std::env::temp_dir().join(format!("zc-ios-{}.sock", &id[..12]))
 }
 
+/// Why an ask failed — and whether the helper ever had it.
+enum AskFailure {
+    /// The pipe was already closed: the helper had died before this request
+    /// left the process. Nothing was applied, so a fresh helper may be asked
+    /// the same thing.
+    Unsent(String),
+    /// The helper had the request — it may have acted before failing, or it
+    /// refused. Not asked again.
+    Failed(String),
+}
+
+impl AskFailure {
+    fn into_message(self) -> String {
+        match self {
+            Self::Unsent(message) | Self::Failed(message) => message,
+        }
+    }
+}
+
 impl InputClient {
     fn start(udid: &str) -> Result<Arc<Self>, String> {
-        let executable = helper_path()?;
+        let executable = helper_program()?;
         // Bound BEFORE the helper is spawned so there is no window in which it
         // dials a socket nobody is listening on yet.
         let socket = frame_socket_path();
@@ -427,12 +446,12 @@ impl InputClient {
     }
 
     /// The whole answer, because a frame needs more of it than a tap does.
-    fn ask(&self, request: &InputRequest) -> Result<WireResponse, String> {
+    fn ask(&self, request: &InputRequest) -> Result<WireResponse, AskFailure> {
         let mut state = held(&self.state);
         let id = state.next_id;
         state.next_id = state.next_id.wrapping_add(1).max(1);
-        let mut line =
-            serde_json::to_vec(&WireRequest { id, request }).map_err(|error| error.to_string())?;
+        let mut line = serde_json::to_vec(&WireRequest { id, request })
+            .map_err(|error| AskFailure::Failed(error.to_string()))?;
         line.push(b'\n');
         if let Err(error) = state
             .stdin
@@ -440,7 +459,9 @@ impl InputClient {
             .and_then(|()| state.stdin.flush())
         {
             self.fell_over(&mut state);
-            return Err(format!("iOS 입력 헬퍼에 보낼 수 없습니다: {error}"));
+            return Err(AskFailure::Unsent(format!(
+                "iOS 입력 헬퍼에 보낼 수 없습니다: {error}"
+            )));
         }
         let answer = match state.replies.recv_timeout(REQUEST_TIMEOUT) {
             Ok(answer) => answer,
@@ -452,31 +473,39 @@ impl InputClient {
                 } else {
                     diagnostic
                 };
-                return Err(format!("iOS 입력 헬퍼가 응답하지 않습니다: {detail}"));
+                return Err(AskFailure::Failed(format!(
+                    "iOS 입력 헬퍼가 응답하지 않습니다: {detail}"
+                )));
             }
         };
         let response: WireResponse = match serde_json::from_str(&answer) {
             Ok(response) => response,
             Err(error) => {
                 self.fell_over(&mut state);
-                return Err(format!("잘못된 iOS 입력 응답: {error}"));
+                return Err(AskFailure::Failed(format!("잘못된 iOS 입력 응답: {error}")));
             }
         };
         if response.id != id {
             self.fell_over(&mut state);
-            return Err("iOS 입력 응답 순서가 맞지 않습니다".to_string());
+            return Err(AskFailure::Failed(
+                "iOS 입력 응답 순서가 맞지 않습니다".to_string(),
+            ));
         }
         if response.ok {
             Ok(response)
         } else {
-            Err(response
-                .error
-                .unwrap_or_else(|| "iOS 입력이 거절됐습니다".to_string()))
+            Err(AskFailure::Failed(
+                response
+                    .error
+                    .unwrap_or_else(|| "iOS 입력이 거절됐습니다".to_string()),
+            ))
         }
     }
 
     fn request(&self, request: &InputRequest) -> Result<Option<String>, String> {
-        self.ask(request).map(|answer| answer.data)
+        self.ask(request)
+            .map(|answer| answer.data)
+            .map_err(AskFailure::into_message)
     }
 }
 
@@ -538,9 +567,39 @@ fn accept_helper(listener: &UnixListener) -> Option<UnixStream> {
     }
 }
 
+/// What the helper was last told to push, kept beside it so a replacement
+/// helper is told the same before anyone is handed it: the pump says its size
+/// once per size, not once per helper, and must not have to know that the
+/// helper it told has since been replaced.
+#[derive(Clone, Copy)]
+struct StreamAsk {
+    long_edge: u32,
+    quality: f64,
+    max_fps: u32,
+}
+
 struct ClientEntry {
     client: Arc<InputClient>,
     references: usize,
+    stream: Option<StreamAsk>,
+}
+
+impl ClientEntry {
+    /// A fresh helper in the corpse's place. The references the panes hold
+    /// keep meaning what they meant, and the pictures the corpse was pushing
+    /// are asked of the newcomer before it is handed out.
+    fn replace_helper(&mut self, udid: &str) -> Result<Arc<InputClient>, String> {
+        let fresh = InputClient::start(udid)?;
+        if let Some(stream) = self.stream {
+            fresh.request(&InputRequest::Stream {
+                long_edge: stream.long_edge,
+                quality: stream.quality,
+                max_fps: stream.max_fps,
+            })?;
+        }
+        self.client = fresh.clone();
+        Ok(fresh)
+    }
 }
 
 fn clients() -> &'static Mutex<HashMap<String, ClientEntry>> {
@@ -559,8 +618,7 @@ pub(super) fn retain(udid: &str) -> Result<(), String> {
         // their references — releasing is still their job — but they are
         // holding a corpse either way, so the entry gets a live helper and
         // this pane's reference is added to the count that was already there.
-        let replacement = InputClient::start(udid)?;
-        entry.client = replacement;
+        entry.replace_helper(udid)?;
         entry.references = entry.references.saturating_add(1);
         return Ok(());
     }
@@ -570,6 +628,7 @@ pub(super) fn retain(udid: &str) -> Result<(), String> {
         ClientEntry {
             client,
             references: 1,
+            stream: None,
         },
     );
     Ok(())
@@ -607,16 +666,58 @@ pub(super) fn release(udid: &str) {
     drop(removed);
 }
 
+const NO_CONNECTION: &str = "이 iOS 시뮬레이터의 입력 연결이 없습니다";
+
 /// This device's live helper, or the one sentence every road that needs one
 /// says when there is none.
 ///
 /// Four call sites were spelling the same lookup, the same `clone`, and the
 /// same message; the fifth would have been the one that spelled it differently.
+///
+/// A corpse is not handed out. The entry a pane retained outlives the helper
+/// it was retained with (a device that reboots takes the helper with it), and
+/// until 2026-09-21 every verb after that death was handed the same dead pipe
+/// and answered `Broken pipe` for as long as the pane stayed open. A helper
+/// known to be dead is replaced here, once, before the caller is given one.
 fn client_for(udid: &str) -> Result<Arc<InputClient>, String> {
-    held(clients())
-        .get(udid)
-        .map(|entry| entry.client.clone())
-        .ok_or_else(|| "이 iOS 시뮬레이터의 입력 연결이 없습니다".to_string())
+    let mut clients = held(clients());
+    let entry = clients
+        .get_mut(udid)
+        .ok_or_else(|| NO_CONNECTION.to_string())?;
+    if entry.client.alive() {
+        return Ok(entry.client.clone());
+    }
+    entry.replace_helper(udid)
+}
+
+/// The helper `failed` stood for, replaced — unless another road already
+/// replaced it, in which case that newcomer is the answer.
+fn resummoned(udid: &str, failed: &Arc<InputClient>) -> Result<Arc<InputClient>, String> {
+    let mut clients = held(clients());
+    let entry = clients
+        .get_mut(udid)
+        .ok_or_else(|| NO_CONNECTION.to_string())?;
+    if !Arc::ptr_eq(&entry.client, failed) && entry.client.alive() {
+        return Ok(entry.client.clone());
+    }
+    entry.replace_helper(udid)
+}
+
+/// One request to this device's helper, answered — asked a second time, of a
+/// fresh helper, only when the first never left this process (the pipe was
+/// already broken: the helper had died, unnoticed, before the ask). A request
+/// the helper had — one that timed out, or came back malformed — is not asked
+/// again: a tap it may have delivered must not be delivered twice.
+fn ask_device(udid: &str, request: &InputRequest) -> Result<WireResponse, String> {
+    let client = client_for(udid)?;
+    match client.ask(request) {
+        Ok(answer) => Ok(answer),
+        Err(AskFailure::Unsent(why)) => {
+            let fresh = resummoned(udid, &client).map_err(|error| format!("{why}; {error}"))?;
+            fresh.ask(request).map_err(AskFailure::into_message)
+        }
+        Err(failure) => Err(failure.into_message()),
+    }
 }
 
 /// One input to the device, and the pump told about it: the seconds after a
@@ -628,13 +729,14 @@ pub(super) fn send(udid: &str, request: InputRequest) -> Result<(), String> {
 }
 
 fn send_unnoted(udid: &str, request: InputRequest) -> Result<(), String> {
-    let client = client_for(udid)?;
+    // The connection is asked about before the pasteboard is touched.
+    client_for(udid)?;
     match request {
         InputRequest::Text { ref text } if !text.is_ascii() => {
             copy_to_simulator_pasteboard(udid, text)?;
-            client.request(&InputRequest::Paste).map(|_| ())
+            ask_device(udid, &InputRequest::Paste).map(|_| ())
         }
-        request => client.request(&request).map(|_| ()),
+        request => ask_device(udid, &request).map(|_| ()),
     }
 }
 
@@ -650,20 +752,31 @@ pub(super) fn stream_frames(
     quality: f64,
     max_fps: u32,
 ) -> Result<(), String> {
-    client_for(udid)?
-        .request(&InputRequest::Stream {
+    ask_device(
+        udid,
+        &InputRequest::Stream {
             long_edge,
             quality,
             max_fps,
-        })
-        .map(|_| ())
+        },
+    )?;
+    if let Some(entry) = held(clients()).get_mut(udid) {
+        entry.stream = Some(StreamAsk {
+            long_edge,
+            quality,
+            max_fps,
+        });
+    }
+    Ok(())
 }
 
 /// Ask the helper to stop pushing, so a hidden pane costs no encoder.
 pub(super) fn stop_frames(udid: &str) -> Result<(), String> {
-    client_for(udid)?
-        .request(&InputRequest::StreamStop)
-        .map(|_| ())
+    ask_device(udid, &InputRequest::StreamStop)?;
+    if let Some(entry) = held(clients()).get_mut(udid) {
+        entry.stream = None;
+    }
+    Ok(())
 }
 
 /// The newest pushed picture, waiting up to `timeout` for one.
@@ -690,11 +803,14 @@ pub(super) fn still_frame(
     long_edge: u32,
     quality: f64,
 ) -> Result<Option<HelperFrame>, String> {
-    let answer = client_for(udid)?.ask(&InputRequest::Frame {
-        seed,
-        long_edge,
-        quality,
-    })?;
+    let answer = ask_device(
+        udid,
+        &InputRequest::Frame {
+            seed,
+            long_edge,
+            quality,
+        },
+    )?;
     let Some(encoded) = answer.data else {
         // Unchanged. The helper still says which generation it looked at, so a
         // caller that lost its own seed is not stuck asking about a picture it
@@ -721,8 +837,8 @@ pub(super) fn accessibility_tree(udid: &str) -> Result<serde_json::Value, String
 
 /// Marks need the raw AX frame, before the display tree rounds it to 0..1.
 pub(super) fn accessibility_roots(udid: &str) -> Result<Vec<serde_json::Value>, String> {
-    let json = client_for(udid)?
-        .request(&InputRequest::Ax)?
+    let json = ask_device(udid, &InputRequest::Ax)?
+        .data
         .ok_or("iOS 접근성 트리가 비어 있습니다")?;
     serde_json::from_str(&json)
         .map_err(|error| format!("iOS 접근성 트리를 읽지 못했습니다: {error}"))
@@ -880,6 +996,19 @@ fn copy_to_simulator_pasteboard(udid: &str, text: &str) -> Result<(), String> {
         }
     }
 }
+
+/// The helper every client is started from: the embedded one — or, in this
+/// crate's own tests, a stand-in that answers like it.
+fn helper_program() -> Result<PathBuf, String> {
+    #[cfg(test)]
+    if let Some(program) = held(&HELPER_STAND_IN).clone() {
+        return Ok(program);
+    }
+    helper_path().map(Path::to_path_buf)
+}
+
+#[cfg(test)]
+static HELPER_STAND_IN: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 fn helper_path() -> Result<&'static Path, String> {
     static HELPER: OnceLock<Result<PathBuf, String>> = OnceLock::new();
@@ -1147,5 +1276,149 @@ mod tests {
         assert_eq!(normalized[0]["children"][0]["frame"]["x"], 0.25);
         assert_eq!(normalized[0]["children"][0]["frame"]["y"], 0.25);
         assert_eq!(normalized[0]["children"][0]["id"], "button");
+    }
+
+    /// A helper that answers like the real one and dies as told by its udid,
+    /// `stand-in-<mode>-<n>`: `leave` answers `n` requests and exits — dead
+    /// before anyone asks again; `swallow` answers `n`, then reads the next
+    /// request and exits without answering — a request the helper had.
+    /// Every life logs what it was asked, so a test can read what a
+    /// replacement was told before anyone asked it anything.
+    const STAND_IN_SCRIPT: &str = r#"#!/bin/sh
+dir='__DIR__'
+udid="$1"
+die="${udid##*-}"
+rest="${udid%-*}"
+mode="${rest##*-}"
+n=$(cat "$dir/$udid.count" 2>/dev/null || echo 0)
+n=$((n+1))
+echo "$n" > "$dir/$udid.count"
+count=0
+while IFS= read -r line; do
+  printf 'life %s: %s\n' "$n" "$line" >> "$dir/$udid.log"
+  count=$((count+1))
+  [ "$count" -gt "$die" ] && exit 0
+  id=$(printf '%s' "$line" | sed -e 's/.*"id":\([0-9][0-9]*\).*/\1/')
+  printf '{"id":%s,"ok":true,"data":"life-%s"}\n' "$id" "$n"
+  if [ "$mode" = leave ] && [ "$count" -ge "$die" ]; then exit 0; fi
+done
+"#;
+
+    fn stand_in() -> &'static Path {
+        static STAND_IN: OnceLock<(tempfile::TempDir, PathBuf)> = OnceLock::new();
+        let (dir, program) = STAND_IN.get_or_init(|| {
+            let dir = tempfile::tempdir().expect("scratch");
+            let program = dir.path().join("stand-in-helper");
+            std::fs::write(
+                &program,
+                STAND_IN_SCRIPT.replace("__DIR__", &dir.path().to_string_lossy()),
+            )
+            .expect("stand-in script");
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700))
+                .expect("chmod");
+            *held(&HELPER_STAND_IN) = Some(program.clone());
+            (dir, program)
+        });
+        let _ = dir;
+        program
+    }
+
+    fn stand_in_log(udid: &str) -> String {
+        let dir = stand_in().parent().expect("scratch").to_path_buf();
+        std::fs::read_to_string(dir.join(format!("{udid}.log"))).unwrap_or_default()
+    }
+
+    fn wait_for_exit(client: &InputClient) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if held(&client.state)
+                .child
+                .try_wait()
+                .ok()
+                .flatten()
+                .is_some()
+            {
+                return;
+            }
+            assert!(Instant::now() < deadline, "the stand-in never left");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn a_helper_that_died_unnoticed_is_replaced_once_and_told_its_stream_again() {
+        stand_in();
+        // Each life answers three times — the start's ping, then two more —
+        // and leaves.
+        let udid = "stand-in-leave-3";
+        retain(udid).expect("first helper");
+        stream_frames(udid, 320, 0.5, 30).expect("stream asked");
+        let first = client_for(udid).expect("the first helper");
+        ask_device(udid, &InputRequest::Ping).expect("its third answer");
+        wait_for_exit(&first);
+        // Nobody has noticed: the entry still says its helper stands.
+        assert!(retained(udid) && first.alive());
+        let answer = ask_device(udid, &InputRequest::Ping).expect("asked again of a fresh helper");
+        assert_eq!(answer.data.as_deref(), Some("life-2"));
+        let second = client_for(udid).expect("the replacement");
+        assert!(!Arc::ptr_eq(&first, &second));
+        assert!(!first.alive() && second.alive());
+        let log = stand_in_log(udid);
+        let second_life: Vec<&str> = log
+            .lines()
+            .filter(|line| line.starts_with("life 2: "))
+            .collect();
+        assert_eq!(second_life.len(), 3, "{log}");
+        assert!(second_life[0].contains(r#""kind":"ping""#), "{log}");
+        assert!(
+            second_life[1].contains(r#""kind":"stream""#)
+                && second_life[1].contains(r#""longEdge":320"#)
+                && second_life[1].contains(r#""maxFps":30"#),
+            "the replacement was not told the stream first: {log}"
+        );
+        assert!(second_life[2].contains(r#""kind":"ping""#), "{log}");
+        assert_eq!(held(clients())[udid].references, 1);
+        release(udid);
+        assert!(client_for(udid).is_err());
+    }
+
+    #[test]
+    fn a_request_the_helper_had_is_not_asked_again() {
+        stand_in();
+        // Two answers a life — the start's ping and one more; the third ask
+        // is read and never answered: the helper had it, so nothing is
+        // retried.
+        let udid = "stand-in-swallow-2";
+        retain(udid).expect("first helper");
+        let first = client_for(udid).expect("the first helper");
+        ask_device(udid, &InputRequest::Ping).expect("its second answer");
+        let error = ask_device(udid, &InputRequest::Ping)
+            .err()
+            .expect("no answer comes");
+        assert!(error.contains("응답하지 않습니다"), "{error}");
+        assert!(!first.alive());
+        assert!(!stand_in_log(udid).contains("life 2"), "a retry was made");
+        // The next ask finds the corpse and replaces it before asking.
+        let answer = ask_device(udid, &InputRequest::Ping).expect("a fresh helper");
+        assert_eq!(answer.data.as_deref(), Some("life-2"));
+        release(udid);
+    }
+
+    #[test]
+    fn a_corpse_is_replaced_before_it_is_handed_out_and_nobody_gets_a_missing_device() {
+        stand_in();
+        let udid = "stand-in-leave-9";
+        retain(udid).expect("first helper");
+        let first = client_for(udid).expect("the first helper");
+        first.fell_over(&mut held(&first.state));
+        assert!(!retained(udid));
+        let second = client_for(udid).expect("a replacement, not the corpse");
+        assert!(!Arc::ptr_eq(&first, &second) && second.alive() && retained(udid));
+        assert_eq!(held(clients())[udid].references, 1);
+        release(udid);
+        assert_eq!(
+            client_for("stand-in-nobody-1").err().as_deref(),
+            Some(NO_CONNECTION)
+        );
     }
 }

@@ -2304,6 +2304,7 @@ pub(super) async fn computer_loop(
                                     tauri::async_runtime::block_on(emulator_step(
                                         &app,
                                         dir.as_deref(),
+                                        cwd.as_deref().map(Path::new),
                                         step,
                                         logged,
                                     ))
@@ -2393,7 +2394,14 @@ pub(super) async fn computer_loop(
                 // one road: the door, then the device's frame in the run's
                 // folder when the shell presented one.
                 let dir = run_evidence::fenced_dir(&local_data_root, evidence.as_deref());
-                emulator_step(&steering, dir.as_deref(), &argv[1..], &argv[1..]).await
+                emulator_step(
+                    &steering,
+                    dir.as_deref(),
+                    cwd.as_deref().map(Path::new),
+                    &argv[1..],
+                    &argv[1..],
+                )
+                .await
             } else if argv.first().is_some_and(|word| word == "ssh") {
                 let answer = answer_ssh_command(&steering, &argv[1..]).await;
                 leave_step(
@@ -2593,16 +2601,19 @@ pub(super) async fn browser_step(
 /// and every emulator step of a walk take, so each is dispatched and logged
 /// the same way (the browser door's twin). `argv`/`logged` are the words after
 /// the door (no `emulator`); `logged` is what the log keeps — a recipe's own
-/// words, so a value the walk was given never reaches the log.
+/// words, so a value the walk was given never reaches the log. `cwd` is where
+/// the shell that asked stands, when its door said so: a relative `--out`
+/// is taken from there.
 pub(super) async fn emulator_step(
     app: &AppHandle,
     dir: Option<&Path>,
+    cwd: Option<&Path>,
     argv: &[String],
     logged: &[String],
 ) -> zerocode_hookd::TeamAnswer {
     let observation = run_evidence::observation();
     let began = std::time::Instant::now();
-    let answer = answer_emulator_command(app, argv).await;
+    let answer = answer_emulator_command(app, argv, cwd).await;
     if let Some(dir) = dir {
         evidence_runtime::leave_emulator_evidence(
             dir,
@@ -3295,6 +3306,7 @@ fn refused_at_the_door(
 pub(super) async fn answer_emulator_command(
     app: &AppHandle,
     argv: &[String],
+    cwd: Option<&Path>,
 ) -> zerocode_hookd::TeamAnswer {
     use zerocode_core::computer_use::{
         EmulatorMethod, EmulatorPlatform, emulator_usage, parse_emulator_command,
@@ -3427,7 +3439,7 @@ pub(super) async fn answer_emulator_command(
         EmulatorMethod::Screenshot => {
             let device = device.expect("parser requires a device");
             let platform = platform.expect("parser requires a platform");
-            capture_emulator_screenshot(platform, device, command.out.as_deref()).await
+            capture_emulator_screenshot(platform, device, command.out.as_deref(), cwd).await
         }
     };
 
@@ -3546,10 +3558,11 @@ pub(super) async fn capture_emulator_screenshot(
     platform: zerocode_core::computer_use::EmulatorPlatform,
     device: String,
     out: Option<&str>,
+    cwd: Option<&Path>,
 ) -> Result<serde_json::Value, String> {
     let bytes = emulator_screenshot_bytes(platform, &device).await?;
     let byte_count = bytes.len();
-    let path = write_agent_screenshot("emulator", &bytes, out)?;
+    let path = write_agent_screenshot("emulator", &bytes, out, cwd)?;
     Ok(json!({
         "surface": "zerocode-built-in",
         "platform": platform.as_str(),
@@ -5684,7 +5697,7 @@ pub(super) async fn answer_browser_command(
                         bytes
                     };
                     let byte_count = bytes.len();
-                    match write_agent_screenshot("browser", &bytes, command.out.as_deref()) {
+                    match write_agent_screenshot("browser", &bytes, command.out.as_deref(), None) {
                         Ok(path) if command.json => browser_said(format!(
                             "{}\n",
                             json!({
@@ -5717,10 +5730,15 @@ pub(super) fn browser_screenshot_refused(json: bool, message: &str) -> zerocode_
 /// Persist a bounded PNG and return an absolute path. The default destination
 /// is private scratch space; an explicit destination uses normal CLI overwrite
 /// semantics but is only touched after the capture itself has succeeded.
+/// `cwd` is where the shell that asked stands, when its door said so
+/// (`EMULATOR_CWD_VERBS`): a relative `requested` is taken from there, as a
+/// person's would be. A door that does not say leaves a relative path to this
+/// process's own folder, as it always did.
 pub(super) fn write_agent_screenshot(
     surface: &str,
     bytes: &[u8],
     requested: Option<&str>,
+    cwd: Option<&Path>,
 ) -> Result<String, String> {
     const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
     if !bytes.starts_with(PNG_SIGNATURE) {
@@ -5732,7 +5750,10 @@ pub(super) fn write_agent_screenshot(
         ));
     }
     let path = match requested {
-        Some(path) if !path.is_empty() => PathBuf::from(path),
+        Some(path) if !path.is_empty() => match cwd {
+            Some(cwd) if Path::new(path).is_relative() => cwd.join(path),
+            _ => PathBuf::from(path),
+        },
         Some(_) => return Err("--out needs a path".to_string()),
         None => {
             let directory = std::env::temp_dir().join("zerocode-screenshots");

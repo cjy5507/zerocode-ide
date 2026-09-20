@@ -5874,21 +5874,47 @@ fn agent_screenshots_are_bounded_png_files_not_terminal_bytes() {
     let directory = tempfile::tempdir().expect("scratch");
     let destination = directory.path().join("browser.png");
     let png = b"\x89PNG\r\n\x1a\nsmall-test-frame";
-    let written =
-        write_agent_screenshot("browser", png, Some(destination.to_string_lossy().as_ref()))
-            .expect("write PNG");
+    let written = write_agent_screenshot(
+        "browser",
+        png,
+        Some(destination.to_string_lossy().as_ref()),
+        None,
+    )
+    .expect("write PNG");
     assert_eq!(std::fs::read(&written).expect("read PNG"), png);
     assert!(
-        write_agent_screenshot("browser", b"not a png", None)
+        write_agent_screenshot("browser", b"not a png", None, None)
             .expect_err("non-PNG")
             .contains("did not return a PNG")
     );
     let mut oversized = vec![0_u8; AGENT_SCREENSHOT_MAX_BYTES + 1];
     oversized[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
     assert!(
-        write_agent_screenshot("browser", &oversized, None)
+        write_agent_screenshot("browser", &oversized, None, None)
             .expect_err("oversized")
             .contains("byte limit")
+    );
+    // A relative destination is the shell's own when its door said where the
+    // shell stands (`zerocode-emulator screenshot --out frame.png`); an
+    // absolute one is itself wherever the shell stands.
+    let shell = directory.path().join("shell");
+    std::fs::create_dir_all(&shell).expect("the shell's folder");
+    let relative = write_agent_screenshot("emulator", png, Some("frame.png"), Some(&shell))
+        .expect("write under the shell's folder");
+    assert_eq!(
+        std::path::PathBuf::from(&relative),
+        shell.join("frame.png").canonicalize().expect("the file")
+    );
+    let absolute = write_agent_screenshot(
+        "emulator",
+        png,
+        Some(destination.to_string_lossy().as_ref()),
+        Some(&shell),
+    )
+    .expect("write where told");
+    assert_eq!(
+        std::path::PathBuf::from(&absolute),
+        destination.canonicalize().expect("the file")
     );
 }
 
@@ -17022,7 +17048,10 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
             "function thoughtLabel(turn) {",
             vec!["worker.thought", "worker.thoughtFor"],
         ),
-        ("function streamingTurnNode(role) {", vec!["worker.thinking"]),
+        (
+            "function streamingTurnNode(role) {",
+            vec!["worker.thinking"],
+        ),
         ("function agentVoice(id) {", vec!["worker.busy"]),
         (
             "function helperTailNode(run, turn) {",

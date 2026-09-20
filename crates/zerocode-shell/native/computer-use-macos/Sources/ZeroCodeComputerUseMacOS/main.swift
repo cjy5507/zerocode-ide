@@ -84,6 +84,16 @@ struct AppDescriptor {
     let pid: pid_t
     let app: NSRunningApplication
 
+    /// The other names it answers to — its bundle's own words and its
+    /// executable (`applicationOtherNames`) — read off the bundle only when
+    /// asked, which `matches` does after the name and the identifier miss.
+    var otherNames: [String] {
+        applicationOtherNames(
+            info: app.bundleURL.flatMap { Bundle(url: $0) }?.infoDictionary,
+            executableURL: app.executableURL
+        )
+    }
+
     var needsManualAccessibilityMode: Bool {
         // Chromium/Electron apps often need this private AX mode, but applying it
         // broadly can corrupt native Cocoa app trees into app-root-only nodes.
@@ -1559,9 +1569,14 @@ private func parsePid(_ query: String) -> pid_t? {
     return pid
 }
 
+/// The core's `identity::matches`, as the core module spells it in Swift (a
+/// source contract holds it): the localized name, the identifier, or the
+/// bundle's own names and executable. `launch --app Calculator` answered
+/// name=계산기 (2026-09-21) and `observe --app Calculator` then found nothing;
+/// every verb that names a running app — `launch`'s lookup included — asks
+/// through this one rule.
 private func matches(_ app: AppDescriptor, query: String) -> Bool {
-    app.name.caseInsensitiveCompare(query) == .orderedSame ||
-        app.bundleId?.caseInsensitiveCompare(query) == .orderedSame
+    applicationAnswers(to: query, name: app.name, bundleId: app.bundleId, otherNames: app.otherNames)
 }
 
 private func pidIsLive(_ pid: pid_t) -> Bool {
@@ -5582,7 +5597,7 @@ private enum DesktopApps {
     static let settleTimeoutSeconds: TimeInterval = 5
 
     static func resolveApplicationURL(_ query: String, running: [AppDescriptor]) throws -> URL {
-        if let live = running.first(where: { $0.name.caseInsensitiveCompare(query) == .orderedSame || $0.bundleId == query }),
+        if let live = running.first(where: { matches($0, query: query) }),
            let url = live.app.bundleURL {
             return url
         }
@@ -5617,6 +5632,9 @@ private enum DesktopApps {
         }
         return [
             "name": launched.localizedName ?? query,
+            // The bundle's own unlocalized name: the word the next verb can
+            // ask by when `name` came back in the person's language.
+            "bundleName": jsonNullable(bundleName(info: Bundle(url: url)?.infoDictionary)),
             "bundleId": jsonNullable(launched.bundleIdentifier),
             "pid": Int(pid),
             "path": url.path,

@@ -13,6 +13,127 @@ fn ios_tree() -> Value {
     serde_json::from_str(include_str!("fixtures/ios.json")).unwrap()
 }
 
+/// Captured 2026-09-21 from an iPhone simulator (iOS 26.5, 402x874 points)
+/// through the helper's own `ax` request: the home screen, and Settings right
+/// after `simctl launch com.apple.Preferences`. Times, battery and the
+/// sign-in prompt are all they carry.
+fn ios_home_tree() -> Value {
+    serde_json::from_str(include_str!("fixtures/ios-home.json")).unwrap()
+}
+
+fn ios_settings_tree() -> Value {
+    serde_json::from_str(include_str!("fixtures/ios-settings.json")).unwrap()
+}
+
+/// The same tree as the exporter gave it before it was asked about centres.
+fn without_hit_tests(mut tree: Value) -> Value {
+    fn strip(node: &mut Value) {
+        if let Some(object) = node.as_object_mut() {
+            object.remove(HIT_AT_CENTRE_KEY);
+        }
+        let children = match node {
+            Value::Array(roots) => roots.iter_mut().collect::<Vec<_>>(),
+            Value::Object(object) => object
+                .get_mut("children")
+                .and_then(Value::as_array_mut)
+                .map(|children| children.iter_mut().collect())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        for child in children {
+            strip(child);
+        }
+    }
+    strip(&mut tree);
+    tree
+}
+
+fn marked_words<'a>(plan: &MarkPlan, faces: &'a [ElementFace]) -> Vec<(&'a str, &'a str)> {
+    plan.marks
+        .iter()
+        .map(|placed| {
+            let face = faces
+                .iter()
+                .find(|face| face.index == placed.element_index)
+                .expect("a numbered face");
+            (face.role.as_str(), face.words())
+        })
+        .collect()
+}
+
+#[test]
+fn ios_settings_numbers_what_the_exporter_found_under_each_centre() {
+    // Jev opened Settings from home (mark 10) and the next `marks` answered
+    // 0 items three times over. The tree was whole — a heading, the sign-in
+    // card, 「일반」, the toolbar's search field and its dictation button —
+    // but with no z-order proof the numbering refused every centre another
+    // candidate held (the floating search field holds 「일반」's), and the
+    // sign-in card is over half the screen. The exporter now says what is on
+    // top at each centre: the field and its button answer to themselves,
+    // 「일반」 does not.
+    let snapshot = Snapshot::ios(&ios_settings_tree()).unwrap();
+    let plan = numbered(&snapshot.faces, snapshot.screen);
+    assert_eq!(
+        marked_words(&plan, &snapshot.faces),
+        [("AXTextField", "검색"), ("AXButton", "받아쓰기")]
+    );
+    let general = snapshot
+        .faces
+        .iter()
+        .find(|face| face.words() == "일반")
+        .expect("the row under the search field");
+    assert_eq!(general.seen().area(), 0.0);
+    assert!(general.local().area() > 0.0);
+    let field = snapshot
+        .faces
+        .iter()
+        .find(|face| face.role == "AXTextField")
+        .expect("the search field");
+    // Window-local, like the frame it answers for.
+    assert_eq!(field.seen(), field.local());
+    // The tree as the exporter gave it before: no answer at any centre,
+    // every claimed centre refused, and the screen unmarkable.
+    let before = Snapshot::ios(&without_hit_tests(ios_settings_tree())).unwrap();
+    assert!(before.faces.iter().all(|face| face.visible.is_none()));
+    assert!(numbered(&before.faces, before.screen).marks.is_empty());
+}
+
+#[test]
+fn ios_home_numbers_the_apps_and_leaves_the_covered_widget_faces_out() {
+    let snapshot = Snapshot::ios(&ios_home_tree()).unwrap();
+    let plan = numbered(&snapshot.faces, snapshot.screen);
+    let marked = marked_words(&plan, &snapshot.faces);
+    for app in [
+        "사진",
+        "미리 알림",
+        "News",
+        "건강",
+        "지갑",
+        "설정",
+        "Safari",
+        "메시지",
+    ] {
+        assert!(
+            marked.contains(&("AXButton", app)),
+            "{app} lost its number: {marked:?}"
+        );
+    }
+    assert!(marked.contains(&("AXSlider", "검색")), "{marked:?}");
+    // The widget stack's two faces answered to something else on top.
+    let covered: Vec<&ElementFace> = snapshot
+        .faces
+        .iter()
+        .filter(|face| face.seen().area() == 0.0)
+        .collect();
+    assert_eq!(covered.len(), 2, "{covered:?}");
+    assert!(covered.iter().all(|face| face.height > 190.0));
+    assert!(plan.marks.iter().all(|placed| {
+        covered
+            .iter()
+            .all(|face| face.index != placed.element_index)
+    }));
+}
+
 #[test]
 fn ios_ax_fields_keep_their_evidence_and_leave_unknowns_empty() {
     let faces = faces(EmulatorPlatform::Ios, &ios_tree());

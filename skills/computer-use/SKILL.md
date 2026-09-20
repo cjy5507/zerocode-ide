@@ -96,7 +96,8 @@ zerocode-emulator screenshot --platform ios|android --device <listed-id> [--out 
 
 Both screenshot commands write PNG bytes to a file and return its path; they
 never print image bytes to the terminal. Omit `--out` for a private scratch
-path, or pass a destination when the artifact belongs in the worktree.
+path, or pass a destination when the artifact belongs in the worktree; the
+emulator takes a relative `--out` from the shell's own folder.
 
 Omit `--device` on `open` to let the built-in backend choose an already-running
 device or the first installed one. After opening, use the ID returned by
