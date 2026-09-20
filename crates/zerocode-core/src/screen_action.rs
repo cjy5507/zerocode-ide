@@ -77,10 +77,10 @@ const QUESTION: &str = "action";
 /// The words of the question when a recorded walk stopped. They are ours: a
 /// page's own text reaches the model as an option's description and as state,
 /// never as an instruction.
-const CLEAR_INSTRUCTIONS: &str = "A recorded browser flow stopped at the step named in `stopped`, for the reason in `refusal`. The controls the page is showing right now are the options, each named by the number the screen drew on it. Choose the one control a person would press so that the stopped step can run again.";
+const CLEAR_INSTRUCTIONS: &str = "A recorded browser flow stopped at the step named in `stopped`, for the reason in `refusal`. The controls the page is showing right now are the options, each named by the number the screen drew on it. `shows` is the text the page displays right now that is not a control, and `pressed` is what this walk already pressed, oldest first. Choose the one control a person would press so that the stopped step can run again.";
 
 /// The words of the question when a goal was named and nothing has failed.
-const GOAL_INSTRUCTIONS: &str = "Someone wants to reach the goal in `goal` on the screen described by `where`, and they can only press things. The controls that screen is showing right now are the options, each named by the number the screen drew on it. Choose the one control a person would press next to get closer to that goal.";
+const GOAL_INSTRUCTIONS: &str = "Someone wants to reach the goal in `goal` on the screen described by `where`, and they can only press things. The controls that screen is showing right now are the options, each named by the number the screen drew on it. `shows` is the text the screen displays right now that is not a control — a value, a heading, a message — and `pressed` is what this walk already pressed, oldest first. Read the two together to tell how far along the goal already is, and choose the one control a person would press NEXT to get closer to it: never a press whose effect `shows` already carries, and never the same control again unless the goal itself repeats it.";
 
 /// What choosing [`GIVE_UP`] means. Written as a situation rather than as a
 /// degree, because each option is judged on its own words.
@@ -100,7 +100,17 @@ const DONE_MEANS: &str = "The goal has already been reached on this screen; noth
 const CLEAR_STATE_KEYS: [&str; 3] = ["stopped", "step", "refusal"];
 
 /// The state's keys both errands fill.
-const STATE_KEYS: [&str; 3] = ["goal", "where", "alreadyTried"];
+const STATE_KEYS: [&str; 5] = ["goal", "where", "alreadyTried", "pressed", "shows"];
+
+/// How much of the screen's own text a question carries: the newest-first
+/// cut is the top of the screen, because that is where a display value, a
+/// title or a banner stands. Forty lines is more than a calculator's one and
+/// a settings pane's dozen; 1,500 characters is about what the legend of
+/// [`MAX_ACTION_CANDIDATES`] controls already costs, so a screen's words never
+/// more than double the request the door redacts and the deadline bounds.
+/// A screen that shows more is cut, and the row's `showsLines` says so.
+pub const SHOWS_LINE_CAP: usize = 40;
+pub const SHOWS_CHAR_CAP: usize = 1_500;
 
 /// The key the numbered controls sit under.
 const CANDIDATES_KEY: &str = "candidates";
@@ -115,7 +125,7 @@ const CANDIDATES_KEY: &str = "candidates";
 /// ([`Errand::key`]), so evidence is read per errand; what a single version
 /// buys is that neither errand's words can change while the other's evidence
 /// silently keeps its number.
-pub const SCREEN_ACTION_RUBRIC_VERSION: u32 = 3;
+pub const SCREEN_ACTION_RUBRIC_VERSION: u32 = 4;
 
 /// What a walk is asking the screen about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,6 +226,36 @@ pub struct ActionLook<'a> {
     pub tried: &'a [usize],
     /// The marks answer's items, in the order the look numbered them.
     pub items: &'a [Value],
+    /// What this walk already pressed, oldest first — each the legend line of
+    /// the control as it was numbered when pressed. Unlike `tried`, it is not
+    /// forgotten when the screen moves: a display that changed because of
+    /// the last press is exactly what the next question needs to know.
+    pub pressed: &'a [String],
+    /// The text the screen shows right now that is not a control — a display
+    /// value, a heading, a message — as the surface read it, top to bottom.
+    /// Empty when the surface reads no text; cut to [`SHOWS_LINE_CAP`] and
+    /// [`SHOWS_CHAR_CAP`] here, so every surface is cut the same way.
+    pub shows: &'a [String],
+}
+
+/// The screen's text as the question carries it: whole lines from the top,
+/// until either cap is reached.
+#[must_use]
+pub fn shows_cut(shows: &[String]) -> Vec<&str> {
+    let mut kept = Vec::new();
+    let mut chars = 0usize;
+    for line in shows
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+    {
+        if kept.len() == SHOWS_LINE_CAP || chars + line.chars().count() > SHOWS_CHAR_CAP {
+            break;
+        }
+        chars += line.chars().count();
+        kept.push(line);
+    }
+    kept
 }
 
 /// One question, ready for the wire, holding the closed set it offered.
@@ -367,6 +407,8 @@ pub fn ask(look: &ActionLook<'_>) -> Option<ActionAsk> {
     }
     state.insert(STATE_KEYS[1].to_string(), look.at.said());
     state.insert(STATE_KEYS[2].to_string(), json!(look.tried));
+    state.insert(STATE_KEYS[3].to_string(), json!(look.pressed));
+    state.insert(STATE_KEYS[4].to_string(), json!(shows_cut(look.shows)));
     state.insert(CANDIDATES_KEY.to_string(), Value::Array(candidates));
     let questions = choice::asked(QUESTION, look.errand.instructions(), criteria);
     Some(ActionAsk {

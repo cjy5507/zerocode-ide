@@ -89,6 +89,8 @@ struct Waiting {
     /// The cause the answer named, so its label can say whether what
     /// followed was what that cause leads to (`agreed`).
     cause: stall_cause::Cause,
+    /// How sure the answer was, as the notice to the coordinator says it.
+    confidence: f64,
 }
 
 /// What this window remembers about the silences it asked about.
@@ -101,7 +103,7 @@ pub(super) struct StallBook {
     /// The cause the seat named for an attempt still quiet, by dispatch —
     /// what the sweep acts on when the seat acts ([`acting_cause`]). Kept
     /// exactly as long as `seen` keeps the silence.
-    answered: HashMap<String, stall_cause::Cause>,
+    answered: HashMap<String, (stall_cause::Cause, f64)>,
     /// The ledger the rows go to, and the answered rows without a label yet.
     /// `None` until a beat has read that ledger's tail, so the rows a window
     /// restart left unlabeled are labeled too.
@@ -173,8 +175,10 @@ pub(super) fn ask_about(
             // there; one that has takes it here, once.
             if let Some(waiting) = waiting {
                 let mut held = book.lock().unwrap_or_else(|held| held.into_inner());
-                held.answered
-                    .insert(waiting.dispatch.clone(), waiting.cause);
+                held.answered.insert(
+                    waiting.dispatch.clone(),
+                    (waiting.cause, waiting.confidence),
+                );
                 if let Some((_, rows)) = &mut held.waiting
                     && !rows.iter().any(|row| row.key == waiting.key)
                 {
@@ -250,6 +254,7 @@ fn settle(wire: &Wire, question: Question) -> (Value, Option<Waiting>) {
                 dispatch: silence.dispatch,
                 asked_ms,
                 cause: choice.cause,
+                confidence: choice.confidence,
             };
             (row, Some(waiting))
         }
@@ -274,7 +279,40 @@ pub(super) fn acting_cause(
         return None;
     }
     let held = book.lock().unwrap_or_else(|held| held.into_inner());
-    held.answered.get(dispatch).copied()
+    held.answered.get(dispatch).map(|(cause, _)| *cause)
+}
+
+/// What the seat read off the panes still quiet this beat, for the
+/// coordinator — when the seat ACTS, and for every cause the sweep does not
+/// act on itself (a transient error is typed a continuation instead). One
+/// reading per silence: the ledger keeps the notice keyed by the silence's
+/// start, so the same answer on the next beat is the same fact.
+pub(super) fn acting_judgments(
+    host: &dyn Host,
+    book: &Arc<Mutex<StallBook>>,
+    quiet: impl Iterator<Item = (String, String, i64)>,
+) -> Vec<zerocode_core::orchestration::StallJudged> {
+    let Some(wire) = host.jev_wire() else {
+        return Vec::new();
+    };
+    if !crate::systemone::applies(&wire, &STALL) {
+        return Vec::new();
+    }
+    let held = book.lock().unwrap_or_else(|held| held.into_inner());
+    quiet
+        .filter_map(|(worker, dispatch, since_ms)| {
+            let (cause, confidence) = held.answered.get(&dispatch)?;
+            if *cause == stall_cause::Cause::TransientApiError {
+                return None;
+            }
+            Some(zerocode_core::orchestration::StallJudged {
+                worker,
+                stalled_since_ms: since_ms,
+                cause: cause.word().to_string(),
+                confidence: *confidence,
+            })
+        })
+        .collect()
 }
 
 /// The answered rows in the tail of `ledger` that no label row names yet.
@@ -309,6 +347,7 @@ fn unlabeled_in(ledger: &Path) -> Vec<Waiting> {
                     .as_str()
                     .and_then(stall_cause::Cause::from_word)
                     .unwrap_or(stall_cause::Cause::Unknown),
+                confidence: row["confidence"].as_f64().unwrap_or_default(),
             })
         })
         .collect()

@@ -254,6 +254,8 @@ fn a_stopped_walks_question_leaves_no_credential_from_any_field_the_row_names() 
         },
         tried: &[],
         items: &items,
+        pressed: &[],
+        shows: &[],
     })
     .expect("a screen with controls asks");
     let mut body =

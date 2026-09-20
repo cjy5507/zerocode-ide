@@ -85,8 +85,12 @@ impl LiveJudge {
     /// for the walk's `workspace`, and `seat` is the surface's own row.
     #[must_use]
     pub fn new(keys: &dyn RouterKeys, workspace: Option<&Path>, seat: &'static JevUse) -> Self {
+        let wire = Wire::new(keys);
+        // The walk's first look is longer than a handshake: connect now,
+        // so the first question pays for its answer alone.
+        wire.warm();
         Self {
-            wire: Wire::new(keys),
+            wire,
             workspace: workspace.map(Path::to_path_buf),
             seat,
             spent: None,

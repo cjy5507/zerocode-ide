@@ -26,6 +26,7 @@
 //! the day's count.
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -59,6 +60,11 @@ pub const SCHEMA: &str = "schema";
 
 /// The contract's "overloaded" status; it is not in the HTTP registry.
 const OVERLOADED_STATUS: u16 = 529;
+
+/// How long a warm-up connect may take before it is abandoned — the cold
+/// first ask the bench timed, rounded up; a warm-up that outlives a walk's
+/// first question was no help and is not worth a socket.
+const ACTION_WARM_TIMEOUT: Duration = Duration::from_millis(2_000);
 
 /// The word a status is refused with. Unlike zo's client this wire does not
 /// retry: a browser recovery is already inside a stopped walk's budget, and a
@@ -347,6 +353,28 @@ impl Wire {
         )
     }
 
+    /// Open the endpoint's connection ahead of the first question, off the
+    /// caller's thread: a walk's first look takes longer than a handshake,
+    /// and a first ask that pays DNS, TCP and TLS on top of the answer ran
+    /// past its 1,500 ms deadline on the bench (round 1: 1,504 ms refused,
+    /// rounds 2–10: p50 280 ms — 2026-09-21, §2 of
+    /// docs/design/jev-seats-accuracy-wave-20260921.md). No key is sent: the
+    /// request is a bare GET of the base, whose answer is thrown away; what
+    /// it leaves behind is a pooled socket the POST reuses. Without a key
+    /// nothing is sent, as nothing would be asked.
+    pub fn warm(&self) {
+        if self.key().is_none() {
+            return;
+        }
+        let Some(client) = client() else {
+            return;
+        };
+        let base = self.base.trim_end_matches('/').to_string();
+        tauri::async_runtime::spawn(async move {
+            let _ = client.get(&base).timeout(ACTION_WARM_TIMEOUT).send().await;
+        });
+    }
+
     /// One question of `row`'s about words from `workspace`, whole: the door,
     /// then one POST of the door's bytes bounded by `deadline`. Blocks — a
     /// caller that must not wait asks from a thread of its own.
@@ -402,9 +430,7 @@ impl Wire {
         if Instant::now() >= deadline {
             return Err(TIMEOUT.to_string());
         }
-        let client = reqwest::Client::builder()
-            .build()
-            .map_err(|_| TRANSPORT.to_string())?;
+        let client = client().ok_or_else(|| TRANSPORT.to_string())?;
         let url = format!("{}{SYSTEMONE_PATH}", self.base.trim_end_matches('/'));
         // Key/consent checks, runtime startup and client construction spend
         // this call's budget too; the socket never starts a fresh deadline.
@@ -427,6 +453,20 @@ impl Wire {
         // The body is read inside the same deadline the request was given.
         answer.text().await.map_err(|err| failure(&err))
     }
+}
+
+/// The one HTTP client every question the window asks goes through: its
+/// connection pool keeps the endpoint's TLS session alive between asks, so
+/// a walk's second question rides the first's socket instead of opening its
+/// own. A client per ask was a handshake per ask — see §2 of
+/// docs/design/jev-seats-accuracy-wave-20260921.md for the bench that timed
+/// both on the same look. `None` only when the client cannot be built at
+/// all, which the ask refuses as `transport`.
+fn client() -> Option<&'static reqwest::Client> {
+    static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| reqwest::Client::builder().build().ok())
+        .as_ref()
 }
 
 /// The word a request that never answered is refused with.

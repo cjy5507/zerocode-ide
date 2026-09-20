@@ -377,6 +377,13 @@ pub enum RuntimeRequest {
         walled: Vec<zerocode_core::orchestration::QuotaWallWitness>,
         now_ms: i64,
     },
+    /// What the stall seat read off quiet panes this beat, when the seat
+    /// acts. The ledger revalidates lifecycle and writes one notice per
+    /// silence.
+    StallCauses {
+        judged: Vec<zerocode_core::orchestration::StallJudged>,
+        now_ms: i64,
+    },
     /// The beat reserves one handover before it walks it (§2.3): the
     /// receipt row exists from the first step, so a window that dies
     /// mid-walk leaves a row saying how far it got.
@@ -662,6 +669,11 @@ impl std::fmt::Debug for RuntimeRequest {
             Self::QuotaWalls { walled, now_ms } => formatter
                 .debug_struct("RuntimeRequest::QuotaWalls")
                 .field("workers", &walled.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::StallCauses { judged, now_ms } => formatter
+                .debug_struct("RuntimeRequest::StallCauses")
+                .field("workers", &judged.len())
                 .field("now_ms", now_ms)
                 .finish(),
             // Ids only: the plan carries a task's spec.
@@ -1632,6 +1644,20 @@ impl RuntimeActor {
         now_ms: i64,
     ) -> Result<(bool, u64), RuntimeError> {
         match self.request(RuntimeRequest::QuietSweep { stalled, now_ms })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// The beat's stall-seat readings. Answers whether a notice was written,
+    /// and the revision that answer speaks for; the same reading of the same
+    /// silence on the next beat moves nothing.
+    pub fn stall_causes(
+        &self,
+        judged: Vec<zerocode_core::orchestration::StallJudged>,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::StallCauses { judged, now_ms })? {
             RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
             _ => Err(RuntimeError::AuthorityRejected),
         }
@@ -2721,6 +2747,9 @@ impl RuntimeState {
             } => self.turn_ended(term, turn_started_ms, interrupted, now_ms),
             RuntimeRequest::QuietSweep { stalled, now_ms } => self.quiet_swept(&stalled, now_ms),
             RuntimeRequest::QuotaWalls { walled, now_ms } => self.quota_walled(&walled, now_ms),
+            RuntimeRequest::StallCauses { judged, now_ms } => {
+                self.stall_causes_judged(&judged, now_ms)
+            }
             RuntimeRequest::HandoverBegin { plan, now_ms } => self.handover_begun(&plan, now_ms),
             RuntimeRequest::HandoverStep {
                 run,
@@ -3687,6 +3716,41 @@ impl RuntimeState {
             return Err(RuntimeError::RecoveryRequired);
         }
         let told = self.ledger.workers_quota_walled(walled, now_ms);
+        if told == 0 {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn stall_causes_judged(
+        &mut self,
+        judged: &[zerocode_core::orchestration::StallJudged],
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || judged.len() > MAX_LIST
+            || judged.iter().any(|one| {
+                one.worker.is_empty()
+                    || one.worker.len() > MAX_NAME
+                    || one.cause.is_empty()
+                    || one.cause.len() > MAX_NAME
+                    || one.stalled_since_ms < 0
+                    || !one.confidence.is_finite()
+            })
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let told = self.ledger.stall_causes_judged(judged, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
                 moved: false,

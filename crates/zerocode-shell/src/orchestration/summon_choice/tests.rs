@@ -32,11 +32,15 @@ fn shadow() -> SummonShadow {
                 id: "claude".to_string(),
                 spent_percent: Some(61),
                 window: Some("weekly"),
+                launched: 0,
+                recent_brief: None,
             },
             Summonable {
                 id: "kimi".to_string(),
                 spent_percent: None,
                 window: None,
+                launched: 0,
+                recent_brief: None,
             },
         ],
     }
@@ -171,7 +175,7 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
     assert_eq!(row["dispatch"], json!("dp-4712"));
     assert_eq!(row["task"], json!("t-4711"));
     assert_eq!(row["mode"], json!("shadow"));
-    assert_eq!(row["rubricVersion"], json!(1));
+    assert_eq!(row["rubricVersion"], json!(2));
     assert!(row["elapsedMs"].is_u64() && row["requestBytes"].as_u64() > Some(0));
 
     // The same question answered the coordinator's own way is the row that

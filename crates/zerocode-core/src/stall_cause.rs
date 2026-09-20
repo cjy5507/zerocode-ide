@@ -8,9 +8,10 @@
 //! wall and a transient API error. Every other silence is `went_quiet` news,
 //! and a coordinator reads the pane to learn why. This module puts that same
 //! reading to Jev as a closed choice — the two measured causes (in words the
-//! table has not measured), four more ways a worker's silence reads on this
-//! machine, and `unknown` — and says what came of the silence afterwards. It
-//! decides nothing: the use offers no mode that acts (`crate::jev::STALL`).
+//! table has not measured), five more ways a worker's silence reads on this
+//! machine, and `unknown` — and says what came of the silence afterwards.
+//! Under `on`, or an `auto` its own evidence raised, the seat acts on the
+//! answer (`crate::jev::STALL`, docs/design/jev-every-seat-acts-20260920.md).
 //!
 //! Every example phrase in the criteria below was read off this machine's own
 //! records on 2026-09-17, never written from memory of what a CLI prints: the
@@ -42,7 +43,7 @@ const STATE_KEYS: [&str; 4] = ["agent", "quietSeconds", "screen", "transcript"];
 /// The version of the words in this module. Bump it when any of them changes:
 /// a judgment read under one wording is not evidence about another. The test
 /// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`].
-pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 1;
+pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 2;
 
 /// How long after a silence was asked about its label waits for what
 /// followed ([`followed`]).
@@ -61,6 +62,7 @@ pub const STALL_LABEL_WINDOW_MS: i64 = 2 * 60 * 60 * 1_000;
 pub enum Cause {
     TransientApiError,
     QuotaWall,
+    AuthFailure,
     WaitingOnOwnCliQuestion,
     FinishedWithoutReport,
     LongRunningTool,
@@ -70,9 +72,10 @@ pub enum Cause {
 
 impl Cause {
     /// Every cause, in the order the question offers them.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::TransientApiError,
         Self::QuotaWall,
+        Self::AuthFailure,
         Self::WaitingOnOwnCliQuestion,
         Self::FinishedWithoutReport,
         Self::LongRunningTool,
@@ -86,6 +89,7 @@ impl Cause {
         match self {
             Self::TransientApiError => "transient_api_error",
             Self::QuotaWall => "quota_wall",
+            Self::AuthFailure => "auth_failure",
             Self::WaitingOnOwnCliQuestion => "waiting_on_own_cli_question",
             Self::FinishedWithoutReport => "finished_without_report",
             Self::LongRunningTool => "long_running_tool",
@@ -102,6 +106,10 @@ impl Cause {
     ///   (`server_overloaded`, and `other` opening with the stream sentence).
     /// - wall: two released Claude screens — the second is a limit the marker
     ///   table has no row for — and Codex's own sentence.
+    /// - login: an opencode worker's pane (`Token refresh failed: 401`,
+    ///   w-5479, 2026-09-20, t-5498) and a Claude turn's error in the same
+    ///   verification (`Refresh token not found or invalid`, t-5499) — the
+    ///   silence the first rubric read as `unknown` with 0.95.
     /// - question: a Claude question box as a coordinator read it off a pane
     ///   (transcript `e4d2cde0-…`), and `AskUserQuestion` calls in 31 Claude
     ///   transcripts.
@@ -118,6 +126,9 @@ impl Cause {
             }
             Self::QuotaWall => {
                 "The provider refuses more work until a limit resets or is raised, in words like `You've hit your session limit · resets 2:10am (Asia/Seoul)`, `You've hit your monthly spend limit. Run /usage-credits to manage your limit` or `You've hit your usage limit.`"
+            }
+            Self::AuthFailure => {
+                "The agent's login to its provider no longer works, so every request is refused until somebody signs it in again, in words like `Token refresh failed: 401`, `Refresh token not found or invalid`, `401 Unauthorized`, `authentication_error`, `Not logged in`, or a prompt to run its own login command. Waiting, retrying and typing a continuation do not help: another agent, or a person, has to take the work."
             }
             Self::WaitingOnOwnCliQuestion => {
                 "The agent's own program has a question or a confirmation on the screen and waits for a key: a box like `Do you want to continue?` over `1. Yes` and `2. No` with `Enter to select · ↑/↓ to navigate · Esc to cancel`, or an `AskUserQuestion` call as the conversation's last record with no answer after it."
@@ -302,6 +313,9 @@ fn newest_within<S: AsRef<str>>(lines: &[S], cap: usize) -> String {
 pub const fn expected_followed(cause: Cause) -> Option<Followed> {
     match cause {
         Cause::TransientApiError | Cause::QuotaWall => Some(Followed::Resumed),
+        // A dead login is not waited out: the attempt is stopped or abandoned
+        // and the work summoned again on an agent that can sign in.
+        Cause::AuthFailure => Some(Followed::WorkerStop),
         Cause::WaitingOnOwnCliQuestion => Some(Followed::Mail),
         Cause::FinishedWithoutReport => Some(Followed::WorkerDone),
         Cause::LongRunningTool | Cause::HumanTookOver => Some(Followed::Nothing),

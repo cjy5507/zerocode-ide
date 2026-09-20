@@ -87,6 +87,9 @@ fn pane_answer() -> String {
 fn a_desktop_walk_looks_presses_and_checks_through_the_apps_own_door() {
     let road = Road::new(|verb| match verb {
         "observe" => ok(&desktop_answer()),
+        // The window's own text beside its controls (t-5497): what the
+        // question reads as `shows`, blank lines and all.
+        "read" => ok(r#"{"source":"accessibility","text":"채팅\n\n홍길동\n"}"#),
         "click" | "wait-for" => ok("{}"),
         _ => refused(),
     });
@@ -111,6 +114,11 @@ fn a_desktop_walk_looks_presses_and_checks_through_the_apps_own_door() {
         }
     );
     assert_eq!(screen.items.len(), 1);
+    assert_eq!(
+        screen.shows,
+        ["채팅", "홍길동"],
+        "a desktop look reads the window's text beside its controls"
+    );
     assert!(world.press(1));
     assert_eq!(world.reached(), Some(true));
 
@@ -126,15 +134,17 @@ fn a_desktop_walk_looks_presses_and_checks_through_the_apps_own_door() {
             "--json"
         ]
     );
+    // The look's second call: the window's text, by the same app name.
+    assert_eq!(road.argv(1), ["read", "--app", "카카오톡", "--json"]);
     // By number, never by point: the pin re-measures what it was handed.
     assert_eq!(
-        road.argv(1),
+        road.argv(2),
         ["click", "--mark", "1", "--look", "77249.1"],
         "a number is read against the look that drew it, and names no app of its own"
     );
     // The caller's own words, at no wait — the guarded path's own witness.
     assert_eq!(
-        road.argv(2),
+        road.argv(3),
         [
             "wait-for",
             "--app",
@@ -303,8 +313,8 @@ fn a_press_cannot_outlive_the_goal_budget_after_its_look() {
     assert!(!world.press(1));
     assert_eq!(
         road.said.borrow().len(),
-        1,
-        "an expired goal sends no input"
+        2,
+        "an expired goal sends no input — the look's two reads and nothing after"
     );
 }
 

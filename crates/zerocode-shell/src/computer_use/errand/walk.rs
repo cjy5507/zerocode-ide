@@ -103,6 +103,7 @@ where
                 path: self.path.clone(),
             },
             items,
+            shows: Vec::new(),
         })
     }
 

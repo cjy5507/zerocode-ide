@@ -46,6 +46,8 @@ fn asked_about(goal: &str, label: &str) -> ActionAsk {
         },
         tried: &[],
         items: &items,
+        pressed: &[],
+        shows: &[],
     })
     .expect("a screen with controls asks")
 }
@@ -426,6 +428,8 @@ fn what_one_screen_question_costs_against_the_real_endpoint() {
         },
         tried: &[],
         items: &items,
+        pressed: &[],
+        shows: &[],
     })
     .expect("a screen with controls asks");
     println!(

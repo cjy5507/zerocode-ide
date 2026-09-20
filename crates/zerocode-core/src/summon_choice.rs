@@ -63,6 +63,18 @@ const ROOM_READ: &str = "{agent}. {spent}% of its {window} quota is already spen
 const ROOM_UNREAD: &str =
     "{agent}. This machine has read no quota gauge for it, so how much room it has is unknown.";
 
+/// What an option adds about the summonses this ledger has carried for the
+/// agent — hindsight the window has for free: which agent its coordinators
+/// actually chose, and for what. The count is the ledger's, bounded by
+/// retention; the words are the newest task's title.
+const HISTORY_SOME: &str = " This window has summoned it {launched} times before; its newest summons here was for: {brief}";
+
+/// What an option adds about an agent this ledger has never summoned.
+const HISTORY_NONE: &str = " This window has never summoned it.";
+
+/// How much of the newest task's title an option carries.
+pub const SUMMON_RECENT_BRIEF_CHAR_CAP: usize = 160;
+
 /// The state's keys, in the order the fingerprint reads them.
 const STATE_KEYS: [&str; 5] = ["brief", "briefChars", "worktree", "replaces", "task"];
 
@@ -71,7 +83,7 @@ const STATE_KEYS: [&str; 5] = ["brief", "briefChars", "worktree", "replaces", "t
 /// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`],
 /// so changing a word without bumping the version is a red test rather than a
 /// quiet drift.
-pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 1;
+pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 2;
 
 /// The fewest options that make a choice. One agent is not a question, and a
 /// question asked where there was nothing to decide is a row that says the
@@ -95,18 +107,39 @@ pub struct Summonable {
     /// Which window that number describes (`session`, `weekly`, `monthly`),
     /// as the quota table spells it.
     pub window: Option<&'static str>,
+    /// How many summonses this ledger has carried for it — every run it still
+    /// holds, so the number is bounded by retention and says only "accepted
+    /// here that many times", never "good at".
+    pub launched: usize,
+    /// The title of the task its newest summons here carried, when it
+    /// carried one: what this window last found it fit for, in the
+    /// coordinator's own words. Cut to [`SUMMON_RECENT_BRIEF_CHAR_CAP`].
+    pub recent_brief: Option<String>,
 }
 
 impl Summonable {
     /// What this option says about itself.
     fn means(&self) -> String {
-        match (self.spent_percent, self.window) {
+        let room = match (self.spent_percent, self.window) {
             (Some(spent), Some(window)) => ROOM_READ
                 .replace("{agent}", &self.id)
                 .replace("{spent}", &spent.to_string())
                 .replace("{window}", window),
             _ => ROOM_UNREAD.replace("{agent}", &self.id),
-        }
+        };
+        let history = match (self.launched, self.recent_brief.as_deref()) {
+            (0, _) => HISTORY_NONE.to_string(),
+            (launched, brief) => HISTORY_SOME
+                .replace("{launched}", &launched.to_string())
+                .replace(
+                    "{brief}",
+                    &crate::jev::door::cut(
+                        brief.unwrap_or("a pane summoned with no task"),
+                        Cap::Chars(SUMMON_RECENT_BRIEF_CHAR_CAP),
+                    ),
+                ),
+        };
+        room + &history
     }
 }
 
@@ -157,7 +190,15 @@ pub struct SummonPick {
 /// that happened to be asked about.
 #[must_use]
 pub fn rubric_words() -> String {
-    [INSTRUCTIONS, ROOM_READ, ROOM_UNREAD, &STATE_KEYS.join(",")].join("\n")
+    [
+        INSTRUCTIONS,
+        ROOM_READ,
+        ROOM_UNREAD,
+        HISTORY_SOME,
+        HISTORY_NONE,
+        &STATE_KEYS.join(","),
+    ]
+    .join("\n")
 }
 
 /// This summons' brief, shaped to the use's own cap

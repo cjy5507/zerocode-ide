@@ -9,6 +9,8 @@ fn room(id: &str, spent: Option<u8>) -> Summonable {
         id: id.to_string(),
         spent_percent: spent,
         window: spent.map(|_| "weekly"),
+        launched: 0,
+        recent_brief: None,
     }
 }
 
@@ -26,10 +28,10 @@ fn look() -> SummonLook<'static> {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(SUMMON_CHOICE_RUBRIC_VERSION, 1);
+    assert_eq!(SUMMON_CHOICE_RUBRIC_VERSION, 2);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "b234b271756b5778"
+        "76838fcf6cc3d441"
     );
 }
 
@@ -55,13 +57,16 @@ fn an_option_says_the_room_this_window_has_actually_read() {
     let criteria = &asked.questions["summon"]["criteria"];
     assert_eq!(
         criteria["claude"],
-        json!("claude. 61% of its weekly quota is already spent on this machine.")
+        json!(
+            "claude. 61% of its weekly quota is already spent on this machine. This window \
+             has never summoned it."
+        )
     );
     assert_eq!(
         criteria["cursor"],
         json!(
             "cursor. This machine has read no quota gauge for it, so how much room it has is \
-             unknown."
+             unknown. This window has never summoned it."
         )
     );
 }
@@ -168,4 +173,27 @@ fn an_answer_is_judged_against_the_set_that_was_asked() {
     assert_eq!(read.chosen, "kimi");
     assert!((read.confidence - 0.62).abs() < 1e-9);
     assert_eq!(read.probabilities.len(), 2);
+}
+
+/// An option says what this ledger has summoned the agent for — the free
+/// hindsight a coordinator's own choices leave behind — and says plainly
+/// when it never has, instead of implying a history nobody wrote.
+#[test]
+fn an_option_carries_the_ledgers_own_summons_history() {
+    let seasoned = Summonable {
+        launched: 12,
+        recent_brief: Some("measure the seat's latency on the installed build".to_string()),
+        ..room("claude", Some(61))
+    };
+    let said = seasoned.means();
+    assert!(said.contains("summoned it 12 times"), "{said}");
+    assert!(said.contains("measure the seat's latency"), "{said}");
+    let fresh = room("kimi", None).means();
+    assert!(fresh.contains("never summoned it"), "{fresh}");
+    let bare = Summonable {
+        launched: 1,
+        recent_brief: None,
+        ..room("codex", None)
+    };
+    assert!(bare.means().contains("no task"), "{}", bare.means());
 }

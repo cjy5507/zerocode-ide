@@ -80,6 +80,7 @@ impl FakeWorld {
     pub(super) fn showing(marks: &[usize]) -> Self {
         Self {
             screen: Some(Screen {
+                shows: Vec::new(),
                 at: Seen::Page {
                     host: "app.local".into(),
                     path: "/settings".into(),
@@ -875,6 +876,7 @@ fn two_looks_are_the_same_screen_when_the_question_would_read_the_same_words() {
             path: "/x".into(),
         },
         items: vec![control(1, label)],
+        shows: Vec::new(),
     };
     assert!(page("a.local", "저장").same_as(&page("a.local", "저장")));
     assert!(!page("a.local", "저장").same_as(&page("a.local", "삭제")));
@@ -898,6 +900,7 @@ fn two_looks_are_the_same_screen_when_the_question_would_read_the_same_words() {
             window: "채팅".into(),
         },
         items: vec![control(1, "보내기")],
+        shows: Vec::new(),
     };
     assert!(desk("카카오톡").same_as(&desk("카카오톡")));
     assert!(!desk("카카오톡").same_as(&desk("Finder")));

@@ -8763,6 +8763,77 @@ impl Ledger {
     /// unanswered questions — then reconstructs cadence from the same
     /// `went_quiet` rows that hold turn facts. No parallel reminder counter can
     /// drift from the durable episode.
+    /// Tell each run's coordinator what the stall seat read off a quiet
+    /// pane, once per silence — the seat's exit for every cause that is not
+    /// typed a continuation (`transient_api_error` is; `auth_failure`,
+    /// `quota_wall` the gauge did not witness, a question box, a finished
+    /// turn, a long tool, a person's hand are not). The window sends these
+    /// only when the seat ACTS (a person's `on`, or `auto` its own ledger
+    /// raised); a recording seat's answer stays a row. Same lookups and the
+    /// same inbox road as [`Self::workers_stalled`], so the coordinator reads
+    /// the cause where it read the silence.
+    pub fn stall_causes_judged(&mut self, judged: &[StallJudged], now_ms: i64) -> usize {
+        if now_ms < 0 {
+            return 0;
+        }
+        let mut told = 0;
+        for one in judged {
+            if one.stalled_since_ms < 0 || one.cause.is_empty() {
+                continue;
+            }
+            let Some((run_id, body, task, dispatch)) = self.runs.iter().find_map(|run| {
+                let worker = run.worker(&one.worker)?;
+                if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
+                    return None;
+                }
+                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+                if !dispatch.is_open() {
+                    return None;
+                }
+                let already = run.messages.iter().any(|held| {
+                    held.kind == MessageKind::WentQuiet
+                        && held.dispatch.as_deref() == Some(dispatch.id.as_str())
+                        && serde_json::from_str::<serde_json::Value>(held.body.as_str()).is_ok_and(
+                            |body| {
+                                body["reason"] == STALL_JUDGED_REASON
+                                    && body["stalledSinceMs"] == one.stalled_since_ms
+                            },
+                        )
+                });
+                if already {
+                    return None;
+                }
+                Some((
+                    run.id.clone(),
+                    serde_json::json!({
+                        "workerId": worker.id,
+                        "agent": worker.agent,
+                        "pane": worker.pane,
+                        "taskId": dispatch.task,
+                        "dispatchId": dispatch.id,
+                        "reason": STALL_JUDGED_REASON,
+                        "stalledSinceMs": one.stalled_since_ms,
+                        "observedAtMs": now_ms,
+                        "cause": one.cause,
+                        "confidence": one.confidence,
+                        "notification": true,
+                    }),
+                    dispatch.task.clone(),
+                    dispatch.id.clone(),
+                ))
+            }) else {
+                continue;
+            };
+            if self
+                .record_quiet_observation(&run_id, body, task, dispatch, now_ms, true)
+                .is_some()
+            {
+                told += 1;
+            }
+        }
+        told
+    }
+
     pub fn workers_stalled(&mut self, stalled: &[(String, i64)], now_ms: i64) -> usize {
         if now_ms < 0 {
             return 0;
@@ -11376,6 +11447,24 @@ pub struct QuotaWallMarker {
     pub line: Text,
 }
 
+/// The `reason` a quiet notice carries when it is the stall seat's reading
+/// of the silence rather than the silence itself.
+pub const STALL_JUDGED_REASON: &str = "judged";
+
+/// The stall seat's reading of one silence, as the window hands it to the
+/// ledger when the seat acts: the worker, the silence it was asked about
+/// (its start, which keys the notice), the cause word the rubric chose and
+/// how sure the judgment was. Built only by the window's stall sweep
+/// (`crates/zerocode-shell/src/orchestration/stall_cause.rs`), read only by
+/// [`Ledger::stall_causes_judged`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct StallJudged {
+    pub worker: String,
+    pub stalled_since_ms: i64,
+    pub cause: String,
+    pub confidence: f64,
+}
+
 /// Both witnesses to one worker's quota wall, and the worker they are about.
 ///
 /// Only [`quota_wall_witness`] builds one — a witness with one half missing
@@ -12102,16 +12191,59 @@ fn installed_rooms(launcher: &dyn Launcher, now_ms: i64) -> Option<Vec<AgentRoom
 /// the quota gate itself lets such a summons through. Its option says so in
 /// its own words rather than borrowing a number nobody measured.
 #[must_use]
-pub fn summonable(launcher: &dyn Launcher, now_ms: i64) -> Vec<crate::summon_choice::Summonable> {
+pub fn summonable(
+    launcher: &dyn Launcher,
+    ledger: &Ledger,
+    now_ms: i64,
+) -> Vec<crate::summon_choice::Summonable> {
+    let history = summons_history(ledger);
     installed_rooms(launcher, now_ms)
         .unwrap_or_default()
         .into_iter()
         .filter(|room| !room.at_wall)
-        .map(|room| crate::summon_choice::Summonable {
-            id: room.id,
-            spent_percent: room.gauge.as_ref().map(|held| held.used_percent),
-            window: room.gauge.as_ref().map(|held| held.window.as_str()),
+        .map(|room| {
+            let (launched, recent_brief) =
+                history.get(room.id.as_str()).cloned().unwrap_or((0, None));
+            crate::summon_choice::Summonable {
+                id: room.id,
+                spent_percent: room.gauge.as_ref().map(|held| held.used_percent),
+                window: room.gauge.as_ref().map(|held| held.window.as_str()),
+                launched,
+                recent_brief,
+            }
         })
+        .collect()
+}
+
+/// What this ledger has summoned each agent for: how many times, and the
+/// title of the task its newest summons carried. The hindsight a summon
+/// judgment gets for free (t-5462): the coordinators' own choices, read off
+/// the runs the ledger still holds, never a roster somebody typed.
+fn summons_history(ledger: &Ledger) -> std::collections::HashMap<&str, (usize, Option<String>)> {
+    let mut newest: std::collections::HashMap<&str, (usize, i64, Option<String>)> =
+        std::collections::HashMap::new();
+    for run in ledger.runs() {
+        for worker in &run.workers {
+            let title = worker
+                .dispatch
+                .as_deref()
+                .and_then(|id| run.dispatch(id))
+                .and_then(|dispatch| run.task(&dispatch.task))
+                .map(|task| task.title.as_str().trim().to_string())
+                .filter(|title| !title.is_empty());
+            let held = newest
+                .entry(worker.agent.as_str())
+                .or_insert((0, i64::MIN, None));
+            held.0 += 1;
+            if worker.started_ms >= held.1 {
+                held.1 = worker.started_ms;
+                held.2 = title;
+            }
+        }
+    }
+    newest
+        .into_iter()
+        .map(|(agent, (launched, _, title))| (agent, (launched, title)))
         .collect()
 }
 
@@ -15364,7 +15496,7 @@ fn plan_inner(
                     carries_a_task: task.is_some(),
                 };
                 let chosen = launcher
-                    .choose_agent(&look, &summonable(launcher, now_ms))
+                    .choose_agent(&look, &summonable(launcher, ledger, now_ms))
                     .ok_or_else(|| {
                         format!(
                             "--agent {SUMMON_AUTO_AGENT}: the summon seat chose nothing — it \
@@ -15666,7 +15798,7 @@ fn plan_inner(
                     worktree: isolated,
                     replaces_an_attempt: retry_of.is_some(),
                     carries_a_task: task.is_some(),
-                    options: summonable(launcher, now_ms),
+                    options: summonable(launcher, ledger, now_ms),
                 }
             });
             /* And the placement question's ledger half (t-4781), from the

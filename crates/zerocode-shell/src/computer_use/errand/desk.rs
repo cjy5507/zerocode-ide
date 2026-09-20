@@ -66,6 +66,16 @@ fn phone_argv(verb: &str, platform: EmulatorPlatform, device: &str) -> Vec<Strin
     .collect()
 }
 
+/// The lines of a surface's text answer, as the screen carries them —
+/// trimmed, blanks dropped; the question does the cutting.
+fn shows_of(text: &str) -> Vec<String> {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn answer_value(answer: &TeamAnswer) -> Option<Value> {
     if answer.exit_code != 0 {
         return None;
@@ -129,6 +139,26 @@ impl Aim {
     /// number without the look it was read from, because a number means
     /// nothing apart from the table that drew it. A pane's label IS that
     /// identity, so the browser door asks for no id.
+    /// The verb that reads the screen's own text beside its controls, when
+    /// this surface has one worth a round trip. The desktop reads its
+    /// window's accessibility text (`read --app`): a calculator's display,
+    /// a dialog's message — what a walk pressed the wrong key for want of
+    /// (t-5497, 3/4 wrong on "7×6=42"). A page's legend already names
+    /// its controls and the browser walk read 10/10 without it (2026-09-20),
+    /// and a phone's `tree` is a heavier answer than its marks — both are
+    /// `None` until a measurement says otherwise.
+    fn shows_argv(&self) -> Option<Vec<String>> {
+        match self {
+            Self::App { name } => Some(vec![
+                "read".to_string(),
+                "--app".to_string(),
+                name.clone(),
+                JSON_FLAG.to_string(),
+            ]),
+            Self::Pane { .. } | Self::Phone { .. } => None,
+        }
+    }
+
     fn press_argv(&self, mark: usize, look: &str) -> Vec<String> {
         match self {
             Self::Phone { platform, device } => {
@@ -200,6 +230,7 @@ pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
                         device: device.clone(),
                     },
                     items: said.get(ITEMS_KEY)?.as_array()?.clone(),
+                    shows: Vec::new(),
                 },
                 look.to_string(),
             ))
@@ -211,6 +242,7 @@ pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
                 // the caller reads it once before the walk and hands it in.
                 at: Seen::default(),
                 items: said.get(ITEMS_KEY)?.as_array()?.clone(),
+                shows: Vec::new(),
             },
             String::new(),
         )),
@@ -231,6 +263,7 @@ pub fn screen_of(aim: &Aim, said: &Value) -> Option<(Screen, String)> {
                             .to_string(),
                     },
                     items: marks.get(ITEMS_KEY)?.as_array()?.clone(),
+                    shows: Vec::new(),
                 },
                 marks
                     .get(LOOK_ID_KEY)
@@ -296,6 +329,12 @@ where
         let (mut screen, look) = screen_of(&self.aim, &said)?;
         if matches!(self.aim, Aim::Pane { .. }) {
             screen.at = self.page.clone();
+        }
+        if let Some(argv) = self.aim.shows_argv() {
+            let answer = read_unjudged(self.road, self.aim.tool(), &argv);
+            screen.shows = answer_value(&answer)
+                .and_then(|read| Some(shows_of(read.get("text")?.as_str()?)))
+                .unwrap_or_default();
         }
         self.look = look;
         Some(screen)

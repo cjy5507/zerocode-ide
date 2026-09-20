@@ -186,6 +186,11 @@ impl Default for Seen {
 pub struct Screen {
     pub at: Seen,
     pub items: Vec<Value>,
+    /// The text the surface read off the screen that is not a control — a
+    /// display value, a heading, a message — top to bottom, uncut: the
+    /// question cuts it ([`zerocode_core::screen_action::shows_cut`]). Empty
+    /// for a surface that reads none.
+    pub shows: Vec<String>,
 }
 
 impl Screen {
@@ -533,6 +538,12 @@ pub fn run(
     // screen they were spent on. A screen that moved is a new screen: its
     // numbers mean something else, so the list starts again.
     let mut tried: Vec<usize> = Vec::new();
+    // What this walk pressed, oldest first, as the legend named each control
+    // when it was pressed. Unlike `tried` it survives a screen that moved:
+    // the display a press just changed is what the next question reads
+    // (t-5497 — a calculator walk pressed `7` three times because every
+    // new display looked like a fresh screen with `7` on offer).
+    let mut pressed_so_far: Vec<String> = Vec::new();
     let mut before: Option<Screen> = None;
     let mut still = 0usize;
     for attempt in 1..=at.steps() {
@@ -589,6 +600,8 @@ pub fn run(
             at: screen.at.asked(),
             tried: &tried,
             items: &screen.items,
+            pressed: &pressed_so_far,
+            shows: &screen.shows,
         }) else {
             walked
                 .rows
@@ -596,6 +609,7 @@ pub fn run(
             return walked;
         };
         let press_policy = seat_of(screen.at.surface());
+        let shows_lines = screen.shows.len();
         before = Some(screen);
 
         let candidates = asked.marks().len();
@@ -628,6 +642,8 @@ pub fn run(
             json!({
                 "outcome": "answered",
                 "candidates": candidates,
+                "showsLines": shows_lines,
+                "pressedBefore": pressed_so_far.len(),
                 "confidence": choice.confidence,
                 "probabilities": choice.probabilities,
             }),
@@ -687,6 +703,17 @@ pub fn run(
             return walked;
         }
         tried.push(chosen);
+        pressed_so_far.push(
+            before
+                .as_ref()
+                .and_then(|seen| {
+                    seen.items.iter().find(|item| {
+                        item.get("mark").and_then(Value::as_u64) == u64::try_from(chosen).ok()
+                    })
+                })
+                .and_then(zerocode_core::computer_use_protocol::marks::legend_line)
+                .unwrap_or_else(|| format!("mark:{chosen}")),
+        );
         walked.pressed += 1;
         note(&mut said, "pressed", json!(true));
         note(&mut said, "routeUse", json!(USE_APPLIED));

@@ -8645,6 +8645,57 @@ fn a_workers_verdict_is_read_as_json_and_not_looked_for_in_the_bytes() {
     }
 }
 
+/// The stall seat's reading of a silence reaches the coordinator once, as a
+/// quiet notice whose `reason` says it is a reading: the same silence read
+/// again on the next beat adds nothing, a new silence is new news, and a
+/// worker that is not live, or whose dispatch closed, gets no notice.
+#[test]
+fn the_stall_seats_reading_is_told_once_per_silence() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name supervision");
+    let task = bench.json("task-create --spec migrate");
+    let task_id = task["taskId"].as_str().expect("an id").to_string();
+    let (worker, _pane) = bench.seat(&format!("worker-start --agent claude --task {task_id}"));
+    let reading = |since: i64| StallJudged {
+        worker: worker.clone(),
+        stalled_since_ms: since,
+        cause: "auth_failure".to_string(),
+        confidence: 0.9,
+    };
+    assert_eq!(
+        bench.ledger.stall_causes_judged(&[reading(5_000)], 185_000),
+        1
+    );
+    assert_eq!(
+        bench.ledger.stall_causes_judged(&[reading(5_000)], 245_000),
+        0,
+        "the same silence was told twice"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .stall_causes_judged(&[reading(300_000)], 480_000),
+        1,
+        "a new silence of the same attempt is new news"
+    );
+    let mail = bench.json("check --types went_quiet");
+    let messages = mail["messages"].as_array().expect("a list");
+    assert_eq!(messages.len(), 2, "{mail}");
+    let body: serde_json::Value =
+        serde_json::from_str(messages[0]["body"].as_str().expect("a body")).expect("JSON");
+    assert_eq!(body["reason"], STALL_JUDGED_REASON);
+    assert_eq!(body["cause"], "auth_failure");
+    assert_eq!(body["confidence"], 0.9);
+    assert_eq!(body["workerId"], worker);
+    assert_eq!(body["taskId"], task_id);
+    assert_eq!(body["stalledSinceMs"], 5_000);
+    let unknown = StallJudged {
+        worker: "w-nobody".to_string(),
+        ..reading(5_000)
+    };
+    assert_eq!(bench.ledger.stall_causes_judged(&[unknown], 500_000), 0);
+}
+
 /// A turn ending is an exact fact, but not yet evidence of a stall. The
 /// window's beat is the only road that turns prolonged quiet into news.
 ///

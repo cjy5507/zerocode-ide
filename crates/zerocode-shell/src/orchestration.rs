@@ -3876,6 +3876,18 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
      * same cache the summons was judged by. Both or nothing — the pure
      * function decides, and a pane with less stays on the quiet road. A
      * wall already written down is asked nothing and reminded of nothing. */
+    /* The seat's own readings of silences asked about on earlier beats, for
+     * the coordinator's inbox — gathered before the loop below moves each
+     * silence, sent after the quiet news so a reading never outruns the
+     * silence it reads. */
+    let judged = stall_cause::acting_judgments(
+        host,
+        &held.stalls,
+        stalled
+            .iter()
+            .filter(|one| !one.walled_already)
+            .map(|one| (one.worker.clone(), one.dispatch.clone(), one.since_ms)),
+    );
     let mut quiet: Vec<(String, i64)> = Vec::new();
     let mut walled: Vec<zerocode_core::orchestration::QuotaWallWitness> = Vec::new();
     let mut stopped: Vec<(Stalled, zerocode_core::orchestration::TransientErrorMarker)> =
@@ -3966,6 +3978,11 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
     for workers in quiet.chunks(zerocode_core::orchestration::MAX_LIST) {
         if let Ok((notified, _)) = held.actor.quiet_sweep(workers.to_vec(), now_ms) {
             moved |= notified;
+        }
+    }
+    for readings in judged.chunks(zerocode_core::orchestration::MAX_LIST) {
+        if let Ok((told, _)) = held.actor.stall_causes(readings.to_vec(), now_ms) {
+            moved |= told;
         }
     }
     rang(moved);

@@ -3485,7 +3485,8 @@ fn an_unmarked_stall_is_asked_about_once_and_recorded_beside_the_silence() {
     assert_eq!(row["confidence"], 0.62);
     assert_eq!(
         row["probabilities"].as_object().map(|all| all.len()),
-        Some(7)
+        Some(zerocode_core::stall_cause::Cause::ALL.len()),
+        "one probability per cause the rubric offers"
     );
     assert_eq!(row["requests"], 1);
     assert!(

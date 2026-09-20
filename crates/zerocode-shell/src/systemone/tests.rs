@@ -166,3 +166,34 @@ fn the_door_is_the_only_road_to_the_wire_in_the_window() {
         "the System One route is named outside the window's wire: {naming:?}"
     );
 }
+
+/// A warm-up is one bare GET of the base — no key, no words — whose only
+/// product is the pooled socket the first question rides; and a wire with
+/// no key sends none, as it would ask nothing (the same "no key, no socket"
+/// the question keeps).
+#[test]
+fn a_warm_up_sends_one_bare_get_and_a_keyless_wire_sends_none() {
+    let endpoint = Endpoint::serving("HTTP/1.1 404 Not Found", String::new(), 0);
+    Wire::at(&endpoint.base(), "", None).warm();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert!(endpoint.asked().is_empty(), "no key, no socket");
+
+    Wire::at(&endpoint.base(), "test-key", None).warm();
+    let began = std::time::Instant::now();
+    while endpoint.asked().is_empty() && began.elapsed() < std::time::Duration::from_secs(3) {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let asked = endpoint.asked();
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(asked[0].starts_with("GET / HTTP/1.1"), "{}", asked[0]);
+    assert!(
+        !asked[0].contains("Authorization") && !asked[0].contains("test-key"),
+        "a warm-up carries no key: {}",
+        asked[0]
+    );
+    assert!(
+        asked[0].ends_with("\r\n\r\n"),
+        "a warm-up carries no body: {}",
+        asked[0]
+    );
+}

@@ -33,6 +33,8 @@ fn a_look<'a>(items: &'a [Value], tried: &'a [usize]) -> ActionLook<'a> {
         },
         tried,
         items,
+        pressed: &[],
+        shows: &[],
     }
 }
 
@@ -47,6 +49,8 @@ fn a_goal<'a>(items: &'a [Value], tried: &'a [usize]) -> ActionLook<'a> {
         },
         tried,
         items,
+        pressed: &[],
+        shows: &[],
     }
 }
 
@@ -229,10 +233,10 @@ fn every_broken_rule_discards_the_answer_whole() {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(SCREEN_ACTION_RUBRIC_VERSION, 3);
+    assert_eq!(SCREEN_ACTION_RUBRIC_VERSION, 4);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "8637a4b95c43616a"
+        "24ffa8989582fd7e"
     );
 }
 
@@ -306,4 +310,41 @@ fn a_number_already_spent_on_this_screen_is_not_offered_again() {
 
     // Every number spent and the question is not worth asking at all.
     assert!(ask(&a_goal(&items, &[1, 2, 3])).is_none());
+}
+
+/// The question carries what the walk already pressed and what the screen
+/// shows, and cuts the screen's words by whole lines to the caps — so a
+/// calculator's display reaches the judgment (t-5497) and a long page
+/// cannot swell the request past what the deadline bounds.
+#[test]
+fn the_state_carries_what_was_pressed_and_what_the_screen_shows_cut_to_the_caps() {
+    let items = vec![item(9, "button", "7"), item(12, "button", "×")];
+    let pressed = vec!["button 7 @ 40,300".to_string()];
+    let shows: Vec<String> = (0..SHOWS_LINE_CAP + 5)
+        .map(|n| format!("line {n}"))
+        .collect();
+    let look = ActionLook {
+        pressed: &pressed,
+        shows: &shows,
+        ..a_goal(&items, &[])
+    };
+    let asked = ask(&look).expect("a question");
+    assert_eq!(asked.state["pressed"], json!(pressed));
+    let carried = asked.state["shows"].as_array().expect("lines");
+    assert_eq!(carried.len(), SHOWS_LINE_CAP, "cut by lines");
+    assert_eq!(carried[0], json!("line 0"), "top of the screen first");
+
+    let wide = vec![
+        "x".repeat(SHOWS_CHAR_CAP - 10),
+        "y".repeat(20),
+        "z".to_string(),
+    ];
+    let cut = shows_cut(&wide);
+    assert_eq!(
+        cut.len(),
+        1,
+        "a line that would cross the character cap ends the cut"
+    );
+    let blank = vec!["  ".to_string(), "42".to_string()];
+    assert_eq!(shows_cut(&blank), vec!["42"], "blank lines are not lines");
 }

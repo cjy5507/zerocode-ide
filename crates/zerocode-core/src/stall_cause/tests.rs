@@ -9,7 +9,8 @@ use crate::jev::door::clear_text;
 
 /// An answer in the contract's shape: `chosen` with the rest spread evenly.
 fn answered(chosen: &str, confidence: f64) -> Value {
-    let rest = 0.3 / 6.0;
+    // The rest share what the chosen one leaves, however many causes stand.
+    let rest = 0.3 / (Cause::ALL.len() - 1) as f64;
     let probabilities: Map<String, Value> = Cause::ALL
         .iter()
         .map(|cause| {
@@ -131,10 +132,10 @@ fn an_answer_is_read_only_through_the_causes_offered() {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(STALL_CAUSE_RUBRIC_VERSION, 1);
+    assert_eq!(STALL_CAUSE_RUBRIC_VERSION, 2);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "848d39f562adc8f9"
+        "f75306aaa8d3cf97"
     );
 }
 
@@ -242,5 +243,35 @@ fn every_cause_but_unknown_names_what_follows_it() {
     assert_eq!(
         expected_followed(Cause::FinishedWithoutReport),
         Some(Followed::WorkerDone)
+    );
+}
+
+/// A dead login is its own answer, offered by the word a ledger row keeps and
+/// labeled by what a coordinator does about it — not waited out like a
+/// transient error, not mailed like a question box (t-5498: `Token refresh
+/// failed: 401` read as `unknown` 0.95 under the first rubric).
+#[test]
+fn a_dead_login_is_offered_and_labeled_as_the_end_of_the_attempt() {
+    let look = StallLook {
+        agent: "opencode",
+        quiet_ms: 180_000,
+        screen: "Token refresh failed: 401\n❯",
+        transcript: &[],
+    };
+    let asked = ask(&look).expect("a screen with words is a question");
+    let offered = asked.questions["cause"]["criteria"]
+        .as_object()
+        .expect("criteria");
+    assert!(offered.contains_key("auth_failure"), "{offered:?}");
+    assert!(
+        offered["auth_failure"]
+            .as_str()
+            .is_some_and(|means| means.contains("Token refresh failed: 401")),
+        "the criterion quotes the words this machine's pane showed"
+    );
+    assert_eq!(Cause::from_word("auth_failure"), Some(Cause::AuthFailure));
+    assert_eq!(
+        expected_followed(Cause::AuthFailure),
+        Some(Followed::WorkerStop)
     );
 }
