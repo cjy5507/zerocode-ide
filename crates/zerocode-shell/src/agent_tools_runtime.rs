@@ -1161,6 +1161,19 @@ impl agent_teams::Host for TeamWindow {
             state.pane_helpers().insert(term, helper.to_string());
         }
         state.team_envs().insert(term, env);
+        // Where the pane was seated, in the diagnostic log beside its spawn
+        // line: the tab the sidebar reads (`term:worker` → the worktree card
+        // whose path this names) or a split inside its parent. A worker that
+        // never showed on a card left no way to tell which of the two it was
+        // handed, or under which path (2026-09-20, w-5447).
+        note_window_event(
+            state.local_data_root(),
+            &format!(
+                "term {term} seated as worker of term {from_term} in {} ({})",
+                root.display(),
+                if worker_surface { "own tab" } else { "split" }
+            ),
+        );
         // A protocol worker owns its own tab even when this process restores
         // an existing conversation. Announcing a restore as a split first
         // briefly seats it inside the coordinator's tab.
