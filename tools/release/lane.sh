@@ -97,6 +97,7 @@ UPDATER_KEY=${UPDATER_KEY:-$RELEASE_HOME/keys/updater.key}   # `tauri signer gen
 UPDATER_KEY_PASSWORD_FILE=${UPDATER_KEY_PASSWORD_FILE:-$UPDATER_KEY.password}   # optional; absent means the key has no password
 FEED_PY=$SELF_DIR/updater_feed.py
 LEGACY_INSTALL_SH=$SELF_DIR/legacy/install.sh   # the old CLI's installer, verbatim (§2.7)
+APP_INSTALL_SH=$SELF_DIR/install.sh             # the app's installer: reads the feed beside it, so it goes up with every release
 # -------------------------------------------------------------------------------
 # The root gate's browser harnesses (ui/tests/*.mjs) resolve Playwright through
 # NODE_PATH, not only through the node_modules symlink the scratch gets.
@@ -651,6 +652,14 @@ do_publish() {
   for f in "$out/$(asset_base).app.tar.gz" "$out/$(asset_base).app.tar.gz.sig" "$out/$(asset_base).dmg" "$out/$UPDATER_FEED"; do
     [ -f "$f" ] && assets="$assets $f"
   done
+  # The app installer rides beside the feed it reads, so
+  # `releases/latest/download/install.sh` always names the installer that
+  # matches `latest.json` next to it (the README's one-line install; the
+  # link answered 404 from v1.1.0 to v1.1.4, when only the retired CLI's
+  # installer had ever been an asset). The legacy manifest below overwrites
+  # it with the old CLI's installer, verbatim, when that manifest is on.
+  cp "$APP_INSTALL_SH" "$out/install.sh" || { WHY="copy $APP_INSTALL_SH"; return 1; }
+  assets="$assets $out/install.sh"
   if [ "$RELEASE_LEGACY_MANIFEST" = 1 ]; then
     for t in $ZO_BUILD_TARGETS; do
       bin=$(zo_for_triple "$t")
@@ -666,7 +675,7 @@ do_publish() {
       > "$out/manifest.txt" || { WHY="manifest.txt"; return 1; }
     ( cd "$out" && python3 "$FEED_PY" sums install.sh manifest.txt $(for t in $ZO_BUILD_TARGETS; do printf 'zo-%s-%s ' "$tag" "$t"; done) ) \
       > "$out/SHA256SUMS" || { WHY="SHA256SUMS"; return 1; }
-    assets="$assets $out/manifest.txt $out/SHA256SUMS $out/install.sh"
+    assets="$assets $out/manifest.txt $out/SHA256SUMS"
     for t in $ZO_BUILD_TARGETS; do assets="$assets $out/zo-$tag-$t"; done
   fi
   for f in $assets; do names="${names:+$names,}$(basename "$f")"; done

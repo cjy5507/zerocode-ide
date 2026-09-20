@@ -1277,8 +1277,12 @@ class Publish(LaneCase):
         assets = lines[0].split("assets=")[1].split()[0].split(",")
         self.assertEqual(sorted(assets), sorted([
             f"ZeroCode_{VERSION}_aarch64.app.tar.gz", f"ZeroCode_{VERSION}_aarch64.app.tar.gz.sig",
-            f"ZeroCode_{VERSION}_aarch64.dmg", "latest.json",
+            f"ZeroCode_{VERSION}_aarch64.dmg", "latest.json", "install.sh",
         ]))
+        # The app installer goes up beside the feed it reads, so the README's
+        # `latest/download/install.sh` never 404s again (v1.1.0..v1.1.4 did).
+        self.assertEqual((self.lane.out(SHA_A) / "install.sh").read_bytes(), (RELEASE / "install.sh").read_bytes(),
+                         "the app's install.sh goes up verbatim")
         self.assertIn("notes=", lines[0])
         self.assertEqual([l for l in self.lane.stub_lines() if "beta" in l], [], "stable moves no beta tag")
 
