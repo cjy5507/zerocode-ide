@@ -1266,11 +1266,20 @@ where
                     let rate_limit_model = self
                         .rate_limit_model_for_active_stream()
                         .map(str::to_string);
-                    let verifier_rate_limit_retry_cap = self.verifier_rate_limit_retry_cap();
+                    // How long this stream argues with a capacity wall. A
+                    // deep-gate VERIFY leg answers first and keeps its ranked
+                    // walk's cap; outside one the main turn asks whether it has
+                    // an escape at all, because `decide_quota_escape` below only
+                    // gets to look once this call gives up (t-5499: a 429 with no
+                    // reset hint burned the whole 300 s account budget in front
+                    // of a fallback that answered in seconds).
+                    let rate_limit_retry_cap = self
+                        .verifier_rate_limit_retry_cap()
+                        .or_else(|| self.main_turn_rate_limit_retry_cap());
                     let mut stream_fut = Box::pin(crate::retry::retry_async(
                         "stream_async",
                         Some(self.hook_abort_signal.flag()),
-                        verifier_rate_limit_retry_cap,
+                        rate_limit_retry_cap,
                         move |attempt, error: &RuntimeError| {
                             if let Some(model) = rate_limit_model.as_deref() {
                                 crate::retry::mark_foreground_capacity_stall(

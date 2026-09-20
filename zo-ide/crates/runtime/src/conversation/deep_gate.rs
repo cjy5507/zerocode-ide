@@ -3688,8 +3688,9 @@ where
 
     /// How many capacity (429) retries the VERIFY leg's stream may spend before
     /// the error propagates so [`Self::verify_subturn`]'s ranked walk can move
-    /// on. `None` outside a verify leg: the main turn keeps its full wall-clock
-    /// budget, because riding a throttle out beats killing the user's turn.
+    /// on. `None` outside a verify leg — this answer is only about the leg, and
+    /// the stream falls through to `main_turn_rate_limit_retry_cap`, which asks
+    /// the main turn's own question (has this wall anywhere to go?).
     ///
     /// Inside the leg the escape route decides the cap. A later
     /// different-provider candidate is a real cross-model verifier, so the first

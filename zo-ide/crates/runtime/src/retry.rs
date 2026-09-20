@@ -59,6 +59,21 @@ const RATE_LIMIT_MAX_ELAPSED: Duration = Duration::from_secs(300);
 /// stream re-opens), which is ample patience for a blip.
 const OVERLOAD_MAX_ELAPSED: Duration = Duration::from_secs(30);
 
+/// How many *capacity* retries the MAIN turn spends before the error propagates
+/// so the caller's quota escape can run (`main_turn_rate_limit_retry_cap`).
+///
+/// Two retries on the rate-limit schedule, ≈5 s then ≈10 s, which absorbs the
+/// short burst that clears by itself and then hands over. The wall-clock budget
+/// above is the right patience only when riding it out is the *only* recovery;
+/// with an escape installed it is pure freeze, because the escape is consulted
+/// only once this call returns `Fail`. Measured on the reported turn (t-5499): a
+/// `gemini-flash` account 429 with no reset hint spent ten backoffs and 240 s of
+/// the [`RATE_LIMIT_MAX_ELAPSED`] budget before the swap ran, while the same
+/// prompt answered in 4.6 s on another model — the same reasoning
+/// [`OVERLOAD_MAX_ELAPSED`] already records, that insistence buys nothing once
+/// the fallback is productive.
+pub(crate) const MAIN_TURN_CAPACITY_BURST: u32 = 2;
+
 /// Env override (milliseconds) for the capacity wall-clock budgets. `0` opts out
 /// of wall-clock mode entirely and falls back to the bounded [`MAX_RETRIES`]
 /// attempt count (the pre-wall-clock behaviour); a bad value uses the defaults.
@@ -644,6 +659,57 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(attempts.get(), 2, "the cap must allow exactly one retry");
         assert_eq!(notices.get(), 1, "exactly one backoff is announced");
+    }
+
+    /// The main turn's burst cap: with an escape installed the stream absorbs
+    /// [`MAIN_TURN_CAPACITY_BURST`] capacity retries and then propagates, so
+    /// `decide_quota_escape` runs in seconds instead of after the full
+    /// [`RATE_LIMIT_MAX_ELAPSED`] account budget (t-5499: ten backoffs, 240 s,
+    /// in front of a fallback that answered the same prompt in 4.6 s).
+    ///
+    /// Sleeps two real rate-limit backoffs — the crate's tokio dev features do
+    /// not include `test-util`, so there is no virtual clock — which is why the
+    /// elapsed assertion is a ceiling well under the budget rather than an
+    /// equality.
+    #[tokio::test]
+    async fn main_turn_capacity_burst_hands_over_on_the_third_capacity_error() {
+        let attempts = std::cell::Cell::new(0u32);
+        let notices = std::cell::Cell::new(0u32);
+        let started = Instant::now();
+        let result: Result<(), String> = retry_async(
+            "test",
+            None,
+            Some(MAIN_TURN_CAPACITY_BURST),
+            |_, _| {},
+            |_, _, _| notices.set(notices.get() + 1),
+            |attempt| {
+                attempts.set(attempt + 1);
+                async move {
+                    Err::<(), String>(
+                        "api returned 429 Too Many Requests (RESOURCE_EXHAUSTED)".to_string(),
+                    )
+                }
+            },
+        )
+        .await;
+        let elapsed = started.elapsed();
+        eprintln!("[t-5499] main-turn burst handed over after {} ms", elapsed.as_millis());
+        assert!(result.is_err(), "the third capacity error must propagate");
+        assert_eq!(
+            attempts.get(),
+            MAIN_TURN_CAPACITY_BURST + 1,
+            "two retries are absorbed, the third capacity error hands over"
+        );
+        assert_eq!(
+            notices.get(),
+            MAIN_TURN_CAPACITY_BURST,
+            "one backoff notice per absorbed retry"
+        );
+        assert!(
+            elapsed <= Duration::from_secs(20),
+            "handing over took {elapsed:?}; the point of the cap is seconds, not the \
+             {RATE_LIMIT_MAX_ELAPSED:?} account budget"
+        );
     }
 
     #[tokio::test]
