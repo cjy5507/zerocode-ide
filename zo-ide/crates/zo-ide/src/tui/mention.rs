@@ -1477,7 +1477,8 @@ mod tests {
                 indices: None,
             }],
         );
-        mentions.key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut composer);
+        let outcome = mentions.key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut composer);
+        assert_eq!(outcome, MentionKey::Consumed);
         assert_eq!(composer.text(), "@wiki/alpha.md ");
         let (range, token) = composer.at_token().expect("the cursor still has affinity to the token");
         assert_eq!(token, "wiki/alpha.md");
