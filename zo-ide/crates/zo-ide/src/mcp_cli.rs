@@ -25,6 +25,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use core_types::paths::ZO_DIR_NAME;
 use runtime::mcp_oauth::{BrowserOpener, McpAuthResult};
 use runtime::{
     ConfigLoader, ConfigSource, McpEdit, McpRemoteServerConfig, McpServerConfig,
@@ -36,7 +37,7 @@ pub const USAGE: &str = "\
 zo mcp list [--json] [--cwd <dir>]
 zo mcp get <name> [--json] [--cwd <dir>]
 zo mcp add <name> (--url <url> | -- <command> [args…]) [--env K=V]… [--header K=V]…
-       [--transport stdio|http|sse|ws] [--project] [--cwd <dir>]
+       [--transport stdio|http|sse|ws] [--project [--trust]] [--cwd <dir>]
 zo mcp remove <name> [--project] [--cwd <dir>]
 zo mcp login <name> [--scopes <a,b>] [--cwd <dir>]
 zo mcp logout <name> [--cwd <dir>]
@@ -51,6 +52,12 @@ zo mcp logout <name> [--cwd <dir>]
   A server is stdio unless --url names an endpoint; --transport picks one of
   zo's own transports explicitly. --env is the stdio server's environment and
   --header the remote one's headers; neither VALUE is ever printed back.
+
+  A project server is behind the supply-chain gate: writing it into a document
+  the repository carries is not consent to run it. --trust is that consent —
+  it records this one name in the project's trust record, which counts only
+  while it is your own uncommitted file — and without it `add` says in one
+  line that the server is not loaded and how to trust it.
 
   `login` runs the OAuth flow for a remote server (inside the ZeroCode window
   the consent page opens in the window's own browser, where the person is
@@ -101,6 +108,10 @@ struct Request {
     verb: Verb,
     /// Which document a write lands in. Reads merge every scope regardless.
     project: bool,
+    /// Whether the person consented to the project server actually running.
+    /// Separate from `project` on purpose: the document is the repository's,
+    /// the consent is theirs.
+    trust: bool,
     json: bool,
     cwd: Option<PathBuf>,
 }
@@ -186,6 +197,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
         // payload the flags carry.
         verb: Verb::List,
         project: false,
+        trust: false,
         json: false,
         cwd: None,
     };
@@ -205,6 +217,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
         match flag {
             "--json" => request.json = true,
             "--project" => request.project = true,
+            "--trust" => request.trust = true,
             "--cwd" => request.cwd = Some(PathBuf::from(value()?)),
             "--url" => spec.url = Some(value()?),
             "--transport" => spec.transport = Some(transport_from_label(&value()?)?),
@@ -215,6 +228,13 @@ fn parse(args: &[String]) -> Result<Request, String> {
         }
     }
     request.verb = build_verb(verb_word, name, spec, scopes)?;
+    // The record gates project-scoped servers and nothing else, so the flag is
+    // refused where it would quietly mean nothing.
+    if request.trust && !(request.project && matches!(request.verb, Verb::Add { .. })) {
+        return Err(format!(
+            "--trust is the consent `zo mcp add --project` asks for, and belongs to no other command line\n\n{USAGE}"
+        ));
+    }
     Ok(request)
 }
 
@@ -522,12 +542,16 @@ fn list_text(rows: &[Row]) -> String {
 }
 
 /// Why a project-scoped server is not loaded, and the two ways to load it.
+/// The record is named from the loader's own spelling of it, so a rename there
+/// cannot leave this sentence pointing at a file nobody reads.
 fn gate_reason(path: Option<&Path>) -> String {
     format!(
-        "{} is not trusted (.zo/trusted-mcp-servers.json, or enableAllProjectMcpServers)",
-        path.map_or_else(|| ".zo/settings.json".to_string(), |path| path
-            .display()
-            .to_string())
+        "{} is not trusted ({ZO_DIR_NAME}/{}, or enableAllProjectMcpServers)",
+        path.map_or_else(
+            || format!("{ZO_DIR_NAME}/settings.json"),
+            |path| path.display().to_string()
+        ),
+        runtime::TRUSTED_MCP_SERVERS_FILE,
     )
 }
 
@@ -590,31 +614,73 @@ fn add(
     let path = scope_path(request, loader);
     let edit = runtime::write_mcp_server(&path, name, &config)
         .map_err(|error| format!("{name} could not be written: {error}"))?;
+    // Consent is its own act, and its own document. A project settings file is
+    // carried by the repository to everyone who clones it, so the name reaches
+    // the gate's record only because this command line said `--trust`.
+    let trusted = request.trust.then(|| trust(loader, name)).transpose()?;
     // A project document is behind the supply-chain gate, so "written" is not
-    // yet "will load". Ask the loader rather than guess: a person who just
-    // added a server wants to know whether the next session will run it.
+    // yet "will load" — and neither is "recorded", since the record counts only
+    // as the operator's own uncommitted file. Ask the loader rather than guess:
+    // a person who just added a server wants to know whether the next session
+    // will run it.
     let gated = request.project && !load(loader)?.mcp().servers().contains_key(name);
-    Ok(render(
-        request.json,
-        &json!({
-            "server": name,
-            "edit": edit_label(edit),
-            "path": path.display().to_string(),
-            "transport": transport_label(transport_of(&config)),
-            "gated": gated,
-        }),
-        || {
-            let mut text = format!("{} {name} in {}", past_tense(edit), path.display());
-            if gated {
-                let _ = write!(
-                    text,
-                    "\nit will not load until it is trusted — {}",
-                    gate_reason(Some(&path))
-                );
-            }
-            text
-        },
-    ))
+    let mut report = json!({
+        "server": name,
+        "edit": edit_label(edit),
+        "path": path.display().to_string(),
+        "transport": transport_label(transport_of(&config)),
+        "gated": gated,
+    });
+    if let Some((record, trust_edit)) = &trusted {
+        report["trustEdit"] = json!(edit_label(*trust_edit));
+        report["trustPath"] = json!(record.display().to_string());
+    }
+    Ok(render(request.json, &report, || {
+        let mut text = format!("{} {name} in {}", past_tense(edit), path.display());
+        if let Some((record, trust_edit)) = &trusted {
+            let _ = write!(
+                text,
+                "\ntrusted {name} — {} in {}",
+                edit_label(*trust_edit),
+                record.display()
+            );
+        }
+        if gated {
+            let _ = write!(
+                text,
+                "\n{}",
+                still_gated(&path, trusted.as_ref().map(|(record, _)| record.as_path()))
+            );
+        }
+        text
+    }))
+}
+
+/// Record the name in the gate's own document — never in the settings one,
+/// which is the file the repository carries.
+fn trust(loader: &ConfigLoader, name: &str) -> Result<(PathBuf, McpEdit), String> {
+    let path = loader.trusted_mcp_servers_path();
+    let edit = runtime::trust_mcp_server(&path, name)
+        .map_err(|error| format!("{name} could not be trusted: {error}"))?;
+    Ok((path, edit))
+}
+
+/// The line a project `add` ends on while the server still will not load.
+/// Without consent the fix is the flag. With it the record exists and the gate
+/// did not believe it, which is a different sentence and a different fix — the
+/// record authorizes only as the operator's own uncommitted file, so that a
+/// repository cannot ship consent to run its own MCP command.
+fn still_gated(document: &Path, record: Option<&Path>) -> String {
+    match record {
+        None => format!(
+            "it will not load until it is trusted — {} (--trust records it)",
+            gate_reason(Some(document))
+        ),
+        Some(record) => format!(
+            "it still will not load: {} counts only as your own uncommitted file — a git-tracked or symlinked one, or a nested .zo repository, fails closed",
+            record.display()
+        ),
+    }
 }
 
 fn remove(request: &Request, loader: &ConfigLoader, name: &str) -> Result<Report, String> {

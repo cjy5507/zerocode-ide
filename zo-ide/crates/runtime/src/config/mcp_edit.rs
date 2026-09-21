@@ -1,4 +1,5 @@
-//! Writing the `mcpServers` section of one settings document.
+//! Writing the `mcpServers` section of one settings document, and the record
+//! of the project-scoped servers an operator consented to.
 //!
 //! The inverse of `parsers::parse_mcp_server_config`, spelled with
 //! `parsers::mcp_keys` — the very table the parser matches on — so a
@@ -22,7 +23,7 @@ use crate::json::JsonValue;
 
 use super::parsers::{
     infer_mcp_server_type, mcp_keys, mcp_server_context, parse_json_object_contents,
-    parse_mcp_server_config,
+    parse_mcp_server_config, parse_trusted_mcp_server_names,
 };
 use super::{
     ConfigError, McpManagedProxyServerConfig, McpOAuthConfig, McpRemoteServerConfig,
@@ -93,16 +94,69 @@ pub fn remove_mcp_server(path: &Path, name: &str) -> Result<McpEdit, ConfigError
     Ok(McpEdit::Removed)
 }
 
+/// Record `name` in the trusted-MCP-servers file at `path`, keeping the names
+/// already there in the order the person wrote them.
+///
+/// A project document lives in the repository, so writing a server into it is
+/// not consent to RUN it: the server loads only once its name stands in this
+/// record. Whether a record may be BELIEVED at all is
+/// [`ConfigLoader`](super::ConfigLoader)'s gate — a git-tracked, symlinked or
+/// nested-`.zo` file fails closed there — which is why recording a name says
+/// nothing about the next load on its own.
+///
+/// # Errors
+///
+/// The record is not a JSON array of server names, it does not survive the
+/// round-trip through the parser a future session uses, or the write fails.
+pub fn trust_mcp_server(path: &Path, name: &str) -> Result<McpEdit, ConfigError> {
+    let mut names = parse_trusted_mcp_server_names(path, &read_file_or_empty(path)?)?;
+    if names.iter().any(|trusted| trusted == name) {
+        return Ok(McpEdit::Unchanged);
+    }
+    names.push(name.to_string());
+    let rendered =
+        JsonValue::Array(names.iter().cloned().map(JsonValue::String).collect()).render_pretty();
+    // The read-back `commit` does for a settings document: a record our
+    // renderer mangles is caught before it becomes the file on disk.
+    if parse_trusted_mcp_server_names(path, &rendered)? != names {
+        return Err(ConfigError::Parse(format!(
+            "{}: the trusted MCP servers did not survive the JSON round-trip",
+            path.display()
+        )));
+    }
+    create_parent_directory(path)?;
+    // Owner-only like every document this module writes: a name another local
+    // account could append is a server this one would run.
+    write_private_file(path, rendered.as_bytes(), &ParentDirPolicy::LeaveParent)
+        .map_err(ConfigError::Io)?;
+    Ok(McpEdit::Added)
+}
+
 /// Read the document through the loader's own parser. A file that is not there
 /// yet is an empty document — `zo mcp add` is often the first thing to write a
 /// settings file at all.
 fn read_document(path: &Path) -> Result<BTreeMap<String, JsonValue>, ConfigError> {
-    let contents = match std::fs::read_to_string(path) {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(ConfigError::Io(error)),
+    parse_json_object_contents(path, &read_file_or_empty(path)?)
+}
+
+/// The file as it stands, or nothing at all — the same thing to a writer whose
+/// job is to add one entry.
+fn read_file_or_empty(path: &Path) -> Result<String, ConfigError> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => Ok(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(String::new()),
+        Err(error) => Err(ConfigError::Io(error)),
+    }
+}
+
+/// Create the `.zo` (or config home) directory when it is missing, but never
+/// re-permission one that already exists — it may be a shared, pre-existing
+/// directory this process does not own.
+fn create_parent_directory(path: &Path) -> Result<(), ConfigError> {
+    let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+        return Ok(());
     };
-    parse_json_object_contents(path, &contents)
+    std::fs::create_dir_all(parent).map_err(ConfigError::Io)
 }
 
 /// The document's `mcpServers` object, created when absent.
@@ -159,13 +213,9 @@ fn commit(
             )));
         }
     }
-    // Create the `.zo` (or config home) directory when it is missing, but never
-    // re-permission one that already exists — it may be a shared, pre-existing
-    // directory this process does not own. The file itself is owner-only: an
-    // `env` block under `mcpServers` carries the server's tokens.
-    if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(ConfigError::Io)?;
-    }
+    create_parent_directory(path)?;
+    // The file is owner-only: an `env` block under `mcpServers` carries the
+    // server's tokens.
     write_private_file(path, rendered.as_bytes(), &ParentDirPolicy::LeaveParent)
         .map_err(ConfigError::Io)
 }

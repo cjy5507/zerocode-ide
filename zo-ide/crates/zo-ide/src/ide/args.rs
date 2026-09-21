@@ -25,7 +25,7 @@ zo [--model <alias>] [--permission-mode <mode>] [--effort <level>]
 zo models [--refresh] [--json]
 zo commands [--json]
 zo mcp list|get|add|remove|login|logout [<name>] [--url <url>|-- <command>…] [--env K=V] [--header K=V]
-       [--transport stdio|http|sse|ws] [--scopes <a,b>] [--project] [--cwd <dir>] [--json]
+       [--transport stdio|http|sse|ws] [--scopes <a,b>] [--project [--trust]] [--cwd <dir>] [--json]
 zo cron ensure|show|remove --description <name> [--schedule <expr>] [--prompt <text>|--prompt-file <path|->] [--cwd <dir>]
 zo decision-shadow eval --labels <file.jsonl> [--cwd <dir>] [--json]
 zo decision-shadow check [--json]
@@ -89,8 +89,10 @@ zo decision-shadow check [--json]
                      server the supply-chain gate skipped is shown as
                      untrusted, with the document that declared it),
                      `add`/`remove` write one server into ~/.zo/settings.json
-                     or, with --project, <cwd>/.zo/settings.json, and
-                     `login`/`logout` hold a remote server's OAuth token
+                     or, with --project, <cwd>/.zo/settings.json — where the
+                     server stays gated until --trust records that one name in
+                     the project's trust record — and `login`/`logout` hold a
+                     remote server's OAuth token
   decision-shadow    score the routing probe and its typed twin
                      (smart.decisionShadow) against a person's labels:
                      --labels names a JSONL file, one task per line with a

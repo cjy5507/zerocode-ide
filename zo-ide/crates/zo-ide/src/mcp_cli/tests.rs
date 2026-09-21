@@ -36,6 +36,12 @@ impl Scratch {
         self.cwd.path().join(".zo").join("settings.json")
     }
 
+    /// The supply-chain gate's own document, spelled the way a person types
+    /// it: what `--trust` writes has to be the file the loader reads.
+    fn trust_record(&self) -> PathBuf {
+        self.cwd.path().join(".zo").join("trusted-mcp-servers.json")
+    }
+
     /// Run one command line, with no stored tokens and a browser nobody opens.
     fn run(&self, line: &[&str]) -> Result<String, String> {
         self.run_with(line, &Tokens::empty())
@@ -115,8 +121,9 @@ impl BrowserOpener for RefusingBrowser {
 #[test]
 fn the_usage_names_every_verb_and_flag_the_parser_takes() {
     for word in [
-        "list", "get", "add", "remove", "login", "logout", "--json", "--project", "--cwd",
-        "--url", "--transport", "--env", "--header", "--scopes", "stdio", "http", "sse", "ws",
+        "list", "get", "add", "remove", "login", "logout", "--json", "--project", "--trust",
+        "--cwd", "--url", "--transport", "--env", "--header", "--scopes", "stdio", "http", "sse",
+        "ws",
     ] {
         assert!(USAGE.contains(word), "usage says nothing of {word}");
     }
@@ -522,4 +529,135 @@ fn logout_forgets_a_stored_token_and_says_so_when_there_was_none() {
         .expect("logout");
     assert!(printed.contains("no token was stored"), "{printed}");
     assert_eq!(tokens.forgotten.borrow().len(), 1);
+}
+
+// --- the project scope's trust record ----------------------------------
+
+/// Writing a server into a document the repository carries is not consent to
+/// RUN it: the trust record is the gate's own file, and without `--trust`
+/// `add` does not touch it — it says, in one line, that the server is not
+/// loaded and names the flag that would record it.
+#[test]
+fn a_project_add_without_trust_leaves_the_trust_record_alone_and_says_so() {
+    let scratch = Scratch::new();
+    // A record the person wrote themselves, so "untouched" means these bytes.
+    std::fs::create_dir_all(scratch.trust_record().parent().expect("parent"))
+        .expect("project config dir");
+    std::fs::write(scratch.trust_record(), "[\"someone-elses\"]\n").expect("seed trust record");
+
+    let printed = scratch
+        .run(&["add", "repo", "--project", "--", "uvx", "repo-server"])
+        .expect("add project");
+
+    assert_eq!(
+        std::fs::read_to_string(scratch.trust_record()).expect("trust record"),
+        "[\"someone-elses\"]\n"
+    );
+    assert!(printed.contains("will not load"), "{printed}");
+    assert!(printed.contains("--trust"), "{printed}");
+    let report = scratch.json(&["add", "repo", "--project", "--json", "--", "uvx", "repo-server"]);
+    assert_eq!(report["gated"], json!(true));
+    // No consent was given, so the report has nothing to say about the record.
+    assert_eq!(report["trustEdit"], Value::Null);
+    assert!(!scratch
+        .loader()
+        .load()
+        .expect("load")
+        .mcp()
+        .servers()
+        .contains_key("repo"));
+}
+
+/// With consent the name stands in the record, and the next load runs the
+/// server — the whole point of the flag.
+#[test]
+fn trust_records_the_name_and_the_next_load_reads_the_server_back() {
+    let scratch = Scratch::new();
+    let report = scratch.json(&[
+        "add", "repo", "--project", "--trust", "--json", "--", "uvx", "repo-server",
+    ]);
+    assert_eq!(report["edit"], "added");
+    assert_eq!(report["trustEdit"], "added");
+    assert_eq!(
+        report["trustPath"],
+        json!(scratch.trust_record().display().to_string())
+    );
+    // `gated` is the loader's answer, not the writer's hope.
+    assert_eq!(report["gated"], json!(false));
+
+    let config = scratch.loader().load().expect("load");
+    assert_eq!(config.mcp().servers()["repo"].scope, ConfigSource::Project);
+    assert!(config.mcp().untrusted_project_servers().is_empty());
+    assert_eq!(scratch.json(&["list", "--json"])["servers"][0]["trusted"], json!(true));
+}
+
+/// The record is the project scope's gate, so the flag is refused anywhere it
+/// would mean nothing — and a refused command line writes nothing at all.
+#[test]
+fn trust_belongs_to_a_project_add_and_is_refused_anywhere_else() {
+    let scratch = Scratch::new();
+    for line in [
+        vec!["add", "user-scoped", "--trust", "--", "npx"],
+        vec!["remove", "repo", "--project", "--trust"],
+    ] {
+        let error = scratch.run(&line).expect_err("refusal");
+        assert!(error.contains("--trust"), "{line:?}: {error}");
+    }
+    assert!(!scratch.trust_record().exists());
+    assert!(!scratch.home_settings().exists());
+}
+
+/// Consent is a set of names: recording one twice is not a second entry, and
+/// the names already in the record are the person's, not ours to reorder.
+#[test]
+fn trusting_a_name_twice_leaves_one_entry_and_keeps_the_names_already_there() {
+    let scratch = Scratch::new();
+    scratch
+        .run(&["add", "first", "--project", "--trust", "--", "npx"])
+        .expect("add first");
+    let again = scratch.json(&["add", "first", "--project", "--trust", "--json", "--", "npx"]);
+    assert_eq!(again["edit"], "unchanged");
+    assert_eq!(again["trustEdit"], "unchanged");
+    scratch
+        .run(&["add", "second", "--project", "--trust", "--", "npx"])
+        .expect("add second");
+
+    let record: Value = serde_json::from_str(
+        &std::fs::read_to_string(scratch.trust_record()).expect("trust record"),
+    )
+    .expect("the record is JSON");
+    assert_eq!(record, json!(["first", "second"]));
+    let servers = scratch.loader().load().expect("load");
+    assert!(servers.mcp().servers().contains_key("first"));
+    assert!(servers.mcp().servers().contains_key("second"));
+}
+
+/// `--trust` writes the record; whether the gate BELIEVES it is the loader's
+/// answer. A `.zo/.git` marker is one of the shapes that fails closed (a
+/// repository must not be able to authorize its own MCP command), and the
+/// report carries that answer rather than the writer's hope.
+#[test]
+fn a_trust_record_the_gate_cannot_believe_is_written_and_reported_as_still_gated() {
+    let scratch = Scratch::new();
+    let zo = scratch.cwd.path().join(".zo");
+    std::fs::create_dir_all(&zo).expect("project config dir");
+    std::fs::write(zo.join(".git"), "gitdir: elsewhere\n").expect("nested repository marker");
+
+    let printed = scratch
+        .run(&["add", "repo", "--project", "--trust", "--", "npx"])
+        .expect("add project");
+
+    // The name stands in the record …
+    assert!(std::fs::read_to_string(scratch.trust_record())
+        .expect("trust record")
+        .contains("repo"));
+    // … and the report says the gate did not take it.
+    assert!(printed.contains("uncommitted"), "{printed}");
+    assert!(!scratch
+        .loader()
+        .load()
+        .expect("load")
+        .mcp()
+        .servers()
+        .contains_key("repo"));
 }

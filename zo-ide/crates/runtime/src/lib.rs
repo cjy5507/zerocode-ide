@@ -122,8 +122,8 @@ pub use config::{
     McpWebSocketServerConfig, OAuthConfig, ResolvedPermissionMode, RuntimeConfig,
     RuntimeFeatureConfig, RuntimeHookConfig, RuntimePermissionRuleConfig, RuntimePluginConfig,
     RuntimeSecondBrainConfig, RuntimeShipConfig, ScopedMcpServerConfig, UntrustedMcpServer,
-    ZO_SETTINGS_SCHEMA_NAME,
-    persist_allow_always_rules, remove_mcp_server, write_mcp_server,
+    TRUSTED_MCP_SERVERS_FILE, ZO_SETTINGS_SCHEMA_NAME,
+    persist_allow_always_rules, remove_mcp_server, trust_mcp_server, write_mcp_server,
 };
 pub use conversation::{ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{
