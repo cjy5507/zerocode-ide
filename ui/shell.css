@@ -14409,6 +14409,46 @@ details[open] > .helper-cap::after {
   background: none;
 }
 
+/* The plan a permission asks approval for, on the card (the extension's plan
+ * review): the answer's own prose, in a well that scrolls on its own rather
+ * than pushing the two answers off the page. */
+.board-approve-plan {
+  overflow-y: auto;
+  max-height: var(--chat-plan-max-h);
+  padding: var(--chat-bubble-pad-y) var(--chat-bubble-pad-x);
+  border-radius: var(--chat-radius-bubble);
+  background: var(--chat-tool-bg);
+  /* Rendered markdown flows as prose — the `pre-wrap` `.helper-said` carries
+   * is for words a person typed, as it is on an answer's own row. */
+  white-space: normal;
+  font-size: var(--chat-prose-size);
+  line-height: var(--chat-prose-leading);
+}
+
+.board-approve-plan > :last-child {
+  margin-bottom: 0;
+}
+
+/* The reason that rides the refusal — the composer's own box, at card size. */
+.board-approve-feedback {
+  box-sizing: border-box;
+  width: 100%;
+  padding: var(--chat-bubble-pad-y) var(--chat-bubble-pad-x);
+  border: var(--rule-width) solid var(--chat-composer-edge);
+  border-radius: var(--chat-radius-bubble);
+  background: var(--chat-composer-bg);
+  color: var(--ink-chalk);
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  line-height: var(--chat-prose-leading);
+  resize: vertical;
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+
+.board-approve-feedback:focus-within {
+  border-color: var(--chat-accent);
+}
+
 .worker-composer-box {
   display: block;
   box-sizing: border-box;

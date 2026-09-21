@@ -543,7 +543,7 @@ function askDraftFor(card) {
  * conversation view keeps one with its page — the same shape, so the panels
  * read either. `repaint` is the surface's own repaint (the board's when
  * unset); `instead` is the conversation's third road on a permission card. */
-function askDraftOf(card, sig, { repaint = null, instead = null, answer = null } = {}) {
+function askDraftOf(card, sig, { repaint = null, instead = null, answer = null, base = "" } = {}) {
   return {
     sig,
     index: 0,
@@ -557,6 +557,10 @@ function askDraftOf(card, sig, { repaint = null, instead = null, answer = null }
     // The road an answer takes when it is not the board's keystroke road:
     // a wire's card answers the agent's request itself.
     answer,
+    // Where the card's prose measures its relative paths from — a plan names
+    // the files it will touch, and those names are links off this checkout.
+    // The board's own cards have none; their prose resolves to nothing.
+    base,
   };
 }
 
@@ -782,6 +786,11 @@ function askSendWord(card, draft) {
 function approvalPanelNode(card, draft) {
   const panel = document.createElement("span");
   panel.className = "board-approve";
+  // The plan this permission asks approval FOR, when the CLI's plan tool is
+  // what asked (`ApprovalPrompt.plan`, filled off the catalog in Rust): the
+  // extension's plan review card — the plan itself instead of a summary
+  // line, and a reason field on the refusal.
+  const plan = typeof card.approval.plan === "string" ? card.approval.plan : "";
   const title = document.createElement("span");
   title.className = "board-approve-title";
   const glyph = document.createElementNS("http://www.w3.org/2000/svg", "svg");
@@ -790,12 +799,19 @@ function approvalPanelNode(card, draft) {
   use.setAttribute("href", "#i-shield");
   glyph.appendChild(use);
   const words = document.createElement("span");
-  words.textContent = t("board.approve.title", "{{tool}} 허용할까요?", {
-    tool: card.approval.tool,
-  });
+  words.textContent = plan
+    ? t("board.approve.planTitle", "계획을 승인할까요?")
+    : t("board.approve.title", "{{tool}} 허용할까요?", { tool: card.approval.tool });
   title.append(glyph, words);
   panel.appendChild(title);
-  if (card.approval.summary) {
+  if (plan) {
+    // The plan reads as the answer's own prose — one painter, so a heading
+    // and a numbered step look the same here as in the transcript.
+    const well = document.createElement("div");
+    well.className = "board-approve-plan helper-said";
+    paintHelperProse(well, plan, draft.base ?? "");
+    panel.appendChild(well);
+  } else if (card.approval.summary) {
     const detail = document.createElement("span");
     detail.className = "board-approve-detail";
     detail.textContent = card.approval.summary;
@@ -808,13 +824,19 @@ function approvalPanelNode(card, draft) {
   if (card.approval.edits?.length > 0) {
     panel.appendChild(toolDiffNode(card.approval.edits, card.approval.summary ?? ""));
   }
+  // The reason a refusal carries, on a plan the wire asked about: the
+  // extension's field under its plan review. Only where a refusal has
+  // somewhere to put words — the pane's road says them in the composer
+  // instead (`draft.instead`).
+  const feedback = plan && draft.answer ? planFeedbackNode() : null;
+  if (feedback) panel.appendChild(feedback);
   const acts = document.createElement("span");
   acts.className = "board-approve-acts";
   const term = Number(card.pane.slice(card.pane.indexOf(":") + 1));
   // The board's card answers the TUI by keystroke; a wire's card answers the
   // request itself (`draft.answer`, the option's id).
   const decide = draft.answer ?? ((allow) => invoke("answer_approval", { term, allow }));
-  const act = (label, choice, kind, then = null) => {
+  const act = (label, choice, kind, { then = null, says = null } = {}) => {
     const button = document.createElement("button");
     button.type = "button";
     button.className = `board-approve-act ${kind}`;
@@ -824,14 +846,29 @@ function approvalPanelNode(card, draft) {
       event.stopPropagation();
       draft.sending = true;
       draft.open = false;
-      decide(choice).catch((error) => showError(String(error)));
+      decide(choice, says?.() || null).catch((error) => showError(String(error)));
       repaintAsk(draft);
       then?.();
     };
     return button;
   };
   const options = card.approval.options ?? [];
-  if (options.length > 0) {
+  if (plan) {
+    // A plan is answered in its own two words, whatever the wire calls its
+    // options: approve it, or send back what to change. The ids are the
+    // wire's own — read by the kind it gave them, never spelled here.
+    const allowing = options.find((one) => one.kind === "allow_once") ??
+      options.find((one) => one.kind.startsWith("allow"));
+    const denying = options.find((one) => one.kind.startsWith("reject"));
+    acts.appendChild(act(t("board.approve.planAllow", "승인하고 진행"), allowing ? allowing.id : true, "is-allow"));
+    if (feedback) {
+      acts.appendChild(act(t("board.approve.planFeedback", "피드백 보내기"), denying ? denying.id : false, "is-deny",
+        { says: () => feedback.value.trim() }));
+    } else if (!draft.instead) {
+      // A plan card with neither field nor composer still refuses.
+      acts.appendChild(act(t("board.approve.deny", "거부"), denying ? denying.id : false, "is-deny"));
+    }
+  } else if (options.length > 0) {
     // The wire's own choices, in its order: the agent's words when it gave
     // them (ACP names its options), the window's word for a decision's kind.
     for (const option of options) {
@@ -848,10 +885,22 @@ function approvalPanelNode(card, draft) {
   // the refusing key, then the composer takes the words. Only where a
   // composer stands (the conversation view hands the focus road in).
   if (draft.instead) {
-    acts.appendChild(act(t("composer.instead", "대신 지시하기"), false, "is-instead", draft.instead));
+    acts.appendChild(act(t("composer.instead", "대신 지시하기"), false, "is-instead", { then: draft.instead }));
   }
   panel.appendChild(acts);
   return panel;
+}
+
+/* The reason field under a plan the wire asked about — the extension's plan
+ * review card writes its feedback into the refusal, which Claude Code shows
+ * the model as the sentence it reads (`wire_answer`'s `message`). */
+function planFeedbackNode() {
+  const field = document.createElement("textarea");
+  field.className = "board-approve-feedback";
+  field.rows = 2;
+  field.placeholder = t("board.approve.feedbackHint", "계획에서 고칠 점을 적어 주세요");
+  field.setAttribute("aria-label", field.placeholder);
+  return field;
 }
 
 /* The window's word for a wire decision's kind — the four ACP names a
@@ -10718,7 +10767,7 @@ listen("wire:update", (event) => {
  * the decision's kind otherwise, worded by the window), or a question list. */
 function wireAskShape(run, ask) {
   const approval = ask.kind === "approval"
-    ? { tool: ask.tool, summary: ask.summary ?? null, edits: ask.edits ?? [], options: ask.options ?? [] }
+    ? { tool: ask.tool, summary: ask.summary ?? null, plan: ask.plan ?? null, edits: ask.edits ?? [], options: ask.options ?? [] }
     : null;
   const askPrompt = ask.kind === "question"
     ? {
@@ -10774,7 +10823,10 @@ function paintWireAsk(host, run, force = false) {
     run.askShape = shape;
     run.askDraft = askDraftOf(shape, sig, {
       repaint: () => paintWireAsk(host, run, true),
-      answer: (choice) => invoke("wire_answer", {
+      base: helperBase(run),
+      // `message` is the words a refusal carries where the protocol has a
+      // place for them — the plan card's feedback field.
+      answer: (choice, message = null) => invoke("wire_answer", {
         id: run.wire,
         ask: ask.id,
         ...(ask.kind === "question"
@@ -10784,7 +10836,9 @@ function paintWireAsk(host, run, force = false) {
               one.other,
             ].filter(Boolean)),
           }
-          : { option: choice }),
+          // The words only ride a refusal that has some; a plain answer is
+          // the same request it always was.
+          : { option: choice, ...(message ? { message } : {}) }),
       }),
     });
     force = true;
@@ -11096,6 +11150,7 @@ function paintPaneAsk(held, force = false) {
   if (held.askDraft?.sig !== ask.sig) {
     held.askDraft = askDraftOf(ask, ask.sig, {
       repaint: () => paintPaneAsk(held, true),
+      base: helperBase(held.run),
       instead: () => held.host.querySelector(".worker-composer-box")?.focus(),
     });
     force = true;

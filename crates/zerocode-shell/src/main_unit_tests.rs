@@ -17152,6 +17152,7 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "composer-pad-y",
         "composer-pad-x",
         "composer-max-h",
+        "plan-max-h",
         "footer-pad",
         "footer-gap",
         "meta-pad",
