@@ -1946,6 +1946,7 @@ mod tests {
             // compared against the permission request's `tool_name`.
             if let Some(plan) = console.plan_tool {
                 assert!(!plan.is_empty() && !plan.starts_with('/'), "{id}: {plan}");
+            }
             if let Some(compact) = console.compact_command {
                 assert!(compact.starts_with('/'), "{id}: {compact}");
             }

@@ -54566,6 +54566,13 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       // 「지금 읽었나」만 묻는다 — 몇 번 읽었는지는 쫓아 읽기가 정하고,
       // 그 수는 기계의 속도다. 남의 판 쪽은 아래에서 0으로 못 박는다.
       seen.activityPolled = polled > beforeMine;
+      // 이 판의 읽기가 예약한 쫓아 읽기(160 ms)가 다 지나간 뒤에야 남의 판을
+      // 센다 — 그 예약이 아래 기다림 안에 떨어지면 「남의 판이 시킨 읽기」로
+      // 잘못 세어지고, 그 시각은 기계의 부하가 정한다(2026-09-21 세 레인이
+      // 기계를 같이 쓰는 동안 붉었다 푸르렀다 했다).
+      await settle();
+      await settle();
+      await settle();
       const beforeOther = polled;
       tell("hook:activity", { pane: `term:${term + 1}`, activities: [{ verb: "Read", target: "b.rs", phase: "start" }] });
       await window.__PAINTED__();
