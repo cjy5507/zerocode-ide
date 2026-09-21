@@ -58,14 +58,6 @@ mkdir -p "$TREE"
 git archive --format=tar "$SOURCE_SHA" | tar -x -C "$TREE" || { echo "publish-source: archive of $TAG failed" >&2; exit 3; }
 for dir in "${EXCLUDED_DIRS[@]}"; do rm -rf "${TREE:?}/$dir"; done
 
-# The personal-data scan is the gate the snapshot must clear. Until it lands
-# (t-5781) its absence is said aloud, never skipped in silence.
-if [ -f "$REPO/tools/release/pii-scan.py" ]; then
-  ( cd "$TREE" && python3 "$REPO/tools/release/pii-scan.py" --root . ) || { echo "publish-source: refused — the personal-data scan is red on $TAG's tree" >&2; exit 3; }
-else
-  echo "publish-source: WARNING pii-scan.py is not here yet — the snapshot is unscanned" >&2
-fi
-
 # ------------------------------------------------------- the public lineage --
 PUB=$WORK/public
 git init -q "$PUB"
@@ -86,6 +78,15 @@ fi
 
 cp -R "$TREE"/. "$PUB"/
 git -C "$PUB" add -A
+# The personal-data scan is the gate the snapshot must clear, and it reads
+# only what git tracks — so it runs over the public index just staged, which
+# is exactly the set of files about to be pushed and nothing else. Until the
+# scan lands (t-5781) its absence is said aloud, never skipped in silence.
+if [ -f "$REPO/tools/release/pii-scan.py" ]; then
+  python3 "$REPO/tools/release/pii-scan.py" --root "$PUB" || { echo "publish-source: refused — the personal-data scan is red on $TAG's tree" >&2; exit 3; }
+else
+  echo "publish-source: WARNING pii-scan.py is not here yet — the snapshot is unscanned" >&2
+fi
 NOTES=$(awk -v v="$VERSION" '/^## \[/{p=($0 ~ "\\[" v "\\]")} p' "$TREE/CHANGELOG.md" 2>/dev/null | head -80)
 {
   echo "release: $TAG"
