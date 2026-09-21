@@ -128,6 +128,17 @@ class PiiScan(unittest.TestCase):
         hits = found(self.checkout.root)["home-path"]
         self.assertEqual([h["line"] for h in hits], [1, 2], hits)
 
+    def test_a_retina_asset_name_is_not_a_mailbox(self):
+        """`icon@2x.png` and `128x128@2x.png` end in a scale suffix, not a
+        domain: the mailbox row forgives that whole family of asset names."""
+        self.checkout.write(
+            "assets.rs",
+            'const ICON: &str = "icons/icon@2x.png";\n'
+            'const TILE: &str = "128x128@2x.png";\n'
+            'const LOGO: &str = "logo@3x.webp";\n',
+        )
+        self.assertEqual(found(self.checkout.root).get("email", []), [])
+
     def test_a_finding_is_reported_at_its_own_line(self):
         caught = CAUGHT["home-path"]
         self.checkout.write("a.txt", f"one\ntwo\n{caught}\nfour\n")

@@ -79,13 +79,14 @@ RULES = (
         says="a mailbox outside the reserved example domains — a real person or service",
         find=r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
         # Reserved and fictional domains, the public code hosts a `git@` URL
-        # names, Google's own service-account example — and `128x128@2x.png`,
-        # which is a retina asset, not a mailbox.
+        # names, Google's own service-account example — and a retina asset
+        # (`icon@2x.png`, `128x128@2x.png`), whose `@2x` is a scale, not a
+        # mailbox.
         allow=r"(?i)[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)*"
               r"(?:example\.(?:com|org|net)|acme\.com|github\.com|gitlab\.com|azure\.com"
               r"|gserviceaccount\.com|zerocode\.[a-z]+"
               r"|test|example|invalid|local|localhost)"
-              r"|[0-9]+x[0-9]+@[0-9]+x\.(?:png|jpe?g|gif|svg|webp|ico)",
+              r"|[A-Za-z0-9._%+-]+@[0-9]+x\.(?:png|jpe?g|gif|svg|webp|ico)",
         skip=(("ui/vendor/", "third-party bundles and their authors' own copyright notices"),),
     ),
     dict(
