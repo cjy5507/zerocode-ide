@@ -35,6 +35,7 @@
 //! | [`composer`] | `›` 한 줄 편집기(UTF-8·붙여넣기 안전) |
 //! | [`effort_effect`] | Max·Ultra·Smart 컴포저/푸터 일회성 전환 |
 //! | [`slash`] | keep-list 와 컴포저 자동완성 팝업의 재료 |
+//! | [`mention`] | `@` 파일·스킬·볼트 페이지 팝업(codex `mentions_v2`) |
 //! | [`models`] | 자격증명 있는 provider 의 모델 목록(`/model` 피커) |
 //! | [`summary`] | 종료·재개 때 나가는 usage·재개 힌트 두 줄 |
 //! | [`question`] | `AskUserQuestion` 오버레이의 재료(codex `request_user_input`) |
@@ -60,6 +61,7 @@ pub mod folds;
 pub mod highlight;
 pub mod holdback;
 pub mod markdown;
+pub mod mention;
 pub mod models;
 pub mod painter;
 mod paint_probe;

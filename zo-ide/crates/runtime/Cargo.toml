@@ -27,6 +27,10 @@ thiserror.workspace = true
 sha2.workspace = true
 glob = "0.3"
 ignore = "0.4"
+# `@` file search: the fuzzy matcher Codex 0.155.1 runs (`codex-file-search`),
+# fed by the `ignore` walker above. nucleo-matcher scores paths the same way
+# Helix and Codex rank them.
+nucleo = "0.5"
 plugins = { path = "../plugins" }
 regex = "1"
 shlex = "1.3"

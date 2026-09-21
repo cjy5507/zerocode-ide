@@ -25,6 +25,7 @@ fn frame<'a>(composer: &'a Composer, status: Option<&'a Status>) -> Frame<'a> {
         sessions: None,
         pager: None,
         popup: None,
+        mention: None,
         shortcuts: None,
         model: "claude-fable-5-1",
         effort: "smart",

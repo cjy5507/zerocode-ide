@@ -1032,6 +1032,56 @@ fn the_slash_popup_row_is_the_captured_one() {
     assert_eq!(rendered, format!("\u{1b}[1m\u{1b}[38;5;6;49m  {measured}"));
 }
 
+/// The `@` popup's selected row wears the slash popup's row style — bold +
+/// cyan over the whole line, `;49` included — codex `mentions_v2/render.rs`
+/// gives the selected row its `accent_style` the same way. The tag column
+/// is the last thing on the row and the file name is cyan on its own when
+/// the row is not selected.
+#[test]
+fn the_at_popup_selected_row_wears_the_slash_popup_style() {
+    use std::path::{Path, PathBuf};
+    use runtime::file_search::{FileMatch, MatchType};
+    use zo_ide::tui::mention::MentionPopup;
+    let root = Path::new("/repo");
+    let mut popup = MentionPopup::new(Vec::new(), "src", None);
+    popup.set_file_matches(
+        "src",
+        vec![
+            FileMatch {
+                score: 90,
+                path: PathBuf::from("src/composer.rs"),
+                match_type: MatchType::File,
+                root: root.to_path_buf(),
+                full_path: root.join("src/composer.rs"),
+                indices: Some(vec![0, 1, 2]),
+            },
+            FileMatch {
+                score: 80,
+                path: PathBuf::from("src/compose_tests.rs"),
+                match_type: MatchType::File,
+                root: root.to_path_buf(),
+                full_path: root.join("src/compose_tests.rs"),
+                indices: Some(vec![0, 1, 2]),
+            },
+        ],
+    );
+    let lines = popup.lines(120, zo_ide::tui::palette::COMMAND_TOKEN);
+    assert_eq!(lines.len(), 4, "two rows, a blank, the footer");
+    let mut selected = String::new();
+    write_spans(&lines[0], &mut selected);
+    assert!(
+        selected.starts_with("\u{1b}[1m\u{1b}[38;5;6;49m> composer.rs"),
+        "{selected:?}"
+    );
+    assert!(lines[0].plain().ends_with("File  "), "{:?}", lines[0].plain());
+    let mut plain_row = String::new();
+    write_spans(&lines[1], &mut plain_row);
+    assert!(plain_row.starts_with("  \u{1b}[38;5;6;49mcompose_tests.rs"), "{plain_row:?}");
+    // codex highlights the matched characters of the directory part only —
+    // the file name is one cyan span (`render.rs::primary_spans`).
+    assert!(plain_row.contains("\u{1b}[1msrc"), "the matched directory characters are bold: {plain_row:?}");
+}
+
 /// 캡처의 11.03s 프레임 — `Select Model and Effort` 피커 전체. 번호 행의
 /// 설명 열, `(default)`/`(current)` 표기, `›` 커서, 푸터가 모두 여기서 나온다.
 #[test]
@@ -2513,6 +2563,7 @@ fn question_frame<'a>(composer: &'a Composer, question: &'a view::Question) -> F
         sessions: None,
         pager: None,
         popup: None,
+        mention: None,
         shortcuts: None,
         model: "claude-opus-5",
         effort: "high",
@@ -2672,6 +2723,7 @@ fn frame_build_cost() {
         sessions: None,
         pager: None,
         popup: None,
+        mention: None,
         shortcuts: None,
         model: "claude-opus-5",
         effort: "high",

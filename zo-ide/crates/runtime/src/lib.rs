@@ -17,7 +17,7 @@ mod convert_messages;
 pub mod file_neighbours;
 pub mod file_ops;
 pub mod file_read_registry;
-pub mod fuzzy_file_picker;
+pub mod file_search;
 pub mod git_snapshot;
 mod hooks;
 pub mod image_guard;

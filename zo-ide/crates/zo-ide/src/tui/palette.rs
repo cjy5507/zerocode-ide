@@ -46,6 +46,12 @@ const LIGHT_TABLE_HEADER: Color = Color::Rgb(108, 76, 21);
 
 /// codex 가 `.cyan()` 으로 칠하는 명령 토큰.
 pub const COMMAND_TOKEN: Color = Color::Indexed(6);
+/// The `@` popup's file name and `File` tag — codex `mentions_v2/render.rs`
+/// `base_style.fg(Color::Cyan)` and `candidate.rs` `MentionType::File`.
+pub const MENTION_FILE: Color = Color::Indexed(6);
+/// The `@` popup's `Vault` tag and the active `Skills` mode — the magenta
+/// codex gives its non-file rows (`MentionType::Plugin`, `SearchMode::Tools`).
+pub const MENTION_PAGE: Color = Color::Indexed(5);
 /// 부팅 카드에서 effort 토큰.
 pub const CARD_EFFORT: Color = Color::Indexed(5);
 /// 경고 셀 `⚠`.
