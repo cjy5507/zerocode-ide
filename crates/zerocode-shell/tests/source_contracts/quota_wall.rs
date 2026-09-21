@@ -124,8 +124,9 @@ fn the_wall_witness_is_asked_beside_the_stall_probe_and_outside_the_team_table()
         "let marker = marker?;",
         "let headroom = headroom?;",
         "read_gauge(headroom, now_ms)",
-        "!reading.at_wall",
-        "reading.stale",
+        // At the wall AND fresh, through the one sentence every road that
+        // acts on a spent gauge reads (t-4839).
+        "!reading.wall_to_act_on()",
         "headroom.updated_at_ms > now_ms",
     ] {
         assert!(
@@ -133,6 +134,28 @@ fn the_wall_witness_is_asked_beside_the_stall_probe_and_outside_the_team_table()
             "the two-witness rule lost `{needed}`:\n{witness}"
         );
     }
+    // That sentence, and the two readers that would otherwise each keep their
+    // own copy of it: the summons refusal, and the set a summon judgment is
+    // closed over. 2026-09-19 is what two copies cost — a gauge too old to
+    // refuse on was a wall in the options alone, so the agent the window went
+    // on to summon was missing from the choice and the row read as a
+    // disagreement.
+    let sentence = super::support::block_after(&core, "fn wall_to_act_on(&self) -> bool {");
+    assert!(
+        sentence.contains("self.at_wall && !self.stale"),
+        "the one wall sentence stopped asking for a fresh number:\n{sentence}"
+    );
+    let rooms = super::support::block_after(&core, "fn installed_rooms(");
+    assert!(
+        rooms.contains("read_gauge(held, now_ms).wall_to_act_on()"),
+        "the options pass judges a wall of its own again:\n{rooms}"
+    );
+    let verdict = super::support::block_after(&core, "pub fn quota_verdict(");
+    assert!(
+        verdict.contains("if reading.at_wall && !reading.wall_to_act_on() {")
+            && verdict.contains("if reading.wall_to_act_on() {"),
+        "the refusal road stopped reading the one sentence:\n{verdict}"
+    );
     let gauge = super::support::block_after(&core, "fn read_gauge(");
     for needed in [
         "QUOTA_POLICY.wall_percent",

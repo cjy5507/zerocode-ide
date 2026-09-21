@@ -11497,7 +11497,7 @@ pub fn quota_wall_witness(
     let marker = marker?;
     let headroom = headroom?;
     let reading = read_gauge(headroom, now_ms);
-    if !reading.at_wall || reading.stale || headroom.updated_at_ms > now_ms {
+    if !reading.wall_to_act_on() || headroom.updated_at_ms > now_ms {
         return None;
     }
     Some(QuotaWallWitness {
@@ -11922,6 +11922,24 @@ fn read_gauge(headroom: &Headroom, now_ms: i64) -> GaugeReading {
     }
 }
 
+impl GaugeReading {
+    /// The wall a decision may act on: the number is at the table's wall AND
+    /// the snapshot still describes the window it was read from.
+    ///
+    /// The ONE sentence, because three roads read a spent gauge — the summons
+    /// refusal, the wall witness the beat hands work on, and the set a summons'
+    /// options are closed over — and every road that spells it out again is a
+    /// chance for them to disagree. They did (t-4839): a 100% snapshot of a
+    /// window that had already reset was `too old to refuse on` at the gate and
+    /// a wall in the options, so the agent this window went on to summon was
+    /// missing from the set the judgment chose between, and the row said the
+    /// two disagreed. A stale number describes a window that may no longer
+    /// exist; `unread is not a wall`, and neither is unreadable.
+    fn wall_to_act_on(&self) -> bool {
+        self.at_wall && !self.stale
+    }
+}
+
 /// Milliseconds as whole minutes, rounded up — "resets in 1 min" for forty
 /// seconds, never "resets in 0 min".
 fn minutes_up(ms: i64) -> u64 {
@@ -12014,7 +12032,7 @@ pub fn quota_verdict(
         held.provider,
         held.window.as_str()
     );
-    if reading.at_wall && reading.stale {
+    if reading.at_wall && !reading.wall_to_act_on() {
         return QuotaVerdict::Warn(notice_for(
             "warn",
             Some(held),
@@ -12030,7 +12048,7 @@ pub fn quota_verdict(
             ),
         ));
     }
-    if reading.at_wall {
+    if reading.wall_to_act_on() {
         let retry = reading
             .retry_in_minutes
             .map(|minutes| format!(" — or ask again in {minutes} min"))
@@ -12042,9 +12060,7 @@ pub fn quota_verdict(
                     .as_ref()
                     .map(|gauge| (gauge, read_gauge(gauge, now_ms)));
                 match other {
-                    Some((gauge, other_reading))
-                        if other_reading.at_wall && !other_reading.stale =>
-                    {
+                    Some((gauge, other_reading)) if other_reading.wall_to_act_on() => {
                         let why = format!(
                             "{figure} — nothing was written; and the alternative {} is at {}% of \
                              its {} {} quota {} too{retry}",
@@ -12157,6 +12173,10 @@ fn quota_gate(
 struct AgentRoom {
     id: String,
     gauge: Option<Headroom>,
+    /// Whether that gauge is a wall this minute —
+    /// [`GaugeReading::wall_to_act_on`], the sentence the refusal itself is
+    /// made of, so a number the gate would only warn about is not a wall here
+    /// either.
     at_wall: bool,
 }
 
@@ -12175,7 +12195,7 @@ fn installed_rooms(launcher: &dyn Launcher, now_ms: i64) -> Option<Vec<AgentRoom
                     id: row.id.to_string(),
                     at_wall: gauge
                         .as_ref()
-                        .is_some_and(|held| read_gauge(held, now_ms).at_wall),
+                        .is_some_and(|held| read_gauge(held, now_ms).wall_to_act_on()),
                     gauge,
                 }
             })
@@ -12189,7 +12209,10 @@ fn installed_rooms(launcher: &dyn Launcher, now_ms: i64) -> Option<Vec<AgentRoom
 ///
 /// An agent whose gauge nobody has read is here: unread is not a wall, and
 /// the quota gate itself lets such a summons through. Its option says so in
-/// its own words rather than borrowing a number nobody measured.
+/// its own words rather than borrowing a number nobody measured. So is one
+/// whose gauge is spent but too old to refuse on — the gate lets THAT summons
+/// through as well, with the number in the receipt, and a set that dropped it
+/// would be a choice with the real answer taken out of it (t-4839).
 #[must_use]
 pub fn summonable(
     launcher: &dyn Launcher,
