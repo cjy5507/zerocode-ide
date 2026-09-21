@@ -35262,3 +35262,295 @@ fn the_flow_console_checks_the_main_webview_before_reading_or_executing() {
         "evidence must not be broadcast to guest listeners"
     );
 }
+
+/// t-5587: the 「macOS 권한」 page shows what macOS actually answers **this
+/// window**, judged from one table.
+///
+/// The page shipped in 1.1.9 stood at 「알 수 없음」 for five of its nine rows
+/// because `status()` returned constants there, and folded a `false` from
+/// `AXIsProcessTrusted` / `CGPreflightScreenCaptureAccess` into Unknown as
+/// well — a page that could not tell "nobody knows" from "you cannot use
+/// this". Eight things hold that shut:
+///
+///   1. **One table.** Nine `PermissionId`s, one `PERMISSIONS` row each, each
+///      row carrying its own System Settings pane. The old `const fn
+///      settings_url(` — a second nine-armed list of the same permissions —
+///      must not come back.
+///   2. **A judged row is not a constant.** Every `JudgedBy::Api` row names a
+///      `Probe`, and `Probe::read` is the only road to a status; only
+///      `JudgedBy::NoApi` may carry a `PermissionStatus` literal, and only
+///      the two rows macOS answers nothing for do.
+///   3. **False is Denied.** Accessibility and screen recording say Denied
+///      when their API says false: whether it was never asked or was refused,
+///      a tool this window launches cannot do it today.
+///   4. **An answered prompt row opens the pane.** macOS raises each dialog
+///      once per process identity, so a Granted or Denied row must not offer
+///      a trigger that would do nothing.
+///   5. **A failed connection test is stamped too**, so a stale success
+///      cannot pass for a fresh one.
+///   6. **The probes stay off the async worker.** Nine TCC round trips cost
+///      ~22 ms warm on the machine this was measured on, and the page asks on
+///      open, on every window focus, and after every action.
+///   7. **The dialog cannot kill the window.** Asking for a capture device
+///      without its usage description terminates the process, so every
+///      `Prompt::CaptureDevice` row has its key in the merged `Info.plist`.
+///   8. **The words say why.** The section explains denied and unknown, the
+///      three rows macOS cannot fully answer say what stands in their place,
+///      and the last-test line is read from the catalog in four locales.
+#[test]
+fn the_macos_permission_page_judges_this_process_from_one_table() {
+    let native = include_str!("../../src/developer_permissions.rs");
+    let shipped = native
+        .split_once("#[cfg(test)]")
+        .map_or(native, |(before, _)| before);
+    let table = support::block_after(shipped, "const PERMISSIONS: [Permission; 9] = [");
+
+    // 1. One row per id, each with its own pane, and no second list.
+    for id in [
+        "Microphone",
+        "Camera",
+        "Screen",
+        "Accessibility",
+        "FullDiskAccess",
+        "Automation",
+        "LocalNetwork",
+        "Usb",
+        "Bluetooth",
+    ] {
+        assert_eq!(
+            table.matches(&format!("id: PermissionId::{id},")).count(),
+            1,
+            "`{id}` must stand on exactly one row of PERMISSIONS"
+        );
+    }
+    assert_eq!(
+        table.matches("settings_url:").count(),
+        9,
+        "every permission opens one System Settings pane, from the table"
+    );
+    assert_eq!(
+        shipped.matches("x-apple.systempreferences:").count(),
+        9,
+        "the System Settings panes live on the table and nowhere else"
+    );
+    assert!(
+        !shipped.contains("const fn settings_url("),
+        "the second permission list is back: settings_url must be a column"
+    );
+    assert!(
+        shipped.contains("fn permission(id: PermissionId) -> &'static Permission {")
+            && shipped.contains("opener.arg(permission(id).settings_url);"),
+        "opening a pane must look the row up in the one table"
+    );
+
+    // 2. Judged rows go through a probe; only the api-less rows are constants.
+    assert_eq!(
+        table.matches("judged_by: JudgedBy::Api(Probe::").count(),
+        7,
+        "seven rows are answered by a named macOS probe"
+    );
+    assert_eq!(
+        table.matches("judged_by: JudgedBy::NoApi(").count(),
+        2,
+        "only local network and USB have no query API"
+    );
+    for row in ["LocalNetwork", "Usb"] {
+        let start = table
+            .find(&format!("id: PermissionId::{row},"))
+            .expect("the api-less row");
+        let body = &table[start..];
+        let body = &body[..body.find("\n    },").unwrap_or(body.len())];
+        assert!(
+            body.contains("JudgedBy::NoApi(PermissionStatus::"),
+            "`{row}` must carry the honest constant it stands at:\n{body}"
+        );
+    }
+    let status = support::block_after(shipped, "fn status(row: &Permission) -> PermissionStatus {");
+    assert!(
+        status.contains("JudgedBy::Api(probe) => probe.read(),")
+            && status.contains("JudgedBy::NoApi(standing) => without_api(standing),"),
+        "status() must read the table, never a second match over ids:\n{status}"
+    );
+    assert!(
+        !status.contains("PermissionId::"),
+        "status() judges rows, not identifiers — an id arm is a second table:\n{status}"
+    );
+
+    // Each probe names exactly one native entry point, and the two
+    // authorization enums Apple defines identically share one mapping.
+    for call in [
+        "authorizationStatusForMediaType:",
+        "CGPreflightScreenCaptureAccess()",
+        "AXIsProcessTrusted()",
+        "AEDeterminePermissionToAutomateTarget(",
+        "msg_send![class, authorization]",
+    ] {
+        assert!(
+            shipped.contains(call),
+            "the probe table promises `{call}` and the file does not call it"
+        );
+    }
+    assert_eq!(
+        shipped.matches("fn tcc_authorization(").count(),
+        1,
+        "AVAuthorizationStatus and CBManagerAuthorization share one mapping"
+    );
+    assert!(
+        shipped.contains("AnyClass::get(c\"CBCentralManager\")")
+            && !shipped.contains("CBCentralManager alloc")
+            && !shipped.contains("initWithDelegate"),
+        "Bluetooth is read from the class property; creating a manager prompts"
+    );
+
+    // 3. False is Denied, on both of the rows that used to fold it away.
+    for probe in ["fn screen_capture_status()", "fn accessibility_status()"] {
+        let body = support::block_after(shipped, probe);
+        assert!(
+            body.contains("PermissionStatus::Granted") && body.contains("PermissionStatus::Denied"),
+            "`{probe}` must answer Denied when its API says false:\n{body}"
+        );
+        assert!(
+            !body.contains("PermissionStatus::Unknown"),
+            "`{probe}` folded a false back into Unknown:\n{body}"
+        );
+    }
+
+    // 4. An answered prompt row points at the pane instead of a dead button.
+    let action = support::block_after(
+        shipped,
+        "const fn action(row: &Permission, status: PermissionStatus) -> PermissionAction {",
+    );
+    assert!(
+        action.contains("match row.prompt")
+            && action.contains("PermissionStatus::Granted | PermissionStatus::Denied")
+            && action.contains("PermissionAction::TriggerPrompt")
+            && action.contains("_ => PermissionAction::OpenSettings,"),
+        "the button posture must come from the row's prompt and its answer:\n{action}"
+    );
+
+    // 5. Every connection test is stamped, refusals included.
+    let failed = support::block_after(shipped, "    fn failed(failure: &'static str) -> Self {");
+    assert!(
+        failed.contains("tested_at: now_in_millis(),"),
+        "a failed test must say when it ran:\n{failed}"
+    );
+    assert!(
+        shipped.contains("    tested_at: u64,"),
+        "the stamp is always carried, never an Option the renderer must guess at"
+    );
+
+    // 6. The probes run off the async worker.
+    let command = support::block_after(
+        support::shipped_backend(),
+        "pub(crate) async fn developer_permission_statuses()",
+    );
+    assert!(
+        command.contains("tokio::task::spawn_blocking(developer_permissions::statuses)"),
+        "nine TCC round trips must not sit on the async worker:\n{command}"
+    );
+    let request = support::block_after(shipped, "pub async fn request(id: PermissionId)");
+    assert!(
+        request.contains("tokio::task::spawn_blocking(move || prompt.raise())")
+            && request.contains("tokio::task::spawn_blocking(move || status(row))"),
+        "raising a dialog and re-reading the answer both block:\n{request}"
+    );
+
+    // 7. Every capture-device dialog has the usage description that keeps
+    //    macOS from terminating the window when it is raised — in the plist
+    //    the bundler merges, and checked again before the dialog is raised,
+    //    because a `cargo run` window carries no bundle at all.
+    let plist = include_str!("../../Info.plist");
+    assert_eq!(
+        table.matches("prompt: Some(Prompt::CaptureDevice(").count(),
+        2,
+        "the microphone and the camera are the two rows that ask AVFoundation"
+    );
+    let keys = support::block_after(shipped, "    const fn usage_description_key(self)");
+    let named = keys
+        .match_indices("\"NS")
+        .map(|(at, _)| {
+            let rest = &keys[at + 1..];
+            &rest[..rest.find('"').expect("a closed key literal")]
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        named,
+        vec!["NSMicrophoneUsageDescription", "NSCameraUsageDescription"],
+        "the keys the window looks for must be the two capture descriptions"
+    );
+    for key in named {
+        assert!(
+            plist.contains(&format!("<key>{key}</key>")),
+            "`{key}` is missing from Info.plist: requestAccess would \
+             terminate the window"
+        );
+    }
+    let ask = support::block_after(shipped, "fn request_capture_device(kind: MediaKind)");
+    assert!(
+        ask.contains("if !can_ask_for(kind) {") && ask.contains("return false;"),
+        "the dialog must not be raised without its usage description:\n{ask}"
+    );
+    assert!(
+        request.contains("let opened_system_settings = !raised;")
+            && request.contains("open_settings(id)?;"),
+        "a dialog that cannot be raised must still take the person \
+         somewhere:\n{request}"
+    );
+
+    // 8. The words. The section explains the two statuses a person cannot
+    //    act on, and the rows macOS cannot answer say what stands instead.
+    let markup = include_str!("../../../../ui/index.html");
+    let section = support::markup_between(
+        markup,
+        "data-i18n=\"settings.permissions.accessHint\"",
+        "</p>",
+    );
+    for said in ["거부됨", "알 수 없음", "책임 프로세스"] {
+        assert!(
+            section.contains(said),
+            "the section must say what `{said}` means here:\n{section}"
+        );
+    }
+    let window = support::window_source();
+    let definitions = support::block_after(window, "const developerPermissionDefinitions = ");
+    for (key, reason) in [
+        ("automationHint", "System Events"),
+        ("localNetworkHint", "API"),
+        ("usbHint", "API"),
+    ] {
+        let hint = definitions
+            .split_once(&format!("t(\"settings.permissions.{key}\", \""))
+            .map(|(_, rest)| rest.split_once("\")").map_or(rest, |(said, _)| said))
+            .unwrap_or_else(|| panic!("`{key}` left the renderer's copy"));
+        assert!(
+            hint.contains(reason),
+            "`{key}` must say why its row cannot be read: {hint}"
+        );
+    }
+    let evidence = support::block_after(window, "function lastLocalNetworkTestCopy(id) {");
+    assert!(
+        evidence.contains("t(\"settings.permissions.lastTestOk\", ")
+            && evidence.contains("t(\"settings.permissions.lastTestFailed\", ")
+            && evidence.contains("localNetworkTestResult.testedAt"),
+        "the last test is quoted from the catalog, with its time:\n{evidence}"
+    );
+    assert!(
+        !window.contains("developerPermissionStatuses = new Set([\n  \"granted\", \"denied\", \"unknown\", \"ready\", \"unsupported\", \"tested\","),
+        "the last test must not grow a tenth status word"
+    );
+    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    for key in [
+        "settings.permissions.accessHint",
+        "settings.permissions.automationHint",
+        "settings.permissions.localNetworkHint",
+        "settings.permissions.usbHint",
+        "settings.permissions.lastTestOk",
+        "settings.permissions.lastTestFailed",
+    ] {
+        assert_eq!(
+            i18n.matches(&format!("\"{key}\":")).count(),
+            4,
+            "`{key}` is missing from one of the en/ja/zh/es catalogs"
+        );
+    }
+}

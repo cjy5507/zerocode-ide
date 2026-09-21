@@ -1865,17 +1865,17 @@ const developerPermissionDefinitions = Object.freeze([
   {
     id: "automation",
     title: () => t("settings.permissions.automation", "자동화"),
-    hint: () => t("settings.permissions.automationHint", "Apple Events를 사용하는 도구의 시스템 요청을 표시합니다."),
+    hint: () => t("settings.permissions.automationHint", "Apple Events를 사용하는 도구가 다른 앱을 조종합니다. 판정 대상은 System Events이며, 그 앱이 떠 있지 않으면 물어볼 상대가 없어 「알 수 없음」입니다."),
   },
   {
     id: "local-network",
     title: () => t("settings.permissions.localNetwork", "로컬 네트워크"),
-    hint: () => t("settings.permissions.localNetworkHint", "LAN의 개발 서버와 기기에 연결합니다."),
+    hint: () => t("settings.permissions.localNetworkHint", "LAN의 개발 서버와 기기에 연결합니다. macOS는 이 권한을 조회하는 API를 주지 않으므로, 아래 연결 테스트만이 증거입니다."),
   },
   {
     id: "usb",
     title: () => t("settings.permissions.usb", "USB 액세서리"),
-    hint: () => t("settings.permissions.usbHint", "연결된 개발 및 디버깅 기기에 접근합니다."),
+    hint: () => t("settings.permissions.usbHint", "연결된 개발 및 디버깅 기기에 접근합니다. macOS는 이 권한을 조회하는 API를 주지 않고, 액세서리가 붙는 그때마다 묻습니다."),
   },
   {
     id: "bluetooth",
@@ -1925,6 +1925,18 @@ function developerPermissionStatusCopy(status) {
   }[status];
 }
 
+/* The only row with no status API of its own: what stands in for one is the
+ * card's own connection test, carried here with the time it ran so a stale
+ * success cannot pass for a fresh one. It is not a new status word — the row
+ * still says 「알 수 없음」, and this line says what was actually tried. */
+function lastLocalNetworkTestCopy(id) {
+  if (id !== "local-network" || !localNetworkTestResult) return null;
+  const at = new Date(localNetworkTestResult.testedAt).toLocaleString();
+  return localNetworkTestResult.ok
+    ? () => t("settings.permissions.lastTestOk", "최근 연결 테스트 성공 · {{at}}", { at })
+    : () => t("settings.permissions.lastTestFailed", "최근 연결 테스트 실패 · {{at}}", { at });
+}
+
 function developerPermissionNode(row) {
   const item = document.createElement("div");
   item.className = "integration-site developer-permission-row";
@@ -1940,6 +1952,15 @@ function developerPermissionNode(row) {
   hint.className = "settings-row-desc";
   say(hint, row.hint);
   copy.append(title, hint);
+
+  const evidence = lastLocalNetworkTestCopy(row.id);
+  if (evidence) {
+    const said = document.createElement("span");
+    said.className = "settings-row-desc";
+    said.dataset.permissionEvidence = row.id;
+    say(said, evidence);
+    copy.append(said);
+  }
 
   const status = document.createElement("span");
   status.className = "settings-state";
@@ -2055,6 +2076,7 @@ function paintLocalNetworkTest() {
   el("local-network-test").disabled = localNetworkTesting;
   el("local-network-host").disabled = localNetworkTesting;
   el("local-network-port").disabled = localNetworkTesting;
+  paintDeveloperPermissions();
 }
 
 async function testLocalNetworkPermission() {
@@ -2067,7 +2089,7 @@ async function testLocalNetworkPermission() {
   try {
     localNetworkTestResult = await invoke("test_local_network_permission", { host, port });
   } catch {
-    localNetworkTestResult = { ok: false, failure: "unknown" };
+    localNetworkTestResult = { ok: false, failure: "unknown", testedAt: Date.now() };
   }
   localNetworkTesting = false;
   paintLocalNetworkTest();

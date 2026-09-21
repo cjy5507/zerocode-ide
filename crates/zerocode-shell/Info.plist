@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the bundle's generated Info.plist by tauri-bundler, which reads
+  the Info.plist sitting beside tauri.conf.json.
+
+  These two keys are not decoration. macOS terminates any process that calls
+  AVCaptureDevice.requestAccessForMediaType: without the matching usage
+  description, so the 「macOS 권한」 page's microphone and camera buttons
+  would kill the window instead of asking. The window asks on behalf of the
+  tools its panes launch — it is their responsible process.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>ZeroCode asks on behalf of the developer tools you launch from its terminals, so they can record and transcribe audio.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>ZeroCode asks on behalf of the developer tools you launch from its terminals, so they can capture video from a camera.</string>
+</dict>
+</plist>
