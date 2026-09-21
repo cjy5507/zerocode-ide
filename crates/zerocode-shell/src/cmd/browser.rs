@@ -854,6 +854,10 @@ pub(crate) fn open_browser_pane(
         browser_profile_store(id).ok_or("프로필 id가 아닙니다")?;
     }
     let parsed = browsable(&url)?;
+    // A pane is a road a walk starts on, and the walk's judge warms the wire
+    // too late to help its first question (t-5535): warm it here, while the
+    // pane is still being born, on the helper's own thread.
+    crate::systemone::warm_for_walks();
     // The label: minted here for the window's own open, or CLAIMED when the
     // agents' door reserved it first (`zerocode-browser open` answers the
     // label before the pane exists). Only a reserved label is accepted —

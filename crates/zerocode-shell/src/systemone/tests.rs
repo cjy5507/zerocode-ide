@@ -167,6 +167,17 @@ fn the_door_is_the_only_road_to_the_wire_in_the_window() {
     );
 }
 
+/// Every request `endpoint` has heard once it has heard `many` of them, or
+/// once three seconds have passed: a warm-up's own request is sent from a
+/// task of its own, so it lands a moment after the call that asked for it.
+fn heard(endpoint: &Endpoint, many: usize) -> Vec<String> {
+    let began = std::time::Instant::now();
+    while endpoint.asked().len() < many && began.elapsed() < Duration::from_secs(3) {
+        thread::sleep(Duration::from_millis(20));
+    }
+    endpoint.asked()
+}
+
 /// A warm-up is one bare GET of the base — no key, no words — whose only
 /// product is the pooled socket the first question rides; and a wire with
 /// no key sends none, as it would ask nothing (the same "no key, no socket"
@@ -175,15 +186,11 @@ fn the_door_is_the_only_road_to_the_wire_in_the_window() {
 fn a_warm_up_sends_one_bare_get_and_a_keyless_wire_sends_none() {
     let endpoint = Endpoint::serving("HTTP/1.1 404 Not Found", String::new(), 0);
     Wire::at(&endpoint.base(), "", None).warm();
-    std::thread::sleep(std::time::Duration::from_millis(300));
+    thread::sleep(Duration::from_millis(300));
     assert!(endpoint.asked().is_empty(), "no key, no socket");
 
     Wire::at(&endpoint.base(), "test-key", None).warm();
-    let began = std::time::Instant::now();
-    while endpoint.asked().is_empty() && began.elapsed() < std::time::Duration::from_secs(3) {
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-    let asked = endpoint.asked();
+    let asked = heard(&endpoint, 1);
     assert_eq!(asked.len(), 1, "{asked:?}");
     assert!(asked[0].starts_with("GET / HTTP/1.1"), "{}", asked[0]);
     assert!(
@@ -196,4 +203,43 @@ fn a_warm_up_sends_one_bare_get_and_a_keyless_wire_sends_none() {
         "a warm-up carries no body: {}",
         asked[0]
     );
+}
+
+/// The doors' warm-up (t-5535) is that same warm-up, reached from a window
+/// that is only booting or a pane that is only opening: with a key it opens
+/// one socket, and without one it opens none — a door cannot send what a
+/// question could not.
+#[test]
+fn the_doors_warm_up_opens_one_socket_and_none_without_a_key() {
+    let endpoint = Endpoint::serving("HTTP/1.1 404 Not Found", String::new(), 0);
+    warm_off_thread(Wire::at(&endpoint.base(), "", None));
+    thread::sleep(Duration::from_millis(300));
+    assert!(endpoint.asked().is_empty(), "no key, no socket");
+
+    warm_off_thread(Wire::at(&endpoint.base(), "test-key", None));
+    let asked = heard(&endpoint, 1);
+    assert_eq!(asked.len(), 1, "{asked:?}");
+    assert!(asked[0].starts_with("GET / HTTP/1.1"), "{}", asked[0]);
+}
+
+/// The second door in a minute sends nothing: the first door's socket is
+/// still in the pool, and a GET per door is the cost this saves. The window
+/// where that is true is the pool's own ([`POOL_IDLE`]), so the skip and the
+/// socket cannot disagree.
+#[test]
+fn a_second_warm_up_inside_the_pools_idle_window_opens_no_socket() {
+    let endpoint = Endpoint::serving("HTTP/1.1 404 Not Found", String::new(), 0);
+    Wire::at(&endpoint.base(), "test-key", None).warm();
+    assert_eq!(
+        heard(&endpoint, 1).len(),
+        1,
+        "the first door opens a socket"
+    );
+
+    // A second door, with a wire of its own — what is remembered is the
+    // origin's socket, not one wire's idea of it.
+    Wire::at(&endpoint.base(), "test-key", None).warm();
+    thread::sleep(Duration::from_millis(300));
+    let asked = endpoint.asked();
+    assert_eq!(asked.len(), 1, "a live socket was warmed twice: {asked:?}");
 }

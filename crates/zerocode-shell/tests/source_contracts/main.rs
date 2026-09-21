@@ -556,6 +556,82 @@ mod tests {
         }
     }
 
+    /// t-5535: a walk's judge warms the wire when the walk is asked for, and
+    /// after a restart that is too late — the first look is shorter than the
+    /// handshake it would have to hide, which cost the first question of the
+    /// first walk 554 ms against 242–290 ms for the ones behind it (§2.2 of
+    /// docs/design/jev-seats-accuracy-wave-20260921.md). So every door a walk
+    /// can start behind warms it first, and each through the one helper: the
+    /// window's boot, a browser pane, and a device stream on either platform.
+    ///
+    /// Read without whitespace, the way the router's own road is read
+    /// (`computer_use_routes_pages_and_devices_to_zerocodes_owned_surfaces`):
+    /// rustfmt folds a call across lines the moment its line grows, and the
+    /// road is the same road however it is wrapped.
+    #[test]
+    fn every_door_a_walk_starts_behind_warms_the_wire() {
+        let backend = shipped_backend();
+        let squeezed = |text: &str| text.split_whitespace().collect::<String>();
+        let warms = "systemone::warm_for_walks();";
+
+        // The two doors the window itself owns, in the shipped backend.
+        for (door, opens) in [
+            ("the window's boot", ".setup(move |app| {"),
+            ("a browser pane", "fn open_browser_pane("),
+        ] {
+            let block = squeezed(block_after(backend, opens));
+            assert!(
+                block.contains(warms),
+                "{door} opens without warming the wire a walk will ask on"
+            );
+        }
+
+        // And the device streams, whose files the backend parts do not carry.
+        for (door, source, opens) in [
+            (
+                "an iOS stream",
+                include_str!("../../src/emulator/ios.rs"),
+                "async fn start_emulator_stream(",
+            ),
+            (
+                "an Android stream",
+                include_str!("../../src/emulator/android.rs"),
+                "async fn start_android_stream(",
+            ),
+        ] {
+            let block = squeezed(block_after(source, opens));
+            assert!(
+                block.contains(warms),
+                "{door} opens without warming the wire a walk will ask on"
+            );
+        }
+
+        // One warm-up in the window: a door asks the helper, and the helper
+        // and the walk's own judge are the only two callers of the wire's
+        // `warm` — nobody opens a socket of their own beside it.
+        let wire = include_str!("../../src/systemone.rs");
+        let product = wire
+            .split("#[cfg(test)]\npub(crate) mod tests")
+            .next()
+            .unwrap_or(wire);
+        let helper = block_after(product, "pub fn warm_for_walks(");
+        assert!(
+            squeezed(helper).contains("warm_off_thread(Wire::of_this_machine())"),
+            "the doors' warm-up no longer reads this machine's key:\n{helper}"
+        );
+        assert_eq!(
+            product.matches(".warm()").count(),
+            1,
+            "the wire is warmed in one place inside itself"
+        );
+        let judge = include_str!("../../src/computer_use/errand/live.rs");
+        assert_eq!(
+            judge.matches("wire.warm()").count(),
+            1,
+            "a walk's judge warms the same wire, once"
+        );
+    }
+
     /// A lone command and every step of a batch take one road: the evidence,
     /// the band's count and the operator's memory of its hands are written in
     /// one place, and a batch reaches the helper only through its steps.

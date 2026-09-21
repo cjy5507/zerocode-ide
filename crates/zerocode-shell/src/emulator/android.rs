@@ -1012,6 +1012,9 @@ pub(crate) async fn start_android_stream(
     on_frame: BinaryChannel,
 ) -> Result<EmulatorStream, String> {
     crate::from_the_main_webview(&webview)?;
+    // The same door as iOS's, warmed for the same reason (t-5535): a walk on
+    // this device asks its first question a moment after the first frame.
+    crate::systemone::warm_for_walks();
     tauri::async_runtime::spawn_blocking(move || {
         let sdk = android_sdk()
             .ok_or("Android SDK를 찾지 못했습니다 — Android Studio의 SDK를 설치하세요")?;

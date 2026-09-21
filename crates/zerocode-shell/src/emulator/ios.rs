@@ -941,6 +941,10 @@ pub(crate) async fn start_emulator_stream(
     on_frame: BinaryChannel,
 ) -> Result<EmulatorStream, String> {
     crate::from_the_main_webview(&webview)?;
+    // A device stream is a road a walk starts on, the same as a browser pane
+    // (t-5535): the wire is warmed here, before the boot and the first frame,
+    // so the walk's first question does not pay a handshake as well.
+    crate::systemone::warm_for_walks();
     tauri::async_runtime::spawn_blocking(move || {
         let devices = list_ios_simulators();
         let chosen = selected_simulator(&devices, udid.as_deref())?;
