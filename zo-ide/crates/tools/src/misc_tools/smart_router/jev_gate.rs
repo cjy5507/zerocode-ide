@@ -154,6 +154,12 @@ impl JevDoor {
     /// ([`HEDGE_SAMPLE_ROWS`]) only the rows that are one request's own
     /// latency are a sample of the wire ([`Timed::sample`]).
     ///
+    /// Which use is hedged at all follows from that, and is the rule's
+    /// answer rather than a setting: on the routing sample the delay
+    /// [`hedge::MAX_EXTRA_LOAD`] can afford is itself past the wall, so
+    /// routing plans nothing and asks once. It had fired five times before
+    /// t-5874 and the second copy won none of them.
+    ///
     /// `None` too when the day's budget could not carry a second request
     /// behind the first. That is the plan declining to spend; the place
     /// itself is taken by [`Self::count_a_hedge`] at the moment the hedge may
@@ -483,25 +489,41 @@ mod tests {
         assert_eq!(read(&hedged), None, "the faster of two copies is not one request");
     }
 
-    /// The whole reading, through the real door: this machine's own 22
-    /// answered routing rows name the delay
-    /// `zerocode_core::jev::hedge` documents, 864 ms against the 1,500 ms
-    /// wall — and the recall use, whose ledger holds none of them, plans
-    /// nothing from another use's rows.
+    /// The whole reading, through the real door: each use's delay comes from
+    /// its OWN ledger's tail and from no other's.
+    ///
+    /// Both ledgers are written here, with real rows, and the two answers are
+    /// opposites — so neither `None` can be the door quietly reading nothing.
+    /// The routing rows are refused and the recall rows are planned, which is
+    /// what `zerocode_core::jev::hedge` says of these two samples: routing's
+    /// p75 is 2,257 ms, already past the wall, while recall's leaves the
+    /// second copy 1,104 ms against a 275 ms median (t-5874).
     #[test]
     fn a_use_reads_its_delay_from_its_own_ledgers_tail() {
         /// Every answered routing judgment this machine's ledger held on
         /// 2026-09-18, in milliseconds.
-        const LEDGER: [u64; 22] = [
+        const ROUTING_LEDGER: [u64; 22] = [
             210, 218, 241, 250, 292, 311, 349, 473, 487, 616, 636, 641, 702, 1_020, 1_570, 1_953,
             2_257, 2_596, 3_140, 4_259, 4_847, 6_798,
         ];
+        /// The recall window behind this machine's firing of 2026-09-21
+        /// 13:30:10, which the second copy won.
+        const RECALL_LEDGER: [u64; 16] = [
+            238, 242, 245, 246, 270, 271, 272, 275, 301, 316, 336, 396, 490, 529, 556, 590,
+        ];
         let home = tempfile::tempdir().expect("a config home");
-        let ledger = home.path().join(ROUTING.ledger);
-        for ms in LEDGER {
+        for ms in ROUTING_LEDGER {
             super::super::shadow_ledger::append_shadow_row(
-                &ledger,
+                &home.path().join(ROUTING.ledger),
                 &routing_row(door::ANSWERED_OUTCOME, ms),
+                u64::MAX,
+            )
+            .expect("a sample row");
+        }
+        for ms in RECALL_LEDGER {
+            super::super::shadow_ledger::append_shadow_row(
+                &home.path().join(RECALL.ledger),
+                &recall_row(door::ANSWERED_OUTCOME, ms),
                 u64::MAX,
             )
             .expect("a sample row");
@@ -511,11 +533,15 @@ mod tests {
         let wall = Duration::from_millis(1_500);
 
         assert_eq!(
-            door.hedge_for(&ROUTING, wall),
-            Some(Duration::from_millis(864)),
-            "the rule's own number, read back through the ledger"
+            door.hedge_for(&RECALL, wall),
+            Some(Duration::from_millis(396)),
+            "the rule's own number, read back through the recall ledger"
         );
-        assert_eq!(door.hedge_for(&RECALL, wall), None, "one use's rows are not another's sample");
+        assert_eq!(
+            door.hedge_for(&ROUTING, wall),
+            None,
+            "routing's own rows name a delay past the wall, and the recall rows beside them are not its sample"
+        );
     }
 
     /// The hedge's four columns are one spelling in both ledgers, and a row
