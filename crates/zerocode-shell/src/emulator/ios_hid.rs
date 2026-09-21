@@ -45,6 +45,41 @@ const FRAME_SOCKET_ACCEPT_POLL: Duration = Duration::from_millis(5);
 
 const FRAME_SOCKET_READ_CHUNK: usize = 64 * 1024;
 
+/// How much of a dead helper's stderr one log line carries. The whole of it is
+/// kept ([`MAX_DIAGNOSTIC_BYTES`]) for the error a request answers with; the
+/// line is for a reader scanning the window log, and the last words are the
+/// ones that say why it died.
+const STDERR_NOTE_CHARS: usize = 400;
+
+/// Where the helper's own story is written down: the window log, once the
+/// first pane has said where that is.
+///
+/// This module has no `AppHandle` — it is reached from the pump, from the
+/// input commands and from the capability thread — and the events worth a
+/// line are exactly the ones nobody could see on 2026-09-21: a helper that
+/// was started and put down dozens of times a minute left nothing in the
+/// window log, because the only road that wrote there was the pump's, and all
+/// it could say was that the stream was closed.
+static NOTE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// Say where helper events are written. The first caller wins; the root does
+/// not change for the life of the window.
+pub(super) fn note_helper_events_at(local_data_root: &Path) {
+    let _ = NOTE_ROOT.set(local_data_root.to_path_buf());
+}
+
+/// One line about this device's helper: in the window log, and on stderr
+/// under test, where the live harnesses read it.
+fn note(udid: &str, line: &str) {
+    let short = udid.get(..8).unwrap_or(udid);
+    let line = format!("emulator ios helper {short}: {line}");
+    #[cfg(test)]
+    eprintln!("[helper] {line}");
+    if let Some(root) = NOTE_ROOT.get() {
+        crate::note_window_event(root, &line);
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(
     tag = "kind",
@@ -126,6 +161,27 @@ pub(super) enum InputRequest {
     StreamStop,
 }
 
+impl InputRequest {
+    /// The request's own name, for a log line about what went wrong with it.
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Ping => "ping",
+            Self::Touch { .. } => "touch",
+            Self::Tap { .. } => "tap",
+            Self::Swipe { .. } => "swipe",
+            Self::MultiTouch { .. } => "multitouch",
+            Self::Text { .. } => "text",
+            Self::Paste => "paste",
+            Self::Button { .. } => "button",
+            Self::Rotate { .. } => "rotate",
+            Self::Ax => "ax",
+            Self::Frame { .. } => "frame",
+            Self::Stream { .. } => "stream",
+            Self::StreamStop => "streamstop",
+        }
+    }
+}
+
 /// A picture the helper encoded, with the generation and size it was taken at.
 pub(super) struct HelperFrame {
     pub(super) bytes: Vec<u8>,
@@ -171,6 +227,17 @@ struct FrameBus {
     /// tell "the screen has not moved" from "nothing will ever arrive again",
     /// because the pump answers those two with different roads.
     closed: AtomicBool,
+    /// How many of the helper's pusher connections are being read right now.
+    ///
+    /// Zero is a third fact, and it used to read as the first: not "the screen
+    /// has not moved" and not "this bus is finished", but "nobody is connected
+    /// to send anything". A pusher retires the moment its reader lets go of
+    /// the connection, and the helper does not dial again on its own — it
+    /// dials once per stream it is ASKED for. So a pane that lost its pusher
+    /// was left waiting the frame timeout every turn and drawing only on the
+    /// refresh beat, one picture every `IDLE_REFRESH_INTERVAL`, with nothing
+    /// in the log to say why. Told apart, it is one re-negotiation to repair.
+    pushers: std::sync::atomic::AtomicUsize,
 }
 
 impl FrameBus {
@@ -179,7 +246,25 @@ impl FrameBus {
             latest: Mutex::new(None),
             arrived: Condvar::new(),
             closed: AtomicBool::new(false),
+            pushers: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// A pusher's connection has been accepted and is being read.
+    fn pusher_arrived(&self) {
+        self.pushers.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// That connection has ended. Deliberately WITHOUT waking the waiters: a
+    /// re-negotiation is one pusher leaving and the next arriving, and cutting
+    /// a wait short to answer "nobody is pushing" in that sub-millisecond gap
+    /// would turn every size change into a failure the road has to forgive.
+    fn pusher_left(&self) {
+        self.pushers.fetch_sub(1, Ordering::AcqRel);
+    }
+
+    fn pushing(&self) -> bool {
+        self.pushers.load(Ordering::Acquire) > 0
     }
 
     fn put(&self, frame: HelperFrame) {
@@ -218,6 +303,14 @@ impl FrameBus {
         }
         if self.is_closed() {
             return Err("iOS 화면 스트림이 닫혔습니다".to_string());
+        }
+        // A whole wait with nothing arriving AND nobody connected to send
+        // anything is not a still screen — it is a stream that was negotiated
+        // and is not being pushed, and the road above repairs that by asking
+        // for it again. Asked only at the END of the wait, so a size change's
+        // own handover is never mistaken for one.
+        if !self.pushing() {
+            return Err("iOS 화면을 미는 연결이 없습니다".to_string());
         }
         Ok(None)
     }
@@ -280,6 +373,11 @@ struct ProcessState {
 }
 
 struct InputClient {
+    /// The device this helper serves, for the lines it leaves behind.
+    udid: String,
+    /// The helper's process id, the one fact that tells one helper from the
+    /// next in a log where they are replaced.
+    pid: u32,
     state: Mutex<ProcessState>,
     diagnostic: Arc<Mutex<String>>,
     /// Where pushed pictures land. Separate from `state` on purpose: this is
@@ -290,14 +388,22 @@ struct InputClient {
     /// where binding failed, which is not fatal — the helper then runs with the
     /// argument list it has always had and only the pulled road works.
     socket: Option<PathBuf>,
-    /// Set the moment this client kills its own helper.
+    /// Set the moment this helper stops being able to answer — whether this
+    /// client killed it or it went on its own.
     ///
     /// Every road out of `ask` that fails kills the process, and a killed
     /// helper never answers again — but the entry holding it stays in the map
     /// until the last pane releases it, so without this a later `retain` is
     /// handed the corpse and reports success over it. That pane then spends a
     /// 4-second timeout per frame on a process that exited minutes ago.
-    dead: AtomicBool,
+    ///
+    /// Shared with the reply thread, which reaches the same conclusion sooner
+    /// and for free: a helper that died closed its stdout, and that thread is
+    /// already sitting on it. Set there, a death costs the roads above one
+    /// turn; set only by a failed ask — which is what this was until
+    /// 2026-09-22 — it costs a frame timeout, a miss budget and a five-second
+    /// rest of the fast road before anyone thinks to look.
+    dead: Arc<AtomicBool>,
 }
 
 /// Somewhere short enough for a Unix socket to live.
@@ -347,12 +453,14 @@ impl InputClient {
         } else {
             let _ = std::fs::remove_file(&socket);
         }
+        let started = Instant::now();
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| format!("iOS 입력 헬퍼를 시작할 수 없습니다: {error}"))?;
+        let pid = child.id();
         let Some(stdin) = child.stdin.take() else {
             stop_process(&mut child);
             return Err("iOS 입력 헬퍼의 입력 문이 없습니다".to_string());
@@ -366,13 +474,36 @@ impl InputClient {
             return Err("iOS 입력 헬퍼의 진단 문이 없습니다".to_string());
         };
         let (reply_tx, reply_rx) = mpsc::channel();
+        // Shared with the reply thread below, which is the first road in this
+        // process to learn that the helper is gone.
+        let dead = Arc::new(AtomicBool::new(false));
+        let fallen = dead.clone();
+        let fallen_udid = udid.to_string();
         if let Err(error) = std::thread::Builder::new()
             .name(format!("ios-hid-replies-{udid}"))
             .spawn(move || {
+                let mut abandoned = false;
                 for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                     if reply_tx.send(line).is_err() {
+                        abandoned = true;
                         break;
                     }
+                }
+                // The helper's stdout closes the moment it dies, and this
+                // thread is already sitting on it — so this is where a death
+                // is CHEAPEST to notice. Until 2026-09-22 the only road that
+                // learned of one was a request that failed on the broken
+                // pipe, which meant a corpse read as a standing helper to
+                // everyone who only looked: the pump waited its whole frame
+                // timeout on a bus nothing would arrive at, spent its miss
+                // budget, and rested the fast road for five seconds before
+                // anything asked the helper a question.
+                //
+                // `abandoned` is the other ending: the client was put down
+                // and dropped the receiver. That helper is already being
+                // killed by `Drop`, and nothing is owed a line about it.
+                if !abandoned && !fallen.swap(true, Ordering::AcqRel) {
+                    note(&fallen_udid, &format!("pid {pid} stopped answering"));
                 }
             })
         {
@@ -381,6 +512,7 @@ impl InputClient {
         }
         let diagnostic = Arc::new(Mutex::new(String::new()));
         let diagnostic_sink = diagnostic.clone();
+        let diagnostic_udid = udid.to_string();
         if let Err(error) = std::thread::Builder::new()
             .name(format!("ios-hid-diagnostics-{udid}"))
             .spawn(move || {
@@ -388,7 +520,19 @@ impl InputClient {
                 let _ = BufReader::new(stderr)
                     .take(MAX_DIAGNOSTIC_BYTES as u64)
                     .read_to_end(&mut bytes);
-                *held(&diagnostic_sink) = String::from_utf8_lossy(&bytes).trim().to_string();
+                let said = String::from_utf8_lossy(&bytes).trim().to_string();
+                // The pipe closes when the helper dies, so this is its last
+                // word, written down beside the pid so the death it belongs
+                // to can be found.
+                if !said.is_empty() {
+                    let tail = said.char_indices().rev().nth(STDERR_NOTE_CHARS - 1);
+                    let tail = tail.map_or(said.as_str(), |(at, _)| &said[at..]);
+                    note(
+                        &diagnostic_udid,
+                        &format!("pid {pid} said on stderr: {}", tail.replace('\n', " | ")),
+                    );
+                }
+                *held(&diagnostic_sink) = said;
             })
         {
             stop_process(&mut child);
@@ -397,6 +541,8 @@ impl InputClient {
 
         let frames = Arc::new(FrameBus::new());
         let client = Arc::new(Self {
+            udid: udid.to_string(),
+            pid,
             state: Mutex::new(ProcessState {
                 child,
                 stdin,
@@ -406,14 +552,15 @@ impl InputClient {
             diagnostic,
             frames: frames.clone(),
             socket: listener.is_some().then(|| socket.clone()),
-            dead: AtomicBool::new(false),
+            dead,
         });
         if let Some(listener) = listener {
             let bus = frames;
+            let serving = udid.to_string();
             if std::thread::Builder::new()
                 .name(format!("ios-hid-frames-{udid}"))
                 .spawn(move || {
-                    serve_frame_socket(&listener, &bus);
+                    serve_frame_socket(&listener, &bus, &serving);
                     // Whatever ended the service — a helper that never dialled,
                     // a listener that gave out, this client being put down —
                     // every waiter has to learn it, or a pane sits on a bus
@@ -430,6 +577,18 @@ impl InputClient {
             client.frames.close();
         }
         let _ = client.request(&InputRequest::Ping)?;
+        note(
+            udid,
+            &format!(
+                "pid {pid} started in {}ms (frame socket {})",
+                started.elapsed().as_millis(),
+                if client.socket.is_some() {
+                    "bound"
+                } else {
+                    "absent"
+                }
+            ),
+        );
         Ok(client)
     }
 
@@ -440,10 +599,21 @@ impl InputClient {
     /// Kill the helper and remember that it is gone.
     ///
     /// Always both, never only the kill — the memory is what stops the next
-    /// pane being handed this client.
-    fn fell_over(&self, state: &mut ProcessState) {
-        stop_process(&mut state.child);
+    /// pane being handed this client. And say why, with how the process
+    /// actually ended: a helper that had already died of its own accord gives
+    /// `wait` its real status here (a signal, an exit code), where a live one
+    /// put down answers with the kill.
+    fn fell_over(&self, state: &mut ProcessState, why: &str) {
+        let ended = stop_process(&mut state.child);
         self.dead.store(true, Ordering::Release);
+        note(
+            &self.udid,
+            &format!(
+                "pid {} put down after {why} — {}",
+                self.pid,
+                ended_as(ended)
+            ),
+        );
     }
 
     /// The whole answer, because a frame needs more of it than a tap does.
@@ -459,7 +629,10 @@ impl InputClient {
             .write_all(&line)
             .and_then(|()| state.stdin.flush())
         {
-            self.fell_over(&mut state);
+            self.fell_over(
+                &mut state,
+                &format!("{} could not be sent ({error})", request.name()),
+            );
             return Err(AskFailure::Unsent(format!(
                 "iOS 입력 헬퍼에 보낼 수 없습니다: {error}"
             )));
@@ -467,7 +640,10 @@ impl InputClient {
         let answer = match state.replies.recv_timeout(REQUEST_TIMEOUT) {
             Ok(answer) => answer,
             Err(error) => {
-                self.fell_over(&mut state);
+                self.fell_over(
+                    &mut state,
+                    &format!("{} went unanswered ({error})", request.name()),
+                );
                 let diagnostic = held(&self.diagnostic).clone();
                 let detail = if diagnostic.is_empty() {
                     error.to_string()
@@ -482,12 +658,25 @@ impl InputClient {
         let response: WireResponse = match serde_json::from_str(&answer) {
             Ok(response) => response,
             Err(error) => {
-                self.fell_over(&mut state);
+                self.fell_over(
+                    &mut state,
+                    &format!(
+                        "{} was answered with something else ({error})",
+                        request.name()
+                    ),
+                );
                 return Err(AskFailure::Failed(format!("잘못된 iOS 입력 응답: {error}")));
             }
         };
         if response.id != id {
-            self.fell_over(&mut state);
+            self.fell_over(
+                &mut state,
+                &format!(
+                    "{} was answered out of order (asked {id}, told {})",
+                    request.name(),
+                    response.id
+                ),
+            );
             return Err(AskFailure::Failed(
                 "iOS 입력 응답 순서가 맞지 않습니다".to_string(),
             ));
@@ -512,7 +701,23 @@ impl InputClient {
 
 impl Drop for InputClient {
     fn drop(&mut self) {
-        stop_process(&mut held(&self.state).child);
+        // One death, one line, from whichever road got there first: this
+        // client putting its helper down is only news if nobody has already
+        // said the helper is gone. `fell_over` and the reply thread mark the
+        // same flag, so a helper killed for a failed request does not also
+        // read as one put down here, and neither does a corpse being swept.
+        let told = self.dead.swap(true, Ordering::AcqRel);
+        let ended = stop_process(&mut held(&self.state).child);
+        if !told {
+            note(
+                &self.udid,
+                &format!(
+                    "pid {} put down with its client — {}",
+                    self.pid,
+                    ended_as(ended)
+                ),
+            );
+        }
         self.frames.close();
         if let Some(socket) = &self.socket {
             // The frame thread may be asleep in `accept`, waiting for the next
@@ -541,58 +746,141 @@ impl Drop for InputClient {
 /// the window's own log that day: a pane pushed its first picture at +9.0s,
 /// was resized, rested at +26.5s and only came back at +32.6s (1060x2304 ->
 /// 412x896) — twenty-three seconds of a slow road bought by a resize.
-fn serve_frame_socket(listener: &UnixListener, bus: &FrameBus) {
+fn serve_frame_socket(listener: &UnixListener, bus: &FrameBus, udid: &str) {
     // The first dial is the helper coming to work at all, and it has a
     // deadline: a helper that never connects must not leave waiters hoping.
     let Some(first) = accept_helper(listener) else {
+        note(
+            udid,
+            &format!(
+                "the helper never dialled the frame socket within {}s; pictures will be pulled",
+                FRAME_SOCKET_ACCEPT_TIMEOUT.as_secs()
+            ),
+        );
         return;
     };
-    read_frames_from(first, bus);
+    read_frames_from(first, bus, udid);
     // Every later one is a re-negotiation or a resume, and those have no
     // deadline — a paused pane can sit for minutes. Blocking rather than
     // polling for that wait: five milliseconds of looking, for minutes, is a
     // core spent on nothing. [`InputClient::drop`] knocks on this socket, so
     // the sleep ends when the client does.
-    if listener.set_nonblocking(false).is_err() {
+    if let Err(error) = listener.set_nonblocking(false) {
+        note(
+            udid,
+            &format!("the frame socket could not be made to block: {error}"),
+        );
         return;
     }
     while !bus.is_closed() {
-        let Ok((stream, _)) = listener.accept() else {
-            return;
+        let stream = match listener.accept() {
+            Ok((stream, _)) => stream,
+            // Both of these are "look again", not "this client has no push
+            // road any more": a signal landed on this thread, or a pusher
+            // gave up between dialling and being accepted. Answered with a
+            // return, the bus closes for the life of the client and every
+            // later wait says the stream is closed.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::ConnectionAborted
+                ) =>
+            {
+                continue;
+            }
+            Err(error) => {
+                note(
+                    udid,
+                    &format!("the frame socket stopped accepting: {error}"),
+                );
+                return;
+            }
         };
         if bus.is_closed() {
             return;
         }
-        read_frames_from(stream, bus);
+        read_frames_from(stream, bus, udid);
     }
 }
 
-/// One connection's pictures, until the socket or the protocol gives out.
-fn read_frames_from(stream: UnixStream, bus: &FrameBus) {
+/// One connection's pictures, until the socket or the protocol gives out —
+/// and a word about which of those it was, because a pusher that closed its
+/// own end (superseded, or its surface gone) and a reader that gave up on it
+/// read exactly alike from the pump's side.
+fn read_frames_from(stream: UnixStream, bus: &FrameBus, udid: &str) {
     // Back to blocking now that there IS a peer: the reader thread has nothing
     // to do but wait for bytes, and spinning on WouldBlock would burn a core
     // for the life of the pane.
-    if stream.set_nonblocking(false).is_err() {
+    if let Err(error) = stream.set_nonblocking(false) {
+        note(
+            udid,
+            &format!("a pusher connection could not be made to block: {error}"),
+        );
         return;
     }
+    bus.pusher_arrived();
     let mut socket = BufReader::new(stream);
     let mut buffer = Vec::new();
     let mut chunk = vec![0u8; FRAME_SOCKET_READ_CHUNK];
-    loop {
+    let mut pictures = 0u64;
+    let ended = loop {
         let read = match socket.read(&mut chunk) {
-            Ok(0) | Err(_) => return,
+            Ok(0) => break "the pusher closed its end".to_string(),
+            // A signal that landed on this thread is not the pusher going
+            // away, and `read` does not retry one for us. Counted as the end
+            // of the connection — which is what it was until 2026-09-22 — one
+            // SIGCHLD from the still-picture road's own `simctl` child let go
+            // of a pusher that was mid-stream, and the helper it belonged to
+            // took that as its own death.
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => break format!("read failed: {error}"),
             Ok(read) => read,
         };
+        if let_go_of(pictures) {
+            break "the harness let it go".to_string();
+        }
         buffer.extend_from_slice(&chunk[..read]);
         match drain_frames(&mut buffer) {
             Ok(frames) => {
                 for frame in frames {
+                    pictures += 1;
                     bus.put(frame);
                 }
             }
-            Err(_) => return,
+            Err(error) => break format!("the pipe desynchronised: {error}"),
         }
-    }
+    };
+    bus.pusher_left();
+    note(
+        udid,
+        &format!("a pusher connection ended after {pictures} pictures: {ended}"),
+    );
+}
+
+/// After how many pictures the harness lets a connection go, standing in for
+/// the reader hiccups the shipped road has to survive — a bus put down under a
+/// live pusher, a read that failed, a client replaced beneath it. `0` never
+/// lets go, and that is the only value outside the tests.
+#[cfg(test)]
+static LET_GO_AFTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Tell the frame reader to walk away from a connection after this many
+/// pictures. The live harness uses it to reproduce, out of the window, the one
+/// event the window could not be made to repeat on demand.
+#[cfg(test)]
+pub(super) fn let_go_of_connections_after(pictures: u64) {
+    LET_GO_AFTER.store(pictures, Ordering::Release);
+}
+
+#[cfg(test)]
+fn let_go_of(pictures: u64) -> bool {
+    let after = LET_GO_AFTER.load(Ordering::Acquire);
+    after > 0 && pictures >= after
+}
+
+#[cfg(not(test))]
+fn let_go_of(_pictures: u64) -> bool {
+    false
 }
 
 fn accept_helper(listener: &UnixListener) -> Option<UnixStream> {
@@ -600,7 +888,17 @@ fn accept_helper(listener: &UnixListener) -> Option<UnixStream> {
     loop {
         match listener.accept() {
             Ok((stream, _)) => return Some(stream),
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+            // The same three "look again" answers the loop above takes: a
+            // poll that found nothing yet, a signal, and a dial that gave up
+            // before it was accepted. Only the deadline ends this wait.
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::ConnectionAborted
+                ) =>
+            {
                 if Instant::now() >= deadline {
                     return None;
                 }
@@ -633,6 +931,17 @@ impl ClientEntry {
     /// keep meaning what they meant, and the pictures the corpse was pushing
     /// are asked of the newcomer before it is handed out.
     fn replace_helper(&mut self, udid: &str) -> Result<Arc<InputClient>, String> {
+        note(
+            udid,
+            &format!(
+                "pid {} is gone; starting another{}",
+                self.client.pid,
+                self.stream.map_or(String::new(), |stream| format!(
+                    " and asking it for the stream at {}px {}fps",
+                    stream.long_edge, stream.max_fps
+                ))
+            ),
+        );
         let fresh = InputClient::start(udid)?;
         if let Some(stream) = self.stream {
             fresh.request(&InputRequest::Stream {
@@ -678,22 +987,42 @@ pub(super) fn retain(udid: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether this device's helper has been asked for and is standing.
+/// What this device's helper is, to a road that wants a picture from it.
 ///
-/// The pump is started before the capability thread retains its helper,
-/// deliberately, so the first picture does not wait on a 247-495ms cold
-/// start; that leaves a window where asking for a frame finds an empty map.
-/// "Nobody has asked for one yet" and "the one we have is broken" are
-/// different facts and the frame road spends its patience on only one of
-/// them — which is why a CORPSE answers false here too: an entry whose
-/// process has died would otherwise send the road through its whole miss
-/// budget on a pipe that cannot answer, once per rest. The corpse itself is
-/// replaced by the next successful `retain`, and the references its panes
-/// still hold keep meaning what they meant.
-pub(super) fn retained(udid: &str) -> bool {
+/// Three answers rather than two, because the two the roads actually act on
+/// were collapsed into one boolean until 2026-09-22 and they are owed
+/// opposite things.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HelperStanding {
+    /// Nobody has asked for one yet. The pump is started BEFORE the capability
+    /// thread retains its helper, deliberately, so the first picture does not
+    /// wait on a 247-495ms cold start — which leaves a window where asking for
+    /// a frame finds an empty map. That window is somebody else's work in
+    /// progress, not this road's failure, and it is not charged to anyone.
+    Unasked,
+    /// One is standing and answering.
+    Standing,
+    /// The one we had is gone. Nothing brings it back on its own: the
+    /// capability thread asks once and goes home, so a road that treats this
+    /// like `Unasked` — which is what a single boolean made it do — waits for
+    /// a helper nobody is going to bring. A road that wants a picture asks for
+    /// one here and is answered with a fresh helper.
+    Fallen,
+}
+
+/// The one reader of that fact. The references a fallen helper's panes hold
+/// keep meaning what they meant; it is the PROCESS that is gone, and the entry
+/// gets a live one from the next road that asks.
+pub(super) fn standing(udid: &str) -> HelperStanding {
     held(clients())
         .get(udid)
-        .is_some_and(|entry| entry.client.alive())
+        .map_or(HelperStanding::Unasked, |entry| {
+            if entry.client.alive() {
+                HelperStanding::Standing
+            } else {
+                HelperStanding::Fallen
+            }
+        })
 }
 
 pub(super) fn release(udid: &str) {
@@ -1110,9 +1439,22 @@ fn materialize_helper() -> Result<PathBuf, String> {
     Ok(destination)
 }
 
-fn stop_process(child: &mut Child) {
+/// Put the helper down and answer how it ended.
+///
+/// The kill is a no-op on a process that has already exited, and `wait` then
+/// answers with the status it really died with — which is how a helper that
+/// died of a signal of its own is told apart from one this window put down.
+fn stop_process(child: &mut Child) -> Option<std::process::ExitStatus> {
     let _ = child.kill();
-    let _ = child.wait();
+    child.wait().ok()
+}
+
+/// The words for a helper's end, for the log.
+fn ended_as(ended: Option<std::process::ExitStatus>) -> String {
+    ended.map_or_else(
+        || "its end could not be read".to_string(),
+        |status| format!("ended with {status}"),
+    )
 }
 
 fn held<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1206,7 +1548,7 @@ mod tests {
         let serving = {
             let bus = bus.clone();
             std::thread::spawn(move || {
-                serve_frame_socket(&listener, &bus);
+                serve_frame_socket(&listener, &bus, "test-device");
                 bus.close();
             })
         };
@@ -1301,6 +1643,10 @@ mod tests {
     #[test]
     fn the_bus_keeps_only_the_newest_picture_so_a_slow_pane_skips_to_now() {
         let bus = FrameBus::new();
+        // With somebody connected to send one, because that is the whole
+        // difference between the two empty answers below: "the screen has not
+        // moved" is only true while a pusher is there to have said so.
+        bus.pusher_arrived();
         for seed in 1..=3u32 {
             bus.put(HelperFrame {
                 bytes: vec![seed as u8],
@@ -1440,8 +1786,22 @@ done
         }
     }
 
+    /// Wait for the window to LEARN something, rather than for it to happen.
+    ///
+    /// A helper's death has two halves and they are seconds apart in the worst
+    /// case: the process exits, and some road here concludes that it has. The
+    /// second half is what every road above acts on, so the tests wait on it
+    /// by name instead of sleeping and hoping.
+    fn wait_until(what: impl Fn() -> bool, said: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !what() {
+            assert!(Instant::now() < deadline, "{said}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
-    fn a_helper_that_died_unnoticed_is_replaced_once_and_told_its_stream_again() {
+    fn a_helper_that_died_on_its_own_is_noticed_replaced_once_and_told_its_stream_again() {
         stand_in();
         // Each life answers three times — the start's ping, then two more —
         // and leaves.
@@ -1451,8 +1811,17 @@ done
         let first = client_for(udid).expect("the first helper");
         ask_device(udid, &InputRequest::Ping).expect("its third answer");
         wait_for_exit(&first);
-        // Nobody has noticed: the entry still says its helper stands.
-        assert!(retained(udid) && first.alive());
+        // Noticed without anyone asking, and that is the point of the road:
+        // the reply thread is already sitting on the helper's stdout, which
+        // closes when it dies. Until 2026-09-22 this entry read `Standing`
+        // until a REQUEST failed on the broken pipe, so a pane whose helper
+        // had gone paid a frame timeout, its whole miss budget and a
+        // five-second rest of the fast road before anything found out.
+        wait_until(
+            || standing(udid) == HelperStanding::Fallen,
+            "the helper's death was never noticed",
+        );
+        assert!(!first.alive());
         let answer = ask_device(udid, &InputRequest::Ping).expect("asked again of a fresh helper");
         assert_eq!(answer.data.as_deref(), Some("life-2"));
         let second = client_for(udid).expect("the replacement");
@@ -1505,10 +1874,14 @@ done
         let udid = "stand-in-leave-9";
         retain(udid).expect("first helper");
         let first = client_for(udid).expect("the first helper");
-        first.fell_over(&mut held(&first.state));
-        assert!(!retained(udid));
+        first.fell_over(&mut held(&first.state), "the test put it down");
+        assert!(standing(udid) == HelperStanding::Fallen);
         let second = client_for(udid).expect("a replacement, not the corpse");
-        assert!(!Arc::ptr_eq(&first, &second) && second.alive() && retained(udid));
+        assert!(
+            !Arc::ptr_eq(&first, &second)
+                && second.alive()
+                && standing(udid) == HelperStanding::Standing
+        );
         assert_eq!(held(clients())[udid].references, 1);
         release(udid);
         assert_eq!(

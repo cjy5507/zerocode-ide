@@ -1184,10 +1184,14 @@ mod tests {
              device boots, so a pane's first seconds are the slow road's"
         );
         let hid = include_str!("../../src/emulator/ios_hid.rs");
+        let standing = block_after(hid, "pub(super) fn standing(");
         assert!(
-            hid.contains(".is_some_and(|entry| entry.client.alive())"),
-            "a dead helper still counts as retained, so the frame road spends \
-             its whole miss budget on a corpse once per rest"
+            standing.contains("entry.client.alive()")
+                && standing.contains("HelperStanding::Fallen")
+                && standing.contains("HelperStanding::Unasked"),
+            "a dead helper reads the same as one nobody asked for, so the \
+             frame road either spends its miss budget on a corpse or waits \
+             forever for a helper nobody will bring:\n{standing}"
         );
     }
 
@@ -1243,6 +1247,66 @@ mod tests {
                 .contains("UnixStream::connect(socket)"),
             "nothing wakes the frame thread out of `accept`, so it outlives \
              the client it belongs to"
+        );
+    }
+
+    /// t-5763 — a reader that walks away costs a thread, never the helper.
+    ///
+    /// Every road in this window that lets go of a pusher connection is
+    /// DESIGNED to be survivable: the bus is put down when a client is
+    /// replaced, a read can be interrupted by a signal the still-picture
+    /// road's own `simctl` child delivers, a dial can be aborted before it is
+    /// accepted. The helper turned each of them into its own death — measured
+    /// out of the window on 2026-09-22 as signal 13 within 250ms of the reader
+    /// closing — and in the window that read as a pane pushing one picture,
+    /// resting the fast road for five seconds, and doing it again on a six
+    /// second beat for as long as it stayed open (v1.1.11, 20:02-20:05).
+    ///
+    /// Three facts hold the repair, and losing any one puts the beat back:
+    /// the helper survives a broken pipe, the window notices a helper that
+    /// died without being asked anything, and the bus tells a still screen
+    /// from a stream nobody is pushing.
+    #[test]
+    fn a_frame_reader_that_walks_away_costs_the_ios_helper_a_thread_not_its_life() {
+        let swift =
+            include_str!("../../../../crates/zerocode-shell/native/ios-emulator-helper/main.swift");
+        assert!(
+            swift.contains("signal(SIGPIPE, SIG_IGN)"),
+            "the helper dies of SIGPIPE again, so one dropped pusher \
+             connection costs the whole process"
+        );
+        let helper = include_str!("../../src/emulator/ios_hid.rs");
+        // The helper's stdout closes when it dies and the reply thread is
+        // already sitting on it, so that thread is where a death costs
+        // nothing to notice. Asked for by the flag it sets, not by its
+        // spelling: the point is that SOMETHING other than a failed request
+        // reaches the conclusion.
+        let replies = block_after(helper, r#".name(format!("ios-hid-replies-{udid}"))"#);
+        assert!(
+            helper.contains("let fallen = dead.clone();") && replies.contains("fallen"),
+            "only a failed request learns that the helper died, so a corpse \
+             reads as standing until a road pays a frame timeout, a miss \
+             budget and a five-second rest to find out:\n{replies}"
+        );
+        let taking = block_after(helper, "fn take(&self, timeout: Duration)");
+        assert!(
+            taking.contains("if !self.pushing() {"),
+            "a stream nobody is pushing reads as a still screen, so a pane \
+             whose pusher retired draws on the refresh beat alone and nothing \
+             ever re-negotiates:\n{taking}"
+        );
+        // And the two reader answers that mean "look again" stay that way.
+        let reading = block_after(helper, "fn read_frames_from(");
+        assert!(
+            reading.contains("std::io::ErrorKind::Interrupted => continue"),
+            "a signal on the frame thread lets go of a live pusher \
+             again:\n{reading}"
+        );
+        assert!(
+            block_after(helper, "fn serve_frame_socket(")
+                .contains("std::io::ErrorKind::ConnectionAborted"),
+            "a dial that gave up before it was accepted closes this client's \
+             push road for good"
         );
     }
 
