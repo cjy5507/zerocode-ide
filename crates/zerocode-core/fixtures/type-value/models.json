@@ -265,7 +265,7 @@
       "id": "lan-qwen-4b",
       "model": "qwen3-vl-4b",
       "road": "openai-compat",
-      "baseUrl": "http://192.0.2.2:4000/v1",
+      "baseUrl": "http://192.0.2.123:4000/v1",
       "credentialKey": "GME_LLM_KEY",
       "reach": "a custom provider row on this machine's own network — the reference for what a NEAR endpoint costs, not a road this product can ship",
       "measured": {
@@ -312,7 +312,7 @@
       "id": "lan-qwen-35b-a3b",
       "model": "qwen3.6-35b-a3b",
       "road": "openai-compat",
-      "baseUrl": "http://192.0.2.2:4000/v1",
+      "baseUrl": "http://192.0.2.123:4000/v1",
       "credentialKey": "GME_LLM_KEY",
       "reach": "same near endpoint, a mixture-of-experts row",
       "measured": {

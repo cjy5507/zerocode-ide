@@ -134,16 +134,16 @@ mod tests {
         .expect("a target in the settings document's shape")
     }
 
-    const CARD: &str = "903640b2-e3eb-4bd5-b5fc-4a1dd2cfed74";
+    const EDGE: &str = "903640b2-e3eb-4bd5-b5fc-4a1dd2cfed74";
     const TUNNEL: &str = "8b9eb85a-bb94-4e47-a542-e9fd6eba4a38";
 
     #[test]
     fn a_saved_host_and_a_target_for_the_same_server_are_one_row_and_the_target_answers() {
-        let hosts = [host("acme@card-ssh", CARD, "192.0.2.3", 22012, "acme")];
+        let hosts = [host("acme@edge-ssh", EDGE, "192.0.2.161", 22012, "acme")];
         let targets = [target(
-            "acme@card-ssh",
+            "acme@edge-ssh",
             "ssh-1",
-            "192.0.2.3",
+            "192.0.2.161",
             22012,
             "acme",
         )];
@@ -151,17 +151,17 @@ mod tests {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].host_id, "target:ssh-1");
         assert_eq!(rows[0].target_id.as_deref(), Some("ssh-1"));
-        assert_eq!(rows[0].native_host_id.as_deref(), Some(CARD));
-        assert_eq!(rows[0].label, "acme@card-ssh");
+        assert_eq!(rows[0].native_host_id.as_deref(), Some(EDGE));
+        assert_eq!(rows[0].label, "acme@edge-ssh");
     }
 
     #[test]
     fn roots_saved_under_either_identity_land_on_the_folded_row() {
-        let hosts = [host("acme@card-ssh", CARD, "192.0.2.3", 22012, "acme")];
+        let hosts = [host("acme@edge-ssh", EDGE, "192.0.2.161", 22012, "acme")];
         let targets = [target(
-            "acme@card-ssh",
+            "acme@edge-ssh",
             "ssh-1",
-            "192.0.2.3",
+            "192.0.2.161",
             22012,
             "acme",
         )];
@@ -169,9 +169,9 @@ mod tests {
             &hosts,
             &targets,
             [
-                (CARD, "/home/acme/vol_02"),
+                (EDGE, "/home/acme/vol_02"),
                 ("target:ssh-1", "/home/acme"),
-                (CARD, "/home/acme"),
+                (EDGE, "/home/acme"),
             ],
         );
         assert_eq!(rows[0].roots, ["/home/acme", "/home/acme/vol_02"]);
@@ -180,16 +180,16 @@ mod tests {
     #[test]
     fn different_servers_stay_separate_rows_in_saved_then_target_order() {
         let hosts = [host(
-            "acme@card-db-tunnel",
+            "acme@edge-db-tunnel",
             TUNNEL,
-            "192.0.2.3",
+            "192.0.2.161",
             22013,
             "acme",
         )];
         let targets = [target(
-            "acme@card-ssh",
+            "acme@edge-ssh",
             "ssh-1",
-            "192.0.2.3",
+            "192.0.2.161",
             22012,
             "acme",
         )];
@@ -204,24 +204,12 @@ mod tests {
         // Four `~/.ssh/config` aliases of one account on one machine, each
         // also saved as a host under the same label: four rows, not seven.
         let hosts = [
-            host("acme@card-ssh", CARD, "192.0.2.3", 22012, "acme"),
-            host(
-                "acme@card-db-tunnel",
-                TUNNEL,
-                "192.0.2.3",
-                22012,
-                "acme",
-            ),
+            host("acme@edge-ssh", EDGE, "192.0.2.161", 22012, "acme"),
+            host("acme@edge-db-tunnel", TUNNEL, "192.0.2.161", 22012, "acme"),
         ];
         let targets = [
-            target(
-                "acme@card-db-tunnel",
-                "ssh-2",
-                "192.0.2.3",
-                22012,
-                "acme",
-            ),
-            target("acme@card-ssh", "ssh-1", "192.0.2.3", 22012, "acme"),
+            target("acme@edge-db-tunnel", "ssh-2", "192.0.2.161", 22012, "acme"),
+            target("acme@edge-ssh", "ssh-1", "192.0.2.161", 22012, "acme"),
         ];
         let rows = fold(&hosts, &targets, []);
         let pairs: Vec<(&str, Option<&str>)> = rows
@@ -231,8 +219,8 @@ mod tests {
         assert_eq!(
             pairs,
             [
-                ("acme@card-db-tunnel", Some(TUNNEL)),
-                ("acme@card-ssh", Some(CARD))
+                ("acme@edge-db-tunnel", Some(TUNNEL)),
+                ("acme@edge-ssh", Some(EDGE))
             ]
         );
     }
@@ -241,8 +229,8 @@ mod tests {
     fn a_target_that_only_names_a_config_alias_cannot_be_folded() {
         // With no address of its own, the target's server is whatever the
         // config says — unknown here, so both rows stay.
-        let hosts = [host("acme@card-ssh", CARD, "192.0.2.3", 22012, "acme")];
-        let targets = [target("acme@card-ssh", "ssh-1", "", 22012, "acme")];
+        let hosts = [host("acme@edge-ssh", EDGE, "192.0.2.161", 22012, "acme")];
+        let targets = [target("acme@edge-ssh", "ssh-1", "", 22012, "acme")];
         assert_eq!(fold(&hosts, &targets, []).len(), 2);
     }
 }

@@ -9,8 +9,10 @@ def plain(buf):
     return ANSI.sub(b"", bytes(buf))
 
 ROOT = os.environ.get("PARITY_ROOT", "/tmp/zo-agent-parity-20260907")
-ZO = os.environ.get("PARITY_ZO_BIN", "/Users/dev/.local/bin/zo")
-CLAUDE = "/Users/dev/.local/bin/claude"
+# Whoever runs this owns the binaries; the environment names the machine,
+# not a path written here.
+ZO = os.environ.get("PARITY_ZO_BIN", os.path.expanduser("~/.local/bin/zo"))
+CLAUDE = os.environ.get("PARITY_CLAUDE_BIN", os.path.expanduser("~/.local/bin/claude"))
 
 
 def hermetic_env(sandbox, base_url, extra=None):

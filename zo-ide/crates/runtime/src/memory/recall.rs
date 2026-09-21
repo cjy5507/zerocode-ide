@@ -3716,7 +3716,7 @@ mod tests {
     /// in. Run it deliberately:
     ///
     /// ```text
-    /// ZEROCODE_SECOND_BRAIN=/Users/dev \
+    /// ZEROCODE_SECOND_BRAIN=/Users/dev/vault \
     ///   cargo test -p runtime --lib -- recall_miss_against_the_vaults_own_log --ignored --nocapture
     /// ```
     #[test]

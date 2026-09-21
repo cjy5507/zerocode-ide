@@ -11,7 +11,9 @@ ROOT = os.environ.get("PARITY_ROOT", "/tmp/zo-agent-parity-20260907")
 sys.path.insert(0, os.path.join(ROOT, "harness"))
 import analyze  # noqa: E402
 
-GIT = os.environ.get("PARITY_GIT", "/Users/dev/zerocode/workspaces/zerocode/t-2941-zo-vs-cc-opus")
+# The checkout whose sha the rows carry: the one it is run from unless
+# `PARITY_GIT` names another.
+GIT = os.environ.get("PARITY_GIT", os.getcwd())
 
 
 def sh(*args):

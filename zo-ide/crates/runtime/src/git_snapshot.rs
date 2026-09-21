@@ -837,7 +837,7 @@ mod tests {
             .output()
             .unwrap();
         Command::new("git")
-            .args(["config", "user.email", "someone@example.com"])
+            .args(["config", "user.email", "test@example.com"])
             .current_dir(dir.path())
             .output()
             .unwrap();

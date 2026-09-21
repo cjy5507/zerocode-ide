@@ -690,6 +690,7 @@ mod tests {
     use super::*;
 
     /// 테스트 전용 throwaway 2048-bit 키 (실서비스 어디에도 안 쓰임).
+    /// pii-scan: allow credential — 이 서명 시험을 위해 만든 일회용 키이며 어떤 계정도 열지 않는다.
     const TEST_KEY_PEM: &str = "-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC1/Egcdzb6ZceW
 4fHDjuxbQbX6Fzr9bS2cPhhfAgDZ+D53fNlGcOlLfRpU6AJxEtLz9S6ViCmQiCaY
