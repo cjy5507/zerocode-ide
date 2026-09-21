@@ -11,9 +11,10 @@ set windows-shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 # 게이트한다.
 verify: pii-check fmt-check lint doc test shell-lint shell-test tools-test swift-test window-runner-test settings-browser-test window-browser-test browser-observation-test browser-door-test knowledge-browser-test win-check-if-available
 
-# The re-entry gate for private values (~7 s over every tracked file): a home
-# directory, an office address, a mailbox, a key of a real shape, or a name
-# this tree was cleared of, must not reach the public source snapshot.
+# The re-entry gate for private values (3.9 s over 1,687 tracked files, the
+# median of 3 on an idle machine): a home directory, an office address, a
+# mailbox, a key of a real shape, or a name this tree was cleared of, must
+# not reach the public source snapshot.
 # Everything it knows is the `RULES` table in the script (and `BANISHED`, which
 # carries digests, never a word) — `pii-scan.py --table` prints it, and a site
 # that cannot be rewritten waives itself where it stands. First in `verify`

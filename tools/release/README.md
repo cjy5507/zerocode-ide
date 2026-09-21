@@ -53,7 +53,8 @@ The lane reads the `.pub` beside the key and the scratch's
 The source repository publishes a release snapshot, so a value that points at
 the machine it was written on must not be in the tree. `just pii-check` reads
 every tracked file and exits 1 while it holds one; it is the first recipe
-`verify` names, so it refuses before anything compiles (~7 s over 1,649 files).
+`verify` names, so it refuses before anything compiles (3.9 s over 1,687 files,
+median of 3 on an idle machine).
 
 Everything it knows is the `RULES` table at the top of the script — one row per
 category, each carrying what it finds (`find`), what it forgives (`allow`) and
