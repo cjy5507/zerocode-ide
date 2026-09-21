@@ -58,15 +58,15 @@ use zo_ide::tui::view::{
 };
 
 /// 캡처 하나를 읽는다 — 열 벌이던 같은 세 줄을 한 자리로 모았다.
-/// `docs/captures/` 가 옮겨지면 여기 한 줄만 고친다.
+/// 캡처가 옮겨지면 여기 한 줄만 고친다.
 fn capture_named(name: &str) -> Vec<u8> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/captures")
+        .join("tests/fixtures/captures")
         .join(name);
     std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()))
 }
 
-/// 캡처 원본. 워크스페이스 루트의 `docs/captures/` 에 있다.
+/// 캡처 원본. 이 시험 옆 `tests/fixtures/captures/` 에 있다.
 fn capture() -> Vec<u8> {
     capture_named("codex-tui-v0.149.1-turn.bin")
 }

@@ -133,7 +133,9 @@ from datetime import datetime
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
-ANALYSIS_TOOLS = REPO / "zo-ide" / "docs" / "analysis" / "tools"
+# The rulers this script imports rather than copies. They moved out of
+# zo-ide/docs on 2026-09-21 — a ruler is code, and the notes do not ship.
+ANALYSIS_TOOLS = REPO / "tools"
 PRICE_TABLE = REPO / "crates" / "model-prices" / "resources" / "model-prices.json"
 
 

@@ -976,7 +976,8 @@ mod scoped_keychain_tests {
     #[test]
     fn a_managed_directory_is_filed_under_its_hashed_name() {
         let service = scoped_keychain_service(OsStr::new("/Users/dev/Library/Application Support/dev.zerocode.app/.claude"));
-        assert_eq!(service, "Claude Code-credentials-5815b6e3");
+        // The digest is derived from the path above, so it moves with it.
+        assert_eq!(service, "Claude Code-credentials-f2bb2309");
         assert_eq!(service.len(), "Claude Code-credentials-".len() + 8);
         assert_ne!(service, scoped_keychain_service(OsStr::new("/tmp/other")));
     }

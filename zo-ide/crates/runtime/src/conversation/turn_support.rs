@@ -944,7 +944,7 @@ fn the_reminder_bench_fixture_keeps_its_pitfall_out_of_the_recall_section() {
     use core_types::MemoryRetriever as _;
 
     let vault_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../docs/bench/tasks/17-pipe-exit-code/vault");
+        .join("../../bench/tasks/17-pipe-exit-code/vault");
     assert!(
         vault_root.is_dir(),
         "the bench vault moved: {}",
