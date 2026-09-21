@@ -35,10 +35,41 @@ pub fn shadow_ledger_path(cwd: &Path, file: &str) -> PathBuf {
     shadow_ledger_dir(cwd).join(file)
 }
 
+/// Whether a process that has not armed durable traces may write `path`.
+///
+/// The rule the prompt-cache and request-timing ledgers already keep
+/// (`runtime::durable_traces_armed`, 2026-09-10), asked here for the Jev
+/// seats: evidence under the PERSON's own home is written only by a host that
+/// armed it — zo's binary, first thing in `main`. A process nobody armed is a
+/// crate test or an embedded host that never asked, and cargo runs a unit test
+/// from the package root, so its rows land under a project slug that reads
+/// exactly like a session's (`…-zo-ide-crates-tools-…`). Forty-eight `no_key`
+/// routing rows sat beside fifty-two a real session had written, and every
+/// number the Jev dashboard shows was counted on the sum (t-5785, t-5805).
+///
+/// A path OUTSIDE that home is a path somebody chose on purpose — a test's
+/// scratch directory, a harness's pinned `ZO_STATE_DIR` or `ZO_CONFIG_HOME` —
+/// and is written for whoever asked. The person's home is asked for by the
+/// name it has, never through `default_config_home`, because that one reads
+/// the override and would refuse the isolation it exists to allow.
+fn may_write(armed: bool, person_home: Option<&Path>, path: &Path) -> bool {
+    armed || person_home.is_none_or(|home| !path.starts_with(home))
+}
+
 /// One serialized line, one `O_APPEND` write — the same discipline as the
 /// outcome store, for the same reason (concurrent recorders must never
 /// zipper a line). Past `max_bytes` the file is cut to its newer half first.
+///
+/// A write [`may_write`] refuses is not an error: nothing was written because
+/// nothing should have been, which is the same answer an empty row set gives.
 pub fn append_shadow_row<T: Serialize>(path: &Path, row: &T, max_bytes: u64) -> io::Result<()> {
+    if !may_write(
+        runtime::durable_traces_armed(),
+        runtime::conventional_config_home().as_deref(),
+        path,
+    ) {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -137,6 +168,50 @@ fn keep_newer_half(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 무장하지 않은 판은 사람의 홈에 한 줄도 남기지 않는다 — 제가 고른
+    /// 자리에는 그대로 남긴다.
+    ///
+    /// 판정은 순수 함수라 이 시험이 사람의 진짜 홈을 건드리지 않는다: 홈은
+    /// 인자로 들어온다.
+    #[test]
+    fn an_unarmed_process_writes_nothing_under_the_persons_own_home() {
+        let home = std::path::Path::new("/home/dev/.zo");
+        let theirs = home.join("projects/app-1/state/smart-router/decision-shadow.jsonl");
+        let mine = std::path::Path::new("/tmp/scratch-1/smart-router/decision-shadow.jsonl");
+
+        assert!(!may_write(false, Some(home), &theirs), "unarmed, the person's home");
+        assert!(may_write(true, Some(home), &theirs), "a host armed it");
+        assert!(may_write(false, Some(home), mine), "unarmed, a directory it chose");
+        assert!(may_write(false, None, &theirs), "no home resolves: nothing to protect");
+        // 이름이 비슷한 이웃은 그 홈이 아니다.
+        assert!(may_write(false, Some(home), std::path::Path::new("/home/dev/.zo-old/x.jsonl")));
+    }
+
+    /// 그리고 쓰는 길이 그 판정을 실제로 묻는다: 무장 안 한 이 시험 판이
+    /// `HOME` 아래 `.zo` 로 쓰면 파일이 생기지 않는다.
+    #[test]
+    fn the_write_road_asks_it_and_leaves_no_file() {
+        let _lock = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().unwrap();
+        let previous = std::env::var_os("HOME");
+        std::env::set_var("HOME", dir.path());
+        let refused = dir.path().join(".zo").join("projects").join("x").join("row.jsonl");
+        let allowed = dir.path().join("scratch").join("row.jsonl");
+        let wrote = |path: &Path| {
+            append_shadow_row(path, &serde_json::json!({"n": 1}), u64::MAX).expect("no error");
+            path.exists()
+        };
+        let (left, right) = (wrote(&refused), wrote(&allowed));
+        match previous {
+            Some(value) => std::env::set_var("HOME", value),
+            None => std::env::remove_var("HOME"),
+        }
+        assert!(!left, "an unarmed process wrote a row into the person's own home");
+        assert!(right, "a path the process chose is still written");
+    }
 
     #[test]
     fn the_last_row_is_read_from_the_end() {

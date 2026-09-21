@@ -115,7 +115,8 @@ pub use zerocode_core::compact_diff::{
     CompactDiffHunk, CompactDiffLine, CompactDiffLineKind, compact_line_diff,
 };
 pub use config::{
-    default_config_home, durable_traces_armed, jev_ledger_dir, jev_seat_applies, project_slug,
+    conventional_config_home, default_config_home, durable_traces_armed, jev_ledger_dir,
+    jev_seat_applies, project_slug,
     relocate_traces_out_of_tree, traces_base,
     zo_global_config_roots,
     zo_project_state_dir, zo_state_base, JEV_LEDGER_DIR,
