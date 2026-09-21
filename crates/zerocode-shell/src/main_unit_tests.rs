@@ -17335,7 +17335,8 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
 #[test]
 fn the_conversation_wears_the_extensions_own_measures() {
     let panel: serde_json::Value =
-        serde_json::from_str(include_str!("chat/claude-code-panel.json")).expect("the panel snapshot");
+        serde_json::from_str(include_str!("chat/claude-code-panel.json"))
+            .expect("the panel snapshot");
     let tokens = include_str!("../../../ui/tokens.css");
     let light_at = tokens
         .find(":root[data-theme=\"light\"] {")
@@ -17347,7 +17348,9 @@ fn the_conversation_wears_the_extensions_own_measures() {
             .find(&key)
             .unwrap_or_else(|| panic!("--{name} has no dark value"));
         let rest = &dark[at + key.len()..];
-        rest[..rest.find(';').expect("a declaration ends")].trim().to_string()
+        rest[..rest.find(';').expect("a declaration ends")]
+            .trim()
+            .to_string()
     };
     let rule = |key: &str, property: &str| -> String {
         panel["rules"][key][property]
@@ -17379,7 +17382,11 @@ fn the_conversation_wears_the_extensions_own_measures() {
         match digits.parse::<f64>() {
             Ok(number) if !digits.is_empty() => {
                 let unit = value[digits.len()..].trim().to_string();
-                let unit = if number == 0.0 && unit.is_empty() { "px".to_string() } else { unit };
+                let unit = if number == 0.0 && unit.is_empty() {
+                    "px".to_string()
+                } else {
+                    unit
+                };
                 (format!("{number}"), unit)
             }
             _ => (value, String::new()),
@@ -17394,21 +17401,42 @@ fn the_conversation_wears_the_extensions_own_measures() {
         ("chat-radius-bubble", var("--corner-radius-medium")),
         ("chat-bubble-pad-y", nth(rule("userMessage", "padding"), 0)),
         ("chat-bubble-pad-x", nth(rule("userMessage", "padding"), 1)),
-        ("chat-list-pad-x", nth(rule("messagesContainer", "padding"), 1)),
-        ("chat-list-pad-bottom", nth(rule("messagesContainer", "padding"), 2)),
-        ("chat-list-pad-top", rule("messagesContainer.stickyMode:before", "height")),
+        (
+            "chat-list-pad-x",
+            nth(rule("messagesContainer", "padding"), 1),
+        ),
+        (
+            "chat-list-pad-bottom",
+            nth(rule("messagesContainer", "padding"), 2),
+        ),
+        (
+            "chat-list-pad-top",
+            rule("messagesContainer.stickyMode:before", "height"),
+        ),
         ("chat-dock-inset", rule("inputContainer", "bottom")),
         ("chat-dock-max", rule("inputContainer", "max-width")),
         ("chat-fade", rule("messageGradient", "height")),
-        ("chat-sticky-pad-top", rule("message.stickyHeader", "padding-top")),
-        ("chat-sticky-pad-bottom", rule("message.stickyHeader", "padding-bottom")),
+        (
+            "chat-sticky-pad-top",
+            rule("message.stickyHeader", "padding-top"),
+        ),
+        (
+            "chat-sticky-pad-bottom",
+            rule("message.stickyHeader", "padding-bottom"),
+        ),
         ("chat-send-size", rule("sendButton", "width")),
         ("chat-radius-send", rule("sendButton", "border-radius")),
         ("chat-pill-height", var("--app-pill-min-height")),
         ("chat-pill-size", rule("modelPill", "font-size")),
         ("chat-pill-pad-x", nth(rule("modelPill", "padding"), 1)),
-        ("chat-composer-pad-y", nth(rule("messageInput", "padding"), 0)),
-        ("chat-composer-pad-x", nth(rule("messageInput", "padding"), 3)),
+        (
+            "chat-composer-pad-y",
+            nth(rule("messageInput", "padding"), 0),
+        ),
+        (
+            "chat-composer-pad-x",
+            nth(rule("messageInput", "padding"), 3),
+        ),
         ("chat-composer-max-h", rule("messageInput", "max-height")),
         ("chat-prose-leading", rule("messageInput", "line-height")),
         ("chat-footer-pad", rule("inputFooter", "padding")),
@@ -17419,14 +17447,26 @@ fn the_conversation_wears_the_extensions_own_measures() {
         ("chat-status-mark-size", rule("spinner icon", "font-size")),
         ("chat-actions-h", rule("assistantActions", "height")),
         ("chat-actions-gap", rule("assistantActions", "gap")),
-        ("chat-copy-size", rule("assistantActions copyResponseButton", "width")),
-        ("chat-copy-pad", rule("assistantActions copyResponseButton", "padding")),
+        (
+            "chat-copy-size",
+            rule("assistantActions copyResponseButton", "width"),
+        ),
+        (
+            "chat-copy-pad",
+            rule("assistantActions copyResponseButton", "padding"),
+        ),
         ("chat-radius-small", var("--corner-radius-small")),
         ("chat-radius-composer", var("--corner-radius-large")),
         ("chat-meta-pad", rule("metaMessage", "padding")),
         ("chat-meta-alpha", rule("metaMessage", "opacity")),
-        ("chat-dot-done", rule("timelineMessage.dotSuccess:before", "background-color")),
-        ("chat-dot-failed", rule("timelineMessage.dotFailure:before", "background-color")),
+        (
+            "chat-dot-done",
+            rule("timelineMessage.dotSuccess:before", "background-color"),
+        ),
+        (
+            "chat-dot-failed",
+            rule("timelineMessage.dotFailure:before", "background-color"),
+        ),
         ("agent-accent-claude", var("--app-claude-orange")),
         ("agent-send-claude", var("--app-claude-clay-button-orange")),
         ("chat-send-ink", var("--app-claude-ivory")),
@@ -17435,7 +17475,9 @@ fn the_conversation_wears_the_extensions_own_measures() {
     for (name, want) in &pairs {
         let have = token(name);
         if measure(&have) != measure(want) {
-            drifted.push(format!("--{name} is `{have}`, the panel's stylesheet says `{want}`"));
+            drifted.push(format!(
+                "--{name} is `{have}`, the panel's stylesheet says `{want}`"
+            ));
         }
     }
     assert!(
@@ -17461,7 +17503,10 @@ fn the_conversation_wears_the_extensions_own_measures() {
     let spinner = rule("spinnerRow", "animation");
     let seconds: f64 = spinner
         .split_whitespace()
-        .find_map(|word| word.strip_suffix('s').and_then(|number| number.parse::<f64>().ok()))
+        .find_map(|word| {
+            word.strip_suffix('s')
+                .and_then(|number| number.parse::<f64>().ok())
+        })
         .expect("the spinner row fades in over a number of seconds");
     let (millis, unit) = measure(&token("chat-status-in"));
     assert_eq!(
@@ -19418,5 +19463,42 @@ mod dock_launched_usage_probes {
         );
         assert_eq!(read.session.map(|window| window.used_percent), Some(12));
         assert_eq!(read.weekly.map(|window| window.used_percent), Some(40));
+    }
+}
+
+mod quiet_since {
+    use crate::agent_tools_runtime::quiet_since_output;
+    use zerocode_core::orchestration::QUIET_GRACE_MS;
+
+    /// The start of a silence is the moment the child last wrote, and it is
+    /// the same number on every beat that reads it — not `now − elapsed`,
+    /// which drifted 21 ms over eight beats and had the ledger tell one
+    /// silence eight times (2026-09-21).
+    #[test]
+    fn a_silence_starts_when_the_child_last_wrote_and_reads_the_same_on_every_beat() {
+        let wrote = 1_700_000_000_000;
+        assert_eq!(
+            quiet_since_output(Some(wrote), 0, wrote + QUIET_GRACE_MS - 1),
+            None,
+            "inside the grace it is not yet a silence"
+        );
+        let first = quiet_since_output(Some(wrote), 0, wrote + QUIET_GRACE_MS);
+        let later = quiet_since_output(Some(wrote), 0, wrote + QUIET_GRACE_MS + 8_021);
+        assert_eq!(first, Some(wrote));
+        assert_eq!(later, first, "a later beat read a different start");
+    }
+
+    /// A child that never wrote is quiet since it started.
+    #[test]
+    fn a_child_that_never_wrote_is_quiet_since_it_started() {
+        let started = 5_000;
+        assert_eq!(
+            quiet_since_output(None, started, started + QUIET_GRACE_MS - 1),
+            None
+        );
+        assert_eq!(
+            quiet_since_output(None, started, started + QUIET_GRACE_MS),
+            Some(started)
+        );
     }
 }
