@@ -48,6 +48,38 @@ The lane reads the `.pub` beside the key and the scratch's
 `plugins.updater.pubkey`, writes the key id (`updater_pubkey`) to
 `status.json`, and is red on a mismatch before signing anything.
 
+## The private values that must not ship (`pii-scan.py`)
+
+The source repository publishes a release snapshot, so a value that points at
+the machine it was written on must not be in the tree. `just pii-check` reads
+every tracked file and exits 1 while it holds one; it is the first recipe
+`verify` names, so it refuses before anything compiles (~7 s over 1,649 files).
+
+Everything it knows is the `RULES` table at the top of the script — one row per
+category, each carrying what it finds (`find`), what it forgives (`allow`) and
+which paths it does not read (`skip`). `pii-scan.py --table` prints it. The
+four rows are a home directory (written out, or slugged into a session id), an
+address on a real private network, a mailbox outside the reserved example
+domains, and a token or key of a shape a provider actually issues.
+
+A fifth category has no shape a regex can know: a name. `BANISHED` beside the
+table carries the SHA-256 of each word this tree was cleared of once — a
+customer, a product, an internal host — so the gate refuses the word without
+the script ever spelling it, and a digest publishes nothing. It matches a
+whole word, which is how a path, a host or a project name carries one; a name
+welded into a longer identifier is past it and is caught by reading the diff.
+
+Nothing else in the script names a value, and nothing outside it does either:
+a new exception is a new entry in that row's `allow`, or — for a single site
+that cannot be rewritten, like the throwaway key a signing test needs — a
+`pii-scan: allow <category> — <why>` comment on that line or the one above it,
+which is visible in the diff that adds it.
+
+The placeholder vocabulary a rewrite should reach for: `/Users/dev` for a home
+directory, the RFC 5737 documentation addresses (192.0.2.x, 198.51.100.x) for a
+network address, and an `example.com` / `.test` / `.invalid` domain for a
+mailbox. `tests/test_pii_scan.py` pins every row from both sides.
+
 ## Which gates a sha owes (2026-09-16)
 
 Each gate judges one tree — `gate-root` the window, its crates and the tools,
