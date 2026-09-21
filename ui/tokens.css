@@ -1969,6 +1969,8 @@
    * fifth under the pointer (`--app-pill-background` / `-hover-`). */
   --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
   --chat-pill-hover-bg: color-mix(in srgb, var(--ink-chalk) 18%, transparent);
+  /* 고리의 빈 쪽. `--edge-rule`은 border 전용이라 stroke 로 못 쓴다. */
+  --chat-meter-track: var(--edge-mark);
   /* The composer's shadow (`inputContainer`, `0 1px 2px #0000001a`). */
   --chat-shadow: 0 1px 2px rgb(0 0 0 / 10%);
   /* The permission mode's reach, one colour each (the extension's send by
@@ -2034,6 +2036,13 @@
   --chat-pill-height: 18px;
   --chat-pill-size: 0.85em;
   --chat-pill-pad-x: 8px;
+  /* 턴 끝을 기다리는 글들: 항목 사이 4px 눈금 하나, 그리고 그 줄이 상자를
+   * 밀어내기 전에 스스로 구르기 시작하는 높이(항목 넷 어름). */
+  --chat-queue-gap: 4px;
+  --chat-queue-max-h: 96px;
+  /* 컨텍스트 고리: 알약의 글자 높이에 맞춘 12px, 2px 굵기. */
+  --chat-meter-size: 12px;
+  --chat-meter-stroke: 2px;
   --chat-preview-mark: 36px;
   --chat-fold-max: 360px;
   /* The extension's page, read off its stylesheet (2.1.278) and worn as
@@ -2510,6 +2519,7 @@
   --chat-link: var(--ai-accent);
   --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
   --chat-pill-hover-bg: color-mix(in srgb, var(--ink-chalk) 18%, transparent);
+  --chat-meter-track: var(--edge-mark);
   --chat-shadow: 0 1px 2px rgb(0 0 0 / 10%);
   --chat-reach-edits: var(--ink-chalk);
   --chat-reach-edits-ink: var(--surface-deck);

@@ -1484,6 +1484,11 @@ pub struct AgentPresence {
     /// the same conversation: the wire resumes a session by flag and the
     /// CLI has an exit command the window can type.
     pub wire_resumes: bool,
+    /// The CLI's own word for winning context back ([`AgentVoice`]), which
+    /// the composer's context meter sends when it is pressed. `None` leaves
+    /// that chip a reading with no door — the window never invents a
+    /// command a CLI did not name.
+    pub compact_command: Option<&'static str>,
 }
 
 /// How far a permission mode lets the agent act before it asks — the one
@@ -1578,6 +1583,10 @@ pub struct AgentVoice {
     /// `None` for a CLI whose plan tool was not measured; its permission
     /// requests stay ordinary approvals rather than guessed plans.
     pub plan_tool: Option<&'static str>,
+    /// The slash command that summarises a session to win its context back.
+    /// The composer's context meter IS that button, so the word has to be
+    /// this CLI's own; `None` leaves the meter a reading and no door.
+    pub compact_command: Option<&'static str>,
 }
 
 /// The consoles this catalog knows — read off each CLI's own screen and its
@@ -1635,6 +1644,10 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // The tool Claude Code asks plan approval with; its input's
             // `plan` is the plan the card previews.
             plan_tool: Some("ExitPlanMode"),
+            // On Claude Code's own command list — the `system.init` frame of
+            // the stream-json wire named `compact` among 138 slash commands,
+            // and the command answered down that wire (measured 2026-09-21).
+            compact_command: Some("/compact"),
         },
     ),
     (
@@ -1667,6 +1680,10 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             }),
             exit_command: None,
             plan_tool: None,
+            // In the 0.155.1 binary's own slash blob — "summarize
+            // conversation to prevent hitting the context limit"
+            // (docs/design/zo-vs-codex-gaps-20260921.md #23, `S:53003`).
+            compact_command: Some("/compact"),
         },
     ),
     (
@@ -1692,6 +1709,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             wire: None,
             exit_command: None,
             plan_tool: None,
+            // zo's own twelve (`zo-ide/README.md:36`).
+            compact_command: Some("/compact"),
         },
     ),
     (
@@ -1719,6 +1738,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             wire: None,
             exit_command: None,
             plan_tool: None,
+            // agy's compaction word is not measured here.
+            compact_command: None,
         },
     ),
 ];
@@ -1735,6 +1756,7 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     wire: None,
     exit_command: None,
     plan_tool: None,
+    compact_command: None,
 };
 
 /// One agent's console, or the silent one for an agent the table does not
@@ -1826,6 +1848,7 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                     .wire
                     .is_some_and(|road| road.resume.is_some())
                     && agent_voice(spec.id).exit_command.is_some(),
+                compact_command: agent_voice(spec.id).compact_command,
             }
         })
         .collect()
@@ -1901,6 +1924,8 @@ mod tests {
             // compared against the permission request's `tool_name`.
             if let Some(plan) = console.plan_tool {
                 assert!(!plan.is_empty() && !plan.starts_with('/'), "{id}: {plan}");
+            if let Some(compact) = console.compact_command {
+                assert!(compact.starts_with('/'), "{id}: {compact}");
             }
         }
         assert_eq!(
@@ -1921,6 +1946,17 @@ mod tests {
         assert_eq!(claude_wire.resume, Some("--resume"));
         assert_eq!(super::agent_voice("claude").exit_command, Some("/exit"));
         assert!(super::agent_voice("codex").exit_command.is_none());
+        // The context meter's door: three CLIs name the word, one does not,
+        // and the silent console never does.
+        for named in ["claude", "codex", "zo"] {
+            assert_eq!(
+                super::agent_voice(named).compact_command,
+                Some("/compact"),
+                "{named}"
+            );
+        }
+        assert!(super::agent_voice("antigravity").compact_command.is_none());
+        assert!(super::SILENT_CONSOLE.compact_command.is_none());
         assert!(super::wire_road("zo").is_none());
         let silent = super::agent_voice("nobody");
         assert_eq!(silent, super::SILENT_CONSOLE);

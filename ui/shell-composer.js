@@ -23,9 +23,16 @@ const COMPOSER_SUBMIT_DELAY_MS = 500;
 /* How long a palette answer stands before the CLI is asked again. */
 const SLASH_CATALOG_TTL_MS = 5 * 60 * 1000;
 
-/* Send words to a pane the measured way: paste, one breath, Enter. */
-async function deliverToPane(term, text) {
+/* Send words to a pane the measured way: paste, one breath, Enter.
+ *
+ * `landed` is called the moment the words are in the pane's own box, before
+ * the breath: an Enter that fails AFTER that leaves the words standing over
+ * there, and the caller has to wear that difference (`run.sendUncertain` —
+ * 「전달됐지만 전송 완료를 확인하지 못했습니다」) rather than report a send
+ * that simply failed. */
+async function deliverToPane(term, text, landed = null) {
   await invoke("term_paste", { term, text });
+  landed?.();
   await new Promise((done) => setTimeout(done, COMPOSER_SUBMIT_DELAY_MS));
   await invoke("term_key", { term, press: { key: "Enter", ctrl: false, alt: false } });
 }
@@ -121,6 +128,8 @@ function composerRoad(run, spec = null) {
         };
       },
       send: (text) => invoke("wire_send", { id: run.wire, text }),
+      // 이 세션이 마지막으로 말한 컨텍스트(`wire_log`의 `usage`).
+      usage: () => run.wireLog?.usage ?? null,
     };
   }
   return {
@@ -132,7 +141,144 @@ function composerRoad(run, spec = null) {
     cycleMode: () => cyclePanePermission(run, spec),
     catalog: (cwd, refresh) => slashCatalogFor(spec.id, cwd, refresh),
     send: (text) => deliverToPane(run.term, text),
+    // 판에게는 출처가 둘이다. 제 전사가 말한 것이 먼저고(모든 CLI가
+    // 남긴다), 그것이 없으면 zo 채널이 세션에 대해 말한 것. 셋째는 없다 —
+    // 훅은 토큰을 나르지 않는다.
+    usage: () => paneUsage.get(run.term)
+      ?? sessionUsage.get(paneSessions.get(run.term)?.session?.id)
+      ?? null,
   };
+}
+
+/* ---- 실행 중에 친 글: 창이 들고 있다가 턴 끝에 보낸다 ---------------------
+ *
+ * 확장의 입력 자리말 「Queue another message…」와 그 `heldPrompts`: 턴
+ * 한가운데서 친 글은 창 안에 서 있다가 턴이 끝나면 나간다. 지금까지 이
+ * 입력줄은 실행 중에도 즉시 보냈고, 그 글이 어디에 떨어지는지는 길마다
+ * 달랐다 — 판의 TUI는 제 대기열에 넣고(그 대기열은 이 창이 그릴 수도 지울
+ * 수도 없다), 선은 턴 한가운데에 user 메시지를 끼워 넣는다. 창이 들고
+ * 있으면 모든 에이전트가 같은 그림을 얻는다: 보이는 항목, 사람이 정한
+ * 순서, 지우는 ×. 새로고침에 사라지던 글(확장 changelog 2.1.268/272)도
+ * 여기서는 실행이 살아 있는 동안 산다. */
+
+/* 이 실행이 지금 턴을 돌리고 있는가 — 보내기가 중지로 바뀌는 그 판정
+ * 하나다(`paintWorkerComposerState`가 이 함수를 부른다; 식이 두 벌 있으면
+ * 언젠가 둘이 갈라진다). 판은 훅이 말한 낱말, 선은 제 상태. */
+function composerWorking(run) {
+  const term = run.term;
+  const onPane = term !== undefined && term !== null
+    && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)));
+  return onPane || run.status === "running";
+}
+
+/* 글 하나가 실행에 닿는 길 — 선이면 한 요청, 판이면 붙여넣기·숨·Enter.
+ * 제출과 대기열이 **같은 이 문**을 지나므로, 대기열에서 나간 글은 사람이
+ * 직접 친 글과 한 글자도 다르지 않게 도착한다. */
+function composerDeliver(run, message, landed = null) {
+  return run.wire ? composerRoad(run).send(message) : deliverToPane(run.term, message, landed);
+}
+
+/* 대기열에 한 글. 상한이 없다 — 이것은 사람이 친 글이고, 어느 것을 버릴지
+ * 창이 고를 수 없다. 실행 하나의 수명과 같이 살고 그 실행이 사라질 때
+ * (탭 drop, `forgetPaneChat`) 같이 사라진다. */
+function queueComposerMessage(run, message) {
+  if (!run.queue) run.queue = [];
+  run.queue.push(message);
+}
+
+/* 대기 중인 글의 한 줄 — 첫 줄(빈 줄은 건너뛴다)만. 길이는 CSS가 자른다
+ * (`text-overflow`), 여기서 자르는 것은 줄바꿈뿐이다. */
+function composerQueueWords(message) {
+  return (String(message).split("\n").find((line) => line.trim() !== "") ?? "").trim();
+}
+
+/* 대기열 줄 하나 — 상자 위, 첨부 칩 줄과 같은 층위. 세우기만 한다. */
+function composerQueueNode() {
+  const queue = document.createElement("div");
+  queue.className = "composer-queue";
+  queue.hidden = true;
+  const count = document.createElement("span");
+  count.className = "composer-queue-count";
+  queue.appendChild(count);
+  return queue;
+}
+
+/* 항목 하나 — 글 한 줄과 그것을 빼는 ×. 지우기는 대기열을 고치고 이 실행의
+ * 입력줄 전부를 다시 그린다(같은 실행을 두 자리에서 보고 있을 수 있다). */
+function composerQueueItemNode(run, message, at) {
+  const item = document.createElement("div");
+  item.className = "composer-queue-item";
+  const words = document.createElement("span");
+  words.className = "composer-queue-words";
+  words.textContent = composerQueueWords(message);
+  const drop = document.createElement("button");
+  drop.type = "button";
+  drop.className = "composer-queue-drop";
+  labelButton(drop, t("composer.queue.drop", "대기열에서 지우기"));
+  drop.appendChild(iconNode("x"));
+  drop.addEventListener("click", () => {
+    run.queue?.splice(at, 1);
+    syncWorkerComposers(run);
+  });
+  item.append(words, drop);
+  return item;
+}
+
+/* 대기열의 그림. 항목들의 서명이 그대로면 DOM을 건드리지 않는다 — 조용한
+ * 폴은 mutation 0이고, 다시 세우는 값은 항목이 실제로 바뀐 폴에서만 치른다.
+ * 그리기만 한다: 보내는 문은 `settleComposerQueue`다(SRP). */
+function paintComposerQueue(form, run) {
+  const queue = form.querySelector(".composer-queue");
+  if (!queue) return;
+  const held = run.queue ?? [];
+  writeHidden(queue, held.length === 0);
+  const sign = held.map(composerQueueWords).join("\u0000");
+  if (queue.__queueSign === sign) return;
+  queue.__queueSign = sign;
+  const count = queue.querySelector(".composer-queue-count");
+  writeTextContent(count, t("composer.queue.count", "대기 {{n}}", { n: held.length }));
+  queue.replaceChildren(count, ...held.map((message, at) => composerQueueItemNode(run, message, at)));
+}
+
+/* 대기열의 첫 항목을 내보내는 문 — 상태가 움직이는 자리에서만 불린다.
+ *
+ * 한 턴에 하나. 보낸 직후에는 훅도 선도 아직 「작업 중」이라 말하지 않아서,
+ * 그 짧은 창에 이 문이 다시 불리면 대기열이 통째로 쏟아진다. 그래서 보낼
+ * 때 빗장(`run.queueArmed`)을 내리고, 상태가 실제로 working으로 오른 것을
+ * 본 뒤에만 다시 올린다 — 시계가 아니라 상태가 기준이다. */
+function settleComposerQueue(run) {
+  if (composerWorking(run)) {
+    run.queueArmed = true;
+    return;
+  }
+  if (run.queueArmed === false) return;
+  if (!run.queue?.length || run.sending || run.sendUncertain) return;
+  const message = run.queue.shift();
+  run.queueArmed = false;
+  run.sending = true;
+  syncWorkerComposers(run);
+  let pasted = false;
+  void composerDeliver(run, message, () => { pasted = true; })
+    .catch((error) => {
+      if (pasted) run.sendUncertain = true;
+      showError(error);
+    })
+    .finally(() => {
+      run.sending = false;
+      syncWorkerComposers(run);
+    });
+}
+
+/* 그 판에 말하는 실행들의 대기열 — 판의 상태가 움직인 자리(`hook:agent`)에서
+ * 한 번씩. 그림은 `paintComposerChipsFor`의 몫이고 이 문은 보내기만 한다. */
+function settleComposerQueuesFor(term) {
+  const settled = new Set();
+  for (const form of document.querySelectorAll(".worker-composer")) {
+    const run = form.__workerRun;
+    if (run?.term !== term || settled.has(run)) continue;
+    settled.add(run);
+    settleComposerQueue(run);
+  }
 }
 
 /* ---- the agent·model chip ------------------------------------------------ */
@@ -542,6 +688,110 @@ function paintComposerModeChip(chip, run, spec) {
   writeAttribute(chip, "data-tip", tip);
   writeAttribute(chip, "aria-label", tip);
   chip.disabled = !road.canChangeMode();
+}
+
+/* ---- 컨텍스트 미터와 압축 문 --------------------------------------------
+ *
+ * X의 오래된 말(「상태 줄이 가장 저평가된 기능 — 모델·effort·정확한 컨텍스트
+ * 사용량」)과 확장 푸터의 파이. 확장은 창 크기에서 제 출력 상한과 제 상수를
+ * 빼고 나서 그리는데, 그 둘은 확장의 산수와 확장의 리터럴이라 옮기지 않는다.
+ * 여기서는 CLI가 준 두 수만 쓴다 — 쓴 만큼과 담을 수 있는 만큼.
+ *
+ * 그리고 그 알약이 곧 압축 단추다. 채워 가는 고리를 보여 주면서 비울 길을
+ * 주지 않는 것은 계기판만 있고 손잡이가 없는 것과 같다. */
+
+/* 고리의 둘레를 100으로 잡는다 — 백분율이 그대로 `stroke-dasharray`의
+ * 길이가 되어, 비율을 그리는 데 제2의 산수가 없다. r = 100 / 2π. */
+const METER_CIRCUMFERENCE = 100;
+const METER_RADIUS = 15.915_5;
+
+/* 트랙과 채움, 원 둘. 세우기만 한다. */
+function composerMeterNode() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "worker-composer-meter");
+  svg.setAttribute("viewBox", "0 0 32 32");
+  svg.setAttribute("aria-hidden", "true");
+  for (const role of ["is-track", "is-fill"]) {
+    const ring = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    ring.setAttribute("class", role);
+    ring.setAttribute("cx", "16");
+    ring.setAttribute("cy", "16");
+    ring.setAttribute("r", String(METER_RADIUS));
+    svg.appendChild(ring);
+  }
+  return svg;
+}
+
+/* 이 실행에서 압축을 부를 수 있는가 — 카탈로그가 그 명령을 알고, 이 길이
+ * 그것을 나를 수 있을 때의 그 명령, 아니면 `null`.
+ *
+ * 판은 언제나 나를 수 있다: 사람이 화면에 직접 치는 것과 같은 길이다. 선은
+ * 세션이 제 명령 목록에 그 이름을 올렸을 때만 — 올리지 않은 세션에 슬래시
+ * 한 줄을 보내면 그것은 명령이 아니라 모델에게 하는 말이 되고, 사람은
+ * 컨텍스트가 줄기를 기다리며 줄지 않는 고리를 본다. */
+function composerCompactCommand(run, spec) {
+  const command = spec?.compact_command ?? null;
+  if (!command) return null;
+  if (!run.wire) return command;
+  return (run.wireLog?.commands ?? []).some((row) => row.name === command) ? command : null;
+}
+
+/* 창 크기를 말로 — 모르면 「?」. 지어낸 분모는 툴팁에서도 쓰지 않는다. */
+function composerContextWindowWords(reading) {
+  return reading.window > 0
+    ? reading.window.toLocaleString()
+    : t("composer.context.unknownWindow", "?");
+}
+
+function composerContextChip(run, spec) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "worker-composer-pill worker-composer-context";
+  chip.hidden = true;
+  chip.append(composerMeterNode(), pillWordsNode(""));
+  labelButton(chip, t("composer.context.tipPlain", "컨텍스트 {{tokens}} / {{window}}", {
+    tokens: "0",
+    window: t("composer.context.unknownWindow", "?"),
+  }));
+  chip.addEventListener("click", () => {
+    const command = composerCompactCommand(run, spec);
+    if (!command) return;
+    void composerDeliver(run, command).catch((error) => showError(error));
+  });
+  paintComposerContextChip(chip, run, spec);
+  return chip;
+}
+
+/* 읽은 값이 있을 때만 선다. 창을 아는 읽기는 고리와 백분율, 모르는 읽기는
+ * 상태바와 **같은 낱말**(`usageCtxWord`)과 고리 없음 — 어휘를 두 벌 만들지
+ * 않는다. 쓰기는 전부 값이 바뀔 때만(조용한 폴은 mutation 0). */
+function paintComposerContextChip(chip, run, spec) {
+  const reading = composerRoad(run, spec).usage();
+  const shown = Boolean(reading) && reading.tokens > 0;
+  writeHidden(chip, !shown);
+  if (!shown) return;
+  const ratio = reading.window > 0 ? Math.min(1, reading.tokens / reading.window) : 0;
+  const meter = chip.querySelector(".worker-composer-meter");
+  writeHidden(meter, reading.window <= 0);
+  if (reading.window > 0) {
+    writeAttribute(
+      meter.querySelector(".is-fill"),
+      "stroke-dasharray",
+      `${(ratio * METER_CIRCUMFERENCE).toFixed(1)} ${METER_CIRCUMFERENCE}`,
+    );
+  }
+  writeTextContent(
+    chip.querySelector(".worker-composer-pill-words"),
+    reading.window > 0 ? `${Math.round(ratio * 100)}%` : usageCtxWord(reading),
+  );
+  const command = composerCompactCommand(run, spec);
+  const words = { tokens: reading.tokens.toLocaleString(), window: composerContextWindowWords(reading) };
+  const tip = command
+    ? t("composer.context.tip", "컨텍스트 {{tokens}} / {{window}} — 눌러서 압축 ({{command}})", { ...words, command })
+    : t("composer.context.tipPlain", "컨텍스트 {{tokens}} / {{window}}", words);
+  writeAttribute(chip, "data-tip", tip);
+  writeAttribute(chip, "aria-label", tip);
+  chip.disabled = command === null;
 }
 
 /* ---- the `/` palette ----------------------------------------------------- */

@@ -220,6 +220,24 @@ pub(crate) struct WireState {
     pub(crate) live: Vec<WireLive>,
     /// ACP: the ways the agent can be authenticated, from `initialize`.
     pub(crate) auth_methods: Vec<String>,
+    /// How full the session's context is, when the CLI says — the composer's
+    /// meter. `None` for a wire that never reports one (ACP says nothing
+    /// about tokens), and the meter then does not stand.
+    pub(crate) usage: Option<WireUsage>,
+}
+
+/// What a session says about the context it carries: the tokens the last
+/// request stood on, and the window they stand in.
+///
+/// `window` is `0` where the CLI names no window — the chip then says the
+/// count and draws no ring, because a ring over a made-up denominator cannot
+/// tell "nearly full" from "just started". The same two numbers come off a
+/// transcript (`zerocode_core::transcript::TranscriptUsage`) and off zo's
+/// channel, so one chip reads all three roads without asking which it is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct WireUsage {
+    pub(crate) tokens: u64,
+    pub(crate) window: u64,
 }
 
 /// One voice the agent is streaming in — `thinking` or `assistant` — and its
@@ -245,6 +263,9 @@ struct WireMark {
     model: Option<String>,
     mode: Option<String>,
     commands: usize,
+    /// The context reading the page's meter draws: a settled fact, so a new
+    /// one is news even in a turn that said nothing else.
+    usage: Option<WireUsage>,
     live: usize,
 }
 
@@ -257,6 +278,7 @@ impl WireMark {
             && self.model == other.model
             && self.mode == other.mode
             && self.commands == other.commands
+            && self.usage == other.usage
     }
 }
 
@@ -393,6 +415,7 @@ impl WireState {
             model: self.model.clone(),
             mode: self.mode.clone(),
             commands: self.commands.len(),
+            usage: self.usage,
             live: self.live.len()
                 + self
                     .live
@@ -734,6 +757,32 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
             state.turn = None;
             state.live.clear();
             state.status = if failed { "failed" } else { "idle" };
+        }
+        "thread/tokenUsage/updated" => {
+            // Codex's app-server announces the thread's token usage on its
+            // own notification (`ThreadTokenUsageUpdatedNotification` →
+            // `ThreadTokenUsage`, read off `codex app-server
+            // generate-json-schema` for 0.155.1 on 2026-09-21). `last` is the
+            // request that just finished — what the next one will carry, so
+            // the context; `total` is the thread's whole spend, which is not
+            // a context and would read as a meter that only ever fills.
+            // `modelContextWindow` is null where the model's window is not
+            // known, and 0 then says so.
+            let told = params.get("tokenUsage").unwrap_or(&serde_json::Value::Null);
+            let tokens = told
+                .get("last")
+                .and_then(|last| last.get("totalTokens"))
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0);
+            if tokens > 0 {
+                state.usage = Some(WireUsage {
+                    tokens,
+                    window: told
+                        .get("modelContextWindow")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0),
+                });
+            }
         }
         "thread/status/changed" => {
             let status = params.get("status").unwrap_or(&serde_json::Value::Null);
@@ -1313,6 +1362,9 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
         }
         Some("result") => {
             state.live.clear();
+            if let Some(usage) = claude_result_usage(state, message) {
+                state.usage = Some(usage);
+            }
             let failed = message.get("is_error").and_then(serde_json::Value::as_bool) == Some(true);
             if failed {
                 let words = message
@@ -1327,6 +1379,48 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
         _ => {}
     }
     out
+}
+
+/// The context a Claude Code `result` line reports.
+///
+/// Measured 2026-09-21 against `claude -p --input-format stream-json
+/// --output-format stream-json --verbose` (2.1.x on this machine): the result
+/// frame carries `usage` and `modelUsage` at its TOP level, not inside a
+/// `message`. The context is the last request's whole prompt —
+/// `input_tokens` plus both cache counts, the three the token measurement
+/// note adds (`zo-ide/docs/analysis/cc-token-measure-r16.md`); the output is
+/// not context yet. The window is that model's own
+/// (`modelUsage[<model>].contextWindow`, measured 1000000 for
+/// `claude-fable-5-1`), and a result with no row for it — a local command
+/// that never reached a model, where `modelUsage` came back `{}` — keeps the
+/// window at 0 rather than inventing a denominator.
+///
+/// The extension subtracts `maxOutputTokens` and a constant of its own from
+/// the window before drawing its pie. Neither number is ours to reuse: one
+/// is the extension's arithmetic and the other is its literal, so this
+/// reports the two numbers the CLI gave and lets the chip say what they are.
+fn claude_result_usage(state: &WireState, message: &serde_json::Value) -> Option<WireUsage> {
+    let usage = message.get("usage")?;
+    let count = |name: &str| {
+        usage
+            .get(name)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0)
+    };
+    let tokens = count("input_tokens")
+        + count("cache_creation_input_tokens")
+        + count("cache_read_input_tokens");
+    if tokens == 0 {
+        return None;
+    }
+    let window = state
+        .model
+        .as_deref()
+        .and_then(|model| message.get("modelUsage")?.get(model))
+        .and_then(|row| row.get("contextWindow"))
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    Some(WireUsage { tokens, window })
 }
 
 /// The reply to a Claude Code permission question: an allow repeats the input
@@ -1962,6 +2056,9 @@ pub(crate) struct WireLog {
     pub(crate) commands: Vec<WireCommand>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) version: Option<String>,
+    /// How full the context is, when the session said (the composer's meter).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) usage: Option<WireUsage>,
 }
 
 #[derive(Default)]
@@ -2278,6 +2375,7 @@ pub(crate) fn log_of(session: &WireSession, after: u64) -> Result<WireLog, Strin
         modes: state.modes.clone(),
         commands: state.commands.clone(),
         version: state.version.clone(),
+        usage: state.usage,
     })
 }
 
@@ -2704,6 +2802,106 @@ mod tests {
         assert_eq!(state.mode.as_deref(), Some("auto_edit"));
         assert_eq!(state.status, "idle");
         assert!(state.prompt_request.is_none());
+    }
+
+    /// The context meter's two numbers come off the CLI, and only off it.
+    ///
+    /// The Claude shapes here are the frames measured on 2026-09-21 (a
+    /// `result` line carrying `usage` and `modelUsage` at its top level);
+    /// Codex's is its app-server schema for 0.155.1. A frame that names no
+    /// window keeps 0 — the chip then says the count instead of drawing a
+    /// ring over a denominator nobody gave.
+    #[test]
+    fn a_session_reports_the_context_it_carries_and_never_invents_the_window() {
+        let mut state = WireState::default();
+        take(
+            Protocol::ClaudeStream,
+            &mut state,
+            &serde_json::json!({"type":"system","subtype":"init","model":"claude-fable-5-1"}),
+        );
+        take(
+            Protocol::ClaudeStream,
+            &mut state,
+            &serde_json::json!({"type":"result","subtype":"success","is_error":false,
+                "usage":{"input_tokens":2,"cache_creation_input_tokens":17628,"cache_read_input_tokens":9000,"output_tokens":4},
+                "modelUsage":{"claude-fable-5-1":{"contextWindow":1_000_000,"maxOutputTokens":64000}}}),
+        );
+        assert_eq!(
+            state.usage,
+            Some(WireUsage {
+                tokens: 26630,
+                window: 1_000_000
+            }),
+            "the last request's whole prompt, in the model's own window"
+        );
+        // A local command reaches no model: its `modelUsage` is `{}` and the
+        // window stays unknown rather than borrowing the last one.
+        let mut local = WireState {
+            model: Some("claude-fable-5-1".into()),
+            ..WireState::default()
+        };
+        take(
+            Protocol::ClaudeStream,
+            &mut local,
+            &serde_json::json!({"type":"result","subtype":"success","is_error":false,
+                "usage":{"input_tokens":1200,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},
+                "modelUsage":{}}),
+        );
+        assert_eq!(
+            local.usage,
+            Some(WireUsage {
+                tokens: 1200,
+                window: 0
+            })
+        );
+        // A result that spent nothing says nothing.
+        let mut quiet = WireState::default();
+        take(
+            Protocol::ClaudeStream,
+            &mut quiet,
+            &serde_json::json!({"type":"result","subtype":"success","is_error":false,
+                "usage":{"input_tokens":0,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},
+                "modelUsage":{}}),
+        );
+        assert!(quiet.usage.is_none());
+        // Codex says it on its own notification: `last` is the context, and
+        // `total` — the thread's whole spend — is not.
+        let mut codex = WireState::default();
+        take(
+            Protocol::AppServer,
+            &mut codex,
+            &serde_json::json!({"method":"thread/tokenUsage/updated","params":{"threadId":"t1","turnId":"u1",
+                "tokenUsage":{"last":{"inputTokens":34000,"cachedInputTokens":30000,"outputTokens":512,"reasoningOutputTokens":0,"totalTokens":34512},
+                    "total":{"inputTokens":900000,"cachedInputTokens":0,"outputTokens":9000,"reasoningOutputTokens":0,"totalTokens":909000},
+                    "modelContextWindow":272_000}}}),
+        );
+        assert_eq!(
+            codex.usage,
+            Some(WireUsage {
+                tokens: 34512,
+                window: 272_000
+            })
+        );
+        // A new reading is settled news: the page hears it even when the turn
+        // said nothing else.
+        let before = codex.mark();
+        take(
+            Protocol::AppServer,
+            &mut codex,
+            &serde_json::json!({"method":"thread/tokenUsage/updated","params":{"threadId":"t1","turnId":"u2",
+                "tokenUsage":{"last":{"inputTokens":40000,"cachedInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0,"totalTokens":40000},
+                    "total":{"inputTokens":0,"cachedInputTokens":0,"outputTokens":0,"reasoningOutputTokens":0,"totalTokens":0},
+                    "modelContextWindow":null}}}),
+        );
+        assert!(!codex.mark().settled_as(&before));
+        assert_eq!(
+            codex.usage,
+            Some(WireUsage {
+                tokens: 40000,
+                window: 0
+            }),
+            "a null window is unknown, not the one said a turn ago"
+        );
     }
 
     #[test]

@@ -140,6 +140,7 @@ pub(crate) fn subagent_log(
         skipped: false,
         more: false,
         folded: false,
+        usage: None,
     };
     // Where the helper's conversation is. The vendor may have said so itself —
     // zo names each running helper's session file in its `subagents` frame and
@@ -194,6 +195,7 @@ pub(crate) fn pane_log(
             skipped: false,
             more: false,
             folded: false,
+            usage: None,
         });
     };
     transcript_log_at(&path, after)
@@ -253,6 +255,7 @@ pub(crate) fn transcript_log_at(
         skipped: chunk.skipped,
         more: next < size,
         folded,
+        usage: zerocode_core::transcript::usage_in(&text),
     })
 }
 

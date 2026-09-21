@@ -2466,6 +2466,25 @@ function usageCtxWord(reading) {
   return `ctx ${reading.tokens.toLocaleString()}`;
 }
 
+/* 그리고 판의 전사가 말한 같은 두 수 — 훅은 토큰을 나르지 않고 채널은
+ * zo의 것이라, 그 둘이 없는 판에게는 제 전사가 유일한 출처다(`pane_log`의
+ * `usage`). 판 번호로 잡히므로 판이 죽을 때(`term:exited`)와 대화를 잊을
+ * 때(`forgetPaneChat`) 같이 지운다. */
+const paneUsage = new Map();
+
+/* 담고, 값이 움직였는지 말한다 — 움직였을 때만 칩을 다시 그리므로, 같은
+ * 수를 다시 실어 온 폴은 아무것도 만지지 않는다. */
+function rememberPaneUsage(term, usage) {
+  const tokens = Number(usage?.tokens ?? 0);
+  const window = Number(usage?.window ?? 0);
+  if (!Number.isFinite(tokens) || tokens <= 0) return false;
+  const reading = { tokens, window: Number.isFinite(window) && window > 0 ? window : 0 };
+  const held = paneUsage.get(term);
+  if (held && held.tokens === reading.tokens && held.window === reading.window) return false;
+  paneUsage.set(term, reading);
+  return true;
+}
+
 /* 그리고 그 판의 카드가 읽는 같은 값 — 비율까지.
  *
  * 둘 다 있어야 그린다. 토큰만 아는 카드에 막대를 그리려면 창 크기를 지어내야
@@ -10220,6 +10239,11 @@ listen("hook:agent", (event) => {
   }
   const wasMidTurn = isMidTurn(hookStates.get(term));
   hookStates.set(term, state);
+  // 판의 상태가 **여기서** 움직인다 — 칩을 다시 그린 자리(위)에서는 훅의
+  // 낱말이 아직 옛것이라, 턴이 끝난 그 순간을 그 자리에서는 볼 수 없다.
+  // 그래서 기다리던 글을 내보내는 문은 상태가 실제로 옮겨 앉은 이 줄 뒤에
+  // 선다(그리는 문과 보내는 문은 여전히 따로다).
+  settleComposerQueuesFor(term);
   agentClock.sync();
   // A conversation view asked for mid-turn is handed to the wire now that the
   // turn is over — if the person still has it up.
@@ -10745,13 +10769,14 @@ function wireRunStatus(status) {
 function holdWireState(run, log) {
   const before = run.wireLog
     ? JSON.stringify([run.wireLog.status, run.wireLog.asks, run.wireLog.model, run.wireLog.mode,
-      run.wireLog.modes, run.wireLog.commands, run.wireLog.live])
+      run.wireLog.modes, run.wireLog.commands, run.wireLog.live, run.wireLog.usage ?? null])
     : "";
   run.wireLog = log;
   run.status = wireRunStatus(log.status);
   if (log.status === "ended" && run.endedAt === null) run.endedAt = Date.now();
   run.toolCalls = run.helper.turns.filter((turn) => turn.role === "tool").length;
-  return before !== JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands, log.live]);
+  return before !== JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands,
+    log.live, log.usage ?? null]);
 }
 
 /* A wire session said it has something new — a delta of what it is saying, a
@@ -10962,8 +10987,11 @@ function forgetPaneChat(term) {
   if (!held) return;
   dropWorkerScreen(held.tab.pane);
   held.host?.remove();
+  // 기다리던 글들은 이 대화의 것이었다 — 대화가 사라지면 같이 사라진다.
+  held.run.queue = null;
   paneChats.delete(term);
   paneLive.delete(term);
+  paneUsage.delete(term);
 }
 
 /* The active pane's term when it runs an agent — the pane the toggle speaks
@@ -11077,6 +11105,7 @@ function paintPaneChat(term) {
   // when it ends — the state it reads (`run.status`) moved here, so it is
   // repainted here; a hook's chip repaint ran before the state landed.
   if (moved) syncWorkerComposers(run);
+  if (moved) settleComposerQueue(run);
   paintPaneAsk(held);
   // Said once, where the turns would be: the agent has not named a transcript.
   noticeOnPaneChat(
@@ -11232,6 +11261,12 @@ async function pollHelperPages() {
     return;
   }
   held.found = true;
+  // 전사가 말한 컨텍스트 사용량. 판의 길에서만 담는다 — 헬퍼의 전사는
+  // 부모 판이 서 있는 자리가 아니고, 그것을 판의 값으로 적으면 칩이 남의
+  // 수를 이 판의 것이라 말하게 된다.
+  const usageMoved = held.id === PANE_LOG_ID && more.usage
+    ? rememberPaneUsage(tab.worker.term, more.usage)
+    : false;
   // The transcript names the model that wrote it. Only taken where nothing
   // has said yet: a hook that carries one is the pane's live word and this is
   // the file's memory of it, which is a turn behind whenever both speak.
@@ -11255,8 +11290,11 @@ async function pollHelperPages() {
   // the composer read it there), and a change repaints with no new turn.
   const wireChanged = held.id === WIRE_LOG_ID && holdWireState(tab.worker, more);
   if (document.hidden || activeHelperPage() !== tab) return;
-  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged) return;
+  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved) return;
   if (wireChanged) syncWorkerComposers(tab.worker);
+  if (wireChanged) settleComposerQueue(tab.worker);
+  // 컨텍스트가 움직였다 — 미터만 갈아입는다(턴은 그대로일 수 있다).
+  if (usageMoved) syncWorkerComposers(tab.worker);
   // 새로 온 것이 있을 때에만 다시 그린다 — 쉬는 페이지는 아무 값도 치르지
   // 않고, 그림도 온 턴만 잇는다(`syncHelperTurns`).
   paintHelperSurface(tab);
@@ -12586,6 +12624,10 @@ function workerComposerNode(run, owner = null) {
     ? t("worker.sayTo", "{{name}}에게 보내기…", { name: run.name || agentName(run.agent) })
     : t("worker.say", "부모 에이전트에게 보내기…");
   box.setAttribute("aria-label", box.placeholder);
+  // 실행 중에는 상자가 「대기열에 추가」라고 말하고 턴 사이에는 제 본래의
+  // 말로 돌아온다 — 그 본래의 말은 여기서 한 번 정해지므로, 갈아입히는
+  // 페인터(`paintWorkerComposerState`)가 규칙을 다시 짓지 않게 들려 둔다.
+  form.__composerSay = box.placeholder;
   // 쓰다 만 문장은 실행의 것이다 — 페이지가 다시 서도(탭 전환, 부모의
   // 생사) 상자가 그 문장을 다시 입는다. 폴은 애초에 이 상자를 다시 만들지
   // 않는다(`paintHelperPage`의 뼈대).
@@ -12613,6 +12655,8 @@ function workerComposerNode(run, owner = null) {
   // 첨부(t-2993)는 제 모듈의 것 — 칩 줄은 상자 위에, 「+」는 도구 줄 맨 왼쪽에.
   // 브라우저의 시작점은 부모 판의 체크아웃이다.
   const attachments = composerAttachments(form, box, tools, { start: owner?.worktree ?? null });
+  // 턴이 끝나기를 기다리는 글들 — 첨부 칩 줄 위, 상자 바로 위 두 층.
+  form.prepend(composerQueueNode());
   // The extension's row: after `+`, the agent chip (mark · name · model, opening
   // the model menu) and the permission-mode chip; on the right the `/` and the
   // send. The door to the parent stands only on a helper's page — a pane's own
@@ -12622,6 +12666,7 @@ function workerComposerNode(run, owner = null) {
   if (spec) {
     tools.appendChild(composerAgentChip(run, spec));
     tools.appendChild(composerModeChip(run, spec));
+    tools.appendChild(composerContextChip(run, spec));
   }
   // The helpers running inside this pane (the extension's footer pill) —
   // hidden while there are none, which is most of the time.
@@ -12698,17 +12743,15 @@ function workerComposerNode(run, owner = null) {
     try {
       const message = attachments.count() === 0 ? text || null : await attachments.outgoing(text);
       if (message === null) return;
-      if (run.wire) {
-        // Down the wire as one request — no pty, no pacing.
-        await composerRoad(run).send(message);
-      } else {
-        // Pasted first, then a breath, then Enter — `deliverToPane`; `pasted`
-        // marks the words as already in the parent's box when the Enter fails.
-        await invoke("term_paste", { term: run.term, text: message });
-        pasted = true;
-        await new Promise((done) => setTimeout(done, COMPOSER_SUBMIT_DELAY_MS));
-        await invoke("term_key", { term: run.term, press: { key: "Enter", ctrl: false, alt: false } });
-      }
+      // 실행 중에 친 글은 창이 들고 있다가 턴이 끝나면 보낸다 — 첨부까지
+      // 조립된 그대로가 대기열에 든다(`settleComposerQueue`). 여기서
+      // `sendUncertain`을 다시 보지 않는 것은 이 핸들러의 첫 줄이 이미
+      // 그 상태를 돌려보냈기 때문이다.
+      if (composerWorking(run)) queueComposerMessage(run, message);
+      // 아니면 그 자리에서 실행의 길로 — 선이면 한 요청, 판이면
+      // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
+      // 상자에 있다는 사실을 남긴다.
+      else await composerDeliver(run, message, () => { pasted = true; });
       if (run.draft === draft && box.value === draft) {
         box.value = "";
         run.draft = "";
@@ -12737,9 +12780,16 @@ function paintWorkerComposerState(form, run, delivered = null) {
   }
   box.readOnly = Boolean(run.sending);
   const send = form.querySelector(".worker-composer-send");
-  const term = run.term;
-  const working = (term !== undefined && term !== null && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)))) || run.status === "running";
+  const working = composerWorking(run);
   const stopping = working && !run.sending && !run.sendUncertain;
+  // 기다리는 글들, 그리고 상자가 무엇을 하겠다고 말하는지: 실행 중이면
+  // 「대기열에 추가」, 턴 사이면 제 본래의 말.
+  paintComposerQueue(form, run);
+  const saying = working
+    ? t("composer.queue.placeholder", "다음 메시지 대기열에 추가…")
+    : form.__composerSay;
+  writeAttribute(box, "placeholder", saying);
+  writeAttribute(box, "aria-label", saying);
 
   if (stopping) {
     send.disabled = false;
@@ -12760,6 +12810,8 @@ function paintWorkerComposerState(form, run, delivered = null) {
   if (modeChip && spec) paintComposerModeChip(modeChip, run, spec);
   const agentsChip = form.querySelector(".worker-composer-agents");
   if (agentsChip) paintComposerAgentsChip(agentsChip, run);
+  const contextChip = form.querySelector(".worker-composer-context");
+  if (contextChip && spec) paintComposerContextChip(contextChip, run, spec);
   // The send and the focus ring wear the permission mode's reach — the
   // extension colours both by it (`[data-permission-mode]`).
   wearReach(form, composerReachOf(run));
@@ -13281,6 +13333,7 @@ listen("term:exited", (event) => {
   const { term } = event.payload;
   forgetManagedTerminalSession(term);
   forgetCodexPtyFallback(term);
+  paneUsage.delete(term);
   orphanWorkersOf(term);
   if (term === FLOAT_TERM) {
     // The chord is read inside, not captured: it can be rebound while the
