@@ -1092,6 +1092,45 @@ pub fn model_in(chunk: &str) -> Option<String> {
     })
 }
 
+/// The context a transcript's last answer stood on — the tokens, and the
+/// window they stand in.
+///
+/// A transcript records what was SPENT, never what the model can hold, so
+/// `window` is always 0 here and the page draws the count rather than a
+/// ring. The shape is the wire's (`WireUsage`) and zo's channel's on
+/// purpose: one chip reads all three roads without branching on which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize)]
+pub struct TranscriptUsage {
+    pub tokens: u64,
+    pub window: u64,
+}
+
+/// The context the LAST answer in this chunk carried — `input_tokens` plus
+/// both cache counts, the same three the wire adds.
+///
+/// Claude Code and zo stamp it in the same place (`message.usage`, measured
+/// against both fixtures) and only on an answer, so the presence of the
+/// field is itself the test for whose line it is; asking the row's kind
+/// again would be the same question spelled twice, once per vendor. A chunk
+/// with no such line answers `None` and nothing is drawn.
+#[must_use]
+pub fn usage_in(chunk: &str) -> Option<TranscriptUsage> {
+    chunk.lines().rev().find_map(|line| {
+        let row: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        let usage = row.get("message")?.get("usage")?;
+        let count = |name: &str| {
+            usage
+                .get(name)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(0)
+        };
+        let tokens = count("input_tokens")
+            + count("cache_creation_input_tokens")
+            + count("cache_read_input_tokens");
+        (tokens > 0).then_some(TranscriptUsage { tokens, window: 0 })
+    })
+}
+
 /// The turns in a stretch of transcript, in the order they were written.
 ///
 /// Complete lines only — the caller reads by byte and stops at the last
@@ -1579,6 +1618,58 @@ mod tests {
             prompt_in_payload(&payload("<div>keep me</div>")).as_deref(),
             Some("<div>keep me</div>")
         );
+    }
+
+    /// How full a pane's context is, recovered from the file it already
+    /// reads. A pane with neither a wire nor a channel has no other source:
+    /// hooks carry no token counts, so without this the composer's meter
+    /// would be blank for exactly the panes that run longest.
+    #[test]
+    fn a_transcript_names_the_context_its_last_answer_stood_on() {
+        let answered = |input: u64, write: u64, read: u64| {
+            serde_json::json!({"type": "assistant", "message": {"role": "assistant", "usage": {
+                "input_tokens": input, "cache_creation_input_tokens": write,
+                "cache_read_input_tokens": read, "output_tokens": 40}}})
+            .to_string()
+        };
+        // The three input counts are the prompt; the output is not context yet.
+        assert_eq!(
+            usage_in(&answered(2, 17628, 9000)),
+            Some(TranscriptUsage {
+                tokens: 26630,
+                window: 0
+            })
+        );
+        // The LAST answer is the one that says where the session stands now.
+        let asked =
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": "go"}})
+                .to_string();
+        assert_eq!(
+            usage_in(&[answered(1, 100, 0), asked, answered(1, 0, 900)].join("\n"))
+                .map(|held| held.tokens),
+            Some(901)
+        );
+        // zo stamps it in the same place under its own line kind.
+        assert_eq!(
+            usage_in(
+                &serde_json::json!({"type": "message", "message": {"role": "assistant", "usage": {
+                    "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0, "input_tokens": 2,
+                    "output_tokens": 14}}})
+                    .to_string()
+            )
+            .map(|held| held.tokens),
+            Some(2)
+        );
+        // Nothing spent, nothing said — and a file with no such line at all.
+        assert_eq!(usage_in(&answered(0, 0, 0)), None);
+        assert_eq!(usage_in(&asked_only()), None);
+        assert_eq!(usage_in(""), None);
+        assert_eq!(usage_in("not json at all"), None);
+    }
+
+    fn asked_only() -> String {
+        serde_json::json!({"type": "user", "message": {"role": "user", "content": "go"}})
+            .to_string()
     }
 
     /// The model a pane is on, recovered from the transcript it already

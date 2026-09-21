@@ -2448,6 +2448,11 @@ pub(super) struct SubagentLog {
     /// megabytes behind it, and a view opened on it shows the end and says
     /// the rest is folded rather than painting the whole past as arriving.
     pub(super) folded: bool,
+    /// How full the context was when this chunk's last answer was written —
+    /// the composer's meter for a pane that has neither a wire nor a channel
+    /// to ask. The file knows no window, so only the count stands.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) usage: Option<zerocode_core::transcript::TranscriptUsage>,
 }
 
 /// How much of a helper's transcript one ask may carry.
