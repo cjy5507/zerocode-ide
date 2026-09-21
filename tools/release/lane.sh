@@ -688,7 +688,22 @@ do_publish() {
   fi
   [ "$rc" = 0 ] || { WHY="gh release create $tag rc=$rc ($log)"; return 1; }
   log "publish: $tag on $RELEASE_GITHUB_REPO prerelease=$prerelease assets=$names"
-  [ "$prerelease" = 1 ] || return 0
+  if [ "$prerelease" != 1 ]; then
+    # The public source repository carries one squashed commit per release
+    # (publish-source.sh): the tag's tree without the design notes, judged by
+    # the personal-data scan. A refusal is said here and does not redden the
+    # lane — the release above is already out; the first snapshot of a lineage
+    # is a person's `--replace-history`, once, and a red scan is the person's
+    # to clean. `is_dry` keeps the publish stub sequence unchanged.
+    if is_dry; then :
+    else
+      ( cd "$RELEASE_REPO" && bash "$SELF_DIR/publish-source.sh" "$tag" ) >> "$log" 2>&1; src_rc=$?
+      if [ "$src_rc" = 0 ]; then log "publish: source snapshot $tag on the public repository"
+      else log "publish: source snapshot for $tag NOT made (rc=$src_rc, $log) — a lineage nobody started with --replace-history, or a red personal-data scan"
+      fi
+    fi
+    return 0
+  fi
   # beta: the moving `beta` prerelease carries the feed, so
   # …/releases/download/beta/latest.json follows the newest beta.
   if is_dry; then stub_log "beta-move $tag from=$kind assets=$UPDATER_FEED"; rc=$(stub BETA_MOVE_RC 0)
