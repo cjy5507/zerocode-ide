@@ -258,6 +258,37 @@ impl ApiError {
         }
     }
 
+    /// A 429 raised **before any request left this process**, shaped exactly
+    /// like the one the account window answers with on the wire.
+    ///
+    /// A caller that already knows the window is parked — the provider
+    /// client's pre-send door, reading [`crate::quota`] — holds a cool-down,
+    /// not a response. What it must hand up is nevertheless indistinguishable
+    /// from a real 429, because every reader downstream keys off the fields a
+    /// wire 429 carries: [`Self::provider_error_class`] reads the status for
+    /// the quota escape's scope, [`Self::is_rate_limit`] reads it again, and
+    /// [`Display`] turns `retry_after` into the [`RESET_HINT_TOKEN`] the
+    /// runtime's retry classifier parses back out of the flattened text.
+    /// Minting the shape here, beside the wire path that builds the same
+    /// variant, is what keeps the two the same error; assembled at the call
+    /// site, one missing field makes the wall unreadable to the very escape it
+    /// exists to trigger.
+    #[must_use]
+    pub fn rate_limited_before_send(provider: &str, parked_for: Duration) -> Self {
+        Self::Api {
+            status: reqwest::StatusCode::TOO_MANY_REQUESTS,
+            error_type: Some("rate_limit_error".to_string()),
+            message: Some(format!(
+                "{provider} is parked by a rate limit this machine already took, \
+                 so no request was sent; the window clears in {}",
+                human_reset_wait(parked_for)
+            )),
+            body: String::new(),
+            retryable: true,
+            retry_after: Some(parked_for),
+        }
+    }
+
     #[must_use]
     pub fn retry_after(&self) -> Option<Duration> {
         match self {

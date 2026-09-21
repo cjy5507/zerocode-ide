@@ -456,6 +456,34 @@ mod tests {
         );
     }
 
+    /// The refusal the provider client raises *before sending*, when the
+    /// shared registry already says the window is parked, must read here
+    /// exactly like a 429 that came back over the wire: the seconds it names
+    /// survive the flattening, so a park past what is left of the budget hands
+    /// the turn over at once instead of sleeping against it.
+    #[test]
+    fn a_park_refused_before_sending_reads_like_a_wire_rate_limit() {
+        let parked =
+            api::ApiError::rate_limited_before_send("anthropic", Duration::from_secs(60))
+                .to_string();
+        assert_eq!(
+            classify_for_retry(&parked, 0, Duration::ZERO),
+            RetryVerdict::Retry {
+                delay: Duration::from_secs(60)
+            },
+            "a reachable park is waited out once: {parked}"
+        );
+        assert_eq!(
+            classify_for_retry(
+                &parked,
+                0,
+                RATE_LIMIT_MAX_ELAPSED.saturating_sub(Duration::from_secs(10))
+            ),
+            RetryVerdict::Fail,
+            "a park past what is left of the budget hands over: {parked}"
+        );
+    }
+
     #[test]
     fn exhausted_provider_retry_ladder_is_terminal() {
         let verdict = classify_for_retry(

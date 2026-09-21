@@ -1150,10 +1150,87 @@ impl AnthropicClient {
             .is_some_and(|hint| hint > self.retry_reach())
     }
 
+    /// The refusal owed to a wall this process inherited rather than earned,
+    /// or `None` when nothing is holding requests back.
+    ///
+    /// [`crate::quota::rate_limit_cooldown_remaining_ms`] is the one place
+    /// that answers "hold requests to this provider?" — this process's own
+    /// 429s unioned with what other `zo` processes wrote to the shared
+    /// registry — and the verify bridge already asks it by the same function
+    /// before it picks a cross-model verifier. Asking it here, *before* the
+    /// request, is what stops a fresh process re-earning a wall the last one
+    /// already paid for: on 2026-09-21 an account 429 named a `retry-after`
+    /// of 154,912 s and each new `zo` still opened by sending, because a
+    /// cool-down was only ever consulted after a response came back. Refused
+    /// in front of the wire, the runtime's escape — a fallback model, or a
+    /// plain notice — runs on the first ask.
+    ///
+    /// [`crate::quota::took_own_rate_limit`] is what keeps this a door and
+    /// not a gag. Once this process has taken its own 429 the park is its own
+    /// ladder's arithmetic, and hard-refusing on that overrides the layers
+    /// that own the timing: measured, a provider answering `retry-after: 0`
+    /// became minutes of self-imposed silence and a `/goal` that should have
+    /// resumed on the next attempt never did.
+    ///
+    /// Independent of the retry policy either way. `fail_fast_on_rate_limit`
+    /// and the ladder decide what to do with an answer that *arrived*; this
+    /// never sends, never sleeps and never spends an attempt.
+    fn parked_window_refusal() -> Option<ApiError> {
+        let kind = super::ProviderKind::Anthropic;
+        if crate::quota::took_own_rate_limit(kind) {
+            return None;
+        }
+        let parked = Duration::from_millis(crate::quota::rate_limit_cooldown_remaining_ms(kind));
+        (!parked.is_zero()).then(|| ApiError::rate_limited_before_send("anthropic", parked))
+    }
+
+    /// Sleep one rung of the retry ladder, announcing it first.
+    ///
+    /// Split out of `send_with_retry` only because the ladder outgrew the
+    /// hundred-line lint; it is still one step of that loop and nothing else
+    /// calls it.
+    async fn wait_out_one_rung(
+        &self,
+        attempts: u32,
+        last_error: Option<&ApiError>,
+    ) -> Result<(), ApiError> {
+        // Server-provided `Retry-After` is authoritative and used verbatim;
+        // our own exponential backoff is jittered so N parallel agents
+        // retrying the same 429 don't re-collide on an identical wakeup.
+        let delay = match last_error.and_then(ApiError::retry_after) {
+            Some(server) => server,
+            None => super::retry_backoff::spread_backoff(self.backoff_for_attempt(attempts)?),
+        };
+        let capped = delay.min(self.max_backoff.max(Duration::from_secs(30)));
+        if let (Some(callback), Some(error)) = (&self.retry_notice, last_error) {
+            callback(AnthropicRetryNotice {
+                attempt: attempts,
+                max_attempts: self.max_retries + 1,
+                delay: capped,
+                error: error.to_string(),
+            });
+        }
+        // Include the failure reason: without it the log shows bare retry
+        // ladders and the underlying 429/529/network cause is undiagnosable
+        // (the OTLP tracer that records it is env-gated and normally off).
+        let reason = last_error.map_or_else(|| "unknown error".to_owned(), single_line_reason);
+        eprintln!(
+            "[zo] retrying in {:.1}s (attempt {}/{}): {reason}",
+            capped.as_secs_f64(),
+            attempts,
+            self.max_retries + 1,
+        );
+        tokio::time::sleep(capped).await;
+        Ok(())
+    }
+
     async fn send_with_retry(
         &self,
         request: &MessageRequest,
     ) -> Result<reqwest::Response, ApiError> {
+        if let Some(parked) = Self::parked_window_refusal() {
+            return Err(parked);
+        }
         let mut attempts = 0;
         let mut last_error: Option<ApiError>;
         let mut transport_streak: u32 = 0;
@@ -1230,35 +1307,7 @@ impl AnthropicClient {
                 &mut escape_http,
             );
 
-            // Server-provided `Retry-After` is authoritative and used verbatim;
-            // our own exponential backoff is jittered so N parallel agents
-            // retrying the same 429 don't re-collide on an identical wakeup.
-            let delay = match last_error.as_ref().and_then(ApiError::retry_after) {
-                Some(server) => server,
-                None => super::retry_backoff::spread_backoff(self.backoff_for_attempt(attempts)?),
-            };
-            let capped = delay.min(self.max_backoff.max(Duration::from_secs(30)));
-            if let (Some(callback), Some(error)) = (&self.retry_notice, last_error.as_ref()) {
-                callback(AnthropicRetryNotice {
-                    attempt: attempts,
-                    max_attempts: self.max_retries + 1,
-                    delay: capped,
-                    error: error.to_string(),
-                });
-            }
-            // Include the failure reason: without it the log shows bare retry
-            // ladders and the underlying 429/529/network cause is undiagnosable
-            // (the OTLP tracer that records it is env-gated and normally off).
-            let reason = last_error
-                .as_ref()
-                .map_or_else(|| "unknown error".to_owned(), single_line_reason);
-            eprintln!(
-                "[zo] retrying in {:.1}s (attempt {}/{}): {reason}",
-                capped.as_secs_f64(),
-                attempts,
-                self.max_retries + 1,
-            );
-            tokio::time::sleep(capped).await;
+            self.wait_out_one_rung(attempts, last_error.as_ref()).await?;
         }
 
         Err(ApiError::RetriesExhausted {
