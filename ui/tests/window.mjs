@@ -55378,6 +55378,11 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
       window.__ANSWER__.wire_send = (args) => { calls.push(["wire", args.id, args.text]); return null; };
       window.__ANSWER__.wire_stop = () => null;
       const tabId = await openWirePage("codex", "/tmp/zerocode-window-test");
+      // 선의 상태는 첫 `wire_log` 읽기가 실어 온다(`holdWireState`) — 시계가
+      // 아니라 그 읽기를 기다린다(부하 아래 120 ms가 모자라 보내기가 먼저 나갔다).
+      await pollHelperPages();
+      const wireTab = () => tabs.find((tab) => tab.id === tabId);
+      for (let i = 0; i < 50 && wireTab()?.worker.status !== "running"; i++) await settle(20);
       await window.__PAINTED__();
       await settle(120);
       const face = document.querySelector("#worker-view");
