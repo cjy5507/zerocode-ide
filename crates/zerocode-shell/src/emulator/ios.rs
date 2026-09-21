@@ -799,6 +799,15 @@ impl HelperRoad {
             return HelperFrameAnswer::Absent;
         }
         self.misses = self.misses.saturating_add(1);
+        // The first miss of a run says what went wrong; the rest line below
+        // says the road gave up. Between them a reader sees whether three
+        // misses were one failure or three different ones.
+        if self.misses == 1 {
+            crate::note_window_event(
+                husk_root,
+                &format!("emulator ios pump {stream}: framebuffer road stumbled ({error})"),
+            );
+        }
         if self.misses >= HELPER_MISSES_BEFORE_GIVING_UP {
             crate::note_window_event(
                 husk_root,
@@ -895,12 +904,20 @@ impl HelperRoad {
         // after this message the request lane is free for touches, and pictures
         // arrive on their own socket without anyone asking for them.
         if self.streaming_at != Some((long_edge, max_fps)) {
+            let was = self.streaming_at;
             if let Err(error) =
                 super::ios_hid::stream_frames(udid, long_edge, FRAME_JPEG_QUALITY, max_fps)
             {
                 let why = self.why(booting);
                 return self.stumbled(why, &error, husk_root, stream);
             }
+            crate::note_window_event(
+                husk_root,
+                &format!(
+                    "emulator ios pump {stream}: stream asked at {long_edge}px {max_fps}fps{}",
+                    was.map_or(String::new(), |(edge, fps)| format!(" (was {edge}px {fps}fps)"))
+                ),
+            );
             self.streaming_at = Some((long_edge, max_fps));
             // The stream the helper was pushing down, if any, has just been
             // retired in favour of this one — so the close that follows is
@@ -976,6 +993,12 @@ fn pump_ios_frames(
     if let Some(parent) = frame.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // The helper's own story — starts, deaths, replacements, the frame
+    // socket's ends — goes in the same log as the pump's, or the pump's
+    // "the stream is closed" is the only witness to a helper being replaced
+    // every second (2026-09-21).
+    #[cfg(target_os = "macos")]
+    super::ios_hid::note_helper_events_at(&husk_root);
     let mut misses = pump::MissCounter::new(MISSES_BEFORE_NOTE);
     // What the fast road COSTS, and only while the screen is actually moving:
     // an idle wait or a paused pane between two pictures is not the road's
@@ -2327,6 +2350,282 @@ mod tests {
             println!("LIVE: {long_edge} long edge — {pictures} pictures, road alive");
         }
         super::super::ios_hid::release(&udid);
+    }
+
+    /// The pane's own turns, out of the window, against a real device — the
+    /// column the window's log could not show.
+    ///
+    /// `a_re_negotiated_stream_keeps_its_push_road` asks once per size and
+    /// then only waits; this walks the pump's actual road. The pane is born
+    /// attended (the active rate), is told a heartbeat later that nobody is
+    /// over it (the glance rate), asks outright every `IDLE_REFRESH_INTERVAL`,
+    /// and after every failure falls to a slower road that costs a capture and
+    /// an idle rest before the fast road is tried again — the shape the window
+    /// walked on 2026-09-21 while a helper was started and put down every
+    /// second behind it.
+    ///
+    /// ```text
+    /// ZEROCODE_LIVE_SIMULATOR=<udid> [ZEROCODE_LIVE_SECONDS=60] \
+    ///   [ZEROCODE_LIVE_BOOT=1] [ZEROCODE_LIVE_SLOW_ROAD=screenshot] \
+    ///   [ZEROCODE_LIVE_SIGCHLD=tokio] [ZEROCODE_LIVE_SIMULATOR_APP=1] \
+    ///   [ZEROCODE_LIVE_ATTENTION_EVERY_MS=0] [ZEROCODE_LIVE_POKE_EVERY_MS=0] \
+    ///   cargo test -p zerocode-shell --bin zerocode-shell -- --ignored \
+    ///   --nocapture the_panes_turn_column
+    /// ```
+    ///
+    /// `BOOT` shuts the device down first and opens the roads during its boot,
+    /// the way a pane does (D5); `SLOW_ROAD=screenshot` walks the real
+    /// still-picture road on every turn the fast road answers nothing (a
+    /// `simctl` child per turn, as in the window) instead of sleeping its
+    /// cost; `SIGCHLD=tokio` installs the window's own child-reaping signal
+    /// handler first; `SIMULATOR_APP=1` asks for the Simulator application
+    /// and hides it, as the window does between the boot and the pump.
+    /// `ATTENTION_EVERY_MS` brings the pointer back and takes
+    /// it away on that beat (0: it never comes back); `POKE_EVERY_MS` swipes
+    /// the device on that beat so the screen has something to push (0: the
+    /// device's own motion only).
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs an iOS simulator; with ZEROCODE_LIVE_BOOT it shuts that device down first"]
+    fn the_panes_turn_column_keeps_the_push_road() {
+        let Ok(udid) = std::env::var("ZEROCODE_LIVE_SIMULATOR") else {
+            println!("LIVE: no simulator named; nothing measured");
+            return;
+        };
+        let number = |name: &str, or: u64| {
+            std::env::var(name)
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or(or)
+        };
+        let flag = |name: &str, value: &str| std::env::var(name).as_deref() == Ok(value);
+        let seconds = number("ZEROCODE_LIVE_SECONDS", 60);
+        let attention_every = number("ZEROCODE_LIVE_ATTENTION_EVERY_MS", 0);
+        let poke_every = number("ZEROCODE_LIVE_POKE_EVERY_MS", 0);
+        let from_shutdown = flag("ZEROCODE_LIVE_BOOT", "1");
+        let real_slow_road = flag("ZEROCODE_LIVE_SLOW_ROAD", "screenshot");
+        // The window's control is born engaged and hears that nobody is over
+        // the pane once the pane has laid itself out — within its first turns.
+        const ATTENTION_REPORT_AFTER: Duration = Duration::from_millis(300);
+        // What the slow road costs on every turn the fast one answers Absent
+        // when it is not walked for real: one read of the Simulator's window
+        // (27-28ms measured).
+        const SLOW_ROAD_CAPTURE: Duration = Duration::from_millis(28);
+        // The pane in the window's log was 353x768.
+        let long_edge = resolve_long_edge(Some(768));
+        if flag("ZEROCODE_LIVE_SIGCHLD", "tokio") {
+            // One child through tokio is what makes tokio install its
+            // SIGCHLD handler for the whole process, as the window's own
+            // first tokio child does.
+            let runtime = tokio::runtime::Runtime::new().expect("a runtime");
+            runtime
+                .block_on(async { tokio::process::Command::new("/usr/bin/true").status().await })
+                .expect("a child through tokio");
+            println!("LIVE: tokio's SIGCHLD handler is installed");
+        }
+        if from_shutdown {
+            let _ = shutdown_simulator(&udid);
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        let started = Instant::now();
+        let boot = if from_shutdown {
+            let device = SimulatorDevice {
+                udid: udid.clone(),
+                name: "live".to_string(),
+                booted: false,
+                runtime: "live".to_string(),
+            };
+            boot_simulator(&device).expect("the device boots");
+            println!("LIVE: +{}ms boot accepted", started.elapsed().as_millis());
+            let watch = BootWatch::waking();
+            let watching = watch.clone();
+            let device = udid.clone();
+            std::thread::spawn(move || {
+                let began = Instant::now();
+                let _ = simctl_command()
+                    .args(["bootstatus", &device])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                watching.finished();
+                println!(
+                    "LIVE: +{}ms the device finished booting",
+                    began.elapsed().as_millis()
+                );
+            });
+            watch
+        } else {
+            BootWatch::already_up()
+        };
+        if flag("ZEROCODE_LIVE_SIMULATOR_APP", "1") {
+            // What the window does between the boot and the pump: the
+            // Simulator application is asked for, hidden, so the device has
+            // a window of its own — and the application is on the device
+            // the whole time the helper reads its framebuffer.
+            prepare_simulator_services(&udid);
+            crate::simulator_window::hide_simulator();
+            println!(
+                "LIVE: +{}ms Simulator.app asked for, hidden",
+                started.elapsed().as_millis()
+            );
+        }
+        let attaching = udid.clone();
+        let attached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let standing = attached.clone();
+        let asking = std::thread::spawn(move || {
+            while !standing.load(std::sync::atomic::Ordering::Acquire) {
+                if super::super::ios_hid::retain(&attaching).is_ok() {
+                    standing.store(true, std::sync::atomic::Ordering::Release);
+                    return;
+                }
+                std::thread::sleep(HELPER_ATTACH_RETRY);
+            }
+        });
+        let poking = (poke_every > 0).then(|| {
+            let udid = udid.clone();
+            let done = attached.clone();
+            let every = Duration::from_millis(poke_every);
+            std::thread::spawn(move || {
+                let mut down = true;
+                while !done.load(std::sync::atomic::Ordering::Acquire) {
+                    std::thread::sleep(every);
+                    if !super::super::ios_hid::retained(&udid) {
+                        continue;
+                    }
+                    let (from, to) = if down { (0.3, 0.7) } else { (0.7, 0.3) };
+                    down = !down;
+                    let _ = super::super::ios_hid::send(
+                        &udid,
+                        super::super::ios_hid::InputRequest::Swipe {
+                            x1: 0.5,
+                            y1: from,
+                            x2: 0.5,
+                            y2: to,
+                            duration_ms: 200,
+                        },
+                    );
+                }
+            })
+        });
+        let frame = std::env::temp_dir().join(format!(
+            "zc-turn-column-{}.jpg",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut road = HelperRoad::new();
+        let mut last_emitted: Option<Instant> = None;
+        let (mut turns, mut pictures, mut stills, mut absents, mut rests, mut asks, mut shots) =
+            (0u32, 0u32, 0u32, 0u32, 0u32, 0u32, 0u32);
+        let mut unchanged = 0u32;
+        let mut first_picture: Option<Duration> = None;
+        let mut resting_seen = false;
+        let mut bytes = 0u64;
+        while started.elapsed() < Duration::from_secs(seconds) {
+            turns += 1;
+            let now = started.elapsed();
+            let engaged = if now < ATTENTION_REPORT_AFTER {
+                true
+            } else if attention_every == 0 {
+                false
+            } else {
+                ((now - ATTENTION_REPORT_AFTER).as_millis() / u128::from(attention_every)) % 2 == 1
+            };
+            let refresh = last_emitted.is_none_or(|at| at.elapsed() >= IDLE_REFRESH_INTERVAL);
+            let turn = Turn {
+                long_edge,
+                max_fps: frame_rate_for(engaged),
+                refresh,
+                booting: boot.booting(),
+            };
+            let was = road.streaming_at;
+            let answer = road.take_frame(&udid, turn, nowhere(), "harness");
+            if was != road.streaming_at && road.streaming_at.is_some() {
+                asks += 1;
+                println!(
+                    "LIVE: +{}ms stream asked at {long_edge}px {}fps{}",
+                    now.as_millis(),
+                    turn.max_fps,
+                    if turn.booting { " (booting)" } else { "" }
+                );
+            }
+            match answer {
+                HelperFrameAnswer::Picture(picture) => {
+                    pictures += 1;
+                    bytes += picture.bytes.len() as u64;
+                    unchanged = 0;
+                    last_emitted = Some(Instant::now());
+                    if first_picture.is_none() {
+                        first_picture = Some(now);
+                        println!(
+                            "LIVE: +{}ms first picture {}x{} ({} bytes)",
+                            now.as_millis(),
+                            picture.width,
+                            picture.height,
+                            picture.bytes.len()
+                        );
+                    }
+                }
+                HelperFrameAnswer::Still => stills += 1,
+                HelperFrameAnswer::Absent => {
+                    absents += 1;
+                    if road.resting_since.is_some() && !resting_seen {
+                        rests += 1;
+                        resting_seen = true;
+                        println!("LIVE: +{}ms the road rested", now.as_millis());
+                    }
+                    // The slow road: one capture, then the rest the pump takes
+                    // after it — the boot's short one while the device is
+                    // coming up, the idle ladder once it is not.
+                    if real_slow_road {
+                        shots += 1;
+                        let _ = std::fs::remove_file(&frame);
+                        let _ = simctl_command()
+                            .args(["io", &udid, "screenshot", "--type=jpeg"])
+                            .arg(&frame)
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                        let _ = crate::proc::quiet_command("sips")
+                            .args(["-Z", "900"])
+                            .arg(&frame)
+                            .arg("--out")
+                            .arg(&frame)
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null())
+                            .status();
+                    } else {
+                        std::thread::sleep(SLOW_ROAD_CAPTURE);
+                    }
+                    unchanged = unchanged.saturating_add(1);
+                    std::thread::sleep(if turn.booting {
+                        BOOTING_MISS_REST
+                    } else {
+                        FALLBACK_IDLE_LADDER.delay(unchanged)
+                    });
+                }
+            }
+            if road.resting_since.is_none() {
+                resting_seen = false;
+            }
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        println!(
+            "LIVE: {seconds}s at {long_edge}px — turns {turns}, stream asks {asks}, pictures {pictures} \
+             ({:.1}/s, {} KB), stills {stills}, absents {absents}, screenshots {shots}, rests {rests}, \
+             misses now {}, first picture {}",
+            f64::from(pictures) / elapsed,
+            bytes / 1024,
+            road.misses,
+            first_picture.map_or("never".to_string(), |at| format!("at {}ms", at.as_millis()))
+        );
+        attached.store(true, std::sync::atomic::Ordering::Release);
+        let _ = asking.join();
+        if let Some(poking) = poking {
+            let _ = poking.join();
+        }
+        let _ = std::fs::remove_file(&frame);
+        road.stop_streaming(&udid);
+        super::super::ios_hid::release(&udid);
+        assert_eq!(rests, 0, "the framebuffer road rested {rests} times in {seconds}s");
     }
 
     #[test]
