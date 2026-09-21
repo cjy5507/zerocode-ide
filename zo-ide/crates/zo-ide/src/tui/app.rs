@@ -57,6 +57,7 @@ use super::pending_input::PendingInputs;
 use super::permissions::{self, active_permission_label, permission_rank};
 use super::question;
 use super::sessions;
+use super::mention::{self, MentionKey, Mentions};
 use super::slash;
 use super::summary::{self, SessionSummary};
 use super::tools::{Explored, Outcome, ToolCall, ToolGroup, ToolKind};
@@ -77,6 +78,7 @@ use crate::ide::prompt::PendingPrompt;
 use crate::ide::reporter::HookReporter;
 use crate::ide::run_loop::ExitReason;
 use crate::session::plain_session::{LaunchFlags, OpenOptions, PlainSession, ReplayItem};
+use crate::session::file_search::{FileSearchManager, FileSearchResult};
 use crate::session::subagent_progress::{SubagentProgress, SubagentProgressWatcher};
 use crate::session::turn_scaffold::TurnScaffold;
 use crate::session::{AgentCompletionPump, AgentFollowup};
@@ -556,6 +558,17 @@ struct Ui {
     /// 자동완성 팝업에서 고른 줄. 팝업 자체는 컴포저 원문에서 매번 다시
     /// 만든다 — 상태로 남길 것은 커서뿐이다.
     popup_selected: usize,
+    /// The `@` popup and what it remembers between keys — codex
+    /// `popups.active` · `dismissed_mention_token` · `current_file_query`
+    /// ([`Mentions`]). Unlike the slash popup it is state: its rows arrive
+    /// from a search thread, not from the composer text alone.
+    mentions: Mentions,
+    /// The skills the `@` popup lists, read from disk once per conversation
+    /// the first time a popup opens.
+    skill_catalog: Option<Vec<mention::Candidate>>,
+    /// The file search behind the `@` popup: one walk per query run, and the
+    /// files this conversation's tools read or wrote, which it ranks first.
+    file_search: FileSearchManager,
     reporter: Option<HookReporter>,
     model: String,
     /// The model actually on the wire when it is not `model` — a
@@ -637,6 +650,9 @@ struct App {
     /// turn was cancelled, and the teammate loop reads the reason here to
     /// write its closing document instead of waiting for the next word.
     close_requested: Option<String>,
+    /// Snapshots from the `@` file search — codex `AppEvent::FileSearchResult`
+    /// — selected on beside keys and blocks so a result never waits for one.
+    file_search_rx: tokio::sync::mpsc::UnboundedReceiver<FileSearchResult>,
     ui: Ui,
 }
 
@@ -1434,6 +1450,9 @@ impl Ui {
         self.agents = None;
         self.last_commit = None;
         self.effort_effect = None;
+        self.mentions.close();
+        self.skill_catalog = None;
+        self.file_search.forget_touched();
     }
 
     /// 화면이 이미 아는 것만으로 세운 `/status` 재료.
@@ -1542,7 +1561,8 @@ impl Ui {
             || self.sessions.is_some()
             || pager.is_some()
             || question.is_some()
-            || popup.is_some();
+            || popup.is_some()
+            || self.mentions.is_open();
         let max_rows = if whole {
             self.painter.popup_budget()
         } else {
@@ -1564,6 +1584,7 @@ impl Ui {
             sessions: self.sessions.as_ref(),
             pager: pager.as_deref(),
             popup: popup.as_ref(),
+            mention: self.mentions.popup(),
             shortcuts: shortcuts.as_deref(),
             model: footer_model,
             effort: &display_effort,
@@ -1782,6 +1803,7 @@ impl Ui {
             || self.sessions.is_some()
             || self.parked.is_some()
             || self.agents.is_some()
+            || self.mentions.is_open()
         {
             return None;
         }
@@ -1845,6 +1867,7 @@ impl Ui {
                 if !self.composer.handle_paste_image_path(text) {
                     self.composer.insert_pasted(text);
                 }
+                self.sync_mentions();
                 KeyOutcome::Nothing
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -1874,10 +1897,53 @@ impl Ui {
                     self.parked_key(*key);
                     return KeyOutcome::Nothing;
                 }
-                self.idle_key(*key)
+                let outcome = self.idle_key(*key);
+                self.sync_mentions();
+                outcome
             }
             _ => KeyOutcome::Nothing,
         }
+    }
+
+    /// codex `sync_popups`: after every event that may have moved the
+    /// composer, the `@` popup follows the token under the cursor — opened
+    /// the moment one appears, fed the file search, closed when it goes. A
+    /// surface that owns the keys (a picker, a dialog, the agents overview
+    /// with its own composer) gets no popup under it.
+    fn sync_mentions(&mut self) {
+        if self.overlay().is_some()
+            || self.sessions.is_some()
+            || self.parked.is_some()
+            || self.agents.is_some()
+            || self.transcript.is_some()
+        {
+            self.mentions.close();
+            self.file_search.on_user_query("");
+            return;
+        }
+        let Ui {
+            mentions,
+            composer,
+            file_search,
+            skill_catalog,
+            session_cwd,
+            ..
+        } = self;
+        mentions.sync(composer, file_search, || {
+            skill_catalog
+                .get_or_insert_with(|| {
+                    mention::build_search_catalog(&runtime::discover_skills(session_cwd))
+                })
+                .clone()
+        });
+    }
+
+    /// codex `apply_file_search_result` → `on_file_search_result`: a snapshot
+    /// from the search thread lands in the popup when the person is still on
+    /// the token it answers.
+    fn on_file_search_result(&mut self, result: FileSearchResult) {
+        self.mentions
+            .on_file_search_result(&self.composer, &result.query, result.matches);
     }
 
     #[allow(clippy::too_many_lines)] // 평평한 키 match — 한 arm 씩.
@@ -1890,6 +1956,13 @@ impl Ui {
             && self.pending_input.edit_latest_queued(&mut self.composer)
         {
             return KeyOutcome::Nothing;
+        }
+        // The `@` popup reads its keys first — codex
+        // `handle_key_event_with_mentions_v2_popup`. Enter with nothing to
+        // insert closes it and submits the line as it is.
+        match self.mentions.key(&key, &mut self.composer) {
+            MentionKey::Consumed => return KeyOutcome::Nothing,
+            MentionKey::Submit | MentionKey::Passed => {}
         }
         match key.code {
             _ if transcript::is_open_key(&key) => {
@@ -2886,11 +2959,14 @@ impl Ui {
                 if !self.composer.handle_paste_image_path(text) {
                     self.composer.insert_pasted(text);
                 }
+                self.sync_mentions();
                 true
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 tools::KeyboardPresence::process().note_input();
-                self.turn_key(key, turn, exit_after)
+                let handled = self.turn_key(key, turn, exit_after);
+                self.sync_mentions();
+                handled
             }
             _ => false,
         }
@@ -2963,6 +3039,16 @@ impl Ui {
         {
             return true;
         }
+        // The `@` popup consumes its keys — Esc closes it before it could
+        // read as an interrupt, exactly as codex's composer does.
+        match self.mentions.key(key, &mut self.composer) {
+            MentionKey::Consumed => return true,
+            MentionKey::Submit => {
+                self.submit_composer_during_turn(turn, exit_after);
+                return true;
+            }
+            MentionKey::Passed => {}
+        }
         if interrupt {
             if self.pending_input.has_pending_steers() {
                 self.pending_input.interrupt_and_submit_steers();
@@ -3033,6 +3119,7 @@ impl Ui {
             self.turn_slash(command);
             return;
         }
+        let trimmed = mention::expand_page_mentions(&trimmed, self.file_search.roots());
         // The runtime steering queue is text-only. Preserve a mid-turn image
         // as an ordinary queued follow-up instead of dropping its attachment.
         if !submission.image_paths.is_empty() {
@@ -3271,6 +3358,16 @@ impl Ui {
                 // concrete work and its orphan cell earns the turn separator.
                 self.had_work_activity = true;
                 let announced = self.tools.remove(&tool_call_id.0);
+                // A file a tool read or wrote stands first in the `@` popup
+                // from now on.
+                if let Some(path) = announced
+                    .as_ref()
+                    .filter(|_| !is_error)
+                    .map(|pending| pending.path.as_str())
+                    .filter(|path| !path.is_empty())
+                {
+                    self.file_search.note_touched(std::path::Path::new(path));
+                }
                 // A result that came before its call was seated: the call
                 // lands as its own committed cell (or is discarded as a
                 // transient) and never needs the slot.
@@ -3902,6 +3999,8 @@ impl App {
         let cwd = view::short_cwd(&session_cwd.to_string_lossy());
         let worktree_context = worktree_context(&session_cwd);
         let footer_location = view::footer_location(&cwd, worktree_context.as_deref());
+        let (file_search_tx, file_search_rx) = tokio::sync::mpsc::unbounded_channel();
+        let file_search = FileSearchManager::new(session_cwd.clone(), file_search_tx);
         Ok(Self {
             ui: Ui {
                 flags,
@@ -3941,6 +4040,9 @@ impl App {
                 transcript_bytes: 0,
                 last_answer: String::new(),
                 popup_selected: 0,
+                mentions: Mentions::default(),
+                skill_catalog: None,
+                file_search,
                 reporter: HookReporter::from_env(),
                 model,
                 fast,
@@ -3970,6 +4072,7 @@ impl App {
             agent_completion_pump,
             subagent_frame_relay,
             close_requested: None,
+            file_search_rx,
             signals: TerminationSignals::install(),
         })
     }
@@ -4051,6 +4154,10 @@ impl App {
                     Some(Err(_)) | None => break ExitReason::UserExit,
                 },
                 () = TerminationSignals::delivered(&mut self.signals) => break ExitReason::UserExit,
+                Some(result) = self.file_search_rx.recv() => {
+                    self.ui.on_file_search_result(result);
+                    self.ui.draw();
+                }
                 followup = recv_agent_followup(&mut self.agent_completion_pump) => {
                     let prompt = Submission {
                         text: followup.text.clone(),
@@ -4259,6 +4366,10 @@ impl App {
                 },
                 () = TerminationSignals::delivered(&mut self.signals) => {
                     return IdleOutcome::Close(CloseReason::UserExit);
+                }
+                Some(result) = self.file_search_rx.recv() => {
+                    self.ui.on_file_search_result(result);
+                    self.ui.draw();
                 }
                 command = crate::ide::events::next_command(crate::ide::events::channel()) => match command {
                     Command::Steer { text } => return IdleOutcome::NextTurn(text),
@@ -4474,7 +4585,7 @@ impl App {
                 let text = unescaped.to_string();
                 self.ui.user_cell(&text);
                 return Some(Submission {
-                    text,
+                    text: mention::expand_page_mentions(&text, self.ui.file_search.roots()),
                     image_paths: submission.image_paths.clone(),
                 });
             }
@@ -4486,8 +4597,10 @@ impl App {
             slash::Line::Plain | slash::Line::Path => {}
         }
         self.ui.user_cell(trimmed);
+        // A `@wiki/…` mention becomes its page's body here — the screen shows
+        // what the person typed, the model reads the page.
         Some(Submission {
-            text: trimmed.to_string(),
+            text: mention::expand_page_mentions(trimmed, self.ui.file_search.roots()),
             image_paths: submission.image_paths.clone(),
         })
     }
@@ -4827,6 +4940,9 @@ impl App {
                 self.ui.footer_location = view::footer_location(&cwd, context.as_deref());
                 self.ui.cwd = cwd;
                 self.ui.session_cwd = cwd_path;
+                self.ui
+                    .file_search
+                    .update_search_dir(self.ui.session_cwd.clone());
                 self.ui.session_id = self.session().handle.id.clone();
                 self.ui.registry = self.session().registry();
                 self.session_card();
@@ -4926,6 +5042,9 @@ impl App {
                 self.ui.footer_location = view::footer_location(&cwd, context.as_deref());
                 self.ui.cwd = cwd;
                 self.ui.session_cwd = cwd_path;
+                self.ui
+                    .file_search
+                    .update_search_dir(self.ui.session_cwd.clone());
                 self.ui.session_id = self.session().handle.id.clone();
                 self.ui.registry = self.session().registry();
                 self.session_card();
@@ -5204,6 +5323,10 @@ impl App {
                     } else {
                         subagent_watcher_open = false;
                     }
+                }
+                Some(result) = self.file_search_rx.recv() => {
+                    ui.on_file_search_result(result);
+                    ui.draw_with_queue(|| block_rx.len());
                 }
                 Some(answer) = events::wait_answer(turn_scaffold.ide, waiting) => {
                     // IDE 모달이 먼저 답했다 — 패인의 다이얼로그를 그 답으로 닫는다.
@@ -5568,6 +5691,12 @@ fn test_ui() -> Ui {
         last_answer: String::new(),
         transcript_bytes: 0,
         popup_selected: 0,
+        mentions: Mentions::default(),
+        skill_catalog: None,
+        file_search: FileSearchManager::new(
+            std::env::temp_dir(),
+            tokio::sync::mpsc::unbounded_channel().0,
+        ),
         reporter: None,
         model: "test-model".to_string(),
         fast: false,
@@ -7481,6 +7610,7 @@ mod tests {
             sessions: None,
             pager: None,
             popup: None,
+            mention: None,
             shortcuts: None,
             model: "test-model",
             effort: "",

@@ -197,6 +197,94 @@ impl Composer {
         self.browsing = None;
     }
 
+    /// Replace `range` with `text`, cursor and attachments kept sane — the
+    /// `@` popup's completion road (codex `TextArea::replace_range`).
+    ///
+    /// The cursor stays where it points: before the range it does not move,
+    /// inside or at the range's end it lands after the replacement, past the
+    /// range it shifts by the length difference. An image placeholder that
+    /// the range cuts through loses its attachment, as a deletion would.
+    pub fn replace_range(&mut self, range: std::ops::Range<usize>, text: &str) {
+        let range = range.start.min(self.text.len())..range.end.min(self.text.len());
+        let range = self.boundary_before(range.start)..self.boundary_before(range.end);
+        if self.cursor >= range.end {
+            self.cursor = self.cursor - range.end + range.start + text.len();
+        } else if self.cursor > range.start {
+            self.cursor = range.start + text.len();
+        }
+        self.text.replace_range(range, text);
+        self.remove_missing_images();
+        self.browsing = None;
+    }
+
+    /// Put the cursor at byte `at`, pulled back to a character boundary.
+    pub fn set_cursor(&mut self, at: usize) {
+        self.cursor = self.boundary_before(at);
+    }
+
+    /// The `@token` the cursor is on — codex
+    /// `completion_target::current_prefixed_token_range(textarea, '@', allow_empty)`.
+    ///
+    /// A token is one whitespace-delimited word that starts with `@`. The
+    /// cursor is on it anywhere from its `@` to just past its last character,
+    /// and — codex's "token affinity" — one horizontal separator past it too,
+    /// which is where a completion leaves the cursor. A cursor that stands
+    /// right before a word belongs to that word, not the one before. The
+    /// range covers the `@`; the string does not. A second `@` inside the word
+    /// stays part of it (`@scope/pkg@latest`, `@icon@2x.png`), a word with `@`
+    /// in its middle is no token (`foo@bar`), and a bare `@` is the empty
+    /// query only while nothing follows it — `test @ world` is prose.
+    #[must_use]
+    pub fn at_token(&self) -> Option<(std::ops::Range<usize>, String)> {
+        let cursor = self.cursor.min(self.text.len());
+        let before = self.text[..cursor].chars().next_back();
+        let at = self.text[cursor..].chars().next();
+        let start = if before.is_some_and(|ch| !ch.is_whitespace()) {
+            self.word_start(cursor)
+        } else if at.is_some_and(|ch| !ch.is_whitespace()) {
+            cursor
+        } else {
+            // On or past one separator: the word it follows, if any.
+            let separator = before.filter(|ch| ch.is_whitespace() && !is_line_break(*ch))?;
+            let word_end = cursor - separator.len_utf8();
+            if self.text[..word_end]
+                .chars()
+                .next_back()
+                .is_none_or(char::is_whitespace)
+            {
+                return None;
+            }
+            self.word_start(word_end)
+        };
+        let end = self.text[start..]
+            .char_indices()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map_or(self.text.len(), |(at, _)| start + at);
+        let token = self.text[start..end].strip_prefix('@')?;
+        if token.is_empty() && self.text[end..].chars().any(|ch| !ch.is_whitespace()) {
+            return None;
+        }
+        Some((start..end, token.to_string()))
+    }
+
+    /// The byte where the word that `inside` is in (or just past) begins.
+    fn word_start(&self, inside: usize) -> usize {
+        self.text[..inside]
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map_or(0, |(at, ch)| at + ch.len_utf8())
+    }
+
+    /// `at`, or the start of the character it points into.
+    fn boundary_before(&self, at: usize) -> usize {
+        let mut at = at.min(self.text.len());
+        while !self.text.is_char_boundary(at) {
+            at -= 1;
+        }
+        at
+    }
+
     /// Text the person pasted, made safe for a composer that writes its
     /// bytes straight to the terminal — see `normalize_pasted_text`.
     pub fn insert_pasted(&mut self, text: &str) {
@@ -647,6 +735,16 @@ impl Composer {
     }
 }
 
+/// Whitespace that ends a line — a separator a completion never rests on
+/// (codex `advance_past_completion_separator`'s list).
+#[must_use]
+pub const fn is_line_break(ch: char) -> bool {
+    matches!(
+        ch,
+        '\n' | '\r' | '\u{000B}' | '\u{000C}' | '\u{0085}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
 fn extend_history(history: &mut Vec<String>, entries: impl IntoIterator<Item = String>) {
     for entry in entries {
         let entry = entry.trim();
@@ -780,6 +878,74 @@ fn position(row: usize, column: usize) -> (u16, u16) {
 
 #[cfg(test)]
 mod tests {
+    /// codex `test_current_at_token_*` — the whitespace word under the cursor,
+    /// when it starts with `@`; the range covers the sigil, the token does not.
+    #[test]
+    fn the_at_token_is_the_word_under_the_cursor_that_starts_with_the_sigil() {
+        let cases: &[(&str, usize, Option<&str>)] = &[
+            ("@hello", 3, Some("hello")),
+            ("@file.txt", 4, Some("file.txt")),
+            ("hello @world test", 8, Some("world")),
+            ("@İstanbul", 3, Some("İstanbul")),
+            ("@诶", 2, Some("诶")),
+            ("hello", 2, None),
+            ("@", 1, Some("")),
+            ("@ hello", 2, None),
+            ("test @ world", 6, None),
+            ("@test", 0, Some("test")),
+            ("@test", 5, Some("test")),
+            ("@file1 @file2", 0, Some("file1")),
+            ("@file1 @file2", 8, Some("file2")),
+            ("", 0, None),
+            ("aaa@aaa", 4, None),
+            ("aaa @aaa", 5, Some("aaa")),
+            ("test　@İstanbul", 8, Some("İstanbul")),
+            ("@ЙЦУ　@诶", 10, Some("诶")),
+            ("test\t@file", 6, Some("file")),
+            ("npx -y @kaeawc/auto-mobile@latest", 12, Some("kaeawc/auto-mobile@latest")),
+            ("@icons/icon@2x.png", 8, Some("icons/icon@2x.png")),
+            ("foo@bar", 3, None),
+            // Token affinity: one separator past the token still means it.
+            ("@wiki/alpha.md ", 15, Some("wiki/alpha.md")),
+            ("@ma  @scope", 4, Some("ma")),
+            ("@ma  @scope", 5, Some("scope")),
+            ("look at src/x.rs  please", 17, None),
+            ("@\n", 2, None),
+        ];
+        for (input, cursor, expected) in cases {
+            let mut composer = Composer::new();
+            composer.insert_str(input);
+            composer.set_cursor(*cursor);
+            let token = composer.at_token().map(|(_, token)| token);
+            assert_eq!(token.as_deref(), *expected, "input {input:?} cursor {cursor}");
+        }
+        let mut composer = Composer::new();
+        composer.insert_str("hello @world test");
+        composer.set_cursor(8);
+        let (range, _) = composer.at_token().expect("token");
+        assert_eq!(&composer.text()[range], "@world");
+    }
+
+    #[test]
+    fn replace_range_moves_the_cursor_with_the_text_and_never_splits_a_character() {
+        let mut composer = Composer::new();
+        composer.insert_str("a @co b");
+        composer.set_cursor("a @co b".len());
+        composer.replace_range(2..5, "src/composer.rs");
+        assert_eq!(composer.text(), "a src/composer.rs b");
+        assert_eq!(composer.cursor(), composer.text().len());
+        composer.set_cursor(0);
+        composer.replace_range(2..17, "x");
+        assert_eq!(composer.text(), "a x b");
+        assert_eq!(composer.cursor(), 0, "a cursor before the range stays");
+        let mut composer = Composer::new();
+        composer.insert_str("한글");
+        composer.set_cursor(1);
+        assert_eq!(composer.cursor(), 0, "pulled back to the boundary");
+        composer.replace_range(1..4, "x");
+        assert_eq!(composer.text(), "x글", "the range is pulled to boundaries too");
+    }
+
     use std::path::{Path, PathBuf};
     use std::time::Instant;
 

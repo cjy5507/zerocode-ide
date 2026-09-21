@@ -8,6 +8,7 @@
 mod built_runtime;
 mod agent_completion_pump;
 mod dreamer_hook;
+pub(crate) mod file_search;
 mod lsp_runtime;
 mod mcp_runtime;
 mod orchestration;

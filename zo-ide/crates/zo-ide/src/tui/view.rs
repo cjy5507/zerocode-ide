@@ -39,6 +39,12 @@ const MIN_FOOTER_CWD_WIDTH: usize = 2;
 
 /// codex's status widget defaults to three detail rows.
 pub const STATUS_DETAILS_DEFAULT_MAX_LINES: usize = 3;
+/// Maximum number of rows a composer popup shows at once — codex
+/// `bottom_pane/popup_consts.rs::MAX_POPUP_ROWS`, "keep this consistent
+/// across all popups for a uniform feel". The `@` popup ([`super::mention`])
+/// windows its rows to it; the slash popup lists a bounded catalog and draws
+/// it whole.
+pub const MAX_POPUP_ROWS: usize = 8;
 const DETAILS_PREFIX: &str = "  └ ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1294,6 +1300,10 @@ pub struct Frame<'a> {
     pub pager: Option<&'a [Line]>,
     /// 컴포저 아래(푸터 자리)의 슬래시 자동완성 팝업.
     pub popup: Option<&'a Popup>,
+    /// 컴포저 아래(푸터 자리)의 `@` 팝업 — 파일·스킬·볼트 페이지. 슬래시
+    /// 팝업과 같은 자리를 쓰고, `@` 토큰이 있으면 이것이 이긴다(codex
+    /// `sync_command_popup` 도 `@` 토큰 앞에서 명령 팝업을 접는다).
+    pub mention: Option<&'a super::mention::MentionPopup>,
     /// 컴포저에 `?` 만 있을 때 뜨는 단축키 카드.
     pub shortcuts: Option<&'a [String]>,
     pub model: &'a str,
@@ -1411,7 +1421,9 @@ fn build_with_focus(frame: &Frame<'_>, focus: Color) -> (Vec<Line>, Option<(u16,
     rows.push(Line::empty());
     // 팝업은 푸터 자리에 앉는다 — 캡처의 `/model` 프레임이 그 자리에서
     // 모델·cwd 줄을 밀어냈다.
-    if let Some(popup) = frame.popup {
+    if let Some(mention) = frame.mention {
+        rows.extend(mention.lines(frame.width, focus));
+    } else if let Some(popup) = frame.popup {
         rows.extend(popup.lines_with_focus(frame.width, focus));
     } else {
         if let Some(dream) = frame.dream {
@@ -1496,6 +1508,7 @@ pub fn shortcut_card() -> Vec<String> {
         "/help                 this list          /exit  quit (Ctrl-D too)".to_string(),
         "/clear [name]         clear terminal + start a new chat".to_string(),
         "//text                send a literal leading slash".to_string(),
+        "@name                 mention a file, skill or vault page — ↑↓ pick · tab/enter insert · esc close".to_string(),
         "esc interrupt · ctrl-c twice to quit · ↑↓ history · shift+tab cycles permissions".to_string(),
     ]
 }
@@ -1537,6 +1550,7 @@ mod tests {
             sessions: None,
             pager: None,
             popup: None,
+            mention: None,
             shortcuts: None,
             model: "claude-opus-5",
             effort: "high",

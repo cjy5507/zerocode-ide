@@ -84,7 +84,7 @@ pub const ZO_PAGE_DIR: &str = "zo";
 pub const SESSION_SOURCE_PREFIX: &str = "zo:session:";
 
 /// Markdown extension. A wikilink names a page without it.
-const PAGE_SUFFIX: &str = ".md";
+pub const PAGE_SUFFIX: &str = ".md";
 
 /// Wikilink target of the vault's map of content, derived from
 /// [`WIKI_INDEX_FILE`] so the file name and the link that points at it cannot
