@@ -13294,6 +13294,33 @@ mod tests {
             draining.contains("wordJamos.push(...decomposeHangul(text));"),
             "the drain no longer feeds commits back through the automaton:\n{draining}"
         );
+        // A composition that ENDS with only half a letter in it is not
+        // finished text either, and the drain used to type it at the pty like
+        // any syllable — five of them walked into a shell in one evening
+        // (window-errors.log 2026-09-22, t-5835). It waits for the key that
+        // caused it instead, and there is exactly one holder and one release.
+        assert!(
+            draining.contains("holdHalfLetter(joined);"),
+            "the drain types half a letter straight at the pty again:\n{draining}"
+        );
+        let escort = block_after(window, "function escortHalfLetter() {");
+        assert!(
+            escort.contains("routeText(text)") && escort.contains("reportStrayJamo("),
+            "the held half letter leaves by a door the husk is not watching:\n{escort}"
+        );
+        // Released on every road the person's next act can arrive on, so
+        // nothing they type can overtake the half letter they typed first.
+        for road in [
+            r#"keySink.addEventListener("keydown", (event) => {"#,
+            r#"keySink.addEventListener("compositionstart", () => {"#,
+            r#"keySink.addEventListener("input", () => {"#,
+        ] {
+            let body = block_after(window, road);
+            assert!(
+                body.contains("escortHalfLetter()"),
+                "a half letter can be overtaken on `{road}`:\n{body}"
+            );
+        }
     }
 
     /// Typing in a diff is saved by the save that already exists.
