@@ -459,9 +459,14 @@ pub fn read_report(report: &Value, lines: &[RecipeLine]) -> Option<StoppedRead> 
 
 /// How a row says the judgment was used: recorded beside the walk, as the
 /// record-only modes do.
+///
+/// The three words are the use table's, not this file's: every Jev ledger
+/// carries this column and a reader sweeping them all — the promotion judge,
+/// a script counting how often a seat changed anything — reads one spelling
+/// or none (`zerocode_core::jev`).
 const USE_SHADOW: &str = JevMode::Shadow.key();
-const USE_APPLIED: &str = "applied";
-const USE_FALLBACK: &str = "fallback";
+const USE_APPLIED: &str = zerocode_core::jev::ROUTE_USE_APPLIED;
+const USE_FALLBACK: &str = zerocode_core::jev::ROUTE_USE_FALLBACK;
 
 /// The key a row carries its reason under, beside `routeUse`: why the hand
 /// never went out although the judgment named a number. Written here and read

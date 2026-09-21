@@ -13,19 +13,20 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-/// Where shadow ledgers live under a project's state dir, next to the outcome
-/// store they must never be confused with.
-pub const SHADOW_LEDGER_DIR: &str = "smart-router";
-
 /// Past this size a shadow ledger keeps only its newer half. A soak is
 /// evidence, not an archive; the rows that matter are the recent ones.
 pub const SHADOW_LEDGER_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Where a project's shadow ledgers live — the directory a reader that holds
 /// several of them keeps, so a ledger's name is the only thing it has to know.
+///
+/// The runtime's, because the runtime reads these ledgers too: the system
+/// prompt asks a Jev seat whether it stands before deciding what it says
+/// about skills, and a folder name spelled twice is a reader looking in a
+/// place nothing writes to.
 #[must_use]
 pub fn shadow_ledger_dir(cwd: &Path) -> PathBuf {
-    runtime::zo_project_state_dir(cwd).join(SHADOW_LEDGER_DIR)
+    runtime::jev_ledger_dir(cwd)
 }
 
 /// Where a project's shadow ledger `file` lives.

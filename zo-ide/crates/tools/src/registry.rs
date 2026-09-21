@@ -358,6 +358,19 @@ const DEFERRED_TOOL_NAMES_EXTRA: &[&str] = &[
     "SendUserMessage",
     "SkillDistill",
     "SkillReview",
+    // The skill index's replacement (t-5629), deferred for the reason every
+    // ranked list is: a turn that needs no skill never looks, and a turn that
+    // does pays one lookup against the 900 tokens the index spent on every
+    // request.
+    //
+    // They carry no `DEFERRED_TOOL_HOOKS` line — the prompt section that
+    // replaces the index already says when to reach for them, on the one road
+    // where they matter — but they ARE named in the manifest, because a
+    // deferred tool the fixed harness never promises is one the model has no
+    // reason to open on the other road (`harness_budget`'s
+    // `every_fixed_harness_tool_name_is_registered_or_deferred_reachable`).
+    "skill_search",
+    "skill_load",
     "Sleep",
     // Only reachable once you hold an agent id, and the result that hands you
     // one names this tool — so the name in the deferred list is enough.

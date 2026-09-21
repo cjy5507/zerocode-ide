@@ -44,7 +44,26 @@ impl Bucket {
     const fn budget_tokens(self) -> u64 {
         match self {
             Self::System => 5_500,
-            Self::Tools => 2_000,
+            // 2,000 until t-5629, and moved by the seven tokens two deferred
+            // names cost — `skill_search` and `skill_load` in the manifest,
+            // which is billed here because it is a tool-plane cost. The bucket
+            // stood at 1,998 with two tokens of head, and there was no way to
+            // pay from inside it: their SCHEMAS are deferred and cost nothing,
+            // the names cannot be shortened, and the only other prose in reach
+            // is another tool's own one-line advertisement.
+            //
+            // What the seven buy, and why this is not the growth r49 forbids:
+            // they are not a schema on the wire — the wire is still twelve —
+            // and on any machine with a skill catalog the same fixed harness
+            // loses far more than it gains, because the `# Available skills`
+            // index stops being rendered. Measured on this machine's
+            // eighteen-skill catalog (2026-09-21): the skills bucket falls
+            // 878 → 178 and the whole fixed harness 7,452 → 6,789. The
+            // shipped harness carries no machine skills by design
+            // (`harness_budget`), so the floor it measures is the one case
+            // that pays the seven and collects nothing — which is the honest
+            // number to hold this to, and it is seven.
+            Self::Tools => 2_010,
             // The renderer's own ceiling (`runtime::SKILL_INDEX_BUDGET_TOKENS`):
             // the index folds its tail to stay under it, so the gate and the
             // prompt ask one number.

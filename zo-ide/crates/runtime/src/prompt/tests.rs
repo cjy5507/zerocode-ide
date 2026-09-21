@@ -1041,6 +1041,7 @@ fn build_injects_skills_index_after_dynamic_boundary() {
             Some("Diagnose failing tests".to_string()),
             PathBuf::from("/tmp/project/.zo/skills/debugger/SKILL.md"),
         )],
+        skills_index_road: super::SkillsIndexRoad::Index,
     };
 
     let sections = SystemPromptBuilder::new()
@@ -1800,4 +1801,135 @@ fn skills_index_stays_inside_its_budget_and_names_what_it_left_out() {
 
     let few = super::render_skills_index(&skills[..3]);
     assert!(few.contains("`skill-02`") && !few.contains("more installed skill"), "{few}");
+}
+
+/// A catalog for the index-road tests: `wide` enough that the index has to
+/// fold part of it away, or small enough that it does not.
+fn skill_catalog(count: usize, description_words: usize) -> Vec<SkillIndexEntry> {
+    let words = (0..description_words)
+        .map(|w| format!("word{w}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    (0..count)
+        .map(|i| {
+            SkillIndexEntry::new(
+                format!("skill-{i:02}"),
+                Some(format!("Trigger words for skill {i}: {words}")),
+                PathBuf::from(format!("/tmp/p/.zo/skills/skill-{i:02}/SKILL.md")),
+            )
+        })
+        .collect()
+}
+
+/// The seat's `on`, and an `auto` its own evidence raised, take the index out
+/// of the prompt. `shadow` and `auto`-not-yet-raised leave it exactly where it
+/// was — which is what makes a recorded search readable beside the index it
+/// would replace.
+#[test]
+fn the_skill_seat_decides_whether_the_index_is_rendered_at_all() {
+    use zerocode_core::jev::JevMode;
+
+    let small = skill_catalog(3, 4);
+    for (mode, raised, road) in [
+        (JevMode::Off, false, super::SkillsIndexRoad::Index),
+        (JevMode::Shadow, false, super::SkillsIndexRoad::Index),
+        (JevMode::Shadow, true, super::SkillsIndexRoad::Index),
+        (JevMode::Auto, false, super::SkillsIndexRoad::Index),
+        (JevMode::Auto, true, super::SkillsIndexRoad::Tools),
+        (JevMode::On, false, super::SkillsIndexRoad::Tools),
+    ] {
+        assert_eq!(
+            super::SkillsIndexRoad::decide(mode, raised, &small),
+            road,
+            "{mode:?} raised={raised}"
+        );
+    }
+}
+
+/// An index that has to fold part of the catalog away is not the catalog any
+/// more, so the tools take over whatever the seat is set to — the word match
+/// behind them works with no key, so nothing becomes unreachable.
+#[test]
+fn an_index_that_overflows_its_budget_gives_way_to_the_tools() {
+    use zerocode_core::jev::JevMode;
+
+    let wide = skill_catalog(40, 30);
+    assert!(
+        super::render_skills_index(&wide).contains("more installed skill"),
+        "the fixture has to be one the index folds"
+    );
+    assert_eq!(
+        super::SkillsIndexRoad::decide(JevMode::Off, false, &wide),
+        super::SkillsIndexRoad::Tools
+    );
+    // An empty catalog takes no road at all: the section is not rendered.
+    assert_eq!(
+        super::SkillsIndexRoad::decide(JevMode::Off, false, &[]),
+        super::SkillsIndexRoad::Index
+    );
+}
+
+/// What the tool road costs, in the bytes `--prompt-input` counts: the
+/// section keeps its heading, so the budget row still bills it, and what
+/// leaves is the list.
+#[test]
+fn the_tool_road_costs_a_fraction_of_the_index_and_keeps_its_heading() {
+    let wide = skill_catalog(40, 30);
+    let index = super::render_skills_index(&wide);
+    let tools = super::render_skills_tools(wide.len());
+
+    assert!(tools.starts_with(super::SKILLS_INDEX_HEADING), "{tools}");
+    assert!(
+        tools.contains("skill_search") && tools.contains("skill_load"),
+        "the section names the tools that replace the list: {tools}"
+    );
+    assert!(
+        !tools.contains("`skill-00`"),
+        "the point is that no skill is listed: {tools}"
+    );
+    assert!(tools.contains("40 skills"), "it says how many are installed: {tools}");
+    assert!(
+        super::estimated_tokens(&tools) * 4 < super::estimated_tokens(&index),
+        "the tool road is {} tokens against the index's {}",
+        super::estimated_tokens(&tools),
+        super::estimated_tokens(&index)
+    );
+}
+
+/// The whole prompt, both ways: the same builder, the same catalog, and the
+/// only difference is the section.
+#[test]
+fn a_rendered_prompt_carries_one_road_or_the_other_and_never_both() {
+    let skills = skill_catalog(6, 6);
+    let mut context = ProjectContext {
+        cwd: PathBuf::from("/tmp/p"),
+        current_date: "2026-09-21".to_string(),
+        skills_index: skills.clone(),
+        ..ProjectContext::default()
+    };
+    let rendered = |context: &ProjectContext| {
+        SystemPromptBuilder::new()
+            .with_project_context(context.clone())
+            .render()
+    };
+
+    context.skills_index_road = super::SkillsIndexRoad::Index;
+    let with_index = rendered(&context);
+    assert!(with_index.contains("`skill-00`"));
+    assert!(!with_index.contains("skill_search"));
+
+    context.skills_index_road = super::SkillsIndexRoad::Tools;
+    let with_tools = rendered(&context);
+    assert!(!with_tools.contains("`skill-00`"), "no skill is listed");
+    assert!(with_tools.contains("skill_search") && with_tools.contains("skill_load"));
+    assert!(
+        with_tools.len() < with_index.len(),
+        "the tool road is the shorter prompt: {} against {}",
+        with_tools.len(),
+        with_index.len()
+    );
+    // Both still carry the heading the prompt-input report bills by.
+    for prompt in [&with_index, &with_tools] {
+        assert!(prompt.contains(super::SKILLS_INDEX_HEADING));
+    }
 }

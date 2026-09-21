@@ -4082,6 +4082,26 @@
             </div>
 
             <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-skills-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.skills">스킬 고르기</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.skillsSummary">
+                    지금 하는 일을 설치된 스킬마다 견주어 순위를 매깁니다.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-skills-select" data-jev-seat="skills"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.skillsHint">
+                  지금 하는 일이 설치된 스킬 하나하나에 얼마나 맞는지 묻고, 가장 맞는 다섯까지의 SKILL.md 전문을 도구 결과로 돌려줍니다. 일에 대한 설명 앞 2,000자와 스킬마다 이름·설명(각 1,200자)만 보내고, 스킬 본문은 보내지 않습니다 — 본문은 이 기계의 디스크에서 읽습니다. 실제 적용은 시스템 프롬프트의 스킬 목록(900토큰)을 아예 빼고 도구 둘만 알립니다. 기록만은 목록을 그대로 두고 판단만 적습니다. 키가 없거나 답이 10초를 넘기면 낱말이 겹치는 순서로 되돌아갑니다.
+                </p>
+              </details>
+            </div>
+
+            <div class="settings-jev-row" data-jev-row>
               <label class="settings-field" data-field="md" for="typesafe-browser-select">
                 <span class="settings-field-copy">
                   <span class="settings-label" data-i18n="settings.typesafe.browser">브라우저 걷기</span>
