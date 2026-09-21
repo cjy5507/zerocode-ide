@@ -2291,7 +2291,20 @@ pub fn report_of(
     };
     let approval = approving
         .then(|| zerocode_core::ask::approval_in_parsed(&payload))
-        .flatten();
+        .flatten()
+        // The plan a permission is asking approval FOR, filled here because
+        // this is the line that knows WHICH agent asked: the reader is given
+        // a payload, and which tool carries a plan is the catalog's fact
+        // (`AgentVoice::plan_tool`). An agent the catalog does not voice
+        // names no plan tool, so its permissions stay ordinary approvals.
+        .map(|mut approval| {
+            approval.plan = zerocode_core::ask::plan_in(
+                payload.tree().and_then(|tree| tree.get("tool_input")),
+                &approval.tool,
+                zerocode_core::agent::agent_voice(envelope.agent.slug()).plan_tool,
+            );
+            approval
+        });
     Some(PaneHookReport {
         permission_mode: payload
             .tree()
@@ -3058,6 +3071,32 @@ mod tests {
             report.submit_shape,
             zerocode_core::ask::SubmitShape::NotAQuestion
         );
+    }
+
+    /// 계획을 묻는 권한 요청은 계획을 싣고 온다 — 그 도구가 이 CLI의 계획
+    /// 도구일 때에만. 도구 이름은 카탈로그의 사실이고(`AgentVoice::plan_tool`),
+    /// 읽는 이는 페이로드만 받으므로 이 줄이 둘을 잇는 유일한 자리다.
+    #[test]
+    fn a_permission_on_the_agents_plan_tool_carries_its_plan() {
+        let planning = concat!(
+            r#"{"hook_event_name":"PermissionRequest","tool_name":"ExitPlanMode","#,
+            r#""tool_input":{"plan":"1. read ask.rs 2. stand the card"}}"#
+        );
+        let report = report_of(&envelope("term-3", "", planning), None).expect("a report");
+        assert_eq!(
+            report
+                .approval
+                .as_ref()
+                .and_then(|approval| approval.plan.as_deref()),
+            Some("1. read ask.rs 2. stand the card")
+        );
+        // 다른 도구의 입력은 계획이 아니다 — 무엇을 싣고 있든.
+        let ordinary = concat!(
+            r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash","#,
+            r#""tool_input":{"command":"ls","plan":"1. read ask.rs"}}"#
+        );
+        let report = report_of(&envelope("term-3", "", ordinary), None).expect("a report");
+        assert_eq!(report.approval.expect("an approval").plan, None);
     }
 
     /// The model rides the report when the payload says one, and stays off

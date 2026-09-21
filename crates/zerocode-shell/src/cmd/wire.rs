@@ -208,6 +208,9 @@ pub(crate) fn wire_send(
 
 /// Answer one open question: the option picked (an approval), or the answers
 /// per question (a `request_user_input`). `None` for the option dismisses.
+///
+/// `message` rides a refusal where the protocol carries one — the plan card's
+/// feedback field, which Claude Code's denial shows the model as its reason.
 #[tauri::command(async)]
 pub(crate) fn wire_answer(
     state: State<'_, AppState>,
@@ -215,11 +218,13 @@ pub(crate) fn wire_answer(
     ask: serde_json::Value,
     option: Option<String>,
     answers: Option<Vec<Vec<String>>>,
+    message: Option<String>,
 ) -> Result<(), String> {
     state.shell_runtime().wires.get(id)?.answer(
         &ask,
         option.as_deref(),
         &answers.unwrap_or_default(),
+        message.as_deref(),
     )
 }
 

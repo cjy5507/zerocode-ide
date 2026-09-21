@@ -141,6 +141,11 @@ pub(crate) struct WireAsk {
     pub(crate) tool: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) summary: Option<String>,
+    /// The plan this permission asks approval for, when the tool asking is
+    /// the agent's plan tool (`ask::plan_in`) — the card draws it as the
+    /// extension's plan review rather than as a summary line.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) plan: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) edits: Vec<TranscriptEdit>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
@@ -191,6 +196,11 @@ pub(crate) struct WireState {
     /// `starting` · `working` · `asking` · `idle` · `failed` · `ended`.
     pub(crate) status: &'static str,
     pub(crate) asks: Vec<WireAsk>,
+    /// The tool THIS agent asks plan approval with, taken from the catalog
+    /// when the session started (`AgentVoice::plan_tool`). Kept beside the
+    /// state because the adapter reads messages and knows no agent; the
+    /// catalog is still the one place the fact is written.
+    pub(crate) plan_tool: Option<&'static str>,
     pub(crate) model: Option<String>,
     pub(crate) models: Vec<WireModel>,
     pub(crate) mode: Option<String>,
@@ -565,6 +575,9 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
                     method: method.to_string(),
                     tool: "shell".to_string(),
                     summary: Some(if command.is_empty() { reason } else { command }),
+                    // Only Claude Code names a plan tool today; the other
+                    // adapters ask ordinary approvals.
+                    plan: None,
                     edits: Vec::new(),
                     options: codex_options(),
                     questions: Vec::new(),
@@ -579,6 +592,7 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
                     id: id.clone(),
                     kind: "approval",
                     method: method.to_string(),
+                    plan: None,
                     tool: "apply_patch".to_string(),
                     summary: Some(open.map_or_else(
                         || text_of(params.get("reason")),
@@ -598,6 +612,7 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
                     id: id.clone(),
                     kind: "approval",
                     method: method.to_string(),
+                    plan: None,
                     tool: "permissions".to_string(),
                     summary: Some(if reason.is_empty() {
                         permissions
@@ -662,6 +677,7 @@ fn codex_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoin
                     method: method.to_string(),
                     tool: "request_user_input".to_string(),
                     summary: None,
+                    plan: None,
                     edits: Vec::new(),
                     options: Vec::new(),
                     questions,
@@ -899,6 +915,7 @@ fn acp_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoing>
                     method: method.to_string(),
                     tool,
                     summary: (!title.is_empty()).then_some(title),
+                    plan: None,
                     edits: acp_edits(call.get("content")),
                     options: params
                         .get("options")
@@ -1100,7 +1117,11 @@ fn claude_options(with_suggestions: bool) -> Vec<WireOption> {
 /// (`ask::approval_in_payload` — its summary and its diff), or the questions
 /// of an `AskUserQuestion` (`ask::questions_shape`), which the CLI also asks
 /// through permission.
-fn claude_ask(id: serde_json::Value, request: &serde_json::Value) -> WireAsk {
+fn claude_ask(
+    id: serde_json::Value,
+    request: &serde_json::Value,
+    plan_tool: Option<&str>,
+) -> WireAsk {
     let tool = text_of(request.get("tool_name"));
     let input = request
         .get("input")
@@ -1118,6 +1139,7 @@ fn claude_ask(id: serde_json::Value, request: &serde_json::Value) -> WireAsk {
             method: "can_use_tool".to_string(),
             tool,
             summary: None,
+            plan: None,
             edits: Vec::new(),
             options: Vec::new(),
             questions: prompt
@@ -1144,13 +1166,18 @@ fn claude_ask(id: serde_json::Value, request: &serde_json::Value) -> WireAsk {
     let described = zerocode_core::ask::approval_in_payload(
         &serde_json::json!({ "tool_name": tool, "tool_input": input }).to_string(),
     );
+    let tool = described
+        .as_ref()
+        .map_or(tool, |prompt| prompt.tool.clone());
     WireAsk {
         id,
+        // The plan the CLI asks approval for, when this IS its plan tool:
+        // the catalog's fact, applied by the caller as it is on the hook
+        // road (`ask::plan_in`).
+        plan: zerocode_core::ask::plan_in(Some(&input), &tool, plan_tool),
         kind: "approval",
         method: "can_use_tool".to_string(),
-        tool: described
-            .as_ref()
-            .map_or(tool, |prompt| prompt.tool.clone()),
+        tool,
         summary: described
             .as_ref()
             .and_then(|prompt| prompt.summary.clone())
@@ -1274,7 +1301,7 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
             match request.get("subtype").and_then(serde_json::Value::as_str) {
                 Some("can_use_tool") => {
                     state.flush_live();
-                    state.asks.push(claude_ask(id, request));
+                    state.asks.push(claude_ask(id, request, state.plan_tool));
                     state.status = "asking";
                 }
                 Some(other) => out.push(Outgoing::Refuse {
@@ -1306,10 +1333,15 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
 /// as the CLI proposed it, an allow for the session adds the CLI's own rule
 /// suggestions, a question's answers ride the input, and a denial is a
 /// sentence the model reads.
+///
+/// `message` is the person's own words on that refusal — the plan card's
+/// feedback field (the extension's "Send feedback", 2.1.275). Given none, the
+/// window's own sentence stands, which is what every other refusal sends.
 fn claude_answer(
     ask: &WireAsk,
     option: Option<&str>,
     answers: &[Vec<String>],
+    message: Option<&str>,
 ) -> serde_json::Value {
     let grant = ask.grant.clone().unwrap_or(serde_json::Value::Null);
     let mut input = grant
@@ -1347,7 +1379,9 @@ fn claude_answer(
         }),
         _ => serde_json::json!({
             "behavior": "deny",
-            "message": "The person declined this tool call in the ZeroCode window.",
+            "message": message
+                .filter(|words| !words.trim().is_empty())
+                .unwrap_or("The person declined this tool call in the ZeroCode window."),
         }),
     }
 }
@@ -1709,11 +1743,16 @@ impl WireSession {
         }
     }
 
+    /// Answer one open question. `message` is the words a refusal carries
+    /// where the protocol has a place for them — Claude Code's denial IS a
+    /// sentence the model reads, so the plan card's feedback travels there.
+    /// Codex and ACP answer with an option alone and drop it.
     pub(crate) fn answer(
         &self,
         ask_id: &serde_json::Value,
         option: Option<&str>,
         answers: &[Vec<String>],
+        message: Option<&str>,
     ) -> Result<(), String> {
         let ask = {
             let mut state = self
@@ -1734,7 +1773,7 @@ impl WireSession {
         let result = match self.protocol {
             Protocol::AppServer => codex_answer(&ask, option, answers),
             Protocol::Acp => acp_answer(option),
-            Protocol::ClaudeStream => claude_answer(&ask, option, answers),
+            Protocol::ClaudeStream => claude_answer(&ask, option, answers, message),
         };
         let written = self.reply(&ask.id, result);
         self.settled();
@@ -2017,6 +2056,9 @@ impl WireRuntime {
             next_request: AtomicI64::new(1),
             state: Mutex::new(WireState {
                 status: "starting",
+                // The one place an agent fact enters the adapter: the
+                // catalog's, read here where the agent is still named.
+                plan_tool: zerocode_core::agent::agent_voice(agent).plan_tool,
                 ..WireState::default()
             }),
             replies: Mutex::new(HashMap::new()),
@@ -2908,15 +2950,18 @@ mod tests {
             ]
         );
         assert_eq!(
-            claude_answer(&ask, Some("allow"), &[]),
+            claude_answer(&ask, Some("allow"), &[], None),
             serde_json::json!({"behavior":"allow","updatedInput":input})
         );
         assert_eq!(
-            claude_answer(&ask, Some("allow_always"), &[]),
+            claude_answer(&ask, Some("allow_always"), &[], None),
             serde_json::json!({"behavior":"allow","updatedInput":input,"updatedPermissions":suggestions})
         );
-        assert_eq!(claude_answer(&ask, Some("deny"), &[])["behavior"], "deny");
-        assert_eq!(claude_answer(&ask, None, &[])["behavior"], "deny");
+        assert_eq!(
+            claude_answer(&ask, Some("deny"), &[], None)["behavior"],
+            "deny"
+        );
+        assert_eq!(claude_answer(&ask, None, &[], None)["behavior"], "deny");
         assert_eq!(
             reply_line(
                 Protocol::ClaudeStream,
@@ -2954,6 +2999,55 @@ mod tests {
         );
     }
 
+    /// The plan permission (`ExitPlanMode`, the extension's "Claude's Plan"):
+    /// the plan rides the ask so the card can preview it, and the refusal
+    /// carries the person's own words — which is what Claude Code shows the
+    /// model as its reason. The plan is the CATALOG's fact: a session whose
+    /// agent names no plan tool reads the same request as an ordinary
+    /// approval.
+    #[test]
+    fn a_plan_permission_carries_its_plan_and_the_refusal_carries_the_words() {
+        let plan = "## Plan\n1. read\n2. write";
+        let request = serde_json::json!({
+            "type": "control_request",
+            "request_id": "p1",
+            "request": {
+                "subtype": "can_use_tool",
+                "tool_name": "ExitPlanMode",
+                "input": { "plan": plan },
+            },
+        });
+        let mut state = WireState {
+            plan_tool: zerocode_core::agent::agent_voice("claude").plan_tool,
+            ..WireState::default()
+        };
+        assert_eq!(state.plan_tool, Some("ExitPlanMode"));
+        claude(&mut state, request.clone());
+        let ask = state.asks[0].clone();
+        assert_eq!((ask.kind, ask.tool.as_str()), ("approval", "ExitPlanMode"));
+        assert_eq!(ask.plan.as_deref(), Some(plan));
+        // The refusal is the plan's feedback road: given words, they travel;
+        // given none, the window's own sentence still stands.
+        assert_eq!(
+            claude_answer(&ask, Some("deny"), &[], Some("drop step 2")),
+            serde_json::json!({ "behavior": "deny", "message": "drop step 2" })
+        );
+        assert_eq!(
+            claude_answer(&ask, Some("deny"), &[], Some("   "))["message"],
+            "The person declined this tool call in the ZeroCode window.",
+            "blank feedback is no feedback"
+        );
+        assert_eq!(
+            claude_answer(&ask, Some("allow"), &[], Some("ignored"))["behavior"],
+            "allow",
+            "the words ride a refusal, not an approval"
+        );
+        // An agent the catalog gives no plan tool asks an ordinary approval.
+        let mut silent = WireState::default();
+        claude(&mut silent, request);
+        assert_eq!(silent.asks[0].plan, None);
+    }
+
     /// `AskUserQuestion` comes through permission too: its questions stand as
     /// the question card, and the answers ride the tool's input keyed by the
     /// question's own text with the option's label, as the CLI's dialog
@@ -2984,10 +3078,10 @@ mod tests {
         let mut answered = input.clone();
         answered["answers"] = serde_json::json!({"Which one?":"A"});
         assert_eq!(
-            claude_answer(&ask, None, &[vec!["A".to_string()]]),
+            claude_answer(&ask, None, &[vec!["A".to_string()]], None),
             serde_json::json!({"behavior":"allow","updatedInput":answered})
         );
-        assert_eq!(claude_answer(&ask, None, &[])["behavior"], "deny");
+        assert_eq!(claude_answer(&ask, None, &[], None)["behavior"], "deny");
     }
 
     /// Our own requests and their answers wear each protocol's shape: JSON-RPC
