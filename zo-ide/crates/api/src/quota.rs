@@ -20,7 +20,7 @@
 //! Partitioned per [`ProviderKind`] so a Gemini 429 never parks a Claude turn,
 //! and `DeepSeek`/Grok fold onto their OpenAI/xAI slots (see [`provider_slot`]).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -193,6 +193,9 @@ pub fn isolate_rate_limit_state_for_tests() {
         last_seen.store(0, Ordering::SeqCst);
         overload.store(0, Ordering::SeqCst);
     }
+    for seen in &OWN_RATE_LIMIT_SEEN {
+        seen.store(false, Ordering::SeqCst);
+    }
     for exhausted in &PROVIDER_QUOTA_EXHAUSTED_UNTIL_MS {
         exhausted.store(0, Ordering::SeqCst);
     }
@@ -247,6 +250,16 @@ static RATE_LIMIT_COOLDOWN_UNTIL_UNIX_MS: [AtomicU64; PROVIDER_SLOTS] =
 /// after a throttle burst on that provider should not re-open at the top tier.
 static LAST_RATE_LIMIT_AT_MS: [AtomicU64; PROVIDER_SLOTS] =
     [const { AtomicU64::new(0) }; PROVIDER_SLOTS];
+
+/// Per-provider "this process took an account 429 for it" flag.
+///
+/// [`LAST_RATE_LIMIT_AT_MS`] cannot answer that question on its own: it holds
+/// a monotonic reading whose zero means both "never throttled" and "throttled
+/// in this process's first millisecond", which is exactly when a fresh `zo`
+/// asks (a test binary reproduced it on the first line of its first test).
+/// This flag only ever goes true, so the answer never flickers.
+static OWN_RATE_LIMIT_SEEN: [AtomicBool; PROVIDER_SLOTS] =
+    [const { AtomicBool::new(false) }; PROVIDER_SLOTS];
 
 /// Per-provider monotonic deadline (ms) for a **provider-overload** pause
 /// (529 / `overloaded_error`), kept apart from the account cool-down above.
@@ -438,6 +451,7 @@ fn mark_cooldown(kind: ProviderKind, extra_ms: u64, scope: CapacityScope) {
     let capped = extra_ms.min(ceiling);
     if matches!(scope, CapacityScope::Account) {
         LAST_RATE_LIMIT_AT_MS[slot].store(now, Ordering::Relaxed);
+        OWN_RATE_LIMIT_SEEN[slot].store(true, Ordering::Relaxed);
         // Wall-clock reset deadline for the display views — same instant/window as
         // the monotonic deadline below, ratcheted forward independently. Because
         // both clocks advance together, a mark that fails to advance the monotonic
@@ -573,6 +587,23 @@ pub fn rate_limit_cooldown_remaining_ms(kind: ProviderKind) -> u64 {
     // Whichever window is longer wins: another process's shared 429 can park
     // this one even when its own monotonic window is clear.
     local.max(crate::quota_shared::cooldown_remaining_ms(kind))
+}
+
+/// Whether THIS process has taken an account 429 for `kind` since it started.
+///
+/// The question is not "how hot is the window?" — that is
+/// [`rate_limit_headroom_low`] — but "is the park standing in the registry
+/// knowledge this process earned, or knowledge it inherited?".
+///
+/// The provider clients' pre-send door needs that distinction. A park this
+/// process earned is its own retry ladder's arithmetic (15 s, 30 s, 60 s …)
+/// and the layers that wrote it — the client ladder, the runtime classifier
+/// above it — already own when to try again. A park it did not earn came from
+/// another `zo` on the same account, and nothing in this process knows about
+/// it until a request comes back refused.
+#[must_use]
+pub fn took_own_rate_limit(kind: ProviderKind) -> bool {
+    OWN_RATE_LIMIT_SEEN[provider_slot(kind)].load(Ordering::Relaxed)
 }
 
 /// Spawn headroom gate (W9-4): `true` while the process has little provider
