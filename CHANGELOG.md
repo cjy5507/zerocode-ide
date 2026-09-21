@@ -2,7 +2,7 @@
 
 ## [1.1.13] — 2026-09-22
 
-_since v1.1.12 (17 commits)_
+_since v1.1.12 (21 commits)_
 
 ### feat
 - feat(jev): the three unlabeled seats get a "what came next" row — routing labels the turn's route by its attempt, placement labels where the person left the pane, recall labels whether the first note was read — and recall rises on its own labels
@@ -11,6 +11,9 @@ _since v1.1.12 (17 commits)_
 - feat(jev): a consented checkout's linked worktrees are consented too (t-5805)
 
 ### fix
+- fix(ime): a commit that leaves only half a letter waits for the key that caused it (t-5835)
+- fix(ime): the half letter's beat is read at the door, not raced against its own timer (t-5835)
+- fix(emulator): the helper's own starts, deaths and replacements reach the window log (t-5763)
 - fix(emulator): one iOS helper death, one line — and the tests that pinned the old silence (t-5763)
 - fix(orchestration): a pointer a knock already took is not parked again while its offer is young
 - fix(jev): an unarmed process leaves no seat row in the person's own home (t-5805)
@@ -20,14 +23,12 @@ _since v1.1.12 (17 commits)_
 - docs(agents): Windows is a build target for Codex sessions too
 
 ### test
+- test(contracts): the gate that says half-built jamo never reach the pty now asks about the hold too (t-5835)
 - test(zo): the ledger-cost measurement takes its source folder from the environment
 - test(zo): the labels branch's summary tests call the test-local `one` the dashboard introduced
 
 ### release
 - release: the public snapshot is scanned as the staged index, which is what gets pushed
-
-### wip
-- wip(emulator): the helper's own starts, deaths and replacements reach the window log
 
 
 ## [1.1.12] — 2026-09-21
