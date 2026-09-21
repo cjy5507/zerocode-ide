@@ -83,6 +83,7 @@ fn answered_before_a_session(argv: &[String]) -> Option<Answered> {
         "scoreboard" => Some(run_scoreboard(rest)),
         "decision-shadow" => Some(run_decision_shadow(rest)),
         "jev" => Some(run_jev(rest)),
+        "mcp" => Some(run_mcp(rest)),
         _ => None,
     }
 }
@@ -296,6 +297,24 @@ fn run_decision_shadow(args: &[String]) -> Result<(&'static str, u8), Box<dyn st
         Err(message) => {
             eprintln!("zo decision-shadow: {message}");
             ("decision-shadow-refused", 1)
+        }
+    })
+}
+
+/// `zo mcp …` reads and writes the configured MCP servers from outside a
+/// session: the same settings documents `ConfigLoader` merges, written back
+/// through the loader's own parser. `--doctor`'s principle exactly — no
+/// credentials, no workspace trust, no provider runtime.
+fn run_mcp(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    Ok(match zo_ide::mcp_cli::run(args, &cwd) {
+        Ok(report) => {
+            println!("{}", report.text);
+            success("mcp")
+        }
+        Err(message) => {
+            eprintln!("zo mcp: {message}");
+            ("mcp-refused", 1)
         }
     })
 }

@@ -41,6 +41,57 @@ impl JsonValue {
         rendered
     }
 
+    /// The same document, indented two spaces per level and one entry per
+    /// line, with a trailing newline.
+    ///
+    /// [`render`](Self::render) is what a machine reads back; this is what a
+    /// person reads and edits. A writer that touches one key of somebody's
+    /// hand-written settings file uses this, so the other keys come out of the
+    /// edit as readable — and as diffable — as they went in.
+    #[must_use]
+    pub fn render_pretty(&self) -> String {
+        let mut rendered = String::new();
+        self.render_pretty_into(&mut rendered, 0);
+        rendered.push('\n');
+        rendered
+    }
+
+    fn render_pretty_into(&self, rendered: &mut String, depth: usize) {
+        const INDENT: &str = "  ";
+        match self {
+            Self::Array(values) if !values.is_empty() => {
+                rendered.push_str("[\n");
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        rendered.push_str(",\n");
+                    }
+                    rendered.push_str(&INDENT.repeat(depth + 1));
+                    value.render_pretty_into(rendered, depth + 1);
+                }
+                rendered.push('\n');
+                rendered.push_str(&INDENT.repeat(depth));
+                rendered.push(']');
+            }
+            Self::Object(entries) if !entries.is_empty() => {
+                rendered.push_str("{\n");
+                for (index, (key, value)) in entries.iter().enumerate() {
+                    if index > 0 {
+                        rendered.push_str(",\n");
+                    }
+                    rendered.push_str(&INDENT.repeat(depth + 1));
+                    render_string_into(rendered, key);
+                    rendered.push_str(": ");
+                    value.render_pretty_into(rendered, depth + 1);
+                }
+                rendered.push('\n');
+                rendered.push_str(&INDENT.repeat(depth));
+                rendered.push('}');
+            }
+            // Scalars, and the empty array and object, read best on one line.
+            other => other.render_into(rendered),
+        }
+    }
+
     fn render_into(&self, rendered: &mut String) {
         match self {
             Self::Null => rendered.push_str("null"),

@@ -323,6 +323,20 @@ pub fn authenticate_mcp_server_remote(
     remote: &McpRemoteServerConfig,
     browser: &dyn BrowserOpener,
 ) -> McpAuthResult {
+    authenticate_mcp_server_remote_with_scopes(server_name, remote, &[], browser)
+}
+
+/// [`authenticate_mcp_server_remote`], with the scopes the consent page is
+/// asked for named on the command line (`zo mcp login <name> --scopes a,b`).
+///
+/// An empty `scopes` leaves whatever the config or discovery decided, so the
+/// no-scopes call above is the same flow it always was.
+pub fn authenticate_mcp_server_remote_with_scopes(
+    server_name: &str,
+    remote: &McpRemoteServerConfig,
+    scopes: &[String],
+    browser: &dyn BrowserOpener,
+) -> McpAuthResult {
     // Fast path first: a cached, valid token short-circuits before any network
     // discovery is attempted.
     let cached = load_mcp_oauth_token(server_name).ok().flatten();
@@ -337,7 +351,7 @@ pub fn authenticate_mcp_server_remote(
     // Explicit config wins and is unchanged; otherwise discover natively. Both
     // build the config in this top-level synchronous context so the refresh path
     // never nests a `run_http` inside `run_http`.
-    let config = match &remote.oauth {
+    let mut config = match &remote.oauth {
         Some(mcp_oauth) => mcp_oauth_to_config(server_name, mcp_oauth),
         None => match discover_oauth_config(server_name, &remote.url) {
             Ok(config) => config,
@@ -349,6 +363,9 @@ pub fn authenticate_mcp_server_remote(
             }
         },
     };
+    if !scopes.is_empty() {
+        config.scopes = scopes.to_vec();
+    }
 
     complete_mcp_auth(server_name, &config, cached.as_ref(), browser)
 }
