@@ -413,10 +413,11 @@ impl InputClient {
             if std::thread::Builder::new()
                 .name(format!("ios-hid-frames-{udid}"))
                 .spawn(move || {
-                    pump_frame_socket(&listener, &bus);
-                    // Whatever ended the read — a refused connection, a closed
-                    // socket, a desynchronised pipe — every waiter has to learn
-                    // it, or a pane sits on a bus nothing will ever arrive at.
+                    serve_frame_socket(&listener, &bus);
+                    // Whatever ended the service — a helper that never dialled,
+                    // a listener that gave out, this client being put down —
+                    // every waiter has to learn it, or a pane sits on a bus
+                    // nothing will ever arrive at.
                     bus.close();
                 })
                 .is_err()
@@ -514,17 +515,60 @@ impl Drop for InputClient {
         stop_process(&mut held(&self.state).child);
         self.frames.close();
         if let Some(socket) = &self.socket {
+            // The frame thread may be asleep in `accept`, waiting for the next
+            // stream this helper will never open now. One knock wakes it; the
+            // bus closed above is what tells it to go home.
+            let _ = UnixStream::connect(socket);
             let _ = std::fs::remove_file(socket);
         }
     }
 }
 
-/// Accept the helper's one connection and feed every picture it pushes to the
-/// bus, until the socket or the protocol gives out.
-fn pump_frame_socket(listener: &UnixListener, bus: &FrameBus) {
-    let Some(stream) = accept_helper(listener) else {
+/// Feed the bus from the helper's connections, one after another, for as long
+/// as this client lives.
+///
+/// Successive, not one: the helper dials this socket per STREAM rather than
+/// per process — its pusher thread connects when it is told to start and
+/// closes that end the moment its orders are superseded (main.swift's
+/// `FramePusher.pump`, `defer { close(fd) }`). A re-negotiated size, a pane
+/// that paused and came back, a pointer entering and lifting the rate: each of
+/// those is one deliberate close followed by one fresh dial.
+///
+/// Read as a single connection — which is what this was until 2026-09-21 —
+/// that first EOF was the road's death: the bus closed, every later frame
+/// answered `iOS 화면 스트림이 닫혔습니다`, three of those rested the fast road
+/// for five seconds, and the pane fell to the still-picture road. Measured in
+/// the window's own log that day: a pane pushed its first picture at +9.0s,
+/// was resized, rested at +26.5s and only came back at +32.6s (1060x2304 ->
+/// 412x896) — twenty-three seconds of a slow road bought by a resize.
+fn serve_frame_socket(listener: &UnixListener, bus: &FrameBus) {
+    // The first dial is the helper coming to work at all, and it has a
+    // deadline: a helper that never connects must not leave waiters hoping.
+    let Some(first) = accept_helper(listener) else {
         return;
     };
+    read_frames_from(first, bus);
+    // Every later one is a re-negotiation or a resume, and those have no
+    // deadline — a paused pane can sit for minutes. Blocking rather than
+    // polling for that wait: five milliseconds of looking, for minutes, is a
+    // core spent on nothing. [`InputClient::drop`] knocks on this socket, so
+    // the sleep ends when the client does.
+    if listener.set_nonblocking(false).is_err() {
+        return;
+    }
+    while !bus.is_closed() {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        if bus.is_closed() {
+            return;
+        }
+        read_frames_from(stream, bus);
+    }
+}
+
+/// One connection's pictures, until the socket or the protocol gives out.
+fn read_frames_from(stream: UnixStream, bus: &FrameBus) {
     // Back to blocking now that there IS a peer: the reader thread has nothing
     // to do but wait for bytes, and spinning on WouldBlock would burn a core
     // for the life of the pane.
@@ -1137,6 +1181,57 @@ mod tests {
         wire.extend_from_slice(&height.to_be_bytes());
         wire.extend_from_slice(body);
         wire
+    }
+
+    /// A pusher that retires and dials again is a seam in the road, not its
+    /// end.
+    ///
+    /// The helper opens one connection per STREAM: re-negotiating a size
+    /// retires the old pusher thread, which closes its end, and starts a new
+    /// one that dials afresh. Served as a single connection, that first EOF
+    /// closed the bus for good and every later frame answered "the stream is
+    /// closed" — three of which rest the fast road for five seconds.
+    #[test]
+    fn a_pusher_that_retires_and_dials_again_keeps_the_same_bus() {
+        let socket = std::env::temp_dir().join(format!(
+            "zc-ios-test-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
+        let _ = std::fs::remove_file(&socket);
+        let listener = UnixListener::bind(&socket).expect("a socket to listen on");
+        listener
+            .set_nonblocking(true)
+            .expect("a listener that can be polled");
+        let bus = Arc::new(FrameBus::new());
+        let serving = {
+            let bus = bus.clone();
+            std::thread::spawn(move || {
+                serve_frame_socket(&listener, &bus);
+                bus.close();
+            })
+        };
+        // Two streams in a row, each closed by the pusher the way a
+        // re-negotiation closes one.
+        for seed in [7u32, 8] {
+            let mut dialled = UnixStream::connect(&socket).expect("the helper dials");
+            dialled
+                .write_all(&pushed(seed, 414, 900, b"picture"))
+                .expect("one picture");
+            drop(dialled);
+            let frame = bus
+                .take(Duration::from_secs(5))
+                .expect("the bus is still open")
+                .expect("the picture arrives");
+            assert_eq!(frame.seed, seed, "the second stream never reached the bus");
+        }
+        // And the way the client itself ends it: the bus closed, then one
+        // knock so a thread asleep in `accept` goes home.
+        bus.close();
+        let _ = UnixStream::connect(&socket);
+        serving
+            .join()
+            .expect("the frame thread ends with the client");
+        let _ = std::fs::remove_file(&socket);
     }
 
     #[test]

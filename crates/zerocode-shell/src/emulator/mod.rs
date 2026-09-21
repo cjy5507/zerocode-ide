@@ -13,6 +13,7 @@ mod ios;
 #[cfg(target_os = "macos")]
 mod ios_hid;
 pub(crate) mod marks;
+mod prefs;
 mod process;
 mod pump;
 mod session;
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, ipc::InvokeResponseBody};
+use tauri::{AppHandle, Emitter, Manager, ipc::InvokeResponseBody};
 
 pub(crate) use android::{
     android_accessibility_tree, android_accessibility_tree_direct, android_button,
@@ -343,9 +344,48 @@ pub(crate) async fn choose_emulator_app(
     Ok(Some(checked.to_string_lossy().into_owned()))
 }
 
-pub(crate) fn shutdown_all() {
+/// What the window does for the emulators when it starts.
+///
+/// Its own door rather than two calls from the boot, because both halves are
+/// the same sentence — the device somebody will ask for next should already be
+/// awake, and the one nobody asks for should not stay awake forever — and
+/// neither of them may hold the boot up: each starts its own thread.
+pub(crate) fn on_window_boot(app: &AppHandle) {
+    let app = app.clone();
+    // One thread for all of it: the settings read, a device listing and a
+    // boot are file and process work, and a window that waits on a simulator
+    // before it paints has made a convenience into a launch delay.
+    let _ = std::thread::Builder::new()
+        .name("emulator-boot".to_string())
+        .spawn(move || {
+            preboot_last_used(&app);
+            ios::start_idle_reclaimer(app);
+        });
+}
+
+/// Wake the device each platform was last used with (D4).
+///
+/// Only the DEVICE: no stream, no pane, no Simulator window. A pane opened
+/// while this boot is in flight attaches to it rather than starting a second
+/// one.
+pub(crate) fn preboot_last_used(app: &AppHandle) {
+    if !prefs::of(app).preboot_last_used {
+        return;
+    }
+    ios::preboot_last_used(app);
+}
+
+pub(crate) fn shutdown_all(app: &AppHandle) {
+    let prefs = prefs::of(app);
     registry().shutdown_all();
     android::shutdown_all_devices();
+    // 켜 둔 기기는 켜 둔다 (D3): the devices this window booted outlive it, so
+    // the next window has something to come back to, unless the person asked
+    // for the opposite.
+    ios::devices_at_exit(
+        prefs.keep_booted,
+        app.state::<crate::AppState>().local_data_root(),
+    );
     #[cfg(target_os = "macos")]
     ios_hid::shutdown_all();
 }

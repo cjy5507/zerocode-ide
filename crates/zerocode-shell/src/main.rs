@@ -3300,6 +3300,11 @@ fn main() -> ExitCode {
             )), handle.clone());
             artifact_runtime::note_retention_days(retention_days);
             automation_runtime::adopt_stored_evidence(&local_data_root);
+            // 판의 첫 1초 (t-5645): the device somebody opened last is woken
+            // now, before a pane asks for it, and the watch that shuts an
+            // unwatched device down starts. Both spawn their own threads —
+            // nothing here waits on a simulator.
+            emulator::on_window_boot(&handle);
             let scanning = handle.clone();
             // zo rides along (t-3191, design §2.4): the bundle's `Resources/bin/zo`
             // against `~/.local/bin/zo`, judged and swapped by rename on this
@@ -3437,7 +3442,7 @@ fn main() -> ExitCode {
                 // panes' exits on the way out.
                 orchestration::window_exiting(now_epoch_ms());
                 handle.state::<AppState>().native_tray().begin_exit();
-                emulator::shutdown_all();
+                emulator::shutdown_all(handle);
                 codex_queue::shutdown_all();
                 capture_scrollback_at_exit(handle);
                 // 원장의 마지막 플러시 — 디바운스가 아직 자고 있어도 여기서

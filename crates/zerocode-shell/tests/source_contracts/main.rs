@@ -1126,15 +1126,81 @@ mod tests {
             "an expired rest does not try the road as if new"
         );
         assert!(
-            pump.contains("rest = (rest * 2).min(Duration::from_secs(60));"),
+            pump.contains("(rest * 2).min(HELPER_ATTACH_CEILING)")
+                && pump.contains("const HELPER_ATTACH_CEILING: Duration"),
             "the capability thread stopped retrying its cold start, so one \
              lost dlopen parks the pane on the slow roads forever"
+        );
+        // And while the device is still coming up it asks on the short beat
+        // instead (t-5645, D5): the pane opens its roads before the boot is
+        // over now, and the doubling backoff would answer a nine-second boot
+        // by first asking again at three seconds, then nine, then twenty-one.
+        assert!(
+            pump.contains("const HELPER_ATTACH_RETRY: Duration = Duration::from_millis(500);")
+                && pump.contains("rest = if boot.booting() {"),
+            "the helper is no longer asked for on the short beat while the \
+             device boots, so a pane's first seconds are the slow road's"
         );
         let hid = include_str!("../../src/emulator/ios_hid.rs");
         assert!(
             hid.contains(".is_some_and(|entry| entry.client.alive())"),
             "a dead helper still counts as retained, so the frame road spends \
              its whole miss budget on a corpse once per rest"
+        );
+    }
+
+    /// The first second of an iOS pane (t-5645, `emulator-first-second`).
+    ///
+    /// Three facts, each of which was a pane sitting on nothing:
+    ///
+    /// * the pump opens its roads AT ONCE and times the boot beside them (D5).
+    ///   It used to run `bootstatus` to the end first, so the pane was blank
+    ///   for the whole boot — measured at 8.8s on this machine — while the
+    ///   Simulator's own window showed the boot logo the entire time.
+    /// * a failure the road can explain is not a miss (D7). A device still
+    ///   booting has no framebuffer yet, and a stream the pump replaced by
+    ///   asking for a new size ends because it was replaced.
+    /// * there is ONE `simctl shutdown` in this window, so the person's own
+    ///   button and the idle reclaimer cannot disagree about what an
+    ///   already-shut-down device means (D3).
+    #[test]
+    fn the_ios_pane_draws_while_the_device_boots_and_counts_only_what_it_cannot_explain() {
+        let pump = include_str!("../../src/emulator/ios.rs");
+        assert!(
+            !pump.contains("fn wait_until_the_device_can_draw("),
+            "the pane holds its first picture until the boot is over again"
+        );
+        // The measurement stays, because the one line a person reading the log
+        // wants is how long the device took.
+        assert!(
+            pump.contains("waited {}ms for the device to finish booting"),
+            "the boot is no longer timed at all"
+        );
+        let stumbling = block_after(pump, "fn stumbled(");
+        assert!(
+            stumbling.contains("if why != Stumble::Unexplained {"),
+            "a booting device or a stream we replaced ourselves counts \
+             against the fast road again:\n{stumbling}"
+        );
+        assert_eq!(
+            pump.matches(r#".args(["shutdown", "#).count(),
+            1,
+            "there is more than one road that shuts a simulator down"
+        );
+        // And the helper's frame socket serves the connections a pane's own
+        // sizes cost it, rather than dying with the first one.
+        let helper = include_str!("../../src/emulator/ios_hid.rs");
+        let serving = block_after(helper, "fn serve_frame_socket(");
+        assert!(
+            serving.contains("while !bus.is_closed()") && serving.contains("listener.accept()"),
+            "the frame socket is back to one connection, so the first resize \
+             ends the push road:\n{serving}"
+        );
+        assert!(
+            block_after(helper, "impl Drop for InputClient {")
+                .contains("UnixStream::connect(socket)"),
+            "nothing wakes the frame thread out of `accept`, so it outlives \
+             the client it belongs to"
         );
     }
 
