@@ -1473,7 +1473,7 @@ mod tests {
     ///
     /// ```text
     /// ZO_RERANK_REPLAY_LEDGER=~/.zo/projects/<slug>/state/smart-router/rerank-shadow.jsonl \
-    ///   ZEROCODE_SECOND_BRAIN=/Users/dev \
+    ///   ZEROCODE_SECOND_BRAIN=/Users/dev/vault \
     ///   cargo test -p tools --lib -- what_the_bottom_level_drop_removes --ignored --nocapture
     /// ```
     #[test]

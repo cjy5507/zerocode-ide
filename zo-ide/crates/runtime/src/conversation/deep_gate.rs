@@ -6245,7 +6245,7 @@ mod tests {
     fn preexisting_dirty_paths_subtracts_the_attempts_own_files() {
         let baseline = vec![
             "Business/Card/CardBusiness.cs".to_string(),
-            "Common/acme/E4NETApi.cs".to_string(),
+            "Common/Acme/AcmeApi.cs".to_string(),
             "src/touched_by_attempt.rs".to_string(),
         ];
         let diff_paths = vec!["src/touched_by_attempt.rs".to_string()];
@@ -6253,7 +6253,7 @@ mod tests {
             preexisting_dirty_paths(&baseline, &diff_paths, None),
             vec![
                 "Business/Card/CardBusiness.cs".to_string(),
-                "Common/acme/E4NETApi.cs".to_string(),
+                "Common/Acme/AcmeApi.cs".to_string(),
             ]
         );
         assert!(preexisting_dirty_paths(&[], &diff_paths, None).is_empty());

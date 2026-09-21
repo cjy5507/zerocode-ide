@@ -624,7 +624,7 @@ fn an_unidentifiable_or_remote_tree_is_unsupported_and_never_empty() {
 
     // Another host's tree, even one whose path spells this checkout's.
     let remote = read(
-        &EvidenceTarget::remote(&format!("card-ssh:{checkout}")),
+        &EvidenceTarget::remote(&format!("edge-ssh:{checkout}")),
         &GitSnapshotSource::new(Orchestrator::open(root.path()).ok().as_ref()),
         &LedgerSource::new(Some(&ledger)),
         &WorkflowSource::new(Some(&store_path)),

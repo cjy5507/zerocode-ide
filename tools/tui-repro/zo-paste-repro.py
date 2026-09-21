@@ -3,7 +3,7 @@ cols, rows = 180, 40
 pid, fd = pty.fork()
 if pid == 0:
     os.chdir(os.path.expanduser("~/2026/y"))
-    os.execvp("/Users/dev/.local/bin/zo", ["zo"])
+    os.execvp(os.environ.get("ZO_BIN", os.path.expanduser("~/.local/bin/zo")), ["zo"])
 fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
 screen = pyte.Screen(cols, rows); stream = pyte.ByteStream(screen)
 buf = bytearray()

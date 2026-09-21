@@ -11,7 +11,7 @@ export async function workspaceBoardFixture() {
       path: `/projects/${name}/${i}`, branch, base: i ? "main" : null,
       is_main: i === 0, is_folder: false, active: project === 0 && i === 0,
       ownership: "zerocode-managed", external_hidden: false, last_activity_ms: Date.now() - i * 60_000,
-      host: name === "acme" && i === 0 ? "acme@card-ssh" : null,
+      host: name === "acme" && i === 0 ? "acme@edge-ssh" : null,
     })),
   }));
   window.__ANSWER__.project_catalog = () => catalog;
@@ -64,7 +64,7 @@ export async function testWorkspaceBoard(browser, origin, ok) {
       read.mode === "list" && read.groups === 5 && read.cards === 21 && read.pinned && read.stable && read.changed === 21, JSON.stringify(read));
 
     const hostBadge = await page.locator('.workspace-board-card[data-worktree-path="/projects/acme/0"] .workspace-board-card-host').textContent();
-    ok("SSH host badge renders on remote cards", hostBadge === "acme@card-ssh");
+    ok("SSH host badge renders on remote cards", hostBadge === "acme@edge-ssh");
 
     await page.waitForSelector('#workspace-board-accuracy:not([hidden]) [data-accuracy-field="weakestDecision"]');
     const accuracy = await page.evaluate(() => {
@@ -96,7 +96,7 @@ export async function testWorkspaceBoard(browser, origin, ok) {
     });
     ok("Cmd+K respects active scrims and does not steal focus", respectsScrim);
 
-    await page.fill("#workspace-board-query", "card-ssh");
+    await page.fill("#workspace-board-query", "edge-ssh");
     ok("search matches SSH host field", await page.locator(".workspace-board-card:visible").count() === 1);
     await page.click("#workspace-board-search-clear");
 

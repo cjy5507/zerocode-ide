@@ -568,9 +568,9 @@ mod tests {
         // The blob has carried `email` as well as `emailAddress`; a reader that
         // knows one of them turns a good login into "could not resolve email".
         let plain = ClaudeIdentity::from_credentials(
-            r#"{"oauthAccount":{"email":"someone@example.com","organizationId":"org-2"}}"#,
+            r#"{"oauthAccount":{"email":"a@b.test","organizationId":"org-2"}}"#,
         );
-        assert_eq!(plain.email.as_deref(), Some("someone@example.com"));
+        assert_eq!(plain.email.as_deref(), Some("a@b.test"));
         assert_eq!(plain.organization_uuid.as_deref(), Some("org-2"));
     }
 

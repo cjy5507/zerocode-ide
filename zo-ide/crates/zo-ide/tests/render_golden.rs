@@ -1,6 +1,6 @@
 //! codex 스타일 렌더러의 골든 테스트.
 //!
-//! 정본은 `docs/codex-capture-v0.149.1.txt` — codex-cli 0.149.1 을 PTY 로 뜬
+//! 정본은 `tests/fixtures/codex-capture-v0.149.1.txt` — codex-cli 0.149.1 을 PTY 로 뜬
 //! 원본 바이트다. 핵심 테스트([`replays_the_measured_capture_byte_for_byte`])는
 //! 그 캡처와 **바이트 단위로** 같은지를 본다. 캡처에서 빼는 것은 딱 셋,
 //! 전부 환경 산물이다:
@@ -30,8 +30,9 @@ use zo_ide::tui::palette::{ColorLevel, FOOTER_CWD, FOOTER_MODEL, TerminalPalette
 use zo_ide::tui::shimmer::shimmer_spans_for_palette;
 use zo_ide::util::ansi::strip_ansi;
 
-/// 캡처 원본. 테스트 파일에서 `docs/` 까지는 세 칸 위다.
-const CAPTURE: &str = include_str!("../../../docs/codex-capture-v0.149.1.txt");
+/// 캡처 원본 — 설계 노트가 아니라 이 골든이 바이트로 비교하는 픽스처이므로,
+/// 자기를 읽는 시험 옆에 산다(`zo-ide/docs/` 는 공개 트리에 들어가지 않는다).
+const CAPTURE: &str = include_str!("fixtures/codex-capture-v0.149.1.txt");
 
 const CAPTURE_CWD: &str = "/private/tmp/claude-501/-Users-dev-zerocode-workspaces-zerocode-zerocode-cli/c1a46d57-1e90-46fe-a537-6d276fa63892/scratchpad/codex-style";
 
@@ -180,7 +181,7 @@ fn capture_scenario() -> Vec<RenderBlock> {
         bash_result(
             "call_ls",
             0,
-            "total 0\ndrwxr-xr-x@  3 joe  wheel   96 Aug 26 11:57 .\ndrwx------@ 15 joe  wheel  480 Aug 26 11:57 ..\n-rw-r--r--@  1 joe  wheel    0 Aug 26 11:57 capture-ansi.txt\n",
+            "total 0\ndrwxr-xr-x@  3 dev  wheel   96 Aug 26 11:57 .\ndrwx------@ 15 dev  wheel  480 Aug 26 11:57 ..\n-rw-r--r--@  1 dev  wheel    0 Aug 26 11:57 capture-ansi.txt\n",
             "",
         ),
         text(

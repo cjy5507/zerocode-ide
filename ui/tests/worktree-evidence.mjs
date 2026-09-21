@@ -314,7 +314,7 @@ export async function testWorktreeEvidence(browser, origin, ok) {
       return window.__EVIDENCE_CALLS__[before];
     });
     ok("원격 워크스페이스는 호스트를 실어 묻는다",
-      remote.host === "acme@card-ssh" && remote.path === "/projects/acme/0", JSON.stringify(remote));
+      remote.host === "acme@edge-ssh" && remote.path === "/projects/acme/0", JSON.stringify(remote));
 
     /* 키보드: 열면 「다시 읽기」가 키를 받고, Escape가 닫는다. */
     await page.evaluate((held) => { window.__EVIDENCE_ANSWER__ = held; }, EVIDENCE);

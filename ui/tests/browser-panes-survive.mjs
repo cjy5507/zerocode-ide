@@ -27,8 +27,8 @@ import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.
 /* 사건이 남긴 주소 그대로 — 증거
  * `/Users/dev/zerocode/archives/20260920-e2e-v1.1.3/06-window-after-android-open.png`. */
 const PERSON_TABS = Object.freeze([
-  "https://192.0.2.1/schemes/acme/edit",
-  "http://192.0.2.4:8080/actuator/prometheus",
+  "https://198.51.100.135/schemes/payments/edit",
+  "http://192.0.2.104:8080/actuator/prometheus",
   "https://example.com/r1-walk-fixture",
 ]);
 

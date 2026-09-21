@@ -9,7 +9,18 @@ set windows-shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 # CI와 동일한 게이트. 헤드리스 단계(test/lint/doc)는 웹뷰 스택을 빌드하지
 # 않도록 zerocode-shell을 제외하고, 창은 shell-lint/shell-test 단계가 따로
 # 게이트한다.
-verify: fmt-check lint doc test shell-lint shell-test tools-test swift-test window-runner-test settings-browser-test window-browser-test browser-observation-test browser-door-test knowledge-browser-test win-check-if-available
+verify: pii-check fmt-check lint doc test shell-lint shell-test tools-test swift-test window-runner-test settings-browser-test window-browser-test browser-observation-test browser-door-test knowledge-browser-test win-check-if-available
+
+# The re-entry gate for private values (3.9 s over 1,687 tracked files, the
+# median of 3 on an idle machine): a home directory, an office address, a
+# mailbox, a key of a real shape, or a name this tree was cleared of, must
+# not reach the public source snapshot.
+# Everything it knows is the `RULES` table in the script (and `BANISHED`, which
+# carries digests, never a word) — `pii-scan.py --table` prints it, and a site
+# that cannot be rewritten waives itself where it stands. First in `verify`
+# because it refuses before anything compiles.
+pii-check:
+    python3 tools/release/pii-scan.py
 
 # --no-fail-fast here and in shell-test: cargo otherwise stops at the first
 # failing test binary, and the release lane re-runs only the names that
@@ -26,9 +37,10 @@ lint:
 shell-lint:
     cargo clippy -p zerocode-shell --all-targets -- -D warnings
 
-# The tools' own tests (stdlib python, ~80 s — the bench runner's end-to-end
-# fakes are ~25 s of it — plus the signer's ~14 s): the release lane's dry-run
-# contract, the version bump, the app signer and its nested-code gate, the
+# The tools' own tests (stdlib python, ~85 s — the bench runner's end-to-end
+# fakes are ~25 s of it — plus the signer's ~14 s and the PII gate's ~5 s): the
+# release lane's dry-run contract, the version bump, the PII gate's table read
+# from both sides, the app signer and its nested-code gate, the
 # scoreboard beat's clock, the Computer Use bench, the Jev ledger reader and
 # the token-diet baseline's definitions. They sat outside the gate until
 # 2026-09-11 (the signer's until 09-12) — the same silence the knowledge graph
@@ -36,6 +48,7 @@ shell-lint:
 tools-test:
     python3 tools/release/tests/test_lane.py
     python3 tools/release/tests/test_bump.py
+    python3 tools/release/tests/test_pii_scan.py
     python3 tools/signing/tests/test_signing.py
     python3 tools/signing/tests/test_sign_app_bundle.py
     python3 tools/scoreboard/tests/test_scoreboard_launchd.py

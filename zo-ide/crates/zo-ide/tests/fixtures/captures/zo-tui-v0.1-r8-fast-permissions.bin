@@ -1,0 +1,87 @@
+
+--READ   1.64s 12B--
+[?2004h[6n
+--WRITE   3.08s trust--
+
+--READ   3.64s 1024B--
+[?2026h[2;1H[J[2;40r[2;1HMMMMMM[r[1;7r[1;1H
+[39;49m[K[2m╭────────────────────────────────────────────────────────╮[39m[49m[0m
+[39;49m[K[2m│ >_ [22m[1mzo[22m[2m[2m (v0.1.0)                                         │[39m[49m[0m
+[39;49m[K[2m│                                                        │[39m[49m[0m
+[39;49m[K[2m│ model:     [22mgpt-5.6-terra [38;5;5;49msmart[2m[39;49m   [22m[38;5;6;49m/model[2m[39;49m to change      │[39m[49m[0m
+[39;49m[K[2m│ directory: [22m~/zerocode/workspaces/…/zerocode-cli/zo-ide[2m │[39m[49m[0m
+[39;49m[K[2m╰────────────────────────────────────────────────────────╯[39m[49m[0m[r[8;1H[0m[K[0m[9;1H[0m[K[0m[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[2m[2m
+--READ   3.64s 264B--
+[39;49mAsk zo to do anything[0m[11;1H[0m[K[0m[12;1H[0m[K  [38;2;246;226;183;49mgpt-5.6-terra smart[2m[39;49m · [22m[38;2;171;223;167;49m~/zerocode/workspaces/zerocode/zerocode-cli/zo-ide[2m[39;49m   ? for shortcuts[0m[0m[0 q[?25h[10;3H[?2026l
+--WRITE   8.08s permissions-slash--
+
+--READ   8.08s 731B--
+[?2026h[8;1H[J[8;1H[0m[K[0m[9;1H[0m[K[0m[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/[0m[11;1H[0m[K[0m[12;1H[0m[K[1m[38;5;6;49m  /model        choose what model and reasoning effort to use[0m[13;1H[0m[K  /fast         [2m1.5x speed, increased usage[0m[14;1H[0m[K  /permissions  [2mread-only, workspace-write or danger-full-access[0m[15;1H[0m[K  /resume       [2mresume a saved chat[0m[16;1H[0m[K  /compact      [2mcompact the conversation to free context[0m[17;1H[0m[K  /status       [2mmodel, permissions, effort, session and context[0m[18;1H[0m[K  /help         [2mshow the shortcut card[0m[19;1H[0m[K  /exit         [2mexit zo[0m[0m[0 q[?25h[10;4H[?2026l
+--READ   8.08s 259B--
+[?2026h[8;1H[J[8;1H[0m[K[0m[9;1H[0m[K[0m[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/p[0m[11;1H[0m[K[0m[12;1H[0m[K[1m[38;5;6;49m  /permissions  read-only, workspace-write or danger-full-access[0m[0m[0 q[?25h[10;5H[?2026l
+--READ   8.08s 101B--
+[?2026h[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/pe[0m[0m[0 q[?25h[10;6H[?2026l
+--READ   8.08s 102B--
+[?2026h[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/per[0m[0m[0 q[?25h[10;7H[?2026l
+--READ   8.08s 103B--
+[?2026h[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/perm[0m[0m[0 q[?25h[10;8H[?2026l
+--READ   8.08s 104B--
+[?2026h[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/permi[0m[0m[0 q[?25h[10;9H[?2026l
+--READ   8.08s 106B--
+[?2026h[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/permis[0m[0m[0 q[?25h[10;10H[?2026l
+--READ   8.08s 107B--
+[?2026h[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/permiss[0m[0m[0 q[?25h[10;11H[?2026l
+--READ   8.08s 108B--
+[?2026h[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/permissi[0m[0m[0 q[?25h[10;12H[?2026l
+--READ   8.08s 109B--
+[?2026h[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/permissio[0m[0m[0 q[?25h[10;13H[?2026l
+--READ   8.08s 110B--
+[?2026h[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/permission[0m[0m[0 q[?25h[10;14H[?2026l
+--READ   8.08s 111B--
+[?2026h[10;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/permissions[0m[0m[0 q[?25h[10;15H[?2026l
+--WRITE  10.04s permissions-picker--
+
+--READ  10.04s 1010B--
+[?2026h[8;40r[8;1HMMMM[r[1;11r[7;1H
+[39;49m[K[39m[49m[0m
+[39;49m[K[39m[49m[0m
+[39;49m[K[1m[2m› [22m[22m/permissions[39m[49m[0m
+[39;49m[K[39m[49m[0m[r[12;1H[J[12;1H[0m[K[0m[13;1H[0m[K[0m[14;1H[0m[K  [1mUpdate Model Permissions[0m[15;1H[0m[K[0m[16;1H[0m[K[1m[38;5;6;49m› 1. Ask for approval (current)  Codex can read and edit files in the current workspace, and run commands. Approval is[0m[17;1H[0m[K                              [1m[38;5;6;49mrequired to access the internet or edit other files.[0m[18;1H[0m[K  2. Approve for me              [2mOnly ask for actions detected as potentially unsafe.[0m[19;1H[0m[K  3. Full Access                 [2mCodex can edit files outside this workspace and access the internet without asking for[0m[20;1H[0m[K                              [2mapproval. Exercise caution when using.[0m[21;1H[0m[K[0m[22;1H[0m[K  [2mPress enter to confirm or esc to go back[0m[0m[?25l[?2026l
+--WRITE  14.08s permissions-close--
+
+--READ  14.08s 375B--
+[?2026h[12;1H[J[12;1H[0m[K[0m[13;1H[0m[K[0m[14;1H[0m[K[1m[38;2;255;178;66;49m› [22m[2m[2m[39;49mAsk zo to do anything[0m[15;1H[0m[K[0m[16;1H[0m[K  [38;2;246;226;183;49mgpt-5.6-terra smart[2m[39;49m · [22m[38;2;171;223;167;49m~/zerocode/workspaces/zerocode/zerocode-cli/zo-ide[2m[39;49m   ? for shortcuts[0m[0m[0 q[?25h[14;3H[?2026l
+--WRITE  16.05s fast-slash--
+
+--READ  16.05s 1024B--
+[?2026h[12;1H[J[12;1H[0m[K[0m[13;1H[0m[K[0m[14;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/[0m[15;1H[0m[K[0m[16;1H[0m[K[1m[38;5;6;49m  /model        choose what model and reasoning effort to use[0m[17;1H[0m[K  /fast         [2m1.5x speed, increased usage[0m[18;1H[0m[K  /permissions  [2mread-only, workspace-write or danger-full-access[0m[19;1H[0m[K  /resume       [2mresume a saved chat[0m[20;1H[0m[K  /compact      [2mcompact the conversation to free context[0m[21;1H[0m[K  /status       [2mmodel, permissions, effort, session and context[0m[22;1H[0m[K  /help         [2mshow the shortcut card[0m[23;1H[0m[K  /exit         [2mexit zo[0m[0m[0 q[?25h[14;4H[?2026l[?2026h[12;1H[J[12;1H[0m[K[0m[13;1H[0m[K[0m[14;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/f[0m[15;1H[0m[K[0m[16;1H[0m[K[1m[38;5;6;49m  /fast  1.5x speed, increased usage[0m[0m[0 q[?25h[14;5H[?2026l[?2026h[14;1H[0m[K[1m[38;2;255;178;66;49m› [22m
+--READ  16.05s 250B--
+[39;49m/fa[0m[0m[0 q[?25h[14;6H[?2026l[?2026h[14;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/fas[0m[0m[0 q[?25h[14;7H[?2026l[?2026h[14;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/fast[0m[0m[0 q[?25h[14;8H[?2026l
+--WRITE  18.01s fast-toggle--
+
+--READ  18.04s 623B--
+[?2026h[12;40r[12;1HMMMM[r[1;15r[11;1H
+[39;49m[K[39m[49m[0m
+[39;49m[K[39m[49m[0m
+[39;49m[K[1m[2m› [22m[22m/fast[39m[49m[0m
+[39;49m[K[39m[49m[0m[r[16;40r[16;1HMM[r[1;17r[15;1H
+[39;49m[K[39m[49m[0m
+[39;49m[K[2m• Service tier set to priority[39m[49m[0m[r[20;1H[0m[K[1m[38;2;255;178;66;49m› [22m[2m[2m[39;49mAsk zo to do anything[0m[22;1H[0m[K  [38;2;246;226;183;49mgpt-5.6-terra smart fast[2m[39;49m · [22m[38;2;171;223;167;49m~/zerocode/workspaces/zerocode/zerocode-cli/zo-ide[2m[39;49m   ? for shortcuts[0m[0m[0 q[?25h[20;3H[?2026l
+--WRITE  22.09s exit--
+
+--READ  22.09s 1024B--
+[?2026h[18;1H[J[18;1H[0m[K[0m[19;1H[0m[K[0m[20;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/[0m[21;1H[0m[K[0m[22;1H[0m[K[1m[38;5;6;49m  /model        choose what model and reasoning effort to use[0m[23;1H[0m[K  /fast         [2m1.5x speed, increased usage[0m[24;1H[0m[K  /permissions  [2mread-only, workspace-write or danger-full-access[0m[25;1H[0m[K  /resume       [2mresume a saved chat[0m[26;1H[0m[K  /compact      [2mcompact the conversation to free context[0m[27;1H[0m[K  /status       [2mmodel, permissions, effort, session and context[0m[28;1H[0m[K  /help         [2mshow the shortcut card[0m[29;1H[0m[K  /exit         [2mexit zo[0m[0m[0 q[?25h[20;4H[?2026l[?2026h[18;1H[J[18;1H[0m[K[0m[19;1H[0m[K[0m[20;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/e[0m[21;1H[0m[K[0m[22;1H[0m[K[1m[38;5;6;49m  /exit  exit zo[0m[0m[0 q[?25h[20;5H[?2026l[?2026h[20;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/ex[0m[0m
+--READ  22.09s 127B--
+[0 q[?25h[20;6H[?2026l[?2026h[20;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/exi[0m[0m[0 q[?25h[20;7H[?2026l
+--READ  22.09s 103B--
+[?2026h[20;1H[0m[K[1m[38;2;255;178;66;49m› [22m[39;49m/exit[0m[0m[0 q[?25h[20;8H[?2026l
+--WRITE  24.08s exit-submit--
+
+--READ  24.09s 517B--
+[?2026h[18;40r[18;1HMMMM[r[1;21r[17;1H
+[39;49m[K[39m[49m[0m
+[39;49m[K[39m[49m[0m
+[39;49m[K[1m[2m› [22m[22m/exit[39m[49m[0m
+[39;49m[K[39m[49m[0m[r[24;1H[0m[K[1m[38;2;255;178;66;49m› [22m[2m[2m[39;49mAsk zo to do anything[0m[26;1H[0m[K  [38;2;246;226;183;49mgpt-5.6-terra smart fast[2m[39;49m · [22m[38;2;171;223;167;49m~/zerocode/workspaces/zerocode/zerocode-cli/zo-ide[2m[39;49m   ? for shortcuts[0m[0m[0 q[?25h[24;3H[?2026l[r[22;1H[J[0m[?25h
+--READ  24.09s 85B--
+[?2004lTo continue this session, run [36mzo --resume session-1787803595164-0[39m

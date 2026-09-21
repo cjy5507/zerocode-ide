@@ -29699,29 +29699,21 @@ mod tests {
         }
     }
 
-    /// The board's design vocabulary is a checked source contract. Without
-    /// this gate the document can become an archaeological note while the UI
-    /// quietly grows a sixth state, a third relationship, or a second meaning
-    /// for "running".
+    /// The board's ontology is a checked source contract. Without this gate
+    /// the UI quietly grows a sixth state, a third relationship, or a second
+    /// meaning for "running".
+    ///
+    /// The vocabulary it holds — Project ▸ Workspace ▸ Agent ▸ Subagent,
+    /// containment beside lineage, `needs-attention` as a state, a repaint
+    /// only when the picture changes, rendered pixels as the evidence — was
+    /// read out of a design note until 2026-09-21. The notes stay off the
+    /// public tree, so the promises are spelled here, beside the code they
+    /// hold, and what is left below is the half that was ever about code.
     #[test]
     fn the_agent_board_implements_its_documented_ontology() {
-        let design = include_str!("../../../../docs/design/agent-board-ontology.md");
         let markup = include_str!("../../../../ui/index.html");
         let window = window_source();
 
-        for promise in [
-            "Project ▸ Workspace ▸ Agent ▸ Subagent",
-            "**Containment**",
-            "**Lineage**",
-            "`needs-attention`",
-            "The board repaints only when its picture changes.",
-            "rendered pixels are the evidence",
-        ] {
-            assert!(
-                design.contains(promise),
-                "agent-board-ontology.md lost its `{promise}` contract"
-            );
-        }
         assert!(
             markup.contains(r#"class="agent-graph-run""#)
                 && markup.contains(r##"<use href="#i-orbit"></use>"##)
@@ -31143,9 +31135,10 @@ mod tests {
             "the skill's named helper `labelButton` left ui/shell.js"
         );
 
-        // The spellings the skill shares with the direction document — one
-        // gate instead of two hand-kept copies.
-        let direction = include_str!("../../../../docs/design/direction.md");
+        // The spellings an agent reads off the skill and writes into CSS.
+        // They were held against the direction document too, until the design
+        // notes left the tree (2026-09-21); the skill is the copy that ships,
+        // so the skill is the copy that is gated.
         for shared in [
             "4 / 8 / 12 / 16 / 24 / 32",
             "11 / 12 / 13 / 15 / 18 / 24",
@@ -31154,9 +31147,9 @@ mod tests {
             "720px",
         ] {
             assert!(
-                body.contains(shared) && direction.contains(shared),
-                "`{shared}` no longer appears in both the skill and \
-                 docs/design/direction.md — the two spellings have forked"
+                body.contains(shared),
+                "`{shared}` left skills/design/SKILL.md — an agent without \
+                 the scale reaches for a number of its own"
             );
         }
     }

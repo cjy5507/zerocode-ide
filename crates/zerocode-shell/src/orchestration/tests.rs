@@ -14858,7 +14858,7 @@ fn a_seat_the_window_never_placed_is_refused() {
 /// about it, and the answer says `unsupported` rather than `empty`.
 #[test]
 fn a_remote_checkout_is_unsupported_and_not_looked_for_on_this_disk() {
-    let read = crate::worktree_evidence_runtime::for_remote("card-ssh:/srv/app", 7);
+    let read = crate::worktree_evidence_runtime::for_remote("edge-ssh:/srv/app", 7);
     assert_eq!(
         read.snapshot.state,
         zerocode_orchestrator::worktree_evidence::SourceState::Unsupported
@@ -14878,7 +14878,7 @@ fn a_remote_checkout_is_unsupported_and_not_looked_for_on_this_disk() {
     // path on this machine.
     assert_eq!(
         read.workspace_id,
-        crate::worktree_evidence_runtime::for_remote("card-ssh:/srv/app", 9).workspace_id
+        crate::worktree_evidence_runtime::for_remote("edge-ssh:/srv/app", 9).workspace_id
     );
     assert!(!read.workspace_id.contains('/'));
     // The ledger's rows are keyed by local paths, so none of them can be
