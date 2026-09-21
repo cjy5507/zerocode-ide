@@ -6939,12 +6939,13 @@ async fn e2e_a_file_the_turn_read_stands_first_in_the_at_popup() {
         visible.iter().any(|row| row.starts_with("> fixture.txt  ./"))
             && visible.iter().any(|row| row.starts_with("  fix.txt") && row.contains("  ./"))
     });
-    // Esc once closes the popup, once more clears the line — so `/exit`
-    // below lands on an empty composer and nothing else is submitted. The
+    // Esc closes the popup and Ctrl-U clears the line — so `/exit` below
+    // lands on an empty composer and nothing else is submitted. (Two Esc
+    // bytes back to back read as one escape sequence, not two keys.) The
     // placeholder was on screen at boot too, so the wait starts here.
     let before_esc = run.output_len();
     run.send(b"\x1b").expect("close the popup");
-    run.send(b"\x1b").expect("clear the composer");
+    run.send(b"\x15").expect("clear the composer");
     run.wait_for_after("Ask zo to do anything", before_esc, TEST_TIMEOUT);
     let _ = run.finish();
     assert_eq!(service.request_bodies().await.len(), 2, "the tool turn only");

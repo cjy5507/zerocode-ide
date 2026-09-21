@@ -555,19 +555,19 @@ fn matcher_worker(
 fn build_snapshot(
     inner: &SessionInner,
     nucleo: &Nucleo<IndexedEntry>,
-    matcher: &mut Matcher,
+    scorer: &mut Matcher,
     query: &str,
     walk_complete: bool,
     settled: bool,
 ) -> FileSearchSnapshot {
     let snapshot = nucleo.snapshot();
-    let matched = snapshot.matched_item_count() as usize;
+    let matched_count = snapshot.matched_item_count() as usize;
     let window = if inner.boost.is_some() {
         inner.limit.saturating_mul(RERANK_WINDOW)
     } else {
         inner.limit
     }
-    .min(matched);
+    .min(matched_count);
     let pattern = snapshot.pattern().column_pattern(0);
     let mut indices = Vec::<u32>::new();
     let mut matches: Vec<FileMatch> = (0..window)
@@ -575,7 +575,7 @@ fn build_snapshot(
             let item = snapshot.get_matched_item(u32::try_from(n).ok()?)?;
             indices.clear();
             let haystack = item.matcher_columns[0].slice(..);
-            let score = pattern.indices(haystack, matcher, &mut indices)?;
+            let score = pattern.indices(haystack, scorer, &mut indices)?;
             let boost = inner
                 .boost
                 .as_ref()
@@ -604,7 +604,7 @@ fn build_snapshot(
     FileSearchSnapshot {
         query: query.to_string(),
         matches,
-        total_match_count: matched,
+        total_match_count: matched_count,
         scanned_file_count: snapshot.item_count() as usize,
         walk_complete,
         settled,
@@ -889,6 +889,7 @@ mod bench {
 
     #[test]
     #[ignore = "a measurement against a real tree; run with --ignored --nocapture"]
+    #[allow(clippy::too_many_lines)] // one measurement, four tables, in the order they are read
     fn first_result_and_keystroke_latency() {
         let root = std::env::var_os(ROOT_ENV)
             .map_or_else(|| std::env::current_dir().expect("cwd"), PathBuf::from);
@@ -1128,7 +1129,12 @@ mod tests {
         assert!(found.contains(&"src/alpha.rs".to_string()), "{found:?}");
         assert!(found.contains(&"wiki/alpha-page.md".to_string()), "{found:?}");
         assert!(found.contains(&"wiki/deep/alpha-two.md".to_string()), "{found:?}");
-        assert!(!found.iter().any(|path| path.ends_with(".png")), "{found:?}");
+        assert!(
+            !found.iter().any(|path| Path::new(path)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("png"))),
+            "{found:?}"
+        );
         let page = results
             .matches
             .iter()
