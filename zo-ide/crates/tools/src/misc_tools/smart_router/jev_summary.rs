@@ -115,11 +115,11 @@ impl SeatReport {
 
     /// How many more rows before the next auto judgment (§4), for a seat that
     /// can rise at all — counted on every request the ledger holds, which is
-    /// the count the judge's cadence runs on.
+    /// the count the judge's cadence runs on, and read from the judge itself
+    /// so the countdown and the judgment land on the same row.
     #[must_use]
     pub fn rows_to_next_judgment(&self) -> Option<usize> {
-        self.rise_floor_permille
-            .map(|_| JUDGED_EVERY_ROWS - self.asked_ever % JUDGED_EVERY_ROWS)
+        promote::rows_to_next_judgment(zerocode_core::jev::jev_use(self.id)?, self.asked_ever)
     }
 }
 

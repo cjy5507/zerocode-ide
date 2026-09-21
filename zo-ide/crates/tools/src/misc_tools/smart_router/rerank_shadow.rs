@@ -2044,8 +2044,8 @@ mod tests {
     /// judgment's order — where the recall before the rise read recall's own.
     #[test]
     fn auto_rises_on_its_own_labels_and_the_next_recall_reads_the_judgments_order() {
-        use zerocode_core::jev::promote::{Verdict, ROSE};
-        use zerocode_core::jev::summary::{rows_that_can_clear, JUDGED_EVERY_ROWS};
+        use zerocode_core::jev::promote::{window_wanted_for, Verdict, ROSE};
+        use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
         let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
         let hits = three();
         let (before, verdict, rose, after, applied) = machine(zerocode_core::jev::JevMode::Auto.key(), &mock.base_url, |cwd| {
@@ -2059,8 +2059,10 @@ mod tests {
             // A window's worth of answered readings, at a judgment boundary,
             // and a window's worth of labels that agreed — written as the
             // seat writes them, in its own ledger.
-            let floor = RECALL.answer_floor_permille.expect("recall rises");
-            let wanted = rows_that_can_clear(floor).next_multiple_of(JUDGED_EVERY_ROWS);
+            // The seat's own width, which is also its first judgment
+            // boundary: the cadence counts from the row the window can first
+            // be full on.
+            let wanted = window_wanted_for(&RECALL).expect("recall rises");
             let already = rows(cwd).len();
             for at in 0..(wanted - already) {
                 let row = serde_json::json!({

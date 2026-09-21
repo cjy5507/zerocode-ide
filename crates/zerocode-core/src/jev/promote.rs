@@ -23,13 +23,25 @@
 //! (a route-change budget, [`crate::jev::JevUse::agreement_floor_permille`]).
 //! Labels a person did write still outrank that: they are the only evidence
 //! of being right rather than merely the same.
+//!
+//! And a seat with no probe to be compared against is carried up by its own
+//! ledger alone (2026-09-22, [`crate::jev::JevUse::agreement_rows_wanted`]).
+//! The route-change budget was written for a judgment standing beside the
+//! reader it would replace, and two of the seats have no such reader: what
+//! their rows carry is hindsight — was the note read, was the pane left where
+//! it was put — which is the labels' kind of evidence and falls through when
+//! thin, not the agreement's. Held to the agreement line they were held by
+//! `too_few_compared`, the one line in §4 with no road out: the recall seat
+//! cleared its answer line at 18 of the 50 judgments its 1,005 rows were
+//! given and was stopped at `0 of 20` on every one of them.
 
 use serde_json::{Value, json};
 
-use crate::jev::JevUse;
+use crate::jev::{A_WINDOW_OF_COMPARISONS, JevUse};
 
 use crate::jev::summary::{
-    AT, JUDGED_EVERY_ROWS, TRANSITION, Tally, WILSON_Z_95, rows_that_can_clear, wilson_lower,
+    AT, JUDGED_EVERY_ROWS, TRANSITION, Tally, WILSON_Z_95, rows_that_can_clear_forgiving,
+    wilson_lower,
 };
 
 /// What the judge said of a ledger's rows, and the window it said it on —
@@ -69,7 +81,7 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
     let floor = seat.answer_floor_permille?;
     let agreement_floor = seat.agreement_floor_permille?;
     let deadline_ms = seat.apply_deadline_ms?;
-    let window_wanted = rows_that_can_clear(floor);
+    let window_wanted = window_wanted_for(seat)?;
     let held = crate::jev::summary::last_asked(rows, window_wanted);
     let since_ms = held
         .first()
@@ -85,6 +97,10 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
             deadline_ms,
             agreement_floor_permille: agreement_floor,
             agreement,
+            agreement_rows_wanted: seat
+                .agreement_rows_wanted
+                .unwrap_or(A_WINDOW_OF_COMPARISONS),
+            window_forgives: seat.window_forgives.unwrap_or(0),
             labels: None,
             fallbacks_in_a_row: crate::jev::summary::failures_in_a_row(rows),
         },
@@ -98,19 +114,57 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
     })
 }
 
-/// Whether the rows say a judgment is due: every [`JUDGED_EVERY_ROWS`]
-/// requests, or at once for an acting seat that has fallen back
-/// [`FALLBACKS_THAT_END_IT`] times running (§4).
+/// The window `seat` is judged on: the last requests its answer floor can be
+/// cleared on, given what the seat forgives ([`JevUse::window_forgives`]).
+///
+/// One reader, because three things need it and must agree — the judge, the
+/// cadence that decides when to judge ([`judgment_due`]), and the screen that
+/// says "17 of 73". `None` for a seat that names no floor, which is a seat
+/// that never rises.
 #[must_use]
-pub fn judgment_due(rows: &[Value]) -> bool {
+pub fn window_wanted_for(seat: &JevUse) -> Option<usize> {
+    Some(rows_that_can_clear_forgiving(
+        seat.answer_floor_permille?,
+        seat.window_forgives.unwrap_or(0),
+    ))
+}
+
+/// Whether the rows say a judgment of `seat` is due: every
+/// [`JUDGED_EVERY_ROWS`] requests once its window can be full, or at once for
+/// an acting seat that has fallen back [`FALLBACKS_THAT_END_IT`] times
+/// running (§4).
+///
+/// Counted from the window and not from the first row, because a judgment
+/// made before the window can be full has only one thing it can say. The
+/// window seats' ledgers are small and the judgments were being spent on it:
+/// of the four judgments this machine's placement, summon and routing seats
+/// had been given in their whole lives by 2026-09-22, three said
+/// `too_few_rows` off a window arithmetic had already decided could not be
+/// full, and placement — 38 rows against a window of 25 — never got another
+/// one, because its second boundary at row 40 had not arrived.
+#[must_use]
+pub fn judgment_due(seat: &JevUse, rows: &[Value]) -> bool {
     let asked = rows
         .iter()
         .filter(|row| crate::jev::summary::asked_something(row).is_some())
         .count();
-    let at_boundary = asked > 0 && asked % JUDGED_EVERY_ROWS == 0;
+    let wanted = window_wanted_for(seat).unwrap_or(JUDGED_EVERY_ROWS);
+    let at_boundary = asked >= wanted && (asked - wanted).is_multiple_of(JUDGED_EVERY_ROWS);
     let ending_it = stand_from(rows) == Stand::Applying
         && crate::jev::summary::failures_in_a_row(rows) >= FALLBACKS_THAT_END_IT;
     at_boundary || ending_it
+}
+
+/// How many more requests before `seat`'s next judgment — the same cadence
+/// [`judgment_due`] runs on, so the screen's countdown and the judgment land
+/// on the same row. `None` for a seat that never rises.
+#[must_use]
+pub fn rows_to_next_judgment(seat: &JevUse, asked: usize) -> Option<usize> {
+    let wanted = window_wanted_for(seat)?;
+    Some(match asked.checked_sub(wanted) {
+        None => wanted - asked,
+        Some(past) => JUDGED_EVERY_ROWS - past % JUDGED_EVERY_ROWS,
+    })
 }
 
 /// The word every schema refusal's token is built from: zo writes it alone
@@ -232,6 +286,15 @@ pub struct Evidence<'window> {
     pub agreement_floor_permille: u16,
     /// How often it did, over the window.
     pub agreement: Agreement,
+    /// How many comparisons must be in hand before that budget binds at all
+    /// ([`JevUse::agreement_rows_wanted`]). Zero says this seat has no reader
+    /// to be compared against, so a window with no marks is not a reason to
+    /// hold it.
+    pub agreement_rows_wanted: usize,
+    /// How many of the window's rows may have missed and the seat still clear
+    /// its answer floor ([`JevUse::window_forgives`]) — what the window's own
+    /// width was derived from.
+    pub window_forgives: usize,
     /// What labels said, when a person wrote any.
     pub labels: Option<Labels>,
     /// Fallbacks in a row while applying.
@@ -310,7 +373,7 @@ pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
     // The window a floor can be cleared on, not the judgment's cadence: a
     // seat judged every twenty rows on the last twenty could never bound
     // twenty answers above 0.95 (2026-09-17..20).
-    let wanted = rows_that_can_clear(evidence.floor_permille);
+    let wanted = rows_that_can_clear_forgiving(evidence.floor_permille, evidence.window_forgives);
     if window.asked() < wanted {
         return Some(Line::TooFewRows {
             rows: window.asked(),
@@ -346,13 +409,19 @@ pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
         });
     }
     let agreement = evidence.agreement;
-    if agreement.compared < JUDGED_EVERY_ROWS {
+    if agreement.compared < evidence.agreement_rows_wanted {
         return Some(Line::TooFewCompared {
             compared: agreement.compared,
-            wanted: JUDGED_EVERY_ROWS,
+            wanted: evidence.agreement_rows_wanted,
         });
     }
-    let bound = permille(agreement.lower_bound().unwrap_or(0.0));
+    // A seat that wants none and has none is judged on its own ledger: the
+    // route-change budget asks how often this reader said what the OTHER one
+    // said, and a seat with no other reader has no such number — held to it,
+    // it waits on a mark nothing writes. A mark it does have is still read,
+    // whatever the seat wants, and one that says the judgment was wrong takes
+    // it back down.
+    let bound = agreement.lower_bound().map(permille)?;
     (bound < evidence.agreement_floor_permille).then_some(Line::Agreement {
         bound_permille: bound,
         floor_permille: evidence.agreement_floor_permille,

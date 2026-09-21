@@ -243,12 +243,6 @@ impl Tally {
         (self.asked() > 0).then(|| wilson_lower(self.answered, self.asked(), WILSON_Z_95))
     }
 
-    /// How many more rows this use owes before its next auto judgment (§4).
-    #[must_use]
-    pub const fn rows_to_next_judgment(&self) -> usize {
-        JUDGED_EVERY_ROWS - self.rows % JUDGED_EVERY_ROWS
-    }
-
     /// The door's refusals among the failures, by token — the rows
     /// `refused` counts, said one token at a time, so a screen can say
     /// "no key 3 · not consented 60" without a table of the door's words.
@@ -291,16 +285,48 @@ pub fn wilson_lower(successes: usize, trials: usize, z: f64) -> f64 {
 /// under it.
 #[must_use]
 pub fn rows_that_can_clear(floor_permille: u16) -> usize {
+    rows_that_can_clear_forgiving(floor_permille, 0)
+}
+
+/// The fewest rows a window must hold before a floor can be cleared on it
+/// while `forgives` of them missed. [`rows_that_can_clear`] is this width
+/// with nothing forgiven.
+///
+/// A seat needs the forgiving width because the other one is a knife's edge:
+/// it is the FEWEST rows on which `n` of `n` bound above the line, so at that
+/// width the answer line reads "the last n were all answers", and one timeout
+/// anywhere in the window takes the seat back to the start of its climb.
+/// Measured on this machine's own ledgers (2026-09-22): recall, placement and
+/// summon each held exactly 34 answers of 35 against a 900‰ floor and bounded
+/// at 854‰ — one timeout apiece, at recall's row 973, placement's row 22 and
+/// summon's row 40 — and summon's would have sat inside its window for 35
+/// more requests. Forgiving one takes that floor's window from 35 rows to 53;
+/// replayed over recall's own 1,005 rows it cut the seat's transitions from
+/// eight rises and eight falls to five and five, which is the flicker
+/// [`JUDGED_EVERY_ROWS`] exists to damp.
+///
+/// A floor of a thousand per thousand has no window at all and returns
+/// [`usize::MAX`]; the use table's contract keeps floors under it.
+#[must_use]
+pub fn rows_that_can_clear_forgiving(floor_permille: u16, forgives: usize) -> usize {
     if floor_permille >= 1000 {
         return usize::MAX;
     }
     let share = f64::from(floor_permille) / 1000.0;
     let z2 = WILSON_Z_95 * WILSON_Z_95;
+    // The closed form is the exact width for a perfect window, and a width a
+    // perfect window cannot clear no forgiven window clears either, so it is
+    // a floor on the search for every `forgives`.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let mut rows = ((z2 * share / (1.0 - share)).ceil() as usize).max(JUDGED_EVERY_ROWS);
     // The closed form is exact; the bound is compared in the floor's own
     // units after flooring, so one more row covers a last-bit disagreement.
-    while crate::jev::promote::permille(wilson_lower(rows, rows, WILSON_Z_95)) < floor_permille {
+    while crate::jev::promote::permille(wilson_lower(
+        rows.saturating_sub(forgives),
+        rows,
+        WILSON_Z_95,
+    )) < floor_permille
+    {
         rows += 1;
     }
     rows

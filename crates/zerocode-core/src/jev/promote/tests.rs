@@ -5,7 +5,7 @@ use crate::jev::summary::Tally;
 /// The rows a floor of 950 per thousand can be cleared on — what the clean
 /// window is sized to, and what a thin one is one short of.
 fn wanted() -> usize {
-    rows_that_can_clear(950)
+    crate::jev::summary::rows_that_can_clear(950)
 }
 
 fn window(rows: usize, answered: usize, p95_ms: Option<u64>) -> Tally {
@@ -30,6 +30,8 @@ fn clean() -> Evidence<'static> {
             compared: 60,
             agreed: 57,
         },
+        agreement_rows_wanted: A_WINDOW_OF_COMPARISONS,
+        window_forgives: 0,
         labels: Some(Labels {
             compared: 40,
             judgment_right: 34,
@@ -605,7 +607,14 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
     use serde_json::json;
     let seat = &crate::jev::SUMMON;
     let floor = seat.answer_floor_permille.expect("summon rises");
-    let wanted = rows_that_can_clear(floor);
+    let wanted = window_wanted_for(seat).expect("summon rises");
+    assert_eq!(
+        wanted,
+        crate::jev::summary::rows_that_can_clear_forgiving(
+            floor,
+            seat.window_forgives.expect("summon forgives a bad minute")
+        )
+    );
     let row = |at: i64, agreed: bool| json!({"at": at, "outcome": "answered", "elapsedMs": 600, "requests": 1, "agreed": agreed});
     // Thin: held short of rows, and not yet due.
     let thin: Vec<serde_json::Value> = (0..3).map(|at| row(at, true)).collect();
@@ -615,9 +624,24 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
         judged.verdict,
         Verdict::Hold(Line::TooFewRows { rows: 3, .. })
     ));
-    assert!(!judgment_due(&thin));
-    assert!(judgment_due(
+    assert!(!judgment_due(seat, &thin));
+    // Counted from the window, not from the first row: a judgment at row
+    // twenty of a fifty-three-row window could only ever say `too_few_rows`.
+    assert!(!judgment_due(
+        seat,
         &(0..JUDGED_EVERY_ROWS as i64)
+            .map(|at| row(at, true))
+            .collect::<Vec<_>>()
+    ));
+    assert!(judgment_due(
+        seat,
+        &(0..wanted as i64)
+            .map(|at| row(at, true))
+            .collect::<Vec<_>>()
+    ));
+    assert!(judgment_due(
+        seat,
+        &(0..(wanted + JUDGED_EVERY_ROWS) as i64)
             .map(|at| row(at, true))
             .collect::<Vec<_>>()
     ));

@@ -1193,10 +1193,14 @@ fn a_screen_seats_auto_rises_on_its_own_rows_and_falls_when_the_wire_does() {
         "an auto nobody has raised records"
     );
 
-    // A window's worth of presses the walks went on to confirm. Eighty, so
-    // the count lands on the judgment's own cadence, of which the last 73 —
-    // the rows a floor of nine in ten can be cleared on — are read.
-    let rows: Vec<Value> = (0..80).map(|n| answered_press(1_000 + n, true)).collect();
+    // A window's worth of presses the walks went on to confirm — the seat's
+    // own width, read from the table, so the count lands on the judgment's
+    // first cadence and the window it reads is full. The width is not spelled
+    // here: it moves with the seat's floor and with what its window forgives.
+    let wanted = zerocode_core::jev::promote::window_wanted_for(seat).expect("a screen seat rises");
+    let rows: Vec<Value> = (0..wanted as i64)
+        .map(|n| answered_press(1_000 + n, true))
+        .collect();
     write_rows(seat, &wire, None, &rows, 90_000);
 
     let judged = crate::systemone::read_rows(&ledger);

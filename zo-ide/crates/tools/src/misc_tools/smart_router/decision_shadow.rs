@@ -45,7 +45,7 @@ use super::probe_exec::{remember_bounded, ProbeSlot, ProbeUse, PROBE_TIMEOUT};
 use super::settings::decision_shadow_mode_from;
 use zerocode_core::jev::ROUTING;
 use zerocode_core::jev::promote::{self, Verdict};
-use zerocode_core::jev::summary::{self as jev_ledger, JUDGED_EVERY_ROWS};
+use zerocode_core::jev::summary::{self as jev_ledger};
 
 use super::jev_summary;
 use super::shadow_ledger::{append_shadow_row, last_shadow_lines, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
@@ -93,10 +93,11 @@ const TASK: &str = "task";
 /// shown to still agree (this machine's last seven rows, every one `applied`
 /// with `not_run`, 2026-09-21).
 ///
-/// Why five. The judge wants [`JUDGED_EVERY_ROWS`] compared axes over the
+/// Why five. The judge wants
+/// [`zerocode_core::jev::summary::JUDGED_EVERY_ROWS`] compared axes over the
 /// window its floor can be cleared on
-/// ([`zerocode_core::jev::summary::rows_that_can_clear`]: 73 rows for
-/// routing's 0.95). One turn in five is 14 control rows a window, three
+/// ([`zerocode_core::jev::promote::window_wanted_for`]: 73 rows for routing's
+/// 0.95, which forgives nothing). One turn in five is 14 control rows a window, three
 /// judged axes each — 42 compared if the probe answers every time; at the
 /// probe's measured share of timeouts (11 rows of 28, 2026-09-20) eight still
 /// answer, 24 axes, clear of the twenty with a row to spare. One in ten would
@@ -945,13 +946,15 @@ fn draft_labels(cwd: &Path, tasks: &[(&str, &str)], shots: &[Shot]) {
 /// Judge the seat on what it has just written, and write down a rise or a
 /// fall (docs/design/jev-settings-20260917.md §4).
 ///
-/// Once every [`JUDGED_EVERY_ROWS`] requests, not at the end of every turn: a
-/// bound that moved on every row would rise and fall on a single answer. The
-/// window is the last requests a floor of the seat's can be cleared on
-/// ([`zerocode_core::jev::summary::rows_that_can_clear`]), the standing is the
-/// last transition this same file recorded, and nothing is written unless the
-/// answer changed — a ledger of "still recording" every twenty rows is a
-/// ledger nobody reads.
+/// Once every [`zerocode_core::jev::summary::JUDGED_EVERY_ROWS`] requests and not
+/// at the end of every turn
+/// ([`promote::judgment_due`]): a bound that moved on every row would rise and
+/// fall on a single answer. The window is the last requests a floor of the
+/// seat's can be cleared on
+/// ([`zerocode_core::jev::summary::rows_that_can_clear_forgiving`]), the
+/// standing is the last transition this same file recorded, and nothing is
+/// written unless the answer changed — a ledger of "still recording" every
+/// twenty rows is a ledger nobody reads.
 ///
 /// The ledger and the settings are handed in, both resolved before the batch
 /// that calls this detached: the environment that answers where either lives
@@ -963,18 +966,13 @@ pub fn judge_ledger(
     now_ms: i64,
 ) -> Option<Verdict> {
     let rows = super::jev_summary::read_rows(ledger);
-    let asked = rows.iter().filter(|row| jev_summary::asked_something(row).is_some()).count();
-    let stand = promote::stand_from(&rows);
-    let fallbacks_in_a_row = jev_summary::failures_in_a_row(&rows);
-    // Two clocks. The lines are judged once every window, because a bound that
-    // moved on every row would rise and fall on a single answer. The fallback
-    // rule is not one of those lines: three in a row is the wire, the key or
-    // the model, and the whole point of it is that an acting seat stops now
-    // rather than after nineteen more requests nobody will get an answer to.
-    let at_boundary = asked > 0 && asked % JUDGED_EVERY_ROWS == 0;
-    let ending_it = stand == promote::Stand::Applying
-        && fallbacks_in_a_row >= promote::FALLBACKS_THAT_END_IT;
-    if !at_boundary && !ending_it {
+    // Two clocks, and both of them the table's: the lines are judged once
+    // every window because a bound that moved on every row would rise and
+    // fall on a single answer, and an acting seat that has fallen back three
+    // times running stops now rather than after nineteen more requests
+    // nobody will get an answer to. `promote::judgment_due` holds both, so
+    // this seat and the window's seats cannot keep different time.
+    if !promote::judgment_due(&ROUTING, &rows) {
         return None;
     }
     let judged = judge_rows(&rows, settings)?;
@@ -999,7 +997,7 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
     let floor = ROUTING.answer_floor_permille?;
     let agreement_floor = ROUTING.agreement_floor_permille?;
     let deadline_ms = ROUTING.apply_deadline_ms?;
-    let window_wanted = jev_ledger::rows_that_can_clear(floor);
+    let window_wanted = promote::window_wanted_for(&ROUTING)?;
     let held = jev_ledger::last_asked(rows, window_wanted);
     let window = jev_ledger::summarize_rows(held.iter().copied(), i64::MIN);
     let (compared, control_rows) = with_control_rows(rows, &held);
@@ -1012,6 +1010,10 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
             deadline_ms,
             agreement_floor_permille: agreement_floor,
             agreement,
+            agreement_rows_wanted: ROUTING
+                .agreement_rows_wanted
+                .unwrap_or(zerocode_core::jev::A_WINDOW_OF_COMPARISONS),
+            window_forgives: ROUTING.window_forgives.unwrap_or(0),
             labels: labels_standing(settings, rows),
             fallbacks_in_a_row: jev_summary::failures_in_a_row(rows),
         },

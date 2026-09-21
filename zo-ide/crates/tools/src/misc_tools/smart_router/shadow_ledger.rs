@@ -165,7 +165,7 @@ pub fn judge_seat_ledger(
 ) -> Option<zerocode_core::jev::promote::Verdict> {
     use zerocode_core::jev::promote;
     let rows: Vec<serde_json::Value> = read_shadow_rows(ledger);
-    if !promote::judgment_due(&rows) {
+    if !promote::judgment_due(seat, &rows) {
         return None;
     }
     let judged = promote::judge_seat(seat, &rows)?;
