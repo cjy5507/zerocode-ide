@@ -329,13 +329,131 @@ fn keychain_services(home: &Path) -> Vec<String> {
     vec![scoped]
 }
 
-/// Who the keychain entry is filed under. `$USER`, the way the original reads
-/// it (`keychain.ts:80-82`).
+/// Who the keychain entry is filed under: `$USER` the way the original reads it
+/// (`keychain.ts:80-82`), then `$USERNAME`, then this uid's own account — and
+/// nothing at all when none of the three answers.
+///
+/// The environment is asked first because these items are the CLI's, and the
+/// CLI files them under `$USER`. A uid consulted ahead of it would address a
+/// different account than the one the item is actually under.
+///
+/// The chain ends in `None`, never in a name. The version before this one
+/// returned the literal `"user"` once both variables were absent, and that is a
+/// real execution environment: MEASURED 2026-09-20 (w-4837), an exec'd child of
+/// the window had no `USER` at all, `LOGNAME=root`, and `joe` as the uid's own
+/// account. The window then asked the keychain about an account nobody has, was
+/// told there is no such item, and reported that the person kept no key while
+/// the key sat right there. A made-up name turns "I do not know" into a
+/// confident wrong answer about somebody else's keychain; `None` keeps it a
+/// question about ours.
+///
+/// `LOGNAME` is deliberately NOT in the chain. It is the variable that DID
+/// answer in that environment, and what it answered was the wrong account. A
+/// third guess is not a third chance at the truth.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-fn keychain_user() -> String {
-    std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "user".to_string())
+fn keychain_user() -> Option<String> {
+    keychain_user_from(|name| std::env::var(name).ok(), account_of_this_uid)
+}
+
+/// The chain with both of its sources handed in.
+///
+/// Separate from [`keychain_user`] so the environment that names nobody can be
+/// read in a test without `remove_var`, which is process-global and would run
+/// underneath every other test in this binary.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keychain_user_from(
+    environment: impl Fn(&str) -> Option<String>,
+    uid_account: impl FnOnce() -> Option<String>,
+) -> Option<String> {
+    ["USER", "USERNAME"]
+        .into_iter()
+        .filter_map(environment)
+        .find(|name| !name.is_empty())
+        .or_else(|| uid_account().filter(|name| !name.is_empty()))
+}
+
+/// This process's own account, as the password database names it — the one
+/// source of the answer an execution environment cannot leave blank.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn account_of_this_uid() -> Option<String> {
+    #[cfg(unix)]
+    {
+        // `getpwuid_r` rather than `getpwuid`: the plain call answers out of a
+        // buffer libc keeps for the whole process, and keychain items are read
+        // from whichever thread wants one. The EFFECTIVE uid, because
+        // `security` inherits it and opens that account's login keychain — the
+        // name written on the item and the keychain it lands in have to be one
+        // person.
+        let mut entry = std::mem::MaybeUninit::<libc::passwd>::zeroed();
+        let mut found: *mut libc::passwd = std::ptr::null_mut();
+        let mut room = vec![0_u8; PASSWD_ENTRY_BYTES];
+        // SAFETY: both out-parameters belong to this frame, and the buffer is
+        // passed with its own length.
+        let code = unsafe {
+            libc::getpwuid_r(
+                libc::geteuid(),
+                entry.as_mut_ptr(),
+                room.as_mut_ptr().cast(),
+                room.len(),
+                &raw mut found,
+            )
+        };
+        if code != 0 || found.is_null() {
+            return None;
+        }
+        // SAFETY: `found` points at `entry`, which the call above filled in.
+        let name = unsafe { (*found).pw_name };
+        if name.is_null() {
+            return None;
+        }
+        // SAFETY: `pw_name` is libc's own NUL-terminated string inside `room`,
+        // which outlives the copy this line makes of it.
+        let name = unsafe { std::ffi::CStr::from_ptr(name) };
+        name.to_str().ok().map(str::to_owned)
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// How much room one password-database entry is given. A system whose entry
+/// does not fit answers `ERANGE`, which this road reads as "we do not know" —
+/// the honest answer, and the one this function exists to keep available.
+#[cfg(unix)]
+const PASSWD_ENTRY_BYTES: usize = 4096;
+
+/// The word every keychain door refuses in when it cannot name the account to
+/// ask about. One spelling, so a log, a pane and a readiness line agree — and a
+/// token rather than prose, because it points the reader at this machine's
+/// execution environment rather than at their own keychain.
+///
+/// Emphatically not `no_key`: that word is a claim about the PERSON's keychain,
+/// and this refusal is a statement about ours.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const UNKNOWN_USER: &str = "unknown_user";
+
+/// That refusal as the sentence a caller hands upward.
+///
+/// It must not carry [`NO_SUCH_ITEM`]: `read_keychain_service_if_present` folds
+/// that word into `Ok(None)`, and `Ok(None)` is read all the way up the router
+/// and Jev roads as "this person has no key" — the very lie this road exists to
+/// stop repeating one level higher.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn unknown_user_refusal() -> String {
+    format!(
+        "{UNKNOWN_USER}: 이 실행 환경이 키체인 계정 이름을 말하지 않습니다 — USER·USERNAME 이 비어 있고 uid 도 계정을 답하지 않았습니다. 키가 아니라 환경의 문제입니다"
+    )
+}
+
+/// The account a keychain door files its item under, or the refusal that says
+/// nobody told us.
+///
+/// Takes the answer instead of fetching it, so the refusal can be read on a
+/// machine that does know who it is.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn keychain_account(named: Option<String>) -> Result<String, String> {
+    named.ok_or_else(unknown_user_refusal)
 }
 
 /// The one key a Claude credentials object is known by.
@@ -467,7 +585,7 @@ fn seed_scoped_keychain_if_missing(
 
 /// What the keychain answered about one directory.
 ///
-/// Four answers because there were four repairs behind one word, and the file
+/// Five answers because there were five repairs behind one word, and the file
 /// has said so since it was written: "a refusal SAYS WHICH DOOR IT WAS". What
 /// this adds is the half that matters to a CALLER rather than to a reader of
 /// logs — whether the answer is EVIDENCE. "It holds something that is not a
@@ -491,6 +609,15 @@ pub(crate) enum KeychainSays {
     /// Nothing was learned: refused, locked, slower than the bound — or a
     /// platform with no keychain at all, where the file is the whole story.
     NoAnswer,
+    /// There was nobody to ask ABOUT: `$USER`, `$USERNAME` and this uid's own
+    /// account all declined to name anybody, so there is no account to put
+    /// after `-a`.
+    ///
+    /// The fifth answer, and the one this window got wrong for a day. It used
+    /// to invent the name `"user"`, ask about a keychain nobody has, and report
+    /// the empty answer as the person keeping no key (t-5419). It is not
+    /// `Missing`: an item we never addressed is not an item that is not there.
+    UnknownUser,
 }
 
 impl KeychainSays {
@@ -503,6 +630,7 @@ impl KeychainSays {
             Self::Damaged => "damaged item",
             Self::Missing => "no item",
             Self::NoAnswer => "no answer",
+            Self::UnknownUser => UNKNOWN_USER,
         }
     }
 
@@ -542,7 +670,9 @@ pub(crate) fn keychain_says(dir: &Path) -> KeychainSays {
         let Some(service) = keychain_services(dir).into_iter().next() else {
             return KeychainSays::NoAnswer;
         };
-        let user = keychain_user();
+        let Some(user) = keychain_user() else {
+            return KeychainSays::UnknownUser;
+        };
         // A refusal SAYS WHICH DOOR IT WAS. The version of this that swallowed
         // the reason cost a whole morning: the person was told "이 계정의
         // 자격증명을 읽지 못했습니다" thirty-four times, and the sentence was
@@ -843,7 +973,7 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
         let _one_writer = KEYCHAIN_WRITES
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let user = keychain_user();
+        let user = keychain_account(keychain_user())?;
         let delete = || {
             security_command(
                 &["delete-generic-password", "-s", service, "-a", &user],
@@ -906,7 +1036,7 @@ pub(crate) fn write_keychain_service(service: &str, credentials: &str) -> Result
 pub(crate) fn read_keychain_service(service: &str) -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        let user = keychain_user();
+        let user = keychain_account(keychain_user())?;
         security_command(
             &["find-generic-password", "-s", service, "-a", &user, "-w"],
             None,
@@ -922,7 +1052,7 @@ pub(crate) fn read_keychain_service(service: &str) -> Result<String, String> {
 pub(crate) fn delete_keychain_service(service: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
-        let user = keychain_user();
+        let user = keychain_account(keychain_user())?;
         match security_command(
             &["delete-generic-password", "-s", service, "-a", &user],
             None,
@@ -1744,19 +1874,20 @@ fn copy_login(from: &Path, into: &Path) -> Result<(), String> {
 /// Retire a staged or reassigned login, never its settings or conversations.
 fn clear_login(dir: &Path) -> Result<(), String> {
     #[cfg(target_os = "macos")]
-    for service in keychain_services(dir) {
-        if let Err(error) = security_command(
-            &[
-                "delete-generic-password",
-                "-s",
-                &service,
-                "-a",
-                &keychain_user(),
-            ],
-            None,
-        ) && !error.contains(NO_SUCH_ITEM)
-        {
-            return Err(error);
+    {
+        // Resolved once, and before the first delete: a keychain this machine
+        // cannot address is not a keychain with nothing in it, and a clear that
+        // "succeeded" without deleting anything would leave a live item behind
+        // a login we believe we retired.
+        let user = keychain_account(keychain_user())?;
+        for service in keychain_services(dir) {
+            if let Err(error) = security_command(
+                &["delete-generic-password", "-s", &service, "-a", &user],
+                None,
+            ) && !error.contains(NO_SUCH_ITEM)
+            {
+                return Err(error);
+            }
         }
     }
     for name in [CREDENTIALS_FILE, OAUTH_ACCOUNT_FILE] {
@@ -2266,6 +2397,15 @@ fn require_unattended_login_with_probe(
 mod tests {
     use super::*;
 
+    /// The account this machine files its keychain items under. A suite that
+    /// cannot name it is not testing the keychain, so it says so rather than
+    /// running against an account nobody has — which is the defect these tests
+    /// were written for.
+    #[cfg(target_os = "macos")]
+    fn this_machines_account() -> String {
+        keychain_user().expect("this machine names who is running the suite")
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn file_era_login_is_seeded_before_a_probe_even_if_the_cli_cannot_start() {
@@ -2313,7 +2453,7 @@ mod tests {
                 "-s",
                 &service,
                 "-a",
-                &keychain_user(),
+                &this_machines_account(),
                 "-w",
             ],
             None,
@@ -2346,7 +2486,7 @@ mod tests {
                 "-s",
                 &service,
                 "-a",
-                &keychain_user(),
+                &this_machines_account(),
                 "-w",
             ],
             Some(&cut),
@@ -2382,7 +2522,7 @@ mod tests {
                         "-s",
                         &service,
                         "-a",
-                        &keychain_user()
+                        &this_machines_account()
                     ],
                     None
                 )
@@ -2394,7 +2534,13 @@ mod tests {
         write_private(&refused.path().join(CREDENTIALS_FILE), credentials).unwrap();
         let service = keychain_services(refused.path()).remove(0);
         security_command(
-            &["test-refuse-read", "-s", &service, "-a", &keychain_user()],
+            &[
+                "test-refuse-read",
+                "-s",
+                &service,
+                "-a",
+                &this_machines_account(),
+            ],
             None,
         )
         .unwrap();
@@ -3047,7 +3193,7 @@ JSON
         #[cfg(target_os = "macos")]
         {
             let service = keychain_services(dir).remove(0);
-            let user = keychain_user();
+            let user = this_machines_account();
             security_command(
                 &[
                     "add-generic-password",
@@ -3074,7 +3220,7 @@ JSON
         let account = one_account(config.path(), "a-1", "one@example.com", "stale");
         let dir = Path::new(&account.config_dir);
         let service = keychain_services(dir).remove(0);
-        let user = keychain_user();
+        let user = this_machines_account();
         let complete = r#"{"claudeAiOauth":{"accessToken":"fresh","refreshToken":"refresh","expiresAt":1999999999999}}"#;
         security_command(
             &[
@@ -3894,7 +4040,7 @@ JSON
     #[test]
     fn a_write_whose_delete_was_refused_once_still_lands() {
         let service = "zerocode-test-pinned-item";
-        let user = keychain_user();
+        let user = this_machines_account();
         write_keychain_service(service, "stale").expect("seed");
         security_command(&["test-pin-item", "-s", service, "-a", &user], None).expect("pin");
         write_keychain_service(service, "fresh").expect("the retry lands the write");
@@ -4047,5 +4193,111 @@ JSON
         assert!(KeychainSays::NotALogin.contradicts_a_login());
         assert!(KeychainSays::Missing.contradicts_a_login());
         assert!(!KeychainSays::Login("x".into()).contradicts_a_login());
+    }
+
+    /// `$USER` and `$USERNAME` are not the only things that know who is running
+    /// this, and the uid is the one that cannot be empty.
+    ///
+    /// MEASURED 2026-09-20 (w-4837): an exec'd child of the window had no
+    /// `USER` at all, `LOGNAME=root`, and `joe` as the uid's own account.
+    /// `LOGNAME` is deliberately not in the chain for exactly that reason — it
+    /// was the variable that DID answer, and it answered with the wrong
+    /// account. A third guess is not a third chance at the truth.
+    #[test]
+    fn an_environment_that_names_nobody_still_asks_this_uids_own_account() {
+        let uid_account = account_of_this_uid().expect("this uid has an account of its own");
+        assert!(
+            !uid_account.is_empty(),
+            "the uid road answered with nothing"
+        );
+        assert_eq!(
+            keychain_user_from(|_| None, account_of_this_uid),
+            Some(uid_account.clone()),
+            "an environment that names nobody never reached the uid"
+        );
+        // The environment still wins while it names somebody: these items are
+        // the CLI's, and the CLI files them under `$USER` (`keychain.ts:80-82`),
+        // so a uid consulted ahead of it would ask about a different account.
+        assert_eq!(
+            keychain_user_from(
+                |name| (name == "USER").then(|| "from-the-environment".to_string()),
+                account_of_this_uid
+            ),
+            Some("from-the-environment".to_string())
+        );
+        // A variable set to nothing is not a name either — `-a ""` is as
+        // invented an account as `-a user` is.
+        assert_eq!(
+            keychain_user_from(
+                |name| (name == "USER").then(String::new),
+                account_of_this_uid
+            ),
+            Some(uid_account)
+        );
+    }
+
+    /// And when no source answers, the answer is that no source answered.
+    ///
+    /// The version before this one returned the literal `"user"` here, so the
+    /// app asked the keychain about an account nobody has, was told there is no
+    /// such item, and reported that the person has no key while the key sat
+    /// right there.
+    #[test]
+    fn a_machine_that_names_nobody_at_all_says_so_instead_of_inventing_a_name() {
+        let answer = keychain_user_from(|_| None, || None);
+        assert_ne!(
+            answer.as_deref(),
+            Some("user"),
+            "a made-up account name is back"
+        );
+        assert_eq!(answer, None, "not knowing has to stay a question");
+    }
+
+    /// The word the doors refuse in is about US, and must not be foldable into
+    /// a word about the person's keychain.
+    ///
+    /// `read_keychain_service_if_present` turns the tool's "no such item" into
+    /// `Ok(None)`, and every caller above it reads that as "this person has no
+    /// key" — `no_key` on the router and Jev roads. An unaddressable keychain
+    /// has to come out the other door, or the lie simply moves up a level.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_door_with_no_account_to_name_refuses_as_an_unknown_user_never_as_a_missing_item() {
+        let refusal = unknown_user_refusal();
+        assert!(
+            refusal.contains(UNKNOWN_USER),
+            "the refusal does not name its own door: {refusal}"
+        );
+        assert!(
+            !refusal.contains(NO_SUCH_ITEM),
+            "an unaddressable keychain would be folded into `no key`: {refusal}"
+        );
+        assert_eq!(keychain_account(None), Err(unknown_user_refusal()));
+        assert_eq!(
+            keychain_account(Some("somebody".into())),
+            Ok("somebody".to_string())
+        );
+    }
+
+    /// An account we could not even name is not a keychain missing an item, so
+    /// it neither accuses the login nor triggers a write.
+    ///
+    /// This is the same distinction the rest of this enum exists for: a write
+    /// on an answer we did not get is the dialog storm ("키체인이 계속") with
+    /// one more cause behind it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_unknown_account_neither_contradicts_a_login_nor_reseeds() {
+        assert!(!KeychainSays::UnknownUser.contradicts_a_login());
+        assert!(!KeychainSays::UnknownUser.is_signed_out_document());
+        assert_eq!(KeychainSays::UnknownUser.word(), UNKNOWN_USER);
+        let store = tempfile::tempdir().expect("temp store");
+        let credentials = r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"b"}}"#;
+        seed_scoped_keychain_if_missing(store.path(), credentials, &KeychainSays::UnknownUser)
+            .expect("an unknown account is not a repair");
+        assert!(
+            matches!(keychain_says(store.path()), KeychainSays::Missing),
+            "a keychain we could not address was written to anyway"
+        );
     }
 }
