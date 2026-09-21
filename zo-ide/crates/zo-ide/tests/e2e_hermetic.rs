@@ -1776,6 +1776,134 @@ async fn e2e_a_delegation_cell_shows_its_task_not_its_arguments() {
     }
 }
 
+/// Anthropic thinking has no bold heading, so the status row said `Working`
+/// for the whole block and the body never reached the screen (2026-09-22,
+/// "thinking 중에 뭘 하는지 확인이 안 됨"). Now the row says the newest
+/// complete sentence and the block commits as a titled thinking cell; a
+/// `/thinking` keeps the row's word and drops the cell (t-5872).
+///
+/// The delta-to-screen latency is measured, not assumed: the script writes
+/// one SSE event per sentence with its instant, and the screen is polled
+/// until the sentence's word stands on the row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn e2e_headerless_thinking_names_the_status_row_and_commits_a_titled_cell() {
+    let layout = Layout::new();
+    let sentences = [
+        "The person wants the fixture summarised. ",
+        "Let me read the fixture before answering. ",
+        "It is three lines long, so one sentence will do.",
+    ];
+    let words = [
+        "The person wants the fixture summarised",
+        "Let me read the fixture before answering",
+        "It is three lines long, so one sentence will do",
+    ];
+    let gap = Duration::from_millis(400);
+    let service = ScriptedAnthropicService::thinking(&sentences, gap, "### Summary\n\n- three lines\n")
+        .await
+        .expect("start thinking script");
+    let mut run = pty(&layout, service.base_url(), &interactive_args());
+    let timeout = Duration::from_secs(20);
+
+    run.wait_for("directory:", TEST_TIMEOUT);
+    run.send(b"Summarise the fixture\r").expect("send prompt");
+
+    // Each sentence's word on the status row, and how long after its delta
+    // left the server. The shimmer styles every glyph, so the row is read
+    // through the screen, never as raw bytes.
+    let mut latencies_ms = Vec::new();
+    for (index, word) in words.iter().enumerate() {
+        let deadline = Instant::now() + timeout;
+        let seen_at = loop {
+            let mut screen = Screen::new(40);
+            screen.feed(&run.snapshot_output());
+            let visible = screen.visible();
+            if visible
+                .iter()
+                .any(|row| row.contains("esc to interrupt") && row.contains(word))
+            {
+                break Instant::now();
+            }
+            assert!(
+                Instant::now() < deadline,
+                "sentence {index} never reached the status row: {visible:#?}"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        };
+        // Event 0 of request 0 is `message_start`, 1 is the block start, so
+        // sentence `index` is event `index + 2`.
+        let sent_at = service
+            .event_marks()
+            .into_iter()
+            .find(|mark| mark.request_index == 0 && mark.event_index == index + 2)
+            .map(|mark| mark.at)
+            .expect("the sentence's event mark");
+        latencies_ms.push(seen_at.saturating_duration_since(sent_at).as_secs_f64() * 1000.0);
+    }
+    eprintln!("thinking delta → status row (ms): {latencies_ms:.1?}");
+    // A frame is 32 ms and the poll adds 2 ms; measured alone this is under
+    // 50 ms. The bound is a second because this binary's PTY cases run
+    // beside one another under `just test`: a stall is what it refuses, not
+    // a loaded scheduler.
+    assert!(
+        latencies_ms.iter().all(|ms| *ms < 1_000.0),
+        "the status word lagged its delta: {latencies_ms:?}"
+    );
+
+    // The block ends: a titled thinking cell with the sentences under it,
+    // then the answer.
+    run.wait_for_history_row("Thinking", timeout);
+    run.wait_for_history_row("three lines", timeout);
+    let mut screen = Screen::new(40);
+    screen.feed(&run.snapshot_output());
+    let transcript = screen.transcript();
+    let title = transcript
+        .iter()
+        .position(|row| row.trim() == "• Thinking")
+        .unwrap_or_else(|| panic!("no thinking title row: {transcript:#?}"));
+    assert!(
+        transcript[title + 1].contains("The person wants the fixture summarised"),
+        "the body follows the title: {transcript:#?}"
+    );
+    assert!(
+        transcript
+            .iter()
+            .position(|row| row.contains("three lines"))
+            .is_some_and(|answer| answer > title),
+        "the answer follows the thinking cell: {transcript:#?}"
+    );
+
+    // `/thinking` hides the next block's cell; the row still gets its word.
+    run.send(b"/thinking\r").expect("send /thinking");
+    run.wait_for_history_row("thinking hidden", timeout);
+    let cells_before = {
+        let mut screen = Screen::new(40);
+        screen.feed(&run.snapshot_output());
+        screen.transcript().iter().filter(|row| row.trim() == "• Thinking").count()
+    };
+    run.send(b"Summarise it again\r").expect("send second prompt");
+    let deadline = Instant::now() + timeout;
+    loop {
+        let mut screen = Screen::new(40);
+        screen.feed(&run.snapshot_output());
+        if screen
+            .visible()
+            .iter()
+            .any(|row| row.contains("esc to interrupt") && row.contains(words[0]))
+        {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the hidden block still names the row");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    run.wait_for_history_row("three lines", timeout);
+    let mut screen = Screen::new(40);
+    screen.feed(&run.snapshot_output());
+    let cells_after = screen.transcript().iter().filter(|row| row.trim() == "• Thinking").count();
+    assert_eq!(cells_after, cells_before, "a hidden block commits no thinking cell");
+    let _ = run.finish();
+}
+
 /// One turn, one spawn, four ledgers — joined by equality on the attempt key.
 ///
 /// This is the case the attempt-key contract exists for

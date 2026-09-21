@@ -818,6 +818,10 @@ pub struct MarkdownStream {
     open_fence_pad: Vec<Line>,
     kind: MarkdownStreamKind,
     reasoning_transcript: Option<String>,
+    /// [`Self::finish`] rendered a reasoning body that opened with no
+    /// heading — Anthropic thinking — so the caller commits it as a thinking
+    /// cell ([`super::thinking::cell`]) rather than codex's summary cell.
+    headerless_thinking: bool,
 }
 
 impl MarkdownStream {
@@ -846,6 +850,7 @@ impl MarkdownStream {
             open_fence_pad: Vec::new(),
             kind: MarkdownStreamKind::Answer,
             reasoning_transcript: None,
+            headerless_thinking: false,
         }
     }
 
@@ -1029,14 +1034,13 @@ impl MarkdownStream {
                 .strip_prefix("**")
                 .and_then(|content| content.strip_suffix("**"))
                 .is_some_and(|content| !content.is_empty() && !content.contains("**"));
-            let transcript_only = header.is_empty() && !title_only;
+            // No heading and not a bare title: raw thinking (Anthropic), which
+            // used to be transcript-only. It is rendered like any body now and
+            // the caller gives it a title and a preview (t-5872).
+            self.headerless_thinking = header.is_empty() && !title_only;
             let transcript_content = content.trim().to_string();
             self.reasoning_transcript = (!transcript_content.is_empty()).then_some(transcript_content);
             self.kind = MarkdownStreamKind::Answer;
-            if transcript_only {
-                self.policy.reset();
-                return Vec::new();
-            }
             self.pending = content;
         }
         let mut source = std::mem::take(&mut self.committed);
@@ -1076,6 +1080,12 @@ impl MarkdownStream {
     /// Take the cleaned reasoning body destined for Ctrl+T transcript history.
     pub fn take_reasoning_transcript(&mut self) -> Option<String> {
         self.reasoning_transcript.take()
+    }
+
+    /// Whether the last [`Self::finish`] rendered headerless thinking.
+    #[must_use]
+    pub const fn finished_headerless_thinking(&self) -> bool {
+        self.headerless_thinking
     }
 
     /// 뷰포트의 활성 셀 칸에 그릴 꼬리 — **확정 렌더**에서 큐에 들어간 만큼을
@@ -1697,13 +1707,9 @@ mod tests {
         let mut stream = MarkdownStream::reasoning(40);
         stream.push("thinking about it\n");
         let lines = stream.finish();
-        assert!(lines.is_empty(), "headerless reasoning is transcript-only");
-        let transcript = stream.take_reasoning_transcript().expect("transcript body");
-        let mut visible = MarkdownStream::reasoning(40);
-        visible.push(&format!("**Thinking**\n\n{transcript}\n"));
-        let lines = visible.finish();
         let body = lines.last().expect("body");
         assert!(body.spans[1].style.dim && body.spans[1].style.italic);
+        assert_eq!(stream.take_reasoning_transcript().as_deref(), Some("thinking about it"));
     }
 
     #[test]
@@ -1716,16 +1722,31 @@ mod tests {
         assert_eq!(lines, vec![String::new(), "• They pass.".to_string()]);
     }
 
+    /// Anthropic thinking has no heading. It renders like a body — the
+    /// caller titles and previews it — and says so, while codex's headed
+    /// summary and a bare bold title do not (t-5872).
     #[test]
-    fn headerless_reasoning_is_withheld_from_main_history() {
+    fn headerless_reasoning_renders_and_announces_itself() {
         let mut stream = MarkdownStream::reasoning(40);
         stream.push("Detailed reasoning goes here.\n");
 
-        assert!(stream.finish().is_empty());
+        let lines: Vec<String> = stream.finish().iter().map(Line::plain).collect();
+        assert_eq!(lines, vec![String::new(), "• Detailed reasoning goes here.".to_string()]);
+        assert!(stream.finished_headerless_thinking());
         assert_eq!(
             stream.take_reasoning_transcript().as_deref(),
             Some("Detailed reasoning goes here.")
         );
+
+        let mut headed = MarkdownStream::reasoning(40);
+        headed.push("**Checking the tests**\n\nThey pass.\n");
+        headed.finish();
+        assert!(!headed.finished_headerless_thinking());
+
+        let mut title = MarkdownStream::reasoning(40);
+        title.push("**Confirming backend JSONL source**\n");
+        title.finish();
+        assert!(!title.finished_headerless_thinking());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 
 use crate::tui::fast;
 
-/// zo 가 실제로 처리하는 슬래시 열하나.
+/// zo 가 실제로 처리하는 슬래시 열셋.
 ///
 /// 순서는 팝업이 그리는 순서다. `/new` 는 codex `SlashCommand` 열거와 같이
 /// `/permissions` 와 `/resume` 사이에, `/clear` 는 종료 명령 뒤에 선다.
@@ -23,6 +23,10 @@ use crate::tui::fast;
 pub enum Slash {
     Model,
     Fast,
+    /// zo's own: show or hide the model's thinking cells (t-5872). codex has
+    /// no command for it — its `hide_agent_reasoning` is a config key — and
+    /// it stands beside `/fast` as the other display toggle.
+    Thinking,
     Permissions,
     New,
     Resume,
@@ -70,6 +74,7 @@ impl Slash {
     pub const CATALOG: &'static [Self] = &[
         Self::Model,
         Self::Fast,
+        Self::Thinking,
         Self::Permissions,
         Self::New,
         Self::Resume,
@@ -88,6 +93,7 @@ impl Slash {
         match self {
             Self::Model => "/model",
             Self::Fast => "/fast",
+            Self::Thinking => "/thinking",
             Self::Permissions => "/permissions",
             Self::New => "/new",
             Self::Resume => "/resume",
@@ -115,6 +121,7 @@ impl Slash {
             // 캡처(`codex-tui-v0.149.1-model-picker.bin`, 8.24s 프레임)의 팝업 줄.
             Self::Model => "choose what model and reasoning effort to use",
             Self::Fast => fast::COMMAND_DESCRIPTION,
+            Self::Thinking => crate::tui::strings::THINKING_COMMAND_DESCRIPTION,
             Self::Permissions => "read-only, workspace-write or danger-full-access",
             Self::New => "start a new chat during a conversation",
             // 원본 문안 그대로(`slash_command.rs:95`), 캡처
@@ -132,8 +139,9 @@ impl Slash {
 
     /// 파이프 프런트엔드(`zo -p`, `ide/run_loop`)가 이 명령을 처리하는가.
     ///
-    /// 넷이 빠진다. `/resume` 는 뷰포트를 가져가는 피커가 정본이라 append-only
-    /// 스트림에는 그릴 자리가 없고, `/fast` 는 맨 터미널 TUI 에만 붙은 토글이다.
+    /// 다섯이 빠진다. `/resume` 는 뷰포트를 가져가는 피커가 정본이라 append-only
+    /// 스트림에는 그릴 자리가 없고, `/fast` 와 `/thinking` 은 맨 터미널 TUI 에만
+    /// 붙은 토글이다(파이프는 `--show-thinking` 플래그가 같은 일을 한다).
     /// `/new` 와 `/clear` 는 여러 채팅을 오가는 대화형 TUI 명령이라 한 번 실행하고
     /// 끝나는 파이프 프런트엔드에는 없다.
     /// `/goal` 은 반대로 **파이프에서도 처리한다**: 상태/진행은 append-only
@@ -143,7 +151,10 @@ impl Slash {
     /// 한 번 적어 디스패치와 `/help` 목록이 같은 답을 읽는다.
     #[must_use]
     pub const fn handled_in_pipe(self) -> bool {
-        !matches!(self, Self::Fast | Self::New | Self::Resume | Self::Clear)
+        !matches!(
+            self,
+            Self::Fast | Self::Thinking | Self::New | Self::Resume | Self::Clear
+        )
     }
 
     /// 컴포저 한 줄이 이 명령인가 — 슬래시가 붙은 채로 묻는다(`"/exit"`).
@@ -191,13 +202,14 @@ mod tests {
     }
 
     #[test]
-    fn the_keep_list_is_the_eleven_commands_zo_handles() {
+    fn the_keep_list_is_the_thirteen_commands_zo_handles() {
         let names: Vec<&str> = Slash::CATALOG.iter().map(|command| command.name()).collect();
         assert_eq!(
             names,
             vec![
                 "/model",
                 "/fast",
+                "/thinking",
                 "/permissions",
                 "/new",
                 "/resume",

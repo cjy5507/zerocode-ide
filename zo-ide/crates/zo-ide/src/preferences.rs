@@ -20,6 +20,10 @@ const MODEL_KEY: &str = "model";
 const EFFORT_KEY: &str = "reasoningEffort";
 const WORKSPACE_TRUST_KEY: &str = "workspaceTrust";
 const TOOL_DIGEST_KEY: &str = "toolDigest";
+/// Whether the interactive front shows thinking cells (t-5872). Absent means
+/// the front's own default (`tui::thinking::SHOW_BY_DEFAULT`); `/thinking`
+/// toggles the running session without writing here.
+pub const SHOW_THINKING_KEY: &str = "showThinking";
 
 /// The one recognized `workspaceTrust` value: the interactive trust gate is
 /// retired and every folder opens in full access, no prompt, outranking even
@@ -38,6 +42,8 @@ pub struct Preferences {
     /// Raw `toolDigest` value (`off` turns the over-cap fold off; anything
     /// else keeps the default on). Parsed by `tools::ToolDigestMode`.
     pub tool_digest: Option<String>,
+    /// `showThinking`, when the document says one way or the other.
+    pub show_thinking: Option<bool>,
 }
 
 impl Preferences {
@@ -103,6 +109,7 @@ pub fn load_from_path(path: &Path) -> Preferences {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string),
+        show_thinking: object.get(SHOW_THINKING_KEY).and_then(Value::as_bool),
     }
 }
 

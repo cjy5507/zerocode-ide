@@ -304,6 +304,12 @@ fn format_unresolved_indirected_result(name: &str, value: &Value) -> ToolResultB
 ///
 /// `None` when the payload is not that envelope, so anything unexpected falls
 /// back to the generic renderer rather than being mis-summarised.
+/// The tail of a detached spawn's receipt — what the tool says AT spawn,
+/// before the helper has said anything. A cell that shows a finished
+/// helper's words beside `Completed` reads this to know there are none yet
+/// (`zo_ide::tui::tools`, t-5872).
+pub const DETACHED_SPAWN_RECEIPT: &str = "its report arrives when it finishes";
+
 fn format_delegation_result(name: &str, value: &Value) -> Option<ToolResultBody> {
     let status = extract_str(value, "status")?;
     let kind = extract_str(value, "subagentType")
@@ -323,7 +329,7 @@ fn format_delegation_result(name: &str, value: &Value) -> Option<ToolResultBody>
             .unwrap_or_default();
         return Some(ToolResultBody::Generic {
             name: name.to_string(),
-            content: format!("{kind} started{on} · its report arrives when it finishes"),
+            content: format!("{kind} started{on} · {DETACHED_SPAWN_RECEIPT}"),
             truncated: false,
         });
     }

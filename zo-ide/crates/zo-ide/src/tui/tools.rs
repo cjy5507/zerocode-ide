@@ -56,7 +56,7 @@ const MAX_GROUPED_CALLS: usize = 32;
 /// `EXEC_DISPLAY_LAYOUT.output_max_lines`(5) 로. 두 상한이 같은 5 이고 사람이
 /// 보는 것은 행이므로 여기서는 한 단으로 접는다 — 머리 절반·중간 생략·꼬리
 /// 절반이라는 원본의 모양과 "생략 수는 논리 줄로 센다"는 원본의 계약은 그대로다.
-const OUTPUT_MAX_ROWS: usize = 5;
+pub(super) const OUTPUT_MAX_ROWS: usize = 5;
 /// An upstream formatter only reports that it omitted *some* source output.
 /// Count that unknown tail conservatively as one line, in the same elision
 /// grammar the visible-row cap uses, instead of adding a second
@@ -64,6 +64,13 @@ const OUTPUT_MAX_ROWS: usize = 5;
 const SOURCE_TRUNCATION_NOTE: &str = "… +1 lines";
 /// Re-injected agent reports need enough context to be useful in history.
 const AGENT_RESULT_MAX_ROWS: usize = 20;
+/// codex `multi_agents.rs::COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES` — how much
+/// of a finished agent's message stands beside `Completed`. zo counts scalar
+/// values rather than graphemes (no segmentation crate); the value is codex's.
+const COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES: usize = 240;
+/// codex `multi_agents.rs::COLLAB_PROMPT_PREVIEW_GRAPHEMES` — how much of the
+/// delegated prompt a spawn cell keeps under `└`.
+const COLLAB_PROMPT_PREVIEW_GRAPHEMES: usize = 160;
 /// 명령이 여러 줄일 때 헤더 아래로 흐르는 행 수 상한 — 같은 레이아웃의
 /// `command_continuation_max_lines`(2).
 const COMMAND_CONTINUATION_MAX_ROWS: usize = 2;
@@ -1350,9 +1357,13 @@ impl ToolGroup {
             }
         } else if let Some(done) = call.done.as_ref().filter(|done| !done.ok) {
             out.extend(output_block(&done.output, width));
+        } else if let Some(preview) = call.done.as_ref().and_then(|done| completed_preview(&done.output)) {
+            // The helper answered in this call: codex's `Completed - <message>`
+            // row (`multi_agents.rs::status_summary_spans`) takes the slot.
+            out.extend(prefixed(&[preview], width, &Prefix::tool_output(), true));
         } else if !spawn.prompt.is_empty() {
             out.extend(prefixed(
-                &[Line::from_text(spawn.prompt.to_string())],
+                &[Line::from_text(truncate_text(spawn.prompt, COLLAB_PROMPT_PREVIEW_GRAPHEMES))],
                 width,
                 &Prefix::tool_output(),
                 true,
@@ -1521,6 +1532,45 @@ pub(crate) fn strip_agent_result_harness(mut output: &str) -> &str {
             return output;
         }
         output = rest;
+    }
+}
+
+/// The `Completed - <message preview>` row of a spawn whose helper answered
+/// inside the call — codex `multi_agents.rs::status_summary_spans` for a
+/// `Completed` agent state. `None` for a detached spawn, whose immediate
+/// result is the runtime's JSON envelope (`agentId`, `status`) and whose
+/// report lands later as its own `AgentResult` cell.
+fn completed_preview(output: &str) -> Option<Line> {
+    let output = strip_agent_result_harness(output);
+    let trimmed = output.trim();
+    if trimmed.is_empty()
+        || trimmed.ends_with(
+            runtime::message_stream::anthropic::tools::DETACHED_SPAWN_RECEIPT,
+        )
+    {
+        return None;
+    }
+    if trimmed.starts_with('{') && serde_json::from_str::<serde_json::Value>(trimmed).is_ok() {
+        return None;
+    }
+    let message = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    let preview = truncate_text(&message, COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES);
+    Some(Line::new(vec![
+        Span::new("Completed", Style::new().fg(palette::TOOL_OK)),
+        Span::dim(" - "),
+        Span::raw(preview),
+    ]))
+}
+
+/// codex `text_formatting::truncate_text`: the first `max` units of `text`
+/// with an ellipsis when anything was cut; the whole text otherwise.
+fn truncate_text(text: &str, max: usize) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{}…", head.trim_end())
+    } else {
+        head
     }
 }
 
@@ -1770,7 +1820,7 @@ fn trim_logical(
 
 /// 앞에서 `keep` 줄만 남기고 나머지를 `… +N lines` 한 줄로 접는다 — codex
 /// `ExecCell::limit_lines_from_start`.
-fn limit_from_start(lines: &[Line], keep: usize) -> Vec<Line> {
+pub(super) fn limit_from_start(lines: &[Line], keep: usize) -> Vec<Line> {
     if lines.len() <= keep {
         return lines.to_vec();
     }

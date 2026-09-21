@@ -181,6 +181,9 @@ pub struct PlainSession {
     /// budget refused — for the frontend to print the next time it asks.
     /// The dispatch calls return the turn; this carries the words.
     autonomy_notices: Vec<String>,
+    /// The turn's route facts for the interactive front (t-5872): what the
+    /// routing judgment and the step governor decided, as they decide it.
+    route_fact: super::route_fact::RouteFactSender,
 }
 
 /// `PlainSession::open` 에 들어간 런치 플래그의 되읽기 — `/resume` 으로 세션을
@@ -608,6 +611,7 @@ impl PlainSession {
             agent_completion_receiver,
             headless: options.headless,
             autonomy_notices: Vec::new(),
+            route_fact: super::route_fact::channel(),
         };
         // A new session has no file yet, so this publishes its initial
         // snapshot. A resumed session is already persistence-bound and clean;
@@ -642,6 +646,12 @@ impl PlainSession {
     #[must_use]
     pub fn effort(&self) -> Option<Effort> {
         self.effort
+    }
+
+    /// The front's end of this session's route facts (t-5872).
+    #[must_use]
+    pub(crate) fn route_fact_receiver(&self) -> super::route_fact::RouteFactReceiver {
+        self.route_fact.subscribe()
     }
 
     /// 도는 도구를 끊는 신호의 사본. 스캐폴드가 이걸 쥐고 있다가 Esc 에 쏜다.
@@ -752,9 +762,12 @@ impl PlainSession {
             &self.cwd,
             &self.handle.id,
             self.allowed_tools.as_ref(),
-            input,
-            turn_setup.assessment,
-            (named_effort, effort_band_ceiling),
+            super::smart_runtime::SmartTurnInput {
+                input,
+                assessment: turn_setup.assessment,
+                turn_effort: (named_effort, effort_band_ceiling),
+                route_fact: &self.route_fact,
+            },
         );
         self.arm_turn_limits();
         // 난이도가 넓다고 하면 호스트가 먼저 갈라 읽는다(`orchestration`): 결과는
