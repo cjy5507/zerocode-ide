@@ -252,6 +252,42 @@ fn shadow_records_what_it_would_have_pressed_and_presses_nothing() {
     }
 }
 
+#[test]
+fn a_recording_seat_says_on_the_row_and_in_one_word_why_it_pressed_nothing() {
+    // A walk under a seat that only records looked, from the outside, exactly
+    // like a walk that found nothing worth pressing: `pressed: 0`, no error,
+    // and a `routeUse` nobody reads as an explanation. Thirteen walks of the
+    // v1.1.3 measurement went that way, every one of them judged at 0.95 or
+    // better, before the seat itself was looked at (t-5455).
+    for (mode, why) in [
+        (Mode::Shadow, stopped(RecipeStop::CheckFailed)),
+        (Mode::Auto, goal(1)),
+    ] {
+        let mut judge = FakeJudge::chose(&[2]);
+        let mut world = FakeWorld::showing(&[1, 2]);
+
+        let recorded = run(mode, false, &why, &mut judge, &mut world);
+
+        let said = &recorded.rows[0];
+        assert_eq!(said["routeUse"], json!(USE_SHADOW), "{mode:?}");
+        assert_eq!(said[REASON], json!(SEAT_RECORDING), "{mode:?}");
+        assert_eq!(said["pressed"], json!(false), "{mode:?}");
+        assert_eq!(
+            no_press_reason(&recorded.rows),
+            Some(SEAT_RECORDING),
+            "{mode:?}"
+        );
+    }
+
+    // The word says something only because an acting walk does not carry it:
+    // a reason on every row would be no reason at all.
+    let mut judge = FakeJudge::chose(&[2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let applied = run(Mode::On, true, &goal(1), &mut judge, &mut world);
+    assert_eq!(applied.rows[0]["routeUse"], json!(USE_APPLIED));
+    assert_eq!(no_press_reason(&applied.rows), None);
+}
+
 /// A judge that says what asking cost at the Jev door has it written on the
 /// row, under the keys every Jev ledger spells; one that says nothing leaves
 /// the row as it always was.

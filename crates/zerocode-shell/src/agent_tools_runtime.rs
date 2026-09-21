@@ -3181,12 +3181,21 @@ pub(super) fn run_goal(
 }
 
 /// A walk's answer in words, for a caller that did not ask for JSON.
-fn goal_text(said: &serde_json::Value) -> String {
+///
+/// The count carries a reason after it when one of the rows gave one: read
+/// alone, `0 press(es)` says "nothing on that screen was worth pressing",
+/// which is exactly what a walk under a recording seat does not mean
+/// (t-5455).
+pub(super) fn goal_text(said: &serde_json::Value) -> String {
     let pressed = said["pressed"].as_u64().unwrap_or_default();
     let reached = said["reached"] == serde_json::Value::Bool(true);
     let goal = said["goal"].as_str().unwrap_or_default();
     let got = if reached { "reached" } else { "not reached" };
-    format!("{goal}: {got} after {pressed} press(es)")
+    let why = said["steps"]
+        .as_array()
+        .and_then(|steps| computer_use::errand::no_press_reason(steps))
+        .map_or_else(String::new, |reason| format!(" — {reason}"));
+    format!("{goal}: {got} after {pressed} press(es){why}")
 }
 
 /// One walk's answer: the report when it walked to its end, else the stop

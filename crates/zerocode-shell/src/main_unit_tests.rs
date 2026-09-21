@@ -18421,6 +18421,74 @@ pub(crate) mod computer_desktop_wait {
     }
 }
 
+/// What a walk's answer says in words to a caller that did not ask for JSON.
+///
+/// The count alone reads as "there was nothing worth pressing", which is the
+/// one thing a walk under a recording seat does not mean (t-5455).
+mod walk_answer_words {
+    use crate::agent_tools_runtime::goal_text;
+    use serde_json::json;
+    use zerocode_core::jev::promote::SEAT_RECORDING;
+
+    /// A walk's answer as `run_goal` assembles one, with `steps` as the
+    /// errand wrote them.
+    fn answered(pressed: u64, reached: bool, steps: serde_json::Value) -> serde_json::Value {
+        json!({
+            "goal": "press Continue",
+            "mode": "auto",
+            "pressed": pressed,
+            "reached": reached,
+            "steps": steps,
+        })
+    }
+
+    #[test]
+    fn a_walk_that_pressed_says_what_it_always_said() {
+        assert_eq!(
+            goal_text(&answered(
+                1,
+                true,
+                json!([{ "outcome": "answered", "chosen": "mark:1", "routeUse": "applied", "pressed": true }]),
+            )),
+            "press Continue: reached after 1 press(es)"
+        );
+    }
+
+    #[test]
+    fn a_walk_under_a_recording_seat_says_the_reason_its_row_gave() {
+        let mut said = json!({
+            "outcome": "answered",
+            "chosen": "mark:1",
+            "routeUse": "shadow",
+            "pressed": false,
+        });
+        said[crate::computer_use::errand::REASON] = json!(SEAT_RECORDING);
+        assert_eq!(
+            goal_text(&answered(0, false, json!([said]))),
+            "press Continue: not reached after 0 press(es) — seat_recording"
+        );
+    }
+
+    #[test]
+    fn a_walk_whose_rows_gave_no_reason_invents_none() {
+        // `off` answers with no steps at all, and a walk that gave up has
+        // rows that say so without a reason on them: neither gets a dash
+        // with nothing after it.
+        assert_eq!(
+            goal_text(&answered(0, false, json!([]))),
+            "press Continue: not reached after 0 press(es)"
+        );
+        assert_eq!(
+            goal_text(&answered(
+                0,
+                false,
+                json!([{ "outcome": "answered", "chosen": "give_up", "routeUse": "fallback" }]),
+            )),
+            "press Continue: not reached after 0 press(es)"
+        );
+    }
+}
+
 mod update_command_edges {
     use super::*;
     use cmd::update::{HistorySource, fetch_releases, history_after_fetch, since_last_check};
