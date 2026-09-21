@@ -35694,6 +35694,10 @@ const chatFace = await page.evaluate(async () => {
   const composer = face.querySelector(".worker-composer");
   seen.composerStands = Boolean(composer);
   const box = composer?.querySelector(".worker-composer-box");
+  // The parent is between turns for the sends below: words typed while it
+  // works wait in the window's queue now (`composer-queue`), and this pins
+  // the road a send takes, not the wait.
+  tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-chat" });
   if (box) box.value = "  keep going  ";
   composer?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
   seen.pasteFirst = calls.length === 1 && calls[0][0] === "paste";

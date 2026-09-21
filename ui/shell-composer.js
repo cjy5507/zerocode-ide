@@ -165,10 +165,16 @@ function composerRoad(run, spec = null) {
  * 하나다(`paintWorkerComposerState`가 이 함수를 부른다; 식이 두 벌 있으면
  * 언젠가 둘이 갈라진다). 판은 훅이 말한 낱말, 선은 제 상태. */
 function composerWorking(run) {
+  // A wire's page has no pane: its own status is the turn. A page that speaks
+  // to a PANE — the pane's own conversation, or a helper's page whose words
+  // go to the parent — reads that pane's hook word and nothing else: a
+  // helper's `running` is the helper's, and gating the parent's composer on
+  // it queued words to a parent that was sitting idle (2026-09-21, the
+  // t-110 pins and the attach suite caught it on the merge).
+  if (run.wire) return run.status === "running";
   const term = run.term;
-  const onPane = term !== undefined && term !== null
+  return term !== undefined && term !== null
     && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)));
-  return onPane || run.status === "running";
 }
 
 /* 글 하나가 실행에 닿는 길 — 선이면 한 요청, 판이면 붙여넣기·숨·Enter.

@@ -70,7 +70,9 @@ export async function testComposerAttach(page, ok, limits) {
     const tell = (name, payload) => {
       for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
     };
-    tell("hook:agent", { term, state: "working", agent: "claude", session: "s-attach" });
+    // Between turns: a send while the pane works waits in the window's queue
+    // (`composer-queue`), and these pins are about what a send carries.
+    tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-attach" });
     tell("hook:subagent", { term, rows: [{ id: "chip", name: "@chip" }] });
     await window.__PAINTED__();
     window.__ANSWER__.subagent_log = () => ({
