@@ -15505,6 +15505,12 @@ fn plan_inner(
              * act refuses the summons by name rather than landing a guess:
              * a worker nobody chose is the one thing this road may not
              * produce. */
+            // The options are read BEFORE the reservation below writes this
+            // worker and its dispatch: read after, the option for the very
+            // agent being summoned would count this summons and quote this
+            // task's title as its newest brief — the work being judged,
+            // which the state must never show (w-5540's finding, t-4839).
+            let summon_options = summonable(launcher, ledger, now_ms);
             let (agent, agent_by_seat) = if agent == SUMMON_AUTO_AGENT {
                 let brief_words = match asked.is_empty() {
                     false => asked,
@@ -15519,7 +15525,7 @@ fn plan_inner(
                     carries_a_task: task.is_some(),
                 };
                 let chosen = launcher
-                    .choose_agent(&look, &summonable(launcher, ledger, now_ms))
+                    .choose_agent(&look, &summon_options)
                     .ok_or_else(|| {
                         format!(
                             "--agent {SUMMON_AUTO_AGENT}: the summon seat chose nothing — it \
@@ -15821,7 +15827,7 @@ fn plan_inner(
                     worktree: isolated,
                     replaces_an_attempt: retry_of.is_some(),
                     carries_a_task: task.is_some(),
-                    options: summonable(launcher, ledger, now_ms),
+                    options: summon_options,
                 }
             });
             /* And the placement question's ledger half (t-4781), from the

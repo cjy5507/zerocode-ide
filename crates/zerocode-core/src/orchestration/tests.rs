@@ -13532,6 +13532,17 @@ fn a_summons_is_judged_over_the_agents_that_could_carry_it_this_minute() {
         (None, None),
         "an unread gauge says so rather than borrowing a number"
     );
+    // The options were read before this summons was written down: the
+    // agent being summoned is not counted for it, and its newest brief is
+    // not this task's own words (w-5540, t-4839).
+    assert_eq!(
+        (
+            shadow.options[0].launched,
+            shadow.options[0].recent_brief.as_deref()
+        ),
+        (0, None),
+        "this very summons leaked into its own option"
+    );
 
     // What the judgment is written down beside, and the shape it is asked
     // about — the brief's head, never the briefing this road wraps around
@@ -13548,6 +13559,13 @@ fn a_summons_is_judged_over_the_agents_that_could_carry_it_this_minute() {
         .expect("two agents are a question");
     assert_eq!(asked.options(), ["claude", "kimi"]);
     assert!(!asked.state.to_string().contains("opus"));
+    assert!(
+        !asked
+            .questions
+            .to_string()
+            .contains("measure-the-frame-time"),
+        "an option quoted the work being judged"
+    );
 
     // A pane summoned to work with by hand describes no work, so there is
     // nothing to judge and no question is carried at all.
