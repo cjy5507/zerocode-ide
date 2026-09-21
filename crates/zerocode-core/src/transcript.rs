@@ -1092,6 +1092,10 @@ pub fn model_in(chunk: &str) -> Option<String> {
     })
 }
 
+/// The spelling of the field [`usage_in`] looks for, used as a byte filter
+/// before any line is parsed.
+const USAGE_FIELD: &str = "\"usage\"";
+
 /// The context a transcript's last answer stood on — the tokens, and the
 /// window they stand in.
 ///
@@ -1113,22 +1117,33 @@ pub struct TranscriptUsage {
 /// field is itself the test for whose line it is; asking the row's kind
 /// again would be the same question spelled twice, once per vendor. A chunk
 /// with no such line answers `None` and nothing is drawn.
+///
+/// The chunk is a quarter of a megabyte and this runs on every read, so the
+/// lines that cannot hold the field are turned away by a byte scan before
+/// any of them is parsed: parsing all of them a second time (`turns_in`
+/// already parsed them once) put a measured third onto the shell suite's
+/// wall clock. A line whose prose merely says `"usage"` costs one parse and
+/// the walk goes on, so the answer is the same either way.
 #[must_use]
 pub fn usage_in(chunk: &str) -> Option<TranscriptUsage> {
-    chunk.lines().rev().find_map(|line| {
-        let row: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-        let usage = row.get("message")?.get("usage")?;
-        let count = |name: &str| {
-            usage
-                .get(name)
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0)
-        };
-        let tokens = count("input_tokens")
-            + count("cache_creation_input_tokens")
-            + count("cache_read_input_tokens");
-        (tokens > 0).then_some(TranscriptUsage { tokens, window: 0 })
-    })
+    chunk
+        .lines()
+        .rev()
+        .filter(|line| line.contains(USAGE_FIELD))
+        .find_map(|line| {
+            let row: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+            let usage = row.get("message")?.get("usage")?;
+            let count = |name: &str| {
+                usage
+                    .get(name)
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0)
+            };
+            let tokens = count("input_tokens")
+                + count("cache_creation_input_tokens")
+                + count("cache_read_input_tokens");
+            (tokens > 0).then_some(TranscriptUsage { tokens, window: 0 })
+        })
 }
 
 /// The turns in a stretch of transcript, in the order they were written.
