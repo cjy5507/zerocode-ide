@@ -1937,28 +1937,39 @@ function clearPreedit() {
  * 온전한 음절은 이 길을 타지 않는다 — 끝난 글자는 기다릴 것이 없다. */
 const HALF_LETTER_ESCORT_MS = 48;
 let halfLetter = "";
+let halfLetterAt = 0;
 let halfLetterTimer = 0;
 
 function holdHalfLetter(text) {
   clearTimeout(halfLetterTimer);
   halfLetter = text;
+  halfLetterAt = performance.now();
   traceIme(`half.hold ${text}`);
-  halfLetterTimer = setTimeout(() => {
-    halfLetterTimer = 0;
-    traceIme(`half.dropped ${halfLetter}`);
-    halfLetter = "";
-  }, HALF_LETTER_ESCORT_MS);
+  // The timer only makes sure the answer is given when nothing else asks —
+  // it is `escortHalfLetter` again, which by then reads a passed beat and
+  // lets nothing out. A timer running late therefore changes no verdict.
+  halfLetterTimer = setTimeout(escortHalfLetter, HALF_LETTER_ESCORT_MS);
 }
 
-/* 붙들린 반쪽을 놓아 주는 한 자리 — 사람의 다음 행동이 시작되기 전에.
- * 판으로 가는 낱자는 여전히 허스크가 듣는다: 이 길로 나가는 것은 사람이
- * 친 ㅋㅋ이고, 「drain」 이름으로 찍히는 줄이 다시 보이면 그것은 회귀다. */
+/* 붙들린 반쪽의 운명을 정하는 한 자리 — 사람의 다음 행동이 시작되기 전에.
+ *
+ * 박자를 재는 자리가 여기인 것이 요점이다: 문이 언제 열렸는지를 문에서 재야
+ * 판이 멎어 있던 동안에도 답이 같다. 타이머가 제때 못 뛰면 붙들린 반쪽이
+ * 뒤늦은 조합을 타고 나가 버린다 — 전체 하네스를 한꺼번에 돌릴 때 실제로
+ * 그랬다.
+ *
+ * 판으로 가는 낱자는 여전히 허스크가 듣는다: 이 길로 나가는 것은 사람이 친
+ * ㅋㅋ이고, 「drain」 이름으로 찍히는 줄이 다시 보이면 그것은 회귀다. */
 function escortHalfLetter() {
   if (!halfLetter) return;
   clearTimeout(halfLetterTimer);
   halfLetterTimer = 0;
   const text = halfLetter;
   halfLetter = "";
+  if (performance.now() - halfLetterAt > HALF_LETTER_ESCORT_MS) {
+    traceIme(`half.dropped ${text}`);
+    return;
+  }
   traceIme(`half.escort out=${text}`);
   reportStrayJamo("escort", text);
   routeText(text);
