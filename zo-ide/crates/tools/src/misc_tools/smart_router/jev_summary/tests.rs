@@ -257,7 +257,7 @@ fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
 
     // Recall rises too now (t-5806), on its own labels: an empty ledger is a
     // window short of every row, not a seat nobody judges.
-    let quiet = super::one(&zerocode_core::jev::RECALL, &roots, None, None, 1_000, 0);
+    let quiet = one(&zerocode_core::jev::RECALL, &roots, None, None, 1_000, 0);
     assert!(matches!(quiet.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 0, .. }))), "{:?}", quiet.verdict());
     // An orchestration seat is judged by the table on its own rows: thin here.
     write(home.path(), zerocode_core::jev::SUMMON.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5, "agreed": true})]);
@@ -822,7 +822,7 @@ fn a_turn_label_is_one_comparison_in_the_window_of_the_turn_it_grades() {
     assert_eq!(judged.window.rows, 25, "a label was counted as a request");
     assert_eq!(judged.agreement, Agreement { compared: 2, agreed: 1 }, "two labels of held turns, one of a turn gone");
     assert_eq!(judged.control_rows, 0, "a label was counted as a control row");
-    let report = super::one(seat, &roots, None, None, 1_000, 0);
+    let report = one(seat, &roots, None, None, 1_000, 0);
     assert_eq!(report.judged, Some(judged));
     assert_eq!(report.asked_ever, 25);
     // The week counts every mark, held turn or not: three labels, two agreed.
@@ -849,7 +849,7 @@ fn a_seats_week_of_marks_is_counted_beside_its_judged_window() {
             json!({"at": -1_000_000_000_000_i64, "label": "5:6", "query": 5, "notes": 6, "applied": true, "agreed": false}),
         ],
     );
-    let report = super::one(seat, &roots, None, None, 1_000, 0);
+    let report = one(seat, &roots, None, None, 1_000, 0);
     assert!(matches!(report.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))), "{:?}", report.verdict());
     assert_eq!(report.judged.as_ref().map(|judged| judged.agreement), Some(Agreement { compared: 2, agreed: 1 }));
     assert_eq!(report.agreement_week, Agreement { compared: 2, agreed: 1 });
