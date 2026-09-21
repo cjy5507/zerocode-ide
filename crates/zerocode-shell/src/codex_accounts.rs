@@ -45,7 +45,9 @@ const AUTH_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 /// before the tree is killed. Orca's `postAuthExitTimeout` is the same idea:
 /// a CLI that does exit should be allowed to.
 const POST_AUTH_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
-pub(crate) const ACCOUNT_STORE_FILE: &str = "codex-accounts.json";
+// The store's name is `zerocode_core`'s: the window writes this file and a zo
+// running outside a pane reads it to follow the chosen account (t-5777).
+pub(crate) use zerocode_core::codex_account::STORE_FILE as ACCOUNT_STORE_FILE;
 pub(crate) const MANAGED_ACCOUNTS_DIR: &str = "codex-accounts";
 pub(crate) const MANAGED_HOME_DIR: &str = "home";
 const SYSTEM_HOME_DIR: &str = ".codex";
@@ -217,6 +219,53 @@ fn sync_runtime_model_cache(source_home: &Path, runtime: &Path) {
     }
 }
 
+/// One `auth.json` the way the CLI writes one: an `id_token` whose payload
+/// carries the email, the account id beside it, and the `last_refresh`
+/// stamp this module's direction rule reads.
+#[cfg(test)]
+pub(crate) fn auth_fixture(account: &str, refreshed_at: &str, access: &str) -> String {
+    // base64url, no padding — the three segments `identity_from_auth`
+    // needs before it will call this a login.
+    fn segment(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let mut held = 0u32;
+            for (at, byte) in chunk.iter().enumerate() {
+                held |= u32::from(*byte) << (16 - 8 * at);
+            }
+            for at in 0..(chunk.len() * 8).div_ceil(6) {
+                out.push(ALPHABET[((held >> (18 - 6 * at)) & 0x3f) as usize] as char);
+            }
+        }
+        out
+    }
+    let claims = format!(r#"{{"email":"person@example.com","sub":"{account}"}}"#);
+    let id_token = format!(
+        "{}.{}.{}",
+        segment(br#"{"alg":"none"}"#),
+        segment(claims.as_bytes()),
+        segment(b"signature")
+    );
+    format!(
+        r#"{{"auth_mode":"chatgpt","tokens":{{"id_token":"{id_token}","access_token":"{access}","refresh_token":"rt-{access}","account_id":"{account}"}},"last_refresh":"{refreshed_at}"}}"#
+    )
+}
+
+/// Does the runtime home's copy beat the stored one?
+///
+/// Only when it is the SAME login and its `last_refresh` is provably later.
+/// The judgement itself is `zerocode_hookd::codex_runtime_auth`'s, which
+/// already owns this direction between the mirror and `~/.codex`: ChatGPT
+/// rotates refresh tokens, so two homes holding one login have exactly one
+/// live branch, and a second copy of the rule is a second answer waiting to
+/// disagree (t-5777).
+pub(crate) fn runtime_copy_wins(runtime: &str, stored: &str) -> bool {
+    zerocode_hookd::codex_runtime_auth::same_identity(runtime, stored)
+        && zerocode_hookd::codex_runtime_auth::monotonically_fresher(runtime, stored)
+}
+
 /// Write the selected account's credentials into the shared runtime home,
 /// preserving sessions across accounts and switching logins in real-time.
 pub fn materialize(config_root: &Path, local_data_root: &Path) -> Result<(), String> {
@@ -240,8 +289,19 @@ pub fn materialize_into(config_root: &Path, runtime: &Path) -> Result<(), String
         && signed_in_content(curr)
         && let Some(prev_account) = store.accounts.iter().find(|a| &a.id == prev_id)
     {
-        let prev_home = Path::new(&prev_account.home_dir);
-        let _ = write_private(&prev_home.join(AUTH_FILE), curr);
+        let prev_auth = Path::new(&prev_account.home_dir).join(AUTH_FILE);
+        // Only a PROVABLY fresher stored copy stops the write-back. A file
+        // Codex stamped later is the live branch of a rotating refresh token,
+        // and saving an older one over it logs that account out; anything the
+        // stamps cannot decide stays as it was — the runtime home is where the
+        // pane just worked.
+        let held = std::fs::read_to_string(&prev_auth).ok();
+        if !held
+            .as_deref()
+            .is_some_and(|held| runtime_copy_wins(held, curr))
+        {
+            let _ = write_private(&prev_auth, curr);
+        }
     }
 
     // 2. Materialize the active account.
@@ -249,8 +309,16 @@ pub fn materialize_into(config_root: &Path, runtime: &Path) -> Result<(), String
     if let Some(account) = active {
         let switched = record.account.as_deref() != Some(account.id.as_str());
         let account_home = Path::new(&account.home_dir);
-        let creds = std::fs::read_to_string(account_home.join(AUTH_FILE))
+        let stored = std::fs::read_to_string(account_home.join(AUTH_FILE))
             .map_err(|_| "계정의 자격 증명을 읽지 못했습니다".to_string())?;
+        // The runtime home may hold a NEWER copy of this same login — a pane
+        // refreshed inside it a moment ago, and step 1 has just saved that copy
+        // into the account's home. Writing the older one back over it would
+        // hand the pane a refresh token the endpoint has already rotated away.
+        let creds = match current_runtime_content.as_deref() {
+            Some(curr) if runtime_copy_wins(curr, &stored) => curr.to_string(),
+            _ => stored,
+        };
 
         write_private(&runtime_auth, &creds)?;
         let hash = sha256_hex(creds.as_bytes());
@@ -269,9 +337,18 @@ pub fn materialize_into(config_root: &Path, runtime: &Path) -> Result<(), String
         // System default: read from ~/.codex if present.
         if let Some(sys_home) = system_home() {
             let sys_auth = sys_home.join(AUTH_FILE);
-            if let Ok(creds) = std::fs::read_to_string(&sys_auth)
-                && signed_in_content(&creds)
+            if let Ok(stored) = std::fs::read_to_string(&sys_auth)
+                && signed_in_content(&stored)
             {
+                // Same rule against the machine's own login: a fresher copy in
+                // the runtime home stands. Writing it back into `~/.codex` is
+                // `zerocode_hookd::codex_runtime_auth`'s job — it holds the
+                // provenance that proves the copy started as ours — and it runs
+                // on both the launch and the pane-exit road.
+                let creds = match current_runtime_content.as_deref() {
+                    Some(curr) if runtime_copy_wins(curr, &stored) => curr.to_string(),
+                    _ => stored,
+                };
                 write_private(&runtime_auth, &creds)?;
                 let hash = sha256_hex(creds.as_bytes());
                 let _ = write_private(&runtime.join(".zerocode-auth-provenance"), &hash);
@@ -874,6 +951,109 @@ mod tests {
     }
 
     use super::*;
+
+    /// A store with one account, selected, whose home holds `held`.
+    fn one_selected_account(root: &Path, held: &str) -> (PathBuf, PathBuf) {
+        let home = account_home(root, "acct-1").expect("a safe id");
+        std::fs::create_dir_all(&home).expect("account home");
+        std::fs::write(home.join(AUTH_FILE), held).expect("seed the account home");
+        let store = CodexAccountStore {
+            accounts: vec![CodexAccount {
+                id: "acct-1".to_string(),
+                email: Some("person@example.com".to_string()),
+                provider_account_id: Some("account-one".to_string()),
+                workspace_label: None,
+                home_dir: home.to_string_lossy().into_owned(),
+                added_at: 1,
+            }],
+            selection: CodexSelection {
+                active: Some("acct-1".to_string()),
+            },
+        };
+        write_store(root, &store).expect("store");
+        (home, runtime_home(root))
+    }
+
+    /// ChatGPT rotates refresh tokens, so the two homes holding one login have
+    /// exactly one live branch. Whichever side refreshed LAST is that branch,
+    /// and a materialize that ignored `last_refresh` handed the pane a token
+    /// the endpoint had already rotated away — the "logs out every day" the
+    /// person reported (t-5777).
+    #[test]
+    fn the_fresher_last_refresh_wins_in_both_directions() {
+        let root = tempfile::tempdir().expect("a data root");
+        let older = auth_fixture("account-one", "2026-09-17T02:48:26Z", "at-old");
+        let newer = auth_fixture("account-one", "2026-09-21T06:32:33Z", "at-new");
+
+        // The pane refreshed inside the runtime home: that copy reaches the
+        // account's own home AND survives the materialize.
+        let (home, runtime) = one_selected_account(root.path(), &older);
+        std::fs::create_dir_all(&runtime).expect("runtime home");
+        std::fs::write(runtime.join(AUTH_FILE), &newer).expect("seed the runtime");
+        write_runtime_record(
+            &runtime,
+            &CodexRuntimeAuth {
+                version: RUNTIME_MODEL_CACHE_VERSION,
+                account: Some("acct-1".to_string()),
+                written: Some(older.clone()),
+            },
+        );
+        materialize_into(root.path(), &runtime).expect("materialize");
+        assert_eq!(
+            std::fs::read_to_string(home.join(AUTH_FILE)).expect("read the account home"),
+            newer,
+            "the rotation inside the runtime home never reached the account"
+        );
+        assert_eq!(
+            std::fs::read_to_string(runtime.join(AUTH_FILE)).expect("read the runtime"),
+            newer,
+            "the older stored copy was written back over a fresher runtime one"
+        );
+
+        // The other direction: a `codex login` refreshed the account's own home
+        // while the runtime kept an older copy. The account home stands and the
+        // runtime follows it.
+        std::fs::write(home.join(AUTH_FILE), &newer).expect("the account refreshed");
+        std::fs::write(runtime.join(AUTH_FILE), &older).expect("a stale runtime");
+        write_runtime_record(
+            &runtime,
+            &CodexRuntimeAuth {
+                version: RUNTIME_MODEL_CACHE_VERSION,
+                account: Some("acct-1".to_string()),
+                written: Some(newer.clone()),
+            },
+        );
+        materialize_into(root.path(), &runtime).expect("materialize");
+        assert_eq!(
+            std::fs::read_to_string(home.join(AUTH_FILE)).expect("read the account home"),
+            newer,
+            "an older runtime copy overwrote the account's newer login"
+        );
+        assert_eq!(
+            std::fs::read_to_string(runtime.join(AUTH_FILE)).expect("read the runtime"),
+            newer,
+            "the runtime kept a stale login"
+        );
+    }
+
+    /// Another account's file is not a fresher copy of this one, whatever its
+    /// stamp says — the identity gate, checked here because the direction rule
+    /// is what would otherwise move tokens between two people's homes.
+    #[test]
+    fn a_different_account_never_wins_on_its_stamp() {
+        let mine = auth_fixture("account-one", "2026-09-17T02:48:26Z", "at-old");
+        let theirs = auth_fixture("account-two", "2026-09-21T06:32:33Z", "at-new");
+        assert!(!runtime_copy_wins(&theirs, &mine));
+        assert!(runtime_copy_wins(
+            &auth_fixture("account-one", "2026-09-21T06:32:33Z", "at-new"),
+            &mine
+        ));
+        // No stamp at all is not a proof of freshness.
+        assert!(!runtime_copy_wins(
+            &auth_fixture("account-one", "", "at-new"),
+            &mine
+        ));
+    }
 
     #[test]
     fn a_hostile_id_never_becomes_a_path() {

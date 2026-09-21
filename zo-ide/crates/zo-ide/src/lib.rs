@@ -134,6 +134,33 @@ mod main_contract {
         assert_eq!(api::SYSTEMONE_API_KEY_ENV, zerocode_harness::TYPESAFE_API_KEY_ENV);
     }
 
+    /// 창이 고른 OpenAI 계정을 따라가려면 창의 폴더를 정확히 같은 이름으로
+    /// 불러야 한다. 창 쪽 철자는 부모 저장소의 것이고, 이 쪽 사본을 그것에
+    /// 묶는다 — 창이 폴더 이름을 바꾸면 이 시험이 먼저 빨개진다(t-5777).
+    #[test]
+    fn the_windows_codex_home_is_spelled_the_windows_way() {
+        assert_eq!(
+            api::managed_account::ZEROCODE_APP_IDENTIFIER,
+            zerocode_core::app::IDENTIFIER
+        );
+        assert_eq!(
+            api::managed_account::CODEX_ACCOUNT_STORE_FILE,
+            zerocode_core::codex_account::STORE_FILE
+        );
+        assert_eq!(
+            api::managed_account::CODEX_RUNTIME_HOME_SEGMENTS,
+            zerocode_core::codex_account::RUNTIME_HOME_SEGMENTS
+        );
+        assert_eq!(
+            api::managed_account::CODEX_AUTH_FILE,
+            zerocode_core::codex_account::AUTH_FILE
+        );
+        assert_eq!(
+            api::managed_account::CODEX_HOME_ENV,
+            zerocode_core::codex_account::HOME_VAR
+        );
+    }
+
     /// The TypeSafe switch the window's settings write is the one zo's router
     /// reads: every mode the Jev use table offers routing, written where the
     /// table says, reads back through zo's merged settings as itself.

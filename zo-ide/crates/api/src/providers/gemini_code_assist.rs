@@ -25,6 +25,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::managed_account::external_credentials_disabled;
 use core_types::session::ToolCallPairing;
 use core_types::{OAuthAuthorizationRequest, OAuthConfig, OAuthTokenSet, PkceCodePair};
 use serde::Deserialize;
@@ -497,22 +498,11 @@ async fn post_token_form(
 /// Whether a saved Gemini Code Assist OAuth token exists.
 #[must_use]
 pub fn oauth_present() -> bool {
-    !external_credential_probes_disabled()
+    !external_credentials_disabled()
         && crate::oauth_store::load_google_code_assist_oauth()
             .ok()
             .flatten()
             .is_some()
-}
-
-fn external_credential_probes_disabled() -> bool {
-    std::env::var("ZO_DISABLE_EXTERNAL_CREDENTIALS")
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
 }
 
 /// Whether a token is expired or close enough to expiry that refresh is safer.
@@ -526,7 +516,7 @@ pub fn token_expired(tokens: &OAuthTokenSet) -> bool {
 /// Load saved Gemini Code Assist OAuth tokens, refreshing first when possible.
 #[must_use]
 pub fn load_fresh_oauth() -> Option<OAuthTokenSet> {
-    if external_credential_probes_disabled() {
+    if external_credentials_disabled() {
         return None;
     }
     let tokens = crate::oauth_store::load_google_code_assist_oauth()

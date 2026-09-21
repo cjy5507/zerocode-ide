@@ -93,6 +93,7 @@ version = "1.1.11"
 dependencies = [
  "base64 0.22.1",
  "core-types",
+ "dirs",
  "futures-util",
  "memchr",
  "model-prices",

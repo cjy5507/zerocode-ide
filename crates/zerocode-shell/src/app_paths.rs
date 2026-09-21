@@ -72,7 +72,9 @@ pub(crate) mod artifact_file {
     pub(crate) const WEBVIEW_ERRORS: &str = "webview-errors.log";
     pub(crate) const SERVE_TOKEN_PREFIX: &str = zerocode_lane::SERVE_TOKEN_PREFIX;
     pub(crate) const CODEX_HOOK_BACKUP: &str = "hooks.json.pre-zerocode";
-    pub(crate) const CODEX_RUNTIME_HOME: &str = "codex-runtime-home";
+    /// The mirror home's first segment — the directory the migration moves.
+    pub(crate) const CODEX_RUNTIME_HOME: &str =
+        zerocode_core::codex_account::RUNTIME_HOME_SEGMENTS[0];
 }
 
 pub(crate) mod legacy_settings_file {
@@ -291,7 +293,7 @@ pub(crate) const ARTIFACTS: &[ArtifactSpec] = &[
     directory(
         artifact_file::CODEX_RUNTIME_HOME,
         PathClass::LocalData,
-        "codex-runtime-home",
+        artifact_file::CODEX_RUNTIME_HOME,
         MigrationKind::Recreate,
     ),
     directory(

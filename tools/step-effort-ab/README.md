@@ -25,14 +25,17 @@ python3 tools/step-effort-ab/run.py run --zo zo-ide/target/debug/zo --model gpt-
 python3 tools/step-effort-ab/run.py analyze --out /tmp/ab-sol
 ```
 
-- 인증은 zo의 것을 그대로 쓴다: Anthropic은 Claude Code 세션 자격, OpenAI는 `~/.codex/auth.json`(ChatGPT 로그인,
-  `zo login openai`), Google은 `zo login google`. 토큰이 만료되면 첫 턴이 5초 만에 `401 token_expired`로 끝나고
-  `session: null`이 찍힌다 — 그 실행은 버린다.
+- 인증은 zo의 것을 그대로 쓴다: Anthropic은 Claude Code 세션 자격, Google은 `zo login google`. OpenAI는 창(ZeroCode
+  window)에 로그인된 계정을 따라간다 — 하네스는 `CODEX_HOME` 없이 zo를 띄우지만 zo가 창의 관리 codex 홈을 스스로
+  찾는다(t-5777). 다른 계정으로 재려면 그 홈을 `CODEX_HOME=<홈>`으로 직접 건네고, 창이 없는 기계에서는
+  `zo login openai`가 남긴 제 로그인을 쓴다. 토큰이 만료되면 첫 턴이 5초 만에 `401 token_expired`로 끝나고
+  `session: null`이 찍힌다 — 그 실행은 버린다. 어느 계정으로 말하는지는 `/status`의 출처 칸(IDE-managed ·
+  environment · own login)이 답한다.
 - 설정 홈을 바꾸려면 `ZO_CONFIG_HOME`(원장·캐시·자격이 모두 그 아래로 간다); 하네스도 같은 변수를 읽는다.
 - `smart.jev.*` 동의가 없는 워크스페이스에서는 B팔의 Jev 물음이 `not_consented` 행으로 남고 표는 그대로 돈다.
 - 조절기는 Anthropic 와이어에서 낱말이 `on`이어도 적용하지 않는다(행의 `held: anthropic_cache_prefix`) —
   `docs/design/zo-step-effort-governor-20260921.md` §6의 실측 때문이다. OpenAI·Google에서 켤지는 이 하네스의
-  숫자로 판정한다(2026-09-21 현재 두 토큰이 만료돼 미실측).
+  숫자로 판정한다(OpenAI 쪽 「토큰 만료」는 t-5777에서 창 계정을 따라가며 풀렸다).
 
 ## 과업 여섯
 

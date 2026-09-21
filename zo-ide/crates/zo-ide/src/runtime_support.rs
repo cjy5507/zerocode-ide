@@ -798,7 +798,8 @@ pub enum AccountOrigin {
     OwnLogin,
     /// 이 기계의 Claude Code 키체인 세션.
     Keychain,
-    /// 환경 변수의 API 키.
+    /// 판이 태어날 때의 환경 변수 — Claude 는 API 키, OpenAI 는 창이 판에
+    /// 건넨 `CODEX_HOME`.
     Env,
 }
 
@@ -844,19 +845,20 @@ pub fn account_facts(provider: api::ManagedProvider) -> Option<AccountFacts> {
                 }
             }
         }
-        api::ManagedProvider::OpenAi => {
-            if api::oauth_store::codex_auth::auth_json_path().is_some() {
-                Some(AccountOrigin::IdeManaged)
-            } else if api::oauth_store::load_openai_oauth()
-                .ok()
-                .flatten()
-                .is_some()
-            {
-                Some(AccountOrigin::OwnLogin)
-            } else {
-                None
-            }
-        }
+        // 어디서 빌린 계정인지 그대로 말한다: 창이 고르거나 창에서 찾아낸
+        // 계정은 관리, 판이 태어날 때의 `CODEX_HOME` 은 환경, 아무것도 없으면
+        // 제 로그인. 「자주 만료된다」 는 신고는 이 칸이 비어 있어서 아무도
+        // 어느 계정으로 말하는지 볼 수 없었기 때문이다(t-5777).
+        api::ManagedProvider::OpenAi => match api::oauth_store::openai_oauth_source()? {
+            api::oauth_store::OpenAiAuthSource::CodexHome(
+                api::managed_account::CodexHomeSource::Channel
+                | api::managed_account::CodexHomeSource::IdeManaged,
+            ) => Some(AccountOrigin::IdeManaged),
+            api::oauth_store::OpenAiAuthSource::CodexHome(
+                api::managed_account::CodexHomeSource::Env,
+            ) => Some(AccountOrigin::Env),
+            api::oauth_store::OpenAiAuthSource::OwnLogin => Some(AccountOrigin::OwnLogin),
+        },
         // Google 은 창과 zo 가 **한 파일**을 나눠 쓴다: 창의 로그인이 zo 의
         // credentials.json 에 직접 쓰므로 "IDE 관리" 와 "자기 로그인" 을 파일만
         // 보고는 가를 수 없다. 창이 이름을 실어 보냈을 때만 관리로 말한다.
@@ -2530,6 +2532,75 @@ mod oauth_refresh_tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         std::fs::remove_dir_all(config_home).ok();
         std::fs::remove_dir_all(switched).ok();
+    }
+
+    /// 카드의 출처 칸은 어느 계정으로 말하는지 **그대로** 말한다: 창이 판에
+    /// 건넨 `CODEX_HOME` 은 환경, 창에서 찾아낸 홈은 관리, 아무것도 없으면 제
+    /// 로그인. 이 칸이 비어 있던 동안 사람은 zo 가 죽은 제 로그인으로 말하는
+    /// 것을 「토큰이 또 만료됐다」 로만 볼 수 있었다(t-5777).
+    #[test]
+    fn the_openai_card_names_which_account_it_borrowed() {
+        let _env_lock = crate::test_env_lock();
+        api::managed_account::clear();
+        let home = crate::support::temp_dir("openai-origin");
+        let handed = home.join("handed");
+        std::fs::create_dir_all(&handed).expect("a codex home");
+        std::fs::write(
+            handed.join("auth.json"),
+            r#"{"auth_mode":"chatgpt","tokens":{"access_token":"at","refresh_token":"rt","account_id":"acct"}}"#,
+        )
+        .expect("seed the handed-off login");
+        let _config_home = crate::support::EnvVarGuard::set(
+            "ZO_CONFIG_HOME",
+            Some(home.to_str().expect("utf8 config home")),
+        );
+        let _zo_home = crate::support::EnvVarGuard::set("ZO_HOME", None);
+
+        // ② 판이 태어날 때의 `CODEX_HOME`.
+        let _codex_home = crate::support::EnvVarGuard::set(
+            api::managed_account::CODEX_HOME_ENV,
+            Some(handed.to_str().expect("utf8 codex home")),
+        );
+        assert_eq!(
+            super::account_facts(api::ManagedProvider::OpenAi).map(|facts| facts.origin),
+            Some(super::AccountOrigin::Env)
+        );
+
+        // ① 채널이 실어 온 계정 — 창이 고른 것.
+        api::managed_account::apply(
+            api::ManagedProvider::OpenAi,
+            &api::ManagedAccountUpdate {
+                label: Some("personal".to_string()),
+                claude_config_dir: None,
+                codex_home: Some(handed.clone()),
+            },
+        );
+        assert_eq!(
+            super::account_facts(api::ManagedProvider::OpenAi),
+            Some(super::AccountFacts {
+                provider: "openai",
+                label: Some("personal".to_string()),
+                origin: super::AccountOrigin::IdeManaged,
+            })
+        );
+        api::managed_account::clear();
+
+        // 아무 codex 홈도 없고 제 저장소만 있으면 제 로그인이다.
+        let _no_codex_home =
+            crate::support::EnvVarGuard::set(api::managed_account::CODEX_HOME_ENV, None);
+        api::oauth_store::save_openai_oauth(&core_types::OpenAiOAuthTokens {
+            access_token: "own-at".to_string(),
+            refresh_token: Some("own-rt".to_string()),
+            expires_at: Some(0),
+            account_id: Some("own-account".to_string()),
+            scopes: Vec::new(),
+        })
+        .expect("zo's own login saves");
+        assert_eq!(
+            super::account_facts(api::ManagedProvider::OpenAi).map(|facts| facts.origin),
+            Some(super::AccountOrigin::OwnLogin)
+        );
+        std::fs::remove_dir_all(home).ok();
     }
 
     #[test]

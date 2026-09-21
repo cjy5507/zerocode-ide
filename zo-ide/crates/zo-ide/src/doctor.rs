@@ -602,21 +602,21 @@ fn inspect_claude_auth() -> Finding {
 
 fn inspect_codex_auth() -> Finding {
     let codex_home_set = env_non_empty(api::oauth_store::codex_auth::CODEX_HOME_ENV);
-    let Some(path) = api::oauth_store::codex_auth::auth_json_path() else {
+    let Some((path, source)) = api::oauth_store::codex_auth::auth_json_path_with_source() else {
         return Finding {
             label: "Codex".to_string(),
             status: Status::Warn,
             value: if codex_home_set {
                 "CODEX_HOME/auth.json not found".to_string()
             } else {
-                "CODEX_HOME is not set; auth.json handoff is inactive".to_string()
+                "no Codex login: CODEX_HOME is unset and no ZeroCode window is signed in".to_string()
             },
         };
     };
     match api::oauth_store::codex_auth::load_at(&path) {
         Ok(Some(tokens)) => expiry_finding(
             "Codex",
-            "CODEX_HOME/auth.json",
+            codex_home_phrase(source),
             tokens.expires_at,
             tokens.refresh_token.is_some(),
         ),
@@ -630,6 +630,15 @@ fn inspect_codex_auth() -> Finding {
             status: Status::Fail,
             value: "auth.json is unreadable or malformed".to_string(),
         },
+    }
+}
+
+/// 이 로그인을 어디서 빌렸는지 한 줄로 — 해석 순서의 행 이름 그대로.
+const fn codex_home_phrase(source: api::managed_account::CodexHomeSource) -> &'static str {
+    match source {
+        api::managed_account::CodexHomeSource::Channel => "the account the window switched to",
+        api::managed_account::CodexHomeSource::Env => "CODEX_HOME/auth.json",
+        api::managed_account::CodexHomeSource::IdeManaged => "the ZeroCode window's own codex home",
     }
 }
 

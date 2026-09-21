@@ -40,6 +40,22 @@ pub const HOME_VAR: &str = "CODEX_HOME";
 /// The file the CLI writes its login into, inside that home.
 pub const AUTH_FILE: &str = "auth.json";
 
+/// Where the window remembers the accounts it holds and which one is chosen —
+/// one file in the app's data folder ([`crate::app::IDENTIFIER`]).
+///
+/// Spelled here because it is read from BOTH sides of the window/agent
+/// boundary: the window writes it, and a zo running outside a pane reads it to
+/// find the account the person is signed in to (t-5777).
+pub const STORE_FILE: &str = "codex-accounts.json";
+
+/// The shared Codex home every ZeroCode pane runs in, below the app's data
+/// folder: `codex-runtime-home/home`.
+///
+/// Two segments, so no caller can accidentally name the person's own
+/// `~/.codex` — the invariant `zerocode_hookd::codex_mirror::Home` is built on,
+/// and the fallback a zo outside a pane borrows when no account is selected.
+pub const RUNTIME_HOME_SEGMENTS: [&str; 2] = ["codex-runtime-home", "home"];
+
 /// How an account is signed in.
 ///
 /// Orca's `authKind` (:215822). The distinction is not decoration: an API-key

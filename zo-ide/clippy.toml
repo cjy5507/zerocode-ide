@@ -2,4 +2,4 @@
 # `doc_markdown` lint but are prose, not code, so they should not require
 # backticks in doc comments. `..` keeps clippy's built-in allowlist
 # (OAuth, GitHub, TypeScript, ...).
-doc-valid-idents = ["ChatGPT", "OpenAI", "OpenCode", "Codex", "TypeSafe", ".."]
+doc-valid-idents = ["ChatGPT", "OpenAI", "OpenCode", "Codex", "TypeSafe", "ZeroCode", ".."]

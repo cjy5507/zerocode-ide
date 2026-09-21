@@ -223,20 +223,9 @@ pub async fn exchange_google_oauth_code_and_save_adc(
 #[must_use]
 pub fn gemini_oauth_available() -> bool {
     env_non_empty(GOOGLE_ACCESS_TOKEN_ENV)
-        || (!external_credential_probes_disabled()
+        || (!crate::managed_account::external_credentials_disabled()
             && adc_credentials_path(&|key| std::env::var(key).ok())
                 .is_some_and(|path| path.is_file()))
-}
-
-fn external_credential_probes_disabled() -> bool {
-    std::env::var("ZO_DISABLE_EXTERNAL_CREDENTIALS")
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
 }
 
 /// Resolve a Gemini access token from `GOOGLE_ACCESS_TOKEN`, ADC, or gcloud.

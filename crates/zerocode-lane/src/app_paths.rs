@@ -12,7 +12,11 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 /// The Tauri bundle identifier, and therefore the stable directory name.
-pub const APP_IDENTIFIER: &str = "dev.zerocode.app";
+///
+/// One spelling for the whole product: an agent running outside a pane finds
+/// this same folder to follow the account the window is signed in to, so the
+/// name belongs to the shared vocabulary crate.
+pub use zerocode_core::app::IDENTIFIER as APP_IDENTIFIER;
 
 /// The window's settings document, under the config root. Spelled here so the
 /// shell that writes it and a CLI that only reads one key out of it
