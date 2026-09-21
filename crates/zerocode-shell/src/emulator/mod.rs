@@ -77,12 +77,35 @@ struct EmulatorPayload {
     mime: Option<&'static str>,
 }
 
-#[derive(Clone, Copy, Serialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 enum EmulatorNoteCode {
     FrameUnavailable,
     StreamEnded,
     VideoStartFailed,
+    /// The device itself is not on the bridge — killed, still booting, or
+    /// `offline`. Not a sick stream: the pump is resting beside it and will
+    /// carry on the moment `adb` lists it again, which is why this says
+    /// "it will resume" rather than asking anybody to restart anything.
+    DeviceOffline,
+}
+
+impl EmulatorNoteCode {
+    /// The word this note travels as.
+    ///
+    /// The same spelling `serde` writes, said once here so a REFUSAL can
+    /// carry it too — a tap turned away because the device is gone and the
+    /// note under the pane are the same fact, and must not become two
+    /// sentences that drift apart. A test pins these spellings to the ones
+    /// `serde` puts on the wire.
+    const fn code(self) -> &'static str {
+        match self {
+            Self::FrameUnavailable => "frame-unavailable",
+            Self::StreamEnded => "stream-ended",
+            Self::VideoStartFailed => "video-start-failed",
+            Self::DeviceOffline => "device-offline",
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -417,5 +440,28 @@ mod tests {
             serde_json::to_value(EmulatorNoteCode::FrameUnavailable).unwrap(),
             "frame-unavailable"
         );
+    }
+
+    /// The word a note travels as and the word a refusal carries are the same
+    /// word.
+    ///
+    /// A device that is gone says so twice — under the pane, from the pump,
+    /// and in the error a refused tap hands back — and the window matches
+    /// them by this spelling. Two spellings is a tap that reports "could not
+    /// send input" while the pane beside it says the device is off.
+    #[test]
+    fn the_note_codes_travel_as_their_own_words() {
+        for code in [
+            EmulatorNoteCode::FrameUnavailable,
+            EmulatorNoteCode::StreamEnded,
+            EmulatorNoteCode::VideoStartFailed,
+            EmulatorNoteCode::DeviceOffline,
+        ] {
+            assert_eq!(
+                serde_json::to_value(code).unwrap(),
+                code.code(),
+                "the wire and the refusal spell this note differently"
+            );
+        }
     }
 }

@@ -93,6 +93,16 @@ pub(super) struct SessionControl {
     /// reads it on every frame while a resize writes it a few times a second.
     viewport_long_edge: AtomicU32,
     cleanup: Mutex<Option<Box<dyn FnOnce() + Send + 'static>>>,
+    /// Whether the pump last found the DEVICE on the bridge.
+    ///
+    /// The pump reads `adb` once a turn and leaves the answer here; the input
+    /// door reads it for nothing. It is a HINT, not the verdict: it is only
+    /// ever believed far enough to make an input road ask `adb` itself before
+    /// refusing, because a pane parked in the background stops reading and a
+    /// memo frozen on "gone" must never turn away a device that came back.
+    /// True until a pump says otherwise — a session with no pump refuses
+    /// nothing on this account.
+    on_the_bridge: AtomicBool,
     /// The door this stream's pictures go through.
     ///
     /// A slot the session owns rather than an argument the pump carries,
@@ -123,6 +133,7 @@ impl SessionControl {
             input,
             viewport_long_edge: AtomicU32::new(0),
             cleanup: Mutex::new(None),
+            on_the_bridge: AtomicBool::new(true),
             frames: Mutex::new(None),
         })
     }
@@ -157,6 +168,16 @@ impl SessionControl {
 
     pub fn is_engaged(&self) -> bool {
         self.engaged.load(Ordering::Acquire)
+    }
+
+    /// What the pump last saw of the device.
+    pub fn was_on_the_bridge(&self) -> bool {
+        self.on_the_bridge.load(Ordering::Acquire)
+    }
+
+    /// The pump's reading of the device, published for the input door.
+    pub fn note_on_the_bridge(&self, present: bool) {
+        self.on_the_bridge.store(present, Ordering::Release);
     }
 
     /// Engaged until the window says otherwise: a pane that never reports

@@ -1469,7 +1469,12 @@ function sayInEmulatorNote(tab, words) {
   note.hidden = false;
 }
 
+/* 기기가 판 아래에서 사라졌다는 한 낱말. 쪽지도, 거절당한 탭도 이것을 들고
+ * 오므로 두 자리가 서로 다른 말을 할 수 없다(백엔드 `EmulatorNoteCode::code`). */
+const EMULATOR_DEVICE_OFFLINE = "device-offline";
+
 function emulatorNoteMessage(code, fallback = "") {
+  if (code === EMULATOR_DEVICE_OFFLINE) return t("emulator.deviceOffline", "기기가 꺼졌습니다 — 다시 켜지면 이어집니다.");
   if (code === "frame-unavailable") return t("emulator.frameUnavailable", "화면이 오지 않습니다. 기기가 멈춰 있으면 재부팅해 보세요.");
   if (code === "stream-ended") return t("emulator.streamEnded", "화면 연결이 종료됐습니다.");
   if (code === "video-start-failed") return t("emulator.videoStartFailed", "Android 비디오 인코더를 시작하지 못했습니다.");
@@ -1501,9 +1506,17 @@ function emulatorDoor(tab) {
  * 적혀 있었고, 그중 하나만 고쳐지는 날이 오는 것이 이 함수가 막는 일이다. */
 function sendEmulatorInput(tab, verb, extra = {}, { throttle = false } = {}) {
   const prefix = tab.platform === "android" ? "android" : "ios";
-  return invoke(`${prefix}_${verb}`, { ...emulatorDoor(tab), ...extra }).catch((error) =>
-    reportEmulatorError(tab, error, "emulator.inputFailed", throttle),
-  );
+  return invoke(`${prefix}_${verb}`, { ...emulatorDoor(tab), ...extra }).catch((error) => {
+    /* 기기가 꺼져서 거절된 입력은 「보내지 못했습니다」가 아니다 — 거절이
+     * 쪽지의 코드를 그대로 들고 오므로, 판 아래에 이미 서 있는 그 문장을
+     * 다시 말한다. 토스트를 띄우면 펌프가 조용히 기다리는 동안 사람은 제
+     * 손이 고장 난 줄 안다. */
+    if (String(error).includes(EMULATOR_DEVICE_OFFLINE)) {
+      sayInEmulatorNote(tab, emulatorNoteMessage(EMULATOR_DEVICE_OFFLINE));
+      return undefined;
+    }
+    return reportEmulatorError(tab, error, "emulator.inputFailed", throttle);
+  });
 }
 
 /* 이 판이 지금 만질 수 있는 탭 — 아니면 아무것도 아니다. 일곱 자리가 같은
@@ -2621,6 +2634,18 @@ listen("emulator:note", (event) => {
   const message = emulatorNoteMessage(code, note);
   const tab = tabs.find((one) => one.kind === "emulator" && one.stream === stream);
   if (!tab) return;
+  /* 기기가 꺼진 것은 스트림의 병이 아니다. 펌프는 그 자리에서 기다리다가
+   * 기기가 돌아오면 같은 판에 새 스트림을 잇는다 — 여기서 비디오 복구로
+   * 넘어가면 멀쩡한 스트림을 헐고 느린 녹화 길로 내려앉는다. 판은 말만
+   * 바꾸고, 첫 그림이 오는 순간 `live`가 스스로 되살아난다. */
+  if (code === EMULATOR_DEVICE_OFFLINE) {
+    sayInEmulatorNote(tab, message);
+    if (tab.live) {
+      tab.live = false;
+      paintEmulatorView(tab);
+    }
+    return;
+  }
   if (tab.video) {
     void recoverEmulatorVideo(tab, stream, message);
     return;

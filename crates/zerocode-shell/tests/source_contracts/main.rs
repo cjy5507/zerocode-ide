@@ -1056,6 +1056,48 @@ mod tests {
         );
     }
 
+    /// A device that left the bridge is a sentence, not a teardown.
+    ///
+    /// The pump rests beside an emulator that was killed under the pane and
+    /// reattaches when adb lists it again, so the note it sends must not send
+    /// the window down `recoverEmulatorVideo` — that tears a healthy stream
+    /// down and drops the pane onto the slow recorder road for a device that
+    /// is simply off. And a tap refused for the same reason carries the same
+    /// code, so the pane says one thing rather than "could not send input"
+    /// beside "the device is off" (t-5761).
+    #[test]
+    fn a_device_that_left_the_bridge_is_said_once_and_keeps_its_stream() {
+        let source = window_source();
+
+        let noting = block_after(source, r#"listen("emulator:note", (event) => {"#);
+        let offline = noting
+            .find("EMULATOR_DEVICE_OFFLINE")
+            .expect("the note listener never names an offline device");
+        let recovering = noting
+            .find("recoverEmulatorVideo")
+            .expect("the note listener lost its video recovery");
+        assert!(
+            offline < recovering,
+            "a device that is merely off still tears its stream down:\n{noting}"
+        );
+        assert!(
+            noting[offline..recovering].contains("return;"),
+            "an offline device falls through to the video recovery:\n{noting}"
+        );
+
+        let sending = block_after(source, "function sendEmulatorInput(");
+        assert!(
+            sending.contains("EMULATOR_DEVICE_OFFLINE") && sending.contains("sayInEmulatorNote("),
+            "a tap refused because the device is gone still raises the generic \
+             input error:\n{sending}"
+        );
+        // One spelling, and it is the backend's own.
+        assert!(
+            source.contains(r#"const EMULATOR_DEVICE_OFFLINE = "device-offline";"#),
+            "the window spells the offline note differently from the pump"
+        );
+    }
+
     /// Powering the emulator off does not leave an empty pane — a plain shell
     /// stands in the same seat ("ios를 끄면 화면이 비[어] … 자동으로 터미널창이
     /// 켜져야함"). Three details carry the meaning: the shell is seated BEFORE
@@ -8271,8 +8313,83 @@ mod tests {
         }
         assert!(
             block_after(android_emulator, "fn shutdown_android_emulator(")
-                .contains("android_serial_is_live"),
+                .contains("device_presence(&sdk.adb, &serial) == DevicePresence::Gone"),
             "Android shutdown stopped validating its post-stream serial with adb"
+        );
+        // And there is ONE reading of "is the device there". The mirror, the
+        // recorder, the input door and the two serial guards all ask it, so a
+        // killed emulator cannot be absent to one road and present to
+        // another — which is how a pane came to push a scrcpy jar 6.7 times a
+        // second at a serial adb had not had for two minutes (t-5761).
+        assert_eq!(
+            android_emulator.matches("fn device_presence(").count(),
+            1,
+            "a second answer to \"is the device on the bridge\" appeared"
+        );
+        assert!(
+            !android_emulator.contains("fn android_serial_is_live("),
+            "the old listing-road liveness check is back beside the one verdict"
+        );
+        for road in [
+            "fn pump_android_video(",
+            "fn pump_android_frames(",
+            "fn android_control(",
+        ] {
+            assert!(
+                block_after(android_emulator, road).contains("device_presence(")
+                    || block_after(android_emulator, road).contains("absence.absent("),
+                "{road} tries the device without reading whether it is there"
+            );
+        }
+        // A rest, and a named one: both pumps wait out an absence on the same
+        // interval instead of spinning, and the note the pane gets says the
+        // DEVICE is off rather than blaming the stream.
+        for road in ["fn pump_android_video(", "fn pump_android_frames("] {
+            let pumping = block_after(android_emulator, road);
+            assert!(
+                pumping.contains("control.rest(DEVICE_ABSENT_REST);"),
+                "{road} hammers an absent device instead of resting on it"
+            );
+        }
+        // One reading, published once: the pane hears "the device is off",
+        // and the input door is told without spending a process to ask.
+        let seeing = block_after(android_emulator, "fn saw(&mut self,");
+        assert!(
+            seeing.contains("EmulatorNoteCode::DeviceOffline")
+                && seeing.contains("self.gone_since.is_none()"),
+            "an absent device stopped telling the pane what happened, or \
+             tells it once a second:\n{seeing}"
+        );
+        assert!(
+            seeing.contains("note_on_the_bridge("),
+            "the pump keeps its reading to itself, so every input pays a \
+             process to learn it:\n{seeing}"
+        );
+        // And a frame that arrived is evidence the device is back — a watch
+        // left holding an absence goes on refusing the taps of a live device.
+        let framing = block_after(android_emulator, "fn pump_android_frames(");
+        assert!(
+            framing.contains("absence.answered()"),
+            "the frame pump never tells its watch the device answered"
+        );
+        // And nothing is spawned AT a device already known to be gone: the
+        // rest comes before the capture, not after it.
+        let resting = framing
+            .find("absence.is_gone() && absence.absent(&adb)")
+            .expect("the frame pump photographs a device it knows is gone");
+        let capturing = framing
+            .find(r#""exec-out", "screencap""#)
+            .expect("the frame pump lost its capture");
+        assert!(
+            resting < capturing,
+            "an absent device is photographed before it is rested on:\n{framing}"
+        );
+        // The refusal a tap gets carries the note's own word, so the pane says
+        // one thing about a dead device rather than two.
+        assert!(
+            block_after(android_emulator, "fn android_control(")
+                .contains("EmulatorNoteCode::DeviceOffline.code()"),
+            "an input refused for an absent device stopped naming the note"
         );
         // One table says where `adb` and `emulator` live, and only
         // `SdkEnvironment::current` reads the environment that table walks. A

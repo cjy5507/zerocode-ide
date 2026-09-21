@@ -63,6 +63,37 @@ const ANDROID_STREAM_BIT_RATE: &str = "8000000";
 /// instead, and the turn after asks the mirror once more.
 const SCRCPY_STOOD_UP: Duration = Duration::from_secs(1);
 const MISSES_BEFORE_NOTE: u32 = 2;
+/// The one spelling of what an emulator serial looks like.
+const EMULATOR_SERIAL_PREFIX: &str = "emulator-";
+/// How long a pump waits before asking `adb` again about a device that is not
+/// on the bridge.
+///
+/// A pane whose emulator was killed under it used to spend its whole existence
+/// starting things for a device that was gone: measured in the field on 1.1.11
+/// (2026-09-21 20:09), 149 `scrcpy refused` lines in two minutes — 6.7 tries a
+/// second, each one an `adb push` of a 70 KB jar, a `dumpsys input` and an
+/// encoder spawn. Resting here instead costs one `adb get-state` a second
+/// (11.7 ms median, measured on an idle API 35 emulator).
+///
+/// A second, and not longer, because this interval is also how long the pane
+/// stays dark AFTER the device comes back: the pump can only notice a return
+/// when it next looks. One second keeps the whole reattachment — look, push,
+/// tunnel, first picture — inside the three the pane is given.
+const DEVICE_ABSENT_REST: Duration = Duration::from_secs(1);
+/// How long the video pump waits after a turn in which the device, though
+/// `adb` lists it, gave back nothing at all.
+///
+/// Being on the bridge is not the same as being able to show a picture. A
+/// restarting AVD answers `adb get-state` with `device` well before its
+/// framework is up: measured across three kill-and-revive rounds on an API 35
+/// emulator, 1.0 s, 13.5 s and 8.3 s passed between `adb` listing the serial
+/// and `scrcpy` being able to open on it. 1.1.11 spent every one of those
+/// seconds starting a mirror, a size read and an encoder six times over.
+///
+/// A turn that carried bytes is respawned on [`VIDEO_RESTART_INTERVAL`]
+/// instead — that one is a recorder reaching its time limit, and the mirror
+/// must not blink while it is replaced.
+const DEVICE_WAKING_REST: Duration = Duration::from_secs(1);
 const MANAGED_PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const MANAGED_FILE_NAME: &str = "android-emulators.json";
 const MANAGED_FILE_VERSION: u32 = 1;
@@ -950,7 +981,7 @@ fn android_running(adb: &Path) -> Vec<(String, String)> {
             let mut columns = line.split_whitespace();
             let serial = columns.next()?;
             let state = columns.next()?;
-            if state != "device" || !serial.starts_with("emulator-") {
+            if state != "device" || !serial.starts_with(EMULATOR_SERIAL_PREFIX) {
                 return None;
             }
             let avd = android_avd_name(adb, serial).unwrap_or_default();
@@ -1200,8 +1231,149 @@ fn list_android_devices() -> Result<Vec<AndroidDevice>, String> {
     Ok(devices)
 }
 
-fn android_serial_is_live(adb: &Path, serial: &str) -> bool {
-    android_running(adb).iter().any(|(live, _)| live == serial)
+/// Whether one serial is on the bridge — the single absence verdict this
+/// module has.
+///
+/// The mirror, the recorder and every input door read it, because "is the
+/// device there" is one question and three answers to it is how a pane ends up
+/// pushing a jar at a serial `adb` has not had for two minutes while the
+/// person is told their tap failed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DevicePresence {
+    /// `adb` lists it as `device`: it can be pushed to, recorded and typed at.
+    OnTheBridge,
+    /// Gone from the list, or listed in a state that refuses work — `offline`
+    /// while it boots or dies, `unauthorized`, `bootloader`.
+    Gone,
+}
+
+/// Read the bridge once, for one serial.
+///
+/// `adb get-state` and not `adb devices -l`: it answers the same question
+/// about the serial actually being asked about, in one process that never
+/// reaches the device's shell — 11.7 ms median against a live emulator, and
+/// the same 10–11 ms when the device is gone, because the adb SERVER refuses
+/// it. The listing road costs `devices -l` plus an `emu avd name` per device
+/// (15.1 + 16.5 ms each, measured) to learn names nobody asked for.
+fn device_presence(adb: &Path, serial: &str) -> DevicePresence {
+    // Only emulators are ever streamed, tapped or shut down here, and the
+    // listing road has always enforced that. `get-state` would happily answer
+    // for a phone on a cable, so the rule travels with the verdict.
+    if !serial.starts_with(EMULATOR_SERIAL_PREFIX) {
+        return DevicePresence::Gone;
+    }
+    let said = crate::proc::quiet_command(adb)
+        .args(["-s", serial, "get-state"])
+        .output()
+        .ok()
+        .filter(|answer| answer.status.success())
+        .map(|answer| String::from_utf8_lossy(&answer.stdout).trim().to_string());
+    presence_of(said.as_deref())
+}
+
+/// What one `adb get-state` answer means. `None` is the command itself having
+/// refused, which is what a serial no longer on the bridge produces.
+fn presence_of(said: Option<&str>) -> DevicePresence {
+    match said {
+        Some("device") => DevicePresence::OnTheBridge,
+        _ => DevicePresence::Gone,
+    }
+}
+
+/// One pump's memory of a device that went away.
+///
+/// The pane's note and the black box's line are written ONCE per absence
+/// rather than once per look, and the return is written with how long it
+/// lasted. That is the difference between a log naming an event and a log
+/// filling with 149 copies of it.
+///
+/// It also publishes each reading on the session, where the input door reads
+/// it for nothing — a tap turned away in the pane's own words costs no process
+/// at all while the device is healthy.
+struct AbsenceWatch {
+    app: AppHandle,
+    stream: String,
+    husk_root: PathBuf,
+    control: Arc<SessionControl>,
+    serial: String,
+    gone_since: Option<Instant>,
+}
+
+impl AbsenceWatch {
+    fn new(
+        app: &AppHandle,
+        stream: &str,
+        husk_root: &Path,
+        control: &Arc<SessionControl>,
+        serial: &str,
+    ) -> Self {
+        Self {
+            app: app.clone(),
+            stream: stream.to_string(),
+            husk_root: husk_root.to_path_buf(),
+            control: Arc::clone(control),
+            serial: serial.to_string(),
+            gone_since: None,
+        }
+    }
+
+    /// Is this watch already holding an absence? A field, not a process —
+    /// the road that photographs a device every 120 ms asks this first and
+    /// only pays `adb` once it has reason to.
+    const fn is_gone(&self) -> bool {
+        self.gone_since.is_some()
+    }
+
+    /// Ask `adb` itself. `true` means the device is not there — rest, and try
+    /// nothing at it.
+    fn absent(&mut self, adb: &Path) -> bool {
+        let presence = device_presence(adb, &self.serial);
+        self.saw(presence);
+        presence == DevicePresence::Gone
+    }
+
+    /// A picture arrived, which only a live device produces.
+    ///
+    /// Cheaper evidence than a process, and the road holding it must hand it
+    /// over: a watch left holding an absence goes on refusing the taps of a
+    /// device that came back, and a pump that asked `adb` on every healthy
+    /// frame would pay 11.7 ms for what the frame already proved.
+    fn answered(&mut self) {
+        self.saw(DevicePresence::OnTheBridge);
+    }
+
+    fn saw(&mut self, presence: DevicePresence) {
+        self.control
+            .note_on_the_bridge(presence == DevicePresence::OnTheBridge);
+        let stream = &self.stream;
+        let serial = &self.serial;
+        match presence {
+            DevicePresence::Gone => {
+                if self.gone_since.is_none() {
+                    self.gone_since = Some(Instant::now());
+                    emit_note(&self.app, stream, EmulatorNoteCode::DeviceOffline);
+                    crate::note_window_event(
+                        &self.husk_root,
+                        &format!(
+                            "emulator android {stream}: {serial} left the bridge; \
+                             looking every {DEVICE_ABSENT_REST:?} until it is back"
+                        ),
+                    );
+                }
+            }
+            DevicePresence::OnTheBridge => {
+                if let Some(since) = self.gone_since.take() {
+                    crate::note_window_event(
+                        &self.husk_root,
+                        &format!(
+                            "emulator android {stream}: {serial} back on the bridge after {:?}",
+                            since.elapsed()
+                        ),
+                    );
+                }
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -1233,7 +1405,7 @@ pub(crate) async fn android_emulators_direct() -> Result<Vec<AndroidDevice>, Str
 pub(crate) async fn android_screenshot_direct(serial: String) -> Result<Vec<u8>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let sdk = android_sdk().map_err(|search| search.to_string())?;
-        if !android_serial_is_live(&sdk.adb, &serial) {
+        if device_presence(&sdk.adb, &serial) == DevicePresence::Gone {
             return Err(format!("Android device `{serial}` is not running"));
         }
         let output = crate::proc::quiet_command(&sdk.adb)
@@ -1410,15 +1582,28 @@ fn pump_android_frames(
     control: Arc<SessionControl>,
 ) {
     let _finished = FinishSession::new(stream.clone());
+    let husk_root = app
+        .state::<crate::AppState>()
+        .local_data_root()
+        .to_path_buf();
     let frame = capture_path(&stream);
     if let Some(parent) = frame.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
     let mut misses = pump::MissCounter::new(MISSES_BEFORE_NOTE);
+    let mut absence = AbsenceWatch::new(&app, &stream, &husk_root, &control, &serial);
     let mut unchanged = 0u32;
     let mut last_fingerprint = None;
     let mut last_emitted = None;
     while control.wait_until_running() {
+        // A device already known to be gone is not photographed on the chance
+        // that it came back. The watch's own memory is free; only when it
+        // holds an absence is `adb` asked, and nothing at all is spawned at
+        // the device until it answers.
+        if absence.is_gone() && absence.absent(&adb) {
+            control.rest(DEVICE_ABSENT_REST);
+            continue;
+        }
         if !control.wait_for_payload_slot() {
             continue;
         }
@@ -1437,21 +1622,29 @@ fn pump_android_frames(
         if !control.install_child(child) {
             continue;
         }
-        if !wait_for_child(&control, CAPTURE_TIMEOUT) {
+        let captured = wait_for_child(&control, CAPTURE_TIMEOUT)
+            .then(|| read_bounded(&frame).ok())
+            .flatten();
+        let Some(bytes) = captured else {
             if control.is_alive() && !control.is_paused() {
-                if misses.missed() {
-                    emit_note(&app, &stream, EmulatorNoteCode::FrameUnavailable);
+                // A capture that came back with nothing is the FIRST place a
+                // device's absence shows, and the only place worth asking adb
+                // about it: a healthy pane takes a picture every 120 ms and
+                // must not pay a process each time to be told what the
+                // picture already proved.
+                if absence.absent(&adb) {
+                    control.rest(DEVICE_ABSENT_REST);
+                } else {
+                    if misses.missed() {
+                        emit_note(&app, &stream, EmulatorNoteCode::FrameUnavailable);
+                    }
+                    control.rest(IDLE_CAPTURE_INTERVAL);
                 }
-                control.rest(IDLE_CAPTURE_INTERVAL);
             }
-            continue;
-        }
-        let Ok(bytes) = read_bounded(&frame) else {
-            misses.missed();
-            control.rest(IDLE_CAPTURE_INTERVAL);
             continue;
         };
         misses.hit();
+        absence.answered();
         let fingerprint = pump::frame_fingerprint(&bytes);
         let changed = last_fingerprint != Some(fingerprint);
         let refresh_due =
@@ -1658,7 +1851,18 @@ fn pump_android_video(
         .state::<crate::AppState>()
         .local_data_root()
         .to_path_buf();
+    let mut absence = AbsenceWatch::new(&app, &stream, &husk_root, &control, &serial);
     while control.wait_until_running() {
+        // The device itself first, once, before anything is pushed to it.
+        // Both roads below end at the same device, so both are the same waste
+        // when it is gone: measured, a killed emulator had this loop pushing
+        // the scrcpy jar 6.4 times a second for as long as the pane stayed
+        // open. A turn here is a whole mirror session, so the one reading
+        // costs 11.7 ms against the 226 ms the session start costs anyway.
+        if absence.absent(&sdk.adb) {
+            control.rest(DEVICE_ABSENT_REST);
+            continue;
+        }
         // The mirror first, when this machine has the helper for it. scrcpy
         // does its own scaling, so it is handed the long edge rather than a
         // shape — and it needs no `--size` arithmetic from this side at all.
@@ -1740,6 +1944,7 @@ fn pump_android_video(
             continue;
         }
         let mut bytes = [0u8; 64 * 1024];
+        let mut carried = false;
         loop {
             let Ok(read) = output.read(&mut bytes) else {
                 break;
@@ -1747,6 +1952,7 @@ fn pump_android_video(
             if read == 0 || !control.is_alive() || control.is_paused() {
                 break;
             }
+            carried = true;
             if !matches!(
                 emit_bytes(
                     &app,
@@ -1764,7 +1970,17 @@ fn pump_android_video(
         }
         control.kill_child();
         if control.is_alive() && !control.is_paused() {
-            control.rest(VIDEO_RESTART_INTERVAL);
+            // A turn that carried pictures and ended is a recorder reaching
+            // its time limit: replace it at once, or the mirror blinks. A
+            // turn that carried NOTHING — no mirror, no frame — is a device
+            // that is listed but not yet showing anything, and trying it
+            // again a tenth of a second later is the loop this task came
+            // from, only with the serial present.
+            control.rest(if carried {
+                VIDEO_RESTART_INTERVAL
+            } else {
+                DEVICE_WAKING_REST
+            });
         }
     }
     control.kill_child();
@@ -1840,12 +2056,21 @@ pub(crate) async fn start_emulator_video(
     .map_err(|error| error.to_string())?
 }
 
+/// The one door every tap, keystroke, tree read and log tail comes through.
+///
+/// It is also where a device that is gone turns them away — in the pane's own
+/// words rather than in `adb`'s, and without spending a process to say so: the
+/// pump leaves its last reading on the session, and only a reading that says
+/// "gone" is worth the [`device_presence`] call that confirms it.
 fn android_control(serial: &str) -> Result<(AndroidSdk, Arc<SessionControl>), String> {
     let sdk = android_sdk().map_err(|search| search.to_string())?;
     let control = registry()
         .target_control(EmulatorPlatform::Android, serial)
         .filter(|control| control.is_alive())
         .ok_or("이 Android 에뮬레이터 스트림은 실행 중이 아닙니다")?;
+    if !control.was_on_the_bridge() && device_presence(&sdk.adb, serial) == DevicePresence::Gone {
+        return Err(EmulatorNoteCode::DeviceOffline.code().to_string());
+    }
     Ok((sdk, control))
 }
 
@@ -2173,7 +2398,7 @@ pub(crate) async fn shutdown_android_emulator(
     crate::from_the_main_webview(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
         let sdk = android_sdk().map_err(|search| search.to_string())?;
-        if !android_serial_is_live(&sdk.adb, &serial) {
+        if device_presence(&sdk.adb, &serial) == DevicePresence::Gone {
             stop_managed_device(&serial);
             return Ok(());
         }
@@ -2528,6 +2753,378 @@ mod tests {
             preboot_candidate(root.path(), now).as_deref(),
             Some("Pixel_9")
         );
+    }
+
+    /// Only `device` is a device. Everything `adb` can say instead — a state
+    /// that refuses work, a failed command, a blank line — is absence, and it
+    /// is absence for the mirror, the recorder and the input door alike.
+    #[test]
+    fn only_a_serial_adb_calls_device_counts_as_being_there() {
+        assert_eq!(presence_of(Some("device")), DevicePresence::OnTheBridge);
+        for said in [
+            "offline",
+            "unauthorized",
+            "bootloader",
+            "recovery",
+            "",
+            "unknown",
+        ] {
+            assert_eq!(
+                presence_of(Some(said)),
+                DevicePresence::Gone,
+                "`adb get-state` said {said:?} and that was taken for a device"
+            );
+        }
+        // The command itself refusing — `error: device 'emulator-5554' not
+        // found`, which is what a killed emulator produces — is the ordinary
+        // way this question is answered, not an exception to it.
+        assert_eq!(presence_of(None), DevicePresence::Gone);
+    }
+
+    /// A serial that is not an emulator's is never asked about.
+    ///
+    /// The listing road has always dropped a phone on a cable, and the
+    /// verdict the three roads now share has to carry that rule with it —
+    /// `adb get-state` would answer `device` for one happily. The path is a
+    /// name nothing can run, so a verdict of anything but `Gone` would have
+    /// meant the rule was read after the process was spawned.
+    #[test]
+    fn a_serial_that_is_not_an_emulators_is_gone_without_asking_adb() {
+        assert_eq!(
+            device_presence(Path::new("/nonexistent/adb"), "R5CT21ABCDE"),
+            DevicePresence::Gone
+        );
+        assert!(EMULATOR_SERIAL_PREFIX.ends_with('-'));
+    }
+
+    /// The rest is a named interval, long enough to be a rest and short
+    /// enough that the pane it darkens comes back inside its three seconds.
+    ///
+    /// The ceiling is the whole reattachment: this look, then the push,
+    /// tunnel and handshake that follow it (945 ms to the readiness byte,
+    /// measured in [`crate::scrcpy`]).
+    #[test]
+    fn the_absent_rest_is_a_second_not_a_hot_loop() {
+        assert!(
+            DEVICE_ABSENT_REST >= Duration::from_secs(1),
+            "resting less than a second is the loop this replaced"
+        );
+        assert!(
+            DEVICE_ABSENT_REST + Duration::from_millis(945) <= Duration::from_secs(3),
+            "the pane cannot come back inside three seconds from this rest"
+        );
+    }
+
+    /// What a killed emulator costs a pane, measured rather than argued.
+    ///
+    /// Ignored by default: it needs a real device, and it KILLS the one it is
+    /// given twice over, which is why nothing is assumed and everything is
+    /// named. Give it the COPY of an AVD on a port of its own — never the
+    /// device a window is holding.
+    ///
+    /// ```text
+    /// ZEROCODE_LIVE_ADB=$ANDROID_HOME/platform-tools/adb \
+    /// ZEROCODE_LIVE_EMULATOR=$ANDROID_HOME/emulator/emulator \
+    /// ZEROCODE_LIVE_SERIAL=emulator-5560 \
+    /// ZEROCODE_LIVE_AVD=t5761_probe \
+    /// ZEROCODE_LIVE_SCRCPY_JAR=~/Library/Application\ Support/dev.zerocode.app/scrcpy/scrcpy-server-v3.3.4.jar \
+    ///   cargo test -p zerocode-shell -- --ignored --nocapture a_killed_emulator
+    /// ```
+    ///
+    /// Both roads are run against the same device under the same conditions:
+    /// the one 1.1.11 shipped, written out here because it is the CONTROL and
+    /// no longer exists in the pump, and the one this lands. Each pass kills
+    /// the device, measures what the pump does with the gap, stands the AVD
+    /// back up and measures how long the pane stays dark AFTER `adb` lists the
+    /// serial again — the boot itself is the device's own and belongs to
+    /// neither road.
+    #[test]
+    #[ignore = "needs a real Android device it is allowed to kill"]
+    fn a_killed_emulator_is_rested_on_by_one_road_and_hammered_by_the_other() {
+        let (Ok(adb), Ok(emulator), Ok(serial), Ok(avd), Ok(jar)) = (
+            std::env::var("ZEROCODE_LIVE_ADB"),
+            std::env::var("ZEROCODE_LIVE_EMULATOR"),
+            std::env::var("ZEROCODE_LIVE_SERIAL"),
+            std::env::var("ZEROCODE_LIVE_AVD"),
+            std::env::var("ZEROCODE_LIVE_SCRCPY_JAR"),
+        ) else {
+            println!("LIVE: no device named; nothing measured");
+            return;
+        };
+        let adb = PathBuf::from(adb);
+        let jar = PathBuf::from(jar);
+        let emulator = PathBuf::from(emulator);
+        let port = serial
+            .strip_prefix(EMULATOR_SERIAL_PREFIX)
+            .expect("an emulator serial")
+            .to_string();
+        let sdk = AndroidSdk {
+            root: emulator.clone(),
+            adb: adb.clone(),
+            emulator: Ok(emulator.clone()),
+        };
+        /// How long each road is watched while the device is away.
+        const WATCHED: Duration = Duration::from_secs(10);
+        /// How closely the witness stamps the device's return. The error in
+        /// every reattachment below is bounded by this, and it is the same
+        /// for both roads.
+        const WITNESS_TICK: Duration = Duration::from_millis(100);
+
+        let kill = |adb: &Path| {
+            let asked = Instant::now();
+            let _ = crate::proc::quiet_command(adb)
+                .args(["-s", &serial, "emu", "kill"])
+                .status();
+            while device_presence(adb, &serial) == DevicePresence::OnTheBridge {
+                assert!(
+                    asked.elapsed() < Duration::from_secs(60),
+                    "it would not die"
+                );
+                std::thread::sleep(WITNESS_TICK);
+            }
+            asked.elapsed()
+        };
+        // An independent witness, so the two moments that matter are stamped
+        // by neither road under test: when `adb` LISTS the serial again, and
+        // when the device can actually show something. They are not the same
+        // moment, which is the whole finding here.
+        let stand_up = |adb: PathBuf| {
+            let standing = crate::proc::quiet_command(&emulator)
+                .args([
+                    "-avd",
+                    &avd,
+                    "-no-window",
+                    "-no-boot-anim",
+                    "-no-snapshot",
+                    "-port",
+                    &port,
+                ])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("the AVD stands back up");
+            let seen = Arc::new(Mutex::new((None, None)));
+            let stamp = Arc::clone(&seen);
+            let serial = serial.clone();
+            let watching = std::thread::spawn(move || {
+                let asked = Instant::now();
+                while device_presence(&adb, &serial) == DevicePresence::Gone {
+                    assert!(asked.elapsed() < BOOT_TIMEOUT, "it never came back");
+                    std::thread::sleep(WITNESS_TICK);
+                }
+                held(&stamp).0 = Some(Instant::now());
+                // "Able to show something", asked the way the FRAME road
+                // asks it, because it is the one readiness probe that does
+                // not disturb the mirror: a second `scrcpy` on one device
+                // pushes over the jar the road under test is using.
+                // `sys.boot_completed` was tried first and is the wrong
+                // witness — measured, a mirror opens BEFORE the framework
+                // declares the boot done, so every gap came out as zero.
+                loop {
+                    let showing = crate::proc::quiet_command(&adb)
+                        .args(["-s", &serial, "exec-out", "screencap", "-p"])
+                        .output()
+                        .ok()
+                        .filter(|answer| answer.status.success())
+                        .is_some_and(|answer| !answer.stdout.is_empty());
+                    if showing {
+                        held(&stamp).1 = Some(Instant::now());
+                        return;
+                    }
+                    assert!(asked.elapsed() < BOOT_TIMEOUT, "it never woke up");
+                    std::thread::sleep(WITNESS_TICK);
+                }
+            });
+            (standing, seen, watching)
+        };
+
+        // ---- the road 1.1.11 shipped: push, size, encoder, a tenth of a second
+        assert_eq!(
+            device_presence(&adb, &serial),
+            DevicePresence::OnTheBridge,
+            "the device to be killed is not there to begin with"
+        );
+        // One turn of it, answering whether the mirror opened. The recorder
+        // half is spawned and then collected rather than read: a LIVE
+        // `screenrecord` fills its pipe and blocks for its whole time limit,
+        // which the pump avoids by reading the pipe and which a measurement
+        // has no use for.
+        let hammer = || {
+            let mirrored = crate::scrcpy::start(
+                &adb,
+                &serial,
+                &jar,
+                VIDEO_MAX_DIMENSION,
+                ANDROID_STREAM_BIT_RATE,
+            )
+            .is_ok()
+            // Stamped where the pump would write its "mirroring" line, not at
+            // the end of the turn: the recorder half and the rest below it
+            // are what this road does INSTEAD, and charging them to the
+            // reattachment would flatter the road that replaces it.
+            .then(Instant::now);
+            let _ = bounded_video_size(&sdk, &serial);
+            let born = crate::proc::quiet_command(&adb)
+                .args([
+                    "-s",
+                    &serial,
+                    "exec-out",
+                    "screenrecord",
+                    "--output-format=h264",
+                    "--time-limit",
+                    VIDEO_TIME_LIMIT_SECONDS,
+                    "-",
+                ])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn();
+            if let Ok(mut child) = born {
+                let until = Instant::now() + VIDEO_RESTART_INTERVAL;
+                while Instant::now() < until && matches!(child.try_wait(), Ok(None)) {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            std::thread::sleep(VIDEO_RESTART_INTERVAL);
+            mirrored
+        };
+        println!("LIVE: {serial} died in {:?}", kill(&adb));
+        // What the pane cannot do while the device is away, measured on the
+        // input door rather than argued about.
+        let refused = Instant::now();
+        let said = read_android_screen_size(&sdk, &serial).expect_err("a gone device has no size");
+        let old_refusal = refused.elapsed();
+        let mut hammered = 0u32;
+        let until = Instant::now() + WATCHED;
+        while Instant::now() < until {
+            assert!(hammer().is_none(), "the device came back mid-measurement");
+            hammered += 1;
+        }
+        // The frame road's own version of the same waste: a `screencap` at a
+        // serial that is gone, once an idle interval, forever. Its rested
+        // replacement is the loop measured below — the two pumps share one
+        // watch and one rest, so it is counted once.
+        let mut photographed = 0u32;
+        let until = Instant::now() + WATCHED;
+        while Instant::now() < until {
+            let born = crate::proc::quiet_command(&adb)
+                .args(["-s", &serial, "exec-out", "screencap", "-p"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            if let Ok(mut child) = born {
+                let _ = child.wait();
+            }
+            photographed += 1;
+            std::thread::sleep(IDLE_CAPTURE_INTERVAL);
+        }
+        let (mut standing, seen, watching) = stand_up(adb.clone());
+        let mut mirror = None;
+        while mirror.is_none() {
+            mirror = hammer();
+        }
+        watching.join().expect("the witness");
+        let mirror = mirror.expect("a mirror");
+        let (listed, ready) = *held(&seen);
+        let old_dark = (
+            mirror - listed.expect("a return"),
+            mirror.saturating_duration_since(ready.expect("a boot")),
+        );
+        let _ = standing.kill();
+        let _ = standing.wait();
+
+        // ---- the road this lands: one reading, then a rest
+        println!("LIVE: {serial} died in {:?}", kill(&adb));
+        let refused = Instant::now();
+        let new_refusal_says = (device_presence(&adb, &serial) == DevicePresence::Gone)
+            .then(|| EmulatorNoteCode::DeviceOffline.code());
+        let new_refusal = refused.elapsed();
+        let mut looked = 0u32;
+        let until = Instant::now() + WATCHED;
+        while Instant::now() < until {
+            assert_eq!(
+                device_presence(&adb, &serial),
+                DevicePresence::Gone,
+                "the device came back mid-measurement"
+            );
+            looked += 1;
+            std::thread::sleep(DEVICE_ABSENT_REST);
+        }
+        let (mut standing, seen, watching) = stand_up(adb.clone());
+        // The pump's own shape: a device that is not there is rested on, and
+        // one that is there but gives nothing back is rested on too — for a
+        // named interval each, rather than a tenth of a second.
+        let mirror = loop {
+            if device_presence(&adb, &serial) == DevicePresence::Gone {
+                std::thread::sleep(DEVICE_ABSENT_REST);
+                continue;
+            }
+            if crate::scrcpy::start(
+                &adb,
+                &serial,
+                &jar,
+                VIDEO_MAX_DIMENSION,
+                ANDROID_STREAM_BIT_RATE,
+            )
+            .is_ok()
+            {
+                break Instant::now();
+            }
+            std::thread::sleep(DEVICE_WAKING_REST);
+        };
+        watching.join().expect("the witness");
+        let (listed, ready) = *held(&seen);
+        let new_dark = (
+            mirror - listed.expect("a return"),
+            mirror.saturating_duration_since(ready.expect("a boot")),
+        );
+        let _ = standing.kill();
+        let _ = standing.wait();
+
+        let rate = |count: u32| f64::from(count) / WATCHED.as_secs_f64();
+        println!("LIVE: ---- t-5761, {serial}, {WATCHED:?} absent, witness every {WITNESS_TICK:?}");
+        println!(
+            "LIVE: mirror tries a second        1.1.11 {:.1}   rested {:.1}",
+            rate(hammered),
+            rate(looked)
+        );
+        println!(
+            "LIVE: frame tries a second         1.1.11 {:.1}   rested {:.1} (the same one look)",
+            rate(photographed),
+            rate(looked)
+        );
+        let ms = |gap: Duration| gap.as_secs_f64() * 1000.0;
+        println!(
+            "LIVE: dark after adb lists it      1.1.11 {:.0} ms   rested {:.0} ms",
+            ms(old_dark.0),
+            ms(new_dark.0)
+        );
+        // Zero here is the answer, not a missing one: the mirror was already
+        // up by the time an independent probe got its first picture out of
+        // the device. Anything else is the pane waiting on its own rests
+        // after the device was ready to serve, which is what the three
+        // seconds are a ceiling on.
+        println!(
+            "LIVE: behind the first picture     1.1.11 {:.0} ms   rested {:.0} ms",
+            ms(old_dark.1),
+            ms(new_dark.1)
+        );
+        println!(
+            "LIVE: an input while absent         1.1.11 {:.0} ms {said:?}   rested {:.0} ms {new_refusal_says:?}",
+            old_refusal.as_secs_f64() * 1000.0,
+            new_refusal.as_secs_f64() * 1000.0
+        );
+        assert!(
+            rate(looked) <= 1.0,
+            "the rested road is looking more than once a second"
+        );
+        assert!(
+            new_dark.1 <= Duration::from_secs(3),
+            "the pane stays dark longer than the three seconds it is given \
+             after the device can show something"
+        );
+        assert_eq!(new_refusal_says, Some("device-offline"));
     }
 
     #[test]
