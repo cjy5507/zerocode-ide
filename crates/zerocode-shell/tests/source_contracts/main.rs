@@ -8208,6 +8208,36 @@ mod tests {
                 .contains("android_serial_is_live"),
             "Android shutdown stopped validating its post-stream serial with adb"
         );
+        // One table says where `adb` and `emulator` live, and only
+        // `SdkEnvironment::current` reads the environment that table walks. A
+        // second reader is how a window opened from the Dock — minimal PATH,
+        // no `ANDROID_*` (trap 307) — came to screenshot a live device it
+        // could not touch (t-5446/t-5451).
+        let environment = block_after(android_emulator, "fn current() -> Self {");
+        for road in [
+            r#"var_os("ANDROID_SDK_ROOT")"#,
+            r#"var_os("ANDROID_HOME")"#,
+            "dirs::home_dir()",
+        ] {
+            assert!(
+                environment.contains(road),
+                "the one SDK environment stopped reading {road}"
+            );
+            assert_eq!(
+                android_emulator.matches(road).count(),
+                1,
+                "{road} is read outside the one SDK environment"
+            );
+        }
+        // And `adb` alone carries a device that is already running: the
+        // emulator package is asked for the AVD list, never for the frames,
+        // taps or tree of a device adb can already see.
+        let listing = block_after(android_emulator, "fn list_android_devices(");
+        assert!(
+            listing.contains("android_running(&sdk.adb)")
+                && listing.contains("if devices.is_empty()"),
+            "a missing emulator package hides devices adb can already reach:\n{listing}"
+        );
         let videoing = block_after(android_emulator, "fn pump_android_video(");
         assert!(
             videoing.contains("VIDEO_TIME_LIMIT_SECONDS")
