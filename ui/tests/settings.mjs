@@ -258,6 +258,7 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "vault.sessionLimit": 200,
   "artifacts_retention_days": 0,
   "diff_side_by_side": true,
+  "conversation_focus_view": false,
   "window_material": { "terminal_opacity": 1.0, "blur": false },
   "default_agent": { "kind": "auto" },
   "agent_teams_mode": "panes",
@@ -667,7 +668,7 @@ const SETTINGS_MUTATION_COMMANDS = new Set([
   "set_terminal_opacity",
   "set_window_blur", "set_agent_teams_mode", "set_default_agent",
   "set_shortcut_visibility", "set_task_source_visibility", "set_keybinding",
-  "set_diff_side_by_side", "set_confirm_close_pinned",
+  "set_diff_side_by_side", "set_conversation_focus_view", "set_confirm_close_pinned",
   "set_skip_close_terminal_with_running_process_confirm", "set_ctrl_tab_order_mode",
   "patch_workspace_creation_prefs",
   "patch_floating_workspace",
@@ -1252,6 +1253,10 @@ class StatefulBackend {
       case "set_diff_side_by_side":
         this.settings.diff_side_by_side = args.on === true;
         keys = ["diff_side_by_side"];
+        break;
+      case "set_conversation_focus_view":
+        this.settings.conversation_focus_view = args.on === true;
+        keys = ["conversation_focus_view"];
         break;
       case "set_confirm_close_pinned":
         this.settings.confirm_close_pinned = args.on === true;

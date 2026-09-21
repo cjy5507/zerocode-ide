@@ -812,6 +812,34 @@ pub(crate) fn set_diff_side_by_side(
     )
 }
 
+/// Whether a conversation folds each turn's tool work behind one summary row
+/// — the extension's 「Focus view」 (2.1.221).
+///
+/// A view preference and not a page one, for `set_diff_side_by_side`'s reason:
+/// a person asks for the quieter transcript once, and every conversation they
+/// open afterwards — a helper's page, a pane's view, a wire's session — is the
+/// one they asked for. The toggle stands on the conversation's own head rather
+/// than in the settings window, the way the extension keeps it in its command
+/// menu: it is reached while reading, not while configuring.
+#[tauri::command(async)]
+pub(crate) fn set_conversation_focus_view(
+    app: AppHandle,
+    webview: tauri::Webview,
+    state: State<'_, AppState>,
+    on: bool,
+) -> Result<SettingsSnapshot, String> {
+    commit_setting(
+        &app,
+        &webview,
+        &state,
+        &[setting_key::CONVERSATION_FOCUS_VIEW],
+        move |settings| {
+            settings.conversation_focus_view = on;
+            Ok(())
+        },
+    )
+}
+
 /// Change one editor/diff wrapping preference against the latest document.
 /// The tagged patch lets stale windows edit different controls without either
 /// replacing the sibling value it has not re-read yet.
