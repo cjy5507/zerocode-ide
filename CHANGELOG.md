@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.1.11] — 2026-09-21
+
+_since v1.1.10 (19 commits)_
+
+### feat
+- feat(emulator): the first second of an iOS pane — it draws while the device boots, and the device outlives the window (t-5645)
+- feat(emulator): an Android pane resumes a device that was already there, and says so from its first frame (t-5644)
+- feat(zo): a step effort governor — effort per request inside the turn, held on Anthropic's wire (t-5633)
+- feat(orchestration): move a worker's effort between turns through its row's door (t-5637)
+- feat(zo): rank the skills with one Jev question each, and take the index out of the prompt (t-5629)
+- feat(window): the conversation streams for every agent that can, wears the panel's own measures, and says why when it cannot
+
+### fix
+- fix(shell): a silence starts when the child last wrote, read once from the PTY — not now minus elapsed
+- fix(zo): pay the tool plane for two deferred names, and stop two tests trusting an isolation they never had (t-5629)
+- fix(shell): pin the scrcpy server to 3.3.4 so the Android pane mirrors again on Android 15
+- fix(zo): say when to reach for the skill search, and clear two clippy lints (t-5629)
+
+### refactor
+- refactor(zo): one reader for whether a Jev seat has risen (t-5629)
+
+### docs
+- docs(emulator): the iOS half of the first second, measured (t-5645)
+- docs(design): the first-second table carries the Android numbers t-5644 measured
+
+### test
+- test(shell): the quiet-since tests live in the unit-test file, and the stall-probe contract reads the epoch millisecond
+
+
 ## [1.1.10] — 2026-09-21
 
 _since v1.1.9 (34 commits)_
