@@ -33,8 +33,9 @@ zo decision-shadow check [--json]
 
   check: put the judgment's own questions about one fixed task (no words of
   yours) to TypeSafe's System One with the key zo would use — TYPESAFE_API_KEY,
-  or the key saved in ZeroCode's settings — and print the model that answered
-  and how long it took, or the token of why none did (no_key, unauthorized,
+  or the key saved in ZeroCode's settings — and print the model that answered,
+  how long it took and which source the key came from (environment, adopted,
+  window_keychain), or the token of why none did (no_key, unauthorized,
   timeout, …). Bills one small request; exits 1 when nothing answered.
 ";
 
@@ -111,6 +112,13 @@ fn elapsed_ms(check: &tools::SystemOneCheck) -> u64 {
     u64::try_from(check.elapsed.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Which rung of the key ladder answered, as a word — absent when no rung did.
+fn key_source(check: &tools::SystemOneCheck) -> Value {
+    check
+        .key_source
+        .map_or(Value::Null, |source| Value::from(source.token()))
+}
+
 fn render_check_json(check: &tools::SystemOneCheck) -> Value {
     match &check.outcome {
         Ok(model) => json!({
@@ -118,24 +126,32 @@ fn render_check_json(check: &tools::SystemOneCheck) -> Value {
             "model": model,
             "elapsedMs": elapsed_ms(check),
             "retries": check.retries,
+            "keySource": key_source(check),
         }),
         Err(failure) => json!({
             "answered": false,
             "failure": failure.ledger_token(),
             "elapsedMs": elapsed_ms(check),
             "retries": check.retries,
+            "keySource": key_source(check),
         }),
     }
 }
 
 fn render_check_text(check: &tools::SystemOneCheck) -> String {
+    let held = check
+        .key_source
+        .map_or_else(String::new, |source| format!(", key from {}", source.token()));
     match &check.outcome {
         Ok(model) => format!(
-            "System One answered: {model} in {} ms ({} retries)",
+            "System One answered: {model} in {} ms ({} retries{held})",
             elapsed_ms(check),
             check.retries
         ),
-        Err(failure) => format!("System One did not answer: {}", failure.ledger_token()),
+        Err(failure) => format!(
+            "System One did not answer: {}{held}",
+            failure.ledger_token()
+        ),
     }
 }
 
