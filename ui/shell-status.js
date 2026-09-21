@@ -5212,6 +5212,9 @@ function dropTab(id, { closed = false } = {}) {
   }
   if (removed?.kind === "emulator") {
     removed.emulatorEpoch = (removed.emulatorEpoch ?? 0) + 1;
+    // 닫힌 탭의 자막 시계는 여기서 멈춘다 — 1초 타이머는 탭이 사라져도
+    // 혼자 돌고, 그 틱이 남의 판에 글을 쓴다.
+    dropEmulatorBootCaption(removed);
     // 아직 아무 스트림에도 붙지 못한 탭이 닫힐 수 있다 — 판을 먼저 세우므로
     // 붙기 전의 판이 존재하고, 그 판을 닫는 것은 정상적인 일이다.
     void teardownEmulatorStream(removed.stream);

@@ -69,6 +69,26 @@ const MANAGED_FILE_VERSION: u32 = 1;
 const MANAGED_FILE_MAX_BYTES: u64 = 64 * 1024;
 const MANAGED_DEVICE_MAX: usize = 32;
 const MANAGED_PROPERTY: &str = "qemu.zerocode.managed";
+/// How long a saved exit is waited for before the signal goes instead.
+///
+/// `adb emu kill` is the only exit that writes the AVD's `default_boot`
+/// snapshot, and that snapshot is the whole of the next pane's first second
+/// (D2). Writing it means flushing the guest's RAM to disk: measured at 6.3 s
+/// for the first save of a Pixel 6 (670 MB) and 1.4–2.0 s for the saves after
+/// it, load ~35. The limit is set several times that, because the cost of
+/// waiting a moment too long is a slow exit and the cost of not waiting is the
+/// next pane's cold boot — and a device still there when it passes gets the
+/// signal it used to get.
+const SNAPSHOT_SAVE_LIMIT: Duration = Duration::from_secs(30);
+const SNAPSHOT_SAVE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// How often the idle reclaimer looks at a fleet nobody has a pane on (D3).
+const IDLE_RECLAIM_POLL_INTERVAL: Duration = Duration::from_secs(60);
+/// How recently an AVD must have been streamed for the next window to put it
+/// up before anybody asks (D4). A device nobody has opened in a week is a
+/// device this window would be starting for nothing.
+const PREBOOT_RECENT_DAYS: i64 = 7;
+const MILLIS_PER_MINUTE: i64 = 60 * 1_000;
+const MILLIS_PER_DAY: i64 = 24 * 60 * MILLIS_PER_MINUTE;
 
 static MANAGED_STORE_GATE: Mutex<()> = Mutex::new(());
 static MANAGED_SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
@@ -83,10 +103,25 @@ struct ManagedEmulatorRecord {
     started: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+/// The AVD a pane last streamed, and when.
+///
+/// It outlives every device row: the rows say what is running NOW and are
+/// dropped the moment their process is, while this is the only thing a window
+/// booting on a machine where nothing is running can read to know which
+/// device to put up (D4).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LastUsedDevice {
+    avd: String,
+    at_ms: i64,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct ManagedEmulatorFile {
     version: u32,
     devices: Vec<ManagedEmulatorRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    last_used: Option<LastUsedDevice>,
 }
 
 struct ManagedEmulatorProcess {
@@ -165,8 +200,55 @@ impl ManagedEmulatorProcess {
         held(&self.child).is_some()
     }
 
+    /// Whether the emulator this record names is still up.
+    ///
+    /// A live `Child` is the stronger authority, exactly as [`poll_process`]
+    /// reads it; a device adopted from a previous window has only the pid and
+    /// its start identity.
+    ///
+    /// [`poll_process`]: ManagedEmulatorProcess::poll_process
+    fn is_running(&self) -> bool {
+        matches!(self.poll_process(), Ok(None))
+    }
+
+    /// Ask the device to write its snapshot and quit.
+    ///
+    /// `adb emu kill` is the emulator's own exit: it saves `default_boot` on
+    /// the way out, which is what turns the next pane's cold 25 s into a
+    /// resume (D2). Everything here is best effort — no adb, no serial, or a
+    /// device that does not go inside [`SNAPSHOT_SAVE_LIMIT`] all fall through
+    /// to the signal the caller was already sending.
+    fn ask_for_a_saved_exit(&self) {
+        let Some(serial) = self.record().serial else {
+            return;
+        };
+        let Ok(sdk) = android_sdk() else {
+            return;
+        };
+        if crate::proc::quiet_command(&sdk.adb)
+            .args(["-s", &serial, "emu", "kill"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+        {
+            return;
+        }
+        let deadline = Instant::now() + SNAPSHOT_SAVE_LIMIT;
+        while self.is_running() && Instant::now() < deadline {
+            std::thread::sleep(SNAPSHOT_SAVE_POLL_INTERVAL);
+        }
+    }
+
+    /// Put this emulator away — the one road every caller takes.
+    ///
+    /// The pane's power button, the window's exit and the idle reclaimer all
+    /// arrive here, so the saved exit is asked for once rather than in three
+    /// slightly different copies. `true` means the device is gone and the
+    /// caller may forget its row.
     fn stop(&self) -> bool {
         self.launching.store(false, Ordering::Release);
+        self.ask_for_a_saved_exit();
         if let Some(mut child) = held(&self.child).take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -203,15 +285,21 @@ fn managed_file(local_data_root: &Path) -> PathBuf {
     local_data_root.join(MANAGED_FILE_NAME)
 }
 
+/// The shape an AVD name has to have before this window will put it on a
+/// command line — the one judgement both the device rows and the last-used
+/// row are read through.
+fn valid_avd_name(avd: &str) -> bool {
+    !avd.is_empty()
+        && avd.len() <= 256
+        && !avd
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace())
+}
+
 fn valid_managed_record(record: &ManagedEmulatorRecord) -> bool {
     record.token.len() == 48
         && record.token.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && !record.avd.is_empty()
-        && record.avd.len() <= 256
-        && !record
-            .avd
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
+        && valid_avd_name(&record.avd)
         && record.serial.as_ref().is_none_or(|serial| {
             serial.len() <= 64
                 && serial.strip_prefix("emulator-").is_some_and(|port| {
@@ -225,29 +313,46 @@ fn valid_managed_record(record: &ManagedEmulatorRecord) -> bool {
         }
 }
 
-fn read_managed_records(local_data_root: &Path) -> Result<Vec<ManagedEmulatorRecord>, String> {
+fn read_managed_file(local_data_root: &Path) -> Result<ManagedEmulatorFile, String> {
     let file = managed_file(local_data_root);
     let bytes = match crate::durable_file::read_plain_file(&file) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(ManagedEmulatorFile {
+                version: MANAGED_FILE_VERSION,
+                ..ManagedEmulatorFile::default()
+            });
+        }
         Err(error) => return Err(error.to_string()),
     };
     if bytes.len() as u64 > MANAGED_FILE_MAX_BYTES {
         return Err("Android 에뮬레이터 소유권 파일이 올바르지 않습니다".to_string());
     }
-    let parsed: ManagedEmulatorFile =
+    let mut parsed: ManagedEmulatorFile =
         serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
     if parsed.version != MANAGED_FILE_VERSION || parsed.devices.len() > MANAGED_DEVICE_MAX {
         return Err("Android 에뮬레이터 소유권 파일 판번호가 올바르지 않습니다".to_string());
     }
-    Ok(parsed
-        .devices
-        .into_iter()
-        .filter(valid_managed_record)
-        .collect())
+    parsed.devices.retain(valid_managed_record);
+    parsed.last_used = parsed
+        .last_used
+        .filter(|last| valid_avd_name(&last.avd) && last.at_ms > 0);
+    Ok(parsed)
 }
 
-fn write_managed_records_locked(local_data_root: &Path) -> Result<(), String> {
+fn read_managed_records(local_data_root: &Path) -> Result<Vec<ManagedEmulatorRecord>, String> {
+    read_managed_file(local_data_root).map(|file| file.devices)
+}
+
+/// Write this root's device rows together with the last-used device.
+///
+/// `last_used` of `None` keeps whatever the file already carries: the rows are
+/// rewritten on every launch, stop and reconcile, and the last-used device is
+/// a fact from BEFORE this window that none of those know anything about.
+fn write_managed_file_locked(
+    local_data_root: &Path,
+    last_used: Option<LastUsedDevice>,
+) -> Result<(), String> {
     let mut devices = held(managed_devices())
         .values()
         .filter(|process| process.local_data_root == local_data_root)
@@ -259,9 +364,11 @@ fn write_managed_records_locked(local_data_root: &Path) -> Result<(), String> {
     if devices.len() > MANAGED_DEVICE_MAX {
         return Err("관리할 수 있는 Android 에뮬레이터가 너무 많습니다".to_string());
     }
+    let last_used = last_used.or_else(|| read_managed_file(local_data_root).ok()?.last_used);
     let bytes = serde_json::to_vec(&ManagedEmulatorFile {
         version: MANAGED_FILE_VERSION,
         devices,
+        last_used,
     })
     .map_err(|error| error.to_string())?;
     crate::durable_file::replace_bytes(&managed_file(local_data_root), &bytes)
@@ -269,9 +376,48 @@ fn write_managed_records_locked(local_data_root: &Path) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+fn write_managed_records_locked(local_data_root: &Path) -> Result<(), String> {
+    write_managed_file_locked(local_data_root, None)
+}
+
 fn write_managed_records(local_data_root: &Path) -> Result<(), String> {
     let _store = held(&MANAGED_STORE_GATE);
     write_managed_records_locked(local_data_root)
+}
+
+/// Remember the AVD a pane just opened, so the next window can put it up
+/// before anybody asks (D4).
+fn note_last_used_device(local_data_root: &Path, avd: &str, now_ms: i64) {
+    if !valid_avd_name(avd) {
+        return;
+    }
+    let _store = held(&MANAGED_STORE_GATE);
+    let _ = write_managed_file_locked(
+        local_data_root,
+        Some(LastUsedDevice {
+            avd: avd.to_string(),
+            at_ms: now_ms,
+        }),
+    );
+}
+
+/// Whether a device last streamed at `at_ms` is recent enough to preboot.
+///
+/// Its own function because the window's boot is the one caller that cannot
+/// be run twice to see what it decided: the answer is a device either quietly
+/// starting or quietly not.
+fn within_the_preboot_window(at_ms: i64, now_ms: i64) -> bool {
+    (0..=PREBOOT_RECENT_DAYS * MILLIS_PER_DAY).contains(&(now_ms - at_ms))
+}
+
+/// The AVD this machine should have up before anybody opens a pane, or
+/// nothing when the last one is older than [`PREBOOT_RECENT_DAYS`].
+fn preboot_candidate(local_data_root: &Path, now_ms: i64) -> Option<String> {
+    read_managed_file(local_data_root)
+        .ok()?
+        .last_used
+        .filter(|last| within_the_preboot_window(last.at_ms, now_ms))
+        .map(|last| last.avd)
 }
 
 fn forget_managed_process(process: &Arc<ManagedEmulatorProcess>) {
@@ -402,17 +548,148 @@ fn managed_process_for_avd(
         .cloned()
 }
 
-pub(super) fn shutdown_all_devices() {
+fn managed_processes() -> Vec<Arc<ManagedEmulatorProcess>> {
+    held(managed_devices()).values().cloned().collect()
+}
+
+/// Put away every emulator this window is holding.
+///
+/// `keep_booted` is the person's `emulator.keepBooted` (D3): the devices stay
+/// up and their rows stay on disk, so the NEXT window adopts them through the
+/// road that already exists instead of paying a cold boot. Launches stop
+/// either way — a window on its way out has nobody to hand a new device to.
+pub(super) fn shutdown_all_devices(keep_booted: bool) {
     MANAGED_SHUTTING_DOWN.store(true, Ordering::Release);
-    let processes = held(managed_devices())
-        .values()
-        .cloned()
-        .collect::<Vec<_>>();
-    for process in processes {
+    if keep_booted {
+        return;
+    }
+    for process in managed_processes() {
         if process.stop() {
             forget_managed_process(&process);
         }
     }
+}
+
+/// Whether a fleet nobody has a pane on has been idle long enough to put away.
+///
+/// `last_pane_closed_ms` is `None` while a pane is open, which is why this is
+/// the whole judgement rather than half of it: "no panes" and "no panes for
+/// long enough" are different facts, and only the second one turns a device
+/// off. `minutes` of zero is the person saying never.
+fn idle_shutdown_is_due(last_pane_closed_ms: Option<i64>, now_ms: i64, minutes: u32) -> bool {
+    let Some(closed) = last_pane_closed_ms else {
+        return false;
+    };
+    minutes > 0 && now_ms.saturating_sub(closed) >= i64::from(minutes) * MILLIS_PER_MINUTE
+}
+
+/// Turn off the devices this window is holding, through [`ManagedEmulatorProcess::stop`]
+/// — the same saved exit the pane's power button takes.
+fn reclaim_idle_devices(local_data_root: &Path) -> usize {
+    let mut put_away = 0;
+    for process in managed_processes() {
+        if process.local_data_root != local_data_root {
+            continue;
+        }
+        if process.stop() {
+            forget_managed_process(&process);
+            put_away += 1;
+        }
+    }
+    put_away
+}
+
+/// Watch for a fleet nobody is looking at (D3).
+///
+/// Devices are kept booted so the next pane opens on a resume, and a device
+/// kept booted forever is a phone's worth of RAM nobody asked for — so the
+/// reclaimer is the other half of `emulator.keepBooted`, not an extra. It
+/// reads the setting each time it has something to decide rather than holding
+/// a copy, because the person may turn it off while it sleeps.
+pub(super) fn arm_idle_reclaim(app: &AppHandle) {
+    static ARMED: std::sync::Once = std::sync::Once::new();
+    let app = app.clone();
+    ARMED.call_once(move || {
+        let _ = std::thread::Builder::new()
+            .name("android-emulator-idle".to_string())
+            .spawn(move || {
+                let mut idle_since: Option<i64> = None;
+                loop {
+                    std::thread::sleep(IDLE_RECLAIM_POLL_INTERVAL);
+                    let local_data_root = app.state::<crate::AppState>().local_data_root().to_path_buf();
+                    let mine = managed_processes()
+                        .into_iter()
+                        .filter(|process| process.local_data_root == local_data_root)
+                        .count();
+                    if mine == 0 || registry().live_count(EmulatorPlatform::Android) > 0 {
+                        idle_since = None;
+                        continue;
+                    }
+                    let now_ms = crate::now_epoch_ms();
+                    let closed = *idle_since.get_or_insert(now_ms);
+                    let minutes = crate::load_settings_resilient(
+                        app.state::<crate::AppState>().settings(),
+                    )
+                    .document
+                    .emulator_idle_shutdown_minutes;
+                    if !idle_shutdown_is_due(Some(closed), now_ms, minutes) {
+                        continue;
+                    }
+                    idle_since = None;
+                    let put_away = reclaim_idle_devices(&local_data_root);
+                    if put_away > 0 {
+                        crate::note_window_event(
+                            &local_data_root,
+                            &format!(
+                                "emulator android idle reclaim: {put_away} device(s) after {minutes}m"
+                            ),
+                        );
+                    }
+                }
+            });
+    });
+}
+
+/// Put the last-used AVD up before anybody asks for it (D4).
+///
+/// Only the device: no stream, no pane, no window event beyond the one line
+/// that says it happened. A pane opened while this is still booting finds the
+/// tokenized launch through [`managed_process_for_avd`] and waits for it
+/// rather than starting the same AVD twice.
+pub(super) fn preboot_last_used(app: &AppHandle) {
+    let app = app.clone();
+    let _ = std::thread::Builder::new()
+        .name("android-emulator-preboot".to_string())
+        .spawn(move || {
+            let local_data_root = app
+                .state::<crate::AppState>()
+                .local_data_root()
+                .to_path_buf();
+            reconcile_managed_devices_now(&local_data_root);
+            let Some(avd) = preboot_candidate(&local_data_root, crate::now_epoch_ms()) else {
+                return;
+            };
+            let Ok(sdk) = android_sdk() else {
+                return;
+            };
+            let Ok(devices) = list_android_devices() else {
+                return;
+            };
+            let Some(chosen) = devices.into_iter().find(|device| device.avd == avd) else {
+                return;
+            };
+            if chosen.serial.is_some() {
+                return;
+            }
+            let outcome = match boot_android_device(&app, &sdk, &chosen) {
+                Ok(serial) => format!("serial {serial}"),
+                Err(error) => format!("failed: {error}"),
+            };
+            crate::note_window_event(
+                &local_data_root,
+                &format!("emulator android preboot avd {avd} {outcome}"),
+            );
+        });
 }
 
 /// Where one tool lives inside an SDK: the binary's name and the package
@@ -1027,11 +1304,16 @@ fn boot_android_device(
         let marker = format!("{MANAGED_PROPERTY}={}", managed.record().token);
         let emulator = sdk.emulator.as_ref().map_err(SdkSearch::to_string)?;
         let mut boot = crate::proc::quiet_command(emulator);
+        // No `-no-snapshot` (D2). That flag turns off BOTH halves of quick
+        // boot — the resume on the way in and the save on the way out — so an
+        // AVD carrying `default_boot` and `fastboot.forceFastBoot=yes` was
+        // still paying a full cold boot every single time. Measured on one
+        // Pixel 6 AVD, load ~33: 42.3 s to `sys.boot_completed` cold against
+        // 7.3 s and 7.2 s resuming the snapshot the exit below writes.
         boot.args([
             "-avd",
             &chosen.avd,
             "-no-window",
-            "-no-snapshot",
             "-no-boot-anim",
             "-prop",
             &marker,
@@ -1223,6 +1505,14 @@ pub(crate) async fn start_android_stream(
         let sdk = android_sdk().map_err(|search| search.to_string())?;
         reconcile_managed_devices_now(app.state::<crate::AppState>().local_data_root());
         let chosen = selected_android_device(&list_android_devices()?, avd.as_deref())?;
+        // Before the claim, because a pane handed an existing session returns
+        // from inside it — and a device somebody just opened a second pane on
+        // is exactly the one the next window should put up (D4).
+        note_last_used_device(
+            app.state::<crate::AppState>().local_data_root(),
+            &chosen.avd,
+            crate::now_epoch_ms(),
+        );
         let lease = match registry().claim(SessionKey::frames(
             EmulatorPlatform::Android,
             chosen.avd.clone(),
@@ -2164,12 +2454,90 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_fleet_is_only_put_away_after_the_persons_own_minutes() {
+        let now = 1_700_000_000_000;
+        // A pane is open: there is nothing to decide.
+        assert!(!idle_shutdown_is_due(None, now, 30));
+        // Closed, but not for long enough — and not for a second too few.
+        assert!(!idle_shutdown_is_due(
+            Some(now - 29 * MILLIS_PER_MINUTE),
+            now,
+            30
+        ));
+        assert!(!idle_shutdown_is_due(
+            Some(now - 30 * MILLIS_PER_MINUTE + 1),
+            now,
+            30
+        ));
+        assert!(idle_shutdown_is_due(
+            Some(now - 30 * MILLIS_PER_MINUTE),
+            now,
+            30
+        ));
+        // Zero minutes is the person saying never, however long it has been.
+        assert!(!idle_shutdown_is_due(Some(0), now, 0));
+        // A clock that walked backwards is not a reason to turn a device off.
+        assert!(!idle_shutdown_is_due(
+            Some(now + MILLIS_PER_MINUTE),
+            now,
+            30
+        ));
+    }
+
+    #[test]
+    fn only_a_device_used_inside_the_preboot_window_is_put_up_again() {
+        let now = 1_700_000_000_000;
+        assert!(within_the_preboot_window(now, now));
+        assert!(within_the_preboot_window(
+            now - PREBOOT_RECENT_DAYS * MILLIS_PER_DAY,
+            now
+        ));
+        assert!(!within_the_preboot_window(
+            now - PREBOOT_RECENT_DAYS * MILLIS_PER_DAY - 1,
+            now
+        ));
+        // A row written by a clock ahead of this one is not "just used".
+        assert!(!within_the_preboot_window(now + 1, now));
+    }
+
+    #[test]
+    fn the_last_used_device_outlives_the_rows_and_the_rewrites_that_drop_them() {
+        let root = tempfile::tempdir().expect("local data root");
+        let now = 1_700_000_000_000;
+        note_last_used_device(root.path(), "Pixel_9", now);
+        assert_eq!(
+            preboot_candidate(root.path(), now).as_deref(),
+            Some("Pixel_9")
+        );
+        // The rewrite every launch and every reconcile performs names no
+        // last-used device, and must not take this one away with it.
+        write_managed_records(root.path()).expect("rewrite the rows");
+        assert_eq!(
+            preboot_candidate(root.path(), now).as_deref(),
+            Some("Pixel_9")
+        );
+        // A week later it is still readable and no longer worth booting.
+        assert_eq!(
+            preboot_candidate(root.path(), now + PREBOOT_RECENT_DAYS * MILLIS_PER_DAY + 1),
+            None
+        );
+        // A name this window would refuse to put on a command line is not
+        // remembered at all.
+        note_last_used_device(root.path(), "Pixel 9; rm -rf /", now);
+        assert_eq!(
+            preboot_candidate(root.path(), now).as_deref(),
+            Some("Pixel_9")
+        );
+    }
+
+    #[test]
     fn a_pre_spawn_intent_round_trips_without_a_pid_or_serial() {
         let root = tempfile::tempdir().expect("local data root");
         let record = managed_record('e');
         let bytes = serde_json::to_vec(&ManagedEmulatorFile {
             version: MANAGED_FILE_VERSION,
             devices: vec![record.clone()],
+            last_used: None,
         })
         .expect("owner json");
         crate::durable_file::replace_bytes(&managed_file(root.path()), &bytes)

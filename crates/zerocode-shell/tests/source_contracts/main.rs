@@ -35555,3 +35555,108 @@ fn the_macos_permission_page_judges_this_process_from_one_table() {
         );
     }
 }
+
+/// The emulator pane's first second (docs/design/emulator-first-second-20260921.md).
+///
+/// D2: the AVD is launched so it can resume its `default_boot` snapshot, and
+/// put away through the one exit that writes that snapshot. D3: the window's
+/// goodbye keeps the devices when the person's switch says so, and the idle
+/// reclaimer takes the same road the power button takes rather than a second
+/// copy of it. D4: prebooting starts a device and nothing else.
+#[test]
+fn the_emulator_pane_opens_on_a_resumed_device() {
+    let android = include_str!("../../src/emulator/android.rs");
+
+    // D2 — the flag that turned off BOTH halves of quick boot is gone, and
+    // the three that shape a headless, owned launch are not.
+    let launch = support::block_after(android, "fn boot_android_device(");
+    assert!(
+        !launch.contains("\"-no-snapshot\""),
+        "the launch went back to a cold boot every time:\n{launch}"
+    );
+    for kept in ["\"-no-window\"", "\"-no-boot-anim\"", "\"-prop\""] {
+        assert!(
+            launch.contains(kept),
+            "the launch lost {kept}, which is not what D2 removed:\n{launch}"
+        );
+    }
+
+    // D2 — the exit asks the emulator to save before anything signals it, and
+    // waits inside a named limit rather than a number written here.
+    let saved_exit = support::block_after(android, "fn ask_for_a_saved_exit(");
+    assert!(
+        saved_exit.contains("\"emu\", \"kill\"") && saved_exit.contains("SNAPSHOT_SAVE_LIMIT"),
+        "the saved exit is no longer `adb emu kill` inside a named limit:\n{saved_exit}"
+    );
+    let stop = support::block_after(android, "fn stop(&self) -> bool {");
+    let asked = stop
+        .find("self.ask_for_a_saved_exit();")
+        .expect("stop must ask for a saved exit");
+    let signalled = stop.find("child.kill()").expect("stop keeps its signal");
+    assert!(
+        asked < signalled,
+        "the signal went before the snapshot could be written:\n{stop}"
+    );
+
+    // D3 — one road out, taken by the pane's power button, the window's exit
+    // and the idle reclaimer alike.
+    for caller in [
+        "fn shutdown_all_devices(",
+        "fn reclaim_idle_devices(",
+        "fn stop_managed_device(",
+    ] {
+        assert!(
+            support::block_after(android, caller).contains("process.stop()"),
+            "{caller} grew an exit of its own instead of the shared one"
+        );
+    }
+    let goodbye = support::block_after(android, "pub(super) fn shutdown_all_devices(");
+    assert!(
+        goodbye.contains("if keep_booted {"),
+        "the window's goodbye stopped honouring `emulator.keepBooted`:\n{goodbye}"
+    );
+
+    // D4 — prebooting starts a device. It must never open a stream: the pane
+    // that arrives later is what opens one, and a stream nobody is watching
+    // is a pump paid for forever.
+    let preboot = support::block_after(android, "pub(super) fn preboot_last_used(");
+    assert!(
+        preboot.contains("boot_android_device(") && !preboot.contains("registry()"),
+        "prebooting opened a stream instead of only starting the device:\n{preboot}"
+    );
+    let wire = include_str!("../../src/emulator/mod.rs");
+    let door = support::block_after(wire, "pub(crate) fn preboot_last_used(");
+    assert!(
+        door.contains("android::preboot_last_used(app)")
+            && door.contains("#[cfg(target_os = \"macos\")]"),
+        "the one preboot door lost a platform:\n{door}"
+    );
+
+    // D6 — the caption stands in the same turn the pane does, ticks, and is
+    // put away by whatever else has something to say in that line.
+    let window = support::window_source();
+    let standing = support::block_after(window, "function standEmulatorBootCaption(tab) {");
+    assert!(
+        standing.contains("paintEmulatorBootCaption(tab);")
+            && standing.contains("EMULATOR_BOOT_CAPTION_TICK_MS"),
+        "the boot caption no longer stands at once and ticks:\n{standing}"
+    );
+    let switching = support::block_after(window, "async function switchEmulatorDevice(");
+    assert!(
+        switching.contains("standEmulatorBootCaption(tab);"),
+        "a pane opened without its boot caption:\n{switching}"
+    );
+    let saying = support::block_after(window, "function sayInEmulatorNote(tab, words) {");
+    assert!(
+        saying.contains("dropEmulatorBootCaption(tab);"),
+        "another message can now be overwritten by the caption's next tick:\n{saying}"
+    );
+    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    for key in ["emulator.booting", "emulator.bootingUnnamed"] {
+        assert_eq!(
+            i18n.matches(&format!("\"{key}\":")).count(),
+            4,
+            "`{key}` is missing from one of the en/ja/zh/es catalogs"
+        );
+    }
+}

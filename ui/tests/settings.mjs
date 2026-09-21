@@ -267,6 +267,9 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "computer_confirm_payment": true,
   "computer_confirm_transfer": true,
   "computer_confirm_delete": true,
+  "emulator.keepBooted": true,
+  "emulator.prebootLastUsed": true,
+  "emulator.idleShutdownMinutes": 30,
   "browser": {
     "home_page": "",
     "search_engine": "google",

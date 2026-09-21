@@ -580,6 +580,19 @@ impl SessionRegistry {
             .map(|entry| entry.control.clone())
     }
 
+    /// How many live panes this platform has open right now.
+    ///
+    /// The idle reclaimer's whole question (D3): a fleet nobody is looking at
+    /// is a fleet that can be put away, and a fleet with one pane on it is
+    /// not, whichever device that pane is on.
+    pub fn live_count(&self, platform: EmulatorPlatform) -> usize {
+        held(&self.state)
+            .sessions
+            .values()
+            .filter(|entry| entry.descriptor.platform == platform && entry.control.is_alive())
+            .count()
+    }
+
     pub fn stop(&self, stream: &str) -> bool {
         let (entry, first) = {
             let mut state = held(&self.state);
