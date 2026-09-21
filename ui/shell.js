@@ -11459,6 +11459,10 @@ function helperTurnRowNode(run, turn, spoken) {
     // The agent's rows stand on the timeline rail (`is-step`); a system line
     // stands off it, the way the extension's meta messages do.
     row.className = turn.role === "assistant" ? "helper-turn is-assistant is-step" : `helper-turn is-${turn.role}`;
+    // Announced by who said it, as the extension announces every message
+    // (2.1.272): the person's rows say 「나」 above, an answer says the
+    // agent's own name — the catalog's, never a word invented here.
+    if (turn.role === "assistant") row.setAttribute("aria-label", agentName(run.agent));
     const clean = turn.role === "assistant" ? cleanseAssistantText(turn.text) : turn.text;
     paintHelperProse(said, clean || turn.text, helperBase(run));
   }
@@ -11557,6 +11561,10 @@ function dressToolTurn(row, turn, run, spoken) {
   const words = toolWords(turn);
   writeTextContent(row.querySelector(".helper-tool-name"), words.name);
   writeTextContent(row.querySelector(".helper-tool-arg"), words.arg);
+  // A tool row is announced by the tool it ran (2.1.272) — the CLI's own
+  // name for it, which the row already shows. Guarded like every other
+  // write here: a quiet poll costs no mutation.
+  writeAttribute(row, "aria-label", t("worker.toolRow", "{{name}} 도구", { name: words.name }));
   // What the call took, once its result is in — the CLI feeds say it beside
   // the call (Hermes: `┊ 💻 terminal  ls -la  (0.3s)`), and so does this row.
   if (turn.outputAt !== undefined && turn.at !== undefined && !row.querySelector(".helper-tool-took")) {
@@ -11826,6 +11834,25 @@ function helperActionsNode(turn) {
   copy.addEventListener("click", () => void clipboardText.write(turn.text));
   actions.appendChild(copy);
   return actions;
+}
+
+/* The last thing the agent SAID on this page, or "" — what the copy under an
+ * answer copies, reached from the palette instead of the pointer
+ * (`/copy`, 2.1.275). The turns are the page's own memory, so there is
+ * nothing to ask the backend for. */
+function lastAnswerOf(run) {
+  return (run?.helper?.turns ?? []).findLast((turn) => turn.role === "assistant")?.text ?? "";
+}
+
+/* `/copy` — the last answer to the clipboard, through the one clipboard door
+ * this window has. A page that has been answered nothing does not list the
+ * command at all (`windowSlashCommands`), so this is never a press that does
+ * nothing; it still checks, because the turns can be capped away between the
+ * palette opening and the Enter. */
+function copyLastAnswer(run) {
+  const said = lastAnswerOf(run);
+  if (!said) return;
+  void clipboardText.write(said);
 }
 
 function helperPreviewNode(run, target) {

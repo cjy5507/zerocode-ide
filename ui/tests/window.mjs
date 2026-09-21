@@ -35623,6 +35623,8 @@ const chatFace = await page.evaluate(async () => {
   };
   const turns = [...face.querySelectorAll(".helper-turn")];
   seen.count = turns.length;
+  seen.assistantNamed = [turns[1]?.getAttribute("aria-label"), agentName("claude")];
+  seen.toolNamed = [turns[3]?.getAttribute("aria-label"), t("worker.toolRow", "{{name}} 도구", { name: "Read" })];
   // The first user turn is the briefing box — the extension's `userMessage`:
   // a bordered box on the left, in a row that sticks to the top while its
   // answer scrolls under it, with every other thing the person said, whole.
@@ -35794,7 +35796,9 @@ ok(
     chatFace.moreFolded && chatFace.moreWords === chatFace.wantMoreWords &&
     chatFace.wellHolds && chatFace.wellScrolls &&
     chatFace.readName === "Read" && chatFace.readArg === "one line" && chatFace.readBare &&
-    chatFace.liveDot,
+    chatFace.liveDot &&
+    chatFace.assistantNamed[0] === chatFace.assistantNamed[1] &&
+    chatFace.toolNamed[0] === chatFace.toolNamed[1],
   JSON.stringify(chatFace),
 );
 ok(
@@ -54297,6 +54301,10 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       seen.paletteHead = pane?.querySelector(".composer-slash-head")?.textContent;
       seen.wantHead = `${agentName("claude")} 2.1.272 · ${t("composer.slash.sourceSession", "이 세션")}`;
       seen.paletteRows = [...(pane?.querySelectorAll(".composer-slash-row .composer-slash-name") ?? [])].map((n) => n.textContent);
+      seen.copyAbout = [...(pane?.querySelectorAll(".composer-slash-row") ?? [])]
+        .find((row) => row.querySelector(".composer-slash-name")?.textContent === "/copy")
+        ?.querySelector(".composer-slash-about")?.textContent ?? null;
+      seen.wantCopyAbout = t("composer.slash.copy", "마지막 답을 클립보드에 복사한다");
       seen.askedCwd = asked[0]?.cwd ?? null;
       seen.wantCwd = tabOfTerm(term)?.worktree ?? null;
       box.value = "/co";
@@ -54348,6 +54356,18 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       seen.artifactFilled = box.value.startsWith(t("artifacts.newDraft", "HTML").slice(0, 8)) && calls.length === sentBefore;
       box.value = "";
       box.dispatchEvent(new Event("input", { bubbles: true }));
+      // `/copy` acts where it stands: the last answer to the clipboard, the
+      // box emptied, and nothing sent to the CLI (2.1.275).
+      window.__CLIPBOARD_WRITES__.length = 0;
+      box.value = "/cop";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      await settle(30);
+      const copiedBefore = calls.length;
+      press("Enter");
+      await settle(60);
+      seen.copied = window.__CLIPBOARD_WRITES__.at(-1) ?? null;
+      seen.copySentNothing = calls.length === copiedBefore;
+      seen.copyClearedBox = box.value === "";
       // A Codex pane: its picker lives on its own screen, so a pick sends the
       // bare command and turns the pane back to its terminal.
       const codexTerm = await openTermTab({ placement: "tab" });
@@ -54384,6 +54404,15 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       seen.helperDoor = Boolean(helperComposer?.querySelector(".worker-composer-door"));
       seen.helperPlaceholder = helperComposer?.querySelector(".worker-composer-box")?.placeholder;
       seen.wantHelperPlaceholder = t("worker.say", "부모 에이전트에게 보내기…");
+      // A page nobody has been answered on does not list `/copy` — a row
+      // that would do nothing when it is pressed is not drawn at all.
+      const helperBox = helperComposer?.querySelector(".worker-composer-box");
+      if (helperBox) { helperBox.value = "/"; helperBox.dispatchEvent(new Event("input", { bubbles: true })); }
+      await settle(120);
+      const helperRows = [...document.querySelectorAll("#worker-view .composer-slash-row .composer-slash-name")]
+        .map((one) => one.textContent);
+      seen.helperRows = helperRows;
+      seen.copyUnlisted = helperRows.length > 0 && !helperRows.includes("/copy");
       delete window.__ANSWER__.term_paste; delete window.__ANSWER__.term_key;
       delete window.__ANSWER__.agent_models; delete window.__ANSWER__.slash_commands;
       delete window.__ANSWER__.pane_log; delete window.__ANSWER__.subagent_log;
@@ -54413,13 +54442,19 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
     ok(
       "`/` opens the palette the CLI itself would show — its list with the source on the head, asked for this checkout — filtering by the start of a name or a word inside it, saying so on a typo, arrows moving the highlight, Tab filling, Enter running an argument-less command through the send road, the window's own /artifact only filling",
       seen.paletteShown && seen.paletteHead === seen.wantHead && seen.askedCwd === seen.wantCwd &&
-        JSON.stringify(seen.paletteRows) === JSON.stringify(["/compact", "/context", "/codex:review", "/clear", "/artifact"]) &&
-        JSON.stringify(seen.filtered) === JSON.stringify(["/compact", "/context", "/codex:review"]) && seen.hot === "/compact" &&
+        JSON.stringify(seen.paletteRows) === JSON.stringify(["/compact", "/context", "/codex:review", "/clear", "/artifact", "/copy"]) &&
+        JSON.stringify(seen.filtered) === JSON.stringify(["/compact", "/context", "/codex:review", "/copy"]) && seen.hot === "/compact" &&
         JSON.stringify(seen.innerWord) === JSON.stringify(["/codex:review"]) &&
         seen.none === seen.wantNone &&
         seen.hotAfterDown === "/context" && seen.tabFilled === "/context " && seen.tabSentNothing && seen.paletteClosedAfterTab &&
         seen.enterRan === seen.wantEnterRan && seen.boxClearedAfterRun &&
         seen.artifactListed === "/artifact" && seen.artifactFilled,
+      JSON.stringify(seen),
+    );
+    ok(
+      "`/copy` puts the page's last answer on the clipboard from the palette — nothing sent to the CLI, the box emptied — and a page that has been answered nothing does not list it",
+      seen.copied === "hello" && seen.copySentNothing && seen.copyClearedBox &&
+        seen.copyAbout === seen.wantCopyAbout && seen.copyUnlisted,
       JSON.stringify(seen),
     );
     ok(
@@ -54903,7 +54938,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
         seen.newsDuringReadReadAgain && seen.closedAtOnce && seen.streamingGone && seen.closedShown &&
         seen.closedRows === 2 && seen.closedThoughtShut &&
         seen.menuModels === "GPT-5.6 Sol,GPT-6 Astra" && seen.modelSet === seen.wantModelSet &&
-        seen.paletteHead === seen.wantPaletteHead && seen.paletteRows === "/help,/artifact" &&
+        seen.paletteHead === seen.wantPaletteHead && seen.paletteRows === "/help,/artifact,/copy" &&
         seen.stopped && seen.tabGone,
       JSON.stringify(seen),
     );

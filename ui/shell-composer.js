@@ -470,9 +470,14 @@ ${cwd}`;
   return catalog;
 }
 
-/* The commands the WINDOW answers itself, before the words reach the CLI. */
-function windowSlashCommands() {
-  return [
+/* The commands the WINDOW answers itself, before the words reach the CLI.
+ *
+ * `run` is the page the palette hangs on: a command whose door is shut on
+ * that page is not listed at all, because a row that does nothing when it is
+ * pressed is the dead control this window does not draw. */
+function windowSlashCommands(run = null) {
+  const said = lastAnswerOf(run);
+  const commands = [
     {
       name: "/artifact",
       about: t("composer.slash.artifact", "HTML 아티팩트 초안을 입력줄에 채운다"),
@@ -489,6 +494,18 @@ function windowSlashCommands() {
       },
     },
   ];
+  if (said) {
+    commands.push({
+      name: "/copy",
+      about: t("composer.slash.copy", "마지막 답을 클립보드에 복사한다"),
+      args: "",
+      kind: "window",
+      // Acts here and now: no words go to the CLI, so the box is emptied and
+      // the palette closes without a submit.
+      act: (page) => copyLastAnswer(page),
+    });
+  }
+  return commands;
 }
 
 /* Claude Code's own matching rule (docs/en/commands → "How the command menu
@@ -551,7 +568,7 @@ function composerSlash(form, box, run, spec, cwd) {
       close();
       return;
     }
-    const all = [...catalog.commands, ...windowSlashCommands()];
+    const all = [...catalog.commands, ...windowSlashCommands(run)];
     rows = all.filter((command) => slashMatches(command, typed));
     // The head: the CLI, its installed version, and where the list came
     // from — with the page's version beside a documented list that was read
@@ -608,18 +625,29 @@ function composerSlash(form, box, run, spec, cwd) {
   // The words already in the box, less the `/word` being typed, ride along:
   // as the command's argument (`/compact 이 부분만`), or under a window
   // command's own draft.
-  const fill = (command) => {
-    const rest = box.value.replace(/^\/\S*\s?/, "");
-    box.value = command.fill ? command.fill(rest) : `${command.name} ${rest}`;
+  const writeBox = (value) => {
+    box.value = value;
     run.draft = box.value;
     box.dispatchEvent(new Event("input", { bubbles: true }));
     box.focus();
     box.setSelectionRange(box.value.length, box.value.length);
   };
+  const fill = (command) => {
+    const rest = box.value.replace(/^\/\S*\s?/, "");
+    writeBox(command.fill ? command.fill(rest) : `${command.name} ${rest}`);
+  };
   // Enter on a command runs it — the CLI's own behaviour — unless it wants an
   // argument, when the words are filled and the person finishes them. A
   // window command only fills.
   const run_ = (command) => {
+    // A window command that ACTS is answered here: the words that summoned
+    // it leave the box and nothing is sent anywhere (`/copy`).
+    if (command.act) {
+      writeBox("");
+      close();
+      command.act(run);
+      return;
+    }
     fill(command);
     close();
     if (!command.fill && !command.args) form.requestSubmit();
