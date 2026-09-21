@@ -3,6 +3,7 @@
 mod accessibility;
 mod capabilities;
 mod display;
+mod snapshots;
 
 #[cfg(test)]
 mod sdk_tests;
@@ -81,6 +82,42 @@ const MANAGED_PROPERTY: &str = "qemu.zerocode.managed";
 /// signal it used to get.
 const SNAPSHOT_SAVE_LIMIT: Duration = Duration::from_secs(30);
 const SNAPSHOT_SAVE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// The flag that turns off BOTH halves of quick boot, which this window has
+/// not passed since D2.
+///
+/// It is read back off the running process rather than only kept out of the
+/// launch, because a device this window ADOPTS was started by some earlier
+/// window, and an emulator carrying this flag will never write the snapshot
+/// the next pane resumes. What it cannot witness is the SDK launcher's own
+/// decision: that binary re-execs with the arguments it was handed and builds
+/// QEMU's options in-process — measured 09-21 on emulator 36.4.10, where the
+/// verbose log's "QEMU options list" ran to ninety arguments while `ps` showed
+/// the four the window passed. The launcher's decision is witnessed by what it
+/// leaves in the AVD instead; see [`snapshots`]. It is a constant because the
+/// launch itself must stay clean of the literal.
+const NO_SNAPSHOT_FLAG: &str = "-no-snapshot";
+/// The AVD files this window reads, and the ceiling it reads them under.
+///
+/// `<name>.ini` points at the AVD directory, `<name>.avd` is where it sits
+/// when nothing points elsewhere, and `config.ini` inside it carries the
+/// person's own boot preferences. All three are a few kilobytes of
+/// `key = value`; the ceiling is there so a reader cannot be made to follow
+/// whatever was renamed on top of one.
+const AVD_DIRECTORY_SUFFIX: &str = ".avd";
+const AVD_POINTER_SUFFIX: &str = ".ini";
+const AVD_CONFIG_FILE: &str = "config.ini";
+const AVD_PATH_KEY: &str = "path";
+const AVD_INI_MAX_BYTES: u64 = 64 * 1024;
+/// The `.android` root and the directory of AVDs inside it.
+const DOT_ANDROID: &str = ".android";
+const AVD_SUBDIRECTORY: &str = "avd";
+/// The keys an AVD carries when a cold boot was asked for on purpose — the
+/// person's own answer, and the first thing to name when the window is asking
+/// why a quick boot did not happen.
+const COLD_BOOT_KEYS: [(&str, &str); 2] = [
+    ("fastboot.forceColdBoot", "yes"),
+    ("fastboot.forceFastBoot", "no"),
+];
 /// How often the idle reclaimer looks at a fleet nobody has a pane on (D3).
 const IDLE_RECLAIM_POLL_INTERVAL: Duration = Duration::from_secs(60);
 /// How recently an AVD must have been streamed for the next window to put it
@@ -755,6 +792,12 @@ struct SdkEnvironment {
     path: Option<OsString>,
     sdk_root: Option<OsString>,
     android_home: Option<OsString>,
+    /// The three that name where AVDs live rather than where the SDK does.
+    /// They are read here for the same reason as the rest: so a test hands
+    /// over a fake home instead of writing globals this whole binary shares.
+    avd_home: Option<OsString>,
+    android_user_home: Option<OsString>,
+    sdk_home: Option<OsString>,
     home: Option<PathBuf>,
 }
 
@@ -764,6 +807,9 @@ impl SdkEnvironment {
             path: std::env::var_os("PATH"),
             sdk_root: std::env::var_os("ANDROID_SDK_ROOT"),
             android_home: std::env::var_os("ANDROID_HOME"),
+            avd_home: std::env::var_os("ANDROID_AVD_HOME"),
+            android_user_home: std::env::var_os("ANDROID_USER_HOME"),
+            sdk_home: std::env::var_os("ANDROID_SDK_HOME"),
             home: dirs::home_dir(),
         }
     }
@@ -924,6 +970,181 @@ fn resolve_android_sdk(environment: &SdkEnvironment) -> Result<AndroidSdk, SdkSe
 
 fn android_sdk() -> Result<AndroidSdk, SdkSearch> {
     resolve_android_sdk(&SdkEnvironment::current())
+}
+
+/// Every directory AVDs could live in, in the order the emulator itself walks
+/// them: `$ANDROID_AVD_HOME` outright, then the `avd` inside the current and
+/// the legacy names for the `.android` root, then the one under the person's
+/// home that everything falls back to.
+///
+/// A row with nothing configured offers nothing, exactly as the SDK table
+/// above does — and on the window's own machine only the last row is filled,
+/// because a window opened from the Dock inherits no `ANDROID_*` at all
+/// (trap 307).
+fn avd_homes(environment: &SdkEnvironment) -> Vec<PathBuf> {
+    [
+        configured_root(environment.avd_home.as_ref()),
+        configured_root(environment.android_user_home.as_ref())
+            .map(|root| root.join(AVD_SUBDIRECTORY)),
+        configured_root(environment.sdk_home.as_ref())
+            .map(|root| root.join(DOT_ANDROID).join(AVD_SUBDIRECTORY)),
+        environment
+            .home
+            .as_ref()
+            .map(|home| home.join(DOT_ANDROID).join(AVD_SUBDIRECTORY)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+/// The directory one AVD's files sit in: the absolute `path=` its pointer
+/// names, or the `<name>.avd` beside that pointer when there is none.
+///
+/// `None` means this machine has no such AVD on disk — which is not an error
+/// anywhere it is asked. Nothing here refuses a launch; it only decides
+/// whether there is a snapshot to look at.
+fn avd_root(environment: &SdkEnvironment, avd: &str) -> Option<PathBuf> {
+    if !valid_avd_name(avd) {
+        return None;
+    }
+    avd_homes(environment).into_iter().find_map(|home| {
+        let pointed = ini_values(
+            &home.join(format!("{avd}{AVD_POINTER_SUFFIX}")),
+            &[AVD_PATH_KEY],
+        )
+        .into_iter()
+        .next()
+        .map(|(_, path)| PathBuf::from(path))
+        .filter(|path| path.is_absolute());
+        pointed
+            .into_iter()
+            .chain(std::iter::once(
+                home.join(format!("{avd}{AVD_DIRECTORY_SUFFIX}")),
+            ))
+            .find(|root| root.is_dir())
+    })
+}
+
+/// The values these keys carry in one AVD ini file.
+///
+/// `<name>.ini`, `config.ini` and `emulator-user.ini` are all the same
+/// `key = value` shape, so they are read through one reader rather than three.
+/// Keys are answered in the order they were asked for, and a key the file does
+/// not carry is simply absent.
+fn ini_values(path: &Path, keys: &[&str]) -> Vec<(String, String)> {
+    let readable =
+        std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() <= AVD_INI_MAX_BYTES);
+    if !readable {
+        return Vec::new();
+    }
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let (key, value) = (key.trim(), value.trim());
+        if keys.contains(&key) && !found.iter().any(|(seen, _): &(String, _)| seen == key) {
+            found.push((key.to_string(), value.to_string()));
+        }
+    }
+    found.sort_by_key(|(key, _)| keys.iter().position(|wanted| wanted == key));
+    found
+}
+
+/// Today, locally, as `YYYY-MM-DD` — what a moved-aside snapshot is named
+/// after. The offset comes from the window's one local clock rather than a
+/// second reading of the platform.
+fn today_local() -> String {
+    let offset_minutes =
+        i32::try_from(crate::automation_runtime::local_offset_secs() / 60).unwrap_or_default();
+    zerocode_core::civil::iso_date_of(crate::now_epoch_ms(), offset_minutes)
+}
+
+/// Move a snapshot the emulator has already refused out of its way, before
+/// this launch meets it too (t-5762).
+///
+/// This is not a tidy-up for disk's sake. Such a record SURVIVES every exit
+/// that does not save — a crash, a force quit, an exit past
+/// [`SNAPSHOT_SAVE_LIMIT`], the SIGKILL this window sent before D2 — so an
+/// AVD that once failed a load pays the cold boot on every launch until
+/// something replaces it. `beat_sweep_w012` carried its August one until
+/// 09-21, which is exactly what D2 was supposed to have ended. Clearing it
+/// here means the launch after this one starts from a snapshot or from
+/// nothing, never from a refusal, and the window log says which.
+fn clear_a_stale_snapshot(local_data_root: &Path, avd: &str) {
+    let Some(root) = avd_root(&SdkEnvironment::current(), avd) else {
+        return;
+    };
+    if let Some(note) = snapshots::tidy(&root, &today_local()) {
+        crate::note_window_event(local_data_root, &note);
+    }
+}
+
+/// The witness for a quick boot that did not happen anyway (t-5762).
+///
+/// Both rows are read once the device is up, because neither is knowable
+/// before it, and nothing is changed here — the boot has already been paid
+/// for. The line exists so the next reader of `window-errors.log` starts from
+/// the reason rather than from "the pane was slow again".
+///
+/// * The AVD's `default_boot` as it stands NOW. The launch moved a refused one
+///   aside before the launcher looked, so one that is refused HERE was written
+///   during this very boot: a failed load rewrites `snapshot.pb` into an
+///   11-byte record carrying only a reason code. That is the launcher's own
+///   decision, in the only place it is legible.
+/// * [`NO_SNAPSHOT_FLAG`] on the process itself — which only ever means the
+///   process was GIVEN it, so on an adopted device it names the older window
+///   that started it, and on one we started it is a regression in this file.
+fn note_a_refused_snapshot(local_data_root: &Path, avd: &str, pid: Option<u32>) {
+    let mut reasons = Vec::new();
+    let root = avd_root(&SdkEnvironment::current(), avd);
+    if let Some(root) = &root
+        && let snapshots::Verdict::Broken(reason) =
+            snapshots::inspect(&snapshots::default_boot_of(root))
+    {
+        reasons.push(format!(
+            "the emulator refused its own snapshot during this boot and recorded it: {reason}"
+        ));
+    }
+    if pid.is_some_and(|pid| {
+        crate::resource_usage::process_has_args(pid, &[NO_SNAPSHOT_FLAG]) == Ok(true)
+    }) {
+        reasons.push(format!(
+            "the running emulator carries {NO_SNAPSHOT_FLAG}, so it will not write one either"
+        ));
+    }
+    if reasons.is_empty() {
+        return;
+    }
+    // Only now, because these cost a file read each and say nothing unless
+    // something above already went wrong.
+    if let Some(root) = &root {
+        reasons.extend(
+            ini_values(
+                &root.join(AVD_CONFIG_FILE),
+                &COLD_BOOT_KEYS.map(|(key, _)| key),
+            )
+            .into_iter()
+            .filter(|(key, value)| {
+                COLD_BOOT_KEYS
+                    .iter()
+                    .any(|(cold, asked)| cold == key && asked.eq_ignore_ascii_case(value))
+            })
+            .map(|(key, value)| format!("{AVD_CONFIG_FILE} asks for a cold boot: {key}={value}")),
+        );
+    }
+    crate::note_window_event(
+        local_data_root,
+        &format!(
+            "emulator android quick boot did not happen: avd {avd} pid {} — {}",
+            pid.map_or_else(|| "unknown".to_string(), |pid| pid.to_string()),
+            reasons.join("; ")
+        ),
+    );
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1296,6 +1517,10 @@ fn boot_android_device(
         // starting a second instance of the same AVD.
         adopted
     } else {
+        // Before the launcher reads it: a `default_boot` the emulator has
+        // already refused is a cold boot on every launch until something
+        // replaces it (t-5762).
+        clear_a_stale_snapshot(&local_data_root, &chosen.avd);
         // The intent reaches durable storage before the process exists. Its
         // unguessable token is also placed on the emulator command line, so a
         // restart can recover the pid even if this process dies immediately
@@ -1376,6 +1601,9 @@ fn boot_android_device(
             .filter(|answer| answer.status.success())
             .is_some_and(|answer| String::from_utf8_lossy(&answer.stdout).trim() == "1");
         if ready {
+            // The AVD's snapshot directory is only final once the emulator
+            // has read it, which is now.
+            note_a_refused_snapshot(&local_data_root, &chosen.avd, managed.record().pid);
             held(&managed.record).serial = Some(serial.clone());
             if let Err(error) = write_managed_records(&local_data_root) {
                 managed.stop();

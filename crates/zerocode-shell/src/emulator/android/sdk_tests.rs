@@ -54,8 +54,36 @@ impl FakeHome {
             path: Some(OsString::from("/usr/bin:/bin:/usr/sbin:/sbin")),
             sdk_root: None,
             android_home: None,
+            avd_home: None,
+            android_user_home: None,
+            sdk_home: None,
             home: Some(self.directory.path().to_path_buf()),
         }
+    }
+
+    /// One AVD directory under `home`, with the pointer beside it that the
+    /// SDK writes — optionally pointing somewhere else entirely, which is
+    /// what a person who moved an AVD off the boot disk has.
+    fn avd(&self, home: &Path, name: &str, contents_at: Option<&Path>) -> PathBuf {
+        std::fs::create_dir_all(home).expect("avd home");
+        let root = contents_at.map_or_else(
+            || home.join(format!("{name}{AVD_DIRECTORY_SUFFIX}")),
+            Path::to_path_buf,
+        );
+        std::fs::create_dir_all(&root).expect("avd directory");
+        std::fs::write(
+            home.join(format!("{name}{AVD_POINTER_SUFFIX}")),
+            format!(
+                "avd.ini.encoding=UTF-8\n{AVD_PATH_KEY}={}\npath.rel=avd/{name}{AVD_DIRECTORY_SUFFIX}\n",
+                root.display()
+            ),
+        )
+        .expect("avd pointer");
+        root
+    }
+
+    fn under(&self, name: &str) -> PathBuf {
+        self.directory.path().join(name)
     }
 }
 
@@ -209,5 +237,128 @@ fn a_relative_configured_root_is_not_walked() {
     assert!(
         !why.contains("relative/sdk"),
         "a relative root was walked anyway: {why}"
+    );
+}
+
+/// The AVD table, top to bottom: `$ANDROID_AVD_HOME`, then the `avd` inside
+/// `$ANDROID_USER_HOME` and inside the legacy `$ANDROID_SDK_HOME/.android`,
+/// then `~/.android/avd` — which is the only row a window opened from the Dock
+/// has (trap 307), and the row this machine's own AVD sits in.
+#[test]
+fn each_row_of_the_avd_table_wins_over_the_rows_under_it() {
+    let fake = FakeHome::new(&[]);
+    let default_home = fake.under(DOT_ANDROID).join(AVD_SUBDIRECTORY);
+    let user_home = fake.under("user-home");
+    let sdk_home = fake.under("sdk-home");
+    let avd_home = fake.under("avd-home");
+
+    let by_default = fake.avd(&default_home, "probe", None);
+    let by_user = fake.avd(&user_home.join(AVD_SUBDIRECTORY), "probe", None);
+    let by_sdk = fake.avd(
+        &sdk_home.join(DOT_ANDROID).join(AVD_SUBDIRECTORY),
+        "probe",
+        None,
+    );
+    let by_avd_home = fake.avd(&avd_home, "probe", None);
+
+    let mut environment = fake.environment();
+    assert_eq!(
+        avd_root(&environment, "probe").as_deref(),
+        Some(by_default.as_path()),
+        "the home default is the last row and the only one set"
+    );
+    environment.sdk_home = Some(sdk_home.into_os_string());
+    assert_eq!(
+        avd_root(&environment, "probe").as_deref(),
+        Some(by_sdk.as_path()),
+        "$ANDROID_SDK_HOME comes before the home default"
+    );
+    environment.android_user_home = Some(user_home.into_os_string());
+    assert_eq!(
+        avd_root(&environment, "probe").as_deref(),
+        Some(by_user.as_path()),
+        "$ANDROID_USER_HOME comes before $ANDROID_SDK_HOME"
+    );
+    environment.avd_home = Some(avd_home.into_os_string());
+    assert_eq!(
+        avd_root(&environment, "probe").as_deref(),
+        Some(by_avd_home.as_path()),
+        "$ANDROID_AVD_HOME is the first row"
+    );
+}
+
+/// The pointer beside an AVD is what says where its files are — an AVD moved
+/// off the boot disk keeps its name in `~/.android/avd` and nothing else.
+#[test]
+fn the_pointer_decides_where_the_avd_files_are() {
+    let fake = FakeHome::new(&[]);
+    let home = fake.under(DOT_ANDROID).join(AVD_SUBDIRECTORY);
+    let elsewhere = fake.under("second-disk").join("moved.avd");
+    let root = fake.avd(&home, "moved", Some(&elsewhere));
+    assert_eq!(root, elsewhere);
+    assert_eq!(
+        avd_root(&fake.environment(), "moved").as_deref(),
+        Some(elsewhere.as_path())
+    );
+
+    // A pointer naming a directory that is not there falls back to the
+    // `<name>.avd` beside it rather than answering a road nobody can read.
+    std::fs::remove_dir_all(&elsewhere).expect("clear");
+    let beside = home.join(format!("moved{AVD_DIRECTORY_SUFFIX}"));
+    std::fs::create_dir_all(&beside).expect("avd directory");
+    assert_eq!(
+        avd_root(&fake.environment(), "moved").as_deref(),
+        Some(beside.as_path())
+    );
+}
+
+/// An AVD this machine does not have is not an error anywhere it is asked —
+/// and a name that could not go on a command line is never joined into a path.
+#[test]
+fn an_unknown_or_unusable_avd_name_answers_nothing() {
+    let fake = FakeHome::new(&[]);
+    fake.avd(
+        &fake.under(DOT_ANDROID).join(AVD_SUBDIRECTORY),
+        "probe",
+        None,
+    );
+    assert_eq!(avd_root(&fake.environment(), "absent"), None);
+    assert_eq!(avd_root(&fake.environment(), "../probe"), None);
+    assert_eq!(avd_root(&fake.environment(), ""), None);
+}
+
+/// One reader for every AVD ini: answers in the order asked for, ignores what
+/// was not asked for, and refuses a file too big to be one.
+#[test]
+fn the_ini_reader_answers_the_keys_it_was_asked_for() {
+    let fake = FakeHome::new(&[]);
+    let root = fake.avd(
+        &fake.under(DOT_ANDROID).join(AVD_SUBDIRECTORY),
+        "probe",
+        None,
+    );
+    let config = root.join(AVD_CONFIG_FILE);
+    std::fs::write(
+        &config,
+        "AvdId=probe\nfastboot.forceColdBoot=no\nfastboot.forceFastBoot = yes\nhw.ramSize=2G\n",
+    )
+    .expect("config");
+
+    assert_eq!(
+        ini_values(&config, &COLD_BOOT_KEYS.map(|(key, _)| key)),
+        vec![
+            ("fastboot.forceColdBoot".to_string(), "no".to_string()),
+            ("fastboot.forceFastBoot".to_string(), "yes".to_string()),
+        ],
+        "both keys, in the order the table names them, with the spaces trimmed"
+    );
+    assert_eq!(ini_values(&config, &["hw.cpu"]), Vec::new());
+    assert_eq!(ini_values(&root.join("absent.ini"), &["AvdId"]), Vec::new());
+
+    std::fs::write(&config, vec![b'#'; AVD_INI_MAX_BYTES as usize + 1]).expect("oversized");
+    assert_eq!(
+        ini_values(&config, &["AvdId"]),
+        Vec::new(),
+        "a file too big to be an ini is not read"
     );
 }
