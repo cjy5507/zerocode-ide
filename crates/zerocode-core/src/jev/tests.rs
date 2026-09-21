@@ -42,12 +42,60 @@ fn mobile_screen_judgment_has_its_own_seat_and_consent_setting() {
     assert_ne!(mobile.setting, DESKTOP.setting);
     assert_ne!(mobile.ledger, BROWSER.ledger);
     assert_ne!(mobile.ledger, DESKTOP.ledger);
-    assert!(!mobile.promotes);
-    assert_eq!(mobile.answer_floor_permille, None);
     assert_eq!(
         mobile.mode_in(&json!({"smart": {"browserAction": "on", "desktopAction": "on"}})),
         JevMode::Off
     );
+}
+
+/// The three screen seats' `auto` rises, on the lines
+/// docs/design/jev-seats-accuracy-wave-20260921.md §4 wrote down — pinned
+/// here because they are what a walk presses on, and a number that drifted
+/// out of the design would move that with nobody reading it.
+#[test]
+fn every_screen_seat_rises_on_the_lines_the_wave_wrote_down() {
+    const {
+        assert!(BROWSER.promotes && DESKTOP.promotes && EMULATOR.promotes);
+    }
+    for seat in [&BROWSER, &DESKTOP, &EMULATOR] {
+        assert_eq!(
+            seat.answer_floor_permille,
+            Some(SCREEN_ANSWER_FLOOR_PERMILLE),
+            "{}",
+            seat.id
+        );
+        assert_eq!(
+            seat.agreement_floor_permille,
+            Some(SCREEN_AGREEMENT_FLOOR_PERMILLE),
+            "{}",
+            seat.id
+        );
+        assert_eq!(
+            seat.apply_deadline_ms,
+            Some(SCREEN_APPLY_DEADLINE_MS),
+            "{}",
+            seat.id
+        );
+        // Pressing is still the press floor's to allow, whoever raised the
+        // seat: a promoted `auto` presses at the same confidence `on` does.
+        assert_eq!(
+            seat.press_floor_permille,
+            Some(SCREEN_PRESS_FLOOR_PERMILLE),
+            "{}",
+            seat.id
+        );
+    }
+    assert_eq!(SCREEN_ANSWER_FLOOR_PERMILLE, 900);
+    assert_eq!(SCREEN_AGREEMENT_FLOOR_PERMILLE, 800);
+    assert_eq!(SCREEN_APPLY_DEADLINE_MS, 1_500);
+    // Nine in ten is a line thirty-five walks can clear — the routing seat's
+    // 73 is its own floor's window, not this one's — and the agreement is
+    // read over the judgment's own cadence of twenty comparisons.
+    assert_eq!(
+        summary::rows_that_can_clear(SCREEN_ANSWER_FLOOR_PERMILLE),
+        35
+    );
+    assert!(summary::rows_that_can_clear(SCREEN_AGREEMENT_FLOOR_PERMILLE) < 35);
 }
 
 #[test]
@@ -121,12 +169,21 @@ fn recall_acts_only_when_a_person_says_on() {
     );
 }
 
+/// Read with no judgment to hand, `auto` records; read with one, it is
+/// whatever the judge last decided. A person's three words are theirs in
+/// both readings.
 #[test]
-fn auto_asks_and_records_but_acts_on_nothing_yet() {
+fn auto_records_until_its_own_judge_says_otherwise() {
     assert!(!JevMode::Off.asks() && !JevMode::Off.applies());
     assert!(JevMode::Shadow.asks() && !JevMode::Shadow.applies());
     assert!(JevMode::Auto.asks() && !JevMode::Auto.applies());
     assert!(JevMode::On.asks() && JevMode::On.applies());
+    for raised in [false, true] {
+        assert!(!JevMode::Off.applies_with(raised));
+        assert!(!JevMode::Shadow.applies_with(raised));
+        assert!(JevMode::On.applies_with(raised));
+        assert_eq!(JevMode::Auto.applies_with(raised), raised);
+    }
 }
 
 /// Promotion rises from `auto` to acting, so a use that promotes offers both.

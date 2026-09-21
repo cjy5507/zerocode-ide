@@ -296,7 +296,7 @@ fn the_folder_a_walk_was_asked_from_is_the_workspace_the_door_consents_by() {
         },
     );
     let mut world = FakeWorld::showing(&[1, 2]);
-    let recovered = run(Mode::On, &at, &mut judge, &mut world);
+    let recovered = run(Mode::On, true, &at, &mut judge, &mut world);
     assert_eq!(endpoint.asked().len(), 1, "one request left the door");
     assert_eq!(world.presses, [1]);
     assert_eq!(recovered.rows.len(), 1, "{:?}", recovered.rows);
@@ -315,7 +315,7 @@ fn the_folder_a_walk_was_asked_from_is_the_workspace_the_door_consents_by() {
         },
     );
     let mut world = FakeWorld::showing(&[1, 2]);
-    let recovered = run(Mode::On, &at, &mut judge, &mut world);
+    let recovered = run(Mode::On, true, &at, &mut judge, &mut world);
     assert!(endpoint.asked().is_empty(), "nothing left the door");
     assert!(world.presses.is_empty(), "nothing was pressed");
     assert_eq!(recovered.rows.len(), 1, "{:?}", recovered.rows);

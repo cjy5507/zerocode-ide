@@ -194,7 +194,7 @@ fn mobile_and_other_surfaces_refuse_low_confidence() {
         choice.confidence = 0.29;
         let mut world = FakeWorld::showing(&[1]);
         world.screen.as_mut().unwrap().at = seen;
-        let walked = run(Mode::On, &goal(1), &mut judge, &mut world);
+        let walked = run(Mode::On, true, &goal(1), &mut judge, &mut world);
         assert!(world.presses.is_empty(), "low confidence must not press");
         assert_eq!(walked.pressed, 0);
         assert_eq!(walked.rows[0]["barred"], Barred::LowConfidence.as_str());
@@ -209,6 +209,7 @@ fn off_asks_nothing_presses_nothing_and_writes_nothing() {
 
     let recovered = run(
         Mode::Off,
+        false,
         &stopped(RecipeStop::StepFailed),
         &mut judge,
         &mut world,
@@ -225,14 +226,15 @@ fn off_asks_nothing_presses_nothing_and_writes_nothing() {
 
 #[test]
 fn shadow_records_what_it_would_have_pressed_and_presses_nothing() {
-    // `auto` records until something promotes it, and nothing promotes a
-    // press: it is held to every word `shadow` is.
+    // `auto` records until its own ledger promotes it, so an `auto` nobody
+    // has raised is held to every word `shadow` is.
     for mode in [Mode::Shadow, Mode::Auto] {
         let mut judge = FakeJudge::chose(&[2]);
         let mut world = FakeWorld::showing(&[1, 2]);
 
         let recovered = run(
             mode,
+            mode.applies(),
             &stopped(RecipeStop::CheckFailed),
             &mut judge,
             &mut world,
@@ -272,6 +274,7 @@ fn what_asking_cost_at_the_door_is_on_the_row() {
 
     let recovered = run(
         Mode::Shadow,
+        false,
         &stopped(RecipeStop::CheckFailed),
         &mut judge,
         &mut world,
@@ -283,6 +286,7 @@ fn what_asking_cost_at_the_door_is_on_the_row() {
     let mut quiet = FakeJudge::chose(&[2]);
     let recovered = run(
         Mode::Shadow,
+        false,
         &stopped(RecipeStop::CheckFailed),
         &mut quiet,
         &mut FakeWorld::showing(&[1, 2]),
@@ -297,6 +301,7 @@ fn on_presses_the_number_it_chose_and_walks_again_from_the_reports_own_next() {
 
     let recovered = run(
         Mode::On,
+        true,
         &stopped(RecipeStop::StepFailed),
         &mut judge,
         &mut world,
@@ -325,6 +330,7 @@ fn pressing_is_not_succeeding() {
 
     let recovered = run(
         Mode::On,
+        true,
         &stopped(RecipeStop::StepFailed),
         &mut judge,
         &mut world,
@@ -351,6 +357,7 @@ fn a_walk_spends_no_more_than_the_attempt_cap() {
 
     let recovered = run(
         Mode::On,
+        true,
         &stopped(RecipeStop::StepFailed),
         &mut judge,
         &mut world,
@@ -369,6 +376,7 @@ fn a_door_that_refused_the_press_is_not_tried_again() {
 
     let recovered = run(
         Mode::On,
+        true,
         &stopped(RecipeStop::StepFailed),
         &mut judge,
         &mut world,
@@ -392,6 +400,7 @@ fn an_unusable_answer_leaves_the_walk_where_it_stopped() {
 
         let recovered = run(
             Mode::On,
+            true,
             &stopped(RecipeStop::StepFailed),
             &mut judge,
             &mut world,
@@ -415,6 +424,7 @@ fn giving_up_presses_nothing() {
 
     let recovered = run(
         Mode::On,
+        true,
         &stopped(RecipeStop::StepFailed),
         &mut judge,
         &mut world,
@@ -432,7 +442,7 @@ fn only_a_failed_step_or_check_is_ever_recovered() {
         let mut judge = FakeJudge::chose(&[1]);
         let mut world = FakeWorld::showing(&[1]);
 
-        run(Mode::On, &stopped(stop), &mut judge, &mut world);
+        run(Mode::On, true, &stopped(stop), &mut judge, &mut world);
 
         assert_eq!(
             judge.asked.is_empty(),
@@ -457,7 +467,7 @@ fn money_is_never_recovered() {
 
     let mut judge = FakeJudge::chose(&[1]);
     let mut world = FakeWorld::showing(&[1, 2]);
-    let recovered = run(Mode::On, &moneyed, &mut judge, &mut world);
+    let recovered = run(Mode::On, true, &moneyed, &mut judge, &mut world);
 
     assert!(judge.asked.is_empty() && world.presses.is_empty());
     assert_eq!(
@@ -488,7 +498,7 @@ fn a_guarded_flow_refuses_recovery_even_with_no_money_line_of_its_own() {
 
     let mut judge = FakeJudge::chose(&[1]);
     let mut world = FakeWorld::showing(&[1]);
-    let recovered = run(Mode::On, &guarded, &mut judge, &mut world);
+    let recovered = run(Mode::On, true, &guarded, &mut judge, &mut world);
     assert!(judge.asked.is_empty() && world.presses.is_empty());
     assert_eq!(recovered.rows[0]["barred"], json!(Barred::Guarded.as_str()));
 
@@ -525,6 +535,7 @@ fn a_walk_without_clock_enough_to_ask_and_still_walk_asks_nothing() {
     world.left_ms = deadline;
     let recovered = run(
         Mode::On,
+        true,
         &stopped(RecipeStop::StepFailed),
         &mut judge,
         &mut world,
@@ -543,6 +554,7 @@ fn a_screen_that_cannot_be_read_or_shows_nothing_presses_nothing() {
     blind.screen = None;
     let recovered = run(
         Mode::On,
+        true,
         &stopped(RecipeStop::StepFailed),
         &mut judge,
         &mut blind,
@@ -554,6 +566,7 @@ fn a_screen_that_cannot_be_read_or_shows_nothing_presses_nothing() {
     let mut bare = FakeWorld::showing(&[]);
     let recovered = run(
         Mode::On,
+        true,
         &stopped(RecipeStop::StepFailed),
         &mut judge,
         &mut bare,
@@ -576,9 +589,13 @@ fn the_mode_word_is_read_the_way_the_router_card_reads_its_own() {
     for mode in BROWSER.modes {
         assert_eq!(word(mode.key()), *mode);
     }
+    // Read with nothing raised, `auto` records; read with the judge's own
+    // answer, it is that answer. The walk is handed the second reading.
+    assert!(!Mode::Auto.applies());
+    assert!(Mode::Auto.applies_with(true));
     assert!(
-        !Mode::Auto.applies(),
-        "nothing promotes a press: auto never presses"
+        !Mode::Shadow.applies_with(true),
+        "a person's shadow is theirs"
     );
 }
 
@@ -686,7 +703,7 @@ fn a_goal_walk_presses_step_after_step_and_never_resumes_a_document() {
     let mut judge = FakeJudge::chose(&[1, 2, 3]);
     let mut world = FakeWorld::that_moves(&[1, 2, 3]);
 
-    let walked = run(Mode::On, &goal(3), &mut judge, &mut world);
+    let walked = run(Mode::On, true, &goal(3), &mut judge, &mut world);
 
     assert_eq!(world.presses, [1, 2, 3]);
     assert!(
@@ -714,7 +731,7 @@ fn the_callers_own_condition_ends_a_goal_walk_and_the_judgments_word_is_the_weak
     let mut world = FakeWorld::that_moves(&[1, 2, 3]);
     world.reached = vec![false, true];
 
-    let walked = run(Mode::On, &goal(10), &mut judge, &mut world);
+    let walked = run(Mode::On, true, &goal(10), &mut judge, &mut world);
 
     assert_eq!(world.presses, [1, 2], "it stopped when the check held");
     assert_eq!(walked.reached, Some(true));
@@ -737,7 +754,7 @@ fn the_callers_own_condition_ends_a_goal_walk_and_the_judgments_word_is_the_weak
     ]);
     let mut world = FakeWorld::that_moves(&[1, 2]);
 
-    let walked = run(Mode::On, &goal(10), &mut judge, &mut world);
+    let walked = run(Mode::On, true, &goal(10), &mut judge, &mut world);
 
     assert_eq!(world.presses, [1]);
     assert_eq!(walked.reached, Some(true));
@@ -755,6 +772,7 @@ fn a_screen_that_will_not_move_ends_the_walk_whatever_its_step_budget_says() {
 
     let walked = run(
         Mode::On,
+        true,
         &goal(zerocode_core::computer_use::WALK_STEPS_MAX),
         &mut judge,
         &mut world,
@@ -780,7 +798,7 @@ fn a_screen_that_moved_offers_its_numbers_again_because_they_mean_something_else
     let mut judge = FakeJudge::chose(&[1, 1, 1]);
     let mut world = FakeWorld::that_moves(&[1, 2]);
 
-    run(Mode::On, &goal(3), &mut judge, &mut world);
+    run(Mode::On, true, &goal(3), &mut judge, &mut world);
 
     assert_eq!(world.presses, [1, 1, 1]);
     assert_eq!(
@@ -795,7 +813,7 @@ fn a_goal_walk_spends_no_more_than_the_steps_it_was_given() {
     let mut judge = FakeJudge::chose(&[1, 2, 3, 4, 5, 6, 7]);
     let mut world = FakeWorld::that_moves(&[1, 2, 3, 4, 5, 6, 7]);
 
-    let walked = run(Mode::On, &goal(4), &mut judge, &mut world);
+    let walked = run(Mode::On, true, &goal(4), &mut judge, &mut world);
 
     assert_eq!(world.presses.len(), 4);
     assert_eq!(walked.rows.len(), 4);
@@ -837,7 +855,7 @@ fn a_goal_walk_passes_every_gate_a_recovery_does() {
     for mode in [Mode::Off, Mode::Shadow, Mode::Auto] {
         let mut judge = FakeJudge::chose(&[1, 2]);
         let mut world = FakeWorld::that_moves(&[1, 2]);
-        let walked = run(mode, &goal(10), &mut judge, &mut world);
+        let walked = run(mode, mode.applies(), &goal(10), &mut judge, &mut world);
         assert!(world.presses.is_empty(), "{mode:?}");
         assert_eq!(walked.pressed, 0, "{mode:?}");
         assert_eq!(walked.reached, Some(false), "{mode:?}");
@@ -859,10 +877,20 @@ fn the_two_surfaces_sit_in_their_own_seats() {
         seat_of(Surface::Desk),
         zerocode_core::jev::jev_use("desktop").expect("the desktop seat is in the table")
     );
-    for seat in [seat_of(Surface::Page), seat_of(Surface::Desk)] {
+    for seat in [
+        seat_of(Surface::Page),
+        seat_of(Surface::Desk),
+        seat_of(Surface::Phone),
+    ] {
         assert!(
-            !seat.promotes,
-            "{}: nothing promotes a press — auto never presses",
+            seat.promotes,
+            "{}: a screen seat's auto rises on its own ledger",
+            seat.id
+        );
+        assert_eq!(
+            seat.apply_deadline_ms,
+            Some(u64::try_from(ACTION_DEADLINE.as_millis()).unwrap_or(u64::MAX)),
+            "{}: the wall the walk waits is the wall the judge reads",
             seat.id
         );
     }
@@ -911,7 +939,7 @@ fn two_looks_are_the_same_screen_when_the_question_would_read_the_same_words() {
 fn the_actual_goal_press_carries_its_judgment_and_restores_the_recording_context() {
     let mut world = FakeWorld::showing(&[1]);
     let mut judge = FakeJudge::chose(&[1]);
-    run(Mode::On, &goal(1), &mut judge, &mut world);
+    run(Mode::On, true, &goal(1), &mut judge, &mut world);
     assert_eq!(world.observed.len(), 1);
     let observed = world.observed[0].as_ref().unwrap();
     assert_eq!(observed["judgment"]["asked"], true);
@@ -919,4 +947,246 @@ fn the_actual_goal_press_carries_its_judgment_and_restores_the_recording_context
     assert!(observed["judgment"]["ms"].is_u64());
     assert!(observed["look_ms"].is_u64());
     assert!(crate::run_evidence::observation().is_none());
+}
+
+// ---- the seat's standing, and the hindsight it is earned on ---------------
+
+#[test]
+fn an_auto_its_own_ledger_raised_presses_what_an_unraised_one_only_recorded() {
+    // The one difference promotion makes, held in one test: the same mode,
+    // the same screen, the same answer — and the caller's `acting` is what
+    // decides whether the number is pressed or only written down.
+    for (acting, presses, route) in [(false, 0, USE_SHADOW), (true, 1, USE_APPLIED)] {
+        let mut judge = FakeJudge::chose(&[2]);
+        let mut world = FakeWorld::showing(&[1, 2]);
+
+        let walked = run(
+            Mode::Auto,
+            acting,
+            &stopped(RecipeStop::CheckFailed),
+            &mut judge,
+            &mut world,
+        );
+
+        assert_eq!(world.presses.len(), presses, "acting={acting}");
+        assert_eq!(walked.rows[0]["mode"], json!(Mode::Auto.key()));
+        assert_eq!(walked.rows[0]["chosen"], json!("mark:2"), "acting={acting}");
+        assert_eq!(walked.rows[0]["routeUse"], json!(route), "acting={acting}");
+    }
+}
+
+#[test]
+fn a_walk_that_got_there_agrees_with_every_press_it_took_to_get_there() {
+    // The unit is the walk and not the press: the first press left the
+    // caller's condition unmet and is still one of the presses that arrived.
+    let mut judge = FakeJudge::chose(&[1, 2, 3]);
+    let mut world = FakeWorld::that_moves(&[1, 2, 3]);
+    world.reached = vec![false, true];
+
+    let walked = run(Mode::On, true, &goal(10), &mut judge, &mut world);
+
+    assert_eq!(walked.pressed, 2);
+    assert_eq!(walked.agreed, Some(true));
+    assert_eq!(walked.rows[0]["recheck"], json!(false));
+    for row in &walked.rows {
+        assert_eq!(row[AGREED.canonical], json!(true), "{row}");
+    }
+}
+
+#[test]
+fn a_walk_that_never_got_there_disagrees_with_the_presses_it_spent() {
+    let mut judge = FakeJudge::chose(&[1, 2, 3]);
+    let mut world = FakeWorld::showing(&[1, 2, 3]);
+    world.reached = vec![false, false, false];
+
+    let walked = run(Mode::On, true, &goal(10), &mut judge, &mut world);
+
+    // Two presses that moved nothing, and then the screen ended the walk.
+    assert_eq!(walked.pressed, SAME_SCREEN_LIMIT);
+    assert_eq!(walked.agreed, Some(false));
+    let stuck = walked.rows.last().expect("the walk says why it stopped");
+    assert_eq!(stuck["outcome"], json!("stuck"));
+    assert!(
+        stuck.get(AGREED.canonical).is_none(),
+        "the mark is about presses, and this row is not one"
+    );
+    for row in &walked.rows[..walked.pressed] {
+        assert_eq!(row[AGREED.canonical], json!(false), "{row}");
+    }
+}
+
+#[test]
+fn a_walk_nothing_checked_is_left_out_of_the_agreement_rather_than_guessed_at() {
+    // No `until`: the world answers no condition, so nothing but the
+    // judgment's own word says the walk arrived, and §4 counts neither way.
+    let mut judge = FakeJudge::chose(&[1, 2, 3]);
+    let mut world = FakeWorld::that_moves(&[1, 2, 3]);
+
+    let walked = run(Mode::On, true, &goal(3), &mut judge, &mut world);
+
+    assert_eq!(walked.pressed, 3);
+    assert_eq!(walked.agreed, None);
+    for row in &walked.rows {
+        assert!(row.get(AGREED.canonical).is_none(), "{row}");
+    }
+
+    // And the judgment's own `done` is that same weaker word: it ends the
+    // walk, it does not testify about the press before it.
+    let mut judge = FakeJudge::saying(vec![
+        pick(1),
+        Judged::Chose(ActionChoice {
+            chosen: Chosen::Done,
+            probabilities: BTreeMap::new(),
+            confidence: 0.9,
+        }),
+    ]);
+    let mut world = FakeWorld::that_moves(&[1, 2]);
+
+    let walked = run(Mode::On, true, &goal(10), &mut judge, &mut world);
+
+    assert_eq!(walked.reached, Some(true), "the judgment said it arrived");
+    assert_eq!(walked.agreed, None, "and nothing checked that it had");
+    for row in &walked.rows {
+        assert!(row.get(AGREED.canonical).is_none(), "{row}");
+    }
+}
+
+#[test]
+fn a_recovery_agrees_with_its_press_exactly_when_the_stop_was_cleared() {
+    let mut judge = FakeJudge::chose(&[2]);
+    let mut world = FakeWorld::showing(&[1, 2, 3]);
+
+    let recovered = run(
+        Mode::On,
+        true,
+        &stopped(RecipeStop::StepFailed),
+        &mut judge,
+        &mut world,
+    );
+
+    assert_eq!(recovered.agreed, Some(true));
+    assert_eq!(recovered.rows[0][AGREED.canonical], json!(true));
+
+    // The same walk whose re-walks keep stopping at the step that stopped.
+    let mut judge = FakeJudge::chose(&[1, 3]);
+    let mut world = FakeWorld::showing(&[1, 2, 3]);
+    world.walks = vec![Some(4), Some(4)];
+
+    let recovered = run(
+        Mode::On,
+        true,
+        &stopped(RecipeStop::StepFailed),
+        &mut judge,
+        &mut world,
+    );
+
+    assert_eq!(recovered.agreed, Some(false));
+    for row in &recovered.rows {
+        assert_eq!(row[AGREED.canonical], json!(false), "{row}");
+    }
+}
+
+#[test]
+fn a_walk_that_pressed_nothing_agrees_with_nothing() {
+    let mut judge = FakeJudge::chose(&[1]);
+    let mut world = FakeWorld::showing(&[]);
+
+    let walked = run(Mode::On, true, &goal(3), &mut judge, &mut world);
+
+    assert_eq!(walked.rows[0]["outcome"], json!("no_candidate"));
+    assert_eq!(walked.pressed, 0);
+    assert_eq!(walked.agreed, None, "a shadow row testifies about no press");
+    assert!(walked.rows[0].get(AGREED.canonical).is_none());
+}
+
+/// One row of a walk, as the seat writes them.
+fn answered_press(at_ms: i64, agreed: bool) -> Value {
+    json!({
+        AT.canonical: at_ms,
+        "outcome": "answered",
+        ELAPSED_MS.canonical: 300,
+        "pressed": true,
+        AGREED.canonical: agreed,
+    })
+}
+
+/// A wire whose config home is `home` and whose settings put `seat` in `mode`.
+fn wire_at(home: &tempfile::TempDir, seat: &JevUse, mode: Mode) -> crate::systemone::Wire {
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({ zerocode_core::jev::SMART_SETTINGS_KEY: { seat.setting: mode.key() } }).to_string(),
+    )
+    .expect("zo's settings");
+    crate::systemone::Wire::at("http://127.0.0.1:1", "test-key", Some(settings))
+}
+
+#[test]
+fn a_walks_rows_land_in_its_evidence_folder_and_in_the_seats_one_ledger() {
+    let home = tempfile::tempdir().expect("a zo home");
+    let session = home.path().join("sessions").join("2026-09-21");
+    let seat = seat_of(Surface::Page);
+    let wire = wire_at(&home, seat, Mode::Auto);
+
+    write_rows(seat, &wire, Some(&session), &[answered_press(1, true)], 1);
+
+    let beside_the_evidence = session.join(seat.ledger);
+    let one_ledger = crate::systemone::ledger_of(&wire, seat).expect("the seat's ledger");
+    assert_eq!(
+        std::fs::read_to_string(&beside_the_evidence).expect("the evidence copy"),
+        std::fs::read_to_string(&one_ledger).expect("the judged copy"),
+        "one row, written down in both places it belongs"
+    );
+    assert!(
+        one_ledger.ends_with(
+            std::path::Path::new(zerocode_core::jev::count::REQUESTS_DIR).join(seat.ledger)
+        ),
+        "{}",
+        one_ledger.display()
+    );
+}
+
+#[test]
+fn a_screen_seats_auto_rises_on_its_own_rows_and_falls_when_the_wire_does() {
+    let home = tempfile::tempdir().expect("a zo home");
+    let seat = seat_of(Surface::Page);
+    let wire = wire_at(&home, seat, Mode::Auto);
+    let ledger = crate::systemone::ledger_of(&wire, seat).expect("the seat's ledger");
+    assert!(
+        !crate::systemone::applies(&wire, seat),
+        "an auto nobody has raised records"
+    );
+
+    // A window's worth of presses the walks went on to confirm. Eighty, so
+    // the count lands on the judgment's own cadence, of which the last 73 —
+    // the rows a floor of nine in ten can be cleared on — are read.
+    let rows: Vec<Value> = (0..80).map(|n| answered_press(1_000 + n, true)).collect();
+    write_rows(seat, &wire, None, &rows, 90_000);
+
+    let judged = crate::systemone::read_rows(&ledger);
+    let transition = judged.last().expect("a judgment stands beside the rows");
+    assert_eq!(
+        transition[zerocode_core::jev::summary::TRANSITION.canonical],
+        json!(zerocode_core::jev::promote::ROSE),
+        "{transition}"
+    );
+    assert!(
+        crate::systemone::applies(&wire, seat),
+        "and the next walk presses"
+    );
+
+    // Three answers in a row that never came back end it at once, whatever
+    // the cadence says: that is the wire, the key or the model.
+    let dead: Vec<Value> = (0..3)
+        .map(|n| json!({ AT.canonical: 2_000 + n, "outcome": "timeout" }))
+        .collect();
+    write_rows(seat, &wire, None, &dead, 95_000);
+
+    let judged = crate::systemone::read_rows(&ledger);
+    assert_eq!(
+        judged.last().expect("a fall stands too")
+            [zerocode_core::jev::summary::TRANSITION.canonical],
+        json!(zerocode_core::jev::promote::FELL)
+    );
+    assert!(!crate::systemone::applies(&wire, seat));
 }

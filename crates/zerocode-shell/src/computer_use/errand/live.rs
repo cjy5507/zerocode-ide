@@ -116,6 +116,18 @@ impl LiveJudge {
     pub fn armed(&self) -> bool {
         self.wire.armed()
     }
+
+    /// The wire this walk asks down, for the two questions the caller has to
+    /// answer from the same settings file and the same config home the
+    /// questions go through: whether the seat is acting
+    /// ([`crate::systemone::applies`]) and where its ledger lives
+    /// ([`super::write_rows`]). Borrowed rather than built a second time —
+    /// two wires could read the settings at two different moments and have
+    /// a walk press on one answer while recording under the other.
+    #[must_use]
+    pub const fn wire(&self) -> &Wire {
+        &self.wire
+    }
 }
 
 impl ActionJudge for LiveJudge {
