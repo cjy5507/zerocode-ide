@@ -1870,7 +1870,8 @@ fn the_real_host_checks_the_terminal_map_without_copying_the_grid() {
         .0;
     assert!(
         quiet.contains("HookState::Working")
-            && quiet.contains("last_output_at()")
+            && quiet.contains("last_output_epoch_ms()")
+            && !quiet.contains("last_output_at()")
             && quiet.contains("quiet_since_output(last_output, worker_started_ms, now_ms)")
             && shared_quiet.contains("QUIET_GRACE_MS")
             && shared_quiet.contains("worker_started_ms"),
