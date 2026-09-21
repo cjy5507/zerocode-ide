@@ -8509,10 +8509,26 @@ mod tests {
             window.contains(r#"document.querySelectorAll('[id$="-scrim"]')"#),
             "the shade list is back to names picked by hand"
         );
-        let dropping = block_after(window, "function dropTab(id) {");
+        let dropping = block_after(window, "function dropTab(id, {");
         assert!(
             dropping.contains(r#"invoke("close_browser_pane""#),
             "a dropped browser tab leaves its webview floating:\n{dropping}"
+        );
+        // The pane goes whatever brought us here; the RESTORE RECORD only
+        // hears the person. Every other road into this door is bookkeeping —
+        // a checkout gone from the disk, a project removed — and a record
+        // rewritten for one of those is a window that comes back empty on the
+        // next start, which is what the live report was (t-5453: three panes
+        // and the record, 3 → 2 → 1 → 0, in seven seconds).
+        assert!(
+            dropping.contains("if (closed) rememberBrowserOpenTabs();"),
+            "the browser's restore record is written by bookkeeping again:\n{dropping}"
+        );
+        let closing = block_after(window, "function closeTab(id) {");
+        assert!(
+            closing.contains("dropTab(id, { closed: true });"),
+            "the person's own close stopped saying so, so the restore record \
+             now keeps addresses they closed on purpose:\n{closing}"
         );
     }
 
@@ -26078,7 +26094,7 @@ mod tests {
         }
 
         // The close lands on the last look, through the measured picker.
-        let closing = block_after(source, "function dropTab(id) {");
+        let closing = block_after(source, "function dropTab(id, {");
         assert!(
             closing.contains("setActiveTab(pickNextActiveTab(siblings, group, id));")
                 && closing.contains("dropRecentTab(leaf, id);"),
@@ -31727,9 +31743,17 @@ mod tests {
     ///      `.pane-title-bar`/`--orca-pane-title-height` for the size).
     ///   4. And the Escape ladder's last rung asked `kind !== "lane"`, which
     ///      swept terminal tabs in — so Escape CLOSED a terminal instead of
-    ///      reaching the shell. It asks `keyboardTarget() === null` now: "is
-    ///      anything listening", which is the question that cannot be wrong
-    ///      about a surface added later.
+    ///      reaching the shell.
+    ///
+    /// The answer to (4) was `keyboardTarget() === null` — "is anything
+    /// listening" — and it was wrong in the same way, one kind wider: nothing
+    /// listens on a browser pane, a board or a graph either, so Escape closed
+    /// those too, and a browser close takes the restore record with it. The
+    /// rung names the family it meant now (`ESCAPE_CLOSES`: a file, a diff, a
+    /// notebook) and keeps the listener test beside it, because a document
+    /// with a shell split next to it is a document somebody is typing past.
+    /// Both old forms are pinned as what it must NOT say — each was the tidy
+    /// edit a later hand reaches for (t-5453, live 2026-09-20 16:13).
     #[test]
     fn the_pane_verbs_are_measured_and_escape_still_reaches_a_shell() {
         let window = window_source();
@@ -31789,12 +31813,19 @@ mod tests {
         // form is exactly the shape a later edit would reach for again.
         let keys = block_after(window, "window.addEventListener(\"keydown\", (event) => {");
         assert!(
-            keys.contains("if (reading && keyboardTarget() === null)"),
-            "the Escape rung stopped asking whether anything is listening:\n{keys}"
+            keys.contains(
+                "if (reading && ESCAPE_CLOSES.has(reading.kind) && keyboardTarget() === null)"
+            ),
+            "the Escape rung stopped naming the read surfaces it may close:\n{keys}"
         );
         assert!(
             !keys.contains("reading.kind !== \"lane\""),
             "Escape closes terminal tabs again instead of reaching the shell"
+        );
+        assert!(
+            !keys.contains("if (reading && keyboardTarget() === null)"),
+            "Escape is back to closing whatever is in front — a browser pane, \
+             the board, the graph — because nothing listens on them either"
         );
     }
 
