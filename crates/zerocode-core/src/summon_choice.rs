@@ -11,9 +11,11 @@
 //! So it is a closed choice, and the set it is closed over is not built here:
 //! it is the set the quota gate already assembles to name the agents still
 //! holding room when it refuses one
-//! (`crate::orchestration::summonable`) — installed, and not at their wall
-//! this minute. An agent whose quota is spent is not an option, because an
-//! option nobody could carry out is not a closed choice; it is a suggestion.
+//! (`crate::orchestration::summonable`) — installed, and not at a wall that
+//! window would act on. An agent whose quota is spent is not an option,
+//! because an option nobody could carry out is not a closed choice; it is a
+//! suggestion. One whose spent number is too old to refuse on IS an option:
+//! the gate would summon it, so the choice has to be able to name it.
 //!
 //! **What this window says about an agent, and what it does not.** The criteria
 //! carry an agent's id and the room its provider has left, and nothing else.
@@ -90,8 +92,30 @@ pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 2;
 /// judgment agreed when it never chose.
 pub const FEWEST_OPTIONS: usize = 2;
 
+/// The row's key for why it carries no `agreed` mark
+/// ([`crate::jev::summary::AGREED`]).
+///
+/// A word rather than a flag: `agreed` is left unwritten for more than one
+/// reason — a summons the seat itself chose for has no coordinator's word to
+/// agree with — and a reader looking at a mark-less row deserves to be told
+/// which. The judge needs nothing from it: it counts the rows that carry a
+/// mark, so a row without one is already out of every comparison. This is for
+/// whoever asks WHY.
+pub const NOT_COMPARED_KEY: &str = "notCompared";
+
+/// [`NOT_COMPARED_KEY`]'s word for a summons whose own agent was not among the
+/// options — [`SummonAsk::offered`] says whether it was.
+///
+/// 2026-09-19 18:49 is why the word exists: a row offered five agents and not
+/// the codex the summons had landed on, and wrote `agreed: false` — a mismatch
+/// with an answer the judgment was never shown. A judgment that could not have
+/// named the agent did not disagree about it, and evidence about nothing may
+/// not reach the statistics a seat rises on.
+pub const NOT_OFFERED: &str = "not_offered";
+
 /// One agent this window could summon this minute, as the quota gate's own
-/// look at the machine left it: installed, and not at its wall.
+/// look at the machine left it: installed, and not at a wall that gate would
+/// refuse on.
 ///
 /// Built by [`crate::orchestration::summonable`] and by nothing else — the
 /// same pass that names the agents still holding room when a summons is
@@ -253,6 +277,17 @@ impl SummonAsk {
     #[must_use]
     pub fn options(&self) -> &[String] {
         &self.offered
+    }
+
+    /// Whether `agent` was one of them — asked of the agent a summons really
+    /// landed on, before a row may say the two answers agreed or did not.
+    ///
+    /// The answer is `false` where the two halves of a summons disagree about
+    /// what this machine can carry: a row then says [`NOT_OFFERED`] under
+    /// [`NOT_COMPARED_KEY`] instead of a mark.
+    #[must_use]
+    pub fn offered(&self, agent: &str) -> bool {
+        self.offered.iter().any(|offered| offered == agent)
     }
 
     /// What `answers` says about the question that was asked.

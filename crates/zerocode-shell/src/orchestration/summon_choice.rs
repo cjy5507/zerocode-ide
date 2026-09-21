@@ -196,8 +196,16 @@ fn settle(
             // No mark on a summons the seat itself chose for: there was no
             // coordinator's word to agree with, and a row that agreed with
             // its own answer would be a judge grading itself.
+            // And none on a summons whose own agent was never offered: a
+            // judgment that could not have named it did not disagree about
+            // it, so the row says WHY in a word instead of a mark it has no
+            // right to (t-4839).
             if !shadow.auto {
-                row["agreed"] = json!(pick.chosen == shadow.pinned.agent);
+                if ask.offered(&shadow.pinned.agent) {
+                    row["agreed"] = json!(pick.chosen == shadow.pinned.agent);
+                } else {
+                    row[summon_choice::NOT_COMPARED_KEY] = json!(summon_choice::NOT_OFFERED);
+                }
             }
             row["probabilities"] = json!(pick.probabilities);
             row["confidence"] = json!(pick.confidence);

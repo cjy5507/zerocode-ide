@@ -173,6 +173,15 @@ fn an_answer_is_judged_against_the_set_that_was_asked() {
     assert_eq!(read.chosen, "kimi");
     assert!((read.confidence - 0.62).abs() < 1e-9);
     assert_eq!(read.probabilities.len(), 2);
+
+    // And the same set answers the other direction: whether the agent the
+    // summons actually landed on was one of the things offered. A row about a
+    // summons this question never carried an option for is not a comparison,
+    // and the word it says so with is this module's ([`NOT_OFFERED`]).
+    assert!(asked.offered("claude") && asked.offered("kimi"));
+    assert!(!asked.offered("codex"), "codex was never offered");
+    assert_eq!(NOT_OFFERED, "not_offered");
+    assert_eq!(NOT_COMPARED_KEY, "notCompared");
 }
 
 /// An option says what this ledger has summoned the agent for — the free

@@ -13594,6 +13594,142 @@ fn a_summons_is_judged_over_the_agents_that_could_carry_it_this_minute() {
     assert!(crate::summon_choice::ask(&shadow.look(), &shadow.options).is_none());
 }
 
+/// A number too old to refuse on is too old to close the options over
+/// either: the agent a summons really landed on is in the set the judgment
+/// chooses from.
+///
+/// The accident this closes: 2026-09-19 18:49, the summon seat's first row
+/// out of `never asked` was unusable as evidence. codex's gauge said 100%
+/// for a window that had already reset, so the gate summoned it with
+/// `too old to refuse on` in the receipt — and the options, which read the
+/// same gauge for `at_wall` alone, had dropped codex. Jev chose from a set
+/// missing the real answer and the row went into the seat's agreement
+/// statistics as a disagreement. Near its wall — the one moment a warning
+/// is printed — a false mismatch was guaranteed, and the seat held itself
+/// back from rising on its own rows.
+///
+/// So both readings answer through one sentence
+/// (`GaugeReading::wall_to_act_on`): stale is not a wall on either road,
+/// fresh is a wall on both.
+#[test]
+fn a_gauge_too_old_to_refuse_on_is_no_wall_in_the_options_either() {
+    const NOW: i64 = 5_000_000;
+    /// The summons every half of this case makes, and the shadow it carried.
+    fn offered(machine: &Gauged, now_ms: i64) -> (serde_json::Value, Vec<String>) {
+        let mut ledger = Ledger::new();
+        let mut team = Team::new("team-1", "token", 7);
+        let opened = planned_on(
+            &mut ledger,
+            &mut team,
+            machine,
+            "run-create --name s",
+            now_ms,
+        );
+        assert_eq!(opened.reply.exit_code, 0, "{}", opened.reply.stderr);
+        let summoned = planned_on(
+            &mut ledger,
+            &mut team,
+            machine,
+            "worker-start --agent codex --prompt measure-the-frame-time-again",
+            now_ms + 1,
+        );
+        assert_eq!(summoned.reply.exit_code, 0, "{}", summoned.reply.stderr);
+        let said: serde_json::Value =
+            serde_json::from_str(&summoned.reply.stdout).expect("a receipt");
+        let options = summoned
+            .prepared_worker_start
+            .as_ref()
+            .expect("the reservation")
+            .summon_shadow
+            .as_ref()
+            .expect("a judgment's half")
+            .options
+            .iter()
+            .map(|agent| agent.id.clone())
+            .collect();
+        (said, options)
+    }
+
+    // Stale at 100%: the snapshot's own window has reset since it was read,
+    // which is as stale as an old one. The gate warns and summons.
+    let stale = Gauged {
+        machine: Looked::at(&["claude", "codex", "kimi"]),
+        gauges: vec![
+            (
+                "codex",
+                gauge("codex", 100, NOW - 3 * 60_000, Some(NOW - 60_000)),
+            ),
+            ("claude", gauge("claude", 61, NOW - 60_000, None)),
+        ],
+    };
+    let (said, options) = offered(&stale, NOW);
+    assert_eq!(said["quotaNotice"]["level"], "warn");
+    assert_eq!(said["quotaNotice"]["age"], "stale");
+    assert!(
+        said["quotaNotice"]["said"]
+            .as_str()
+            .expect("the notice's words")
+            .contains("too old to refuse on"),
+        "{}",
+        said["quotaNotice"]["said"]
+    );
+    assert!(
+        options.contains(&"codex".to_string()),
+        "the agent this summons landed on was missing from the set the judgment chooses \
+         from: {options:?}"
+    );
+
+    // And a gauge old enough on the clock alone reads the same way.
+    let aged = Gauged {
+        machine: Looked::at(&["claude", "codex", "kimi"]),
+        gauges: vec![
+            (
+                "codex",
+                gauge(
+                    "codex",
+                    100,
+                    NOW - QUOTA_POLICY.snapshot_max_age_ms - 1_000,
+                    None,
+                ),
+            ),
+            ("claude", gauge("claude", 61, NOW - 60_000, None)),
+        ],
+    };
+    let (said, options) = offered(&aged, NOW);
+    assert_eq!(said["quotaNotice"]["level"], "warn");
+    assert!(options.contains(&"codex".to_string()), "{options:?}");
+
+    // Fresh at 100%: a wall on both roads. The summons is refused, and the
+    // sentence that refusal prints does not name codex as having room —
+    // the same pass answers both.
+    let fresh = Gauged {
+        machine: Looked::at(&["claude", "codex", "kimi"]),
+        gauges: vec![
+            ("codex", gauge("codex", 100, NOW - 1_000, None)),
+            ("claude", gauge("claude", 61, NOW - 60_000, None)),
+        ],
+    };
+    let mut ledger = Ledger::new();
+    let mut team = Team::new("team-1", "token", 7);
+    let opened = planned_on(&mut ledger, &mut team, &fresh, "run-create --name s", NOW);
+    assert_eq!(opened.reply.exit_code, 0, "{}", opened.reply.stderr);
+    let refused = planned_on(
+        &mut ledger,
+        &mut team,
+        &fresh,
+        "worker-start --agent codex --prompt measure-it",
+        NOW + 1,
+    );
+    assert_eq!(refused.reply.exit_code, 1, "{}", refused.reply.stdout);
+    assert!(
+        refused.reply.stderr.contains("codex is at 100%")
+            && refused.reply.stderr.contains("claude 61% (weekly)")
+            && !refused.reply.stderr.contains("codex 100%"),
+        "{}",
+        refused.reply.stderr
+    );
+}
+
 /// `agent-list` says, per INSTALLED agent, the three numbers a
 /// coordinator picks by — and `null` for a gauge nobody read, which is
 /// not the same row as an agent at 0%.

@@ -46,7 +46,7 @@ fn shadow() -> SummonShadow {
     }
 }
 
-fn seat() -> Value {
+fn seat(shadow: &SummonShadow) -> Value {
     opened(
         &Seat {
             run: "run-4275",
@@ -54,7 +54,7 @@ fn seat() -> Value {
             dispatch: Some("dp-4712"),
             task: Some("t-4711"),
         },
-        &shadow(),
+        shadow,
         JevMode::Shadow.key(),
         1_789_600_000_000,
     )
@@ -126,7 +126,7 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
     let shadow = shadow();
     let ask =
         summon_choice::ask(&shadow.look(), &shadow.options).expect("two agents are a question");
-    let row = settle(&wire, seat(), &ask, &shadow, Some(work.path()));
+    let row = settle(&wire, seat(&shadow), &ask, &shadow, Some(work.path()));
 
     // What was sent: the brief's head, the shape, and the two agents that
     // could have carried it — never the agent the coordinator typed.
@@ -189,9 +189,80 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
             &work.path().display().to_string(),
         )),
     );
-    let agreed = settle(&wire, seat(), &ask, &shadow, Some(work.path()));
+    let agreed = settle(&wire, seat(&shadow), &ask, &shadow, Some(work.path()));
     assert_eq!(agreed["chosen"], json!("claude"));
     assert_eq!(agreed["agreed"], json!(true));
+    assert_eq!(
+        zerocode_core::jev::summary::agreement_since(std::slice::from_ref(&agreed), 0),
+        zerocode_core::jev::promote::Agreement {
+            compared: 1,
+            agreed: 1,
+        },
+        "a marked row is the one comparison the seat rises on"
+    );
+}
+
+/// A summons whose own agent was never among the options is no comparison at
+/// all: the row leaves `agreed` unwritten, says in a word why, and the seat's
+/// agreement statistics pass it by.
+///
+/// The accident this closes: 2026-09-19 18:49, the summon seat's first row out
+/// of `never asked` (w-4837) offered five agents and not the codex the summons
+/// had actually landed on. Jev chose from a set the real answer was missing
+/// from, and `agreed: false` put that into the very statistics the seat rises
+/// on. The filter that dropped codex is fixed one crate over
+/// (`GaugeReading::wall_to_act_on`); this is the second half, because a row is
+/// evidence about what it was asked, and a judgment that was never offered the
+/// answer did not disagree with it.
+#[test]
+fn a_summons_the_options_never_offered_is_no_comparison_at_all() {
+    let work = tempfile::tempdir().expect("a checkout");
+    let home = tempfile::tempdir().expect("a zo home");
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", an_agent_answer("kimi", "claude"), 0);
+    let wire = Wire::at(
+        &endpoint.base(),
+        "test-key",
+        Some(settings_consenting_to(
+            &home,
+            &work.path().display().to_string(),
+        )),
+    );
+    // The summons landed on codex; the options are the two agents the quota
+    // gate said had room. The row this makes is the 09-19 row.
+    let shadow = SummonShadow {
+        pinned: Pinned {
+            agent: "codex".to_string(),
+            ..shadow().pinned
+        },
+        ..shadow()
+    };
+    let ask =
+        summon_choice::ask(&shadow.look(), &shadow.options).expect("two agents are a question");
+    let row = settle(&wire, seat(&shadow), &ask, &shadow, Some(work.path()));
+
+    // The question was asked and answered in shape — that much is a request
+    // like any other, and the row still says what came back.
+    assert_eq!(row["outcome"], json!("answered"));
+    assert_eq!(row["chosen"], json!("kimi"));
+    assert_eq!(row["agent"], json!("codex"));
+    assert_eq!(row["options"], json!(["claude", "kimi"]));
+    assert_eq!(row["confidence"], json!(0.64));
+    // What it does NOT say: that the two disagreed.
+    assert!(
+        row["agreed"].is_null(),
+        "a judgment never offered codex was marked as disagreeing with it: {row}"
+    );
+    assert_eq!(
+        row[summon_choice::NOT_COMPARED_KEY],
+        json!(summon_choice::NOT_OFFERED),
+        "the row kept no word for why it carries no mark: {row}"
+    );
+    // And the judge reads it the way the row means it.
+    assert_eq!(
+        zerocode_core::jev::summary::agreement_since(std::slice::from_ref(&row), 0),
+        zerocode_core::jev::promote::Agreement::default(),
+        "evidence about nothing reached the seat's agreement statistics"
+    );
 }
 
 /// A checkout the person never consented to sends nothing at all, and the row
@@ -210,7 +281,7 @@ fn a_workspace_nobody_consented_to_is_the_rows_outcome_and_nothing_leaves() {
     let shadow = shadow();
     let ask =
         summon_choice::ask(&shadow.look(), &shadow.options).expect("two agents are a question");
-    let row = settle(&wire, seat(), &ask, &shadow, Some(work.path()));
+    let row = settle(&wire, seat(&shadow), &ask, &shadow, Some(work.path()));
 
     assert!(
         endpoint.asked().is_empty(),
@@ -240,7 +311,7 @@ fn an_answer_naming_an_agent_that_was_not_offered_says_nothing() {
     let shadow = shadow();
     let ask =
         summon_choice::ask(&shadow.look(), &shadow.options).expect("two agents are a question");
-    let row = settle(&wire, seat(), &ask, &shadow, Some(work.path()));
+    let row = settle(&wire, seat(&shadow), &ask, &shadow, Some(work.path()));
     assert_eq!(row["outcome"], json!(SCHEMA));
     assert!(row["chosen"].is_null());
     assert_eq!(row[REQUESTS_KEY], json!(1), "the request was still spent");
