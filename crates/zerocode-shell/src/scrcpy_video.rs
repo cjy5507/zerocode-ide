@@ -6,7 +6,7 @@
 //! without a phone.
 //!
 //! The layout is the original's, and it is pinned to the server version the
-//! original pins (`SCRCPY_SERVER_VERSION = '2.4'`, with `send_codec_meta` and
+//! original pinned (`SCRCPY_SERVER_VERSION = '2.4'`; this window now pins 3.3.4, same framing, with `send_codec_meta` and
 //! `send_frame_meta` left on):
 //!
 //! - a one-byte readiness marker, then a 64-byte device name, once

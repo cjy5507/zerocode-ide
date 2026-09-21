@@ -34,24 +34,28 @@ use std::path::{Path, PathBuf};
 
 /// The server version this client's protocol is written against.
 ///
-/// The original pins the same one (`SCRCPY_SERVER_VERSION = '2.4'`), and the
-/// number is not decoration: the server refuses a client whose version string
+/// The original pinned 2.4 (`SCRCPY_SERVER_VERSION = '2.4'`); that server dies on
+/// Android 15 with `ClassNotFoundException: com.genymobile.scrcpy.Server` before it
+/// ever listens (measured 2026-09-21 on an API 35 emulator: refused every time, so the
+/// pane fell to the recorder road and a screenshot took 28 s under load). 3.3.4 keeps
+/// the same framing — device name, codec meta, packet headers — and answered its
+/// readiness byte in 945 ms on the same emulator. The number is not decoration: the server refuses a client whose version string
 /// does not match its own, which is what keeps a silently upgraded helper from
 /// speaking a framing this side does not know.
-pub const SERVER_VERSION: &str = "2.4";
+pub const SERVER_VERSION: &str = "3.3.4";
 
 /// Where the release the version names actually lives.
 const SERVER_URL: &str =
-    "https://github.com/Genymobile/scrcpy/releases/download/v2.4/scrcpy-server-v2.4";
+    "https://github.com/Genymobile/scrcpy/releases/download/v3.3.4/scrcpy-server-v3.3.4";
 
 /// What that release is, byte for byte.
 ///
-/// Taken from the vendor's own published `SHA256SUMS.txt` for v2.4 and
+/// Taken from the vendor's own published `SHA256SUMS.txt` for v3.3.4 and
 /// checked against a fresh download here — they agree. The original checks
 /// only that the file it fetched is at least ten kilobytes; this is the same
 /// fetch with the vendor's own answer to "is this the file", which matters
 /// more than usual for an artifact this window pushes onto a device and runs.
-const SERVER_SHA256: &str = "93c272b7438605c055e127f7444064ed78fa9ca49f81156777fd201e79ce7ba3";
+const SERVER_SHA256: &str = "8588238c9a5a00aa542906b6ec7e6d5541d9ffb9b5d0f6e1bc0e365e2303079e";
 
 /// Where the server is pushed to on the device. The original's path, and
 /// scrcpy's own default.
@@ -323,7 +327,7 @@ mod tests {
     /// thing nobody can see from here, so at least say what they are.
     #[test]
     fn the_pinned_server_is_named_and_hashed() {
-        assert_eq!(SERVER_VERSION, "2.4");
+        assert_eq!(SERVER_VERSION, "3.3.4");
         assert_eq!(SERVER_SHA256.len(), 64);
         assert!(SERVER_SHA256.chars().all(|one| one.is_ascii_hexdigit()));
         assert!(super::SERVER_URL.ends_with(&format!("scrcpy-server-v{SERVER_VERSION}")));
@@ -340,7 +344,7 @@ mod tests {
     /// ```text
     /// ZEROCODE_LIVE_ADB=$ANDROID_HOME/platform-tools/adb \
     /// ZEROCODE_LIVE_SERIAL=emulator-5554 \
-    /// ZEROCODE_LIVE_SCRCPY_JAR=/path/to/scrcpy-server-v2.4 \
+    /// ZEROCODE_LIVE_SCRCPY_JAR=/path/to/scrcpy-server-v3.3.4 \
     ///   cargo test -p zerocode-shell -- --ignored --nocapture a_live_mirror
     /// ```
     #[test]
