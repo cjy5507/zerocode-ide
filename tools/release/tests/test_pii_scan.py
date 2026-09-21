@@ -35,12 +35,15 @@ _spec.loader.exec_module(pii_scan)
 # The caught column is fictional — a name, a subnet, a mailbox and a key id
 # that exist nowhere — and each is waived on its own line.
 CASES = (
-    # (category, caught, allowed)
+    # (category, caught, allowed)   — the literals live here and nowhere else
     ("home-path", "/Users/mallory", "/Users/dev"),  # pii-scan: allow home-path — 이 게이트의 시험 픽스처
     ("private-ip", "10.99.44.7", "10.0.0.5"),  # pii-scan: allow private-ip — 이 게이트의 시험 픽스처
     ("email", "chief@northwind-holdings.co.kr", "one@example.com"),  # pii-scan: allow email — 이 게이트의 시험 픽스처
     ("credential", "AKIAQ7RVBNMLKJHGFDSZ", "AKIAIOSFODNN7EXAMPLE"),  # pii-scan: allow credential — 이 게이트의 시험 픽스처
 )
+
+CAUGHT = {category: caught for category, caught, _allowed in CASES}
+ALLOWED = {category: allowed for category, _caught, allowed in CASES}
 
 
 def run(root, *args):
@@ -110,7 +113,7 @@ class PiiScan(unittest.TestCase):
                 )
 
     def test_a_finding_is_reported_at_its_own_line(self):
-        _, caught, _ = CASES[0]
+        caught = CAUGHT["home-path"]
         self.checkout.write("a.txt", f"one\ntwo\n{caught}\nfour\n")
         self.assertEqual(found(self.checkout.root)["home-path"][0]["line"], 3)
 
@@ -126,14 +129,14 @@ class PiiScan(unittest.TestCase):
     # --- the machinery a gate lives on -------------------------------------
 
     def test_only_tracked_files_are_read(self):
-        _, caught, _ = CASES[0]
+        caught = CAUGHT["home-path"]
         self.checkout.write("tracked.txt", f"{caught}\n")
         self.checkout.write("untracked.txt", f"{caught}\n", track=False)
         hits = found(self.checkout.root)["home-path"]
         self.assertEqual([h["path"] for h in hits], ["tracked.txt"], hits)
 
     def test_a_file_that_is_not_text_is_skipped_rather_than_crashing(self):
-        _, caught, _ = CASES[0]
+        caught = CAUGHT["home-path"]
         self.checkout.write("icon.bin", b"\x89PNG\r\n\x1a\n\xff\xfe" + caught.encode() + b"\xff")
         self.checkout.write("plain.txt", f"{caught}\n")
         done = run(self.checkout.root)
@@ -144,13 +147,15 @@ class PiiScan(unittest.TestCase):
     def test_a_rows_skip_holds_and_belongs_to_that_row_alone(self):
         """`ui/vendor/` is third-party text: the rows about people do not read
         it, and the rows about machines still do."""
-        self.checkout.write("ui/vendor/bundle.js", "chief@northwind-holdings.co.kr\n10.99.44.7\n")
+        self.checkout.write(
+            "ui/vendor/bundle.js", f"{CAUGHT['email']}\n{CAUGHT['private-ip']}\n"
+        )
         hits = found(self.checkout.root)
         self.assertEqual(hits["email"], [])
         self.assertEqual([h["path"] for h in hits["private-ip"]], ["ui/vendor/bundle.js"])
 
     def test_a_waiver_holds_on_its_own_line_and_the_line_above(self):
-        _, caught, _ = CASES[0]
+        caught = CAUGHT["home-path"]
         self.checkout.write(
             "waived.txt",
             f"{caught}  # pii-scan: allow home-path — why\n"
@@ -159,14 +164,14 @@ class PiiScan(unittest.TestCase):
         self.assertEqual(found(self.checkout.root)["home-path"], [])
 
     def test_a_waiver_speaks_only_for_the_category_it_names(self):
-        _, caught, _ = CASES[0]
+        caught = CAUGHT["home-path"]
         self.checkout.write("waived.txt", f"{caught}  # pii-scan: allow email — wrong row\n")
         self.assertEqual(len(found(self.checkout.root)["home-path"]), 1)
 
     # --- what the recipe sees ----------------------------------------------
 
     def test_a_clean_checkout_is_rc_0_and_a_dirty_one_is_rc_1(self):
-        _, caught, allowed = CASES[0]
+        caught, allowed = CAUGHT["home-path"], ALLOWED["home-path"]
         self.checkout.write("clean.txt", f"{allowed}\n")
         self.assertEqual(run(self.checkout.root).returncode, 0)
         self.checkout.write("dirty.txt", f"{caught}\n")
@@ -183,7 +188,7 @@ class PiiScan(unittest.TestCase):
         self.assertRegex(done.stdout, r"(?m)^total\s+0\s+0$")
 
     def test_quiet_prints_the_counts_without_the_lines(self):
-        _, caught, _ = CASES[0]
+        caught = CAUGHT["home-path"]
         self.checkout.write("dirty.txt", f"{caught}\n")
         done = run(self.checkout.root, "--quiet")
         self.assertEqual(done.returncode, 1)
