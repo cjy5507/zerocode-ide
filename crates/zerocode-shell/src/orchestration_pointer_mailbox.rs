@@ -257,14 +257,30 @@ pub(crate) fn park(
     match held.get(&term) {
         Some(standing) if standing.notice.id() == notice.id() => false,
         _ => {
+            let mut offered = shelf()
+                .offered
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            /* The same pointer, already handed to a knock and still young: the
+             * agent has it and is finishing what it was doing. Parking it
+             * again here would take that offer back and put the same
+             * sentence in front of the agent at its very next tool boundary
+             * — measured on 2026-09-22, one working pane was told about one
+             * unread mail 43 times in twenty minutes, once per tool call, and
+             * the window's log said "parked" 43 times with it. The offer
+             * keeps its minute; `collect_stale` hands the mail back to the
+             * road that types once that minute is up. */
+            if let Some((standing, at)) = offered.get(&term)
+                && standing.notice.id() == notice.id()
+                && at.elapsed() < RENOTIFY_AFTER
+            {
+                return false;
+            }
             /* A newer watermark supersedes an offer nobody proved. The mail
              * it names includes everything the old one did, so holding the
              * old offer open would only delay the road that types. */
-            shelf()
-                .offered
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&term);
+            offered.remove(&term);
+            drop(offered);
             held.insert(
                 term,
                 Standing {
@@ -659,5 +675,56 @@ mod tests {
         assert!(!agent_has_hook_route(Some("zo")));
         assert!(!agent_has_hook_route(None));
         assert!(!agent_has_hook_route(Some("a-name-nobody-ships")));
+    }
+
+    /// A pointer a knock already took is not parked again while its offer is
+    /// young.
+    ///
+    /// The beat asks every second and the tool boundary knocks every call;
+    /// between them an unread mail became one nudge per tool call and one
+    /// log line per beat. The same notice, offered less than a minute ago,
+    /// is answered "unchanged" — and a NEWER watermark still replaces the
+    /// offer at once, because it names mail the offer did not.
+    #[test]
+    fn an_offered_pointer_is_not_parked_again_while_its_offer_is_young() {
+        const TERM: u32 = 9_461;
+        forget_term(TERM);
+        assert!(park(
+            TERM,
+            "run-1",
+            "run:run-1",
+            "m-1",
+            None,
+            notice("m-1", 1)
+        ));
+        assert!(
+            shelf()
+                .take(
+                    &crate::hooks::pane_key_of(TERM),
+                    "",
+                    PointerMoment::ToolBoundary
+                )
+                .is_some(),
+            "the knock takes the pointer"
+        );
+        assert!(
+            !park(TERM, "run-1", "run:run-1", "m-1", None, notice("m-1", 1)),
+            "the same mail was parked again on top of a young offer"
+        );
+        assert!(
+            shelf()
+                .take(
+                    &crate::hooks::pane_key_of(TERM),
+                    "",
+                    PointerMoment::ToolBoundary
+                )
+                .is_none(),
+            "the next knock was handed the same sentence again"
+        );
+        assert!(
+            park(TERM, "run-1", "run:run-1", "m-2", None, notice("m-2", 2)),
+            "newer mail did not replace the offer"
+        );
+        forget_term(TERM);
     }
 }
