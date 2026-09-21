@@ -89,6 +89,13 @@ const paneModels = new Map();
 /* The permission mode a pane last reported, as the CLI spelled it
  * (`bypassPermissions`, `workspace-write`) — the composer's mode chip reads it. */
 const panePermissionModes = new Map();
+/* The words a pane's agent is saying right now, by pane: what its own channel
+ * streams (zo's `text_delta` and `reasoning` frames, `session:frame`) before
+ * its transcript carries the turn — the pane's counterpart of a wire's
+ * `wire_log.live`, drawn by the same streaming rows (`syncStreamingTurns`). A
+ * piece the voice finished (`done`) stands until the turn that says those
+ * words arrives (`settlePaneLive`), so the close is one paint, never a blink. */
+const paneLive = new Map();
 /* The question a pane's program is asking, when the hook DESCRIBED it — a
  * permission request (tool, summary, the edit as rows) or an AskUserQuestion
  * with its options — keyed by term, cleared by the next report that is not a
@@ -10126,7 +10133,15 @@ listen("hook:agent", (event) => {
       (session && paneSessions.get(term)?.session?.id !== session.id)) {
     paneAutonomy.delete(term);
   }
+  const named = Boolean(session) && paneSessions.get(term)?.session?.id !== session.id;
   if (session) paneSessions.set(term, { agent, session, resumable: event.payload.resumable });
+  // The session id a hand-over needs arrived (or changed) while the person
+  // already had the conversation up as the transcript view: the wire is
+  // tried now — between turns; mid-turn `handPaneToWire` waits for the end.
+  if (named) {
+    const chat = paneChats.get(term);
+    if (chat?.on && !chat.handing && wireRowFor(term)) void handPaneToWire(term);
+  }
   // A state change in the pane the person is already looking at is seen the
   // moment it happens — without this, working in the front tab still grew an
   // unseen dot on the board behind you. One event, one moment: the read and
@@ -10508,12 +10523,12 @@ async function openHelperPage(row, sub) {
  * exit, and the new tab stands where the pane's tab stood (`at`) carrying the
  * turns already said (`history`), so the swap reads as the same conversation
  * changing renderer, not as a new page. */
-async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -1, history = [], label = null } = {}) {
+async function openWirePage(agent, cwd, { resume = null, fromTerm = null, at = -1, history = [], label = null, refused = showError } = {}) {
   let started;
   try {
     started = await invoke("wire_start", { agent, cwd, resume, from_pane: fromTerm });
   } catch (error) {
-    showError(error);
+    refused(error);
     return null;
   }
   const tabId = `wire:${started.id}`;
@@ -10622,7 +10637,12 @@ async function handPaneToWire(term) {
       at: owner ? tabs.indexOf(owner) : -1,
       history,
       label: owner ? tabLabel(owner) : null,
+      // The refusal stays on the page (`paintPaneChat`), not only in a toast
+      // — the backend logs it too (`refusal_line`), so the log and the page
+      // give the same reason.
+      refused: (reason) => { held.wireRefusal = String(reason?.message ?? reason); },
     });
+    if (tabId === null) paintPaneChat(term);
     return tabId !== null;
   } finally {
     held.handing = false;
@@ -10716,17 +10736,21 @@ function wireAskShape(run, ask) {
 /* The card a question stands in, under the transcript and above the composer
  * — the pane's conversation and a wire's page both stand theirs here. */
 function standAskCard(host, panel) {
-  let card = host.querySelector(":scope > .pane-chat-ask");
+  let card = host.querySelector(".pane-chat-ask");
   if (!card) {
     card = document.createElement("section");
     card.className = "pane-chat-ask";
     card.setAttribute("aria-label", t("board.tasks.needsInput", "진행하려면 확인이 필요해요."));
   }
   card.replaceChildren(panel);
-  if (card.parentElement !== host) {
-    const anchor = host.querySelector(":scope > .worker-composer")
-      ?? host.querySelector(":scope > .helper-status");
-    anchor?.before(card);
+  // Inside the dock, above the composer — the extension's card stands in its
+  // `inputContainer`; a page without a composer keeps it under the list.
+  const dock = host.querySelector(".chat-dock");
+  const home = dock ?? host;
+  if (card.parentElement !== home) {
+    const anchor = dock?.querySelector(":scope > .worker-composer") ?? null;
+    if (anchor) anchor.before(card);
+    else home.appendChild(card);
   }
   return card;
 }
@@ -10738,7 +10762,7 @@ function standAskCard(host, panel) {
  * asks; never on a quiet poll. */
 function paintWireAsk(host, run, force = false) {
   const ask = run.wireLog?.asks?.[0] ?? null;
-  const card = host.querySelector(":scope > .pane-chat-ask");
+  const card = host.querySelector(".pane-chat-ask");
   if (!ask) {
     card?.remove();
     run.askDraft = null;
@@ -10853,7 +10877,15 @@ function paneChatOn(term) {
 
 async function setPaneChat(term, on) {
   const held = paneChatOf(term);
-  if (held.on === on) return;
+  if (held.on === on) {
+    // 「대화」 pressed on a conversation already standing as the transcript
+    // view: the wire is asked for again — a session the hooks had not yet
+    // named, a wire that was refused, may be there now. Until 2026-09-21 a
+    // pane that once fell to the transcript view never tried the wire again.
+    if (on && !held.handing) void handPaneToWire(term);
+    return;
+  }
+  if (!on) held.wireRefusal = null;
   // A pane whose agent can be driven on a wire is handed over to it: the
   // conversation view IS the wire then, streaming. Otherwise — or until the
   // turn ends — the transcript view stands.
@@ -10874,6 +10906,7 @@ function forgetPaneChat(term) {
   dropWorkerScreen(held.tab.pane);
   held.host?.remove();
   paneChats.delete(term);
+  paneLive.delete(term);
 }
 
 /* The active pane's term when it runs an agent — the pane the toggle speaks
@@ -10972,7 +11005,8 @@ function paintPaneChat(term) {
   // report as an hour of work. A pane already mid-turn when the view opens
   // takes the turn's stamp on its first paint.
   const stamp = hookStamps.get(term) ?? null;
-  if (run.status !== status || (status === "running" && stamp !== null && run.startedAt !== stamp)) {
+  const moved = run.status !== status;
+  if (moved || (status === "running" && stamp !== null && run.startedAt !== stamp)) {
     run.status = status;
     if (status === "running") {
       run.startedAt = stamp ?? Date.now();
@@ -10982,6 +11016,10 @@ function paintPaneChat(term) {
     }
   }
   paintHelperPage(held.host, held.tab);
+  // The composer's send is a stop while the turn is out and the send again
+  // when it ends — the state it reads (`run.status`) moved here, so it is
+  // repainted here; a hook's chip repaint ran before the state landed.
+  if (moved) syncWorkerComposers(run);
   paintPaneAsk(held);
   // Said once, where the turns would be: the agent has not named a transcript.
   noticeOnPaneChat(
@@ -10998,6 +11036,15 @@ function paintPaneChat(term) {
     "worker.handoverPending",
     held.pendingWire === true,
     t("worker.handoverPending", "이 턴이 끝나면 대화가 실시간 세션(선)으로 이어집니다 — 그때부터 답이 낱말 단위로 흐릅니다."),
+  );
+  // A hand-over the backend refused (a worker's pane, a wire that failed to
+  // stand, a screen that kept its conversation): the page says why, in the
+  // backend's words, and stays the transcript view — 「대화」 again asks again.
+  noticeOnPaneChat(
+    held,
+    "worker.wireRefused",
+    typeof held.wireRefusal === "string" && held.wireRefusal !== "",
+    t("worker.wireRefused", "실시간 세션(선)으로 넘기지 못했습니다: {{reason}} — 전사 뷰로 봅니다(답은 턴이 닫힐 때 한 번에). 「대화」를 다시 누르면 다시 시도합니다.", { reason: held.wireRefusal ?? "" }),
   );
   noticeOnPaneChat(
     held,
@@ -11017,7 +11064,12 @@ function noticeOnPaneChat(held, key, wanted, words) {
     shown?.remove();
     return;
   }
-  if (shown) return;
+  if (shown) {
+    // The same line with new words (a refusal's reason): the words change,
+    // the line stays.
+    writeTextContent(shown, words);
+    return;
+  }
   const said = document.createElement("p");
   said.className = "pane-chat-notice";
   said.dataset.says = key;
@@ -11035,7 +11087,7 @@ function noticeOnPaneChat(held, key, wanted, words) {
 function paintPaneAsk(held, force = false) {
   const term = held.run.term;
   const ask = paneAsks.get(term);
-  const card = held.host.querySelector(":scope > .pane-chat-ask");
+  const card = held.host.querySelector(".pane-chat-ask");
   if (!ask) {
     card?.remove();
     held.askDraft = null;
@@ -11356,6 +11408,9 @@ function helperTurnRowNode(run, turn, spoken) {
     paintHelperProse(said, clean || turn.text, helperBase(run));
   }
   row.appendChild(said);
+  // Every answer carries the extension's action row (`assistantActions`):
+  // a copy, shown while the pointer or the focus is on the answer.
+  if (turn.role === "assistant") row.appendChild(helperActionsNode(turn));
   row.dataset.turn = String(turn.seq);
   return row;
 }
@@ -11559,6 +11614,9 @@ function updateHelperStatus(line, run) {
   const voice = agentVoice(run.agent);
   const shown = run.status === "running";
   writeHidden(line, !shown);
+  // The mark wears the permission mode's reach, as the extension's spinner
+  // does (`[data-permission-mode]` on its container).
+  wearReach(line, composerReachOf(run));
   const mark = line.querySelector(".helper-status-mark");
   writeTextContent(line.querySelector(".helper-status-word"), voice.busy_word);
   // Forward and back, as the CLI plays it; a console with one mark keeps it.
@@ -11695,6 +11753,12 @@ function helperTailNode(run, turn) {
   tail.className = "helper-tail";
   const target = helperPreviewTarget(turn.text);
   if (target) tail.appendChild(helperPreviewNode(run, target));
+  return tail;
+}
+
+/* The extension's `assistantActions` under an answer: one copy button, on
+ * every answer, visible while the pointer or the focus is on the row. */
+function helperActionsNode(turn) {
   const actions = document.createElement("div");
   actions.className = "helper-actions";
   const copy = document.createElement("button");
@@ -11706,8 +11770,7 @@ function helperTailNode(run, turn) {
   copy.appendChild(iconNode("copy"));
   copy.addEventListener("click", () => void clipboardText.write(turn.text));
   actions.appendChild(copy);
-  tail.appendChild(actions);
-  return tail;
+  return actions;
 }
 
 function helperPreviewNode(run, target) {
@@ -11763,8 +11826,16 @@ function previewDoorNode(open, words, go) {
 function dressLastAnswer(list, run, newest) {
   if (!newest || newest.row === list.__lastAnswer) return;
   list.__lastAnswer?.querySelector(":scope > .helper-tail")?.remove();
-  newest.row.appendChild(helperTailNode(run, newest.turn));
+  const tail = helperTailNode(run, newest.turn);
+  if (tail.childElementCount) newest.row.appendChild(tail);
   list.__lastAnswer = newest.row;
+}
+
+/* The list's fixed tail — the status line the extension's panel keeps under
+ * the last row (`spinnerRow`) — that every turn and streaming row stands
+ * before. `null` while the page has none. */
+function helperListTail(list) {
+  return list.querySelector(":scope > .helper-status");
 }
 
 function scrollHelperToBottom(list) {
@@ -11840,8 +11911,11 @@ function syncHelperTurns(list, run) {
   for (const turn of held) {
     if (turn.seq <= drawn) continue;
     const row = helperTurnRowNode(run, turn, spoken);
-    list.insertBefore(row, streaming);
+    list.insertBefore(row, streaming ?? helperListTail(list));
     if (turn.role === "assistant") newest = { row, turn };
+    // The words this turn carries were streaming a moment ago: their
+    // finished piece leaves in this same paint (`syncStreamingTurns` below).
+    settlePaneLive(run, turn.role);
     // The thought before this turn now knows how long it lasted.
     const before = row.previousElementSibling;
     if (before?.classList.contains("is-thinking") && before.__turn?.thoughtMs !== undefined) {
@@ -11873,10 +11947,12 @@ function syncHelperTurns(list, run) {
  * repaint (2.1.278 webview, `content_block_delta` → `text +=`). The
  * word-paced reveal of 09-16 held words back at 60 → 33 ms each and fell
  * seconds behind a fast model; the person asked for the terminal's own
- * timing (09-20). A page fed from a transcript has no live text — the
- * vendor writes its file a message at a time — and draws nothing here. */
+ * timing (09-20). A page fed from a transcript draws what the pane's own
+ * channel streams (`paneLive`, zo's frames) — the vendor writes its file a
+ * turn at a time — and a pane with neither wire nor channel draws nothing
+ * here. */
 function syncStreamingTurns(list, run) {
-  const live = run.wire ? run.wireLog?.live ?? [] : [];
+  const live = run.wire ? run.wireLog?.live ?? [] : paneLiveOf(run);
   const rows = [...list.querySelectorAll(":scope > .is-streaming")];
   live.forEach((piece, index) => {
     let row = rows[index];
@@ -11886,7 +11962,7 @@ function syncStreamingTurns(list, run) {
     }
     if (!row) {
       row = streamingTurnNode(piece.role);
-      list.appendChild(row);
+      list.insertBefore(row, helperListTail(list));
       rows[index] = row;
     }
     if (row.__text === piece.text) return;
@@ -11998,6 +12074,14 @@ function helperTurnsNode(run) {
   list.setAttribute("role", "log");
   list.setAttribute("aria-label", t("worker.transcript", "헬퍼 대화 기록"));
   list.tabIndex = 0;
+  // A person's words stuck at the top (the extension's sticky header) are a
+  // door back to where they were said: a click scrolls the row home.
+  list.addEventListener("click", (event) => {
+    const row = event.target.closest?.(".helper-turn.is-user");
+    if (!row || !list.contains(row)) return;
+    if (Math.round(row.getBoundingClientRect().top) > Math.round(list.getBoundingClientRect().top)) return;
+    row.scrollIntoView({ block: "start", behavior: "instant" });
+  });
   syncHelperTurns(list, run);
   return list;
 }
@@ -12133,7 +12217,7 @@ function workerComposerNode(run, owner = null) {
   // 생사) 상자가 그 문장을 다시 입는다. 폴은 애초에 이 상자를 다시 만들지
   // 않는다(`paintHelperPage`의 뼈대).
   box.value = run.draft ?? "";
-  // 상자는 제 글만큼 자란다 — 상한은 CSS의 것(`--chat-composer-max-rows`).
+  // 상자는 제 글만큼 자란다 — 상한은 CSS의 것(`--chat-composer-max-h`).
   // 붙기 전에는 잴 수 없으므로 첫 맞춤은 다음 프레임에.
   const fit = () => {
     box.style.height = "auto";
@@ -12298,6 +12382,9 @@ function paintWorkerComposerState(form, run, delivered = null) {
   if (agentChip) paintComposerAgentChip(agentChip, run, agentModelLists.get(run.agent)?.rows ?? run.wireModels ?? null);
   const modeChip = form.querySelector(".worker-composer-mode");
   if (modeChip && spec) paintComposerModeChip(modeChip, run, spec);
+  // The send and the focus ring wear the permission mode's reach — the
+  // extension colours both by it (`[data-permission-mode]`).
+  wearReach(form, composerReachOf(run));
   form.querySelector(".worker-delivery").hidden = !run.sendUncertain;
 }
 
@@ -12412,21 +12499,46 @@ function paintHelperPage(host, tab) {
     return;
   }
   dropWorkerScreen(tab.pane);
+  host.__dockWatch?.disconnect();
   host.classList.add("is-chat-page");
   host.replaceChildren();
   const head = workerHeadNode(run);
   const turns = helperTurnsNode(run);
+  // The status line is the list's own last row, as the extension's spinner
+  // row is (`spinnerRow` under the last message): it scrolls with the words
+  // and stands under the last of them.
   const status = helperStatusNode(run);
-  host.append(head, turns, status);
+  turns.appendChild(status);
+  host.append(head, turns);
   // 문맥은 입력줄의 알약이 말한다. 부모가 없으면 입력줄도 없으므로 그 사실
   // 한 줄만 남는다 — 선 위의 세션은 부모 없이도 제 입력줄을 가진다(보내기가
-  // 선으로 간다).
-  if (owner || run.wire) host.appendChild(workerComposerNode(run, owner));
+  // 선으로 간다). The composer floats over the list's foot in the
+  // extension's dock (`inputContainer`), the question card inside it.
+  if (owner || run.wire) host.appendChild(chatDockNode(host, workerComposerNode(run, owner)));
   else host.insertBefore(workerWhereNode(run, null), turns);
   if (run.wire) paintWireAsk(host, run);
   // 처음 서는 페이지는 끝에서 연다 — 사람이 읽는 것은 언제나 끝이다.
   turns.scrollTop = turns.scrollHeight;
   host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status };
+}
+
+/* The extension's dock at the foot of the conversation (`inputContainer`):
+ * the composer — and the question card, when one stands — floating over the
+ * list's last rows, inset by the dock's margins and no wider than its
+ * measure. The list keeps room under its words for it: the dock's height,
+ * watched, rides the page as `--chat-dock-h`. */
+function chatDockNode(host, composer) {
+  const dock = document.createElement("div");
+  dock.className = "chat-dock";
+  dock.appendChild(composer);
+  if (typeof ResizeObserver === "function") {
+    const watch = new ResizeObserver(() => {
+      host.style.setProperty("--chat-dock-h", `${dock.offsetHeight}px`);
+    });
+    watch.observe(dock);
+    host.__dockWatch = watch;
+  }
+  return dock;
 }
 
 function paintWorkerView(tab) {
@@ -13480,6 +13592,17 @@ function laneSignal(session, frame) {
     if (paneTermsBySession(session).length === 0) {
       replaceLaneSubagents(session, frame.running);
     }
+  } else if (frame.type === "text_delta" || frame.type === "reasoning") {
+    // The channel's own stream of what the agent is saying: the pane's
+    // conversation view draws it as it arrives (`paneLive`).
+    notePaneLive(session, frame);
+  } else if (frame.type === "turn" && frame.phase === "start") {
+    // A new turn: what the last one streamed has landed in the transcript
+    // or never will; the streaming rows start clean.
+    for (const term of paneTermsBySession(session)) {
+      paneLive.delete(term);
+      paintPaneLive(term);
+    }
   } else if (frame.type === "usage") {
     /* 상태바와 보드는 같은 손으로 읽는다 (t-2374). 두 번째 파서를 지으면
      * 「상태바는 24,489인데 카드는 비었다」가 언제든 생긴다 — 그리고 그것은
@@ -13505,6 +13628,56 @@ function laneSignal(session, frame) {
 listen("session:frame", (event) => {
   laneSignal(event.payload.session, event.payload.frame);
 });
+
+/* One delta of a pane's live text: appended to the piece it continues (same
+ * voice, same block, still open) or begun as a new piece — the shape a wire's
+ * live list has (`WireLive`: role, text, done), so the page draws both alike.
+ * The pane on screen paints it by the next frame (`paintLiveAnswer`); a pane
+ * whose conversation is not up keeps the words for when it is. */
+function notePaneLive(session, frame) {
+  const role = frame.type === "reasoning" ? "thinking" : "assistant";
+  for (const term of paneTermsBySession(session)) {
+    const pieces = paneLive.get(term) ?? [];
+    const last = pieces.at(-1);
+    if (last && last.role === role && last.id === frame.id && !last.done) {
+      last.text += frame.text ?? "";
+      last.done = frame.done === true;
+    } else {
+      pieces.push({ role, id: frame.id, text: frame.text ?? "", done: frame.done === true });
+    }
+    paneLive.set(term, pieces);
+    paintPaneLive(term);
+  }
+}
+
+/* The streaming rows of a pane's conversation, when it is on screen, follow
+ * its live pieces now — and a reader at the tail stays at the tail. */
+function paintPaneLive(term) {
+  const held = paneChats.get(term);
+  if (!held?.on || !held.host || held.host.hidden) return;
+  const list = held.host.querySelector(".helper-turns");
+  if (!list) return;
+  const follow = helperFollowsTail(list);
+  syncStreamingTurns(list, held.tab.worker);
+  if (follow) scrollHelperToBottom(list);
+}
+
+/* The live pieces a pane's page draws — none for a run with no pane. */
+function paneLiveOf(run) {
+  return run.term === undefined || run.term === null ? [] : paneLive.get(run.term) ?? [];
+}
+
+/* A turn of `role` arrived from the transcript: the finished pieces of that
+ * voice were those words, and leave in the same paint. A person's turn closes
+ * every finished piece — whatever streamed before it has landed, or never
+ * will. */
+function settlePaneLive(run, role) {
+  const pieces = paneLiveOf(run);
+  if (!pieces.length) return;
+  const kept = pieces.filter((piece) => !piece.done || (role !== "user" && piece.role !== role));
+  if (kept.length) paneLive.set(run.term, kept);
+  else paneLive.delete(run.term);
+}
 
 /* The subscribe snapshot — what the session said before this window attached.
  * Walked through the same switch, with one guard: a permission prompt counts

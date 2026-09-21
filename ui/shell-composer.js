@@ -46,6 +46,26 @@ function permissionModeWords(mode) {
     .toLowerCase();
 }
 
+/* How far the run's permission mode reaches, off the catalog's console table
+ * (`permission_modes`, `list_agents`): `edits`, `plan` or `bypass` — or
+ * `null` for a mode that asks, and for no mode at all, which wears nothing.
+ * The send, the focus ring and the spinner's mark wear it (the extension's
+ * `[data-permission-mode]`), and the words are each CLI's own. */
+function composerReachOf(run) {
+  const spec = installedAgents().find((row) => row.id === run.agent) ?? null;
+  if (!spec) return null;
+  const mode = composerRoad(run, spec).mode();
+  const reach = spec.permission_modes?.find((row) => row.mode === mode)?.reach ?? "ask";
+  return reach === "ask" ? null : reach;
+}
+
+/* `data-permission-reach` on a node, or nothing at all for the asking mode
+ * — a rule that matches the attribute matches only a reach that colours. */
+function wearReach(node, reach) {
+  if (reach) node.setAttribute("data-permission-reach", reach);
+  else node.removeAttribute("data-permission-reach");
+}
+
 /* ---- the road ----------------------------------------------------------- */
 
 /* The road a composer speaks down. A pane's composer pastes into the pty and

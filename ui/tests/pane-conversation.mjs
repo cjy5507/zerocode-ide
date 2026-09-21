@@ -55,25 +55,31 @@ export async function testPaneConversation(browser, origin, ok) {
 
     await page.waitForSelector(".helper-turn.is-user");
 
-    // ---------------------------------------------------------- right aligned
+    // ------------------------------------------------- the person's sticky row
     const placed = await page.evaluate(() => {
       const list = document.querySelector(".helper-turns");
       const user = document.querySelector(".helper-turn.is-user");
+      const box = user.querySelector(".helper-said");
       const answer = document.querySelector(".helper-turn.is-assistant");
       const listBox = list.getBoundingClientRect();
-      const userBox = user.getBoundingClientRect();
+      const userBox = box.getBoundingClientRect();
       const answerBox = answer.getBoundingClientRect();
+      const gutter = parseFloat(getComputedStyle(list).paddingLeft);
       return {
-        alignSelf: getComputedStyle(user).alignSelf,
-        userLeftGap: Math.round(userBox.left - listBox.left),
-        userRightGap: Math.round(listBox.right - userBox.right),
+        sticky: getComputedStyle(user).position,
+        stickyTop: getComputedStyle(user).top,
+        boxLeftGap: Math.round(userBox.left - listBox.left),
+        boxRightGap: Math.round(listBox.right - userBox.right),
+        gutter: Math.round(gutter),
+        boxEdge: getComputedStyle(box).borderTopWidth,
         answerLeftGap: Math.round(answerBox.left - listBox.left),
       };
     });
-    ok("what the person said is the extension's box on the left, sized to its words, and what the agent said stands on the rail beside it",
-      placed.alignSelf === "flex-start" &&
-      placed.userLeftGap < placed.userRightGap &&
-      placed.answerLeftGap <= placed.userLeftGap,
+    ok("what the person said is the extension's sticky header — the row sticks at the list's top, the box spans the list between its gutters with the input's 1px edge — and what the agent said stands on the rail beside it",
+      placed.sticky === "sticky" && placed.stickyTop === "0px" &&
+      placed.boxLeftGap === placed.gutter && placed.boxRightGap === placed.gutter &&
+      placed.boxEdge === "1px" &&
+      placed.answerLeftGap <= placed.boxLeftGap,
       JSON.stringify(placed));
 
     // ------------------------------------------------------- whole, by the next frame
@@ -98,6 +104,91 @@ export async function testPaneConversation(browser, origin, ok) {
     ok("an answer that arrived whole stands whole by the next frame — the terminal already said it — once, with no streaming row left behind",
       arrival.shown && arrival.rows === arrival.held && arrival.once === 1 && arrival.streamingRows === 0,
       JSON.stringify(arrival));
+
+    // ------------------------------------------------ the channel's live text
+    // zo streams what it is saying on its own channel (`session:frame`,
+    // `text_delta` / `reasoning`): the page draws it as it arrives, by the
+    // next frame; a finished piece stands until the transcript's turn carries
+    // those words, and leaves in that same paint.
+    const streamed = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const flat = (text) => text.replace(/\s+/g, " ").trim();
+      const term = window.__TERM__;
+      paneSessions.set(term, { agent: "zo", session: { key: "session_id", id: "s-zo-live" }, resumable: true });
+      const list = document.querySelector(".helper-turns");
+      const rows = () => [...list.querySelectorAll(":scope > .is-streaming")].map((row) => row.dataset.role);
+      const seen = {};
+      const say = (frame) => tell("session:frame", { session: "s-zo-live", frame });
+      say({ type: "turn", turn_id: 9, phase: "start" });
+      say({ type: "reasoning", id: 1, text: "먼저 파일을 읽고", done: false });
+      say({ type: "reasoning", id: 1, text: " 고친다.", done: true });
+      say({ type: "text_delta", id: 2, text: "원인은 ", done: false });
+      await frame();
+      seen.rowsAfterFirst = rows().join(",");
+      seen.thoughtShown = flat(list.querySelector('.is-streaming[data-role="thinking"] .helper-thought-body')?.textContent ?? "") === "먼저 파일을 읽고 고친다.";
+      say({ type: "text_delta", id: 2, text: "폴백이 끈적한 것", done: false });
+      say({ type: "text_delta", id: 2, text: "입니다.", done: true });
+      await frame();
+      const live = () => flat(list.querySelector('.is-streaming[data-role="assistant"]')?.textContent ?? "");
+      seen.answerByNextFrame = live() === "원인은 폴백이 끈적한 것입니다.";
+      seen.doneStays = rows().join(",") === "thinking,assistant";
+      seen.tailBeforeStatus = list.lastElementChild?.classList.contains("helper-status") === true &&
+        list.querySelector(":scope > .is-streaming")?.nextElementSibling !== null;
+      // The transcript brings the turns: the streaming rows go, the turn rows
+      // stand, the words once.
+      window.__LOG__ = { next: 3, turns: [{ role: "thinking", text: "먼저 파일을 읽고 고친다." }, { role: "assistant", text: "원인은 폴백이 끈적한 것입니다." }] };
+      await pollHelperPages();
+      window.__LOG__ = { next: 3, turns: [] };
+      await frame();
+      seen.settled = rows().length === 0 &&
+        list.innerText.split("원인은 폴백이").length - 1 === 1 &&
+        list.querySelectorAll("[data-turn]").length === 5;
+      // A new turn's start clears whatever was left standing.
+      say({ type: "text_delta", id: 3, text: "남은 조각", done: true });
+      await frame();
+      seen.leftover = rows().length;
+      say({ type: "turn", turn_id: 10, phase: "start" });
+      await frame();
+      seen.clearedOnTurnStart = rows().length === 0 && paneLive.has(term) === false;
+      return seen;
+    });
+    ok("a zo pane streams what its channel says — a thought and then the answer stand under the last turn by the next frame, a finished piece stays until the transcript's turn carries its words and leaves in that paint, the status row keeps the list's tail, and a new turn's start clears what was left",
+      streamed.rowsAfterFirst === "thinking,assistant" && streamed.thoughtShown &&
+      streamed.answerByNextFrame && streamed.doneStays && streamed.tailBeforeStatus &&
+      streamed.settled && streamed.leftover === 1 && streamed.clearedOnTurnStart,
+      JSON.stringify(streamed));
+
+    // ---------------------------------------------------------------- the dock
+    const dock = await page.evaluate(async () => {
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      await frame();
+      await frame();
+      const host = document.querySelector(".pane-chat.is-chat-page");
+      const dock = host?.querySelector(":scope > .chat-dock");
+      const list = host?.querySelector(".helper-turns");
+      const style = dock ? getComputedStyle(dock) : null;
+      const read = (name) => getComputedStyle(host).getPropertyValue(name).trim();
+      return {
+        floats: style?.position === "absolute",
+        inset: style ? [style.bottom, style.left, style.right].join(",") : "",
+        wantInset: [read("--chat-dock-inset"), read("--chat-dock-inset"), read("--chat-dock-inset")].join(","),
+        measure: style?.maxWidth ?? "",
+        wantMeasure: read("--chat-dock-max"),
+        composerInDock: dock?.firstElementChild?.classList.contains("worker-composer") === true,
+        roomUnder: list && dock
+          ? parseFloat(getComputedStyle(list).paddingBottom) >= dock.offsetHeight + parseFloat(read("--chat-list-pad-bottom"))
+          : false,
+        fades: getComputedStyle(host, "::after").height === read("--chat-fade"),
+        statusLast: list?.lastElementChild?.classList.contains("helper-status") === true,
+      };
+    });
+    ok("the composer floats in the extension's dock — absolute at the foot, inset by the dock's margin on three sides, no wider than its measure, the list keeping room under its words for it and fading under it, the status row the list's last child",
+      dock.floats && dock.inset === dock.wantInset && dock.measure === dock.wantMeasure && dock.composerInDock &&
+      dock.roomUnder && dock.fades && dock.statusLast,
+      JSON.stringify(dock));
 
     // A pane nobody has sent a model-bearing hook for still knows what it is
     // on, because its own transcript says so. The chip itself is this exact

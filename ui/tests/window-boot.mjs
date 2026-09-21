@@ -1144,6 +1144,7 @@ const stubBackend = ({ boot, pollers }) => {
         homepage_url: "https://docs.anthropic.com/claude/docs/claude-code", installed: true,
         found_as: "claude", unsupported_here: false, missing_requirement: null,
         takes_a_paste: false, ready: "quiet", glyph: "✻", busy_word: "Pondering…", models_provider: "claude", model_command: "/model", model_command_takes_id: true, permission_road: "shift-tab",
+        permission_modes: [{ mode: "acceptEdits", reach: "edits" }, { mode: "plan", reach: "plan" }, { mode: "bypassPermissions", reach: "bypass" }, { mode: "auto", reach: "bypass" }],
         wire: "claude-stream", wire_resumes: true },
       { id: "codex", name: "Codex", favicon_domain: "openai.com",
         homepage_url: "https://github.com/openai/codex", installed: true,

@@ -35623,10 +35623,14 @@ const chatFace = await page.evaluate(async () => {
   };
   const turns = [...face.querySelectorAll(".helper-turn")];
   seen.count = turns.length;
-  // The first user turn is the briefing box — on the left like the
-  // extension's, with every other thing the person said, whole.
+  // The first user turn is the briefing box — the extension's `userMessage`:
+  // a bordered box on the left, in a row that sticks to the top while its
+  // answer scrolls under it, with every other thing the person said, whole.
+  const briefingSaid = turns[0]?.querySelector(":scope > .helper-said") ?? null;
   seen.briefingBubble = turns[0]?.tagName === "ARTICLE" &&
-    turns[0]?.classList.contains("is-briefing") && getComputedStyle(turns[0]).alignSelf === "flex-start";
+    turns[0]?.classList.contains("is-briefing") && getComputedStyle(turns[0]).position === "sticky" &&
+    briefingSaid !== null && getComputedStyle(briefingSaid).borderTopWidth === "1px" &&
+    Math.abs(briefingSaid.getBoundingClientRect().left - turns[0].getBoundingClientRect().left) <= 2;
   seen.briefingSaid = turns[0]?.querySelector(".helper-said")?.textContent?.split("\n", 1)[0];
   seen.briefingWho = turns[0]?.querySelector(".helper-who") === null
     ? turns[0]?.getAttribute("aria-label")
@@ -35752,7 +35756,10 @@ const chatFace = await page.evaluate(async () => {
   const root = getComputedStyle(document.documentElement);
   seen.composerRadius = getComputedStyle(composer).borderRadius;
   seen.wantComposerRadius = root.getPropertyValue("--chat-radius-composer").trim();
-  seen.col = root.getPropertyValue("--chat-col").trim();
+  // The composer floats in the extension's dock, no wider than the token.
+  const chatDock = face.querySelector(".chat-dock");
+  seen.dockMax = chatDock ? getComputedStyle(chatDock).maxWidth : "";
+  seen.wantDockMax = root.getPropertyValue("--chat-dock-max").trim();
   // The composer's focus edge is the agent's accent.
   box?.focus();
   await new Promise((done) => setTimeout(done, 450));
@@ -35946,6 +35953,9 @@ ok(
  * all of it — a result dresses the row it belongs to. */
 const toolStates = await page.evaluate(async () => {
   const seen = {};
+  // The list's last turn — the status row stands after it, as the panel's
+  // `spinnerRow` does, so `lastElementChild` is never a turn.
+  const lastTurnOf = (node) => [...node.querySelectorAll(":scope > .helper-turn")].at(-1) ?? null;
   const term = await openTermTab({ placement: "tab" });
   const owner = tabOfTerm(term);
   const tell = (name, payload) => {
@@ -35985,7 +35995,8 @@ const toolStates = await page.evaluate(async () => {
   };
   const dotOf = (row) => getComputedStyle(row, "::before");
   const tools = [...list.querySelectorAll(".helper-turn.is-tool")];
-  seen.rowsTotal = list.children.length;
+  // The turns alone — the status row is the list's last child, never a turn.
+  seen.rowsTotal = list.querySelectorAll(":scope > .helper-turn").length;
   seen.toolCount = tools.length;
   // The four the answer closed: the CLI's names as written, no accent.
   seen.fourNames = tools.slice(0, 4).map((row) => row.querySelector(".helper-tool-name").textContent).join(",");
@@ -36031,7 +36042,7 @@ const toolStates = await page.evaluate(async () => {
     { role: "tool_result", text: "exit 1", tool: { call_id: "d", is_error: true } },
   ]);
   paintWorkerView(tab);
-  const failed = list.lastElementChild;
+  const failed = lastTurnOf(list);
   seen.failedRow = failed.classList.contains("is-tool") && failed.classList.contains("is-failed") &&
     !failed.classList.contains("is-done") && !failed.classList.contains("is-live") &&
     dotOf(failed).backgroundColor === probe("--chat-dot-failed", "backgroundColor");
@@ -36053,7 +36064,7 @@ const toolStates = await page.evaluate(async () => {
       ] }] } },
   ]);
   paintWorkerView(tab);
-  const edited = list.lastElementChild;
+  const edited = lastTurnOf(list);
   const diff = edited.querySelector(":scope > .helper-tool-diff");
   seen.diffRows = [...(diff?.querySelectorAll(".diff-line") ?? [])].map((row) => row.className.replace("diff-line diff-line--", "")).join(",");
   seen.diffText = [...(diff?.querySelectorAll(".diff-text") ?? [])].map((node) => node.textContent).join("|");
@@ -36075,8 +36086,8 @@ const toolStates = await page.evaluate(async () => {
       ] } },
   ]);
   paintWorkerView(tab);
-  seen.patchPaths = [...list.lastElementChild.querySelectorAll(".helper-tool-diff-path")].map((node) => node.textContent).join(",");
-  seen.patchNumbered = list.lastElementChild.querySelector(".diff-line--add .diff-num:nth-child(2)")?.textContent;
+  seen.patchPaths = [...lastTurnOf(list).querySelectorAll(".helper-tool-diff-path")].map((node) => node.textContent).join(",");
+  seen.patchNumbered = lastTurnOf(list).querySelector(".diff-line--add .diff-num:nth-child(2)")?.textContent;
   // A quiet paint touches nothing.
   const watch = new MutationObserver(() => {});
   watch.observe(list, { childList: true, subtree: true, characterData: true, attributes: true });
@@ -36208,8 +36219,11 @@ const answerTail = await page.evaluate(async () => {
   seen.browsed = browsed;
   seen.defaults = defaults;
   seen.wantWhere = `${owner.worktree}/index.html`;
-  // 복사는 그 턴의 원문 그대로 — 창의 클립보드 문으로.
-  const copy = tail?.querySelector(".helper-copy");
+  // 복사는 답마다 — 확장의 `assistantActions`처럼 행의 손잡이 줄에 서고,
+  // 그 턴의 원문 그대로를 창의 클립보드 문으로 보낸다.
+  seen.copyOnEveryAnswer = [turns[1], turns[2]].every((row) =>
+    row?.querySelector(":scope > .helper-actions > .helper-copy") !== null);
+  const copy = turns[2]?.querySelector(":scope > .helper-actions > .helper-copy");
   seen.copyNamed = copy?.getAttribute("aria-label") === t("worker.copyAnswer", "답 복사") &&
     copy?.dataset.tip === t("worker.copyAnswer", "답 복사");
   const writesBefore = window.__CLIPBOARD_WRITES__.length;
@@ -36222,8 +36236,8 @@ const answerTail = await page.evaluate(async () => {
   holdHelperTurns(tab.worker.helper, [{ role: "assistant", text: "그리고 끝." }]);
   paintWorkerView(tab);
   const rows = [...list.querySelectorAll(".helper-turn")];
-  seen.tailMoved = list.querySelectorAll(".helper-tail").length === 1 &&
-    Boolean(rows[3]?.querySelector(":scope > .helper-tail")) &&
+  // 꼬리는 카드가 있을 때만 서는 것 — 이름한 것이 없는 새 답에는 꼬리도 없다.
+  seen.tailMoved = list.querySelectorAll(".helper-tail").length === 0 &&
     turns[2].querySelector(".helper-tail") === null;
   seen.noCardWithoutName = rows[3]?.querySelector(".helper-preview") === null &&
     Boolean(rows[3]?.querySelector(".helper-copy"));
@@ -36238,7 +36252,7 @@ const answerTail = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a bare path in the answer is an accent link with a file icon that opens the document viewer against the parent's checkout (code chips stay), the last answer naming index.html gets a preview card whose two doors are the browser tab and the default app, copy writes that answer through the window's clipboard, and the tail moves with the last answer — no card when nothing is named",
+  "a bare path in the answer is an accent link with a file icon that opens the document viewer against the parent's checkout (code chips stay), the last answer naming index.html gets a preview card whose two doors are the browser tab and the default app, a copy button under every answer writes that answer through the window's clipboard, and the tail goes with the last answer — no card, and no tail, when nothing is named",
   answerTail.linkCount === 1 && answerTail.linkWords === "docs/plan.md" &&
     answerTail.linkTip === "docs/plan.md" && answerTail.linkIcon === "#i-file" &&
     answerTail.linkIsButton && answerTail.codeUntouched && answerTail.linkAccent &&
@@ -36250,7 +36264,7 @@ ok(
     answerTail.menuClosed &&
     JSON.stringify(answerTail.browsed) === JSON.stringify([answerTail.wantWhere]) &&
     JSON.stringify(answerTail.defaults) === JSON.stringify([answerTail.wantWhere]) &&
-    answerTail.copyNamed && answerTail.copied &&
+    answerTail.copyOnEveryAnswer && answerTail.copyNamed && answerTail.copied &&
     answerTail.tailMoved && answerTail.noCardWithoutName,
   JSON.stringify(answerTail),
 );
@@ -36296,13 +36310,31 @@ const helperWide = await page.evaluate(async () => {
   const prose = face.querySelector(".helper-turn.is-assistant");
   const listBox = list.getBoundingClientRect();
   const proseBox = prose.getBoundingClientRect();
+  const gutter = Number.parseFloat(getComputedStyle(list).paddingLeft);
   seen.paneWidth = Math.round(listBox.width);
   seen.columnWidth = Math.round(proseBox.width);
+  seen.gutter = gutter;
+  // The extension's list holds no reading column: the rows take the pane
+  // behind the list's own gutters, the same on both sides.
+  seen.fillsPane = Math.abs(proseBox.width - (listBox.width - 2 * gutter)) <= 2;
   seen.centered =
     Math.abs((proseBox.left - listBox.left) - (listBox.right - proseBox.right)) <= 2;
-  const box = face.querySelector(".worker-composer-box");
-  seen.composerOnAxis = box
-    ? Math.abs(box.getBoundingClientRect().left - proseBox.left) <= 2
+  // The composer floats in the extension's dock: inset from the pane's edges,
+  // no wider than the token, centered on the pane's axis, and the composer
+  // as wide as the dock.
+  const rootTokens = getComputedStyle(document.documentElement);
+  const dockInset = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-inset"));
+  const dockMax = Number.parseFloat(rootTokens.getPropertyValue("--chat-dock-max"));
+  const faceBox = face.getBoundingClientRect();
+  const dockBox = face.querySelector(".chat-dock")?.getBoundingClientRect() ?? null;
+  seen.dockWidth = dockBox ? Math.round(dockBox.width) : 0;
+  seen.wantDockWidth = Math.round(Math.min(faceBox.width - 2 * dockInset, dockMax));
+  seen.dockCentered = dockBox
+    ? Math.abs((dockBox.left - faceBox.left) - (faceBox.right - dockBox.right)) <= 2
+    : false;
+  const composerBox = face.querySelector(".worker-composer")?.getBoundingClientRect() ?? null;
+  seen.composerOnAxis = composerBox && dockBox
+    ? Math.abs(composerBox.left - dockBox.left) <= 2 && Math.abs(composerBox.right - dockBox.right) <= 2
     : false;
   // While the helper runs, the status line under the transcript says the
   // agent's word on the transcript's axis, and the tail calls are out.
@@ -36389,10 +36421,12 @@ const helperNarrow = await page.evaluate(async (term) => {
 }, helperWide.term);
 await page.setViewportSize({ width: 1280, height: 860 });
 ok(
-  "the helper conversation holds a centered reading column on a wide pane and gives it the whole pane on a narrow one, with the composer and the live line on the same axis",
+  "the helper conversation takes the pane behind the list's gutters, wide or narrow, with the composer floating in the extension's centered dock and the live line on the transcript's axis",
   helperWide.paneWidth === 1200 &&
-    helperWide.columnWidth === 900 &&
-    helperWide.centered && helperWide.composerOnAxis &&
+    helperWide.gutter > 0 && helperWide.fillsPane &&
+    helperWide.centered && helperWide.dockWidth === helperWide.wantDockWidth &&
+    helperWide.dockWidth < helperWide.columnWidth &&
+    helperWide.dockCentered && helperWide.composerOnAxis &&
     helperNarrow.paneWidth === 420 && helperNarrow.fillsPane &&
     helperNarrow.gutterShrank && helperNarrow.noSideScroll &&
     helperNarrow.groupInside && helperNarrow.composerInside,
@@ -36424,7 +36458,7 @@ ok(
     chatFace.doorWords === chatFace.wantDoor && chatFace.doorLeads && chatFace.noWhereLine &&
     chatFace.sendNamed && chatFace.sendSquare && chatFace.sendFromToken &&
     chatFace.composerRadius === chatFace.wantComposerRadius &&
-    chatFace.composerRadius !== "" && chatFace.col === "900px" &&
+    chatFace.composerRadius !== "" && chatFace.dockMax === chatFace.wantDockMax && chatFace.dockMax !== "" &&
     chatFace.modelWords === chatFace.wantModel && chatFace.wantModel !== null,
   JSON.stringify(chatFace),
 );
@@ -36509,8 +36543,10 @@ ok(
  * 입력줄의 초점과 쓰다 만 문장은 폴을 건너 살아남는다. */
 /* 400턴의 목록이 세우는 노드 수의 상한 — t-2973 전, 도구 턴이 카드 행
  * (p + svg + use + 동사 + 대상)이던 때의 실측 1468. 「동안 작업」 접힘은 몸을
- * 펼칠 때 짓는 대신 이 수 아래에 머문다. */
-const HELPER_LIST_NODES_CEILING = 1468;
+ * 펼칠 때 짓는 대신 이 수 아래에 머문다. 09-21: 답마다 확장의 행동 행
+ * (`assistantActions`: div·button·svg·use)이 서고 상태 줄이 목록의 것이 되어
+ * 같은 400턴이 1745 — 늘어난 것은 확장의 행뿐이다. */
+const HELPER_LIST_NODES_CEILING = 1745;
 await page.setViewportSize({ width: 1280, height: 860 });
 const flatTranscript = await page.evaluate(async () => {
   const seen = {};
@@ -36553,7 +36589,9 @@ const flatTranscript = await page.evaluate(async () => {
   const face = document.getElementById("worker-view");
   const list = face?.querySelector(".helper-turns");
   seen.opened = Boolean(list);
-  seen.count = list.children.length;
+  // The turns alone: the status row is the list's own last child now (the
+  // extension's spinner row), and is not a turn.
+  seen.count = list.querySelectorAll(":scope > [data-turn]").length;
   // 400턴이 세우는 노드의 수 — 「동안 작업」 접힘이 도구 카드를 대신해도
   // 이 수는 오르지 않아야 한다(t-2973). 접힌 몸은 펼칠 때 짓는다.
   seen.listNodes = list.querySelectorAll("*").length;
@@ -36575,17 +36613,21 @@ const flatTranscript = await page.evaluate(async () => {
   probe.remove();
   // 브리핑도 그 뒤 사람의 말도 같은 왼쪽 상자(확장 2.1.278의 `userMessage`)
   // — 라벨 없이, 1px 테두리, 이름은 aria-label이 말한다.
+  // The row is the extension's sticky header; the box with the words is
+  // its child (2.1.278 `stickyHeader` > `userMessage`, 09-21).
   const brief = list.querySelector(".helper-turn.is-briefing");
   const briefStyle = getComputedStyle(brief);
-  seen.briefingBubble = briefStyle.alignSelf === "flex-start" &&
-    briefStyle.backgroundColor !== "rgba(0, 0, 0, 0)" &&
-    brief.getBoundingClientRect().width < list.clientWidth;
+  const briefBox = getComputedStyle(brief.querySelector(":scope > .helper-said"));
+  seen.briefingBubble = briefStyle.position === "sticky" &&
+    briefBox.backgroundColor !== "rgba(0, 0, 0, 0)" &&
+    brief.getBoundingClientRect().width <= list.clientWidth;
   const person = list.querySelector(".helper-turn.is-user:not(.is-briefing)");
   const personStyle = getComputedStyle(person);
-  seen.userQuiet = personStyle.alignSelf === briefStyle.alignSelf &&
-    personStyle.backgroundColor === briefStyle.backgroundColor &&
-    personStyle.borderRadius === briefStyle.borderRadius &&
-    personStyle.borderLeftWidth === "1px" && briefStyle.borderLeftWidth === "1px" &&
+  const personBox = getComputedStyle(person.querySelector(":scope > .helper-said"));
+  seen.userQuiet = personStyle.position === briefStyle.position &&
+    personBox.backgroundColor === briefBox.backgroundColor &&
+    personBox.borderRadius === briefBox.borderRadius &&
+    personBox.borderLeftWidth === "1px" && briefBox.borderLeftWidth === "1px" &&
     person.className === brief.className.replace(" is-briefing", "") &&
     !brief.querySelector(".helper-who") && !person.querySelector(".helper-who") &&
     brief.getAttribute("aria-label") === t("worker.briefing", "브리핑") &&
@@ -36622,7 +36664,8 @@ const flatTranscript = await page.evaluate(async () => {
   // line under the transcript — one live row, nothing else.
   const liveLine = list.querySelector(".helper-turn.is-tool.is-live");
   const statusLine = face.querySelector(".helper-status");
-  seen.liveTail = liveLine !== null && liveLine === list.lastElementChild &&
+  seen.liveTail = liveLine !== null && liveLine === [...list.querySelectorAll(":scope > [data-turn]")].at(-1) &&
+    liveLine.nextElementSibling === statusLine &&
     list.querySelectorAll(".is-live").length === 1 && statusLine !== null && !statusLine.hidden;
   // 고정 뼈대: 스크롤은 전사만 한다. 머리·문맥·입력줄은 전사를 굴려도 그대로.
   seen.frame = getComputedStyle(face).overflowY === "hidden" &&
@@ -36655,7 +36698,7 @@ const flatTranscript = await page.evaluate(async () => {
   box.focus();
   box.value = "쓰다 만 문장";
   box.dispatchEvent(new Event("input", { bubbles: true }));
-  const rows0 = [...list.children];
+  const rows0 = [...list.querySelectorAll(":scope > [data-turn]")];
   window.__ANSWER__.subagent_log = () => ({
     found: true,
     next: 4010,
@@ -36668,14 +36711,14 @@ const flatTranscript = await page.evaluate(async () => {
   const t1 = performance.now();
   await pollHelperPages();
   seen.pollMs = Math.round((performance.now() - t1) * 100) / 100;
-  const rows1 = [...list.children];
+  const rows1 = [...list.querySelectorAll(":scope > [data-turn]")];
   seen.cappedCount = rows1.length;
   seen.identityHeld = rows1.slice(0, 398).every((row, at) => row === rows0[at + 2]);
   seen.appendedKeys = rows1[398]?.dataset.turn === "400" && rows1[399]?.dataset.turn === "401";
   // 살아 있는 묶음은 꼬리 하나뿐 — 새 말이 앞 묶음을 닫고, 새 도구 턴이 새
   // 묶음을 연다.
   const lives = list.querySelectorAll(".helper-turn.is-tool.is-live");
-  seen.liveMoved = lives.length === 1 && lives[0] === list.lastElementChild &&
+  seen.liveMoved = lives.length === 1 && lives[0] === rows1.at(-1) &&
     lives[0].dataset.turn === "401";
   seen.followedTail =
     list.scrollHeight - list.scrollTop - list.clientHeight <= 2;
@@ -36708,7 +36751,7 @@ const flatTranscript = await page.evaluate(async () => {
   await pollHelperPages();
   seen.anchorHeld = Math.abs(anchor.getBoundingClientRect().top - anchorTop) <= 2 &&
     list.contains(anchor);
-  seen.stillCapped = list.children.length === 400;
+  seen.stillCapped = list.querySelectorAll(":scope > [data-turn]").length === 400;
 
   // 숨은 페이지는 묻지 않는다 — 폴은 보고 있는 페이지만의 것이다.
   setActiveTab(owner.id);
@@ -36774,6 +36817,8 @@ const flatNarrow = await page.evaluate(async () => {
     composerOn: composer.getBoundingClientRect().bottom <= innerHeight + 1,
     frame: getComputedStyle(face).overflowY === "hidden" &&
       getComputedStyle(list).overflowY === "auto",
+    // The pane's width as the window laid it out, for the day this goes red.
+    faceWidth: Math.round(face.getBoundingClientRect().width),
     narrowPadding: parseFloat(getComputedStyle(list).paddingLeft),
     light: document.documentElement.getAttribute("data-theme") === "light",
   };
@@ -54499,15 +54544,9 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
       seen.cardDiff = card?.querySelectorAll(".helper-tool-diff .diff-line").length ?? 0;
       seen.cardBeforeComposer = card?.nextElementSibling?.classList.contains("worker-composer") === true;
       seen.cardActs = [...(card?.querySelectorAll(".board-approve-act") ?? [])].map((act) => act.className.replace("board-approve-act ", "")).join(",");
-      seen.cardAccent = card ? getComputedStyle(card).borderLeftColor : "";
-      seen.wantCardAccent = (() => {
-        const span = document.createElement("span");
-        span.style.color = "var(--agent-accent-claude)";
-        chat.appendChild(span);
-        const value = getComputedStyle(span).color;
-        span.remove();
-        return value;
-      })();
+      // The card stands in the dock with the composer, as the extension's
+      // does in its `inputContainer` — no accent rail of its own.
+      seen.cardInDock = card?.parentElement?.classList.contains("chat-dock") === true;
       // The poll's paint leaves the card alone.
       const watch = new MutationObserver(() => {});
       watch.observe(card, { childList: true, subtree: true, attributes: true, characterData: true });
@@ -54591,6 +54630,33 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
           t("worker.historyFolded", "긴 기록의 끝부분만 보입니다 — 이전 턴은 판의 화면과 세션 기록에 있습니다.");
       seen.turnClock = paneChats.get(long)?.run.startedAt === hookStamps.get(long) &&
         Date.now() - paneChats.get(long).run.startedAt < bornAgo / 2;
+      // The permission mode's reach colours the send and the spinner's mark
+      // (the extension's `[data-permission-mode]`): edits taken without
+      // asking invert the send; the asking mode wears nothing.
+      tell("hook:agent", { term: long, state: "idle", agent: "claude", resumable: false, permission_mode: "acceptEdits" });
+      await window.__PAINTED__();
+      await settle();
+      const longForm = longChat?.querySelector(".worker-composer");
+      const reachColor = (name) => {
+        const span = document.createElement("span");
+        span.style.color = `var(${name})`;
+        longChat.appendChild(span);
+        const value = getComputedStyle(span).color;
+        span.remove();
+        return value;
+      };
+      seen.reachWorn = longForm?.dataset.permissionReach === "edits" &&
+        longChat?.querySelector(".helper-status")?.dataset.permissionReach === "edits";
+      // Read once the button's colour has finished easing from the agent's
+      // colour to the reach's — mid-transition it is an interpolated oklab.
+      await new Promise((done) => setTimeout(done, 400));
+      seen.sendInverted = longForm
+        ? getComputedStyle(longForm.querySelector(".worker-composer-send")).backgroundColor === reachColor("--chat-reach-edits")
+        : false;
+      tell("hook:agent", { term: long, state: "idle", agent: "claude", resumable: false, permission_mode: "default" });
+      await window.__PAINTED__();
+      await settle();
+      seen.askWearsNothing = longForm?.hasAttribute("data-permission-reach") === false;
       // A plain shell has no conversation to show.
       const plain = await openTermTab({ placement: "tab" });
       await window.__PAINTED__();
@@ -54608,10 +54674,11 @@ suite("pane-conversation-view", async ({ browser, origin, ok }) => {
         seen.hookPolled && seen.activityPolled && seen.otherPaneQuiet &&
         seen.busyWhileWorking && seen.quietWhenDone && seen.busyAgain &&
         seen.cardShown && seen.cardTool === seen.wantCardTool && seen.cardDiff === 2 && seen.cardBeforeComposer &&
-        seen.cardActs === "is-allow,is-deny,is-instead" && seen.cardAccent === seen.wantCardAccent &&
+        seen.cardActs === "is-allow,is-deny,is-instead" && seen.cardInDock &&
         seen.cardQuietPaint === 0 && seen.approved === seen.wantApproved && seen.cardQuietAfter && seen.cardGone &&
         seen.insteadDenied && seen.insteadFocus &&
         seen.backOnQuestion && seen.termPressed === "true" && seen.againChat && seen.backByHand &&
+        seen.reachWorn && seen.sendInverted && seen.askWearsNothing &&
         seen.noticeSaid && seen.caughtUp && seen.openedAtTail && seen.turnClock && seen.hiddenOnPlain && seen.forgotten &&
         seen.toggleMs < 50,
       JSON.stringify(seen),
@@ -54956,6 +55023,32 @@ suite("pane-hands-over-to-wire", async ({ browser, origin, ok }) => {
       await settle();
       seen.refusedKeepsTranscript = paneChatOn(kept) && !tabs.some((tab) => tab.worker?.session === "s-kept") &&
         paneChats.get(kept)?.pendingWire !== true && tabOfTerm(kept) !== undefined;
+      // The refusal stands on the page in the backend's words, and 「대화」
+      // pressed again asks the wire again — the transcript view is not a
+      // dead end (2026-09-21: a pane that once fell to it never retried).
+      seen.refusalSaid = await until(() =>
+        (document.querySelector(`.pane-chat[data-term="${kept}"] .pane-chat-notice[data-says="worker.wireRefused"]`)?.textContent ?? "")
+          .includes("kept its screen 8s"));
+      let nextWire = 12;
+      window.__ANSWER__.wire_start = (args) => {
+        calls.push(["start", args]);
+        return { id: nextWire++, agent: args.agent, protocol: "claude-stream", version: "2.1.273", model: null, session: args.resume ?? null };
+      };
+      el("view-toggle-chat").click();
+      seen.retriedOnPress = await until(() => tabs.some((tab) => tab.worker?.wire === 12));
+      seen.retryResumed = calls.filter((call) => call[0] === "start").at(-1)?.[1]?.resume === "s-kept";
+      // A conversation opened before the hooks named a session waits as the
+      // transcript view and is handed over the moment the session id arrives.
+      const early = await openTermTab({ placement: "tab" });
+      await window.__PAINTED__();
+      tell("hook:agent", { term: early, state: "done", agent: "claude", resumable: false });
+      await window.__PAINTED__();
+      const startsEarly = calls.filter((call) => call[0] === "start").length;
+      el("view-toggle-chat").click();
+      await settle();
+      seen.earlyTranscript = paneChatOn(early) && calls.filter((call) => call[0] === "start").length === startsEarly;
+      tell("hook:agent", { term: early, state: "done", agent: "claude", session: { key: "session_id", id: "s-early" }, resumable: true });
+      seen.handedOnSession = await until(() => calls.filter((call) => call[0] === "start").at(-1)?.[1]?.resume === "s-early");
       for (const name of ["pane_log", "wire_start", "wire_log", "wire_stop"]) delete window.__ANSWER__[name];
       for (const held of [...tabs]) dropTab(held.id);
       return seen;
@@ -54966,7 +55059,8 @@ suite("pane-hands-over-to-wire", async ({ browser, origin, ok }) => {
         seen.history === 2 && seen.toggleShown && seen.chatPressed && seen.paneChatOff && seen.paneGone && seen.seatKept &&
         seen.relaunched && seen.launchArgs === seen.wantLaunchArgs && seen.stopped && seen.backInSeat &&
         seen.midTurnTranscript && seen.midTurnPending && seen.midTurnNotice && seen.handedAfterTurn &&
-        seen.afterTurnArgs === JSON.stringify("s-busy") && seen.refusedKeepsTranscript,
+        seen.afterTurnArgs === JSON.stringify("s-busy") && seen.refusedKeepsTranscript &&
+        seen.refusalSaid && seen.retriedOnPress && seen.retryResumed && seen.earlyTranscript && seen.handedOnSession,
       JSON.stringify(seen),
     );
   } finally {

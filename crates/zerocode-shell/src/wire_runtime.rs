@@ -218,6 +218,11 @@ pub(crate) struct WireState {
 pub(crate) struct WireLive {
     pub(crate) role: &'static str,
     pub(crate) text: String,
+    /// Whether the voice finished these words: a wire closes its live text
+    /// into a turn itself (`false` here, always), while a pane's channel says
+    /// `done` on the last delta and its transcript carries the turn later —
+    /// the page keeps a done piece standing until that turn arrives.
+    pub(crate) done: bool,
 }
 
 /// What the page draws, as one comparable value: the settled part (turns,
@@ -342,6 +347,7 @@ impl WireState {
             _ => self.live.push(WireLive {
                 role,
                 text: delta.to_string(),
+                done: false,
             }),
         }
     }
@@ -2259,6 +2265,25 @@ pub(crate) fn hand_over_line(
     }
 }
 
+/// The window log's line for a pane whose wire never stood — the refusal
+/// came before any hand-over (a worker's pane, a CLI without an exit command,
+/// a binary not on the PATH, an account door, a handshake that failed). The
+/// same vocabulary as [`hand_over_line`]'s refusal, so the log reads as one
+/// story: what the pane kept, and why.
+pub(crate) fn refusal_line(
+    term: crate::TermId,
+    agent: &str,
+    session: Option<&str>,
+    reason: &str,
+) -> String {
+    let session: String = session
+        .unwrap_or_default()
+        .chars()
+        .take(SESSION_LOG_PREFIX_CHARS)
+        .collect();
+    format!("term {term} kept {agent} {session} on its screen, no wire started: {reason}")
+}
+
 /// How much of a session id the log line carries — enough to tell sessions
 /// apart, not the whole uuid on every line.
 const SESSION_LOG_PREFIX_CHARS: usize = 8;
@@ -2771,11 +2796,13 @@ mod tests {
             vec![
                 WireLive {
                     role: "thinking",
-                    text: "Look.".into()
+                    text: "Look.".into(),
+                    done: false,
                 },
                 WireLive {
                     role: "assistant",
-                    text: "done".into()
+                    text: "done".into(),
+                    done: false,
                 },
             ]
         );
@@ -3056,11 +3083,13 @@ mod tests {
             vec![
                 WireLive {
                     role: "assistant",
-                    text: "Hello".into()
+                    text: "Hello".into(),
+                    done: false,
                 },
                 WireLive {
                     role: "thinking",
-                    text: "hm".into()
+                    text: "hm".into(),
+                    done: false,
                 }
             ]
         );
@@ -3194,6 +3223,23 @@ mod tests {
         assert_eq!(
             hand_over_line(2, "claude", None, 7, &kept),
             "term 2 kept claude  on its screen, wire 7 stopped: the pane's CLI kept its screen 8s after `/exit`"
+        );
+    }
+
+    /// A wire refused before it stood leaves the same kind of line: until
+    /// 2026-09-21 these refusals reached only a toast, and a window log with
+    /// twenty-two Claude panes and no hand-over line could not say why the
+    /// conversation never streamed.
+    #[test]
+    fn a_wire_refused_before_it_stands_logs_the_refusal_too() {
+        assert_eq!(
+            refusal_line(
+                4,
+                "claude",
+                Some("b7695d1e-1846-43f6"),
+                "a worker's pane stays a pane"
+            ),
+            "term 4 kept claude b7695d1e on its screen, no wire started: a worker's pane stays a pane"
         );
     }
 }

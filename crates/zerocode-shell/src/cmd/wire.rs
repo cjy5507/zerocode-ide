@@ -45,42 +45,19 @@ pub(crate) fn wire_start(
     resume: Option<String>,
     from_pane: Option<TermId>,
 ) -> Result<WireStarted, String> {
-    if let Some(term) = from_pane {
-        if state.workers().values().any(|(seat, _)| *seat == term) {
-            return Err(
-                "a worker's pane stays a pane: the ledger drives it through its screen".into(),
-            );
-        }
-        if zerocode_core::agent::agent_voice(&agent)
-            .exit_command
-            .is_none()
-        {
-            return Err(format!("{agent} has no exit command this window knows"));
-        }
-    }
-    let found = scm_runtime::detected_agents(false)
-        .into_iter()
-        .find(|row| row.id == agent)
-        .ok_or_else(|| format!("{agent} is not in the catalog"))?;
-    let name = found
-        .found_as
-        .ok_or_else(|| format!("{} is not installed here", found.name))?;
-    let path = shell_path::launch_path();
-    let binary = zerocode_core::agent::resolve_on_path(path.as_deref(), &name)
-        .ok_or_else(|| format!("{name} is not on the shell's PATH"))?;
-    // Which account it runs as — the door every launch of this agent takes.
-    let launch_env = account_env_for(state.config_root(), &agent)?;
-    let session = state.shell_runtime().wires.start(
-        &agent,
-        &binary,
-        Path::new(&cwd),
-        env!("CARGO_PKG_VERSION"),
-        resume.as_deref(),
-        &launch_env,
-        move |id| {
-            let _ = app.emit("wire:update", WireUpdate { id });
-        },
-    )?;
+    // A refusal before the wire stands is logged beside the hand-over's own
+    // receipt: a pane that asked for its conversation and kept its screen
+    // must leave a line saying why, not only a toast (2026-09-21 — twenty-two
+    // Claude panes, no line, no way to tell).
+    let session = stand_wire(&app, &state, &agent, &cwd, resume.as_deref(), from_pane)
+        .inspect_err(|reason| {
+            if let Some(term) = from_pane {
+                crate::system_runtime::note_window_event(
+                    state.local_data_root(),
+                    &wire_runtime::refusal_line(term, &agent, resume.as_deref(), reason),
+                );
+            }
+        })?;
     if let Some(term) = from_pane {
         let outcome = hand_over_pane(&state, term, &agent);
         crate::system_runtime::note_window_event(
@@ -111,6 +88,57 @@ pub(crate) fn wire_start(
         model,
         session: resume,
     })
+}
+
+/// Everything between the ask and a wire that stands: the pane's own gates
+/// (a worker's seat, an exit command), the catalog, the PATH, the account's
+/// door, and the child's handshake. One `Err` for every reason, so the
+/// caller can log it once.
+fn stand_wire(
+    app: &AppHandle,
+    state: &State<'_, AppState>,
+    agent: &str,
+    cwd: &str,
+    resume: Option<&str>,
+    from_pane: Option<TermId>,
+) -> Result<Arc<wire_runtime::WireSession>, String> {
+    if let Some(term) = from_pane {
+        if state.workers().values().any(|(seat, _)| *seat == term) {
+            return Err(
+                "a worker's pane stays a pane: the ledger drives it through its screen".into(),
+            );
+        }
+        if zerocode_core::agent::agent_voice(agent)
+            .exit_command
+            .is_none()
+        {
+            return Err(format!("{agent} has no exit command this window knows"));
+        }
+    }
+    let found = scm_runtime::detected_agents(false)
+        .into_iter()
+        .find(|row| row.id == agent)
+        .ok_or_else(|| format!("{agent} is not in the catalog"))?;
+    let name = found
+        .found_as
+        .ok_or_else(|| format!("{} is not installed here", found.name))?;
+    let path = shell_path::launch_path();
+    let binary = zerocode_core::agent::resolve_on_path(path.as_deref(), &name)
+        .ok_or_else(|| format!("{name} is not on the shell's PATH"))?;
+    // Which account it runs as — the door every launch of this agent takes.
+    let launch_env = account_env_for(state.config_root(), agent)?;
+    let app = app.clone();
+    state.shell_runtime().wires.start(
+        agent,
+        &binary,
+        Path::new(cwd),
+        env!("CARGO_PKG_VERSION"),
+        resume,
+        &launch_env,
+        move |id| {
+            let _ = app.emit("wire:update", WireUpdate { id });
+        },
+    )
 }
 
 /// How long the pane's CLI gets to leave after its exit command. A TUI

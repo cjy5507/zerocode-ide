@@ -1471,6 +1471,10 @@ pub struct AgentPresence {
     pub model_command: Option<&'static str>,
     pub model_command_takes_id: bool,
     pub permission_road: Option<&'static str>,
+    /// What each of the CLI's permission modes lets it do on its own
+    /// ([`PermissionMode`]): the composer's send button and the spinner wear
+    /// the reach, the way Claude Code's panel colours them by mode.
+    pub permission_modes: &'static [PermissionMode],
     /// The protocol this CLI speaks without a screen — `app-server` (Codex,
     /// JSON-RPC over stdio), `acp` (Gemini CLI `--acp`) or `claude-stream`
     /// (Claude Code stream-json) — when the window can drive it as a wire
@@ -1480,6 +1484,36 @@ pub struct AgentPresence {
     /// the same conversation: the wire resumes a session by flag and the
     /// CLI has an exit command the window can type.
     pub wire_resumes: bool,
+}
+
+/// How far a permission mode lets the agent act before it asks — the one
+/// fact the window draws about a mode (Claude Code's panel colours its send
+/// button by it: edits taken without asking, a planning session that writes
+/// nothing, every permission bypassed). A mode the table does not name asks,
+/// and wears the plain send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionReach {
+    /// The agent asks before it acts.
+    Ask,
+    /// Edits land without a question; commands still ask.
+    Edits,
+    /// The agent reads and plans, and writes nothing.
+    Plan,
+    /// Nothing asks.
+    Bypass,
+}
+
+/// One permission mode of one CLI, spelled as that CLI reports it, and its
+/// reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PermissionMode {
+    pub mode: &'static str,
+    pub reach: PermissionReach,
+}
+
+const fn mode(mode: &'static str, reach: PermissionReach) -> PermissionMode {
+    PermissionMode { mode, reach }
 }
 
 /// How a CLI is driven without its screen: the arguments that start it on a
@@ -1524,6 +1558,10 @@ pub struct AgentVoice {
     /// How the permission mode changes mid-session: `shift-tab` cycles it on
     /// the CLI's own keyboard; a slash command opens the CLI's picker.
     pub permission_road: Option<&'static str>,
+    /// The CLI's permission modes as it reports them (hook payload, channel
+    /// status, wire mode list), each with its reach. Only modes whose reach
+    /// is documented are named; the rest ask.
+    pub permission_modes: &'static [PermissionMode],
     /// The screenless mode the window can drive as a wire session (unit 6:
     /// docs/design/agent-wire-sessions-20260915.md), when the CLI has one.
     pub wire: Option<WireRoad>,
@@ -1556,6 +1594,16 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             }),
             // `shift+tab to cycle`, on Claude Code's own status line.
             permission_road: Some("shift-tab"),
+            // The modes the extension's own stylesheet colours (2.1.278
+            // `sendButton[data-permission-mode=…]`): acceptEdits inverts the
+            // button, plan wears the plan colour, bypassPermissions and auto
+            // the error colour. `default` and the rest ask.
+            permission_modes: &[
+                mode("acceptEdits", PermissionReach::Edits),
+                mode("plan", PermissionReach::Plan),
+                mode("bypassPermissions", PermissionReach::Bypass),
+                mode("auto", PermissionReach::Bypass),
+            ],
             // `claude -p` fed and read as stream-json: the lines its own
             // panel streams from (`--include-partial-messages`), permission
             // questions as `control_request`s on stdio (2.1.272 read
@@ -1590,6 +1638,13 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
                 takes_id: false,
             }),
             permission_road: Some("/permissions"),
+            // app-server `approvalPolicy` (docs/design/agent-wire-sessions
+            // §2): `untrusted` and `on-request` ask; `on-failure` runs and
+            // asks only when a command fails; `never` asks nothing.
+            permission_modes: &[
+                mode("on-failure", PermissionReach::Edits),
+                mode("never", PermissionReach::Bypass),
+            ],
             // `codex app-server`: JSON-RPC over stdio, the protocol its own
             // `generate-json-schema` describes (0.154 read 2026-09-15). A
             // thread is resumed by request (`thread/resume`), not by flag —
@@ -1614,6 +1669,14 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
                 takes_id: true,
             }),
             permission_road: Some("/permissions"),
+            // zo's own three (zo-ide/README.md: `read-only |
+            // workspace-write | danger-full-access`; it accepts Claude Code's
+            // spellings too, and reports its own).
+            permission_modes: &[
+                mode("read-only", PermissionReach::Plan),
+                mode("workspace-write", PermissionReach::Edits),
+                mode("danger-full-access", PermissionReach::Bypass),
+            ],
             wire: None,
             exit_command: None,
         },
@@ -1632,6 +1695,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
                 takes_id: false,
             }),
             permission_road: None,
+            // agy's modes are not measured here; every mode asks until they are.
+            permission_modes: &[],
             // The catalog's `antigravity` is Antigravity CLI `agy` (Go), not
             // Gemini CLI: it has no `--acp`, and its own stream-json print
             // mode denies every tool on this machine through its pre-tool
@@ -1652,6 +1717,7 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     models_provider: None,
     model_slash: None,
     permission_road: None,
+    permission_modes: &[],
     wire: None,
     exit_command: None,
 };
@@ -1739,6 +1805,7 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                     .model_slash
                     .is_some_and(|road| road.takes_id),
                 permission_road: agent_voice(spec.id).permission_road,
+                permission_modes: agent_voice(spec.id).permission_modes,
                 wire: agent_voice(spec.id).wire.map(|road| road.protocol),
                 wire_resumes: agent_voice(spec.id)
                     .wire
@@ -1754,6 +1821,17 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
 #[must_use]
 pub fn wire_road(id: &str) -> Option<WireRoad> {
     agent_voice(id).wire
+}
+
+/// How far `mode` lets `agent` act on its own — [`PermissionReach::Ask`] for
+/// a mode the console does not name, or no mode at all.
+#[must_use]
+pub fn permission_reach(agent: &str, mode: &str) -> PermissionReach {
+    agent_voice(agent)
+        .permission_modes
+        .iter()
+        .find(|row| row.mode == mode)
+        .map_or(PermissionReach::Ask, |row| row.reach)
 }
 
 impl std::fmt::Display for AgentKind {
@@ -1830,6 +1908,43 @@ mod tests {
         assert_eq!(claude.models_provider, Some("claude"));
         assert!(claude.model_slash.is_some_and(|road| road.takes_id));
         assert!(!super::agent_voice("codex").model_slash.unwrap().takes_id);
+    }
+
+    /// A mode's reach is the console's word, spelled as that CLI reports it;
+    /// a mode nobody measured asks, and so does a silent console.
+    #[test]
+    fn a_permission_modes_reach_is_read_off_the_console_and_unknown_modes_ask() {
+        use super::{PermissionReach, permission_reach};
+        assert_eq!(
+            permission_reach("claude", "acceptEdits"),
+            PermissionReach::Edits
+        );
+        assert_eq!(permission_reach("claude", "plan"), PermissionReach::Plan);
+        assert_eq!(
+            permission_reach("claude", "bypassPermissions"),
+            PermissionReach::Bypass
+        );
+        assert_eq!(permission_reach("claude", "auto"), PermissionReach::Bypass);
+        assert_eq!(permission_reach("claude", "default"), PermissionReach::Ask);
+        assert_eq!(
+            permission_reach("zo", "workspace-write"),
+            PermissionReach::Edits
+        );
+        assert_eq!(permission_reach("zo", "read-only"), PermissionReach::Plan);
+        assert_eq!(
+            permission_reach("zo", "danger-full-access"),
+            PermissionReach::Bypass
+        );
+        assert_eq!(permission_reach("codex", "never"), PermissionReach::Bypass);
+        assert_eq!(
+            permission_reach("codex", "on-request"),
+            PermissionReach::Ask
+        );
+        assert_eq!(permission_reach("nobody", "anything"), PermissionReach::Ask);
+        assert_eq!(
+            serde_json::to_value(super::agent_voice("claude").permission_modes[0]).unwrap(),
+            serde_json::json!({"mode": "acceptEdits", "reach": "edits"})
+        );
     }
 
     use super::*;

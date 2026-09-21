@@ -17053,8 +17053,10 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
             vec!["worker.thinking"],
         ),
         ("function agentVoice(id) {", vec!["worker.busy"]),
+        // The copy stands under every answer now (the extension's
+        // `assistantActions`), not only the last one's tail.
         (
-            "function helperTailNode(run, turn) {",
+            "function helperActionsNode(turn) {",
             vec!["worker.copyAnswer"],
         ),
         (
@@ -17095,6 +17097,14 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "send-ink",
         "link",
         "pill-bg",
+        "pill-hover-bg",
+        "shadow",
+        "reach-edits",
+        "reach-edits-ink",
+        "reach-plan",
+        "reach-plan-ink",
+        "reach-bypass",
+        "reach-bypass-ink",
     ] {
         let declared = format!("\n  --chat-{name}:");
         assert!(dark.contains(&declared), "--chat-{name} has no dark value");
@@ -17107,19 +17117,48 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "radius-bubble",
         "bubble-pad-x",
         "radius-composer",
-        "col",
         "bubble-max",
         "prose-size",
         "prose-leading",
         "chip-size",
         "send-size",
         "pill-height",
+        "pill-size",
+        "pill-pad-x",
         "dot",
         "dot-halo",
         "gutter",
-        "composer-max-rows",
         "preview-mark",
         "tool-gap",
+        // The extension's page geometry (2.1.278), one value each.
+        "dock-inset",
+        "dock-max",
+        "dock-h",
+        "list-pad-x",
+        "list-pad-top",
+        "list-pad-bottom",
+        "fade",
+        "sticky-pad-top",
+        "sticky-pad-bottom",
+        "sticky-fade",
+        "status-h",
+        "status-mark-w",
+        "status-mark-size",
+        "status-in",
+        "actions-h",
+        "actions-gap",
+        "copy-size",
+        "copy-pad",
+        "composer-pad-y",
+        "composer-pad-x",
+        "composer-max-h",
+        "footer-pad",
+        "footer-gap",
+        "meta-pad",
+        "meta-gap",
+        "meta-alpha",
+        "radius-small",
+        "font-ui",
     ] {
         let declared = format!("\n  --chat-{name}:");
         assert_eq!(
@@ -17139,6 +17178,11 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ".worker-composer-pill {",
         ".worker-composer-send {",
         ".helper-turn.is-user {",
+        ".helper-turn.is-user > .helper-said {",
+        ".helper-turns {",
+        ".chat-dock {",
+        ".helper-actions {",
+        ".helper-status-mark {",
         ".helper-turn.is-tool {",
         ".helper-tool-call {",
         ".helper-tool-result {",
@@ -17175,6 +17219,153 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         offenders.is_empty(),
         "the helper page writes a pixel where a --chat-* token belongs:\n{}",
         offenders.join("\n")
+    );
+}
+
+/// The conversation view's measures are the extension panel's own, read off
+/// its stylesheet by `tools/agents/claude_code_panel_rules.py` into
+/// `chat/claude-code-panel.json` — so "like Claude Code's panel" is a table
+/// this gate reads, not an eye's verdict. 09-15 read screenshots and 09-20
+/// read the package by hand; both left measures behind (the dock, the
+/// sticky header, the footer, the pills). The snapshot names the version
+/// it was read from; refreshing it for a new CLI is one script run, and
+/// every drift it brings is a red line here with both numbers in it.
+#[test]
+fn the_conversation_wears_the_extensions_own_measures() {
+    let panel: serde_json::Value =
+        serde_json::from_str(include_str!("chat/claude-code-panel.json")).expect("the panel snapshot");
+    let tokens = include_str!("../../../ui/tokens.css");
+    let light_at = tokens
+        .find(":root[data-theme=\"light\"] {")
+        .expect("the light treatment block is gone from ui/tokens.css");
+    let dark = &tokens[..light_at];
+    let token = |name: &str| -> String {
+        let key = format!("\n  --{name}:");
+        let at = dark
+            .find(&key)
+            .unwrap_or_else(|| panic!("--{name} has no dark value"));
+        let rest = &dark[at + key.len()..];
+        rest[..rest.find(';').expect("a declaration ends")].trim().to_string()
+    };
+    let rule = |key: &str, property: &str| -> String {
+        panel["rules"][key][property]
+            .as_str()
+            .unwrap_or_else(|| panic!("the snapshot has no `{property}` on `{key}`"))
+            .to_string()
+    };
+    let var = |name: &str| -> String {
+        panel["vars"][name]
+            .as_str()
+            .unwrap_or_else(|| panic!("the snapshot has no `{name}`"))
+            .to_string()
+    };
+    let nth = |value: String, at: usize| -> String {
+        value
+            .split_whitespace()
+            .nth(at)
+            .unwrap_or_else(|| panic!("`{value}` has no part {at}"))
+            .to_string()
+    };
+    // A measure as a number and its unit, so `.85em` is `0.85em` and `0`
+    // is `0px`; a colour as its lowercase spelling.
+    fn measure(value: &str) -> (String, String) {
+        let value = value.trim().to_ascii_lowercase();
+        let digits: String = value
+            .chars()
+            .take_while(|glyph| glyph.is_ascii_digit() || *glyph == '.' || *glyph == '-')
+            .collect();
+        match digits.parse::<f64>() {
+            Ok(number) if !digits.is_empty() => {
+                let unit = value[digits.len()..].trim().to_string();
+                let unit = if number == 0.0 && unit.is_empty() { "px".to_string() } else { unit };
+                (format!("{number}"), unit)
+            }
+            _ => (value, String::new()),
+        }
+    }
+    let pairs: Vec<(&str, String)> = vec![
+        ("chat-gutter", rule("timelineMessage", "padding-left")),
+        ("chat-rail-dot-x", rule("timelineMessage:before", "left")),
+        ("chat-dot", rule("timelineMessage:before", "width")),
+        ("chat-rail-x", rule("timelineMessage:after", "left")),
+        ("chat-row-pad", rule("message", "--message-padding-top")),
+        ("chat-radius-bubble", var("--corner-radius-medium")),
+        ("chat-bubble-pad-y", nth(rule("userMessage", "padding"), 0)),
+        ("chat-bubble-pad-x", nth(rule("userMessage", "padding"), 1)),
+        ("chat-list-pad-x", nth(rule("messagesContainer", "padding"), 1)),
+        ("chat-list-pad-bottom", nth(rule("messagesContainer", "padding"), 2)),
+        ("chat-list-pad-top", rule("messagesContainer.stickyMode:before", "height")),
+        ("chat-dock-inset", rule("inputContainer", "bottom")),
+        ("chat-dock-max", rule("inputContainer", "max-width")),
+        ("chat-fade", rule("messageGradient", "height")),
+        ("chat-sticky-pad-top", rule("message.stickyHeader", "padding-top")),
+        ("chat-sticky-pad-bottom", rule("message.stickyHeader", "padding-bottom")),
+        ("chat-send-size", rule("sendButton", "width")),
+        ("chat-radius-send", rule("sendButton", "border-radius")),
+        ("chat-pill-height", var("--app-pill-min-height")),
+        ("chat-pill-size", rule("modelPill", "font-size")),
+        ("chat-pill-pad-x", nth(rule("modelPill", "padding"), 1)),
+        ("chat-composer-pad-y", nth(rule("messageInput", "padding"), 0)),
+        ("chat-composer-pad-x", nth(rule("messageInput", "padding"), 3)),
+        ("chat-composer-max-h", rule("messageInput", "max-height")),
+        ("chat-prose-leading", rule("messageInput", "line-height")),
+        ("chat-footer-pad", rule("inputFooter", "padding")),
+        ("chat-footer-gap", rule("inputFooter", "gap")),
+        ("chat-status-h", rule("spinnerRow", "height")),
+        ("chat-meta-gap", rule("spinnerRow", "margin-top")),
+        ("chat-status-mark-w", rule("spinner icon", "width")),
+        ("chat-status-mark-size", rule("spinner icon", "font-size")),
+        ("chat-actions-h", rule("assistantActions", "height")),
+        ("chat-actions-gap", rule("assistantActions", "gap")),
+        ("chat-copy-size", rule("assistantActions copyResponseButton", "width")),
+        ("chat-copy-pad", rule("assistantActions copyResponseButton", "padding")),
+        ("chat-radius-small", var("--corner-radius-small")),
+        ("chat-radius-composer", var("--corner-radius-large")),
+        ("chat-meta-pad", rule("metaMessage", "padding")),
+        ("chat-meta-alpha", rule("metaMessage", "opacity")),
+        ("chat-dot-done", rule("timelineMessage.dotSuccess:before", "background-color")),
+        ("chat-dot-failed", rule("timelineMessage.dotFailure:before", "background-color")),
+        ("agent-accent-claude", var("--app-claude-orange")),
+        ("agent-send-claude", var("--app-claude-clay-button-orange")),
+        ("chat-send-ink", var("--app-claude-ivory")),
+    ];
+    let mut drifted = Vec::new();
+    for (name, want) in &pairs {
+        let have = token(name);
+        if measure(&have) != measure(want) {
+            drifted.push(format!("--{name} is `{have}`, the panel's stylesheet says `{want}`"));
+        }
+    }
+    assert!(
+        drifted.is_empty(),
+        "the conversation drifted off the panel's own measures ({}):\n  {}",
+        panel["version"].as_str().unwrap_or("?"),
+        drifted.join("\n  ")
+    );
+    // The focus ring's reach, the sticky header's fade and the spinner's
+    // fade-in are written inside longer values; each is read where it sits.
+    let ring = rule("composer:focus-within", "box-shadow");
+    assert!(
+        ring.starts_with(&format!("0 0 0 {}", token("chat-focus-ring"))),
+        "the focus ring is `{ring}`, the token {}",
+        token("chat-focus-ring")
+    );
+    let sticky = rule("message.stickyHeader", "background-image");
+    assert!(
+        sticky.contains(&format!("calc(100% - {})", token("chat-sticky-fade"))),
+        "the sticky header fades over `{sticky}`, the token {}",
+        token("chat-sticky-fade")
+    );
+    let spinner = rule("spinnerRow", "animation");
+    let seconds: f64 = spinner
+        .split_whitespace()
+        .find_map(|word| word.strip_suffix('s').and_then(|number| number.parse::<f64>().ok()))
+        .expect("the spinner row fades in over a number of seconds");
+    let (millis, unit) = measure(&token("chat-status-in"));
+    assert_eq!(
+        (millis, unit.as_str()),
+        (format!("{}", seconds * 1000.0), "ms"),
+        "the spinner row fades in over `{spinner}`"
     );
 }
 

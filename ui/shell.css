@@ -517,7 +517,8 @@ body:has(#workbench.is-sidebar-folded) .titlebar {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .is-arriving {
+  .is-arriving,
+  .helper-status {
     animation: none;
   }
 }
@@ -13308,12 +13309,16 @@ body.mod-held .term-link,
  * 것을 갖는다 — 판이 통째로 굴러가는 명령 실행의 페이지와 다른 점은
  * 이것뿐이다. */
 .worker-view.is-chat-page {
+  position: relative;
   display: flex;
   flex-direction: column;
   padding: 0;
   overflow: hidden;
   /* 바닥 하나 — 카드도 괘선도 그 위에 서지 않는다(t-2973). */
   background: var(--chat-ground);
+  /* The page's face is the platform's, as the panel wears VS Code's
+   * (`--vscode-chat-font-family`); every rule below reads `--font-ui`. */
+  --font-ui: var(--chat-font-ui);
 }
 
 .worker-head {
@@ -13347,19 +13352,18 @@ body.mod-held .term-link,
   min-width: 0;
 }
 
-/* 읽기 좋은 한 단. 2K 판에서 전사가 창 끝까지 늘어나면 한 줄이 눈보다 길어
- * 지므로, 단은 720–800px에서 멈추고 남는 폭은 좌우 여백이 갖는다 — 머리·문맥
- * 줄·전사·입력줄이 같은 축에 서도록 여백은 네 곳이 같은 식으로 잰다. 좁아지면
- * 식의 첫 항(최소 여백)이 이겨서 아무것도 잘리지 않는다. */
+/* The extension's list runs the panel's whole width with 20px at the sides
+ * (`messagesContainer`); only the dock has a measure (`--chat-dock-max`).
+ * The head and the context line share the list's gutter so the four stand
+ * on one axis. */
 .worker-view.is-chat-page {
-  --helper-col: var(--chat-col);
-  --helper-gutter: max(var(--space-4), calc((100% - var(--helper-col)) / 2));
+  --helper-gutter: var(--chat-list-pad-x);
 }
 
 /* The one thing that changes per agent: the accent. The four CLIs the
  * catalog voices wear their own; every other agent — Kimi, Grok, the next
  * one — wears the window's, so the rest of the page is uniform. */
-.worker-view[data-agent="claude"] { --chat-accent: var(--agent-accent-claude); }
+.worker-view[data-agent="claude"] { --chat-accent: var(--agent-accent-claude); --chat-send-bg: var(--agent-send-claude); }
 .worker-view[data-agent="codex"] { --chat-accent: var(--agent-accent-codex); }
 .worker-view[data-agent="zo"] { --chat-accent: var(--agent-accent-zo); }
 .worker-view[data-agent="antigravity"] { --chat-accent: var(--agent-accent-antigravity); }
@@ -13522,11 +13526,24 @@ details.worker-command {
    * and the rows off the rail carry their own margins. */
   gap: 0;
   margin: 0;
-  padding: var(--space-3) var(--helper-gutter, var(--space-4)) var(--space-6);
+  /* Room under the last row for the dock floating over it, beside the
+   * extension's own 40px (`--chat-dock-h` is the dock's watched height). */
+  padding: 0 var(--helper-gutter, var(--chat-list-pad-x)) calc(var(--chat-list-pad-bottom) + var(--chat-dock-h));
   overflow-y: auto;
   /* 앵커 보정은 스크립트가 한 벌로 한다(`syncHelperTurns`) — 브라우저의
    * 자동 앵커가 겹치면 한쪽이 거짓말이 된다. */
   overflow-anchor: none;
+  /* The person's words stick inside this list and nowhere else (the
+   * extension's `isolation: isolate` on its sticky mode). */
+  isolation: isolate;
+}
+
+/* The list opens with a spacer rather than padding, so the first sticky
+ * header sticks at the very top (`stickyMode:before`). */
+.helper-turns::before {
+  content: "";
+  flex: none;
+  height: var(--chat-list-pad-top);
 }
 
 .helper-turn {
@@ -13543,11 +13560,26 @@ details.worker-command {
   overflow-wrap: break-word;
 }
 
-/* 사람의 말: 본문은 쓰인 줄바꿈을 지킨다. */
+/* 사람의 말: 본문은 쓰인 줄바꿈을 지킨다. The row is the extension's sticky
+ * header (`stickyHeader`, 2.1.278): it stays at the list's top while its own
+ * turn scrolls under it, padded above and below, its last stretch fading to
+ * the ground; the box with the words is its child (`.helper-said`). */
 .helper-turn.is-user {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: block;
+  margin: var(--chat-bubble-gap) 0;
+  padding: var(--chat-sticky-pad-top) 0 var(--chat-sticky-pad-bottom);
+  background-image: linear-gradient(
+    to bottom,
+    var(--chat-ground) calc(100% - var(--chat-sticky-fade)),
+    transparent 100%
+  );
+}
+
+.helper-turn.is-user:first-child {
+  margin-top: 0;
 }
 
 .helper-said {
@@ -13603,9 +13635,14 @@ details.worker-command {
   display: none;
 }
 
-/* A line off the rail — a system word — keeps the row's rhythm. */
+/* A line off the rail — a system word — is the extension's meta message
+ * (`metaMessage`): italic, in the secondary ink, a little faded. */
 .helper-turn:not(.is-step):not(.is-user) {
-  padding: var(--chat-row-pad) 0;
+  margin: var(--chat-meta-gap) 0;
+  padding: var(--chat-meta-pad);
+  color: var(--chat-work-ink);
+  font-style: italic;
+  opacity: var(--chat-meta-alpha);
 }
 
 /* Rendered markdown flows as prose; the pre-wrap above is for words typed
@@ -13626,7 +13663,7 @@ details.worker-command {
 .is-chat-page .helper-said pre {
   margin: var(--space-2) 0;
   padding: var(--space-2);
-  border-radius: var(--radius-sm);
+  border-radius: var(--chat-radius-small);
   background: var(--chat-code-bg);
 }
 
@@ -13768,20 +13805,37 @@ details.worker-command {
   background: var(--row-hover);
 }
 
+/* The extension's `assistantActions`: a short row under every answer, its
+ * copy shown only while the pointer or the focus is on the answer. */
 .helper-actions {
   display: flex;
-  gap: var(--space-1);
+  align-items: center;
+  gap: var(--chat-actions-gap);
+  height: var(--chat-actions-h);
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-standard);
+}
+
+.helper-turn.is-assistant:hover .helper-actions,
+.helper-turn.is-assistant:focus-within .helper-actions {
+  opacity: 1;
+}
+
+/* An answer with its action row keeps no pad under it: the row is the pad
+ * (`message:has([data-message-actions])`). */
+.helper-turn.is-assistant:has(> .helper-actions) {
+  padding-bottom: 0;
 }
 
 .helper-copy {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: var(--control-height-sm);
-  height: var(--control-height-sm);
-  padding: 0;
+  width: var(--chat-copy-size);
+  height: var(--chat-copy-size);
+  padding: var(--chat-copy-pad);
   border: 0;
-  border-radius: var(--radius-sm);
+  border-radius: var(--chat-radius-small);
   background: none;
   color: var(--ink-mist);
   cursor: pointer;
@@ -13803,13 +13857,13 @@ details.worker-command {
  * is the aria-label). The side is the reader's bearing: what they typed sits
  * under their hand, and the agent's answers keep the left margin they are
  * read down. The briefing wears the same bubble. */
-/* What the person said: the extension's box — on the left with everything
- * else, sized to its words, a 1px edge in the input's colour on the input's
- * ground, 6px corners (2.1.278 `userMessage`). */
-.helper-turn.is-user {
-  align-self: flex-start;
+/* What the person said: the extension's box — a 1px edge in the input's
+ * colour on the input's ground, 6px corners, and as wide as the list, since
+ * the panel's sticky mode makes every box a block (2.1.278 `userMessage`,
+ * `stickyMode`). A stuck box is a door home (`helperTurnsNode`). */
+.helper-turn.is-user > .helper-said {
+  display: block;
   max-width: var(--chat-bubble-max);
-  margin: var(--chat-bubble-gap) 0;
   padding: var(--chat-bubble-pad-y) var(--chat-bubble-pad-x);
   border: 1px solid var(--chat-composer-edge);
   border-radius: var(--chat-radius-bubble);
@@ -13817,6 +13871,7 @@ details.worker-command {
   color: var(--chat-bubble-ink);
   font-size: var(--chat-prose-size);
   line-height: var(--chat-prose-leading);
+  cursor: pointer;
 }
 
 .helper-who {
@@ -14081,15 +14136,26 @@ details.worker-command {
 
 /* `✻ Pondering…` — under the transcript, above the composer, while the run
  * is out. The mark breathes on the accent; the word is the CLI's own. */
+/* The extension's spinner row (`spinnerRow`): the list's last row, a beat
+ * tall, fading in; its mark a mono glyph in a column as wide as itself,
+ * which puts it where the rail's dots stand, the word beside it in the
+ * primary ink at a medium weight. */
 .helper-status {
   flex: none;
   display: flex;
   align-items: center;
-  gap: var(--space-2);
-  margin: 0;
-  padding: var(--space-1) var(--helper-gutter, var(--space-4));
+  gap: var(--space-1);
+  height: var(--chat-status-h);
+  margin: var(--chat-meta-gap) 0 0;
+  padding: 0;
   font-size: var(--chat-prose-size);
-  color: var(--chat-work-ink);
+  color: var(--ink-chalk);
+  animation: helper-status-in var(--chat-status-in) var(--ease-standard);
+}
+
+@keyframes helper-status-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 .helper-status[hidden] {
@@ -14097,6 +14163,11 @@ details.worker-command {
 }
 
 .helper-status-mark {
+  display: inline-block;
+  width: var(--chat-status-mark-w);
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: var(--chat-status-mark-size);
   color: var(--chat-accent);
   animation: helper-live-pulse 1.6s var(--ease-standard) infinite;
 }
@@ -14108,6 +14179,12 @@ details.worker-command {
 }
 
 .helper-status-word {
+  /* One word, never a second line: it ends in an ellipsis before it can
+   * widen the list (`.helper-tool-arg` does the same on the tool row). */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 500;
 }
 
@@ -14230,34 +14307,99 @@ details[open] > .helper-cap::after {
 
 .worker-composer:hover,
 .worker-composer:focus-within {
-  border-color: var(--chat-accent);
+  border-color: var(--chat-reach, var(--chat-accent));
 }
 
-/* Focused, the extension's ring: the accent's edge with its soft halo. */
+/* Focused, the extension's ring: the accent's edge — or the permission
+ * mode's reach — with its soft halo, over the resting shadow. */
 .worker-composer:focus-within {
-  box-shadow: 0 0 0 var(--chat-focus-ring) color-mix(in srgb, var(--chat-accent) 12%, transparent);
+  box-shadow:
+    0 0 0 var(--chat-focus-ring) color-mix(in srgb, var(--chat-reach, var(--chat-accent)) 12%, transparent),
+    var(--chat-shadow);
 }
 
-/* 고정 뼈대에서는 붙일 필요가 없다 — 입력줄이 원래 바닥의 단이다. 상자만
- * 전사와 같은 축에 선다. `relative`: 팔레트와 메뉴가 이 상자 위에 뜬다. */
+/* In the dock the box needs no margins of its own; `relative`: the palette
+ * and the menu float over it. The extension's shadow sits under it. */
 .is-chat-page .worker-composer {
   position: relative;
   flex: none;
-  margin: 0 var(--helper-gutter) var(--space-3);
+  margin: 0;
+  box-shadow: var(--chat-shadow);
+}
+
+/* The extension's dock (`inputContainer`): absolute at the foot, inset on
+ * three sides, no wider than its measure and centred, over the list's last
+ * rows. The question card stands in it above the composer. */
+.chat-dock {
+  position: absolute;
+  right: var(--chat-dock-inset);
+  bottom: var(--chat-dock-inset);
+  left: var(--chat-dock-inset);
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-width: var(--chat-dock-max);
+  margin: 0 auto;
+}
+
+/* The list's last stretch fades under the dock (`messageGradient`). */
+.worker-view.is-chat-page:has(> .chat-dock)::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 2;
+  height: var(--chat-fade);
+  background: linear-gradient(to bottom, transparent 0%, var(--chat-ground) 100%);
+  pointer-events: none;
+}
+
+/* The permission mode's reach, worn as one colour by the send, the focus
+ * ring and the spinner's mark (the extension's `[data-permission-mode]`).
+ * A mode that asks wears no attribute, and the agent's own colour. */
+.worker-composer[data-permission-reach="edits"],
+.helper-status[data-permission-reach="edits"] {
+  --chat-reach: var(--chat-reach-edits);
+  --chat-reach-ink: var(--chat-reach-edits-ink);
+}
+
+.worker-composer[data-permission-reach="plan"],
+.helper-status[data-permission-reach="plan"] {
+  --chat-reach: var(--chat-reach-plan);
+  --chat-reach-ink: var(--chat-reach-plan-ink);
+}
+
+.worker-composer[data-permission-reach="bypass"],
+.helper-status[data-permission-reach="bypass"] {
+  --chat-reach: var(--chat-reach-bypass);
+  --chat-reach-ink: var(--chat-reach-bypass-ink);
+}
+
+.worker-composer[data-permission-reach] .worker-composer-send:not(.is-stop) {
+  background: var(--chat-reach);
+  color: var(--chat-reach-ink);
+}
+
+.helper-status[data-permission-reach] .helper-status-mark {
+  color: var(--chat-reach);
 }
 
 /* The question the program asks, as the extension's card in the
  * conversation: under the transcript, above the composer, on the agent's
  * accent. The panel inside is the board's own; here it sheds the board's
  * well and wears this card's. */
+/* In the dock above the composer — the extension's card
+ * (`permissionRequestContainer`): the composer's edge and ground, its large
+ * corners, one step of padding. */
 .pane-chat-ask {
   flex: none;
-  margin: 0 var(--helper-gutter) var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border: var(--rule-width) solid var(--edge-rule);
-  border-left: var(--accent-rule) solid var(--chat-accent);
-  border-radius: var(--radius-sm);
-  background: var(--chat-bubble);
+  margin: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--chat-radius-composer);
+  background: var(--chat-composer-bg);
 }
 
 .pane-chat-ask .board-approve,
@@ -14272,18 +14414,18 @@ details[open] > .helper-cap::after {
   box-sizing: border-box;
   width: 100%;
   min-width: 0;
-  padding: var(--space-3) var(--space-4) var(--space-1);
+  /* The extension's `messageInput`: 10×14 inside, 1.5 leading, 200px tall
+   * at most. */
+  padding: var(--chat-composer-pad-y) var(--chat-composer-pad-x);
   border: 0;
   background: transparent;
   color: var(--ink-chalk);
   font-family: var(--font-ui);
-  font-size: var(--text-sm);
-  line-height: var(--leading-body);
+  font-size: var(--chat-prose-size);
+  line-height: var(--chat-prose-leading);
   resize: none;
   overflow-y: auto;
-  max-height: calc(
-    var(--chat-composer-max-rows) * var(--leading-body) * 1em + var(--space-3) + var(--space-1)
-  );
+  max-height: var(--chat-composer-max-h);
 }
 
 /* The box lights its own edge on `:focus-within` (above), so the measured
@@ -14295,12 +14437,15 @@ details[open] > .helper-cap::after {
   box-shadow: none;
 }
 
+/* The extension's footer (`inputFooter`): a hairline above it, the chips
+ * five px in and six apart. */
 .worker-composer-tools {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-2);
-  padding: 0 var(--space-3) var(--space-3);
+  gap: var(--chat-footer-gap);
+  padding: var(--chat-footer-pad);
+  border-top: var(--rule-width) solid var(--chat-composer-edge);
 }
 
 .worker-composer-right {
@@ -14316,15 +14461,20 @@ details[open] > .helper-cap::after {
   align-items: center;
   gap: var(--space-1);
   height: var(--chat-pill-height);
-  padding: 0 var(--space-3);
+  padding: 0 var(--chat-pill-pad-x);
   border: 0;
   border-radius: var(--radius-pill);
   background: var(--chat-pill-bg);
-  color: var(--ink-label);
+  color: var(--ink-chalk);
   font-family: var(--font-ui);
-  font-size: var(--text-xs);
+  font-size: var(--chat-pill-size);
   line-height: 1;
   white-space: nowrap;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.worker-composer-pill:hover {
+  background: var(--chat-pill-hover-bg);
 }
 
 .worker-composer-pill .icon {

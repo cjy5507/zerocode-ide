@@ -1965,7 +1965,23 @@
   --chat-send-stop-bg: var(--ink-figure);
   --chat-send-stop-ink: var(--surface-abyss);
   --chat-link: var(--ai-accent);
-  --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 6%, transparent);
+  /* The extension's pills: a tenth of the ink on the ground, closer to a
+   * fifth under the pointer (`--app-pill-background` / `-hover-`). */
+  --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
+  --chat-pill-hover-bg: color-mix(in srgb, var(--ink-chalk) 18%, transparent);
+  /* The composer's shadow (`inputContainer`, `0 1px 2px #0000001a`). */
+  --chat-shadow: 0 1px 2px rgb(0 0 0 / 10%);
+  /* The permission mode's reach, one colour each (the extension's send by
+   * `[data-permission-mode]`): edits taken without asking invert the send
+   * (ink on ground), a planning session wears the window's accent, a
+   * bypassed session the halt colour — the one destructive state this
+   * product colours. */
+  --chat-reach-edits: var(--ink-chalk);
+  --chat-reach-edits-ink: var(--surface-deck);
+  --chat-reach-plan: var(--ai-accent);
+  --chat-reach-plan-ink: var(--surface-abyss);
+  --chat-reach-bypass: var(--signal-halt);
+  --chat-reach-bypass-ink: var(--chat-send-ink);
   --chat-dot-done: #74c991;
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 4%, transparent);
@@ -1982,7 +1998,6 @@
   --chat-bubble-pad-y: 4px;
   --chat-bubble-gap: 4px;
   --chat-radius-composer: 8px;
-  --chat-col: 900px;
   --chat-bubble-max: 100%;
   --chat-prose-size: var(--text-sm);
   --chat-prose-leading: 1.5;
@@ -2000,15 +2015,68 @@
   --chat-focus-ring: 3px;
   --chat-accent: var(--ai-accent);
   --agent-accent-claude: #d97757;
+  /* Claude Code's send is its clay, a shade under its accent, in both
+   * themes (`--app-claude-clay-button-orange`, fixed on the extension's
+   * root); every other agent's send is its accent. */
+  --agent-send-claude: #c6613f;
   --agent-accent-codex: #10a37f;
   --agent-accent-zo: #8b7cf6;
   --agent-accent-antigravity: #4e8cf7;
   --chat-chip-size: 0.92em;
   --chat-send-size: 26px;
-  --chat-pill-height: var(--control-height-sm);
-  --chat-composer-max-rows: 8;
+  /* The extension's pills: 18px tall, .85em words, 8px sides, round. */
+  --chat-pill-height: 18px;
+  --chat-pill-size: 0.85em;
+  --chat-pill-pad-x: 8px;
   --chat-preview-mark: 36px;
   --chat-fold-max: 360px;
+  /* The extension's page, read off its stylesheet (2.1.278) and worn as
+   * one geometry by every agent's conversation. The dock (`inputContainer`)
+   * floats 16px off the foot and the sides, no wider than 680px, centred;
+   * the list (`messagesContainer`, sticky mode) pads 20px at the sides,
+   * opens with a 20px spacer, keeps 40px under its last row beside the
+   * dock's own height, and fades its last 150px under the dock. The
+   * person's words are a sticky header 14px above the box and 12px below,
+   * the last 12px fading to the ground. The spinner row (`spinnerRow`) is
+   * 1.85em tall; its mark is a 1.5em mono glyph in a 1.5em column, which
+   * puts it where the rail's dots stand; it fades in over 300ms. An
+   * answer's action row is 16px tall with a 20px copy padded 2px. The
+   * composer's box pads 10×14 and grows to 200px; its footer pads 5px and
+   * gaps 6px. Meta lines (`metaMessage`) pad 8px, sit 4px off their
+   * neighbours and stand at .8 of the ink. Small corners are 4px
+   * (`--corner-radius-small`). The chat's type is the platform's own UI
+   * face, as the panel inherits VS Code's (`--vscode-chat-font-family`) —
+   * a person's chosen face still wins. */
+  --chat-dock-inset: 16px;
+  --chat-dock-max: 680px;
+  /* The dock's watched height, written on the page by `chatDockNode`; a page
+   * without a dock keeps the extension's 40px alone. */
+  --chat-dock-h: 0px;
+  --chat-list-pad-x: 20px;
+  --chat-list-pad-top: 20px;
+  --chat-list-pad-bottom: 40px;
+  --chat-fade: 150px;
+  --chat-sticky-pad-top: 14px;
+  --chat-sticky-pad-bottom: 12px;
+  --chat-sticky-fade: 12px;
+  --chat-status-h: 1.85em;
+  --chat-status-mark-w: 1.5em;
+  --chat-status-mark-size: 1.5em;
+  --chat-status-in: 300ms;
+  --chat-actions-h: 16px;
+  --chat-actions-gap: 2px;
+  --chat-copy-size: 20px;
+  --chat-copy-pad: 2px;
+  --chat-composer-pad-y: 10px;
+  --chat-composer-pad-x: 14px;
+  --chat-composer-max-h: 200px;
+  --chat-footer-pad: 5px;
+  --chat-footer-gap: 6px;
+  --chat-meta-pad: 8px;
+  --chat-meta-gap: 4px;
+  --chat-meta-alpha: 0.8;
+  --chat-radius-small: 4px;
+  --chat-font-ui: var(--font-ui-choice, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
 
   /* A tool turn is two rows — what was called, and what it answered — and
    * they belong to each other, so the gap between them is tighter than the
@@ -2434,13 +2502,22 @@
   --chat-send-stop-bg: var(--ink-figure);
   --chat-send-stop-ink: var(--surface-abyss);
   --chat-link: var(--ai-accent);
-  --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 5%, transparent);
+  --chat-pill-bg: color-mix(in srgb, var(--ink-chalk) 10%, transparent);
+  --chat-pill-hover-bg: color-mix(in srgb, var(--ink-chalk) 18%, transparent);
+  --chat-shadow: 0 1px 2px rgb(0 0 0 / 10%);
+  --chat-reach-edits: var(--ink-chalk);
+  --chat-reach-edits-ink: var(--surface-deck);
+  --chat-reach-plan: var(--ai-accent);
+  --chat-reach-plan-ink: var(--surface-abyss);
+  --chat-reach-bypass: var(--signal-halt);
+  --chat-reach-bypass-ink: var(--chat-send-ink);
   --chat-dot-done: #3f9a5f;
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 3%, transparent);
   --chat-code-bg: color-mix(in srgb, var(--ink-chalk) 6%, transparent);
   --chat-accent: var(--ai-accent);
   --agent-accent-claude: #c8643a;
+  --agent-send-claude: #c6613f;
   --agent-accent-codex: #0e8a6c;
   --agent-accent-zo: #6b5fd6;
   --agent-accent-antigravity: #2f6fdb;
