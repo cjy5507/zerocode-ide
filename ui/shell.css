@@ -13595,12 +13595,15 @@ details.worker-command {
  * rail are the row's pseudo-elements, so a 400-turn page pays no node for
  * them. The rail starts at the first step's dot, ends a dot's reach below
  * the last step's, and a lone step has none. */
-.helper-turn.is-step {
+/* 걸음 하나 — 턴의 행이거나, Focus view가 그 행들 앞에 세운 묶음 머리다.
+ * 둘은 같은 자 위에 서므로 규칙도 하나다(`:is()`): 묶음 머리를 다른 자에
+ * 세우면 레일이 그 한 줄에서 어긋난다. */
+:is(.helper-turn, .helper-group).is-step {
   position: relative;
   padding: var(--chat-row-pad) 0 var(--chat-row-pad) var(--chat-gutter);
 }
 
-.helper-turn.is-step::before {
+:is(.helper-turn, .helper-group).is-step::before {
   content: "";
   position: absolute;
   left: var(--chat-rail-dot-x);
@@ -13612,7 +13615,7 @@ details.worker-command {
   background: var(--chat-work-ink);
 }
 
-.helper-turn.is-step::after {
+:is(.helper-turn, .helper-group).is-step::after {
   content: "";
   position: absolute;
   left: var(--chat-rail-x);
@@ -13622,16 +13625,16 @@ details.worker-command {
   background: var(--chat-divider);
 }
 
-.helper-turn.is-step:not(.helper-turn.is-step + .helper-turn.is-step)::after {
+:is(.helper-turn, .helper-group).is-step:not(:is(.helper-turn, .helper-group).is-step + :is(.helper-turn, .helper-group).is-step)::after {
   top: calc(var(--chat-row-pad) + var(--chat-rail-dot-y) + var(--chat-dot) / 2);
 }
 
-.helper-turn.is-step:not(:has(+ .helper-turn.is-step))::after {
+:is(.helper-turn, .helper-group).is-step:not(:has(+ :is(.helper-turn, .helper-group).is-step))::after {
   bottom: auto;
   height: calc(var(--chat-row-pad) + var(--chat-rail-dot-y) + var(--chat-dot) / 2);
 }
 
-.helper-turn.is-step:not(.helper-turn.is-step + .helper-turn.is-step):not(:has(+ .helper-turn.is-step))::after {
+:is(.helper-turn, .helper-group).is-step:not(:is(.helper-turn, .helper-group).is-step + :is(.helper-turn, .helper-group).is-step):not(:has(+ :is(.helper-turn, .helper-group).is-step))::after {
   display: none;
 }
 
@@ -13895,17 +13898,20 @@ details.worker-command {
   color: var(--chat-work-ink);
 }
 
-.helper-turn.is-tool.is-done::before {
+.helper-turn.is-tool.is-done::before,
+.helper-group.is-done::before {
   background: var(--chat-dot-done);
 }
 
-.helper-turn.is-tool.is-failed::before {
+.helper-turn.is-tool.is-failed::before,
+.helper-group.is-failed::before {
   background: var(--chat-dot-failed);
 }
 
 /* A call still out: the agent's accent with its halo, blinking at the
  * extension's beat (`dotProgress`: 1s, linear). */
-.helper-turn.is-tool.is-live::before {
+.helper-turn.is-tool.is-live::before,
+.helper-group.is-live::before {
   background: var(--chat-accent);
   box-shadow: 0 0 0 var(--chat-dot-halo) color-mix(in srgb, var(--chat-accent) 18%, transparent);
   animation: helper-live-pulse 1s linear infinite;
@@ -14160,6 +14166,106 @@ details.worker-command {
 
 .helper-status[hidden] {
   display: none;
+}
+
+/* ---- Focus view (확장 2.1.221) ----
+ *
+ * 한 턴의 도구 일이 요약 한 줄 뒤로 접힌다. 접힌 구성원은 목록의 직계
+ * 자식으로 **남은 채** 숨으므로 — 옮기면 `syncHelperTurns`의 열쇠 회계가
+ * 무너진다 — `[hidden]`이 `.helper-turn`의 display를 이겨야 한다(상태 행이
+ * 같은 이유로 제 규칙을 갖는다). */
+.helper-turn[hidden] {
+  display: none;
+}
+
+/* 묶음 머리는 도구 행의 자를 그대로 쓴다: `.is-step`이 여백과 레일과 점을
+ * 주고(위), 상태의 점은 도구 행과 같은 규칙에서 온다. 여기서 더하는 것은
+ * 그 줄의 글자뿐이다. */
+.helper-group {
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  background: none;
+  font-size: var(--chat-prose-size);
+  color: var(--chat-work-ink);
+}
+
+.helper-group-cap {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: var(--font-ui);
+  font-size: var(--chat-prose-size);
+  line-height: var(--chat-prose-leading);
+  color: var(--chat-work-ink);
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-group-cap:hover,
+.helper-group-cap:focus-visible {
+  color: var(--ink-chalk);
+}
+
+/* 요약은 줄지 않는다 — 줄어드는 것은 나가 있는 호출의 이름 쪽이다. */
+.helper-group-words {
+  flex: none;
+  font-weight: 500;
+}
+
+/* 지금 나가 있는 호출 하나. 도구 행의 두 칸(`.helper-tool-name` ·
+ * `.helper-tool-arg`)을 그대로 입으므로 이름과 대상의 규칙은 한 벌뿐이다. */
+.helper-group-live {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.helper-group-live[hidden] {
+  display: none;
+}
+
+/* 머리의 토글. 대화 페이지의 조용한 아이콘 단추(`.helper-copy`)와 같은 자
+ * 위에 서고, 이것만 상태를 가진다 — 켜져 있음은 최대 대비로 말한다. */
+.worker-focus {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--chat-copy-size);
+  height: var(--chat-copy-size);
+  padding: var(--chat-copy-pad);
+  border: 0;
+  border-radius: var(--chat-radius-small);
+  background: none;
+  color: var(--ink-mist);
+  cursor: pointer;
+  transition:
+    color var(--motion-fast) var(--ease-standard),
+    background var(--motion-fast) var(--ease-standard);
+}
+
+.worker-focus:hover {
+  color: var(--ink-chalk);
+  background: var(--chat-pill-bg);
+}
+
+.worker-focus[aria-pressed="true"] {
+  color: var(--chat-accent);
+  background: var(--chat-pill-bg);
+}
+
+.worker-focus .icon {
+  width: var(--icon-size);
+  height: var(--icon-size);
 }
 
 .helper-status-mark {
@@ -14846,6 +14952,8 @@ button.worker-composer-pill:hover {
 @media (prefers-reduced-motion: reduce) {
   .helper-cap,
   .helper-cap::after,
+  .helper-group-cap,
+  .worker-focus,
   button.worker-where.is-door,
   .helper-preview-door,
   .helper-copy,
@@ -14856,6 +14964,7 @@ button.worker-composer-pill:hover {
   }
 
   .helper-turn.is-tool.is-live::before,
+  .helper-group.is-live::before,
   .helper-status-mark {
     animation: none;
   }
