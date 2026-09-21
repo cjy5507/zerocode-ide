@@ -24,7 +24,7 @@ use runtime::scoreboard::{
 use serde_json::{Value, json};
 
 const DEFAULT_SINCE_SECS: u64 = 24 * 3600;
-const DEFAULT_BASELINE: &str = "zo-ide/docs/bench/results/scoreboard-baseline.json";
+const DEFAULT_BASELINE: &str = "zo-ide/bench/scoreboard-baseline.json";
 const DEFAULT_LANE_LOGS: &str = ".local/share/zerocode/release/out";
 const DEFAULT_FLAKES: &str = "tools/release/flakes.txt";
 const DEFAULT_CALM_LOAD: f64 = 12.0;
@@ -503,7 +503,7 @@ mod tests {
         let cwd = Path::new("/w");
         let r = parse(&[], cwd).expect("defaults");
         assert_eq!(r.since_secs, 86_400);
-        assert_eq!(r.baseline, Path::new("/w/zo-ide/docs/bench/results/scoreboard-baseline.json"));
+        assert_eq!(r.baseline, Path::new("/w/zo-ide/bench/scoreboard-baseline.json"));
         let r = parse(&["--since".into(), "7d".into(), "--file-tasks".into()], cwd).expect("parse");
         assert_eq!(r.since_secs, 7 * 86_400);
         assert!(r.file_tasks);

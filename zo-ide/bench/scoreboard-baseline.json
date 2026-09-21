@@ -1,0 +1,26 @@
+{
+  "written_at": 1789094678,
+  "first_byte": {
+    "claude-fable-5-1": {
+      "p50_ms": 4700,
+      "p90_ms": 5560,
+      "n": 2
+    },
+    "claude-opus-5": {
+      "p50_ms": 1431,
+      "p90_ms": 1839,
+      "n": 12
+    },
+    "gemini-3.8-flash": {
+      "p50_ms": 2532,
+      "p90_ms": 4728,
+      "n": 771
+    }
+  },
+  "breaks_per_10k": 0,
+  "gate_secs": {
+    "gate-root": 795,
+    "gate-zo": 674
+  },
+  "flake_names": 16
+}
