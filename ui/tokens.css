@@ -1982,6 +1982,12 @@
   --chat-reach-plan-ink: var(--surface-abyss);
   --chat-reach-bypass: var(--signal-halt);
   --chat-reach-bypass-ink: var(--chat-send-ink);
+  /* How tall the plan on an approval card stands before it scrolls on its
+   * own — a little over the composer's own cap (200px), so a plan of a dozen
+   * steps is read in place while the two answers stay in reach. The
+   * extension's plan preview is drawn by its React card, not by a rule its
+   * stylesheet carries (2.1.278 has none), so this is the window's scale. */
+  --chat-plan-max-h: 240px;
   --chat-dot-done: #74c991;
   --chat-dot-failed: #c74e39;
   --chat-tool-bg: color-mix(in srgb, var(--ink-chalk) 4%, transparent);

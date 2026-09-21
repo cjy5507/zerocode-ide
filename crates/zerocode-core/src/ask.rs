@@ -127,6 +127,39 @@ pub struct ApprovalPrompt {
     /// diff before the person answers. Empty for a tool that edits nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edits: Vec<crate::transcript::TranscriptEdit>,
+    /// The plan this permission is asking approval FOR, when the tool asking
+    /// is the CLI's plan tool — the extension's "Claude's Plan" card previews
+    /// it and offers a reason field on the refusal (2.1.268-275).
+    ///
+    /// Filled by the caller, never here: which tool carries a plan is an
+    /// agent fact, and this reader is given a payload and no agent
+    /// ([`plan_in`] is the rule, `AgentVoice::plan_tool` the fact).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan: Option<String>,
+}
+
+/// The plan inside a permission request's input, when the tool asking IS the
+/// agent's plan tool.
+///
+/// Three things have to line up: the agent names a plan tool at all, the
+/// request is that tool, and the input carries a non-empty `plan` string.
+/// Anything else is an ordinary approval — a card that guessed a plan out of
+/// a tool it does not know would put a "Claude's Plan" heading over a `Bash`
+/// command.
+#[must_use]
+pub fn plan_in(
+    input: Option<&serde_json::Value>,
+    tool: &str,
+    plan_tool: Option<&str>,
+) -> Option<String> {
+    if plan_tool? != tool {
+        return None;
+    }
+    input
+        .and_then(|value| value.get("plan"))
+        .and_then(|value| value.as_str())
+        .filter(|plan| !plan.is_empty())
+        .map(str::to_string)
 }
 
 /// The approval inside a permission event's payload.
@@ -157,6 +190,7 @@ pub fn approval_in_parsed(payload: &crate::payload::HookPayload<'_>) -> Option<A
         tool: tool.to_string(),
         summary: approval_summary(input),
         edits: crate::transcript::edits_in(tool, input),
+        plan: None,
     })
 }
 
@@ -679,6 +713,47 @@ mod tests {
         );
         assert_eq!(APPROVAL_ALLOW, "1");
         assert_eq!(APPROVAL_DENY, "\u{1b}");
+        assert_eq!(bash.plan, None, "the reader fills no plan; the caller does");
+    }
+
+    /// A plan is read only where all three line up: the agent names a plan
+    /// tool, the request IS that tool, and the input carries a plan worth
+    /// showing. Every other shape is an ordinary approval.
+    #[test]
+    fn a_plan_is_read_only_from_the_agents_own_plan_tool() {
+        let planning = serde_json::json!({ "plan": "## Plan\n1. read\n2. write" });
+        assert_eq!(
+            plan_in(Some(&planning), "ExitPlanMode", Some("ExitPlanMode")).as_deref(),
+            Some("## Plan\n1. read\n2. write")
+        );
+        assert_eq!(
+            plan_in(Some(&planning), "Bash", Some("ExitPlanMode")),
+            None,
+            "another tool's input is not a plan, whatever it carries"
+        );
+        assert_eq!(
+            plan_in(Some(&planning), "ExitPlanMode", None),
+            None,
+            "an agent that names no plan tool has no plan card"
+        );
+        assert_eq!(
+            plan_in(
+                Some(&serde_json::json!({ "plan": "" })),
+                "ExitPlanMode",
+                Some("ExitPlanMode")
+            ),
+            None,
+            "an empty plan is nothing to approve"
+        );
+        assert_eq!(
+            plan_in(
+                Some(&serde_json::json!({ "plan": 7 })),
+                "ExitPlanMode",
+                Some("ExitPlanMode")
+            ),
+            None
+        );
+        assert_eq!(plan_in(None, "ExitPlanMode", Some("ExitPlanMode")), None);
     }
 
     /// claude, one single-select question: the digit answers and submits in

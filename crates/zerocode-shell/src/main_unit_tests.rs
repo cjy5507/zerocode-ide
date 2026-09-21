@@ -17025,6 +17025,8 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.preview",
         "worker.thoughtFor",
         "worker.thinking",
+        // Every row announces what it is (2.1.272): a tool row by its tool.
+        "worker.toolRow",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -17039,7 +17041,7 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
     let reads = [
         (
             "function dressToolTurn(row, turn, run, spoken) {",
-            vec!["worker.moreLines"],
+            vec!["worker.moreLines", "worker.toolRow"],
         ),
         // The fold's label lives in `thoughtLabel` (the bare word, or the
         // extension's 「Thought for Ns」 once the thought's length is known);
@@ -17152,6 +17154,7 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "composer-pad-y",
         "composer-pad-x",
         "composer-max-h",
+        "plan-max-h",
         "footer-pad",
         "footer-gap",
         "meta-pad",

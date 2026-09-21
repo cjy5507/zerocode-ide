@@ -35623,6 +35623,8 @@ const chatFace = await page.evaluate(async () => {
   };
   const turns = [...face.querySelectorAll(".helper-turn")];
   seen.count = turns.length;
+  seen.assistantNamed = [turns[1]?.getAttribute("aria-label"), agentName("claude")];
+  seen.toolNamed = [turns[3]?.getAttribute("aria-label"), t("worker.toolRow", "{{name}} 도구", { name: "Read" })];
   // The first user turn is the briefing box — the extension's `userMessage`:
   // a bordered box on the left, in a row that sticks to the top while its
   // answer scrolls under it, with every other thing the person said, whole.
@@ -35794,7 +35796,9 @@ ok(
     chatFace.moreFolded && chatFace.moreWords === chatFace.wantMoreWords &&
     chatFace.wellHolds && chatFace.wellScrolls &&
     chatFace.readName === "Read" && chatFace.readArg === "one line" && chatFace.readBare &&
-    chatFace.liveDot,
+    chatFace.liveDot &&
+    chatFace.assistantNamed[0] === chatFace.assistantNamed[1] &&
+    chatFace.toolNamed[0] === chatFace.toolNamed[1],
   JSON.stringify(chatFace),
 );
 ok(
@@ -54252,6 +54256,9 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // The tool row, left to right: + · agent chip · mode chip … / · send.
       const tools = composer?.querySelector(".worker-composer-tools");
       seen.rowOrder = [...(tools?.children ?? [])].map((node) => node.className.split(" ").pop());
+      // The agents pill stands in the row but says nothing while no helper
+      // is out — it is the roster's count, not a permanent chip.
+      seen.agentsPillQuiet = composer?.querySelector(".worker-composer-agents")?.hidden === true;
       const agentChip = composer?.querySelector(".worker-composer-agent");
       seen.chipMark = agentChip?.querySelector(".worker-composer-mark")?.textContent;
       seen.chipName = agentChip?.querySelector(".worker-composer-pill-words")?.textContent;
@@ -54297,6 +54304,10 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       seen.paletteHead = pane?.querySelector(".composer-slash-head")?.textContent;
       seen.wantHead = `${agentName("claude")} 2.1.272 · ${t("composer.slash.sourceSession", "이 세션")}`;
       seen.paletteRows = [...(pane?.querySelectorAll(".composer-slash-row .composer-slash-name") ?? [])].map((n) => n.textContent);
+      seen.copyAbout = [...(pane?.querySelectorAll(".composer-slash-row") ?? [])]
+        .find((row) => row.querySelector(".composer-slash-name")?.textContent === "/copy")
+        ?.querySelector(".composer-slash-about")?.textContent ?? null;
+      seen.wantCopyAbout = t("composer.slash.copy", "마지막 답을 클립보드에 복사한다");
       seen.askedCwd = asked[0]?.cwd ?? null;
       seen.wantCwd = tabOfTerm(term)?.worktree ?? null;
       box.value = "/co";
@@ -54348,6 +54359,18 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       seen.artifactFilled = box.value.startsWith(t("artifacts.newDraft", "HTML").slice(0, 8)) && calls.length === sentBefore;
       box.value = "";
       box.dispatchEvent(new Event("input", { bubbles: true }));
+      // `/copy` acts where it stands: the last answer to the clipboard, the
+      // box emptied, and nothing sent to the CLI (2.1.275).
+      window.__CLIPBOARD_WRITES__.length = 0;
+      box.value = "/cop";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      await settle(30);
+      const copiedBefore = calls.length;
+      press("Enter");
+      await settle(60);
+      seen.copied = window.__CLIPBOARD_WRITES__.at(-1) ?? null;
+      seen.copySentNothing = calls.length === copiedBefore;
+      seen.copyClearedBox = box.value === "";
       // A Codex pane: its picker lives on its own screen, so a pick sends the
       // bare command and turns the pane back to its terminal.
       const codexTerm = await openTermTab({ placement: "tab" });
@@ -54384,6 +54407,15 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       seen.helperDoor = Boolean(helperComposer?.querySelector(".worker-composer-door"));
       seen.helperPlaceholder = helperComposer?.querySelector(".worker-composer-box")?.placeholder;
       seen.wantHelperPlaceholder = t("worker.say", "부모 에이전트에게 보내기…");
+      // A page nobody has been answered on does not list `/copy` — a row
+      // that would do nothing when it is pressed is not drawn at all.
+      const helperBox = helperComposer?.querySelector(".worker-composer-box");
+      if (helperBox) { helperBox.value = "/"; helperBox.dispatchEvent(new Event("input", { bubbles: true })); }
+      await settle(120);
+      const helperRows = [...document.querySelectorAll("#worker-view .composer-slash-row .composer-slash-name")]
+        .map((one) => one.textContent);
+      seen.helperRows = helperRows;
+      seen.copyUnlisted = helperRows.length > 0 && !helperRows.includes("/copy");
       delete window.__ANSWER__.term_paste; delete window.__ANSWER__.term_key;
       delete window.__ANSWER__.agent_models; delete window.__ANSWER__.slash_commands;
       delete window.__ANSWER__.pane_log; delete window.__ANSWER__.subagent_log;
@@ -54394,7 +54426,8 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
     ok(
       "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page keeps its door and speaks of the parent",
       seen.placeholder === seen.wantPlaceholder && seen.noDoorOnOwnPane &&
-        JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-mode", "worker-composer-right"]) &&
+        JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-mode", "worker-composer-agents", "worker-composer-right"]) &&
+        seen.agentsPillQuiet &&
         seen.chipMark === "✻" && seen.chipName === "Claude" && seen.chipModelRaw === " · claude-fable-5-1" &&
         seen.helperDoor && seen.helperPlaceholder === seen.wantHelperPlaceholder,
       JSON.stringify(seen),
@@ -54413,13 +54446,19 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
     ok(
       "`/` opens the palette the CLI itself would show — its list with the source on the head, asked for this checkout — filtering by the start of a name or a word inside it, saying so on a typo, arrows moving the highlight, Tab filling, Enter running an argument-less command through the send road, the window's own /artifact only filling",
       seen.paletteShown && seen.paletteHead === seen.wantHead && seen.askedCwd === seen.wantCwd &&
-        JSON.stringify(seen.paletteRows) === JSON.stringify(["/compact", "/context", "/codex:review", "/clear", "/artifact"]) &&
-        JSON.stringify(seen.filtered) === JSON.stringify(["/compact", "/context", "/codex:review"]) && seen.hot === "/compact" &&
+        JSON.stringify(seen.paletteRows) === JSON.stringify(["/compact", "/context", "/codex:review", "/clear", "/artifact", "/copy"]) &&
+        JSON.stringify(seen.filtered) === JSON.stringify(["/compact", "/context", "/codex:review", "/copy"]) && seen.hot === "/compact" &&
         JSON.stringify(seen.innerWord) === JSON.stringify(["/codex:review"]) &&
         seen.none === seen.wantNone &&
         seen.hotAfterDown === "/context" && seen.tabFilled === "/context " && seen.tabSentNothing && seen.paletteClosedAfterTab &&
         seen.enterRan === seen.wantEnterRan && seen.boxClearedAfterRun &&
         seen.artifactListed === "/artifact" && seen.artifactFilled,
+      JSON.stringify(seen),
+    );
+    ok(
+      "`/copy` puts the page's last answer on the clipboard from the palette — nothing sent to the CLI, the box emptied — and a page that has been answered nothing does not list it",
+      seen.copied === "hello" && seen.copySentNothing && seen.copyClearedBox &&
+        seen.copyAbout === seen.wantCopyAbout && seen.copyUnlisted,
       JSON.stringify(seen),
     );
     ok(
@@ -54903,7 +54942,7 @@ suite("wire-session", async ({ browser, origin, ok }) => {
         seen.newsDuringReadReadAgain && seen.closedAtOnce && seen.streamingGone && seen.closedShown &&
         seen.closedRows === 2 && seen.closedThoughtShut &&
         seen.menuModels === "GPT-5.6 Sol,GPT-6 Astra" && seen.modelSet === seen.wantModelSet &&
-        seen.paletteHead === seen.wantPaletteHead && seen.paletteRows === "/help,/artifact" &&
+        seen.paletteHead === seen.wantPaletteHead && seen.paletteRows === "/help,/artifact,/copy" &&
         seen.stopped && seen.tabGone,
       JSON.stringify(seen),
     );
@@ -55061,6 +55100,192 @@ suite("pane-hands-over-to-wire", async ({ browser, origin, ok }) => {
         seen.midTurnTranscript && seen.midTurnPending && seen.midTurnNotice && seen.handedAfterTurn &&
         seen.afterTurnArgs === JSON.stringify("s-busy") && seen.refusedKeepsTranscript &&
         seen.refusalSaid && seen.retriedOnPress && seen.retryResumed && seen.earlyTranscript && seen.handedOnSession,
+      JSON.stringify(seen),
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+/* The plan card (the extension's "Claude's Plan", 2.1.268-275) and the agents
+ * pill (2.1.269). A permission whose tool is the CLI's own plan tool is not
+ * an ordinary approval: the plan itself stands on the card as prose, the two
+ * answers are approve and send-feedback, and the refusal carries the words
+ * the person typed. On a pane the composer is that third road, as it already
+ * is for every other permission. */
+suite("plan-card", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    const seen = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const settle = (ms = 60) => new Promise((done) => setTimeout(done, ms));
+      const seen = {};
+      const calls = [];
+      const plan = "## 계획\n\n1. `ask.rs`를 읽는다\n2. 카드를 세운다";
+      // ---- the wire: the plan rides the ask, the refusal rides the words.
+      const log = {
+        found: true, skipped: false, next: 1, status: "asking", agent: "claude",
+        protocol: "claude-stream", model: null, models: [], mode: null, modes: [], commands: [],
+        version: "2.1.278", live: [],
+        turns: [{ role: "user", text: "계획을 세워줘" }],
+        asks: [{
+          id: "cd1", kind: "approval", method: "can_use_tool", tool: "ExitPlanMode",
+          plan, options: [
+            { id: "allow", kind: "allow_once" },
+            { id: "allow_always", kind: "allow_always" },
+            { id: "deny", kind: "reject_once" },
+          ],
+        }],
+      };
+      window.__ANSWER__.wire_start = (args) => ({ id: 31, agent: args.agent, protocol: "claude-stream", version: "2.1.278", model: null, session: null });
+      window.__ANSWER__.wire_log = (args) => ({ ...log, turns: log.turns.slice(args.after), next: log.turns.length });
+      window.__ANSWER__.wire_answer = (args) => { calls.push(["answer", args]); return null; };
+      window.__ANSWER__.wire_stop = () => null;
+      await openWirePage("claude", "/tmp/zerocode-window-test");
+      await pollHelperPages();
+      await window.__PAINTED__();
+      await settle();
+      const face = document.querySelector("#worker-view");
+      const card = face?.querySelector(".pane-chat-ask");
+      seen.cardShown = Boolean(card);
+      seen.title = card?.querySelector(".board-approve-title")?.textContent ?? null;
+      seen.wantTitle = t("board.approve.planTitle", "계획을 승인할까요?");
+      // The plan is the answer's own prose: a heading is a heading, a list a list.
+      const well = card?.querySelector(".board-approve-plan");
+      seen.planHeading = well?.querySelector("h2")?.textContent ?? null;
+      seen.planSteps = well?.querySelectorAll("li").length ?? 0;
+      seen.planChip = Boolean(well?.querySelector("code"));
+      seen.planScrolls = well ? getComputedStyle(well).overflowY === "auto" && getComputedStyle(well).maxHeight !== "none" : false;
+      // The plan wears the conversation's prose measures, not the card's
+      // small print — every length a token.
+      const probe = (name, property) => {
+        const span = document.createElement("span");
+        span.style[property] = `var(${name})`;
+        document.body.appendChild(span);
+        const value = getComputedStyle(span)[property];
+        span.remove();
+        return value;
+      };
+      seen.planProse = well
+        ? getComputedStyle(well).fontSize === probe("--chat-prose-size", "fontSize") &&
+          getComputedStyle(well).whiteSpace === "normal"
+        : false;
+      // No summary line beside it — the plan IS what this asks about.
+      seen.noSummary = card?.querySelector(".board-approve-detail") === null;
+      seen.acts = [...(card?.querySelectorAll(".board-approve-act") ?? [])].map((act) => act.textContent);
+      seen.wantActs = [t("board.approve.planAllow", "승인하고 진행"), t("board.approve.planFeedback", "피드백 보내기")];
+      const field = card?.querySelector(".board-approve-feedback");
+      seen.fieldHint = field?.placeholder ?? null;
+      seen.wantFieldHint = t("board.approve.feedbackHint", "계획에서 고칠 점을 적어 주세요");
+      if (field) field.value = "2번은 빼 주세요";
+      card?.querySelectorAll(".board-approve-act")[1]?.click();
+      await settle();
+      seen.refused = JSON.stringify(calls.at(-1));
+      seen.wantRefused = JSON.stringify(["answer", { id: 31, ask: "cd1", option: "deny", message: "2번은 빼 주세요" }]);
+      for (const name of ["wire_start", "wire_log", "wire_answer", "wire_stop"]) delete window.__ANSWER__[name];
+      for (const held of [...tabs]) dropTab(held.id);
+      // ---- the pane: the same card, answered down the pane's own road.
+      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, skipped: false, turns: [{ role: "user", text: "계획을 세워줘" }] });
+      const term = await openTermTab({ placement: "tab" });
+      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-plan", resumable: false });
+      await window.__PAINTED__();
+      el("view-toggle-chat").click();
+      await settle(150);
+      const chat = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
+      tell("hook:agent", { term, state: "awaiting-permission", agent: "claude", session: "s-plan", resumable: false,
+        approval: { tool: "ExitPlanMode", summary: `{"plan":"…"}`, plan } });
+      await window.__PAINTED__();
+      const paneCard = chat?.querySelector(".pane-chat-ask");
+      seen.paneTitle = paneCard?.querySelector(".board-approve-title")?.textContent ?? null;
+      seen.panePlan = paneCard?.querySelector(".board-approve-plan h2")?.textContent ?? null;
+      seen.paneNoField = paneCard?.querySelector(".board-approve-feedback") === null;
+      seen.paneActs = [...(paneCard?.querySelectorAll(".board-approve-act") ?? [])]
+        .map((act) => act.className.replace("board-approve-act ", "")).join(",");
+      window.__APPROVED__ = null;
+      paneCard?.querySelector(".board-approve-act.is-instead")?.click();
+      await settle();
+      seen.paneInstead = JSON.stringify(window.__APPROVED__) === JSON.stringify({ term, allow: false });
+      seen.paneInsteadFocus = document.activeElement?.classList.contains("worker-composer-box") === true;
+      // An ordinary permission is untouched by any of this.
+      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-plan", resumable: false });
+      await window.__PAINTED__();
+      tell("hook:agent", { term, state: "awaiting-permission", agent: "claude", session: "s-plan", resumable: false,
+        approval: { tool: "Bash", summary: "rm -rf build" } });
+      await window.__PAINTED__();
+      const plainCard = chat?.querySelector(".pane-chat-ask");
+      seen.plainTitle = plainCard?.querySelector(".board-approve-title")?.textContent ?? null;
+      seen.wantPlainTitle = t("board.approve.title", "{{tool}} 허용할까요?", { tool: "Bash" });
+      seen.plainNoPlan = plainCard?.querySelector(".board-approve-plan") === null;
+      seen.plainSummary = plainCard?.querySelector(".board-approve-detail")?.textContent ?? null;
+      // ---- the agents pill: the roster's count, its list, its failure ink.
+      const composer = chat?.querySelector(".worker-composer");
+      const pill = composer?.querySelector(".worker-composer-agents");
+      seen.pillHiddenAtRest = pill?.hidden === true;
+      tell("hook:subagent", { term, rows: [
+        { id: "one", name: "@reader", state: "running" },
+        { id: "two", name: "@writer", state: "failed" },
+      ] });
+      await settle();
+      seen.pillWords = pill?.querySelector(".worker-composer-pill-words")?.textContent ?? null;
+      seen.wantPillWords = t("composer.agents", "에이전트 {{n}}", { n: 2 });
+      seen.pillShown = pill?.hidden === false;
+      seen.pillFailed = pill?.classList.contains("is-failed") === true;
+      seen.pillTip = pill?.dataset.tip === t("composer.agentsTip", "하위 에이전트 보기") &&
+        pill?.getAttribute("aria-label") === t("composer.agentsTip", "하위 에이전트 보기");
+      pill?.click();
+      await settle();
+      const menu = composer?.querySelector(".composer-menu");
+      seen.menuRows = [...(menu?.querySelectorAll(".composer-menu-item") ?? [])]
+        .map((row) => `${row.querySelector(".composer-menu-name")?.textContent} · ${row.querySelector(".composer-menu-sub")?.textContent}`);
+      seen.wantMenuRows = [
+        `@reader · ${t("board.working", "작업 중")}`,
+        `@writer · ${t("worker.endedFailed", "실패")}`,
+      ];
+      let askedLog = null;
+      window.__ANSWER__.subagent_log = (args) => {
+        askedLog = args;
+        return { found: true, next: 1, skipped: false, turns: [{ role: "user", text: "read it" }] };
+      };
+      menu?.querySelector(".composer-menu-item")?.click();
+      await settle(150);
+      seen.openedHelper = askedLog?.id ?? null;
+      seen.helperTabStands = tabs.some((tab) => tab.id === `helper:${term}:one`) && activeTabId === `helper:${term}:one`;
+      // The last helper stopping empties the pill, as the roster empties.
+      tell("hook:subagent", { term, rows: [] });
+      await settle();
+      seen.pillGone = pill?.hidden === true;
+      delete window.__ANSWER__.pane_log;
+      delete window.__ANSWER__.subagent_log;
+      tell("term:exited", { term });
+      window.__PANES__ = [];
+      for (const held of [...tabs]) dropTab(held.id);
+      for (const at of [...termViews.keys()]) dropTermView(at);
+      return seen;
+    });
+    ok(
+      "a wire's plan permission stands as the plan review card — the plan as prose in a well of its own, no summary line, approve and send-feedback for answers — and the feedback rides the refusal down the wire",
+      seen.cardShown && seen.title === seen.wantTitle &&
+        seen.planHeading === "계획" && seen.planSteps === 2 && seen.planChip && seen.planScrolls &&
+        seen.planProse &&
+        seen.noSummary && JSON.stringify(seen.acts) === JSON.stringify(seen.wantActs) &&
+        seen.fieldHint === seen.wantFieldHint && seen.refused === seen.wantRefused,
+      JSON.stringify(seen),
+    );
+    ok(
+      "a pane's plan permission wears the same card with the composer as its third road, and an ordinary permission is untouched — its tool in the question, its summary under it, no plan",
+      seen.paneTitle === seen.wantTitle && seen.panePlan === "계획" && seen.paneNoField &&
+        seen.paneActs === "is-allow,is-instead" && seen.paneInstead && seen.paneInsteadFocus &&
+        seen.plainTitle === seen.wantPlainTitle && seen.plainNoPlan && seen.plainSummary === "rm -rf build",
+      JSON.stringify(seen),
+    );
+    ok(
+      "the composer's agents pill counts the helpers still out, wears the failure ink when one failed, lists them with the board's own state words, opens a row's transcript — and goes quiet when the roster empties",
+      seen.pillHiddenAtRest && seen.pillShown && seen.pillWords === seen.wantPillWords &&
+        seen.pillFailed && seen.pillTip &&
+        JSON.stringify(seen.menuRows) === JSON.stringify(seen.wantMenuRows) &&
+        seen.openedHelper === "one" && seen.helperTabStands && seen.pillGone,
       JSON.stringify(seen),
     );
   } finally {

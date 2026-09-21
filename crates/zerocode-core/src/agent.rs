@@ -1570,6 +1570,14 @@ pub struct AgentVoice {
     /// (`/exit`, on Claude Code's own command list). `None` where the exit
     /// word was not measured; such a pane keeps its screen.
     pub exit_command: Option<&'static str>,
+    /// The tool this CLI asks permission with when it is asking for a PLAN to
+    /// be approved — Claude Code's `ExitPlanMode`, whose input carries the
+    /// plan itself. The extension draws that one permission as its own card
+    /// ("Claude's Plan", 2.1.268-275: the plan previewed, and a reason field
+    /// on the refusal), and this is the only fact that tells the two apart.
+    /// `None` for a CLI whose plan tool was not measured; its permission
+    /// requests stay ordinary approvals rather than guessed plans.
+    pub plan_tool: Option<&'static str>,
 }
 
 /// The consoles this catalog knows — read off each CLI's own screen and its
@@ -1624,6 +1632,9 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
                 resume: Some("--resume"),
             }),
             exit_command: Some("/exit"),
+            // The tool Claude Code asks plan approval with; its input's
+            // `plan` is the plan the card previews.
+            plan_tool: Some("ExitPlanMode"),
         },
     ),
     (
@@ -1655,6 +1666,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
                 resume: None,
             }),
             exit_command: None,
+            plan_tool: None,
         },
     ),
     (
@@ -1679,6 +1691,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             ],
             wire: None,
             exit_command: None,
+            plan_tool: None,
         },
     ),
     (
@@ -1705,6 +1718,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // stays for the day the catalog names an ACP speaker.
             wire: None,
             exit_command: None,
+            plan_tool: None,
         },
     ),
 ];
@@ -1720,6 +1734,7 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     permission_modes: &[],
     wire: None,
     exit_command: None,
+    plan_tool: None,
 };
 
 /// One agent's console, or the silent one for an agent the table does not
@@ -1881,6 +1896,11 @@ mod tests {
             }
             if let Some(exit) = console.exit_command {
                 assert!(exit.starts_with('/'), "{id}: {exit}");
+            }
+            // A plan tool is a TOOL's name, not a slash command: it is
+            // compared against the permission request's `tool_name`.
+            if let Some(plan) = console.plan_tool {
+                assert!(!plan.is_empty() && !plan.starts_with('/'), "{id}: {plan}");
             }
         }
         assert_eq!(
