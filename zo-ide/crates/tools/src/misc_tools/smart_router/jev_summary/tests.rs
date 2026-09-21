@@ -856,18 +856,25 @@ fn a_seats_week_of_marks_is_counted_beside_its_judged_window() {
     assert_eq!((report.week.rows, report.asked_ever), (1, 1), "a label was counted as a request");
 }
 
-/// What the labels and the judge cost on this machine's own ledgers (t-5806)
-/// — run deliberately, with `--ignored --nocapture`: it copies the real
-/// routing (22 KB, 36 rows) and recall (1.4 MB, 1,005 rows) ledgers of this
-/// machine's main checkout into a scratch state directory and times the tail
-/// read a route label pays, the whole-file read the judge pays, and the label
-/// append, each a hundred times. Numbers, not a claim: the report reads them.
+/// What the labels and the judge cost on real ledgers (t-5806) — run
+/// deliberately, with `--ignored --nocapture` and `ZO_JEV_LEDGER_SOURCE`
+/// naming a project's `state/smart-router` folder: it copies that folder's
+/// routing (measured: 22 KB, 36 rows) and recall (1.4 MB, 1,005 rows)
+/// ledgers into a scratch state directory and times the tail read a route
+/// label pays, the whole-file read the judge pays, and the label append, each
+/// a hundred times. Numbers, not a claim: the report reads them. The folder
+/// comes from the environment because a checked-in path would name a person's
+/// machine.
 #[test]
 #[ignore = "replays this machine's real ledgers; run deliberately"]
 fn measure_what_a_label_and_a_judge_cost_on_this_machines_ledgers() {
     use std::time::Instant;
     use super::super::decision_shadow::{decision_shadow_path, note_route_followed};
-    let source = std::path::Path::new("/Users/dev/.zo/projects/Users-dev-2026-zerocode-0fef7579911bc688/state/smart-router");
+    let Some(source) = std::env::var_os("ZO_JEV_LEDGER_SOURCE").map(std::path::PathBuf::from) else {
+        eprintln!("ZO_JEV_LEDGER_SOURCE names no smart-router folder; nothing measured");
+        return;
+    };
+    let source = source.as_path();
     if !source.join(zerocode_core::jev::ROUTING.ledger).is_file() {
         eprintln!("no real ledgers under {}; nothing measured", source.display());
         return;
