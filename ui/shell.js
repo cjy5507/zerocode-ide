@@ -10159,7 +10159,6 @@ listen("hook:agent", (event) => {
   // event without one is an event about something else, not a forgetting.
   if (event.payload.model) paneModels.set(term, event.payload.model);
   if (event.payload.permission_mode) panePermissionModes.set(term, event.payload.permission_mode);
-  paintComposerChipsFor(term);
   // The row's word ladder eats both of these (Orca's entry.prompt /
   // entry.lastAssistantMessage) — sticky for the same reason as the model.
   if (event.payload.prompt) panePrompts.set(term, event.payload.prompt);
@@ -10235,10 +10234,17 @@ listen("hook:agent", (event) => {
     } else if (clearedRestoreBirth || event.payload.prompt || event.payload.said) {
       scheduleAgentPaint(["cards", "board"]);
     }
+    // The state stood still, but the model or the mode may have moved.
+    paintComposerChipsFor(term);
     return;
   }
   const wasMidTurn = isMidTurn(hookStates.get(term));
   hookStates.set(term, state);
+  // The composer wears the state the pane now has — send or stop, the
+  // queue's placeholder or its own words. Painted after the set, not before
+  // it: painted above, it wore the old word until the next repaint (measured:
+  // the helper page's stop button outlived the end of the turn).
+  paintComposerChipsFor(term);
   // 판의 상태가 **여기서** 움직인다 — 칩을 다시 그린 자리(위)에서는 훅의
   // 낱말이 아직 옛것이라, 턴이 끝난 그 순간을 그 자리에서는 볼 수 없다.
   // 그래서 기다리던 글을 내보내는 문은 상태가 실제로 옮겨 앉은 이 줄 뒤에
@@ -12824,8 +12830,9 @@ function syncWorkerComposers(run, delivered = null) {
   }
 }
 
-/* The chips of every composer that speaks to `term` — repainted when the
- * pane's model or permission mode changes (`hook:agent`). */
+/* Every composer that speaks to `term` — its chips and its state —
+ * repainted when the pane's model, permission mode or hook state moves
+ * (`hook:agent`, once the state has moved). */
 function paintComposerChipsFor(term) {
   for (const form of document.querySelectorAll(".worker-composer")) {
     const run = form.__workerRun;

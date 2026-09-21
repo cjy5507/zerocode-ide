@@ -94,6 +94,15 @@ export async function testAgentConversation(browser, origin, ok) {
       draft.startsWith("기존 초안") && draft.includes("HTML") &&
       await page.evaluate(() => window.__COUNTS__.term_paste ?? 0) === draftBefore);
 
+    // The parent is between turns for the sends below: words typed while it
+    // works wait in the window's queue (`composer-queue`); these pins ride the
+    // road a send takes, not the wait.
+    await page.evaluate(() => {
+      const term = window.__CHAT_TAB__.worker.term;
+      for (const handler of window.__LISTENERS__["hook:agent"] ?? []) {
+        handler({ payload: { term, state: "idle", agent: "claude" } });
+      }
+    });
     const failure = await page.evaluate(async () => {
       let writes = 0;
       let rejectWrite;

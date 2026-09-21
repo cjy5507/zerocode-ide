@@ -35613,10 +35613,10 @@ const chatFace = await page.evaluate(async () => {
   );
   await new Promise((done) => setTimeout(done, 120));
   const face = document.querySelector("#worker-view");
-  const probe = (name, property = "color") => {
+  const probe = (name, property = "color", host = document.body) => {
     const span = document.createElement("span");
     span.style[property] = `var(${name})`;
-    document.body.appendChild(span);
+    host.appendChild(span);
     const value = getComputedStyle(span)[property];
     span.remove();
     return value;
@@ -35757,8 +35757,10 @@ const chatFace = await page.evaluate(async () => {
   seen.sendSquare = sendStyle !== null &&
     Math.abs(parseFloat(sendStyle.width) - parseFloat(sendStyle.height)) <= 1 &&
     sendStyle.borderRadius === getComputedStyle(document.documentElement).getPropertyValue("--chat-radius-send").trim();
+  // The send's colour is the agent's own (`.worker-view[data-agent]` scopes
+  // `--chat-send-bg`), so the token is read where the button stands.
   seen.sendFromToken = sendStyle?.backgroundColor ===
-    probe(sendStops ? "--chat-send-stop-bg" : "--chat-send-bg", "backgroundColor");
+    probe(sendStops ? "--chat-send-stop-bg" : "--chat-send-bg", "backgroundColor", composer);
   const root = getComputedStyle(document.documentElement);
   seen.composerRadius = getComputedStyle(composer).borderRadius;
   seen.wantComposerRadius = root.getPropertyValue("--chat-radius-composer").trim();
@@ -55349,6 +55351,17 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
       seen.wantStraightOut = JSON.stringify([["paste", term, "지금"], ["key", term, "Enter"]]);
       seen.idlePlaceholder = box?.placeholder;
       seen.wantIdlePlaceholder = t("worker.sayTo", "{{name}}에게 보내기…", { name: agentName("claude") });
+      // 훅만으로 입력줄이 옷을 갈아입는다 — 제출 없이도 중지↔보내기, 자리말도
+      // 제 것으로. 상태가 움직인 뒤에 그려야 옛 낱말을 입지 않는다.
+      const send = () => composer?.querySelector(".worker-composer-send");
+      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-queue", resumable: false });
+      await window.__PAINTED__();
+      seen.stopWhileWorking = send()?.classList.contains("is-stop") === true &&
+        box?.placeholder === seen.wantWorkingPlaceholder;
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-queue", resumable: false });
+      await window.__PAINTED__();
+      seen.sendWhenIdle = send()?.classList.contains("is-stop") === false &&
+        box?.placeholder === seen.wantIdlePlaceholder;
       // 대화를 잊으면 기다리던 글도 같이 사라진다.
       const paneRun = paneChats.get(term)?.run;
       paneRun.queue = ["남은 것"];
@@ -55407,7 +55420,8 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
         seen.stillHeld === JSON.stringify(["둘째"]) &&
         seen.secondOut === seen.wantSecondOut && seen.queueEmpty === JSON.stringify([]) &&
         seen.straightOut === seen.wantStraightOut &&
-        seen.idlePlaceholder === seen.wantIdlePlaceholder && seen.forgotten,
+        seen.idlePlaceholder === seen.wantIdlePlaceholder &&
+        seen.stopWhileWorking && seen.sendWhenIdle && seen.forgotten,
       JSON.stringify(seen),
     );
     ok(
