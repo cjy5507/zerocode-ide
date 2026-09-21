@@ -102,6 +102,12 @@ pub use misc_tools::{
     merged_settings_root,
 };
 pub use misc_tools::{
+    note_loaded_skill, note_search_answer, skill_search, skill_search_mode_from,
+    skill_search_path,
+    skill_seat_has_risen, Chosen, Searched, SkillLabelRow, SkillSearchRow,
+    SKILL_OUTCOME_ANSWERED, SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE, SKILL_SEARCH_SETTING,
+};
+pub use misc_tools::{
     build_plan_shadow, conversation_anchor_ttl_for, conversation_anchor_ttl_from_root,
     model_options_for, model_price_for, plan_priors_for, plan_shadow_path,
     record_plan_shadow, switch_candidates, CACHE_ANCHOR_TTL_ENV,

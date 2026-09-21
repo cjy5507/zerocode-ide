@@ -87,13 +87,15 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use api::{
-    SystemOneQuestion, SystemOneQuestionKind, SystemOneResponse, SystemOneScoreAnswer,
-};
+use api::{SystemOneQuestion, SystemOneResponse};
 // The grid the wire answers on, from the one crate both programs read: the
 // window derives its own screen judgments' tolerances from the same rounding,
-// and this fact spelled in two places is two facts that can disagree.
+// and this fact spelled in two places is two facts that can disagree. Only
+// the tests read it directly now — `crate::jev_score` derives every bound
+// from it, and they check those bounds against it.
+#[cfg(test)]
 use zerocode_core::jev::ANSWER_STEP as SYSTEMONE_ANSWER_STEP;
+use crate::jev_score::{read_score, ScoreRule};
 use core_types::text::truncate_on_char_boundary;
 use core_types::MemoryHit;
 use serde_json::{json, Value};
@@ -127,7 +129,13 @@ pub const RERANK_TOP_LEVEL: f64 = 3.0;
 
 /// How many levels there are, and the level numbers added up. Spelled beside
 /// [`RERANK_TOP_LEVEL`] for its reason, and held to the table by its assert.
+///
+/// Only the tests read them now: what the bounds are derived from is the
+/// scale itself (`crate::jev_score::Scale`), and these are the numbers that
+/// derivation is checked against.
+#[cfg(test)]
 const RERANK_LEVEL_COUNT: f64 = 4.0;
+#[cfg(test)]
 const RERANK_LEVEL_NUMBER_SUM: f64 = 6.0;
 const _: () = assert!(
     RERANK_LEVELS.len() == 4,
@@ -149,7 +157,10 @@ pub const RERANK_SUMMARY_MAX_BYTES: usize = zerocode_core::jev::RECALL_SUMMARY_B
 pub const RERANK_REQUEST_CHAR_CAP: usize = zerocode_core::jev::RECALL_REQUEST_CHAR_CAP;
 
 /// The most the wire's rounding can have moved any one number an answer
-/// carries: half of [`SYSTEMONE_ANSWER_STEP`].
+/// carries: half of `zerocode_core::jev::ANSWER_STEP`. The shared reader
+/// derives every bound from it (`crate::jev_score`); here it is what a test
+/// checks those bounds against.
+#[cfg(test)]
 const WIRE_ROUNDING: f64 = SYSTEMONE_ANSWER_STEP / 2.0;
 
 /// The midpoint between the bottom level's number and the next one. Spelled
@@ -160,20 +171,16 @@ const HALF_A_LEVEL: f64 = 0.5;
 /// A reading below this reads as the bottom level — the one reading a judgment
 /// may act on by removing a note rather than moving it.
 ///
-/// `HALF_A_LEVEL` is where conventional rounding puts the boundary, and this
-/// sits half a wire step below it so no number the wire can spell lands ON the
-/// cut: answers arrive on a grid of whole [`SYSTEMONE_ANSWER_STEP`]s and 0.5 is
-/// one of them, so a cut at the midpoint itself would have a double's last bit
-/// deciding whether a note a person reads off the row as the level above is
-/// dropped. At 0.495 every grid value up to 0.49 is the bottom level and 0.50
-/// is not, and a reading that made the round trip through
-/// [`RerankReading::normalised`] and back cannot have moved across it either.
-pub const RERANK_BOTTOM_LEVEL_CUT: f64 = HALF_A_LEVEL - WIRE_ROUNDING;
+/// The shared cut (`crate::jev_score::BOTTOM_LEVEL_CUT`): half a level is
+/// where conventional rounding puts the boundary, and the cut sits half a
+/// wire step below it so no number the wire can spell lands ON it. At 0.495
+/// every grid value up to 0.49 is the bottom level and 0.50 is not, and a
+/// reading that made the round trip through [`RerankReading::normalised`] and
+/// back cannot have moved across it either.
+pub const RERANK_BOTTOM_LEVEL_CUT: f64 = crate::jev_score::BOTTOM_LEVEL_CUT;
 const _: () = assert!(
-    RERANK_BOTTOM_LEVEL_CUT < HALF_A_LEVEL
-        && HALF_A_LEVEL - RERANK_BOTTOM_LEVEL_CUT < SYSTEMONE_ANSWER_STEP,
-    "the cut sits inside the last wire step below the midpoint, which is what \
-     keeps every grid value on one side of it or the other"
+    RERANK_BOTTOM_LEVEL_CUT < HALF_A_LEVEL,
+    "the cut sits below the midpoint between the bottom level and the next"
 );
 
 /// Whether a reading on the level scale is the bottom level's: *the note is
@@ -188,39 +195,24 @@ pub fn reads_as_bottom_level(score: f64) -> bool {
 }
 
 /// How far the level probabilities may sum from one before the answer is
-/// refused.
+/// refused, and how far a score may sit from the probability-weighted mean of
+/// its levels.
 ///
-/// The contract says they sum to one, and they do — before the wire rounds
-/// them. Four of them arrive rounded, half a step each at the most, so their
-/// sum can stand four half-steps from one: 4 × 0.005 = 0.02. The bound sits
-/// one more half-step out, and not on 0.02 itself, for the reason
-/// [`SCORE_MEAN_TOLERANCE`] gives: a distance the grid lands on exactly is a
-/// distance a double's last bit decides.
-pub const SPREAD_SUM_TOLERANCE: f64 = RERANK_LEVEL_COUNT * WIRE_ROUNDING + WIRE_ROUNDING;
-
-/// How far a score may sit from the probability-weighted mean of its levels
-/// before the answer is refused.
+/// Both are the scale's own numbers now, derived once for every seat that
+/// asks a score question (`crate::jev_score::Scale`): four rounded
+/// probabilities can put their sum 4 × 0.005 from one, and the level numbers
+/// 0 + 1 + 2 + 3 multiply the same rounding into the mean, each with one more
+/// half-step so the bound never lands on a distance the grid spells exactly.
+/// The numbers this scale derives are the ones measured here against
+/// `jev-1.13.0` on 2026-09-18 — 0.025 and 0.035 — and a test in that module
+/// holds them there.
 ///
-/// The contract says the two are the same number, and they are — before the
-/// wire rounds them. The rounding reaches this comparison twice:
-///
-/// * through the probabilities, because the mean is rebuilt from four numbers
-///   each up to half a step out, and a level's own number multiplies its
-///   error: 0.005 × (0 + 1 + 2 + 3) = 0.03;
-/// * through the score, which was rounded too: 0.005.
-///
-/// The first term is the widest gap the rounding alone can open, and it lands
-/// ON the grid — both sides of the comparison are whole numbers of steps, so
-/// the distance between them is one too. The second term is what carries the
-/// bound half a step past the last distance it admits, where no double's last
-/// bit decides a gap the contract allows.
-///
-/// This was guessed at 0.02 before, which is a distance the grid lands on
-/// exactly. Of 240 answers `jev-1.13.0` gave on 2026-09-18, 38 sat exactly
-/// there, and the comparison admitted 17 of them and refused 21; two more sat
-/// at 0.03. That refused 23 answers in 240, and because one batch asks about
+/// It was guessed at 0.02 before, which is a distance the grid lands on
+/// exactly. Of 240 answers `jev-1.13.0` gave that day, 38 sat exactly there,
+/// and the comparison admitted 17 of them and refused 21; two more sat at
+/// 0.03. That refused 23 answers in 240, and because one batch asks about
 /// eight notes and one refusal discards the batch whole, 17 batches in 30.
-pub const SCORE_MEAN_TOLERANCE: f64 = RERANK_LEVEL_NUMBER_SUM * WIRE_ROUNDING + WIRE_ROUNDING;
+pub const RERANK_SCALE: crate::jev_score::Scale = crate::jev_score::Scale::new(&RERANK_LEVELS);
 
 /// Marker the state's truncations leave, so a clipped summary is visibly one —
 /// the table's own, so the door's byte cap re-cutting a summary this already
@@ -356,7 +348,7 @@ pub enum RerankRejection {
     LevelKeys(String),
     /// A probability outside `[0, 1]`, or not a number at all.
     ProbabilityRange(String),
-    /// The probabilities do not sum to one within [`SPREAD_SUM_TOLERANCE`].
+    /// The probabilities do not sum to one within the scale's tolerance.
     ProbabilitySum(String),
     /// `score` is missing, not finite, or outside the scale.
     ScoreRange(String),
@@ -435,17 +427,14 @@ pub fn validate_rerank(
         .collect()
 }
 
-/// Whether an answer is about the levels that were offered: the same level
-/// numbers in its spread and in the legend it echoes back.
-fn names_the_levels(answer: &SystemOneScoreAnswer) -> bool {
-    answer.probabilities.len() == RERANK_LEVELS.len()
-        && answer.legend.len() == RERANK_LEVELS.len()
-        && (0..RERANK_LEVELS.len()).all(|level| {
-            let level = level.to_string();
-            answer.probabilities.contains_key(&level) && answer.legend.contains_key(&level)
-        })
-}
-
+/// One note's answer, read on [`RERANK_SCALE`].
+///
+/// The arithmetic — the level keys, the probabilities, the sum, the score's
+/// range and its being the weighted mean, the confidence — is the shared
+/// reader's (`crate::jev_score::read_score`), because it is arithmetic about
+/// the wire and the length of a scale rather than anything about a note. What
+/// stays here is which note broke the rule, because that is what this
+/// judgment's ledger row records.
 fn read_answer(
     candidate: &RerankCandidate,
     response: &SystemOneResponse,
@@ -455,53 +444,21 @@ fn read_answer(
         .score_answer(id)
         .ok_or_else(|| RerankRejection::MissingAnswer(id.clone()))?
         .map_err(|_| RerankRejection::NotAScore(id.clone()))?;
-    if answer.kind != SystemOneQuestionKind::Score {
-        return Err(RerankRejection::NotAScore(id.clone()));
-    }
-    if !names_the_levels(&answer) {
-        return Err(RerankRejection::LevelKeys(id.clone()));
-    }
-    let mut weighted = 0.0;
-    let mut total = 0.0;
-    // The level's own number, carried alongside rather than converted from the
-    // index: the scale is short and a cast would be the only lossy step here.
-    let mut number = 0.0;
-    for level in 0..RERANK_LEVELS.len() {
-        let probability = answer
-            .probabilities
-            .get(&level.to_string())
-            .copied()
-            .ok_or_else(|| RerankRejection::LevelKeys(id.clone()))?;
-        if !probability.is_finite() || !(0.0..=1.0).contains(&probability) {
-            return Err(RerankRejection::ProbabilityRange(id.clone()));
-        }
-        weighted += probability * number;
-        total += probability;
-        number += 1.0;
-    }
-    if (total - 1.0).abs() > SPREAD_SUM_TOLERANCE {
-        return Err(RerankRejection::ProbabilitySum(id.clone()));
-    }
-    let top = RERANK_TOP_LEVEL;
-    if !answer.score.is_finite() || !(0.0..=top).contains(&answer.score) {
-        return Err(RerankRejection::ScoreRange(id.clone()));
-    }
-    // The contract says the score IS the weighted mean. Checking it is how a
-    // reply built for some other scale is caught before it orders anything —
-    // within what the wire's rounding can account for, which is the whole of
-    // SCORE_MEAN_TOLERANCE and nothing more.
-    if (answer.score - weighted).abs() > SCORE_MEAN_TOLERANCE {
-        return Err(RerankRejection::ScoreMismatch(id.clone()));
-    }
-    if !answer.confidence.is_finite() || !(0.0..=1.0).contains(&answer.confidence) {
-        return Err(RerankRejection::ConfidenceRange(id.clone()));
-    }
+    let reading = read_score(&answer, &RERANK_SCALE).map_err(|rule| match rule {
+        ScoreRule::NotAScore => RerankRejection::NotAScore(id.clone()),
+        ScoreRule::LevelKeys => RerankRejection::LevelKeys(id.clone()),
+        ScoreRule::ProbabilityRange => RerankRejection::ProbabilityRange(id.clone()),
+        ScoreRule::ProbabilitySum => RerankRejection::ProbabilitySum(id.clone()),
+        ScoreRule::ScoreRange => RerankRejection::ScoreRange(id.clone()),
+        ScoreRule::ScoreMismatch => RerankRejection::ScoreMismatch(id.clone()),
+        ScoreRule::ConfidenceRange => RerankRejection::ConfidenceRange(id.clone()),
+    })?;
     Ok(RerankReading {
         position: candidate.position,
         slug: candidate.slug.clone(),
-        score: answer.score,
-        normalised: answer.score / top,
-        confidence: answer.confidence,
+        score: reading.score,
+        normalised: reading.normalised,
+        confidence: reading.confidence,
     })
 }
 
@@ -828,6 +785,8 @@ fn judgment_only_order(hits: usize, scores: &[f64]) -> Vec<usize> {
 
 #[cfg(test)]
 mod tests {
+    use api::SystemOneQuestionKind;
+
     use super::*;
 
     fn hit(slug: &str, summary: &str) -> MemoryHit {
@@ -1069,12 +1028,12 @@ mod tests {
     fn each_bound_sits_between_the_roundings_reach_and_the_next_step_of_the_grid() {
         for (bound, widest, what) in [
             (
-                SCORE_MEAN_TOLERANCE,
+                RERANK_SCALE.score_mean_tolerance(),
                 RERANK_LEVEL_NUMBER_SUM * WIRE_ROUNDING,
                 "a score against the mean of its spread",
             ),
             (
-                SPREAD_SUM_TOLERANCE,
+                RERANK_SCALE.spread_sum_tolerance(),
                 RERANK_LEVEL_COUNT * WIRE_ROUNDING,
                 "a spread against one",
             ),

@@ -2606,6 +2606,22 @@ pub fn zo_project_state_dir(cwd: &std::path::Path) -> PathBuf {
         .join("state")
 }
 
+/// The folder under a project's state where every Jev seat zo owns appends
+/// its ledger, one file per seat named by the use table's row.
+///
+/// It lives here rather than in the crate that writes those ledgers because
+/// two crates now need to find them: the tools crate, which appends, and this
+/// one, which reads a seat's standing before deciding what the system prompt
+/// says about skills. A folder name spelled twice is a reader looking in a
+/// place nothing writes to.
+pub const JEV_LEDGER_DIR: &str = "smart-router";
+
+/// Where a project's Jev ledgers live.
+#[must_use]
+pub fn jev_ledger_dir(cwd: &std::path::Path) -> PathBuf {
+    zo_project_state_dir(cwd).join(JEV_LEDGER_DIR)
+}
+
 /// Whether durable traces (`.zo/turns`, `.zo/dream`) live under the global
 /// per-project state directory instead of the working tree. Off by default —
 /// the crates' own tests read and write traces beside a scratch cwd — and

@@ -76,6 +76,12 @@ pub enum HarnessFeature {
     /// turn reads changed. Declined `off` and `no_key`; failed under the
     /// adapter's token.
     RerankShadow,
+    /// The skill search (`smart.skillSearch`): every installed skill put to a
+    /// System One judgment against the task a turn describes, so the best of
+    /// them come back as a tool result instead of the whole catalog riding
+    /// the system prompt. Declined `off` and `no_key`; failed under the
+    /// adapter's token.
+    SkillSearch,
     /// Per-tool-call reasoning replay on the OpenAI Responses wire — the
     /// items resent ahead of a function call so the model keeps its own chain
     /// of thought across a tool round-trip.
@@ -170,6 +176,7 @@ impl HarnessFeature {
             Self::RoutingProbe => "routing_probe",
             Self::DecisionShadow => "decision_shadow",
             Self::RerankShadow => "rerank_shadow",
+            Self::SkillSearch => "skill_search",
             Self::ReasoningReplayCall => "reasoning_replay_call",
             Self::ReasoningReplayTurnFinal => "reasoning_replay_turn_final",
             Self::DesignGuidance => "design_guidance",
@@ -191,6 +198,7 @@ impl HarnessFeature {
             Self::RoutingProbe => "routing probe",
             Self::DecisionShadow => "TypeSafe routing judgment",
             Self::RerankShadow => "rerank shadow (memory judgment)",
+            Self::SkillSearch => "skill search (skill judgment)",
             Self::ReasoningReplayCall => "reasoning replay (tool call)",
             Self::ReasoningReplayTurnFinal => "reasoning replay (turn boundary)",
             Self::DesignGuidance => "design guidance reminder",
@@ -222,6 +230,9 @@ impl HarnessFeature {
             }
             Self::RerankShadow => {
                 "requires a recall that returned notes, smart.rerankShadow = \"shadow\", and TYPESAFE_API_KEY"
+            }
+            Self::SkillSearch => {
+                "requires a skill_search call, an installed skill, smart.skillSearch on, and TYPESAFE_API_KEY"
             }
             Self::ReasoningReplayCall | Self::ReasoningReplayTurnFinal => {
                 "OpenAI Responses wire only; silent on an Anthropic-only session"
@@ -259,6 +270,7 @@ impl HarnessFeature {
             Self::RoutingProbe,
             Self::DecisionShadow,
             Self::RerankShadow,
+            Self::SkillSearch,
             Self::ReasoningReplayCall,
             Self::ReasoningReplayTurnFinal,
             Self::DesignGuidance,

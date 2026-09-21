@@ -43,6 +43,12 @@ pub use smart_router::{
     RERANK_SHADOW_SETTING,
 };
 pub use smart_router::{
+    note_loaded_skill, note_search_answer, skill_search, skill_search_mode_from,
+    skill_search_path,
+    skill_seat_has_risen, Chosen, Searched, SkillLabelRow, SkillSearchRow,
+    SKILL_OUTCOME_ANSWERED, SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE, SKILL_SEARCH_SETTING,
+};
+pub use smart_router::{
     build_plan_shadow, conversation_anchor_ttl_for, conversation_anchor_ttl_from_root,
     model_options_for, model_price_for, plan_priors_for, plan_shadow_path,
     record_plan_shadow, switch_candidates, CACHE_ANCHOR_TTL_ENV,
@@ -97,7 +103,8 @@ pub(crate) use skill_tools::execute_skill;
 pub use skill_tools::{stranded_proposed_skills, ProposedSkill};
 pub(crate) use skill_tools::{
     normalize_skill_slug, parse_skill_frontmatter_field, render_proposed_skill, write_atomic_new,
-    write_atomic_replace, SkillDistillInput, SkillInput, SkillReviewInput,
+    write_atomic_replace, SkillDistillInput, SkillInput, SkillLoadInput, SkillReviewInput,
+    SkillSearchInput,
 };
 
 use std::collections::BTreeMap;
@@ -818,6 +825,38 @@ pub(crate) fn run_skill(input: SkillInput, ctx: &ToolContext) -> Result<String, 
     let text = to_pretty_json(&output)?;
     ctx.note_artifact_skill_read(std::path::Path::new(&output.path));
     Ok(text)
+}
+
+/// The search's own cwd is the project whose settings, ledger and skill roots
+/// it reads — the one the tool context names, or this process's own when a
+/// context was built without one.
+fn tool_cwd(ctx: &ToolContext) -> std::path::PathBuf {
+    ctx.cwd
+        .clone()
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+}
+
+pub(crate) fn run_skill_search(
+    input: &SkillSearchInput,
+    ctx: &ToolContext,
+) -> Result<String, ToolError> {
+    let output = skill_tools::execute_skill_search(input, &tool_cwd(ctx))?;
+    for skill in &output.skills {
+        ctx.note_artifact_skill_read(std::path::Path::new(&skill.path));
+    }
+    to_pretty_json(&output)
+}
+
+pub(crate) fn run_skill_load(
+    input: &SkillLoadInput,
+    ctx: &ToolContext,
+) -> Result<String, ToolError> {
+    let output = skill_tools::execute_skill_load(input, &tool_cwd(ctx))?;
+    for skill in &output.skills {
+        ctx.note_artifact_skill_read(std::path::Path::new(&skill.path));
+    }
+    to_pretty_json(&output)
 }
 
 pub(crate) fn run_skill_distill(input: &SkillDistillInput) -> Result<String, ToolError> {

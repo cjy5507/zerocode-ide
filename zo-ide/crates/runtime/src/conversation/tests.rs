@@ -3791,6 +3791,7 @@ fn runs_user_to_tool_to_result_loop_end_to_end_and_tracks_usage() {
             instruction_files: Vec::new(),
             memory_index: None,
             skills_index: Vec::new(),
+            skills_index_road: crate::SkillsIndexRoad::Index,
         })
         .with_os("linux", "6.8")
         .build();

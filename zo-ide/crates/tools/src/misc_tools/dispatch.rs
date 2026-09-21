@@ -28,7 +28,8 @@ use super::{
     ExitPlanModeInput, MemoryWriteInput, MonitorInput, NotebookEditInput, RemoteTriggerInput,
     ListAgentsInput, PushNotificationInput, RetrieveToolOutputInput, ScheduleWakeupInput, SendMessageInput, SendToUserInput,
     SessionRecallInput,
-    SkillDistillInput, SkillInput, SkillReviewInput, SleepInput, SpawnMultiAgentInput,
+    SkillDistillInput, SkillInput, SkillLoadInput, SkillReviewInput, SkillSearchInput,
+    SleepInput, SpawnMultiAgentInput,
     StopAgentInput,
     StructuredOutputInput, SyntheticOutputInput, ToolContext, ToolError,
     ToolSearchInput, MAIN_CONVERSATION_TARGET,
@@ -286,6 +287,12 @@ pub(crate) fn dispatch(
 ) -> Option<Result<String, ToolError>> {
     match name {
         "Skill" => Some(from_value::<SkillInput>(input).and_then(|input| super::run_skill(input, ctx))),
+        "skill_search" => Some(from_value::<SkillSearchInput>(input).and_then(|input| {
+            super::run_skill_search(&input, ctx)
+        })),
+        "skill_load" => Some(
+            from_value::<SkillLoadInput>(input).and_then(|input| super::run_skill_load(&input, ctx)),
+        ),
         "SkillDistill" => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 from_value::<SkillDistillInput>(input).and_then(|inp| run_skill_distill(&inp))

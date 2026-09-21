@@ -14,6 +14,7 @@ mod probe_gate;
 mod settings;
 mod shadow_ledger;
 mod rerank_shadow;
+mod skill_search;
 mod shape;
 mod shape_words;
 mod turn;
@@ -42,6 +43,11 @@ pub use rerank_shadow::{
     rerank_shadow_path, Judged, RerankShadow, RerankShadowRow, RERANK_OUTCOME_ANSWERED,
     RERANK_OUTCOME_UNORDERABLE, RERANK_SHADOW_FILE,
 };
+pub use skill_search::{
+    note_loaded_skill, note_search_answer, search as skill_search, seat_has_risen as skill_seat_has_risen,
+    skill_search_path, Chosen, Searched, SkillLabelRow, SkillSearchRow, SKILL_OUTCOME_ANSWERED,
+    SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE,
+};
 pub use shadow_ledger::read_shadow_rows;
 pub use plan_shadow::{
     build_plan_shadow, model_options_for, model_price_for, plan_priors_for, plan_shadow_path,
@@ -50,8 +56,8 @@ pub use plan_shadow::{
 };
 pub(crate) use settings::live_agent_model_policy;
 pub use settings::{
-    decision_shadow_mode_from, rerank_shadow_mode_from, DecisionShadowMode, DECISION_SHADOW_SETTING,
-    RERANK_SHADOW_SETTING,
+    decision_shadow_mode_from, rerank_shadow_mode_from, skill_search_mode_from,
+    DecisionShadowMode, DECISION_SHADOW_SETTING, RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING,
     conversation_anchor_ttl_for, conversation_anchor_ttl_from_root, CACHE_ANCHOR_TTL_ENV,
     smart_deep_tier_models, smart_deep_tier_models_for, smart_exec_swap, smart_setting_defaults,
     smart_turn_routing_and_inventory_for, smart_turn_routing_for, DeepTierModelsSetting,

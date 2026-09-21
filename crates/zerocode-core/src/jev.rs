@@ -28,6 +28,7 @@ pub mod count;
 pub mod door;
 pub mod hedge;
 pub mod promote;
+pub mod shard;
 pub mod summary;
 
 /// The object zo's settings keep every Jev switch under.
@@ -130,6 +131,23 @@ pub const PLACEMENT_BRIEF_CHAR_CAP: usize = 400;
 /// answer rather than a refusal — a worker nobody is watching is started and
 /// left off the stage, which is what a scheduled run already does.
 pub const PLACEMENT_OPTIONS: [&str; 3] = ["tab", "split", "background"];
+
+/// The word a row's `routeUse` carries when the seat's answer is what the
+/// product did — the one column a reader sweeps a ledger for to find out
+/// whether a judgment ever changed anything.
+///
+/// Its two companions are read rather than written here: a recording row
+/// carries [`JevMode::Shadow`]'s own word, because that is exactly what it
+/// says, and a row that fell back to the product's own reader carries
+/// [`ROUTE_USE_FALLBACK`]. Three words for one column, spelled once, because
+/// the column is swept by scripts and by the promotion judge and a fourth
+/// spelling of "fallback" is a row neither of them counts.
+pub const ROUTE_USE_APPLIED: &str = "applied";
+
+/// The word a row's `routeUse` carries when the seat was asked and the
+/// product used its own reader anyway: no key, a refusal, a failure, or an
+/// answer that did not clear the seat's floor.
+pub const ROUTE_USE_FALLBACK: &str = "fallback";
 
 /// What a person set a use to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -685,9 +703,170 @@ pub const SUMMON: JevUse = JevUse {
     apply_deadline_ms: Some(SUMMON_APPLY_DEADLINE_MS),
 };
 
+/// Characters of the task a skill ranking reads — what the turn is about, in
+/// the words the model hands the search.
+///
+/// The routing seat's cap and not a second number: the two questions read the
+/// same kind of text for the same reason — the head of a task is what bands
+/// it — and a second cap on the same words would be a second answer to how
+/// much of a person's work leaves the machine.
+pub const SKILL_TASK_CHAR_CAP: usize = ROUTING_TASK_CHAR_CAP;
+
+/// Characters of one skill's description a ranking question carries.
+///
+/// A skill's frontmatter description is written to be read by a model
+/// deciding whether to open the skill, which is exactly this question, so the
+/// cut is generous: 1,200 characters holds every one of the 50 skills
+/// installed on this machine whole (2026-09-21, across `~/.zo/skills`,
+/// `~/.claude/skills` and `~/.codex/skills`; p50 232, p75 405, p90 548, max
+/// 916). Past it a description is a document, and a document is what
+/// `skill_load` hands back.
+pub const SKILL_DESCRIPTION_CHAR_CAP: usize = 1_200;
+
+/// Skills one request asks about ([`shard::even_shards`]'s target).
+///
+/// The reference build this seat is borrowed from sends 137 skills as three
+/// even shards at this target, and reports one search at 38.6k input tokens
+/// (`pi-jev-skill-picker`, 2026-09-21). Fifty questions over one state is a
+/// request whose state is written once and whose questions are a line each,
+/// so the shard that decides the answer is the one that is asked, not the one
+/// that is longest.
+pub const SKILL_SHARD_TARGET: usize = 50;
+
+/// The most skills one search hands back whole. Past this a tool result is a
+/// document dump: the measured mean skill body on this machine is 9.4 KiB
+/// (2026-09-21, 18 `~/.zo/skills`), so five is already the size of the index
+/// this seat exists to remove.
+pub const SKILL_TOP_CAP: usize = 5;
+
+/// How many a search hands back when the caller does not say.
+///
+/// Three, which is what the reference build returns, and 28 KiB of skill
+/// bodies at this machine's mean — a tool result a turn reads once, against
+/// an index that rode every request. A caller that wants more asks for it, up
+/// to [`SKILL_TOP_CAP`].
+pub const SKILL_TOP_DEFAULT: usize = 3;
+const _: () = assert!(
+    SKILL_TOP_DEFAULT <= SKILL_TOP_CAP,
+    "the default is one of the sizes a caller may ask for"
+);
+
+/// The ordered levels of the one question asked about each skill, lowest
+/// first — the words themselves, so the seat's rubric is in the table its
+/// caps are in and a level cannot be reworded without the row noticing.
+///
+/// Three levels and not four, because a skill is not a note: a note can share
+/// a subject without answering anything, which is the distinction recall's
+/// four levels are for, while a skill either covers the procedure at hand,
+/// sits next to it, or does not.
+pub const SKILL_LEVELS: [&str; 3] = [
+    "The skill is about some other kind of work; nothing in it applies to this task.",
+    "The skill is adjacent — it shares tools, files or vocabulary with the task but does not cover it.",
+    "The skill covers this task directly: its procedure is one this task should follow.",
+];
+
+/// What a skill's reading must reach, in parts per thousand of the top level,
+/// before the search hands the skill back at all.
+///
+/// The line the reference build names is "the expected level must lean toward
+/// *covers this directly*" — 1.4 of a top level of 2 — and it is written here
+/// in the units this table's other lines are written in, so a reader
+/// comparing a seat's floors is comparing numbers of the same kind. 1.4 / 2.0
+/// is 700 per thousand.
+///
+/// It is not [`SKILLS`]'s `answer_floor_permille`, and the two are never read
+/// for each other: this one is a line under one SKILL's relevance, and that
+/// one is a line under how often the SEAT answers at all. A seat can answer
+/// every time and still rate nothing above this floor, which is the honest
+/// outcome for a task no installed skill covers.
+pub const SKILL_RELEVANCE_FLOOR_PERMILLE: u16 = 700;
+
+/// What the skill seat's answers must bound above before `auto` rises to
+/// replacing the prompt's index (§4): nine in ten.
+///
+/// The orchestration seats' number, reached from this seat's own side: a
+/// search that does not come back costs the turn nothing it was not already
+/// going to pay, because the deterministic word match behind it still hands
+/// the turn a ranked list ([`ROUTE_USE_FALLBACK`]). Written here rather than
+/// read from [`ORCHESTRATION_ANSWER_FLOOR_PERMILLE`] for the reason that
+/// constant is not [`SCREEN_ANSWER_FLOOR_PERMILLE`]: two lines that happen to
+/// coincide are still two policies, and a search that learns to answer at a
+/// different rate than a coordinator's sweep should move one of them alone.
+pub const SKILL_ANSWER_FLOOR_PERMILLE: u16 = 900;
+
+/// The skill seat's route-change budget (§4): four searches in five must have
+/// put a skill the turn went on to load among the ones they handed back.
+///
+/// What this seat has in place of a probe is hindsight, as the screen seats
+/// do — the turn's own next move. A search whose answer the turn then loaded
+/// named the right skill; one the turn ignored, and read the index or another
+/// skill instead, did not. Held to the same budget as every other seat that
+/// takes a decision off a reader: one in five wrong is not a rate at which to
+/// remove the index unasked.
+pub const SKILL_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
+
+/// The wall one skill search may hold the tool call that asked for it.
+///
+/// A tool result is the thing the model is waiting for, so the wall is the
+/// one a person notices rather than the one a router can hide: ten seconds,
+/// the summons seat's number, because both are a wait somebody is sitting
+/// through rather than a step inside a turn. Past it the search hands back
+/// what the word match ranked and says so on the row.
+pub const SKILL_SEARCH_APPLY_DEADLINE_MS: u64 = 10_000;
+
+/// zo's skill search: how much each installed skill covers the task a turn
+/// describes, one score question per skill (t-5629).
+///
+/// The seat exists to take the skill index out of the system prompt. Today
+/// every installed skill's name and compacted description is rendered on
+/// every request under a 900-token budget, and a machine past that budget
+/// pays it in full and still has its tail folded into a line that names only
+/// a count. What the seat puts in its place is a tool: the search ranks every
+/// skill — none folded away — and hands the top ones back whole, in a tool
+/// result, where the cached prefix never sees them.
+///
+/// `on` and a risen `auto` are the apply stage, and what they apply is the
+/// prompt itself: the index section is replaced by the two tools' names.
+/// `shadow` leaves the index exactly where it is and records what the search
+/// would have handed back, which is what makes the two readable side by side.
+///
+/// What is sent is the task, and the name and description of each installed
+/// skill. A skill's BODY is never sent: it is read from the disk this machine
+/// already holds it on and handed to the model as a tool result, so the
+/// judgment prices a line and the turn reads a document.
+pub const SKILLS: JevUse = JevUse {
+    id: "skills",
+    setting: "skillSearch",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    sends: &[
+        Sent {
+            at: "/state/task",
+            cap: Cap::Chars(SKILL_TASK_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/skills",
+            cap: Cap::Items(SKILL_SHARD_TARGET),
+        },
+        Sent {
+            at: "/state/skills/*/name",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/skills/*/description",
+            cap: Cap::Chars(SKILL_DESCRIPTION_CHAR_CAP),
+        },
+    ],
+    ledger: "skill-search.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(SKILL_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(SKILL_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(SKILL_SEARCH_APPLY_DEADLINE_MS),
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 8] = [
-    ROUTING, RECALL, BROWSER, DESKTOP, EMULATOR, STALL, PLACEMENT, SUMMON,
+pub static JEV_USES: [JevUse; 9] = [
+    ROUTING, RECALL, SKILLS, BROWSER, DESKTOP, EMULATOR, STALL, PLACEMENT, SUMMON,
 ];
 
 impl JevUse {
