@@ -2539,6 +2539,22 @@
   --agent-accent-antigravity: #2f6fdb;
 }
 
+/* Jev dashboard geometry; colours inherit the semantic palette in both
+   themes, the trend lines take the first lane's hue. */
+:root {
+  --jev-title-size: 26px;
+  --jev-meta-size: 12px;
+  --jev-body-size: 13px;
+  --jev-line: 1px;
+  --jev-spark-width: 44px;
+  --jev-spark-height: 18px;
+  --jev-cell-min: 56px;
+  --jev-why-width: 180px;
+  --jev-mode-width: 9em;
+  --jev-trend: var(--lane-1);
+  --jev-dot: var(--ink-chalk);
+}
+
 /* Skill library geometry; colours inherit the semantic palette in both themes. */
 :root {
   --skills-detail-min: 320px;

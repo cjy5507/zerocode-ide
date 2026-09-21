@@ -42,6 +42,12 @@ pub const ZO_JEV_SUMMARY_SESSIONS_FLAG: &str = "--computer-use";
 /// and the card said "nothing asked yet" of a routing seat with 28 rows
 /// (2026-09-20, the person's screenshot).
 pub const ZO_JEV_SUMMARY_CWD_FLAG: &str = "--cwd";
+/// The flag that asks zo to list each seat's last requests under its
+/// numbers — what the dashboard shows beside the table
+/// (docs/design/jev-dashboard-and-perfection-20260921.md §2 (b)). The card
+/// never passes it: it draws the numbers, and a list it would not draw is
+/// bytes across the exec boundary for nothing.
+pub const ZO_JEV_SUMMARY_RECENT_FLAG: &str = "--recent";
 
 /// The keychain item the key lives in.
 #[must_use]
@@ -568,7 +574,13 @@ mod tests {
             .split_once("tauri::generate_handler![")
             .map(|(_, list)| list)
             .expect("the handler list");
-        let pane = include_str!("../../../ui/shell-settings.js");
+        // The card's script and the dashboard's: one Jev, two surfaces, and
+        // the seat switch's door (`set_jev_mode`) and the ledgers' numbers
+        // (`jev_summary`) are asked from the file both surfaces share.
+        let pane = concat!(
+            include_str!("../../../ui/shell-settings.js"),
+            include_str!("../../../ui/shell-jev.js")
+        );
         for command in [
             "typesafe_settings",
             "save_typesafe_key",
@@ -576,6 +588,7 @@ mod tests {
             "set_jev_mode",
             "set_route_classifier",
             "check_typesafe_key",
+            "jev_summary",
         ] {
             assert!(
                 handlers.contains(&format!("{command},")),
@@ -746,6 +759,7 @@ mod tests {
                     "\n/* ---- ",
                 ),
             ),
+            ("dashboard script", include_str!("../../../ui/shell-jev.js")),
         ];
         let switches: Vec<(String, &str)> = JEV_USES
             .iter()
@@ -981,6 +995,78 @@ mod tests {
             zo.contains(&format!("[{ZO_JEV_SUMMARY_CWD_FLAG} <dir>]")),
             "zo no longer documents `{ZO_JEV_SUMMARY_CWD_FLAG}`"
         );
+        assert!(
+            zo.contains(&format!("[{ZO_JEV_SUMMARY_RECENT_FLAG} <n>]")),
+            "zo no longer documents `{ZO_JEV_SUMMARY_RECENT_FLAG}`"
+        );
+    }
+
+    /// The dashboard's fields — the days, the recent list, the applied count
+    /// and the door's refusals — are read when zo sends them and stay empty
+    /// from a zo that does not, so the card keeps drawing beside an older zo.
+    #[test]
+    fn a_summary_carries_the_days_and_the_recent_list_when_zo_sends_them() {
+        let stdout = br#"{"windowDays":7,"judgedEveryRows":20,"seats":[
+          {"id":"summon","setting":"summonChoice","mode":"on","ledger":"summon-choice.jsonl",
+           "found":"/x/summon-choice.jsonl",
+           "today":{"rows":2,"answered":2,"refused":0,"applied":0,"refusals":[],"answeredShare":1.0,
+                    "answeredLowerBound":0.34,"called":2,"requests":2,"redactedLines":4,"inputTokens":0,
+                    "p50Ms":227,"p95Ms":236,"failures":[]},
+           "week":{"rows":50,"answered":48,"refused":2,"applied":0,
+                   "refusals":[{"token":"not_consented","rows":2}],
+                   "answeredShare":0.96,"answeredLowerBound":0.86,"called":48,"requests":48,
+                   "redactedLines":100,"inputTokens":0,"p50Ms":230,"p95Ms":410,
+                   "failures":[{"token":"not_consented","rows":2}]},
+           "costUsd":0.01,"riseFloorPermille":900,"clearsRiseFloor":false,"rowsToNextJudgment":10,
+           "judged":{"window":{"rows":34,"answered":34,"answeredShare":1.0,"answeredLowerBound":0.89,
+                     "called":34,"requests":34,"redactedLines":0,"inputTokens":0,"p50Ms":230,"p95Ms":410,
+                     "failures":[]},"windowWanted":34,
+                     "agreement":{"compared":44,"agreed":16,"lowerBound":0.24,"controlRows":0}},
+           "stand":"recording","applies":true,"verdict":{"verdict":"hold","line":"answered"},
+           "days":[{"startMs":1789900000000,"tally":{"rows":3,"answered":3,"answeredShare":1.0,
+                    "answeredLowerBound":0.43,"p50Ms":220},"agreement":{"compared":3,"agreed":1}}],
+           "recent":[{"at":1790001955550,"outcome":"answered","elapsedMs":227,"cached":false,
+                      "asked":{"task":"t-5807","worker":"w-5814","options":5},"answered":"claude",
+                      "confidence":0.19,"applied":null,"agreed":true,"followed":null}]}
+        ]}"#;
+        let seats = read_summary(stdout).expect("a summary");
+        let summon = &seats[0];
+        assert_eq!(summon.clears_rise_floor, Some(false));
+        assert_eq!(summon.week.p50_ms, Some(230));
+        assert_eq!(summon.week.called, 48);
+        assert_eq!(
+            summon.week.refusals,
+            vec![SeatFailure {
+                token: "not_consented".to_string(),
+                rows: 2
+            }]
+        );
+        let judged = summon.judged.as_ref().expect("judged");
+        assert_eq!(
+            (judged.agreement.compared, judged.agreement.agreed),
+            (44, 16)
+        );
+        assert_eq!(summon.days.len(), 1);
+        assert_eq!(summon.days[0].start_ms, 1_789_900_000_000);
+        assert_eq!(summon.days[0].tally.rows, 3);
+        assert_eq!(summon.days[0].agreement.agreed, 1);
+        assert_eq!(
+            summon.days[0].tally.p95_ms, None,
+            "a day zo left short is read short"
+        );
+        assert_eq!(summon.recent.len(), 1);
+        let one = &summon.recent[0];
+        assert_eq!(one.asked.get("task"), Some(&Value::from("t-5807")));
+        assert_eq!(one.answered, Value::from("claude"));
+        assert_eq!((one.applied, one.agreed), (None, Some(true)));
+
+        // An older zo sends none of it, and the seat reads with the empties.
+        let older = br#"{"seats":[{"id":"summon","stand":"recording","applies":false,
+          "today":{"rows":0,"answered":0},"week":{"rows":0,"answered":0}}]}"#;
+        let seat = &read_summary(older).expect("a summary")[0];
+        assert!(seat.days.is_empty() && seat.recent.is_empty());
+        assert_eq!(seat.clears_rise_floor, None);
+        assert!(seat.week.refusals.is_empty() && seat.week.failures.is_empty());
     }
 
     /// The command line the window execs is the one zo's CLI documents.
@@ -1081,6 +1167,10 @@ pub struct SeatNumbers {
     pub rows_to_next_judgment: Option<usize>,
     #[serde(default)]
     pub rise_floor_permille: Option<u16>,
+    /// Whether the judged window's lower bound clears the rise line; absent
+    /// for a seat that never rises or a window nothing has filled.
+    #[serde(default)]
+    pub clears_rise_floor: Option<bool>,
     pub today: SeatWindow,
     pub week: SeatWindow,
     /// The window the judge read and the agreement over it, for a seat that
@@ -1089,6 +1179,59 @@ pub struct SeatNumbers {
     pub judged: Option<SeatJudged>,
     #[serde(default)]
     pub cost_usd: Option<f64>,
+    /// Today and the days before it, oldest first — the trend the dashboard
+    /// draws; empty from a zo that counts only the week.
+    #[serde(default)]
+    pub days: Vec<SeatDay>,
+    /// The seat's last requests, newest first, when the command asked for
+    /// them ([`ZO_JEV_SUMMARY_RECENT_FLAG`]); empty otherwise.
+    #[serde(default)]
+    pub recent: Vec<SeatDecision>,
+}
+
+/// One local day of a seat's ledger, counted the way the week is.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatDay {
+    pub start_ms: i64,
+    pub tally: SeatWindow,
+    #[serde(default)]
+    pub agreement: SeatAgreement,
+}
+
+/// One request of a seat, as zo digested it (`zerocode_core::jev::recent`):
+/// the row's own facts, never its body. Passed through as zo shaped it — the
+/// dashboard draws whatever facts a seat's rows carry, by their names, and
+/// this reader names none of them.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatDecision {
+    pub at: i64,
+    pub outcome: String,
+    #[serde(default)]
+    pub elapsed_ms: Option<u64>,
+    #[serde(default)]
+    pub cached: bool,
+    #[serde(default)]
+    pub asked: Map<String, Value>,
+    #[serde(default)]
+    pub answered: Value,
+    #[serde(default)]
+    pub confidence: Option<f64>,
+    #[serde(default)]
+    pub applied: Option<bool>,
+    #[serde(default)]
+    pub agreed: Option<bool>,
+    #[serde(default)]
+    pub followed: Option<String>,
+}
+
+/// One outcome token and how many rows carried it.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatFailure {
+    pub token: String,
+    pub rows: usize,
 }
 
 /// The numbers a seat is promoted on: the last requests its floor can be
@@ -1111,6 +1254,10 @@ pub struct SeatAgreement {
     pub agreed: usize,
     #[serde(default)]
     pub lower_bound: Option<f64>,
+    /// Control rows the comparison borrowed — the routing seat's probe run
+    /// once more beside a judgment already acted on; zero elsewhere.
+    #[serde(default)]
+    pub control_rows: usize,
 }
 
 /// What the judge said of a seat's recent window.
@@ -1137,9 +1284,28 @@ pub struct SeatWindow {
     #[serde(default)]
     pub answered_lower_bound: Option<f64>,
     #[serde(default)]
+    pub p50_ms: Option<u64>,
+    #[serde(default)]
     pub p95_ms: Option<u64>,
     #[serde(default)]
     pub redacted_lines: u64,
+    /// Rows whose judgment went over the wire.
+    #[serde(default)]
+    pub called: usize,
+    #[serde(default)]
+    pub requests: u64,
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// Rows whose answer is what the product did.
+    #[serde(default)]
+    pub applied: usize,
+    /// Every outcome that was not an answer, by token, most frequent first.
+    #[serde(default)]
+    pub failures: Vec<SeatFailure>,
+    /// The door's refusals among them — no key, not consented, budget — the
+    /// rows `refused` counts, one token at a time.
+    #[serde(default)]
+    pub refusals: Vec<SeatFailure>,
 }
 
 /// What `zo jev summary --json` said, or `None` when it printed nothing this

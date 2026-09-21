@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use tools::jev_summary::{self, SeatReport};
 
 pub const USAGE: &str = "\
-zo jev summary [--cwd <dir>] [--computer-use <sessions-dir>] [--json]
+zo jev summary [--cwd <dir>] [--computer-use <sessions-dir>] [--recent <n>] [--json]
 
   summary: count every Jev seat's ledger — today and the last seven days.
   Per seat: its mode (off/shadow/on/auto), rows, how many answered and the
@@ -25,13 +25,19 @@ zo jev summary [--cwd <dir>] [--computer-use <sessions-dir>] [--json]
   A seat no ledger has been written for says so; it is not a seat that
   answered nothing. --computer-use names the window's Computer Use sessions
   folder, where the screen seats append beside each walk's evidence
-  (<dir>/<session>/<ledger>); every session's rows are counted.
+  (<dir>/<session>/<ledger>); every session's rows are counted. --recent
+  lists each seat's last <n> requests under its numbers — what was asked,
+  what it answered, whether that was acted on, and what the seat's own
+  writer later said of it — read from the same rows in the same pass.
+  Every seat also carries its last seven local days, one count per day.
 ";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Request {
     cwd: Option<PathBuf>,
     sessions: Option<PathBuf>,
+    /// How many of each seat's last requests to list; none by default.
+    recent: usize,
     json: bool,
 }
 
@@ -41,7 +47,7 @@ fn parse(args: &[String]) -> Result<Request, String> {
         Some("-h" | "--help") | None => return Err(USAGE.to_string()),
         Some(other) => return Err(format!("unknown verb '{other}'\n\n{USAGE}")),
     }
-    let mut request = Request { cwd: None, sessions: None, json: false };
+    let mut request = Request { cwd: None, sessions: None, recent: 0, json: false };
     let mut rest = args[1..].iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
@@ -53,6 +59,11 @@ fn parse(args: &[String]) -> Result<Request, String> {
             "--computer-use" => {
                 let dir = rest.next().ok_or_else(|| "--computer-use needs a directory".to_string())?;
                 request.sessions = Some(PathBuf::from(dir));
+            }
+            "--recent" => {
+                let count = rest.next().ok_or_else(|| "--recent needs a count".to_string())?;
+                request.recent =
+                    count.parse().map_err(|_| format!("--recent needs a count, not '{count}'"))?;
             }
             other => return Err(format!("unknown argument '{other}'\n\n{USAGE}")),
         }
@@ -74,7 +85,14 @@ pub fn run(args: &[String], cwd: &Path, now_ms: i64, offset_s: i64) -> Result<Re
     let cwd = request.cwd.clone().unwrap_or_else(|| cwd.to_path_buf());
     let settings = tools::merged_settings_root(&cwd);
     let roots = jev_summary::ledger_roots(&cwd);
-    let seats = jev_summary::report(&roots, request.sessions.as_deref(), settings.as_ref(), now_ms, offset_s);
+    let seats = jev_summary::report_with_recent(
+        &roots,
+        request.sessions.as_deref(),
+        settings.as_ref(),
+        now_ms,
+        offset_s,
+        request.recent,
+    );
     Ok(Report {
         text: if request.json {
             render_json(&seats).to_string()
@@ -89,6 +107,14 @@ fn tally_json(tally: &jev_summary::SeatTally) -> Value {
         "rows": tally.rows,
         "answered": tally.answered,
         "refused": tally.refused,
+        "applied": tally.applied,
+        // The door's refusals by token, beside `failures` which holds every
+        // token: a screen says "no key 3 · not consented 60" off this list
+        // without a table of the door's words of its own.
+        "refusals": tally
+            .refusals()
+            .map(|(token, count)| json!({ "token": token, "rows": count }))
+            .collect::<Vec<Value>>(),
         "answeredShare": tally.answered_share(),
         "answeredLowerBound": tally.answered_lower_bound(),
         "called": tally.called,
@@ -102,6 +128,29 @@ fn tally_json(tally: &jev_summary::SeatTally) -> Value {
             .iter()
             .map(|(token, count)| json!({ "token": token, "rows": count }))
             .collect::<Vec<Value>>(),
+    })
+}
+
+fn agreement_json(agreement: &jev_summary::SeatAgreement) -> Value {
+    json!({
+        "compared": agreement.compared,
+        "agreed": agreement.agreed,
+        "lowerBound": agreement.lower_bound(),
+    })
+}
+
+fn decision_json(decision: &jev_summary::SeatDecision) -> Value {
+    json!({
+        "at": decision.at,
+        "outcome": decision.outcome,
+        "elapsedMs": decision.elapsed_ms,
+        "cached": decision.cached,
+        "asked": decision.asked,
+        "answered": decision.answered,
+        "confidence": decision.confidence,
+        "applied": decision.applied,
+        "agreed": decision.agreed,
+        "followed": decision.followed,
     })
 }
 
@@ -126,20 +175,31 @@ fn render_json(seats: &[SeatReport]) -> Value {
                 // The window the verdict was read on, and the agreement over
                 // it — the numbers a seat is promoted on, which are not the
                 // week's.
-                "judged": seat.judged.as_ref().map(|judged| json!({
-                    "window": tally_json(&judged.window),
-                    "windowWanted": judged.window_wanted,
-                    "agreement": {
-                        "compared": judged.agreement.compared,
-                        "agreed": judged.agreement.agreed,
-                        "lowerBound": judged.agreement.lower_bound(),
-                        // Control rows joined to the window for the
-                        // comparison — the probe run once more beside a
-                        // judgment an active turn acted on. They are in no
-                        // other number here.
-                        "controlRows": judged.control_rows,
-                    },
-                })),
+                "judged": seat.judged.as_ref().map(|judged| {
+                    let mut agreement = agreement_json(&judged.agreement);
+                    // Control rows joined to the window for the comparison —
+                    // the probe run once more beside a judgment an active
+                    // turn acted on. They are in no other number here.
+                    agreement["controlRows"] = Value::from(judged.control_rows);
+                    json!({
+                        "window": tally_json(&judged.window),
+                        "windowWanted": judged.window_wanted,
+                        "agreement": agreement,
+                    })
+                }),
+                // Today and the six days before it, oldest first — the trend
+                // beside the week, counted by the week's own counter.
+                "days": seat
+                    .days
+                    .iter()
+                    .map(|day| json!({
+                        "startMs": day.start_ms,
+                        "tally": tally_json(&day.tally),
+                        "agreement": agreement_json(&day.agreement),
+                    }))
+                    .collect::<Vec<Value>>(),
+                // The last requests, newest first, when `--recent` asked.
+                "recent": seat.recent.iter().map(decision_json).collect::<Vec<Value>>(),
                 "stand": seat.stand.token(),
                 "applies": seat.applies,
                 "verdict": seat.verdict().map(|verdict| json!({

@@ -22,6 +22,8 @@ const PANE_OF = {
   "google-account-list": "provider-accounts",
   "router-provider-list": "api-routers",
   "router-preset-select": "api-routers",
+  // The Jev dashboard's "in settings" lands on the first seat's switch.
+  "typesafe-routing-select": "api-routers",
   "show-automations": "appearance",
   "show-tasks": "appearance",
   "worktree-prefix": "git",
@@ -5116,13 +5118,10 @@ let typesafeInitialized = false;
  * and the standing is read off the key itself. */
 let typesafeChecked = null;
 
-/* What zo last said each seat's ledger holds (`zo jev summary --json`,
- * jev-settings-20260917.md §5). This page does not count those files: the
- * judge that promotes a seat reads them the same way, and a card free to
- * disagree with the seat it is drawing is worse than a card with no numbers.
- * `null` until zo answers, and it stays null on a zo too old to know the
- * verb — the switches then stand without numbers rather than not at all. */
-let jevNumbers = null;
+/* What zo last said each seat's ledger holds lives in shell-jev.js
+ * (`jevNumbers`, `loadJevNumbers`, `paintJevNumbers`): one cache and one set
+ * of words for this card and for the dashboard, so the number under a
+ * switch here is the number in the dashboard's row. */
 
 function initTypeSafeEvents() {
   if (typesafeInitialized) return;
@@ -5144,8 +5143,7 @@ function initTypeSafeEvents() {
     select.addEventListener("change", (event) => {
       const seat = event.target.dataset.jevSeat;
       const mode = event.target.value;
-      void runTypeSafe(() => invoke("set_jev_mode", { use: seat, mode }), (state) =>
-        jevSwitchSaid(state, seat));
+      void moveJevSeat(seat, mode, (state) => jevSwitchSaid(state, seat));
     });
   }
   el("route-classifier-select")?.addEventListener("change", (event) => {
@@ -5311,81 +5309,9 @@ function paintTypeSafe(state) {
   if (count) count.textContent = seats > 0 ? String(seats) : "";
   paintClassifierGate(state);
   paintTypeSafeSave();
-}
-
-/* Ask zo for the ledgers' numbers and repaint. Its own step, because the
- * switches must stand the moment the card opens and a ledger read is not
- * something a person should wait on to see them. */
-async function loadJevNumbers() {
-  let held = null;
-  try {
-    held = await invoke("jev_summary");
-  } catch {
-    held = null;
-  }
-  // Nothing new to draw — a zo that cannot count leaves the card exactly as
-  // the settings answer left it, rather than repainting it a second time over
-  // whatever a person has since done to it.
-  if (held === jevNumbers) return;
-  jevNumbers = held;
-  if (typesafeState) paintTypeSafe(typesafeState);
-}
-
-/* The word for the line a judgment turned on. The tokens are the core's
- * (`promote::Line::token`); what each one MEANS to a person is this page's,
- * said once here rather than in seven rows of markup. */
-function jevLineWords(line) {
-  switch (line) {
-    case "too_few_rows": return t("settings.typesafe.lineTooFewRows", "행이 더 쌓여야 합니다");
-    case "answered": return t("settings.typesafe.lineAnswered", "답한 비율이 모자랍니다");
-    case "latency": return t("settings.typesafe.lineLatency", "답이 너무 늦습니다");
-    case "schema": return t("settings.typesafe.lineSchema", "형식이 깨진 답이 있었습니다");
-    case "too_few_compared": return t("settings.typesafe.lineTooFewCompared", "프로브와 견줄 답이 더 쌓여야 합니다");
-    case "agreement": return t("settings.typesafe.lineAgreement", "프로브와 다른 답이 너무 잦습니다");
-    case "labels": return t("settings.typesafe.lineLabels", "라벨이 프로브 쪽을 가리킵니다");
-    case "fallbacks": return t("settings.typesafe.lineFallbacks", "연달아 되돌아갔습니다");
-    default: return "";
-  }
-}
-
-/* The one line under a seat's switch: what it did today, how it answered over
- * the week, and — for a seat whose `auto` may rise — what the judge said of
- * that window. Built here, so a seat added to the table gets its numbers with
- * it rather than an eighth copy of the same markup. */
-function paintJevNumbers(line, seat) {
-  const held = (jevNumbers ?? []).find((row) => row.id === seat) ?? null;
-  let said = line.querySelector("[data-jev-numbers]");
-  if (!held) {
-    // Nothing counted: no line at all rather than an empty one, so a row with
-    // no numbers reads as a row with no numbers and not as a silent zero.
-    said?.remove();
-    return;
-  }
-  if (!said) {
-    said = document.createElement("p");
-    said.className = "settings-row-desc settings-jev-numbers";
-    said.setAttribute("data-jev-numbers", "");
-    line.append(said);
-  }
-  if (held.week.rows === 0) {
-    said.textContent = t("settings.typesafe.seatNeverAsked", "아직 아무것도 묻지 않았습니다.");
-    return;
-  }
-  const words = [t("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}} 답함", {
-    today: String(held.today.rows),
-    rows: String(held.week.rows),
-    answered: String(held.week.answered),
-  })];
-  if (held.week.p95Ms !== null && held.week.p95Ms !== undefined) {
-    words.push(t("settings.typesafe.seatP95", "p95 {{ms}} ms", { ms: String(held.week.p95Ms) }));
-  }
-  if (held.verdict) {
-    const because = jevLineWords(held.verdict.line);
-    words.push(held.applies
-      ? t("settings.typesafe.seatApplying", "근거가 서서 적용 중입니다.")
-      : t("settings.typesafe.seatHolding", "아직 기록만 합니다 — {{because}}", { because }));
-  }
-  said.textContent = words.join(" · ");
+  // The dashboard's rows wear the same switches and the same numbers; a
+  // move made here, or a fresh count, reaches it through this one paint.
+  paintJevViews();
 }
 
 function paintTypeSafeSave() {

@@ -46,6 +46,7 @@ pub(crate) const STAGE_ARGLESS_KINDS: &[&str] = &[
     "knowledge",
     "skills",
     "artifacts",
+    "jev",
 ];
 
 /// One document tab, as the file remembers it.

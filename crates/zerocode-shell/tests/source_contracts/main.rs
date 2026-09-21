@@ -10142,9 +10142,11 @@ mod tests {
         // usage gauge's own period (`releaseAmbient`), never watched.
         // Twelve since t-3191: the update feed's clock (`updateAmbient`) rides
         // the same period; the backend's table decides which knock is a check.
+        // Thirteen since t-5807: the Jev dashboard's slow beat (`jevPoll`),
+        // one zo process every thirty seconds while the tab is on stage.
         assert_eq!(
             window.matches(" = idlePoller({").count(),
-            12,
+            13,
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");

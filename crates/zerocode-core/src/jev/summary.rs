@@ -112,6 +112,25 @@ pub const AGREED: LedgerKey = LedgerKey {
     canonical: "agreed",
     also: &[],
 };
+/// Whether the seat's answer is what the product did, as a word: the row's
+/// `routeUse` carries [`crate::jev::ROUTE_USE_APPLIED`] when it was, a
+/// recording seat's mode word or [`crate::jev::ROUTE_USE_FALLBACK`] when it
+/// was not. Written by the routing seat and the screen seats.
+pub const ROUTE_USE: LedgerKey = LedgerKey {
+    canonical: "routeUse",
+    also: &[],
+};
+/// The same fact as a boolean, on the seats that reorder or place something
+/// (recall, placement, the window's effort seat).
+pub const APPLIED: LedgerKey = LedgerKey {
+    canonical: "applied",
+    also: &[],
+};
+/// The same fact as a screen walk says it: whether the hand went out.
+pub const PRESSED: LedgerKey = LedgerKey {
+    canonical: "pressed",
+    also: &[],
+};
 
 /// Every key this module reads, so a contract can walk them.
 pub const LEDGER_KEYS: &[LedgerKey] = &[
@@ -124,6 +143,9 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     INPUT_TOKENS,
     TRANSITION,
     AGREED,
+    ROUTE_USE,
+    APPLIED,
+    PRESSED,
 ];
 
 /// The word a row carries when its judgment answered and passed its checks.
@@ -165,6 +187,11 @@ pub struct Tally {
     /// Rows that asked and did not answer, by outcome token, most frequent
     /// first, then by token so the order is the same twice.
     pub failures: Vec<(String, usize)>,
+    /// Rows whose answer is what the product did ([`applied_of`]) — an
+    /// acting seat's answers that cleared their checks. A recording seat has
+    /// none, and a seat whose rows carry no such word has none either, which
+    /// is not the same as a seat that fell back every time.
+    pub applied: usize,
     /// Requests spent, retries included.
     pub requests: u64,
     /// Lines the door withheld across the window.
@@ -211,6 +238,13 @@ impl Tally {
     #[must_use]
     pub const fn rows_to_next_judgment(&self) -> usize {
         JUDGED_EVERY_ROWS - self.rows % JUDGED_EVERY_ROWS
+    }
+
+    /// The door's refusals among the failures, by token — the rows
+    /// `refused` counts, said one token at a time, so a screen can say
+    /// "no key 3 · not consented 60" without a table of the door's words.
+    pub fn refusals(&self) -> impl Iterator<Item = &(String, usize)> + '_ {
+        self.failures.iter().filter(|(token, _)| is_refusal(token))
     }
 }
 
@@ -358,6 +392,16 @@ pub fn failures_in_a_row(rows: &[Value]) -> u32 {
 /// [`AGREED`], asked rows and label rows alike.
 #[must_use]
 pub fn agreement_since(rows: &[Value], since_ms: i64) -> crate::jev::promote::Agreement {
+    agreement_rows(rows.iter(), since_ms)
+}
+
+/// [`agreement_since`] over rows already picked out — one local day of a
+/// ledger, for the trend a screen draws beside the week.
+#[must_use]
+pub fn agreement_rows<'a>(
+    rows: impl IntoIterator<Item = &'a Value>,
+    since_ms: i64,
+) -> crate::jev::promote::Agreement {
     let mut agreement = crate::jev::promote::Agreement::default();
     for row in rows {
         let Some(agreed) = AGREED.read(row).and_then(Value::as_bool) else {
@@ -370,6 +414,25 @@ pub fn agreement_since(rows: &[Value], since_ms: i64) -> crate::jev::promote::Ag
         agreement.agreed += usize::from(agreed);
     }
     agreement
+}
+
+/// Whether a row's answer is what the product did, read off whichever of the
+/// three spellings the row carries — [`ROUTE_USE`] first, because a screen
+/// walk writes it beside [`PRESSED`] and the word is the more exact of the
+/// two; then [`APPLIED`]; then [`PRESSED`]. `None` for a row that says
+/// nothing about it: a refusal, a failure, or a seat with no apply stage.
+///
+/// One reader, because three seats spell the fact three ways and a counter
+/// that read one of them would show the recall seat applying nothing.
+#[must_use]
+pub fn applied_of(row: &Value) -> Option<bool> {
+    if let Some(word) = ROUTE_USE.read(row).and_then(Value::as_str) {
+        return Some(word == crate::jev::ROUTE_USE_APPLIED);
+    }
+    APPLIED
+        .read(row)
+        .and_then(Value::as_bool)
+        .or_else(|| PRESSED.read(row).and_then(Value::as_bool))
 }
 
 /// Whether an outcome token is the door's — a request that was never sent.
@@ -405,6 +468,7 @@ pub fn summarize_rows<'a>(rows: impl IntoIterator<Item = &'a Value>, since_ms: i
             continue;
         }
         tally.rows += 1;
+        tally.applied += usize::from(applied_of(row) == Some(true));
         tally.requests += REQUESTS.read(row).and_then(Value::as_u64).unwrap_or(0);
         tally.redacted_lines += REDACTED_LINES
             .read(row)

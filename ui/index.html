@@ -50,6 +50,7 @@
     <script defer src="./shell-update.js"></script>
     <script defer src="./shell-computer.js"></script>
     <script defer src="./shell-settings.js"></script>
+    <script defer src="./shell-jev.js"></script>
     <script defer src="./shell-flow.js"></script>
     <script defer src="./shell-remote.js"></script>
     <script defer src="./shell-sftp.js"></script>
@@ -1232,6 +1233,14 @@
               <svg class="icon" aria-hidden="true"><use href="#i-orbit"></use></svg>
               <span class="sr" data-i18n="board.tasks.heading">작업 상황판</span>
               <span class="nav-badge" id="board-badge" hidden></span>
+            </button>
+            <!-- The Jev dashboard (t-5807): every seat's numbers, its last
+                 decisions and the week's trend, read from the same count the
+                 settings card draws. Beside the live-agent door because both
+                 report what a runtime measured. -->
+            <button class="foot-icon" id="nav-jev" type="button" aria-pressed="false" data-i18n-title="jev.tab" data-tip="Jev 대시보드">
+              <svg class="icon" aria-hidden="true"><use href="#i-gauge"></use></svg>
+              <span class="sr" data-i18n="jev.tab">Jev 대시보드</span>
             </button>
             <button class="foot-icon" id="nav-board" type="button" aria-pressed="false" data-i18n-title="workspaceBoard.label" data-tip="워크스페이스 보드">
               <svg class="icon" aria-hidden="true"><use href="#i-kanban"></use></svg>

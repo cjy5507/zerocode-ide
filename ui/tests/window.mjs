@@ -39,6 +39,7 @@ import { testAgentConversation } from "./agent-conversation.mjs";
 import { testBrowserRecovery } from "./browser-recovery.mjs";
 import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
+import { testJevDashboard, testJevDashboardEvidence } from "./jev-dashboard.mjs";
 
 import { testCrashReport } from "./crash-report.mjs";
 import { testTerminalSelection } from "./terminal-selection.mjs";
@@ -184,6 +185,10 @@ suite("agent-conversation", ({ browser, origin, ok }) => testAgentConversation(b
 suite("browser-recovery", ({ browser, origin, ok }) => testBrowserRecovery(browser, origin, ok));
 suite("browser-panes-survive", ({ browser, origin, ok }) => testBrowserPanesSurvive(browser, origin, ok));
 suite("coordinator-panel", ({ browser, origin, ok }) => testCoordinatorPanel(browser, origin, ok));
+suite("jev-dashboard", async ({ browser, origin, ok }) => {
+  await testJevDashboard(browser, origin, ok);
+  await testJevDashboardEvidence(browser, origin, ok);
+});
 suite("native-folder-picker", ({ browser, origin, ok }) => testNativeFolderPicker(browser, origin, ok));
 suite("sftp", ({ browser, origin, ok }) => testSftpAndTeam(browser, origin, ok));
 suite("pane-follow", ({ browser, origin, ok }) => testPaneFollowsCwd(browser, origin, ok));

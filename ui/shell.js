@@ -15862,6 +15862,7 @@ const DOC_VIEWS = {
   knowledge: { build: buildKnowledgeView, paint: paintKnowledgeStage },
   skills: { build: buildSkillsView, paint: paintSkillsStage },
   artifacts: { build: buildArtifactsView, paint: paintArtifactsStage },
+  jev: { build: buildJevView, paint: paintJevStage, wire: wireJevView },
   tokens: { build: buildTokensView, paint: paintTokensView, wire: wireTokensView },
 };
 

@@ -37486,6 +37486,239 @@ h4.knowledge-inspector-head::after {
 .zo-integration-body button { max-width: 100%; white-space: normal; }
 /* Skills document: one keyed list;
   narrow panes stack the same detail node. */
+/* ---- Jev dashboard (t-5807) — the seats' numbers, decisions and trend.
+   Geometry from tokens.css (--jev-*); colours from the semantic palette. */
+.jev-view {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-width: 0;
+  height: 100%;
+  padding: var(--space-5);
+  overflow: auto;
+  color: var(--ink-chalk);
+  background: var(--surface-deck);
+  font-size: var(--jev-body-size);
+}
+
+.jev-view[hidden], .jev-view [hidden] {
+  display: none !important;
+}
+
+.jev-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.jev-title {
+  font-size: var(--jev-title-size);
+  margin: var(--space-1) 0;
+}
+
+.jev-eyebrow, .jev-about, .jev-freshness, .jev-bound, .jev-trend-name, .jev-trend-last,
+.jev-why-facts, .jev-decision-when, .jev-decision-marks, .jev-recent-empty {
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  margin: 0;
+}
+
+.jev-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.jev-status, .jev-error {
+  margin: 0;
+}
+
+.jev-error {
+  color: var(--signal-halt);
+}
+
+/* The table takes its own height and the view scrolls as one page; a table
+   scrolling inside a page that also scrolls is two scrollbars for one list. */
+.jev-table-wrap {
+  flex: none;
+  overflow-x: auto;
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+}
+
+.jev-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-variant-numeric: tabular-nums;
+}
+
+.jev-table th, .jev-table td {
+  padding: var(--space-2);
+  text-align: left;
+  vertical-align: top;
+  border-bottom: var(--jev-line) solid var(--edge-rule);
+}
+
+/* The counted cells stay on one line; the words wrap. */
+.jev-table [data-jev-cell="rows"], .jev-table [data-jev-cell="answered"], .jev-table [data-jev-cell="latency"],
+.jev-table [data-jev-cell="acted"], .jev-table [data-jev-cell="cost"], .jev-table [data-jev-cell="seat"] {
+  white-space: nowrap;
+  min-width: var(--jev-cell-min);
+}
+
+.jev-fact-strong {
+  font-weight: 600;
+}
+
+.jev-fact-mist {
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-table th {
+  color: var(--ink-mist);
+  font-weight: 500;
+  font-size: var(--jev-meta-size);
+  background: var(--surface-well);
+  position: sticky;
+  top: 0;
+}
+
+.jev-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.jev-table tr.is-quiet td {
+  color: var(--ink-mist);
+}
+
+.jev-table tr.is-applying [data-jev-cell="seat"] {
+  font-weight: 600;
+}
+
+.jev-view select.jev-mode {
+  background-color: var(--surface-well);
+  color: var(--ink-chalk);
+  border: var(--jev-line) solid var(--edge-mark);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  font: inherit;
+  max-width: var(--jev-mode-width);
+}
+
+.jev-share {
+  font-weight: 600;
+}
+
+/* Three small trends side by side, the latest value under each: the names
+   are the column head's, so a row stays a row's height. */
+.jev-trends {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.jev-trend {
+  display: grid;
+  justify-items: center;
+  gap: 1px;
+}
+
+.jev-table [data-jev-cell="why"] {
+  min-width: var(--jev-why-width);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-spark {
+  width: var(--jev-spark-width);
+  height: var(--jev-spark-height);
+  overflow: visible;
+}
+
+.jev-spark-line {
+  fill: none;
+  stroke: var(--jev-trend);
+  stroke-width: 1.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.jev-spark-dot {
+  fill: var(--jev-dot);
+}
+
+.jev-why p {
+  margin: 0;
+}
+
+.jev-why-verdict {
+  color: var(--ink-chalk);
+}
+
+.jev-recent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.jev-recent-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.jev-recent-title {
+  font-size: var(--jev-body-size);
+  margin: 0;
+}
+
+.jev-view select.jev-recent-seat {
+  background-color: var(--surface-well);
+  color: var(--ink-chalk);
+  border: var(--jev-line) solid var(--edge-mark);
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  font: inherit;
+}
+
+.jev-recent-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.jev-decision {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 2fr) minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: baseline;
+  padding: var(--space-2) var(--space-3);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+}
+
+.jev-decision-outcome {
+  font-weight: 600;
+}
+
+.jev-decision[data-outcome]:not([data-outcome="answered"]) .jev-decision-outcome {
+  color: var(--signal-halt);
+}
+
+/* The facts wrap rather than cut: a line a person cannot finish reading is
+   a line that says less than the row does. */
+.jev-decision-asked, .jev-decision-answer {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .skills-view {
   position: relative;
   container: skills / inline-size;

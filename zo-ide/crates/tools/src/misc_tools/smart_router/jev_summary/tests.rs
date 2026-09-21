@@ -5,6 +5,18 @@ use serde_json::json;
 
 use super::*;
 
+/// One seat counted the card's way — its numbers and days, no recent list.
+fn one(
+    seat: &'static JevUse,
+    roots: &[PathBuf],
+    sessions: Option<&Path>,
+    settings: Option<&Value>,
+    now_ms: i64,
+    offset_s: i64,
+) -> SeatReport {
+    super::one_with(seat, roots, sessions, settings, now_ms, offset_s, 0)
+}
+
 fn write(dir: &std::path::Path, name: &str, rows: &[Value]) {
     fs::create_dir_all(dir).expect("dir");
     let mut text = String::new();
@@ -56,7 +68,7 @@ fn every_seat_in_the_table_gets_a_row_whether_or_not_it_has_a_ledger() {
     );
     let seats: Vec<SeatReport> = zerocode_core::jev::JEV_USES
         .iter()
-        .map(|seat| super::one(seat, &roots, None, None, 1_000, 0))
+        .map(|seat| one(seat, &roots, None, None, 1_000, 0))
         .collect();
     assert_eq!(seats.len(), zerocode_core::jev::JEV_USES.len());
     let routing = seats.iter().find(|seat| seat.id == "routing").expect("routing");
@@ -88,7 +100,7 @@ fn a_screen_seats_rows_are_counted_across_its_session_folders() {
         &[json!({"at": 5, "outcome": "no_look"}), json!({"at": 6, "outcome": "answered", "elapsedMs": 60, "requests": 1})],
     );
     write(&sessions.join("20260918-000000-1"), "unrelated.txt", &[json!({"at": 1})]);
-    let report = super::one(seat, &roots, Some(&sessions), None, 1_000, 0);
+    let report = one(seat, &roots, Some(&sessions), None, 1_000, 0);
     assert_eq!(report.week.rows, 3, "every session folder's rows");
     assert_eq!(report.week.answered, 2);
     assert_eq!(report.week.p95_ms, Some(60));
@@ -98,7 +110,7 @@ fn a_screen_seats_rows_are_counted_across_its_session_folders() {
         "named by the oldest session that has the file"
     );
     assert_eq!(
-        super::one(seat, &roots, None, None, 1_000, 0).found,
+        one(seat, &roots, None, None, 1_000, 0).found,
         None,
         "without a sessions folder the seat is as unread as before"
     );
@@ -120,7 +132,7 @@ fn a_screen_seat_is_counted_once_when_its_root_ledger_holds_what_a_session_copie
     write(&roots[0], seat.ledger, &walk);
     write(&sessions.join("20260921-000000-1"), seat.ledger, &walk);
 
-    let report = super::one(seat, &roots, Some(&sessions), None, 1_000, 0);
+    let report = one(seat, &roots, Some(&sessions), None, 1_000, 0);
 
     assert_eq!(report.week.rows, walk.len(), "one ledger, counted once");
     assert_eq!(report.found.as_deref(), Some(roots[0].join(seat.ledger).as_path()));
@@ -153,7 +165,7 @@ fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
         zerocode_core::jev::SMART_SETTINGS_KEY: { seat.setting: JevMode::Auto.key() }
     });
 
-    let report = super::one(seat, &roots, None, Some(&settings), 1_000, 0);
+    let report = one(seat, &roots, None, Some(&settings), 1_000, 0);
 
     let judged = report.judged.as_ref().expect("a rising seat is judged");
     assert_eq!(judged.window_wanted, wanted, "35 walks, not routing's 73");
@@ -178,7 +190,7 @@ fn a_seat_that_never_rises_is_never_asked_to_clear_a_line() {
     #[allow(clippy::explicit_iter_loop)]
     for seat in zerocode_core::jev::JEV_USES.iter() {
         write(home.path(), seat.ledger, &answered);
-        let row = super::one(seat, &roots, None, None, 1_000, 0);
+        let row = one(seat, &roots, None, None, 1_000, 0);
         assert_eq!(
             row.clears_rise_floor.is_some(),
             seat.promotes,
@@ -219,7 +231,7 @@ fn a_seat_starts_recording_and_a_rise_row_in_its_own_ledger_makes_it_act() {
     let auto = json!({ "smart": { seat.setting: "auto" } });
 
     write(home.path(), seat.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5})]);
-    let quiet = super::one(seat, &roots, None, Some(&auto), 1_000, 0);
+    let quiet = one(seat, &roots, None, Some(&auto), 1_000, 0);
     assert_eq!(quiet.stand, Stand::Recording);
     assert!(!quiet.applies, "auto starts recording");
 
@@ -228,7 +240,7 @@ fn a_seat_starts_recording_and_a_rise_row_in_its_own_ledger_makes_it_act() {
         seat.ledger,
         &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5}), json!({"at": 2, (TRANSITION.canonical): ROSE})],
     );
-    let raised = super::one(seat, &roots, None, Some(&auto), 1_000, 0);
+    let raised = one(seat, &roots, None, Some(&auto), 1_000, 0);
     assert_eq!(raised.stand, Stand::Applying);
     assert!(raised.applies, "a rise its own ledger recorded makes auto act");
 }
@@ -240,16 +252,16 @@ fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
     let roots = [home.path().to_path_buf()];
     let seat = &zerocode_core::jev::ROUTING;
     write(home.path(), seat.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5})]);
-    let row = super::one(seat, &roots, None, None, 1_000, 0);
+    let row = one(seat, &roots, None, None, 1_000, 0);
     assert!(matches!(row.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))));
 
     // And a seat with no rise line is never judged at all. Recall, not an
     // orchestration seat: those rise now (2026-09-20), on the table's lines.
-    let quiet = super::one(&zerocode_core::jev::RECALL, &roots, None, None, 1_000, 0);
+    let quiet = one(&zerocode_core::jev::RECALL, &roots, None, None, 1_000, 0);
     assert_eq!(quiet.verdict(), None);
     // An orchestration seat is judged by the table on its own rows: thin here.
     write(home.path(), zerocode_core::jev::SUMMON.ledger, &[json!({"at": 1, "outcome": "answered", "elapsedMs": 5, "agreed": true})]);
-    let summon = super::one(&zerocode_core::jev::SUMMON, &roots, None, None, 1_000, 0);
+    let summon = one(&zerocode_core::jev::SUMMON, &roots, None, None, 1_000, 0);
     assert!(matches!(summon.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))), "{:?}", summon.verdict());
     assert_eq!(summon.judged.as_ref().map(|judged| judged.agreement.compared), Some(1));
 }
@@ -300,7 +312,7 @@ fn the_screen_and_the_judge_read_one_window() {
         .map(|at| compared(at, ["large", "low", "analysis"], Some(["large", "low", "analysis"])))
         .collect();
     write(home.path(), seat.ledger, &rows);
-    let report = super::one(seat, &roots, None, None, i64::MAX / 2, 0);
+    let report = one(seat, &roots, None, None, i64::MAX / 2, 0);
     let judged = report.judged.as_ref().expect("the routing seat is judged");
     assert_eq!(Some(judged.clone()), super::super::decision_shadow::judge_rows(&rows, None));
     assert_eq!(judged.window.rows, 30, "the window is the last rows the floor can be cleared on");
@@ -606,7 +618,7 @@ fn a_control_row_is_compared_beside_its_windows_row_and_counted_nowhere_else() {
     );
 
     // A clock just past the rows, so the day and the week both hold them.
-    let report = super::one(seat, &roots, None, None, 1_000, 0);
+    let report = one(seat, &roots, None, None, 1_000, 0);
     assert_eq!(report.judged, Some(judged));
     assert_eq!(report.asked_ever, 25, "the cadence counted a control row");
     assert_eq!(report.rows_to_next_judgment(), Some(JUDGED_EVERY_ROWS - 25 % JUDGED_EVERY_ROWS));
@@ -628,3 +640,97 @@ fn an_orchestration_seat_has_no_control_rows_to_borrow() {
     let judged = zerocode_core::jev::promote::judge_seat(&zerocode_core::jev::SUMMON, &rows).expect("judged");
     assert_eq!((judged.agreement.compared, judged.control_rows), (3, 0));
 }
+
+/// The trend's buckets: today and the six days before it in the person's
+/// zone, oldest first, each counted by the week's counter over its own rows
+/// — a row at 23:59:59.999 belongs to its day and the next millisecond to
+/// the next (docs/design/jev-dashboard-and-perfection-20260921.md §2 (c)).
+#[test]
+fn a_seats_days_are_seven_local_days_counted_by_the_weeks_own_counter() {
+    let offset = 9 * 3_600;
+    let now_ms = 1_789_700_000_000;
+    let today = start_of_day_ms(now_ms, offset);
+    let rows = [
+        json!({"at": today - 1, "outcome": "answered", "elapsedMs": 300, "agreed": true}),
+        json!({"at": today, "outcome": "answered", "elapsedMs": 100}),
+        json!({"at": today + 5, "outcome": "not_consented"}),
+        json!({"at": today - 6 * MS_PER_DAY + 10, "outcome": "answered", "elapsedMs": 50, "agreed": false}),
+        json!({"at": today - 7 * MS_PER_DAY, "outcome": "answered", "elapsedMs": 999}),
+        json!({"at": today + 3, "label": "k", "agreed": false}),
+    ];
+    let days = days_of(&rows, now_ms, offset);
+    assert_eq!(days.len(), usize::try_from(WINDOW_DAYS).expect("days"));
+    assert_eq!(days.last().expect("today").start_ms, today);
+    assert_eq!(days[0].start_ms, today - 6 * MS_PER_DAY, "oldest first");
+    let last = days.last().expect("today");
+    assert_eq!((last.tally.rows, last.tally.answered, last.tally.refused), (2, 1, 1));
+    assert_eq!(last.tally.p50_ms, Some(100));
+    assert_eq!((last.agreement.compared, last.agreement.agreed), (1, 0), "a label row counts on its own day");
+    let yesterday = &days[5];
+    assert_eq!(yesterday.tally.rows, 1, "the millisecond before midnight is yesterday's");
+    assert_eq!((yesterday.agreement.compared, yesterday.agreement.agreed), (1, 1));
+    assert_eq!((days[0].tally.rows, days[0].agreement.compared), (1, 1));
+    assert!(days.iter().all(|day| day.tally.p50_ms != Some(999)), "a row past the week is in no day");
+}
+
+/// The recent list rides the same rows the numbers were counted from, only
+/// when asked, newest first, with the label a later row left.
+#[test]
+fn the_recent_list_is_read_from_the_same_rows_and_only_when_asked() {
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::STALL;
+    let key = "dp-1@5";
+    write(
+        home.path(),
+        seat.ledger,
+        &[
+            json!({"at": 5, "stall": key, "dispatch": "dp-1", "worker": "w-2", "outcome": "answered", "elapsedMs": 40,
+                   "requests": 1, "chosen": "waiting_on_person", "confidence": 0.7}),
+            json!({"at": 6, "stall": "dp-3@6", "outcome": "not_consented", "requests": 0}),
+            json!({"at": 9, "label": key, "dispatch": "dp-1", "worker": "w-2", "followed": "worker_done", "agreed": false}),
+        ],
+    );
+    let quiet = one(seat, &roots, None, None, 1_000, 0);
+    assert!(quiet.recent.is_empty(), "the card's ask lists nothing");
+    assert_eq!(quiet.week.rows, 2);
+
+    let asked = report_with_recent(&roots, None, None, 1_000, 0, 5);
+    let stall = asked.iter().find(|row| row.id == seat.id).expect("stall");
+    assert_eq!(stall.week.rows, 2, "the same count");
+    assert_eq!(stall.recent.len(), 2);
+    assert_eq!(stall.recent[0].at, 6, "newest first");
+    assert_eq!(stall.recent[0].outcome, "not_consented");
+    let labelled = &stall.recent[1];
+    assert_eq!(labelled.answered, json!("waiting_on_person"));
+    assert_eq!(labelled.followed.as_deref(), Some("worker_done"));
+    assert_eq!(labelled.agreed, Some(false));
+    assert_eq!(labelled.asked.get("worker"), Some(&json!("w-2")));
+    let one_row = report_with_recent(&roots, None, None, 1_000, 0, 1);
+    assert_eq!(one_row.iter().find(|row| row.id == seat.id).expect("stall").recent.len(), 1);
+    for other in asked.iter().filter(|row| row.id != seat.id) {
+        assert!(other.recent.is_empty(), "{} has no rows to list", other.id);
+        assert_eq!(other.days.len(), usize::try_from(WINDOW_DAYS).expect("days"), "{} still carries its days", other.id);
+    }
+}
+
+/// One reader of a seat's rows: the numbers, the days and the recent list
+/// are read from the file `rows_of` names, and a screen seat's session
+/// copies are read only when the root has no file.
+#[test]
+fn rows_of_names_the_root_first_and_the_session_copies_only_without_it() {
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().join("jev")];
+    let sessions = home.path().join("sessions");
+    let seat = &zerocode_core::jev::BROWSER;
+    write(&sessions.join("20260921-000000-1"), seat.ledger, &[json!({"at": 1, "outcome": "answered"})]);
+    let (found, rows) = rows_of(seat, &roots, Some(&sessions));
+    assert_eq!(found.as_deref(), Some(sessions.join("20260921-000000-1").join(seat.ledger).as_path()));
+    assert_eq!(rows.len(), 1);
+    write(&roots[0], seat.ledger, &[json!({"at": 2, "outcome": "answered"}), json!({"at": 3, "outcome": "answered"})]);
+    let (found, rows) = rows_of(seat, &roots, Some(&sessions));
+    assert_eq!(found.as_deref(), Some(roots[0].join(seat.ledger).as_path()));
+    assert_eq!(rows.len(), 2, "the root's rows, not the root's and the copies'");
+    assert_eq!(rows_of(seat, &roots[..0], None), (None, Vec::new()));
+}
+

@@ -4231,6 +4231,10 @@ function renderTabs() {
   const door = el("nav-agents");
   const pressed = String(activeTabId === "board");
   if (door.getAttribute("aria-pressed") !== pressed) door.setAttribute("aria-pressed", pressed);
+  // The Jev door beside it wears the same fact about its own tab.
+  const jevDoor = el("nav-jev");
+  const jevPressed = String(activeTabId === JEV_TAB.id);
+  if (jevDoor.getAttribute("aria-pressed") !== jevPressed) jevDoor.setAttribute("aria-pressed", jevPressed);
   // The machine figures ride along, bounded — a render is a fine moment to
   // notice they are stale, and a terrible one to spawn `lsof`.
   paintMachineFigures();
@@ -4914,6 +4918,7 @@ function setActiveTab(id) {
   helperClock.sync();
   browserMenuPoll.sync();
   resourcePoll.sync();
+  jevPoll.sync();
 }
 
 /* A tree back from the file may hold leaves whose tabs did not come back
