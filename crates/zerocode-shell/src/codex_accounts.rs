@@ -227,8 +227,7 @@ pub(crate) fn auth_fixture(account: &str, refreshed_at: &str, access: &str) -> S
     // base64url, no padding — the three segments `identity_from_auth`
     // needs before it will call this a login.
     fn segment(bytes: &[u8]) -> String {
-        const ALPHABET: &[u8] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
         let mut out = String::new();
         for chunk in bytes.chunks(3) {
             let mut held = 0u32;
