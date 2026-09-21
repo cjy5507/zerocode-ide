@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.1.10] — 2026-09-21
+
+_since v1.1.9 (34 commits)_
+
+### feat
+- feat(zo): `zo mcp add --project --trust` — consent is its own act, and its own document (t-5584)
+- feat(jev): the screen seats' auto rises on the walks it got right (t-5460)
+- feat(zo): `zo mcp list|get|add|remove|login|logout` — the configured servers, from outside a session
+
+### fix
+- fix(shell): the macOS permissions page shows what macOS answers this window (t-5587)
+- fix(accounts): the keychain says it does not know the account instead of inventing one (t-5419)
+- fix(emulator): one table says where adb and emulator live (t-5451)
+- fix(shell): the machine's hold names the window it belongs to (t-5444)
+- fix(jev): a walk under a recording seat says why it pressed nothing (t-5455)
+- fix(api): a wall another zo already paid for is answered before the request
+- fix(orchestration): a summons reads its options before it is written down
+- fix(window): Escape closes only what it reads, and the browser's restore record hears only the person
+- fix(jev): a gauge too old to refuse on is no wall in the summon options, and a summons nobody offered is no comparison (t-4839)
+- fix(emulator,ios): a subview two parents share is not a missing observation (t-5445)
+- fix(api,tools): a wall hours away ends the retry ladder at once, and a parked provider is not probed
+
+### perf
+- perf(jev): warm the wire at the doors a walk starts behind, not inside the walk
+
+### docs
+- docs(jev): the screen seats' auto landed — a 35-row window at 900‰ and one root ledger as the count
+- docs(jev): the screen seats' auto — walk-level agreed, one ledger under ~/.zo/jev, the ask deadline as the line
+- docs(jev): zo under a quota wall — the L0 ladder against an unreachable retry-after
+- docs(jev): the installed 1.1.9 browser seat answers in 242–290 ms after its cold first ask
+- docs(jev): what the installed 1.1.9 shows for the emulator and routing seats
+
+### test
+- test(api): the parked-window door's hint is compared in whole seconds
+
+
 ## [1.1.9] — 2026-09-21
 
 _since v1.1.8 (10 commits)_
