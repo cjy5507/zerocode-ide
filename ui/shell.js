@@ -11954,6 +11954,260 @@ function helperFollowsTail(list) {
   return !!list && list.scrollHeight - list.scrollTop - list.clientHeight <= HELPER_FOLLOW_SLACK_PX;
 }
 
+/* ---- Focus view: 한 턴의 도구 일을 요약 한 줄 뒤로 ----
+ *
+ * 확장 2.1.221의 「Focus view hides tool activity behind per-turn summaries
+ * with a live running-tool indicator」. 연속한 활동 행 — 도구 호출과 생각 —
+ * 이 한 묶음이 되고, 묶음의 머리가 「도구 호출 n회 · 실패 m」과 지금 나가
+ * 있는 호출 하나를 말한다. 사람의 말·답·시스템 줄은 활동이 아니므로 묶음을
+ * 닫는다: 그래서 한 묶음은 「한 턴이 한 일」과 같은 구간이다.
+ *
+ * 구성원은 목록의 직계 자식으로 **남는다**. 옮기지 않는 것이 요점이다 —
+ * 행의 열쇠(`data-turn`)로 잇고 지우는 `syncHelperTurns`의 회계도, t-110의
+ * 정체성 핀들도 모두 그 자리를 전제로 서 있다. 묶음 노드는 `data-turn`이
+ * 없어 그 회계에 보이지 않고, 접힘은 구성원의 `hidden` 한 비트다.
+ *
+ * 계수는 묶음이 들고 다닌다(`__calls`·`__failed`·`__live`). 폴마다 구성원을
+ * 다시 세는 대신 상태가 움직인 행 하나만 계상하므로(`accountFocusMember`),
+ * 한 폴이 치르는 값은 그 폴에 온 행과 아직 나가 있는 호출의 수에 비례한다. */
+
+/* 이 창의 모든 대화가 입는 한 값 — 전역 설정 `conversation_focus_view`.
+ * 스냅샷이 옮기고(`applyAgentSettingsSnapshot`), 머리의 단추가 쓴다. */
+let conversationFocusView = false;
+
+function focusViewOn() {
+  return conversationFocusView;
+}
+
+/* 토글이 움직였다. 서 있는 목록은 그 자리에서 따라가고 — 사람이 누른 그
+ * 페이지가 다음 폴을 기다리지 않게 — 아직 안 그려진 페이지는 제 다음 그림의
+ * `syncHelperTurns` 첫 줄에서 따라온다. */
+function repaintFocusView() {
+  const on = focusViewOn();
+  for (const list of document.querySelectorAll(".helper-turns")) applyFocusView(list, on);
+  for (const button of document.querySelectorAll(".worker-focus")) {
+    writeAttribute(button, "aria-pressed", on ? "true" : "false");
+  }
+}
+
+/* 설정을 쓰는 한 곳. 값은 먼저 화면에 서고(사람의 손끝은 왕복을 기다리지
+ * 않는다) 권위 있는 스냅샷이 돌아와 같은 값을 다시 놓는다. */
+function setConversationFocusView(on) {
+  conversationFocusView = on;
+  repaintFocusView();
+  void commitSetting("conversation_focus_view", "set_conversation_focus_view", { on });
+}
+
+/* 머리의 토글. 아이콘 단추라 이름을 두 번 단다(`labelButton`) — 손끝의
+ * 말풍선에게 한 번, 보조기술에게 한 번. */
+function focusViewButtonNode() {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "worker-focus";
+  button.appendChild(iconNode("list-filter"));
+  labelButton(button, t("worker.focusView", "집중 보기"));
+  button.setAttribute("aria-pressed", focusViewOn() ? "true" : "false");
+  button.addEventListener("click", () => setConversationFocusView(!focusViewOn()));
+  return button;
+}
+
+/* 묶음 머리 하나. 요약의 말과, 지금 나가 있는 호출을 말하는 자리 — 그 자리는
+ * 도구 행의 마크업 그대로(`.helper-tool-name` + `.helper-tool-arg`)라 규칙이
+ * 두 벌 되지 않는다. 계수는 여기서 0으로 시작한다. */
+function focusGroupNode() {
+  const group = document.createElement("article");
+  group.className = "helper-group is-step";
+  const cap = document.createElement("button");
+  cap.type = "button";
+  cap.className = "helper-group-cap";
+  const words = document.createElement("span");
+  words.className = "helper-group-words";
+  const live = document.createElement("span");
+  live.className = "helper-group-live";
+  const name = document.createElement("span");
+  name.className = "helper-tool-name";
+  const arg = document.createElement("span");
+  arg.className = "helper-tool-arg";
+  live.append(name, arg);
+  live.hidden = true;
+  cap.append(words, live);
+  group.appendChild(cap);
+  group.__calls = 0;
+  group.__failed = 0;
+  group.__live = 0;
+  group.__members = 0;
+  group.__liveRow = null;
+  group.__open = false;
+  cap.addEventListener("click", () => openFocusGroup(group, !group.__open));
+  return group;
+}
+
+/* 활동 행인가 — 도구 호출과 생각만이 묶인다. 스트리밍 행과 상태 행은
+ * `data-turn`이 없어 부르는 쪽에서 이미 걸러진다. */
+function isFocusActivityRow(row) {
+  return row.classList.contains("is-tool") || row.classList.contains("is-thinking");
+}
+
+/* 행이 지금 계상되는 칸. 생각 행은 호출이 아니므로 제 칸을 따로 갖는다. */
+function focusRowState(row) {
+  if (row.classList.contains("is-thinking")) return "thought";
+  if (row.classList.contains("is-failed")) return "failed";
+  if (row.classList.contains("is-live")) return "live";
+  return "done";
+}
+
+/* 계수 한 칸을 옮긴다 — 붙을 때 +1, 상태가 바뀌거나 떨어질 때 -1. 셋을 한
+ * 곳에서 옮기므로 「호출 수」와 「실패 수」가 서로 다른 셈을 하지 못한다. */
+function tallyFocusState(group, state, by) {
+  if (state === undefined || state === "thought") return;
+  group.__calls += by;
+  if (state === "failed") group.__failed += by;
+  if (state === "live") group.__live += by;
+}
+
+/* 한 행이 바뀐 만큼만 묶음의 계수를 옮긴다 — 행당 O(1). */
+function accountFocusMember(group, row) {
+  const after = focusRowState(row);
+  if (row.__focusState === after) return;
+  tallyFocusState(group, row.__focusState, -1);
+  tallyFocusState(group, after, 1);
+  row.__focusState = after;
+  if (after === "live") group.__liveRow = row;
+  else if (group.__liveRow === row) group.__liveRow = null;
+}
+
+/* 앞이 잘려 나가는 행 하나를 묶음에서 뺀다. 마지막 구성원이 떠나면 묶음
+ * 노드도 그 자리에서 사라진다 — 빈 머리가 남으면 그것이 곧 거짓 요약이다. */
+function dropFocusMember(row) {
+  const group = row.__group;
+  if (!group) return;
+  tallyFocusState(group, row.__focusState, -1);
+  if (group.__liveRow === row) group.__liveRow = null;
+  row.__group = null;
+  row.__focusState = undefined;
+  group.__members -= 1;
+  if (group.__members <= 0) group.remove();
+}
+
+/* 새로 선 활동 행 하나를 열린 묶음에 들인다 — 없으면 이 행 바로 앞에 새
+ * 묶음을 세운다. */
+function attachFocusRow(list, row) {
+  let group = list.__focusOpen;
+  if (!group || !group.isConnected) {
+    group = focusGroupNode();
+    list.insertBefore(group, row);
+    list.__focusOpen = group;
+  }
+  row.classList.add("is-grouped");
+  row.__group = group;
+  group.__members += 1;
+  accountFocusMember(group, row);
+  writeHidden(row, !group.__open);
+  paintFocusGroup(group);
+}
+
+/* 새로 선 행 하나가 묶음 회계에 들어가거나, 묶음을 닫는다. */
+function holdFocusRow(list, row) {
+  if (isFocusActivityRow(row)) attachFocusRow(list, row);
+  else list.__focusOpen = null;
+}
+
+/* 머리가 말할 살아 있는 호출 한 행 — 가장 최근에 나간 것. 계상이 그때그때
+ * 적어 두므로 보통은 물어보기만 하면 되고, 형제가 먼저 끝나 비었을 때만
+ * 구성원을 따라가며 다시 찾는다(폴마다가 아니라 그 한 번). */
+function liveFocusMember(group) {
+  const held = group.__liveRow;
+  if (held && held.__group === group && held.__focusState === "live") return held;
+  let row = group.nextElementSibling;
+  while (row && row.__group === group) {
+    if (row.__focusState === "live") {
+      group.__liveRow = row;
+      return row;
+    }
+    row = row.nextElementSibling;
+  }
+  group.__liveRow = null;
+  return null;
+}
+
+/* 나가 있는 호출 하나를 머리가 말한다 — 도구 행이 이미 쓴 낱말 그대로
+ * 옮겨 적는다(`dressToolTurn`이 `toolWords`로 쓴 그 두 칸), 같은 규칙을
+ * 두 번 돌리지 않기 위해서다. */
+function paintFocusGroupLive(group) {
+  const live = group.querySelector(":scope > .helper-group-cap > .helper-group-live");
+  const row = group.__live > 0 ? liveFocusMember(group) : null;
+  writeHidden(live, row === null);
+  if (!row) return;
+  writeTextContent(live.querySelector(".helper-tool-name"), row.querySelector(".helper-tool-name")?.textContent ?? "");
+  writeTextContent(live.querySelector(".helper-tool-arg"), row.querySelector(".helper-tool-arg")?.textContent ?? "");
+}
+
+/* 계수에서 말과 클래스와 live 표시를 — 바뀔 때만 쓴다. 조용한 폴은
+ * mutation 0이어야 하므로 여기의 모든 쓰기는 문지기를 지난다. 머리의 이름은
+ * 펼침 여부에만 달려 있으니 그 비트가 움직일 때만 다시 단다. */
+function paintFocusGroup(group) {
+  const cap = group.querySelector(":scope > .helper-group-cap");
+  const calls = group.__calls;
+  const words = calls === 0
+    ? t("worker.focusThinking", "생각")
+    : t("worker.focusCalls", "도구 호출 {{n}}회", { n: calls }) +
+      (group.__failed > 0 ? t("worker.focusFailed", " · 실패 {{n}}", { n: group.__failed }) : "");
+  writeTextContent(cap.querySelector(".helper-group-words"), words);
+  const open = group.__open === true;
+  writeAttribute(cap, "aria-expanded", open ? "true" : "false");
+  if (group.__labelled !== open) {
+    labelButton(cap, open
+      ? t("worker.focusCollapse", "도구 호출 접기")
+      : t("worker.focusExpand", "도구 호출 펼치기"));
+    group.__labelled = open;
+  }
+  // 점은 묶음의 상태다: 하나라도 나가 있으면 액센트, 아니면 실패가 있으면
+  // 멈춤의 잉크, 아니면 초록 — 도구 행의 규칙을 그대로 입는다.
+  writeClass(group, "is-live", group.__live > 0);
+  writeClass(group, "is-failed", group.__live === 0 && group.__failed > 0);
+  writeClass(group, "is-done", group.__live === 0 && group.__failed === 0);
+  paintFocusGroupLive(group);
+}
+
+/* 묶음을 펼치거나 접는다 — 구성원만 따라가며, 사람의 한 동작에만. */
+function openFocusGroup(group, open) {
+  group.__open = open;
+  let row = group.nextElementSibling;
+  while (row && row.__group === group) {
+    writeHidden(row, !open);
+    row = row.nextElementSibling;
+  }
+  paintFocusGroup(group);
+}
+
+/* 묶음을 모두 거둔다 — 구성원은 제자리에 남고 표시만 벗는다. */
+function clearFocusGroups(list) {
+  for (const group of list.querySelectorAll(":scope > .helper-group")) group.remove();
+  for (const row of list.querySelectorAll(":scope > .is-grouped")) {
+    row.classList.remove("is-grouped");
+    row.__group = null;
+    row.__focusState = undefined;
+    writeHidden(row, false);
+  }
+  list.__focusOpen = null;
+}
+
+/* 목록 하나를 토글의 지금 값에 맞춘다. 켤 때만 목록을 **한 번** 훑고, 그
+ * 값이 이미 적용되어 있으면 아무것도 만지지 않는다 — 그래서 폴마다 불러도
+ * 조용하다. */
+function applyFocusView(list, on) {
+  if (list.__focus === on) return;
+  clearFocusGroups(list);
+  list.__focus = on;
+  if (!on) return;
+  for (const row of [...list.children]) {
+    // 묶음 머리·스트리밍 행·상태 행은 턴이 아니다.
+    if (row.dataset.turn === undefined) continue;
+    if (isFocusActivityRow(row)) attachFocusRow(list, row);
+    else list.__focusOpen = null;
+  }
+}
+
 /* 전사를 장부에 맞춘다 — 통째로 다시 세우지 않고.
  *
  * 폴마다 400턴을 `replaceChildren`으로 재생성하던 것이 이 페이지의 무게였다:
@@ -11966,7 +12220,12 @@ function helperFollowsTail(list) {
  * 거짓말이 된다). */
 function syncHelperTurns(list, run) {
   const held = run.helper.turns;
+  // 이 목록이 입고 있는 값이 토글의 값과 다르면 먼저 맞춘다 — 같으면
+  // 아무것도 만지지 않으므로 조용한 폴은 여기서 값을 치르지 않는다.
+  const focus = focusViewOn();
+  applyFocusView(list, focus);
   if (!held.length) {
+    clearFocusGroups(list);
     for (const row of list.querySelectorAll(":scope > [data-turn]")) row.remove();
     list.__lastAnswer = null;
     syncStreamingTurns(list, run);
@@ -11977,9 +12236,24 @@ function syncHelperTurns(list, run) {
   const beforeHeight = list.scrollHeight;
   const beforeTop = list.scrollTop;
   let dropped = false;
-  while (list.firstElementChild && Number(list.firstElementChild.dataset.turn) < first) {
-    list.firstElementChild.remove();
+  // 앞에서 지워지는 것은 장부가 놓은 턴들이다. 그 사이에 선 묶음 머리는
+  // `data-turn`이 없으므로 건너뛰고(`Number(undefined) < first`는 거짓이라
+  // 예전 루프는 거기서 멈춰 상한을 잃었다), 턴이 아닌 다른 행 — 스트리밍과
+  // 상태 — 에서는 멈춘다: 그 뒤로는 지울 턴이 없다. 지워지는 행은 제 묶음의
+  // 계수에서 빠지고, 비게 된 묶음은 그 자리에서 사라진다.
+  let front = list.firstElementChild;
+  while (front) {
+    const next = front.nextElementSibling;
+    if (front.dataset.turn === undefined) {
+      if (!front.classList.contains("helper-group")) break;
+      front = next;
+      continue;
+    }
+    if (Number(front.dataset.turn) >= first) break;
+    dropFocusMember(front);
+    front.remove();
     dropped = true;
+    front = next;
   }
   if (dropped && !follow) {
     list.scrollTop = Math.max(0, beforeTop - (beforeHeight - list.scrollHeight));
@@ -12006,13 +12280,27 @@ function syncHelperTurns(list, run) {
     if (before?.classList.contains("is-thinking") && before.__turn?.thoughtMs !== undefined) {
       dressThoughtRow(before, before.__turn);
     }
+    // 활동 행은 열린 묶음에 들고, 말한 행은 묶음을 닫는다 — 앞줄의 이웃을
+    // 물은 뒤라야 묶음 머리가 그 사이에 끼어들지 않는다.
+    if (focus) holdFocusRow(list, row);
   }
   // A result that joined its call after the row stood, a word that closed
   // the calls before it, a run that ended: the rows still out are dressed
   // again — and only those, so a settled row is never touched.
+  // 이 루프가 도는 행이 곧 상태가 움직일 수 있는 행 전부다(살아 있던 호출이
+  // 결과를 받아 done/failed가 되는 자리가 여기뿐이다). 그래서 묶음의 계수도
+  // 여기서만 옮기면 되고, 목록을 다시 훑을 이유가 없다. 행은 문서 차례로
+  // 오므로 한 묶음의 행들은 붙어 있고, 묶음은 한 번만 다시 그린다.
+  let touched = null;
   for (const row of list.querySelectorAll(":scope > .is-tool.is-live")) {
     dressToolTurn(row, row.__turn, run, spoken);
+    const group = row.__group;
+    if (!group) continue;
+    accountFocusMember(group, row);
+    if (touched && group !== touched) paintFocusGroup(touched);
+    touched = group;
   }
+  if (touched) paintFocusGroup(touched);
   // A turn that arrived stands whole, the moment it arrived — the terminal
   // already showed these words as they were said, and a page that released
   // them again a word at a time (09-16 → 09-20) only lagged behind it. The
@@ -12529,9 +12817,12 @@ function workerHeadNode(run) {
   uses.className = "worker-uses";
   const state = document.createElement("span");
   state.className = "worker-state";
-  // 이름은 왼쪽, 나머지는 오른쪽의 연한 메타 한 덩이(t-2973).
+  // 이름은 왼쪽, 나머지는 오른쪽의 연한 메타 한 덩이(t-2973). 그 덩이의
+  // 맨 앞에 Focus view의 토글이 선다 — 턴을 가진 페이지에만: 명령 실행의
+  // 페이지가 그리는 것은 화면이지 턴이 아니라, 접을 것이 없다.
   const meta = document.createElement("span");
   meta.className = "worker-meta";
+  if (run.helper) meta.appendChild(focusViewButtonNode());
   meta.append(clock, uses, state);
   head.append(mark, name, meta);
   updateWorkerHead(head, run);
@@ -12540,6 +12831,10 @@ function workerHeadNode(run) {
 
 function updateWorkerHead(head, run) {
   writeTextContent(head.querySelector(".worker-mark"), agentVoice(run.agent).glyph);
+  // 토글의 눌림은 창의 한 값이라, 다른 페이지에서 바뀌었어도 이 머리가
+  // 다음 그림에 따라온다 — 값이 움직였을 때만 쓴다.
+  const focus = head.querySelector(".worker-focus");
+  if (focus) writeAttribute(focus, "aria-pressed", focusViewOn() ? "true" : "false");
   head.querySelector(".worker-name").textContent = run.name;
   head.querySelector(".worker-elapsed").textContent = workerElapsedWords(run);
   head.querySelector(".worker-uses").textContent = toolUsesWords(run.toolCalls ?? 0);

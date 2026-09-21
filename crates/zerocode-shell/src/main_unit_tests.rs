@@ -13895,6 +13895,70 @@ fn deleting_canonical_documents_never_reimports_consumed_legacy_values() {
     );
 }
 
+/// Focus view is one remembered bit, and it is the conversation's alone.
+///
+/// The toggle stands on the conversation's own head rather than in the
+/// settings window — a person reaches for it while reading, the way the
+/// extension keeps it in its command menu (2.1.221) — so this is the gate
+/// that says the bit still travels the canonical road: the command patches
+/// the shared document, the document survives a restart, and the window
+/// applies the authoritative snapshot rather than a second copy of the value.
+#[test]
+fn the_conversation_focus_view_is_one_remembered_bit() {
+    let backend = shipped_backend();
+    let (shipped, _) = backend.split_once("#[cfg(test)]").unwrap_or((backend, ""));
+    assert!(
+        shipped.contains("            set_conversation_focus_view,"),
+        "the toggle is not on the command list, so saving it fails at runtime"
+    );
+    // OFF unless this machine has said otherwise: a transcript's default is
+    // the whole story, and the fold is what a person reaches for when a turn
+    // grows long.
+    assert!(
+        block_after(shipped, "impl Default for SettingsDocument {")
+            .contains("conversation_focus_view: false,"),
+        "a machine that has never been asked now folds its conversations"
+    );
+
+    let directory = tempfile::tempdir().expect("settings sandbox");
+    let repository = settings::SettingsRepository::new(directory.path());
+    repository
+        .write_json(SETTINGS_DOCUMENT_FILE, &SettingsDocument::default())
+        .expect("initial settings");
+    assert!(
+        !load_settings(&repository)
+            .expect("fresh settings")
+            .document
+            .conversation_focus_view
+    );
+    mutate_settings(&repository, |settings| {
+        settings.conversation_focus_view = true;
+        Ok(())
+    })
+    .expect("save the focus view");
+    drop(repository);
+
+    let restarted = settings::SettingsRepository::new(directory.path());
+    assert!(
+        load_settings(&restarted)
+            .expect("next boot settings")
+            .document
+            .conversation_focus_view,
+        "the conversation's focus view did not survive a restart"
+    );
+
+    assert_canonical_setting_round_trip(
+        backend,
+        window_source(),
+        "set_conversation_focus_view",
+        "setting_key::CONVERSATION_FOCUS_VIEW",
+        "settings.conversation_focus_view = on;",
+        "function setConversationFocusView(on) {",
+        "conversation_focus_view",
+        "conversationFocusView = snapshot.conversation_focus_view === true;",
+    );
+}
+
 #[test]
 fn non_default_settings_are_the_next_boot_snapshot() {
     let directory = tempfile::tempdir().expect("settings sandbox");
@@ -17027,6 +17091,13 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.thinking",
         // Every row announces what it is (2.1.272): a tool row by its tool.
         "worker.toolRow",
+        // Focus view (2.1.221): the summary's words, and the toggle's name.
+        "worker.focusView",
+        "worker.focusCalls",
+        "worker.focusFailed",
+        "worker.focusThinking",
+        "worker.focusExpand",
+        "worker.focusCollapse",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -17069,6 +17140,22 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
                 "worker.openInBrowser",
                 "worker.openInApp",
             ],
+        ),
+        // The summary a folded turn wears, and the cap's two names — all of
+        // them written from the group's own counters, in one place.
+        (
+            "function paintFocusGroup(group) {",
+            vec![
+                "worker.focusCalls",
+                "worker.focusFailed",
+                "worker.focusThinking",
+                "worker.focusExpand",
+                "worker.focusCollapse",
+            ],
+        ),
+        (
+            "function focusViewButtonNode() {",
+            vec!["worker.focusView"],
         ),
     ];
     for (opens, wanted) in reads {
@@ -17199,6 +17286,12 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ".helper-preview-menu {",
         ".helper-copy {",
         ".is-chat-page .helper-said :not(pre) > code {",
+        // Focus view's own rules (2.1.221).
+        ".helper-group {",
+        ".helper-group-cap {",
+        ".helper-group-words {",
+        ".helper-group-live {",
+        ".worker-focus {",
     ];
     let mut offenders = Vec::new();
     for opens in gained {

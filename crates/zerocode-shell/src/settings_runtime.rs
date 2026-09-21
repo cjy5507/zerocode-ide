@@ -121,6 +121,7 @@ pub(super) mod setting_key {
     pub const VAULT_SESSION_LIMIT: &str = "vault.sessionLimit";
     pub const ARTIFACTS_RETENTION_DAYS: &str = "artifacts_retention_days";
     pub const DIFF_SIDE_BY_SIDE: &str = "diff_side_by_side";
+    pub const CONVERSATION_FOCUS_VIEW: &str = "conversation_focus_view";
     pub const PANEL_WIDTHS: &str = "panel_widths";
     pub const WORKTREE_PREFS: &str = "worktree_prefs";
     pub const NOTIFICATIONS: &str = "notifications";
@@ -2206,6 +2207,12 @@ pub(super) struct SettingsDocument {
     pub(super) vault_session_limit: usize,
     #[serde(default = "enabled_by_default")]
     pub(super) diff_side_by_side: bool,
+    /// Whether a conversation folds each turn's tool work behind one summary
+    /// row (the extension's 「Focus view」, 2.1.221). OFF unless this person
+    /// has asked for it: the transcript's default is the whole story, and
+    /// the fold is the thing they reach for when a turn grows long.
+    #[serde(default)]
+    pub(super) conversation_focus_view: bool,
     #[serde(default)]
     pub(super) window_material: WindowMaterial,
     #[serde(default)]
@@ -2369,6 +2376,7 @@ impl Default for SettingsDocument {
             artifacts_retention_days: 0,
             vault_session_limit: default_vault_session_limit(),
             diff_side_by_side: true,
+            conversation_focus_view: false,
             window_material: WindowMaterial::default(),
             default_agent: zerocode_core::DefaultAgentPreference::Auto,
             agent_teams_mode: TeamsMode::default(),
