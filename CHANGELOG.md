@@ -1,5 +1,63 @@
 # Changelog
 
+## [1.1.12] — 2026-09-21
+
+_since v1.1.11 (48 commits)_
+
+### feat
+- feat(release): the home-path row reads a Windows path too
+- feat(release): a re-entry gate for private values — one table, one recipe
+- feat(composer): the context meter is a ring you can also press to empty
+- feat(window): a turn's tool work stands behind one summary, and the summary counts without counting
+- feat(settings): a conversation remembers which way it is read
+- feat(window): the composer counts the helpers running inside its pane
+- feat(window): every row says who spoke it, and `/copy` hands the last answer over
+- feat(window): the plan stands on the card that asks about it, and the refusal takes a reason
+- feat(ask): a plan permission carries its plan, and its refusal carries the words
+- feat(catalog): each console names its own word for winning context back
+- feat(wire): a session says how full its context is, in the two numbers it was given
+- feat(window): words typed mid-turn wait in the window, not in a pty nobody can see
+
+### fix
+- fix(zo): the OpenAI account follows the ZeroCode window, wherever zo runs
+- fix(emulator): the probe's cold boot spells the snapshot flag as the one constant
+- fix: the fixtures the gate reads leave docs/ too, and one carried a real address
+- fix(emulator): an Android device that leaves the bridge is rested on, not hammered (t-5761)
+- fix: nothing in the tree reads a design note, so a clone without docs/ builds
+- fix(release): the gate's own fixtures live in the one table that waives them
+- fix(emulator): an AVD is never launched onto a snapshot the emulator refused
+- fix(window): the conversation list scrolls itself, never the page
+- fix(conversation): the composer wears the state after the hook moves it, and the pins read the road as it is
+- fix(composer): the queue gates on the pane the words go to, not on a helper's own running
+- fix(integration): the merged console test closes its first arm, the design note carries lanes B and C, and the other-pane pin waits out the follow-up read
+
+### perf
+- perf(transcript): the context reader turns lines away by the byte before it parses one
+
+### docs
+- docs(agents): what never goes into git, as a standing rule beside the gate
+- docs(design): Windows like the Mac — the builder is the first blocker, then unsigned installers and a two-platform feed
+- docs: the abide borrow candidates and the model-catalog de-hardcoding plan
+- docs(plans): the third wave's order is written down before it is placed
+
+### test
+- test(window): the queue suite waits for the wire's first read, not a clock
+- test(window): the fold is pinned by what it must not lose, and the wave's order is written down
+
+### style
+- style(shell): the auth fixture's alphabet is laid out the way the root rustfmt lays it
+
+### chore
+- chore(release): the gate's cost is a measurement, not an estimate
+- chore(tools): the moved rulers tell you where they are now
+- chore: the tree names no person, machine or office before it goes public
+- chore(zo): the scoreboard baseline is a measurement, not a note — it lives under zo-ide/bench
+- chore: keep design notes out of the repository before it goes public
+
+### release
+- release: the lane publishes the source snapshot after the release, and says so when it cannot
+- release: the public source repository carries one squashed commit per release
+
 ## [1.1.11] — 2026-09-21
 
 _since v1.1.10 (19 commits)_
