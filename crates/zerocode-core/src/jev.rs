@@ -756,6 +756,36 @@ pub const PLACEMENT: JevUse = JevUse {
 /// worker. `auto` records too: what a later stage would promote on is the row
 /// beside what the summons actually did and what became of that worker, and
 /// no such judge exists yet.
+///
+/// The `agreed` rule (t-5873). The answer agreed when it named the agent this
+/// summons actually landed on — `--agent` as the quota gate left it, which is
+/// what the pane really ran. The label is written once, at the summons, and
+/// never revised: what a coordinator does NEXT is another summons with its
+/// own row.
+///
+/// Three consequences worth saying out loud, because each looked like a
+/// mislabel until it was read:
+///
+/// - A coordinator who tries a second agent on the same work files a
+///   `--retry-of` summons, and that row is labeled against ITS own agent, not
+///   against the one it replaces. So a judgment that named `codex` for a task
+///   a person then re-ran on `claude` disagrees with the retry and agreed
+///   with nothing — correctly: the coordinator's choice for THAT summons was
+///   `claude`. The state says a retry is what it is (`replaces`), so the
+///   judgment is asked under the same fact the coordinator had.
+/// - `--agent auto` has no coordinator's word to agree with — the seat's
+///   answer WAS the word — so the row carries no mark at all
+///   (`SummonShadow::auto`). Eighteen of this machine's fifty-six rows are
+///   such summonses and none of them is in the agreement.
+/// - A summons whose own agent was never offered is not a comparison either;
+///   the row says [`crate::summon_choice::NOT_OFFERED`] under
+///   [`crate::summon_choice::NOT_COMPARED_KEY`] instead of a mark.
+///
+/// What the rule does NOT count as disagreement: a person taking the pane
+/// over (`taken_over`), the worker being stopped, or the work failing. Those
+/// are facts about what happened after, and this seat is judged on whether
+/// it picks what the coordinator picks — not on whether the coordinator was
+/// right.
 pub const SUMMON: JevUse = JevUse {
     id: "summon",
     setting: "summonChoice",

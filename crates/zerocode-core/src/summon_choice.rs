@@ -18,19 +18,30 @@
 //! the gate would summon it, so the choice has to be able to name it.
 //!
 //! **What this window says about an agent, and what it does not.** The criteria
-//! carry an agent's id and the room its provider has left, and nothing else.
-//! There is no table here of which agent is good at what, for the same reason
-//! `agent-list` refuses to keep one: such a table is stale the day a vendor
-//! ships, and availability is the only thing a machine can keep honestly. What
-//! an agent IS, is the judge's to know — that is the whole reason this is a
-//! judgment rather than a lookup.
+//! carry an agent's id, the room its provider has left, and this ledger's own
+//! record of it — how many times the coordinators here chose it, what became
+//! of that work, how long it took, and what its newest summons was for
+//! ([`AgentRecord`]). There is still no table of which agent is good at what,
+//! for the same reason `agent-list` refuses to keep one: such a table is
+//! stale the day a vendor ships. A record is the opposite of that table —
+//! nobody types it, it is derived from the summonses that happened, and it
+//! says "this window did this" and never "this agent is that". What an agent
+//! IS, is the judge's to know; what this machine has SEEN of it is the
+//! judge's to be told, because on 2026-09-21 it was not: eleven of seventeen
+//! disagreements named an agent this ledger had never summoned at all.
 //!
 //! **What the state is.** The shape of the summons, not the summons: the head
-//! of its brief, how long the whole brief was, and the three placement facts
-//! the ledger already knows. The head is what bands a task — it says what is
-//! wanted before it starts listing the constraints it is wanted under — and
-//! it is the only text that leaves, cut to the use's cap here as well as at
-//! the door, so what a row records beside an answer is what was asked about.
+//! of its brief, how long the whole brief was, the three placement facts the
+//! ledger already knows, and the task's own attempt history. The head is what
+//! bands a task — it says what is wanted before it starts listing the
+//! constraints it is wanted under — and it is the only text that leaves, cut
+//! to the use's cap here as well as at the door, so what a row records beside
+//! an answer is what was asked about. Which is also why the head is taken
+//! from the TASK and not from the summons' prompt where there is a task
+//! ([`crate::orchestration`]'s `summon_words`): a prompt opens with the
+//! house's standing rules, and on the later half of 2026-09-21 those rules
+//! filled all 1,200 characters of the cap, so the question was asked about
+//! work it had not been shown.
 //!
 //! **What the state deliberately leaves out** is the agent the coordinator
 //! typed. A question that shows the answer somebody already wrote down is not
@@ -54,7 +65,7 @@ const QUESTION: &str = "summon";
 
 /// The words of the question. They are ours: a summons's own text reaches the
 /// model as state, never as an instruction.
-const INSTRUCTIONS: &str = "An agent is about to be summoned to carry out the work described in `brief`, in a pane of its own. Choose which of the agents offered should be the one. Judge what the work asks for — how hard it is, how much of a codebase it has to hold at once, how many files it will touch, whether it has to measure something and report numbers — against what each agent is, and against how much of its provider's quota this machine has already spent. Every agent offered can be started right now.";
+const INSTRUCTIONS: &str = "An agent is about to be summoned to carry out the work described in `brief`, in a pane of its own. Choose which of the agents offered should be the one. Judge what the work asks for — how hard it is, how much of a codebase it has to hold at once, how many files it will touch, whether it has to measure something and report numbers, and whether earlier attempts on it already failed — against what each agent is, and against how much of its provider's quota this machine has already spent. Every agent offered can be started right now. Each option also carries this machine's own record of that agent: how often this window summoned it, how much of that work reached `worker_done`, and how long it took. That record is the only measured evidence here about how an agent actually does, and how much of it there is counts as much as what it says: a record built on a handful of summonses is weak evidence about the next one, however clean it looks, while one built on hundreds is strong. An agent with no record has not been shown to carry work like this, which is not the same as having been shown to.";
 
 /// What an option says about an agent whose gauge this window has read.
 const ROOM_READ: &str = "{agent}. {spent}% of its {window} quota is already spent on this machine.";
@@ -69,23 +80,75 @@ const ROOM_UNREAD: &str =
 /// agent — hindsight the window has for free: which agent its coordinators
 /// actually chose, and for what. The count is the ledger's, bounded by
 /// retention; the words are the newest task's title.
-const HISTORY_SOME: &str = " This window has summoned it {launched} times before; its newest summons here was for: {brief}";
+///
+/// The count is said AGAINST the offered set's own total, not alone. A bare
+/// "16 times" reads as experience and a bare "266 times" reads as more of
+/// the same; "16 of 536" and "266 of 536" are the sixteen-fold difference
+/// they actually are. Measured: with the counts bare, the replay named a
+/// five-summons agent over a 266-summons one on fifteen of fifty-four rows
+/// (t-5873).
+const HISTORY_SOME: &str = " This window has summoned it {launched} of the {between} times it summoned any of these agents; its newest summonses here were for: {briefs}";
 
 /// What an option adds about an agent this ledger has never summoned.
-const HISTORY_NONE: &str = " This window has never summoned it.";
+///
+/// It says the absence, rather than leaving a silent option to read as a
+/// clean slate. 2026-09-21 is why: `qwen-code` had carried nothing on this
+/// machine and the judgment named it for eleven of seventeen disagreements,
+/// against a `claude` this ledger had summoned 265 times.
+const HISTORY_NONE: &str =
+    " This window has never summoned it, so nothing this machine measured says how it does.";
 
-/// How much of the newest task's title an option carries.
+/// What an option adds about how the work this ledger gave the agent WENT —
+/// the other half of the hindsight: a count of summonses says the
+/// coordinators kept choosing it, and says nothing about what came back.
+///
+/// Only the summonses whose work has ENDED are in it. An open dispatch has
+/// no outcome yet, and folding it in either direction would be a number
+/// about nothing.
+const RECORD_SOME: &str = " Of the {carried} of those whose work has ended, {finished} reached worker_done, a median {minutes} minutes of work each.";
+
+/// What an option says where an agent's summonses here carried no written
+/// task at all — a pane somebody opened to work with by hand.
+const NO_TASK: &str = "panes summoned with no task";
+
+/// What an option adds about an agent this ledger has summoned but whose
+/// work has not ended — a first summons still running is not a record.
+const RECORD_PENDING: &str =
+    " None of that work has ended yet, so how it goes is still unmeasured here.";
+
+/// How much of a newest task's title an option carries.
 pub const SUMMON_RECENT_BRIEF_CHAR_CAP: usize = 160;
 
+/// How many of an agent's newest tasks an option names.
+///
+/// One was not enough. What the coordinators here actually follow is a rule
+/// about the KIND of work — measuring goes to one agent, designing to
+/// another, a small errand to a third — and a single title is an anecdote
+/// where three are a pattern. Measured over the replay (t-5873): one title
+/// left thirteen of thirty-three rows naming a five-summons agent for work
+/// this window has always given a two-hundred-summons one.
+pub const SUMMON_RECENT_BRIEFS: usize = 3;
+
+/// What separates the titles an option lists.
+const BRIEF_SEPARATOR: &str = "; ";
+
 /// The state's keys, in the order the fingerprint reads them.
-const STATE_KEYS: [&str; 5] = ["brief", "briefChars", "worktree", "replaces", "task"];
+const STATE_KEYS: [&str; 7] = [
+    "brief",
+    "briefChars",
+    "worktree",
+    "replaces",
+    "task",
+    "attempts",
+    "failures",
+];
 
 /// The version of the words above. Bump it when any of them changes: a
 /// judgment read under one wording is not evidence about another. The test
 /// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`],
 /// so changing a word without bumping the version is a red test rather than a
 /// quiet drift.
-pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 2;
+pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 3;
 
 /// The fewest options that make a choice. One agent is not a question, and a
 /// question asked where there was nothing to decide is a row that says the
@@ -131,19 +194,15 @@ pub struct Summonable {
     /// Which window that number describes (`session`, `weekly`, `monthly`),
     /// as the quota table spells it.
     pub window: Option<&'static str>,
-    /// How many summonses this ledger has carried for it — every run it still
-    /// holds, so the number is bounded by retention and says only "accepted
-    /// here that many times", never "good at".
-    pub launched: usize,
-    /// The title of the task its newest summons here carried, when it
-    /// carried one: what this window last found it fit for, in the
-    /// coordinator's own words. Cut to [`SUMMON_RECENT_BRIEF_CHAR_CAP`].
-    pub recent_brief: Option<String>,
+    /// What this ledger's own dealings with the agent came to — built by
+    /// [`records`] and by nothing else.
+    pub record: AgentRecord,
 }
 
 impl Summonable {
-    /// What this option says about itself.
-    fn means(&self) -> String {
+    /// What this option says about itself, against the offered set's own
+    /// total of summonses ([`HISTORY_SOME`]).
+    fn means(&self, between: usize) -> String {
         let room = match (self.spent_percent, self.window) {
             (Some(spent), Some(window)) => ROOM_READ
                 .replace("{agent}", &self.id)
@@ -151,20 +210,155 @@ impl Summonable {
                 .replace("{window}", window),
             _ => ROOM_UNREAD.replace("{agent}", &self.id),
         };
-        let history = match (self.launched, self.recent_brief.as_deref()) {
-            (0, _) => HISTORY_NONE.to_string(),
-            (launched, brief) => HISTORY_SOME
-                .replace("{launched}", &launched.to_string())
-                .replace(
-                    "{brief}",
-                    &crate::jev::door::cut(
-                        brief.unwrap_or("a pane summoned with no task"),
-                        Cap::Chars(SUMMON_RECENT_BRIEF_CHAR_CAP),
-                    ),
-                ),
-        };
-        room + &history
+        room + &self.record.means(between)
     }
+}
+
+/// One summons this ledger carried, flattened to the facts [`records`] reads:
+/// which agent it went to, when its pane opened, and what became of the work
+/// it was given.
+///
+/// Public, and `serde`, because the arithmetic has two feeders and may have
+/// only one copy of itself: the window's own walk over the ledger
+/// ([`crate::orchestration::summonable`]), and the replay that reads the same
+/// rows out of the authority store to measure a rubric against summonses
+/// that already happened (`tools/summon-replay`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CarriedSummons {
+    /// The agent the summons landed on.
+    pub agent: String,
+    /// When its pane opened — what orders "newest".
+    pub started_ms: i64,
+    /// When the work it was given ended, while it has. `None` is a dispatch
+    /// still open, and a summons that carried no task at all.
+    pub ended_ms: Option<i64>,
+    /// Whether that work reached `worker_done`. `Some(false)` is a dispatch
+    /// that ended without a word; `None` is one that has not ended.
+    pub succeeded: Option<bool>,
+    /// The title of the task it carried, when it carried one.
+    pub title: Option<String>,
+}
+
+/// What this ledger's own history says about one agent: how often the
+/// coordinators here chose it, what became of that work, and how long it
+/// took them.
+///
+/// Every number is this machine's, bounded by retention — a run the sweep
+/// has taken is a run this ledger no longer holds — and none of it is a
+/// claim about the agent. "This window summoned it 265 times and 121 of
+/// those reached `worker_done`" is a fact about this window; "claude is good
+/// at Rust" is the table this file refuses to keep.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRecord {
+    /// How many summonses this ledger has carried for it.
+    pub launched: usize,
+    /// How many of those gave it work that has since ENDED — the only ones
+    /// anything is known about.
+    pub carried: usize,
+    /// How many of THOSE reached `worker_done`.
+    pub finished: usize,
+    /// The median wall time of the ended ones, in whole minutes.
+    pub median_minutes: Option<u64>,
+    /// The titles of the tasks its newest summonses here carried, newest
+    /// first — what this window keeps finding it fit for, in the
+    /// coordinators' own words. At most [`SUMMON_RECENT_BRIEFS`] of them,
+    /// each cut to [`SUMMON_RECENT_BRIEF_CHAR_CAP`].
+    pub recent_briefs: Vec<String>,
+}
+
+impl AgentRecord {
+    /// What an option says about this record — the history, and then what
+    /// came of it.
+    fn means(&self, between: usize) -> String {
+        if self.launched == 0 {
+            return HISTORY_NONE.to_string();
+        }
+        let briefs = match self.recent_briefs.is_empty() {
+            true => NO_TASK.to_string(),
+            false => self
+                .recent_briefs
+                .iter()
+                .map(|brief| crate::jev::door::cut(brief, Cap::Chars(SUMMON_RECENT_BRIEF_CHAR_CAP)))
+                .collect::<Vec<String>>()
+                .join(BRIEF_SEPARATOR),
+        };
+        let history = HISTORY_SOME
+            .replace("{launched}", &self.launched.to_string())
+            .replace("{between}", &between.to_string())
+            .replace("{briefs}", &briefs);
+        let outcome = match (self.carried, self.median_minutes) {
+            (0, _) | (_, None) => RECORD_PENDING.to_string(),
+            (carried, Some(minutes)) => RECORD_SOME
+                .replace("{carried}", &carried.to_string())
+                .replace("{finished}", &self.finished.to_string())
+                .replace("{minutes}", &minutes.to_string()),
+        };
+        history + &outcome
+    }
+}
+
+/// How many milliseconds make a minute — the unit a median is reported in,
+/// because a coordinator reads "41 minutes" and not "2,460,000".
+const MS_A_MINUTE: i64 = 60_000;
+
+/// What each agent's summonses came to, folded out of `carried`.
+///
+/// The one place this arithmetic lives. `launched` counts every summons;
+/// `carried` and `finished` count only the ones whose work has ENDED, because
+/// an open dispatch has no outcome and folding it in either direction would
+/// be a number about nothing. The median is the nearest-rank p50 the Jev
+/// summary already computes ([`crate::jev::summary::percentile`]).
+#[must_use]
+pub fn records(carried: &[CarriedSummons]) -> BTreeMap<String, AgentRecord> {
+    let mut titles: BTreeMap<String, Vec<(i64, String)>> = BTreeMap::new();
+    let mut minutes: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    let mut records: BTreeMap<String, AgentRecord> = BTreeMap::new();
+    for summons in carried {
+        let record = records.entry(summons.agent.clone()).or_default();
+        record.launched += 1;
+        if let (Some(ended), Some(succeeded)) = (summons.ended_ms, summons.succeeded) {
+            record.carried += 1;
+            record.finished += usize::from(succeeded);
+            let held = ended.saturating_sub(summons.started_ms) / MS_A_MINUTE;
+            minutes
+                .entry(summons.agent.clone())
+                .or_default()
+                .push(u64::try_from(held).unwrap_or(0));
+        }
+        if let Some(title) = summons.title.clone() {
+            titles
+                .entry(summons.agent.clone())
+                .or_default()
+                .push((summons.started_ms, title));
+        }
+    }
+    for (agent, mut held) in minutes {
+        held.sort_unstable();
+        if let Some(record) = records.get_mut(&agent) {
+            record.median_minutes = crate::jev::summary::percentile(&held, 0.50);
+        }
+    }
+    for (agent, mut held) in titles {
+        // Newest first, and a title repeated by a retry named once: three
+        // attempts on one task are one thing this window found the agent fit
+        // for, not three.
+        held.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+        let mut newest = Vec::new();
+        for (_, title) in held {
+            if !newest.contains(&title) {
+                newest.push(title);
+            }
+            if newest.len() == SUMMON_RECENT_BRIEFS {
+                break;
+            }
+        }
+        if let Some(record) = records.get_mut(&agent) {
+            record.recent_briefs = newest;
+        }
+    }
+    records
 }
 
 /// The shape of one summons — what the ledger can honestly report about the
@@ -184,6 +378,17 @@ pub struct SummonLook<'a> {
     pub replaces_an_attempt: bool,
     /// Whether it carries a written task, or is a pane summoned to work with.
     pub carries_a_task: bool,
+    /// How many attempts this task has already had — dispatches on it that
+    /// ended, counted before this summons opens one.
+    ///
+    /// The difficulty grade the LEDGER can give honestly. There is no table
+    /// here that bands work by its words, for the same reason there is none
+    /// that bands agents: it would be a belief. Whether this particular task
+    /// has already defeated somebody is a measurement.
+    pub attempts: usize,
+    /// The task's consecutive failures, as [`crate::orchestration::Task`]
+    /// counts them — three ends a task rather than dispatching a fourth.
+    pub failures: u32,
 }
 
 /// One question and the set its answer is judged against — the two travel
@@ -220,6 +425,8 @@ pub fn rubric_words() -> String {
         ROOM_UNREAD,
         HISTORY_SOME,
         HISTORY_NONE,
+        RECORD_SOME,
+        RECORD_PENDING,
         &STATE_KEYS.join(","),
     ]
     .join("\n")
@@ -242,10 +449,15 @@ pub fn ask(look: &SummonLook<'_>, summonable: &[Summonable]) -> Option<SummonAsk
     if summonable.len() < FEWEST_OPTIONS {
         return None;
     }
+    // The denominator every option's history is said against: the summonses
+    // this ledger gave the agents offered HERE. Read off the options rather
+    // than the whole ledger, so a question's own numbers add up inside it
+    // and an agent nobody could summon today cannot move them.
+    let between: usize = summonable.iter().map(|agent| agent.record.launched).sum();
     let mut criteria = Map::new();
     let mut offered = Vec::new();
     for agent in summonable {
-        criteria.insert(agent.id.clone(), Value::from(agent.means()));
+        criteria.insert(agent.id.clone(), Value::from(agent.means(between)));
         offered.push(agent.id.clone());
     }
     let state = Value::Object(Map::from_iter([
@@ -263,6 +475,8 @@ pub fn ask(look: &SummonLook<'_>, summonable: &[Summonable]) -> Option<SummonAsk
             Value::from(look.replaces_an_attempt),
         ),
         ("task".to_string(), Value::from(look.carries_a_task)),
+        ("attempts".to_string(), Value::from(look.attempts)),
+        ("failures".to_string(), Value::from(look.failures)),
     ]));
     let questions = choice::asked(QUESTION, INSTRUCTIONS, criteria);
     Some(SummonAsk {

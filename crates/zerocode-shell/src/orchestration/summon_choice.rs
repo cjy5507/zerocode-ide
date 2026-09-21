@@ -7,10 +7,10 @@
 //! (`zerocode_core::jev::SUMMON`, `smart.summonChoice`) offers no mode that
 //! applies. Under a person's `shadow` or `auto` this module puts the summons'
 //! SHAPE to Jev once, after the pane really opened: the head of the brief and
-//! four facts about the ask, closed over the agents the quota gate says could
-//! have carried it this minute. The answer is one row in
-//! `summon-choice.jsonl`, beside what was actually summoned and whether the
-//! two agreed.
+//! six facts about the ask, closed over the agents the quota gate says could
+//! have carried it this minute and what this ledger's own record of each of
+//! them is. The answer is one row in `summon-choice.jsonl`, beside what was
+//! actually summoned and whether the two agreed.
 //!
 //! Asked after the pane opened, and only then: a summons whose split was
 //! refused is not a decision anybody made, and a row about it would be
@@ -106,6 +106,8 @@ fn opened(seat: &Seat<'_>, shadow: &SummonShadow, mode: &str, now_ms: i64) -> Va
         "worktree": shadow.worktree,
         "replaces": shadow.replaces_an_attempt,
         "carriesATask": shadow.carries_a_task,
+        "attempts": shadow.attempts,
+        "failures": shadow.failures,
         REQUESTS_KEY: 0,
         REDACTED_LINES_KEY: 0,
     })
@@ -134,7 +136,7 @@ pub(super) fn record(
     let mut row = opened(&Seat::of(prepared), &shadow, mode.key(), now_ms);
     let Some(ask) = summon_choice::ask(&shadow.look(), &shadow.options) else {
         row["outcome"] = json!(ONE_OPTION);
-        row["options"] = json!(agent_ids(&shadow));
+        row["options"] = json!(offered(&shadow));
         append(&ledger, &row, now_ms);
         return;
     };
@@ -148,12 +150,33 @@ pub(super) fn record(
     }));
 }
 
-/// The option words a question that was never asked would have offered.
-fn agent_ids(shadow: &SummonShadow) -> Vec<String> {
+/// What the question said about each agent it offered, in the order it
+/// offered them — the numbers, not the sentences they were poured into.
+///
+/// The row already promises that a reader never has to trust that the
+/// question carried what it says it did, and until now `options` kept that
+/// promise for the SET and broke it for the evidence: five ids, and no way to
+/// tell afterwards what this window had read about them. A row that carries
+/// the numbers is also the only row a later replay can be exact about, since
+/// the ledger those numbers came from keeps moving.
+///
+/// Written for a question that was asked and for one that was not: a summons
+/// with a single option still names what it knew about it.
+fn offered(shadow: &SummonShadow) -> Vec<Value> {
     shadow
         .options
         .iter()
-        .map(|agent| agent.id.clone())
+        .map(|agent| {
+            json!({
+                "id": agent.id,
+                "spent": agent.spent_percent,
+                "window": agent.window,
+                "launched": agent.record.launched,
+                "carried": agent.record.carried,
+                "finished": agent.record.finished,
+                "medianMinutes": agent.record.median_minutes,
+            })
+        })
         .collect()
 }
 
@@ -166,9 +189,12 @@ fn settle(
     shadow: &SummonShadow,
     checkout: Option<&Path>,
 ) -> Value {
-    // The set the answer will be judged against, written down before it is
-    // asked: a row whose options came from the answer would prove nothing.
-    row["options"] = json!(ask.options());
+    // The set the answer will be judged against, and what the question said
+    // about each of them — written down before it is asked: a row whose
+    // options came from the answer would prove nothing. The order is the
+    // order offered, which `the_row_names_every_option_the_question_carried`
+    // holds against [`SummonAsk::options`].
+    row["options"] = json!(offered(shadow));
     let began = Instant::now();
     let answer = wire.ask(
         &SUMMON,
