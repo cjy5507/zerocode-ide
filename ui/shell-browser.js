@@ -1410,6 +1410,65 @@ function emulatorErrorMessage(key) {
   return t("emulator.connectionFailed", "에뮬레이터에 연결하지 못했습니다.");
 }
 
+/* 부팅 자막이 흐른 초를 고쳐 쓰는 주기(D6). */
+const EMULATOR_BOOT_CAPTION_TICK_MS = 1_000;
+
+/* 「부팅 중 · <기기> · n초」.
+ *
+ * 기기 이름은 스트림이 답해야 오는데(콜드 부팅이면 그게 수십 초다) 자막은
+ * 판이 서는 순간 서야 하므로, 아직 이름이 없는 동안은 이름 칸이 없는 쪽을
+ * 말한다 — 빈 칸에 가운뎃점만 남는 「부팅 중 ·  · 3초」가 되지 않게. */
+function emulatorBootWords(tab, now = Date.now()) {
+  const seconds = Math.max(0, Math.round((now - tab.bootingSince) / 1_000));
+  const device = tab.deviceName || tab.deviceId || "";
+  return device
+    ? t("emulator.booting", "부팅 중 · {{device}} · {{seconds}}초", { device, seconds })
+    : t("emulator.bootingUnnamed", "부팅 중 · {{seconds}}초", { seconds });
+}
+
+/* 자막을 지금 한 번 쓴다 — 부팅 중인 탭에만. */
+function paintEmulatorBootCaption(tab) {
+  if (tab.bootingSince == null) return;
+  const note = groupOf(tab.pane)?.emulatorView?.querySelector(".emulator-note");
+  if (!note) return;
+  note.textContent = emulatorBootWords(tab);
+  note.hidden = false;
+}
+
+/* 자막을 세운다: 지금 한 번, 그리고 1초마다.
+ *
+ * 판이 서는 그 턴에 불리므로 첫 글자는 프레임 하나 안에 선다 — 스트림이
+ * 대답하기를 기다리면 콜드 부팅 동안 판이 빈칸으로 남는다(실측 42.3 s). */
+function standEmulatorBootCaption(tab) {
+  dropEmulatorBootCaption(tab);
+  tab.bootingSince = Date.now();
+  paintEmulatorBootCaption(tab);
+  tab.bootCaptionAt = setInterval(() => {
+    if (!tabs.includes(tab) || tab.live) dropEmulatorBootCaption(tab);
+    else paintEmulatorBootCaption(tab);
+  }, EMULATOR_BOOT_CAPTION_TICK_MS);
+}
+
+/* 자막을 눕힌다 — 첫 프레임, 다른 소식, 닫힌 탭. */
+function dropEmulatorBootCaption(tab) {
+  if (tab.bootCaptionAt) clearInterval(tab.bootCaptionAt);
+  tab.bootCaptionAt = null;
+  tab.bootingSince = null;
+}
+
+/* 판 아래 한 줄이 자막 말고 다른 말을 한다 — 실패든 복구든 꺼짐이든.
+ *
+ * 네 자리가 저마다 세 줄로 같은 일을 적고 있었고, 자막이 붙은 지금은 그
+ * 세 줄에 「자막을 먼저 눕힌다」가 더해진다. 빠뜨린 한 자리는 1초 뒤 자막이
+ * 그 소식을 덮어쓰는 것으로 나타난다. */
+function sayInEmulatorNote(tab, words) {
+  dropEmulatorBootCaption(tab);
+  const note = groupOf(tab.pane)?.emulatorView?.querySelector(".emulator-note");
+  if (!note) return;
+  note.textContent = words;
+  note.hidden = false;
+}
+
 function emulatorNoteMessage(code, fallback = "") {
   if (code === "frame-unavailable") return t("emulator.frameUnavailable", "화면이 오지 않습니다. 기기가 멈춰 있으면 재부팅해 보세요.");
   if (code === "stream-ended") return t("emulator.streamEnded", "화면 연결이 종료됐습니다.");
@@ -1883,6 +1942,11 @@ function paintEmulatorView(tab) {
     }
     pick.value = `${tab.platform}:${tab.deviceId ?? tab.udid ?? ""}`;
   }
+  // 첫 프레임이 `live` 를 세우는 곳이 바로 여기다 — 그러니 자막이 눕는
+  // 자리도 여기고, 그림이 아직 없는 동안은 이 판을 다시 그릴 때마다 자막이
+  // 제 자리에 남는다(판을 갈아 끼우면 note 는 새 것이다).
+  if (tab.live) dropEmulatorBootCaption(tab);
+  else paintEmulatorBootCaption(tab);
   // 프레임 베젤은 이름이 말하는 꼴을 입고, 화면은 판을 재서 앉는다(1-g45).
   layoutEmulatorScreen(host, tab);
 }
@@ -1895,6 +1959,9 @@ async function switchEmulatorDevice(tab, platform, id) {
   tab.working = true;
   tab.live = false;
   paintEmulatorView(tab);
+  // 자막은 여기서 선다(D6) — 판이 서는 것과 같은 턴이고, 기기를 갈아타도
+  // 새 기기의 초부터 다시 센다.
+  standEmulatorBootCaption(tab);
   const previous = tab.stream;
   dropEmulatorBinaryDoor(tab);
   tab.video = false;
@@ -1964,9 +2031,9 @@ async function switchEmulatorDevice(tab, platform, id) {
     // 갈아탄 기기는 제 첫 그림부터 다시 시작한다 — 옛 터널이 남긴 그림은
     // 이 기기의 것이 아니다.
     host.querySelector(".emulator-canvas").hidden = true;
-    const note = host.querySelector(".emulator-note");
-    note.textContent = failure ?? t("emulator.waking", "기기를 깨우는 중…");
-    note.hidden = false;
+    // 기기가 섰다고 그림이 온 것은 아니다 — 실패만 자막의 자리를 가져간다.
+    if (failure === null) paintEmulatorBootCaption(tab);
+    else sayInEmulatorNote(tab, failure);
     paintEmulatorView(tab);
   }
   syncEmulatorStreamVisibility();
@@ -2039,9 +2106,7 @@ async function shutdownEmulatorTab(tab) {
     const host = docHost(tab.pane, "emulator");
     host.querySelector(".emulator-frame").hidden = true;
     host.querySelector(".emulator-canvas").hidden = true;
-    const note = host.querySelector(".emulator-note");
-    note.textContent = t("emulator.off", "에뮬레이터가 꺼졌습니다");
-    note.hidden = false;
+    sayInEmulatorNote(tab, t("emulator.off", "에뮬레이터가 꺼졌습니다"));
     paintEmulatorView(tab);
   }
 }
@@ -2354,23 +2419,16 @@ async function recoverEmulatorVideo(tab, failedStream, error) {
     const host = groupOf(tab.pane)?.emulatorView;
     if (host) {
       host.querySelector(".emulator-canvas").hidden = true;
-      const note = host.querySelector(".emulator-note");
-      note.textContent = t("emulator.videoFallback", "비디오 연결을 복구하는 중…");
-      note.hidden = false;
+      sayInEmulatorNote(tab, t("emulator.videoFallback", "비디오 연결을 복구하는 중…"));
       paintEmulatorView(tab);
     }
     syncEmulatorStreamVisibility();
   } catch (fallbackError) {
     binaryDoor?.dispose();
-    const note = groupOf(tab.pane)?.emulatorView?.querySelector(".emulator-note");
-    if (note) {
-      note.textContent = reportEmulatorError(
-        tab,
-        `${error} · ${fallbackError}`,
-        "emulator.connectionFailed",
-      );
-      note.hidden = false;
-    }
+    sayInEmulatorNote(
+      tab,
+      reportEmulatorError(tab, `${error} · ${fallbackError}`, "emulator.connectionFailed"),
+    );
   }
 }
 
@@ -2567,10 +2625,7 @@ listen("emulator:note", (event) => {
     void recoverEmulatorVideo(tab, stream, message);
     return;
   }
-  const said = groupOf(tab.pane)?.emulatorView?.querySelector(".emulator-note");
-  if (!said) return;
-  said.textContent = message;
-  said.hidden = false;
+  sayInEmulatorNote(tab, message);
   if (tab.live) {
     tab.live = false;
     paintEmulatorView(tab);

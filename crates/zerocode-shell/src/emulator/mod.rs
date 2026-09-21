@@ -343,11 +343,40 @@ pub(crate) async fn choose_emulator_app(
     Ok(Some(checked.to_string_lossy().into_owned()))
 }
 
-pub(crate) fn shutdown_all() {
+/// Close every pane, and put away the devices the window is not keeping.
+///
+/// `keep_booted` is the person's `emulator.keepBooted` (D3): the panes always
+/// go — nothing is left pumping into a window that is gone — and the devices
+/// stay up so the next window's first pane opens on a resume rather than a
+/// cold boot.
+pub(crate) fn shutdown_all(keep_booted: bool) {
     registry().shutdown_all();
-    android::shutdown_all_devices();
+    android::shutdown_all_devices(keep_booted);
     #[cfg(target_os = "macos")]
     ios_hid::shutdown_all();
+}
+
+/// Put the last-used device of each platform up while the window is still
+/// painting (D4).
+///
+/// One entry point rather than one per platform, because "the device the next
+/// pane will want" is one question with a per-platform answer, and the window
+/// boot has no business knowing how many platforms there are. Nothing here
+/// opens a stream: prebooting is the device only, and the pane that arrives
+/// later joins the launch already in flight.
+pub(crate) fn preboot_last_used(app: &AppHandle) {
+    android::preboot_last_used(app);
+    // iOS lands here (D5/D4-ios, t-5645): `simctl boot` for the last-used
+    // simulator, on the same terms — device only, no stream.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = app;
+    }
+}
+
+/// Start watching for a fleet nobody has a pane on (D3).
+pub(crate) fn arm_idle_reclaim(app: &AppHandle) {
+    android::arm_idle_reclaim(app);
 }
 
 #[cfg(test)]
