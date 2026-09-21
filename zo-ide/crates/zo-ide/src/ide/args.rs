@@ -117,6 +117,10 @@ zo decision-shadow check [--json]
 pub struct RenderFlags {
     /// codex exec 실측은 마크다운을 원문 그대로 찍는다 — 렌더는 opt-in.
     pub render_markdown: bool,
+    /// `--show-thinking`. The pipe front keeps thinking hidden without it
+    /// (`codex exec` runs with reasoning summaries off); the interactive
+    /// front shows thinking by default and reads the `showThinking` setting
+    /// and `/thinking` on top of this flag (`tui::thinking`, t-5872).
     pub show_thinking: bool,
     /// stderr 를 터미널에 그대로 둘지. 기본(거짓)은 로그 파일로 돌린다 —
     /// `run_loop::install_stderr_redirect` 참고.

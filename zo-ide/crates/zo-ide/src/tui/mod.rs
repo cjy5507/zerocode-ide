@@ -30,6 +30,7 @@
 //! | [`fast`] | `/fast` capability, transport variant, and display state |
 //! | [`permissions`] | Codex preset rows and zo permission-mode mapping |
 //! | [`tools`] | 도구 턴의 셀(`Ran`·`Exploring`·`Edited`·MCP) |
+//! | [`thinking`] | reasoning 의 상태 낱말(굵은 제목 또는 마지막 문장)과 접힌 thinking 셀 |
 //! | [`folds`] | 도구 셀 경계의 접기 마커(OSC 7788) |
 //! | [`composer`] | `›` 한 줄 편집기(UTF-8·붙여넣기 안전) |
 //! | [`effort_effect`] | Max·Ultra·Smart 컴포저/푸터 일회성 전환 |
@@ -73,6 +74,7 @@ pub mod slash;
 pub mod summary;
 pub mod strings;
 pub mod tables;
+pub mod thinking;
 pub mod tools;
 pub mod transcript;
 pub mod tty;

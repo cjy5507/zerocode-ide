@@ -39,6 +39,11 @@ const MIN_FOOTER_CWD_WIDTH: usize = 2;
 
 /// codex's status widget defaults to three detail rows.
 pub const STATUS_DETAILS_DEFAULT_MAX_LINES: usize = 3;
+/// codex `bottom_pane/popup_consts.rs::MAX_POPUP_ROWS`: "Maximum number of
+/// rows any popup should attempt to display. Keep this consistent across all
+/// popups for a uniform feel." The slash popup shows a window of this many
+/// rows that follows the selection; the catalog behind it may be longer.
+pub const MAX_POPUP_ROWS: usize = 8;
 const DETAILS_PREFIX: &str = "  └ ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -535,6 +540,13 @@ impl Popup {
         self.lines_with_focus(width, palette::COMMAND_TOKEN)
     }
 
+    /// The first row of the [`MAX_POPUP_ROWS`] window: the selection is kept
+    /// inside it, scrolling the window down only once the selection has
+    /// passed its last row — codex `render_rows`'s `scroll_top`.
+    fn window_start(&self) -> usize {
+        self.selected.saturating_sub(MAX_POPUP_ROWS.saturating_sub(1))
+    }
+
     fn lines_with_focus(&self, width: usize, focus: Color) -> Vec<Line> {
         let column = self
             .rows
@@ -545,6 +557,8 @@ impl Popup {
         self.rows
             .iter()
             .enumerate()
+            .skip(self.window_start())
+            .take(MAX_POPUP_ROWS)
             .map(|(index, row)| {
                 two_column(
                     "  ",
@@ -1487,6 +1501,7 @@ pub fn shortcut_card() -> Vec<String> {
         "/model [alias]        switch model — no alias opens the model + effort picker".to_string(),
         "/permissions <mode>   read-only · workspace-write · danger-full-access".to_string(),
         format!("/fast                 {}", super::fast::COMMAND_DESCRIPTION),
+        format!("/thinking             {}", super::strings::THINKING_COMMAND_DESCRIPTION),
         "/new [name]           start a new chat — optional name".to_string(),
         "/resume [id]          resume a saved chat — no id opens the picker".to_string(),
         "/compact [focus]      compact the conversation".to_string(),
@@ -1737,6 +1752,40 @@ mod tests {
             .iter()
             .all(|span| span.style.fg == Some(crate::tui::palette::COMMAND_TOKEN)));
         assert_eq!(plain.last().expect("footer"), "Press enter to continue");
+    }
+
+    /// codex caps every popup at `MAX_POPUP_ROWS` and scrolls the window
+    /// with the selection (`popup_consts.rs`, `render_rows`): a thirteen-row
+    /// catalog shows eight rows, and the last row is reached by scrolling.
+    #[test]
+    fn the_popup_shows_a_codex_sized_window_that_follows_the_selection() {
+        let rows: Vec<super::PopupRow> = (0..13)
+            .map(|index| super::PopupRow {
+                name: format!("/cmd{index:02}"),
+                description: format!("command {index}"),
+            })
+            .collect();
+        let mut popup = super::Popup { rows, selected: 0 };
+        let plain = |popup: &super::Popup| -> Vec<String> {
+            popup.lines(80).iter().map(Line::plain).collect()
+        };
+        let first = plain(&popup);
+        assert_eq!(first.len(), super::MAX_POPUP_ROWS);
+        assert!(first[0].contains("/cmd00") && first[7].contains("/cmd07"), "{first:?}");
+
+        for _ in 0..12 {
+            popup.down();
+        }
+        let last = plain(&popup);
+        assert_eq!(last.len(), super::MAX_POPUP_ROWS);
+        assert!(last[0].contains("/cmd05") && last[7].contains("/cmd12"), "{last:?}");
+        assert_eq!(popup.selection(), Some("/cmd12"));
+        let selected = popup
+            .lines(80)
+            .into_iter()
+            .nth(7)
+            .expect("the selected row is the window's last");
+        assert!(selected.spans.iter().all(|span| span.style.bold), "{selected:?}");
     }
 
     #[test]

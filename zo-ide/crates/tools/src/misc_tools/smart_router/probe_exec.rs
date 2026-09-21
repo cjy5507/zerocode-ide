@@ -343,10 +343,39 @@ pub(super) fn route_probe_assessment(
     prompt: &str,
     attempt: &str,
 ) -> Option<ProbeAssessment> {
-    route_probe_assessments(inventory, parent_model, &[(description, prompt)], attempt)
-        .first()
-        .copied()
-        .flatten()
+    route_probe_assessment_judged(inventory, parent_model, description, prompt, attempt)
+        .map(|probed| probed.assessment)
+}
+
+/// One task's verdict and who gave it: the active decision shadow (Jev's
+/// typed judgment) or the chat probe it fell back to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct ProbedTask {
+    pub(super) assessment: ProbeAssessment,
+    /// The typed judgment answered; the chat probe never ran for it.
+    pub(super) judged: bool,
+}
+
+/// [`route_probe_assessment`] with the seat that answered kept beside the
+/// verdict — the status row's word for a judged turn (t-5872).
+pub(super) fn route_probe_assessment_judged(
+    inventory: &ModelInventory,
+    parent_model: &str,
+    description: &str,
+    prompt: &str,
+    attempt: &str,
+) -> Option<ProbedTask> {
+    probe_and_shadow_judged(
+        inventory,
+        parent_model,
+        &[(description, prompt)],
+        attempt,
+        super::decision_shadow::DECISION_SHADOW_DEADLINE,
+    )
+    .0
+    .first()
+    .copied()
+    .flatten()
 }
 
 /// Batch form for a fan-out: Jev actual-use mode first judges all unique tasks
@@ -385,6 +414,24 @@ pub(super) fn probe_and_shadow(
     attempt: &str,
     shadow_deadline: Duration,
 ) -> (Vec<Option<ProbeAssessment>>, Option<tokio::task::JoinHandle<()>>) {
+    let (probed, shadow) = probe_and_shadow_judged(inventory, parent_model, tasks, attempt, shadow_deadline);
+    (
+        probed
+            .into_iter()
+            .map(|task| task.map(|task| task.assessment))
+            .collect(),
+        shadow,
+    )
+}
+
+/// [`probe_and_shadow`] with each verdict's seat kept ([`ProbedTask`]).
+fn probe_and_shadow_judged(
+    inventory: &ModelInventory,
+    parent_model: &str,
+    tasks: &[(&str, &str)],
+    attempt: &str,
+    shadow_deadline: Duration,
+) -> (Vec<Option<ProbedTask>>, Option<tokio::task::JoinHandle<()>>) {
     // The ablation arm bails out HERE rather than discarding the verdict
     // further down, so the control arm pays none of the probe's latency or
     // tokens either — that cost is part of what an ablation measures. This is
@@ -405,7 +452,14 @@ pub(super) fn probe_and_shadow(
             .assessments
             .into_iter()
             .zip(fallback)
-            .map(|(assessment, slot)| assessment.or_else(|| slot.and_then(|slot| slot.verdict.ok())))
+            .map(|(assessment, slot)| {
+                assessment
+                    .map(|assessment| ProbedTask { assessment, judged: true })
+                    .or_else(|| {
+                        slot.and_then(|slot| slot.verdict.ok())
+                            .map(|assessment| ProbedTask { assessment, judged: false })
+                    })
+            })
             .collect();
         // Routing is settled; the control sample leaves now, off the turn's
         // clock, for the rows the judge compares.
@@ -418,7 +472,10 @@ pub(super) fn probe_and_shadow(
     let shadow = super::decision_shadow::fire(tasks, &slots, attempt, shadow_deadline);
     let results = slots
         .iter()
-        .map(|slot| slot.and_then(|slot| slot.verdict.ok()))
+        .map(|slot| {
+            slot.and_then(|slot| slot.verdict.ok())
+                .map(|assessment| ProbedTask { assessment, judged: false })
+        })
         .collect();
     (results, shadow)
 }

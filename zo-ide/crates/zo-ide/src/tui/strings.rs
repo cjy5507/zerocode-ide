@@ -15,6 +15,27 @@ use super::activity::Activity;
 use super::shimmer::fmt_elapsed_compact;
 
 pub const WORKING: &str = "Working";
+/// The title row of a committed thinking cell (t-5872) — codex's reasoning
+/// cells carry the model's own bold heading; Anthropic thinking has none, so
+/// the cell says what it is.
+pub const THINKING: &str = "Thinking";
+/// The `/thinking` popup row.
+pub const THINKING_COMMAND_DESCRIPTION: &str = "show or hide the model's thinking";
+/// What `/thinking` says it did, one word each way.
+pub const THINKING_SHOWN: &str = "thinking shown · /thinking hides it";
+pub const THINKING_HIDDEN: &str = "thinking hidden · /thinking shows it";
+
+/// The status row's word for a route Jev (or the step table) chose this
+/// turn: `jev · opus max · stuck_check_red` (t-5872). `who` is the seat that
+/// decided, `model` the wire model when it differs from the session's,
+/// `effort` the level the next request carries, `reason` one ledger token.
+#[must_use]
+pub fn route_fact(who: &str, model: Option<&str>, effort: &str, reason: &str) -> String {
+    match model {
+        Some(model) => format!("{who} · {model} {effort} · {reason}"),
+        None => format!("{who} · {effort} · {reason}"),
+    }
+}
 /// The `/model` picker's description for a row its source stopped listing
 /// while a session had it selected — the row stays, dimmed, with the local
 /// clock of the first refresh that missed it (t-3054). Choosing it still
@@ -69,22 +90,35 @@ pub fn helper_wave(total: usize, running: usize) -> String {
     format!("agents {total} · running {running} · done {done}")
 }
 
+/// One helper's row: `label · model · 12 tool uses · 1m 20s · Read · src/a.rs
+/// · "…its last output line"`. Every part after the label is optional and
+/// simply absent when unknown — codex's `multi_agents.rs` rows name the
+/// agent, its model and effort, and its last message the same way. The one
+/// spelling for the status line under `Working`, the live row inside the
+/// spawn cell and the `/agents` picker.
 #[must_use]
 pub fn helper(
     label: &str,
+    model: Option<&str>,
     tool_calls: u64,
     elapsed: Duration,
     activity: &Activity,
+    output_tail: Option<&str>,
 ) -> String {
-    let uses = core_types::helper_run::tool_uses(tool_calls);
-    let elapsed = fmt_elapsed_compact(elapsed.as_secs());
-    match activity.target.as_deref() {
-        Some(target) => format!(
-            "{label} · {uses} · {elapsed} · {} · {target}",
-            activity.tool
-        ),
-        None => format!("{label} · {uses} · {elapsed} · {}", activity.tool),
+    let mut parts: Vec<String> = vec![label.to_string()];
+    if let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) {
+        parts.push(model.to_string());
     }
+    parts.push(core_types::helper_run::tool_uses(tool_calls));
+    parts.push(fmt_elapsed_compact(elapsed.as_secs()));
+    parts.push(activity.tool.clone());
+    if let Some(target) = activity.target.as_deref() {
+        parts.push(target.to_string());
+    }
+    if let Some(tail) = output_tail.map(str::trim).filter(|tail| !tail.is_empty()) {
+        parts.push(format!("\"{tail}\""));
+    }
+    parts.join(core_types::helper_run::FACT_SEPARATOR)
 }
 
 #[must_use]

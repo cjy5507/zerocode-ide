@@ -21,6 +21,13 @@ enum Script {
     /// One `Agent` spawn, then a final answer. Drives the delegation cell and
     /// the mid-turn steering path.
     Spawn { final_text: String },
+    /// Anthropic thinking on EVERY request — one `thinking_delta` per
+    /// sentence, each event written `gap` apart and its write instant kept
+    /// ([`ScriptedAnthropicService::event_marks`]) — then `final_text`. The
+    /// status word, the thinking cell and the delta-to-screen latency
+    /// (t-5872).
+    #[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+    Thinking { sentences: Vec<String>, gap: Duration, final_text: String },
     /// One slow `bash`, then a final answer — a turn that is genuinely BUSY
     /// long enough for a human to type into it.
     SlowTool { final_text: String },
@@ -138,6 +145,9 @@ impl Script {
             Self::McpTool { final_text, .. } => text_sse("msg_mcp_final", final_text),
             Self::Spawn { .. } if request_index == 0 => spawn_sse(),
             Self::Spawn { final_text } => text_sse("msg_spawn_final", final_text),
+            Self::Thinking { sentences, final_text, .. } => {
+                thinking_sse(&format!("msg_thinking_{request_index}"), sentences, final_text)
+            }
             Self::SlowTool { .. } if request_index == 0 => slow_tool_sse(),
             Self::SlowTool { final_text } => text_sse("msg_slow_final", final_text),
             Self::ParkedTool { seconds, .. } if request_index == 0 => parked_tool_sse(*seconds),
@@ -208,6 +218,25 @@ impl Script {
             _ => (1, Duration::ZERO),
         }
     }
+
+    /// The gap between SSE EVENTS when the body is written one event at a
+    /// time (every request of a thinking script), so a test can time each
+    /// delta against the screen.
+    fn event_gap(&self) -> Option<Duration> {
+        match self {
+            Self::Thinking { gap, .. } => Some(*gap),
+            _ => None,
+        }
+    }
+}
+
+/// When one SSE event of one request left the server.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)] // e2e_hermetic only; the module is shared by every e2e binary.
+pub struct EventMark {
+    pub request_index: usize,
+    pub event_index: usize,
+    pub at: std::time::Instant,
 }
 
 /// A deterministic loopback server with a fixed response script.
@@ -216,6 +245,8 @@ pub struct ScriptedAnthropicService {
     requests: Arc<Mutex<Vec<String>>>,
     #[allow(dead_code)] // Baseline counters, shared service in several test binaries.
     usage: Arc<Mutex<[u64; 3]>>,
+    /// The write instant of every event a per-event script sent.
+    marks: Arc<std::sync::Mutex<Vec<EventMark>>>,
     shutdown: Option<oneshot::Sender<()>>,
     join_handle: JoinHandle<()>,
 }
@@ -311,6 +342,28 @@ impl ScriptedAnthropicService {
             final_text: final_text.into(),
         })
         .await
+    }
+
+    /// Think aloud in `sentences` on every request, one event per sentence
+    /// `gap` apart, then answer `final_text`.
+    #[allow(dead_code)] // e2e_hermetic only
+    pub async fn thinking(
+        sentences: &[&str],
+        gap: Duration,
+        final_text: impl Into<String>,
+    ) -> io::Result<Self> {
+        Self::spawn(Script::Thinking {
+            sentences: sentences.iter().map(|sentence| (*sentence).to_string()).collect(),
+            gap,
+            final_text: final_text.into(),
+        })
+        .await
+    }
+
+    /// Every event mark a per-event script recorded so far.
+    #[allow(dead_code)] // e2e_hermetic only
+    pub fn event_marks(&self) -> Vec<EventMark> {
+        self.marks.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
     }
 
     /// Respond first with one `Agent` spawn, then with `final_text`.
@@ -441,7 +494,9 @@ impl ScriptedAnthropicService {
         let address = listener.local_addr()?;
         let requests = Arc::new(Mutex::new(Vec::new()));
         let usage = Arc::new(Mutex::new([0; 3]));
+        let marks = Arc::new(std::sync::Mutex::new(Vec::new()));
         let response_usage = Arc::clone(&usage);
+        let response_marks = Arc::clone(&marks);
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel();
         let request_state = Arc::clone(&requests);
         let join_handle = tokio::spawn(async move {
@@ -453,8 +508,9 @@ impl ScriptedAnthropicService {
                         let request_state = Arc::clone(&request_state);
                         let script = script.clone();
                         let response_usage = Arc::clone(&response_usage);
+                        let response_marks = Arc::clone(&response_marks);
                         tokio::spawn(async move {
-                            let _ = handle_connection(socket, request_state, response_usage, &script).await;
+                            let _ = handle_connection(socket, request_state, response_usage, response_marks, &script).await;
                         });
                     }
                 }
@@ -465,6 +521,7 @@ impl ScriptedAnthropicService {
             base_url: format!("http://{address}"),
             requests,
             usage,
+            marks,
             shutdown: Some(shutdown_tx),
             join_handle,
         })
@@ -484,6 +541,7 @@ async fn handle_connection(
     mut socket: TcpStream,
     requests: Arc<Mutex<Vec<String>>>,
     usage: Arc<Mutex<[u64; 3]>>,
+    marks: Arc<std::sync::Mutex<Vec<EventMark>>>,
     script: &Script,
 ) -> io::Result<()> {
     let (method, body) = read_http_request(&mut socket).await?;
@@ -511,6 +569,25 @@ async fn handle_connection(
             tokio::time::sleep(hold).await;
         }
         let framed = http_response("text/event-stream", &response);
+        if let Some(event_gap) = script.event_gap() {
+            // One write per SSE event, its instant kept: the head first, then
+            // each `event:`/`data:` pair with the gap between them.
+            let head_end = framed.find("\r\n\r\n").map_or(framed.len(), |at| at + 4);
+            socket.write_all(&framed.as_bytes()[..head_end]).await?;
+            socket.flush().await?;
+            for (event_index, event) in framed[head_end..].split_inclusive("\n\n").enumerate() {
+                if event_index > 0 {
+                    tokio::time::sleep(event_gap).await;
+                }
+                marks
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(EventMark { request_index, event_index, at: std::time::Instant::now() });
+                socket.write_all(event.as_bytes()).await?;
+                socket.flush().await?;
+            }
+            return Ok(());
+        }
         for (index, piece) in split_evenly(&framed, pieces).into_iter().enumerate() {
             if index > 0 {
                 tokio::time::sleep(gap).await;
@@ -669,6 +746,97 @@ fn text_sse(message_id: &str, text: &str) -> String {
         &mut body,
         "content_block_stop",
         &json!({"type": "content_block_stop", "index": 0}),
+    );
+    append_sse(
+        &mut body,
+        "message_delta",
+        &json!({
+            "type": "message_delta",
+            "delta": {"stop_reason": "end_turn", "stop_sequence": null},
+            "usage": usage_json(12, 8)
+        }),
+    );
+    append_sse(&mut body, "message_stop", &json!({"type": "message_stop"}));
+    body
+}
+
+/// Anthropic thinking: one `thinking` block whose deltas are `sentences`, a
+/// signature, then the answer as a text block.
+fn thinking_sse(message_id: &str, sentences: &[String], final_text: &str) -> String {
+    let mut body = String::new();
+    append_sse(
+        &mut body,
+        "message_start",
+        &json!({
+            "type": "message_start",
+            "message": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [],
+                "model": "claude-sonnet-4-6",
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": usage_json(12, 0)
+            }
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_start",
+        &json!({
+            "type": "content_block_start",
+            "index": 0,
+            "content_block": {"type": "thinking", "thinking": ""}
+        }),
+    );
+    for sentence in sentences {
+        append_sse(
+            &mut body,
+            "content_block_delta",
+            &json!({
+                "type": "content_block_delta",
+                "index": 0,
+                "delta": {"type": "thinking_delta", "thinking": sentence}
+            }),
+        );
+    }
+    append_sse(
+        &mut body,
+        "content_block_delta",
+        &json!({
+            "type": "content_block_delta",
+            "index": 0,
+            "delta": {"type": "signature_delta", "signature": "e2e-signature"}
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_stop",
+        &json!({"type": "content_block_stop", "index": 0}),
+    );
+    append_sse(
+        &mut body,
+        "content_block_start",
+        &json!({
+            "type": "content_block_start",
+            "index": 1,
+            "content_block": {"type": "text", "text": ""}
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_delta",
+        &json!({
+            "type": "content_block_delta",
+            "index": 1,
+            "delta": {"type": "text_delta", "text": final_text}
+        }),
+    );
+    append_sse(
+        &mut body,
+        "content_block_stop",
+        &json!({"type": "content_block_stop", "index": 1}),
     );
     append_sse(
         &mut body,

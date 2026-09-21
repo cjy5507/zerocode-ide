@@ -214,6 +214,17 @@ pub(crate) struct PlanShadowTurn {
     pub(crate) cwd: PathBuf,
 }
 
+/// What one turn brings to its Smart install: the prompt, its assessment,
+/// the effort it starts on (floor, band ceiling) and where its route facts
+/// go (t-5872).
+#[derive(Clone, Copy)]
+pub(crate) struct SmartTurnInput<'a> {
+    pub(crate) input: &'a str,
+    pub(crate) assessment: tools::TurnProbeAssessment,
+    pub(crate) turn_effort: (Option<api::EffortLevel>, Option<api::EffortLevel>),
+    pub(crate) route_fact: &'a super::route_fact::RouteFactSender,
+}
+
 /// Install this turn's Smart routes and answer who orchestrates its
 /// sub-agents (`smart.orchestration`), read from the same merged settings
 /// snapshot so the two can never disagree.
@@ -222,10 +233,20 @@ pub(crate) fn install_smart_turn(
     cwd: &Path,
     session_id: &str,
     allowed_tools: Option<&AllowedToolSet>,
-    input: &str,
-    assessment: tools::TurnProbeAssessment,
-    turn_effort: (Option<api::EffortLevel>, Option<api::EffortLevel>),
+    turn: SmartTurnInput<'_>,
 ) -> SmartTurnInstalled {
+    let SmartTurnInput {
+        input,
+        assessment,
+        turn_effort,
+        route_fact,
+    } = turn;
+    // The turn's opening fact for the status row (t-5872): the judged band
+    // and the effort floor — already decided above, nothing asked again.
+    let _ = route_fact.send(super::route_fact::RouteFact::turn_start(
+        assessment,
+        turn_effort.0,
+    ));
     let (routing, inventory) = tools::smart_turn_routing_and_inventory_for(
         cwd,
         runtime.api_client().model(),
@@ -255,6 +276,7 @@ pub(crate) fn install_smart_turn(
         runtime.api_client().model(),
         assessment.complexity,
         turn_effort,
+        route_fact.clone(),
     );
     let routing = SmartTurnRouting::for_turn(routing, input, assessment);
     let wiring = SmartTurnWiring::resolve(routing, |model, role| {
@@ -322,6 +344,7 @@ fn step_effort_config(
     main_model: &str,
     band: runtime::RouteTaskComplexity,
     turn_effort: (Option<api::EffortLevel>, Option<api::EffortLevel>),
+    route_fact: super::route_fact::RouteFactSender,
 ) -> Option<runtime::StepEffortConfig> {
     let word = tools::step_effort_word(cwd)?;
     if !word.governs() {
@@ -340,6 +363,13 @@ fn step_effort_config(
     let observer: runtime::StepEffortObserver = Arc::new(move |event: &runtime::StepEvent| {
         if runtime::durable_traces_armed() {
             let _ = tools::record_step_event(&ledger_cwd, event);
+        }
+        // The same decision, to the status row: a step that moved the wire
+        // replaces the turn's opening fact (t-5872).
+        if let runtime::StepEvent::Step(row) = event {
+            if let Some(fact) = super::route_fact::RouteFact::step(row) {
+                let _ = route_fact.send(Some(fact));
+            }
         }
     });
     let (heavier_model, cross_top_model) = rung_neighbours(inventory, main_model);
@@ -784,6 +814,7 @@ mod tests {
                 complexity: runtime::RouteTaskComplexity::Large,
                 intent: RouteTaskIntent::Implementation,
                 provenance: runtime::RouteAssessmentProvenance::Deterministic,
+                judged: false,
             },
         )
     }

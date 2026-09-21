@@ -618,11 +618,11 @@ fn handle_slash<W: Write>(
             }
             SlashOutcome::Continue
         }
-        // 파이프가 들지 않는 둘 — 이유는 [`Slash::handled_in_pipe`] 에 적혀
+        // 파이프가 들지 않는 다섯 — 이유는 [`Slash::handled_in_pipe`] 에 적혀
         // 있고, `/help` 목록도 그 술어를 읽는다(아래 테스트가 묶어 둔다).
         // 여기를 `_` 로 두지 않는 것은 명령이 늘 때 컴파일러가 답을 받아 내게
         // 하기 위해서다.
-        Some(Slash::Fast | Slash::New | Slash::Resume | Slash::Clear) | None => {
+        Some(Slash::Fast | Slash::Thinking | Slash::New | Slash::Resume | Slash::Clear) | None => {
             unknown_command(renderer, name)
         }
     }

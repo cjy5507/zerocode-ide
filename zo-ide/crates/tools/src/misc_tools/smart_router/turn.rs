@@ -140,6 +140,7 @@ fn deterministic_assessment(
         complexity,
         intent: runtime::RouteTaskIntent::Other,
         provenance: runtime::RouteAssessmentProvenance::Deterministic,
+        judged: false,
     }
 }
 
@@ -225,6 +226,10 @@ pub struct TurnProbeAssessment {
     /// Whether the result remains keyword-only or includes a probe verdict
     /// that cleared fusion's confidence gate.
     pub provenance: runtime::RouteAssessmentProvenance,
+    /// Whether the verdict fused above was Jev's typed judgment (the active
+    /// decision shadow answered) rather than the Fast-tier chat probe's. A
+    /// display fact for the status row (t-5872); nothing routes on it.
+    pub judged: bool,
 }
 
 /// What a probe verdict is allowed to replace for this turn.
@@ -434,21 +439,26 @@ pub fn assess_turn_probed(
     }
     note_gate(ProbeGate::Admitted);
     let inventory = runtime::connected_model_inventory(parent_model);
-    let Some(probe) =
-        super::probe_exec::route_probe_assessment(&inventory, parent_model, "", user_text, attempt)
-    else {
+    let Some(probed) = super::probe_exec::route_probe_assessment_judged(
+        &inventory,
+        parent_model,
+        "",
+        user_text,
+        attempt,
+    ) else {
         return deterministic;
     };
     let fusion = runtime::fuse_probe_assessment(
         metadata.complexity,
         metadata.risk,
         deterministic.intent,
-        &probe,
+        &probed.assessment,
     );
     TurnProbeAssessment {
         complexity: resolve_probed_complexity(admission, metadata.complexity, fusion),
         intent: fusion.intent,
         provenance: fusion.provenance,
+        judged: probed.judged,
     }
 }
 
@@ -656,6 +666,7 @@ mod host_prelude_tests {
             complexity,
             intent: RouteTaskIntent::Other,
             provenance: RouteAssessmentProvenance::Deterministic,
+            judged: false,
         }
     }
 
