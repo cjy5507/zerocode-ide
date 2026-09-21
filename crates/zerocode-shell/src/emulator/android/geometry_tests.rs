@@ -36,7 +36,7 @@ esac
         let sdk = AndroidSdk {
             root: directory.path().into(),
             adb,
-            emulator: directory.path().join("unused-emulator"),
+            emulator: Ok(directory.path().join("unused-emulator")),
         };
         Self { directory, sdk }
     }

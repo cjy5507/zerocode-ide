@@ -4,6 +4,9 @@ mod accessibility;
 mod capabilities;
 mod display;
 
+#[cfg(test)]
+mod sdk_tests;
+
 #[cfg(all(test, unix))]
 mod geometry_tests;
 
@@ -412,11 +415,195 @@ pub(super) fn shutdown_all_devices() {
     }
 }
 
+/// Where one tool lives inside an SDK: the binary's name and the package
+/// directory that holds it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct AndroidTool {
+    binary: &'static str,
+    package: &'static str,
+}
+
+/// Every road to a device — frames, input, the accessibility tree — is this
+/// one binary, so nothing that talks to a running device needs anything else.
+const ADB: AndroidTool = AndroidTool {
+    binary: "adb",
+    package: "platform-tools",
+};
+
+/// Only the AVD list and a cold boot need this one.
+const EMULATOR: AndroidTool = AndroidTool {
+    binary: "emulator",
+    package: "emulator",
+};
+
+/// One row of the search table, in the order it is walked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SdkSource {
+    Path,
+    SdkRoot,
+    AndroidHome,
+    HostDefault,
+}
+
+impl SdkSource {
+    /// The table, top to bottom: the binary the person's own shell would run,
+    /// then the two roots a toolchain sets, then where the installer put it.
+    ///
+    /// A window opened from the Dock inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin`
+    /// and no `ANDROID_*` at all (trap 307), so on that machine every row but
+    /// the last is empty — which is why the last row exists.
+    const TABLE: [Self; 4] = [
+        Self::Path,
+        Self::SdkRoot,
+        Self::AndroidHome,
+        Self::HostDefault,
+    ];
+
+    /// How this row is named back to the person when nothing held the binary.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Path => "$PATH",
+            Self::SdkRoot => "$ANDROID_SDK_ROOT",
+            Self::AndroidHome => "$ANDROID_HOME",
+            Self::HostDefault => "기본 SDK 자리",
+        }
+    }
+}
+
+/// What the resolver may read. The process environment is read in
+/// [`SdkEnvironment::current`] alone, so a test hands it a fake home rather
+/// than writing globals every other test in this binary shares.
+#[derive(Clone, Debug)]
+struct SdkEnvironment {
+    path: Option<OsString>,
+    sdk_root: Option<OsString>,
+    android_home: Option<OsString>,
+    home: Option<PathBuf>,
+}
+
+impl SdkEnvironment {
+    fn current() -> Self {
+        Self {
+            path: std::env::var_os("PATH"),
+            sdk_root: std::env::var_os("ANDROID_SDK_ROOT"),
+            android_home: std::env::var_os("ANDROID_HOME"),
+            home: dirs::home_dir(),
+        }
+    }
+
+    /// The directories this row offers, in the order they are tried. A row
+    /// with nothing configured offers none, and says so in the reason.
+    fn roads(&self, source: SdkSource) -> Vec<PathBuf> {
+        match source {
+            SdkSource::Path => self
+                .path
+                .iter()
+                .flat_map(|path| std::env::split_paths(path))
+                .collect(),
+            SdkSource::SdkRoot => configured_root(self.sdk_root.as_ref())
+                .into_iter()
+                .collect(),
+            SdkSource::AndroidHome => configured_root(self.android_home.as_ref())
+                .into_iter()
+                .collect(),
+            SdkSource::HostDefault => self
+                .home
+                .iter()
+                .map(|home| host_default_sdk_root(home))
+                .collect(),
+        }
+    }
+}
+
+/// The files a tool would sit in on one road, in the order they are tried.
+///
+/// Every row but `$PATH` names an SDK root the tool lives under. A `$PATH`
+/// entry is one package's own directory, so the tool is either in it or in
+/// its sibling package under the same root — a shell with `platform-tools`
+/// on its path still reaches the emulator beside it.
+fn files_in(source: SdkSource, road: &Path, tool: AndroidTool) -> Vec<PathBuf> {
+    let file = executable(tool.binary);
+    match source {
+        SdkSource::Path => std::iter::once(road.join(&file))
+            .chain(
+                road.parent()
+                    .map(|root| root.join(tool.package).join(&file)),
+            )
+            .collect(),
+        _ => vec![road.join(tool.package).join(file)],
+    }
+}
+
+/// A configured root is walked only when it is absolute: a relative one would
+/// be joined against whatever directory the window happened to start in.
+fn configured_root(value: Option<&OsString>) -> Option<PathBuf> {
+    let root = PathBuf::from(value?);
+    root.is_absolute().then_some(root)
+}
+
+/// Where this platform's installer puts the SDK, under the person's home.
+fn host_default_sdk_root(home: &Path) -> PathBuf {
+    #[cfg(target_os = "macos")]
+    return home.join("Library/Android/sdk");
+    #[cfg(target_os = "windows")]
+    return home.join("AppData/Local/Android/Sdk");
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    return home.join("Android/Sdk");
+}
+
+/// The tool that was not found, and every road walked looking for it. It is
+/// the error itself, so whoever refuses the person's action says where to put
+/// the SDK rather than only that it is missing.
+#[derive(Clone, Debug)]
+struct SdkSearch {
+    tool: AndroidTool,
+    looked: Vec<(SdkSource, Vec<PathBuf>)>,
+}
+
+impl std::fmt::Display for SdkSearch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let roads = self
+            .looked
+            .iter()
+            .map(|(source, roads)| {
+                if roads.is_empty() {
+                    format!("{}(설정 안 됨)", source.label())
+                } else {
+                    let walked = roads
+                        .iter()
+                        .map(|road| road.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("{}({walked})", source.label())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        write!(
+            formatter,
+            "Android SDK의 {}를 찾지 못했습니다 — 본 자리: {roads}",
+            self.tool.binary
+        )
+    }
+}
+
+/// The SDK root a located binary implies: `<root>/<package>/<binary>`.
+fn sdk_root_of(binary: &Path) -> PathBuf {
+    binary
+        .parent()
+        .and_then(Path::parent)
+        .unwrap_or_else(|| Path::new(""))
+        .to_path_buf()
+}
+
 #[derive(Clone, Debug)]
 struct AndroidSdk {
     root: PathBuf,
     adb: PathBuf,
-    emulator: PathBuf,
+    /// The AVD list and a cold boot need this; nothing else does. A machine
+    /// without the package keeps the reason it would give, so the roads that
+    /// only need `adb` still run against a device that is already up.
+    emulator: Result<PathBuf, SdkSearch>,
 }
 
 fn executable(name: &str) -> OsString {
@@ -425,60 +612,41 @@ fn executable(name: &str) -> OsString {
     name
 }
 
-fn sdk_at(root: PathBuf) -> Option<AndroidSdk> {
-    if !root.is_absolute() {
-        return None;
+/// The file this tool lives in, or every road that did not hold it.
+fn locate(environment: &SdkEnvironment, tool: AndroidTool) -> Result<PathBuf, SdkSearch> {
+    let mut looked = Vec::with_capacity(SdkSource::TABLE.len());
+    for source in SdkSource::TABLE {
+        let roads = environment.roads(source);
+        if let Some(found) = roads
+            .iter()
+            .flat_map(|road| files_in(source, road, tool))
+            .find(|candidate| candidate.is_file())
+        {
+            return Ok(found);
+        }
+        looked.push((source, roads));
     }
-    let adb = root.join("platform-tools").join(executable("adb"));
-    let emulator = root.join("emulator").join(executable("emulator"));
-    (adb.is_file() && emulator.is_file()).then_some(AndroidSdk {
+    Err(SdkSearch { tool, looked })
+}
+
+/// `adb` alone decides whether this machine has an SDK: it is the road every
+/// frame, tap and tree takes. A missing `emulator` package only costs the AVD
+/// list and a cold boot, so it is carried as its own reason rather than
+/// failing the resolve — a window that could screenshot a live device but not
+/// touch it was exactly that asymmetry (t-5446).
+fn resolve_android_sdk(environment: &SdkEnvironment) -> Result<AndroidSdk, SdkSearch> {
+    let adb = locate(environment, ADB)?;
+    let emulator = locate(environment, EMULATOR);
+    let root = sdk_root_of(emulator.as_deref().unwrap_or(&adb));
+    Ok(AndroidSdk {
         root,
         adb,
         emulator,
     })
 }
 
-fn path_binary(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|directory| directory.join(executable(name)))
-        .find(|candidate| candidate.is_file())
-}
-
-fn android_sdk_candidates() -> Vec<PathBuf> {
-    let mut candidates = Vec::new();
-    for variable in ["ANDROID_HOME", "ANDROID_SDK_ROOT"] {
-        if let Some(path) = std::env::var_os(variable) {
-            candidates.push(PathBuf::from(path));
-        }
-    }
-    if let Some(home) = dirs::home_dir() {
-        #[cfg(target_os = "macos")]
-        candidates.push(home.join("Library/Android/sdk"));
-        #[cfg(target_os = "linux")]
-        candidates.push(home.join("Android/Sdk"));
-    }
-    #[cfg(target_os = "windows")]
-    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-        candidates.push(PathBuf::from(local).join("Android/Sdk"));
-    }
-    if let Some(adb) = path_binary("adb")
-        && let Some(root) = adb.parent().and_then(Path::parent)
-    {
-        candidates.push(root.to_path_buf());
-    }
-    if let Some(emulator) = path_binary("emulator")
-        && let Some(root) = emulator.parent().and_then(Path::parent)
-    {
-        candidates.push(root.to_path_buf());
-    }
-    let mut seen = HashSet::new();
-    candidates.retain(|candidate| seen.insert(candidate.clone()));
-    candidates
-}
-
-fn android_sdk() -> Option<AndroidSdk> {
-    android_sdk_candidates().into_iter().find_map(sdk_at)
+fn android_sdk() -> Result<AndroidSdk, SdkSearch> {
+    resolve_android_sdk(&SdkEnvironment::current())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -683,21 +851,52 @@ fn reconcile_managed_devices_now(local_data_root: &Path) {
     }
 }
 
-fn list_android_devices() -> Vec<AndroidDevice> {
-    let Some(sdk) = android_sdk() else {
-        return Vec::new();
-    };
+/// Every AVD this machine can show: the ones already up, then the ones the
+/// emulator package knows how to start.
+///
+/// `adb` alone answers the first half, so a device that is already running is
+/// listed — and therefore mirrored, tapped and read — on a machine whose SDK
+/// has no emulator package at all. Only when that leaves nothing does the
+/// missing package become the answer.
+fn list_android_devices() -> Result<Vec<AndroidDevice>, String> {
+    let sdk = android_sdk().map_err(|search| search.to_string())?;
     let running = android_running(&sdk.adb);
-    let Ok(out) = crate::proc::quiet_command(&sdk.emulator)
-        .arg("-list-avds")
-        .output()
-    else {
-        return Vec::new();
+    let mut devices = running
+        .iter()
+        .filter(|(_, avd)| !avd.is_empty())
+        .map(|(serial, avd)| AndroidDevice {
+            avd: avd.clone(),
+            serial: Some(serial.clone()),
+            booted: true,
+        })
+        .collect::<Vec<_>>();
+    let emulator = match &sdk.emulator {
+        Ok(emulator) => emulator,
+        Err(search) if devices.is_empty() => return Err(search.to_string()),
+        Err(_) => return Ok(devices),
     };
-    if !out.status.success() {
-        return Vec::new();
-    }
-    let mut devices = Vec::new();
+    let listed = crate::proc::quiet_command(emulator)
+        .arg("-list-avds")
+        .output();
+    let out = match listed {
+        Ok(out) if out.status.success() => out,
+        // Listing is the only thing this binary is asked for here. While
+        // devices are already up its failure costs nothing; when there are
+        // none it is the whole answer, and answering "no AVDs" instead would
+        // hide it — one sentence covering two different causes is what sent
+        // t-5446 looking at the wrong one.
+        answer if devices.is_empty() => {
+            let detail = match answer {
+                Ok(out) => String::from_utf8_lossy(&out.stderr).trim().to_string(),
+                Err(error) => error.to_string(),
+            };
+            return Err(format!(
+                "{} -list-avds가 실패했습니다: {detail}",
+                emulator.display()
+            ));
+        }
+        _ => return Ok(devices),
+    };
     for line in String::from_utf8_lossy(&out.stdout).lines() {
         let avd = line.trim();
         let prefix = avd.split_whitespace().next();
@@ -707,6 +906,7 @@ fn list_android_devices() -> Vec<AndroidDevice> {
                 prefix,
                 Some("INFO" | "WARNING" | "ERROR" | "DEBUG" | "VERBOSE" | "PANIC")
             )
+            || devices.iter().any(|device| device.avd == avd)
         {
             continue;
         }
@@ -720,7 +920,7 @@ fn list_android_devices() -> Vec<AndroidDevice> {
             serial,
         });
     }
-    devices
+    Ok(devices)
 }
 
 fn android_serial_is_live(adb: &Path, serial: &str) -> bool {
@@ -741,13 +941,13 @@ pub(crate) async fn android_emulators(
         list_android_devices()
     })
     .await
-    .map_err(|error| error.to_string())
+    .map_err(|error| error.to_string())?
 }
 
 pub(crate) async fn android_emulators_direct() -> Result<Vec<AndroidDevice>, String> {
     tauri::async_runtime::spawn_blocking(list_android_devices)
         .await
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?
 }
 
 /// One lossless frame from the same adb device the built-in pane mirrors.
@@ -755,7 +955,7 @@ pub(crate) async fn android_emulators_direct() -> Result<Vec<AndroidDevice>, Str
 /// written them, so no partial destination is reported as a screenshot.
 pub(crate) async fn android_screenshot_direct(serial: String) -> Result<Vec<u8>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let sdk = android_sdk().ok_or("Android SDK(adb)를 찾을 수 없습니다")?;
+        let sdk = android_sdk().map_err(|search| search.to_string())?;
         if !android_serial_is_live(&sdk.adb, &serial) {
             return Err(format!("Android device `{serial}` is not running"));
         }
@@ -825,7 +1025,8 @@ fn boot_android_device(
         // after `spawn` and before the pid/start pair is committed.
         let managed = begin_managed_launch(&local_data_root, &chosen.avd)?;
         let marker = format!("{MANAGED_PROPERTY}={}", managed.record().token);
-        let mut boot = crate::proc::quiet_command(&sdk.emulator);
+        let emulator = sdk.emulator.as_ref().map_err(SdkSearch::to_string)?;
+        let mut boot = crate::proc::quiet_command(emulator);
         boot.args([
             "-avd",
             &chosen.avd,
@@ -876,10 +1077,13 @@ fn boot_android_device(
             return Err("에뮬레이터 부팅이 시간을 초과했습니다".to_string());
         }
         std::thread::sleep(BOOT_POLL_INTERVAL);
-        let found = list_android_devices()
+        // The serial of a booting AVD comes from adb, which is already the
+        // next question asked of it — polling the AVD list here would start
+        // the emulator binary once a second to learn nothing new.
+        let found = android_running(&sdk.adb)
             .into_iter()
-            .find(|device| device.avd == chosen.avd)
-            .and_then(|device| device.serial);
+            .find(|(_, avd)| avd == &chosen.avd)
+            .map(|(serial, _)| serial);
         let Some(serial) = found else {
             continue;
         };
@@ -1016,10 +1220,9 @@ pub(crate) async fn start_android_stream(
     // this device asks its first question a moment after the first frame.
     crate::systemone::warm_for_walks();
     tauri::async_runtime::spawn_blocking(move || {
-        let sdk = android_sdk()
-            .ok_or("Android SDK를 찾지 못했습니다 — Android Studio의 SDK를 설치하세요")?;
+        let sdk = android_sdk().map_err(|search| search.to_string())?;
         reconcile_managed_devices_now(app.state::<crate::AppState>().local_data_root());
-        let chosen = selected_android_device(&list_android_devices(), avd.as_deref())?;
+        let chosen = selected_android_device(&list_android_devices()?, avd.as_deref())?;
         let lease = match registry().claim(SessionKey::frames(
             EmulatorPlatform::Android,
             chosen.avd.clone(),
@@ -1296,9 +1499,9 @@ pub(crate) async fn start_emulator_video(
     let jar = crate::scrcpy::server_jar(&cache_root).await;
     tauri::async_runtime::spawn_blocking(move || {
         let husk_root = cache_root;
-        let sdk = android_sdk().ok_or_else(|| {
+        let sdk = android_sdk().map_err(|search| {
             crate::note_window_event(&husk_root, "emulator video refused: no android sdk");
-            "Android SDK가 없습니다".to_string()
+            search.to_string()
         })?;
         if registry()
             .target_control(EmulatorPlatform::Android, &serial)
@@ -1348,7 +1551,7 @@ pub(crate) async fn start_emulator_video(
 }
 
 fn android_control(serial: &str) -> Result<(AndroidSdk, Arc<SessionControl>), String> {
-    let sdk = android_sdk().ok_or("Android SDK가 없습니다")?;
+    let sdk = android_sdk().map_err(|search| search.to_string())?;
     let control = registry()
         .target_control(EmulatorPlatform::Android, serial)
         .filter(|control| control.is_alive())
@@ -1679,7 +1882,7 @@ pub(crate) async fn shutdown_android_emulator(
 ) -> Result<(), String> {
     crate::from_the_main_webview(&webview)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let sdk = android_sdk().ok_or("Android SDK가 없습니다")?;
+        let sdk = android_sdk().map_err(|search| search.to_string())?;
         if !android_serial_is_live(&sdk.adb, &serial) {
             stop_managed_device(&serial);
             return Ok(());
@@ -1841,14 +2044,6 @@ mod tests {
             "right",
         ] {
             assert!(android_keycode(alias).is_some(), "missing alias {alias}");
-        }
-    }
-
-    #[test]
-    fn configured_sdk_paths_come_before_host_defaults() {
-        let candidates = android_sdk_candidates();
-        if let Some(configured) = std::env::var_os("ANDROID_HOME") {
-            assert_eq!(candidates.first(), Some(&PathBuf::from(configured)));
         }
     }
 
