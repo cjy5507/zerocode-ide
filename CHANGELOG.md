@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.1.14] — 2026-09-22
+
+_since v1.1.13 (19 commits)_
+
+### feat
+- feat(zo): the composer's `@` opens Codex 0.155.1's mention popup — a nucleo file search, skills, and this session's files and vault pages first (t-5871)
+- feat(jev): auto rises for the first time — the window forgives a bad minute, a seat with no reader to compare against is judged on its own ledger, and no judgment is spent on a window that cannot be full (t-5875)
+- feat(zo-tui): thinking says what it is doing, its body stands as a folded cell, helper rows carry model and tail, and the status row names the route Jev chose (t-5872)
+- feat(summon): the choice is asked about the task and against this ledger's own record (t-5873)
+
+### fix
+- fix(jev): a hedge leaves only where its second copy has room to land (t-5874)
+- fix(zo): the terminal reader is crossterm's poll-based tty source — a key that lands beside a SIGWINCH no longer waits for the next keystroke
+- fix(orchestration): the quota-wall witness knows a model's own cap — "You've reached your … limit"
+
+### test
+- test(zo): the page-mention completion test reads the key's outcome, as its must_use asks (t-5871)
+- test(zo): the `@` popup golden, and the last two lints (t-5871)
+- test(summon): the row keeps what the question was told, and a replay measures the seat on it (t-5873)
+
+### release
+- release: four runtime spawn tests join the load-flake list
+- release: two tools-crate process spawns join the load-flake list
+- release: the personal-data scan forgives every retina asset name, not only the square ones
+- release: the iOS helper corpse test is a load flake the lane judges solo
+
 ## [1.1.13] — 2026-09-22
 
 _since v1.1.12 (21 commits)_
