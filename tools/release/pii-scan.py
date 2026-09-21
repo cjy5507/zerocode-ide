@@ -50,10 +50,15 @@ RULES = (
     dict(
         name="home-path",
         says="a real account's home directory, written out or slugged into a session id",
-        find=r"(?:/Users/|\bUsers-)[A-Za-z0-9._]+",
-        allow=r"(?:/Users/|Users-)"
+        # Both separators, and a Rust string's doubled backslash. There is no
+        # `/home/` row: every `/home/` path in this tree is a container root
+        # (`codex-runtime-home/home/…`) or a role (`builder`, `codex`), so the
+        # row would be noise — a remote account's name is what the banished
+        # row and the diff catch.
+        find=r"(?:[/\\]{1,2}Users[/\\]{1,2}|\bUsers-)[A-Za-z0-9._]+",
+        allow=r"(?:[/\\]{1,2}Users[/\\]{1,2}|Users-)"
               r"(?:dev|you|user|someone|somebody|me|person|people|fixture|tester|test|example"
-              r"|other|another|private|Public|Shared|[a-z])"
+              r"|other|another|private|Public|Shared|[A-Za-z]{1,2})"
               r"(?:\.[A-Za-z0-9]+)?",
         skip=(),
     ),

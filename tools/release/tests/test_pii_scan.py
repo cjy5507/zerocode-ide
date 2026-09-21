@@ -112,6 +112,22 @@ class PiiScan(unittest.TestCase):
                     f"{category}: the placeholder must be forgiven, not merely outranked: {hits}",
                 )
 
+    def test_a_home_directory_is_caught_on_either_separator(self):
+        """Windows writes `C:\\Users\\dev`, and a Rust string doubles the
+        backslash; a short placeholder is forgiven on every spelling.
+
+        The prose above spells the placeholder, not a name: this file is read
+        by the gate it tests, and the gate is right to refuse either one."""
+        name = CAUGHT["home-path"].rsplit("/", 1)[-1]
+        self.checkout.write(
+            "a.rs",
+            f'let p = "C:\\\\Users\\\\{name}\\\\x";\n'
+            f'let q = r"C:\\Users\\{name}\\y";\n'
+            'let ok = r"C:\\Users\\pi\\z";\n',
+        )
+        hits = found(self.checkout.root)["home-path"]
+        self.assertEqual([h["line"] for h in hits], [1, 2], hits)
+
     def test_a_finding_is_reported_at_its_own_line(self):
         caught = CAUGHT["home-path"]
         self.checkout.write("a.txt", f"one\ntwo\n{caught}\nfour\n")
