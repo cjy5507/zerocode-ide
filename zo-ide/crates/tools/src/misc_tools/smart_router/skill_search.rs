@@ -292,6 +292,7 @@ impl Searched {
 /// caller never has to decide what to do with a search that did not happen.
 /// The row is appended before this returns, so a reader of the ledger sees
 /// the search that a tool result came from.
+#[must_use]
 pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
     let candidates = skill_candidates(skills);
     let fallback = |outcome: &str| Searched {

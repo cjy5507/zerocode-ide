@@ -862,7 +862,9 @@ mod tests {
 
     /// Run `body` with the global Zo home pointed somewhere empty.
     fn with_empty_global_home<T>(root: &std::path::Path, body: impl FnOnce() -> T) -> T {
-        let _guard = crate::tests::env_lock().lock().unwrap_or_else(|held| held.into_inner());
+        let _guard = crate::tests::env_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let home = root.join("home");
         let previous = std::env::var_os(core_types::paths::ZO_CONFIG_HOME_ENV);
         std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, &home);
