@@ -2622,6 +2622,30 @@ pub fn jev_ledger_dir(cwd: &std::path::Path) -> PathBuf {
     zo_project_state_dir(cwd).join(JEV_LEDGER_DIR)
 }
 
+/// Whether `seat`'s own evidence has raised its `auto` to acting, read back
+/// from the transitions its ledger recorded
+/// (`zerocode_core::jev::promote::stand_from`).
+///
+/// One reader, because two programs ask it of the same seat: the system
+/// prompt, deciding whether to render the skill index at all, and the seat's
+/// own executor, deciding whether a tool result is the judgment's. Two
+/// readings of one ledger are two answers to one question, and the one that
+/// drifts is the one nobody is looking at.
+///
+/// A ledger that cannot be read is a seat that has never risen, which is
+/// where every seat starts.
+#[must_use]
+pub fn jev_seat_applies(cwd: &std::path::Path, seat: &zerocode_core::jev::JevUse) -> bool {
+    let Ok(text) = std::fs::read_to_string(jev_ledger_dir(cwd).join(seat.ledger)) else {
+        return false;
+    };
+    let rows: Vec<serde_json::Value> = text
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    zerocode_core::jev::promote::stand_from(&rows) == zerocode_core::jev::promote::Stand::Applying
+}
+
 /// Whether durable traces (`.zo/turns`, `.zo/dream`) live under the global
 /// per-project state directory instead of the working tree. Off by default —
 /// the crates' own tests read and write traces beside a scratch cwd — and

@@ -44,7 +44,7 @@ pub use rerank_shadow::{
     RERANK_OUTCOME_UNORDERABLE, RERANK_SHADOW_FILE,
 };
 pub use skill_search::{
-    note_loaded_skill, note_search_answer, search as skill_search, seat_has_risen as skill_seat_has_risen,
+    note_loaded_skill, note_search_answer, search as skill_search,
     skill_search_path, Chosen, Searched, SkillLabelRow, SkillSearchRow, SKILL_OUTCOME_ANSWERED,
     SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE,
 };

@@ -310,7 +310,7 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
     // Read once, here: the standing decides both whether the tool result is
     // the judgment's and whether a second request is worth buying, and two
     // readings of one ledger could answer those two questions differently.
-    let acting = mode.applies_with(seat_has_risen(cwd));
+    let acting = mode.applies_with(runtime::jev_seat_applies(cwd, &SKILLS));
     let (mut row, ranked) =
         api::sync_bridge::run_blocking(judge(cwd, task, &candidates, acting));
     let judged = row.outcome == SKILL_OUTCOME_ANSWERED;
@@ -418,13 +418,6 @@ fn asking_mode(cwd: &Path) -> Option<JevMode> {
         return None;
     }
     Some(mode)
-}
-
-/// Whether this seat's own evidence has raised its `auto` to acting.
-#[must_use]
-pub fn seat_has_risen(cwd: &Path) -> bool {
-    let rows = super::jev_summary::read_rows(&skill_search_path(cwd));
-    zerocode_core::jev::promote::stand_from(&rows) == zerocode_core::jev::promote::Stand::Applying
 }
 
 /// One search's row and its ranking: recalled from the memo, refused at the

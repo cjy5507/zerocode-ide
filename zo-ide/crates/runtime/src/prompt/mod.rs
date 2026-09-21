@@ -1557,20 +1557,7 @@ fn discover_skills_index_road(cwd: &Path, skills: &[SkillIndexEntry]) -> SkillsI
         .ok()
         .and_then(|config| serde_json::from_str(&config.as_json().render()).ok())
         .map_or(JevMode::Off, |root: serde_json::Value| SKILLS.mode_in(&root));
-    SkillsIndexRoad::decide(mode, seat_has_risen(cwd), skills)
-}
-
-/// Whether the skill seat's own evidence has raised its `auto` to acting.
-fn seat_has_risen(cwd: &Path) -> bool {
-    let ledger = crate::jev_ledger_dir(cwd).join(SKILLS.ledger);
-    let Ok(text) = fs::read_to_string(&ledger) else {
-        return false;
-    };
-    let rows: Vec<serde_json::Value> = text
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .collect();
-    zerocode_core::jev::promote::stand_from(&rows) == zerocode_core::jev::promote::Stand::Applying
+    SkillsIndexRoad::decide(mode, crate::jev_seat_applies(cwd, &SKILLS), skills)
 }
 
 /// The words the fold line opens with — what [`index_overflows`] looks for,

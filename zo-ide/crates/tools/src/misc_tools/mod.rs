@@ -45,7 +45,7 @@ pub use smart_router::{
 pub use smart_router::{
     note_loaded_skill, note_search_answer, skill_search, skill_search_mode_from,
     skill_search_path,
-    skill_seat_has_risen, Chosen, Searched, SkillLabelRow, SkillSearchRow,
+    Chosen, Searched, SkillLabelRow, SkillSearchRow,
     SKILL_OUTCOME_ANSWERED, SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE, SKILL_SEARCH_SETTING,
 };
 pub use smart_router::{
