@@ -24,6 +24,9 @@ const DESKTOP_APPS: &str = include_str!(
     "../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOSCore/DesktopApps.swift"
 );
 const IOS_BRIDGE: &str = include_str!("../../native/ios-emulator-helper/AccessibilityBridge.swift");
+const IOS_CHILD_TALLY: &str = include_str!(
+    "../../native/ios-emulator-helper/Sources/ZeroCodeIosEmulatorHelperCore/AccessibilityChildTally.swift"
+);
 const MOBILE_MARKS: &str = include_str!("../../src/emulator/marks.rs");
 
 /// The quoted strings of the Swift array literal on the line that declares it
@@ -743,5 +746,48 @@ fn the_ios_exporters_centre_answer_is_read_by_the_key_it_writes() {
     assert!(
         IOS_BRIDGE.contains(&format!("dict[\"{key}\"] = answered")),
         "the bridge writes its answer under another key"
+    );
+}
+/// A subview two parents reference is not a missing observation.
+///
+/// `Snapshot::new` refuses a truncated tree outright, so the exporter's word
+/// for it decides whether a whole screen can be numbered. The walk seats a
+/// revisited element once and every parent after the first saw one fewer
+/// child than it declared — counted as a cut, that refused screens nothing
+/// was missing from (t-5445). The three reasons a child leaves no dictionary
+/// are told apart here and nowhere else, so the source says it.
+#[test]
+fn the_ios_exporter_counts_a_revisited_child_before_it_calls_a_subtree_truncated() {
+    let revisit = IOS_BRIDGE
+        .split("guard visited.insert(ObjectIdentifier(element)).inserted else {")
+        .nth(1)
+        .expect("the walk no longer remembers the elements it seated");
+    assert!(
+        revisit.trim_start().starts_with("return .revisited"),
+        "a second parent's reach answers the same nothing a depth or budget cut does"
+    );
+    assert!(
+        IOS_BRIDGE.contains("AccessibilityChildTally(declared: children.count)"),
+        "the walk no longer counts the children the element declared"
+    );
+    let flags: Vec<&str> = IOS_BRIDGE
+        .lines()
+        .filter(|line| line.contains(r#"dict["truncated"] = true"#))
+        .collect();
+    assert_eq!(flags.len(), 1, "{flags:?}");
+    assert!(
+        flags[0].contains("tally.truncated"),
+        "a subtree is called truncated on something other than the tally: {}",
+        flags[0]
+    );
+    assert!(
+        IOS_CHILD_TALLY.contains("seats.count + revisited < declared"),
+        "the tally counts a child already seated elsewhere as one it is missing"
+    );
+    // The other half of the rule: a spent budget cannot prove the unseen tail
+    // was empty, and that loss still reaches the reader.
+    assert!(
+        IOS_BRIDGE.contains(r#"if remainingElements == 0 { root["truncated"] = true }"#),
+        "a spent element budget no longer says the tree is truncated"
     );
 }
