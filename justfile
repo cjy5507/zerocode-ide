@@ -62,6 +62,7 @@ tools-test:
     python3 tools/computer-bench/test_fixture_apm.py
     python3 tools/tests/test_decision_shadow_summary.py
     python3 tools/tests/test_jev_token_diet_baseline.py
+    python3 tools/tests/test_hedge_replay_seed.py
     python3 tools/tests/test_claude_code_panel_rules.py
 
 # The native helpers' own tests (Swift, 178 + 5 on 2026-09-21): the pure Core

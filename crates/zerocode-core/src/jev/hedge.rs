@@ -47,25 +47,59 @@
 //! Finagle and the sketches lower p99 in general. This door has a harder
 //! objective: a judgment is *used* only if it lands inside a wall
 //! (`DECISION_ACTIVE_DEADLINE`), and past that wall an answer is discarded
-//! whether it arrives or not. A delay chosen only from `maxExtraLoad` can
-//! therefore be past the wall, where a second request cannot finish in time
-//! and buys nothing at full price — on this machine's samples the
-//! load-derived delay is 2,257 ms against a 1,500 ms wall.
+//! whether it arrives or not. And the second copy is bounded by that same
+//! wall, measured from the *first* request's own first byte
+//! (`SystemOneClient::attempts`) — so what the second copy really gets is
+//! `wall - delay`, its **room**, and a delay chosen only from `maxExtraLoad`
+//! can leave no room worth having.
 //!
-//! So the rule takes the earlier of the two:
+//! So the delay is the load's to name and the room is the wall's to refuse:
 //!
 //! ```text
-//! delay = min( percentile(1 - MAX_EXTRA_LOAD),  wall - median )
+//! delay = percentile(1 - MAX_EXTRA_LOAD)
+//! room  = wall - delay,   and no hedge unless room >= ANSWERS_OF_ROOM * median
 //! ```
 //!
-//! The second term is what a wall asks for and what nothing in the field has:
-//! leave the second request as long as an ordinary answer takes, or do not
-//! bother it. On the 22 answered routing rows that is
-//! `min(2257, 1500 - 636) = 864 ms`, where the load-derived delay alone would
-//! have been 2,257 ms — past the wall, and worth nothing. A replay of those
-//! same rows clears the wall on 81.8% of them against 63.6% asked once, for
-//! 1.41x the requests, and this module's tests hold all four numbers to that
-//! sample.
+//! # What the ledger said when it was asked (2026-09-22, t-5874)
+//!
+//! The rule shipped with the two terms folded into `min(percentile,
+//! wall - median)` instead, which is the same formula with the room silently
+//! fixed at one median — and which lets the wall pull the delay *earlier*
+//! than the load rank, past the preference `MAX_EXTRA_LOAD` states. Both
+//! halves of that are now measured, on every hedge this machine has fired:
+//! 68 of them, 5 on the routing ledger and 63 on recall.
+//!
+//! | | firings | second copy won | first copy won | both died at the wall | load p50 / max |
+//! |---|---|---|---|---|---|
+//! | the folded rule | 68 | 11 | 43 | 14 | 0.22 / **0.39** |
+//! | this rule | 41 | 10 | 24 | 7 | 0.22 / 0.25 |
+//!
+//! Three readings, in the order they change the rule:
+//!
+//! 1. **A copy with one median of room does not land.** Sorted by the room
+//!    the copy was given, the firings split cleanly: one median of room or
+//!    less won 1 of 27, two or more won 10 of 41. `ANSWERS_OF_ROOM` is that
+//!    cliff and nothing else — a sweep of it over these same 68 firings puts
+//!    the requests spent per expected rescue at 8.0 (one median), 7.2 (1.75),
+//!    **6.1 (two)**, 8.0 (2.5).
+//! 2. **The folded rule broke its own preference.** The `min` let the wall
+//!    name a delay earlier than the load rank on 6 of the 68, where the share
+//!    of calls leaving twice reached 0.39 against the 0.25 this module
+//!    promises. Reading the delay from the load rank alone bounds it by
+//!    construction: 0.25 is now the measured maximum, not an aspiration.
+//! 3. **The two copies are not independent draws**, which is what
+//!    [`cleared_share`]'s second number assumes and what every published
+//!    hedge rests on. Of the 14 firings whose call missed the wall — the only
+//!    firings with a rescue to make — the second copy missed it too in
+//!    **14 of 14**, each one's `loser_ms` landing within 2 ms of `wall -
+//!    delay`: the copy ran out the same clock. On the one firing outside a
+//!    timeout where both latencies were recorded, they were 1,397 ms and
+//!    1,398 ms. The wire is slow by the moment, not by the request.
+//!
+//! Reading 3 is the one this module cannot fix, only refuse to spend into,
+//! and it is why the gate is the room rather than a cleverer delay: where the
+//! copy has time for two ordinary answers there is slack in the moment, and
+//! where it has time for one there is not.
 
 use core::time::Duration;
 
@@ -78,6 +112,10 @@ use core::time::Duration;
 /// actually support. It is a preference, not a bound — the day's count at the
 /// door is the bound, and [`HedgePlan::extra_load`] says what this delay
 /// really costs on the samples it was read from.
+///
+/// Since t-5874 it is also what it says: the delay is this rank, so the share
+/// that leaves twice cannot exceed it. The rule it replaced could, and did,
+/// on 6 of this machine's 68 firings.
 pub const MAX_EXTRA_LOAD: f64 = 0.25;
 
 /// The fewest answers a percentile may be named from.
@@ -90,25 +128,45 @@ pub const MAX_EXTRA_LOAD: f64 = 0.25;
 /// sample holds rather than its own maximum.
 pub const MIN_SAMPLES: usize = 8;
 
+/// How many ordinary answers must fit in the second copy's own budget
+/// ([`HedgePlan::room`]) before it is worth sending.
+///
+/// The second copy does not get the wall; it gets what is left of the wall
+/// after the delay, because both copies are bounded from the first request's
+/// first byte. Two, because this machine's 68 firings say so and say it
+/// sharply: given one median of room or less the copy answered first on 1 of
+/// 27, given two or more on 10 of 41. The cliff is between one and two, so
+/// the constant is two — a copy that is not given as long as two ordinary
+/// answers is being sent to arrive late, at full price.
+///
+/// A median rather than a higher rank because the copy is a fresh draw, not
+/// the first copy's remainder, and the median is the draw it most likely
+/// takes.
+pub const ANSWERS_OF_ROOM: u64 = 2;
+
 /// A judgment may leave at most twice: the first request and one hedge. So a
 /// hedge's cost is bounded at twice the requests by construction, whatever
 /// the distribution does, and no budget can be surprised by a third.
 pub const MAX_ATTEMPTS: u32 = 2;
 
-/// When a second request leaves, and what that costs on the samples the delay
-/// was read from.
+/// When a second request leaves, how long it then has, and what that costs on
+/// the samples the delay was read from.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HedgePlan {
     /// How long after the first request the second one leaves.
     pub delay: Duration,
+    /// What the second copy has to answer in: the wall less the delay, since
+    /// both copies are bounded from the first request's own first byte. The
+    /// number [`ANSWERS_OF_ROOM`] is measured against, worth carrying because
+    /// it — not the delay — is what decided whether this plan exists.
+    pub room: Duration,
     /// The share of `samples` that ran past `delay`: the requests that would
     /// actually have left twice. This is what the plan costs, measured rather
     /// than assumed, and a caller whose budget cannot carry it declines.
+    ///
+    /// At most [`MAX_EXTRA_LOAD`] by construction, because `delay` is that
+    /// rank.
     pub extra_load: f64,
-    /// Whether the wall, not [`MAX_EXTRA_LOAD`], set the delay — the case the
-    /// field's rule does not have, worth a ledger column because it says the
-    /// plan is spending more than it prefers to in order to land in time.
-    pub wall_bound: bool,
 }
 
 /// The delay for a judgment whose answers have looked like `samples`
@@ -116,10 +174,11 @@ pub struct HedgePlan {
 /// discarded.
 ///
 /// `None` — ask once — when the sample is too small to name a rank
-/// ([`MIN_SAMPLES`]), or when an ordinary answer already runs past the wall,
-/// because then the whole distribution is late and a second copy of it is
-/// late too: that is a wall to raise or a judgment to drop, not a request to
-/// duplicate.
+/// ([`MIN_SAMPLES`]), when the delay the load prefers is itself past the wall,
+/// or when what is left of the wall after it cannot hold
+/// [`ANSWERS_OF_ROOM`] ordinary answers. That last one is the whole rule: a
+/// second copy is worth its price only where it has room to land, and on this
+/// machine's ledger a copy without that room lands 1 time in 27.
 #[must_use]
 pub fn plan(samples: &[u64], wall: Duration) -> Option<HedgePlan> {
     if samples.len() < MIN_SAMPLES {
@@ -128,23 +187,28 @@ pub fn plan(samples: &[u64], wall: Duration) -> Option<HedgePlan> {
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
     let wall_ms = u64::try_from(wall.as_millis()).unwrap_or(u64::MAX);
-    // What the day's preferred load buys, and what the wall demands: the
-    // second request needs as long as an ordinary answer takes.
-    let by_load = percentile(&sorted, 1.0 - MAX_EXTRA_LOAD);
-    let by_wall = wall_ms.checked_sub(percentile(&sorted, 0.5))?;
-    let delay = by_load.min(by_wall);
+    // What the day's preferred load buys, and nothing else: a delay the wall
+    // pulled earlier than this rank would spend more than MAX_EXTRA_LOAD says
+    // it prefers to, which is the bug this replaced.
+    let delay = percentile(&sorted, 1.0 - MAX_EXTRA_LOAD);
     if delay == 0 || delay >= wall_ms {
+        return None;
+    }
+    // What the wall demands in return: the copy leaves inside the same wall
+    // the first request did, so this is all it has.
+    let room = wall_ms - delay;
+    if room < ANSWERS_OF_ROOM.saturating_mul(percentile(&sorted, 0.5)) {
         return None;
     }
     let over = sorted.iter().filter(|answer| **answer > delay).count();
     Some(HedgePlan {
         delay: Duration::from_millis(delay),
+        room: Duration::from_millis(room),
         #[expect(
             clippy::cast_precision_loss,
             reason = "a share of a sample this rule already refuses below MIN_SAMPLES"
         )]
         extra_load: over as f64 / sorted.len() as f64,
-        wall_bound: by_wall < by_load,
     })
 }
 
@@ -155,8 +219,17 @@ pub fn plan(samples: &[u64], wall: Duration) -> Option<HedgePlan> {
 /// same sample — the assumption every published hedge rests on, and the one
 /// the field warns about: two requests that queue behind the same overloaded
 /// back-end are slow together, and then a hedge buys less than this says. It
-/// is stated here as arithmetic on a sample so a ledger of real hedges can
+/// was stated here as arithmetic on a sample so a ledger of real hedges could
 /// contradict it, which is the only way to find out.
+///
+/// It has now been asked, and it is contradicted (t-5874). Of this machine's
+/// 68 firings, 14 were calls that missed the wall — the only firings with a
+/// rescue to make — and the second copy missed it on 14 of 14, each `loser_ms`
+/// within 2 ms of `wall - delay`. This arithmetic, read on the same windows,
+/// expected most of them to land. So the number below is kept as what
+/// independence would buy, and is read as an upper bound rather than a
+/// forecast; what the rule actually spends on is [`HedgePlan::room`], which
+/// the same ledger does support.
 #[must_use]
 pub fn cleared_share(samples: &[u64], wall: Duration, plan: Option<&HedgePlan>) -> (f64, f64) {
     let wall_ms = u64::try_from(wall.as_millis()).unwrap_or(u64::MAX);
@@ -168,7 +241,7 @@ pub fn cleared_share(samples: &[u64], wall: Duration, plan: Option<&HedgePlan>) 
     };
     let once = share(wall_ms);
     let twice = plan.map_or(once, |plan| {
-        let second = wall_ms.saturating_sub(u64::try_from(plan.delay.as_millis()).unwrap_or(0));
+        let second = u64::try_from(plan.room.as_millis()).unwrap_or(0);
         1.0 - (1.0 - once) * (1.0 - share(second))
     });
     (once, twice)
