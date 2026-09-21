@@ -8514,6 +8514,9 @@ listen("hook:subagent", (event) => {
   if (rows?.length) paneSubagents.set(term, rows);
   else paneSubagents.delete(term);
   syncHelperPagesWith(term, rows ?? []);
+  // The composer's agents pill counts this roster; it is the only thing on
+  // the page that does, so one line repaints it.
+  paintComposerChipsFor(term);
   // The tab strip is NOT repainted: a helper is not its pane's state, and the
   // badge on the tab says what the pane is doing. Repainting it here would be
   // this window drawing the very confusion the backend refuses to create.
@@ -12332,6 +12335,9 @@ function workerComposerNode(run, owner = null) {
     tools.appendChild(composerAgentChip(run, spec));
     tools.appendChild(composerModeChip(run, spec));
   }
+  // The helpers running inside this pane (the extension's footer pill) —
+  // hidden while there are none, which is most of the time.
+  tools.appendChild(composerAgentsChip(run));
   if (owner && !ownPane) {
     const door = document.createElement("button");
     door.type = "button";
@@ -12464,6 +12470,8 @@ function paintWorkerComposerState(form, run, delivered = null) {
   if (agentChip) paintComposerAgentChip(agentChip, run, agentModelLists.get(run.agent)?.rows ?? run.wireModels ?? null);
   const modeChip = form.querySelector(".worker-composer-mode");
   if (modeChip && spec) paintComposerModeChip(modeChip, run, spec);
+  const agentsChip = form.querySelector(".worker-composer-agents");
+  if (agentsChip) paintComposerAgentsChip(agentsChip, run);
   // The send and the focus ring wear the permission mode's reach — the
   // extension colours both by it (`[data-permission-mode]`).
   wearReach(form, composerReachOf(run));

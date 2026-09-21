@@ -266,47 +266,91 @@ function closeComposerMenu(chip = null) {
   openMenu = null;
 }
 
+/* ---- the bones every composer menu wears -------------------------------- */
+
+/* The panel, its heads and its rows — written once here so the model menu and
+ * the agents pill's menu cannot drift into two different-looking lists. */
+function composerMenuNode() {
+  const menu = document.createElement("div");
+  menu.className = "composer-menu";
+  menu.setAttribute("role", "menu");
+  return menu;
+}
+
+function composerMenuSection(menu, words) {
+  const head = document.createElement("div");
+  head.className = "composer-menu-head";
+  head.textContent = words;
+  menu.appendChild(head);
+  return head;
+}
+
+function composerMenuItem(menu, words, sub, on, { current = false } = {}) {
+  const option = document.createElement("button");
+  option.type = "button";
+  option.className = "composer-menu-item";
+  option.setAttribute("role", "menuitem");
+  if (current) option.setAttribute("aria-current", "true");
+  const name = document.createElement("span");
+  name.className = "composer-menu-name";
+  name.textContent = words;
+  option.appendChild(name);
+  if (sub) {
+    const dim = document.createElement("span");
+    dim.className = "composer-menu-sub";
+    dim.textContent = sub;
+    option.appendChild(dim);
+  }
+  option.addEventListener("click", () => {
+    closeComposerMenu();
+    on();
+  });
+  menu.appendChild(option);
+  return option;
+}
+
+/* Stand a built menu on the chip that opened it and keep it there: placed,
+ * closed by a press outside or by Escape, and placed again whenever the
+ * window or the composer moves under it. Every composer menu opens here. */
+function standOpenComposerMenu(chip, menu) {
+  chip.parentElement.appendChild(menu);
+  standComposerMenu(menu, chip);
+  chip.setAttribute("aria-expanded", "true");
+  const away = (event) => {
+    if (!menu.contains(event.target) && event.target !== chip) closeComposerMenu();
+  };
+  const keys = (event) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      closeComposerMenu();
+      chip.focus();
+    }
+  };
+  const stand = () => standComposerMenu(menu, chip);
+  document.addEventListener("pointerdown", away, true);
+  document.addEventListener("keydown", keys, true);
+  window.addEventListener("resize", stand);
+  // Anything scrolling under the menu carries the chip with it, and the
+  // composer grows as the draft wraps — both move what the menu stands on.
+  document.addEventListener("scroll", stand, true);
+  const watch = new ResizeObserver(stand);
+  watch.observe(chip.closest(".worker-composer") ?? chip);
+  openMenu = { node: menu, chip, away, keys, stand, watch };
+  menu.querySelector('[aria-current="true"], .composer-menu-item')?.focus();
+}
+
 /* The chip's menu: the models this CLI drives, the current one ticked, then
  * the other installed CLIs — each opening a fresh pane in the same checkout,
  * because a running pty runs one program. */
 async function openComposerMenu(chip, run, spec) {
   closeComposerMenu();
-  const menu = document.createElement("div");
-  menu.className = "composer-menu";
-  menu.setAttribute("role", "menu");
+  const menu = composerMenuNode();
   const road = composerRoad(run, spec);
   const models = await road.models();
   paintComposerAgentChip(chip, run, models);
   const current = road.model();
-  const section = (words) => {
-    const head = document.createElement("div");
-    head.className = "composer-menu-head";
-    head.textContent = words;
-    menu.appendChild(head);
-  };
-  const item = (words, sub, on, { current: isCurrent = false } = {}) => {
-    const option = document.createElement("button");
-    option.type = "button";
-    option.className = "composer-menu-item";
-    option.setAttribute("role", "menuitem");
-    if (isCurrent) option.setAttribute("aria-current", "true");
-    const name = document.createElement("span");
-    name.className = "composer-menu-name";
-    name.textContent = words;
-    option.appendChild(name);
-    if (sub) {
-      const dim = document.createElement("span");
-      dim.className = "composer-menu-sub";
-      dim.textContent = sub;
-      option.appendChild(dim);
-    }
-    option.addEventListener("click", () => {
-      closeComposerMenu();
-      on();
-    });
-    menu.appendChild(option);
-    return option;
-  };
+  const section = (words) => composerMenuSection(menu, words);
+  const item = (words, sub, on, options = {}) => composerMenuItem(menu, words, sub, on, options);
   if (spec.model_command || run.wire) {
     section(t("composer.menu.models", "모델"));
     if (models.length === 0) {
@@ -337,30 +381,7 @@ async function openComposerMenu(chip, run, spec) {
       item(row.name, row.wire, () => void openWirePage(row.id, helperBase(run)));
     }
   }
-  chip.parentElement.appendChild(menu);
-  standComposerMenu(menu, chip);
-  chip.setAttribute("aria-expanded", "true");
-  const away = (event) => {
-    if (!menu.contains(event.target) && event.target !== chip) closeComposerMenu();
-  };
-  const keys = (event) => {
-    if (event.key === "Escape") {
-      event.stopPropagation();
-      closeComposerMenu();
-      chip.focus();
-    }
-  };
-  const stand = () => standComposerMenu(menu, chip);
-  document.addEventListener("pointerdown", away, true);
-  document.addEventListener("keydown", keys, true);
-  window.addEventListener("resize", stand);
-  // Anything scrolling under the menu carries the chip with it, and the
-  // composer grows as the draft wraps — both move what the menu stands on.
-  document.addEventListener("scroll", stand, true);
-  const watch = new ResizeObserver(stand);
-  watch.observe(chip.closest(".worker-composer") ?? chip);
-  openMenu = { node: menu, chip, away, keys, stand, watch };
-  menu.querySelector('[aria-current="true"], .composer-menu-item')?.focus();
+  standOpenComposerMenu(chip, menu);
 }
 
 /* A pick walks the CLI's own road: `/model <id>` where the CLI takes the id,
@@ -408,6 +429,81 @@ async function openPaneWith(run, other) {
   } catch (error) {
     showError(error);
   }
+}
+
+/* ---- the agents pill ----------------------------------------------------- */
+
+/* `N agents` under the box (the extension's footer pill, 2.1.269): how many
+ * helpers are running inside this pane right now, opening the list of them.
+ * The roster is the backend's (`paneSubagents`, kept by `hook:subagent` and
+ * cleared with the pane), so the pill counts and never remembers. */
+function composerAgentsChip(run) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "worker-composer-pill worker-composer-agents";
+  chip.hidden = true;
+  chip.setAttribute("aria-haspopup", "menu");
+  chip.setAttribute("aria-expanded", "false");
+  chip.dataset.keyboardOwner = "true";
+  chip.append(iconNode("bot"), pillWordsNode(""));
+  // The tip never changes, so it is said once rather than on every paint.
+  labelButton(chip, t("composer.agentsTip", "하위 에이전트 보기"));
+  chip.addEventListener("click", () => {
+    if (chip.getAttribute("aria-expanded") === "true") closeComposerMenu(chip);
+    else openComposerAgentsMenu(chip, run);
+  });
+  paintComposerAgentsChip(chip, run);
+  return chip;
+}
+
+/* The helpers this page's pane is running. A wire session has no pane, so it
+ * has no helpers to show — the roster is keyed by terminal. */
+function composerSubagentsOf(run) {
+  if (run.wire || run.term === undefined || run.term === null) return [];
+  return paneSubagents.get(run.term) ?? [];
+}
+
+/* The window's word for one helper's state. The board's own words, so a row
+ * in this menu and the same row in the sidebar never disagree. */
+function subagentStateWords(state) {
+  if (state === "done") return bucketWord("done");
+  if (state === "failed") return t("worker.endedFailed", "실패");
+  return bucketWord("working");
+}
+
+/* Shown only while helpers are out, and wearing the failure ink when one of
+ * them failed — the tool row's own failed colour, not the halt this product
+ * keeps for destructive doors. Every write is guarded. */
+function paintComposerAgentsChip(chip, run) {
+  const rows = composerSubagentsOf(run);
+  const out = rows.filter((row) => row.state !== "done").length;
+  writeHidden(chip, out === 0);
+  writeClass(chip, "is-failed", rows.some((row) => row.state === "failed"));
+  if (out === 0) return;
+  writeTextContent(
+    chip.querySelector(".worker-composer-pill-words"),
+    t("composer.agents", "에이전트 {{n}}", { n: out }),
+  );
+}
+
+/* Every helper of this pane, running ones and finished ones alike, each row
+ * opening its own transcript page — the same door the sidebar's row opens
+ * (`openHelperPage`), because a helper has no pane of its own. */
+function openComposerAgentsMenu(chip, run) {
+  closeComposerMenu();
+  const rows = composerSubagentsOf(run);
+  if (rows.length === 0) return;
+  const menu = composerMenuNode();
+  const owner = tabOfTerm(run.term);
+  composerMenuSection(menu, t("composer.agentsTip", "하위 에이전트 보기"));
+  for (const row of rows) {
+    composerMenuItem(menu, row.name, subagentStateWords(row.state), () =>
+      void openHelperPage(
+        { term: run.term, agent: run.agent, worktree: owner?.worktree, tab: owner },
+        row,
+      ));
+  }
+  standOpenComposerMenu(chip, menu);
 }
 
 /* ---- the permission-mode chip ------------------------------------------- */

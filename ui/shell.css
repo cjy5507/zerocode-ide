@@ -14449,6 +14449,12 @@ details[open] > .helper-cap::after {
   border-color: var(--chat-accent);
 }
 
+/* The agents pill wears the failure ink of a tool that failed — never the
+ * halt colour, which this product keeps for destructive doors. */
+.worker-composer-agents.is-failed {
+  color: var(--chat-dot-failed);
+}
+
 .worker-composer-box {
   display: block;
   box-sizing: border-box;
@@ -14510,7 +14516,11 @@ details[open] > .helper-cap::after {
   font-size: var(--chat-pill-size);
   line-height: 1;
   white-space: nowrap;
-  transition: background-color var(--motion-fast) var(--ease-standard);
+  /* The ink eases too: the agents pill turns to the failure colour when a
+   * helper fails, and a colour this window changes it changes over time. */
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
 }
 
 .worker-composer-pill:hover {

@@ -54256,6 +54256,9 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       // The tool row, left to right: + · agent chip · mode chip … / · send.
       const tools = composer?.querySelector(".worker-composer-tools");
       seen.rowOrder = [...(tools?.children ?? [])].map((node) => node.className.split(" ").pop());
+      // The agents pill stands in the row but says nothing while no helper
+      // is out — it is the roster's count, not a permanent chip.
+      seen.agentsPillQuiet = composer?.querySelector(".worker-composer-agents")?.hidden === true;
       const agentChip = composer?.querySelector(".worker-composer-agent");
       seen.chipMark = agentChip?.querySelector(".worker-composer-mark")?.textContent;
       seen.chipName = agentChip?.querySelector(".worker-composer-pill-words")?.textContent;
@@ -54423,7 +54426,8 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
     ok(
       "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page keeps its door and speaks of the parent",
       seen.placeholder === seen.wantPlaceholder && seen.noDoorOnOwnPane &&
-        JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-mode", "worker-composer-right"]) &&
+        JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-mode", "worker-composer-agents", "worker-composer-right"]) &&
+        seen.agentsPillQuiet &&
         seen.chipMark === "✻" && seen.chipName === "Claude" && seen.chipModelRaw === " · claude-fable-5-1" &&
         seen.helperDoor && seen.helperPlaceholder === seen.wantHelperPlaceholder,
       JSON.stringify(seen),
@@ -55215,6 +55219,43 @@ suite("plan-card", async ({ browser, origin, ok }) => {
       seen.wantPlainTitle = t("board.approve.title", "{{tool}} 허용할까요?", { tool: "Bash" });
       seen.plainNoPlan = plainCard?.querySelector(".board-approve-plan") === null;
       seen.plainSummary = plainCard?.querySelector(".board-approve-detail")?.textContent ?? null;
+      // ---- the agents pill: the roster's count, its list, its failure ink.
+      const composer = chat?.querySelector(".worker-composer");
+      const pill = composer?.querySelector(".worker-composer-agents");
+      seen.pillHiddenAtRest = pill?.hidden === true;
+      tell("hook:subagent", { term, rows: [
+        { id: "one", name: "@reader", state: "running" },
+        { id: "two", name: "@writer", state: "failed" },
+      ] });
+      await settle();
+      seen.pillWords = pill?.querySelector(".worker-composer-pill-words")?.textContent ?? null;
+      seen.wantPillWords = t("composer.agents", "에이전트 {{n}}", { n: 2 });
+      seen.pillShown = pill?.hidden === false;
+      seen.pillFailed = pill?.classList.contains("is-failed") === true;
+      seen.pillTip = pill?.dataset.tip === t("composer.agentsTip", "하위 에이전트 보기") &&
+        pill?.getAttribute("aria-label") === t("composer.agentsTip", "하위 에이전트 보기");
+      pill?.click();
+      await settle();
+      const menu = composer?.querySelector(".composer-menu");
+      seen.menuRows = [...(menu?.querySelectorAll(".composer-menu-item") ?? [])]
+        .map((row) => `${row.querySelector(".composer-menu-name")?.textContent} · ${row.querySelector(".composer-menu-sub")?.textContent}`);
+      seen.wantMenuRows = [
+        `@reader · ${t("board.working", "작업 중")}`,
+        `@writer · ${t("worker.endedFailed", "실패")}`,
+      ];
+      let askedLog = null;
+      window.__ANSWER__.subagent_log = (args) => {
+        askedLog = args;
+        return { found: true, next: 1, skipped: false, turns: [{ role: "user", text: "read it" }] };
+      };
+      menu?.querySelector(".composer-menu-item")?.click();
+      await settle(150);
+      seen.openedHelper = askedLog?.id ?? null;
+      seen.helperTabStands = tabs.some((tab) => tab.id === `helper:${term}:one`) && activeTabId === `helper:${term}:one`;
+      // The last helper stopping empties the pill, as the roster empties.
+      tell("hook:subagent", { term, rows: [] });
+      await settle();
+      seen.pillGone = pill?.hidden === true;
       delete window.__ANSWER__.pane_log;
       delete window.__ANSWER__.subagent_log;
       tell("term:exited", { term });
@@ -55237,6 +55278,14 @@ suite("plan-card", async ({ browser, origin, ok }) => {
       seen.paneTitle === seen.wantTitle && seen.panePlan === "계획" && seen.paneNoField &&
         seen.paneActs === "is-allow,is-instead" && seen.paneInstead && seen.paneInsteadFocus &&
         seen.plainTitle === seen.wantPlainTitle && seen.plainNoPlan && seen.plainSummary === "rm -rf build",
+      JSON.stringify(seen),
+    );
+    ok(
+      "the composer's agents pill counts the helpers still out, wears the failure ink when one failed, lists them with the board's own state words, opens a row's transcript — and goes quiet when the roster empties",
+      seen.pillHiddenAtRest && seen.pillShown && seen.pillWords === seen.wantPillWords &&
+        seen.pillFailed && seen.pillTip &&
+        JSON.stringify(seen.menuRows) === JSON.stringify(seen.wantMenuRows) &&
+        seen.openedHelper === "one" && seen.helperTabStands && seen.pillGone,
       JSON.stringify(seen),
     );
   } finally {
