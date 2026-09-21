@@ -2417,6 +2417,25 @@ function usageCtxWord(reading) {
   return `ctx ${reading.tokens.toLocaleString()}`;
 }
 
+/* 그리고 판의 전사가 말한 같은 두 수 — 훅은 토큰을 나르지 않고 채널은
+ * zo의 것이라, 그 둘이 없는 판에게는 제 전사가 유일한 출처다(`pane_log`의
+ * `usage`). 판 번호로 잡히므로 판이 죽을 때(`term:exited`)와 대화를 잊을
+ * 때(`forgetPaneChat`) 같이 지운다. */
+const paneUsage = new Map();
+
+/* 담고, 값이 움직였는지 말한다 — 움직였을 때만 칩을 다시 그리므로, 같은
+ * 수를 다시 실어 온 폴은 아무것도 만지지 않는다. */
+function rememberPaneUsage(term, usage) {
+  const tokens = Number(usage?.tokens ?? 0);
+  const window = Number(usage?.window ?? 0);
+  if (!Number.isFinite(tokens) || tokens <= 0) return false;
+  const reading = { tokens, window: Number.isFinite(window) && window > 0 ? window : 0 };
+  const held = paneUsage.get(term);
+  if (held && held.tokens === reading.tokens && held.window === reading.window) return false;
+  paneUsage.set(term, reading);
+  return true;
+}
+
 /* 그리고 그 판의 카드가 읽는 같은 값 — 비율까지.
  *
  * 둘 다 있어야 그린다. 토큰만 아는 카드에 막대를 그리려면 창 크기를 지어내야
@@ -10698,13 +10717,14 @@ function wireRunStatus(status) {
 function holdWireState(run, log) {
   const before = run.wireLog
     ? JSON.stringify([run.wireLog.status, run.wireLog.asks, run.wireLog.model, run.wireLog.mode,
-      run.wireLog.modes, run.wireLog.commands, run.wireLog.live])
+      run.wireLog.modes, run.wireLog.commands, run.wireLog.live, run.wireLog.usage ?? null])
     : "";
   run.wireLog = log;
   run.status = wireRunStatus(log.status);
   if (log.status === "ended" && run.endedAt === null) run.endedAt = Date.now();
   run.toolCalls = run.helper.turns.filter((turn) => turn.role === "tool").length;
-  return before !== JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands, log.live]);
+  return before !== JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands,
+    log.live, log.usage ?? null]);
 }
 
 /* A wire session said it has something new — a delta of what it is saying, a
@@ -10914,6 +10934,7 @@ function forgetPaneChat(term) {
   held.run.queue = null;
   paneChats.delete(term);
   paneLive.delete(term);
+  paneUsage.delete(term);
 }
 
 /* The active pane's term when it runs an agent — the pane the toggle speaks
@@ -11182,6 +11203,12 @@ async function pollHelperPages() {
     return;
   }
   held.found = true;
+  // 전사가 말한 컨텍스트 사용량. 판의 길에서만 담는다 — 헬퍼의 전사는
+  // 부모 판이 서 있는 자리가 아니고, 그것을 판의 값으로 적으면 칩이 남의
+  // 수를 이 판의 것이라 말하게 된다.
+  const usageMoved = held.id === PANE_LOG_ID && more.usage
+    ? rememberPaneUsage(tab.worker.term, more.usage)
+    : false;
   // The transcript names the model that wrote it. Only taken where nothing
   // has said yet: a hook that carries one is the pane's live word and this is
   // the file's memory of it, which is a turn behind whenever both speak.
@@ -11205,9 +11232,11 @@ async function pollHelperPages() {
   // the composer read it there), and a change repaints with no new turn.
   const wireChanged = held.id === WIRE_LOG_ID && holdWireState(tab.worker, more);
   if (document.hidden || activeHelperPage() !== tab) return;
-  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged) return;
+  if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged && !usageMoved) return;
   if (wireChanged) syncWorkerComposers(tab.worker);
   if (wireChanged) settleComposerQueue(tab.worker);
+  // 컨텍스트가 움직였다 — 미터만 갈아입는다(턴은 그대로일 수 있다).
+  if (usageMoved) syncWorkerComposers(tab.worker);
   // 새로 온 것이 있을 때에만 다시 그린다 — 쉬는 페이지는 아무 값도 치르지
   // 않고, 그림도 온 턴만 잇는다(`syncHelperTurns`).
   paintHelperSurface(tab);
@@ -12264,6 +12293,7 @@ function workerComposerNode(run, owner = null) {
   if (spec) {
     tools.appendChild(composerAgentChip(run, spec));
     tools.appendChild(composerModeChip(run, spec));
+    tools.appendChild(composerContextChip(run, spec));
   }
   if (owner && !ownPane) {
     const door = document.createElement("button");
@@ -12402,6 +12432,8 @@ function paintWorkerComposerState(form, run, delivered = null) {
   if (agentChip) paintComposerAgentChip(agentChip, run, agentModelLists.get(run.agent)?.rows ?? run.wireModels ?? null);
   const modeChip = form.querySelector(".worker-composer-mode");
   if (modeChip && spec) paintComposerModeChip(modeChip, run, spec);
+  const contextChip = form.querySelector(".worker-composer-context");
+  if (contextChip && spec) paintComposerContextChip(contextChip, run, spec);
   // The send and the focus ring wear the permission mode's reach — the
   // extension colours both by it (`[data-permission-mode]`).
   wearReach(form, composerReachOf(run));
@@ -12916,6 +12948,7 @@ listen("term:exited", (event) => {
   const { term } = event.payload;
   forgetManagedTerminalSession(term);
   forgetCodexPtyFallback(term);
+  paneUsage.delete(term);
   orphanWorkersOf(term);
   if (term === FLOAT_TERM) {
     // The chord is read inside, not captured: it can be rebound while the

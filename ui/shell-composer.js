@@ -128,6 +128,8 @@ function composerRoad(run, spec = null) {
         };
       },
       send: (text) => invoke("wire_send", { id: run.wire, text }),
+      // 이 세션이 마지막으로 말한 컨텍스트(`wire_log`의 `usage`).
+      usage: () => run.wireLog?.usage ?? null,
     };
   }
   return {
@@ -139,6 +141,12 @@ function composerRoad(run, spec = null) {
     cycleMode: () => cyclePanePermission(run, spec),
     catalog: (cwd, refresh) => slashCatalogFor(spec.id, cwd, refresh),
     send: (text) => deliverToPane(run.term, text),
+    // 판에게는 출처가 둘이다. 제 전사가 말한 것이 먼저고(모든 CLI가
+    // 남긴다), 그것이 없으면 zo 채널이 세션에 대해 말한 것. 셋째는 없다 —
+    // 훅은 토큰을 나르지 않는다.
+    usage: () => paneUsage.get(run.term)
+      ?? sessionUsage.get(paneSessions.get(run.term)?.session?.id)
+      ?? null,
   };
 }
 
@@ -584,6 +592,110 @@ function paintComposerModeChip(chip, run, spec) {
   writeAttribute(chip, "data-tip", tip);
   writeAttribute(chip, "aria-label", tip);
   chip.disabled = !road.canChangeMode();
+}
+
+/* ---- 컨텍스트 미터와 압축 문 --------------------------------------------
+ *
+ * X의 오래된 말(「상태 줄이 가장 저평가된 기능 — 모델·effort·정확한 컨텍스트
+ * 사용량」)과 확장 푸터의 파이. 확장은 창 크기에서 제 출력 상한과 제 상수를
+ * 빼고 나서 그리는데, 그 둘은 확장의 산수와 확장의 리터럴이라 옮기지 않는다.
+ * 여기서는 CLI가 준 두 수만 쓴다 — 쓴 만큼과 담을 수 있는 만큼.
+ *
+ * 그리고 그 알약이 곧 압축 단추다. 채워 가는 고리를 보여 주면서 비울 길을
+ * 주지 않는 것은 계기판만 있고 손잡이가 없는 것과 같다. */
+
+/* 고리의 둘레를 100으로 잡는다 — 백분율이 그대로 `stroke-dasharray`의
+ * 길이가 되어, 비율을 그리는 데 제2의 산수가 없다. r = 100 / 2π. */
+const METER_CIRCUMFERENCE = 100;
+const METER_RADIUS = 15.915_5;
+
+/* 트랙과 채움, 원 둘. 세우기만 한다. */
+function composerMeterNode() {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "worker-composer-meter");
+  svg.setAttribute("viewBox", "0 0 32 32");
+  svg.setAttribute("aria-hidden", "true");
+  for (const role of ["is-track", "is-fill"]) {
+    const ring = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    ring.setAttribute("class", role);
+    ring.setAttribute("cx", "16");
+    ring.setAttribute("cy", "16");
+    ring.setAttribute("r", String(METER_RADIUS));
+    svg.appendChild(ring);
+  }
+  return svg;
+}
+
+/* 이 실행에서 압축을 부를 수 있는가 — 카탈로그가 그 명령을 알고, 이 길이
+ * 그것을 나를 수 있을 때의 그 명령, 아니면 `null`.
+ *
+ * 판은 언제나 나를 수 있다: 사람이 화면에 직접 치는 것과 같은 길이다. 선은
+ * 세션이 제 명령 목록에 그 이름을 올렸을 때만 — 올리지 않은 세션에 슬래시
+ * 한 줄을 보내면 그것은 명령이 아니라 모델에게 하는 말이 되고, 사람은
+ * 컨텍스트가 줄기를 기다리며 줄지 않는 고리를 본다. */
+function composerCompactCommand(run, spec) {
+  const command = spec?.compact_command ?? null;
+  if (!command) return null;
+  if (!run.wire) return command;
+  return (run.wireLog?.commands ?? []).some((row) => row.name === command) ? command : null;
+}
+
+/* 창 크기를 말로 — 모르면 「?」. 지어낸 분모는 툴팁에서도 쓰지 않는다. */
+function composerContextWindowWords(reading) {
+  return reading.window > 0
+    ? reading.window.toLocaleString()
+    : t("composer.context.unknownWindow", "?");
+}
+
+function composerContextChip(run, spec) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "worker-composer-pill worker-composer-context";
+  chip.hidden = true;
+  chip.append(composerMeterNode(), pillWordsNode(""));
+  labelButton(chip, t("composer.context.tipPlain", "컨텍스트 {{tokens}} / {{window}}", {
+    tokens: "0",
+    window: t("composer.context.unknownWindow", "?"),
+  }));
+  chip.addEventListener("click", () => {
+    const command = composerCompactCommand(run, spec);
+    if (!command) return;
+    void composerDeliver(run, command).catch((error) => showError(error));
+  });
+  paintComposerContextChip(chip, run, spec);
+  return chip;
+}
+
+/* 읽은 값이 있을 때만 선다. 창을 아는 읽기는 고리와 백분율, 모르는 읽기는
+ * 상태바와 **같은 낱말**(`usageCtxWord`)과 고리 없음 — 어휘를 두 벌 만들지
+ * 않는다. 쓰기는 전부 값이 바뀔 때만(조용한 폴은 mutation 0). */
+function paintComposerContextChip(chip, run, spec) {
+  const reading = composerRoad(run, spec).usage();
+  const shown = Boolean(reading) && reading.tokens > 0;
+  writeHidden(chip, !shown);
+  if (!shown) return;
+  const ratio = reading.window > 0 ? Math.min(1, reading.tokens / reading.window) : 0;
+  const meter = chip.querySelector(".worker-composer-meter");
+  writeHidden(meter, reading.window <= 0);
+  if (reading.window > 0) {
+    writeAttribute(
+      meter.querySelector(".is-fill"),
+      "stroke-dasharray",
+      `${(ratio * METER_CIRCUMFERENCE).toFixed(1)} ${METER_CIRCUMFERENCE}`,
+    );
+  }
+  writeTextContent(
+    chip.querySelector(".worker-composer-pill-words"),
+    reading.window > 0 ? `${Math.round(ratio * 100)}%` : usageCtxWord(reading),
+  );
+  const command = composerCompactCommand(run, spec);
+  const words = { tokens: reading.tokens.toLocaleString(), window: composerContextWindowWords(reading) };
+  const tip = command
+    ? t("composer.context.tip", "컨텍스트 {{tokens}} / {{window}} — 눌러서 압축 ({{command}})", { ...words, command })
+    : t("composer.context.tipPlain", "컨텍스트 {{tokens}} / {{window}}", words);
+  writeAttribute(chip, "data-tip", tip);
+  writeAttribute(chip, "aria-label", tip);
+  chip.disabled = command === null;
 }
 
 /* ---- the `/` palette ----------------------------------------------------- */

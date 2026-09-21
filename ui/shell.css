@@ -14549,6 +14549,46 @@ details[open] > .helper-cap::after {
   height: var(--icon-size-sm);
 }
 
+/* 컨텍스트 알약: 작은 고리와 수. 눌리면 그 CLI의 압축 명령이 나가고,
+ * 그 명령을 나를 수 없는 세션에서는 읽기만 하는 알약으로 선다. */
+.worker-composer-context {
+  cursor: pointer;
+}
+
+.worker-composer-context:disabled {
+  cursor: default;
+}
+
+.worker-composer-context[hidden] {
+  display: none;
+}
+
+.worker-composer-meter {
+  width: var(--chat-meter-size);
+  height: var(--chat-meter-size);
+  /* 12시에서 시작해 시계 방향으로 — 사람이 게이지를 읽는 방향. */
+  transform: rotate(-90deg);
+}
+
+.worker-composer-meter[hidden] {
+  display: none;
+}
+
+.worker-composer-meter circle {
+  fill: none;
+  stroke-width: var(--chat-meter-stroke);
+}
+
+.worker-composer-meter .is-track {
+  stroke: var(--chat-meter-track);
+}
+
+.worker-composer-meter .is-fill {
+  stroke: var(--chat-accent);
+  stroke-linecap: round;
+  transition: stroke-dasharray var(--motion-fast) var(--ease-standard);
+}
+
 /* The agent chip's mark — the same glyph the head wears, in the accent. */
 .worker-composer-mark {
   color: var(--chat-accent);

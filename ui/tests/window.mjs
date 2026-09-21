@@ -54397,7 +54397,7 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
     ok(
       "the composer wears the extension's row — `+`, the agent chip (mark · name · model), the mode chip, then `/` and send — a pane's own conversation speaks to the pane without a door, and a helper's page keeps its door and speaks of the parent",
       seen.placeholder === seen.wantPlaceholder && seen.noDoorOnOwnPane &&
-        JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-mode", "worker-composer-right"]) &&
+        JSON.stringify(seen.rowOrder) === JSON.stringify(["composer-attach-plus", "worker-composer-agent", "worker-composer-mode", "worker-composer-context", "worker-composer-right"]) &&
         seen.chipMark === "✻" && seen.chipName === "Claude" && seen.chipModelRaw === " · claude-fable-5-1" &&
         seen.helperDoor && seen.helperPlaceholder === seen.wantHelperPlaceholder,
       JSON.stringify(seen),
@@ -55059,6 +55059,140 @@ suite("composer-queue", async ({ browser, origin, ok }) => {
       "a wire's page holds the same way and sends down the wire when its own status says the turn ended",
       seen.wireSentNothing && seen.wireQueued === JSON.stringify(["선에서 기다릴 글"]) &&
         seen.wireOut === seen.wantWireOut && seen.wireQueueEmpty === JSON.stringify([]),
+      JSON.stringify(seen),
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+/* 컨텍스트 미터 — 세션이 준 두 수로 서는 고리 하나와, 그것을 비울 문. 창을
+ * 아는 읽기는 백분율과 고리, 모르는 읽기는 상태바와 같은 낱말에 고리 없음,
+ * 읽기가 없으면 알약도 없다. 문은 그 CLI의 명령을 그 길이 나를 수 있을
+ * 때만 산다. */
+suite("context-meter", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    const seen = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const settle = (ms = 80) => new Promise((done) => setTimeout(done, ms));
+      const seen = {};
+      const calls = [];
+      // ---- 선의 길: 두 수를 다 아는 세션 ----
+      let log = {
+        found: true, skipped: false, next: 0, turns: [], status: "idle", asks: [], agent: "codex",
+        protocol: "app-server", model: "gpt-5.6-sol", models: [], mode: "on-request", modes: [],
+        commands: [{ name: "/compact", about: "" }], version: "0.154.0", live: [],
+        usage: { tokens: 34000, window: 100000 },
+      };
+      window.__ANSWER__.wire_start = () => ({ id: 21, agent: "codex", protocol: "app-server", version: "0.154.0", model: "gpt-5.6-sol" });
+      window.__ANSWER__.wire_log = (args) => ({ ...log, turns: log.turns.slice(args.after), next: log.turns.length });
+      window.__ANSWER__.wire_send = (args) => { calls.push(["wire", args.id, args.text]); return null; };
+      window.__ANSWER__.wire_stop = () => null;
+      const tabId = await openWirePage("codex", "/tmp/zerocode-window-test");
+      await window.__PAINTED__();
+      await pollHelperPages();
+      await settle(120);
+      const face = document.querySelector("#worker-view");
+      const chip = face?.querySelector(".worker-composer-context");
+      seen.chipShown = chip ? !chip.hidden : false;
+      seen.words = chip?.querySelector(".worker-composer-pill-words")?.textContent;
+      seen.ring = chip?.querySelector(".worker-composer-meter .is-fill")?.getAttribute("stroke-dasharray");
+      seen.ringShown = chip?.querySelector(".worker-composer-meter")?.hidden === false;
+      seen.tip = chip?.dataset.tip;
+      seen.wantTip = t("composer.context.tip", "컨텍스트 {{tokens}} / {{window}} — 눌러서 압축 ({{command}})",
+        { tokens: (34000).toLocaleString(), window: (100000).toLocaleString(), command: "/compact" });
+      seen.aria = chip?.getAttribute("aria-label");
+      seen.enabled = chip?.disabled === false;
+      // 조용한 폴은 이 알약에 아무것도 쓰지 않는다.
+      const watch = new MutationObserver(() => {});
+      if (chip) watch.observe(chip, { childList: true, subtree: true, attributes: true, characterData: true });
+      await pollHelperPages();
+      await settle();
+      seen.quietMutations = watch.takeRecords().length;
+      watch.disconnect();
+      // 누르면 그 세션이 이름한 명령이 선으로.
+      chip?.click();
+      await settle();
+      seen.compacted = JSON.stringify(calls.slice(-1));
+      seen.wantCompacted = JSON.stringify([["wire", 21, "/compact"]]);
+      // 세션이 그 명령을 이름하지 않으면 문은 없다 — 읽기는 그대로.
+      log = { ...log, commands: [{ name: "/help", about: "" }], usage: { tokens: 90000, window: 100000 } };
+      await pollHelperPages();
+      await window.__PAINTED__();
+      await settle();
+      seen.mute = chip?.disabled === true;
+      seen.muteWords = chip?.querySelector(".worker-composer-pill-words")?.textContent;
+      seen.muteTip = chip?.dataset.tip;
+      seen.wantMuteTip = t("composer.context.tipPlain", "컨텍스트 {{tokens}} / {{window}}",
+        { tokens: (90000).toLocaleString(), window: (100000).toLocaleString() });
+      // 읽기가 없으면 알약도 없다.
+      log = { ...log, usage: undefined };
+      await pollHelperPages();
+      await window.__PAINTED__();
+      await settle();
+      seen.goneWithoutUsage = chip?.hidden === true;
+      closeTab(tabId);
+      await settle();
+      // ---- 판의 길: 전사만 아는 읽기(창 크기는 없다) ----
+      window.__ANSWER__.term_paste = (args) => (calls.push(["paste", args.term, args.text]), null);
+      window.__ANSWER__.term_key = (args) => (calls.push(["key", args.term, args.press.key]), null);
+      window.__ANSWER__.pane_log = () => ({
+        found: true, next: 1, turns: [{ role: "assistant", text: "done" }],
+        usage: { tokens: 24000, window: 0 },
+      });
+      const term = await openTermTab({ placement: "tab" });
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-meter", resumable: false });
+      await window.__PAINTED__();
+      el("view-toggle-chat").click();
+      await settle(200);
+      const chat = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
+      const paneChip = chat?.querySelector(".worker-composer-context");
+      seen.paneShown = paneChip ? !paneChip.hidden : false;
+      seen.paneWords = paneChip?.querySelector(".worker-composer-pill-words")?.textContent;
+      seen.wantPaneWords = usageCtxWord({ tokens: 24000, window: 0 });
+      seen.paneRingHidden = paneChip?.querySelector(".worker-composer-meter")?.hidden === true;
+      seen.paneTip = paneChip?.dataset.tip;
+      seen.wantPaneTip = t("composer.context.tip", "컨텍스트 {{tokens}} / {{window}} — 눌러서 압축 ({{command}})",
+        { tokens: (24000).toLocaleString(), window: t("composer.context.unknownWindow", "?"), command: "/compact" });
+      const paneBefore = calls.length;
+      paneChip?.click();
+      await settle(800);
+      seen.paneCompacted = JSON.stringify(calls.slice(paneBefore));
+      seen.wantPaneCompacted = JSON.stringify([["paste", term, "/compact"], ["key", term, "Enter"]]);
+      // 판이 떠나면 그 읽기도 떠난다.
+      seen.heldBeforeExit = paneUsage.has(term);
+      tell("term:exited", { term });
+      await settle();
+      seen.forgotten = paneUsage.has(term) === false;
+      for (const name of ["wire_start", "wire_log", "wire_send", "wire_stop", "term_paste", "term_key", "pane_log"]) {
+        delete window.__ANSWER__[name];
+      }
+      for (const tab of [...tabs]) dropTab(tab.id);
+      for (const at of [...termViews.keys()]) dropTermView(at);
+      return seen;
+    });
+    ok(
+      "a wire that names both numbers wears the ring and the percentage, says both in its tip, and stays untouched by a poll that brought no new reading",
+      seen.chipShown && seen.words === "34%" && seen.ring === "34.0 100" && seen.ringShown &&
+        seen.tip === seen.wantTip && seen.aria === seen.wantTip && seen.enabled &&
+        seen.quietMutations === 0,
+      JSON.stringify(seen),
+    );
+    ok(
+      "the chip IS the compact button — a press sends the CLI's own word down the wire that announced it, a session that never announced it leaves a reading with no door, and no reading leaves no chip",
+      seen.compacted === seen.wantCompacted && seen.mute && seen.muteWords === "90%" &&
+        seen.muteTip === seen.wantMuteTip && seen.goneWithoutUsage,
+      JSON.stringify(seen),
+    );
+    ok(
+      "a pane whose only source is its transcript says the count in the status bar's own words with no ring over a window nobody gave, compacts down its own road, and is forgotten with the shell",
+      seen.paneShown && seen.paneWords === seen.wantPaneWords && seen.paneRingHidden &&
+        seen.paneTip === seen.wantPaneTip &&
+        seen.paneCompacted === seen.wantPaneCompacted &&
+        seen.heldBeforeExit && seen.forgotten,
       JSON.stringify(seen),
     );
   } finally {

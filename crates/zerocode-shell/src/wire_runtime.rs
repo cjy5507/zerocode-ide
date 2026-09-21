@@ -1335,7 +1335,7 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
         }
         Some("result") => {
             state.live.clear();
-            if let Some(usage) = claude_usage(state, message) {
+            if let Some(usage) = claude_result_usage(state, message) {
                 state.usage = Some(usage);
             }
             let failed = message.get("is_error").and_then(serde_json::Value::as_bool) == Some(true);
@@ -1372,7 +1372,7 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
 /// the window before drawing its pie. Neither number is ours to reuse: one
 /// is the extension's arithmetic and the other is its literal, so this
 /// reports the two numbers the CLI gave and lets the chip say what they are.
-fn claude_usage(state: &WireState, message: &serde_json::Value) -> Option<WireUsage> {
+fn claude_result_usage(state: &WireState, message: &serde_json::Value) -> Option<WireUsage> {
     let usage = message.get("usage")?;
     let count = |name: &str| {
         usage
