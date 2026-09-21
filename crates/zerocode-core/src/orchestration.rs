@@ -12225,49 +12225,121 @@ pub fn summonable(
         .into_iter()
         .filter(|room| !room.at_wall)
         .map(|room| {
-            let (launched, recent_brief) =
-                history.get(room.id.as_str()).cloned().unwrap_or((0, None));
+            let record = history.get(&room.id).cloned().unwrap_or_default();
             crate::summon_choice::Summonable {
                 id: room.id,
                 spent_percent: room.gauge.as_ref().map(|held| held.used_percent),
                 window: room.gauge.as_ref().map(|held| held.window.as_str()),
-                launched,
-                recent_brief,
+                record,
             }
         })
         .collect()
 }
 
-/// What this ledger has summoned each agent for: how many times, and the
-/// title of the task its newest summons carried. The hindsight a summon
-/// judgment gets for free (t-5462): the coordinators' own choices, read off
-/// the runs the ledger still holds, never a roster somebody typed.
-fn summons_history(ledger: &Ledger) -> std::collections::HashMap<&str, (usize, Option<String>)> {
-    let mut newest: std::collections::HashMap<&str, (usize, i64, Option<String>)> =
-        std::collections::HashMap::new();
+/// What a `worker-start --task` summons knows about the work it carries, read
+/// off the run once so the borrow ends at the read.
+struct WorkAsWritten {
+    /// The task's own words ([`summon_words`]) — what a judgment about this
+    /// summons is asked about.
+    words: String,
+    /// Attempts this ledger already holds on the task.
+    attempts: usize,
+    /// Its consecutive failures, as [`Task`] counts them.
+    failures: u32,
+}
+
+/// A task's own words, for the summon judgment's brief: its roster name, and
+/// then the spec it was written in.
+///
+/// Deliberately not the summons' `--prompt`. A prompt is a delivery vehicle,
+/// and on this machine it opens with the house's standing rules — commit this
+/// way, run these gates, write the report there — which ran to 1,678
+/// characters on 2026-09-21 against a 1,200-character cap
+/// ([`crate::jev::SUMMON_BRIEF_CHAR_CAP`]). Every summons in that half-day
+/// therefore asked its judgment about the rules and never about the work, and
+/// agreement fell from 14 of 17 to 2 of 16 across the change (t-5873). The
+/// task is where the work is written down, and the ledger holds it.
+fn summon_words(task: &Task) -> String {
+    let title = task.title.as_str().trim();
+    let spec = task.spec.as_str().trim();
+    if spec.is_empty() {
+        return task.display_name().to_string();
+    }
+    if title.is_empty() || spec.starts_with(title) {
+        return spec.to_string();
+    }
+    format!("{title}\n\n{spec}")
+}
+
+/// The words one summons puts to its judgment: the task's, where it carries
+/// one, and otherwise the prompt — which is all a `--bare` pane or a
+/// task-less summons has ever written down about itself.
+fn summon_brief<'a>(written: Option<&'a WorkAsWritten>, asked: &'a str) -> &'a str {
+    written.map_or(asked, |written| written.words.as_str())
+}
+
+/// What this ledger has summoned each agent for and what came of it. The
+/// hindsight a summon judgment gets for free (t-5462, t-5873): the
+/// coordinators' own choices and their outcomes, read off the runs the ledger
+/// still holds, never a roster somebody typed.
+///
+/// Every summons this ledger holds, as the fold's own input shape — so the
+/// arithmetic that turns them into a record lives in one place
+/// ([`crate::summon_choice::records`]) and the replay harness, which reads
+/// the same rows straight out of the authority store, cannot compute it a
+/// second way.
+fn summons_history(
+    ledger: &Ledger,
+) -> std::collections::BTreeMap<String, crate::summon_choice::AgentRecord> {
+    crate::summon_choice::records(&carried_summonses(ledger))
+}
+
+/// Every summons this ledger holds, with the work it was given folded in:
+/// which agent, when its pane opened, and what became of that work.
+///
+/// The link is read off the DISPATCH and never off the worker. A worker's own
+/// `dispatch` field names the attempt it is carrying *while it carries one*
+/// and is cleared the moment that attempt ends, so on this machine 4 of 556
+/// worker rows still hold one while 549 dispatches name their worker — a fold
+/// that walked the worker's side would find every finished piece of work
+/// outcome-less and report that nothing this window summoned has ever
+/// finished (t-5873, measured against the authority store).
+///
+/// A worker with no dispatch at all — a `--bare` pane, one whose attempt was
+/// taken off it — still counts as a summons and carries no outcome, which is
+/// the truth: a coordinator chose that agent and this ledger cannot say how
+/// it went.
+fn carried_summonses(ledger: &Ledger) -> Vec<crate::summon_choice::CarriedSummons> {
+    let mut carried = Vec::new();
     for run in ledger.runs() {
+        // The newest attempt each worker was given. Two of this machine's
+        // workers have carried two; every other one has carried one, and
+        // "the last thing it was given" is the answer that does not depend
+        // on that.
+        let mut newest: std::collections::HashMap<&str, &Dispatch> =
+            std::collections::HashMap::new();
+        for dispatch in &run.dispatches {
+            let held = newest.entry(dispatch.worker.as_str()).or_insert(dispatch);
+            if dispatch.started_ms >= held.started_ms {
+                *held = dispatch;
+            }
+        }
         for worker in &run.workers {
-            let title = worker
-                .dispatch
-                .as_deref()
-                .and_then(|id| run.dispatch(id))
+            let dispatch = newest.get(worker.id.as_str()).copied();
+            let title = dispatch
                 .and_then(|dispatch| run.task(&dispatch.task))
                 .map(|task| task.title.as_str().trim().to_string())
                 .filter(|title| !title.is_empty());
-            let held = newest
-                .entry(worker.agent.as_str())
-                .or_insert((0, i64::MIN, None));
-            held.0 += 1;
-            if worker.started_ms >= held.1 {
-                held.1 = worker.started_ms;
-                held.2 = title;
-            }
+            carried.push(crate::summon_choice::CarriedSummons {
+                agent: worker.agent.clone(),
+                started_ms: worker.started_ms,
+                ended_ms: dispatch.and_then(|dispatch| dispatch.ended_ms),
+                succeeded: dispatch.and_then(|dispatch| dispatch.succeeded),
+                title,
+            });
         }
     }
-    newest
-        .into_iter()
-        .map(|(agent, (launched, _, title))| (agent, (launched, title)))
-        .collect()
+    carried
 }
 
 /// "installed agents with headroom: claude 61% (weekly), kimi 12% (session)"
@@ -13112,6 +13184,11 @@ pub struct SummonShadow {
     pub worktree: bool,
     pub replaces_an_attempt: bool,
     pub carries_a_task: bool,
+    /// Attempts this ledger already held on the task when the summons was
+    /// decided, and the task's consecutive failures — the difficulty grade
+    /// the ledger can give honestly.
+    pub attempts: usize,
+    pub failures: u32,
     /// The agents this window could have summoned this minute.
     pub options: Vec<crate::summon_choice::Summonable>,
 }
@@ -13126,6 +13203,8 @@ impl SummonShadow {
             worktree: self.worktree,
             replaces_an_attempt: self.replaces_an_attempt,
             carries_a_task: self.carries_a_task,
+            attempts: self.attempts,
+            failures: self.failures,
         }
     }
 }
@@ -15453,13 +15532,29 @@ fn plan_inner(
                         .to_string(),
                 );
             }
-            let (task, task_title) = match words.value("--task") {
+            let (task, task_title, written) = match words.value("--task") {
                 Some(id) => {
                     let run = ledger.run(&run_id).ok_or_else(|| unknown_run(&run_id))?;
                     let held = run.task(id).ok_or_else(|| format!("unknown task: {id}"))?;
-                    (Some(id.to_string()), Some(held.display_name().to_string()))
+                    (
+                        Some(id.to_string()),
+                        Some(held.display_name().to_string()),
+                        Some(WorkAsWritten {
+                            words: summon_words(held),
+                            // Attempts this ledger already holds. Counted
+                            // before the reservation below opens one, so the
+                            // number is "how often this has been tried
+                            // already" and not "including now".
+                            attempts: run
+                                .dispatches
+                                .iter()
+                                .filter(|dispatch| dispatch.task == id)
+                                .count(),
+                            failures: held.failures,
+                        }),
+                    )
                 }
-                None => (None, None),
+                None => (None, None, None),
             };
             let model = words.value("--model").map(str::to_string);
             let effort = words.value("--effort").map(str::to_string);
@@ -15512,17 +15607,16 @@ fn plan_inner(
             // which the state must never show (w-5540's finding, t-4839).
             let summon_options = summonable(launcher, ledger, now_ms);
             let (agent, agent_by_seat) = if agent == SUMMON_AUTO_AGENT {
-                let brief_words = match asked.is_empty() {
-                    false => asked,
-                    true => task_title.as_deref().unwrap_or_default(),
-                };
-                let (brief, brief_chars) = crate::summon_choice::brief_shape(brief_words);
+                let (brief, brief_chars) =
+                    crate::summon_choice::brief_shape(summon_brief(written.as_ref(), asked));
                 let look = crate::summon_choice::SummonLook {
                     brief: &brief,
                     brief_chars,
                     worktree: words.has("--worktree"),
                     replaces_an_attempt: words.value("--retry-of").is_some(),
                     carries_a_task: task.is_some(),
+                    attempts: written.as_ref().map_or(0, |written| written.attempts),
+                    failures: written.as_ref().map_or(0, |written| written.failures),
                 };
                 let chosen = launcher
                     .choose_agent(&look, &summon_options)
@@ -15808,10 +15902,7 @@ fn plan_inner(
             // operator opening an agent to work with by hand — describes no
             // work, and a judgment asked about nothing is a row that says
             // nothing: it gets no question at all.
-            let said = match asked.is_empty() {
-                false => Some(asked),
-                true => task_title.as_deref(),
-            };
+            let said = Some(summon_brief(written.as_ref(), asked)).filter(|said| !said.is_empty());
             prepared_worker_start.summon_shadow = said.map(|words| {
                 let (brief, brief_chars) = crate::summon_choice::brief_shape(words);
                 SummonShadow {
@@ -15827,12 +15918,20 @@ fn plan_inner(
                     worktree: isolated,
                     replaces_an_attempt: retry_of.is_some(),
                     carries_a_task: task.is_some(),
+                    attempts: written.as_ref().map_or(0, |written| written.attempts),
+                    failures: written.as_ref().map_or(0, |written| written.failures),
                     options: summon_options,
                 }
             });
             /* And the placement question's ledger half (t-4781), from the
              * same words for the same reason: a room is decided by why the
-             * worker was summoned. `armed` is the run's own arming — an
+             * worker was summoned. Which means the placement seat's brief
+             * moved with the summon seat's when the words became the TASK's
+             * (t-5873, `summon_words`) — deliberately, and for the same
+             * reason: the house's standing rules describe no room either.
+             * Its rubric's own words did not change, so its version stands;
+             * what changed is which of the person's own text fills the same
+             * state key under the same cap. `armed` is the run's own arming — an
              * armed run dispatches its work itself, so nobody is waiting on
              * the pane that opens — and the window folds it with the one
              * fact only it holds, whether anybody is at the keyboard. */

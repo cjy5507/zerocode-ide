@@ -13537,10 +13537,10 @@ fn a_summons_is_judged_over_the_agents_that_could_carry_it_this_minute() {
     // not this task's own words (w-5540, t-4839).
     assert_eq!(
         (
-            shadow.options[0].launched,
-            shadow.options[0].recent_brief.as_deref()
+            shadow.options[0].record.launched,
+            shadow.options[0].record.recent_briefs.as_slice()
         ),
-        (0, None),
+        (0, &[][..]),
         "this very summons leaked into its own option"
     );
 
