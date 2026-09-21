@@ -243,3 +243,79 @@ fn a_second_warm_up_inside_the_pools_idle_window_opens_no_socket() {
     let asked = endpoint.asked();
     assert_eq!(asked.len(), 1, "a live socket was warmed twice: {asked:?}");
 }
+
+/// The whole road, end to end: a seat left on `auto` records, is judged by
+/// its own writer at its own cadence, writes the rise into the ledger it was
+/// decided on, and is read back as acting — the claim `auto` makes, held
+/// here because until 2026-09-22 no ledger on this machine carried a single
+/// transition row in 1,147 requests (t-5875).
+///
+/// The placement seat, because it is the one whose rows say what the road is
+/// for: 38 real requests, one timeout, no reader to be compared against.
+#[test]
+fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
+    use serde_json::json;
+    use zerocode_core::jev::promote::{ROSE, Stand, stand_from, window_wanted_for};
+    use zerocode_core::jev::{JevMode, PLACEMENT};
+
+    let home = tempfile::tempdir().expect("a zo home");
+    let ledger = home.path().join(PLACEMENT.ledger);
+    let wanted = window_wanted_for(&PLACEMENT).expect("placement rises");
+    let answered = |at: i64| json!({"at": at, "outcome": "answered", "elapsedMs": 300, "requests": 1, "applied": true});
+
+    // One short of the window: nothing is judged, because nothing could be.
+    for at in 0..wanted as i64 - 1 {
+        record_rows(&PLACEMENT, &ledger, &[answered(at)], at);
+    }
+    assert_eq!(stand_from(&read_rows(&ledger)), Stand::Recording);
+    assert!(
+        !read_rows(&ledger)
+            .iter()
+            .any(|row| row["transition"] == json!(ROSE))
+    );
+
+    // The row that fills it: the writer judges, and the rise is written
+    // beside the rows it was decided on.
+    record_rows(
+        &PLACEMENT,
+        &ledger,
+        &[answered(wanted as i64)],
+        wanted as i64,
+    );
+    let rows = read_rows(&ledger);
+    let rose = rows
+        .iter()
+        .find(|row| row["transition"] == json!(ROSE))
+        .expect("the seat rose on its own rows");
+    assert_eq!(rose["rows"], json!(wanted));
+    assert_eq!(rose["answered"], json!(wanted));
+    assert_eq!(stand_from(&rows), Stand::Applying);
+    assert!(JevMode::Auto.applies_with(true), "and `auto` acts on it");
+    assert!(
+        !JevMode::Shadow.applies_with(true),
+        "a person's word outranks it"
+    );
+
+    // One miss inside the window is forgiven; three failures running are not,
+    // and an acting seat does not wait for the next cadence to stop.
+    record_rows(
+        &PLACEMENT,
+        &ledger,
+        &[json!({"at": 1, "outcome": "timeout", "requests": 1})],
+        1,
+    );
+    assert_eq!(stand_from(&read_rows(&ledger)), Stand::Applying);
+    for at in 2..4 {
+        record_rows(
+            &PLACEMENT,
+            &ledger,
+            &[json!({"at": at, "outcome": "timeout", "requests": 1})],
+            at,
+        );
+    }
+    let rows = read_rows(&ledger);
+    let fell = rows.last().expect("a row");
+    assert_eq!(fell["transition"], json!(zerocode_core::jev::promote::FELL));
+    assert_eq!(fell["line"], json!("fallbacks"));
+    assert_eq!(stand_from(&rows), Stand::Recording);
+}

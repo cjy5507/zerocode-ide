@@ -127,7 +127,7 @@ pub fn record_rows(seat: &JevUse, ledger: &Path, rows: &[Value], now_ms: i64) {
         return;
     }
     let held = read_rows(ledger);
-    if !zerocode_core::jev::promote::judgment_due(&held) {
+    if !zerocode_core::jev::promote::judgment_due(seat, &held) {
         return;
     }
     let Some(judged) = zerocode_core::jev::promote::judge_seat(seat, &held) else {

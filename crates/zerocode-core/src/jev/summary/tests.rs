@@ -151,23 +151,27 @@ fn the_window_starts_where_it_is_told_and_an_empty_one_shares_nothing() {
     assert_eq!(empty.answered_lower_bound(), None);
 }
 
+/// The countdown belongs to the seat, whose window decides when its first
+/// judgment can happen at all — a tally has no seat and so cannot say
+/// ([`crate::jev::promote::rows_to_next_judgment`], pinned in the table's own
+/// tests).
 #[test]
 fn the_rows_a_use_owes_before_its_next_judgment_count_down_and_wrap() {
-    let owed = |rows: usize| {
-        Tally {
-            rows,
-            ..Tally::default()
-        }
-        .rows_to_next_judgment()
-    };
-    assert_eq!(owed(0), JUDGED_EVERY_ROWS);
-    assert_eq!(owed(1), JUDGED_EVERY_ROWS - 1);
-    assert_eq!(owed(JUDGED_EVERY_ROWS - 1), 1);
+    let seat = &crate::jev::PLACEMENT;
+    let wanted = crate::jev::promote::window_wanted_for(seat).expect("placement rises");
+    let owed = |asked: usize| crate::jev::promote::rows_to_next_judgment(seat, asked);
     assert_eq!(
-        owed(JUDGED_EVERY_ROWS),
-        JUDGED_EVERY_ROWS,
-        "a judgment just made owes a full window"
+        owed(0),
+        Some(wanted),
+        "the first judgment waits for a full window"
     );
+    assert_eq!(owed(wanted - 1), Some(1));
+    assert_eq!(
+        owed(wanted),
+        Some(JUDGED_EVERY_ROWS),
+        "a judgment just made owes a full cadence"
+    );
+    assert_eq!(owed(wanted + JUDGED_EVERY_ROWS - 1), Some(1));
 }
 
 #[test]

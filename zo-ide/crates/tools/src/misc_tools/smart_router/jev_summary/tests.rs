@@ -147,7 +147,7 @@ fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().join("jev")];
     let seat = &zerocode_core::jev::BROWSER;
-    let wanted = summary::rows_that_can_clear(seat.answer_floor_permille.expect("a rise line"));
+    let wanted = promote::window_wanted_for(seat).expect("a rise line");
     let walk: Vec<Value> = (0..wanted)
         .map(|n| {
             json!({
@@ -168,11 +168,11 @@ fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
     let report = one(seat, &roots, None, Some(&settings), 1_000, 0);
 
     let judged = report.judged.as_ref().expect("a rising seat is judged");
-    assert_eq!(judged.window_wanted, wanted, "35 walks, not routing's 73");
+    assert_eq!(judged.window_wanted, wanted, "a screen seat's own width, not routing's");
     assert_eq!(judged.window.asked(), wanted);
     assert_eq!(report.verdict(), Some(Verdict::Rise));
     assert_eq!(report.clears_rise_floor, Some(true));
-    assert_eq!(report.rows_to_next_judgment(), Some(JUDGED_EVERY_ROWS - wanted % JUDGED_EVERY_ROWS));
+    assert_eq!(report.rows_to_next_judgment(), Some(JUDGED_EVERY_ROWS), "a full window owes a full cadence");
     // It has not risen yet — nothing has written the transition — so the card
     // still draws it as recording, and says what it is waiting on.
     assert_eq!(report.stand, Stand::Recording);
@@ -318,7 +318,11 @@ fn the_screen_and_the_judge_read_one_window() {
     assert_eq!(judged.window.rows, 30, "the window is the last rows the floor can be cleared on");
     assert_eq!(judged.agreement.compared, 90);
     assert_eq!(report.asked_ever, 30);
-    assert_eq!(report.rows_to_next_judgment(), Some(10), "cadence counts every request, not the week's");
+    assert_eq!(
+        report.rows_to_next_judgment(),
+        promote::rows_to_next_judgment(&zerocode_core::jev::ROUTING, 30),
+        "cadence counts every request, not the week's"
+    );
     assert_eq!(report.verdict(), judged.verdict.into());
 }
 
@@ -359,18 +363,24 @@ fn answered(at: i64) -> Value {
     json!({"at": at, "outcome": "answered", "elapsedMs": 400, "requests": 1})
 }
 
+/// And the first judgment waits for the window the seat's own floor can be
+/// cleared on, not for the cadence alone: a verdict read off a window
+/// arithmetic has already decided cannot be full has one thing it can say.
 #[test]
 fn the_lines_are_judged_once_a_window_and_not_at_the_end_of_every_turn() {
-    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
     let work = tempfile::tempdir().expect("tmp");
-    let short: Vec<Value> = (0..i64::try_from(JUDGED_EVERY_ROWS).expect("a window fits") - 1).map(answered).collect();
+    let wanted = i64::try_from(
+        promote::window_wanted_for(&zerocode_core::jev::ROUTING).expect("routing rises"),
+    )
+    .expect("a window fits");
+    let short: Vec<Value> = (0..wanted - 1).map(answered).collect();
     let ledger = ledger_with(work.path(), &short);
     assert_eq!(
         super::super::decision_shadow::judge_ledger(&ledger, None, 9),
         None,
         "a window one row short was judged anyway"
     );
-    let full: Vec<Value> = (0..i64::try_from(JUDGED_EVERY_ROWS).expect("a window fits")).map(answered).collect();
+    let full: Vec<Value> = (0..wanted).map(answered).collect();
     let ledger = ledger_with(work.path(), &full);
     assert!(
         super::super::decision_shadow::judge_ledger(&ledger, None, 9).is_some(),
@@ -380,9 +390,12 @@ fn the_lines_are_judged_once_a_window_and_not_at_the_end_of_every_turn() {
 
 #[test]
 fn a_verdict_that_changed_nothing_writes_nothing_down() {
-    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
     let work = tempfile::tempdir().expect("tmp");
-    let full: Vec<Value> = (0..i64::try_from(JUDGED_EVERY_ROWS).expect("a window fits")).map(answered).collect();
+    let wanted = i64::try_from(
+        promote::window_wanted_for(&zerocode_core::jev::ROUTING).expect("routing rises"),
+    )
+    .expect("a window fits");
+    let full: Vec<Value> = (0..wanted).map(answered).collect();
     let ledger = ledger_with(work.path(), &full);
     let before = fs::read_to_string(&ledger).expect("read");
     // Clean rows, but nobody has labelled anything: §4 holds, and a hold is
@@ -591,7 +604,6 @@ fn control(at: i64, task: &str, jev: [&str; 3], probe: [&str; 3]) -> Value {
 #[test]
 fn a_control_row_is_compared_beside_its_windows_row_and_counted_nowhere_else() {
     use zerocode_core::jev::promote::{Agreement, Line, Verdict};
-    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf()];
     let seat = &zerocode_core::jev::ROUTING;
@@ -621,7 +633,11 @@ fn a_control_row_is_compared_beside_its_windows_row_and_counted_nowhere_else() {
     let report = one(seat, &roots, None, None, 1_000, 0);
     assert_eq!(report.judged, Some(judged));
     assert_eq!(report.asked_ever, 25, "the cadence counted a control row");
-    assert_eq!(report.rows_to_next_judgment(), Some(JUDGED_EVERY_ROWS - 25 % JUDGED_EVERY_ROWS));
+    assert_eq!(
+        report.rows_to_next_judgment(),
+        promote::rows_to_next_judgment(seat, 25),
+        "the cadence counted a control row"
+    );
     assert_eq!((report.today.rows, report.week.rows), (25, 25), "the day or the week counted a control row");
 
     // Without the control rows the same window compares nothing at all.

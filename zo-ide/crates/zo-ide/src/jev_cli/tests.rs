@@ -182,7 +182,15 @@ fn the_control_rows_the_agreement_borrowed_are_named_in_both_answers() {
         .expect("routing");
     assert_eq!(routing["judged"]["window"]["rows"], 1, "the control row was counted in the window");
     assert_eq!(routing["today"]["rows"], 1, "the control row was counted in the day");
-    assert_eq!(routing["rowsToNextJudgment"], 19, "the control row moved the cadence");
+    // The countdown is the judge's own: the first judgment waits for the
+    // window routing's floor can be cleared on, and this row took one off it.
+    let owed = zerocode_core::jev::promote::rows_to_next_judgment(&zerocode_core::jev::ROUTING, 1)
+        .expect("routing rises");
+    assert_eq!(
+        routing["rowsToNextJudgment"],
+        serde_json::json!(owed),
+        "the control row moved the cadence"
+    );
     assert_eq!(
         routing["judged"]["agreement"],
         serde_json::json!({
@@ -196,7 +204,7 @@ fn the_control_rows_the_agreement_borrowed_are_named_in_both_answers() {
     let text = render_text(&seats);
     let line = text.lines().find(|line| line.starts_with("routing")).expect("the routing line");
     assert!(line.contains("agrees 3 of 3 (1 control row)"), "{line}");
-    assert!(line.contains("19 rows to judgment"), "{line}");
+    assert!(line.contains(&format!("{owed} rows to judgment")), "{line}");
     // A seat that borrowed nothing says nothing of it.
     let summon = text.lines().find(|line| line.starts_with("summon")).expect("the summon line");
     assert!(!summon.contains("control row"), "{summon}");

@@ -284,7 +284,72 @@ pub struct JevUse {
     /// so the stage that waits and the judge that reads the wait cannot
     /// disagree. A use that does not promote names none.
     pub apply_deadline_ms: Option<u64>,
+    /// How many of the judgment window's rows may have missed and the seat
+    /// still clear its answer floor — what widens the window
+    /// ([`summary::rows_that_can_clear_forgiving`]).
+    ///
+    /// It is the use's own because a miss is: at a seat whose answer the
+    /// coordinator or the graph was going to stand in for anyway, one timeout
+    /// is the wire having a bad minute and costs nothing at all; at a seat
+    /// whose miss holds a turn for its whole wall, a seat that misses is one
+    /// the person feels. The unforgiving width makes every floor read "the
+    /// last n were all answers", so without this column the three seats with
+    /// a full window all sat one timeout under their line (2026-09-22).
+    /// A use that does not promote forgives nothing, because nothing is
+    /// judged.
+    pub window_forgives: Option<usize>,
+    /// How many comparisons must be in hand before the route-change budget
+    /// ([`Self::agreement_floor_permille`]) binds — and, when that many are
+    /// not, whether the seat waits for them or is judged on its own ledger.
+    ///
+    /// Zero says the seat has no reader to be compared against, so the budget
+    /// has no subject and the seat rises on what its ledger alone shows: that
+    /// it answers, in time, well-formed. A comparison it does have is still
+    /// read, and one that says the seat is wrong takes it back down.
+    ///
+    /// It is the use's own for the same reason the floors are. `too_few_
+    /// compared` is the only line in §4 with no road out — a seat whose rows
+    /// carry no mark is held by it forever, which is the door with no handle
+    /// the labels rule was rewritten to remove. Recall's ledger cleared its
+    /// answer line at 18 of the 50 judgments in its 1,005 rows and was held
+    /// at `0 of 20` on every one of them (2026-09-22). A use that does not
+    /// promote names none.
+    pub agreement_rows_wanted: Option<usize>,
 }
+
+/// What a seat forgives whose miss the product was going to cover anyway: one
+/// row of the judgment window ([`JevUse::window_forgives`]).
+///
+/// One and not three, which is what [`crate::jev::promote::FALLBACKS_THAT_END_IT`]
+/// reads as the wire, the key or the model: this is the other reading of the
+/// same fact, a single bad minute, and a window that forgave three would let a
+/// seat rise on an afternoon the wire spent failing. One is also what the
+/// measurement asked for — the three seats with a full window on 2026-09-22
+/// were each holding exactly one timeout.
+pub const FORGIVES_A_BAD_MINUTE: usize = 1;
+
+/// What a seat forgives whose miss holds a turn: nothing.
+///
+/// The seats at the 950‰ line. Their window is already 73 rows wide, forgiving
+/// one takes it to 110, and the thing being bought is the right to miss — at
+/// the one seat where a miss is a turn held for its whole wall before the
+/// probe runs anyway. A seat that cannot answer 73 times running is not one to
+/// hand a turn's route to.
+pub const FORGIVES_NOTHING: usize = 0;
+
+/// What a seat with a reader to be compared against must show before its
+/// route-change budget binds: a judgment window's worth
+/// ([`JevUse::agreement_rows_wanted`]).
+pub const A_WINDOW_OF_COMPARISONS: usize = summary::JUDGED_EVERY_ROWS;
+
+/// What a seat with no reader to be compared against must show: nothing.
+///
+/// Not a lowered bar — there is no probe beside these judgments and no rule
+/// they overrule, so the route-change budget has nothing to be a budget of.
+/// What the seat is held to instead is every other line of §4, and the marks
+/// its own writer leaves once they exist: the moment one arrives that says the
+/// seat was wrong, the agreement line binds and takes it back down.
+pub const NO_READER_TO_COMPARE: usize = 0;
 
 /// The routing seat's route-change budget: four compared axes in five must
 /// agree with the chat probe, as a 95% lower bound.
@@ -368,6 +433,8 @@ pub const ROUTING: JevUse = JevUse {
     press_floor_permille: None,
     agreement_floor_permille: Some(ROUTE_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(ROUTING_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_NOTHING),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
 };
 
 /// The wall zo's routing waits for a judgment when the seat acts: the batch
@@ -491,6 +558,8 @@ pub const RECALL: JevUse = JevUse {
     // it (`rerank_shadow::RERANK_APPLY_DEADLINE`), so the judge times the
     // seat against the wall the stage actually holds.
     apply_deadline_ms: Some(ROUTING_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(NO_READER_TO_COMPARE),
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -586,6 +655,8 @@ pub const BROWSER: JevUse = JevUse {
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
     agreement_floor_permille: Some(SCREEN_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(SCREEN_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -619,6 +690,8 @@ pub const DESKTOP: JevUse = JevUse {
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
     agreement_floor_permille: Some(SCREEN_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(SCREEN_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
@@ -649,6 +722,8 @@ pub const EMULATOR: JevUse = JevUse {
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
     agreement_floor_permille: Some(SCREEN_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(SCREEN_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -676,7 +751,32 @@ pub const STALL: JevUse = JevUse {
     press_floor_permille: None,
     agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(STALL_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
 };
+
+/// What the placement seat's answers must bound above before `auto` rises to
+/// choosing the room (§4): four in five, and not the nine in ten the other
+/// orchestration seats are held to.
+///
+/// The line belongs where the negatives are, not where the ceiling is (the
+/// vault's "a judgment seat pays where its negatives are few, not where its
+/// ceiling is high"): this seat has the cheapest negative in the table on
+/// both sides. A miss costs nothing — the window's own layout rule places the
+/// pane, exactly as it did before the seat existed, inside a 2 s wall. A
+/// WRONG answer costs one drag, and that drag is the seat's own mark
+/// ([`PLACEMENT_LABEL_WINDOW_MS`]), so the seat is contradicted by the very
+/// move that undoes it. Nothing is lost, nothing is spent, and no other agent
+/// runs. [`ORCHESTRATION_ANSWER_FLOOR_PERMILLE`]'s own reason for sitting
+/// under routing's — "a seat that does not answer costs nothing" — reads one
+/// step further here, and this is where it lands.
+///
+/// Four in five is the table's existing word for a budget whose negative is
+/// cheap ([`ROUTE_AGREEMENT_FLOOR_PERMILLE`] and the two beside it), and it
+/// takes the window this seat is judged on from the 53 rows a forgiving 900‰
+/// line asks for down to 25 — which its ledger, 38 rows on 2026-09-22,
+/// already holds.
+pub const PLACEMENT_ANSWER_FLOOR_PERMILLE: u16 = 800;
 
 /// The window's worker placement: which of [`PLACEMENT_OPTIONS`] a worker it
 /// just started belongs in.
@@ -730,10 +830,12 @@ pub const PLACEMENT: JevUse = JevUse {
     }],
     ledger: "worker-placement.jsonl",
     promotes: true,
-    answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
+    answer_floor_permille: Some(PLACEMENT_ANSWER_FLOOR_PERMILLE),
     press_floor_permille: None,
     agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(PLACEMENT_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(NO_READER_TO_COMPARE),
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -756,6 +858,26 @@ pub const PLACEMENT: JevUse = JevUse {
 /// worker. `auto` records too: what a later stage would promote on is the row
 /// beside what the summons actually did and what became of that worker, and
 /// no such judge exists yet.
+///
+/// Why this seat has no confidence axis (measured 2026-09-22, t-5875 with
+/// t-5873's finding). Its marks split hard by how sure the judgment was: over
+/// this machine's 54 comparisons, the rows at confidence 0.5 and over agreed
+/// 14 of 20 (70.0%) and the rows under it 4 of 34 (11.8%). That is real
+/// signal, and it is still not a promotion. The line is read as a bound, not
+/// a share, and cutting to the confident rows shrinks the sample faster than
+/// it lifts the share: the 95% lower bound goes from 222‰ over 54 rows to
+/// 481‰ over 20, against a floor of [`ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE`]
+/// — 319 short. At 0.6 and over it is 12 of 15, bounding at 548‰. And no
+/// width fixes it: a bound converges on the true share from below, so a
+/// subset that agrees 70% of the time can never bound above 80% however many
+/// rows it gathers. This seat has to be RIGHTER, not filtered.
+///
+/// A confidence axis would also have to be a matched pair to mean anything:
+/// this seat applies whatever it answers — it names no
+/// [`JevUse::press_floor_permille`] and `summon_choice` reads no confidence
+/// before acting — so an agreement read over the confident rows alone would
+/// be a bound on a population the seat does not act on. The axis belongs here
+/// the day the apply stage gates on the same number, and not before.
 pub const SUMMON: JevUse = JevUse {
     id: "summon",
     setting: "summonChoice",
@@ -770,6 +892,8 @@ pub const SUMMON: JevUse = JevUse {
     press_floor_permille: None,
     agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(SUMMON_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
 };
 
 /// Characters of the repeated tool call one step-effort question carries —
@@ -822,6 +946,8 @@ pub const STEP_EFFORT: JevUse = JevUse {
     press_floor_permille: None,
     agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(STEP_EFFORT_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
 };
 
 /// Characters of the task a skill ranking reads — what the turn is about, in
@@ -983,6 +1109,8 @@ pub const SKILLS: JevUse = JevUse {
     press_floor_permille: None,
     agreement_floor_permille: Some(SKILL_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(SKILL_SEARCH_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
 };
 
 /// The wall zo's step effort governor holds a step judgment to, in
@@ -1031,6 +1159,8 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     press_floor_permille: None,
     agreement_floor_permille: Some(ROUTE_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(ZO_STEP_EFFORT_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_NOTHING),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
 };
 
 /// Every place this product asks Jev something.

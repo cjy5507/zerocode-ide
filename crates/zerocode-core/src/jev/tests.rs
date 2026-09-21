@@ -240,6 +240,144 @@ fn a_use_names_a_rise_line_exactly_when_auto_may_rise_for_it() {
     }
 }
 
+/// The two columns that say what a seat's window forgives and how much
+/// comparison its route-change budget is read over belong to the same rule
+/// as the floors: a seat that rises names both, a seat that does not names
+/// neither, and neither may ask for a window no evidence reaches.
+#[test]
+fn a_use_names_what_its_window_forgives_and_what_it_compares_exactly_when_it_rises() {
+    for row in JEV_USES {
+        assert_eq!(
+            row.promotes,
+            row.window_forgives.is_some(),
+            "{} promotes={} forgives={:?}",
+            row.id,
+            row.promotes,
+            row.window_forgives
+        );
+        assert_eq!(
+            row.promotes,
+            row.agreement_rows_wanted.is_some(),
+            "{} promotes={} comparisons wanted={:?}",
+            row.id,
+            row.promotes,
+            row.agreement_rows_wanted
+        );
+        let (Some(floor), Some(forgives)) = (row.answer_floor_permille, row.window_forgives) else {
+            continue;
+        };
+        // A window is a window: forgiving more than the floor's own miss
+        // budget would be a line the floor no longer means.
+        assert!(
+            forgives <= FORGIVES_A_BAD_MINUTE,
+            "{} forgives {forgives} rows",
+            row.id
+        );
+        let wanted = summary::rows_that_can_clear_forgiving(floor, forgives);
+        assert!(
+            wanted < usize::MAX,
+            "{} names a window nothing fills",
+            row.id
+        );
+        assert!(
+            wanted >= summary::rows_that_can_clear(floor),
+            "{} forgives a miss on a window no wider than the perfect one",
+            row.id
+        );
+        // What a forgiving window buys, in the units the seat is judged in:
+        // one miss inside it is not the end of the climb.
+        let one_short = summary::wilson_lower(wanted - forgives, wanted, summary::WILSON_Z_95);
+        assert!(
+            crate::jev::promote::permille(one_short) >= floor,
+            "{} cannot clear {floor}‰ over {wanted} rows with {forgives} forgiven",
+            row.id
+        );
+    }
+}
+
+/// A seat is judged only once its window can be full, and then every
+/// [`summary::JUDGED_EVERY_ROWS`] requests — the countdown the screen draws
+/// and the cadence the judge runs on are one function.
+#[test]
+fn a_seats_first_judgment_waits_for_a_window_it_can_fill() {
+    use crate::jev::promote::{rows_to_next_judgment, window_wanted_for};
+    for seat in JEV_USES.iter().filter(|row| row.promotes) {
+        let wanted = window_wanted_for(seat).expect("a rising seat names a window");
+        assert_eq!(rows_to_next_judgment(seat, 0), Some(wanted));
+        assert_eq!(rows_to_next_judgment(seat, wanted - 1), Some(1));
+        assert_eq!(
+            rows_to_next_judgment(seat, wanted),
+            Some(summary::JUDGED_EVERY_ROWS)
+        );
+        assert_eq!(
+            rows_to_next_judgment(seat, wanted + 1),
+            Some(summary::JUDGED_EVERY_ROWS - 1)
+        );
+    }
+}
+
+/// The two seats with no reader to be compared against are the two whose
+/// wrong answer the person undoes in one move and whose own mark is that
+/// move — everything else must show a window of comparisons first.
+#[test]
+fn only_the_seats_with_no_reader_to_compare_rise_on_their_own_ledger() {
+    let on_their_own: Vec<&str> = JEV_USES
+        .iter()
+        .filter(|row| row.agreement_rows_wanted == Some(NO_READER_TO_COMPARE))
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(on_their_own, vec![RECALL.id, PLACEMENT.id]);
+    for row in JEV_USES
+        .iter()
+        .filter(|row| !on_their_own.contains(&row.id) && row.promotes)
+    {
+        assert_eq!(
+            row.agreement_rows_wanted,
+            Some(A_WINDOW_OF_COMPARISONS),
+            "{}",
+            row.id
+        );
+    }
+}
+
+/// The placement seat's answer floor is its own, and under the line the other
+/// orchestration seats share: the cheapest negative in the table pays the
+/// least for it (the vault's "a judgment seat pays where its negatives are
+/// few, not where its ceiling is high").
+#[test]
+fn the_placement_seats_line_sits_where_its_negatives_are() {
+    assert_eq!(
+        PLACEMENT.answer_floor_permille,
+        Some(PLACEMENT_ANSWER_FLOOR_PERMILLE)
+    );
+    const { assert!(PLACEMENT_ANSWER_FLOOR_PERMILLE < ORCHESTRATION_ANSWER_FLOOR_PERMILLE) };
+    for row in [STALL, SUMMON, STEP_EFFORT] {
+        assert_eq!(
+            row.answer_floor_permille,
+            Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
+            "{}",
+            row.id
+        );
+    }
+    // And it buys a window the seat's own ledger can fill: 25 rows against
+    // the 53 the nine-in-ten line asks for once a miss is forgiven, on a
+    // ledger 38 rows long (2026-09-22).
+    assert_eq!(
+        summary::rows_that_can_clear_forgiving(
+            PLACEMENT_ANSWER_FLOOR_PERMILLE,
+            FORGIVES_A_BAD_MINUTE
+        ),
+        25
+    );
+    assert_eq!(
+        summary::rows_that_can_clear_forgiving(
+            ORCHESTRATION_ANSWER_FLOOR_PERMILLE,
+            FORGIVES_A_BAD_MINUTE
+        ),
+        53
+    );
+}
+
 #[test]
 fn a_use_that_promotes_has_somewhere_to_rise_from_and_to() {
     for row in JEV_USES.iter().filter(|row| row.promotes) {
