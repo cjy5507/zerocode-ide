@@ -118,9 +118,12 @@ async fn a_parked_window_is_refused_without_a_request() {
         ),
         "an account window, not a provider overload: {error}"
     );
+    // The text carries whole seconds and the runtime parses whole seconds
+    // back; the park itself is read to the millisecond, so a 14.999 s park
+    // is "14" on the wire (a load-flake on the merged tree, 2026-09-21).
     assert_eq!(
         reset_hint_in_text(&error.to_string()),
-        Some(hint),
+        Some(Duration::from_secs(hint.as_secs())),
         "the flattened text must carry the seconds the runtime parses back: {error}"
     );
 }
