@@ -1,0 +1,42 @@
+^DOpenAI Codex v0.149.1
+--------
+[1mworkdir:[0m /private/tmp/claude-501/-Users-dev-zerocode-workspaces-zerocode-zerocode-cli/c1a46d57-1e90-46fe-a537-6d276fa63892/scratchpad/codex-style
+[1mmodel:[0m gpt-5.6-sol
+[1mprovider:[0m openai
+[1mapproval:[0m never
+[1msandbox:[0m read-only
+[1mreasoning effort:[0m xhigh
+[1mreasoning summaries:[0m none
+[1msession id:[0m 01a03c00-7270-7852-ad34-f628d7c0051f
+--------
+[36muser[0m
+Run 'ls -la' in the current directory with your shell tool, then summarize what you see in one short sentence. Also include a tiny markdown sample in your final answer: a heading, a bullet list of two items, and one inline `code` span.
+[1mhook:[0m [2mSessionStart[0m
+[1mhook:[0m [2mSessionStart[0m Completed
+[1mhook:[0m [2mUserPromptSubmit[0m
+[1mhook:[0m [2mUserPromptSubmit[0m Completed
+[35m[3mcodex[0m[0m
+I’ll inspect the current directory, then give you the requested compact summary and Markdown sample.
+[1mhook:[0m [2mPreToolUse[0m
+[1mhook:[0m [2mPreToolUse[0m Completed
+[35m[3mexec[0m[0m
+[1m/bin/zsh -lc 'ls -la'[0m in /private/tmp/claude-501/-Users-dev-zerocode-workspaces-zerocode-zerocode-cli/c1a46d57-1e90-46fe-a537-6d276fa63892/scratchpad/codex-style
+[32m succeeded in 0ms:[0m
+total 0
+drwxr-xr-x@  3 dev  wheel   96 Aug 26 11:57 .
+drwx------@ 15 dev  wheel  480 Aug 26 11:57 ..
+-rw-r--r--@  1 dev  wheel    0 Aug 26 11:57 capture-ansi.txt
+
+[1mhook:[0m [2mPostToolUse[0m
+[1mhook:[0m [2mPostToolUse[0m Completed
+[35m[3mcodex[0m[0m
+The directory contains one empty file, `capture-ansi.txt`.
+
+### Sample
+
+- First item
+- Second item with `code`
+[1mhook:[0m [2mStop[0m
+[1mhook:[0m [2mStop[0m Completed
+[2mtokens used[0m
+6,575
