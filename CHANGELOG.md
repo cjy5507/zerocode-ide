@@ -1,5 +1,35 @@
 # Changelog
 
+## [1.1.13] — 2026-09-22
+
+_since v1.1.12 (17 commits)_
+
+### feat
+- feat(jev): the three unlabeled seats get a "what came next" row — routing labels the turn's route by its attempt, placement labels where the person left the pane, recall labels whether the first note was read — and recall rises on its own labels
+- feat(jev): the window's Jev dashboard — every seat's numbers, decisions and trend on one tab (t-5807)
+- feat(zo): the key ladder names the rung that answered (t-5805)
+- feat(jev): a consented checkout's linked worktrees are consented too (t-5805)
+
+### fix
+- fix(emulator): one iOS helper death, one line — and the tests that pinned the old silence (t-5763)
+- fix(orchestration): a pointer a knock already took is not parked again while its offer is young
+- fix(jev): an unarmed process leaves no seat row in the person's own home (t-5805)
+- fix(emulator): a frame reader that walks away costs the iOS helper a thread, not its life (t-5763)
+
+### docs
+- docs(agents): Windows is a build target for Codex sessions too
+
+### test
+- test(zo): the ledger-cost measurement takes its source folder from the environment
+- test(zo): the labels branch's summary tests call the test-local `one` the dashboard introduced
+
+### release
+- release: the public snapshot is scanned as the staged index, which is what gets pushed
+
+### wip
+- wip(emulator): the helper's own starts, deaths and replacements reach the window log
+
+
 ## [1.1.12] — 2026-09-21
 
 _since v1.1.11 (48 commits)_
