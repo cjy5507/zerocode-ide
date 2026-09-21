@@ -1345,18 +1345,22 @@ window.addEventListener("keydown", (event) => {
       return;
     }
     // Any surface that is READ rather than typed into: a file, a diff, a
-    // notebook, and whatever the next one turns out to be.
+    // notebook. `ESCAPE_CLOSES` is that family, by name.
     //
-    // Asked as "is anything listening" rather than as a list of kinds. The
-    // list was `kind !== "lane"`, which swept in terminal tabs — so Escape
-    // on a terminal CLOSED IT instead of reaching the shell, and Escape is
-    // the most-pressed key in vim, in less, and in every agent TUI this
-    // window exists to run. `keyboardTarget()` is the window's own answer to
-    // that question and it already accounts for the floating terminal and
-    // for a screen covering the stage, which is why the `termFloat` clause
-    // that used to be here is gone rather than moved.
+    // It used to be asked as "is anything listening" (`keyboardTarget() ===
+    // null`), which is true of every kind but a terminal and a lane — so the
+    // key closed browser panes, the board and the graph as readily as a file,
+    // and a browser close takes the restore record with it (t-5453). Naming
+    // the family is the same correction this road already took once, when the
+    // test was `kind !== "lane"` and Escape closed terminals.
+    //
+    // Still only while nothing is listening: a document that HAS the keyboard
+    // (a pane split beside it, the floating terminal over it) is a document
+    // somebody is typing past, and `keyboardTarget()` is the window's own
+    // answer to that — it already accounts for the float and for a screen
+    // covering the stage.
     const reading = currentTab();
-    if (reading && keyboardTarget() === null) {
+    if (reading && ESCAPE_CLOSES.has(reading.kind) && keyboardTarget() === null) {
       event.preventDefault();
       closeTab(reading.id);
       return;

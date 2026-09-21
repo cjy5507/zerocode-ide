@@ -37,6 +37,7 @@ import { testFlowConsole } from "./flow-console.mjs";
 import { testWorktreeEvidence } from "./worktree-evidence.mjs";
 import { testAgentConversation } from "./agent-conversation.mjs";
 import { testBrowserRecovery } from "./browser-recovery.mjs";
+import { testBrowserPanesSurvive } from "./browser-panes-survive.mjs";
 import { testCoordinatorPanel } from "./coordinator-panel.mjs";
 
 import { testCrashReport } from "./crash-report.mjs";
@@ -181,6 +182,7 @@ suite("flow-console", ({ browser, origin, ok }) => testFlowConsole(browser, orig
 suite("worktree-evidence", ({ browser, origin, ok }) => testWorktreeEvidence(browser, origin, ok));
 suite("agent-conversation", ({ browser, origin, ok }) => testAgentConversation(browser, origin, ok));
 suite("browser-recovery", ({ browser, origin, ok }) => testBrowserRecovery(browser, origin, ok));
+suite("browser-panes-survive", ({ browser, origin, ok }) => testBrowserPanesSurvive(browser, origin, ok));
 suite("coordinator-panel", ({ browser, origin, ok }) => testCoordinatorPanel(browser, origin, ok));
 suite("native-folder-picker", ({ browser, origin, ok }) => testNativeFolderPicker(browser, origin, ok));
 suite("sftp", ({ browser, origin, ok }) => testSftpAndTeam(browser, origin, ok));

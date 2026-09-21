@@ -5131,8 +5131,17 @@ async function openDefaultTabsOnce(worktree) {
 }
 
 /* Take a tab off the strip without touching what it was showing. Closing is
- * [`closeTab`]; this is what a lane disappearing on its own looks like. */
-function dropTab(id) {
+ * [`closeTab`]; this is what a lane disappearing on its own looks like.
+ *
+ * `closed` says whether a person asked for this — their close, the agent's
+ * `zerocode-browser close`, which walks the same door on their behalf. Every
+ * other caller is BOOKKEEPING: a checkout swept off the disk, a project
+ * removed, an emulator tab giving its seat to the shell that replaces it. The
+ * two are told apart for one reason — the browser's restore record. A tab the
+ * person closed is one they do not want back; a tab this window took away is
+ * one they never let go of, and rewriting the record for it is how a window
+ * comes back on the next start with nothing in it (t-5453). */
+function dropTab(id, { closed = false } = {}) {
   const at = tabs.findIndex((tab) => tab.id === id);
   const removed = tabs[at];
   const leaf = removed?.pane ?? focusedPane;
@@ -5233,7 +5242,13 @@ function dropTab(id) {
     browserSaid.delete(removed.label);
     browserEarly.delete(removed.label);
     browserAnnotations.delete(removed.label);
-    rememberBrowserOpenTabs();
+    // The record only hears the person. The native pane above has to go
+    // whatever brought us here — a webview outliving its tab floats over
+    // whatever the leaf shows next — but the LIST of what to put back on the
+    // next start is the person's, and only their close edits it. Everything
+    // else that takes a browser tab away (a checkout gone from the disk, a
+    // project removed) leaves that list standing, so the address comes back.
+    if (closed) rememberBrowserOpenTabs();
   }
   // A closed terminal tab must stay closed on the next visit, and an empty
   // set is how the file hears that. The dot goes back down with it — the last
@@ -5408,7 +5423,12 @@ function closeTab(id) {
   // ⌘⇧T that brought back the URL with none of the page's state would be a
   // different page wearing the same address.
   if (tab.kind === "browser") {
-    dropTab(id);
+    // The one door a browser tab leaves by on purpose — the strip's ×, ⌘W,
+    // 「탭 닫기」, and the agent's `zerocode-browser close`, which the window
+    // routes here so that it walks exactly this road. Said out loud
+    // (`closed`), because it is what tells the restore record to forget this
+    // address; no other road may.
+    dropTab(id, { closed: true });
     if (termFloat.hidden) keySink.focus();
     return;
   }
@@ -5440,6 +5460,27 @@ function closeTab(id) {
 function isDocument(tab) {
   return tab.kind === "file" || tab.kind === "diff" || tab.kind === "image";
 }
+
+/* The kinds Escape may take off the strip: the ones that are READ, and whose
+ * whole state is the path they were read from.
+ *
+ * Escape used to ask `keyboardTarget() === null` instead — "is anything
+ * listening" — which is true of every kind but a terminal and a lane. So the
+ * key closed the browser pane somebody was signed into, the board and the
+ * graph, and each browser close rewrote the restore record on the way out:
+ * three panes and two pages gone in seven seconds, and nothing to come back
+ * to on the next start (t-5453, 2026-09-20 16:13:03–09; the record went 3 → 2
+ * → 1 → 0 as the panes went). The comment above the road always named the
+ * right family — a file, a diff, a notebook — so it is asked as that family
+ * rather than as the absence of a listener. A live surface leaves by its own
+ * close door and no other.
+ *
+ * This is the same shape as the bug before it, one kind wider: the test then
+ * was `kind !== "lane"`, which swept in terminals, and the answer was to name
+ * what may go rather than what may not. */
+const ESCAPE_CLOSES = new Set(
+  ["file", "diff", "imagediff", "image", "mdview", "csv", "ipynb"],
+);
 
 /* The question in flight, and the promise waiting on its answer. */
 let closingAsk = null;
