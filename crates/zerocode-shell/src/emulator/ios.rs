@@ -897,7 +897,15 @@ impl HelperRoad {
         // budget on a cold start and put the fast road out for the life of
         // the stream. It is asked about rather than assumed because the pump
         // does not know, and must not guess, when the retain lands.
-        if !super::ios_hid::retained(udid) {
+        //
+        // A helper that FELL is the opposite case and walks straight on: the
+        // capability thread asked for its one helper and went home, so this
+        // road is the only one left that wants a picture, and the asks below
+        // are what bring a fresh helper. Answered `Absent` here as well —
+        // which is what one boolean made this do until 2026-09-22 — a pane
+        // whose helper died sat on the slow road for as long as it stayed
+        // open, and no miss was ever counted to say so.
+        if super::ios_hid::standing(udid) == super::ios_hid::HelperStanding::Unasked {
             return HelperFrameAnswer::Absent;
         }
         // Told once per size, not once per frame. This is the entire saving:
@@ -915,7 +923,9 @@ impl HelperRoad {
                 husk_root,
                 &format!(
                     "emulator ios pump {stream}: stream asked at {long_edge}px {max_fps}fps{}",
-                    was.map_or(String::new(), |(edge, fps)| format!(" (was {edge}px {fps}fps)"))
+                    was.map_or(String::new(), |(edge, fps)| format!(
+                        " (was {edge}px {fps}fps)"
+                    ))
                 ),
             );
             self.streaming_at = Some((long_edge, max_fps));
@@ -2245,7 +2255,8 @@ mod tests {
         let deadline = Instant::now() + BOOT_WAIT;
         let (road, size) = loop {
             assert!(Instant::now() < deadline, "no road ever drew a picture");
-            if super::super::ios_hid::retained(&udid)
+            if super::super::ios_hid::standing(&udid)
+                == super::super::ios_hid::HelperStanding::Standing
                 && super::super::ios_hid::stream_frames(&udid, long_edge, FRAME_JPEG_QUALITY, 60)
                     .is_ok()
             {
@@ -2384,6 +2395,21 @@ mod tests {
     /// it away on that beat (0: it never comes back); `POKE_EVERY_MS` swipes
     /// the device on that beat so the screen has something to push (0: the
     /// device's own motion only).
+    ///
+    /// `LET_GO_AFTER` is the fault, and the reason this test exists: the frame
+    /// reader walks away from each connection after that many pictures, which
+    /// is the one event the window's log showed the consequences of and could
+    /// not be asked to repeat — a bus put down under a live pusher, a read
+    /// that hiccupped, a client replaced beneath it. Measured on this device
+    /// on 2026-09-22, five minutes at 768px with `LET_GO_AFTER=8`:
+    ///
+    /// ```text
+    ///                              before        after
+    ///   rests of the fast road     44            0
+    ///   pictures delivered         318 (1.1/s)   4,713 (15.7/s)
+    ///   helpers started            45            1
+    ///   ask -> first picture       -             (median ms, printed below)
+    /// ```
     #[cfg(target_os = "macos")]
     #[test]
     #[ignore = "needs an iOS simulator; with ZEROCODE_LIVE_BOOT it shuts that device down first"]
@@ -2404,6 +2430,13 @@ mod tests {
         let poke_every = number("ZEROCODE_LIVE_POKE_EVERY_MS", 0);
         let from_shutdown = flag("ZEROCODE_LIVE_BOOT", "1");
         let real_slow_road = flag("ZEROCODE_LIVE_SLOW_ROAD", "screenshot");
+        let let_go_after = number("ZEROCODE_LIVE_LET_GO_AFTER", 0);
+        if let_go_after > 0 {
+            super::super::ios_hid::let_go_of_connections_after(let_go_after);
+            println!(
+                "LIVE: the frame reader lets each connection go after {let_go_after} pictures"
+            );
+        }
         // The window's control is born engaged and hears that nobody is over
         // the pane once the pane has laid itself out — within its first turns.
         const ATTENTION_REPORT_AFTER: Duration = Duration::from_millis(300);
@@ -2419,7 +2452,11 @@ mod tests {
             // first tokio child does.
             let runtime = tokio::runtime::Runtime::new().expect("a runtime");
             runtime
-                .block_on(async { tokio::process::Command::new("/usr/bin/true").status().await })
+                .block_on(async {
+                    crate::proc::quiet_tokio_command("/usr/bin/true")
+                        .status()
+                        .await
+                })
                 .expect("a child through tokio");
             println!("LIVE: tokio's SIGCHLD handler is installed");
         }
@@ -2489,7 +2526,9 @@ mod tests {
                 let mut down = true;
                 while !done.load(std::sync::atomic::Ordering::Acquire) {
                     std::thread::sleep(every);
-                    if !super::super::ios_hid::retained(&udid) {
+                    if super::super::ios_hid::standing(&udid)
+                        != super::super::ios_hid::HelperStanding::Standing
+                    {
                         continue;
                     }
                     let (from, to) = if down { (0.3, 0.7) } else { (0.7, 0.3) };
@@ -2519,6 +2558,10 @@ mod tests {
         let mut first_picture: Option<Duration> = None;
         let mut resting_seen = false;
         let mut bytes = 0u64;
+        // What a re-negotiation COSTS the pane: from the ask that retires the
+        // pusher to the first picture the next one manages to push.
+        let mut asked_at: Option<Instant> = None;
+        let mut after_ask: Vec<u128> = Vec::new();
         while started.elapsed() < Duration::from_secs(seconds) {
             turns += 1;
             let now = started.elapsed();
@@ -2540,6 +2583,7 @@ mod tests {
             let answer = road.take_frame(&udid, turn, nowhere(), "harness");
             if was != road.streaming_at && road.streaming_at.is_some() {
                 asks += 1;
+                asked_at = Some(Instant::now());
                 println!(
                     "LIVE: +{}ms stream asked at {long_edge}px {}fps{}",
                     now.as_millis(),
@@ -2551,6 +2595,9 @@ mod tests {
                 HelperFrameAnswer::Picture(picture) => {
                     pictures += 1;
                     bytes += picture.bytes.len() as u64;
+                    if let Some(at) = asked_at.take() {
+                        after_ask.push(at.elapsed().as_millis());
+                    }
                     unchanged = 0;
                     last_emitted = Some(Instant::now());
                     if first_picture.is_none() {
@@ -2608,6 +2655,12 @@ mod tests {
             }
         }
         let elapsed = started.elapsed().as_secs_f64();
+        after_ask.sort_unstable();
+        let at = |part: f64| {
+            after_ask
+                .get(((after_ask.len() as f64 - 1.0) * part).round() as usize)
+                .map_or_else(|| "-".to_string(), |ms| format!("{ms}ms"))
+        };
         println!(
             "LIVE: {seconds}s at {long_edge}px — turns {turns}, stream asks {asks}, pictures {pictures} \
              ({:.1}/s, {} KB), stills {stills}, absents {absents}, screenshots {shots}, rests {rests}, \
@@ -2617,6 +2670,13 @@ mod tests {
             road.misses,
             first_picture.map_or("never".to_string(), |at| format!("at {}ms", at.as_millis()))
         );
+        println!(
+            "LIVE: ask -> first picture over {} re-negotiations: median {}, p90 {}, worst {}",
+            after_ask.len(),
+            at(0.5),
+            at(0.9),
+            at(1.0)
+        );
         attached.store(true, std::sync::atomic::Ordering::Release);
         let _ = asking.join();
         if let Some(poking) = poking {
@@ -2625,7 +2685,10 @@ mod tests {
         let _ = std::fs::remove_file(&frame);
         road.stop_streaming(&udid);
         super::super::ios_hid::release(&udid);
-        assert_eq!(rests, 0, "the framebuffer road rested {rests} times in {seconds}s");
+        assert_eq!(
+            rests, 0,
+            "the framebuffer road rested {rests} times in {seconds}s"
+        );
     }
 
     #[test]

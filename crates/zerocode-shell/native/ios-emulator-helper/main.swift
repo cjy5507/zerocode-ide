@@ -1013,6 +1013,21 @@ private func write(_ response: Response) {
 
 setbuf(stdout, nil)
 setbuf(stderr, nil)
+// A reader that walks away must cost this process a thread, never the process.
+//
+// The frame socket is DESIGNED to be let go from the other end: the window
+// drops a pusher connection when its bus is put down, when a read hiccups, and
+// when the client it belongs to is replaced — each of those is one pusher
+// retiring, and `writeAll` already answers false so `pump` can close its end
+// and go home. Without this line it never gets the chance: the default action
+// for SIGPIPE is death, so the first picture written into a socket nobody is
+// reading killed the WHOLE helper — measured on 2026-09-21 as signal 13 within
+// 250ms of the reader closing, and in the window as a helper started and put
+// down every few seconds behind a pane that had fallen to the slow road.
+// Stdout is covered by the same line and wants the same answer: a window that
+// is gone is answered by `readLine` returning nil, which ends this process
+// deliberately, one request later.
+signal(SIGPIPE, SIG_IGN)
 _ = NSApplication.shared
 NSApplication.shared.setActivationPolicy(.accessory)
 
