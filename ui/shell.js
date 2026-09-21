@@ -10168,6 +10168,11 @@ listen("hook:agent", (event) => {
   }
   const wasMidTurn = isMidTurn(hookStates.get(term));
   hookStates.set(term, state);
+  // 판의 상태가 **여기서** 움직인다 — 칩을 다시 그린 자리(위)에서는 훅의
+  // 낱말이 아직 옛것이라, 턴이 끝난 그 순간을 그 자리에서는 볼 수 없다.
+  // 그래서 기다리던 글을 내보내는 문은 상태가 실제로 옮겨 앉은 이 줄 뒤에
+  // 선다(그리는 문과 보내는 문은 여전히 따로다).
+  settleComposerQueuesFor(term);
   agentClock.sync();
   // A conversation view asked for mid-turn is handed to the wire now that the
   // turn is over — if the person still has it up.
@@ -10905,6 +10910,8 @@ function forgetPaneChat(term) {
   if (!held) return;
   dropWorkerScreen(held.tab.pane);
   held.host?.remove();
+  // 기다리던 글들은 이 대화의 것이었다 — 대화가 사라지면 같이 사라진다.
+  held.run.queue = null;
   paneChats.delete(term);
   paneLive.delete(term);
 }
@@ -11020,6 +11027,7 @@ function paintPaneChat(term) {
   // when it ends — the state it reads (`run.status`) moved here, so it is
   // repainted here; a hook's chip repaint ran before the state landed.
   if (moved) syncWorkerComposers(run);
+  if (moved) settleComposerQueue(run);
   paintPaneAsk(held);
   // Said once, where the turns would be: the agent has not named a transcript.
   noticeOnPaneChat(
@@ -11199,6 +11207,7 @@ async function pollHelperPages() {
   if (document.hidden || activeHelperPage() !== tab) return;
   if (!more?.turns?.length && !replaced && !skippedNow && !wireChanged) return;
   if (wireChanged) syncWorkerComposers(tab.worker);
+  if (wireChanged) settleComposerQueue(tab.worker);
   // 새로 온 것이 있을 때에만 다시 그린다 — 쉬는 페이지는 아무 값도 치르지
   // 않고, 그림도 온 턴만 잇는다(`syncHelperTurns`).
   paintHelperSurface(tab);
@@ -12213,6 +12222,10 @@ function workerComposerNode(run, owner = null) {
     ? t("worker.sayTo", "{{name}}에게 보내기…", { name: run.name || agentName(run.agent) })
     : t("worker.say", "부모 에이전트에게 보내기…");
   box.setAttribute("aria-label", box.placeholder);
+  // 실행 중에는 상자가 「대기열에 추가」라고 말하고 턴 사이에는 제 본래의
+  // 말로 돌아온다 — 그 본래의 말은 여기서 한 번 정해지므로, 갈아입히는
+  // 페인터(`paintWorkerComposerState`)가 규칙을 다시 짓지 않게 들려 둔다.
+  form.__composerSay = box.placeholder;
   // 쓰다 만 문장은 실행의 것이다 — 페이지가 다시 서도(탭 전환, 부모의
   // 생사) 상자가 그 문장을 다시 입는다. 폴은 애초에 이 상자를 다시 만들지
   // 않는다(`paintHelperPage`의 뼈대).
@@ -12240,6 +12253,8 @@ function workerComposerNode(run, owner = null) {
   // 첨부(t-2993)는 제 모듈의 것 — 칩 줄은 상자 위에, 「+」는 도구 줄 맨 왼쪽에.
   // 브라우저의 시작점은 부모 판의 체크아웃이다.
   const attachments = composerAttachments(form, box, tools, { start: owner?.worktree ?? null });
+  // 턴이 끝나기를 기다리는 글들 — 첨부 칩 줄 위, 상자 바로 위 두 층.
+  form.prepend(composerQueueNode());
   // The extension's row: after `+`, the agent chip (mark · name · model, opening
   // the model menu) and the permission-mode chip; on the right the `/` and the
   // send. The door to the parent stands only on a helper's page — a pane's own
@@ -12322,17 +12337,15 @@ function workerComposerNode(run, owner = null) {
     try {
       const message = attachments.count() === 0 ? text || null : await attachments.outgoing(text);
       if (message === null) return;
-      if (run.wire) {
-        // Down the wire as one request — no pty, no pacing.
-        await composerRoad(run).send(message);
-      } else {
-        // Pasted first, then a breath, then Enter — `deliverToPane`; `pasted`
-        // marks the words as already in the parent's box when the Enter fails.
-        await invoke("term_paste", { term: run.term, text: message });
-        pasted = true;
-        await new Promise((done) => setTimeout(done, COMPOSER_SUBMIT_DELAY_MS));
-        await invoke("term_key", { term: run.term, press: { key: "Enter", ctrl: false, alt: false } });
-      }
+      // 실행 중에 친 글은 창이 들고 있다가 턴이 끝나면 보낸다 — 첨부까지
+      // 조립된 그대로가 대기열에 든다(`settleComposerQueue`). 여기서
+      // `sendUncertain`을 다시 보지 않는 것은 이 핸들러의 첫 줄이 이미
+      // 그 상태를 돌려보냈기 때문이다.
+      if (composerWorking(run)) queueComposerMessage(run, message);
+      // 아니면 그 자리에서 실행의 길로 — 선이면 한 요청, 판이면
+      // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
+      // 상자에 있다는 사실을 남긴다.
+      else await composerDeliver(run, message, () => { pasted = true; });
       if (run.draft === draft && box.value === draft) {
         box.value = "";
         run.draft = "";
@@ -12361,9 +12374,16 @@ function paintWorkerComposerState(form, run, delivered = null) {
   }
   box.readOnly = Boolean(run.sending);
   const send = form.querySelector(".worker-composer-send");
-  const term = run.term;
-  const working = (term !== undefined && term !== null && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)))) || run.status === "running";
+  const working = composerWorking(run);
   const stopping = working && !run.sending && !run.sendUncertain;
+  // 기다리는 글들, 그리고 상자가 무엇을 하겠다고 말하는지: 실행 중이면
+  // 「대기열에 추가」, 턴 사이면 제 본래의 말.
+  paintComposerQueue(form, run);
+  const saying = working
+    ? t("composer.queue.placeholder", "다음 메시지 대기열에 추가…")
+    : form.__composerSay;
+  writeAttribute(box, "placeholder", saying);
+  writeAttribute(box, "aria-label", saying);
 
   if (stopping) {
     send.disabled = false;

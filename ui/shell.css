@@ -14482,6 +14482,73 @@ details[open] > .helper-cap::after {
   height: var(--icon-size-sm);
 }
 
+/* 턴이 끝나기를 기다리는 글들 — 상자 위, 첨부 칩 줄과 같은 층위. 알약의
+ * 옷을 그대로 입고(같은 바탕·같은 높이 감각), 길어지면 이 줄만 구른다. */
+.composer-queue {
+  display: flex;
+  flex-direction: column;
+  gap: var(--chat-queue-gap);
+  max-height: var(--chat-queue-max-h);
+  overflow-y: auto;
+  padding: var(--chat-queue-gap) var(--chat-composer-pad-x);
+}
+
+.composer-queue[hidden] {
+  display: none;
+}
+
+.composer-queue-count {
+  color: var(--ink-mist);
+  font-family: var(--font-ui);
+  font-size: var(--chat-pill-size);
+  line-height: 1;
+}
+
+.composer-queue-item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-height: var(--chat-pill-height);
+  padding: 0 var(--chat-pill-pad-x);
+  border-radius: var(--radius-pill);
+  background: var(--chat-pill-bg);
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.composer-queue-item:hover {
+  background: var(--chat-pill-hover-bg);
+}
+
+.composer-queue-words {
+  flex: 1;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font-family: var(--font-ui);
+  font-size: var(--chat-pill-size);
+  line-height: 1;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.composer-queue-drop {
+  display: inline-flex;
+  align-items: center;
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  cursor: pointer;
+  transition: color var(--motion-fast) var(--ease-standard);
+}
+
+.composer-queue-drop:hover {
+  color: var(--ink-chalk);
+}
+
+.composer-queue-drop .icon {
+  width: var(--icon-size-sm);
+  height: var(--icon-size-sm);
+}
+
 /* The agent chip's mark — the same glyph the head wears, in the accent. */
 .worker-composer-mark {
   color: var(--chat-accent);

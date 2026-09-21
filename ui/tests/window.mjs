@@ -54235,8 +54235,11 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
         };
       };
       // A Claude pane wearing its conversation, its model and mode from the hook.
+      // At REST between turns: what a composer says and does while a turn is
+      // out is the queue's business (`composer-queue`), and a box that says
+      // 「대기열에 추가」 would hide the two words this suite is about.
       const term = await openTermTab({ placement: "tab" });
-      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-chips", resumable: false, model: "claude-fable-5-1", permission_mode: "bypassPermissions" });
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-chips", resumable: false, model: "claude-fable-5-1", permission_mode: "bypassPermissions" });
       await window.__PAINTED__();
       window.__ANSWER__.pane_log = () => ({ found: true, next: 2, turns: [
         { role: "user", text: "hi" }, { role: "assistant", text: "hello" },
@@ -54376,9 +54379,9 @@ suite("composer-chips", async ({ browser, origin, ok }) => {
       seen.wantCodexHead = `${agentName("codex")} 0.154.0 · ${t("composer.slash.sourceDocs", "문서 기준")}`;
       // A helper's page keeps the door to its parent and speaks of the parent.
       const owner = tabOfTerm(term);
-      tell("hook:subagent", { term, rows: [{ id: "helper-1", name: "@helper" }] });
+      tell("hook:subagent", { term, rows: [{ id: "helper-1", name: "@helper", state: "done" }] });
       window.__ANSWER__.subagent_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
-      await openHelperPage({ term, agent: "claude", worktree: owner.worktree, tab: owner }, { id: "helper-1", name: "@helper" });
+      await openHelperPage({ term, agent: "claude", worktree: owner.worktree, tab: owner }, { id: "helper-1", name: "@helper", state: "done" });
       await settle(120);
       const helperComposer = document.querySelector("#worker-view .worker-composer");
       seen.helperDoor = Boolean(helperComposer?.querySelector(".worker-composer-door"));
@@ -54905,6 +54908,157 @@ suite("wire-session", async ({ browser, origin, ok }) => {
         seen.menuModels === "GPT-5.6 Sol,GPT-6 Astra" && seen.modelSet === seen.wantModelSet &&
         seen.paletteHead === seen.wantPaletteHead && seen.paletteRows === "/help,/artifact" &&
         seen.stopped && seen.tabGone,
+      JSON.stringify(seen),
+    );
+  } finally {
+    await page.close();
+  }
+});
+
+/* 실행 중에 친 글은 창이 들고 있다가 턴이 끝나면 나간다 — 판이든 선이든 같은
+ * 그림(항목·순서·×)이고, 같은 길(`composerDeliver`)로 도착한다. 한 턴에
+ * 하나: 보낸 직후의 짧은 idle 창에 대기열이 통째로 쏟아지지 않는다. */
+suite("composer-queue", async ({ browser, origin, ok }) => {
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    const seen = await page.evaluate(async () => {
+      const tell = (name, payload) => {
+        for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+      };
+      const settle = (ms = 80) => new Promise((done) => setTimeout(done, ms));
+      const seen = {};
+      const calls = [];
+      window.__ANSWER__.term_paste = (args) => (calls.push(["paste", args.term, args.text]), null);
+      window.__ANSWER__.term_key = (args) => (calls.push(["key", args.term, args.press.key]), null);
+      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, turns: [{ role: "user", text: "go" }] });
+      const type = (box, words) => {
+        box.value = words;
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        box.closest(".worker-composer").requestSubmit();
+      };
+      // ---- 판의 길 ----
+      const term = await openTermTab({ placement: "tab" });
+      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-queue", resumable: false });
+      await window.__PAINTED__();
+      el("view-toggle-chat").click();
+      await settle(150);
+      const chat = document.querySelector(`.pane-slot[data-term="${term}"] .pane-chat`);
+      const composer = chat?.querySelector(".worker-composer");
+      const box = composer?.querySelector(".worker-composer-box");
+      const items = () => [...(composer?.querySelectorAll(".composer-queue-item") ?? [])]
+        .map((item) => item.querySelector(".composer-queue-words")?.textContent);
+      // 실행 중에는 상자가 대기열이라고 말한다.
+      seen.workingPlaceholder = box?.placeholder;
+      seen.wantWorkingPlaceholder = t("composer.queue.placeholder", "다음 메시지 대기열에 추가…");
+      const before = calls.length;
+      type(box, "첫째");
+      await settle();
+      seen.sentNothing = calls.length === before;
+      seen.queued = JSON.stringify(items());
+      seen.boxCleared = box.value === "";
+      seen.count = composer?.querySelector(".composer-queue-count")?.textContent;
+      seen.wantCount = t("composer.queue.count", "대기 {{n}}", { n: 1 });
+      // 둘을 쌓는다 — 셋째는 × 로 지운다.
+      type(box, "둘째");
+      await settle();
+      type(box, "버릴 것");
+      await settle();
+      seen.stacked = JSON.stringify(items());
+      composer?.querySelectorAll(".composer-queue-drop")[2]?.click();
+      await settle();
+      seen.afterDrop = JSON.stringify(items());
+      // 턴이 끝나면 첫째가 그 길로 — 붙여넣기 한 번, Enter 한 번. 한 턴에 하나.
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-queue", resumable: false });
+      await window.__PAINTED__();
+      await settle(800);
+      seen.firstOut = JSON.stringify(calls.slice(-2));
+      seen.wantFirstOut = JSON.stringify([["paste", term, "첫째"], ["key", term, "Enter"]]);
+      seen.oneAtATime = JSON.stringify(items());
+      // 상태가 working 으로 올랐다가 다시 끝나야 둘째가 나간다.
+      tell("hook:agent", { term, state: "working", agent: "claude", session: "s-queue", resumable: false });
+      await window.__PAINTED__();
+      await pollHelperPages();
+      await settle();
+      seen.stillHeld = JSON.stringify(items());
+      tell("hook:agent", { term, state: "idle", agent: "claude", session: "s-queue", resumable: false });
+      await window.__PAINTED__();
+      await settle(800);
+      seen.secondOut = JSON.stringify(calls.slice(-2));
+      seen.wantSecondOut = JSON.stringify([["paste", term, "둘째"], ["key", term, "Enter"]]);
+      seen.queueEmpty = JSON.stringify(items());
+      // 턴 사이에 친 글은 기다리지 않는다 — 곧바로 그 길로.
+      const straight = calls.length;
+      type(box, "지금");
+      await settle(800);
+      seen.straightOut = JSON.stringify(calls.slice(straight));
+      seen.wantStraightOut = JSON.stringify([["paste", term, "지금"], ["key", term, "Enter"]]);
+      seen.idlePlaceholder = box?.placeholder;
+      seen.wantIdlePlaceholder = t("worker.sayTo", "{{name}}에게 보내기…", { name: agentName("claude") });
+      // 대화를 잊으면 기다리던 글도 같이 사라진다.
+      const paneRun = paneChats.get(term)?.run;
+      paneRun.queue = ["남은 것"];
+      forgetPaneChat(term);
+      seen.forgotten = paneRun.queue === null;
+      // ---- 선의 길 ----
+      let log = {
+        found: true, skipped: false, next: 0, turns: [], status: "working", asks: [], agent: "codex",
+        protocol: "app-server", model: "gpt-5.6-sol", models: [], mode: "on-request", modes: [], commands: [],
+        version: "0.154.0", live: [],
+      };
+      window.__ANSWER__.wire_start = () => ({ id: 11, agent: "codex", protocol: "app-server", version: "0.154.0", model: "gpt-5.6-sol" });
+      window.__ANSWER__.wire_log = (args) => ({ ...log, turns: log.turns.slice(args.after), next: log.turns.length });
+      window.__ANSWER__.wire_send = (args) => { calls.push(["wire", args.id, args.text]); return null; };
+      window.__ANSWER__.wire_stop = () => null;
+      const tabId = await openWirePage("codex", "/tmp/zerocode-window-test");
+      await window.__PAINTED__();
+      await settle(120);
+      const face = document.querySelector("#worker-view");
+      const wireBox = face?.querySelector(".worker-composer-box");
+      const wireItems = () => [...(face?.querySelectorAll(".composer-queue-item") ?? [])]
+        .map((item) => item.querySelector(".composer-queue-words")?.textContent);
+      const wireBefore = calls.length;
+      type(wireBox, "선에서 기다릴 글");
+      await settle();
+      seen.wireSentNothing = calls.length === wireBefore;
+      seen.wireQueued = JSON.stringify(wireItems());
+      log = { ...log, status: "idle" };
+      await pollHelperPages();
+      await window.__PAINTED__();
+      await settle(120);
+      seen.wireOut = JSON.stringify(calls.slice(-1));
+      seen.wantWireOut = JSON.stringify([["wire", 11, "선에서 기다릴 글"]]);
+      seen.wireQueueEmpty = JSON.stringify(wireItems());
+      closeTab(tabId);
+      await settle();
+      for (const name of ["term_paste", "term_key", "pane_log", "wire_start", "wire_log", "wire_send", "wire_stop"]) {
+        delete window.__ANSWER__[name];
+      }
+      for (const tab of [...tabs]) dropTab(tab.id);
+      for (const at of [...termViews.keys()]) dropTermView(at);
+      return seen;
+    });
+    ok(
+      "a message typed while the turn is out is held by the window — the box says so, the words stand as a queue item that an × takes back, and nothing reaches the pane",
+      seen.workingPlaceholder === seen.wantWorkingPlaceholder && seen.sentNothing &&
+        seen.queued === JSON.stringify(["첫째"]) && seen.boxCleared &&
+        seen.count === seen.wantCount &&
+        seen.stacked === JSON.stringify(["첫째", "둘째", "버릴 것"]) &&
+        seen.afterDrop === JSON.stringify(["첫째", "둘째"]),
+      JSON.stringify(seen),
+    );
+    ok(
+      "the turn's end sends the first held message down the pane's own road — paste, a breath, Enter — one per turn: the second waits for the state to rise to working and fall again, a message typed between turns goes straight out, and forgetting the conversation forgets what it held",
+      seen.firstOut === seen.wantFirstOut && seen.oneAtATime === JSON.stringify(["둘째"]) &&
+        seen.stillHeld === JSON.stringify(["둘째"]) &&
+        seen.secondOut === seen.wantSecondOut && seen.queueEmpty === JSON.stringify([]) &&
+        seen.straightOut === seen.wantStraightOut &&
+        seen.idlePlaceholder === seen.wantIdlePlaceholder && seen.forgotten,
+      JSON.stringify(seen),
+    );
+    ok(
+      "a wire's page holds the same way and sends down the wire when its own status says the turn ended",
+      seen.wireSentNothing && seen.wireQueued === JSON.stringify(["선에서 기다릴 글"]) &&
+        seen.wireOut === seen.wantWireOut && seen.wireQueueEmpty === JSON.stringify([]),
       JSON.stringify(seen),
     );
   } finally {

@@ -2028,6 +2028,10 @@
   --chat-pill-height: 18px;
   --chat-pill-size: 0.85em;
   --chat-pill-pad-x: 8px;
+  /* 턴 끝을 기다리는 글들: 항목 사이 4px 눈금 하나, 그리고 그 줄이 상자를
+   * 밀어내기 전에 스스로 구르기 시작하는 높이(항목 넷 어름). */
+  --chat-queue-gap: 4px;
+  --chat-queue-max-h: 96px;
   --chat-preview-mark: 36px;
   --chat-fold-max: 360px;
   /* The extension's page, read off its stylesheet (2.1.278) and worn as

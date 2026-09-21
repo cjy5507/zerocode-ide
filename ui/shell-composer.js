@@ -23,9 +23,16 @@ const COMPOSER_SUBMIT_DELAY_MS = 500;
 /* How long a palette answer stands before the CLI is asked again. */
 const SLASH_CATALOG_TTL_MS = 5 * 60 * 1000;
 
-/* Send words to a pane the measured way: paste, one breath, Enter. */
-async function deliverToPane(term, text) {
+/* Send words to a pane the measured way: paste, one breath, Enter.
+ *
+ * `landed` is called the moment the words are in the pane's own box, before
+ * the breath: an Enter that fails AFTER that leaves the words standing over
+ * there, and the caller has to wear that difference (`run.sendUncertain` —
+ * 「전달됐지만 전송 완료를 확인하지 못했습니다」) rather than report a send
+ * that simply failed. */
+async function deliverToPane(term, text, landed = null) {
   await invoke("term_paste", { term, text });
+  landed?.();
   await new Promise((done) => setTimeout(done, COMPOSER_SUBMIT_DELAY_MS));
   await invoke("term_key", { term, press: { key: "Enter", ctrl: false, alt: false } });
 }
@@ -133,6 +140,137 @@ function composerRoad(run, spec = null) {
     catalog: (cwd, refresh) => slashCatalogFor(spec.id, cwd, refresh),
     send: (text) => deliverToPane(run.term, text),
   };
+}
+
+/* ---- 실행 중에 친 글: 창이 들고 있다가 턴 끝에 보낸다 ---------------------
+ *
+ * 확장의 입력 자리말 「Queue another message…」와 그 `heldPrompts`: 턴
+ * 한가운데서 친 글은 창 안에 서 있다가 턴이 끝나면 나간다. 지금까지 이
+ * 입력줄은 실행 중에도 즉시 보냈고, 그 글이 어디에 떨어지는지는 길마다
+ * 달랐다 — 판의 TUI는 제 대기열에 넣고(그 대기열은 이 창이 그릴 수도 지울
+ * 수도 없다), 선은 턴 한가운데에 user 메시지를 끼워 넣는다. 창이 들고
+ * 있으면 모든 에이전트가 같은 그림을 얻는다: 보이는 항목, 사람이 정한
+ * 순서, 지우는 ×. 새로고침에 사라지던 글(확장 changelog 2.1.268/272)도
+ * 여기서는 실행이 살아 있는 동안 산다. */
+
+/* 이 실행이 지금 턴을 돌리고 있는가 — 보내기가 중지로 바뀌는 그 판정
+ * 하나다(`paintWorkerComposerState`가 이 함수를 부른다; 식이 두 벌 있으면
+ * 언젠가 둘이 갈라진다). 판은 훅이 말한 낱말, 선은 제 상태. */
+function composerWorking(run) {
+  const term = run.term;
+  const onPane = term !== undefined && term !== null
+    && (hookStates.get(term) === "working" || isMidTurn(hookStates.get(term)));
+  return onPane || run.status === "running";
+}
+
+/* 글 하나가 실행에 닿는 길 — 선이면 한 요청, 판이면 붙여넣기·숨·Enter.
+ * 제출과 대기열이 **같은 이 문**을 지나므로, 대기열에서 나간 글은 사람이
+ * 직접 친 글과 한 글자도 다르지 않게 도착한다. */
+function composerDeliver(run, message, landed = null) {
+  return run.wire ? composerRoad(run).send(message) : deliverToPane(run.term, message, landed);
+}
+
+/* 대기열에 한 글. 상한이 없다 — 이것은 사람이 친 글이고, 어느 것을 버릴지
+ * 창이 고를 수 없다. 실행 하나의 수명과 같이 살고 그 실행이 사라질 때
+ * (탭 drop, `forgetPaneChat`) 같이 사라진다. */
+function queueComposerMessage(run, message) {
+  if (!run.queue) run.queue = [];
+  run.queue.push(message);
+}
+
+/* 대기 중인 글의 한 줄 — 첫 줄(빈 줄은 건너뛴다)만. 길이는 CSS가 자른다
+ * (`text-overflow`), 여기서 자르는 것은 줄바꿈뿐이다. */
+function composerQueueWords(message) {
+  return (String(message).split("\n").find((line) => line.trim() !== "") ?? "").trim();
+}
+
+/* 대기열 줄 하나 — 상자 위, 첨부 칩 줄과 같은 층위. 세우기만 한다. */
+function composerQueueNode() {
+  const queue = document.createElement("div");
+  queue.className = "composer-queue";
+  queue.hidden = true;
+  const count = document.createElement("span");
+  count.className = "composer-queue-count";
+  queue.appendChild(count);
+  return queue;
+}
+
+/* 항목 하나 — 글 한 줄과 그것을 빼는 ×. 지우기는 대기열을 고치고 이 실행의
+ * 입력줄 전부를 다시 그린다(같은 실행을 두 자리에서 보고 있을 수 있다). */
+function composerQueueItemNode(run, message, at) {
+  const item = document.createElement("div");
+  item.className = "composer-queue-item";
+  const words = document.createElement("span");
+  words.className = "composer-queue-words";
+  words.textContent = composerQueueWords(message);
+  const drop = document.createElement("button");
+  drop.type = "button";
+  drop.className = "composer-queue-drop";
+  labelButton(drop, t("composer.queue.drop", "대기열에서 지우기"));
+  drop.appendChild(iconNode("x"));
+  drop.addEventListener("click", () => {
+    run.queue?.splice(at, 1);
+    syncWorkerComposers(run);
+  });
+  item.append(words, drop);
+  return item;
+}
+
+/* 대기열의 그림. 항목들의 서명이 그대로면 DOM을 건드리지 않는다 — 조용한
+ * 폴은 mutation 0이고, 다시 세우는 값은 항목이 실제로 바뀐 폴에서만 치른다.
+ * 그리기만 한다: 보내는 문은 `settleComposerQueue`다(SRP). */
+function paintComposerQueue(form, run) {
+  const queue = form.querySelector(".composer-queue");
+  if (!queue) return;
+  const held = run.queue ?? [];
+  writeHidden(queue, held.length === 0);
+  const sign = held.map(composerQueueWords).join("\u0000");
+  if (queue.__queueSign === sign) return;
+  queue.__queueSign = sign;
+  const count = queue.querySelector(".composer-queue-count");
+  writeTextContent(count, t("composer.queue.count", "대기 {{n}}", { n: held.length }));
+  queue.replaceChildren(count, ...held.map((message, at) => composerQueueItemNode(run, message, at)));
+}
+
+/* 대기열의 첫 항목을 내보내는 문 — 상태가 움직이는 자리에서만 불린다.
+ *
+ * 한 턴에 하나. 보낸 직후에는 훅도 선도 아직 「작업 중」이라 말하지 않아서,
+ * 그 짧은 창에 이 문이 다시 불리면 대기열이 통째로 쏟아진다. 그래서 보낼
+ * 때 빗장(`run.queueArmed`)을 내리고, 상태가 실제로 working으로 오른 것을
+ * 본 뒤에만 다시 올린다 — 시계가 아니라 상태가 기준이다. */
+function settleComposerQueue(run) {
+  if (composerWorking(run)) {
+    run.queueArmed = true;
+    return;
+  }
+  if (run.queueArmed === false) return;
+  if (!run.queue?.length || run.sending || run.sendUncertain) return;
+  const message = run.queue.shift();
+  run.queueArmed = false;
+  run.sending = true;
+  syncWorkerComposers(run);
+  let pasted = false;
+  void composerDeliver(run, message, () => { pasted = true; })
+    .catch((error) => {
+      if (pasted) run.sendUncertain = true;
+      showError(error);
+    })
+    .finally(() => {
+      run.sending = false;
+      syncWorkerComposers(run);
+    });
+}
+
+/* 그 판에 말하는 실행들의 대기열 — 판의 상태가 움직인 자리(`hook:agent`)에서
+ * 한 번씩. 그림은 `paintComposerChipsFor`의 몫이고 이 문은 보내기만 한다. */
+function settleComposerQueuesFor(term) {
+  const settled = new Set();
+  for (const form of document.querySelectorAll(".worker-composer")) {
+    const run = form.__workerRun;
+    if (run?.term !== term || settled.has(run)) continue;
+    settled.add(run);
+    settleComposerQueue(run);
+  }
 }
 
 /* ---- the agent·model chip ------------------------------------------------ */

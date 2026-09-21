@@ -17125,6 +17125,9 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "pill-height",
         "pill-size",
         "pill-pad-x",
+        // 턴 끝을 기다리는 글들의 줄.
+        "queue-gap",
+        "queue-max-h",
         "dot",
         "dot-halo",
         "gutter",
