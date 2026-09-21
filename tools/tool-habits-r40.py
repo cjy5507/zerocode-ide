@@ -3,9 +3,9 @@
 
 Run it from `zo-ide/`:
 
-    python3 docs/analysis/tools/tool-habits-r40.py                # last 24h
-    python3 docs/analysis/tools/tool-habits-r40.py --hours 72
-    python3 docs/analysis/tools/tool-habits-r40.py --json /tmp/habits.json
+    python3 tools/tool-habits-r40.py                # last 24h
+    python3 tools/tool-habits-r40.py --hours 72
+    python3 tools/tool-habits-r40.py --json /tmp/habits.json
 
 Every number in `docs/analysis/tool-habits-r40.md` comes from this script, and
 nothing here writes anything.

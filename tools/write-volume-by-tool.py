@@ -12,9 +12,9 @@ tool on one path, and this script measures how much of the gap it can reach.
 
 Run:
 
-    python3 docs/analysis/tools/write-volume-by-tool.py
-    python3 docs/analysis/tools/write-volume-by-tool.py --rows /tmp/r31.jsonl
-    python3 docs/analysis/tools/write-volume-by-tool.py --since-r27 2026-08-30T18:14
+    python3 tools/write-volume-by-tool.py
+    python3 tools/write-volume-by-tool.py --rows /tmp/r31.jsonl
+    python3 tools/write-volume-by-tool.py --since-r27 2026-08-30T18:14
 
 Input is the two live stores, never anything in this repo:
 

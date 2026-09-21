@@ -19,9 +19,9 @@ computes the ruler that separates (a) from (b):
 
 Run:
 
-    python3 docs/analysis/tools/new-content-bytes.py
-    python3 docs/analysis/tools/new-content-bytes.py --rows /tmp/rows.jsonl
-    python3 docs/analysis/tools/new-content-bytes.py --no-vault   # see note 3
+    python3 tools/new-content-bytes.py
+    python3 tools/new-content-bytes.py --rows /tmp/rows.jsonl
+    python3 tools/new-content-bytes.py --no-vault   # see note 3
 
 Input is the two live stores, NOT anything in this repo:
 
