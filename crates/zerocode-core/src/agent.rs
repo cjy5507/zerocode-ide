@@ -7,8 +7,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::capabilities::{
-    AuthProbeKind, BlockedSignal, CLAUDE_RESUME_SELECTORS, Harness, IdShape, PointerRoute,
-    SpawnRoad, StoreResume, Submit, SubmitAck, TrustMenu, WakeMark,
+    AuthProbeKind, BlockedSignal, CLAUDE_EFFORT_LADDER, CLAUDE_EFFORT_PICKER,
+    CLAUDE_RESUME_SELECTORS, CODEX_EFFORT_LADDER, Harness, IdShape, MoveRoad, PointerRoute,
+    SpawnRoad, StoreResume, Submit, SubmitAck, TrustMenu, TurnMoves, WakeMark,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -531,7 +532,11 @@ pub fn prompt_injection(spec: &AgentSpec, prompt: &str) -> Option<Injected> {
 /// reads its default from. Neither entry is the other's copy — an id that
 /// appears in one and not the other is a normal thing here, and the two are
 /// looked up through separate doors (`agent_spec` / `AgentKind::from_slug`).
-pub const AGENT_SPECS: [AgentSpec; 35] = [
+// A `static`, not a `const`: the table is read by reference everywhere, and
+// a const this size would be copied whole at each use (clippy's
+// `large_const_arrays`, crossed when the rows grew their between-turn move
+// columns).
+pub static AGENT_SPECS: [AgentSpec; 35] = [
     // First because it is this project's own harness: the list a person picks
     // a default from opens with the agent this window ships with.
     //
@@ -574,6 +579,18 @@ pub const AGENT_SPECS: [AgentSpec; 35] = [
             submit_ack: SubmitAck::Channel,
             blocked: &[BlockedSignal::TrustMenu(TrustMenu::Zo)],
             auth_probes: &[AuthProbeKind::IdentityFile, AuthProbeKind::Keychain],
+            // `zo commands --json` (1.1.10, 2026-09-21) lists `/model` and no
+            // `/effort`: the model takes its id on the line, the effort is
+            // the second stage of that same picker — and zo moves its own
+            // effort per request from inside (its step governor), so the
+            // beat leaves it alone. Its ladder is its own `--effort` help.
+            moves: TurnMoves {
+                effort: Some(MoveRoad::Shown("/model")),
+                model: Some(MoveRoad::Line("/model")),
+                ladder: &[
+                    "off", "low", "medium", "high", "xhigh", "max", "ultra", "smart",
+                ],
+            },
             ..Harness::PLAIN
         },
     },
@@ -620,6 +637,17 @@ pub const AGENT_SPECS: [AgentSpec; 35] = [
             }),
             vault_resume_carries_launch_args: true,
             auth_probes: &[AuthProbeKind::IdentityFile, AuthProbeKind::Keychain],
+            // Measured 2026-09-21 on 2.1.278 in a pty of its own
+            // (docs/captures/claude-code-2.1.278-effort-slash.txt): `/effort
+            // low` typed between two turns put `effort: low` on the next
+            // assistant record — and "saved as your default for new
+            // sessions" into the account's `modelSettings`, which the
+            // picker's `s` does not. `/model <id>` takes the id the same way.
+            moves: TurnMoves {
+                effort: Some(MoveRoad::Picker(CLAUDE_EFFORT_PICKER)),
+                model: Some(MoveRoad::Line("/model")),
+                ladder: CLAUDE_EFFORT_LADDER,
+            },
             ..Harness::PLAIN
         },
     },
@@ -677,6 +705,18 @@ pub const AGENT_SPECS: [AgentSpec; 35] = [
             wake_mark: WakeMark::Rollout,
             vault_resume_carries_launch_args: true,
             auth_probes: &[AuthProbeKind::IdentityFile],
+            // Measured 2026-09-21 on 0.155.1 in a pty of its own: `/model
+            // low` went to the model as a user message (the rollout holds
+            // `"text":"/model low"` under `role: user`), `/reasoning` is
+            // "Unrecognized command", and `/model` alone opens the two-stage
+            // picker (zo-ide/docs/codex-tui-mechanics.md). So nothing the
+            // beat types moves its effort; a summons' `-c
+            // model_reasoning_effort=` does.
+            moves: TurnMoves {
+                effort: Some(MoveRoad::Relaunch),
+                model: Some(MoveRoad::Shown("/model")),
+                ladder: CODEX_EFFORT_LADDER,
+            },
             ..Harness::PLAIN
         },
     },
@@ -928,6 +968,14 @@ pub const AGENT_SPECS: [AgentSpec; 35] = [
                 BlockedSignal::LoginGate,
             ],
             vault_resume_carries_launch_args: true,
+            // Gemini CLI's `/model` opens its manage dialog (the console table's
+            // own note) and `--effort` is a launch flag on this machine
+            // (`orchestration::TUNABLE`): shown and relaunched, no ladder read.
+            moves: TurnMoves {
+                effort: Some(MoveRoad::Relaunch),
+                model: Some(MoveRoad::Shown("/model")),
+                ladder: &[],
+            },
             ..Harness::PLAIN
         },
     },
@@ -1537,14 +1585,6 @@ pub struct WireRoad {
     pub resume: Option<&'static str>,
 }
 
-/// How a running session changes its model: a slash command, and whether it
-/// takes the model id as its argument or only opens the CLI's own picker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct SlashRoad {
-    pub command: &'static str,
-    pub takes_id: bool,
-}
-
 /// How an agent's own screen marks itself, says it is working, and takes the
 /// two commands a composer chip sends it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1559,7 +1599,6 @@ pub struct AgentVoice {
     /// its rows (`zo models --json`, `provider`): the composer's model menu
     /// lists those rows. `None` lists every row — zo drives them all.
     pub models_provider: Option<&'static str>,
-    pub model_slash: Option<SlashRoad>,
     /// How the permission mode changes mid-session: `shift-tab` cycles it on
     /// the CLI's own keyboard; a slash command opens the CLI's picker.
     pub permission_road: Option<&'static str>,
@@ -1597,6 +1636,9 @@ pub struct AgentVoice {
 /// <id>`; Codex's `/model` only opens its picker, so the window shows the
 /// screen). One table; an agent it does not name has no console, and the
 /// view then shows no status word and no roads rather than guessed ones.
+/// The model road itself — `/model <id>` on the line, or a picker the chip
+/// only shows — is the row's `moves.model` in the capability table, not a
+/// second spelling here.
 const AGENT_VOICES: [(&str, AgentVoice); 4] = [
     (
         "claude",
@@ -1605,10 +1647,6 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             glyph_cycle: &["·", "✢", "*", "✶", "✻", "✽"],
             busy_word: "Pondering…",
             models_provider: Some("claude"),
-            model_slash: Some(SlashRoad {
-                command: "/model",
-                takes_id: true,
-            }),
             // `shift+tab to cycle`, on Claude Code's own status line.
             permission_road: Some("shift-tab"),
             // The modes the extension's own stylesheet colours (2.1.278
@@ -1657,10 +1695,6 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             glyph_cycle: &[],
             busy_word: "Thinking…",
             models_provider: Some("openai"),
-            model_slash: Some(SlashRoad {
-                command: "/model",
-                takes_id: false,
-            }),
             permission_road: Some("/permissions"),
             // app-server `approvalPolicy` (docs/design/agent-wire-sessions
             // §2): `untrusted` and `on-request` ask; `on-failure` runs and
@@ -1693,10 +1727,6 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             glyph_cycle: &[],
             busy_word: "Working…",
             models_provider: None,
-            model_slash: Some(SlashRoad {
-                command: "/model",
-                takes_id: true,
-            }),
             permission_road: Some("/permissions"),
             // zo's own three (zo-ide/README.md: `read-only |
             // workspace-write | danger-full-access`; it accepts Claude Code's
@@ -1720,12 +1750,6 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             glyph_cycle: &[],
             busy_word: "Thinking…",
             models_provider: Some("google"),
-            // Gemini CLI's `/model` opens its manage dialog; `set <id>` is
-            // documented but unmeasured here, so the picker road stands.
-            model_slash: Some(SlashRoad {
-                command: "/model",
-                takes_id: false,
-            }),
             permission_road: None,
             // agy's modes are not measured here; every mode asks until they are.
             permission_modes: &[],
@@ -1750,7 +1774,6 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     glyph_cycle: &[],
     busy_word: "",
     models_provider: None,
-    model_slash: None,
     permission_road: None,
     permission_modes: &[],
     wire: None,
@@ -1837,10 +1860,12 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                 glyph_cycle: agent_voice(spec.id).glyph_cycle,
                 busy_word: agent_voice(spec.id).busy_word,
                 models_provider: agent_voice(spec.id).models_provider,
-                model_command: agent_voice(spec.id).model_slash.map(|road| road.command),
-                model_command_takes_id: agent_voice(spec.id)
-                    .model_slash
-                    .is_some_and(|road| road.takes_id),
+                model_command: spec.harness.moves.model.and_then(MoveRoad::command),
+                model_command_takes_id: spec
+                    .harness
+                    .moves
+                    .model
+                    .is_some_and(|road| matches!(road, MoveRoad::Line(_))),
                 permission_road: agent_voice(spec.id).permission_road,
                 permission_modes: agent_voice(spec.id).permission_modes,
                 wire: agent_voice(spec.id).wire.map(|road| road.protocol),
@@ -1901,9 +1926,6 @@ mod tests {
                 console.glyph_cycle,
                 console.glyph
             );
-            if let Some(road) = console.model_slash {
-                assert!(road.command.starts_with('/'), "{id}: {}", road.command);
-            }
             if let Some(road) = console.permission_road {
                 assert!(road == "shift-tab" || road.starts_with('/'), "{id}: {road}");
             }
@@ -1962,8 +1984,28 @@ mod tests {
         assert_eq!(silent, super::SILENT_CONSOLE);
         let claude = super::agent_voice("claude");
         assert_eq!(claude.models_provider, Some("claude"));
-        assert!(claude.model_slash.is_some_and(|road| road.takes_id));
-        assert!(!super::agent_voice("codex").model_slash.unwrap().takes_id);
+    }
+
+    /// The composer chip's model road is the capability row's, so a chip
+    /// that types `/model <id>` at Claude Code and only shows Codex its
+    /// picker reads both facts off the one table.
+    #[test]
+    fn the_presence_rows_model_road_is_the_capability_rows() {
+        let rows = super::agent_presence(None, "macos");
+        let of = |id: &str| rows.iter().find(|row| row.id == id).expect(id);
+        assert_eq!(of("claude").model_command, Some("/model"));
+        assert!(of("claude").model_command_takes_id);
+        assert_eq!(of("codex").model_command, Some("/model"));
+        assert!(!of("codex").model_command_takes_id);
+        assert_eq!(of("zo").model_command, Some("/model"));
+        assert!(of("zo").model_command_takes_id);
+        assert_eq!(of("aider").model_command, None);
+        assert!(!of("aider").model_command_takes_id);
+        for row in &rows {
+            if let Some(command) = row.model_command {
+                assert!(command.starts_with('/'), "{}: {command}", row.id);
+            }
+        }
     }
 
     /// A mode's reach is the console's word, spelled as that CLI reports it;

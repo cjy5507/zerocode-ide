@@ -21,6 +21,7 @@ pub mod fuzzy_file_picker;
 pub mod git_snapshot;
 mod hooks;
 pub mod image_guard;
+pub mod jev_score;
 mod jsonl_log;
 pub mod lsp_client;
 pub mod live_output;
@@ -55,6 +56,7 @@ pub mod sandbox;
 pub mod second_brain;
 pub mod secure_fs;
 pub mod session_control;
+pub mod skill_rank;
 pub mod skill_sources;
 pub mod skills;
 pub mod stale_branch;
@@ -113,9 +115,10 @@ pub use zerocode_core::compact_diff::{
     CompactDiffHunk, CompactDiffLine, CompactDiffLineKind, compact_line_diff,
 };
 pub use config::{
-    default_config_home, durable_traces_armed, project_slug, relocate_traces_out_of_tree, traces_base,
+    default_config_home, durable_traces_armed, jev_ledger_dir, jev_seat_applies, project_slug,
+    relocate_traces_out_of_tree, traces_base,
     zo_global_config_roots,
-    zo_project_state_dir, zo_state_base,
+    zo_project_state_dir, zo_state_base, JEV_LEDGER_DIR,
     CliConfigOverrides, ConfigEntry, ConfigError, ConfigLoader, ConfigSource, HookMatcher,
     HookRule, McpConfigCollection, McpEdit, McpManagedProxyServerConfig, McpOAuthConfig,
     McpRemoteServerConfig, McpSdkServerConfig, McpServerConfig, McpStdioServerConfig, McpTransport,
@@ -284,7 +287,8 @@ pub use prompt::{
     load_system_prompt_for_main_with_mode, load_system_prompt_for_main_with_mode_and_spawn,
     output_style, prepend_bullets, skill_search_roots,
     split_system_with_identity, ContextFile, ProjectContext, PromptBuildError, PromptMode,
-    render_reminders, SkillIndexEntry, SkillInvocationMode, SkillTriggers, SystemPromptBuilder,
+    render_reminders, SkillIndexEntry, SkillInvocationMode, SkillTriggers, SkillsIndexRoad,
+    SystemPromptBuilder,
     ReminderCandidate, SKILLS_INDEX_HEADING, SKILL_INDEX_BUDGET_TOKENS, MAX_REMINDER_LINES,
     MAX_REMINDER_TOKENS,
     REMINDERS_SECTION_HEADING, REMINDER_LINE_PREFIX,

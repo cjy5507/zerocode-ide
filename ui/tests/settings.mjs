@@ -54,12 +54,14 @@ const TYPESAFE_DECISION_MODES = Object.freeze([
 const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "routing", setting: "decisionShadow", modes: "off shadow on auto" }),
   Object.freeze({ id: "recall", setting: "rerankShadow", modes: "off shadow on auto" }),
+  Object.freeze({ id: "skills", setting: "skillSearch", modes: "off shadow on auto" }),
   Object.freeze({ id: "browser", setting: "browserAction", modes: "off shadow on auto" }),
   Object.freeze({ id: "desktop", setting: "desktopAction", modes: "off shadow on auto" }),
   Object.freeze({ id: "emulator", setting: "emulatorAction", modes: "off shadow on auto" }),
   Object.freeze({ id: "stall", setting: "stallCause", modes: "off shadow on auto" }),
   Object.freeze({ id: "placement", setting: "workerPlacement", modes: "off shadow on auto" }),
   Object.freeze({ id: "summon", setting: "summonChoice", modes: "off shadow on auto" }),
+  Object.freeze({ id: "effort", setting: "stepEffort", modes: "off shadow on auto" }),
 ]);
 const jevSeat = (id) => JEV_SEATS.find((seat) => seat.id === id) ?? null;
 /* The routing classifier's four words (`zerocode_core::jev::ClassifierMode`)

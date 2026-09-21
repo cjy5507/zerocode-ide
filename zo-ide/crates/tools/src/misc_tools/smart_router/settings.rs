@@ -339,6 +339,23 @@ pub fn rerank_shadow_mode_from(loader: &runtime::ConfigLoader) -> Option<Decisio
     merged_settings_root_from(loader).map(|root| zerocode_core::jev::RECALL.mode_in(&root))
 }
 
+/// `smart.skillSearch`: whether the installed skills are ranked against the
+/// task by a judgment. Its own switch, not the other two's, because it sends
+/// something else off the machine — the name and description of every skill
+/// this machine has installed — and consent to one is not consent to another.
+pub const SKILL_SEARCH_SETTING: &str = zerocode_core::jev::SKILLS.setting;
+
+/// `smart.skillSearch` from the settings `loader` merges, on the same terms
+/// as [`decision_shadow_mode_from`]. `on`, and an `auto` this seat's own
+/// evidence has raised, are its apply stage — and what they apply is the
+/// prompt: the skill index comes out and the two tools go in its place
+/// (`runtime::prompt`). `shadow` leaves the index where it is and records
+/// what the search would have handed back.
+#[must_use]
+pub fn skill_search_mode_from(loader: &runtime::ConfigLoader) -> Option<DecisionShadowMode> {
+    merged_settings_root_from(loader).map(|root| zerocode_core::jev::SKILLS.mode_in(&root))
+}
+
 /// The plan scorer's knobs (`smart.plan.*`). While the scorer runs in shadow
 /// it decides nothing; these only shape what the shadow ledger records, so a
 /// later comparison reads the thresholds the live scorer would use.

@@ -286,6 +286,96 @@ fn the_builders_cut_at_the_tables_caps() {
     assert!(caps(&STALL).contains(&Cap::Bytes(STALL_TRANSCRIPT_BYTE_CAP)));
     assert!(caps(&PLACEMENT).contains(&Cap::Chars(PLACEMENT_BRIEF_CHAR_CAP)));
     assert!(caps(&SUMMON).contains(&Cap::Chars(SUMMON_BRIEF_CHAR_CAP)));
+    assert!(caps(&SKILLS).contains(&Cap::Chars(SKILL_TASK_CHAR_CAP)));
+    assert!(caps(&SKILLS).contains(&Cap::Items(SKILL_SHARD_TARGET)));
+    assert!(caps(&SKILLS).contains(&Cap::Chars(SKILL_DESCRIPTION_CHAR_CAP)));
+}
+
+/// The skill seat sends a name and a line about each skill, and never a
+/// skill's body: the body is read off this machine's own disk and handed to
+/// the model as a tool result, so what leaves is a list and what the turn
+/// reads is a document.
+#[test]
+fn the_skill_seat_sends_names_and_descriptions_and_never_a_body() {
+    let sent: Vec<&str> = SKILLS.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(
+        sent,
+        vec![
+            "/state/task",
+            "/state/skills",
+            "/state/skills/*/name",
+            "/state/skills/*/description",
+        ]
+    );
+    assert!(
+        !sent
+            .iter()
+            .any(|at| at.contains("body") || at.contains("prompt")),
+        "a skill's body never leaves: {sent:?}"
+    );
+}
+
+/// The skill search's own floor is a line under one skill's relevance, and
+/// the seat's rise line is a line under how often the seat answers at all.
+/// Two different questions, kept apart by their units as well as their names.
+#[test]
+fn a_skills_relevance_floor_is_not_the_seats_answer_rate() {
+    // 1.4 of a top level of 2 — the reference build's line, in this table's
+    // own per-thousand units.
+    let top = SKILL_LEVELS.len() - 1;
+    assert_eq!(top, 2);
+    assert_eq!(SKILL_RELEVANCE_FLOOR_PERMILLE, 700);
+    assert_eq!(
+        f64::from(SKILL_RELEVANCE_FLOOR_PERMILLE) / 1_000.0 * 2.0,
+        1.4
+    );
+    assert_eq!(
+        SKILLS.answer_floor_permille,
+        Some(SKILL_ANSWER_FLOOR_PERMILLE)
+    );
+    assert_ne!(
+        SKILLS.answer_floor_permille,
+        Some(SKILL_RELEVANCE_FLOOR_PERMILLE),
+        "the seat's rise line is not a skill's relevance line"
+    );
+    // A level is judged on its own against the state, so each one describes a
+    // situation rather than a degree — no level names its own number or its
+    // neighbour.
+    for level in SKILL_LEVELS {
+        assert!(!level.is_empty());
+        assert!(
+            !level.contains("more") && !level.contains("less"),
+            "a level describes a situation, not a degree: {level}"
+        );
+    }
+}
+
+/// The skill seat rises on its own evidence, waits a wall a person sits
+/// through, and asks in shards no larger than one request should carry.
+#[test]
+fn the_skill_seat_rises_on_its_own_lines() {
+    const { assert!(SKILLS.promotes) };
+    assert!(SKILLS.modes.contains(&JevMode::On));
+    assert_eq!(
+        SKILLS.agreement_floor_permille,
+        Some(SKILL_AGREEMENT_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        SKILLS.apply_deadline_ms,
+        Some(SKILL_SEARCH_APPLY_DEADLINE_MS)
+    );
+    assert_eq!(
+        SKILLS.press_floor_permille, None,
+        "a search presses nothing"
+    );
+    // The window it is judged over is one a real day of searches can fill.
+    assert!(summary::rows_that_can_clear(SKILL_ANSWER_FLOOR_PERMILLE) <= 40);
+    // Every shard fits the cap the table says one request carries.
+    for total in [1_usize, 50, 51, 101, 137] {
+        for shard in shard::even_shards(total, SKILL_SHARD_TARGET) {
+            assert!(shard.len() <= SKILL_SHARD_TARGET, "{total}: {shard:?}");
+        }
+    }
 }
 
 /// A stall's answer is a row beside what the coordinator did, never an act:
@@ -358,6 +448,35 @@ fn a_summon_question_acts_under_on_and_under_auto_once_its_evidence_stands() {
     assert!(!SUMMON.mode_of(Some(&json!("auto"))).applies_with(false));
     assert!(SUMMON.mode_of(Some(&json!("auto"))).applies_with(true));
     assert_eq!(jev_use("summon"), Some(&SUMMON));
+}
+
+/// A worker's between-turn effort move is a judgment about its last turn,
+/// and the door is the agent's row: the seat acts under `on` and under an
+/// `auto` its own evidence raised, records under `shadow`, and its one text
+/// is the repeated call's card line.
+#[test]
+fn a_step_effort_question_acts_under_on_and_under_auto_once_its_evidence_stands() {
+    assert!(STEP_EFFORT.modes.contains(&JevMode::On));
+    const { assert!(STEP_EFFORT.promotes) };
+    assert_eq!(STEP_EFFORT.mode_of(Some(&json!("on"))), JevMode::On);
+    assert_eq!(STEP_EFFORT.mode_of(Some(&json!("auto"))), JevMode::Auto);
+    assert!(STEP_EFFORT.mode_of(Some(&json!("on"))).applies());
+    assert!(
+        !STEP_EFFORT
+            .mode_of(Some(&json!("auto")))
+            .applies_with(false)
+    );
+    assert!(STEP_EFFORT.mode_of(Some(&json!("auto"))).applies_with(true));
+    assert_eq!(jev_use("effort"), Some(&STEP_EFFORT));
+    let sent: Vec<&str> = STEP_EFFORT.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(sent, ["/state/repeated"]);
+    assert_eq!(
+        STEP_EFFORT.apply_deadline_ms,
+        Some(STEP_EFFORT_APPLY_DEADLINE_MS),
+        "the wall the beat waits is the row's"
+    );
+    // A move lands between two turns; it cannot wait the stall sweep's wall.
+    const { assert!(STEP_EFFORT_APPLY_DEADLINE_MS < STALL_APPLY_DEADLINE_MS) };
 }
 
 /// The one text a summons' question carries is the head of the brief. The

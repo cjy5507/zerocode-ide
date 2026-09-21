@@ -70,6 +70,14 @@ pub trait PtyTransport: Send {
         None
     }
 
+    /// The same moment as [`Self::last_output_at`] on the wall clock, in
+    /// epoch milliseconds, taken once when the bytes arrived — the number a
+    /// reader keys a silence by, so every beat reads the same one. `None`
+    /// is "this transport does not say".
+    fn last_output_epoch_ms(&self) -> Option<i64> {
+        None
+    }
+
     /// Whether a local child still owns the foreground process group.
     /// Remote channels have no comparable OS process identity and answer
     /// `None`, which means no opinion rather than false.
@@ -152,6 +160,10 @@ impl PtyTransport for PtyHandle {
         self.transport.last_output_at()
     }
 
+    fn last_output_epoch_ms(&self) -> Option<i64> {
+        self.transport.last_output_epoch_ms()
+    }
+
     fn foreground_is_child(&self) -> Option<bool> {
         self.transport.foreground_is_child()
     }
@@ -172,6 +184,10 @@ impl PtyTransport for PtyLane {
 
     fn last_output_at(&self) -> Option<std::time::Instant> {
         PtyLane::last_output_at(self)
+    }
+
+    fn last_output_epoch_ms(&self) -> Option<i64> {
+        PtyLane::last_output_epoch_ms(self)
     }
 
     fn terminal(&self) -> &Terminal {

@@ -194,7 +194,7 @@ fn cli_targets_use_verified_aliases_and_never_substitute_for_zo() {
     assert!(command.contains("--agent codex"));
     assert!(skill::skill_install_command(&["review"], &["zo"]).is_none());
     assert_eq!(skill::cli_agent("kimi"), Some("kimi-code-cli"));
-    for agent in zerocode_core::agent::AGENT_SPECS {
+    for agent in &zerocode_core::agent::AGENT_SPECS {
         assert!(
             skill::install_target(agent.id).is_some(),
             "{} needs an explicit capability record",

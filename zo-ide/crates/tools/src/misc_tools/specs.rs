@@ -36,6 +36,45 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "skill_search",
+            description: "Rank every installed skill against the work at hand and return the best ones' full SKILL.md. Use it when the system prompt lists no skills, or when more are installed than it lists.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "A sentence or two describing the work at hand, not keywords."
+                    },
+                    "maxSkills": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": zerocode_core::jev::SKILL_TOP_CAP,
+                        "description": "How many to return whole; defaults to 3."
+                    }
+                },
+                "required": ["task"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "skill_load",
+            description: "Load installed skills by name and return each one's full SKILL.md. Case and separators are ignored; a name nothing answers to comes back with the closest ones.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "names": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 1
+                    }
+                },
+                "required": ["names"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "SkillDistill",
             description: "Write a reusable skill draft as `.zo/skills/<slug>/SKILL.md` with `state: proposed`. Use only after a task reveals repeatable procedure knowledge worth saving; proposed drafts are not auto-activated until approved. To evolve an existing draft (or augment one a duplicate check pointed you to), pass `update: true` to bump its version and rewrite the body.",
             input_schema: json!({

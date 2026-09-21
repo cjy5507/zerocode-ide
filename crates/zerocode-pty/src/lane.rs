@@ -256,6 +256,13 @@ pub struct PtyLane {
     /// still at work from one that has stopped, for a caller whose wait on
     /// it ran out.
     last_output_at: Option<Instant>,
+    /// The same moment on the wall clock, in epoch milliseconds — for a
+    /// reader that keys a silence by its start and must read the same
+    /// number on every beat. Deriving it later as `now − elapsed` does not
+    /// give that: measured 2026-09-21, eight beats a second apart read eight
+    /// starts spread over 21 ms, and the ledger told the same silence eight
+    /// times. Written in the same breath as `last_output_at`, read as is.
+    last_output_epoch_ms: Option<i64>,
     /// The writes the child has not answered yet ([`crate::answer`]).
     unanswered: Unanswered,
     /// Every test-owned write, including automatic terminal replies.
@@ -426,6 +433,7 @@ impl PtyLane {
             terminal: Terminal::new(rows as usize, cols as usize),
             ended: false,
             last_output_at: None,
+            last_output_epoch_ms: None,
             unanswered: Unanswered::default(),
             #[cfg(test)]
             input_tape: Vec::new(),
@@ -464,6 +472,7 @@ impl PtyLane {
                     let shown = self.echoes.sift(&chunk);
                     self.terminal.feed(&shown);
                     self.last_output_at = Some(Instant::now());
+                    self.last_output_epoch_ms = Some(epoch_ms_now());
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
@@ -639,6 +648,14 @@ impl PtyLane {
     #[must_use]
     pub const fn last_output_at(&self) -> Option<Instant> {
         self.last_output_at
+    }
+
+    /// The same moment as [`Self::last_output_at`] on the wall clock, in
+    /// epoch milliseconds — the number a silence is keyed by, stable across
+    /// reads because it was taken once, when the bytes arrived.
+    #[must_use]
+    pub const fn last_output_epoch_ms(&self) -> Option<i64> {
+        self.last_output_epoch_ms
     }
 
     /// The child's process id while it runs.
@@ -1839,4 +1856,13 @@ mod ending_tests {
              have — or refuse ones it does: {said:?}"
         );
     }
+}
+
+/// Now, in epoch milliseconds — one read, taken where the fact happens.
+fn epoch_ms_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_millis()).unwrap_or(i64::MAX)
+        })
 }

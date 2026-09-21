@@ -15,6 +15,25 @@ pub(crate) struct SkillInput {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct SkillSearchInput {
+    /// A sentence or two describing the work at hand — what the ranking is
+    /// against. Not a keyword list: the judgment reads it the way a person
+    /// would.
+    pub task: String,
+    /// How many skills to hand back whole, capped at
+    /// `zerocode_core::jev::SKILL_TOP_CAP`.
+    #[serde(default, rename = "maxSkills", alias = "max_skills")]
+    pub max_skills: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct SkillLoadInput {
+    /// The skills to load, by name. Case and separators are ignored, and a
+    /// name nothing answers to comes back with the closest names.
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct SkillDistillInput {
     pub slug: String,
     pub description: String,
@@ -54,6 +73,60 @@ pub(crate) struct SkillOutput {
     pub(crate) prompt: String,
 }
 
+/// One skill a search or a load handed back whole.
+#[derive(Debug, Serialize)]
+pub(crate) struct LoadedSkill {
+    pub(crate) skill: String,
+    pub(crate) path: String,
+    pub(crate) description: Option<String>,
+    /// Which trusted source it was loaded from.
+    pub(crate) origin: String,
+    /// Where the judgment put it on 0 to 1, and how sure it was. Absent on a
+    /// `skill_load`, which asks nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reading: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) confidence: Option<f64>,
+    pub(crate) prompt: String,
+}
+
+/// A name nothing answered to, and the names it was probably meant to be.
+#[derive(Debug, Serialize)]
+pub(crate) struct UnknownSkill {
+    pub(crate) asked: String,
+    pub(crate) suggestions: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SkillSearchOutput {
+    /// Which reader ranked these: `applied` when the judgment did, `shadow`
+    /// or `auto` when it was asked and recorded but the turn reads the word
+    /// match's order anyway, `fallback` when the word match is all there was.
+    #[serde(rename = "rankedBy")]
+    pub(crate) ranked_by: String,
+    /// What became of the judgment, in the ledger's own word.
+    pub(crate) outcome: String,
+    /// How many skills are installed — every one of them was ranked.
+    pub(crate) installed: usize,
+    /// The best ones, whole, best first.
+    pub(crate) skills: Vec<LoadedSkill>,
+    /// The names of every other skill that was ranked above the floor, in
+    /// order, so `skill_load` can reach one without a second search.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) others: Vec<String>,
+    /// Said when the ranking is empty, so an empty answer is never read as a
+    /// failure that said nothing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) note: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub(crate) struct SkillLoadOutput {
+    pub(crate) skills: Vec<LoadedSkill>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) unknown: Vec<UnknownSkill>,
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct SkillDistillOutput {
     pub(crate) slug: String,
@@ -74,7 +147,20 @@ pub(crate) struct SkillReviewOutput {
 // --- Execution ---
 
 pub(crate) fn execute_skill(input: SkillInput) -> Result<SkillOutput, ToolError> {
-    let resolved = match resolve_skill_path(&input.skill) {
+    // A `current_dir` failure still resolves global Zo and provider skills,
+    // which do not depend on the working directory.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    execute_skill_at(input, &cwd)
+}
+
+/// [`execute_skill`], against a named working directory.
+///
+/// The catalog is discovered from a directory, and the two callers that hand
+/// one in — `skill_search` and `skill_load` — have already discovered theirs
+/// from the tool context's. Resolving against the process's instead would
+/// rank a skill found in one project and load one found in another.
+pub(crate) fn execute_skill_at(input: SkillInput, cwd: &Path) -> Result<SkillOutput, ToolError> {
+    let resolved = match resolve_skill_path(&input.skill, cwd) {
         Ok(resolved) => resolved,
         Err(ToolError::NotFound(_)) => {
             // Headless zo has no window installer. Its three publication skills
@@ -109,6 +195,136 @@ pub(crate) fn execute_skill(input: SkillInput) -> Result<SkillOutput, ToolError>
         description,
         origin: resolved.origin,
         prompt,
+    })
+}
+
+/// Rank every installed skill against `task` and hand back the best of them
+/// whole.
+///
+/// The ranking is the seat's (`crate::misc_tools::skill_search`) and the
+/// loading is [`execute_skill`]'s, so a skill reached this way is refused,
+/// read and labelled exactly as one reached by name.
+///
+/// # Errors
+/// A cap the caller asked for that is not one this search offers.
+pub(crate) fn execute_skill_search(
+    input: &SkillSearchInput,
+    cwd: &Path,
+) -> Result<SkillSearchOutput, ToolError> {
+    let task = non_empty("task", &input.task)?;
+    let wanted = match input.max_skills {
+        None => zerocode_core::jev::SKILL_TOP_DEFAULT,
+        Some(asked) if (1..=zerocode_core::jev::SKILL_TOP_CAP).contains(&asked) => asked,
+        Some(asked) => {
+            return Err(ToolError::InvalidInput(format!(
+                "maxSkills must be between 1 and {}, not {asked}",
+                zerocode_core::jev::SKILL_TOP_CAP
+            )))
+        }
+    };
+    let installed = runtime::discover_skills(cwd);
+    let searched = crate::misc_tools::skill_search(cwd, task, &installed);
+    // What the turn does next is this seat's only evidence, so the names the
+    // JUDGMENT gave are remembered before any skill is loaded — not the ones
+    // the turn was handed, which under a recording mode are the word match's
+    // and say nothing about the seat.
+    if let Some(judged) = searched.judged_names.as_deref() {
+        crate::misc_tools::note_search_answer(cwd, judged);
+    }
+
+    let mut skills = Vec::new();
+    let mut others = Vec::new();
+    for reading in &searched.ranked {
+        if skills.len() >= wanted {
+            others.push(reading.name.clone());
+            continue;
+        }
+        match load_named_skill(&reading.name, cwd) {
+            // A skill that is proposed, unreadable or gone is not an error
+            // here: the ranking named it, the catalog no longer stands behind
+            // it, and the other four answers are still worth having.
+            Ok(mut loaded) => {
+                loaded.reading = Some(reading.normalised);
+                loaded.confidence = searched.judged().then_some(reading.confidence);
+                skills.push(loaded);
+            }
+            Err(_) => others.push(reading.name.clone()),
+        }
+    }
+    let note = skills.is_empty().then(|| {
+        format!(
+            "No installed skill covers this task. {} were ranked; call `skill_load` by name if you \
+             know which you want.",
+            installed.len()
+        )
+    });
+    Ok(SkillSearchOutput {
+        ranked_by: searched.route_use,
+        outcome: searched.outcome,
+        installed: installed.len(),
+        skills,
+        others,
+        note,
+    })
+}
+
+/// Load skills by name, ignoring case and separators, and answer a name
+/// nothing knows with the names it was probably meant to be.
+///
+/// No judgment is asked: a caller that knows the name has already decided.
+///
+/// # Errors
+/// An empty list, which is a call that asked for nothing.
+pub(crate) fn execute_skill_load(
+    input: &SkillLoadInput,
+    cwd: &Path,
+) -> Result<SkillLoadOutput, ToolError> {
+    if input.names.is_empty() {
+        return Err(ToolError::InvalidInput("names must not be empty".into()));
+    }
+    let installed = runtime::discover_skills(cwd);
+    let names: Vec<String> = installed.iter().map(|skill| skill.name.clone()).collect();
+    let mut skills = Vec::new();
+    let mut unknown = Vec::new();
+    for matched in runtime::skill_rank::resolve_skill_names(&input.names, &names) {
+        match matched {
+            runtime::skill_rank::NameMatch::Found(name) => match load_named_skill(&name, cwd) {
+                Ok(loaded) => skills.push(loaded),
+                // A name the catalog knows and the gate refuses is reported
+                // as unknown with its own reason rather than failing the
+                // whole call: the other names asked for still load.
+                Err(error) => unknown.push(UnknownSkill {
+                    asked: name,
+                    suggestions: vec![error.to_string()],
+                }),
+            },
+            runtime::skill_rank::NameMatch::Unknown { asked, suggestions } => {
+                unknown.push(UnknownSkill { asked, suggestions });
+            }
+        }
+    }
+    Ok(SkillLoadOutput { skills, unknown })
+}
+
+/// One skill, read and refused exactly as the `Skill` tool reads and refuses
+/// it, with this seat's `agreed` mark written down.
+fn load_named_skill(name: &str, cwd: &Path) -> Result<LoadedSkill, ToolError> {
+    let output = execute_skill_at(
+        SkillInput {
+            skill: name.to_string(),
+            args: None,
+        },
+        cwd,
+    )?;
+    crate::misc_tools::note_loaded_skill(cwd, name);
+    Ok(LoadedSkill {
+        skill: output.skill,
+        path: output.path,
+        description: output.description,
+        origin: output.origin,
+        reading: None,
+        confidence: None,
+        prompt: output.prompt,
     })
 }
 
@@ -262,7 +478,7 @@ struct ResolvedSkill {
     origin: String,
 }
 
-fn resolve_skill_path(skill: &str) -> Result<ResolvedSkill, ToolError> {
+fn resolve_skill_path(skill: &str, cwd: &Path) -> Result<ResolvedSkill, ToolError> {
     let requested = skill.trim().trim_start_matches('/').trim_start_matches('$');
     if requested.is_empty() {
         return Err(ToolError::InvalidInput("skill must not be empty".into()));
@@ -271,10 +487,7 @@ fn resolve_skill_path(skill: &str) -> Result<ResolvedSkill, ToolError> {
     // The catalog is the single source of trusted roots shared with the prompt
     // index and the per-turn router: project Zo → global Zo → enabled Claude →
     // enabled Codex, with provider roots canonicalized and containment-checked.
-    // A `current_dir` failure still resolves global Zo and provider skills,
-    // which do not depend on the working directory.
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let catalog = runtime::SkillCatalog::discover(&cwd);
+    let catalog = runtime::SkillCatalog::discover(cwd);
     match catalog.resolve(requested) {
         Some(candidate) => Ok(ResolvedSkill {
             path: candidate.skill_md.clone(),
@@ -612,4 +825,166 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    // ---- the two tools that replace the prompt's index (t-5629) ------------
+
+    use super::{
+        execute_skill_load, execute_skill_search, SkillLoadInput, SkillSearchInput, ToolError,
+    };
+
+    /// A project whose `.zo/skills` holds `skills`, each with a body long
+    /// enough that "the whole SKILL.md came back" means something.
+    ///
+    /// The machine's own global skills are in the catalog too and cannot be
+    /// taken out of it — `zo_global_config_roots` reads `ZO_CONFIG_HOME`,
+    /// `ZO_HOME` AND `~/.zo`, so pointing one of them somewhere empty hides
+    /// nothing. So these tests assert about the skills they planted, whose
+    /// vocabulary no real skill shares, and never about how many there are.
+    fn project_with_skills(skills: &[(&str, &str)]) -> (std::path::PathBuf, std::path::PathBuf) {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("zo-skill-search-{unique}"));
+        let cwd = root.join("project");
+        for (name, description) in skills {
+            let dir = cwd.join(".zo").join("skills").join(name);
+            std::fs::create_dir_all(&dir).expect("create skill root");
+            std::fs::write(
+                dir.join("SKILL.md"),
+                format!(
+                    "---\nname: {name}\ndescription: {description}\n---\n\n\
+                     The whole body of {name}, which only a load ever reads.\n"
+                ),
+            )
+            .expect("write skill");
+        }
+        (root.clone(), cwd)
+    }
+
+    /// (c) The search hands back the top skills WHOLE and names the rest —
+    /// and it says which reader ranked them, so an answer from the word match
+    /// is never read as a judgment.
+    #[test]
+    fn a_search_returns_the_best_whole_and_names_the_rest() {
+        let (root, cwd) = project_with_skills(&[
+            ("zqflow", "Runs the zqflow pipeline over zqrecords"),
+            ("zqreport", "Writes a zqflow report from zqrecords"),
+            ("unrelated", "Bakes bread"),
+        ]);
+        let output = execute_skill_search(
+            &SkillSearchInput {
+                // Words no real skill shares, so the machine's own catalog
+                // cannot outrank what this test planted.
+                task: "zqflow pipeline zqrecords".to_string(),
+                max_skills: Some(1),
+            },
+            &cwd,
+        )
+        .expect("a search");
+        assert!(
+            output.installed >= 3,
+            "the three planted skills are in the catalog: {}",
+            output.installed
+        );
+        assert_eq!(output.skills.len(), 1, "one whole skill was asked for");
+        assert_eq!(
+            output.skills[0].skill, "zqflow",
+            "the skill sharing every word of the task comes first"
+        );
+        assert!(
+            output.skills[0].prompt.contains("The whole body of zqflow"),
+            "the SKILL.md comes back whole: {}",
+            output.skills[0].prompt
+        );
+        assert_eq!(
+            output.others.first().map(String::as_str),
+            Some("zqreport"),
+            "the next best is named so a load can reach it without a second search: {:?}",
+            output.others
+        );
+        assert!(
+            !output.others.contains(&"unrelated".to_string())
+                && output.skills.iter().all(|s| s.skill != "unrelated"),
+            "a skill sharing no word with the task is not ranked: {:?}",
+            output.others
+        );
+        // (e) With no key the word match answers, and the result says so.
+        assert_eq!(output.ranked_by, zerocode_core::jev::ROUTE_USE_FALLBACK);
+        assert!(output.skills[0].confidence.is_none(), "a word count is not a confidence");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A cap the search does not offer is refused rather than clamped: a
+    /// caller that asked for ten skills wants to know it got three.
+    #[test]
+    fn a_search_refuses_a_cap_it_does_not_offer() {
+        let (root, cwd) = project_with_skills(&[("zqflow", "zqflow things")]);
+        for asked in [0, zerocode_core::jev::SKILL_TOP_CAP + 1] {
+            let refused = execute_skill_search(
+                &SkillSearchInput {
+                    task: "zqflow".to_string(),
+                    max_skills: Some(asked),
+                },
+                &cwd,
+            );
+            assert!(matches!(refused, Err(ToolError::InvalidInput(_))), "{asked}");
+        }
+        assert!(
+            execute_skill_search(
+                &SkillSearchInput { task: "   ".to_string(), max_skills: None },
+                &cwd,
+            )
+            .is_err(),
+            "a search with no task is a call that asked nothing"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// (c) `skill_load` matches a name whatever its case and separators, and
+    /// answers a typo with the names it was probably meant to be.
+    #[test]
+    fn a_load_forgives_case_separators_and_a_typo() {
+        let (root, cwd) = project_with_skills(&[
+            ("zqflow", "zqflow things"),
+            ("zqreport", "zqreport things"),
+        ]);
+        let output = execute_skill_load(
+            &SkillLoadInput {
+                names: vec![
+                    "ZQ Flow".to_string(),
+                    "zq_report".to_string(),
+                    "zqfloww".to_string(),
+                    // A name nothing on any machine is a substring of, or a
+                    // typo away from.
+                    "qqqqqqqqqqqqqqqq".to_string(),
+                ],
+            },
+            &cwd,
+        )
+        .expect("a load");
+        let loaded: Vec<&str> = output.skills.iter().map(|s| s.skill.as_str()).collect();
+        assert_eq!(loaded, vec!["zqflow", "zqreport"]);
+        assert!(output.skills[0].prompt.contains("The whole body of zqflow"));
+        assert!(output.skills[0].reading.is_none(), "a load asks nothing");
+
+        let unknown: Vec<&str> = output.unknown.iter().map(|u| u.asked.as_str()).collect();
+        assert_eq!(unknown, vec!["zqfloww", "qqqqqqqqqqqqqqqq"]);
+        assert_eq!(
+            output.unknown[0].suggestions.first().map(String::as_str),
+            Some("zqflow"),
+            "the typo names the skill it was meant to be: {:?}",
+            output.unknown[0].suggestions
+        );
+        assert!(
+            output.unknown[1].suggestions.is_empty(),
+            "nothing close enough to guess at: {:?}",
+            output.unknown[1].suggestions
+        );
+
+        assert!(
+            execute_skill_load(&SkillLoadInput { names: Vec::new() }, &cwd).is_err(),
+            "a load that asked for nothing"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 }

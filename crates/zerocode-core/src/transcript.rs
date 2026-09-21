@@ -1087,7 +1087,13 @@ fn tool_result_turn(part: &serde_json::Value, at_ms: Option<i64>) -> TranscriptT
 pub fn model_in(chunk: &str) -> Option<String> {
     chunk.lines().rev().find_map(|line| {
         let row: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
-        let model = row.get("message")?.get("model")?.as_str()?.trim();
+        let model = row
+            .get("message")
+            .and_then(|message| message.get("model"))
+            // Codex writes it once per turn, on the turn's own context record.
+            .or_else(|| turn_context(&row)?.get("model"))?
+            .as_str()?
+            .trim();
         (!model.is_empty() && !model.starts_with('<')).then(|| model.to_string())
     })
 }
@@ -1144,6 +1150,38 @@ pub fn usage_in(chunk: &str) -> Option<TranscriptUsage> {
                 + count("cache_read_input_tokens");
             (tokens > 0).then_some(TranscriptUsage { tokens, window: 0 })
         })
+}
+
+/// A Codex rollout's `turn_context` payload, for a row that is one.
+fn turn_context(row: &serde_json::Value) -> Option<&serde_json::Value> {
+    (row.get("type").and_then(serde_json::Value::as_str) == Some("turn_context"))
+        .then(|| row.get("payload"))
+        .flatten()
+}
+
+/// The effort a transcript says its newest turn ran at — its newest word, or
+/// `None` where the vendor has not said (t-5637).
+///
+/// Both vendors write it, in their own places: Claude Code stamps `effort`
+/// on every assistant record (and the turn's own `perTurnEffort` beside it,
+/// which is the one to read — measured 2026-09-21 on 2.1.278, an `/effort
+/// low` typed between two turns put `"effort":"low","perTurnEffort":"low"`
+/// on the next record); Codex writes `effort` in each turn's `turn_context`
+/// (`gpt-6-astra` / `xhigh` in this machine's rollouts). This is the witness
+/// the step-effort seat reads a move's landing off: the CLI's own record of
+/// what the request went out at, never the word the window typed.
+#[must_use]
+pub fn effort_in(chunk: &str) -> Option<String> {
+    chunk.lines().rev().find_map(|line| {
+        let row: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        let effort = if row.get("type").and_then(serde_json::Value::as_str) == Some("assistant") {
+            row.get("perTurnEffort").or_else(|| row.get("effort"))?
+        } else {
+            turn_context(&row)?.get("effort")?
+        };
+        let effort = effort.as_str()?.trim();
+        (!effort.is_empty()).then(|| effort.to_string())
+    })
 }
 
 /// The turns in a stretch of transcript, in the order they were written.
@@ -1735,6 +1773,54 @@ mod tests {
     /// conversation as a bubble with the person's own voice, because the
     /// envelope stripper was only ever wired to the hook's `prompt` field
     /// (`prompt_in_parsed`) and never to the transcript the page reads.
+    /// Each vendor's own word for the effort a turn ran at, newest first —
+    /// Claude Code's per-turn stamp and Codex's turn context — and nothing
+    /// for a record that carries none.
+    #[test]
+    fn effort_in_reads_each_vendors_own_stamp() {
+        let claude = |effort: &str, per_turn: Option<&str>| {
+            let mut row = serde_json::json!({
+                "type": "assistant", "effort": effort,
+                "message": {"role": "assistant", "model": "claude-fable-5-1", "content": []}
+            });
+            if let Some(per_turn) = per_turn {
+                row["perTurnEffort"] = serde_json::json!(per_turn);
+            }
+            row.to_string()
+        };
+        let codex = |model: &str, effort: &str| {
+            serde_json::json!({
+                "type": "turn_context",
+                "payload": {"turn_id": "t", "model": model, "effort": effort, "summary": "none"}
+            })
+            .to_string()
+        };
+        assert_eq!(
+            effort_in(&[claude("medium", Some("medium")), claude("low", Some("low"))].join("\n")),
+            Some("low".to_string())
+        );
+        // The turn's own word outranks the session's when the two differ.
+        assert_eq!(
+            effort_in(&claude("xhigh", Some("ultracode"))),
+            Some("ultracode".to_string())
+        );
+        assert_eq!(effort_in(&claude("high", None)), Some("high".to_string()));
+        assert_eq!(
+            effort_in(&[codex("gpt-6-astra", "xhigh"), codex("gpt-6-astra", "low")].join("\n")),
+            Some("low".to_string())
+        );
+        assert_eq!(
+            model_in(&codex("gpt-6-astra", "xhigh")),
+            Some("gpt-6-astra".to_string())
+        );
+        assert_eq!(
+            effort_in(r#"{"type":"user","message":{"role":"user","content":"hi"}}"#),
+            None
+        );
+        assert_eq!(effort_in(""), None);
+        assert_eq!(effort_in("not json"), None);
+    }
+
     #[test]
     fn a_slash_commands_replay_is_not_somebody_speaking() {
         let said = |text: &str| {
