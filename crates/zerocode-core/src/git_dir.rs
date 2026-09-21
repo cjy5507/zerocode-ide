@@ -33,6 +33,9 @@ pub struct Identity {
     pub worktree_id: String,
 }
 
+/// What a checkout names its git directory, or the file that points at one.
+const GIT_DIR_NAME: &str = ".git";
+
 /// The git directory of the checkout rooted at `root`.
 ///
 /// [`None`] means this is not the root of a checkout — an ordinary answer, not
@@ -41,7 +44,7 @@ pub struct Identity {
 /// environment is a spelling only git itself honours.
 #[must_use]
 pub fn of(root: &Path) -> Option<PathBuf> {
-    let dot = root.join(".git");
+    let dot = root.join(GIT_DIR_NAME);
     if dot.is_dir() {
         return Some(dot);
     }
@@ -80,6 +83,31 @@ pub fn common_of(root: &Path) -> Option<PathBuf> {
     }
     // Relative to the per-worktree directory, and usually exactly `../..`.
     Some(own.join(target))
+}
+
+/// The checkout that owns the repository `path` belongs to: the nearest
+/// checkout at or above `path`, and then — when that one is a linked worktree
+/// — the checkout it was cut from.
+///
+/// [`of`] answers only at a checkout's own root and only about that checkout,
+/// which is the right end of the pointer for per-worktree state. This is the
+/// other question: WHICH REPOSITORY are these words from. A worktree's shared
+/// git directory is the main checkout's own ([`common_of`]), so its parent is
+/// that checkout — and for a main checkout the walk simply arrives back at
+/// itself.
+///
+/// [`None`] for a folder no checkout holds, and for a bare repository, which
+/// has no checkout to name. The walk reads files rather than running `git
+/// worktree list`, for the reason this module exists: one process per answer
+/// is a bad trade for a string read from two small files.
+#[must_use]
+pub fn owning_checkout_of(path: &Path) -> Option<PathBuf> {
+    let shared = normalized(path.ancestors().find_map(common_of)?);
+    shared
+        .file_name()
+        .filter(|name| *name == OsStr::new(GIT_DIR_NAME))
+        .and(shared.parent())
+        .map(Path::to_path_buf)
 }
 
 /// Stable local identity of a checkout without spawning Git.
@@ -208,6 +236,63 @@ mod tests {
 
         // 체크아웃이 아니면 여기도 답이 없다.
         assert_eq!(common_of(dir.path()), None);
+    }
+
+    #[test]
+    fn a_worktree_is_owned_by_the_checkout_it_was_cut_from_and_a_stranger_is_not() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let main = dir.path().join("main");
+        let shared = main.join(".git");
+        let own = shared.join("worktrees").join("linked");
+        std::fs::create_dir_all(&own).expect("git dirs");
+        std::fs::create_dir_all(main.join("crates").join("tools")).expect("a folder inside");
+
+        // 본체는 자기 자신이 주인이고, 그 안의 폴더도 같은 답을 낸다 — 세션이
+        // 체크아웃 뿌리가 아니라 그 아래에서 열려도 같은 저장소다.
+        assert_eq!(
+            owning_checkout_of(&main).as_deref(),
+            Some(normalized(main.clone()).as_path())
+        );
+        assert_eq!(
+            owning_checkout_of(&main.join("crates").join("tools")).as_deref(),
+            Some(normalized(main.clone()).as_path())
+        );
+
+        // 연결된 워크트리는 자기를 잘라 낸 체크아웃이 주인이다.
+        let linked = dir.path().join("linked");
+        std::fs::create_dir_all(linked.join("ui")).expect("linked checkout");
+        std::fs::write(linked.join(".git"), format!("gitdir: {}\n", own.display()))
+            .expect("pointer");
+        std::fs::write(own.join("commondir"), "../..\n").expect("common pointer");
+        for asked in [linked.clone(), linked.join("ui")] {
+            assert_eq!(
+                owning_checkout_of(&asked).as_deref(),
+                Some(normalized(main.clone()).as_path()),
+                "{}",
+                asked.display()
+            );
+        }
+
+        // 남의 저장소의 워크트리는 남의 체크아웃이 주인이다.
+        let stranger = dir.path().join("stranger");
+        let stranger_own = stranger.join(".git").join("worktrees").join("side");
+        std::fs::create_dir_all(&stranger_own).expect("stranger git dirs");
+        let side = dir.path().join("side");
+        std::fs::create_dir_all(&side).expect("side checkout");
+        std::fs::write(
+            side.join(".git"),
+            format!("gitdir: {}\n", stranger_own.display()),
+        )
+        .expect("pointer");
+        std::fs::write(stranger_own.join("commondir"), "../..\n").expect("common pointer");
+        assert_eq!(
+            owning_checkout_of(&side).as_deref(),
+            Some(normalized(stranger).as_path())
+        );
+
+        // 체크아웃이 아무 데도 없으면 답이 없다.
+        let nowhere = tempfile::tempdir().expect("tempdir");
+        assert_eq!(owning_checkout_of(nowhere.path()), None);
     }
 
     #[test]
