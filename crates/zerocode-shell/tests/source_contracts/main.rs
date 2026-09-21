@@ -35647,6 +35647,61 @@ fn the_emulator_pane_opens_on_a_resumed_device() {
         );
     }
 
+    // D2 (t-5762) — removing the flag was not enough. A `default_boot` the SDK
+    // launcher cannot load makes the launcher add `-no-snapshot` to its own
+    // re-exec, which turns off the SAVE as well, so the AVD is cold forever.
+    // The launch clears such a snapshot before the launcher looks, and the
+    // boot that follows reads the launcher's own argv as the witness for the
+    // case it missed.
+    for step in [
+        "clear_a_stale_snapshot(&local_data_root, &chosen.avd);",
+        "note_a_refused_snapshot(&local_data_root, &chosen.avd, managed.record().pid);",
+    ] {
+        assert!(
+            launch.contains(step),
+            "the launch lost `{step}`, and a broken snapshot is cold forever \
+             again:\n{launch}"
+        );
+    }
+    assert_eq!(
+        android.matches("\"-no-snapshot\"").count(),
+        1,
+        "the flag must be spelled once, as the constant the witness reads — a \
+         second spelling is a launch passing it again"
+    );
+    assert!(
+        support::block_after(android, "fn note_a_refused_snapshot(").contains("NO_SNAPSHOT_FLAG"),
+        "the witness stopped reading the flag off the process it adopted"
+    );
+    assert!(
+        android.contains("const NO_SNAPSHOT_FLAG: &str = \"-no-snapshot\";"),
+        "that one spelling is no longer the named constant"
+    );
+
+    // D2 (t-5762) — the rule that decides "resumable" is read off a measured
+    // file list, and every number and name in it is a constant rather than a
+    // literal written into the check.
+    let snapshots = include_str!("../../src/emulator/android/snapshots.rs");
+    for named in [
+        "const SNAPSHOT_DESCRIPTOR",
+        "const DESCRIPTOR_MIN_BYTES",
+        "const RAM_IMAGES",
+        "const RAM_MIN_BYTES",
+        "const STALE_PREFIX",
+        "const STALE_KEEP",
+    ] {
+        assert!(
+            snapshots.contains(named),
+            "`{named}` is gone — a size, a count or a name was written into \
+             the judgement instead"
+        );
+    }
+    let judgement = support::block_after(snapshots, "pub(super) fn inspect(");
+    assert!(
+        judgement.contains("DESCRIPTOR_MIN_BYTES") && judgement.contains("RAM_MIN_BYTES"),
+        "the judgement stopped reading its own table:\n{judgement}"
+    );
+
     // D2 — the exit asks the emulator to save before anything signals it, and
     // waits inside a named limit rather than a number written here.
     let saved_exit = support::block_after(android, "fn ask_for_a_saved_exit(");
