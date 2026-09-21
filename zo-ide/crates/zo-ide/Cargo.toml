@@ -27,7 +27,7 @@ pulldown-cmark = "0.13"
 # 5.3 의 문법·테마 번들(약 250개 문법, 32개 테마)이고 syntect 자체를
 # `re_exports` 로 다시 내주므로 **의존성 한 줄**로 둘 다 온다.
 two-face = { version = "=0.5.1", default-features = false, features = ["syntect-default-onig"] }
-crossterm = { version = "0.29", features = ["event-stream"] }
+crossterm = { version = "0.29", features = ["event-stream", "use-dev-tty"] }
 unicode-width = "0.2"
 serde.workspace = true
 serde_json.workspace = true
