@@ -1241,7 +1241,7 @@ mod tests {
         // reaches the conclusion.
         let replies = block_after(helper, r#".name(format!("ios-hid-replies-{udid}"))"#);
         assert!(
-            replies.contains("fallen.store(true, Ordering::Release)"),
+            helper.contains("let fallen = dead.clone();") && replies.contains("fallen"),
             "only a failed request learns that the helper died, so a corpse \
              reads as standing until a road pays a frame timeout, a miss \
              budget and a five-second rest to find out:\n{replies}"

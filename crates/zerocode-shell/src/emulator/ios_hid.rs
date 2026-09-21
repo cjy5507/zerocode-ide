@@ -502,8 +502,7 @@ impl InputClient {
                 // `abandoned` is the other ending: the client was put down
                 // and dropped the receiver. That helper is already being
                 // killed by `Drop`, and nothing is owed a line about it.
-                if !abandoned {
-                    fallen.store(true, Ordering::Release);
+                if !abandoned && !fallen.swap(true, Ordering::AcqRel) {
                     note(&fallen_udid, &format!("pid {pid} stopped answering"));
                 }
             })
@@ -702,15 +701,23 @@ impl InputClient {
 
 impl Drop for InputClient {
     fn drop(&mut self) {
+        // One death, one line, from whichever road got there first: this
+        // client putting its helper down is only news if nobody has already
+        // said the helper is gone. `fell_over` and the reply thread mark the
+        // same flag, so a helper killed for a failed request does not also
+        // read as one put down here, and neither does a corpse being swept.
+        let told = self.dead.swap(true, Ordering::AcqRel);
         let ended = stop_process(&mut held(&self.state).child);
-        note(
-            &self.udid,
-            &format!(
-                "pid {} put down with its client — {}",
-                self.pid,
-                ended_as(ended)
-            ),
-        );
+        if !told {
+            note(
+                &self.udid,
+                &format!(
+                    "pid {} put down with its client — {}",
+                    self.pid,
+                    ended_as(ended)
+                ),
+            );
+        }
         self.frames.close();
         if let Some(socket) = &self.socket {
             // The frame thread may be asleep in `accept`, waiting for the next
@@ -1636,6 +1643,10 @@ mod tests {
     #[test]
     fn the_bus_keeps_only_the_newest_picture_so_a_slow_pane_skips_to_now() {
         let bus = FrameBus::new();
+        // With somebody connected to send one, because that is the whole
+        // difference between the two empty answers below: "the screen has not
+        // moved" is only true while a pusher is there to have said so.
+        bus.pusher_arrived();
         for seed in 1..=3u32 {
             bus.put(HelperFrame {
                 bytes: vec![seed as u8],
@@ -1775,8 +1786,22 @@ done
         }
     }
 
+    /// Wait for the window to LEARN something, rather than for it to happen.
+    ///
+    /// A helper's death has two halves and they are seconds apart in the worst
+    /// case: the process exits, and some road here concludes that it has. The
+    /// second half is what every road above acts on, so the tests wait on it
+    /// by name instead of sleeping and hoping.
+    fn wait_until(what: impl Fn() -> bool, said: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !what() {
+            assert!(Instant::now() < deadline, "{said}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     #[test]
-    fn a_helper_that_died_unnoticed_is_replaced_once_and_told_its_stream_again() {
+    fn a_helper_that_died_on_its_own_is_noticed_replaced_once_and_told_its_stream_again() {
         stand_in();
         // Each life answers three times — the start's ping, then two more —
         // and leaves.
@@ -1786,8 +1811,17 @@ done
         let first = client_for(udid).expect("the first helper");
         ask_device(udid, &InputRequest::Ping).expect("its third answer");
         wait_for_exit(&first);
-        // Nobody has noticed: the entry still says its helper stands.
-        assert!(standing(udid) == HelperStanding::Standing && first.alive());
+        // Noticed without anyone asking, and that is the point of the road:
+        // the reply thread is already sitting on the helper's stdout, which
+        // closes when it dies. Until 2026-09-22 this entry read `Standing`
+        // until a REQUEST failed on the broken pipe, so a pane whose helper
+        // had gone paid a frame timeout, its whole miss budget and a
+        // five-second rest of the fast road before anything found out.
+        wait_until(
+            || standing(udid) == HelperStanding::Fallen,
+            "the helper's death was never noticed",
+        );
+        assert!(!first.alive());
         let answer = ask_device(udid, &InputRequest::Ping).expect("asked again of a fresh helper");
         assert_eq!(answer.data.as_deref(), Some("life-2"));
         let second = client_for(udid).expect("the replacement");
