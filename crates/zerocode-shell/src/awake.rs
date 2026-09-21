@@ -11,7 +11,12 @@
 //!     not hold the lid open forever (`AGENT_AWAKE_STATUS_STALE_AFTER_MS`).
 //!   - macOS: `/usr/bin/caffeinate` as a child, killed to release. Orca
 //!     runs `-i -s` beside Electron's display blocker; `-d` here is that
-//!     blocker's own flag, so one child carries both halves.
+//!     blocker's own flag, so one child carries both halves. `-w <pid>`
+//!     names the window, so the child ends when the window does by ANY
+//!     road — `Drop` is the fast release of an orderly exit, never the only
+//!     one. Measured 2026-09-20, before that flag: 83 `caffeinate -d -i -s`
+//!     hanging off launchd, the oldest eight days old, one left behind per
+//!     restart or crash, and a machine that had not slept for days.
 //!   - Linux: `systemd-inhibit --what=sleep:handle-lid-switch` — logind
 //!     ignores ordinary sleep inhibitors for the lid on many systems, so
 //!     the lid lock rides along (linux-lid-sleep-assertion.ts:68).
@@ -254,21 +259,37 @@ fn keeper_loop(shared: &Arc<(Mutex<Inner>, Condvar)>) {
     }
 }
 
+/// The hold itself, built but not started, so what gets spawned can be read
+/// without a process table. `watch` is the pid the child's own life is tied
+/// to — the window's, everywhere but the test that kills a stand-in.
+#[cfg(target_os = "macos")]
+fn assertion_command(watch: u32) -> std::process::Command {
+    // -d display, -i idle, -s system-on-AC: the union of Orca's Electron
+    // display blocker and its `caffeinate -i -s` child. -w <pid>: hold only
+    // as long as that process lives, which is what makes the child die on
+    // every road out of the window and not just the orderly one.
+    let mut command = crate::proc::quiet_command("/usr/bin/caffeinate");
+    command
+        .args(["-d", "-i", "-s", "-w"])
+        .arg(watch.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    command
+}
+
 /// The platform's own "stay up" process, or `None` where none exists or it
 /// could not start — the keeper retries on its own clock.
 #[cfg(target_os = "macos")]
 fn start_assertion() -> Option<std::process::Child> {
-    // -d display, -i idle, -s system-on-AC: the union of Orca's Electron
-    // display blocker and its `caffeinate -i -s` child.
-    crate::proc::quiet_command("/usr/bin/caffeinate")
-        .args(["-d", "-i", "-s"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()
+    assertion_command(std::process::id()).spawn().ok()
 }
 
+// The same question macOS answers with `-w` is open here: `systemd-inhibit`
+// holds the lock through an fd owned by the process it runs, so an orphaned
+// one keeps the lid inhibited with nobody left to kill it, and it has no
+// `-w`. Closing it would take a watcher this file does not have. t-5444's
+// measurement is macOS only, so this stays written down rather than guessed.
 #[cfg(target_os = "linux")]
 fn start_assertion() -> Option<std::process::Child> {
     crate::proc::quiet_command("systemd-inhibit")
@@ -302,6 +323,10 @@ fn release_assertion(child: &mut Option<std::process::Child>) {
 /// `ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED` while agents
 /// work, bare `ES_CONTINUOUS` to hand the machine back. Must run on the
 /// keeper thread and only there: the state binds to the calling thread.
+///
+/// macOS's orphan question does not arise here: there is no child to outlive
+/// anything, and a thread's execution state dies with the process that owns
+/// it whichever way that process goes.
 #[cfg(windows)]
 fn windows_execution_state(active: bool) {
     use windows_sys::Win32::System::Power::{
@@ -374,6 +399,77 @@ mod tests {
 
         service.set_mode(ComputerAwakeMode::On);
         assert!(service.status().1, "on did not hold the machine");
+    }
+
+    /// The hold names the window it belongs to. `caffeinate -w <pid>` ends
+    /// when that pid does, so every road out of the window — a clean exit,
+    /// `std::process::exit`, a crash, SIGKILL, Tauri's own exit — takes the
+    /// child with it. `Drop` is the fast release of an orderly exit, never
+    /// the only one: measured 2026-09-20, 83 children had outlived their
+    /// windows and hung off launchd, the oldest eight days old, and the
+    /// machine had not slept for days.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_hold_names_the_window_it_belongs_to() {
+        let command = assertion_command(std::process::id());
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+
+        let watch = args
+            .iter()
+            .position(|arg| arg == "-w")
+            .expect("the hold was spawned without -w, so it outlives the window");
+        assert_eq!(
+            args.get(watch + 1),
+            Some(&std::process::id().to_string()),
+            "-w did not name this process"
+        );
+        // The hold itself is unchanged: display, idle and system.
+        for flag in ["-d", "-i", "-s"] {
+            assert!(args.iter().any(|arg| arg == flag), "{flag} was dropped");
+        }
+    }
+
+    /// And it really does let go. A stand-in for the window is SIGKILLed —
+    /// the one road `Drop` cannot travel — and the child the keeper would
+    /// have spawned ends on its own, with nobody to kill it.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_hold_lets_go_when_the_window_it_watches_is_killed() {
+        let mut window = crate::proc::quiet_command("/bin/sleep")
+            .arg("60")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("a stand-in for the window");
+        let mut held = assertion_command(window.id()).spawn().expect("the hold");
+
+        window.kill().expect("SIGKILL the stand-in window");
+        let _ = window.wait();
+
+        // Measured 2026-09-21: 11 / 16 / 37 ms across three trials. Only a
+        // child that never lets go can spend this budget.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut released = false;
+        while !released && Instant::now() < deadline {
+            released = matches!(held.try_wait(), Ok(Some(_)));
+            if !released {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        if !released {
+            // Never leave behind the very orphan this test is about.
+            let _ = held.kill();
+        }
+        let _ = held.wait();
+
+        assert!(
+            released,
+            "the hold outlived the process it watches — a killed window leaves an orphan"
+        );
     }
 
     /// The wire spellings are Orca's own three words.
