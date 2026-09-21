@@ -94,6 +94,18 @@ fn write_doors() -> Vec<(&'static str, Option<&'static str>, &'static str)> {
             Some("orchestration.rs"),
             "impl Launcher for Catalog {",
         ),
+        // The between-turn effort door (t-5637): the beat's pass that types
+        // a picker's command and keys at a worker's composer.
+        (
+            "step_effort::sweep",
+            Some("orchestration/step_effort.rs"),
+            "pub(super) fn sweep(",
+        ),
+        (
+            "step_effort::advance",
+            Some("orchestration/step_effort.rs"),
+            "fn advance(",
+        ),
     ]
 }
 
@@ -106,11 +118,13 @@ fn no_write_door_branches_on_an_agents_name() {
     // Its tests live in `orchestration/tests.rs`, so the whole file ships;
     // an inline `#[cfg(test)]` early in it would truncate the split.
     let orchestration = strip_rust_comments(&shell_source("orchestration.rs"));
+    let step_effort = shipped_code(&shell_source("orchestration/step_effort.rs"));
     let branches = agent_name_branches();
     for (door, source, opens) in write_doors() {
         let text = match source {
             None => &backend,
             Some("orchestration.rs") => &orchestration,
+            Some("orchestration/step_effort.rs") => &step_effort,
             Some(other) => panic!("{door} names an unread source {other}"),
         };
         let block = block_after(text, opens);
@@ -285,4 +299,68 @@ fn the_moved_facts_have_one_home_and_their_old_names_are_readers() {
         gating.contains("IdShape::Uuid.accepts(said)"),
         "the store id shape is spelled a second time:\n{gating}"
     );
+}
+
+/// The between-turn move roads — `/effort`, `/model`, the picker's keys and
+/// its legend — are spelled on the catalog rows alone (t-5637). The beat's
+/// pass reads `caps.moves.effort` and the composer chip reads the presence
+/// row's `model_command`; neither carries a command of its own, so changing
+/// what a CLI takes between turns is one row edit.
+#[test]
+fn the_between_turn_move_roads_are_spelled_on_the_rows_alone() {
+    let rows = core_source("agent.rs");
+    let table = core_source("capabilities.rs");
+    let pass = shipped_code(&shell_source("orchestration/step_effort.rs"));
+    let orchestration = strip_rust_comments(&shell_source("orchestration.rs"));
+    let backend = shipped_code(shipped_backend());
+    for spelled in [
+        "\"/effort\"",
+        "\"/model\"",
+        "s for this session only",
+        "\\x1b[C",
+        "\\x1b[D",
+    ] {
+        assert!(
+            rows.contains(spelled) || table.contains(spelled),
+            "`{spelled}` is not on any row or in the table"
+        );
+        for (name, text) in [
+            ("orchestration/step_effort.rs", pass.as_str()),
+            ("orchestration.rs", orchestration.as_str()),
+            ("the joined backend", backend.as_str()),
+        ] {
+            assert!(
+                !text.contains(spelled),
+                "{name} spells the move road `{spelled}` itself instead of reading the row"
+            );
+        }
+    }
+    // The pass reads the door off the row, and moves only down a road the
+    // row says moves between turns.
+    for needed in [
+        "caps.moves.effort",
+        "look.road.moves_between_turns()",
+        "look.road.picker()",
+        "look.moves.rung_from(",
+    ] {
+        assert!(
+            pass.contains(needed),
+            "the pass stopped reading `{needed}` off the row"
+        );
+    }
+    // Every row answers all three columns: the table's type makes it so,
+    // and the measured rows are the ones the doors read.
+    for spec in &zerocode_core::AGENT_SPECS {
+        let moves = spec.capabilities().moves;
+        assert_eq!(moves, spec.harness.moves, "{}", spec.id);
+        if let Some(road) = moves.effort
+            && road.moves_between_turns()
+        {
+            assert!(
+                !moves.ladder.is_empty(),
+                "{} moves its effort between turns with no ladder to read a rung off",
+                spec.id
+            );
+        }
+    }
 }

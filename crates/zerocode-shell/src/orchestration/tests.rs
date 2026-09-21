@@ -2923,6 +2923,17 @@ impl StoppedWorker {
         policy: &str,
         usage: Vec<(&'static str, crate::usage::ProviderUsage)>,
     ) -> Self {
+        Self::stand_with(leader_term, "--agent claude", policy, usage)
+    }
+
+    /// The same window with the worker summoned by `summons` — the words
+    /// after `worker-start`, so a case can name the agent and its dial.
+    fn stand_with(
+        leader_term: u32,
+        summons: &str,
+        policy: &str,
+        usage: Vec<(&'static str, crate::usage::ProviderUsage)>,
+    ) -> Self {
         let began = clock();
         let (window, store) = PrivateWindow::boot_with_usage(usage);
         let beat = one_beat_at_a_time();
@@ -2955,13 +2966,11 @@ impl StoppedWorker {
             .as_str()
             .expect("a task")
             .to_string();
-        stood.worker = stood.json(
-            &format!("worker-start --agent claude --task {task}"),
-            began + 2,
-        )["workerId"]
-            .as_str()
-            .expect("a worker")
-            .to_string();
+        stood.worker =
+            stood.json(&format!("worker-start {summons} --task {task}"), began + 2)["workerId"]
+                .as_str()
+                .expect("a worker")
+                .to_string();
         if !policy.is_empty() {
             let _ = stood.verb(&format!("handover-policy {policy}"), began + 3);
         }
@@ -3397,14 +3406,70 @@ impl StoppedWorker {
 
     /// The stall ledger's rows under zo's config home `home`, oldest first.
     fn stall_rows(home: &tempfile::TempDir) -> Vec<serde_json::Value> {
+        Self::rows_of(home, &zerocode_core::jev::STALL)
+    }
+
+    /// One seat's ledger rows under zo's config home `home`, oldest first.
+    fn rows_of(
+        home: &tempfile::TempDir,
+        seat: &zerocode_core::jev::JevUse,
+    ) -> Vec<serde_json::Value> {
         let path = home
             .path()
             .join(zerocode_core::jev::count::REQUESTS_DIR)
-            .join(zerocode_core::jev::STALL.ledger);
+            .join(seat.ledger);
         std::fs::read_to_string(path)
             .unwrap_or_default()
             .lines()
             .map(|line| serde_json::from_str(line).expect("a json row"))
+            .collect()
+    }
+
+    /// [`Self::asks_jev`] for any seat: point the wire at `endpoint` with
+    /// `seat` at `mode` and `consented` as the one workspace root, in a home
+    /// of the case's own.
+    fn asks_jev_for(
+        &self,
+        seat: &zerocode_core::jev::JevUse,
+        endpoint: &crate::systemone::tests::Endpoint,
+        mode: zerocode_core::jev::JevMode,
+        consented: &str,
+    ) -> tempfile::TempDir {
+        use zerocode_core::jev::SMART_SETTINGS_KEY;
+        let home = tempfile::tempdir().expect("a zo home");
+        let settings = home.path().join("settings.json");
+        std::fs::write(
+            &settings,
+            serde_json::json!({
+                SMART_SETTINGS_KEY: {
+                    seat.setting: mode.key(),
+                    "jev": { "workspaces": [consented] },
+                }
+            })
+            .to_string(),
+        )
+        .expect("zo's settings");
+        *self.host.jev.lock().unwrap() = Some((endpoint.base(), settings));
+        home
+    }
+
+    /// Re-point the wire at another endpoint, keeping the home and settings.
+    fn answers_from(&self, endpoint: &crate::systemone::tests::Endpoint) {
+        let mut held = self.host.jev.lock().unwrap();
+        if let Some((base, _)) = held.as_mut() {
+            *base = endpoint.base();
+        }
+    }
+
+    /// Everything the host was asked to send at the worker's pane, in order.
+    fn sent_at_worker(&self) -> Vec<String> {
+        self.host
+            .sent
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .iter()
+            .filter(|(term, _)| *term == self.host.worker_term)
+            .map(|(_, text)| text.clone())
             .collect()
     }
 }
@@ -14931,4 +14996,392 @@ fn the_grace_tries_to_seat_a_sleeper_before_it_ends_it() {
         helper_body.contains(".overrides") && helper_body.contains(".clone()"),
         "the grace must hand the stored overrides back rather than clearing them"
     );
+}
+
+/* ---- the step-effort seat (t-5637) ------------------------------------ */
+
+/// The endpoint's answer to the step-effort question: `chosen` with the rest
+/// of the moves spread evenly.
+fn a_move_answer(chosen: &str) -> String {
+    use zerocode_core::step_effort::Move;
+    let rest = 0.2 / 2.0;
+    let probabilities: serde_json::Map<String, serde_json::Value> = Move::ALL
+        .iter()
+        .map(|mv| {
+            let share = if mv.word() == chosen { 0.8 } else { rest };
+            (mv.word().to_string(), serde_json::json!(share))
+        })
+        .collect();
+    serde_json::json!({
+        "model": "jev-1.13.0",
+        "answers": {
+            "move": {
+                "type": "choice",
+                "choice": chosen,
+                "probabilities": probabilities,
+                "confidence": 0.7,
+            }
+        },
+        "usage": { "input_tokens": 900, "output_tokens": 0 },
+    })
+    .to_string()
+}
+
+/// Claude Code's records for one turn at `effort`: a prompt, then `calls`
+/// as `(tool, command, failed)`, each with its result.
+fn a_claude_turn(prompt: &str, effort: &str, calls: &[(&str, &str, bool)]) -> Vec<String> {
+    let mut rows = vec![
+        serde_json::json!({"type": "user", "message": {"role": "user", "content": prompt}})
+            .to_string(),
+    ];
+    for (at, (name, command, failed)) in calls.iter().enumerate() {
+        rows.push(
+            serde_json::json!({"type": "assistant", "effort": effort, "perTurnEffort": effort,
+            "message": {"role": "assistant", "model": "claude-fable-5-1", "content": [
+                {"type": "tool_use", "id": format!("toolu_{prompt}_{at}"), "name": name,
+                 "input": {"command": command}}
+            ]}})
+            .to_string(),
+        );
+        rows.push(
+            serde_json::json!({"type": "user", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": format!("toolu_{prompt}_{at}"),
+                 "is_error": failed, "content": if *failed { "error" } else { "ok" }}
+            ]}})
+            .to_string(),
+        );
+    }
+    rows.push(
+        serde_json::json!({"type": "assistant", "effort": effort, "perTurnEffort": effort,
+            "message": {"role": "assistant", "model": "claude-fable-5-1",
+                        "content": [{"type": "text", "text": "done with that"}]}})
+        .to_string(),
+    );
+    rows
+}
+
+/// A turn that made the same call three times and failed each time.
+fn a_stuck_turn(prompt: &str, effort: &str) -> Vec<String> {
+    a_claude_turn(
+        prompt,
+        effort,
+        &[
+            ("Bash", "cargo test -p x", true),
+            ("Bash", "cargo test -p x", true),
+            ("Bash", "cargo test -p x", true),
+        ],
+    )
+}
+
+/// A turn that read one file and went through.
+fn a_progressed_turn(prompt: &str, effort: &str) -> Vec<String> {
+    a_claude_turn(prompt, effort, &[("Read", "src/lib.rs", false)])
+}
+
+/// The worker's turn is under way on `rows`, then ends at `at`.
+fn a_turn_runs_then_ends(stood: &StoppedWorker, rows: &[String], began_at: i64, at: i64) {
+    std::fs::write(&stood.host.transcript, format!("{}\n", rows.join("\n")))
+        .expect("the transcript");
+    *stood.host.busy.lock().unwrap() = true;
+    super::pane_turn_began(stood.host.worker_term);
+    tick(&stood.host, &[], began_at);
+    let owned: Vec<&str> = rows.iter().map(String::as_str).collect();
+    stood.stops_on(&owned, at);
+}
+
+/// A stuck turn under a person's `on`: the seat asks once, the answer is a
+/// row, the picker's command goes through the guarded door, its keys go
+/// only once the screen shows the legend — one rung up, for this session
+/// only — and the next turn's progress is the row's label. Then the rule
+/// brings the effort back, through the same door, and the label says so.
+#[test]
+fn a_stuck_turn_raises_the_effort_one_rung_for_this_session_and_progress_brings_it_back() {
+    use zerocode_core::capabilities::CLAUDE_EFFORT_PICKER;
+    use zerocode_core::jev::{JevMode, STEP_EFFORT};
+    let stood = StoppedWorker::stand_with(
+        97_700,
+        "--agent claude --model claude-fable-5-1 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let raise =
+        crate::systemone::tests::Endpoint::serving("HTTP/1.1 200 OK", a_move_answer("raise"), 0);
+    let home = stood.asks_jev_for(&STEP_EFFORT, &raise, JevMode::On, "/wt");
+    let began = stood.began + 10_000;
+
+    // The first turn: seen running, then ended stuck.
+    let stuck = a_stuck_turn("fix the build", "medium");
+    a_turn_runs_then_ends(&stood, &stuck, began, began + 1_000);
+    tick(&stood.host, &[], began + 2_000);
+    let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    let asked = &rows[0];
+    assert_eq!(asked["worker"], stood.worker.as_str());
+    assert_eq!(asked["agent"], "claude");
+    assert_eq!(asked["mode"], "on");
+    assert_eq!(asked["door"], "picker");
+    assert_eq!(asked["from"], "medium");
+    assert_eq!(asked["to"], "high");
+    assert_eq!(asked["floor"], "medium");
+    assert_eq!(asked["ruled"], "raise");
+    assert_eq!(asked["chosen"], "raise");
+    assert_eq!(asked["outcome"], "answered");
+    assert_eq!(asked["agreedWithRule"], true);
+    assert_eq!(asked["signals"]["repeats"], 3);
+    assert_eq!(asked["signals"]["toolFailures"], 3);
+    assert_eq!(asked["requests"], 1);
+    let heard = raise.asked();
+    assert_eq!(heard.len(), 1, "asked {} times", heard.len());
+    let sent = heard_body(&heard[0]);
+    assert_eq!(sent["state"]["repeated"], "Bash · cargo test -p x");
+    assert_eq!(sent["state"]["effort"], "medium");
+    assert!(
+        stood.sent_at_worker().is_empty(),
+        "nothing typed on the asking beat"
+    );
+
+    // The next beat types the picker's command through the door; the one
+    // after reads the receipt and waits for the legend; nothing else goes in
+    // while the screen does not show it.
+    tick(&stood.host, &[], began + 3_000);
+    assert_eq!(stood.sent_at_worker(), [CLAUDE_EFFORT_PICKER.open, "\r"]);
+    tick(&stood.host, &[], began + 4_000);
+    tick(&stood.host, &[], began + 4_500);
+    assert_eq!(stood.sent_at_worker().len(), 2, "no key before the legend");
+    *stood.host.screen.lock().unwrap() = format!(
+        "   Effort\n   low  ▲medium   high   xhigh   max   ultracode\n   ←/→ to adjust · Enter to confirm · {} · Esc to cancel\n",
+        CLAUDE_EFFORT_PICKER.legend
+    );
+    tick(&stood.host, &[], began + 5_000);
+    assert_eq!(
+        stood.sent_at_worker(),
+        [
+            CLAUDE_EFFORT_PICKER.open,
+            "\r",
+            CLAUDE_EFFORT_PICKER.raise,
+            CLAUDE_EFFORT_PICKER.session_only
+        ]
+    );
+    *stood.host.screen.lock().unwrap() = String::new();
+    assert_eq!(
+        StoppedWorker::rows_of(&home, &STEP_EFFORT).len(),
+        1,
+        "no label before the next turn"
+    );
+
+    // The next turn goes through at the raised effort: the label says so,
+    // and the rule now says bring it back.
+    let mut progressed = stuck.clone();
+    progressed.extend(a_progressed_turn("now the tests", "high"));
+    let lower =
+        crate::systemone::tests::Endpoint::serving("HTTP/1.1 200 OK", a_move_answer("lower"), 0);
+    stood.answers_from(&lower);
+    a_turn_runs_then_ends(&stood, &progressed, began + 6_000, began + 7_000);
+    tick(&stood.host, &[], began + 8_000);
+    let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let label = &rows[1];
+    assert_eq!(label["label"], asked["move"]);
+    assert_eq!(label["applied"], true);
+    assert_eq!(label["doorOutcome"], "keyed");
+    assert_eq!(label["followed"], "progressed");
+    assert_eq!(label["landed"], "high");
+    assert_eq!(label["agreed"], true);
+    tick(&stood.host, &[], began + 9_000);
+    let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
+    assert_eq!(rows.len(), 3, "{rows:?}");
+    let restoring = &rows[2];
+    assert_eq!(restoring["ruled"], "lower");
+    assert_eq!(restoring["chosen"], "lower");
+    assert_eq!(restoring["raised"], true);
+    assert_eq!(restoring["from"], "high");
+    assert_eq!(restoring["to"], "medium");
+    tick(&stood.host, &[], began + 10_000);
+    tick(&stood.host, &[], began + 11_000);
+    *stood.host.screen.lock().unwrap() = CLAUDE_EFFORT_PICKER.legend.to_string();
+    tick(&stood.host, &[], began + 12_000);
+    let sent = stood.sent_at_worker();
+    assert_eq!(
+        &sent[4..],
+        [
+            CLAUDE_EFFORT_PICKER.open,
+            "\r",
+            CLAUDE_EFFORT_PICKER.lower,
+            CLAUDE_EFFORT_PICKER.session_only
+        ]
+    );
+}
+
+/// Under `shadow` the seat asks and writes the same rows, and the composer
+/// is never touched — the label grades what the turn did at the effort it
+/// kept.
+#[test]
+fn a_recording_step_effort_seat_writes_its_rows_and_types_nothing() {
+    use zerocode_core::jev::{JevMode, STEP_EFFORT};
+    let stood = StoppedWorker::stand_with(
+        97_800,
+        "--agent claude --model claude-fable-5-1 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let endpoint =
+        crate::systemone::tests::Endpoint::serving("HTTP/1.1 200 OK", a_move_answer("raise"), 0);
+    let home = stood.asks_jev_for(&STEP_EFFORT, &endpoint, JevMode::Shadow, "/wt");
+    let began = stood.began + 10_000;
+    let stuck = a_stuck_turn("fix the build", "medium");
+    a_turn_runs_then_ends(&stood, &stuck, began, began + 1_000);
+    for beat in [2_000, 3_000, 4_000, 5_000] {
+        tick(&stood.host, &[], began + beat);
+    }
+    let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["mode"], "shadow");
+    assert_eq!(rows[0]["chosen"], "raise");
+    assert!(
+        stood.sent_at_worker().is_empty(),
+        "a recording seat types nothing"
+    );
+    let mut next = stuck.clone();
+    next.extend(a_stuck_turn("try again", "medium"));
+    a_turn_runs_then_ends(&stood, &next, began + 6_000, began + 7_000);
+    tick(&stood.host, &[], began + 8_000);
+    let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[1]["applied"], false);
+    assert_eq!(rows[1]["doorOutcome"], "recorded");
+    assert_eq!(rows[1]["followed"], "stuck");
+    assert_eq!(rows[1]["agreed"], false);
+    assert!(stood.sent_at_worker().is_empty());
+}
+
+/// A composer with a turn under way gets nothing, and a move whose next
+/// turn started before the composer rested is written down as such; a pane
+/// a person took over is never read at all.
+#[test]
+fn a_busy_composer_and_a_taken_over_pane_get_no_effort_keys() {
+    use zerocode_core::jev::{JevMode, STEP_EFFORT};
+    let stood = StoppedWorker::stand_with(
+        97_900,
+        "--agent claude --model claude-fable-5-1 --effort medium",
+        "",
+        Vec::new(),
+    );
+    let endpoint =
+        crate::systemone::tests::Endpoint::serving("HTTP/1.1 200 OK", a_move_answer("raise"), 0);
+    let home = stood.asks_jev_for(&STEP_EFFORT, &endpoint, JevMode::On, "/wt");
+    let began = stood.began + 10_000;
+    let stuck = a_stuck_turn("fix the build", "medium");
+    a_turn_runs_then_ends(&stood, &stuck, began, began + 1_000);
+    tick(&stood.host, &[], began + 2_000);
+    assert_eq!(StoppedWorker::rows_of(&home, &STEP_EFFORT).len(), 1);
+    // The next turn starts before the beat could type: the composer is busy.
+    let mut next = stuck.clone();
+    next.extend(a_stuck_turn("again", "medium"));
+    std::fs::write(&stood.host.transcript, format!("{}\n", next.join("\n")))
+        .expect("the transcript");
+    *stood.host.busy.lock().unwrap() = true;
+    super::pane_turn_began(stood.host.worker_term);
+    tick(&stood.host, &[], began + 3_000);
+    tick(&stood.host, &[], began + 4_000);
+    assert!(
+        stood.sent_at_worker().is_empty(),
+        "a running turn is not typed at"
+    );
+    let owned: Vec<&str> = next.iter().map(String::as_str).collect();
+    stood.stops_on(&owned, began + 5_000);
+    tick(&stood.host, &[], began + 6_000);
+    let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[1]["doorOutcome"], "turn_started");
+    assert_eq!(rows[1]["applied"], false);
+    assert!(stood.sent_at_worker().is_empty());
+
+    // A person takes the pane: the seat reads nothing more of it.
+    super::pane_taken_over(stood.host.worker_term, began + 6_500);
+    let mut third = next.clone();
+    third.extend(a_stuck_turn("and again", "medium"));
+    a_turn_runs_then_ends(&stood, &third, began + 7_000, began + 8_000);
+    for beat in [9_000, 10_000] {
+        tick(&stood.host, &[], began + beat);
+    }
+    assert_eq!(
+        StoppedWorker::rows_of(&home, &STEP_EFFORT).len(),
+        2,
+        "no row for a person's pane"
+    );
+    assert!(stood.sent_at_worker().is_empty());
+}
+
+/// A Codex worker has no door the beat can type through: its row records
+/// the move under `relaunch`, the composer is never touched, and the label
+/// still grades the next turn.
+#[test]
+fn a_codex_workers_move_is_recorded_under_relaunch_and_nothing_is_typed() {
+    use zerocode_core::jev::{JevMode, STEP_EFFORT};
+    let stood = StoppedWorker::stand_with(
+        98_000,
+        "--agent codex --model gpt-6-astra --effort medium",
+        "",
+        Vec::new(),
+    );
+    let endpoint =
+        crate::systemone::tests::Endpoint::serving("HTTP/1.1 200 OK", a_move_answer("raise"), 0);
+    let home = stood.asks_jev_for(&STEP_EFFORT, &endpoint, JevMode::On, "/wt");
+    let began = stood.began + 10_000;
+    let context = |effort: &str| {
+        serde_json::json!({"type": "turn_context", "payload": {"turn_id": "t", "model": "gpt-6-astra", "effort": effort}}).to_string()
+    };
+    let prompt = |text: &str| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": text}]}})
+        .to_string()
+    };
+    let call = |id: &str| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "function_call", "name": "shell",
+            "call_id": id, "arguments": "{\"command\":[\"cargo\",\"test\"]}"}}).to_string()
+    };
+    let output = |id: &str| {
+        serde_json::json!({"type": "response_item", "payload": {"type": "function_call_output", "call_id": id, "output": "exit 101"}}).to_string()
+    };
+    let stuck = vec![
+        context("medium"),
+        prompt("run the tests"),
+        call("c1"),
+        output("c1"),
+        call("c2"),
+        output("c2"),
+        call("c3"),
+        output("c3"),
+    ];
+    a_turn_runs_then_ends(&stood, &stuck, began, began + 1_000);
+    for beat in [2_000, 3_000, 4_000] {
+        tick(&stood.host, &[], began + beat);
+    }
+    let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0]["agent"], "codex");
+    assert_eq!(rows[0]["door"], "relaunch");
+    assert_eq!(rows[0]["from"], "medium");
+    assert_eq!(rows[0]["to"], "high");
+    assert_eq!(rows[0]["chosen"], "raise");
+    assert!(
+        stood.sent_at_worker().is_empty(),
+        "nothing to type at Codex"
+    );
+    let mut next = stuck.clone();
+    next.extend([
+        context("medium"),
+        prompt("and now"),
+        call("c4"),
+        output("c4"),
+    ]);
+    a_turn_runs_then_ends(&stood, &next, began + 5_000, began + 6_000);
+    tick(&stood.host, &[], began + 7_000);
+    let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[1]["doorOutcome"], "relaunch");
+    assert_eq!(rows[1]["applied"], false);
+    assert_eq!(rows[1]["followed"], "progressed");
+    assert_eq!(rows[1]["landed"], "medium");
+    assert!(stood.sent_at_worker().is_empty());
 }

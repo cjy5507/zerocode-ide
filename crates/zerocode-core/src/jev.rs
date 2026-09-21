@@ -685,9 +685,69 @@ pub const SUMMON: JevUse = JevUse {
     apply_deadline_ms: Some(SUMMON_APPLY_DEADLINE_MS),
 };
 
+/// Characters of the repeated tool call one step-effort question carries —
+/// the call's name and target as the board draws them, one card line
+/// (`crate::transcript::clamp`), which is what the question is about: the
+/// thing the worker keeps doing.
+pub const STEP_EFFORT_REPEATED_CHAR_CAP: usize = 240;
+
+/// The wall the beat waits for a step-effort answer, in milliseconds.
+///
+/// A move lands between two turns, and the next turn can start the moment
+/// the coordinator's pointer is typed — so the seat is held to the summons'
+/// wall (ten seconds keeps routing's slowest measured answer, 6,798 ms) and
+/// not the stall sweep's thirty: past it the rule's own move stands in for
+/// the answer, exactly as routing falls back to its probe.
+pub const STEP_EFFORT_APPLY_DEADLINE_MS: u64 = SUMMON_APPLY_DEADLINE_MS;
+
+/// The window's between-turn effort move for a worker whose CLI takes one
+/// (t-5637, `crate::step_effort`): which way a worker's effort should go
+/// before its next turn — up a rung when its last turn repeated one tool
+/// call or failed tools in a row, down when the turn was routine and the
+/// effort stands above the summons' word, or hold.
+///
+/// The idea is vechen's Codex+Jev experiment (the vault's
+/// `a-reasoning-effort-governor-changes-effort-per-step…`): judge the effort
+/// per step, not once per turn. zo does it per request from inside; the
+/// window can only reach a Claude Code or Codex worker at its composer, so
+/// its unit is the turn, and its door is the row's `moves.effort` — Claude
+/// Code's `/effort` picker, driven one rung a time for this session only.
+/// Codex takes nothing typed (its `/model low` is a message to the model),
+/// so a Codex row records the move it would have made under `relaunch`.
+///
+/// What is sent is the repeated call's card line and numbers the product
+/// wrote itself. Under `on`, or an `auto` its own evidence raised, the seat's
+/// answer is what moves — and the rule's own move when the answer does not
+/// arrive within [`STEP_EFFORT_APPLY_DEADLINE_MS`]; a person's `shadow`
+/// records both beside each other and types nothing. The label is what the
+/// next turn did: progressed, or the same stuck shape again.
+pub const STEP_EFFORT: JevUse = JevUse {
+    id: "effort",
+    setting: "stepEffort",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    sends: &[Sent {
+        at: "/state/repeated",
+        cap: Cap::Chars(STEP_EFFORT_REPEATED_CHAR_CAP),
+    }],
+    ledger: "step-effort.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(ORCHESTRATION_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(STEP_EFFORT_APPLY_DEADLINE_MS),
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 8] = [
-    ROUTING, RECALL, BROWSER, DESKTOP, EMULATOR, STALL, PLACEMENT, SUMMON,
+pub static JEV_USES: [JevUse; 9] = [
+    ROUTING,
+    RECALL,
+    BROWSER,
+    DESKTOP,
+    EMULATOR,
+    STALL,
+    PLACEMENT,
+    SUMMON,
+    STEP_EFFORT,
 ];
 
 impl JevUse {
