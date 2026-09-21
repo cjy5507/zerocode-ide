@@ -563,16 +563,20 @@ const GITHUB_ACCOUNTS = Object.freeze([
   },
 ]);
 
+/* What the native side answers once it actually asks macOS (t-5587). Five of
+ * the nine are readable facts, two are answers nobody gave yet, and two — the
+ * microphone and automation — are the rows a dialog can still be raised for.
+ * Camera is granted, so its prompt is spent and the row opens the pane. */
 const DEVELOPER_PERMISSION_STATES = Object.freeze([
-  { id: "microphone", status: "unknown", action: "open-settings" },
-  { id: "camera", status: "unknown", action: "open-settings" },
+  { id: "microphone", status: "ready", action: "trigger-prompt" },
+  { id: "camera", status: "granted", action: "open-settings" },
   { id: "screen", status: "granted", action: "open-settings" },
-  { id: "accessibility", status: "granted", action: "open-settings" },
+  { id: "accessibility", status: "denied", action: "open-settings" },
   { id: "full-disk-access", status: "denied", action: "open-settings" },
-  { id: "automation", status: "unknown", action: "trigger-prompt" },
+  { id: "automation", status: "ready", action: "trigger-prompt" },
   { id: "local-network", status: "unknown", action: "trigger-prompt" },
   { id: "usb", status: "ready", action: "open-settings" },
-  { id: "bluetooth", status: "ready", action: "open-settings" },
+  { id: "bluetooth", status: "denied", action: "open-settings" },
 ]);
 
 /* What `glab` on this machine says. Three facts and no lifecycle: the GitLab
@@ -2173,7 +2177,7 @@ class StatefulBackend {
               port: args.port,
               testedAt: 1_700_000_000_000,
             }
-          : { ok: false, failure: "unreachable" };
+          : { ok: false, failure: "unreachable", testedAt: 1_700_000_086_400 };
       case "term_text": return null;
       case "setup_guide":
         return { steps: [], complete: true, dismissed: false, entry: false };
@@ -5184,6 +5188,38 @@ await test("macOS Permissions exposes one closed native inventory and a private-
     "the renderer permission inventory diverged from the native closed list",
   );
 
+  /* t-5587: every row wears the status the native side answered, and the
+   * summary counts the same nine — not a constant the page carries. */
+  const SAID = {
+    granted: "허용됨", denied: "거부됨", unknown: "알 수 없음", ready: "요청 가능",
+  };
+  assertEqual(
+    await pageA.locator("#developer-permission-list .settings-state").evaluateAll(
+      (rows) => rows.map((row) => row.textContent),
+    ),
+    DEVELOPER_PERMISSION_STATES.map((row) => SAID[row.status]),
+    "a permission row said something other than what macOS answered",
+  );
+  assertEqual(
+    await pageA.locator("#developer-permissions-summary").textContent(),
+    "5 / 9 사용 가능",
+    "the availability count was not recounted from the live answers",
+  );
+
+  /* The answered prompt is spent: macOS raises each dialog once per process
+   * identity, so camera (granted) points at the pane while microphone
+   * (nobody asked yet) still offers the dialog. */
+  assertEqual(
+    await pageA.locator('[data-permission-id="microphone"] button').textContent(),
+    "권한 요청 표시",
+    "an unasked capture permission stopped offering its macOS dialog",
+  );
+  assertEqual(
+    await pageA.locator('[data-permission-id="camera"] button').textContent(),
+    "시스템 설정 열기",
+    "an answered capture permission offered a dialog macOS will not raise",
+  );
+
   const promptAt = backend.calls.length;
   await pageA.locator('[data-permission-id="automation"] button').click();
   const prompt = await backend.waitForCall("A", "request_developer_permission", promptAt);
@@ -5212,6 +5248,16 @@ await test("macOS Permissions exposes one closed native inventory and a private-
   );
   await pageA.waitForFunction(() =>
     document.querySelector("#local-network-test-status")?.textContent.includes("43123"));
+  assert(
+    (await pageA.locator('[data-permission-evidence="local-network"]').textContent())
+      .startsWith("최근 연결 테스트 성공 · "),
+    "the row with no status API did not quote the test that stands in for one",
+  );
+  assertEqual(
+    await pageA.locator('[data-permission-id="local-network"] .settings-state').textContent(),
+    "알 수 없음",
+    "the connection test invented a tenth status word",
+  );
 
   await pageA.locator("#local-network-host").fill("8.8.8.8");
   const publicAt = backend.calls.length;
@@ -5224,11 +5270,16 @@ await test("macOS Permissions exposes one closed native inventory and a private-
   );
   await pageA.waitForFunction(() =>
     document.querySelector("#local-network-test-status")?.textContent.includes("연결할 수 없습니다"));
+  assert(
+    (await pageA.locator('[data-permission-evidence="local-network"]').textContent())
+      .startsWith("최근 연결 테스트 실패 · "),
+    "a refused test left the row quoting a stale success",
+  );
 
   const focusedAt = backend.calls.length;
   await pageA.evaluate(() => window.dispatchEvent(new Event("focus")));
   await backend.waitForCall("A", "developer_permission_statuses", focusedAt);
-  return "9 native IDs + fixed actions + private address connection boundary";
+  return "9 native IDs + 5/9 counted from live answers + spent prompts open the pane";
 });
 
 await test("Quick Commands settings and the terminal menu mutate one repository", async () => {

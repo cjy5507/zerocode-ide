@@ -113,6 +113,22 @@ export async function assertAppBundle(app) {
   if (!info.includes("dev.zerocode.app.computer-use") || !info.includes("<key>LSUIElement</key><true/>")) {
     throw new Error(`Computer Use helper identity is invalid: ${helperPlist}`);
   }
+  await assertPrivacyUsageDescriptions(app);
+}
+
+/* t-5587: the window raises macOS's own microphone and camera dialogs for the
+ * 「macOS 권한」 page. macOS terminates any process that asks without the
+ * matching usage description, so the merge of crates/zerocode-shell/Info.plist
+ * is not cosmetic — if it silently stopped happening, the button would kill
+ * the window. Proven here on the built bundle, not on the source file. */
+async function assertPrivacyUsageDescriptions(app) {
+  const plist = join(app, "Contents", "Info.plist");
+  const info = await readFile(plist, "utf8");
+  for (const key of ["NSMicrophoneUsageDescription", "NSCameraUsageDescription"]) {
+    if (!new RegExp(`<key>${key}</key>\\s*<string>[^<]+</string>`).test(info)) {
+      throw new Error(`${key} did not reach the bundle: ${plist}`);
+    }
+  }
 }
 
 async function main() {

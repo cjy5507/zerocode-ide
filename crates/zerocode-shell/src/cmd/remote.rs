@@ -545,9 +545,17 @@ pub(crate) async fn open_remote_server_session(
     Ok(hold_terminal_handle(&app, pty))
 }
 
-#[tauri::command(async)]
-pub(crate) fn developer_permission_statuses() -> Vec<developer_permissions::PermissionState> {
-    developer_permissions::statuses()
+/// Read the nine permissions on a blocking worker.
+///
+/// Each answer is a TCC round trip, so the whole refresh costs tens of
+/// milliseconds; the page asks on open, on every window focus and after every
+/// action, and a terminal streaming beside it must not feel any of that.
+#[tauri::command]
+pub(crate) async fn developer_permission_statuses()
+-> Result<Vec<developer_permissions::PermissionState>, String> {
+    tokio::task::spawn_blocking(developer_permissions::statuses)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
