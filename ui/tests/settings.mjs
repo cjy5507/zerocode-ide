@@ -62,6 +62,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "placement", setting: "workerPlacement", modes: "off shadow on auto" }),
   Object.freeze({ id: "summon", setting: "summonChoice", modes: "off shadow on auto" }),
   Object.freeze({ id: "effort", setting: "stepEffort", modes: "off shadow on auto" }),
+  Object.freeze({ id: "step_effort", setting: "zoStepEffort", modes: "off shadow on auto" }),
 ]);
 const jevSeat = (id) => JEV_SEATS.find((seat) => seat.id === id) ?? null;
 /* The routing classifier's four words (`zerocode_core::jev::ClassifierMode`)
@@ -270,6 +271,9 @@ const RUST_DEFAULT_DOCUMENT_JSON = String.raw`{
   "computer_confirm_payment": true,
   "computer_confirm_transfer": true,
   "computer_confirm_delete": true,
+  "emulator.keepBooted": true,
+  "emulator.prebootLastUsed": true,
+  "emulator.idleShutdownMinutes": 30,
   "browser": {
     "home_page": "",
     "search_engine": "google",

@@ -73,11 +73,11 @@ fn the_text_answer_names_every_seat_once() {
     let report = Report { text };
     for seat in zerocode_core::jev::JEV_USES {
         assert_eq!(
-            report.text.matches(seat.id).count(),
+            named(&report.text, seat.id),
             1,
             "{} named {} times",
             seat.id,
-            report.text.matches(seat.id).count()
+            named(&report.text, seat.id)
         );
     }
     assert!(report.text.contains("never asked"));
@@ -140,4 +140,17 @@ fn the_control_rows_the_agreement_borrowed_are_named_in_both_answers() {
     // A seat that borrowed nothing says nothing of it.
     let summon = text.lines().find(|line| line.starts_with("summon")).expect("the summon line");
     assert!(!summon.contains("control row"), "{summon}");
+}
+
+/// How many times `id` stands in `text` as a whole word — `effort` inside
+/// `step_effort` is that seat's name, not this one's.
+fn named(text: &str, id: &str) -> usize {
+    let is_word = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    text.match_indices(id)
+        .filter(|(at, _)| {
+            let before = text[..*at].chars().next_back();
+            let after = text[at + id.len()..].chars().next();
+            !before.is_some_and(is_word) && !after.is_some_and(is_word)
+        })
+        .count()
 }

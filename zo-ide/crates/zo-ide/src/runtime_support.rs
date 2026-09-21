@@ -2062,8 +2062,16 @@ impl ApiClient for AnthropicRuntimeClient {
             .as_ref()
             .and_then(|t| t.budget_tokens)
             .filter(|&budget| budget > 0);
+        // The step governor's effort for THIS request, when it decided one,
+        // else the turn's — the same reading the TUI client takes.
+        let requested = crate::session::runtime_bridge::request_effort(
+            &request,
+            self.named_effort,
+            self.effort_band_ceiling,
+            configured_budget,
+        );
         let effective_budget =
-            api::effort_budget_with_floor(configured_budget, request.effort_override);
+            api::effort_budget_with_floor(requested.budget, request.effort_override);
         // Reminders ride the newest user message (see runtime_bridge) so the
         // system blocks and cached history stay byte-identical across turns.
         let mut messages = runtime::convert_messages_for(
@@ -2080,11 +2088,11 @@ impl ApiClient for AnthropicRuntimeClient {
             |b| Some(api::ThinkingConfig::enabled(b)),
         );
         let effort = crate::session::runtime_bridge::effort_with_budget_floor(
-            self.named_effort,
+            requested.named,
             effective_budget,
-            self.effort_band_ceiling,
+            requested.band_ceiling,
         );
-        let effort_band_ceiling = self.effort_band_ceiling;
+        let effort_band_ceiling = requested.band_ceiling;
         let message_request = MessageRequest {
             model: wire_model.clone(),
             max_tokens: crate::max_tokens_for_model(&wire_model),

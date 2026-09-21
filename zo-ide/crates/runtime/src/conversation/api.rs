@@ -63,6 +63,14 @@ pub struct ApiRequest {
     /// escalation; this is that seam). `None` on every ordinary turn, so the
     /// configured effort is unchanged unless escalation explicitly engages.
     pub effort_override: Option<u32>,
+    /// The step effort governor's effort for THIS request
+    /// (`conversation/step_effort.rs`), or `None` for the client's own. When
+    /// set, a client puts it on the wire request as `effort` and
+    /// `effort_band_ceiling` in place of the turn's — the same two fields
+    /// every backend already reads — and sizes any legacy thinking budget
+    /// from the same level. Unlike `effort_override` it may LOWER effort: a
+    /// routine step spends less on purpose.
+    pub effort_step: Option<super::EffortStep>,
     /// Per-turn wire-model override, or `None` for the client's bound model.
     /// The runtime sets it VERBATIM when an Anthropic safety classifier declines
     /// a Fable/Mythos turn (`stop_reason: "refusal"`): the turn is retried once

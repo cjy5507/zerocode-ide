@@ -41855,6 +41855,58 @@ const palette = await page.evaluate(async () => {
   closeTab(mirror3.id);
   await new Promise((done) => setTimeout(done, 80));
   delete window.__ANSWER__.shutdown_mobile_emulator;
+  // 부팅 자막(D6): 판이 서는 그 턴에 「부팅 중 · <기기> · n초」가 서고, 첫
+  // 프레임이 오면 눕는다. 스트림은 일부러 늦게 답한다 — 콜드 부팅이 그렇고
+  // (실측 42.3 s), 자막이 그 대답을 기다린다면 판은 그동안 빈칸이다.
+  let letTheStreamAnswer = null;
+  const wasAnswering = window.__ANSWER__.start_emulator_stream;
+  window.__ANSWER__.start_emulator_stream = (args) =>
+    new Promise((settle) => {
+      streamStarts += 1;
+      const device = fleet.find((one) => one.udid === (args?.udid ?? "U1")) ?? fleet[0];
+      const stream = `S${streamStarts}`;
+      letTheStreamAnswer = () => settle({ stream, udid: device.udid, name: device.name });
+    });
+  const openedAt = performance.now();
+  const opening = openEmulatorTab("ios", "U1");
+  const booting = tabs.filter((one) => one.kind === "emulator").at(-1);
+  const bootHost = [...document.querySelectorAll(".emulator-view")].find(
+    (one) => one._emulatorTab === booting,
+  );
+  const bootNote = bootHost?.querySelector(".emulator-note");
+  seen.captionMs = Math.round(performance.now() - openedAt);
+  seen.captionStandsBeforeTheStreamAnswers =
+    bootNote?.hidden === false &&
+    bootNote.textContent === t("emulator.booting", "부팅 중 · {{device}} · {{seconds}}초", {
+      device: "U1",
+      seconds: 0,
+    }) &&
+    seen.captionMs < 100;
+  // 스트림은 아직 아무것도 답하지 않았다 — 자막이 먼저 섰다는 뜻.
+  await new Promise((done) => setTimeout(done, 40));
+  seen.captionStandsWhileTheDeviceBoots =
+    typeof letTheStreamAnswer === "function" &&
+    booting.stream === undefined &&
+    bootNote.hidden === false;
+  // 초는 흐른 시간에서 나온다 — 1초 타이머를 기다리지 않고 그 계산을 본다.
+  seen.captionCountsTheSeconds =
+    emulatorBootWords(booting, booting.bootingSince + 3_200).includes("3") &&
+    emulatorBootWords({ bootingSince: booting.bootingSince }, booting.bootingSince + 1_000) ===
+      t("emulator.bootingUnnamed", "부팅 중 · {{seconds}}초", { seconds: 1 });
+  letTheStreamAnswer();
+  await opening;
+  await new Promise((done) => setTimeout(done, 40));
+  // 기기가 대답해도 그림이 온 것은 아니다: 이름만 자막에 들어선다.
+  seen.captionWearsTheDeviceName =
+    bootNote.hidden === false && bootNote.textContent.includes("iPhone 17");
+  for (const hear of window.__LISTENERS__["emulator:frame"] ?? []) {
+    hear({ payload: { stream: booting.stream, bytes: btoa("boot-frame") } });
+  }
+  seen.captionGoesOnTheFirstFrame =
+    bootNote.hidden === true && booting.bootCaptionAt === null && booting.bootingSince === null;
+  closeTab(booting.id);
+  await new Promise((done) => setTimeout(done, 80));
+  window.__ANSWER__.start_emulator_stream = wasAnswering;
   // 한글로 물어도 행이 답한다.
   tcInput.value = t("tabs.simKeywordIphone", "아이폰");
   await paintTabCreate();
@@ -41950,6 +42002,13 @@ const palette = await page.evaluate(async () => {
   }
   return seen;
 });
+ok(
+  `the emulator pane's boot caption stands in ${palette.captionMs}ms, counts up, and goes on the first frame`,
+  palette.captionStandsBeforeTheStreamAnswers && palette.captionStandsWhileTheDeviceBoots &&
+    palette.captionCountsTheSeconds &&
+    palette.captionWearsTheDeviceName && palette.captionGoesOnTheFirstFrame,
+  `caption ${palette.captionMs}ms (≤100ms, D6)`,
+);
 ok(
   "the + palette's emulator row boots the real simulator, and the dressed records still restore",
   palette.simulatorOffered && palette.simulatorBoots && palette.framesLand &&

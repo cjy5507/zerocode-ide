@@ -736,7 +736,7 @@ where
     /// provider, not the main model's window, so both the escape decider and the
     /// retry cap in front of it stand aside — from one reading, so they cannot
     /// come to disagree about which legs count.
-    fn deep_leg_owns_the_wire(&self) -> bool {
+    pub(super) fn deep_leg_owns_the_wire(&self) -> bool {
         self.deep_plan_leg_active || self.deep_verify_leg_active || self.exec_impl_leg_active
     }
 

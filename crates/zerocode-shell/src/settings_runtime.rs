@@ -2239,6 +2239,23 @@ pub(super) struct SettingsDocument {
     pub(super) computer_confirm_delete: bool,
     #[serde(default)]
     pub(super) browser: BrowserPrefs,
+    /// Whether the emulators this window started stay up when it exits
+    /// (docs/design/emulator-first-second-20260921.md D3). On for a person who
+    /// never chose: a device left booted is the whole of the next pane's first
+    /// second, and the row on disk is what lets the next window adopt it.
+    #[serde(default = "enabled_by_default", rename = "emulator.keepBooted")]
+    pub(super) emulator_keep_booted: bool,
+    /// Whether the window puts the last-used device up while it boots (D4).
+    #[serde(default = "enabled_by_default", rename = "emulator.prebootLastUsed")]
+    pub(super) emulator_preboot_last_used: bool,
+    /// How long a kept-booted fleet with no pane on it waits before it is put
+    /// away (D3). `0` is never — a phone's worth of RAM held for as long as
+    /// the person wants it held.
+    #[serde(
+        default = "default_emulator_idle_shutdown_minutes",
+        rename = "emulator.idleShutdownMinutes"
+    )]
+    pub(super) emulator_idle_shutdown_minutes: u32,
     /// Whether an OpenCode Go session cookie is on file — Orca's own
     /// `opencodeCookieConfigured` (`rate-limit-types.ts:134` has the same flag
     /// for the sibling provider). The cookie ITSELF is never here: it goes to
@@ -2387,6 +2404,9 @@ impl Default for SettingsDocument {
             computer_confirm_transfer: true,
             computer_confirm_delete: true,
             browser: BrowserPrefs::default(),
+            emulator_keep_booted: true,
+            emulator_preboot_last_used: true,
+            emulator_idle_shutdown_minutes: default_emulator_idle_shutdown_minutes(),
             opencode_cookie_configured: false,
             opencode_workspace: String::new(),
             ssh_hosts: Vec::new(),
@@ -3755,4 +3775,12 @@ pub(super) fn current_branch(root: &std::path::Path) -> Option<String> {
 
 fn default_vault_session_limit() -> usize {
     zerocode_core::vault::Limits::DEFAULT.default
+}
+
+/// Half an hour with no pane on it before a kept-booted emulator is put away
+/// (docs/design/emulator-first-second-20260921.md D3) — long enough to cover
+/// a person looking at something else and coming back, short enough that a
+/// device forgotten before lunch is not still holding its RAM after it.
+const fn default_emulator_idle_shutdown_minutes() -> u32 {
+    30
 }

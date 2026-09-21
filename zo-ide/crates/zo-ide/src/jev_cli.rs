@@ -155,7 +155,7 @@ fn render_text(seats: &[SeatReport]) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "{:<10} {:<7} {:<9} {:>7} {:>7} {:>8} {:>7} {:>7}  notes",
+        "{:<12} {:<7} {:<9} {:>7} {:>7} {:>8} {:>7} {:>7}  notes",
         "seat", "mode", "stands", "today", "7d", "answered", "p50", "p95"
     );
     for seat in seats {
@@ -210,7 +210,7 @@ fn render_text(seats: &[SeatReport]) -> String {
         }
         let _ = writeln!(
             out,
-            "{:<10} {:<7} {:<9} {:>7} {:>7} {:>8} {:>7} {:>7}  {}",
+            "{:<12} {:<7} {:<9} {:>7} {:>7} {:>8} {:>7} {:>7}  {}",
             seat.id,
             seat.mode.key(),
             if seat.applies { "applying" } else { seat.stand.token() },
