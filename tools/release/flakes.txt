@@ -46,3 +46,10 @@ zo:e2e_continue_replays_two_completed_turns_from_the_same_session
 # 2026-09-22 (coordinator gate after the J6 merge, four workers building, load 30+): the fake iOS helper's channel handshake
 # timed out ("timed out waiting on channel") once in the full shell-test; green solo x3 in 0.34 s — a load flake of t-5763's corpse test.
 root:emulator::ios_hid::tests::a_corpse_is_replaced_before_it_is_handed_out_and_nobody_gets_a_missing_device
+
+# 2026-09-22 07:2x v1.1.14 coordinator gate (a worker's first full build ran beside it; zo-test 06:09–06:16): the tools
+# crate's read-only sandbox bash and the python REPL kernel each failed to start once in the full `just test`
+# ("No such file or directory", "python runtime not found"); green solo ×3 in 0.05 s and green in the five gates before.
+# Process-spawn timing under load — the same family as the pane timings above.
+zo:permissions_misc::given_read_only_enforcer_when_read_only_safe_bash_then_allowed
+zo:shell::repl_executes_python_code_in_a_persistent_kernel
