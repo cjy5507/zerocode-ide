@@ -57,6 +57,11 @@ const FAIL_MALFORMED: &str = "malformed";
 const FAIL_CACHED_MALFORMED: &str = "cached_malformed";
 const FAIL_CLIENT_UNAVAILABLE: &str = "client_unavailable";
 const FAIL_CACHE_UNAVAILABLE: &str = "cache_unavailable";
+/// The probe's provider is parked behind its own wall — this process's 429,
+/// or a neighbour's through the shared cool-down — so no call is made: it
+/// would only hear the wall again, and the row would say `provider_failure`
+/// for a reason the ledger already knew (the first control row, 2026-09-21).
+const FAIL_PROVIDER_PARKED: &str = "provider_parked";
 
 enum ProbeCallOutcome {
     Response(Box<api::MessageResponse>),
@@ -290,6 +295,36 @@ pub fn task_fingerprint(description: &str, prompt: &str) -> u64 {
 /// Resolve the model the probe itself runs on: the router's own Fast-role
 /// pick from the already-loaded inventory — the probe reuses the engine it
 /// serves instead of hand-rolling a second "cheap model" table.
+/// Every task that lost its probe fails with `reason`, one row each — the
+/// one shape both a missing client and a parked provider answer in.
+fn fail_misses(
+    slots: &mut [Option<ProbeSlot>],
+    misses: &[(usize, u64)],
+    road: ProbeUse,
+    model: &str,
+    reason: &'static str,
+) {
+    for (index, fingerprint) in misses {
+        probe_failed(road, *fingerprint, model, reason);
+        slots[*index] = Some(ProbeSlot {
+            fingerprint: *fingerprint,
+            verdict: Err(reason),
+        });
+    }
+}
+
+/// How long `model`'s provider is still parked behind a rate-limit wall
+/// (`api::quota`: this process's own 429s and the shared file's), or zero.
+fn parked_ms(model: &str) -> u64 {
+    parked_ms_for(api::detect_provider_kind(model))
+}
+
+/// The same question of a provider by kind — the half a test can ask
+/// without the model catalog, which another test's config home may hide.
+fn parked_ms_for(kind: api::ProviderKind) -> u64 {
+    api::quota::rate_limit_cooldown_remaining_ms(kind)
+}
+
 fn probe_model(inventory: &ModelInventory, parent_model: &str) -> String {
     let request = RouteRequest::for_target(
         RoutingTarget::RoleFallback(RouteRole::Fast),
@@ -462,17 +497,15 @@ pub(super) fn probe_slots(
     // caller (`provider_client.rs`), so a pinned/aliased Fast-role model id
     // cannot misroute provider detection or the wire model.
     let model = api::resolve_model_alias(&model);
+    if parked_ms(&model) > 0 {
+        fail_misses(&mut slots, &misses, road, &model, FAIL_PROVIDER_PARKED);
+        return slots;
+    }
     let Some(client) = probe_client(&model) else {
         // One failure per task that lost its probe, not one per batch — a
         // credential-less environment should read as "every probe gave up",
         // which is what the count then says.
-        for (index, fingerprint) in &misses {
-            probe_failed(road, *fingerprint, &model, FAIL_CLIENT_UNAVAILABLE);
-            slots[*index] = Some(ProbeSlot {
-                fingerprint: *fingerprint,
-                verdict: Err(FAIL_CLIENT_UNAVAILABLE),
-            });
-        }
+        fail_misses(&mut slots, &misses, road, &model, FAIL_CLIENT_UNAVAILABLE);
         return slots;
     };
     let client = std::sync::Arc::new(client);
@@ -556,6 +589,19 @@ fn probe_request(model: &str, description: &str, prompt: &str) -> MessageRequest
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A provider parked behind its wall is read as parked before the batch
+    /// builds a client for it. Asked by kind: a sibling test's config home
+    /// hides the model catalog, and a model id read without it falls to the
+    /// machine's own credentials — xAI's slot, which the guard serializes.
+    #[test]
+    fn a_probe_on_a_parked_provider_is_parked_too() {
+        let _guard = api::quota::rate_limit_test_guard();
+        api::quota::isolate_rate_limit_state_for_tests();
+        assert_eq!(parked_ms_for(api::ProviderKind::Xai), 0, "a fresh process is parked nowhere");
+        api::quota::mark_rate_limit_cooldown(api::ProviderKind::Xai, 60_000);
+        assert!(parked_ms_for(api::ProviderKind::Xai) > 0, "the wall xAI just announced is not read");
+    }
 
     #[test]
     fn fingerprint_separates_field_boundaries() {

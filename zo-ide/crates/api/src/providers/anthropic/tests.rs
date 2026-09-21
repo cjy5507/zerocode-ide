@@ -2097,3 +2097,60 @@ fn the_binding_beta_joins_the_header_once() {
     );
     assert_eq!(with_beta("", THINKING_BINDING_BETA), THINKING_BINDING_BETA);
 }
+
+/// A `retry-after` the ladder could never reach — hours, when the ladder's
+/// whole reach is minutes — ends the ladder after the first answer, with the
+/// hint kept on the error for the runtime's escape. Measured on 2026-09-21:
+/// each request slept 30 s up to six times against a 154,912 s hint.
+#[tokio::test]
+async fn a_wall_hours_away_is_not_retried_at_the_ladders_cap() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let hits = Arc::new(AtomicUsize::new(0));
+    let server_hits = hits.clone();
+    let server = tokio::spawn(async move {
+        loop {
+            let Ok(Ok((mut socket, _))) =
+                tokio::time::timeout(Duration::from_millis(300), listener.accept()).await
+            else {
+                break;
+            };
+            server_hits.fetch_add(1, Ordering::SeqCst);
+            let mut scratch = [0u8; 2048];
+            let _ = socket.read(&mut scratch).await;
+            let body = b"{\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit.\"},\"type\":\"error\"}";
+            let head = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nconnection: close\r\nretry-after: 154912\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n",
+                body.len()
+            );
+            socket.write_all(head.as_bytes()).await.unwrap();
+            socket.write_all(body).await.unwrap();
+            socket.flush().await.unwrap();
+            let _ = socket.shutdown().await;
+        }
+    });
+
+    let client = AnthropicClient::new("token")
+        .with_base_url(format!("http://{addr}"))
+        .with_retry_policy(5, Duration::from_millis(1), Duration::from_millis(5));
+    let began = std::time::Instant::now();
+    let error = client
+        .stream_message(&streaming_request())
+        .await
+        .expect_err("a wall hours away is an error, not a wait");
+    let took = began.elapsed();
+    server.await.unwrap();
+
+    assert_eq!(hits.load(Ordering::SeqCst), 1, "the ladder asked again against a hint it cannot reach");
+    assert!(took < Duration::from_secs(5), "the ladder slept against the wall: {took:?}");
+    assert_eq!(
+        error.retry_after(),
+        Some(Duration::from_secs(154_912)),
+        "the hint must ride up with the error: {error}"
+    );
+}

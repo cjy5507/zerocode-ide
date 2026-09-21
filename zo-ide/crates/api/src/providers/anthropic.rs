@@ -1129,6 +1129,27 @@ impl AnthropicClient {
         Ok(raw.into_token_set(now_unix_timestamp()))
     }
 
+    /// The most this ladder would ever wait in total — every retry at its
+    /// cap — which is the longest server hint it makes sense to obey here. A
+    /// hint beyond it belongs to the layer that can change model, not to
+    /// this one, which can only sleep.
+    fn retry_reach(&self) -> Duration {
+        self.max_backoff.max(DEFAULT_MAX_BACKOFF) * (self.max_retries + 1)
+    }
+
+    /// Whether `error` names a wall the server says lifts beyond this
+    /// ladder's reach. Taking the ladder's cap against such a wall neither
+    /// obeys the hint nor escapes it: on 2026-09-21 thirty-one requests each
+    /// slept 30 s up to six times against a `retry-after` of 154,912 s. Past
+    /// the reach the hint is an instruction to stop, and the error goes up
+    /// with the hint still on it for the runtime's escape — a fallback model,
+    /// or a plain notice — to read at once.
+    fn wall_beyond_reach(&self, error: Option<&ApiError>) -> bool {
+        error
+            .and_then(ApiError::retry_after)
+            .is_some_and(|hint| hint > self.retry_reach())
+    }
+
     async fn send_with_retry(
         &self,
         request: &MessageRequest,
@@ -1199,7 +1220,7 @@ impl AnthropicClient {
                 }
             }
 
-            if attempts > self.max_retries {
+            if attempts > self.max_retries || self.wall_beyond_reach(last_error.as_ref()) {
                 break;
             }
 
