@@ -26,7 +26,7 @@
 //! the day's count.
 
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -65,6 +65,12 @@ const OVERLOADED_STATUS: u16 = 529;
 /// first ask the bench timed, rounded up; a warm-up that outlives a walk's
 /// first question was no help and is not worth a socket.
 const ACTION_WARM_TIMEOUT: Duration = Duration::from_millis(2_000);
+
+/// How long the pool keeps a socket nobody is using — reqwest's own default,
+/// but named and set on the client below rather than inherited, so the window
+/// a door skips a warm-up inside and the window the socket actually survives
+/// are one number and cannot drift apart.
+const POOL_IDLE: Duration = Duration::from_secs(90);
 
 /// The word a status is refused with. Unlike zo's client this wire does not
 /// retry: a browser recovery is already inside a stopped walk's budget, and a
@@ -362,6 +368,13 @@ impl Wire {
     /// request is a bare GET of the base, whose answer is thrown away; what
     /// it leaves behind is a pooled socket the POST reuses. Without a key
     /// nothing is sent, as nothing would be asked.
+    ///
+    /// Called from every door a walk may start behind ([`warm_for_walks`]),
+    /// so most calls find the socket an earlier door left and send nothing:
+    /// the pool's own idle window decides (`warm_due`). The key is read
+    /// before that window is touched, so a keyless window — which sends
+    /// nothing — also remembers nothing, and the first warm-up after a key
+    /// is finally typed is not skipped as though it had already run.
     pub fn warm(&self) {
         if self.key().is_none() {
             return;
@@ -370,6 +383,9 @@ impl Wire {
             return;
         };
         let base = self.base.trim_end_matches('/').to_string();
+        if !warm_due(&base) {
+            return;
+        }
         tauri::async_runtime::spawn(async move {
             let _ = client.get(&base).timeout(ACTION_WARM_TIMEOUT).send().await;
         });
@@ -455,17 +471,73 @@ impl Wire {
     }
 }
 
+/// Open the socket a walk's first question will ride, from a door the walk
+/// has not reached yet: the window's boot, a browser pane, a device stream.
+///
+/// A walk's own judge warms the wire too (`errand::live::LiveJudge::new`),
+/// and after a restart that is too late: the first look of the first walk is
+/// 100–300 ms and the handshake it would have to hide is longer, so on the
+/// installed 1.1.9 that first question cost 554 ms against the 242–290 ms of
+/// the ones behind it (§2.2 of
+/// docs/design/jev-seats-accuracy-wave-20260921.md). The doors below open
+/// long before a walk is asked for, and what they call is the judge's own
+/// warm-up through the judge's own wire — one warm-up in the window, not a
+/// second kind of one.
+///
+/// On a thread of its own, because the key comes from the keychain through
+/// the `security` command (`accounts::read_keychain_service`) — a process
+/// spawn — and a door that waits on one has turned a warm-up into a delay.
+pub fn warm_for_walks() {
+    warm_off_thread(Wire::of_this_machine());
+}
+
+/// The body every door walks, with the wire handed in rather than read from
+/// this machine, so a test can point the same road at a loopback endpoint.
+fn warm_off_thread(wire: Wire) {
+    std::thread::spawn(move || wire.warm());
+}
+
+/// Whether a warm-up to `origin` would buy anything, and a record that it is
+/// about to if it would.
+///
+/// The pool keeps an idle socket for [`POOL_IDLE`]; a second warm-up inside
+/// that window pays a request for a connection the client already holds, and
+/// a window whose boot, browser pane and device stream all open within a
+/// minute would pay it three times. Keyed by origin because the pool is
+/// keyed by origin — a socket opened to one endpoint is no help to another,
+/// which is what the test override points the wire at. A row older than the
+/// window names a socket the pool has already dropped and is dropped with
+/// it, so this holds one row per origin warmed in the last [`POOL_IDLE`].
+fn warm_due(origin: &str) -> bool {
+    static WARMED: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
+    let mut warmed = WARMED.lock().unwrap_or_else(PoisonError::into_inner);
+    let now = Instant::now();
+    warmed.retain(|(_, at)| now.duration_since(*at) < POOL_IDLE);
+    if warmed.iter().any(|(seen, _)| seen == origin) {
+        return false;
+    }
+    warmed.push((origin.to_string(), now));
+    true
+}
+
 /// The one HTTP client every question the window asks goes through: its
 /// connection pool keeps the endpoint's TLS session alive between asks, so
 /// a walk's second question rides the first's socket instead of opening its
 /// own. A client per ask was a handshake per ask — see §2 of
 /// docs/design/jev-seats-accuracy-wave-20260921.md for the bench that timed
-/// both on the same look. `None` only when the client cannot be built at
-/// all, which the ask refuses as `transport`.
+/// both on the same look. Its idle window is [`POOL_IDLE`], named rather
+/// than inherited so a warm-up can be skipped on the same number the socket
+/// lives by. `None` only when the client cannot be built at all, which the
+/// ask refuses as `transport`.
 fn client() -> Option<&'static reqwest::Client> {
     static CLIENT: OnceLock<Option<reqwest::Client>> = OnceLock::new();
     CLIENT
-        .get_or_init(|| reqwest::Client::builder().build().ok())
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .pool_idle_timeout(POOL_IDLE)
+                .build()
+                .ok()
+        })
         .as_ref()
 }
 

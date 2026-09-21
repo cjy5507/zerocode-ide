@@ -3260,6 +3260,11 @@ fn main() -> ExitCode {
                     federation_loop(farm, federation).await
                 });
             }
+            // And the socket a walk's first question will ride (t-5535). The
+            // agents' roads are open above, so a walk can now be asked for;
+            // the handshake it would otherwise pay is opened here instead, on
+            // the helper's own thread — nothing on the boot path waits for it.
+            systemone::warm_for_walks();
             // The Jira sync outbox the last window enqueued but never finished:
             // a crash between enqueue and the network leaves Pending rows behind.
             // Resume them now — held by default, so a drain posts nothing until a
