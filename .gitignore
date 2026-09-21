@@ -46,3 +46,7 @@ crates/zerocode-shell/bin/
 /CLAUDE.md
 /untitled.md
 /untitled-2.md
+
+# Design notes and plans stay on this machine; the public repository carries code only (2026-09-21).
+docs/
+zo-ide/docs/
