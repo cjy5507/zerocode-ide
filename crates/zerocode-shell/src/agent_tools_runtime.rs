@@ -644,7 +644,7 @@ pub(super) fn pane_worktree(env: &[(String, String)]) -> Option<PathBuf> {
 }
 
 /// The stall probe and the retirement fence use the same PTY quiet rule.
-fn quiet_since_output(
+pub(crate) fn quiet_since_output(
     last_output_ms: Option<i64>,
     worker_started_ms: i64,
     now_ms: i64,
@@ -5817,42 +5817,4 @@ pub(super) fn write_agent_screenshot(
         .unwrap_or(path)
         .to_string_lossy()
         .into_owned())
-}
-
-#[cfg(test)]
-mod quiet_since_tests {
-    use super::quiet_since_output;
-    use zerocode_core::orchestration::QUIET_GRACE_MS;
-
-    /// The start of a silence is the moment the child last wrote, and it is
-    /// the same number on every beat that reads it — not `now − elapsed`,
-    /// which drifted 21 ms over eight beats and had the ledger tell one
-    /// silence eight times (2026-09-21).
-    #[test]
-    fn a_silence_starts_when_the_child_last_wrote_and_reads_the_same_on_every_beat() {
-        let wrote = 1_700_000_000_000;
-        assert_eq!(
-            quiet_since_output(Some(wrote), 0, wrote + QUIET_GRACE_MS - 1),
-            None,
-            "inside the grace it is not yet a silence"
-        );
-        let first = quiet_since_output(Some(wrote), 0, wrote + QUIET_GRACE_MS);
-        let later = quiet_since_output(Some(wrote), 0, wrote + QUIET_GRACE_MS + 8_021);
-        assert_eq!(first, Some(wrote));
-        assert_eq!(later, first, "a later beat read a different start");
-    }
-
-    /// A child that never wrote is quiet since it started.
-    #[test]
-    fn a_child_that_never_wrote_is_quiet_since_it_started() {
-        let started = 5_000;
-        assert_eq!(
-            quiet_since_output(None, started, started + QUIET_GRACE_MS - 1),
-            None
-        );
-        assert_eq!(
-            quiet_since_output(None, started, started + QUIET_GRACE_MS),
-            Some(started)
-        );
-    }
 }

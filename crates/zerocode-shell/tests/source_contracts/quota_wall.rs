@@ -66,7 +66,7 @@ fn the_wall_witness_is_asked_beside_the_stall_probe_and_outside_the_team_table()
     );
     for evidence in [
         "HookState::Working",
-        "last_output_at()",
+        "last_output_epoch_ms()",
         "quiet_since_output(",
         "worker_started_ms",
     ] {
