@@ -1,0 +1,71 @@
+[
+  {
+    "AXLabel": "설정",
+    "AXValue": null,
+    "AXUniqueId": "com.example.settings",
+    "role_description": "application",
+    "type": "Application",
+    "enabled": true,
+    "hit_at_centre": false,
+    "frame": {"x": 0, "y": 0, "width": 390, "height": 844},
+    "children": [
+      {
+        "AXLabel": null,
+        "AXValue": null,
+        "AXUniqueId": "settings.pinned",
+        "role_description": "그룹",
+        "type": "Group",
+        "enabled": true,
+        "hit_at_centre": false,
+        "frame": {"x": 0, "y": 60, "width": 390, "height": 140},
+        "children": [
+          {
+            "AXLabel": "AirDrop",
+            "AXValue": null,
+            "AXUniqueId": "settings.airdrop",
+            "role_description": "button",
+            "type": "Button",
+            "enabled": true,
+            "hit_at_centre": true,
+            "frame": {"x": 20, "y": 76, "width": 350, "height": 44},
+            "children": []
+          },
+          {
+            "AXLabel": "기내 모드",
+            "AXValue": null,
+            "AXUniqueId": "settings.airplane",
+            "role_description": "button",
+            "type": "Button",
+            "enabled": true,
+            "hit_at_centre": true,
+            "frame": {"x": 20, "y": 136, "width": 350, "height": 44},
+            "children": []
+          }
+        ]
+      },
+      {
+        "AXLabel": null,
+        "AXValue": null,
+        "AXUniqueId": "settings.list",
+        "role_description": "그룹",
+        "type": "Group",
+        "enabled": true,
+        "hit_at_centre": false,
+        "frame": {"x": 0, "y": 220, "width": 390, "height": 200},
+        "children": [
+          {
+            "AXLabel": "일반",
+            "AXValue": null,
+            "AXUniqueId": "settings.general",
+            "role_description": "button",
+            "type": "Button",
+            "enabled": true,
+            "hit_at_centre": true,
+            "frame": {"x": 20, "y": 236, "width": 350, "height": 44},
+            "children": []
+          }
+        ]
+      }
+    ]
+  }
+]

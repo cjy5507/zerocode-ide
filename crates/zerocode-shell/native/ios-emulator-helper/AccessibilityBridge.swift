@@ -148,7 +148,7 @@ final class AccessibilityBridge: NSObject {
         var coverage = AccessibilityCoverage()
         var visited = Set<ObjectIdentifier>()
         var remainingElements = Self.maxSerializedElements
-        guard var root = serialize(
+        guard case .seated(var root) = serialize(
             element: rootElement,
             token: token,
             coverage: &coverage,
@@ -354,7 +354,7 @@ final class AccessibilityBridge: NSObject {
                     coverage.insertContainer(frame)
                     continue
                 }
-                if let serialized = serialize(
+                if case .seated(let serialized) = serialize(
                     element: element,
                     token: token,
                     coverage: &coverage,
@@ -399,12 +399,14 @@ final class AccessibilityBridge: NSObject {
         visited: inout Set<ObjectIdentifier>,
         remainingElements: inout Int,
         depth: Int
-    ) -> [String: Any]? {
+    ) -> AccessibilityWalkStep {
         guard remainingElements > 0, depth <= Self.maxSerializationDepth else {
-            return nil
+            return .lost
         }
+        // Seated once, under the first parent that reached it: an element two
+        // parents share must not collect two numbers.
         guard visited.insert(ObjectIdentifier(element)).inserted else {
-            return nil
+            return .revisited
         }
         remainingElements -= 1
 
@@ -467,21 +469,21 @@ final class AccessibilityBridge: NSObject {
             children = element.value(forKey: "accessibilityChildren") as? [Any]
         }
         if let children {
+            var tally = AccessibilityChildTally(declared: children.count)
             for child in children {
                 guard remainingElements > 0 else { break }
                 guard let childObj = child as? NSObject else { continue }
-                if let childDict = serialize(
+                tally.record(serialize(
                     element: childObj,
                     token: token,
                     coverage: &coverage,
                     visited: &visited,
                     remainingElements: &remainingElements,
                     depth: depth + 1
-                ) {
-                    childDicts.append(childDict)
-                }
+                ))
             }
-            if childDicts.count < children.count { dict["truncated"] = true }
+            childDicts = tally.seats
+            if tally.truncated { dict["truncated"] = true }
         }
 
         // Record this element. Only true leaves block the grid — anything
@@ -496,7 +498,7 @@ final class AccessibilityBridge: NSObject {
         }
         dict["children"] = childDicts
 
-        return dict
+        return .seated(dict)
     }
 
     /// What the exporter puts under this element's centre — asked with the

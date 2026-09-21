@@ -352,9 +352,15 @@ fn build_ios_emulator_helper() {
     let manifest = std::path::PathBuf::from(
         std::env::var_os("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"),
     );
-    let source = manifest.join("native/ios-emulator-helper/main.swift");
-    let accessibility = manifest.join("native/ios-emulator-helper/AccessibilityBridge.swift");
-    for input in [&source, &accessibility] {
+    // One module: the two files at the helper's root, plus the part of it
+    // `swift test` builds on its own (`just swift-test`, Package.swift there).
+    let helper = manifest.join("native/ios-emulator-helper");
+    let inputs = [
+        helper.join("main.swift"),
+        helper.join("AccessibilityBridge.swift"),
+        helper.join("Sources/ZeroCodeIosEmulatorHelperCore/AccessibilityChildTally.swift"),
+    ];
+    for input in &inputs {
         println!("cargo:rerun-if-changed={}", input.display());
     }
     let architecture = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
@@ -366,7 +372,7 @@ fn build_ios_emulator_helper() {
     let target = format!("{architecture}-apple-macosx14.0");
     use std::hash::{Hash as _, Hasher as _};
     let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
-    for input in [&source, &accessibility] {
+    for input in &inputs {
         std::fs::read(input)
             .expect("read iOS emulator helper source")
             .hash(&mut fingerprint);
@@ -378,7 +384,7 @@ fn build_ios_emulator_helper() {
     if !output.is_file() {
         let status = std::process::Command::new("xcrun")
             .args(["--sdk", "macosx", "swiftc"])
-            .args([&source, &accessibility])
+            .args(&inputs)
             .args(["-O", "-whole-module-optimization", "-target", &target, "-o"])
             .arg(&output)
             .status()

@@ -25,6 +25,15 @@ fn ios_settings_tree() -> Value {
     serde_json::from_str(include_str!("fixtures/ios-settings.json")).unwrap()
 }
 
+/// A screen whose accessibility graph is a DAG, as the exporter hands it over:
+/// `settings.airdrop` is pinned above the list *and* listed inside it, so two
+/// parents reference the one subview. The walk seats it under the first parent
+/// that reaches it — `settings.list` therefore exports one child where it
+/// declared two, and nothing at all is missing.
+fn ios_dag_tree() -> Value {
+    serde_json::from_str(include_str!("fixtures/ios-dag.json")).unwrap()
+}
+
 /// The same tree as the exporter gave it before it was asked about centres.
 fn without_hit_tests(mut tree: Value) -> Value {
     fn strip(node: &mut Value) {
@@ -549,6 +558,44 @@ fn a_device_replaced_after_resolution_cannot_reach_the_marked_tap() {
     });
     assert_eq!(result.unwrap_err().code, error_code::PIN_BROKEN);
     assert_eq!(taps, 0);
+}
+
+/// A subview two parents share costs the screen nothing.
+///
+/// The exporter seats such an element once, so the parent that reached it
+/// second shows fewer children than it declared. Counting that as a cut
+/// subtree made `Snapshot` refuse a screen that was exported whole (t-5445);
+/// the exporter's own rule is pinned in `tests/source_contracts`. Here: the
+/// tree is taken, the shared cell carries exactly one number, and the same
+/// tree marked truncated is still refused — that word still means
+/// observations the export does not have.
+#[test]
+fn a_subview_two_parents_share_is_numbered_once_and_never_refuses_the_screen() {
+    let snapshot = Snapshot::ios(&ios_dag_tree()).unwrap();
+    let plan = numbered(&snapshot.faces, snapshot.screen);
+    assert_eq!(
+        marked_words(&plan, &snapshot.faces),
+        [
+            ("AXButton", "AirDrop"),
+            ("AXButton", "기내 모드"),
+            ("AXButton", "일반")
+        ]
+    );
+    let shared: Vec<&ElementFace> = snapshot
+        .faces
+        .iter()
+        .filter(|face| face.words() == "AirDrop")
+        .collect();
+    assert_eq!(
+        shared.len(),
+        1,
+        "the shared cell is seated twice: {shared:?}"
+    );
+    // What the exporter used to say about that second parent, and what the
+    // word must go on meaning: a subtree it really could not walk.
+    let mut cut = ios_dag_tree();
+    cut[0]["children"][1]["truncated"] = json!(true);
+    assert!(Snapshot::ios(&cut).unwrap_err().contains("truncated"));
 }
 
 #[test]

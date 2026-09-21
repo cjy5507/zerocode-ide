@@ -50,13 +50,16 @@ tools-test:
     python3 tools/tests/test_decision_shadow_summary.py
     python3 tools/tests/test_jev_token_diet_baseline.py
 
-# The Computer Use helper's own tests (Swift, 146 on 2026-09-12): the pure
-# Core its main.swift calls, and the case tables it shares with the Rust core.
-# They sat in no recipe until the bench (E2) — the silence the tools' tests
-# had. ~17 s cold (a fresh scratch builds the package in debug), ~2 s warm.
-# Elsewhere it says SKIPPED aloud: the helper is macOS-only.
+# The native helpers' own tests (Swift, 178 + 5 on 2026-09-21): the pure Core
+# the Computer Use helper's main.swift calls and the case tables it shares with
+# the Rust core, then the iOS emulator helper's own Core — the part of its
+# exporter that can be judged without a booted simulator. They sat in no recipe
+# until the bench (E2) — the silence the tools' tests had. ~17 s + ~13 s cold
+# (a fresh scratch builds each package in debug), ~2 s warm. Every package runs
+# even after one fails, for the reason `test` keeps `--no-fail-fast`. Elsewhere
+# it says SKIPPED aloud: both helpers are macOS-only.
 swift-test:
-    if [ "$(uname -s)" = Darwin ]; then swift test --package-path crates/zerocode-shell/native/computer-use-macos; else echo "swift-test SKIPPED: the Computer Use helper is macOS-only"; fi
+    if [ "$(uname -s)" = Darwin ]; then rc=0; for helper in computer-use-macos ios-emulator-helper; do swift test --package-path "crates/zerocode-shell/native/$helper" || rc=1; done; exit $rc; else echo "swift-test SKIPPED: the native helpers are macOS-only"; fi
 
 # 창의 순수 로직(서버 응답 파싱, porcelain, 브랜치 읽기) 단위 테스트.
 # clippy --all-targets가 이미 테스트를 컴파일해 두므로 실행 비용만 든다.
