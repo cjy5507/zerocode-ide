@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use api::{SystemOneCall, SystemOneClient, SystemOneConfig, SystemOneFailure, SYSTEMONE_MODEL};
 use zerocode_core::jev::door::Refused;
 use runtime::{
-    DecisionVerdict, ProbeAssessment, RubricAxis,
+    DecisionVerdict, ProbeAssessment, RubricAxis, SwitchTrigger,
     DECISION_RUBRIC_VERSION,
 };
 use serde::{Deserialize, Serialize};
@@ -48,7 +48,7 @@ use zerocode_core::jev::promote::{self, Verdict};
 use zerocode_core::jev::summary::{self as jev_ledger, JUDGED_EVERY_ROWS};
 
 use super::jev_summary;
-use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
+use super::shadow_ledger::{append_shadow_row, last_shadow_lines, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
 use crate::misc_tools::agent_tools::shared_agent_runtime;
 
 /// The decision shadow's ledger file, under the shared shadow-ledger directory
@@ -811,6 +811,92 @@ fn write_rows(ledger: &Path, settings: Option<&serde_json::Value>, rows: &[Decis
     judge_ledger(ledger, settings, now_ms());
 }
 
+/// The `followed` word of a turn the route stood through: nothing unseated
+/// the model the judgment routed to before the turn ended.
+pub const ROUTE_STOOD: &str = "stood";
+
+/// How far back a turn's own rows are looked for when its label is written.
+///
+/// A turn's routing rows are the newest in the ledger when the turn ends —
+/// its own judgment, the judgments of the agents it spawned, and the control
+/// row a sampled active turn drew — and the widest turn this machine has
+/// routed spawned twenty-two workers (run-4275). Two hundred and fifty-six
+/// rows holds that turn ten times over without reading a ledger that runs to
+/// megabytes back to its first line, which the judge already does once every
+/// twenty requests and the label does not have to do again.
+const LABEL_LOOKBACK_ROWS: usize = 256;
+
+/// One turn's label: what became of the route the judgment took part in.
+///
+/// A row of its own rather than a column on the judgment's row, for the
+/// reason the skill seat gives (`skill_search::SkillLabelRow`): the
+/// judgment's row is written before anybody knows how the turn will end.
+/// Named by the turn's attempt twice — as [`jev_ledger::LABEL`], which says
+/// what kind of row this is, and as `attempt`, the column the judgment's
+/// rows carry, so the judge joins the two on one spelling.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteLabelRow {
+    pub at: u64,
+    /// The attempt this label grades — the value every routing row of that
+    /// turn carries as `attempt`.
+    pub label: String,
+    pub attempt: String,
+    /// [`ROUTE_STOOD`], or the door the wire left through
+    /// (`SwitchTrigger::as_str`): `quota`, `refusal`, `starvation`, `person`.
+    pub followed: String,
+    /// The mark the judge counts: the route stood.
+    pub agreed: bool,
+}
+
+/// Whether a model switch says the route the judgment took part in did not
+/// stand: the model it routed to could not serve ([`SwitchTrigger::forced`]
+/// — a quota wall, a refusal, an overload shed), or the person named another
+/// one themselves. A deep gate's leg borrowing a client for one sub-turn and
+/// the step governor moving a rung are the turn's own design, not a route
+/// unseated, and leave the label alone.
+#[must_use]
+pub fn route_unseated_by(trigger: SwitchTrigger) -> bool {
+    trigger.forced() || trigger == SwitchTrigger::Person
+}
+
+/// Write the routing seat's `agreed` mark for the turn `attempt` names: the
+/// route stood, or `unseated` moved the wire off it first.
+///
+/// Nothing is written when the ledger's tail holds no judgment of that
+/// attempt — a turn the seat was never asked about is not one it agreed or
+/// disagreed with — and nothing is written twice: a label already standing
+/// for the attempt is left as it is. Answers whether a row was written.
+#[must_use]
+pub fn note_route_followed(cwd: &Path, attempt: &str, unseated: Option<SwitchTrigger>) -> bool {
+    let attempt = attempt.trim();
+    if attempt.is_empty() {
+        return false;
+    }
+    let ledger = decision_shadow_path(cwd);
+    let tail: Vec<serde_json::Value> = last_shadow_lines(&ledger, LABEL_LOOKBACK_ROWS)
+        .iter()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let of_attempt = |row: &serde_json::Value| row.get(ATTEMPT).and_then(serde_json::Value::as_str) == Some(attempt);
+    let judged = tail.iter().any(|row| of_attempt(row) && jev_ledger::asked_something(row).is_some());
+    let labeled = tail.iter().any(|row| of_attempt(row) && jev_ledger::LABEL.read(row).is_some());
+    if !judged || labeled {
+        return false;
+    }
+    let row = RouteLabelRow {
+        at: u64::try_from(now_ms()).unwrap_or_default(),
+        label: attempt.to_string(),
+        attempt: attempt.to_string(),
+        followed: unseated.map_or(ROUTE_STOOD, SwitchTrigger::as_str).to_string(),
+        agreed: unseated.is_none(),
+    };
+    append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok()
+}
+
+/// The routing row's attempt column, as the row spells it.
+const ATTEMPT: &str = "attempt";
+
 /// The file label drafts are appended to, beside the ledger they will be
 /// joined to.
 pub const LABEL_DRAFTS_FILE: &str = "decision-labels.draft.jsonl";
@@ -933,13 +1019,15 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
     Some(Judged { verdict, window, window_wanted, agreement, control_rows })
 }
 
-/// The window's rows and, after them, every control row of a task the window
-/// holds — the rows the agreement is read over — with how many of the second
-/// kind joined.
+/// The window's rows and, after them, every row joined to them for the
+/// agreement — the control row of a task the window holds, and the turn
+/// label of an attempt it holds ([`RouteLabelRow`]) — with how many control
+/// rows joined.
 ///
-/// Joined by task and not taken whole: a control row stands for the active
-/// row it was drawn beside, and one whose row has left the window has left
-/// with it. A window of `applied` rows compares nothing on its own (its probe
+/// Joined by task and by attempt rather than taken whole: a control row
+/// stands for the active row it was drawn beside, a label for the turn its
+/// rows were judged in, and one whose row has left the window has left with
+/// it. A window of `applied` rows compares nothing on its own (its probe
 /// cell is `not_run`); these are where its comparisons come from.
 fn with_control_rows<'a>(
     rows: &'a [serde_json::Value],
@@ -949,33 +1037,53 @@ fn with_control_rows<'a>(
         .iter()
         .filter_map(|row| row.get(TASK).and_then(serde_json::Value::as_str))
         .collect();
+    let attempts: HashSet<&str> = held
+        .iter()
+        .filter_map(|row| row.get(ATTEMPT).and_then(serde_json::Value::as_str))
+        .collect();
     let mut compared = held.to_vec();
     let mut joined = 0;
     for row in rows {
-        if !jev_ledger::is_control_row(row) {
+        if jev_ledger::is_control_row(row) {
+            if row.get(TASK).and_then(serde_json::Value::as_str).is_some_and(|task| tasks.contains(task)) {
+                compared.push(row);
+                joined += 1;
+            }
             continue;
         }
-        if row.get(TASK).and_then(serde_json::Value::as_str).is_some_and(|task| tasks.contains(task)) {
+        let is_label = jev_ledger::LABEL.read(row).is_some() && jev_ledger::AGREED.read(row).is_some();
+        if is_label
+            && row
+                .get(ATTEMPT)
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|attempt| attempts.contains(attempt))
+        {
             compared.push(row);
-            joined += 1;
         }
     }
     (compared, joined)
 }
 
-/// How often the judgment named what the chat probe named, over the rows
-/// where both answered — one comparison per judged axis of each such row.
+/// How often the judgment named what the reader it would replace named: one
+/// comparison per judged axis of each row where both the judgment and the
+/// chat probe answered, and one per turn label that carries the seat's
+/// `agreed` mark ([`RouteLabelRow`] — the route stood, or did not).
 ///
-/// Read from the rows the window was counted from, and the control rows
-/// joined to them (`with_control_rows`), so the share and the bound stand
-/// on the same requests. A row the probe timed out on (eleven of this
-/// machine's 28) compares nothing and counts nothing, and so does an active
-/// row on its own: its probe cell is `not_run`, and its control row is where
-/// the comparison is.
+/// Read from the rows the window was counted from, and the rows joined to
+/// them (`with_control_rows`), so the share and the bound stand on the same
+/// requests. A row the probe timed out on (eleven of this machine's 28)
+/// compares nothing and counts nothing, and so does an active row on its
+/// own: its probe cell is `not_run`, and its control row is where the
+/// comparison is.
 #[must_use]
 pub fn agreement_in(rows: &[&serde_json::Value]) -> promote::Agreement {
     let mut agreement = promote::Agreement::default();
     for row in rows {
+        if let Some(agreed) = jev_ledger::AGREED.read(row).and_then(serde_json::Value::as_bool) {
+            agreement.compared += 1;
+            agreement.agreed += usize::from(agreed);
+            continue;
+        }
         let Ok(row) = serde_json::from_value::<DecisionShadowRow>((*row).clone()) else {
             continue;
         };

@@ -374,20 +374,11 @@ async fn judge_step(
 }
 
 /// Judge the seat on what it has just written, and write down a rise or a
-/// fall — the routing seat's cadence (`decision_shadow::judge_ledger`), read
-/// through the table's own judge because this seat's agreement is the
-/// `agreed` marks its own rows carry, not a probe beside a judgment.
+/// fall — the one judge every seat that carries its own `agreed` marks
+/// takes (`shadow_ledger::judge_seat_ledger`).
 #[must_use]
 pub fn judge_ledger(ledger: &Path, now_ms: i64) -> Option<promote::Verdict> {
-    let rows = super::jev_summary::read_rows(ledger);
-    if !promote::judgment_due(&rows) {
-        return None;
-    }
-    let judged = promote::judge_seat(&ZO_STEP_EFFORT, &rows)?;
-    if let Some(row) = promote::transition_row(now_ms, judged.verdict, &judged.window) {
-        let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
-    }
-    Some(judged.verdict)
+    super::shadow_ledger::judge_seat_ledger(&ZO_STEP_EFFORT, ledger, now_ms)
 }
 
 #[cfg(test)]

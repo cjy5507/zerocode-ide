@@ -741,6 +741,12 @@ impl PlainSession {
         );
         let restore_reactive_gate =
             TurnHarness::install_reactive_verify_gate_if_coding(input, &mut self.runtime);
+        // Where this turn's messages begin, for the labels written at its end
+        // (t-5806): everything the turn appends stands after this index.
+        let turn_from = self
+            .runtime
+            .try_runtime()
+            .map_or(0, |inner| inner.session().messages.len());
         let installed = super::smart_runtime::install_smart_turn(
             &mut self.runtime,
             &self.cwd,
@@ -750,61 +756,7 @@ impl PlainSession {
             turn_setup.assessment,
             (named_effort, effort_band_ceiling),
         );
-        if let Some(inner) = self.runtime.try_runtime_mut() {
-            // Who stops this turn if it does not stop itself. A person at the
-            // keyboard has Esc — the one breaker Claude Code and Codex run
-            // with — so their turn sets no clock and no token cap unless the
-            // env names one. A headless run, or an autonomous turn the goal
-            // controller or the window drives, has nobody to press it and
-            // keeps the safety net.
-            let attendance = if self.headless || inner.is_autonomous_surface() {
-                runtime::Attendance::Unattended
-            } else {
-                runtime::Attendance::Attended
-            };
-            inner.set_attendance(attendance);
-            // And for the parts of the process with no runtime to ask — the
-            // caps a spawned helper is given on its own thread.
-            runtime::declare_attendance(attendance);
-            let (deadline, output_budget, input_budget) = runtime::env_turn_budgets(attendance);
-            match deadline {
-                Some(budget) => inner.set_deadline(std::time::Instant::now() + budget),
-                None => inner.clear_deadline(),
-            }
-            inner.set_turn_output_token_budget(output_budget);
-            inner.set_turn_input_token_budget(input_budget);
-            // Arm the progress-gated deadline extension.
-            //
-            // The policy, its defaults (2 pushes of 30 minutes) and its env
-            // overrides all existed, and the turn loop's consumer is careful —
-            // it extends only on FRESH progress (reads and probes do not
-            // count), caps the count, and says so on screen. Nothing ever
-            // armed it, so `deadline_extension` stayed `None` and the blunt
-            // 60-minute cut its own comment blames for "interrupting the
-            // legitimate long audit or deploy pipeline" was still the whole
-            // policy.
-            //
-            // Here, beside the deadline it extends, and re-read every turn for
-            // the same reason `set_deadline` is: an env change takes effect on
-            // the next turn rather than at next launch.
-            //
-            // Only this host. A spawned sub-agent keeps its deadline as a hard
-            // straggler bound — nobody is watching it to notice a grind.
-            inner.set_deadline_extension(runtime::env_deadline_extension());
-            // 도는 도구를 끊는 신호를 심는다.
-            //
-            // 런타임은 이걸 `await_cancellable_tool_dispatch` 의 `select!` 두
-            // 팔 중 하나로 지켜보고 있었다: 도구 완료 아니면 이 신호. 그런데
-            // 아무도 신호를 쥔 적이 없어서, 도구가 떠 있는 동안 Esc 가 세우는
-            // 깃발 둘(`hook_abort`·`cancel`)을 그 select 는 읽지 않았다 —
-            // 화면엔 "interrupted" 가 찍히고 턴은 계속 돌았다. 물린 MCP·bash
-            // 호출이면 영영.
-            //
-            // 예산 옆에서 매 턴 다시 심는 이유는 `set_deadline` 과 같다: 이
-            // 런타임은 모델·권한 전환에 다시 세워지고, 그때 심어둔 사본은
-            // 함께 사라진다.
-            inner.set_tool_cancel_signal(self.tool_cancel.clone());
-        }
+        self.arm_turn_limits();
         // 난이도가 넓다고 하면 호스트가 먼저 갈라 읽는다(`orchestration`): 결과는
         // 이 턴의 문맥에 앉고, 모델은 그 위에서 시작한다. 예산·출석 선언 뒤라
         // 헬퍼도 같은 한도를 받는다.
@@ -852,9 +804,104 @@ impl PlainSession {
             None => Err("runtime not available".to_string()),
         };
         TurnHarness::restore_deep_gate(&mut self.runtime, restore_reactive_gate);
+        // The Jev seats' labels for this turn (t-5806): whether the route the
+        // routing seat took part in stood, and whether the note the recall
+        // seat put first was read. Judged on what is already in memory — the
+        // switch the observer saw, and the messages this turn appended — and
+        // not on a cancelled turn, which says nothing about either.
+        if !user_cancel_requested.load(Ordering::SeqCst) && !hook_abort_signal.is_aborted() {
+            self.label_jev_seats(installed.route_watch.taken(), turn_from);
+        }
         let summary = result?;
         self.persist().map_err(|error| error.to_string())?;
         Ok(summary)
+    }
+
+    /// Who stops this turn if it does not stop itself, and what cuts a tool
+    /// that will not end — armed every turn, because the runtime is rebuilt
+    /// on a model or permission switch and takes the last turn's copies with
+    /// it. Its own method so the turn's body stays readable (clippy's line
+    /// budget), not because any of it is reused.
+    fn arm_turn_limits(&mut self) {
+    if let Some(inner) = self.runtime.try_runtime_mut() {
+        // Who stops this turn if it does not stop itself. A person at the
+        // keyboard has Esc — the one breaker Claude Code and Codex run
+        // with — so their turn sets no clock and no token cap unless the
+        // env names one. A headless run, or an autonomous turn the goal
+        // controller or the window drives, has nobody to press it and
+        // keeps the safety net.
+        let attendance = if self.headless || inner.is_autonomous_surface() {
+            runtime::Attendance::Unattended
+        } else {
+            runtime::Attendance::Attended
+        };
+        inner.set_attendance(attendance);
+        // And for the parts of the process with no runtime to ask — the
+        // caps a spawned helper is given on its own thread.
+        runtime::declare_attendance(attendance);
+        let (deadline, output_budget, input_budget) = runtime::env_turn_budgets(attendance);
+        match deadline {
+            Some(budget) => inner.set_deadline(std::time::Instant::now() + budget),
+            None => inner.clear_deadline(),
+        }
+        inner.set_turn_output_token_budget(output_budget);
+        inner.set_turn_input_token_budget(input_budget);
+        // Arm the progress-gated deadline extension.
+        //
+        // The policy, its defaults (2 pushes of 30 minutes) and its env
+        // overrides all existed, and the turn loop's consumer is careful —
+        // it extends only on FRESH progress (reads and probes do not
+        // count), caps the count, and says so on screen. Nothing ever
+        // armed it, so `deadline_extension` stayed `None` and the blunt
+        // 60-minute cut its own comment blames for "interrupting the
+        // legitimate long audit or deploy pipeline" was still the whole
+        // policy.
+        //
+        // Here, beside the deadline it extends, and re-read every turn for
+        // the same reason `set_deadline` is: an env change takes effect on
+        // the next turn rather than at next launch.
+        //
+        // Only this host. A spawned sub-agent keeps its deadline as a hard
+        // straggler bound — nobody is watching it to notice a grind.
+        inner.set_deadline_extension(runtime::env_deadline_extension());
+        // 도는 도구를 끊는 신호를 심는다.
+        //
+        // 런타임은 이걸 `await_cancellable_tool_dispatch` 의 `select!` 두
+        // 팔 중 하나로 지켜보고 있었다: 도구 완료 아니면 이 신호. 그런데
+        // 아무도 신호를 쥔 적이 없어서, 도구가 떠 있는 동안 Esc 가 세우는
+        // 깃발 둘(`hook_abort`·`cancel`)을 그 select 는 읽지 않았다 —
+        // 화면엔 "interrupted" 가 찍히고 턴은 계속 돌았다. 물린 MCP·bash
+        // 호출이면 영영.
+        //
+        // 예산 옆에서 매 턴 다시 심는 이유는 `set_deadline` 과 같다: 이
+        // 런타임은 모델·권한 전환에 다시 세워지고, 그때 심어둔 사본은
+        // 함께 사라진다.
+        inner.set_tool_cancel_signal(self.tool_cancel.clone());
+    }    }
+
+    /// Write the routing and recall seats' `agreed` marks for the turn that
+    /// just ended: the route stood unless `unseated` says which door moved
+    /// the wire, and the recall's first note was read or cited in the
+    /// messages from `turn_from` on. A session compaction may have shrunk the
+    /// transcript under that index; the turn is then read from its own user
+    /// message, the last one the session holds.
+    fn label_jev_seats(&self, unseated: Option<runtime::SwitchTrigger>, turn_from: usize) {
+        let Some(inner) = self.runtime.try_runtime() else {
+            return;
+        };
+        let attempt = inner.attempt().to_string();
+        let messages = Arc::clone(&inner.session().messages);
+        let from = if turn_from <= messages.len() {
+            turn_from
+        } else {
+            messages
+                .iter()
+                .rposition(|message| message.role == core_types::MessageRole::User)
+                .unwrap_or(0)
+        };
+        // Whether a row was written is the ledger's business, not the turn's.
+        let _ = tools::note_route_followed(&self.cwd, &attempt, unseated);
+        let _ = tools::note_recall_read(&self.cwd, &messages[from..]);
     }
 
     /// 턴 후 영속 — 메시지는 이미 append 됐고, 헤더/압축 변경만 스냅샷.

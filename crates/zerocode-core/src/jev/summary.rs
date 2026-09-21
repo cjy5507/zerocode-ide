@@ -131,6 +131,14 @@ pub const PRESSED: LedgerKey = LedgerKey {
     canonical: "pressed",
     also: &[],
 };
+/// The answered row a label row is about — the key that row carried as its
+/// own name (a stall's key, a placed worker's id, a turn's attempt), so a
+/// reader can join the label back to the request it grades without a second
+/// spelling of either.
+pub const LABEL: LedgerKey = LedgerKey {
+    canonical: "label",
+    also: &[],
+};
 
 /// Every key this module reads, so a contract can walk them.
 pub const LEDGER_KEYS: &[LedgerKey] = &[
@@ -146,6 +154,7 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     ROUTE_USE,
     APPLIED,
     PRESSED,
+    LABEL,
 ];
 
 /// The word a row carries when its judgment answered and passed its checks.

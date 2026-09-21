@@ -1177,6 +1177,10 @@ pub struct SeatNumbers {
     /// rises — absent from a zo that judged on the week.
     #[serde(default)]
     pub judged: Option<SeatJudged>,
+    /// Every `agreed` mark of the week, whether or not the seat rises —
+    /// absent from a zo older than the label rows (t-5806).
+    #[serde(default)]
+    pub agreement_week: Option<SeatAgreement>,
     #[serde(default)]
     pub cost_usd: Option<f64>,
     /// Today and the days before it, oldest first — the trend the dashboard

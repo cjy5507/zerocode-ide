@@ -10,6 +10,7 @@ zerocode-core = { path = "../../../crates/zerocode-core" }
 api = { path = "../api" }
 codegraph = { path = "../codegraph" }
 core-types = { path = "../core-types" }
+decision-core = { path = "../decision-core" }
 plugins = { path = "../plugins" }
 runtime = { path = "../runtime" }
 telemetry = { package = "zo-telemetry", path = "../telemetry" }

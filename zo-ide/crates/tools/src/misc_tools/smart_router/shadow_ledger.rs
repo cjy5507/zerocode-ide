@@ -151,6 +151,30 @@ pub fn last_shadow_lines(path: &Path, rows: usize) -> Vec<String> {
     whole[whole.len().saturating_sub(rows)..].iter().map(|line| (*line).to_string()).collect()
 }
 
+/// Judge `seat` on the ledger it has just written, and write down a rise or a
+/// fall — the routing seat's cadence (`decision_shadow::judge_ledger`), read
+/// through the table's own judge for a seat whose agreement is the `agreed`
+/// marks its own rows carry rather than a probe beside a judgment: the step
+/// governor's and the recall seat's. One judge, because two seats that each
+/// spelled the cadence would be two cadences.
+#[must_use]
+pub fn judge_seat_ledger(
+    seat: &zerocode_core::jev::JevUse,
+    ledger: &Path,
+    now_ms: i64,
+) -> Option<zerocode_core::jev::promote::Verdict> {
+    use zerocode_core::jev::promote;
+    let rows: Vec<serde_json::Value> = read_shadow_rows(ledger);
+    if !promote::judgment_due(&rows) {
+        return None;
+    }
+    let judged = promote::judge_seat(seat, &rows)?;
+    if let Some(row) = promote::transition_row(now_ms, judged.verdict, &judged.window) {
+        let _ = append_shadow_row(ledger, &row, SHADOW_LEDGER_MAX_BYTES);
+    }
+    Some(judged.verdict)
+}
+
 /// Drop the older half of a ledger's lines, atomically (write beside, rename).
 fn keep_newer_half(path: &Path) -> io::Result<()> {
     let text = fs::read_to_string(path)?;

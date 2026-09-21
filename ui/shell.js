@@ -8372,6 +8372,12 @@ const paneSubagents = new Map();
  * 않는다**: 훅 행은 훅 행대로, 판 행은 판 행대로 오늘처럼 선다. 판이 끝나면
  * `dropTermView`가 지운다. */
 const paneHelpers = new Map();
+/* The workers whose pane the placement seat answered for and whose label is
+ * still open (t-5806): term → { worker }. Filled when the door says the
+ * answer is in its book (`placed`), emptied by the first move this surface
+ * reports of that pane or by the pane ending — a second move of the same
+ * pane is a fact about the person's afternoon, not about the answer. */
+const placedWorkers = new Map();
 
 /* The pane that IS this helper, or `null` — the map above read the other way.
  * Asked by a roster row's click: a helper whose seat named it has a pane to go
@@ -9495,6 +9501,8 @@ async function focusAgentPane(worktree, tabId, term, agent = null) {
       if (revealListedWorker(term, worktree, agent)) return;
       detachedAgents.delete(term);
       mountTermTab(term, { worktree, ...(agent ? { agent: agentName(agent) } : {}) }, { placement: "tab" });
+      // The person brought a parked worker back onto the stage.
+      noteWorkerRoomChange(term, "tab");
     }
     return;
   }
@@ -13517,7 +13525,7 @@ listen("term:cwd", (event) => {
  * pane, and any failure on this road seats the pane as a tab, which is what
  * every worker got before the seat existed (2026-09-20, "전부 자동 기록하며
  * 실제 적용되어야"). */
-async function roomForWorker({ parent, worktree, seat }) {
+async function roomForWorker({ parent, term, worktree, seat }) {
   if (!seat || typeof seat.brief !== "string" || seat.brief.length === 0) return "tab";
   const host = tabs.find((tab) => tab.kind === "term" && paneLeaves(tab.layout).includes(parent)) ?? null;
   const front = tabs.find((tab) => tab.id === activeTabId) ?? null;
@@ -13542,11 +13550,29 @@ async function roomForWorker({ parent, worktree, seat }) {
   };
   try {
     const judged = await invoke("judge_worker_room", { look });
+    // An answer the door put in its book waits for what the person does with
+    // the pane; this surface is the only one that can see that, so it keeps
+    // the worker's name by the term until it has reported one move.
+    if (judged?.placed && typeof seat.worker === "string") placedWorkers.set(term, { worker: seat.worker });
     if (judged?.applied && typeof judged.chosen === "string") return judged.chosen;
   } catch {
     // A backend without the door, or a door that refused: the tab it is.
   }
   return "tab";
+}
+
+/* The person moved a placed worker's pane to `room` — one of the seat's
+ * three rooms — and the placement seat's label is written from it (t-5806).
+ * Reported once per placed pane, by the roads a PERSON takes: a tab dragged
+ * to another group or split, a tiled pane closed into the background, a
+ * parked worker brought back to a tab. The seat's own re-seat and the
+ * window's parking of a team's overflow are not the person and never come
+ * through here. A pane no answer is waiting on reports nothing. */
+function noteWorkerRoomChange(term, room) {
+  const placed = placedWorkers.get(term);
+  if (!placed) return;
+  placedWorkers.delete(term);
+  invoke("note_worker_room_change", { worker: placed.worker, room }).catch(() => {});
 }
 
 /* Move a just-seated worker to the room the placement seat named, when the
@@ -13600,7 +13626,7 @@ listen("term:worker", (event) => {
   // Then the placement seat, off this handler: the tab above is what every
   // worker got before the seat existed and what it keeps unless a seat that
   // ACTS names another room (`reseatWorkerByAnswer`).
-  void roomForWorker({ parent, worktree, seat }).then((room) => reseatWorkerByAnswer(term, parent, worktree, agent, room));
+  void roomForWorker({ parent, term, worktree, seat }).then((room) => reseatWorkerByAnswer(term, parent, worktree, agent, room));
   void (async () => {
     try {
       await refreshWorktrees();

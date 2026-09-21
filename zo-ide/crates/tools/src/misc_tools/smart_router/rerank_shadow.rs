@@ -46,13 +46,16 @@ use runtime::memory::rerank::{
     apply_order, compare, rerank_candidates, rerank_questions, rerank_state, validate_rerank,
     RerankComparison, RerankReading, RERANK_RUBRIC_VERSION,
 };
+use core_types::{ContentBlock, ConversationMessage, MessageRole};
 use runtime::{MemoryHit, RecallSeat};
 use serde::{Deserialize, Serialize};
 
 use super::jev_gate::{self, JevDoor};
 use super::probe_exec::{remember_bounded, task_fingerprint, PROBE_TIMEOUT};
 use super::settings::rerank_shadow_mode_from;
-use super::shadow_ledger::{append_shadow_row, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES};
+use super::shadow_ledger::{
+    append_shadow_row, judge_seat_ledger, shadow_ledger_path, SHADOW_LEDGER_MAX_BYTES,
+};
 use crate::misc_tools::agent_tools::shared_agent_runtime;
 
 /// The rerank shadow's ledger file, under the shared shadow-ledger directory
@@ -366,11 +369,42 @@ pub(super) fn settle(cwd: &Path, query: &str, hits: Vec<MemoryHit>) -> Vec<Memor
     let Some(mode) = asking_mode(cwd, query, &hits) else {
         return hits;
     };
-    if !mode.applies() {
+    // `auto` acts on the standing its own ledger recorded (§4, t-5806): the
+    // judge wrote a rise there when the window cleared every line on the
+    // seat's own labels, and reading it back here is what makes `auto` a
+    // word that decides rather than a second spelling of `shadow`. Read only
+    // under `auto`: a person's `on` needs no ledger, and `shadow` reads none.
+    let raised = mode == zerocode_core::jev::JevMode::Auto && runtime::jev_seat_applies(cwd, &RECALL);
+    if !mode.applies_with(raised) {
         fire(cwd, query, &hits, RERANK_SHADOW_DEADLINE, None);
         return hits;
     }
     apply(cwd, query, hits)
+}
+
+/// Judge the seat on what it has just written — a reading or a label — and
+/// write down a rise or a fall in this same ledger (§4), through the one
+/// judge a seat with its own marks takes.
+pub(super) fn judge_ledger(ledger: &Path, now_ms: i64) -> Option<zerocode_core::jev::promote::Verdict> {
+    judge_seat_ledger(&RECALL, ledger, now_ms)
+}
+
+/// The clock the judge's transition rows carry.
+fn now_ms() -> i64 {
+    i64::try_from(unix_millis()).unwrap_or(i64::MAX)
+}
+
+/// The judge, off the turn: it reads the whole ledger — 4.5 ms on this
+/// machine's 1,005-row, 1.4 MB recall ledger (measured 2026-09-22,
+/// `measure_what_a_label_and_a_judge_cost_on_this_machines_ledgers`) — and
+/// the road that asks for it is either holding the turn's recall thread or
+/// ending the turn, neither of which should pay a file parse for a verdict
+/// the NEXT recall reads. The record-only road judges inline, because it is
+/// already off the turn.
+fn judge_detached(ledger: PathBuf) {
+    shared_agent_runtime().spawn(async move {
+        let _ = tokio::task::spawn_blocking(move || judge_ledger(&ledger, now_ms())).await;
+    });
 }
 
 /// The mode this recall is to be judged under, or `None` when it is not to be
@@ -432,14 +466,18 @@ fn apply(cwd: &Path, query: &str, hits: Vec<MemoryHit>) -> Vec<MemoryHit> {
         .as_ref()
         .and_then(|judged| apply_order(&hits, &judged.proposed, &judged.dropped));
     row.applied = read.is_some();
-    let _ = append_shadow_row(&rerank_shadow_path(cwd), &row, SHADOW_LEDGER_MAX_BYTES);
+    let ledger = rerank_shadow_path(cwd);
+    let _ = append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES);
+    judge_detached(ledger);
+    note_settled(cwd, &row, &hits);
     read.unwrap_or(hits)
 }
 
 /// Open the door, judge the reading, and leave the row with whoever writes it.
 async fn run(shot: Shot, answer: Option<RowSender>) {
     let Shot { cwd, ledger, config, query, hits, deadline } = shot;
-    let Ok(door) = tokio::task::spawn_blocking(move || JevDoor::open(&cwd)).await else {
+    let opened_at = cwd.clone();
+    let Ok(door) = tokio::task::spawn_blocking(move || JevDoor::open(&opened_at)).await else {
         telemetry::attest_failed(telemetry::HarnessFeature::RerankShadow, FAIL_SETTINGS_UNAVAILABLE);
         return;
     };
@@ -451,7 +489,169 @@ async fn run(shot: Shot, answer: Option<RowSender>) {
     let Some(row) = kept(row, answer).await else {
         return;
     };
-    let _ = tokio::task::spawn_blocking(move || append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES)).await;
+    note_settled(&cwd, &row, &hits);
+    let _ = tokio::task::spawn_blocking(move || {
+        let written = append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES);
+        judge_ledger(&ledger, now_ms());
+        written
+    })
+    .await;
+}
+
+/* ---- the label: what the turn then read ----------------------------------- */
+
+/// The last reading this process settled for a project — what a label at the
+/// turn's end is judged against.
+///
+/// In memory and not on disk, for the reason the skill seat gives
+/// (`skill_search::last_answer`): the mark is whether THIS turn went on to
+/// read what THIS reading put first, and an order read back off a ledger row
+/// could be a reading another session settled an hour ago. One per project,
+/// because recall runs once per request and a turn's last settled reading is
+/// the one whose order the turn was handed.
+struct Settled {
+    query: u64,
+    notes: u64,
+    applied: bool,
+    /// The judgment's order, each note with the path recall handed it under.
+    proposed: Vec<(String, String)>,
+}
+
+fn last_settled() -> &'static Mutex<HashMap<PathBuf, Settled>> {
+    static SETTLED: OnceLock<Mutex<HashMap<PathBuf, Settled>>> = OnceLock::new();
+    SETTLED.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Remember the order a reading settled on, when it settled on one: a row
+/// whose judgment failed or could not be ordered proposes nothing, and a turn
+/// that read recall's own order was not asked to agree with anything.
+fn note_settled(cwd: &Path, row: &RerankShadowRow, hits: &[MemoryHit]) {
+    let Some(judged) = row.judged.as_ref() else {
+        return;
+    };
+    let proposed: Vec<(String, String)> = judged
+        .proposed
+        .iter()
+        .filter_map(|slug| {
+            hits.iter()
+                .find(|hit| hit.entry.slug == *slug)
+                .map(|hit| (slug.clone(), hit.entry.path.clone()))
+        })
+        .collect();
+    if proposed.is_empty() {
+        return;
+    }
+    if let Ok(mut settled) = last_settled().lock() {
+        settled.insert(
+            cwd.to_path_buf(),
+            Settled { query: row.query, notes: row.notes, applied: row.applied, proposed },
+        );
+    }
+}
+
+/// The recall seat's `agreed` mark, one row per turn that was handed a
+/// judged order: whether the note the judgment put FIRST was read or cited
+/// before the turn ended.
+///
+/// A row of its own, keyed like the reading it grades (`query`, `notes`) and
+/// carrying `applied` from it, so an order the turn read and an order only
+/// recorded beside recall's are compared on one mark. `rank` is the place in
+/// the judgment's order of the first note the turn touched, in the order the
+/// turn touched them; absent when it touched none. Shaped like the skill
+/// seat's label (`skill_search::SkillLabelRow`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RerankLabelRow {
+    pub at: u64,
+    /// The reading this row grades, spelled `<query>:<notes>` — the two
+    /// fingerprints the answered row is named by.
+    pub label: String,
+    pub query: u64,
+    pub notes: u64,
+    pub applied: bool,
+    pub agreed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rank: Option<usize>,
+}
+
+/// Write the recall seat's mark for the turn that just ended, judged on
+/// `turn` — the messages the turn appended, already in memory — against the
+/// last reading this process settled for `cwd`. A note was touched when a
+/// tool call named its path, or the assistant's own words cited its slug
+/// (`[[slug]]`, or the path itself, as `decision_core::dreamer::cited_targets`
+/// reads them). Nothing is written when no reading was settled since the
+/// last label; answers whether a row was written.
+#[must_use]
+pub fn note_recall_read(cwd: &Path, turn: &[ConversationMessage]) -> bool {
+    let Some(settled) = last_settled().lock().ok().and_then(|mut held| held.remove(cwd)) else {
+        return false;
+    };
+    let row = label_row(&settled, turn);
+    let ledger = rerank_shadow_path(cwd);
+    let written = append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok();
+    // A label may be the mark that clears the seat's agreement line: judge
+    // now rather than at the next reading's write, so a rise the labels
+    // earned is read by the very next recall — off the turn that is ending.
+    judge_detached(ledger);
+    written
+}
+
+/// The mark itself: whether the first proposed note was touched, and the
+/// rank of the first note touched.
+fn label_row(settled: &Settled, turn: &[ConversationMessage]) -> RerankLabelRow {
+    let touched: Vec<usize> = touched_in_order(&settled.proposed, turn);
+    RerankLabelRow {
+        at: unix_millis(),
+        label: format!("{}:{}", settled.query, settled.notes),
+        query: settled.query,
+        notes: settled.notes,
+        applied: settled.applied,
+        agreed: touched.contains(&0),
+        rank: touched.first().copied(),
+    }
+}
+
+/// The ranks of the proposed notes a turn touched, in the order it touched
+/// them, each once.
+fn touched_in_order(proposed: &[(String, String)], turn: &[ConversationMessage]) -> Vec<usize> {
+    let mut touched = Vec::new();
+    for message in turn {
+        if message.role != MessageRole::Assistant {
+            continue;
+        }
+        for block in &message.blocks {
+            let mut hit = |rank: usize| {
+                if !touched.contains(&rank) {
+                    touched.push(rank);
+                }
+            };
+            match block {
+                ContentBlock::ToolUse { input, .. } => {
+                    for (rank, (_, path)) in proposed.iter().enumerate() {
+                        if !path.is_empty() && input.contains(path.as_str()) {
+                            hit(rank);
+                        }
+                    }
+                }
+                ContentBlock::Text { text } => {
+                    for target in decision_core::dreamer::cited_targets(text) {
+                        for (rank, (slug, path)) in proposed.iter().enumerate() {
+                            if cites(&target, slug, path) {
+                                hit(rank);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    touched
+}
+
+/// Whether a cited target names a note: its slug, or its path whole or by a
+/// tail that begins at a path component.
+fn cites(target: &str, slug: &str, path: &str) -> bool {
+    target == slug || target == path || path.ends_with(&format!("/{target}"))
 }
 
 /// The row when this task is the one to write it, `None` when a caller waiting
@@ -1706,5 +1906,190 @@ mod tests {
             runtime::render_recalled_memory_section(&hits?)
                 .map_or(0, |section| section.chars().count() / 4 + 1),
         )
+    }
+
+
+    /// The label rows this project's ledger holds, oldest first — read as
+    /// labels, so a reading's row is skipped, as a label is by `rows`.
+    fn labels(cwd: &Path) -> Vec<RerankLabelRow> {
+        super::super::shadow_ledger::read_shadow_rows(&rerank_shadow_path(cwd))
+    }
+
+    /// What a turn appended: one assistant message per block.
+    fn turn(blocks: Vec<ContentBlock>) -> Vec<ConversationMessage> {
+        std::iter::once(ConversationMessage::user_text("the question"))
+            .chain(blocks.into_iter().map(|block| ConversationMessage::assistant(vec![block])))
+            .collect()
+    }
+
+    fn read_of(path: &str) -> ContentBlock {
+        ContentBlock::ToolUse {
+            id: "toolu_1".to_string(),
+            name: "Read".to_string(),
+            input: serde_json::json!({"file_path": path}).to_string(),
+        }
+    }
+
+    fn said(text: &str) -> ContentBlock {
+        ContentBlock::Text { text: text.to_string() }
+    }
+
+    /// The label (t-5806): whether the note the judgment put first was read
+    /// or cited before the turn ended, and the rank of the first note the
+    /// turn touched. One row per settled reading, shaped like the skill
+    /// seat's, carrying `applied` so an applied order and a recorded one are
+    /// compared on the same mark.
+    #[test]
+    fn the_label_says_whether_the_turn_read_what_the_judgment_put_first() {
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
+        let hits = three();
+        let (read, labeled) = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (label, row nine)", hits.to_vec());
+            // The turn read the judgment's first note by its path: agreed.
+            let first = read[0].entry.path.clone();
+            assert!(note_recall_read(cwd, &turn(vec![read_of(&first)])));
+            // Nothing settled since: a second label has nothing to grade.
+            assert!(!note_recall_read(cwd, &turn(vec![read_of(&first)])));
+            (read, labels(cwd))
+        });
+        assert_eq!(slugs(&read), ["wiki/b", "wiki/c", "wiki/a"]);
+        assert_eq!(labeled.len(), 1, "{labeled:?}");
+        let label = &labeled[0];
+        assert_eq!((label.agreed, label.rank, label.applied), (true, Some(0), true));
+        assert_eq!(label.label, format!("{}:{}", label.query, label.notes));
+    }
+
+    #[test]
+    fn a_turn_that_cited_the_second_note_and_read_none_disagrees_at_rank_one() {
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
+        let hits = three();
+        let labeled = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let _read = settle(cwd, "which note answers this (label, cited)", hits.to_vec());
+            // `[[wiki/c]]` in the assistant's own words, and a path-shaped
+            // mention of a note nobody proposed.
+            assert!(note_recall_read(
+                cwd,
+                &turn(vec![said("see [[wiki/c|the background]] and wiki/zzz.md")])
+            ));
+            labels(cwd)
+        });
+        assert_eq!((labeled[0].agreed, labeled[0].rank), (false, Some(1)), "{labeled:?}");
+    }
+
+    #[test]
+    fn a_turn_that_touched_no_proposed_note_disagrees_with_no_rank() {
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
+        let hits = three();
+        let labeled = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let _read = settle(cwd, "which note answers this (label, nothing)", hits.to_vec());
+            // A tool result and a user message are not the assistant's doing;
+            // a read of some other file touches nothing.
+            let mut messages = turn(vec![read_of("/somewhere/else.md")]);
+            messages.push(ConversationMessage::user_text("[[wiki/b]] typed by the person"));
+            assert!(note_recall_read(cwd, &messages));
+            labels(cwd)
+        });
+        assert_eq!((labeled[0].agreed, labeled[0].rank), (false, None), "{labeled:?}");
+    }
+
+    /// A recorded reading (`shadow`) is labeled too, with `applied: false`,
+    /// so the two populations can be compared on one mark; the row lands
+    /// after the turn moved on, and the label waits for nothing it cannot
+    /// have — a turn that ends before the row settled leaves no label.
+    #[test]
+    fn a_recorded_reading_is_labeled_once_its_row_has_settled() {
+        let mock = Mock::serving(200, reply_for(&[0, 3, 1]));
+        let hits = three();
+        let labeled = machine(zerocode_core::jev::JevMode::Shadow.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (label, shadow)", hits.to_vec());
+            assert_eq!(slugs(&read), slugs(&hits), "shadow reads recall's order");
+            let waited = std::time::Instant::now();
+            while rows(cwd).is_empty() && waited.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let proposed = rows(cwd)[0].judged.as_ref().expect("a judgment").proposed.clone();
+            assert_eq!(proposed[0], "wiki/b");
+            // The turn read the judgment's first note, though it was handed
+            // recall's order — the mark says the judgment would have been
+            // right to put it first.
+            let first = hits.iter().find(|hit| hit.entry.slug == proposed[0]).expect("the note").entry.path.clone();
+            assert!(note_recall_read(cwd, &turn(vec![read_of(&first)])));
+            labels(cwd)
+        });
+        assert_eq!(labeled.len(), 1, "{labeled:?}");
+        assert_eq!((labeled[0].agreed, labeled[0].rank, labeled[0].applied), (true, Some(0), false));
+    }
+
+    #[test]
+    fn a_label_is_not_a_request_and_a_request_is_not_a_label() {
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
+        let hits = three();
+        let (readings, labeled, asked) = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
+            let read = settle(cwd, "which note answers this (label, kinds)", hits.to_vec());
+            assert!(note_recall_read(cwd, &turn(vec![read_of(&read[0].entry.path)])));
+            let asked = super::super::jev_summary::read_rows(&rerank_shadow_path(cwd))
+                .iter()
+                .filter(|row| zerocode_core::jev::summary::asked_something(row).is_some())
+                .count();
+            (rows(cwd), labels(cwd), asked)
+        });
+        assert_eq!((readings.len(), labeled.len(), asked), (1, 1, 1));
+    }
+
+
+    /// `auto` rises on the seat's own labels (t-5806, "모든 승격"): a window of
+    /// readings that answered inside the wall and twenty turns that read what
+    /// the judgment put first clear every line, the judge writes the rise in
+    /// this ledger, and the very next recall under `auto` reads the
+    /// judgment's order — where the recall before the rise read recall's own.
+    #[test]
+    fn auto_rises_on_its_own_labels_and_the_next_recall_reads_the_judgments_order() {
+        use zerocode_core::jev::promote::{Verdict, ROSE};
+        use zerocode_core::jev::summary::{rows_that_can_clear, JUDGED_EVERY_ROWS};
+        let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
+        let hits = three();
+        let (before, verdict, rose, after, applied) = machine(zerocode_core::jev::JevMode::Auto.key(), &mock.base_url, |cwd| {
+            let ledger = rerank_shadow_path(cwd);
+            // The seat starts recording: the turn reads recall's order.
+            let before = settle(cwd, "which note answers this (auto, before)", hits.to_vec());
+            let began = std::time::Instant::now();
+            while rows(cwd).is_empty() && began.elapsed() < Duration::from_secs(5) {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            // A window's worth of answered readings, at a judgment boundary,
+            // and a window's worth of labels that agreed — written as the
+            // seat writes them, in its own ledger.
+            let floor = RECALL.answer_floor_permille.expect("recall rises");
+            let wanted = rows_that_can_clear(floor).next_multiple_of(JUDGED_EVERY_ROWS);
+            let already = rows(cwd).len();
+            for at in 0..(wanted - already) {
+                let row = serde_json::json!({
+                    "at": 1_000 + at, "query": at, "notes": at, "rubric_version": RERANK_RUBRIC_VERSION,
+                    "outcome": RERANK_OUTCOME_ANSWERED, "candidates": 3, "elapsed_ms": 300, "retries": 0,
+                    "requests": 1, "redactedLines": 0, "applied": false,
+                });
+                append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).expect("a reading");
+            }
+            for at in 0..JUDGED_EVERY_ROWS {
+                let label = serde_json::json!({
+                    "at": 5_000 + at, "label": format!("{at}:{at}"), "query": at, "notes": at,
+                    "applied": false, "agreed": true, "rank": 0,
+                });
+                append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
+            }
+            let verdict = judge_ledger(&ledger, 9_000);
+            let rose = super::super::jev_summary::read_rows(&ledger)
+                .iter()
+                .any(|row| zerocode_core::jev::summary::TRANSITION.read(row) == Some(&serde_json::json!(ROSE)));
+            // Raised: the next recall under `auto` reads the judgment's order.
+            let after = settle(cwd, "which note answers this (auto, after)", hits.to_vec());
+            let applied = rows(cwd).last().map(|row| row.applied);
+            (before, verdict, rose, after, applied)
+        });
+        assert_eq!(slugs(&before), slugs(&hits), "a recording seat reads recall's order");
+        assert_eq!(verdict, Some(Verdict::Rise), "the labels did not raise the seat");
+        assert!(rose, "the rise was not written in the seat's own ledger");
+        assert_eq!(slugs(&after), ["wiki/b", "wiki/c", "wiki/a"], "the raised seat did not act");
+        assert_eq!(applied, Some(true), "the row of the raised seat's reading does not say it applied");
     }
 }

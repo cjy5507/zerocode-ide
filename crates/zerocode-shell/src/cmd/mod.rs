@@ -142,7 +142,7 @@ pub(crate) use typesafe::{
 };
 
 pub(crate) mod worker_room;
-pub(crate) use worker_room::judge_worker_room;
+pub(crate) use worker_room::{judge_worker_room, note_worker_room_change};
 
 pub(crate) use github_pr::{github_pr_file_diff, github_set_reviewers};
 

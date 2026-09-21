@@ -84,6 +84,13 @@ pub struct SeatReport {
     /// the week: the week is a clock and the window is a count, and the
     /// numbers a seat is promoted on are these.
     pub judged: Option<promote::Judged>,
+    /// How often, over the week, a row of this seat said its judgment agreed
+    /// with what then happened — every row that carries the seat's `agreed`
+    /// mark ([`summary::agreement_since`]), whether the seat rises or not.
+    /// The judged window's agreement above is the number a seat is promoted
+    /// on; this one is the number a seat that never rises (recall) still
+    /// earns, and the one a week's trend is read from (t-5806).
+    pub agreement_week: promote::Agreement,
     /// Every request the ledger holds, whatever its age — what the judgment's
     /// cadence counts.
     pub asked_ever: usize,
@@ -269,7 +276,9 @@ fn one_with(
 ) -> SeatReport {
     let (found, rows) = rows_of(seat, roots, sessions);
     let today = summary::summarize(&rows, start_of_day_ms(now_ms, offset_s));
-    let week = summary::summarize(&rows, now_ms - WINDOW_DAYS * MS_PER_DAY);
+    let week_since_ms = now_ms - WINDOW_DAYS * MS_PER_DAY;
+    let week = summary::summarize(&rows, week_since_ms);
+    let agreement_week = summary::agreement_since(&rows, week_since_ms);
     let cost_usd = cost_of(week.input_tokens);
     let asked_ever = rows.iter().filter(|row| asked_something(row).is_some()).count();
     // The judge's own reading of the same rows, not a second Evidence built
@@ -297,6 +306,7 @@ fn one_with(
         rise_floor_permille: seat.answer_floor_permille,
         clears_rise_floor,
         judged,
+        agreement_week,
         asked_ever,
         stand,
         applies: seat

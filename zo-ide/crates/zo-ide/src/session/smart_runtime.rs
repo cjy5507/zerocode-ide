@@ -147,6 +147,37 @@ pub(crate) struct SmartTurnInstalled {
     /// Shared with the switch observer installed on the runtime, which
     /// files a row for every model switch the turn makes.
     pub(crate) plan_shadow: Option<Arc<PlanShadowTurn>>,
+    /// What the same observer saw of the route this turn: the first switch
+    /// that unseated it, if any — read at the turn's end for the routing
+    /// seat's label (t-5806, `tools::note_route_followed`).
+    pub(crate) route_watch: Arc<RouteWatch>,
+}
+
+/// The routing seat's witness for one turn: whether a model switch unseated
+/// the route the judgment took part in before the turn ended.
+///
+/// Fed by the switch observer, which sees every switch the runtime makes,
+/// and read once when the turn ends. The first unseating switch is kept —
+/// a turn whose quota wall moved it and whose person then moved it again
+/// disagreed with its route at the wall — and a leg's borrowed client or the
+/// step governor's rung leaves it untouched (`tools::route_unseated_by`).
+#[derive(Default)]
+pub(crate) struct RouteWatch(std::sync::Mutex<Option<runtime::SwitchTrigger>>);
+
+impl RouteWatch {
+    fn note(&self, trigger: runtime::SwitchTrigger) {
+        if !tools::route_unseated_by(trigger) {
+            return;
+        }
+        let mut held = self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        held.get_or_insert(trigger);
+    }
+
+    /// The switch that unseated the route, taken so a second reading of the
+    /// same turn finds nothing.
+    pub(crate) fn taken(&self) -> Option<runtime::SwitchTrigger> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take()
+    }
 }
 
 impl SmartTurnInstalled {
@@ -245,6 +276,7 @@ pub(crate) fn install_smart_turn(
         .exec_contract
         .as_ref()
         .is_some_and(ExecContract::exec_swap_enabled);
+    let route_watch = Arc::new(RouteWatch::default());
     if let Some(inner) = runtime.try_runtime_mut() {
         wiring.install(inner);
         inner.set_reserved_edit_gate(reserved_edit_gate);
@@ -253,20 +285,25 @@ pub(crate) fn install_smart_turn(
         inner.set_step_effort(step_effort);
         // Every switch this turn makes — the quota and refusal fallbacks,
         // the overload demotion, a deep-gate leg's client — files the same
-        // scored row the turn start files, tagged with its door. Set-or-
-        // cleared with the rest of the turn's routes.
-        inner.set_switch_observer(plan_shadow.as_ref().map(|shadow| {
-            let shadow = Arc::clone(shadow);
-            let session_id = session_id.to_string();
-            let complexity = assessment.complexity;
-            Arc::new(move |switch: &runtime::ModelSwitch| {
-                record_plan_switch(&shadow, &session_id, complexity, switch);
-            }) as runtime::SwitchObserver
-        }));
+        // scored row the turn start files, tagged with its door, and tells
+        // the routing seat's witness whether the route stood (t-5806).
+        // Set-or-cleared with the rest of the turn's routes: the observer
+        // is this turn's, and holds this turn's witness.
+        let observed_shadow = plan_shadow.as_ref().map(Arc::clone);
+        let watch = Arc::clone(&route_watch);
+        let session_id = session_id.to_string();
+        let complexity = assessment.complexity;
+        inner.set_switch_observer(Some(Arc::new(move |switch: &runtime::ModelSwitch| {
+            watch.note(switch.trigger);
+            if let Some(shadow) = observed_shadow.as_ref() {
+                record_plan_switch(shadow, &session_id, complexity, switch);
+            }
+        }) as runtime::SwitchObserver));
     }
     SmartTurnInstalled {
         orchestration,
         plan_shadow,
+        route_watch,
     }
 }
 

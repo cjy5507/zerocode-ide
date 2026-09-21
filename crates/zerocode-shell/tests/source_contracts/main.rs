@@ -30635,6 +30635,93 @@ mod tests {
         );
     }
 
+    /// The placement seat's label reads the person's moves through one door
+    /// (t-5806): the roads a person takes to move a pane report it, the
+    /// roads the window takes to move one for its own reasons do not, and
+    /// the window remembers a placed worker only while its answer waits.
+    #[test]
+    fn a_placed_workers_move_is_reported_by_the_person_roads_and_no_other() {
+        let window = window_source();
+        let backend = shipped_backend();
+        // The book entry is made where the answer arrives, keyed by the term.
+        let asking = block_after(window, "async function roomForWorker(");
+        assert!(
+            asking.contains("judged?.placed")
+                && asking.contains("placedWorkers.set(term, { worker: seat.worker })"),
+            "the surface no longer remembers which placed worker a term is:\n{asking}"
+        );
+        // One door, and it forgets the worker on the first report.
+        let door = block_after(window, "function noteWorkerRoomChange(term, room) {");
+        assert!(
+            door.contains("placedWorkers.delete(term);")
+                && door.contains(
+                    "invoke(\"note_worker_room_change\", { worker: placed.worker, room })"
+                ),
+            "the move door reports twice, or names the wrong worker:\n{door}"
+        );
+        // The person's roads: a tab dragged (both drops), a tiled pane
+        // closed, a parked worker revealed.
+        let dragged = block_after(window, "function endTabDrag() {");
+        assert_eq!(
+            dragged
+                .matches("noteWorkerRoomChange(draggedTerm, \"tab\")")
+                .count(),
+            2,
+            "a drop no longer reports the placed worker's move:\n{dragged}"
+        );
+        let closed = block_after(window, "function closePaneLeaf(tab, going) {");
+        assert!(
+            closed.contains("noteWorkerRoomChange(going, \"background\")"),
+            "closing a tiled worker no longer reports the move:\n{closed}"
+        );
+        let revealed = block_after(window, "async function focusAgentPane(");
+        assert!(
+            revealed.contains("noteWorkerRoomChange(term, \"tab\")"),
+            "revealing a parked worker no longer reports the move:\n{revealed}"
+        );
+        // The window's own moves are not the person's.
+        for road in [
+            "function reseatWorkerByAnswer(",
+            "function revealListedWorker(",
+            "function parkTeamWorkers(",
+            "function reseatTerm(term, extra) {",
+        ] {
+            assert!(
+                !block_after(window, road).contains("noteWorkerRoomChange("),
+                "a road the window takes on its own reports a person's move: {road}"
+            );
+        }
+        // And a pane that ended is forgotten, so its worker id cannot be
+        // reported for a pane that no longer exists.
+        assert_eq!(
+            window.matches("placedWorkers.delete(term);").count(),
+            2,
+            "the placed book is emptied on the report and on the pane's end, nowhere else"
+        );
+        // The door itself, and the beat that grades the quiet case.
+        let room = block_after(backend, "pub(crate) async fn note_worker_room_change(");
+        assert!(
+            room.contains("room_changed(")
+                && room.contains("&Wire::of_this_machine(),")
+                && room.contains("rooms(),")
+                && room.contains("crate::now_epoch_ms(),"),
+            "the move door no longer grades through the one book:\n{room}"
+        );
+        let graded = block_after(backend, "pub(crate) fn room_changed(");
+        assert!(
+            graded.contains("PLACEMENT_OPTIONS.contains(&room)")
+                && graded.contains("PLACEMENT_LABEL_WINDOW_MS")
+                && graded.contains("crate::systemone::record_rows(&PLACEMENT,"),
+            "a move is graded outside the table's rooms, the seat's window or the seat's ledger road:\n{graded}"
+        );
+        let mark = block_after(backend, "fn label_row(worker: &str, placed: &Placed,");
+        assert!(
+            mark.contains("label[AGREED.canonical] = json!(followed == placed.chosen);")
+                && mark.contains("LABEL.canonical: worker,"),
+            "the placement label spells its mark or its name itself:\n{mark}"
+        );
+    }
+
     #[test]
     fn a_successful_worker_cleans_up_after_its_report_returns() {
         let backend = shipped_backend();

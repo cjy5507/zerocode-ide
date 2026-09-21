@@ -36,13 +36,14 @@ pub use decision_report::{
     AxisEvaluation, DecisionShadowSummary, LabelEvaluation, BASIS_POINTS,
 };
 pub use decision_shadow::{
-    check_system_one, decision_shadow_path, CheckFailure, DecisionShadowRow, JudgedAxis, ProbeCell,
-    SystemOneCheck, DECISION_SHADOW_FILE, KEY_CHECK_TASK, OUTCOME_ANSWERED,
+    check_system_one, decision_shadow_path, note_route_followed, route_unseated_by, CheckFailure,
+    DecisionShadowRow, JudgedAxis, ProbeCell, RouteLabelRow, SystemOneCheck, DECISION_SHADOW_FILE,
+    KEY_CHECK_TASK, OUTCOME_ANSWERED, ROUTE_STOOD,
 };
 pub use probe_exec::task_fingerprint;
 pub use rerank_shadow::{
-    rerank_shadow_path, Judged, RerankShadow, RerankShadowRow, RERANK_OUTCOME_ANSWERED,
-    RERANK_OUTCOME_UNORDERABLE, RERANK_SHADOW_FILE,
+    note_recall_read, rerank_shadow_path, Judged, RerankLabelRow, RerankShadow, RerankShadowRow,
+    RERANK_OUTCOME_ANSWERED, RERANK_OUTCOME_UNORDERABLE, RERANK_SHADOW_FILE,
 };
 pub use skill_search::{
     note_loaded_skill, note_search_answer, search as skill_search,
