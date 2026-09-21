@@ -552,6 +552,10 @@ fn a_verdict_and_its_row_call_a_rise_and_a_fall_the_same_thing() {
     assert_eq!(words.len(), 4, "two verdicts share a word");
     assert_eq!(Stand::Recording.token(), "recording");
     assert_eq!(Stand::Applying.token(), "applying");
+    // The reason a walk gives for pressing nothing names the stand it was
+    // standing at, so the two cannot come to say different things about the
+    // same seat.
+    assert!(SEAT_RECORDING.ends_with(Stand::Recording.token()));
 }
 
 #[test]

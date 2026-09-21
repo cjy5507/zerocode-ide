@@ -52,6 +52,7 @@ use serde_json::{Value, json};
 use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
+use zerocode_core::jev::promote::SEAT_RECORDING;
 use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
 use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{
@@ -462,6 +463,24 @@ const USE_SHADOW: &str = JevMode::Shadow.key();
 const USE_APPLIED: &str = "applied";
 const USE_FALLBACK: &str = "fallback";
 
+/// The key a row carries its reason under, beside `routeUse`: why the hand
+/// never went out although the judgment named a number. Written here and read
+/// by [`no_press_reason`] alone, so the walk's rows and the words it answers
+/// in cannot come to spell it differently.
+pub(crate) const REASON: &str = "reason";
+
+/// Why this walk pressed nothing, when one of its rows says why.
+///
+/// The caller asks here rather than reading `pressed: 0` and guessing. A walk
+/// under a seat that only records is indistinguishable, from the outside,
+/// from one that found nothing to press — the shape that cost the v1.1.3
+/// measurement thirteen walks before anyone looked at the seat (t-5455).
+#[must_use]
+pub fn no_press_reason(rows: &[Value]) -> Option<&str> {
+    rows.iter()
+        .find_map(|row| row.get(REASON).and_then(Value::as_str))
+}
+
 /// What a walk came to: the rows it wrote, the report of the document's
 /// re-walk when there was one, and — for a goal — whether it got there.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -746,9 +765,14 @@ fn walk(
         note(&mut said, "chosen", json!(format!("mark:{chosen}")));
 
         // A seat that is not acting records what it would have pressed and
-        // presses nothing.
+        // presses nothing — and says so, in the word the stand itself is
+        // named by. Without it the row is a judgment with no consequence and
+        // no account of why, which reads from the outside exactly like a
+        // screen that had nothing worth pressing (t-5455).
         if !acting {
             note(&mut said, "routeUse", json!(USE_SHADOW));
+            note(&mut said, "pressed", json!(false));
+            note(&mut said, REASON, json!(SEAT_RECORDING));
             walked.rows.push(row(mode, at, attempt, said));
             return walked;
         }

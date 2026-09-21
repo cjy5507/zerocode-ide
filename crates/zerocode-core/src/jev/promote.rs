@@ -146,6 +146,23 @@ pub enum Stand {
     Applying,
 }
 
+/// Why a screen walk pressed nothing though its judgment named a control:
+/// the seat it walks under is only recording ([`Stand::Recording`]), so the
+/// answer was written down and no hand went out.
+///
+/// It is a word rather than a sentence because a row carries it, the walk's
+/// own prose repeats it and a reader greps for it — one spelling, or the
+/// three drift. It lives beside the stand it names and not beside the walk
+/// because the walk is not the only seat that can be standing here.
+///
+/// It exists because a walk that pressed nothing said nothing about why: the
+/// 2026-09-20 measurement of v1.1.3 spent thirteen browser and desktop walks
+/// on a seat at `auto` that judged every screen with confidence 0.95 and
+/// higher, pressed none of them, and answered `pressed: 0, reached: false`
+/// with no error and no reason. The seat was raised by hand at 16:19 and the
+/// same walks pressed six times out of six (t-5455).
+pub const SEAT_RECORDING: &str = "seat_recording";
+
 /// How often the judgment named what the probe it would replace named, over
 /// the window's rows where both answered — every judged axis of every such
 /// row is one comparison.
