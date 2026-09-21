@@ -356,6 +356,7 @@ impl std::fmt::Debug for SystemOneClient {
 pub struct SystemOneConfig {
     base_url: String,
     api_key: String,
+    key_source: crate::providers::KeySource,
 }
 
 impl std::fmt::Debug for SystemOneConfig {
@@ -371,10 +372,26 @@ impl SystemOneConfig {
     /// The key from [`SYSTEMONE_API_KEY_ENV`], and the origin from
     /// [`SYSTEMONE_BASE_URL_ENV`] when set.
     ///
+    /// Three rungs answer for the key, in this order
+    /// (`providers::read_env_key`, whose enum names them — a code span, not a
+    /// link: rustdoc will not link a public page to a private item):
+    ///
+    /// | # | source | the zo it answers for |
+    /// |---|---|---|
+    /// | ① | the process environment | a shell, a harness or a CI leg that exported `TYPESAFE_API_KEY` |
+    /// | ② | this process's adopted table | one the window launched, keys handed over under a prefix of ours |
+    /// | ③ | the window's own keychain item | one the window did NOT launch — typed into a pane, or run from a terminal |
+    ///
+    /// The third rung is why a zo outside the window answers at all. This key
+    /// is a SERVICE key: its name is the vendor's, no prefix of ours marks it,
+    /// and no launch hands it over — so before that road every judgment a
+    /// terminal zo made was `no_key`. `zo decision-shadow check` walks this
+    /// ladder once and prints which rung answered.
+    ///
     /// # Errors
-    /// [`SystemOneFailure::NoKey`] when no key is configured.
+    /// [`SystemOneFailure::NoKey`] when no rung has one.
     pub fn from_env() -> Result<Self, SystemOneFailure> {
-        let api_key = crate::providers::read_env_non_empty(SYSTEMONE_API_KEY_ENV)
+        let (api_key, key_source) = crate::providers::read_env_key(SYSTEMONE_API_KEY_ENV)
             .ok()
             .flatten()
             .ok_or(SystemOneFailure::NoKey)?;
@@ -383,7 +400,13 @@ impl SystemOneConfig {
             .map(|url| url.trim().to_string())
             .filter(|url| !url.is_empty())
             .unwrap_or_else(|| SYSTEMONE_BASE_URL.to_string());
-        Ok(Self { base_url, api_key })
+        Ok(Self { base_url, api_key, key_source })
+    }
+
+    /// Which rung of that ladder this configuration's key came from.
+    #[must_use]
+    pub const fn key_source(&self) -> crate::providers::KeySource {
+        self.key_source
     }
 
     /// The client this configuration names.

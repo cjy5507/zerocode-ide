@@ -2565,6 +2565,15 @@ pub fn default_config_home() -> PathBuf {
     core_types::paths::default_config_home()
 }
 
+/// The home this PERSON's sessions use (`~/.zo`), whatever this process was
+/// told — the one question [`default_config_home`] cannot answer, asked by
+/// the guard that keeps an unarmed process out of it
+/// (`tools::smart_router::shadow_ledger`).
+#[must_use]
+pub fn conventional_config_home() -> Option<PathBuf> {
+    core_types::paths::conventional_config_home()
+}
+
 /// All per-user global config homes, highest priority first:
 /// `ZO_CONFIG_HOME`, then `ZO_HOME`, then `~/.zo`.
 ///

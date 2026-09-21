@@ -88,7 +88,7 @@ pub use providers::{
     BandDifficulty,
     CUSTOM_PROVIDERS_ENV, EXPERIMENTAL_PROVIDERS_ENV, MODEL_CLASSES_ENV,
     MODEL_CONTEXT_WINDOWS_ENV, MODEL_EFFORT_CEILINGS_ENV, ULTRA_BAND_ENV,
-    CustomProviderUsability, ModelClass, ModelFitHint, NON_CLAUDE_ADAPTERS_ENV,
+    CustomProviderUsability, KeySource, ModelClass, ModelFitHint, NON_CLAUDE_ADAPTERS_ENV,
     PlanPriorsTable, ProviderCatalogEntry, ProviderKind, ProviderMetadata, RouterPriors,
     WorkTurnPrior,
     apply_non_anthropic_identity, band_difficulty_for_request, builtin_model_catalog_json, builtin_provider_catalog, catalog_family_id,

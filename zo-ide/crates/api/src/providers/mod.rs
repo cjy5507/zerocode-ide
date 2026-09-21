@@ -2529,7 +2529,7 @@ fn env_non_empty(key: &str) -> bool {
     std::env::var(key)
         .ok()
         .is_some_and(|value| !value.trim().is_empty())
-        || adopted_launch_key(key).is_some()
+        || adopted_table_key(key).or_else(|| window_keychain_key(key)).is_some()
 }
 
 /// Resolve a user-facing model alias to its canonical model id.
@@ -3978,25 +3978,76 @@ fn context_window_for_canonical(raw_model: &str, canonical_lower: &str) -> u64 {
 /// Propagates a non-`NotPresent` [`crate::error::ApiError`] (e.g. a value that
 /// is not valid Unicode).
 pub(crate) fn read_env_non_empty(key: &str) -> Result<Option<String>, crate::error::ApiError> {
+    Ok(read_env_key(key)?.map(|(value, _)| value))
+}
+
+/// The ladder itself: `key`'s value and the rung that answered for it.
+///
+/// One climb, in one order — the environment, then this process's own table,
+/// then the window's keychain — so a caller that needs the rung and one that
+/// needs only the value cannot walk two different ladders.
+///
+/// # Errors
+/// A variable set to bytes that are not UTF-8.
+pub(crate) fn read_env_key(
+    key: &str,
+) -> Result<Option<(String, KeySource)>, crate::error::ApiError> {
     match std::env::var(key) {
-        Ok(value) if !value.is_empty() => Ok(Some(value)),
-        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(adopted_launch_key(key)),
+        Ok(value) if !value.is_empty() => Ok(Some((value, KeySource::Environment))),
+        Ok(_) | Err(std::env::VarError::NotPresent) => {
+            Ok(adopted_table_key(key).or_else(|| window_keychain_key(key)))
+        }
         Err(error) => Err(crate::error::ApiError::from(error)),
     }
 }
 
-/// Keys this process adopted out of its environment at startup
-/// ([`adopt_launch_keys`]), by variable name.
-fn adopted_launch_keys() -> &'static RwLock<std::collections::HashMap<String, String>> {
-    static ADOPTED: OnceLock<RwLock<std::collections::HashMap<String, String>>> = OnceLock::new();
+/// Which rung of the ladder above answered for a key this process sends.
+///
+/// A person needs this named, not inferred: "no key" and "the window has one
+/// you cannot see" are different problems, and before the third rung existed
+/// every judgment a zo outside the window made was `no_key` (t-5805). It is
+/// the same shape the OpenAI login carries for the same reason (t-5777's
+/// `CodexHomeSource`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeySource {
+    /// ① The process environment — a shell, a harness or a CI leg set it.
+    Environment,
+    /// ② This process's own table ([`adopt_launch_keys`]): the window handed
+    ///    it over at launch, under a prefix of ours.
+    Adopted,
+    /// ③ The window's keychain item, read once when the key was first needed
+    ///    ([`find_service_keys_in_keychain`], [`find_router_keys_in_keychain`])
+    ///    — the rung a zo the window did not launch stands on.
+    WindowKeychain,
+}
+
+impl KeySource {
+    /// The word a report, a pane or a JSON answer names this rung by.
+    #[must_use]
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Environment => "environment",
+            Self::Adopted => "adopted",
+            Self::WindowKeychain => "window_keychain",
+        }
+    }
+}
+
+/// Keys this process holds outside its environment, by variable name, each
+/// with the rung it came from ([`adopt_launch_keys`], [`window_keychain_key`]).
+///
+/// The rung is kept beside the value rather than re-derived on the next read:
+/// the keychain is asked once per name and its answer is remembered here, so a
+/// second reader that only saw this table would call a keychain key "adopted"
+/// and a person looking for why their key works would be told the wrong story.
+fn adopted_launch_keys() -> &'static RwLock<std::collections::HashMap<String, (String, KeySource)>>
+{
+    static ADOPTED: OnceLock<RwLock<std::collections::HashMap<String, (String, KeySource)>>> =
+        OnceLock::new();
     ADOPTED.get_or_init(Default::default)
 }
 
-fn adopted_launch_key(key: &str) -> Option<String> {
-    adopted_table_key(key).or_else(|| window_keychain_key(key))
-}
-
-fn adopted_table_key(key: &str) -> Option<String> {
+fn adopted_table_key(key: &str) -> Option<(String, KeySource)> {
     adopted_launch_keys()
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -4009,7 +4060,7 @@ fn adopted_table_key(key: &str) -> Option<String> {
 /// ([`find_router_keys_in_keychain`], [`find_service_keys_in_keychain`]) and
 /// kept in the adopted table. One reader at a time, so a caller that waited
 /// finds what the first one read.
-fn window_keychain_key(key: &str) -> Option<String> {
+fn window_keychain_key(key: &str) -> Option<(String, KeySource)> {
     let keychains = window_keychains()
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4025,8 +4076,8 @@ fn window_keychain_key(key: &str) -> Option<String> {
             adopted_launch_keys()
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(key.to_string(), value.clone());
-            Some(value)
+                .insert(key.to_string(), (value.clone(), KeySource::WindowKeychain));
+            Some((value, KeySource::WindowKeychain))
         }
         KeychainAnswer::Absent => None,
         // Not an answer, so it is not one to remember: the next caller that
@@ -4063,7 +4114,7 @@ pub fn adopt_launch_keys(prefix: &str) -> usize {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (name, value) in &found {
         std::env::remove_var(name);
-        table.insert(name.clone(), value.clone());
+        table.insert(name.clone(), (value.clone(), KeySource::Adopted));
     }
     found.len()
 }
@@ -6520,6 +6571,48 @@ mod tests {
             "asked once, and only for the name it lists"
         );
         assert!(std::env::var_os(named).is_none(), "the key never entered the environment");
+
+        super::forget_adopted_launch_keys_for_test();
+    }
+
+    /// Each rung of the ladder names itself, and the name survives the read
+    /// that caches it: the keychain is asked once per variable, so a second
+    /// reader that called its answer "adopted" would tell a person looking
+    /// for why their key works the wrong story (t-5805).
+    #[test]
+    fn the_key_ladder_names_the_rung_that_answered() {
+        let _lock = crate::test_env_lock();
+        let named = crate::SYSTEMONE_API_KEY_ENV;
+
+        let _set = EnvVarGuard::set(named, Some("from-the-shell"));
+        super::forget_adopted_launch_keys_for_test();
+        assert_eq!(
+            super::read_env_key(named).expect("a readable variable"),
+            Some(("from-the-shell".to_string(), super::KeySource::Environment))
+        );
+
+        let _unset = EnvVarGuard::set(named, None);
+        super::forget_adopted_launch_keys_for_test();
+        assert_eq!(super::read_env_key(named).expect("no variable"), None);
+
+        super::install_window_keychain(
+            super::WindowKeyNames::Exactly(vec![named.to_string()]),
+            "test.key.",
+            fake_keychain,
+        );
+        let first = super::read_env_key(named).expect("the window's keychain");
+        let again = super::read_env_key(named).expect("the same key, read back");
+        assert_eq!(
+            first.as_ref().map(|(_, source)| *source),
+            Some(super::KeySource::WindowKeychain),
+            "the rung the key actually came from"
+        );
+        assert_eq!(first, again, "a cached read tells the same story");
+        assert_eq!(
+            super::KeySource::WindowKeychain.token(),
+            "window_keychain",
+            "the word a report and a JSON answer name it by"
+        );
 
         super::forget_adopted_launch_keys_for_test();
     }

@@ -19,7 +19,9 @@
 //!
 //! Consent is read from the person's own settings file and nowhere else. A
 //! repository arrives with its own `.zo/settings.json`; if that file could
-//! name the workspace it sits in, a clone would consent for the person.
+//! name the workspace it sits in, a clone would consent for the person. What
+//! a consented root carries with it is its own linked worktrees
+//! ([`JevSettings::consents`]), which that same clone cannot become.
 //!
 //! [`may_send`] is pure. [`pass`] reads the day's count and counts the request
 //! the door lets through ([`super::count`]); reading the settings and writing a
@@ -140,10 +142,44 @@ impl JevSettings {
         }
     }
 
-    /// Whether `workspace` is a consented root or a folder under one, compared
-    /// segment by segment (`/a/bc` is not under `/a/b`).
+    /// Whether the person consented to the words of `workspace`: a consented
+    /// root, a folder under one, or a linked git worktree of a checkout that
+    /// is one.
+    ///
+    /// The worktree arm is what makes a run of workers answerable. A worker
+    /// works in a checkout cut from the person's own — `git worktree add` —
+    /// and named a folder the person never typed, so on the rule's first
+    /// spelling 86% of one run's step-effort rows were `not_consented`
+    /// (t-4781): a whole run of judgments refused for a repository the person
+    /// HAD consented to. It does not reopen what this module's head refuses:
+    /// consent is still read from the person's own settings file, and a clone
+    /// cannot make itself a worktree of a consented checkout — only that
+    /// checkout can cut one.
+    ///
+    /// The cost is a read of at most two small files, and only on the arm
+    /// that is about to refuse: a consented root answers before git is asked
+    /// at all.
     #[must_use]
     pub fn consents(&self, workspace: &str) -> bool {
+        self.names(workspace) || self.owns_a_consented_checkout(Path::new(workspace))
+    }
+
+    /// The checkout that owns `workspace`'s repository is one of the consented
+    /// roots — the arm that answers for a linked worktree.
+    ///
+    /// A workspace that is not an absolute path is one nobody could name, and
+    /// consents to nothing, exactly as a workspace of `None` does: asking git
+    /// about a relative path would ask about the ASKING PROGRAM's directory,
+    /// and a crate test's cwd is not the words' workspace.
+    fn owns_a_consented_checkout(&self, workspace: &Path) -> bool {
+        workspace.is_absolute()
+            && crate::git_dir::owning_checkout_of(workspace)
+                .is_some_and(|checkout| self.names(&resolved_path(&checkout)))
+    }
+
+    /// One of the consented roots IS `workspace` or holds it, compared segment
+    /// by segment (`/a/bc` is not under `/a/b`).
+    fn names(&self, workspace: &str) -> bool {
         self.workspaces
             .iter()
             .any(|root| crate::vault::inside_or_equal(root, workspace))

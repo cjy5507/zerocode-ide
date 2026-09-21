@@ -164,12 +164,19 @@ impl CheckFailure {
 }
 
 /// What one key check saw: the model that answered, or why none did — and how
-/// long the call took and how often it was re-sent.
+/// long the call took, how often it was re-sent, and which rung of the key
+/// ladder held the key it was sent with.
+///
+/// The rung is here because "it worked" and "it worked with the key the window
+/// keeps, which no launch handed me" are different answers, and the second is
+/// the one a zo run outside the window is being asked about (t-5805). `None`
+/// is no key at all, which is the `no_key` the outcome already names.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemOneCheck {
     pub outcome: Result<String, CheckFailure>,
     pub elapsed: Duration,
     pub retries: u32,
+    pub key_source: Option<api::KeySource>,
 }
 
 /// Put the shadow's own question about [`KEY_CHECK_TASK`] to System One, once:
@@ -180,8 +187,15 @@ pub struct SystemOneCheck {
 /// carry. The memo is not consulted: a check that recalled an answer would
 /// prove nothing about the key.
 pub async fn check_system_one() -> SystemOneCheck {
-    let unsent = |failure| SystemOneCheck { outcome: Err(failure), elapsed: Duration::ZERO, retries: 0 };
-    let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
+    let config = SystemOneConfig::from_env().ok();
+    let key_source = config.as_ref().map(SystemOneConfig::key_source);
+    let unsent = |failure| SystemOneCheck {
+        outcome: Err(failure),
+        elapsed: Duration::ZERO,
+        retries: 0,
+        key_source,
+    };
+    let client = config.map(SystemOneConfig::into_client);
     let state = runtime::rubric_task_text("", KEY_CHECK_TASK);
     let request = runtime::decision_request(SYSTEMONE_MODEL, &state);
     let Some(body) = jev_gate::body_of(&request) else {
@@ -200,7 +214,7 @@ pub async fn check_system_one() -> SystemOneCheck {
             .map(|_| response.model)
             .map_err(|_| CheckFailure::Wire(SystemOneFailure::Schema))
     });
-    SystemOneCheck { outcome, elapsed: call.elapsed, retries: call.retries }
+    SystemOneCheck { outcome, elapsed: call.elapsed, retries: call.retries, key_source }
 }
 
 /// The probe's side of a row: the token it answered on every rubric axis, by

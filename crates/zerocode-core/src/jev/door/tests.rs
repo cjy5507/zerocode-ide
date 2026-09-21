@@ -100,6 +100,73 @@ fn a_folder_under_a_consented_root_passes_and_one_beside_it_does_not() {
 }
 
 #[test]
+fn a_worktree_of_a_consented_checkout_is_consented_and_a_strangers_is_not() {
+    let dir = tempfile::tempdir().expect("a machine to cut checkouts on");
+    // 동의한 체크아웃 하나, 동의하지 않은 체크아웃 하나 — 같은 기계, 같은 무늬.
+    let mine = dir.path().join("app");
+    let theirs = dir.path().join("stranger");
+    let cut_from = |checkout: &std::path::Path, name: &str| {
+        let git_dir = checkout.join(".git").join("worktrees").join(name);
+        std::fs::create_dir_all(&git_dir).expect("the worktree's own git directory");
+        let at = dir.path().join("workspaces").join(name);
+        std::fs::create_dir_all(&at).expect("the checkout");
+        std::fs::write(at.join(".git"), format!("gitdir: {}\n", git_dir.display()))
+            .expect("the pointer git writes");
+        std::fs::write(git_dir.join("commondir"), "../..\n").expect("the shared pointer");
+        at
+    };
+    std::fs::create_dir_all(mine.join("crates")).expect("a folder inside the checkout");
+    let ours = cut_from(&mine, "t-5805");
+    let strangers = cut_from(&theirs, "side");
+
+    let settings = JevSettings {
+        enabled: true,
+        workspaces: vec![resolved_path(&mine)],
+        daily_requests: None,
+    };
+    // 동의한 체크아웃, 그 아래 폴더, 거기서 잘라 낸 워크트리, 그 아래 폴더.
+    for inside in [
+        mine.clone(),
+        mine.join("crates"),
+        ours.clone(),
+        ours.join("ui"),
+    ] {
+        assert!(
+            settings.consents(&resolved_path(&inside)),
+            "{}",
+            inside.display()
+        );
+    }
+    // 남의 저장소도, 남의 워크트리도, 둘을 담은 폴더도 아니다.
+    for outside in [theirs.clone(), strangers, dir.path().to_path_buf()] {
+        assert!(
+            !settings.consents(&resolved_path(&outside)),
+            "{}",
+            outside.display()
+        );
+    }
+    // 그리고 문은 같은 답을 낸다 — 규칙은 한 함수이고, 문은 그것을 부른다.
+    let refused = |workspace: &str| {
+        may_send(
+            &ROUTING,
+            &Asking {
+                key: true,
+                settings: &settings,
+                workspace: Some(workspace),
+                sent_today: 0,
+            },
+            json!({}),
+        )
+        .err()
+    };
+    assert_eq!(refused(&resolved_path(&ours)), None);
+    assert_eq!(
+        refused(&resolved_path(&theirs)),
+        Some(Refused::NotConsented)
+    );
+}
+
+#[test]
 fn settings_of_the_wrong_shape_never_widen_what_is_sent() {
     let read = |jev: Value| JevSettings::from_root(&json!({ "smart": { "jev": jev } }));
 

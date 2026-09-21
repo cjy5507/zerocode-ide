@@ -377,6 +377,25 @@ fn dedupe_paths(paths: impl IntoIterator<Item = PathBuf>) -> Vec<PathBuf> {
     roots
 }
 
+/// The home THIS PERSON's sessions use — `~/.zo` — whatever this process was
+/// told. `None` when no user home resolves.
+///
+/// Every other reader wants [`default_config_home`]: where THIS process reads
+/// and writes, overrides and all. This one answers a different question, and
+/// there is exactly one kind of caller for it — a guard asking "would this
+/// write land in the person's own home?". Such a guard must not read the
+/// override, because the override is the very test isolation it exists to
+/// allow: asked through [`default_config_home`] it would answer "yes, the
+/// person's home" for a test writing into its own temp directory, and refuse
+/// the one write that was never a problem.
+#[must_use]
+pub fn conventional_config_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|home| !home.as_os_str().is_empty())
+        .map(|home| home.join(ZO_DIR_NAME))
+}
+
 /// The single canonical write location for user state (sessions,
 /// credentials, generated settings): the first entry of
 /// [`zo_global_config_roots`]. When no user home can be resolved, use one
