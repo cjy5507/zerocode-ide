@@ -3123,7 +3123,11 @@ mod tests {
                     &avd,
                     "-no-window",
                     "-no-boot-anim",
-                    "-no-snapshot",
+                    // The probe copy is cold-booted on purpose: both rounds
+                    // must stand the device up the same way, and a snapshot
+                    // the first round wrote would hand the second a head
+                    // start. Spelled as the one constant the launch reads.
+                    NO_SNAPSHOT_FLAG,
                     "-port",
                     &port,
                 ])
