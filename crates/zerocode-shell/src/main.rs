@@ -3260,16 +3260,6 @@ fn main() -> ExitCode {
                     federation_loop(farm, federation).await
                 });
             }
-            // The device the next pane will want, put up while the window is
-            // still painting (D4), and the watch that puts a fleet nobody is
-            // looking at away again (D3). Neither opens a stream.
-            if load_settings_resilient(app.state::<AppState>().settings())
-                .document
-                .emulator_preboot_last_used
-            {
-                emulator::preboot_last_used(&handle);
-            }
-            emulator::arm_idle_reclaim(&handle);
             // And the socket a walk's first question will ride (t-5535). The
             // agents' roads are open above, so a walk can now be asked for;
             // the handshake it would otherwise pay is opened here instead, on
@@ -3310,6 +3300,11 @@ fn main() -> ExitCode {
             )), handle.clone());
             artifact_runtime::note_retention_days(retention_days);
             automation_runtime::adopt_stored_evidence(&local_data_root);
+            // 판의 첫 1초 (t-5645): the device somebody opened last is woken
+            // now, before a pane asks for it, and the watch that shuts an
+            // unwatched device down starts. Both spawn their own threads —
+            // nothing here waits on a simulator.
+            emulator::on_window_boot(&handle);
             let scanning = handle.clone();
             // zo rides along (t-3191, design §2.4): the bundle's `Resources/bin/zo`
             // against `~/.local/bin/zo`, judged and swapped by rename on this
@@ -3447,15 +3442,7 @@ fn main() -> ExitCode {
                 // panes' exits on the way out.
                 orchestration::window_exiting(now_epoch_ms());
                 handle.state::<AppState>().native_tray().begin_exit();
-                // The panes always close; whether the DEVICES do is the
-                // person's `emulator.keepBooted` (D3). Read here rather than
-                // held from boot, because the switch may have been turned in
-                // this session.
-                emulator::shutdown_all(
-                    load_settings_resilient(handle.state::<AppState>().settings())
-                        .document
-                        .emulator_keep_booted,
-                );
+                emulator::shutdown_all(handle);
                 codex_queue::shutdown_all();
                 capture_scrollback_at_exit(handle);
                 // 원장의 마지막 플러시 — 디바운스가 아직 자고 있어도 여기서

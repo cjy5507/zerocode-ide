@@ -1,6 +1,7 @@
 //! iOS Simulator discovery, lifecycle, frame capture and input commands.
 
 mod capabilities;
+mod keeping;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -37,6 +38,18 @@ const FALLBACK_IDLE_LADDER: pump::IdleLadder = pump::IdleLadder {
 
 /// How long a polling road rests after a capture that answered nothing at all.
 const FALLBACK_MISS_REST: Duration = Duration::from_millis(900);
+
+/// The same rest, while the device is still coming up.
+///
+/// The full rest is for a road that answered nothing about a device that CAN
+/// draw — a wedged simulator, a screenshot that timed out — where trying again
+/// at once would spend the pane's whole existence on failures that are not
+/// going to stop. A booting device is a different question with a different
+/// answer already on its way: measured on this machine, the first picture a
+/// shut-down device can give arrives within a second of `simctl boot` being
+/// accepted, so a 900ms rest is up to 900ms of blank pane AFTER the boot logo
+/// exists.
+const BOOTING_MISS_REST: Duration = Duration::from_millis(250);
 
 /// The gap the POLLING roads leave between frames when the work itself was
 /// quick.
@@ -166,6 +179,24 @@ const WINDOW_LOOK_EVERY: Duration = Duration::from_secs(1);
 /// at.
 const BOOT_WAIT: Duration = Duration::from_secs(300);
 
+/// How often the helper is asked for again while the device is still coming
+/// up.
+///
+/// The pane no longer holds its first picture until the boot is over (D5), so
+/// the roads below draw the Simulator's own boot logo from the moment
+/// CoreSimulator accepts the boot. What a booting device cannot yet give is
+/// the HELPER — it loads the active Xcode's SimulatorKit against a framebuffer
+/// that does not exist yet — and the doubling backoff that covers a machine
+/// with no helper at all would answer a nine-second boot by first asking again
+/// at three seconds, then at nine, then at twenty-one. This is the beat for
+/// the one case where the next try is genuinely likely to be the one that
+/// works, at one cold start (247-495ms) per try.
+const HELPER_ATTACH_RETRY: Duration = Duration::from_millis(500);
+
+/// The longest the capability thread ever waits between cold starts, once the
+/// device is up and the helper still has not answered.
+const HELPER_ATTACH_CEILING: Duration = Duration::from_secs(60);
+
 /// One `simctl` invocation, however this machine reaches it.
 ///
 /// `xcrun` resolves its tool with a real process walk on every call, and the
@@ -277,6 +308,19 @@ fn selected_simulator(
     })
 }
 
+/// Whether `simctl boot`'s refusal is the device saying it is already awake.
+///
+/// The only way to tell an already-running device from a real failure is the
+/// state named in the refusal, and since the window preboots the last device
+/// used (D4) that state is `Booting` as often as it is `Booted`: a pane opened
+/// while the preboot is still in flight must attach to that boot rather than
+/// failing in front of the person.
+fn already_awake(said: &str) -> bool {
+    ["current state: Booted", "current state: Booting"]
+        .into_iter()
+        .any(|state| said.contains(state))
+}
+
 fn boot_simulator(device: &SimulatorDevice) -> Result<(), String> {
     if device.booted {
         return Ok(());
@@ -286,8 +330,35 @@ fn boot_simulator(device: &SimulatorDevice) -> Result<(), String> {
         .output()
         .map_err(|error| error.to_string())?;
     let said = String::from_utf8_lossy(&boot.stderr);
-    if !boot.status.success() && !said.contains("current state: Booted") {
+    if !boot.status.success() && !already_awake(&said) {
         return Err(format!("시뮬레이터를 부팅할 수 없습니다: {}", said.trim()));
+    }
+    Ok(())
+}
+
+/// The one `simctl shutdown` in this window.
+///
+/// Both roads that end a simulator's day come through here: the person's own
+/// 끄기 button ([`shutdown_mobile_emulator`], which checks first that the
+/// device is one of this machine's) and the idle reclaimer, which has already
+/// decided. A second spelling of this would be a second answer to "what does
+/// an already-shut-down device mean", and the reclaimer meets that case every
+/// time somebody shuts a device down by hand first.
+fn shutdown_simulator(udid: &str) -> Result<(), String> {
+    let mut command = simctl_command();
+    command.args(["shutdown", udid]);
+    // Bounded, because one caller is the window on its way out: a wedged
+    // device — this module already knows of one that hangs `simctl io
+    // screenshot` forever — must cost the exit a deadline rather than the
+    // whole of it.
+    let out = super::process::run_bounded(
+        command,
+        super::capability::SHORT_COMMAND_TIMEOUT,
+        super::capability::COMMAND_OUTPUT_BYTES,
+    )?;
+    let said = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() && !said.contains("current state: Shutdown") {
+        return Err(format!("시뮬레이터를 끌 수 없습니다: {}", said.trim()));
     }
     Ok(())
 }
@@ -424,66 +495,145 @@ fn screenshot_picture(
     Ok(read_bounded(frame).ok())
 }
 
-/// Hold the pane's first picture until the device can draw one.
+/// Whether the device this pane opened is still on its way up.
 ///
-/// `simctl boot` returns when CoreSimulator has ACCEPTED the boot, and every
-/// road to a picture works from that instant — so without this the pane's
-/// first frame is the boot screen, measured at 6.6KB of black with a spinner
-/// four pixels across. Everything downstream is then correct and useless: the
-/// pane paints it, calls itself connected, takes down the note that said the
-/// device was waking, and offers the same black until the device finishes —
-/// 9.6s on a warm boot here, a minute and a half on a first one. The note the
-/// pane already has is a better answer than that picture, so this simply does
-/// not produce the picture.
+/// Two roads need the answer and neither can ask CoreSimulator cheaply: the
+/// pump's framebuffer road, whose failures are only worth resting it for once
+/// the device can actually draw, and the capability thread, whose cold start
+/// cannot succeed before then either. One watch, two readers, and the
+/// `bootstatus` child that answers it runs beside the pictures rather than in
+/// front of them.
+struct BootWatch {
+    finished: std::sync::atomic::AtomicBool,
+}
+
+impl BootWatch {
+    /// A device that was already running. Nothing is waited for, and no road
+    /// gets to blame a boot for failing.
+    fn already_up() -> Arc<Self> {
+        Arc::new(Self {
+            finished: std::sync::atomic::AtomicBool::new(true),
+        })
+    }
+
+    fn waking() -> Arc<Self> {
+        Arc::new(Self {
+            finished: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn booting(&self) -> bool {
+        !self.finished.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn finished(&self) {
+        self.finished
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Time the device's boot WITHOUT standing in the first picture's way.
 ///
-/// `bootstatus` is the platform's own answer to the question and not a
-/// formality: measured, it holds until the device's system application is up,
-/// which is the same moment the framebuffer stops being black.
+/// Until 2026-09-21 this waited: `bootstatus` ran to the end and only then was
+/// a road opened, because every road can capture a boot screen and none of
+/// them can tell one from a device — measured, that first picture is 6.6KB of
+/// black with a four-pixel spinner, and the pane would have called itself
+/// connected over it.
 ///
-/// Asked only for a device THIS pane booted. One that was already running has
-/// answered it long ago, and paying even 0.18s of it on the way to the first
-/// frame would be paying for nothing.
+/// What that traded away is the nine seconds the person spends looking at a
+/// pane with nothing in it ("둘 다 1초 때에 바로 부팅되게 할 순 없나"), while
+/// the Simulator's own window — the same device, the same CoreSimulator —
+/// shows an Apple logo and a progress ring the whole time. That logo IS the
+/// honest picture of a device that is booting, so the roads now draw it and
+/// this keeps only the part that was never in the way: the measurement, for
+/// the one line a person reading the log wants, and the flag the two roads
+/// above read to tell "not yet" from "broken".
+///
+/// The child is owned here rather than handed to [`SessionControl`]: that slot
+/// holds ONE child and the still-picture road needs it for every frame it
+/// takes, which is exactly the road that draws the boot logo.
 #[cfg(target_os = "macos")]
-fn wait_until_the_device_can_draw(
+fn watch_the_device_boot(
     udid: &str,
-    control: &SessionControl,
+    control: &Arc<SessionControl>,
     husk_root: &Path,
     stream: &str,
-) {
-    let Ok(child) = simctl_command()
-        .args(["bootstatus", udid])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        // A machine that cannot even spawn it keeps the behaviour it had:
-        // frames from whenever, boot screen included.
-        return;
-    };
-    if !control.install_child(child) {
-        return;
+) -> Arc<BootWatch> {
+    let watch = BootWatch::waking();
+    let watching = watch.clone();
+    let control = control.clone();
+    let husk_root = husk_root.to_path_buf();
+    let named = stream.to_string();
+    let device = udid.to_string();
+    if std::thread::Builder::new()
+        .name(format!("ios-boot-{stream}"))
+        .spawn(move || {
+            let started = Instant::now();
+            let ready = match simctl_command()
+                .args(["bootstatus", &device])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(mut child) => wait_beside(&mut child, &control),
+                // A machine that cannot even spawn it has no second opinion
+                // about this boot, and nothing above may keep calling the
+                // device "not yet" on the strength of a question nobody asked.
+                Err(_) => {
+                    watching.finished();
+                    return;
+                }
+            };
+            watching.finished();
+            crate::note_window_event(
+                &husk_root,
+                &format!(
+                    "emulator ios pump {named}: waited {}ms for the device to finish booting ({})",
+                    started.elapsed().as_millis(),
+                    if ready { "ready" } else { "gave up" }
+                ),
+            );
+        })
+        .is_err()
+    {
+        watch.finished();
     }
-    let started = Instant::now();
-    let ready = wait_for_child(control, BOOT_WAIT);
-    // The pane is blank for the whole of this, so the one thing a person
-    // reading the log will want is how long it was blank and why it stopped.
-    crate::note_window_event(
-        husk_root,
-        &format!(
-            "emulator ios pump {stream}: waited {}ms for the device to finish booting ({})",
-            started.elapsed().as_millis(),
-            if ready { "ready" } else { "gave up" }
-        ),
-    );
+    watch
 }
 
 #[cfg(not(target_os = "macos"))]
-fn wait_until_the_device_can_draw(
+fn watch_the_device_boot(
     _udid: &str,
-    _control: &SessionControl,
+    _control: &Arc<SessionControl>,
     _husk_root: &Path,
     _stream: &str,
-) {
+) -> Arc<BootWatch> {
+    BootWatch::already_up()
+}
+
+/// Wait for a child this thread owns, giving up at [`BOOT_WAIT`] or as soon as
+/// the stream it belongs to ends.
+///
+/// The cap is for the boot that is not coming, not for the slow one: measured
+/// on this machine, an already-booted device answers `bootstatus` in 0.18s and
+/// a warm cold boot in 8.8-9.6s, while a device meeting its setup assistant
+/// for the first time spends minutes.
+#[cfg(target_os = "macos")]
+fn wait_beside(child: &mut std::process::Child, control: &SessionControl) -> bool {
+    let deadline = Instant::now() + BOOT_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if control.is_alive() && Instant::now() < deadline => {
+                std::thread::sleep(super::PROCESS_POLL_INTERVAL);
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
 }
 
 /// One picture off the helper, with the size it was actually encoded at.
@@ -534,6 +684,8 @@ struct HelperRoad {
     /// this is what turns a resize — or a pointer entering — into exactly one
     /// re-negotiation instead of one per frame.
     streaming_at: Option<(u32, u32)>,
+    /// Where this road stands between one picture and the next.
+    seam: Seam,
     misses: u32,
     /// When the road was put down. Tried as if new once the retry has passed.
     resting_since: Option<Instant>,
@@ -544,21 +696,108 @@ struct HelperRoad {
     told: bool,
 }
 
+/// What one turn of the pump asks the fast road for.
+///
+/// One value rather than four more arguments because they arrive together and
+/// say one thing: this is the picture this pane wants right now, and this is
+/// what the road may conclude from failing to hand one over.
+#[derive(Clone, Copy)]
+struct Turn {
+    /// The long edge the pane can actually paint.
+    long_edge: u32,
+    /// The rate the helper is allowed to push at.
+    max_fps: u32,
+    /// Ask outright, whether or not the screen moved.
+    refresh: bool,
+    /// The device is still coming up, so "no picture" is not a failure.
+    booting: bool,
+}
+
+/// Why one helper turn came back empty — and therefore whether it counts
+/// against the road.
+///
+/// "Not yet" and "dead" are different facts, and only one of them is worth
+/// resting a road for. Two of these three are "not yet":
+///
+/// * a device still booting has no framebuffer to hand out, and asking it for
+///   one is the pane doing its job early rather than the road failing;
+/// * a stream the pump itself just replaced, by asking for a new size or rate,
+///   ends because it was replaced. The helper retires the pusher mid-stream
+///   and that pusher closes its end of the socket (main.swift's `FramePusher`).
+///
+/// Counting the second of those was the whole of the 2026-09-21 defect: a pane
+/// that did nothing worse than being resized had three of them in a row at
+/// +26.5s, rested the fast road for five seconds, and only came back at
+/// +32.6s.
+/// What a re-negotiation is owed, and whether it has been paid.
+///
+/// The helper answers a new size or rate by retiring the pusher that was
+/// mid-stream and starting another, and the retiring one closes its end of the
+/// frame socket — so the failure that follows our own ask is ours. Exactly one
+/// failure, though, and not one per ask: a stumble puts the road back to
+/// "nothing negotiated", so a road that fails, re-negotiates and fails again
+/// would otherwise forgive itself forever and never rest. It is a PICTURE that
+/// buys the next free pass, because a picture is the only proof the road was
+/// healthy in between.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Seam {
+    /// Nothing has been asked for that would close a stream.
+    Closed,
+    /// A size or rate was just asked for; the close it causes is ours.
+    Owed,
+    /// That close has been forgiven and no picture has arrived since.
+    Spent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Stumble {
+    /// The device is still coming up.
+    Booting,
+    /// We replaced this stream ourselves, this turn.
+    Renegotiated,
+    /// Nothing explains it. The one that rests the road.
+    Unexplained,
+}
+
 impl HelperRoad {
     fn new() -> Self {
         Self {
             streaming_at: None,
+            seam: Seam::Closed,
             misses: 0,
             resting_since: None,
             told: false,
         }
     }
 
-    /// Count one failure, and put the road down once they stop being hiccups.
-    fn stumbled(&mut self, error: &str, husk_root: &Path, stream: &str) -> HelperFrameAnswer {
+    /// What this turn's failure counts as — and where a re-negotiation's one
+    /// free pass is spent.
+    fn why(&mut self, booting: bool) -> Stumble {
+        if booting {
+            return Stumble::Booting;
+        }
+        if self.seam == Seam::Owed {
+            self.seam = Seam::Spent;
+            return Stumble::Renegotiated;
+        }
+        Stumble::Unexplained
+    }
+
+    /// Answer one failure: count it only when nothing explains it, and put the
+    /// road down once the unexplained ones stop being hiccups.
+    fn stumbled(
+        &mut self,
+        why: Stumble,
+        error: &str,
+        husk_root: &Path,
+        stream: &str,
+    ) -> HelperFrameAnswer {
         // Whatever failed, the helper is no longer known to be pushing at any
         // size — so the next healthy turn re-negotiates rather than assuming.
         self.streaming_at = None;
+        if why != Stumble::Unexplained {
+            return HelperFrameAnswer::Absent;
+        }
         self.misses = self.misses.saturating_add(1);
         if self.misses >= HELPER_MISSES_BEFORE_GIVING_UP {
             crate::note_window_event(
@@ -601,6 +840,10 @@ impl HelperRoad {
             self.told = true;
         }
         self.misses = 0;
+        // A picture ends the seam a re-negotiation opened, and is the only
+        // thing that buys the next free pass: the next failure is about
+        // whatever comes after this picture.
+        self.seam = Seam::Closed;
         HelperFrameAnswer::Picture(picture)
     }
 
@@ -620,12 +863,16 @@ impl HelperRoad {
     fn take_frame(
         &mut self,
         udid: &str,
-        long_edge: u32,
-        max_fps: u32,
-        refresh: bool,
+        turn: Turn,
         husk_root: &Path,
         stream: &str,
     ) -> HelperFrameAnswer {
+        let Turn {
+            long_edge,
+            max_fps,
+            refresh,
+            booting,
+        } = turn;
         if let Some(since) = self.resting_since {
             if since.elapsed() < HELPER_ROAD_RETRY {
                 return HelperFrameAnswer::Absent;
@@ -651,9 +898,17 @@ impl HelperRoad {
             if let Err(error) =
                 super::ios_hid::stream_frames(udid, long_edge, FRAME_JPEG_QUALITY, max_fps)
             {
-                return self.stumbled(&error, husk_root, stream);
+                let why = self.why(booting);
+                return self.stumbled(why, &error, husk_root, stream);
             }
             self.streaming_at = Some((long_edge, max_fps));
+            // The stream the helper was pushing down, if any, has just been
+            // retired in favour of this one — so the close that follows is
+            // ours and not the road's. Only from `Closed`: an ask that follows
+            // a forgiven failure, with no picture in between, buys nothing.
+            if self.seam == Seam::Closed {
+                self.seam = Seam::Owed;
+            }
         }
         let picture = |frame: super::ios_hid::HelperFrame| HelperPicture {
             bytes: frame.bytes,
@@ -679,10 +934,16 @@ impl HelperRoad {
                         self.misses = 0;
                         HelperFrameAnswer::Still
                     }
-                    Err(error) => self.stumbled(&error, husk_root, stream),
+                    Err(error) => {
+                        let why = self.why(booting);
+                        self.stumbled(why, &error, husk_root, stream)
+                    }
                 }
             }
-            Err(error) => self.stumbled(&error, husk_root, stream),
+            Err(error) => {
+                let why = self.why(booting);
+                self.stumbled(why, &error, husk_root, stream)
+            }
         }
     }
 
@@ -690,9 +951,7 @@ impl HelperRoad {
     fn take_frame(
         &mut self,
         _udid: &str,
-        _long_edge: u32,
-        _max_fps: u32,
-        _refresh: bool,
+        _turn: Turn,
         _husk_root: &Path,
         _stream: &str,
     ) -> HelperFrameAnswer {
@@ -705,7 +964,7 @@ fn pump_ios_frames(
     stream: String,
     udid: String,
     device: String,
-    waking: bool,
+    boot: Arc<BootWatch>,
     control: Arc<SessionControl>,
 ) {
     let _finished = FinishSession::new(stream.clone());
@@ -713,11 +972,6 @@ fn pump_ios_frames(
         .state::<crate::AppState>()
         .local_data_root()
         .to_path_buf();
-    // Before anything is captured, because every road can capture a boot
-    // screen and none of them can tell one from a device.
-    if waking {
-        wait_until_the_device_can_draw(&udid, &control, &husk_root, &stream);
-    }
     let frame = capture_path(&stream);
     if let Some(parent) = frame.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -764,9 +1018,18 @@ fn pump_ios_frames(
         // that has died.
         let refresh = last_emitted.is_none_or(|at| at.elapsed() >= IDLE_REFRESH_INTERVAL);
         let long_edge = resolve_long_edge(control.viewport_long_edge());
-        let max_fps =
-            frame_rate_for(control.is_engaged() || control.input_within(INPUT_BOOST_WINDOW));
-        match helper.take_frame(&udid, long_edge, max_fps, refresh, &husk_root, &stream) {
+        let turn = Turn {
+            long_edge,
+            max_fps: frame_rate_for(
+                control.is_engaged() || control.input_within(INPUT_BOOST_WINDOW),
+            ),
+            refresh,
+            // Read per turn rather than once: a boot finishes DURING a pane's
+            // first seconds, and the turn after it finishes is the first one
+            // whose failures are worth anything.
+            booting: boot.booting(),
+        };
+        match helper.take_frame(&udid, turn, &husk_root, &stream) {
             HelperFrameAnswer::Absent => rate.broke(),
             // Nothing moved. The push road is watching the framebuffer for
             // free, so there is no rest to take and no ladder to climb — the
@@ -851,7 +1114,12 @@ fn pump_ios_frames(
         };
         let Some(bytes) = bytes else {
             if control.is_alive() && !control.is_paused() {
-                if misses.missed() {
+                // A device that is still coming up has no picture to give yet,
+                // and telling the pane its screen is unavailable over a boot is
+                // the same lie the fast road stopped telling (D5). The budget
+                // is not spent on it either: it is for a device that CAN draw,
+                // and it has to survive the boot intact.
+                if !turn.booting && misses.missed() {
                     crate::note_window_event(
                         &husk_root,
                         &format!(
@@ -860,7 +1128,11 @@ fn pump_ios_frames(
                     );
                     emit_note(&app, &stream, EmulatorNoteCode::FrameUnavailable);
                 }
-                control.rest(FALLBACK_MISS_REST);
+                control.rest(if turn.booting {
+                    BOOTING_MISS_REST
+                } else {
+                    FALLBACK_MISS_REST
+                });
             }
             continue;
         };
@@ -1038,17 +1310,34 @@ pub(crate) async fn start_emulator_stream(
         if let Some(viewport) = viewport {
             control.set_viewport_long_edge(viewport.long_edge_px);
         }
+        let husk_root = app
+            .state::<crate::AppState>()
+            .local_data_root()
+            .to_path_buf();
         crate::note_window_event(
-            app.state::<crate::AppState>().local_data_root(),
+            &husk_root,
             &format!(
                 "emulator ios stream {stream_id} picked {} ({})",
                 chosen.name, chosen.udid
             ),
         );
+        // This is the device the next window wakes before anybody asks (D4),
+        // and the one this window is answerable for when it goes quiet (D3).
+        keeping::remember_this_device(&husk_root, &chosen.udid, &chosen.name);
+        // The boot is timed beside the pictures rather than in front of them
+        // (D5): the roads below draw the Simulator's own boot logo while this
+        // watch says the device is still coming up, and both of the roads that
+        // can only fail while it does read the same watch.
+        let boot = if waking {
+            watch_the_device_boot(&chosen.udid, &control, &husk_root, &stream_id)
+        } else {
+            BootWatch::already_up()
+        };
         let descriptor = lease.activate(descriptor, control.clone());
         let pump_app = app.clone();
         let pump_stream = stream_id.clone();
         let pump_udid = chosen.udid.clone();
+        let pump_boot = boot.clone();
         // The window road finds the Simulator's window by the DEVICE NAME its
         // title wears — the udid appears nowhere on screen.
         let pump_device = chosen.name;
@@ -1061,7 +1350,7 @@ pub(crate) async fn start_emulator_stream(
                     pump_stream,
                     pump_udid,
                     pump_device,
-                    waking,
+                    pump_boot,
                     control,
                 )
             })
@@ -1088,7 +1377,7 @@ pub(crate) async fn start_emulator_stream(
                 // a machine that really cannot start one is asked about ever
                 // more rarely, and `rest` returns false the moment the
                 // stream dies.
-                let mut rest = Duration::from_secs(3);
+                let mut rest = HELPER_ATTACH_RETRY;
                 let mut interactive = ios_input_available(&capability_udid);
                 loop {
                     // The stream can end while the helper is still starting,
@@ -1106,7 +1395,16 @@ pub(crate) async fn start_emulator_stream(
                     if interactive || !capability_control.rest(rest) {
                         return;
                     }
-                    rest = (rest * 2).min(Duration::from_secs(60));
+                    // While the device is still coming up the next try is
+                    // genuinely likely to be the one that works, so it is
+                    // asked for on the short beat (D5); once it is up, the
+                    // doubling backoff is what covers a machine that will
+                    // never have a helper at all.
+                    rest = if boot.booting() {
+                        HELPER_ATTACH_RETRY
+                    } else {
+                        (rest * 2).min(HELPER_ATTACH_CEILING)
+                    };
                     interactive = ios_input_available(&capability_udid);
                 }
             });
@@ -1128,15 +1426,7 @@ pub(crate) async fn shutdown_mobile_emulator(
             .iter()
             .find(|device| device.udid == udid)
             .ok_or("이 기계의 시뮬레이터가 아닙니다")?;
-        let out = simctl_command()
-            .args(["shutdown", &chosen.udid])
-            .output()
-            .map_err(|error| error.to_string())?;
-        let said = String::from_utf8_lossy(&out.stderr);
-        if !out.status.success() && !said.contains("current state: Shutdown") {
-            return Err(format!("시뮬레이터를 끌 수 없습니다: {}", said.trim()));
-        }
-        Ok(())
+        shutdown_simulator(&chosen.udid)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1613,6 +1903,37 @@ pub(crate) async fn ios_logs(
     .map_err(|error| error.to_string())?
 }
 
+/// Wake the simulator this machine last used, before anybody asks for it (D4).
+///
+/// On the caller's thread: [`super::on_window_boot`] owns the one thread all
+/// of this rides, so a platform added beside this one does not bring a third.
+pub(super) fn preboot_last_used(app: &AppHandle) {
+    keeping::preboot_last_used(app);
+}
+
+/// Start the watch that shuts this window's devices down once nothing is
+/// looking at them (D3).
+pub(super) fn start_idle_reclaimer(app: AppHandle) {
+    keeping::start_idle_reclaimer(app);
+}
+
+/// The window is closing. A booted simulator is left booted — that is the
+/// whole of D3 — unless the person has said otherwise, in which case the
+/// devices this window is answerable for go with it.
+///
+/// Nothing else here shuts a simulator down on the way out, and nothing ever
+/// did: `ios_hid::shutdown_all` puts down the helper CLIENTS (a process apiece
+/// and a socket apiece), and the registry stops the streams. The device itself
+/// has always survived this window; what it did not survive was having nothing
+/// to come back to, which is what the preboot and the last-used record are
+/// for.
+pub(super) fn devices_at_exit(keep_booted: bool, local_data_root: &Path) {
+    if keep_booted {
+        return;
+    }
+    keeping::shut_down_our_devices(local_data_root);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1685,6 +2006,327 @@ mod tests {
         );
         // The ceiling holds even though rounding up would otherwise cross it.
         assert!(resolve_long_edge(Some(MAX_LONG_EDGE_PX)) <= MAX_LONG_EDGE_PX);
+    }
+
+    /// Nowhere at all: [`crate::note_window_event`] opens a file inside the
+    /// root it is given and does nothing when that root does not exist, so a
+    /// road tested here writes no log anywhere on this machine.
+    fn nowhere() -> &'static Path {
+        Path::new("/zerocode-tests-have-no-data-root")
+    }
+
+    /// A stream the pump itself replaced is a seam in the road, not its death.
+    ///
+    /// The helper answers a new size by retiring the pusher mid-stream, and
+    /// that pusher closes its end — so the very next wait says "the stream is
+    /// closed". Counted as misses, three of those rested the fast road for
+    /// five seconds and dropped the pane onto the still-picture road, measured
+    /// in the window's log on 2026-09-21 at +26.5s after nothing worse than a
+    /// resize.
+    #[test]
+    fn a_stream_we_replaced_ourselves_costs_the_road_nothing() {
+        let mut road = HelperRoad::new();
+        road.seam = Seam::Owed;
+        let why = road.why(false);
+        assert_eq!(why, Stumble::Renegotiated);
+        road.stumbled(why, "iOS 화면 스트림이 닫혔습니다", nowhere(), "stream");
+        assert_eq!(road.misses, 0, "a close we caused was counted against us");
+        assert!(
+            road.resting_since.is_none(),
+            "the road rested over a resize"
+        );
+        // And the next turn re-negotiates rather than assuming the old size.
+        assert!(road.streaming_at.is_none());
+        // The free pass is spent, not held: a road that fails again before any
+        // picture arrives is failing for its own reasons.
+        assert_eq!(road.why(false), Stumble::Unexplained);
+    }
+
+    /// A picture closes the seam: whatever fails after one is about what came
+    /// after it.
+    #[test]
+    fn a_picture_ends_the_free_pass() {
+        let mut road = HelperRoad::new();
+        road.seam = Seam::Owed;
+        road.arrived(
+            HelperPicture {
+                bytes: vec![1, 2, 3],
+                width: 412,
+                height: 896,
+                seed: 518,
+            },
+            nowhere(),
+            "stream",
+        );
+        assert_eq!(road.seam, Seam::Closed);
+        assert_eq!(road.why(false), Stumble::Unexplained);
+    }
+
+    /// The free pass is bought by a PICTURE, not by the ask itself — otherwise
+    /// a road whose every stream dies would re-negotiate, be forgiven, and
+    /// never once be rested or written down.
+    #[test]
+    fn a_road_that_only_ever_re_negotiates_is_forgiven_once_and_then_rested() {
+        let mut road = HelperRoad::new();
+        for turn in 0..=HELPER_MISSES_BEFORE_GIVING_UP {
+            // What `take_frame` does after an ask the helper accepted.
+            if road.seam == Seam::Closed {
+                road.seam = Seam::Owed;
+            }
+            let why = road.why(false);
+            assert_eq!(
+                why,
+                if turn == 0 {
+                    Stumble::Renegotiated
+                } else {
+                    Stumble::Unexplained
+                },
+                "turn {turn} was judged wrong"
+            );
+            road.stumbled(why, "iOS 화면 스트림이 닫혔습니다", nowhere(), "stream");
+        }
+        assert_eq!(road.misses, HELPER_MISSES_BEFORE_GIVING_UP);
+        assert!(road.resting_since.is_some());
+    }
+
+    /// A device that cannot draw yet is not a road that is broken. The pane
+    /// opens its roads before the boot is over now (D5), so the helper's cold
+    /// start legitimately fails for as long as the device is coming up.
+    #[test]
+    fn a_booting_device_never_rests_the_road() {
+        let mut road = HelperRoad::new();
+        for _ in 0..HELPER_MISSES_BEFORE_GIVING_UP * 3 {
+            let why = road.why(true);
+            assert_eq!(why, Stumble::Booting);
+            road.stumbled(why, "화면 소스를 열 수 없습니다", nowhere(), "stream");
+        }
+        assert_eq!(road.misses, 0);
+        assert!(road.resting_since.is_none());
+        // And a boot does not spend the re-negotiation's free pass: the resize
+        // that happens during a boot still gets its one forgiveness after it.
+        road.seam = Seam::Owed;
+        assert_eq!(road.why(true), Stumble::Booting);
+        assert_eq!(road.seam, Seam::Owed);
+    }
+
+    /// The rest itself is untouched: three failures nothing explains still put
+    /// the road down for the retry, which is what a helper that really died
+    /// must not cost the pane more than once.
+    #[test]
+    fn three_failures_nothing_explains_still_rest_the_road() {
+        let mut road = HelperRoad::new();
+        for turn in 1..=HELPER_MISSES_BEFORE_GIVING_UP {
+            let why = road.why(false);
+            assert_eq!(why, Stumble::Unexplained);
+            road.stumbled(
+                why,
+                "iOS 입력 헬퍼가 응답하지 않습니다",
+                nowhere(),
+                "stream",
+            );
+            assert_eq!(road.misses, turn);
+        }
+        assert!(road.resting_since.is_some());
+    }
+
+    /// `simctl boot` says no to a device that is already awake, and the state
+    /// it names is the only way to tell that from a failure. With a preboot in
+    /// flight (D4) that state is `Booting` as often as `Booted`.
+    #[test]
+    fn a_boot_already_in_flight_reads_as_a_yes() {
+        assert!(already_awake(
+            "Unable to boot device in current state: Booted"
+        ));
+        assert!(already_awake(
+            "Unable to boot device in current state: Booting"
+        ));
+        assert!(!already_awake(
+            "Invalid device: D0707A9F-8352-4989-934B-2392F6B367CF"
+        ));
+        assert!(!already_awake(
+            "Unable to boot device in current state: Shutting Down"
+        ));
+    }
+
+    /// One pane's first picture, against a real simulator, in the order the
+    /// pump asks its roads in.
+    ///
+    /// The capability thread's beat and the pump's turn are reproduced rather
+    /// than the pump itself, because the pump needs a window: a thread that
+    /// retries the helper's cold start, and a loop that takes the helper's
+    /// picture when there is one and a CoreSimulator still picture when there
+    /// is not. That IS the road order the pane sees.
+    ///
+    /// ```text
+    /// ZEROCODE_LIVE_SIMULATOR=<udid> ZEROCODE_LIVE_ORDER=new|old \
+    ///   cargo test -p zerocode-shell --bin zerocode-shell -- --ignored \
+    ///   --nocapture the_first_picture
+    /// ```
+    ///
+    /// `old` waits for `bootstatus` before opening a road, which is what this
+    /// window did until 2026-09-21; `new` opens them at once.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "boots a real iOS simulator and shuts it down again"]
+    fn the_first_picture_of_a_live_pane() {
+        let Ok(udid) = std::env::var("ZEROCODE_LIVE_SIMULATOR") else {
+            println!("LIVE: no simulator named; nothing measured");
+            return;
+        };
+        let old_order = std::env::var("ZEROCODE_LIVE_ORDER").as_deref() == Ok("old");
+        let already_booted = list_ios_simulators()
+            .into_iter()
+            .find(|device| device.udid == udid)
+            .map(|device| device.booted)
+            .unwrap_or_default();
+        // The clock starts where the pane's does: the stream has picked a
+        // device and is about to make sure it is awake.
+        let started = Instant::now();
+        let device = SimulatorDevice {
+            udid: udid.clone(),
+            name: "live".to_string(),
+            booted: already_booted,
+            runtime: "live".to_string(),
+        };
+        boot_simulator(&device).expect("the device boots");
+        let booted_at = started.elapsed();
+        if old_order {
+            let _ = simctl_command()
+                .args(["bootstatus", &udid])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            println!(
+                "LIVE: bootstatus answered at {}ms",
+                started.elapsed().as_millis()
+            );
+        }
+        // The capability thread: one cold start per beat until one stands.
+        let attaching = udid.clone();
+        let attached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let standing = attached.clone();
+        let asking = std::thread::spawn(move || {
+            while !standing.load(std::sync::atomic::Ordering::Acquire) {
+                if super::super::ios_hid::retain(&attaching).is_ok() {
+                    standing.store(true, std::sync::atomic::Ordering::Release);
+                    return;
+                }
+                std::thread::sleep(HELPER_ATTACH_RETRY);
+            }
+        });
+        let long_edge = resolve_long_edge(None);
+        let frame = std::env::temp_dir().join(format!(
+            "zc-first-picture-{}.jpg",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let deadline = Instant::now() + BOOT_WAIT;
+        let (road, size) = loop {
+            assert!(Instant::now() < deadline, "no road ever drew a picture");
+            if super::super::ios_hid::retained(&udid)
+                && super::super::ios_hid::stream_frames(&udid, long_edge, FRAME_JPEG_QUALITY, 60)
+                    .is_ok()
+            {
+                if let Ok(Some(picture)) =
+                    super::super::ios_hid::next_frame(&udid, FRAME_WAIT_TIMEOUT)
+                {
+                    break (
+                        "helper push",
+                        format!("{}x{}", picture.width, picture.height),
+                    );
+                }
+                if let Ok(Some(picture)) =
+                    super::super::ios_hid::still_frame(&udid, None, long_edge, FRAME_JPEG_QUALITY)
+                {
+                    break (
+                        "helper still",
+                        format!("{}x{}", picture.width, picture.height),
+                    );
+                }
+            }
+            let _ = std::fs::remove_file(&frame);
+            let shot = simctl_command()
+                .args(["io", &udid, "screenshot", "--type=jpeg"])
+                .arg(&frame)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if shot.is_ok_and(|status| status.success())
+                && let Ok(bytes) = std::fs::metadata(&frame)
+                && bytes.len() > 0
+            {
+                break ("still picture", format!("{} bytes", bytes.len()));
+            }
+            // The pump's own rest after a capture that answered nothing —
+            // without it this would measure a road nobody walks.
+            std::thread::sleep(BOOTING_MISS_REST);
+        };
+        let first = started.elapsed();
+        println!(
+            "LIVE: {} device, {} order — boot accepted at {}ms, first picture at {}ms on the {road} road ({size})",
+            if already_booted {
+                "booted"
+            } else {
+                "shut-down"
+            },
+            if old_order { "old" } else { "new" },
+            booted_at.as_millis(),
+            first.as_millis()
+        );
+        attached.store(true, std::sync::atomic::Ordering::Release);
+        let _ = asking.join();
+        let _ = std::fs::remove_file(&frame);
+        super::super::ios_hid::release(&udid);
+        if !already_booted {
+            let _ = shutdown_simulator(&udid);
+        }
+    }
+
+    /// The push road survives the sizes a pane actually asks for.
+    ///
+    /// A resize, a pause and resume, a pointer entering: each of those is one
+    /// `stream` ask, and the helper answers it by retiring the pusher that was
+    /// mid-stream — which closes its end of the frame socket. Served as one
+    /// connection, the wait after that ask answered `iOS 화면 스트림이
+    /// 닫혔습니다` forever after.
+    ///
+    /// `Ok(None)` is the pass here: it is the answer of a live socket with a
+    /// still screen. `Err` is the failure this test exists for.
+    ///
+    /// ```text
+    /// ZEROCODE_LIVE_SIMULATOR=<udid> \
+    ///   cargo test -p zerocode-shell --bin zerocode-shell -- --ignored \
+    ///   --nocapture a_re_negotiated_stream
+    /// ```
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs a booted iOS simulator"]
+    fn a_re_negotiated_stream_keeps_its_push_road() {
+        let Ok(udid) = std::env::var("ZEROCODE_LIVE_SIMULATOR") else {
+            println!("LIVE: no simulator named; nothing measured");
+            return;
+        };
+        super::super::ios_hid::retain(&udid).expect("the helper stands");
+        // The sizes a dragged split crosses, and back again.
+        for (turn, asked) in [1024u32, 512, 1024].into_iter().enumerate() {
+            let long_edge = resolve_long_edge(Some(asked));
+            super::super::ios_hid::stream_frames(&udid, long_edge, FRAME_JPEG_QUALITY, 60)
+                .expect("the helper takes the new size");
+            let started = Instant::now();
+            let mut pictures = 0u32;
+            while started.elapsed() < Duration::from_secs(2) {
+                match super::super::ios_hid::next_frame(&udid, FRAME_WAIT_TIMEOUT) {
+                    Ok(Some(_)) => pictures += 1,
+                    Ok(None) => {}
+                    Err(error) => panic!(
+                        "turn {turn} at {long_edge}: the push road died on a re-negotiation \
+                         after {}ms — {error}",
+                        started.elapsed().as_millis()
+                    ),
+                }
+            }
+            println!("LIVE: {long_edge} long edge — {pictures} pictures, road alive");
+        }
+        super::super::ios_hid::release(&udid);
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod ios;
 #[cfg(target_os = "macos")]
 mod ios_hid;
 pub(crate) mod marks;
+mod prefs;
 mod process;
 mod pump;
 mod session;
@@ -23,7 +24,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, ipc::InvokeResponseBody};
+use tauri::{AppHandle, Emitter, Manager, ipc::InvokeResponseBody};
 
 pub(crate) use android::{
     android_accessibility_tree, android_accessibility_tree_direct, android_button,
@@ -343,17 +344,25 @@ pub(crate) async fn choose_emulator_app(
     Ok(Some(checked.to_string_lossy().into_owned()))
 }
 
-/// Close every pane, and put away the devices the window is not keeping.
+/// What the window does for the emulators when it starts.
 ///
-/// `keep_booted` is the person's `emulator.keepBooted` (D3): the panes always
-/// go — nothing is left pumping into a window that is gone — and the devices
-/// stay up so the next window's first pane opens on a resume rather than a
-/// cold boot.
-pub(crate) fn shutdown_all(keep_booted: bool) {
-    registry().shutdown_all();
-    android::shutdown_all_devices(keep_booted);
-    #[cfg(target_os = "macos")]
-    ios_hid::shutdown_all();
+/// Its own door rather than three calls from the boot, because all of it is
+/// the same sentence — the device somebody will ask for next should already
+/// be awake, and the one nobody asks for should not stay awake forever — and
+/// none of it may hold the boot up: the work runs on its own thread, and the
+/// reclaimers each start theirs.
+pub(crate) fn on_window_boot(app: &AppHandle) {
+    let app = app.clone();
+    // One thread for all of it: the settings read, a device listing and a
+    // boot are file and process work, and a window that waits on a simulator
+    // before it paints has made a convenience into a launch delay.
+    let _ = std::thread::Builder::new()
+        .name("emulator-boot".to_string())
+        .spawn(move || {
+            preboot_last_used(&app);
+            android::arm_idle_reclaim(&app);
+            ios::start_idle_reclaimer(app);
+        });
 }
 
 /// Put the last-used device of each platform up while the window is still
@@ -361,22 +370,34 @@ pub(crate) fn shutdown_all(keep_booted: bool) {
 ///
 /// One entry point rather than one per platform, because "the device the next
 /// pane will want" is one question with a per-platform answer, and the window
-/// boot has no business knowing how many platforms there are. Nothing here
-/// opens a stream: prebooting is the device only, and the pane that arrives
-/// later joins the launch already in flight.
+/// boot has no business knowing how many platforms there are — nor whether the
+/// person wants it at all: `emulator.prebootLastUsed` is read here, once, for
+/// both. Nothing here opens a stream: prebooting is the device only, and the
+/// pane that arrives later joins the launch already in flight.
 pub(crate) fn preboot_last_used(app: &AppHandle) {
-    android::preboot_last_used(app);
-    // iOS lands here (D5/D4-ios, t-5645): `simctl boot` for the last-used
-    // simulator, on the same terms — device only, no stream.
-    #[cfg(target_os = "macos")]
-    {
-        let _ = app;
+    if !prefs::of(app).preboot_last_used {
+        return;
     }
+    android::preboot_last_used(app);
+    ios::preboot_last_used(app);
 }
 
-/// Start watching for a fleet nobody has a pane on (D3).
-pub(crate) fn arm_idle_reclaim(app: &AppHandle) {
-    android::arm_idle_reclaim(app);
+/// Close every pane, and put away the devices the window is not keeping.
+///
+/// `emulator.keepBooted` (D3) is read here, at exit, because the switch may
+/// have been turned in this session: the panes always go — nothing is left
+/// pumping into a window that is gone — and the devices stay up so the next
+/// window's first pane opens on a resume rather than a cold boot.
+pub(crate) fn shutdown_all(app: &AppHandle) {
+    let prefs = prefs::of(app);
+    registry().shutdown_all();
+    android::shutdown_all_devices(prefs.keep_booted);
+    ios::devices_at_exit(
+        prefs.keep_booted,
+        app.state::<crate::AppState>().local_data_root(),
+    );
+    #[cfg(target_os = "macos")]
+    ios_hid::shutdown_all();
 }
 
 #[cfg(test)]
