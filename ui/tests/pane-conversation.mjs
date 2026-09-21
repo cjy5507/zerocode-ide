@@ -190,6 +190,65 @@ export async function testPaneConversation(browser, origin, ok) {
       dock.roomUnder && dock.fades && dock.statusLast,
       JSON.stringify(dock));
 
+    // ------------------------------------------------ only the list scrolls
+    // Following the tail with `scrollIntoView` on the last row moved every
+    // scrollable ancestor as well — the document included, `overflow: hidden`
+    // notwithstanding — and a conversation standing a little below the
+    // viewport dragged the tab strip and the side rail out of the window
+    // (installed 1.1.11, 2026-09-21). The page is stood a little taller and
+    // wider than its viewport here, the way a slot that mis-measures does, so
+    // a document scroll would show; the list follows its tail, the document
+    // does not move, and a person's row clicked home moves the list alone.
+    const pageScroll = await page.evaluate(async () => {
+      const frame = () => new Promise((done) => requestAnimationFrame(done));
+      const list = document.querySelector(".helper-turns");
+      const root = document.scrollingElement;
+      const before = {
+        overflowY: root.scrollHeight - root.clientHeight,
+        overflowX: root.scrollWidth - root.clientWidth,
+      };
+      const spacer = document.createElement("div");
+      spacer.style.cssText = "position:absolute;left:100%;top:100%;width:400px;height:120px";
+      document.body.appendChild(spacer);
+      try {
+        list.scrollTop = list.scrollHeight;
+        const turns = [];
+        for (let i = 0; i < 30; i += 1) {
+          turns.push({ role: "user", text: `질문 ${i}` });
+          turns.push({ role: "assistant", text: `답 ${i} ` + "긴 줄 ".repeat(120) });
+        }
+        window.__LOG__ = { next: 100, turns };
+        await pollHelperPages();
+        window.__LOG__ = { next: 100, turns: [] };
+        await frame();
+        await frame();
+        const followed = {
+          docTop: root.scrollTop,
+          docLeft: root.scrollLeft,
+          listAtBottom: Math.abs(list.scrollTop + list.clientHeight - list.scrollHeight) <= 2,
+        };
+        // A person's row stuck at the top, clicked, comes home in the list.
+        const users = [...list.querySelectorAll(".helper-turn.is-user")];
+        const stuck = users.find((row) =>
+          Math.round(row.getBoundingClientRect().top) <= Math.round(list.getBoundingClientRect().top));
+        stuck?.click();
+        await frame();
+        const home = stuck
+          ? Math.round(stuck.getBoundingClientRect().top) - Math.round(list.getBoundingClientRect().top)
+          : null;
+        return { before, ...followed, home, docTopAfterClick: root.scrollTop, docLeftAfterClick: root.scrollLeft };
+      } finally {
+        spacer.remove();
+      }
+    });
+    ok("only the list scrolls — the tail is followed and a person's row is clicked home without the document moving, on a page stood taller and wider than its viewport",
+      pageScroll.docTop === 0 && pageScroll.docLeft === 0 && pageScroll.listAtBottom &&
+      pageScroll.home === 0 && pageScroll.docTopAfterClick === 0 && pageScroll.docLeftAfterClick === 0,
+      JSON.stringify(pageScroll));
+    ok("the conversation page itself does not overflow its viewport",
+      pageScroll.before.overflowY === 0 && pageScroll.before.overflowX === 0,
+      JSON.stringify(pageScroll.before));
+
     // A pane nobody has sent a model-bearing hook for still knows what it is
     // on, because its own transcript says so. The chip itself is this exact
     // read (`paneModels.get(run.term)`, ui/shell-composer.js) — it is not

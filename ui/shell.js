@@ -11976,10 +11976,14 @@ function scrollHelperToBottom(list) {
     // 클수록 그 틈이 넓다. 다시 묻고 나서 옮긴다 — 방금 바닥으로 보낸 판은
     // 여전히 바닥이므로 따라가던 사람은 그대로 따라간다.
     if (!list.isConnected || !helperFollowsTail(list)) return;
+    // The list is the one thing on this page that scrolls, so it is the one
+    // thing this moves. `scrollIntoView` on the last row is not the same
+    // move: it scrolls every scrollable ancestor as well — the document
+    // included, `overflow: hidden` notwithstanding — and a page whose
+    // conversation stood a title bar's height below the viewport was dragged
+    // down (and, on a wide row, sideways) until the tab strip and the side
+    // rail were out of the window (2026-09-21, installed 1.1.11).
     list.scrollTop = list.scrollHeight;
-    try {
-      list.lastElementChild?.scrollIntoView({ block: "end", behavior: "instant" });
-    } catch {}
   });
 }
 
@@ -12497,7 +12501,8 @@ function helperTurnsNode(run) {
     const row = event.target.closest?.(".helper-turn.is-user");
     if (!row || !list.contains(row)) return;
     if (Math.round(row.getBoundingClientRect().top) > Math.round(list.getBoundingClientRect().top)) return;
-    row.scrollIntoView({ block: "start", behavior: "instant" });
+    // Scroll the list, never the page: see `scrollHelperToBottom`.
+    list.scrollTop += row.getBoundingClientRect().top - list.getBoundingClientRect().top;
   });
   syncHelperTurns(list, run);
   return list;
