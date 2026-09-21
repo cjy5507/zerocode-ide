@@ -43,3 +43,6 @@ zo:e2e_compaction_after_a_tool_turn_died_sends_a_valid_summary_request
 zo:e2e_continue_after_a_tool_turn_died_mid_flight_sends_a_valid_request
 zo:e2e_continue_replays_two_completed_turns_from_the_same_session
 
+# 2026-09-22 (coordinator gate after the J6 merge, four workers building, load 30+): the fake iOS helper's channel handshake
+# timed out ("timed out waiting on channel") once in the full shell-test; green solo x3 in 0.34 s — a load flake of t-5763's corpse test.
+root:emulator::ios_hid::tests::a_corpse_is_replaced_before_it_is_handed_out_and_nobody_gets_a_missing_device
