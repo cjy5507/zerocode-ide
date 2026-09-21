@@ -18,12 +18,15 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 use zerocode_core::jev::count::REQUESTS_DIR;
 use zerocode_core::jev::promote::{self, Stand, Verdict};
+use zerocode_core::jev::recent::{self, Decision};
 use zerocode_core::jev::summary::{self, Tally};
 use zerocode_core::jev::{JEV_USES, JevMode, JevUse};
 
 /// What a reader of this report needs from the table's own counter, re-said
 /// here so a caller does not have to take a dependency on the shared core to
 /// read an answer this crate already built.
+pub use zerocode_core::jev::promote::Agreement as SeatAgreement;
+pub use zerocode_core::jev::recent::Decision as SeatDecision;
 pub use zerocode_core::jev::summary::{
     JUDGED_EVERY_ROWS, Tally as SeatTally, asked_something, failures_in_a_row, summarize_last,
 };
@@ -39,6 +42,19 @@ use super::shadow_ledger::shadow_ledger_dir;
 pub const WINDOW_DAYS: i64 = 7;
 
 const MS_PER_DAY: i64 = 24 * 60 * 60 * 1000;
+
+/// One local day of a seat's rows, for the trend the dashboard draws beside
+/// the week (docs/design/jev-dashboard-and-perfection-20260921.md §2 (c)):
+/// the same counter as the week, over the rows whose `at` fell in the day.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DayTally {
+    /// Midnight the day began at, in the person's own zone.
+    pub start_ms: i64,
+    pub tally: Tally,
+    /// The comparisons the seat's rows carried that day — the marks its own
+    /// writer left, counted the way the judge counts them.
+    pub agreement: promote::Agreement,
+}
 
 /// One seat, counted.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +91,11 @@ pub struct SeatReport {
     pub stand: Stand,
     /// Whether the seat acts right now: its mode, and for `auto` its standing.
     pub applies: bool,
+    /// Today and the [`WINDOW_DAYS`]` - 1` days before it, oldest first.
+    pub days: Vec<DayTally>,
+    /// The last requests, newest first — as many as the caller asked for
+    /// ([`report_with_recent`]); none for a caller that wants the numbers.
+    pub recent: Vec<Decision>,
 }
 
 impl SeatReport {
@@ -139,7 +160,26 @@ pub fn report(
     now_ms: i64,
     offset_s: i64,
 ) -> Vec<SeatReport> {
-    JEV_USES.iter().map(|seat| one(seat, roots, sessions, settings, now_ms, offset_s)).collect()
+    report_with_recent(roots, sessions, settings, now_ms, offset_s, 0)
+}
+
+/// [`report`], with each seat's last `recent` requests read alongside its
+/// numbers — the dashboard's ask, in the same pass over the same rows, so
+/// the list under the table and the table above it are one reading of the
+/// file.
+#[must_use]
+pub fn report_with_recent(
+    roots: &[PathBuf],
+    sessions: Option<&Path>,
+    settings: Option<&Value>,
+    now_ms: i64,
+    offset_s: i64,
+    recent: usize,
+) -> Vec<SeatReport> {
+    JEV_USES
+        .iter()
+        .map(|seat| one_with(seat, roots, sessions, settings, now_ms, offset_s, recent))
+        .collect()
 }
 
 /// Every ledger file a seat has under a folder of Computer Use sessions —
@@ -164,14 +204,12 @@ pub fn session_ledgers(sessions: &Path, ledger: &str) -> Vec<PathBuf> {
     found
 }
 
-fn one(
-    seat: &'static JevUse,
-    roots: &[PathBuf],
-    sessions: Option<&Path>,
-    settings: Option<&Value>,
-    now_ms: i64,
-    offset_s: i64,
-) -> SeatReport {
+/// A seat's ledger and its rows: the file the table names under the first
+/// root that has it, else the copies beside each Computer Use session. The
+/// one place the choice is made, so the numbers, the days and the recent
+/// list are read from the same rows.
+#[must_use]
+pub fn rows_of(seat: &JevUse, roots: &[PathBuf], sessions: Option<&Path>) -> (Option<PathBuf>, Vec<Value>) {
     let under_roots = roots.iter().map(|root| root.join(seat.ledger)).find(|path| path.is_file());
     let per_session = sessions.map(|dir| session_ledgers(dir, seat.ledger)).unwrap_or_default();
     let found = under_roots.clone().or_else(|| per_session.first().cloned());
@@ -189,6 +227,47 @@ fn one(
         Some(ledger) => read_rows(ledger),
         None => per_session.iter().flat_map(|ledger| read_rows(ledger)).collect(),
     };
+    (found, rows)
+}
+
+/// Today and the days before it, oldest first, each counted by the week's
+/// own counter over the rows whose `at` fell in it. Calendar days in the
+/// person's zone, not seven rolling spans: a trend is read against the day
+/// a person remembers doing something.
+#[must_use]
+pub fn days_of(rows: &[Value], now_ms: i64, offset_s: i64) -> Vec<DayTally> {
+    let today = start_of_day_ms(now_ms, offset_s);
+    (0..WINDOW_DAYS)
+        .rev()
+        .map(|back| {
+            let start_ms = today - back * MS_PER_DAY;
+            let end_ms = start_ms + MS_PER_DAY;
+            let held: Vec<&Value> = rows
+                .iter()
+                .filter(|row| {
+                    let at = summary::AT.read(row).and_then(Value::as_i64).unwrap_or(0);
+                    (start_ms..end_ms).contains(&at)
+                })
+                .collect();
+            DayTally {
+                start_ms,
+                tally: summary::summarize_rows(held.iter().copied(), i64::MIN),
+                agreement: summary::agreement_rows(held.iter().copied(), i64::MIN),
+            }
+        })
+        .collect()
+}
+
+fn one_with(
+    seat: &'static JevUse,
+    roots: &[PathBuf],
+    sessions: Option<&Path>,
+    settings: Option<&Value>,
+    now_ms: i64,
+    offset_s: i64,
+    recent: usize,
+) -> SeatReport {
+    let (found, rows) = rows_of(seat, roots, sessions);
     let today = summary::summarize(&rows, start_of_day_ms(now_ms, offset_s));
     let week = summary::summarize(&rows, now_ms - WINDOW_DAYS * MS_PER_DAY);
     let cost_usd = cost_of(week.input_tokens);
@@ -223,6 +302,8 @@ fn one(
         applies: seat
             .mode_in(settings.unwrap_or(&Value::Null))
             .applies_with(stand == Stand::Applying),
+        days: days_of(&rows, now_ms, offset_s),
+        recent: recent::recent(&rows, recent),
     }
 }
 

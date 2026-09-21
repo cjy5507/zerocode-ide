@@ -85,8 +85,15 @@ pub(crate) async fn check_typesafe_key() -> Result<TypeSafeCheck, String> {
 /// --json` (docs/design/jev-settings-20260917.md §5). A zo too old to know
 /// the verb answers nothing this reader understands, and the card draws its
 /// switches without numbers rather than refusing to draw at all.
+///
+/// `recent` asks for each seat's last that many requests as well — the
+/// dashboard's list under the table; the card leaves it out and the answer
+/// carries none.
 #[tauri::command]
-pub(crate) async fn jev_summary(state: State<'_, AppState>) -> Result<Vec<SeatNumbers>, String> {
+pub(crate) async fn jev_summary(
+    state: State<'_, AppState>,
+    recent: Option<usize>,
+) -> Result<Vec<SeatNumbers>, String> {
     // The screen seats append beside each walk's evidence under this
     // window's Computer Use sessions, not under a root zo knows; handed over
     // on the exec boundary so one counter counts every seat.
@@ -103,14 +110,19 @@ pub(crate) async fn jev_summary(state: State<'_, AppState>) -> Result<Vec<SeatNu
         if !bin.exists() {
             return Err(format!("zo not installed at {}", bin.display()));
         }
-        let output = crate::proc::quiet_command(&bin)
+        let mut command = crate::proc::quiet_command(&bin);
+        command
             .args(typesafe_settings::ZO_JEV_SUMMARY_ARGS)
             .arg(typesafe_settings::ZO_JEV_SUMMARY_CWD_FLAG)
             .arg(&project)
             .arg(typesafe_settings::ZO_JEV_SUMMARY_SESSIONS_FLAG)
-            .arg(&sessions)
-            .output()
-            .map_err(|error| error.to_string())?;
+            .arg(&sessions);
+        if let Some(count) = recent.filter(|count| *count > 0) {
+            command
+                .arg(typesafe_settings::ZO_JEV_SUMMARY_RECENT_FLAG)
+                .arg(count.to_string());
+        }
+        let output = command.output().map_err(|error| error.to_string())?;
         typesafe_settings::read_summary(&output.stdout).ok_or_else(|| {
             format!(
                 "zo {} exited {}: {}",

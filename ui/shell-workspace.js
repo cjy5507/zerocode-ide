@@ -2952,6 +2952,19 @@ el("nav-agents").addEventListener("click", () => {
   leavePagesForStage();
   openBoard();
 });
+/* The Jev door: the seats' numbers, decisions and trend on one tab
+ * (docs/design/jev-dashboard-and-perfection-20260921.md §2). A neighbour of
+ * the live-agent dashboard for the same reason that one neighbours the
+ * workspace board — it reports what a runtime measured, not what a person
+ * arranged — and it toggles the way its neighbour does. */
+el("nav-jev").addEventListener("click", () => {
+  setWorkspaceBoardOpen(false);
+  if (activeTabId === JEV_TAB.id) {
+    dropTab(JEV_TAB.id);
+    return;
+  }
+  openJevView();
+});
 el("nav-vault").addEventListener("click", () => {
   leavePagesForStage();
   openVault();

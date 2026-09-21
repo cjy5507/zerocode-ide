@@ -305,3 +305,59 @@ fn a_control_row_is_not_a_request_and_is_counted_nowhere_but_by_name() {
         "the control row at the end broke the run, or was counted in it"
     );
 }
+
+#[test]
+fn the_rows_whose_answer_was_acted_on_are_counted_off_whichever_word_the_seat_spelled() {
+    let rows = [
+        json!({"at": 1, "outcome": "answered", "routeUse": "applied"}),
+        json!({"at": 2, "outcome": "answered", "routeUse": "fallback"}),
+        json!({"at": 3, "outcome": "answered", "applied": true}),
+        json!({"at": 4, "outcome": "answered", "pressed": true}),
+        json!({"at": 5, "outcome": "answered", "chosen": "claude"}),
+        json!({"at": 6, "outcome": "no_key"}),
+    ];
+    let tally = summarize(&rows, 0);
+    assert_eq!(
+        tally.applied, 3,
+        "one per spelling, none for a seat with no apply stage"
+    );
+    assert_eq!(applied_of(&rows[1]), Some(false));
+    assert_eq!(applied_of(&rows[4]), None);
+    assert_eq!(Tally::default().applied, 0);
+}
+
+#[test]
+fn the_doors_refusals_are_named_among_the_failures_one_token_at_a_time() {
+    let rows = [
+        json!({"at": 1, "outcome": "not_consented"}),
+        json!({"at": 2, "outcome": "not_consented"}),
+        json!({"at": 3, "outcome": "no_key"}),
+        json!({"at": 4, "outcome": "timeout"}),
+        json!({"at": 5, "outcome": "answered", "elapsedMs": 5}),
+    ];
+    let tally = summarize(&rows, 0);
+    let refusals: Vec<(String, usize)> = tally.refusals().cloned().collect();
+    assert_eq!(
+        refusals,
+        vec![("not_consented".to_string(), 2), ("no_key".to_string(), 1)],
+        "most frequent first, and the wire's timeout is not the door's"
+    );
+    assert_eq!(tally.refused, 3);
+    assert_eq!(tally.failures.len(), 3);
+}
+
+#[test]
+fn an_agreement_over_rows_already_picked_out_reads_the_same_marks() {
+    let rows = [
+        json!({"at": 1, "agreed": true}),
+        json!({"at": 2, "agreed": false}),
+        json!({"at": 3, "label": "x", "agreed": true}),
+    ];
+    let held: Vec<&Value> = rows
+        .iter()
+        .filter(|row| row["at"].as_i64() != Some(2))
+        .collect();
+    let agreement = agreement_rows(held.iter().copied(), i64::MIN);
+    assert_eq!((agreement.compared, agreement.agreed), (2, 2));
+    assert_eq!(agreement_since(&rows, 0), agreement_rows(rows.iter(), 0));
+}

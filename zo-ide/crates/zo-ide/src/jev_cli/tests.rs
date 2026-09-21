@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn the_usage_names_the_one_verb_and_both_flags() {
-    for word in ["zo jev summary", "--cwd", "--json"] {
+    for word in ["zo jev summary", "--cwd", "--json", "--recent"] {
         assert!(USAGE.contains(word), "usage says nothing of {word}");
     }
     assert_eq!(parse(&[]).unwrap_err(), USAGE);
@@ -24,7 +24,7 @@ fn an_unknown_word_is_refused_with_the_usage_rather_than_guessed_at() {
 
 #[test]
 fn the_flags_are_read_in_either_order() {
-    let want = Request { cwd: Some(std::path::PathBuf::from("/tmp/x")), sessions: None, json: true };
+    let want = Request { cwd: Some(std::path::PathBuf::from("/tmp/x")), sessions: None, recent: 0, json: true };
     let one = parse(&["summary".into(), "--json".into(), "--cwd".into(), "/tmp/x".into()]);
     let two = parse(&["summary".into(), "--cwd".into(), "/tmp/x".into(), "--json".into()]);
     assert_eq!(one.as_ref(), Ok(&want));
@@ -33,12 +33,72 @@ fn the_flags_are_read_in_either_order() {
 
 #[test]
 fn the_sessions_folder_is_read_off_its_flag() {
-    let want = Request { cwd: None, sessions: Some(std::path::PathBuf::from("/tmp/cu")), json: false };
+    let want = Request { cwd: None, sessions: Some(std::path::PathBuf::from("/tmp/cu")), recent: 0, json: false };
     assert_eq!(parse(&["summary".into(), "--computer-use".into(), "/tmp/cu".into()]).as_ref(), Ok(&want));
     assert_eq!(
         parse(&["summary".to_string(), "--computer-use".to_string()]).unwrap_err(),
         "--computer-use needs a directory"
     );
+}
+
+#[test]
+fn the_recent_count_is_read_off_its_flag_and_refused_when_it_is_not_a_count() {
+    let want = Request { cwd: None, sessions: None, recent: 12, json: true };
+    assert_eq!(parse(&["summary".into(), "--recent".into(), "12".into(), "--json".into()]).as_ref(), Ok(&want));
+    assert_eq!(parse(&["summary".to_string(), "--recent".to_string()]).unwrap_err(), "--recent needs a count");
+    assert!(
+        parse(&["summary".into(), "--recent".into(), "many".into()])
+            .unwrap_err()
+            .starts_with("--recent needs a count, not 'many'")
+    );
+}
+
+/// The dashboard's fields ride the JSON: the applied count and the door's
+/// refusals in every tally, seven days per seat, and the recent list when
+/// asked — read off the same rows as the numbers.
+#[test]
+fn the_json_carries_the_days_the_refusals_the_applied_count_and_the_recent_list() {
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::PLACEMENT;
+    std::fs::write(
+        home.path().join(seat.ledger),
+        [
+            serde_json::json!({"at": 900, "outcome": "answered", "elapsedMs": 40, "requests": 1, "chosen": "split",
+                               "applied": true, "confidence": 0.6, "task": "t-1", "worker": "w-1"}),
+            serde_json::json!({"at": 950, "outcome": "not_consented", "requests": 0}),
+        ]
+        .iter()
+        .map(|row| row.to_string() + "\n")
+        .collect::<String>(),
+    )
+    .expect("write");
+    let seats = tools::jev_summary::report_with_recent(&roots, None, None, 1_000, 0, 3);
+    let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+    let placement = value["seats"]
+        .as_array()
+        .expect("seats")
+        .iter()
+        .find(|row| row["id"] == seat.id)
+        .expect("placement");
+    assert_eq!(placement["week"]["applied"], 1);
+    assert_eq!(placement["week"]["refusals"], serde_json::json!([{"token": "not_consented", "rows": 1}]));
+    assert_eq!(placement["week"]["failures"], serde_json::json!([{"token": "not_consented", "rows": 1}]));
+    assert_eq!(placement["days"].as_array().map(Vec::len), Some(7));
+    assert_eq!(placement["days"][6]["tally"]["rows"], 2, "today is the last day");
+    assert_eq!(placement["days"][6]["agreement"]["compared"], 0);
+    let recent = placement["recent"].as_array().expect("recent");
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0]["outcome"], "not_consented");
+    assert_eq!(recent[1]["answered"], "split");
+    assert_eq!(recent[1]["applied"], true);
+    assert_eq!(recent[1]["asked"], serde_json::json!({"task": "t-1", "worker": "w-1"}));
+    assert_eq!(recent[1]["confidence"], 0.6);
+    let unasked = tools::jev_summary::report(&roots, None, None, 1_000, 0);
+    let without: serde_json::Value = serde_json::from_str(&render_json(&unasked).to_string()).expect("json");
+    let placement = without["seats"].as_array().expect("seats").iter().find(|row| row["id"] == seat.id).expect("placement");
+    assert_eq!(placement["recent"], serde_json::json!([]), "nothing listed unless asked");
+    assert_eq!(placement["days"].as_array().map(Vec::len), Some(7), "the days always ride");
 }
 
 #[test]

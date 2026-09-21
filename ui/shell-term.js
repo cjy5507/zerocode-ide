@@ -6411,7 +6411,7 @@ function persistPaneLayouts(worktree) {
  * (`isTransientEditorContentType`, :50810); not sending them keeps the
  * file's churn down to what can actually return. */
 const STAGE_STORED_KINDS = new Set(
-  ["file", "image", "mdview", "csv", "ipynb", "board", "changes", "vault", "knowledge", "skills", "artifacts"],
+  ["file", "image", "mdview", "csv", "ipynb", "board", "changes", "vault", "knowledge", "skills", "artifacts", "jev"],
 );
 
 /* Suppresses the persist calls that restoring itself fires — the same
@@ -6711,6 +6711,7 @@ async function reopenStageTab(tab) {
   if (tab.kind === "knowledge") return openKnowledgeGraph();
   if (tab.kind === "skills") return openSkillsView();
   if (tab.kind === "artifacts") return openArtifacts({ fresh: true });
+  if (tab.kind === "jev") return openJevView();
 }
 
 /* The documents this worktree had when it was last looked at, back in their
@@ -8093,6 +8094,7 @@ function tabLabel(tab) {
   if (tab.kind === "knowledge") return t("knowledge.tab", "지식 그래프");
   if (tab.kind === "skills") return skillText("title");
   if (tab.kind === "artifacts") return t("artifacts.tab", "아티팩트");
+  if (tab.kind === "jev") return t("jev.tab", "Jev 대시보드");
   if (tab.kind === "tokens") return t("tokens.tab", "토큰 사용량");
   if (tab.kind === "emulator") {
     return tab.deviceName || t("emulator.tab", "모바일 에뮬레이터");

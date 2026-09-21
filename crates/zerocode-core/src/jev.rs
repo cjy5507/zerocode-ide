@@ -28,6 +28,7 @@ pub mod count;
 pub mod door;
 pub mod hedge;
 pub mod promote;
+pub mod recent;
 pub mod shard;
 pub mod summary;
 
