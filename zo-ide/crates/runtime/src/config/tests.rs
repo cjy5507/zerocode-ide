@@ -104,7 +104,10 @@ fn tui_inline_mode_loads_from_merged_settings_and_defaults_unset() {
 static CLI_OVERRIDE_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
 
 /// 오버라이드 셀이 기본값으로 안정된 동안만 load 하도록 잡는 read 가드.
-fn overrides_stable() -> std::sync::RwLockReadGuard<'static, ()> {
+///
+/// `pub(super)`: `config::mcp_edit` 의 라운드트립 시험도 `load` 를 부른다 —
+/// 락이 둘이면 서로를 못 보므로 같은 락을 빌려 준다.
+pub(super) fn overrides_stable() -> std::sync::RwLockReadGuard<'static, ()> {
     CLI_OVERRIDE_LOCK
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)

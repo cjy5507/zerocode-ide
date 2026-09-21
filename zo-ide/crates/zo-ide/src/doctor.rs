@@ -6,6 +6,7 @@
 //! spawning an MCP process, or printing a token.
 
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -494,13 +495,34 @@ fn inspect_mcp(config: Option<&runtime::RuntimeConfig>, config_failed: bool) -> 
             },
         };
     };
-    let configured = config.mcp().servers().len();
-    let blocked = config.mcp().untrusted_project_servers().len();
-    let value = if blocked == 0 {
-        format!("{configured} configured server(s)")
-    } else {
-        format!("{configured} configured server(s), {blocked} awaiting trust")
-    };
+    // Name them. A count answers "did the file parse"; a diagnosis of MCP has
+    // to answer "is the server I just added there", which is the question a
+    // person runs doctor with after `zo mcp add`.
+    let names = config
+        .mcp()
+        .servers()
+        .keys()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let blocked = config
+        .mcp()
+        .untrusted_project_servers()
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<Vec<_>>();
+    let mut value = format!("{} configured server(s)", names.len());
+    if !names.is_empty() {
+        let _ = write!(value, ": {}", names.join(", "));
+    }
+    if !blocked.is_empty() {
+        let _ = write!(
+            value,
+            "; {} awaiting trust: {}",
+            blocked.len(),
+            blocked.join(", ")
+        );
+    }
+    let blocked = blocked.len();
     Finding {
         label: "MCP".to_string(),
         status: if blocked == 0 {

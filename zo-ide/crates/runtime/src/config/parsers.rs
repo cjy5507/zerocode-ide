@@ -25,6 +25,45 @@ use super::{
     RuntimeReviewConfig, RuntimeShipConfig, ScopedLspServerConfig, ScopedMcpServerConfig,
 };
 
+/// Every key the `mcpServers` section is spelled with, named once.
+///
+/// The writer (`super::mcp_edit`) is the inverse of the parsers below, and a
+/// second copy of these spellings would be a file `zo mcp add` writes and
+/// `ConfigLoader` cannot read back. Both sides read this module instead.
+pub(super) mod mcp_keys {
+    /// The settings section itself.
+    pub const SERVERS: &str = "mcpServers";
+    /// The transport tag, and the tags it may carry.
+    pub const TYPE: &str = "type";
+    pub const STDIO: &str = "stdio";
+    pub const SSE: &str = "sse";
+    pub const HTTP: &str = "http";
+    pub const WS: &str = "ws";
+    pub const SDK: &str = "sdk";
+    pub const MANAGED_PROXY: &str = "claudeai-proxy";
+    /// Stdio.
+    pub const COMMAND: &str = "command";
+    pub const ARGS: &str = "args";
+    pub const ENV: &str = "env";
+    pub const TOOL_CALL_TIMEOUT_MS: &str = "toolCallTimeoutMs";
+    /// Remote (http/sse/ws) and the managed proxy.
+    pub const URL: &str = "url";
+    pub const HEADERS: &str = "headers";
+    pub const HEADERS_HELPER: &str = "headersHelper";
+    pub const ID: &str = "id";
+    /// The SDK server's own name.
+    pub const NAME: &str = "name";
+    /// The per-server OAuth block.
+    pub const OAUTH: &str = "oauth";
+    pub const CLIENT_ID: &str = "clientId";
+    pub const CALLBACK_PORT: &str = "callbackPort";
+    pub const AUTH_SERVER_METADATA_URL: &str = "authServerMetadataUrl";
+    pub const XAA: &str = "xaa";
+    /// The two switches that take a declared server back out.
+    pub const DISABLED: &str = "disabled";
+    pub const ENABLED: &str = "enabled";
+}
+
 pub(super) fn merge_lsp_servers(
     target: &mut BTreeMap<String, ScopedLspServerConfig>,
     source: ConfigSource,
@@ -99,12 +138,15 @@ pub(super) fn merge_mcp_servers(
     root: &BTreeMap<String, JsonValue>,
     path: &Path,
 ) -> Result<(), ConfigError> {
-    let Some(mcp_servers) = root.get("mcpServers") else {
+    let Some(mcp_servers) = root.get(mcp_keys::SERVERS) else {
         return Ok(());
     };
-    let servers = expect_object(mcp_servers, &format!("{}: mcpServers", path.display()))?;
+    let servers = expect_object(
+        mcp_servers,
+        &format!("{}: {}", path.display(), mcp_keys::SERVERS),
+    )?;
     for (name, value) in servers {
-        let context = format!("{}: mcpServers.{name}", path.display());
+        let context = mcp_server_context(path, name);
         if mcp_server_disabled(value, &context)? {
             target.remove(name);
             continue;
@@ -123,8 +165,8 @@ pub(super) fn merge_mcp_servers(
 
 fn mcp_server_disabled(value: &JsonValue, context: &str) -> Result<bool, ConfigError> {
     let object = expect_object(value, context)?;
-    let disabled = optional_bool(object, "disabled", context)?.unwrap_or(false);
-    let enabled = optional_bool(object, "enabled", context)?.unwrap_or(true);
+    let disabled = optional_bool(object, mcp_keys::DISABLED, context)?.unwrap_or(false);
+    let enabled = optional_bool(object, mcp_keys::ENABLED, context)?.unwrap_or(true);
     Ok(disabled || !enabled)
 }
 
@@ -513,37 +555,46 @@ pub(super) fn parse_mcp_server_config(
     context: &str,
 ) -> Result<McpServerConfig, ConfigError> {
     let object = expect_object(value, context)?;
-    let server_type =
-        optional_string(object, "type", context)?.unwrap_or_else(|| infer_mcp_server_type(object));
+    let server_type = optional_string(object, mcp_keys::TYPE, context)?
+        .unwrap_or_else(|| infer_mcp_server_type(object));
     match server_type {
-        "stdio" => Ok(McpServerConfig::Stdio(McpStdioServerConfig {
-            command: expect_string(object, "command", context)?.to_string(),
-            args: optional_string_array(object, "args", context)?.unwrap_or_default(),
-            env: optional_string_map(object, "env", context)?.unwrap_or_default(),
-            tool_call_timeout_ms: optional_u64(object, "toolCallTimeoutMs", context)?,
+        mcp_keys::STDIO => Ok(McpServerConfig::Stdio(McpStdioServerConfig {
+            command: expect_string(object, mcp_keys::COMMAND, context)?.to_string(),
+            args: optional_string_array(object, mcp_keys::ARGS, context)?.unwrap_or_default(),
+            env: optional_string_map(object, mcp_keys::ENV, context)?.unwrap_or_default(),
+            tool_call_timeout_ms: optional_u64(object, mcp_keys::TOOL_CALL_TIMEOUT_MS, context)?,
         })),
-        "sse" => Ok(McpServerConfig::Sse(parse_mcp_remote_server_config(
+        mcp_keys::SSE => Ok(McpServerConfig::Sse(parse_mcp_remote_server_config(
             object, context,
         )?)),
-        "http" => Ok(McpServerConfig::Http(parse_mcp_remote_server_config(
+        mcp_keys::HTTP => Ok(McpServerConfig::Http(parse_mcp_remote_server_config(
             object, context,
         )?)),
-        "ws" => Ok(McpServerConfig::Ws(McpWebSocketServerConfig {
-            url: expect_string(object, "url", context)?.to_string(),
-            headers: optional_string_map(object, "headers", context)?.unwrap_or_default(),
-            headers_helper: optional_string(object, "headersHelper", context)?.map(str::to_string),
+        mcp_keys::WS => Ok(McpServerConfig::Ws(McpWebSocketServerConfig {
+            url: expect_string(object, mcp_keys::URL, context)?.to_string(),
+            headers: optional_string_map(object, mcp_keys::HEADERS, context)?.unwrap_or_default(),
+            headers_helper: optional_string(object, mcp_keys::HEADERS_HELPER, context)?
+                .map(str::to_string),
         })),
-        "sdk" => Ok(McpServerConfig::Sdk(McpSdkServerConfig {
-            name: expect_string(object, "name", context)?.to_string(),
+        mcp_keys::SDK => Ok(McpServerConfig::Sdk(McpSdkServerConfig {
+            name: expect_string(object, mcp_keys::NAME, context)?.to_string(),
         })),
-        "claudeai-proxy" => Ok(McpServerConfig::ManagedProxy(McpManagedProxyServerConfig {
-            url: expect_string(object, "url", context)?.to_string(),
-            id: expect_string(object, "id", context)?.to_string(),
-        })),
+        mcp_keys::MANAGED_PROXY => {
+            Ok(McpServerConfig::ManagedProxy(McpManagedProxyServerConfig {
+                url: expect_string(object, mcp_keys::URL, context)?.to_string(),
+                id: expect_string(object, mcp_keys::ID, context)?.to_string(),
+            }))
+        }
         other => Err(ConfigError::Parse(format!(
             "{context}: unsupported MCP server type for {server_name}: {other}"
         ))),
     }
+}
+
+/// Where a complaint about one server points: the document and the exact key
+/// path inside it. Shared so the parser and the writer name the same place.
+pub(super) fn mcp_server_context(path: &Path, name: &str) -> String {
+    format!("{}: {}.{name}", path.display(), mcp_keys::SERVERS)
 }
 
 pub(super) fn parse_lsp_server_config(
@@ -572,10 +623,10 @@ pub(super) fn parse_lsp_server_config(
 }
 
 pub(super) fn infer_mcp_server_type(object: &BTreeMap<String, JsonValue>) -> &'static str {
-    if object.contains_key("url") {
-        "http"
+    if object.contains_key(mcp_keys::URL) {
+        mcp_keys::HTTP
     } else {
-        "stdio"
+        mcp_keys::STDIO
     }
 }
 
@@ -584,9 +635,10 @@ pub(super) fn parse_mcp_remote_server_config(
     context: &str,
 ) -> Result<McpRemoteServerConfig, ConfigError> {
     Ok(McpRemoteServerConfig {
-        url: expect_string(object, "url", context)?.to_string(),
-        headers: optional_string_map(object, "headers", context)?.unwrap_or_default(),
-        headers_helper: optional_string(object, "headersHelper", context)?.map(str::to_string),
+        url: expect_string(object, mcp_keys::URL, context)?.to_string(),
+        headers: optional_string_map(object, mcp_keys::HEADERS, context)?.unwrap_or_default(),
+        headers_helper: optional_string(object, mcp_keys::HEADERS_HELPER, context)?
+            .map(str::to_string),
         oauth: parse_optional_mcp_oauth_config(object, context)?,
     })
 }
@@ -595,16 +647,20 @@ pub(super) fn parse_optional_mcp_oauth_config(
     object: &BTreeMap<String, JsonValue>,
     context: &str,
 ) -> Result<Option<McpOAuthConfig>, ConfigError> {
-    let Some(value) = object.get("oauth") else {
+    let Some(value) = object.get(mcp_keys::OAUTH) else {
         return Ok(None);
     };
-    let oauth = expect_object(value, &format!("{context}.oauth"))?;
+    let oauth = expect_object(value, &format!("{context}.{}", mcp_keys::OAUTH))?;
     Ok(Some(McpOAuthConfig {
-        client_id: optional_string(oauth, "clientId", context)?.map(str::to_string),
-        callback_port: optional_u16(oauth, "callbackPort", context)?,
-        auth_server_metadata_url: optional_string(oauth, "authServerMetadataUrl", context)?
-            .map(str::to_string),
-        xaa: optional_bool(oauth, "xaa", context)?,
+        client_id: optional_string(oauth, mcp_keys::CLIENT_ID, context)?.map(str::to_string),
+        callback_port: optional_u16(oauth, mcp_keys::CALLBACK_PORT, context)?,
+        auth_server_metadata_url: optional_string(
+            oauth,
+            mcp_keys::AUTH_SERVER_METADATA_URL,
+            context,
+        )?
+        .map(str::to_string),
+        xaa: optional_bool(oauth, mcp_keys::XAA, context)?,
     }))
 }
 

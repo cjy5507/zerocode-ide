@@ -117,13 +117,13 @@ pub use config::{
     zo_global_config_roots,
     zo_project_state_dir, zo_state_base,
     CliConfigOverrides, ConfigEntry, ConfigError, ConfigLoader, ConfigSource, HookMatcher,
-    HookRule, McpConfigCollection, McpManagedProxyServerConfig, McpOAuthConfig,
+    HookRule, McpConfigCollection, McpEdit, McpManagedProxyServerConfig, McpOAuthConfig,
     McpRemoteServerConfig, McpSdkServerConfig, McpServerConfig, McpStdioServerConfig, McpTransport,
     McpWebSocketServerConfig, OAuthConfig, ResolvedPermissionMode, RuntimeConfig,
     RuntimeFeatureConfig, RuntimeHookConfig, RuntimePermissionRuleConfig, RuntimePluginConfig,
     RuntimeSecondBrainConfig, RuntimeShipConfig, ScopedMcpServerConfig, UntrustedMcpServer,
     ZO_SETTINGS_SCHEMA_NAME,
-    persist_allow_always_rules,
+    persist_allow_always_rules, remove_mcp_server, write_mcp_server,
 };
 pub use conversation::{ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{

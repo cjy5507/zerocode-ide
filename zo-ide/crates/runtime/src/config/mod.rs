@@ -1,3 +1,4 @@
+mod mcp_edit;
 mod parsers;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -11,6 +12,9 @@ use core_types::paths::{write_private_file, ParentDirPolicy};
 use crate::json::JsonValue;
 use crate::sandbox::SandboxConfig;
 
+pub use self::mcp_edit::{remove_mcp_server, write_mcp_server, McpEdit};
+
+use self::parsers::mcp_keys;
 use self::parsers::{
     deep_merge_objects, extend_unique, merge_lsp_servers, merge_mcp_servers, optional_string_map,
     parse_optional_hooks_config, parse_optional_model, parse_optional_oauth_config,
@@ -571,6 +575,16 @@ impl ConfigLoader {
     #[must_use]
     pub fn config_home(&self) -> &Path {
         &self.config_home
+    }
+
+    /// The workspace this loader discovers project documents under.
+    ///
+    /// A writer that edits `<cwd>/.zo/settings.json` asks the loader where
+    /// that is rather than joining its own `.zo`, so the file it writes is the
+    /// file [`discover`](Self::discover) reads back.
+    #[must_use]
+    pub fn cwd(&self) -> &Path {
+        &self.cwd
     }
 
     /// Canonical global config roots in priority order (highest first); the
@@ -1873,7 +1887,7 @@ fn merge_trusted_project_mcp_servers(
     enable_all: bool,
     trusted: &BTreeSet<String>,
 ) -> Result<(), ConfigError> {
-    let Some(servers) = root.get("mcpServers").and_then(JsonValue::as_object) else {
+    let Some(servers) = root.get(mcp_keys::SERVERS).and_then(JsonValue::as_object) else {
         return Ok(());
     };
     let mut allowed = BTreeMap::new();
@@ -1908,7 +1922,7 @@ fn merge_trusted_project_mcp_servers(
         return Ok(());
     }
     let mut gated_root = BTreeMap::new();
-    gated_root.insert("mcpServers".to_string(), JsonValue::Object(allowed));
+    gated_root.insert(mcp_keys::SERVERS.to_string(), JsonValue::Object(allowed));
     merge_mcp_servers(target, ConfigSource::Project, &gated_root, path)
 }
 

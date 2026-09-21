@@ -6688,3 +6688,64 @@ fn find_file_named(root: &std::path::Path, name: &str) -> Option<PathBuf> {
     }
     None
 }
+
+/// The whole `zo mcp` road, end to end in the real binary: `add` writes a
+/// server into the config home, `list --json` reads it back, `--doctor` — the
+/// diagnosis a person actually runs after adding one — names it, and `remove`
+/// takes it out again.
+///
+/// The three verbs and the doctor are separate processes on purpose: the round
+/// trip this proves is a file, not a data structure that never left memory.
+#[test]
+fn e2e_mcp_add_reaches_the_doctor_and_remove_takes_it_back_out() {
+    const SERVER: &str = "e2e-mcp-server-t5552";
+    let layout = Layout::new();
+    let mcp = |args: &[&str]| {
+        run_pipe(
+            &layout.cwd,
+            &layout.home,
+            &layout.sessions,
+            &layout.state,
+            // No session opens for any of these verbs, so nothing is dialled.
+            "http://127.0.0.1:1",
+            args,
+            b"",
+        )
+        .expect("run zo")
+    };
+
+    let added = mcp(&["mcp", "add", SERVER, "--", "npx", "-y", "server-everything"]);
+    assert!(added.status.success(), "add exited with {:?}", added.status);
+
+    let listed = mcp(&["mcp", "list", "--json"]);
+    assert!(listed.status.success(), "list exited with {:?}", listed.status);
+    let listed: serde_json::Value =
+        serde_json::from_slice(&listed.stdout).expect("list --json is JSON");
+    let servers = listed["servers"].as_array().expect("servers");
+    assert_eq!(servers.len(), 1, "{listed}");
+    assert_eq!(servers[0]["name"], SERVER);
+    assert_eq!(servers[0]["transport"], "stdio");
+    assert_eq!(servers[0]["endpoint"], "npx -y server-everything");
+
+    let doctor = mcp(&["--doctor"]);
+    let report = strip_ansi(&String::from_utf8_lossy(&doctor.stdout));
+    assert!(
+        report.contains(SERVER),
+        "the doctor does not name the server that was just added:\n{report}"
+    );
+
+    let removed = mcp(&["mcp", "remove", SERVER]);
+    assert!(removed.status.success(), "remove exited with {:?}", removed.status);
+    let doctor = mcp(&["--doctor"]);
+    let report = strip_ansi(&String::from_utf8_lossy(&doctor.stdout));
+    assert!(
+        !report.contains(SERVER),
+        "the doctor still names a removed server:\n{report}"
+    );
+
+    // A name nobody configured is a non-zero exit, and one sentence on stderr.
+    let missing = mcp(&["mcp", "remove", SERVER]);
+    assert_eq!(missing.status.code(), Some(1), "{:?}", missing.status);
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(stderr.contains("no MCP server named"), "stderr was:\n{stderr}");
+}
