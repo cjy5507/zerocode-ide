@@ -12,7 +12,7 @@ use core_types::paths::{write_private_file, ParentDirPolicy};
 use crate::json::JsonValue;
 use crate::sandbox::SandboxConfig;
 
-pub use self::mcp_edit::{remove_mcp_server, write_mcp_server, McpEdit};
+pub use self::mcp_edit::{remove_mcp_server, trust_mcp_server, write_mcp_server, McpEdit};
 
 use self::parsers::mcp_keys;
 use self::parsers::{
@@ -20,11 +20,18 @@ use self::parsers::{
     parse_optional_hooks_config, parse_optional_model, parse_optional_oauth_config,
     parse_json_object_contents, parse_optional_permission_mode, parse_optional_permission_rules,
     parse_optional_plugin_config, parse_optional_review_config, parse_optional_sandbox_config,
-    parse_optional_ship_config, read_optional_json_object, validate_optional_hooks_config,
+    parse_optional_ship_config, parse_trusted_mcp_server_names, read_optional_json_object,
+    validate_optional_hooks_config,
 };
 
 /// Schema name advertised by generated settings files.
 pub const ZO_SETTINGS_SCHEMA_NAME: &str = "SettingsSchema";
+
+/// The project's record of the MCP servers an operator has consented to run,
+/// as a person types it. The one spelling: the parser that reads the record,
+/// the writer that records a name in it, and the message that explains the
+/// gate all name this constant.
+pub const TRUSTED_MCP_SERVERS_FILE: &str = mcp_keys::TRUSTED_SERVERS_FILE;
 
 /// Origin of a loaded settings file in the configuration precedence chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -649,8 +656,13 @@ impl ConfigLoader {
     }
 
     /// Path of the per-project record of MCP servers the user has trusted.
-    fn trusted_mcp_servers_path(&self) -> PathBuf {
-        self.cwd.join(".zo").join("trusted-mcp-servers.json")
+    ///
+    /// Public for the same reason [`cwd`](Self::cwd) is: `zo mcp add
+    /// --project --trust` records a name in the very file this loader reads
+    /// back, rather than joining a `.zo` of its own.
+    #[must_use]
+    pub fn trusted_mcp_servers_path(&self) -> PathBuf {
+        self.cwd.join(".zo").join(mcp_keys::TRUSTED_SERVERS_FILE)
     }
 
     /// Names of project `.zo/mcp.json` servers the user has explicitly trusted.
@@ -665,32 +677,12 @@ impl ConfigLoader {
         let Some(contents) = trusted_uncommitted_zo_file_snapshot(
             &self.cwd,
             &path,
-            "trusted-mcp-servers.json",
+            mcp_keys::TRUSTED_SERVERS_FILE,
         ) else {
             return Ok(BTreeSet::new());
         };
-        if contents.trim().is_empty() {
-            return Ok(BTreeSet::new());
-        }
-        let parsed = JsonValue::parse(&contents)
-            .map_err(|error| ConfigError::Parse(format!("{}: {error}", path.display())))?;
-        let Some(entries) = parsed.as_array() else {
-            return Err(ConfigError::Parse(format!(
-                "{}: trusted MCP servers must be a JSON array of server names",
-                path.display()
-            )));
-        };
-        entries
-            .iter()
-            .map(|entry| {
-                entry.as_str().map(ToOwned::to_owned).ok_or_else(|| {
-                    ConfigError::Parse(format!(
-                        "{}: trusted MCP server names must be strings",
-                        path.display()
-                    ))
-                })
-            })
-            .collect()
+        parse_trusted_mcp_server_names(&path, &contents)
+            .map(|names| names.into_iter().collect())
     }
 
     /// Replace the process-wide CLI config overrides. Called once at

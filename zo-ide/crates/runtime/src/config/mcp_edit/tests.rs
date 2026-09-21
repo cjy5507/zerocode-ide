@@ -311,3 +311,101 @@ fn the_written_document_is_owner_only() {
     let mode = std::fs::metadata(&path).expect("metadata").permissions().mode();
     assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
 }
+
+// --- the project's trust record ----------------------------------------
+
+/// The other half of `zo mcp add --project --trust`: a name in the record is
+/// consent for exactly that server. Its sibling in the same document stays
+/// gated, and the writer lands on the file the loader reads rather than
+/// joining a `.zo` of its own.
+#[test]
+fn a_trusted_name_un_gates_exactly_that_project_server() {
+    let home = tempfile::tempdir().expect("config home");
+    let cwd = tempfile::tempdir().expect("workspace");
+    let settings = cwd.path().join(".zo").join("settings.json");
+    let expected = http("https://example.test/mcp");
+    write_mcp_server(&settings, "consented", &expected).expect("write");
+    write_mcp_server(&settings, "sibling", &stdio("npx", &[], &[])).expect("write");
+
+    let record = ConfigLoader::new(cwd.path(), home.path()).trusted_mcp_servers_path();
+    assert_eq!(
+        trust_mcp_server(&record, "consented").expect("trust"),
+        McpEdit::Added
+    );
+
+    let config = load_at(&home, &cwd);
+    assert_eq!(config.mcp().servers()["consented"].config, expected);
+    assert!(!config.mcp().servers().contains_key("sibling"));
+    let untrusted = config.mcp().untrusted_project_servers();
+    assert_eq!(untrusted.len(), 1);
+    assert_eq!(untrusted[0].name, "sibling");
+}
+
+/// Consent is a set of names. The record is created where nothing stood, the
+/// names a person put there stay in the order they wrote them, and recording
+/// one twice is not a second entry.
+#[test]
+fn trusting_a_name_twice_is_unchanged_and_the_names_already_there_survive() {
+    let dir = tempfile::tempdir().expect("temporary project dir");
+    let record = dir
+        .path()
+        .join(".zo")
+        .join(mcp_keys::TRUSTED_SERVERS_FILE);
+    assert_eq!(
+        trust_mcp_server(&record, "first").expect("trust"),
+        McpEdit::Added,
+        "the record is written even where no .zo directory stood"
+    );
+    std::fs::write(&record, "[\"first\",\"handwritten\"]").expect("a person edits the record");
+    assert_eq!(
+        trust_mcp_server(&record, "second").expect("trust"),
+        McpEdit::Added
+    );
+    assert_eq!(
+        trust_mcp_server(&record, "second").expect("trust"),
+        McpEdit::Unchanged
+    );
+    let names = parse_trusted_mcp_server_names(
+        &record,
+        &std::fs::read_to_string(&record).expect("trust record"),
+    )
+    .expect("parse");
+    assert_eq!(names, ["first", "handwritten", "second"]);
+}
+
+#[test]
+fn a_trust_record_that_is_not_an_array_of_names_is_refused_before_anything_is_written() {
+    let dir = tempfile::tempdir().expect("temporary project dir");
+    let record = dir.path().join(mcp_keys::TRUSTED_SERVERS_FILE);
+    for (seeded, complaint) in [
+        (r#"{"mcpServers":{}}"#, "JSON array"),
+        ("[1]", "must be strings"),
+    ] {
+        std::fs::write(&record, seeded).expect("seed record");
+        let error = trust_mcp_server(&record, "name").expect_err("refusal");
+        assert!(error.to_string().contains(complaint), "{error}");
+        assert_eq!(
+            std::fs::read_to_string(&record).expect("trust record"),
+            seeded
+        );
+    }
+}
+
+/// A name another local account could append is a server this one would run.
+#[cfg(unix)]
+#[test]
+fn the_trust_record_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("temporary project dir");
+    let record = dir
+        .path()
+        .join(".zo")
+        .join(mcp_keys::TRUSTED_SERVERS_FILE);
+    trust_mcp_server(&record, "consented").expect("trust");
+    let mode = std::fs::metadata(&record)
+        .expect("metadata")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o600, "mode was {:o}", mode & 0o777);
+}

@@ -62,6 +62,46 @@ pub(super) mod mcp_keys {
     /// The two switches that take a declared server back out.
     pub const DISABLED: &str = "disabled";
     pub const ENABLED: &str = "enabled";
+    /// The record, beside the project document it gates, of the project-scoped
+    /// servers an operator has consented to run.
+    pub const TRUSTED_SERVERS_FILE: &str = "trusted-mcp-servers.json";
+}
+
+/// The server names one trusted-MCP-servers record holds, in the order the
+/// document lists them.
+///
+/// Whether a record may be BELIEVED at all is
+/// [`ConfigLoader`](super::ConfigLoader)'s gate — a tracked, symlinked or
+/// nested-`.zo` file fails closed there. This is only the record's grammar: a
+/// JSON array of names. `super::mcp_edit` records a name through this same
+/// function, so a name `zo mcp add --project --trust` writes is a name the
+/// next session reads back.
+pub(super) fn parse_trusted_mcp_server_names(
+    path: &Path,
+    contents: &str,
+) -> Result<Vec<String>, ConfigError> {
+    if contents.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let parsed = JsonValue::parse(contents)
+        .map_err(|error| ConfigError::Parse(format!("{}: {error}", path.display())))?;
+    let Some(entries) = parsed.as_array() else {
+        return Err(ConfigError::Parse(format!(
+            "{}: trusted MCP servers must be a JSON array of server names",
+            path.display()
+        )));
+    };
+    entries
+        .iter()
+        .map(|entry| {
+            entry.as_str().map(ToOwned::to_owned).ok_or_else(|| {
+                ConfigError::Parse(format!(
+                    "{}: trusted MCP server names must be strings",
+                    path.display()
+                ))
+            })
+        })
+        .collect()
 }
 
 pub(super) fn merge_lsp_servers(
