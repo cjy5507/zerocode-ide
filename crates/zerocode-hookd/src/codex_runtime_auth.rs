@@ -193,7 +193,13 @@ fn offset_of(tail: &str) -> Option<i64> {
 
 /// Is `candidate` provably fresher than `baseline`? Unprovable is `false` —
 /// a write-back that cannot show its work does not happen.
-fn monotonically_fresher(candidate: &str, baseline: &str) -> bool {
+///
+/// Public because the managed-account half of the window
+/// (`zerocode_shell::codex_accounts`) decides the same direction between a
+/// managed home and the runtime mirror, and a rotating refresh token cannot
+/// have two rules: whichever side is written second becomes the live branch,
+/// and the other's token is `invalid_grant` the next time it is used.
+pub fn monotonically_fresher(candidate: &str, baseline: &str) -> bool {
     match (last_refresh(candidate), last_refresh(baseline)) {
         (Some(newer), Some(older)) => newer > older,
         (Some(_), None) => true,
@@ -223,7 +229,10 @@ fn identity(auth_json: &str) -> Option<String> {
         .map(|key| format!("key:{key}"))
 }
 
-fn same_identity(left: &str, right: &str) -> bool {
+/// Are these two files the same login? Unknown on either side is NOT the same
+/// one — the conservative reading, and the guard that keeps one account's
+/// tokens out of another's home.
+pub fn same_identity(left: &str, right: &str) -> bool {
     match (identity(left), identity(right)) {
         (Some(mine), Some(theirs)) => mine == theirs,
         _ => false,

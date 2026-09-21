@@ -606,7 +606,7 @@ const fn origin_phrase(origin: crate::runtime_support::AccountOrigin) -> &'stati
         crate::runtime_support::AccountOrigin::IdeManaged => "IDE-managed",
         crate::runtime_support::AccountOrigin::OwnLogin => "own login",
         crate::runtime_support::AccountOrigin::Keychain => "Claude Code keychain",
-        crate::runtime_support::AccountOrigin::Env => "environment key",
+        crate::runtime_support::AccountOrigin::Env => "environment",
     }
 }
 

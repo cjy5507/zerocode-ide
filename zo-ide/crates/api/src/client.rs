@@ -629,7 +629,9 @@ pub fn resolve_openai_oauth_fresh() -> Option<OpenAiOAuthTokens> {
 /// path. A refresh failure yields the existing (expired) tokens so the call can
 /// surface a clear 401 rather than silently downgrading to the api-key path.
 fn load_fresh_openai_oauth() -> Option<OpenAiOAuthTokens> {
-    let tokens = crate::oauth_store::load_openai_oauth().ok().flatten()?;
+    let (tokens, source) = crate::oauth_store::load_openai_oauth_with_source()
+        .ok()
+        .flatten()?;
     if !openai_oauth_expired(&tokens) {
         return Some(tokens);
     }
@@ -668,10 +670,31 @@ fn load_fresh_openai_oauth() -> Option<OpenAiOAuthTokens> {
             if crate::providers::refresh_gate::record_failure(&refresh_token, &error) {
                 eprintln!(
                     "\x1b[33mChatGPT login can no longer be refreshed ({error}).\n  \
-                     Run `zo login openai` (or /login openai) to reconnect.\x1b[0m"
+                     {}\x1b[0m",
+                    openai_reconnect_hint(source)
                 );
             }
             Some(tokens)
+        }
+    }
+}
+
+/// What to do about a ChatGPT login that will not refresh, which depends on
+/// WHOSE login it is.
+///
+/// zo's own store is the one that goes stale unnoticed: the window keeps its
+/// account refreshed, so a person whose window is signed in has a working
+/// account a metre away — and until t-5777 a zo started outside a pane never
+/// looked at it, said "expired", and sent them to log in again for the second
+/// time this month.
+fn openai_reconnect_hint(source: crate::oauth_store::OpenAiAuthSource) -> &'static str {
+    match source {
+        crate::oauth_store::OpenAiAuthSource::OwnLogin => {
+            "ZeroCode 창에 로그인돼 있으면 그 계정을 따라갑니다 — 창 밖이면 `zo login openai` \
+             (또는 /login openai)."
+        }
+        crate::oauth_store::OpenAiAuthSource::CodexHome(_) => {
+            "Run `zo login openai` (or /login openai) to reconnect."
         }
     }
 }
@@ -690,6 +713,24 @@ fn openai_oauth_expired(tokens: &OpenAiOAuthTokens) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// 죽은 로그인을 고치는 길은 그 로그인이 **누구 것이냐**에 달렸다: 창의
+    /// 계정이면 다시 로그인이 답이지만, 제 저장소가 죽은 것이라면 한 걸음
+    /// 옆의 창에 살아 있는 계정이 있다 — 그 사실을 말하지 않는 문구가 사람을
+    /// 한 달에 두 번 로그인시켰다(t-5777).
+    #[test]
+    fn a_dead_own_login_is_told_the_window_would_be_followed() {
+        let own = super::openai_reconnect_hint(crate::oauth_store::OpenAiAuthSource::OwnLogin);
+        assert!(own.contains("ZeroCode 창"), "{own}");
+        assert!(own.contains("zo login openai"), "{own}");
+        let borrowed = super::openai_reconnect_hint(crate::oauth_store::OpenAiAuthSource::CodexHome(
+            crate::managed_account::CodexHomeSource::IdeManaged,
+        ));
+        assert!(
+            !borrowed.contains("ZeroCode 창"),
+            "the window's own account is already the one that failed: {borrowed}"
+        );
+    }
+
     use crate::providers::{
         EXPERIMENTAL_PROVIDERS_ENV, NON_CLAUDE_ADAPTERS_ENV, ProviderKind, detect_provider_kind,
         non_claude_adapters_enabled, resolve_model_alias,

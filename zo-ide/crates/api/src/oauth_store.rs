@@ -193,33 +193,76 @@ impl From<StoredOpenAiOAuth> for OpenAiOAuthTokens {
     }
 }
 
-/// Load saved ChatGPT OAuth tokens for the provider router.
-///
-/// Resolution: the handed-off account first — `$CODEX_HOME/auth.json`, which
-/// zerocode-IDE sets per pane to the account the user picked there — then zo's
-/// own `credentials.json` (`zo login openai`). Codex and zo share one OAuth
-/// client id, so its tokens are ours to use; see [`save_openai_oauth`] for why
-/// a rotation then goes back to that same file.
-///
-/// The hand-off wins because every usage surface already reads it: the quota
-/// probe bills `/status` against `$CODEX_HOME`, so an older `zo login openai`
-/// taking precedence spent one account while the whole UI reported another —
-/// requests 429'd on an exhausted plan under a status line showing a full one.
-pub fn load_openai_oauth() -> io::Result<Option<OpenAiOAuthTokens>> {
-    Ok(resolve_openai_oauth()?.map(|(tokens, _)| tokens))
+/// Which login this pane speaks as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenAiAuthSource {
+    /// A Codex `auth.json` — the window's account, however it was found
+    /// (`crate::managed_account::resolve_codex_home`).
+    CodexHome(crate::managed_account::CodexHomeSource),
+    /// zo's own `credentials.json`, from `zo login openai`.
+    OwnLogin,
 }
 
-/// [`load_openai_oauth`] plus where a rotation must be written back:
-/// `Some(path)` for the handed-off Codex login, `None` for zo's own store.
-fn resolve_openai_oauth() -> io::Result<Option<(OpenAiOAuthTokens, Option<PathBuf>)>> {
+/// Load saved ChatGPT OAuth tokens for the provider router.
+///
+/// Resolution: the window's account first — the `auth.json` of the Codex home
+/// [`crate::managed_account::resolve_codex_home`] names, which is the account
+/// the person is signed in to in the ZeroCode window whether or not this shell
+/// was handed a `CODEX_HOME` — then zo's own `credentials.json`
+/// (`zo login openai`). Codex and zo share one OAuth client id, so its tokens
+/// are ours to use; see [`save_openai_oauth`] for why a rotation then goes back
+/// to that same file.
+///
+/// The window's account wins because every usage surface already reads it: the
+/// quota probe bills `/status` against that home, so an older `zo login openai`
+/// taking precedence spent one account while the whole UI reported another —
+/// requests 429'd on an exhausted plan under a status line showing a full one,
+/// and, once that own login expired, 401'd while `codex login status` next to
+/// it said the person was signed in (2026-09-21, t-5777).
+pub fn load_openai_oauth() -> io::Result<Option<OpenAiOAuthTokens>> {
+    Ok(resolve_openai_oauth()?.map(|resolved| resolved.tokens))
+}
+
+/// [`load_openai_oauth`] plus the source, for the surfaces that name it: the
+/// `/status` card's origin column and the message a dead login prints.
+pub fn load_openai_oauth_with_source(
+) -> io::Result<Option<(OpenAiOAuthTokens, OpenAiAuthSource)>> {
+    Ok(resolve_openai_oauth()?.map(|resolved| (resolved.tokens, resolved.source)))
+}
+
+/// Where this pane's ChatGPT login came from, without reading the tokens
+/// themselves into a caller that only draws a row.
+#[must_use]
+pub fn openai_oauth_source() -> Option<OpenAiAuthSource> {
+    resolve_openai_oauth().ok().flatten().map(|resolved| resolved.source)
+}
+
+/// One resolved ChatGPT login: the tokens, where they came from, and where a
+/// rotation must be written back — `Some(path)` for a Codex home, `None` for
+/// zo's own store.
+struct ResolvedOpenAiOAuth {
+    tokens: OpenAiOAuthTokens,
+    source: OpenAiAuthSource,
+    write_back: Option<PathBuf>,
+}
+
+fn resolve_openai_oauth() -> io::Result<Option<ResolvedOpenAiOAuth>> {
     // A hand-off that cannot be read is not a hand-off. Falling through to zo's
     // own login beats failing the turn on a half-written mirror.
-    if let Some(path) = codex_auth::auth_json_path() {
+    if let Some((path, source)) = codex_auth::auth_json_path_with_source() {
         if let Some(tokens) = codex_auth::load_at(&path).ok().flatten() {
-            return Ok(Some((tokens, Some(path))));
+            return Ok(Some(ResolvedOpenAiOAuth {
+                tokens,
+                source: OpenAiAuthSource::CodexHome(source),
+                write_back: Some(path),
+            }));
         }
     }
-    Ok(load_own_openai_oauth()?.map(|tokens| (tokens, None)))
+    Ok(load_own_openai_oauth()?.map(|tokens| ResolvedOpenAiOAuth {
+        tokens,
+        source: OpenAiAuthSource::OwnLogin,
+        write_back: None,
+    }))
 }
 
 /// Whether an incoming token set belongs to the account a file already holds.
@@ -256,9 +299,11 @@ fn load_own_openai_oauth() -> io::Result<Option<OpenAiOAuthTokens>> {
 /// in `credentials.json`, which is also the write [`codex_auth::save_at`] would
 /// (rightly) refuse against someone else's login file.
 pub fn save_openai_oauth(tokens: &OpenAiOAuthTokens) -> io::Result<()> {
-    if let Some((held, Some(path))) = resolve_openai_oauth()? {
-        if same_openai_account(&held, tokens) {
-            return codex_auth::save_at(&path, tokens);
+    if let Some(held) = resolve_openai_oauth()? {
+        if let Some(path) = held.write_back {
+            if same_openai_account(&held.tokens, tokens) {
+                return codex_auth::save_at(&path, tokens);
+            }
         }
     }
     let path = credentials_path()?;
@@ -1965,22 +2010,28 @@ pub mod codex_auth {
     use core_types::OpenAiOAuthTokens;
     use serde_json::Value;
 
-    pub use crate::managed_account::CODEX_HOME_ENV;
-    const AUTH_FILE: &str = "auth.json";
+    pub use crate::managed_account::{CODEX_AUTH_FILE as AUTH_FILE, CODEX_HOME_ENV};
+    use crate::managed_account::CodexHomeSource;
 
-    /// `$CODEX_HOME/auth.json` — only when `CODEX_HOME` is set. That is an
-    /// explicit hand-off (zerocode-IDE names the account it chose; a person can
-    /// export it), never an ambient grab of `~/.codex`: a bare terminal user
-    /// who happens to have the Codex CLI installed must not find zo speaking as
-    /// their ChatGPT login without being told. `Some` only when the file exists.
+    /// The Codex `auth.json` this pane speaks as, and where it came from.
     ///
-    /// 어느 홈인지는 [`crate::managed_account`] 가 답한다: 채널로 계정이 바뀌면
-    /// 그 값이 판이 태어날 때 굳은 env 를 이긴다.
+    /// The order is [`crate::managed_account::resolve_codex_home`]'s — the
+    /// channel's account, the launch `CODEX_HOME`, then the window's own
+    /// managed home. Never an ambient grab of `~/.codex`: that file is the
+    /// person's CLI login, not the account the window chose, and a bare
+    /// terminal user who happens to have the Codex CLI installed must not find
+    /// zo speaking as it without being told. `Some` only when the file exists.
+    #[must_use]
+    pub fn auth_json_path_with_source() -> Option<(PathBuf, CodexHomeSource)> {
+        let home = crate::managed_account::resolve_codex_home()?;
+        let path = home.path.join(AUTH_FILE);
+        path.is_file().then_some((path, home.source))
+    }
+
+    /// [`auth_json_path_with_source`] for a caller that only needs the file.
     #[must_use]
     pub fn auth_json_path() -> Option<PathBuf> {
-        let home = crate::managed_account::codex_home()?;
-        let path = PathBuf::from(home).join(AUTH_FILE);
-        path.is_file().then_some(path)
+        auth_json_path_with_source().map(|(path, _)| path)
     }
 
     /// Read the tokens out of one `auth.json`. `Ok(None)` when the file holds

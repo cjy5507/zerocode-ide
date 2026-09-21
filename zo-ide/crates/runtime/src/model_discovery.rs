@@ -72,11 +72,6 @@ pub const CODEX_CLIENT_VERSION_DEFAULT: &str = "0.153.4";
 pub const CHATGPT_MODELS_URL: &str = "https://chatgpt.com/backend-api/codex/models";
 /// Codex's cache file inside a Codex home.
 pub const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
-/// The app's shared Codex runtime home, under the person's home directory —
-/// the third cache this machine may hold (the window syncs the selected
-/// account's cache into it).
-pub const APP_RUNTIME_CODEX_HOME: &str =
-    "Library/Application Support/dev.zerocode.app/codex-runtime-home/home";
 /// How many selected models the process remembers for the keep-selected rule.
 const SELECTED_MEMORY: usize = 8;
 
@@ -724,20 +719,25 @@ fn non_empty_env(key: &str) -> Option<String> {
 }
 
 /// The Codex home the live answer is written back to and the token is read
-/// from: the account the channel switched to (`api::managed_account`), then
-/// `$ZO_CODEX_HOME`, then `$CODEX_HOME`, then `~/.codex`.
+/// from: whatever `api::managed_account::resolve_codex_home` names — the
+/// account the channel switched to, the launch `CODEX_HOME`, or the window's
+/// own managed home — then `$ZO_CODEX_HOME`, then `~/.codex`.
+///
+/// `$CODEX_HOME` is not read again here; the resolution table above already
+/// holds that row, and asking twice is how two answers start to differ.
 #[must_use]
 pub fn codex_home() -> Option<PathBuf> {
     api::managed_account::codex_home()
         .map(PathBuf::from)
         .or_else(|| non_empty_env("ZO_CODEX_HOME").map(PathBuf::from))
-        .or_else(|| non_empty_env("CODEX_HOME").map(PathBuf::from))
         .or_else(|| non_empty_env("HOME").map(|home| PathBuf::from(home).join(".codex")))
 }
 
 /// Every Codex home this machine may hold a `models_cache.json` under, the
-/// selected account's first: [`codex_home`], `~/.codex`, and the app's
-/// runtime home ([`APP_RUNTIME_CODEX_HOME`]). De-duplicated, in that order.
+/// selected account's first: [`codex_home`], `~/.codex`, and the window's
+/// shared runtime home (`api::managed_account::ide_codex_home`, which the
+/// window syncs the selected account's cache into). De-duplicated, in that
+/// order.
 #[must_use]
 pub fn codex_cache_paths() -> Vec<PathBuf> {
     let mut homes: Vec<PathBuf> = Vec::new();
@@ -746,7 +746,9 @@ pub fn codex_cache_paths() -> Vec<PathBuf> {
     }
     if let Some(home) = non_empty_env("HOME").map(PathBuf::from) {
         homes.push(home.join(".codex"));
-        homes.push(home.join(APP_RUNTIME_CODEX_HOME));
+    }
+    if let Some(home) = api::managed_account::ide_codex_home() {
+        homes.push(home);
     }
     let mut seen = HashSet::new();
     homes

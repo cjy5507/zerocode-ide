@@ -1550,7 +1550,18 @@ fn sync_agent_auth_inner(
             && let Some(managed_home) =
                 crate::codex_accounts::account_home(local_data_root, account_id)
         {
-            let _ = std::fs::write(managed_home.join(crate::codex_accounts::AUTH_FILE), &curr);
+            // The same direction rule the launch road keeps: only a provably
+            // fresher stored copy stops this write. A rotating refresh token
+            // has one live branch, and saving the older one over it is a
+            // logout with a delay on it (t-5777).
+            let account_auth = managed_home.join(crate::codex_accounts::AUTH_FILE);
+            let held = std::fs::read_to_string(&account_auth).ok();
+            if !held
+                .as_deref()
+                .is_some_and(|held| crate::codex_accounts::runtime_copy_wins(held, &curr))
+            {
+                let _ = std::fs::write(&account_auth, &curr);
+            }
         }
         return Ok(Some(
             zerocode_hookd::codex_runtime_auth::AuthSync::Unchanged,
@@ -2464,6 +2475,63 @@ mod tests {
                 .expect("best-effort sync");
             assert!(synced.is_none(), "{agent} reached the codex auth sync");
         }
+    }
+
+    /// …and refuses the write when the account's own home holds the newer
+    /// login. The pane's copy is not automatically the live branch: a
+    /// `codex login` in another home rotates the refresh token too, and the
+    /// older file landing last is the logout the person reports as "it expires
+    /// again" (t-5777).
+    #[test]
+    fn a_zo_exit_never_overwrites_a_fresher_account_login() {
+        let root = tempfile::tempdir().expect("local data root");
+        let system_home = tempfile::tempdir().expect("system home");
+        let managed = crate::codex_accounts::account_home(root.path(), "account-a")
+            .expect("managed account home");
+        std::fs::create_dir_all(&managed).expect("managed home");
+        let newer = crate::codex_accounts::auth_fixture(
+            "00000000-0000-0000-0000-00000000000a",
+            "2026-09-21T06:32:33Z",
+            "at-new",
+        );
+        let older = crate::codex_accounts::auth_fixture(
+            "00000000-0000-0000-0000-00000000000a",
+            "2026-09-17T02:48:26Z",
+            "at-old",
+        );
+        std::fs::write(managed.join(crate::codex_accounts::AUTH_FILE), &newer)
+            .expect("the account refreshed elsewhere");
+        std::fs::write(
+            root.path().join(crate::codex_accounts::ACCOUNT_STORE_FILE),
+            serde_json::json!({
+                "accounts": [{ "id": "account-a", "home_dir": managed, "added_at": 0 }],
+                "active": "account-a"
+            })
+            .to_string(),
+        )
+        .expect("account store");
+        let runtime = crate::codex_accounts::runtime_home(root.path());
+        std::fs::create_dir_all(&runtime).expect("runtime home");
+        crate::codex_accounts::write_runtime_record(
+            &runtime,
+            &crate::codex_accounts::CodexRuntimeAuth {
+                version: 1,
+                account: Some("account-a".to_string()),
+                written: Some("{}".to_string()),
+            },
+        );
+        std::fs::write(runtime.join(crate::codex_accounts::AUTH_FILE), &older)
+            .expect("a stale runtime copy");
+
+        sync_agent_auth_inner(root.path(), "zo", Some(system_home.path()))
+            .expect("best-effort sync");
+
+        assert_eq!(
+            std::fs::read_to_string(managed.join(crate::codex_accounts::AUTH_FILE))
+                .expect("the account's login"),
+            newer,
+            "the exit road wrote an older copy over the account's newer login"
+        );
     }
 
     #[test]

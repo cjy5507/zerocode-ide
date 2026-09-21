@@ -6,6 +6,11 @@ applied), B = `on`.
 
     run.py run --zo <bin> --model <id> --out <dir>
     run.py analyze --out <dir>
+
+The child zo inherits this environment. It is launched without `CODEX_HOME`,
+and since t-5777 that is fine: zo follows the account the ZeroCode window is
+signed in to. Export `CODEX_HOME=<a codex home>` here only to measure a
+DIFFERENT OpenAI account than the window's.
 """
 
 from __future__ import annotations

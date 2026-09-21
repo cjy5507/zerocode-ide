@@ -60,7 +60,11 @@ use crate::toml_lines::{self, Scan};
 
 /// Where the mirror lives under the app's data directory
 /// (`resolveOrcaManagedCodexHomePath`, :446-448).
-pub const HOME_SEGMENTS: [&str; 2] = ["codex-runtime-home", "home"];
+///
+/// The spelling is `zerocode_core`'s because it crosses the window's edge: a
+/// zo started outside a pane reads this same directory to borrow the login
+/// the window holds (t-5777).
+pub use zerocode_core::codex_account::RUNTIME_HOME_SEGMENTS as HOME_SEGMENTS;
 
 /// A `CODEX_HOME` this product owns.
 ///

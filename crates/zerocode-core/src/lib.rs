@@ -17,6 +17,7 @@ pub mod agent_emulator;
 pub mod agent_exit;
 pub mod agent_lineage;
 pub mod agent_teams;
+pub mod app;
 pub mod artifact;
 pub mod artifact_publish;
 pub mod artifact_transcript;

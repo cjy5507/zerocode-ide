@@ -11,6 +11,11 @@ model-fit-hints = []
 
 [dependencies]
 core-types = { path = "../core-types" }
+# The window's app-data folder, resolved by the same rules Tauri uses, so a zo
+# outside a pane can find the account the window is signed in to (t-5777).
+# `dirs` is already in this lock through the tool crates; the api crate reads
+# only its config/data/home roots.
+dirs = "6"
 memchr = "2"
 # The window's price table, at the top of this repository — one crate both
 # cargo workspaces compile, so the plan scorer and the window's token scanners

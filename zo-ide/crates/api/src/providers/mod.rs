@@ -2464,22 +2464,11 @@ pub fn provider_usable_for_smart_inventory(kind: ProviderKind) -> bool {
 /// without needing an API key or the experimental-adapters flag — the
 /// subscription itself is the credential.
 fn openai_oauth_present() -> bool {
-    !external_credential_probes_disabled()
+    !crate::managed_account::external_credentials_disabled()
         && crate::oauth_store::load_openai_oauth()
             .ok()
             .flatten()
             .is_some()
-}
-
-fn external_credential_probes_disabled() -> bool {
-    std::env::var("ZO_DISABLE_EXTERNAL_CREDENTIALS")
-        .ok()
-        .is_some_and(|value| {
-            matches!(
-                value.trim().to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
 }
 
 fn explicit_non_claude_adapter_gate_enabled() -> bool {
