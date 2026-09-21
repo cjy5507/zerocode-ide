@@ -175,10 +175,20 @@ fn one(
     let under_roots = roots.iter().map(|root| root.join(seat.ledger)).find(|path| path.is_file());
     let per_session = sessions.map(|dir| session_ledgers(dir, seat.ledger)).unwrap_or_default();
     let found = under_roots.clone().or_else(|| per_session.first().cloned());
-    let mut rows = under_roots.as_deref().map(read_rows).unwrap_or_default();
-    for ledger in &per_session {
-        rows.extend(read_rows(ledger));
-    }
+    // The root is the seat's ledger and the session folders hold a COPY of
+    // the same rows: since 2026-09-21 a screen seat's walk writes both at
+    // once (`computer_use::errand::write_rows`,
+    // docs/design/jev-seats-accuracy-wave-20260921.md §4, decision 3), and
+    // the window always hands this counter its sessions folder. Adding the
+    // two would count every walk twice: a judgment window that fills at
+    // twice the rate on the same evidence, and a week's bill read at double
+    // what the door was actually asked. The root is read when it has the
+    // file; the session copies are what a seat whose rows predate that
+    // change still has, and they are read only then.
+    let rows = match under_roots.as_deref() {
+        Some(ledger) => read_rows(ledger),
+        None => per_session.iter().flat_map(|ledger| read_rows(ledger)).collect(),
+    };
     let today = summary::summarize(&rows, start_of_day_ms(now_ms, offset_s));
     let week = summary::summarize(&rows, now_ms - WINDOW_DAYS * MS_PER_DAY);
     let cost_usd = cost_of(week.input_tokens);

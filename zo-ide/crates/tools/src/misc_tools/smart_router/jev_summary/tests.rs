@@ -106,6 +106,68 @@ fn a_screen_seats_rows_are_counted_across_its_session_folders() {
 }
 
 #[test]
+fn a_screen_seat_is_counted_once_when_its_root_ledger_holds_what_a_session_copied() {
+    // Both places hold the same rows (§4, decision 3). The root is the one
+    // counted: a counter that added them would say a walk that answered
+    // thirty-five times answered seventy.
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().join("jev")];
+    let sessions = home.path().join("computer-use").join("sessions");
+    let seat = &zerocode_core::jev::BROWSER;
+    let walk: Vec<Value> = (0..35)
+        .map(|n| json!({"at": 10 + n, "outcome": "answered", "elapsedMs": 40, "requests": 1, "pressed": true, "agreed": true}))
+        .collect();
+    write(&roots[0], seat.ledger, &walk);
+    write(&sessions.join("20260921-000000-1"), seat.ledger, &walk);
+
+    let report = super::one(seat, &roots, Some(&sessions), None, 1_000, 0);
+
+    assert_eq!(report.week.rows, walk.len(), "one ledger, counted once");
+    assert_eq!(report.found.as_deref(), Some(roots[0].join(seat.ledger).as_path()));
+    assert_eq!(report.asked_ever, walk.len());
+}
+
+/// The rows a walk writes under `~/.zo/jev` are read by the same counter the
+/// orchestration seats' are, and they carry the seat all the way to a rise
+/// (§4, decision 3 and 5).
+#[test]
+fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().join("jev")];
+    let seat = &zerocode_core::jev::BROWSER;
+    let wanted = summary::rows_that_can_clear(seat.answer_floor_permille.expect("a rise line"));
+    let walk: Vec<Value> = (0..wanted)
+        .map(|n| {
+            json!({
+                "at": 10 + i64::try_from(n).unwrap_or_default(),
+                "outcome": "answered",
+                "elapsedMs": 300,
+                "requests": 1,
+                "pressed": true,
+                "agreed": true,
+            })
+        })
+        .collect();
+    write(&roots[0], seat.ledger, &walk);
+    let settings = json!({
+        zerocode_core::jev::SMART_SETTINGS_KEY: { seat.setting: JevMode::Auto.key() }
+    });
+
+    let report = super::one(seat, &roots, None, Some(&settings), 1_000, 0);
+
+    let judged = report.judged.as_ref().expect("a rising seat is judged");
+    assert_eq!(judged.window_wanted, wanted, "35 walks, not routing's 73");
+    assert_eq!(judged.window.asked(), wanted);
+    assert_eq!(report.verdict(), Some(Verdict::Rise));
+    assert_eq!(report.clears_rise_floor, Some(true));
+    assert_eq!(report.rows_to_next_judgment(), Some(JUDGED_EVERY_ROWS - wanted % JUDGED_EVERY_ROWS));
+    // It has not risen yet — nothing has written the transition — so the card
+    // still draws it as recording, and says what it is waiting on.
+    assert_eq!(report.stand, Stand::Recording);
+    assert!(!report.applies);
+}
+
+#[test]
 fn a_seat_that_never_rises_is_never_asked_to_clear_a_line() {
     let home = tempfile::tempdir().expect("tmp");
     let roots = [home.path().to_path_buf(), home.path().join("other")];

@@ -284,6 +284,45 @@ pub const ROUTE_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 /// at confidence 0.29. This is a policy line, not a calibrated accuracy claim.
 pub const SCREEN_PRESS_FLOOR_PERMILLE: u16 = 500;
 
+/// What a screen seat's answers must bound above before `auto` rises to
+/// pressing (docs/design/jev-seats-accuracy-wave-20260921.md §4): nine in ten.
+///
+/// The orchestration seats' number, arrived at from the walk's own side: a
+/// question that does not come back costs the walk nothing it was not already
+/// going to pay — the walk ends where a walk without a judgment ends, at the
+/// step that stopped — while every answer that does come back moves a real
+/// pointer on a real screen. Written here rather than read from
+/// [`ORCHESTRATION_ANSWER_FLOOR_PERMILLE`] for the reason that constant is
+/// itself not [`ROUTE_AGREEMENT_FLOOR_PERMILLE`]: two lines that happen to
+/// coincide are still two policies, and a screen that learns to answer at a
+/// different rate than a coordinator's sweep should move one of them alone.
+pub const SCREEN_ANSWER_FLOOR_PERMILLE: u16 = 900;
+
+/// The screen seats' route-change budget (§4): four presses in five must be
+/// ones the walk went on to confirm.
+///
+/// What a screen seat has in place of a probe to compare against is hindsight
+/// — the walk's own end. A press the walk reached its goal after is a press
+/// the judgment got right; one the walk was still stuck after is not
+/// ([`summary::AGREED`], stamped a walk at a time). That is stronger evidence
+/// than the routing seat's agreement, which says only that two readers said
+/// the same thing, and it is held to the same line: a reader that leaves a
+/// walk stuck every fifth press is not one to hand the mouse to unasked.
+pub const SCREEN_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
+
+/// The wall one screen question may hold a walk, in milliseconds — the number
+/// the walk itself waits (`computer_use::errand::ACTION_DEADLINE`, which reads
+/// it from here) and the latency line the judge holds a rising seat to.
+///
+/// It is the question's deadline and not the walk's speed target. A screen
+/// question's floor is the judgment server's own answer time — 280 ms at the
+/// median once the client stopped opening a new connection for each one
+/// (§2.1, 2026-09-21) — so the 131 ms a person's own step costs would be a
+/// line no seat could ever clear. That number is the walk's goal and lives in
+/// the measurement table; this one is the wall past which an answer is slower
+/// than the fallback it would replace.
+pub const SCREEN_APPLY_DEADLINE_MS: u64 = 1_500;
+
 /// zo's routing judgment: a task's complexity, risk and intent beside the
 /// chat probe's (docs/design/jev-decision-shadow-20260917.md).
 pub const ROUTING: JevUse = JevUse {
@@ -445,18 +484,30 @@ const DESKTOP_SENDS: [Sent; 6] = [
 /// The window's browser walk: which numbered control on a page to press
 /// (docs/design/jev-browser-action-20260917.md). It answers two errands — a
 /// recorded walk that stopped, and a goal named in a person's words — and
-/// both of them press, so `auto` never rises to acting.
+/// both of them press.
+///
+/// `auto` rises here (docs/design/jev-seats-accuracy-wave-20260921.md §4).
+/// It did not until then, and the sentence this doc used to carry — that a
+/// press is always a person's to allow — read as a safety rule when it was
+/// really an absence: nothing had been built that could tell a seat pressing
+/// well from one pressing badly, so every screen seat sat at `shadow` under a
+/// name that promised otherwise. What tells them apart now is the walk's own
+/// end: a press the walk reached its goal after was the right number, and one
+/// it was still stuck after was not ([`SCREEN_AGREEMENT_FLOOR_PERMILLE`]).
+/// A person's `off`, `shadow` and `on` still outrank the judge in both
+/// directions; `auto` is the mode that says "decide on the evidence", and it
+/// now does.
 pub const BROWSER: JevUse = JevUse {
     id: "browser",
     setting: "browserAction",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     sends: &BROWSER_SENDS,
     ledger: "browser-action.jsonl",
-    promotes: false,
-    answer_floor_permille: None,
+    promotes: true,
+    answer_floor_permille: Some(SCREEN_ANSWER_FLOOR_PERMILLE),
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
-    agreement_floor_permille: None,
-    apply_deadline_ms: None,
+    agreement_floor_permille: Some(SCREEN_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(SCREEN_APPLY_DEADLINE_MS),
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -476,22 +527,26 @@ pub const BROWSER: JevUse = JevUse {
 ///    open question this seat exists to answer, and a ledger that mixes them
 ///    cannot answer it for either.
 ///
-/// Pressing is a person's choice here too, so `auto` records and never rises.
+/// `auto` rises here on this seat's own evidence, as [`BROWSER`]'s does, and
+/// on nothing the other surface earned — which is reason 3 above holding at
+/// the moment it matters.
 pub const DESKTOP: JevUse = JevUse {
     id: "desktop",
     setting: "desktopAction",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     sends: &DESKTOP_SENDS,
     ledger: "desktop-action.jsonl",
-    promotes: false,
-    answer_floor_permille: None,
+    promotes: true,
+    answer_floor_permille: Some(SCREEN_ANSWER_FLOOR_PERMILLE),
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
-    agreement_floor_permille: None,
-    apply_deadline_ms: None,
+    agreement_floor_permille: Some(SCREEN_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(SCREEN_APPLY_DEADLINE_MS),
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
-/// browser/desktop settings never enable it, and `auto` never promotes presses.
+/// browser/desktop settings never enable it, and its `auto` rises — as
+/// [`BROWSER`]'s and [`DESKTOP`]'s do — only on the presses this surface's own
+/// walks confirmed.
 pub const EMULATOR: JevUse = JevUse {
     id: "emulator",
     setting: "emulatorAction",
@@ -511,11 +566,11 @@ pub const EMULATOR: JevUse = JevUse {
         SCREEN_SENDS[3],
     ],
     ledger: "emulator-action.jsonl",
-    promotes: false,
-    answer_floor_permille: None,
+    promotes: true,
+    answer_floor_permille: Some(SCREEN_ANSWER_FLOOR_PERMILLE),
     press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
-    agreement_floor_permille: None,
-    apply_deadline_ms: None,
+    agreement_floor_permille: Some(SCREEN_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(SCREEN_APPLY_DEADLINE_MS),
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured

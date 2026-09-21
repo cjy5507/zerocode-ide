@@ -2977,8 +2977,20 @@ pub(super) fn run_recipe(
                     deadline_ms,
                     spent,
                 );
-                let recovered = computer_use::errand::run(mode, &at, &mut judge, &mut world);
-                computer_use::errand::write_rows(seat, dir, &recovered.rows);
+                // Whether the seat presses: a person's `on`, or an `auto`
+                // its own ledger has promoted — read off the wire the
+                // questions go down, so the standing and the answers come
+                // from one settings file and one ledger root.
+                let acting = crate::systemone::applies(judge.wire(), seat);
+                let recovered =
+                    computer_use::errand::run(mode, acting, &at, &mut judge, &mut world);
+                computer_use::errand::write_rows(
+                    seat,
+                    judge.wire(),
+                    dir,
+                    &recovered.rows,
+                    crate::project_runtime::now_epoch_ms(),
+                );
                 if let Some(walked) = recovered.report {
                     report = walked;
                 }
@@ -3149,9 +3161,16 @@ pub(super) fn run_goal(
             "steps": [],
         }));
     }
+    let acting = crate::systemone::applies(judge.wire(), seat);
     let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0);
-    let walked = errand::run(mode, &at, &mut judge, &mut world);
-    errand::write_rows(seat, dir, &walked.rows);
+    let walked = errand::run(mode, acting, &at, &mut judge, &mut world);
+    errand::write_rows(
+        seat,
+        judge.wire(),
+        dir,
+        &walked.rows,
+        crate::project_runtime::now_epoch_ms(),
+    );
     said(serde_json::json!({
         "goal": goal,
         "mode": mode.key(),

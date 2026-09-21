@@ -52,16 +52,19 @@ use serde_json::{Value, json};
 use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
-use zerocode_core::jev::summary::{AT, ELAPSED_MS};
-use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse};
+use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
+use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{
     ActionAsk, ActionChoice, ActionLook, Chosen, SCREEN_ACTION_RUBRIC_VERSION, Where, ask,
 };
 
-/// How long one judgment may hold a walk. The same number the router's
-/// applied mode waits: a judgment that has not answered by then is slower
-/// than the fallback it would replace.
-pub const ACTION_DEADLINE: Duration = Duration::from_millis(1_500);
+/// How long one judgment may hold a walk: the screen seats' own wall, read
+/// from the use table that judges a rising seat against it
+/// ([`SCREEN_APPLY_DEADLINE_MS`]) rather than spelled again here. A judgment
+/// that has not answered by then is slower than the fallback it would
+/// replace, and the stage that waits and the judge that reads the wait have
+/// to be reading one number.
+pub const ACTION_DEADLINE: Duration = Duration::from_millis(SCREEN_APPLY_DEADLINE_MS);
 
 /// How many numbers one walk may spend clearing one stop. Two, because a
 /// third guess on a screen that did not move twice is a loop, not a recovery.
@@ -471,6 +474,20 @@ pub struct Walked {
     /// caller's own condition said so or, failing that, when the judgment
     /// said `done`. `None` for an errand that has no goal to reach.
     pub reached: Option<bool>,
+    /// What the walk itself went on to show about the numbers it pressed —
+    /// the hindsight the seat's promotion is judged on
+    /// (docs/design/jev-seats-accuracy-wave-20260921.md §4, decision 2),
+    /// stamped onto every press of this walk as
+    /// [`zerocode_core::jev::summary::AGREED`].
+    ///
+    /// A walk and not a press is the unit: a goal reached in three presses
+    /// says all three were right, and counting the first two as misses
+    /// because the screen was not yet there would judge the seat on a
+    /// question nobody asked it. `None` when nothing confirmed the walk
+    /// either way — a goal walk given no `until`, or one the judgment ended
+    /// with its own `done` — and those walks are left out of the agreement
+    /// rather than guessed at.
+    pub agreed: Option<bool>,
 }
 
 /// One row, with the words every ledger of this family uses.
@@ -510,8 +527,51 @@ fn note(said: &mut Value, key: &str, value: Value) {
 /// caller ends up exactly where it would have without a judgment at all. That
 /// equivalence is the feature's first promise and
 /// `off_and_shadow_change_nothing_about_the_walk` holds it.
+///
+/// `acting` is whether this seat presses at all, and it is the caller's to
+/// answer rather than the mode's: under `auto` a seat presses once its own
+/// ledger has promoted it (`crate::systemone::applies`), and the ledger is a
+/// file this module has no business reading in the middle of a walk. `mode`
+/// still says whether anything is ASKED, and still names itself on every row.
 pub fn run(
     mode: Mode,
+    acting: bool,
+    at: &Errand<'_>,
+    judge: &mut dyn ActionJudge,
+    world: &mut dyn World,
+) -> Walked {
+    let mut walked = walk(mode, acting, at, judge, world);
+    agree(&mut walked);
+    walked
+}
+
+/// What the walk itself said about the numbers it pressed, written onto the
+/// presses it said it of (§4, decision 2).
+///
+/// A walk that pressed nothing agreed with nothing: the mark is about
+/// judgments that were acted on, and a shadow row or a barred one is not one
+/// of those.
+fn agree(walked: &mut Walked) {
+    if walked.pressed == 0 {
+        walked.agreed = None;
+        return;
+    }
+    let Some(agreed) = walked.agreed else {
+        return;
+    };
+    for row in &mut walked.rows {
+        if row.get("pressed").and_then(Value::as_bool) == Some(true) {
+            note(row, AGREED.canonical, json!(agreed));
+        }
+    }
+}
+
+/// The walk itself, up to whichever gate ends it — [`run`] is this and the
+/// hindsight mark, kept apart so that every one of the exits below lands in
+/// one place that can stamp them.
+fn walk(
+    mode: Mode,
+    acting: bool,
     at: &Errand<'_>,
     judge: &mut dyn ActionJudge,
     world: &mut dyn World,
@@ -548,6 +608,9 @@ pub fn run(
     let mut still = 0usize;
     for attempt in 1..=at.steps() {
         if world.left_ms() <= u64::try_from(ACTION_DEADLINE.as_millis()).unwrap_or(u64::MAX) {
+            // Out of time with the errand unserved: whatever was pressed on
+            // the way here did not get the walk there (§4, decision 2).
+            walked.agreed = Some(false);
             walked.rows.push(row(
                 mode,
                 at,
@@ -579,6 +642,7 @@ pub fn run(
             Some(was) if was.same_as(&screen) => {
                 still += 1;
                 if still >= SAME_SCREEN_LIMIT {
+                    walked.agreed = Some(false);
                     walked.rows.push(row(
                         mode,
                         at,
@@ -603,6 +667,7 @@ pub fn run(
             pressed: &pressed_so_far,
             shows: &screen.shows,
         }) else {
+            walked.agreed = Some(false);
             walked
                 .rows
                 .push(row(mode, at, attempt, json!({ "outcome": "no_candidate" })));
@@ -660,6 +725,13 @@ pub fn run(
                 };
                 note(&mut said, "chosen", json!(ended));
                 note(&mut said, "routeUse", json!(USE_FALLBACK));
+                // Giving up is the judgment saying the presses so far led
+                // nowhere; `done` is it saying the opposite about a screen
+                // nothing checked, which §4 leaves out of the agreement
+                // rather than counting on the judgment's own word.
+                if choice.chosen == Chosen::GiveUp {
+                    walked.agreed = Some(false);
+                }
                 if choice.chosen == Chosen::Done {
                     // The weaker of the two ends: nothing was checked, the
                     // judgment simply says it is there. The row says which
@@ -673,9 +745,9 @@ pub fn run(
         };
         note(&mut said, "chosen", json!(format!("mark:{chosen}")));
 
-        // A record-only mode records what it would have pressed and presses
-        // nothing.
-        if !mode.applies() {
+        // A seat that is not acting records what it would have pressed and
+        // presses nothing.
+        if !acting {
             note(&mut said, "routeUse", json!(USE_SHADOW));
             walked.rows.push(row(mode, at, attempt, said));
             return walked;
@@ -729,6 +801,7 @@ pub fn run(
                     .as_ref()
                     .is_some_and(|report| cleared_past(report, next));
                 note(&mut said, "recheck", json!(cleared));
+                walked.agreed = Some(cleared);
                 walked.rows.push(row(mode, at, attempt, said));
                 walked.report = after;
                 if cleared {
@@ -742,6 +815,7 @@ pub fn run(
                 let reached = world.reached();
                 if let Some(reached) = reached {
                     note(&mut said, "recheck", json!(reached));
+                    walked.agreed = Some(reached);
                 }
                 walked.rows.push(row(mode, at, attempt, said));
                 if reached == Some(true) {
@@ -754,26 +828,38 @@ pub fn run(
     walked
 }
 
-/// Append the rows to the walk's evidence folder, under the ledger `seat`
-/// names. A folder that will not take them is said once on stderr and never
-/// raised: a walk's record is not worth failing a walk that already happened.
-pub fn write_rows(seat: &JevUse, dir: Option<&std::path::Path>, rows: &[Value]) {
-    let (Some(dir), false) = (dir, rows.is_empty()) else {
+/// Write the walk's rows down, in both of the places a screen seat's row
+/// belongs (§4, decision 3), through the one appender every Jev ledger is
+/// written by:
+///
+/// - the walk's evidence folder, where the rows are part of what the run
+///   renders — `dir` is that folder, and a walk recording no evidence has
+///   none;
+/// - `<config home>/jev/<seat>.jsonl`, the root every seat's ledger is judged
+///   and counted under. That write goes through
+///   [`crate::systemone::record_rows`], so a screen seat's rows are judged by
+///   the writer that appended them — the road the orchestration seats already
+///   take — and `zo jev summary` reads all eight seats under one root instead
+///   of three of them scattered a session folder at a time.
+///
+/// A folder or a file that will not take them is said once on stderr and
+/// never raised: a walk's record is not worth failing a walk that already
+/// happened.
+pub fn write_rows(
+    seat: &JevUse,
+    wire: &crate::systemone::Wire,
+    dir: Option<&std::path::Path>,
+    rows: &[Value],
+    now_ms: i64,
+) {
+    if rows.is_empty() {
         return;
-    };
-    let mut said = String::new();
-    for row in rows {
-        said.push_str(&row.to_string());
-        said.push('\n');
     }
-    use std::io::Write as _;
-    let written = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(dir.join(seat.ledger))
-        .and_then(|mut file| file.write_all(said.as_bytes()));
-    if let Err(why) = written {
-        eprintln!("recipe-run: the walk's record was not written: {why}");
+    if let Some(dir) = dir {
+        crate::systemone::append_rows(&dir.join(seat.ledger), rows);
+    }
+    if let Some(ledger) = crate::systemone::ledger_of(wire, seat) {
+        crate::systemone::record_rows(seat, &ledger, rows, now_ms);
     }
 }
 
