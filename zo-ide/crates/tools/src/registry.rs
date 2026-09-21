@@ -358,12 +358,17 @@ const DEFERRED_TOOL_NAMES_EXTRA: &[&str] = &[
     "SendUserMessage",
     "SkillDistill",
     "SkillReview",
-    // The skill index's replacement (t-5629). They are deferred for the
-    // reason every ranked list is: a turn that needs no skill never looks,
-    // and a turn that does pays one lookup against the 900 tokens the index
-    // spent on every request. The prompt section that replaces the index
-    // names them both, so the promise a manifest line makes is made twice
-    // exactly where it matters.
+    // The skill index's replacement (t-5629), deferred for the reason every
+    // ranked list is: a turn that needs no skill never looks, and a turn that
+    // does pays one lookup against the 900 tokens the index spent on every
+    // request.
+    //
+    // They carry no `DEFERRED_TOOL_HOOKS` line — the prompt section that
+    // replaces the index already says when to reach for them, on the one road
+    // where they matter — but they ARE named in the manifest, because a
+    // deferred tool the fixed harness never promises is one the model has no
+    // reason to open on the other road (`harness_budget`'s
+    // `every_fixed_harness_tool_name_is_registered_or_deferred_reachable`).
     "skill_search",
     "skill_load",
     "Sleep",
@@ -509,14 +514,6 @@ const DEFERRED_TOOL_HOOKS: &[(&str, &str)] = &[
     (
         "TeamCreate",
         "Track team tasks/inbox without launching agents.",
-    ),
-    (
-        "skill_search",
-        "Rank every installed skill against the task; returns the best ones whole.",
-    ),
-    (
-        "skill_load",
-        "Load installed skills by name, typos forgiven.",
     ),
     (
         "SkillDistill",

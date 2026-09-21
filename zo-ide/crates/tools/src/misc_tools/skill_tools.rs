@@ -834,9 +834,11 @@ mod tests {
     /// A project whose `.zo/skills` holds `skills`, each with a body long
     /// enough that "the whole SKILL.md came back" means something.
     ///
-    /// The global skill roots are pointed at an empty directory for the run,
-    /// so the answer is about the skills this test planted and not about
-    /// whichever skills the machine running it happens to have installed.
+    /// The machine's own global skills are in the catalog too and cannot be
+    /// taken out of it — `zo_global_config_roots` reads `ZO_CONFIG_HOME`,
+    /// `ZO_HOME` AND `~/.zo`, so pointing one of them somewhere empty hides
+    /// nothing. So these tests assert about the skills they planted, whose
+    /// vocabulary no real skill shares, and never about how many there are.
     fn project_with_skills(skills: &[(&str, &str)]) -> (std::path::PathBuf, std::path::PathBuf) {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -856,24 +858,7 @@ mod tests {
             )
             .expect("write skill");
         }
-        std::fs::create_dir_all(root.join("home")).expect("an empty global home");
         (root.clone(), cwd)
-    }
-
-    /// Run `body` with the global Zo home pointed somewhere empty.
-    fn with_empty_global_home<T>(root: &std::path::Path, body: impl FnOnce() -> T) -> T {
-        let _guard = crate::tests::env_lock()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let home = root.join("home");
-        let previous = std::env::var_os(core_types::paths::ZO_CONFIG_HOME_ENV);
-        std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, &home);
-        let answer = body();
-        match previous {
-            Some(value) => std::env::set_var(core_types::paths::ZO_CONFIG_HOME_ENV, value),
-            None => std::env::remove_var(core_types::paths::ZO_CONFIG_HOME_ENV),
-        }
-        answer
     }
 
     /// (c) The search hands back the top skills WHOLE and names the rest —
@@ -886,31 +871,40 @@ mod tests {
             ("zqreport", "Writes a zqflow report from zqrecords"),
             ("unrelated", "Bakes bread"),
         ]);
-        let output = with_empty_global_home(&root, || {
-            execute_skill_search(
-                &SkillSearchInput {
-                    task: "run the zqflow pipeline over our zqrecords".to_string(),
-                    max_skills: Some(1),
-                },
-                &cwd,
-            )
-            .expect("a search")
-        });
-        assert_eq!(output.installed, 3, "every installed skill was ranked");
+        let output = execute_skill_search(
+            &SkillSearchInput {
+                // Words no real skill shares, so the machine's own catalog
+                // cannot outrank what this test planted.
+                task: "zqflow pipeline zqrecords".to_string(),
+                max_skills: Some(1),
+            },
+            &cwd,
+        )
+        .expect("a search");
+        assert!(
+            output.installed >= 3,
+            "the three planted skills are in the catalog: {}",
+            output.installed
+        );
         assert_eq!(output.skills.len(), 1, "one whole skill was asked for");
-        assert_eq!(output.skills[0].skill, "zqflow");
+        assert_eq!(
+            output.skills[0].skill, "zqflow",
+            "the skill sharing every word of the task comes first"
+        );
         assert!(
             output.skills[0].prompt.contains("The whole body of zqflow"),
             "the SKILL.md comes back whole: {}",
             output.skills[0].prompt
         );
-        assert!(
-            output.others.contains(&"zqreport".to_string()),
-            "the rest are named so a load can reach them: {:?}",
+        assert_eq!(
+            output.others.first().map(String::as_str),
+            Some("zqreport"),
+            "the next best is named so a load can reach it without a second search: {:?}",
             output.others
         );
         assert!(
-            !output.others.contains(&"unrelated".to_string()),
+            !output.others.contains(&"unrelated".to_string())
+                && output.skills.iter().all(|s| s.skill != "unrelated"),
             "a skill sharing no word with the task is not ranked: {:?}",
             output.others
         );
@@ -954,28 +948,33 @@ mod tests {
             ("zqflow", "zqflow things"),
             ("zqreport", "zqreport things"),
         ]);
-        let output = with_empty_global_home(&root, || {
-            execute_skill_load(
-                &SkillLoadInput {
-                    names: vec![
-                        "ZQ Flow".to_string(),
-                        "zq_report".to_string(),
-                        "zqfloww".to_string(),
-                        "totallyabsentname".to_string(),
-                    ],
-                },
-                &cwd,
-            )
-            .expect("a load")
-        });
+        let output = execute_skill_load(
+            &SkillLoadInput {
+                names: vec![
+                    "ZQ Flow".to_string(),
+                    "zq_report".to_string(),
+                    "zqfloww".to_string(),
+                    // A name nothing on any machine is a substring of, or a
+                    // typo away from.
+                    "qqqqqqqqqqqqqqqq".to_string(),
+                ],
+            },
+            &cwd,
+        )
+        .expect("a load");
         let loaded: Vec<&str> = output.skills.iter().map(|s| s.skill.as_str()).collect();
         assert_eq!(loaded, vec!["zqflow", "zqreport"]);
         assert!(output.skills[0].prompt.contains("The whole body of zqflow"));
         assert!(output.skills[0].reading.is_none(), "a load asks nothing");
 
         let unknown: Vec<&str> = output.unknown.iter().map(|u| u.asked.as_str()).collect();
-        assert_eq!(unknown, vec!["zqfloww", "totallyabsentname"]);
-        assert_eq!(output.unknown[0].suggestions, vec!["zqflow".to_string()]);
+        assert_eq!(unknown, vec!["zqfloww", "qqqqqqqqqqqqqqqq"]);
+        assert_eq!(
+            output.unknown[0].suggestions.first().map(String::as_str),
+            Some("zqflow"),
+            "the typo names the skill it was meant to be: {:?}",
+            output.unknown[0].suggestions
+        );
         assert!(
             output.unknown[1].suggestions.is_empty(),
             "nothing close enough to guess at: {:?}",
