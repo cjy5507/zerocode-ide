@@ -34,13 +34,14 @@ pub use smart_router::{
 };
 pub use smart_router::{
     basis_points, check_system_one, decision_shadow_mode_from, decision_shadow_path,
-    evaluate_decision_labels, read_shadow_rows, rerank_shadow_mode_from, rerank_shadow_path,
-    summarize_decision_shadow, task_fingerprint, AxisAgreement, AxisEvaluation, CheckFailure,
-    DecisionShadowMode, DecisionShadowRow, DecisionShadowSummary, Judged, JudgedAxis,
-    LabelEvaluation, ProbeCell, RerankShadow, RerankShadowRow, SystemOneCheck, BASIS_POINTS,
+    evaluate_decision_labels, note_recall_read, note_route_followed, read_shadow_rows,
+    rerank_shadow_mode_from, rerank_shadow_path, route_unseated_by, summarize_decision_shadow,
+    task_fingerprint, AxisAgreement, AxisEvaluation, CheckFailure, DecisionShadowMode,
+    DecisionShadowRow, DecisionShadowSummary, Judged, JudgedAxis, LabelEvaluation, ProbeCell,
+    RerankLabelRow, RerankShadow, RerankShadowRow, RouteLabelRow, SystemOneCheck, BASIS_POINTS,
     DECISION_SHADOW_FILE, DECISION_SHADOW_SETTING, KEY_CHECK_TASK, OUTCOME_ANSWERED,
     RERANK_OUTCOME_ANSWERED, RERANK_OUTCOME_UNORDERABLE, RERANK_SHADOW_FILE,
-    RERANK_SHADOW_SETTING,
+    RERANK_SHADOW_SETTING, ROUTE_STOOD,
 };
 pub use smart_router::{
     note_loaded_skill, note_search_answer, skill_search, skill_search_mode_from,

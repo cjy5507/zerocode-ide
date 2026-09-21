@@ -3773,6 +3773,7 @@ dependencies = [
  "base64 0.22.1",
  "codegraph",
  "core-types",
+ "decision-core",
  "futures-util",
  "nix 0.29.0",
  "plugins",

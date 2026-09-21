@@ -155,17 +155,27 @@ fn every_use_is_off_until_a_person_says_otherwise() {
     );
 }
 
-/// Recall has an apply stage now (t-4676): `on` reorders what a turn reads,
-/// and `auto` still only records, because nothing promotes recall yet.
+/// Recall has an apply stage (t-4676): `on` reorders what a turn reads. Its
+/// `auto` records until the judge raises it on the seat's own labels
+/// (t-5806), on the skill seat's lines read from there.
 #[test]
-fn recall_acts_only_when_a_person_says_on() {
+fn recall_acts_when_a_person_says_on_or_its_labels_raised_it() {
     assert_eq!(RECALL.mode_of(Some(&json!("on"))), JevMode::On);
     assert!(RECALL.mode_of(Some(&json!("on"))).applies());
     assert_eq!(RECALL.mode_of(Some(&json!("auto"))), JevMode::Auto);
     assert!(!RECALL.mode_of(Some(&json!("auto"))).applies());
-    assert!(
-        !jev_use(RECALL.id).expect("the recall row").promotes,
-        "only a person moves recall off recording"
+    assert!(RECALL.mode_of(Some(&json!("auto"))).applies_with(true));
+    let row = jev_use(RECALL.id).expect("the recall row");
+    assert!(row.promotes, "recall rises on its labels now");
+    assert_eq!(row.answer_floor_permille, Some(SKILL_ANSWER_FLOOR_PERMILLE));
+    assert_eq!(
+        row.agreement_floor_permille,
+        Some(SKILL_AGREEMENT_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        row.apply_deadline_ms,
+        Some(ROUTING_APPLY_DEADLINE_MS),
+        "the judge times recall against the wall its apply road waits inside"
     );
 }
 

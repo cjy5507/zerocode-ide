@@ -140,6 +140,14 @@ fn render_json(seats: &[SeatReport]) -> Value {
                         "controlRows": judged.control_rows,
                     },
                 })),
+                // Every `agreed` mark of the week, counted whether or not the
+                // seat rises — the recall seat's only agreement number, and
+                // the routing seat's turn labels beside its probe axes.
+                "agreementWeek": {
+                    "compared": seat.agreement_week.compared,
+                    "agreed": seat.agreement_week.agreed,
+                    "lowerBound": seat.agreement_week.lower_bound(),
+                },
                 "stand": seat.stand.token(),
                 "applies": seat.applies,
                 "verdict": seat.verdict().map(|verdict| json!({

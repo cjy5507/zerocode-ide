@@ -651,6 +651,7 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
         "the old mark is outside the window"
     );
     assert_eq!(judged.verdict, Verdict::Rise);
-    // A seat the table says never rises is not judged.
-    assert_eq!(judge_seat(&crate::jev::RECALL, &full), None);
+    // Every seat in the table rises now (t-5806): recall is judged on the
+    // same marks, on its own lines.
+    assert!(judge_seat(&crate::jev::RECALL, &full).is_some());
 }

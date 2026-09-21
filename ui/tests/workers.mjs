@@ -1452,6 +1452,106 @@ export async function testWorkers({ browser, origin, ok, faults }) {
         strandedWorker.shown.onStage === "term:13511",
       JSON.stringify(strandedWorker),
     );
+
+    /* ---- the placement seat's label: the person's move, reported once ----
+     *
+     * A worker the seat answered for (`placed`) is remembered by its term;
+     * the person dragging its tab to another group reports the move to the
+     * one door with the worker's id, and a second drag of the same tab
+     * reports nothing. A worker restored without a seat (a restart's
+     * reseat) is nobody's answer, and its drag reports nothing either. */
+    const placedMove = await page.evaluate(async () => {
+      const path = "/tmp/zerocode-window-test/wt-placed";
+      const leader = await openTermTab({ placement: "tab" });
+      const reported = [];
+      window.__ANSWER__.note_worker_room_change = (args) => {
+        reported.push(JSON.parse(JSON.stringify(args)));
+        return true;
+      };
+      window.__ANSWER__.judge_worker_room = () => ({
+        outcome: "answered",
+        chosen: "tab",
+        applied: false,
+        offered: ["tab", "split", "background"],
+        placed: true,
+      });
+      const worker = 13520;
+      for (const handler of window.__LISTENERS__["term:worker"] ?? []) {
+        handler({
+          payload: {
+            parent: leader,
+            term: worker,
+            worktree: path,
+            agent: "codex",
+            seat: { run: "run-1", worker: "w-13520", dispatch: "dp-1", task: "t-1", brief: "measure the frame time", briefChars: 21 },
+          },
+        });
+      }
+      // The answer arrives off the handler: wait for the door to have been asked.
+      const waited = Date.now();
+      while (!placedWorkers.has(worker) && Date.now() - waited < 2_000) {
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      const remembered = placedWorkers.get(worker)?.worker ?? null;
+      const restored = worker + 1;
+      for (const handler of window.__LISTENERS__["term:worker"] ?? []) {
+        handler({ payload: { parent: leader, term: restored, worktree: path, agent: "codex", resumed: "session" } });
+      }
+      const restoredRemembered = placedWorkers.has(restored);
+      // The person opens that checkout, so both tabs stand on its stage.
+      const previousPath = activeWorktreePath;
+      const previousTree = stageTree();
+      const previousFocus = focusedPane;
+      activeWorktreePath = path;
+      activeTabId = null;
+      updateStage();
+      const drag = (term) => {
+        const tab = tabOfTerm(term);
+        const other = splitStageBesideFocused("horizontal");
+        tabDrag = { id: tab.id, startX: 0, moved: true, target: { group: other, zone: "center" } };
+        endTabDrag();
+        return tab.pane === other;
+      };
+      const firstDrag = drag(worker);
+      const afterFirst = reported.length;
+      const secondDrag = drag(worker);
+      const afterSecond = reported.length;
+      const restoredDrag = drag(restored);
+      const afterRestored = reported.length;
+      for (const term of [worker, restored]) {
+        const tab = tabOfTerm(term);
+        if (tab) dropTab(tab.id);
+        dropTermView(term);
+      }
+      const leaderTab = tabOfTerm(leader);
+      if (leaderTab) dropTab(leaderTab.id);
+      dropTermView(leader);
+      delete window.__ANSWER__.note_worker_room_change;
+      delete window.__ANSWER__.judge_worker_room;
+      activeWorktreePath = previousPath;
+      setStageTree(previousTree);
+      focusedPane = previousFocus;
+      updateStage();
+      return { remembered, restoredRemembered, firstDrag, secondDrag, restoredDrag, afterFirst, afterSecond, afterRestored, reported };
+    });
+    ok(
+      "a placed worker's tab dragged by the person reports the move once, with the worker's id and the room",
+      placedMove.remembered === "w-13520" &&
+        placedMove.firstDrag === true &&
+        placedMove.afterFirst === 1 &&
+        placedMove.reported[0]?.worker === "w-13520" &&
+        placedMove.reported[0]?.room === "tab" &&
+        placedMove.secondDrag === true &&
+        placedMove.afterSecond === 1,
+      JSON.stringify(placedMove),
+    );
+    ok(
+      "a worker restored without a seat is nobody's answer and its drag reports nothing",
+      placedMove.restoredRemembered === false &&
+        placedMove.restoredDrag === true &&
+        placedMove.afterRestored === 1,
+      JSON.stringify(placedMove),
+    );
   } finally {
     await page.close();
   }

@@ -343,6 +343,16 @@ pub const SCREEN_APPLY_DEADLINE_MS: u64 = 1_500;
 
 /// zo's routing judgment: a task's complexity, risk and intent beside the
 /// chat probe's (docs/design/jev-decision-shadow-20260917.md).
+///
+/// The `agreed` rule (t-5806): a routing judgment agreed when the turn it
+/// routed STOOD — no quota wall, refusal fallback or overload demotion moved
+/// the wire to another model, and the person did not name one themselves —
+/// and disagreed when any of those unseated the route before the turn ended.
+/// The label is one row per turn, keyed by the turn's attempt, written by
+/// the host when the turn ends (`decision_shadow::note_route_followed`); a
+/// turn the person cancelled is not judged, and a turn the seat was never
+/// asked about leaves no label. The judge counts it beside the probe's axis
+/// agreement, one comparison per label row.
 pub const ROUTING: JevUse = JevUse {
     id: "routing",
     setting: "decisionShadow",
@@ -385,16 +395,51 @@ pub const STALL_APPLY_DEADLINE_MS: u64 = 30_000;
 pub const PLACEMENT_APPLY_DEADLINE_MS: u64 = 2_000;
 pub const SUMMON_APPLY_DEADLINE_MS: u64 = 10_000;
 
+/// How long after a placement answer a person's move of the worker's pane
+/// still counts against that answer, in milliseconds (t-5806).
+///
+/// The placement seat's label is what the person did with the window in the
+/// minutes after it appeared: a pane they moved to another room said the
+/// seat chose wrong, and a pane they left where it was said it chose right
+/// — or that nobody was looking, which the label cannot tell apart and does
+/// not pretend to. Five minutes is a policy line, not a measured one: long
+/// enough for somebody who was typing elsewhere to turn to the new pane,
+/// short enough that a rearrangement an hour later — a different piece of
+/// work — is not charged to a decision it had nothing to do with. The beat
+/// reads it to write the `agreed` row once the window has passed, and the
+/// window's move recorder reads it to refuse a move that came too late.
+pub const PLACEMENT_LABEL_WINDOW_MS: i64 = 5 * 60 * 1_000;
+
+/// What the recall seat's answers must bound above before `auto` rises to
+/// ordering what a turn reads (§4): nine in ten — the skill seat's line, read
+/// from there rather than respelled (t-5806, "모든 승격"), because the two
+/// seats are the same kind: a ranking a reader falls back from at no cost
+/// (recall's own order stands when the judgment does not come back, as the
+/// word match stands behind a skill search). One name of its own, so a
+/// re-measurement moves this seat's line alone.
+pub const RECALL_ANSWER_FLOOR_PERMILLE: u16 = SKILL_ANSWER_FLOOR_PERMILLE;
+
+/// The recall seat's route-change budget (§4): four readings in five must
+/// have put the note the turn then read or cited first — the seat's own
+/// hindsight mark (`rerank_shadow::note_recall_read`), which is what it has
+/// in place of a probe, as the skill seat has. The skill seat's budget, read
+/// from there for the reason its answer floor is.
+pub const RECALL_AGREEMENT_FLOOR_PERMILLE: u16 = SKILL_AGREEMENT_FLOOR_PERMILLE;
+
 /// zo's recall rerank: how much each note a recall found helps with the
 /// request (docs/design/typesafe-judgment-expansion-20260917.md).
 ///
 /// `on` is the apply stage: the judgment's order, after the vault's graph has
-/// had its say, is the order the turn reads. It stays a person's choice —
-/// `promotes` is false — because the 887 answered readings this machine has
-/// recorded say the judgment moves something on nearly every recall (a median
-/// of 7 notes reordered, the first note changed in 73% of them), and a use
-/// that changes that much of what a turn reads is not one evidence should
-/// switch on by itself.
+/// had its say, is the order the turn reads. The 887 answered readings this
+/// machine had recorded by 2026-09-17 say the judgment moves something on
+/// nearly every recall (a median of 7 notes reordered, the first note changed
+/// in 73% of them), which is why the seat stayed a person's choice until it
+/// had a mark to rise on. It has one now (t-5806): `auto` rises when the
+/// window's readings answered inside the routing seat's wall and the turns
+/// then read what the judgment put first four times in five, on the lines
+/// [`RECALL_ANSWER_FLOOR_PERMILLE`] and [`RECALL_AGREEMENT_FLOOR_PERMILLE`];
+/// the judge writes the rise in the seat's own ledger, and the seat reads it
+/// back per recall (`rerank_shadow::settle`).
 ///
 /// The apply also LEAVES OUT the notes the judgment put on its bottom level —
 /// *nothing in it bears on the request* — which the same ledger says is 24.5%
@@ -403,6 +448,17 @@ pub const SUMMON_APPLY_DEADLINE_MS: u64 = 10_000;
 /// marked superseded or contradicted is never dropped, and a judgment that
 /// cannot account for every page recall admitted is one recall's own order
 /// outlives (`runtime::memory::rerank`).
+///
+/// The `agreed` rule (t-5806): a rerank agreed when the note it put FIRST
+/// was actually read or cited before the turn ended — a `Read` of the note's
+/// own path, or a `[[slug]]` citation in what the assistant wrote, both
+/// inside the same turn and after the order was handed over; nothing a
+/// later turn reads counts. The label row also carries `rank`, the place in
+/// the judgment's order of the first note the turn touched (absent when it
+/// touched none), and `applied`, so an applied order and a recorded one can
+/// be compared on the same mark. Written by the host at the turn's end
+/// (`rerank_shadow::note_recall_read`), and read by the judge as this seat's
+/// agreement — one comparison per label row.
 pub const RECALL: JevUse = JevUse {
     id: "recall",
     setting: "rerankShadow",
@@ -426,11 +482,14 @@ pub const RECALL: JevUse = JevUse {
         },
     ],
     ledger: "rerank-shadow.jsonl",
-    promotes: false,
-    answer_floor_permille: None,
+    promotes: true,
+    answer_floor_permille: Some(RECALL_ANSWER_FLOOR_PERMILLE),
     press_floor_permille: None,
-    agreement_floor_permille: None,
-    apply_deadline_ms: None,
+    agreement_floor_permille: Some(RECALL_AGREEMENT_FLOOR_PERMILLE),
+    // The routing seat's active wall: the apply road already waits inside
+    // it (`rerank_shadow::RERANK_APPLY_DEADLINE`), so the judge times the
+    // seat against the wall the stage actually holds.
+    apply_deadline_ms: Some(ROUTING_APPLY_DEADLINE_MS),
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -648,9 +707,18 @@ pub const STALL: JevUse = JevUse {
 /// (`crate::worker_placement`, `cmd::worker_room`); nothing calls it, and
 /// nothing should until those rows exist.
 ///
-/// `promotes` stays false for the same reason it always did: the labels would
-/// be what the person did with the worker's window in the seconds after it
-/// appeared — closed it, moved it, never looked — and no stage reads them.
+/// The `agreed` rule (t-5806): the answer agreed when the person left the
+/// worker's pane in the room the seat named for [`PLACEMENT_LABEL_WINDOW_MS`]
+/// after the answer, and disagreed when they moved it to another room inside
+/// that window — closed a tiled pane to the background, dragged its tab out
+/// beside something else, brought a parked worker back to a tab. A move
+/// that keeps the room (a tab dragged to another group) is still written
+/// down, as a move the answer survived. The window's surface reports the
+/// move through one door (`note_worker_room_change`) and the beat writes the
+/// quiet case once the window has passed (`worker_room::label_rooms`); a
+/// pane placed before this window process started is not labeled, because
+/// nothing saw what became of it. The row it labels is named by its
+/// `label` key, the worker id the answered row carries as `placement`.
 pub const PLACEMENT: JevUse = JevUse {
     id: "placement",
     setting: "workerPlacement",

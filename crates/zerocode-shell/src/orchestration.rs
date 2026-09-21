@@ -4251,6 +4251,9 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // A worker whose turn just ended is read, and its effort moved before
     // the pointer below can start its next turn (t-5637).
     step_effort::sweep(host, now_ms);
+    // And the placement seat's quiet labels: a pane the person left where
+    // the seat put it for the whole window is graded on this beat (t-5806).
+    crate::cmd::worker_room::sweep(host, now_ms);
     point_at_waiting_mail(host, now_ms);
     // The readiness sweep, on the beat that already exists: the sounds heard
     // since the last one retire their windows, and whoever stayed silent past

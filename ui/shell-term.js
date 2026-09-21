@@ -5456,6 +5456,8 @@ function dropTermView(term) {
   // 떼어 둔 목록에서도. 끝난 셸은 다시 붙을 곳이 없고, 남겨 두면 카드가 문
   // 없는 행을 그린다(사용자 계약의 마지막 절: "종료되면 자동 에이전트 종료").
   detachedAgents.delete(term);
+  // 자리 판정의 라벨을 기다리던 판이었다면 그것도 — 끝난 판은 옮길 곳이 없다.
+  placedWorkers.delete(term);
   // 그리고 이 셸의 카드 화면도. **여기지 `dropTermScreen`이 아니다** — 저쪽은
   // 미리보기가 빌려 간 화면을 돌려주는 길이기도 하고, 그때 그 에이전트는 여전히
   // 살아 있어서 카드도 서 있다. 거기서 지우면 들여다본 카드는 닫는 순간 두 번째
@@ -7838,6 +7840,8 @@ function closePaneLeaf(tab, going) {
   if (termHoldsAgent(going)) {
     detachedAgents.set(going, tab.worktree);
     dropTermScreen(going);
+    // The person closed a tiled worker's pane: it went to the background.
+    noteWorkerRoomChange(going, "background");
   } else {
     invoke("close_term", { term: going }).catch(() => {});
     dropTermView(going);
