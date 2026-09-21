@@ -1754,6 +1754,9 @@ function reportStrayJamo(road, text) {
  * so it is ahead of the document-level routing by event order, not by
  * luck. */
 keySink.addEventListener("keydown", (event) => {
+  // The key that broke the last composition open is this one: whatever it
+  // does next, the half letter it committed goes out ahead of it.
+  escortHalfLetter();
   if (event.isComposing || event.key === "Process" || event.keyCode === 229) {
     traceIme(`key.ime ${event.key}`);
     // The bare Enter that commits: kept (see `commitEnter`). Modified ones
@@ -1912,6 +1915,66 @@ function clearPreedit() {
   keySink.style.top = "";
 }
 
+/* ---- 반쪽에서 끊긴 커밋은 제 키를 달고서야 나간다 (t-5835) ----
+ *
+ * 조합이 낱자 하나만 남긴 채 끝나면 드레인은 그것을 완성된 음절과 똑같이
+ * pty로 보냈다. 그래서 `ㅎ`·`ㅁ`·`ㅣ`가 판에 찍혔다(window-errors.log,
+ * 2026-09-22: 「bare jamo left through drain」 다섯 번, 줄마다 흔적 링이 붙어
+ * 있다). 링이 보여 주는 이 창의 이벤트 차례가 가르는 자리다:
+ *
+ *   조합 이벤트가 먼저 오고, 그것을 일으킨 keydown(229)이 뒤에 온다 —
+ *   `comp.start`·`comp.update ㅍ` 다음에 `key.ime ㅍ`. 그러니 사람이 누른
+ *   키가 일으킨 커밋은 언제나 그 키를 바로 뒤에 달고 있다: 로그에 남은 성한
+ *   커밋 444건에서 커밋 다음 사건까지 p50 3 ms·p90 15 ms, 404건이 20 ms 안.
+ *   반대로 사람이 아무것도 누르지 않았는데 판이 조합을 가져가 버린 커밋은
+ *   가장 빠른 것도 97 ms 뒤에야 다음 사건을 봤다 (다섯 건 모두 97~581 ms).
+ *
+ * 그 사이가 이 박자다. 낱자만 든 커밋은 여기 붙들렸다가 뒤따라오는 사람의
+ * 행동 — 키다운, 새 조합, input — 앞에 실려 나가고, 박자가 조용히 지나가면
+ * 아예 나가지 않는다. ㅋㅋ·ㅠㅠ 처럼 낱자를 정말로 치는 글은 다음 ㅋ의
+ * 키다운이 곧장 놓아 주므로 예전과 같은 박자로 판에 닿는다.
+ *
+ * 온전한 음절은 이 길을 타지 않는다 — 끝난 글자는 기다릴 것이 없다. */
+const HALF_LETTER_ESCORT_MS = 48;
+let halfLetter = "";
+let halfLetterAt = 0;
+let halfLetterTimer = 0;
+
+function holdHalfLetter(text) {
+  clearTimeout(halfLetterTimer);
+  halfLetter = text;
+  halfLetterAt = performance.now();
+  traceIme(`half.hold ${text}`);
+  // The timer only makes sure the answer is given when nothing else asks —
+  // it is `escortHalfLetter` again, which by then reads a passed beat and
+  // lets nothing out. A timer running late therefore changes no verdict.
+  halfLetterTimer = setTimeout(escortHalfLetter, HALF_LETTER_ESCORT_MS);
+}
+
+/* 붙들린 반쪽의 운명을 정하는 한 자리 — 사람의 다음 행동이 시작되기 전에.
+ *
+ * 박자를 재는 자리가 여기인 것이 요점이다: 문이 언제 열렸는지를 문에서 재야
+ * 판이 멎어 있던 동안에도 답이 같다. 타이머가 제때 못 뛰면 붙들린 반쪽이
+ * 뒤늦은 조합을 타고 나가 버린다 — 전체 하네스를 한꺼번에 돌릴 때 실제로
+ * 그랬다.
+ *
+ * 판으로 가는 낱자는 여전히 허스크가 듣는다: 이 길로 나가는 것은 사람이 친
+ * ㅋㅋ이고, 「drain」 이름으로 찍히는 줄이 다시 보이면 그것은 회귀다. */
+function escortHalfLetter() {
+  if (!halfLetter) return;
+  clearTimeout(halfLetterTimer);
+  halfLetterTimer = 0;
+  const text = halfLetter;
+  halfLetter = "";
+  if (performance.now() - halfLetterAt > HALF_LETTER_ESCORT_MS) {
+    traceIme(`half.dropped ${text}`);
+    return;
+  }
+  traceIme(`half.escort out=${text}`);
+  reportStrayJamo("escort", text);
+  routeText(text);
+}
+
 function drainKeySink() {
   clearPreedit();
   const text = keySink.value;
@@ -1940,6 +2003,13 @@ function drainKeySink() {
   }
   const joined = text;
   traceIme(`drain sink=${text} out=${joined}${commitEnter && joined ? " +enter" : ""}`);
+  // 반쪽 글자만 든 커밋은 사람이 끝낸 글자가 아니다 (t-5835). 그것을 일으킨
+  // 키를 한 박자 기다렸다가, 그 키 앞에 실려 나간다. Enter로 커밋된 것은
+  // 그 키가 이미 여기 와 있으므로 기다릴 것이 없다.
+  if (!commitEnter && HANGUL_JAMO.test(joined)) {
+    holdHalfLetter(joined);
+    return;
+  }
   if (STRAY_JAMO.test(joined)) reportStrayJamo("drain", joined);
   if (joined) routeText(joined);
   // The Enter that committed this text goes AFTER it, as the key it was —
@@ -1952,6 +2022,9 @@ function drainKeySink() {
 }
 
 keySink.addEventListener("compositionstart", () => {
+  // Whatever this composition commits comes after the half letter the last
+  // one left behind, never before it.
+  escortHalfLetter();
   // The input context has arrived — mid-word, possibly mid-syllable. What
   // the rescue holds must NOT go to the pty here: 로 typed across this seam
   // used to land as "ㄹ" then "ㅗ" (reported). The half-word waits beside
@@ -1989,6 +2062,10 @@ keySink.addEventListener("compositionend", () => {
 });
 
 keySink.addEventListener("input", () => {
+  // A composition's own trailing input finds the sink already drained — that
+  // is the engine finishing, not the person starting, and it must not be what
+  // lets a held half letter out. Text standing here is a real insertion.
+  if (keySink.value !== "") escortHalfLetter();
   if (composing) return;
   // A finished composition never looks like this: bare compatibility jamo
   // (ㄴ, ㅏ — U+3130-318F) landing OUTSIDE a composition are keystrokes the
