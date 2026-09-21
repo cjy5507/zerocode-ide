@@ -360,6 +360,35 @@ fn a_summon_question_acts_under_on_and_under_auto_once_its_evidence_stands() {
     assert_eq!(jev_use("summon"), Some(&SUMMON));
 }
 
+/// A worker's between-turn effort move is a judgment about its last turn,
+/// and the door is the agent's row: the seat acts under `on` and under an
+/// `auto` its own evidence raised, records under `shadow`, and its one text
+/// is the repeated call's card line.
+#[test]
+fn a_step_effort_question_acts_under_on_and_under_auto_once_its_evidence_stands() {
+    assert!(STEP_EFFORT.modes.contains(&JevMode::On));
+    const { assert!(STEP_EFFORT.promotes) };
+    assert_eq!(STEP_EFFORT.mode_of(Some(&json!("on"))), JevMode::On);
+    assert_eq!(STEP_EFFORT.mode_of(Some(&json!("auto"))), JevMode::Auto);
+    assert!(STEP_EFFORT.mode_of(Some(&json!("on"))).applies());
+    assert!(
+        !STEP_EFFORT
+            .mode_of(Some(&json!("auto")))
+            .applies_with(false)
+    );
+    assert!(STEP_EFFORT.mode_of(Some(&json!("auto"))).applies_with(true));
+    assert_eq!(jev_use("effort"), Some(&STEP_EFFORT));
+    let sent: Vec<&str> = STEP_EFFORT.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(sent, ["/state/repeated"]);
+    assert_eq!(
+        STEP_EFFORT.apply_deadline_ms,
+        Some(STEP_EFFORT_APPLY_DEADLINE_MS),
+        "the wall the beat waits is the row's"
+    );
+    // A move lands between two turns; it cannot wait the stall sweep's wall.
+    const { assert!(STEP_EFFORT_APPLY_DEADLINE_MS < STALL_APPLY_DEADLINE_MS) };
+}
+
 /// The one text a summons' question carries is the head of the brief. The
 /// agent the coordinator typed is not in the table's `sends` because it is
 /// not in the state at all — a question that shows the answer somebody

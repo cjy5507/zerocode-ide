@@ -282,6 +282,19 @@ pub(super) fn acting_cause(
     held.answered.get(dispatch).map(|(cause, _)| *cause)
 }
 
+/// The cause the seat last named for `dispatch`'s silence, whatever the seat's
+/// standing — a fact the step-effort seat reads (`super::step_effort`) so it
+/// holds a worker's effort where it is under a silence more reasoning does
+/// not change. `None` for an attempt nobody asked about, or one heard from
+/// since.
+pub(super) fn answered_cause(
+    book: &Arc<Mutex<StallBook>>,
+    dispatch: &str,
+) -> Option<stall_cause::Cause> {
+    let held = book.lock().unwrap_or_else(|held| held.into_inner());
+    held.answered.get(dispatch).map(|(cause, _)| *cause)
+}
+
 /// What the seat read off the panes still quiet this beat, for the
 /// coordinator — when the seat ACTS, and for every cause the sweep does not
 /// act on itself (a transient error is typed a continuation instead). One

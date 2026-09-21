@@ -9826,7 +9826,7 @@ fn a_prompt_waits_for_the_signal_its_agent_gives() {
     // marks are exhausted by the four signals — a fifth mark added to
     // core without a signal here would silently become `Quiet`. A glyph
     // is the row's, carried across as it is.
-    for spec in zerocode_core::AGENT_SPECS {
+    for spec in &zerocode_core::AGENT_SPECS {
         let signal = ready_signal_for(Some(spec.id));
         let expected = match spec.ready {
             ReadyMark::Quiet => ReadySignal::Quiet,

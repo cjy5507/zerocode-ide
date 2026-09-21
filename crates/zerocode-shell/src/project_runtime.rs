@@ -2257,7 +2257,7 @@ pub(super) fn set_agent_permission_mode_in(
             AGENT_LAUNCH_DOCUMENT_FILE,
             AgentLaunchOverrides::new,
             |held: &mut AgentLaunchOverrides| {
-                for spec in zerocode_core::AGENT_SPECS {
+                for spec in &zerocode_core::AGENT_SPECS {
                     if !zerocode_core::has_permission_switch(spec.id) {
                         continue;
                     }

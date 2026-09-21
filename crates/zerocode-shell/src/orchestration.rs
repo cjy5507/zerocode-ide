@@ -27,6 +27,7 @@
 
 pub(crate) mod coordinator_handover;
 mod stall_cause;
+mod step_effort;
 mod summon_choice;
 
 use std::path::{Path, PathBuf};
@@ -225,6 +226,9 @@ struct RuntimeSeat {
     /// what followed them (t-4538) — shared with the question asked off the
     /// beat, which writes its answer down when it arrives.
     stalls: Arc<Mutex<stall_cause::StallBook>>,
+    /// The between-turn effort moves this window has judged, typed and not
+    /// yet graded (t-5637) — shared with the question asked off the beat.
+    moves: Arc<Mutex<step_effort::MoveBook>>,
 }
 
 type LiveRuntime = Arc<RuntimeSeat>;
@@ -1479,6 +1483,7 @@ fn install_runtime(actor: RuntimeActor, overrides: LiveOverrides, usage: UsageSo
         pane_reconciler: Mutex::new(PaneReconciler::default()),
         usage,
         stalls: Arc::default(),
+        moves: Arc::default(),
     }));
     // Boot seeds the first answer before any webview can restore worker seats.
     refresh_board_ledger();
@@ -4243,6 +4248,9 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // And a wall with a standing order behind it is walked — one handover
     // per beat, outside every lock, through the one door (§2.3).
     walk_handovers(host, overrides, now_ms);
+    // A worker whose turn just ended is read, and its effort moved before
+    // the pointer below can start its next turn (t-5637).
+    step_effort::sweep(host, now_ms);
     point_at_waiting_mail(host, now_ms);
     // The readiness sweep, on the beat that already exists: the sounds heard
     // since the last one retire their windows, and whoever stayed silent past

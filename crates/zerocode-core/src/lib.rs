@@ -85,6 +85,7 @@ pub mod skill_install;
 pub mod source_control_ai;
 pub mod stall_cause;
 pub mod stats_events;
+pub mod step_effort;
 pub mod summon_choice;
 pub mod supply_chain;
 pub mod task;

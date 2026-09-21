@@ -4200,6 +4200,26 @@
                 </p>
               </details>
             </div>
+
+            <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-effort-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.effort">워커의 턴 사이 노력</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.effortSummary">
+                    막힌 턴 뒤엔 한 단 올리고, 지나간 뒤엔 되돌릴지 묻습니다.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-effort-select" data-jev-seat="effort"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.effortHint">
+                  워커의 턴이 끝날 때마다 그 턴의 전사를 읽습니다 — 같은 도구 호출을 세 번 연달아 했거나 도구 결과가 둘 이상 오류면 막힌 턴, 읽기만 했으면 routine 턴. 그때만 「올릴지·내릴지·둘지」를 묻고, 보내는 것은 반복된 호출 한 줄(240자)과 숫자뿐입니다. 켜져 있으면 다음 턴 전에 그 에이전트의 문으로 한 단만 옮깁니다 — Claude Code는 /effort 피커를 이 세션만으로, Codex는 문이 없어 행만 적습니다. 결과는 다음 턴이 나아갔는지 옆에 한 줄로 적습니다.
+                </p>
+              </details>
+            </div>
           </div>
         </div>
         </section>

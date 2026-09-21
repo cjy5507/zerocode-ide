@@ -80,6 +80,176 @@ pub enum PointerRoute {
     CodexAppServer,
 }
 
+/// The keys that drive one CLI's own effort picker, read off its screen.
+///
+/// Measured on Claude Code 2.1.278 (2026-09-21, `docs/captures/
+/// claude-code-2.1.278-effort-slash.txt`): `/effort` with no argument opens a
+/// one-line picker — `←/→ to adjust · Enter to confirm · s for this session
+/// only · Esc to cancel` — standing on the session's current level. `/effort
+/// <level>` with a word applies at once too, but "saved as your default for
+/// new sessions": it rewrites `modelSettings` in the account's settings file,
+/// which every later launch of that account without `--effort` then starts
+/// on. The picker's `s` is the one road that leaves the file alone, so the
+/// beat takes it and moves one rung a time — one arrow, then `s` — which is
+/// also why no ladder arithmetic is needed to drive it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PickerKeys {
+    /// The slash command that opens the picker, typed as a line at the
+    /// resting composer through the guarded door.
+    pub open: &'static str,
+    /// One rung down.
+    pub lower: &'static str,
+    /// One rung up.
+    pub raise: &'static str,
+    /// Confirms for this session only.
+    pub session_only: &'static str,
+    /// Words the picker prints while it is up. The keys are sent only after
+    /// the screen shows them; a screen without them gets no key.
+    pub legend: &'static str,
+}
+
+/// How a RUNNING agent's model or effort moves between two turns, read off
+/// its row — the door the beat's step-effort seat asks before it types
+/// anything at a worker (t-5637).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MoveRoad {
+    /// One line at the resting composer: the command and the new word
+    /// (`/model <id>`). Whether the CLI also saves the word as its default
+    /// is the CLI's own habit — Claude Code does for `/model`.
+    Line(&'static str),
+    /// The command opens the CLI's own picker, and these measured keys drive
+    /// it one rung a time without touching the CLI's saved defaults.
+    Picker(PickerKeys),
+    /// The command opens a picker whose keys this window has not measured:
+    /// a composer chip types it and shows the person the screen; the beat
+    /// moves nothing through it.
+    Shown(&'static str),
+    /// Nothing typed at a running session — Codex 0.155.1 sends `/model low`
+    /// to the model as a message (its rollout keeps it as a user turn) and
+    /// its picker persists to `config.toml`, so the only dial is the next
+    /// summons' own (`orchestration::launch_tuning`'s row).
+    Relaunch,
+}
+
+impl MoveRoad {
+    /// The slash command a composer types to reach this road, if typing
+    /// reaches it at all.
+    #[must_use]
+    pub const fn command(self) -> Option<&'static str> {
+        match self {
+            Self::Line(command) | Self::Shown(command) => Some(command),
+            Self::Picker(keys) => Some(keys.open),
+            Self::Relaunch => None,
+        }
+    }
+
+    /// The one line that carries `word` down this road, or `None` for a road
+    /// no line carries: a picker takes keys, a shown picker takes a person,
+    /// a relaunch takes a summons.
+    #[must_use]
+    pub fn line(self, word: &str) -> Option<String> {
+        match self {
+            Self::Line(command) => Some(format!("{command} {word}")),
+            Self::Picker(_) | Self::Shown(_) | Self::Relaunch => None,
+        }
+    }
+
+    /// The picker's keys, when the road is one.
+    #[must_use]
+    pub const fn picker(self) -> Option<PickerKeys> {
+        match self {
+            Self::Picker(keys) => Some(keys),
+            Self::Line(_) | Self::Shown(_) | Self::Relaunch => None,
+        }
+    }
+
+    /// The word a ledger row keeps for the door this road is.
+    #[must_use]
+    pub const fn door(self) -> &'static str {
+        match self {
+            Self::Line(_) => "line",
+            Self::Picker(_) => "picker",
+            Self::Shown(_) => "shown",
+            Self::Relaunch => "relaunch",
+        }
+    }
+
+    /// Whether the beat can move a running session down this road on its
+    /// own — a line it types or a picker it drives.
+    #[must_use]
+    pub const fn moves_between_turns(self) -> bool {
+        matches!(self, Self::Line(_) | Self::Picker(_))
+    }
+}
+
+/// The two between-turn moves of one agent and the ladder its effort words
+/// stand on — three columns of the row, read together.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct TurnMoves {
+    /// How the effort moves between turns; `None` where nobody measured one.
+    pub effort: Option<MoveRoad>,
+    /// How the model moves between turns; `None` where nobody measured one.
+    pub model: Option<MoveRoad>,
+    /// The effort words the CLI's own picker offers, lowest first — what a
+    /// row's `to` word is read off when a move goes up or down one rung. A
+    /// CLI whose picker was not read has an empty ladder and gets no `to`.
+    pub ladder: &'static [&'static str],
+}
+
+impl TurnMoves {
+    /// No measured road either way.
+    pub const NONE: Self = Self {
+        effort: None,
+        model: None,
+        ladder: &[],
+    };
+
+    /// The word one rung above or below `current` on this ladder — `None`
+    /// off the ladder's end, and `None` for a word the ladder does not know,
+    /// which is a word this row was not measured with.
+    #[must_use]
+    pub fn rung_from(&self, current: &str, up: bool) -> Option<&'static str> {
+        let at = self.ladder.iter().position(|word| *word == current)?;
+        let next = if up {
+            at.checked_add(1)?
+        } else {
+            at.checked_sub(1)?
+        };
+        self.ladder.get(next).copied()
+    }
+
+    /// Whether `word` stands above `floor` on this ladder; two words the
+    /// ladder does not both know stand nowhere in particular.
+    #[must_use]
+    pub fn stands_above(&self, word: &str, floor: &str) -> bool {
+        let rung = |name: &str| self.ladder.iter().position(|held| *held == name);
+        matches!((rung(word), rung(floor)), (Some(high), Some(low)) if high > low)
+    }
+}
+
+/// Claude Code's effort picker, as its own screen spells it (2.1.278).
+pub const CLAUDE_EFFORT_PICKER: PickerKeys = PickerKeys {
+    open: "/effort",
+    lower: "\x1b[D",
+    raise: "\x1b[C",
+    session_only: "s",
+    legend: "s for this session only",
+};
+
+/// The levels Claude Code's picker offers, lowest first, as its own line
+/// draws them (`low medium high xhigh max ultracode`); `ultracode` is left
+/// off because it is xhigh plus workflow orchestration, not a rung above
+/// max — and `auto`, which `/effort` also takes, is a return to the model's
+/// default rather than a level.
+pub const CLAUDE_EFFORT_LADDER: &[&str] = &["low", "medium", "high", "xhigh", "max"];
+
+/// The reasoning efforts Codex 0.155.1's picker offers, lowest first, read
+/// off its binary's own list (`minimal low medium high xhigh max ultra`);
+/// which of them a model supports is the model's own row in its catalog.
+pub const CODEX_EFFORT_LADDER: &[&str] =
+    &["minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+
 /// Which witness says whether a resumed conversation was cut mid-turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -238,6 +408,11 @@ pub struct Harness {
     /// The local witnesses a readiness probe may ask about this agent's
     /// login; empty for an agent whose login this window cannot see.
     pub auth_probes: &'static [AuthProbeKind],
+    /// How the agent's effort and model move between two turns of a running
+    /// session, and the effort ladder its words stand on (t-5637) — the
+    /// beat's step-effort seat and the composer's model chip both read
+    /// these; neither spells a command of its own.
+    pub moves: TurnMoves,
 }
 
 impl Harness {
@@ -252,6 +427,7 @@ impl Harness {
         wake_mark: WakeMark::Hook,
         vault_resume_carries_launch_args: false,
         auth_probes: &[],
+        moves: TurnMoves::NONE,
     };
 }
 
@@ -375,6 +551,8 @@ pub struct AgentCapabilities {
     pub resume: Resume,
     pub spawn: SpawnRoad,
     pub pointer_route: Option<PointerRoute>,
+    /// The between-turn moves and the effort ladder, off the row.
+    pub moves: TurnMoves,
 }
 
 impl AgentCapabilities {
@@ -462,6 +640,7 @@ impl AgentSpec {
             },
             spawn: self.harness.spawn,
             pointer_route: self.harness.pointer_route,
+            moves: self.harness.moves,
         }
     }
 }
