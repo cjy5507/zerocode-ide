@@ -916,8 +916,56 @@ pub const SKILLS: JevUse = JevUse {
     apply_deadline_ms: Some(SKILL_SEARCH_APPLY_DEADLINE_MS),
 };
 
+/// The wall zo's step effort governor holds a step judgment to, in
+/// milliseconds — the latency line the judge reads a rising seat against.
+///
+/// The judgment is detached: it never holds a request, and its answer is
+/// read at the NEXT step of the loop. What the wall means here is "in time
+/// for the next request": a step's own round trip — the model's reply plus
+/// the tool batch after it — runs longer than this on every measured turn,
+/// so an answer inside it is on the desk before the request it could move
+/// leaves. Written as its own number and not read from
+/// [`ROUTING_APPLY_DEADLINE_MS`]: routing's wall is what a turn WAITS, this
+/// one is what a step can still USE, and two lines that coincide today are
+/// still two policies.
+pub const ZO_STEP_EFFORT_APPLY_DEADLINE_MS: u64 = 1_500;
+
+/// zo's step effort governor: the band of a step inside the turn — read as
+/// the routing rubric's complexity of the turn's words with the step's
+/// signals after them — so a request may spend a rung less on a routine
+/// step and a rung more on a stuck one
+/// (docs/design/zo-step-effort-governor-20260921.md, t-5633).
+///
+/// The seat is asked only where the governor's own table is unsure — a
+/// read-only batch that is also slipping — or once every few steps; its
+/// answer moves the NEXT request's effort, never the current one. What is
+/// sent is the same head of the turn the routing seat sends, under the same
+/// cap, with one line of counts (batch kind, repeats, errors, a red check)
+/// that name no file and quote no output.
+///
+/// `auto` rises on the seat's own evidence: the `agreed` mark its writer
+/// leaves one step after the judgment was consulted — whether that step
+/// made progress (no repeated call, no error, no red check) — is what the
+/// judge counts, held to the routing seat's own lines because the answer
+/// moves a request field the same way a route does.
+pub const ZO_STEP_EFFORT: JevUse = JevUse {
+    id: "step_effort",
+    setting: "zoStepEffort",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    sends: &[Sent {
+        at: "/state",
+        cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
+    }],
+    ledger: "step-effort-zo.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(950),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(ROUTE_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(ZO_STEP_EFFORT_APPLY_DEADLINE_MS),
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 10] = [
+pub static JEV_USES: [JevUse; 11] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -928,6 +976,7 @@ pub static JEV_USES: [JevUse; 10] = [
     PLACEMENT,
     SUMMON,
     STEP_EFFORT,
+    ZO_STEP_EFFORT,
 ];
 
 impl JevUse {

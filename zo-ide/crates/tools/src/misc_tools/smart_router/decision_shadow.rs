@@ -406,7 +406,7 @@ pub(super) fn unix_millis() -> u64 {
 }
 
 /// The ledger's axes for a verdict: each token and its probability by name.
-fn judged_axes(verdict: &DecisionVerdict) -> BTreeMap<String, JudgedAxis> {
+pub(super) fn judged_axes(verdict: &DecisionVerdict) -> BTreeMap<String, JudgedAxis> {
     verdict
         .readings()
         .iter()
@@ -1000,7 +1000,7 @@ fn labels_standing(
     })
 }
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     i64::try_from(
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

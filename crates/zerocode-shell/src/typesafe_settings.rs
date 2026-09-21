@@ -679,6 +679,12 @@ mod tests {
                 )),
             ),
             (
+                "zo step effort seat",
+                product(include_str!(
+                    "../../../zo-ide/crates/tools/src/misc_tools/smart_router/step_effort.rs"
+                )),
+            ),
+            (
                 "zo settings",
                 between(
                     include_str!(

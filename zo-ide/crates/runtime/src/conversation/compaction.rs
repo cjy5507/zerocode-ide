@@ -1972,6 +1972,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 // request over a large conversation would re-bill the entire
                 // prefix as cache-write (measured: ~14-25k tokens per toggle).
                 effort_override: None,
+                effort_step: None,
                 model_override: None,
             };
         }
@@ -1989,6 +1990,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
             // Compaction summary never escalates effort (thinking stays
             // untouched too — see the cache-invalidation note above).
             effort_override: None,
+            effort_step: None,
             model_override,
         }
     }

@@ -194,8 +194,12 @@ pub fn build_message_request(
         .as_ref()
         .and_then(|t| t.budget_tokens)
         .filter(|&budget| budget > 0);
+    // The step governor's effort for THIS request, when it decided one, else
+    // the turn's — one reading for both clients (`request_effort`).
+    let requested = request_effort(request, named_effort, effort_band_ceiling, configured_budget);
+    let (named_effort, effort_band_ceiling) = (requested.named, requested.band_ceiling);
     let effective_budget =
-        api::effort_budget_with_floor(configured_budget, request.effort_override);
+        api::effort_budget_with_floor(requested.budget, request.effort_override);
     let thinking = effective_budget.map_or(thinking, |b| Some(api::ThinkingConfig::enabled(b)));
     // Preserve a named preset independently of its legacy numeric budget while
     // still allowing a deep-gate floor to raise lower named tiers. The merge is
@@ -223,6 +227,42 @@ pub fn build_message_request(
         output_config: None,
         effort,
         effort_band_ceiling,
+    }
+}
+
+/// The effort a request goes out with, before the deep-gate floor: the turn's
+/// own, or — when the step effort governor decided one for this request
+/// (`ApiRequest::effort_step`) — the governor's level and band ceiling, with
+/// the legacy thinking budget re-sized from the ladder preset that sends
+/// that level (`Effort::for_level`). Re-sizing is what lets a step go DOWN:
+/// the budget merge below is a maximum, and the turn's own budget would
+/// otherwise raise a lowered level straight back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RequestEffort {
+    pub(crate) named: Option<api::EffortLevel>,
+    pub(crate) band_ceiling: Option<api::EffortLevel>,
+    pub(crate) budget: Option<u32>,
+}
+
+pub(crate) fn request_effort(
+    request: &ApiRequest,
+    named_effort: Option<api::EffortLevel>,
+    effort_band_ceiling: Option<api::EffortLevel>,
+    configured_budget: Option<u32>,
+) -> RequestEffort {
+    match request.effort_step {
+        Some(step) => RequestEffort {
+            named: Some(step.effort),
+            band_ceiling: step.band_ceiling,
+            budget: configured_budget
+                .and_then(|_| crate::effort::Effort::for_level(step.effort))
+                .map(crate::effort::Effort::budget),
+        },
+        None => RequestEffort {
+            named: named_effort,
+            band_ceiling: effort_band_ceiling,
+            budget: configured_budget,
+        },
     }
 }
 
@@ -616,6 +656,7 @@ mod tests {
             messages: Arc::new(messages),
             tool_choice: None,
             effort_override: None,
+            effort_step: None,
             model_override: None,
         };
         build_message_request(&request, model, true, None, registry, None, None, None)
@@ -640,6 +681,49 @@ mod tests {
         assert_eq!(inside.len(), outside.len() + 1);
     }
 
+    /// The governor's per-request effort replaces the turn's, and re-sizes
+    /// the legacy budget from the ladder preset that sends the new level —
+    /// which is what lets a step go DOWN past the budget merge.
+    #[test]
+    fn a_step_effort_replaces_the_turns_and_resizes_the_budget_from_the_ladder() {
+        use api::EffortLevel as L;
+        let mut request = ApiRequest {
+            system_prompt: Arc::from(Vec::<String>::new()),
+            wire_reminders: Arc::from(Vec::<String>::new()),
+            messages: Arc::new(Vec::new()),
+            tool_choice: None,
+            effort_override: None,
+            effort_step: None,
+            model_override: None,
+        };
+        // No step: byte-identical to the turn's own reading.
+        let turn = request_effort(&request, Some(L::Xhigh), Some(L::Max), Some(28_000));
+        assert_eq!(
+            turn,
+            RequestEffort { named: Some(L::Xhigh), band_ceiling: Some(L::Max), budget: Some(28_000) }
+        );
+        // A step a rung down on the Smart band: both ends move, the budget is
+        // High's own, and the merge below cannot raise it back.
+        request.effort_step = Some(runtime::EffortStep { effort: L::High, band_ceiling: Some(L::Xhigh) });
+        let down = request_effort(&request, Some(L::Xhigh), Some(L::Max), Some(28_000));
+        assert_eq!(
+            down,
+            RequestEffort {
+                named: Some(L::High),
+                band_ceiling: Some(L::Xhigh),
+                budget: Some(crate::effort::Effort::High.budget())
+            }
+        );
+        assert_eq!(effort_with_budget_floor(down.named, down.budget, down.band_ceiling), Some(L::High));
+        // A static pin lowered a rung: no band, the pin's budget replaced.
+        request.effort_step = Some(runtime::EffortStep { effort: L::Medium, band_ceiling: None });
+        let pin = request_effort(&request, Some(L::High), None, Some(10_000));
+        assert_eq!(pin.budget, Some(crate::effort::Effort::Medium.budget()));
+        assert_eq!(effort_with_budget_floor(pin.named, pin.budget, pin.band_ceiling), Some(L::Medium));
+        // Thinking off stays off whatever the step says.
+        assert_eq!(request_effort(&request, None, None, None).budget, None);
+    }
+
     fn request_with_tool_history(name: &str) -> ApiRequest {
         ApiRequest {
             system_prompt: Arc::from(Vec::<String>::new()),
@@ -661,6 +745,7 @@ mod tests {
             ]),
             tool_choice: None,
             effort_override: None,
+            effort_step: None,
             model_override: None,
         }
     }
@@ -942,6 +1027,7 @@ mod tests {
             messages: Arc::new(Vec::new()),
             tool_choice: None,
             effort_override: None,
+            effort_step: None,
             model_override: None,
         };
         let wire = build_message_request(
@@ -978,6 +1064,7 @@ mod tests {
             messages: Arc::new(Vec::new()),
             tool_choice: None,
             effort_override: None,
+            effort_step: None,
             model_override: None,
         };
         let wire = build_message_request(
@@ -1006,6 +1093,7 @@ mod tests {
             messages: Arc::new(Vec::new()),
             tool_choice: None,
             effort_override: None,
+            effort_step: None,
             model_override: None,
         };
         let wire = build_message_request(

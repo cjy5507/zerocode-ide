@@ -208,6 +208,21 @@ impl Effort {
         })
     }
 
+    /// The static preset that sends `level` — the road back from a wire level
+    /// to the ladder's own thinking budget ([`Self::budget`]). The step effort
+    /// governor lowers or raises a request's level by a rung, and a legacy
+    /// budget model must then spend that rung's budget rather than the turn's:
+    /// with `High` on the wire, `High`'s 10,000, not `Smart`'s 28,000.
+    /// `None` only for a level no static preset sends, which the ladder has
+    /// none of today.
+    #[must_use]
+    pub fn for_level(level: api::EffortLevel) -> Option<Effort> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|preset| preset.band_ceiling().is_none() && preset.level() == Some(level))
+    }
+
     /// Resolve the level whose budget matches `budget` exactly. A `None`
     /// or zero budget maps to [`Effort::Off`]; any other unmatched value
     /// returns `None` (the caller treats it as a custom budget).
