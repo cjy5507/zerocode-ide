@@ -76,3 +76,14 @@ main. Coordinators sharing the checkout merge and gate in a detached coordinator
 worktree, without stashing or committing another pane's changes.
 Exception: update the main checkout's release lane driver from the landed commit
 when the lane needs it; replace the file atomically (git checkout or temp + rename).
+
+# Windows is a build target, not a hope
+
+`cfg(windows)` / `cfg(not(unix))` code compiles nowhere on this Mac unless
+someone cross-compiles it. Both `just verify` recipes (root and `zo-ide/`) now
+end with `win-check-if-available` (cargo-xwin + brew llvm; a loud SKIPPED
+where they are missing). When a change touches a platform gate, a Tauri
+window API, or a process/pty/fs call, run `just win-check` in the workspace
+you touched before pushing — 2026-09-10 found seven product compile errors
+(macOS-only Tauri APIs, a stub signature, a Rust-2024 extern block) and three
+unix-only tests that the billing-blocked Windows CI leg had hidden for days.
