@@ -102,7 +102,12 @@ struct StallMarkerRule {
 /// - claude: "You've hit your session limit · resets 4:10am (Asia/Seoul)"
 ///   on screen and as the `isApiErrorMessage` assistant record with
 ///   `error: "rate_limit"`; "You've hit your limit" is the older spelling
-///   the design quotes and is kept beside it.
+///   the design quotes and is kept beside it. A model's own cap
+///   (2026-09-22, w-5922) is the same `rate_limit` record with a sentence
+///   that names the model — "You've reached your Fable limit. Run
+///   /usage-credits to continue or switch models with /model." — so its
+///   marker is the family, `You've reached your … limit`, never the name:
+///   the session gauge read 23% while that pane stood at the wall.
 /// - zo: its own hint line, "This account's usage limit … resets in 2h 17m"
 ///   (`usage_limit_hint`, zo-ide 2026-09-07), and the raw frame code it
 ///   prints when a stream dies on the wall.
@@ -144,10 +149,11 @@ const STALL_MARKERS: &[StallMarkerRule] = &[
             &["You've hit your limit"],
             &["You've hit your session limit"],
             &["You've hit your weekly limit"],
+            &["You've reached your", "limit"],
         ],
         transcript: TranscriptRule::ClaudeJsonl {
             errors: &["rate_limit"],
-            says: &[&["hit your", "limit"]],
+            says: &[&["hit your", "limit"], &["reached your", "limit"]],
         },
     },
     StallMarkerRule {
@@ -580,6 +586,10 @@ pub(crate) mod tests {
     pub(crate) const CLAUDE_PLAIN_RECORD: &str = r#"{"parentUuid":"u","isSidechain":false,"type":"assistant","uuid":"v","timestamp":"2026-08-07T10:25:04.042Z","message":{"id":"n","model":"claude-fable-5-1","role":"assistant","stop_reason":"end_turn","type":"message","content":[{"type":"text","text":"Continuing with the migration."}]}}"#;
     const CLAUDE_USER_QUOTING_THE_WALL: &str = r#"{"parentUuid":"v","isSidechain":false,"type":"user","uuid":"w","message":{"role":"user","content":[{"type":"tool_result","content":"log says: You've hit your session limit · resets 7:30pm"}]}}"#;
     const CLAUDE_SCREEN_LINE: &str = "You've hit your session limit · resets 4:10am (Asia/Seoul)";
+    /// A model's own cap as the real file carried it (2026-09-22, w-5922,
+    /// ids scrubbed): the same `rate_limit` record, a sentence naming the model.
+    const CLAUDE_MODEL_CAP_RECORD: &str = r#"{"parentUuid":"p","isSidechain":false,"type":"assistant","uuid":"u","timestamp":"2026-09-21T21:08:12.346Z","message":{"id":"m","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{"type":"text","text":"You've reached your Fable limit. Run /usage-credits to continue or switch models with /model."}]},"requestId":"req_y","error":"rate_limit","isApiErrorMessage":true}"#;
+    const CLAUDE_MODEL_CAP_SCREEN_LINE: &str = "⎿  You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.";
 
     /// zo's hint (`usage_limit_hint`, zo-ide 2026-09-07) as the pane shows it.
     const ZO_STATUS_LINE: &str = "This account's usage limit … resets in 2h 17m. With a quota fallback configured (/smart) the turn continues on another model; otherwise wait or /model.";
@@ -629,6 +639,31 @@ pub(crate) mod tests {
         assert!(
             marker_in("claude", Some("You've hit your limit · resets 5pm"), None).is_some(),
             "the design's older spelling was dropped"
+        );
+        // A model's own cap: the record and the screen line both name the
+        // model, and the marker reads the family around it.
+        let model_cap = marker_in(
+            "claude",
+            None,
+            Some(&lines(&[CLAUDE_PLAIN_RECORD, CLAUDE_MODEL_CAP_RECORD])),
+        )
+        .expect("claude's model-cap record");
+        assert_eq!(model_cap.source, "transcript");
+        assert!(
+            model_cap.line.as_str().starts_with("You've reached your"),
+            "{}",
+            model_cap.line.as_str()
+        );
+        let model_cap_screen = marker_in(
+            "claude",
+            Some(&format!("some output\n{CLAUDE_MODEL_CAP_SCREEN_LINE}\n> ")),
+            None,
+        )
+        .expect("claude's model-cap screen line");
+        assert_eq!(model_cap_screen.source, "screen");
+        assert!(
+            marker_in("claude", Some("You've reached your goal, nice"), None).is_none(),
+            "a sentence without `limit` is not a wall"
         );
 
         let zo = marker_in("zo", Some(&format!("…\n{ZO_STATUS_LINE}")), None).expect("zo's hint");
