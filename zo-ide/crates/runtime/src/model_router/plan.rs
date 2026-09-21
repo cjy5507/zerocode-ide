@@ -76,11 +76,16 @@ pub enum SwitchTrigger {
     VerifyLeg,
     /// The Architect contract's implementer ran the EXEC leg.
     ExecLeg,
+    /// The step effort governor moved the turn a rung on the same provider
+    /// — heavier after two strong stuck steps at the effort cap, lighter
+    /// after a run of routine steps on the floor
+    /// (`conversation/step_effort.rs`, t-5633).
+    Step,
 }
 
 impl SwitchTrigger {
     /// Every trigger, the one place the set is enumerated.
-    pub const ALL: [SwitchTrigger; 7] = [
+    pub const ALL: [SwitchTrigger; 8] = [
         Self::Person,
         Self::Quota,
         Self::Refusal,
@@ -88,6 +93,7 @@ impl SwitchTrigger {
         Self::PlanLeg,
         Self::VerifyLeg,
         Self::ExecLeg,
+        Self::Step,
     ];
 
     /// Canonical label, as the shadow ledger's `trigger` column spells it.
@@ -101,6 +107,7 @@ impl SwitchTrigger {
             Self::PlanLeg => "plan-leg",
             Self::VerifyLeg => "verify-leg",
             Self::ExecLeg => "exec-leg",
+            Self::Step => "step",
         }
     }
 

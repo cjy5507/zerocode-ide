@@ -286,6 +286,41 @@ fn the_builders_cut_at_the_tables_caps() {
     assert!(caps(&STALL).contains(&Cap::Bytes(STALL_TRANSCRIPT_BYTE_CAP)));
     assert!(caps(&PLACEMENT).contains(&Cap::Chars(PLACEMENT_BRIEF_CHAR_CAP)));
     assert!(caps(&SUMMON).contains(&Cap::Chars(SUMMON_BRIEF_CHAR_CAP)));
+    assert!(caps(&STEP_EFFORT).contains(&Cap::Chars(ROUTING_TASK_CHAR_CAP)));
+}
+
+/// The step governor's seat sends the same head of a turn the routing seat
+/// sends, rises on its own progress marks, and offers every word — a seat
+/// whose answer moves a request field is one a person can switch on and one
+/// evidence can raise (docs/design/zo-step-effort-governor-20260921.md §5).
+#[test]
+fn the_step_effort_seat_reads_the_turn_like_routing_and_rises_on_its_own_marks() {
+    assert_eq!(jev_use("step_effort"), Some(&STEP_EFFORT));
+    assert_eq!(STEP_EFFORT.sends, ROUTING.sends);
+    const { assert!(STEP_EFFORT.promotes) };
+    assert_eq!(
+        STEP_EFFORT.answer_floor_permille,
+        ROUTING.answer_floor_permille
+    );
+    assert_eq!(
+        STEP_EFFORT.agreement_floor_permille,
+        ROUTING.agreement_floor_permille
+    );
+    assert_eq!(
+        STEP_EFFORT.apply_deadline_ms,
+        Some(STEP_EFFORT_APPLY_DEADLINE_MS)
+    );
+    assert!(STEP_EFFORT.mode_of(Some(&json!("on"))).applies());
+    assert!(
+        !STEP_EFFORT
+            .mode_of(Some(&json!("auto")))
+            .applies_with(false)
+    );
+    assert!(STEP_EFFORT.mode_of(Some(&json!("auto"))).applies_with(true));
+    assert!(
+        !STEP_EFFORT.permits_press(1.0),
+        "a step judgment presses nothing"
+    );
 }
 
 /// A stall's answer is a row beside what the coordinator did, never an act:

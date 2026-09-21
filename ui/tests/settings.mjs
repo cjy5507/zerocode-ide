@@ -60,6 +60,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "stall", setting: "stallCause", modes: "off shadow on auto" }),
   Object.freeze({ id: "placement", setting: "workerPlacement", modes: "off shadow on auto" }),
   Object.freeze({ id: "summon", setting: "summonChoice", modes: "off shadow on auto" }),
+  Object.freeze({ id: "step_effort", setting: "stepEffort", modes: "off shadow on auto" }),
 ]);
 const jevSeat = (id) => JEV_SEATS.find((seat) => seat.id === id) ?? null;
 /* The routing classifier's four words (`zerocode_core::jev::ClassifierMode`)

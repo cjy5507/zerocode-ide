@@ -4200,6 +4200,26 @@
                 </p>
               </details>
             </div>
+
+            <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-step_effort-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.step_effort">걸음마다 생각의 깊이</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.step_effortSummary">
+                    zo가 한 턴 안의 걸음마다 얼마나 깊이 생각할지 묻습니다 — 막히면 더, routine이면 덜.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-step_effort-select" data-jev-seat="step_effort"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.step_effortHint">
+                  zo의 한 턴 안에서 요청마다 추론 노력을 조절합니다. 표가 직전 도구 배치를 읽어(읽기만 했는지, 같은 호출을 반복했는지, 시험이 빨간지) 다음 요청의 노력을 한두 단 올리거나 내리고, 표가 확신하지 못하는 걸음과 다섯 걸음마다 한 번만 Jev에 묻습니다. 보내는 것은 라우팅 판정과 같은 턴의 앞 2,000자와 셈 한 줄뿐입니다. 낱말이 없으면 표만 돌고 기록하며 아무것도 보내지 않습니다.
+                </p>
+              </details>
+            </div>
           </div>
         </div>
         </section>

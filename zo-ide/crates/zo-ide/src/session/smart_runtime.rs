@@ -214,6 +214,17 @@ pub(crate) fn install_smart_turn(
             cwd,
         ))
     });
+    // The step effort governor for this turn: the person's `smart.stepEffort`
+    // word, the turn's effort as its base, the connected inventory's rungs
+    // beside the main model. Resolved before the runtime is borrowed below,
+    // like the routes.
+    let step_effort = step_effort_config(
+        cwd,
+        &inventory,
+        runtime.api_client().model(),
+        assessment.complexity,
+        turn_effort,
+    );
     let routing = SmartTurnRouting::for_turn(routing, input, assessment);
     let wiring = SmartTurnWiring::resolve(routing, |model, role| {
         let (named_effort, effort_band_ceiling) = match role {
@@ -237,6 +248,9 @@ pub(crate) fn install_smart_turn(
     if let Some(inner) = runtime.try_runtime_mut() {
         wiring.install(inner);
         inner.set_reserved_edit_gate(reserved_edit_gate);
+        // Set-or-cleared with the rest of the turn's routes: a runtime a
+        // previous turn governed is not governed by a word since erased.
+        inner.set_step_effort(step_effort);
         // Every switch this turn makes — the quota and refusal fallbacks,
         // the overload demotion, a deep-gate leg's client — files the same
         // scored row the turn start files, tagged with its door. Set-or-
@@ -254,6 +268,111 @@ pub(crate) fn install_smart_turn(
         orchestration,
         plan_shadow,
     }
+}
+
+/// The step effort governor for this turn
+/// (docs/design/zo-step-effort-governor-20260921.md §5), or none: when the
+/// person wrote `off`, when the merged settings cannot be read, or when the
+/// turn carries no effort to govern (`--effort off`).
+///
+/// No word at all installs the table alone — it decides, its rows are filed,
+/// nothing is applied and the seat is never asked. A written word is the
+/// seat's mode: `shadow` asks and records, `on` applies, `auto` applies once
+/// the seat's own ledger raised it (`tools::step_effort_raised`).
+fn step_effort_config(
+    cwd: &Path,
+    inventory: &runtime::ModelInventory,
+    main_model: &str,
+    band: runtime::RouteTaskComplexity,
+    turn_effort: (Option<api::EffortLevel>, Option<api::EffortLevel>),
+) -> Option<runtime::StepEffortConfig> {
+    let word = tools::step_effort_word(cwd)?;
+    if !word.governs() {
+        return None;
+    }
+    let (floor, ceiling) = turn_effort;
+    let floor = floor?;
+    let raised = word.asks() && tools::step_effort_raised(cwd);
+    let seat: Option<Arc<dyn runtime::StepEffortSeat>> = word
+        .asks()
+        .then(|| tools::StepSeat::open(cwd) as Arc<dyn runtime::StepEffortSeat>);
+    // Rows land in the project's shadow ledger, and only for a runtime a host
+    // armed for durable traces — the guard the plan shadow and the timing
+    // ledger keep, so a crate test's turns never write into a person's home.
+    let ledger_cwd = cwd.to_path_buf();
+    let observer: runtime::StepEffortObserver = Arc::new(move |event: &runtime::StepEvent| {
+        if runtime::durable_traces_armed() {
+            let _ = tools::record_step_event(&ledger_cwd, event);
+        }
+    });
+    let (heavier_model, cross_top_model) = rung_neighbours(inventory, main_model);
+    let held = held_on(api::detect_provider_kind(main_model));
+    Some(runtime::StepEffortConfig {
+        applies: held.is_none() && word.applies_with(raised),
+        floor,
+        ceiling,
+        band,
+        heavier_model,
+        lighter_model: api::starvation_demotion_model(main_model).map(|model| api::resolve_model_alias(&model)),
+        cross_top_model,
+        seat,
+        observer: Some(observer),
+        held,
+    })
+}
+
+/// Why an applying word is held back on Anthropic's wire — the ledger's
+/// word for it.
+pub(crate) const HELD_ANTHROPIC_CACHE_PREFIX: &str = "anthropic_cache_prefix";
+
+/// What the governor may not apply on a provider's wire, whatever the word
+/// says (docs/design/zo-step-effort-governor-20260921.md §6).
+///
+/// Anthropic's prompt cache keys the message prefix on the thinking
+/// parameters: a request whose `output_config.effort` differs from the one
+/// before it re-writes every cached message breakpoint. Measured 2026-09-21
+/// on claude-opus-5 in one session (session-1789973703305-0, turn 6): the
+/// step the governor lowered to `high` re-billed 53,400 tokens of cache
+/// write against 9,610 read, and the step back to `xhigh` another 54,894 —
+/// two rewrites of the whole conversation for one rung of thinking saved,
+/// where the steps around them read 58k–65k from cache and wrote under a
+/// thousand. On that wire the governor records and never moves a request;
+/// OpenAI's `reasoning_effort` sits outside the prompt prefix its cache is
+/// keyed on, and Gemini's `thinkingLevel` likewise, so those wires apply.
+fn held_on(provider: api::ProviderKind) -> Option<&'static str> {
+    (provider == api::ProviderKind::Anthropic).then_some(HELD_ANTHROPIC_CACHE_PREFIX)
+}
+
+/// The rungs the governor may move the turn to, read off the connected
+/// inventory's own bands (`model_router::tiering`): the same provider's model
+/// in the band above the main model, and another provider's top model. The
+/// rung below is the catalog's own `demotes_to` (`api::starvation_demotion_model`),
+/// the one the overload escape already walks.
+fn rung_neighbours(inventory: &runtime::ModelInventory, main_model: &str) -> (Option<String>, Option<String>) {
+    let main_id = api::resolve_model_alias(main_model);
+    let Some(main) = inventory
+        .find(&main_id)
+        .or_else(|| inventory.find(main_model))
+    else {
+        return (None, None);
+    };
+    let usable = |model: &&runtime::ModelDescriptor| {
+        model.band() != runtime::ModelBand::Superseded && model.id() != main.id()
+    };
+    let heavier = inventory
+        .models()
+        .iter()
+        .filter(usable)
+        .filter(|model| model.provider() == main.provider() && model.band() < main.band())
+        .max_by_key(|model| model.band())
+        .map(|model| model.id().to_string());
+    let cross_top = inventory
+        .models()
+        .iter()
+        .filter(usable)
+        .find(|model| model.provider() != main.provider() && model.band() == runtime::ModelBand::Top)
+        .map(|model| model.id().to_string());
+    (heavier, cross_top)
 }
 
 /// The scorer's shadow inputs for one turn (or for a `/model` between
@@ -552,6 +671,55 @@ mod tests {
         ) -> Result<Vec<AssistantEvent>, RuntimeError> {
             Err(RuntimeError::new("stub client must not stream"))
         }
+    }
+
+    /// An applying word is held on Anthropic's wire and nowhere else.
+    #[test]
+    fn the_governor_is_held_on_anthropics_wire_and_applies_elsewhere() {
+        assert_eq!(held_on(api::ProviderKind::Anthropic), Some(HELD_ANTHROPIC_CACHE_PREFIX));
+        assert_eq!(held_on(api::ProviderKind::OpenAi), None);
+        assert_eq!(held_on(api::detect_provider_kind("claude-opus-5")), Some(HELD_ANTHROPIC_CACHE_PREFIX));
+        assert_eq!(held_on(api::detect_provider_kind("gpt-5.6-sol")), None);
+    }
+
+    /// The rungs beside the main model come from the inventory's own bands:
+    /// the same provider's band above it, and another provider's top model.
+    #[test]
+    fn rung_neighbours_read_the_inventorys_bands_and_never_name_a_model() {
+        use runtime::model_router::{EffortCeiling, ModelSource, TiersProvenance};
+        use runtime::{ModelCapability, ModelDescriptor, ModelInventory, ModelTier};
+        let deep = [ModelTier::Deep, ModelTier::Strong];
+        let strong = [ModelTier::Balanced, ModelTier::Strong];
+        let coding = [ModelCapability::Default, ModelCapability::ToolUse, ModelCapability::Coding];
+        let model = |id: &str, provider: &str, family: &str, tiers: &[ModelTier], ceiling, rank| {
+            ModelDescriptor::new(id, provider, family)
+                .source(ModelSource::EnabledBuiltinProvider)
+                .capabilities(coding)
+                .tiers(tiers.iter().copied())
+                .tiers_provenance(TiersProvenance::ProviderDeclared)
+                .effort_ceiling(ceiling)
+                .release_rank(rank)
+        };
+        let inventory = ModelInventory::new(
+            "claude-opus-5",
+            vec![
+                model("claude-fable-5-1", "anthropic", "fable", &deep, EffortCeiling::Max, 60),
+                model("claude-opus-5", "anthropic", "opus", &strong, EffortCeiling::Max, 50),
+                model("claude-sonnet-5", "anthropic", "sonnet", &strong, EffortCeiling::Max, 45),
+                model("gpt-6-astra", "openai", "astra", &deep, EffortCeiling::Ultra, 60),
+                model("gpt-5.6-sol", "openai", "sol", &strong, EffortCeiling::Ultra, 56),
+            ],
+        );
+        // From the second band, the band above is the provider's top.
+        let (heavier, cross_top) = rung_neighbours(&inventory, "claude-opus-5");
+        assert_eq!(heavier.as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(cross_top.as_deref(), Some("gpt-6-astra"));
+        // From the top there is nothing above on this provider.
+        let (heavier, cross_top) = rung_neighbours(&inventory, "claude-fable-5-1");
+        assert_eq!(heavier, None);
+        assert_eq!(cross_top.as_deref(), Some("gpt-6-astra"));
+        // A model the inventory does not hold has no neighbours.
+        assert_eq!(rung_neighbours(&inventory, "nobody"), (None, None));
     }
 
     fn routing() -> SmartTurnRouting {

@@ -16,6 +16,9 @@
 - **판단 Shadow**(기본 꺼짐): `smart.decisionShadow: "shadow"`이면 라우팅 probe가 읽는 과업마다 같은 규칙표의 typed 판단을 TypeSafe System One(`jev-latest`, 키 `TYPESAFE_API_KEY`)에 묻고
   probe 옆에 적는다 — **과업 글의 앞 2,000자가 `api.typesafe.ai`로 간다.** 라우팅은 바뀌지 않고, 턴은 기다리지 않는다. 원장은 지문만 든 `smart-router/decision-shadow.jsonl`,
   읽는 곳은 `zo --doctor`의 Jev 행과 `zo decision-shadow eval --labels <file.jsonl>` — `../docs/design/jev-decision-shadow-20260917.md`.
+- **걸음 effort 조절기**: 한 턴 안의 요청마다 추론 노력을 표 하나가 정한다 — 직전 도구 배치가 읽기뿐이면 한 단 아래, 같은 호출 반복·도구 오류 연속·검사 빨강이면 한두 단 위,
+  사람의 `--effort` 상한 안에서. 낱말이 없으면 표만 돌고 `smart-router/step-effort.jsonl`에 적으며 아무것도 적용하지 않는다; `smart.stepEffort: "on"`이 적용, `"shadow"`/`"auto"`는
+  엇갈린 걸음과 다섯 걸음마다 Jev에 한 번 묻는다(자리 `step_effort`) — `../docs/design/zo-step-effort-governor-20260921.md`.
 - **자율 실행**: `/goal`, `/loop`, 헤드리스 `--loop-every/--loop-until/--loop-max`. 한도는 `autonomy/limits.rs` 표 하나, 429는 자동 재개.
 - **고정 하네스**: 시스템 핵심·도구 스키마·스킬 색인·리마인더를 계열별 예산 게이트로 관리(`--prompt-input`). 드리머 리마인더는 wire 채널.
 - **회상**: 본문 색인 + 세컨드 브레인 그래프 관계. 완료 영수증, 도구 습관 넛지, 긴 결과 다이제스트.

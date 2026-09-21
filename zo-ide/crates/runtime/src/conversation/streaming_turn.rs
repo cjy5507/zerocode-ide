@@ -595,6 +595,7 @@ where
         self.heuristic_stop_nudges = 0;
         self.progress_marker_at_last_signal = 0;
         self.full_compactions_this_turn = 0;
+        self.begin_step_effort_turn(internal_subturn);
         // Fold refusal history only at a PUBLIC boundary. Internal subturns are
         // additional legs of the same user turn and must not double-count it.
         if !internal_subturn {
@@ -2630,6 +2631,7 @@ where
             // Re-anchor the live plan after this tool batch (mirrors the sync
             // turn loop) so the next streamed request keeps the plan in view.
             self.nudge_serial_reads_after_batch();
+            self.govern_step_after_batch();
             self.reinject_todo_progress_reminder();
             self.fire_post_batch_lifecycle_hooks();
         }

@@ -4190,7 +4190,7 @@ impl App {
             image_paths: Vec::new(),
         };
         let completion = match self.submit(&submission) {
-            Some(prompt) => self.turn(&prompt, events, None, None).await,
+            Some(prompt) => Box::pin(self.turn(&prompt, events, None, None)).await,
             // An empty brief cannot become a turn. The parent gets the same
             // sentence the screen does rather than an empty answer.
             None => TurnOutcome {
@@ -4974,7 +4974,7 @@ impl App {
     ) {
         let mut next_turn = Some((initial, initial_followup));
         while let Some((input, followup)) = next_turn.take() {
-            let completion = self.turn(&input, events, None, followup.as_ref()).await;
+            let completion = Box::pin(self.turn(&input, events, None, followup.as_ref())).await;
             if self.ui.exit.is_some() || self.session.is_none() {
                 break;
             }

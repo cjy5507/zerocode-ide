@@ -20,6 +20,7 @@ mod fallback;
 mod helpers;
 mod reminders;
 mod repetition;
+mod step_effort;
 mod streaming;
 mod streaming_turn;
 mod team_inbox;
@@ -60,6 +61,13 @@ pub use deep_gate::{
 #[cfg(test)]
 use compaction::parse_auto_compaction_threshold;
 pub use error::{RuntimeError, StreamingTurnError, ToolError, ToolTextKind};
+pub use step_effort::{
+    decide as decide_step_effort, shift as shift_step_effort, EffortStep, RungMove, StepAsk,
+    StepAskContext, StepBatch, StepDecision, StepEffortConfig, StepEffortObserver, StepEffortSeat,
+    StepEvent, StepJudgment, StepJudgmentRow, StepLabel, StepMove, StepReason, StepRow,
+    StepSignals, LABEL_ROW_KIND, NO_IN_TURN_ROAD, ROUTINE_STEPS_FOR_LIGHTER, STEP_JUDGMENT_EVERY,
+    STEP_ROW_KIND, STRONG_STEPS_FOR_HEAVIER,
+};
 pub use reminders::{
     build_design_guidance_reminder, DESIGN_GUIDANCE_REMINDER_PREFIX, PRELUDE_FANNED_OUT_REMINDER,
     ROUTE_HINT_REMINDER_PREFIX,
@@ -1189,6 +1197,11 @@ pub struct ConversationRuntime<C, T> {
     /// implementation back to the native model. Default `false` — sub-agent
     /// and headless runtimes never arm it.
     reserved_edit_gate: bool,
+    /// The step effort governor the host installed for this turn, with its
+    /// counters: the effort each request carries is decided here per step
+    /// (`conversation/step_effort.rs`). `None` — every host that never asked,
+    /// sub-agents included — leaves the client's own effort on every request.
+    step_effort: Option<step_effort::StepEffortState>,
     /// Per-turn routing band used to choose proportional deep-gate VERIFY
     /// depth. `None` is deliberately full verification for hosts that do not
     /// install routing metadata.
@@ -1745,6 +1758,7 @@ where
             exec_impl_leg_active: false,
             exec_native_leg_active: false,
             reserved_edit_gate: false,
+            step_effort: None,
             verify_band: None,
             verify_intent: RouteTaskIntent::Other,
         }
@@ -2008,6 +2022,7 @@ where
         self.verify_treadmill_run = 0;
         self.turn_progress_results = 0;
         self.heuristic_stop_nudges = 0;
+        self.begin_step_effort_turn(is_continuation);
         self.progress_marker_at_last_signal = 0;
         self.full_compactions_this_turn = 0;
         // Fold refusal history only at a PUBLIC boundary. Continuations are
@@ -2891,6 +2906,7 @@ where
             // Re-anchor the live plan after this tool batch so the next model
             // request keeps the in-progress todo item in view across the turn.
             self.nudge_serial_reads_after_batch();
+            self.govern_step_after_batch();
             self.reinject_todo_progress_reminder();
             self.fire_post_batch_lifecycle_hooks();
         }

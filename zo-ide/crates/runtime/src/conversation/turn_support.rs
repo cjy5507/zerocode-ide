@@ -571,6 +571,9 @@ where
             // Effort floor for this turn (deep-gate escalation); `None` on an
             // ordinary turn leaves the client's configured effort unchanged.
             effort_override: self.effort_override,
+            // The step governor's effort for this request, when one is
+            // installed and applies; `None` leaves the client's own effort.
+            effort_step: self.step_effort_for_request(),
             // Per-turn wire-model override: the refusal fallback wins over a
             // confidence-cascade escalation (a refusal on the escalated model
             // must still swap to the safe fallback); `None` on an ordinary
@@ -649,6 +652,9 @@ where
         // mutation this call just put on record, and a reader between the two
         // must never see the retirement without the fact that caused it.
         self.record_verified_state_from_tool(result_message, tool_input);
+        // The step governor reads the same settled result: the batch it is
+        // deciding the next request's effort from.
+        self.note_step_tool_result(result_message, tool_input);
         // A turn-start verified-state observation is only true until this turn
         // mutates something, and the reminder absorber deliberately RE-ANCHORS
         // an unchanged set near the tail once it drifts past its dedupe window
