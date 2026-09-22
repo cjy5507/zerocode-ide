@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::PoisonError;
+use std::sync::{Mutex, PoisonError, TryLockError};
 
 use codegraph::{CodeGraph, IndexStatus, Symbol, SymbolKind, DEFAULT_CACHE_FILE_NAME};
+use runtime::file_neighbours::MAX_NEIGHBOURS;
 use runtime::{permission_enforcer::PermissionEnforcer, PermissionMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -13,6 +14,9 @@ use crate::{
 };
 
 pub(crate) const MAX_CODEGRAPH_RESULTS: usize = 200;
+/// Defining files an `impact` refusal names when `file` was left out and the
+/// name has several: enough to pick from, not an inventory.
+const MAX_NAMED_DEFINERS: usize = 8;
 const CODEGRAPH_CACHE_DIR_NAME: &str = "codegraph";
 
 macro_rules! codegraph_description {
@@ -34,11 +38,52 @@ struct FindSymbolInput {
 #[derive(Debug, Deserialize)]
 struct FindReferencesInput {
     name: String,
+    /// The workspace-relative file defining `name`: narrows the answer to
+    /// that definition's references (`CodeGraph::references_to`).
+    #[serde(default)]
+    file: Option<String>,
 }
+
+/// How a `find_references` answer was chosen — the output's `resolution`.
+const RESOLUTION_EXACT_NAME: &str = "exact_name_match";
+const RESOLUTION_DEFINITION_IN_FILE: &str = "definition_in_file";
 
 #[derive(Debug, Deserialize)]
 struct FileOutlineInput {
     path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImpactInput {
+    name: String,
+    /// The workspace-relative file defining `name`; optional when only one
+    /// file does.
+    #[serde(default)]
+    file: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ImpactFile {
+    file: String,
+    references: usize,
+    test: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ImpactOutput {
+    name: String,
+    file: String,
+    definitions: Vec<SymbolMatch>,
+    references: usize,
+    referencing_files: usize,
+    callers: usize,
+    tests: usize,
+    files: Vec<ImpactFile>,
+    truncated: bool,
+    resolution: &'static str,
+    index: IndexStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index_warning: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,12 +177,29 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "find_references",
             description: codegraph_description!(
-                "Find identifier occurrences with exactly the requested spelling, grouped by file. Results are capped and report `truncated` honestly."
+                "Find identifier occurrences with exactly the requested spelling, grouped by file. Pass `file` (the workspace-relative file that defines the name) to keep only that definition's references: occurrences in that file, in files whose imports name it, or all of them when no other file defines it. Results are capped and report `truncated` honestly."
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "minLength": 1 }
+                    "name": { "type": "string", "minLength": 1 },
+                    "file": { "type": "string", "minLength": 1 }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }),
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
+            name: "impact",
+            description: codegraph_description!(
+                "Measure what changing a definition reaches before changing it: the references of `name` as `file` defines it (narrowed as `find_references` with `file`), the files they sit in, how many are other files (callers) and how many are tests. `file` may be left out when only one file defines the name."
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "minLength": 1 },
+                    "file": { "type": "string", "minLength": 1 }
                 },
                 "required": ["name"],
                 "additionalProperties": false
@@ -187,6 +249,11 @@ pub(crate) fn dispatch(
                     .and_then(|input| run_file_outline(ctx, &input))
             }),
         ),
+        "impact" => Some(
+            maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
+                from_value::<ImpactInput>(input).and_then(|input| run_impact(ctx, &input))
+            }),
+        ),
         _ => None,
     }
 }
@@ -223,10 +290,31 @@ fn run_find_references(
     input: &FindReferencesInput,
 ) -> Result<String, ToolError> {
     let name = required_text("name", &input.name)?;
+    let file = input
+        .file
+        .as_deref()
+        .map(|file| required_text("file", file))
+        .transpose()?;
     with_codegraph(ctx, |graph| {
-        let mut references = graph
-            .find_references(name)
-            .map_err(|error| codegraph_error(&error))?;
+        let (mut references, resolution) = match file {
+            Some(file) => (
+                graph
+                    .references_to(file, name)
+                    .map_err(|error| codegraph_error(&error))?
+                    .ok_or_else(|| {
+                        ToolError::InvalidInput(format!(
+                            "`{file}` defines no `{name}`; find_symbol names the files that do"
+                        ))
+                    })?,
+                RESOLUTION_DEFINITION_IN_FILE,
+            ),
+            None => (
+                graph
+                    .find_references(name)
+                    .map_err(|error| codegraph_error(&error))?,
+                RESOLUTION_EXACT_NAME,
+            ),
+        };
         let total_matches = references.len();
         references.truncate(MAX_CODEGRAPH_RESULTS);
         let mut grouped = BTreeMap::<String, Vec<ReferenceMatch>>::new();
@@ -249,11 +337,91 @@ fn run_find_references(
             files,
             total_matches,
             truncated: total_matches > MAX_CODEGRAPH_RESULTS,
-            resolution: "exact_name_match",
+            resolution,
             index: status,
             index_warning: index_warning(status),
         })
     })
+}
+
+fn run_impact(ctx: &ToolContext, input: &ImpactInput) -> Result<String, ToolError> {
+    let name = required_text("name", &input.name)?;
+    let file = input
+        .file
+        .as_deref()
+        .map(|file| required_text("file", file))
+        .transpose()?;
+    with_codegraph(ctx, |graph| {
+        let file = match file {
+            Some(file) => std::path::PathBuf::from(file),
+            None => sole_definer(graph, name)?,
+        };
+        let impact = graph
+            .impact(&file, name)
+            .map_err(|error| codegraph_error(&error))?
+            .ok_or_else(|| {
+                ToolError::InvalidInput(format!(
+                    "`{}` defines no `{name}`; find_symbol names the files that do",
+                    file.display()
+                ))
+            })?;
+        let status = graph.status();
+        let (referencing_files, callers, tests) =
+            (impact.files.len(), impact.callers(), impact.tests());
+        let files = impact
+            .files
+            .iter()
+            .take(MAX_CODEGRAPH_RESULTS)
+            .map(|linked| ImpactFile {
+                file: display_path(&linked.file),
+                references: linked.references,
+                test: linked.test,
+            })
+            .collect();
+        to_pretty_json(ImpactOutput {
+            name: name.to_string(),
+            file: display_path(&impact.file),
+            definitions: impact.definitions.into_iter().map(symbol_match).collect(),
+            references: impact.references,
+            referencing_files,
+            callers,
+            tests,
+            files,
+            truncated: referencing_files > MAX_CODEGRAPH_RESULTS,
+            resolution: RESOLUTION_DEFINITION_IN_FILE,
+            index: status,
+            index_warning: index_warning(status),
+        })
+    })
+}
+
+/// The one file defining `name`, or a refusal that says why there is none to
+/// pick — nothing defines it, or several do (named, up to a handful).
+fn sole_definer(graph: &mut CodeGraph, name: &str) -> Result<std::path::PathBuf, ToolError> {
+    let mut definers = graph
+        .find_symbols(name, None)
+        .map_err(|error| codegraph_error(&error))?
+        .into_iter()
+        .map(|symbol| symbol.file)
+        .collect::<Vec<_>>();
+    definers.dedup();
+    match definers.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => Err(ToolError::InvalidInput(format!(
+            "no indexed file defines `{name}`"
+        ))),
+        several => Err(ToolError::InvalidInput(format!(
+            "{} files define `{name}` ({}{}); pass `file`",
+            several.len(),
+            several
+                .iter()
+                .take(MAX_NAMED_DEFINERS)
+                .map(|file| display_path(file))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if several.len() > MAX_NAMED_DEFINERS { ", …" } else { "" }
+        ))),
+    }
 }
 
 fn run_file_outline(ctx: &ToolContext, input: &FileOutlineInput) -> Result<String, ToolError> {
@@ -277,11 +445,57 @@ fn run_file_outline(ctx: &ToolContext, input: &FileOutlineInput) -> Result<Strin
     })
 }
 
+/// What the index adds to a file read's neighbour list: the files defining
+/// names the read file uses, and the test files using names it defines,
+/// absolute and most referenced first.
+#[derive(Debug, Default)]
+pub(crate) struct IndexNeighbours {
+    pub(crate) uses: Vec<PathBuf>,
+    pub(crate) tested_by: Vec<PathBuf>,
+}
+
+/// The index's neighbours for `file`, when the session already holds an
+/// index of this workspace or one was already built on disk. A read never
+/// builds an index, never walks the workspace, and never waits: if a
+/// codegraph call holds the slot, the read goes without.
+pub(crate) fn neighbours_for_read(
+    slot: &Mutex<Option<CodeGraph>>,
+    cwd: Option<&Path>,
+    workspace_root: Option<&Path>,
+    file: &Path,
+) -> Option<IndexNeighbours> {
+    let root = index_root(cwd, workspace_root).ok()?;
+    let relative = file.strip_prefix(&root).ok()?;
+    let mut slot = match slot.try_lock() {
+        Ok(slot) => slot,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    match slot.as_ref() {
+        Some(graph) if graph.workspace_root() != root => return None,
+        Some(_) => {}
+        None => *slot = CodeGraph::open_existing(&root, codegraph_cache_path(&root)).ok()?,
+    }
+    let links = slot
+        .as_mut()?
+        .file_links(relative, MAX_NEIGHBOURS)
+        .ok()??;
+    Some(IndexNeighbours {
+        uses: links.uses.iter().map(|linked| root.join(&linked.file)).collect(),
+        tested_by: links
+            .used_by
+            .iter()
+            .filter(|linked| linked.test)
+            .map(|linked| root.join(&linked.file))
+            .collect(),
+    })
+}
+
 fn with_codegraph<T>(
     ctx: &ToolContext,
     operation: impl FnOnce(&mut CodeGraph) -> Result<T, ToolError>,
 ) -> Result<T, ToolError> {
-    let root = workspace_root(ctx)?;
+    let root = index_root(ctx.cwd.as_deref(), ctx.workspace_root.as_deref())?;
     let mut slot = ctx
         .codegraph
         .lock()
@@ -293,22 +507,29 @@ fn with_codegraph<T>(
         *slot = None;
     }
     if slot.is_none() {
-        let cache_path = runtime::zo_project_state_dir(&root)
-            .join(CODEGRAPH_CACHE_DIR_NAME)
-            .join(DEFAULT_CACHE_FILE_NAME);
         *slot = Some(
-            CodeGraph::load_or_build(&root, cache_path)
+            CodeGraph::load_or_build(&root, codegraph_cache_path(&root))
                 .map_err(|error| codegraph_error(&error))?,
         );
     }
     operation(slot.as_mut().expect("codegraph initialized above"))
 }
 
-fn workspace_root(ctx: &ToolContext) -> Result<PathBuf, ToolError> {
-    let root = ctx
-        .cwd
-        .as_deref()
-        .or(ctx.workspace_root.as_deref())
+/// Where a workspace's index lives: the project's zo state, never the tree.
+/// The codegraph tools, a read's neighbours and `zo vault code` open this one
+/// file.
+#[must_use]
+pub fn codegraph_cache_path(root: &Path) -> PathBuf {
+    runtime::zo_project_state_dir(root)
+        .join(CODEGRAPH_CACHE_DIR_NAME)
+        .join(DEFAULT_CACHE_FILE_NAME)
+}
+
+/// The workspace an index covers: the session's working directory, else its
+/// workspace root, else the process's, canonicalized.
+fn index_root(cwd: Option<&Path>, workspace_root: Option<&Path>) -> Result<PathBuf, ToolError> {
+    let root = cwd
+        .or(workspace_root)
         .map(Path::to_path_buf)
         .map_or_else(std::env::current_dir, Ok)?;
     fs::canonicalize(&root).map_err(|error| {
@@ -445,7 +666,7 @@ mod tests {
     #[test]
     fn codegraph_specs_are_read_only_deferred_and_honest() {
         let specs = mvp_tool_specs();
-        for name in ["find_symbol", "find_references", "file_outline"] {
+        for name in ["find_symbol", "find_references", "file_outline", "impact"] {
             let spec = specs
                 .iter()
                 .find(|spec| spec.name == name)
@@ -529,6 +750,173 @@ mod tests {
             .expect("children")
             .iter()
             .any(|child| child["name"] == "build"));
+    }
+
+    /// A whole-file read lists what the index links the file to — the file
+    /// defining a name it imports, the test importing a name it defines —
+    /// beyond what its own text resolves (the test sits outside every naming
+    /// convention); a window further in lists nothing.
+    #[test]
+    fn a_whole_file_read_lists_what_the_index_links_it_to() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        for (path, source) in [
+            (
+                "src/graph.rs",
+                "use crate::util::shared_util;\npub fn scan_graph() { shared_util(); }\n",
+            ),
+            ("src/util.rs", "pub fn shared_util() {}\n"),
+            (
+                "tests/graph_suite.rs",
+                "use acme::graph::scan_graph;\nfn covers() { scan_graph(); }\n",
+            ),
+        ] {
+            let path = workspace.path().join(path);
+            fs::create_dir_all(path.parent().expect("parent")).expect("fixture dir");
+            fs::write(path, source).expect("fixture source");
+        }
+        let graph = CodeGraph::load_or_build(
+            workspace.path(),
+            workspace.path().join("cache").join(DEFAULT_CACHE_FILE_NAME),
+        )
+        .expect("fixture graph");
+        let root = graph.workspace_root().to_path_buf();
+        let ctx = ToolContext::new().with_cwd(workspace.path());
+        *ctx.codegraph
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(graph);
+
+        let read = |input: Value| -> Value {
+            let output = crate::file_tools::dispatch(&ctx, None, "read_file", &input)
+                .expect("handled read")
+                .expect("successful read");
+            serde_json::from_str(&output).expect("JSON read")
+        };
+        let whole = read(json!({ "path": "src/graph.rs" }));
+        let neighbours = whole["file"]["neighbours"]
+            .as_array()
+            .expect("neighbours")
+            .iter()
+            .map(|neighbour| {
+                (
+                    neighbour["relation"].as_str().expect("relation").to_owned(),
+                    neighbour["path"].as_str().expect("path").to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let at = |relative: &str| root.join(relative).to_string_lossy().into_owned();
+        assert!(neighbours.contains(&("imports".to_owned(), at("src/util.rs"))));
+        assert!(neighbours.contains(&("tests".to_owned(), at("tests/graph_suite.rs"))));
+
+        let window = read(json!({ "path": "src/graph.rs", "offset": 1 }));
+        assert!(window["file"]["neighbours"].is_null());
+    }
+
+    /// With `file`, the answer is that definition's references; a file that
+    /// does not define the name is refused rather than answered empty.
+    #[test]
+    fn find_references_narrows_to_the_definition_a_file_holds() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        for (path, source) in [
+            ("a.rs", "pub fn build() {}\n"),
+            ("b.rs", "pub fn build() {}\n"),
+            ("c.rs", "use crate::a::build;\nfn c() { build(); }\n"),
+            ("d.rs", "fn d(thing: Thing) { thing.build(); }\n"),
+        ] {
+            fs::write(workspace.path().join(path), source).expect("fixture source");
+        }
+        let graph = CodeGraph::load_or_build(
+            workspace.path(),
+            workspace.path().join("cache").join(DEFAULT_CACHE_FILE_NAME),
+        )
+        .expect("fixture graph");
+        let ctx = ToolContext::new().with_cwd(workspace.path());
+        *ctx.codegraph
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(graph);
+
+        let narrowed = dispatch(
+            &ctx,
+            None,
+            "find_references",
+            &json!({ "name": "build", "file": "a.rs" }),
+        )
+        .expect("handled references")
+        .expect("successful references");
+        let narrowed: Value = serde_json::from_str(&narrowed).expect("JSON references");
+        assert_eq!(narrowed["resolution"], RESOLUTION_DEFINITION_IN_FILE);
+        assert_eq!(narrowed["total_matches"], 2);
+        assert_eq!(narrowed["files"][0]["file"], "c.rs");
+
+        let spelled = dispatch(&ctx, None, "find_references", &json!({ "name": "build" }))
+            .expect("handled references")
+            .expect("successful references");
+        let spelled: Value = serde_json::from_str(&spelled).expect("JSON references");
+        assert_eq!(spelled["resolution"], RESOLUTION_EXACT_NAME);
+        assert_eq!(spelled["total_matches"], 3);
+
+        let error = dispatch(
+            &ctx,
+            None,
+            "find_references",
+            &json!({ "name": "build", "file": "c.rs" }),
+        )
+        .expect("handled references")
+        .expect_err("c.rs defines no build");
+        assert!(matches!(error, ToolError::InvalidInput(_)));
+    }
+
+    /// `impact` counts one definition's callers and tests; without `file` it
+    /// takes the only definer, and refuses a name several files define.
+    #[test]
+    fn impact_counts_callers_and_tests_and_asks_which_definition() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        fs::create_dir_all(workspace.path().join("tests")).expect("tests dir");
+        for (path, source) in [
+            ("a.rs", "pub fn build() {}\npub fn only_here() {}\n"),
+            ("b.rs", "pub fn build() {}\n"),
+            ("c.rs", "use crate::a::build;\nfn c() { build(); only_here(); }\n"),
+            ("tests/t.rs", "use acme::a::only_here;\nfn t() { only_here(); }\n"),
+        ] {
+            fs::write(workspace.path().join(path), source).expect("fixture source");
+        }
+        let graph = CodeGraph::load_or_build(
+            workspace.path(),
+            workspace.path().join("cache").join(DEFAULT_CACHE_FILE_NAME),
+        )
+        .expect("fixture graph");
+        let ctx = ToolContext::new().with_cwd(workspace.path());
+        *ctx.codegraph
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(graph);
+
+        let answer = dispatch(&ctx, None, "impact", &json!({ "name": "only_here" }))
+            .expect("handled impact")
+            .expect("one definer: no file needed");
+        let answer: Value = serde_json::from_str(&answer).expect("JSON impact");
+        assert_eq!(answer["file"], "a.rs");
+        assert_eq!(answer["callers"], 2);
+        assert_eq!(answer["tests"], 1);
+        assert_eq!(answer["resolution"], RESOLUTION_DEFINITION_IN_FILE);
+
+        let narrowed = dispatch(
+            &ctx,
+            None,
+            "impact",
+            &json!({ "name": "build", "file": "a.rs" }),
+        )
+        .expect("handled impact")
+        .expect("a.rs defines build");
+        let narrowed: Value = serde_json::from_str(&narrowed).expect("JSON impact");
+        assert_eq!(narrowed["references"], 2);
+        assert_eq!(narrowed["files"][0]["file"], "c.rs");
+
+        let error = dispatch(&ctx, None, "impact", &json!({ "name": "build" }))
+            .expect("handled impact")
+            .expect_err("two definers");
+        assert!(
+            matches!(&error, ToolError::InvalidInput(message) if message.contains("a.rs") && message.contains("b.rs")),
+            "{error:?}"
+        );
     }
 
     #[test]

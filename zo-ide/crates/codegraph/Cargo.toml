@@ -8,6 +8,7 @@ publish.workspace = true
 [dependencies]
 ignore = "0.4"
 rayon = "1"
+rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -23,3 +24,10 @@ tempfile.workspace = true
 
 [lints]
 workspace = true
+
+# What the index costs on a real workspace — build, disk, load, resident
+# size, one saved file, the tool queries (t-5970). Driven by
+# `tools/codegraph-bench/run.py`; harness-less so each phase is one process.
+[[bench]]
+name = "index_cost"
+harness = false

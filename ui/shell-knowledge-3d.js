@@ -128,6 +128,18 @@ const KNOWLEDGE_GL_DISTANCE = Object.freeze({
     + " q = vec2(q.x - KNOWLEDGE_ROOT3 * q.y, -KNOWLEDGE_ROOT3 * q.x - q.y) * 0.5; }"
     + " q.x -= clamp(q.x, -radius * KNOWLEDGE_ROOT3, 0.0);"
     + " away = -length(q) * sign(q.y);",
+  /* 위아래가 평평한 정육각형(꼭짓점 (±R, 0)): 안쪽 반지름 R√3/2의 윗변으로 접어 잰다. */
+  hexagon: "vec2 h = abs(vLocal); float inner = radius * KNOWLEDGE_ROOT3 * 0.5;"
+    + " vec2 fold = vec2(-KNOWLEDGE_ROOT3 * 0.5, 0.5);"
+    + " h -= 2.0 * min(dot(fold, h), 0.0) * fold;"
+    + " h -= vec2(clamp(h.x, -inner / KNOWLEDGE_ROOT3, inner / KNOWLEDGE_ROOT3), inner);"
+    + " away = length(h) * sign(h.y);",
+  /* 십자(반길이 3R/√10, 반폭 R/√10): 한 팔로 접어 잰다. */
+  cross: "vec2 c = abs(vLocal); c = (c.y > c.x) ? c.yx : c.xy;"
+    + " vec2 arm = vec2(3.0, 1.0) * radius * KNOWLEDGE_INV_ROOT10;"
+    + " vec2 q = c - arm; float k = max(q.y, q.x);"
+    + " vec2 w = (k > 0.0) ? q : vec2(arm.y - c.x, -k);"
+    + " away = sign(k) * length(max(w, 0.0));",
 });
 
 /* 점의 조각 셰이더. 모양의 갈래를 **표에서** 짓는다 — 셰이더에 모양의 번호를 적어 두면
@@ -163,6 +175,7 @@ flat in int vForm;
 out vec4 outColor;
 #define KNOWLEDGE_HALF_ROOT2 ${Math.SQRT1_2}
 #define KNOWLEDGE_ROOT3 ${Math.sqrt(3)}
+#define KNOWLEDGE_INV_ROOT10 ${1 / Math.sqrt(10)}
 float knowledgeBox(vec2 p, float halfSide) {
   vec2 corner = abs(p) - vec2(halfSide);
   return length(max(corner, 0.0)) + min(max(corner.x, corner.y), 0.0);
@@ -411,13 +424,18 @@ function knowledgeRestingNodeInk(palette, tuning, layout, model, at) {
   const own = kind === "component" ? palette.component
     : kind === "vulnerability" ? palette.vulnerability : null;
   const ownAt = own === null ? -1 : knowledgeGlSupplyRow(model, at);
+  /* 코드 층의 점(t-5970)은 종류마다 한 견본 — 몸 칸 0, 테두리 칸 4. */
+  const code = kind === "code_file" ? palette.codeFile
+    : kind === "code_symbol" ? palette.codeSymbol : null;
+  const plain = ghost ? palette.ghost : source ? palette.source : code;
   return {
-    fill: ghost ? palette.ghost : source ? palette.source : own !== null ? own.fill : palette.nodeFill,
-    fillAt: ghost || source ? 0 : own !== null ? ownAt * 4 : row * 4,
-    stroke: ghost ? palette.ghost : source ? palette.source : own !== null ? own.stroke : palette.nodeStroke,
-    strokeAt: ghost || source ? 4 : own !== null ? ownAt * 4 : row * 4,
+    fill: plain ?? (own !== null ? own.fill : palette.nodeFill),
+    fillAt: plain !== null ? 0 : own !== null ? ownAt * 4 : row * 4,
+    stroke: plain ?? (own !== null ? own.stroke : palette.nodeStroke),
+    strokeAt: plain !== null ? 4 : own !== null ? ownAt * 4 : row * 4,
     strokePx: ghost ? tuning.nodeGhostStroke
       : source ? 1
+      : code !== null ? tuning.nodeStroke
       : own !== null ? own.width[ownAt]
       : tier === KNOWLEDGE_TIER_CORE ? tuning.nodeSelectedStroke
       : tuning.nodeStroke,
@@ -463,6 +481,8 @@ function knowledgeGlPalette(view, held) {
     nodeStroke: null,
     ghost: new Float32Array(8),
     source: new Float32Array(8),
+    codeFile: new Float32Array(8),
+    codeSymbol: new Float32Array(8),
     /* 공급망의 점(P4) — 구성요소는 (생태계 없음 + 생태계) × (멤버 아님·멤버), 취약점은 (심각도 없음 +
      * 심각도) × (정보성 아님·정보성) 줄이고, 줄마다 몸·테두리의 색과 테두리 굵기다
      * (`knowledgeGlSupplyRow`). */
@@ -571,6 +591,8 @@ function knowledgeGlPalette(view, held) {
       vulnerabilities,
       ghost: add("knowledge-node is-ghost", -1, "leaf"),
       source: add("knowledge-node is-source", -1, "leaf"),
+      codeFile: add("knowledge-node is-code_file", -1, "leaf"),
+      codeSymbol: add("knowledge-node is-code_symbol", -1, "leaf"),
       selected: add("knowledge-node is-page is-selected", -1, "leaf"),
       match: add("knowledge-node is-page is-search-match", -1, "leaf"),
       inter: line("knowledge-edge is-inter", -1),
@@ -615,6 +637,11 @@ function knowledgeGlPalette(view, held) {
   knowledgeGlColor(read(swatches.ghost).stroke, palette.ghost, 4);
   knowledgeGlColor(read(swatches.source).fill, palette.source, 0);
   knowledgeGlColor(read(swatches.source).stroke, palette.source, 4);
+  for (const [swatch, into] of [[swatches.codeFile, palette.codeFile],
+    [swatches.codeSymbol, palette.codeSymbol]]) {
+    knowledgeGlColor(read(swatch).fill, into, 0);
+    knowledgeGlColor(read(swatch).stroke, into, 4);
+  }
   knowledgeGlColor(read(swatches.selected).stroke, palette.tint ??= new Float32Array(4), 0);
   knowledgeGlColor(read(swatches.match).stroke, palette.highlight, 0);
   for (let hue = 0; hue < hues; hue += 1) {

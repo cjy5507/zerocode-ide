@@ -164,7 +164,9 @@ impl EdgeProvenance {
 /// writes a typed relation, or — as `source:` — a `mentions` line to a source
 /// node; and the scanner measures nothing, so a measured line in the scanned
 /// picture has no road behind it (measured lines ride beside the graph:
-/// [`crate::second_brain_live::MergeCandidate`], the supply chain).
+/// [`crate::second_brain_live::MergeCandidate`], the supply chain) — except
+/// the code layer's, which the graft writes and names
+/// ([`crate::second_brain_code::grafted_line`]).
 #[must_use]
 pub fn vouched(edge: &GraphEdge, target: NodeKind) -> bool {
     match edge.provenance {
@@ -176,7 +178,7 @@ pub fn vouched(edge: &GraphEdge, target: NodeKind) -> bool {
                 edge.kind != EdgeKind::Mentions
             }
         }
-        EdgeProvenance::Measured => false,
+        EdgeProvenance::Measured => crate::second_brain_code::grafted_line(edge.kind, target),
     }
 }
 
@@ -190,6 +192,12 @@ pub enum NodeKind {
     /// A raw source a page's `source:` frontmatter names. Never walked and
     /// never stat'ed — the page's own words are the evidence it exists.
     Source,
+    /// A file of the active project's code that a page names — never scanned
+    /// here: grafted from the codegraph index's answer
+    /// ([`crate::second_brain_code::graft`], t-5970).
+    CodeFile,
+    /// A definition in that code a page names by its symbol.
+    CodeSymbol,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -296,6 +304,9 @@ struct PageFacts {
     /// Vault-relative `raw/…` paths the body names in prose — how the log and
     /// a page vouch that a raw item was read (`second_brain_lint`).
     raw_mentions: Vec<String>,
+    /// Spans that may name the active project's code
+    /// ([`crate::second_brain_code::code_mentions`]), for the code layer.
+    code_mentions: Vec<String>,
     excerpt: String,
     /// Link targets as written, before resolution: the body's own links as
     /// [`EdgeKind::Mentions`] in written order, then each typed relation the
@@ -343,6 +354,18 @@ impl GraphCache {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Each held page's code mentions, by page id in id order — what the
+    /// code layer asks the project's index about (t-5970). As of the last
+    /// [`Self::scan`]; a page naming nothing is left out.
+    #[must_use]
+    pub fn code_mentions(&self) -> std::collections::BTreeMap<&str, &[String]> {
+        self.entries
+            .iter()
+            .filter(|(_, entry)| !entry.facts.code_mentions.is_empty())
+            .map(|(id, entry)| (id.as_str(), entry.facts.code_mentions.as_slice()))
+            .collect()
     }
 
     /// Walk `root/wiki`, re-reading only what changed, and answer the graph.
@@ -553,6 +576,11 @@ fn parse_page(text: &str, stem: &str) -> PageFacts {
         .get("ingested_at")
         .is_some_and(|held| !unquote(held.trim()).trim().is_empty());
     let raw_mentions = second_brain_lint::raw_mentions(body, MAX_PAGE_LINKS);
+    let code_mentions = crate::second_brain_code::code_mentions(
+        body,
+        source.as_deref(),
+        &crate::second_brain_code::CodeLimits::default(),
+    );
     let excerpt = page_excerpt(body);
     // Body links first, in written order, then the declared relations in enum
     // order: [`MAX_PAGE_LINKS`] bounds what one page contributes in total, so a
@@ -590,6 +618,7 @@ fn parse_page(text: &str, stem: &str) -> PageFacts {
         source,
         ingested_at,
         raw_mentions,
+        code_mentions,
         excerpt,
         links,
         truncated: false,
@@ -886,7 +915,7 @@ fn wiki_links(body: &str) -> Vec<String> {
 }
 
 /// A ``` or ~~~ fence and its width, or nothing.
-fn fence_mark(trimmed: &str) -> Option<(char, usize)> {
+pub(crate) fn fence_mark(trimmed: &str) -> Option<(char, usize)> {
     for mark in ['`', '~'] {
         let width = trimmed.chars().take_while(|held| *held == mark).count();
         if width >= 3 {
@@ -1114,20 +1143,7 @@ fn assemble(found: &[FoundPage], cache: &HashMap<String, CacheEntry>, sources: b
     });
     tags.truncate(MAX_GRAPH_TAGS);
 
-    let mut per_kind: BTreeMap<EdgeKind, u32> = BTreeMap::new();
-    for edge in &edges {
-        *per_kind.entry(edge.kind).or_default() += 1;
-    }
-    let mut kinds: Vec<KindCount> = per_kind
-        .into_iter()
-        .map(|(kind, count)| KindCount { kind, count })
-        .collect();
-    kinds.sort_by(|left, right| {
-        right
-            .count
-            .cmp(&left.count)
-            .then_with(|| left.kind.cmp(&right.kind))
-    });
+    let kinds = kind_counts(&edges);
     let provenances = provenance_counts(&edges);
 
     VaultGraph {
@@ -1145,6 +1161,25 @@ fn assemble(found: &[FoundPage], cache: &HashMap<String, CacheEntry>, sources: b
         truncated,
         reparsed: 0,
     }
+}
+
+/// How many edges of each kind, most used first.
+pub(crate) fn kind_counts(edges: &[GraphEdge]) -> Vec<KindCount> {
+    let mut per_kind: BTreeMap<EdgeKind, u32> = BTreeMap::new();
+    for edge in edges {
+        *per_kind.entry(edge.kind).or_default() += 1;
+    }
+    let mut kinds: Vec<KindCount> = per_kind
+        .into_iter()
+        .map(|(kind, count)| KindCount { kind, count })
+        .collect();
+    kinds.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+    kinds
 }
 
 /// How many lines each road wrote, every road listed in enum order — a zero

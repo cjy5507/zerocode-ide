@@ -659,6 +659,125 @@ impl zerocode_hookd::PromptKnowledge for VaultKnowledge {
     }
 }
 
+/// How long one project's code layer stands before `zo vault code` is asked
+/// again (t-5970): the view refreshes on every watcher tick, and a tick must
+/// not spawn zo and walk the project each time.
+const CODE_LAYER_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+/// Layers held — one per (vault, project) the window has looked at.
+const MAX_CODE_LAYERS: usize = 8;
+
+type HeldCodeLayer = (
+    Instant,
+    Result<zerocode_core::second_brain_code::CodeLayer, String>,
+);
+
+fn code_layers() -> &'static Mutex<HashMap<(PathBuf, PathBuf), HeldCodeLayer>> {
+    static LAYERS: OnceLock<Mutex<HashMap<(PathBuf, PathBuf), HeldCodeLayer>>> = OnceLock::new();
+    LAYERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The project's code layer for this vault, held while fresh and otherwise
+/// asked of `zo vault code` — the codegraph index is zo's, and nothing in the
+/// window reads it. A refusal is held for as long as an answer, so a missing
+/// zo is not asked again on every tick.
+fn code_layer_for(
+    vault: &Path,
+    project: &Path,
+) -> Result<zerocode_core::second_brain_code::CodeLayer, String> {
+    let key = (vault.to_path_buf(), project.to_path_buf());
+    if let Some((at, held)) = code_layers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        && at.elapsed() < CODE_LAYER_TTL
+    {
+        return held.clone();
+    }
+    let answer = zo_vault_code(vault, project);
+    let mut held = code_layers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.len() >= MAX_CODE_LAYERS && !held.contains_key(&key) {
+        held.clear();
+    }
+    held.insert(key, (Instant::now(), answer.clone()));
+    answer
+}
+
+fn zo_vault_code(
+    vault: &Path,
+    project: &Path,
+) -> Result<zerocode_core::second_brain_code::CodeLayer, String> {
+    let zo = zerocode_pty::ZoBinary::discover()
+        .ok_or("zo를 찾을 수 없습니다 — 코드 층은 zo가 프로젝트의 인덱스에서 읽습니다")?;
+    let output = crate::proc::quiet_command(&zo.path)
+        .args(["vault", "code", "--json", "--vault"])
+        .arg(vault)
+        .arg("--project")
+        .arg(project)
+        .current_dir(project)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("zo vault code를 실행하지 못했습니다: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let said = stderr.trim();
+        return Err(if said.is_empty() {
+            format!("zo vault code가 {}(으)로 끝났습니다", output.status)
+        } else {
+            said.to_string()
+        });
+    }
+    serde_json::from_slice(&output.stdout)
+        .map_err(|error| format!("zo vault code의 답을 읽지 못했습니다: {error}"))
+}
+
+/// What the code lens put on the picture (t-5970), or why it put nothing.
+#[derive(Clone, Serialize)]
+pub(crate) struct CodeLens {
+    /// The project whose index answered, as the view asked for it.
+    project: String,
+    /// Distinct mentions the vault's pages made, and how many the index
+    /// could place.
+    mentions: usize,
+    resolved: usize,
+    grafted: zerocode_core::second_brain_code::GraftSummary,
+    /// The refusal, verbatim, when there is no layer.
+    error: Option<String>,
+}
+
+/// Graft `project`'s code layer onto `graph` and say what happened.
+fn graft_code_lens(
+    vault: &Path,
+    project: &str,
+    graph: &mut zerocode_core::second_brain_graph::VaultGraph,
+) -> CodeLens {
+    let mut lens = CodeLens {
+        project: project.to_string(),
+        mentions: 0,
+        resolved: 0,
+        grafted: zerocode_core::second_brain_code::GraftSummary::default(),
+        error: None,
+    };
+    let layer = PathBuf::from(project)
+        .canonicalize()
+        .map_err(|error| format!("{project}: {error}"))
+        .and_then(|root| code_layer_for(vault, &root));
+    match layer {
+        Ok(layer) => {
+            lens.mentions = layer.mentions;
+            lens.resolved = layer.resolved;
+            lens.grafted = zerocode_core::second_brain_code::graft(
+                graph,
+                &layer,
+                &zerocode_core::second_brain_code::CodeLimits::default(),
+            );
+        }
+        Err(error) => lens.error = Some(error),
+    }
+    lens
+}
+
 #[derive(Clone, Serialize)]
 pub(crate) struct SecondBrainGraphReport {
     /// The vault the picture was read from, canonicalized.
@@ -673,6 +792,9 @@ pub(crate) struct SecondBrainGraphReport {
     /// What is live about the picture (t-2931): recalls, the bus log, merge
     /// candidates, and the table every number came from.
     live: zerocode_core::second_brain_live::LiveLayer,
+    /// The code lens's answer (t-5970); absent while the lens is off.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    code: Option<CodeLens>,
 }
 
 /// The vault path this window will read a graph from.
@@ -699,12 +821,16 @@ pub(crate) fn graph_root(saved: String, asked: Option<String>) -> Result<PathBuf
 
 /// `utc_offset_minutes` is the window's `Date.getTimezoneOffset()`: the
 /// journal's stamps are wall-clock time and the live layer dates them in the
-/// window's own zone.
+/// window's own zone. `code` with a `project` grafts that project's code
+/// layer (t-5970) after the live layer and the watch lane read the vault's
+/// own picture — code is not a page to watch or to call alive.
 #[tauri::command]
 pub(crate) async fn second_brain_graph(
     state: State<'_, AppState>,
     path: Option<String>,
     sources: Option<bool>,
+    code: Option<bool>,
+    project: Option<String>,
     utc_offset_minutes: Option<i32>,
 ) -> Result<SecondBrainGraphReport, String> {
     let saved = load_settings_resilient(state.settings())
@@ -715,7 +841,7 @@ pub(crate) async fn second_brain_graph(
     tauri::async_runtime::spawn_blocking(move || {
         let root = graph_root(saved, path)?;
         let began = Instant::now();
-        let graph = scanned_graph(&root, sources);
+        let mut graph = scanned_graph(&root, sources);
         let live = live_layer_for(
             &root,
             &graph,
@@ -723,12 +849,19 @@ pub(crate) async fn second_brain_graph(
             utc_offset_minutes.unwrap_or(0),
         );
         aim_watch_lane(&watched, &root, &graph);
+        let code = code
+            .unwrap_or(false)
+            .then_some(project)
+            .flatten()
+            .filter(|project| !project.trim().is_empty())
+            .map(|project| graft_code_lens(&root, &project, &mut graph));
         Ok(SecondBrainGraphReport {
             vault: root.to_string_lossy().into_owned(),
             empty: graph.pages == 0,
             graph,
             scanned_ms: u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX),
             live,
+            code,
         })
     })
     .await

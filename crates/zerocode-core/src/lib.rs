@@ -74,6 +74,7 @@ pub mod scm_observer;
 pub mod scm_tree;
 pub mod screen_action;
 pub mod second_brain;
+pub mod second_brain_code;
 pub mod second_brain_export;
 pub mod second_brain_graph;
 pub mod second_brain_lint;

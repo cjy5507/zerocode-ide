@@ -311,11 +311,7 @@ pub fn read_file(
     }
 
     let content = fs::read_to_string(&absolute_path)?;
-    // A read from the top of a code file is the moment the model decides what
-    // to read next; a window further in is a drill-in that already knows.
-    let neighbours = if offset.unwrap_or(0) == 0
-        && crate::file_neighbours::is_code_path(&absolute_path.to_string_lossy())
-    {
+    let neighbours = if crate::file_neighbours::wants_neighbours(&absolute_path, offset) {
         crate::file_neighbours::neighbours_of(&absolute_path, &content)
     } else {
         Vec::new()

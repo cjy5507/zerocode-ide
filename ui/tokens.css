@@ -1551,6 +1551,11 @@
   --knowledge-severity-none: var(--knowledge-severity-unknown);
   --knowledge-informational-fill-weight: 30%;
   --knowledge-informational-stroke: 1.5;
+  /* 코드 층(t-5970): 파일(⬢)과 정의(✚)도 램프 밖의 둘을 빌린다 — 볼트의 군집 색과 공급망의 두
+   * 생태계(ref 파랑·보드 보라)와 겹치지 않게 보드의 하늘색과 에메랄드. 몸이 그 잉크이고 테두리는
+   * 바탕이다(구성요소의 점과 같은 옷): 뜻은 모양이 지고, 색은 그 뜻을 한 번 더 말할 뿐이다. */
+  --knowledge-code-file-ink: var(--workspace-board-sky);
+  --knowledge-code-symbol-ink: var(--workspace-board-emerald);
   --knowledge-edge-mentions-ink: color-mix(in srgb, var(--ink-mist) 28%, transparent);
   --knowledge-edge-mentions-width: 1;
   /* 군집 안의 본문 링크와 군집 사이의 본문 링크(09-16). 안쪽은 군집의 모양을

@@ -253,7 +253,7 @@ pub fn assess(
                     .insert(nodes[from].id.clone());
                 continue;
             }
-            NodeKind::Source => continue,
+            NodeKind::Source | NodeKind::CodeFile | NodeKind::CodeSymbol => continue,
             NodeKind::Page => {}
         }
         if Some(from) == index_at {

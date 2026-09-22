@@ -1,6 +1,9 @@
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::test_path::is_test_path;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Position {
@@ -140,6 +143,22 @@ pub struct Import {
     pub range: SourceRange,
 }
 
+impl Import {
+    /// Whether this import spells `name` — as a whole identifier in the path
+    /// it was written with, or as the name it binds. The evidence the index
+    /// takes that a file means one particular definition of a name: against
+    /// rust-analyzer on this repository (t-5970), a file linked to a name's
+    /// only definer without it was right 52% of the time.
+    #[must_use]
+    pub fn spells(&self, name: &str) -> bool {
+        self.name.as_deref() == Some(name)
+            || self
+                .path
+                .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .any(|token| token == name)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Reference {
     pub name: String,
@@ -174,6 +193,92 @@ pub enum SkipReason {
 pub struct SkippedFile {
     pub file: PathBuf,
     pub reason: SkipReason,
+}
+
+/// A file's neighbours as the index's exact names can tell them.
+///
+/// A name links a file to the one indexed file that defines it, and only
+/// when the file's own imports spell the name ([`Import::spells`]). A name
+/// several files define says nothing about which a spelling meant; a name one
+/// file defines, spelled without an import, is as often a local or a
+/// standard-library item (a method call, a field). Precision over reach,
+/// because a reader acts on the list.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FileLinks {
+    /// Files defining names this file spells, the most spelled first.
+    pub uses: Vec<LinkedFile>,
+    /// Files spelling names this file defines, the most spelling first.
+    pub used_by: Vec<LinkedFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LinkedFile {
+    pub file: PathBuf,
+    /// Occurrences of the linking names between the two files.
+    pub references: usize,
+    /// Whether `file` reads as a test file (`is_test_path`).
+    pub test: bool,
+}
+
+impl LinkedFile {
+    /// Sum `(file, occurrences)` pairs per file: the most referenced first,
+    /// path order between equals, each marked test or not.
+    pub(crate) fn tally<'a>(pairs: impl IntoIterator<Item = (&'a Path, usize)>) -> Vec<Self> {
+        let mut totals = BTreeMap::<&Path, usize>::new();
+        for (file, occurrences) in pairs {
+            *totals.entry(file).or_default() += occurrences;
+        }
+        let mut linked = totals
+            .into_iter()
+            .map(|(file, references)| Self {
+                test: is_test_path(file),
+                file: file.to_path_buf(),
+                references,
+            })
+            .collect::<Vec<_>>();
+        // Stable: equals keep the path order the map gave them.
+        linked.sort_by(|left, right| right.references.cmp(&left.references));
+        linked
+    }
+}
+
+/// What a mention of code names in the index
+/// (`CodeGraph::resolve_mentions`): a file, or one definition.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "resolved", content = "at", rename_all = "snake_case")]
+pub enum Resolved {
+    File(PathBuf),
+    Symbol(Symbol),
+}
+
+/// What changing one definition reaches, counted before the change — the
+/// callers and the tests as one answer (`CodeGraph::impact`).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Impact {
+    /// The workspace-relative file holding the definition.
+    pub file: PathBuf,
+    /// The name's definitions in that file, in source order — a method two
+    /// types there define is two.
+    pub definitions: Vec<Symbol>,
+    /// Occurrences meant for them (`CodeGraph::references_to`).
+    pub references: usize,
+    /// The files those occurrences sit in, the most first; the defining file
+    /// too when it uses its own definition.
+    pub files: Vec<LinkedFile>,
+}
+
+impl Impact {
+    /// Files other than the defining one that reference the definition.
+    #[must_use]
+    pub fn callers(&self) -> usize {
+        self.files.iter().filter(|linked| linked.file != self.file).count()
+    }
+
+    /// Referencing files that read as tests.
+    #[must_use]
+    pub fn tests(&self) -> usize {
+        self.files.iter().filter(|linked| linked.test).count()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
