@@ -785,9 +785,10 @@ fn the_patches_this_machine_wrote_reviewed_in_hindsight() {
 }
 
 /// What an edit's result waits on the calling thread for the seat, off and
-/// shadow in turn, warm, the wire slower than anything measured here: under
-/// shadow the review leaves on its own, so what the result pays is the
-/// setting, the door and the book — never the wire.
+/// shadow in turn and then the other way round, warm, the wire slower than
+/// anything measured here: under shadow the review leaves on its own, so
+/// what the result pays is the setting, the door and the book — never the
+/// wire.
 #[test]
 #[ignore = "a timing, printed: what the seat costs the edit's own thread"]
 fn what_the_seat_costs_the_edits_own_thread() {
@@ -801,7 +802,7 @@ fn what_the_seat_costs_the_edits_own_thread() {
         };
         (at(0.5), at(0.95))
     };
-    for mode in ["off", "shadow"] {
+    for mode in ["off", "shadow", "shadow", "off"] {
         let mock = Mock::slow_first(Duration::from_secs(2), reply(UNRELATED));
         let (p50, p95) = machine(&PATCH_REVIEW, mode, &mock.base_url, |cwd| {
             forget_waiting(cwd);
