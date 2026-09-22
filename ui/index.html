@@ -4305,6 +4305,25 @@
                 </p>
               </details>
             </div>
+            <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-compaction-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.compaction">요약 전 관련성 정리</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.compactionSummary">
+                    대화를 요약해 접기 전에, 오래된 도구 결과마다 남은 일에 아직 필요한지 묻고 아닌 것은 요약에서 뺍니다.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-compaction-select" data-jev-seat="compaction"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.compactionHint">
+                  zo가 문맥이 차서 대화를 요약할 때, 보존 꼬리 밖의 도구 결과 블록마다 「남은 목표에 아직 필요한가」를 Jev에 한꺼번에 묻고 아닌 것은 요약 입력에서 뺍니다. 뺀 블록의 원문은 먼저 볼트에 봉인되어 session_recall로 되읽을 수 있습니다. 보내는 것은 마지막 요청의 앞 2,000자, 마지막 답의 앞 1,000자, 블록마다 도구 이름·입력 앞 240자·출력 앞 320바이트뿐이고, 답이 제때 오지 않은 블록은 그대로 둡니다. shadow는 뺐을 블록만 원장에 적고 요약은 그대로 둡니다. 라벨은 사후: 뺀 블록을 다섯 턴 안에 다시 읽으면 후회로 셉니다.
+                </p>
+              </details>
+            </div>
 
             <div class="settings-jev-row" data-jev-row>
               <label class="settings-field" data-field="md" for="typesafe-agent_tool-select">
@@ -4361,6 +4380,26 @@
                 <summary data-i18n="settings.status.evidence">자세히</summary>
                 <p data-i18n="settings.typesafe.notifyHint">
                   오늘의 규칙표는 보고 있지 않은 판이 멈추거나 끝나면 늘 울립니다. 이 자리는 그 결정 지점에서 사건의 종류(입력 대기·완료·사람이 멈춤·에이전트의 전언), 판 이름, 창에 사람이 있는지, 알림 본문 한 줄(240자), 그 판의 최근 알림 여섯 건과 각각에 1분 안에 돌아왔는지, 지금 기다리는 판 수를 보내 끊기·묶기·무시를 묻습니다. off·shadow·시간 초과·거절이면 오늘 규칙 그대로 울리고, 근거가 서서 auto가 오른 뒤에만 묶기와 무시가 실제 푸시와 탭 표시를 바꿉니다. 묶인 알림은 다음에 창에 손을 대는 순간 하나로 접어 알립니다. 라벨은 사람의 손: 알림 뒤 1분 안에 그 판에 입력하면 끊기가 맞았고, 창에 있으면서 손대지 않았으면 끊지 않는 편이 맞았다고 적습니다.
+                </p>
+              </details>
+            </div>
+
+            <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-mention_rerank-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.mention_rerank">@ 팝업·/resume 의도 재순위</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.mention_rerankSummary">
+                    zo의 @ 파일 팝업과 /resume 목록 첫 페이지를, 쓰고 있는 문장으로 다시 세웁니다 — 퍼지 순서가 먼저 뜨고, 답은 뒤에 얹힙니다.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-mention_rerank-select" data-jev-seat="mention_rerank"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.mention_rerankHint">
+                  zo 작성창에서 @ 뒤에 글자를 치면 퍼지 검색 여덟 행이 즉시 뜨고, 그 한 페이지를 두고 「지금 쓰는 문장에서 어느 행을 뜻하는가」를 Jev에 비동기로 한 번 묻습니다. 답은 고르기가 아직 첫 행에 그대로 있을 때만 순서를 바꾸고, 키를 더 치면 앞 물음은 버립니다. /resume 목록도 검색어를 치면 같은 자리가 첫 페이지를 봅니다. 보내는 것은 문장 앞 1,000자, 친 글자, 행 이름 여덟 개와 행이 이미 보여 주는 머리(스킬 설명·세션 첫 프롬프트) 320바이트뿐이고 파일 본문은 읽지 않습니다. 못 온 답·늦은 답은 퍼지 순서 그대로입니다. shadow는 Jev가 1위로 놓았을 행만 원장에 적고 화면은 그대로 둡니다. 라벨은 비교: 사람이 고른 행이 Jev 1위였는지를 완성마다 적습니다.
                 </p>
               </details>
             </div>

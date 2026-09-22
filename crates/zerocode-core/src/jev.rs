@@ -1799,8 +1799,126 @@ pub const NOTIFY: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
 };
 
+/// Characters of the sentence a person is writing that one mention
+/// judgment reads as their intent — the composer's text around the `@`
+/// token, or the words typed into the `/resume` search. The recall seat's
+/// request cap, because it is the same kind of text read for the same
+/// purpose: the sentence or two that says what the person is after.
+pub const MENTION_INTENT_CHAR_CAP: usize = RECALL_REQUEST_CHAR_CAP;
+
+/// Candidate rows one mention judgment is asked about: one page of the
+/// popup — the eight rows a person sees without scrolling (codex
+/// `MAX_POPUP_ROWS`, which zo's view pins to this number). A ninth row is one
+/// the person has not seen, and a judgment that puts it first would be
+/// reordering a list the person was never shown.
+pub const MENTION_CANDIDATE_CAP: usize = 8;
+
+/// Bytes of one candidate's head a mention judgment carries — a skill's
+/// description, a session's first prompt as its row shows it. The recall
+/// seat's summary cap: a head is what a reader skims to tell rows apart,
+/// never a body. A file or a page carries no head at all, only its name.
+pub const MENTION_HEAD_BYTE_CAP: usize = RECALL_SUMMARY_BYTE_CAP;
+
+/// What the mention seat's answers must bound above before `auto` rises to
+/// reordering the page (§4): nine in ten — the recall seat's line, read from
+/// there because the two are the same kind: a ranking a reader falls back
+/// from at no cost (the fuzzy page stands when the judgment does not come
+/// back, as recall's own order stands). One name, so a re-measurement moves
+/// this seat's line alone.
+pub const MENTION_ANSWER_FLOOR_PERMILLE: u16 = RECALL_ANSWER_FLOOR_PERMILLE;
+
+/// The mention seat's route-change budget (§4): four picks in five must be
+/// the row the judgment put first — the comparison the person makes with
+/// every completion, which is what this seat has in place of a probe. The
+/// recall seat's budget, for the reason its answer floor is.
+pub const MENTION_AGREEMENT_FLOOR_PERMILLE: u16 = RECALL_AGREEMENT_FLOOR_PERMILLE;
+
+/// The wall past which a mention answer is dropped, in milliseconds — the
+/// latency line the judge reads a rising seat against.
+///
+/// Nothing waits on this seat: the fuzzy page is drawn the moment the
+/// person types, and the judgment lands on it afterwards, only while the
+/// selection still sits on the first row. The wall is therefore not a wait
+/// but a staleness line — an answer that arrives after it is for a page the
+/// person has been looking at too long to move under them. The routing
+/// seat's wall, because it is the same wire and the same question of how
+/// long a Jev answer may hold the thing it is deciding, and the wire's
+/// measured p95 sits well inside it (337 ms over 240 single-choice answers
+/// on 2026-09-22, t-6040; this seat's own replay is in
+/// `tools/mention-rerank-replay`). Written as its own number rather than read from
+/// [`ROUTING_APPLY_DEADLINE_MS`]: two lines that coincide are still two
+/// policies, and a page that learns to tolerate a later reorder should move
+/// this one alone.
+pub const MENTION_APPLY_DEADLINE_MS: u64 = 1_500;
+
+/// zo's mention rerank: which row of the `@` popup, or of the `/resume`
+/// list, the person means — read off the sentence they are writing
+/// (t-6042).
+///
+/// The `@` popup (t-5871) and the `/resume` picker rank by fuzzy score and
+/// recency; neither knows what the person is writing. The idea is jevable's
+/// "Jev Search"/"Upweight": the fuzzy page is drawn first, exactly as today,
+/// and one closed choice over its rows — asked off the key path — may put
+/// the row the sentence is about first. The answer lands only while the
+/// selection still sits on the first row; a person who has moved it has
+/// already chosen a page, and a page is not moved under them. A newer
+/// keystroke discards the older question: one question in flight, ever.
+///
+/// What is sent is the head of the sentence, the token typed, and one page
+/// of candidate names with the head each row already shows on screen.
+/// Nothing is read from disk for it: no file body, no page body, no
+/// transcript. Every request passes the door; a refusal, a timeout or a
+/// reply that breaks the contract leaves the fuzzy page as it was.
+///
+/// `on` and a risen `auto` are the apply stage: the page's rows take the
+/// judgment's order. `shadow` asks and records what it would have put first
+/// and the page stands. The `agreed` rule is a comparison, made by the
+/// person: one label per completion, `true` when the row they took was the
+/// row the judgment put first, `false` otherwise, with `rank` the place the
+/// judgment gave the row they took; a pick outside the page the judgment
+/// saw is written down as not compared, since the seat never offered it.
+pub const MENTION_RERANK: JevUse = JevUse {
+    id: "mention_rerank",
+    setting: "jevMentionRerank",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    sends: &[
+        Sent {
+            at: "/state/intent",
+            cap: Cap::Chars(MENTION_INTENT_CHAR_CAP),
+        },
+        // The token is a piece of the same sentence, under the same cap —
+        // a second cap on the same words would be a second answer to how
+        // much of a person's writing leaves the machine.
+        Sent {
+            at: "/state/query",
+            cap: Cap::Chars(MENTION_INTENT_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/candidates",
+            cap: Cap::Items(MENTION_CANDIDATE_CAP),
+        },
+        Sent {
+            at: "/state/candidates/*/name",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/candidates/*/head",
+            cap: Cap::Bytes(MENTION_HEAD_BYTE_CAP),
+        },
+    ],
+    ledger: "mention-rerank.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(MENTION_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(MENTION_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(MENTION_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 15] = [
+pub static JEV_USES: [JevUse; 16] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -1816,6 +1934,7 @@ pub static JEV_USES: [JevUse; 15] = [
     AGENT_TOOL,
     BROWSER_READ,
     NOTIFY,
+    MENTION_RERANK,
 ];
 
 impl JevUse {

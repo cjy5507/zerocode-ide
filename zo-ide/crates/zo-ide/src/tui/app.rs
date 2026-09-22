@@ -81,6 +81,7 @@ use crate::ide::run_loop::ExitReason;
 use crate::session::plain_session::{LaunchFlags, OpenOptions, PlainSession, ReplayItem};
 use crate::session::route_fact::{RouteFact, RouteFactReceiver};
 use crate::session::file_search::{FileSearchManager, FileSearchResult};
+use tools::{MentionAnswer, MentionAsk, MentionCandidate, MentionRerank, MentionSurface};
 use crate::session::subagent_progress::{SubagentProgress, SubagentProgressWatcher};
 use crate::session::turn_scaffold::TurnScaffold;
 use crate::session::{AgentCompletionPump, AgentFollowup};
@@ -592,6 +593,11 @@ struct Ui {
     /// The file search behind the `@` popup: one walk per query run, and the
     /// files this conversation's tools read or wrote, which it ranks first.
     file_search: FileSearchManager,
+    /// The mention seat (t-6042): one page of the `@` popup or the `/resume`
+    /// list put to a judgment as the person types, its answers landing on
+    /// [`App::mention_rerank_rx`]. Armed when a page opens, told what the
+    /// person took when it closes.
+    mention_rerank: MentionRerank,
     reporter: Option<HookReporter>,
     model: String,
     /// The model actually on the wire when it is not `model` — a
@@ -654,6 +660,29 @@ struct Ui {
     exit: Option<ExitReason>,
 }
 
+/// What searches a page under the composer: the `@` file search and the
+/// mention seat (t-6042), each with the channel its answers land on — the
+/// searchers for [`Ui`], the receivers for [`App`]'s select loops.
+struct PageSearches {
+    file_search: FileSearchManager,
+    file_search_rx: tokio::sync::mpsc::UnboundedReceiver<FileSearchResult>,
+    mention_rerank: MentionRerank,
+    mention_rerank_rx: tokio::sync::mpsc::UnboundedReceiver<MentionAnswer>,
+}
+
+fn page_searches(cwd: &std::path::Path) -> PageSearches {
+    let (file_search_tx, file_search_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (mention_rerank_tx, mention_rerank_rx) = tokio::sync::mpsc::unbounded_channel();
+    PageSearches {
+        file_search: FileSearchManager::new(cwd.to_path_buf(), file_search_tx),
+        file_search_rx,
+        mention_rerank: MentionRerank::at(cwd, move |answer| {
+            let _ = mention_rerank_tx.send(answer);
+        }),
+        mention_rerank_rx,
+    }
+}
+
 struct App {
     /// 턴이 도는 동안에는 세션이 **여기 없다** — 턴 future 가 통째로 가져가
     /// 다른 task 에서 돈다([`App::turn`]). 그래야 턴 준비의 동기 구간이
@@ -679,6 +708,9 @@ struct App {
     /// Snapshots from the `@` file search — codex `AppEvent::FileSearchResult`
     /// — selected on beside keys and blocks so a result never waits for one.
     file_search_rx: tokio::sync::mpsc::UnboundedReceiver<FileSearchResult>,
+    /// Answers from the mention seat (t-6042), selected on beside the file
+    /// search's snapshots so an answer never waits for a key.
+    mention_rerank_rx: tokio::sync::mpsc::UnboundedReceiver<MentionAnswer>,
     ui: Ui,
 }
 
@@ -1525,6 +1557,7 @@ impl Ui {
         self.last_commit = None;
         self.effort_effect = None;
         self.mentions.close();
+        self.mention_rerank.disarm();
         self.skill_catalog = None;
         self.file_search.forget_touched();
     }
@@ -1985,6 +2018,7 @@ impl Ui {
     /// surface that owns the keys (a picker, a dialog, the agents overview
     /// with its own composer) gets no popup under it.
     fn sync_mentions(&mut self) {
+        let was_open = self.mentions.is_open();
         if self.overlay().is_some()
             || self.sessions.is_some()
             || self.parked.is_some()
@@ -1993,6 +2027,9 @@ impl Ui {
         {
             self.mentions.close();
             self.file_search.on_user_query("");
+            if was_open {
+                self.mention_rerank.disarm();
+            }
             return;
         }
         let Ui {
@@ -2010,6 +2047,7 @@ impl Ui {
                 })
                 .clone()
         });
+        self.mention_popup_moved(was_open);
     }
 
     /// codex `apply_file_search_result` → `on_file_search_result`: a snapshot
@@ -2018,6 +2056,90 @@ impl Ui {
     fn on_file_search_result(&mut self, result: FileSearchResult) {
         self.mentions
             .on_file_search_result(&self.composer, &result.query, result.matches);
+        self.mention_page_stands();
+    }
+
+    /// zo (t-6042): the `@` popup's keys, and what the mention seat is told
+    /// after them — the pick a completion made, a page that closed, a page
+    /// whose rows a mode switch changed.
+    fn mention_key(&mut self, key: &KeyEvent) -> MentionKey {
+        let was_open = self.mentions.is_open();
+        let outcome = self.mentions.key(key, &mut self.composer);
+        self.mention_popup_moved(was_open);
+        outcome
+    }
+
+    /// zo (t-6042): after anything that may have opened, closed or changed
+    /// the `@` popup. The seat is armed as a page opens and disarmed as one
+    /// closes — after the pick the closing completion made is written — and
+    /// an open page is put to it when it changed.
+    fn mention_popup_moved(&mut self, was_open: bool) {
+        if let Some(pick) = self.mentions.take_pick() {
+            let _ = self.mention_rerank.note_chosen(pick.ticket, pick.position, pick.reordered);
+        }
+        match (was_open, self.mentions.is_open()) {
+            (false, true) => self.mention_rerank.arm(),
+            (true, false) => self.mention_rerank.disarm(),
+            _ => {}
+        }
+        self.mention_page_stands();
+    }
+
+    /// zo (t-6042): the `@` popup's page as it stands, put to the mention
+    /// seat when it changed. The intent is the composer's text around the
+    /// token; the seat cuts it to the row's cap.
+    fn mention_page_stands(&mut self) {
+        if !self.mentions.is_open() {
+            return;
+        }
+        let intent = self.composer.at_token().map_or_else(String::new, |(range, _)| {
+            let text = self.composer.text();
+            let start = range.start.min(text.len());
+            let end = range.end.clamp(start, text.len());
+            format!("{}{}", text[..start].trim_end(), text[end..].trim_start())
+        });
+        let Ui { mentions, mention_rerank, .. } = self;
+        mentions.page_stands(|query, candidates| {
+            mention_rerank.ask(MentionAsk {
+                surface: MentionSurface::Mention,
+                intent: intent.clone(),
+                query: query.to_string(),
+                candidates,
+            })
+        });
+    }
+
+    /// zo (t-6042): the `/resume` list's first page as it stands, put to the
+    /// mention seat when it changed. The words typed are the whole intent.
+    fn resume_page_stands(&mut self) {
+        let Ui { sessions, mention_rerank, .. } = self;
+        let Some(picker) = sessions.as_mut() else {
+            return;
+        };
+        picker.page_stands(|query, candidates: Vec<MentionCandidate>| {
+            mention_rerank.ask(MentionAsk {
+                surface: MentionSurface::Resume,
+                intent: String::new(),
+                query: query.to_string(),
+                candidates,
+            })
+        });
+    }
+
+    /// zo (t-6042): an answer from the mention seat lands on whichever page
+    /// asked — and only while that page still stands and its selection sits
+    /// on the first row.
+    fn on_mention_rerank(&mut self, answer: &MentionAnswer) {
+        match answer.surface {
+            MentionSurface::Resume => {
+                if let Some(picker) = self.sessions.as_mut() {
+                    picker.apply_rerank(answer);
+                }
+            }
+            MentionSurface::Mention => {
+                self.mentions.apply_rerank(answer);
+            }
+        }
     }
 
     #[allow(clippy::too_many_lines)] // 평평한 키 match — 한 arm 씩.
@@ -2034,7 +2156,7 @@ impl Ui {
         // The `@` popup reads its keys first — codex
         // `handle_key_event_with_mentions_v2_popup`. Enter with nothing to
         // insert closes it and submits the line as it is.
-        match self.mentions.key(&key, &mut self.composer) {
+        match self.mention_key(&key) {
             MentionKey::Consumed => return KeyOutcome::Nothing,
             MentionKey::Submit | MentionKey::Passed => {}
         }
@@ -2636,6 +2758,9 @@ impl Ui {
             Some(self.session_cwd.clone()),
             sessions::now_millis(),
         ));
+        // zo (t-6042): the list is a page the mention seat may reorder once
+        // the person types what they are looking for.
+        self.mention_rerank.arm();
     }
 
     /// `/resume` 한 키 — codex `resume_picker.rs` 의 키 표 그대로.
@@ -2677,13 +2802,21 @@ impl Ui {
                 .and_then(sessions::SessionPicker::selected_id)
                 .map(ToOwned::to_owned);
             if let Some(id) = chosen {
+                // zo (t-6042): the pick, read against the page the seat saw,
+                // before the page goes.
+                if let Some(pick) = self.sessions.as_ref().and_then(sessions::SessionPicker::pick) {
+                    let _ = self.mention_rerank.note_chosen(pick.ticket, pick.position, pick.reordered);
+                }
                 self.sessions = None;
+                self.mention_rerank.disarm();
                 return KeyOutcome::Resumed(id);
             }
         }
         if close {
             self.sessions = None;
+            self.mention_rerank.disarm();
         }
+        self.resume_page_stands();
         KeyOutcome::Nothing
     }
 
@@ -3115,7 +3248,7 @@ impl Ui {
         }
         // The `@` popup consumes its keys — Esc closes it before it could
         // read as an interrupt, exactly as codex's composer does.
-        match self.mentions.key(key, &mut self.composer) {
+        match self.mention_key(key) {
             MentionKey::Consumed => return true,
             MentionKey::Submit => {
                 self.submit_composer_during_turn(turn, exit_after);
@@ -4083,8 +4216,7 @@ impl App {
         let worktree_context = worktree_context(&session_cwd);
         let footer_location = view::footer_location(&cwd, worktree_context.as_deref());
         let route_fact = session.route_fact_receiver();
-        let (file_search_tx, file_search_rx) = tokio::sync::mpsc::unbounded_channel();
-        let file_search = FileSearchManager::new(session_cwd.clone(), file_search_tx);
+        let PageSearches { file_search, file_search_rx, mention_rerank, mention_rerank_rx } = page_searches(&session_cwd);
         Ok(Self {
             ui: Ui {
                 flags,
@@ -4128,6 +4260,7 @@ impl App {
                 mentions: Mentions::default(),
                 skill_catalog: None,
                 file_search,
+                mention_rerank,
                 reporter: HookReporter::from_env(),
                 model,
                 fast,
@@ -4159,6 +4292,7 @@ impl App {
             route_fact,
             close_requested: None,
             file_search_rx,
+            mention_rerank_rx,
             signals: TerminationSignals::install(),
         })
     }
@@ -4242,6 +4376,10 @@ impl App {
                 () = TerminationSignals::delivered(&mut self.signals) => break ExitReason::UserExit,
                 Some(result) = self.file_search_rx.recv() => {
                     self.ui.on_file_search_result(result);
+                    self.ui.draw();
+                }
+                Some(answer) = self.mention_rerank_rx.recv() => {
+                    self.ui.on_mention_rerank(&answer);
                     self.ui.draw();
                 }
                 followup = recv_agent_followup(&mut self.agent_completion_pump) => {
@@ -4455,6 +4593,10 @@ impl App {
                 }
                 Some(result) = self.file_search_rx.recv() => {
                     self.ui.on_file_search_result(result);
+                    self.ui.draw();
+                }
+                Some(answer) = self.mention_rerank_rx.recv() => {
+                    self.ui.on_mention_rerank(&answer);
                     self.ui.draw();
                 }
                 command = crate::ide::events::next_command(crate::ide::events::channel()) => match command {
@@ -5031,6 +5173,7 @@ impl App {
                 self.ui
                     .file_search
                     .update_search_dir(self.ui.session_cwd.clone());
+                self.ui.mention_rerank.move_to(&self.ui.session_cwd);
                 self.ui.session_id = self.session().handle.id.clone();
                 self.ui.registry = self.session().registry();
                 self.session_card();
@@ -5134,6 +5277,7 @@ impl App {
                 self.ui
                     .file_search
                     .update_search_dir(self.ui.session_cwd.clone());
+                self.ui.mention_rerank.move_to(&self.ui.session_cwd);
                 self.ui.session_id = self.session().handle.id.clone();
                 self.ui.registry = self.session().registry();
                 self.session_card();
@@ -5432,6 +5576,10 @@ impl App {
                 }
                 Some(result) = self.file_search_rx.recv() => {
                     ui.on_file_search_result(result);
+                    ui.draw_with_queue(|| block_rx.len());
+                }
+                Some(answer) = self.mention_rerank_rx.recv() => {
+                    ui.on_mention_rerank(&answer);
                     ui.draw_with_queue(|| block_rx.len());
                 }
                 Some(answer) = events::wait_answer(turn_scaffold.ide, waiting) => {
@@ -5804,6 +5952,7 @@ fn test_ui() -> Ui {
             std::env::temp_dir(),
             tokio::sync::mpsc::unbounded_channel().0,
         ),
+        mention_rerank: MentionRerank::at(&std::env::temp_dir(), |_| {}),
         reporter: None,
         model: "test-model".to_string(),
         fast: false,
