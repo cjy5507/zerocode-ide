@@ -288,6 +288,16 @@ fn set_mode(path: &Path, row: &JevUse, mode: &str) -> Result<(), String> {
         .offered(mode)
         .ok_or_else(|| format!("알 수 없는 판단 모드입니다: {mode}"))?
         .key();
+    update_smart(path, |smart| {
+        smart.insert(row.setting.to_string(), Value::String(word.to_string()));
+    })
+}
+
+/// Change `smart` in zo's settings file and nothing else — the one door the
+/// seat switches, the classifier and the model pin write through. A missing
+/// `smart` is made; one that is not an object is refused rather than
+/// overwritten.
+fn update_smart(path: &Path, change: impl FnOnce(&mut Map<String, Value>)) -> Result<(), String> {
     crate::api_routers::update_zo_settings_root(path, |root| {
         let smart = root
             .entry(SMART_SETTINGS_KEY)
@@ -297,7 +307,7 @@ fn set_mode(path: &Path, row: &JevUse, mode: &str) -> Result<(), String> {
                 "settings.json의 {SMART_SETTINGS_KEY}가 JSON 객체가 아니라 바꾸지 않았습니다"
             ));
         };
-        smart.insert(row.setting.to_string(), Value::String(word.to_string()));
+        change(smart);
         Ok(())
     })
 }
@@ -318,20 +328,11 @@ pub fn set_classifier(path: &Path, mode: &str) -> Result<(), String> {
     let word = ClassifierMode::offered(mode)
         .ok_or_else(|| format!("알 수 없는 분류기 모드입니다: {mode}"))?
         .key();
-    crate::api_routers::update_zo_settings_root(path, |root| {
-        let smart = root
-            .entry(SMART_SETTINGS_KEY)
-            .or_insert_with(|| Value::Object(Map::new()));
-        let Value::Object(smart) = smart else {
-            return Err(format!(
-                "settings.json의 {SMART_SETTINGS_KEY}가 JSON 객체가 아니라 바꾸지 않았습니다"
-            ));
-        };
+    update_smart(path, |smart| {
         smart.insert(
             CLASSIFIER_SETTING.to_string(),
             Value::String(word.to_string()),
         );
-        Ok(())
     })
 }
 
@@ -354,24 +355,13 @@ pub fn set_model(path: &Path, word: &str) -> Result<ModelRow, String> {
     } else {
         Some(pinned_model(word).ok_or_else(|| format!("알 수 없는 모델 이름입니다: {word}"))?)
     };
-    crate::api_routers::update_zo_settings_root(path, |root| {
-        let smart = root
-            .entry(SMART_SETTINGS_KEY)
-            .or_insert_with(|| Value::Object(Map::new()));
-        let Value::Object(smart) = smart else {
-            return Err(format!(
-                "settings.json의 {SMART_SETTINGS_KEY}가 JSON 객체가 아니라 바꾸지 않았습니다"
-            ));
-        };
-        match pin {
-            Some(pin) => {
-                smart.insert(MODEL_SETTING.to_string(), Value::String(pin.to_string()));
-            }
-            None => {
-                smart.remove(MODEL_SETTING);
-            }
+    update_smart(path, |smart| match pin {
+        Some(pin) => {
+            smart.insert(MODEL_SETTING.to_string(), Value::String(pin.to_string()));
         }
-        Ok(())
+        None => {
+            smart.remove(MODEL_SETTING);
+        }
     })?;
     Ok(ModelRow::of(&crate::api_routers::read_zo_settings_root(
         path,
