@@ -1,0 +1,1070 @@
+//! What a forked step may do, and what it may not (t-6044).
+
+use std::collections::BTreeMap;
+
+use serde_json::{Value, json};
+use zerocode_core::branching::BranchChoice;
+use zerocode_core::computer_recipe::RecipeStop;
+use zerocode_core::jev::summary::AGREED;
+use zerocode_core::screen_action::{ActionChoice, Chosen, option_of};
+
+use super::super::tests::{FakeJudge, FakeWorld, goal, pick, stopped};
+use super::super::{Judged, Mode, run, run_with};
+use super::{Branching, Compared};
+
+const SHADOW: Branching = Branching {
+    mode: Mode::Shadow,
+    acting: false,
+};
+const RAISED: Branching = Branching {
+    mode: Mode::Auto,
+    acting: true,
+};
+const UNRAISED: Branching = Branching {
+    mode: Mode::Auto,
+    acting: false,
+};
+
+/// The screen seat's answer: `chosen` first, then the others by weight.
+fn ranked(chosen: usize, spread: &[(usize, f64)]) -> Judged {
+    let Judged::Chose(mut choice) = pick(chosen) else {
+        unreachable!()
+    };
+    choice.probabilities = spread
+        .iter()
+        .map(|(mark, weight)| (option_of(*mark), *weight))
+        .collect();
+    choice.probabilities.insert("give_up".to_string(), 0.0);
+    Judged::Chose(choice)
+}
+
+/// A comparison that names `mark` at `confidence`.
+fn compared(mark: usize, confidence: f64) -> Compared {
+    Compared::Chose(BranchChoice {
+        mark,
+        probabilities: BTreeMap::new(),
+        confidence,
+    })
+}
+
+fn control(mark: usize, label: &str) -> Value {
+    json!({
+        "mark": mark,
+        "role": "button",
+        "label": label,
+        "centerX": 100.0 + mark as f64,
+        "centerY": 40.0,
+    })
+}
+
+/// A phone showing two controls, where pressing 2 leads to a screen with
+/// nothing new and pressing 1 leads to the goal's screen.
+fn phone() -> FakeWorld {
+    let mut world = FakeWorld::android(&[1, 2]);
+    world.leads_to.insert(
+        1,
+        vec![
+            control(1, "Wi-Fi"),
+            control(2, "Bluetooth"),
+            control(3, "연결됨"),
+        ],
+    );
+    world
+}
+
+/// A judge whose press ranks 2 first and 1 second.
+fn judging() -> FakeJudge {
+    let mut judge = FakeJudge::chose(&[]);
+    judge.answers = vec![ranked(2, &[(2, 0.6), (1, 0.4)])];
+    judge
+}
+
+/// The rows of a walk with the clock's stamps taken off, so two walks can
+/// be compared word for word.
+fn unstamped(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .map(|row| {
+            let mut row = row.clone();
+            if let Some(row) = row.as_object_mut() {
+                row.remove("at");
+                row.remove("elapsedMs");
+            }
+            row
+        })
+        .collect()
+}
+
+#[test]
+fn off_is_todays_walk_byte_for_byte() {
+    let mut plain_world = phone();
+    let mut plain_judge = judging();
+    let plain = run(Mode::On, true, &goal(1), &mut plain_judge, &mut plain_world);
+
+    for off in [
+        Branching::OFF,
+        Branching {
+            mode: Mode::Off,
+            acting: true,
+        },
+    ] {
+        let mut world = phone();
+        let mut judge = judging();
+        let walked = run_with(Mode::On, true, off, &goal(1), &mut judge, &mut world);
+        assert_eq!(unstamped(&walked.rows), unstamped(&plain.rows), "{off:?}");
+        assert!(walked.forks.is_empty(), "{off:?}");
+        assert_eq!(world.presses, plain_world.presses, "{off:?}");
+        assert!(world.snapshot_log.is_empty(), "{off:?}");
+        assert!(judge.compared.is_empty(), "{off:?}: nothing is asked");
+    }
+    assert_eq!(
+        plain_world.presses,
+        [2],
+        "today presses the seat's first choice"
+    );
+}
+
+#[test]
+fn shadow_asks_over_actions_alone_and_presses_todays_number() {
+    for recording in [SHADOW, UNRAISED] {
+        let mut world = phone();
+        let mut judge = judging();
+        judge.compares = vec![compared(1, 0.9)];
+
+        let walked = run_with(Mode::On, true, recording, &goal(1), &mut judge, &mut world);
+
+        assert_eq!(
+            world.presses,
+            [2],
+            "{recording:?}: today's number is pressed"
+        );
+        assert!(
+            world.snapshot_log.is_empty(),
+            "{recording:?}: nothing is saved"
+        );
+        assert_eq!(judge.compared, [vec![2, 1]], "{recording:?}");
+        let asked = &judge.compared_state[0];
+        assert!(
+            asked["candidates"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|candidate| candidate.get("result").is_none()),
+            "{recording:?}: the question carries actions alone:\n{asked}"
+        );
+        assert_eq!(asked["where"]["platform"], "android");
+        assert_eq!(walked.forks.len(), 1, "{recording:?}");
+        let row = &walked.forks[0];
+        assert_eq!(row["mode"], json!(recording.mode.key()));
+        assert_eq!(row["explored"], 0);
+        assert_eq!(row["today"], "mark:2");
+        assert_eq!(row["chosen"], "mark:1");
+        assert_eq!(row["candidates"], 2);
+        assert_eq!(row["routeUse"], "shadow");
+        assert_eq!(row["reason"], "seat_recording");
+        assert_eq!(row["platform"], "android");
+        assert_eq!(row["device"], "Pixel_6");
+        assert!(row["branching"].is_string() && row["at"].is_i64());
+        assert!(
+            walked.rows[0].get("forked").is_none(),
+            "the screen seat's row pressed its own number"
+        );
+    }
+}
+
+#[test]
+fn an_acting_seat_saves_tries_each_candidate_and_presses_the_comparisons_pick() {
+    let mut world = phone();
+    let mut judge = judging();
+    judge.compares = vec![compared(1, 0.8)];
+
+    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+
+    assert_eq!(
+        world.presses,
+        [2, 1, 1],
+        "each candidate once on the saved device, then the pick"
+    );
+    assert_eq!(
+        world.snapshot_log,
+        [
+            ("save", "fake-0".to_string()),
+            ("load", "fake-0".to_string()),
+            ("load", "fake-0".to_string()),
+            ("forget", "fake-0".to_string()),
+        ],
+        "one save, a load after every candidate, one forget"
+    );
+    assert_eq!(judge.compared, [vec![2, 1]]);
+    let asked = &judge.compared_state[0];
+    let candidates = asked["candidates"].as_array().unwrap();
+    assert_eq!(candidates[0]["option"], "mark:2");
+    assert_eq!(
+        candidates[0]["result"]["moved"], false,
+        "pressing 2 led nowhere"
+    );
+    assert_eq!(candidates[1]["result"]["moved"], true);
+    assert_eq!(candidates[1]["result"]["count"], 3);
+    assert!(
+        candidates[1]["result"]["controls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|line| line.as_str().unwrap().contains("연결됨"))
+    );
+    assert_eq!(asked["before"].as_array().unwrap().len(), 2);
+    let row = &walked.forks[0];
+    assert_eq!(row["explored"], 2);
+    assert_eq!(row["routeUse"], "applied");
+    assert_eq!(row["chosen"], "mark:1");
+    assert_eq!(row["today"], "mark:2");
+    assert_eq!(row["outcome"], "answered");
+    assert_eq!(row["confidence"], 0.8);
+    assert_eq!(row["stepMs"].as_array().unwrap().len(), 2);
+    assert_eq!(row["restoreMs"].as_array().unwrap().len(), 2);
+    assert!(row["saveMs"].is_u64() && row["forkMs"].is_u64() && row["budgetMs"].is_u64());
+    assert_eq!(
+        walked.rows[0]["forked"], "mark:1",
+        "the screen seat's row says which number the hand went out with"
+    );
+    assert_eq!(
+        walked.rows[0]["chosen"], "mark:2",
+        "and keeps its own answer"
+    );
+    // The exploratory presses carry the fork's context, the pick the walk's.
+    let contexts: Vec<Value> = world
+        .observed
+        .iter()
+        .map(|seen: &Option<Value>| seen.clone().unwrap_or(Value::Null))
+        .collect();
+    assert_eq!(contexts[0]["fork"]["candidate"], 0);
+    assert_eq!(contexts[0]["fork"]["of"], 2);
+    assert_eq!(contexts[1]["fork"]["mark"], 1);
+    assert_eq!(contexts[2]["judgment"]["asked"], true);
+}
+
+#[test]
+fn a_low_confidence_comparison_and_a_refusal_press_the_first_candidate() {
+    for (answer, outcome, barred) in [
+        (Some(compared(1, 0.3)), "answered", Some("low_confidence")),
+        (None, "timeout", None),
+    ] {
+        let mut world = phone();
+        let mut judge = judging();
+        judge.compares = answer.into_iter().collect();
+
+        let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+
+        assert_eq!(
+            world.presses,
+            [2, 1, 2],
+            "{outcome}: explored, then today's"
+        );
+        let row = &walked.forks[0];
+        assert_eq!(row["outcome"], outcome);
+        assert_eq!(row["routeUse"], "fallback");
+        assert_eq!(row.get("barred").and_then(Value::as_str), barred);
+        assert!(
+            walked.rows[0].get("forked").is_none(),
+            "{outcome}: the hand went out with the seat's own number"
+        );
+        assert_eq!(
+            world.snapshot_log.last(),
+            Some(&("forget", "fake-0".to_string())),
+            "{outcome}: the saved state is let go of"
+        );
+    }
+}
+
+#[test]
+fn a_device_that_cannot_be_saved_steps_back_to_a_single_press() {
+    // An iOS simulator, and an Android device whose save failed, both
+    // answer the walk with no saved state.
+    let mut world = phone();
+    world.snapshots = None;
+    let mut judge = judging();
+    judge.compares = vec![compared(1, 0.9)];
+
+    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+
+    assert_eq!(world.presses, [2]);
+    assert!(
+        judge.compared.is_empty(),
+        "nothing explored, nothing compared"
+    );
+    assert_eq!(walked.forks[0]["barred"], "no_snapshot");
+    assert_eq!(walked.forks[0]["routeUse"], "fallback");
+    assert_eq!(walked.forks[0]["explored"], 0);
+}
+
+#[test]
+fn a_page_or_the_desktop_is_never_forked() {
+    let mut world = FakeWorld::showing(&[1, 2]);
+    world.snapshots = Some(0);
+    let mut judge = judging();
+    judge.compares = vec![compared(1, 0.9)];
+
+    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+
+    assert_eq!(world.presses, [2]);
+    assert!(walked.forks.is_empty(), "the seat is a phone step's");
+    assert!(world.snapshot_log.is_empty());
+}
+
+#[test]
+fn a_fork_without_clock_enough_presses_the_first_candidate_at_once() {
+    let mut world = phone();
+    world.snapshots = Some(1_000);
+    world.look_ms = 1_000;
+    // After the look and the save, three rounds of a step and a load plus
+    // the wall is more than what is left. The step's own cost is read off the
+    // walk's clock, which a fake world does not turn, so the budget here is
+    // the loads and the wall alone.
+    world.left_ms = 6_000;
+    let mut judge = judging();
+    judge.compares = vec![compared(1, 0.9)];
+
+    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+
+    assert_eq!(world.presses, [2]);
+    assert_eq!(
+        world.snapshot_log,
+        [
+            ("save", "fake-0".to_string()),
+            ("forget", "fake-0".to_string())
+        ],
+        "the budget is read off the save, and the save is let go of"
+    );
+    assert_eq!(walked.forks[0]["barred"], "no_budget");
+    assert_eq!(walked.forks[0]["saveMs"], 1_000);
+    assert!(judge.compared.is_empty());
+}
+
+#[test]
+fn a_load_that_fails_leaves_the_device_on_that_candidates_screen_and_says_so() {
+    let mut world = phone();
+    world.restore_takes = false;
+    let mut judge = judging();
+    judge.compares = vec![compared(1, 0.9)];
+
+    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+
+    assert_eq!(
+        world.presses,
+        [2],
+        "the first candidate's press is the step: nothing else is pressed"
+    );
+    let row = &walked.forks[0];
+    assert_eq!(row["outcome"], "restore_failed");
+    assert_eq!(row["chosen"], "mark:2");
+    assert_eq!(row["explored"], 1);
+    assert_eq!(row["routeUse"], "fallback");
+    assert!(judge.compared.is_empty());
+    assert_eq!(
+        world.snapshot_log,
+        [
+            ("save", "fake-0".to_string()),
+            ("load", "fake-0".to_string()),
+            ("forget", "fake-0".to_string())
+        ]
+    );
+    assert_eq!(walked.pressed, 1, "the walk counts the press it made");
+}
+
+#[test]
+fn one_candidate_is_no_fork() {
+    let mut world = phone();
+    let mut judge = FakeJudge::chose(&[]);
+    judge.answers = vec![ranked(2, &[(2, 1.0), (1, 0.0)])];
+    judge.compares = vec![compared(1, 0.9)];
+
+    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+
+    assert_eq!(world.presses, [2]);
+    assert!(
+        walked.forks.is_empty(),
+        "a press nobody else was weighed against is a step"
+    );
+    assert!(world.snapshot_log.is_empty());
+}
+
+#[test]
+fn a_step_at_the_persons_turn_is_never_forked() {
+    let mut world = phone();
+    let mut judge = judging();
+    judge.compares = vec![compared(1, 0.9)];
+
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &stopped(RecipeStop::PersonsTurn),
+        &mut judge,
+        &mut world,
+    );
+
+    assert!(world.presses.is_empty() && world.snapshot_log.is_empty());
+    assert!(walked.forks.is_empty());
+    assert_eq!(walked.rows[0]["barred"], "not_recoverable");
+}
+
+/// A goal walk of two steps whose second judgment is `second`.
+fn two_steps(second: Judged, compare: Compared) -> (FakeWorld, FakeJudge) {
+    let world = phone();
+    let mut judge = judging();
+    judge.answers.push(second);
+    judge.compares = vec![compare];
+    (world, judge)
+}
+
+#[test]
+fn the_walks_next_step_grades_the_fork() {
+    // Reached at once: the caller's own condition held after the pick.
+    let (mut world, mut judge) = two_steps(pick(3), compared(1, 0.8));
+    world.reached = vec![true];
+    let walked = run_with(Mode::On, true, RAISED, &goal(2), &mut judge, &mut world);
+    assert_eq!(walked.forks[0]["next"], "reached");
+    assert_eq!(walked.forks[0][AGREED.canonical], true);
+    assert_eq!(
+        walked.forks[0]["rescued"], true,
+        "a pick that differed from today's and got there rescued the step"
+    );
+
+    // Moved on: the next look is a new screen and the judgment presses on.
+    let (mut world, mut judge) = two_steps(pick(3), compared(1, 0.8));
+    let walked = run_with(Mode::On, true, RAISED, &goal(2), &mut judge, &mut world);
+    assert_eq!(walked.forks[0]["next"], "moved_on");
+    assert_eq!(walked.forks[0][AGREED.canonical], true);
+    assert_eq!(walked.forks[0]["rescued"], true);
+
+    // Gave up: the next judgment sees nothing worth pressing where the pick led.
+    let (mut world, mut judge) = two_steps(
+        Judged::Chose(ActionChoice {
+            chosen: Chosen::GiveUp,
+            probabilities: BTreeMap::new(),
+            confidence: 0.7,
+        }),
+        compared(1, 0.8),
+    );
+    let walked = run_with(Mode::On, true, RAISED, &goal(2), &mut judge, &mut world);
+    assert_eq!(walked.forks[0]["next"], "gave_up");
+    assert_eq!(walked.forks[0][AGREED.canonical], false);
+    assert_eq!(walked.forks[0]["rescued"], false);
+
+    // The same screen: the pick did nothing, and what follows is a retry.
+    let (mut world, mut judge) = two_steps(pick(1), compared(2, 0.8));
+    let walked = run_with(Mode::On, true, RAISED, &goal(2), &mut judge, &mut world);
+    assert_eq!(walked.forks[0]["chosen"], "mark:2");
+    assert_eq!(walked.forks[0]["next"], "same_screen");
+    assert_eq!(walked.forks[0][AGREED.canonical], false);
+
+    // The walk ended before a next look: nothing is shown either way.
+    let (mut world, mut judge) = two_steps(pick(3), compared(1, 0.8));
+    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+    assert!(walked.forks[0].get("next").is_none());
+    assert!(walked.forks[0].get(AGREED.canonical).is_none());
+}
+
+#[test]
+fn under_shadow_the_mark_reads_the_comparison_against_todays_press() {
+    // The same pick shares today's fate.
+    let (mut world, mut judge) = two_steps(pick(3), compared(2, 0.8));
+    world.leads_to.insert(2, vec![control(3, "다음")]);
+    let walked = run_with(Mode::On, true, SHADOW, &goal(2), &mut judge, &mut world);
+    assert_eq!(world.presses, [2, 3]);
+    assert_eq!(walked.forks[0]["next"], "moved_on");
+    assert_eq!(walked.forks[0][AGREED.canonical], true);
+    assert_eq!(walked.forks[0]["rescued"], false, "nothing was applied");
+
+    // A different pick is wrong when today's press went on fine.
+    let (mut world, mut judge) = two_steps(pick(3), compared(1, 0.8));
+    world.leads_to.insert(2, vec![control(3, "다음")]);
+    let walked = run_with(Mode::On, true, SHADOW, &goal(2), &mut judge, &mut world);
+    assert_eq!(walked.forks[0][AGREED.canonical], false);
+
+    // And says nothing when today's press failed: nobody tried the other.
+    let (mut world, mut judge) = two_steps(pick(1), compared(1, 0.8));
+    let walked = run_with(Mode::On, true, SHADOW, &goal(2), &mut judge, &mut world);
+    assert_eq!(walked.forks[0]["next"], "same_screen");
+    assert!(walked.forks[0].get(AGREED.canonical).is_none());
+}
+
+/// The fork's cost on a fake desk whose clock is this machine's own: a look
+/// of 1,386 ms and a press of 1,420 ms (the emulator walk this window
+/// recorded on 2026-09-20, `computer-use/sessions/20260920-125305-1482`),
+/// and 1,700 ms per snapshot save or load — inside the band the live AVD on
+/// this machine answered on 2026-09-22 (`a_live_avds_snapshot_round_trip`
+/// on emulator-5554: saves 2,394 and 921 ms, loads 1,338 and 1,409 ms, the
+/// delete 101 ms) and the 1.4–2.0 s saves `emulator::android::SNAPSHOT_SAVE_LIMIT`'s
+/// note measured. Printed so a report can carry the multiple; asserted so
+/// the arithmetic cannot drift from the road.
+#[test]
+fn measure_forked_steps_on_a_fake_desk() {
+    const LOOK_MS: u64 = 1_386;
+    const PRESS_MS: u64 = 1_420;
+    const SNAPSHOT_MS: u64 = 1_700;
+    let desk = || {
+        let mut world = phone();
+        world.look_ms = LOOK_MS;
+        world.press_ms = PRESS_MS;
+        world.snapshots = Some(SNAPSHOT_MS);
+        world.left_ms = 600_000;
+        world
+    };
+    // One step, today: a look and a press.
+    let mut single = desk();
+    let mut judge = judging();
+    run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(1),
+        &mut judge,
+        &mut single,
+    );
+    let single_ms = single.spent_ms;
+    assert_eq!(single_ms, LOOK_MS + PRESS_MS);
+
+    // The same step, forked over k = 2: a save, two presses with a look and
+    // a load each, and the pick.
+    let mut forked = desk();
+    let mut judge = judging();
+    judge.compares = vec![compared(1, 0.8)];
+    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut forked);
+    let forked_ms = forked.spent_ms;
+    assert_eq!(
+        forked_ms,
+        LOOK_MS + SNAPSHOT_MS + 2 * (PRESS_MS + LOOK_MS + SNAPSHOT_MS) + PRESS_MS
+    );
+    assert_eq!(walked.forks[0]["explored"], 2);
+
+    // Rescued steps over a set of forks where today's press leads nowhere
+    // and the alternate leads to the goal, judged by a comparison that reads
+    // the results as scripted: every one of them.
+    let mut rescued = 0;
+    let mut forks = 0;
+    for _ in 0..10 {
+        let mut world = desk();
+        world.reached = vec![true];
+        let mut judge = judging();
+        judge.compares = vec![compared(1, 0.8)];
+        let walked = run_with(Mode::On, true, RAISED, &goal(2), &mut judge, &mut world);
+        forks += 1;
+        if walked.forks[0]["rescued"] == json!(true) {
+            rescued += 1;
+        }
+    }
+    #[allow(clippy::cast_precision_loss)]
+    let multiple = forked_ms as f64 / single_ms as f64;
+    println!(
+        "MEASURE fake desk: single step {single_ms} ms, forked step (k=2) {forked_ms} ms, x{multiple:.2}; rescued {rescued}/{forks} steps where today's press led nowhere"
+    );
+    assert_eq!(rescued, forks);
+    assert!(multiple > 1.0);
+}
+
+/* ---- the replay: the fake desk's forks, asked of the real endpoint ---- */
+
+/// The seed `tools/branching-replay/seed.py` wrote (optional: it counts how
+/// many of this machine's phone presses a fork would have been offered at).
+const SEED_ENV: &str = "ZEROCODE_BRANCHING_REPLAY_SEED";
+/// How many times each fork is asked (default 1): passes beyond the first
+/// measure the seat's repeatability, not more evidence.
+const RUNS_ENV: &str = "ZEROCODE_BRANCHING_REPLAY_RUNS";
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplaySeed {
+    k: usize,
+    k_cap: usize,
+    apply_deadline_ms: u64,
+    rows: Vec<ReplayRow>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ReplayRow {
+    platform: Option<String>,
+    probabilities: BTreeMap<String, f64>,
+    chosen: Option<String>,
+    look_ms: Option<u64>,
+    act_ms: Option<u64>,
+}
+
+/// One fork of the fake desk: a goal, the screen before, the candidates with
+/// the screens they led to, and which candidate the scenario says is right.
+struct Scenario {
+    goal: &'static str,
+    before: &'static [&'static str],
+    candidates: &'static [(usize, &'static str, bool, &'static [&'static str])],
+    right: usize,
+}
+
+/// Forks a phone walk meets: a settings tree, a chat list, a form, a dialog.
+/// Each candidate is the legend line pressed, whether the screen moved and
+/// the legend of the screen it led to; the first candidate is the one the
+/// emulator seat ranked first.
+const SCENARIOS: [Scenario; 8] = [
+    Scenario {
+        goal: "Wi-Fi 설정을 열어라",
+        before: &[
+            "1 button Wi-Fi @101,40",
+            "2 button 설정 @102,40",
+            "3 button 검색 @103,40",
+        ],
+        candidates: &[
+            (
+                2,
+                "2 button 설정 @102,40",
+                true,
+                &[
+                    "4 button 네트워크 및 인터넷 @104,40",
+                    "5 button 연결된 기기 @105,40",
+                    "6 button 앱 @106,40",
+                ],
+            ),
+            (
+                1,
+                "1 button Wi-Fi @101,40",
+                true,
+                &[
+                    "7 switch Wi-Fi 사용 @107,40",
+                    "8 button 저장된 네트워크 @108,40",
+                ],
+            ),
+        ],
+        right: 1,
+    },
+    Scenario {
+        goal: "홍길동에게 보낼 채팅방을 열어라",
+        before: &[
+            "1 button 홍길동 @101,40",
+            "2 button 김철수 @102,40",
+            "3 button 새 채팅 @103,40",
+        ],
+        candidates: &[
+            (
+                3,
+                "3 button 새 채팅 @103,40",
+                true,
+                &["4 edit 받는 사람 @104,40", "5 button 취소 @105,40"],
+            ),
+            (
+                1,
+                "1 button 홍길동 @101,40",
+                true,
+                &[
+                    "6 edit 메시지 입력 @106,40",
+                    "7 button 보내기 @107,40",
+                    "8 text 홍길동 @108,10",
+                ],
+            ),
+        ],
+        right: 1,
+    },
+    Scenario {
+        goal: "알림을 끄고 저장하라",
+        before: &[
+            "1 switch 알림 @101,40",
+            "2 button 저장 @102,40",
+            "3 button 뒤로 @103,40",
+        ],
+        candidates: &[
+            (
+                2,
+                "2 button 저장 @102,40",
+                false,
+                &[
+                    "1 switch 알림 @101,40",
+                    "2 button 저장 @102,40",
+                    "3 button 뒤로 @103,40",
+                ],
+            ),
+            (
+                1,
+                "1 switch 알림 @101,40",
+                true,
+                &[
+                    "1 switch 알림 꺼짐 @101,40",
+                    "2 button 저장 @102,40",
+                    "3 button 뒤로 @103,40",
+                ],
+            ),
+        ],
+        right: 1,
+    },
+    Scenario {
+        goal: "계정에서 로그아웃하라",
+        before: &[
+            "1 button 프로필 @101,40",
+            "2 button 설정 @102,40",
+            "3 button 도움말 @103,40",
+        ],
+        candidates: &[
+            (
+                1,
+                "1 button 프로필 @101,40",
+                true,
+                &[
+                    "4 text 홍길동 @104,10",
+                    "5 button 프로필 수정 @105,40",
+                    "6 button 로그아웃 @106,40",
+                ],
+            ),
+            (
+                2,
+                "2 button 설정 @102,40",
+                true,
+                &[
+                    "7 button 알림 @107,40",
+                    "8 button 개인정보 @108,40",
+                    "9 button 정보 @109,40",
+                ],
+            ),
+        ],
+        right: 1,
+    },
+    Scenario {
+        goal: "사진을 한 장 첨부하라",
+        before: &[
+            "1 button 카메라 @101,40",
+            "2 button 갤러리 @102,40",
+            "3 button 파일 @103,40",
+        ],
+        candidates: &[
+            (
+                3,
+                "3 button 파일 @103,40",
+                true,
+                &[
+                    "4 button 최근 @104,40",
+                    "5 button 다운로드 @105,40",
+                    "6 button 문서 @106,40",
+                ],
+            ),
+            (
+                2,
+                "2 button 갤러리 @102,40",
+                true,
+                &[
+                    "7 image IMG_0001 @107,40",
+                    "8 image IMG_0002 @108,40",
+                    "9 button 선택 @109,40",
+                ],
+            ),
+            (
+                1,
+                "1 button 카메라 @101,40",
+                true,
+                &["10 button 촬영 @110,40", "11 button 전환 @111,40"],
+            ),
+        ],
+        right: 2,
+    },
+    Scenario {
+        goal: "확인 대화상자를 닫고 목록으로 돌아가라",
+        before: &[
+            "1 button 취소 @101,40",
+            "2 button 삭제 @102,40",
+            "3 text 정말 삭제할까요? @103,10",
+        ],
+        candidates: &[
+            (
+                2,
+                "2 button 삭제 @102,40",
+                true,
+                &[
+                    "4 text 삭제되었습니다 @104,10",
+                    "5 button 실행 취소 @105,40",
+                ],
+            ),
+            (
+                1,
+                "1 button 취소 @101,40",
+                true,
+                &[
+                    "6 button 항목 1 @106,40",
+                    "7 button 항목 2 @107,40",
+                    "8 button 항목 3 @108,40",
+                ],
+            ),
+        ],
+        right: 1,
+    },
+    Scenario {
+        goal: "다크 모드를 켜라",
+        before: &[
+            "1 button 디스플레이 @101,40",
+            "2 button 소리 @102,40",
+            "3 button 배터리 @103,40",
+        ],
+        candidates: &[
+            (
+                3,
+                "3 button 배터리 @103,40",
+                true,
+                &["4 switch 절전 모드 @104,40", "5 text 배터리 82% @105,10"],
+            ),
+            (
+                1,
+                "1 button 디스플레이 @101,40",
+                true,
+                &[
+                    "6 switch 다크 모드 @106,40",
+                    "7 button 밝기 @107,40",
+                    "8 button 글자 크기 @108,40",
+                ],
+            ),
+        ],
+        right: 1,
+    },
+    Scenario {
+        goal: "이번 달 청구서를 열어라",
+        before: &[
+            "1 button 홈 @101,40",
+            "2 button 청구 @102,40",
+            "3 button 더보기 @103,40",
+        ],
+        candidates: &[
+            (
+                3,
+                "3 button 더보기 @103,40",
+                true,
+                &[
+                    "4 button 설정 @104,40",
+                    "5 button 고객센터 @105,40",
+                    "6 button 로그아웃 @106,40",
+                ],
+            ),
+            (
+                2,
+                "2 button 청구 @102,40",
+                true,
+                &[
+                    "7 button 2026년 9월 청구서 @107,40",
+                    "8 button 2026년 8월 청구서 @108,40",
+                    "9 button 자동 납부 @109,40",
+                ],
+            ),
+        ],
+        right: 2,
+    },
+];
+
+fn scenario_ask(scenario: &Scenario) -> zerocode_core::branching::BranchAsk {
+    use zerocode_core::branching::{BranchLook, Candidate, Outcome, ask};
+    let candidates: Vec<Candidate> = scenario
+        .candidates
+        .iter()
+        .map(|(mark, action, moved, controls)| Candidate {
+            mark: *mark,
+            action: (*action).to_string(),
+            result: Some(Outcome {
+                moved: *moved,
+                controls: controls.iter().map(|line| (*line).to_string()).collect(),
+                count: controls.len(),
+            }),
+        })
+        .collect();
+    let before: Vec<String> = scenario
+        .before
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect();
+    ask(&BranchLook {
+        goal: scenario.goal,
+        at: zerocode_core::screen_action::Where::Phone {
+            platform: "android",
+            device: "Pixel_6",
+        },
+        before: &before,
+        candidates: &candidates,
+    })
+    .expect("every scenario has two candidates")
+}
+
+/// The fake desk's forks, put to the real endpoint as the shipped question
+/// (`branching::ask`), and read against the scenario's own right answer:
+/// how often the comparison named it, how often it named what the emulator
+/// seat would have pressed (the first candidate), its latency and what it
+/// cost. With a seed, also how many of this machine's phone presses a fork
+/// would have been offered at (`branching::fork_wanted` over the seat's own
+/// probabilities) and what those steps' looks and presses cost.
+///
+/// The person's ledger and day count are never touched — the question
+/// leaves from a temporary home. The key comes from the environment
+/// (`tools/branching-replay/README.md`).
+#[test]
+#[ignore = "crosses the real endpoint; run by hand with the key in the environment"]
+fn the_forks_this_desk_would_take() {
+    use zerocode_core::branching::fork_wanted;
+    use zerocode_core::jev::{BRANCHING, BRANCHING_APPLY_DEADLINE_MS, JevMode, SMART_SETTINGS_KEY};
+
+    if let Ok(seed_at) = std::env::var(SEED_ENV) {
+        let seed: ReplaySeed =
+            serde_json::from_str(&std::fs::read_to_string(&seed_at).expect("the seed reads"))
+                .expect("the seed's shape");
+        assert_eq!(
+            (seed.k, seed.k_cap, seed.apply_deadline_ms),
+            (
+                zerocode_core::jev::BRANCHING_K,
+                zerocode_core::jev::BRANCHING_K_CAP,
+                BRANCHING_APPLY_DEADLINE_MS
+            ),
+            "a seed made for another table is refused"
+        );
+        let mut would_fork = 0usize;
+        let mut looks = Vec::new();
+        let mut acts = Vec::new();
+        for row in &seed.rows {
+            let chosen = row
+                .chosen
+                .as_deref()
+                .and_then(zerocode_core::screen_action::mark_of)
+                .map_or(Chosen::GiveUp, Chosen::Mark);
+            let choice = ActionChoice {
+                chosen,
+                probabilities: row.probabilities.clone(),
+                confidence: 0.0,
+            };
+            if fork_wanted(&choice).len() >= 2 {
+                would_fork += 1;
+            }
+            looks.extend(row.look_ms);
+            acts.extend(row.act_ms);
+        }
+        looks.sort_unstable();
+        acts.sort_unstable();
+        println!(
+            "SEED {seed_at}: {} phone presses on this machine, {would_fork} would have forked (k={}); look p50 {:?} ms, press p50 {:?} ms; platforms {:?}",
+            seed.rows.len(),
+            seed.k,
+            zerocode_core::jev::summary::percentile(&looks, 0.5),
+            zerocode_core::jev::summary::percentile(&acts, 0.5),
+            seed.rows
+                .iter()
+                .filter_map(|row| row.platform.clone())
+                .collect::<std::collections::BTreeSet<_>>(),
+        );
+    }
+
+    let key = std::env::var(zerocode_harness::TYPESAFE_API_KEY_ENV).unwrap_or_else(|_| {
+        panic!(
+            "{} carries this machine's TypeSafe key",
+            zerocode_harness::TYPESAFE_API_KEY_ENV
+        )
+    });
+    let runs: usize = std::env::var(RUNS_ENV)
+        .ok()
+        .and_then(|said| said.parse().ok())
+        .unwrap_or(1)
+        .max(1);
+    let home = tempfile::tempdir().expect("a zo home of this measurement's own");
+    let work = tempfile::tempdir().expect("a checkout");
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({
+            SMART_SETTINGS_KEY: {
+                BRANCHING.setting: JevMode::Shadow.key(),
+                "jev": { "workspaces": [work.path().display().to_string()] },
+            }
+        })
+        .to_string(),
+    )
+    .expect("zo's settings");
+    let wire =
+        crate::systemone::Wire::at(crate::systemone::SYSTEMONE_BASE_URL, &key, Some(settings));
+    let rate = model_prices::systemone_rate(crate::systemone::SYSTEMONE_MODEL);
+    println!(
+        "scenarios={} runs={runs} wall={}ms",
+        SCENARIOS.len(),
+        BRANCHING_APPLY_DEADLINE_MS
+    );
+
+    let mut right = zerocode_core::jev::promote::Agreement::default();
+    let mut as_today = 0usize;
+    let mut elapsed = Vec::new();
+    let mut refusals: BTreeMap<String, usize> = BTreeMap::new();
+    let mut input_tokens = 0u64;
+    let mut first: Vec<Option<usize>> = vec![None; SCENARIOS.len()];
+    let mut repeated = zerocode_core::jev::promote::Agreement::default();
+    for pass in 0..runs {
+        for (index, scenario) in SCENARIOS.iter().enumerate() {
+            let asked = scenario_ask(scenario);
+            let began = std::time::Instant::now();
+            let answered = wire.ask(
+                &BRANCHING,
+                Some(work.path()),
+                crate::systemone::request_body(&asked.state, &asked.questions),
+                std::time::Duration::from_millis(BRANCHING_APPLY_DEADLINE_MS),
+            );
+            let took = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+            elapsed.push(took);
+            let read = answered.answer.and_then(|body| {
+                let parsed: Value =
+                    serde_json::from_str(&body).map_err(|_| "schema".to_string())?;
+                input_tokens += parsed["usage"]["input_tokens"].as_u64().unwrap_or_default();
+                asked
+                    .read(parsed.get("answers").unwrap_or(&Value::Null))
+                    .map_err(|why| why.token().to_string())
+            });
+            match read {
+                Ok(choice) => {
+                    right.compared += 1;
+                    right.agreed += usize::from(choice.mark == scenario.right);
+                    as_today += usize::from(choice.mark == scenario.candidates[0].0);
+                    if pass == 0 {
+                        first[index] = Some(choice.mark);
+                    } else if let Some(was) = first[index] {
+                        repeated.compared += 1;
+                        repeated.agreed += usize::from(was == choice.mark);
+                    }
+                    println!(
+                        "  {pass}/{index} {:<24} chose mark:{} (right mark:{}, today mark:{}) conf {:.2} {took} ms",
+                        scenario.goal,
+                        choice.mark,
+                        scenario.right,
+                        scenario.candidates[0].0,
+                        choice.confidence
+                    );
+                }
+                Err(token) => {
+                    *refusals.entry(token.clone()).or_default() += 1;
+                    println!(
+                        "  {pass}/{index} {:<24} refused: {token} {took} ms",
+                        scenario.goal
+                    );
+                }
+            }
+        }
+    }
+    elapsed.sort_unstable();
+    let asked_count = elapsed.len();
+    let cost = rate.map(|rate| rate.input_cost_usd(input_tokens));
+    println!(
+        "\nright {}/{} ({}) · named today's press {}/{} · repeat {}/{} · refusals {refusals:?}",
+        right.agreed,
+        right.compared,
+        right.lower_bound().map_or_else(
+            || "—".to_string(),
+            |bound| format!("Wilson lower {:.1}%", bound * 100.0)
+        ),
+        as_today,
+        right.compared,
+        repeated.agreed,
+        repeated.compared,
+    );
+    println!(
+        "latency p50 {:?} ms · p95 {:?} ms · max {:?} ms over {asked_count} asks; input tokens {input_tokens}; cost {}",
+        zerocode_core::jev::summary::percentile(&elapsed, 0.5),
+        zerocode_core::jev::summary::percentile(&elapsed, 0.95),
+        elapsed.last(),
+        cost.map_or_else(
+            || "unpriced".to_string(),
+            |usd| format!(
+                "${usd:.4} total, ${:.6} per ask",
+                usd / asked_count.max(1) as f64
+            )
+        )
+    );
+}

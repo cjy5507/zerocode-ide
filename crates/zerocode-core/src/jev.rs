@@ -6,7 +6,8 @@
 //! page or on the desktop — about a worker whose pane went quiet, about where
 //! a worker's window belongs, about which agent a summons should start,
 //! about which blocks of a page an agent's browser read should fold away
-//! and about whether a ring is worth interrupting the person for.
+//! about whether a ring is worth interrupting the person for, and about
+//! which of the screens a forked phone step led to is the one to keep.
 //! Each keeps its own wire — the two Cargo workspaces carry different `reqwest` majors
 //! (docs/design/jev-browser-action-20260917.md §1.4) — so what must not fork
 //! lives here, in the one crate both already read:
@@ -1799,8 +1800,155 @@ pub const NOTIFY: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
 };
 
+/// How many of the emulator seat's candidates a forked phone step tries
+/// before one is made canonical (t-6044, [`BRANCHING`]).
+///
+/// Two is the brief's number and the smallest fork there is: the press the
+/// emulator seat would have made anyway, and the one it ranked next. Every
+/// candidate past the first costs the walk a press, a look and a snapshot
+/// load — on the AVD saves this window has measured, 1.4–2.0 s each for the
+/// load alone (`emulator::android::SNAPSHOT_SAVE_LIMIT`'s note) — so the
+/// count is a policy line on the walk's clock, not an accuracy claim. It is
+/// read through [`crate::branching::top_k`], never respelled.
+pub const BRANCHING_K: usize = 2;
+
+/// The most candidates a forked step may ever try, whatever a later reading
+/// of [`BRANCHING_K`] says: the question offers at most this many results
+/// ([`Sent`] `Items` cap on `/state/candidates`), so a `k` above it would be
+/// a candidate explored and never judged.
+pub const BRANCHING_K_CAP: usize = 3;
+const _: () = assert!(
+    BRANCHING_K >= 2 && BRANCHING_K <= BRANCHING_K_CAP,
+    "a fork tries at least two candidates and never more than the question can carry"
+);
+
+/// The wall the forked step holds a walk for the comparison's answer, in
+/// milliseconds — the screen seats' wall, written as this seat's own number
+/// for the reason every coinciding wall in this table is: the screen
+/// question is asked BEFORE anything is pressed, this one after `k` presses
+/// have already been tried and undone, and two policies that coincide today
+/// are still two policies. Past it the first candidate — the emulator seat's
+/// own press — is made canonical, which is exactly the step a walk without
+/// this seat would have taken.
+pub const BRANCHING_APPLY_DEADLINE_MS: u64 = 1_500;
+
+/// What the branching seat's answers must bound above before `auto` rises to
+/// choosing the canonical candidate (§4): nine in ten — the screen seats'
+/// line, reached from this seat's own side: a comparison that does not come
+/// back costs the walk the fork's clock and nothing else, because the first
+/// candidate is then pressed as it would have been without the seat.
+pub const BRANCHING_ANSWER_FLOOR_PERMILLE: u16 = 900;
+
+/// The branching seat's route-change budget (§4): four canonical picks in
+/// five must have been ones the walk then went on from. Held to the screen
+/// seats' budget because the negative is the same kind: a pick the walk had
+/// to undo or retry is one more press on a screen, and one in five wrong is
+/// not a rate at which to hand the canonical step to a comparison unasked.
+pub const BRANCHING_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
+
+/// The window's forked phone step (t-6044, `crate::branching`): when the
+/// emulator seat's answer ranks two or more controls, the walk saves the
+/// Android device where it stands, presses each of the top [`BRANCHING_K`]
+/// in turn, reads the screen each one leads to, puts the device back, and
+/// asks Jev which RESULT is the closest to the goal — the candidate it names
+/// is the one pressed for real. jevable's "Mario Never Dies" idea, on the
+/// state rather than on the request: the hedge (`crate::jev::hedge`) copies a
+/// question, this copies a world.
+///
+/// It has a seat of its own and not a flag on the emulator row because it
+/// sends what that row never does — the screens a press LED TO, which a
+/// person consenting to "judge which control to press" did not consent to
+/// having explored on their device — and because the two are judged apart:
+/// the emulator seat's mark is whether the press it chose reached the goal,
+/// this seat's is whether a comparison of results picked better than that
+/// press would have.
+///
+/// What is sent: the goal, the device's platform and name, the controls of
+/// the screen before the fork, and per candidate the legend line that was
+/// pressed and — when the fork explored — the legend lines of the screen it
+/// led to and whether the screen moved. Never a screenshot, never a control's
+/// body beyond its legend line.
+///
+/// `off` is today's walk byte for byte. `shadow` explores nothing: it asks
+/// the same question over the candidates' actions alone, records what it
+/// would have made canonical beside what the emulator seat pressed, and
+/// presses the emulator seat's choice. Only an `auto` this seat's own ledger
+/// raised saves, explores and presses the comparison's pick; a timeout, a
+/// refusal, an answer under [`SCREEN_PRESS_FLOOR_PERMILLE`], a device that
+/// cannot be saved (iOS has no snapshot road) or a fork past its clock all
+/// press the first candidate — the emulator seat's own — as today. A step at
+/// which the person's turn stands is never forked: the errand's own gates
+/// bar it before any candidate exists.
+///
+/// The `agreed` rule (a Comparison label, one per forked step, written by the
+/// walk's own next step): the canonical pick agreed when the walk went on
+/// from it — the caller's condition held, or the next look showed a screen
+/// that moved and the next judgment chose a control on it — and disagreed
+/// when the next step was a retry (the same screen again) or the judgment
+/// gave up on what the pick led to. Under `shadow` the comparison is graded
+/// against the emulator seat's press: the same pick shares its fate, a
+/// different pick is wrong when the press went on fine, and says nothing
+/// when the press failed — an alternative nobody tried is not evidence
+/// (`crate::branching::agreed`).
+pub const BRANCHING: JevUse = JevUse {
+    id: "branching",
+    setting: "jevBranching",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    sends: &[
+        Sent {
+            at: "/state/goal",
+            cap: Cap::Chars(GOAL_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/where/platform",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/where/device",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/before",
+            cap: Cap::Items(SCREEN_CANDIDATE_CAP),
+        },
+        Sent {
+            at: "/state/before/*",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/candidates",
+            cap: Cap::Items(BRANCHING_K_CAP),
+        },
+        Sent {
+            at: "/state/candidates/*/action",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/candidates/*/result/controls",
+            cap: Cap::Items(SCREEN_CANDIDATE_CAP),
+        },
+        Sent {
+            at: "/state/candidates/*/result/controls/*",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/questions/*/criteria/*",
+            cap: Cap::Uncut,
+        },
+    ],
+    ledger: "branching.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(BRANCHING_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: Some(SCREEN_PRESS_FLOOR_PERMILLE),
+    agreement_floor_permille: Some(BRANCHING_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(BRANCHING_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 15] = [
+pub static JEV_USES: [JevUse; 16] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -1816,6 +1964,7 @@ pub static JEV_USES: [JevUse; 15] = [
     AGENT_TOOL,
     BROWSER_READ,
     NOTIFY,
+    BRANCHING,
 ];
 
 impl JevUse {

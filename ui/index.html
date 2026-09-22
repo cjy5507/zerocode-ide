@@ -4364,6 +4364,25 @@
                 </p>
               </details>
             </div>
+            <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-branching-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.branching">갈라지는 미래</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.branchingSummary">
+                    Android 기기 위의 걷기에서 판정이 누를 후보를 둘 이상 냈을 때, 기기를 저장해 두고 후보마다 눌러 본 결과 화면을 비교해 가장 나은 하나만 정본으로 잇습니다.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-branching-select" data-jev-seat="branching"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.branchingHint">
+                  휴대폰 화면의 판정은 번호가 매겨진 컨트롤 중 하나를 골라 누릅니다. 그 답이 둘 이상의 컨트롤에 무게를 두었을 때, 이 자리는 Android 에뮬레이터의 스냅샷으로 기기를 저장하고, 상위 후보 두 개를 차례로 눌러 각각 어떤 화면으로 이어지는지 읽은 뒤 기기를 되돌리고, 어느 결과가 목표에 가장 가까운지 묻습니다. 보내는 것은 목표, 기기의 플랫폼과 이름, 누르기 전 화면의 컨트롤 목록, 후보마다 누른 컨트롤 한 줄과 이어진 화면의 컨트롤 목록(최대 12줄)·화면이 바뀌었는지이며, 화면 그림은 나가지 않습니다. off면 오늘의 걷기와 바이트까지 같고, shadow는 갈라 보지 않고 후보의 행동만으로 「갈랐다면 무엇을 골랐을지」를 원장에 적습니다. 근거가 서서 auto가 오른 뒤에만 실제로 저장·시도·되돌리기를 하고 비교의 답을 누릅니다. 시간이 모자라거나, iOS처럼 스냅샷이 없거나, 답이 늦거나 확신이 낮으면 첫 후보를 오늘처럼 한 번 누릅니다. 사람의 차례가 뜬 걸음은 갈라 보지 않습니다. 라벨은 걷기의 다음 걸음: 고른 후보로 다음 화면까지 나아가면 맞았고, 같은 화면이 되돌아오거나 판정이 포기하면 틀렸다고 적습니다.
+                </p>
+              </details>
+            </div>
           </div>
         </div>
         </section>

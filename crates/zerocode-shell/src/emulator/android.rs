@@ -293,13 +293,7 @@ impl ManagedEmulatorProcess {
         let Ok(sdk) = android_sdk() else {
             return;
         };
-        if crate::proc::quiet_command(&sdk.adb)
-            .args(["-s", &serial, "emu", "kill"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_err()
-        {
+        if emu_console(&sdk.adb, &serial, &["kill"]).is_err() {
             return;
         }
         let deadline = Instant::now() + SNAPSHOT_SAVE_LIMIT;
@@ -342,6 +336,94 @@ impl ManagedEmulatorProcess {
             _ => false,
         }
     }
+}
+
+/// The emulator's own console, reached the way every road here reaches it:
+/// `adb -s <serial> emu <words…>`, which carries the console's auth token
+/// for us. The console answers `OK` or `KO: <reason>` on its last line, and
+/// `adb` exits 0 either way, so the answer is read and not the status.
+///
+/// One road for the saved exit (`kill`) and a forked step's `avd snapshot`
+/// verbs (t-6044): the snapshot a fork saves and loads is the same kind of
+/// state the exit writes as `default_boot`, through the same door.
+fn emu_console(adb: &Path, serial: &str, words: &[&str]) -> Result<String, String> {
+    let answer = crate::proc::quiet_command(adb)
+        .args(["-s", serial, "emu"])
+        .args(words)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|error| format!("adb emu {}: {error}", words.join(" ")))?;
+    let said = String::from_utf8_lossy(&answer.stdout).trim().to_string();
+    if !answer.status.success() {
+        return Err(format!(
+            "adb emu {} exited {}: {}",
+            words.join(" "),
+            answer.status,
+            String::from_utf8_lossy(&answer.stderr).trim()
+        ));
+    }
+    if said
+        .lines()
+        .any(|line| line.trim_start().starts_with(CONSOLE_REFUSED))
+    {
+        return Err(format!("adb emu {}: {said}", words.join(" ")));
+    }
+    Ok(said)
+}
+
+/// How the emulator console begins a line that refused the command.
+const CONSOLE_REFUSED: &str = "KO";
+
+/// What a forked step asks the AVD's snapshot road for (t-6044): the
+/// console's own `avd snapshot <verb> <name>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AvdSnapshot {
+    Save,
+    Load,
+    Delete,
+}
+
+impl AvdSnapshot {
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Save => "save",
+            Self::Load => "load",
+            Self::Delete => "delete",
+        }
+    }
+}
+
+/// Save, load or delete the named snapshot of a running AVD, and answer how
+/// long the console took over it, in milliseconds.
+///
+/// A load puts the guest back mid-flight: the bridge drops the device for a
+/// moment while the RAM image is read in, so a load waits — inside
+/// [`SNAPSHOT_SAVE_LIMIT`], at [`SNAPSHOT_SAVE_POLL_INTERVAL`] — for `adb
+/// get-state` to answer `device` again before it is called done, exactly as
+/// the pump's presence reader reads a device that went away
+/// (`device_presence`). A device that does not come back inside the limit is
+/// a load that failed, and the caller hears so.
+pub(crate) fn android_avd_snapshot(
+    serial: &str,
+    verb: AvdSnapshot,
+    name: &str,
+) -> Result<u64, String> {
+    let sdk = android_sdk().map_err(|search| search.to_string())?;
+    let began = Instant::now();
+    emu_console(&sdk.adb, serial, &["avd", "snapshot", verb.word(), name])?;
+    if verb == AvdSnapshot::Load {
+        let deadline = began + SNAPSHOT_SAVE_LIMIT;
+        while device_presence(&sdk.adb, serial) != DevicePresence::OnTheBridge {
+            if Instant::now() >= deadline {
+                return Err(format!(
+                    "the device did not come back on the bridge within {} s of loading {name}",
+                    SNAPSHOT_SAVE_LIMIT.as_secs()
+                ));
+            }
+            std::thread::sleep(SNAPSHOT_SAVE_POLL_INTERVAL);
+        }
+    }
+    Ok(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX))
 }
 
 fn managed_devices() -> &'static Mutex<HashMap<String, Arc<ManagedEmulatorProcess>>> {

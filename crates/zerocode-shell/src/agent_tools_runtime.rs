@@ -3171,13 +3171,33 @@ pub(super) fn run_goal(
         }));
     }
     let acting = crate::systemone::applies(judge.wire(), seat);
-    let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0);
-    let walked = errand::run(mode, acting, &at, &mut judge, &mut world);
+    // The branching seat's standing (t-6044), read off the same wire and the
+    // same settings file as the screen seat's: whether a phone step whose
+    // judgment ranked two or more controls is forked, and whether the
+    // comparison's pick is the one pressed.
+    let forks = &zerocode_core::jev::BRANCHING;
+    let branching = errand::Branching {
+        mode: errand::mode_now(forks),
+        acting: crate::systemone::applies(judge.wire(), forks),
+    };
+    let snapshots: Box<dyn desk::Snapshots> = Box::new(AvdSnapshots {
+        device: word("device").unwrap_or_default(),
+    });
+    let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0)
+        .with_snapshots(snapshots);
+    let walked = errand::run_with(mode, acting, branching, &at, &mut judge, &mut world);
     errand::write_rows(
         seat,
         judge.wire(),
         dir,
         &walked.rows,
+        crate::project_runtime::now_epoch_ms(),
+    );
+    errand::write_rows(
+        forks,
+        judge.wire(),
+        dir,
+        &walked.forks,
         crate::project_runtime::now_epoch_ms(),
     );
     said(serde_json::json!({
@@ -3187,6 +3207,38 @@ pub(super) fn run_goal(
         "reached": walked.reached.unwrap_or_default(),
         "steps": walked.rows,
     }))
+}
+
+/// An Android AVD's saved states, as a forked step drives them (t-6044): the
+/// device the walk was aimed at by the name `list` shows, resolved to its
+/// live serial the way every other Android verb resolves it
+/// (`active_android_serial`), then the emulator console's own `avd snapshot`
+/// road. Built for every mobile walk; the world keeps it only for Android.
+struct AvdSnapshots {
+    device: String,
+}
+
+impl AvdSnapshots {
+    fn drive(&self, verb: crate::emulator::AvdSnapshot, name: &str) -> Result<u64, String> {
+        let serial = tauri::async_runtime::block_on(active_android_serial(&self.device))?;
+        crate::emulator::android_avd_snapshot(&serial, verb, name)
+    }
+}
+
+impl computer_use::errand::desk::Snapshots for AvdSnapshots {
+    fn save(&mut self, name: &str) -> Result<u64, String> {
+        self.drive(crate::emulator::AvdSnapshot::Save, name)
+    }
+
+    fn load(&mut self, name: &str) -> Result<u64, String> {
+        self.drive(crate::emulator::AvdSnapshot::Load, name)
+    }
+
+    fn delete(&mut self, name: &str) {
+        if let Err(why) = self.drive(crate::emulator::AvdSnapshot::Delete, name) {
+            eprintln!("walk: a fork's snapshot was left on the device: {why}");
+        }
+    }
 }
 
 /// A walk's answer in words, for a caller that did not ask for JSON.

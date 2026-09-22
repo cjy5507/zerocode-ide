@@ -17,29 +17,40 @@ fn control(mark: usize, label: &str) -> Value {
     })
 }
 
-/// A judge that answers what the test says, and counts what it was asked.
-struct FakeJudge {
-    answers: Vec<Judged>,
-    asked: Vec<Vec<usize>>,
+/// A judge that answers what the test says, and counts what it was asked —
+/// presses and, since t-6044, comparisons.
+pub(super) struct FakeJudge {
+    pub(super) answers: Vec<Judged>,
+    pub(super) asked: Vec<Vec<usize>>,
+    /// The comparisons it answers, in order; empty refuses.
+    pub(super) compares: Vec<Compared>,
+    /// The comparisons it was asked: the candidates offered, in order.
+    pub(super) compared: Vec<Vec<usize>>,
+    /// The state of the last comparison it was asked, as the wire would
+    /// carry it.
+    pub(super) compared_state: Vec<Value>,
 }
 
 impl FakeJudge {
-    fn chose(marks: &[usize]) -> Self {
+    pub(super) fn chose(marks: &[usize]) -> Self {
         Self {
             answers: marks.iter().map(|mark| pick(*mark)).collect(),
             asked: Vec::new(),
+            compares: Vec::new(),
+            compared: Vec::new(),
+            compared_state: Vec::new(),
         }
     }
     fn saying(answers: Vec<Judged>) -> Self {
         Self {
             answers,
-            asked: Vec::new(),
+            ..Self::chose(&[])
         }
     }
 }
 
 /// A validated choice of `mark`, as the pure module would have read one.
-fn pick(mark: usize) -> Judged {
+pub(super) fn pick(mark: usize) -> Judged {
     Judged::Chose(ActionChoice {
         chosen: Chosen::Mark(mark),
         probabilities: BTreeMap::new(),
@@ -56,6 +67,16 @@ impl ActionJudge for FakeJudge {
             self.answers.remove(0)
         }
     }
+
+    fn compare(&mut self, ask: &zerocode_core::branching::BranchAsk) -> Compared {
+        self.compared.push(ask.marks().to_vec());
+        self.compared_state.push(ask.state.clone());
+        if self.compares.is_empty() {
+            Compared::Refused("timeout".to_string())
+        } else {
+            self.compares.remove(0)
+        }
+    }
 }
 
 /// A world that answers what the test says and remembers what was done to it —
@@ -63,17 +84,37 @@ impl ActionJudge for FakeJudge {
 pub(super) struct FakeWorld {
     screen: Option<Screen>,
     pub(super) presses: Vec<usize>,
-    observed: Vec<Option<Value>>,
+    pub(super) observed: Vec<Option<Value>>,
     press_takes: bool,
     walked_from: Vec<usize>,
     /// The step each re-walk says it stopped at; `None` means it finished.
     walks: Vec<Option<usize>>,
-    left_ms: u64,
+    pub(super) left_ms: u64,
     /// Whether every press renumbers the screen — a world that moves.
     moves: bool,
     /// What the caller's own condition answers, press by press; a world whose
     /// caller wrote no condition has none.
-    reached: Vec<bool>,
+    pub(super) reached: Vec<bool>,
+    /// The device's saved states (t-6044): `None` is a world that cannot
+    /// save — a page, an iOS simulator. `Some(cost)` saves in `cost` ms of
+    /// the world's own clock.
+    pub(super) snapshots: Option<u64>,
+    /// What each press leads to, by mark: the screen's items after it. A
+    /// mark not named here leaves the screen as it was (or, for a world
+    /// that moves, renumbers it as before).
+    pub(super) leads_to: BTreeMap<usize, Vec<Value>>,
+    /// Whether a load takes; a world whose load fails stays where the last
+    /// press put it.
+    pub(super) restore_takes: bool,
+    /// Every save, load and forget, in order: `("save", name)` and so on.
+    pub(super) snapshot_log: Vec<(&'static str, String)>,
+    /// The screen the last save kept, restored on load.
+    saved_screen: Option<Screen>,
+    /// What one press and one look cost, in ms of the world's own clock.
+    pub(super) press_ms: u64,
+    pub(super) look_ms: u64,
+    /// How much of `left_ms` the world has spent — the clock a test reads.
+    pub(super) spent_ms: u64,
 }
 
 impl FakeWorld {
@@ -95,7 +136,34 @@ impl FakeWorld {
             left_ms: 60_000,
             moves: false,
             reached: Vec::new(),
+            snapshots: None,
+            leads_to: BTreeMap::new(),
+            restore_takes: true,
+            snapshot_log: Vec::new(),
+            saved_screen: None,
+            press_ms: 0,
+            look_ms: 0,
+            spent_ms: 0,
         }
+    }
+
+    /// The same world as an Android phone that can be saved and loaded
+    /// (t-6044), showing `marks`.
+    pub(super) fn android(marks: &[usize]) -> Self {
+        let mut world = Self::showing(marks);
+        if let Some(screen) = world.screen.as_mut() {
+            screen.at = Seen::Phone {
+                platform: zerocode_core::computer_use::EmulatorPlatform::Android,
+                device: "Pixel_6".into(),
+            };
+        }
+        world.snapshots = Some(0);
+        world
+    }
+
+    fn spend(&mut self, ms: u64) {
+        self.spent_ms = self.spent_ms.saturating_add(ms);
+        self.left_ms = self.left_ms.saturating_sub(ms);
     }
 
     /// The same world, whose screen shows different words after every press.
@@ -109,11 +177,20 @@ impl FakeWorld {
 
 impl World for FakeWorld {
     fn look(&mut self) -> Option<Screen> {
+        self.spend(self.look_ms);
         self.screen.clone()
     }
     fn press(&mut self, mark: usize) -> bool {
         self.observed.push(crate::run_evidence::observation());
         self.presses.push(mark);
+        self.spend(self.press_ms);
+        if self.press_takes
+            && let Some(leads_to) = self.leads_to.get(&mark)
+            && let Some(screen) = self.screen.as_mut()
+        {
+            screen.items.clone_from(leads_to);
+            return true;
+        }
         if self.press_takes
             && self.moves
             && let Some(screen) = self.screen.as_mut()
@@ -125,6 +202,34 @@ impl World for FakeWorld {
             }
         }
         self.press_takes
+    }
+
+    fn save(&mut self) -> Option<Saved> {
+        let cost = self.snapshots?;
+        self.spend(cost);
+        let name = format!("fake-{}", self.snapshot_log.len());
+        self.snapshot_log.push(("save", name.clone()));
+        self.saved_screen = self.screen.clone();
+        Some(Saved {
+            name,
+            took_ms: cost,
+        })
+    }
+
+    fn restore(&mut self, saved: &Saved) -> bool {
+        self.snapshot_log.push(("load", saved.name.clone()));
+        if let Some(cost) = self.snapshots {
+            self.spend(cost);
+        }
+        if !self.restore_takes {
+            return false;
+        }
+        self.screen = self.saved_screen.clone();
+        true
+    }
+
+    fn forget(&mut self, saved: &Saved) {
+        self.snapshot_log.push(("forget", saved.name.clone()));
     }
 
     fn reached(&mut self) -> Option<bool> {

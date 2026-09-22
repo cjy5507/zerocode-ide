@@ -36143,8 +36143,26 @@ fn the_emulator_pane_opens_on_a_resumed_device() {
     // waits inside a named limit rather than a number written here.
     let saved_exit = support::block_after(android, "fn ask_for_a_saved_exit(");
     assert!(
-        saved_exit.contains("\"emu\", \"kill\"") && saved_exit.contains("SNAPSHOT_SAVE_LIMIT"),
+        saved_exit.contains("emu_console(&sdk.adb, &serial, &[\"kill\"])")
+            && saved_exit.contains("SNAPSHOT_SAVE_LIMIT"),
         "the saved exit is no longer `adb emu kill` inside a named limit:\n{saved_exit}"
+    );
+    // The console is one road (t-6044): the saved exit's `kill` and a forked
+    // step's `avd snapshot save|load|delete` both walk `adb -s <serial> emu …`
+    // through `emu_console`, and a load waits for the bridge inside the same
+    // named limit the exit waits for its save.
+    let console = support::block_after(android, "fn emu_console(");
+    assert!(
+        console.contains("[\"-s\", serial, \"emu\"]") && console.contains(".args(words)"),
+        "the console road no longer spells `adb emu` once:\n{console}"
+    );
+    let snapshot_road = support::block_after(android, "pub(crate) fn android_avd_snapshot(");
+    assert!(
+        snapshot_road
+            .contains("emu_console(&sdk.adb, serial, &[\"avd\", \"snapshot\", verb.word(), name])")
+            && snapshot_road.contains("SNAPSHOT_SAVE_LIMIT")
+            && snapshot_road.contains("device_presence(&sdk.adb, serial)"),
+        "a fork's snapshot no longer walks the console road and waits for the bridge:\n{snapshot_road}"
     );
     let stop = support::block_after(android, "fn stop(&self) -> bool {");
     let asked = stop

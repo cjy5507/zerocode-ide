@@ -29,11 +29,39 @@ use zerocode_core::computer_use::{EmulatorPlatform, FLOW_BASELINE_PROBE_MS};
 use zerocode_core::computer_use_protocol::marks::{ITEMS_KEY, LOOK_ID_KEY};
 use zerocode_hookd::TeamAnswer;
 
-use super::{Screen, Seen, Surface, World};
+use super::{Saved, Screen, Seen, Surface, World};
 
 /// The flag every road here asks its answer as JSON with — the word both
 /// CLIs already take, spelled once.
 const JSON_FLAG: &str = "--json";
+
+/// What a forked step's saved state is called on the device: this, then a
+/// short random tail, so two forks of one device never share a name and a
+/// state left behind by a window that died is recognisable for what it is.
+const FORK_SNAPSHOT_PREFIX: &str = "zerocode-fork-";
+
+/// A device's saved states, as a forked step drives them (t-6044) — the seam
+/// the Android AVD snapshot road sits behind, and a test replaces.
+///
+/// Only Android has one: an AVD saves and loads a named snapshot through the
+/// emulator's own console, an iOS simulator has no such road, and a page or
+/// the desktop is not a device. A world with none of these answers
+/// [`World::save`] with `None`, and the step is taken once, as today.
+pub trait Snapshots {
+    /// Save the device as `name`; answer how long it took.
+    ///
+    /// # Errors
+    /// The device's own words for why it could not.
+    fn save(&mut self, name: &str) -> Result<u64, String>;
+    /// Put the device back to `name`.
+    ///
+    /// # Errors
+    /// The device's own words for why it could not.
+    fn load(&mut self, name: &str) -> Result<u64, String>;
+    /// Delete `name` from the device. Best effort: a state that stays costs
+    /// disk, not correctness.
+    fn delete(&mut self, name: &str);
+}
 
 /// The flag a look takes when nobody will open its picture.
 const NO_PICTURE_FLAG: &str = "--no-screenshot";
@@ -291,6 +319,8 @@ pub struct GoalWorld<'a, Road> {
     deadline_ms: u64,
     spent_ms: u64,
     began: Instant,
+    /// The device's saved states, when this surface has them (t-6044).
+    snapshots: Option<Box<dyn Snapshots>>,
 }
 
 impl<'a, Road> GoalWorld<'a, Road> {
@@ -311,7 +341,26 @@ impl<'a, Road> GoalWorld<'a, Road> {
             deadline_ms,
             spent_ms,
             began: Instant::now(),
+            snapshots: None,
         }
+    }
+
+    /// The same world, able to save and load the device it is aimed at — an
+    /// Android AVD's snapshot road, or a test's stand-in. A world aimed at
+    /// anything but an Android device keeps no road however it is built: a
+    /// forked step never saves what it cannot load.
+    #[must_use]
+    pub fn with_snapshots(mut self, snapshots: Box<dyn Snapshots>) -> Self {
+        if matches!(
+            self.aim,
+            Aim::Phone {
+                platform: EmulatorPlatform::Android,
+                ..
+            }
+        ) {
+            self.snapshots = Some(snapshots);
+        }
+        self
     }
 }
 
@@ -373,6 +422,40 @@ where
             .spent_ms
             .saturating_add(u64::try_from(self.began.elapsed().as_millis()).unwrap_or(u64::MAX));
         self.deadline_ms.saturating_sub(spent)
+    }
+
+    fn save(&mut self) -> Option<Saved> {
+        let snapshots = self.snapshots.as_mut()?;
+        let name = format!(
+            "{FORK_SNAPSHOT_PREFIX}{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..8]
+        );
+        match snapshots.save(&name) {
+            Ok(took_ms) => Some(Saved { name, took_ms }),
+            Err(why) => {
+                eprintln!("walk: the device was not saved for a fork: {why}");
+                None
+            }
+        }
+    }
+
+    fn restore(&mut self, saved: &Saved) -> bool {
+        let Some(snapshots) = self.snapshots.as_mut() else {
+            return false;
+        };
+        match snapshots.load(&saved.name) {
+            Ok(_) => true,
+            Err(why) => {
+                eprintln!("walk: the device was not put back after a fork: {why}");
+                false
+            }
+        }
+    }
+
+    fn forget(&mut self, saved: &Saved) {
+        if let Some(snapshots) = self.snapshots.as_mut() {
+            snapshots.delete(&saved.name);
+        }
     }
 }
 

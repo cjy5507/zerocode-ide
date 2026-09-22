@@ -191,8 +191,10 @@ pub enum Where<'a> {
 
 impl Where<'_> {
     /// The address as the state carries it — the two keys of whichever
-    /// surface this is.
-    fn said(self) -> Value {
+    /// surface this is. Shared with the forked step's question
+    /// (`crate::branching`), so the two seats spell one address one way.
+    #[must_use]
+    pub fn said(self) -> Value {
         match self {
             Self::Page { host, path } => json!({ "host": host, "path": path }),
             Self::Desk { app, window } => json!({ "app": app, "window": window }),
@@ -294,13 +296,17 @@ pub struct ActionChoice {
     pub confidence: f64,
 }
 
-/// A mark's option name.
-fn option_of(mark: usize) -> String {
+/// A mark's option name — `mark:7`. Shared with the forked step's question
+/// (`crate::branching`), which offers the same numbers as options so a
+/// ledger reads one spelling for "the control numbered 7" across both seats.
+#[must_use]
+pub fn option_of(mark: usize) -> String {
     format!("{MARK_OPTION_PREFIX}{mark}")
 }
 
 /// The number an option names, if it names one.
-fn mark_of(option: &str) -> Option<usize> {
+#[must_use]
+pub fn mark_of(option: &str) -> Option<usize> {
     option.strip_prefix(MARK_OPTION_PREFIX)?.parse().ok()
 }
 

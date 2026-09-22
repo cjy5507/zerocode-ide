@@ -9,12 +9,14 @@
 //! browser row's name for the request and nothing else.
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde_json::Value;
-use zerocode_core::jev::JevUse;
+use zerocode_core::branching::BranchAsk;
+use zerocode_core::jev::{BRANCHING, BRANCHING_APPLY_DEADLINE_MS, JevUse};
 use zerocode_core::screen_action::ActionAsk;
 
-use super::{ACTION_DEADLINE, ActionJudge, Judged, Spent};
+use super::{ACTION_DEADLINE, ActionJudge, Compared, Judged, Spent};
 use crate::api_routers::RouterKeys;
 use crate::systemone::{SCHEMA, Wire, request_body};
 
@@ -44,6 +46,23 @@ pub fn read_body(ask: &ActionAsk, body: &str) -> Judged {
 #[must_use]
 pub fn request_of(ask: &ActionAsk) -> Value {
     request_body(&ask.state, &ask.questions)
+}
+
+/// What a successful body says about a forked step's comparison, read the
+/// way [`read_body`] reads a press: the envelope here, every shape rule the
+/// question's own ([`BranchAsk::read`]).
+#[must_use]
+pub fn read_compared(ask: &BranchAsk, body: &str) -> Compared {
+    let Ok(parsed) = serde_json::from_str::<Value>(body) else {
+        return Compared::Refused(SCHEMA.to_string());
+    };
+    let Some(answers) = parsed.get("answers") else {
+        return Compared::Refused(SCHEMA.to_string());
+    };
+    match ask.read(answers) {
+        Ok(choice) => Compared::Chose(choice),
+        Err(why) => Compared::Refused(why.token().to_string()),
+    }
 }
 
 /// Where a test points the door: zo's settings file and the workspace the
@@ -142,6 +161,22 @@ impl ActionJudge for LiveJudge {
         match asked.answer {
             Ok(body) => read_body(ask, &body),
             Err(token) => Judged::Refused(token),
+        }
+    }
+
+    /// The forked step's comparison (t-6044): the same wire, the same
+    /// workspace's consent, under the branching seat's own row and wall.
+    fn compare(&mut self, ask: &BranchAsk) -> Compared {
+        let asked = self.wire.ask(
+            &BRANCHING,
+            self.workspace.as_deref(),
+            request_body(&ask.state, &ask.questions),
+            Duration::from_millis(BRANCHING_APPLY_DEADLINE_MS),
+        );
+        self.spent = Some(asked.spent);
+        match asked.answer {
+            Ok(body) => read_compared(ask, &body),
+            Err(token) => Compared::Refused(token),
         }
     }
 
