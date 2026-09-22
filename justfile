@@ -66,6 +66,7 @@ tools-test:
     python3 tools/tests/test_summon_replay_seed.py
     python3 tools/tests/test_compaction_replay_seed.py
     python3 tools/tests/test_agent_tool_replay_seed.py
+    python3 tools/tests/test_browser_read_replay_seed.py
     python3 tools/tests/test_claude_code_panel_rules.py
     python3 tools/tests/test_codegraph_bench.py
 

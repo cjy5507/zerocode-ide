@@ -72,6 +72,7 @@ mod browser_cookies;
 mod browser_diagnose;
 mod browser_guest_runtime;
 mod browser_nav_state;
+mod browser_read;
 mod browser_runtime;
 mod browser_user_agent;
 mod checks_runtime;

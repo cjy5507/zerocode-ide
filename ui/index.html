@@ -4325,6 +4325,26 @@
                 </p>
               </details>
             </div>
+
+            <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-browser_read-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.browser_read">브라우저 읽기의 소음</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.browser_readSummary">
+                    에이전트가 페이지를 읽을 때 내비게이션·푸터·배너 같은 블록을 접을지 묻습니다.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-browser_read-select" data-jev-seat="browser_read"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.browser_readHint">
+                  에이전트가 zerocode-browser read로 페이지를 읽을 때, 본문을 페이지의 랜드마크(main·nav·header·footer·aside·form 등)에서 블록으로 나눠 블록마다 「페이지의 내용인가, 그 둘레의 가구인가」를 묻습니다. 보내는 것은 페이지 제목과 블록마다의 태그 경로·글 머리 240자뿐이고, 블록의 본문은 나가지 않습니다. 켜져 있으면 가구로 판정된 블록을 「N개 블록 생략」 한 줄로 접고, 에이전트는 read --full로 언제든 전체를 읽습니다. 답이 시간 안에 오지 않거나 모양이 어긋나면 오늘처럼 페이지 전체를 줍니다. 결과는 에이전트가 그 다음에 누르거나 입력한 자리가 접힌 블록 안이었는지 옆에 한 줄로 적습니다.
+                </p>
+              </details>
+            </div>
           </div>
         </div>
         </section>

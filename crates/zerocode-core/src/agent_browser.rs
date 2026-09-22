@@ -175,6 +175,8 @@ pub const BROWSER_VERBS: [BrowserVerb; 18] = [
     verb("open", 1, 1, BROWSER_DOOR_BUDGET_MS),
     act_verb("goto", 2, 2, BROWSER_DOOR_BUDGET_MS),
     act_verb("eval", 2, 2, BROWSER_CALLBACK_DEADLINE_MS),
+    // `read <label> [css]` or `read <label> --full` — the same read, whole
+    // when the agent says so (`parse_read`).
     verb("read", 1, 2, BROWSER_CALLBACK_DEADLINE_MS),
     // `click <label> <css>` or `click <label> --mark <n>` — the same press
     // named by a selector or by a number the pane's last `marks` handed out.
@@ -343,6 +345,48 @@ pub fn parse_click(argv: &[String]) -> Result<ClickTarget, String> {
             "click takes a css selector or --mark <n> (zerocode-browser click <label> <css> | --mark <n>)"
                 .into(),
         ),
+    }
+}
+
+/// The flag that asks for a page whole, with no block folded away — the
+/// agent's own word over the read seat's ([`crate::jev::BROWSER_READ`]).
+pub const READ_FULL_FLAG: &str = "--full";
+
+/// `read <label> [css]` or `read <label> --full`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadCommand {
+    pub label: String,
+    /// The selector to read, or the whole document.
+    pub selector: Option<String>,
+    /// Whether the agent asked for the page whole — no judgment, no fold.
+    pub full: bool,
+}
+
+/// Read a `read` line: the arity is already checked, so this tells the
+/// selector shape from the whole-page flag and refuses a selector shaped
+/// like a flag nobody offered.
+pub fn parse_read(argv: &[String]) -> Result<ReadCommand, String> {
+    let label = labelled(argv, "read")?;
+    match argv.get(2).map(String::as_str) {
+        None => Ok(ReadCommand {
+            label,
+            selector: None,
+            full: false,
+        }),
+        Some(flag) if flag == READ_FULL_FLAG => Ok(ReadCommand {
+            label,
+            selector: None,
+            full: true,
+        }),
+        Some(flag) if flag.starts_with("--") => Err(format!(
+            "unknown read option `{flag}` (zerocode-browser read <label> [css | {READ_FULL_FLAG}])"
+        )),
+        Some("") => Err("read takes a css selector or --full".to_string()),
+        Some(css) => Ok(ReadCommand {
+            label,
+            selector: Some(css.to_string()),
+            full: false,
+        }),
     }
 }
 
@@ -780,7 +824,8 @@ pub fn usage() -> String {
         "  zerocode-browser close <label>        판을 닫음 (창이 닫고, 사라질 때까지 기다림)",
         "  zerocode-browser goto <label> <url>   그 판을 그 주소로",
         "  zerocode-browser eval <label> <expr>  게스트 페이지의 동기 식과 JSON 값",
-        "  zerocode-browser read <label> [css]   보이는 텍스트와 고른 DOM",
+        "  zerocode-browser read <label> [css]   보이는 텍스트와 고른 DOM (본문 소음 판정이 켜져 있으면 nav·footer 같은 블록은 한 줄로 접음)",
+        "  zerocode-browser read <label> --full  판정 없이 페이지 전체 텍스트",
         "  zerocode-browser click <label> <css>  보이는 첫 요소를 클릭",
         "  zerocode-browser click <label> --mark <n>",
         "                                             마지막 marks의 번호 n을 누름 (움직였거나 바뀌었으면 거절)",
@@ -1028,6 +1073,7 @@ mod tests {
             "goto <label> <url>",
             "eval <label> <expr>",
             "read <label> [css]",
+            "read <label> --full",
             "click <label> <css>",
             "type <label> <css> <text>",
             "wait <label> <css> [timeout-ms]",
@@ -1234,6 +1280,7 @@ mod tests {
             &["goto", "b", "https://x"],
             &["read", "b"],
             &["read", "b", "main"],
+            &["read", "b", READ_FULL_FLAG],
             &["find", "b", "RCPT-"],
             &["wait", "b", "#done"],
             &["wait", "b", "#done", "500"],

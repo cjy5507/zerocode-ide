@@ -31,6 +31,15 @@ const CLICK_BODY = DOOR.match(/const CLICK_BODY: &str = r#"([\s\S]*?)"#;/)[1];
 // The wait's body is written inline in `automate_wait`; it is the raw string
 // right after the door's own words about the picker.
 const WAIT_BODY = DOOR.match(/could see\. A page whose only visible match stands behind a hidden\n\s*\/\/ twin used to time this wait out with the control on screen\.\n\s*r#"([\s\S]*?)"#,/)[1];
+const TYPE_BODY = DOOR.match(/const TYPE_BODY: &str = r#"([\s\S]*?)"#;/)[1];
+// The read seat's block cutter, and the landmark list it cuts at — read from
+// the use table the way the Rust reads it, so the fixture is cut where the
+// window cuts (`zerocode_core::jev::BROWSER_READ_BLOCK_ROOTS`).
+const READ_BLOCKS_BODY = DOOR.match(/const BROWSER_READ_BLOCKS_BODY: &str = r#"([\s\S]*?)"#;/)[1];
+const JEV = await readFile(resolve(UI, "../crates/zerocode-core/src/jev.rs"), "utf8");
+const BLOCK_ROOTS = [...JEV.match(/pub const BROWSER_READ_BLOCK_ROOTS: \[&str; \d+\] = \[([\s\S]*?)\];/)[1]
+  .matchAll(/"([^"]+)"/g)].map((hit) => hit[1]);
+const READ_FIXTURES = resolve(UI, "tests", "fixtures", "browser-read");
 
 /* Exactly `automation_script`'s shape (browser.rs): helpers, the request, the
  * body inside one try. Built here from the same three pieces so the test runs
@@ -180,6 +189,95 @@ await test("find still cycles both ways on unchanged text and clears only its ow
   assert(JSON.stringify(state.hits.map((hit) => hit.index)) === "[1,2,1]" && state.hits.every((hit) => hit.count === 2), "unchanged matches no longer cycle", state);
   assert(state.text === "Ready Ready" && state.marks === 0, "clear damaged the page", state);
 }));
+
+/* The read seat's cutter, on the ten fixture pages: every block is a
+ * landmark or the run under one, addressed by the same chain a press
+ * answers; nothing rendered is lost and nothing unrendered is read. */
+const readRequest = { blockRoots: BLOCK_ROOTS.join(","), textCap: 20000, titleCap: 500, urlCap: 2000, answerCap: 256000 };
+const words = (text) => text.replace(/\s+/g, " ").trim();
+const { readdir } = await import("node:fs/promises");
+const fixtures = (await readdir(READ_FIXTURES)).filter((name) => name.endsWith(".html")).sort();
+assert(fixtures.length === 10, "ten fixture pages", fixtures);
+const cut = {};
+for (const name of fixtures) {
+  const fixturePage = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  await fixturePage.goto("file://" + resolve(READ_FIXTURES, name));
+  const answer = JSON.parse(await fixturePage.evaluate(script(readRequest, READ_BLOCKS_BODY)));
+  assert(answer.ok, `${name}: the cutter refused`, answer);
+  cut[name] = answer.value;
+  await fixturePage.close();
+}
+
+await test("the cutter keeps every rendered word of the page and reads no script", async () => {
+  for (const [name, page] of Object.entries(cut)) {
+    const joined = words(page.blocks.map((block) => block.text).join("\n"));
+    const whole = words(page.text);
+    for (const word of whole.split(" ")) {
+      assert(joined.includes(word), `${name}: the blocks lost "${word}"`);
+    }
+    assert(!joined.includes("never read"), `${name}: a script's text was read`, joined);
+    assert(joined.includes("Menu") === false || name !== "news.html", `${name}: a hidden nav was read`);
+  }
+  return `${Object.keys(cut).length} pages, ${Object.values(cut).reduce((n, page) => n + page.blocks.length, 0)} blocks`;
+});
+
+await test("every block is a landmark or the run under one, addressed from the body", async () => {
+  for (const [name, page] of Object.entries(cut)) {
+    for (const block of page.blocks) {
+      assert(block.path.startsWith("body"), `${name}: a block not under the body`, block.path);
+      assert(block.text.trim().length > 0, `${name}: an empty block`, block.path);
+      const last = block.path.split(">").pop();
+      const tag = last.replace(/[#.\[].*$/, "");
+      const structural = BLOCK_ROOTS.some((root) => root === tag || (root.startsWith("[role=") && last.includes(root.slice(1, -1))));
+      assert(last === "*" || last === "body" || structural, `${name}: a block that is not a landmark`, block.path);
+    }
+  }
+  const news = cut["news.html"];
+  const paths = news.blocks.map((block) => block.path);
+  assert(paths.includes("body>header#masthead>*"), "the masthead's own words are a run", paths);
+  assert(paths.includes("body>header#masthead>nav"), "the nav inside the masthead is its own block", paths);
+  assert(paths.includes("body>div#cookie[role=dialog]"), "a div with a dialog role is a landmark", paths);
+  assert(paths.includes("body>main>article"), "the article is one block", paths);
+  assert(paths.includes("body>main>aside.related"), "the related rail is one block", paths);
+  assert(paths.includes("body>main>section.ad"), "the ad unit is one block", paths);
+  assert(paths.includes("body>footer"), "the footer is one block", paths);
+  assert(!paths.some((path) => path.includes("nav.hidden")), "a hidden nav is not a block", paths);
+  return paths.join(" | ");
+});
+
+await test("two siblings of one tag are told apart by their index", async () => {
+  const forum = cut["forum.html"];
+  const paths = forum.blocks.map((block) => block.path);
+  assert(paths.includes("body>main>section.replies>article[1]") && paths.includes("body>main>section.replies>article[2]"), "the replies are not numbered", paths);
+  assert(paths.includes("body>main>article.op"), "the opening post is one block", paths);
+  const landing = cut["landing.html"];
+  const sections = landing.blocks.map((block) => block.path).filter((path) => path.startsWith("body>main>section"));
+  assert(sections.length === 3 && new Set(sections).size === 3, "three sections, three addresses", sections);
+  return `${paths.length} forum blocks`;
+});
+
+await test("a press names the block it landed in by the same chain the cutter wrote", async () => {
+  const fixturePage = await browser.newPage({ viewport: { width: 900, height: 600 } });
+  await fixturePage.goto("file://" + resolve(READ_FIXTURES, "news.html"));
+  // The links are real: a press must name its block, not leave the page.
+  await fixturePage.evaluate(() => document.addEventListener("click", (event) => event.preventDefault(), true));
+  const chainOf = async (selector) => {
+    const answer = JSON.parse(await fixturePage.evaluate(script({ selector, blockRoots: readRequest.blockRoots }, CLICK_BODY)));
+    assert(answer.ok, `click ${selector} refused`, answer);
+    return answer.value;
+  };
+  const accept = await chainOf("#accept");
+  assert(accept.blockPath === "body>div#cookie[role=dialog]", "the cookie button is in the dialog block", accept);
+  assert(accept.pageUrl.startsWith("file://"), "the press answers the page's address", accept);
+  const world = await chainOf('nav[aria-label="sections"] a');
+  assert(world.blockPath === "body>header#masthead>nav", "a section link is in the masthead's nav", world);
+  const related = await chainOf("aside.related a");
+  assert(related.blockPath === "body>main>aside.related", "a related link is in the rail", related);
+  const typed = JSON.parse(await fixturePage.evaluate(script({ selector: "#accept", text: "x", road: "keys", blockRoots: readRequest.blockRoots }, TYPE_BODY)));
+  assert(!typed.ok && typed.code === "element_not_editable", "a button is not typed into", typed);
+  await fixturePage.close();
+  return `${accept.blockPath}; ${world.blockPath}; ${related.blockPath}`;
+});
 
 await browser.close();
 
