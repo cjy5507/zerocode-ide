@@ -6,6 +6,7 @@
 //! where the loops in `mod.rs` (and `compaction`/tests) still reach them.
 
 use crate::team_inbox_digest::TEAM_INBOX_REMINDER_PREFIX;
+use crate::todo_progress::PLAN_WRITING_TOOLS;
 use crate::verified_state::VERIFIED_STATE_REMINDER_PREFIX;
 
 use super::verify_treadmill::VERIFY_TREADMILL_REMINDER_PREFIX;
@@ -27,9 +28,6 @@ const PERSISTED_REMINDER_DEDUPE_WINDOW: usize = 12;
 /// the same plan (2026-09-03). Twice the dedupe window: a plan the model
 /// just rewrote deserves a longer silence than one the harness repeated.
 pub(super) const PLAN_IN_VIEW_WINDOW: usize = 2 * PERSISTED_REMINDER_DEDUPE_WINDOW;
-
-/// The tool whose result IS the plan, whichever name the model called it by.
-const PLAN_WRITING_TOOLS: [&str; 2] = ["TodoWrite", "todo_write"];
 
 /// Prefix marking the transient mid-turn todo-progress reminder, so it is
 /// refreshed (replace-by-prefix) after each tool batch and cleared at turn start

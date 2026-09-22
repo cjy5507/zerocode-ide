@@ -25,11 +25,31 @@ ZEROCODE_PATCH_REVIEW_REPLAY_SEED=/tmp/patch-review-replay/seed.json \
 
 | 손잡이 | 무엇 |
 | --- | --- |
-| `ZEROCODE_PATCH_REVIEW_REPLAY_LIMIT` | 앞에서부터 이만큼의 검토만 묻는다 (시범용) |
+| `ZEROCODE_PATCH_REVIEW_REPLAY_STATE` | 과업을 어떻게 읽을지 — `v1`(기본, 자리의 것) · `v2a` · `v2b` · `v2c` (`runtime::patch_review::TaskReading`, 아래) |
+| `ZEROCODE_PATCH_REVIEW_REPLAY_LIMIT` | 씨앗의 패치 중 대략 이만큼을 고르게 뽑아 묻는다 (`div_ceil` 간격) |
 | `ZEROCODE_PATCH_REVIEW_REPLAY_SHOW` | 앞 N개 검토의 보낸 상태와 네 답을 통째로 찍는다 — 사람의 말과 코드가 자기 터미널에만 나간다 |
+| `ZEROCODE_PATCH_REVIEW_REPLAY_OUT` | 검토마다 JSON 한 줄(읽기·`judged` 지문·과업 글자 수·답·판정·사후·벽)을 이 파일에 — 글도 경로도 없다 |
 
-지출 상한은 시험 안의 상수 `REPLAY_SPEND_CAP_USD`(\$0.20)다: 낸 검토의 입력 토큰 값이 상한에 닿으면 더 묻지 않는다.
+지출 상한은 시험 안의 상수 `REPLAY_SPEND_CAP_USD`다: 과업 읽기 넷을 한 표본에서 견주는 비교 전체의 상한
+`REPLAY_COMPARISON_CAP_USD`(\$0.30)를 읽기 수로 나눈 몫(\$0.075)이 한 판의 상한이고, 낸 검토의 입력 토큰 값이 거기 닿으면 더 묻지 않는다.
 동시에 네 개(`REPLAY_IN_FLIGHT`)씩 묻는다 — 와이어의 분당 1,200과는 거리가 멀다.
+
+## 과업 읽기 — 같은 패치, 다른 `/state/task` (t-6232)
+
+질문 넷·패치·증거·경로 지문은 그대로 두고, 무엇을 「과업」으로 읽는지만 바꾼다. 읽기는 모두
+`runtime::patch_review::task_by` 한 함수(자리가 묻는 `ask_for` 는 그 `v1`)이고, 재생은 `ask_reading` 으로 같은 패치를 묻는다.
+
+| 낱말 | 과업 |
+| --- | --- |
+| `v1` | 사람의 최근 말 하나 — 자리가 오늘 보내는 것 |
+| `v2a` | 사람의 최근 말 셋(`PERSONS_RECENT_MESSAGES`), 말한 순서대로 |
+| `v2b` | 사람의 최근 말, 그 뒤 모델이 편집 전에 한 가장 최근 말(계획·설명) |
+| `v2c` | 그 뒤 모델이 할 일 도구(`TodoWrite`)로 적은 가장 최근 계획, 열린 항목 먼저 — 없거나 다 끝났으면 `v2b` |
+
+여러 글을 잇는 읽기는 스스로 `PATCH_REVIEW_TASK_CHAR_CAP` 안에 맞춘다 — 가장 최근 글부터 맞추고 각 글은 남은 자리의 머리를
+가진다(문은 과업의 머리를 자르므로, 먼저 붙여 넣은 긴 브리핑이 「진행」을 밀어내지 않게). 어느 읽기든 사람의 말이 없으면
+묻지 않으므로 네 읽기는 **같은 패치**를 묻는다: 한 씨앗·한 `LIMIT` 의 네 판은 같은 표본이고, 머리줄의 `sample` 지문이 그것을 보인다.
+한 판은 표본 위에서 네 읽기가 무엇을 읽었는지(`v1`·`v2b` 와 달랐던 수, 글자 수 p50/p90)도 묻지 않고 찍는다.
 
 ## 이 하네스가 지키는 네 가지
 

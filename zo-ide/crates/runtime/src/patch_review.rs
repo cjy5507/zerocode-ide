@@ -50,10 +50,11 @@ use zerocode_core::jev::{
     PATCH_REVIEW_PERMIT_FLOOR_PERMILLE, PATCH_REVIEW_REGRET_TURNS, PATCH_REVIEW_TASK_CHAR_CAP,
 };
 
-use crate::compact::relevance::newest_words_where;
+use crate::compact::relevance::{newest_words_where, words_where};
 use crate::compact::{is_edit_result_tool, result_envelope};
 use crate::file_ops::StructuredPatchHunk;
 use crate::session::{ContentBlock, ConversationMessage, MessageRole};
+use crate::todo_progress::{render_todo_lines, todos_written, PLAN_WRITING_TOOLS};
 
 /// Bumped whenever a question's words, the state's shape or the verdict's rule
 /// changes. A row carries it, and its request digest is taken over it, so a
@@ -156,7 +157,8 @@ pub struct PatchAsk {
     /// The file, as the tool reported writing it.
     pub path: String,
     pub hunks: Vec<StructuredPatchHunk>,
-    /// The person's newest words.
+    /// The task, as the ask's [`TaskReading`] read it — the person's newest
+    /// words under the seat's own.
     pub task: String,
     /// The newest lines of the tool result the edit followed, within
     /// [`PATCH_REVIEW_EVIDENCE_BYTE_CAP`]; empty when no result came first.
@@ -208,9 +210,144 @@ pub fn written_patch(tool_name: &str, output: &str) -> Option<(String, Vec<Struc
 /// spoke and does not open with [`HARNESS_TAG_OPEN`].
 #[must_use]
 pub fn persons_words(messages: &[ConversationMessage]) -> String {
-    newest_words_where(messages, MessageRole::User, |words| {
-        !words.trim_start().starts_with(HARNESS_TAG_OPEN)
-    })
+    newest_words_where(messages, MessageRole::User, is_persons)
+}
+
+/// Whether a user message's words are the person's own — not what the
+/// harness wrote in their place ([`HARNESS_TAG_OPEN`]).
+fn is_persons(words: &str) -> bool {
+    !words.trim_start().starts_with(HARNESS_TAG_OPEN)
+}
+
+/// How many of the person's newest messages [`TaskReading::PersonsRecent`]
+/// reads — the brief's three (t-6232): the words that began the turn and
+/// the two before them, which is where a turn that says only "go on" points.
+pub const PERSONS_RECENT_MESSAGES: usize = 3;
+
+/// What a review reads as the task a patch is for (t-6232). The questions,
+/// the patch, the evidence and the path are the same under every reading;
+/// only `/state/task` differs. The seat asks under
+/// [`TaskReading::PersonsNewest`]; the others are the replay's candidates for
+/// a rubric version that reads more than the person's newest words, each of
+/// which would send words the person has not consented to under v1.
+///
+/// Every reading needs words of the person's to ask at all, so each reads
+/// the same patches: a replay of one is a replay of the same sample as the
+/// others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskReading {
+    /// `v1`: the person's newest words.
+    PersonsNewest,
+    /// `v2a`: the person's newest [`PERSONS_RECENT_MESSAGES`] messages, in the
+    /// order they were said.
+    PersonsRecent,
+    /// `v2b`: the person's newest words, then the model's newest words since
+    /// them — what it said it was about to do before the edit.
+    ModelsPlan,
+    /// `v2c`: the plan the model wrote with its todo tool since the person's
+    /// newest words, the newest one, while an item of it is still open;
+    /// [`TaskReading::ModelsPlan`] when the turn has none.
+    TodoPlan,
+}
+
+impl TaskReading {
+    /// Every reading, the seat's own first.
+    pub const ALL: [Self; 4] = [
+        Self::PersonsNewest,
+        Self::PersonsRecent,
+        Self::ModelsPlan,
+        Self::TodoPlan,
+    ];
+
+    /// The word a replay names the reading by.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::PersonsNewest => "v1",
+            Self::PersonsRecent => "v2a",
+            Self::ModelsPlan => "v2b",
+            Self::TodoPlan => "v2c",
+        }
+    }
+
+    /// The reading `word` names, as [`Self::word`] spells it.
+    #[must_use]
+    pub fn named(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|reading| reading.word() == word.trim())
+    }
+}
+
+/// What `reading` reads out of `messages` as the task — empty when the person
+/// has said nothing, whatever the reading. A reading that joins several
+/// texts fits them to [`PATCH_REVIEW_TASK_CHAR_CAP`] itself, the newest
+/// first; the person's newest words alone are cut where the state is built,
+/// as they always were.
+#[must_use]
+pub fn task_by(messages: &[ConversationMessage], reading: TaskReading) -> String {
+    let mut persons = words_where(messages, MessageRole::User, is_persons);
+    let Some((turn_began, newest)) = persons.next() else {
+        return String::new();
+    };
+    // What the model said and wrote after the person last spoke.
+    let since = &messages[turn_began + 1..];
+    match reading {
+        TaskReading::PersonsNewest => newest,
+        TaskReading::PersonsRecent => {
+            let mut recent: Vec<String> = std::iter::once(newest)
+                .chain(persons.map(|(_, words)| words))
+                .take(PERSONS_RECENT_MESSAGES)
+                .collect();
+            recent.reverse();
+            within_task_cap(&recent)
+        }
+        TaskReading::ModelsPlan => models_plan(newest, since),
+        TaskReading::TodoPlan => todo_plan(since).unwrap_or_else(|| models_plan(newest, since)),
+    }
+}
+
+/// The person's newest words, then the model's newest words in `since`.
+fn models_plan(persons: String, since: &[ConversationMessage]) -> String {
+    let models = newest_words_where(since, MessageRole::Assistant, |_| true);
+    within_task_cap(&[persons, models])
+}
+
+/// The newest plan a todo tool wrote in `since`, one item a line and the
+/// open ones first (`todo_progress::render_todo_lines`) — `None` when no plan
+/// was written there, or every item of the newest one is done.
+fn todo_plan(since: &[ConversationMessage]) -> Option<String> {
+    let written = since.iter().rev().find_map(|message| {
+        message.blocks.iter().rev().find_map(|block| match block {
+            ContentBlock::ToolResult {
+                tool_name,
+                output,
+                is_error: false,
+                ..
+            } if PLAN_WRITING_TOOLS.contains(&tool_name.as_str()) => todos_written(output),
+            _ => None,
+        })
+    })?;
+    render_todo_lines(&written)
+}
+
+/// `parts`, in the order they were said, joined by a blank line within
+/// [`PATCH_REVIEW_TASK_CHAR_CAP`] characters: the newest is fitted first, and
+/// each keeps the head of the room left to it — so the door, which cuts a
+/// task to its head, never cuts the newest words away to keep older ones.
+fn within_task_cap(parts: &[String]) -> String {
+    const JOIN: &str = "\n\n";
+    let mut room = PATCH_REVIEW_TASK_CHAR_CAP;
+    let mut kept: Vec<String> = Vec::new();
+    for part in parts.iter().rev().filter(|part| !part.trim().is_empty()) {
+        let join = if kept.is_empty() { 0 } else { JOIN.chars().count() };
+        if room <= join {
+            break;
+        }
+        let head = cut(part, Cap::Chars(room - join));
+        room -= join + head.chars().count();
+        kept.push(head);
+    }
+    kept.reverse();
+    kept.join(JOIN)
 }
 
 /// The newest lines of the newest tool result in `messages` that is not
@@ -282,8 +419,30 @@ pub fn ask_for(
     tool_name: &str,
     output: &str,
 ) -> Option<PatchAsk> {
+    ask_reading(
+        messages,
+        attempt,
+        tool_use_id,
+        tool_name,
+        output,
+        TaskReading::PersonsNewest,
+    )
+}
+
+/// [`ask_for`] with the task read the way `reading` reads it — the seat's own
+/// reading is [`TaskReading::PersonsNewest`]; a replay asks the same patches
+/// under another (t-6232).
+#[must_use]
+pub fn ask_reading(
+    messages: &[ConversationMessage],
+    attempt: &str,
+    tool_use_id: &str,
+    tool_name: &str,
+    output: &str,
+    reading: TaskReading,
+) -> Option<PatchAsk> {
     let (path, hunks) = written_patch(tool_name, output)?;
-    let task = persons_words(messages);
+    let task = task_by(messages, reading);
     if task.trim().is_empty() {
         return None;
     }

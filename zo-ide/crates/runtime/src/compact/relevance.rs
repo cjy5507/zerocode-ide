@@ -234,13 +234,28 @@ pub(crate) fn newest_words_where(
     role: MessageRole,
     keep: impl Fn(&str) -> bool,
 ) -> String {
+    words_where(messages, role, keep)
+        .next()
+        .map(|(_, words)| words)
+        .unwrap_or_default()
+}
+
+/// Every message of `role` in `messages` that spoke words `keep` accepts,
+/// newest first, each beside its index — [`newest_words_where`]'s reading,
+/// for a reader that wants more than the newest, or where it stands (the
+/// patch review's task readings, t-6232).
+pub(crate) fn words_where<'a>(
+    messages: &'a [ConversationMessage],
+    role: MessageRole,
+    keep: impl Fn(&str) -> bool + 'a,
+) -> impl Iterator<Item = (usize, String)> + 'a {
     messages
         .iter()
+        .enumerate()
         .rev()
-        .filter(|message| message.role == role)
-        .map(spoken)
-        .find(|words| !words.trim().is_empty() && keep(words))
-        .unwrap_or_default()
+        .filter(move |(_, message)| message.role == role)
+        .map(|(at, message)| (at, spoken(message)))
+        .filter(move |(_, words)| !words.trim().is_empty() && keep(words))
 }
 
 /// What to ask the seat about `plan`, or `None` when there is nothing to
