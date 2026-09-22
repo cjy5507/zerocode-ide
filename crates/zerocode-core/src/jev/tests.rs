@@ -1246,7 +1246,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 19);
+    assert_eq!(JEV_USES.len(), 20);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1467,9 +1467,9 @@ fn the_patch_review_seat_sends_a_patch_and_its_evidence_and_rises_on_hindsight()
     assert!(!PATCH_REVIEW.mode_of(Some(&json!("auto"))).applies_with(false));
     assert!(PATCH_REVIEW.mode_of(Some(&json!("auto"))).applies_with(true));
     assert_eq!(PATCH_REVIEW.mode_in(&json!({})), JevMode::Off);
-    // Last in the table for now: the challenger seat's row (t-6151) takes the
-    // place before it when that branch lands.
+    // The twentieth row, after the challenger seat's (t-6151).
     assert_eq!(JEV_USES.last(), Some(&PATCH_REVIEW));
+    assert_eq!(JEV_USES[JEV_USES.len() - 2], CHALLENGER);
 }
 
 /// A request's receipt is the whole SHA-256 of the seat, the rubric version,
