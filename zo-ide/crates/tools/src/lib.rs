@@ -103,6 +103,11 @@ pub use misc_tools::{
     merged_settings_root,
 };
 pub use misc_tools::{
+    compaction_relevance_path, jev_compaction_mode_from, note_compaction_reread, CompactionJudge,
+    CompactionLabelRow, CompactionRow, COMPACTION_JUDGMENT_DEADLINE, COMPACTION_OUTCOME_ANSWERED,
+    COMPACTION_RELEVANCE_FILE, JEV_COMPACTION_SETTING,
+};
+pub use misc_tools::{
     note_loaded_skill, note_search_answer, skill_search, skill_search_mode_from,
     skill_search_path,
     Chosen, Searched, SkillLabelRow, SkillSearchRow,

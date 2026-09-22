@@ -33,6 +33,11 @@ pub use smart_router::{
     merged_settings_root,
 };
 pub use smart_router::{
+    compaction_relevance_path, jev_compaction_mode_from, note_compaction_reread, CompactionJudge,
+    CompactionLabelRow, CompactionRow, COMPACTION_JUDGMENT_DEADLINE, COMPACTION_OUTCOME_ANSWERED,
+    COMPACTION_RELEVANCE_FILE, JEV_COMPACTION_SETTING,
+};
+pub use smart_router::{
     basis_points, check_system_one, decision_shadow_mode_from, decision_shadow_path,
     evaluate_decision_labels, note_recall_read, note_route_followed, read_shadow_rows,
     rerank_shadow_mode_from, rerank_shadow_path, route_unseated_by, summarize_decision_shadow,

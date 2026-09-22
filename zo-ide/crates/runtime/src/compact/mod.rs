@@ -1,5 +1,7 @@
 use crate::session::{AnchorSummary, ContentBlock, ConversationMessage, MessageRole, Session};
 
+pub mod relevance;
+
 const COMPACT_CONTINUATION_PREAMBLE: &str = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\n";
 const COMPACT_RECENT_MESSAGES_NOTE: &str = "Recent messages are preserved verbatim.";
 const COMPACT_DIRECT_RESUME_INSTRUCTION: &str = "Continue the conversation from where it left off without asking the user any further questions. Resume directly — do not acknowledge the summary, do not recap what was happening, and do not preface with continuation text.";
@@ -172,7 +174,7 @@ const MIN_COMPACTABLE_MESSAGES: usize = 8;
 
 /// Number of trailing messages whose estimated tokens fit `budget_tokens` —
 /// the CC-parity token-budgeted preserved tail. Capped so at least
-/// [`MIN_COMPACTABLE_MESSAGES`] remain to summarize, then floored at the
+/// `MIN_COMPACTABLE_MESSAGES` remain to summarize, then floored at the
 /// legacy 4-message default ([`CompactionConfig::default`]): the floor wins
 /// on a session too small for both bounds, which keeps small-session
 /// behavior byte-identical to the fixed-tail era (the budget only ever
@@ -2155,10 +2157,32 @@ fn seal_microcompact_originals(session: &Session, plan: &MicrocompactPlan) -> bo
         .collect();
     indices.sort_unstable();
     indices.dedup();
+    seal_originals_of(session, &session.messages, session.first_message_index(), &indices)
+}
+
+/// Seal the pre-clear ORIGINAL of `messages[index]` for every `index` in
+/// `indices` (sorted, distinct) into `session`'s vault, at `base_seq + index`
+/// on the vault's seq axis — the one seal both trims pay before they blank a
+/// body: microcompact over the live transcript (`base_seq` its
+/// `first_message_index`), and the relevance drop over a compaction plan's
+/// evicted set (`base_seq` that index plus the plan's cache prefix, the axis
+/// `apply_compaction` heals on). A message already holding an earlier
+/// round's placeholder is healed from the vault first, so a later seal cannot
+/// bury a pristine record under a partially-cleared one (dedup is last-wins).
+///
+/// Answers whether the caller may now destroy those bodies — `false` only
+/// when the vault append FAILED; an empty selection wrote nothing and
+/// answers `true`, as [`Session::seal_originals_to_vault`] does.
+#[must_use]
+fn seal_originals_of(
+    session: &Session,
+    messages: &[ConversationMessage],
+    base_seq: u32,
+    indices: &[usize],
+) -> bool {
     if indices.is_empty() {
         return true;
     }
-    let base_seq = session.first_message_index();
     let seqs: Vec<u32> = indices
         .iter()
         .map(|&message_index| {
@@ -2167,7 +2191,7 @@ fn seal_microcompact_originals(session: &Session, plan: &MicrocompactPlan) -> bo
         .collect();
     let mut batch: Vec<ConversationMessage> = indices
         .iter()
-        .map(|&message_index| session.messages[message_index].clone())
+        .map(|&message_index| messages[message_index].clone())
         .collect();
     if needs_microcompact_heal(&batch) {
         restore_microcompacted_bodies(&mut batch, session, &seqs);

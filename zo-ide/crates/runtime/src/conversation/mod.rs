@@ -39,7 +39,7 @@ pub use api::{
 };
 use compaction::{auto_compaction_threshold_from_env_or_policy, ContextPolicy};
 pub use compaction::{
-    auto_compaction_threshold_for_model, auto_compaction_threshold_from_env,
+    auto_compaction_tail_budget, auto_compaction_threshold_for_model, auto_compaction_threshold_from_env, MICROCOMPACT_MIN_OUTPUT_BYTES,
     count_progress_tool_results, final_assistant_text, AutoCompactionEvent, BudgetExhausted,
     TurnSummary,
 };
@@ -685,6 +685,10 @@ pub struct ConversationRuntime<C, T> {
     /// Seated beside the retriever and shown every recall after it settles;
     /// its answer is the order the turn reads. See [`crate::RecallSeat`].
     recall_seat: Option<Arc<dyn crate::RecallSeat>>,
+    /// Seated beside full compaction and asked, once per boundary, which
+    /// tool results the summary still needs to read. See
+    /// [`crate::CompactionSeat`].
+    compaction_seat: Option<Arc<dyn crate::CompactionSeat>>,
     max_iterations: usize,
     /// Optional wall-clock deadline for the turn. Two callers set it: spawned
     /// sub-agents bound a straggler that overran its caller's wait window, and
@@ -1657,6 +1661,7 @@ where
             attempt_cache_scope: None,
             memory_retriever: None,
             recall_seat: None,
+            compaction_seat: None,
             max_iterations: default_max_iterations(),
             deadline: None,
             deadline_extension: None,

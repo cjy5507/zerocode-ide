@@ -316,9 +316,10 @@ fn a_seats_first_judgment_waits_for_a_window_it_can_fill() {
     }
 }
 
-/// The two seats with no reader to be compared against are the two whose
-/// wrong answer the person undoes in one move and whose own mark is that
-/// move — everything else must show a window of comparisons first.
+/// The seats with no reader to be compared against are the ones whose own
+/// mark is a later fact — the person's move, the turn's read, the re-read
+/// after a drop — and everything else must show a window of comparisons
+/// first.
 #[test]
 fn only_the_seats_with_no_reader_to_compare_rise_on_their_own_ledger() {
     // The counter and both writers ask one judge; the thin-sample policy
@@ -332,7 +333,7 @@ fn only_the_seats_with_no_reader_to_compare_rise_on_their_own_ledger() {
         .filter(|row| row.agreement_kind == AgreementKind::Hindsight)
         .map(|row| row.id)
         .collect();
-    assert_eq!(on_their_own, vec![RECALL.id, PLACEMENT.id]);
+    assert_eq!(on_their_own, vec![RECALL.id, PLACEMENT.id, COMPACTION.id]);
     for row in JEV_USES.iter().filter(|row| row.promotes) {
         assert_eq!(
             row.agreement_rows_wanted,
@@ -565,6 +566,73 @@ fn the_step_effort_seat_reads_the_turn_like_routing_and_rises_on_its_own_marks()
     assert!(
         !ZO_STEP_EFFORT.permits_press(1.0),
         "a step judgment presses nothing"
+    );
+}
+
+/// A tool result about to be summarized away is kept or dropped on the
+/// remaining work, not on its age: the seat sends the goal, the newest words
+/// and each block's head, answers a closed keep/drop, drops only past its
+/// own lean, and rises on the hindsight of the turns after — a dropped block
+/// read again inside the window is the regret its label records.
+#[test]
+fn the_compaction_seat_drops_by_relevance_and_rises_on_its_regret_marks() {
+    assert_eq!(jev_use("compaction"), Some(&COMPACTION));
+    let sent: Vec<&str> = COMPACTION.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(
+        sent,
+        [
+            "/state/goal",
+            "/state/recent",
+            "/state/blocks",
+            "/state/blocks/*/tool",
+            "/state/blocks/*/input",
+            "/state/blocks/*/head",
+        ],
+        "heads only: a body never leaves, and the tail is not asked about"
+    );
+    let caps = |row: &JevUse| -> Vec<Cap> { row.sends.iter().map(|sent| sent.cap).collect() };
+    assert!(caps(&COMPACTION).contains(&Cap::Chars(COMPACTION_GOAL_CHAR_CAP)));
+    assert!(caps(&COMPACTION).contains(&Cap::Items(COMPACTION_SHARD_TARGET)));
+    assert!(caps(&COMPACTION).contains(&Cap::Bytes(COMPACTION_BLOCK_HEAD_BYTE_CAP)));
+    assert!(caps(&COMPACTION).contains(&Cap::Chars(COMPACTION_INPUT_CHAR_CAP)));
+
+    const { assert!(COMPACTION.promotes) };
+    assert_eq!(COMPACTION.agreement_kind, AgreementKind::Hindsight);
+    assert_eq!(
+        COMPACTION.answer_floor_permille,
+        Some(COMPACTION_ANSWER_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        COMPACTION.agreement_floor_permille,
+        Some(COMPACTION_AGREEMENT_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        COMPACTION.apply_deadline_ms,
+        Some(COMPACTION_APPLY_DEADLINE_MS),
+        "the one wall the whole batch waits is the row's"
+    );
+    // A miss costs nothing, so the seat waits longer than a turn's route
+    // and shorter than a summons: it sits beside a summary round-trip.
+    const { assert!(COMPACTION_APPLY_DEADLINE_MS > ROUTING_APPLY_DEADLINE_MS) };
+    const { assert!(COMPACTION_APPLY_DEADLINE_MS < SUMMON_APPLY_DEADLINE_MS) };
+
+    assert_eq!(COMPACTION_OPTIONS, [COMPACTION_KEEP, COMPACTION_DROP]);
+    assert_ne!(COMPACTION_KEEP, COMPACTION_DROP);
+    // The drop lean is a lean: over one half, under certainty.
+    const { assert!(COMPACTION_DROP_FLOOR_PERMILLE > 500 && COMPACTION_DROP_FLOOR_PERMILLE < 1_000) };
+    const { assert!(COMPACTION_REGRET_TURNS > 0) };
+
+    assert!(COMPACTION.mode_of(Some(&json!("on"))).applies());
+    assert!(!COMPACTION.mode_of(Some(&json!("auto"))).applies_with(false));
+    assert!(COMPACTION.mode_of(Some(&json!("auto"))).applies_with(true));
+    assert!(
+        !COMPACTION
+            .mode_of(Some(&json!("shadow")))
+            .applies_with(true)
+    );
+    assert!(
+        !COMPACTION.permits_press(1.0),
+        "a compaction judgment presses nothing"
     );
 }
 

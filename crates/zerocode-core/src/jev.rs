@@ -1199,8 +1199,178 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
 };
 
+/// Characters of the person's last request one compaction judgment reads
+/// as the goal the remaining work serves — the routing seat's cap, for the
+/// routing seat's reason: the head of a request is what says what it is
+/// about, and a second number on the same words would be a second answer
+/// to how much of a person's work leaves the machine.
+pub const COMPACTION_GOAL_CHAR_CAP: usize = ROUTING_TASK_CHAR_CAP;
+
+/// Characters of the assistant's newest words one compaction judgment reads
+/// as where the work stands — the recall seat's request cap, because the two
+/// are the same kind of text read for the same purpose: the sentence or two
+/// that says what is being done right now.
+pub const COMPACTION_RECENT_CHAR_CAP: usize = RECALL_REQUEST_CHAR_CAP;
+
+/// Characters of one tool call's input a compaction judgment carries beside
+/// the result it produced — the step-effort seat's card-line cap, which is
+/// what a call's name and target take on the board. Measured on this
+/// machine's 1,091 transcripts (2026-09-22): tool inputs run to 122
+/// characters at the median and 324 at p75; 68% fit whole, and the rest are
+/// a body (a file's new content, a long command) whose head is the target.
+pub const COMPACTION_INPUT_CHAR_CAP: usize = STEP_EFFORT_REPEATED_CHAR_CAP;
+
+/// Bytes of one tool result's head a compaction judgment carries — the recall
+/// seat's summary cap, for the same reason: a head is what a reader skims to
+/// know what a result was about, never the result. Measured on this machine's
+/// 14,509 clearable tool results (2026-09-22, bodies of 240 B and over):
+/// 320 bytes holds their first five lines at the median and two at p10,
+/// against bodies of 1,995 B (p50) and 8,561 B (p90).
+pub const COMPACTION_BLOCK_HEAD_BYTE_CAP: usize = RECALL_SUMMARY_BYTE_CAP;
+
+/// Tool results one compaction request asks about ([`shard::even_shards`]'s
+/// target) — the skill seat's number, because the two requests have the same
+/// shape: one state written once and a line-long question per item, so the
+/// shard that decides the answer is the one that is asked, not the longest.
+pub const COMPACTION_SHARD_TARGET: usize = SKILL_SHARD_TARGET;
+
+/// The closed answer every compaction question offers, spelled once: keep the
+/// block for the summary to read, or drop it. A third word would be an answer
+/// nothing could act on.
+pub const COMPACTION_OPTIONS: [&str; 2] = [COMPACTION_KEEP, COMPACTION_DROP];
+
+/// The word that keeps a block in the summary's input.
+pub const COMPACTION_KEEP: &str = "keep";
+
+/// The word that takes a block out of the summary's input.
+pub const COMPACTION_DROP: &str = "drop";
+
+/// What a `drop` answer's own probability must reach, per thousand, before
+/// the block is dropped at all.
+///
+/// The two sides of this question are not symmetric. A block kept costs the
+/// summary a few hundred tokens of input once; a block dropped is one the
+/// summary never sees — recoverable from the vault by `session_recall`, but
+/// not from the summary — so the judgment has to be more than half sure
+/// before it takes one out. Seven in ten is the skill seat's line for the
+/// same lean ([`SKILL_RELEVANCE_FLOOR_PERMILLE`], "the expected level must
+/// lean toward covers this directly"), written here in the units this table
+/// writes its other lines in.
+pub const COMPACTION_DROP_FLOOR_PERMILLE: u16 = 700;
+
+/// What the compaction seat's answers must bound above before `auto` rises
+/// to dropping (§4): nine in ten.
+///
+/// The skill seat's reasoning, reached from this seat's own side: a question
+/// that does not come back costs the compaction nothing it was not already
+/// going to pay — every block is kept and the summary reads what it read
+/// before the seat existed ([`ROUTE_USE_FALLBACK`]). Written as its own
+/// number rather than read from [`SKILL_ANSWER_FLOOR_PERMILLE`]: two lines
+/// that coincide are still two policies.
+pub const COMPACTION_ANSWER_FLOOR_PERMILLE: u16 = 900;
+
+/// The compaction seat's route-change budget (§4): four dropped blocks in
+/// five must be ones the turns after never went back for.
+///
+/// What this seat has in place of a probe is hindsight: a block dropped and
+/// then read again within [`COMPACTION_REGRET_TURNS`] turns — the same path
+/// opened, or the same call made — was a block the work still needed, and
+/// the label says so (`regret`). Held to the same budget as every other seat
+/// that takes a decision off a reader: one in five wrong is not a rate at
+/// which to take blocks away from the summary unasked.
+pub const COMPACTION_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
+
+/// The wall one compaction waits for its judgments, in milliseconds — one
+/// number for the whole batch, every shard leaving together and the slowest
+/// of them being what the boundary waits.
+///
+/// Three seconds: twice the routing seat's wall, because a compaction request
+/// carries up to [`COMPACTION_SHARD_TARGET`] questions over a state of some
+/// 16 KiB where routing carries five over 2,000 characters, and a compaction
+/// is not a turn's wait but a boundary that already sits through a summary
+/// round-trip measured in tens of seconds. Past it every unanswered block is
+/// kept, which is exactly what a compaction did before the seat existed.
+pub const COMPACTION_APPLY_DEADLINE_MS: u64 = 3_000;
+
+/// Turns after a compaction inside which reading a dropped block again counts
+/// against the judgment that dropped it (the seat's hindsight label).
+///
+/// Five is a policy line, not a measured one: long enough that the turn
+/// resuming from the summary and the few after it — where a missing fact
+/// shows as a re-read — are inside it, short enough that a file opened an
+/// hour later for another reason is not charged to a decision it had nothing
+/// to do with (the placement seat's window, [`PLACEMENT_LABEL_WINDOW_MS`],
+/// is drawn the same way). A label is written once per dropped block: at the
+/// turn that read it again, or at the fifth turn that did not.
+pub const COMPACTION_REGRET_TURNS: u32 = 5;
+
+/// zo's relevance compaction: for each tool result about to be summarized
+/// out of a session, whether the summary still needs to read it (t-6039).
+///
+/// Compaction used to trim by age alone — microcompact clears the OLDEST
+/// results — and the summary read everything the tail did not keep. The
+/// idea is jevable's "instant compaction": ask, per tool result, whether the
+/// remaining work needs it, and summarize only what is left. A drop reuses
+/// the microcompact machinery whole: the original is sealed to the vault
+/// first, the summary's copy carries the placeholder, and the eviction seal
+/// heals the placeholder back before the raw record is written — so the
+/// vault stays lossless and `session_recall` can still read a dropped block.
+///
+/// What is sent is the head of the person's last request, the head of the
+/// assistant's newest words, and for each block its tool's name, the head of
+/// its input and the head of its output — never a body, never the tail.
+/// Every request passes the door; a refusal, a timeout or a reply that
+/// breaks the contract keeps every block it covered.
+///
+/// `on` and a risen `auto` are the apply stage: the dropped blocks leave the
+/// summary's input. `shadow` asks and records what it would have dropped and
+/// the summary reads what it read before. The `agreed` rule is hindsight
+/// ([`COMPACTION_REGRET_TURNS`]): one label per dropped block, `false` when
+/// a turn inside the window read the same path or made the same call again
+/// (regret), `true` at the window's end otherwise.
+pub const COMPACTION: JevUse = JevUse {
+    id: "compaction",
+    setting: "jevCompaction",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    sends: &[
+        Sent {
+            at: "/state/goal",
+            cap: Cap::Chars(COMPACTION_GOAL_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/recent",
+            cap: Cap::Chars(COMPACTION_RECENT_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/blocks",
+            cap: Cap::Items(COMPACTION_SHARD_TARGET),
+        },
+        Sent {
+            at: "/state/blocks/*/tool",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/blocks/*/input",
+            cap: Cap::Chars(COMPACTION_INPUT_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/blocks/*/head",
+            cap: Cap::Bytes(COMPACTION_BLOCK_HEAD_BYTE_CAP),
+        },
+    ],
+    ledger: "compaction-relevance.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(COMPACTION_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(COMPACTION_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(COMPACTION_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Hindsight,
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 11] = [
+pub static JEV_USES: [JevUse; 12] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -1212,6 +1382,7 @@ pub static JEV_USES: [JevUse; 11] = [
     SUMMON,
     STEP_EFFORT,
     ZO_STEP_EFFORT,
+    COMPACTION,
 ];
 
 impl JevUse {

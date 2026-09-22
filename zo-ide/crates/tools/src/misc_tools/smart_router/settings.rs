@@ -356,6 +356,22 @@ pub fn skill_search_mode_from(loader: &runtime::ConfigLoader) -> Option<Decision
     merged_settings_root_from(loader).map(|root| zerocode_core::jev::SKILLS.mode_in(&root))
 }
 
+/// `smart.jevCompaction`: whether the tool results a full compaction is about
+/// to summarize away are put to a judgment first. Its own switch, because it
+/// sends something else off the machine — the heads of a session's tool
+/// calls and results — and consent to one is not consent to another.
+pub const JEV_COMPACTION_SETTING: &str = zerocode_core::jev::COMPACTION.setting;
+
+/// `smart.jevCompaction` from the settings `loader` merges, on the same
+/// terms as [`decision_shadow_mode_from`]. `on`, and an `auto` this seat's
+/// own evidence has raised, are its apply stage — the dropped blocks leave
+/// the summary's input (`runtime::compaction_relevance`). `shadow` records
+/// what would have been dropped and the summary reads what it read before.
+#[must_use]
+pub fn jev_compaction_mode_from(loader: &runtime::ConfigLoader) -> Option<DecisionShadowMode> {
+    merged_settings_root_from(loader).map(|root| zerocode_core::jev::COMPACTION.mode_in(&root))
+}
+
 /// The plan scorer's knobs (`smart.plan.*`). While the scorer runs in shadow
 /// it decides nothing; these only shape what the shadow ledger records, so a
 /// later comparison reads the thresholds the live scorer would use.

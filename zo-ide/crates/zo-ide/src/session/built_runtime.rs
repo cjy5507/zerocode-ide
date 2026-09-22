@@ -17,6 +17,9 @@ pub(crate) struct RuntimePluginState {
     /// working directory is known, because that is where its setting and its
     /// ledger live.
     pub(crate) recall_seat: Option<Arc<dyn runtime::RecallSeat>>,
+    /// Seated beside full compaction and asked which tool results the
+    /// summary still needs. Built here for the reason the recall seat is.
+    pub(crate) compaction_seat: Option<Arc<dyn runtime::CompactionSeat>>,
     pub(crate) mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     pub(crate) lsp_state: Option<Arc<Mutex<RuntimeLspState>>>,
 }

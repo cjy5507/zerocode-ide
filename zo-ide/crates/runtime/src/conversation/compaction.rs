@@ -618,8 +618,10 @@ const MICROCOMPACT_LARGE_WINDOW_TOKENS: u64 = 400_000;
 /// a single incidental trim on a genuinely-progressing turn never trips it.
 pub(super) const MICROCOMPACT_THRASH_PROMOTION: usize = 3;
 /// Bodies smaller than this stay intact (clearing them saves nothing and
-/// costs information); image-bearing results are always clearable.
-const MICROCOMPACT_MIN_OUTPUT_BYTES: usize = 240;
+/// costs information); image-bearing results are always clearable. The
+/// relevance seat spends no question under it either, for the same reason
+/// (`crate::compact::relevance`).
+pub const MICROCOMPACT_MIN_OUTPUT_BYTES: usize = 240;
 /// How many more requests a trim is assumed to have left to pay itself back.
 ///
 /// A firing re-bills its invalidated suffix ONCE and saves `clearable` on every
@@ -638,6 +640,22 @@ use tokio::sync::mpsc;
 // The sync turn loop's auto-compaction surface: threshold check, summary
 // generation (api-first with deterministic fallback), and session rewrite.
 // The turn loop itself only calls [`ConversationRuntime::maybe_auto_compact`].
+
+/// The token budget of the preserved tail an auto round keeps verbatim for a
+/// session on `context_window`: 12% of the window capped at 40k tokens, or
+/// what `ZO_COMPACT_TAIL_TOKENS` says (`0` restores the legacy 4-message
+/// tail). The one number the runtime's tail and a replay of its boundaries
+/// (`tools/compaction-replay`) both cut by.
+#[must_use]
+pub fn auto_compaction_tail_budget(context_window: u64) -> u64 {
+    std::env::var(COMPACT_TAIL_TOKENS_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .unwrap_or_else(|| {
+            (context_window.saturating_mul(AUTO_COMPACTION_TAIL_PERCENT) / 100)
+                .min(AUTO_COMPACTION_TAIL_MAX_TOKENS)
+        })
+}
 
 /// Deterministic local compaction used as the fallback when the API summary
 /// round-trip fails. A `/compact <focus>` request keeps steering toward the
@@ -805,16 +823,10 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
     /// re-work right after each compact). `ZO_COMPACT_TAIL_TOKENS`
     /// overrides the budget; `0` restores the legacy 4-message tail.
     fn auto_compaction_preserved_tail_len(&self) -> usize {
-        let budget = std::env::var(COMPACT_TAIL_TOKENS_ENV)
-            .ok()
-            .and_then(|raw| raw.trim().parse::<u64>().ok())
-            .unwrap_or_else(|| {
-                (self.context_window_for_guards()
-                    .saturating_mul(AUTO_COMPACTION_TAIL_PERCENT)
-                    / 100)
-                    .min(AUTO_COMPACTION_TAIL_MAX_TOKENS)
-            });
-        crate::compact::preserved_tail_len_for_budget(&self.session.messages, budget)
+        crate::compact::preserved_tail_len_for_budget(
+            &self.session.messages,
+            auto_compaction_tail_budget(self.context_window_for_guards()),
+        )
     }
 
     pub(super) fn auto_compaction_config_for_tokens(
@@ -1822,10 +1834,63 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 removed_message_count: 0,
             });
         };
+        let plan = self.judged_compaction_plan_blocking(plan);
 
         let raw_summary = self.request_compaction_summary(&plan, focus)?;
         let raw_summary = Self::faithful_summary_or_local(raw_summary, &plan);
         Ok(apply_compaction(plan, &raw_summary))
+    }
+
+    /// The plan the summary reads, once the compaction seat has had its say
+    /// (t-6039): the same plan when no seat is installed, when there is
+    /// nothing to ask, when the seat's mode only records, or when its answer
+    /// did not arrive inside the row's wall; otherwise the plan with the
+    /// dropped blocks' bodies replaced by the microcompact placeholder — the
+    /// originals sealed to the vault first, so `apply_compaction` heals and
+    /// re-seals them and nothing is lost.
+    ///
+    /// Sits between `prepare_compaction` and the summary request on purpose:
+    /// the seat changes what the summary READS, never what the session holds,
+    /// and a fallback to the local summarizer re-prepares from the session
+    /// and reads everything — which is what a compaction did before the seat.
+    ///
+    /// `&mut self` rather than `&self`, although nothing here is written:
+    /// the future holds the borrow across the seat's await, and a shared
+    /// borrow of a runtime is `Send` only when the runtime is `Sync`, which
+    /// its hook reporter is not. The exclusive borrow is `Send` on the same
+    /// terms as every other awaiting method of this runtime.
+    pub(super) async fn judged_compaction_plan(&mut self, plan: CompactionPlan) -> CompactionPlan {
+        let Some(seat) = self.compaction_seat.as_ref().map(Arc::clone) else {
+            return plan;
+        };
+        let attempt = self.attempt().to_string();
+        let (plan, judged) = crate::compact::relevance::judge_plan(
+            seat.as_ref(),
+            &self.session,
+            plan,
+            MICROCOMPACT_MIN_OUTPUT_BYTES,
+            &attempt,
+        )
+        .await;
+        if judged.dropped > 0 {
+            self.record_compaction_round(
+                "relevance_drop",
+                judged.asked,
+                judged.asked.saturating_sub(judged.dropped),
+                judged.dropped,
+            );
+        }
+        plan
+    }
+
+    /// [`Self::judged_compaction_plan`] for the synchronous road, which
+    /// already blocks on the summary round-trip; a runtime with no seat pays
+    /// nothing here.
+    pub(super) fn judged_compaction_plan_blocking(&mut self, plan: CompactionPlan) -> CompactionPlan {
+        if self.compaction_seat.is_none() {
+            return plan;
+        }
+        ::api::sync_bridge::run_blocking(self.judged_compaction_plan(plan))
     }
 
     /// Guard against a hallucinated API summary (LAVA P1 verifier): if it cites
@@ -1881,6 +1946,7 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 removed_message_count: 0,
             });
         };
+        let plan = self.judged_compaction_plan(plan).await;
         let Some(async_client) = self.async_api_client.clone() else {
             // Defensive: callers only take this path when an async client is
             // present, but stay correct (sync round-trip) if that changes.

@@ -15597,6 +15597,94 @@ fn compaction_plan_for(
     .expect("a session over budget always yields a plan")
 }
 
+/// The compaction seat's seam (t-6039): with no seat the plan the summary
+/// reads is the plan `prepare_compaction` made, byte for byte; with a seat
+/// that acts, the dropped block's body is the microcompact placeholder in
+/// the summary request and nowhere else — the session itself is untouched.
+#[tokio::test]
+async fn the_compaction_seat_changes_what_the_summary_reads_and_nothing_else() {
+    use crate::compact::relevance::{CompactionAsk, CompactionJudgment, CompactionSeat};
+    use crate::compact::MICROCOMPACT_PLACEHOLDER;
+
+    struct Drops(Vec<usize>, bool);
+    impl CompactionSeat for Drops {
+        fn judge<'a>(
+            &'a self,
+            _ask: &'a CompactionAsk,
+        ) -> futures_util::future::BoxFuture<'a, CompactionJudgment> {
+            Box::pin(async move { CompactionJudgment { dropped: self.0.clone(), applies: self.1 } })
+        }
+    }
+
+    let mut runtime = compaction_test_runtime();
+    let body = format!("READ_BODY {}", "x".repeat(600));
+    for message in [
+        ConversationMessage {
+            role: MessageRole::User,
+            blocks: vec![ContentBlock::Text { text: "fix the tests".to_string() }],
+            usage: None,
+            thought_signature: None,
+            reasoning_replay: None,
+            model: None,
+        },
+        ConversationMessage::assistant(vec![ContentBlock::ToolUse {
+            id: "t1".to_string(),
+            name: "Read".to_string(),
+            input: r#"{"path":"/work/a.rs"}"#.to_string(),
+        }]),
+        ConversationMessage {
+            role: MessageRole::User,
+            blocks: vec![ContentBlock::ToolResult {
+                tool_use_id: "t1".to_string(),
+                tool_name: "Read".to_string(),
+                output: body.clone(),
+                is_error: false,
+                images: Vec::new(),
+            }],
+            usage: None,
+            thought_signature: None,
+            reasoning_replay: None,
+            model: None,
+        },
+        ConversationMessage::assistant(vec![ContentBlock::Text { text: "done".to_string() }]),
+    ] {
+        runtime.session.push_message(message).expect("push");
+    }
+    for text in ["keep going", "and on", "tail one", "tail two"] {
+        runtime.session.push_user_text(text).expect("push");
+    }
+    let config = CompactionConfig { preserve_recent_messages: 2, max_estimated_tokens: 0 };
+    let prepared = crate::compact::prepare_compaction(&runtime.session, config).expect("a plan");
+
+    // No seat: the seam is a pass-through, on both roads.
+    let same = runtime.judged_compaction_plan(prepared.clone()).await;
+    assert_eq!(same.messages_to_compact, prepared.messages_to_compact);
+    assert_eq!(same.cache_prefix, prepared.cache_prefix);
+    let same = runtime.judged_compaction_plan_blocking(prepared.clone());
+    assert_eq!(same.messages_to_compact, prepared.messages_to_compact);
+
+    // A recording seat: the same plan, byte for byte.
+    runtime.set_compaction_seat(Some(Arc::new(Drops(vec![0], false))));
+    let same = runtime.judged_compaction_plan(prepared.clone()).await;
+    assert_eq!(same.messages_to_compact, prepared.messages_to_compact);
+
+    // An acting seat: the read's body is the placeholder in the summary
+    // request, the tail and the session are what they were.
+    runtime.set_compaction_seat(Some(Arc::new(Drops(vec![0], true))));
+    let judged = runtime.judged_compaction_plan(prepared.clone()).await;
+    let request = runtime.compaction_summary_request(&judged, None);
+    let sent = format!("{:?}", request.messages);
+    assert!(sent.contains(MICROCOMPACT_PLACEHOLDER), "the summary reads the placeholder");
+    assert!(!sent.contains(&body), "the summary never reads the dropped body");
+    assert_eq!(judged.preserved_tail, prepared.preserved_tail);
+    assert!(
+        runtime.session.messages.iter().any(|message| message.blocks.iter().any(
+            |block| matches!(block, ContentBlock::ToolResult { output, .. } if *output == body)
+        )),
+        "the live session still holds the body"
+    );
+}
+
 fn compaction_test_runtime() -> ConversationRuntime<NoopApiClient, StaticToolExecutor> {
     let mut runtime = ConversationRuntime::new(
         Session::new(),
