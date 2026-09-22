@@ -2344,6 +2344,18 @@ pub(super) async fn computer_loop(
                         );
                         let desk =
                             || computer_use::recipe_run::LiveDesk::new().in_window(app.clone());
+                        // The second reader (`--rescue`, t-6132 S3): the
+                        // frontier, headless, under the window's own login —
+                        // built here because only this loop holds the state
+                        // the launch environment is read from.
+                        let rescue = zerocode_core::computer_use::walk_rescues(&command.params)
+                            .then(|| {
+                                computer_use::errand::team::TeamJudge::new(
+                                    app.state::<AppState>().config_root(),
+                                    cwd.as_deref().map(Path::new),
+                                )
+                            })
+                            .flatten();
                         if command.method == zerocode_core::computer_use::ComputerMethod::Walk {
                             run_goal(
                                 &command,
@@ -2352,6 +2364,7 @@ pub(super) async fn computer_loop(
                                 cwd.as_deref().map(Path::new),
                                 roads,
                                 desk,
+                                rescue,
                             )
                         } else {
                             run_recipe(
@@ -2362,6 +2375,7 @@ pub(super) async fn computer_loop(
                                 roads,
                                 desk,
                                 || !reply.is_closed(),
+                                rescue,
                             )
                         }
                     };
@@ -2769,6 +2783,7 @@ where
 /// the folder the walk was asked from, as the Computer Use door said it. A
 /// walk asked from nowhere known is judged for no workspace, which the door
 /// refuses.
+#[allow(clippy::too_many_arguments)] // The walk's roads, its desk, its caller and its second reader are each one seam a test replaces on its own.
 pub(super) fn run_recipe(
     command: &zerocode_core::computer_use::ComputerCommand,
     deadline_ms: u64,
@@ -2786,6 +2801,7 @@ pub(super) fn run_recipe(
     >,
     mut desk_of: impl computer_use::arena::DeskOf,
     caller_waits: impl Fn() -> bool,
+    mut rescue: Option<computer_use::errand::team::TeamJudge>,
 ) -> zerocode_hookd::TeamAnswer {
     use computer_use::arena::{self, Arena, ArenaDesk, Stage};
     use computer_use::recipe_run::{self, Desk as _, Run};
@@ -2991,8 +3007,21 @@ pub(super) fn run_recipe(
                 // questions go down, so the standing and the answers come
                 // from one settings file and one ledger root.
                 let acting = crate::systemone::applies(judge.wire(), seat);
-                let recovered =
-                    computer_use::errand::run(mode, acting, &at, &mut judge, &mut world);
+                let options = computer_use::errand::Options {
+                    overlap: false,
+                    rescue: rescue.is_some(),
+                };
+                let recovered = computer_use::errand::run_with(
+                    mode,
+                    acting,
+                    &at,
+                    &mut judge,
+                    &mut world,
+                    options,
+                    rescue
+                        .as_mut()
+                        .map(|team| team as &mut dyn computer_use::errand::ActionJudge),
+                );
                 computer_use::errand::write_rows(
                     seat,
                     judge.wire(),
@@ -3065,6 +3094,7 @@ pub(super) fn run_goal(
         impl FnMut(serde_json::Value),
     >,
     mut desk_of: impl computer_use::arena::DeskOf,
+    mut rescue: Option<computer_use::errand::team::TeamJudge>,
 ) -> zerocode_hookd::TeamAnswer {
     use computer_use::errand::{self, desk};
     use computer_use::recipe_run::Desk as _;
@@ -3175,8 +3205,19 @@ pub(super) fn run_goal(
     let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0);
     let options = errand::Options {
         overlap: zerocode_core::computer_use::walk_overlaps(&command.params),
+        rescue: rescue.is_some(),
     };
-    let walked = errand::run_with(mode, acting, &at, &mut judge, &mut world, options);
+    let walked = errand::run_with(
+        mode,
+        acting,
+        &at,
+        &mut judge,
+        &mut world,
+        options,
+        rescue
+            .as_mut()
+            .map(|team| team as &mut dyn errand::ActionJudge),
+    );
     errand::write_rows(
         seat,
         judge.wire(),

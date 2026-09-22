@@ -142,6 +142,14 @@ pub struct Options {
     /// that clears a stop never ask ahead: those walks do not come back to
     /// the same screen.
     pub overlap: bool,
+    /// The second rung (t-6132 S3): when the seat's judgment is under its
+    /// press floor, ask the second reader the walk was handed
+    /// ([`run_with`]'s `rescue`) the same closed choice, and press its
+    /// number under the seat's own press rule; only when that too is under
+    /// the floor, refused, a link, `give_up` or `done` does the walk step
+    /// back to the person as it does today. Off, the walk never asks: the
+    /// second reader costs a frontier turn.
+    pub rescue: bool,
 }
 
 /// What a judgment begun ahead of the walk came to ([`Pending::wait`]): the
@@ -224,6 +232,15 @@ pub trait ActionJudge {
     /// asked in turn.
     fn finish(&mut self, done: Done) -> Judged {
         done.judged
+    }
+
+    /// [`Self::choose`], told how long the walk can wait — what a second
+    /// reader whose answer takes seconds rather than a wire's milliseconds
+    /// needs ([`Options::rescue`]). A judge with a wall of its own ignores
+    /// it; the default asks as ever.
+    fn choose_within(&mut self, ask: &ActionAsk, left: Duration) -> Judged {
+        let _ = left;
+        self.choose(ask)
     }
 
     /// What the last [`Self::choose`] sent through the Jev door, for the row.
@@ -585,6 +602,15 @@ pub const OVERLAP: &str = "overlap";
 pub const OVERLAP_USED: &str = "used";
 pub const OVERLAP_DISCARDED: &str = "discarded";
 
+/// The key a row keeps what the second reader said under
+/// ([`Options::rescue`]): its outcome, what it chose, its confidence and
+/// how long it took — beside the seat's own judgment, which stays the row's
+/// `confidence` and `chosen`. `rescuedBy` names who pressed when the second
+/// reader did.
+pub const RESCUE: &str = "rescue";
+pub const RESCUED_BY: &str = "rescuedBy";
+pub const RESCUED_BY_TEAM: &str = "team";
+
 /// Why this walk pressed nothing, when one of its rows says why.
 ///
 /// The caller asks here rather than reading `pressed: 0` and guessing. A walk
@@ -629,6 +655,12 @@ pub struct Walked {
     /// Judgments begun ahead that the next look made moot — their request
     /// spent, the screen asked afresh.
     pub discarded: usize,
+    /// Steps the seat's judgment left under its press floor that the second
+    /// reader pressed for ([`Options::rescue`]).
+    pub rescued: usize,
+    /// Steps the second reader was asked about and could not press for —
+    /// the walk stepped back to the person as it does today.
+    pub rescue_failed: usize,
 }
 
 /// One row, with the words every ledger of this family uses.
@@ -674,6 +706,11 @@ fn note(said: &mut Value, key: &str, value: Value) {
 /// ledger has promoted it (`crate::systemone::applies`), and the ledger is a
 /// file this module has no business reading in the middle of a walk. `mode`
 /// still says whether anything is ASKED, and still names itself on every row.
+///
+/// The window's two callers ask through [`run_with`], with the switches the
+/// verb was given; this plain form is the tests' — every switch off, no
+/// second reader — and the promise [`run_with`] keeps is that it is this.
+#[cfg(test)]
 pub fn run(
     mode: Mode,
     acting: bool,
@@ -681,11 +718,12 @@ pub fn run(
     judge: &mut dyn ActionJudge,
     world: &mut dyn World,
 ) -> Walked {
-    run_with(mode, acting, at, judge, world, Options::default())
+    run_with(mode, acting, at, judge, world, Options::default(), None)
 }
 
-/// [`run`], with the switches a caller may set ([`Options`]). Every switch
-/// off is [`run`] exactly.
+/// [`run`], with the switches a caller may set ([`Options`]) and the second
+/// reader the switches may ask (`rescue`, [`Options::rescue`]). Every switch
+/// off is [`run`] exactly, whoever was handed in.
 pub fn run_with(
     mode: Mode,
     acting: bool,
@@ -693,8 +731,9 @@ pub fn run_with(
     judge: &mut dyn ActionJudge,
     world: &mut dyn World,
     options: Options,
+    rescue: Option<&mut dyn ActionJudge>,
 ) -> Walked {
-    let mut walked = walk(mode, acting, at, judge, world, options);
+    let mut walked = walk(mode, acting, at, judge, world, options, rescue);
     agree(&mut walked);
     walked
 }
@@ -750,6 +789,7 @@ fn walk(
     judge: &mut dyn ActionJudge,
     world: &mut dyn World,
     options: Options,
+    mut rescue: Option<&mut dyn ActionJudge>,
 ) -> Walked {
     let mut walked = Walked::default();
     if matches!(at.why, Why::Goal { .. }) {
@@ -969,13 +1009,66 @@ fn walk(
             return walked;
         }
 
+        // The second rung ([`Options::rescue`]): a judgment under the seat's
+        // press floor is put to the second reader as the same closed choice,
+        // and its number is pressed under the same rule — or the walk steps
+        // back to the person as it does today.
+        let mut chosen = chosen;
         if !press_policy.permits_press(choice.confidence) {
-            note(&mut said, "barred", json!(Barred::LowConfidence.as_str()));
-            note(&mut said, "pressed", json!(false));
-            note(&mut said, "routeUse", json!(USE_FALLBACK));
-            walked.rows.push(row(mode, at, attempt, said));
-            return walked;
+            let seen = before
+                .as_ref()
+                .expect("the screen this walk just looked at");
+            let rescued = match rescue.as_deref_mut().filter(|_| options.rescue) {
+                Some(team) => {
+                    let asking = std::time::Instant::now();
+                    let answered =
+                        team.choose_within(&asked, Duration::from_millis(world.left_ms()));
+                    let team_ms = u64::try_from(asking.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let (word, mark) = second_rung(press_policy, seen, &answered);
+                    note(
+                        &mut said,
+                        RESCUE,
+                        json!({
+                            "outcome": word,
+                            "chosen": match &answered {
+                                Judged::Chose(second) => match second.chosen {
+                                    Chosen::Mark(mark) => format!("mark:{mark}"),
+                                    Chosen::GiveUp => zerocode_core::screen_action::GIVE_UP.to_string(),
+                                    Chosen::Done => zerocode_core::screen_action::DONE.to_string(),
+                                },
+                                Judged::Refused(token) => token.clone(),
+                            },
+                            "confidence": match &answered {
+                                Judged::Chose(second) => json!(second.confidence),
+                                Judged::Refused(_) => Value::Null,
+                            },
+                            ELAPSED_MS.canonical: team_ms,
+                        }),
+                    );
+                    mark
+                }
+                None => None,
+            };
+            match rescued {
+                Some(mark) => {
+                    walked.rescued += 1;
+                    chosen = mark;
+                    note(&mut said, RESCUED_BY, json!(RESCUED_BY_TEAM));
+                    note(&mut said, "chosen", json!(format!("mark:{mark}")));
+                }
+                None => {
+                    if options.rescue && rescue.is_some() {
+                        walked.rescue_failed += 1;
+                    }
+                    note(&mut said, "barred", json!(Barred::LowConfidence.as_str()));
+                    note(&mut said, "pressed", json!(false));
+                    note(&mut said, "routeUse", json!(USE_FALLBACK));
+                    walked.rows.push(row(mode, at, attempt, said));
+                    return walked;
+                }
+            }
         }
+        let chosen = chosen;
 
         let seen = before
             .as_ref()
@@ -1067,6 +1160,28 @@ fn walk(
     walked
 }
 
+/// What the second reader's answer comes to under the seat's own press rule
+/// ([`Options::rescue`]): the number to press, and the word the row says it
+/// by. `pressed` when it named a number the seat would press; `low_confidence`
+/// when its confidence is under the floor; `link` when the number carries the
+/// screen elsewhere — a rescue that navigates away is the person's call;
+/// `give_up`/`done` when it declined to press; the wire's own token when it
+/// answered nothing.
+fn second_rung(policy: &JevUse, seen: &Screen, answered: &Judged) -> (String, Option<usize>) {
+    match answered {
+        Judged::Refused(token) => (token.clone(), None),
+        Judged::Chose(second) => match second.chosen {
+            Chosen::GiveUp => (zerocode_core::screen_action::GIVE_UP.to_string(), None),
+            Chosen::Done => (zerocode_core::screen_action::DONE.to_string(), None),
+            Chosen::Mark(_) if !policy.permits_press(second.confidence) => {
+                (Barred::LowConfidence.as_str().to_string(), None)
+            }
+            Chosen::Mark(mark) if presses_a_link(seen, mark) => ("link".to_string(), None),
+            Chosen::Mark(mark) => ("pressed".to_string(), Some(mark)),
+        },
+    }
+}
+
 /// The control `mark` names on `seen`, as the legend named it — what a walk
 /// writes among `pressed` once it has pressed it.
 fn legend_of(seen: &Screen, mark: usize) -> String {
@@ -1156,6 +1271,7 @@ fn cleared_past(report: &Value, was: usize) -> bool {
 
 pub mod desk;
 pub mod live;
+pub mod team;
 pub mod walk;
 
 #[cfg(test)]

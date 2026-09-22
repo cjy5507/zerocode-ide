@@ -982,7 +982,11 @@ fn a_judgment_begun_ahead_runs_down_the_wire_and_its_account_comes_back() {
         &goal,
         &mut judge,
         &mut world,
-        crate::computer_use::errand::Options { overlap: true },
+        crate::computer_use::errand::Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
     );
     assert_eq!(world.presses, vec![1, 2]);
     assert_eq!((walked.overlapped, walked.discarded), (1, 0));
