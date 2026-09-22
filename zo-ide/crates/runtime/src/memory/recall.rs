@@ -65,7 +65,69 @@ pub struct LexicalMemoryRetriever {
     /// not two, and counting the edge twice would let one enthusiastic author
     /// manufacture a hub.
     corpus_in_degree: BTreeMap<String, usize>,
+    /// What readers did with the pages recall put in front of them — the
+    /// demand side of the hub prior. Empty by default, which ranks exactly
+    /// as before.
+    demand: RecallDemand,
     active_model: Option<MemoryModelTag>,
+}
+
+/// How often recall has shown each page and how often a reader then opened
+/// it, as the recall seat's hindsight labels record it.
+///
+/// An in-link is what the vault says about a page; an opened page is what a
+/// reader said. The two disagree on this machine: of the pages recall put in
+/// its five slots over 197 sessions, the most-recalled hubs had been opened
+/// zero times in fifty-one showings, and 35% of all slots went to pages
+/// nobody had ever opened after five or more showings. Their in-links did not
+/// change; what changed is that readers had been asked and had answered.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RecallDemand {
+    /// `slug → (times recalled, times opened after a recall)`.
+    shown: BTreeMap<String, (u32, u32)>,
+}
+
+/// Showings a page gets before nobody opening it counts against it.
+///
+/// Five, because a page cannot be opened until recall has shown it, and a
+/// judgment made on the first showing or two would bury every new page
+/// before a reader had the chance to want it. Past five showings with no
+/// opening, the readers have answered.
+pub const UNADDRESSED_AFTER_RECALLS: u32 = 5;
+
+/// Boost points an unaddressed page sinks by when its own words did score:
+/// one past the largest hub lift, so a page five readers left unopened ranks
+/// below a page no reader has been shown yet, however many pages link to it.
+/// The graph also stops admitting it as a neighbour — that, not the prior, is
+/// how a hub was reaching a quarter of all queries: every page citing it made
+/// it that page's neighbour, arriving on the citing page's score. Only its own
+/// lexical match recalls it now, which is still enough when nothing better
+/// answers.
+pub const UNADDRESSED_DEMOTION: i64 = GRAPH_HUB_PRIOR_MAX + 1;
+
+impl RecallDemand {
+    /// Build from `(slug, recalled, opened)` rows.
+    #[must_use]
+    pub fn from_rows<I>(rows: I) -> Self
+    where
+        I: IntoIterator<Item = (String, u32, u32)>,
+    {
+        Self {
+            shown: rows
+                .into_iter()
+                .map(|(slug, recalled, opened)| (slug, (recalled, opened)))
+                .collect(),
+        }
+    }
+
+    /// Whether readers have been shown `slug` at least
+    /// [`UNADDRESSED_AFTER_RECALLS`] times and none of them opened it.
+    #[must_use]
+    pub fn unaddressed(&self, slug: &str) -> bool {
+        self.shown
+            .get(slug)
+            .is_some_and(|&(recalled, opened)| recalled >= UNADDRESSED_AFTER_RECALLS && opened == 0)
+    }
 }
 
 /// One reading of the merged memory stores, plus the fingerprint of the
@@ -270,6 +332,7 @@ impl LexicalMemoryRetriever {
             corpus_incoming: BTreeMap::new(),
             corpus_by_slug: BTreeMap::new(),
             corpus_in_degree: BTreeMap::new(),
+            demand: RecallDemand::default(),
             active_model: None,
         }
     }
@@ -277,6 +340,17 @@ impl LexicalMemoryRetriever {
     #[must_use]
     pub fn from_index_markdown(markdown: &str) -> Self {
         Self::new(parse_memory_index(markdown))
+    }
+
+    /// Tell the retriever what readers did with the pages it recalled before,
+    /// so a hub nobody opens stops being lifted by its in-links. Nothing is
+    /// wired to read this from the recall seat's ledger yet: the seat labels
+    /// only whether its first note was opened, and a demand read off that
+    /// would call every other page unaddressed.
+    #[must_use]
+    pub fn with_demand(mut self, demand: RecallDemand) -> Self {
+        self.demand = demand;
+        self
     }
 
     /// Tell the retriever which model is driving this session, so recall can
@@ -302,6 +376,7 @@ impl LexicalMemoryRetriever {
             corpus_incoming: BTreeMap::new(),
             corpus_by_slug: BTreeMap::new(),
             corpus_in_degree: BTreeMap::new(),
+            demand: RecallDemand::default(),
             active_model: None,
         }
     }
@@ -444,6 +519,12 @@ impl LexicalMemoryRetriever {
             let mut admitted: BTreeMap<crate::second_brain::corpus::RelationKind, usize> =
                 BTreeMap::new();
             for (kind, neighbor, from_seed) in self.graph_neighbors(seed, page) {
+                // Readers have answered about this page; the graph does not
+                // bring it back in on another page's words. Its own words
+                // still can, below.
+                if self.demand.unaddressed(neighbor) {
+                    continue;
+                }
                 let Some(decay) = relation_decay(kind) else {
                     continue;
                 };
@@ -567,7 +648,14 @@ impl LexicalMemoryRetriever {
     /// The boost a vault page carries before any query is asked: what the rest
     /// of the vault has said about it, independent of this query.
     fn corpus_prior(&self, slug: &str) -> i64 {
-        let mut prior = self.hub_prior(slug);
+        // The vault's attention lifts a page only until readers have answered:
+        // in-links are one author's sentence each, an unopened showing is a
+        // reader's, and five readers outweigh any number of links.
+        let mut prior = if self.demand.unaddressed(slug) {
+            -UNADDRESSED_DEMOTION
+        } else {
+            self.hub_prior(slug)
+        };
         // Signed on purpose: a page nothing else lifted still sinks below its
         // successor, which is the whole point of naming a successor.
         if self.is_superseded(slug) {
@@ -2008,8 +2096,9 @@ pub use hybrid::HybridMemoryRetriever;
 mod tests {
     use super::{
         load_lexical_memory_retriever, parse_memory_index, recall_section_reserve_tokens,
-        render_recalled_memory_section, LexicalMemoryRetriever, GRAPH_NEIGHBORS_PER_KIND,
-        GRAPH_RELATION_DECAY, MAX_RECALLED_ENTRIES,
+        render_recalled_memory_section, LexicalMemoryRetriever, RecallDemand,
+        GRAPH_NEIGHBORS_PER_KIND, GRAPH_RELATION_DECAY, MAX_RECALLED_ENTRIES,
+        UNADDRESSED_AFTER_RECALLS,
     };
     use crate::memory::MemoryModelTag;
     use core_types::{MemoryEntry, MemoryHit, MemoryRetriever};
@@ -2496,6 +2585,66 @@ mod tests {
             slugs_of(&retriever.recall("vellichor", 5)),
             vec!["wiki/seed", "wiki/z-hub", "wiki/a-quiet"],
             "what the vault keeps coming back to comes first when the query cannot choose"
+        );
+    }
+
+    /// The same two neighbours, once readers have answered about the hub:
+    /// shown five times and never opened, the graph stops bringing it in and
+    /// only its own words recall it; shown four times, or opened once in
+    /// fifty, it keeps its place.
+    #[test]
+    fn a_hub_nobody_opened_after_five_showings_arrives_only_on_its_own_words() {
+        use crate::second_brain::corpus::RelationKind;
+        let _lock = crate::test_env_lock();
+
+        let pages: [FixturePage<'_>; 6] = [
+            (
+                "wiki/seed",
+                "vellichor",
+                &[
+                    (RelationKind::Related, "wiki/a-quiet"),
+                    (RelationKind::Related, "wiki/z-hub"),
+                ],
+            ),
+            ("wiki/a-quiet", "sonder", &[]),
+            ("wiki/z-hub", "hiraeth", &[]),
+            ("wiki/cite-1", "komorebi", &[(RelationKind::Related, "wiki/z-hub")]),
+            ("wiki/cite-2", "meraki", &[(RelationKind::Related, "wiki/z-hub")]),
+            ("wiki/cite-3", "saudade", &[(RelationKind::Related, "wiki/z-hub")]),
+        ];
+        let ranked = |query: &str, recalled: u32, opened: u32| {
+            let demand = RecallDemand::from_rows([("wiki/z-hub".to_string(), recalled, opened)]);
+            let retriever = LexicalMemoryRetriever::from_index_markdown(INDEX)
+                .with_corpus(corpus_scan(&pages))
+                .with_demand(demand);
+            retriever
+                .recall(query, 5)
+                .into_iter()
+                .map(|hit| hit.entry.slug)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            ranked("vellichor", UNADDRESSED_AFTER_RECALLS, 0),
+            ["wiki/seed", "wiki/a-quiet"],
+            "five readers shown the hub and none opening it: the graph no longer admits it"
+        );
+        assert_eq!(
+            ranked("hiraeth", UNADDRESSED_AFTER_RECALLS, 0)
+                .first()
+                .map(String::as_str),
+            Some("wiki/z-hub"),
+            "its own words still recall it, first"
+        );
+        assert_eq!(
+            ranked("vellichor", UNADDRESSED_AFTER_RECALLS - 1, 0),
+            ["wiki/seed", "wiki/z-hub", "wiki/a-quiet"],
+            "inside its survival window the hub is not yet judged"
+        );
+        assert_eq!(
+            ranked("vellichor", 50, 1),
+            ["wiki/seed", "wiki/z-hub", "wiki/a-quiet"],
+            "one reader opening it is an answer, and its place stays"
         );
     }
 
