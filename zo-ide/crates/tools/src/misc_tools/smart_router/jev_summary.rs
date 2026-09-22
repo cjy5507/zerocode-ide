@@ -72,6 +72,18 @@ pub struct SeatReport {
     /// What the week's billed input tokens cost, when the price table names
     /// the judgment's model.
     pub cost_usd: Option<f64>,
+    /// The model the seat asks for — the person's pin (`smart.jevModel`) or
+    /// the vendor's alias (t-6187). The same for every seat, and on every
+    /// seat's line because it is the other half of what the line says: which
+    /// id was asked, and which version answered.
+    pub asked_model: String,
+    /// The version the newest request that names one was answered by
+    /// ([`promote::on_the_newest_version`]) — `None` for a seat whose rows
+    /// name no version, which is every row written before versions were.
+    pub model: Option<String>,
+    /// The version the seat's rows were cut away from at the last change of
+    /// version, when there was one.
+    pub cut: Option<String>,
     /// The share the seat's answers must bound above before `auto` may rise
     /// (§4), in parts per thousand — `None` for a seat that never rises.
     pub rise_floor_permille: Option<u16>,
@@ -91,9 +103,9 @@ pub struct SeatReport {
     /// on; this one is the number a seat that never rises (recall) still
     /// earns, and the one a week's trend is read from (t-5806).
     pub agreement_week: promote::Agreement,
-    /// Every request the ledger holds, whatever its age — what the judgment's
-    /// cadence counts.
-    pub asked_ever: usize,
+    /// The requests the judgment's cadence counts: every one the newest
+    /// answering version was asked ([`promote::asked_toward_judgment`]).
+    pub asked_toward_judgment: usize,
     /// Where the seat stands, read back from its own transitions.
     pub stand: Stand,
     /// Whether the seat acts right now: its mode, and for `auto` its standing.
@@ -119,7 +131,7 @@ impl SeatReport {
     /// so the countdown and the judgment land on the same row.
     #[must_use]
     pub fn rows_to_next_judgment(&self) -> Option<usize> {
-        promote::rows_to_next_judgment(zerocode_core::jev::jev_use(self.id)?, self.asked_ever)
+        promote::rows_to_next_judgment(zerocode_core::jev::jev_use(self.id)?, self.asked_toward_judgment)
     }
 }
 
@@ -279,8 +291,10 @@ fn one_with(
     let week_since_ms = now_ms - WINDOW_DAYS * MS_PER_DAY;
     let week = summary::summarize(&rows, week_since_ms);
     let agreement_week = summary::agreement_since(&rows, week_since_ms);
-    let cost_usd = cost_of(week.input_tokens);
-    let asked_ever = rows.iter().filter(|row| asked_something(row).is_some()).count();
+    let asked_model = zerocode_core::jev::model_in(settings.unwrap_or(&Value::Null)).to_string();
+    let cost_usd = cost_of(week.input_tokens, &asked_model);
+    let asked_toward_judgment = promote::asked_toward_judgment(&rows);
+    let version = promote::on_the_newest_version(&rows);
     // The judge's own reading of the same rows, not a second Evidence built
     // here from the week: routing reads its agreement off the probe beside
     // the judgment, every other rising seat off the `agreed` marks its own
@@ -303,11 +317,14 @@ fn one_with(
         today,
         week,
         cost_usd,
+        model: version.model.map(str::to_string),
+        cut: version.cut.map(str::to_string),
+        asked_model,
         rise_floor_permille: seat.answer_floor_permille,
         clears_rise_floor,
         judged,
         agreement_week,
-        asked_ever,
+        asked_toward_judgment,
         stand,
         applies: seat
             .mode_in(settings.unwrap_or(&Value::Null))
@@ -348,11 +365,12 @@ pub fn start_of_day_ms(now_ms: i64, offset_s: i64) -> i64 {
 /// chat table this answered `None` for every seat and the card drew no cost at
 /// all, against a price that has been written down since the launch post.
 ///
-/// Priced by the id the seat ASKS with, not the one the wire answers with: the
-/// bill is for the request, and a dated id no row names is unpriced rather
-/// than billed at a neighbour's rate.
-pub(super) fn cost_of(input_tokens: u64) -> Option<f64> {
-    Some(api::systemone_rate(api::SYSTEMONE_MODEL)?.input_cost_usd(input_tokens))
+/// Priced by the id the seat ASKS with — the person's pin, or the alias — not
+/// the one the wire answers with: the bill is for the request. A pinned
+/// version bills at its family's row, and a dated id no row names is
+/// unpriced rather than billed at a neighbour's rate (`api::systemone_rate`).
+pub(super) fn cost_of(input_tokens: u64, asked: &str) -> Option<f64> {
+    Some(api::systemone_rate(asked)?.input_cost_usd(input_tokens))
 }
 
 #[cfg(test)]

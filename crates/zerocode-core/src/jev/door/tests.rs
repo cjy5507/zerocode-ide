@@ -17,6 +17,7 @@ fn settings(daily_requests: Option<u64>) -> JevSettings {
         enabled: true,
         workspaces: vec![APP.to_string()],
         daily_requests,
+        model: crate::jev::DEFAULT_MODEL.to_string(),
     }
 }
 
@@ -195,6 +196,7 @@ fn a_worktree_of_a_consented_checkout_is_consented_and_a_strangers_is_not() {
         enabled: true,
         workspaces: vec![resolved_path(&mine)],
         daily_requests: None,
+        model: crate::jev::DEFAULT_MODEL.to_string(),
     };
     // 동의한 체크아웃, 그 아래 폴더, 거기서 잘라 낸 워크트리, 그 아래 폴더.
     for inside in [
@@ -249,6 +251,7 @@ fn settings_of_the_wrong_shape_never_widen_what_is_sent() {
             enabled: true,
             workspaces: Vec::new(),
             daily_requests: None,
+            model: crate::jev::DEFAULT_MODEL.to_string(),
         },
         "unset, Jev is on and nothing is consented or capped"
     );
@@ -527,6 +530,66 @@ fn a_key_check_asks_no_consent_but_keeps_the_switch_and_the_budget() {
         ..asking(&capped, None, 0)
     };
     assert_eq!(may_check_key(&keyless, &body).err(), Some(Refused::NoKey));
+}
+
+/// Every request the door lets through names the model the person pinned
+/// (`smart.jevModel`, t-6187) — whatever the asking program wrote into it,
+/// in both programs, because both pass this door — and the vendor's alias
+/// when nobody pinned one, so an unpinned request leaves the door exactly
+/// as it came. A pin that is not one word is no pin: a slip never sends a
+/// model nobody named.
+#[test]
+fn a_cleared_request_names_the_model_the_person_pinned() {
+    let named = |settings: &Value| {
+        let door = JevSettings::from_root(settings);
+        let cleared = may_send(
+            &ROUTING,
+            &asking(&door, Some(APP), 0),
+            routing_body("rename a variable"),
+        )
+        .expect("cleared");
+        let checked =
+            may_check_key(&asking(&door, None, 0), &routing_body("a key check")).expect("checked");
+        let model = |bytes: &[u8]| {
+            serde_json::from_slice::<Value>(bytes).expect("a body")["model"]
+                .as_str()
+                .map(str::to_string)
+        };
+        (model(cleared.bytes()), model(checked.bytes()), cleared)
+    };
+    let pinned = json!({"smart": {"jevModel": " jev-1.13.0 ", "jev": {"workspaces": [APP]}}});
+    let (sent, checked, _) = named(&pinned);
+    assert_eq!(sent.as_deref(), Some("jev-1.13.0"));
+    assert_eq!(
+        checked.as_deref(),
+        Some("jev-1.13.0"),
+        "a key check asks the pinned model too"
+    );
+
+    let unpinned = json!({"smart": {"jev": {"workspaces": [APP]}}});
+    let (sent, _, cleared) = named(&unpinned);
+    assert_eq!(sent.as_deref(), Some("jev-latest"));
+    assert_eq!(
+        cleared.bytes(),
+        routing_body("rename a variable").to_string().as_bytes(),
+        "an unpinned request is the body the program built, to the byte"
+    );
+
+    for slip in [
+        json!(""),
+        json!("   "),
+        json!("jev 1.13"),
+        json!(113),
+        json!(null),
+    ] {
+        let (sent, _, _) =
+            named(&json!({"smart": {"jevModel": slip, "jev": {"workspaces": [APP]}}}));
+        assert_eq!(
+            sent.as_deref(),
+            Some("jev-latest"),
+            "{slip} pinned something"
+        );
+    }
 }
 
 #[test]

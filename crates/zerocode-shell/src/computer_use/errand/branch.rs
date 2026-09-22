@@ -28,13 +28,16 @@ use zerocode_core::branching::{
     fork_budget_ms, fork_wanted,
 };
 use zerocode_core::computer_use_protocol::marks::legend_line;
-use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
+use zerocode_core::guarded::ControlKind;
 use zerocode_core::jev::promote::SEAT_RECORDING;
 use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
 use zerocode_core::jev::{BRANCHING, BRANCHING_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{ActionChoice, option_of};
 
-use super::{ActionJudge, Barred, Errand, Mode, REASON, Screen, Seen, Walked, World};
+use super::{
+    ActionJudge, Barred, CONTROL_KIND, Errand, Mode, REASON, Screen, Seen, Walked, World,
+    control_kind, press_rule,
+};
 
 /// The branching seat's standing for one walk: whether a forked step is
 /// asked about at all, and whether the comparison's pick is the one pressed.
@@ -199,6 +202,7 @@ fn action_of(screen: &Screen, mark: usize) -> String {
 fn compared(
     judge: &mut dyn ActionJudge,
     asked: &zerocode_core::branching::BranchAsk,
+    screen: &Screen,
     today: usize,
     acting: bool,
     said: &mut Value,
@@ -208,8 +212,7 @@ fn compared(
     let judgment_ms = u64::try_from(judging.elapsed().as_millis()).unwrap_or(u64::MAX);
     said[ELAPSED_MS.canonical] = json!(judgment_ms);
     if let Some(spent) = judge.spent() {
-        said[REQUESTS_KEY] = json!(spent.requests);
-        said[REDACTED_LINES_KEY] = json!(spent.redacted_lines);
+        spent.stamp(said);
     }
     match answered {
         Compared::Refused(token) => {
@@ -227,7 +230,11 @@ fn compared(
                 said[REASON] = json!(SEAT_RECORDING);
                 return today;
             }
-            if !BRANCHING.permits_press(choice.confidence) {
+            // The walk's one press rule, read for the pick (t-6187): a
+            // control a press cannot take back asks nine in ten here too.
+            let (permitted, kind) = press_rule(&BRANCHING, screen, choice.mark, choice.confidence);
+            said[CONTROL_KIND] = json!(kind.word());
+            if !permitted {
                 said["barred"] = json!(Barred::LowConfidence.as_str());
                 said["routeUse"] = json!(USE_FALLBACK);
                 return today;
@@ -258,7 +265,13 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
     else {
         return Stepped::today(today);
     };
-    let marks = fork_wanted(step.choice);
+    // A fork presses each candidate for real before a snapshot puts the
+    // device back, and a snapshot cannot take back what left the device — a
+    // payment, a delete, a message sent. A control a press cannot take back
+    // is never explored (t-6187); the step is taken once, as today, when
+    // fewer than two candidates are left.
+    let mut marks = fork_wanted(step.choice);
+    marks.retain(|mark| control_kind(screen, *mark) == ControlKind::Plain);
     if marks.len() < 2 {
         return Stepped::today(today);
     }
@@ -286,7 +299,7 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
             // The pick is today's whatever the answer; what the mark reads is
             // whether the comparison named it. A refusal named nothing and
             // shares today's fate.
-            let _ = compared(judge, &asked, today, false, &mut said);
+            let _ = compared(judge, &asked, screen, today, false, &mut said);
             same_pick = said
                 .get("chosen")
                 .and_then(Value::as_str)
@@ -408,7 +421,7 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
             before: &before,
             candidates: &tried,
         }) {
-            pick = compared(judge, &asked, today, true, &mut said);
+            pick = compared(judge, &asked, screen, today, true, &mut said);
         }
     }
     world.forget(&saved);

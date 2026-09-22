@@ -560,6 +560,7 @@ fn the_walks_next_step_grades_the_fork() {
             chosen: Chosen::GiveUp,
             probabilities: BTreeMap::new(),
             confidence: 0.7,
+            guard: None,
         }),
         compared(1, 0.8),
     );
@@ -1193,6 +1194,7 @@ fn the_forks_this_desk_would_take() {
                 chosen,
                 probabilities: row.probabilities.clone(),
                 confidence: 0.0,
+                guard: None,
             };
             if fork_wanted(&choice).len() >= 2 {
                 would_fork += 1;
@@ -1559,4 +1561,44 @@ fn the_next_look_settles_the_fork_and_says_the_memo_answered_ahead() {
     assert_eq!(row[CACHED.canonical], true);
     assert_eq!(row["chosen"], "mark:1");
     assert!(row.get("forked").is_none(), "one candidate: no fork");
+}
+
+/// A fork presses each candidate for real before a snapshot puts the device
+/// back, and a snapshot cannot take back what left the device: a torn step
+/// whose runner-up is a control a press cannot take back is not forked — the
+/// seat's own pick is pressed once, as today (t-6187). The same torn step
+/// over two plain controls forks.
+#[test]
+fn a_fork_never_explores_a_control_a_press_cannot_take_back() {
+    let torn_over = |runner_up: &str| {
+        let mut world = FakeWorld::android(&[1, 2]);
+        let mut screen = world.look_now();
+        screen.items = vec![control(1, runner_up), control(2, "다음")];
+        world.screen_is(screen);
+        let mut judge = judging();
+        judge.compares = vec![compared(1, 0.9)];
+        let walked = run_with(
+            Mode::On,
+            true,
+            RAISED,
+            &goal(1),
+            &mut judge,
+            &mut world,
+            Options::default(),
+            None,
+        );
+        (walked, world, judge)
+    };
+    let (walked, world, judge) = torn_over("계정 삭제");
+    assert_eq!(
+        world.presses,
+        [2],
+        "the delete was pressed to see what it does"
+    );
+    assert!(world.snapshot_log.is_empty(), "{:?}", world.snapshot_log);
+    assert!(walked.forks.is_empty() && judge.compared.is_empty());
+
+    let (walked, world, _) = torn_over("설정");
+    assert!(!world.snapshot_log.is_empty(), "two plain controls fork");
+    assert_eq!(walked.forks.len(), 1);
 }

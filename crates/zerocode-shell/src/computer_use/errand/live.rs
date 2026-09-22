@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use serde_json::{Value, json};
 use zerocode_core::branching::BranchAsk;
-use zerocode_core::jev::door::{Memo, Memoed, REDACTED_LINES_KEY, REQUESTS_KEY};
+use zerocode_core::jev::door::{Memo, Memoed};
 use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
 use zerocode_core::jev::{
     BRANCHING, BRANCHING_APPLY_DEADLINE_MS, JUDGMENT_CACHE, JevMode, JevUse, memo,
@@ -243,8 +243,14 @@ impl LiveJudge {
             return self.answer_and_remember(ask, &asked.answer, asked.spent, &path, &memoed);
         };
         row[ELAPSED_MS.canonical] = json!(memoed.lookup_ms);
-        row[REQUESTS_KEY] = json!(0);
-        row[REDACTED_LINES_KEY] = json!(0);
+        // A hit sends nothing, and the version on its row is the one that
+        // gave the answer the memo kept (t-6187).
+        Spent {
+            requests: 0,
+            redacted_lines: 0,
+            model: crate::systemone::answered_by(&recalled.answer),
+        }
+        .stamp(&mut row);
         if memoed.answered {
             // The memo's answer stands in for the wire's — if it still reads.
             match read_body(ask, &recalled.answer) {
@@ -404,7 +410,7 @@ impl ActionJudge for LiveJudge {
     }
 
     fn spent(&self) -> Option<Spent> {
-        self.spent
+        self.spent.clone()
     }
 
     fn cached(&self) -> bool {

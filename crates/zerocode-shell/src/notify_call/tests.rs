@@ -3,7 +3,7 @@
 //! case reads this machine's keychain, settings or ledgers.
 
 use serde_json::json;
-use zerocode_core::jev::door::Refused;
+use zerocode_core::jev::door::{REQUESTS_KEY, Refused};
 use zerocode_core::jev::{NOTIFY_LABEL_WINDOW_MS, SMART_SETTINGS_KEY};
 
 use super::*;
@@ -306,6 +306,11 @@ fn an_answered_question_is_a_row_and_a_wait_and_shadow_changes_nothing() {
     assert_eq!(row["mode"], "shadow");
     assert_eq!(row["rubricVersion"], NOTIFY_CALL_RUBRIC_VERSION);
     assert_eq!(row[REQUESTS_KEY], 1);
+    assert_eq!(
+        row[zerocode_core::jev::summary::MODEL.canonical],
+        "jev-1.13.0",
+        "the version that answered"
+    );
     assert_eq!(row["confidence"], 0.64);
     assert!(row["requestBytes"].as_u64().is_some_and(|bytes| bytes > 0));
     let waiting = waiting.expect("an answer waits for its label");

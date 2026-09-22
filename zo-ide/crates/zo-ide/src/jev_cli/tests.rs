@@ -248,6 +248,68 @@ fn the_json_carries_the_days_the_refusals_the_applied_count_and_the_recent_list(
     assert_eq!(placement["days"].as_array().map(Vec::len), Some(7), "the days always ride");
 }
 
+/// Every seat's line says which id it asks with and which version answered
+/// (t-6187): the person's pin, or the alias, beside the `model` its newest
+/// request named — and a verdict read on rows a change of version cut
+/// names the version it cut away. A pinned version is still priced: it
+/// bills at its family's row.
+#[test]
+fn the_json_names_the_asked_model_the_answering_version_and_the_cut() {
+    let home = tempfile::tempdir().expect("tmp");
+    let roots = [home.path().to_path_buf()];
+    let seat = &zerocode_core::jev::PLACEMENT;
+    std::fs::write(
+        home.path().join(seat.ledger),
+        [
+            serde_json::json!({"at": 900, "outcome": "answered", "elapsedMs": 40, "requests": 1,
+                               "inputTokens": 1000, "model": "jev-1.12.0"}),
+            serde_json::json!({"at": 950, "outcome": "answered", "elapsedMs": 40, "requests": 1,
+                               "inputTokens": 1000, "model": "jev-1.13.0"}),
+            serde_json::json!({"at": 960, "outcome": "timeout", "requests": 1}),
+        ]
+        .iter()
+        .map(|row| row.to_string() + "\n")
+        .collect::<String>(),
+    )
+    .expect("write");
+    let placement_of = |settings: Option<&serde_json::Value>| {
+        let seats = tools::jev_summary::report(&roots, None, settings, 1_000, 0);
+        let value: serde_json::Value = serde_json::from_str(&render_json(&seats).to_string()).expect("json");
+        let placement = value["seats"]
+            .as_array()
+            .expect("seats")
+            .iter()
+            .find(|row| row["id"] == seat.id)
+            .expect("placement")
+            .clone();
+        (placement, render_text(&seats))
+    };
+
+    let pinned = serde_json::json!({"smart": {"jevModel": "jev-1.13.0"}});
+    let (placement, text) = placement_of(Some(&pinned));
+    assert_eq!(placement["askedModel"], "jev-1.13.0", "the id the seat asks with is the pin");
+    assert_eq!(placement["model"], "jev-1.13.0", "the version the newest answer named");
+    assert_eq!(placement["verdict"]["cutModel"], "jev-1.12.0", "the thin window says why it is thin");
+    assert!(placement["costUsd"].as_f64().is_some_and(|usd| usd > 0.0), "a pinned version is priced");
+    let line = text.lines().find(|line| line.starts_with(seat.id)).expect("the placement line");
+    assert!(line.contains("asks jev-1.13.0 · answered by jev-1.13.0"), "{line}");
+    assert!(line.contains("cut at jev-1.12.0"), "{line}");
+
+    let (placement, _) = placement_of(None);
+    assert_eq!(placement["askedModel"], zerocode_core::jev::DEFAULT_MODEL, "unpinned, the alias");
+    let summon = {
+        let seats = tools::jev_summary::report(&roots, None, None, 1_000, 0);
+        render_json(&seats)["seats"]
+            .as_array()
+            .expect("seats")
+            .iter()
+            .find(|row| row["id"] == zerocode_core::jev::SUMMON.id)
+            .expect("summon")
+            .clone()
+    };
+    assert_eq!(summon["model"], serde_json::Value::Null, "a seat nothing answered names no version");
+}
+
 #[test]
 fn every_seat_the_table_names_reaches_the_json_with_its_own_numbers() {
     let home = tempfile::tempdir().expect("tmp");

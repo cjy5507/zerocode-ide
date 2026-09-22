@@ -3548,6 +3548,11 @@ fn an_unmarked_stall_is_asked_about_once_and_recorded_beside_the_silence() {
     assert_eq!(row["mode"], JevMode::Shadow.key());
     assert_eq!(row["outcome"], "answered");
     assert_eq!(row["cause"], "finished_without_report");
+    assert_eq!(
+        row[zerocode_core::jev::summary::MODEL.canonical],
+        "jev-1.13.0",
+        "the version that answered"
+    );
     assert_eq!(row["confidence"], 0.62);
     assert_eq!(
         row["probabilities"].as_object().map(|all| all.len()),
@@ -15131,6 +15136,11 @@ fn a_stuck_turn_raises_the_effort_one_rung_for_this_session_and_progress_brings_
     assert_eq!(asked["signals"]["repeats"], 3);
     assert_eq!(asked["signals"]["toolFailures"], 3);
     assert_eq!(asked["requests"], 1);
+    assert_eq!(
+        asked[zerocode_core::jev::summary::MODEL.canonical],
+        "jev-1.13.0",
+        "the version that answered"
+    );
     let heard = raise.asked();
     assert_eq!(heard.len(), 1, "asked {} times", heard.len());
     let sent = heard_body(&heard[0]);

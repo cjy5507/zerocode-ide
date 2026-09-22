@@ -36,7 +36,6 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zerocode_core::browser_read::{self, ReadAsk, Verdict, inside};
-use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
 use zerocode_core::jev::promote::SEAT_RECORDING;
 use zerocode_core::jev::summary::{
     AGREED, APPLIED, AT, ELAPSED_MS, INPUT_TOKENS, LABEL, ROUTE_USE,
@@ -182,10 +181,7 @@ fn ask_shards(wire: &Wire, workspace: Option<&Path>, asks: &[ReadAsk]) -> Vec<As
             .map(|handle| {
                 handle.join().unwrap_or_else(|_| Asked {
                     answer: Err(crate::systemone::TRANSPORT.to_string()),
-                    spent: crate::systemone::Spent {
-                        requests: 0,
-                        redacted_lines: 0,
-                    },
+                    spent: crate::systemone::Spent::default(),
                     request_bytes: 0,
                     memo: None,
                 })
@@ -239,18 +235,7 @@ pub(crate) fn settle(
     let answers = ask_shards(wire, workspace, &asks);
     row[ELAPSED_MS.canonical] =
         json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
-    row[REQUESTS_KEY] = json!(
-        answers
-            .iter()
-            .map(|asked| asked.spent.requests)
-            .sum::<u32>()
-    );
-    row[REDACTED_LINES_KEY] = json!(
-        answers
-            .iter()
-            .map(|asked| asked.spent.redacted_lines)
-            .sum::<usize>()
-    );
+    crate::systemone::Spent::together(answers.iter().map(|asked| &asked.spent)).stamp(&mut row);
     row["requestBytes"] = json!(
         answers
             .iter()

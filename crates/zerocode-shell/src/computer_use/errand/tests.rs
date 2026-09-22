@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use super::*;
 use zerocode_core::computer_flow::{Confirm, EvidenceLevel, Fingerprint, Money};
+use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
+use zerocode_core::jev::summary::MODEL;
 use zerocode_core::screen_action::{DONE, GIVE_UP};
 
 /// One control the page is showing.
@@ -86,6 +88,7 @@ pub(super) fn pick(mark: usize) -> Judged {
         chosen: Chosen::Mark(mark),
         probabilities: BTreeMap::new(),
         confidence: 0.7,
+        guard: None,
     })
 }
 
@@ -254,6 +257,16 @@ impl FakeWorld {
     fn holding(mut self, ms: u64) -> Self {
         self.press_holds = Duration::from_millis(ms);
         self
+    }
+
+    /// Stand the world on `screen` — a fixture's, say (t-6187).
+    pub(super) fn screen_is(&mut self, screen: Screen) {
+        self.screen = Some(screen);
+    }
+
+    /// The screen the world stands on now, for a test to change a piece of.
+    pub(super) fn look_now(&self) -> Screen {
+        self.screen.clone().expect("a world that shows a screen")
     }
 }
 
@@ -482,6 +495,9 @@ fn a_recording_seat_says_on_the_row_and_in_one_word_why_it_pressed_nothing() {
 /// A judge that says what asking cost at the Jev door has it written on the
 /// row, under the keys every Jev ledger spells; one that says nothing leaves
 /// the row as it always was.
+/// What asking cost at the door — and which version answered (t-6187) — is
+/// on the row, through the one writer every seat's row goes through; a
+/// judge that sent nowhere leaves all three off.
 #[test]
 fn what_asking_cost_at_the_door_is_on_the_row() {
     struct Spending(FakeJudge);
@@ -493,6 +509,7 @@ fn what_asking_cost_at_the_door_is_on_the_row() {
             Some(Spent {
                 requests: 1,
                 redacted_lines: 2,
+                model: Some("jev-1.13.0".to_string()),
             })
         }
     }
@@ -509,6 +526,7 @@ fn what_asking_cost_at_the_door_is_on_the_row() {
 
     assert_eq!(recovered.rows[0][REQUESTS_KEY], json!(1));
     assert_eq!(recovered.rows[0][REDACTED_LINES_KEY], json!(2));
+    assert_eq!(recovered.rows[0][MODEL.canonical], json!("jev-1.13.0"));
 
     let mut quiet = FakeJudge::chose(&[2]);
     let recovered = run(
@@ -519,6 +537,7 @@ fn what_asking_cost_at_the_door_is_on_the_row() {
         &mut FakeWorld::showing(&[1, 2]),
     );
     assert!(recovered.rows[0].get(REQUESTS_KEY).is_none());
+    assert!(recovered.rows[0].get(MODEL.canonical).is_none());
 }
 
 #[test]
@@ -646,6 +665,7 @@ fn giving_up_presses_nothing() {
         chosen: Chosen::GiveUp,
         probabilities: BTreeMap::new(),
         confidence: 0.3,
+        guard: None,
     })]);
     let mut world = FakeWorld::showing(&[1, 2]);
 
@@ -977,6 +997,7 @@ fn the_callers_own_condition_ends_a_goal_walk_and_the_judgments_word_is_the_weak
             chosen: Chosen::Done,
             probabilities: BTreeMap::new(),
             confidence: 0.9,
+            guard: None,
         }),
     ]);
     let mut world = FakeWorld::that_moves(&[1, 2]);
@@ -1261,6 +1282,7 @@ fn a_walk_nothing_checked_is_left_out_of_the_agreement_rather_than_guessed_at() 
             chosen: Chosen::Done,
             probabilities: BTreeMap::new(),
             confidence: 0.9,
+            guard: None,
         }),
     ]);
     let mut world = FakeWorld::that_moves(&[1, 2]);
@@ -1800,6 +1822,7 @@ fn a_second_reader_that_cannot_press_leaves_the_walk_where_today_leaves_it() {
                 chosen: Chosen::GiveUp,
                 probabilities: BTreeMap::new(),
                 confidence: 0.9,
+                guard: None,
             })]),
             None,
         ),
@@ -1809,6 +1832,7 @@ fn a_second_reader_that_cannot_press_leaves_the_walk_where_today_leaves_it() {
                 chosen: Chosen::Done,
                 probabilities: BTreeMap::new(),
                 confidence: 0.9,
+                guard: None,
             })]),
             None,
         ),
@@ -1999,5 +2023,270 @@ fn the_second_rung_presses_for_the_steps_the_seat_left_and_costs_its_own_turn() 
         rescued.rescue_failed,
         unhelped.pressed,
         unhelped.rescue_failed
+    );
+}
+
+use super::guard_fixtures::{CLEAN, Fixture, INJECTED, WALLED};
+use zerocode_core::screen_action::{Guard, Stopped};
+
+/// The world a fixture's screen stands in.
+fn world_on(fixture: &Fixture) -> FakeWorld {
+    let mut world = FakeWorld::showing(&[]);
+    world.screen_is(fixture.screen());
+    world
+}
+
+/// A goal walk of one press on a fixture's screen.
+fn goal_on(fixture: &Fixture) -> Errand<'_> {
+    Errand {
+        goal: fixture.goal,
+        why: Why::Goal { steps: 1 },
+        flow: None,
+        moves_money: false,
+    }
+}
+
+/// How a guard answers a fixture: sure of what is true of it.
+fn yes(holds: bool) -> f64 {
+    if holds { 0.92 } else { 0.04 }
+}
+
+/// A judge that picks the fixture's first control, sure of it, with both
+/// guards saying what the fixture is.
+fn judging(fixture: &Fixture) -> FakeJudge {
+    FakeJudge::saying(vec![Judged::Chose(ActionChoice {
+        chosen: Chosen::Mark(1),
+        probabilities: BTreeMap::new(),
+        confidence: 0.9,
+        guard: Some(Guard {
+            instructed: yes(fixture.injected),
+            walled: yes(fixture.walled),
+        }),
+    })])
+}
+
+/// An acting seat presses nothing on a screen whose text tells an assistant
+/// what to do, nor on a wall, and steps back to the person with the stop
+/// named; a clean screen is pressed as today (t-6187). Both guards' values
+/// are on every answered row, per thousand.
+#[test]
+fn an_acting_walk_refuses_an_injected_screen_and_a_wall_and_presses_a_clean_one() {
+    let per_thousand = |holds: bool| json!(zerocode_core::jev::promote::permille(yes(holds)));
+    for fixture in INJECTED.iter().take(5) {
+        let walked = run(
+            Mode::On,
+            true,
+            &goal_on(fixture),
+            &mut judging(fixture),
+            &mut world_on(fixture),
+        );
+        assert_eq!(walked.pressed, 0, "{} was pressed", fixture.name);
+        let row = walked.rows.last().expect("a row");
+        assert_eq!(
+            row["barred"],
+            json!(Stopped::Injected.word()),
+            "{}",
+            fixture.name
+        );
+        assert_eq!(
+            no_press_reason(&walked.rows),
+            Some(Stopped::Injected.word()),
+            "the walk's answer says why"
+        );
+        assert_eq!(row["pressed"], json!(false));
+        assert_eq!(row["routeUse"], json!(USE_FALLBACK));
+        assert_eq!(row["instructed"], per_thousand(true));
+        assert_eq!(row["walled"], per_thousand(false));
+    }
+    for fixture in CLEAN.iter().take(5) {
+        let walked = run(
+            Mode::On,
+            true,
+            &goal_on(fixture),
+            &mut judging(fixture),
+            &mut world_on(fixture),
+        );
+        assert_eq!(walked.pressed, 1, "{} was not pressed", fixture.name);
+        let row = walked.rows.last().expect("a row");
+        assert!(row.get("barred").is_none(), "{}: {row}", fixture.name);
+        assert_eq!(row["routeUse"], json!(USE_APPLIED));
+        assert_eq!(row["instructed"], per_thousand(false));
+    }
+    for fixture in &WALLED {
+        let walked = run(
+            Mode::On,
+            true,
+            &goal_on(fixture),
+            &mut judging(fixture),
+            &mut world_on(fixture),
+        );
+        assert_eq!(walked.pressed, 0, "{} was pressed", fixture.name);
+        let row = walked.rows.last().expect("a row");
+        assert_eq!(
+            row["barred"],
+            json!(Stopped::Walled.word()),
+            "{}",
+            fixture.name
+        );
+        assert_eq!(row["walled"], per_thousand(true));
+    }
+}
+
+/// A seat that only records writes both guards on its row and refuses
+/// nothing — it presses nothing anyway, and the row says why in the stand's
+/// own word (t-6187).
+#[test]
+fn a_recording_walk_writes_both_guards_and_refuses_nothing() {
+    for fixture in INJECTED
+        .iter()
+        .take(5)
+        .chain(CLEAN.iter().take(5))
+        .chain(WALLED.iter())
+    {
+        let walked = run(
+            Mode::Shadow,
+            false,
+            &goal_on(fixture),
+            &mut judging(fixture),
+            &mut world_on(fixture),
+        );
+        assert_eq!(walked.pressed, 0);
+        let row = walked.rows.last().expect("a row");
+        assert_eq!(row[REASON], json!(SEAT_RECORDING), "{}", fixture.name);
+        assert!(row.get("barred").is_none(), "{}: {row}", fixture.name);
+        assert_eq!(
+            row["instructed"],
+            json!(zerocode_core::jev::promote::permille(yes(fixture.injected)))
+        );
+        assert_eq!(
+            row["walled"],
+            json!(zerocode_core::jev::promote::permille(yes(fixture.walled)))
+        );
+    }
+}
+
+/// A walk sure of a control at 0.8 presses it when the control is plain and
+/// steps back to the person when the control cannot be taken back — a
+/// delete, a payment, a send (t-6187): the floor for those is nine in ten.
+/// The row names the control's kind either way.
+#[test]
+fn a_destructive_control_at_eight_in_ten_goes_to_the_person_and_a_plain_one_is_pressed() {
+    let sure = |confidence: f64| {
+        FakeJudge::saying(vec![Judged::Chose(ActionChoice {
+            chosen: Chosen::Mark(1),
+            probabilities: BTreeMap::new(),
+            confidence,
+            guard: None,
+        })])
+    };
+    let on = |label: &str| {
+        let mut world = FakeWorld::showing(&[]);
+        world.screen_is(Screen {
+            at: Seen::default(),
+            items: vec![control(1, label), control(2, "닫기")],
+            shows: Vec::new(),
+        });
+        world
+    };
+    for label in [
+        "계정 삭제",
+        "Delete account",
+        "결제하기",
+        "Send",
+        "주문 확정",
+    ] {
+        let mut world = on(label);
+        let walked = run(Mode::On, true, &goal(1), &mut sure(0.8), &mut world);
+        assert!(world.presses.is_empty(), "{label} was pressed at 0.8");
+        let row = walked.rows.last().expect("a row");
+        assert_eq!(
+            row["barred"],
+            json!(Barred::LowConfidence.as_str()),
+            "{label}"
+        );
+        assert_eq!(row["controlKind"], json!("destructive"), "{label}");
+
+        let mut world = on(label);
+        run(Mode::On, true, &goal(1), &mut sure(0.9), &mut world);
+        assert_eq!(world.presses, [1], "{label} at 0.9 is pressed");
+    }
+    for label in ["저장", "다음", "Open settings"] {
+        let mut world = on(label);
+        let walked = run(Mode::On, true, &goal(1), &mut sure(0.8), &mut world);
+        assert_eq!(world.presses, [1], "{label} at 0.8 is pressed");
+        assert_eq!(
+            walked.rows.last().expect("a row")["controlKind"],
+            json!("plain")
+        );
+    }
+}
+
+/// The destructive presses the fixture screens would have seen (t-6187): on
+/// every control of the guard fixtures' twenty-three screens, a walk sure of
+/// that control at each confidence the fixture judges here answer with under
+/// nine in ten. Before, the one floor pressed every one of them at or over a
+/// half; now a destructive one goes to the person and a plain one is pressed
+/// as before. Printed so the report carries the counts; asserted so they
+/// cannot drift from the rule.
+#[test]
+fn the_destructive_presses_under_nine_in_ten_on_the_fixture_screens_before_and_after() {
+    use zerocode_core::guarded::ControlKind;
+    const UNDER_NINE: [f64; 6] = [0.5, 0.55, 0.6, 0.7, 0.8, 0.85];
+    let (mut steps, mut destructive, mut before, mut after, mut plain_kept) = (0, 0, 0, 0, 0);
+    let mut kinds = std::collections::BTreeSet::new();
+    for fixture in INJECTED.iter().chain(CLEAN.iter()).chain(WALLED.iter()) {
+        let screen = fixture.screen();
+        for item in &screen.items {
+            let mark = usize::try_from(item["mark"].as_u64().expect("a mark")).expect("small");
+            let kind = control_kind(&screen, mark);
+            for confidence in UNDER_NINE {
+                steps += 1;
+                let mut world = FakeWorld::showing(&[]);
+                world.screen_is(screen.clone());
+                let mut judge = FakeJudge::saying(vec![Judged::Chose(ActionChoice {
+                    chosen: Chosen::Mark(mark),
+                    probabilities: BTreeMap::new(),
+                    confidence,
+                    guard: None,
+                })]);
+                let walked = run(Mode::On, true, &goal_on(fixture), &mut judge, &mut world);
+                let pressed_now = walked.pressed == 1;
+                // Today's rule was the plain floor for every control.
+                let pressed_before = BROWSER.permits_press(confidence, ControlKind::Plain);
+                if kind == ControlKind::Destructive {
+                    destructive += 1;
+                    before += usize::from(pressed_before);
+                    after += usize::from(pressed_now);
+                    kinds.insert(legend_of(&screen, mark));
+                } else {
+                    plain_kept += usize::from(pressed_now == pressed_before);
+                }
+            }
+        }
+    }
+    println!(
+        "{}",
+        json!({
+            "steps": steps,
+            "destructiveSteps": destructive,
+            "destructiveControls": kinds.len(),
+            "pressedUnderNineBefore": before,
+            "pressedUnderNineAfter": after,
+            "plainStepsUnchanged": plain_kept,
+            "plainSteps": steps - destructive,
+        })
+    );
+    assert_eq!(
+        after, 0,
+        "a destructive control was pressed under nine in ten"
+    );
+    assert_eq!(
+        before, destructive,
+        "the old floor pressed every one of them"
+    );
+    assert_eq!(
+        plain_kept,
+        steps - destructive,
+        "a plain control's press moved"
     );
 }

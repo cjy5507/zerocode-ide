@@ -414,6 +414,12 @@ fn render_json(seats: &[SeatReport]) -> Value {
                 "today": tally_json(&seat.today),
                 "week": tally_json(&seat.week),
                 "costUsd": seat.cost_usd,
+                // Which id the seat asks with — the person's pin, or the
+                // alias — and which version the newest answer named: the two
+                // halves of "is the seat still measuring what it was fitted
+                // to" (t-6187).
+                "askedModel": seat.asked_model,
+                "model": seat.model,
                 "riseFloorPermille": seat.rise_floor_permille,
                 "clearsRiseFloor": seat.clears_rise_floor,
                 "rowsToNextJudgment": seat.rows_to_next_judgment(),
@@ -455,9 +461,12 @@ fn render_json(seats: &[SeatReport]) -> Value {
                 },
                 "stand": seat.stand.token(),
                 "applies": seat.applies,
-                "verdict": seat.verdict().map(|verdict| json!({
-                    "verdict": verdict.token(),
-                    "line": verdict.line().map(tools::jev_summary::line_token),
+                "verdict": seat.judged.as_ref().map(|judged| json!({
+                    "verdict": judged.verdict.token(),
+                    "line": judged.verdict.line().map(tools::jev_summary::line_token),
+                    // The version the rows were cut away from, beside the
+                    // line the seat holds on: a thin sample says why.
+                    "cutModel": judged.cut,
                 })),
             }))
             .collect::<Vec<Value>>(),
@@ -509,13 +518,25 @@ fn render_text(seats: &[SeatReport]) -> String {
                 );
             }
         }
-        if let Some(verdict) = seat.verdict() {
+        if let Some(judged) = seat.judged.as_ref() {
+            let verdict = judged.verdict;
             let _ = write!(
                 notes,
                 "{}{}{}",
                 if notes.is_empty() { "" } else { " · " },
                 verdict.token(),
                 verdict.line().map_or_else(String::new, |line| format!(" ({})", line.token()))
+            );
+            if let Some(cut) = judged.cut.as_deref() {
+                let _ = write!(notes, " · cut at {cut}");
+            }
+        }
+        if let Some(model) = seat.model.as_deref() {
+            let _ = write!(
+                notes,
+                "{}asks {} · answered by {model}",
+                if notes.is_empty() { "" } else { " · " },
+                seat.asked_model
             );
         }
         if let Some(owed) = seat.rows_to_next_judgment() {

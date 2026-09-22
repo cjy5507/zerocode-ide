@@ -194,8 +194,13 @@ struct Remembered {
     jev: std::collections::BTreeMap<String, JudgedAxis>,
 }
 
-fn memo() -> &'static Mutex<HashMap<u64, Remembered>> {
-    static MEMO: OnceLock<Mutex<HashMap<u64, Remembered>>> = OnceLock::new();
+/// What the memo keys a step's judgment by: the model the door asks for
+/// ([`jev_gate::model_key`]) and the step's state, so a judgment one pin
+/// answered is never recalled under another.
+type StepKey = (u64, u64);
+
+fn memo() -> &'static Mutex<HashMap<StepKey, Remembered>> {
+    static MEMO: OnceLock<Mutex<HashMap<StepKey, Remembered>>> = OnceLock::new();
     MEMO.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -290,7 +295,7 @@ async fn judge_step(
     client: Option<&api::SystemOneClient>,
     ask: &OwnedAsk,
 ) -> (StepJudgmentRow, Option<StepJudgment>) {
-    let key = task_fingerprint("", &ask.state);
+    let key: StepKey = (door.model_key(), task_fingerprint("", &ask.state));
     let recalled = memo().lock().ok().and_then(|memo| memo.get(&key).cloned());
     if let Some(remembered) = recalled {
         telemetry::attest_fired(telemetry::HarnessFeature::DecisionShadow);
@@ -486,6 +491,7 @@ mod tests {
             enabled: true,
             workspaces: vec![home.path().display().to_string()],
             daily_requests: None,
+            model: zerocode_core::jev::DEFAULT_MODEL.to_string(),
         };
         let door = JevDoor::at(settings, home.path(), home.path());
         let ask = OwnedAsk {

@@ -5461,6 +5461,27 @@ function initTypeSafeEvents() {
         ? t("settings.classifier.nowProbes", "이제 모델에게도 묻습니다 — 라우팅 판단도 여기서 물을 수 있습니다.")
         : t("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 어디에도 묻지 않습니다."));
   });
+  // The model pin (`smart.jevModel`): an empty field unpins. The backend
+  // refuses a pin its door would not read, and the refusal is said here.
+  el("typesafe-model-input")?.addEventListener("change", (event) => {
+    const model = event.target.value;
+    void runTypeSafe(() => invoke("set_jev_model", { model }), (state) =>
+      state.model?.pinned
+        ? t("settings.typesafe.modelPinned", "{{model}}에 고정했습니다. 다음 요청부터 이 버전에 묻습니다.",
+          { model: state.model.model })
+        : t("settings.typesafe.modelUnpinned", "고정을 풀었습니다. 늘 최신 버전에 묻습니다."));
+  });
+}
+
+/* The model field as the backend answered it: the pin when there is one,
+ * empty with the alias behind it when there is none. A field somebody is
+ * typing in is left alone. */
+function paintTypeSafeModel(state) {
+  const input = el("typesafe-model-input");
+  if (!input || !state.model) return;
+  input.placeholder = state.model.alias;
+  if (document.activeElement !== input) input.value = state.model.pinned ? state.model.model : "";
+  input.disabled = typesafeBusy;
 }
 
 /* One seat's row of the backend's answer, by the use's own name. The words a
@@ -5615,6 +5636,7 @@ function paintTypeSafe(state) {
   }
   const count = el("jev-uses-count");
   if (count) count.textContent = seats > 0 ? String(seats) : "";
+  paintTypeSafeModel(state);
   paintClassifierGate(state);
   paintTypeSafeSave();
   // The dashboard's rows wear the same switches and the same numbers; a

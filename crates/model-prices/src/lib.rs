@@ -408,6 +408,12 @@ struct SystemOneTable {
 #[derive(Debug, Deserialize)]
 struct SystemOneRow {
     ids: Vec<String>,
+    /// The family whose numbered versions (`jev-1.13.0` of `jev`) bill at
+    /// this row — the one place a pinned version finds its price, since the
+    /// vendor names one price per model and a version is the id a pinned
+    /// request asks with (t-6187).
+    #[serde(default)]
+    prices_versions_of: Option<String>,
     input: f64,
     output: f64,
     /// `YYYY-MM-DD`, the day the vendor published this price.
@@ -451,19 +457,40 @@ impl SystemOneRate {
 }
 
 /// The rate for a System One model id, or `None` for one no row names. The id
-/// must be one a row names, in any case: a dated or pinned id nobody wrote down
-/// is unpriced, never billed at a neighbour's rate.
+/// must be one a row names, in any case, or a numbered version of the family
+/// a row prices (`prices_versions_of`: `jev-1.13.0` is a `jev`): a dated or
+/// otherwise named id nobody wrote down is unpriced, never billed at a
+/// neighbour's rate.
 pub fn systemone_rate(model: &str) -> Option<SystemOneRate> {
     let wanted = model.trim();
-    table()
-        .typesafe
-        .rows
-        .iter()
+    let rows = &table().typesafe.rows;
+    rows.iter()
         .find(|row| row.ids.iter().any(|id| id.eq_ignore_ascii_case(wanted)))
+        .or_else(|| {
+            rows.iter().find(|row| {
+                row.prices_versions_of
+                    .as_deref()
+                    .is_some_and(|family| is_numbered_version_of(wanted, family))
+            })
+        })
         .map(|row| SystemOneRate {
             input: row.input,
             output: row.output,
             announced: row.announced_date(),
+        })
+}
+
+/// Whether `id` is a numbered version of `family`, in any case: the family, a
+/// hyphen, and whole numbers joined by dots (`jev-1.13.0`, `jev-2`). A date
+/// (`jev-2026-09-15`) is hyphenated, and a variant (`jev-1.13.0-preview`)
+/// carries a word, so neither is one.
+fn is_numbered_version_of(id: &str, family: &str) -> bool {
+    id.get(..family.len())
+        .is_some_and(|head| head.eq_ignore_ascii_case(family))
+        && id[family.len()..].strip_prefix('-').is_some_and(|version| {
+            version
+                .split('.')
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
         })
 }
 
@@ -572,6 +599,30 @@ mod tests {
             None,
             "a judgment call is not a chat candidate"
         );
+    }
+
+    /// A pinned version of Jev (`smart.jevModel`, t-6187) bills at the
+    /// family's own row — the vendor names one price for Jev, and the pin
+    /// is the id the seat asks with — while a dated id, a named variant and
+    /// anything that is not a numbered version stay unpriced.
+    #[test]
+    fn a_numbered_version_bills_at_its_familys_row() {
+        let family = systemone_rate("jev-latest").expect("the launch price is written down");
+        for version in ["jev-1.13.0", " JEV-1.13.0 ", "jev-2", "jev-1.14"] {
+            assert_eq!(systemone_rate(version), Some(family), "{version}");
+        }
+        for unnamed in [
+            "jev-",
+            "jev-1.",
+            "jev-.1",
+            "jev-1..2",
+            "jev-1.13.0-preview",
+            "jev-2026-09-15",
+            "jevv-1.13.0",
+            "pev-1.13.0",
+        ] {
+            assert_eq!(systemone_rate(unnamed), None, "{unnamed} was priced");
+        }
     }
 
     /// The table loads, every row has a key, and no key is spelled twice —

@@ -52,12 +52,13 @@ use serde_json::{Value, json};
 use zerocode_core::branching::{BranchAsk, NextStep};
 use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
-use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
+use zerocode_core::guarded::{ControlKind, kind_of};
 use zerocode_core::jev::promote::SEAT_RECORDING;
 use zerocode_core::jev::summary::{AGREED, AT, CACHED, ELAPSED_MS};
 use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{
-    ActionAsk, ActionChoice, ActionLook, Chosen, SCREEN_ACTION_RUBRIC_VERSION, Where, ask,
+    ActionAsk, ActionChoice, ActionLook, Chosen, Guard, SCREEN_ACTION_RUBRIC_VERSION, Stopped,
+    Where, ask,
 };
 
 pub use branch::{Branching, Compared, Saved};
@@ -489,6 +490,22 @@ pub enum Barred {
     NoSteps,
     /// A valid choice does not meet its seat's screen-press confidence floor.
     LowConfidence,
+    /// The screen's own text tells an assistant what to do (t-6187): the
+    /// walk steps back to the person rather than press on a screen that is
+    /// giving it orders.
+    Injected,
+    /// The screen is a wall — a sign-in, a robot check, an error dialog — in
+    /// front of the page the goal needs (t-6187).
+    Walled,
+}
+
+impl From<Stopped> for Barred {
+    fn from(stopped: Stopped) -> Self {
+        match stopped {
+            Stopped::Injected => Self::Injected,
+            Stopped::Walled => Self::Walled,
+        }
+    }
 }
 
 impl Barred {
@@ -503,6 +520,8 @@ impl Barred {
             Self::NoBudget => "no_budget",
             Self::NoSteps => "no_steps",
             Self::LowConfidence => "low_confidence",
+            Self::Injected => Stopped::Injected.word(),
+            Self::Walled => Stopped::Walled.word(),
         }
     }
 }
@@ -625,6 +644,11 @@ const USE_FALLBACK: &str = zerocode_core::jev::ROUTE_USE_FALLBACK;
 /// by [`no_press_reason`] alone, so the walk's rows and the words it answers
 /// in cannot come to spell it differently.
 pub(crate) const REASON: &str = "reason";
+
+/// The key a row names the kind of control its judgment named under
+/// ([`ControlKind::word`], t-6187): what the press rule read, and what a
+/// later reader counts destructive presses by.
+pub(crate) const CONTROL_KIND: &str = "controlKind";
 
 /// The key a row says under which way a judgment begun ahead of the walk
 /// went ([`Options::overlap`]), and its two words: the walk asked the very
@@ -997,7 +1021,7 @@ fn walk(
                                 "candidates": candidates,
                                 "routeUse": USE_FALLBACK,
                             }),
-                            spent,
+                            spent.as_ref(),
                             judgment_ms,
                             crate::project_runtime::now_epoch_ms(),
                         ),
@@ -1017,7 +1041,7 @@ fn walk(
                     "confidence": choice.confidence,
                     "probabilities": choice.probabilities,
                 }),
-                spent,
+                spent.as_ref(),
                 judgment_ms,
                 crate::project_runtime::now_epoch_ms(),
             ),
@@ -1038,6 +1062,13 @@ fn walk(
         // one word every Jev ledger's counter reads it by.
         if judge.cached() {
             note(&mut said, CACHED.canonical, json!(true));
+        }
+        // What the two guards asked beside the choice said, per thousand,
+        // on every answered row — recording or acting (t-6187).
+        if let Some(guard) = choice.guard {
+            for (key, permille) in guard.permille() {
+                note(&mut said, key, json!(permille));
+            }
         }
         let chosen = match choice.chosen {
             Chosen::Mark(mark) => mark,
@@ -1067,6 +1098,18 @@ fn walk(
             }
         };
         note(&mut said, "chosen", json!(format!("mark:{chosen}")));
+        // The control the judgment named, by kind, on every row that names
+        // one — recording or acting — and whether the one press rule lets it
+        // go (t-6187).
+        let (permitted, kind) = press_rule(
+            press_policy,
+            before
+                .as_ref()
+                .expect("the screen this walk just looked at"),
+            chosen,
+            choice.confidence,
+        );
+        note(&mut said, CONTROL_KIND, json!(kind.word()));
 
         // A seat that is not acting records what it would have pressed and
         // presses nothing — and says so, in the word the stand itself is
@@ -1081,6 +1124,22 @@ fn walk(
             return walked;
         }
 
+        // A screen whose text gives the walk orders, or a wall in front of
+        // the page the goal needs, is not pressed on — by this judgment or by
+        // a second reader's (t-6187). The walk steps back to the person, as a
+        // judgment under the press floor does, and the row names the stop.
+        if let Some(stopped) = choice.guard.and_then(Guard::stops) {
+            let word = Barred::from(stopped).as_str();
+            note(&mut said, "barred", json!(word));
+            // The walk's own answer says why no hand went out
+            // ([`no_press_reason`]), so the one who asked can tell the person.
+            note(&mut said, REASON, json!(word));
+            note(&mut said, "pressed", json!(false));
+            note(&mut said, "routeUse", json!(USE_FALLBACK));
+            walked.rows.push(row(mode, at, attempt, said));
+            return walked;
+        }
+
         // The second rung ([`Options::rescue`]): a judgment under the seat's
         // press floor is put to the second reader as the same closed choice,
         // and its number is pressed under the same rule — or the walk steps
@@ -1089,7 +1148,7 @@ fn walk(
         // The second reader's own answer, when it pressed: the ranking a
         // forked step reads its candidates off, in place of the seat's.
         let mut rescued_by: Option<ActionChoice> = None;
-        if !press_policy.permits_press(choice.confidence) {
+        if !permitted {
             let seen = before
                 .as_ref()
                 .expect("the screen this walk just looked at");
@@ -1133,6 +1192,11 @@ fn walk(
                     chosen = mark;
                     note(&mut said, RESCUED_BY, json!(RESCUED_BY_TEAM));
                     note(&mut said, "chosen", json!(format!("mark:{mark}")));
+                    note(
+                        &mut said,
+                        CONTROL_KIND,
+                        json!(control_kind(seen, mark).word()),
+                    );
                 }
                 None => {
                     if options.rescue && rescue.is_some() {
@@ -1304,13 +1368,28 @@ fn second_rung(policy: &JevUse, seen: &Screen, answered: &Judged) -> (String, Op
         Judged::Chose(second) => match second.chosen {
             Chosen::GiveUp => (zerocode_core::screen_action::GIVE_UP.to_string(), None),
             Chosen::Done => (zerocode_core::screen_action::DONE.to_string(), None),
-            Chosen::Mark(_) if !policy.permits_press(second.confidence) => {
+            Chosen::Mark(mark) if !press_rule(policy, seen, mark, second.confidence).0 => {
                 (Barred::LowConfidence.as_str().to_string(), None)
             }
             Chosen::Mark(mark) if presses_a_link(seen, mark) => ("link".to_string(), None),
             Chosen::Mark(mark) => ("pressed".to_string(), Some(mark)),
         },
     }
+}
+
+/// The one press rule every press of a walk passes — the seat's own answer,
+/// a second reader's, a fork's pick (t-6187): the seat's floor for a plain
+/// control, nine in ten for one a press cannot take back
+/// ([`JevUse::permits_press`]). The control's kind comes back for the row.
+fn press_rule(policy: &JevUse, seen: &Screen, mark: usize, confidence: f64) -> (bool, ControlKind) {
+    let kind = control_kind(seen, mark);
+    (policy.permits_press(confidence, kind), kind)
+}
+
+/// The kind of the control `mark` names on `seen`, read off the legend line
+/// the question offered it under ([`kind_of`]).
+fn control_kind(seen: &Screen, mark: usize) -> ControlKind {
+    kind_of(&legend_of(seen, mark))
 }
 
 /// The control `mark` names on `seen`, as the legend named it — what a walk
@@ -1375,14 +1454,13 @@ pub fn write_rows(
 /// its judgment and threw the number away, and a row with no `at` fell
 /// outside every "today" and "7d" window, so the three screen seats read as
 /// "never asked" on the settings card with 41 rows on disk.
-fn stamped(mut said: Value, spent: Option<Spent>, elapsed_ms: u64, now_ms: i64) -> Value {
+fn stamped(mut said: Value, spent: Option<&Spent>, elapsed_ms: u64, now_ms: i64) -> Value {
     if let Some(fields) = said.as_object_mut() {
         fields.insert(AT.canonical.to_string(), json!(now_ms));
         fields.insert(ELAPSED_MS.canonical.to_string(), json!(elapsed_ms));
-        if let Some(spent) = spent {
-            fields.insert(REQUESTS_KEY.to_string(), json!(spent.requests));
-            fields.insert(REDACTED_LINES_KEY.to_string(), json!(spent.redacted_lines));
-        }
+    }
+    if let Some(spent) = spent {
+        spent.stamp(&mut said);
     }
     said
 }
@@ -1402,6 +1480,8 @@ fn cleared_past(report: &Value, was: usize) -> bool {
 
 pub mod branch;
 pub mod desk;
+#[cfg(test)]
+pub(crate) mod guard_fixtures;
 pub mod live;
 pub mod team;
 pub mod walk;

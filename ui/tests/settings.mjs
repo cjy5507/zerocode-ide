@@ -73,6 +73,16 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "judgment_cache", setting: "jevJudgmentCache", modes: "off shadow on auto" }),
 ]);
 const jevSeat = (id) => JEV_SEATS.find((seat) => seat.id === id) ?? null;
+/* The model pin every Jev request names (`zerocode_core::jev::MODEL_SETTING`)
+   and the alias an unpinned request asks (`DEFAULT_MODEL`), as
+   `typesafe_settings` answers them — `typesafe_settings.rs` holds these to
+   the core's. A pin is one word: blank is no pin, as the door reads it. */
+const JEV_MODEL_SETTING = "jevModel";
+const JEV_MODEL_ALIAS = "jev-latest";
+const jevModelPin = (given) => {
+  const word = String(given ?? "").trim();
+  return word && !/[\s\p{Cc}]/u.test(word) ? word : null;
+};
 /* The routing classifier's four words (`zerocode_core::jev::ClassifierMode`)
    and what each one does. Only the probing word calls a probe, and the routing
    seat is asked nothing under the other three — `typesafe_settings.rs` holds
@@ -2606,6 +2616,22 @@ class StatefulBackend {
         };
         return this.typesafeSettings();
       }
+      case "set_jev_model": {
+        // Mirrors `typesafe_settings::set_model`: an empty word unpins (the
+        // key leaves the file), a pin the door would not read is refused.
+        if (this.typesafeSetFailure) {
+          throw { kind: "failed", message: "fixture refused the model" };
+        }
+        const pin = jevModelPin(args.model);
+        if (!pin && String(args.model ?? "").trim()) {
+          throw { kind: "failed", message: `not a model: ${args.model}` };
+        }
+        const smart = { ...(this.zoSettings.smart ?? {}) };
+        if (pin) smart[JEV_MODEL_SETTING] = pin;
+        else delete smart[JEV_MODEL_SETTING];
+        this.zoSettings.smart = smart;
+        return this.typesafeSettings();
+      }
       case "check_typesafe_key": return clone(this.typesafeCheck);
       case "jev_summary":
         if (this.jevSummary === null) throw new Error("unknown argument 'jev'");
@@ -2624,9 +2650,16 @@ class StatefulBackend {
       const offered = seat.modes.split(" ");
       return offered.includes(word) ? word : offered[0];
     };
+    const pin = jevModelPin(this.zoSettings.smart?.[JEV_MODEL_SETTING]);
     return {
       keysKeptHere: !this.routerKeychainUnavailable,
       keySaved: Boolean(this.keychain.get(TYPESAFE_SERVICE)?.trim()),
+      model: {
+        setting: JEV_MODEL_SETTING,
+        model: pin ?? JEV_MODEL_ALIAS,
+        pinned: pin !== null,
+        alias: JEV_MODEL_ALIAS,
+      },
       switches: JEV_SEATS.map((seat) => ({
         id: seat.id,
         setting: seat.setting,
@@ -4330,6 +4363,74 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
     await said("settings.typesafe.seatNeverAsked", "아직 아무것도 묻지 않았습니다."),
     "a seat nothing has asked read as a seat that answered nothing",
   );
+
+  // The id asked and the version that answered, one line with the window's
+  // rows and the version a change cut away (t-6187) — before the verdict,
+  // which stays the line's last words.
+  routingNumbers.askedModel = JEV_MODEL_ALIAS;
+  routingNumbers.model = "jev-1.13.0";
+  routingNumbers.judged = { window: window7(25, 25, 400), windowWanted: 73,
+    agreement: { compared: 0, agreed: 0, lowerBound: null, controlRows: 0 } };
+  routingNumbers.verdict = { verdict: "hold", line: "answered", cutModel: "jev-1.12.0" };
+  await pageA.evaluate(() => refreshApiRouters());
+  const versioned = [
+    await said("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}} 답함",
+      { today: 1, rows: 26, answered: 23 }),
+    await said("settings.typesafe.seatP95", "p95 {{ms}} ms", { ms: 4847 }),
+    [
+      await said("settings.typesafe.seatVersion", "물은 {{asked}} · 답한 {{model}}",
+        { asked: JEV_MODEL_ALIAS, model: "jev-1.13.0" }),
+      await said("settings.typesafe.seatWindowRows", "창 안 {{rows}}행", { rows: 25 }),
+      await said("settings.typesafe.seatCut", "{{cut}} 행은 창에서 뺌", { cut: "jev-1.12.0" }),
+    ].join(" · "),
+    await said("settings.typesafe.seatHolding", "아직 기록만 합니다 — {{because}}",
+      { because: await said("settings.typesafe.lineAnswered", "답한 비율이 모자랍니다") }),
+  ].join(" · ");
+  await pageA.waitForFunction(
+    (words) => document.querySelector('[data-jev-seat="routing"]')
+      ?.closest("[data-jev-row]")?.querySelector("[data-jev-numbers]")?.textContent === words,
+    versioned, { timeout: UI_TIMEOUT },
+  );
+  delete routingNumbers.askedModel;
+  delete routingNumbers.model;
+  delete routingNumbers.judged;
+  routingNumbers.verdict = { verdict: "hold", line: "answered" };
+
+  // The model pin (`smart.jevModel`): unpinned, the field is empty with the
+  // alias behind it; a version pins it where the door reads it; an empty
+  // field unpins — the key leaves the file — and a pin the door would not
+  // read is refused and writes nothing.
+  const modelInput = pageA.locator("#typesafe-model-input");
+  assertEqual(await modelInput.inputValue(), "", "an unpinned card showed a pin");
+  assertEqual(await modelInput.getAttribute("placeholder"), JEV_MODEL_ALIAS);
+  const pinAt = backend.calls.length;
+  await modelInput.fill("jev-1.13.0");
+  await modelInput.dispatchEvent("change");
+  assertEqual((await backend.waitForCall("A", "set_jev_model", pinAt)).args.model, "jev-1.13.0");
+  await pageA.waitForFunction(
+    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
+    await said("settings.typesafe.modelPinned", "{{model}}에 고정했습니다. 다음 요청부터 이 버전에 묻습니다.",
+      { model: "jev-1.13.0" }),
+    { timeout: UI_TIMEOUT },
+  );
+  assertEqual(backend.zoSettings.smart[JEV_MODEL_SETTING], "jev-1.13.0");
+  await pageA.evaluate(() => refreshApiRouters());
+  assertEqual(await modelInput.inputValue(), "jev-1.13.0", "a reopened card lost the pin");
+  const slipAt = backend.calls.length;
+  await modelInput.fill("jev 1.13");
+  await modelInput.dispatchEvent("change");
+  await backend.waitForCall("A", "set_jev_model", slipAt);
+  assertEqual(backend.zoSettings.smart[JEV_MODEL_SETTING], "jev-1.13.0", "a refused pin was written");
+  const unpinAt = backend.calls.length;
+  await modelInput.fill("");
+  await modelInput.dispatchEvent("change");
+  await backend.waitForCall("A", "set_jev_model", unpinAt);
+  await pageA.waitForFunction(
+    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
+    await said("settings.typesafe.modelUnpinned", "고정을 풀었습니다. 늘 최신 버전에 묻습니다."),
+    { timeout: UI_TIMEOUT },
+  );
+  assertEqual(JEV_MODEL_SETTING in backend.zoSettings.smart, false, "unpinned left the key behind");
 
   const autoAt = backend.calls.length;
   await pageA.selectOption("#typesafe-routing-select", "auto");

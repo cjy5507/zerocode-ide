@@ -77,6 +77,7 @@ pub const ASKED_KEYS: &[&str] = &[
     "dispatch",
     "agent",
     "model",
+    crate::summon_choice::WORKER_MODEL_KEY,
     "flow",
     "errand",
     "attempt",
