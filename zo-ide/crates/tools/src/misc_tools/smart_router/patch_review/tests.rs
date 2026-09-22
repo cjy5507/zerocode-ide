@@ -783,3 +783,44 @@ fn the_patches_this_machine_wrote_reviewed_in_hindsight() {
         "input tokens {input_tokens}, cost ${spent:.4} (${per_review:.6} per review), cap ${REPLAY_SPEND_CAP_USD:.2}"
     );
 }
+
+/// What an edit's result waits on the calling thread for the seat, off and
+/// shadow in turn, warm, the wire slower than anything measured here: under
+/// shadow the review leaves on its own, so what the result pays is the
+/// setting, the door and the book — never the wire.
+#[test]
+#[ignore = "a timing, printed: what the seat costs the edit's own thread"]
+fn what_the_seat_costs_the_edits_own_thread() {
+    const ROUNDS: usize = 200;
+    let quantiles = |mut held: Vec<Duration>| {
+        held.sort_unstable();
+        let at = |share: f64| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+            let index = ((held.len() - 1) as f64 * share).round() as usize;
+            held[index].as_secs_f64() * 1_000.0
+        };
+        (at(0.5), at(0.95))
+    };
+    for mode in ["off", "shadow"] {
+        let mock = Mock::slow_first(Duration::from_secs(2), reply(UNRELATED));
+        let (p50, p95) = machine(&PATCH_REVIEW, mode, &mock.base_url, |cwd| {
+            forget_waiting(cwd);
+            let judge = PatchReviewJudge::at(cwd);
+            // Warm: the first asks open files and a client nothing else has.
+            for at in 0..10 {
+                let _ = api::sync_bridge::run_blocking(judge.review(ask(&format!("warm-{at}"))));
+            }
+            let held: Vec<Duration> = (0..ROUNDS)
+                .map(|at| {
+                    let asked = ask(&format!("edit-{at}"));
+                    let started = Instant::now();
+                    let _ = api::sync_bridge::run_blocking(judge.review(asked));
+                    started.elapsed()
+                })
+                .collect();
+            forget_waiting(cwd);
+            quantiles(held)
+        });
+        println!("{mode:>6}: the edit's thread held p50 {p50:.3} ms, p95 {p95:.3} ms over {ROUNDS} edits");
+    }
+}
