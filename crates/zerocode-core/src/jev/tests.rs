@@ -1191,5 +1191,93 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 16);
+    assert_eq!(JEV_USES.len(), 17);
+}
+
+/// The branching seat (t-6044) forks one phone step — the emulator seat's
+/// top candidates each tried on a saved device and the results compared —
+/// and rises on the walk's own next step.
+#[test]
+fn the_branching_seat_forks_a_phone_step_and_rises_on_the_walks_next_step() {
+    assert_eq!(jev_use("branching"), Some(&BRANCHING));
+    assert_eq!(BRANCHING.setting, "jevBranching");
+    assert_eq!(BRANCHING.ledger, "branching.jsonl");
+    // A labeled seat whose acting word is evidence, never a person's `on`:
+    // off, shadow, auto (the seat contract's third rule, as the notify seat).
+    assert_eq!(
+        BRANCHING.modes,
+        &[JevMode::Off, JevMode::Shadow, JevMode::Auto]
+    );
+    assert_eq!(BRANCHING.offered("on"), None);
+    assert!(
+        !BRANCHING.mode_of(Some(&json!("on"))).asks(),
+        "no `on`: it reads as off"
+    );
+    assert!(!BRANCHING.mode_of(Some(&json!("auto"))).applies_with(false));
+    assert!(BRANCHING.mode_of(Some(&json!("auto"))).applies_with(true));
+    assert_eq!(
+        BRANCHING.mode_in(&json!({"smart": {"emulatorAction": "auto"}})),
+        JevMode::Off,
+        "the emulator seat's consent is not the fork's"
+    );
+    assert_ne!(BRANCHING.setting, EMULATOR.setting);
+    assert_ne!(BRANCHING.ledger, EMULATOR.ledger);
+
+    // What is sent: the goal, the phone's address, the screen before and each
+    // candidate's action and the controls it led to — never a body.
+    let sent: Vec<&str> = BRANCHING.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(
+        sent,
+        [
+            "/state/goal",
+            "/state/where/platform",
+            "/state/where/device",
+            "/state/before",
+            "/state/before/*",
+            "/state/candidates",
+            "/state/candidates/*/action",
+            "/state/candidates/*/result/controls",
+            "/state/candidates/*/result/controls/*",
+            "/questions/*/criteria/*",
+        ]
+    );
+    let caps = |row: &JevUse| -> Vec<Cap> { row.sends.iter().map(|sent| sent.cap).collect() };
+    assert!(caps(&BRANCHING).contains(&Cap::Chars(GOAL_CHAR_CAP)));
+    assert!(caps(&BRANCHING).contains(&Cap::Items(BRANCHING_K_CAP)));
+    assert!(caps(&BRANCHING).contains(&Cap::Items(SCREEN_CANDIDATE_CAP)));
+
+    // k is one number in the table, at least two and never past what the
+    // question carries.
+    const {
+        assert!(BRANCHING_K == 2);
+        assert!(BRANCHING_K_CAP == 3);
+        assert!(BRANCHING_K <= BRANCHING_K_CAP);
+        assert!(BRANCHING.promotes);
+    }
+    assert_eq!(BRANCHING.agreement_kind, AgreementKind::Comparison);
+    assert_eq!(
+        BRANCHING.answer_floor_permille,
+        Some(BRANCHING_ANSWER_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        BRANCHING.agreement_floor_permille,
+        Some(BRANCHING_AGREEMENT_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        BRANCHING.apply_deadline_ms,
+        Some(BRANCHING_APPLY_DEADLINE_MS)
+    );
+    assert_eq!(BRANCHING.window_forgives, Some(FORGIVES_A_BAD_MINUTE));
+    assert_eq!(
+        BRANCHING.agreement_rows_wanted,
+        Some(A_WINDOW_OF_COMPARISONS)
+    );
+    // The comparison's pick is pressed at the screen seats' own confidence
+    // line; under it the first candidate stands, as today.
+    assert_eq!(
+        BRANCHING.press_floor_permille,
+        Some(SCREEN_PRESS_FLOOR_PERMILLE)
+    );
+    assert!(BRANCHING.permits_press(0.5) && !BRANCHING.permits_press(0.49));
+    assert_eq!(BRANCHING_APPLY_DEADLINE_MS, 1_500);
 }

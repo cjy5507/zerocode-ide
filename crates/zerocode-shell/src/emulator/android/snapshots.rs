@@ -221,6 +221,7 @@ fn file_bytes(path: &Path) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{AvdSnapshot, android_avd_snapshot};
     use super::*;
 
     /// The two directories the 09-21 measurement left on disk, rebuilt: the
@@ -364,6 +365,49 @@ mod tests {
                 .join(format!("{STALE_PREFIX}2026-09-21.2"))
                 .is_dir()
         );
+    }
+
+    /// A forked step's snapshot round trip on a live AVD (t-6044): save a
+    /// named snapshot, load it, delete it, and print what each took — the
+    /// numbers a fork's budget is made of. Nothing is guessed: without a
+    /// device the test says so and measures nothing.
+    ///
+    /// ```text
+    /// ZEROCODE_LIVE_ANDROID_SERIAL=emulator-5554 \
+    ///   cargo test -p zerocode-shell --bin zerocode-shell -- --ignored \
+    ///   --nocapture a_live_avds_snapshot_round_trip
+    /// ```
+    #[test]
+    #[ignore = "drives a real emulator's console"]
+    fn a_live_avds_snapshot_round_trip() {
+        let Ok(serial) = std::env::var("ZEROCODE_LIVE_ANDROID_SERIAL") else {
+            println!("LIVE: no serial named; nothing measured");
+            return;
+        };
+        let name = format!("zerocode-fork-live-{}", std::process::id());
+        let mut took = Vec::new();
+        for verb in [
+            AvdSnapshot::Save,
+            AvdSnapshot::Load,
+            AvdSnapshot::Save,
+            AvdSnapshot::Load,
+        ] {
+            match android_avd_snapshot(&serial, verb, &name) {
+                Ok(ms) => {
+                    println!("LIVE: avd snapshot {} {name}: {ms} ms", verb.word());
+                    took.push((verb, ms));
+                }
+                Err(why) => {
+                    println!("LIVE: avd snapshot {} {name} failed: {why}", verb.word());
+                    break;
+                }
+            }
+        }
+        match android_avd_snapshot(&serial, AvdSnapshot::Delete, &name) {
+            Ok(ms) => println!("LIVE: avd snapshot delete {name}: {ms} ms"),
+            Err(why) => println!("LIVE: avd snapshot delete {name} failed: {why}"),
+        }
+        println!("LIVE: {took:?}");
     }
 
     /// The same judgement, run against a real AVD on this machine — the road

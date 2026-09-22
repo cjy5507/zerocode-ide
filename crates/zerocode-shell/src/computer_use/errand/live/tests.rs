@@ -478,3 +478,105 @@ fn what_one_screen_question_costs_against_the_real_endpoint() {
         millis.last().copied().unwrap_or_default(),
     );
 }
+
+/// A forked step's question, as the walk would build one.
+fn compared_ask() -> zerocode_core::branching::BranchAsk {
+    use zerocode_core::branching::{BranchLook, Candidate, Outcome, ask as ask_branch};
+    let candidates = [
+        Candidate {
+            mark: 2,
+            action: "2 button 설정 @102,40".into(),
+            result: Some(Outcome {
+                moved: false,
+                controls: vec![],
+                count: 2,
+            }),
+        },
+        Candidate {
+            mark: 1,
+            action: "1 button Wi-Fi @101,40".into(),
+            result: Some(Outcome {
+                moved: true,
+                controls: vec!["3 button 연결됨 @103,40".into()],
+                count: 3,
+            }),
+        },
+    ];
+    ask_branch(&BranchLook {
+        goal: "Wi-Fi 설정을 열어라",
+        at: zerocode_core::screen_action::Where::Phone {
+            platform: "android",
+            device: "Pixel_6",
+        },
+        before: &[],
+        candidates: &candidates,
+    })
+    .expect("two candidates ask")
+}
+
+/// A body the endpoint would answer a comparison with.
+fn body_comparing(choice: &str) -> String {
+    json!({
+        "model": SYSTEMONE_MODEL,
+        "answers": {
+            "best": {
+                "type": "choice",
+                "choice": choice,
+                "probabilities": { "mark:2": 0.2, "mark:1": 0.8 },
+                "confidence": 0.8,
+            }
+        },
+        "usage": { "input_tokens": 140, "output_tokens": 0 },
+    })
+    .to_string()
+}
+
+/// The comparison goes down the same wire under the branching seat's own
+/// row (t-6044): the door reads that row's consent, the request carries the
+/// fork's state, and the answer is read by the fork's own question — a
+/// refusal by its word, a body the contract answered as a choice.
+#[test]
+fn a_comparison_is_asked_under_the_branching_row_and_read_by_its_own_question() {
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_comparing("mark:1"), 0);
+    let (_home, mut judge) = consented_judge(&endpoint.base());
+
+    let Compared::Chose(choice) = judge.compare(&compared_ask()) else {
+        panic!("the contract's own answer is a choice");
+    };
+    assert_eq!(choice.mark, 1);
+    assert_eq!(choice.confidence, 0.8);
+    assert_eq!(
+        judge.spent(),
+        Some(Spent {
+            requests: 1,
+            redacted_lines: 0
+        })
+    );
+    let heard = endpoint.asked();
+    assert_eq!(heard.len(), 1, "one call, not a retry");
+    assert!(heard[0].contains(&format!("POST {SYSTEMONE_PATH}")));
+    assert!(heard[0].contains("Wi-Fi"), "the fork's state went with it");
+    assert!(
+        heard[0].contains("\\\"best\\\"") || heard[0].contains("\"best\""),
+        "the fork's own question was asked:\n{}",
+        heard[0]
+    );
+
+    // A number the question never offered is refused by the rule's word.
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_comparing("mark:9"), 0);
+    let (_home, mut judge) = consented_judge(&endpoint.base());
+    assert_eq!(
+        judge.compare(&compared_ask()),
+        Compared::Refused(ChoiceRefusal::UnknownOption.token().to_string())
+    );
+
+    // A shut door sends nothing: no key is the door's first question.
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_comparing("mark:1"), 0);
+    let home = tempfile::tempdir().expect("a zo home");
+    let mut keyless = LiveJudge::at(&endpoint.base(), "", door_in(&home, "work"));
+    assert_eq!(
+        keyless.compare(&compared_ask()),
+        Compared::Refused(Refused::NoKey.token().to_string())
+    );
+    assert!(endpoint.asked().is_empty(), "no key, no socket");
+}

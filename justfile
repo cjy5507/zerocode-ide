@@ -69,6 +69,7 @@ tools-test:
     python3 tools/tests/test_browser_read_replay_seed.py
     python3 tools/tests/test_notify_replay_seed.py
     python3 tools/tests/test_mention_rerank_replay_seed.py
+    python3 tools/tests/test_branching_replay_seed.py
     python3 tools/tests/test_claude_code_panel_rules.py
     python3 tools/tests/test_codegraph_bench.py
 

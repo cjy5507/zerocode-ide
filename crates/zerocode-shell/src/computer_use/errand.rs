@@ -49,6 +49,7 @@
 use std::time::Duration;
 
 use serde_json::{Value, json};
+use zerocode_core::branching::{BranchAsk, NextStep};
 use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
@@ -58,6 +59,8 @@ use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APP
 use zerocode_core::screen_action::{
     ActionAsk, ActionChoice, ActionLook, Chosen, SCREEN_ACTION_RUBRIC_VERSION, Where, ask,
 };
+
+pub use branch::{Branching, Compared, Saved};
 
 /// How long one judgment may hold a walk: the screen seats' own wall, read
 /// from the use table that judges a rising seat against it
@@ -130,8 +133,18 @@ pub use crate::systemone::Spent;
 pub trait ActionJudge {
     fn choose(&mut self, ask: &ActionAsk) -> Judged;
 
-    /// What the last [`Self::choose`] sent through the Jev door, for the row.
-    /// A judge that sends nowhere — a test's — has nothing to say.
+    /// Which of a forked step's results is the closest to the goal (t-6044,
+    /// `zerocode_core::jev::BRANCHING`) — asked under that seat's own row,
+    /// down the same wire. A judge with no comparison to give — a test's that
+    /// was handed none — refuses, and the first candidate stands as today.
+    fn compare(&mut self, ask: &BranchAsk) -> Compared {
+        let _ = ask;
+        Compared::Refused(branch::NO_COMPARISON.to_string())
+    }
+
+    /// What the last [`Self::choose`] or [`Self::compare`] sent through the
+    /// Jev door, for the row. A judge that sends nowhere — a test's — has
+    /// nothing to say.
     fn spent(&self) -> Option<Spent> {
         None
     }
@@ -245,6 +258,25 @@ pub trait World {
     /// on, which is the weaker of the two and says so in the row.
     fn reached(&mut self) -> Option<bool> {
         None
+    }
+    /// Save the device where it stands, so a forked step can try a candidate
+    /// and come back (t-6044). `None` when this world cannot — a page, the
+    /// desktop, an iOS simulator, an Android device whose save failed — and
+    /// then the step is taken once, as today. What comes back is what
+    /// [`Self::restore`] and [`Self::forget`] take.
+    fn save(&mut self) -> Option<Saved> {
+        None
+    }
+    /// Put the device back where [`Self::save`] left it. `false` when it
+    /// could not, and then the device stands where the last press left it.
+    fn restore(&mut self, saved: &Saved) -> bool {
+        let _ = saved;
+        false
+    }
+    /// Let go of a saved state the fork is done with, so a device does not
+    /// fill with the states of every step it ever forked. Best effort.
+    fn forget(&mut self, saved: &Saved) {
+        let _ = saved;
     }
 }
 
@@ -512,6 +544,9 @@ pub struct Walked {
     /// with its own `done` — and those walks are left out of the agreement
     /// rather than guessed at.
     pub agreed: Option<bool>,
+    /// The branching seat's rows (t-6044): one per forked step, written to
+    /// that seat's own ledger by the caller, never to the screen seat's.
+    pub forks: Vec<Value>,
 }
 
 /// One row, with the words every ledger of this family uses.
@@ -564,7 +599,22 @@ pub fn run(
     judge: &mut dyn ActionJudge,
     world: &mut dyn World,
 ) -> Walked {
-    let mut walked = walk(mode, acting, at, judge, world);
+    run_with(mode, acting, Branching::OFF, at, judge, world)
+}
+
+/// [`run`], with the branching seat's standing beside the screen seat's
+/// (t-6044): `branching` says whether a phone step whose judgment ranked two
+/// or more controls is asked about at all, and whether the comparison's pick
+/// is the one pressed. [`Branching::OFF`] is [`run`] byte for byte.
+pub fn run_with(
+    mode: Mode,
+    acting: bool,
+    branching: Branching,
+    at: &Errand<'_>,
+    judge: &mut dyn ActionJudge,
+    world: &mut dyn World,
+) -> Walked {
+    let mut walked = walk(mode, acting, branching, at, judge, world);
     agree(&mut walked);
     walked
 }
@@ -596,11 +646,16 @@ fn agree(walked: &mut Walked) {
 fn walk(
     mode: Mode,
     acting: bool,
+    branching: Branching,
     at: &Errand<'_>,
     judge: &mut dyn ActionJudge,
     world: &mut dyn World,
 ) -> Walked {
     let mut walked = Walked::default();
+    // The forked step waiting for the walk's next step to grade it (t-6044):
+    // the row's place among `walked.forks`, and whether the comparison named
+    // the candidate that was actually pressed.
+    let mut pending: Option<branch::Pending> = None;
     if matches!(at.why, Why::Goal { .. }) {
         walked.reached = Some(false);
     }
@@ -664,6 +719,9 @@ fn walk(
         }
         match before.as_ref() {
             Some(was) if was.same_as(&screen) => {
+                // A forked step whose pick left the screen where it was is a
+                // step the walk now retries (t-6044).
+                branch::settle(&mut walked, pending.take(), NextStep::SameScreen);
                 still += 1;
                 if still >= SAME_SCREEN_LIMIT {
                     walked.agreed = Some(false);
@@ -709,6 +767,8 @@ fn walk(
         let choice = match judged {
             Judged::Chose(choice) => choice,
             Judged::Refused(token) => {
+                // A next step nobody judged shows nothing about the fork.
+                branch::settle(&mut walked, pending.take(), NextStep::Unknown);
                 walked.rows.push(row(
                     mode,
                     at,
@@ -740,6 +800,17 @@ fn walk(
             judgment_ms,
             crate::project_runtime::now_epoch_ms(),
         );
+        // The screen moved past the last forked step: what the judgment says
+        // of the new screen is that step's mark (t-6044) — a control to press
+        // is the walk going on, `done` is the goal, `give_up` is a dead end.
+        if pending.is_some() {
+            let next = match choice.chosen {
+                Chosen::Mark(_) => NextStep::MovedOn,
+                Chosen::Done => NextStep::Reached,
+                Chosen::GiveUp => NextStep::GaveUp,
+            };
+            branch::settle(&mut walked, pending.take(), next);
+        }
         let chosen = match choice.chosen {
             Chosen::Mark(mark) => mark,
             Chosen::GiveUp | Chosen::Done => {
@@ -790,13 +861,47 @@ fn walk(
             return walked;
         }
 
-        let pressed = crate::run_evidence::observing(
-            json!({
-                "look_ms": look_ms,
-                "judgment": { "asked": true, "ms": judgment_ms, "confidence": choice.confidence },
-            }),
-            || world.press(chosen),
+        // The forked step (t-6044): on a phone whose judgment ranked two or
+        // more controls, the branching seat may try the top candidates on a
+        // saved device and make the comparison's pick canonical. Off, it is
+        // the press below exactly; every other way out presses the number
+        // chosen above — the first candidate — as today.
+        let forked = branch::step(
+            &branch::Step {
+                branching,
+                at,
+                attempt,
+                screen: before.as_ref(),
+                choice: &choice,
+                chosen,
+                look_ms,
+            },
+            judge,
+            world,
         );
+        if forked.mark != chosen {
+            // The screen seat's row keeps its own answer; the number the hand
+            // went out with is the fork's, and the row says so.
+            note(&mut said, "forked", json!(format!("mark:{}", forked.mark)));
+        }
+        let chosen = forked.mark;
+        if let Some(fork) = forked.row {
+            pending = Some(branch::Pending {
+                row: walked.forks.len(),
+                same_pick: forked.same_pick,
+            });
+            walked.forks.push(fork);
+        }
+        let pressed = match forked.pressed {
+            Some(pressed) => pressed,
+            None => crate::run_evidence::observing(
+                json!({
+                    "look_ms": look_ms,
+                    "judgment": { "asked": true, "ms": judgment_ms, "confidence": choice.confidence },
+                }),
+                || world.press(chosen),
+            ),
+        };
         if !pressed {
             note(&mut said, "routeUse", json!(USE_FALLBACK));
             note(&mut said, "pressed", json!(false));
@@ -833,6 +938,17 @@ fn walk(
                 walked.agreed = Some(cleared);
                 walked.rows.push(row(mode, at, attempt, said));
                 walked.report = after;
+                // The re-walk is the forked step's next step (t-6044): past
+                // the stop is the walk going on, the same stop again a retry.
+                branch::settle(
+                    &mut walked,
+                    pending.take(),
+                    if cleared {
+                        NextStep::Reached
+                    } else {
+                        NextStep::SameScreen
+                    },
+                );
                 if cleared {
                     return walked;
                 }
@@ -848,6 +964,7 @@ fn walk(
                 }
                 walked.rows.push(row(mode, at, attempt, said));
                 if reached == Some(true) {
+                    branch::settle(&mut walked, pending.take(), NextStep::Reached);
                     walked.reached = Some(true);
                     return walked;
                 }
@@ -926,6 +1043,7 @@ fn cleared_past(report: &Value, was: usize) -> bool {
         .is_none_or(|at| at > was)
 }
 
+pub mod branch;
 pub mod desk;
 pub mod live;
 pub mod walk;
