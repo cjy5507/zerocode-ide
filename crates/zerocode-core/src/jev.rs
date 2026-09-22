@@ -26,6 +26,7 @@
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+pub mod challenger;
 pub mod choice;
 pub mod count;
 pub mod door;
@@ -2140,8 +2141,125 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
 };
 
+/// How many of a role's eligible attempts try the model nobody has evidence
+/// for: one in five (user decision 2026-09-22, relayed m-6151).
+///
+/// A model discovery has never routed to earns no outcome rows, and a model
+/// with no rows can never clear [`promote`]'s window — so the lineup this
+/// machine believes in is the one it believed in the day the catalog was
+/// written. One in five is the smallest share that fills a comparison window
+/// inside a working day at this machine's measured rate (4,093 route
+/// outcomes to 2026-09-22), and small enough that four of five attempts are
+/// still the incumbent's.
+pub const CHALLENGER_ONE_IN: u64 = 5;
+
+/// The most of a day's model spend the challenger arm may be: one tenth
+/// (same decision).
+///
+/// Counted by the price table, over the day's own rows, so a quiet day buys
+/// a small experiment and a busy one a larger — a fixed dollar ceiling would
+/// mean either no evidence on a quiet day or a runaway on a busy one.
+pub const CHALLENGER_DAY_SPEND_PERMILLE: u16 = 100;
+
+/// What a design question may carry of the work it is about.
+///
+/// The request in the person's own words, capped as the mention seat caps a
+/// sentence: a judge comparing two answers needs the question, never the
+/// repository.
+pub const CHALLENGER_TASK_CHAR_CAP: usize = MENTION_INTENT_CHAR_CAP;
+
+/// How many designs a comparison carries: two, the incumbent's and the
+/// challenger's. A third would not be a comparison.
+pub const CHALLENGER_DESIGN_CAP: usize = 2;
+
+/// How much of each design the judge reads — a plan, not a patch. The stall
+/// seat's transcript cap, which is the largest piece of a person's own text
+/// this product already sends through the door.
+pub const CHALLENGER_DESIGN_BYTE_CAP: usize = STALL_TRANSCRIPT_BYTE_CAP;
+
+/// What the challenger seat's answers must bound above before `auto` scores
+/// a comparison that moves a role's model: nine in ten, the recall seat's
+/// line, because a judgment that does not come back costs nothing here —
+/// the incumbent acted either way and the row is simply unlabeled.
+pub const CHALLENGER_ANSWER_FLOOR_PERMILLE: u16 = RECALL_ANSWER_FLOOR_PERMILLE;
+
+/// The challenger seat's agreement line (§4): four in five of its scored
+/// comparisons must name the design the verification loop later vindicated.
+/// The recall seat's budget, for the same reason — a seat that names the
+/// winner four times in five is reading quality; one that names it half the
+/// time is a coin this product would be spending money to flip.
+pub const CHALLENGER_AGREEMENT_FLOOR_PERMILLE: u16 = RECALL_AGREEMENT_FLOOR_PERMILLE;
+
+/// The wall past which a comparison is dropped, in milliseconds.
+///
+/// Nothing waits on it: the incumbent's design is what the attempt acts on,
+/// and the score lands afterwards on a row already written. Two seconds is
+/// therefore a staleness line rather than a wait — past it the attempt has
+/// usually moved on and the row is better left unlabeled than labeled late.
+pub const CHALLENGER_APPLY_DEADLINE_MS: u64 = 2_000;
+
+/// Whether a model nobody has evidence for is worth what it costs to find
+/// out — the challenger arm (user decision 2026-09-22, relayed m-6151).
+///
+/// Discovery moves a family alias to the newest release on its own
+/// (`model_discovery`), and the router learns from outcomes on its own
+/// (`model_router::learned`), but nothing in between ever tries a model the
+/// catalog ranks below the incumbent. So a new release is either adopted
+/// wholesale by an alias move or never measured at all, and "Fable outranks
+/// Opus" stays a sentence in a shipped table rather than a thing this
+/// machine has observed.
+///
+/// This seat closes that gap the way the pool seats close theirs. One in
+/// [`CHALLENGER_ONE_IN`] eligible attempts asks the challenger for the same
+/// design the incumbent is about to act on; the attempt acts on the
+/// INCUMBENT's design either way, and the two — anonymized, so the judge
+/// scores the plan rather than the name — are put to Jev as a closed
+/// comparison. The label is quality: the verification loop's own verdict
+/// where the attempt has one, and the anonymized comparison where it does
+/// not. A finished attempt is never a win by itself
+/// ([[agent-turn-done-is-not-task-verified]]).
+///
+/// What it sends is the request and two designs. What it decides is nothing
+/// a person waits on: `shadow` records the score, `on` is the person's own
+/// word, and `auto` lets a role's model move only once the seat's own
+/// comparisons clear its line over a window and the challenger's Wilson
+/// lower bound passes the incumbent's rate for THAT role ([`promote`]) —
+/// which is also what takes it back down.
+///
+/// Held back on purpose: verification, review, the release lane and guarded
+/// flows (payment, operator) never draw a challenger, and neither does a
+/// retry or a handover — a second opinion is not what a retry needs.
+pub const CHALLENGER: JevUse = JevUse {
+    id: "challenger",
+    setting: "jevChallenger",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    sends: &[
+        Sent {
+            at: "/state/task",
+            cap: Cap::Chars(CHALLENGER_TASK_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/designs",
+            cap: Cap::Items(CHALLENGER_DESIGN_CAP),
+        },
+        Sent {
+            at: "/state/designs/*/body",
+            cap: Cap::Bytes(CHALLENGER_DESIGN_BYTE_CAP),
+        },
+    ],
+    ledger: "challenger.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(CHALLENGER_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(CHALLENGER_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(CHALLENGER_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 18] = [
+pub static JEV_USES: [JevUse; 19] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -2160,6 +2278,7 @@ pub static JEV_USES: [JevUse; 18] = [
     MENTION_RERANK,
     BRANCHING,
     JUDGMENT_CACHE,
+    CHALLENGER,
 ];
 
 impl JevUse {

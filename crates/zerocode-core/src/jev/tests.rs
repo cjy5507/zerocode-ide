@@ -1191,7 +1191,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 18);
+    assert_eq!(JEV_USES.len(), 19);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
