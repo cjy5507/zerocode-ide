@@ -72,10 +72,12 @@ fn phone() -> FakeWorld {
     world
 }
 
-/// A judge whose press ranks 2 first and 1 second.
+/// A judge whose press ranks 2 first and 1 second, torn between them —
+/// inside the table's margin (`BRANCHING_FORK_MARGIN_PERMILLE`), so the
+/// step is one a fork is for.
 fn judging() -> FakeJudge {
     let mut judge = FakeJudge::chose(&[]);
-    judge.answers = vec![ranked(2, &[(2, 0.6), (1, 0.4)])];
+    judge.answers = vec![ranked(2, &[(2, 0.55), (1, 0.45)])];
     judge
 }
 
@@ -556,10 +558,33 @@ fn measure_forked_steps_on_a_fake_desk() {
     #[allow(clippy::cast_precision_loss)]
     let multiple = forked_ms as f64 / single_ms as f64;
     println!(
-        "MEASURE fake desk: single step {single_ms} ms, forked step (k=2) {forked_ms} ms, x{multiple:.2}; rescued {rescued}/{forks} steps where today's press led nowhere"
+        "MEASURE fake desk: single step {single_ms} ms, forked step (k=2) {forked_ms} ms, x{multiple:.2}; rescued {rescued}/{forks} steps of a scripted world where today's press led nowhere and the comparison read the script (the script's number, not a claim)"
     );
     assert_eq!(rescued, forks);
     assert!(multiple > 1.0);
+
+    // The gate's bite (t-6155 F3): over a leader-and-runner-up grid of the
+    // seat's answers — the leader from 0.30 to 0.95 in steps of 0.05, the
+    // rest on the runner-up — how many steps fork now that a clear lead is a
+    // single step. Before the margin every one of them forked, and the fork
+    // above was the clock of every step.
+    let grid: Vec<f64> = (6_u8..=19).map(|n| f64::from(n) / 20.0).collect();
+    let forking = grid
+        .iter()
+        .filter(|leader| {
+            let Judged::Chose(choice) = ranked(2, &[(2, **leader), (1, 1.0 - **leader)]) else {
+                unreachable!()
+            };
+            zerocode_core::branching::fork_wanted(&choice).len() >= 2
+        })
+        .count();
+    println!(
+        "MEASURE fork gate: {forking}/{} steps of a leader/runner-up grid (0.30..=0.95 by 0.05) fork under the margin; {}/{} did before it",
+        grid.len(),
+        grid.len(),
+        grid.len()
+    );
+    assert!(forking > 0 && forking < grid.len());
 }
 
 /* ---- the replay: the fake desk's forks, asked of the real endpoint ---- */
@@ -627,7 +652,7 @@ const SCENARIOS: [Scenario; 8] = [
                 "1 button Wi-Fi @101,40",
                 true,
                 &[
-                    "7 switch Wi-Fi 사용 @107,40",
+                    "7 switch 무선 랜 사용 @107,40",
                     "8 button 저장된 네트워크 @108,40",
                 ],
             ),
@@ -655,7 +680,7 @@ const SCENARIOS: [Scenario; 8] = [
                 &[
                     "6 edit 메시지 입력 @106,40",
                     "7 button 보내기 @107,40",
-                    "8 text 홍길동 @108,10",
+                    "8 text 마지막 접속 방금 전 @108,10",
                 ],
             ),
         ],
@@ -664,28 +689,28 @@ const SCENARIOS: [Scenario; 8] = [
     Scenario {
         goal: "알림을 끄고 저장하라",
         before: &[
-            "1 switch 알림 @101,40",
-            "2 button 저장 @102,40",
+            "1 switch 푸시 수신 @101,40",
+            "2 button 적용 @102,40",
             "3 button 뒤로 @103,40",
         ],
         candidates: &[
             (
                 2,
-                "2 button 저장 @102,40",
+                "2 button 적용 @102,40",
                 false,
                 &[
-                    "1 switch 알림 @101,40",
-                    "2 button 저장 @102,40",
+                    "1 switch 푸시 수신 @101,40",
+                    "2 button 적용 @102,40",
                     "3 button 뒤로 @103,40",
                 ],
             ),
             (
                 1,
-                "1 switch 알림 @101,40",
+                "1 switch 푸시 수신 @101,40",
                 true,
                 &[
-                    "1 switch 알림 꺼짐 @101,40",
-                    "2 button 저장 @102,40",
+                    "1 switch 푸시 수신 해제됨 @101,40",
+                    "2 button 적용 @102,40",
                     "3 button 뒤로 @103,40",
                 ],
             ),
@@ -707,7 +732,7 @@ const SCENARIOS: [Scenario; 8] = [
                 &[
                     "4 text 홍길동 @104,10",
                     "5 button 프로필 수정 @105,40",
-                    "6 button 로그아웃 @106,40",
+                    "6 button 이 기기에서 나가기 @106,40",
                 ],
             ),
             (
@@ -809,7 +834,7 @@ const SCENARIOS: [Scenario; 8] = [
                 "1 button 디스플레이 @101,40",
                 true,
                 &[
-                    "6 switch 다크 모드 @106,40",
+                    "6 switch 어두운 테마 @106,40",
                     "7 button 밝기 @107,40",
                     "8 button 글자 크기 @108,40",
                 ],
@@ -840,8 +865,8 @@ const SCENARIOS: [Scenario; 8] = [
                 "2 button 청구 @102,40",
                 true,
                 &[
-                    "7 button 2026년 9월 청구서 @107,40",
-                    "8 button 2026년 8월 청구서 @108,40",
+                    "7 button 2026년 9월분 명세 @107,40",
+                    "8 button 2026년 8월분 명세 @108,40",
                     "9 button 자동 납부 @109,40",
                 ],
             ),
@@ -849,6 +874,57 @@ const SCENARIOS: [Scenario; 8] = [
         right: 2,
     },
 ];
+
+/// The stems of a goal's words: each whitespace token with one trailing
+/// particle taken off, two characters and longer. A harness rule and not a
+/// product one — it exists so a scenario cannot hand the comparison its
+/// answer as a string.
+fn goal_stems(goal: &str) -> Vec<String> {
+    const PARTICLES: [&str; 14] = [
+        "에서", "에게", "으로", "하라", "어라", "을", "를", "이", "가", "에", "의", "로", "고",
+        "라",
+    ];
+    goal.split_whitespace()
+        .map(|word| {
+            PARTICLES
+                .iter()
+                .find_map(|particle| word.strip_suffix(particle))
+                .unwrap_or(word)
+                .to_string()
+        })
+        .filter(|stem| stem.chars().count() >= 2)
+        .collect()
+}
+
+/// No scenario hands the comparison its answer as a string (t-6155 F3): the
+/// screen the right candidate leads to carries none of the goal's words.
+/// A wrong candidate's screen may — a decoy is what a real screen does —
+/// and the controls pressed may, since the emulator seat saw those too.
+#[test]
+fn no_scenario_leaks_its_goal_into_the_right_candidates_result() {
+    for scenario in &SCENARIOS {
+        let stems = goal_stems(scenario.goal);
+        assert!(!stems.is_empty(), "{}", scenario.goal);
+        let right = scenario
+            .candidates
+            .iter()
+            .find(|(mark, ..)| *mark == scenario.right)
+            .expect("the right candidate is one of the candidates");
+        for line in right.3 {
+            for stem in &stems {
+                assert!(
+                    !line.contains(stem.as_str()),
+                    "{:?}: the right result {line:?} carries the goal's {stem:?}",
+                    scenario.goal
+                );
+            }
+        }
+    }
+    // The reader takes the stems a person would: nouns and verbs, not their
+    // particles, and nothing of one character.
+    assert_eq!(goal_stems("알림을 끄고 저장하라"), ["알림", "저장"]);
+    assert_eq!(goal_stems("Wi-Fi 설정을 열어라"), ["Wi-Fi", "설정"]);
+}
 
 fn scenario_ask(scenario: &Scenario) -> zerocode_core::branching::BranchAsk {
     use zerocode_core::branching::{BranchLook, Candidate, Outcome, ask};

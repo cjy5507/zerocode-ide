@@ -1946,6 +1946,27 @@ const _: () = assert!(
     "a fork tries at least two candidates and never more than the question can carry"
 );
 
+/// How far the emulator seat's first choice must lead its runner-up, in
+/// parts per thousand of the answer's mass, for the step to be a single
+/// press: a lead under this forks (`crate::branching::fork_wanted`), as does
+/// a leader under the seat's own press floor ([`SCREEN_PRESS_FLOOR_PERMILLE`])
+/// whatever its lead.
+///
+/// One in five, a policy line and not a calibrated claim, like every other
+/// line in this table: without it a fork was taken at every step whose
+/// answer gave a second control any weight at all (t-6155 F3), which on the
+/// fake desk is every step and on a real device is ×4.82 the clock of the
+/// step it replaces. One fifth is the same one-in-five the route-change
+/// budgets are cut at (800‰): a leader the seat itself is not four-in-five
+/// sure of over its runner-up is the answer a fork is for. Two of this
+/// machine's phone presses to date carried a weighted runner-up, so the
+/// line waits for `branching.jsonl` to move it.
+pub const BRANCHING_FORK_MARGIN_PERMILLE: u16 = 200;
+const _: () = assert!(
+    BRANCHING_FORK_MARGIN_PERMILLE > 0 && BRANCHING_FORK_MARGIN_PERMILLE < 1_000,
+    "a margin of nothing never forks and a margin of everything always does"
+);
+
 /// The wall the forked step holds a walk for the comparison's answer, in
 /// milliseconds — the screen seats' wall, written as this seat's own number
 /// for the reason every coinciding wall in this table is: the screen
@@ -1971,7 +1992,9 @@ pub const BRANCHING_ANSWER_FLOOR_PERMILLE: u16 = 900;
 pub const BRANCHING_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 
 /// The window's forked phone step (t-6044, `crate::branching`): when the
-/// emulator seat's answer ranks two or more controls, the walk saves the
+/// emulator seat's answer is torn between two or more controls — its first
+/// choice leading the runner-up by under [`BRANCHING_FORK_MARGIN_PERMILLE`],
+/// or sitting under the press floor itself — the walk saves the
 /// Android device where it stands, presses each of the top [`BRANCHING_K`]
 /// in turn, reads the screen each one leads to, puts the device back, and
 /// asks Jev which RESULT is the closest to the goal — the candidate it names
