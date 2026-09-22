@@ -94,6 +94,24 @@ mod tests {
     use runtime::team_cron_registry::CronRegistry;
 
     const MINUTE_MS: u64 = 60_000;
+    /// 2023-11-14T22:13:50Z — fifty seconds into a minute.
+    const CREATED_MID_MINUTE_SECS: u64 = 1_700_000_030;
+
+    #[test]
+    fn a_cron_created_on_the_minute_is_due_that_minute() {
+        let registry = CronRegistry::new_in_memory();
+        let on_the_minute = CREATED_MID_MINUTE_SECS / 60 * 60;
+        let entry = registry
+            .create_at("* * * * *", "say hello", None, on_the_minute)
+            .expect("create");
+        assert_eq!(
+            next_wakeup(&registry, on_the_minute * 1_000),
+            Some(on_the_minute * 1_000),
+            "created on the minute, the entry is due that minute, not the next"
+        );
+        assert!(dispatch_due(&registry, on_the_minute * 1_000).is_some());
+        assert_eq!(entry.created_at, on_the_minute);
+    }
 
     #[test]
     fn an_empty_registry_never_wakes_the_session() {
@@ -105,8 +123,12 @@ mod tests {
     #[test]
     fn a_cron_wakes_the_session_at_its_next_minute_and_fires_once_for_it() {
         let registry = CronRegistry::new_in_memory();
+        // A known second, fifty seconds into its minute: the entry's first
+        // minute is the next one, whatever the wall clock says. (Created ON a
+        // minute it would be due that minute — the race the wall clock used to
+        // lose once in sixty runs; `a_cron_created_on_the_minute_is_due_that_minute`.)
         let entry = registry
-            .create("* * * * *", "say hello", Some("every minute"))
+            .create_at("* * * * *", "say hello", Some("every minute"), CREATED_MID_MINUTE_SECS)
             .expect("create");
         let created_ms = entry.created_at * 1_000;
         // The first matching minute strictly after creation.

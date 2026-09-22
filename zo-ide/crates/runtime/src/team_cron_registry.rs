@@ -1183,11 +1183,28 @@ impl CronRegistry {
         }
     }
 
+    /// Create an entry stamped with the wall clock — [`Self::create_at`] with
+    /// this second.
     pub fn create(
         &self,
         schedule: &str,
         prompt: &str,
         description: Option<&str>,
+    ) -> Result<CronEntry, String> {
+        self.create_at(schedule, prompt, description, now_secs())
+    }
+
+    /// Create an entry stamped `created_at_secs`. The clock is a parameter so
+    /// a caller that must know the second — a test asking what minute the
+    /// entry first comes due — is not at the mercy of the wall clock: an entry
+    /// created on the minute is due that very minute (`ceil_to_minute`), one
+    /// created a second later is due the next.
+    pub fn create_at(
+        &self,
+        schedule: &str,
+        prompt: &str,
+        description: Option<&str>,
+        created_at_secs: u64,
     ) -> Result<CronEntry, String> {
         validate_cron_schedule(schedule)?;
         if prompt.trim().is_empty() {
@@ -1207,7 +1224,7 @@ impl CronRegistry {
             }
             inner.counter += 1;
             let rev = inner.bump_revision();
-            let ts = now_secs();
+            let ts = created_at_secs;
             let cron_id = format!("cron_{:08x}_{}", ts, inner.counter);
             let entry = CronEntry {
                 cron_id: cron_id.clone(),
