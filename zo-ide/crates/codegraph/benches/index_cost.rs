@@ -11,7 +11,9 @@
 //! ```
 //!
 //! Every phase goes through the crate's public API only — the same calls the
-//! zo tools make — so one harness measures any index behind that API.
+//! zo tools make — so one harness measures any index behind that API. Two
+//! phases only dump what the index answers (`links`, `sample`), for
+//! `tools/codegraph-bench/truth.py` to hold against rust-analyzer's LSIF.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -19,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
 
-use codegraph::{CodeGraph, CodeGraphError, SymbolKind, DEFAULT_CACHE_FILE_NAME};
+use codegraph::{CodeGraph, CodeGraphError, Symbol, SymbolKind, DEFAULT_CACHE_FILE_NAME};
 use serde_json::{json, Value};
 
 /// Timed repetitions of one query when the driver names none.
@@ -30,6 +32,10 @@ const DEFAULT_EDIT_SAMPLES: usize = 5;
 /// to have indexed the save. Rust syntax: the phase refuses other files.
 const EDIT_PROBE_PREFIX: &str = "codegraph_bench_probe_";
 const EDIT_PROBE_EXTENSION: &str = "rs";
+/// Definitions the `sample` phase draws when the driver names no count.
+const DEFAULT_SAMPLE_SIZE: usize = 100;
+/// Seed for the `sample` phase's draw; any fixed value makes it repeatable.
+const DEFAULT_SAMPLE_SEED: u64 = 5_970;
 const MILLIS_PER_SECOND: f64 = 1_000.0;
 const KIB_PER_MIB: f64 = 1_024.0;
 const BYTES_PER_MIB: f64 = 1_024.0 * 1_024.0;
@@ -43,8 +49,10 @@ fn main() {
         "load" => load(&options),
         "query" => query(&options),
         "edit" => edit(&options),
+        "links" => links(&options),
+        "sample" => sample(&options),
         other => Err(format!(
-            "unknown phase `{other}`; expected build, load, query or edit"
+            "unknown phase `{other}`; expected build, load, query, edit, links or sample"
         )),
     });
     match outcome {
@@ -82,7 +90,7 @@ impl Options {
                 return Err(format!("unexpected argument `{argument}`"));
             }
         }
-        let phase = phase.ok_or("name a phase: build, load, query or edit")?;
+        let phase = phase.ok_or("name a phase: build, load, query, edit, links or sample")?;
         Ok(Self { phase, values })
     }
 
@@ -94,6 +102,14 @@ impl Options {
     }
 
     fn count(&self, key: &str, default: usize) -> Result<usize, String> {
+        self.number(key, default)
+    }
+
+    fn number<T>(&self, key: &str, default: T) -> Result<T, String>
+    where
+        T: std::str::FromStr,
+        T::Err: std::fmt::Display,
+    {
         self.values.get(key).map_or(Ok(default), |value| {
             value
                 .parse()
@@ -163,13 +179,24 @@ fn load(options: &Options) -> PhaseResult {
     let started = Instant::now();
     let matches = graph.find_references(&names[0]).map_err(describe)?.len();
     let first_query_ms = elapsed_ms(started);
+    let resident_after_query = resident_mb();
+    drop(graph);
+    // What a file read pays for an index it did not open: open what is on
+    // disk, never build.
+    let started = Instant::now();
+    let opened = CodeGraph::open_existing(&workspace, &cache)
+        .map_err(describe)?
+        .is_some();
+    let open_existing_ms = elapsed_ms(started);
     Ok(json!({
         "phase": "load",
         "load_ms": load_ms,
         "resident_mb": resident_after_load,
         "first_query_ms": first_query_ms,
         "first_query_matches": matches,
-        "resident_after_query_mb": resident_mb(),
+        "resident_after_query_mb": resident_after_query,
+        "open_existing_ms": open_existing_ms,
+        "open_existing_found": opened,
     }))
 }
 
@@ -215,6 +242,19 @@ fn query(options: &Options) -> PhaseResult {
             .map_or(0, |symbols| symbols.len());
         outline_samples.push(elapsed_ms(started));
     }
+    // The neighbour list's question, every link kept: the cost does not
+    // depend on how many the caller shows.
+    let mut links_samples = Vec::new();
+    let mut links_found = (0, 0);
+    for _ in 0..repetitions {
+        let started = Instant::now();
+        let links = graph
+            .file_links(&outline_file, usize::MAX)
+            .map_err(describe)?
+            .unwrap_or_default();
+        links_samples.push(elapsed_ms(started));
+        links_found = (links.uses.len(), links.used_by.len());
+    }
     let mut refresh_samples = Vec::new();
     for _ in 0..repetitions {
         let started = Instant::now();
@@ -223,6 +263,8 @@ fn query(options: &Options) -> PhaseResult {
     }
     Ok(json!({
         "phase": "query",
+        "file_links_ms": percentiles(&mut links_samples),
+        "file_links_found": { "uses": links_found.0, "used_by": links_found.1 },
         "repetitions": repetitions,
         "find_references_ms": percentiles(&mut reference_samples),
         "find_references_matches": reference_counts,
@@ -318,6 +360,125 @@ fn count_functions(graph: &mut CodeGraph, name: &str) -> Result<usize, String> {
         .find_symbols(name, Some(SymbolKind::Function))
         .map(|symbols| symbols.len())
         .map_err(describe)
+}
+
+/// Every indexed file's links, every link kept — the neighbour list's source,
+/// dumped for the truth script to check file by file.
+fn links(options: &Options) -> PhaseResult {
+    let workspace = options.workspace()?;
+    let (_, cache) = options.cache()?;
+    let mut graph = CodeGraph::load_or_build(&workspace, &cache).map_err(describe)?;
+    graph.refresh().map_err(describe)?;
+    let mut files = Vec::new();
+    for file in graph.indexed_files() {
+        if let Some(links) = graph.file_links(&file, usize::MAX).map_err(describe)? {
+            files.push(json!({
+                "file": file,
+                "uses": links.uses,
+                "used_by": links.used_by,
+            }));
+        }
+    }
+    Ok(json!({ "phase": "links", "files": files }))
+}
+
+/// A seeded draw of definitions under `--under` in `.rs` files, each with
+/// every occurrence of its name `find_references` answers — the exact-name
+/// answer whose precision the truth script measures. Each occurrence says
+/// whether its file's imports spell the name, and each definition how many
+/// files define its name: the two cheap filters that precision is weighed
+/// against.
+fn sample(options: &Options) -> PhaseResult {
+    let workspace = options.workspace()?;
+    let (_, cache) = options.cache()?;
+    let under = options.path("under")?;
+    let count = options.count("count", DEFAULT_SAMPLE_SIZE)?;
+    let seed = options.number("seed", DEFAULT_SAMPLE_SEED)?;
+    let mut graph = CodeGraph::load_or_build(&workspace, &cache).map_err(describe)?;
+    graph.refresh().map_err(describe)?;
+    let mut definitions = Vec::<Symbol>::new();
+    for file in graph.indexed_files() {
+        let rust = file.extension().and_then(|extension| extension.to_str())
+            == Some(EDIT_PROBE_EXTENSION);
+        if rust && file.starts_with(&under) {
+            let outline = graph.file_outline(&file).map_err(describe)?;
+            definitions.extend(outline.unwrap_or_default());
+        }
+    }
+    let population = definitions.len();
+    let drawn = draw(&mut definitions, count, seed);
+    let mut imports_spell = BTreeMap::<(PathBuf, String), bool>::new();
+    let mut samples = Vec::new();
+    for definition in drawn {
+        let definers = graph
+            .find_symbols(&definition.name, None)
+            .map_err(describe)?
+            .iter()
+            .map(|symbol| symbol.file.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        let mut occurrences = Vec::new();
+        for reference in graph.find_references(&definition.name).map_err(describe)? {
+            let key = (reference.file.clone(), definition.name.clone());
+            let spelled = if let Some(spelled) = imports_spell.get(&key) {
+                *spelled
+            } else {
+                let spelled = imports_spell_name(&mut graph, &reference.file, &definition.name)?;
+                imports_spell.insert(key, spelled);
+                spelled
+            };
+            occurrences.push(json!({
+                "file": reference.file,
+                "row": reference.range.start.row,
+                "column": reference.range.start.column,
+                "imports_spell": spelled,
+            }));
+        }
+        samples.push(json!({
+            "definition": definition,
+            "definers": definers,
+            "occurrences": occurrences,
+        }));
+    }
+    Ok(json!({
+        "phase": "sample",
+        "population": population,
+        "seed": seed,
+        "samples": samples,
+    }))
+}
+
+/// Whether one of `file`'s imports spells `name` — in its path or as the
+/// name it binds.
+fn imports_spell_name(graph: &mut CodeGraph, file: &Path, name: &str) -> Result<bool, String> {
+    Ok(graph
+        .file_imports(file)
+        .map_err(describe)?
+        .unwrap_or_default()
+        .iter()
+        .any(|import| import.spells(name)))
+}
+
+/// `count` items drawn without replacement by a seeded xorshift64* — the
+/// same draw for the same seed and the same population order.
+fn draw<T>(items: &mut [T], count: usize, seed: u64) -> Vec<T>
+where
+    T: Clone,
+{
+    let mut state = seed.max(1);
+    let mut next = || {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    };
+    let count = count.min(items.len());
+    for position in 0..count {
+        let remaining = u64::try_from(items.len() - position).unwrap_or(u64::MAX);
+        let offset = usize::try_from(next() % remaining).unwrap_or_default();
+        items.swap(position, position + offset);
+    }
+    items[..count].to_vec()
 }
 
 #[allow(clippy::needless_pass_by_value)] // the shape `map_err` hands over

@@ -207,6 +207,7 @@ def summary(run: dict) -> dict:
         "load_resident_mb": median(loads, "resident_mb"),
         "load_peak_mb": median(loads, "peak_resident_mb"),
         "first_query_ms": median(loads, "first_query_ms"),
+        "open_existing_ms": median(loads, "open_existing_ms"),
         "refresh_after_save_ms": median_of(edits, "refresh_after_save_ms", "p50"),
         "refresh_after_create_ms": median_of(edits, "refresh_after_create_ms", "p50"),
         "refresh_after_delete_ms": median_of(edits, "refresh_after_delete_ms", "p50"),
@@ -215,6 +216,7 @@ def summary(run: dict) -> dict:
         "find_symbol_p50_ms": median_of(queries, "find_symbol_ms", "p50"),
         "find_symbol_p95_ms": median_of(queries, "find_symbol_ms", "p95"),
         "file_outline_p50_ms": median_of(queries, "file_outline_ms", "p50"),
+        "file_links_p50_ms": median_of(queries, "file_links_ms", "p50"),
         "unchanged_refresh_p50_ms": median_of(queries, "unchanged_refresh_ms", "p50"),
         "query_resident_mb": median(queries, "resident_mb"),
     }
@@ -233,6 +235,7 @@ ROWS = (
     ("load_resident_mb", "로드 뒤 상주 RSS (MB)", "{:.0f}"),
     ("load_peak_mb", "로드 프로세스 최대 RSS (MB)", "{:.0f}"),
     ("first_query_ms", "로드 뒤 첫 find_references (ms)", "{:.1f}"),
+    ("open_existing_ms", "읽기가 여는 인덱스 open_existing (ms)", "{:.1f}"),
     ("refresh_after_save_ms", "파일 하나 저장 뒤 갱신 p50 (ms)", "{:.1f}"),
     ("refresh_after_create_ms", "파일 하나 추가 뒤 갱신 p50 (ms)", "{:.1f}"),
     ("refresh_after_delete_ms", "파일 하나 삭제 뒤 갱신 p50 (ms)", "{:.1f}"),
@@ -241,6 +244,7 @@ ROWS = (
     ("find_symbol_p50_ms", "find_symbol p50 (ms)", "{:.2f}"),
     ("find_symbol_p95_ms", "find_symbol p95 (ms)", "{:.2f}"),
     ("file_outline_p50_ms", "file_outline p50 (ms)", "{:.2f}"),
+    ("file_links_p50_ms", "file_links p50 (ms, 이웃 한 줄의 질문)", "{:.2f}"),
     ("unchanged_refresh_p50_ms", "변화 없는 신선도 확인 p50 (ms)", "{:.2f}"),
     ("query_resident_mb", "질의 뒤 상주 RSS (MB)", "{:.0f}"),
 )

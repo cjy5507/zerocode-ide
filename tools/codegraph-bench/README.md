@@ -46,3 +46,29 @@ for i in 1 2 3; do
 done
 tools/codegraph-bench/run.py --no-run --compare v1-1.json … --compare v2-3.json   # 표만
 ```
+
+## rust-analyzer와 대조하기 (`truth.py`)
+
+인덱스는 이름 철자만으로 잇는다. rust-analyzer의 LSIF는 Rust 식별자 하나하나가 어느 정의로 풀리는지
+알므로, 인덱스가 내놓는 답의 정밀도·재현율을 재는 기준이 된다. 같은 스냅샷 하나에서 셋을 뽑는다:
+
+```sh
+rust-analyzer lsif <스냅샷>/zo-ide > truth.lsif          # stable 툴체인의 rust-analyzer, 이 저장소 ~2분
+index_cost build  --workspace <스냅샷> --cache-dir <c>
+index_cost links  --workspace <스냅샷> --cache-dir <c> > links.json    # 파일마다 file_links 전부
+index_cost sample --workspace <스냅샷> --cache-dir <c> --under zo-ide --count 100 > sample.json
+python3 -c "import json;print('\n'.join(e['file'] for e in json.load(open('links.json'))['files']))" > files.txt
+ZO_MEASURE_NEIGHBOURS_ROOT=<스냅샷> ZO_MEASURE_NEIGHBOURS_FILES=files.txt ZO_MEASURE_NEIGHBOURS_OUT=neighbours.json \
+  cargo test -p runtime --test neighbours_measure -- --ignored          # 본문만의 이웃(전)
+tools/codegraph-bench/truth.py --lsif truth.lsif --root <스냅샷> \
+  --links links.json --neighbours neighbours.json --sample sample.json
+```
+
+- **links**: 「F가 G를 쓴다」·「시험 T가 F를 쓴다」 링크 중 LSIF가 실제 의존으로 확인하는 몫.
+- **neighbours**: 읽기 한 번의 이웃 줄 — 전(본문만)과 후(본문 다음 인덱스, 관계당 8개) — 의 정밀도와
+  실제 의존 재현율, 진짜 시험 수.
+- **references**: 시드 고정으로 뽑은 정의 N개에 대해 `find_references`(이름 일치)가 내놓은 자리 중 그
+  정의로 풀리는 몫, 그리고 값싼 필터 둘(같은 파일이거나 import가 이름을 말함 / 거기에 정의 파일이 하나뿐인
+  이름은 전부 유지)이 남기는 몫의 정밀도·재현율.
+
+LSIF의 열은 UTF-16, 인덱스의 열은 바이트다 — 자리마다 제 소스 줄로 바꿔 맞춘다.

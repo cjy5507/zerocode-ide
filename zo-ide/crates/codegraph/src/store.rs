@@ -11,6 +11,7 @@
 //! Every table, statement and pragma lives in this module; the rest of the
 //! crate asks it questions in the model's own types.
 
+use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -158,14 +159,16 @@ const SELECT_IMPORTS_OF_FILE: &str = "SELECT path, name, start_row, start_column
 /// Names this file spells that exactly one other file defines, with that
 /// file. A name defined twice in the one file comes back twice; the caller
 /// counts it once.
-const SELECT_USES: &str = "SELECT refs.name_id, refs.occurrences, symbols.file_id
+const SELECT_USES: &str = "SELECT DISTINCT names.name, refs.occurrences, symbols.file_id
     FROM refs JOIN symbols ON symbols.name_id = refs.name_id
+    JOIN names ON names.id = refs.name_id
     WHERE refs.file_id = ?1 AND symbols.file_id != ?1
       AND NOT EXISTS (SELECT 1 FROM symbols AS other
           WHERE other.name_id = refs.name_id AND other.file_id != symbols.file_id)";
 /// Files spelling names that only this file defines.
-const SELECT_USED_BY: &str = "SELECT DISTINCT refs.file_id, refs.name_id, refs.occurrences
+const SELECT_USED_BY: &str = "SELECT DISTINCT refs.file_id, names.name, refs.occurrences
     FROM symbols JOIN refs ON refs.name_id = symbols.name_id
+    JOIN names ON names.id = symbols.name_id
     WHERE symbols.file_id = ?1 AND refs.file_id != ?1
       AND NOT EXISTS (SELECT 1 FROM symbols AS other
           WHERE other.name_id = symbols.name_id AND other.file_id != ?1)";
@@ -384,6 +387,15 @@ impl Store {
         self.files.by_path.keys().map(PathBuf::as_path)
     }
 
+    pub(crate) fn indexed_paths(&self) -> Vec<PathBuf> {
+        self.files
+            .by_path
+            .iter()
+            .filter(|(_, file)| file.indexed)
+            .map(|(path, _)| path.clone())
+            .collect()
+    }
+
     pub(crate) fn file_limit_reached(&self) -> bool {
         self.files.file_limit_reached
     }
@@ -539,16 +551,20 @@ impl Store {
     /// The imports of one file as its source spells them, or `None` when the
     /// index holds no parsed file at `path`.
     pub(crate) fn imports(&self, path: &Path) -> Result<Option<Vec<Import>>, CodeGraphError> {
-        let fail = |source| index_error(&self.path, source);
         let Some(file) = self.stored(path).filter(|file| file.indexed) else {
             return Ok(None);
         };
+        self.imports_of(file.id, path).map(Some)
+    }
+
+    fn imports_of(&self, file_id: i64, path: &Path) -> Result<Vec<Import>, CodeGraphError> {
+        let fail = |source| index_error(&self.path, source);
         let mut statement = self
             .connection
             .prepare_cached(SELECT_IMPORTS_OF_FILE)
             .map_err(fail)?;
         let rows = statement
-            .query_map([file.id], |row| {
+            .query_map([file_id], |row| {
                 Ok(Import {
                     path: row.get(0)?,
                     name: row.get(1)?,
@@ -557,33 +573,58 @@ impl Store {
                 })
             })
             .map_err(fail)?;
-        rows.collect::<Result<Vec<_>, _>>().map(Some).map_err(fail)
+        rows.collect::<Result<Vec<_>, _>>().map_err(fail)
     }
 
-    /// The files `file_id` is linked to by names exactly one file defines,
-    /// each list the most referenced first and cut at `limit`.
+    /// Whether `file_id`'s imports spell `name`, reading each file's imports
+    /// once per question.
+    fn imports_spell(
+        &self,
+        seen: &mut HashMap<i64, Vec<Import>>,
+        file_id: i64,
+        name: &str,
+    ) -> Result<bool, CodeGraphError> {
+        let imports = match seen.entry(file_id) {
+            Entry::Occupied(entry) => entry.into_mut(),
+            Entry::Vacant(entry) => entry.insert(match self.files.by_id.get(&file_id) {
+                Some((_, path)) => self.imports_of(file_id, path)?,
+                None => Vec::new(),
+            }),
+        };
+        Ok(imports.iter().any(|import| import.spells(name)))
+    }
+
+    /// The files `file_id` is linked to ([`FileLinks`]): by a name exactly
+    /// one file defines, spelled by the using file's imports. Each list the
+    /// most referenced first and cut at `limit`.
     pub(crate) fn links(&self, file_id: i64, limit: usize) -> Result<FileLinks, CodeGraphError> {
         let fail = |source| index_error(&self.path, source);
-        let mut uses = HashMap::<i64, (i64, i64)>::new();
+        let mut imports = HashMap::new();
+        let mut uses = HashMap::<String, (i64, i64)>::new();
         let mut statement = self.connection.prepare_cached(SELECT_USES).map_err(fail)?;
         let rows = statement
             .query_map([file_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get(2)?))
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get(2)?))
             })
             .map_err(fail)?;
         for row in rows {
-            let (name_id, occurrences, definer) = row.map_err(fail)?;
-            uses.insert(name_id, (definer, occurrences));
+            let (name, occurrences, definer) = row.map_err(fail)?;
+            if self.imports_spell(&mut imports, file_id, &name)? {
+                uses.insert(name, (definer, occurrences));
+            }
         }
         let mut used_by = Vec::new();
         let mut statement = self.connection.prepare_cached(SELECT_USED_BY).map_err(fail)?;
         let rows = statement
             .query_map([file_id], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(2)?))
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get(2)?))
             })
             .map_err(fail)?;
         for row in rows {
-            used_by.push(row.map_err(fail)?);
+            let (reader, name, occurrences) = row.map_err(fail)?;
+            if self.imports_spell(&mut imports, reader, &name)? {
+                used_by.push((reader, occurrences));
+            }
         }
         Ok(FileLinks {
             uses: self.linked_files(uses.into_values(), limit),

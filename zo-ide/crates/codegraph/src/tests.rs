@@ -379,41 +379,50 @@ fn an_old_cache_is_removed_and_another_workspace_rebuilds() {
 }
 
 #[test]
-fn file_links_follow_names_only_one_file_defines() {
+fn file_links_follow_names_only_one_file_defines_and_the_user_imports() {
     let (_workspace, mut graph) = fixture_graph(&[
         (
             "src/graph.rs",
-            "pub fn scan_graph() {}\npub fn new() {}\nfn helper() { shared_util(); shared_util(); }\n",
+            "use crate::util::shared_util;\npub fn scan_graph() {}\npub fn new() {}\nfn helper() { shared_util(); shared_util(); lonely(); }\n",
         ),
-        ("src/util.rs", "pub fn shared_util() {}\npub fn new() {}\n"),
-        ("src/app.rs", "fn run() { scan_graph(); new(); }\n"),
-        ("tests/graph.rs", "fn covers() { scan_graph(); scan_graph(); }\n"),
+        (
+            "src/util.rs",
+            "pub fn shared_util() {}\npub fn new() {}\npub fn lonely() {}\n",
+        ),
+        ("src/app.rs", "use crate::graph::{new, scan_graph};\nfn run() { scan_graph(); new(); }\n"),
+        (
+            "tests/graph.rs",
+            "use zo::graph::scan_graph;\nfn covers() { scan_graph(); scan_graph(); }\n",
+        ),
+        ("src/unimported.rs", "fn call() { scan_graph(); }\n"),
     ]);
     let links = graph
         .file_links("src/graph.rs", MAX_INDEXED_FILES)
         .expect("links query")
         .expect("current file");
-    // `shared_util` is defined once, in util.rs; `new` is defined twice and
-    // links nothing.
+    // `shared_util` has one definer and graph.rs imports it (the `use` line
+    // is one of its three occurrences). `lonely` has one definer but no
+    // import spells it; `new` has two definers. Neither links.
     assert_eq!(
         links.uses,
         vec![LinkedFile {
             file: PathBuf::from("src/util.rs"),
-            references: 2,
+            references: 3,
             test: false,
         }]
     );
+    // unimported.rs spells `scan_graph` without importing it: not a link.
     assert_eq!(
         links.used_by,
         vec![
             LinkedFile {
                 file: PathBuf::from("tests/graph.rs"),
-                references: 2,
+                references: 3,
                 test: true,
             },
             LinkedFile {
                 file: PathBuf::from("src/app.rs"),
-                references: 1,
+                references: 2,
                 test: false,
             },
         ]
@@ -424,6 +433,28 @@ fn file_links_follow_names_only_one_file_defines() {
         .expect("current file");
     assert_eq!(first.used_by.len(), 1, "cut at the limit, most referenced kept");
     assert_eq!(first.used_by[0].file, PathBuf::from("tests/graph.rs"));
+}
+
+#[test]
+fn an_import_spells_a_name_as_a_whole_identifier_or_as_what_it_binds() {
+    let import = |path: &str, name: Option<&str>| Import {
+        path: path.to_string(),
+        name: name.map(str::to_string),
+        file: PathBuf::from("lib.rs"),
+        range: SourceRange {
+            start: Position { row: 0, column: 0 },
+            end: Position { row: 0, column: 0 },
+            start_byte: 0,
+            end_byte: 0,
+        },
+    };
+    let scan = import("crate::scan::{fingerprint, scan_workspace}", None);
+    assert!(scan.spells("scan_workspace") && scan.spells("fingerprint"));
+    // Every whole identifier of the path, the module's own name included…
+    assert!(scan.spells("scan"));
+    // …and never a part of one.
+    assert!(!scan.spells("scan_work") && !import("crate::scanner::Scan", None).spells("scan"));
+    assert!(import(".shared", Some("helper")).spells("helper"));
 }
 
 #[test]

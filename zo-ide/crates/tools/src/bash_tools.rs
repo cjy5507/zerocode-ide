@@ -213,6 +213,7 @@ fn run_bash_as_dedicated_read(
             workspace_root,
             cwd,
             &ctx.file_reads,
+            Some(&ctx.codegraph),
         )?,
         crate::bash_redirect::DedicatedRead::Grep { .. } => crate::file_tools::run_grep_search(
             &from_value(&input)?,

@@ -140,6 +140,22 @@ pub struct Import {
     pub range: SourceRange,
 }
 
+impl Import {
+    /// Whether this import spells `name` — as a whole identifier in the path
+    /// it was written with, or as the name it binds. The evidence the index
+    /// takes that a file means one particular definition of a name: against
+    /// rust-analyzer on this repository (t-5970), a file linked to a name's
+    /// only definer without it was right 52% of the time.
+    #[must_use]
+    pub fn spells(&self, name: &str) -> bool {
+        self.name.as_deref() == Some(name)
+            || self
+                .path
+                .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+                .any(|token| token == name)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Reference {
     pub name: String,
@@ -178,10 +194,12 @@ pub struct SkippedFile {
 
 /// A file's neighbours as the index's exact names can tell them.
 ///
-/// A name links two files only while exactly one indexed file defines it:
-/// then every file spelling it points at that one. A name several files
-/// define says nothing about which a spelling meant, so it links nothing —
-/// precision over reach, because a reader acts on the list.
+/// A name links a file to the one indexed file that defines it, and only
+/// when the file's own imports spell the name ([`Import::spells`]). A name
+/// several files define says nothing about which a spelling meant; a name one
+/// file defines, spelled without an import, is as often a local or a
+/// standard-library item (a method call, a field). Precision over reach,
+/// because a reader acts on the list.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct FileLinks {
     /// Files defining names this file spells, the most spelled first.

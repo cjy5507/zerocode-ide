@@ -287,6 +287,13 @@ impl CodeGraph {
         self.store.links(stored.id, limit).map(Some)
     }
 
+    /// Every file the index holds parsed, in path order, as the last refresh
+    /// left them.
+    #[must_use]
+    pub fn indexed_files(&self) -> Vec<PathBuf> {
+        self.store.indexed_paths()
+    }
+
     pub fn skipped_files(&self) -> Result<Vec<SkippedFile>, CodeGraphError> {
         self.store.skipped()
     }

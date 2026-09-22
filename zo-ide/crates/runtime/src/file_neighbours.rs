@@ -1,6 +1,7 @@
 //! What sits next to a file the model just read: the files it imports, the
 //! module that declares it and the ones it declares, and its tests — resolved
-//! from the file's own text and a few `stat` calls, never from an index.
+//! from the file's own text and a few `stat` calls, then completed from the
+//! codegraph index when one is already open or on disk.
 //!
 //! r40 counted 83% of tool batches carrying a single call, and the prompt's
 //! "read the files you can already predict together" changing nothing. The
@@ -10,10 +11,20 @@
 //!
 //! Cheap by construction: the first `IMPORT_SCAN_LINES` lines are scanned
 //! for import syntax, each candidate costs a handful of existence checks, and
-//! the list is capped at [`MAX_NEIGHBOURS`]. The codegraph index is
-//! deliberately not consulted — on this workspace it is a 251 MB JSON file,
-//! and a read must not pay for loading it. Resolution is heuristic but
+//! the list is capped at [`MAX_NEIGHBOURS`]. Resolution is heuristic but
 //! existence-checked: a path is listed only when the file is really there.
+//!
+//! The index adds what the text cannot resolve ([`with_index_links`], fed by
+//! the tools crate): the file defining a name this one imports, and the
+//! tests importing a name this one defines. It was left out while it was a
+//! JSON file — 352 MB on this repository, 0.94 s and 791 MB resident to load
+//! — and is consulted now that it is `SQLite`: opening an index already on
+//! disk costs ~2 ms once per session and one file's links ~0.9 ms (p50, a
+//! 1.7k-line file; t-5970). A read never builds, walks or waits for it.
+//! Against rust-analyzer on 706 Rust files here, the index took the imports
+//! listed from 1,049 to 2,192 at 96.7% precision (the text alone: 100%), the
+//! real dependencies found from 17.8% to 36.0%, and the real tests listed
+//! from 122 to 412 (precision 61.6% → 83.4%).
 
 use std::collections::BTreeSet;
 use std::path::{Component, Path, PathBuf};
@@ -64,6 +75,14 @@ pub struct Neighbour {
     pub path: String,
 }
 
+/// Whether a read of `path` from `offset` carries neighbours: a read from the
+/// top of a code file is the moment the model decides what to read next; a
+/// window further in is a drill-in that already knows.
+#[must_use]
+pub fn wants_neighbours(path: &Path, offset: Option<usize>) -> bool {
+    offset.unwrap_or(0) == 0 && is_code_path(&path.to_string_lossy())
+}
+
 /// Whether `path` names a source file the outline and neighbour passes apply to.
 #[must_use]
 pub fn is_code_path(path: &str) -> bool {
@@ -96,6 +115,31 @@ pub fn neighbours_of(path: &Path, content: &str) -> Vec<Neighbour> {
         _ => {}
     }
     tests::collect(path, &ext, &mut found);
+    found.into_neighbours()
+}
+
+/// `neighbours` — the text's own candidates for `path` — followed by what the
+/// codegraph index links the file to: the files defining names it uses, as
+/// imports, and the test files using names it defines, as tests. The index's
+/// candidates come after the text's, under the same caps, and like them are
+/// listed only when the file is on disk. Paths are absolute.
+#[must_use]
+pub fn with_index_links(
+    path: &Path,
+    neighbours: Vec<Neighbour>,
+    uses: &[PathBuf],
+    tested_by: &[PathBuf],
+) -> Vec<Neighbour> {
+    let mut found = Found::new(path);
+    for neighbour in neighbours {
+        found.keep(neighbour);
+    }
+    for file in uses {
+        found.take(Relation::Imports, file);
+    }
+    for file in tested_by {
+        found.take(Relation::Tests, file);
+    }
     found.into_neighbours()
 }
 
@@ -138,6 +182,15 @@ impl Found {
             path: candidate.to_string_lossy().into_owned(),
         });
         true
+    }
+
+    /// Count a neighbour an earlier pass already checked, without asking the
+    /// disk again.
+    fn keep(&mut self, neighbour: Neighbour) {
+        let slot = neighbour.relation as usize;
+        self.seen.insert(PathBuf::from(&neighbour.path));
+        self.per_relation[slot] += 1;
+        self.neighbours.push(neighbour);
     }
 
     /// The first existing candidate wins; the rest are not tried.
@@ -498,7 +551,10 @@ mod unit_tests {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use super::{is_code_path, neighbours_of, Neighbour, Relation, MAX_NEIGHBOURS};
+    use super::{
+        is_code_path, neighbours_of, wants_neighbours, with_index_links, Neighbour, Relation,
+        MAX_NEIGHBOURS,
+    };
 
     fn touch(root: &Path, relative: &str) -> PathBuf {
         let path = root.join(relative);
@@ -583,6 +639,42 @@ mod unit_tests {
         let neighbours = neighbours_of(&file, content);
         assert_eq!(paths(&neighbours, Relation::Imports, &root), vec!["pkg/util.py", "pkg/sub/__init__.py", "shared.py"]);
         assert_eq!(paths(&neighbours, Relation::Tests, &root), vec!["pkg/tests/test_mod.py"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The index's candidates follow the text's: a file the text already
+    /// listed is not listed twice, a path that is not on disk is dropped, and
+    /// the caps count both.
+    #[test]
+    fn index_links_follow_the_texts_own_under_the_same_caps() {
+        let root = scratch("index");
+        touch(&root, "src/lib.rs");
+        let util = touch(&root, "src/util.rs");
+        let graph = touch(&root, "crates/graph/src/scan.rs");
+        let covering = touch(&root, "crates/graph/tests/scan.rs");
+        let file = touch(&root, "src/me.rs");
+        let texts = neighbours_of(&file, "use crate::util::helper;\n");
+        assert_eq!(paths(&texts, Relation::Imports, &root), vec!["src/util.rs"]);
+
+        let merged = with_index_links(
+            &file,
+            texts,
+            &[util.clone(), graph, root.join("src/gone.rs"), file.clone()],
+            &[covering],
+        );
+        assert_eq!(
+            paths(&merged, Relation::Imports, &root),
+            vec!["src/util.rs", "crates/graph/src/scan.rs"]
+        );
+        assert_eq!(paths(&merged, Relation::Tests, &root), vec!["crates/graph/tests/scan.rs"]);
+
+        let many = (0..20)
+            .map(|n| touch(&root, &format!("src/dep{n}.rs")))
+            .collect::<Vec<_>>();
+        let capped = with_index_links(&file, Vec::new(), &many, &many);
+        assert!(capped.len() <= MAX_NEIGHBOURS);
+        assert_eq!(paths(&capped, Relation::Imports, &root).len(), 8, "per-relation cap");
+        assert!(wants_neighbours(&file, None) && !wants_neighbours(&file, Some(40)));
         let _ = fs::remove_dir_all(&root);
     }
 

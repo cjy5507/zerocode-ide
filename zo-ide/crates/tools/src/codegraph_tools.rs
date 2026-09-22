@@ -1,9 +1,10 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::PoisonError;
+use std::sync::{Mutex, PoisonError, TryLockError};
 
 use codegraph::{CodeGraph, IndexStatus, Symbol, SymbolKind, DEFAULT_CACHE_FILE_NAME};
+use runtime::file_neighbours::MAX_NEIGHBOURS;
 use runtime::{permission_enforcer::PermissionEnforcer, PermissionMode};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -277,11 +278,57 @@ fn run_file_outline(ctx: &ToolContext, input: &FileOutlineInput) -> Result<Strin
     })
 }
 
+/// What the index adds to a file read's neighbour list: the files defining
+/// names the read file uses, and the test files using names it defines,
+/// absolute and most referenced first.
+#[derive(Debug, Default)]
+pub(crate) struct IndexNeighbours {
+    pub(crate) uses: Vec<PathBuf>,
+    pub(crate) tested_by: Vec<PathBuf>,
+}
+
+/// The index's neighbours for `file`, when the session already holds an
+/// index of this workspace or one was already built on disk. A read never
+/// builds an index, never walks the workspace, and never waits: if a
+/// codegraph call holds the slot, the read goes without.
+pub(crate) fn neighbours_for_read(
+    slot: &Mutex<Option<CodeGraph>>,
+    cwd: Option<&Path>,
+    workspace_root: Option<&Path>,
+    file: &Path,
+) -> Option<IndexNeighbours> {
+    let root = index_root(cwd, workspace_root).ok()?;
+    let relative = file.strip_prefix(&root).ok()?;
+    let mut slot = match slot.try_lock() {
+        Ok(slot) => slot,
+        Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(TryLockError::WouldBlock) => return None,
+    };
+    match slot.as_ref() {
+        Some(graph) if graph.workspace_root() != root => return None,
+        Some(_) => {}
+        None => *slot = CodeGraph::open_existing(&root, index_cache_path(&root)).ok()?,
+    }
+    let links = slot
+        .as_mut()?
+        .file_links(relative, MAX_NEIGHBOURS)
+        .ok()??;
+    Some(IndexNeighbours {
+        uses: links.uses.iter().map(|linked| root.join(&linked.file)).collect(),
+        tested_by: links
+            .used_by
+            .iter()
+            .filter(|linked| linked.test)
+            .map(|linked| root.join(&linked.file))
+            .collect(),
+    })
+}
+
 fn with_codegraph<T>(
     ctx: &ToolContext,
     operation: impl FnOnce(&mut CodeGraph) -> Result<T, ToolError>,
 ) -> Result<T, ToolError> {
-    let root = workspace_root(ctx)?;
+    let root = index_root(ctx.cwd.as_deref(), ctx.workspace_root.as_deref())?;
     let mut slot = ctx
         .codegraph
         .lock()
@@ -293,22 +340,26 @@ fn with_codegraph<T>(
         *slot = None;
     }
     if slot.is_none() {
-        let cache_path = runtime::zo_project_state_dir(&root)
-            .join(CODEGRAPH_CACHE_DIR_NAME)
-            .join(DEFAULT_CACHE_FILE_NAME);
         *slot = Some(
-            CodeGraph::load_or_build(&root, cache_path)
+            CodeGraph::load_or_build(&root, index_cache_path(&root))
                 .map_err(|error| codegraph_error(&error))?,
         );
     }
     operation(slot.as_mut().expect("codegraph initialized above"))
 }
 
-fn workspace_root(ctx: &ToolContext) -> Result<PathBuf, ToolError> {
-    let root = ctx
-        .cwd
-        .as_deref()
-        .or(ctx.workspace_root.as_deref())
+/// Where a workspace's index lives: the project's zo state, never the tree.
+fn index_cache_path(root: &Path) -> PathBuf {
+    runtime::zo_project_state_dir(root)
+        .join(CODEGRAPH_CACHE_DIR_NAME)
+        .join(DEFAULT_CACHE_FILE_NAME)
+}
+
+/// The workspace an index covers: the session's working directory, else its
+/// workspace root, else the process's, canonicalized.
+fn index_root(cwd: Option<&Path>, workspace_root: Option<&Path>) -> Result<PathBuf, ToolError> {
+    let root = cwd
+        .or(workspace_root)
         .map(Path::to_path_buf)
         .map_or_else(std::env::current_dir, Ok)?;
     fs::canonicalize(&root).map_err(|error| {
@@ -529,6 +580,65 @@ mod tests {
             .expect("children")
             .iter()
             .any(|child| child["name"] == "build"));
+    }
+
+    /// A whole-file read lists what the index links the file to — the file
+    /// defining a name it imports, the test importing a name it defines —
+    /// beyond what its own text resolves (the test sits outside every naming
+    /// convention); a window further in lists nothing.
+    #[test]
+    fn a_whole_file_read_lists_what_the_index_links_it_to() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        for (path, source) in [
+            (
+                "src/graph.rs",
+                "use crate::util::shared_util;\npub fn scan_graph() { shared_util(); }\n",
+            ),
+            ("src/util.rs", "pub fn shared_util() {}\n"),
+            (
+                "tests/graph_suite.rs",
+                "use acme::graph::scan_graph;\nfn covers() { scan_graph(); }\n",
+            ),
+        ] {
+            let path = workspace.path().join(path);
+            fs::create_dir_all(path.parent().expect("parent")).expect("fixture dir");
+            fs::write(path, source).expect("fixture source");
+        }
+        let graph = CodeGraph::load_or_build(
+            workspace.path(),
+            workspace.path().join("cache").join(DEFAULT_CACHE_FILE_NAME),
+        )
+        .expect("fixture graph");
+        let root = graph.workspace_root().to_path_buf();
+        let ctx = ToolContext::new().with_cwd(workspace.path());
+        *ctx.codegraph
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(graph);
+
+        let read = |input: Value| -> Value {
+            let output = crate::file_tools::dispatch(&ctx, None, "read_file", &input)
+                .expect("handled read")
+                .expect("successful read");
+            serde_json::from_str(&output).expect("JSON read")
+        };
+        let whole = read(json!({ "path": "src/graph.rs" }));
+        let neighbours = whole["file"]["neighbours"]
+            .as_array()
+            .expect("neighbours")
+            .iter()
+            .map(|neighbour| {
+                (
+                    neighbour["relation"].as_str().expect("relation").to_owned(),
+                    neighbour["path"].as_str().expect("path").to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let at = |relative: &str| root.join(relative).to_string_lossy().into_owned();
+        assert!(neighbours.contains(&("imports".to_owned(), at("src/util.rs"))));
+        assert!(neighbours.contains(&("tests".to_owned(), at("tests/graph_suite.rs"))));
+
+        let window = read(json!({ "path": "src/graph.rs", "offset": 1 }));
+        assert!(window["file"]["neighbours"].is_null());
     }
 
     #[test]
