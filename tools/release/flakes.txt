@@ -66,3 +66,8 @@ zo:lsp_client::tests::sync_and_collect_diagnostics_returns_did_change_diagnostic
 # port the test frees and rebinds was taken by a neighbour between the two binds (`EADDRINUSE` from bind_seat(port)),
 # not by our own lingering connection — SO_REUSEADDR covers only the latter. Green solo ×3 in 0.00 s.
 root:google_login::tests::the_callback_seat_can_be_retaken_while_the_last_one_lingers
+# 2026-09-22 (coordinator gate for t-5966, `just shell-test` at load 60-74 beside four worker builds): the test expects
+# its hand-driven `collect_stale` to answer Fresh (the hook already took the pointer), but under load the run outlived
+# HOOK_COLLECTION_GRACE, so the parked pointer read as stale instead (tests.rs:9857). Orchestration untouched by the
+# branch; green solo ×3 in 0.37–0.86 s. A wall-clock grace measured against a loaded test run, like the families above.
+root:orchestration::tests::a_working_claude_pane_is_pointed_at_through_its_own_hook_and_never_its_composer
