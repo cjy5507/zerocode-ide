@@ -39,7 +39,7 @@ impl DedicatedRead {
     /// model-facing note both use.
     pub(crate) const fn tool_name(&self) -> &'static str {
         match self {
-            Self::ReadFile { .. } => "read_file",
+            Self::ReadFile { .. } => crate::file_tools::READ_FILE_TOOL_NAME,
             Self::Grep { .. } => "grep_search",
             Self::Glob { .. } => "glob_search",
         }

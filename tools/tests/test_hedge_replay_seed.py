@@ -20,6 +20,7 @@ Run: python3 tools/tests/test_hedge_replay_seed.py   (stdlib only)
 import importlib.util
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -120,15 +121,15 @@ class Reconstruction(unittest.TestCase):
         held, recorded = seed.reconstruction_holds([dict(firing, samples=[*answers, 800])])
         self.assertEqual((held, recorded), (0, 1), "a stray row must break the check")
 
-    def test_a_firing_under_min_samples_is_left_out(self):
-        """Below `MIN_SAMPLES` the rule names no rank, so such a firing could
-        not have happened and a seed row for it would be noise."""
+    def test_a_firing_under_min_samples_is_kept_and_fails_reconstruction(self):
+        """A pruned ledger can lose the firing's history. That is missing
+        evidence, not permission to erase the firing from the denominator."""
         rows = [recall_row(elapsed_ms=300) for _ in range(seed.MIN_SAMPLES - 1)]
         rows.append(recall_row(hedge_fired=True, hedge_delay_ms=300, elapsed_ms=400))
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
             path = self.a_ledger(tmp, "rerank-shadow.jsonl", rows)
-            self.assertEqual(seed.firings_in("recall", path), [])
+            self.assertEqual(seed.reconstruction_holds(seed.firings_in("recall", path)), (0, 1))
 
     def test_half_a_line_from_a_pruned_ledger_is_skipped_not_fatal(self):
         """A ledger past `SHADOW_LEDGER_MAX_BYTES` keeps only its newer half,
@@ -139,6 +140,48 @@ class Reconstruction(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('sedMs": 400}\n' + json.dumps(routing_row(elapsedMs=500)) + "\n")
             self.assertEqual(len(seed.rows_of(path)), 1)
+
+
+class CommandIntegrity(Reconstruction):
+    def run_seed(self, rows, *, repeat_root=False):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            self.a_ledger(tmp, "decision-shadow.jsonl", rows)
+            command = [sys.executable, str(REPO / "tools/hedge-replay/seed.py"), "--project", str(tmp), "--out", str(tmp / "seed.json")]
+            if repeat_root:
+                command += ["--project", str(tmp / ".")]
+            result = subprocess.run(command, text=True, capture_output=True, check=False)
+            output = json.loads((tmp / "seed.json").read_text()) if (tmp / "seed.json").exists() else None
+            return result, output
+
+    def complete_rows(self):
+        rows = [routing_row(at=n, elapsedMs=300) for n in range(seed.MIN_SAMPLES)]
+        rows.append(routing_row(at=seed.MIN_SAMPLES, hedgeFired=True, hedgeDelayMs=300, elapsedMs=400))
+        return rows
+
+    def test_missing_delay_fails_instead_of_verifying_zero_of_zero(self):
+        rows = self.complete_rows()
+        del rows[-1]["hedgeDelayMs"]
+        result, output = self.run_seed(rows)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIsNone(output)
+
+    def test_insufficient_history_fails_instead_of_erasing_the_firing(self):
+        result, output = self.run_seed(self.complete_rows()[1:])
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIsNone(output)
+
+    def test_repeating_a_root_does_not_count_the_same_firing_twice(self):
+        result, output = self.run_seed(self.complete_rows(), repeat_root=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(output["firings"]), 1)
+
+    def test_a_deliberately_broken_recorded_delay_fails_the_command(self):
+        rows = self.complete_rows()
+        rows[-1]["hedgeDelayMs"] += 1
+        result, output = self.run_seed(rows)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIsNone(output)
 
 
 class ConstantsMatchTheirSource(unittest.TestCase):

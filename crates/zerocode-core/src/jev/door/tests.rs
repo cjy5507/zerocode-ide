@@ -100,6 +100,73 @@ fn a_folder_under_a_consented_root_passes_and_one_beside_it_does_not() {
 }
 
 #[test]
+fn an_unregistered_git_pointer_cannot_borrow_another_checkouts_consent() {
+    let dir = tempfile::tempdir().expect("machine");
+    let parent = dir.path().join("parent");
+    let stranger = dir.path().join("stranger");
+    std::fs::create_dir_all(parent.join(".git")).expect("parent");
+    std::fs::create_dir_all(&stranger).expect("stranger");
+    std::fs::write(
+        stranger.join(".git"),
+        format!("gitdir: {}\n", parent.join(".git").display()),
+    )
+    .expect("untrusted pointer");
+    let consented = JevSettings {
+        workspaces: vec![resolved_path(&parent)],
+        ..settings(None)
+    };
+    assert!(!consented.consents(&resolved_path(&stranger)));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_a_registered_git_file_does_not_register_its_own_folder() {
+    let dir = tempfile::tempdir().expect("machine");
+    let parent = dir.path().join("parent");
+    let own = parent.join(".git/worktrees/registered");
+    let registered = dir.path().join("registered");
+    let stranger = dir.path().join("stranger");
+    for path in [&own, &registered, &stranger] {
+        std::fs::create_dir_all(path).expect("folder");
+    }
+    std::fs::write(
+        registered.join(".git"),
+        format!("gitdir: {}\n", own.display()),
+    )
+    .expect("pointer");
+    std::fs::write(own.join("commondir"), "../..").expect("shared");
+    std::fs::write(
+        own.join("gitdir"),
+        registered.join(".git").to_string_lossy().as_bytes(),
+    )
+    .expect("backlink");
+    std::os::unix::fs::symlink(registered.join(".git"), stranger.join(".git"))
+        .expect("borrowed pointer");
+    let consented = JevSettings {
+        workspaces: vec![resolved_path(&parent)],
+        ..settings(None)
+    };
+    assert!(!consented.consents(&resolved_path(&stranger)));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_below_a_consented_root_does_not_consent_to_its_outside_target() {
+    let dir = tempfile::tempdir().expect("machine");
+    let parent = dir.path().join("parent");
+    let stranger = dir.path().join("stranger");
+    std::fs::create_dir_all(&parent).expect("parent");
+    std::fs::create_dir_all(&stranger).expect("stranger");
+    std::os::unix::fs::symlink(&stranger, parent.join("link")).expect("link");
+    let consented = JevSettings {
+        workspaces: vec![resolved_path(&parent)],
+        ..settings(None)
+    };
+    let link = Path::new(&resolved_path(&parent)).join("link");
+    assert!(!consented.consents(&link.to_string_lossy()));
+}
+
+#[test]
 fn a_worktree_of_a_consented_checkout_is_consented_and_a_strangers_is_not() {
     let dir = tempfile::tempdir().expect("a machine to cut checkouts on");
     // 동의한 체크아웃 하나, 동의하지 않은 체크아웃 하나 — 같은 기계, 같은 무늬.
@@ -113,6 +180,11 @@ fn a_worktree_of_a_consented_checkout_is_consented_and_a_strangers_is_not() {
         std::fs::write(at.join(".git"), format!("gitdir: {}\n", git_dir.display()))
             .expect("the pointer git writes");
         std::fs::write(git_dir.join("commondir"), "../..\n").expect("the shared pointer");
+        std::fs::write(
+            git_dir.join("gitdir"),
+            at.join(".git").to_string_lossy().as_bytes(),
+        )
+        .expect("registered backlink");
         at
     };
     std::fs::create_dir_all(mine.join("crates")).expect("a folder inside the checkout");

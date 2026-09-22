@@ -364,10 +364,6 @@ fn the_rows_sit_beside_the_days_count() {
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReplaySeed {
-    /// Every summons this ledger holds — folded into each agent's record by
-    /// [`zerocode_core::summon_choice::records`] and by nothing here, so the
-    /// arithmetic the product runs is the arithmetic the measurement runs.
-    carried: Vec<zerocode_core::summon_choice::CarriedSummons>,
     gauges: std::collections::BTreeMap<String, ReplayGauge>,
     replays: Vec<Replay>,
 }
@@ -391,6 +387,10 @@ struct Replay {
     /// four hours apart, because four summonses had landed in between and
     /// changed what the options said (2026-09-22).
     at: i64,
+    /// The dispatch snapshot at this row, including only outcomes already
+    /// known then. Older seeds must be regenerated rather than replaying
+    /// today's completion status as yesterday's evidence.
+    carried: Vec<zerocode_core::summon_choice::CarriedSummons>,
     task: String,
     rubric_version: Option<u32>,
     /// The agent the summons actually landed on — the label
@@ -478,7 +478,7 @@ fn the_seats_agreement_over_the_rows_that_already_happened() {
         arm == ARM_ROOM || arm == ARM_RECORD,
         "{ARM_ENV} is `{ARM_ROOM}` or `{ARM_RECORD}`, not `{arm}`"
     );
-    let gauge_word = std::env::var(GAUGE_ENV).unwrap_or_default();
+    let gauge_word = std::env::var(GAUGE_ENV).unwrap_or_else(|_| GAUGE_UNREAD.to_string());
     let read_gauges = gauge_word != GAUGE_UNREAD;
     let seed: ReplaySeed =
         serde_json::from_str(&std::fs::read_to_string(&seed_at).expect("the seed reads"))
@@ -545,7 +545,7 @@ fn the_seats_agreement_over_the_rows_that_already_happened() {
         // reservation: this summons must not count itself or quote its own
         // task (t-4839).
         let records = zerocode_core::summon_choice::records(
-            &seed
+            &replay
                 .carried
                 .iter()
                 .filter(|carried| carried.started_ms < replay.at)
@@ -661,39 +661,41 @@ fn the_seats_agreement_over_the_rows_that_already_happened() {
         }
     }
     elapsed.sort_unstable();
-    println!("\n| arm | compared | agreed | share | wilson lower | p50 ms | p95 ms |");
-    println!("| --- | --- | --- | --- | --- | --- | --- |");
-    for (name, held) in [("production", &production), (arm.as_str(), &agreement)] {
+    println!("\nRepeated asks are dependent observations; pooled shares have no Wilson interval.");
+    println!("| arm | compared | agreed | share | p50 ms | p95 ms |");
+    println!("| --- | --- | --- | --- | --- | --- |");
+    for (name, held, times) in [
+        ("production", &production, &[][..]),
+        (arm.as_str(), &agreement, elapsed.as_slice()),
+    ] {
         println!(
-            "| {name} | {compared} | {agreed} | {share} | {bound} | {p50} | {p95} |",
+            "| {name} | {compared} | {agreed} | {share} | {p50} | {p95} |",
             compared = held.compared,
             agreed = held.agreed,
             share = share_of(held),
-            bound = bound_of(held),
-            p50 = percentile_of(&elapsed, 0.50),
-            p95 = percentile_of(&elapsed, 0.95),
+            p50 = percentile_of(times, 0.50),
+            p95 = percentile_of(times, 0.95),
         );
     }
     println!("\n| rows written under | production | {arm} |");
     println!("| --- | --- | --- |");
     for (version, (before, after)) in &by_version {
         println!(
-            "| {version} (n={n}) | {before_share} ({before_bound}) | {after_share} ({after_bound}) |",
+            "| {version} (n={n}) | {before_share} | {after_share} |",
             n = before.compared,
             before_share = share_of(before),
-            before_bound = bound_of(before),
             after_share = share_of(after),
-            after_bound = bound_of(after),
         );
     }
-    println!("\n| pass | compared | agreed | share |");
-    println!("| --- | --- | --- | --- |");
+    println!("\n| pass | compared | agreed | share | Wilson lower (one ask per row) |");
+    println!("| --- | --- | --- | --- | --- |");
     for (pass, held) in passes.iter().enumerate() {
         println!(
-            "| #{pass} | {compared} | {agreed} | {share} |",
+            "| #{pass} | {compared} | {agreed} | {share} | {bound} |",
             compared = held.compared,
             agreed = held.agreed,
             share = share_of(held),
+            bound = bound_of(held),
         );
     }
     println!(

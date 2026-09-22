@@ -8,6 +8,19 @@ use super::*;
 /// against rather than reached for across the workspace.
 const WALL: Duration = Duration::from_millis(1_500);
 
+#[test]
+fn extreme_samples_and_a_zero_wall_cannot_create_an_overflowed_plan() {
+    for sample in [[0; MIN_SAMPLES], [u64::MAX; MIN_SAMPLES]] {
+        for wall in [Duration::ZERO, WALL, Duration::MAX] {
+            assert_eq!(plan(&sample, wall), None);
+        }
+    }
+    let mut sample = [0; MIN_SAMPLES];
+    sample[MIN_SAMPLES / 2..].fill(1);
+    let room = plan(&sample, WALL).expect("a positive delay with a zero median");
+    assert_eq!(room.room, WALL - room.delay);
+}
+
 /// A duration as the whole milliseconds these samples are written in.
 fn ms(elapsed: Duration) -> u64 {
     u64::try_from(elapsed.as_millis()).expect("a duration this file spells in millis")
@@ -222,17 +235,15 @@ fn without_a_plan_both_shares_are_the_same_reading() {
 }
 
 /// What independence would buy, on a window the rule does hedge — kept as the
-/// upper bound it is now known to be (see [`cleared_share`]).
+/// independent-draw estimate (see [`cleared_share`]).
 #[test]
-fn the_independent_reading_is_an_upper_bound_the_ledger_beat_down() {
+fn the_second_share_is_the_independent_draw_estimate() {
     let plan = plan(&ROOMY, WALL).expect("a plan");
     let (once, twice) = cleared_share(&ROOMY, WALL, Some(&plan));
     assert!((once - 1.0).abs() < f64::EPSILON, "once {once}");
     assert!((twice - 1.0).abs() < f64::EPSILON, "twice {twice}");
 
-    /* And on a window it refuses, the arithmetic still promises a gain — the
-     * promise the 14 timeouts disproved. This is the number the module's own
-     * doc now reads as a bound rather than a forecast. */
+    // Even on a refused window, the independence assumption predicts a gain.
     let folded = HedgePlan {
         delay: Duration::from_millis(857),
         room: Duration::from_millis(643),

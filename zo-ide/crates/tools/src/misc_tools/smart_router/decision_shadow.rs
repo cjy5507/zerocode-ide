@@ -1010,6 +1010,7 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
             deadline_ms,
             agreement_floor_permille: agreement_floor,
             agreement,
+            agreement_kind: ROUTING.agreement_kind,
             agreement_rows_wanted: ROUTING
                 .agreement_rows_wanted
                 .unwrap_or(zerocode_core::jev::A_WINDOW_OF_COMPARISONS),

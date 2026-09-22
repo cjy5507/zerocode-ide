@@ -8,6 +8,71 @@ fn wanted() -> usize {
     crate::jev::summary::rows_that_can_clear(950)
 }
 
+#[test]
+fn a_no_reader_seat_keeps_its_standing_when_its_first_positive_label_arrives() {
+    for seat in [&crate::jev::RECALL, &crate::jev::PLACEMENT] {
+        let wanted = window_wanted_for(seat).expect("a promoting seat");
+        let mut rows: Vec<Value> = (0..wanted)
+            .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 1}))
+            .collect();
+        rows.push(json!({"transition": ROSE}));
+        rows.push(json!({"at": wanted, "label": "request", "agreed": true}));
+        assert_eq!(
+            judge_seat(seat, &rows).expect("judged").verdict,
+            Verdict::Keep,
+            "{}",
+            seat.id
+        );
+    }
+}
+
+#[test]
+fn hindsight_waits_for_the_sample_floor_then_uses_the_same_wilson_line() {
+    for seat in [&crate::jev::RECALL, &crate::jev::PLACEMENT] {
+        let wanted = window_wanted_for(seat).expect("a promoting seat");
+        let floor = seat.agreement_rows_wanted.expect("a label sample floor");
+        for (compared, agreed, falls) in [
+            (floor - 1, false, false),
+            (floor, true, false),
+            (floor, false, true),
+        ] {
+            let mut rows: Vec<Value> = (0..wanted)
+                .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 1}))
+                .collect();
+            rows.push(json!({"transition": ROSE}));
+            rows.extend(
+                (0..compared).map(|at| json!({"at": wanted + at, "label": at, "agreed": agreed})),
+            );
+            let verdict = judge_seat(seat, &rows).expect("judged").verdict;
+            assert_eq!(
+                matches!(verdict, Verdict::Fall(Line::Agreement { .. })),
+                falls,
+                "{} {compared} {agreed} {verdict:?}",
+                seat.id
+            );
+        }
+    }
+}
+
+#[test]
+fn one_forgiven_timeout_does_not_forgive_a_second_one() {
+    for seat in [&crate::jev::RECALL, &crate::jev::PLACEMENT] {
+        let wanted = window_wanted_for(seat).expect("a promoting seat");
+        for misses in [1, 2] {
+            let rows: Vec<Value> = (0..wanted)
+                .map(|at| json!({"at": at, "outcome": if at < misses {"timeout"} else {"answered"}, "elapsedMs": 1}))
+                .collect();
+            let verdict = judge_seat(seat, &rows).expect("judged").verdict;
+            assert_eq!(
+                verdict == Verdict::Rise,
+                misses == 1,
+                "{} {verdict:?}",
+                seat.id
+            );
+        }
+    }
+}
+
 fn window(rows: usize, answered: usize, p95_ms: Option<u64>) -> Tally {
     Tally {
         rows,
@@ -31,6 +96,7 @@ fn clean() -> Evidence<'static> {
             agreed: 57,
         },
         agreement_rows_wanted: A_WINDOW_OF_COMPARISONS,
+        agreement_kind: AgreementKind::Comparison,
         window_forgives: 0,
         labels: Some(Labels {
             compared: 40,

@@ -89,11 +89,13 @@ def nearest_rank(sorted_samples: list[int], q: float) -> int:
 
 def ledgers(roots: list[Path]) -> list[tuple[str, Path]]:
     found = []
+    seen = set()
     for root in roots:
         for project in sorted(root.glob("*/state/smart-router")):
             for name, seat in LEDGERS.items():
                 path = project / name
-                if path.is_file():
+                if path.is_file() and path.resolve() not in seen:
+                    seen.add(path.resolve())
                     found.append((seat, path))
     return found
 
@@ -123,8 +125,6 @@ def firings_in(seat: str, path: Path) -> list[dict]:
             continue
         window = rows[max(0, index - SAMPLE_ROWS) : index]
         samples = [s for s in (one_requests_own_latency(r) for r in window) if s is not None]
-        if len(samples) < MIN_SAMPLES:
-            continue
         out.append(
             {
                 "seat": seat,
@@ -146,13 +146,15 @@ def reconstruction_holds(firings: list[dict]) -> tuple[int, int]:
     held = 0
     for firing in firings:
         recorded = firing["recordedDelayMs"]
-        if not isinstance(recorded, int):
+        if type(recorded) is not int or len(firing["samples"]) < MIN_SAMPLES:
             continue
         sorted_samples = sorted(firing["samples"])
         by_load = nearest_rank(sorted_samples, 0.75)
         median = nearest_rank(sorted_samples, 0.5)
         held += int(min(by_load, WALL_MS - median) == recorded)
-    return held, sum(1 for f in firings if isinstance(f["recordedDelayMs"], int))
+    # Every firing is a claim, including one whose history or delay is missing.
+    # Dropping those claims made an unreadable ledger verify as 0/0.
+    return held, len(firings)
 
 
 def main() -> int:

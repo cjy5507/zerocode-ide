@@ -23,5 +23,7 @@ use core_types::MemoryHit;
 /// It runs on recall's own blocking thread, so anything slow has to be handed
 /// off — or, when the mode is one that acts, bounded by a wall the seat owns.
 pub trait RecallSeat: Send + Sync {
-    fn settle(&self, query: &str, hits: Vec<MemoryHit>) -> Vec<MemoryHit>;
+    /// `attempt` belongs to the turn; asynchronous evidence must keep this
+    /// identity rather than borrowing another turn in the same project.
+    fn settle(&self, attempt: &str, query: &str, hits: Vec<MemoryHit>) -> Vec<MemoryHit>;
 }
