@@ -1,0 +1,271 @@
+//! t-6003: one login road for every agent whose own CLI signs itself in.
+//!
+//! Claude and Codex each had a login button that ran the CLI's login verb in
+//! a home this window manages and waited for the credential file. Grok and
+//! Kimi are the first two rows of a TABLE that says the same thing per
+//! provider — the home variable, the credential witness, the verb or the
+//! slash command, the completion judgement — and every door (the settings
+//! row, the status bar's sign-in, the readiness invalidation, the tests) is
+//! driven off that table. Adding a provider is one row and one fixture.
+//!
+//! What these contracts keep: Codex logs in through the shared runner and
+//! owns no polling loop of its own; the table reuses the usage modules'
+//! provider facts rather than copying them; the command doors and the window
+//! branch on the row's answers and never on an agent's name; the status bar
+//! learns which providers have a sign-in road from the table; and the new
+//! words exist in all four catalogs.
+
+use super::agent_capabilities::{agent_name_branches, shell_source};
+use super::support::{block_after, strip_comments, strip_rust_comments, window_source};
+
+/// The shipped half of one shell source, comments stripped.
+fn shipped(name: &str) -> String {
+    let source = shell_source(name);
+    // The test MODULE, not the first `#[cfg(test)]`: `codex_accounts.rs`
+    // keeps a test-only fixture builder mid-file, and a cut there would drop
+    // the login road under test with it.
+    let (code, _) = source
+        .split_once("#[cfg(test)]\nmod tests")
+        .unwrap_or((&source, ""));
+    strip_rust_comments(code)
+}
+
+#[test]
+fn codex_logs_in_through_the_shared_runner_and_owns_no_loop_of_its_own() {
+    let codex = shipped("codex_accounts.rs");
+    assert!(
+        codex.contains("cli_login::run_login(") && codex.contains("cli_login::command("),
+        "codex_accounts.rs no longer logs in through the shared runner"
+    );
+    for own in [
+        "try_wait()",
+        "POST_AUTH_GRACE",
+        "AUTH_POLL",
+        "LOGIN_TIMEOUT",
+        "thread::spawn",
+        ".stdout.take()",
+    ] {
+        assert!(
+            !codex.contains(own),
+            "codex_accounts.rs grew a login loop of its own again: `{own}`"
+        );
+    }
+    // And the runner is where those live now — once.
+    let runner = shipped("cli_login.rs");
+    for owned in [
+        "LOGIN_TIMEOUT",
+        "WITNESS_POLL",
+        "POST_AUTH_GRACE",
+        "try_wait()",
+    ] {
+        assert!(runner.contains(owned), "the shared runner lost `{owned}`");
+    }
+}
+
+#[test]
+fn the_table_borrows_every_provider_fact_from_the_usage_modules() {
+    let table = shipped("cli_login.rs");
+    let rows = block_after(&table, "pub(crate) const CLI_LOGINS: &[CliLogin] = &[");
+    assert!(
+        rows.contains("usage_grok::") && rows.contains("usage_kimi::"),
+        "a row stopped reading its home and witness off the usage module:\n{rows}"
+    );
+    // The facts the usage modules already own must not be spelled again here.
+    for copied in [
+        "\".grok\"",
+        "\"auth.json\"",
+        "\"GROK_HOME\"",
+        "\".kimi-code\"",
+        "\"kimi-code.json\"",
+        "\"credentials\"",
+        "\"KIMI_CODE_HOME\"",
+        "auth.x.ai",
+    ] {
+        assert!(
+            !table.contains(copied),
+            "cli_login.rs carries a second copy of a provider fact: {copied}"
+        );
+    }
+    // Every row names a catalog agent.
+    let mut named = 0;
+    for spec in zerocode_core::AGENT_SPECS {
+        if rows.contains(&format!("agent: \"{}\",", spec.id)) {
+            named += 1;
+        }
+    }
+    let rows_written = rows.matches("agent: \"").count();
+    assert_eq!(
+        named, rows_written,
+        "a login row names an agent the catalog does not have:\n{rows}"
+    );
+    assert!(
+        rows_written >= 2,
+        "the first two rows (grok, kimi) are gone"
+    );
+}
+
+#[test]
+fn the_login_doors_branch_on_the_row_and_never_on_an_agents_name() {
+    let usage = shipped("cmd/usage.rs");
+    let branches = agent_name_branches();
+    for door in [
+        "fn cli_login_list(",
+        "fn cli_login_start(",
+        "fn cli_login_logout(",
+        "fn cli_login_wait(",
+    ] {
+        let body = block_after(&usage, door);
+        for branch in &branches {
+            assert!(
+                !body.contains(branch.as_str()),
+                "{door} branches on an agent's name: {branch}\n{body}"
+            );
+        }
+        assert!(
+            body.contains("cli_login::"),
+            "{door} no longer reads the login table:\n{body}"
+        );
+    }
+    // Every verb that moves a login forgets the agent's readiness row.
+    for door in [
+        "fn cli_login_start(",
+        "fn cli_login_logout(",
+        "fn cli_login_wait(",
+    ] {
+        let body = block_after(&usage, door);
+        assert!(
+            body.contains("readiness_runtime::invalidate("),
+            "{door} moved a login without invalidating the readiness snapshot:\n{body}"
+        );
+    }
+    let runner = shipped("cli_login.rs");
+    for branch in &branches {
+        assert!(
+            !runner.contains(branch.as_str()),
+            "cli_login.rs branches on an agent's name outside its table: {branch}"
+        );
+    }
+}
+
+#[test]
+fn the_window_paints_the_rows_off_the_table_and_types_the_rows_own_commands() {
+    let window = strip_comments(window_source());
+    let markup = include_str!("../../../../ui/index.html");
+    assert!(
+        markup.contains("id=\"cli-login-list\"") && markup.contains("id=\"cli-login-note\""),
+        "the provider accounts pane lost its CLI login card"
+    );
+    let arriving = block_after(&window, "function showSettingsPane(");
+    assert!(
+        arriving.contains("void refreshCliLogins();"),
+        "arriving at the accounts pane no longer re-reads the CLI login rows:\n{arriving}"
+    );
+    for road in [
+        "invoke(\"cli_login_list\")",
+        "invoke(\"cli_login_start\", { agent: row.agent })",
+        "invoke(\"cli_login_logout\", { agent: row.agent })",
+        "invoke(\"cli_login_wait\", { agent: row.agent, signedIn: true })",
+        "invoke(\"cli_login_wait\", { agent: row.agent, signedIn: false })",
+    ] {
+        assert!(window.contains(road), "the window no longer walks {road}");
+    }
+    // The TUI road opens the agent's own pane through the one launch door
+    // and types the ROW's slash command — never a literal of its own.
+    let typing = block_after(
+        &window,
+        "async function typeCliLoginCommand(row, command) {",
+    );
+    assert!(
+        typing.contains("launchAgentTab({ agent: row.agent, prompt: \"\"")
+            && typing.contains(
+                "invoke(\"send_prompt\", { term, text: command, submit: true, agent: row.agent })"
+            ),
+        "the TUI login road stopped going through the launch door and send_prompt:\n{typing}"
+    );
+    for block in [
+        "function cliLoginRow(row) {",
+        "async function startCliLogin(row, button) {",
+        "async function logoutCliLogin(row) {",
+        "async function typeCliLoginCommand(row, command) {",
+    ] {
+        let body = block_after(&window, block);
+        for spec in zerocode_core::AGENT_SPECS {
+            assert!(
+                !body.contains(&format!("\"{}\"", spec.id)),
+                "{block} spells an agent's name instead of reading the row:\n{body}"
+            );
+        }
+        assert!(
+            !body.contains("/login") && !body.contains("/logout"),
+            "{block} spells a slash command the row already carries:\n{body}"
+        );
+    }
+    let starting = block_after(&window, "async function startCliLogin(row, button) {");
+    assert!(
+        starting.contains("row.road")
+            && starting.contains("row.tui_login")
+            && starting.contains("row.pane_command"),
+        "the start door no longer reads the row's road:\n{starting}"
+    );
+    // The pane-verb road is the GitLab card's: a plain shell of this window
+    // with the backend's line typed into it, so a device code printed to
+    // stderr lands in front of the person.
+    let shelling = block_after(&window, "async function typeCliLoginShellLine(row, line) {");
+    assert!(
+        shelling.contains("invoke(\"open_term_tab\", { rows: 24, cols: 96, plain: true })")
+            && shelling.contains("invoke(\"term_text\", { term, text: `${line}\\r` })"),
+        "the pane-verb road stopped typing the row's line into a plain shell:\n{shelling}"
+    );
+}
+
+#[test]
+fn the_status_bar_learns_its_sign_in_roads_from_the_table() {
+    let window = strip_comments(window_source());
+    let row = block_after(&window, "function usageRosterRow(provider) {");
+    assert!(
+        row.contains("const signIn = usageSignIn(provider);")
+            && row.contains("if (state.kind === \"sign-in\" && signIn) {")
+            && !row.contains("provider.signIn()"),
+        "the roster's sign-in button reads the provider record directly again:\n{row}"
+    );
+    let asking = block_after(&window, "function usageSignIn(provider) {");
+    assert!(
+        asking.contains("cliSignIns.has(provider.id)"),
+        "the sign-in road no longer consults the CLI login table:\n{asking}"
+    );
+    let learning = block_after(&window, "function noteCliLoginRows(rows) {");
+    assert!(
+        learning.contains("cliSignIns.clear();") && learning.contains("cliSignIns.add(row.agent)"),
+        "the table's rows no longer teach the status bar its sign-in roads:\n{learning}"
+    );
+    let painting = block_after(&window, "async function refreshCliLogins() {");
+    assert!(
+        painting.contains("noteCliLoginRows(cliLogins.rows"),
+        "a fresh table no longer reaches the status bar:\n{painting}"
+    );
+}
+
+#[test]
+fn the_cli_login_words_exist_in_every_catalog() {
+    let i18n = include_str!("../../../../ui/shell-i18n.js");
+    for key in [
+        "settings.cliLogins.heading",
+        "settings.cliLogins.about",
+        "settings.cliLogins.hint",
+        "settings.cliLogins.signedOut",
+        "settings.cliLogins.notInstalled",
+        "settings.cliLogins.signingIn",
+        "settings.cliLogins.waitingTui",
+        "settings.cliLogins.waitingPane",
+        "settings.cliLogins.logoutAsk",
+        "settings.cliLogins.logoutBody",
+        "settings.cliLogins.noRows",
+        "settings.cliLogins.noLine",
+    ] {
+        assert_eq!(
+            i18n.matches(&format!("\"{key}\":")).count(),
+            4,
+            "`{key}` is missing from one of the en/ja/zh/es catalogs"
+        );
+    }
+}

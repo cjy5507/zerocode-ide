@@ -1,5 +1,6 @@
 mod agent_capabilities;
 mod bundle_resources;
+mod cli_login;
 mod computer_use_mirrors;
 mod crash_report;
 mod fixture_cases;

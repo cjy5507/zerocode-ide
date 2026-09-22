@@ -3831,6 +3831,23 @@
         </div>
         <div class="agent-list" id="google-account-list"></div>
         <p class="settings-hint" id="google-account-note"></p>
+
+        <!-- And every CLI that signs itself in — Grok, Kimi, and whichever
+             provider gains an OAuth login next. One table in the backend
+             (`crates/zerocode-shell/src/cli_login.rs`) says per provider where
+             its home is, which file its login leaves, and whether the login is
+             a headless verb or a command typed inside its own screen; the rows
+             below are that table painted, and a new provider is one row there,
+             not a card here. The window reads the credential file and never
+             writes it. -->
+        <div class="settings-subhead">
+          <h3 class="settings-subhead-title" data-i18n="settings.cliLogins.heading">CLI 로그인</h3>
+          <p class="settings-subhead-desc" data-i18n="settings.cliLogins.about">
+            Grok·Kimi처럼 제 CLI로 로그인하는 에이전트입니다. 창은 자격 증명 파일을 읽기만 합니다.
+          </p>
+        </div>
+        <div class="agent-list" id="cli-login-list"></div>
+        <p class="settings-hint" id="cli-login-note"></p>
         </div>
         </section>
 
