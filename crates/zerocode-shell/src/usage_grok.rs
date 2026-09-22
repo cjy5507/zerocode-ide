@@ -33,7 +33,7 @@ const BILLING_DEFAULT_PATH: &str = "/billing";
 
 /// `GROK_HOME ?? ~/.grok`, the CLI's own resolution
 /// (`grok-session-paths.ts:40-46`).
-const HOME_VAR: &str = "GROK_HOME";
+pub(crate) const HOME_VAR: &str = "GROK_HOME";
 const HOME_DIR: &str = ".grok";
 const AUTH_FILE: &str = "auth.json";
 
@@ -133,7 +133,13 @@ pub(crate) fn read_auth(file: &Path, now_ms: i64) -> Auth {
     let Ok(raw) = std::fs::read_to_string(file) else {
         return Auth::Absent;
     };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    parse_auth(&raw, now_ms)
+}
+
+/// [`read_auth`] over the file's text — the same judgement for a caller
+/// that already holds the bytes (the login road watches the file change).
+pub(crate) fn parse_auth(raw: &str, now_ms: i64) -> Auth {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) else {
         return Auth::Unreadable;
     };
     let Some(entries) = parsed.as_object() else {
@@ -299,6 +305,16 @@ fn whose(session: &Session) -> Option<String> {
         .filter(|held| !held.is_empty())
         .or(session.user_id.as_deref())
         .map(str::to_string)
+}
+
+/// Who `auth.json`'s text says is signed in, by [`whose`]'s rule — the row
+/// that names the login in the settings pane and the gauge's account filter
+/// read the same answer. `None` when the file holds no session.
+pub(crate) fn signed_in_as(raw: &str, now_ms: i64) -> Option<String> {
+    match parse_auth(raw, now_ms) {
+        Auth::Held(session) => whose(&session),
+        Auth::Absent | Auth::Unreadable => None,
+    }
 }
 
 /// One reading of Grok's plan usage. Writes nothing, anywhere.

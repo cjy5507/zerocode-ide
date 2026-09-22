@@ -35,16 +35,6 @@ use zerocode_core::codex_account::{
     AuthKind, CodexAccount, CodexIdentity, CodexSelection, duplicate_of, identity_from_auth,
 };
 
-/// How long the CLI's login may take: a browser is waiting for a human.
-const LOGIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// How often the login is asked whether `auth.json` has arrived.
-const AUTH_POLL: std::time::Duration = std::time::Duration::from_millis(250);
-
-/// How long the CLI is given to shut down on its own once the file is there,
-/// before the tree is killed. Orca's `postAuthExitTimeout` is the same idea:
-/// a CLI that does exit should be allowed to.
-const POST_AUTH_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 // The store's name is `zerocode_core`'s: the window writes this file and a zo
 // running outside a pane reads it to follow the chosen account (t-5777).
 pub(crate) use zerocode_core::codex_account::STORE_FILE as ACCOUNT_STORE_FILE;
@@ -506,30 +496,15 @@ fn carry_settings(source: &Path, home: &Path) {
     }
 }
 
-/// Run the CLI's own login against a managed home.
-///
-/// `program` is the command the agent catalogue found — a machine may have
-/// `codex` under another name and the catalogue already knows which.
 /// The `codex` process every road here starts, aimed at one home.
 ///
-/// One builder because every clause is load-bearing and each road used to
-/// spell all of them: the shell's PATH (a Finder-launched app's own PATH has
-/// no homebrew on it, and `codex` is installed by homebrew on this machine —
-/// see `shell_path`); this home as `CODEX_HOME`, so an ambient one cannot make
-/// every account answer for the same person; and stdin closed with both pipes
-/// taken, so a prompt cannot hang the window and a pipe nobody reads cannot
-/// fill.
+/// The shared CLI login builder (`cli_login::command`) with this provider's
+/// home variable: the shell's PATH, this home as `CODEX_HOME` so an ambient
+/// one cannot make every account answer for the same person, stdin closed
+/// and both pipes taken. Spelled once there rather than here and in every
+/// other provider's module.
 fn codex_command(program: &str, home: &Path) -> Command {
-    let mut command = crate::proc::quiet_command(program);
-    if let Some(path) = crate::shell_path::hydrated() {
-        command.env("PATH", path);
-    }
-    command
-        .env(zerocode_core::codex_account::HOME_VAR, home)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    command
+    crate::cli_login::command(program, zerocode_core::codex_account::HOME_VAR, home)
 }
 
 /// Log the machine's own login (`~/.codex`) in again.
@@ -567,81 +542,28 @@ pub fn logout_system(program: &str) -> Result<(), String> {
     })
 }
 
+/// Run the CLI's own login against a managed home.
+///
+/// `program` is the command the agent catalogue found — a machine may have
+/// `codex` under another name and the catalogue already knows which.
+///
+/// The loop is the shared runner's (`cli_login::run_login`): the file first,
+/// because `codex login` holds a local callback server open and does not
+/// exit on its own — waiting for the process would time out on every
+/// SUCCESSFUL login; both pipes drained; the CLI given its grace and then
+/// taken down. What is Codex's here is only the verb and the witness, and
+/// the judgement that ANY change to `auth.json` is the login landing —
+/// `identity_in` reads who arrived afterwards, as it always did.
 fn run_login(program: &str, home: &Path) -> Result<(), String> {
-    use std::io::Read;
-    std::fs::create_dir_all(home).map_err(|error| error.to_string())?;
-    // What was there before, so a login that writes nothing is not mistaken for
-    // one that did. Orca takes the same snapshot (:216318).
-    let before = std::fs::read_to_string(home.join(AUTH_FILE)).ok();
-
-    let mut child = codex_command(program, home)
-        .arg("login")
-        .spawn()
-        .map_err(|error| format!("{program}을(를) 실행할 수 없습니다: {error}"))?;
-    // Both pipes drained on their own threads: a pipe nobody reads fills, and
-    // then the login blocks mid-print and times out looking innocent.
-    let stdout = child.stdout.take();
-    let _stdout_drain = std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(mut stream) = stdout {
-            let _ = stream.read_to_string(&mut text);
-        }
-    });
-    let stderr = child.stderr.take();
-    let stderr_drain = std::thread::spawn(move || {
-        let mut text = String::new();
-        if let Some(mut stream) = stderr {
-            let _ = stream.read_to_string(&mut text);
-        }
-        text
-    });
-
-    let began = std::time::Instant::now();
-    let mut landed_at: Option<std::time::Instant> = None;
-    loop {
-        // The file first, because this login does not exit on its own: it holds
-        // a local callback server open. Waiting for the process would time out
-        // on every SUCCESSFUL login, which is the worst shape a wait can have.
-        let now = std::fs::read_to_string(home.join(AUTH_FILE)).ok();
-        let arrived = now.is_some() && now != before;
-        if arrived && landed_at.is_none() {
-            landed_at = Some(std::time::Instant::now());
-        }
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return if arrived || status.success() {
-                    Ok(())
-                } else {
-                    let why = stderr_drain
-                        .join()
-                        .ok()
-                        .map(|text| text.trim().lines().last().unwrap_or_default().to_string())
-                        .filter(|line| !line.is_empty());
-                    Err(match why {
-                        Some(line) => format!("로그인이 실패했습니다: {line}"),
-                        None => "로그인이 실패했습니다".into(),
-                    })
-                };
-            }
-            Ok(None) => {
-                // Signed in and still running — give it its moment to leave,
-                // then take it down. A callback server left behind would hold
-                // its port against the next login.
-                if landed_at.is_some_and(|at| at.elapsed() >= POST_AUTH_GRACE) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Ok(());
-                }
-                if began.elapsed() >= LOGIN_TIMEOUT {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("로그인이 완료되지 않았습니다".into());
-                }
-                std::thread::sleep(AUTH_POLL);
-            }
-            Err(error) => return Err(error.to_string()),
-        }
-    }
+    let witness = home.join(AUTH_FILE);
+    let any_change = |_: &str| true;
+    crate::cli_login::run_login(
+        program,
+        &["login"],
+        zerocode_core::codex_account::HOME_VAR,
+        home,
+        Some(crate::cli_login::Witness::taken(&witness, &any_change)),
+    )
 }
 
 /// Add an account: make a home, seed it, log in against it, keep it if a real

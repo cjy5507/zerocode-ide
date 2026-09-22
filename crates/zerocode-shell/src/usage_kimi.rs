@@ -30,7 +30,7 @@ const USAGE_PATH: &str = "/usages";
 
 /// `KIMI_CODE_HOME ?? ~/.kimi-code`, the CLI's own resolution — read the same
 /// files the running CLI writes (`kimi-runtime-home.ts:17-19`).
-const HOME_VAR: &str = "KIMI_CODE_HOME";
+pub(crate) const HOME_VAR: &str = "KIMI_CODE_HOME";
 const HOME_DIR: &str = ".kimi-code";
 const CREDENTIALS_TAIL: [&str; 2] = ["credentials", "kimi-code.json"];
 
@@ -85,7 +85,14 @@ pub(crate) fn read_credentials(file: &Path, now_seconds: i64) -> Credentials {
     let Ok(raw) = std::fs::read_to_string(file) else {
         return Credentials::Absent;
     };
-    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) else {
+    parse_credentials(&raw, now_seconds)
+}
+
+/// [`read_credentials`] over the file's text — the same judgement for a
+/// caller that already holds the bytes (the login road watches the file
+/// change). Reads nothing and writes nothing.
+pub(crate) fn parse_credentials(raw: &str, now_seconds: i64) -> Credentials {
+    let Ok(parsed) = serde_json::from_str::<serde_json::Value>(raw) else {
         return Credentials::Unreadable;
     };
     let token = parsed

@@ -955,6 +955,7 @@ function showSettingsPane(pane) {
     void refreshClaudeAccounts();
     void refreshCodexAccounts();
     void refreshGoogleAccount();
+    void refreshCliLogins();
   }
   if (pane === "api-routers" && arriving) {
     void refreshApiRouters();
@@ -4860,6 +4861,279 @@ function googleLoginMoved() {
   paintGoogleAccount();
   void refreshProviderUsage(usageProvider("antigravity"), true);
 }
+
+/* ---- and the fourth: every CLI that signs itself in ----
+ *
+ * Grok, Kimi, and whichever provider gains an OAuth login next. Claude and
+ * Codex each grew a card above by hand; these rows come off ONE table the
+ * backend owns (`crates/zerocode-shell/src/cli_login.rs`): a row says which
+ * road its login takes and this side walks it, never asking which agent it
+ * is looking at. `verb` — the CLI has a headless login verb; the backend
+ * runs it in the row's home and waits for the credential file, the way the
+ * Codex card does. `tui` — the CLI only signs in from inside its own screen
+ * (Kimi's `/login`), so the window opens the CLI in one of its panes, types
+ * the row's command at it, and the backend watches the file. `first-run` —
+ * the bare program signs in the first time it runs; the pane is opened and
+ * the file watched, nothing typed. The file is read and never written, here
+ * or in the backend: Kimi rotates its refresh token, and a copy written by
+ * anybody but the CLI logs the live session out. */
+let cliLogins = { rows: [] };
+/* Rows with a login or logout in flight, by agent id, carrying the road and
+ * the command being waited on — the caption says so and the buttons refuse
+ * a second press: two browser logins racing for one credential file is the
+ * mistake this guard exists to prevent. */
+const cliLoginBusy = new Map();
+
+async function refreshCliLogins() {
+  try {
+    cliLogins = (await invoke("cli_login_list")) ?? { rows: [] };
+  } catch (error) {
+    showError(error);
+    cliLogins = { rows: [] };
+  }
+  // The status bar's sign-in buttons read the same table: a provider with a
+  // row here has somewhere to send a signed-out gauge.
+  noteCliLoginRows(cliLogins.rows ?? []);
+  paintCliLogins();
+}
+
+function paintCliLogins() {
+  const host = el("cli-login-list");
+  host.replaceChildren();
+  const rows = cliLogins.rows ?? [];
+  for (const row of rows) host.appendChild(cliLoginRow(row));
+  say(el("cli-login-note"), () =>
+    rows.length === 0
+      ? t("settings.cliLogins.noRows", "이 창이 아는 CLI 로그인 길이 없습니다")
+      : t(
+          "settings.cliLogins.hint",
+          "각 CLI가 제 홈에 남긴 자격 증명 파일을 창이 읽기만 합니다 — 로그인과 로그아웃은 그 CLI가 합니다.",
+        ),
+  );
+}
+
+/* One provider as a row: the CLI's name, who is signed in (or why nobody
+ * is), and the verbs this machine can take. The classes the three cards
+ * above wear, so the pane reads as one list. Not `ownLoginRow`: that row is
+ * a radio — chosen exactly when no managed account is — and there is
+ * nothing to choose here. */
+function cliLoginRow(row) {
+  const line = document.createElement("div");
+  line.className = "agent-row account-row";
+  const body = document.createElement("span");
+  body.className = "agent-row-body account-body";
+  const top = document.createElement("span");
+  top.className = "account-topline";
+  const who = document.createElement("span");
+  who.className = "agent-row-name";
+  who.textContent = row.name;
+  top.appendChild(who);
+  body.appendChild(top);
+  const under = document.createElement("span");
+  under.className = "agent-row-cmd";
+  under.textContent = cliLoginUnder(row);
+  body.appendChild(under);
+  line.appendChild(body);
+  for (const action of cliLoginActions(row)) {
+    const button = document.createElement("button");
+    button.className = action.className;
+    button.type = "button";
+    button.textContent = action.label;
+    button.disabled = Boolean(action.disabled);
+    button.addEventListener("click", () => action.press(button));
+    line.appendChild(button);
+  }
+  return line;
+}
+
+function cliLoginUnder(row) {
+  const busy = cliLoginBusy.get(row.agent);
+  if (busy?.road === "verb") {
+    return t("settings.cliLogins.signingIn", "브라우저에서 로그인 중…");
+  }
+  if (busy?.command) {
+    return t(
+      "settings.cliLogins.waitingTui",
+      "터미널 판에서 {{command}}을(를) 마치면 이 행이 갱신됩니다",
+      { command: busy.command },
+    );
+  }
+  if (busy) {
+    return t("settings.cliLogins.waitingPane", "터미널 판에서 로그인을 마치면 이 행이 갱신됩니다");
+  }
+  if (!row.installed) {
+    return t(
+      "settings.cliLogins.notInstalled",
+      "{{program}}을(를) PATH에서 찾지 못했습니다 — 설치 안내는 오른쪽 링크",
+      { program: row.agent },
+    );
+  }
+  if (!row.signed_in) {
+    return t("settings.cliLogins.signedOut", "{{home}}에 로그인이 없습니다", { home: row.home });
+  }
+  return row.account ?? row.home;
+}
+
+/* The verbs a row offers: the vendor's install page while the CLI is
+ * absent (the same door the agent list's rows open), a sign-in while
+ * nobody is signed in, and 다시 로그인 + 로그아웃 once somebody is. */
+function cliLoginActions(row) {
+  if (!row.installed) {
+    if (!row.homepage_url) return [];
+    return [
+      {
+        className: "account-relogin",
+        label: t("settings.agents.install", "설치"),
+        press: () => openExternal(row.homepage_url),
+      },
+    ];
+  }
+  const busy = cliLoginBusy.has(row.agent);
+  const actions = [
+    {
+      className: "account-relogin",
+      label: row.signed_in
+        ? t("settings.accounts.relogin", "다시 로그인")
+        : t("usage.signIn", "로그인"),
+      disabled: busy,
+      press: (button) => startCliLogin(row, button),
+    },
+  ];
+  if (row.signed_in) {
+    actions.push({
+      className: "account-logout",
+      label: t("settings.accounts.logout", "로그아웃"),
+      disabled: busy,
+      press: () => logoutCliLogin(row),
+    });
+  }
+  return actions;
+}
+
+/* Sign in, or sign in again — the row's road decides how. The report is
+ * re-read by every road (the backend answers with the table after the file
+ * moved), and a login the person abandoned leaves the rows exactly as they
+ * were. */
+async function startCliLogin(row, button) {
+  if (cliLoginBusy.has(row.agent)) return;
+  button.disabled = true;
+  cliLoginBusy.set(row.agent, {
+    road: row.road,
+    command: row.tui_login ?? row.pane_command ?? null,
+  });
+  paintCliLogins();
+  try {
+    if (row.road === "verb") {
+      cliLogins = await invoke("cli_login_start", { agent: row.agent });
+    } else {
+      // `pane-verb` types the row's shell line into a plain shell; `tui`
+      // types the row's slash command at its TUI; `first-run` opens the TUI
+      // bare. Each is then watched by the backend until the proof lands.
+      if (row.road === "pane-verb") await typeCliLoginShellLine(row, row.pane_command);
+      else await typeCliLoginCommand(row, row.tui_login ?? null);
+      cliLogins = await invoke("cli_login_wait", { agent: row.agent, signedIn: true });
+    }
+  } catch (error) {
+    showError(String(error));
+    cliLoginBusy.delete(row.agent);
+    await refreshCliLogins();
+    return;
+  }
+  cliLoginBusy.delete(row.agent);
+  cliLoginMoved(row);
+}
+
+/* Open the CLI in a pane of this window and type `command` at it — or open
+ * it bare when there is nothing to type. The one launch door every agent
+ * takes (`launchAgentTab`), with an EMPTY prompt: a launch prompt has the
+ * orchestration contract appended to it, which would turn a slash command
+ * into a paragraph. The words go through `send_prompt` instead, whose
+ * readiness wait lands them in the composer rather than in the CLI's boot
+ * banner. A pane the agent already holds is reused and brought to the
+ * front: the command is a word to a running program, not a reason to start
+ * a second one. */
+async function typeCliLoginCommand(row, command) {
+  let term = [...paneAgents].find(([, agent]) => agent === row.agent)?.[0] ?? null;
+  const held = term === null ? null : tabOfTerm(term);
+  if (held === null) {
+    term = await launchAgentTab({ agent: row.agent, prompt: "", ...spawnGrid() });
+    mountTermTab(term, { agent: row.name }, {});
+  } else {
+    setActiveTab(held.id);
+  }
+  if (command) {
+    await invoke("send_prompt", { term, text: command, submit: true, agent: row.agent });
+  }
+  return term;
+}
+
+/* A verb that needs a screen — a device code on stderr, or a CLI that
+ * refuses a pipe — typed into a plain shell of this window, the way the
+ * GitLab card types `glab auth login` (`openGitlabLoginTerminal`). The line
+ * is the backend's: the home in the CLI's own variable, then the verb, so
+ * the CLI writes where the gauge reads. The settings panel steps aside so
+ * the person can see the code they are being asked to enter. */
+async function typeCliLoginShellLine(row, line) {
+  if (!line) throw new Error(t("settings.cliLogins.noLine", "이 행에는 입력할 명령이 없습니다"));
+  setSettingsOpen(false);
+  const term = await invoke("open_term_tab", { rows: 24, cols: 96, plain: true });
+  mountTermTab(term);
+  await invoke("term_text", { term, text: `${line}\r` });
+  return term;
+}
+
+/* Sign out. Asked first, the way the other cards ask: the credential this
+ * removes is the one every terminal running that CLI signs in with. */
+async function logoutCliLogin(row) {
+  if (cliLoginBusy.has(row.agent)) return;
+  const said = await askConfirm({
+    title: t("settings.cliLogins.logoutAsk", "{{name}} 로그인을 로그아웃할까요?", { name: row.name }),
+    body: t(
+      "settings.cliLogins.logoutBody",
+      "{{home}}의 자격 증명이 지워집니다. 다른 CLI의 로그인은 그대로입니다.",
+      { home: row.home },
+    ),
+    confirm: t("settings.accounts.logout", "로그아웃"),
+    deny: t("settings.accounts.keep", "그대로 두기"),
+    danger: true,
+  });
+  if (said !== true) return;
+  cliLoginBusy.set(row.agent, { road: row.logout_road, command: row.tui_logout ?? null });
+  paintCliLogins();
+  try {
+    if (row.logout_road === "verb") {
+      cliLogins = await invoke("cli_login_logout", { agent: row.agent });
+    } else {
+      await typeCliLoginCommand(row, row.tui_logout ?? null);
+      cliLogins = await invoke("cli_login_wait", { agent: row.agent, signedIn: false });
+    }
+  } catch (error) {
+    showError(String(error));
+    cliLoginBusy.delete(row.agent);
+    await refreshCliLogins();
+    return;
+  }
+  cliLoginBusy.delete(row.agent);
+  cliLoginMoved(row);
+}
+
+/* The Claude, Codex and Google cards each have this hand, for the same
+ * reason: the bar's figure for this provider is a fact about ONE login, and
+ * without a forced re-read the segment keeps the previous login's word until
+ * the fifteen-minute poll comes round. The rows are already fresh — every
+ * verb above answers with the table re-read after the file moved — so only
+ * the gauge and the agent list are asked again. */
+function cliLoginMoved(row) {
+  noteCliLoginRows(cliLogins.rows ?? []);
+  paintCliLogins();
+  const provider = USAGE_PROVIDERS.find((one) => one.id === row.agent);
+  if (provider) void refreshProviderUsage(provider, true);
+  void refreshAgents();
+}
+
+// Once at boot, so the status bar's sign-in buttons know their roads before
+// anybody opens the accounts pane; the pane re-reads on every arrival.
+void refreshCliLogins();
 
 /* ---- where a card stands, in four words ----
  *

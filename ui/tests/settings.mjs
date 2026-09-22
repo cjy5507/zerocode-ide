@@ -2232,6 +2232,7 @@ class StatefulBackend {
       case "verify_claude_accounts": return [];
       case "verify_codex_accounts": return [];
       case "codex_account_list": return { accounts: [], can_add: true };
+      case "cli_login_list": return { rows: [] };
       case "relogin_codex_login": return { accounts: [], can_add: true };
       case "logout_codex_login": return { accounts: [], can_add: true };
       case "google_account": return clone(this.googleAccount);

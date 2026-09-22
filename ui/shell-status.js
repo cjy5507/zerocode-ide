@@ -1057,6 +1057,28 @@ function usageProvider(id) {
   return USAGE_PROVIDERS.find((one) => one.id === id) ?? USAGE_PROVIDERS[0];
 }
 
+/* Which providers have a sign-in road THIS window can walk, learned from the
+ * backend's CLI login table (`cli_login_list`, painted on the accounts pane)
+ * rather than written per record above: a provider that gains a row there
+ * gains its button here, with no second list to forget. Claude, Codex and
+ * Antigravity keep the `signIn` hand on their own records — their cards are
+ * hand-made. */
+const cliSignIns = new Set();
+
+function noteCliLoginRows(rows) {
+  cliSignIns.clear();
+  for (const row of rows) cliSignIns.add(row.agent);
+  paintUsagePanel();
+}
+
+/* Where a signed-out gauge sends a person, or `null` when this window has no
+ * road for that provider — and then no button stands, because a button that
+ * does nothing is worse than none. */
+function usageSignIn(provider) {
+  if (provider.signIn) return provider.signIn;
+  return cliSignIns.has(provider.id) ? showProviderAccounts : null;
+}
+
 function usageProviderDomain(provider) {
   return agentRows.find((one) => one.id === provider.id)?.favicon_domain ?? "";
 }
@@ -1458,13 +1480,15 @@ function usageRosterRow(provider) {
   head.addEventListener("click", () => showUsageDetails(provider.id));
   row.appendChild(head);
 
-  // 로그인 단추는 **확인된 로그아웃**에만, 그리고 갈 길이 있을 때만 선다.
-  if (state.kind === "sign-in" && provider.signIn) {
+  // 로그인 단추는 **확인된 로그아웃**에만, 그리고 갈 길이 있을 때만 선다 —
+  // 기록 자신의 손이거나, 백엔드의 CLI 로그인 표가 이 공급자를 알 때.
+  const signIn = usageSignIn(provider);
+  if (state.kind === "sign-in" && signIn) {
     const enter = document.createElement("button");
     enter.className = "usage-roster-signin";
     enter.type = "button";
     enter.textContent = t("usage.signIn", "로그인");
-    enter.addEventListener("click", () => provider.signIn());
+    enter.addEventListener("click", () => signIn());
     row.appendChild(enter);
   }
 
