@@ -71,6 +71,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "mention_rerank", setting: "jevMentionRerank", modes: "off shadow on auto" }),
   Object.freeze({ id: "branching", setting: "jevBranching", modes: "off shadow on auto" }),
   Object.freeze({ id: "judgment_cache", setting: "jevJudgmentCache", modes: "off shadow on auto" }),
+  Object.freeze({ id: "challenger", setting: "jevChallenger", modes: "off shadow on auto" }),
 ]);
 const jevSeat = (id) => JEV_SEATS.find((seat) => seat.id === id) ?? null;
 /* The routing classifier's four words (`zerocode_core::jev::ClassifierMode`)
