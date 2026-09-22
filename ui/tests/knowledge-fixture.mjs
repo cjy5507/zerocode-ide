@@ -594,6 +594,14 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
       }
       return { from: named(a), to: named(b), k, paths, shortest: toB[a], capped: false, limits, elapsed_us: 1 };
     },
+    /* HTML 내보내기의 문(t-5966 G4): 건넨 그림을 적고 영수증을 답한다 — 저장소는 픽스처라 없다. */
+    second_brain_export_html: (args) => {
+      (window.__EXPORTS__ ??= []).push(args);
+      if (window.__EXPORT_FAIL__) return Promise.reject(window.__EXPORT_FAIL__);
+      const input = args.input;
+      return { id: "p-knowledge", title: input.title, version: (window.__EXPORTS__.length), bytes: JSON.stringify(input).length,
+        path: "/artifacts/pages/p-knowledge/index.html", nodes: input.nodes.length, edges: input.edges.length };
+    },
     quick_commands: () => window.__QUICK__ ?? [],
     list_quick_commands: () => window.__QUICK__ ?? [],
     launch_agent_tab: (args) => { window.__LAUNCHED__ = args; return (window.__NEXT_TERM__ = (window.__NEXT_TERM__ ?? 0) + 1); },

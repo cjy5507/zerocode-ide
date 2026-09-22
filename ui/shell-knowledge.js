@@ -1183,9 +1183,18 @@ function buildKnowledgeView() {
   scenePopover.append(sceneHead, sceneCreate, sceneList);
   scene.append(sceneToggle, scenePopover);
 
+  /* HTML로 내보내기(t-5966 G4): 지금 보이는 부분그래프를 자급자족 HTML 하나로 아티팩트 저장소에. */
+  const exportHtml = document.createElement("button");
+  exportHtml.type = "button";
+  exportHtml.className = "btn knowledge-export";
+  exportHtml.dataset.i18nAria = "knowledge.exportHtml";
+  exportHtml.setAttribute("aria-label", t("knowledge.exportHtml", "HTML로 내보내기"));
+  exportHtml.dataset.tip = t("knowledge.exportHtml", "HTML로 내보내기");
+  exportHtml.innerHTML = icon("download");
+
   const tools = document.createElement("div");
   tools.className = "knowledge-view-tools";
-  tools.append(slicer, scene, again);
+  tools.append(slicer, scene, exportHtml, again);
   lenses.appendChild(tools);
   head.append(name, modes, searchBox, navToggle, gap, stat, lensToggle, lenses);
 
@@ -7397,6 +7406,7 @@ function wireKnowledgeView(view) {
     });
   });
   view.querySelector(".knowledge-refresh").onclick = () => void refreshKnowledgeGraph({ force: true });
+  view.querySelector(".knowledge-export").onclick = () => void exportKnowledgeHtml(view);
   const searchBox = view.querySelector(".knowledge-search");
   const find = view.querySelector(".knowledge-query");
   find.value = knowledgeQuery;
@@ -7923,6 +7933,116 @@ async function refreshKnowledgeGraph({ force = false, trailing = false } = {}) {
 
 function knowledgeTab() {
   return tabs.find((held) => held.kind === KNOWLEDGE_TAB.kind) ?? null;
+}
+
+/* ---- HTML 아티팩트 내보내기 (t-5966 G4) ----
+ *
+ * 지금 렌즈가 보여 주는 부분그래프 — 점은 앉은 자리와 쉬는 옷 그대로, 선은 관계·근거·잉크·
+ * 점선 그대로 — 를 백엔드(`second_brain_export_html`)에 건넨다. 그리는 것은 core의 템플릿이고
+ * 저장은 아티팩트 저장소의 같은 문(`publish_page`)이다. 색은 GL 팔레트가 스타일시트에서 읽은
+ * 값(`knowledgeGlPalette`) — 창의 옷을 옮겨 적은 것이 아니라 계산된 것이라, 창 밖 브라우저도
+ * 같은 잉크를 본다. 옛 답(근거 없는 선)은 싣지 않는다. */
+/* 실수 넷을 CSS 색 낱말로. */
+function knowledgeInkWord(table, at) {
+  const channel = (value) => Math.round(value * 255);
+  const alpha = Math.round(table[at + 3] * 1000) / 1000;
+  return `rgba(${channel(table[at])}, ${channel(table[at + 1])}, ${channel(table[at + 2])}, ${alpha})`;
+}
+
+/* 토큰 하나의 계산된 색 — 판 안의 견본 하나에 입혀 읽는다(팔레트와 같은 손). */
+function knowledgeProbeInk(view, expression) {
+  const probe = document.createElement("span");
+  probe.style.color = expression;
+  probe.hidden = true;
+  view.appendChild(probe);
+  const word = getComputedStyle(probe).color;
+  probe.remove();
+  return word;
+}
+
+function collectKnowledgeExport(view, layout) {
+  const model = layout.model;
+  const tuning = layout.tuning;
+  /* 팔레트는 견본(`knowledge-node`·`knowledge-edge` 클래스의 숨은 SVG)을 판에 세워 읽는다 —
+   * 읽고 나면 걷는다. 남겨 두면 점을 세는 손(하네스·검색)이 견본을 점으로 읽는다. 내보내기는
+   * 드문 손이라 한 번의 세움이 싸다. */
+  const palette = knowledgeGlPalette(view, null);
+  const seatOf = new Int32Array(layout.count).fill(-1);
+  const nodes = [];
+  for (let at = 0; at < layout.count; at += 1) {
+    if (layout.drawn !== null && layout.drawn[at] === 0) continue;
+    const ink = knowledgeRestingNodeInk(palette, tuning, layout, model, at);
+    seatOf[at] = nodes.length;
+    nodes.push({
+      id: model.keys[at],
+      title: model.titles[at],
+      kind: model.kinds[at],
+      x: layout.x[at],
+      y: layout.drawY[at],
+      r: layout.radius[at],
+      fill: knowledgeInkWord(ink.fill, ink.fillAt),
+      stroke: knowledgeInkWord(ink.stroke, ink.strokeAt),
+      stroke_px: ink.strokePx,
+      dashed: ink.dashed,
+      named: layout.nodeEls[at]?.classList.contains("is-named") ?? layout.tier[at] !== KNOWLEDGE_TIER_LEAF,
+      tags: model.tags[at],
+    });
+  }
+  const edges = [];
+  const legend = new Map();
+  for (let at = 0; at < model.edgeCount; at += 1) {
+    if (layout.drawnEdge !== null && layout.drawnEdge[at] === 0) continue;
+    const from = seatOf[model.from[at]];
+    const to = seatOf[model.to[at]];
+    const road = KNOWLEDGE_EDGE_PROVENANCES[model.provenance[at]]?.id;
+    if (from < 0 || to < 0 || road === undefined) continue;
+    const ink = knowledgeRestingEdgeInk(palette, tuning, layout, model, at);
+    const kind = KNOWLEDGE_EDGE_KINDS[model.kind[at]];
+    const word = knowledgeInkWord(ink.ink, ink.inkAt);
+    edges.push({ from, to, kind, provenance: road, ink: word, width: ink.width, dash: ink.dash,
+      directed: KNOWLEDGE_EDGE_DIRECTED.includes(kind) });
+    if (!legend.has(kind)) legend.set(kind, { kind, ink: word, dash: ink.dash });
+  }
+  /* 켜진 렌즈의 짧은 낱말들과 숨긴 근거·검색어 — 머리의 한 줄이다. */
+  const lenses = [...view.querySelectorAll('[data-knowledge-flag][aria-pressed="true"] span[data-i18n]')]
+    .map((one) => one.textContent);
+  for (const road of knowledgeProvenanceHidden) lenses.push(`−${road}`);
+  if (knowledgeQuery.trim() !== "") lenses.push(knowledgeQuery.trim());
+  const vault = knowledgeReport?.vault ?? "";
+  palette.swatches.host.remove();
+  palette.swatches.tracing.remove();
+  return {
+    title: t("knowledge.exportTitle", "{{vault}} 지식 그래프", { vault: vault.split("/").filter(Boolean).pop() ?? vault }),
+    vault,
+    lenses,
+    theme: {
+      ground: knowledgeProbeInk(view, "var(--knowledge-ground)"),
+      ink: getComputedStyle(view).color,
+      rule: knowledgeProbeInk(view, "var(--edge-rule)"),
+      highlight: knowledgeProbeInk(view, "var(--knowledge-highlight)"),
+    },
+    nodes,
+    edges,
+    legend: [...legend.values()],
+    exported_at: new Date().toISOString(),
+  };
+}
+
+async function exportKnowledgeHtml(view) {
+  const layout = knowledgeLayouts.get(view);
+  if (!layout || layout.count === 0) {
+    toast(t("knowledge.exportEmpty", "내보낼 그림이 없습니다"));
+    return;
+  }
+  const input = collectKnowledgeExport(view, layout);
+  try {
+    const receipt = await invoke("second_brain_export_html", { input });
+    toast(t("knowledge.exportDone", "아티팩트로 저장됨: {{title}} · {{kb}} KB · 점 {{nodes}} · 선 {{edges}}", {
+      title: receipt.title, kb: Math.round(receipt.bytes / 1024), nodes: receipt.nodes, edges: receipt.edges,
+    }));
+  } catch (error) {
+    toast(t("knowledge.exportFailed", "내보내지 못했습니다: {{why}}", { why: String(error) }), "error");
+  }
 }
 
 /* 무대가 이 탭을 드러낼 때 지나는 문. 여기서만 다시 읽는 것은 「보고 있을

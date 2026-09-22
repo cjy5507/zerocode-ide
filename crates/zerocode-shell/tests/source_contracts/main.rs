@@ -32688,6 +32688,18 @@ mod tests {
                 && paths.contains("second_brain_paths::report("),
             "the path command left the cached picture, the blocking pool or core's calculator:\n{paths}"
         );
+        let export = block_after(backend, "pub(crate) async fn second_brain_export_html(");
+        assert!(
+            export.contains("spawn_blocking")
+                && export.contains("second_brain_export::render(")
+                && export.contains(".publish_page(")
+                && export.contains("CHANGED_EVENT"),
+            "the export command left core's renderer, the store's publish door or the changed event:\n{export}"
+        );
+        assert!(
+            !export.contains("<html") && !export.contains("<script"),
+            "the export command writes markup of its own — the page is core's template"
+        );
     }
 
     /// t-4140 S2: which mode the knowledge graph opens in is a rule about

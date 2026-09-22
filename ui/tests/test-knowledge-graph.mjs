@@ -2013,6 +2013,71 @@ ok("provenance: three toggles default on, a hidden road drops its lines and keep
     && JSON.stringify(provenanceLens.overview) === JSON.stringify(["measured=0", "declared=2", "inferred=2"]),
   JSON.stringify(provenanceLens));
 
+/* Test 11e(t-5966 G4): HTML로 내보내기. 단추 하나가 지금 렌즈의 부분그래프 — 점의 자리·쉬는 옷·
+ * 선의 관계·근거·잉크 — 를 백엔드의 한 문(`second_brain_export_html`)에 건네고, 영수증을 토스트로
+ * 말한다. 「타입 관계만」이 켜진 판에서는 그 렌즈가 남긴 점과 선만 실린다. */
+const exportTest = await page.evaluate(async () => {
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  knowledgeSelectedKey = null;
+  knowledgeQuery = "";
+  knowledgeProvenanceHidden.clear();
+  window.__EXPORTS__ = [];
+  window.__VAULT__ = {
+    pages: 5,
+    customEdges: [
+      { from: 0, to: 1, kind: "mentions" },
+      { from: 0, to: 2, kind: "depends_on" },
+      { from: 2, to: 3, kind: "implements" },
+      { from: 3, to: 4, kind: "mentions" },
+    ],
+  };
+  dropTab("knowledge");
+  document.getElementById("nav-knowledge").click();
+  await wait(300);
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  view.querySelector(".knowledge-export").click();
+  await wait(80);
+  const whole = window.__EXPORTS__[0]?.input ?? null;
+  const toastWhole = document.querySelector(".toast")?.textContent ?? "";
+  view.querySelector('[data-knowledge-flag="typed"]').click();
+  await wait(80);
+  view.querySelector(".knowledge-export").click();
+  await wait(80);
+  const typed = window.__EXPORTS__[1]?.input ?? null;
+  view.querySelector('[data-knowledge-flag="typed"]').click();
+  await wait(50);
+  const rgba = (word) => /^rgba\(\d+, \d+, \d+, [\d.]+\)$/.test(word);
+  const colour = (word) => /^rgba?\(/.test(word);
+  return {
+    asked: window.__EXPORTS__.length,
+    whole: whole === null ? null : {
+      title: whole.title, vault: whole.vault, lenses: whole.lenses, nodes: whole.nodes.length, edges: whole.edges.length,
+      theme: Object.values(whole.theme).every(colour),
+      nodeInks: whole.nodes.every((node) => rgba(node.fill) && rgba(node.stroke) && node.r > 0 && typeof node.x === "number"),
+      edgeInks: whole.edges.every((edge) => rgba(edge.ink) && ["measured", "declared", "inferred"].includes(edge.provenance)),
+      directed: whole.edges.filter((edge) => edge.directed).map((edge) => edge.kind).sort(),
+      legend: whole.legend.map((row) => row.kind).sort(),
+      exportedAt: whole.exported_at,
+    },
+    typed: typed === null ? null : { nodes: typed.nodes.length, edges: typed.edges.length, lenses: typed.lenses,
+      kinds: typed.edges.map((edge) => edge.kind).sort() },
+    toastWhole,
+  };
+});
+ok("export: the button hands the lens's picture — settled points in their computed inks, every line with kind, road and ink — to the one backend door and says the receipt; a lens narrows what is handed over",
+  exportTest.asked === 2 && exportTest.whole !== null && exportTest.typed !== null
+    && exportTest.whole.vault === "/vault" && exportTest.whole.title.includes("vault")
+    && exportTest.whole.nodes === 5 && exportTest.whole.edges === 4
+    && exportTest.whole.theme && exportTest.whole.nodeInks && exportTest.whole.edgeInks
+    && JSON.stringify(exportTest.whole.directed) === JSON.stringify(["depends_on", "implements"])
+    && JSON.stringify(exportTest.whole.legend) === JSON.stringify(["depends_on", "implements", "mentions"])
+    && /^\d{4}-\d{2}-\d{2}T/.test(exportTest.whole.exportedAt)
+    && exportTest.toastWhole.includes("KB") && exportTest.toastWhole.includes("5")
+    && exportTest.typed.nodes === 3 && exportTest.typed.edges === 2
+    && JSON.stringify(exportTest.typed.kinds) === JSON.stringify(["depends_on", "implements"])
+    && exportTest.typed.lenses.some((word) => word.includes("타입")),
+  JSON.stringify(exportTest));
+
 /* Test 11c: 시간 슬라이서의 프리셋은 벽시계의 창이다(K24) — 「24시간」은 지금에서
  * 24시간 안에 고쳐지거나 회상된 페이지를 남긴다. 볼트의 시간 폭에 대한 백분율로
  * 옮겨 1% 단위로 반올림하고 1~100에 가두면, 400일 볼트의 「24시간」은 가장 새 페이지

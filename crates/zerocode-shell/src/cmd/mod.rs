@@ -234,10 +234,10 @@ pub(crate) use session::{
 };
 
 pub(crate) use second_brain::{
-    get_second_brain_scenes, second_brain_graph, second_brain_link, second_brain_open,
-    second_brain_page, second_brain_paths, second_brain_relate, second_brain_seat_recalls,
-    second_brain_setup, second_brain_status, set_second_brain_explore, set_second_brain_scenes,
-    set_second_brain_weekly_review,
+    get_second_brain_scenes, second_brain_export_html, second_brain_graph, second_brain_link,
+    second_brain_open, second_brain_page, second_brain_paths, second_brain_relate,
+    second_brain_seat_recalls, second_brain_setup, second_brain_status, set_second_brain_explore,
+    set_second_brain_scenes, set_second_brain_weekly_review,
 };
 
 pub(crate) use supply_chain::{supply_chain_graph, supply_chain_report};

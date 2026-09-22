@@ -35642,7 +35642,8 @@ details.task-board-section > summary {
     color var(--motion-fast) var(--ease-standard);
 }
 
-.knowledge-refresh {
+.knowledge-refresh,
+.knowledge-export {
   flex: none;
 }
 
