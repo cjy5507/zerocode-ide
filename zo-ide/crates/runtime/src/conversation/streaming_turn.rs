@@ -2893,6 +2893,9 @@ where
     ) -> Result<ConversationMessage, StreamingTurnError> {
         let (mut output, kind) = result;
         let mut is_error = kind.is_error();
+        // The patch review seat reads the tool's own envelope, so it is kept
+        // before any hook merges text into it (t-6203).
+        let reviewed = (!is_error && self.reviews_edits_of(&p.tool_name)).then(|| output.clone());
         if options.notify_slow {
             crate::notifications::notify_if_slow(
                 &p.tool_name,
@@ -2980,6 +2983,12 @@ where
             is_error,
             batch_hard_stops,
         );
+        // The patch review seat's line, model-facing only and last: a hook
+        // that failed the result took the patch with it.
+        if let Some(pristine) = reviewed.filter(|_| !is_error) {
+            let note = self.reviewed_edit_note(&p.tool_use_id, &p.tool_name, &pristine).await;
+            output = super::reviewed_edit::with_review_note(output, note);
+        }
 
         // Drain images the tool staged. The real live dispatcher shares the
         // image sink through cloned contexts, so this remains correct whether

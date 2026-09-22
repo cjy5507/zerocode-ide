@@ -372,6 +372,23 @@ pub fn jev_compaction_mode_from(loader: &runtime::ConfigLoader) -> Option<Decisi
     merged_settings_root_from(loader).map(|root| zerocode_core::jev::COMPACTION.mode_in(&root))
 }
 
+/// `smart.jevPatchReview`: whether every patch an edit tool writes is put to
+/// the four review questions (t-6203). Its own switch, because it sends
+/// something else off the machine again — a patch's hunks and the newest
+/// lines of the output the edit followed — and consent to one is not consent
+/// to another.
+pub const JEV_PATCH_REVIEW_SETTING: &str = zerocode_core::jev::PATCH_REVIEW.setting;
+
+/// `smart.jevPatchReview` from the settings `loader` merges, on the same terms
+/// as [`decision_shadow_mode_from`]. `on`, and an `auto` this seat's own
+/// evidence has raised, add one line to the result of a patch the review did
+/// not permit (`runtime::patch_review`); `shadow` asks beside the turn and
+/// changes nothing the model reads.
+#[must_use]
+pub fn jev_patch_review_mode_from(loader: &runtime::ConfigLoader) -> Option<DecisionShadowMode> {
+    merged_settings_root_from(loader).map(|root| zerocode_core::jev::PATCH_REVIEW.mode_in(&root))
+}
+
 /// `smart.agentTool`: whether an agent's own question — zo's `Jev` tool, `zo
 /// jev ask|choose|score` — is put to a System One judgment (t-6040). Its own
 /// switch, because it sends something else off the machine again: not the

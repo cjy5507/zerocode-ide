@@ -44,6 +44,7 @@ pub mod model_router;
 pub mod notifications;
 mod oauth;
 pub mod permission;
+pub mod patch_review;
 pub mod permission_enforcer;
 mod permissions;
 mod prompt;
@@ -101,6 +102,7 @@ pub fn low_disk_warning(dir: &std::path::Path) -> Option<String> {
 }
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use compact::relevance as compaction_relevance;
+pub use patch_review::{PatchAsk, PatchReview, PatchReviewSeat, PATCH_REVIEW_RUBRIC_VERSION};
 pub use compact::relevance::{
     BlockHead, CompactionAsk, CompactionJudgment, CompactionSeat, COMPACTION_RUBRIC_VERSION,
 };

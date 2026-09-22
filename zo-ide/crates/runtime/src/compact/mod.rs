@@ -1750,6 +1750,24 @@ pub fn edited_file_paths(messages: &[ConversationMessage]) -> Vec<String> {
     paths
 }
 
+/// A tool result's envelope: the JSON value its output opens with, and
+/// nothing after it.
+///
+/// What the model reads is not always the tool's own bytes: a hook's context,
+/// a repetition notice or the patch review's note (t-6203) is appended after
+/// the envelope, on the model-facing copy, and a reader that parsed the whole
+/// output strictly read such an edit as no edit at all — a verified-state
+/// ledger that never heard of it, a trace that never listed the file. Every
+/// reader of an edit's envelope reads it through here, so text appended to a
+/// result can never hide the mutation it records.
+#[must_use]
+pub fn result_envelope(output: &str) -> Option<serde_json::Value> {
+    serde_json::Deserializer::from_str(output)
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()
+}
+
 /// Pull the mutated file path out of one edit/write result envelope. Tolerant:
 /// returns `None` for a cleared placeholder, non-JSON, or an envelope without a
 /// recognizable path key.
@@ -1757,7 +1775,7 @@ fn edited_path_from_output(output: &str) -> Option<String> {
     if output == MICROCOMPACT_PLACEHOLDER {
         return None;
     }
-    let value = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    let value = result_envelope(output)?;
     let object = value.as_object()?;
     ["filePath", "path", "file_path"]
         .iter()

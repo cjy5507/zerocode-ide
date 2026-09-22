@@ -123,6 +123,46 @@ fn tool_verified_state_events(
     events
 }
 
+/// Whether one turn's messages, in order, earn the harness's receipt (r43):
+/// the turn edited, and a check ran green after its last edit.
+///
+/// The live ledger folds the same facts as each result settles
+/// ([`VerifiedStateLedger::receipt_checks_this_turn`]); this reads them off a
+/// transcript with the same classifier ([`tool_verified_state_events`]), so a
+/// seat that waits on the receipt — the patch review's hindsight (t-6203) —
+/// labels a turn the same way live and on a replay. Each result is read with
+/// the input its call carried, which is what a transcript keeps.
+///
+/// [`VerifiedStateLedger::receipt_checks_this_turn`]: crate::verified_state::VerifiedStateLedger::receipt_checks_this_turn
+pub(crate) fn receipt_in(turn: &[ConversationMessage]) -> bool {
+    let mut inputs: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    let (mut edited, mut green_since_edit) = (false, false);
+    for message in turn {
+        for block in &message.blocks {
+            if let ContentBlock::ToolUse { id, input, .. } = block {
+                inputs.insert(id.as_str(), input.as_str());
+            }
+        }
+        let Some(called) = message.blocks.iter().find_map(|block| match block {
+            ContentBlock::ToolResult { tool_use_id, .. } => Some(tool_use_id.as_str()),
+            _ => None,
+        }) else {
+            continue;
+        };
+        let input = inputs.get(called).copied().unwrap_or_default();
+        for event in tool_verified_state_events(message, input) {
+            match event {
+                VerifiedStateEvent::Edit(_) => {
+                    edited = true;
+                    green_since_edit = false;
+                }
+                VerifiedStateEvent::GreenCheck(_) => green_since_edit = true,
+            }
+        }
+    }
+    edited && green_since_edit
+}
+
 /// The check-shaped command inside a bash tool input, capped for storage.
 /// `None` for anything that is not a check (`ls -la` is green every time and
 /// proves nothing) or whose input did not parse.

@@ -20,6 +20,10 @@ pub(crate) struct RuntimePluginState {
     /// Seated beside full compaction and asked which tool results the
     /// summary still needs. Built here for the reason the recall seat is.
     pub(crate) compaction_seat: Option<Arc<dyn runtime::CompactionSeat>>,
+    /// Seated beside the edit tools and asked about every patch they write
+    /// before the model reads the result. Built here for the reason the
+    /// recall seat is.
+    pub(crate) patch_review_seat: Option<Arc<dyn runtime::PatchReviewSeat>>,
     pub(crate) mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     pub(crate) lsp_state: Option<Arc<Mutex<RuntimeLspState>>>,
 }

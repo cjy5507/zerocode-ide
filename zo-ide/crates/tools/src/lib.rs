@@ -115,6 +115,11 @@ pub use misc_tools::{
     MENTION_RUBRIC_VERSION,
 };
 pub use misc_tools::{
+    jev_patch_review_mode_from, note_patch_review_turn, patch_review_path, PatchReviewJudge,
+    PatchReviewLabelRow, PatchReviewRow, JEV_PATCH_REVIEW_SETTING, PATCH_REVIEW_DEADLINE,
+    PATCH_REVIEW_FILE, PATCH_REVIEW_OUTCOME_ANSWERED,
+};
+pub use misc_tools::{
     compaction_relevance_path, jev_compaction_mode_from, note_compaction_reread, CompactionJudge,
     CompactionLabelRow, CompactionRow, COMPACTION_JUDGMENT_DEADLINE, COMPACTION_OUTCOME_ANSWERED,
     COMPACTION_RELEVANCE_FILE, JEV_COMPACTION_SETTING,

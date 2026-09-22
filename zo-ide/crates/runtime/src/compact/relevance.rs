@@ -222,13 +222,24 @@ fn spoken(message: &ConversationMessage) -> String {
 /// The newest message of `role` that spoke — a user message that is only a
 /// tool result, or an assistant message that only called tools, is not one.
 fn newest_words(session: &Session, role: MessageRole) -> String {
-    session
-        .messages
+    newest_words_where(&session.messages, role, |_| true)
+}
+
+/// [`newest_words`] over `messages`, counting only the words `keep` accepts —
+/// the one reading of "the newest thing somebody said" every seat that asks
+/// about a conversation shares (the patch review keeps the person's own
+/// words and passes over what the harness wrote in their place, t-6203).
+pub(crate) fn newest_words_where(
+    messages: &[ConversationMessage],
+    role: MessageRole,
+    keep: impl Fn(&str) -> bool,
+) -> String {
+    messages
         .iter()
         .rev()
         .filter(|message| message.role == role)
         .map(spoken)
-        .find(|words| !words.trim().is_empty())
+        .find(|words| !words.trim().is_empty() && keep(words))
         .unwrap_or_default()
 }
 
