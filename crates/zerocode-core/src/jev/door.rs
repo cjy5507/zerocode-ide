@@ -634,6 +634,32 @@ pub fn cut(text: &str, cap: Cap) -> String {
     text
 }
 
+/// The newest `lines`, oldest first, joined by newlines, that fit `cap` bytes
+/// once the door has cleared them — a text read from its END (a screen's
+/// bottom, a transcript's last turns, a check's last lines). A line is counted
+/// at the larger of itself and the mark that may stand in for it, so the door
+/// — which cuts a text's end to its cap — never has to cut the newest words
+/// this kept.
+#[must_use]
+pub fn newest_within<S: AsRef<str>>(lines: &[S], cap: usize) -> String {
+    let mut used = 0;
+    let mut start = lines.len();
+    for (at, line) in lines.iter().enumerate().rev() {
+        let cleared = line.as_ref().len().max(WITHHELD_LINE.len());
+        let joined = cleared + usize::from(start < lines.len());
+        if used + joined > cap {
+            break;
+        }
+        used += joined;
+        start = at;
+    }
+    lines[start..]
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Cut in place; answer where the kept words end, before any mark.
 fn cut_in_place(text: &mut String, cap: Cap) -> usize {
     match cap {

@@ -359,7 +359,10 @@ fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
         .filter(|row| row.agreement_kind == AgreementKind::Hindsight)
         .map(|row| row.id)
         .collect();
-    assert_eq!(hindsight, vec![RECALL.id, PLACEMENT.id, COMPACTION.id]);
+    assert_eq!(
+        hindsight,
+        vec![RECALL.id, PLACEMENT.id, COMPACTION.id, PATCH_REVIEW.id]
+    );
     for row in JEV_USES.iter().filter(|row| row.promotes) {
         assert_eq!(
             row.agreement_rows_wanted,
@@ -1243,7 +1246,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 18);
+    assert_eq!(JEV_USES.len(), 19);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1402,4 +1405,105 @@ fn the_judgment_cache_sends_nothing_and_rises_on_the_memos_own_comparison() {
         .find("take_a_place(settings, requests)")
         .expect("the count");
     assert!(asked < looked && looked < counted, "{passing}");
+}
+
+/// The patch review seat (t-6203) asks four Noul questions of a patch an edit
+/// has just written — its hunks, the person's words and the evidence the edit
+/// followed, never the file around them — and rises on hindsight: whether the
+/// same lines were edited again inside its window.
+#[test]
+fn the_patch_review_seat_sends_a_patch_and_its_evidence_and_rises_on_hindsight() {
+    assert_eq!(jev_use("patch_review"), Some(&PATCH_REVIEW));
+    assert_eq!(PATCH_REVIEW.setting, "jevPatchReview");
+    assert_eq!(PATCH_REVIEW.ledger, "patch-review.jsonl");
+    assert_eq!(
+        PATCH_REVIEW.modes,
+        &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+        "a labeled seat offers all four words (seat contract, second correction)"
+    );
+    let sent: Vec<(&str, Cap)> = PATCH_REVIEW.sends.iter().map(|sent| (sent.at, sent.cap)).collect();
+    assert_eq!(
+        sent,
+        [
+            ("/state/task", Cap::Chars(PATCH_REVIEW_TASK_CHAR_CAP)),
+            ("/state/patch", Cap::Bytes(PATCH_REVIEW_PATCH_BYTE_CAP)),
+            ("/state/evidence", Cap::Bytes(PATCH_REVIEW_EVIDENCE_BYTE_CAP)),
+            ("/state/path", Cap::Uncut),
+        ],
+        "the hunks and the evidence's tail: no file body, and the path only as a fingerprint"
+    );
+    assert_eq!(PATCH_REVIEW_TASK_CHAR_CAP, ROUTING_TASK_CHAR_CAP);
+
+    const { assert!(PATCH_REVIEW.promotes) };
+    assert_eq!(PATCH_REVIEW.agreement_kind, AgreementKind::Hindsight);
+    assert_eq!(
+        PATCH_REVIEW.answer_floor_permille,
+        Some(PATCH_REVIEW_ANSWER_FLOOR_PERMILLE)
+    );
+    assert_eq!(PATCH_REVIEW_ANSWER_FLOOR_PERMILLE, 900);
+    assert_eq!(
+        PATCH_REVIEW.agreement_floor_permille,
+        Some(PATCH_REVIEW_AGREEMENT_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        PATCH_REVIEW.apply_deadline_ms,
+        Some(PATCH_REVIEW_APPLY_DEADLINE_MS)
+    );
+    assert_eq!(PATCH_REVIEW.window_forgives, Some(FORGIVES_A_BAD_MINUTE));
+    assert_eq!(PATCH_REVIEW.agreement_rows_wanted, Some(A_WINDOW_OF_COMPARISONS));
+    // The permit line is the reference harness's own 0.8, and it is not the
+    // seat's answer rate: one says how sure one review must be, the other how
+    // often the seat must answer at all.
+    assert_eq!(PATCH_REVIEW_PERMIT_FLOOR_PERMILLE, 800);
+    const { assert!(PATCH_REVIEW_PERMIT_FLOOR_PERMILLE > 500 && PATCH_REVIEW_PERMIT_FLOOR_PERMILLE < 1_000) };
+    const { assert!(PATCH_REVIEW_REGRET_TURNS == 5) };
+    assert!(
+        !PATCH_REVIEW.permits_press(1.0, crate::guarded::ControlKind::Plain),
+        "a review presses nothing and blocks nothing"
+    );
+
+    assert!(PATCH_REVIEW.mode_of(Some(&json!("on"))).applies());
+    assert!(!PATCH_REVIEW.mode_of(Some(&json!("shadow"))).applies_with(true));
+    assert!(!PATCH_REVIEW.mode_of(Some(&json!("auto"))).applies_with(false));
+    assert!(PATCH_REVIEW.mode_of(Some(&json!("auto"))).applies_with(true));
+    assert_eq!(PATCH_REVIEW.mode_in(&json!({})), JevMode::Off);
+    // Last in the table for now: the challenger seat's row (t-6151) takes the
+    // place before it when that branch lands.
+    assert_eq!(JEV_USES.last(), Some(&PATCH_REVIEW));
+}
+
+/// A request's receipt is the whole SHA-256 of the seat, the rubric version,
+/// the model asked for and the cleared bytes — each part framed by its
+/// length, so no two different requests share one digest by sliding bytes
+/// from one part into the next.
+#[test]
+fn a_request_digest_vouches_for_the_seat_the_rubric_the_model_and_the_bytes() {
+    let digest = digest_of("patch_review", 1, "jev-1.13.0", br#"{"state":{}}"#);
+    assert_eq!(digest.len(), 64, "the whole SHA-256: {digest}");
+    assert!(digest.chars().all(|glyph| glyph.is_ascii_hexdigit() && !glyph.is_ascii_uppercase()));
+    assert_eq!(
+        digest,
+        digest_of("patch_review", 1, "jev-1.13.0", br#"{"state":{}}"#),
+        "the same request, the same receipt"
+    );
+    for other in [
+        digest_of("compaction", 1, "jev-1.13.0", br#"{"state":{}}"#),
+        digest_of("patch_review", 2, "jev-1.13.0", br#"{"state":{}}"#),
+        digest_of("patch_review", 1, "jev-latest", br#"{"state":{}}"#),
+        digest_of("patch_review", 1, "jev-1.13.0", br#"{"state":{"a":1}}"#),
+    ] {
+        assert_ne!(digest, other, "every part is in the receipt");
+    }
+    // Framed: a byte moved from one part into the next is another request.
+    assert_ne!(digest_of("ab", 1, "c", b"d"), digest_of("a", 1, "bc", b"d"));
+    assert_ne!(digest_of("a", 1, "b", b"cd"), digest_of("a", 1, "bc", b"d"));
+    // Pinned, so an offline replay that frames the parts as the doc says
+    // reproduces it byte for byte.
+    assert_eq!(
+        digest_of("", 0, "", b""),
+        "353e4a6a2987c8ad2380e1971e961cfe482d00e5e599e3e1a296ea28a5374ddc"
+    );
+    // The fingerprint beside it is the same hasher, cut to sixteen digits.
+    assert_eq!(fingerprint_of("").len(), 16);
+    assert_eq!(fingerprint_of(""), "e3b0c44298fc1c14", "SHA-256 of nothing, cut");
 }
