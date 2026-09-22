@@ -27,6 +27,14 @@
 //! the door lets through ([`super::count`]); reading the settings and writing a
 //! refusal's row belong to the program that asks.
 //!
+//! A memo stands between the door and the wire ([`pass_remembering`],
+//! [`super::memo`]): once the four questions are answered, the cleared bytes
+//! are looked up, and a hit under a seat that may answer from it is a request
+//! that passed and does not leave — no byte sent, no place taken in the day.
+//! The memo is asked after consent and the switch, never before: a memo hit
+//! is still the person's words being judged, and a workspace they withdrew
+//! consent from is answered by nothing, remembered or not.
+//!
 //! A judgment asked twice meets the fourth question twice. The second request
 //! ([`super::hedge`]) carries the bytes the door already cleared, so consent,
 //! the switch and the key have been answered for it; what has not is the day's
@@ -34,10 +42,11 @@
 //! leave.
 
 use std::path::Path;
+use std::time::Instant;
 
 use serde_json::Value;
 
-use super::{CUT_MARK, Cap, JevMode, JevUse, SMART_SETTINGS_KEY, count};
+use super::{CUT_MARK, Cap, JevMode, JevUse, SMART_SETTINGS_KEY, count, memo};
 use crate::credential::{MASK, may_carry_a_credential};
 
 /// The object under `smart` the door's own settings live in.
@@ -355,6 +364,62 @@ pub fn pass(
     workspace: Option<&str>,
     requests: &Path,
 ) -> Result<Cleared, Refused> {
+    pass_remembering(ask, key, settings, workspace, requests, None).map(|passed| passed.cleared)
+}
+
+/// The memo a request may be answered from, when the asking seat keeps one.
+#[derive(Debug, Clone, Copy)]
+pub struct Memo<'a> {
+    /// The memo file ([`memo::MEMO_FILE`] under the Jev folder).
+    pub path: &'a Path,
+    /// The seat whose question this is — half of the memo's key.
+    pub seat: &'a JevUse,
+    /// Whether a hit may answer in the wire's place. Under `shadow`, and
+    /// under an `auto` nobody has raised, the memo is looked up and the
+    /// request still goes, so the two answers can be compared.
+    pub applying: bool,
+}
+
+/// What the memo said about one cleared request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Memoed {
+    /// The key the request was looked up under ([`memo::key_of`]).
+    pub key: String,
+    /// The answer the memo held, if it held one.
+    pub recalled: Option<memo::Recalled>,
+    /// How long the lookup took.
+    pub lookup_ms: u64,
+    /// Whether the memo answers this request: a hit under a seat that may
+    /// apply it. Then the request was not counted and must not be sent.
+    pub answered: bool,
+}
+
+/// A request the door let through, with what the memo knew of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Passed {
+    pub cleared: Cleared,
+    /// `None` when no memo was asked — a seat whose cache is off, or a use
+    /// that keeps none.
+    pub memo: Option<Memoed>,
+}
+
+/// [`pass`], with the memo between the door and the count: the four questions
+/// first, then the lookup of the cleared bytes, then the day's place — taken
+/// only for a request that will leave. A hit under `applying` leaves nothing
+/// and takes nothing; a hit under a seat that only compares is counted like
+/// any request, because the request still goes.
+///
+/// # Errors
+/// As [`pass`]. A memo hit never widens what the door lets through: every
+/// refusal is asked before the memo is.
+pub fn pass_remembering(
+    ask: impl FnOnce(&Asking<'_>) -> Result<Cleared, Refused>,
+    key: bool,
+    settings: &JevSettings,
+    workspace: Option<&str>,
+    requests: &Path,
+    memo: Option<Memo<'_>>,
+) -> Result<Passed, Refused> {
     let asking = Asking {
         key,
         settings,
@@ -362,7 +427,21 @@ pub fn pass(
         sent_today: count::sent(requests),
     };
     let cleared = ask(&asking)?;
-    take_a_place(settings, requests).map(|()| cleared)
+    let memo = memo.map(|memo| {
+        let looking = Instant::now();
+        let key = memo::key_of(memo.seat, cleared.bytes());
+        let recalled = memo::recall(memo.path, &key);
+        Memoed {
+            answered: memo.applying && recalled.is_some(),
+            key,
+            recalled,
+            lookup_ms: u64::try_from(looking.elapsed().as_millis()).unwrap_or(u64::MAX),
+        }
+    });
+    if memo.as_ref().is_some_and(|memo| memo.answered) {
+        return Ok(Passed { cleared, memo });
+    }
+    take_a_place(settings, requests).map(|()| Passed { cleared, memo })
 }
 
 /// Take the day's place for a second request of a judgment already cleared —

@@ -54,7 +54,7 @@ use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
 use zerocode_core::jev::promote::SEAT_RECORDING;
-use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
+use zerocode_core::jev::summary::{AGREED, AT, CACHED, ELAPSED_MS};
 use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{
     ActionAsk, ActionChoice, ActionLook, Chosen, SCREEN_ACTION_RUBRIC_VERSION, Where, ask,
@@ -128,6 +128,94 @@ pub enum Judged {
 /// What asking a judgment cost at the Jev door — the wire's own account.
 pub use crate::systemone::Spent;
 
+/// How a walk is asked to go beyond today's loop — switches the caller sets,
+/// every one off by default, so a walk asked plainly is today's walk to the
+/// byte ([`run`] is [`run_with`] under these).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Options {
+    /// Overlap the next judgment with the press before it (t-6132 S2): the
+    /// moment a goal walk's press is taken, the next question is asked of
+    /// the screen as it was — the last look, with the pressed number spent
+    /// and its legend among `pressed` — on a thread of its own, while the
+    /// press lands and the next look is taken. When that look asks the same
+    /// question to the byte, the answer in flight is used and the walk
+    /// waited only for what the judgment had left; when it does not, the
+    /// answer is dropped, its request spent, and the screen is asked afresh.
+    /// A press on a link, a screen one more stand from stuck, and a walk
+    /// that clears a stop never ask ahead: those walks do not come back to
+    /// the same screen.
+    pub overlap: bool,
+    /// The second rung (t-6132 S3): when the seat's judgment is under its
+    /// press floor, ask the second reader the walk was handed
+    /// ([`run_with`]'s `rescue`) the same closed choice, and press its
+    /// number under the seat's own press rule; only when that too is under
+    /// the floor, refused, a link, `give_up` or `done` does the walk step
+    /// back to the person as it does today. Off, the walk never asks: the
+    /// second reader costs a frontier turn.
+    pub rescue: bool,
+}
+
+/// What a judgment begun ahead of the walk came to ([`Pending::wait`]): the
+/// judge's answer, and what the judge would have said of itself had it been
+/// asked in the walk's own turn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Done {
+    pub judged: Judged,
+    pub spent: Option<Spent>,
+    pub cached: bool,
+    /// Rows of the judge's own seats (the judgment cache's, t-6132 S1) the
+    /// question wrote on the way, handed back to the judge that will write
+    /// them.
+    pub rows: Vec<Value>,
+}
+
+/// A judgment in flight — begun before the walk needed it, waited for only
+/// once the walk asks the very question it was begun on.
+#[derive(Debug)]
+pub struct Pending {
+    ask: ActionAsk,
+    done: std::sync::mpsc::Receiver<Done>,
+    began: std::time::Instant,
+}
+
+impl Pending {
+    /// A judgment of `ask` whose answer will arrive on `done`.
+    #[must_use]
+    pub fn new(ask: ActionAsk, done: std::sync::mpsc::Receiver<Done>) -> Self {
+        Self {
+            ask,
+            done,
+            began: std::time::Instant::now(),
+        }
+    }
+
+    /// Whether this is the very question the walk is asking now — the same
+    /// state and the same options, to the byte; anything else is another
+    /// screen and the answer in flight says nothing about it.
+    #[must_use]
+    pub fn matches(&self, asked: &ActionAsk) -> bool {
+        self.ask == *asked
+    }
+
+    /// Milliseconds the judgment has been running ahead of the walk.
+    #[must_use]
+    pub fn ran_ms(&self) -> u64 {
+        u64::try_from(self.began.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The answer, waited for. A judge whose thread died is a wire that
+    /// never answered, in the wire's own word.
+    #[must_use]
+    pub fn wait(self) -> Done {
+        self.done.recv().unwrap_or_else(|_| Done {
+            judged: Judged::Refused(crate::systemone::TRANSPORT.to_string()),
+            spent: None,
+            cached: false,
+            rows: Vec::new(),
+        })
+    }
+}
+
 /// Choosing one of the numbers a look handed out — the seam the window's
 /// System One wire sits behind and a test replaces.
 pub trait ActionJudge {
@@ -142,11 +230,43 @@ pub trait ActionJudge {
         Compared::Refused(branch::NO_COMPARISON.to_string())
     }
 
+    /// Begin choosing on a thread of the judge's own, for a walk that will
+    /// ask this very question next ([`Options::overlap`]). `None` from a
+    /// judge that cannot ask ahead — the default — and then the walk asks in
+    /// its own turn as ever.
+    fn begin(&mut self, ask: &ActionAsk) -> Option<Pending> {
+        let _ = ask;
+        None
+    }
+
+    /// Take back what a judgment begun ahead came to, so [`Self::spent`] and
+    /// [`Self::cached`] say of it what they would have said of a question
+    /// asked in turn.
+    fn finish(&mut self, done: Done) -> Judged {
+        done.judged
+    }
+
+    /// [`Self::choose`], told how long the walk can wait — what a second
+    /// reader whose answer takes seconds rather than a wire's milliseconds
+    /// needs ([`Options::rescue`]). A judge with a wall of its own ignores
+    /// it; the default asks as ever.
+    fn choose_within(&mut self, ask: &ActionAsk, left: Duration) -> Judged {
+        let _ = left;
+        self.choose(ask)
+    }
+
     /// What the last [`Self::choose`] or [`Self::compare`] sent through the
     /// Jev door, for the row. A judge that sends nowhere — a test's — has
     /// nothing to say.
     fn spent(&self) -> Option<Spent> {
         None
+    }
+
+    /// Whether the last [`Self::choose`] was answered by the judgment memo
+    /// rather than the wire ([`zerocode_core::jev::memo`], t-6132) — the
+    /// row's [`CACHED`], so a counter reads it as an answer and not a call.
+    fn cached(&self) -> bool {
+        false
     }
 }
 
@@ -506,6 +626,23 @@ const USE_FALLBACK: &str = zerocode_core::jev::ROUTE_USE_FALLBACK;
 /// in cannot come to spell it differently.
 pub(crate) const REASON: &str = "reason";
 
+/// The key a row says under which way a judgment begun ahead of the walk
+/// went ([`Options::overlap`]), and its two words: the walk asked the very
+/// question and used the answer, or the next look asked another and the
+/// answer was dropped with its request spent.
+pub const OVERLAP: &str = "overlap";
+pub const OVERLAP_USED: &str = "used";
+pub const OVERLAP_DISCARDED: &str = "discarded";
+
+/// The key a row keeps what the second reader said under
+/// ([`Options::rescue`]): its outcome, what it chose, its confidence and
+/// how long it took — beside the seat's own judgment, which stays the row's
+/// `confidence` and `chosen`. `rescuedBy` names who pressed when the second
+/// reader did.
+pub const RESCUE: &str = "rescue";
+pub const RESCUED_BY: &str = "rescuedBy";
+pub const RESCUED_BY_TEAM: &str = "team";
+
 /// Why this walk pressed nothing, when one of its rows says why.
 ///
 /// The caller asks here rather than reading `pressed: 0` and guessing. A walk
@@ -547,6 +684,18 @@ pub struct Walked {
     /// The branching seat's rows (t-6044): one per forked step, written to
     /// that seat's own ledger by the caller, never to the screen seat's.
     pub forks: Vec<Value>,
+    /// Judgments begun ahead of the walk that the walk went on to use
+    /// ([`Options::overlap`]).
+    pub overlapped: usize,
+    /// Judgments begun ahead that the next look made moot — their request
+    /// spent, the screen asked afresh.
+    pub discarded: usize,
+    /// Steps the seat's judgment left under its press floor that the second
+    /// reader pressed for ([`Options::rescue`]).
+    pub rescued: usize,
+    /// Steps the second reader was asked about and could not press for —
+    /// the walk stepped back to the person as it does today.
+    pub rescue_failed: usize,
 }
 
 /// One row, with the words every ledger of this family uses.
@@ -592,6 +741,11 @@ fn note(said: &mut Value, key: &str, value: Value) {
 /// ledger has promoted it (`crate::systemone::applies`), and the ledger is a
 /// file this module has no business reading in the middle of a walk. `mode`
 /// still says whether anything is ASKED, and still names itself on every row.
+///
+/// The window's two callers ask through [`run_with`], with the switches the
+/// verb was given; this plain form is the tests' — every switch off, no
+/// second reader — and the promise [`run_with`] keeps is that it is this.
+#[cfg(test)]
 pub fn run(
     mode: Mode,
     acting: bool,
@@ -599,13 +753,26 @@ pub fn run(
     judge: &mut dyn ActionJudge,
     world: &mut dyn World,
 ) -> Walked {
-    run_with(mode, acting, Branching::OFF, at, judge, world)
+    run_with(
+        mode,
+        acting,
+        Branching::OFF,
+        at,
+        judge,
+        world,
+        Options::default(),
+        None,
+    )
 }
 
 /// [`run`], with the branching seat's standing beside the screen seat's
-/// (t-6044): `branching` says whether a phone step whose judgment ranked two
-/// or more controls is asked about at all, and whether the comparison's pick
-/// is the one pressed. [`Branching::OFF`] is [`run`] byte for byte.
+/// (t-6044) and the switches a caller may set (t-6132): `branching` says
+/// whether a phone step whose judgment ranked two or more controls is asked
+/// about at all, and whether the comparison's pick is the one pressed;
+/// [`Options`] are the walk's own switches, and `rescue` the second reader
+/// they may ask ([`Options::rescue`]). [`Branching::OFF`] with every switch
+/// off is [`run`] byte for byte, whoever was handed in.
+#[allow(clippy::too_many_arguments)]
 pub fn run_with(
     mode: Mode,
     acting: bool,
@@ -613,10 +780,32 @@ pub fn run_with(
     at: &Errand<'_>,
     judge: &mut dyn ActionJudge,
     world: &mut dyn World,
+    options: Options,
+    rescue: Option<&mut dyn ActionJudge>,
 ) -> Walked {
-    let mut walked = walk(mode, acting, branching, at, judge, world);
+    let mut walked = walk(mode, acting, branching, at, judge, world, options, rescue);
     agree(&mut walked);
     walked
+}
+
+/// Whether pressing `item` carries the screen elsewhere — a link, on a page
+/// or in an app's tree — so the screen after it is not one the last look
+/// can stand in for ([`Options::overlap`]).
+#[must_use]
+pub fn moves_the_page(item: &Value) -> bool {
+    item.get("role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role.eq_ignore_ascii_case("link") || role.ends_with("Link"))
+}
+
+/// A row's words with a judgment-in-flight note on them, when there is one.
+fn overlapped(mut said: Value, overlap: Option<&Value>) -> Value {
+    if let (Some(said), Some(Value::Object(overlap))) = (said.as_object_mut(), overlap) {
+        for (key, value) in overlap {
+            said.insert(key.clone(), value.clone());
+        }
+    }
+    said
 }
 
 /// What the walk itself said about the numbers it pressed, written onto the
@@ -643,6 +832,7 @@ fn agree(walked: &mut Walked) {
 /// The walk itself, up to whichever gate ends it — [`run`] is this and the
 /// hindsight mark, kept apart so that every one of the exits below lands in
 /// one place that can stamp them.
+#[allow(clippy::too_many_arguments)]
 fn walk(
     mode: Mode,
     acting: bool,
@@ -650,12 +840,14 @@ fn walk(
     at: &Errand<'_>,
     judge: &mut dyn ActionJudge,
     world: &mut dyn World,
+    options: Options,
+    mut rescue: Option<&mut dyn ActionJudge>,
 ) -> Walked {
     let mut walked = Walked::default();
     // The forked step waiting for the walk's next step to grade it (t-6044):
     // the row's place among `walked.forks`, and whether the comparison named
     // the candidate that was actually pressed.
-    let mut pending: Option<branch::Pending> = None;
+    let mut fork: Option<branch::Pending> = None;
     if matches!(at.why, Why::Goal { .. }) {
         walked.reached = Some(false);
     }
@@ -685,6 +877,10 @@ fn walk(
     let mut pressed_so_far: Vec<String> = Vec::new();
     let mut before: Option<Screen> = None;
     let mut still = 0usize;
+    // The judgment begun on the last look, if the walk asked ahead
+    // ([`Options::overlap`]): used when the next look asks the same question,
+    // dropped when it does not.
+    let mut ahead: Option<Pending> = None;
     for attempt in 1..=at.steps() {
         if world.left_ms() <= u64::try_from(ACTION_DEADLINE.as_millis()).unwrap_or(u64::MAX) {
             // Out of time with the errand unserved: whatever was pressed on
@@ -721,7 +917,7 @@ fn walk(
             Some(was) if was.same_as(&screen) => {
                 // A forked step whose pick left the screen where it was is a
                 // step the walk now retries (t-6044).
-                branch::settle(&mut walked, pending.take(), NextStep::SameScreen);
+                branch::settle(&mut walked, fork.take(), NextStep::SameScreen);
                 still += 1;
                 if still >= SAME_SCREEN_LIMIT {
                     walked.agreed = Some(false);
@@ -761,55 +957,87 @@ fn walk(
 
         let candidates = asked.marks().len();
         let judging = std::time::Instant::now();
-        let judged = judge.choose(&asked);
+        // A judgment begun on the last look answers this question only when
+        // it IS this question; the row says which way it went, and how much
+        // of the judgment the walk never waited for.
+        let (judged, overlap) = match ahead.take() {
+            Some(begun) if begun.matches(&asked) => {
+                let hidden_ms = begun.ran_ms();
+                walked.overlapped += 1;
+                (
+                    judge.finish(begun.wait()),
+                    Some(json!({ OVERLAP: OVERLAP_USED, "hiddenMs": hidden_ms })),
+                )
+            }
+            Some(begun) => {
+                walked.discarded += 1;
+                drop(begun);
+                (
+                    judge.choose(&asked),
+                    Some(json!({ OVERLAP: OVERLAP_DISCARDED })),
+                )
+            }
+            None => (judge.choose(&asked), None),
+        };
         let judgment_ms = u64::try_from(judging.elapsed().as_millis()).unwrap_or(u64::MAX);
         let spent = judge.spent();
         let choice = match judged {
             Judged::Chose(choice) => choice,
             Judged::Refused(token) => {
                 // A next step nobody judged shows nothing about the fork.
-                branch::settle(&mut walked, pending.take(), NextStep::Unknown);
+                branch::settle(&mut walked, fork.take(), NextStep::Unknown);
                 walked.rows.push(row(
                     mode,
                     at,
                     attempt,
-                    stamped(
-                        json!({
-                            "outcome": token,
-                            "candidates": candidates,
-                            "routeUse": USE_FALLBACK,
-                        }),
-                        spent,
-                        judgment_ms,
-                        crate::project_runtime::now_epoch_ms(),
+                    overlapped(
+                        stamped(
+                            json!({
+                                "outcome": token,
+                                "candidates": candidates,
+                                "routeUse": USE_FALLBACK,
+                            }),
+                            spent,
+                            judgment_ms,
+                            crate::project_runtime::now_epoch_ms(),
+                        ),
+                        overlap.as_ref(),
                     ),
                 ));
                 return walked;
             }
         };
-        let mut said = stamped(
-            json!({
-                "outcome": "answered",
-                "candidates": candidates,
-                "showsLines": shows_lines,
-                "pressedBefore": pressed_so_far.len(),
-                "confidence": choice.confidence,
-                "probabilities": choice.probabilities,
-            }),
-            spent,
-            judgment_ms,
-            crate::project_runtime::now_epoch_ms(),
+        let mut said = overlapped(
+            stamped(
+                json!({
+                    "outcome": "answered",
+                    "candidates": candidates,
+                    "showsLines": shows_lines,
+                    "pressedBefore": pressed_so_far.len(),
+                    "confidence": choice.confidence,
+                    "probabilities": choice.probabilities,
+                }),
+                spent,
+                judgment_ms,
+                crate::project_runtime::now_epoch_ms(),
+            ),
+            overlap.as_ref(),
         );
         // The screen moved past the last forked step: what the judgment says
         // of the new screen is that step's mark (t-6044) — a control to press
         // is the walk going on, `done` is the goal, `give_up` is a dead end.
-        if pending.is_some() {
+        if fork.is_some() {
             let next = match choice.chosen {
                 Chosen::Mark(_) => NextStep::MovedOn,
                 Chosen::Done => NextStep::Reached,
                 Chosen::GiveUp => NextStep::GaveUp,
             };
-            branch::settle(&mut walked, pending.take(), next);
+            branch::settle(&mut walked, fork.take(), next);
+        }
+        // A memo hit is an answer that sent nothing: the row says so in the
+        // one word every Jev ledger's counter reads it by.
+        if judge.cached() {
+            note(&mut said, CACHED.canonical, json!(true));
         }
         let chosen = match choice.chosen {
             Chosen::Mark(mark) => mark,
@@ -853,26 +1081,87 @@ fn walk(
             return walked;
         }
 
+        // The second rung ([`Options::rescue`]): a judgment under the seat's
+        // press floor is put to the second reader as the same closed choice,
+        // and its number is pressed under the same rule — or the walk steps
+        // back to the person as it does today.
+        let mut chosen = chosen;
+        // The second reader's own answer, when it pressed: the ranking a
+        // forked step reads its candidates off, in place of the seat's.
+        let mut rescued_by: Option<ActionChoice> = None;
         if !press_policy.permits_press(choice.confidence) {
-            note(&mut said, "barred", json!(Barred::LowConfidence.as_str()));
-            note(&mut said, "pressed", json!(false));
-            note(&mut said, "routeUse", json!(USE_FALLBACK));
-            walked.rows.push(row(mode, at, attempt, said));
-            return walked;
+            let seen = before
+                .as_ref()
+                .expect("the screen this walk just looked at");
+            let rescued = match rescue.as_deref_mut().filter(|_| options.rescue) {
+                Some(team) => {
+                    let asking = std::time::Instant::now();
+                    let answered =
+                        team.choose_within(&asked, Duration::from_millis(world.left_ms()));
+                    let team_ms = u64::try_from(asking.elapsed().as_millis()).unwrap_or(u64::MAX);
+                    let (word, mark) = second_rung(press_policy, seen, &answered);
+                    if let (Some(_), Judged::Chose(second)) = (mark, &answered) {
+                        rescued_by = Some(second.clone());
+                    }
+                    note(
+                        &mut said,
+                        RESCUE,
+                        json!({
+                            "outcome": word,
+                            "chosen": match &answered {
+                                Judged::Chose(second) => match second.chosen {
+                                    Chosen::Mark(mark) => format!("mark:{mark}"),
+                                    Chosen::GiveUp => zerocode_core::screen_action::GIVE_UP.to_string(),
+                                    Chosen::Done => zerocode_core::screen_action::DONE.to_string(),
+                                },
+                                Judged::Refused(token) => token.clone(),
+                            },
+                            "confidence": match &answered {
+                                Judged::Chose(second) => json!(second.confidence),
+                                Judged::Refused(_) => Value::Null,
+                            },
+                            ELAPSED_MS.canonical: team_ms,
+                        }),
+                    );
+                    mark
+                }
+                None => None,
+            };
+            match rescued {
+                Some(mark) => {
+                    walked.rescued += 1;
+                    chosen = mark;
+                    note(&mut said, RESCUED_BY, json!(RESCUED_BY_TEAM));
+                    note(&mut said, "chosen", json!(format!("mark:{mark}")));
+                }
+                None => {
+                    if options.rescue && rescue.is_some() {
+                        walked.rescue_failed += 1;
+                    }
+                    note(&mut said, "barred", json!(Barred::LowConfidence.as_str()));
+                    note(&mut said, "pressed", json!(false));
+                    note(&mut said, "routeUse", json!(USE_FALLBACK));
+                    walked.rows.push(row(mode, at, attempt, said));
+                    return walked;
+                }
+            }
         }
+        let chosen = chosen;
 
         // The forked step (t-6044): on a phone whose judgment ranked two or
         // more controls, the branching seat may try the top candidates on a
         // saved device and make the comparison's pick canonical. Off, it is
         // the press below exactly; every other way out presses the number
-        // chosen above — the first candidate — as today.
+        // chosen above — the first candidate — as today. A step the second
+        // reader pressed for is forked on the second reader's own ranking:
+        // its answer is the choice the walk goes out with (t-6132 S3).
         let forked = branch::step(
             &branch::Step {
                 branching,
                 at,
                 attempt,
                 screen: before.as_ref(),
-                choice: &choice,
+                choice: rescued_by.as_ref().unwrap_or(&choice),
                 chosen,
                 look_ms,
             },
@@ -885,12 +1174,50 @@ fn walk(
             note(&mut said, "forked", json!(format!("mark:{}", forked.mark)));
         }
         let chosen = forked.mark;
-        if let Some(fork) = forked.row {
-            pending = Some(branch::Pending {
+        if let Some(row) = forked.row {
+            fork = Some(branch::Pending {
                 row: walked.forks.len(),
                 same_pick: forked.same_pick,
             });
-            walked.forks.push(fork);
+            walked.forks.push(row);
+        }
+
+        let seen = before
+            .as_ref()
+            .expect("the screen this walk just looked at");
+        let legend = legend_of(seen, chosen);
+        // Ask ahead ([`Options::overlap`]), before the press: the next
+        // question as the last look would put it — this screen, the chosen
+        // number spent, its legend among `pressed` — begun now, so the
+        // judgment runs while the press lands and the next look is taken.
+        // Only a goal walk comes back to a look; not after a link, whose
+        // screen is another page; not when one more stand on this screen
+        // would end the walk before it asked; not on the last step, which
+        // asks nothing more.
+        // A forked step asks ahead only once its canonical number stands: the
+        // fork's own presses and looks are the fork's and not the walk's, so
+        // nothing was begun over them, and the question begun here names the
+        // number the hand goes out with.
+        if options.overlap
+            && matches!(at.why, Why::Goal { .. })
+            && attempt < at.steps()
+            && still + 1 < SAME_SCREEN_LIMIT
+            && !presses_a_link(seen, chosen)
+        {
+            let mut tried_ahead = tried.clone();
+            tried_ahead.push(chosen);
+            let mut pressed_ahead = pressed_so_far.clone();
+            pressed_ahead.push(legend.clone());
+            ahead = ask(&ActionLook {
+                goal: at.goal,
+                errand: at.asked(),
+                at: seen.at.asked(),
+                tried: &tried_ahead,
+                items: &seen.items,
+                pressed: &pressed_ahead,
+                shows: &seen.shows,
+            })
+            .and_then(|question| judge.begin(&question));
         }
         let pressed = match forked.pressed {
             Some(pressed) => pressed,
@@ -909,17 +1236,7 @@ fn walk(
             return walked;
         }
         tried.push(chosen);
-        pressed_so_far.push(
-            before
-                .as_ref()
-                .and_then(|seen| {
-                    seen.items.iter().find(|item| {
-                        item.get("mark").and_then(Value::as_u64) == u64::try_from(chosen).ok()
-                    })
-                })
-                .and_then(zerocode_core::computer_use_protocol::marks::legend_line)
-                .unwrap_or_else(|| format!("mark:{chosen}")),
-        );
+        pressed_so_far.push(legend);
         walked.pressed += 1;
         note(&mut said, "pressed", json!(true));
         note(&mut said, "routeUse", json!(USE_APPLIED));
@@ -942,7 +1259,7 @@ fn walk(
                 // the stop is the walk going on, the same stop again a retry.
                 branch::settle(
                     &mut walked,
-                    pending.take(),
+                    fork.take(),
                     if cleared {
                         NextStep::Reached
                     } else {
@@ -964,7 +1281,7 @@ fn walk(
                 }
                 walked.rows.push(row(mode, at, attempt, said));
                 if reached == Some(true) {
-                    branch::settle(&mut walked, pending.take(), NextStep::Reached);
+                    branch::settle(&mut walked, fork.take(), NextStep::Reached);
                     walked.reached = Some(true);
                     return walked;
                 }
@@ -972,6 +1289,46 @@ fn walk(
         }
     }
     walked
+}
+
+/// What the second reader's answer comes to under the seat's own press rule
+/// ([`Options::rescue`]): the number to press, and the word the row says it
+/// by. `pressed` when it named a number the seat would press; `low_confidence`
+/// when its confidence is under the floor; `link` when the number carries the
+/// screen elsewhere — a rescue that navigates away is the person's call;
+/// `give_up`/`done` when it declined to press; the wire's own token when it
+/// answered nothing.
+fn second_rung(policy: &JevUse, seen: &Screen, answered: &Judged) -> (String, Option<usize>) {
+    match answered {
+        Judged::Refused(token) => (token.clone(), None),
+        Judged::Chose(second) => match second.chosen {
+            Chosen::GiveUp => (zerocode_core::screen_action::GIVE_UP.to_string(), None),
+            Chosen::Done => (zerocode_core::screen_action::DONE.to_string(), None),
+            Chosen::Mark(_) if !policy.permits_press(second.confidence) => {
+                (Barred::LowConfidence.as_str().to_string(), None)
+            }
+            Chosen::Mark(mark) if presses_a_link(seen, mark) => ("link".to_string(), None),
+            Chosen::Mark(mark) => ("pressed".to_string(), Some(mark)),
+        },
+    }
+}
+
+/// The control `mark` names on `seen`, as the legend named it — what a walk
+/// writes among `pressed` once it has pressed it.
+fn legend_of(seen: &Screen, mark: usize) -> String {
+    seen.items
+        .iter()
+        .find(|item| item.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok())
+        .and_then(zerocode_core::computer_use_protocol::marks::legend_line)
+        .unwrap_or_else(|| format!("mark:{mark}"))
+}
+
+/// Whether the control `mark` names on `seen` carries the screen elsewhere.
+fn presses_a_link(seen: &Screen, mark: usize) -> bool {
+    seen.items
+        .iter()
+        .find(|item| item.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok())
+        .is_some_and(moves_the_page)
 }
 
 /// Write the walk's rows down, in both of the places a screen seat's row
@@ -1046,6 +1403,7 @@ fn cleared_past(report: &Value, was: usize) -> bool {
 pub mod branch;
 pub mod desk;
 pub mod live;
+pub mod team;
 pub mod walk;
 
 #[cfg(test)]

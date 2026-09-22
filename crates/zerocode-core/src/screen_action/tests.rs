@@ -348,3 +348,53 @@ fn the_state_carries_what_was_pressed_and_what_the_screen_shows_cut_to_the_caps(
     let blank = vec!["  ".to_string(), "42".to_string()];
     assert_eq!(shows_cut(&blank), vec!["42"], "blank lines are not lines");
 }
+
+/// A second reader's answer — one option, one confidence — is judged by the
+/// closed choice's own rules: only an offered option, only a share.
+#[test]
+fn a_second_readers_answer_is_judged_against_the_offered_set() {
+    let items = vec![
+        json!({ "mark": 3, "role": "button", "label": "저장", "centerX": 10.0, "centerY": 20.0 }),
+        json!({ "mark": 5, "role": "link", "label": "닫기", "centerX": 30.0, "centerY": 20.0 }),
+    ];
+    let asked = ask(&ActionLook {
+        goal: "채팅방 열기",
+        errand: Errand::Goal,
+        at: Where::Page {
+            host: "app.local",
+            path: "/",
+        },
+        tried: &[],
+        items: &items,
+        pressed: &[],
+        shows: &[],
+    })
+    .expect("asks");
+    let chosen = asked.choice_of(" mark:5 ", 0.8).expect("an offered number");
+    assert_eq!(chosen.chosen, Chosen::Mark(5));
+    assert_eq!(chosen.confidence, 0.8);
+    assert_eq!(chosen.probabilities, [("mark:5".to_string(), 0.8)].into());
+    assert_eq!(
+        asked.choice_of(GIVE_UP, 0.5).expect("offered").chosen,
+        Chosen::GiveUp
+    );
+    assert_eq!(
+        asked.choice_of(DONE, 1.0).expect("offered").chosen,
+        Chosen::Done
+    );
+    assert_eq!(
+        asked.choice_of("mark:4", 0.9).unwrap_err(),
+        ActionRefusal::UnknownOption
+    );
+    assert_eq!(
+        asked.choice_of("", 0.9).unwrap_err(),
+        ActionRefusal::UnknownOption
+    );
+    for not_a_share in [-0.1, 1.01, f64::NAN] {
+        assert_eq!(
+            asked.choice_of("mark:3", not_a_share).unwrap_err(),
+            ActionRefusal::NotOne,
+            "{not_a_share}"
+        );
+    }
+}

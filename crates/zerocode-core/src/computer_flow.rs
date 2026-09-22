@@ -2088,7 +2088,7 @@ mod tests {
             .is_err()
         );
         assert!(usage().contains(
-            "recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--end N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--json]"
+            "recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--end N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--rescue] [--json]"
         ));
         assert!(
             parse_command(&words(&["recipe-show", "--name", "pay", "--confirm", "x"])).is_err()
