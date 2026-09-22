@@ -1,5 +1,61 @@
 # Changelog
 
+## [1.1.15] — 2026-09-23
+
+_since v1.1.14 (62 commits)_
+
+### feat
+- feat(window): a `read --full` after a fold labels the fold regretted, and the read measurement shows page medians and totals without the bot walls (t-6162 F6)
+- feat(jev): the judgment cache offers `on` — a labeled seat carries all four words, the person's own override among them (seat contract, second correction; t-6132)
+- feat(computer-use): the second rung — a screen judgment under its press floor is put to the frontier, headless, before the walk steps back to the person (t-6132 S3)
+- feat(computer-use): a goal walk asked to `--overlap` judges the next look before the press lands — the question begun on the last look is used when the next look asks it to the byte, dropped when it does not (t-6132 S2)
+- feat(window): every CLI that signs itself in has a row — the login table carries the survey's twenty-nine, and says plainly where it cannot read one (t-6120)
+- feat(jev): the judgment cache seat — a screen question the door already cleared with the same bytes is answered from a memo, and a Flow walked again asks the wire nothing (t-6132 S1)
+- feat(window): the branching seat — a forked phone step tries the judgment's top candidates on a saved AVD and presses the result Jev picks (t-6044)
+- feat(recall): a page five readers left unopened is not brought in by the graph — RecallDemand seam behind with_demand, unaddressed pages sink past the hub lift and stop arriving as neighbours; own words still recall them. Not wired to a ledger yet (the recall seat labels only its first note). Replay over 681 queries: read-history slots 29.1%→34.9%, unaddressed slots 35.1%→8.5%, 63 read pages displaced by newly admitted neighbours
+- feat(jev): the mention rerank seat — the @ popup and the /resume list keep their fuzzy page, and one judgment may reorder it only while the selection still sits on row one (t-6042)
+- feat(window): the notify seat — one ring judged where today's table decides, held or dropped only under a risen auto, and labeled by the person's own hand (t-6043)
+- feat(window): the browser read folds a page's furniture — one Jev seat cuts the body at its landmarks, asks each block in parallel shards, and the next press labels it (t-6041)
+- feat(jev): the agent tool seat — zo's `Jev` tool and `zo jev ask|choose|score` through the one door (t-6040)
+- feat(jev): the compaction seat — tool results leave the summary by relevance, not age, and the turns after grade the drop (t-6039)
+- feat(knowledge): the vault's graph grafts the code its pages name — files ⬢ and definitions ✚ on measured lines (t-5970)
+- feat(window): Grok and Kimi sign in from the accounts pane — one CLI login table, Codex on the shared runner (t-6003)
+- feat(zo): `impact` — the callers and tests one definition reaches, asked before changing it (t-5970)
+- feat(knowledge): the lens's picture exports as one self-contained HTML artifact (t-5966 G4)
+- feat(knowledge): paths between two pages are one calculator in core, asked by the window and by `zo vault path` (t-5966 G3)
+- feat(knowledge): every relation names the road that wrote it — measured, declared or inferred (t-5966 G1)
+- feat(codegraph): find_references can answer one definition, not a spelling (t-5970)
+- … 2 more feat commits
+
+### fix
+- fix(window): a branching row carries fingerprints of the goal and the device's name, not the words (t-6162 F12)
+- fix(window): a read row carries the host and the path's fingerprint, never the path (t-6162 F8)
+- fix(zo): the compaction replay takes one point per transcript and shows medians beside the pooled shares, with a Wilson floor on regret (t-6162 F5, F10)
+- fix(zo): the mention replay's intent no longer carries the file it names — the path and its name come out as substrings, and the table counts what is left (t-6162 F4)
+- fix(branching): the replay bounds the first pass alone — a Wilson lower bound over pooled passes was a sample twice its size (t-6162 F2)
+- fix(branching): a fork is wanted only when the seat is torn — a lead under the table's margin, or a leader under the press floor — and the golden stops spelling its own answers (t-6162 F3)
+- fix(jev): no seat rises with no marks to hand — the sample floor holds a hindsight seat exactly as it holds a comparison seat (t-6162 F1)
+- fix(jev): one mode set per kind of seat — every labeled seat offers off|shadow|on|auto, and the notify and branching rows stop being the odd ones out (t-6162 F7)
+- fix(ui): the agent-tool hint names the Jev tool and the zo jev command without backticks — no user-facing string is written in markdown
+- fix(jev): the adversarial verification's nine confirmed defects — consent pointers, replay leaks, thin labels, recall reads, hedge seed (t-5961)
+
+### docs
+- docs(window): the notify replay's table says what a hand is (t-6162 F9)
+
+### test
+- test(zo): the recall seat's rise test dates its labels inside the window it judges (t-6162, F1 follow-up)
+- test(window): two tests meet the F1 floor and the F3 margin after the S-wave merge (t-6162)
+- test(core): the recipe-run manual line the flow tables are pinned to now shows [--rescue] (t-6132 S3 follow-up)
+- test(window): the bell ladder contracts name the rungs without their visibility — the shipped-source reader strips pub(super) (t-6043)
+- test(knowledge): an edge label's word is its first text node — the tooltip title sits behind it (t-5966)
+
+### release
+- release: the parked-pointer hook test joins the load-flake list
+- release: the google_login seat-retake test joins the load-flake list
+
+### diet
+- diet(zo): two deferred-tool hook lines shed fifteen characters — the r49 tool bucket holds the agent tool seat beside the code graph
+
 ## [1.1.14] — 2026-09-22
 
 _since v1.1.13 (19 commits)_
