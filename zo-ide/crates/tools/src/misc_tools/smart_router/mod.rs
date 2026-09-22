@@ -6,6 +6,7 @@ mod decision_shadow;
 mod evidence;
 mod infer;
 mod jev_gate;
+mod mention_rerank;
 mod metadata;
 pub mod jev_summary;
 mod plan_shadow;
@@ -54,6 +55,11 @@ pub use compaction_seat::{
     CompactionRow, COMPACTION_JUDGMENT_DEADLINE, COMPACTION_OUTCOME_ANSWERED,
     COMPACTION_RELEVANCE_FILE,
 };
+pub use mention_rerank::{
+    mention_rerank_path, MentionAnswer, MentionAsk, MentionCandidate, MentionJudged, MentionLabelRow,
+    MentionRerank, MentionRerankRow, MentionSurface, MENTION_OUTCOME_ANSWERED, MENTION_RERANK_DEADLINE,
+    MENTION_RERANK_FILE, MENTION_RUBRIC_VERSION,
+};
 pub use skill_search::{
     note_loaded_skill, note_search_answer, search as skill_search,
     skill_search_path, Chosen, Searched, SkillLabelRow, SkillSearchRow, SKILL_OUTCOME_ANSWERED,
@@ -72,8 +78,10 @@ pub use plan_shadow::{
 };
 pub(crate) use settings::live_agent_model_policy;
 pub use settings::{
-    decision_shadow_mode_from, jev_compaction_mode_from, rerank_shadow_mode_from,
+    decision_shadow_mode_from, jev_compaction_mode_from, jev_mention_rerank_mode_from,
+    rerank_shadow_mode_from,
     skill_search_mode_from, DecisionShadowMode, DECISION_SHADOW_SETTING, JEV_COMPACTION_SETTING,
+    JEV_MENTION_RERANK_SETTING,
     RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING,
     conversation_anchor_ttl_for, conversation_anchor_ttl_from_root, CACHE_ANCHOR_TTL_ENV,
     smart_deep_tier_models, smart_deep_tier_models_for, smart_exec_swap, smart_setting_defaults,

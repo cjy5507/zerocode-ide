@@ -49,11 +49,15 @@ use std::path::{Path, PathBuf};
 
 use unicode_width::UnicodeWidthStr;
 
+use tools::{MentionAnswer, MentionCandidate};
+use zerocode_core::jev::MENTION_CANDIDATE_CAP;
+
 use crate::resume::ResumeSession;
 
 use super::ansi::{Color, Line, Span, Style};
 use super::palette;
 use super::paths::center_truncate_path;
+use super::rerank::{permute_head, PageRerank, Pick};
 
 /// codex `SESSION_META_DATE_WIDTH`.
 const DATE_WIDTH: usize = 12;
@@ -320,6 +324,9 @@ pub struct SessionPicker {
     /// `ensure_selected_visible` 이 그때 잡는다 — `Cell` 인 이유이고,
     /// `EffortEffect::started_at` 이 같은 이유로 `Cell` 이다.
     scroll_top: Cell<usize>,
+    /// zo (t-6042): 이 목록의 첫 페이지를 두고 mention 자리에 물은 것과 그
+    /// 답. `filtered` 는 답이 실행되기 전까지 필터·검색·정렬 그대로다.
+    rerank: PageRerank,
 }
 
 impl SessionPicker {
@@ -344,9 +351,67 @@ impl SessionPicker {
             reference_millis,
             selected: 0,
             scroll_top: Cell::new(0),
+            rerank: PageRerank::default(),
         };
         picker.apply_filter();
         picker
+    }
+
+    /// zo (t-6042): 목록의 첫 페이지가 바뀌었으면 mention 자리에 묻는다 —
+    /// `ask` 가 검색어와 후보 한 페이지(세션 id 와 첫 프롬프트 한 줄)를 받아
+    /// 자리의 티켓을 답한다 — 이미 든 답이 지금 실행될 수 있으면 실행한다.
+    /// 검색어가 비면 묻지 않는다: 의도가 없는 목록은 최근순 그대로다.
+    pub fn page_stands(&mut self, ask: impl FnOnce(&str, Vec<MentionCandidate>) -> Option<u64>) {
+        let candidates = self.page();
+        let selected_first = self.selected == 0;
+        let query = self.query.clone();
+        if let Some(order) = self.rerank.page_stands(&query, candidates, selected_first, ask) {
+            permute_head(&mut self.filtered, &order);
+        }
+    }
+
+    /// zo (t-6042): 자리의 답. 지금 페이지에 대한 물음의 답일 때만, 그리고
+    /// 사람이 고르기를 움직이지 않고 첫 행에 있을 때만 목록을 움직인다.
+    pub fn apply_rerank(&mut self, answer: &MentionAnswer) -> bool {
+        let names = self.page_names();
+        let selected_first = self.selected == 0;
+        match self.rerank.answered(answer, &names, selected_first) {
+            Some(order) => {
+                permute_head(&mut self.filtered, &order);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// zo (t-6042): 고른 행을 자리가 본 페이지에 대어 읽은 것 — 라벨용.
+    #[must_use]
+    pub fn pick(&self) -> Option<Pick> {
+        let id = self.selected_id()?;
+        self.rerank.pick(id)
+    }
+
+    /// 첫 페이지: 자리가 보는 대로 — 이름은 세션 id, 머리는 첫 프롬프트 한 줄.
+    fn page(&self) -> Vec<MentionCandidate> {
+        self.filtered
+            .iter()
+            .take(MENTION_CANDIDATE_CAP)
+            .map(|index| {
+                let row = &self.all[*index];
+                MentionCandidate {
+                    name: row.id.clone(),
+                    head: row.preview.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn page_names(&self) -> Vec<String> {
+        self.filtered
+            .iter()
+            .take(MENTION_CANDIDATE_CAP)
+            .map(|index| self.all[*index].id.clone())
+            .collect()
     }
 
     /// 지금 고른 세션의 id.
@@ -413,10 +478,12 @@ impl SessionPicker {
 
     pub fn up(&mut self) {
         self.selected = self.selected.saturating_sub(1);
+        self.rerank.moved();
     }
 
     pub fn down(&mut self) {
         self.selected = (self.selected + 1).min(self.filtered.len().saturating_sub(1));
+        self.rerank.moved();
     }
 
     /// codex `focus_next_toolbar_control`(tab).
@@ -482,6 +549,9 @@ impl SessionPicker {
         if self.filtered.is_empty() {
             self.scroll_top.set(0);
         }
+        // 목록은 다시 필터·검색·정렬 순서다; 든 답은 다음 `page_stands` 가
+        // 아직 실행될 수 있으면 다시 실행한다.
+        self.rerank.rows_rebuilt();
     }
 
     /// codex `row_matches_filter`.
@@ -1422,6 +1492,77 @@ mod tests {
         assert_eq!(cwd_column_width(40), 30);
         assert_eq!(cwd_column_width(120), 51);
         assert_eq!(cwd_column_width(400), 72);
+    }
+
+    /// zo (t-6042): the same page rule as the `@` popup, on the list.
+    fn three_sessions() -> SessionPicker {
+        let now = 10_000_000_000u128;
+        let rows: Vec<SessionRow> = [("parser-a", "fix the parser"), ("router-b", "route the thing"), ("parser-c", "parser tests")]
+            .iter()
+            .enumerate()
+            .map(|(index, (id, preview))| SessionRow {
+                id: (*id).to_string(),
+                cwd: None,
+                preview: (*preview).to_string(),
+                created_millis: now - index as u128 * 1_000,
+                updated_millis: now - index as u128 * 1_000,
+                held_by: None,
+            })
+            .collect();
+        SessionPicker::new(rows, None, now)
+    }
+
+    fn resume_answer(ticket: u64, order: &[usize], applies: bool) -> tools::MentionAnswer {
+        tools::MentionAnswer {
+            ticket,
+            surface: tools::MentionSurface::Resume,
+            order: order.to_vec(),
+            applies,
+        }
+    }
+
+    #[test]
+    fn the_list_is_asked_about_once_a_search_is_typed_and_the_answer_lands_on_the_first_row_only() {
+        let mut picker = three_sessions();
+        let asked = std::cell::RefCell::new(Vec::new());
+        let ask = |query: &str, candidates: Vec<tools::MentionCandidate>| {
+            asked.borrow_mut().push((query.to_string(), candidates));
+            Some(1)
+        };
+        picker.page_stands(ask);
+        assert!(asked.borrow().is_empty(), "no search, no intent, no question");
+        // Every row has an `r`: the search narrows nothing and names the intent.
+        picker.push_char('r');
+        picker.page_stands(ask);
+        {
+            let asked = asked.borrow();
+            assert_eq!(asked.len(), 1);
+            assert_eq!(asked[0].0, "r");
+            assert_eq!(asked[0].1.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["parser-a", "router-b", "parser-c"]);
+            assert_eq!(asked[0].1[0].head, "fix the parser", "a session's head is its first prompt");
+        }
+        assert_eq!(picker.visible_ids(), ["parser-a", "router-b", "parser-c"], "the first frame is the list as filtered");
+        assert!(picker.apply_rerank(&resume_answer(1, &[2, 0, 1], true)));
+        assert_eq!(picker.visible_ids(), ["parser-c", "parser-a", "router-b"]);
+        assert_eq!(picker.pick(), Some(super::Pick { ticket: 1, position: Some(2), reordered: true }));
+
+        let mut moved = three_sessions();
+        moved.push_char('r');
+        moved.page_stands(|_, _| Some(2));
+        moved.down();
+        assert!(!moved.apply_rerank(&resume_answer(2, &[2, 0, 1], true)));
+        assert_eq!(moved.visible_ids(), ["parser-a", "router-b", "parser-c"]);
+    }
+
+    #[test]
+    fn off_leaves_the_list_as_filtered_and_labels_nothing() {
+        let mut picker = three_sessions();
+        picker.push_char('p');
+        let golden = picker.lines(120, 30);
+        picker.page_stands(|_, _| None);
+        assert!(!picker.apply_rerank(&resume_answer(1, &[2, 0, 1], true)));
+        assert_eq!(picker.lines(120, 30), golden);
+        assert_eq!(picker.pick(), None);
     }
 
     /// t-2947 — the picker's cost must not depend on how long the newest

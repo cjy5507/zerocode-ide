@@ -24,11 +24,22 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use runtime::file_search::{fuzzy_match, FileMatch, MatchType, SearchRoot};
 use runtime::SkillIndexEntry;
 
+use tools::{MentionAnswer, MentionCandidate};
+use zerocode_core::jev::MENTION_CANDIDATE_CAP;
+
 use super::ansi::{Color, Line, Span, Style};
 use super::composer::{is_line_break, Composer};
 use super::palette;
+use super::rerank::{permute_head, PageRerank, Pick};
 use super::view::MAX_POPUP_ROWS;
 use crate::session::file_search::FileSearchManager;
+
+// The page the mention seat is asked about is the page the person sees: one
+// popup window, and the seat's row names the same number (t-6042).
+const _: () = assert!(
+    MAX_POPUP_ROWS == MENTION_CANDIDATE_CAP,
+    "the mention seat's page is the popup's window"
+);
 
 /// Codex `mentions_v2/candidate.rs::TAG_WIDTH` — the right-aligned tag column
 /// is as wide as its widest word.
@@ -341,6 +352,10 @@ pub struct MentionPopup {
     /// The vault's page root, when there is one — a match from it is a
     /// [`MentionType::Page`].
     page_root: Option<PathBuf>,
+    /// zo: what the mention seat was asked about this page, and what it
+    /// answered (t-6042). The rows above are the fuzzy page until an answer
+    /// the seat acts on lands while the selection still sits on row one.
+    rerank: PageRerank,
 }
 
 impl MentionPopup {
@@ -356,9 +371,70 @@ impl MentionPopup {
             search_mode: SearchMode::Results,
             state: ScrollState::default(),
             page_root,
+            rerank: PageRerank::default(),
         };
         popup.refresh_rows();
         popup
+    }
+
+    /// zo (t-6042): the page as it stands, put to the mention seat when it
+    /// changed — `ask` is handed the token and one page of candidates and
+    /// answers the seat's ticket — and permuted by an answer already held
+    /// when that answer may be applied now. Nothing here waits.
+    pub fn page_stands(&mut self, ask: impl FnOnce(&str, Vec<MentionCandidate>) -> Option<u64>) {
+        let candidates = self.page();
+        let selected_first = self.state.selected_idx == Some(0);
+        let query = self.query.clone();
+        if let Some(order) = self.rerank.page_stands(&query, candidates, selected_first, ask) {
+            permute_head(&mut self.rows, &order);
+        }
+    }
+
+    /// zo (t-6042): an answer from the seat. It lands only when it names the
+    /// question asked about this page, and moves the rows only while the
+    /// selection still sits on the first row and the person has not moved
+    /// it. Answers whether the page changed.
+    pub fn apply_rerank(&mut self, answer: &MentionAnswer) -> bool {
+        let names = self.page_names();
+        let selected_first = self.state.selected_idx == Some(0);
+        match self.rerank.answered(answer, &names, selected_first) {
+            Some(order) => {
+                permute_head(&mut self.rows, &order);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// zo (t-6042): the selected row's pick, read against the page the seat
+    /// saw — for the label the seat writes. `None` when nothing was asked.
+    #[must_use]
+    pub fn pick(&self) -> Option<Pick> {
+        let idx = self.state.selected_idx?;
+        let row = self.rows.get(idx)?;
+        self.rerank.pick(&row.display_name)
+    }
+
+    /// One page of the rows as the seat sees them: the name the row shows,
+    /// and the description a skill row shows beside it. A file or a page
+    /// has no head.
+    fn page(&self) -> Vec<MentionCandidate> {
+        self.rows
+            .iter()
+            .take(MENTION_CANDIDATE_CAP)
+            .map(|row| MentionCandidate {
+                name: row.display_name.clone(),
+                head: row.description.clone().unwrap_or_default(),
+            })
+            .collect()
+    }
+
+    fn page_names(&self) -> Vec<String> {
+        self.rows
+            .iter()
+            .take(MENTION_CANDIDATE_CAP)
+            .map(|row| row.display_name.clone())
+            .collect()
     }
 
     pub fn set_query(&mut self, query: &str) {
@@ -400,12 +476,14 @@ impl MentionPopup {
         let len = self.rows.len();
         self.state.move_up_wrap(len);
         self.state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
+        self.rerank.moved();
     }
 
     pub fn move_down(&mut self) {
         let len = self.rows.len();
         self.state.move_down_wrap(len);
         self.state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
+        self.rerank.moved();
     }
 
     pub fn previous_search_mode(&mut self) {
@@ -439,6 +517,9 @@ impl MentionPopup {
         let len = self.rows.len();
         self.state.clamp_selection(len);
         self.state.ensure_visible(len, MAX_POPUP_ROWS.min(len));
+        // The rows are the fuzzy page again; a held answer is re-applied by
+        // the next `page_stands`, if it still may be.
+        self.rerank.rows_rebuilt();
     }
 
     /// Codex `mentions_v2/render.rs::render_popup` — the rows, one blank row,
@@ -915,12 +996,32 @@ pub struct Mentions {
     popup: Option<MentionPopup>,
     dismissed: Option<DismissedToken>,
     current_file_query: Option<String>,
+    /// zo (t-6042): the pick the last completion made, read against the
+    /// page the mention seat saw, until the host takes it for the label.
+    last_pick: Option<Pick>,
 }
 
 impl Mentions {
     #[must_use]
     pub const fn popup(&self) -> Option<&MentionPopup> {
         self.popup.as_ref()
+    }
+
+    /// zo (t-6042): [`MentionPopup::page_stands`] on the open popup.
+    pub fn page_stands(&mut self, ask: impl FnOnce(&str, Vec<MentionCandidate>) -> Option<u64>) {
+        if let Some(popup) = self.popup.as_mut() {
+            popup.page_stands(ask);
+        }
+    }
+
+    /// zo (t-6042): [`MentionPopup::apply_rerank`] on the open popup.
+    pub fn apply_rerank(&mut self, answer: &MentionAnswer) -> bool {
+        self.popup.as_mut().is_some_and(|popup| popup.apply_rerank(answer))
+    }
+
+    /// zo (t-6042): the pick the last completion made, once.
+    pub fn take_pick(&mut self) -> Option<Pick> {
+        self.last_pick.take()
     }
 
     #[must_use]
@@ -1063,6 +1164,7 @@ impl Mentions {
     /// The `close_popup` tail of Codex's key handler: put the selection into
     /// the composer over the `@` token, then close.
     fn complete(&mut self, composer: &mut Composer, selected: Option<Selection>) {
+        self.last_pick = self.popup.as_ref().and_then(MentionPopup::pick);
         if let (Some(selected), Some((range, _))) = (selected, composer.at_token()) {
             match selected {
                 Selection::File(path) => {
@@ -1407,6 +1509,200 @@ mod tests {
         assert_eq!(row.chars().count(), 30, "{row:?}");
         assert!(row.contains('…'), "{row:?}");
         assert!(row.ends_with("File  "), "{row:?}");
+    }
+
+    /// zo (t-6042): the seat's answer lands on the page only while the
+    /// selection still sits on the first row of a page the person has not
+    /// moved through, and only for the question asked about this page.
+    fn three_files(query: &str) -> MentionPopup {
+        let root = Path::new("/repo");
+        let mut popup = MentionPopup::new(Vec::new(), query, None);
+        popup.set_file_matches(
+            query,
+            vec![
+                file_match("src/compact/mod.rs", root, None, 90),
+                file_match("src/tui/composer.rs", root, None, 80),
+                file_match("src/compose_tests.rs", root, None, 70),
+            ],
+        );
+        popup
+    }
+
+    fn rerank_answer(ticket: u64, order: &[usize], applies: bool) -> MentionAnswer {
+        MentionAnswer {
+            ticket,
+            surface: tools::MentionSurface::Mention,
+            order: order.to_vec(),
+            applies,
+        }
+    }
+
+    fn names(popup: &MentionPopup) -> Vec<String> {
+        popup.rows().iter().map(|row| row.display_name.clone()).collect()
+    }
+
+    #[test]
+    fn the_first_frame_is_the_fuzzy_page_and_the_seat_is_asked_about_it_once() {
+        let mut popup = three_files("comp");
+        let fuzzy = names(&popup);
+        let asked = std::cell::RefCell::new(Vec::new());
+        let ask = |query: &str, candidates: Vec<MentionCandidate>| {
+            asked.borrow_mut().push((query.to_string(), candidates));
+            Some(1)
+        };
+        popup.page_stands(ask);
+        popup.page_stands(ask);
+        assert_eq!(names(&popup), fuzzy, "the first frame is the fuzzy page, whatever was asked");
+        let asked = asked.borrow();
+        assert_eq!(asked.len(), 1, "the same page is asked about once");
+        assert_eq!(asked[0].0, "comp");
+        assert_eq!(
+            asked[0].1.iter().map(|candidate| candidate.name.as_str()).collect::<Vec<_>>(),
+            fuzzy.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        assert!(asked[0].1.iter().all(|candidate| candidate.head.is_empty()), "a file has no head");
+    }
+
+    #[test]
+    fn a_late_answer_reorders_the_page_only_on_the_first_row_of_an_unmoved_page() {
+        let mut popup = three_files("comp");
+        popup.page_stands(|_, _| Some(1));
+        assert!(popup.apply_rerank(&rerank_answer(1, &[1, 2, 0], true)));
+        assert_eq!(names(&popup), ["src/tui/composer.rs", "src/compose_tests.rs", "src/compact/mod.rs"]);
+        assert_eq!(popup.selected_index(), Some(0), "the selection stays on the first row — now the judgment's");
+        assert_eq!(popup.pick(), Some(Pick { ticket: 1, position: Some(1), reordered: true }));
+
+        let mut moved = three_files("comp");
+        moved.page_stands(|_, _| Some(2));
+        moved.move_down();
+        moved.move_up();
+        assert!(!moved.apply_rerank(&rerank_answer(2, &[1, 2, 0], true)), "a page the person moved through is theirs");
+        assert_eq!(names(&moved), ["src/compact/mod.rs", "src/tui/composer.rs", "src/compose_tests.rs"]);
+        assert_eq!(moved.pick(), Some(Pick { ticket: 2, position: Some(0), reordered: false }));
+    }
+
+    #[test]
+    fn an_answer_for_an_older_question_or_a_recording_mode_moves_nothing() {
+        let mut popup = three_files("comp");
+        popup.page_stands(|_, _| Some(3));
+        let before = popup.lines(80, palette::COMMAND_TOKEN);
+        assert!(!popup.apply_rerank(&rerank_answer(2, &[1, 2, 0], true)), "an older ticket");
+        assert!(!popup.apply_rerank(&rerank_answer(3, &[1, 2, 0], false)), "a recording mode's answer");
+        assert_eq!(popup.lines(80, palette::COMMAND_TOKEN), before, "the page's bytes did not move");
+        // The recording answer is still what the pick is read against.
+        assert_eq!(popup.pick(), Some(Pick { ticket: 3, position: Some(0), reordered: false }));
+    }
+
+    /// `off`: the seat asks nothing, so the popup's bytes are the bytes of a
+    /// popup that never heard of the seat — the golden frame's (t-5871).
+    #[test]
+    fn off_leaves_every_byte_of_the_page_as_it_was() {
+        let mut popup = three_files("comp");
+        let golden = popup.lines(80, palette::COMMAND_TOKEN);
+        popup.page_stands(|_, _| None);
+        assert!(!popup.apply_rerank(&rerank_answer(1, &[1, 2, 0], true)));
+        assert_eq!(popup.lines(80, palette::COMMAND_TOKEN), golden);
+        assert_eq!(popup.pick(), None, "nothing was asked, so nothing is labeled");
+        popup.set_query("compo");
+        popup.page_stands(|_, _| None);
+        let rendered: String = popup.lines(80, palette::COMMAND_TOKEN).iter().map(Line::plain).collect();
+        assert!(rendered.starts_with("> mod.rs"), "{rendered:?}");
+    }
+
+    /// A snapshot that rebuilds the same page takes the remembered order
+    /// again; one that changes the page forgets it and asks anew.
+    #[test]
+    fn a_rebuilt_page_keeps_the_judgments_order_and_a_changed_page_asks_anew() {
+        let root = Path::new("/repo");
+        let mut popup = three_files("comp");
+        let tickets = std::cell::Cell::new(10);
+        let ask = |_: &str, _: Vec<MentionCandidate>| {
+            tickets.set(tickets.get() + 1);
+            Some(tickets.get())
+        };
+        popup.page_stands(ask);
+        assert!(popup.apply_rerank(&rerank_answer(11, &[2, 0, 1], true)));
+        popup.set_file_matches(
+            "comp",
+            vec![
+                file_match("src/compact/mod.rs", root, None, 90),
+                file_match("src/tui/composer.rs", root, None, 80),
+                file_match("src/compose_tests.rs", root, None, 70),
+            ],
+        );
+        assert_eq!(names(&popup)[0], "src/compact/mod.rs", "the snapshot rebuilt the fuzzy page");
+        popup.page_stands(ask);
+        assert_eq!(names(&popup)[0], "src/compose_tests.rs", "the same page took the order again");
+        assert_eq!(tickets.get(), 11, "and was not asked again");
+        popup.set_query("compos");
+        popup.set_file_matches("compos", vec![file_match("src/tui/composer.rs", root, None, 80), file_match("src/compose_tests.rs", root, None, 70)]);
+        popup.page_stands(ask);
+        assert_eq!(tickets.get(), 12, "a changed page is a new question");
+        assert!(!popup.apply_rerank(&rerank_answer(11, &[1, 0], true)), "the old question's answer is for another page");
+    }
+
+    #[test]
+    fn a_completion_remembers_the_pick_for_the_host_once() {
+        let mut mentions = Mentions::default();
+        let mut composer = composer_with("look at @comp", "look at @comp".len());
+        let mut popup = three_files("comp");
+        popup.page_stands(|_, _| Some(5));
+        mentions.popup = Some(popup);
+        assert_eq!(mentions.key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &mut composer), MentionKey::Consumed);
+        assert_eq!(mentions.take_pick(), Some(Pick { ticket: 5, position: Some(0), reordered: false }));
+        assert_eq!(mentions.take_pick(), None, "taken once");
+    }
+
+    /// Measurement, not a gate (t-6042): what one keystroke costs the popup
+    /// with the seat's page bookkeeping beside it — `set_query`, the rows
+    /// rebuilt, and `page_stands` with an `ask` that clones the page the way
+    /// the seat does — against the same keystroke with nothing asked.
+    ///
+    /// ```text
+    /// cargo test -p zo-ide --release --lib -- --ignored --nocapture measure_a_keystroke_with_the_page_bookkeeping
+    /// ```
+    #[test]
+    #[ignore = "measurement, not a gate"]
+    fn measure_a_keystroke_with_the_page_bookkeeping() {
+        const KEYS: usize = 2_000;
+        let root = Path::new("/repo");
+        let matches: Vec<FileMatch> = (0..MAX_POPUP_ROWS)
+            .map(|n| file_match(&format!("src/tui/component_{n:02}.rs"), root, Some(vec![4, 5, 6]), 100 - u32::try_from(n).expect("a page of rows")))
+            .collect();
+        let mut asked = Vec::new();
+        let mut off = Vec::with_capacity(KEYS);
+        let mut on = Vec::with_capacity(KEYS);
+        for key in 0..KEYS {
+            let query = format!("comp{}", key % 7);
+            let mut popup = MentionPopup::new(Vec::new(), "com", None);
+            popup.set_file_matches("com", matches.clone());
+            let started = std::time::Instant::now();
+            popup.set_query(&query);
+            popup.page_stands(|_, _| None);
+            off.push(started.elapsed());
+            let mut popup = MentionPopup::new(Vec::new(), "com", None);
+            popup.set_file_matches("com", matches.clone());
+            let started = std::time::Instant::now();
+            popup.set_query(&query);
+            popup.page_stands(|query, candidates| {
+                // What the seat does on the key path: clone the ask and spawn.
+                asked.push((query.to_string(), candidates));
+                Some(key as u64)
+            });
+            on.push(started.elapsed());
+        }
+        let percentile = |samples: &mut Vec<std::time::Duration>, percent: usize| {
+            samples.sort_unstable();
+            samples[(samples.len() * percent / 100).min(samples.len() - 1)]
+        };
+        println!(
+            "keystroke on a {MAX_POPUP_ROWS}-row page over {KEYS} keys\n  seat off  p50 {:>8.1} µs  p95 {:>8.1} µs\n  seat on   p50 {:>8.1} µs  p95 {:>8.1} µs  ({} pages cloned)",
+            percentile(&mut off, 50).as_secs_f64() * 1e6,
+            percentile(&mut off, 95).as_secs_f64() * 1e6,
+            percentile(&mut on, 50).as_secs_f64() * 1e6,
+            percentile(&mut on, 95).as_secs_f64() * 1e6,
+            asked.len(),
+        );
     }
 
     fn composer_with(text: &str, cursor: usize) -> Composer {

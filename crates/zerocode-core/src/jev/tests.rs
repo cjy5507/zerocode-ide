@@ -636,6 +636,94 @@ fn the_compaction_seat_drops_by_relevance_and_rises_on_its_regret_marks() {
     );
 }
 
+/// A fuzzy page is reordered by what the person is writing, never by a
+/// body: the seat sends the sentence in progress, the token typed and one
+/// page of candidate names with the head each row already shows, asks one
+/// closed choice over them, and rises on the comparison the person makes
+/// with every pick — the row they took against the row the judgment put
+/// first. The wall is the routing seat's, because nothing waits on it: a
+/// late answer is dropped, and the page the person already sees stands.
+#[test]
+fn the_mention_seat_reranks_a_fuzzy_page_and_rises_on_the_persons_pick() {
+    assert_eq!(jev_use("mention_rerank"), Some(&MENTION_RERANK));
+    assert_eq!(MENTION_RERANK.setting, "jevMentionRerank");
+    let sent: Vec<&str> = MENTION_RERANK.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(
+        sent,
+        [
+            "/state/intent",
+            "/state/query",
+            "/state/candidates",
+            "/state/candidates/*/name",
+            "/state/candidates/*/head",
+        ],
+        "names and heads only: no file body, no page body, no transcript"
+    );
+    let caps: Vec<Cap> = MENTION_RERANK.sends.iter().map(|sent| sent.cap).collect();
+    assert_eq!(caps[0], Cap::Chars(MENTION_INTENT_CHAR_CAP));
+    assert_eq!(
+        caps[1],
+        Cap::Chars(MENTION_INTENT_CHAR_CAP),
+        "the token is part of the same sentence"
+    );
+    assert_eq!(caps[2], Cap::Items(MENTION_CANDIDATE_CAP));
+    assert_eq!(caps[4], Cap::Bytes(MENTION_HEAD_BYTE_CAP));
+    // One page, and one page only: the popup's window (codex
+    // `MAX_POPUP_ROWS`), which zo's own view pins to the same number.
+    const { assert!(MENTION_CANDIDATE_CAP == 8) };
+    assert_eq!(
+        MENTION_INTENT_CHAR_CAP, RECALL_REQUEST_CHAR_CAP,
+        "the same kind of text, the same cap"
+    );
+    assert_eq!(MENTION_HEAD_BYTE_CAP, RECALL_SUMMARY_BYTE_CAP);
+
+    const { assert!(MENTION_RERANK.promotes) };
+    assert_eq!(MENTION_RERANK.agreement_kind, AgreementKind::Comparison);
+    assert_eq!(
+        MENTION_RERANK.answer_floor_permille,
+        Some(MENTION_ANSWER_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        MENTION_RERANK.agreement_floor_permille,
+        Some(MENTION_AGREEMENT_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        MENTION_RERANK.apply_deadline_ms,
+        Some(MENTION_APPLY_DEADLINE_MS),
+        "the one wall a late answer is dropped past is the row's"
+    );
+    assert_eq!(MENTION_RERANK.window_forgives, Some(FORGIVES_A_BAD_MINUTE));
+    assert_eq!(
+        MENTION_RERANK.agreement_rows_wanted,
+        Some(A_WINDOW_OF_COMPARISONS)
+    );
+    assert_eq!(
+        MENTION_RERANK.modes,
+        &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+        "the recall seat's words: a person's on, and an auto that rises on its own labels"
+    );
+    assert!(MENTION_RERANK.mode_of(Some(&json!("on"))).applies());
+    assert!(
+        !MENTION_RERANK
+            .mode_of(Some(&json!("shadow")))
+            .applies_with(true)
+    );
+    assert!(
+        MENTION_RERANK
+            .mode_of(Some(&json!("auto")))
+            .applies_with(true)
+    );
+    assert!(
+        !MENTION_RERANK
+            .mode_of(Some(&json!("auto")))
+            .applies_with(false)
+    );
+    assert!(
+        !MENTION_RERANK.permits_press(1.0),
+        "a rerank presses nothing"
+    );
+}
+
 /// A stall's answer is a row beside what the coordinator did, never an act:
 /// the use offers nothing that applies, and so nothing it could rise to.
 #[test]

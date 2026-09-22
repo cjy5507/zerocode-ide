@@ -372,6 +372,24 @@ pub fn jev_compaction_mode_from(loader: &runtime::ConfigLoader) -> Option<Decisi
     merged_settings_root_from(loader).map(|root| zerocode_core::jev::COMPACTION.mode_in(&root))
 }
 
+/// `smart.jevMentionRerank`: whether one page of the `@` popup or the
+/// `/resume` list is put to a judgment as the person types. Its own switch,
+/// because it sends something else off the machine — the head of the
+/// sentence a person is writing, and the names on the page — and consent
+/// to one is not consent to another.
+pub const JEV_MENTION_RERANK_SETTING: &str = zerocode_core::jev::MENTION_RERANK.setting;
+
+/// `smart.jevMentionRerank` from the settings `loader` merges, on the same
+/// terms as [`decision_shadow_mode_from`]. `on`, and an `auto` this seat's
+/// own labels have raised, are its apply stage — the page takes the
+/// judgment's order while the selection still sits on its first row
+/// (`mention_rerank`). `shadow` records what would have been put first and
+/// the page stands.
+#[must_use]
+pub fn jev_mention_rerank_mode_from(loader: &runtime::ConfigLoader) -> Option<DecisionShadowMode> {
+    merged_settings_root_from(loader).map(|root| zerocode_core::jev::MENTION_RERANK.mode_in(&root))
+}
+
 /// The plan scorer's knobs (`smart.plan.*`). While the scorer runs in shadow
 /// it decides nothing; these only shape what the shadow ledger records, so a
 /// later comparison reads the thresholds the live scorer would use.

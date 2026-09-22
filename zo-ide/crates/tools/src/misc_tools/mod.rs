@@ -33,6 +33,12 @@ pub use smart_router::{
     merged_settings_root,
 };
 pub use smart_router::{
+    jev_mention_rerank_mode_from, mention_rerank_path, MentionAnswer, MentionAsk, MentionCandidate,
+    MentionJudged, MentionLabelRow, MentionRerank, MentionRerankRow, MentionSurface,
+    JEV_MENTION_RERANK_SETTING, MENTION_OUTCOME_ANSWERED, MENTION_RERANK_DEADLINE, MENTION_RERANK_FILE,
+    MENTION_RUBRIC_VERSION,
+};
+pub use smart_router::{
     compaction_relevance_path, jev_compaction_mode_from, note_compaction_reread, CompactionJudge,
     CompactionLabelRow, CompactionRow, COMPACTION_JUDGMENT_DEADLINE, COMPACTION_OUTCOME_ANSWERED,
     COMPACTION_RELEVANCE_FILE, JEV_COMPACTION_SETTING,
