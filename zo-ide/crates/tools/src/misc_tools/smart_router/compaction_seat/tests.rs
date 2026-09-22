@@ -475,7 +475,7 @@ fn median(shares: &mut [f64]) -> f64 {
     }
     shares.sort_by(f64::total_cmp);
     let mid = shares.len() / 2;
-    if shares.len() % 2 == 0 {
+    if shares.len().is_multiple_of(2) {
         f64::midpoint(shares[mid - 1], shares[mid])
     } else {
         shares[mid]

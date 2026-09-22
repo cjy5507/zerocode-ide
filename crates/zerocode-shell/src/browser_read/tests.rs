@@ -736,7 +736,7 @@ fn the_pages_that_were_gathered() {
         0.0
     } else {
         let mid = saved_shares.len() / 2;
-        if saved_shares.len() % 2 == 0 {
+        if saved_shares.len().is_multiple_of(2) {
             f64::midpoint(saved_shares[mid - 1], saved_shares[mid])
         } else {
             saved_shares[mid]
