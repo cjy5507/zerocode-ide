@@ -2382,24 +2382,24 @@ pub const CHALLENGER: JevUse = JevUse {
 /// patch is for — the routing seat's cap, for the routing seat's reason: the
 /// head of a request is what says what it asks, and a second number on the
 /// same words would be a second answer to how much of a person's work leaves
-/// the machine. Measured on this machine's 2,282 zo edits (2026-09-23): the
-/// person's newest words ran to 47 characters at the median and 764 at p90,
-/// and 2,000 held 92.5% of them whole.
+/// the machine. Measured on the 1,673 patches this machine's zo sessions wrote
+/// (147 transcripts, their vaults read too, 2026-09-23): the person's newest
+/// words ran to 50 characters at the median — a pasted brief to 6,152 at p90
+/// — and 2,000 held 87.3% of them whole.
 pub const PATCH_REVIEW_TASK_CHAR_CAP: usize = ROUTING_TASK_CHAR_CAP;
 
 /// Bytes of one patch's unified diff a review carries — its hunks with their
-/// context lines, and nothing of the file around them. Measured on this
-/// machine's 2,282 zo edits (2026-09-23): the rendered hunks ran to 1,221 B at
-/// the median, 6,001 B at p90 and 8,838 B at p95. 8 KiB holds 94.5% of them
-/// whole; past it a patch is a rewrite, and its head is what a review of it
-/// can still read.
+/// context lines, and nothing of the file around them. Measured on the same
+/// 1,673 patches: the rendered hunks ran to 1,037 B at the median, 5,424 B at
+/// p90 and 7,743 B at p95. 8 KiB holds 95.3% of them whole; past it a patch is
+/// a rewrite, and its head is what a review of it can still read.
 pub const PATCH_REVIEW_PATCH_BYTE_CAP: usize = 8 * 1024;
 
 /// Bytes of evidence one review carries: the newest lines of the tool result
 /// the edit followed — a test's output, a read, a search — kept from the end,
-/// because a check prints its verdict last. Measured on the same 2,282 edits:
-/// that result ran to 1,179 B at the median and 4,238 B at p90; 4 KiB holds
-/// 88.8% of them whole and the newest lines of the rest.
+/// because a check prints its verdict last. Measured on the same 1,673
+/// patches: that result ran to 1,399 B at the median and 4,627 B at p90; 4 KiB
+/// holds 88.3% of them whole and the newest lines of the rest.
 pub const PATCH_REVIEW_EVIDENCE_BYTE_CAP: usize = 4 * 1024;
 
 /// How far each of a review's four answers must lean toward the side that lets
@@ -2758,7 +2758,12 @@ const FINGERPRINT_BYTES: usize = 8;
 pub fn digest_of(seat: &str, rubric_version: u32, model: &str, request: &[u8]) -> String {
     let version = rubric_version.to_string();
     let mut hasher = Sha256::new();
-    for part in [seat.as_bytes(), version.as_bytes(), model.as_bytes(), request] {
+    for part in [
+        seat.as_bytes(),
+        version.as_bytes(),
+        model.as_bytes(),
+        request,
+    ] {
         hasher.update((part.len() as u64).to_le_bytes());
         hasher.update(part);
     }

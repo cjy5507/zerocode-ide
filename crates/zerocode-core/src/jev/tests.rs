@@ -1421,13 +1421,20 @@ fn the_patch_review_seat_sends_a_patch_and_its_evidence_and_rises_on_hindsight()
         &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
         "a labeled seat offers all four words (seat contract, second correction)"
     );
-    let sent: Vec<(&str, Cap)> = PATCH_REVIEW.sends.iter().map(|sent| (sent.at, sent.cap)).collect();
+    let sent: Vec<(&str, Cap)> = PATCH_REVIEW
+        .sends
+        .iter()
+        .map(|sent| (sent.at, sent.cap))
+        .collect();
     assert_eq!(
         sent,
         [
             ("/state/task", Cap::Chars(PATCH_REVIEW_TASK_CHAR_CAP)),
             ("/state/patch", Cap::Bytes(PATCH_REVIEW_PATCH_BYTE_CAP)),
-            ("/state/evidence", Cap::Bytes(PATCH_REVIEW_EVIDENCE_BYTE_CAP)),
+            (
+                "/state/evidence",
+                Cap::Bytes(PATCH_REVIEW_EVIDENCE_BYTE_CAP)
+            ),
             ("/state/path", Cap::Uncut),
         ],
         "the hunks and the evidence's tail: no file body, and the path only as a fingerprint"
@@ -1450,12 +1457,19 @@ fn the_patch_review_seat_sends_a_patch_and_its_evidence_and_rises_on_hindsight()
         Some(PATCH_REVIEW_APPLY_DEADLINE_MS)
     );
     assert_eq!(PATCH_REVIEW.window_forgives, Some(FORGIVES_A_BAD_MINUTE));
-    assert_eq!(PATCH_REVIEW.agreement_rows_wanted, Some(A_WINDOW_OF_COMPARISONS));
+    assert_eq!(
+        PATCH_REVIEW.agreement_rows_wanted,
+        Some(A_WINDOW_OF_COMPARISONS)
+    );
     // The permit line is the reference harness's own 0.8, and it is not the
     // seat's answer rate: one says how sure one review must be, the other how
     // often the seat must answer at all.
     assert_eq!(PATCH_REVIEW_PERMIT_FLOOR_PERMILLE, 800);
-    const { assert!(PATCH_REVIEW_PERMIT_FLOOR_PERMILLE > 500 && PATCH_REVIEW_PERMIT_FLOOR_PERMILLE < 1_000) };
+    const {
+        assert!(
+            PATCH_REVIEW_PERMIT_FLOOR_PERMILLE > 500 && PATCH_REVIEW_PERMIT_FLOOR_PERMILLE < 1_000
+        )
+    };
     const { assert!(PATCH_REVIEW_REGRET_TURNS == 5) };
     assert!(
         !PATCH_REVIEW.permits_press(1.0, crate::guarded::ControlKind::Plain),
@@ -1463,9 +1477,21 @@ fn the_patch_review_seat_sends_a_patch_and_its_evidence_and_rises_on_hindsight()
     );
 
     assert!(PATCH_REVIEW.mode_of(Some(&json!("on"))).applies());
-    assert!(!PATCH_REVIEW.mode_of(Some(&json!("shadow"))).applies_with(true));
-    assert!(!PATCH_REVIEW.mode_of(Some(&json!("auto"))).applies_with(false));
-    assert!(PATCH_REVIEW.mode_of(Some(&json!("auto"))).applies_with(true));
+    assert!(
+        !PATCH_REVIEW
+            .mode_of(Some(&json!("shadow")))
+            .applies_with(true)
+    );
+    assert!(
+        !PATCH_REVIEW
+            .mode_of(Some(&json!("auto")))
+            .applies_with(false)
+    );
+    assert!(
+        PATCH_REVIEW
+            .mode_of(Some(&json!("auto")))
+            .applies_with(true)
+    );
     assert_eq!(PATCH_REVIEW.mode_in(&json!({})), JevMode::Off);
     // The twentieth row, after the challenger seat's (t-6151).
     assert_eq!(JEV_USES.last(), Some(&PATCH_REVIEW));
@@ -1480,7 +1506,11 @@ fn the_patch_review_seat_sends_a_patch_and_its_evidence_and_rises_on_hindsight()
 fn a_request_digest_vouches_for_the_seat_the_rubric_the_model_and_the_bytes() {
     let digest = digest_of("patch_review", 1, "jev-1.13.0", br#"{"state":{}}"#);
     assert_eq!(digest.len(), 64, "the whole SHA-256: {digest}");
-    assert!(digest.chars().all(|glyph| glyph.is_ascii_hexdigit() && !glyph.is_ascii_uppercase()));
+    assert!(
+        digest
+            .chars()
+            .all(|glyph| glyph.is_ascii_hexdigit() && !glyph.is_ascii_uppercase())
+    );
     assert_eq!(
         digest,
         digest_of("patch_review", 1, "jev-1.13.0", br#"{"state":{}}"#),
@@ -1505,5 +1535,9 @@ fn a_request_digest_vouches_for_the_seat_the_rubric_the_model_and_the_bytes() {
     );
     // The fingerprint beside it is the same hasher, cut to sixteen digits.
     assert_eq!(fingerprint_of("").len(), 16);
-    assert_eq!(fingerprint_of(""), "e3b0c44298fc1c14", "SHA-256 of nothing, cut");
+    assert_eq!(
+        fingerprint_of(""),
+        "e3b0c44298fc1c14",
+        "SHA-256 of nothing, cut"
+    );
 }

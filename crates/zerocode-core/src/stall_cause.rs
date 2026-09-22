@@ -278,7 +278,6 @@ pub fn transcript_tail(lines: &[String]) -> String {
     newest_within(&said, STALL_TRANSCRIPT_BYTE_CAP)
 }
 
-
 /// What a cause leads to, when it leads anywhere in particular — the mark a
 /// label row carries for the judge (§4 of the settings design): the answer
 /// was right when what followed the silence is what its cause leads to. A
