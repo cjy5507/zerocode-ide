@@ -21,6 +21,7 @@
   엇갈린 걸음과 다섯 걸음마다 Jev에 한 번 묻는다(자리 `step_effort`) — `../docs/design/zo-step-effort-governor-20260921.md`.
 - **관련성 컴팩션**(기본 꺼짐): `smart.jevCompaction: "shadow"|"on"|"auto"`이면 문맥이 차서 요약할 때 보존 꼬리 밖 도구 결과 블록마다 「남은 목표에 아직 필요한가」를 Jev에 병렬로 묻고(벽 하나 3 s, 못 온 답=keep),
   `on`·오른 `auto`는 `drop`(P≥0.7)을 요약 입력에서 뺀다 — 원문은 microcompact와 같은 볼트 봉인·복원 기계로 잃지 않는다. 원장 `smart-router/compaction-relevance.jsonl`, 라벨은 사후(다섯 턴 안 되읽기=후회, 자리 `compaction`); 재생 하네스 `tools/compaction-replay`.
+- **의도 재순위**(기본 꺼짐): `smart.jevMentionRerank: "shadow"|"on"|"auto"`이면 작성창 `@` 팝업의 퍼지 첫 페이지(여덟 행)와 `/resume` 목록 첫 페이지를 두고 「쓰고 있는 문장이 어느 행을 뜻하는가」를 Jev에 비동기로 한 번 묻는다(자리 `mention_rerank`, 벽 1.5 s, 최신 물음 하나만). 퍼지 순서가 먼저 뜨고, `on`·오른 `auto`는 고르기가 아직 첫 행일 때만 답의 순서를 얹는다; 못 온 답·늦은 답·움직인 고르기=퍼지 그대로. 보내는 것은 문장 앞 1,000자·친 글자·행 이름 여덟·행이 보여 주는 머리 320 B(파일 본문 없음). 원장 `smart-router/mention-rerank.jsonl`, 라벨은 비교(고른 행==Jev 1위, 완성마다); 재생 하네스 `tools/mention-rerank-replay`.
 - **자율 실행**: `/goal`, `/loop`, 헤드리스 `--loop-every/--loop-until/--loop-max`. 한도는 `autonomy/limits.rs` 표 하나, 429는 자동 재개.
 - **고정 하네스**: 시스템 핵심·도구 스키마·스킬 색인·리마인더를 계열별 예산 게이트로 관리(`--prompt-input`). 드리머 리마인더는 wire 채널.
 - **회상**: 본문 색인 + 세컨드 브레인 그래프 관계. 완료 영수증, 도구 습관 넛지, 긴 결과 다이제스트.

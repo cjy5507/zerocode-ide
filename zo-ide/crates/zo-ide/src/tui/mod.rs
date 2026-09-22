@@ -62,6 +62,7 @@ pub mod highlight;
 pub mod holdback;
 pub mod markdown;
 pub mod mention;
+pub mod rerank;
 pub mod models;
 pub mod painter;
 mod paint_probe;
