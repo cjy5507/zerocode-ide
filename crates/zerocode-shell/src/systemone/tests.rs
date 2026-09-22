@@ -22,7 +22,12 @@ impl Endpoint {
     /// Answer `status` with `body`, after `hold_ms` milliseconds each time —
     /// one request at a time, which is what every seat that asks once needs.
     pub(crate) fn serving(status: &'static str, body: String, hold_ms: u64) -> Self {
-        Self::listening(status, body, hold_ms, false)
+        Self::listening(
+            status,
+            Arc::new(move |_: &str| body.clone()),
+            hold_ms,
+            false,
+        )
     }
 
     /// The same endpoint answering every connection on a thread of its own,
@@ -31,15 +36,30 @@ impl Endpoint {
     /// shards held 300 ms each would come back after 600 whether or not the
     /// seat asked them together.
     pub(crate) fn serving_each(status: &'static str, body: String, hold_ms: u64) -> Self {
-        Self::listening(status, body, hold_ms, true)
+        Self::listening(status, Arc::new(move |_: &str| body.clone()), hold_ms, true)
     }
 
-    fn listening(status: &'static str, body: String, hold_ms: u64, each: bool) -> Self {
+    /// An endpoint whose body is chosen by the request it read — head and
+    /// body as they arrived — each connection on a thread of its own: what a
+    /// walk that asks two different questions of one endpoint needs.
+    pub(crate) fn answering_each(
+        status: &'static str,
+        answer: impl Fn(&str) -> String + Send + Sync + 'static,
+        hold_ms: u64,
+    ) -> Self {
+        Self::listening(status, Arc::new(answer), hold_ms, true)
+    }
+
+    fn listening(
+        status: &'static str,
+        body: Arc<dyn Fn(&str) -> String + Send + Sync>,
+        hold_ms: u64,
+        each: bool,
+    ) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback seat");
         let addr = listener.local_addr().expect("its address");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let heard = Arc::clone(&seen);
-        let body = Arc::new(body);
         thread::spawn(move || {
             for socket in listener.incoming() {
                 let Ok(mut socket) = socket else {
@@ -49,6 +69,7 @@ impl Endpoint {
                 let body = Arc::clone(&body);
                 let mut answer = move || {
                     let request = read_request(&mut socket);
+                    let body = body(&request);
                     heard.lock().expect("the record").push(request);
                     if hold_ms > 0 {
                         thread::sleep(Duration::from_millis(hold_ms));

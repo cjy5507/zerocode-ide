@@ -1218,7 +1218,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 17);
+    assert_eq!(JEV_USES.len(), 18);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1304,4 +1304,74 @@ fn the_branching_seat_forks_a_phone_step_and_rises_on_the_walks_next_step() {
     );
     assert!(BRANCHING.permits_press(0.5) && !BRANCHING.permits_press(0.49));
     assert_eq!(BRANCHING_APPLY_DEADLINE_MS, 1_500);
+}
+
+/// The judgment cache (t-6132) is a seat with no question of its own: it
+/// sends nothing, presses nothing, and rises on the memo's own comparison —
+/// the remembered choice against the fresh one the wire gave for the same
+/// bytes. A labeled seat: all four words, `on` the person's own.
+#[test]
+fn the_judgment_cache_sends_nothing_and_rises_on_the_memos_own_comparison() {
+    assert_eq!(jev_use("judgment_cache"), Some(&JUDGMENT_CACHE));
+    assert_eq!(JUDGMENT_CACHE.setting, "jevJudgmentCache");
+    assert_eq!(
+        JUDGMENT_CACHE.modes,
+        &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto]
+    );
+    assert_eq!(JUDGMENT_CACHE.offered("on"), Some(JevMode::On));
+    assert!(JUDGMENT_CACHE.mode_of(Some(&json!("on"))).applies());
+    assert!(
+        JUDGMENT_CACHE.sends.is_empty(),
+        "a memo hit leaves the machine no bytes; there is nothing to cap"
+    );
+    assert_eq!(JUDGMENT_CACHE.ledger, "judgment-cache.jsonl");
+    const { assert!(JUDGMENT_CACHE.promotes) };
+    assert_eq!(JUDGMENT_CACHE.agreement_kind, AgreementKind::Comparison);
+    assert_eq!(
+        JUDGMENT_CACHE.answer_floor_permille,
+        Some(JUDGMENT_CACHE_ANSWER_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        JUDGMENT_CACHE.agreement_floor_permille,
+        Some(JUDGMENT_CACHE_AGREEMENT_FLOOR_PERMILLE)
+    );
+    // Held above the screen seats' line: the same reader against itself.
+    const { assert!(JUDGMENT_CACHE_AGREEMENT_FLOOR_PERMILLE > SCREEN_AGREEMENT_FLOOR_PERMILLE) };
+    assert_eq!(
+        JUDGMENT_CACHE.apply_deadline_ms,
+        Some(JUDGMENT_MEMO_DEADLINE_MS)
+    );
+    const { assert!(JUDGMENT_MEMO_DEADLINE_MS < SCREEN_APPLY_DEADLINE_MS) };
+    assert_eq!(JUDGMENT_CACHE.window_forgives, Some(FORGIVES_NOTHING));
+    assert!(
+        !JUDGMENT_CACHE.permits_press(1.0),
+        "the memo presses nothing; the screen seat's own rule reads the remembered confidence"
+    );
+    assert!(JUDGMENT_CACHE.mode_of(Some(&json!("on"))).asks());
+    assert!(
+        !JUDGMENT_CACHE
+            .mode_of(Some(&json!("auto")))
+            .applies_with(false)
+    );
+    assert!(
+        JUDGMENT_CACHE
+            .mode_of(Some(&json!("auto")))
+            .applies_with(true)
+    );
+    // The door asks the memo after its own four questions and before it
+    // counts — held as a statement order in the door's source.
+    let door = include_str!("door.rs");
+    let passing = &door[door
+        .find("pub fn pass_remembering(")
+        .expect("the memo road")..];
+    let asked = passing
+        .find("let cleared = ask(&asking)?;")
+        .expect("the four questions");
+    let looked = passing
+        .find("memo::recall(memo.path, &key)")
+        .expect("the lookup");
+    let counted = passing
+        .find("take_a_place(settings, requests)")
+        .expect("the count");
+    assert!(asked < looked && looked < counted, "{passing}");
 }

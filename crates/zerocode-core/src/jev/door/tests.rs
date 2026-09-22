@@ -660,3 +660,130 @@ fn a_row_without_the_doors_count_predates_the_door() {
     assert!(!predates_the_door("{\"at\": "), "a torn line says nothing");
     assert!(!predates_the_door("[1, 2]"));
 }
+
+/// The memo sits between the door's four questions and its count: a hit
+/// under a seat that may apply it is a request that passed and did not
+/// leave — no place taken — while under a seat that only compares the same
+/// hit is counted like any request, because the request still goes. Every
+/// refusal is asked before the memo is.
+#[test]
+fn a_memo_hit_passes_the_door_and_takes_no_place_only_when_it_may_answer() {
+    let home = tempfile::tempdir().expect("a config home");
+    let requests = count::requests_path(home.path(), "2026-09-22");
+    let memo_file = home.path().join(count::REQUESTS_DIR).join(memo::MEMO_FILE);
+    let capped = settings(Some(3));
+    let body = routing_body("rename a variable");
+    let routing = |asking: &Asking<'_>| may_send(&ROUTING, asking, body.clone());
+    let memo = |applying: bool| Memo {
+        path: &memo_file,
+        seat: &ROUTING,
+        applying,
+    };
+
+    // A miss under an applying seat: looked up, nothing held, counted.
+    let passed = pass_remembering(
+        routing,
+        true,
+        &capped,
+        Some(APP),
+        &requests,
+        Some(memo(true)),
+    )
+    .expect("the door lets it through");
+    let memoed = passed.memo.clone().expect("a memo was asked");
+    assert_eq!(memoed.recalled, None);
+    assert!(!memoed.answered);
+    assert_eq!(count::sent(&requests), 1, "a miss leaves, and is counted");
+    assert_eq!(memoed.key, memo::key_of(&ROUTING, passed.cleared.bytes()));
+
+    // The wire's answer, remembered under the cleared bytes' key.
+    memo::remember(&memo_file, &ROUTING, &memoed.key, "{\"answers\":{}}", 1).expect("kept");
+
+    // A hit under a seat that only compares: the request still goes, so it
+    // still takes its place.
+    let passed = pass_remembering(
+        routing,
+        true,
+        &capped,
+        Some(APP),
+        &requests,
+        Some(memo(false)),
+    )
+    .expect("the door lets it through");
+    let memoed = passed.memo.expect("a memo was asked");
+    assert!(memoed.recalled.is_some());
+    assert!(!memoed.answered);
+    assert_eq!(count::sent(&requests), 2);
+
+    // A hit under an applying seat: passed, not counted.
+    let passed = pass_remembering(
+        routing,
+        true,
+        &capped,
+        Some(APP),
+        &requests,
+        Some(memo(true)),
+    )
+    .expect("the door lets it through");
+    let memoed = passed.memo.expect("a memo was asked");
+    assert!(memoed.answered);
+    assert_eq!(
+        memoed.recalled.map(|r| r.answer),
+        Some("{\"answers\":{}}".to_string())
+    );
+    assert_eq!(
+        count::sent(&requests),
+        2,
+        "a hit that answers takes no place"
+    );
+
+    // The four questions come first: a workspace nobody consented to is
+    // refused with the memo full, and so is a day with no place left.
+    assert_eq!(
+        pass_remembering(
+            routing,
+            true,
+            &capped,
+            Some("/elsewhere"),
+            &requests,
+            Some(memo(true))
+        )
+        .err(),
+        Some(Refused::NotConsented)
+    );
+    assert_eq!(
+        pass_remembering(
+            routing,
+            false,
+            &capped,
+            Some(APP),
+            &requests,
+            Some(memo(true))
+        )
+        .err(),
+        Some(Refused::NoKey)
+    );
+    count::count_one(&requests).expect("the day's last place");
+    assert_eq!(
+        pass_remembering(
+            routing,
+            true,
+            &capped,
+            Some(APP),
+            &requests,
+            Some(memo(true))
+        )
+        .err(),
+        Some(Refused::Budget),
+        "the budget is asked before the memo"
+    );
+
+    // No memo asked: `pass` as it always was.
+    let open = settings(None);
+    assert_eq!(
+        pass_remembering(routing, true, &open, Some(APP), &requests, None)
+            .expect("through")
+            .memo,
+        None
+    );
+}

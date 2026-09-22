@@ -580,3 +580,540 @@ fn a_comparison_is_asked_under_the_branching_row_and_read_by_its_own_question() 
     );
     assert!(endpoint.asked().is_empty(), "no key, no socket");
 }
+
+// ---- the judgment cache (t-6132) ------------------------------------------
+
+/// A body the endpoint would answer a GOAL walk's question with: the goal
+/// offers `done` beside the marks and `give_up`, and the closed choice's
+/// rules want every offered option named.
+fn goal_body_choosing(choice: &str) -> String {
+    json!({
+        "model": SYSTEMONE_MODEL,
+        "answers": {
+            "action": {
+                "type": "choice",
+                "choice": choice,
+                "probabilities": { "mark:1": 0.7, "mark:2": 0.1, "give_up": 0.1, "done": 0.1 },
+                "confidence": 0.7,
+            }
+        },
+        "usage": { "input_tokens": 120, "output_tokens": 0 },
+    })
+    .to_string()
+}
+
+/// A door whose settings also set the judgment cache to `cache`, consenting
+/// the walk's own workspace; `None` leaves the cache key out — off, as any
+/// settings file written before the seat existed.
+fn door_caching(home: &tempfile::TempDir, cache: Option<&str>) -> Doorway {
+    let work = home.path().join("work");
+    std::fs::create_dir_all(&work).expect("a workspace");
+    let settings = home.path().join("settings.json");
+    let mut smart = json!({ "jev": { "workspaces": [work.display().to_string()] } });
+    if let Some(cache) = cache {
+        smart[zerocode_core::jev::JUDGMENT_CACHE.setting] = json!(cache);
+    }
+    std::fs::write(
+        &settings,
+        json!({ zerocode_core::jev::SMART_SETTINGS_KEY: smart }).to_string(),
+    )
+    .expect("zo's settings");
+    Doorway {
+        settings: Some(settings),
+        workspace: Some(work),
+        ..Doorway::default()
+    }
+}
+
+fn memo_file(home: &tempfile::TempDir) -> std::path::PathBuf {
+    home.path()
+        .join(zerocode_core::jev::count::REQUESTS_DIR)
+        .join(zerocode_core::jev::memo::MEMO_FILE)
+}
+
+fn cache_ledger(home: &tempfile::TempDir) -> std::path::PathBuf {
+    home.path()
+        .join(zerocode_core::jev::count::REQUESTS_DIR)
+        .join(zerocode_core::jev::JUDGMENT_CACHE.ledger)
+}
+
+/// The day's count under `home`, whichever day the wire counted it in.
+fn day_count(home: &tempfile::TempDir) -> u64 {
+    std::fs::read_dir(home.path().join(zerocode_core::jev::count::REQUESTS_DIR))
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_name().to_string_lossy().starts_with("requests-"))
+                .map(|entry| zerocode_core::jev::count::sent(&entry.path()))
+                .sum()
+        })
+        .unwrap_or(0)
+}
+
+/// Stand the judgment cache's `auto` up, the way its own judge would: one
+/// rise written into its ledger.
+fn raise_the_cache(home: &tempfile::TempDir) {
+    crate::systemone::append_rows(
+        &cache_ledger(home),
+        &[json!({
+            zerocode_core::jev::summary::AT.canonical: 1,
+            zerocode_core::jev::summary::TRANSITION.canonical: zerocode_core::jev::promote::ROSE,
+        })],
+    );
+}
+
+/// The cache seat's rows a judge wrote, read back from its ledger.
+fn cache_rows(judge: &mut LiveJudge, home: &tempfile::TempDir) -> Vec<serde_json::Value> {
+    judge.write_memo_rows(None, 5);
+    crate::systemone::read_rows(&cache_ledger(home))
+        .into_iter()
+        .filter(|row| zerocode_core::jev::summary::TRANSITION.read(row).is_none())
+        .collect()
+}
+
+#[test]
+fn a_cache_that_is_off_leaves_the_wire_every_byte_it_had() {
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:1"), 0);
+    let home = tempfile::tempdir().expect("a zo home");
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door_caching(&home, None));
+    let asked = asked();
+
+    for _ in 0..2 {
+        let Judged::Chose(choice) = judge.choose(&asked) else {
+            panic!("the wire answers");
+        };
+        assert_eq!(choice.chosen, Chosen::Mark(1));
+        assert!(!judge.cached());
+        assert_eq!(judge.spent().map(|spent| spent.requests), Some(1));
+    }
+    assert_eq!(endpoint.asked().len(), 2, "every question went out");
+    assert!(!memo_file(&home).exists(), "no memo file is written");
+    assert!(
+        cache_rows(&mut judge, &home).is_empty(),
+        "no row of the cache's own"
+    );
+    assert_eq!(day_count(&home), 2);
+}
+
+#[test]
+fn shadow_asks_the_wire_as_today_and_labels_the_memo_against_it() {
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:1"), 0);
+    let home = tempfile::tempdir().expect("a zo home");
+    let mut judge = LiveJudge::at(
+        &endpoint.base(),
+        "test-key",
+        door_caching(&home, Some(zerocode_core::jev::JevMode::Shadow.key())),
+    );
+    let asked = asked();
+
+    // The first question: a miss, remembered.
+    assert!(matches!(judge.choose(&asked), Judged::Chose(_)));
+    assert_eq!(zerocode_core::jev::memo::rows(&memo_file(&home)), 1);
+    // The second: a hit the wire is still asked for, labeled by agreement.
+    assert!(matches!(judge.choose(&asked), Judged::Chose(_)));
+    assert!(!judge.cached(), "shadow never answers from the memo");
+    assert_eq!(judge.spent().map(|spent| spent.requests), Some(1));
+    assert_eq!(endpoint.asked().len(), 2);
+    assert_eq!(day_count(&home), 2, "both requests left and were counted");
+
+    let rows = cache_rows(&mut judge, &home);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert_eq!(rows[0]["miss"], json!(true));
+    assert!(
+        rows[0].get("outcome").is_none(),
+        "a miss is not an ask of the cache"
+    );
+    assert_eq!(rows[1]["outcome"], json!("answered"));
+    assert_eq!(rows[1]["routeUse"], json!("shadow"));
+    assert_eq!(
+        rows[1][zerocode_core::jev::summary::AGREED.canonical],
+        json!(true)
+    );
+    assert_eq!(rows[1][REQUESTS_KEY], json!(0));
+    assert_eq!(rows[1]["seat"], json!(zerocode_core::jev::BROWSER.id));
+    assert!(rows[1]["key"].as_str().is_some_and(|key| key.len() == 16));
+}
+
+#[test]
+fn a_risen_auto_answers_the_same_bytes_from_the_memo_and_sends_nothing() {
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:1"), 0);
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_caching(&home, Some(zerocode_core::jev::JevMode::Auto.key()));
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door.clone());
+    let asked = asked();
+
+    // An auto nobody has raised compares, like shadow.
+    assert!(matches!(judge.choose(&asked), Judged::Chose(_)));
+    assert!(matches!(judge.choose(&asked), Judged::Chose(_)));
+    assert!(!judge.cached());
+    assert_eq!(endpoint.asked().len(), 2);
+
+    // Raised, the memo answers: nothing leaves, nothing is counted.
+    raise_the_cache(&home);
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door);
+    let Judged::Chose(choice) = judge.choose(&asked) else {
+        panic!("the memo answers");
+    };
+    assert_eq!(choice.chosen, Chosen::Mark(1));
+    assert!(judge.cached());
+    assert_eq!(
+        judge.spent(),
+        Some(Spent {
+            requests: 0,
+            redacted_lines: 0
+        })
+    );
+    assert_eq!(endpoint.asked().len(), 2, "the third question never left");
+    assert_eq!(day_count(&home), 2, "and took no place in the day");
+    let rows = cache_rows(&mut judge, &home);
+    let hit = rows.last().expect("a row for the hit");
+    assert_eq!(hit["outcome"], json!("answered"));
+    assert_eq!(
+        hit["routeUse"],
+        json!(zerocode_core::jev::ROUTE_USE_APPLIED)
+    );
+    assert!(
+        hit.get(zerocode_core::jev::summary::AGREED.canonical)
+            .is_none(),
+        "nothing to compare"
+    );
+
+    // A question with other bytes is a miss, and goes.
+    let other = asked_about("settings smoke", "저장");
+    assert!(matches!(judge.choose(&other), Judged::Chose(_)));
+    assert!(!judge.cached());
+    assert_eq!(endpoint.asked().len(), 3);
+}
+
+#[test]
+fn a_memo_hit_still_passes_the_door_first() {
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:1"), 0);
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_caching(&home, Some(zerocode_core::jev::JevMode::Auto.key()));
+    let asked = asked();
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door.clone());
+    assert!(matches!(judge.choose(&asked), Judged::Chose(_)));
+    raise_the_cache(&home);
+
+    // No key: refused before the memo, as ever.
+    let mut keyless = LiveJudge::at(&endpoint.base(), "", door.clone());
+    assert_eq!(
+        keyless.choose(&asked),
+        Judged::Refused(Refused::NoKey.token().to_string())
+    );
+    assert!(!keyless.cached());
+    // A workspace nobody consented to: refused, memo or no memo.
+    let elsewhere = Doorway {
+        workspace: Some(home.path().join("elsewhere")),
+        ..door
+    };
+    let mut stranger = LiveJudge::at(&endpoint.base(), "test-key", elsewhere);
+    assert_eq!(
+        stranger.choose(&asked),
+        Judged::Refused(Refused::NotConsented.token().to_string())
+    );
+    assert!(
+        cache_rows(&mut stranger, &home).is_empty(),
+        "a refusal writes no cache row"
+    );
+    assert_eq!(endpoint.asked().len(), 1);
+}
+
+#[test]
+fn a_remembered_answer_that_no_longer_reads_is_asked_afresh() {
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:1"), 0);
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_caching(&home, Some(zerocode_core::jev::JevMode::Auto.key()));
+    let asked = asked();
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door.clone());
+    assert!(matches!(judge.choose(&asked), Judged::Chose(_)));
+    raise_the_cache(&home);
+
+    // The memo now holds an answer naming a number the question never offered.
+    let memo = memo_file(&home);
+    let key = crate::systemone::read_rows(&memo)[0]["key"]
+        .as_str()
+        .expect("the key")
+        .to_string();
+    std::fs::remove_file(&memo).expect("a fresh memo");
+    zerocode_core::jev::memo::remember(
+        &memo,
+        &zerocode_core::jev::BROWSER,
+        &key,
+        &body_choosing("mark:9"),
+        1,
+    )
+    .expect("a stale memory");
+
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door);
+    let Judged::Chose(choice) = judge.choose(&asked) else {
+        panic!("the wire answers after the memo failed to read");
+    };
+    assert_eq!(choice.chosen, Chosen::Mark(1));
+    assert!(!judge.cached());
+    assert_eq!(judge.spent().map(|spent| spent.requests), Some(1));
+    assert_eq!(endpoint.asked().len(), 2);
+    let rows = cache_rows(&mut judge, &home);
+    let stale = rows.last().expect("the stale hit's row");
+    assert_eq!(
+        stale["outcome"],
+        json!(ChoiceRefusal::UnknownOption.token())
+    );
+    assert_eq!(
+        stale["routeUse"],
+        json!(zerocode_core::jev::ROUTE_USE_FALLBACK)
+    );
+    // And the fresh answer is what the memo holds now.
+    assert_eq!(
+        zerocode_core::jev::memo::recall(&memo, &key).map(|r| r.answer),
+        Some(body_choosing("mark:1"))
+    );
+}
+
+/// The walk's own row says the memo answered: `cached`, and no request.
+#[test]
+fn a_walk_answered_from_the_memo_says_so_on_its_row() {
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", goal_body_choosing("mark:1"), 0);
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_caching(&home, Some(zerocode_core::jev::JevMode::Auto.key()));
+    let goal = crate::computer_use::errand::tests::goal(1);
+
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door.clone());
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let first = run(Mode::On, true, &goal, &mut judge, &mut world);
+    assert_eq!(first.pressed, 1, "{:?}", first.rows);
+    assert!(
+        first.rows[0]
+            .get(zerocode_core::jev::summary::CACHED.canonical)
+            .is_none()
+    );
+    assert_eq!(first.rows[0][REQUESTS_KEY], json!(1));
+
+    raise_the_cache(&home);
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let second = run(Mode::On, true, &goal, &mut judge, &mut world);
+    assert_eq!(second.pressed, 1, "the memo's number is pressed");
+    assert_eq!(
+        second.rows[0][zerocode_core::jev::summary::CACHED.canonical],
+        json!(true)
+    );
+    assert_eq!(second.rows[0][REQUESTS_KEY], json!(0));
+    assert_eq!(second.rows[0]["outcome"], json!("answered"));
+    assert_eq!(endpoint.asked().len(), 1);
+}
+
+/// The measurement the seat is for: the same Flow walked twice, the second
+/// time under a risen cache. Printed, and held on the one number that is a
+/// promise — the second walk sends nothing.
+#[test]
+fn the_second_walk_of_the_same_flow_sends_nothing() {
+    const HOLD_MS: u64 = 250;
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", goal_body_choosing("mark:1"), HOLD_MS);
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_caching(&home, Some(zerocode_core::jev::JevMode::Auto.key()));
+    let goal = crate::computer_use::errand::tests::goal(3);
+
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door.clone());
+    let mut world = FakeWorld::that_moves(&[1, 2]);
+    let began = std::time::Instant::now();
+    let first = run(Mode::On, true, &goal, &mut judge, &mut world);
+    let first_ms = began.elapsed().as_millis();
+    assert_eq!(first.pressed, 3, "{:?}", first.rows);
+    assert_eq!(endpoint.asked().len(), 3);
+
+    raise_the_cache(&home);
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door);
+    let mut world = FakeWorld::that_moves(&[1, 2]);
+    let began = std::time::Instant::now();
+    let second = run(Mode::On, true, &goal, &mut judge, &mut world);
+    let second_ms = began.elapsed().as_millis();
+    assert_eq!(second.pressed, 3);
+    assert_eq!(
+        endpoint.asked().len(),
+        3,
+        "the second walk asked the wire nothing"
+    );
+    assert!(second.rows.iter().all(|row| {
+        row[zerocode_core::jev::summary::CACHED.canonical] == json!(true)
+            && row[REQUESTS_KEY] == json!(0)
+    }));
+    println!(
+        "measure: judgment-cache flow=3 presses wire_hold_ms={HOLD_MS} first_run_ms={first_ms} first_wire_calls=3 second_run_ms={second_ms} second_wire_calls=0"
+    );
+}
+
+/// What the memo would have agreed with, against the real endpoint: the same
+/// screen question asked `ZEROCODE_JEV_BENCH_PASSES` times, the first answer
+/// standing for what a memo remembers and every later one for the fresh
+/// answer `shadow` compares it with. Prints the pooled share and a 95%
+/// Wilson lower bound; asserts nothing about the answer. Not part of the
+/// gate — it spends a person's key and crosses the internet. The look and
+/// the goal are read as the bench above reads them.
+#[test]
+#[ignore = "spends a real key on the real endpoint"]
+fn what_the_memo_would_have_agreed_with_against_the_real_endpoint() {
+    let look = std::env::var("ZEROCODE_JEV_BENCH_LOOK").expect("a marked look's json");
+    let goal = std::env::var("ZEROCODE_JEV_BENCH_GOAL").expect("a goal sentence");
+    let key = std::env::var("ZEROCODE_JEV_BENCH_KEY").expect("a TypeSafe key");
+    let passes: usize = std::env::var("ZEROCODE_JEV_BENCH_PASSES")
+        .ok()
+        .and_then(|passes| passes.parse().ok())
+        .unwrap_or(5);
+    let said: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&look).expect("the look")).expect("json");
+    let said = said.get("result").unwrap_or(&said);
+    let items = said
+        .pointer("/marks/items")
+        .or_else(|| said.get("items"))
+        .and_then(serde_json::Value::as_array)
+        .expect("items")
+        .clone();
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_in(&home, "work");
+    let asked = ask(&ActionLook {
+        goal: &goal,
+        errand: zerocode_core::screen_action::Errand::Goal,
+        at: Where::Page {
+            host: "bench.local",
+            path: "/",
+        },
+        tried: &[],
+        items: &items,
+        pressed: &[],
+        shows: &[],
+    })
+    .expect("a screen with controls asks");
+    let mut judge = LiveJudge::at(
+        &std::env::var("ZO_SYSTEMONE_BASE_URL")
+            .unwrap_or_else(|_| crate::systemone::SYSTEMONE_BASE_URL.to_string()),
+        &key,
+        door,
+    );
+    let mut answers = Vec::new();
+    let mut waits = Vec::new();
+    for pass in 1..=passes {
+        let began = std::time::Instant::now();
+        let judged = judge.choose(&asked);
+        let ms = began.elapsed().as_millis();
+        waits.push(ms);
+        match judged {
+            Judged::Chose(choice) => {
+                println!(
+                    "pass {pass}: {:?} confidence {} in {ms} ms",
+                    choice.chosen, choice.confidence
+                );
+                answers.push(Some(choice.chosen));
+            }
+            Judged::Refused(token) => {
+                println!("pass {pass}: refused {token} in {ms} ms");
+                answers.push(None);
+            }
+        }
+    }
+    let remembered = answers.first().cloned().flatten();
+    let compared: Vec<bool> = answers
+        .iter()
+        .skip(1)
+        .filter_map(|fresh| Some(fresh.as_ref()? == remembered.as_ref()?))
+        .collect();
+    let agreed = compared.iter().filter(|a| **a).count();
+    let lower = zerocode_core::jev::summary::wilson_lower(
+        agreed,
+        compared.len(),
+        zerocode_core::jev::summary::WILSON_Z_95,
+    );
+    waits.sort_unstable();
+    println!(
+        "measure: memo-agreement passes={passes} compared={} agreed={agreed} share={:.3} wilson_lower={lower:.3} p50_ms={} max_ms={}",
+        compared.len(),
+        if compared.is_empty() {
+            0.0
+        } else {
+            agreed as f64 / compared.len() as f64
+        },
+        waits[waits.len() / 2],
+        waits[waits.len() - 1]
+    );
+}
+
+// ---- asking ahead over the wire (t-6132 S2) ---------------------------------
+
+/// A judgment begun ahead of the walk runs down the same wire on a thread of
+/// its own, and what it would have said of itself — the door's account, the
+/// memo's rows — comes back to the judge that writes the rows: a walk with
+/// `overlap` on a screen that stays writes exactly the rows a walk in turn
+/// would, with the second judgment marked as used ahead.
+#[test]
+fn a_judgment_begun_ahead_runs_down_the_wire_and_its_account_comes_back() {
+    // The first question offers both numbers; the second, mark 1 spent,
+    // offers mark 2 alone — and the closed choice wants every offered option
+    // named, so the endpoint answers each question in its own shape.
+    let endpoint = Endpoint::answering_each(
+        "HTTP/1.1 200 OK",
+        |request: &str| {
+            if request.contains("\"mark:1\"") {
+                goal_body_choosing("mark:1")
+            } else {
+                json!({
+                    "model": SYSTEMONE_MODEL,
+                    "answers": {
+                        "action": {
+                            "type": "choice",
+                            "choice": "mark:2",
+                            "probabilities": { "mark:2": 0.8, "give_up": 0.1, "done": 0.1 },
+                            "confidence": 0.8,
+                        }
+                    },
+                    "usage": { "input_tokens": 120, "output_tokens": 0 },
+                })
+                .to_string()
+            }
+        },
+        40,
+    );
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_caching(&home, Some(zerocode_core::jev::JevMode::Shadow.key()));
+    let goal = crate::computer_use::errand::tests::goal(3);
+
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let walked = crate::computer_use::errand::run_with(
+        Mode::On,
+        true,
+        crate::computer_use::errand::Branching::OFF,
+        &goal,
+        &mut judge,
+        &mut world,
+        crate::computer_use::errand::Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert_eq!(world.presses, vec![1, 2]);
+    assert_eq!((walked.overlapped, walked.discarded), (1, 0));
+    assert_eq!(
+        endpoint.asked().len(),
+        2,
+        "two questions, one of them ahead"
+    );
+    let second = &walked.rows[1];
+    assert_eq!(
+        second[crate::computer_use::errand::OVERLAP],
+        json!(crate::computer_use::errand::OVERLAP_USED)
+    );
+    assert_eq!(
+        second[REQUESTS_KEY],
+        json!(1),
+        "the door's account of the question asked ahead"
+    );
+    assert_eq!(second["outcome"], json!("answered"));
+    assert_eq!(second["chosen"], json!("mark:2"));
+    // The cache seat's rows of both questions land, the ahead one's through
+    // `finish`: two misses (each screen's bytes differ by `tried`/`pressed`).
+    let rows = cache_rows(&mut judge, &home);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows.iter().all(|row| row["miss"] == json!(true)));
+    assert_eq!(zerocode_core::jev::memo::rows(&memo_file(&home)), 2);
+}

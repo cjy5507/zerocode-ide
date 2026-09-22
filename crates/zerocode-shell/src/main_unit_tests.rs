@@ -18441,6 +18441,7 @@ pub(crate) mod computer_desktop_wait {
             ),
             || BlindDesk(std::time::Instant::now()),
             || true,
+            None,
         );
         answer_computer_command(&words(&["resume", "--json"]));
         assert_eq!(walked, 0, "nothing walks at a stopped door");
@@ -18475,6 +18476,7 @@ pub(crate) mod computer_desktop_wait {
             ),
             || BlindDesk(std::time::Instant::now()),
             || true,
+            None,
         );
         assert_eq!(
             turn,
@@ -18510,6 +18512,7 @@ pub(crate) mod computer_desktop_wait {
             ),
             || BlindDesk(std::time::Instant::now()),
             || true,
+            None,
         );
         assert_eq!(done.exit_code, 0);
         assert_eq!(envelope(&done)["result"]["done"], true);
@@ -18621,6 +18624,7 @@ pub(crate) mod computer_desktop_wait {
                     ),
                     || BlindDesk(std::time::Instant::now()),
                     || true,
+                    None,
                 );
                 assert_eq!(answer.exit_code, 0, "{fault}: {}", answer.stderr);
             }

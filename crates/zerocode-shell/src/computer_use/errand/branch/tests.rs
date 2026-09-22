@@ -3,13 +3,16 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
-use zerocode_core::branching::BranchChoice;
+use zerocode_core::branching::{BranchChoice, NextStep};
 use zerocode_core::computer_recipe::RecipeStop;
-use zerocode_core::jev::summary::AGREED;
+use zerocode_core::jev::summary::{AGREED, CACHED};
 use zerocode_core::screen_action::{ActionChoice, Chosen, option_of};
 
 use super::super::tests::{FakeJudge, FakeWorld, goal, pick, stopped};
-use super::super::{Judged, Mode, run, run_with};
+use super::super::{
+    Barred, Judged, Mode, OVERLAP, OVERLAP_USED, Options, RESCUE, RESCUED_BY, RESCUED_BY_TEAM, run,
+    run_with,
+};
 use super::{Branching, Compared};
 
 const SHADOW: Branching = Branching {
@@ -111,7 +114,16 @@ fn off_is_todays_walk_byte_for_byte() {
     ] {
         let mut world = phone();
         let mut judge = judging();
-        let walked = run_with(Mode::On, true, off, &goal(1), &mut judge, &mut world);
+        let walked = run_with(
+            Mode::On,
+            true,
+            off,
+            &goal(1),
+            &mut judge,
+            &mut world,
+            Options::default(),
+            None,
+        );
         assert_eq!(unstamped(&walked.rows), unstamped(&plain.rows), "{off:?}");
         assert!(walked.forks.is_empty(), "{off:?}");
         assert_eq!(world.presses, plain_world.presses, "{off:?}");
@@ -132,7 +144,16 @@ fn shadow_asks_over_actions_alone_and_presses_todays_number() {
         let mut judge = judging();
         judge.compares = vec![compared(1, 0.9)];
 
-        let walked = run_with(Mode::On, true, recording, &goal(1), &mut judge, &mut world);
+        let walked = run_with(
+            Mode::On,
+            true,
+            recording,
+            &goal(1),
+            &mut judge,
+            &mut world,
+            Options::default(),
+            None,
+        );
 
         assert_eq!(
             world.presses,
@@ -191,7 +212,16 @@ fn an_acting_seat_saves_tries_each_candidate_and_presses_the_comparisons_pick() 
     let mut judge = judging();
     judge.compares = vec![compared(1, 0.8)];
 
-    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
 
     assert_eq!(
         world.presses,
@@ -266,7 +296,16 @@ fn a_low_confidence_comparison_and_a_refusal_press_the_first_candidate() {
         let mut judge = judging();
         judge.compares = answer.into_iter().collect();
 
-        let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+        let walked = run_with(
+            Mode::On,
+            true,
+            RAISED,
+            &goal(1),
+            &mut judge,
+            &mut world,
+            Options::default(),
+            None,
+        );
 
         assert_eq!(
             world.presses,
@@ -298,7 +337,16 @@ fn a_device_that_cannot_be_saved_steps_back_to_a_single_press() {
     let mut judge = judging();
     judge.compares = vec![compared(1, 0.9)];
 
-    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
 
     assert_eq!(world.presses, [2]);
     assert!(
@@ -317,7 +365,16 @@ fn a_page_or_the_desktop_is_never_forked() {
     let mut judge = judging();
     judge.compares = vec![compared(1, 0.9)];
 
-    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
 
     assert_eq!(world.presses, [2]);
     assert!(walked.forks.is_empty(), "the seat is a phone step's");
@@ -337,7 +394,16 @@ fn a_fork_without_clock_enough_presses_the_first_candidate_at_once() {
     let mut judge = judging();
     judge.compares = vec![compared(1, 0.9)];
 
-    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
 
     assert_eq!(world.presses, [2]);
     assert_eq!(
@@ -360,7 +426,16 @@ fn a_load_that_fails_leaves_the_device_on_that_candidates_screen_and_says_so() {
     let mut judge = judging();
     judge.compares = vec![compared(1, 0.9)];
 
-    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
 
     assert_eq!(
         world.presses,
@@ -391,7 +466,16 @@ fn one_candidate_is_no_fork() {
     judge.answers = vec![ranked(2, &[(2, 1.0), (1, 0.0)])];
     judge.compares = vec![compared(1, 0.9)];
 
-    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
 
     assert_eq!(world.presses, [2]);
     assert!(
@@ -414,6 +498,8 @@ fn a_step_at_the_persons_turn_is_never_forked() {
         &stopped(RecipeStop::PersonsTurn),
         &mut judge,
         &mut world,
+        Options::default(),
+        None,
     );
 
     assert!(world.presses.is_empty() && world.snapshot_log.is_empty());
@@ -435,7 +521,16 @@ fn the_walks_next_step_grades_the_fork() {
     // Reached at once: the caller's own condition held after the pick.
     let (mut world, mut judge) = two_steps(pick(3), compared(1, 0.8));
     world.reached = vec![true];
-    let walked = run_with(Mode::On, true, RAISED, &goal(2), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
     assert_eq!(walked.forks[0]["next"], "reached");
     assert_eq!(walked.forks[0][AGREED.canonical], true);
     assert_eq!(
@@ -445,7 +540,16 @@ fn the_walks_next_step_grades_the_fork() {
 
     // Moved on: the next look is a new screen and the judgment presses on.
     let (mut world, mut judge) = two_steps(pick(3), compared(1, 0.8));
-    let walked = run_with(Mode::On, true, RAISED, &goal(2), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
     assert_eq!(walked.forks[0]["next"], "moved_on");
     assert_eq!(walked.forks[0][AGREED.canonical], true);
     assert_eq!(walked.forks[0]["rescued"], true);
@@ -459,21 +563,48 @@ fn the_walks_next_step_grades_the_fork() {
         }),
         compared(1, 0.8),
     );
-    let walked = run_with(Mode::On, true, RAISED, &goal(2), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
     assert_eq!(walked.forks[0]["next"], "gave_up");
     assert_eq!(walked.forks[0][AGREED.canonical], false);
     assert_eq!(walked.forks[0]["rescued"], false);
 
     // The same screen: the pick did nothing, and what follows is a retry.
     let (mut world, mut judge) = two_steps(pick(1), compared(2, 0.8));
-    let walked = run_with(Mode::On, true, RAISED, &goal(2), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
     assert_eq!(walked.forks[0]["chosen"], "mark:2");
     assert_eq!(walked.forks[0]["next"], "same_screen");
     assert_eq!(walked.forks[0][AGREED.canonical], false);
 
     // The walk ended before a next look: nothing is shown either way.
     let (mut world, mut judge) = two_steps(pick(3), compared(1, 0.8));
-    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
     assert!(walked.forks[0].get("next").is_none());
     assert!(walked.forks[0].get(AGREED.canonical).is_none());
 }
@@ -483,7 +614,16 @@ fn under_shadow_the_mark_reads_the_comparison_against_todays_press() {
     // The same pick shares today's fate.
     let (mut world, mut judge) = two_steps(pick(3), compared(2, 0.8));
     world.leads_to.insert(2, vec![control(3, "다음")]);
-    let walked = run_with(Mode::On, true, SHADOW, &goal(2), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        SHADOW,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
     assert_eq!(world.presses, [2, 3]);
     assert_eq!(walked.forks[0]["next"], "moved_on");
     assert_eq!(walked.forks[0][AGREED.canonical], true);
@@ -492,12 +632,30 @@ fn under_shadow_the_mark_reads_the_comparison_against_todays_press() {
     // A different pick is wrong when today's press went on fine.
     let (mut world, mut judge) = two_steps(pick(3), compared(1, 0.8));
     world.leads_to.insert(2, vec![control(3, "다음")]);
-    let walked = run_with(Mode::On, true, SHADOW, &goal(2), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        SHADOW,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
     assert_eq!(walked.forks[0][AGREED.canonical], false);
 
     // And says nothing when today's press failed: nobody tried the other.
     let (mut world, mut judge) = two_steps(pick(1), compared(1, 0.8));
-    let walked = run_with(Mode::On, true, SHADOW, &goal(2), &mut judge, &mut world);
+    let walked = run_with(
+        Mode::On,
+        true,
+        SHADOW,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
     assert_eq!(walked.forks[0]["next"], "same_screen");
     assert!(walked.forks[0].get(AGREED.canonical).is_none());
 }
@@ -534,6 +692,8 @@ fn measure_forked_steps_on_a_fake_desk() {
         &goal(1),
         &mut judge,
         &mut single,
+        Options::default(),
+        None,
     );
     let single_ms = single.spent_ms;
     assert_eq!(single_ms, LOOK_MS + PRESS_MS);
@@ -543,7 +703,16 @@ fn measure_forked_steps_on_a_fake_desk() {
     let mut forked = desk();
     let mut judge = judging();
     judge.compares = vec![compared(1, 0.8)];
-    let walked = run_with(Mode::On, true, RAISED, &goal(1), &mut judge, &mut forked);
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(1),
+        &mut judge,
+        &mut forked,
+        Options::default(),
+        None,
+    );
     let forked_ms = forked.spent_ms;
     assert_eq!(
         forked_ms,
@@ -561,7 +730,16 @@ fn measure_forked_steps_on_a_fake_desk() {
         world.reached = vec![true];
         let mut judge = judging();
         judge.compares = vec![compared(1, 0.8)];
-        let walked = run_with(Mode::On, true, RAISED, &goal(2), &mut judge, &mut world);
+        let walked = run_with(
+            Mode::On,
+            true,
+            RAISED,
+            &goal(2),
+            &mut judge,
+            &mut world,
+            Options::default(),
+            None,
+        );
         forks += 1;
         if walked.forks[0]["rescued"] == json!(true) {
             rescued += 1;
@@ -1180,4 +1358,203 @@ fn the_forks_this_desk_would_take() {
             )
         )
     );
+}
+
+// ---- beside the walk's own switches (t-6132) --------------------------------
+//
+// The order of one step, where the two meet: look, the judgment (asked in
+// turn, or the one begun on the last look), the second rung, the fork, the
+// question begun ahead, the press — and on the next look the fork's mark and
+// the memo's word both on their rows.
+
+/// A forked step asks ahead ([`Options::overlap`]) with the number the hand
+/// goes out with — the comparison's pick, not the seat's own — its legend
+/// among `pressed`; and the fork's own presses and looks begin nothing.
+#[test]
+fn a_forked_step_asks_ahead_with_the_canonical_number() {
+    let mut world = phone();
+    let mut judge = judging();
+    judge.compares = vec![compared(1, 0.8)];
+    // One answer for the question begun ahead, one for the screen the pick
+    // leads to.
+    judge.answers.extend([pick(3), pick(3)]);
+
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+
+    assert_eq!(
+        world.presses[..3],
+        [2, 1, 1],
+        "each candidate on the saved device, then the pick"
+    );
+    assert_eq!(
+        judge.begun,
+        [vec![2]],
+        "begun once, after the fork: the pick (1) is the number spent, not today's (2)"
+    );
+    let legend = |mark: usize| {
+        zerocode_core::computer_use_protocol::marks::legend_line(&control(mark, "저장"))
+            .expect("a legend line")
+    };
+    assert_eq!(
+        judge.begun_state[0]["pressed"],
+        json!([legend(1)]),
+        "the legend among `pressed` is the pick's, not today's ({})",
+        legend(2)
+    );
+    assert_eq!(walked.forks[0]["chosen"], "mark:1");
+    assert_eq!(walked.rows[0]["forked"], "mark:1");
+    // Pressing 1 leads to a screen that moved: the next look asks another
+    // question, the answer in flight is dropped, and the fork's mark is the
+    // walk going on.
+    assert_eq!((walked.overlapped, walked.discarded), (0, 1));
+    assert_eq!(walked.forks[0]["next"], NextStep::MovedOn.word());
+    assert_eq!(walked.forks[0][AGREED.canonical], true);
+}
+
+/// The second rung comes before the fork: a step the second reader pressed
+/// for is forked on the second reader's own ranking — its pick is the first
+/// candidate, `today` on the fork's row — and the comparison's pick is the
+/// number the hand goes out with. Without the rung the walk steps back to
+/// the person before any candidate exists.
+#[test]
+fn a_rescued_step_forks_on_the_second_readers_ranking() {
+    let seat = || {
+        let mut judge = FakeJudge::chose(&[]);
+        let Judged::Chose(mut unsure) = ranked(2, &[(2, 0.6), (1, 0.4)]) else {
+            unreachable!()
+        };
+        unsure.confidence = 0.29;
+        judge.answers = vec![Judged::Chose(unsure)];
+        judge.compares = vec![compared(2, 0.8)];
+        judge
+    };
+    let mut world = phone();
+    let mut judge = seat();
+    let mut team = FakeJudge::chose(&[]);
+    team.answers = vec![ranked(1, &[(1, 0.6), (2, 0.4)])];
+
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: false,
+            rescue: true,
+        },
+        Some(&mut team),
+    );
+
+    assert_eq!(team.asked, [vec![1, 2]], "the same closed choice");
+    assert_eq!(
+        judge.compared,
+        [vec![1, 2]],
+        "the fork's candidates are the second reader's, its pick first"
+    );
+    assert_eq!(
+        world.presses,
+        [1, 2, 2],
+        "explored in the second reader's order, then the comparison's pick"
+    );
+    let row = &walked.rows[0];
+    assert_eq!(row[RESCUE]["outcome"], "pressed");
+    assert_eq!(row[RESCUED_BY], RESCUED_BY_TEAM);
+    assert_eq!(row["chosen"], "mark:1", "the second reader's number");
+    assert_eq!(
+        row["forked"], "mark:2",
+        "and the fork's, which the hand went out with"
+    );
+    assert_eq!(row["pressed"], true);
+    let fork = &walked.forks[0];
+    assert_eq!(fork["today"], "mark:1");
+    assert_eq!(fork["chosen"], "mark:2");
+    assert_eq!(fork["routeUse"], "applied");
+    assert_eq!(
+        (walked.rescued, walked.rescue_failed, walked.pressed),
+        (1, 0, 1)
+    );
+
+    let mut world = phone();
+    let mut judge = seat();
+    let unhelped = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
+    assert!(
+        world.presses.is_empty(),
+        "the person's step: nothing pressed"
+    );
+    assert!(judge.compared.is_empty() && world.snapshot_log.is_empty());
+    assert!(unhelped.forks.is_empty());
+    assert_eq!(
+        unhelped.rows[0]["barred"],
+        json!(Barred::LowConfidence.as_str())
+    );
+}
+
+/// On the next look both seats write: the fork's row learns what the pick
+/// led to, and the screen seat's row says the judgment begun ahead was used
+/// and came from the memo.
+#[test]
+fn the_next_look_settles_the_fork_and_says_the_memo_answered_ahead() {
+    let mut world = phone();
+    let mut judge = judging();
+    // The comparison keeps today's 2, which leads nowhere: the screen stays,
+    // and the question begun ahead is the one the next look asks.
+    judge.compares = vec![compared(2, 0.8)];
+    judge.answers.push(pick(1));
+    judge.cached = true;
+
+    let walked = run_with(
+        Mode::On,
+        true,
+        RAISED,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+
+    assert_eq!(
+        world.presses,
+        [2, 1, 2, 1],
+        "the fork's two, the pick, then the answer begun ahead"
+    );
+    assert_eq!(judge.begun, [vec![1]], "begun once, 2 spent");
+    assert_eq!(walked.forks.len(), 1);
+    let fork = &walked.forks[0];
+    assert_eq!(fork["chosen"], "mark:2");
+    assert_eq!(fork["next"], NextStep::SameScreen.word());
+    assert_eq!(fork[AGREED.canonical], false);
+    assert_eq!((walked.overlapped, walked.discarded), (1, 0));
+    let row = &walked.rows[1];
+    assert_eq!(row[OVERLAP], json!(OVERLAP_USED));
+    assert!(row["hiddenMs"].is_u64());
+    assert_eq!(row[CACHED.canonical], true);
+    assert_eq!(row["chosen"], "mark:1");
+    assert!(row.get("forked").is_none(), "one candidate: no fork");
 }

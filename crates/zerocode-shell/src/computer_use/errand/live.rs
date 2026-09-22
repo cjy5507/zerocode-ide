@@ -11,14 +11,26 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use zerocode_core::branching::BranchAsk;
-use zerocode_core::jev::{BRANCHING, BRANCHING_APPLY_DEADLINE_MS, JevUse};
+use zerocode_core::jev::door::{Memo, Memoed, REDACTED_LINES_KEY, REQUESTS_KEY};
+use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
+use zerocode_core::jev::{
+    BRANCHING, BRANCHING_APPLY_DEADLINE_MS, JUDGMENT_CACHE, JevMode, JevUse, memo,
+};
 use zerocode_core::screen_action::ActionAsk;
 
-use super::{ACTION_DEADLINE, ActionJudge, Compared, Judged, Spent};
+use super::{ACTION_DEADLINE, ActionJudge, Compared, Done, Judged, Pending, Spent};
 use crate::api_routers::RouterKeys;
-use crate::systemone::{SCHEMA, Wire, request_body};
+use crate::systemone::{SCHEMA, Wire, memo_path, request_body};
+
+/// The key the judgment cache's rows keep the screen seat they answered for
+/// under, and the memo key the lookup was made with.
+const FOR_SEAT_KEY: &str = "seat";
+const MEMO_KEY: &str = "key";
+/// The key a lookup that found nothing is written under — a row with no
+/// `outcome`, which the judge does not count and a hit-rate reader does.
+const MISS_KEY: &str = "miss";
 
 /// What a successful body says about the question, or why it says nothing.
 /// Every shape rule is `browser_action`'s: this reads the envelope and hands
@@ -97,6 +109,20 @@ pub struct LiveJudge {
     /// the door checks, and whose ledger the row lands in.
     seat: &'static JevUse,
     spent: Option<Spent>,
+    /// Whether the last question was answered by the memo.
+    cached: bool,
+    /// The judgment cache's own rows — one per lookup the memo was asked —
+    /// written to its ledger by the walk's caller ([`Self::write_memo_rows`])
+    /// through the same road every seat's rows take.
+    memo_rows: Vec<Value>,
+}
+
+/// How the judgment cache stands for one question: the seat's mode as the
+/// person set it, and whether a risen `auto` may answer from the memo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CacheStand {
+    mode: JevMode,
+    applying: bool,
 }
 
 impl LiveJudge {
@@ -113,6 +139,8 @@ impl LiveJudge {
             workspace: workspace.map(Path::to_path_buf),
             seat,
             spent: None,
+            cached: false,
+            memo_rows: Vec::new(),
         }
     }
 
@@ -126,6 +154,8 @@ impl LiveJudge {
             workspace: doorway.workspace,
             seat: doorway.seat,
             spent: None,
+            cached: false,
+            memo_rows: Vec::new(),
         }
     }
 
@@ -147,10 +177,151 @@ impl LiveJudge {
     pub const fn wire(&self) -> &Wire {
         &self.wire
     }
-}
 
-impl ActionJudge for LiveJudge {
-    fn choose(&mut self, ask: &ActionAsk) -> Judged {
+    /// Where the judgment cache stands right now, read from the same settings
+    /// file and the same ledger root the questions go through. `None` when
+    /// the cache is off — and then no memo is asked, no file is touched and
+    /// no row is written: today's walk to the byte.
+    fn cache_stand(&self) -> Option<CacheStand> {
+        let mode = JUDGMENT_CACHE.mode_in(&self.wire.settings_root());
+        mode.asks().then(|| CacheStand {
+            mode,
+            applying: crate::systemone::applies(&self.wire, &JUDGMENT_CACHE),
+        })
+    }
+
+    /// The judgment cache's rows this walk produced, taken — the caller
+    /// writes them beside the walk's own through [`super::write_rows`].
+    pub fn write_memo_rows(&mut self, dir: Option<&Path>, now_ms: i64) {
+        let rows = std::mem::take(&mut self.memo_rows);
+        super::write_rows(&JUDGMENT_CACHE, &self.wire, dir, &rows, now_ms);
+    }
+
+    /// One question down the wire, with the memo in front of it when the
+    /// cache asks (t-6132). What the memo said becomes one row of the cache
+    /// seat's own: a miss (no `outcome`), a hit compared against the fresh
+    /// answer under `shadow` and an unraised `auto` (`agreed`), or a hit that
+    /// answered under a risen `auto` (`routeUse: applied`). A remembered body
+    /// the question's own rules refuse is a hit that no longer reads: the
+    /// wire is asked after all, and the row says `schema`.
+    fn choose_remembering(&mut self, ask: &ActionAsk, stand: CacheStand) -> Judged {
+        let Some(path) = memo_path(&self.wire) else {
+            return self.choose_plain(ask);
+        };
+        let asked = self.wire.ask_remembering(
+            self.seat,
+            self.workspace.as_deref(),
+            request_of(ask),
+            ACTION_DEADLINE,
+            Some(Memo {
+                path: &path,
+                seat: self.seat,
+                applying: stand.applying,
+            }),
+        );
+        let Some(memoed) = asked.memo.clone() else {
+            // Refused at the door before the memo was reached: no lookup, no
+            // row of the cache's own.
+            self.spent = Some(asked.spent);
+            return match asked.answer {
+                Ok(body) => read_body(ask, &body),
+                Err(token) => Judged::Refused(token),
+            };
+        };
+        let now_ms = crate::project_runtime::now_epoch_ms();
+        let mut row = json!({
+            AT.canonical: now_ms,
+            FOR_SEAT_KEY: self.seat.id,
+            MEMO_KEY: memoed.key,
+            "mode": stand.mode.key(),
+        });
+        let Some(recalled) = memoed.recalled.as_ref() else {
+            // A miss: the wire answers as ever, and what it answered is
+            // remembered for the next walk that asks these bytes.
+            row[MISS_KEY] = json!(true);
+            self.memo_rows.push(row);
+            return self.answer_and_remember(ask, &asked.answer, asked.spent, &path, &memoed);
+        };
+        row[ELAPSED_MS.canonical] = json!(memoed.lookup_ms);
+        row[REQUESTS_KEY] = json!(0);
+        row[REDACTED_LINES_KEY] = json!(0);
+        if memoed.answered {
+            // The memo's answer stands in for the wire's — if it still reads.
+            match read_body(ask, &recalled.answer) {
+                Judged::Chose(choice) => {
+                    row["outcome"] = json!("answered");
+                    row["routeUse"] = json!(zerocode_core::jev::ROUTE_USE_APPLIED);
+                    self.memo_rows.push(row);
+                    self.spent = Some(asked.spent);
+                    self.cached = true;
+                    return Judged::Chose(choice);
+                }
+                Judged::Refused(token) => {
+                    row["outcome"] = json!(token);
+                    row["routeUse"] = json!(zerocode_core::jev::ROUTE_USE_FALLBACK);
+                    self.memo_rows.push(row);
+                    // The wire after all, counted as any request.
+                    let fresh = self.wire.ask(
+                        self.seat,
+                        self.workspace.as_deref(),
+                        request_of(ask),
+                        ACTION_DEADLINE,
+                    );
+                    return self.answer_and_remember(
+                        ask,
+                        &fresh.answer,
+                        fresh.spent,
+                        &path,
+                        &memoed,
+                    );
+                }
+            }
+        }
+        // A hit under a seat that only compares: the wire was asked, and the
+        // memo is labeled by whether it named the same number.
+        row["outcome"] = json!("answered");
+        row["routeUse"] = json!(JevMode::Shadow.key());
+        let fresh = self.answer_and_remember(ask, &asked.answer, asked.spent, &path, &memoed);
+        if let (Judged::Chose(fresh), Judged::Chose(remembered)) =
+            (&fresh, read_body(ask, &recalled.answer))
+        {
+            row[AGREED.canonical] = json!(fresh.chosen == remembered.chosen);
+        }
+        self.memo_rows.push(row);
+        fresh
+    }
+
+    /// The wire's answer read through the question, and — a choice that
+    /// passed its checks — remembered under the memo's key.
+    fn answer_and_remember(
+        &mut self,
+        ask: &ActionAsk,
+        answer: &Result<String, String>,
+        spent: Spent,
+        path: &Path,
+        memoed: &Memoed,
+    ) -> Judged {
+        self.spent = Some(spent);
+        let judged = match answer {
+            Ok(body) => read_body(ask, body),
+            Err(token) => Judged::Refused(token.clone()),
+        };
+        if let (Judged::Chose(_), Ok(body)) = (&judged, answer)
+            && let Err(why) = memo::remember(
+                path,
+                self.seat,
+                &memoed.key,
+                body,
+                crate::project_runtime::now_epoch_ms(),
+            )
+        {
+            eprintln!("judgment memo: the answer was not remembered: {why}");
+        }
+        judged
+    }
+
+    /// The question as it was asked before the memo existed: the wire alone.
+    fn choose_plain(&mut self, ask: &ActionAsk) -> Judged {
         let asked = self.wire.ask(
             self.seat,
             self.workspace.as_deref(),
@@ -162,6 +333,58 @@ impl ActionJudge for LiveJudge {
             Ok(body) => read_body(ask, &body),
             Err(token) => Judged::Refused(token),
         }
+    }
+}
+
+impl LiveJudge {
+    /// This judge's twin for a thread of its own: the same wire, workspace
+    /// and seat, with nothing yet asked — what a question begun ahead of the
+    /// walk runs on ([`ActionJudge::begin`]).
+    fn twin(&self) -> Self {
+        Self {
+            wire: self.wire.clone(),
+            workspace: self.workspace.clone(),
+            seat: self.seat,
+            spent: None,
+            cached: false,
+            memo_rows: Vec::new(),
+        }
+    }
+}
+
+impl ActionJudge for LiveJudge {
+    fn choose(&mut self, ask: &ActionAsk) -> Judged {
+        self.cached = false;
+        match self.cache_stand() {
+            Some(stand) => self.choose_remembering(ask, stand),
+            None => self.choose_plain(ask),
+        }
+    }
+
+    fn begin(&mut self, ask: &ActionAsk) -> Option<Pending> {
+        let (done, waited) = std::sync::mpsc::channel();
+        let mut twin = self.twin();
+        let ahead = ask.clone();
+        std::thread::Builder::new()
+            .name("jev-ahead".to_string())
+            .spawn(move || {
+                let judged = twin.choose(&ahead);
+                let _ = done.send(Done {
+                    judged,
+                    spent: twin.spent,
+                    cached: twin.cached,
+                    rows: std::mem::take(&mut twin.memo_rows),
+                });
+            })
+            .ok()?;
+        Some(Pending::new(ask.clone(), waited))
+    }
+
+    fn finish(&mut self, done: Done) -> Judged {
+        self.spent = done.spent;
+        self.cached = done.cached;
+        self.memo_rows.extend(done.rows);
+        done.judged
     }
 
     /// The forked step's comparison (t-6044): the same wire, the same
@@ -182,6 +405,10 @@ impl ActionJudge for LiveJudge {
 
     fn spent(&self) -> Option<Spent> {
         self.spent
+    }
+
+    fn cached(&self) -> bool {
+        self.cached
     }
 }
 

@@ -432,6 +432,38 @@ impl ActionAsk {
         &self.marks
     }
 
+    /// A second reader's answer to this question — one option and one
+    /// confidence, as a frontier model asked the same closed choice answers
+    /// it (t-6132 S3) — judged against the set this question offered. The
+    /// rules are the closed choice's own: an option nobody offered, and a
+    /// confidence that is not a share, are refused whole. What such an
+    /// answer lacks is a spread over the options, so its probabilities carry
+    /// the one number it gave.
+    ///
+    /// # Errors
+    ///
+    /// [`ActionRefusal::UnknownOption`] for an option this question did not
+    /// offer; [`ActionRefusal::NotOne`] for a confidence outside `[0, 1]`.
+    pub fn choice_of(&self, option: &str, confidence: f64) -> Result<ActionChoice, ActionRefusal> {
+        let option = option.trim();
+        if !self.options().iter().any(|offered| offered == option) {
+            return Err(ActionRefusal::UnknownOption);
+        }
+        if !(0.0..=1.0).contains(&confidence) {
+            return Err(ActionRefusal::NotOne);
+        }
+        let chosen = match option {
+            GIVE_UP => Chosen::GiveUp,
+            DONE => Chosen::Done,
+            named => Chosen::Mark(mark_of(named).ok_or(ActionRefusal::UnknownOption)?),
+        };
+        Ok(ActionChoice {
+            chosen,
+            probabilities: BTreeMap::from([(option.to_string(), confidence)]),
+            confidence,
+        })
+    }
+
     /// Every option name it offered, in the order a reader would see them.
     #[must_use]
     pub fn options(&self) -> Vec<String> {

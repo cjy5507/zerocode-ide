@@ -1,6 +1,7 @@
 //! What a walk by judgment may do, and what it may not.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use super::*;
 use zerocode_core::computer_flow::{Confirm, EvidenceLevel, Fingerprint, Money};
@@ -18,7 +19,8 @@ fn control(mark: usize, label: &str) -> Value {
 }
 
 /// A judge that answers what the test says, and counts what it was asked —
-/// presses and, since t-6044, comparisons.
+/// presses, comparisons (t-6044), and the questions begun ahead of the walk
+/// (t-6132).
 pub(super) struct FakeJudge {
     pub(super) answers: Vec<Judged>,
     pub(super) asked: Vec<Vec<usize>>,
@@ -29,22 +31,51 @@ pub(super) struct FakeJudge {
     /// The state of the last comparison it was asked, as the wire would
     /// carry it.
     pub(super) compared_state: Vec<Value>,
+    /// The questions it was asked ahead of the walk ([`ActionJudge::begin`]),
+    /// answered from the same list on a thread of their own.
+    pub(super) begun: Vec<Vec<usize>>,
+    /// The state of each question begun ahead, as the wire would carry it.
+    pub(super) begun_state: Vec<Value>,
+    /// Whether it answers from the judgment memo ([`ActionJudge::cached`]),
+    /// in turn or ahead — a test's stand-in for the cache seat's hit.
+    pub(super) cached: bool,
+    /// Whether it asks ahead at all — a judge that cannot answers `None`.
+    overlaps: bool,
+    /// How long one answer takes, in turn or ahead.
+    latency: Duration,
+    /// What [`ActionJudge::finish`] handed back.
+    finished: usize,
 }
 
 impl FakeJudge {
     pub(super) fn chose(marks: &[usize]) -> Self {
-        Self {
-            answers: marks.iter().map(|mark| pick(*mark)).collect(),
-            asked: Vec::new(),
-            compares: Vec::new(),
-            compared: Vec::new(),
-            compared_state: Vec::new(),
-        }
+        Self::saying(marks.iter().map(|mark| pick(*mark)).collect())
     }
     fn saying(answers: Vec<Judged>) -> Self {
         Self {
             answers,
-            ..Self::chose(&[])
+            asked: Vec::new(),
+            compares: Vec::new(),
+            compared: Vec::new(),
+            compared_state: Vec::new(),
+            begun: Vec::new(),
+            begun_state: Vec::new(),
+            cached: false,
+            overlaps: true,
+            latency: Duration::ZERO,
+            finished: 0,
+        }
+    }
+    /// The same judge, each answer taking `ms`.
+    fn slow(mut self, ms: u64) -> Self {
+        self.latency = Duration::from_millis(ms);
+        self
+    }
+    fn next_answer(&mut self) -> Judged {
+        if self.answers.is_empty() {
+            Judged::Refused("timeout".to_string())
+        } else {
+            self.answers.remove(0)
         }
     }
 }
@@ -61,11 +92,39 @@ pub(super) fn pick(mark: usize) -> Judged {
 impl ActionJudge for FakeJudge {
     fn choose(&mut self, ask: &ActionAsk) -> Judged {
         self.asked.push(ask.marks().to_vec());
-        if self.answers.is_empty() {
-            Judged::Refused("timeout".to_string())
-        } else {
-            self.answers.remove(0)
+        std::thread::sleep(self.latency);
+        self.next_answer()
+    }
+
+    fn begin(&mut self, ask: &ActionAsk) -> Option<Pending> {
+        if !self.overlaps {
+            return None;
         }
+        self.begun.push(ask.marks().to_vec());
+        self.begun_state.push(ask.state.clone());
+        let judged = self.next_answer();
+        let latency = self.latency;
+        let cached = self.cached;
+        let (done, waited) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(latency);
+            let _ = done.send(Done {
+                judged,
+                spent: None,
+                cached,
+                rows: Vec::new(),
+            });
+        });
+        Some(Pending::new(ask.clone(), waited))
+    }
+
+    fn finish(&mut self, done: Done) -> Judged {
+        self.finished += 1;
+        done.judged
+    }
+
+    fn cached(&self) -> bool {
+        self.cached
     }
 
     fn compare(&mut self, ask: &zerocode_core::branching::BranchAsk) -> Compared {
@@ -92,6 +151,13 @@ pub(super) struct FakeWorld {
     pub(super) left_ms: u64,
     /// Whether every press renumbers the screen — a world that moves.
     moves: bool,
+    /// Whether only every second press moves the screen — a world where a
+    /// press lands on the screen it was pressed on half the time, which is
+    /// where a judgment begun on the last look can be used.
+    moves_every_other: bool,
+    /// How long a press holds the walk — the door's own landing, which a
+    /// judgment begun ahead runs behind.
+    press_holds: Duration,
     /// What the caller's own condition answers, press by press; a world whose
     /// caller wrote no condition has none.
     pub(super) reached: Vec<bool>,
@@ -135,6 +201,8 @@ impl FakeWorld {
             walks: vec![None],
             left_ms: 60_000,
             moves: false,
+            moves_every_other: false,
+            press_holds: Duration::ZERO,
             reached: Vec::new(),
             snapshots: None,
             leads_to: BTreeMap::new(),
@@ -167,11 +235,25 @@ impl FakeWorld {
     }
 
     /// The same world, whose screen shows different words after every press.
-    fn that_moves(marks: &[usize]) -> Self {
+    pub(super) fn that_moves(marks: &[usize]) -> Self {
         Self {
             moves: true,
             ..Self::showing(marks)
         }
+    }
+
+    /// The same world, whose screen moves after every second press only.
+    fn that_moves_every_other(marks: &[usize]) -> Self {
+        Self {
+            moves_every_other: true,
+            ..Self::showing(marks)
+        }
+    }
+
+    /// The same world, each press holding the walk `ms`.
+    fn holding(mut self, ms: u64) -> Self {
+        self.press_holds = Duration::from_millis(ms);
+        self
     }
 }
 
@@ -183,23 +265,27 @@ impl World for FakeWorld {
     fn press(&mut self, mark: usize) -> bool {
         self.observed.push(crate::run_evidence::observation());
         self.presses.push(mark);
+        // Time first — the world's own clock, then the door's landing — then
+        // whether the screen moved, then where the press led.
         self.spend(self.press_ms);
+        std::thread::sleep(self.press_holds);
+        let round = self.presses.len();
+        let moves = self.moves || (self.moves_every_other && round.is_multiple_of(2));
+        if self.press_takes
+            && moves
+            && let Some(screen) = self.screen.as_mut()
+        {
+            // A screen that moved: same numbers, different words.
+            for item in &mut screen.items {
+                item["label"] = json!(format!("저장 {round}"));
+            }
+        }
         if self.press_takes
             && let Some(leads_to) = self.leads_to.get(&mark)
             && let Some(screen) = self.screen.as_mut()
         {
             screen.items.clone_from(leads_to);
             return true;
-        }
-        if self.press_takes
-            && self.moves
-            && let Some(screen) = self.screen.as_mut()
-        {
-            // A screen that moved: same numbers, different words.
-            let round = self.presses.len();
-            for item in &mut screen.items {
-                item["label"] = json!(format!("저장 {round}"));
-            }
         }
         self.press_takes
     }
@@ -1330,4 +1416,588 @@ fn a_screen_seats_auto_rises_on_its_own_rows_and_falls_when_the_wire_does() {
         json!(zerocode_core::jev::promote::FELL)
     );
     assert!(!crate::systemone::applies(&wire, seat));
+}
+
+// ---- asking ahead of the look (t-6132 S2) ----------------------------------
+
+/// A row with the two clocks and the wall time taken off, for comparing
+/// what two walks wrote apart from when.
+fn timeless(row: &Value) -> Value {
+    let mut row = row.clone();
+    if let Some(row) = row.as_object_mut() {
+        row.remove(AT.canonical);
+        row.remove(ELAPSED_MS.canonical);
+    }
+    row
+}
+
+#[test]
+fn overlap_off_is_todays_walk_to_the_byte() {
+    let mut plain_judge = FakeJudge::chose(&[1, 2, 1]);
+    let mut plain_world = FakeWorld::that_moves_every_other(&[1, 2]);
+    let plain = run(Mode::On, true, &goal(3), &mut plain_judge, &mut plain_world);
+
+    let mut judge = FakeJudge::chose(&[1, 2, 1]);
+    let mut world = FakeWorld::that_moves_every_other(&[1, 2]);
+    let off = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        None,
+    );
+    assert_eq!(
+        off.rows.iter().map(timeless).collect::<Vec<_>>(),
+        plain.rows.iter().map(timeless).collect::<Vec<_>>()
+    );
+    assert_eq!((off.overlapped, off.discarded), (0, 0));
+    assert!(judge.begun.is_empty(), "nothing is asked ahead");
+    assert_eq!(judge.asked, plain_judge.asked);
+    assert_eq!(world.presses, plain_world.presses);
+    assert!(off.rows.iter().all(|row| row.get(OVERLAP).is_none()));
+}
+
+/// After a press on a screen that then stays, the walk's next question is
+/// the one begun on the last look — the pressed number spent, its legend
+/// among `pressed` — and the walk uses that answer instead of asking again.
+#[test]
+fn a_judgment_begun_on_the_last_look_answers_the_next_look_that_asks_the_same_question() {
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert_eq!(world.presses, vec![1, 2]);
+    assert_eq!(judge.asked, vec![vec![1, 2]], "asked in turn once");
+    assert_eq!(judge.begun, vec![vec![2]], "begun ahead once: mark 1 spent");
+    assert_eq!(judge.finished, 1);
+    assert_eq!((walked.overlapped, walked.discarded), (1, 0));
+    assert!(walked.rows[0].get(OVERLAP).is_none());
+    assert_eq!(walked.rows[1][OVERLAP], json!(OVERLAP_USED));
+    assert!(walked.rows[1]["hiddenMs"].is_u64());
+    assert_eq!(walked.rows[1]["chosen"], json!("mark:2"));
+    // The screen never moved: the third look is where the walk stops, and
+    // no judgment was begun for it (one more stand would end the walk).
+    assert_eq!(walked.rows[2]["outcome"], json!("stuck"));
+}
+
+/// A screen that moved asks another question: the judgment begun ahead is
+/// dropped, its request spent, and the new screen is asked in turn.
+#[test]
+fn a_judgment_begun_ahead_is_dropped_when_the_next_look_asks_another_question() {
+    let mut judge = FakeJudge::chose(&[1, 1, 1]);
+    let mut world = FakeWorld::that_moves(&[1, 2]);
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert_eq!(world.presses, vec![1, 1]);
+    assert_eq!(judge.begun, vec![vec![2]], "begun on the first screen");
+    assert_eq!(judge.asked.len(), 2, "both screens asked in turn");
+    assert_eq!(judge.finished, 0);
+    assert_eq!((walked.overlapped, walked.discarded), (0, 1));
+    assert_eq!(walked.rows[1][OVERLAP], json!(OVERLAP_DISCARDED));
+}
+
+/// No question is begun ahead after a link, on the last step, on a screen
+/// one more stand from stuck, for a walk that clears a stop, or by a judge
+/// that cannot ask ahead.
+#[test]
+fn nothing_is_begun_ahead_where_the_next_screen_is_another_page_or_the_walk_ends() {
+    // A link: the screen after it is another page.
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    world.screen.as_mut().unwrap().items[0]["role"] = json!("link");
+    run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert!(judge.begun.is_empty(), "a link is not asked ahead");
+    assert!(moves_the_page(&json!({ "role": "link" })));
+    assert!(moves_the_page(&json!({ "role": "AXLink" })));
+    assert!(!moves_the_page(&json!({ "role": "button" })));
+
+    // The last step asks nothing more.
+    let mut judge = FakeJudge::chose(&[1]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert!(judge.begun.is_empty());
+
+    // A recovery walks the document again; it never comes back to a look.
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    world.walks = vec![Some(4), None];
+    run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &stopped(RecipeStop::StepFailed),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert!(judge.begun.is_empty());
+
+    // A judge that cannot ask ahead: the walk asks in turn.
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    judge.overlaps = false;
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert_eq!(judge.asked.len(), 2);
+    assert_eq!((walked.overlapped, walked.discarded), (0, 0));
+}
+
+/// The measurement asking ahead is for: a walk whose presses hold the door's
+/// own landing and whose judgments take the wire's own time, with and
+/// without the judgment begun ahead — on a screen that stays after every
+/// second press, where the answer in flight can be used. Printed, and held
+/// on the count: every other judgment was hidden behind a press.
+#[test]
+fn a_judgment_hidden_behind_the_press_shortens_the_walk_by_what_it_hid() {
+    const JUDGE_MS: u64 = 60;
+    const PRESS_MS: u64 = 80;
+    const STEPS: usize = 8;
+    let walk = |overlap: bool| {
+        let mut judge = FakeJudge::chose(&[1, 2, 1, 2, 1, 2, 1, 2]).slow(JUDGE_MS);
+        let mut world = FakeWorld::that_moves_every_other(&[1, 2]).holding(PRESS_MS);
+        let began = std::time::Instant::now();
+        let walked = run_with(
+            Mode::On,
+            true,
+            Branching::OFF,
+            &goal(STEPS),
+            &mut judge,
+            &mut world,
+            Options {
+                overlap,
+                rescue: false,
+            },
+            None,
+        );
+        (
+            began.elapsed().as_millis(),
+            walked,
+            judge.asked.len() + judge.begun.len(),
+        )
+    };
+    let (before_ms, plain, plain_asks) = walk(false);
+    let (after_ms, ahead, ahead_asks) = walk(true);
+    assert_eq!(plain.pressed, STEPS);
+    assert_eq!(ahead.pressed, STEPS);
+    assert_eq!((plain.overlapped, plain.discarded), (0, 0));
+    assert_eq!(
+        (ahead.overlapped, ahead.discarded),
+        (STEPS / 2, 0),
+        "every other judgment was begun ahead and used"
+    );
+    assert_eq!(plain_asks, STEPS);
+    assert_eq!(ahead_asks, STEPS, "asking ahead asks no more questions");
+    let hidden_per_step = ahead
+        .rows
+        .iter()
+        .filter_map(|row| row["hiddenMs"].as_u64())
+        .sum::<u64>()
+        / ahead.overlapped.max(1) as u64;
+    assert!(
+        hidden_per_step >= PRESS_MS,
+        "a judgment begun before the press ran at least as long as the press held: {hidden_per_step} ms"
+    );
+    // A step is the time from one judgment to the next, read off the rows'
+    // own clocks.
+    let steps_of = |walked: &Walked| -> Vec<u64> {
+        let at: Vec<i64> = walked
+            .rows
+            .iter()
+            .filter_map(|row| row[AT.canonical].as_i64())
+            .collect();
+        let mut steps: Vec<u64> = at
+            .windows(2)
+            .map(|pair| u64::try_from(pair[1] - pair[0]).unwrap_or(0))
+            .collect();
+        steps.sort_unstable();
+        steps
+    };
+    let (plain_steps, ahead_steps) = (steps_of(&plain), steps_of(&ahead));
+    let pct = |steps: &[u64], share: f64| {
+        zerocode_core::jev::summary::percentile(steps, share).unwrap_or(0)
+    };
+    println!(
+        "measure: overlap steps={STEPS} judge_ms={JUDGE_MS} press_ms={PRESS_MS} before_ms={before_ms} after_ms={after_ms} step_p50_before={} step_p95_before={} step_p50_after={} step_p95_after={} overlapped={} discarded={} discard_share={:.2} hidden_ms_per_used_step={hidden_per_step}",
+        pct(&plain_steps, 0.5),
+        pct(&plain_steps, 0.95),
+        pct(&ahead_steps, 0.5),
+        pct(&ahead_steps, 0.95),
+        ahead.overlapped,
+        ahead.discarded,
+        ahead.discarded as f64 / (ahead.overlapped + ahead.discarded).max(1) as f64
+    );
+}
+
+// ---- the second rung (t-6132 S3) -------------------------------------------
+
+/// A judge whose every answer sits under the seat's press floor — what the
+/// second rung is for.
+fn unsure(marks: &[usize]) -> FakeJudge {
+    let mut judge = FakeJudge::chose(marks);
+    for answer in &mut judge.answers {
+        if let Judged::Chose(choice) = answer {
+            choice.confidence = 0.29;
+        }
+    }
+    judge
+}
+
+fn sure(marks: &[usize]) -> FakeJudge {
+    let mut judge = FakeJudge::chose(marks);
+    for answer in &mut judge.answers {
+        if let Judged::Chose(choice) = answer {
+            choice.confidence = 0.9;
+        }
+    }
+    judge
+}
+
+#[test]
+fn rescue_off_is_todays_walk_to_the_byte_whoever_was_handed_in() {
+    let mut plain_judge = unsure(&[1]);
+    let mut plain_world = FakeWorld::showing(&[1, 2]);
+    let plain = run(Mode::On, true, &goal(3), &mut plain_judge, &mut plain_world);
+
+    let mut judge = unsure(&[1]);
+    let mut team = sure(&[2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let off = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options::default(),
+        Some(&mut team),
+    );
+    assert_eq!(
+        off.rows.iter().map(timeless).collect::<Vec<_>>(),
+        plain.rows.iter().map(timeless).collect::<Vec<_>>()
+    );
+    assert!(team.asked.is_empty(), "the second reader is never asked");
+    assert!(world.presses.is_empty());
+    assert_eq!((off.rescued, off.rescue_failed), (0, 0));
+    assert_eq!(off.rows[0]["barred"], json!(Barred::LowConfidence.as_str()));
+}
+
+/// The seat's judgment under its floor, the second reader's above it: the
+/// second reader's number is pressed under the seat's own rule, and the row
+/// says who pressed and what each reader said.
+#[test]
+fn a_judgment_under_the_floor_is_pressed_for_by_the_second_reader_when_it_is_sure() {
+    let mut judge = unsure(&[1]);
+    let mut team = sure(&[2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: false,
+            rescue: true,
+        },
+        Some(&mut team),
+    );
+    assert_eq!(world.presses, vec![2], "the second reader's number");
+    assert_eq!(team.asked, vec![vec![1, 2]], "the same closed choice");
+    assert_eq!((walked.rescued, walked.rescue_failed), (1, 0));
+    let row = &walked.rows[0];
+    assert_eq!(row["pressed"], json!(true));
+    assert_eq!(row["chosen"], json!("mark:2"));
+    assert_eq!(
+        row["confidence"],
+        json!(0.29),
+        "the seat's own judgment stays on the row"
+    );
+    assert_eq!(row[RESCUED_BY], json!(RESCUED_BY_TEAM));
+    assert_eq!(row[RESCUE]["outcome"], json!("pressed"));
+    assert_eq!(row[RESCUE]["chosen"], json!("mark:2"));
+    assert_eq!(row[RESCUE]["confidence"], json!(0.9));
+    assert!(row[RESCUE][ELAPSED_MS.canonical].is_u64());
+    assert!(row.get("barred").is_none());
+    assert_eq!(row["routeUse"], json!("applied"));
+}
+
+/// Where the second reader cannot press for the walk — unsure itself,
+/// refused, a link, `give_up`, `done` — the walk steps back to the person
+/// exactly as it does today, and the row says why the rung did not hold.
+#[test]
+fn a_second_reader_that_cannot_press_leaves_the_walk_where_today_leaves_it() {
+    let cases: Vec<(&str, FakeJudge, Option<&str>)> = vec![
+        ("low_confidence", unsure(&[2]), None),
+        ("timeout", FakeJudge::saying(Vec::new()), None),
+        (
+            "give_up",
+            FakeJudge::saying(vec![Judged::Chose(ActionChoice {
+                chosen: Chosen::GiveUp,
+                probabilities: BTreeMap::new(),
+                confidence: 0.9,
+            })]),
+            None,
+        ),
+        (
+            "done",
+            FakeJudge::saying(vec![Judged::Chose(ActionChoice {
+                chosen: Chosen::Done,
+                probabilities: BTreeMap::new(),
+                confidence: 0.9,
+            })]),
+            None,
+        ),
+        ("link", sure(&[2]), Some("link")),
+    ];
+    for (why, mut team, role_of_two) in cases {
+        let mut judge = unsure(&[1]);
+        let mut world = FakeWorld::showing(&[1, 2]);
+        if let Some(role) = role_of_two {
+            world.screen.as_mut().unwrap().items[1]["role"] = json!(role);
+        }
+        let walked = run_with(
+            Mode::On,
+            true,
+            Branching::OFF,
+            &goal(1),
+            &mut judge,
+            &mut world,
+            Options {
+                overlap: false,
+                rescue: true,
+            },
+            Some(&mut team),
+        );
+        assert!(world.presses.is_empty(), "{why}: nothing is pressed");
+        assert_eq!(team.asked.len(), 1, "{why}: the second reader was asked");
+        assert_eq!((walked.rescued, walked.rescue_failed), (0, 1), "{why}");
+        let row = &walked.rows[0];
+        assert_eq!(
+            row["barred"],
+            json!(Barred::LowConfidence.as_str()),
+            "{why}"
+        );
+        assert_eq!(row["pressed"], json!(false), "{why}");
+        assert_eq!(row["routeUse"], json!("fallback"), "{why}");
+        assert_eq!(row[RESCUE]["outcome"], json!(why), "{why}: {row}");
+        assert!(row.get(RESCUED_BY).is_none(), "{why}");
+        assert_eq!(
+            row["chosen"],
+            json!("mark:1"),
+            "{why}: the seat's own number stays"
+        );
+    }
+}
+
+/// A recovery is rescued the same way: the second reader's press, then the
+/// document walked again from the report's own resume point.
+#[test]
+fn a_recovery_under_the_floor_is_pressed_for_and_the_document_walked_again() {
+    let mut judge = unsure(&[1]);
+    let mut team = sure(&[2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &stopped(RecipeStop::StepFailed),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: false,
+            rescue: true,
+        },
+        Some(&mut team),
+    );
+    assert_eq!(world.presses, vec![2]);
+    assert_eq!(world.walked_from, vec![4]);
+    assert_eq!(walked.rescued, 1);
+    assert_eq!(walked.rows[0]["recheck"], json!(true));
+}
+
+/// A seat that is sure never climbs the rung: the second reader is not
+/// asked, and its cost is not paid.
+#[test]
+fn a_sure_judgment_never_asks_the_second_reader() {
+    let mut judge = sure(&[1]);
+    let mut team = sure(&[2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: false,
+            rescue: true,
+        },
+        Some(&mut team),
+    );
+    assert_eq!(world.presses, vec![1]);
+    assert!(team.asked.is_empty());
+}
+
+/// The measurement the rung is for: a Flow whose seat is unsure on half of
+/// its steps, walked with and without the second reader — how many steps it
+/// pressed for that would have gone to the person, how many it could not,
+/// and what each rung cost the walk in time. Printed; held on the counts.
+#[test]
+fn the_second_rung_presses_for_the_steps_the_seat_left_and_costs_its_own_turn() {
+    const STEPS: usize = 6;
+    const JUDGE_MS: u64 = 40;
+    const TEAM_MS: u64 = 120;
+    // The seat: sure, unsure, sure, unsure … ; the second reader: always sure.
+    let seat = || {
+        let mut judge = FakeJudge::chose(&[1, 1, 1, 1, 1, 1]).slow(JUDGE_MS);
+        for (n, answer) in judge.answers.iter_mut().enumerate() {
+            if let Judged::Chose(choice) = answer {
+                choice.confidence = if n % 2 == 0 { 0.9 } else { 0.29 };
+            }
+        }
+        judge
+    };
+    // Without the rung the walk stops at its first unsure step: the person.
+    let mut plain_judge = seat();
+    let mut plain_world = FakeWorld::that_moves(&[1, 2]);
+    let began = std::time::Instant::now();
+    let plain = run(
+        Mode::On,
+        true,
+        &goal(STEPS),
+        &mut plain_judge,
+        &mut plain_world,
+    );
+    let plain_ms = began.elapsed().as_millis();
+    assert_eq!(
+        plain.pressed, 1,
+        "today the walk ends at the first unsure step"
+    );
+    assert_eq!(
+        plain.rows.last().unwrap()["barred"],
+        json!(Barred::LowConfidence.as_str())
+    );
+
+    let mut judge = seat();
+    let mut team = sure(&[2, 2, 2]).slow(TEAM_MS);
+    let mut world = FakeWorld::that_moves(&[1, 2]);
+    let began = std::time::Instant::now();
+    let rescued = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(STEPS),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: false,
+            rescue: true,
+        },
+        Some(&mut team),
+    );
+    let rescued_ms = began.elapsed().as_millis();
+    assert_eq!(
+        rescued.pressed, STEPS,
+        "every step pressed, half by the second reader"
+    );
+    assert_eq!((rescued.rescued, rescued.rescue_failed), (STEPS / 2, 0));
+    assert_eq!(team.asked.len(), STEPS / 2);
+
+    // A second reader that cannot help: the walk still ends at the person,
+    // one turn later.
+    let mut judge = seat();
+    let mut team = FakeJudge::saying(Vec::new()).slow(TEAM_MS);
+    let mut world = FakeWorld::that_moves(&[1, 2]);
+    let began = std::time::Instant::now();
+    let unhelped = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(STEPS),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: false,
+            rescue: true,
+        },
+        Some(&mut team),
+    );
+    let unhelped_ms = began.elapsed().as_millis();
+    assert_eq!(unhelped.pressed, 1);
+    assert_eq!((unhelped.rescued, unhelped.rescue_failed), (0, 1));
+    println!(
+        "measure: rescue steps={STEPS} judge_ms={JUDGE_MS} team_ms={TEAM_MS} plain: pressed={} ms={plain_ms} | rescued: pressed={} rescued={} failed={} ms={rescued_ms} | unhelped: pressed={} failed={} ms={unhelped_ms}",
+        plain.pressed,
+        rescued.pressed,
+        rescued.rescued,
+        rescued.rescue_failed,
+        unhelped.pressed,
+        unhelped.rescue_failed
+    );
 }
