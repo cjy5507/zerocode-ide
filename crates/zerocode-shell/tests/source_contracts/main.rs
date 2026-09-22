@@ -32567,6 +32567,141 @@ mod tests {
         );
     }
 
+    /// t-5966 G1: a line's provenance is one enum in core, spelled on the
+    /// wire by serde, and read — never derived — by the window.
+    ///
+    /// The window's table holds the enum's names in the enum's order, the
+    /// model takes each line's road from the answer (`edge.provenance`) and
+    /// nowhere from its kind, and the shell backend names a road by the
+    /// enum's variants rather than by a string a refactor could miss.
+    #[test]
+    fn edge_provenance_is_one_enum_read_off_the_wire() {
+        let core = include_str!("../../../zerocode-core/src/second_brain_graph.rs");
+        let window = crate::ui_source::window_source();
+
+        // The enum's wire spellings, from its own `as_str` table.
+        let held = core
+            .split("impl EdgeProvenance {")
+            .nth(1)
+            .expect("the provenance enum's impl");
+        let spelled = &held[..held.find("\n}\n").unwrap_or(held.len())];
+        let wire: Vec<&str> = spelled
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let (_, rest) = line.split_once("Self::")?;
+                let (_, word) = rest.split_once("=> \"")?;
+                word.strip_suffix("\",")
+            })
+            .collect();
+        assert_eq!(
+            wire,
+            ["measured", "declared", "inferred"],
+            "the provenance enum's wire spellings moved:\n{spelled}"
+        );
+
+        // The window's table names exactly those roads, in that order.
+        let table = block_after(window, "const KNOWLEDGE_EDGE_PROVENANCES = Object.freeze([");
+        let ids: Vec<&str> = table
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("{ id: \""))
+            .filter_map(|rest| rest.split_once('"').map(|(id, _)| id))
+            .collect();
+        assert_eq!(
+            ids, wire,
+            "the window's provenance table drifted from the enum"
+        );
+
+        // The model reads the road from the answer and derives none.
+        let model = block_after(window, "function knowledgeModel(report) {");
+        assert!(
+            model.contains("knowledgeEdgeProvenanceCode(edge)"),
+            "the model no longer reads `edge.provenance` through the one reader"
+        );
+        let reader = block_after(window, "function knowledgeEdgeProvenanceCode(edge) {");
+        assert!(
+            reader.contains("KNOWLEDGE_EDGE_PROVENANCE_CODE[edge.provenance]")
+                && !reader.contains("edge.kind"),
+            "the reader derives a road from the kind instead of the answer:\n{reader}"
+        );
+        for road in &wire {
+            assert!(
+                !strip_comments(model).contains(&format!("\"{road}\"")),
+                "`knowledgeModel` spells the road `{road}` itself — roads come off the wire"
+            );
+        }
+
+        // The one backend file that touches the graph spells no road as a
+        // string: the enum's names, or nothing.
+        let graph_commands = BACKEND_PARTS
+            .iter()
+            .find(|(name, _)| *name == "cmd/second_brain.rs")
+            .map(|(_, text)| *text)
+            .expect("cmd/second_brain.rs is a shipped part");
+        let shipped = strip_rust_comments(graph_commands);
+        for road in &wire {
+            assert!(
+                !shipped.contains(&format!("\"{road}\"")),
+                "cmd/second_brain.rs spells the road `{road}` as a string — name \
+                 `EdgeProvenance::` instead"
+            );
+        }
+    }
+
+    /// t-5966 G3/G4: the path calculator is core's and the window holds
+    /// none; the export renders in core and publishes through the store's
+    /// one door.
+    ///
+    /// The window used to run a breadth-first search of its own over the
+    /// lens's subset; two calculators over two pictures answered two
+    /// things. Now Shift-click and the ask form both go through
+    /// `second_brain_paths`, the backend walks the cached picture off the
+    /// window's thread with `second_brain_paths::report`, and the export
+    /// command renders with `second_brain_export::render` and publishes
+    /// with `Store::publish_page` — the gallery, its versions and its
+    /// thumbnails need nothing new.
+    #[test]
+    fn paths_are_counted_in_core_and_the_export_goes_through_the_artifact_door() {
+        let window = crate::ui_source::window_source();
+        let code = strip_comments(window);
+        assert!(
+            !code.contains("function findKnowledgeShortestPath("),
+            "the window grew a path calculator of its own again"
+        );
+        let asking = block_after(window, "async function runKnowledgeShortestPath(");
+        assert!(
+            asking.contains("invoke(\"second_brain_paths\"") && !asking.contains("neighbour["),
+            "Shift-click no longer asks the backend for the path:\n{asking}"
+        );
+        let routing = block_after(window, "function knowledgeRoute(model, path) {");
+        assert!(
+            routing.contains("path.report.paths[path.picked]")
+                && routing.contains("model.keys.indexOf("),
+            "the route no longer maps the answer's ids onto this picture:\n{routing}"
+        );
+
+        let backend = shipped_backend();
+        let paths = block_after(backend, "pub(crate) async fn second_brain_paths(");
+        assert!(
+            paths.contains("spawn_blocking")
+                && paths.contains("scanned_graph(")
+                && paths.contains("second_brain_paths::report("),
+            "the path command left the cached picture, the blocking pool or core's calculator:\n{paths}"
+        );
+        let export = block_after(backend, "pub(crate) async fn second_brain_export_html(");
+        assert!(
+            export.contains("spawn_blocking")
+                && export.contains("second_brain_export::render(")
+                && export.contains(".publish_page(")
+                && export.contains("CHANGED_EVENT"),
+            "the export command left core's renderer, the store's publish door or the changed event:\n{export}"
+        );
+        assert!(
+            !export.contains("<html") && !export.contains("<script"),
+            "the export command writes markup of its own — the page is core's template"
+        );
+    }
+
     /// t-4140 S2: which mode the knowledge graph opens in is a rule about
     /// where the person came from and what this vault remembers — never a
     /// rule about how big the graph is. The design (docs/design/

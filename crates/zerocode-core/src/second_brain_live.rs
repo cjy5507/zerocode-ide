@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::second_brain::{RAW_DIR, WIKI_DIR, WIKI_INDEX_FILE, WIKI_LOG_FILE};
-use crate::second_brain_graph::{GraphNode, NodeKind, VaultGraph};
+use crate::second_brain_graph::{EdgeProvenance, GraphNode, NodeKind, VaultGraph};
 use crate::second_brain_related::tokenize;
 
 /// The vault's private folder, beside `raw/` and `wiki/` and never walked by
@@ -745,6 +745,10 @@ pub struct MergeCandidate {
     pub reason: MergeReason,
     /// Title overlap in percent; a same-links pair scores 100.
     pub score: u32,
+    /// The road that wrote the pair (t-5966): always
+    /// [`EdgeProvenance::Measured`], carried on the wire so the dedupe lens
+    /// dresses its `merge?` line from the answer and spells no road itself.
+    pub provenance: EdgeProvenance,
 }
 
 /// Pages that may be one page: high title-token overlap
@@ -871,6 +875,8 @@ pub fn merge_candidates(graph: &VaultGraph, limits: &Limits) -> Vec<MergeCandida
             right,
             reason,
             score,
+            // The measured road: nobody wrote this pair in the vault.
+            provenance: EdgeProvenance::Measured,
         })
         .collect();
     candidates.sort_by(|a, b| {
@@ -969,7 +975,7 @@ pub fn live_layer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::second_brain_graph::{EdgeKind, GraphEdge};
+    use crate::second_brain_graph::{EdgeKind, EdgeProvenance, GraphEdge};
 
     fn page(id: &str, title: &str, modified_ms: i64) -> GraphNode {
         GraphNode {
@@ -1000,6 +1006,7 @@ mod tests {
                     from: *from,
                     to: *to,
                     kind: EdgeKind::Mentions,
+                    provenance: EdgeProvenance::Inferred,
                 })
                 .collect(),
             ..VaultGraph::default()
@@ -1323,13 +1330,15 @@ mod tests {
                     left: 4,
                     right: 5,
                     reason: MergeReason::SameLinks,
-                    score: 100
+                    score: 100,
+                    provenance: EdgeProvenance::Measured,
                 },
                 MergeCandidate {
                     left: 0,
                     right: 1,
                     reason: MergeReason::TitleOverlap,
-                    score: 60
+                    score: 60,
+                    provenance: EdgeProvenance::Measured,
                 },
             ],
             "{found:?}"

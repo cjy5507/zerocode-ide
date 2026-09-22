@@ -35642,7 +35642,8 @@ details.task-board-section > summary {
     color var(--motion-fast) var(--ease-standard);
 }
 
-.knowledge-refresh {
+.knowledge-refresh,
+.knowledge-export {
   flex: none;
 }
 
@@ -36264,12 +36265,15 @@ details.task-board-section > summary {
   stroke-width: var(--knowledge-edge-lit-width);
 }
 
-/* 최단 경로 (Bloom 문법) — 경로 노드와 간선 밝힘, 나머지는 디밍 */
-.knowledge-picture.is-path .knowledge-node.is-path-dim {
+/* 경로 — 경로의 점과 선만 밝고 나머지는 물러선다. 물러서는 옷은 판(`is-path`)의 규칙이고
+ * 점·선마다 클래스를 쓰지 않는다(t-5966): 천 쪽에서 점 1,020개와 선 1,734개에 「흐림」을
+ * 쓰고 지우는 것이 경로 하나에 프레임을 백 밀리초로 만들었다(실측 102 ms → 아래 규칙으로
+ * 경로의 몫만 남긴다). 포커스·검색의 흐림과 같은 손이다. */
+.knowledge-picture.is-path .knowledge-node:not(.is-path-lit) {
   opacity: var(--knowledge-dim-opacity);
 }
 
-.knowledge-picture.is-path .knowledge-edge.is-path-dim {
+.knowledge-picture.is-path .knowledge-edge:not(.is-path-lit) {
   opacity: var(--knowledge-dim-edge-opacity);
 }
 
@@ -36321,6 +36325,46 @@ details.task-board-section > summary {
 .knowledge-chain-rel {
   color: var(--nav-plane-ring);
   font-weight: 500;
+}
+
+/* 사슬의 홉마다 근거(t-5966 G3) — 관계 낱말 뒤의 작은 꼬리. */
+.knowledge-chain-road {
+  color: var(--ink-label);
+  font-weight: 400;
+}
+
+/* 경로 묻기와 경로 목록(t-5966 G3). 입력은 설정의 옷, 단추는 렌즈 플래그의 옷을 입는다. */
+.knowledge-path-ask {
+  display: flex;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.knowledge-path-ask .knowledge-path-to {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.knowledge-path-note {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-label);
+}
+
+.knowledge-path-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.knowledge-path-pick {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.knowledge-path-pick.is-active {
+  color: var(--ink-chalk);
+  border-color: var(--nav-plane-ring);
 }
 
 .knowledge-node.is-lit .knowledge-dot,
@@ -36449,6 +36493,29 @@ details.task-board-section > summary {
   border-top-style: dashed;
 }
 .knowledge-legend-edge.kind-affects { border-top-color: var(--knowledge-typed-affects); }
+
+/* 근거의 표본(t-5966): 새 잉크 없이 있는 표의 것으로 — 기계가 잰 선은 dedupe 물음의 점선,
+ * 키가 선언한 선은 타입 관계의 잉크, 본문이 추론한 선은 본문 링크의 옅은 잉크. */
+.knowledge-legend-edge.is-measured {
+  border-top-color: var(--knowledge-merge-ink);
+  border-top-style: dashed;
+}
+.knowledge-legend-edge.is-declared { border-top-color: var(--edge-mark); }
+.knowledge-legend-edge.is-inferred { border-top-color: var(--knowledge-edge-mentions-ink); }
+
+/* 근거 렌즈의 세 토글 — 다른 렌즈와 같은 세그먼트 컨트롤의 옷. */
+.knowledge-provenance {
+  display: flex;
+  flex: none;
+  gap: 0;
+  overflow: hidden;
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+}
+
+.knowledge-provenance-flag .knowledge-legend-edge {
+  flex: none;
+}
 
 /* 공급망의 범례 표본(P4): 그림의 점과 같은 낱말(`data-ecosystem`·`data-member`·`data-severity`)을 들어
  * 같은 변수를 받는다 — 몸의 식은 캔버스의 점과 같고, 테두리만 표본의 자(화면 픽셀)다. */
@@ -36703,6 +36770,15 @@ h4.knowledge-inspector-head::after {
 
 .knowledge-relation-why::before,
 .knowledge-legend-why::before {
+  content: " · ";
+}
+
+/* 관계 줄의 근거 칩(t-5966) — 뜻 한 줄 뒤에 누가 썼는가. */
+.knowledge-relation-provenance {
+  color: var(--ink-label);
+}
+
+.knowledge-relation-provenance::before {
   content: " · ";
 }
 

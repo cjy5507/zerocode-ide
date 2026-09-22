@@ -18,5 +18,6 @@ the recipe's numbers and the card's numbers cannot drift:
 | missing frontmatter (1) | `no-source.md` has no `source:` |
 | undeclared relations (1) | `hub.md` links `[[linked-target]]` in prose with no key naming it |
 | unlogged raw (1) | `raw/unlogged.md` — no `source:` names it and no page mentions its path |
+| unsourced edges (0) | every line the scan writes names the road that wrote it (t-5966) — the row is the invariant, not a witness |
 | contradictions (1) | `linked-target.md` declares `contradicts: [[indexed-clean]]` |
 | superseded (1) | `hub.md` declares `supersedes: [[old-note]]` |

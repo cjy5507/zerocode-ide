@@ -84,6 +84,7 @@ fn answered_before_a_session(argv: &[String]) -> Option<Answered> {
         "decision-shadow" => Some(run_decision_shadow(rest)),
         "jev" => Some(run_jev(rest)),
         "mcp" => Some(run_mcp(rest)),
+        "vault" => Some(run_vault(rest)),
         _ => None,
     }
 }
@@ -315,6 +316,23 @@ fn run_mcp(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Er
         Err(message) => {
             eprintln!("zo mcp: {message}");
             ("mcp-refused", 1)
+        }
+    })
+}
+
+/// `zo vault path …` answers how two pages of the second brain connect, with
+/// the window's own calculator over the same scanner — no session, no
+/// credentials, no workspace trust (t-5966 G3).
+fn run_vault(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
+    let cwd = std::env::current_dir()?;
+    Ok(match zo_ide::vault_cli::run(args, &cwd) {
+        Ok(report) => {
+            println!("{}", report.text);
+            success("vault")
+        }
+        Err(message) => {
+            eprintln!("zo vault: {message}");
+            ("vault-refused", 1)
         }
     })
 }

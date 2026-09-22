@@ -314,6 +314,16 @@ pub(crate) fn install(store: Arc<Store>, app: tauri::AppHandle) {
     *store_cell().lock().unwrap_or_else(PoisonError::into_inner) = Some(store);
 }
 
+/// The window the booted store answers to, for a caller outside this file
+/// that published through the store and must say the catalog moved.
+pub(crate) fn window_handle() -> Option<tauri::AppHandle> {
+    store()?
+        .window
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
 /// The window's store, or `None` before boot — every caller reads that as
 /// "nothing to register", never as an error.
 pub(crate) fn store() -> Option<Arc<Store>> {

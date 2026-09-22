@@ -37,6 +37,7 @@ fn the_fixture_vault_is_red_with_exactly_its_expected_counts() {
         "missing_frontmatter       1   pages without source/ingested_at",
         "undeclared_relations      1   prose links no relation key declares",
         "unlogged_raw              1   raw items without an ingestion record",
+        "unsourced_edges           0   relations whose provenance no road vouches for",
         "contradictions            1   declared `contradicts`",
         "superseded                1   pages a `supersedes`",
         // Seated by the scan since 09-07: the fixture has no two pages that look

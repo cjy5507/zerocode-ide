@@ -27,6 +27,7 @@ zo commands [--json]
 zo mcp list|get|add|remove|login|logout [<name>] [--url <url>|-- <command>…] [--env K=V] [--header K=V]
        [--transport stdio|http|sse|ws] [--scopes <a,b>] [--project [--trust]] [--cwd <dir>] [--json]
 zo cron ensure|show|remove --description <name> [--schedule <expr>] [--prompt <text>|--prompt-file <path|->] [--cwd <dir>]
+zo vault path <from> <to> [--k <n>] [--json] [--vault <dir>] [--cwd <dir>]
 zo decision-shadow eval --labels <file.jsonl> [--cwd <dir>] [--json]
 zo decision-shadow check [--json]
 

@@ -665,6 +665,7 @@ const stubBackend = ({ boot, pollers }) => {
       undeclared_relations: [...undeclared].sort(([left], [right]) => left.localeCompare(right))
         .map(([page, targets]) => ({ page, targets: [...new Set(targets)].sort() })),
       unlogged_raw: [],
+      unsourced_edges: [],
       contradictions,
       superseded: [...superseded].sort(),
       merge_candidates: null,
@@ -676,13 +677,14 @@ const stubBackend = ({ boot, pollers }) => {
       missing_frontmatter: 0,
       undeclared_relations: table.undeclared_relations.length,
       unlogged_raw: 0,
+      unsourced_edges: 0,
       contradictions,
       superseded: table.superseded.length,
       merge_candidates: null,
     };
     table.findings = table.counts.index_gaps + table.counts.ghost_links + table.counts.orphans
       + table.counts.missing_frontmatter + table.counts.undeclared_relations
-      + table.counts.unlogged_raw;
+      + table.counts.unlogged_raw + table.counts.unsourced_edges;
     return table;
   };
   window.__buildVaultGraph__ = (args, spec) => {
@@ -742,7 +744,10 @@ const stubBackend = ({ boot, pollers }) => {
       seen.add(key);
       /* 낡은 답을 흉내 내는 갈래. `kind`도 `graph.kinds`도 없던 시절의 페이로드를
          창이 아직 그리는지는 픽스처가 그 시절을 지을 수 있어야만 재어진다. */
-      edges.push(spec.untyped ? { from, to } : { from, to, kind });
+      /* 근거(t-5966)는 백엔드의 세 길 그대로: 본문 링크는 inferred, 키(원본 `source:` 포함)는
+         declared. */
+      const provenance = kind !== "mentions" || nodes[to]?.kind === "source" ? "declared" : "inferred";
+      edges.push(spec.untyped ? { from, to } : { from, to, kind, provenance });
     };
     /* 고아는 양쪽이 다 비어야 고아다: 다섯 장에 한 장은 아무것도 걸지 않고,
        아무도 그것을 가리키지 않는다 — 나가는 선만 없애면 들어오는 선이 남아
@@ -810,6 +815,9 @@ const stubBackend = ({ boot, pollers }) => {
           .sort((left, right) => right.count - left.count || left.tag.localeCompare(right.tag)),
         // 낡은 답에는 이 열쇠가 아예 없다.
         ...(spec.untyped ? {} : { kinds }),
+        /* 근거별 수(t-5966): 세 길 전부, enum 순서로, 0도 한 줄. */
+        ...(spec.untyped ? {} : { provenances: ["measured", "declared", "inferred"].map((provenance) => ({
+          provenance, count: edges.filter((edge) => edge.provenance === provenance).length })) }),
         pages,
         ghosts,
         orphans: lint.orphans.length,

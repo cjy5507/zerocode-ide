@@ -2,6 +2,7 @@
 //! that happens to carry the flaw.
 
 use super::*;
+use crate::second_brain_graph::EdgeProvenance;
 use crate::supply_chain::{Component, Ecosystem, Fix, Origin, SupplyEdge, Vulnerability};
 
 /// A component the test spells in one line. `deps` are indices into the same
@@ -51,6 +52,7 @@ fn depends(from: usize, to: usize) -> SupplyEdge {
         from: from as u32,
         to: to as u32,
         kind: SupplyEdgeKind::DependsOn,
+        provenance: EdgeProvenance::Measured,
     }
 }
 
@@ -59,6 +61,7 @@ fn affects(vulnerability: usize, component: usize) -> SupplyEdge {
         from: vulnerability as u32,
         to: component as u32,
         kind: SupplyEdgeKind::Affects,
+        provenance: EdgeProvenance::Measured,
     }
 }
 

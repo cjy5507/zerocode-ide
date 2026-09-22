@@ -735,6 +735,113 @@ pub(crate) async fn second_brain_graph(
     .map_err(|join| join.to_string())?
 }
 
+/// Paths between two pages (t-5966 G3) — the one calculator,
+/// `zerocode_core::second_brain_paths::report`, over the same cached picture
+/// the view draws (`sources` as the view asked it). The window maps the
+/// answer's ids onto whatever its lens is showing and counts nothing itself;
+/// `zo vault path` prints the same answer on a pane.
+#[tauri::command]
+pub(crate) async fn second_brain_paths(
+    state: State<'_, AppState>,
+    path: Option<String>,
+    sources: Option<bool>,
+    from: String,
+    to: String,
+    k: Option<usize>,
+) -> Result<zerocode_core::second_brain_paths::PathReport, String> {
+    let saved = load_settings_resilient(state.settings())
+        .document
+        .second_brain_vault;
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = graph_root(saved, path)?;
+        let graph = scanned_graph(&root, sources.unwrap_or(false));
+        zerocode_core::second_brain_paths::report(
+            &graph,
+            &from,
+            &to,
+            k.unwrap_or(zerocode_core::second_brain_paths::PATH_LIMITS.k_max),
+        )
+        .map_err(|refusal| refusal.to_string())
+    })
+    .await
+    .map_err(|join| join.to_string())?
+}
+
+/// The receipt an export answers with: the gallery row it became.
+#[derive(Clone, Serialize)]
+pub(crate) struct SecondBrainExportReceipt {
+    pub(crate) id: String,
+    pub(crate) title: String,
+    pub(crate) version: u32,
+    pub(crate) bytes: u64,
+    pub(crate) path: String,
+    pub(crate) nodes: usize,
+    pub(crate) edges: usize,
+}
+
+/// The folder under the artifact store where a vault's picture is written
+/// before it is published — one file per vault, so every export of the same
+/// vault is a new version of one gallery row rather than a new row.
+const KNOWLEDGE_EXPORT_DIR: &str = "knowledge";
+/// The gallery label every knowledge export wears.
+const KNOWLEDGE_EXPORT_LABEL: &str = "knowledge-graph";
+
+/// The picture the window is showing, as one self-contained HTML page in the
+/// artifact store (t-5966 G4). Rendering is core's
+/// (`zerocode_core::second_brain_export::render`, the size bound included);
+/// this side writes the page beside the store and publishes it through the
+/// same door an agent's page goes through (`Store::publish_page`), so the
+/// gallery, its versions and its thumbnails need nothing new.
+#[tauri::command]
+pub(crate) async fn second_brain_export_html(
+    input: zerocode_core::second_brain_export::ExportInput,
+) -> Result<SecondBrainExportReceipt, String> {
+    let store = artifact_runtime::store().ok_or("아티팩트 스토어가 아직 열리지 않았습니다")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let page = zerocode_core::second_brain_export::render(&input)
+            .map_err(|refusal| refusal.to_string())?;
+        let seat = store.root().join(KNOWLEDGE_EXPORT_DIR);
+        std::fs::create_dir_all(&seat).map_err(|error| error.to_string())?;
+        let file_path = seat.join(format!(
+            "{}.html",
+            &artifact_runtime::sha256_hex(input.vault.as_bytes())[..16]
+        ));
+        std::fs::write(&file_path, page.html.as_bytes()).map_err(|error| error.to_string())?;
+        let meta = store.publish_page(&zerocode_core::artifact_publish::PublishInput {
+            file_path,
+            title: Some(input.title.clone()),
+            description: Some(format!(
+                "{} · {} nodes · {} edges{}",
+                input.vault,
+                page.nodes,
+                page.edges,
+                if input.lenses.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", input.lenses.join(" · "))
+                }
+            )),
+            favicon: None,
+            label: Some(KNOWLEDGE_EXPORT_LABEL.to_string()),
+        })?;
+        if let Some(app) = artifact_runtime::window_handle() {
+            use tauri::Emitter as _;
+            let _ = app.emit(artifact_runtime::CHANGED_EVENT, ());
+        }
+        Ok(SecondBrainExportReceipt {
+            id: meta.id,
+            title: meta.title,
+            version: meta.version,
+            bytes: meta.bytes,
+            path: meta.path.to_string_lossy().into_owned(),
+            nodes: page.nodes,
+            edges: page.edges,
+        })
+    })
+    .await
+    .map_err(|join| join.to_string())?
+}
+
 /// Where one graph node's page lives, so the window can open it as a document.
 ///
 /// The id came from the scan and the join is checked there
