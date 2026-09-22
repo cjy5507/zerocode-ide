@@ -1369,8 +1369,103 @@ pub const COMPACTION: JevUse = JevUse {
     agreement_kind: AgreementKind::Hindsight,
 };
 
+/// Characters of one text an agent's own question carries — the question,
+/// its context, an option, a level, an item (t-6040).
+///
+/// The routing seat's cap and not a second number, for the reason
+/// [`SKILL_TASK_CHAR_CAP`] is: the head of a text is what a question reads,
+/// and a second cap on a caller's words would be a second answer to how much
+/// of them leaves the machine.
+pub const AGENT_TOOL_TEXT_CHAR_CAP: usize = ROUTING_TASK_CHAR_CAP;
+
+/// The most options one `choose` may offer: the wire's own ceiling
+/// (docs.typesafe.ai/primitives/choice — "up to 255 options"), spelled once
+/// here so the tool and the CLI refuse the same list.
+pub const AGENT_TOOL_OPTION_CAP: usize = 255;
+
+/// How many levels one `score` may name: the wire's own bounds
+/// (docs.typesafe.ai/primitives/score — "at least two levels; the API accepts
+/// up to 10").
+pub const AGENT_TOOL_LEVELS: std::ops::RangeInclusive<usize> = 2..=10;
+
+/// The most items one `score` call takes, asked as even shards of
+/// [`SKILL_SHARD_TARGET`] at once ([`shard::even_shards`], the skill seat's
+/// own arithmetic). Five shards, because that is what the largest batch
+/// measured here wanted — the 240-page classification golden of t-6040 — and
+/// a caller with more pipes twice; each shard is one request against the
+/// day's budget.
+pub const AGENT_TOOL_ITEM_CAP: usize = 5 * SKILL_SHARD_TARGET;
+
+/// The wall one agent question may hold the tool call or the shell that asked
+/// it: the skill seat's, for the skill seat's reason — a tool result is what
+/// a model is waiting for, so the wall is the one a person notices.
+pub const AGENT_TOOL_DEADLINE_MS: u64 = SKILL_SEARCH_APPLY_DEADLINE_MS;
+
+/// The two options an `ask` is a choice over, the affirmative first. Spelled
+/// once: the tool's answer and the CLI's exit code both read it.
+pub const AGENT_TOOL_ASK_OPTIONS: [&str; 2] = ["yes", "no"];
+
+/// The seat an agent asks on purpose: zo's `Jev` tool and `zo jev
+/// ask|choose|score`, which a worker or an agent in a pane calls instead of
+/// spending its own model's tokens on a classification, a pick or a grading
+/// (t-6040; the vault's "a Jev showcase maps to our eleven seats and leaves
+/// compaction and an agent door").
+///
+/// It is not a stage of the product's own: nothing falls back to it and
+/// nothing it answers is compared with a reader it would replace, so it has
+/// no label, never promotes, and offers no `auto` — an `auto` that can never
+/// rise is `shadow` under a name that promises otherwise. `shadow` asks and
+/// writes the row and hands the caller nothing, so a person can read what an
+/// agent's questions cost before letting agents act on the answers; `on`
+/// hands the answer over. `off`, the default, is the tool refusing and the
+/// CLI exiting 2 with nothing sent and nothing written.
+///
+/// What is sent is the caller's own words — the question, its context, the
+/// options or levels, the items — each cut to [`AGENT_TOOL_TEXT_CHAR_CAP`]
+/// and cleared of credential lines where the door reads it. The option and
+/// level words ride the questions' criteria (a choice's descriptions, a
+/// score's levels), so the door reads that path too, as the screen seats do.
+/// The rows only count: caller, shape, size, tokens and latency
+/// (docs: the seat is "집계만").
+pub const AGENT_TOOL: JevUse = JevUse {
+    id: "agent_tool",
+    setting: "agentTool",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On],
+    sends: &[
+        Sent {
+            at: "/state/question",
+            cap: Cap::Chars(AGENT_TOOL_TEXT_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/context",
+            cap: Cap::Chars(AGENT_TOOL_TEXT_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/items",
+            cap: Cap::Items(SKILL_SHARD_TARGET),
+        },
+        Sent {
+            at: "/state/items/*",
+            cap: Cap::Chars(AGENT_TOOL_TEXT_CHAR_CAP),
+        },
+        Sent {
+            at: "/questions/*/criteria/*",
+            cap: Cap::Chars(AGENT_TOOL_TEXT_CHAR_CAP),
+        },
+    ],
+    ledger: "agent-tool.jsonl",
+    promotes: false,
+    answer_floor_permille: None,
+    press_floor_permille: None,
+    agreement_floor_permille: None,
+    apply_deadline_ms: None,
+    window_forgives: None,
+    agreement_rows_wanted: None,
+    agreement_kind: AgreementKind::Comparison,
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 12] = [
+pub static JEV_USES: [JevUse; 13] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -1383,6 +1478,7 @@ pub static JEV_USES: [JevUse; 12] = [
     STEP_EFFORT,
     ZO_STEP_EFFORT,
     COMPACTION,
+    AGENT_TOOL,
 ];
 
 impl JevUse {

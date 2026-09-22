@@ -48,7 +48,7 @@ use crate::prompt::SkillIndexEntry;
 pub const SKILL_RUBRIC_VERSION: u32 = 1;
 
 /// The scale every skill question is asked on — the use table's own levels.
-pub const SKILL_SCALE: Scale = Scale::new(&SKILL_LEVELS);
+pub const SKILL_SCALE: Scale<'static> = Scale::new(&SKILL_LEVELS);
 
 /// The letter a question id opens with, so what comes back is named rather
 /// than numbered. Spelled once: [`skill_questions`] writes ids with it and

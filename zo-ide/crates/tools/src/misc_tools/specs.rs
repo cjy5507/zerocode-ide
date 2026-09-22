@@ -319,6 +319,31 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
             required_permission: PermissionMode::ReadOnly,
         },
         ToolSpec {
+            name: "Jev",
+            // The agent tool seat (t-6040): TypeSafe's System One asked by the
+            // model itself, through the one Jev door, on the person's own
+            // switch (`smart.agentTool`). Deferred, like every tool a plain
+            // coding turn does not touch; the manifest hook is its whole
+            // advertisement.
+            description: "Ask Jev, TypeSafe's fast typed judge, instead of reasoning it out: `ask` a yes/no question, `choose` one of your options, or `score` items on your own ordered levels (low to high, 2-10). Give it the facts in `context`; it returns probabilities, no prose. Off unless smart.agentTool is on — an `off` or `shadow` verdict means decide it yourself.",
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "shape": { "type": "string", "enum": ["ask", "choose", "score"] },
+                    "question": { "type": "string", "minLength": 1 },
+                    "context": { "type": "string", "description": "ask/choose: the facts to read first." },
+                    "options": { "type": "array", "items": { "type": "string" }, "description": "choose: 2-255 options." },
+                    "levels": { "type": "array", "items": { "type": "string" }, "description": "score: 2-10 level descriptions, low to high." },
+                    "items": { "type": "array", "items": { "type": "string" }, "description": "score: the items to grade." }
+                },
+                "required": ["shape", "question"],
+                "additionalProperties": false
+            }),
+            // Asking a judge is not a privilege: the person's switch and the
+            // Jev door bound what leaves, not the permission tier.
+            required_permission: PermissionMode::ReadOnly,
+        },
+        ToolSpec {
             name: "ListAgents",
             description: "List the sub-agents and teammates THIS session owns, with what each one is and where it is. One row per agent: `id` (what `SendMessage`/`StopAgent` take), `name` (its addressable label), `status`, `execution` — `inline` for a thread of this process, `pane` for a teammate running in a zo of its own — its `pane` when it has one, `lastReceipt` (what the last message to it came to: consumed/queued/rejected), `run_generation`, and `completion_waiting`, which says a finished agent's result is sitting there for `GetAgentCompletion` to collect. Reach for it when you have lost track of what you launched, before spawning something you may already have running, or when a result you expected has not arrived and you want to know whether the agent is still going. It reads the session's own registry, so another session's agents never appear; `format: \"table\"` returns the same rows as compact text instead of JSON.",
             input_schema: json!({

@@ -351,7 +351,7 @@ pub fn start_of_day_ms(now_ms: i64, offset_s: i64) -> i64 {
 /// Priced by the id the seat ASKS with, not the one the wire answers with: the
 /// bill is for the request, and a dated id no row names is unpriced rather
 /// than billed at a neighbour's rate.
-fn cost_of(input_tokens: u64) -> Option<f64> {
+pub(super) fn cost_of(input_tokens: u64) -> Option<f64> {
     Some(api::systemone_rate(api::SYSTEMONE_MODEL)?.input_cost_usd(input_tokens))
 }
 

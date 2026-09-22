@@ -15,7 +15,7 @@ use zerocode_core::jev::{
 };
 
 use super::super::settings::JEV_COMPACTION_SETTING;
-use super::super::test_wire::Mock;
+use super::super::jev_mock::Mock;
 use super::*;
 
 /// The workspace every ask here comes from, consented at a door that reads

@@ -24,24 +24,27 @@ use zerocode_core::jev::{ANSWER_STEP, WIRE_ROUNDING};
 
 /// An ordered scale a score question offers, lowest level first.
 ///
-/// Borrowed rather than owned: every scale in this workspace is a table
-/// written down in full, and a scale built at runtime would be a rubric
-/// nothing can be pinned against.
+/// Borrowed rather than owned: every scale the product asks on is a table
+/// written down in full (`'static`), and a scale built at runtime would be a
+/// rubric nothing can be pinned against. The one scale that is not the
+/// product's — the levels an agent hands `zo jev score` (t-6040) — borrows
+/// the caller's words for the length of the call, and is checked by these
+/// same rules rather than by a second copy of them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Scale {
-    levels: &'static [&'static str],
+pub struct Scale<'a> {
+    levels: &'a [&'a str],
 }
 
-impl Scale {
+impl<'a> Scale<'a> {
     /// The scale these level descriptions make.
     #[must_use]
-    pub const fn new(levels: &'static [&'static str]) -> Self {
+    pub const fn new(levels: &'a [&'a str]) -> Self {
         Self { levels }
     }
 
     /// The level descriptions, as the request sends them.
     #[must_use]
-    pub const fn levels(&self) -> &'static [&'static str] {
+    pub const fn levels(&self) -> &'a [&'a str] {
         self.levels
     }
 
@@ -201,7 +204,7 @@ pub struct ScoreReading {
 /// The first rule the answer breaks.
 pub fn read_score(
     answer: &SystemOneScoreAnswer,
-    scale: &Scale,
+    scale: &Scale<'_>,
 ) -> Result<ScoreReading, ScoreRule> {
     if answer.kind != SystemOneQuestionKind::Score {
         return Err(ScoreRule::NotAScore);
@@ -252,7 +255,7 @@ pub fn read_score(
 
 /// Whether an answer is about the levels that were offered: the same level
 /// numbers in its spread and in the legend it echoes back.
-fn names_the_levels(answer: &SystemOneScoreAnswer, scale: &Scale) -> bool {
+fn names_the_levels(answer: &SystemOneScoreAnswer, scale: &Scale<'_>) -> bool {
     answer.probabilities.len() == scale.levels.len()
         && answer.legend.len() == scale.levels.len()
         && (0..scale.levels.len()).all(|level| {
@@ -281,10 +284,10 @@ mod tests {
 
     use super::*;
 
-    const FOUR: Scale = Scale::new(&["a", "b", "c", "d"]);
-    const THREE: Scale = Scale::new(&["a", "b", "c"]);
+    const FOUR: Scale<'static> = Scale::new(&["a", "b", "c", "d"]);
+    const THREE: Scale<'static> = Scale::new(&["a", "b", "c"]);
 
-    fn answer(scale: &Scale, spread: &[f64], score: f64, confidence: f64) -> SystemOneScoreAnswer {
+    fn answer(scale: &Scale<'_>, spread: &[f64], score: f64, confidence: f64) -> SystemOneScoreAnswer {
         let probabilities: BTreeMap<String, f64> = spread
             .iter()
             .enumerate()

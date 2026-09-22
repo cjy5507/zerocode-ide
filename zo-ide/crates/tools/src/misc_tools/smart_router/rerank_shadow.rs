@@ -804,7 +804,7 @@ mod tests {
     use runtime::memory::rerank::RERANK_LEVELS;
     use runtime::MemoryEntry;
 
-    use super::super::test_wire::Mock;
+    use super::super::jev_mock::Mock;
     use super::*;
 
     fn hit(slug: &str, summary: &str) -> MemoryHit {
@@ -1289,30 +1289,10 @@ mod tests {
     }
 
     /// The whole of what the seat reads: a config home holding one consented
-    /// workspace and the recall switch set to `mode`, a key, and a mock origin.
+    /// workspace and the recall switch set to `mode`, a key, and a mock origin
+    /// — the shared machine (`jev_mock`), told which seat's switch to set.
     fn machine<T>(mode: &str, base_url: &str, body: impl FnOnce(&Path) -> T) -> T {
-        let home = tempfile::tempdir().expect("a config home");
-        let work = tempfile::tempdir().expect("a workspace");
-        // As the filesystem spells it, which is how the door spells a cwd.
-        let cwd = std::fs::canonicalize(work.path()).expect("the workspace resolved");
-        std::fs::write(
-            home.path().join("settings.json"),
-            serde_json::json!({
-                zerocode_core::jev::SMART_SETTINGS_KEY: {
-                    RECALL.setting: mode,
-                    "jev": {"enabled": true, "workspaces": [cwd.to_string_lossy()]},
-                }
-            })
-            .to_string(),
-        )
-        .expect("a settings file");
-        let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", &home.path().to_string_lossy())
-            .set_also("ZO_HOME", home.path())
-            .set_also("HOME", home.path())
-            .set_also(core_types::paths::ZO_STATE_DIR_ENV, home.path())
-            .set_also(api::SYSTEMONE_API_KEY_ENV, "test-key")
-            .set_also(api::SYSTEMONE_BASE_URL_ENV, base_url);
-        body(&cwd)
+        super::super::jev_mock::machine(&RECALL, mode, base_url, body)
     }
 
     fn slugs(hits: &[MemoryHit]) -> Vec<String> {
