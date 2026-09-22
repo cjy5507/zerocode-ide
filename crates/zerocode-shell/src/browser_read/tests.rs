@@ -160,7 +160,17 @@ fn shadow_records_the_judgment_and_hands_back_the_page_whole() {
     assert_eq!(row["folded"], 0);
     assert_eq!(row["charsBefore"], row["charsAfter"]);
     assert_eq!(row["host"], "docs.example.com");
-    assert_eq!(row["path"], "/guide/start");
+    // The path never reaches a row (t-6155 F8): its fingerprint does, from
+    // the table's one producer, so two reads of one page still group.
+    assert_eq!(
+        row["pathFingerprint"],
+        zerocode_core::jev::fingerprint_of("/guide/start")
+    );
+    assert!(row.get("path").is_none());
+    assert!(
+        !row.to_string().contains("/guide"),
+        "no piece of the address past the host is in the row:\n{row}"
+    );
     assert_eq!(row["pane"], PANE);
     assert_eq!(row[READ_KEY], format!("{PANE}@1790050000000"));
     assert_eq!(row[REQUESTS_KEY], 1);

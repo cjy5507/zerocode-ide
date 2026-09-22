@@ -92,7 +92,7 @@ def join(held: list[dict]) -> list[dict]:
             "read": row[READ_KEY],
             "at": row.get("at"),
             "host": row.get("host"),
-            "path": row.get("path"),
+            "pathFingerprint": row.get("pathFingerprint"),
             "mode": row.get("mode"),
             "outcome": row.get("outcome"),
             "elapsedMs": row.get("elapsedMs"),

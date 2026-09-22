@@ -41,3 +41,6 @@ python3 tools/browser-read-replay/seed.py --ledger ~/.zo/jev/browser-read.jsonl 
 5. **라벨은 둘.** 접힌 뒤 같은 페이지에서 click/type 이 닿은 자리(접힌 블록 안이면 `agreed:false`)와,
    같은 페이지를 `read --full` 로 다시 통째로 읽은 것(`verb: read_full`, 늘 `agreed:false` — 접기의
    가장 흔한 후회, t-6155 F6). 접은 것이 없는 판(shadow)의 `--full` 은 라벨이 아니다.
+6. **행에 주소는 호스트까지.** read 행은 `host` 와 경로의 지문(`pathFingerprint`, `jev::fingerprint_of`)만
+   싣는다(t-6155 F8) — 경로에는 티켓 번호·사용자 id·서명 URL 조각이 올 수 있고, 라벨 대조는 메모리의
+   URL 로 하므로 행에 경로가 있을 이유가 없다.

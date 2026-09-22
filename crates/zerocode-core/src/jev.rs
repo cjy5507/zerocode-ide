@@ -2288,16 +2288,26 @@ pub fn brief_shape(brief: &str, cap: Cap) -> (String, usize) {
     (door::cut(brief, cap), brief.chars().count())
 }
 
-/// The first sixteen hex digits of the SHA-256 of a question's defining
-/// words — what a question's rubric version is pinned to, so a word changed
-/// without a version bump is a red test rather than a quiet drift.
+/// The first sixteen hex digits of the SHA-256 of `words` — what a ledger
+/// row carries in place of a string it must not carry (a page's path, a
+/// walk's goal, t-6155 F8/F12), and what a question's rubric version is
+/// pinned to. One producer, so two rows that name the same thing agree
+/// exactly and a reader can group them without ever seeing the words.
 #[must_use]
-pub fn rubric_fingerprint(words: impl FnOnce() -> String) -> String {
-    Sha256::digest(words().as_bytes())
+pub fn fingerprint_of(words: &str) -> String {
+    Sha256::digest(words.as_bytes())
         .iter()
         .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// [`fingerprint_of`] a question's defining words — what a rubric version
+/// is pinned to, so a word changed without a version bump is a red test
+/// rather than a quiet drift.
+#[must_use]
+pub fn rubric_fingerprint(words: impl FnOnce() -> String) -> String {
+    fingerprint_of(&words())
 }
 
 #[cfg(test)]

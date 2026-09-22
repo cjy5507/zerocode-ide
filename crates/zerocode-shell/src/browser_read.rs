@@ -125,14 +125,18 @@ pub(crate) fn forget(label: &str) {
         .remove(label);
 }
 
-/// A page's host and path, for the row: the address the door already
-/// cleared, without its query and fragment.
+/// A page's host and the fingerprint of its path, for the row (t-6155 F8):
+/// the host names the site, and the fingerprint lets two reads of one page
+/// be grouped without the path — which can carry a ticket number, a user
+/// id or a signed URL's tail — ever reaching a ledger. No other window seat
+/// writes an address, and the label needs none: it is joined by the read's
+/// own key, and the page is compared in memory (`same_page`).
 fn where_of(url: &str) -> (String, String) {
     url.parse::<tauri::Url>()
         .map(|parsed| {
             (
                 parsed.host_str().unwrap_or_default().to_string(),
-                parsed.path().to_string(),
+                zerocode_core::jev::fingerprint_of(parsed.path()),
             )
         })
         .unwrap_or_default()
@@ -215,14 +219,14 @@ pub(crate) fn settle(
     if asks.is_empty() {
         return whole();
     }
-    let (host, path) = where_of(&page.report.url);
+    let (host, path_fingerprint) = where_of(&page.report.url);
     let read = format!("{label}@{now_ms}");
     let mut row = json!({
         AT.canonical: now_ms,
         READ_KEY: read,
         "pane": label,
         "host": host,
-        "path": path,
+        "pathFingerprint": path_fingerprint,
         "mode": mode.key(),
         "rubricVersion": browser_read::BROWSER_READ_RUBRIC_VERSION,
         "blocks": page.blocks.len(),

@@ -27,7 +27,7 @@ _spec.loader.exec_module(seed)
 def read_row(**over) -> dict:
     row = {
         "at": 1790050000000, "read": "browser-3@1790050000000", "pane": "browser-3",
-        "host": "docs.example.com", "path": "/guide", "mode": "shadow", "outcome": "answered",
+        "host": "docs.example.com", "pathFingerprint": "0123456789abcdef", "mode": "shadow", "outcome": "answered",
         "elapsedMs": 310, "blocks": 6, "asked": 6, "shards": 1, "chrome": 3, "droppable": 2,
         "folded": 0, "charsBefore": 900, "charsAfter": 900, "applied": False, "requests": 1,
         "redactedLines": 0,
