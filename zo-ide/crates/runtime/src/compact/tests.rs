@@ -1335,6 +1335,11 @@ fn bound_anchor_leaves_a_small_anchor_unchanged() {
 /// silently returns nothing, and every end would still be green.
 #[test]
 fn every_seq_the_continuation_advertises_reads_as_evicted() {
+    // Serialized on the crate env lock: a sibling test flips
+    // `ZO_DISABLE_RAW_VAULT`, under which no span is sealed and the
+    // affordance this test reads is absent (red once in the full gate,
+    // 2026-09-22, green alone three times).
+    let _env_guard = crate::test_env_lock();
     let unique = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")

@@ -310,6 +310,13 @@ where
         self.recall_seat = seat;
     }
 
+    /// Seat something beside full compaction that is asked which tool
+    /// results the summary still needs — and, in the modes that act,
+    /// answered by taking the rest out of the summary's input.
+    pub fn set_compaction_seat(&mut self, seat: Option<Arc<dyn crate::CompactionSeat>>) {
+        self.compaction_seat = seat;
+    }
+
     pub fn set_auto_compaction_enabled(&mut self, enabled: bool) {
         self.auto_compaction_enabled = enabled;
         if !enabled {

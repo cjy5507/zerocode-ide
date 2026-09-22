@@ -906,6 +906,7 @@ impl PlainSession {
         let attempt = inner.attempt().to_string();
         if cancelled {
             let _ = tools::note_recall_read(&self.cwd, &attempt, None);
+            let _ = tools::note_compaction_reread(&self.cwd, None);
             return;
         }
         let messages = Arc::clone(&inner.session().messages);
@@ -920,6 +921,9 @@ impl PlainSession {
         // Whether a row was written is the ledger's business, not the turn's.
         let _ = tools::note_route_followed(&self.cwd, &attempt, unseated);
         let _ = tools::note_recall_read(&self.cwd, &attempt, Some(&messages[from..]));
+        // And the compaction seat's: whether a block a compaction dropped was
+        // read again inside its window (t-6039).
+        let _ = tools::note_compaction_reread(&self.cwd, Some(&messages[from..]));
     }
 
     /// 턴 후 영속 — 메시지는 이미 append 됐고, 헤더/압축 변경만 스냅샷.

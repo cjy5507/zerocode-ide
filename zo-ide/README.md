@@ -19,6 +19,8 @@
 - **걸음 effort 조절기**: 한 턴 안의 요청마다 추론 노력을 표 하나가 정한다 — 직전 도구 배치가 읽기뿐이면 한 단 아래, 같은 호출 반복·도구 오류 연속·검사 빨강이면 한두 단 위,
   사람의 `--effort` 상한 안에서. 낱말이 없으면 표만 돌고 `smart-router/step-effort-zo.jsonl`에 적으며 아무것도 적용하지 않는다; `smart.stepEffort: "on"`이 적용, `"shadow"`/`"auto"`는
   엇갈린 걸음과 다섯 걸음마다 Jev에 한 번 묻는다(자리 `step_effort`) — `../docs/design/zo-step-effort-governor-20260921.md`.
+- **관련성 컴팩션**(기본 꺼짐): `smart.jevCompaction: "shadow"|"on"|"auto"`이면 문맥이 차서 요약할 때 보존 꼬리 밖 도구 결과 블록마다 「남은 목표에 아직 필요한가」를 Jev에 병렬로 묻고(벽 하나 3 s, 못 온 답=keep),
+  `on`·오른 `auto`는 `drop`(P≥0.7)을 요약 입력에서 뺀다 — 원문은 microcompact와 같은 볼트 봉인·복원 기계로 잃지 않는다. 원장 `smart-router/compaction-relevance.jsonl`, 라벨은 사후(다섯 턴 안 되읽기=후회, 자리 `compaction`); 재생 하네스 `tools/compaction-replay`.
 - **자율 실행**: `/goal`, `/loop`, 헤드리스 `--loop-every/--loop-until/--loop-max`. 한도는 `autonomy/limits.rs` 표 하나, 429는 자동 재개.
 - **고정 하네스**: 시스템 핵심·도구 스키마·스킬 색인·리마인더를 계열별 예산 게이트로 관리(`--prompt-input`). 드리머 리마인더는 wire 채널.
 - **회상**: 본문 색인 + 세컨드 브레인 그래프 관계. 완료 영수증, 도구 습관 넛지, 긴 결과 다이제스트.

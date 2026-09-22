@@ -1,5 +1,6 @@
 mod apply;
 mod canonical;
+mod compaction_seat;
 mod decision_report;
 mod decision_shadow;
 mod evidence;
@@ -18,7 +19,10 @@ mod skill_search;
 mod shape;
 mod shape_words;
 mod step_effort;
+#[cfg(test)]
+mod test_wire;
 mod turn;
+mod turn_reads;
 
 #[cfg(test)]
 mod tests;
@@ -45,6 +49,11 @@ pub use rerank_shadow::{
     note_recall_read, rerank_shadow_path, Judged, RerankLabelRow, RerankShadow, RerankShadowRow,
     RERANK_OUTCOME_ANSWERED, RERANK_OUTCOME_UNORDERABLE, RERANK_SHADOW_FILE,
 };
+pub use compaction_seat::{
+    compaction_relevance_path, note_compaction_reread, CompactionJudge, CompactionLabelRow,
+    CompactionRow, COMPACTION_JUDGMENT_DEADLINE, COMPACTION_OUTCOME_ANSWERED,
+    COMPACTION_RELEVANCE_FILE,
+};
 pub use skill_search::{
     note_loaded_skill, note_search_answer, search as skill_search,
     skill_search_path, Chosen, Searched, SkillLabelRow, SkillSearchRow, SKILL_OUTCOME_ANSWERED,
@@ -63,8 +72,9 @@ pub use plan_shadow::{
 };
 pub(crate) use settings::live_agent_model_policy;
 pub use settings::{
-    decision_shadow_mode_from, rerank_shadow_mode_from, skill_search_mode_from,
-    DecisionShadowMode, DECISION_SHADOW_SETTING, RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING,
+    decision_shadow_mode_from, jev_compaction_mode_from, rerank_shadow_mode_from,
+    skill_search_mode_from, DecisionShadowMode, DECISION_SHADOW_SETTING, JEV_COMPACTION_SETTING,
+    RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING,
     conversation_anchor_ttl_for, conversation_anchor_ttl_from_root, CACHE_ANCHOR_TTL_ENV,
     smart_deep_tier_models, smart_deep_tier_models_for, smart_exec_swap, smart_setting_defaults,
     smart_turn_routing_and_inventory_for, smart_turn_routing_for, DeepTierModelsSetting,

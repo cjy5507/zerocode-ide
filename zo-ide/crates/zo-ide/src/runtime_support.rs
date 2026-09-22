@@ -385,6 +385,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         plugin_registry,
         memory_retriever,
         recall_seat,
+        compaction_seat,
         mcp_state,
         lsp_state,
     } = runtime_plugin_state;
@@ -487,6 +488,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     runtime.set_auto_compaction_enabled(feature_config.auto_compact_enabled());
     runtime.set_memory_retriever(memory_retriever);
     runtime.set_recall_seat(recall_seat);
+    runtime.set_compaction_seat(compaction_seat);
     // Wire up parallel tool execution: concurrency-safe tools (Read,
     // Glob, Grep, …) will run via spawn_blocking instead of serially.
     let dispatch_registry = tool_registry.clone();

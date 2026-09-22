@@ -100,12 +100,16 @@ pub fn low_disk_warning(dir: &std::path::Path) -> Option<String> {
     bash::low_disk_warning(dir)
 }
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
+pub use compact::relevance as compaction_relevance;
+pub use compact::relevance::{
+    BlockHead, CompactionAsk, CompactionJudgment, CompactionSeat, COMPACTION_RUBRIC_VERSION,
+};
 pub use compact::{
     apply_compaction, compact_session, compact_session_with, compaction_system_prompt,
     distill_session_state, edited_file_paths, estimate_session_tokens, format_compact_summary,
     get_compact_continuation_message, is_edit_result_tool, is_pre_clear_original_of,
     microcompact_clearable_estimate, microcompact_quote, microcompact_session, prepare_compaction,
-    should_compact, MicrocompactQuote,
+    preserved_tail_len_for_budget, should_compact, MicrocompactQuote,
     summary_fabricates_identifiers,
     CompactionConfig, CompactionPlan, CompactionResult, CompactionSummarizer, FocusSummarizer,
     LocalSummarizer, MicrocompactEvent, COMPACTION_SYSTEM_PROMPT, MICROCOMPACT_IMAGE_PLACEHOLDER,
@@ -143,7 +147,7 @@ pub use conversation::{
 };
 pub use conversation::{AgentNotification, AgentNotificationInbox, AgentNotificationKind};
 pub use conversation::{
-    auto_compaction_threshold_for_model, auto_compaction_threshold_from_env, bash_result_exited_zero,
+    auto_compaction_tail_budget, auto_compaction_threshold_for_model, auto_compaction_threshold_from_env, bash_result_exited_zero, MICROCOMPACT_MIN_OUTPUT_BYTES,
     detect_check_command,
     declare_attendance, declared_attendance, env_deadline_extension, env_turn_budgets,
     final_assistant_text, read_only_bash_allow_rules,

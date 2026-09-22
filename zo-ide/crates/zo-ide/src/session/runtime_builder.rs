@@ -92,6 +92,9 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         // Seated whenever there is a retriever to sit beside; what it may do
         // per recall — record, or settle the order — is `smart.rerankShadow`.
         recall_seat: Some(Arc::new(tools::RerankShadow::at(cwd))),
+        // Seated always; what it may do per compaction — record, or drop —
+        // is `smart.jevCompaction`, read at the boundary.
+        compaction_seat: Some(Arc::new(tools::CompactionJudge::at(cwd))),
         mcp_state,
         lsp_state,
     })
