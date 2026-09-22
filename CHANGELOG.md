@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.1.16] — 2026-09-23
+
+_since v1.1.15 (23 commits)_
+
+### feat
+- feat(settings): the patch review seat's row on the Jev card, in all five languages, after the challenger's (t-6203)
+- feat(zo): the patch review seat — four Noul questions of every patch an edit wrote, one code verdict, one line under on, hindsight labels, a digest on every row (t-6203)
+- feat(jev): the patch review seat's row — a written patch, the person's words and the evidence's tail, four questions, hindsight marks — and a request's whole digest beside its fingerprint (t-6203)
+- feat(jev): a control a press cannot take back asks nine in ten, and a fork never explores one (t-6187 A3)
+- feat(jev): a screen question asks two free guards beside its choice, and an acting walk will not press on a screen that gives it orders or on a wall (t-6187 A2)
+- feat(jev): every row names the version that answered, a seat is judged on the newest version's rows, and a person can pin the model (t-6187 A1)
+- feat(jev): the challenger seat — a model nobody has evidence for is asked for the same design on one attempt in five, and the two are compared with their names hidden (t-6151)
+
+### fix
+- fix(ui): the challenger row's Korean reads 견줍니다 and 켜는 것입니다 — three typos in the settings card
+- fix(zo): the patch review's row is written beside the result, not before it, and its public docs link nothing private (t-6203)
+
+### refactor
+- refactor(jev): a Noul wears the closed choice's envelope instead of spelling its keys again (t-6187 A2)
+- refactor(jev): the seat switches, the classifier and the model pin write `smart` through one door (t-6187 A1)
+
+### docs
+- docs(jev): the patch review caps are measured on the patches themselves, sidecars not counted twice, and the row's files are rustfmt-clean (t-6203)
+- docs(jev): may_send names the model field it writes, not a private helper rustdoc cannot link (t-6187 A1)
+
+### test
+- test(zo): the edit-thread timing runs off and shadow in both orders (t-6203)
+- test(zo): what the patch review costs an edit's own thread, off and shadow, measured (t-6203)
+- test(jev): the patch review replay — every patch this machine's zo sessions wrote, asked from before it and graded by the turns after it, in a home of its own under $0.20 (t-6203)
+
+### release
+- release: the cron minute-boundary test and the growing-PTY spinner test join the load-flake list
+
 ## [1.1.15] — 2026-09-23
 
 _since v1.1.14 (62 commits)_
