@@ -176,6 +176,29 @@ pub struct SkippedFile {
     pub reason: SkipReason,
 }
 
+/// A file's neighbours as the index's exact names can tell them.
+///
+/// A name links two files only while exactly one indexed file defines it:
+/// then every file spelling it points at that one. A name several files
+/// define says nothing about which a spelling meant, so it links nothing —
+/// precision over reach, because a reader acts on the list.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct FileLinks {
+    /// Files defining names this file spells, the most spelled first.
+    pub uses: Vec<LinkedFile>,
+    /// Files spelling names this file defines, the most spelling first.
+    pub used_by: Vec<LinkedFile>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LinkedFile {
+    pub file: PathBuf,
+    /// Occurrences of the linking names between the two files.
+    pub references: usize,
+    /// Whether `file` reads as a test file (`is_test_path`).
+    pub test: bool,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct IndexStatus {
     pub indexed_files: usize,

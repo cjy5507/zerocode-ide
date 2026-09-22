@@ -39,8 +39,8 @@ def fake_run(label: str, scale: float) -> dict:
     edit = {"refresh_after_save_ms": percentiles(500 * scale, 520 * scale),
             "refresh_after_create_ms": percentiles(1500 * scale, 1600 * scale),
             "refresh_after_delete_ms": percentiles(1500 * scale, 1600 * scale)}
-    return {"label": label,
-            "phases": {"build": [build, build], "load": [load] * 3, "query": query, "edit": edit}}
+    return {"label": label, "load_average": [4.0 * scale, 3.0, 2.0],
+            "phases": {"build": [build, build], "load": [load] * 3, "query": [query], "edit": [edit]}}
 
 
 class PeakResident(unittest.TestCase):
@@ -64,6 +64,21 @@ class Table(unittest.TestCase):
         self.assertEqual(len(lines), 2 + len(bench.ROWS))
         self.assertIn("| 캐시 로드 (ms) | 960.0 | 480.0 |", lines)
         self.assertIn("| 첫 인덱스 (s) | 1.40 | 0.70 |", lines)
+
+    def test_runs_sharing_a_label_pool_into_one_median_column(self):
+        runs = [fake_run("before", 1.0), fake_run("after", 0.5), fake_run("before", 3.0)]
+        lines = bench.table(runs).splitlines()
+        self.assertEqual(lines[0], "| 지표 | before | after |")
+        # The pooled column holds the median of 960 and 2880 ms over six loads.
+        self.assertIn("| 캐시 로드 (ms) | 1920.0 | 480.0 |", lines)
+        self.assertIn("| 실행 수 (중앙값의 표본) | 2 | 1 |", lines)
+        self.assertIn("| 기계 부하 (1분 평균, 중앙값) | 8.0 | 2.0 |", lines)
+
+    def test_an_older_single_report_run_still_reads(self):
+        run = fake_run("before", 1.0)
+        run["phases"]["query"] = run["phases"]["query"][0]
+        run["phases"]["edit"] = run["phases"]["edit"][0]
+        self.assertIn("| find_references p50 (ms) | 18.00 |", bench.table([run]).splitlines())
 
     def test_a_missing_number_is_a_dash_not_a_zero(self):
         run = fake_run("before", 1.0)

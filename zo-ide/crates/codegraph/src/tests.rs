@@ -1,8 +1,12 @@
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use tempfile::TempDir;
 
 use super::*;
+use crate::extract::extract;
+use crate::index::LEGACY_CACHE_FILE_NAMES;
+use crate::language::spec_for_path;
 
 fn fixture_graph(files: &[(&str, &str)]) -> (TempDir, CodeGraph) {
     let workspace = tempfile::tempdir().expect("temp workspace");
@@ -159,7 +163,7 @@ fn oversized_file_is_skipped_with_marker() {
     let cache = workspace.path().join("state").join(DEFAULT_CACHE_FILE_NAME);
     let graph = CodeGraph::load_or_build(workspace.path(), cache).expect("build codegraph");
     assert!(matches!(
-        graph.skipped_files().as_slice(),
+        graph.skipped_files().expect("skipped files").as_slice(),
         [SkippedFile {
             reason: SkipReason::TooLarge { .. },
             ..
@@ -175,7 +179,7 @@ fn binary_source_is_skipped_with_marker() {
     let cache = workspace.path().join("state").join(DEFAULT_CACHE_FILE_NAME);
     let graph = CodeGraph::load_or_build(workspace.path(), cache).expect("build codegraph");
     assert!(matches!(
-        graph.skipped_files().as_slice(),
+        graph.skipped_files().expect("skipped files").as_slice(),
         [SkippedFile {
             reason: SkipReason::Binary,
             ..
@@ -209,4 +213,263 @@ fn cache_roundtrip_and_corrupt_fallback() {
     fs::write(&cache, b"not-json").expect("corrupt cache");
     let mut rebuilt = CodeGraph::load_or_build(workspace.path(), &cache).expect("fallback rebuild");
     assert!(has_symbol(&mut rebuilt, "cached", SymbolKind::Function));
+}
+
+/// Every language, with a multi-byte identifier and a multi-byte string ahead
+/// of references on the same row: tree-sitter's columns are bytes, and the
+/// index derives a reference's end from its start and the name's byte length.
+const FIDELITY_FILES: [(&str, &str); 4] = [
+    (
+        "src/lib.rs",
+        "use crate::model::{Symbol, SymbolKind};\nmod model;\ntrait Speaker { fn speak(&self); }\nstruct Dog { name: String }\nimpl Speaker for Dog {\n    fn speak(&self) { let label = \"멍멍\"; helper(label, &self.name); }\n}\nfn helper(_: &str, _: &String) {}\n",
+    ),
+    (
+        "web/main.ts",
+        "import { helper } from './helper';\nconst greeting = '안녕'; const answer = helper(greeting);\ninterface Runner { run(): void; }\nclass Job implements Runner { run() { helper(answer); } }\n",
+    ),
+    (
+        "tools/계산.py",
+        "from .shared import helper\n\ndef 계산(값):\n    return helper(값)\n\nclass Worker:\n    def run(self):\n        계산(1)\n",
+    ),
+    (
+        "svc/main.go",
+        "package svc\n\nimport (\n\tfmtAlias \"fmt\"\n\t\"strings\"\n)\n\ntype Worker struct{}\n\nfunc (w Worker) Run() { fmtAlias.Println(strings.ToUpper(\"é\")); helper() }\nfunc helper() {}\n",
+    ),
+];
+
+#[test]
+fn the_index_answers_exactly_what_extraction_found() {
+    let (_workspace, mut graph) = fixture_graph(&FIDELITY_FILES);
+    for (path, source) in FIDELITY_FILES {
+        let spec = spec_for_path(Path::new(path)).expect("supported fixture");
+        let extracted = extract(Path::new(path), source.as_bytes(), spec).expect("extract fixture");
+        assert!(!extracted.references.is_empty(), "{path} has references");
+        for reference in &extracted.references {
+            let found = graph
+                .find_references(&reference.name)
+                .expect("reference query");
+            assert!(found.contains(reference), "{path}: {reference:?} not answered");
+        }
+        for symbol in &extracted.symbols {
+            let found = graph
+                .find_symbols(&symbol.name, Some(symbol.kind))
+                .expect("symbol query");
+            assert!(found.contains(symbol), "{path}: {symbol:?} not answered");
+        }
+        assert_eq!(
+            graph.file_outline(path).expect("outline query"),
+            Some(extracted.symbols.clone())
+        );
+        assert_eq!(
+            graph.file_imports(path).expect("import query"),
+            Some(extracted.imports.clone())
+        );
+    }
+}
+
+#[test]
+fn references_come_in_path_order_then_source_order() {
+    let (_workspace, mut graph) = fixture_graph(&[
+        ("src/z.rs", "fn z() { target(); target(); }\n"),
+        ("src/a.rs", "fn a() { target(); }\nfn target() {}\n"),
+        ("src/m/n.rs", "fn n() { target(); }\n"),
+    ]);
+    let found = graph.find_references("target").expect("reference query");
+    let spots = found
+        .iter()
+        .map(|reference| {
+            (
+                reference.file.clone(),
+                reference.range.start.row,
+                reference.range.start.column,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        spots,
+        vec![
+            (PathBuf::from("src/a.rs"), 0, 9),
+            (PathBuf::from("src/m/n.rs"), 0, 9),
+            (PathBuf::from("src/z.rs"), 0, 9),
+            (PathBuf::from("src/z.rs"), 0, 19),
+        ]
+    );
+}
+
+#[test]
+fn a_refresh_writes_only_what_changed() {
+    let (workspace, mut graph) = fixture_graph(&[
+        ("src/a.rs", "fn alpha() {}\n"),
+        ("src/b.rs", "fn beta() { alpha(); }\n"),
+    ]);
+    assert_eq!(
+        graph.refresh().expect("unchanged refresh"),
+        RefreshSummary::default()
+    );
+
+    fs::write(workspace.path().join("src/c.rs"), "fn gamma() { alpha(); }\n")
+        .expect("add a file");
+    assert_eq!(
+        graph.refresh().expect("refresh after an add"),
+        RefreshSummary {
+            written: 1,
+            removed: 0
+        }
+    );
+    assert_eq!(graph.find_references("alpha").expect("references").len(), 2);
+
+    fs::remove_file(workspace.path().join("src/b.rs")).expect("remove a file");
+    assert_eq!(
+        graph.refresh().expect("refresh after a removal"),
+        RefreshSummary {
+            written: 0,
+            removed: 1
+        }
+    );
+    let files = graph
+        .find_references("alpha")
+        .expect("references")
+        .into_iter()
+        .map(|reference| reference.file)
+        .collect::<Vec<_>>();
+    assert_eq!(files, vec![PathBuf::from("src/c.rs")]);
+    assert!(!has_symbol(&mut graph, "beta", SymbolKind::Function));
+    assert_eq!(graph.status().indexed_files, 2);
+}
+
+#[test]
+fn two_sessions_share_one_index() {
+    let (workspace, mut first) = fixture_graph(&[("lib.rs", "fn shared() {}\n")]);
+    let cache = workspace.path().join("state").join(DEFAULT_CACHE_FILE_NAME);
+    let mut second = CodeGraph::load_or_build(workspace.path(), &cache).expect("second session");
+
+    fs::write(workspace.path().join("lib.rs"), "fn edited() {}\n").expect("edit");
+    assert_eq!(first.refresh().expect("first session refresh").written, 1);
+    // The second session reads the rows the first one wrote instead of
+    // parsing the file again.
+    assert_eq!(
+        second.refresh().expect("second session refresh"),
+        RefreshSummary::default()
+    );
+    assert!(has_symbol(&mut second, "edited", SymbolKind::Function));
+    assert!(!has_symbol(&mut second, "shared", SymbolKind::Function));
+}
+
+#[test]
+fn an_old_cache_is_removed_and_another_workspace_rebuilds() {
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    fs::write(workspace.path().join("lib.rs"), "fn first_root() {}\n").expect("fixture");
+    let state = tempfile::tempdir().expect("temp state");
+    for legacy in LEGACY_CACHE_FILE_NAMES {
+        fs::write(state.path().join(legacy), b"{}").expect("legacy cache");
+    }
+    let cache = state.path().join(DEFAULT_CACHE_FILE_NAME);
+    let mut graph = CodeGraph::load_or_build(workspace.path(), &cache).expect("build");
+    assert!(has_symbol(&mut graph, "first_root", SymbolKind::Function));
+    for legacy in LEGACY_CACHE_FILE_NAMES {
+        assert!(!state.path().join(legacy).exists(), "{legacy} removed");
+    }
+    drop(graph);
+
+    let other = tempfile::tempdir().expect("other workspace");
+    fs::write(other.path().join("lib.rs"), "fn second_root() {}\n").expect("fixture");
+    let mut reused = CodeGraph::load_or_build(other.path(), &cache).expect("rebuild");
+    assert!(has_symbol(&mut reused, "second_root", SymbolKind::Function));
+    assert!(!has_symbol(&mut reused, "first_root", SymbolKind::Function));
+}
+
+#[test]
+fn file_links_follow_names_only_one_file_defines() {
+    let (_workspace, mut graph) = fixture_graph(&[
+        (
+            "src/graph.rs",
+            "pub fn scan_graph() {}\npub fn new() {}\nfn helper() { shared_util(); shared_util(); }\n",
+        ),
+        ("src/util.rs", "pub fn shared_util() {}\npub fn new() {}\n"),
+        ("src/app.rs", "fn run() { scan_graph(); new(); }\n"),
+        ("tests/graph.rs", "fn covers() { scan_graph(); scan_graph(); }\n"),
+    ]);
+    let links = graph
+        .file_links("src/graph.rs", MAX_INDEXED_FILES)
+        .expect("links query")
+        .expect("current file");
+    // `shared_util` is defined once, in util.rs; `new` is defined twice and
+    // links nothing.
+    assert_eq!(
+        links.uses,
+        vec![LinkedFile {
+            file: PathBuf::from("src/util.rs"),
+            references: 2,
+            test: false,
+        }]
+    );
+    assert_eq!(
+        links.used_by,
+        vec![
+            LinkedFile {
+                file: PathBuf::from("tests/graph.rs"),
+                references: 2,
+                test: true,
+            },
+            LinkedFile {
+                file: PathBuf::from("src/app.rs"),
+                references: 1,
+                test: false,
+            },
+        ]
+    );
+    let first = graph
+        .file_links("src/graph.rs", 1)
+        .expect("links query")
+        .expect("current file");
+    assert_eq!(first.used_by.len(), 1, "cut at the limit, most referenced kept");
+    assert_eq!(first.used_by[0].file, PathBuf::from("tests/graph.rs"));
+}
+
+#[test]
+fn file_links_never_describe_a_file_saved_since_the_last_refresh() {
+    let (workspace, mut graph) = fixture_graph(&[
+        ("src/a.rs", "fn alpha() {}\n"),
+        ("src/b.rs", "fn beta() { alpha(); }\n"),
+    ]);
+    assert!(graph
+        .file_links("src/b.rs", MAX_INDEXED_FILES)
+        .expect("links query")
+        .is_some());
+    fs::write(workspace.path().join("src/b.rs"), "fn beta() {}\n").expect("save");
+    assert_eq!(
+        graph
+            .file_links("src/b.rs", MAX_INDEXED_FILES)
+            .expect("links query"),
+        None
+    );
+    graph.refresh().expect("refresh");
+    assert_eq!(
+        graph
+            .file_links("src/b.rs", MAX_INDEXED_FILES)
+            .expect("links query"),
+        Some(FileLinks::default())
+    );
+}
+
+#[test]
+fn open_existing_reads_a_built_index_and_never_builds_one() {
+    let workspace = tempfile::tempdir().expect("temp workspace");
+    fs::write(workspace.path().join("lib.rs"), "fn built() {}\n").expect("fixture");
+    let cache = workspace.path().join("state").join(DEFAULT_CACHE_FILE_NAME);
+    assert!(CodeGraph::open_existing(workspace.path(), &cache)
+        .expect("open")
+        .is_none());
+    assert!(!cache.exists(), "a missing index stays missing");
+
+    drop(CodeGraph::load_or_build(workspace.path(), &cache).expect("build"));
+    let mut opened = CodeGraph::open_existing(workspace.path(), &cache)
+        .expect("open")
+        .expect("built index");
+    assert!(has_symbol(&mut opened, "built", SymbolKind::Function));
+
+    let other = tempfile::tempdir().expect("other workspace");
+    assert!(CodeGraph::open_existing(other.path(), &cache)
+        .expect("open")
+        .is_none());
 }

@@ -29,4 +29,20 @@ tools/codegraph-bench/run.py --scratch <빈 디렉터리> --rev <sha> --label "�
 
 `--scratch`는 매번 비우고 다시 채운다: `git archive <rev>` 스냅샷과 캐시가 그 안에만 생긴다(실제
 `~/.zo/projects/*/state/codegraph`는 건드리지 않는다). 벤치는 릴리즈 프로필(zo가 나가는 프로필)로
-한 번 빌드된다. 기계가 바쁘면 수가 흔들린다 — 실행마다 JSON에 `load_average`가 같이 적힌다.
+한 번 빌드된다.
+
+## 바쁜 기계에서 전/후 재기
+
+다른 빌드가 도는 기계에서는 몇 분 사이에 같은 수가 두 배로 흔들린다. 그래서 전과 후를 **번갈아**
+재고 같은 라벨끼리 합친다: 전 커밋을 스크래치에 `git archive`로 풀어 벤치를 따로 빌드하고
+(`cargo bench -p codegraph --bench index_cost --no-run`), `--binary`로 그 실행 파일을 돌린다.
+같은 라벨의 실행들은 한 열로 합쳐져 모든 수가 전체 표본의 중앙값이 되고, 표 머리에 실행 수와
+그동안의 부하(1분 평균)가 같이 찍힌다.
+
+```sh
+for i in 1 2 3; do
+  tools/codegraph-bench/run.py --scratch <s> --rev <sha> --binary <전 벤치> --label 전 --out v1-$i.json
+  tools/codegraph-bench/run.py --scratch <s> --rev <sha> --binary <후 벤치> --label 후 --out v2-$i.json
+done
+tools/codegraph-bench/run.py --no-run --compare v1-1.json … --compare v2-3.json   # 표만
+```

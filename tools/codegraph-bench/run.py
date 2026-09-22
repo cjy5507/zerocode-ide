@@ -15,6 +15,12 @@ and after a redesign behind that API.
 The scratch directory is emptied and refilled on every run; the cache lives
 inside it, never under the real zo state tree. Every number the run uses is a
 constant below.
+
+A busy machine moves these numbers by twofold between two runs minutes
+apart, so a before and an after are best measured interleaved: `--binary`
+runs a bench built elsewhere (the before commit's, say), and runs sharing a
+label are pooled into one column — every number is then a median over all
+of them, and the table carries the load they ran under.
 """
 
 from __future__ import annotations
@@ -46,7 +52,7 @@ SYMBOL_NAMES = ("tests", "new", "constructor", "stream", "fmt")
 # The file one save rewrites and one outline reads: 1.7k lines of Rust, an
 # ordinary large module rather than a toy.
 EDIT_FILE = "crates/zerocode-core/src/second_brain_graph.rs"
-BUILD_RUNS = 2
+BUILD_RUNS = 3
 LOAD_RUNS = 3
 QUERY_REPETITIONS = 20
 EDIT_SAMPLES = 5
@@ -151,7 +157,7 @@ def measure(binary: str, workspace: Path, cache: Path) -> dict:
     edit = run_phase(
         binary, "edit", common + ["--file", EDIT_FILE, "--samples", str(EDIT_SAMPLES)]
     )
-    return {"build": builds, "load": loads, "query": query, "edit": edit}
+    return {"build": builds, "load": loads, "query": [query], "edit": [edit]}
 
 
 def median(reports: list[dict], key: str) -> float | None:
@@ -159,12 +165,39 @@ def median(reports: list[dict], key: str) -> float | None:
     return statistics.median(values) if values else None
 
 
+def median_of(reports: list[dict], key: str, statistic: str) -> float | None:
+    """The median, over reports, of one percentile a report carries."""
+    return median([report[key] for report in reports if report.get(key)], statistic)
+
+
+def pooled(runs: list[dict]) -> list[dict]:
+    """Runs sharing a label as one run, in first-seen order: every phase's
+    reports concatenated, and every load average kept."""
+    by_label: dict[str, dict] = {}
+    for run in runs:
+        phases = {
+            name: reports if isinstance(reports, list) else [reports]
+            for name, reports in run["phases"].items()
+        }
+        pool = by_label.setdefault(
+            run["label"], {"label": run["label"], "load_averages": [], "phases": {}}
+        )
+        pool["load_averages"].append(run["load_average"][0])
+        for name, reports in phases.items():
+            pool["phases"].setdefault(name, []).extend(reports)
+    return list(by_label.values())
+
+
 def summary(run: dict) -> dict:
-    """The table's numbers, each a median over the runs of its phase."""
+    """The table's numbers, each a median over every report of its phase."""
     phases = run["phases"]
-    builds, loads, query, edit = phases["build"], phases["load"], phases["query"], phases["edit"]
+    builds, loads, queries, edits = (
+        phases["build"], phases["load"], phases["query"], phases["edit"]
+    )
     build_ms = median(builds, "build_ms")
     return {
+        "runs": len(queries),
+        "load_average": statistics.median(run["load_averages"]),
         "indexed_files": builds[-1]["indexed_files"],
         "skipped_files": builds[-1]["skipped_files"],
         "build_s": None if build_ms is None else build_ms / MILLIS_PER_SECOND,
@@ -174,21 +207,23 @@ def summary(run: dict) -> dict:
         "load_resident_mb": median(loads, "resident_mb"),
         "load_peak_mb": median(loads, "peak_resident_mb"),
         "first_query_ms": median(loads, "first_query_ms"),
-        "refresh_after_save_ms": edit["refresh_after_save_ms"]["p50"],
-        "refresh_after_create_ms": edit["refresh_after_create_ms"]["p50"],
-        "refresh_after_delete_ms": edit["refresh_after_delete_ms"]["p50"],
-        "find_references_p50_ms": query["find_references_ms"]["p50"],
-        "find_references_p95_ms": query["find_references_ms"]["p95"],
-        "find_symbol_p50_ms": query["find_symbol_ms"]["p50"],
-        "find_symbol_p95_ms": query["find_symbol_ms"]["p95"],
-        "file_outline_p50_ms": query["file_outline_ms"]["p50"],
-        "unchanged_refresh_p50_ms": query["unchanged_refresh_ms"]["p50"],
-        "query_resident_mb": query.get("resident_mb"),
+        "refresh_after_save_ms": median_of(edits, "refresh_after_save_ms", "p50"),
+        "refresh_after_create_ms": median_of(edits, "refresh_after_create_ms", "p50"),
+        "refresh_after_delete_ms": median_of(edits, "refresh_after_delete_ms", "p50"),
+        "find_references_p50_ms": median_of(queries, "find_references_ms", "p50"),
+        "find_references_p95_ms": median_of(queries, "find_references_ms", "p95"),
+        "find_symbol_p50_ms": median_of(queries, "find_symbol_ms", "p50"),
+        "find_symbol_p95_ms": median_of(queries, "find_symbol_ms", "p95"),
+        "file_outline_p50_ms": median_of(queries, "file_outline_ms", "p50"),
+        "unchanged_refresh_p50_ms": median_of(queries, "unchanged_refresh_ms", "p50"),
+        "query_resident_mb": median(queries, "resident_mb"),
     }
 
 
 # One row per number, in the order the report reads them.
 ROWS = (
+    ("runs", "실행 수 (중앙값의 표본)", "{:.0f}"),
+    ("load_average", "기계 부하 (1분 평균, 중앙값)", "{:.1f}"),
     ("indexed_files", "인덱스한 파일 (건너뜀 제외)", "{:.0f}"),
     ("skipped_files", "건너뛴 파일", "{:.0f}"),
     ("build_s", "첫 인덱스 (s)", "{:.2f}"),
@@ -216,7 +251,8 @@ def cell(value: float | None, template: str) -> str:
 
 
 def table(runs: list[dict]) -> str:
-    """A Markdown table, one column per run, in the order given."""
+    """A Markdown table, one column per label, in the order first given."""
+    runs = pooled(runs)
     summaries = [summary(run) for run in runs]
     lines = [
         "| 지표 | " + " | ".join(run["label"] for run in runs) + " |",
@@ -231,21 +267,31 @@ def table(runs: list[dict]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--scratch", required=True, type=Path,
+    parser.add_argument("--scratch", type=Path,
                         help="emptied and refilled: the snapshot and the cache live here")
     parser.add_argument("--repo", type=Path, default=REPO, help="checkout whose tree is measured")
     parser.add_argument("--rev", default="HEAD",
                         help="the commit measured — pin it so a before and an after read one tree")
-    parser.add_argument("--label", required=True, help="the table column this run fills")
+    parser.add_argument("--label", help="the table column this run fills")
     parser.add_argument("--out", type=Path, help="write this run's reports as JSON")
     parser.add_argument("--compare", type=Path, action="append", default=[],
-                        help="an earlier --out file, shown as a column before this run")
+                        help="an earlier --out file, shown before this run (pooled by label)")
+    parser.add_argument("--binary",
+                        help="a prebuilt index_cost bench to run instead of building this checkout's")
+    parser.add_argument("--no-run", action="store_true",
+                        help="measure nothing; print the table of the --compare files")
     arguments = parser.parse_args(argv)
+    earlier = [json.loads(path.read_text()) for path in arguments.compare]
+    if arguments.no_run:
+        print(table(earlier))
+        return 0
+    if arguments.scratch is None or arguments.label is None:
+        parser.error("--scratch and --label are required unless --no-run")
 
     scratch = arguments.scratch.resolve()
     workspace, cache = scratch / "workspace", scratch / "cache"
     measured_sha = snapshot(arguments.repo, arguments.rev, workspace)
-    binary = bench_binary()
+    binary = arguments.binary or bench_binary()
     started = time.time()
     run = {
         "label": arguments.label,
@@ -258,7 +304,6 @@ def main(argv: list[str] | None = None) -> int:
     }
     if arguments.out:
         arguments.out.write_text(json.dumps(run, indent=2, ensure_ascii=False) + "\n")
-    earlier = [json.loads(path.read_text()) for path in arguments.compare]
     print(table([*earlier, run]))
     return 0
 
