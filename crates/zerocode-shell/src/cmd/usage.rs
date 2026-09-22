@@ -559,12 +559,34 @@ pub(crate) fn logout_codex_login(
     Ok(codex_accounts_report(state.config_root()))
 }
 
+/// How this machine names each row's CLI, asked ONCE for the whole card:
+/// the catalog's own detection for a catalog agent (a machine may have it
+/// under an alias, and the scan already knows which name answered), and a
+/// walk of the launch PATH for the two CLIs the catalog does not know.
+///
+/// Once, because the catalog scan walks PATH for every agent it knows: the
+/// card asking it per row made thirty scans of the same PATH.
+fn cli_login_programs() -> impl Fn(&cli_login::CliLogin) -> Option<String> {
+    let detected = detected_agents(false);
+    let path = shell_path::launch_path();
+    move |row| match row.cli {
+        cli_login::Cli::Agent => detected
+            .iter()
+            .find(|found| found.id == row.agent && found.installed)
+            .and_then(|found| found.found_as.clone()),
+        cli_login::Cli::Own { program, .. } => {
+            zerocode_core::agent::resolve_on_path(path.as_deref(), program)
+                .map(|_| program.to_string())
+        }
+    }
+}
+
 /// The CLI login card: every provider whose own CLI signs itself in, as this
-/// machine stands (`cli_login::CLI_LOGINS`). Read live off the witness files;
-/// nothing here writes.
+/// machine stands (`cli_login::CLI_LOGINS`). Read live off the witness files
+/// and the CLIs' own status commands; nothing here writes.
 #[tauri::command(async)]
 pub(crate) fn cli_login_list() -> cli_login::Report {
-    cli_login::report(agent_program, epoch_ms_now())
+    cli_login::report(&cli_login_programs(), epoch_ms_now())
 }
 
 /// Sign a provider's login in through its headless verb — the CLI's own
@@ -576,7 +598,7 @@ pub(crate) fn cli_login_list() -> cli_login::Report {
 pub(crate) async fn cli_login_start(agent: String) -> Result<cli_login::Report, String> {
     let row = cli_login::row(&agent)
         .ok_or_else(|| format!("{agent}은(는) 로그인 표에 없는 에이전트입니다"))?;
-    let program = agent_program(row.agent)
+    let program = cli_login_programs()(row)
         .ok_or_else(|| format!("이 기계에서 {}을(를) 찾지 못했습니다", row.agent))?;
     tauri::async_runtime::spawn_blocking(move || {
         cli_login::login_headless(row, &program, epoch_ms_now())
@@ -584,7 +606,7 @@ pub(crate) async fn cli_login_start(agent: String) -> Result<cli_login::Report, 
     .await
     .map_err(|error| error.to_string())??;
     readiness_runtime::invalidate(row.agent);
-    Ok(cli_login::report(agent_program, epoch_ms_now()))
+    Ok(cli_login::report(&cli_login_programs(), epoch_ms_now()))
 }
 
 /// Sign a provider's login out through its headless verb. The CLI removes
@@ -593,7 +615,7 @@ pub(crate) async fn cli_login_start(agent: String) -> Result<cli_login::Report, 
 pub(crate) async fn cli_login_logout(agent: String) -> Result<cli_login::Report, String> {
     let row = cli_login::row(&agent)
         .ok_or_else(|| format!("{agent}은(는) 로그인 표에 없는 에이전트입니다"))?;
-    let program = agent_program(row.agent)
+    let program = cli_login_programs()(row)
         .ok_or_else(|| format!("이 기계에서 {}을(를) 찾지 못했습니다", row.agent))?;
     tauri::async_runtime::spawn_blocking(move || {
         cli_login::logout_headless(row, &program, epoch_ms_now())
@@ -601,7 +623,7 @@ pub(crate) async fn cli_login_logout(agent: String) -> Result<cli_login::Report,
     .await
     .map_err(|error| error.to_string())??;
     readiness_runtime::invalidate(row.agent);
-    Ok(cli_login::report(agent_program, epoch_ms_now()))
+    Ok(cli_login::report(&cli_login_programs(), epoch_ms_now()))
 }
 
 /// Watch a provider's witness until it holds a login (`signed_in`) or stops
@@ -617,14 +639,14 @@ pub(crate) async fn cli_login_wait(
         .ok_or_else(|| format!("{agent}은(는) 로그인 표에 없는 에이전트입니다"))?;
     // The CLI, when the machine has it: a row proven by a status command
     // asks it; a row proven by a file needs nobody.
-    let program = agent_program(row.agent);
+    let program = cli_login_programs()(row);
     tauri::async_runtime::spawn_blocking(move || {
         cli_login::watch(row, program.as_deref(), signed_in, epoch_ms_now())
     })
     .await
     .map_err(|error| error.to_string())??;
     readiness_runtime::invalidate(row.agent);
-    Ok(cli_login::report(agent_program, epoch_ms_now()))
+    Ok(cli_login::report(&cli_login_programs(), epoch_ms_now()))
 }
 
 #[tauri::command(async)]

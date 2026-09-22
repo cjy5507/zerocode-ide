@@ -1301,10 +1301,17 @@ pub fn nested_agent_of(command: &str) -> Option<crate::agent::AgentKind> {
             return None;
         }
         let name = head.text.rsplit('/').next().unwrap_or(&head.text);
+        // EVERY name that means this agent on PATH, not only the primary
+        // one: Cursor's CLI is `agent` now and `cursor-agent` is the legacy
+        // link its installer still makes, so a person's muscle memory names
+        // the same agent (`AgentSpec::detect_names`, t-6120).
         let kind = crate::agent::ALL_AGENTS
             .into_iter()
             .filter(|kind| *kind != crate::agent::AgentKind::Zo)
-            .find(|kind| kind.command() == name)?;
+            .find(|kind| {
+                crate::agent::agent_spec(kind.slug())
+                    .is_some_and(|spec| spec.detect_names().any(|said| said == name))
+            })?;
         let rest: Vec<ShellWord> = words.collect();
         if is_agent_probe(&rest) {
             return None;
@@ -1725,6 +1732,8 @@ mod tests {
             ("cd /repo && claude -p '요약'", Some(AgentKind::Claude)),
             ("echo prompt | claude -p", Some(AgentKind::Claude)),
             ("cursor-agent run", Some(AgentKind::Cursor)),
+            // The same agent under the name its docs now spell.
+            ("agent run", Some(AgentKind::Cursor)),
             ("grep codex src/main.rs", None),
             ("git commit -m \"claude did this\"", None),
             ("cargo test codex", None),

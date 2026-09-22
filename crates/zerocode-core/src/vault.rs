@@ -452,20 +452,21 @@ pub const AGENT_SOURCES: [AgentSource; 16] = [
 
 /// The base command an agent resumes with (`defaultAiVaultResumeCommandBase`,
 /// ai-vault-session-drag:115-126).
+///
+/// Orca's fallback is the agent's `detectCmd`, and this reads the same fact
+/// off the terminal catalog — the head of its launch line, which is the
+/// binary the launch button starts. It used to be a list of exceptions here
+/// (`cursor` → `cursor-agent`, `rovo` → `acli`, `antigravity` → `agy`), and
+/// a second copy of a binary name is a second thing to update: when the
+/// catalog learned that Cursor's command is now `agent` and Rovo Dev runs as
+/// `acli rovodev run` (t-6120), this list would have gone on spelling the
+/// old ones and every reopen would have died on `command not found` — which
+/// is exactly how the `antigravity` exception got here in the first place.
+/// A slug with no catalog row keeps its own name.
 pub fn resume_base(slug: &str) -> &str {
-    match slug {
-        "cursor" => "cursor-agent",
-        "rovo" => "acli",
-        "openclaw" => "openclaw",
-        "droid" => "droid",
-        // Orca's fallback is the agent's `detectCmd`
-        // (`defaultAiVaultResumeCommandBase`), and antigravity's is `agy` —
-        // the same fact `AgentKind::command` records. The slug spelled a
-        // binary that does not exist, so every reopen died on
-        // `command not found`.
-        "antigravity" => "agy",
-        other => other,
-    }
+    crate::agent::agent_spec(slug)
+        .and_then(|spec| spec.launch.split_whitespace().next())
+        .unwrap_or(slug)
 }
 
 /// How an agent is told which session to resume (`buildAgentResumeInvocation`,
@@ -2551,10 +2552,22 @@ mod tests {
         // The base command differs from the slug where the BINARY does —
         // antigravity's is `agy`, and the slug spelling was a reopen that
         // died on `command not found`.
-        assert_eq!(resume_base("cursor"), "cursor-agent");
+        assert_eq!(resume_base("cursor"), "agent");
         assert_eq!(resume_base("rovo"), "acli");
         assert_eq!(resume_base("antigravity"), "agy");
         assert_eq!(resume_base("claude"), "claude");
+        // Every base is the catalog's own launch head, so the two can never
+        // drift again; a slug the catalog does not know keeps its name.
+        for source in AGENT_SOURCES {
+            let spec = crate::agent::agent_spec(source.slug).expect("a catalog row");
+            assert_eq!(
+                resume_base(source.slug),
+                spec.launch.split_whitespace().next().expect("a launch"),
+                "{} reopens with a different binary than it launches",
+                source.slug
+            );
+        }
+        assert_eq!(resume_base("nobody"), "nobody");
 
         // Every agent in the table can be resumed, or the card offers nothing.
         for source in AGENT_SOURCES {

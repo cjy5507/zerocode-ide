@@ -705,6 +705,9 @@ class StatefulBackend {
     this.routerPresets = [...ROUTER_PRESETS_CATALOG];
     this.zoSettings = { providers: [] };
     this.keychain = new Map();
+    // The CLI login card's rows — a test fills them; the pane paints what
+    // the backend's table says and nothing of its own.
+    this.cliLogins = { rows: [] };
     // A machine with no keychain for router keys (every build but macOS):
     // `save_router` refuses a key there instead of dropping it on the floor.
     this.routerKeychainUnavailable = false;
@@ -2238,7 +2241,21 @@ class StatefulBackend {
       case "verify_claude_accounts": return [];
       case "verify_codex_accounts": return [];
       case "codex_account_list": return { accounts: [], can_add: true };
-      case "cli_login_list": return { rows: [] };
+      case "cli_login_list": return clone(this.cliLogins ?? { rows: [] });
+      // The three doors that MOVE a login answer with the table re-read, the
+      // way the backend does: the row the test asked about flips and the
+      // rest stand.
+      case "cli_login_start":
+      case "cli_login_wait": {
+        const held = this.cliLogins.rows.find((row) => row.agent === args.agent);
+        if (held) held.signed_in = args.signedIn ?? true;
+        return clone(this.cliLogins);
+      }
+      case "cli_login_logout": {
+        const held = this.cliLogins.rows.find((row) => row.agent === args.agent);
+        if (held) held.signed_in = false;
+        return clone(this.cliLogins);
+      }
       case "relogin_codex_login": return { accounts: [], can_add: true };
       case "logout_codex_login": return { accounts: [], can_add: true };
       case "google_account": return clone(this.googleAccount);
@@ -3700,6 +3717,185 @@ await test("the provider accounts pane carries a Google card whose login the win
     "a signed-in Google row did not offer the repair and the way out",
   );
   return "signed out → consent tab → named login";
+});
+
+await test("CLI 로그인 카드는 행이 말하는 길만 걷고, 못 읽는 로그인은 못 읽는다고 말한다", async () => {
+  // The card is the backend's table painted: every button, caption and
+  // command below comes off a row, and the pane knows no agent's name. The
+  // rows here wear the five shapes the table has — a headless verb, a verb
+  // typed into a shell, a slash command at an agent's own pane, the same for
+  // a CLI the launch catalog does not know, and a login kept where this
+  // window may not look.
+  const row = (fields) => ({
+    homepage_url: "https://example.com",
+    installed: true,
+    signed_in: false,
+    known: true,
+    proof: "file",
+    opens: "agent",
+    home: "~/.fixture",
+    road: "verb",
+    logout_road: "verb",
+    ...fields,
+  });
+  backend.cliLogins = {
+    rows: [
+      row({ agent: "verb-row", name: "Verb", program: "verbcli" }),
+      row({
+        agent: "pane-row",
+        name: "Pane",
+        program: "panecli",
+        road: "pane-verb",
+        pane_command: "PANE_HOME=/Users/dev/.pane panecli login",
+        logout_road: "pane-verb",
+        logout_command: "PANE_HOME=/Users/dev/.pane panecli logout",
+      }),
+      row({
+        agent: "tui-row",
+        name: "Tui",
+        program: "tuicli",
+        signed_in: true,
+        account: "person@example.com",
+        road: "tui",
+        tui_login: "/login",
+        logout_road: "tui",
+        tui_logout: "/logout",
+      }),
+      row({
+        agent: "outside-row",
+        name: "Outside",
+        program: "outsidecli",
+        opens: "shell",
+        road: "tui",
+        tui_login: "/auth",
+        pane_command: "OUTSIDE_HOME=/Users/dev outsidecli",
+        logout_road: "none",
+      }),
+      row({
+        agent: "keyring-row",
+        name: "Keyring",
+        program: "keyringcli",
+        known: false,
+        proof: "none",
+        road: "pane-verb",
+        pane_command: "KEYRING_HOME=/Users/dev/.keyring keyringcli configure",
+        logout_road: "none",
+      }),
+      row({ agent: "absent-row", name: "Absent", program: "absentcli", installed: false }),
+    ],
+  };
+  // Arriving at the pane is what re-reads the table, and a test before this
+  // one may have left the panel standing on it: close it first, so this
+  // arrival is one.
+  await pageA.evaluate(() => setSettingsOpen(false));
+  const openedAt = backend.calls.length;
+  await openSettings(pageA, "provider-accounts");
+  await backend.waitForCall("A", "cli_login_list", openedAt);
+  await renderSettled(pageA);
+  const rows = pageA.locator("#cli-login-list .account-row");
+  assertEqual(await rows.count(), 6, "the card did not paint one row per table row");
+
+  const words = await pageA.evaluate(() => ({
+    signIn: t("usage.signIn", "로그인"),
+    relogin: t("settings.accounts.relogin", "다시 로그인"),
+    logout: t("settings.accounts.logout", "로그아웃"),
+    install: t("settings.agents.install", "설치"),
+    unreadable: t(
+      "settings.cliLogins.unreadable",
+      "{{program}}은(는) 로그인을 창이 읽을 수 없는 곳에 둡니다 — 로그인은 여기서 열고, 결과는 그 CLI에서 확인하세요",
+      { program: "keyringcli" },
+    ),
+    notInstalled: t(
+      "settings.cliLogins.notInstalled",
+      "{{program}}을(를) PATH에서 찾지 못했습니다 — 설치 안내는 오른쪽 링크",
+      { program: "absentcli" },
+    ),
+  }));
+  const under = async (index) => rows.nth(index).locator(".agent-row-cmd").textContent();
+  const buttons = async (index) => rows.nth(index).locator("button").allTextContents();
+
+  // A signed-in row names who, and offers the repair and the way out.
+  assertEqual(await under(2), "person@example.com", "a signed-in row did not name its account");
+  assertEqual(await buttons(2), [words.relogin, words.logout], "a signed-in row's verbs");
+  // A row whose CLI documents no logout offers none.
+  assertEqual(await buttons(3), [words.signIn], "a row with no way out grew one");
+  // A login this window cannot read says so, and is not called signed out.
+  assertEqual(await under(4), words.unreadable, "a keyring row did not say it cannot be read");
+  assertEqual(await buttons(4), [words.signIn], "an unreadable row offered a logout it cannot judge");
+  // A CLI that is not on this machine names what was looked for — not the id.
+  assertEqual(await under(5), words.notInstalled, "an absent CLI did not name the command");
+  assertEqual(await buttons(5), [words.install], "an absent CLI offered something to press besides its page");
+
+  // The headless road: one door, and the table comes back.
+  const signingIn = backend.calls.length;
+  await rows.nth(0).locator("button").click();
+  const started = await backend.waitForCall("A", "cli_login_start", signingIn);
+  assertEqual(started.args.agent, "verb-row", "the door was asked about another row");
+  await renderSettled(pageA);
+  assertEqual(await buttons(0), [words.relogin, words.logout], "the finished login did not move the row");
+
+  // The road that needs a screen: the row's own line, typed into a plain
+  // shell of this window, and then the backend watches.
+  const typing = backend.calls.length;
+  await rows.nth(1).locator("button").click();
+  await backend.waitForCall("A", "open_term_tab", typing);
+  const typed = await backend.waitForCall("A", "term_text", typing);
+  assertEqual(
+    typed.args.text,
+    "PANE_HOME=/Users/dev/.pane panecli login\r",
+    "the window typed something other than the row's line",
+  );
+  const waited = await backend.waitForCall("A", "cli_login_wait", typing);
+  assertEqual(waited.args.signedIn, true, "the watch was not for a login");
+
+  // A CLI the catalog does not launch opens in a shell too, with the slash
+  // command left for the person — and a login the window cannot read is
+  // never waited on. (The pane-verb road above closed the panel so the
+  // person could see the terminal; this opens it again.)
+  await openSettings(pageA, "provider-accounts");
+  await renderSettled(pageA);
+  const opening = backend.calls.length;
+  await rows.nth(4).locator("button").click();
+  const opened = await backend.waitForCall("A", "term_text", opening);
+  assertEqual(
+    opened.args.text,
+    "KEYRING_HOME=/Users/dev/.keyring keyringcli configure\r",
+    "the unreadable row typed something else",
+  );
+  await renderSettled(pageA);
+  assertEqual(
+    backend.calls.slice(opening).filter((call) => call.name === "cli_login_wait").length,
+    0,
+    "the window waited for an answer this CLI never gives",
+  );
+
+  // And the card's own cost, measured: the table is thirty rows now.
+  const painting = await pageA.evaluate(() => {
+    const one = cliLogins;
+    const many = { rows: [] };
+    for (let i = 0; i < 30; i += 1) {
+      many.rows.push({ ...one.rows[0], agent: `row-${i}`, name: `Row ${i}` });
+    }
+    const timed = (table) => {
+      cliLogins = table;
+      const began = performance.now();
+      paintCliLogins();
+      return performance.now() - began;
+    };
+    const few = timed(one);
+    const lots = timed(many);
+    cliLogins = one;
+    paintCliLogins();
+    return { few, lots, rows: many.rows.length };
+  });
+  console.log(
+    `    measured: the CLI login card painted ${backend.cliLogins.rows.length} rows in ` +
+      `${painting.few.toFixed(1)} ms and ${painting.rows} rows in ${painting.lots.toFixed(1)} ms`,
+  );
+  assert(painting.lots < 60, `painting ${painting.rows} rows took ${painting.lots} ms`);
+  backend.cliLogins = { rows: [] };
+  await pageA.evaluate(() => setSettingsOpen(false));
+  return "six shapes, three roads, thirty rows painted";
 });
 
 await test("라우터 추가→연결 시험→모델 셋 켬→settings.json providers 한 항목", async () => {

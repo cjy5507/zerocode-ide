@@ -70,14 +70,17 @@ fn the_table_borrows_every_provider_fact_from_the_usage_modules() {
         rows.contains("usage_grok::") && rows.contains("usage_kimi::"),
         "a row stopped reading its home and witness off the usage module:\n{rows}"
     );
-    // The facts the usage modules already own must not be spelled again here.
+    // The facts a usage gauge already owns must not be spelled again here.
+    // (`auth.json` is not on this list any more: a dozen other CLIs keep
+    // their login in a file of that name and nothing in this window reads
+    // theirs, so those rows carry the path themselves — which is what the
+    // table is for. Grok's copy of it would still be a second copy, and the
+    // two row blocks below are where that is checked.)
     for copied in [
         "\".grok\"",
-        "\"auth.json\"",
         "\"GROK_HOME\"",
         "\".kimi-code\"",
         "\"kimi-code.json\"",
-        "\"credentials\"",
         "\"KIMI_CODE_HOME\"",
         "auth.x.ai",
     ] {
@@ -86,22 +89,61 @@ fn the_table_borrows_every_provider_fact_from_the_usage_modules() {
             "cli_login.rs carries a second copy of a provider fact: {copied}"
         );
     }
-    // Every row names a catalog agent.
-    let mut named = 0;
-    for spec in zerocode_core::AGENT_SPECS {
-        if rows.contains(&format!("agent: \"{}\",", spec.id)) {
-            named += 1;
+    for (agent, module) in [("grok", "usage_grok::"), ("kimi", "usage_kimi::")] {
+        let whole = block_after(rows, &format!("agent: \"{agent}\","));
+        // Only that row: `block_after` runs to the end of the table, and the
+        // rows after it are other providers' facts.
+        let row = whole.split("CliLogin {").next().unwrap_or(whole);
+        assert!(
+            row.contains(module),
+            "the {agent} row stopped reading its facts off {module}:\n{row}"
+        );
+        for spelled in ["auth.json", "credentials/", "Holds::"] {
+            assert!(
+                !row.contains(spelled),
+                "the {agent} row spells `{spelled}`, which its gauge already owns:\n{row}"
+            );
         }
     }
+    // Every row names a catalog agent, or carries the three facts the
+    // catalog would have held for it (the two provider CLIs this window
+    // does not launch).
+    let named = zerocode_core::AGENT_SPECS
+        .iter()
+        .filter(|spec| rows.contains(&format!("agent: \"{}\",", spec.id)))
+        .count();
+    let outside = rows.matches("cli: Cli::Own {").count();
     let rows_written = rows.matches("agent: \"").count();
     assert_eq!(
-        named, rows_written,
-        "a login row names an agent the catalog does not have:\n{rows}"
+        named + outside,
+        rows_written,
+        "a login row names an agent neither the catalog nor the row itself knows:\n{rows}"
     );
     assert!(
-        rows_written >= 2,
-        "the first two rows (grok, kimi) are gone"
+        rows_written >= 29,
+        "the survey's OAuth rows are no longer all here ({rows_written})"
     );
+}
+
+/// The rows that are NOT here, and why — the three whose login already has a
+/// card of its own on this screen. A row for one of them would be a second
+/// button for one login.
+#[test]
+fn the_three_logins_with_a_card_of_their_own_are_not_rows_as_well() {
+    let table = shipped("cli_login.rs");
+    let rows = block_after(&table, "pub(crate) const CLI_LOGINS: &[CliLogin] = &[");
+    for owned in ["claude", "codex", "antigravity"] {
+        assert!(
+            !rows.contains(&format!("agent: \"{owned}\",")),
+            "`{owned}` has a card of its own and a row here as well"
+        );
+    }
+    // And the card each of them is: the Claude accounts card asks the CLI
+    // itself, the Codex card runs on this file's own runner, and the
+    // window's Google login is the credential the Antigravity gauge reads.
+    assert!(shipped("accounts.rs").contains("\"auth\", \"status\""));
+    assert!(shipped("codex_accounts.rs").contains("cli_login::run_login("));
+    assert!(shipped("google_login.rs").contains("google_code_assist_oauth"));
 }
 
 #[test]
@@ -261,6 +303,8 @@ fn the_cli_login_words_exist_in_every_catalog() {
         "settings.cliLogins.logoutBody",
         "settings.cliLogins.noRows",
         "settings.cliLogins.noLine",
+        "settings.cliLogins.unreadable",
+        "settings.cliLogins.unanswered",
     ] {
         assert_eq!(
             i18n.matches(&format!("\"{key}\":")).count(),

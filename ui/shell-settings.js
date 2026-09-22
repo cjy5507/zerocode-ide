@@ -4965,8 +4965,23 @@ function cliLoginUnder(row) {
     return t(
       "settings.cliLogins.notInstalled",
       "{{program}}을(를) PATH에서 찾지 못했습니다 — 설치 안내는 오른쪽 링크",
-      { program: row.agent },
+      { program: row.program },
     );
+  }
+  // Two rows the window must not guess about. `none` is a CLI that keeps
+  // its login in a keyring with no status command behind it: the road still
+  // works, and the CLI's own screen is where the answer is. The other is a
+  // status command that did not answer — which is not 「로그아웃됨」 either.
+  if (!row.known) {
+    return row.proof === "none"
+      ? t(
+          "settings.cliLogins.unreadable",
+          "{{program}}은(는) 로그인을 창이 읽을 수 없는 곳에 둡니다 — 로그인은 여기서 열고, 결과는 그 CLI에서 확인하세요",
+          { program: row.program },
+        )
+      : t("settings.cliLogins.unanswered", "{{program}}이(가) 로그인 상태에 답하지 않았습니다", {
+          program: row.program,
+        });
   }
   if (!row.signed_in) {
     return t("settings.cliLogins.signedOut", "{{home}}에 로그인이 없습니다", { home: row.home });
@@ -4999,7 +5014,12 @@ function cliLoginActions(row) {
       press: (button) => startCliLogin(row, button),
     },
   ];
-  if (row.signed_in) {
+  // The way out stands only where there IS one: several of these CLIs
+  // document no logout at all, and a button that removed the file itself
+  // would take a credential the CLI never said it could lose. A row whose
+  // login this window cannot read has nothing to sign out of either — it
+  // does not know whether anybody is signed in.
+  if (row.signed_in && row.known && row.logout_road !== "none") {
     actions.push({
       className: "account-logout",
       label: t("settings.accounts.logout", "로그아웃"),
@@ -5027,11 +5047,14 @@ async function startCliLogin(row, button) {
       cliLogins = await invoke("cli_login_start", { agent: row.agent });
     } else {
       // `pane-verb` types the row's shell line into a plain shell; `tui`
-      // types the row's slash command at its TUI; `first-run` opens the TUI
-      // bare. Each is then watched by the backend until the proof lands.
+      // types the row's slash command at its CLI; `first-run` opens it bare.
       if (row.road === "pane-verb") await typeCliLoginShellLine(row, row.pane_command);
       else await typeCliLoginCommand(row, row.tui_login ?? null);
-      cliLogins = await invoke("cli_login_wait", { agent: row.agent, signedIn: true });
+      // And then the backend watches — unless the row has nothing to watch,
+      // where waiting would be waiting for an answer that never comes.
+      if (row.proof !== "none") {
+        cliLogins = await invoke("cli_login_wait", { agent: row.agent, signedIn: true });
+      }
     }
   } catch (error) {
     showError(String(error));
@@ -5053,6 +5076,10 @@ async function startCliLogin(row, button) {
  * front: the command is a word to a running program, not a reason to start
  * a second one. */
 async function typeCliLoginCommand(row, command) {
+  // A CLI the launch catalog does not know has no agent pane to open: the
+  // window types its line into a plain shell instead, and the caption names
+  // the command for the person to type at it.
+  if (row.opens === "shell") return typeCliLoginShellLine(row, row.pane_command);
   let term = [...paneAgents].find(([, agent]) => agent === row.agent)?.[0] ?? null;
   const held = term === null ? null : tabOfTerm(term);
   if (held === null) {
@@ -5098,13 +5125,20 @@ async function logoutCliLogin(row) {
     danger: true,
   });
   if (said !== true) return;
-  cliLoginBusy.set(row.agent, { road: row.logout_road, command: row.tui_logout ?? null });
+  cliLoginBusy.set(row.agent, {
+    road: row.logout_road,
+    command: row.tui_logout ?? row.logout_command ?? null,
+  });
   paintCliLogins();
   try {
     if (row.logout_road === "verb") {
       cliLogins = await invoke("cli_login_logout", { agent: row.agent });
     } else {
-      await typeCliLoginCommand(row, row.tui_logout ?? null);
+      // The way out has the same three shapes the way in has: a verb that
+      // needs a screen (it asks which provider, or asks twice), and a slash
+      // command at the CLI's own screen.
+      if (row.logout_road === "pane-verb") await typeCliLoginShellLine(row, row.logout_command);
+      else await typeCliLoginCommand(row, row.tui_logout ?? null);
       cliLogins = await invoke("cli_login_wait", { agent: row.agent, signedIn: false });
     }
   } catch (error) {

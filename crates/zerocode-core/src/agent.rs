@@ -1228,11 +1228,18 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         name: "Cursor",
         favicon_domain: "cursor.com",
         homepage_url: "https://cursor.com/cli",
-        detect: "cursor-agent",
-        detect_aliases: &[],
+        // The CLI's own name is `agent`; `cursor-agent` is the legacy link
+        // the installer still makes beside it — "Create symlinks to the
+        // Cursor Agent executable (primary: agent, legacy: cursor-agent)"
+        // (cursor.com/install, the script the docs hand out). Both point at
+        // one executable FILE named `cursor-agent`, which is why the process
+        // to expect in a pty keeps that name while the command to run and
+        // detect is the one the docs now spell (t-6120, t-6009's survey).
+        detect: "agent",
+        detect_aliases: &["cursor-agent"],
         requires: &[],
         unsupported: &[],
-        launch: "cursor-agent",
+        launch: "agent",
         expected_process: "cursor-agent",
         injection: Injection::Argv,
         draft_flag: None,
@@ -1349,12 +1356,20 @@ pub static AGENT_SPECS: [AgentSpec; 35] = [
         name: "Rovo Dev",
         favicon_domain: "atlassian.com",
         homepage_url: "https://support.atlassian.com/rovo/docs/install-and-run-rovo-dev-cli-on-your-device/",
-        detect: "rovo",
+        // Rovo Dev is an extension of Atlassian's CLI, not a binary of its
+        // own: "Rovo Dev CLI is an extension for Atlassian Command Line
+        // Interface (ACLI)." and the documented way to run it is
+        // `acli rovodev run` (support.atlassian.com/rovo/docs/…). A bare
+        // `rovo` appears nowhere in Atlassian's documentation — it was a
+        // name this catalog invented, and a launch nobody could start
+        // (t-6120, t-6009's survey). The vault's reopen already spelled it
+        // `acli rovodev run --restore`.
+        detect: "acli",
         detect_aliases: &[],
         requires: &[],
         unsupported: &[],
-        launch: "rovo",
-        expected_process: "rovo",
+        launch: "acli rovodev run",
+        expected_process: "acli",
         injection: Injection::StdinAfterStart,
         draft_flag: None,
         draft_env: None,
@@ -2678,6 +2693,48 @@ mod tests {
                 "{} launches a different binary than it detects",
                 spec.id
             );
+        }
+    }
+
+    /// Two rows the catalog named after a product rather than after a
+    /// command, until the login survey read the vendors' own documents
+    /// (t-6009, t-6120).
+    ///
+    /// Rovo Dev is an extension of Atlassian's CLI — `acli rovodev run` —
+    /// and a bare `rovo` is in no Atlassian document; Cursor's CLI is
+    /// `agent` now, with `cursor-agent` kept as the legacy link its
+    /// installer still makes. Both are detected by the command they launch,
+    /// and the process to expect in a pty is the executable's own name.
+    #[test]
+    fn the_two_renamed_clis_are_detected_by_the_command_their_vendors_document() {
+        let rovo = agent_spec("rovo").expect("in the registry");
+        assert_eq!(rovo.detect, "acli");
+        assert_eq!(rovo.launch, "acli rovodev run");
+        assert_eq!(rovo.expected_process, "acli");
+        let cursor = agent_spec("cursor").expect("in the registry");
+        assert_eq!(cursor.launch, "agent");
+        assert_eq!(cursor.detect, "agent");
+        assert_eq!(cursor.detect_aliases, &["cursor-agent"]);
+        // Both names still mean Cursor on a machine that has either.
+        assert_eq!(
+            cursor.detect_names().collect::<Vec<_>>(),
+            vec!["agent", "cursor-agent"]
+        );
+        // The symlinks point at one file called `cursor-agent`, so that is
+        // what a pty shows.
+        assert_eq!(cursor.expected_process, "cursor-agent");
+        // And no other row answers to those names.
+        for spec in &AGENT_SPECS {
+            if spec.id == "cursor" || spec.id == "rovo" {
+                continue;
+            }
+            for name in spec.detect_names() {
+                assert!(
+                    !["agent", "cursor-agent", "acli"].contains(&name),
+                    "{} answers to a name the renamed rows took",
+                    spec.id
+                );
+            }
         }
     }
 
