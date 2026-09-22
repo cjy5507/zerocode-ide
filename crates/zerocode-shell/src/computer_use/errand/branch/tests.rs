@@ -1443,7 +1443,9 @@ fn a_rescued_step_forks_on_the_second_readers_ranking() {
     let mut world = phone();
     let mut judge = seat();
     let mut team = FakeJudge::chose(&[]);
-    team.answers = vec![ranked(1, &[(1, 0.6), (2, 0.4)])];
+    // Torn between the two — inside the fork margin (t-6155 F3), so the
+    // rescued step is one a fork is for.
+    team.answers = vec![ranked(1, &[(1, 0.55), (2, 0.45)])];
 
     let walked = run_with(
         Mode::On,
