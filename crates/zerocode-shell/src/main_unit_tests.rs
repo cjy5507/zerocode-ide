@@ -16352,7 +16352,7 @@ fn the_bell_ladder_stands_once_and_in_orcas_order() {
         dot < master && master < kinds,
         "the ladder's first rungs are out of Orca's order"
     );
-    let ringing = block_after(shipped, "pub(super) fn ring_now(");
+    let ringing = block_after(shipped, "fn ring_now(");
     let gated = ringing
         .find("if !ring_gates_open(app, ring) {")
         .expect("the bell no longer walks the first rungs");
@@ -16377,7 +16377,7 @@ fn the_bell_ladder_stands_once_and_in_orcas_order() {
         cooling < invitation,
         "the ladder's last rungs are out of Orca's order"
     );
-    let held = block_after(shipped, "pub(super) fn ring_held(");
+    let held = block_after(shipped, "fn ring_held(");
     assert!(
         held.contains("if !ring_gates_open(app, ring) {")
             && held.contains("ring_composed(app, worktree, term, folded);"),

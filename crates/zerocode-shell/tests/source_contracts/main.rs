@@ -20371,7 +20371,7 @@ mod tests {
         // the bell asks whether the person is watching and returns before
         // it walks the last rungs, where the cooldown is spent (t-6043 put
         // the notify seat between the two; a watched screen is not asked).
-        let ringing = block_after(shipped, "pub(super) fn ring_now(");
+        let ringing = block_after(shipped, "fn ring_now(");
         let suppressing = ringing
             .find("notify::suppressed(worktree, &active, focused)")
             .expect("the ring no longer asks whether the person is watching");

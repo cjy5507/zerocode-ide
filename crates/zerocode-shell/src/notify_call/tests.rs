@@ -453,7 +453,7 @@ fn a_restart_finds_the_answers_still_waiting_for_their_label() {
 #[test]
 fn off_is_todays_bytes_and_the_seat_sits_where_the_table_decides() {
     let bell = include_str!("../pane_runtime.rs");
-    let ringing = crate::tests::block_after(bell, "pub(super) fn ring_now(");
+    let ringing = crate::tests::block_after(bell, "fn ring_now(");
     let suppressed = ringing
         .find("zerocode_core::notify::suppressed(worktree, &active, focused)")
         .expect("the watched-screen rule");
@@ -485,7 +485,7 @@ fn off_is_todays_bytes_and_the_seat_sits_where_the_table_decides() {
             && composed.contains("*state.last_ring() = Some(LastRing {"),
         "the last rungs are the cooldown, the OS and the address:\n{composed}"
     );
-    let held = crate::tests::block_after(bell, "pub(super) fn ring_held(");
+    let held = crate::tests::block_after(bell, "fn ring_held(");
     assert!(
         !held.contains("call_at_the_bell"),
         "a held ring is not asked of the seat again:\n{held}"
