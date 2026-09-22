@@ -4414,7 +4414,9 @@ function paintTabNode(node, tab) {
     tab.kind === "term" && paneLeaves(tab.layout).some((term) => bellRang.has(term))
       ? "is-bell"
       : "",
-    said === "needs-attention" ? "is-waiting" : "",
+    // A pane whose ring the notify seat took away is not marked as waiting
+    // either (t-6043): the mark is the ring's twin on the strip.
+    said === "needs-attention" && !tabHushed(tab) ? "is-waiting" : "",
     said === "working" ? "is-streaming" : "",
     tab.color ? "has-color" : "",
   ]

@@ -4305,6 +4305,25 @@
                 </p>
               </details>
             </div>
+            <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-notify-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.notify">알림을 끊을 가치</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.notifySummary">
+                    판이 멈추거나 끝나 시스템 알림을 울리려는 순간마다, 지금 끊을지·다음 참석 때 묶어 한 번에 알릴지·그냥 둘지를 묻습니다.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-notify-select" data-jev-seat="notify"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.notifyHint">
+                  오늘의 규칙표는 보고 있지 않은 판이 멈추거나 끝나면 늘 울립니다. 이 자리는 그 결정 지점에서 사건의 종류(입력 대기·완료·사람이 멈춤·에이전트의 전언), 판 이름, 창에 사람이 있는지, 알림 본문 한 줄(240자), 그 판의 최근 알림 여섯 건과 각각에 1분 안에 돌아왔는지, 지금 기다리는 판 수를 보내 끊기·묶기·무시를 묻습니다. off·shadow·시간 초과·거절이면 오늘 규칙 그대로 울리고, 근거가 서서 auto가 오른 뒤에만 묶기와 무시가 실제 푸시와 탭 표시를 바꿉니다. 묶인 알림은 다음에 창에 손을 대는 순간 하나로 접어 알립니다. 라벨은 사람의 손: 알림 뒤 1분 안에 그 판에 입력하면 끊기가 맞았고, 창에 있으면서 손대지 않았으면 끊지 않는 편이 맞았다고 적습니다.
+                </p>
+              </details>
+            </div>
           </div>
         </div>
         </section>

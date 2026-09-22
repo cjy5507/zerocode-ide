@@ -20367,19 +20367,30 @@ mod tests {
         let core = include_str!("../../../zerocode-core/src/notify.rs");
         let (rules, _) = core.split_once("#[cfg(test)]").unwrap_or((core, ""));
 
-        // Suppression first, cooldown second — as STATEMENTS in that order.
-        let ringing = block_after(shipped, "fn ring_now(");
+        // Suppression first, cooldown second — as STATEMENTS in that order:
+        // the bell asks whether the person is watching and returns before
+        // it walks the last rungs, where the cooldown is spent (t-6043 put
+        // the notify seat between the two; a watched screen is not asked).
+        let ringing = block_after(shipped, "pub(super) fn ring_now(");
         let suppressing = ringing
             .find("notify::suppressed(worktree, &active, focused)")
             .expect("the ring no longer asks whether the person is watching");
-        let cooling = ringing
-            .find(".rings().may_ring(worktree, epoch_ms_now())")
-            .expect("the ring no longer keeps a cooldown");
+        let returning = ringing
+            .find("if watched {\n        return;\n    }")
+            .expect("a watched screen no longer turns the ring back");
+        let last = ringing
+            .find("ring_composed(app, worktree, term, &composed);")
+            .expect("the ring no longer walks the last rungs");
         assert!(
-            suppressing < cooling,
-            "the cooldown is spent before suppression is asked, so watching \
+            suppressing < returning && returning < last,
+            "the last rungs run before suppression is asked, so watching \
              the active screen silences its worktree's next genuine \
              ring:\n{ringing}"
+        );
+        let composed = block_after(shipped, "fn ring_composed(");
+        assert!(
+            composed.contains(".rings().may_ring(worktree, epoch_ms_now())"),
+            "the ring no longer keeps a cooldown:\n{composed}"
         );
 
         // The cooldown's memory is keyed by worktree, not one global stamp.

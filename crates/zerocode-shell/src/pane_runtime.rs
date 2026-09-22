@@ -2620,15 +2620,86 @@ pub(super) fn ring_zo_push(app: &AppHandle, term: TermId, push: &ZoPush) {
 }
 
 pub(super) fn ring_now(app: &AppHandle, notice: RingNotice<'_>) {
-    // Composed before the ladder so the gates below read only the three
-    // facts they need — the worktree, the pane and the kind.
+    // Composed before the ladder so the gates below read only the facts they
+    // need — the worktree, the pane, the kind, and (for the seat) who rang
+    // and whether a person ended the turn.
     let composed = notice.notice();
     let RingNotice {
         worktree,
         term,
+        agent,
         ring,
+        interrupted,
         ..
     } = notice;
+    if !ring_gates_open(app, ring) {
+        return;
+    }
+    let (active, focused) = watching(app);
+    let watched = zerocode_core::notify::suppressed(worktree, &active, focused);
+    // The notify seat is asked HERE — after the switches, before the
+    // cooldown — at the one point today's table decides "ring or not"
+    // (t-6043, `zerocode_core::jev::NOTIFY`). A watched screen is today's
+    // own ignore and is not a question; a cooldown is a rate, not a
+    // judgment. Under `off`, `shadow`, a timeout or a refusal the call is
+    // today's, and the bytes below run exactly as they did before the seat
+    // existed; only an `auto` its own evidence raised lets `batch` hold the
+    // ring for the person's next hand and `ignore` drop it.
+    if !watched {
+        let bell = notify_call::Bell {
+            worktree,
+            term,
+            agent,
+            ring,
+            interrupted,
+            notice: &composed,
+            focused,
+        };
+        match notify_call::call_at_the_bell(app, &bell) {
+            zerocode_core::notify_call::Call::Interrupt => {}
+            zerocode_core::notify_call::Call::Batch => {
+                notify_call::hold(app, &bell);
+                return;
+            }
+            zerocode_core::notify_call::Call::Ignore => {
+                notify_call::hush(app, term, zerocode_core::notify_call::Call::Ignore);
+                return;
+            }
+        }
+    }
+    if watched {
+        return;
+    }
+    ring_composed(app, worktree, term, &composed);
+}
+
+/// The rings the notify seat held, told once at the person's next hand
+/// (t-6043): the folded notice walks the same gates as any bell — the
+/// switches, the watched screen, the cooldown — at the first held ring's
+/// address, and is not asked of the seat again.
+pub(super) fn ring_held(
+    app: &AppHandle,
+    worktree: &str,
+    term: Option<TermId>,
+    ring: zerocode_core::notify::Ring,
+    folded: &zerocode_core::notify::Notice,
+) {
+    if !ring_gates_open(app, ring) {
+        return;
+    }
+    let (active, focused) = watching(app);
+    if zerocode_core::notify::suppressed(worktree, &active, focused) {
+        return;
+    }
+    ring_composed(app, worktree, term, folded);
+}
+
+/// The ladder's first rungs (Orca `notifications.ts:121-131`): the tray's
+/// attention dot before any gate, then the master switch and the kind's
+/// own — whether a hook rings or a lane rings, the same door. The lane bell
+/// going straight past these was the second ill of map P0-14, and a gate
+/// standing at each call site was the cause of it.
+fn ring_gates_open(app: &AppHandle, ring: zerocode_core::notify::Ring) -> bool {
     let state = app.state::<AppState>();
     // 트레이의 주의 점은 어떤 게이트보다도 먼저다 — Orca 자신의 순서
     // (`notifications.ts:113-119`, "before the cooldown/focus/enabled gates
@@ -2649,7 +2720,7 @@ pub(super) fn ring_now(app: &AppHandle, notice: RingNotice<'_>) {
         .document
         .notifications;
     if !preferences.enabled {
-        return;
+        return false;
     }
     // A push the agent sent on purpose is the agent pulling a person toward
     // something to act on — the attention kind, under the attention switch.
@@ -2659,20 +2730,35 @@ pub(super) fn ring_now(app: &AppHandle, notice: RingNotice<'_>) {
     ) && !preferences.agent_attention
         || matches!(ring, zerocode_core::notify::Ring::Completion) && !preferences.agent_completion
     {
-        return;
+        return false;
     }
-    let active = state.active_root().display().to_string();
+    true
+}
+
+/// The two facts the watched-screen rule reads: the active worktree and
+/// whether the main window has focus.
+fn watching(app: &AppHandle) -> (String, bool) {
+    let active = app.state::<AppState>().active_root().display().to_string();
     let focused = app
         .get_webview_window("main")
         .and_then(|window| window.is_focused().ok())
         .unwrap_or(false);
-    if zerocode_core::notify::suppressed(worktree, &active, focused) {
-        return;
-    }
+    (active, focused)
+}
+
+/// The ladder's last rungs: the cooldown, then the OS, then the address a
+/// click comes back to.
+fn ring_composed(
+    app: &AppHandle,
+    worktree: &str,
+    term: Option<TermId>,
+    composed: &zerocode_core::notify::Notice,
+) {
+    let state = app.state::<AppState>();
     if !state.rings().may_ring(worktree, epoch_ms_now()) {
         return;
     }
-    let shown = show_notice(app, &composed);
+    let shown = show_notice(app, composed);
     if shown.is_err() {
         // Once per session, not per ring: a denied permission is one fact.
         static SAID_NO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
