@@ -1758,8 +1758,9 @@ pub const NOTIFY_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 /// wait. A watched screen is today's own ignore and is not a question.
 ///
 /// Under `off`, `shadow`, a timeout or a refusal the bell rings exactly as
-/// today; only an `auto` its own evidence raised lets `batch` and `ignore`
-/// change what the OS shows and what the tab strip marks. A held ring is
+/// today; only a person's `on`, or an `auto` its own evidence raised, lets
+/// `batch` and `ignore` change what the OS shows and what the tab strip
+/// marks. A held ring is
 /// folded with every other held ring into one notice at the person's next
 /// hand on the window (`crate::notify::batched`).
 ///
@@ -1774,7 +1775,7 @@ pub const NOTIFY_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 pub const NOTIFY: JevUse = JevUse {
     id: "notify",
     setting: "jevNotify",
-    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     sends: &[
         Sent {
             at: "/state/pane",
@@ -1990,8 +1991,9 @@ pub const BRANCHING_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 /// `off` is today's walk byte for byte. `shadow` explores nothing: it asks
 /// the same question over the candidates' actions alone, records what it
 /// would have made canonical beside what the emulator seat pressed, and
-/// presses the emulator seat's choice. Only an `auto` this seat's own ledger
-/// raised saves, explores and presses the comparison's pick; a timeout, a
+/// presses the emulator seat's choice. Only a person's `on`, or an `auto`
+/// this seat's own ledger raised, saves, explores and presses the
+/// comparison's pick; a timeout, a
 /// refusal, an answer under [`SCREEN_PRESS_FLOOR_PERMILLE`], a device that
 /// cannot be saved (iOS has no snapshot road) or a fork past its clock all
 /// press the first candidate — the emulator seat's own — as today. A step at
@@ -2011,7 +2013,7 @@ pub const BRANCHING_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 pub const BRANCHING: JevUse = JevUse {
     id: "branching",
     setting: "jevBranching",
-    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     sends: &[
         Sent {
             at: "/state/goal",

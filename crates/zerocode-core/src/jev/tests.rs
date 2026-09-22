@@ -384,9 +384,7 @@ fn the_placement_seats_line_sits_where_its_negatives_are() {
 
 /// Promotion rises from `auto` to acting, so a use that promotes offers
 /// `auto` — and a word that acts once the judge has raised it, which `auto`
-/// itself is. A seat whose only acting word is a raised `auto` (the notify
-/// seat, t-6043: what acts there is evidence, never a person's `on`) still
-/// has somewhere to rise to.
+/// itself is.
 #[test]
 fn a_use_that_promotes_has_somewhere_to_rise_from_and_to() {
     for row in JEV_USES.iter().filter(|row| row.promotes) {
@@ -397,6 +395,34 @@ fn a_use_that_promotes_has_somewhere_to_rise_from_and_to() {
             row.id
         );
     }
+}
+
+/// The seat contract's third rule (corrected after t-6155 F7): the words a
+/// seat offers are read off whether anything labels it. A labeled seat —
+/// one that promotes — offers all four, `on` being a person's explicit
+/// override and `auto` what its own evidence raises; a seat nothing labels
+/// offers `off | shadow | on`, because an `auto` there could never rise and
+/// would be `shadow` under a name that promises otherwise. One rule for
+/// every row, so a new seat cannot pick a third set: the notify and
+/// branching seats had (t-6155 F7).
+#[test]
+fn a_seats_mode_set_is_read_off_whether_anything_labels_it() {
+    let labeled: &[JevMode] = &JevMode::ALL;
+    let unlabeled: &[JevMode] = &[JevMode::Off, JevMode::Shadow, JevMode::On];
+    for row in JEV_USES.iter() {
+        assert_eq!(
+            row.promotes,
+            row.agreement_rows_wanted.is_some(),
+            "{}: a labeled seat names its label sample floor",
+            row.id
+        );
+        let expected = if row.promotes { labeled } else { unlabeled };
+        assert_eq!(row.modes, expected, "{}", row.id);
+    }
+    assert!(
+        JEV_USES.iter().any(|row| !row.promotes),
+        "the rule is exercised on both kinds of seat"
+    );
 }
 
 #[test]
@@ -728,13 +754,11 @@ fn the_compaction_seat_drops_by_relevance_and_rises_on_its_regret_marks() {
 fn the_notify_seat_judges_one_ring_and_rises_on_the_persons_reaction() {
     assert_eq!(jev_use("notify"), Some(&NOTIFY));
     assert_eq!(NOTIFY.setting, "jevNotify");
-    // A labeled seat: off, shadow, auto — and no `on`, because what acts here
-    // is evidence and not a person's word (the seat contract's third rule).
-    assert_eq!(
-        NOTIFY.modes,
-        &[JevMode::Off, JevMode::Shadow, JevMode::Auto]
-    );
-    assert_eq!(NOTIFY.offered("on"), None);
+    // A labeled seat offers the four words every labeled seat offers (the
+    // seat contract's third rule, as corrected after t-6155 F7): `on` is a
+    // person's explicit override, `auto` is what its own evidence raises.
+    assert_eq!(NOTIFY.modes, &JevMode::ALL[..]);
+    assert_eq!(NOTIFY.offered("on"), Some(JevMode::On));
     let sent: Vec<&str> = NOTIFY.sends.iter().map(|sent| sent.at).collect();
     assert_eq!(
         sent,
@@ -777,10 +801,9 @@ fn the_notify_seat_judges_one_ring_and_rises_on_the_persons_reaction() {
     const { assert!(NOTIFY_RECENT_CAP > 0) };
 
     assert!(
-        !NOTIFY.mode_of(Some(&json!("on"))).applies(),
-        "no `on`: it reads as off"
+        NOTIFY.mode_of(Some(&json!("on"))).applies_with(false),
+        "`on` is a person's override: it acts without a rise"
     );
-    assert!(!NOTIFY.mode_of(Some(&json!("on"))).asks());
     assert!(!NOTIFY.mode_of(Some(&json!("auto"))).applies_with(false));
     assert!(NOTIFY.mode_of(Some(&json!("auto"))).applies_with(true));
     assert!(!NOTIFY.mode_of(Some(&json!("shadow"))).applies_with(true));
@@ -1202,16 +1225,13 @@ fn the_branching_seat_forks_a_phone_step_and_rises_on_the_walks_next_step() {
     assert_eq!(jev_use("branching"), Some(&BRANCHING));
     assert_eq!(BRANCHING.setting, "jevBranching");
     assert_eq!(BRANCHING.ledger, "branching.jsonl");
-    // A labeled seat whose acting word is evidence, never a person's `on`:
-    // off, shadow, auto (the seat contract's third rule, as the notify seat).
-    assert_eq!(
-        BRANCHING.modes,
-        &[JevMode::Off, JevMode::Shadow, JevMode::Auto]
-    );
-    assert_eq!(BRANCHING.offered("on"), None);
+    // A labeled seat offers the four words every labeled seat offers (the
+    // seat contract's third rule, as corrected after t-6155 F7).
+    assert_eq!(BRANCHING.modes, &JevMode::ALL[..]);
+    assert_eq!(BRANCHING.offered("on"), Some(JevMode::On));
     assert!(
-        !BRANCHING.mode_of(Some(&json!("on"))).asks(),
-        "no `on`: it reads as off"
+        BRANCHING.mode_of(Some(&json!("on"))).applies_with(false),
+        "`on` is a person's override: it acts without a rise"
     );
     assert!(!BRANCHING.mode_of(Some(&json!("auto"))).applies_with(false));
     assert!(BRANCHING.mode_of(Some(&json!("auto"))).applies_with(true));
