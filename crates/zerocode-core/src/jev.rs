@@ -1,8 +1,9 @@
 //! Jev — TypeSafe's System One — as this product asks it: the one table of
 //! every place that asks (docs/design/jev-settings-20260917.md §2).
 //!
-//! Two programs ask. zo asks about a task it is routing and about the notes a
-//! recall found; the window asks which control a walk should press next — on a
+//! Two programs ask. zo asks about a task it is routing, about the notes a
+//! recall found and about a patch an edit has just written; the window asks
+//! which control a walk should press next — on a
 //! page or on the desktop — about a worker whose pane went quiet, about where
 //! a worker's window belongs, about which agent a summons should start,
 //! about which blocks of a page an agent's browser read should fold away
@@ -2377,8 +2378,151 @@ pub const CHALLENGER: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
 };
 
+/// Characters of the person's words one patch review reads as the task the
+/// patch is for — the routing seat's cap, for the routing seat's reason: the
+/// head of a request is what says what it asks, and a second number on the
+/// same words would be a second answer to how much of a person's work leaves
+/// the machine. Measured on the 1,673 patches this machine's zo sessions wrote
+/// (147 transcripts, their vaults read too, 2026-09-23): the person's newest
+/// words ran to 50 characters at the median — a pasted brief to 6,152 at p90
+/// — and 2,000 held 87.3% of them whole.
+pub const PATCH_REVIEW_TASK_CHAR_CAP: usize = ROUTING_TASK_CHAR_CAP;
+
+/// Bytes of one patch's unified diff a review carries — its hunks with their
+/// context lines, and nothing of the file around them. Measured on the same
+/// 1,673 patches: the rendered hunks ran to 1,037 B at the median, 5,424 B at
+/// p90 and 7,743 B at p95. 8 KiB holds 95.3% of them whole; past it a patch is
+/// a rewrite, and its head is what a review of it can still read.
+pub const PATCH_REVIEW_PATCH_BYTE_CAP: usize = 8 * 1024;
+
+/// Bytes of evidence one review carries: the newest lines of the tool result
+/// the edit followed — a test's output, a read, a search — kept from the end,
+/// because a check prints its verdict last. Measured on the same 1,673
+/// patches: that result ran to 1,399 B at the median and 4,627 B at p90; 4 KiB
+/// holds 88.3% of them whole and the newest lines of the rest.
+pub const PATCH_REVIEW_EVIDENCE_BYTE_CAP: usize = 4 * 1024;
+
+/// How far each of a review's four answers must lean toward the side that lets
+/// a patch stand, per thousand, before the code calls it a `permit` — the
+/// probability that it addresses the task and that the evidence supports it
+/// at least this, and that it carries unrelated changes or needed a question
+/// first at most one minus this (t-6203).
+///
+/// A policy line and not a calibrated accuracy claim: it is the line the
+/// reference harness this seat borrows its four questions from draws
+/// (TypeSafeAI/jev-harness, "0.8, uncalibrated default"), written in this
+/// table's units. It is not [`PATCH_REVIEW_ANSWER_FLOOR_PERMILLE`], which is a
+/// line under how often the SEAT answers at all.
+pub const PATCH_REVIEW_PERMIT_FLOOR_PERMILLE: u16 = 800;
+
+/// What the patch review seat's answers must bound above before `auto` rises
+/// to noting (§4): nine in ten. The orchestration seats' reasoning, reached
+/// from this seat's own side: a review that does not come back costs the edit
+/// nothing — it was written before the question left, and its result reads
+/// as it did before the seat existed. Its own number, because two lines that
+/// coincide are still two policies.
+pub const PATCH_REVIEW_ANSWER_FLOOR_PERMILLE: u16 = 900;
+
+/// The patch review seat's route-change budget (§4): four verdicts in five
+/// must be the ones hindsight then gave ([`PATCH_REVIEW_REGRET_TURNS`]) — a
+/// `permit` on a patch that stood, a `proposal_only` on one that was undone
+/// or fixed again. Held to the same budget as every other seat that takes a
+/// decision off a reader: a note that is wrong one time in five is a note a
+/// model learns to read past.
+pub const PATCH_REVIEW_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
+
+/// The wall a review may hold an edit's result, in milliseconds, when the seat
+/// acts — the latency line the judge holds a rising seat to.
+///
+/// A tool result is what the model is waiting on, so the wall is a screen
+/// question's: one request of four questions over one state, answered at the
+/// wire's measured median of a few hundred milliseconds (280 ms for a screen
+/// question, §2.1). Past it the result goes back as it would have without
+/// the seat. A recording seat never holds the result at all: it asks beside
+/// the turn and writes its row when the answer comes. Its own number, for the
+/// reason every coinciding wall in this table is.
+pub const PATCH_REVIEW_APPLY_DEADLINE_MS: u64 = 1_500;
+
+/// Turns after a reviewed patch inside which editing the same lines of the
+/// same file again — a fix of the fix, or an undo — counts as the patch's
+/// regret (the seat's hindsight label, t-6203).
+///
+/// Five is a policy line, not a measured one, drawn the way
+/// [`COMPACTION_REGRET_TURNS`] is: long enough that the turns which test a
+/// change and repair it are inside it, short enough that the same lines
+/// reworked an hour later for another reason are not charged to a review
+/// that had nothing to do with it. A check that ran green after the turn's
+/// last edit settles the label first — the harness's own receipt (r43).
+pub const PATCH_REVIEW_REGRET_TURNS: u32 = 5;
+
+/// zo's patch review: every patch an edit tool has just written — `edit_file`,
+/// `write_file`, `MultiEdit`, anything whose result carries a structured
+/// patch — put to four Noul questions before the model reads the result
+/// (t-6203; the questions are TypeSafeAI/jev-harness's): does it address the
+/// task, does the evidence support it, does it carry changes the task did not
+/// ask for, should the agent have asked first. One code judgment reads the
+/// four against [`PATCH_REVIEW_PERMIT_FLOOR_PERMILLE`]: `permit`,
+/// `proposal_only`, or `unavailable` when nothing answered.
+///
+/// What is sent is the head of the person's newest words, the patch's hunks
+/// with their context lines, the newest lines of the tool result the edit
+/// followed, and the path's fingerprint ([`fingerprint_of`]) — never the
+/// path, never the file around the hunks.
+///
+/// Nothing blocks. The edit is written before the question leaves: this
+/// product is not a sandbox, and a patch it held back would be one the model
+/// believes it made. Under a person's `on`, or an `auto` its own evidence
+/// raised, a `proposal_only` adds one line to the result the model reads —
+/// which question leaned the wrong way, how far, and what to do about it —
+/// and the row carries the verdict. `shadow` asks beside the turn, records,
+/// and changes neither the result nor its timing. `off` is today's result to
+/// the byte.
+///
+/// The `agreed` rule is hindsight, one label per answered review: the patch
+/// stood when a check ran green after the turn's last edit (the harness's
+/// receipt, which settles it first) or when [`PATCH_REVIEW_REGRET_TURNS`]
+/// turns passed without its lines being edited again; it was regretted when
+/// an edit inside the window touched the same lines of the same file — a fix
+/// of the fix, or an undo. A `permit` agreed when the patch stood, a
+/// `proposal_only` when it was regretted.
+pub const PATCH_REVIEW: JevUse = JevUse {
+    id: "patch_review",
+    setting: "jevPatchReview",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    sends: &[
+        Sent {
+            at: "/state/task",
+            cap: Cap::Chars(PATCH_REVIEW_TASK_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/patch",
+            cap: Cap::Bytes(PATCH_REVIEW_PATCH_BYTE_CAP),
+        },
+        Sent {
+            at: "/state/evidence",
+            cap: Cap::Bytes(PATCH_REVIEW_EVIDENCE_BYTE_CAP),
+        },
+        // A fingerprint the product wrote, cleared like everything else the
+        // door reads: declared so a reader of this table sees every key the
+        // state carries.
+        Sent {
+            at: "/state/path",
+            cap: Cap::Uncut,
+        },
+    ],
+    ledger: "patch-review.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(PATCH_REVIEW_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(PATCH_REVIEW_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(PATCH_REVIEW_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Hindsight,
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 19] = [
+pub static JEV_USES: [JevUse; 20] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -2398,6 +2542,7 @@ pub static JEV_USES: [JevUse; 19] = [
     BRANCHING,
     JUDGMENT_CACHE,
     CHALLENGER,
+    PATCH_REVIEW,
 ];
 
 impl JevUse {
@@ -2590,11 +2735,44 @@ pub fn brief_shape(brief: &str, cap: Cap) -> (String, usize) {
 /// exactly and a reader can group them without ever seeing the words.
 #[must_use]
 pub fn fingerprint_of(words: &str) -> String {
-    Sha256::digest(words.as_bytes())
-        .iter()
-        .take(8)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex_of(&Sha256::digest(words.as_bytes())[..FINGERPRINT_BYTES])
+}
+
+/// The bytes of a SHA-256 a fingerprint keeps: sixteen hex digits, enough to
+/// tell apart everything one ledger names and short enough to read.
+const FINGERPRINT_BYTES: usize = 8;
+
+/// The whole SHA-256, in hex, of what one request was — the seat that asked,
+/// the version of its rubric, the model it asked for, and the body's bytes as
+/// the door let them through (after every withheld line and every cut): a
+/// row's receipt (`requestDigest`, t-6203). Two rows carry the same digest
+/// exactly when the wire was handed the same question, so a replay can check
+/// a recorded answer against the request it answered without the row ever
+/// holding the words.
+///
+/// The same hasher as [`fingerprint_of`], whole rather than cut: a
+/// fingerprint names a thing to group rows by, a digest vouches for bytes.
+/// Each part goes in behind its length (eight bytes, little-endian) — the
+/// version as its decimal digits — so no two different tuples hash as one.
+#[must_use]
+pub fn digest_of(seat: &str, rubric_version: u32, model: &str, request: &[u8]) -> String {
+    let version = rubric_version.to_string();
+    let mut hasher = Sha256::new();
+    for part in [
+        seat.as_bytes(),
+        version.as_bytes(),
+        model.as_bytes(),
+        request,
+    ] {
+        hasher.update((part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    hex_of(&hasher.finalize())
+}
+
+/// Bytes as lowercase hex — the one spelling a fingerprint and a digest share.
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 /// [`fingerprint_of`] a question's defining words — what a rubric version

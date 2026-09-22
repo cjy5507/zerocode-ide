@@ -824,7 +824,7 @@ fn edited_file_paths(summary: &TurnSummary) -> Vec<String> {
 }
 
 pub(super) fn tool_result_path(output: &str) -> Option<String> {
-    let value = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    let value = crate::compact::result_envelope(output)?;
     ["filePath", "path", "file_path"]
         .into_iter()
         .find_map(|key| value.get(key).and_then(serde_json::Value::as_str))

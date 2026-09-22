@@ -317,6 +317,13 @@ where
         self.compaction_seat = seat;
     }
 
+    /// Seat something beside the edit tools that is asked about every patch
+    /// they write, after the write and before the model reads the result —
+    /// and, in the modes that act, answered by one line added to that result.
+    pub fn set_patch_review_seat(&mut self, seat: Option<Arc<dyn crate::PatchReviewSeat>>) {
+        self.patch_review_seat = seat;
+    }
+
     pub fn set_auto_compaction_enabled(&mut self, enabled: bool) {
         self.auto_compaction_enabled = enabled;
         if !enabled {

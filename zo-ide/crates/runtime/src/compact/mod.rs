@@ -907,6 +907,17 @@ fn restore_microcompacted_bodies(
     let _ = swap_placeholders_from(messages, &originals);
 }
 
+/// Every tool result in `messages` that microcompact blanked, put back from
+/// `session`'s vault and persisted snapshot where they still hold its body —
+/// addressed by `tool_use_id`, so no body lands on a result it was not — for
+/// a reader that must see a result as it stood before the clear: a replay
+/// asking what a live seat saw at the moment it was asked (t-6203), when the
+/// clear came later. Images stay as they are, since their only address is
+/// positional.
+pub fn heal_cleared_tool_results(messages: &mut [ConversationMessage], session: &Session) {
+    restore_microcompacted_bodies(messages, session, &[]);
+}
+
 const STATE_DISTILL_MAX_CHARS: usize = 1_600;
 
 /// Build a deterministic, bounded working-state snapshot without removing any
@@ -1750,6 +1761,24 @@ pub fn edited_file_paths(messages: &[ConversationMessage]) -> Vec<String> {
     paths
 }
 
+/// A tool result's envelope: the JSON value its output opens with, and
+/// nothing after it.
+///
+/// What the model reads is not always the tool's own bytes: a hook's context,
+/// a repetition notice or the patch review's note (t-6203) is appended after
+/// the envelope, on the model-facing copy, and a reader that parsed the whole
+/// output strictly read such an edit as no edit at all — a verified-state
+/// ledger that never heard of it, a trace that never listed the file. Every
+/// reader of an edit's envelope reads it through here, so text appended to a
+/// result can never hide the mutation it records.
+#[must_use]
+pub fn result_envelope(output: &str) -> Option<serde_json::Value> {
+    serde_json::Deserializer::from_str(output)
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()
+}
+
 /// Pull the mutated file path out of one edit/write result envelope. Tolerant:
 /// returns `None` for a cleared placeholder, non-JSON, or an envelope without a
 /// recognizable path key.
@@ -1757,7 +1786,7 @@ fn edited_path_from_output(output: &str) -> Option<String> {
     if output == MICROCOMPACT_PLACEHOLDER {
         return None;
     }
-    let value = serde_json::from_str::<serde_json::Value>(output).ok()?;
+    let value = result_envelope(output)?;
     let object = value.as_object()?;
     ["filePath", "path", "file_path"]
         .iter()

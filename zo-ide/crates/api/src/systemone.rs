@@ -133,12 +133,22 @@ impl SystemOneFailure {
     }
 }
 
+/// The criteria key under which a Noul says what its yes means.
+const NOUL_YES: &str = "true";
+
+/// The criteria key under which a Noul says what its no means.
+const NOUL_NO: &str = "false";
+
 /// A question's answer space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SystemOneQuestionKind {
     Choice,
     Score,
+    /// Whether a condition holds, answered as one probability of yes
+    /// (docs.typesafe.ai/primitives/noul) — with no confidence beside it,
+    /// because two outcomes and one number say all there is.
+    Noul,
 }
 
 /// The answer space a question offers, in the shape the contract writes it.
@@ -182,6 +192,26 @@ impl SystemOneQuestion {
                     .map(|(name, description)| (name.to_string(), description.map(str::to_string)))
                     .collect(),
             ),
+        }
+    }
+
+    /// A Noul question: `instructions` say what the condition is, `yes` and
+    /// `no` what each outcome means — the boundary cases a condition alone
+    /// leaves open.
+    ///
+    /// The two criteria keys are the wire's own words for the outcomes. The
+    /// window's wire builds the same object (`zerocode_core::jev::noul`),
+    /// which this crate cannot read, so a contract in a crate that reads both
+    /// holds the two builders to one shape.
+    #[must_use]
+    pub fn noul(instructions: &str, yes: &str, no: &str) -> Self {
+        Self {
+            kind: SystemOneQuestionKind::Noul,
+            instructions: instructions.to_string(),
+            criteria: SystemOneCriteria::Named(BTreeMap::from([
+                (NOUL_YES.to_string(), Some(yes.to_string())),
+                (NOUL_NO.to_string(), Some(no.to_string())),
+            ])),
         }
     }
 

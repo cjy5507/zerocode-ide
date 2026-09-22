@@ -20,6 +20,7 @@ mod fallback;
 mod helpers;
 mod reminders;
 mod repetition;
+mod reviewed_edit;
 mod step_effort;
 mod streaming;
 mod streaming_turn;
@@ -97,6 +98,7 @@ use decision_core::{decide_turn_continuity, TurnContinuity, TurnStopSignal};
 // turn loops call to classify a tool batch. `note_verify_treadmill` (the counter
 // + advisory) is an inherent-impl method, reachable without an import.
 use verify_treadmill::{batch_had_successful_mutation, is_verify_class_tool};
+pub(crate) use verified_state::receipt_in;
 // Refusal/quota-fallback items the sync + streaming turn loops still reference.
 use fallback::{
     is_refusal_stop_reason, overload_demotion_warn, quota_fallback_swap_warn,
@@ -689,6 +691,10 @@ pub struct ConversationRuntime<C, T> {
     /// tool results the summary still needs to read. See
     /// [`crate::CompactionSeat`].
     compaction_seat: Option<Arc<dyn crate::CompactionSeat>>,
+    /// Seated beside the edit tools and asked, once per patch, what it makes
+    /// of the patch before the model reads the result. See
+    /// [`crate::PatchReviewSeat`].
+    patch_review_seat: Option<Arc<dyn crate::PatchReviewSeat>>,
     max_iterations: usize,
     /// Optional wall-clock deadline for the turn. Two callers set it: spawned
     /// sub-agents bound a straggler that overran its caller's wait window, and
@@ -1662,6 +1668,7 @@ where
             memory_retriever: None,
             recall_seat: None,
             compaction_seat: None,
+            patch_review_seat: None,
             max_iterations: default_max_iterations(),
             deadline: None,
             deadline_extension: None,
@@ -2760,6 +2767,10 @@ where
                             tool_start,
                             std::time::Duration::from_secs(10),
                         );
+                        // Kept before any hook merges text into it: the patch
+                        // review seat reads the tool's own envelope (t-6203).
+                        let reviewed = (!is_error && self.reviews_edits_of(&p.tool_name))
+                            .then(|| output.clone());
                         output = merge_hook_feedback(p.pre_hook_result.messages(), output, false);
 
                         let post_hook_result = if is_error {
@@ -2811,6 +2822,14 @@ where
                             is_error,
                             &mut batch_hard_stops,
                         );
+                        if let Some(pristine) = reviewed.filter(|_| !is_error) {
+                            let note = self.reviewed_edit_note_blocking(
+                                &p.tool_use_id,
+                                &p.tool_name,
+                                &pristine,
+                            );
+                            output = reviewed_edit::with_review_note(output, note);
+                        }
 
                         // Drain any images the tool staged (single-threaded: image
                         // tools run on this serial path). Drained unconditionally so

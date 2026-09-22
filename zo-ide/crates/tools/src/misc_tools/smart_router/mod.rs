@@ -9,8 +9,11 @@ mod infer;
 mod jev_gate;
 #[cfg(test)]
 mod jev_mock;
+#[cfg(test)]
+mod replay_support;
 mod mention_rerank;
 mod metadata;
+mod patch_review;
 pub mod jev_summary;
 mod plan_shadow;
 mod planner;
@@ -60,6 +63,10 @@ pub use compaction_seat::{
     CompactionRow, COMPACTION_JUDGMENT_DEADLINE, COMPACTION_OUTCOME_ANSWERED,
     COMPACTION_RELEVANCE_FILE,
 };
+pub use patch_review::{
+    note_patch_review_turn, patch_review_path, PatchReviewJudge, PatchReviewLabelRow, PatchReviewRow,
+    PATCH_REVIEW_DEADLINE, PATCH_REVIEW_FILE, PATCH_REVIEW_OUTCOME_ANSWERED,
+};
 pub use mention_rerank::{
     mention_rerank_path, MentionAnswer, MentionAsk, MentionCandidate, MentionJudged, MentionLabelRow,
     MentionRerank, MentionRerankRow, MentionSurface, MENTION_OUTCOME_ANSWERED, MENTION_RERANK_DEADLINE,
@@ -84,9 +91,9 @@ pub use plan_shadow::{
 pub(crate) use settings::live_agent_model_policy;
 pub use settings::{
     agent_tool_mode_from, decision_shadow_mode_from, jev_compaction_mode_from,
-    jev_mention_rerank_mode_from, rerank_shadow_mode_from, skill_search_mode_from,
-    DecisionShadowMode, AGENT_TOOL_SETTING, DECISION_SHADOW_SETTING, JEV_COMPACTION_SETTING,
-    JEV_MENTION_RERANK_SETTING,
+    jev_mention_rerank_mode_from, jev_patch_review_mode_from, rerank_shadow_mode_from,
+    skill_search_mode_from, DecisionShadowMode, AGENT_TOOL_SETTING, DECISION_SHADOW_SETTING,
+    JEV_COMPACTION_SETTING, JEV_MENTION_RERANK_SETTING, JEV_PATCH_REVIEW_SETTING,
     RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING,
     conversation_anchor_ttl_for, conversation_anchor_ttl_from_root, CACHE_ANCHOR_TTL_ENV,
     smart_deep_tier_models, smart_deep_tier_models_for, smart_exec_swap, smart_setting_defaults,

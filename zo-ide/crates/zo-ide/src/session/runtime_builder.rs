@@ -95,6 +95,9 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         // Seated always; what it may do per compaction — record, or drop —
         // is `smart.jevCompaction`, read at the boundary.
         compaction_seat: Some(Arc::new(tools::CompactionJudge::at(cwd))),
+        // Seated always; what it may do per patch — record, or add a line to
+        // the result — is `smart.jevPatchReview`, read at the edit.
+        patch_review_seat: Some(Arc::new(tools::PatchReviewJudge::at(cwd))),
         mcp_state,
         lsp_state,
     })

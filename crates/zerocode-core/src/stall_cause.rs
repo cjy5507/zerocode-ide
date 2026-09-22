@@ -25,7 +25,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value, json};
 
 use crate::jev::choice::{self, ChoiceRefusal};
-use crate::jev::door::WITHHELD_LINE;
+use crate::jev::door::newest_within;
 use crate::jev::{STALL_SCREEN_BYTE_CAP, STALL_TRANSCRIPT_BYTE_CAP};
 use crate::orchestration::{MessageKind, Run, worker_address};
 
@@ -276,29 +276,6 @@ pub fn transcript_tail(lines: &[String]) -> String {
         .map(|turn| format!("{}: {}", turn.role, crate::transcript::clamp(&turn.text)))
         .collect();
     newest_within(&said, STALL_TRANSCRIPT_BYTE_CAP)
-}
-
-/// The newest `lines`, oldest first, joined by newlines, that fit `cap` bytes
-/// once the Jev door has cleared them. A line is counted at the larger of
-/// itself and the mark that may stand in for it, so the door — which cuts a
-/// text's END to its cap — never has to cut the newest words this kept.
-fn newest_within<S: AsRef<str>>(lines: &[S], cap: usize) -> String {
-    let mut used = 0;
-    let mut start = lines.len();
-    for (at, line) in lines.iter().enumerate().rev() {
-        let cleared = line.as_ref().len().max(WITHHELD_LINE.len());
-        let joined = cleared + usize::from(start < lines.len());
-        if used + joined > cap {
-            break;
-        }
-        used += joined;
-        start = at;
-    }
-    lines[start..]
-        .iter()
-        .map(AsRef::as_ref)
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// What a cause leads to, when it leads anywhere in particular — the mark a

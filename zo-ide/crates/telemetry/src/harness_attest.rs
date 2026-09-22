@@ -93,6 +93,12 @@ pub enum HarnessFeature {
     /// the first row. Declined `off` and `no_key`; failed under the
     /// adapter's token.
     MentionRerank,
+    /// The patch review (`smart.jevPatchReview`, t-6203): every patch an edit
+    /// tool wrote put to four questions before the model reads the result,
+    /// and one line added to that result when a seat that acts did not
+    /// permit it. Declined `off` and the door's refusals; failed under the
+    /// adapter's token.
+    PatchReview,
     /// Per-tool-call reasoning replay on the OpenAI Responses wire — the
     /// items resent ahead of a function call so the model keeps its own chain
     /// of thought across a tool round-trip.
@@ -190,6 +196,7 @@ impl HarnessFeature {
             Self::SkillSearch => "skill_search",
             Self::AgentTool => "agent_tool",
             Self::MentionRerank => "mention_rerank",
+            Self::PatchReview => "patch_review",
             Self::ReasoningReplayCall => "reasoning_replay_call",
             Self::ReasoningReplayTurnFinal => "reasoning_replay_turn_final",
             Self::DesignGuidance => "design_guidance",
@@ -214,6 +221,7 @@ impl HarnessFeature {
             Self::SkillSearch => "skill search (skill judgment)",
             Self::AgentTool => "agent Jev tool (ask/choose/score)",
             Self::MentionRerank => "mention rerank (page judgment)",
+            Self::PatchReview => "patch review (edit judgment)",
             Self::ReasoningReplayCall => "reasoning replay (tool call)",
             Self::ReasoningReplayTurnFinal => "reasoning replay (turn boundary)",
             Self::DesignGuidance => "design guidance reminder",
@@ -255,6 +263,9 @@ impl HarnessFeature {
             Self::MentionRerank => {
                 "requires an @ popup or /resume page of two rows or more, smart.jevMentionRerank on, and TYPESAFE_API_KEY"
             }
+            Self::PatchReview => {
+                "requires an edit_file / write_file / MultiEdit that wrote a patch, smart.jevPatchReview on or shadow, and TYPESAFE_API_KEY"
+            }
             Self::ReasoningReplayCall | Self::ReasoningReplayTurnFinal => {
                 "OpenAI Responses wire only; silent on an Anthropic-only session"
             }
@@ -294,6 +305,7 @@ impl HarnessFeature {
             Self::SkillSearch,
             Self::AgentTool,
             Self::MentionRerank,
+            Self::PatchReview,
             Self::ReasoningReplayCall,
             Self::ReasoningReplayTurnFinal,
             Self::DesignGuidance,

@@ -16854,3 +16854,238 @@ fn the_last_iterations_of_a_budget_ask_for_the_report_and_the_final_one_forbids_
     assert_eq!(open.arm_budget_wrap_up(1), None);
     assert!(open.transient_reminders.iter().all(|r| !r.contains("[zo:budget-wrap-up]")));
 }
+
+/* ---- the patch review seat's seam (t-6203) ---------------------------------- */
+
+/// What `edit_file` hands back for one replaced line of `/ws/src/flag.rs`.
+const REVIEWED_EDIT_OUTPUT: &str = r#"{
+  "filePath": "/ws/src/flag.rs",
+  "oldString": "old",
+  "newString": "new",
+  "structuredPatch": [
+    {
+      "oldStart": 3,
+      "oldLines": 3,
+      "newStart": 3,
+      "newLines": 3,
+      "lines": [
+        " let a = 1;",
+        "-let flag = old;",
+        "+let flag = new;",
+        " let b = 2;"
+      ]
+    }
+  ],
+  "userModified": false,
+  "replaceAll": false,
+  "gitDiff": null
+}"#;
+
+/// A seat that says `note` about every patch it is shown, and keeps what it
+/// was asked.
+struct NotingSeat {
+    note: Option<String>,
+    asked: Arc<Mutex<Vec<crate::PatchAsk>>>,
+}
+
+impl crate::PatchReviewSeat for NotingSeat {
+    fn review(&self, ask: crate::PatchAsk) -> futures_util::future::BoxFuture<'_, crate::PatchReview> {
+        self.asked.lock().expect("asked").push(ask);
+        let note = self.note.clone();
+        Box::pin(async move { crate::PatchReview { note } })
+    }
+}
+
+/// Scripted client: one edit, then a plain word.
+struct EditsOnceClient {
+    calls: usize,
+}
+
+impl ApiClient for EditsOnceClient {
+    fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        self.calls += 1;
+        Ok(if self.calls == 1 {
+            vec![
+                AssistantEvent::ToolUse {
+                    id: "edit-1".to_string(),
+                    name: "edit_file".to_string(),
+                    input: r#"{"path":"src/flag.rs","old_string":"old","new_string":"new"}"#.to_string(),
+                },
+                AssistantEvent::MessageStop,
+            ]
+        } else {
+            vec![AssistantEvent::TextDelta("ok".to_string()), AssistantEvent::MessageStop]
+        })
+    }
+}
+
+/// The edit's result as the session holds it — what the model reads.
+fn reviewed_edit_result(runtime: &ConversationRuntime<EditsOnceClient, StaticToolExecutor>) -> String {
+    runtime
+        .session
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .find_map(|block| match block {
+            ContentBlock::ToolResult { tool_use_id, output, .. } if tool_use_id == "edit-1" => Some(output.clone()),
+            _ => None,
+        })
+        .expect("the edit's result")
+}
+
+fn reviewed_edit_runtime(
+    seat: Option<Arc<dyn crate::PatchReviewSeat>>,
+    fails: bool,
+) -> ConversationRuntime<EditsOnceClient, StaticToolExecutor> {
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        EditsOnceClient { calls: 0 },
+        StaticToolExecutor::new().register("edit_file", move |_| {
+            if fails {
+                Err(ToolError::new("old_string not found in file"))
+            } else {
+                Ok(REVIEWED_EDIT_OUTPUT.to_string())
+            }
+        }),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    runtime.set_patch_review_seat(seat);
+    runtime
+}
+
+/// The synchronous loop's seam: with no seat, or a seat that says nothing,
+/// the result the model reads is the tool's own output to the byte; an acting
+/// seat's line joins it after a blank line, and the edit it follows is still
+/// an edit to every reader of the envelope; a failed edit is never asked
+/// about.
+#[test]
+fn the_patch_review_seat_adds_one_line_to_what_the_model_reads_and_nothing_else() {
+    let _todo_store = HermeticTodoStore::pin();
+    let mut runtime = reviewed_edit_runtime(None, false);
+    runtime.run_turn("rename the flag", None).expect("turn runs");
+    assert_eq!(reviewed_edit_result(&runtime), REVIEWED_EDIT_OUTPUT, "no seat: the tool's own bytes");
+
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let silent: Arc<dyn crate::PatchReviewSeat> = Arc::new(NotingSeat { note: None, asked: Arc::clone(&asked) });
+    let mut runtime = reviewed_edit_runtime(Some(silent), false);
+    runtime.run_turn("rename the flag", None).expect("turn runs");
+    assert_eq!(reviewed_edit_result(&runtime), REVIEWED_EDIT_OUTPUT, "a seat that says nothing");
+    {
+        let asked = asked.lock().expect("asked");
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].task, "rename the flag");
+        assert_eq!(asked[0].tool_use_id, "edit-1");
+        assert_eq!(asked[0].path, "/ws/src/flag.rs");
+        assert_eq!(asked[0].hunks.len(), 1);
+    }
+
+    let note = "[zo:patch-review] unrelated changes 0.82 — narrow the edit to the task or confirm the extra change is wanted.";
+    let noting: Arc<dyn crate::PatchReviewSeat> =
+        Arc::new(NotingSeat { note: Some(note.to_string()), asked: Arc::new(Mutex::new(Vec::new())) });
+    let mut runtime = reviewed_edit_runtime(Some(noting), false);
+    runtime.run_turn("rename the flag", None).expect("turn runs");
+    assert_eq!(reviewed_edit_result(&runtime), format!("{REVIEWED_EDIT_OUTPUT}\n\n{note}"));
+    assert_eq!(
+        crate::compact::edited_file_paths(&runtime.session.messages),
+        vec!["/ws/src/flag.rs".to_string()],
+        "the line after the envelope hides no edit"
+    );
+
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let watching: Arc<dyn crate::PatchReviewSeat> =
+        Arc::new(NotingSeat { note: Some(note.to_string()), asked: Arc::clone(&asked) });
+    let mut runtime = reviewed_edit_runtime(Some(watching), true);
+    runtime.run_turn("rename the flag", None).expect("turn runs");
+    assert!(asked.lock().expect("asked").is_empty(), "a failed edit wrote no patch");
+    assert!(!reviewed_edit_result(&runtime).contains("[zo:patch-review]"));
+}
+
+/// The streaming loop's seam — the one place every result is finalized —
+/// makes the same promise.
+#[test]
+fn the_streaming_loop_adds_the_same_line_and_nothing_else() {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use crate::message_stream::types::{BlockId, RenderBlock};
+    use crate::permission::{
+        PermissionDecision as AsyncPermissionDecision, PermissionError,
+        PermissionPrompter as AsyncPermissionPrompter, PermissionRequest as AsyncPermissionRequest,
+    };
+
+    struct Allow;
+    impl AsyncPermissionPrompter for Allow {
+        fn decide<'a>(
+            &'a self,
+            _request: AsyncPermissionRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<AsyncPermissionDecision, PermissionError>> + Send + 'a>> {
+            Box::pin(async { Ok(AsyncPermissionDecision::Allow) })
+        }
+    }
+
+    struct EditsOnceAsync;
+    impl AsyncApiClient for EditsOnceAsync {
+        fn stream_async<'a>(
+            &'a self,
+            request: ApiRequest,
+            _render_tx: tokio::sync::mpsc::Sender<RenderBlock>,
+            _text_block_id: BlockId,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+            let answered = request.messages.iter().any(|message| message.role == MessageRole::Tool);
+            Box::pin(async move {
+                Ok(if answered {
+                    vec![AssistantEvent::TextDelta("ok".to_string()), AssistantEvent::MessageStop]
+                } else {
+                    vec![
+                        AssistantEvent::ToolUse {
+                            id: "edit-1".to_string(),
+                            name: "edit_file".to_string(),
+                            input: r#"{"path":"src/flag.rs","old_string":"old","new_string":"new"}"#.to_string(),
+                        },
+                        AssistantEvent::MessageStop,
+                    ]
+                })
+            })
+        }
+    }
+
+    let _todo_store = HermeticTodoStore::pin();
+    let note = "[zo:patch-review] needs clarification 0.64 — ask the person before building on this change.";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    for (seat_note, expected) in [
+        (None, REVIEWED_EDIT_OUTPUT.to_string()),
+        (Some(note.to_string()), format!("{REVIEWED_EDIT_OUTPUT}\n\n{note}")),
+    ] {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let mut runtime = reviewed_edit_runtime(
+            Some(Arc::new(NotingSeat { note: seat_note, asked: Arc::clone(&asked) })),
+            false,
+        )
+        .with_async_api_client(Arc::new(EditsOnceAsync));
+        let summary = rt.block_on(async {
+            let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+            tokio::spawn(async move { while render_rx.recv().await.is_some() {} });
+            let prompter: Arc<dyn AsyncPermissionPrompter> = Arc::new(Allow);
+            runtime
+                .run_turn_streaming_maybe_deep("rename the flag", Vec::new(), render_tx, prompter)
+                .await
+                .expect("the turn runs")
+        });
+        let outputs: Vec<&str> = summary
+            .tool_results
+            .iter()
+            .filter_map(|message| match &message.blocks[0] {
+                ContentBlock::ToolResult { output, .. } => Some(output.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outputs, [expected.as_str()]);
+        assert_eq!(asked.lock().expect("asked").len(), 1);
+        assert_eq!(asked.lock().expect("asked")[0].task, "rename the flag");
+    }
+}

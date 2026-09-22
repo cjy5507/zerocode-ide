@@ -4458,6 +4458,26 @@
                 </p>
               </details>
             </div>
+
+            <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-patch_review-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.patch_review">패치 검토</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.patch_reviewSummary">
+                    편집 도구가 쓴 패치를 모델이 결과를 읽기 전에 네 가지 질문으로 검토합니다.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-patch_review-select" data-jev-seat="patch_review"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.patch_reviewHint">
+                  zo의 편집 도구(edit_file·write_file·MultiEdit)가 파일에 패치를 쓰면, 모델이 그 결과를 읽기 전에 Jev에게 네 가지를 묻습니다: 과업을 다루는가, 근거가 뒷받침하는가, 과업이 청하지 않은 변경이 섞였는가, 먼저 사람에게 물었어야 했는가. 사람의 최근 말 앞 2,000자, 패치의 바뀐 줄(8 KiB까지), 편집 직전 도구 출력의 끝 4 KiB, 파일 경로의 지문만 보내고 파일 자체는 보내지 않습니다. 네 답이 모두 패치를 두는 쪽으로 0.8 이상 기울면 허용, 아니면 제안으로 판정하지만 어느 쪽도 편집을 막지 않습니다. off는 오늘과 바이트까지 같고, shadow는 턴 옆에서 묻고 판정을 원장에 적을 뿐 결과와 그 시간은 그대로입니다. on은 사람이 명시적으로 켠 것으로, 허용받지 못한 패치의 결과에 어느 질문이 얼마나 기울었고 무엇을 할지 한 줄을 붙입니다 — 1.5초 안에 답이 없으면 붙이지 않습니다. auto는 사후 라벨(같은 줄을 다섯 턴 안에 다시 고치거나 되돌렸는지, 턴의 마지막 편집 뒤 검사가 통과했는지)로 답한 비율이 열에 아홉, 판정이 맞은 비율이 다섯에 넷을 하한으로 넘긴 뒤에만 그 한 줄을 붙입니다. 보내기는 동의한 워크스페이스에서만 하고, 자격 증명일 수 있는 줄은 보내기 전에 가립니다.
+                </p>
+              </details>
+            </div>
           </div>
         </div>
         </section>

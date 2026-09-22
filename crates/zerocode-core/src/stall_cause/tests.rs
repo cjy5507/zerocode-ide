@@ -5,7 +5,7 @@ use serde_json::json;
 
 use super::*;
 use crate::jev::Cap;
-use crate::jev::door::clear_text;
+use crate::jev::door::{WITHHELD_LINE, clear_text};
 
 /// An answer in the contract's shape: `chosen` with the rest spread evenly.
 fn answered(chosen: &str, confidence: f64) -> Value {
