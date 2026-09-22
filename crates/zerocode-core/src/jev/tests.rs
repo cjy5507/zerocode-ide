@@ -1197,16 +1197,17 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
 /// The judgment cache (t-6132) is a seat with no question of its own: it
 /// sends nothing, presses nothing, and rises on the memo's own comparison —
 /// the remembered choice against the fresh one the wire gave for the same
-/// bytes. A labeled seat: off, shadow, auto, and no `on`.
+/// bytes. A labeled seat: all four words, `on` the person's own.
 #[test]
 fn the_judgment_cache_sends_nothing_and_rises_on_the_memos_own_comparison() {
     assert_eq!(jev_use("judgment_cache"), Some(&JUDGMENT_CACHE));
     assert_eq!(JUDGMENT_CACHE.setting, "jevJudgmentCache");
     assert_eq!(
         JUDGMENT_CACHE.modes,
-        &[JevMode::Off, JevMode::Shadow, JevMode::Auto]
+        &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto]
     );
-    assert_eq!(JUDGMENT_CACHE.offered("on"), None);
+    assert_eq!(JUDGMENT_CACHE.offered("on"), Some(JevMode::On));
+    assert!(JUDGMENT_CACHE.mode_of(Some(&json!("on"))).applies());
     assert!(
         JUDGMENT_CACHE.sends.is_empty(),
         "a memo hit leaves the machine no bytes; there is nothing to cap"
@@ -1234,7 +1235,7 @@ fn the_judgment_cache_sends_nothing_and_rises_on_the_memos_own_comparison() {
         !JUDGMENT_CACHE.permits_press(1.0),
         "the memo presses nothing; the screen seat's own rule reads the remembered confidence"
     );
-    assert!(!JUDGMENT_CACHE.mode_of(Some(&json!("on"))).asks());
+    assert!(JUDGMENT_CACHE.mode_of(Some(&json!("on"))).asks());
     assert!(
         !JUDGMENT_CACHE
             .mode_of(Some(&json!("auto")))

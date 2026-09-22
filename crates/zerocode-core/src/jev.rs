@@ -1964,11 +1964,12 @@ pub const MENTION_RERANK: JevUse = JevUse {
 ///
 /// `off` is today's walk to the byte: no lookup, no memo file, no row.
 /// `shadow` asks the wire as today and records whether the memo would have
-/// agreed. `auto` answers from the memo only once its own comparisons bound
-/// above [`JUDGMENT_CACHE_AGREEMENT_FLOOR_PERMILLE`] over a window
-/// ([`promote`]), and falls back to the wire the moment a remembered body
-/// stops reading. No `on`: what acts here is evidence, never a person's word
-/// (the seat contract's third rule, corrected).
+/// agreed. `on` is the person's own word: a hit answers with no evidence
+/// asked for. `auto` answers from the memo only once its own comparisons
+/// bound above [`JUDGMENT_CACHE_AGREEMENT_FLOOR_PERMILLE`] over a window
+/// ([`promote`]), and either falls back to the wire the moment a remembered
+/// body stops reading (the seat contract's third rule, second correction:
+/// a labeled seat offers all four words).
 ///
 /// The memo's key is the seat the question belongs to and the bytes the door
 /// let through — after every withheld line and every cap — so two questions
@@ -1978,7 +1979,7 @@ pub const MENTION_RERANK: JevUse = JevUse {
 pub const JUDGMENT_CACHE: JevUse = JevUse {
     id: "judgment_cache",
     setting: "jevJudgmentCache",
-    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     sends: &[],
     ledger: "judgment-cache.jsonl",
     promotes: true,
