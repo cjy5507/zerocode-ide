@@ -263,6 +263,11 @@ impl FakeWorld {
     pub(super) fn screen_is(&mut self, screen: Screen) {
         self.screen = Some(screen);
     }
+
+    /// The screen the world stands on now, for a test to change a piece of.
+    pub(super) fn look_now(&self) -> Screen {
+        self.screen.clone().expect("a world that shows a screen")
+    }
 }
 
 impl World for FakeWorld {
@@ -2158,4 +2163,130 @@ fn a_recording_walk_writes_both_guards_and_refuses_nothing() {
             json!(zerocode_core::jev::promote::permille(yes(fixture.walled)))
         );
     }
+}
+
+/// A walk sure of a control at 0.8 presses it when the control is plain and
+/// steps back to the person when the control cannot be taken back — a
+/// delete, a payment, a send (t-6187): the floor for those is nine in ten.
+/// The row names the control's kind either way.
+#[test]
+fn a_destructive_control_at_eight_in_ten_goes_to_the_person_and_a_plain_one_is_pressed() {
+    let sure = |confidence: f64| {
+        FakeJudge::saying(vec![Judged::Chose(ActionChoice {
+            chosen: Chosen::Mark(1),
+            probabilities: BTreeMap::new(),
+            confidence,
+            guard: None,
+        })])
+    };
+    let on = |label: &str| {
+        let mut world = FakeWorld::showing(&[]);
+        world.screen_is(Screen {
+            at: Seen::default(),
+            items: vec![control(1, label), control(2, "닫기")],
+            shows: Vec::new(),
+        });
+        world
+    };
+    for label in [
+        "계정 삭제",
+        "Delete account",
+        "결제하기",
+        "Send",
+        "주문 확정",
+    ] {
+        let mut world = on(label);
+        let walked = run(Mode::On, true, &goal(1), &mut sure(0.8), &mut world);
+        assert!(world.presses.is_empty(), "{label} was pressed at 0.8");
+        let row = walked.rows.last().expect("a row");
+        assert_eq!(
+            row["barred"],
+            json!(Barred::LowConfidence.as_str()),
+            "{label}"
+        );
+        assert_eq!(row["controlKind"], json!("destructive"), "{label}");
+
+        let mut world = on(label);
+        run(Mode::On, true, &goal(1), &mut sure(0.9), &mut world);
+        assert_eq!(world.presses, [1], "{label} at 0.9 is pressed");
+    }
+    for label in ["저장", "다음", "Open settings"] {
+        let mut world = on(label);
+        let walked = run(Mode::On, true, &goal(1), &mut sure(0.8), &mut world);
+        assert_eq!(world.presses, [1], "{label} at 0.8 is pressed");
+        assert_eq!(
+            walked.rows.last().expect("a row")["controlKind"],
+            json!("plain")
+        );
+    }
+}
+
+/// The destructive presses the fixture screens would have seen (t-6187): on
+/// every control of the guard fixtures' twenty-three screens, a walk sure of
+/// that control at each confidence the fixture judges here answer with under
+/// nine in ten. Before, the one floor pressed every one of them at or over a
+/// half; now a destructive one goes to the person and a plain one is pressed
+/// as before. Printed so the report carries the counts; asserted so they
+/// cannot drift from the rule.
+#[test]
+fn the_destructive_presses_under_nine_in_ten_on_the_fixture_screens_before_and_after() {
+    use zerocode_core::guarded::ControlKind;
+    const UNDER_NINE: [f64; 6] = [0.5, 0.55, 0.6, 0.7, 0.8, 0.85];
+    let (mut steps, mut destructive, mut before, mut after, mut plain_kept) = (0, 0, 0, 0, 0);
+    let mut kinds = std::collections::BTreeSet::new();
+    for fixture in INJECTED.iter().chain(CLEAN.iter()).chain(WALLED.iter()) {
+        let screen = fixture.screen();
+        for item in &screen.items {
+            let mark = usize::try_from(item["mark"].as_u64().expect("a mark")).expect("small");
+            let kind = control_kind(&screen, mark);
+            for confidence in UNDER_NINE {
+                steps += 1;
+                let mut world = FakeWorld::showing(&[]);
+                world.screen_is(screen.clone());
+                let mut judge = FakeJudge::saying(vec![Judged::Chose(ActionChoice {
+                    chosen: Chosen::Mark(mark),
+                    probabilities: BTreeMap::new(),
+                    confidence,
+                    guard: None,
+                })]);
+                let walked = run(Mode::On, true, &goal_on(fixture), &mut judge, &mut world);
+                let pressed_now = walked.pressed == 1;
+                // Today's rule was the plain floor for every control.
+                let pressed_before = BROWSER.permits_press(confidence, ControlKind::Plain);
+                if kind == ControlKind::Destructive {
+                    destructive += 1;
+                    before += usize::from(pressed_before);
+                    after += usize::from(pressed_now);
+                    kinds.insert(legend_of(&screen, mark));
+                } else {
+                    plain_kept += usize::from(pressed_now == pressed_before);
+                }
+            }
+        }
+    }
+    println!(
+        "{}",
+        json!({
+            "steps": steps,
+            "destructiveSteps": destructive,
+            "destructiveControls": kinds.len(),
+            "pressedUnderNineBefore": before,
+            "pressedUnderNineAfter": after,
+            "plainStepsUnchanged": plain_kept,
+            "plainSteps": steps - destructive,
+        })
+    );
+    assert_eq!(
+        after, 0,
+        "a destructive control was pressed under nine in ten"
+    );
+    assert_eq!(
+        before, destructive,
+        "the old floor pressed every one of them"
+    );
+    assert_eq!(
+        plain_kept,
+        steps - destructive,
+        "a plain control's press moved"
+    );
 }

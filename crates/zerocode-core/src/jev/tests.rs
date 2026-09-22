@@ -22,14 +22,36 @@ fn screen_press_confidence_is_distinct_from_the_promotion_answer_rate() {
             (-0.1, false),
         ] {
             assert_eq!(
-                seat.permits_press(confidence),
+                seat.permits_press(confidence, crate::guarded::ControlKind::Plain),
                 permitted,
                 "{} {confidence}",
                 seat.id
             );
         }
     }
-    assert!(!ROUTING.permits_press(1.0));
+    assert!(!ROUTING.permits_press(1.0, crate::guarded::ControlKind::Plain));
+}
+
+/// A control a press cannot take back asks nine in ten of every screen seat,
+/// whatever its own press floor (t-6187); a plain one asks that floor. A
+/// seat that presses nothing presses neither.
+#[test]
+fn a_destructive_control_asks_nine_in_ten_of_every_screen_seat() {
+    use crate::guarded::ControlKind::{Destructive, Plain};
+    let destructive = f64::from(SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE) / 1_000.0;
+    for seat in [&BROWSER, &DESKTOP, &EMULATOR, &BRANCHING] {
+        let plain = f64::from(seat.press_floor_permille.expect("a screen seat presses")) / 1_000.0;
+        assert!(plain < destructive, "{}", seat.id);
+        assert!(seat.permits_press(plain, Plain), "{}", seat.id);
+        assert!(!seat.permits_press(plain, Destructive), "{}", seat.id);
+        assert!(
+            !seat.permits_press(destructive - ANSWER_STEP, Destructive),
+            "{}",
+            seat.id
+        );
+        assert!(seat.permits_press(destructive, Destructive), "{}", seat.id);
+    }
+    assert!(!ROUTING.permits_press(1.0, Destructive));
 }
 
 #[test]
@@ -511,7 +533,10 @@ fn the_browser_read_seat_folds_on_its_own_line_and_sends_no_body() {
         BROWSER_READ.press_floor_permille,
         Some(BROWSER_READ_FOLD_FLOOR_PERMILLE)
     );
-    assert!(BROWSER_READ.permits_press(0.7) && !BROWSER_READ.permits_press(0.69));
+    assert!(
+        BROWSER_READ.permits_press(0.7, crate::guarded::ControlKind::Plain)
+            && !BROWSER_READ.permits_press(0.69, crate::guarded::ControlKind::Plain)
+    );
     assert_eq!(
         BROWSER_READ.answer_floor_permille,
         Some(BROWSER_READ_ANSWER_FLOOR_PERMILLE)
@@ -678,7 +703,7 @@ fn the_step_effort_seat_reads_the_turn_like_routing_and_rises_on_its_own_marks()
             .applies_with(true)
     );
     assert!(
-        !ZO_STEP_EFFORT.permits_press(1.0),
+        !ZO_STEP_EFFORT.permits_press(1.0, crate::guarded::ControlKind::Plain),
         "a step judgment presses nothing"
     );
 }
@@ -745,7 +770,7 @@ fn the_compaction_seat_drops_by_relevance_and_rises_on_its_regret_marks() {
             .applies_with(true)
     );
     assert!(
-        !COMPACTION.permits_press(1.0),
+        !COMPACTION.permits_press(1.0, crate::guarded::ControlKind::Plain),
         "a compaction judgment presses nothing"
     );
 }
@@ -812,7 +837,7 @@ fn the_notify_seat_judges_one_ring_and_rises_on_the_persons_reaction() {
     assert!(NOTIFY.mode_of(Some(&json!("auto"))).applies_with(true));
     assert!(!NOTIFY.mode_of(Some(&json!("shadow"))).applies_with(true));
     assert!(
-        !NOTIFY.permits_press(1.0),
+        !NOTIFY.permits_press(1.0, crate::guarded::ControlKind::Plain),
         "a notify judgment presses nothing"
     );
 }
@@ -900,7 +925,7 @@ fn the_mention_seat_reranks_a_fuzzy_page_and_rises_on_the_persons_pick() {
             .applies_with(false)
     );
     assert!(
-        !MENTION_RERANK.permits_press(1.0),
+        !MENTION_RERANK.permits_press(1.0, crate::guarded::ControlKind::Plain),
         "a rerank presses nothing"
     );
 }
@@ -1302,7 +1327,10 @@ fn the_branching_seat_forks_a_phone_step_and_rises_on_the_walks_next_step() {
         BRANCHING.press_floor_permille,
         Some(SCREEN_PRESS_FLOOR_PERMILLE)
     );
-    assert!(BRANCHING.permits_press(0.5) && !BRANCHING.permits_press(0.49));
+    assert!(
+        BRANCHING.permits_press(0.5, crate::guarded::ControlKind::Plain)
+            && !BRANCHING.permits_press(0.49, crate::guarded::ControlKind::Plain)
+    );
     assert_eq!(BRANCHING_APPLY_DEADLINE_MS, 1_500);
 }
 
@@ -1344,7 +1372,7 @@ fn the_judgment_cache_sends_nothing_and_rises_on_the_memos_own_comparison() {
     const { assert!(JUDGMENT_MEMO_DEADLINE_MS < SCREEN_APPLY_DEADLINE_MS) };
     assert_eq!(JUDGMENT_CACHE.window_forgives, Some(FORGIVES_NOTHING));
     assert!(
-        !JUDGMENT_CACHE.permits_press(1.0),
+        !JUDGMENT_CACHE.permits_press(1.0, crate::guarded::ControlKind::Plain),
         "the memo presses nothing; the screen seat's own rule reads the remembered confidence"
     );
     assert!(JUDGMENT_CACHE.mode_of(Some(&json!("on"))).asks());

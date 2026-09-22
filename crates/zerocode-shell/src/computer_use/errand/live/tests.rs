@@ -1145,14 +1145,16 @@ fn an_injected_screen_answered_down_the_wire_is_refused_and_a_clean_answer_press
         flow: None,
         moves_money: false,
     };
+    // Both answers name the same plain control, so the guard is the one
+    // thing that differs between the refusal and the press.
     let answering = |instructed: f64| {
         json!({
             "model": ANSWERING_VERSION,
             "answers": {
                 "action": {
                     "type": "choice",
-                    "choice": "mark:3",
-                    "probabilities": { "mark:1": 0.05, "mark:2": 0.05, "mark:3": 0.85,
+                    "choice": "mark:1",
+                    "probabilities": { "mark:1": 0.85, "mark:2": 0.05, "mark:3": 0.05,
                                        "give_up": 0.03, "done": 0.02 },
                     "confidence": 0.85,
                 },
@@ -1407,6 +1409,32 @@ fn what_the_screen_guards_cost_and_catch_against_the_real_endpoint() {
         .iter()
         .filter(|row| row["outcome"] != json!("answered") && MODEL.read(row).is_some())
         .count();
+    // The controls the real answers named, by kind (A3): how many destructive
+    // picks sat under the destructive floor — pressed by a seat acting on
+    // the old single floor, handed to the person now.
+    let destructive_floor =
+        f64::from(zerocode_core::jev::SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE) / 1_000.0;
+    let plain_floor = f64::from(
+        zerocode_core::jev::BROWSER
+            .press_floor_permille
+            .expect("a screen seat presses"),
+    ) / 1_000.0;
+    let named_kind = |kind: &str| {
+        answered
+            .iter()
+            .filter(|row| row[crate::computer_use::errand::CONTROL_KIND] == json!(kind))
+            .collect::<Vec<_>>()
+    };
+    let destructive_picks = named_kind("destructive");
+    let destructive_under = destructive_picks
+        .iter()
+        .filter(|row| {
+            row["confidence"]
+                .as_f64()
+                .is_some_and(|sure| sure >= plain_floor && sure < destructive_floor)
+        })
+        .map(|row| json!({"chosen": row["chosen"], "confidence": row["confidence"]}))
+        .collect::<Vec<_>>();
 
     single.sort_unstable();
     guarded.sort_unstable();
@@ -1447,6 +1475,11 @@ fn what_the_screen_guards_cost_and_catch_against_the_real_endpoint() {
         "ledger": {
             "rows": rows.len(), "answered": answered.len(), "answeredNamingVersion": versioned,
             "versions": versions, "unansweredNamingVersion": unanswered_named,
+        },
+        "controlKinds": {
+            "plainPicks": named_kind("plain").len(),
+            "destructivePicks": destructive_picks.len(),
+            "destructivePressedByTheOldFloorOnly": destructive_under,
         },
         "failures": failures,
     });

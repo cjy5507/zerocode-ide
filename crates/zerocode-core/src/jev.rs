@@ -444,6 +444,22 @@ pub const SCREEN_PRESS_FLOOR_PERMILLE: u16 = 500;
 /// their own two lines — the state is charged once.
 pub const SCREEN_INSTRUCTED_FLOOR_PERMILLE: u16 = 700;
 
+/// What a seat's answer must reach, per thousand, before it presses a
+/// control that cannot be taken back — one that pays, moves money, deletes,
+/// sends, submits or settles something ([`crate::guarded::kind_of`], t-6187):
+/// nine in ten, where a plain control asks the seat's own press floor.
+///
+/// A policy line, not a calibrated accuracy claim, like
+/// [`SCREEN_PRESS_FLOOR_PERMILLE`] — the line the vendor's own guide draws
+/// for destructive actions (reads at a half, destructive at nine in ten), and
+/// the one this table already asks of a seat's answers before it may act at
+/// all ([`SCREEN_ANSWER_FLOOR_PERMILLE`]). A plain press the walk gets wrong
+/// costs one more press; a delete or a payment it gets wrong is the person's
+/// to undo, if it can be undone. Under this line the walk does what it does
+/// with any answer under its floor: the second reader, when it was handed
+/// one, or the person.
+pub const SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE: u16 = 900;
+
 /// What a screen seat's answers must bound above before `auto` rises to
 /// pressing (docs/design/jev-seats-accuracy-wave-20260921.md §4): nine in ten.
 ///
@@ -2266,12 +2282,23 @@ pub static JEV_USES: [JevUse; 18] = [
 ];
 
 impl JevUse {
-    /// Whether a validated screen choice meets this seat's press policy.
+    /// Whether a validated screen choice meets this seat's press policy for
+    /// a control of `kind`: the seat's own press floor for a plain one, and
+    /// never less than [`SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE`] for one a
+    /// press cannot take back (t-6187). A seat with no press floor presses
+    /// nothing, of either kind.
     #[must_use]
-    pub fn permits_press(&self, confidence: f64) -> bool {
-        self.press_floor_permille.is_some_and(|floor| {
-            (0.0..=1.0).contains(&confidence) && confidence >= f64::from(floor) / 1_000.0
-        })
+    pub fn permits_press(&self, confidence: f64, kind: crate::guarded::ControlKind) -> bool {
+        self.press_floor_permille
+            .map(|floor| match kind {
+                crate::guarded::ControlKind::Plain => floor,
+                crate::guarded::ControlKind::Destructive => {
+                    floor.max(SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE)
+                }
+            })
+            .is_some_and(|floor| {
+                (0.0..=1.0).contains(&confidence) && confidence >= f64::from(floor) / 1_000.0
+            })
     }
 
     /// The mode `value` names for this use: one of this use's own words,

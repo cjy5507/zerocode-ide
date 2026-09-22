@@ -52,6 +52,7 @@ use serde_json::{Value, json};
 use zerocode_core::branching::{BranchAsk, NextStep};
 use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
+use zerocode_core::guarded::{ControlKind, kind_of};
 use zerocode_core::jev::promote::SEAT_RECORDING;
 use zerocode_core::jev::summary::{AGREED, AT, CACHED, ELAPSED_MS};
 use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APPLY_DEADLINE_MS};
@@ -644,6 +645,11 @@ const USE_FALLBACK: &str = zerocode_core::jev::ROUTE_USE_FALLBACK;
 /// in cannot come to spell it differently.
 pub(crate) const REASON: &str = "reason";
 
+/// The key a row names the kind of control its judgment named under
+/// ([`ControlKind::word`], t-6187): what the press rule read, and what a
+/// later reader counts destructive presses by.
+pub(crate) const CONTROL_KIND: &str = "controlKind";
+
 /// The key a row says under which way a judgment begun ahead of the walk
 /// went ([`Options::overlap`]), and its two words: the walk asked the very
 /// question and used the answer, or the next look asked another and the
@@ -1092,6 +1098,18 @@ fn walk(
             }
         };
         note(&mut said, "chosen", json!(format!("mark:{chosen}")));
+        // The control the judgment named, by kind, on every row that names
+        // one — recording or acting — and whether the one press rule lets it
+        // go (t-6187).
+        let (permitted, kind) = press_rule(
+            press_policy,
+            before
+                .as_ref()
+                .expect("the screen this walk just looked at"),
+            chosen,
+            choice.confidence,
+        );
+        note(&mut said, CONTROL_KIND, json!(kind.word()));
 
         // A seat that is not acting records what it would have pressed and
         // presses nothing — and says so, in the word the stand itself is
@@ -1130,7 +1148,7 @@ fn walk(
         // The second reader's own answer, when it pressed: the ranking a
         // forked step reads its candidates off, in place of the seat's.
         let mut rescued_by: Option<ActionChoice> = None;
-        if !press_policy.permits_press(choice.confidence) {
+        if !permitted {
             let seen = before
                 .as_ref()
                 .expect("the screen this walk just looked at");
@@ -1174,6 +1192,11 @@ fn walk(
                     chosen = mark;
                     note(&mut said, RESCUED_BY, json!(RESCUED_BY_TEAM));
                     note(&mut said, "chosen", json!(format!("mark:{mark}")));
+                    note(
+                        &mut said,
+                        CONTROL_KIND,
+                        json!(control_kind(seen, mark).word()),
+                    );
                 }
                 None => {
                     if options.rescue && rescue.is_some() {
@@ -1345,13 +1368,28 @@ fn second_rung(policy: &JevUse, seen: &Screen, answered: &Judged) -> (String, Op
         Judged::Chose(second) => match second.chosen {
             Chosen::GiveUp => (zerocode_core::screen_action::GIVE_UP.to_string(), None),
             Chosen::Done => (zerocode_core::screen_action::DONE.to_string(), None),
-            Chosen::Mark(_) if !policy.permits_press(second.confidence) => {
+            Chosen::Mark(mark) if !press_rule(policy, seen, mark, second.confidence).0 => {
                 (Barred::LowConfidence.as_str().to_string(), None)
             }
             Chosen::Mark(mark) if presses_a_link(seen, mark) => ("link".to_string(), None),
             Chosen::Mark(mark) => ("pressed".to_string(), Some(mark)),
         },
     }
+}
+
+/// The one press rule every press of a walk passes — the seat's own answer,
+/// a second reader's, a fork's pick (t-6187): the seat's floor for a plain
+/// control, nine in ten for one a press cannot take back
+/// ([`JevUse::permits_press`]). The control's kind comes back for the row.
+fn press_rule(policy: &JevUse, seen: &Screen, mark: usize, confidence: f64) -> (bool, ControlKind) {
+    let kind = control_kind(seen, mark);
+    (policy.permits_press(confidence, kind), kind)
+}
+
+/// The kind of the control `mark` names on `seen`, read off the legend line
+/// the question offered it under ([`kind_of`]).
+fn control_kind(seen: &Screen, mark: usize) -> ControlKind {
+    kind_of(&legend_of(seen, mark))
 }
 
 /// The control `mark` names on `seen`, as the legend named it — what a walk
