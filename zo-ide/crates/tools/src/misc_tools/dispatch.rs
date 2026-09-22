@@ -17,7 +17,7 @@ use super::smart_router::{
 };
 use super::{
     from_value, maybe_enforce_permission_check, run_agent, run_ask_user_question, run_audit,
-    run_config, run_council, run_enter_plan_mode, run_exit_plan_mode, run_list_agents,
+    run_config, run_council, run_enter_plan_mode, run_exit_plan_mode, run_jev, run_list_agents,
     run_memory_write, run_push_notification,
     run_monitor, run_notebook_edit, run_remote_trigger, run_retrieve_tool_output,
     run_schedule_wakeup, run_send_message, run_send_to_user, run_session_recall,
@@ -25,7 +25,7 @@ use super::{
     run_stop_agent,
     run_structured_output, run_synthetic_output, run_tool_search,
     AgentInput, AskUserQuestionInput, ConfigInput, CouncilInput, EnterPlanModeInput,
-    ExitPlanModeInput, MemoryWriteInput, MonitorInput, NotebookEditInput, RemoteTriggerInput,
+    ExitPlanModeInput, JevInput, MemoryWriteInput, MonitorInput, NotebookEditInput, RemoteTriggerInput,
     ListAgentsInput, PushNotificationInput, RetrieveToolOutputInput, ScheduleWakeupInput, SendMessageInput, SendToUserInput,
     SessionRecallInput,
     SkillDistillInput, SkillInput, SkillLoadInput, SkillReviewInput, SkillSearchInput,
@@ -506,6 +506,7 @@ pub(crate) fn dispatch(
             from_value::<PushNotificationInput>(input)
                 .and_then(|inp| run_push_notification(&inp, ctx)),
         ),
+        "Jev" => Some(from_value::<JevInput>(input).and_then(|inp| run_jev(&inp, ctx))),
         "SyntheticOutput" => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 from_value::<SyntheticOutputInput>(input)

@@ -44,6 +44,11 @@ pub use smart_router::{
     RERANK_SHADOW_SETTING, ROUTE_STOOD,
 };
 pub use smart_router::{
+    agent_tool_mode_from, agent_tool_path, jev_decide, AgentToolRow, JevAnswer, JevCaller, JevInvalid,
+    JevQuestion, JevShape, JevVerdict, ScoredItem, AGENT_TOOL_FILE, AGENT_TOOL_OUTCOME_ANSWERED,
+    AGENT_TOOL_SETTING,
+};
+pub use smart_router::{
     note_loaded_skill, note_search_answer, skill_search, skill_search_mode_from,
     skill_search_path,
     Chosen, Searched, SkillLabelRow, SkillSearchRow,
@@ -170,6 +175,24 @@ pub(crate) const AGENT_RESULT_RELAY_CHARS: usize = 16_000;
 #[derive(Debug, Deserialize)]
 pub(crate) struct SendToUserInput {
     pub message: String,
+}
+
+/// `Jev`'s input (t-6040): which of the three questions, the question itself,
+/// and the parts each shape reads — `context` for `ask` and `choose`,
+/// `options` for `choose`, `levels` and `items` for `score`. The check is the
+/// seat's own ([`JevQuestion::new`]), the same one `zo jev` runs.
+#[derive(Debug, Deserialize)]
+pub(crate) struct JevInput {
+    pub shape: JevShape,
+    pub question: String,
+    #[serde(default)]
+    pub context: Option<String>,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub levels: Vec<String>,
+    #[serde(default)]
+    pub items: Vec<String>,
 }
 
 /// `PushNotification`'s input — Claude Code's shape verbatim: a message and
@@ -850,6 +873,21 @@ pub(crate) fn run_skill_search(
         ctx.note_artifact_skill_read(std::path::Path::new(&skill.path));
     }
     to_pretty_json(&output)
+}
+
+/// Put an agent's own question to the Jev seat, on the road this project's
+/// switch names, and print the verdict — the same struct `zo jev` renders.
+pub(crate) fn run_jev(input: &JevInput, ctx: &ToolContext) -> Result<String, ToolError> {
+    let question = JevQuestion::new(
+        input.shape,
+        &input.question,
+        input.context.as_deref(),
+        &input.options,
+        &input.levels,
+        &input.items,
+    )
+    .map_err(|refused| ToolError::InvalidInput(refused.0))?;
+    to_pretty_json(jev_decide(&tool_cwd(ctx), JevCaller::Tool, &question))
 }
 
 pub(crate) fn run_skill_load(

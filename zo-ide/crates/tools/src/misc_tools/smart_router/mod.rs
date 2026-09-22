@@ -1,3 +1,4 @@
+mod agent_tool;
 mod apply;
 mod canonical;
 mod decision_report;
@@ -5,6 +6,8 @@ mod decision_shadow;
 mod evidence;
 mod infer;
 mod jev_gate;
+#[cfg(test)]
+mod jev_mock;
 mod metadata;
 pub mod jev_summary;
 mod plan_shadow;
@@ -23,6 +26,10 @@ mod turn;
 #[cfg(test)]
 mod tests;
 
+pub use agent_tool::{
+    agent_tool_path, decide as jev_decide, AgentToolRow, JevAnswer, JevCaller, JevInvalid,
+    JevQuestion, JevShape, JevVerdict, ScoredItem, AGENT_TOOL_FILE, AGENT_TOOL_OUTCOME_ANSWERED,
+};
 pub(crate) use apply::{
     apply_smart_models_to_spawn_input_with_auto_types, route_source_label, smart_parent_model_for_agent,
     smart_parent_model_for_agent_with_auto_type,
@@ -63,8 +70,9 @@ pub use plan_shadow::{
 };
 pub(crate) use settings::live_agent_model_policy;
 pub use settings::{
-    decision_shadow_mode_from, rerank_shadow_mode_from, skill_search_mode_from,
-    DecisionShadowMode, DECISION_SHADOW_SETTING, RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING,
+    agent_tool_mode_from, decision_shadow_mode_from, rerank_shadow_mode_from,
+    skill_search_mode_from, DecisionShadowMode, AGENT_TOOL_SETTING, DECISION_SHADOW_SETTING,
+    RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING,
     conversation_anchor_ttl_for, conversation_anchor_ttl_from_root, CACHE_ANCHOR_TTL_ENV,
     smart_deep_tier_models, smart_deep_tier_models_for, smart_exec_swap, smart_setting_defaults,
     smart_turn_routing_and_inventory_for, smart_turn_routing_for, DeepTierModelsSetting,

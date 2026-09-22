@@ -825,3 +825,61 @@ fn only_auto_changes_its_mind_when_the_judge_speaks() {
     assert!(JevMode::On.applies_with(false));
     assert!(!JevMode::Shadow.applies_with(true));
 }
+
+/// The seat an agent asks on purpose (t-6040): a tool and a CLI, never a
+/// stage of the product's own. It names the wire's own bounds for what one
+/// question may carry, offers no `auto` — nothing labels it, so `auto` could
+/// never rise and would be `shadow` under a name that promises otherwise —
+/// and never promotes, so every rise line on its row is empty.
+#[test]
+fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
+    let row = jev_use(AGENT_TOOL.id).expect("the agent tool row");
+    assert_eq!(row.id, "agent_tool");
+    assert_eq!(row.setting, "agentTool");
+    assert_eq!(row.modes, &[JevMode::Off, JevMode::Shadow, JevMode::On]);
+    assert!(!row.promotes);
+    assert_eq!(row.answer_floor_permille, None);
+    assert_eq!(row.agreement_floor_permille, None);
+    assert_eq!(row.apply_deadline_ms, None);
+    assert_eq!(row.window_forgives, None);
+    assert_eq!(row.agreement_rows_wanted, None);
+    assert_eq!(row.press_floor_permille, None);
+
+    // What one question may carry: the caller's words, every one of them
+    // cleared and cut where the door reads them.
+    let at: Vec<&str> = row.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(
+        at,
+        vec![
+            "/state/question",
+            "/state/context",
+            "/state/items",
+            "/state/items/*",
+            "/questions/*/criteria/*",
+        ]
+    );
+    for sent in row.sends {
+        match sent.at {
+            "/state/items" => assert_eq!(sent.cap, Cap::Items(SKILL_SHARD_TARGET)),
+            _ => assert_eq!(
+                sent.cap,
+                Cap::Chars(AGENT_TOOL_TEXT_CHAR_CAP),
+                "{}",
+                sent.at
+            ),
+        }
+    }
+    assert_eq!(AGENT_TOOL_TEXT_CHAR_CAP, ROUTING_TASK_CHAR_CAP);
+    // The wire's own ceilings (docs.typesafe.ai: a choice takes up to 255
+    // options, a score between two and ten levels), spelled once here.
+    assert_eq!(AGENT_TOOL_OPTION_CAP, 255);
+    assert_eq!(AGENT_TOOL_LEVELS, 2..=10);
+    assert_eq!(
+        AGENT_TOOL_ITEM_CAP % SKILL_SHARD_TARGET,
+        0,
+        "items are even shards"
+    );
+    assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
+    assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
+    assert_eq!(JEV_USES.len(), 12);
+}

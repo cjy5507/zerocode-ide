@@ -91,6 +91,11 @@ pub use hunk_attribution::{
 pub use misc_tools::agent_store_dir;
 pub use misc_tools::jev_summary;
 pub use misc_tools::{
+    agent_tool_mode_from, agent_tool_path, jev_decide, AgentToolRow, JevAnswer, JevCaller,
+    JevInvalid, JevQuestion, JevShape, JevVerdict, ScoredItem, AGENT_TOOL_FILE,
+    AGENT_TOOL_OUTCOME_ANSWERED, AGENT_TOOL_SETTING,
+};
+pub use misc_tools::{
     basis_points, check_system_one, decision_shadow_mode_from, decision_shadow_path,
     evaluate_decision_labels, note_recall_read, note_route_followed, read_shadow_rows,
     rerank_shadow_mode_from, rerank_shadow_path, route_unseated_by, summarize_decision_shadow,

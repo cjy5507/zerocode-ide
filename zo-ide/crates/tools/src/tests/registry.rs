@@ -991,3 +991,67 @@ fn push_notification_schema_is_measured_and_deferred() {
          lookup should cost"
     );
 }
+
+/// The agent tool seat's door (t-6040) sits behind `ToolSearch` like
+/// `PushNotification`: off the wire, named in the manifest with its hook,
+/// still run by name — and, with no switch set, it runs to a verdict that
+/// says `off` without touching the network.
+#[test]
+fn jev_is_deferred_still_answers_by_name_and_is_off_until_a_person_says_so() {
+    // A config home with no `smart.agentTool`: the seat reads `off`, so the
+    // call below sends nothing whatever this machine's own settings say.
+    let home = tempfile::tempdir().expect("a config home");
+    let _env = super::EnvGuard::set(core_types::paths::ZO_CONFIG_HOME_ENV, &home.path().to_string_lossy())
+        .set_also("ZO_HOME", home.path())
+        .set_also("HOME", home.path());
+    let registry = GlobalToolRegistry::builtin();
+    let advertised: std::collections::BTreeSet<String> =
+        registry.definitions(None).into_iter().map(|definition| definition.name).collect();
+    assert!(!advertised.contains("Jev"), "the wire is full; it stays deferred");
+    let manifest = crate::deferred_tool_manifest_section();
+    assert!(manifest.contains("Jev (typed judge)"), "{manifest}");
+    let found = registry.search("select:Jev", 3, None, None);
+    assert!(found.schemas.iter().any(|schema| schema.name == "Jev"));
+
+    let refused = registry
+        .execute("Jev", &serde_json::json!({"shape": "choose", "question": "which?", "options": ["only"]}))
+        .expect_err("one option is not a choice");
+    assert!(matches!(refused, super::ToolError::InvalidInput(ref why) if why == "choose needs at least two options"), "{refused:?}");
+
+    let receipt = registry
+        .execute("Jev", &serde_json::json!({"shape": "ask", "question": "Is the sky blue?", "context": "It is noon."}))
+        .expect("a deferred tool still runs by name");
+    let receipt: serde_json::Value = serde_json::from_str(&receipt).expect("a JSON verdict");
+    assert_eq!(receipt["outcome"], "off");
+    assert_eq!(receipt["routeUse"], "off");
+    assert_eq!(receipt.get("answer"), None);
+    assert_eq!(receipt["requests"], 0);
+}
+
+/// The wire seat `Jev` would take, measured the way the harness budget
+/// measures every schema, and pinned from above — the number is printed so a
+/// re-measure is one `--nocapture` away.
+#[test]
+fn jev_schema_is_measured_and_deferred() {
+    const WIRE_SEAT_TOKENS: u64 = 60;
+    const CEILING_TOKENS: u64 = 260;
+    let definition = GlobalToolRegistry::builtin()
+        .definitions(Some(&std::iter::once("Jev".to_string()).collect()))
+        .into_iter()
+        .find(|definition| definition.name == "Jev")
+        .expect("the definition resolves when named");
+    let json = serde_json::to_string(&serde_json::json!({
+        "name": definition.name,
+        "description": definition.description,
+        "input_schema": definition.input_schema,
+    }))
+    .expect("serializable");
+    let chars = json.chars().count();
+    let est_tokens = (chars / 4 + 1) as u64;
+    eprintln!("Jev schema: {chars} chars ≈ {est_tokens} tokens (chars/4 + 1)");
+    assert!(
+        est_tokens > WIRE_SEAT_TOKENS,
+        "the schema now fits a {WIRE_SEAT_TOKENS}-token wire seat ({est_tokens}); the deferral deserves a second look"
+    );
+    assert!(est_tokens <= CEILING_TOKENS, "the schema grew to {est_tokens} tokens — past the {CEILING_TOKENS} a deferred lookup should cost");
+}

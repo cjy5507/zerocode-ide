@@ -356,6 +356,21 @@ pub fn skill_search_mode_from(loader: &runtime::ConfigLoader) -> Option<Decision
     merged_settings_root_from(loader).map(|root| zerocode_core::jev::SKILLS.mode_in(&root))
 }
 
+/// `smart.agentTool`: whether an agent's own question — zo's `Jev` tool, `zo
+/// jev ask|choose|score` — is put to a System One judgment (t-6040). Its own
+/// switch, because it sends something else off the machine again: not the
+/// product's words about a task, but whatever an agent chose to ask, and
+/// consent to one is not consent to the other.
+pub const AGENT_TOOL_SETTING: &str = zerocode_core::jev::AGENT_TOOL.setting;
+
+/// `smart.agentTool` from the settings `loader` merges, on the same terms as
+/// [`decision_shadow_mode_from`]. `on` hands the answer to the agent; `shadow`
+/// asks, writes the row and hands over nothing; `off` sends nothing.
+#[must_use]
+pub fn agent_tool_mode_from(loader: &runtime::ConfigLoader) -> Option<DecisionShadowMode> {
+    merged_settings_root_from(loader).map(|root| zerocode_core::jev::AGENT_TOOL.mode_in(&root))
+}
+
 /// The plan scorer's knobs (`smart.plan.*`). While the scorer runs in shadow
 /// it decides nothing; these only shape what the shadow ledger records, so a
 /// later comparison reads the thresholds the live scorer would use.
