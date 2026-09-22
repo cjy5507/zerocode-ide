@@ -510,11 +510,11 @@ const DEFERRED_TOOL_HOOKS: &[(&str, &str)] = &[
     ("Jev", "typed judge"),
     (
         "find_symbol",
-        "Use find_symbol/find_references/file_outline when grep lacks structure.",
+        "find_symbol/find_references/file_outline: structure grep lacks.",
     ),
     (
         "WebSearch",
-        "Use WebSearch/WebFetch for stale or external facts.",
+        "WebSearch/WebFetch: stale or external facts.",
     ),
     (
         "WorkerCreate",
