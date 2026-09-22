@@ -64,6 +64,7 @@ tools-test:
     python3 tools/tests/test_jev_token_diet_baseline.py
     python3 tools/tests/test_hedge_replay_seed.py
     python3 tools/tests/test_claude_code_panel_rules.py
+    python3 tools/tests/test_codegraph_bench.py
 
 # The native helpers' own tests (Swift, 178 + 5 on 2026-09-21): the pure Core
 # the Computer Use helper's main.swift calls and the case tables it shares with
