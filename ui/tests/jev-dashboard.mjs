@@ -88,7 +88,11 @@ function jevDashboardFixture(real = null) {
       seat.rowsToNextJudgment = 10;
       seat.judged = { window: counted(34, 34), windowWanted: 34,
         agreement: { compared: 44, agreed: 16, lowerBound: 0.24, controlRows: 0 } };
-      seat.verdict = { verdict: "hold", line: "answered" };
+      // The id asked and the version that answered, and the version a change
+      // of version cut away (t-6187) — what the why column and the card say.
+      seat.askedModel = "jev-latest";
+      seat.model = "jev-1.13.0";
+      seat.verdict = { verdict: "hold", line: "answered", cutModel: "jev-1.12.0" };
       seat.days = days([null, 0.9, 1, 0.8, null, 1, 0.96]);
       seat.recent = args?.recent ? decisions(Math.min(args.recent, 5)) : [];
     }
@@ -381,6 +385,11 @@ export async function testJevDashboard(browser, origin, ok) {
         && opened.summon.why.includes("직접 켜서") && opened.summon.why.includes("답한 비율이 모자랍니다")
         && opened.recallWhy.includes("승격하지 않습니다"),
       JSON.stringify({ summon: opened.summon.why, recall: opened.recallWhy }));
+    ok("the why column and the card name the id asked and the version that answered, and the version cut away",
+      opened.summon.why.includes("물은 jev-latest · 답한 jev-1.13.0") && opened.summon.why.includes("jev-1.12.0 행은 창에서 뺌")
+        && (opened.cardLine ?? "").includes("물은 jev-latest · 답한 jev-1.13.0 · 창 안 34행 · jev-1.12.0 행은 창에서 뺌")
+        && !opened.recallWhy.includes("물은"),
+      JSON.stringify({ why: opened.summon.why, card: opened.cardLine, recall: opened.recallWhy }));
     ok("the trend has one point per counted day and none for a day nothing was asked",
       opened.summon.sparks.join(",") === "5,5,5" && opened.quiet.sparks.join(",") === "0,0,0",
       JSON.stringify({ summon: opened.summon.sparks, quiet: opened.quiet.sparks }));

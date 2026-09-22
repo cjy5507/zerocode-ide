@@ -28,7 +28,6 @@ use zerocode_core::branching::{
     fork_budget_ms, fork_wanted,
 };
 use zerocode_core::computer_use_protocol::marks::legend_line;
-use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
 use zerocode_core::jev::promote::SEAT_RECORDING;
 use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
 use zerocode_core::jev::{BRANCHING, BRANCHING_APPLY_DEADLINE_MS};
@@ -208,8 +207,7 @@ fn compared(
     let judgment_ms = u64::try_from(judging.elapsed().as_millis()).unwrap_or(u64::MAX);
     said[ELAPSED_MS.canonical] = json!(judgment_ms);
     if let Some(spent) = judge.spent() {
-        said[REQUESTS_KEY] = json!(spent.requests);
-        said[REDACTED_LINES_KEY] = json!(spent.redacted_lines);
+        spent.stamp(said);
     }
     match answered {
         Compared::Refused(token) => {

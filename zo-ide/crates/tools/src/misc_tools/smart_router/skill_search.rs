@@ -221,18 +221,19 @@ impl SkillSearchRow {
 }
 
 /// A search's ranking as this process remembers it. The key carries the
-/// rubric version and the requested model, so a ranking made under other
-/// words or by another model is never recalled for this one.
+/// rubric version and the requested model — the door's, pinned or not
+/// ([`jev_gate::model_key`]) — so a ranking made under other words or by
+/// another model is never recalled for this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct MemoKey {
     task: u64,
     catalog: u64,
     rubric: u32,
-    model: &'static str,
+    model: u64,
 }
 
 impl MemoKey {
-    fn for_search(task: &str, candidates: &[SkillCandidate]) -> Self {
+    fn for_search(task: &str, candidates: &[SkillCandidate], model: u64) -> Self {
         let mut catalog = String::new();
         for candidate in candidates {
             catalog.push_str(&candidate.name);
@@ -244,7 +245,7 @@ impl MemoKey {
             task: task_fingerprint(task, ""),
             catalog: task_fingerprint("", &catalog),
             rubric: SKILL_RUBRIC_VERSION,
-            model: SYSTEMONE_MODEL,
+            model,
         }
     }
 }
@@ -429,7 +430,20 @@ async fn judge(
     acting: bool,
 ) -> (SkillSearchRow, Vec<SkillReading>) {
     let shards = skill_shards(candidates);
-    let key = MemoKey::for_search(task, candidates);
+    // The door before the memo: what a ranking is remembered under is the
+    // model the door asks for, and only the person's settings say which.
+    let cwd_owned = cwd.to_path_buf();
+    let Ok(door) = tokio::task::spawn_blocking(move || JevDoor::open(&cwd_owned)).await else {
+        telemetry::attest_failed(telemetry::HarnessFeature::SkillSearch, FAIL_SETTINGS_UNAVAILABLE);
+        let row = SkillSearchRow::new(
+            MemoKey::for_search(task, candidates, jev_gate::model_key(SYSTEMONE_MODEL)),
+            candidates.len(),
+            shards.len(),
+            FAIL_SETTINGS_UNAVAILABLE.to_string(),
+        );
+        return (row, Vec::new());
+    };
+    let key = MemoKey::for_search(task, candidates, door.model_key());
     if let Some(remembered) = memo().lock().ok().and_then(|memo| memo.get(&key).cloned()) {
         telemetry::attest_fired(telemetry::HarnessFeature::SkillSearch);
         let mut row = SkillSearchRow::new(
@@ -443,17 +457,6 @@ async fn judge(
         row.chosen = remembered.iter().map(Chosen::from).collect();
         return (row, remembered);
     }
-    let cwd_owned = cwd.to_path_buf();
-    let Ok(door) = tokio::task::spawn_blocking(move || JevDoor::open(&cwd_owned)).await else {
-        telemetry::attest_failed(telemetry::HarnessFeature::SkillSearch, FAIL_SETTINGS_UNAVAILABLE);
-        let row = SkillSearchRow::new(
-            key,
-            candidates.len(),
-            shards.len(),
-            FAIL_SETTINGS_UNAVAILABLE.to_string(),
-        );
-        return (row, Vec::new());
-    };
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
     // Every shard at once: they are independent requests over disjoint
     // skills, and the caller waits for the slowest of them either way — which

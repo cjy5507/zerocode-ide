@@ -52,7 +52,6 @@ use serde_json::{Value, json};
 use zerocode_core::branching::{BranchAsk, NextStep};
 use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
-use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
 use zerocode_core::jev::promote::SEAT_RECORDING;
 use zerocode_core::jev::summary::{AGREED, AT, CACHED, ELAPSED_MS};
 use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APPLY_DEADLINE_MS};
@@ -997,7 +996,7 @@ fn walk(
                                 "candidates": candidates,
                                 "routeUse": USE_FALLBACK,
                             }),
-                            spent,
+                            spent.as_ref(),
                             judgment_ms,
                             crate::project_runtime::now_epoch_ms(),
                         ),
@@ -1017,7 +1016,7 @@ fn walk(
                     "confidence": choice.confidence,
                     "probabilities": choice.probabilities,
                 }),
-                spent,
+                spent.as_ref(),
                 judgment_ms,
                 crate::project_runtime::now_epoch_ms(),
             ),
@@ -1375,14 +1374,13 @@ pub fn write_rows(
 /// its judgment and threw the number away, and a row with no `at` fell
 /// outside every "today" and "7d" window, so the three screen seats read as
 /// "never asked" on the settings card with 41 rows on disk.
-fn stamped(mut said: Value, spent: Option<Spent>, elapsed_ms: u64, now_ms: i64) -> Value {
+fn stamped(mut said: Value, spent: Option<&Spent>, elapsed_ms: u64, now_ms: i64) -> Value {
     if let Some(fields) = said.as_object_mut() {
         fields.insert(AT.canonical.to_string(), json!(now_ms));
         fields.insert(ELAPSED_MS.canonical.to_string(), json!(elapsed_ms));
-        if let Some(spent) = spent {
-            fields.insert(REQUESTS_KEY.to_string(), json!(spent.requests));
-            fields.insert(REDACTED_LINES_KEY.to_string(), json!(spent.redacted_lines));
-        }
+    }
+    if let Some(spent) = spent {
+        spent.stamp(&mut said);
     }
     said
 }

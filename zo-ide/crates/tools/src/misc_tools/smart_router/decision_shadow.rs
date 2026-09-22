@@ -443,13 +443,14 @@ pub(super) fn judged_axes(verdict: &DecisionVerdict) -> BTreeMap<String, JudgedA
 }
 
 /// A task's judgment as this process remembers it. The key carries the rubric
-/// version and the requested model, so a judgment made under other words or by
+/// version and the requested model — the door's, pinned or not
+/// ([`jev_gate::model_key`]) — so a judgment made under other words or by
 /// another model is never recalled for this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct MemoKey {
     task: u64,
     rubric: u32,
-    model: &'static str,
+    model: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -998,9 +999,13 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
     let agreement_floor = ROUTING.agreement_floor_permille?;
     let deadline_ms = ROUTING.apply_deadline_ms?;
     let window_wanted = promote::window_wanted_for(&ROUTING)?;
-    let held = jev_ledger::last_asked(rows, window_wanted);
+    // The newest answering version's rows, as every seat is judged on
+    // (`promote::on_the_newest_version`); where the seat stands is the whole
+    // ledger's.
+    let version = promote::on_the_newest_version(rows);
+    let held = jev_ledger::last_asked(version.requests, window_wanted);
     let window = jev_ledger::summarize_rows(held.iter().copied(), i64::MIN);
-    let (compared, control_rows) = with_control_rows(rows, &held);
+    let (compared, control_rows) = with_control_rows(version.marks, &held);
     let agreement = agreement_in(&compared);
     let verdict = promote::judge(
         promote::stand_from(rows),
@@ -1014,11 +1019,19 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
                 .agreement_rows_wanted
                 .unwrap_or(zerocode_core::jev::A_WINDOW_OF_COMPARISONS),
             window_forgives: ROUTING.window_forgives.unwrap_or(0),
-            labels: labels_standing(settings, rows),
-            fallbacks_in_a_row: jev_summary::failures_in_a_row(rows),
+            labels: labels_standing(settings, version.requests),
+            fallbacks_in_a_row: jev_summary::failures_in_a_row(version.requests),
         },
     );
-    Some(Judged { verdict, window, window_wanted, agreement, control_rows })
+    Some(Judged {
+        verdict,
+        window,
+        window_wanted,
+        agreement,
+        control_rows,
+        model: version.model.map(str::to_string),
+        cut: version.cut.map(str::to_string),
+    })
 }
 
 /// The window's rows and, after them, every row joined to them for the
@@ -1144,7 +1157,7 @@ async fn judge(
     deadline: Duration,
     active: bool,
 ) -> Judgment {
-    let key = MemoKey { task: shot.task, rubric: DECISION_RUBRIC_VERSION, model: SYSTEMONE_MODEL };
+    let key = MemoKey { task: shot.task, rubric: DECISION_RUBRIC_VERSION, model: door.model_key() };
     let recalled = memo().lock().ok().and_then(|memo| memo.get(&key).cloned());
     if let Some(remembered) = recalled {
         telemetry::attest_fired(telemetry::HarnessFeature::DecisionShadow);

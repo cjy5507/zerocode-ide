@@ -25,6 +25,7 @@ fn door(home: &Path) -> JevDoor {
         enabled: true,
         workspaces: vec![WORKSPACE.to_string()],
         daily_requests: None,
+        model: zerocode_core::jev::DEFAULT_MODEL.to_string(),
     };
     JevDoor::at(settings, Path::new(WORKSPACE), home)
 }

@@ -38,14 +38,26 @@
 //! seat act. The seats whose marks arrive late write them themselves
 //! (t-5806); a seat whose marks never arrive is one that stays recording,
 //! which is what `auto` promised.
+//!
+//! Evidence is one version's (2026-09-23, t-6187). Every request names the
+//! vendor's alias unless a person pinned a version, and the alias answers
+//! with whatever version the vendor ships under it — the answer's own
+//! `model` says which ([`crate::jev::summary::MODEL`]). A window that ran
+//! across the day the alias moved would promote the new version on the old
+//! one's record, so the judge reads the ledger from the newest version's
+//! first row on ([`on_the_newest_version`]). A row that names no version —
+//! a refusal, a timeout, a label, every row written before versions were
+//! recorded — belongs to the version of the nearest row after it that names
+//! one: the seats already standing on their ledgers keep the evidence they
+//! stand on, and only a real change of version starts a window again.
 
 use serde_json::{Value, json};
 
 use crate::jev::{A_WINDOW_OF_COMPARISONS, JevUse};
 
 use crate::jev::summary::{
-    AT, JUDGED_EVERY_ROWS, TRANSITION, Tally, WILSON_Z_95, rows_that_can_clear_forgiving,
-    wilson_lower,
+    AT, JUDGED_EVERY_ROWS, MODEL, TRANSITION, Tally, WILSON_Z_95, asked_something,
+    rows_that_can_clear_forgiving, wilson_lower,
 };
 
 /// What the judge said of a ledger's rows, and the window it said it on —
@@ -68,31 +80,120 @@ pub struct Judged {
     /// ([`crate::jev::summary::CONTROL`]), joined to the window by task.
     /// Zero for a seat that has no such sample.
     pub control_rows: usize,
+    /// The version the window was read on — the newest the rows name
+    /// ([`OnVersion::model`]); `None` for a ledger no row names one in.
+    pub model: Option<String>,
+    /// The version the rows were cut away from, when a change of version
+    /// cut them ([`OnVersion::cut`]) — the reason a thinner sample gives
+    /// for itself beside the line it holds on.
+    pub cut: Option<String>,
+}
+
+/// A ledger read from its newest answering version's first row on — the rows
+/// a seat is judged on (t-6187).
+///
+/// Counted back from the newest row: the cut falls at the first row that
+/// names a version other than the newest one. A row that names none belongs
+/// to the nearest named row after it, so a ledger no row names a version in
+/// is read whole, as every ledger was before versions were recorded.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OnVersion<'rows> {
+    /// The version answering now: the one the newest request that names a
+    /// version was answered by — a label grading an older answer does not
+    /// move it — or, in a ledger whose requests name none, the one the
+    /// newest row that names a version says.
+    pub model: Option<&'rows str>,
+    /// The version met where the rows were cut, when they were.
+    pub cut: Option<&'rows str>,
+    /// The rows the window's requests are counted from: every row after the
+    /// newest request another version answered.
+    pub requests: &'rows [Value],
+    /// The rows the marks are counted from: every row after the newest row
+    /// of any kind that names another version — so a label written down
+    /// with the version it graded is cut with that version even when it
+    /// was written after the other version's last request.
+    pub marks: &'rows [Value],
+}
+
+/// The version `row` names as the one that answered it, if it names one.
+fn named_version(row: &Value) -> Option<&str> {
+    MODEL
+        .read(row)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+}
+
+/// `rows` from the newest answering version's first row on ([`OnVersion`]).
+#[must_use]
+pub fn on_the_newest_version(rows: &[Value]) -> OnVersion<'_> {
+    let model = rows
+        .iter()
+        .rev()
+        .filter(|row| asked_something(row).is_some())
+        .find_map(named_version)
+        .or_else(|| rows.iter().rev().find_map(named_version));
+    let another = |row: &Value| named_version(row).is_some_and(|named| Some(named) != model);
+    let after = |found: Option<usize>| found.map_or(0, |at| at + 1);
+    let requests_from = after(
+        rows.iter()
+            .rposition(|row| asked_something(row).is_some() && another(row)),
+    );
+    let marks_from = after(rows.iter().rposition(another));
+    OnVersion {
+        model,
+        cut: marks_from
+            .checked_sub(1)
+            .and_then(|at| rows.get(at))
+            .and_then(named_version),
+        requests: &rows[requests_from..],
+        marks: &rows[marks_from..],
+    }
+}
+
+/// How many requests the judgment's cadence counts: the ones the newest
+/// answering version was asked ([`on_the_newest_version`]). One reader,
+/// because the cadence ([`judgment_due`]) and the countdown a screen draws
+/// ([`rows_to_next_judgment`]) must land on the same row.
+#[must_use]
+pub fn asked_toward_judgment(rows: &[Value]) -> usize {
+    on_the_newest_version(rows)
+        .requests
+        .iter()
+        .filter(|row| asked_something(row).is_some())
+        .count()
 }
 
 /// Judge a seat on its own ledger rows, by the table's lines alone: the
 /// window the seat's answer floor can be cleared on, the seat's apply wall,
-/// and the [`crate::jev::summary::AGREED`] marks its rows carry. `None` for
-/// a seat the table says never rises.
+/// and the [`crate::jev::summary::AGREED`] marks its rows carry — all of
+/// them the newest answering version's ([`on_the_newest_version`]). `None`
+/// for a seat the table says never rises.
 ///
 /// The orchestration seats are judged here, in the process that writes their
 /// rows (the window) and in the counter that shows them (`zo jev summary`),
 /// from one function. zo's routing seat keeps its own reading of agreement —
 /// the probe's answer beside the judgment's, axis by axis — and hands the
 /// rest to the same [`judge`].
+///
+/// Where the seat stands is read from the whole ledger: a standing earned on
+/// one version is not forgotten by the next, only judged on the next one's
+/// rows — a seat already acting keeps acting until one of them breaks a line
+/// ([`judge`]).
 #[must_use]
 pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
     let floor = seat.answer_floor_permille?;
     let agreement_floor = seat.agreement_floor_permille?;
     let deadline_ms = seat.apply_deadline_ms?;
     let window_wanted = window_wanted_for(seat)?;
-    let held = crate::jev::summary::last_asked(rows, window_wanted);
+    let version = on_the_newest_version(rows);
+    let held = crate::jev::summary::last_asked(version.requests, window_wanted);
     let since_ms = held
         .first()
         .and_then(|row| AT.read(row).and_then(Value::as_i64))
         .unwrap_or(i64::MIN);
     let window = crate::jev::summary::summarize_rows(held.iter().copied(), i64::MIN);
-    let agreement = crate::jev::summary::agreement_since(rows, since_ms);
+    let agreement = crate::jev::summary::agreement_since(version.marks, since_ms);
     let verdict = judge(
         stand_from(rows),
         &Evidence {
@@ -106,7 +207,7 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
                 .unwrap_or(A_WINDOW_OF_COMPARISONS),
             window_forgives: seat.window_forgives.unwrap_or(0),
             labels: None,
-            fallbacks_in_a_row: crate::jev::summary::failures_in_a_row(rows),
+            fallbacks_in_a_row: crate::jev::summary::failures_in_a_row(version.requests),
         },
     );
     Some(Judged {
@@ -115,6 +216,8 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
         window_wanted,
         agreement,
         control_rows: 0,
+        model: version.model.map(str::to_string),
+        cut: version.cut.map(str::to_string),
     })
 }
 
@@ -146,16 +249,19 @@ pub fn window_wanted_for(seat: &JevUse) -> Option<usize> {
 /// `too_few_rows` off a window arithmetic had already decided could not be
 /// full, and placement — 38 rows against a window of 25 — never got another
 /// one, because its second boundary at row 40 had not arrived.
+///
+/// Counted on the newest answering version's requests
+/// ([`asked_toward_judgment`]), for the same reason: after a change of
+/// version the window starts again, and a judgment before it is full again
+/// has only `too_few_rows` to say.
 #[must_use]
 pub fn judgment_due(seat: &JevUse, rows: &[Value]) -> bool {
-    let asked = rows
-        .iter()
-        .filter(|row| crate::jev::summary::asked_something(row).is_some())
-        .count();
+    let asked = asked_toward_judgment(rows);
     let wanted = window_wanted_for(seat).unwrap_or(JUDGED_EVERY_ROWS);
     let at_boundary = asked >= wanted && (asked - wanted).is_multiple_of(JUDGED_EVERY_ROWS);
     let ending_it = stand_from(rows) == Stand::Applying
-        && crate::jev::summary::failures_in_a_row(rows) >= FALLBACKS_THAT_END_IT;
+        && crate::jev::summary::failures_in_a_row(on_the_newest_version(rows).requests)
+            >= FALLBACKS_THAT_END_IT;
     at_boundary || ending_it
 }
 

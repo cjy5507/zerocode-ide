@@ -69,6 +69,11 @@ pub const REQUESTS_KEY: &str = "requests";
 /// door.
 pub const REDACTED_LINES_KEY: &str = "redactedLines";
 
+/// The key a request body names its model under, and the key the answer
+/// names the version that answered under — the vendor's word for both
+/// (docs.typesafe.ai/api: `model` in the request and in the response).
+pub const WIRE_MODEL_KEY: &str = "model";
+
 /// What a ledger row's `outcome` says when an answer arrived and passed the
 /// use's own checks. Every Jev ledger spells it this way, and one word is what
 /// lets a reader of somebody else's ledger — the hedge rule's sample of past
@@ -99,16 +104,23 @@ pub struct JevSettings {
     pub workspaces: Vec<String>,
     /// `None` when unset: counted, never refused for the count.
     pub daily_requests: Option<u64>,
+    /// The model every request this door clears names
+    /// ([`super::MODEL_SETTING`], t-6187): the vendor's alias unless the
+    /// person pinned a version.
+    pub model: String,
 }
 
 impl JevSettings {
-    /// The door's settings in a settings document (`smart.jev`). Absent, Jev is
-    /// on, nothing is consented and nothing is capped. A value of the wrong
-    /// shape never widens what is sent: a switch that is not `true` or `false`
-    /// is off, a workspace that is not a non-empty string is skipped, and a
-    /// budget that is not a whole number sends nothing.
+    /// The door's settings in a settings document (`smart.jev`, and the
+    /// model pinned beside it, `smart.jevModel`). Absent, Jev is on, nothing
+    /// is consented, nothing is capped and the alias is asked. A value of the
+    /// wrong shape never widens what is sent: a switch that is not `true` or
+    /// `false` is off, a workspace that is not a non-empty string is skipped,
+    /// a budget that is not a whole number sends nothing, and a pin that is
+    /// not one word is no pin.
     #[must_use]
     pub fn from_root(root: &Value) -> Self {
+        let model = super::model_in(root).to_string();
         let Some(jev) = root
             .get(SMART_SETTINGS_KEY)
             .and_then(|smart| smart.get(JEV_SETTINGS_KEY))
@@ -117,6 +129,7 @@ impl JevSettings {
                 enabled: true,
                 workspaces: Vec::new(),
                 daily_requests: None,
+                model,
             };
         };
         let Some(jev) = jev.as_object() else {
@@ -124,6 +137,7 @@ impl JevSettings {
                 enabled: false,
                 workspaces: Vec::new(),
                 daily_requests: None,
+                model,
             };
         };
         let enabled = jev.get(ENABLED_SETTING).is_none_or(|on| on == true);
@@ -148,6 +162,7 @@ impl JevSettings {
             enabled,
             workspaces,
             daily_requests,
+            model,
         }
     }
 
@@ -314,7 +329,8 @@ pub fn within_budget(settings: &JevSettings, sent: u64) -> bool {
 
 /// Ask the door about one request of `row`'s, its body built as the use
 /// builds it. Cleared, the body's pointed-at texts have lost every line that
-/// may carry a credential and are cut to their caps.
+/// may carry a credential and are cut to their caps, and the body names the
+/// model the person pinned ([`name_the_model`]).
 ///
 /// # Errors
 /// The first of the door's four questions the request fails.
@@ -327,6 +343,7 @@ pub fn may_send(row: &JevUse, asking: &Asking<'_>, mut body: Value) -> Result<Cl
             withheld_lines += clear(value, sent.cap);
         });
     }
+    name_the_model(&mut body, asking.settings);
     Ok(Cleared {
         bytes: body.to_string().into_bytes(),
         withheld_lines,
@@ -335,16 +352,36 @@ pub fn may_send(row: &JevUse, asking: &Asking<'_>, mut body: Value) -> Result<Cl
 
 /// Ask the door about a key check: a sentence no person wrote, sent when a
 /// person asks whether a key works. No workspace's words go, so consent is not
-/// asked; a key, the switch and the budget are.
+/// asked; a key, the switch and the budget are. It asks the model the
+/// person pinned, like every other request: a key check is the question of
+/// whether THIS model answers with this key.
 ///
 /// # Errors
 /// No key, Jev off, or the day's budget spent.
 pub fn may_check_key(asking: &Asking<'_>, body: &Value) -> Result<Cleared, Refused> {
     admit(asking, false)?;
+    let mut body = body.clone();
+    name_the_model(&mut body, asking.settings);
     Ok(Cleared {
         bytes: body.to_string().into_bytes(),
         withheld_lines: 0,
     })
+}
+
+/// Write the model the person pinned into a request body (t-6187), over
+/// whatever the asking program wrote there.
+///
+/// Here, at the door, because this is the one place every request of both
+/// programs passes: a seat that built its body with the alias still asks the
+/// pinned version, and none can forget to. Unpinned, the model is the alias
+/// every program already writes, so the body leaves as it came, to the byte.
+fn name_the_model(body: &mut Value, settings: &JevSettings) {
+    if let Some(fields) = body.as_object_mut() {
+        fields.insert(
+            WIRE_MODEL_KEY.to_string(),
+            Value::from(settings.model.as_str()),
+        );
+    }
 }
 
 /// Ask the door and count what it lets through: the day's count is read from

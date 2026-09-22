@@ -28,7 +28,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
 use zerocode_core::jev::{JevMode, STALL};
 use zerocode_core::orchestration::Ledger;
 use zerocode_core::stall_cause::{self, STALL_CAUSE_RUBRIC_VERSION, StallAsk, StallLook};
@@ -233,8 +232,7 @@ fn settle(wire: &Wire, question: Question) -> (Value, Option<Waiting>) {
     );
     row["elapsedMs"] = json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
     row["requestBytes"] = json!(answer.request_bytes);
-    row[REQUESTS_KEY] = json!(answer.spent.requests);
-    row[REDACTED_LINES_KEY] = json!(answer.spent.redacted_lines);
+    answer.spent.stamp(&mut row);
     let read = answer.answer.and_then(|body| {
         serde_json::from_str::<Value>(&body)
             .ok()

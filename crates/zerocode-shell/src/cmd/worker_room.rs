@@ -432,8 +432,7 @@ fn judged(wire: &Wire, look: &WorkerRoomLook, now_ms: i64) -> WorkerRoomJudged {
     );
     row["elapsedMs"] = json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
     row["requestBytes"] = json!(answer.request_bytes);
-    row[REQUESTS_KEY] = json!(answer.spent.requests);
-    row[REDACTED_LINES_KEY] = json!(answer.spent.redacted_lines);
+    answer.spent.stamp(&mut row);
     let read = answer.answer.and_then(|body| {
         serde_json::from_str::<Value>(&body)
             .ok()
@@ -623,6 +622,11 @@ mod tests {
         assert_eq!(row["applied"], json!(false), "the row claimed a move");
         assert_eq!(row[REQUESTS_KEY], json!(1));
         assert_eq!(row[REDACTED_LINES_KEY], json!(0));
+        assert_eq!(
+            row[zerocode_core::jev::summary::MODEL.canonical],
+            json!("jev-1.13.0"),
+            "the version that answered"
+        );
         assert!(row["elapsedMs"].is_u64() && row["requestBytes"].as_u64() > Some(0));
     }
 

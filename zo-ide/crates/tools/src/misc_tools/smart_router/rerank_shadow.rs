@@ -280,18 +280,19 @@ fn unix_millis() -> u64 {
 }
 
 /// A reading's judgment as this process remembers it. The key carries the
-/// rubric version and the requested model, so a judgment made under other
-/// words or by another model is never recalled for this one.
+/// rubric version and the requested model — the door's, pinned or not
+/// ([`jev_gate::model_key`]) — so a judgment made under other words or by
+/// another model is never recalled for this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct MemoKey {
     query: u64,
     notes: u64,
     rubric: u32,
-    model: &'static str,
+    model: u64,
 }
 
 impl MemoKey {
-    fn for_reading(query: &str, hits: &[MemoryHit]) -> Self {
+    fn for_reading(query: &str, hits: &[MemoryHit], model: u64) -> Self {
         let mut notes = String::new();
         for hit in hits {
             notes.push_str(&hit.entry.slug);
@@ -303,7 +304,7 @@ impl MemoKey {
             query: task_fingerprint(query, ""),
             notes: task_fingerprint("", &notes),
             rubric: RERANK_RUBRIC_VERSION,
-            model: SYSTEMONE_MODEL,
+            model,
         }
     }
 }
@@ -709,7 +710,7 @@ pub(super) async fn judge(
     // The judgment is asked about at most the notes a question was built for,
     // and the fold reads only those, so the two never disagree about a note.
     let hits = &hits[..candidates.len()];
-    let key = MemoKey::for_reading(query, hits);
+    let key = MemoKey::for_reading(query, hits, door.model_key());
     let recalled = memo().lock().ok().and_then(|memo| memo.get(&key).cloned());
     if let Some(remembered) = recalled {
         telemetry::attest_fired(telemetry::HarnessFeature::RerankShadow);
@@ -866,6 +867,7 @@ mod tests {
             enabled: true,
             workspaces: consented.iter().map(|root| (*root).to_string()).collect(),
             daily_requests: None,
+            model: zerocode_core::jev::DEFAULT_MODEL.to_string(),
         };
         JevDoor::at(settings, Path::new(WORKSPACE), home)
     }
@@ -1088,6 +1090,7 @@ mod tests {
             enabled: true,
             workspaces: vec![WORKSPACE.to_string()],
             daily_requests: budget,
+            model: zerocode_core::jev::DEFAULT_MODEL.to_string(),
         };
         JevDoor::at(settings, Path::new(WORKSPACE), home)
     }
@@ -1099,7 +1102,7 @@ mod tests {
         let path = home.join(RECALL.ledger);
         for ms in answers {
             let mut row = RerankShadowRow::new(
-                MemoKey::for_reading("a past reading", &[]),
+                MemoKey::for_reading("a past reading", &[], jev_gate::model_key(SYSTEMONE_MODEL)),
                 1,
                 RERANK_OUTCOME_ANSWERED.to_string(),
             );
@@ -1433,7 +1436,7 @@ mod tests {
     fn an_order_the_fold_cannot_prove_leaves_recalls_order() {
         let hits = three();
         let mut row = RerankShadowRow::new(
-            MemoKey::for_reading("anything", &hits),
+            MemoKey::for_reading("anything", &hits, jev_gate::model_key(SYSTEMONE_MODEL)),
             hits.len(),
             RERANK_OUTCOME_ANSWERED.to_string(),
         );
@@ -1886,7 +1889,7 @@ mod tests {
         assert!(!note_recall_read(work.path(), &[]));
         let hits = three();
         let mut row = RerankShadowRow::new(
-            MemoKey::for_reading("late reading", &hits),
+            MemoKey::for_reading("late reading", &hits, jev_gate::model_key(SYSTEMONE_MODEL)),
             hits.len(),
             RERANK_OUTCOME_ANSWERED.to_string(),
         );

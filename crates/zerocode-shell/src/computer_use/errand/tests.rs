@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use super::*;
 use zerocode_core::computer_flow::{Confirm, EvidenceLevel, Fingerprint, Money};
+use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
+use zerocode_core::jev::summary::MODEL;
 use zerocode_core::screen_action::{DONE, GIVE_UP};
 
 /// One control the page is showing.
@@ -482,6 +484,9 @@ fn a_recording_seat_says_on_the_row_and_in_one_word_why_it_pressed_nothing() {
 /// A judge that says what asking cost at the Jev door has it written on the
 /// row, under the keys every Jev ledger spells; one that says nothing leaves
 /// the row as it always was.
+/// What asking cost at the door — and which version answered (t-6187) — is
+/// on the row, through the one writer every seat's row goes through; a
+/// judge that sent nowhere leaves all three off.
 #[test]
 fn what_asking_cost_at_the_door_is_on_the_row() {
     struct Spending(FakeJudge);
@@ -493,6 +498,7 @@ fn what_asking_cost_at_the_door_is_on_the_row() {
             Some(Spent {
                 requests: 1,
                 redacted_lines: 2,
+                model: Some("jev-1.13.0".to_string()),
             })
         }
     }
@@ -509,6 +515,7 @@ fn what_asking_cost_at_the_door_is_on_the_row() {
 
     assert_eq!(recovered.rows[0][REQUESTS_KEY], json!(1));
     assert_eq!(recovered.rows[0][REDACTED_LINES_KEY], json!(2));
+    assert_eq!(recovered.rows[0][MODEL.canonical], json!("jev-1.13.0"));
 
     let mut quiet = FakeJudge::chose(&[2]);
     let recovered = run(
@@ -519,6 +526,7 @@ fn what_asking_cost_at_the_door_is_on_the_row() {
         &mut FakeWorld::showing(&[1, 2]),
     );
     assert!(recovered.rows[0].get(REQUESTS_KEY).is_none());
+    assert!(recovered.rows[0].get(MODEL.canonical).is_none());
 }
 
 #[test]

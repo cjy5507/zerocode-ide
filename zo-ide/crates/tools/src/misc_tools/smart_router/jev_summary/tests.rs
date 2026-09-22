@@ -136,7 +136,7 @@ fn a_screen_seat_is_counted_once_when_its_root_ledger_holds_what_a_session_copie
 
     assert_eq!(report.week.rows, walk.len(), "one ledger, counted once");
     assert_eq!(report.found.as_deref(), Some(roots[0].join(seat.ledger).as_path()));
-    assert_eq!(report.asked_ever, walk.len());
+    assert_eq!(report.asked_toward_judgment, walk.len());
 }
 
 /// The rows a walk writes under `~/.zo/jev` are read by the same counter the
@@ -317,7 +317,7 @@ fn the_screen_and_the_judge_read_one_window() {
     assert_eq!(Some(judged.clone()), super::super::decision_shadow::judge_rows(&rows, None));
     assert_eq!(judged.window.rows, 30, "the window is the last rows the floor can be cleared on");
     assert_eq!(judged.agreement.compared, 90);
-    assert_eq!(report.asked_ever, 30);
+    assert_eq!(report.asked_toward_judgment, 30);
     assert_eq!(
         report.rows_to_next_judgment(),
         promote::rows_to_next_judgment(&zerocode_core::jev::ROUTING, 30),
@@ -487,11 +487,16 @@ fn a_windows_cost_is_read_from_the_judgment_rate_and_not_the_chat_table() {
     // table this answered `None` for every seat, and the card drew no cost at
     // all against a price written down since the launch post.
     let rate = api::systemone_rate(api::SYSTEMONE_MODEL).expect("the judgment rate is written down");
-    assert_eq!(super::cost_of(0), Some(0.0), "no tokens is no cost, not an unpriced seat");
-    let million = super::cost_of(1_000_000).expect("priced");
+    let alias = api::SYSTEMONE_MODEL;
+    assert_eq!(super::cost_of(0, alias), Some(0.0), "no tokens is no cost, not an unpriced seat");
+    let million = super::cost_of(1_000_000, alias).expect("priced");
     assert!((million - rate.input).abs() < 1e-12, "a million tokens is one unit of the rate");
-    let some = super::cost_of(14_145).expect("priced");
+    let some = super::cost_of(14_145, alias).expect("priced");
     assert!(some > 0.0 && some < million, "{some} is not between nothing and a million tokens");
+    // A pinned version is the id the seat asks with, and bills at its
+    // family's row (t-6187); a dated id nobody wrote down stays unpriced.
+    assert_eq!(super::cost_of(1_000_000, "jev-1.13.0"), Some(million));
+    assert_eq!(super::cost_of(1_000_000, "jev-2026-09-15"), None);
     assert_eq!(
         super::super::plan_shadow::model_price_for(api::SYSTEMONE_MODEL),
         None,
@@ -632,7 +637,7 @@ fn a_control_row_is_compared_beside_its_windows_row_and_counted_nowhere_else() {
     // A clock just past the rows, so the day and the week both hold them.
     let report = one(seat, &roots, None, None, 1_000, 0);
     assert_eq!(report.judged, Some(judged));
-    assert_eq!(report.asked_ever, 25, "the cadence counted a control row");
+    assert_eq!(report.asked_toward_judgment, 25, "the cadence counted a control row");
     assert_eq!(
         report.rows_to_next_judgment(),
         promote::rows_to_next_judgment(seat, 25),
@@ -840,7 +845,7 @@ fn a_turn_label_is_one_comparison_in_the_window_of_the_turn_it_grades() {
     assert_eq!(judged.control_rows, 0, "a label was counted as a control row");
     let report = one(seat, &roots, None, None, 1_000, 0);
     assert_eq!(report.judged, Some(judged));
-    assert_eq!(report.asked_ever, 25);
+    assert_eq!(report.asked_toward_judgment, 25);
     // The week counts every mark, held turn or not: three labels, two agreed.
     assert_eq!(report.agreement_week, Agreement { compared: 3, agreed: 2 });
 }
@@ -869,7 +874,7 @@ fn a_seats_week_of_marks_is_counted_beside_its_judged_window() {
     assert!(matches!(report.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))), "{:?}", report.verdict());
     assert_eq!(report.judged.as_ref().map(|judged| judged.agreement), Some(Agreement { compared: 2, agreed: 1 }));
     assert_eq!(report.agreement_week, Agreement { compared: 2, agreed: 1 });
-    assert_eq!((report.week.rows, report.asked_ever), (1, 1), "a label was counted as a request");
+    assert_eq!((report.week.rows, report.asked_toward_judgment), (1, 1), "a label was counted as a request");
 }
 
 /// What the labels and the judge cost on real ledgers (t-5806) — run

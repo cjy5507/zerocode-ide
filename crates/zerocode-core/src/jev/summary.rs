@@ -140,6 +140,19 @@ pub const LABEL: LedgerKey = LedgerKey {
     also: &[],
 };
 
+/// The model that answered, as the response named it — the version, not the
+/// alias the request asked for (`jev-1.13.0` for `jev-latest`). Written on
+/// every row an answer came back on, and on no row that has none: a refusal
+/// or a timeout names no version, because nothing answered it.
+///
+/// Read by the judge ([`crate::jev::promote::on_the_newest_version`]): an
+/// alias moves when the vendor ships a version, and a floor or a window
+/// fitted to one version silently measures the next (t-6187).
+pub const MODEL: LedgerKey = LedgerKey {
+    canonical: "model",
+    also: &[],
+};
+
 /// Every key this module reads, so a contract can walk them.
 pub const LEDGER_KEYS: &[LedgerKey] = &[
     AT,
@@ -155,6 +168,7 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     APPLIED,
     PRESSED,
     LABEL,
+    MODEL,
 ];
 
 /// The word a row carries when its judgment answered and passed its checks.

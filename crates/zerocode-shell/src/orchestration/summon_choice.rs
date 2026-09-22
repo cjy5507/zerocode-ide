@@ -28,7 +28,9 @@ use serde_json::{Value, json};
 use zerocode_core::jev::SUMMON;
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
 use zerocode_core::orchestration::{PreparedWorkerStart, SummonShadow};
-use zerocode_core::summon_choice::{self, SUMMON_CHOICE_RUBRIC_VERSION, SummonAsk};
+use zerocode_core::summon_choice::{
+    self, SUMMON_CHOICE_RUBRIC_VERSION, SummonAsk, WORKER_MODEL_KEY,
+};
 
 use crate::agent_teams::Host;
 use crate::systemone::{SCHEMA, Wire, request_body};
@@ -97,7 +99,7 @@ fn opened(seat: &Seat<'_>, shadow: &SummonShadow, mode: &str, now_ms: i64) -> Va
         // What the coordinator's three words came to, after the quota gate
         // had its say — the thing the judgment is written down beside.
         "agent": shadow.pinned.agent,
-        "model": shadow.pinned.model,
+        WORKER_MODEL_KEY: shadow.pinned.model,
         "effort": shadow.pinned.effort,
         "modelWasPinned": shadow.model_was_pinned,
         // The shape that was asked about, so a reader of the row never has to
@@ -204,8 +206,7 @@ fn settle(
     );
     row["elapsedMs"] = json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
     row["requestBytes"] = json!(answer.request_bytes);
-    row[REQUESTS_KEY] = json!(answer.spent.requests);
-    row[REDACTED_LINES_KEY] = json!(answer.spent.redacted_lines);
+    answer.spent.stamp(&mut row);
     let read = answer.answer.and_then(|body| {
         serde_json::from_str::<Value>(&body)
             .ok()

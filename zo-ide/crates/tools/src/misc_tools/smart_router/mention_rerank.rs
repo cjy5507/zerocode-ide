@@ -318,18 +318,19 @@ pub struct MentionLabelRow {
 }
 
 /// A page's judgment as this process remembers it. The key carries the
-/// rubric version and the requested model, so a judgment made under other
-/// words or by another model is never recalled for this one.
+/// rubric version and the requested model — the door's, pinned or not
+/// ([`jev_gate::model_key`]) — so a judgment made under other words or by
+/// another model is never recalled for this one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct MemoKey {
     query: u64,
     notes: u64,
     rubric: u32,
-    model: &'static str,
+    model: u64,
 }
 
 impl MemoKey {
-    fn for_page(ask: &MentionAsk) -> Self {
+    fn for_page(ask: &MentionAsk, model: u64) -> Self {
         let mut names = String::new();
         for candidate in &ask.candidates {
             names.push_str(&candidate.name);
@@ -339,7 +340,7 @@ impl MemoKey {
             query: task_fingerprint(&ask.intent, &ask.query),
             notes: task_fingerprint(ask.surface.key(), &names),
             rubric: MENTION_RUBRIC_VERSION,
-            model: SYSTEMONE_MODEL,
+            model,
         }
     }
 }
@@ -703,7 +704,7 @@ pub(super) async fn judge(
     client: Option<&SystemOneClient>,
     ask: &MentionAsk,
 ) -> (MentionRerankRow, Option<Vec<usize>>) {
-    let key = MemoKey::for_page(ask);
+    let key = MemoKey::for_page(ask, door.model_key());
     let recalled = memo().lock().ok().and_then(|memo| memo.get(&key).cloned());
     if let Some(remembered) = recalled {
         telemetry::attest_fired(telemetry::HarnessFeature::MentionRerank);

@@ -16,7 +16,7 @@ use super::*;
 use crate::api_routers::HeldKeys;
 use crate::computer_use::errand::tests::{FakeWorld, stopped};
 use crate::computer_use::errand::{ActionJudge, Mode, run};
-use crate::systemone::tests::Endpoint;
+use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
 use crate::systemone::{
     INVALID_REQUEST, RATE_LIMITED, SYSTEMONE_MODEL, SYSTEMONE_PATH, TIMEOUT, TRANSPORT,
     UNAUTHORIZED,
@@ -82,7 +82,7 @@ fn consented_judge(base: &str) -> (tempfile::TempDir, LiveJudge) {
 /// A body the endpoint would answer with.
 fn body_choosing(choice: &str) -> String {
     json!({
-        "model": SYSTEMONE_MODEL,
+        "model": ANSWERING_VERSION,
         "answers": {
             "action": {
                 "type": "choice",
@@ -250,10 +250,8 @@ fn a_workspace_nobody_consented_to_is_refused_before_a_socket() {
     assert!(endpoint.asked().is_empty(), "nothing left the door");
     assert_eq!(
         judge.spent(),
-        Some(Spent {
-            requests: 0,
-            redacted_lines: 0
-        })
+        Some(Spent::default()),
+        "and nothing answered"
     );
 
     let mut nowhere = LiveJudge::at(&endpoint.base(), "test-key", Doorway::default());
@@ -358,7 +356,8 @@ fn a_credential_on_the_screen_never_reaches_the_wire() {
         judge.spent(),
         Some(Spent {
             requests: 1,
-            redacted_lines: 3
+            redacted_lines: 3,
+            model: Some(ANSWERING_VERSION.to_string()),
         })
     );
 }
@@ -517,7 +516,7 @@ fn compared_ask() -> zerocode_core::branching::BranchAsk {
 /// A body the endpoint would answer a comparison with.
 fn body_comparing(choice: &str) -> String {
     json!({
-        "model": SYSTEMONE_MODEL,
+        "model": ANSWERING_VERSION,
         "answers": {
             "best": {
                 "type": "choice",
@@ -549,7 +548,8 @@ fn a_comparison_is_asked_under_the_branching_row_and_read_by_its_own_question() 
         judge.spent(),
         Some(Spent {
             requests: 1,
-            redacted_lines: 0
+            redacted_lines: 0,
+            model: Some(ANSWERING_VERSION.to_string()),
         })
     );
     let heard = endpoint.asked();
@@ -588,7 +588,7 @@ fn a_comparison_is_asked_under_the_branching_row_and_read_by_its_own_question() 
 /// rules want every offered option named.
 fn goal_body_choosing(choice: &str) -> String {
     json!({
-        "model": SYSTEMONE_MODEL,
+        "model": ANSWERING_VERSION,
         "answers": {
             "action": {
                 "type": "choice",
@@ -730,6 +730,11 @@ fn shadow_asks_the_wire_as_today_and_labels_the_memo_against_it() {
         json!(true)
     );
     assert_eq!(rows[1][REQUESTS_KEY], json!(0));
+    assert_eq!(
+        rows[1][zerocode_core::jev::summary::MODEL.canonical],
+        json!(ANSWERING_VERSION),
+        "a hit names the version that gave the answer the memo kept"
+    );
     assert_eq!(rows[1]["seat"], json!(zerocode_core::jev::BROWSER.id));
     assert!(rows[1]["key"].as_str().is_some_and(|key| key.len() == 16));
 }
@@ -760,7 +765,9 @@ fn a_risen_auto_answers_the_same_bytes_from_the_memo_and_sends_nothing() {
         judge.spent(),
         Some(Spent {
             requests: 0,
-            redacted_lines: 0
+            redacted_lines: 0,
+            // The version that gave the answer the memo kept.
+            model: Some(ANSWERING_VERSION.to_string()),
         })
     );
     assert_eq!(endpoint.asked().len(), 2, "the third question never left");
@@ -1056,7 +1063,7 @@ fn a_judgment_begun_ahead_runs_down_the_wire_and_its_account_comes_back() {
                 goal_body_choosing("mark:1")
             } else {
                 json!({
-                    "model": SYSTEMONE_MODEL,
+                    "model": ANSWERING_VERSION,
                     "answers": {
                         "action": {
                             "type": "choice",

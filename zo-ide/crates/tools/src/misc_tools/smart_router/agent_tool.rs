@@ -596,7 +596,7 @@ pub fn decide(cwd: &Path, caller: JevCaller, question: &JevQuestion) -> JevVerdi
         };
     };
     let acting = mode.applies();
-    let (mut row, answer) = api::sync_bridge::run_blocking(judge(cwd, caller, question, acting));
+    let (mut row, answer, asked) = api::sync_bridge::run_blocking(judge(cwd, caller, question, acting));
     let answered = row.outcome == AGENT_TOOL_OUTCOME_ANSWERED;
     row.route_use = if !answered {
         ROUTE_USE_FALLBACK.to_string()
@@ -633,20 +633,21 @@ pub fn decide(cwd: &Path, caller: JevCaller, question: &JevQuestion) -> JevVerdi
         elapsed_ms: row.elapsed_ms,
         requests: row.requests.unwrap_or(0),
         input_tokens: row.input_tokens,
-        cost_usd: row.input_tokens.and_then(cost_of),
+        cost_usd: row.input_tokens.and_then(|tokens| cost_of(tokens, &asked)),
         model: row.model.clone(),
         note,
     }
 }
 
 /// One question's row and what it answered: refused at the door, or asked in
-/// its requests at once and checked.
+/// its requests at once and checked — with the model the door asked for, the
+/// id the verdict's cost is priced by.
 async fn judge(
     cwd: &Path,
     caller: JevCaller,
     question: &JevQuestion,
     acting: bool,
-) -> (AgentToolRow, Option<JevAnswer>) {
+) -> (AgentToolRow, Option<JevAnswer>, String) {
     let askings = requests_of(question);
     let cwd_owned = cwd.to_path_buf();
     let Ok(door) = tokio::task::spawn_blocking(move || JevDoor::open(&cwd_owned)).await else {
@@ -654,6 +655,7 @@ async fn judge(
         return (
             AgentToolRow::new(caller, question, askings.len(), FAIL_SETTINGS_UNAVAILABLE.to_string()),
             None,
+            SYSTEMONE_MODEL.to_string(),
         );
     };
     let client = SystemOneConfig::from_env().ok().map(SystemOneConfig::into_client);
@@ -661,7 +663,8 @@ async fn judge(
     // disjoint items, and the caller waits for the slowest either way.
     let asked = askings.iter().map(|asking| ask_one(&door, client.as_ref(), asking, acting));
     let replies = futures_util::future::join_all(asked).await;
-    fold(caller, question, &askings, replies)
+    let (row, answer) = fold(caller, question, &askings, replies);
+    (row, answer, door.model().to_string())
 }
 
 /// What one request came back with.

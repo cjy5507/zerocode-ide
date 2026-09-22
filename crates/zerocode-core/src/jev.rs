@@ -39,6 +39,60 @@ pub mod summary;
 /// The object zo's settings keep every Jev switch under.
 pub const SMART_SETTINGS_KEY: &str = "smart";
 
+/// The key under [`SMART_SETTINGS_KEY`] naming the model every Jev request
+/// asks for (t-6187): the vendor's alias unless a person pinned a version.
+///
+/// One switch for every seat of both programs, because what it decides is
+/// not a seat's: an alias answers with whatever version the vendor ships
+/// under it, and a floor or a promotion window fitted to one version
+/// silently measures the next. A person who wants the numbers to stay put
+/// pins the version the rows say answered (`jev-1.13.0`). The door writes
+/// it into every request it clears ([`door::may_send`]), so no seat can ask
+/// under another.
+pub const MODEL_SETTING: &str = "jevModel";
+
+/// The model a request names when nobody pinned one: the vendor's alias —
+/// the word the SDKs call by default, which named `jev-1.13.0` as the
+/// answering version on every one of the 3,179 routing, recall and step
+/// rows zo had recorded a version on by 2026-09-23. The window's wire and
+/// zo's client spell the alias as this word; a contract holds zo's copy,
+/// which cannot read this crate, to it.
+pub const DEFAULT_MODEL: &str = "jev-latest";
+
+/// The model a settings document pins (`smart.jevModel`), or
+/// [`DEFAULT_MODEL`] when it pins none. A value that is not a pin
+/// ([`pinned_model`]) reads as no pin, as an unknown mode word reads as
+/// `off`: a slip never sends a model nobody named.
+#[must_use]
+pub fn model_in(root: &Value) -> &str {
+    pin_in(root).unwrap_or(DEFAULT_MODEL)
+}
+
+/// The pin a settings document holds, if it holds one ([`model_in`] without
+/// the alias behind it) — what a screen reads to say whether the model it
+/// shows was a person's choice.
+#[must_use]
+pub fn pin_in(root: &Value) -> Option<&str> {
+    root.get(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(MODEL_SETTING))
+        .and_then(Value::as_str)
+        .and_then(pinned_model)
+}
+
+/// `word` as a pin: trimmed, and one word — not empty, no space and no
+/// control character in it, which is the shape of every model id the
+/// vendor names. The settings writer refuses what this refuses, so a pin
+/// the reader would ignore is never written.
+#[must_use]
+pub fn pinned_model(word: &str) -> Option<&str> {
+    let word = word.trim();
+    (!word.is_empty()
+        && !word
+            .chars()
+            .any(|glyph| glyph.is_whitespace() || glyph.is_control()))
+    .then_some(word)
+}
+
 /// Characters of a task a routing judgment reads — the chat probe's prompt and
 /// Jev's state alike. The head of a brief is what bands it; the cap bounds
 /// what each call costs and what leaves the machine.

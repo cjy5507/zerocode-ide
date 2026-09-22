@@ -48,9 +48,9 @@
     ]
   },
   "typesafe": {
-    "source": "TypeSafe's launch post for its System One models (https://typesafe.ai/blog/introducing-system-one-models-and-jev, 2026-09-15), re-read 2026-09-17 for docs/design/jev-decision-shadow-20260917.md: input $0.042 per million tokens, output free. A System One call writes no prose and bills input only, and the post names no cache rates, so none are written here. `announced` sits beside the price because an early-access price is the kind that moves. Matching: the exact id, case-insensitive — a dated or pinned id no row names is unpriced, never billed at a neighbour's rate.",
+    "source": "TypeSafe's launch post for its System One models (https://typesafe.ai/blog/introducing-system-one-models-and-jev, 2026-09-15), re-read 2026-09-17 for docs/design/jev-decision-shadow-20260917.md: input $0.042 per million tokens, output free. A System One call writes no prose and bills input only, and the post names no cache rates, so none are written here. `announced` sits beside the price because an early-access price is the kind that moves. Matching: the exact id, case-insensitive, or a numbered version of the family a row names under `prices_versions_of` (a pinned `jev-1.13.0` is a `jev`, t-6187 — the post names one price for the model, not one per version); a dated or otherwise named id no row names is unpriced, never billed at a neighbour's rate.",
     "rows": [
-      { "ids": ["jev-latest"], "input": 0.042, "output": 0.0, "announced": "2026-09-15" }
+      { "ids": ["jev-latest"], "prices_versions_of": "jev", "input": 0.042, "output": 0.0, "announced": "2026-09-15" }
     ]
   }
 }
