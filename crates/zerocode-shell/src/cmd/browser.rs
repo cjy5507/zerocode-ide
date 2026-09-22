@@ -36,7 +36,7 @@ use crate::computer_use::screenshot_png::RgbaImage;
 /// from a dead pane or a wrong label (a Flow's baseline and oracle).
 pub(crate) const WAIT_TIMED_OUT: &str = "시간 안에 셀렉터가 보이지 않았습니다";
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BrowserReadReport {
     pub(crate) title: String,
@@ -65,6 +65,19 @@ pub(crate) struct BrowserInputReport {
     pub(crate) rect: Option<[f64; 4]>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) dpr: Option<f64>,
+    /// Where the pressed or typed element sits among the page's landmarks —
+    /// the chain the read seat's blocks are addressed by
+    /// (`zerocode_core::browser_read::inside`), so the window can say
+    /// whether the press landed in a block a read folded away
+    /// (`crate::browser_read::note_press`). Never printed: it is the
+    /// label's fact, not the agent's.
+    #[serde(skip)]
+    pub(crate) block_path: Option<String>,
+    /// The page's address at the press, cleared of credentials by the same
+    /// page-side rule the read's address is — so a press after a navigation
+    /// is not charged to a read of the page before it. Never printed.
+    #[serde(skip)]
+    pub(crate) page_url: Option<String>,
 }
 
 /// The sentence the door answers a click or a typing with: what it did, then
@@ -76,6 +89,19 @@ pub(crate) const CLICK_SAID: &str = "클릭 이벤트를 보냈습니다";
 pub(crate) const TYPED_SAID: &str = "입력했습니다";
 const INPUT_RECT_KEY: &str = "rect";
 const INPUT_DPR_KEY: &str = "dpr";
+/// The key the click and type scripts answer the element's landmark chain
+/// under (`zcStructuralChain`).
+const INPUT_BLOCK_PATH_KEY: &str = "blockPath";
+/// The key they answer the page's address under, cleared page-side.
+const INPUT_PAGE_URL_KEY: &str = "pageUrl";
+
+/// The selectors a page is cut into blocks at, as the page scripts take
+/// them: the read seat's own list (`zerocode_core::jev::BROWSER_READ_BLOCK_ROOTS`),
+/// joined for `matches`. One producer, so the read that cuts and the press
+/// that names its block read the same list.
+pub(crate) fn block_roots() -> String {
+    zerocode_core::jev::BROWSER_READ_BLOCK_ROOTS.join(",")
+}
 /// Between the facts in the parenthesis (a rect's sides are joined by a
 /// bare comma, so the separator is the comma and a space).
 const INPUT_FACT_SEPARATOR: &str = ", ";
@@ -433,12 +459,22 @@ pub(crate) fn input_report(
         .cloned()
         .and_then(|rect| serde_json::from_value::<[f64; 4]>(rect).ok());
     let dpr = value.get(INPUT_DPR_KEY).and_then(serde_json::Value::as_f64);
+    let block_path = value
+        .get(INPUT_BLOCK_PATH_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(|path| terminal_safe(path, zerocode_core::jev::BROWSER_READ_PATH_CHAR_CAP));
+    let page_url = value
+        .get(INPUT_PAGE_URL_KEY)
+        .and_then(serde_json::Value::as_str)
+        .map(|url| scrub_url_credentials(&terminal_safe(url, BROWSER_URL_CAP)));
     Ok(BrowserInputReport {
         method: method.to_string(),
         trusted_events,
         limitation,
         rect,
         dpr,
+        block_path,
+        page_url,
     })
 }
 
@@ -598,6 +634,46 @@ const zcDom = (element) => {
     }
   }
   return String(clone.outerHTML || "");
+};
+// A structural element's word in a block path (the read seat's cut,
+// `zerocode_core::browser_read`): its tag, its id, its first class and its
+// role — each kept to the characters a selector could carry — then its
+// index among structural siblings of the same tag when there is more than
+// one, so two `section`s under `main` are two addresses.
+const zcPathAtom = (raw) => String(raw || "").trim().replace(/[^A-Za-z0-9_-]/g, "").slice(0, 24);
+const zcTagWord = (node, roots) => {
+  let word = String(node.tagName || "").toLowerCase();
+  const id = zcPathAtom(node.id);
+  if (id) word += "\x23" + id;
+  const first = zcPathAtom(String(node.getAttribute("class") || "").trim().split(/\s+/)[0]);
+  if (first) word += "." + first;
+  const role = zcPathAtom(String(node.getAttribute("role") || "").toLowerCase());
+  if (role) word += "[role=" + role + "]";
+  const parent = node.parentElement;
+  if (parent) {
+    let nth = 0, alike = 0;
+    for (const sibling of parent.children) {
+      if (sibling.tagName !== node.tagName || !sibling.matches(roots)) continue;
+      alike += 1;
+      if (sibling === node) nth = alike;
+    }
+    if (alike > 1) word += "[" + nth + "]";
+  }
+  return word;
+};
+// Where an element sits among the page's landmarks: `body`, then the word of
+// every structural ancestor from the outside in. The read's blocks are cut
+// at the same list and addressed by the same words, so the block a press
+// landed in is the block whose path this chain names (`browser_read::inside`).
+const zcStructuralChain = (element, roots) => {
+  if (!roots || !roots.length) return null;
+  const parts = [];
+  let node = element;
+  while (node && node !== document.body && node.nodeType === 1) {
+    if (node.matches(roots)) parts.unshift(zcTagWord(node, roots));
+    node = node.parentElement;
+  }
+  return ["body", ...parts].join(">");
 };
 "#;
 
@@ -2241,6 +2317,128 @@ fn parse_read_value(value: serde_json::Value) -> Result<BrowserReadReport, Strin
     })
 }
 
+/// A whole-document read with the page cut into blocks for the read seat
+/// (`crate::browser_read`): the same title, address and text `read` answers
+/// today — `text` is the very expression the plain read evaluates, so a read
+/// the seat hands back whole is byte for byte the read that existed before
+/// it — and beside them the body cut at the seat's landmarks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BrowserReadPage {
+    pub(crate) report: BrowserReadReport,
+    pub(crate) blocks: Vec<zerocode_core::browser_read::ReadBlock>,
+}
+
+/// The page script that cuts the body into blocks at the seat's landmarks
+/// (`request.blockRoots`, the table's own list) and answers each block's
+/// path and visible text, up to the read's text cap (`request.textCap`).
+///
+/// An element with no landmark inside it is one block; one with landmarks
+/// inside is walked, and the children that are not landmarks themselves —
+/// a heading, a paragraph, a `div` of them — are one run under it
+/// (`path>*`). A child that only CONTAINS landmarks is transparent: walked
+/// under the same path. What is not rendered is not read (`innerText`'s own
+/// rule for a rendered element; a hidden element is skipped, because
+/// `innerText` on one falls back to its whole `textContent`), and scripts,
+/// styles and templates never are.
+pub(crate) const BROWSER_READ_BLOCKS_BODY: &str = r#"
+const roots = request.blockRoots;
+const cap = request.textCap;
+const body = document.body || document.documentElement;
+const blocks = [];
+let used = 0;
+const unread = (el) => {
+  if (!el || el.nodeType !== 1) return true;
+  if (el.matches("script, style, noscript, template")) return true;
+  if (el.hidden) return true;
+  const style = getComputedStyle(el);
+  return style.display === "none" || style.visibility === "hidden";
+};
+const textOf = (el) => String(typeof el.innerText === "string" ? el.innerText : el.textContent || "");
+const hasStructure = (el) => !!el.querySelector(roots);
+const push = (path, text) => {
+  const whole = String(text || "");
+  if (!whole.trim() || used >= cap) return;
+  const kept = whole.slice(0, cap - used);
+  used += kept.length;
+  blocks.push({ path, text: kept });
+};
+const runText = (nodes) => {
+  const lines = [];
+  for (const node of nodes) {
+    const text = node.nodeType === 3 ? String(node.data || "") : (unread(node) ? "" : textOf(node));
+    if (text.trim()) lines.push(text.trim());
+  }
+  return lines.join("\n");
+};
+const walk = (el, path) => {
+  if (unread(el)) return;
+  if (!hasStructure(el)) { push(path, textOf(el)); return; }
+  let run = [];
+  const flush = () => { if (run.length) { push(path + ">*", runText(run)); run = []; } };
+  for (const child of el.childNodes) {
+    if (child.nodeType === 3) { run.push(child); continue; }
+    if (child.nodeType !== 1 || unread(child)) continue;
+    if (child.matches(roots)) { flush(); walk(child, path + ">" + zcTagWord(child, roots)); }
+    else if (hasStructure(child)) { flush(); walk(child, path); }
+    else run.push(child);
+  }
+  flush();
+};
+walk(body, "body");
+return zcEncode({ ok: true, value: {
+  title: String(document.title || "").slice(0, request.titleCap),
+  url: zcSafeUrl(location.href).slice(0, request.urlCap),
+  text: String(typeof body.innerText === "string" ? body.innerText : body.textContent || "").slice(0, cap),
+  blocks
+} }, request.answerCap);
+"#;
+
+/// The whole document, cut into blocks — what the read seat judges.
+pub(crate) async fn automate_read_blocks(
+    app: &AppHandle,
+    state: &AppState,
+    label: &str,
+) -> Result<BrowserReadPage, String> {
+    let pane = browser_pane_of(app, state, label)?;
+    let script = automation_script(
+        &serde_json::json!({
+            "blockRoots": block_roots(),
+            "textCap": BROWSER_READ_CAP,
+            "titleCap": BROWSER_TITLE_CAP,
+            "urlCap": BROWSER_URL_CAP,
+            "answerCap": BROWSER_CALLBACK_CAP,
+        }),
+        BROWSER_READ_BLOCKS_BODY,
+    );
+    let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
+    parse_read_blocks_reply(reply)
+}
+
+/// A blocks reply parsed without being believed: the report's own caps and
+/// bytes rules, then each block's path and text through the same filter.
+pub(crate) fn parse_read_blocks_reply(reply: serde_json::Value) -> Result<BrowserReadPage, String> {
+    let value = page_value(reply)?;
+    let report = parse_read_value(value.clone())?;
+    let blocks = value
+        .get("blocks")
+        .and_then(serde_json::Value::as_array)
+        .map(|blocks| {
+            blocks
+                .iter()
+                .filter_map(|block| {
+                    let path = block.get("path").and_then(serde_json::Value::as_str)?;
+                    let text = block.get("text").and_then(serde_json::Value::as_str)?;
+                    Some(zerocode_core::browser_read::ReadBlock::new(
+                        &terminal_safe(path, zerocode_core::jev::BROWSER_READ_PATH_CHAR_CAP),
+                        &terminal_safe(text, BROWSER_READ_CAP),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(BrowserReadPage { report, blocks })
+}
+
 /// Activate the first visible element matching a CSS selector.
 #[tauri::command]
 pub(crate) async fn browser_click(
@@ -2262,7 +2460,10 @@ pub(crate) async fn automate_click(
 ) -> Result<BrowserInputReport, String> {
     checked_selector(selector)?;
     let pane = browser_pane_of(app, state, label)?;
-    let script = automation_script(&serde_json::json!({ "selector": selector }), CLICK_BODY);
+    let script = automation_script(
+        &serde_json::json!({ "selector": selector, "blockRoots": block_roots() }),
+        CLICK_BODY,
+    );
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
     input_report(page_value(reply)?, &["dom-activation"])
 }
@@ -2305,7 +2506,8 @@ if (typeof element.click === "function") {
   element.dispatchEvent(new MouseEvent("click", { ...common, detail: 1 }));
 }
 return zcEncode({ ok: true, value: { method: "dom-activation",
-  rect: [rect.left, rect.top, rect.width, rect.height], dpr: window.devicePixelRatio } });
+  rect: [rect.left, rect.top, rect.width, rect.height], dpr: window.devicePixelRatio,
+  blockPath: zcStructuralChain(element, request.blockRoots), pageUrl: zcSafeUrl(location.href) } });
 "#;
 
 // ---- Marks (set-of-marks) for the browser door (t-4246, plan D) ----
@@ -2684,7 +2886,12 @@ pub(crate) async fn automate_type(
     }
     let pane = browser_pane_of(app, state, label)?;
     let script = automation_script(
-        &serde_json::json!({ "selector": selector, "text": text, "road": road.word() }),
+        &serde_json::json!({
+            "selector": selector,
+            "text": text,
+            "road": road.word(),
+            "blockRoots": block_roots(),
+        }),
         TYPE_BODY,
     );
     let reply = page_json(&pane, script, BROWSER_CALLBACK_DEADLINE).await?;
@@ -2731,7 +2938,8 @@ if (request.road === "setter") {
   element.dispatchEvent(typeof InputEvent === "function"
     ? new InputEvent("input", { bubbles: true, composed: true, inputType: "insertReplacementText" })
     : new Event("input", { bubbles: true }));
-  return zcEncode({ ok: true, value: { method: "value-setter", secureField } });
+  return zcEncode({ ok: true, value: { method: "value-setter", secureField,
+    blockPath: zcStructuralChain(element, request.blockRoots), pageUrl: zcSafeUrl(location.href) } });
 }
 if (input || area) {
   try { element.select(); } catch (_) {}
@@ -2768,7 +2976,8 @@ if (!edited || current !== request.text) {
     : new Event("input", { bubbles: true });
   element.dispatchEvent(inputEvent);
 }
-return zcEncode({ ok: true, value: { method, secureField } });
+return zcEncode({ ok: true, value: { method, secureField,
+  blockPath: zcStructuralChain(element, request.blockRoots), pageUrl: zcSafeUrl(location.href) } });
 "#;
 
 /// Wait until a CSS selector names a visible element. The repeated callback

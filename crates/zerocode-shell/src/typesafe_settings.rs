@@ -601,6 +601,49 @@ mod tests {
         }
     }
 
+    /// Every seat's card row names itself in the markup's own language and in
+    /// each of the four catalogs — the label, the one-line summary and the
+    /// folded paragraph — so no language falls back to another seat's words
+    /// or to a bare key. A seat added to the table turns this red until its
+    /// row and its words exist.
+    #[test]
+    fn every_seat_speaks_in_every_catalog() {
+        let page = include_str!("../../../ui/index.html");
+        let i18n = include_str!("../../../ui/shell-i18n.js");
+        for row in &JEV_USES {
+            // The seat's row, from its label to its switch: the label's key
+            // names the row's words (`settings.typesafe.<word>`), and the
+            // summary and the folded paragraph hang off the same word.
+            let switch = page
+                .find(&format!("data-jev-seat=\"{}\"", row.id))
+                .unwrap_or_else(|| panic!("the card has no {} switch", row.id));
+            let before = &page[..switch];
+            let label = before
+                .rfind("class=\"settings-label\" data-i18n=\"")
+                .map(|at| &before[at + "class=\"settings-label\" data-i18n=\"".len()..])
+                .and_then(|rest| rest.split('"').next())
+                .unwrap_or_else(|| panic!("the {} row has no label key", row.id));
+            assert!(
+                label.starts_with("settings.typesafe."),
+                "{}: {label} is not a seat key",
+                row.id
+            );
+            for suffix in ["", "Summary", "Hint"] {
+                let key = format!("{label}{suffix}");
+                assert!(
+                    page.contains(&format!("data-i18n=\"{key}\"")),
+                    "the {} row has no {key}",
+                    row.id
+                );
+                assert_eq!(
+                    i18n.matches(&format!("\"{key}\"")).count(),
+                    4,
+                    "{key} must be in en/ja/zh/es"
+                );
+            }
+        }
+    }
+
     /// The settings harness's fake backend answers every seat the table names,
     /// with the settings key it writes and the modes it offers, so the pane is
     /// driven by the words and meanings it will read. A seat added to the table
@@ -742,6 +785,10 @@ mod tests {
             (
                 "window stall cause",
                 product(include_str!("orchestration/stall_cause.rs")),
+            ),
+            (
+                "window browser read",
+                product(include_str!("browser_read.rs")),
             ),
             (
                 "window walk",

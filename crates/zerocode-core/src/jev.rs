@@ -4,7 +4,8 @@
 //! Two programs ask. zo asks about a task it is routing and about the notes a
 //! recall found; the window asks which control a walk should press next — on a
 //! page or on the desktop — about a worker whose pane went quiet, about where
-//! a worker's window belongs and about which agent a summons should start.
+//! a worker's window belongs, about which agent a summons should start, and
+//! about which blocks of a page an agent's browser read should fold away.
 //! Each keeps its own wire — the two Cargo workspaces carry different `reqwest` majors
 //! (docs/design/jev-browser-action-20260917.md §1.4) — so what must not fork
 //! lives here, in the one crate both already read:
@@ -271,8 +272,11 @@ pub struct JevUse {
     /// a floor on a seat that never rises is a number nobody reads, and a
     /// rising seat with no floor is a promotion with nothing to pass.
     pub answer_floor_permille: Option<u16>,
-    /// Minimum confidence for a screen press, distinct from the answer-rate
-    /// promotion floor. None means this seat has no authority to press.
+    /// Minimum confidence for the seat to act on ONE answer alone — a screen
+    /// press, or a block the browser read folds away — distinct from the
+    /// answer-rate promotion floor. None means this seat acts on no single
+    /// answer's confidence: it has no authority to press, or it applies
+    /// whatever it answers.
     pub press_floor_permille: Option<u16>,
     /// The share of compared axes on which the judgment must bound above in
     /// naming what the reader it replaces named, per thousand, before `auto`
@@ -1199,8 +1203,182 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
 };
 
+/// Characters of a page's title one browser-read question carries — the head
+/// of what the tab says the page is, which is what bands a block's words:
+/// "Sign in" under a title that is a product page is a chrome block, and the
+/// same two words under "Sign in" are the page.
+pub const BROWSER_READ_TITLE_CHAR_CAP: usize = 200;
+
+/// Blocks one browser read asks about ([`Sent`] `Items` cap on
+/// `/state/blocks`). A page past it keeps its remaining blocks unjudged and
+/// unfolded: a block nobody asked about is content, because the fallback of
+/// this seat is the whole page ([`BROWSER_READ`]).
+///
+/// Forty-eight is four requests of [`BROWSER_READ_SHARD_TARGET`], which is
+/// the most the read's one wall ([`BROWSER_READ_APPLY_DEADLINE_MS`]) is asked
+/// to carry side by side; a page that cuts into more blocks than that is a
+/// page whose tail is already past the read's own text cap.
+pub const BROWSER_READ_BLOCK_CAP: usize = 48;
+
+/// Characters of one block's text head a browser-read question carries. The
+/// head is what names a block — "Accept all cookies", "Related articles",
+/// "Skip to content" — and the body under it is never sent: it is read from
+/// the page this machine already holds and handed to the agent or folded.
+pub const BROWSER_READ_HEAD_CHAR_CAP: usize = 240;
+
+/// Characters of one block's tag path a browser-read question carries —
+/// `body>main>article>aside[role=complementary]` — the structural address
+/// that says what the page's author called the block.
+pub const BROWSER_READ_PATH_CHAR_CAP: usize = 160;
+
+/// Blocks one browser-read request asks about ([`shard::even_shards`]'s
+/// target): twelve choice questions over one state, the same width a screen
+/// question offers controls ([`SCREEN_CANDIDATE_CAP`]) and for the same
+/// reason — past it a request is longer than the answer it decides. Written
+/// as its own number because the two are two policies.
+pub const BROWSER_READ_SHARD_TARGET: usize = 12;
+
+/// The structural selectors a page is cut into blocks at, in the browser
+/// door's read: HTML's own landmarks and sectioning elements, and the ARIA
+/// roles that name the same things on a page built of `div`s. One list, here
+/// and nowhere else: the page script that cuts blocks reads it from the
+/// request, and the click and type scripts that name the block a press
+/// landed in read the same list, so a fold and a label cannot disagree about
+/// where a block begins.
+pub const BROWSER_READ_BLOCK_ROOTS: [&str; 20] = [
+    "main",
+    "article",
+    "section",
+    "nav",
+    "header",
+    "footer",
+    "aside",
+    "form",
+    "dialog",
+    "[role=main]",
+    "[role=navigation]",
+    "[role=banner]",
+    "[role=contentinfo]",
+    "[role=complementary]",
+    "[role=dialog]",
+    "[role=alertdialog]",
+    "[role=search]",
+    "[role=region]",
+    "[role=form]",
+    "[role=article]",
+];
+
+/// The two answers a block can be: the page's own substance, or the
+/// furniture around it. Spelled once, because the question offers exactly
+/// these and the fold acts on exactly one of them.
+pub const BROWSER_READ_OPTIONS: [&str; 2] = ["content", "chrome"];
+
+/// [`BROWSER_READ_OPTIONS`]'s word for a block the fold may drop.
+pub const BROWSER_READ_CHROME: &str = BROWSER_READ_OPTIONS[1];
+
+/// [`BROWSER_READ_OPTIONS`]'s word for a block the read keeps.
+pub const BROWSER_READ_CONTENT: &str = BROWSER_READ_OPTIONS[0];
+
+/// The wall one browser read waits for its blocks' judgments, in
+/// milliseconds — every shard side by side, one clock. A read is a tool
+/// result the agent is waiting on, so the wall is a screen question's
+/// ([`SCREEN_APPLY_DEADLINE_MS`], 280 ms at the median on this wire) and
+/// not a summons' ten seconds; past it the read hands back the whole page,
+/// which is what it handed back before the seat existed. Its own number, for
+/// the reason every other coinciding wall in this table is.
+pub const BROWSER_READ_APPLY_DEADLINE_MS: u64 = 1_500;
+
+/// What a browser-read seat's answers must bound above before `auto` rises
+/// to folding (§4): nine in ten — the screen seats' line, arrived at from
+/// the read's own side: a judgment that does not come back costs the agent
+/// nothing but the wall, because the whole page is what it reads then.
+pub const BROWSER_READ_ANSWER_FLOOR_PERMILLE: u16 = 900;
+
+/// The browser-read seat's route-change budget (§4): nine folds in ten must
+/// be ones the agent never reached back into.
+///
+/// Stricter than the screen seats' four in five, because this seat's wrong
+/// answer is not one press but a page the agent has to read twice — the
+/// fold, then `read --full` — and the label that says so is the agent's own
+/// next move ([`AgreementKind::Comparison`]: the block a `click` or `type`
+/// then landed in was one the judgment called chrome, or it was not).
+pub const BROWSER_READ_AGREEMENT_FLOOR_PERMILLE: u16 = 900;
+
+/// The least confidence a block's `chrome` answer must carry before the
+/// fold drops it, per thousand — read through [`JevUse::permits_press`], the
+/// same gate a screen press passes, because it is the same question: is
+/// this one answer sure enough to act on alone.
+///
+/// A policy line, not a calibrated accuracy claim, like
+/// [`SCREEN_PRESS_FLOOR_PERMILLE`], and above it: a press the walk can undo
+/// costs one more press, a block the fold dropped costs the agent the page.
+/// The measurement this seat is held to says the line has to sit where no
+/// content block of the golden pages falls under it (t-6041).
+pub const BROWSER_READ_FOLD_FLOOR_PERMILLE: u16 = 700;
+
+/// The window's browser read: which blocks of a page's text an agent's
+/// `zerocode-browser read` should hand over, and which it should fold away
+/// (t-6041).
+///
+/// The read gives the agent the page's visible text whole, and most of a
+/// page is not what the agent came for — the site's navigation, its header
+/// and footer, a cookie banner, the sponsored rail, the related-links
+/// column. The page script cuts the body into blocks at
+/// [`BROWSER_READ_BLOCK_ROOTS`], and one question per block asks whether the
+/// block is the page ([`BROWSER_READ_CONTENT`]) or its furniture
+/// ([`BROWSER_READ_CHROME`]). What is sent is each block's tag path and the
+/// head of its text, and the page's title; a block's body never leaves.
+///
+/// `on`, and an `auto` its own evidence raised, fold the chrome blocks into
+/// one line that says how many were left out and what kinds, and how to
+/// read them anyway (`read --full`). `shadow` records the same judgment and
+/// hands over the whole page. A judgment that does not come back inside
+/// [`BROWSER_READ_APPLY_DEADLINE_MS`], or that breaks the closed choice's
+/// rules on any block, hands over the whole page too: the seat's fallback is
+/// exactly the read that existed before it.
+///
+/// The `agreed` rule: the judgment agreed when the agent's next `click` or
+/// `type` on that pane, on that same page, landed outside every block the
+/// judgment called chrome, and disagreed when it landed inside one — under
+/// `shadow` as much as under `on`, since what is compared is the judgment
+/// and not the fold. One label per read, written by the window at the press;
+/// a read the agent never pressed after leaves no label, and a read on a page
+/// the pane had left by the press leaves none either.
+pub const BROWSER_READ: JevUse = JevUse {
+    id: "browser_read",
+    setting: "jevBrowserRead",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    sends: &[
+        Sent {
+            at: "/state/title",
+            cap: Cap::Chars(BROWSER_READ_TITLE_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/blocks",
+            cap: Cap::Items(BROWSER_READ_BLOCK_CAP),
+        },
+        Sent {
+            at: "/state/blocks/*/path",
+            cap: Cap::Chars(BROWSER_READ_PATH_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/blocks/*/head",
+            cap: Cap::Chars(BROWSER_READ_HEAD_CHAR_CAP),
+        },
+    ],
+    ledger: "browser-read.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(BROWSER_READ_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: Some(BROWSER_READ_FOLD_FLOOR_PERMILLE),
+    agreement_floor_permille: Some(BROWSER_READ_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(BROWSER_READ_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 11] = [
+pub static JEV_USES: [JevUse; 12] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -1212,6 +1390,7 @@ pub static JEV_USES: [JevUse; 11] = [
     SUMMON,
     STEP_EFFORT,
     ZO_STEP_EFFORT,
+    BROWSER_READ,
 ];
 
 impl JevUse {

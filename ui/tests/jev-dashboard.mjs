@@ -27,6 +27,13 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
  * ask), so they are written under the checkout's output folder, which git
  * ignores, and named in the report. */
 const EVIDENCE_DIR = join(ROOT, "output", "t-5807");
+/* How many seats the settings card carries — counted off the card's own
+ * markup rather than typed here, so a seat added to the use table (which
+ * `typesafe_settings.rs` holds the card to) is not a second number to move.
+ * Every row draws one trend of three sparks. */
+const { readFileSync } = await import("node:fs");
+const SEATS = (readFileSync(join(ROOT, "ui", "index.html"), "utf8").match(/data-jev-seat="/g) ?? []).length;
+const SPARKS_PER_SEAT = 3;
 
 /* Installed on the page: the fixture the three answers are drawn from.
  * With `real` — this machine's own count, from `realSummary` — the summary
@@ -217,6 +224,11 @@ function realSummary() {
  * same numbers stand on. */
 export async function testJevDashboardEvidence(browser, origin, ok) {
   const real = realSummary();
+  // The table carries every seat of the card; the numbers, trends and card
+  // lines are drawn for the seats the answering zo could count. An installed
+  // zo can predate a seat the table just gained (it reads the same table,
+  // once rebuilt), and a row it never answered stands with no trend.
+  const counted = real ? real.seats.length : SEATS;
   await mkdir(EVIDENCE_DIR, { recursive: true });
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -256,7 +268,7 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
       await page.screenshot({ path });
       shots[theme] = { ...seen, path };
       ok(`the ${theme} dashboard is one readable screen: no text cut, clipped or overlapping`,
-        seen.faults.length === 0 && seen.oneScreen && seen.tableFits && seen.rows === 11 && seen.sparks === 33 && seen.theme === theme,
+        seen.faults.length === 0 && seen.oneScreen && seen.tableFits && seen.rows === SEATS && seen.sparks === counted * SPARKS_PER_SEAT && seen.theme === theme,
         JSON.stringify({ ...seen, faults: seen.faults.slice(0, 6), path }));
     }
     ok("the evidence carries this machine's own count when zo answers, and says which",
@@ -278,7 +290,7 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
       await page.locator("#jev-uses-card").screenshot({ path });
       await page.evaluate(() => setSettingsOpen(false));
       ok(`the ${theme} settings card draws the same numbers with no text cut, clipped or overlapping`,
-        card.faults.length === 0 && card.lines === 11, JSON.stringify({ ...card, faults: card.faults.slice(0, 6), path }));
+        card.faults.length === 0 && card.lines === counted, JSON.stringify({ ...card, faults: card.faults.slice(0, 6), path }));
     }
     ok("the evidence pages raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {
@@ -350,7 +362,7 @@ export async function testJevDashboard(browser, origin, ok) {
     ok("the rail door opens the Jev tab and wears its pressed state",
       opened.active === "jev" && opened.visible && opened.pressed === "true", JSON.stringify({ active: opened.active, pressed: opened.pressed }));
     ok("the table carries every seat of the settings card, in the card's order, under the card's names",
-      opened.rowIds.length === 11 && opened.rowIds.join(",") === opened.cardSeats.join(",")
+      opened.rowIds.length === SEATS && opened.rowIds.join(",") === opened.cardSeats.join(",")
         && opened.rowNames.join("|") === opened.cardNames.join("|"),
       JSON.stringify({ rows: opened.rowIds, names: opened.rowNames, card: opened.cardNames }));
     ok("opening costs one settings ask and one summary ask, with the recent list",
@@ -378,7 +390,7 @@ export async function testJevDashboard(browser, origin, ok) {
     ok("the recent list opens on the first seat with decisions and lists the digest",
       opened.recentSeat === "routing" && opened.recentCount === 1 && opened.recentFirst.includes("task: 68212a1194a4e327")
         && opened.recentFirst.includes("complexity=small") && opened.recentFirst.includes("적용")
-        && opened.recentOptions.length === 11,
+        && opened.recentOptions.length === SEATS,
       JSON.stringify({ seat: opened.recentSeat, count: opened.recentCount, first: opened.recentFirst }));
     ok("the tab is titled and the head cells are column heads",
       opened.title !== null && opened.title.length > 0 && opened.heads.every((scope) => scope === "col"), JSON.stringify({ title: opened.title, heads: opened.heads.length }));
@@ -452,7 +464,7 @@ export async function testJevDashboard(browser, origin, ok) {
     ok("a burst of ledger events is one settled summary ask",
       refreshed.during === refreshed.before && refreshed.after === refreshed.before + 1, JSON.stringify(refreshed));
     ok("a re-open within the beat draws what is in hand and asks nothing",
-      refreshed.reopened === refreshed.after && refreshed.rows === 11 && refreshed.closedPressed === "false", JSON.stringify(refreshed));
+      refreshed.reopened === refreshed.after && refreshed.rows === SEATS && refreshed.closedPressed === "false", JSON.stringify(refreshed));
     ok("the dashboard's beat is a slow one, not the ledger's second",
       refreshed.pollMs >= 10_000 && refreshed.settleMs >= 1_000, JSON.stringify({ poll: refreshed.pollMs, settle: refreshed.settleMs }));
 
@@ -489,7 +501,7 @@ export async function testJevDashboard(browser, origin, ok) {
       };
     });
     ok("a zo that cannot count leaves the last numbers standing and says so",
-      !refused.hidden && refused.error.includes("refused: jev_summary") && refused.rows === 11 && refused.week === "50",
+      !refused.hidden && refused.error.includes("refused: jev_summary") && refused.rows === SEATS && refused.week === "50",
       JSON.stringify(refused));
 
     ok("the dashboard raised no renderer fault", faults.length === 0, faults.join(" | "));

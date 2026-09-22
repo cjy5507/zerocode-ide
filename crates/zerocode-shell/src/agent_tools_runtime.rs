@@ -5364,10 +5364,30 @@ pub(super) fn browser_refused(stderr: impl Into<String>) -> zerocode_hookd::Team
     }
 }
 
-/// A typing's answer, on either road.
+/// A read's words — the page's title and address, then its text, then a
+/// selector read's reduced DOM. The one formatter both read roads print
+/// through, inside the read arm's one fence: the plain read's and the read
+/// seat's, so a page the seat hands back whole is the plain read's bytes.
+fn read_words(report: cmd::browser::BrowserReadReport) -> String {
+    let detail = report
+        .dom
+        .map(|dom| format!("\nDOM:\n{dom}\n"))
+        .unwrap_or_default();
+    format!(
+        "제목: {}\n주소: {}\n\n{}\n{}",
+        report.title, report.url, report.text, detail
+    )
+}
+
+/// A typing's answer, on either road — and the label it leaves on the
+/// pane's last judged read.
 fn typed_answer(
+    label: &str,
     typed: Result<cmd::browser::BrowserInputReport, String>,
 ) -> zerocode_hookd::TeamAnswer {
+    if let Ok(report) = &typed {
+        crate::browser_read::label_press(label, "type", report);
+    }
     match typed {
         Ok(report) => browser_said(format!(
             "{}\n",
@@ -5562,22 +5582,32 @@ pub(super) async fn answer_browser_command(
             ),
             Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
         },
+        // `read <label> [css]` reads the page or a selector; `read <label>
+        // --full` reads the page whole, whatever the read seat would fold.
+        // The judged road and the plain road print through ONE formatter
+        // (`read_answer`), so a read the seat hands back whole is the plain
+        // read's bytes.
         ("read", 2) | ("read", 3) => {
-            let selector = argv.get(2).map(String::as_str);
-            match cmd::browser::automate_read(app, &state, &argv[1], selector).await {
-                Ok(report) => {
-                    let detail = report
-                        .dom
-                        .map(|dom| format!("\nDOM:\n{dom}\n"))
-                        .unwrap_or_default();
-                    page_said(
-                        &argv[1],
-                        format!(
-                            "제목: {}\n주소: {}\n\n{}\n{}",
-                            report.title, report.url, report.text, detail
-                        ),
-                    )
-                }
+            let read = match zerocode_core::agent_browser::parse_read(argv) {
+                Ok(read) => read,
+                Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
+            };
+            let mode = zerocode_core::jev::BROWSER_READ
+                .mode_in(&crate::systemone::Wire::of_this_machine().settings_root());
+            let answered = if read.selector.is_none() && !read.full && mode.asks() {
+                // The words' workspace is the checkout the asking pane runs
+                // in — what the door asks the person's consent for.
+                let workspace = pane
+                    .and_then(hooks::term_of_pane_key)
+                    .and_then(|term| state.pane_cwds().get(&term).cloned())
+                    .map(std::path::PathBuf::from);
+                crate::browser_read::read_judged(app, &state, &read.label, workspace, mode).await
+            } else {
+                cmd::browser::automate_read(app, &state, &read.label, read.selector.as_deref())
+                    .await
+            };
+            match answered {
+                Ok(report) => page_said(&read.label, read_words(report)),
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }
         }
@@ -5596,10 +5626,13 @@ pub(super) async fn answer_browser_command(
                 Err(why) => return browser_refused(format!("zerocode-browser: {why}\n")),
             };
             match pressed {
-                Ok(report) => browser_said(format!(
-                    "{}\n",
-                    cmd::browser::input_said(cmd::browser::CLICK_SAID, &report)
-                )),
+                Ok(report) => {
+                    crate::browser_read::label_press(&argv[1], "click", &report);
+                    browser_said(format!(
+                        "{}\n",
+                        cmd::browser::input_said(cmd::browser::CLICK_SAID, &report)
+                    ))
+                }
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }
         }
@@ -5609,12 +5642,18 @@ pub(super) async fn answer_browser_command(
         ("type", 4) => {
             let (label, css, text) = (&argv[1], &argv[2], &argv[3]);
             let road = cmd::browser::TypeRoad::Keys;
-            typed_answer(cmd::browser::automate_type(app, &state, label, css, text, road).await)
+            typed_answer(
+                label,
+                cmd::browser::automate_type(app, &state, label, css, text, road).await,
+            )
         }
         ("type", 5) if argv[3] == zerocode_core::agent_browser::TYPE_VALUE_FLAG => {
             let (label, css, text) = (&argv[1], &argv[2], &argv[4]);
             let road = cmd::browser::TypeRoad::Setter;
-            typed_answer(cmd::browser::automate_type(app, &state, label, css, text, road).await)
+            typed_answer(
+                label,
+                cmd::browser::automate_type(app, &state, label, css, text, road).await,
+            )
         }
         ("wait", 3) | ("wait", 4) => {
             let timeout_ms = match argv.get(3) {
