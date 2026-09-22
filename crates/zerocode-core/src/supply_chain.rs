@@ -32,6 +32,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::second_brain_graph::EdgeProvenance;
+
 /// A package ecosystem this layer reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1272,6 +1274,11 @@ pub struct SupplyEdge {
     pub from: u32,
     pub to: u32,
     pub kind: SupplyEdgeKind,
+    /// The road that wrote the line (t-5966): a lockfile or an OSV record is
+    /// the machine's measurement, so every supply edge is
+    /// [`EdgeProvenance::Measured`] — carried on the wire so the window
+    /// dresses and filters it from the answer.
+    pub provenance: EdgeProvenance,
 }
 
 /// The components, the vulnerabilities that reach them, and the edges.
@@ -1419,7 +1426,12 @@ pub fn supply_graph(
             .collect(),
         edges: edges
             .into_iter()
-            .map(|(kind, from, to)| SupplyEdge { from, to, kind })
+            .map(|(kind, from, to)| SupplyEdge {
+                from,
+                to,
+                kind,
+                provenance: EdgeProvenance::Measured,
+            })
             .collect(),
         components,
     }
@@ -2278,7 +2290,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             vec![&SupplyEdge {
                 from: 0,
                 to: index_of(time),
-                kind: SupplyEdgeKind::Affects
+                kind: SupplyEdgeKind::Affects,
+                provenance: EdgeProvenance::Measured,
             }],
             "the withdrawn record reaches serde with nothing"
         );

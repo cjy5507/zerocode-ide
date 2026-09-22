@@ -16,7 +16,7 @@
 //! reopening the view re-reads only what changed on disk. Bodies are never
 //! kept — the facts are.
 
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -117,6 +117,69 @@ impl EdgeKind {
     ];
 }
 
+/// Where one relation's evidence comes from (t-5966, G1).
+///
+/// Graphify tags every edge EXTRACTED or INFERRED; this graph says which of
+/// three roads wrote a line, because a reader — the lens, the path answer, a
+/// Jev re-ranking, an exported picture — asks different things of a line a
+/// machine measured and a line a person typed. The variant order is the sort
+/// order everywhere a provenance is listed.
+///
+/// The wire spelling is the serde name; a source contract asks for the enum's
+/// names rather than the strings, so the window never spells a road itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeProvenance {
+    /// A machine measured it — a recall trace, a session, a lockfile, a
+    /// dedupe pass over titles. Nobody wrote it in the vault.
+    Measured,
+    /// A frontmatter key declared it: `implements:`, `depends_on:`,
+    /// `source:` … — a person or an agent stated the relation by name.
+    Declared,
+    /// Prose inferred it: a `[[link]]` in a body says the pages are about
+    /// each other without saying how.
+    Inferred,
+}
+
+impl EdgeProvenance {
+    /// Every provenance, in enum order — the rows a lens and a report list.
+    pub const ALL: [Self; 3] = [Self::Measured, Self::Declared, Self::Inferred];
+
+    /// The wire spelling, matching the serde rename.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Measured => "measured",
+            Self::Declared => "declared",
+            Self::Inferred => "inferred",
+        }
+    }
+}
+
+/// Whether a scanned relation's provenance is one a road of this scanner can
+/// vouch for — the rule the lint's 「근거 없는 간선」 row counts against, in one
+/// place, so the table and the scanner cannot drift.
+///
+/// Prose writes no key, so an inferred line is always a `mentions`; a key
+/// writes a typed relation, or — as `source:` — a `mentions` line to a source
+/// node; and the scanner measures nothing, so a measured line in the scanned
+/// picture has no road behind it (measured lines ride beside the graph:
+/// [`crate::second_brain_live::MergeCandidate`], the supply chain).
+#[must_use]
+pub fn vouched(edge: &GraphEdge, target: NodeKind) -> bool {
+    match edge.provenance {
+        EdgeProvenance::Inferred => edge.kind == EdgeKind::Mentions && target != NodeKind::Source,
+        EdgeProvenance::Declared => {
+            if target == NodeKind::Source {
+                edge.kind == EdgeKind::Mentions
+            } else {
+                edge.kind != EdgeKind::Mentions
+            }
+        }
+        EdgeProvenance::Measured => false,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeKind {
@@ -163,11 +226,21 @@ pub struct GraphEdge {
     pub from: u32,
     pub to: u32,
     pub kind: EdgeKind,
+    /// Which road wrote the line (t-5966). Part of what the window draws and
+    /// the lens filters on, never part of the edge's identity: one pair and
+    /// one kind is one line, and the first road to write it names it.
+    pub provenance: EdgeProvenance,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KindCount {
     pub kind: EdgeKind,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProvenanceCount {
+    pub provenance: EdgeProvenance,
     pub count: u32,
 }
 
@@ -185,6 +258,11 @@ pub struct VaultGraph {
     pub tags: Vec<TagCount>,
     /// How many edges of each kind the graph holds, most used first.
     pub kinds: Vec<KindCount>,
+    /// How many edges each road wrote, in enum order, every road listed even
+    /// at zero — the lens's three toggles and the report's table read this
+    /// and count nothing of their own (t-5966).
+    #[serde(default)]
+    pub provenances: Vec<ProvenanceCount>,
     pub pages: usize,
     pub ghosts: usize,
     /// Pages no other page links to and the index does not list — the same
@@ -221,9 +299,19 @@ struct PageFacts {
     excerpt: String,
     /// Link targets as written, before resolution: the body's own links as
     /// [`EdgeKind::Mentions`] in written order, then each typed relation the
-    /// frontmatter declared, in enum order.
-    links: Vec<(EdgeKind, String)>,
+    /// frontmatter declared, in enum order. Each carries the road that wrote
+    /// it — the body's links are inferred, a key's are declared.
+    links: Vec<WrittenLink>,
     truncated: bool,
+}
+
+/// One link as a page wrote it: what it means, which road wrote it, and the
+/// target before resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WrittenLink {
+    kind: EdgeKind,
+    provenance: EdgeProvenance,
+    target: String,
 }
 
 #[derive(Debug, Clone)]
@@ -469,10 +557,16 @@ fn parse_page(text: &str, stem: &str) -> PageFacts {
     // Body links first, in written order, then the declared relations in enum
     // order: [`MAX_PAGE_LINKS`] bounds what one page contributes in total, so a
     // runaway body cannot be joined by a runaway frontmatter.
-    let mut links: Vec<(EdgeKind, String)> = wiki_links(body)
+    // The inferred road: prose links.
+    let mut links: Vec<WrittenLink> = wiki_links(body)
         .into_iter()
-        .map(|target| (EdgeKind::Mentions, target))
+        .map(|target| WrittenLink {
+            kind: EdgeKind::Mentions,
+            provenance: EdgeProvenance::Inferred,
+            target,
+        })
         .collect();
+    // The declared road: relation keys.
     for kind in EdgeKind::TYPED {
         let Some(value) = fields.get(kind.as_str()) else {
             continue;
@@ -482,7 +576,11 @@ fn parse_page(text: &str, stem: &str) -> PageFacts {
                 break;
             }
             if let Some(target) = relation_target(&item) {
-                links.push((kind, target));
+                links.push(WrittenLink {
+                    kind,
+                    provenance: EdgeProvenance::Declared,
+                    target,
+                });
             }
         }
     }
@@ -887,27 +985,33 @@ fn assemble(found: &[FoundPage], cache: &HashMap<String, CacheEntry>, sources: b
 
     // Ghosts and sources are collected first and appended in sorted order, so
     // the node list is deterministic no matter which page named one first.
-    let mut ghosts: BTreeMap<String, Vec<(u32, EdgeKind)>> = BTreeMap::new();
+    let mut ghosts: BTreeMap<String, Vec<(u32, EdgeKind, EdgeProvenance)>> = BTreeMap::new();
     let mut sourced: BTreeMap<String, Vec<u32>> = BTreeMap::new();
-    let mut triples: HashSet<(u32, u32, EdgeKind)> = HashSet::new();
+    // One line per pair and kind; the first road to write it names its
+    // provenance (body links come before keys, so a page that both links and
+    // declares the same relation keeps the declared line as its own kind).
+    let mut triples: HashMap<(u32, u32, EdgeKind), EdgeProvenance> = HashMap::new();
     for (at, page) in found.iter().enumerate() {
         let from = node_index(at);
         let Some(entry) = cache.get(&page.id) else {
             continue;
         };
-        for (kind, target) in &entry.facts.links {
-            match lookup.resolve(target, &index) {
+        for link in &entry.facts.links {
+            match lookup.resolve(&link.target, &index) {
                 Some(to) if triples.len() < MAX_GRAPH_EDGES => {
-                    triples.insert((from, to, *kind));
+                    triples
+                        .entry((from, to, link.kind))
+                        .or_insert(link.provenance);
                 }
                 Some(_) => capped = true,
                 // An unresolved target still means what the page said it
                 // meant, so the ghost carries the kind rather than flattening.
-                None if ghosts.len() < MAX_GRAPH_GHOSTS || ghosts.contains_key(target) => {
-                    ghosts
-                        .entry(target.clone())
-                        .or_default()
-                        .push((from, *kind));
+                None if ghosts.len() < MAX_GRAPH_GHOSTS || ghosts.contains_key(&link.target) => {
+                    ghosts.entry(link.target.clone()).or_default().push((
+                        from,
+                        link.kind,
+                        link.provenance,
+                    ));
                 }
                 None => capped = true,
             }
@@ -917,7 +1021,7 @@ fn assemble(found: &[FoundPage], cache: &HashMap<String, CacheEntry>, sources: b
         }
     }
 
-    let mut extra: Vec<(u32, u32, EdgeKind)> = Vec::new();
+    let mut extra: Vec<(u32, u32, EdgeKind, EdgeProvenance)> = Vec::new();
     for (target, from) in &ghosts {
         let to = node_index(nodes.len());
         nodes.push(GraphNode {
@@ -932,7 +1036,10 @@ fn assemble(found: &[FoundPage], cache: &HashMap<String, CacheEntry>, sources: b
             excerpt: String::new(),
             folder: String::new(),
         });
-        extra.extend(from.iter().map(|(held, kind)| (*held, to, *kind)));
+        extra.extend(
+            from.iter()
+                .map(|(held, kind, provenance)| (*held, to, *kind, *provenance)),
+        );
     }
     let ghost_count = nodes.len() - pages;
     for (source, from) in &sourced {
@@ -950,15 +1057,26 @@ fn assemble(found: &[FoundPage], cache: &HashMap<String, CacheEntry>, sources: b
             folder: String::new(),
         });
         // A source is named by the page's own words, not by a link: naming it
-        // is the faintest relation there is.
-        extra.extend(from.iter().map(|held| (*held, to, EdgeKind::Mentions)));
+        // is the faintest relation there is — and the `source:` key is the
+        // declared road.
+        extra.extend(
+            from.iter()
+                .map(|held| (*held, to, EdgeKind::Mentions, EdgeProvenance::Declared)),
+        );
     }
-    triples.extend(extra);
+    for (from, to, kind, provenance) in extra {
+        triples.entry((from, to, kind)).or_insert(provenance);
+    }
 
     let mut edges: Vec<GraphEdge> = triples
         .into_iter()
-        .filter(|(from, to, _)| from != to)
-        .map(|(from, to, kind)| GraphEdge { from, to, kind })
+        .filter(|((from, to, _), _)| from != to)
+        .map(|((from, to, kind), provenance)| GraphEdge {
+            from,
+            to,
+            kind,
+            provenance,
+        })
         .collect();
     edges.sort_by(|left, right| {
         left.from
@@ -1010,12 +1128,14 @@ fn assemble(found: &[FoundPage], cache: &HashMap<String, CacheEntry>, sources: b
             .cmp(&left.count)
             .then_with(|| left.kind.cmp(&right.kind))
     });
+    let provenances = provenance_counts(&edges);
 
     VaultGraph {
         nodes,
         edges,
         tags,
         kinds,
+        provenances,
         pages,
         ghosts: ghost_count,
         // Settled by the caller from the lint table, once it exists.
@@ -1025,6 +1145,25 @@ fn assemble(found: &[FoundPage], cache: &HashMap<String, CacheEntry>, sources: b
         truncated,
         reparsed: 0,
     }
+}
+
+/// How many lines each road wrote, every road listed in enum order — a zero
+/// is a row that says "none", not a row that is missing.
+#[must_use]
+pub fn provenance_counts(edges: &[GraphEdge]) -> Vec<ProvenanceCount> {
+    EdgeProvenance::ALL
+        .into_iter()
+        .map(|provenance| ProvenanceCount {
+            provenance,
+            count: u32::try_from(
+                edges
+                    .iter()
+                    .filter(|edge| edge.provenance == provenance)
+                    .count(),
+            )
+            .unwrap_or(u32::MAX),
+        })
+        .collect()
 }
 
 fn page_folder(id: &str) -> String {
@@ -1719,6 +1858,165 @@ mod tests {
                 "wiki/Alpha.md -depends_on-> wiki/Beta.md",
             ]
         );
+    }
+
+    /// t-5966 G1: the three roads each name their own provenance, and the
+    /// names go out on the wire as the enum spells them.
+    #[test]
+    fn each_road_names_the_provenance_it_writes() {
+        let root = vault(&[
+            (
+                "Alpha.md",
+                "---\ntitle: 알파\nsource: raw/alpha.md\nimplements: [[Beta]]\n---\n\n\
+                 see [[Gamma]] and [[Beta]].\n",
+            ),
+            ("Beta.md", "plain\n"),
+            ("Gamma.md", "plain\n"),
+        ]);
+        let graph = GraphCache::new().scan(root.path(), true);
+        let of = |from: &str, to: &str, kind: EdgeKind| {
+            graph
+                .edges
+                .iter()
+                .find(|edge| {
+                    graph.nodes[edge.from as usize].id == from
+                        && graph.nodes[edge.to as usize].id == to
+                        && edge.kind == kind
+                })
+                .map(|edge| edge.provenance)
+        };
+        // Prose is the inferred road …
+        assert_eq!(
+            of("wiki/Alpha.md", "wiki/Gamma.md", EdgeKind::Mentions),
+            Some(EdgeProvenance::Inferred)
+        );
+        assert_eq!(
+            of("wiki/Alpha.md", "wiki/Beta.md", EdgeKind::Mentions),
+            Some(EdgeProvenance::Inferred)
+        );
+        // … a key is the declared road, and so is `source:` …
+        assert_eq!(
+            of("wiki/Alpha.md", "wiki/Beta.md", EdgeKind::Implements),
+            Some(EdgeProvenance::Declared)
+        );
+        assert_eq!(
+            of("wiki/Alpha.md", "raw/alpha.md", EdgeKind::Mentions),
+            Some(EdgeProvenance::Declared)
+        );
+        // … and the measured road never writes into the scanned picture:
+        // every line is vouched for, so the lint's row is zero.
+        assert!(
+            graph
+                .edges
+                .iter()
+                .all(|edge| vouched(edge, graph.nodes[edge.to as usize].kind))
+        );
+        assert_eq!(graph.lint.counts.unsourced_edges, 0);
+        assert_eq!(
+            graph.provenances,
+            [
+                ProvenanceCount {
+                    provenance: EdgeProvenance::Measured,
+                    count: 0
+                },
+                ProvenanceCount {
+                    provenance: EdgeProvenance::Declared,
+                    count: 2
+                },
+                ProvenanceCount {
+                    provenance: EdgeProvenance::Inferred,
+                    count: 2
+                },
+            ]
+        );
+        // The wire spelling is the enum's own.
+        for edge in &graph.edges {
+            let wire = serde_json::to_value(edge).unwrap();
+            assert_eq!(wire["provenance"], edge.provenance.as_str());
+        }
+        for provenance in EdgeProvenance::ALL {
+            assert_eq!(
+                serde_json::to_value(provenance).unwrap(),
+                provenance.as_str()
+            );
+        }
+    }
+
+    /// The measured road rides beside the picture: a pair the dedupe pass
+    /// finds carries `measured`, written by that producer and nobody else.
+    #[test]
+    fn the_measured_road_is_the_dedupe_pass_and_says_so_on_the_wire() {
+        let root = vault(&[
+            ("설계 노트 첫째.md", "[[Target]]\n"),
+            ("설계 노트 둘째.md", "[[Target]]\n"),
+            ("Target.md", "plain\n"),
+        ]);
+        let graph = GraphCache::new().scan(root.path(), false);
+        let limits = crate::second_brain_live::Limits::default();
+        let pairs = crate::second_brain_live::merge_candidates(&graph, &limits);
+        assert!(!pairs.is_empty(), "{:?}", ids(&graph));
+        assert!(
+            pairs
+                .iter()
+                .all(|pair| pair.provenance == EdgeProvenance::Measured)
+        );
+        assert_eq!(
+            serde_json::to_value(&pairs[0]).unwrap()["provenance"],
+            EdgeProvenance::Measured.as_str()
+        );
+    }
+
+    /// The one rule behind the lint row, asked directly.
+    #[test]
+    fn a_line_is_vouched_for_only_on_the_road_that_could_have_written_it() {
+        let line = |kind, provenance| GraphEdge {
+            from: 0,
+            to: 1,
+            kind,
+            provenance,
+        };
+        assert!(vouched(
+            &line(EdgeKind::Mentions, EdgeProvenance::Inferred),
+            NodeKind::Page
+        ));
+        assert!(vouched(
+            &line(EdgeKind::Mentions, EdgeProvenance::Inferred),
+            NodeKind::Ghost
+        ));
+        assert!(vouched(
+            &line(EdgeKind::Related, EdgeProvenance::Declared),
+            NodeKind::Page
+        ));
+        assert!(vouched(
+            &line(EdgeKind::Supersedes, EdgeProvenance::Declared),
+            NodeKind::Ghost
+        ));
+        assert!(vouched(
+            &line(EdgeKind::Mentions, EdgeProvenance::Declared),
+            NodeKind::Source
+        ));
+        // Prose writes no key; a key writes no bare mention to a page; the
+        // scanner measures nothing; a source is named by a key alone.
+        assert!(!vouched(
+            &line(EdgeKind::Related, EdgeProvenance::Inferred),
+            NodeKind::Page
+        ));
+        assert!(!vouched(
+            &line(EdgeKind::Mentions, EdgeProvenance::Declared),
+            NodeKind::Page
+        ));
+        assert!(!vouched(
+            &line(EdgeKind::Mentions, EdgeProvenance::Measured),
+            NodeKind::Page
+        ));
+        assert!(!vouched(
+            &line(EdgeKind::Mentions, EdgeProvenance::Inferred),
+            NodeKind::Source
+        ));
+        assert!(!vouched(
+            &line(EdgeKind::Implements, EdgeProvenance::Declared),
+            NodeKind::Source
+        ));
     }
 
     #[test]

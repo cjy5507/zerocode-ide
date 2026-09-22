@@ -32567,6 +32567,87 @@ mod tests {
         );
     }
 
+    /// t-5966 G1: a line's provenance is one enum in core, spelled on the
+    /// wire by serde, and read — never derived — by the window.
+    ///
+    /// The window's table holds the enum's names in the enum's order, the
+    /// model takes each line's road from the answer (`edge.provenance`) and
+    /// nowhere from its kind, and the shell backend names a road by the
+    /// enum's variants rather than by a string a refactor could miss.
+    #[test]
+    fn edge_provenance_is_one_enum_read_off_the_wire() {
+        let core = include_str!("../../../zerocode-core/src/second_brain_graph.rs");
+        let window = crate::ui_source::window_source();
+
+        // The enum's wire spellings, from its own `as_str` table.
+        let held = core
+            .split("impl EdgeProvenance {")
+            .nth(1)
+            .expect("the provenance enum's impl");
+        let spelled = &held[..held.find("\n}\n").unwrap_or(held.len())];
+        let wire: Vec<&str> = spelled
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim();
+                let (_, rest) = line.split_once("Self::")?;
+                let (_, word) = rest.split_once("=> \"")?;
+                word.strip_suffix("\",")
+            })
+            .collect();
+        assert_eq!(
+            wire,
+            ["measured", "declared", "inferred"],
+            "the provenance enum's wire spellings moved:\n{spelled}"
+        );
+
+        // The window's table names exactly those roads, in that order.
+        let table = block_after(window, "const KNOWLEDGE_EDGE_PROVENANCES = Object.freeze([");
+        let ids: Vec<&str> = table
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("{ id: \""))
+            .filter_map(|rest| rest.split_once('"').map(|(id, _)| id))
+            .collect();
+        assert_eq!(
+            ids, wire,
+            "the window's provenance table drifted from the enum"
+        );
+
+        // The model reads the road from the answer and derives none.
+        let model = block_after(window, "function knowledgeModel(report) {");
+        assert!(
+            model.contains("knowledgeEdgeProvenanceCode(edge)"),
+            "the model no longer reads `edge.provenance` through the one reader"
+        );
+        let reader = block_after(window, "function knowledgeEdgeProvenanceCode(edge) {");
+        assert!(
+            reader.contains("KNOWLEDGE_EDGE_PROVENANCE_CODE[edge.provenance]")
+                && !reader.contains("edge.kind"),
+            "the reader derives a road from the kind instead of the answer:\n{reader}"
+        );
+        for road in &wire {
+            assert!(
+                !strip_comments(model).contains(&format!("\"{road}\"")),
+                "`knowledgeModel` spells the road `{road}` itself — roads come off the wire"
+            );
+        }
+
+        // The one backend file that touches the graph spells no road as a
+        // string: the enum's names, or nothing.
+        let graph_commands = BACKEND_PARTS
+            .iter()
+            .find(|(name, _)| *name == "cmd/second_brain.rs")
+            .map(|(_, text)| *text)
+            .expect("cmd/second_brain.rs is a shipped part");
+        let shipped = strip_rust_comments(graph_commands);
+        for road in &wire {
+            assert!(
+                !shipped.contains(&format!("\"{road}\"")),
+                "cmd/second_brain.rs spells the road `{road}` as a string — name \
+                 `EdgeProvenance::` instead"
+            );
+        }
+    }
+
     /// t-4140 S2: which mode the knowledge graph opens in is a rule about
     /// where the person came from and what this vault remembers — never a
     /// rule about how big the graph is. The design (docs/design/

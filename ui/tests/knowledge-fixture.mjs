@@ -150,6 +150,7 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
       undeclared_relations: [...undeclared].sort(([left], [right]) => left.localeCompare(right))
         .map(([page, targets]) => ({ page, targets: [...new Set(targets)].sort() })),
       unlogged_raw: [],
+      unsourced_edges: [],
       contradictions,
       superseded: [...superseded].sort(),
       merge_candidates: null,
@@ -161,13 +162,14 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
       missing_frontmatter: 0,
       undeclared_relations: table.undeclared_relations.length,
       unlogged_raw: 0,
+      unsourced_edges: 0,
       contradictions,
       superseded: table.superseded.length,
       merge_candidates: null,
     };
     table.findings = table.counts.index_gaps + table.counts.ghost_links + table.counts.orphans
       + table.counts.missing_frontmatter + table.counts.undeclared_relations
-      + table.counts.unlogged_raw;
+      + table.counts.unlogged_raw + table.counts.unsourced_edges;
     return table;
   };
   window.__buildVaultGraph__ = (args, spec) => {
@@ -247,7 +249,10 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
       const key = `${from}>${to}`;
       if (seen.has(key)) return;
       seen.add(key);
-      edges.push(spec.untyped ? { from, to } : { from, to, kind });
+      /* 근거(t-5966)는 백엔드의 세 길 그대로: 본문 링크는 inferred, 키(원본 `source:` 포함)는
+         declared. 기계가 잰 선은 볼트 그림에 없다. */
+      const provenance = kind !== "mentions" || nodes[to]?.kind === "source" ? "declared" : "inferred";
+      edges.push(spec.untyped ? { from, to } : { from, to, kind, provenance });
     };
     const lonely = (at) => at % 5 === 4;
     const nearest = (at, step) => {
@@ -315,6 +320,9 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
         tags: [...counted].map(([tag, count]) => ({ tag, count }))
           .sort((left, right) => right.count - left.count || left.tag.localeCompare(right.tag)),
         kinds: spec.untyped ? [] : kinds,
+        /* 근거별 수(t-5966): 백엔드처럼 세 길 전부, enum 순서로, 0도 한 줄. */
+        provenances: ["measured", "declared", "inferred"].map((provenance) => ({
+          provenance, count: edges.filter((edge) => edge.provenance === provenance).length })),
         nodes,
         edges,
       },
@@ -411,9 +419,11 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
     }
     vulnerabilities.sort((left, right) => SUPPLY_SEVERITIES.indexOf(left.row.severity)
       - SUPPLY_SEVERITIES.indexOf(right.row.severity) || (left.row.id < right.row.id ? -1 : 1));
-    vulnerabilities.forEach((held, at) => affects.push({ from: at, to: seat.get(held.target), kind: "affects" }));
+    vulnerabilities.forEach((held, at) => affects.push({ from: at, to: seat.get(held.target), kind: "affects",
+      provenance: "measured" }));
     const edges = [
-      ...links.map(([from, to]) => ({ from: seat.get(from), to: seat.get(to), kind: "depends_on" })),
+      ...links.map(([from, to]) => ({ from: seat.get(from), to: seat.get(to), kind: "depends_on",
+        provenance: "measured" })),
       ...affects,
     ].sort((left, right) => (left.kind < right.kind ? -1 : left.kind > right.kind ? 1 : 0)
       || left.from - right.from || left.to - right.to);

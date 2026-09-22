@@ -18,7 +18,12 @@
 //!   relation key on that page names (the vault protocol says a relation the
 //!   prose states should also be a key, so the graph sees it);
 //! - **unlogged raw** — `raw/` items no page's `source:` names and no page
-//!   (the log above all) mentions by path.
+//!   (the log above all) mentions by path;
+//! - **unsourced edges** — lines whose provenance no road of the scanner can
+//!   vouch for (t-5966; the rule is [`crate::second_brain_graph::vouched`]). Zero on
+//!   any scanned vault by construction — the row is the promise the wire
+//!   makes to the lens, the path answer and the exported picture, checked
+//!   rather than assumed.
 //!
 //! Two more rows are facts rather than faults and never fail the recipe:
 //! declared **contradictions** and **superseded** pages. And one row is a
@@ -34,7 +39,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use crate::second_brain::{RAW_DIR, RAW_README_FILE, WIKI_INDEX_FILE, WIKI_LOG_FILE};
-use crate::second_brain_graph::{EdgeKind, MAX_GRAPH_ENTRIES, NodeKind, VaultGraph};
+use crate::second_brain_graph::{
+    EdgeKind, EdgeProvenance, MAX_GRAPH_ENTRIES, NodeKind, VaultGraph, vouched,
+};
 
 /// A link target nothing on disk answers to, and the pages that wrote it.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,6 +69,17 @@ pub struct UndeclaredRelation {
     pub targets: Vec<String>,
 }
 
+/// A line whose provenance no road of the scanner could have written
+/// (t-5966): the edge by page ids, what it claims to be and which road it
+/// claims wrote it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnsourcedEdge {
+    pub from: String,
+    pub to: String,
+    pub kind: Option<EdgeKind>,
+    pub provenance: Option<EdgeProvenance>,
+}
+
 /// Two pages that look like one — t-2931's dedupe lens fills this seat.
 ///
 /// Kept here so the recipe and the health card have the row the day the
@@ -83,6 +101,9 @@ pub struct LintCounts {
     pub missing_frontmatter: u32,
     pub undeclared_relations: u32,
     pub unlogged_raw: u32,
+    /// Lines whose provenance no road vouches for (t-5966).
+    #[serde(default)]
+    pub unsourced_edges: u32,
     pub contradictions: u32,
     pub superseded: u32,
     /// `None` until the dedupe lens (t-2931) computes it — a row that says
@@ -101,6 +122,9 @@ pub struct VaultLint {
     pub undeclared_relations: Vec<UndeclaredRelation>,
     /// Vault-relative `raw/…` paths, sorted.
     pub unlogged_raw: Vec<String>,
+    /// Lines with a provenance no road vouches for, in edge order (t-5966).
+    #[serde(default)]
+    pub unsourced_edges: Vec<UnsourcedEdge>,
     /// Declared `contradicts` relations — a count, because the pair is already
     /// an edge the graph draws and the search word finds.
     pub contradictions: u32,
@@ -110,7 +134,7 @@ pub struct VaultLint {
     /// t-2931's seat. `None` means nobody computed it.
     pub merge_candidates: Option<Vec<MergeCandidate>>,
     pub counts: LintCounts,
-    /// The rows a recipe fails on — the six deterministic findings, summed.
+    /// The rows a recipe fails on — the seven deterministic findings, summed.
     /// Contradictions and superseded pages are facts the protocol asked for,
     /// not faults, and a merge candidate is a proposal.
     pub findings: u32,
@@ -139,6 +163,7 @@ impl VaultLint {
             missing_frontmatter: count(self.missing_frontmatter.len()),
             undeclared_relations: count(self.undeclared_relations.len()),
             unlogged_raw: count(self.unlogged_raw.len()),
+            unsourced_edges: count(self.unsourced_edges.len()),
             contradictions: self.contradictions,
             superseded: count(self.superseded.len()),
             merge_candidates: self.merge_candidates.as_ref().map(|held| count(held.len())),
@@ -150,6 +175,7 @@ impl VaultLint {
             self.counts.missing_frontmatter,
             self.counts.undeclared_relations,
             self.counts.unlogged_raw,
+            self.counts.unsourced_edges,
         ]
         .into_iter()
         .fold(0u32, u32::saturating_add);
@@ -199,11 +225,25 @@ pub fn assess(
     let mut ghosts: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     let mut contradictions = 0u32;
     let mut superseded: BTreeSet<String> = BTreeSet::new();
+    let mut unsourced_edges: Vec<UnsourcedEdge> = Vec::new();
     for edge in &graph.edges {
         let (from, to) = (edge.from as usize, edge.to as usize);
         let Some(target) = nodes.get(to) else {
             continue;
         };
+        // The one rule (`second_brain_graph::vouched`), asked of every line
+        // before any row sorts it by kind.
+        if !vouched(edge, target.kind) {
+            unsourced_edges.push(UnsourcedEdge {
+                from: nodes
+                    .get(from)
+                    .map(|node| node.id.clone())
+                    .unwrap_or_default(),
+                to: target.id.clone(),
+                kind: Some(edge.kind),
+                provenance: Some(edge.provenance),
+            });
+        }
         match target.kind {
             NodeKind::Ghost => {
                 let written = target.id.strip_prefix("ghost:").unwrap_or(&target.id);
@@ -311,6 +351,7 @@ pub fn assess(
         missing_frontmatter,
         undeclared_relations,
         unlogged_raw,
+        unsourced_edges,
         contradictions,
         superseded: superseded.into_iter().collect(),
         merge_candidates: None,
@@ -680,6 +721,73 @@ mod tests {
             lint.counts.merge_candidates.is_some(),
             "the scan seats the merge candidates"
         );
+    }
+
+    /// t-5966: a line whose provenance no road vouches for is a finding, by
+    /// the ids the graph spells, and moves the recipe's exit.
+    #[test]
+    fn an_edge_no_road_vouches_for_is_counted_and_fails_the_recipe() {
+        use crate::second_brain_graph::{EdgeProvenance, GraphEdge, GraphNode};
+        let page = |id: &str| GraphNode {
+            id: id.to_string(),
+            title: id.to_string(),
+            tags: Vec::new(),
+            kind: NodeKind::Page,
+            modified_ms: 0,
+            out_links: 0,
+            in_links: 0,
+            source: None,
+            excerpt: String::new(),
+            folder: String::new(),
+        };
+        let line = |from, to, kind, provenance| GraphEdge {
+            from,
+            to,
+            kind,
+            provenance,
+        };
+        let graph = VaultGraph {
+            pages: 3,
+            nodes: vec![page(WIKI_INDEX_FILE), page("wiki/a.md"), page("wiki/b.md")],
+            edges: vec![
+                line(0, 1, EdgeKind::Mentions, EdgeProvenance::Inferred),
+                line(0, 2, EdgeKind::Mentions, EdgeProvenance::Inferred),
+                // Prose cannot write a key: nobody vouches for this.
+                line(1, 2, EdgeKind::Related, EdgeProvenance::Inferred),
+                // The scanner measures nothing: nor for this.
+                line(2, 1, EdgeKind::Mentions, EdgeProvenance::Measured),
+                line(1, 2, EdgeKind::Mentions, EdgeProvenance::Inferred),
+            ],
+            ..VaultGraph::default()
+        };
+        let root = tempfile::tempdir().unwrap();
+        let lint = assess(root.path(), &graph, &HashMap::new());
+        assert_eq!(
+            lint.unsourced_edges,
+            [
+                UnsourcedEdge {
+                    from: "wiki/a.md".into(),
+                    to: "wiki/b.md".into(),
+                    kind: Some(EdgeKind::Related),
+                    provenance: Some(EdgeProvenance::Inferred),
+                },
+                UnsourcedEdge {
+                    from: "wiki/b.md".into(),
+                    to: "wiki/a.md".into(),
+                    kind: Some(EdgeKind::Mentions),
+                    provenance: Some(EdgeProvenance::Measured),
+                },
+            ]
+        );
+        assert_eq!(lint.counts.unsourced_edges, 2);
+        // Both pages miss `source`/`ingested_at` (2) and the index lists both,
+        // so the only other rows are frontmatter ones; the two lines above
+        // are the rest of the findings.
+        assert_eq!(
+            lint.findings,
+            lint.counts.missing_frontmatter + lint.counts.undeclared_relations + 2
+        );
+        assert!(!lint.is_clean());
     }
 
     #[test]

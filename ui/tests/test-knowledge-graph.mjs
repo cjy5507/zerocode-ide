@@ -965,10 +965,10 @@ ok(
     brainOpen.overview.tags === 2 &&
     brainOpen.overview.kinds >= 2 &&
     brainOpen.overview.recent === 5 &&
-    // 카파시의 lint 여덟 줄과 라이브 층의 셋(t-2931) — 열한 줄, 수는 픽스처가
-    // 지은 `graph.lint.counts`의 것(라이브 층이 없는 답에서 셋은 0)이고 창은
-    // 하나도 세지 않는다.
-    brainOpen.overview.health.length === 11 &&
+    // 카파시의 lint 여덟 줄, 근거 없는 간선 한 줄(t-5966), 라이브 층의 셋(t-2931) —
+    // 열두 줄, 수는 픽스처가 지은 `graph.lint.counts`의 것(라이브 층이 없는 답에서
+    // 셋은 0)이고 창은 하나도 세지 않는다.
+    brainOpen.overview.health.length === 12 &&
     JSON.stringify(brainOpen.overview.health) === JSON.stringify(brainOpen.overview.healthExpected) &&
     brainOpen.overview.health.includes("orphans=1") &&
     brainOpen.overview.orphanTile === "1" &&
@@ -976,7 +976,7 @@ ok(
     brainOpen.overview.health.includes("index_gaps=12") &&
     brainOpen.overview.health.includes("contradictions=1") &&
     brainOpen.overview.health.includes("superseded=1") &&
-    JSON.stringify(brainOpen.overview.healthDoorless) === JSON.stringify(["unlogged_raw"]) &&
+    JSON.stringify(brainOpen.overview.healthDoorless) === JSON.stringify(["unlogged_raw", "unsourced_edges"]) &&
     brainOpen.overview.health.includes("recalledToday=0") &&
     brainOpen.overview.health.includes("neverRecalled=0") &&
     brainOpen.overview.health.includes("merge=0") &&
@@ -1105,6 +1105,9 @@ const brainFixture = await page.evaluate(async (lint) => {
     // are painted `is-clean` at zero by design — the fixture vault has no
     // recall trace — so only the lint rows count as "clean" here. Without
     // this filter the test had been red since t-2931 unit 3 added them.
+    // The one lint row that is clean on purpose is `unsourced_edges`
+    // (t-5966): zero on any scanned vault by construction, and the fixture
+    // holds no line the scanner did not write.
     clean: [...panel.querySelectorAll(".knowledge-health-row.is-clean")]
       .map((row) => row.dataset.knowledgeLint)
       .filter((lint) => !KNOWLEDGE_HEALTH_ROWS.find((row) => row.lint === lint)?.live),
@@ -1115,9 +1118,10 @@ ok(
   JSON.stringify(brainFixture.health) === JSON.stringify(brainFixture.expected) &&
     brainFixture.health.includes("index_gaps=2") &&
     brainFixture.health.includes("unlogged_raw=1") &&
+    brainFixture.health.includes("unsourced_edges=0") &&
     brainFixture.orphanTile === "1" &&
     brainFixture.ghostTile === "1" &&
-    brainFixture.clean.length === 0,
+    JSON.stringify(brainFixture.clean) === JSON.stringify(["unsourced_edges"]),
   JSON.stringify(brainFixture),
 );
 
@@ -1870,6 +1874,80 @@ const pathKeyed = await page.evaluate(async () => {
       && same(pathKeyed.back),
     JSON.stringify(pathKeyed));
 }
+
+/* Test 11d(t-5966 G1): 선의 근거. 백엔드가 선마다 `provenance`를 적어 보내고, 창은 그것을
+ * 읽기만 한다 — 렌즈의 세 토글(기본 전부 켜짐)은 그 길의 선을 그림에서 빼고 점은 남긴다;
+ * 범례에 세 줄이 서고; 고른 점의 관계 줄마다 근거의 칩이 서며; 밝은 선의 낱말은 관계와
+ * 근거를 <title>로 든다. 건강 카드의 「근거 없는 간선」은 백엔드 표의 0을 그대로 읽는다. */
+const provenanceLens = await page.evaluate(async () => {
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  knowledgeSelectedKey = null;
+  knowledgeQuery = "";
+  knowledgeProvenanceHidden.clear();
+  window.__VAULT__ = {
+    pages: 5,
+    customEdges: [
+      { from: 0, to: 1, kind: "mentions" },
+      { from: 0, to: 2, kind: "depends_on" },
+      { from: 2, to: 3, kind: "implements" },
+      { from: 3, to: 4, kind: "mentions" },
+    ],
+  };
+  dropTab("knowledge");
+  document.getElementById("nav-knowledge").click();
+  await wait(300);
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  const edgesOf = () => [...view.querySelectorAll(".knowledge-edges .knowledge-edge")];
+  const roadsOf = () => edgesOf().map((line) => ["measured", "declared", "inferred"]
+    .find((road) => line.classList.contains(`is-${road}`)) ?? "none").sort();
+  const nodesOf = () => view.querySelectorAll(".knowledge-node").length;
+  const flags = [...view.querySelectorAll("[data-knowledge-provenance]")]
+    .map((one) => [one.dataset.knowledgeProvenance, one.getAttribute("aria-pressed")]);
+  const legend = [...view.querySelectorAll(".knowledge-legend [data-edge-provenance]")]
+    .map((one) => one.dataset.edgeProvenance);
+  const before = { edges: edgesOf().length, roads: roadsOf(), nodes: nodesOf() };
+  /* 「추론」을 끄면 본문 링크의 두 선이 빠지고 점 다섯은 그대로다. */
+  view.querySelector('[data-knowledge-provenance="inferred"]').click();
+  await wait(80);
+  const inferredOff = { edges: edgesOf().length, roads: roadsOf(), nodes: nodesOf(),
+    pressed: view.querySelector('[data-knowledge-provenance="inferred"]').getAttribute("aria-pressed") };
+  view.querySelector('[data-knowledge-provenance="inferred"]').click();
+  await wait(80);
+  const back = { edges: edgesOf().length, roads: roadsOf() };
+  /* 고른 점의 관계 줄: 나가는 둘(본문·키)에 근거의 칩이 각각 선다. */
+  selectKnowledgeNode(view, "wiki/Page-0000.md");
+  await wait(60);
+  const chips = [...view.querySelectorAll(".knowledge-relations-outgoing .knowledge-relation-provenance")]
+    .map((one) => one.dataset.edgeProvenance).sort();
+  /* 밝은 선의 낱말은 관계와 근거를 툴팁으로 든다(방향 있는 관계에만 낱말이 선다). */
+  litKnowledge(view, knowledgeLayouts.get(view), "wiki/Page-0000.md");
+  await wait(30);
+  const titles = [...view.querySelectorAll(".knowledge-edge-label title")].map((one) => one.textContent);
+  litKnowledge(view, knowledgeLayouts.get(view), null);
+  selectKnowledgeNode(view, null);
+  const health = view.querySelector('.knowledge-health-row[data-knowledge-lint="unsourced_edges"]');
+  const overview = [...view.querySelectorAll(".knowledge-overview-provenances li")]
+    .map((one) => `${one.querySelector(".knowledge-relation-word").dataset.edgeProvenance}=${one.querySelector(".knowledge-inspector-note").textContent}`);
+  return { flags, legend, before, inferredOff, back, chips, titles,
+    health: health ? { note: health.querySelector(".knowledge-inspector-note").textContent,
+      disabled: health.querySelector("button").disabled } : null,
+    overview };
+});
+ok("provenance: three toggles default on, a hidden road drops its lines and keeps the points, the legend, the card chips and the label tooltip read the answer's road",
+  JSON.stringify(provenanceLens.flags) === JSON.stringify([["measured", "true"], ["declared", "true"], ["inferred", "true"]])
+    && JSON.stringify(provenanceLens.legend) === JSON.stringify(["measured", "declared", "inferred"])
+    && provenanceLens.before.edges === 4
+    && JSON.stringify(provenanceLens.before.roads) === JSON.stringify(["declared", "declared", "inferred", "inferred"])
+    && provenanceLens.inferredOff.edges === 2
+    && JSON.stringify(provenanceLens.inferredOff.roads) === JSON.stringify(["declared", "declared"])
+    && provenanceLens.inferredOff.nodes === provenanceLens.before.nodes
+    && provenanceLens.inferredOff.pressed === "false"
+    && provenanceLens.back.edges === 4
+    && JSON.stringify(provenanceLens.chips) === JSON.stringify(["declared", "inferred"])
+    && provenanceLens.titles.length === 1 && provenanceLens.titles[0].startsWith("depends_on · ")
+    && provenanceLens.health?.note === "0" && provenanceLens.health?.disabled === true
+    && JSON.stringify(provenanceLens.overview) === JSON.stringify(["measured=0", "declared=2", "inferred=2"]),
+  JSON.stringify(provenanceLens));
 
 /* Test 11c: 시간 슬라이서의 프리셋은 벽시계의 창이다(K24) — 「24시간」은 지금에서
  * 24시간 안에 고쳐지거나 회상된 페이지를 남긴다. 볼트의 시간 폭에 대한 백분율로
@@ -3211,6 +3289,8 @@ const panel = await page.evaluate(async () => {
     dir: row.querySelector(".knowledge-relation-dir")?.textContent ?? "",
     note: row.querySelector(".knowledge-inspector-note")?.textContent ?? "",
     why: row.querySelector(".knowledge-relation-why")?.textContent ?? "",
+    /* 근거의 칩(t-5966) — 뜻 뒤에 누가 썼는가. */
+    road: row.querySelector(".knowledge-relation-provenance")?.textContent ?? "",
     kindWord: row.querySelector(".knowledge-inspector-note")?.firstChild?.textContent ?? "",
   }));
   const chosen = {
@@ -3256,11 +3336,11 @@ ok("t-4140 S4: the inspector is two tabs — the page (overview or the card with
     // 낱말 칸은 관계 키 그대로 시작하고(번역 금지 — 볼트에 적힌 키다) 그 뒤에
     // 그 키의 뜻이 쉬운 말로 붙는다(09-16): 「왜 연결됐는지」에 답하는 한 마디.
     && panel.chosen.outgoing.every((row) => /\bkind-[a-z_]+\b/.test(row.mark) && row.dir === "→"
-      && /^[a-z_?]+/.test(row.note) && row.why.length > 0
-      && row.note === `${row.kindWord}${row.why}`)
+      && /^[a-z_?]+/.test(row.note) && row.why.length > 0 && row.road.length > 0
+      && row.note === `${row.kindWord}${row.why}${row.road}`)
     && panel.chosen.incoming.every((row) => /\bkind-[a-z_]+\b/.test(row.mark) && row.dir === "←"
-      && /^[a-z_?]+/.test(row.note) && row.why.length > 0
-      && row.note === `${row.kindWord}${row.why}`)
+      && /^[a-z_?]+/.test(row.note) && row.why.length > 0 && row.road.length > 0
+      && row.note === `${row.kindWord}${row.why}${row.road}`)
     && panel.kept.tabs === "page:false,activity:true" && panel.kept.activityHidden === false,
   JSON.stringify(panel));
 

@@ -234,6 +234,23 @@ const KNOWLEDGE_EDGE_DIRECTED = Object.freeze(["implements", "depends_on", "supe
 const KNOWLEDGE_EDGE_CODE = Object.freeze(
   Object.fromEntries(KNOWLEDGE_EDGE_KINDS.map((kind, code) => [kind, code])),
 );
+/* 선의 근거(t-5966 G1) — 백엔드 `EdgeProvenance`의 세 낱말, 그 enum 순서 그대로. 자리가
+ * 곧 코드다(`Uint8Array`에 실린다): 뒤에만 붙는다. `id`는 와이어의 철자이고 번역하지
+ * 않는다 — 렌즈의 낱말(`key`)과 뜻 한 줄(`why`)만 사람의 말이다. 창은 어느 선이 어느
+ * 길에서 왔는지 스스로 정하지 않는다: 답의 `provenance`를 읽을 뿐이다. */
+const KNOWLEDGE_EDGE_PROVENANCES = Object.freeze([
+  { id: "measured", key: "knowledge.provenanceMeasured", word: "실측",
+    why: { key: "knowledge.whyMeasured", word: "기계가 잰 관계 — 회상·세션·잠금 파일·중복 검사" } },
+  { id: "declared", key: "knowledge.provenanceDeclared", word: "선언",
+    why: { key: "knowledge.whyDeclared", word: "frontmatter 키가 이름으로 적은 관계" } },
+  { id: "inferred", key: "knowledge.provenanceInferred", word: "추론",
+    why: { key: "knowledge.whyInferred", word: "본문의 [[링크]]가 말하는 관계" } },
+]);
+const KNOWLEDGE_EDGE_PROVENANCE_CODE = Object.freeze(
+  Object.fromEntries(KNOWLEDGE_EDGE_PROVENANCES.map((row, code) => [row.id, code])),
+);
+/* 답에 근거가 없는 선(옛 백엔드)의 자리 — 렌즈는 거르지 않고 옷은 입히지 않는다. */
+const KNOWLEDGE_PROVENANCE_UNKNOWN = 255;
 
 /* 군집 탐지 (3차).
  *
@@ -350,6 +367,8 @@ let knowledgeTypedOnly = false;
  * 페이지만 남긴다: `index_gaps`·`missing_frontmatter`·`undeclared_relations`,
  * 아니면 null. 고아·유령은 제 렌즈(위)를 그대로 쓴다. */
 let knowledgeLintLens = null;
+/* 근거 렌즈(t-5966): 숨긴 근거의 낱말들. 비어 있으면 전부 보인다 — 기본이다. */
+const knowledgeProvenanceHidden = new Set();
 let knowledgeShowSources = false;
 /* 라이브 층의 렌즈 셋(t-2931): 창 안에서 회상되거나 바뀐 것만, 한 번도 회상되지
  * 않은 것만, 그리고 merge 후보 쌍만. 창의 길이는 백엔드의 한 표가 정한다. */
@@ -990,6 +1009,31 @@ function buildKnowledgeView() {
     one.setAttribute("aria-pressed", "false");
     sift.appendChild(one);
   }
+  /* 근거 렌즈(t-5966): 세 토글, 기본 전부 켜짐. 누르면 그 길의 선이 그림에서 빠진다 —
+   * 점은 남는다(선의 렌즈이지 점의 렌즈가 아니다). 표(`KNOWLEDGE_EDGE_PROVENANCES`)의
+   * 순서대로 선다. */
+  const provenance = document.createElement("div");
+  provenance.className = "knowledge-provenance";
+  provenance.setAttribute("role", "group");
+  provenance.dataset.i18nAria = "knowledge.provenanceLens";
+  provenance.setAttribute("aria-label", t("knowledge.provenanceLens", "근거"));
+  for (const row of KNOWLEDGE_EDGE_PROVENANCES) {
+    const one = document.createElement("button");
+    one.type = "button";
+    one.className = "btn knowledge-flag knowledge-provenance-flag";
+    one.dataset.knowledgeProvenance = row.id;
+    one.dataset.i18nAria = row.why.key;
+    one.setAttribute("aria-label", t(row.why.key, row.why.word));
+    one.setAttribute("aria-pressed", "true");
+    const mark = document.createElement("span");
+    mark.className = `knowledge-legend-edge is-${row.id}`;
+    mark.setAttribute("aria-hidden", "true");
+    const short = document.createElement("span");
+    short.dataset.i18n = row.key;
+    short.textContent = t(row.key, row.word);
+    one.append(mark, short);
+    provenance.appendChild(one);
+  }
   /* 표시 설정(t-4140 S6)은 렌즈가 아니라 그림의 설정이다 — 목차·일지의 점과 선을 그림에서
    * 접는다. 눌려 있음이 「보임」이고, 기본이 눌림이다. 시안의 자리대로 머리에 제 단추로
    * 선다; 좁은 판은 낱말을 접고 그림만 남긴다(이름은 `aria-label`이 든다). */
@@ -1030,7 +1074,7 @@ function buildKnowledgeView() {
   lensToggle.setAttribute("aria-expanded", "false");
   const lenses = document.createElement("div");
   lenses.className = "knowledge-lens-popover";
-  lenses.append(sift, tags);
+  lenses.append(sift, provenance, tags);
 
   const gap = document.createElement("span");
   gap.className = "knowledge-gap";
@@ -1290,6 +1334,22 @@ function buildKnowledgeView() {
     item.append(mark, word, why);
     legendList.appendChild(item);
   }
+  /* 근거의 세 줄(t-5966). 표본은 렌즈 토글과 같은 옷(`knowledge-legend-edge is-*`)이다. */
+  for (const row of KNOWLEDGE_EDGE_PROVENANCES) {
+    const item = document.createElement("li");
+    item.dataset.edgeProvenance = row.id;
+    const mark = document.createElement("span");
+    mark.className = `knowledge-legend-edge is-${row.id}`;
+    const word = document.createElement("span");
+    word.dataset.i18n = row.key;
+    word.textContent = t(row.key, row.word);
+    const why = document.createElement("span");
+    why.className = "knowledge-legend-why";
+    why.dataset.i18n = row.why.key;
+    why.textContent = t(row.why.key, row.why.word);
+    item.append(mark, word, why);
+    legendList.appendChild(item);
+  }
   legend.append(legendHead, legendList);
 
   const inspector = document.createElement("aside");
@@ -1433,6 +1493,9 @@ const KNOWLEDGE_HEALTH_ROWS = [
   { lint: "missing_frontmatter", count: "missing_frontmatter", key: "knowledge.lintMissingFrontmatter", word: "source·ingested_at 없는 페이지", door: "lens" },
   { lint: "undeclared_relations", count: "undeclared_relations", key: "knowledge.lintUndeclaredRelations", word: "관계 키 없는 본문 링크", door: "lens" },
   { lint: "unlogged_raw", count: "unlogged_raw", key: "knowledge.lintUnloggedRaw", word: "취합 안 된 raw 항목", door: "none" },
+  /* 근거 없는 간선(t-5966): 백엔드가 어느 길도 보증하지 못한 선. 그림의 점이 아니라 선의
+   * 줄이라 문이 없다 — 스캔한 볼트에서는 만듦새로 0이고, 이 줄은 그 약속을 읽는 자리다. */
+  { lint: "unsourced_edges", count: "unsourced_edges", key: "knowledge.lintUnsourcedEdges", word: "근거 없는 간선", door: "none" },
   { lint: "contradictions", count: "contradictions", key: "knowledge.lintContradictions", word: "모순", door: "search" },
   { lint: "superseded", count: "superseded", key: "knowledge.lintSuperseded", word: "대체된 페이지", door: "search" },
   /* 라이브 층의 셋(t-2931): 오늘 회상된 페이지·한 번도 회상되지 않은 페이지·
@@ -1551,6 +1614,7 @@ function buildKnowledgeOverview() {
     knowledgeListSection("knowledge-overview-hubs", "knowledge.hubs", t("knowledge.hubs", "허브")),
     knowledgeListSection("knowledge-overview-tags", "knowledge.tagShare", t("knowledge.tagShare", "태그 분포")),
     knowledgeListSection("knowledge-overview-kinds", "knowledge.relationKinds", t("knowledge.relationKinds", "관계 종류")),
+    knowledgeListSection("knowledge-overview-provenances", "knowledge.provenanceLens", t("knowledge.provenanceLens", "근거")),
     knowledgeListSection("knowledge-overview-recent", "knowledge.recent", t("knowledge.recent", "최근 수정")),
   );
   return box;
@@ -1762,7 +1826,8 @@ function sameKnowledgeTopology(left, right) {
 
 function knowledgeModel(report) {
   const lens = [knowledgeOrphansOnly, knowledgeGhostsOnly, knowledgeTypedOnly,
-    knowledgeAliveOnly, knowledgeColdOnly, knowledgeMergeOnly, knowledgeLintLens].join("|");
+    knowledgeAliveOnly, knowledgeColdOnly, knowledgeMergeOnly, knowledgeLintLens,
+    [...knowledgeProvenanceHidden].sort().join(",")].join("|");
   /* 공급망 렌즈(P4)가 켜졌으면 답의 점과 선이 볼트 뒤에 붙는다(`knowledgeSupplyView`) — 답·볼트·펼침이
    * 그대로면 같은 객체라 캐시의 문지기가 된다. 꺼졌으면 `null`이고 아래는 볼트만의 그림이다. */
   const supply = knowledgeSupplyView(report?.graph ?? null);
@@ -1784,7 +1849,9 @@ function knowledgeModel(report) {
   /* 후보 쌍은 렌즈가 켜졌을 때만 선이 된다 — 물음표 선 예순 개가 볼트 전체에
    * 늘 그려지면 그림은 관계가 아니라 의심을 말한다. */
   const pairs = knowledgeMergeOnly
-    ? [...graphEdges, ...mergePairs.map((pair) => ({ from: pair.left, to: pair.right, kind: "merge" }))]
+    ? [...graphEdges, ...mergePairs.map((pair) => ({
+      from: pair.left, to: pair.right, kind: "merge", provenance: pair.provenance,
+    }))]
     : graphEdges;
   const alive = new Uint8Array(nodes.length);
   const recalledNow = new Uint8Array(nodes.length);
@@ -1867,6 +1934,7 @@ function knowledgeModel(report) {
   const to = new Int32Array(pairs.length);
   const ghost = new Uint8Array(pairs.length);
   const kind = new Uint8Array(pairs.length);
+  const provenance = new Uint8Array(pairs.length);
   let edgeCount = 0;
   const degree = new Int32Array(count);
   const relationKinds = new Uint8Array(count);
@@ -1876,10 +1944,15 @@ function knowledgeModel(report) {
     if (left < 0 || right < 0) continue;
     const code = knowledgeEdgeCode(edge);
     if (knowledgeTypedOnly && code === 0) continue;
+    /* 근거 렌즈(t-5966): 숨긴 길의 선은 서지 않는다. 답에 근거가 없는 선은 거르지 않는다. */
+    const road = knowledgeEdgeProvenanceCode(edge);
+    if (road !== KNOWLEDGE_PROVENANCE_UNKNOWN
+        && knowledgeProvenanceHidden.has(KNOWLEDGE_EDGE_PROVENANCES[road].id)) continue;
     from[edgeCount] = left;
     to[edgeCount] = right;
     ghost[edgeCount] = held[right].kind === "ghost" || held[left].kind === "ghost" ? 1 : 0;
     kind[edgeCount] = code;
+    provenance[edgeCount] = road;
     relationKinds[left] |= 1 << code;
     relationKinds[right] |= 1 << code;
     edgeCount += 1;
@@ -1976,6 +2049,9 @@ function knowledgeModel(report) {
     to,
     ghost,
     kind,
+    /* 선마다 근거의 자리(t-5966) — `KNOWLEDGE_EDGE_PROVENANCES`의 인덱스, 답에 없으면
+     * `KNOWLEDGE_PROVENANCE_UNKNOWN`. */
+    provenance,
     edgeCount,
     start,
     neighbour,
@@ -2403,6 +2479,19 @@ function knowledgeEdgeWord(code) {
   return code === KNOWLEDGE_EDGE_CODE.merge
     ? t("knowledge.edgeMerge", "merge?")
     : KNOWLEDGE_EDGE_KINDS[code];
+}
+
+/* 답의 선 하나 → 근거의 자리(t-5966). 낱말은 백엔드의 것이고, 모르는 낱말·없는 낱말은
+ * 「모름」이다 — 창이 길을 짐작해 채우지 않는다. */
+function knowledgeEdgeProvenanceCode(edge) {
+  const at = KNOWLEDGE_EDGE_PROVENANCE_CODE[edge.provenance];
+  return at === undefined ? KNOWLEDGE_PROVENANCE_UNKNOWN : at;
+}
+
+/* 자리 → 사람에게 보일 근거의 낱말. 모르는 자리는 빈 낱말이다. */
+function knowledgeProvenanceWord(code) {
+  const row = KNOWLEDGE_EDGE_PROVENANCES[code];
+  return row === undefined ? "" : t(row.key, row.word);
 }
 
 /* 관계 낱말의 뜻을, 쉬운 말로 (09-16).
@@ -4576,6 +4665,7 @@ function makeKnowledgeSvgPainter() {
       held.hue = held.inter ? -1 : layout.communityHue[community[from[at]]];
       held.ghost = ghost[at] === 1;
       held.kind = KNOWLEDGE_EDGE_KINDS[kind[at]];
+      held.provenance = KNOWLEDGE_EDGE_PROVENANCES[model.provenance[at]]?.id ?? "";
       held.focused = layout.focusEdgeVisited[at] === 1;
       /* 바퀴살(시안): 고리의 중심에 닿는 선만 또렷하다. */
       held.spoke = layout.ring !== null && (from[at] === layout.ring.seat || to[at] === layout.ring.seat);
@@ -4621,6 +4711,9 @@ function makeKnowledgeSvgPainter() {
           edge.kind === "mentions" || edge.kind === "merge" ? "" : "is-typed",
           edge.kind === "merge" ? "is-merge" : "",
           edge.kind === "mentions" ? "" : `kind-${edge.kind}`,
+          /* 근거(t-5966)는 옷이 아니라 이름이다 — 잉크와 점선은 관계의 것 그대로이고, 이 클래스는
+           * 범례·시험·내보내기가 선의 길을 읽는 손잡이다. */
+          edge.provenance === "" ? "" : `is-${edge.provenance}`,
           edge.lit ? "is-lit" : "",
           edge.focused ? "is-focus-lit" : "",
           edge.spoke ? "is-spoke" : "",
@@ -4778,6 +4871,14 @@ function paintKnowledgeEdgeLabels(view, layout) {
       word.setAttribute("class", "knowledge-edge-label");
       word.setAttribute("text-anchor", "middle");
       word.textContent = knowledgeEdgeWord(model.kind[at]);
+      /* 툴팁(t-5966): 낱말 위에 머무르면 관계와 그 근거 — SVG의 <title>은 브라우저의 것이라
+       * 층이 하나 더 서지 않는다. */
+      const roadWord = knowledgeProvenanceWord(model.provenance[at]);
+      if (roadWord !== "") {
+        const tip = document.createElementNS(SVG_NS, "title");
+        tip.textContent = `${knowledgeEdgeWord(model.kind[at])} · ${roadWord}`;
+        word.appendChild(tip);
+      }
       held.set(at, word);
     }
     /* 점의 제목과 같은 손: 자리는 그래프 좌표로, 크기는 배율의 역수로. 이것이
@@ -6329,6 +6430,28 @@ function paintKnowledgeOverview(layout, box) {
       return held;
     }),
   );
+  /* 근거별 선의 수(t-5966) — 백엔드가 센 표(`graph.provenances`) 그대로, 렌즈와 무관한
+   * 볼트 전체의 것. 옛 답에는 표가 없고 그때 절은 비어 선다. */
+  const provenances = graph?.provenances ?? [];
+  const topRoad = Math.max(1, ...provenances.map((row) => row.count));
+  reconcileElementOrder(
+    box.querySelector(".knowledge-overview-provenances .knowledge-inspector-list"),
+    provenances.map((row) => {
+      const held = document.createElement("li");
+      held.className = "knowledge-meter";
+      held.style.setProperty("--meter-fill", String(row.count / topRoad));
+      const name = document.createElement("span");
+      name.className = "knowledge-relation-word";
+      name.dataset.edgeProvenance = row.provenance;
+      name.textContent = knowledgeProvenanceWord(KNOWLEDGE_EDGE_PROVENANCE_CODE[row.provenance]
+        ?? KNOWLEDGE_PROVENANCE_UNKNOWN) || row.provenance;
+      const said = document.createElement("span");
+      said.className = "knowledge-inspector-note";
+      said.textContent = String(row.count);
+      held.append(name, said);
+      return held;
+    }),
+  );
   /* 최근 수정은 페이지만 센다: 유령에는 파일이 없고 원본의 시각은 볼트가 아니라
    * 내려받은 날짜다. */
   const byTime = [...model.keys.keys()]
@@ -6508,7 +6631,7 @@ function paintKnowledgeCard(layout, box, seat) {
   const inward = [];
   for (let at = model.start[seat]; at < model.start[seat + 1]; at += 1) {
     const edge = model.throughEdge[at];
-    const row = { other: model.neighbour[at], kind: model.kind[edge] };
+    const row = { other: model.neighbour[at], kind: model.kind[edge], provenance: model.provenance[edge] };
     (model.from[edge] === seat ? outward : inward).push(row);
   }
   const order = (left, right) => left.kind - right.kind
@@ -6525,6 +6648,15 @@ function paintKnowledgeCard(layout, box, seat) {
     why.className = "knowledge-relation-why";
     why.textContent = knowledgeEdgeWhy(KNOWLEDGE_EDGE_KINDS[row.kind]);
     line.querySelector(".knowledge-inspector-note").appendChild(why);
+    /* 근거의 칩(t-5966): 이 선을 누가 썼는가 — 기계·키·본문. 답에 없으면 서지 않는다. */
+    const roadWord = knowledgeProvenanceWord(row.provenance);
+    if (roadWord !== "") {
+      const road = document.createElement("span");
+      road.className = "knowledge-relation-provenance";
+      road.dataset.edgeProvenance = KNOWLEDGE_EDGE_PROVENANCES[row.provenance].id;
+      road.textContent = roadWord;
+      line.querySelector(".knowledge-inspector-note").appendChild(road);
+    }
     const mark = document.createElement("span");
     mark.className = `knowledge-relation-mark knowledge-legend-edge kind-${KNOWLEDGE_EDGE_KINDS[row.kind]}`;
     mark.setAttribute("aria-hidden", "true");
@@ -6746,6 +6878,12 @@ function paintKnowledgeHead(view, layout, matches) {
     if (flag === "typed") button.hidden = !model.typed;
     if (flag === "alive") button.hidden = model.live === null;
     if (flag === "merge") button.hidden = !model.mergeable;
+  }
+  /* 근거 렌즈(t-5966): 눌려 있음이 「보임」이다. */
+  for (const button of view.querySelectorAll("[data-knowledge-provenance]")) {
+    const on = !knowledgeProvenanceHidden.has(button.dataset.knowledgeProvenance);
+    writeAttribute(button, "aria-pressed", String(on));
+    button.classList.toggle("is-active", on);
   }
   /* 공급망의 낱말들(P4) — `sev:` 칩과 범례의 줄은 렌즈가 켜졌을 때만 선다. */
   for (const held of view.querySelectorAll('.knowledge-token-chip[data-token="sev:"], .knowledge-legend [data-legend-supply]')) {
@@ -7513,6 +7651,14 @@ function wireKnowledgeView(view) {
         void refreshKnowledgeGraph({ force: true });
         return;
       }
+      void paintKnowledgeView();
+    };
+  }
+  for (const button of view.querySelectorAll("[data-knowledge-provenance]")) {
+    button.onclick = () => {
+      const road = button.dataset.knowledgeProvenance;
+      if (knowledgeProvenanceHidden.has(road)) knowledgeProvenanceHidden.delete(road);
+      else knowledgeProvenanceHidden.add(road);
       void paintKnowledgeView();
     };
   }

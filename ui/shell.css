@@ -36450,6 +36450,29 @@ details.task-board-section > summary {
 }
 .knowledge-legend-edge.kind-affects { border-top-color: var(--knowledge-typed-affects); }
 
+/* 근거의 표본(t-5966): 새 잉크 없이 있는 표의 것으로 — 기계가 잰 선은 dedupe 물음의 점선,
+ * 키가 선언한 선은 타입 관계의 잉크, 본문이 추론한 선은 본문 링크의 옅은 잉크. */
+.knowledge-legend-edge.is-measured {
+  border-top-color: var(--knowledge-merge-ink);
+  border-top-style: dashed;
+}
+.knowledge-legend-edge.is-declared { border-top-color: var(--edge-mark); }
+.knowledge-legend-edge.is-inferred { border-top-color: var(--knowledge-edge-mentions-ink); }
+
+/* 근거 렌즈의 세 토글 — 다른 렌즈와 같은 세그먼트 컨트롤의 옷. */
+.knowledge-provenance {
+  display: flex;
+  flex: none;
+  gap: 0;
+  overflow: hidden;
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+}
+
+.knowledge-provenance-flag .knowledge-legend-edge {
+  flex: none;
+}
+
 /* 공급망의 범례 표본(P4): 그림의 점과 같은 낱말(`data-ecosystem`·`data-member`·`data-severity`)을 들어
  * 같은 변수를 받는다 — 몸의 식은 캔버스의 점과 같고, 테두리만 표본의 자(화면 픽셀)다. */
 .knowledge-legend-node.is-component .knowledge-legend-ink,
@@ -36703,6 +36726,15 @@ h4.knowledge-inspector-head::after {
 
 .knowledge-relation-why::before,
 .knowledge-legend-why::before {
+  content: " · ";
+}
+
+/* 관계 줄의 근거 칩(t-5966) — 뜻 한 줄 뒤에 누가 썼는가. */
+.knowledge-relation-provenance {
+  color: var(--ink-label);
+}
+
+.knowledge-relation-provenance::before {
   content: " · ";
 }
 
