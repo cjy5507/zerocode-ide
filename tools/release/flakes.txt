@@ -62,3 +62,7 @@ zo:auto_format::tests::formatter_timeout_kills_process_group
 zo:lsp_client::tests::stdio_transport_bounds_open_document_bookkeeping
 zo:lsp_client::tests::stdio_transport_round_trips_real_jsonrpc_requests
 zo:lsp_client::tests::sync_and_collect_diagnostics_returns_did_change_diagnostics
+# 2026-09-22 (coordinator gate for t-5961, `just shell-test` at load 20-27 beside a release-lane build): the ephemeral
+# port the test frees and rebinds was taken by a neighbour between the two binds (`EADDRINUSE` from bind_seat(port)),
+# not by our own lingering connection — SO_REUSEADDR covers only the latter. Green solo ×3 in 0.00 s.
+root:google_login::tests::the_callback_seat_can_be_retaken_while_the_last_one_lingers
