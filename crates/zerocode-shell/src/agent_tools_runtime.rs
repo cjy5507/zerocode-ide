@@ -3000,6 +3000,7 @@ pub(super) fn run_recipe(
                     &recovered.rows,
                     crate::project_runtime::now_epoch_ms(),
                 );
+                judge.write_memo_rows(dir, crate::project_runtime::now_epoch_ms());
                 if let Some(walked) = recovered.report {
                     report = walked;
                 }
@@ -3180,6 +3181,7 @@ pub(super) fn run_goal(
         &walked.rows,
         crate::project_runtime::now_epoch_ms(),
     );
+    judge.write_memo_rows(dir, crate::project_runtime::now_epoch_ms());
     said(serde_json::json!({
         "goal": goal,
         "mode": mode.key(),

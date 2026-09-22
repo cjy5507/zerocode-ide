@@ -4383,6 +4383,26 @@
                 </p>
               </details>
             </div>
+
+            <div class="settings-jev-row" data-jev-row>
+              <label class="settings-field" data-field="md" for="typesafe-judgment_cache-select">
+                <span class="settings-field-copy">
+                  <span class="settings-label" data-i18n="settings.typesafe.judgment_cache">화면 판정 캐시</span>
+                  <span class="settings-row-desc" data-i18n="settings.typesafe.judgment_cacheSummary">
+                    같은 화면에 같은 지시로 걷는 걸음은 이미 받은 판정을 다시 씁니다 — Flow를 되돌릴 때 Jev 호출이 0이 됩니다.
+                  </span>
+                </span>
+                <!-- The options are this seat's own modes from the Jev use table,
+                     built from what `typesafe_settings` answers (`paintJevModes`). -->
+                <select class="settings-input" id="typesafe-judgment_cache-select" data-jev-seat="judgment_cache"></select>
+              </label>
+              <details class="settings-fold">
+                <summary data-i18n="settings.status.evidence">자세히</summary>
+                <p data-i18n="settings.typesafe.judgment_cacheHint">
+                  브라우저·데스크톱·기기 자리가 화면 질문을 문 밖으로 내보내기 직전, 문이 통과시킨 바이트(가린 줄과 자른 뒤의 그것) 그대로를 키로 삼아 전에 받은 답을 찾아봅니다. 보내는 것은 없습니다: 적중이면 바이트 하나 나가지 않고 하루 셈도 늘지 않으며, 원장 행에 cached 표시가 붙습니다. 문의 네 물음(키·스위치·동의·예산)은 적중 전에 그대로 묻습니다. shadow는 오늘처럼 새 답을 받으면서 기억한 답이 같은 번호를 골랐는지만 원장에 적고, auto는 그 일치율의 하한이 자리의 선(열에 아홉)을 넘긴 뒤에만 기억한 답으로 걸음을 잇습니다. 기억한 답이 더는 읽히지 않으면 그 자리에서 새로 묻습니다. 기억은 zo 설정 폴더의 한 파일(judgment-memo.jsonl)에 남고 화면의 글은 담지 않습니다.
+                </p>
+              </details>
+            </div>
           </div>
         </div>
         </section>

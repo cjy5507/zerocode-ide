@@ -179,6 +179,7 @@ fn ask_shards(wire: &Wire, workspace: Option<&Path>, asks: &[ReadAsk]) -> Vec<As
                         redacted_lines: 0,
                     },
                     request_bytes: 0,
+                    memo: None,
                 })
             })
             .collect()

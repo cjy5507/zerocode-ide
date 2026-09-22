@@ -30,8 +30,8 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use zerocode_core::jev::door::{self, Cleared, JevSettings, Refused};
-use zerocode_core::jev::{JevUse, count};
+use zerocode_core::jev::door::{self, JevSettings, Memo, Memoed, Passed, Refused};
+use zerocode_core::jev::{JevUse, count, memo};
 
 use crate::api_routers::{Keychain, RouterKeys};
 
@@ -107,6 +107,19 @@ pub fn ledger_of(wire: &Wire, row: &JevUse) -> Option<PathBuf> {
         wire.config_home()?
             .join(count::REQUESTS_DIR)
             .join(row.ledger),
+    )
+}
+
+/// Where the judgment memo lives: one file beside the seats' ledgers and the
+/// day's count, so a reader finds every Jev artifact in one folder and a
+/// memo written by one walk is read by the next, restart or not
+/// ([`zerocode_core::jev::memo`], t-6132).
+#[must_use]
+pub fn memo_path(wire: &Wire) -> Option<PathBuf> {
+    Some(
+        wire.config_home()?
+            .join(count::REQUESTS_DIR)
+            .join(memo::MEMO_FILE),
     )
 }
 
@@ -227,6 +240,11 @@ pub struct Asked {
     pub spent: Spent,
     /// The bytes the request carried, `0` when the door refused it.
     pub request_bytes: usize,
+    /// What the memo said, when one was asked ([`Wire::ask_remembering`]):
+    /// `None` for a question asked without one, or one the door refused
+    /// before the memo was reached. When `memo.answered`, `answer` is the
+    /// memo's and `spent.requests` is `0`: nothing left the machine.
+    pub memo: Option<Memoed>,
 }
 
 /// Where the key is read from.
@@ -343,19 +361,21 @@ impl Wire {
         key: bool,
         workspace: Option<&Path>,
         body: Value,
-    ) -> Result<Cleared, Refused> {
+        memo: Option<Memo<'_>>,
+    ) -> Result<Passed, Refused> {
         let settings = JevSettings::from_root(&self.settings_root()).resolved();
         let workspace = workspace.map(door::resolved_path);
         let requests = self
             .config_home()
             .map(|home| count::requests_path(home, &today()))
             .unwrap_or_default();
-        door::pass(
+        door::pass_remembering(
             |asking| door::may_send(row, asking, body),
             key,
             &settings,
             workspace.as_deref(),
             &requests,
+            memo,
         )
     }
 
@@ -402,6 +422,25 @@ impl Wire {
         body: Value,
         deadline: Duration,
     ) -> Asked {
+        self.ask_remembering(row, workspace, body, deadline, None)
+    }
+
+    /// [`Self::ask`], with a memo between the door and the socket
+    /// ([`door::pass_remembering`], t-6132): the door's four questions, then
+    /// the lookup of the cleared bytes, then — for a hit under a seat that
+    /// may answer from it — the memo's answer with no request sent and none
+    /// counted; otherwise one POST as ever, with what the memo held riding
+    /// beside the answer so the caller can compare the two and remember the
+    /// fresh one ([`memo::remember`]).
+    #[must_use]
+    pub fn ask_remembering(
+        &self,
+        row: &JevUse,
+        workspace: Option<&Path>,
+        body: Value,
+        deadline: Duration,
+        memo: Option<Memo<'_>>,
+    ) -> Asked {
         let deadline = Instant::now() + deadline;
         let refused = |refusal: Refused| Asked {
             answer: Err(refusal.token().to_string()),
@@ -410,21 +449,39 @@ impl Wire {
                 redacted_lines: 0,
             },
             request_bytes: 0,
+            memo: None,
         };
         let key = self.key();
-        let cleared = match self.pass(row, key.is_some(), workspace, body) {
-            Ok(cleared) => cleared,
+        let passed = match self.pass(row, key.is_some(), workspace, body, memo) {
+            Ok(passed) => passed,
             Err(refusal) => return refused(refusal),
         };
         // The door refuses a keyless request before anything else it asks.
         let Some(key) = key else {
             return refused(Refused::NoKey);
         };
+        let Passed { cleared, memo } = passed;
+        let request_bytes = cleared.bytes().len();
+        let redacted_lines = cleared.withheld_lines();
+        if let Some(remembered) = memo
+            .as_ref()
+            .filter(|memoed| memoed.answered)
+            .and_then(|memoed| memoed.recalled.as_ref())
+        {
+            return Asked {
+                answer: Ok(remembered.answer.clone()),
+                spent: Spent {
+                    requests: 0,
+                    redacted_lines,
+                },
+                request_bytes,
+                memo,
+            };
+        }
         let spent = Spent {
             requests: 1,
-            redacted_lines: cleared.withheld_lines(),
+            redacted_lines,
         };
-        let request_bytes = cleared.bytes().len();
         // Every caller is sync — a walk drives sync roads, a question asked
         // off the beat has a thread of its own — and blocks on the window's
         // runtime the same way.
@@ -433,6 +490,7 @@ impl Wire {
             answer,
             spent,
             request_bytes,
+            memo,
         }
     }
 
@@ -440,7 +498,7 @@ impl Wire {
     async fn ask_once(
         &self,
         key: &str,
-        cleared: Cleared,
+        cleared: door::Cleared,
         deadline: Instant,
     ) -> Result<String, String> {
         if Instant::now() >= deadline {

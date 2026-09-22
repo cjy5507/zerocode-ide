@@ -29,6 +29,7 @@ pub mod choice;
 pub mod count;
 pub mod door;
 pub mod hedge;
+pub mod memo;
 pub mod promote;
 pub mod recent;
 pub mod shard;
@@ -402,6 +403,36 @@ pub const SCREEN_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 /// the measurement table; this one is the wall past which an answer is slower
 /// than the fallback it would replace.
 pub const SCREEN_APPLY_DEADLINE_MS: u64 = 1_500;
+
+/// The share of memo answers that must name what a fresh answer named, per
+/// thousand, before the judgment cache's `auto` answers a walk from the memo
+/// alone ([`JUDGMENT_CACHE`]): nine in ten.
+///
+/// The label is a comparison the seat makes itself under `shadow`: the memo
+/// held an answer for these exact bytes, the wire was asked anyway, and the
+/// two chose the same number or did not. A cache whose answers disagree with
+/// a fresh judgment more than one time in ten is a stale cache, and the walk
+/// it would be answering is a real pointer on a real screen. Held above the
+/// screen seats' own line ([`SCREEN_AGREEMENT_FLOOR_PERMILLE`]) because what
+/// is compared here is the same reader against itself — the notify seat's
+/// replay put Jev's repeatability on identical inputs at 96.5% (t-6043), so
+/// nine in ten is a line a working memo clears with room.
+pub const JUDGMENT_CACHE_AGREEMENT_FLOOR_PERMILLE: u16 = 900;
+
+/// The share of memo lookups that must answer, per thousand, before the
+/// judgment cache's `auto` rises — the screen seats' own line, because a memo
+/// hit stands in for a screen question and is held to what that question is
+/// held to. A hit that no longer reads (a remembered body the question's own
+/// rules refuse) is the miss this floor counts.
+pub const JUDGMENT_CACHE_ANSWER_FLOOR_PERMILLE: u16 = SCREEN_ANSWER_FLOOR_PERMILLE;
+
+/// The wall one memo lookup may hold a walk, in milliseconds — the latency
+/// line the judge holds the cache seat to. A memo is one local file of at
+/// most [`memo::MEMO_ROWS_CAP`] rows read whole (measured 2026-09-22: 2,000
+/// rows of ~400 bytes read and scanned in under 5 ms on this machine); a
+/// lookup past this wall is a memo that has stopped being cheaper than the
+/// question it answers for.
+pub const JUDGMENT_MEMO_DEADLINE_MS: u64 = 50;
 
 /// zo's routing judgment: a task's complexity, risk and intent beside the
 /// chat probe's (docs/design/jev-decision-shadow-20260917.md).
@@ -1917,8 +1948,51 @@ pub const MENTION_RERANK: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
 };
 
+/// The judgment cache: a memo in front of the wire that answers a screen
+/// question the door already cleared once with the very same bytes
+/// (docs/design/stagehand-v4-jev-review-20260922.md, t-6132).
+///
+/// It is a seat with no question of its own. What it sends is nothing — a
+/// hit leaves the machine no bytes and takes no place in the day's count —
+/// and what it decides is whether the walk may take the memo's answer
+/// instead of the wire's. Its rows are lookups: one per hit under `shadow`
+/// and `auto`, carrying the memo's own `agreed` — the remembered choice
+/// against the fresh one the wire gave for the same bytes — and one row per
+/// hit answered under a risen `auto`, carrying `routeUse: applied`. A miss
+/// is written beside them without an `outcome`, so a reader can count the
+/// hit rate and the judge counts only what the memo answered.
+///
+/// `off` is today's walk to the byte: no lookup, no memo file, no row.
+/// `shadow` asks the wire as today and records whether the memo would have
+/// agreed. `auto` answers from the memo only once its own comparisons bound
+/// above [`JUDGMENT_CACHE_AGREEMENT_FLOOR_PERMILLE`] over a window
+/// ([`promote`]), and falls back to the wire the moment a remembered body
+/// stops reading. No `on`: what acts here is evidence, never a person's word
+/// (the seat contract's third rule, corrected).
+///
+/// The memo's key is the seat the question belongs to and the bytes the door
+/// let through — after every withheld line and every cap — so two questions
+/// share an answer exactly when the wire would have seen the same request
+/// ([`memo::key_of`]). The rubric's words are inside those bytes, so a word
+/// changed without a version bump is a different key rather than a stale hit.
+pub const JUDGMENT_CACHE: JevUse = JevUse {
+    id: "judgment_cache",
+    setting: "jevJudgmentCache",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    sends: &[],
+    ledger: "judgment-cache.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(JUDGMENT_CACHE_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(JUDGMENT_CACHE_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(JUDGMENT_MEMO_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_NOTHING),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 16] = [
+pub static JEV_USES: [JevUse; 17] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -1935,6 +2009,7 @@ pub static JEV_USES: [JevUse; 16] = [
     BROWSER_READ,
     NOTIFY,
     MENTION_RERANK,
+    JUDGMENT_CACHE,
 ];
 
 impl JevUse {

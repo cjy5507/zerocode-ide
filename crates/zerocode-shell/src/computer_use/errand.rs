@@ -53,7 +53,7 @@ use zerocode_core::computer_flow::{FlowSpec, Policy};
 use zerocode_core::computer_recipe::{RecipeLine, RecipeStop, RecipeTool};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
 use zerocode_core::jev::promote::SEAT_RECORDING;
-use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
+use zerocode_core::jev::summary::{AGREED, AT, CACHED, ELAPSED_MS};
 use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{
     ActionAsk, ActionChoice, ActionLook, Chosen, SCREEN_ACTION_RUBRIC_VERSION, Where, ask,
@@ -134,6 +134,13 @@ pub trait ActionJudge {
     /// A judge that sends nowhere — a test's — has nothing to say.
     fn spent(&self) -> Option<Spent> {
         None
+    }
+
+    /// Whether the last [`Self::choose`] was answered by the judgment memo
+    /// rather than the wire ([`zerocode_core::jev::memo`], t-6132) — the
+    /// row's [`CACHED`], so a counter reads it as an answer and not a call.
+    fn cached(&self) -> bool {
+        false
     }
 }
 
@@ -740,6 +747,11 @@ fn walk(
             judgment_ms,
             crate::project_runtime::now_epoch_ms(),
         );
+        // A memo hit is an answer that sent nothing: the row says so in the
+        // one word every Jev ledger's counter reads it by.
+        if judge.cached() {
+            note(&mut said, CACHED.canonical, json!(true));
+        }
         let chosen = match choice.chosen {
             Chosen::Mark(mark) => mark,
             Chosen::GiveUp | Chosen::Done => {

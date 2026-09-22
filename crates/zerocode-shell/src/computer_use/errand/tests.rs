@@ -99,7 +99,7 @@ impl FakeWorld {
     }
 
     /// The same world, whose screen shows different words after every press.
-    fn that_moves(marks: &[usize]) -> Self {
+    pub(super) fn that_moves(marks: &[usize]) -> Self {
         Self {
             moves: true,
             ..Self::showing(marks)
