@@ -192,8 +192,8 @@ struct Written {
 /// The file and the hunks a mutation tool's result reports writing, when it
 /// reports any: `None` for a tool that is not a mutation, a result of another
 /// shape (a notebook edit's), or a write that changed nothing. Reads the
-/// result's envelope ([`result_envelope`]), so a line appended to the result
-/// — this seat's own note among them — never hides the patch.
+/// result's envelope (`compact::result_envelope`), so a line appended to the
+/// result — this seat's own note among them — never hides the patch.
 #[must_use]
 pub fn written_patch(tool_name: &str, output: &str) -> Option<(String, Vec<StructuredPatchHunk>)> {
     if !is_edit_result_tool(tool_name) {

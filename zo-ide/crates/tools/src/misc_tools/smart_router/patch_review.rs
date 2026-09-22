@@ -305,16 +305,13 @@ async fn review_and_write(
 ) -> PatchReview {
     let (row, answers) = judge(&door, client.as_ref(), &ask).await;
     let (row, verdict, note) = settle(mode, acting, row, answers.as_ref());
-    let label = row.judged.to_string();
-    let applied = row.applied;
-    let written = ledger.clone();
-    let _ = tokio::task::spawn_blocking(move || {
-        let appended = append_shadow_row(&written, &row, SHADOW_LEDGER_MAX_BYTES);
-        let _ = judge_ledger(&written, super::decision_shadow::now_ms());
-        appended
-    })
-    .await;
-    settle_verdict(&cwd, &ledger, &label, verdict, applied);
+    settle_verdict(&cwd, &ledger, &row.judged.to_string(), verdict, row.applied);
+    // The row and the judge after it read and write the ledger — the whole of
+    // it, for the judge — and nothing the result carries waits on either.
+    drop(tokio::task::spawn_blocking(move || {
+        let _ = append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES);
+        let _ = judge_ledger(&ledger, super::decision_shadow::now_ms());
+    }));
     PatchReview { note }
 }
 
