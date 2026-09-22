@@ -125,18 +125,26 @@ pub(crate) fn forget(label: &str) {
         .remove(label);
 }
 
-/// A page's host and path, for the row: the address the door already
-/// cleared, without its query and fragment.
+/// A page's host and the fingerprint of its path, for the row (t-6155 F8):
+/// the host names the site, and the fingerprint lets two reads of one page
+/// be grouped without the path — which can carry a ticket number, a user
+/// id or a signed URL's tail — ever reaching a ledger. No other window seat
+/// writes an address, and the label needs none: it is joined by the read's
+/// own key, and the page is compared in memory (`same_page`).
 fn where_of(url: &str) -> (String, String) {
     url.parse::<tauri::Url>()
         .map(|parsed| {
             (
                 parsed.host_str().unwrap_or_default().to_string(),
-                parsed.path().to_string(),
+                zerocode_core::jev::fingerprint_of(parsed.path()),
             )
         })
         .unwrap_or_default()
 }
+
+/// The verb a `read --full` label row carries — the agent asked for the
+/// whole page back after the seat folded it.
+pub(crate) const READ_FULL_VERB: &str = "read_full";
 
 /// Two addresses name the same page when they agree up to the fragment —
 /// a `#section` the agent scrolled to is the same page.
@@ -212,14 +220,14 @@ pub(crate) fn settle(
     if asks.is_empty() {
         return whole();
     }
-    let (host, path) = where_of(&page.report.url);
+    let (host, path_fingerprint) = where_of(&page.report.url);
     let read = format!("{label}@{now_ms}");
     let mut row = json!({
         AT.canonical: now_ms,
         READ_KEY: read,
         "pane": label,
         "host": host,
-        "path": path,
+        "pathFingerprint": path_fingerprint,
         "mode": mode.key(),
         "rubricVersion": browser_read::BROWSER_READ_RUBRIC_VERSION,
         "blocks": page.blocks.len(),
@@ -375,6 +383,35 @@ pub(crate) fn note_press(
     }))
 }
 
+/// Label a pane's last judged read by a `read --full` that followed it on
+/// the same page (t-6155 F6): the agent asked for the whole page back, which
+/// is the fold's first and plainest regret — `agreed: false`, one label per
+/// read, in the same book a press writes to. A whole read under a seat that
+/// folded nothing (recording, or a judgment nothing was applied from) says
+/// nothing and spends nothing: the agent already had the page whole, and
+/// the press that follows may still label the judgment. Another page spends
+/// the judgment as a press on another page does.
+pub(crate) fn note_full_read(label: &str, url_now: &str, now_ms: i64) -> Option<Value> {
+    let mut held = store().lock().unwrap_or_else(PoisonError::into_inner);
+    if !held.get(label)?.applied {
+        return None;
+    }
+    let judgment = held.remove(label)?;
+    drop(held);
+    if !same_page(&judgment.url, url_now) {
+        return None;
+    }
+    Some(json!({
+        AT.canonical: now_ms,
+        LABEL.canonical: judgment.read,
+        AGREED.canonical: false,
+        "verb": READ_FULL_VERB,
+        "pane": label,
+        "mode": judgment.mode.key(),
+        APPLIED.canonical: judgment.applied,
+    }))
+}
+
 /// Append `rows` to the seat's ledger through the window's one Jev-ledger
 /// door — which also judges the seat when a judgment is due.
 pub(crate) fn record(wire: &Wire, rows: &[Value], now_ms: i64) {
@@ -453,6 +490,17 @@ pub(crate) fn label_press(
         return;
     };
     // The ledger's folder is the settings file's; no key is read for a row.
+    let wire = Wire::of_this_machine();
+    std::thread::spawn(move || record(&wire, &[row], now_ms));
+}
+
+/// Write the label a `read --full` leaves on a pane's last judged read, if
+/// any — called by the read arm after the whole page really was read.
+pub(crate) fn label_full_read(label: &str, url_now: &str) {
+    let now_ms = crate::project_runtime::now_epoch_ms();
+    let Some(row) = note_full_read(label, url_now, now_ms) else {
+        return;
+    };
     let wire = Wire::of_this_machine();
     std::thread::spawn(move || record(&wire, &[row], now_ms));
 }

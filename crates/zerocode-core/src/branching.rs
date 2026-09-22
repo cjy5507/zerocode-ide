@@ -19,7 +19,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde_json::{Map, Value, json};
 
 use crate::jev::choice::{self, ChoiceRefusal};
-use crate::jev::{BRANCHING_APPLY_DEADLINE_MS, BRANCHING_K, BRANCHING_K_CAP, SCREEN_CANDIDATE_CAP};
+use crate::jev::promote::permille;
+use crate::jev::{
+    BRANCHING, BRANCHING_APPLY_DEADLINE_MS, BRANCHING_FORK_MARGIN_PERMILLE, BRANCHING_K,
+    BRANCHING_K_CAP, SCREEN_CANDIDATE_CAP,
+};
 use crate::screen_action::{ActionChoice, Chosen, Where, mark_of, option_of};
 
 /// The one question's name. The endpoint does not show a question's name to
@@ -139,11 +143,43 @@ pub fn top_k(choice: &ActionChoice, k: usize) -> Vec<usize> {
     marks
 }
 
-/// The candidates the table's own `k` names ([`BRANCHING_K`]); a fork is
-/// worth taking only when there are two.
+/// The candidates a fork tries: the table's own `k` ([`BRANCHING_K`]) when
+/// the seat is torn, the first choice alone when it is not.
+///
+/// Torn is the table's line (t-6155 F3): the first choice leads its
+/// runner-up by under [`BRANCHING_FORK_MARGIN_PERMILLE`] of the answer's
+/// mass, or sits under the seat's own press floor whatever its lead. A clear
+/// lead is a single step — a fork costs the walk a save, `k` presses with a
+/// look and a load each, and the comparison's wall, and buys nothing at a
+/// step the seat was already sure of. Before the line, every answer that
+/// gave a second control any weight at all forked. The lead is read in the
+/// judge's own permille ([`permille`], floored), so the line is a number two
+/// readers agree on exactly.
 #[must_use]
 pub fn fork_wanted(choice: &ActionChoice) -> Vec<usize> {
-    top_k(choice, BRANCHING_K)
+    let marks = top_k(choice, BRANCHING_K);
+    let [first, second, ..] = marks.as_slice() else {
+        return marks;
+    };
+    let weight = |mark: usize| {
+        permille(
+            choice
+                .probabilities
+                .get(&option_of(mark))
+                .copied()
+                .unwrap_or(0.0),
+        )
+    };
+    let leader = weight(*first);
+    let lead = leader.saturating_sub(weight(*second));
+    let unsure = BRANCHING
+        .press_floor_permille
+        .is_some_and(|floor| leader < floor);
+    if lead < BRANCHING_FORK_MARGIN_PERMILLE || unsure {
+        marks
+    } else {
+        vec![*first]
+    }
 }
 
 /// The words that define the question, as one string. The version is pinned
@@ -376,7 +412,7 @@ mod tests {
     /// the table's `k` and never past its cap.
     #[test]
     fn the_candidates_are_the_seats_press_then_the_rest_it_gave_any_weight() {
-        let ranked = choice(4, &[(1, 0.1), (4, 0.6), (7, 0.3), (9, 0.0)]);
+        let ranked = choice(4, &[(1, 0.1), (4, 0.5), (7, 0.4), (9, 0.0)]);
         assert_eq!(top_k(&ranked, 3), [4, 7, 1]);
         assert_eq!(fork_wanted(&ranked), [4, 7], "the table's k");
         assert_eq!(top_k(&ranked, 10), [4, 7, 1], "never past the cap");
@@ -533,6 +569,44 @@ mod tests {
             "a free desk still pays the wall"
         );
         assert_eq!(fork_budget_ms(2, u64::MAX, 1), u64::MAX, "saturates");
+    }
+
+    /// A fork is worth its clock only when the seat is torn (t-6155 F3): the
+    /// runner-up within the table's margin of the leader, or a leader under
+    /// the press floor. A clear lead is a single step, however many controls
+    /// were given some weight.
+    #[test]
+    fn a_fork_is_wanted_only_when_the_seat_is_torn() {
+        use crate::jev::{BRANCHING, BRANCHING_FORK_MARGIN_PERMILLE, SCREEN_PRESS_FLOOR_PERMILLE};
+        assert_eq!(
+            BRANCHING.press_floor_permille,
+            Some(SCREEN_PRESS_FLOOR_PERMILLE)
+        );
+        // A clear lead over a weighted runner-up: one step, and no question.
+        let clear = choice(4, &[(4, 0.7), (7, 0.2), (1, 0.1)]);
+        assert_eq!(fork_wanted(&clear), [4]);
+        // The runner-up inside the margin: a fork of the table's k.
+        let torn = choice(4, &[(4, 0.5), (7, 0.4), (1, 0.1)]);
+        assert_eq!(fork_wanted(&torn), [4, 7]);
+        // A leader under the press floor forks whatever its lead.
+        let unsure = choice(4, &[(4, 0.45), (7, 0.15), (1, 0.1)]);
+        assert_eq!(fork_wanted(&unsure), [4, 7]);
+        // Exactly the margin is a clear lead: the line is "under".
+        let at_line = choice(4, &[(4, 0.6), (7, 0.4)]);
+        assert_eq!(
+            crate::jev::promote::permille(0.6) - crate::jev::promote::permille(0.4),
+            BRANCHING_FORK_MARGIN_PERMILLE
+        );
+        assert_eq!(fork_wanted(&at_line), [4]);
+        // A chosen number the seat gave less weight than another is torn by
+        // definition.
+        let odd = choice(4, &[(4, 0.3), (7, 0.7)]);
+        assert_eq!(fork_wanted(&odd), [4, 7]);
+        // One candidate is never a fork, sure or not.
+        let alone = choice(10, &[(10, 0.3)]);
+        assert_eq!(fork_wanted(&alone), [10]);
+        // The full list is still there for a reader that wants it.
+        assert_eq!(top_k(&clear, 3), [4, 7, 1]);
     }
 
     /// The mark: the walk going on says the pick was right, a retry or a

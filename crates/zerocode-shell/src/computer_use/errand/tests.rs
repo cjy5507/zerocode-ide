@@ -1109,11 +1109,7 @@ fn the_two_surfaces_sit_in_their_own_seats() {
         seat_of(Surface::Desk),
         seat_of(Surface::Phone),
     ] {
-        assert!(
-            seat.promotes,
-            "{}: a screen seat's auto rises on its own ledger",
-            seat.id
-        );
+        assert!(seat.promotes, "{}: a screen seat's auto can rise", seat.id);
         assert_eq!(
             seat.apply_deadline_ms,
             Some(u64::try_from(ACTION_DEADLINE.as_millis()).unwrap_or(u64::MAX)),

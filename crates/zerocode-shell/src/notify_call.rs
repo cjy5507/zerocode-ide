@@ -9,7 +9,8 @@
 //! ignore and is not a question, and a cooldown is a rate, not a judgment.
 //! Under `off`, `shadow`, a timeout, a refusal, or a lane's ring that has no
 //! pane to label, the bell rings exactly as today ([`Call::today`]). Under
-//! an `auto` the judge raised on this seat's own ledger, the bell waits at
+//! a person's `on`, or an `auto` the judge raised on this seat's own ledger,
+//! the bell waits at
 //! most [`NOTIFY_CALL_DEADLINE`] for the answer, and a `batch` or an `ignore`
 //! then takes the ring away: `ignore` drops it, `batch` holds it in
 //! [`NotifyBook`] until the person's next hand on the window, where every

@@ -590,14 +590,49 @@ fn prompt_at(store: &str, path: &str, line: usize) -> Option<String> {
     }
 }
 
-/// The prompt without the path it named — the sentence the person was
-/// writing around the mention.
+/// The prompt without the file it named — the whole path and its name, as
+/// substrings wherever they sit — so what the seat reads is the sentence
+/// the person was writing around the mention. Taken out as substrings and
+/// not as words (t-6155 F4): a mention with a line range on its tail, an
+/// absolute path with the mention inside it, or a name in backticks with a
+/// full stop after it is not a whitespace word, and 22 of 136 seed prompts
+/// carried the file's whole name into the intent that way.
 fn intent_of(prompt: &str, mention: &str) -> String {
-    prompt
-        .split_whitespace()
-        .filter(|word| word.trim_matches(|c: char| "`\"'(),:;<>[]".contains(c)).trim_start_matches('@') != mention)
-        .collect::<Vec<_>>()
-        .join(" ")
+    let name = Path::new(mention).file_name().and_then(|name| name.to_str()).unwrap_or(mention);
+    let mut intent = prompt.to_string();
+    for needle in [format!("@{mention}"), mention.to_string(), format!("@{name}"), name.to_string()] {
+        if !needle.is_empty() {
+            intent = intent.replace(&needle, " ");
+        }
+    }
+    intent.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The intent a replay hands the seat is the sentence around the mention,
+/// with the file the person named taken out — the whole path and its name,
+/// wherever they sit in the prose (t-6155 F4). A judgment that reads
+/// `fanout.rs` in the intent and `fanout.rs` on the page is not reading
+/// intent; it is reading the answer.
+#[test]
+fn the_intent_carries_neither_the_mentioned_path_nor_its_name() {
+    let mention = "crates/zerocode-core/src/orchestration/fanout.rs";
+    for prompt in [
+        "@crates/zerocode-core/src/orchestration/fanout.rs 의 스폰 순서를 봐 줘",
+        "`/Users/dev/zerocode/crates/zerocode-core/src/orchestration/fanout.rs:60-96` 여기 고쳐",
+        "fanout.rs에서 파도가 끊기는 곳(crates/zerocode-core/src/orchestration/fanout.rs).",
+        "봐 줘: crates/zerocode-core/src/orchestration/fanout.rs, 그리고 fanout.rs 시험도",
+    ] {
+        let intent = intent_of(prompt, mention);
+        assert!(!intent.contains(mention), "{prompt:?} -> {intent:?}");
+        assert!(!intent.contains("fanout.rs"), "{prompt:?} -> {intent:?}");
+        assert!(!intent.contains("  "), "{prompt:?} -> {intent:?}: one space between words");
+    }
+    assert_eq!(
+        intent_of("@crates/zerocode-core/src/orchestration/fanout.rs 의 스폰 순서를 봐 줘", mention),
+        "의 스폰 순서를 봐 줘"
+    );
+    // A word that merely shares letters with the name stays.
+    assert!(intent_of("fanout 전략을 fanout.rs 말고 설명해", mention).contains("fanout 전략을"));
 }
 
 /// Replays this machine's own prompts against the product's page and the
@@ -645,6 +680,10 @@ fn the_pages_this_machine_would_have_reranked() {
     // checkouts of one tree is one comparison, not two.
     let mut asked_once: std::collections::BTreeSet<(String, u64)> = std::collections::BTreeSet::new();
     let (mut prompts, mut skipped, mut not_offered, mut compared) = (0usize, 0usize, 0usize, 0usize);
+    // What the intent still carries of the file after `intent_of` (t-6155
+    // F4): its name must be gone; its stem may remain when the person used
+    // it as a word ("fanout 전략"), and is counted so a reader can see it.
+    let (mut name_left, mut stem_left) = (0usize, 0usize);
     let (mut fuzzy_hits, mut jev_hits) = (0usize, 0usize);
     let mut per_store: std::collections::BTreeMap<String, (usize, usize, usize)> = std::collections::BTreeMap::new();
     let (mut input_tokens, mut requests) = (0u64, 0u32);
@@ -670,6 +709,9 @@ fn the_pages_this_machine_would_have_reranked() {
         }
         prompts += 1;
         let name = Path::new(mention).file_name().and_then(|name| name.to_str()).unwrap_or(mention);
+        name_left += usize::from(intent.contains(name));
+        let stem = Path::new(name).file_stem().and_then(|stem| stem.to_str()).unwrap_or(name);
+        stem_left += usize::from(stem.chars().count() >= 3 && intent.contains(stem));
         let query: String = name.chars().take(query_chars).collect();
         let Ok(results) = run(
             &query,
@@ -733,6 +775,7 @@ fn the_pages_this_machine_would_have_reranked() {
     }
     println!("outcomes: {outcomes:?}");
     println!("not on the fuzzy page (not compared): {not_offered}");
+    println!("intent residue: file name left in {name_left} of {prompts} prompts (must be 0), stem left in {stem_left}");
     println!(
         "compared {compared}: fuzzy first {fuzzy_hits} ({:.1}%, Wilson lower {:.1}%) · Jev first {jev_hits} ({:.1}%, Wilson lower {:.1}%)",
         share(fuzzy_hits, compared),

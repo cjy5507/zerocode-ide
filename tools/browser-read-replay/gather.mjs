@@ -37,6 +37,14 @@ const ANSWER_CAP = Number(DOOR.match(/const BROWSER_CALLBACK_CAP: usize = ([0-9_
 const script = (request, body) =>
   `(() => {\n${HELPERS}\nconst request = ${JSON.stringify(request)};\ntry {\n${body}\n} catch (_) { return zcFail("evaluation_failed"); }\n})()`;
 
+/* A page that answered with a bot wall instead of itself: an HTTP status
+ * past 399, or a title one of the common walls puts up. Flagged and still
+ * gathered, so the measurement can show its totals with and without them —
+ * a wall's own words are the page, and folding them says nothing (t-6155
+ * F6). */
+const WALL_TITLES = [/just a moment/i, /attention required/i, /access denied/i, /are you (a )?human/i, /verify you are/i, /security check/i];
+const isWall = (status, title) => status >= 400 || WALL_TITLES.some((wall) => wall.test(title ?? ""));
+
 const args = process.argv.slice(2);
 const flag = (name) => { const at = args.indexOf(name); return at >= 0 ? args[at + 1] : null; };
 const out = flag("--out");
@@ -56,14 +64,16 @@ for (const url of urls) {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   const began = Date.now();
   try {
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    const status = response?.status() ?? 0;
     await page.waitForTimeout(1500);
     const answer = JSON.parse(await page.evaluate(script({
       blockRoots: BLOCK_ROOTS.join(","), textCap: TEXT_CAP, titleCap: TITLE_CAP, urlCap: URL_CAP, answerCap: ANSWER_CAP,
     }, READ_BLOCKS_BODY)));
     if (!answer.ok) throw new Error(`the cutter refused: ${answer.code}`);
-    pages.push({ url, loadMs: Date.now() - began, ...answer.value });
-    console.error(`gathered ${url}: ${answer.value.blocks.length} blocks, ${answer.value.text.length} chars`);
+    const wall = isWall(status, answer.value.title);
+    pages.push({ url, loadMs: Date.now() - began, status, wall, ...answer.value });
+    console.error(`gathered ${url}: ${answer.value.blocks.length} blocks, ${answer.value.text.length} chars, status ${status}${wall ? " (bot wall)" : ""}`);
   } catch (error) {
     pages.push({ url, loadMs: Date.now() - began, error: String(error?.message ?? error), title: "", text: "", blocks: [] });
     console.error(`failed ${url}: ${error?.message ?? error}`);

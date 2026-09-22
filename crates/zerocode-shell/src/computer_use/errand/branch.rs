@@ -147,16 +147,26 @@ fn row(step: &Step<'_>, seen: &Seen, today: usize, candidates: usize, more: Valu
         Seen::Page { .. } | Seen::Desk { .. } => ("", ""),
     };
     let now_ms = crate::project_runtime::now_epoch_ms();
+    // The goal is a person's sentence and the device's name can be a
+    // person's; the row carries their fingerprints (t-6155 F12), which is
+    // enough to group the steps of one walk on one device.
+    let fingerprint = |words: &str| {
+        if words.is_empty() {
+            String::new()
+        } else {
+            zerocode_core::jev::fingerprint_of(words)
+        }
+    };
     let mut row = json!({
         AT.canonical: now_ms,
         KEY: format!("{}@{now_ms}", step.attempt),
-        "flow": step.at.goal,
+        "flowFingerprint": fingerprint(step.at.goal),
         "errand": step.at.key(),
         "attempt": step.attempt,
         "mode": step.branching.mode.key(),
         "rubricVersion": BRANCHING_RUBRIC_VERSION,
         "platform": platform,
-        "device": device,
+        "deviceFingerprint": fingerprint(device),
         "today": option_of(today),
         "candidates": candidates,
     });

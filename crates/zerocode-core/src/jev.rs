@@ -305,11 +305,13 @@ pub struct JevUse {
     /// A use that does not promote forgives nothing, because nothing is
     /// judged.
     pub window_forgives: Option<usize>,
-    /// The sample floor at which the agreement line may speak. For a peer
-    /// comparison, a thinner sample holds promotion; hindsight labels leave
-    /// the other lines to decide until this many marks have arrived.
+    /// The sample floor at which the agreement line may speak: until this
+    /// many marks are in hand the seat is held at `too_few_compared`,
+    /// whatever kind of mark it writes ([`AgreementKind`]). A thinner
+    /// sample never promotes (t-6155 F1).
     pub agreement_rows_wanted: Option<usize>,
-    /// Whether agreement compares a second reader or grades a later outcome.
+    /// Where the seat's `agreed` marks come from: a second reader, or a
+    /// later fact.
     pub agreement_kind: AgreementKind,
 }
 
@@ -338,9 +340,12 @@ pub const FORGIVES_NOTHING: usize = 0;
 /// ([`JevUse::agreement_rows_wanted`]).
 pub const A_WINDOW_OF_COMPARISONS: usize = summary::JUDGED_EVERY_ROWS;
 
-/// What an agreement mark can establish, before its sample is large enough
-/// to read a Wilson bound. Kept in the seat table rather than inferred from
-/// a zero width: a single positive label must not revoke a no-label rise.
+/// Where a seat's `agreed` marks come from — a second reader answering the
+/// same question, or a later fact grading the answer. A description of the
+/// mark for a reader and a screen; the judge holds both kinds to the same
+/// sample floor and the same Wilson line ([`crate::jev::promote`]), so a
+/// hindsight seat with no marks yet is held exactly as a comparison seat
+/// with none (t-6155 F1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgreementKind {
     /// A replacement reader needs comparison evidence before it may act.
@@ -1789,8 +1794,9 @@ pub const NOTIFY_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 /// wait. A watched screen is today's own ignore and is not a question.
 ///
 /// Under `off`, `shadow`, a timeout or a refusal the bell rings exactly as
-/// today; only an `auto` its own evidence raised lets `batch` and `ignore`
-/// change what the OS shows and what the tab strip marks. A held ring is
+/// today; only a person's `on`, or an `auto` its own evidence raised, lets
+/// `batch` and `ignore` change what the OS shows and what the tab strip
+/// marks. A held ring is
 /// folded with every other held ring into one notice at the person's next
 /// hand on the window (`crate::notify::batched`).
 ///
@@ -1805,7 +1811,7 @@ pub const NOTIFY_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 pub const NOTIFY: JevUse = JevUse {
     id: "notify",
     setting: "jevNotify",
-    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     sends: &[
         Sent {
             at: "/state/pane",
@@ -1971,6 +1977,27 @@ const _: () = assert!(
     "a fork tries at least two candidates and never more than the question can carry"
 );
 
+/// How far the emulator seat's first choice must lead its runner-up, in
+/// parts per thousand of the answer's mass, for the step to be a single
+/// press: a lead under this forks (`crate::branching::fork_wanted`), as does
+/// a leader under the seat's own press floor ([`SCREEN_PRESS_FLOOR_PERMILLE`])
+/// whatever its lead.
+///
+/// One in five, a policy line and not a calibrated claim, like every other
+/// line in this table: without it a fork was taken at every step whose
+/// answer gave a second control any weight at all (t-6155 F3), which on the
+/// fake desk is every step and on a real device is ×4.82 the clock of the
+/// step it replaces. One fifth is the same one-in-five the route-change
+/// budgets are cut at (800‰): a leader the seat itself is not four-in-five
+/// sure of over its runner-up is the answer a fork is for. Two of this
+/// machine's phone presses to date carried a weighted runner-up, so the
+/// line waits for `branching.jsonl` to move it.
+pub const BRANCHING_FORK_MARGIN_PERMILLE: u16 = 200;
+const _: () = assert!(
+    BRANCHING_FORK_MARGIN_PERMILLE > 0 && BRANCHING_FORK_MARGIN_PERMILLE < 1_000,
+    "a margin of nothing never forks and a margin of everything always does"
+);
+
 /// The wall the forked step holds a walk for the comparison's answer, in
 /// milliseconds — the screen seats' wall, written as this seat's own number
 /// for the reason every coinciding wall in this table is: the screen
@@ -1996,7 +2023,9 @@ pub const BRANCHING_ANSWER_FLOOR_PERMILLE: u16 = 900;
 pub const BRANCHING_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 
 /// The window's forked phone step (t-6044, `crate::branching`): when the
-/// emulator seat's answer ranks two or more controls, the walk saves the
+/// emulator seat's answer is torn between two or more controls — its first
+/// choice leading the runner-up by under [`BRANCHING_FORK_MARGIN_PERMILLE`],
+/// or sitting under the press floor itself — the walk saves the
 /// Android device where it stands, presses each of the top [`BRANCHING_K`]
 /// in turn, reads the screen each one leads to, puts the device back, and
 /// asks Jev which RESULT is the closest to the goal — the candidate it names
@@ -2021,8 +2050,9 @@ pub const BRANCHING_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 /// `off` is today's walk byte for byte. `shadow` explores nothing: it asks
 /// the same question over the candidates' actions alone, records what it
 /// would have made canonical beside what the emulator seat pressed, and
-/// presses the emulator seat's choice. Only an `auto` this seat's own ledger
-/// raised saves, explores and presses the comparison's pick; a timeout, a
+/// presses the emulator seat's choice. Only a person's `on`, or an `auto`
+/// this seat's own ledger raised, saves, explores and presses the
+/// comparison's pick; a timeout, a
 /// refusal, an answer under [`SCREEN_PRESS_FLOOR_PERMILLE`], a device that
 /// cannot be saved (iOS has no snapshot road) or a fork past its clock all
 /// press the first candidate — the emulator seat's own — as today. A step at
@@ -2042,7 +2072,7 @@ pub const BRANCHING_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 pub const BRANCHING: JevUse = JevUse {
     id: "branching",
     setting: "jevBranching",
-    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     sends: &[
         Sent {
             at: "/state/goal",
@@ -2334,16 +2364,26 @@ pub fn brief_shape(brief: &str, cap: Cap) -> (String, usize) {
     (door::cut(brief, cap), brief.chars().count())
 }
 
-/// The first sixteen hex digits of the SHA-256 of a question's defining
-/// words — what a question's rubric version is pinned to, so a word changed
-/// without a version bump is a red test rather than a quiet drift.
+/// The first sixteen hex digits of the SHA-256 of `words` — what a ledger
+/// row carries in place of a string it must not carry (a page's path, a
+/// walk's goal, t-6155 F8/F12), and what a question's rubric version is
+/// pinned to. One producer, so two rows that name the same thing agree
+/// exactly and a reader can group them without ever seeing the words.
 #[must_use]
-pub fn rubric_fingerprint(words: impl FnOnce() -> String) -> String {
-    Sha256::digest(words().as_bytes())
+pub fn fingerprint_of(words: &str) -> String {
+    Sha256::digest(words.as_bytes())
         .iter()
         .take(8)
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+/// [`fingerprint_of`] a question's defining words — what a rubric version
+/// is pinned to, so a word changed without a version bump is a red test
+/// rather than a quiet drift.
+#[must_use]
+pub fn rubric_fingerprint(words: impl FnOnce() -> String) -> String {
+    fingerprint_of(&words())
 }
 
 #[cfg(test)]

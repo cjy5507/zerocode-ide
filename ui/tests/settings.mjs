@@ -49,8 +49,9 @@ const TYPESAFE_DECISION_MODES = Object.freeze([
   Object.freeze({ mode: "auto", asks: true, applies: false, automatic: true }),
 ]);
 /* Every seat of `zerocode_core::jev::JEV_USES`, in the table's order, with the
-   settings key it writes and the modes it offers — a seat with no apply stage
-   offers no `on`. `typesafe_settings.rs` holds this list against the table. */
+   settings key it writes and the modes it offers — a labeled seat offers all
+   four, a seat nothing labels offers no `auto`. `typesafe_settings.rs` holds
+   this list against the table. */
 const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "routing", setting: "decisionShadow", modes: "off shadow on auto" }),
   Object.freeze({ id: "recall", setting: "rerankShadow", modes: "off shadow on auto" }),
@@ -66,9 +67,9 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "compaction", setting: "jevCompaction", modes: "off shadow on auto" }),
   Object.freeze({ id: "agent_tool", setting: "agentTool", modes: "off shadow on" }),
   Object.freeze({ id: "browser_read", setting: "jevBrowserRead", modes: "off shadow on auto" }),
-  Object.freeze({ id: "notify", setting: "jevNotify", modes: "off shadow auto" }),
+  Object.freeze({ id: "notify", setting: "jevNotify", modes: "off shadow on auto" }),
   Object.freeze({ id: "mention_rerank", setting: "jevMentionRerank", modes: "off shadow on auto" }),
-  Object.freeze({ id: "branching", setting: "jevBranching", modes: "off shadow auto" }),
+  Object.freeze({ id: "branching", setting: "jevBranching", modes: "off shadow on auto" }),
   Object.freeze({ id: "judgment_cache", setting: "jevJudgmentCache", modes: "off shadow on auto" }),
 ]);
 const jevSeat = (id) => JEV_SEATS.find((seat) => seat.id === id) ?? null;

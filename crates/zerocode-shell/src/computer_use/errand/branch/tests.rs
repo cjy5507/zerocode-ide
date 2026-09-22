@@ -75,10 +75,12 @@ fn phone() -> FakeWorld {
     world
 }
 
-/// A judge whose press ranks 2 first and 1 second.
+/// A judge whose press ranks 2 first and 1 second, torn between them —
+/// inside the table's margin (`BRANCHING_FORK_MARGIN_PERMILLE`), so the
+/// step is one a fork is for.
 fn judging() -> FakeJudge {
     let mut judge = FakeJudge::chose(&[]);
-    judge.answers = vec![ranked(2, &[(2, 0.6), (1, 0.4)])];
+    judge.answers = vec![ranked(2, &[(2, 0.55), (1, 0.45)])];
     judge
 }
 
@@ -183,7 +185,19 @@ fn shadow_asks_over_actions_alone_and_presses_todays_number() {
         assert_eq!(row["routeUse"], "shadow");
         assert_eq!(row["reason"], "seat_recording");
         assert_eq!(row["platform"], "android");
-        assert_eq!(row["device"], "Pixel_6");
+        // Neither the device's name nor the goal's words are in the row
+        // (t-6155 F12): their fingerprints are.
+        assert_eq!(
+            row["deviceFingerprint"],
+            zerocode_core::jev::fingerprint_of("Pixel_6")
+        );
+        assert!(row.get("device").is_none() && row.get("flow").is_none());
+        assert!(row["flowFingerprint"].is_string());
+        let printed = row.to_string();
+        assert!(
+            !printed.contains("Pixel_6") && !printed.contains(goal(1).goal),
+            "{printed}"
+        );
         assert!(row["branching"].is_string() && row["at"].is_i64());
         assert!(
             walked.rows[0].get("forked").is_none(),
@@ -734,10 +748,33 @@ fn measure_forked_steps_on_a_fake_desk() {
     #[allow(clippy::cast_precision_loss)]
     let multiple = forked_ms as f64 / single_ms as f64;
     println!(
-        "MEASURE fake desk: single step {single_ms} ms, forked step (k=2) {forked_ms} ms, x{multiple:.2}; rescued {rescued}/{forks} steps where today's press led nowhere"
+        "MEASURE fake desk: single step {single_ms} ms, forked step (k=2) {forked_ms} ms, x{multiple:.2}; rescued {rescued}/{forks} steps of a scripted world where today's press led nowhere and the comparison read the script (the script's number, not a claim)"
     );
     assert_eq!(rescued, forks);
     assert!(multiple > 1.0);
+
+    // The gate's bite (t-6155 F3): over a leader-and-runner-up grid of the
+    // seat's answers — the leader from 0.30 to 0.95 in steps of 0.05, the
+    // rest on the runner-up — how many steps fork now that a clear lead is a
+    // single step. Before the margin every one of them forked, and the fork
+    // above was the clock of every step.
+    let grid: Vec<f64> = (6_u8..=19).map(|n| f64::from(n) / 20.0).collect();
+    let forking = grid
+        .iter()
+        .filter(|leader| {
+            let Judged::Chose(choice) = ranked(2, &[(2, **leader), (1, 1.0 - **leader)]) else {
+                unreachable!()
+            };
+            zerocode_core::branching::fork_wanted(&choice).len() >= 2
+        })
+        .count();
+    println!(
+        "MEASURE fork gate: {forking}/{} steps of a leader/runner-up grid (0.30..=0.95 by 0.05) fork under the margin; {}/{} did before it",
+        grid.len(),
+        grid.len(),
+        grid.len()
+    );
+    assert!(forking > 0 && forking < grid.len());
 }
 
 /* ---- the replay: the fake desk's forks, asked of the real endpoint ---- */
@@ -805,7 +842,7 @@ const SCENARIOS: [Scenario; 8] = [
                 "1 button Wi-Fi @101,40",
                 true,
                 &[
-                    "7 switch Wi-Fi 사용 @107,40",
+                    "7 switch 무선 랜 사용 @107,40",
                     "8 button 저장된 네트워크 @108,40",
                 ],
             ),
@@ -833,7 +870,7 @@ const SCENARIOS: [Scenario; 8] = [
                 &[
                     "6 edit 메시지 입력 @106,40",
                     "7 button 보내기 @107,40",
-                    "8 text 홍길동 @108,10",
+                    "8 text 마지막 접속 방금 전 @108,10",
                 ],
             ),
         ],
@@ -842,28 +879,28 @@ const SCENARIOS: [Scenario; 8] = [
     Scenario {
         goal: "알림을 끄고 저장하라",
         before: &[
-            "1 switch 알림 @101,40",
-            "2 button 저장 @102,40",
+            "1 switch 푸시 수신 @101,40",
+            "2 button 적용 @102,40",
             "3 button 뒤로 @103,40",
         ],
         candidates: &[
             (
                 2,
-                "2 button 저장 @102,40",
+                "2 button 적용 @102,40",
                 false,
                 &[
-                    "1 switch 알림 @101,40",
-                    "2 button 저장 @102,40",
+                    "1 switch 푸시 수신 @101,40",
+                    "2 button 적용 @102,40",
                     "3 button 뒤로 @103,40",
                 ],
             ),
             (
                 1,
-                "1 switch 알림 @101,40",
+                "1 switch 푸시 수신 @101,40",
                 true,
                 &[
-                    "1 switch 알림 꺼짐 @101,40",
-                    "2 button 저장 @102,40",
+                    "1 switch 푸시 수신 해제됨 @101,40",
+                    "2 button 적용 @102,40",
                     "3 button 뒤로 @103,40",
                 ],
             ),
@@ -885,7 +922,7 @@ const SCENARIOS: [Scenario; 8] = [
                 &[
                     "4 text 홍길동 @104,10",
                     "5 button 프로필 수정 @105,40",
-                    "6 button 로그아웃 @106,40",
+                    "6 button 이 기기에서 나가기 @106,40",
                 ],
             ),
             (
@@ -987,7 +1024,7 @@ const SCENARIOS: [Scenario; 8] = [
                 "1 button 디스플레이 @101,40",
                 true,
                 &[
-                    "6 switch 다크 모드 @106,40",
+                    "6 switch 어두운 테마 @106,40",
                     "7 button 밝기 @107,40",
                     "8 button 글자 크기 @108,40",
                 ],
@@ -1018,8 +1055,8 @@ const SCENARIOS: [Scenario; 8] = [
                 "2 button 청구 @102,40",
                 true,
                 &[
-                    "7 button 2026년 9월 청구서 @107,40",
-                    "8 button 2026년 8월 청구서 @108,40",
+                    "7 button 2026년 9월분 명세 @107,40",
+                    "8 button 2026년 8월분 명세 @108,40",
                     "9 button 자동 납부 @109,40",
                 ],
             ),
@@ -1027,6 +1064,57 @@ const SCENARIOS: [Scenario; 8] = [
         right: 2,
     },
 ];
+
+/// The stems of a goal's words: each whitespace token with one trailing
+/// particle taken off, two characters and longer. A harness rule and not a
+/// product one — it exists so a scenario cannot hand the comparison its
+/// answer as a string.
+fn goal_stems(goal: &str) -> Vec<String> {
+    const PARTICLES: [&str; 14] = [
+        "에서", "에게", "으로", "하라", "어라", "을", "를", "이", "가", "에", "의", "로", "고",
+        "라",
+    ];
+    goal.split_whitespace()
+        .map(|word| {
+            PARTICLES
+                .iter()
+                .find_map(|particle| word.strip_suffix(particle))
+                .unwrap_or(word)
+                .to_string()
+        })
+        .filter(|stem| stem.chars().count() >= 2)
+        .collect()
+}
+
+/// No scenario hands the comparison its answer as a string (t-6155 F3): the
+/// screen the right candidate leads to carries none of the goal's words.
+/// A wrong candidate's screen may — a decoy is what a real screen does —
+/// and the controls pressed may, since the emulator seat saw those too.
+#[test]
+fn no_scenario_leaks_its_goal_into_the_right_candidates_result() {
+    for scenario in &SCENARIOS {
+        let stems = goal_stems(scenario.goal);
+        assert!(!stems.is_empty(), "{}", scenario.goal);
+        let right = scenario
+            .candidates
+            .iter()
+            .find(|(mark, ..)| *mark == scenario.right)
+            .expect("the right candidate is one of the candidates");
+        for line in right.3 {
+            for stem in &stems {
+                assert!(
+                    !line.contains(stem.as_str()),
+                    "{:?}: the right result {line:?} carries the goal's {stem:?}",
+                    scenario.goal
+                );
+            }
+        }
+    }
+    // The reader takes the stems a person would: nouns and verbs, not their
+    // particles, and nothing of one character.
+    assert_eq!(goal_stems("알림을 끄고 저장하라"), ["알림", "저장"]);
+    assert_eq!(goal_stems("Wi-Fi 설정을 열어라"), ["Wi-Fi", "설정"]);
+}
 
 fn scenario_ask(scenario: &Scenario) -> zerocode_core::branching::BranchAsk {
     use zerocode_core::branching::{BranchLook, Candidate, Outcome, ask};
@@ -1062,9 +1150,11 @@ fn scenario_ask(scenario: &Scenario) -> zerocode_core::branching::BranchAsk {
 
 /// The fake desk's forks, put to the real endpoint as the shipped question
 /// (`branching::ask`), and read against the scenario's own right answer:
-/// how often the comparison named it, how often it named what the emulator
-/// seat would have pressed (the first candidate), its latency and what it
-/// cost. With a seed, also how many of this machine's phone presses a fork
+/// how often the comparison named it — pass by pass, a Wilson bound on the
+/// first alone — how often it named what the emulator seat would have
+/// pressed (the first candidate), its latency and what it cost. The right
+/// answers are the scenarios' own, a synthetic golden and not this machine's
+/// walks. With a seed, also how many of this machine's phone presses a fork
 /// would have been offered at (`branching::fork_wanted` over the seat's own
 /// probabilities) and what those steps' looks and presses cost.
 ///
@@ -1159,8 +1249,12 @@ fn the_forks_this_desk_would_take() {
         BRANCHING_APPLY_DEADLINE_MS
     );
 
-    let mut right = zerocode_core::jev::promote::Agreement::default();
-    let mut as_today = 0usize;
+    // Per pass, as the notify harness counts (t-6155 F2): only the first
+    // pass is an independent sample and carries a Wilson bound; a later pass
+    // asks the same eight questions again and says only whether the answer
+    // repeated.
+    let mut right_by_pass = vec![zerocode_core::jev::promote::Agreement::default(); runs];
+    let mut as_today_by_pass = vec![0usize; runs];
     let mut elapsed = Vec::new();
     let mut refusals: BTreeMap<String, usize> = BTreeMap::new();
     let mut input_tokens = 0u64;
@@ -1188,9 +1282,9 @@ fn the_forks_this_desk_would_take() {
             });
             match read {
                 Ok(choice) => {
-                    right.compared += 1;
-                    right.agreed += usize::from(choice.mark == scenario.right);
-                    as_today += usize::from(choice.mark == scenario.candidates[0].0);
+                    right_by_pass[pass].compared += 1;
+                    right_by_pass[pass].agreed += usize::from(choice.mark == scenario.right);
+                    as_today_by_pass[pass] += usize::from(choice.mark == scenario.candidates[0].0);
                     if pass == 0 {
                         first[index] = Some(choice.mark);
                     } else if let Some(was) = first[index] {
@@ -1219,18 +1313,37 @@ fn the_forks_this_desk_would_take() {
     elapsed.sort_unstable();
     let asked_count = elapsed.len();
     let cost = rate.map(|rate| rate.input_cost_usd(input_tokens));
+    #[allow(clippy::cast_precision_loss)]
+    let share = |part: usize, whole: usize| {
+        if whole == 0 {
+            0.0
+        } else {
+            100.0 * part as f64 / whole as f64
+        }
+    };
     println!(
-        "\nright {}/{} ({}) · named today's press {}/{} · repeat {}/{} · refusals {refusals:?}",
-        right.agreed,
-        right.compared,
-        right.lower_bound().map_or_else(
-            || "—".to_string(),
-            |bound| format!("Wilson lower {:.1}%", bound * 100.0)
-        ),
-        as_today,
-        right.compared,
-        repeated.agreed,
-        repeated.compared,
+        "\nRepeated asks are dependent observations; only the first pass carries a Wilson bound."
+    );
+    println!("| pass | compared | right | share | Wilson lower | named today's press |");
+    println!("| --- | --- | --- | --- | --- | --- |");
+    for (pass, (right, today)) in right_by_pass.iter().zip(&as_today_by_pass).enumerate() {
+        let bound = if pass == 0 {
+            right
+                .lower_bound()
+                .map_or_else(|| "—".to_string(), |bound| format!("{:.1}%", bound * 100.0))
+        } else {
+            "repeated".to_string()
+        };
+        println!(
+            "| #{pass} | {} | {} | {:.1}% | {bound} | {today} |",
+            right.compared,
+            right.agreed,
+            share(right.agreed, right.compared)
+        );
+    }
+    println!(
+        "repeat {}/{} · refusals {refusals:?}",
+        repeated.agreed, repeated.compared,
     );
     println!(
         "latency p50 {:?} ms · p95 {:?} ms · max {:?} ms over {asked_count} asks; input tokens {input_tokens}; cost {}",
@@ -1330,7 +1443,9 @@ fn a_rescued_step_forks_on_the_second_readers_ranking() {
     let mut world = phone();
     let mut judge = seat();
     let mut team = FakeJudge::chose(&[]);
-    team.answers = vec![ranked(1, &[(1, 0.6), (2, 0.4)])];
+    // Torn between the two — inside the fork margin (t-6155 F3), so the
+    // rescued step is one a fork is for.
+    team.answers = vec![ranked(1, &[(1, 0.55), (2, 0.45)])];
 
     let walked = run_with(
         Mode::On,

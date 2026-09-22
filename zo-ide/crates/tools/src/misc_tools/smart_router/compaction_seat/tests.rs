@@ -442,10 +442,71 @@ fn percentile(sorted: &[u64], share: f64) -> u64 {
     zerocode_core::jev::summary::percentile(sorted, share).unwrap_or(0)
 }
 
+/// The one point a transcript is replayed at (t-6155 F5): its first recorded
+/// compaction when it has one, else the first message at which its own
+/// estimate crossed `threshold`. One and not both, because a threshold point
+/// on a transcript that later compacted sits inside the recorded point's
+/// blocks — the same tool results asked about twice, which the README says
+/// never happens — and because two points on one transcript are not two
+/// samples of this machine's compactions.
+fn replay_point(recorded: &[usize], history: &[ConversationMessage], threshold: u64) -> Option<(&'static str, usize)> {
+    if let Some(cut) = recorded.first() {
+        return Some(("recorded", *cut));
+    }
+    let mut running = 0usize;
+    for (index, message) in history.iter().enumerate() {
+        running += runtime::estimate_session_tokens(&{
+            let mut one = Session::new();
+            one.push_message(message.clone()).expect("push");
+            one
+        });
+        if running as u64 >= threshold {
+            return Some(("threshold", index + 1));
+        }
+    }
+    None
+}
+
+/// The median of a set of shares, for a table that must not let one point
+/// speak for the rest.
+fn median(shares: &mut [f64]) -> f64 {
+    if shares.is_empty() {
+        return 0.0;
+    }
+    shares.sort_by(f64::total_cmp);
+    let mid = shares.len() / 2;
+    if shares.len().is_multiple_of(2) {
+        f64::midpoint(shares[mid - 1], shares[mid])
+    } else {
+        shares[mid]
+    }
+}
+
+/// The one point a transcript is replayed at is its recorded cut when it
+/// has one, else its threshold crossing, never both (t-6155 F5).
+#[test]
+fn a_transcript_is_replayed_at_one_point_recorded_first() {
+    let history: Vec<ConversationMessage> = (0..6).map(|n| user_text(&"x".repeat(4_000 * (n + 1)))).collect();
+    assert_eq!(replay_point(&[3, 5], &history, 1), Some(("recorded", 3)));
+    let (kind, cut) = replay_point(&[], &history, 2_000).expect("the estimate crosses");
+    assert_eq!(kind, "threshold");
+    assert!((1..=6).contains(&cut));
+    assert_eq!(replay_point(&[], &history, u64::MAX), None, "an estimate that never crosses is no point");
+    for (shares, expected) in [(vec![3.0, 1.0, 2.0], 2.0), (vec![4.0, 1.0, 3.0, 2.0], 2.5), (Vec::new(), 0.0)] {
+        let mut shares = shares;
+        assert!((median(&mut shares) - expected).abs() < f64::EPSILON, "{shares:?} -> {expected}");
+    }
+}
+
 /// Replays this machine's own compaction points against the real endpoint
 /// and prints the table the brief asks for: summary-input tokens before and
 /// after, the share of blocks dropped, the regret rate over the turns after
-/// each cut, the batch wall's p50/p95 and the cost.
+/// each cut, the batch wall's p50/p95 and the cost — pooled, and per point
+/// as medians, because one long transcript once carried half the pooled
+/// blocks (t-6155 F5). One point per transcript, the recorded cut first.
+/// The regret share carries a Wilson lower bound on "not regretted"; it is
+/// a floor, since a re-read is only counted when the same call or the same
+/// path comes back (`turn_reads::read_path`).
 ///
 /// Every input a judgment reads is from before its cut — the session is
 /// rebuilt from the messages up to it — and the turns after are read only
@@ -485,6 +546,9 @@ fn the_compactions_this_machine_would_have_made() {
     let mut walls: Vec<u64> = Vec::new();
     let mut outcomes: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     let mut per_cut: Vec<String> = Vec::new();
+    // Per point (t-6155 F5): the drop share and the token share removed,
+    // for medians beside the pooled shares.
+    let (mut drop_shares, mut removed_shares): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
 
     for transcript in seed["transcripts"].as_array().expect("transcripts") {
         let path = transcript["path"].as_str().expect("a path");
@@ -499,29 +563,21 @@ fn the_compactions_this_machine_would_have_made() {
         let model = transcript["model"].as_str();
         let window = model.map_or(0, api::context_window_for_model);
         let threshold = budget.unwrap_or_else(|| u64::from(runtime::auto_compaction_threshold_for_model(model, window)));
-        // The points: every recorded one the seed names, and the first at
-        // which the transcript's own estimate crossed the threshold.
-        let mut points: Vec<(String, usize)> = transcript["recordedCuts"]
+        // The transcript's name in the table: the file's stem, which is a
+        // session id and not a path.
+        let id = Path::new(path).file_stem().and_then(|stem| stem.to_str()).unwrap_or("?");
+        let recorded: Vec<usize> = transcript["recordedCuts"]
             .as_array()
             .map(|cuts| {
                 cuts.iter()
                     .filter_map(serde_json::Value::as_u64)
-                    .map(|cut| ("recorded".to_string(), usize::try_from(cut).unwrap_or(usize::MAX)))
+                    .map(|cut| usize::try_from(cut).unwrap_or(usize::MAX))
                     .collect()
             })
             .unwrap_or_default();
-        let mut running = 0usize;
-        for (index, message) in history.iter().enumerate() {
-            running += runtime::estimate_session_tokens(&{
-                let mut one = Session::new();
-                one.push_message(message.clone()).expect("push");
-                one
-            });
-            if running as u64 >= threshold {
-                points.push(("threshold".to_string(), index + 1));
-                break;
-            }
-        }
+        // One point per transcript: the recorded cut first, else the
+        // threshold crossing.
+        let points = replay_point(&recorded, &history, threshold).into_iter();
         for (kind, cut) in points {
             if cut == 0 || cut > history.len() {
                 continue;
@@ -569,8 +625,10 @@ fn the_compactions_this_machine_would_have_made() {
             regretted_total += regretted;
             tokens_before += before;
             tokens_after += after;
+            drop_shares.push(share(left, ask.blocks.len()));
+            removed_shares.push(share(before.saturating_sub(after), before));
             per_cut.push(format!(
-                "{kind:>9} cut={cut:>4} asked={:>3} dropped={:>3} regret={:>2} tokens {before:>7}→{after:>7} wall={:>5} ms {}",
+                "{kind:>9} cut={cut:>4} asked={:>3} dropped={:>3} regret={:>2} tokens {before:>7}→{after:>7} wall={:>5} ms {} {id}",
                 ask.blocks.len(),
                 left,
                 regretted,
@@ -587,9 +645,30 @@ fn the_compactions_this_machine_would_have_made() {
         println!("{line}");
     }
     println!("outcomes: {outcomes:?}");
-    println!("blocks asked: {candidates_total}, dropped: {dropped_total} ({:.1}%)", share(dropped_total, candidates_total));
-    println!("summary input tokens: {tokens_before} → {tokens_after} ({:.1}% removed)", share(tokens_before.saturating_sub(tokens_after), tokens_before));
-    println!("regret: {regretted_total} of {dropped_total} dropped ({:.1}%)", share(regretted_total, dropped_total));
+    println!(
+        "blocks asked: {candidates_total}, dropped: {dropped_total} ({:.1}% pooled; per-point median {:.1}%)",
+        share(dropped_total, candidates_total),
+        median(&mut drop_shares)
+    );
+    println!(
+        "summary input tokens: {tokens_before} → {tokens_after} ({:.1}% removed pooled; per-point median {:.1}%)",
+        share(tokens_before.saturating_sub(tokens_after), tokens_before),
+        median(&mut removed_shares)
+    );
+    let kept_bound = if dropped_total == 0 {
+        0.0
+    } else {
+        zerocode_core::jev::summary::wilson_lower(
+            dropped_total.saturating_sub(regretted_total),
+            dropped_total,
+            zerocode_core::jev::summary::WILSON_Z_95,
+        )
+    };
+    println!(
+        "regret: {regretted_total} of {dropped_total} dropped ({:.1}%; a floor — not-regretted Wilson lower {:.1}%)",
+        share(regretted_total, dropped_total),
+        100.0 * kept_bound
+    );
     println!("batch wall ms: p50 {} p95 {} max {}", percentile(&sorted, 0.5), percentile(&sorted, 0.95), sorted.last().copied().unwrap_or(0));
     println!("requests: {requests}, input tokens: {input_tokens}, cost: {cost:?} USD");
 }

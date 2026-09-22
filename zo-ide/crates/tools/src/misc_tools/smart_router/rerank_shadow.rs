@@ -2051,9 +2051,22 @@ mod tests {
                 });
                 append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).expect("a reading");
             }
+            // Dated after the window's first reading — the real one `settle`
+            // wrote on this clock — because the judge reads only the marks
+            // written since the window began; a label dated before it is a
+            // label about some other window (t-6155 F1 made this visible:
+            // until then a hindsight seat rose with no marks counted at all).
+            let after_the_window = i64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|since| since.as_millis())
+                    .unwrap_or_default(),
+            )
+            .unwrap_or(i64::MAX / 2)
+                + 60_000;
             for at in 0..JUDGED_EVERY_ROWS {
                 let label = serde_json::json!({
-                    "at": 5_000 + at, "label": format!("{at}:{at}"), "query": at, "notes": at,
+                    "at": after_the_window + i64::try_from(at).unwrap_or_default(), "label": format!("{at}:{at}"), "query": at, "notes": at,
                     "applied": false, "agreed": true, "rank": 0,
                 });
                 append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");

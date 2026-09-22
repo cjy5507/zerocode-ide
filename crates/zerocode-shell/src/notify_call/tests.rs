@@ -874,6 +874,9 @@ fn the_calls_this_machine_would_have_made() {
     }
     println!("\nRepeated asks are dependent observations; pooled shares have no Wilson interval.");
     println!(
+        "A hand is a key or a paste into the pane (`term_key`/`term_paste`); a tab clicked to read is not one, so 'present and quiet' counts a read-only reaction against interrupting (t-6155 F9)."
+    );
+    println!(
         "| pass | reacted rows | called interrupt | hit | Wilson lower | marks | agreed | share | Wilson lower |"
     );
     println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- |");

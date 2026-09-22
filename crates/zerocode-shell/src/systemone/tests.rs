@@ -296,11 +296,14 @@ fn a_second_warm_up_inside_the_pools_idle_window_opens_no_socket() {
 /// transition row in 1,147 requests (t-5875).
 ///
 /// The placement seat, because it is the one whose rows say what the road is
-/// for: 38 real requests, one timeout, no reader to be compared against.
+/// for: 38 real requests, one timeout, and marks that are hindsight — the
+/// pane left where it was put — which the seat waits a window of before it
+/// may rise (t-6155 F1): its own rows alone never carry it up.
 #[test]
 fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
     use serde_json::json;
     use zerocode_core::jev::promote::{ROSE, Stand, stand_from, window_wanted_for};
+    use zerocode_core::jev::summary::rows_that_can_clear;
     use zerocode_core::jev::{JevMode, PLACEMENT};
 
     let home = tempfile::tempdir().expect("a zo home");
@@ -312,6 +315,19 @@ fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
     for at in 0..wanted as i64 - 1 {
         record_rows(&PLACEMENT, &ledger, &[answered(at)], at);
     }
+    // The marks the seat's own later facts wrote: a window's worth, and
+    // enough agreeing ones to clear its budget, dated inside the window.
+    let marks = rows_that_can_clear(PLACEMENT.agreement_floor_permille.expect("a budget"))
+        .max(PLACEMENT.agreement_rows_wanted.expect("a sample floor"));
+    let labels: Vec<serde_json::Value> = (0..marks)
+        .map(|n| json!({"at": 1, "label": format!("placement-{n}"), "agreed": true}))
+        .collect();
+    record_rows(&PLACEMENT, &ledger, &labels, 1);
+    assert_eq!(
+        stand_from(&read_rows(&ledger)),
+        Stand::Recording,
+        "marks alone do not fill the window"
+    );
     assert_eq!(stand_from(&read_rows(&ledger)), Stand::Recording);
     assert!(
         !read_rows(&ledger)
