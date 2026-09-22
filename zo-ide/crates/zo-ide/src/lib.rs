@@ -27,6 +27,7 @@ pub mod decision_shadow_cli;
 pub mod jev_cli;
 pub mod mcp_cli;
 pub mod scoreboard_cli;
+pub mod vault_cli;
 pub mod custom_provider_env;
 pub mod doctor;
 pub mod dream;

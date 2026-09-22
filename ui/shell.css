@@ -36264,12 +36264,15 @@ details.task-board-section > summary {
   stroke-width: var(--knowledge-edge-lit-width);
 }
 
-/* 최단 경로 (Bloom 문법) — 경로 노드와 간선 밝힘, 나머지는 디밍 */
-.knowledge-picture.is-path .knowledge-node.is-path-dim {
+/* 경로 — 경로의 점과 선만 밝고 나머지는 물러선다. 물러서는 옷은 판(`is-path`)의 규칙이고
+ * 점·선마다 클래스를 쓰지 않는다(t-5966): 천 쪽에서 점 1,020개와 선 1,734개에 「흐림」을
+ * 쓰고 지우는 것이 경로 하나에 프레임을 백 밀리초로 만들었다(실측 102 ms → 아래 규칙으로
+ * 경로의 몫만 남긴다). 포커스·검색의 흐림과 같은 손이다. */
+.knowledge-picture.is-path .knowledge-node:not(.is-path-lit) {
   opacity: var(--knowledge-dim-opacity);
 }
 
-.knowledge-picture.is-path .knowledge-edge.is-path-dim {
+.knowledge-picture.is-path .knowledge-edge:not(.is-path-lit) {
   opacity: var(--knowledge-dim-edge-opacity);
 }
 
@@ -36321,6 +36324,46 @@ details.task-board-section > summary {
 .knowledge-chain-rel {
   color: var(--nav-plane-ring);
   font-weight: 500;
+}
+
+/* 사슬의 홉마다 근거(t-5966 G3) — 관계 낱말 뒤의 작은 꼬리. */
+.knowledge-chain-road {
+  color: var(--ink-label);
+  font-weight: 400;
+}
+
+/* 경로 묻기와 경로 목록(t-5966 G3). 입력은 설정의 옷, 단추는 렌즈 플래그의 옷을 입는다. */
+.knowledge-path-ask {
+  display: flex;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+
+.knowledge-path-ask .knowledge-path-to {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.knowledge-path-note {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-label);
+}
+
+.knowledge-path-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-top: var(--space-1);
+}
+
+.knowledge-path-pick {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.knowledge-path-pick.is-active {
+  color: var(--ink-chalk);
+  border-color: var(--nav-plane-ring);
 }
 
 .knowledge-node.is-lit .knowledge-dot,

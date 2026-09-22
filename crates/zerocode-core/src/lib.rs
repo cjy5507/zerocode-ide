@@ -77,6 +77,7 @@ pub mod second_brain;
 pub mod second_brain_graph;
 pub mod second_brain_lint;
 pub mod second_brain_live;
+pub mod second_brain_paths;
 pub mod second_brain_relate;
 pub mod second_brain_related;
 pub mod session;

@@ -735,6 +735,38 @@ pub(crate) async fn second_brain_graph(
     .map_err(|join| join.to_string())?
 }
 
+/// Paths between two pages (t-5966 G3) — the one calculator,
+/// `zerocode_core::second_brain_paths::report`, over the same cached picture
+/// the view draws (`sources` as the view asked it). The window maps the
+/// answer's ids onto whatever its lens is showing and counts nothing itself;
+/// `zo vault path` prints the same answer on a pane.
+#[tauri::command]
+pub(crate) async fn second_brain_paths(
+    state: State<'_, AppState>,
+    path: Option<String>,
+    sources: Option<bool>,
+    from: String,
+    to: String,
+    k: Option<usize>,
+) -> Result<zerocode_core::second_brain_paths::PathReport, String> {
+    let saved = load_settings_resilient(state.settings())
+        .document
+        .second_brain_vault;
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = graph_root(saved, path)?;
+        let graph = scanned_graph(&root, sources.unwrap_or(false));
+        zerocode_core::second_brain_paths::report(
+            &graph,
+            &from,
+            &to,
+            k.unwrap_or(zerocode_core::second_brain_paths::PATH_LIMITS.k_max),
+        )
+        .map_err(|refusal| refusal.to_string())
+    })
+    .await
+    .map_err(|join| join.to_string())?
+}
+
 /// Where one graph node's page lives, so the window can open it as a document.
 ///
 /// The id came from the scan and the join is checked there

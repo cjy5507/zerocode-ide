@@ -1673,16 +1673,41 @@ function buildKnowledgeCard() {
   const when = document.createElement("p");
   when.className = "knowledge-modified";
 
+  /* 경로 묻기(t-5966 G3): 고른 페이지에서 적은 페이지까지. Shift-클릭과 같은 문으로 간다 —
+   * 이름은 백엔드가 푼다(id·wiki/ 아래 경로·파일 이름·제목). */
+  const pathAsk = document.createElement("form");
+  pathAsk.className = "knowledge-path-ask";
+  const pathTo = document.createElement("input");
+  pathTo.type = "text";
+  pathTo.className = "settings-input knowledge-path-to";
+  pathTo.dataset.i18nPlaceholder = "knowledge.pathTo";
+  pathTo.placeholder = t("knowledge.pathTo", "…까지의 경로");
+  pathTo.dataset.i18nAria = "knowledge.pathTo";
+  pathTo.setAttribute("aria-label", t("knowledge.pathTo", "…까지의 경로"));
+  const pathGo = document.createElement("button");
+  pathGo.type = "submit";
+  pathGo.className = "btn knowledge-path-go";
+  pathGo.dataset.i18n = "knowledge.pathChain";
+  pathGo.textContent = t("knowledge.pathChain", "경로");
+  pathAsk.append(pathTo, pathGo);
+
   const chainSection = document.createElement("section");
   chainSection.className = "knowledge-inspector-chain";
   chainSection.hidden = true;
   const chainHead = document.createElement("h4");
   chainHead.className = "knowledge-inspector-head";
   chainHead.dataset.i18n = "knowledge.pathChain";
-  chainHead.textContent = t("knowledge.pathChain", "최단 경로");
+  chainHead.textContent = t("knowledge.pathChain", "경로");
+  /* 답의 요약 한 줄(몇 경로·최단 몇 홉·예산에서 끊겼는가), 경로의 목록(누르면 그 경로를
+   * 밝힌다), 고른 경로의 사슬 — 셋 다 백엔드의 답을 읽는다(`paintKnowledgePathSection`). */
+  const chainNote = document.createElement("p");
+  chainNote.className = "knowledge-path-note";
+  const chainList = document.createElement("div");
+  chainList.className = "knowledge-path-list";
+  chainList.setAttribute("role", "group");
   const chainBody = document.createElement("div");
   chainBody.className = "knowledge-chain-body";
-  chainSection.append(chainHead, chainBody);
+  chainSection.append(chainHead, chainNote, chainList, chainBody);
 
   const acts = document.createElement("div");
   acts.className = "knowledge-inspector-acts";
@@ -1722,6 +1747,7 @@ function buildKnowledgeCard() {
     backlinks,
     knowledgeListSection("knowledge-recalled-by", "knowledge.recalledBy", t("knowledge.recalledBy", "이 페이지를 본 작업")),
     when,
+    pathAsk,
     chainSection,
   );
   return box;
@@ -4627,7 +4653,7 @@ function makeKnowledgeSvgPainter() {
     const { from, to, ghost, kind, edgeCount } = model;
     const spot = knowledgeClusterPicked;
     const community = layout.community;
-    const { sliceMatch, pathEdge, pathShown, drawnEdge } = layout;
+    const { sliceMatch, pathEdge, drawnEdge } = layout;
     for (let at = 0; at < edgeCount; at += 1) {
       if (drawnEdge !== null && drawnEdge[at] === 0) continue;
       const held = measured[at];
@@ -4676,7 +4702,6 @@ function makeKnowledgeSvgPainter() {
       /* 슬라이서 창 밖의 선은 양 끝이 다 창 안이 아닐 때 흐리다 — 점의 규칙 그대로. */
       held.sliceDim = sliceMatch[from[at]] === 0 || sliceMatch[to[at]] === 0;
       held.pathLit = pathEdge[at] === 1;
-      held.pathDim = pathShown && !held.pathLit;
     }
     /* 그려지는 선만 페인터에 넘긴다(t-4140). 부분집합의 목록은 도장이 바뀔 때만 다시
      * 고르고, 프레임마다는 같은 배열을 건넨다 — 페인터는 좌표가 그대로인 선을
@@ -4722,7 +4747,6 @@ function makeKnowledgeSvgPainter() {
           edge.spotlit ? "is-spotlit" : "",
           edge.sliceDim ? "is-slice-dim" : "",
           edge.pathLit ? "is-path-lit" : "",
-          edge.pathDim ? "is-path-dim" : "",
           edge.inter ? "is-inter" : "is-intra",
         ].filter(Boolean).join(" "));
         if (edge.hue >= 0) writeAttribute(group, "data-hue", String(edge.hue));
@@ -5680,83 +5704,81 @@ function knowledgeFocus(view, layout) {
   layout.focusEdgeCount = lit;
 }
 
-/* 최단 경로 (Bloom 문법): 무방향 BFS로 sourceSeat에서 targetSeat까지의 최단 경로를 찾는다.
- * 같은 거리면 타입 간선(frontmatter 관계)을 mentions보다 우선한다. */
-function findKnowledgeShortestPath(model, sourceSeat, targetSeat) {
-  if (sourceSeat < 0 || targetSeat < 0 || sourceSeat === targetSeat) return null;
-  const count = model.count;
-  const { start, neighbour, throughEdge, kind } = model;
-  const dist = new Int32Array(count).fill(-1);
-  const typedScore = new Int32Array(count).fill(0);
-  const parent = new Map();
-  const queue = [sourceSeat];
-  dist[sourceSeat] = 0;
-  typedScore[sourceSeat] = 0;
+/* ---- 경로 (t-5966 G3) ----
+ *
+ * 계산기는 하나다: 백엔드의 `second_brain_paths`(`VaultGraph::paths`). 창은 두 열쇠를 보내고,
+ * 답(경로마다 점의 id, 홉마다 관계·근거·건너간 방향)을 **이 그림**의 자리에 다시 놓아 밝힐
+ * 뿐이다 — 옛 판은 렌즈의 부분집합 위에서 제 BFS를 돌렸고, 두 계산기가 두 그림에 답했다.
+ * 답은 열쇠(id)로 들고 있으므로 렌즈가 점을 새 자리에 앉혀도 같은 두 페이지를 다시 찾고,
+ * 끝점이나 홉이 그림에서 빠지면 길은 서지 않았다가(K21) 돌아오면 다시 선다. */
+let knowledgePathGeneration = 0;
 
-  while (queue.length > 0) {
-    const u = queue.shift();
-    if (u === targetSeat) break;
-    const edges = [];
-    for (let at = start[u]; at < start[u + 1]; at += 1) {
-      const v = neighbour[at];
-      const edge = throughEdge[at];
-      const edgeKind = kind[edge];
-      edges.push({ v, edge, edgeKind });
-    }
-    edges.sort((a, b) => (b.edgeKind > 0 ? 1 : 0) - (a.edgeKind > 0 ? 1 : 0));
-
-    for (const { v, edge, edgeKind } of edges) {
-      const isTyped = edgeKind > 0 ? 1 : 0;
-      const nextDist = dist[u] + 1;
-      const nextTyped = typedScore[u] + isTyped;
-      if (dist[v] === -1) {
-        dist[v] = nextDist;
-        typedScore[v] = nextTyped;
-        parent.set(v, { prev: u, edge, kind: edgeKind });
-        queue.push(v);
-      } else if (dist[v] === nextDist && nextTyped > typedScore[v]) {
-        typedScore[v] = nextTyped;
-        parent.set(v, { prev: u, edge, kind: edgeKind });
-      }
-    }
-  }
-
-  if (dist[targetSeat] === -1) return null;
-
+/* 답의 고른 경로를 이 그림의 자리와 선 번호로. 어느 점이든 그림에 없으면 길이 없다(null).
+ * 홉의 관계가 렌즈에 빠졌어도 같은 두 점 사이의 다른 선이 서 있으면 그 선을 밝힌다 — 그
+ * 사슬은 이 그림에 있다. */
+function knowledgeRoute(model, path) {
+  if (path === null || path.report === null) return null;
+  const named = path.report.paths[path.picked];
+  if (named === undefined) return null;
   const nodes = [];
-  const edges = [];
-  let curr = targetSeat;
-  while (curr !== sourceSeat) {
-    nodes.push(curr);
-    const p = parent.get(curr);
-    edges.push(p.edge);
-    curr = p.prev;
+  for (const node of named.nodes) {
+    const seat = model.keys.indexOf(node.id);
+    if (seat < 0) return null;
+    nodes.push(seat);
   }
-  nodes.push(sourceSeat);
-  nodes.reverse();
-  edges.reverse();
+  const edges = [];
+  for (let at = 0; at < named.hops.length; at += 1) {
+    const code = KNOWLEDGE_EDGE_CODE[named.hops[at].kind];
+    const left = nodes[at];
+    const right = nodes[at + 1];
+    let found = -1;
+    for (let slot = model.start[left]; slot < model.start[left + 1]; slot += 1) {
+      if (model.neighbour[slot] !== right) continue;
+      const edge = model.throughEdge[slot];
+      if (model.kind[edge] === code) {
+        found = edge;
+        break;
+      }
+      if (found < 0) found = edge;
+    }
+    if (found < 0) return null;
+    edges.push(found);
+  }
   return { nodes, edges };
 }
 
-/* 경로의 길 — 두 열쇠를 **이 그림**(모델)에서 다시 찾는다. 자리와 선의 번호는 모델의
- * 것이라 렌즈 하나·워처의 새 답 하나에 다른 페이지를 가리키게 되고, 그 번호로 밝힌
- * 경로는 엉뚱한 점과 엉뚱한 사슬이었다(K21). 끝점이 그림에 없거나 이어지지 않으면
- * 길이 없다(null) — 열쇠는 남아 있어 그 페이지들이 돌아오면 경로도 돌아온다. */
-function knowledgeRoute(model, path) {
-  if (path === null) return null;
-  return findKnowledgeShortestPath(
-    model,
-    model.keys.indexOf(path.sourceKey),
-    model.keys.indexOf(path.targetKey),
-  );
+/* 두 열쇠로 백엔드에 묻고, 답을 들고, 밝힌다. `targetName`은 열쇠일 수도 사람이 적은
+ * 이름일 수도 있다 — 푸는 것은 백엔드이고, 들고 있는 열쇠는 답의 것이다. 늦게 온 답은
+ * 버린다(세대). 판이 그사이 갈렸으면 지금의 판을 되찾는다. */
+async function runKnowledgeShortestPath(view, layout, sourceKey, targetName) {
+  const vault = knowledgeReport?.vault ?? secondBrainVault ?? "";
+  const generation = ++knowledgePathGeneration;
+  let report = null;
+  let refused = null;
+  try {
+    report = await invoke("second_brain_paths", {
+      path: vault, sources: knowledgeShowSources, from: sourceKey, to: targetName,
+    });
+  } catch (error) {
+    refused = String(error);
+  }
+  if (generation !== knowledgePathGeneration) return;
+  knowledgePath = report === null
+    ? { sourceKey, targetKey: targetName, report: null, picked: 0, refused }
+    : { sourceKey: report.from.id, targetKey: report.to.id, report, picked: 0, refused: null };
+  const held = knowledgeLayouts.get(view) ?? layout;
+  highlightKnowledgePath(view, held);
+  knowledgeFocus(view, held);
+  paintKnowledgeInspector(view, held);
+  paintKnowledgeFrame(view, held);
 }
 
-function runKnowledgeShortestPath(view, layout, sourceKey, targetKey) {
-  const path = { sourceKey, targetKey };
-  const route = knowledgeRoute(layout.model, path);
-  if (route === null) return;
-  knowledgePath = path;
-  highlightKnowledgePath(view, layout, route);
+/* 목록의 한 경로를 고른다 — 답은 그대로, 밝히는 것만 바뀐다. */
+function pickKnowledgePath(view, layout, at) {
+  if (knowledgePath === null || knowledgePath.report === null) return;
+  if (at < 0 || at >= knowledgePath.report.paths.length) return;
+  knowledgePath.picked = at;
+  highlightKnowledgePath(view, layout);
   knowledgeFocus(view, layout);
   paintKnowledgeInspector(view, layout);
   paintKnowledgeFrame(view, layout);
@@ -5766,6 +5788,7 @@ function runKnowledgeShortestPath(view, layout, sourceKey, targetKey) {
 function clearKnowledgePath(view, layout) {
   if (!knowledgePath) return;
   knowledgePath = null;
+  knowledgePathGeneration += 1;
   highlightKnowledgePath(view, layout);
   const chain = view.querySelector(".knowledge-inspector-chain");
   if (chain) chain.hidden = true;
@@ -5782,15 +5805,81 @@ function highlightKnowledgePath(view, layout, route = knowledgeRoute(layout.mode
   layout.pathChain = route;
   layout.pathShown = route !== null;
   picture.classList.toggle("is-path", layout.pathShown);
+  /* 밝히는 점만 쓴다 — 물러서는 옷은 판의 클래스가 입힌다(`.is-path .knowledge-node:not(.is-path-lit)`).
+   * 점마다 「흐림」을 쓰면 천 쪽에서 경로 하나가 프레임 백 밀리초였다. */
   const pathNodes = new Set(route?.nodes ?? []);
   for (let at = 0; at < layout.count; at += 1) {
     const on = pathNodes.has(at);
     layout.pathNode[at] = on ? 1 : 0;
     layout.nodeEls[at]?.classList.toggle("is-path-lit", on);
-    layout.nodeEls[at]?.classList.toggle("is-path-dim", layout.pathShown && !on);
   }
   layout.pathEdge.fill(0);
   for (const at of route?.edges ?? []) layout.pathEdge[at] = 1;
+}
+
+/* 인스펙터의 경로 절: 요약 한 줄, 경로의 목록, 고른 경로의 사슬 — 전부 백엔드의 답에서.
+ * 관계 낱말은 키 그대로(번역 금지), 근거는 표의 낱말(`knowledgeProvenanceWord`), 화살표는
+ * 선이 적힌 방향(거슬러 건넌 홉은 ←). */
+function paintKnowledgePathSection(layout, section) {
+  const path = knowledgePath;
+  const note = section.querySelector(".knowledge-path-note");
+  const list = section.querySelector(".knowledge-path-list");
+  const body = section.querySelector(".knowledge-chain-body");
+  list.innerHTML = "";
+  body.innerHTML = "";
+  if (path.report === null) {
+    writeTextContent(note, t("knowledge.pathRefused", "경로를 묻지 못했습니다: {{why}}", { why: path.refused ?? "" }));
+    return;
+  }
+  const { paths, shortest, capped } = path.report;
+  if (paths.length === 0) {
+    writeTextContent(note, t("knowledge.pathNone", "이어지는 길이 없습니다"));
+    return;
+  }
+  let summary = t("knowledge.pathSummary", "경로 {{count}} · 최단 {{hops}}홉", { count: paths.length, hops: shortest ?? 0 });
+  if (capped) summary += t("knowledge.pathCapped", " · 예산에서 끊김");
+  if (layout.pathChain === null) summary += t("knowledge.pathNotInPicture", " · 이 그림에는 없는 경로");
+  writeTextContent(note, summary);
+  paths.forEach((named, at) => {
+    const press = document.createElement("button");
+    press.type = "button";
+    press.className = "btn knowledge-path-pick";
+    press.dataset.knowledgePath = String(at);
+    press.setAttribute("aria-pressed", String(at === path.picked));
+    press.classList.toggle("is-active", at === path.picked);
+    press.textContent = `${at + 1}. ${t("knowledge.pathHops", "{{count}}홉", { count: named.hops.length })} · ${
+      named.hops.map((hop) => hop.kind).join(" · ")}`;
+    list.appendChild(press);
+  });
+  const named = paths[path.picked] ?? paths[0];
+  named.nodes.forEach((node, at) => {
+    if (at > 0) {
+      const hop = named.hops[at - 1];
+      const arrow = hop.reversed ? " ← " : " → ";
+      const first = document.createElement("span");
+      first.className = "knowledge-chain-arrow";
+      first.textContent = arrow;
+      const rel = document.createElement("span");
+      rel.className = "knowledge-chain-rel";
+      rel.textContent = hop.kind;
+      const roadWord = knowledgeProvenanceWord(KNOWLEDGE_EDGE_PROVENANCE_CODE[hop.provenance] ?? KNOWLEDGE_PROVENANCE_UNKNOWN);
+      if (roadWord !== "") {
+        const road = document.createElement("span");
+        road.className = "knowledge-chain-road";
+        road.dataset.edgeProvenance = hop.provenance;
+        road.textContent = `·${roadWord}`;
+        rel.appendChild(road);
+      }
+      const second = document.createElement("span");
+      second.className = "knowledge-chain-arrow";
+      second.textContent = arrow;
+      body.append(first, rel, second);
+    }
+    const span = document.createElement("span");
+    span.className = "knowledge-chain-node";
+    span.textContent = node.title || node.id;
+    body.appendChild(span);
+  });
 }
 
 function selectKnowledgeNode(view, key) {
@@ -6757,33 +6846,8 @@ function paintKnowledgeCard(layout, box, seat) {
 
   const chainSection = box.querySelector(".knowledge-inspector-chain");
   if (chainSection) {
-    if (layout.pathChain !== null) {
-      chainSection.hidden = false;
-      const chainBody = chainSection.querySelector(".knowledge-chain-body");
-      chainBody.innerHTML = "";
-      const { nodes, edges } = layout.pathChain;
-      for (let i = 0; i < nodes.length; i += 1) {
-        if (i > 0) {
-          const arrow1 = document.createElement("span");
-          arrow1.className = "knowledge-chain-arrow";
-          arrow1.textContent = " → ";
-          const relWord = document.createElement("span");
-          relWord.className = "knowledge-chain-rel";
-          const edgeKind = model.kind[edges[i - 1]];
-          relWord.textContent = KNOWLEDGE_EDGE_KINDS[edgeKind] ?? "mentions";
-          const arrow2 = document.createElement("span");
-          arrow2.className = "knowledge-chain-arrow";
-          arrow2.textContent = " → ";
-          chainBody.append(arrow1, relWord, arrow2);
-        }
-        const nodeSpan = document.createElement("span");
-        nodeSpan.className = "knowledge-chain-node";
-        nodeSpan.textContent = model.titles[nodes[i]] || model.keys[nodes[i]];
-        chainBody.appendChild(nodeSpan);
-      }
-    } else {
-      chainSection.hidden = true;
-    }
+    chainSection.hidden = knowledgePath === null;
+    if (knowledgePath !== null) paintKnowledgePathSection(layout, chainSection);
   }
   /* 유령에는 열 파일이 없다 — 문 대신 「이 링크를 가리키는 페이지」 목록이 답이다. 적을
    * frontmatter도 없으니 「연결 추가」도 서지 않는다; 원본도 마찬가지다. */
@@ -7076,7 +7140,7 @@ function wireKnowledgeView(view) {
     }
     const key = knowledgeUnder(event);
     if (event.shiftKey && knowledgeSelectedKey !== null && key !== null && key !== knowledgeSelectedKey) {
-      runKnowledgeShortestPath(view, layout, knowledgeSelectedKey, key);
+      void runKnowledgeShortestPath(view, layout, knowledgeSelectedKey, key);
       return;
     }
     /* 주변 탐색의 빈 곳은 아무것도 아니다(t-4140) — 중심을 놓는 손은 Esc와 토글이다. */
@@ -7448,6 +7512,16 @@ function wireKnowledgeView(view) {
   /* 인스펙터의 손은 하나다. 목록의 줄들은 선택이 옮길 때마다 다시 서지만 이
    * 손은 판이 지어질 때 한 번 매어진다 — 줄마다 리스너를 매면 백 줄짜리 개요가
    * 백 개의 리스너이고, 그 백 개는 다음 선택에서 조용히 새는 백 개다(§6). */
+  /* 경로 묻기(t-5966 G3): 고른 페이지에서 적은 이름까지. 이름을 푸는 것은 백엔드다. */
+  view.querySelector(".knowledge-inspector").onsubmit = (event) => {
+    const ask = event.target.closest(".knowledge-path-ask");
+    if (!ask) return;
+    event.preventDefault();
+    const target = ask.querySelector(".knowledge-path-to").value.trim();
+    const layout = knowledgeLayouts.get(view);
+    if (target === "" || knowledgeSelectedKey === null || !layout) return;
+    void runKnowledgeShortestPath(view, layout, knowledgeSelectedKey, target);
+  };
   view.querySelector(".knowledge-inspector").onclick = (event) => {
     const layout = knowledgeLayouts.get(view);
     if (!layout) return;
@@ -7500,6 +7574,13 @@ function wireKnowledgeView(view) {
         find.value = knowledgeQuery;
       }
       void paintKnowledgeView();
+      return;
+    }
+    /* 경로 목록(t-5966 G3): 누른 경로를 밝힌다. */
+    const pick = event.target.closest("button[data-knowledge-path]");
+    if (pick) {
+      const layout = knowledgeLayouts.get(view);
+      if (layout) pickKnowledgePath(view, layout, Number(pick.dataset.knowledgePath));
       return;
     }
     if (event.target.closest(".knowledge-inspector-request")) {

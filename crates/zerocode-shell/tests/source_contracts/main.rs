@@ -32648,6 +32648,48 @@ mod tests {
         }
     }
 
+    /// t-5966 G3/G4: the path calculator is core's and the window holds
+    /// none; the export renders in core and publishes through the store's
+    /// one door.
+    ///
+    /// The window used to run a breadth-first search of its own over the
+    /// lens's subset; two calculators over two pictures answered two
+    /// things. Now Shift-click and the ask form both go through
+    /// `second_brain_paths`, the backend walks the cached picture off the
+    /// window's thread with `second_brain_paths::report`, and the export
+    /// command renders with `second_brain_export::render` and publishes
+    /// with `Store::publish_page` — the gallery, its versions and its
+    /// thumbnails need nothing new.
+    #[test]
+    fn paths_are_counted_in_core_and_the_export_goes_through_the_artifact_door() {
+        let window = crate::ui_source::window_source();
+        let code = strip_comments(window);
+        assert!(
+            !code.contains("function findKnowledgeShortestPath("),
+            "the window grew a path calculator of its own again"
+        );
+        let asking = block_after(window, "async function runKnowledgeShortestPath(");
+        assert!(
+            asking.contains("invoke(\"second_brain_paths\"") && !asking.contains("neighbour["),
+            "Shift-click no longer asks the backend for the path:\n{asking}"
+        );
+        let routing = block_after(window, "function knowledgeRoute(model, path) {");
+        assert!(
+            routing.contains("path.report.paths[path.picked]")
+                && routing.contains("model.keys.indexOf("),
+            "the route no longer maps the answer's ids onto this picture:\n{routing}"
+        );
+
+        let backend = shipped_backend();
+        let paths = block_after(backend, "pub(crate) async fn second_brain_paths(");
+        assert!(
+            paths.contains("spawn_blocking")
+                && paths.contains("scanned_graph(")
+                && paths.contains("second_brain_paths::report("),
+            "the path command left the cached picture, the blocking pool or core's calculator:\n{paths}"
+        );
+    }
+
     /// t-4140 S2: which mode the knowledge graph opens in is a rule about
     /// where the person came from and what this vault remembers — never a
     /// rule about how big the graph is. The design (docs/design/

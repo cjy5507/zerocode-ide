@@ -505,7 +505,94 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
       window.__GRAPH_ASKED__ = args;
       const built = window.__buildVaultGraph__(args, window.__VAULT__ ?? { pages: 0 });
       window.__GRAPH_ANSWERED_AT__ = performance.now();
+      /* 경로의 문(t-5966 G3)이 같은 그림 위에서 답하도록 마지막 답을 든다. */
+      window.__GRAPH_BUILT__ = built;
       return built;
+    },
+    /* 경로의 문(t-5966 G3) — 백엔드 `second_brain_paths`의 시험 대역. 계약 그대로: 이름은
+       id·wiki/ 아래 경로·파일 이름·제목으로 풀고, 무방향으로 걷고, 목차·일지는 끝점일 때만
+       지나며, 같은 두 점 사이에서는 이름 있는·선언된 선을 고르고, 짧은 것부터 점의 순서로
+       k개까지, 홉마다 관계·근거·거슬렀는가를 싣는다. 계산기가 아니라 대역이다: 창이 답의
+       무엇을 읽는지 재는 데 필요한 모양만 짓는다. */
+    second_brain_paths: (args) => {
+      (window.__PATHS_ASKED__ ??= []).push(args ?? {});
+      if (window.__PATHS_FAIL__) return Promise.reject(window.__PATHS_FAIL__);
+      const graph = window.__GRAPH_BUILT__?.graph;
+      if (!graph) return Promise.reject("볼트 폴더를 먼저 선택해 주세요");
+      const nodes = graph.nodes;
+      const find = (name) => {
+        const word = String(name ?? "").trim();
+        let at = nodes.findIndex((node) => node.id === word);
+        if (at < 0) at = nodes.findIndex((node) => node.id === `wiki/${word}.md`);
+        if (at < 0) at = nodes.findIndex((node) => node.id.split("/").pop() === `${word.toLowerCase()}.md`);
+        if (at < 0) at = nodes.findIndex((node) => node.title.toLowerCase() === word.toLowerCase());
+        return at;
+      };
+      const a = find(args.from);
+      const b = find(args.to);
+      if (a < 0) return Promise.reject(`no page named \`${args.from}\` (from)`);
+      if (b < 0) return Promise.reject(`no page named \`${args.to}\` (to)`);
+      if (a === b) return Promise.reject(`\`${nodes[a].id}\` is both ends — a path needs two`);
+      const limits = { max_hops: 6, k_max: 16, expansions_max: 200000 };
+      const k = Math.min(Math.max(1, args.k ?? limits.k_max), limits.k_max);
+      const rank = (edge) => [edge.kind === "mentions" ? 1 : 0,
+        edge.provenance === "declared" ? 0 : edge.provenance === "inferred" ? 1 : 2];
+      const lists = nodes.map(() => new Map());
+      graph.edges.forEach((edge, index) => {
+        for (const [u, v] of [[edge.from, edge.to], [edge.to, edge.from]]) {
+          const held = lists[u].get(v);
+          if (held === undefined || rank(edge) < rank(graph.edges[held]) || (String(rank(edge)) === String(rank(graph.edges[held])) && index < held)) {
+            lists[u].set(v, index);
+          }
+        }
+      });
+      const usable = (at) => at === a || at === b || (nodes[at].id !== "wiki/index.md" && nodes[at].id !== "wiki/log.md");
+      const toB = new Array(nodes.length).fill(-1);
+      toB[b] = 0;
+      const queue = [b];
+      while (queue.length > 0) {
+        const u = queue.shift();
+        for (const v of lists[u].keys()) {
+          if (usable(v) && toB[v] < 0) { toB[v] = toB[u] + 1; queue.push(v); }
+        }
+      }
+      const named = (at) => ({ id: nodes[at].id, title: nodes[at].title, kind: nodes[at].kind });
+      if (toB[a] < 0 || toB[a] > limits.max_hops) {
+        return { from: named(a), to: named(b), k, paths: [], shortest: null, capped: false, limits, elapsed_us: 1 };
+      }
+      const paths = [];
+      let level = [];
+      const walk = (u, depth, length, onPath, seats, hops) => {
+        const neighbours = [...lists[u].keys()].sort((left, right) => left - right);
+        for (const v of neighbours) {
+          if (!usable(v) || onPath.has(v)) continue;
+          const remaining = length - depth - 1;
+          if (toB[v] < 0 || toB[v] > remaining) continue;
+          const edge = graph.edges[lists[u].get(v)];
+          const hop = { from: nodes[edge.from].id, to: nodes[edge.to].id, kind: edge.kind,
+            provenance: edge.provenance, reversed: edge.to === u && edge.from === v };
+          if (v === b) {
+            if (remaining === 0) {
+              level.push({ nodes: [...seats, v].map(named), hops: [...hops, hop] });
+            }
+            continue;
+          }
+          if (remaining === 0) continue;
+          onPath.add(v);
+          walk(v, depth + 1, length, onPath, [...seats, v], [...hops, hop]);
+          onPath.delete(v);
+        }
+      };
+      /* 한 길이의 경로는 다 찾고 나서 순위를 매긴다: 맨 mentions가 적은 것부터, 같으면 찾은
+         순서(점의 순서). k는 그 뒤에 자른다 — 백엔드의 `keep_ranked`와 같은 손. */
+      const bare = (path) => path.hops.filter((hop) => hop.kind === "mentions").length;
+      for (let length = toB[a]; length <= limits.max_hops && paths.length < k; length += 1) {
+        level = [];
+        walk(a, 0, length, new Set([a]), [a], []);
+        level.sort((left, right) => bare(left) - bare(right));
+        paths.push(...level.slice(0, k - paths.length));
+      }
+      return { from: named(a), to: named(b), k, paths, shortest: toB[a], capped: false, limits, elapsed_us: 1 };
     },
     quick_commands: () => window.__QUICK__ ?? [],
     list_quick_commands: () => window.__QUICK__ ?? [],
