@@ -16,6 +16,7 @@ use zerocode_core::jev::{
 
 use super::super::settings::JEV_COMPACTION_SETTING;
 use super::super::jev_mock::Mock;
+use super::super::replay_support::whole_history;
 use super::*;
 
 /// The workspace every ask here comes from, consented at a door that reads
@@ -397,28 +398,6 @@ const REPLAY_SEED_ENV: &str = "ZEROCODE_COMPACTION_REPLAY_SEED";
 /// A token budget in place of each model's own compaction threshold, so a
 /// machine with few transcripts at the real threshold still yields points.
 const REPLAY_BUDGET_ENV: &str = "ZEROCODE_COMPACTION_REPLAY_BUDGET_TOKENS";
-
-/// Every message a transcript ever held, in order: the vault's evicted
-/// records below `first_message_index`, then what is still live. `None`
-/// when the vault has a hole, since an index would then not be a seq.
-fn whole_history(session: &Session) -> Option<Vec<ConversationMessage>> {
-    let first_live = session.first_message_index();
-    let mut evicted: Vec<ConversationMessage> = Vec::new();
-    for record in session.read_vault() {
-        if record.vault_seq >= first_live {
-            break;
-        }
-        if record.vault_seq != u32::try_from(evicted.len()).ok()? {
-            return None;
-        }
-        evicted.push(record.message);
-    }
-    if u32::try_from(evicted.len()).ok()? != first_live {
-        return None;
-    }
-    evicted.extend(session.messages.iter().cloned());
-    Some(evicted)
-}
 
 /// The turns after a cut, as the label counts them: each begins at a user
 /// message that spoke.

@@ -436,3 +436,350 @@ fn a_cancelled_turn_counts_no_turn_but_leaves_the_patch_behind_it() {
     let labels: Vec<PatchReviewLabelRow> = read_shadow_rows(&ledger);
     assert_eq!((labels[0].hindsight.as_str(), labels[0].turns_later), ("regret", 0), "regretted in the first turn it waited");
 }
+
+/* ---- the replay: the patches this machine's sessions wrote ------------------ */
+
+/// Where the replay seed says which transcripts to read
+/// (`tools/patch-review-replay/seed.py`).
+const REPLAY_SEED_ENV: &str = "ZEROCODE_PATCH_REVIEW_REPLAY_SEED";
+
+/// About how many reviews one replay asks for, when a person wants fewer
+/// than the seed holds — spread evenly over its points.
+const REPLAY_LIMIT_ENV: &str = "ZEROCODE_PATCH_REVIEW_REPLAY_LIMIT";
+
+/// What one replay may spend, in dollars — the brief's ceiling: the replay
+/// stops asking once the reviews it has paid for reach it.
+const REPLAY_SPEND_CAP_USD: f64 = 0.20;
+
+/// How many of the first reviews to print whole — the state that was sent and
+/// the four answers — when a person wants to read what the seat was asked.
+/// The person's own words and code go to their own terminal and nowhere else.
+const REPLAY_SHOW_ENV: &str = "ZEROCODE_PATCH_REVIEW_REPLAY_SHOW";
+
+/// Where to write one JSON line per review — its tool, size, answers, verdict,
+/// hindsight and wall; no words and no path — so a person can read the
+/// numbers again without asking again.
+const REPLAY_OUT_ENV: &str = "ZEROCODE_PATCH_REVIEW_REPLAY_OUT";
+
+/// Reviews in flight at once. The wire's own limit is 1,200 a minute; four
+/// at a time keeps a replay of two thousand patches to minutes and far
+/// under it.
+const REPLAY_IN_FLIGHT: usize = 4;
+
+/// One patch of a transcript, as the replay asks about it and grades it.
+struct ReplayPoint {
+    ask: PatchAsk,
+    hindsight: Option<runtime::patch_review::Hindsight>,
+}
+
+/// What became of the patch `ask` names, read off the turns from the one it
+/// was written in onward — `None` when the transcript ends before its window
+/// does. Only the label reads past the patch; the ask was made from the
+/// messages before it.
+fn hindsight_in(history: &[ConversationMessage], at: usize, ask: &PatchAsk) -> Option<runtime::patch_review::Hindsight> {
+    let turns = runtime::patch_review::persons_turns(history);
+    let mut start = 0;
+    let mut watched = vec![runtime::patch_review::Watched::of(ask)];
+    for turn in turns {
+        let end = start + turn.len();
+        if end > at {
+            let decided = runtime::patch_review::hindsight_of_turn(&mut watched, turn);
+            if let Some((_, hindsight)) = decided.into_iter().next() {
+                return Some(hindsight);
+            }
+        }
+        start = end;
+    }
+    None
+}
+
+/// Every patch in `history` a review would have been asked about: an edit's
+/// result that wrote one, asked from the messages before it.
+fn replay_points(history: &[ConversationMessage]) -> Vec<ReplayPoint> {
+    let mut points = Vec::new();
+    for (at, message) in history.iter().enumerate() {
+        for block in &message.blocks {
+            let ContentBlock::ToolResult { tool_use_id, tool_name, output, is_error, .. } = block else {
+                continue;
+            };
+            if *is_error {
+                continue;
+            }
+            let Some(asked) = ask_for(&history[..at], "replay", tool_use_id, tool_name, output) else {
+                continue;
+            };
+            let hindsight = hindsight_in(history, at, &asked);
+            points.push(ReplayPoint { ask: asked, hindsight });
+        }
+    }
+    points
+}
+
+/// How well `score` puts the regretted patches above the ones that stood —
+/// the chance a regretted patch outscores one that stood, a tie counting half
+/// (the area under the ROC curve, 0.5 being no signal at any line). `None`
+/// with no patch of either kind.
+#[allow(clippy::cast_precision_loss)]
+fn separation(scored: &[(f64, bool)]) -> Option<f64> {
+    let regretted: Vec<f64> = scored.iter().filter(|(_, stood)| !stood).map(|(score, _)| *score).collect();
+    let stood: Vec<f64> = scored.iter().filter(|(_, stood)| *stood).map(|(score, _)| *score).collect();
+    if regretted.is_empty() || stood.is_empty() {
+        return None;
+    }
+    let mut wins = 0.0;
+    for high in &regretted {
+        for low in &stood {
+            wins += match high.partial_cmp(low) {
+                Some(std::cmp::Ordering::Greater) => 1.0,
+                Some(std::cmp::Ordering::Equal) => 0.5,
+                _ => 0.0,
+            };
+        }
+    }
+    Some(wins / (regretted.len() * stood.len()) as f64)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn percent(part: usize, whole: usize) -> f64 {
+    if whole == 0 {
+        0.0
+    } else {
+        part as f64 * 100.0 / whole as f64
+    }
+}
+
+// One measurement, read top to bottom: the points, the asking, the grading and
+// the table are one story, and a split would only move the reader between them.
+#[allow(clippy::too_many_lines)]
+#[test]
+#[ignore = "reads this machine's transcripts through tools/patch-review-replay/seed.py and asks the real endpoint"]
+fn the_patches_this_machine_wrote_reviewed_in_hindsight() {
+    use futures_util::StreamExt as _;
+    use runtime::patch_review::Hindsight;
+    use zerocode_core::jev::summary::{percentile, wilson_lower, WILSON_Z_95};
+
+    let seed_path = std::env::var(REPLAY_SEED_ENV).expect("ZEROCODE_PATCH_REVIEW_REPLAY_SEED names the seed");
+    let seed: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&seed_path).expect("the seed reads")).expect("the seed parses");
+    assert_eq!(
+        seed["regretTurns"].as_u64(),
+        Some(u64::from(PATCH_REVIEW_REGRET_TURNS)),
+        "the seed was made for another window"
+    );
+    let limit: usize = std::env::var(REPLAY_LIMIT_ENV).ok().and_then(|raw| raw.trim().parse().ok()).unwrap_or(usize::MAX);
+    let client = api::SystemOneConfig::from_env().expect("TYPESAFE_API_KEY in the environment").into_client();
+    // A home of the replay's own: the person's ledgers and day count never move.
+    let home = tempfile::tempdir().expect("a config home of the replay's own");
+    let door = door(home.path());
+    let rate = api::systemone_rate(api::SYSTEMONE_MODEL).expect("the wire's rate is in the price table");
+
+    let mut points: Vec<ReplayPoint> = Vec::new();
+    let (mut read, mut skipped) = (0usize, 0usize);
+    for transcript in seed["transcripts"].as_array().expect("transcripts") {
+        let path = transcript["path"].as_str().expect("a path");
+        let Ok(session) = runtime::Session::load_from_path(path) else {
+            skipped += 1;
+            continue;
+        };
+        let Some(history) = super::super::replay_support::history_as_it_stood(&session) else {
+            skipped += 1;
+            continue;
+        };
+        read += 1;
+        points.extend(replay_points(&history));
+    }
+    // A limit takes points spread evenly over the seed, not its head: the
+    // seed is ordered by how many patches a transcript wrote, and its head is
+    // a handful of the busiest sessions.
+    if limit < points.len() {
+        let every = points.len().div_ceil(limit);
+        points = points.into_iter().step_by(every).collect();
+    }
+
+    let mut rows: Vec<(PatchReviewRow, Option<runtime::patch_review::Answers>, Option<Hindsight>)> = Vec::new();
+    let mut spent = 0.0;
+    for chunk in points.chunks(REPLAY_IN_FLIGHT) {
+        if spent >= REPLAY_SPEND_CAP_USD {
+            break;
+        }
+        let asked: Vec<(PatchReviewRow, Option<runtime::patch_review::Answers>, Option<Hindsight>)> =
+            api::sync_bridge::run_blocking(
+                futures_util::stream::iter(chunk)
+                    .map(|point| async {
+                        let (row, answers) = judge(&door, Some(&client), &point.ask).await;
+                        (row, answers, point.hindsight)
+                    })
+                    .buffered(REPLAY_IN_FLIGHT)
+                    .collect(),
+            );
+        spent += asked.iter().map(|(row, _, _)| rate.input_cost_usd(row.input_tokens.unwrap_or(0))).sum::<f64>();
+        rows.extend(asked);
+    }
+
+    let show: usize = std::env::var(REPLAY_SHOW_ENV).ok().and_then(|raw| raw.trim().parse().ok()).unwrap_or(0);
+    for (point, (row, answers, hindsight)) in points.iter().zip(&rows).take(show) {
+        println!(
+            "=== {} {} hunks={} verdict={} hindsight={:?}\n{}\nanswers={:?}",
+            row.tool,
+            row.path,
+            row.hunks,
+            runtime::patch_review::verdict(answers.as_ref()).word(),
+            hindsight.map(Hindsight::word),
+            serde_json::to_string_pretty(&runtime::patch_review::state(&point.ask)).unwrap_or_default(),
+            answers.map(|answers| answers.by_id())
+        );
+    }
+    let mut outcomes: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut permits, mut proposals) = (0usize, 0usize);
+    let (mut graded, mut agreed, mut permits_that_stood) = (0usize, 0usize, 0usize);
+    let (mut stood, mut regretted, mut open, mut receipts) = (0usize, 0usize, 0usize, 0usize);
+    let (mut permit_stood, mut permit_regretted) = (0usize, 0usize);
+    let mut yes_by_fate: BTreeMap<(&str, bool), (f64, usize)> = BTreeMap::new();
+    let mut walls: Vec<u64> = Vec::new();
+    let mut input_tokens = 0u64;
+    for (row, answers, hindsight) in &rows {
+        *outcomes.entry(row.outcome.clone()).or_default() += 1;
+        input_tokens += row.input_tokens.unwrap_or(0);
+        if row.requests > 0 {
+            walls.push(row.elapsed_ms);
+        }
+        match hindsight {
+            Some(Hindsight::Stood { receipt }) => {
+                stood += 1;
+                receipts += usize::from(*receipt);
+            }
+            Some(Hindsight::Regretted) => regretted += 1,
+            None => open += 1,
+        }
+        let verdict = runtime::patch_review::verdict(answers.as_ref());
+        match verdict {
+            Verdict::Permit => permits += 1,
+            Verdict::ProposalOnly => proposals += 1,
+            Verdict::Unavailable => {}
+        }
+        let (Some(hindsight), Some(answers)) = (hindsight, answers) else {
+            continue;
+        };
+        let Some(called) = hindsight.agrees_with(verdict) else {
+            continue;
+        };
+        graded += 1;
+        agreed += usize::from(called);
+        permits_that_stood += usize::from(hindsight.stood());
+        if verdict == Verdict::Permit {
+            if hindsight.stood() {
+                permit_stood += 1;
+            } else {
+                permit_regretted += 1;
+            }
+        }
+        for (question, yes) in runtime::patch_review::REVIEW_QUESTIONS.iter().zip(answers.yes) {
+            let held = yes_by_fate.entry((question.id, hindsight.stood())).or_insert((0.0, 0));
+            held.0 += yes;
+            held.1 += 1;
+        }
+    }
+    walls.sort_unstable();
+    let blanked = rows
+        .iter()
+        .zip(&points)
+        .filter(|(_, point)| point.ask.evidence == runtime::MICROCOMPACT_PLACEHOLDER)
+        .count();
+    let answered = permits + proposals;
+    let decided_stood = stood;
+    println!("--- patch review replay: {} reviews over {read} transcripts ({skipped} skipped), {} points in the seed's transcripts", rows.len(), points.len());
+    println!("outcomes: {outcomes:?}");
+    println!("evidence still a cleared placeholder after healing: {blanked} of {}", rows.len());
+    println!(
+        "verdicts: permit {permits} ({:.1}% of {answered} answered), proposal_only {proposals}",
+        percent(permits, answered)
+    );
+    println!(
+        "hindsight: stood {decided_stood} (receipt {receipts}), regret {regretted}, open {open} (the transcript ended inside the window)"
+    );
+    let bound = |part: usize, whole: usize| 100.0 * wilson_lower(part, whole, WILSON_Z_95);
+    println!(
+        "agreement: {agreed} of {graded} graded ({:.1}% pooled; Wilson 95% lower {:.1}%)",
+        percent(agreed, graded),
+        bound(agreed, graded)
+    );
+    println!(
+        "  the always-permit reader on the same rows: {permits_that_stood} of {graded} ({:.1}%; Wilson lower {:.1}%)",
+        percent(permits_that_stood, graded),
+        bound(permits_that_stood, graded)
+    );
+    let stood_graded = yes_by_fate.get(&("addresses_task", true)).map_or(0, |held| held.1);
+    let regretted_graded = yes_by_fate.get(&("addresses_task", false)).map_or(0, |held| held.1);
+    println!(
+        "  permit rate among patches that stood {:.1}% ({permit_stood}/{stood_graded}), among regretted {:.1}% ({permit_regretted}/{regretted_graded})",
+        percent(permit_stood, stood_graded),
+        percent(permit_regretted, regretted_graded)
+    );
+    // Whether the answers carry any signal at any line, not only at the
+    // permit line: each question's lean against the patch, and the verdict's
+    // own statistic (the least a patch leaned toward standing, as a lean
+    // against it), each as how well it ranks regretted over stood.
+    let graded_rows: Vec<(&runtime::patch_review::Answers, bool)> = rows
+        .iter()
+        .filter_map(|(_, answers, hindsight)| Some((answers.as_ref()?, hindsight.as_ref()?.stood())))
+        .collect();
+    for (at, question) in runtime::patch_review::REVIEW_QUESTIONS.iter().enumerate() {
+        let scored: Vec<(f64, bool)> = graded_rows
+            .iter()
+            .map(|(answers, stood)| {
+                let yes = answers.yes[at];
+                (if question.yes_stands { 1.0 - yes } else { yes }, *stood)
+            })
+            .collect();
+        println!("  regret ranked by {:<20} AUC {:.3}", question.id, separation(&scored).unwrap_or(f64::NAN));
+    }
+    let leaned: Vec<(f64, bool)> = graded_rows
+        .iter()
+        .map(|(answers, stood)| {
+            let least = runtime::patch_review::REVIEW_QUESTIONS
+                .iter()
+                .zip(answers.yes)
+                .map(|(question, yes)| if question.yes_stands { yes } else { 1.0 - yes })
+                .fold(f64::INFINITY, f64::min);
+            (1.0 - least, *stood)
+        })
+        .collect();
+    println!("  regret ranked by the verdict's statistic   AUC {:.3}", separation(&leaned).unwrap_or(f64::NAN));
+    if let Ok(out) = std::env::var(REPLAY_OUT_ENV) {
+        let lines: Vec<String> = rows
+            .iter()
+            .map(|(row, answers, hindsight)| {
+                serde_json::json!({
+                    "tool": row.tool,
+                    "hunks": row.hunks,
+                    "patchBytes": row.patch_bytes,
+                    "outcome": row.outcome,
+                    "answers": answers.map(|answers| answers.by_id()),
+                    "verdict": runtime::patch_review::verdict(answers.as_ref()).word(),
+                    "hindsight": hindsight.map(Hindsight::word),
+                    "elapsedMs": row.elapsed_ms,
+                    "inputTokens": row.input_tokens,
+                })
+                .to_string()
+            })
+            .collect();
+        std::fs::write(&out, lines.join("\n") + "\n").expect("the replay's rows are written");
+        println!("rows written to {out}");
+    }
+    #[allow(clippy::cast_precision_loss)]
+    for question in &runtime::patch_review::REVIEW_QUESTIONS {
+        let mean = |fate: bool| {
+            yes_by_fate
+                .get(&(question.id, fate))
+                .map_or(f64::NAN, |(sum, count)| sum / *count as f64)
+        };
+        println!("  mean p(yes) {:<20} stood {:.3}  regretted {:.3}", question.id, mean(true), mean(false));
+    }
+    let wall = |share| percentile(&walls, share).unwrap_or(0);
+    println!("wall ms: p50 {} p95 {} max {}", wall(0.5), wall(0.95), walls.last().copied().unwrap_or(0));
+    #[allow(clippy::cast_precision_loss)]
+    let per_review = if rows.is_empty() { 0.0 } else { spent / rows.len() as f64 };
+    println!(
+        "input tokens {input_tokens}, cost ${spent:.4} (${per_review:.6} per review), cap ${REPLAY_SPEND_CAP_USD:.2}"
+    );
+}

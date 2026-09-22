@@ -907,6 +907,17 @@ fn restore_microcompacted_bodies(
     let _ = swap_placeholders_from(messages, &originals);
 }
 
+/// Every tool result in `messages` that microcompact blanked, put back from
+/// `session`'s vault and persisted snapshot where they still hold its body —
+/// addressed by `tool_use_id`, so no body lands on a result it was not — for
+/// a reader that must see a result as it stood before the clear: a replay
+/// asking what a live seat saw at the moment it was asked (t-6203), when the
+/// clear came later. Images stay as they are, since their only address is
+/// positional.
+pub fn heal_cleared_tool_results(messages: &mut [ConversationMessage], session: &Session) {
+    restore_microcompacted_bodies(messages, session, &[]);
+}
+
 const STATE_DISTILL_MAX_CHARS: usize = 1_600;
 
 /// Build a deterministic, bounded working-state snapshot without removing any

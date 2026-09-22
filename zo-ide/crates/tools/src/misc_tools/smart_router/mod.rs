@@ -9,6 +9,8 @@ mod infer;
 mod jev_gate;
 #[cfg(test)]
 mod jev_mock;
+#[cfg(test)]
+mod replay_support;
 mod mention_rerank;
 mod metadata;
 mod patch_review;
