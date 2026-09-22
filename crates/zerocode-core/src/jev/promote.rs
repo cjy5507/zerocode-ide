@@ -24,20 +24,24 @@
 //! Labels a person did write still outrank that: they are the only evidence
 //! of being right rather than merely the same.
 //!
-//! And a seat with no probe to be compared against is carried up by its own
-//! ledger alone (2026-09-22, [`crate::jev::JevUse::agreement_rows_wanted`]).
-//! The route-change budget was written for a judgment standing beside the
-//! reader it would replace, and two of the seats have no such reader: what
-//! their rows carry is hindsight — was the note read, was the pane left where
-//! it was put — which is the labels' kind of evidence and falls through when
-//! thin, not the agreement's. Held to the agreement line they were held by
-//! `too_few_compared`, the one line in §4 with no road out: the recall seat
-//! cleared its answer line at 18 of the 50 judgments its 1,005 rows were
-//! given and was stopped at `0 of 20` on every one of them.
+//! No seat rises with no marks to hand, whatever kind its marks are
+//! (2026-09-22, t-6155 F1). For one afternoon the seats whose marks are
+//! hindsight — was the note read, was the pane left where it was put, was
+//! the dropped block read again — were carried up by their own ledger
+//! alone, on the reasoning that a thin sample of hindsight falls through the
+//! way thin labels do rather than holding the way the agreement line does.
+//! That let the compaction seat, whose act is a loss the summary never sees
+//! again, reach Applying on twenty answered rows and not one mark. The
+//! sample floor ([`crate::jev::JevUse::agreement_rows_wanted`]) now holds
+//! every seat the same way: until that many marks are in hand the judge says
+//! `too_few_compared`, and answer rate, latency and shape alone never make a
+//! seat act. The seats whose marks arrive late write them themselves
+//! (t-5806); a seat whose marks never arrive is one that stays recording,
+//! which is what `auto` promised.
 
 use serde_json::{Value, json};
 
-use crate::jev::{A_WINDOW_OF_COMPARISONS, AgreementKind, JevUse};
+use crate::jev::{A_WINDOW_OF_COMPARISONS, JevUse};
 
 use crate::jev::summary::{
     AT, JUDGED_EVERY_ROWS, TRANSITION, Tally, WILSON_Z_95, rows_that_can_clear_forgiving,
@@ -100,7 +104,6 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
             agreement_rows_wanted: seat
                 .agreement_rows_wanted
                 .unwrap_or(A_WINDOW_OF_COMPARISONS),
-            agreement_kind: seat.agreement_kind,
             window_forgives: seat.window_forgives.unwrap_or(0),
             labels: None,
             fallbacks_in_a_row: crate::jev::summary::failures_in_a_row(rows),
@@ -287,12 +290,10 @@ pub struct Evidence<'window> {
     pub agreement_floor_permille: u16,
     /// How often it did, over the window.
     pub agreement: Agreement,
-    /// How many comparisons must be in hand before that budget binds at all
-    /// ([`JevUse::agreement_rows_wanted`]). The agreement kind says whether
-    /// a thinner sample holds promotion or leaves the other lines to decide.
+    /// How many marks must be in hand before that budget can be read at all
+    /// ([`JevUse::agreement_rows_wanted`]); a thinner sample holds
+    /// promotion, whatever kind of mark the seat writes.
     pub agreement_rows_wanted: usize,
-    /// What a thin sample means, declared by the seat.
-    pub agreement_kind: AgreementKind,
     /// How many of the window's rows may have missed and the seat still clear
     /// its answer floor ([`JevUse::window_forgives`]) — what the window's own
     /// width was derived from.
@@ -410,16 +411,16 @@ pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
             probe_right: labels.probe_right,
         });
     }
+    // The sample floor holds every seat, whatever kind of mark it writes
+    // (t-6155 F1): a hindsight seat with no marks yet is a seat nothing has
+    // graded, not one that has passed.
     let agreement = evidence.agreement;
     if agreement.compared < evidence.agreement_rows_wanted {
-        return (evidence.agreement_kind == AgreementKind::Comparison).then_some(
-            Line::TooFewCompared {
-                compared: agreement.compared,
-                wanted: evidence.agreement_rows_wanted,
-            },
-        );
+        return Some(Line::TooFewCompared {
+            compared: agreement.compared,
+            wanted: evidence.agreement_rows_wanted,
+        });
     }
-    // Once the sample floor is met, both kinds use the same Wilson line.
     let bound = agreement.lower_bound().map(permille)?;
     (bound < evidence.agreement_floor_permille).then_some(Line::Agreement {
         bound_permille: bound,

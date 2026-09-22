@@ -304,11 +304,13 @@ pub struct JevUse {
     /// A use that does not promote forgives nothing, because nothing is
     /// judged.
     pub window_forgives: Option<usize>,
-    /// The sample floor at which the agreement line may speak. For a peer
-    /// comparison, a thinner sample holds promotion; hindsight labels leave
-    /// the other lines to decide until this many marks have arrived.
+    /// The sample floor at which the agreement line may speak: until this
+    /// many marks are in hand the seat is held at `too_few_compared`,
+    /// whatever kind of mark it writes ([`AgreementKind`]). A thinner
+    /// sample never promotes (t-6155 F1).
     pub agreement_rows_wanted: Option<usize>,
-    /// Whether agreement compares a second reader or grades a later outcome.
+    /// Where the seat's `agreed` marks come from: a second reader, or a
+    /// later fact.
     pub agreement_kind: AgreementKind,
 }
 
@@ -337,9 +339,12 @@ pub const FORGIVES_NOTHING: usize = 0;
 /// ([`JevUse::agreement_rows_wanted`]).
 pub const A_WINDOW_OF_COMPARISONS: usize = summary::JUDGED_EVERY_ROWS;
 
-/// What an agreement mark can establish, before its sample is large enough
-/// to read a Wilson bound. Kept in the seat table rather than inferred from
-/// a zero width: a single positive label must not revoke a no-label rise.
+/// Where a seat's `agreed` marks come from — a second reader answering the
+/// same question, or a later fact grading the answer. A description of the
+/// mark for a reader and a screen; the judge holds both kinds to the same
+/// sample floor and the same Wilson line ([`crate::jev::promote`]), so a
+/// hindsight seat with no marks yet is held exactly as a comparison seat
+/// with none (t-6155 F1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgreementKind {
     /// A replacement reader needs comparison evidence before it may act.

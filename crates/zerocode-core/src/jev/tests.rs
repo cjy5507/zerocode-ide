@@ -318,22 +318,26 @@ fn a_seats_first_judgment_waits_for_a_window_it_can_fill() {
 
 /// The seats with no reader to be compared against are the ones whose own
 /// mark is a later fact — the person's move, the turn's read, the re-read
-/// after a drop — and everything else must show a window of comparisons
-/// first.
+/// after a drop. The table names them for a reader's sake, and the judge
+/// holds them to the same sample floor as everyone else: no seat rises on
+/// answer rate, latency and shape alone (t-6155 F1).
 #[test]
-fn only_the_seats_with_no_reader_to_compare_rise_on_their_own_ledger() {
-    // The counter and both writers ask one judge; the thin-sample policy
-    // belongs to its named table field, never to a seat id in a reader.
+fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
+    // The counter and both writers ask one judge; the sample floor is the
+    // named table field, and the judge reads no kind beside it.
     let judge = include_str!("promote.rs");
-    assert!(judge.contains("evidence.agreement_kind == AgreementKind::Comparison"));
     assert!(judge.contains("agreement.compared < evidence.agreement_rows_wanted"));
+    assert!(
+        !judge.contains("AgreementKind"),
+        "the judge reads no kind: the floor holds every seat"
+    );
 
-    let on_their_own: Vec<&str> = JEV_USES
+    let hindsight: Vec<&str> = JEV_USES
         .iter()
         .filter(|row| row.agreement_kind == AgreementKind::Hindsight)
         .map(|row| row.id)
         .collect();
-    assert_eq!(on_their_own, vec![RECALL.id, PLACEMENT.id, COMPACTION.id]);
+    assert_eq!(hindsight, vec![RECALL.id, PLACEMENT.id, COMPACTION.id]);
     for row in JEV_USES.iter().filter(|row| row.promotes) {
         assert_eq!(
             row.agreement_rows_wanted,

@@ -1025,7 +1025,7 @@ fn the_two_surfaces_sit_in_their_own_seats() {
     ] {
         assert!(
             seat.promotes,
-            "{}: a screen seat's auto rises on its own ledger",
+            "{}: a screen seat's auto can rise",
             seat.id
         );
         assert_eq!(
