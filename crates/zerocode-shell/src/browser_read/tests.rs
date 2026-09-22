@@ -465,6 +465,63 @@ fn a_press_labels_the_read_it_followed_once_and_only_on_the_same_page() {
     forget(label);
 }
 
+/// A `read --full` after a fold is the fold's first regret (t-6155 F6): the
+/// agent asked for the whole page back. One label per read, in the press's
+/// book; nothing under a seat that folded nothing, since the agent already
+/// had the page whole.
+#[test]
+fn a_whole_read_after_a_fold_labels_it_regretted_once_and_only_when_something_was_folded() {
+    let label = "browser-full-case";
+    forget(label);
+    let folded = ReadJudgment {
+        read: format!("{label}@1"),
+        url: URL.to_string(),
+        chrome: vec!["body>nav".to_string()],
+        applied: true,
+        mode: JevMode::Auto,
+    };
+    remember(label, folded.clone());
+    let row = note_full_read(label, URL, 5).expect("a label");
+    assert_eq!(row[LABEL.canonical], format!("{label}@1"));
+    assert_eq!(row[AGREED.canonical], false);
+    assert_eq!(row["verb"], READ_FULL_VERB);
+    assert_eq!(row[APPLIED.canonical], true);
+    assert_eq!(row["pane"], label);
+    assert_eq!(row["mode"], JevMode::Auto.key());
+    // One label per read: neither a press nor a second whole read finds it.
+    assert_eq!(
+        note_press(label, "click", Some(URL), Some("body>main"), 6),
+        None
+    );
+    assert_eq!(note_full_read(label, URL, 7), None);
+    // A fragment is the same page.
+    remember(label, folded.clone());
+    assert!(note_full_read(label, &format!("{URL}#install"), 8).is_some());
+    // Another page labels nothing and spends the judgment, as a press does.
+    remember(label, folded.clone());
+    assert_eq!(
+        note_full_read(label, "https://docs.example.com/other", 9),
+        None
+    );
+    assert_eq!(
+        note_press(label, "click", Some(URL), Some("body>nav"), 10),
+        None
+    );
+    // Under a seat that folded nothing the whole page was already in hand:
+    // no label, nothing spent, and the press still labels the judgment.
+    let recorded = ReadJudgment {
+        applied: false,
+        mode: JevMode::Shadow,
+        ..folded
+    };
+    remember(label, recorded);
+    assert_eq!(note_full_read(label, URL, 11), None);
+    let row = note_press(label, "click", Some(URL), Some("body>nav"), 12)
+        .expect("the press still labels");
+    assert_eq!(row[AGREED.canonical], false);
+    forget(label);
+}
+
 #[test]
 fn a_read_of_one_block_asks_nothing() {
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body(6, &[(0, 0.9)]), 0);
@@ -542,10 +599,16 @@ fn the_pages_that_were_gathered() {
     let mut elapsed_all: Vec<u64> = Vec::new();
     let (mut before_all, mut after_all, mut tokens_all, mut folded_all, mut blocks_all) =
         (0_u64, 0_u64, 0_u64, 0_u64, 0_u64);
+    // Per page (t-6155 F6): each page's own saved share, for a median one
+    // page cannot own, and the totals with the bot-wall pages left out —
+    // a wall's own words are the page, and folding them says nothing about
+    // folding a page.
+    let mut saved_shares: Vec<f64> = Vec::new();
+    let (mut before_clear, mut after_clear, mut walls) = (0_u64, 0_u64, 0_usize);
     println!(
-        "| page | chars before | chars after | saved | blocks | asked | chrome | folded | wall ms | tokens | outcome |"
+        "| page | chars before | chars after | saved | blocks | asked | chrome | folded | wall ms | tokens | outcome | wall? |"
     );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|");
     let mut folded_paths: Vec<String> = Vec::new();
     for entry in seed["pages"].as_array().expect("pages") {
         if entry.get("error").is_some_and(|error| !error.is_null()) {
@@ -600,14 +663,23 @@ fn the_pages_that_were_gathered() {
         } else {
             100.0 * (before - after) as f64 / before as f64
         };
+        let wall = entry["wall"].as_bool().unwrap_or(false);
+        saved_shares.push(saved);
+        if wall {
+            walls += 1;
+        } else {
+            before_clear += before;
+            after_clear += after;
+        }
         println!(
-            "| {} | {before} | {after} | {saved:.0}% | {} | {} | {} | {} | {elapsed} | {tokens} | {} |",
+            "| {} | {before} | {after} | {saved:.0}% | {} | {} | {} | {} | {elapsed} | {tokens} | {} | {} |",
             page.report.url,
             row["blocks"],
             row["asked"],
             row["chrome"],
             row["folded"],
-            row["outcome"]
+            row["outcome"],
+            if wall { "bot wall" } else { "" }
         );
         // The folded blocks, for the golden reading.
         if let Some(judgment) = &judged.judgment {
@@ -648,6 +720,25 @@ fn the_pages_that_were_gathered() {
             100.0 * (before_all - after_all) as f64 / before_all as f64
         },
         cost.map_or("unpriced".to_string(), |usd| format!("${usd:.4}"))
+    );
+    saved_shares.sort_by(f64::total_cmp);
+    let median = if saved_shares.is_empty() {
+        0.0
+    } else {
+        let mid = saved_shares.len() / 2;
+        if saved_shares.len() % 2 == 0 {
+            f64::midpoint(saved_shares[mid - 1], saved_shares[mid])
+        } else {
+            saved_shares[mid]
+        }
+    };
+    println!(
+        "per-page median saved {median:.1}% · without {walls} bot-wall page(s): chars {before_clear} → {after_clear} ({:.1}% saved)",
+        if before_clear == 0 {
+            0.0
+        } else {
+            100.0 * (before_clear - after_clear) as f64 / before_clear as f64
+        }
     );
     println!(
         "chrome blocks (FOLDED = dropped; chrome<line = called chrome under the fold line, kept):"

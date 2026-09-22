@@ -5659,7 +5659,14 @@ pub(super) async fn answer_browser_command(
                     .await
             };
             match answered {
-                Ok(report) => page_said(&read.label, read_words(report)),
+                Ok(report) => {
+                    // A whole read after a fold is the fold's own label
+                    // (t-6155 F6): written after the page really was read.
+                    if read.full && read.selector.is_none() && mode.asks() {
+                        crate::browser_read::label_full_read(&read.label, &report.url);
+                    }
+                    page_said(&read.label, read_words(report))
+                }
                 Err(why) => browser_refused(format!("zerocode-browser: {why}\n")),
             }
         }
