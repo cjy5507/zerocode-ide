@@ -451,6 +451,81 @@ fn the_builders_cut_at_the_tables_caps() {
     assert!(caps(&SKILLS).contains(&Cap::Items(SKILL_SHARD_TARGET)));
     assert!(caps(&SKILLS).contains(&Cap::Chars(SKILL_DESCRIPTION_CHAR_CAP)));
     assert!(caps(&ZO_STEP_EFFORT).contains(&Cap::Chars(ROUTING_TASK_CHAR_CAP)));
+    assert!(caps(&BROWSER_READ).contains(&Cap::Chars(BROWSER_READ_TITLE_CHAR_CAP)));
+    assert!(caps(&BROWSER_READ).contains(&Cap::Items(BROWSER_READ_BLOCK_CAP)));
+    assert!(caps(&BROWSER_READ).contains(&Cap::Chars(BROWSER_READ_PATH_CHAR_CAP)));
+    assert!(caps(&BROWSER_READ).contains(&Cap::Chars(BROWSER_READ_HEAD_CHAR_CAP)));
+}
+
+/// The browser-read seat folds only on an answer over its own line, sends a
+/// page's title and each block's path and head and never a block's body,
+/// waits one wall for every shard, and rises on the screen seats' answer
+/// line with a stricter route-change budget than theirs — a fold the agent
+/// reached back into costs a whole page, not one press.
+#[test]
+fn the_browser_read_seat_folds_on_its_own_line_and_sends_no_body() {
+    assert_eq!(BROWSER_READ.id, "browser_read");
+    assert_eq!(BROWSER_READ.setting, "jevBrowserRead");
+    assert_eq!(BROWSER_READ.ledger, "browser-read.jsonl");
+    assert_eq!(BROWSER_READ.modes, &JevMode::ALL[..]);
+    const {
+        assert!(BROWSER_READ.promotes);
+        assert!(
+            BROWSER_READ_FOLD_FLOOR_PERMILLE > SCREEN_PRESS_FLOOR_PERMILLE,
+            "a dropped block costs more than a press"
+        );
+        assert!(BROWSER_READ_AGREEMENT_FLOOR_PERMILLE > SCREEN_AGREEMENT_FLOOR_PERMILLE);
+        assert!(BROWSER_READ_SHARD_TARGET * 4 == BROWSER_READ_BLOCK_CAP);
+    }
+    assert_eq!(
+        BROWSER_READ.press_floor_permille,
+        Some(BROWSER_READ_FOLD_FLOOR_PERMILLE)
+    );
+    assert!(BROWSER_READ.permits_press(0.7) && !BROWSER_READ.permits_press(0.69));
+    assert_eq!(
+        BROWSER_READ.answer_floor_permille,
+        Some(BROWSER_READ_ANSWER_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        BROWSER_READ.agreement_floor_permille,
+        Some(BROWSER_READ_AGREEMENT_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        BROWSER_READ.apply_deadline_ms,
+        Some(BROWSER_READ_APPLY_DEADLINE_MS)
+    );
+    assert_eq!(BROWSER_READ.agreement_kind, AgreementKind::Comparison);
+    let sent: Vec<&str> = BROWSER_READ.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(
+        sent,
+        vec![
+            "/state/title",
+            "/state/blocks",
+            "/state/blocks/*/path",
+            "/state/blocks/*/head"
+        ]
+    );
+    assert!(
+        !sent.iter().any(|at| at.ends_with("/text")),
+        "a block's body never leaves"
+    );
+    assert_eq!(BROWSER_READ_OPTIONS, ["content", "chrome"]);
+    assert_eq!(BROWSER_READ_CHROME, "chrome");
+    // The block roots are selectors, each spelled once.
+    let mut roots = BROWSER_READ_BLOCK_ROOTS.to_vec();
+    roots.sort_unstable();
+    roots.dedup();
+    assert_eq!(roots.len(), BROWSER_READ_BLOCK_ROOTS.len());
+    for root in BROWSER_READ_BLOCK_ROOTS {
+        assert!(!root.contains(',') && !root.contains(' '), "{root}");
+    }
+    // The card and the harness read the whole table: the seat is on it.
+    assert!(JEV_USES.contains(&BROWSER_READ));
+    assert_eq!(
+        BROWSER_READ.mode_in(&json!({"smart": {"browserAction": "on"}})),
+        JevMode::Off,
+        "the walk's consent is not the read's"
+    );
 }
 
 /// The skill seat sends a name and a line about each skill, and never a
@@ -971,4 +1046,62 @@ fn only_auto_changes_its_mind_when_the_judge_speaks() {
     }
     assert!(JevMode::On.applies_with(false));
     assert!(!JevMode::Shadow.applies_with(true));
+}
+
+/// The seat an agent asks on purpose (t-6040): a tool and a CLI, never a
+/// stage of the product's own. It names the wire's own bounds for what one
+/// question may carry, offers no `auto` — nothing labels it, so `auto` could
+/// never rise and would be `shadow` under a name that promises otherwise —
+/// and never promotes, so every rise line on its row is empty.
+#[test]
+fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
+    let row = jev_use(AGENT_TOOL.id).expect("the agent tool row");
+    assert_eq!(row.id, "agent_tool");
+    assert_eq!(row.setting, "agentTool");
+    assert_eq!(row.modes, &[JevMode::Off, JevMode::Shadow, JevMode::On]);
+    assert!(!row.promotes);
+    assert_eq!(row.answer_floor_permille, None);
+    assert_eq!(row.agreement_floor_permille, None);
+    assert_eq!(row.apply_deadline_ms, None);
+    assert_eq!(row.window_forgives, None);
+    assert_eq!(row.agreement_rows_wanted, None);
+    assert_eq!(row.press_floor_permille, None);
+
+    // What one question may carry: the caller's words, every one of them
+    // cleared and cut where the door reads them.
+    let at: Vec<&str> = row.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(
+        at,
+        vec![
+            "/state/question",
+            "/state/context",
+            "/state/items",
+            "/state/items/*",
+            "/questions/*/criteria/*",
+        ]
+    );
+    for sent in row.sends {
+        match sent.at {
+            "/state/items" => assert_eq!(sent.cap, Cap::Items(SKILL_SHARD_TARGET)),
+            _ => assert_eq!(
+                sent.cap,
+                Cap::Chars(AGENT_TOOL_TEXT_CHAR_CAP),
+                "{}",
+                sent.at
+            ),
+        }
+    }
+    assert_eq!(AGENT_TOOL_TEXT_CHAR_CAP, ROUTING_TASK_CHAR_CAP);
+    // The wire's own ceilings (docs.typesafe.ai: a choice takes up to 255
+    // options, a score between two and ten levels), spelled once here.
+    assert_eq!(AGENT_TOOL_OPTION_CAP, 255);
+    assert_eq!(AGENT_TOOL_LEVELS, 2..=10);
+    assert_eq!(
+        AGENT_TOOL_ITEM_CAP % SKILL_SHARD_TARGET,
+        0,
+        "items are even shards"
+    );
+    assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
+    assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
+    assert_eq!(JEV_USES.len(), 15);
 }

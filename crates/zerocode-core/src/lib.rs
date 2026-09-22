@@ -24,6 +24,7 @@ pub mod artifact_transcript;
 pub mod ask;
 pub mod automation;
 pub mod board;
+pub mod browser_read;
 pub mod capabilities;
 pub mod checks;
 pub mod civil;

@@ -1,0 +1,15 @@
+# The ten public pages the read seat is measured on (t-6041): one of each
+# shape an agent reads — an encyclopedia article, two documentation pages, a
+# news front, a forum thread list, a project landing, a shop listing sandbox,
+# a search result, a code host page, a package page. All public, none behind
+# a sign-in, and none behind a bot wall (a wall's own words would be the page).
+https://en.wikipedia.org/wiki/Web_browser
+https://developer.mozilla.org/en-US/docs/Web/HTML
+https://docs.python.org/3/tutorial/introduction.html
+https://www.bbc.com/news
+https://news.ycombinator.com/
+https://www.rust-lang.org/
+https://books.toscrape.com/
+https://search.marginalia.nu/search?query=steel+kettle
+https://github.com/rust-lang/rust
+https://pypi.org/project/requests/

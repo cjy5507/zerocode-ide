@@ -64,6 +64,8 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "effort", setting: "stepEffort", modes: "off shadow on auto" }),
   Object.freeze({ id: "step_effort", setting: "zoStepEffort", modes: "off shadow on auto" }),
   Object.freeze({ id: "compaction", setting: "jevCompaction", modes: "off shadow on auto" }),
+  Object.freeze({ id: "agent_tool", setting: "agentTool", modes: "off shadow on" }),
+  Object.freeze({ id: "browser_read", setting: "jevBrowserRead", modes: "off shadow on auto" }),
   Object.freeze({ id: "notify", setting: "jevNotify", modes: "off shadow auto" }),
 ]);
 const jevSeat = (id) => JEV_SEATS.find((seat) => seat.id === id) ?? null;

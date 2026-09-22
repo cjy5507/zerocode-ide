@@ -19,28 +19,52 @@ pub(crate) struct Endpoint {
 }
 
 impl Endpoint {
-    /// Answer `status` with `body`, after `hold_ms` milliseconds each time.
+    /// Answer `status` with `body`, after `hold_ms` milliseconds each time —
+    /// one request at a time, which is what every seat that asks once needs.
     pub(crate) fn serving(status: &'static str, body: String, hold_ms: u64) -> Self {
+        Self::listening(status, body, hold_ms, false)
+    }
+
+    /// The same endpoint answering every connection on a thread of its own,
+    /// so requests that leave side by side are held side by side — what a
+    /// test of a seat that asks in shards needs: on the serial endpoint two
+    /// shards held 300 ms each would come back after 600 whether or not the
+    /// seat asked them together.
+    pub(crate) fn serving_each(status: &'static str, body: String, hold_ms: u64) -> Self {
+        Self::listening(status, body, hold_ms, true)
+    }
+
+    fn listening(status: &'static str, body: String, hold_ms: u64, each: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback seat");
         let addr = listener.local_addr().expect("its address");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let heard = Arc::clone(&seen);
+        let body = Arc::new(body);
         thread::spawn(move || {
             for socket in listener.incoming() {
                 let Ok(mut socket) = socket else {
                     return;
                 };
-                let request = read_request(&mut socket);
-                heard.lock().expect("the record").push(request);
-                if hold_ms > 0 {
-                    thread::sleep(Duration::from_millis(hold_ms));
+                let heard = Arc::clone(&heard);
+                let body = Arc::clone(&body);
+                let mut answer = move || {
+                    let request = read_request(&mut socket);
+                    heard.lock().expect("the record").push(request);
+                    if hold_ms > 0 {
+                        thread::sleep(Duration::from_millis(hold_ms));
+                    }
+                    let answer = format!(
+                        "{status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = socket.write_all(answer.as_bytes());
+                    let _ = socket.flush();
+                };
+                if each {
+                    thread::spawn(answer);
+                } else {
+                    answer();
                 }
-                let answer = format!(
-                    "{status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = socket.write_all(answer.as_bytes());
-                let _ = socket.flush();
             }
         });
         Self { addr, seen }

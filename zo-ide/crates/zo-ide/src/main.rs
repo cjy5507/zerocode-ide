@@ -259,10 +259,11 @@ fn run_scoreboard(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::er
     })
 }
 
-/// `zo decision-shadow eval …` scores the routing probe and its typed twin
-/// against a person's labels, from the workspace's shadow ledger; `check` asks
-/// System One once with the key zo would use. No session. A check nothing
-/// answered prints its reason where an answer would go, and exits 1.
+/// `zo jev summary` counts every seat's ledger; `zo jev ask|choose|score`
+/// puts an agent's own question to the seat and says the answer with its
+/// exit code as well as its text (ask: 0 yes, 1 no, 2 nothing answered;
+/// choose/score: 0 answered, 2 not). No session. A refused command line
+/// prints why and exits with the verb's own refusal code.
 fn run_jev(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Error>> {
     let cwd = std::env::current_dir()?;
     let now_ms = i64::try_from(
@@ -275,11 +276,15 @@ fn run_jev(args: &[String]) -> Result<(&'static str, u8), Box<dyn std::error::Er
     Ok(match zo_ide::jev_cli::run(args, &cwd, now_ms, zo_ide::local_offset_seconds()) {
         Ok(report) => {
             println!("{}", report.text);
-            success("jev")
+            if report.exit == zo_ide::autonomy::limits::HEADLESS_LOOP_EXIT_DONE {
+                success("jev")
+            } else {
+                ("jev-answered-no", report.exit)
+            }
         }
-        Err(message) => {
-            eprintln!("zo jev: {message}");
-            ("jev-refused", 1)
+        Err(refused) => {
+            eprintln!("zo jev: {}", refused.message);
+            ("jev-refused", refused.exit)
         }
     })
 }

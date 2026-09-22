@@ -212,7 +212,7 @@ pub fn reads_as_bottom_level(score: f64) -> bool {
 /// and the comparison admitted 17 of them and refused 21; two more sat at
 /// 0.03. That refused 23 answers in 240, and because one batch asks about
 /// eight notes and one refusal discards the batch whole, 17 batches in 30.
-pub const RERANK_SCALE: crate::jev_score::Scale = crate::jev_score::Scale::new(&RERANK_LEVELS);
+pub const RERANK_SCALE: crate::jev_score::Scale<'static> = crate::jev_score::Scale::new(&RERANK_LEVELS);
 
 /// Marker the state's truncations leave, so a clipped summary is visibly one —
 /// the table's own, so the door's byte cap re-cutting a summary this already

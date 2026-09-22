@@ -352,6 +352,11 @@ const DEFERRED_TOOL_NAMES_EXTRA: &[&str] = &[
     // manifest line (18 chars) is the whole promise it needs. Reversible in
     // one word: `ZO_WIRE_TOOLS=PushNotification`.
     "PushNotification",
+    // The agent tool seat (t-6040), deferred on the same trade as
+    // `PushNotification`: the wire is full, a typed judge is reached for on
+    // a minority of turns, and the hook below is the whole promise it needs.
+    // Reversible in one word: `ZO_WIRE_TOOLS=Jev`.
+    "Jev",
     "RemoteTrigger",
     "ScheduleWakeup",
     "SendMessage",
@@ -499,13 +504,17 @@ const DEFERRED_TOOL_HOOKS: &[(&str, &str)] = &[
         "Council",
         "Compare anonymized answers for agreement or honest ties.",
     ),
+    // Twelve characters, because the tool bucket had five tokens of head
+    // left under its r49 line when this seat landed (2,005 of 2,010) and the
+    // manifest is billed there; the schema behind the door says the rest.
+    ("Jev", "typed judge"),
     (
         "find_symbol",
-        "Use find_symbol/find_references/file_outline when grep lacks structure.",
+        "find_symbol/find_references/file_outline: structure grep lacks.",
     ),
     (
         "WebSearch",
-        "Use WebSearch/WebFetch for stale or external facts.",
+        "WebSearch/WebFetch: stale or external facts.",
     ),
     (
         "WorkerCreate",
