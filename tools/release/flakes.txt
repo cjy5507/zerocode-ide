@@ -71,3 +71,10 @@ root:google_login::tests::the_callback_seat_can_be_retaken_while_the_last_one_li
 # HOOK_COLLECTION_GRACE, so the parked pointer read as stale instead (tests.rs:9857). Orchestration untouched by the
 # branch; green solo ×3 in 0.37–0.86 s. A wall-clock grace measured against a loaded test run, like the families above.
 root:orchestration::tests::a_working_claude_pane_is_pointed_at_through_its_own_hook_and_never_its_composer
+# 2026-09-23 coordinator gate for t-6203 (zo-test, 49 binaries side by side, load 4-13): the cron test expects the
+# first minute strictly after creation, but an entry created inside the first second of a minute is answered that very
+# minute by next_wakeup — a one-in-sixty wall-clock race in the test's expectation, green solo x3 (follow-up: inject the clock).
+zo:autonomy::crons::tests::a_cron_wakes_the_session_at_its_next_minute_and_fires_once_for_it
+# Same gate: the growing PTY could not be spawned ("the pty slave has no name") while the other binaries ran beside it —
+# pty allocation under load; green solo x3.
+zo:e2e_grow_during_a_live_spinner_pins_the_footer_to_the_last_row
