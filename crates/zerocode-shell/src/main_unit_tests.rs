@@ -251,7 +251,7 @@ fn block_after_css<'a>(source: &'a str, opens: &str) -> &'a str {
 /// Enough to ask a question about one block without a parser: every caller
 /// below names something declared at the top level of `ui/shell.js`, so
 /// the first line that is exactly `}` or `});` ends it.
-fn block_after<'a>(source: &'a str, opens: &str) -> &'a str {
+pub(crate) fn block_after<'a>(source: &'a str, opens: &str) -> &'a str {
     let start = source
         .find(opens)
         .unwrap_or_else(|| panic!("`{opens}` is gone from ui/shell.js"));
@@ -16333,22 +16333,55 @@ fn every_authenticating_ssh_road_can_ask_the_person() {
 #[test]
 fn the_bell_ladder_stands_once_and_in_orcas_order() {
     let shipped = shipped_backend();
-    let ringing = block_after(shipped, "fn ring_now(");
-    let dot = ringing
+    // The ladder is three blocks in one order (t-6043 put the notify seat
+    // between the watched-screen rule and the cooldown): the first rungs
+    // (`ring_gates_open`), the ring's own decision (`ring_now`), the last
+    // rungs (`ring_composed`). A held ring re-enters at the first rungs and
+    // skips only the seat.
+    let gates = block_after(shipped, "fn ring_gates_open(");
+    let dot = gates
         .find("note_activity(app, source)")
         .expect("the tray dot left the ladder");
-    let master = ringing
+    let master = gates
         .find("!preferences.enabled")
         .expect("the master switch left the ladder");
-    let kinds = ringing
+    let kinds = gates
         .find("!preferences.agent_attention")
         .expect("the kind gates left the ladder");
-    let invitation = ringing
+    assert!(
+        dot < master && master < kinds,
+        "the ladder's first rungs are out of Orca's order"
+    );
+    let ringing = block_after(shipped, "fn ring_now(");
+    let gated = ringing
+        .find("if !ring_gates_open(app, ring) {")
+        .expect("the bell no longer walks the first rungs");
+    let seat = ringing
+        .find("notify_call::call_at_the_bell(app, &bell)")
+        .expect("the seat left the ladder");
+    let last = ringing
+        .find("ring_composed(app, worktree, term, &composed);")
+        .expect("the bell no longer walks the last rungs");
+    assert!(
+        gated < seat && seat < last,
+        "the bell's own rungs are out of order"
+    );
+    let composed = block_after(shipped, "fn ring_composed(");
+    let cooling = composed
+        .find(".rings().may_ring(worktree, epoch_ms_now())")
+        .expect("the cooldown left the ladder");
+    let invitation = composed
         .find("LastRing {")
         .expect("a fired bell writes no invitation");
     assert!(
-        dot < master && master < kinds && kinds < invitation,
-        "the ladder's rungs are out of Orca's order"
+        cooling < invitation,
+        "the ladder's last rungs are out of Orca's order"
+    );
+    let held = block_after(shipped, "fn ring_held(");
+    assert!(
+        held.contains("if !ring_gates_open(app, ring) {")
+            && held.contains("ring_composed(app, worktree, term, folded);"),
+        "a held ring skips a rung besides the seat:\n{held}"
     );
     // 게이트가 호출부 곁에 다시 자라지 못하게: 배송 전 preferences를
     // 읽는 곳은 사다리 하나뿐이다.
@@ -17046,10 +17079,10 @@ fn only_a_window_road_notify_frame_with_a_body_is_a_push() {
 #[test]
 fn a_zo_push_rings_through_the_one_ladder_under_the_attention_kind() {
     let shipped = shipped_backend();
-    let ringing = block_after(shipped, "fn ring_now(");
+    let gates = block_after(shipped, "fn ring_gates_open(");
     assert!(
-        ringing.contains("Ring::Attention | zerocode_core::notify::Ring::Push"),
-        "the push is not gated by the attention preference:\n{ringing}"
+        gates.contains("Ring::Attention | zerocode_core::notify::Ring::Push"),
+        "the push is not gated by the attention preference:\n{gates}"
     );
     let road = block_after(shipped, "fn ring_zo_push(");
     assert!(
@@ -17153,10 +17186,7 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
                 "worker.focusCollapse",
             ],
         ),
-        (
-            "function focusViewButtonNode() {",
-            vec!["worker.focusView"],
-        ),
+        ("function focusViewButtonNode() {", vec!["worker.focusView"]),
     ];
     for (opens, wanted) in reads {
         let drawing = block_after(window, opens);

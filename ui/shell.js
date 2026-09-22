@@ -81,6 +81,27 @@ function paneHookStates() {
   return states;
 }
 const hookStates = paneHookStates();
+/* The panes whose latest ring the notify seat took away (t-6043): the seat's
+ * call (`batch` or `ignore`) by shell, heard on `notify:call` once the seat
+ * has answered — which is after the hook already painted the pane's
+ * attention mark, so the strip drops the mark rather than never drawing it.
+ * Cleared the moment the pane's state moves: a new state is a new question,
+ * and the seat's word about the last one says nothing about it. */
+const hushedPanes = new Map();
+
+/* Whether every pane of a terminal tab that stands at `needs-attention` has
+ * had its ring hushed by the seat — the tab wears the waiting mark only for
+ * a pane the seat did not take the ring from. */
+function tabHushed(tab) {
+  if (tab.kind !== "term") return false;
+  let waiting = 0;
+  for (const term of paneLeaves(tab.layout)) {
+    if (hookStates.get(term) !== "needs-attention") continue;
+    waiting += 1;
+    if (!hushedPanes.has(term)) return false;
+  }
+  return waiting > 0;
+}
 /* The model a pane's agent is on, sticky the way Orca's lead state keeps it
  * (index.js:10385): the payload's word when it says one, the last word kept
  * when it does not. And WHEN the state last moved, for the row's "now"/"1m"
@@ -1497,6 +1518,18 @@ async function refreshBoardBadge() {
  * never rings is an agent waiting on a person who was never told. */
 listen("notify:blocked", () => {
   showError(t("notify.blocked", "시스템 알림이 차단되어 있습니다 — 에이전트가 기다려도 울리지 않습니다. 시스템 설정 > 알림에서 허용하세요."));
+});
+
+/* The notify seat took a pane's ring away (t-6043): `batch` holds it for the
+ * next hand on the window, `ignore` drops it. Either way the strip stops
+ * marking the pane as waiting — the mark is the ring's twin on the screen,
+ * and a ring the seat judged not worth the interruption is not worth the
+ * amber either. */
+listen("notify:call", (event) => {
+  const { term, call } = event.payload ?? {};
+  if (typeof term !== "number" || typeof call !== "string") return;
+  hushedPanes.set(term, call);
+  scheduleAgentPaint(["tabs"]);
 });
 
 function openBoard() {
@@ -10248,6 +10281,9 @@ listen("hook:agent", (event) => {
   }
   const wasMidTurn = isMidTurn(hookStates.get(term));
   hookStates.set(term, state);
+  // The state moved: whatever the notify seat said about the LAST ring of
+  // this pane is over with it (t-6043).
+  hushedPanes.delete(term);
   // The composer wears the state the pane now has — send or stop, the
   // queue's placeholder or its own words. Painted after the set, not before
   // it: painted above, it wore the old word until the next repaint (measured:

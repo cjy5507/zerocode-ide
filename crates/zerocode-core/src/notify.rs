@@ -47,6 +47,27 @@ pub enum Ring {
     Push,
 }
 
+impl Ring {
+    /// Every kind, in the order the notify seat's ledger lists them.
+    pub const ALL: [Self; 3] = [Self::Attention, Self::Completion, Self::Push];
+
+    /// The word a ledger row keeps for this kind (t-6043).
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Attention => "attention",
+            Self::Completion => "completion",
+            Self::Push => "push",
+        }
+    }
+
+    /// The kind a ledger word names, if it names one.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|ring| ring.word() == word)
+    }
+}
+
 /// The ring a hook state means, if any.
 pub const fn ring_of(state: HookState) -> Option<Ring> {
     match state {
@@ -154,6 +175,31 @@ pub fn notice(
         title: format!("{place} - {agent} {verb}"),
         body: body.unwrap_or_default().to_string(),
     }
+}
+
+/// Several notices the notify seat held (`crate::jev::NOTIFY_BATCH`), folded
+/// into the one the person is told at their next hand on the window
+/// (t-6043).
+///
+/// One notice stands as it is. More than one wear the first's title with
+/// how many stand behind it, and every title as the body, one per line —
+/// the OS shows a title and a few lines, and "api - claude finished +2"
+/// over three titles is what tells somebody what waited for them without
+/// putting words in any agent's mouth. `None` when nothing was held.
+#[must_use]
+pub fn batched(held: &[Notice]) -> Option<Notice> {
+    let (first, rest) = held.split_first()?;
+    if rest.is_empty() {
+        return Some(first.clone());
+    }
+    Some(Notice {
+        title: format!("{} +{}", first.title, rest.len()),
+        body: held
+            .iter()
+            .map(|notice| notice.title.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
+    })
 }
 
 /// The lane bell's memory: which state each lane last rang for, and the
@@ -445,6 +491,39 @@ mod tests {
         assert_eq!(verb(Ring::Attention, true), VERB_ATTENTION);
         assert_eq!(verb(Ring::Completion, false), VERB_FINISHED);
         assert_eq!(verb(Ring::Completion, true), VERB_STOPPED);
+    }
+
+    /// Held rings fold into one notice: one stands as it is, several wear
+    /// the first's title with a count and list every title (t-6043).
+    #[test]
+    fn held_rings_fold_into_one_notice() {
+        assert_eq!(batched(&[]), None);
+        let one = notice(
+            "api",
+            "claude",
+            Ring::Completion,
+            false,
+            None,
+            Some("green"),
+        );
+        assert_eq!(batched(std::slice::from_ref(&one)), Some(one.clone()));
+        let two = notice("web", "codex", Ring::Attention, false, Some("merge?"), None);
+        let three = notice("api", "zo", Ring::Push, false, None, Some("done"));
+        let folded = batched(&[one, two, three]).expect("three held");
+        assert_eq!(folded.title, "api - claude finished +2");
+        assert_eq!(
+            folded.body,
+            "api - claude finished\nweb - codex needs input\napi - zo says"
+        );
+    }
+
+    /// The three kinds have one word each, and the word reads back.
+    #[test]
+    fn a_ring_kind_has_one_word_that_reads_back() {
+        for ring in Ring::ALL {
+            assert_eq!(Ring::from_word(ring.word()), Some(ring));
+        }
+        assert_eq!(Ring::from_word("bell"), None);
     }
 
     /// A push the agent sent on purpose (zo `PushNotification`, t-2943) wears

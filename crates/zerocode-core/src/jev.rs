@@ -4,8 +4,9 @@
 //! Two programs ask. zo asks about a task it is routing and about the notes a
 //! recall found; the window asks which control a walk should press next — on a
 //! page or on the desktop — about a worker whose pane went quiet, about where
-//! a worker's window belongs, about which agent a summons should start, and
-//! about which blocks of a page an agent's browser read should fold away.
+//! a worker's window belongs, about which agent a summons should start,
+//! about which blocks of a page an agent's browser read should fold away
+//! and about whether a ring is worth interrupting the person for.
 //! Each keeps its own wire — the two Cargo workspaces carry different `reqwest` majors
 //! (docs/design/jev-browser-action-20260917.md §1.4) — so what must not fork
 //! lives here, in the one crate both already read:
@@ -1642,8 +1643,164 @@ pub const BROWSER_READ: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
 };
 
+/// The closed answer every notify question offers, spelled once: ring now,
+/// hold it for the next moment the person turns to the window, or say
+/// nothing. A fourth word would be an answer nothing could act on.
+pub const NOTIFY_OPTIONS: [&str; 3] = [NOTIFY_INTERRUPT, NOTIFY_BATCH, NOTIFY_IGNORE];
+
+/// The word that rings the person now — what today's rule does with every
+/// ring it does not suppress.
+pub const NOTIFY_INTERRUPT: &str = "interrupt";
+
+/// The word that holds a ring for the next moment the person is at the
+/// window, where every held ring is folded into one notice.
+pub const NOTIFY_BATCH: &str = "batch";
+
+/// The word that drops a ring.
+pub const NOTIFY_IGNORE: &str = "ignore";
+
+/// How long after a ring the person's hand on that pane counts as the
+/// ring's label, in milliseconds (t-6043).
+///
+/// One minute is a policy line, not a measured one — the brief's own
+/// number: long enough to walk back to the desk after a lock-screen
+/// notification and click the pane it named, short enough that a pane
+/// opened later for another reason is not charged to a ring it had nothing
+/// to do with (the placement seat's window,
+/// [`PLACEMENT_LABEL_WINDOW_MS`], is drawn the same way at five). The seat
+/// writes the label at the first hand inside it, or once it has passed.
+pub const NOTIFY_LABEL_WINDOW_MS: i64 = 60 * 1_000;
+
+/// How long since the person's last hand on the window they still count as
+/// present at it, in milliseconds — the one attendance fact the question
+/// carries beside the window's focus.
+///
+/// The placement seat's window, read from there rather than respelled: the
+/// same question, asked the other way round. That seat asks how long after a
+/// pane appeared a person's move still counts against it — "long enough for
+/// somebody who was typing elsewhere to turn to the new pane" — and this one
+/// asks how long since they last typed anywhere they should still be counted
+/// as somebody who could turn. A focused window nobody has touched for longer
+/// than this is a desk somebody left, and a ring there is a lock-screen
+/// ring.
+pub const NOTIFY_ATTENDANCE_WINDOW_MS: i64 = PLACEMENT_LABEL_WINDOW_MS;
+
+/// Characters of the ring's words one notify question carries — the
+/// question the agent stopped on, or its last words — which is the
+/// notification's own body: one card line
+/// (`crate::transcript::SUMMARY_CHARS`), read through the step-effort seat's
+/// cap because the two are the same cut of the same kind of text, and a
+/// second number on it would be a second answer to how much of an agent's
+/// words leave the machine per ring.
+pub const NOTIFY_WORDS_CHAR_CAP: usize = STEP_EFFORT_REPEATED_CHAR_CAP;
+
+/// Rings of the same pane one notify question carries as its context —
+/// each as its event word, how long ago, and whether the person turned to
+/// the pane inside [`NOTIFY_LABEL_WINDOW_MS`] of it.
+///
+/// Six is a policy line: the per-worktree cooldown
+/// (`crate::notify::COOLDOWN_MS`, five seconds) bounds a pane to twelve
+/// rings a minute, so six is the busiest half-minute a pane can have had —
+/// enough to show a pane that has finished four times without a response,
+/// and not a history. Older rings are not what makes this one worth an
+/// interruption.
+pub const NOTIFY_RECENT_CAP: usize = 6;
+
+/// The wall the bell holds an attention ring for the seat's answer, in
+/// milliseconds, when the seat acts.
+///
+/// The completion's own quiet (`crate::notify::DONE_QUIET_MS`), which every
+/// completion ring already waits before it may ring at all: an answer inside
+/// it delays an attention ring by no more than every "finished" is already
+/// delayed, and a completion's question is asked beside its quiet rather
+/// than after it. Past the wall today's rule rings, exactly as it did before
+/// the seat existed. Written as the completion's number and not read from
+/// [`ROUTING_APPLY_DEADLINE_MS`], which happens to coincide: that is a
+/// turn's wait, this is a bell's, and two policies that coincide are still
+/// two policies.
+pub const NOTIFY_APPLY_DEADLINE_MS: u64 = crate::notify::DONE_QUIET_MS.unsigned_abs();
+
+/// What the notify seat's answers must bound above before `auto` rises to
+/// holding and dropping rings (§4): nine in ten.
+///
+/// The orchestration seats' reasoning, reached from this seat's own side: a
+/// question that does not come back costs the person nothing they were not
+/// already going to get — today's rule rings, as it did before the seat
+/// existed — and every answer that does come back can take a ring away.
+/// Written as its own number rather than read from
+/// [`ORCHESTRATION_ANSWER_FLOOR_PERMILLE`]: two lines that coincide are
+/// still two policies.
+pub const NOTIFY_ANSWER_FLOOR_PERMILLE: u16 = 900;
+
+/// The notify seat's route-change budget (§4): four calls in five must have
+/// been what the person's own hand then said — a ring they turned to within
+/// the minute was worth an interruption, one they did not turn to while at
+/// the window was not. Held to the same budget as every other seat that
+/// takes a decision off a reader: one ring in five wrongly dropped is an
+/// agent waiting on a person who was never told.
+pub const NOTIFY_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
+
+/// The window's ring judgment: whether one notification is worth the
+/// interruption — ring now, hold it for the next moment the person turns to
+/// the window, or say nothing (t-6043, `crate::notify_call`).
+///
+/// Today one rule table decides: a stopped or finished pane rings unless it
+/// is the screen being watched, and a per-worktree cooldown thins the rest
+/// (`crate::notify`). What the table cannot read is whether THIS ring is one
+/// the person needs this second — the fourth "finished" in ten minutes from
+/// a worker nobody has turned to, a "needs input" while three other panes
+/// already wait, a completion at two in the morning. The seat is asked at
+/// the one point the table decides "ring or not", about the ring's kind
+/// ([`crate::notify::verb`]'s word), the pane's name, whether the person is
+/// present at the window or away, one card line of the ring's words, the
+/// pane's last rings and whether each was turned to, and how many panes
+/// wait. A watched screen is today's own ignore and is not a question.
+///
+/// Under `off`, `shadow`, a timeout or a refusal the bell rings exactly as
+/// today; only an `auto` its own evidence raised lets `batch` and `ignore`
+/// change what the OS shows and what the tab strip marks. A held ring is
+/// folded with every other held ring into one notice at the person's next
+/// hand on the window (`crate::notify::batched`).
+///
+/// The `agreed` rule: a Comparison label written by the person's own hand.
+/// A key or a paste into the ring's pane within [`NOTIFY_LABEL_WINDOW_MS`]
+/// says the ring was worth the interruption — `agreed` iff the call was
+/// [`NOTIFY_INTERRUPT`]. No hand inside the window while the person was
+/// present at it says it was not — `agreed` iff the call was not. No hand
+/// while they were away says nothing either way, and leaves no mark: a
+/// person who was not there could not have turned to it. One label row per
+/// answered row, keyed by the row's own `notify` key.
+pub const NOTIFY: JevUse = JevUse {
+    id: "notify",
+    setting: "jevNotify",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::Auto],
+    sends: &[
+        Sent {
+            at: "/state/pane",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/words",
+            cap: Cap::Chars(NOTIFY_WORDS_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/recent",
+            cap: Cap::Items(NOTIFY_RECENT_CAP),
+        },
+    ],
+    ledger: "notify-call.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(NOTIFY_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(NOTIFY_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(NOTIFY_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 14] = [
+pub static JEV_USES: [JevUse; 15] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -1658,6 +1815,7 @@ pub static JEV_USES: [JevUse; 14] = [
     COMPACTION,
     AGENT_TOOL,
     BROWSER_READ,
+    NOTIFY,
 ];
 
 impl JevUse {

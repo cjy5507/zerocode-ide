@@ -382,11 +382,20 @@ fn the_placement_seats_line_sits_where_its_negatives_are() {
     );
 }
 
+/// Promotion rises from `auto` to acting, so a use that promotes offers
+/// `auto` — and a word that acts once the judge has raised it, which `auto`
+/// itself is. A seat whose only acting word is a raised `auto` (the notify
+/// seat, t-6043: what acts there is evidence, never a person's `on`) still
+/// has somewhere to rise to.
 #[test]
 fn a_use_that_promotes_has_somewhere_to_rise_from_and_to() {
     for row in JEV_USES.iter().filter(|row| row.promotes) {
         assert!(row.modes.contains(&JevMode::Auto), "{}", row.id);
-        assert!(row.modes.iter().any(|mode| mode.applies()), "{}", row.id);
+        assert!(
+            row.modes.iter().any(|mode| mode.applies_with(true)),
+            "{}",
+            row.id
+        );
     }
 }
 
@@ -409,7 +418,7 @@ fn uses_are_told_apart_by_every_name_they_answer_to() {
             row.id
         );
     }
-    assert_eq!(jev_use("notify"), None);
+    assert_eq!(jev_use("a seat the table does not name"), None);
 }
 
 #[test]
@@ -510,8 +519,8 @@ fn the_browser_read_seat_folds_on_its_own_line_and_sends_no_body() {
     for root in BROWSER_READ_BLOCK_ROOTS {
         assert!(!root.contains(',') && !root.contains(' '), "{root}");
     }
-    // The card and the harness read the whole table: the seat is on it, last.
-    assert_eq!(JEV_USES.last().map(|row| row.id), Some(BROWSER_READ.id));
+    // The card and the harness read the whole table: the seat is on it.
+    assert!(JEV_USES.contains(&BROWSER_READ));
     assert_eq!(
         BROWSER_READ.mode_in(&json!({"smart": {"browserAction": "on"}})),
         JevMode::Off,
@@ -708,6 +717,76 @@ fn the_compaction_seat_drops_by_relevance_and_rises_on_its_regret_marks() {
     assert!(
         !COMPACTION.permits_press(1.0),
         "a compaction judgment presses nothing"
+    );
+}
+
+/// The notify seat (t-6043) judges one ring — attention, completion or a
+/// push — at the one point today's rule table decides "ring or not", and
+/// rises on the person's own reaction: a pane they turned to within
+/// [`NOTIFY_LABEL_WINDOW_MS`] was one worth the interruption.
+#[test]
+fn the_notify_seat_judges_one_ring_and_rises_on_the_persons_reaction() {
+    assert_eq!(jev_use("notify"), Some(&NOTIFY));
+    assert_eq!(NOTIFY.setting, "jevNotify");
+    // A labeled seat: off, shadow, auto — and no `on`, because what acts here
+    // is evidence and not a person's word (the seat contract's third rule).
+    assert_eq!(
+        NOTIFY.modes,
+        &[JevMode::Off, JevMode::Shadow, JevMode::Auto]
+    );
+    assert_eq!(NOTIFY.offered("on"), None);
+    let sent: Vec<&str> = NOTIFY.sends.iter().map(|sent| sent.at).collect();
+    assert_eq!(
+        sent,
+        ["/state/pane", "/state/words", "/state/recent"],
+        "the pane's name, one card line of words, and the pane's last rings — nothing else a person wrote"
+    );
+    let caps = |row: &JevUse| -> Vec<Cap> { row.sends.iter().map(|sent| sent.cap).collect() };
+    assert!(caps(&NOTIFY).contains(&Cap::Chars(NOTIFY_WORDS_CHAR_CAP)));
+    assert!(caps(&NOTIFY).contains(&Cap::Items(NOTIFY_RECENT_CAP)));
+    assert_eq!(
+        NOTIFY_WORDS_CHAR_CAP,
+        crate::transcript::SUMMARY_CHARS,
+        "one card line"
+    );
+
+    const { assert!(NOTIFY.promotes) };
+    assert_eq!(NOTIFY.agreement_kind, AgreementKind::Comparison);
+    assert_eq!(
+        NOTIFY.answer_floor_permille,
+        Some(NOTIFY_ANSWER_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        NOTIFY.agreement_floor_permille,
+        Some(NOTIFY_AGREEMENT_FLOOR_PERMILLE)
+    );
+    assert_eq!(NOTIFY.apply_deadline_ms, Some(NOTIFY_APPLY_DEADLINE_MS));
+    // The wall an attention ring may be held is the wait every completion
+    // ring already sits through before it may ring at all.
+    assert_eq!(
+        NOTIFY_APPLY_DEADLINE_MS,
+        crate::notify::DONE_QUIET_MS.unsigned_abs(),
+        "the seat's wall is the completion's own quiet"
+    );
+    assert_eq!(
+        NOTIFY_OPTIONS,
+        [NOTIFY_INTERRUPT, NOTIFY_BATCH, NOTIFY_IGNORE]
+    );
+    const { assert!(NOTIFY_LABEL_WINDOW_MS == 60 * 1_000) };
+    const { assert!(NOTIFY_ATTENDANCE_WINDOW_MS > NOTIFY_LABEL_WINDOW_MS) };
+    const { assert!(NOTIFY_RECENT_CAP > 0) };
+
+    assert!(
+        !NOTIFY.mode_of(Some(&json!("on"))).applies(),
+        "no `on`: it reads as off"
+    );
+    assert!(!NOTIFY.mode_of(Some(&json!("on"))).asks());
+    assert!(!NOTIFY.mode_of(Some(&json!("auto"))).applies_with(false));
+    assert!(NOTIFY.mode_of(Some(&json!("auto"))).applies_with(true));
+    assert!(!NOTIFY.mode_of(Some(&json!("shadow"))).applies_with(true));
+    assert!(
+        !NOTIFY.permits_press(1.0),
+        "a notify judgment presses nothing"
     );
 }
 
@@ -1024,5 +1103,5 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 14);
+    assert_eq!(JEV_USES.len(), 15);
 }

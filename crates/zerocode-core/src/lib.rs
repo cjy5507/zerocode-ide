@@ -58,6 +58,7 @@ pub mod linear;
 pub mod localhost_label;
 pub mod mermaid;
 pub mod notify;
+pub mod notify_call;
 pub mod onboarding;
 pub mod orchestration;
 pub mod pane;

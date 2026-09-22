@@ -1019,6 +1019,11 @@ pub(crate) fn term_key(
     // success, for the same reason as the wait below: a key this window
     // failed to deliver took nothing over.
     orchestration::pane_taken_over(term, now_epoch_ms());
+    // The same hand is the notify seat's label (t-6043): a key into a pane
+    // that rang inside the last minute says the ring was worth it, and any
+    // key says the person is at the window — which is also when the rings
+    // the seat held are told, once.
+    notify_call::note_hand(&app, term);
     // A person may have just answered a blocked question, which sends no hook
     // at all. Asked AFTER the write and only when it SUCCEEDED: a key this
     // window failed to deliver answered nothing, and clearing a wait on it
@@ -1250,6 +1255,7 @@ pub(crate) fn term_mouse(
 
 #[tauri::command(async)]
 pub(crate) fn term_paste(
+    app: AppHandle,
     state: State<'_, AppState>,
     term: TermId,
     text: String,
@@ -1260,6 +1266,8 @@ pub(crate) fn term_paste(
         let bytes = encode_paste(&text, bracketed);
         crate::prompt_transaction::human_write(term, &bytes, || pty.write_input(&bytes))
     })?;
+    // A paste is a person's hand as much as a key is (t-6043).
+    notify_call::note_hand(&app, term);
     Ok(())
 }
 

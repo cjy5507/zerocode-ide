@@ -118,6 +118,7 @@ mod jira_store;
 mod keyboard_input_source;
 mod last_status;
 mod native_tray;
+mod notify_call;
 mod opencode_home;
 mod orchestration;
 mod orchestration_notify;
@@ -1160,6 +1161,11 @@ struct ShellRuntime {
     inference_sends: Mutex<HashMap<TermId, u64>>,
     /// When each worktree last rang a notification — the cooldown's memory.
     rings: Mutex<zerocode_core::notify::RingLedger>,
+    /// What the notify seat remembers about the rings it asked about: the
+    /// person's last hand on the window, each pane's last rings, the rows
+    /// waiting for their label and the rings held for the next hand
+    /// (t-6043). The decisions live in `notify_call`; this is the lock.
+    notify_book: Mutex<notify_call::NotifyBook>,
     /// The bell's memory of each lane, so a ring follows a CHANGE.
     ///
     /// The decision itself — first appearance, repeat, straggler after death —
@@ -1364,6 +1370,12 @@ impl ShellRuntime {
 
     fn rings(&self) -> MutexGuard<'_, zerocode_core::notify::RingLedger> {
         self.rings
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn notify_book(&self) -> MutexGuard<'_, notify_call::NotifyBook> {
+        self.notify_book
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
@@ -1732,6 +1744,7 @@ trait ShellStateExt {
     fn previewed_terms(&self) -> MutexGuard<'_, HashMap<String, HashSet<TermId>>>;
     fn hold_terminal(&self, term: TermId, pty: impl Into<PtyHandle>);
     fn rings(&self) -> MutexGuard<'_, zerocode_core::notify::RingLedger>;
+    fn notify_book(&self) -> MutexGuard<'_, notify_call::NotifyBook>;
     fn lane_bell(&self) -> MutexGuard<'_, zerocode_core::notify::LaneBell>;
     fn commit_failure(&self) -> MutexGuard<'_, Option<CommitFailure>>;
     fn deliveries(&self) -> MutexGuard<'_, HashMap<TermId, PromptDelivery>>;
@@ -1869,6 +1882,10 @@ impl ShellStateExt for AppState {
 
     fn rings(&self) -> MutexGuard<'_, zerocode_core::notify::RingLedger> {
         self.shell_runtime().rings()
+    }
+
+    fn notify_book(&self) -> MutexGuard<'_, notify_call::NotifyBook> {
+        self.shell_runtime().notify_book()
     }
 
     fn lane_bell(&self) -> MutexGuard<'_, zerocode_core::notify::LaneBell> {
@@ -2333,6 +2350,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         }),
         project_root: root,
         rings: Mutex::new(zerocode_core::notify::RingLedger::default()),
+        notify_book: Mutex::new(notify_call::NotifyBook::default()),
         lane_bell: Mutex::new(zerocode_core::notify::LaneBell::default()),
         native_tray: native_tray::NativeTray::default(),
         awake,
