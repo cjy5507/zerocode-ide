@@ -437,7 +437,7 @@ fn index_of(at: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::second_brain_graph::{GraphEdge, GraphNode};
+    use crate::second_brain_graph::{EdgeProvenance, GraphEdge, GraphNode};
 
     fn page(id: &str, title: &str, tags: &[&str]) -> GraphNode {
         GraphNode {
@@ -473,6 +473,11 @@ mod tests {
                     from: *from,
                     to: *to,
                     kind: *kind,
+                    provenance: if *kind == EdgeKind::Mentions {
+                        EdgeProvenance::Inferred
+                    } else {
+                        EdgeProvenance::Declared
+                    },
                 })
                 .collect(),
             ..VaultGraph::default()

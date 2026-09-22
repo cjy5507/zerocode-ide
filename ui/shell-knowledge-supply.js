@@ -323,17 +323,23 @@ function knowledgeSupplyJoin(answer, graph) {
     }
     /* 이름이 같은 판이 여럿이면 그 선은 그 전부로 간다 — 관계는 그대로. */
     for (const left of named(edge.from, from)) {
-      for (const right of named(edge.to, to)) edges.push({ from: left, to: right, kind: edge.kind });
+      for (const right of named(edge.to, to)) {
+        edges.push({ from: left, to: right, kind: edge.kind, provenance: edge.provenance });
+      }
     }
   }
+  /* 답의 선은 근거(t-5966)도 답의 것 그대로 — 잠금 파일과 OSV는 기계가 잰 것이고, 그 낱말은
+   * 백엔드가 적어 보낸다. */
   for (const edge of answer.edges ?? []) {
     if (edge.kind === "depends_on") {
       if (!inRange(edge.from, count) || !inRange(edge.to, count)) continue;
       if (seatOf[edge.from] < 0 || seatOf[edge.to] < 0) continue;
-      edges.push({ from: base + seatOf[edge.from], to: base + seatOf[edge.to], kind: edge.kind });
+      edges.push({ from: base + seatOf[edge.from], to: base + seatOf[edge.to], kind: edge.kind,
+        provenance: edge.provenance });
     } else if (edge.kind === "affects") {
       if (!inRange(edge.from, vulnerabilities.length) || !inRange(edge.to, count) || seatOf[edge.to] < 0) continue;
-      edges.push({ from: base + vulnerabilityFrom + edge.from, to: base + seatOf[edge.to], kind: edge.kind });
+      edges.push({ from: base + vulnerabilityFrom + edge.from, to: base + seatOf[edge.to], kind: edge.kind,
+        provenance: edge.provenance });
     }
   }
 

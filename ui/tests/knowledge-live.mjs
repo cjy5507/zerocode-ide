@@ -378,8 +378,8 @@ export async function testKnowledgeLive(page, ok) {
       live: {
         now_ms: now, recalled: [], bus: [],
         merge: [
-          { left: 0, right: 1, reason: "title_overlap", score: 80 },
-          { left: 2, right: 3, reason: "same_links", score: 100 },
+          { left: 0, right: 1, reason: "title_overlap", score: 80, provenance: "measured" },
+          { left: 2, right: 3, reason: "same_links", score: 100, provenance: "measured" },
         ],
         limits,
       },
@@ -400,11 +400,14 @@ export async function testKnowledgeLive(page, ok) {
     const mergeEdges = [...view.querySelectorAll(".knowledge-edge.kind-merge")];
     const dash = mergeEdges[0] ? getComputedStyle(mergeEdges[0]).strokeDasharray : "";
     const typedWorn = mergeEdges.filter((line) => line.classList.contains("is-typed")).length;
+    /* 후보 선의 근거(t-5966)는 답의 낱말 그대로 「실측」이다. */
+    const measuredWorn = mergeEdges.filter((line) => line.classList.contains("is-measured")).length;
     const shown = [...view.querySelectorAll(".knowledge-node")].map((one) => one.dataset.graphKey).sort();
     /* 후보 선의 낱말은 밝을 때 선다: 한 끝을 짚으면 「merge?」. */
     const seat = view.querySelector('.knowledge-node[data-graph-key="wiki/Page-0000.md"]');
     litKnowledge(view, knowledgeLayouts.get(view), seat?.dataset.graphKey ?? null);
-    const labels = [...view.querySelectorAll(".knowledge-edge-label")].map((one) => one.textContent);
+    /* 낱말은 첫 텍스트 노드다 — 그 뒤의 <title>은 툴팁(관계 · 근거, t-5966)이라 `textContent`에 섞인다. */
+    const labels = [...view.querySelectorAll(".knowledge-edge-label")].map((one) => one.firstChild?.textContent ?? "");
     litKnowledge(view, knowledgeLayouts.get(view), null);
     const health = {
       merge: lintRow("merge")?.querySelector(".knowledge-inspector-note")?.textContent ?? null,

@@ -395,6 +395,58 @@ function knowledgeGlColor(word, into, at) {
   into[at + 3] = numbers.length > 3 ? Number(numbers[3]) : 1;
 }
 
+/* 점 하나의 쉬는 옷(t-5966 G4에서 따로 나옴): 종류·군집의 색·단으로 고른 몸과 테두리의
+ * 색 칸과 굵기, 그리고 모양이 점선인가. GL 페인터의 `fillNodes`가 상태의 테두리를 덧입히기
+ * 전의 옷이고, HTML 내보내기가 같은 손으로 읽어 두 그림이 같은 잉크를 입는다. */
+function knowledgeRestingNodeInk(palette, tuning, layout, model, at) {
+  const kind = model.kinds[at];
+  const ghost = kind === "ghost";
+  const source = kind === "source";
+  const tiers = KNOWLEDGE_TIER_WORD.length;
+  const rank = layout.community[at];
+  const hue = kind === "page" ? layout.communityHue[rank] : -1;
+  const tier = layout.tier[at];
+  const row = (hue >= 0 ? hue * tiers : palette.hues * tiers) + tier;
+  /* 공급망의 점(P4)은 제 줄의 옷을 입는다. */
+  const own = kind === "component" ? palette.component
+    : kind === "vulnerability" ? palette.vulnerability : null;
+  const ownAt = own === null ? -1 : knowledgeGlSupplyRow(model, at);
+  return {
+    fill: ghost ? palette.ghost : source ? palette.source : own !== null ? own.fill : palette.nodeFill,
+    fillAt: ghost || source ? 0 : own !== null ? ownAt * 4 : row * 4,
+    stroke: ghost ? palette.ghost : source ? palette.source : own !== null ? own.stroke : palette.nodeStroke,
+    strokeAt: ghost || source ? 4 : own !== null ? ownAt * 4 : row * 4,
+    strokePx: ghost ? tuning.nodeGhostStroke
+      : source ? 1
+      : own !== null ? own.width[ownAt]
+      : tier === KNOWLEDGE_TIER_CORE ? tuning.nodeSelectedStroke
+      : tuning.nodeStroke,
+    dashed: KNOWLEDGE_SHAPES[knowledgeShapeOf(kind)].dashed,
+  };
+}
+
+/* 선 하나의 쉬는 옷: 유령의 선, 이름 있는 관계·merge 물음의 제 잉크와 점선, 군집 안의 본문
+ * 링크, 군집을 건너는 본문 링크 — 이 순서로 하나가 이긴다. 밝힘·짚기의 옷은 `fillEdges`가
+ * 덧입힌다. */
+function knowledgeRestingEdgeInk(palette, tuning, layout, model, at) {
+  const head = model.from[at];
+  const tail = model.to[at];
+  const code = model.kind[at];
+  const word = KNOWLEDGE_EDGE_KINDS[code];
+  const typed = code !== KNOWLEDGE_EDGE_CODE.mentions && word !== "merge";
+  if (model.ghost[at] === 1) {
+    return { ink: palette.ghostEdge, inkAt: 0, width: tuning.edgeMentionsWidth, dash: tuning.edgeGhostDash };
+  }
+  if (typed || word === "merge") {
+    return { ink: palette.typed, inkAt: code * 4, width: palette.widths[code],
+      dash: palette.widths[KNOWLEDGE_EDGE_KINDS.length + code] };
+  }
+  const intra = layout.community[head] === layout.community[tail];
+  const hue = intra ? layout.communityHue[layout.community[head]] : -1;
+  if (intra && hue >= 0) return { ink: palette.intra, inkAt: hue * 4, width: tuning.edgeMentionsWidth, dash: 0 };
+  return { ink: palette.inter, inkAt: 0, width: tuning.edgeMentionsWidth, dash: 0 };
+}
+
 /* 팔레트 — SVG가 입는 옷을 그대로 입힌 견본에게 물어서 얻는다.
  *
  * 견본은 판 안에 사는 0×0짜리 `<svg class="knowledge-picture">`이고, 그 안의 점과
@@ -976,8 +1028,6 @@ function makeKnowledgeGlPainter() {
       const model = layout.model;
       const tuning = layout.tuning;
       const palette = this.palette;
-      const tiers = KNOWLEDGE_TIER_WORD.length;
-      const neutral = palette.hues * tiers;
       const on = picture.classList;
       const tracing = on.contains("is-tracing");
       const focused = on.contains("is-focused");
@@ -999,9 +1049,6 @@ function makeKnowledgeGlPainter() {
         const ghost = kind === "ghost";
         const source = kind === "source";
         const rank = layout.community[at];
-        const hue = kind === "page" ? layout.communityHue[rank] : -1;
-        const tier = layout.tier[at];
-        const row = (hue >= 0 ? hue * tiers : neutral) + tier;
         const lit = layout.litNodes.has(at);
         const selected = at === selectedSeat;
         const match = layout.searchMatch[at] === 1;
@@ -1015,27 +1062,20 @@ function makeKnowledgeGlPainter() {
         if (sliced && layout.sliceMatch[at] === 0) alpha = Math.min(alpha, dim);
         if (spotlight && spot >= 0 && rank !== spot) alpha = Math.min(alpha, dim);
         if (pathed && !pathLit) alpha = Math.min(alpha, dim);
-        /* 공급망의 점(P4)은 제 줄의 옷을 입는다 — 상태(고름·밝힘·경로·검색)의 테두리는 페이지와 같다. */
-        const own = kind === "component" ? palette.component
-          : kind === "vulnerability" ? palette.vulnerability : null;
-        const ownAt = own === null ? -1 : knowledgeGlSupplyRow(model, at);
-        const fill = ghost ? palette.ghost : source ? palette.source : own !== null ? own.fill : palette.nodeFill;
-        const fillAt = ghost || source ? 0 : own !== null ? ownAt * 4 : row * 4;
-        const strokeSource = ghost ? palette.ghost
-          : source ? palette.source
-          : selected || lit || pathLit ? (pathLit ? palette.highlight : palette.tint)
-          : match ? palette.highlight
-          : own !== null ? own.stroke
-          : palette.nodeStroke;
-        const strokeAt = ghost || source ? 4
-          : selected || lit || pathLit || match ? 0 : own !== null ? ownAt * 4 : row * 4;
-        const strokePx = ghost ? tuning.nodeGhostStroke
-          : source ? 1
-          : selected || lit || pathLit ? tuning.nodeSelectedStroke
-          : match ? tuning.nodeMatchStroke
-          : own !== null ? own.width[ownAt]
-          : tier === KNOWLEDGE_TIER_CORE ? tuning.nodeSelectedStroke
-          : tuning.nodeStroke;
+        /* 쉬는 옷은 한 함수(`knowledgeRestingNodeInk`)가 고른다 — 내보내기가 같은 손으로 읽는다.
+         * 상태(고름·밝힘·경로·검색)의 테두리만 여기서 덧입힌다; 공급망의 점(P4)도 제 줄의 옷 위에
+         * 같은 상태의 테두리를 입는다. */
+        const resting = knowledgeRestingNodeInk(palette, tuning, layout, model, at);
+        const fill = resting.fill;
+        const fillAt = resting.fillAt;
+        const stated = !ghost && !source && (selected || lit || pathLit);
+        const strokeSource = stated ? (pathLit ? palette.highlight : palette.tint)
+          : !ghost && !source && match ? palette.highlight
+          : resting.stroke;
+        const strokeAt = stated || (!ghost && !source && match) ? 0 : resting.strokeAt;
+        const strokePx = stated ? tuning.nodeSelectedStroke
+          : !ghost && !source && match ? tuning.nodeMatchStroke
+          : resting.strokePx;
         const seat = nodes;
         this.nodeSeat[seat] = at;
         this.writeInk(this.nodeFill, seat * 4, fill, fillAt, alpha);
@@ -1102,20 +1142,15 @@ function makeKnowledgeGlPainter() {
       const far = tuning.farEdgeOpacity;
       const spot = knowledgeClusterPicked;
       const searchOn = knowledgeQuery.trim() !== "";
-      const { from, to, kind, ghost, edgeCount } = model;
+      const { from, to, edgeCount } = model;
       const drawnEdge = layout.drawnEdge;
       let edges = 0;
       for (let at = 0; at < edgeCount; at += 1) {
         if (drawnEdge !== null && drawnEdge[at] === 0) continue;
         const head = from[at];
         const tail = to[at];
-        const code = kind[at];
         const lit = layout.lit.has(at);
         const focusLit = layout.focusEdgeVisited[at] === 1;
-        const intra = layout.community[head] === layout.community[tail];
-        const hue = intra ? layout.communityHue[layout.community[head]] : -1;
-        const typed = code !== KNOWLEDGE_EDGE_CODE.mentions
-          && KNOWLEDGE_EDGE_KINDS[code] !== "merge";
         const match = layout.searchMatch[head] === 1 && layout.searchMatch[tail] === 1;
         const spotlit = spot >= 0 && layout.community[head] === spot
           && layout.community[tail] === spot;
@@ -1129,22 +1164,12 @@ function makeKnowledgeGlPainter() {
         }
         if (spotlight && !spotlit) alpha = Math.min(alpha, dim);
         if (pathed && !pathLit) alpha = Math.min(alpha, dim);
-        let ink = palette.inter;
-        let inkAt = 0;
-        let width = tuning.edgeMentionsWidth;
-        let dash = 0;
-        if (ghost[at] === 1) {
-          ink = palette.ghostEdge;
-          dash = tuning.edgeGhostDash;
-        } else if (typed || KNOWLEDGE_EDGE_KINDS[code] === "merge") {
-          ink = palette.typed;
-          inkAt = code * 4;
-          width = palette.widths[code];
-          dash = palette.widths[KNOWLEDGE_EDGE_KINDS.length + code];
-        } else if (intra && hue >= 0) {
-          ink = palette.intra;
-          inkAt = hue * 4;
-        }
+        /* 쉬는 옷은 한 함수(`knowledgeRestingEdgeInk`)가 고른다 — 내보내기가 같은 손으로 읽는다. */
+        const resting = knowledgeRestingEdgeInk(palette, tuning, layout, model, at);
+        let ink = resting.ink;
+        let inkAt = resting.inkAt;
+        let width = resting.width;
+        const dash = resting.dash;
         if (lit || (focused && focusLit)) {
           ink = palette.litEdge;
           inkAt = 0;

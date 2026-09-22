@@ -26,7 +26,8 @@ zerocode vault-lint [--vault <dir>] [--json]
 
     Lint the second-brain vault: pages the index does not list, links to
     pages that do not exist, orphans, pages without source/ingested_at,
-    prose links no relation key declares, raw items nothing ingested.
+    prose links no relation key declares, raw items nothing ingested,
+    relations whose provenance no road vouches for.
     The vault is --vault, else $ZEROCODE_SECOND_BRAIN, else the one the
     ZeroCode window saved. Exit 0 clean, 1 with findings, 2 with no vault.
 ";
@@ -252,6 +253,28 @@ pub fn render(root: &Path, road: &str, graph: &VaultGraph, scanned_ms: u128) -> 
     );
     for item in &lint.unlogged_raw {
         under(&mut out, item.clone());
+    }
+    row(
+        &mut out,
+        "unsourced_edges",
+        lint.counts.unsourced_edges.to_string(),
+        "relations whose provenance no road vouches for",
+    );
+    for held in &lint.unsourced_edges {
+        under(
+            &mut out,
+            format!(
+                "{} → {} ({} · {})",
+                held.from,
+                held.to,
+                held.kind
+                    .map_or("?", zerocode_core::second_brain_graph::EdgeKind::as_str),
+                held.provenance.map_or(
+                    "?",
+                    zerocode_core::second_brain_graph::EdgeProvenance::as_str
+                ),
+            ),
+        );
     }
     row(
         &mut out,

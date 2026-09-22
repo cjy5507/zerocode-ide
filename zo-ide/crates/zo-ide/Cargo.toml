@@ -49,6 +49,10 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 shlex = "1"
 tempfile.workspace = true
 url = "2"
+# `zo vault path` is the window's own path calculator, called from a pane
+# (t-5966 G3): the graph scanner and the walk live in zerocode-core, which
+# `runtime` already links for the vault's protocol constants.
+zerocode-core = { path = "../../../crates/zerocode-core" }
 
 [lints]
 workspace = true
@@ -69,7 +73,6 @@ tempfile.workspace = true
 zerocode-harness = { path = "../../../crates/zerocode-harness" }
 # A `/goal --check screen:…` gate line is pinned to the window's own CLI
 # grammar — the one `zerocode-computer` parses.
-zerocode-core = { path = "../../../crates/zerocode-core" }
 
 [target.'cfg(unix)'.dev-dependencies]
 # The e2e driver owns a 120x40 PTY. `openpty` is the same nix API already used

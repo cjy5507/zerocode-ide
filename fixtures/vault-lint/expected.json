@@ -33,6 +33,7 @@
   "unlogged_raw": [
     "raw/unlogged.md"
   ],
+  "unsourced_edges": [],
   "contradictions": 1,
   "superseded": [
     "wiki/old-note.md"
@@ -45,6 +46,7 @@
     "missing_frontmatter": 1,
     "undeclared_relations": 1,
     "unlogged_raw": 1,
+    "unsourced_edges": 0,
     "contradictions": 1,
     "superseded": 1,
     "merge_candidates": 0

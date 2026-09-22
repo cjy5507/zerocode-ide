@@ -965,10 +965,10 @@ ok(
     brainOpen.overview.tags === 2 &&
     brainOpen.overview.kinds >= 2 &&
     brainOpen.overview.recent === 5 &&
-    // 카파시의 lint 여덟 줄과 라이브 층의 셋(t-2931) — 열한 줄, 수는 픽스처가
-    // 지은 `graph.lint.counts`의 것(라이브 층이 없는 답에서 셋은 0)이고 창은
-    // 하나도 세지 않는다.
-    brainOpen.overview.health.length === 11 &&
+    // 카파시의 lint 여덟 줄, 근거 없는 간선 한 줄(t-5966), 라이브 층의 셋(t-2931) —
+    // 열두 줄, 수는 픽스처가 지은 `graph.lint.counts`의 것(라이브 층이 없는 답에서
+    // 셋은 0)이고 창은 하나도 세지 않는다.
+    brainOpen.overview.health.length === 12 &&
     JSON.stringify(brainOpen.overview.health) === JSON.stringify(brainOpen.overview.healthExpected) &&
     brainOpen.overview.health.includes("orphans=1") &&
     brainOpen.overview.orphanTile === "1" &&
@@ -976,7 +976,7 @@ ok(
     brainOpen.overview.health.includes("index_gaps=12") &&
     brainOpen.overview.health.includes("contradictions=1") &&
     brainOpen.overview.health.includes("superseded=1") &&
-    JSON.stringify(brainOpen.overview.healthDoorless) === JSON.stringify(["unlogged_raw"]) &&
+    JSON.stringify(brainOpen.overview.healthDoorless) === JSON.stringify(["unlogged_raw", "unsourced_edges"]) &&
     brainOpen.overview.health.includes("recalledToday=0") &&
     brainOpen.overview.health.includes("neverRecalled=0") &&
     brainOpen.overview.health.includes("merge=0") &&
@@ -1105,6 +1105,9 @@ const brainFixture = await page.evaluate(async (lint) => {
     // are painted `is-clean` at zero by design — the fixture vault has no
     // recall trace — so only the lint rows count as "clean" here. Without
     // this filter the test had been red since t-2931 unit 3 added them.
+    // The one lint row that is clean on purpose is `unsourced_edges`
+    // (t-5966): zero on any scanned vault by construction, and the fixture
+    // holds no line the scanner did not write.
     clean: [...panel.querySelectorAll(".knowledge-health-row.is-clean")]
       .map((row) => row.dataset.knowledgeLint)
       .filter((lint) => !KNOWLEDGE_HEALTH_ROWS.find((row) => row.lint === lint)?.live),
@@ -1115,9 +1118,10 @@ ok(
   JSON.stringify(brainFixture.health) === JSON.stringify(brainFixture.expected) &&
     brainFixture.health.includes("index_gaps=2") &&
     brainFixture.health.includes("unlogged_raw=1") &&
+    brainFixture.health.includes("unsourced_edges=0") &&
     brainFixture.orphanTile === "1" &&
     brainFixture.ghostTile === "1" &&
-    brainFixture.clean.length === 0,
+    JSON.stringify(brainFixture.clean) === JSON.stringify(["unsourced_edges"]),
   JSON.stringify(brainFixture),
 );
 
@@ -1660,29 +1664,52 @@ ok(
 );
 console.log(`   slicer worst drag gap at 1020 nodes: ${slicerScale.worstDragGap}ms`);
 
-// Test 11: Shortest path (Shift-click, undirected BFS preferring typed edges, chain A → … → B untranslated, Esc clears, < 1ms)
+// Test 11: Paths (t-5966 G3). The calculator is the backend's (`second_brain_paths`); Shift-click asks it with
+// the two page keys and the vault, the answer's first path (fewest bare mentions at the shortest length) lights
+// the picture, the card lists every path with its hops' kind and road, picking another re-lights, Esc clears,
+// the ask form reaches the same door by a typed name — and putting an answer onto the 1020-page picture
+// (route + highlight + frame) stays inside the frame budget.
 const pathTest = await page.evaluate(async () => {
-  // Test BFS performance on 1020 nodes first. The function is pure, so its
-  // cost is the least of a few runs: one run is a sample of the machine's
-  // load as much as of the search, and a gate on that lone sample went red
-  // at 1.1 ms in four release lanes while the same search answered in 0.5.
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
   const view1020 = document.querySelector(".knowledge-view:not([hidden])");
   const layout1020 = knowledgeLayouts.get(view1020);
-  let bfs1020Ms = Infinity;
-  if (typeof findKnowledgeShortestPath === "function") {
-    for (let run = 0; run < 5; run += 1) {
-      const t0 = performance.now();
-      findKnowledgeShortestPath(layout1020.model, 0, 500);
-      bfs1020Ms = Math.min(bfs1020Ms, performance.now() - t0);
-    }
+  const keys1020 = layout1020.model.keys;
+  /* 픽스처의 천 쪽은 가까운 뒤 쪽으로만 잇는다(`nearest`) — 여섯 홉 안에 닿는 짝을 묻는다. */
+  const answer1020 = await window.__ANSWER__.second_brain_paths({ from: keys1020[0], to: keys1020[12] });
+  /* 경로가 프레임에 더하는 값: 같은 판의 맨 프레임(경로 없음)과 경로를 밝힌 프레임을 번갈아 재고
+   * 둘의 최솟값의 차를 본다 — 한 프레임 전체는 기계와 부하의 것이고, 경로의 몫은 그 차다. */
+  let routeMs = Infinity;
+  let frameMs = Infinity;
+  let markMs = Infinity;
+  let lightMs = Infinity;
+  for (let run = 0; run < 5; run += 1) {
+    highlightKnowledgePath(view1020, layout1020, null);
+    const b0 = performance.now();
+    paintKnowledgeFrame(view1020, layout1020);
+    frameMs = Math.min(frameMs, performance.now() - b0);
+    const t0 = performance.now();
+    const route = knowledgeRoute(layout1020.model, { report: answer1020, picked: 0 });
+    const t1 = performance.now();
+    highlightKnowledgePath(view1020, layout1020, route);
+    const t2 = performance.now();
+    paintKnowledgeFrame(view1020, layout1020);
+    const t3 = performance.now();
+    routeMs = Math.min(routeMs, t1 - t0);
+    markMs = Math.min(markMs, t2 - t1);
+    lightMs = Math.min(lightMs, t3 - t1);
   }
+  highlightKnowledgePath(view1020, layout1020, null);
+  paintKnowledgeFrame(view1020, layout1020);
+  const paths1020 = answer1020.paths.length;
 
   // Setup custom graph with 6 pages:
-  // Node 0 -> Node 1 (mentions), Node 1 -> Node 3 (mentions)  [mentions path: 0 -> 1 -> 3]
+  // Node 0 -> Node 1 (mentions), Node 1 -> Node 3 (mentions)  [bare path: 0 -> 1 -> 3]
   // Node 0 -> Node 2 (depends_on), Node 2 -> Node 3 (implements)  [typed path: 0 -> 2 -> 3]
-  // Node 4 (isolated), Node 5 (mentions to 4)
+  // Node 4 -> Node 5 (mentions), apart from the rest
   knowledgeSelectedKey = null;
   knowledgeSlicerCutoff = 0;
+  knowledgeProvenanceHidden.clear();
+  window.__PATHS_ASKED__ = [];
   window.__VAULT__ = {
     pages: 6,
     customEdges: [
@@ -1695,34 +1722,38 @@ const pathTest = await page.evaluate(async () => {
   };
   dropTab("knowledge");
   document.getElementById("nav-knowledge").click();
-  await new Promise((done) => setTimeout(done, 300));
+  await wait(300);
 
   const view = document.querySelector(".knowledge-view:not([hidden])");
   const canvas = view.querySelector(".knowledge-canvas");
   const nodes = [...view.querySelectorAll(".knowledge-node")];
+  const shown = () => ({
+    lit: [...view.querySelectorAll(".knowledge-node.is-path-lit")].map((n) => n.dataset.graphKey).sort(),
+    /* 물러선 점은 판의 규칙이 흐린다 — 클래스가 아니라 계산된 불투명도로 센다. */
+    dim: [...view.querySelectorAll(".knowledge-node")]
+      .filter((one) => Number(getComputedStyle(one).opacity) < 1).length,
+    edges: view.querySelectorAll(".knowledge-edge.is-path-lit").length,
+    chain: view.querySelector(".knowledge-chain-body")?.textContent ?? "",
+    roads: [...view.querySelectorAll(".knowledge-chain-road")].map((one) => one.dataset.edgeProvenance),
+    list: [...view.querySelectorAll(".knowledge-path-pick")].map((one) => `${one.textContent}|${one.getAttribute("aria-pressed")}`),
+    note: view.querySelector(".knowledge-path-note")?.textContent ?? "",
+    sectionHidden: view.querySelector(".knowledge-inspector-chain")?.hidden ?? true,
+    pathed: view.querySelector(".knowledge-picture").classList.contains("is-path"),
+  });
 
   // 1. Select Node 0
   nodes[0]?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-  await new Promise((done) => setTimeout(done, 50));
+  await wait(50);
   const node0Selected = nodes[0]?.classList.contains("is-selected") ?? false;
   // Focus depth 1 (the default a person starts at): node 3 is two hops from node 0.
   view.querySelector('[data-knowledge-depth="1"]')?.click();
-  await new Promise((done) => setTimeout(done, 50));
+  await wait(50);
 
-  // 2. Shift-click Node 3
+  // 2. Shift-click Node 3 — the backend is asked once with both keys, the vault and the sources flag.
   nodes[3]?.dispatchEvent(new MouseEvent("click", { bubbles: true, shiftKey: true }));
-  await new Promise((done) => setTimeout(done, 50));
-
-  const picture = view.querySelector(".knowledge-picture");
-  const isPathActive = picture?.classList.contains("is-path") ?? false;
-  const pathLitNodes = [...view.querySelectorAll(".knowledge-node.is-path-lit")]
-    .map((n) => n.dataset.graphKey).sort();
-  const pathDimNodes = view.querySelectorAll(".knowledge-node.is-path-dim").length;
-  const pathLitEdges = view.querySelectorAll(".knowledge-edge.is-path-lit").length;
-
-  const chainEl = view.querySelector(".knowledge-inspector-chain");
-  const chainText = chainEl?.textContent ?? "";
-  const chainVisible = chainEl && !chainEl.hidden;
+  await wait(80);
+  const asked = window.__PATHS_ASKED__.map((one) => ({ ...one }));
+  const first = shown();
 
   /* 경로는 다음 프레임에도 보여야 한다(K19·K22): 배율 단추 하나가 프레임을 다시
    * 그린 뒤, 경로 밖의 선은 흐림의 불투명도이고 경로의 선은 밝힘의 잉크다.
@@ -1739,6 +1770,7 @@ const pathTest = await page.evaluate(async () => {
   for (const at of [0, 2, 3]) pathNodeOpacity.push(Number((await settledStyle(nodes[at])).opacity));
   view.querySelector(".knowledge-zoom-in").click();
   await new Promise((done) => requestAnimationFrame(done));
+  const picture = view.querySelector(".knowledge-picture");
   // Two pages can carry both mentions and a typed relation: each has its own line.
   const edgeLine = (from, to, kind) => view
     .querySelector(`.knowledge-edges > g[data-graph-edge="wiki/Page-000${from}.md>wiki/Page-000${to}.md>${kind}"] path`);
@@ -1751,67 +1783,98 @@ const pathTest = await page.evaluate(async () => {
   const onPathStroke = (await settledStyle(edgeLine(0, 2, "depends_on"))).stroke;
   const dimEdgeOpacity = Number(getComputedStyle(view).getPropertyValue("--knowledge-dim-edge-opacity"));
 
-  // Esc clears path
-  canvas.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-  await new Promise((done) => setTimeout(done, 50));
+  // 3. Pick the second path in the list — the bare one lights, the answer is not asked again.
+  view.querySelectorAll(".knowledge-path-pick")[1]?.click();
+  await wait(50);
+  const second = shown();
+  const askedAfterPick = window.__PATHS_ASKED__.length;
 
-  const pathClearedAfterEsc = !picture?.classList.contains("is-path")
-    && view.querySelectorAll(".knowledge-node.is-path-lit").length === 0
-    && (chainEl?.hidden ?? true);
+  // 4. Esc clears the path and keeps the selection.
+  canvas.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await wait(50);
+  const cleared = shown();
   const node0StillSelected = nodes[0]?.classList.contains("is-selected") ?? false;
 
-  // Esc again deselects node
+  // 5. The ask form reaches the same door with a typed name; the backend resolves it.
+  const ask = view.querySelector(".knowledge-path-ask");
+  ask.querySelector(".knowledge-path-to").value = "개념 3";
+  ask.requestSubmit();
+  await wait(80);
+  const askedByName = window.__PATHS_ASKED__.at(-1);
+  const byName = { ...shown(), targetKey: knowledgePath?.targetKey ?? null };
+
+  // 6. A name nothing answers to is said in the backend's own sentence, and nothing lights.
+  ask.querySelector(".knowledge-path-to").value = "없는 페이지";
+  ask.requestSubmit();
+  await wait(80);
+  const refused = shown();
+
   canvas.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
-  await new Promise((done) => setTimeout(done, 50));
+  await wait(30);
+  canvas.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+  await wait(50);
   const node0Deselected = !(nodes[0]?.classList.contains("is-selected") ?? false);
 
   return {
-    bfs1020Ms: Math.round(bfs1020Ms * 100) / 100,
+    routeMs: Math.round(routeMs * 100) / 100,
+    frameMs: Math.round(frameMs * 100) / 100,
+    markMs: Math.round(markMs * 100) / 100,
+    lightMs: Math.round(lightMs * 100) / 100,
+    paths1020,
     node0Selected,
-    isPathActive,
-    pathLitNodes,
-    pathDimNodes,
-    pathLitEdges,
-    chainVisible,
-    chainText,
+    asked,
+    first,
     pathNodeOpacity,
     offPathOpacity,
     dimEdgeOpacity,
     onPathStroke,
     highlightInk,
-    pathClearedAfterEsc,
+    second,
+    askedAfterPick,
+    cleared,
     node0StillSelected,
+    askedByName,
+    byName,
+    refused,
     node0Deselected,
   };
 });
 
 ok(
-  "shortest path: Shift-click runs undirected BFS preferring typed edges, shows untranslated chain, and Esc clears",
-  pathTest.node0Selected &&
-    pathTest.isPathActive &&
-    pathTest.pathLitNodes.length === 3 &&
-    pathTest.pathLitNodes.includes("wiki/Page-0000.md") &&
-    pathTest.pathLitNodes.includes("wiki/Page-0002.md") &&
-    pathTest.pathLitNodes.includes("wiki/Page-0003.md") &&
-    !pathTest.pathLitNodes.includes("wiki/Page-0001.md") &&
-    pathTest.pathDimNodes > 0 &&
-    pathTest.pathLitEdges === 2 &&
-    pathTest.chainVisible &&
-    pathTest.chainText.includes("depends_on") &&
-    pathTest.chainText.includes("implements") &&
-    !pathTest.chainText.includes("mentions") &&
-    pathTest.pathNodeOpacity.length === 3 &&
-    pathTest.pathNodeOpacity.every((opacity) => opacity === 1) &&
-    Math.abs(pathTest.offPathOpacity - pathTest.dimEdgeOpacity) < 0.01 &&
-    pathTest.highlightInk !== "" &&
-    pathTest.onPathStroke === pathTest.highlightInk &&
-    pathTest.pathClearedAfterEsc &&
-    pathTest.node0StillSelected &&
-    pathTest.node0Deselected &&
-    pathTest.bfs1020Ms < 1.0,
+  "paths: Shift-click asks the backend's one calculator, its first path lights the picture, the card lists every path with kind and road, picking re-lights, the ask form resolves a name, a refusal is said, and Esc clears",
+  pathTest.node0Selected
+    && pathTest.asked.length === 1
+    && pathTest.asked[0].from === "wiki/Page-0000.md" && pathTest.asked[0].to === "wiki/Page-0003.md"
+    && pathTest.asked[0].path === "/vault" && pathTest.asked[0].sources === false && pathTest.asked[0].k === undefined
+    && pathTest.first.pathed && !pathTest.first.sectionHidden
+    && JSON.stringify(pathTest.first.lit) === JSON.stringify(["wiki/Page-0000.md", "wiki/Page-0002.md", "wiki/Page-0003.md"])
+    && pathTest.first.dim > 0 && pathTest.first.edges === 2
+    && pathTest.first.chain === "개념 0 → depends_on·선언 → 개념 2 → implements·선언 → 개념 3"
+    && JSON.stringify(pathTest.first.roads) === JSON.stringify(["declared", "declared"])
+    && JSON.stringify(pathTest.first.list) === JSON.stringify(["1. 2홉 · depends_on · implements|true", "2. 2홉 · mentions · mentions|false"])
+    && pathTest.first.note === "경로 2 · 최단 2홉"
+    && pathTest.pathNodeOpacity.length === 3 && pathTest.pathNodeOpacity.every((opacity) => opacity === 1)
+    && Math.abs(pathTest.offPathOpacity - pathTest.dimEdgeOpacity) < 0.01
+    && pathTest.highlightInk !== "" && pathTest.onPathStroke === pathTest.highlightInk
+    && JSON.stringify(pathTest.second.lit) === JSON.stringify(["wiki/Page-0000.md", "wiki/Page-0001.md", "wiki/Page-0003.md"])
+    && pathTest.second.chain === "개념 0 → mentions·추론 → 개념 1 → mentions·추론 → 개념 3"
+    && JSON.stringify(pathTest.second.list) === JSON.stringify(["1. 2홉 · depends_on · implements|false", "2. 2홉 · mentions · mentions|true"])
+    && pathTest.askedAfterPick === 1
+    && !pathTest.cleared.pathed && pathTest.cleared.lit.length === 0 && pathTest.cleared.sectionHidden
+    && pathTest.node0StillSelected
+    && pathTest.askedByName.to === "개념 3" && pathTest.askedByName.from === "wiki/Page-0000.md"
+    && pathTest.byName.targetKey === "wiki/Page-0003.md" && pathTest.byName.pathed && pathTest.byName.edges === 2
+    && !pathTest.refused.pathed && pathTest.refused.lit.length === 0 && !pathTest.refused.sectionHidden
+    && pathTest.refused.note.includes("없는 페이지") && pathTest.refused.list.length === 0
+    && pathTest.node0Deselected
+    /* 경로를 밝힌 프레임은 이 판의 최악 프레임 예산(`12 * 8`, 천 쪽의 앉는 프레임과 같은 자) 안이다.
+     * 판의 `is-path` 한 클래스가 점·선 전부의 옷을 바꾸므로 그 프레임은 스타일 재계산을 강제로
+     * 치른다 — 실측: 점·선마다 흐림 클래스를 쓰던 판 102 ms → 판의 규칙으로 79 ms(09-22). */
+    && pathTest.paths1020 > 0 && pathTest.routeMs < 2 && pathTest.lightMs < 12 * 8,
   JSON.stringify(pathTest),
 );
-console.log(`   shortest path 1020 nodes BFS time: ${pathTest.bfs1020Ms}ms`);
+console.log(`METRIC knowledge path onto 1020 nodes: route ${pathTest.routeMs}ms; bare frame ${pathTest.frameMs}ms; `
+  + `mark ${pathTest.markMs}ms; mark+frame ${pathTest.lightMs}ms; paths ${pathTest.paths1020}`);
 
 /* Test 11b: 경로는 두 페이지의 열쇠로 든다(K21). 렌즈 하나가 점들을 새 자리에 앉히면
  * 옛 자리 번호는 다른 페이지를 가리킨다 — 그때 밝는 것은 엉뚱한 점이고 인스펙터의
@@ -1830,6 +1893,8 @@ const pathKeyed = await page.evaluate(async () => {
     chain: view.querySelector(".knowledge-inspector-chain")?.hidden
       ? null
       : view.querySelector(".knowledge-chain-body")?.textContent ?? null,
+    /* 답은 남고 그림만 없는 판(t-5966): 요약 줄이 그렇다고 말한다. */
+    note: view.querySelector(".knowledge-path-note")?.textContent ?? "",
     path: picture.classList.contains("is-path"),
   });
   nodeOf(0).dispatchEvent(new MouseEvent("click", { bubbles: true }));
@@ -1858,18 +1923,160 @@ const pathKeyed = await page.evaluate(async () => {
 {
   const route = ["wiki/Page-0000.md", "wiki/Page-0002.md", "wiki/Page-0003.md"];
   const edges = ["wiki/Page-0000.md>wiki/Page-0002.md>depends_on", "wiki/Page-0002.md>wiki/Page-0003.md>implements"];
-  const chain = "개념 0 → depends_on → 개념 2 → implements → 개념 3";
+  const chain = "개념 0 → depends_on·선언 → 개념 2 → implements·선언 → 개념 3";
   const same = (seen) => seen.path
     && JSON.stringify(seen.lit) === JSON.stringify(route)
     && JSON.stringify(seen.edges) === JSON.stringify(edges)
-    && seen.chain === chain;
+    && seen.chain === chain && !seen.note.includes("이 그림에는 없는 경로");
+  /* 끝점이 렌즈에서 빠지면 그림에는 길이 없고(밝힌 점·선 없음), 답의 사슬은 카드에 남아
+   * 「이 그림에는 없는 경로」라고 말한다 — 열쇠가 돌아오면 그림도 돌아온다(K21). */
   ok("a shown path is held by its two pages and found again when a lens re-seats the picture",
     same(pathKeyed.before)
       && same(pathKeyed.typed)
-      && !pathKeyed.orphans.path && pathKeyed.orphans.lit.length === 0 && pathKeyed.orphans.chain === null
+      && !pathKeyed.orphans.path && pathKeyed.orphans.lit.length === 0
+      && pathKeyed.orphans.chain === chain && pathKeyed.orphans.note.includes("이 그림에는 없는 경로")
       && same(pathKeyed.back),
     JSON.stringify(pathKeyed));
 }
+
+/* Test 11d(t-5966 G1): 선의 근거. 백엔드가 선마다 `provenance`를 적어 보내고, 창은 그것을
+ * 읽기만 한다 — 렌즈의 세 토글(기본 전부 켜짐)은 그 길의 선을 그림에서 빼고 점은 남긴다;
+ * 범례에 세 줄이 서고; 고른 점의 관계 줄마다 근거의 칩이 서며; 밝은 선의 낱말은 관계와
+ * 근거를 <title>로 든다. 건강 카드의 「근거 없는 간선」은 백엔드 표의 0을 그대로 읽는다. */
+const provenanceLens = await page.evaluate(async () => {
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  knowledgeSelectedKey = null;
+  knowledgeQuery = "";
+  knowledgeProvenanceHidden.clear();
+  window.__VAULT__ = {
+    pages: 5,
+    customEdges: [
+      { from: 0, to: 1, kind: "mentions" },
+      { from: 0, to: 2, kind: "depends_on" },
+      { from: 2, to: 3, kind: "implements" },
+      { from: 3, to: 4, kind: "mentions" },
+    ],
+  };
+  dropTab("knowledge");
+  document.getElementById("nav-knowledge").click();
+  await wait(300);
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  const edgesOf = () => [...view.querySelectorAll(".knowledge-edges .knowledge-edge")];
+  const roadsOf = () => edgesOf().map((line) => ["measured", "declared", "inferred"]
+    .find((road) => line.classList.contains(`is-${road}`)) ?? "none").sort();
+  const nodesOf = () => view.querySelectorAll(".knowledge-node").length;
+  const flags = [...view.querySelectorAll("[data-knowledge-provenance]")]
+    .map((one) => [one.dataset.knowledgeProvenance, one.getAttribute("aria-pressed")]);
+  const legend = [...view.querySelectorAll(".knowledge-legend [data-edge-provenance]")]
+    .map((one) => one.dataset.edgeProvenance);
+  const before = { edges: edgesOf().length, roads: roadsOf(), nodes: nodesOf() };
+  /* 「추론」을 끄면 본문 링크의 두 선이 빠지고 점 다섯은 그대로다. */
+  view.querySelector('[data-knowledge-provenance="inferred"]').click();
+  await wait(80);
+  const inferredOff = { edges: edgesOf().length, roads: roadsOf(), nodes: nodesOf(),
+    pressed: view.querySelector('[data-knowledge-provenance="inferred"]').getAttribute("aria-pressed") };
+  view.querySelector('[data-knowledge-provenance="inferred"]').click();
+  await wait(80);
+  const back = { edges: edgesOf().length, roads: roadsOf() };
+  /* 고른 점의 관계 줄: 나가는 둘(본문·키)에 근거의 칩이 각각 선다. */
+  selectKnowledgeNode(view, "wiki/Page-0000.md");
+  await wait(60);
+  const chips = [...view.querySelectorAll(".knowledge-relations-outgoing .knowledge-relation-provenance")]
+    .map((one) => one.dataset.edgeProvenance).sort();
+  /* 밝은 선의 낱말은 관계와 근거를 툴팁으로 든다(방향 있는 관계에만 낱말이 선다). */
+  litKnowledge(view, knowledgeLayouts.get(view), "wiki/Page-0000.md");
+  await wait(30);
+  const titles = [...view.querySelectorAll(".knowledge-edge-label title")].map((one) => one.textContent);
+  litKnowledge(view, knowledgeLayouts.get(view), null);
+  selectKnowledgeNode(view, null);
+  const health = view.querySelector('.knowledge-health-row[data-knowledge-lint="unsourced_edges"]');
+  const overview = [...view.querySelectorAll(".knowledge-overview-provenances li")]
+    .map((one) => `${one.querySelector(".knowledge-relation-word").dataset.edgeProvenance}=${one.querySelector(".knowledge-inspector-note").textContent}`);
+  return { flags, legend, before, inferredOff, back, chips, titles,
+    health: health ? { note: health.querySelector(".knowledge-inspector-note").textContent,
+      disabled: health.querySelector("button").disabled } : null,
+    overview };
+});
+ok("provenance: three toggles default on, a hidden road drops its lines and keeps the points, the legend, the card chips and the label tooltip read the answer's road",
+  JSON.stringify(provenanceLens.flags) === JSON.stringify([["measured", "true"], ["declared", "true"], ["inferred", "true"]])
+    && JSON.stringify(provenanceLens.legend) === JSON.stringify(["measured", "declared", "inferred"])
+    && provenanceLens.before.edges === 4
+    && JSON.stringify(provenanceLens.before.roads) === JSON.stringify(["declared", "declared", "inferred", "inferred"])
+    && provenanceLens.inferredOff.edges === 2
+    && JSON.stringify(provenanceLens.inferredOff.roads) === JSON.stringify(["declared", "declared"])
+    && provenanceLens.inferredOff.nodes === provenanceLens.before.nodes
+    && provenanceLens.inferredOff.pressed === "false"
+    && provenanceLens.back.edges === 4
+    && JSON.stringify(provenanceLens.chips) === JSON.stringify(["declared", "inferred"])
+    && provenanceLens.titles.length === 1 && provenanceLens.titles[0].startsWith("depends_on · ")
+    && provenanceLens.health?.note === "0" && provenanceLens.health?.disabled === true
+    && JSON.stringify(provenanceLens.overview) === JSON.stringify(["measured=0", "declared=2", "inferred=2"]),
+  JSON.stringify(provenanceLens));
+
+/* Test 11e(t-5966 G4): HTML로 내보내기. 단추 하나가 지금 렌즈의 부분그래프 — 점의 자리·쉬는 옷·
+ * 선의 관계·근거·잉크 — 를 백엔드의 한 문(`second_brain_export_html`)에 건네고, 영수증을 토스트로
+ * 말한다. 「타입 관계만」이 켜진 판에서는 그 렌즈가 남긴 점과 선만 실린다. */
+const exportTest = await page.evaluate(async () => {
+  const wait = (ms) => new Promise((done) => setTimeout(done, ms));
+  knowledgeSelectedKey = null;
+  knowledgeQuery = "";
+  knowledgeProvenanceHidden.clear();
+  window.__EXPORTS__ = [];
+  window.__VAULT__ = {
+    pages: 5,
+    customEdges: [
+      { from: 0, to: 1, kind: "mentions" },
+      { from: 0, to: 2, kind: "depends_on" },
+      { from: 2, to: 3, kind: "implements" },
+      { from: 3, to: 4, kind: "mentions" },
+    ],
+  };
+  dropTab("knowledge");
+  document.getElementById("nav-knowledge").click();
+  await wait(300);
+  const view = document.querySelector(".knowledge-view:not([hidden])");
+  view.querySelector(".knowledge-export").click();
+  await wait(80);
+  const whole = window.__EXPORTS__[0]?.input ?? null;
+  const toastWhole = document.querySelector(".toast")?.textContent ?? "";
+  view.querySelector('[data-knowledge-flag="typed"]').click();
+  await wait(80);
+  view.querySelector(".knowledge-export").click();
+  await wait(80);
+  const typed = window.__EXPORTS__[1]?.input ?? null;
+  view.querySelector('[data-knowledge-flag="typed"]').click();
+  await wait(50);
+  const rgba = (word) => /^rgba\(\d+, \d+, \d+, [\d.]+\)$/.test(word);
+  const colour = (word) => /^rgba?\(/.test(word);
+  return {
+    asked: window.__EXPORTS__.length,
+    whole: whole === null ? null : {
+      title: whole.title, vault: whole.vault, lenses: whole.lenses, nodes: whole.nodes.length, edges: whole.edges.length,
+      theme: Object.values(whole.theme).every(colour),
+      nodeInks: whole.nodes.every((node) => rgba(node.fill) && rgba(node.stroke) && node.r > 0 && typeof node.x === "number"),
+      edgeInks: whole.edges.every((edge) => rgba(edge.ink) && ["measured", "declared", "inferred"].includes(edge.provenance)),
+      directed: whole.edges.filter((edge) => edge.directed).map((edge) => edge.kind).sort(),
+      legend: whole.legend.map((row) => row.kind).sort(),
+      exportedAt: whole.exported_at,
+    },
+    typed: typed === null ? null : { nodes: typed.nodes.length, edges: typed.edges.length, lenses: typed.lenses,
+      kinds: typed.edges.map((edge) => edge.kind).sort() },
+    toastWhole,
+  };
+});
+ok("export: the button hands the lens's picture — settled points in their computed inks, every line with kind, road and ink — to the one backend door and says the receipt; a lens narrows what is handed over",
+  exportTest.asked === 2 && exportTest.whole !== null && exportTest.typed !== null
+    && exportTest.whole.vault === "/vault" && exportTest.whole.title.includes("vault")
+    && exportTest.whole.nodes === 5 && exportTest.whole.edges === 4
+    && exportTest.whole.theme && exportTest.whole.nodeInks && exportTest.whole.edgeInks
+    && JSON.stringify(exportTest.whole.directed) === JSON.stringify(["depends_on", "implements"])
+    && JSON.stringify(exportTest.whole.legend) === JSON.stringify(["depends_on", "implements", "mentions"])
+    && /^\d{4}-\d{2}-\d{2}T/.test(exportTest.whole.exportedAt)
+    && exportTest.toastWhole.includes("KB") && exportTest.toastWhole.includes("5")
+    && exportTest.typed.nodes === 3 && exportTest.typed.edges === 2
+    && JSON.stringify(exportTest.typed.kinds) === JSON.stringify(["depends_on", "implements"])
+    && exportTest.typed.lenses.some((word) => word.includes("타입")),
+  JSON.stringify(exportTest));
 
 /* Test 11c: 시간 슬라이서의 프리셋은 벽시계의 창이다(K24) — 「24시간」은 지금에서
  * 24시간 안에 고쳐지거나 회상된 페이지를 남긴다. 볼트의 시간 폭에 대한 백분율로
@@ -3211,6 +3418,8 @@ const panel = await page.evaluate(async () => {
     dir: row.querySelector(".knowledge-relation-dir")?.textContent ?? "",
     note: row.querySelector(".knowledge-inspector-note")?.textContent ?? "",
     why: row.querySelector(".knowledge-relation-why")?.textContent ?? "",
+    /* 근거의 칩(t-5966) — 뜻 뒤에 누가 썼는가. */
+    road: row.querySelector(".knowledge-relation-provenance")?.textContent ?? "",
     kindWord: row.querySelector(".knowledge-inspector-note")?.firstChild?.textContent ?? "",
   }));
   const chosen = {
@@ -3256,11 +3465,11 @@ ok("t-4140 S4: the inspector is two tabs — the page (overview or the card with
     // 낱말 칸은 관계 키 그대로 시작하고(번역 금지 — 볼트에 적힌 키다) 그 뒤에
     // 그 키의 뜻이 쉬운 말로 붙는다(09-16): 「왜 연결됐는지」에 답하는 한 마디.
     && panel.chosen.outgoing.every((row) => /\bkind-[a-z_]+\b/.test(row.mark) && row.dir === "→"
-      && /^[a-z_?]+/.test(row.note) && row.why.length > 0
-      && row.note === `${row.kindWord}${row.why}`)
+      && /^[a-z_?]+/.test(row.note) && row.why.length > 0 && row.road.length > 0
+      && row.note === `${row.kindWord}${row.why}${row.road}`)
     && panel.chosen.incoming.every((row) => /\bkind-[a-z_]+\b/.test(row.mark) && row.dir === "←"
-      && /^[a-z_?]+/.test(row.note) && row.why.length > 0
-      && row.note === `${row.kindWord}${row.why}`)
+      && /^[a-z_?]+/.test(row.note) && row.why.length > 0 && row.road.length > 0
+      && row.note === `${row.kindWord}${row.why}${row.road}`)
     && panel.kept.tabs === "page:false,activity:true" && panel.kept.activityHidden === false,
   JSON.stringify(panel));
 

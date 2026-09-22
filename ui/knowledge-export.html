@@ -1,0 +1,256 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title><!--__KNOWLEDGE_EXPORT_TITLE__--></title>
+<!-- 지식 그래프 내보내기(t-5966 G4): 창이 보던 부분그래프 하나를 자급자족 HTML로. 바깥에서
+     아무것도 싣지 않는다 — 글꼴도 스크립트도 스타일도 이 파일 안이고, 색은 내보낸 순간 창의
+     팔레트가 계산한 값이다. `DATA`는 Rust(`second_brain_export::render`)가 채운다. -->
+<style>
+  :root { color-scheme: light dark; }
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: grid; grid-template-rows: auto 1fr; overflow: hidden;
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline;
+    padding: 8px 12px; border-bottom: 1px solid var(--rule);
+  }
+  header h1 { font-size: 15px; margin: 0; }
+  header .meta { opacity: 0.75; font-size: 12px; }
+  header label { display: inline-flex; gap: 4px; align-items: center; font-size: 12px; cursor: pointer; }
+  header .swatch { display: inline-block; width: 22px; height: 0; border-top: 2px solid currentColor; vertical-align: middle; }
+  main { position: relative; overflow: hidden; }
+  canvas { display: block; width: 100%; height: 100%; cursor: grab; }
+  canvas.is-dragging { cursor: grabbing; }
+  #tip {
+    position: absolute; pointer-events: none; max-width: 320px; padding: 6px 8px;
+    border: 1px solid var(--rule); border-radius: 6px; font-size: 12px; white-space: pre-line;
+  }
+  #tip[hidden] { display: none; }
+  footer { position: absolute; right: 10px; bottom: 8px; font-size: 11px; opacity: 0.7; pointer-events: none; }
+</style>
+</head>
+<body>
+<header id="head"></header>
+<main>
+  <canvas id="picture"></canvas>
+  <div id="tip" hidden></div>
+  <footer id="foot"></footer>
+</main>
+<script>
+"use strict";
+const DATA = /*__KNOWLEDGE_EXPORT_DATA__*/null;
+(() => {
+  if (DATA === null) return;
+  const theme = DATA.theme;
+  document.documentElement.style.setProperty("--rule", theme.rule);
+  document.body.style.background = theme.ground;
+  document.body.style.color = theme.ink;
+  const tip = document.getElementById("tip");
+  tip.style.background = theme.ground;
+  tip.style.color = theme.ink;
+  const nodes = DATA.nodes;
+  const edges = DATA.edges;
+  const hidden = new Set();
+  const roads = DATA.provenances;
+  /* 머리: 제목·볼트·렌즈·수, 그리고 근거 필터 셋(창의 렌즈와 같은 뜻: 끄면 그 길의 선이 빠진다). */
+  const head = document.getElementById("head");
+  const h1 = document.createElement("h1");
+  h1.textContent = DATA.title;
+  const meta = document.createElement("span");
+  meta.className = "meta";
+  meta.textContent = `${DATA.vault} · ${nodes.length} nodes · ${edges.length} edges`
+    + (DATA.lenses.length > 0 ? ` · ${DATA.lenses.join(" · ")}` : "") + ` · ${DATA.exported_at}`;
+  head.append(h1, meta);
+  for (const road of roads) {
+    const label = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = true;
+    box.onchange = () => { if (box.checked) hidden.delete(road.provenance); else hidden.add(road.provenance); draw(); };
+    label.append(box, document.createTextNode(`${road.provenance} ${road.count}`));
+    head.appendChild(label);
+  }
+  for (const row of DATA.legend) {
+    const label = document.createElement("label");
+    const swatch = document.createElement("span");
+    swatch.className = "swatch";
+    swatch.style.color = row.ink;
+    swatch.style.borderTopStyle = row.dash > 0 ? "dashed" : "solid";
+    label.append(swatch, document.createTextNode(row.kind));
+    label.style.cursor = "default";
+    head.appendChild(label);
+  }
+  document.getElementById("foot").textContent = DATA.footer;
+
+  const canvas = document.getElementById("picture");
+  const ctx = canvas.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  let scale = 1;
+  let panX = 0;
+  let panY = 0;
+  let picked = -1;
+  const bounds = { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity };
+  for (const node of nodes) {
+    bounds.minX = Math.min(bounds.minX, node.x); bounds.maxX = Math.max(bounds.maxX, node.x);
+    bounds.minY = Math.min(bounds.minY, node.y); bounds.maxY = Math.max(bounds.maxY, node.y);
+  }
+  const adjacency = nodes.map(() => new Set());
+  edges.forEach((edge, at) => { adjacency[edge.from].add(at); adjacency[edge.to].add(at); });
+
+  function fit() {
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.round(rect.width * dpr);
+    canvas.height = Math.round(rect.height * dpr);
+    const spanX = Math.max(1, bounds.maxX - bounds.minX);
+    const spanY = Math.max(1, bounds.maxY - bounds.minY);
+    scale = 0.9 * Math.min(rect.width / spanX, rect.height / spanY);
+    panX = rect.width / 2 - ((bounds.minX + bounds.maxX) / 2) * scale;
+    panY = rect.height / 2 - ((bounds.minY + bounds.maxY) / 2) * scale;
+    draw();
+  }
+  const sx = (x) => x * scale + panX;
+  const sy = (y) => y * scale + panY;
+  const visible = (edge) => !hidden.has(edge.provenance);
+
+  function draw() {
+    const rect = canvas.getBoundingClientRect();
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    const lit = picked < 0 ? null : adjacency[picked];
+    for (let at = 0; at < edges.length; at += 1) {
+      const edge = edges[at];
+      if (!visible(edge)) continue;
+      const a = nodes[edge.from];
+      const b = nodes[edge.to];
+      ctx.globalAlpha = lit === null || lit.has(at) ? 1 : 0.15;
+      ctx.strokeStyle = edge.ink;
+      ctx.lineWidth = edge.width;
+      ctx.setLineDash(edge.dash > 0 ? [edge.dash * 2, edge.dash] : []);
+      const x1 = sx(a.x), y1 = sy(a.y), x2 = sx(b.x), y2 = sy(b.y);
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      if (edge.directed) {
+        const angle = Math.atan2(y2 - y1, x2 - x1);
+        const tipX = x2 - Math.cos(angle) * b.r;
+        const tipY = y2 - Math.sin(angle) * b.r;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        ctx.moveTo(tipX, tipY);
+        ctx.lineTo(tipX - 6 * Math.cos(angle - 0.4), tipY - 6 * Math.sin(angle - 0.4));
+        ctx.lineTo(tipX - 6 * Math.cos(angle + 0.4), tipY - 6 * Math.sin(angle + 0.4));
+        ctx.closePath();
+        ctx.fillStyle = edge.ink;
+        ctx.fill();
+      }
+    }
+    ctx.setLineDash([]);
+    for (let at = 0; at < nodes.length; at += 1) {
+      const node = nodes[at];
+      const near = lit === null || at === picked || [...lit].some((edge) => edges[edge].from === at || edges[edge].to === at);
+      ctx.globalAlpha = near ? 1 : 0.25;
+      ctx.beginPath();
+      ctx.arc(sx(node.x), sy(node.y), node.r, 0, Math.PI * 2);
+      ctx.fillStyle = node.fill;
+      ctx.fill();
+      ctx.lineWidth = at === picked ? node.stroke_px + 1.5 : node.stroke_px;
+      ctx.strokeStyle = at === picked ? theme.highlight : node.stroke;
+      if (node.dashed) ctx.setLineDash([2.5, 2.5]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = theme.ink;
+    ctx.font = "11px system-ui, sans-serif";
+    ctx.textAlign = "center";
+    const budget = scale > 1.6 ? nodes.length : DATA.label_budget;
+    const named = nodes.map((node, at) => [node, at]).filter(([node, at]) => at === picked || node.named)
+      .slice(0, budget);
+    for (const [node] of named) ctx.fillText(node.title, sx(node.x), sy(node.y) - node.r - 3);
+  }
+
+  function under(clientX, clientY) {
+    const rect = canvas.getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    let bestNode = -1;
+    let bestGap = Infinity;
+    for (let at = 0; at < nodes.length; at += 1) {
+      const gap = Math.hypot(sx(nodes[at].x) - px, sy(nodes[at].y) - py);
+      if (gap <= nodes[at].r + 3 && gap < bestGap) { bestGap = gap; bestNode = at; }
+    }
+    if (bestNode >= 0) return { node: bestNode };
+    let bestEdge = -1;
+    bestGap = 5;
+    for (let at = 0; at < edges.length; at += 1) {
+      const edge = edges[at];
+      if (!visible(edge)) continue;
+      const x1 = sx(nodes[edge.from].x), y1 = sy(nodes[edge.from].y), x2 = sx(nodes[edge.to].x), y2 = sy(nodes[edge.to].y);
+      const len2 = (x2 - x1) ** 2 + (y2 - y1) ** 2;
+      const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((px - x1) * (x2 - x1) + (py - y1) * (y2 - y1)) / len2));
+      const gap = Math.hypot(px - (x1 + t * (x2 - x1)), py - (y1 + t * (y2 - y1)));
+      if (gap < bestGap) { bestGap = gap; bestEdge = at; }
+    }
+    return bestEdge >= 0 ? { edge: bestEdge } : null;
+  }
+
+  let drag = null;
+  canvas.addEventListener("pointerdown", (event) => {
+    drag = { x: event.clientX, y: event.clientY, panX, panY, moved: false };
+    canvas.classList.add("is-dragging");
+    canvas.setPointerCapture(event.pointerId);
+  });
+  canvas.addEventListener("pointermove", (event) => {
+    if (drag) {
+      const dx = event.clientX - drag.x;
+      const dy = event.clientY - drag.y;
+      if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+      panX = drag.panX + dx;
+      panY = drag.panY + dy;
+      draw();
+      return;
+    }
+    const hit = under(event.clientX, event.clientY);
+    if (hit === null) { tip.hidden = true; return; }
+    const rect = canvas.getBoundingClientRect();
+    tip.hidden = false;
+    tip.style.left = `${event.clientX - rect.left + 12}px`;
+    tip.style.top = `${event.clientY - rect.top + 12}px`;
+    if (hit.node !== undefined) {
+      const node = nodes[hit.node];
+      tip.textContent = `${node.title}\n${node.id}\n${node.kind}${node.tags.length > 0 ? ` · ${node.tags.join(" · ")}` : ""}`;
+    } else {
+      const edge = edges[hit.edge];
+      tip.textContent = `${nodes[edge.from].title} → ${nodes[edge.to].title}\n${edge.kind} · ${edge.provenance}`;
+    }
+  });
+  canvas.addEventListener("pointerup", (event) => {
+    canvas.classList.remove("is-dragging");
+    const held = drag;
+    drag = null;
+    if (held && held.moved) return;
+    const hit = under(event.clientX, event.clientY);
+    picked = hit !== null && hit.node !== undefined ? (picked === hit.node ? -1 : hit.node) : -1;
+    draw();
+  });
+  canvas.addEventListener("pointerleave", () => { tip.hidden = true; });
+  canvas.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const rect = canvas.getBoundingClientRect();
+    const px = event.clientX - rect.left;
+    const py = event.clientY - rect.top;
+    const factor = Math.exp(-event.deltaY * 0.0015);
+    panX = px - (px - panX) * factor;
+    panY = py - (py - panY) * factor;
+    scale *= factor;
+    draw();
+  }, { passive: false });
+  window.addEventListener("resize", fit);
+  fit();
+})();
+</script>
+</body>
+</html>
