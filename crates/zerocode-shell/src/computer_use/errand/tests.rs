@@ -1,6 +1,7 @@
 //! What a walk by judgment may do, and what it may not.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use super::*;
 use zerocode_core::computer_flow::{Confirm, EvidenceLevel, Fingerprint, Money};
@@ -21,19 +22,41 @@ fn control(mark: usize, label: &str) -> Value {
 struct FakeJudge {
     answers: Vec<Judged>,
     asked: Vec<Vec<usize>>,
+    /// The questions it was asked ahead of the walk ([`ActionJudge::begin`]),
+    /// answered from the same list on a thread of their own.
+    begun: Vec<Vec<usize>>,
+    /// Whether it asks ahead at all — a judge that cannot answers `None`.
+    overlaps: bool,
+    /// How long one answer takes, in turn or ahead.
+    latency: Duration,
+    /// What [`ActionJudge::finish`] handed back.
+    finished: usize,
 }
 
 impl FakeJudge {
     fn chose(marks: &[usize]) -> Self {
-        Self {
-            answers: marks.iter().map(|mark| pick(*mark)).collect(),
-            asked: Vec::new(),
-        }
+        Self::saying(marks.iter().map(|mark| pick(*mark)).collect())
     }
     fn saying(answers: Vec<Judged>) -> Self {
         Self {
             answers,
             asked: Vec::new(),
+            begun: Vec::new(),
+            overlaps: true,
+            latency: Duration::ZERO,
+            finished: 0,
+        }
+    }
+    /// The same judge, each answer taking `ms`.
+    fn slow(mut self, ms: u64) -> Self {
+        self.latency = Duration::from_millis(ms);
+        self
+    }
+    fn next_answer(&mut self) -> Judged {
+        if self.answers.is_empty() {
+            Judged::Refused("timeout".to_string())
+        } else {
+            self.answers.remove(0)
         }
     }
 }
@@ -50,11 +73,33 @@ fn pick(mark: usize) -> Judged {
 impl ActionJudge for FakeJudge {
     fn choose(&mut self, ask: &ActionAsk) -> Judged {
         self.asked.push(ask.marks().to_vec());
-        if self.answers.is_empty() {
-            Judged::Refused("timeout".to_string())
-        } else {
-            self.answers.remove(0)
+        std::thread::sleep(self.latency);
+        self.next_answer()
+    }
+
+    fn begin(&mut self, ask: &ActionAsk) -> Option<Pending> {
+        if !self.overlaps {
+            return None;
         }
+        self.begun.push(ask.marks().to_vec());
+        let judged = self.next_answer();
+        let latency = self.latency;
+        let (done, waited) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            std::thread::sleep(latency);
+            let _ = done.send(Done {
+                judged,
+                spent: None,
+                cached: false,
+                rows: Vec::new(),
+            });
+        });
+        Some(Pending::new(ask.clone(), waited))
+    }
+
+    fn finish(&mut self, done: Done) -> Judged {
+        self.finished += 1;
+        done.judged
     }
 }
 
@@ -71,6 +116,13 @@ pub(super) struct FakeWorld {
     left_ms: u64,
     /// Whether every press renumbers the screen — a world that moves.
     moves: bool,
+    /// Whether only every second press moves the screen — a world where a
+    /// press lands on the screen it was pressed on half the time, which is
+    /// where a judgment begun on the last look can be used.
+    moves_every_other: bool,
+    /// How long a press holds the walk — the door's own landing, which a
+    /// judgment begun ahead runs behind.
+    press_holds: Duration,
     /// What the caller's own condition answers, press by press; a world whose
     /// caller wrote no condition has none.
     reached: Vec<bool>,
@@ -94,6 +146,8 @@ impl FakeWorld {
             walks: vec![None],
             left_ms: 60_000,
             moves: false,
+            moves_every_other: false,
+            press_holds: Duration::ZERO,
             reached: Vec::new(),
         }
     }
@@ -105,6 +159,20 @@ impl FakeWorld {
             ..Self::showing(marks)
         }
     }
+
+    /// The same world, whose screen moves after every second press only.
+    fn that_moves_every_other(marks: &[usize]) -> Self {
+        Self {
+            moves_every_other: true,
+            ..Self::showing(marks)
+        }
+    }
+
+    /// The same world, each press holding the walk `ms`.
+    fn holding(mut self, ms: u64) -> Self {
+        self.press_holds = Duration::from_millis(ms);
+        self
+    }
 }
 
 impl World for FakeWorld {
@@ -114,12 +182,14 @@ impl World for FakeWorld {
     fn press(&mut self, mark: usize) -> bool {
         self.observed.push(crate::run_evidence::observation());
         self.presses.push(mark);
+        std::thread::sleep(self.press_holds);
+        let round = self.presses.len();
+        let moves = self.moves || (self.moves_every_other && round.is_multiple_of(2));
         if self.press_takes
-            && self.moves
+            && moves
             && let Some(screen) = self.screen.as_mut()
         {
             // A screen that moved: same numbers, different words.
-            let round = self.presses.len();
             for item in &mut screen.items {
                 item["label"] = json!(format!("저장 {round}"));
             }
@@ -1229,4 +1299,241 @@ fn a_screen_seats_auto_rises_on_its_own_rows_and_falls_when_the_wire_does() {
         json!(zerocode_core::jev::promote::FELL)
     );
     assert!(!crate::systemone::applies(&wire, seat));
+}
+
+// ---- asking ahead of the look (t-6132 S2) ----------------------------------
+
+/// A row with the two clocks and the wall time taken off, for comparing
+/// what two walks wrote apart from when.
+fn timeless(row: &Value) -> Value {
+    let mut row = row.clone();
+    if let Some(row) = row.as_object_mut() {
+        row.remove(AT.canonical);
+        row.remove(ELAPSED_MS.canonical);
+    }
+    row
+}
+
+#[test]
+fn overlap_off_is_todays_walk_to_the_byte() {
+    let mut plain_judge = FakeJudge::chose(&[1, 2, 1]);
+    let mut plain_world = FakeWorld::that_moves_every_other(&[1, 2]);
+    let plain = run(Mode::On, true, &goal(3), &mut plain_judge, &mut plain_world);
+
+    let mut judge = FakeJudge::chose(&[1, 2, 1]);
+    let mut world = FakeWorld::that_moves_every_other(&[1, 2]);
+    let off = run_with(
+        Mode::On,
+        true,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options::default(),
+    );
+    assert_eq!(
+        off.rows.iter().map(timeless).collect::<Vec<_>>(),
+        plain.rows.iter().map(timeless).collect::<Vec<_>>()
+    );
+    assert_eq!((off.overlapped, off.discarded), (0, 0));
+    assert!(judge.begun.is_empty(), "nothing is asked ahead");
+    assert_eq!(judge.asked, plain_judge.asked);
+    assert_eq!(world.presses, plain_world.presses);
+    assert!(off.rows.iter().all(|row| row.get(OVERLAP).is_none()));
+}
+
+/// After a press on a screen that then stays, the walk's next question is
+/// the one begun on the last look — the pressed number spent, its legend
+/// among `pressed` — and the walk uses that answer instead of asking again.
+#[test]
+fn a_judgment_begun_on_the_last_look_answers_the_next_look_that_asks_the_same_question() {
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let walked = run_with(
+        Mode::On,
+        true,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options { overlap: true },
+    );
+    assert_eq!(world.presses, vec![1, 2]);
+    assert_eq!(judge.asked, vec![vec![1, 2]], "asked in turn once");
+    assert_eq!(judge.begun, vec![vec![2]], "begun ahead once: mark 1 spent");
+    assert_eq!(judge.finished, 1);
+    assert_eq!((walked.overlapped, walked.discarded), (1, 0));
+    assert!(walked.rows[0].get(OVERLAP).is_none());
+    assert_eq!(walked.rows[1][OVERLAP], json!(OVERLAP_USED));
+    assert!(walked.rows[1]["hiddenMs"].is_u64());
+    assert_eq!(walked.rows[1]["chosen"], json!("mark:2"));
+    // The screen never moved: the third look is where the walk stops, and
+    // no judgment was begun for it (one more stand would end the walk).
+    assert_eq!(walked.rows[2]["outcome"], json!("stuck"));
+}
+
+/// A screen that moved asks another question: the judgment begun ahead is
+/// dropped, its request spent, and the new screen is asked in turn.
+#[test]
+fn a_judgment_begun_ahead_is_dropped_when_the_next_look_asks_another_question() {
+    let mut judge = FakeJudge::chose(&[1, 1, 1]);
+    let mut world = FakeWorld::that_moves(&[1, 2]);
+    let walked = run_with(
+        Mode::On,
+        true,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options { overlap: true },
+    );
+    assert_eq!(world.presses, vec![1, 1]);
+    assert_eq!(judge.begun, vec![vec![2]], "begun on the first screen");
+    assert_eq!(judge.asked.len(), 2, "both screens asked in turn");
+    assert_eq!(judge.finished, 0);
+    assert_eq!((walked.overlapped, walked.discarded), (0, 1));
+    assert_eq!(walked.rows[1][OVERLAP], json!(OVERLAP_DISCARDED));
+}
+
+/// No question is begun ahead after a link, on the last step, on a screen
+/// one more stand from stuck, for a walk that clears a stop, or by a judge
+/// that cannot ask ahead.
+#[test]
+fn nothing_is_begun_ahead_where_the_next_screen_is_another_page_or_the_walk_ends() {
+    // A link: the screen after it is another page.
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    world.screen.as_mut().unwrap().items[0]["role"] = json!("link");
+    run_with(
+        Mode::On,
+        true,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options { overlap: true },
+    );
+    assert!(judge.begun.is_empty(), "a link is not asked ahead");
+    assert!(moves_the_page(&json!({ "role": "link" })));
+    assert!(moves_the_page(&json!({ "role": "AXLink" })));
+    assert!(!moves_the_page(&json!({ "role": "button" })));
+
+    // The last step asks nothing more.
+    let mut judge = FakeJudge::chose(&[1]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    run_with(
+        Mode::On,
+        true,
+        &goal(1),
+        &mut judge,
+        &mut world,
+        Options { overlap: true },
+    );
+    assert!(judge.begun.is_empty());
+
+    // A recovery walks the document again; it never comes back to a look.
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    world.walks = vec![Some(4), None];
+    run_with(
+        Mode::On,
+        true,
+        &stopped(RecipeStop::StepFailed),
+        &mut judge,
+        &mut world,
+        Options { overlap: true },
+    );
+    assert!(judge.begun.is_empty());
+
+    // A judge that cannot ask ahead: the walk asks in turn.
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    judge.overlaps = false;
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let walked = run_with(
+        Mode::On,
+        true,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options { overlap: true },
+    );
+    assert_eq!(judge.asked.len(), 2);
+    assert_eq!((walked.overlapped, walked.discarded), (0, 0));
+}
+
+/// The measurement asking ahead is for: a walk whose presses hold the door's
+/// own landing and whose judgments take the wire's own time, with and
+/// without the judgment begun ahead — on a screen that stays after every
+/// second press, where the answer in flight can be used. Printed, and held
+/// on the count: every other judgment was hidden behind a press.
+#[test]
+fn a_judgment_hidden_behind_the_press_shortens_the_walk_by_what_it_hid() {
+    const JUDGE_MS: u64 = 60;
+    const PRESS_MS: u64 = 80;
+    const STEPS: usize = 8;
+    let walk = |overlap: bool| {
+        let mut judge = FakeJudge::chose(&[1, 2, 1, 2, 1, 2, 1, 2]).slow(JUDGE_MS);
+        let mut world = FakeWorld::that_moves_every_other(&[1, 2]).holding(PRESS_MS);
+        let began = std::time::Instant::now();
+        let walked = run_with(
+            Mode::On,
+            true,
+            &goal(STEPS),
+            &mut judge,
+            &mut world,
+            Options { overlap },
+        );
+        (
+            began.elapsed().as_millis(),
+            walked,
+            judge.asked.len() + judge.begun.len(),
+        )
+    };
+    let (before_ms, plain, plain_asks) = walk(false);
+    let (after_ms, ahead, ahead_asks) = walk(true);
+    assert_eq!(plain.pressed, STEPS);
+    assert_eq!(ahead.pressed, STEPS);
+    assert_eq!((plain.overlapped, plain.discarded), (0, 0));
+    assert_eq!(
+        (ahead.overlapped, ahead.discarded),
+        (STEPS / 2, 0),
+        "every other judgment was begun ahead and used"
+    );
+    assert_eq!(plain_asks, STEPS);
+    assert_eq!(ahead_asks, STEPS, "asking ahead asks no more questions");
+    let hidden_per_step = ahead
+        .rows
+        .iter()
+        .filter_map(|row| row["hiddenMs"].as_u64())
+        .sum::<u64>()
+        / ahead.overlapped.max(1) as u64;
+    assert!(
+        hidden_per_step >= PRESS_MS,
+        "a judgment begun before the press ran at least as long as the press held: {hidden_per_step} ms"
+    );
+    // A step is the time from one judgment to the next, read off the rows'
+    // own clocks.
+    let steps_of = |walked: &Walked| -> Vec<u64> {
+        let at: Vec<i64> = walked
+            .rows
+            .iter()
+            .filter_map(|row| row[AT.canonical].as_i64())
+            .collect();
+        let mut steps: Vec<u64> = at
+            .windows(2)
+            .map(|pair| u64::try_from(pair[1] - pair[0]).unwrap_or(0))
+            .collect();
+        steps.sort_unstable();
+        steps
+    };
+    let (plain_steps, ahead_steps) = (steps_of(&plain), steps_of(&ahead));
+    let pct = |steps: &[u64], share: f64| {
+        zerocode_core::jev::summary::percentile(steps, share).unwrap_or(0)
+    };
+    println!(
+        "measure: overlap steps={STEPS} judge_ms={JUDGE_MS} press_ms={PRESS_MS} before_ms={before_ms} after_ms={after_ms} step_p50_before={} step_p95_before={} step_p50_after={} step_p95_after={} overlapped={} discarded={} discard_share={:.2} hidden_ms_per_used_step={hidden_per_step}",
+        pct(&plain_steps, 0.5),
+        pct(&plain_steps, 0.95),
+        pct(&ahead_steps, 0.5),
+        pct(&ahead_steps, 0.95),
+        ahead.overlapped,
+        ahead.discarded,
+        ahead.discarded as f64 / (ahead.overlapped + ahead.discarded).max(1) as f64
+    );
 }

@@ -934,3 +934,79 @@ fn what_the_memo_would_have_agreed_with_against_the_real_endpoint() {
         waits[waits.len() - 1]
     );
 }
+
+// ---- asking ahead over the wire (t-6132 S2) ---------------------------------
+
+/// A judgment begun ahead of the walk runs down the same wire on a thread of
+/// its own, and what it would have said of itself — the door's account, the
+/// memo's rows — comes back to the judge that writes the rows: a walk with
+/// `overlap` on a screen that stays writes exactly the rows a walk in turn
+/// would, with the second judgment marked as used ahead.
+#[test]
+fn a_judgment_begun_ahead_runs_down_the_wire_and_its_account_comes_back() {
+    // The first question offers both numbers; the second, mark 1 spent,
+    // offers mark 2 alone — and the closed choice wants every offered option
+    // named, so the endpoint answers each question in its own shape.
+    let endpoint = Endpoint::answering_each(
+        "HTTP/1.1 200 OK",
+        |request: &str| {
+            if request.contains("\"mark:1\"") {
+                goal_body_choosing("mark:1")
+            } else {
+                json!({
+                    "model": SYSTEMONE_MODEL,
+                    "answers": {
+                        "action": {
+                            "type": "choice",
+                            "choice": "mark:2",
+                            "probabilities": { "mark:2": 0.8, "give_up": 0.1, "done": 0.1 },
+                            "confidence": 0.8,
+                        }
+                    },
+                    "usage": { "input_tokens": 120, "output_tokens": 0 },
+                })
+                .to_string()
+            }
+        },
+        40,
+    );
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_caching(&home, Some(zerocode_core::jev::JevMode::Shadow.key()));
+    let goal = crate::computer_use::errand::tests::goal(3);
+
+    let mut judge = LiveJudge::at(&endpoint.base(), "test-key", door);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    let walked = crate::computer_use::errand::run_with(
+        Mode::On,
+        true,
+        &goal,
+        &mut judge,
+        &mut world,
+        crate::computer_use::errand::Options { overlap: true },
+    );
+    assert_eq!(world.presses, vec![1, 2]);
+    assert_eq!((walked.overlapped, walked.discarded), (1, 0));
+    assert_eq!(
+        endpoint.asked().len(),
+        2,
+        "two questions, one of them ahead"
+    );
+    let second = &walked.rows[1];
+    assert_eq!(
+        second[crate::computer_use::errand::OVERLAP],
+        json!(crate::computer_use::errand::OVERLAP_USED)
+    );
+    assert_eq!(
+        second[REQUESTS_KEY],
+        json!(1),
+        "the door's account of the question asked ahead"
+    );
+    assert_eq!(second["outcome"], json!("answered"));
+    assert_eq!(second["chosen"], json!("mark:2"));
+    // The cache seat's rows of both questions land, the ahead one's through
+    // `finish`: two misses (each screen's bytes differ by `tried`/`pressed`).
+    let rows = cache_rows(&mut judge, &home);
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    assert!(rows.iter().all(|row| row["miss"] == json!(true)));
+    assert_eq!(zerocode_core::jev::memo::rows(&memo_file(&home)), 2);
+}

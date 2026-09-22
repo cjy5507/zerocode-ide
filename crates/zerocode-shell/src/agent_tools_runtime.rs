@@ -3173,7 +3173,10 @@ pub(super) fn run_goal(
     }
     let acting = crate::systemone::applies(judge.wire(), seat);
     let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0);
-    let walked = errand::run(mode, acting, &at, &mut judge, &mut world);
+    let options = errand::Options {
+        overlap: zerocode_core::computer_use::walk_overlaps(&command.params),
+    };
+    let walked = errand::run_with(mode, acting, &at, &mut judge, &mut world, options);
     errand::write_rows(
         seat,
         judge.wire(),

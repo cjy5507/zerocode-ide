@@ -16,7 +16,7 @@ use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
 use zerocode_core::jev::{JUDGMENT_CACHE, JevMode, JevUse, memo};
 use zerocode_core::screen_action::ActionAsk;
 
-use super::{ACTION_DEADLINE, ActionJudge, Judged, Spent};
+use super::{ACTION_DEADLINE, ActionJudge, Done, Judged, Pending, Spent};
 use crate::api_routers::RouterKeys;
 use crate::systemone::{SCHEMA, Wire, memo_path, request_body};
 
@@ -315,6 +315,22 @@ impl LiveJudge {
     }
 }
 
+impl LiveJudge {
+    /// This judge's twin for a thread of its own: the same wire, workspace
+    /// and seat, with nothing yet asked — what a question begun ahead of the
+    /// walk runs on ([`ActionJudge::begin`]).
+    fn twin(&self) -> Self {
+        Self {
+            wire: self.wire.clone(),
+            workspace: self.workspace.clone(),
+            seat: self.seat,
+            spent: None,
+            cached: false,
+            memo_rows: Vec::new(),
+        }
+    }
+}
+
 impl ActionJudge for LiveJudge {
     fn choose(&mut self, ask: &ActionAsk) -> Judged {
         self.cached = false;
@@ -322,6 +338,32 @@ impl ActionJudge for LiveJudge {
             Some(stand) => self.choose_remembering(ask, stand),
             None => self.choose_plain(ask),
         }
+    }
+
+    fn begin(&mut self, ask: &ActionAsk) -> Option<Pending> {
+        let (done, waited) = std::sync::mpsc::channel();
+        let mut twin = self.twin();
+        let ahead = ask.clone();
+        std::thread::Builder::new()
+            .name("jev-ahead".to_string())
+            .spawn(move || {
+                let judged = twin.choose(&ahead);
+                let _ = done.send(Done {
+                    judged,
+                    spent: twin.spent,
+                    cached: twin.cached,
+                    rows: std::mem::take(&mut twin.memo_rows),
+                });
+            })
+            .ok()?;
+        Some(Pending::new(ask.clone(), waited))
+    }
+
+    fn finish(&mut self, done: Done) -> Judged {
+        self.spent = done.spent;
+        self.cached = done.cached;
+        self.memo_rows.extend(done.rows);
+        done.judged
     }
 
     fn spent(&self) -> Option<Spent> {

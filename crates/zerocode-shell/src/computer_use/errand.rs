@@ -125,10 +125,106 @@ pub enum Judged {
 /// What asking a judgment cost at the Jev door — the wire's own account.
 pub use crate::systemone::Spent;
 
+/// How a walk is asked to go beyond today's loop — switches the caller sets,
+/// every one off by default, so a walk asked plainly is today's walk to the
+/// byte ([`run`] is [`run_with`] under these).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Options {
+    /// Overlap the next judgment with the press before it (t-6132 S2): the
+    /// moment a goal walk's press is taken, the next question is asked of
+    /// the screen as it was — the last look, with the pressed number spent
+    /// and its legend among `pressed` — on a thread of its own, while the
+    /// press lands and the next look is taken. When that look asks the same
+    /// question to the byte, the answer in flight is used and the walk
+    /// waited only for what the judgment had left; when it does not, the
+    /// answer is dropped, its request spent, and the screen is asked afresh.
+    /// A press on a link, a screen one more stand from stuck, and a walk
+    /// that clears a stop never ask ahead: those walks do not come back to
+    /// the same screen.
+    pub overlap: bool,
+}
+
+/// What a judgment begun ahead of the walk came to ([`Pending::wait`]): the
+/// judge's answer, and what the judge would have said of itself had it been
+/// asked in the walk's own turn.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Done {
+    pub judged: Judged,
+    pub spent: Option<Spent>,
+    pub cached: bool,
+    /// Rows of the judge's own seats (the judgment cache's, t-6132 S1) the
+    /// question wrote on the way, handed back to the judge that will write
+    /// them.
+    pub rows: Vec<Value>,
+}
+
+/// A judgment in flight — begun before the walk needed it, waited for only
+/// once the walk asks the very question it was begun on.
+#[derive(Debug)]
+pub struct Pending {
+    ask: ActionAsk,
+    done: std::sync::mpsc::Receiver<Done>,
+    began: std::time::Instant,
+}
+
+impl Pending {
+    /// A judgment of `ask` whose answer will arrive on `done`.
+    #[must_use]
+    pub fn new(ask: ActionAsk, done: std::sync::mpsc::Receiver<Done>) -> Self {
+        Self {
+            ask,
+            done,
+            began: std::time::Instant::now(),
+        }
+    }
+
+    /// Whether this is the very question the walk is asking now — the same
+    /// state and the same options, to the byte; anything else is another
+    /// screen and the answer in flight says nothing about it.
+    #[must_use]
+    pub fn matches(&self, asked: &ActionAsk) -> bool {
+        self.ask == *asked
+    }
+
+    /// Milliseconds the judgment has been running ahead of the walk.
+    #[must_use]
+    pub fn ran_ms(&self) -> u64 {
+        u64::try_from(self.began.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /// The answer, waited for. A judge whose thread died is a wire that
+    /// never answered, in the wire's own word.
+    #[must_use]
+    pub fn wait(self) -> Done {
+        self.done.recv().unwrap_or_else(|_| Done {
+            judged: Judged::Refused(crate::systemone::TRANSPORT.to_string()),
+            spent: None,
+            cached: false,
+            rows: Vec::new(),
+        })
+    }
+}
+
 /// Choosing one of the numbers a look handed out — the seam the window's
 /// System One wire sits behind and a test replaces.
 pub trait ActionJudge {
     fn choose(&mut self, ask: &ActionAsk) -> Judged;
+
+    /// Begin choosing on a thread of the judge's own, for a walk that will
+    /// ask this very question next ([`Options::overlap`]). `None` from a
+    /// judge that cannot ask ahead — the default — and then the walk asks in
+    /// its own turn as ever.
+    fn begin(&mut self, ask: &ActionAsk) -> Option<Pending> {
+        let _ = ask;
+        None
+    }
+
+    /// Take back what a judgment begun ahead came to, so [`Self::spent`] and
+    /// [`Self::cached`] say of it what they would have said of a question
+    /// asked in turn.
+    fn finish(&mut self, done: Done) -> Judged {
+        done.judged
+    }
 
     /// What the last [`Self::choose`] sent through the Jev door, for the row.
     /// A judge that sends nowhere — a test's — has nothing to say.
@@ -481,6 +577,14 @@ const USE_FALLBACK: &str = zerocode_core::jev::ROUTE_USE_FALLBACK;
 /// in cannot come to spell it differently.
 pub(crate) const REASON: &str = "reason";
 
+/// The key a row says under which way a judgment begun ahead of the walk
+/// went ([`Options::overlap`]), and its two words: the walk asked the very
+/// question and used the answer, or the next look asked another and the
+/// answer was dropped with its request spent.
+pub const OVERLAP: &str = "overlap";
+pub const OVERLAP_USED: &str = "used";
+pub const OVERLAP_DISCARDED: &str = "discarded";
+
 /// Why this walk pressed nothing, when one of its rows says why.
 ///
 /// The caller asks here rather than reading `pressed: 0` and guessing. A walk
@@ -519,6 +623,12 @@ pub struct Walked {
     /// with its own `done` — and those walks are left out of the agreement
     /// rather than guessed at.
     pub agreed: Option<bool>,
+    /// Judgments begun ahead of the walk that the walk went on to use
+    /// ([`Options::overlap`]).
+    pub overlapped: usize,
+    /// Judgments begun ahead that the next look made moot — their request
+    /// spent, the screen asked afresh.
+    pub discarded: usize,
 }
 
 /// One row, with the words every ledger of this family uses.
@@ -571,9 +681,42 @@ pub fn run(
     judge: &mut dyn ActionJudge,
     world: &mut dyn World,
 ) -> Walked {
-    let mut walked = walk(mode, acting, at, judge, world);
+    run_with(mode, acting, at, judge, world, Options::default())
+}
+
+/// [`run`], with the switches a caller may set ([`Options`]). Every switch
+/// off is [`run`] exactly.
+pub fn run_with(
+    mode: Mode,
+    acting: bool,
+    at: &Errand<'_>,
+    judge: &mut dyn ActionJudge,
+    world: &mut dyn World,
+    options: Options,
+) -> Walked {
+    let mut walked = walk(mode, acting, at, judge, world, options);
     agree(&mut walked);
     walked
+}
+
+/// Whether pressing `item` carries the screen elsewhere — a link, on a page
+/// or in an app's tree — so the screen after it is not one the last look
+/// can stand in for ([`Options::overlap`]).
+#[must_use]
+pub fn moves_the_page(item: &Value) -> bool {
+    item.get("role")
+        .and_then(Value::as_str)
+        .is_some_and(|role| role.eq_ignore_ascii_case("link") || role.ends_with("Link"))
+}
+
+/// A row's words with a judgment-in-flight note on them, when there is one.
+fn overlapped(mut said: Value, overlap: Option<&Value>) -> Value {
+    if let (Some(said), Some(Value::Object(overlap))) = (said.as_object_mut(), overlap) {
+        for (key, value) in overlap {
+            said.insert(key.clone(), value.clone());
+        }
+    }
+    said
 }
 
 /// What the walk itself said about the numbers it pressed, written onto the
@@ -606,6 +749,7 @@ fn walk(
     at: &Errand<'_>,
     judge: &mut dyn ActionJudge,
     world: &mut dyn World,
+    options: Options,
 ) -> Walked {
     let mut walked = Walked::default();
     if matches!(at.why, Why::Goal { .. }) {
@@ -637,6 +781,10 @@ fn walk(
     let mut pressed_so_far: Vec<String> = Vec::new();
     let mut before: Option<Screen> = None;
     let mut still = 0usize;
+    // The judgment begun on the last look, if the walk asked ahead
+    // ([`Options::overlap`]): used when the next look asks the same question,
+    // dropped when it does not.
+    let mut pending: Option<Pending> = None;
     for attempt in 1..=at.steps() {
         if world.left_ms() <= u64::try_from(ACTION_DEADLINE.as_millis()).unwrap_or(u64::MAX) {
             // Out of time with the errand unserved: whatever was pressed on
@@ -710,7 +858,28 @@ fn walk(
 
         let candidates = asked.marks().len();
         let judging = std::time::Instant::now();
-        let judged = judge.choose(&asked);
+        // A judgment begun on the last look answers this question only when
+        // it IS this question; the row says which way it went, and how much
+        // of the judgment the walk never waited for.
+        let (judged, overlap) = match pending.take() {
+            Some(ahead) if ahead.matches(&asked) => {
+                let hidden_ms = ahead.ran_ms();
+                walked.overlapped += 1;
+                (
+                    judge.finish(ahead.wait()),
+                    Some(json!({ OVERLAP: OVERLAP_USED, "hiddenMs": hidden_ms })),
+                )
+            }
+            Some(ahead) => {
+                walked.discarded += 1;
+                drop(ahead);
+                (
+                    judge.choose(&asked),
+                    Some(json!({ OVERLAP: OVERLAP_DISCARDED })),
+                )
+            }
+            None => (judge.choose(&asked), None),
+        };
         let judgment_ms = u64::try_from(judging.elapsed().as_millis()).unwrap_or(u64::MAX);
         let spent = judge.spent();
         let choice = match judged {
@@ -720,32 +889,38 @@ fn walk(
                     mode,
                     at,
                     attempt,
-                    stamped(
-                        json!({
-                            "outcome": token,
-                            "candidates": candidates,
-                            "routeUse": USE_FALLBACK,
-                        }),
-                        spent,
-                        judgment_ms,
-                        crate::project_runtime::now_epoch_ms(),
+                    overlapped(
+                        stamped(
+                            json!({
+                                "outcome": token,
+                                "candidates": candidates,
+                                "routeUse": USE_FALLBACK,
+                            }),
+                            spent,
+                            judgment_ms,
+                            crate::project_runtime::now_epoch_ms(),
+                        ),
+                        overlap.as_ref(),
                     ),
                 ));
                 return walked;
             }
         };
-        let mut said = stamped(
-            json!({
-                "outcome": "answered",
-                "candidates": candidates,
-                "showsLines": shows_lines,
-                "pressedBefore": pressed_so_far.len(),
-                "confidence": choice.confidence,
-                "probabilities": choice.probabilities,
-            }),
-            spent,
-            judgment_ms,
-            crate::project_runtime::now_epoch_ms(),
+        let mut said = overlapped(
+            stamped(
+                json!({
+                    "outcome": "answered",
+                    "candidates": candidates,
+                    "showsLines": shows_lines,
+                    "pressedBefore": pressed_so_far.len(),
+                    "confidence": choice.confidence,
+                    "probabilities": choice.probabilities,
+                }),
+                spent,
+                judgment_ms,
+                crate::project_runtime::now_epoch_ms(),
+            ),
+            overlap.as_ref(),
         );
         // A memo hit is an answer that sent nothing: the row says so in the
         // one word every Jev ledger's counter reads it by.
@@ -802,6 +977,39 @@ fn walk(
             return walked;
         }
 
+        let seen = before
+            .as_ref()
+            .expect("the screen this walk just looked at");
+        let legend = legend_of(seen, chosen);
+        // Ask ahead ([`Options::overlap`]), before the press: the next
+        // question as the last look would put it — this screen, the chosen
+        // number spent, its legend among `pressed` — begun now, so the
+        // judgment runs while the press lands and the next look is taken.
+        // Only a goal walk comes back to a look; not after a link, whose
+        // screen is another page; not when one more stand on this screen
+        // would end the walk before it asked; not on the last step, which
+        // asks nothing more.
+        if options.overlap
+            && matches!(at.why, Why::Goal { .. })
+            && attempt < at.steps()
+            && still + 1 < SAME_SCREEN_LIMIT
+            && !presses_a_link(seen, chosen)
+        {
+            let mut tried_ahead = tried.clone();
+            tried_ahead.push(chosen);
+            let mut pressed_ahead = pressed_so_far.clone();
+            pressed_ahead.push(legend.clone());
+            pending = ask(&ActionLook {
+                goal: at.goal,
+                errand: at.asked(),
+                at: seen.at.asked(),
+                tried: &tried_ahead,
+                items: &seen.items,
+                pressed: &pressed_ahead,
+                shows: &seen.shows,
+            })
+            .and_then(|ahead| judge.begin(&ahead));
+        }
         let pressed = crate::run_evidence::observing(
             json!({
                 "look_ms": look_ms,
@@ -816,17 +1024,7 @@ fn walk(
             return walked;
         }
         tried.push(chosen);
-        pressed_so_far.push(
-            before
-                .as_ref()
-                .and_then(|seen| {
-                    seen.items.iter().find(|item| {
-                        item.get("mark").and_then(Value::as_u64) == u64::try_from(chosen).ok()
-                    })
-                })
-                .and_then(zerocode_core::computer_use_protocol::marks::legend_line)
-                .unwrap_or_else(|| format!("mark:{chosen}")),
-        );
+        pressed_so_far.push(legend);
         walked.pressed += 1;
         note(&mut said, "pressed", json!(true));
         note(&mut said, "routeUse", json!(USE_APPLIED));
@@ -867,6 +1065,24 @@ fn walk(
         }
     }
     walked
+}
+
+/// The control `mark` names on `seen`, as the legend named it — what a walk
+/// writes among `pressed` once it has pressed it.
+fn legend_of(seen: &Screen, mark: usize) -> String {
+    seen.items
+        .iter()
+        .find(|item| item.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok())
+        .and_then(zerocode_core::computer_use_protocol::marks::legend_line)
+        .unwrap_or_else(|| format!("mark:{mark}"))
+}
+
+/// Whether the control `mark` names on `seen` carries the screen elsewhere.
+fn presses_a_link(seen: &Screen, mark: usize) -> bool {
+    seen.items
+        .iter()
+        .find(|item| item.get("mark").and_then(Value::as_u64) == u64::try_from(mark).ok())
+        .is_some_and(moves_the_page)
 }
 
 /// Write the walk's rows down, in both of the places a screen seat's row

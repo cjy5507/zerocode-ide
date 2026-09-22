@@ -1620,6 +1620,18 @@ pub const WALK_STEPS_MAX: usize = 40;
 /// The parser refuses anything out of range, so this reads a checked value —
 /// it clamps so that the number the walk spends is never a number nobody
 /// wrote down.
+/// `walk --overlap`: begin the next judgment on the last look while the press
+/// lands (the window's `errand::Options::overlap`, t-6132 S2). A flag and its
+/// parameter key, spelled once for the parser, the verb table and the walk.
+pub const WALK_OVERLAP_FLAG: &str = "overlap";
+pub const WALK_OVERLAP_PARAM: &str = "overlap";
+
+/// Whether a walk was asked to judge ahead of its looks (`--overlap`).
+#[must_use]
+pub fn walk_overlaps(params: &Value) -> bool {
+    params.get(WALK_OVERLAP_PARAM) == Some(&Value::Bool(true))
+}
+
 #[must_use]
 pub fn walk_steps(params: &Value) -> usize {
     params
@@ -3003,6 +3015,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ),
         ("verify", "verify"),
         ("repeat", "repeat"),
+        (WALK_OVERLAP_FLAG, WALK_OVERLAP_PARAM),
     ] {
         if flags.contains_key(flag) {
             params.insert(key.into(), Value::Bool(true));
@@ -3091,6 +3104,7 @@ fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
                 | "all-layers"
                 | "verify"
                 | "repeat"
+                | WALK_OVERLAP_FLAG
         );
         if flags.contains_key(name) {
             return Err(format!("duplicate --{name}"));
@@ -3344,7 +3358,15 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ComputerMethod::Watch => &["json", "until", "timeout-ms", "display"],
         ComputerMethod::Batch => &["json", BATCH_COMMANDS_FLAG],
         ComputerMethod::Walk => &[
-            "json", "goal", "app", "pane", "platform", "device", "until", "steps",
+            "json",
+            "goal",
+            "app",
+            "pane",
+            "platform",
+            "device",
+            "until",
+            "steps",
+            WALK_OVERLAP_FLAG,
         ],
         ComputerMethod::Compare => &[
             "json", "baseline", "against", "region", "display", "max-diff",
@@ -4045,7 +4067,7 @@ pub fn usage() -> String {
         "  zerocode-computer recipe-list [--json]",
         "  zerocode-computer recipe-show --name <name> [--json]",
         "  zerocode-computer recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--end N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--json]",
-        "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane> | --platform <ios|android> --device <id>) [--until <text on screen when it worked>] [--steps N] [--json]",
+        "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane> | --platform <ios|android> --device <id>) [--until <text on screen when it worked>] [--steps N] [--overlap] [--json]",
         "      (walks the steps in one call, filling {{name}} from --params; stops at the person's turn or last step,",
         "       a step naming the saved screen's element or window, a check the screen fails, an act that changed",
         "       nothing, or a person's hand on the pointer — and answers the step to resume from; a guarded Flow's",
@@ -7381,6 +7403,46 @@ mod tests {
         for shown in ["--repeat [--until <HH:MM|N>]", "--arena <evidence dir>"] {
             assert!(usage.contains(shown), "{shown} is not in the manual");
         }
+    }
+
+    /// `--overlap` (t-6132 S2) is a walk's own word: the walk reads it, the
+    /// manual shows it, and no other verb takes it.
+    #[test]
+    fn a_walk_may_be_asked_to_judge_ahead_of_its_looks_and_nothing_else_may() {
+        let argv = |words: &[&str]| words.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        let plain =
+            parse_command(&argv(&["walk", "--goal", "pay", "--pane", "b"])).expect("a walk");
+        assert!(!walk_overlaps(&plain.params), "off unless asked");
+        assert!(plain.params.get(WALK_OVERLAP_PARAM).is_none());
+        let ahead = parse_command(&argv(&[
+            "walk",
+            "--goal",
+            "pay",
+            "--pane",
+            "b",
+            "--overlap",
+        ]))
+        .expect("a walk asked to judge ahead");
+        assert!(walk_overlaps(&ahead.params));
+        assert_eq!(ahead.params[WALK_OVERLAP_PARAM], Value::Bool(true));
+        assert!(
+            parse_command(&argv(&[
+                "walk",
+                "--goal",
+                "pay",
+                "--pane",
+                "b",
+                "--overlap",
+                "yes"
+            ]))
+            .is_err(),
+            "a switch takes no value"
+        );
+        assert!(
+            parse_command(&argv(&["click", "--x", "1", "--y", "2", "--overlap"])).is_err(),
+            "no other verb takes it"
+        );
+        assert!(usage().contains("[--overlap]"), "the manual shows it");
     }
 
     #[test]
