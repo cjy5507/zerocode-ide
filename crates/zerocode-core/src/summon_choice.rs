@@ -176,6 +176,19 @@ pub const NOT_COMPARED_KEY: &str = "notCompared";
 /// not reach the statistics a seat rises on.
 pub const NOT_OFFERED: &str = "not_offered";
 
+/// The row's key for the model the summons launched its worker with, beside
+/// `agent` and `effort` — the coordinator's word after the quota gate had
+/// its say.
+///
+/// Not `model`: that key is every Jev row's answering version
+/// ([`crate::jev::summary::MODEL`], t-6187), and a summons row carries both —
+/// the worker's model and the Jev version that judged it. Rows written before
+/// 2026-09-23 kept the worker's model under `model`, and the version reader
+/// reads those as a version once: the seat's window starts again at the
+/// first row written since, which moves no standing (every such row was
+/// recording).
+pub const WORKER_MODEL_KEY: &str = "workerModel";
+
 /// One agent this window could summon this minute, as the quota gate's own
 /// look at the machine left it: installed, and not at a wall that gate would
 /// refuse on.

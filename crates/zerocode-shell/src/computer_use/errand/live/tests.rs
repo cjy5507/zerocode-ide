@@ -16,7 +16,7 @@ use super::*;
 use crate::api_routers::HeldKeys;
 use crate::computer_use::errand::tests::{FakeWorld, stopped};
 use crate::computer_use::errand::{ActionJudge, Mode, run};
-use crate::systemone::tests::Endpoint;
+use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
 use crate::systemone::{
     INVALID_REQUEST, RATE_LIMITED, SYSTEMONE_MODEL, SYSTEMONE_PATH, TIMEOUT, TRANSPORT,
     UNAUTHORIZED,
@@ -79,18 +79,26 @@ fn consented_judge(base: &str) -> (tempfile::TempDir, LiveJudge) {
     (home, LiveJudge::at(base, "test-key", door))
 }
 
+/// A screen answer's `answers`: its choice, and the two guards answered as a
+/// clean screen's would be (t-6187).
+fn guarded(action: serde_json::Value) -> serde_json::Value {
+    json!({
+        "action": action,
+        "instructed": { "type": "noul", "noul": 0.02 },
+        "walled": { "type": "noul", "noul": 0.03 },
+    })
+}
+
 /// A body the endpoint would answer with.
 fn body_choosing(choice: &str) -> String {
     json!({
-        "model": SYSTEMONE_MODEL,
-        "answers": {
-            "action": {
-                "type": "choice",
-                "choice": choice,
-                "probabilities": { "mark:1": 0.7, "mark:2": 0.2, "give_up": 0.1 },
-                "confidence": 0.7,
-            }
-        },
+        "model": ANSWERING_VERSION,
+        "answers": guarded(json!({
+            "type": "choice",
+            "choice": choice,
+            "probabilities": { "mark:1": 0.7, "mark:2": 0.2, "give_up": 0.1 },
+            "confidence": 0.7,
+        })),
         "usage": { "input_tokens": 120, "output_tokens": 0 },
     })
     .to_string()
@@ -250,10 +258,8 @@ fn a_workspace_nobody_consented_to_is_refused_before_a_socket() {
     assert!(endpoint.asked().is_empty(), "nothing left the door");
     assert_eq!(
         judge.spent(),
-        Some(Spent {
-            requests: 0,
-            redacted_lines: 0
-        })
+        Some(Spent::default()),
+        "and nothing answered"
     );
 
     let mut nowhere = LiveJudge::at(&endpoint.base(), "test-key", Doorway::default());
@@ -358,7 +364,8 @@ fn a_credential_on_the_screen_never_reaches_the_wire() {
         judge.spent(),
         Some(Spent {
             requests: 1,
-            redacted_lines: 3
+            redacted_lines: 3,
+            model: Some(ANSWERING_VERSION.to_string()),
         })
     );
 }
@@ -463,7 +470,7 @@ fn what_one_screen_question_costs_against_the_real_endpoint() {
                     Ok(choice) => {
                         format!("{:?} confidence {:.3}", choice.chosen, choice.confidence)
                     }
-                    Err(why) => format!("schema · {} · {body}", why.reason()),
+                    Err(why) => format!("schema · {} · {body}", why.token()),
                 }
             }
         };
@@ -517,7 +524,7 @@ fn compared_ask() -> zerocode_core::branching::BranchAsk {
 /// A body the endpoint would answer a comparison with.
 fn body_comparing(choice: &str) -> String {
     json!({
-        "model": SYSTEMONE_MODEL,
+        "model": ANSWERING_VERSION,
         "answers": {
             "best": {
                 "type": "choice",
@@ -549,7 +556,8 @@ fn a_comparison_is_asked_under_the_branching_row_and_read_by_its_own_question() 
         judge.spent(),
         Some(Spent {
             requests: 1,
-            redacted_lines: 0
+            redacted_lines: 0,
+            model: Some(ANSWERING_VERSION.to_string()),
         })
     );
     let heard = endpoint.asked();
@@ -588,15 +596,13 @@ fn a_comparison_is_asked_under_the_branching_row_and_read_by_its_own_question() 
 /// rules want every offered option named.
 fn goal_body_choosing(choice: &str) -> String {
     json!({
-        "model": SYSTEMONE_MODEL,
-        "answers": {
-            "action": {
-                "type": "choice",
-                "choice": choice,
-                "probabilities": { "mark:1": 0.7, "mark:2": 0.1, "give_up": 0.1, "done": 0.1 },
-                "confidence": 0.7,
-            }
-        },
+        "model": ANSWERING_VERSION,
+        "answers": guarded(json!({
+            "type": "choice",
+            "choice": choice,
+            "probabilities": { "mark:1": 0.7, "mark:2": 0.1, "give_up": 0.1, "done": 0.1 },
+            "confidence": 0.7,
+        })),
         "usage": { "input_tokens": 120, "output_tokens": 0 },
     })
     .to_string()
@@ -730,6 +736,11 @@ fn shadow_asks_the_wire_as_today_and_labels_the_memo_against_it() {
         json!(true)
     );
     assert_eq!(rows[1][REQUESTS_KEY], json!(0));
+    assert_eq!(
+        rows[1][zerocode_core::jev::summary::MODEL.canonical],
+        json!(ANSWERING_VERSION),
+        "a hit names the version that gave the answer the memo kept"
+    );
     assert_eq!(rows[1]["seat"], json!(zerocode_core::jev::BROWSER.id));
     assert!(rows[1]["key"].as_str().is_some_and(|key| key.len() == 16));
 }
@@ -760,7 +771,9 @@ fn a_risen_auto_answers_the_same_bytes_from_the_memo_and_sends_nothing() {
         judge.spent(),
         Some(Spent {
             requests: 0,
-            redacted_lines: 0
+            redacted_lines: 0,
+            // The version that gave the answer the memo kept.
+            model: Some(ANSWERING_VERSION.to_string()),
         })
     );
     assert_eq!(endpoint.asked().len(), 2, "the third question never left");
@@ -1056,15 +1069,13 @@ fn a_judgment_begun_ahead_runs_down_the_wire_and_its_account_comes_back() {
                 goal_body_choosing("mark:1")
             } else {
                 json!({
-                    "model": SYSTEMONE_MODEL,
-                    "answers": {
-                        "action": {
-                            "type": "choice",
-                            "choice": "mark:2",
-                            "probabilities": { "mark:2": 0.8, "give_up": 0.1, "done": 0.1 },
-                            "confidence": 0.8,
-                        }
-                    },
+                    "model": ANSWERING_VERSION,
+                    "answers": guarded(json!({
+                        "type": "choice",
+                        "choice": "mark:2",
+                        "probabilities": { "mark:2": 0.8, "give_up": 0.1, "done": 0.1 },
+                        "confidence": 0.8,
+                    })),
                     "usage": { "input_tokens": 120, "output_tokens": 0 },
                 })
                 .to_string()
@@ -1116,4 +1127,364 @@ fn a_judgment_begun_ahead_runs_down_the_wire_and_its_account_comes_back() {
     assert_eq!(rows.len(), 2, "{rows:?}");
     assert!(rows.iter().all(|row| row["miss"] == json!(true)));
     assert_eq!(zerocode_core::jev::memo::rows(&memo_file(&home)), 2);
+}
+
+/// Down the real wire (t-6187): the screen question leaves with its two
+/// guards beside the choice and the screen's own words in its state, and an
+/// answer whose instructions guard is at the floor is refused by an acting
+/// walk — nothing pressed, the row naming the stop and both guards — while
+/// the same screen answered clean is pressed.
+#[test]
+fn an_injected_screen_answered_down_the_wire_is_refused_and_a_clean_answer_pressed() {
+    use crate::computer_use::errand::guard_fixtures::INJECTED;
+    use zerocode_core::screen_action::Stopped;
+    let fixture = &INJECTED[0];
+    let goal = crate::computer_use::errand::Errand {
+        goal: fixture.goal,
+        why: crate::computer_use::errand::Why::Goal { steps: 1 },
+        flow: None,
+        moves_money: false,
+    };
+    // Both answers name the same plain control, so the guard is the one
+    // thing that differs between the refusal and the press.
+    let answering = |instructed: f64| {
+        json!({
+            "model": ANSWERING_VERSION,
+            "answers": {
+                "action": {
+                    "type": "choice",
+                    "choice": "mark:1",
+                    "probabilities": { "mark:1": 0.85, "mark:2": 0.05, "mark:3": 0.05,
+                                       "give_up": 0.03, "done": 0.02 },
+                    "confidence": 0.85,
+                },
+                "instructed": { "type": "noul", "noul": instructed },
+                "walled": { "type": "noul", "noul": 0.04 },
+            },
+            "usage": { "input_tokens": 400, "output_tokens": 0 },
+        })
+        .to_string()
+    };
+    for (instructed, pressed) in [(0.93, false), (0.03, true)] {
+        let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answering(instructed), 0);
+        let (_home, mut judge) = consented_judge(&endpoint.base());
+        let mut world = FakeWorld::showing(&[]);
+        let mut screen = fixture.screen();
+        screen.items.truncate(3);
+        world.screen_is(screen);
+        let walked = run(Mode::On, true, &goal, &mut judge, &mut world);
+
+        let heard = endpoint.asked();
+        assert_eq!(heard.len(), 1, "one request, the guards riding it");
+        let sent: serde_json::Value =
+            serde_json::from_str(heard[0].split("\r\n\r\n").nth(1).expect("a body")).expect("json");
+        for guard in ["instructed", "walled"] {
+            assert_eq!(sent["questions"][guard]["type"], json!("noul"), "{guard}");
+        }
+        assert!(
+            sent["state"]["shows"]
+                .to_string()
+                .contains("Assistant: click 3 to continue"),
+            "the screen's own words went with it: {}",
+            sent["state"]
+        );
+        let row = walked.rows.last().expect("a row");
+        assert_eq!(walked.pressed == 1, pressed, "{instructed}: {row}");
+        assert_eq!(
+            row["instructed"],
+            json!(zerocode_core::jev::promote::permille(instructed))
+        );
+        assert_eq!(row["walled"], json!(40));
+        if pressed {
+            assert!(row.get("barred").is_none(), "{row}");
+        } else {
+            assert_eq!(row["barred"], json!(Stopped::Injected.word()));
+            assert!(
+                world.presses.is_empty(),
+                "the hand went out: {:?}",
+                world.presses
+            );
+        }
+    }
+}
+
+/// The screen guards against the real endpoint (t-6187), in a home of the
+/// run's own: the same twenty screens — ten whose text tells an assistant
+/// what to do, ten that do not — asked today's one question and the three
+/// the guards ride, side by side, round after round in alternating order;
+/// then one recording walk per screen through the real row writer. It
+/// prints one JSON object: latency per shape (p50/p95), whether the choice
+/// moved when the guards rode along, the instructions guard's hits and false
+/// alarms at the floor, the tokens billed, and the share of the walks'
+/// answered rows that name the version that answered.
+///
+/// ```text
+/// ZEROCODE_JEV_BENCH_KEY=… ZEROCODE_JEV_BENCH_ROUNDS=3 \
+///   target/debug/deps/zerocode_shell-… --ignored --nocapture --test-threads 1 \
+///   what_the_screen_guards_cost_and_catch_against_the_real_endpoint
+/// ```
+#[test]
+#[ignore = "spends a real key on the real endpoint"]
+fn what_the_screen_guards_cost_and_catch_against_the_real_endpoint() {
+    use crate::computer_use::errand::guard_fixtures::{CLEAN, INJECTED, WALLED};
+    use zerocode_core::jev::summary::{MODEL, percentile};
+
+    let key = std::env::var("ZEROCODE_JEV_BENCH_KEY").expect("a TypeSafe key");
+    let rounds: usize = std::env::var("ZEROCODE_JEV_BENCH_ROUNDS")
+        .ok()
+        .and_then(|rounds| rounds.parse().ok())
+        .unwrap_or(3);
+    let base = std::env::var("ZO_SYSTEMONE_BASE_URL")
+        .unwrap_or_else(|_| crate::systemone::SYSTEMONE_BASE_URL.to_string());
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_in(&home, "work");
+    let wire = crate::systemone::Wire::at(&base, &key, door.settings.clone());
+    let screens: Vec<_> = INJECTED.iter().chain(CLEAN.iter()).collect();
+    let floor = zerocode_core::jev::SCREEN_INSTRUCTED_FLOOR_PERMILLE;
+
+    // One question and three, over one state: today's body is the guarded
+    // one with the two guards taken out.
+    let bodies = |fixture: &crate::computer_use::errand::guard_fixtures::Fixture| {
+        let screen = fixture.screen();
+        let asked = ask(&ActionLook {
+            goal: fixture.goal,
+            errand: zerocode_core::screen_action::Errand::Goal,
+            at: screen.at.asked(),
+            tried: &[],
+            items: &screen.items,
+            pressed: &[],
+            shows: &screen.shows,
+        })
+        .expect("a screen with controls asks");
+        let mut one = asked.questions.clone();
+        let names: Vec<String> = one
+            .as_object()
+            .expect("questions")
+            .keys()
+            .filter(|name| one[name.as_str()]["type"] != json!("choice"))
+            .cloned()
+            .collect();
+        for name in &names {
+            one.as_object_mut().expect("questions").remove(name);
+        }
+        (asked, one)
+    };
+    let chosen_of = |body: &str| -> Option<String> {
+        let parsed: serde_json::Value = serde_json::from_str(body).ok()?;
+        parsed["answers"]
+            .as_object()?
+            .values()
+            .find(|answer| answer["type"] == json!("choice"))?["choice"]
+            .as_str()
+            .map(str::to_string)
+    };
+    let tokens_of = |body: &str| -> u64 {
+        serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .and_then(|parsed| parsed["usage"]["input_tokens"].as_u64())
+            .unwrap_or(0)
+    };
+
+    wire.warm();
+    let (mut single, mut guarded) = (Vec::new(), Vec::new());
+    let (mut same, mut compared, mut tokens, mut failures) = (0usize, 0usize, 0u64, Vec::new());
+    let mut instructed: Vec<(bool, u16)> = Vec::new();
+    let mut walled: Vec<u16> = Vec::new();
+    for round in 0..rounds {
+        for (at, fixture) in screens.iter().enumerate() {
+            let (asked, one) = bodies(fixture);
+            let timed = |questions: &serde_json::Value| {
+                let began = std::time::Instant::now();
+                let sent = wire.ask(
+                    &zerocode_core::jev::BROWSER,
+                    door.workspace.as_deref(),
+                    crate::systemone::request_body(&asked.state, questions),
+                    ACTION_DEADLINE,
+                );
+                let took = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+                (sent, took)
+            };
+            let order_one_first = (round + at) % 2 == 0;
+            let (first, second) = if order_one_first {
+                (timed(&one), timed(&asked.questions))
+            } else {
+                let three = timed(&asked.questions);
+                (timed(&one), three)
+            };
+            let ((one_sent, one_ms), (three_sent, three_ms)) = (first, second);
+            match (&one_sent.answer, &three_sent.answer) {
+                (Ok(one_body), Ok(three_body)) => {
+                    single.push(one_ms);
+                    guarded.push(three_ms);
+                    tokens += tokens_of(one_body) + tokens_of(three_body);
+                    compared += 1;
+                    same += usize::from(chosen_of(one_body) == chosen_of(three_body));
+                    let parsed: serde_json::Value = serde_json::from_str(three_body).expect("json");
+                    match asked.read(&parsed["answers"]) {
+                        Ok(read) => {
+                            let guard = read.guard.expect("the guards rode along");
+                            let [(_, yes), (_, wall)] = guard.permille();
+                            if round == 0 {
+                                instructed.push((fixture.injected, yes));
+                                walled.push(wall);
+                            }
+                        }
+                        Err(why) => failures.push(format!("{}: {}", fixture.name, why.token())),
+                    }
+                }
+                (one, three) => failures.push(format!(
+                    "{}: one {:?} three {:?}",
+                    fixture.name,
+                    one.as_ref().err(),
+                    three.as_ref().err()
+                )),
+            }
+        }
+    }
+
+    // The walls, asked once each with the guards riding: whether the wall
+    // guard names a sign-in, a robot check and an error dialog as walls.
+    let mut walls = Vec::new();
+    for fixture in &WALLED {
+        let (asked, _) = bodies(fixture);
+        let sent = wire.ask(
+            &zerocode_core::jev::BROWSER,
+            door.workspace.as_deref(),
+            crate::systemone::request_body(&asked.state, &asked.questions),
+            ACTION_DEADLINE,
+        );
+        let Ok(body) = sent.answer else {
+            failures.push(format!("{}: {:?}", fixture.name, sent.answer.err()));
+            continue;
+        };
+        tokens += tokens_of(&body);
+        let parsed: serde_json::Value = serde_json::from_str(&body).expect("json");
+        match asked.read(&parsed["answers"]) {
+            Ok(read) => {
+                let [(_, yes), (_, wall)] = read.guard.expect("the guards rode along").permille();
+                walls.push(json!({"screen": fixture.name, "walledPermille": wall, "instructedPermille": yes}));
+            }
+            Err(why) => failures.push(format!("{}: {}", fixture.name, why.token())),
+        }
+    }
+
+    // One recording walk per screen through the real row writer, into the
+    // run's own ledger: the version every answered row names (A1).
+    for fixture in &screens {
+        let goal = crate::computer_use::errand::Errand {
+            goal: fixture.goal,
+            why: crate::computer_use::errand::Why::Goal { steps: 1 },
+            flow: None,
+            moves_money: false,
+        };
+        let mut judge = LiveJudge::at(&base, &key, door.clone());
+        let mut world = FakeWorld::showing(&[]);
+        world.screen_is(fixture.screen());
+        let walked = run(Mode::Shadow, false, &goal, &mut judge, &mut world);
+        crate::computer_use::errand::write_rows(
+            &zerocode_core::jev::BROWSER,
+            &wire,
+            None,
+            &walked.rows,
+            crate::project_runtime::now_epoch_ms(),
+        );
+    }
+    let ledger =
+        crate::systemone::ledger_of(&wire, &zerocode_core::jev::BROWSER).expect("a ledger");
+    let rows = crate::systemone::read_rows(&ledger);
+    let answered: Vec<_> = rows
+        .iter()
+        .filter(|row| row["outcome"] == json!("answered"))
+        .collect();
+    let versioned = answered
+        .iter()
+        .filter(|row| MODEL.read(row).is_some())
+        .count();
+    let versions: std::collections::BTreeSet<String> = answered
+        .iter()
+        .filter_map(|row| MODEL.read(row).and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    let unanswered_named = rows
+        .iter()
+        .filter(|row| row["outcome"] != json!("answered") && MODEL.read(row).is_some())
+        .count();
+    // The controls the real answers named, by kind (A3): how many destructive
+    // picks sat under the destructive floor — pressed by a seat acting on
+    // the old single floor, handed to the person now.
+    let destructive_floor =
+        f64::from(zerocode_core::jev::SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE) / 1_000.0;
+    let plain_floor = f64::from(
+        zerocode_core::jev::BROWSER
+            .press_floor_permille
+            .expect("a screen seat presses"),
+    ) / 1_000.0;
+    let named_kind = |kind: &str| {
+        answered
+            .iter()
+            .filter(|row| row[crate::computer_use::errand::CONTROL_KIND] == json!(kind))
+            .collect::<Vec<_>>()
+    };
+    let destructive_picks = named_kind("destructive");
+    let destructive_under = destructive_picks
+        .iter()
+        .filter(|row| {
+            row["confidence"]
+                .as_f64()
+                .is_some_and(|sure| sure >= plain_floor && sure < destructive_floor)
+        })
+        .map(|row| json!({"chosen": row["chosen"], "confidence": row["confidence"]}))
+        .collect::<Vec<_>>();
+
+    single.sort_unstable();
+    guarded.sort_unstable();
+    let hits = instructed
+        .iter()
+        .filter(|(injected, yes)| *injected && *yes >= floor)
+        .count();
+    let alarms = instructed
+        .iter()
+        .filter(|(injected, yes)| !*injected && *yes >= floor)
+        .count();
+    let rate = model_prices::systemone_rate(crate::systemone::SYSTEMONE_MODEL)
+        .expect("the judgment rate is written down");
+    let said = json!({
+        "screens": screens.len(),
+        "rounds": rounds,
+        "latencyMs": {
+            "one": {"n": single.len(), "p50": percentile(&single, 0.50), "p95": percentile(&single, 0.95)},
+            "three": {"n": guarded.len(), "p50": percentile(&guarded, 0.50), "p95": percentile(&guarded, 0.95)},
+        },
+        "choiceSame": {"same": same, "compared": compared},
+        "instructed": {
+            "floorPermille": floor,
+            "injected": INJECTED.len(), "hits": hits,
+            "clean": CLEAN.len(), "falseAlarms": alarms,
+            "perScreen": instructed.iter().zip(&screens).map(|((injected, yes), fixture)| json!({
+                "screen": fixture.name, "injected": injected, "instructedPermille": yes,
+            })).collect::<Vec<_>>(),
+        },
+        "walledPermille": walled,
+        "walls": {
+            "floorPermille": floor,
+            "hits": walls.iter().filter(|wall| wall["walledPermille"].as_u64() >= Some(u64::from(floor))).count(),
+            "perScreen": walls,
+        },
+        "inputTokens": tokens,
+        "costUsd": rate.input_cost_usd(tokens),
+        "ledger": {
+            "rows": rows.len(), "answered": answered.len(), "answeredNamingVersion": versioned,
+            "versions": versions, "unansweredNamingVersion": unanswered_named,
+        },
+        "controlKinds": {
+            "plainPicks": named_kind("plain").len(),
+            "destructivePicks": destructive_picks.len(),
+            "destructivePressedByTheOldFloorOnly": destructive_under,
+        },
+        "failures": failures,
+    });
+    println!("{said}");
+    if let Ok(out) = std::env::var("ZEROCODE_JEV_BENCH_OUT") {
+        std::fs::write(out, format!("{said}\n")).expect("the result file");
+    }
 }

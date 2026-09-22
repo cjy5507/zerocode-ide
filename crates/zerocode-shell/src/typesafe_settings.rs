@@ -16,8 +16,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zerocode_core::jev::{
-    CLASSIFIER_SETTING, ClassifierMode, JEV_USES, JevMode, JevUse, ROUTING, SMART_SETTINGS_KEY,
-    jev_use,
+    CLASSIFIER_SETTING, ClassifierMode, DEFAULT_MODEL, JEV_USES, JevMode, JevUse, MODEL_SETTING,
+    ROUTING, SMART_SETTINGS_KEY, jev_use, model_in, pin_in, pinned_model,
 };
 use zerocode_harness::{SERVICE_KEYCHAIN_SERVICE_PREFIX, TYPESAFE_API_KEY_ENV};
 
@@ -137,6 +137,33 @@ pub struct ClassifierRow {
     pub modes: Vec<ClassifierChoice>,
 }
 
+/// The model every request names, as the pane paints it (t-6187): the
+/// settings key it writes, the model the door asks for now, whether a person
+/// pinned it, and the alias an unpinned door asks — so the card never spells
+/// the alias itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelRow {
+    pub setting: &'static str,
+    pub model: String,
+    pub pinned: bool,
+    pub alias: &'static str,
+}
+
+impl ModelRow {
+    fn of(root: &Map<String, Value>) -> Self {
+        // Read by the core's own readers, as the door reads it: a value the
+        // door would ignore is shown as no pin.
+        let root = Value::Object(root.clone());
+        Self {
+            setting: MODEL_SETTING,
+            model: model_in(&root).to_string(),
+            pinned: pin_in(&root).is_some(),
+            alias: DEFAULT_MODEL,
+        }
+    }
+}
+
 /// What the pane paints: whether a key could be kept here, whether one is
 /// saved — never the key itself — and every switch as its reader reads it,
 /// with the modes it offers in the table's order.
@@ -145,6 +172,8 @@ pub struct ClassifierRow {
 pub struct TypeSafeSettings {
     pub keys_kept_here: bool,
     pub key_saved: bool,
+    /// The model every seat's request names — the pin, or the alias.
+    pub model: ModelRow,
     /// Every row of the use table, in the table's order — zo's two and the
     /// window's three on one card, because a person reads them together and
     /// the question each asks is the same: does anything go to the vendor,
@@ -172,6 +201,7 @@ pub fn read_settings(
     Ok(TypeSafeSettings {
         keys_kept_here,
         key_saved,
+        model: ModelRow::of(&root),
         switches: JEV_USES
             .iter()
             .map(|row| SwitchRow {
@@ -258,6 +288,16 @@ fn set_mode(path: &Path, row: &JevUse, mode: &str) -> Result<(), String> {
         .offered(mode)
         .ok_or_else(|| format!("알 수 없는 판단 모드입니다: {mode}"))?
         .key();
+    update_smart(path, |smart| {
+        smart.insert(row.setting.to_string(), Value::String(word.to_string()));
+    })
+}
+
+/// Change `smart` in zo's settings file and nothing else — the one door the
+/// seat switches, the classifier and the model pin write through. A missing
+/// `smart` is made; one that is not an object is refused rather than
+/// overwritten.
+fn update_smart(path: &Path, change: impl FnOnce(&mut Map<String, Value>)) -> Result<(), String> {
     crate::api_routers::update_zo_settings_root(path, |root| {
         let smart = root
             .entry(SMART_SETTINGS_KEY)
@@ -267,7 +307,7 @@ fn set_mode(path: &Path, row: &JevUse, mode: &str) -> Result<(), String> {
                 "settings.json의 {SMART_SETTINGS_KEY}가 JSON 객체가 아니라 바꾸지 않았습니다"
             ));
         };
-        smart.insert(row.setting.to_string(), Value::String(word.to_string()));
+        change(smart);
         Ok(())
     })
 }
@@ -288,21 +328,44 @@ pub fn set_classifier(path: &Path, mode: &str) -> Result<(), String> {
     let word = ClassifierMode::offered(mode)
         .ok_or_else(|| format!("알 수 없는 분류기 모드입니다: {mode}"))?
         .key();
-    crate::api_routers::update_zo_settings_root(path, |root| {
-        let smart = root
-            .entry(SMART_SETTINGS_KEY)
-            .or_insert_with(|| Value::Object(Map::new()));
-        let Value::Object(smart) = smart else {
-            return Err(format!(
-                "settings.json의 {SMART_SETTINGS_KEY}가 JSON 객체가 아니라 바꾸지 않았습니다"
-            ));
-        };
+    update_smart(path, |smart| {
         smart.insert(
             CLASSIFIER_SETTING.to_string(),
             Value::String(word.to_string()),
         );
-        Ok(())
     })
+}
+
+/// Pin the model every Jev request names (`smart.jevModel`, t-6187), or
+/// unpin it with an empty word, leaving every other key as it stood — and
+/// answer the row as the card paints it.
+///
+/// Its own door, like the classifier's: it is no seat's switch, and its word
+/// is a model id rather than a mode. Unpinned is no key at all, not the alias
+/// written down, so an unpinned file follows the alias wherever the vendor
+/// moves it. A word the door would not read as a pin — two words, a control
+/// character — is refused rather than written.
+///
+/// # Errors
+/// A pin that is not one word, a `smart` value that is not an object, or an
+/// unreadable or unwritable file.
+pub fn set_model(path: &Path, word: &str) -> Result<ModelRow, String> {
+    let pin = if word.trim().is_empty() {
+        None
+    } else {
+        Some(pinned_model(word).ok_or_else(|| format!("알 수 없는 모델 이름입니다: {word}"))?)
+    };
+    update_smart(path, |smart| match pin {
+        Some(pin) => {
+            smart.insert(MODEL_SETTING.to_string(), Value::String(pin.to_string()));
+        }
+        None => {
+            smart.remove(MODEL_SETTING);
+        }
+    })?;
+    Ok(ModelRow::of(&crate::api_routers::read_zo_settings_root(
+        path,
+    )?))
 }
 
 /// What `zo decision-shadow check --json` said: the model that answered and
@@ -448,6 +511,70 @@ mod tests {
         }
     }
 
+    /// The model pin (`smart.jevModel`, t-6187) is written where both
+    /// programs' door reads it and nothing else of the file moves; the card
+    /// reads it back as the door does. An empty pin unpins — the key leaves
+    /// the file and the alias is asked again — and a pin that is not one word
+    /// is refused rather than written, because the door would read it as no
+    /// pin at all.
+    #[test]
+    fn the_model_pin_is_written_where_the_door_reads_it_and_an_empty_one_unpins() {
+        use zerocode_core::jev::door::JevSettings;
+        use zerocode_core::jev::{DEFAULT_MODEL, MODEL_SETTING};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        let before = serde_json::json!({
+            "smart": {"plan": {"minEdge": 3}, "decisionShadow": "shadow"},
+            "model": "fable",
+        });
+        std::fs::write(&path, before.to_string()).expect("write");
+        let keys = HeldKeys::default();
+        let door = || {
+            let root: Value =
+                serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+            JevSettings::from_root(&root).model
+        };
+        let card = || read_settings(&path, &keys, true).expect("settings").model;
+
+        assert_eq!(card().model, DEFAULT_MODEL);
+        assert!(!card().pinned);
+        assert_eq!(card().alias, DEFAULT_MODEL);
+
+        let pinned = set_model(&path, " jev-1.13.0 ").expect("a version is a pin");
+        assert_eq!(pinned.model, "jev-1.13.0");
+        assert!(pinned.pinned);
+        assert_eq!(
+            door(),
+            "jev-1.13.0",
+            "the door reads the pin the card wrote"
+        );
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert_eq!(after["smart"][MODEL_SETTING], "jev-1.13.0");
+        assert_eq!(after["smart"]["plan"], before["smart"]["plan"]);
+        assert_eq!(after["smart"]["decisionShadow"], "shadow");
+        assert_eq!(
+            after["model"], "fable",
+            "zo's own model setting is not the pin"
+        );
+
+        for slip in ["jev 1.13", "jev-1.13.0\nx", "jev\t1"] {
+            assert!(set_model(&path, slip).is_err(), "{slip:?} was written");
+            assert_eq!(door(), "jev-1.13.0", "a refused pin left the file alone");
+        }
+
+        let unpinned = set_model(&path, "  ").expect("an empty pin unpins");
+        assert!(!unpinned.pinned);
+        assert_eq!(unpinned.model, DEFAULT_MODEL);
+        assert_eq!(door(), DEFAULT_MODEL);
+        let after: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json");
+        assert!(
+            after["smart"].get(MODEL_SETTING).is_none(),
+            "unpinned is no key, not the alias written down: {after}"
+        );
+    }
+
     /// Each switch reads as its reader reads it: a mode its row offers, in any
     /// case; a typo or a boolean is off; a `smart` that is not an object is
     /// refused rather than overwritten.
@@ -587,6 +714,7 @@ mod tests {
             "remove_typesafe_key",
             "set_jev_mode",
             "set_route_classifier",
+            "set_jev_model",
             "check_typesafe_key",
             "jev_summary",
         ] {
@@ -913,6 +1041,23 @@ mod tests {
         assert_eq!(CLASSIFIER_SETTING, "autoClassifier");
     }
 
+    /// The harness's fake backend answers the model pin the way the window
+    /// does (t-6187): the core's key and the core's alias, and the card
+    /// asks the pin's own door.
+    #[test]
+    fn the_settings_harness_mirrors_the_model_pin() {
+        let harness = include_str!("../../../ui/tests/settings.mjs");
+        assert!(
+            harness.contains(&format!("const JEV_MODEL_SETTING = \"{MODEL_SETTING}\"")),
+            "the harness pins another key than the door reads"
+        );
+        assert!(
+            harness.contains(&format!("const JEV_MODEL_ALIAS = \"{DEFAULT_MODEL}\"")),
+            "the harness's alias is not the core's"
+        );
+        assert!(harness.contains("case \"set_jev_model\""));
+    }
+
     /// The harness's fake backend answers the classifier the way the window
     /// does: the four words, what each one does, and which seat it gates.
     #[test]
@@ -1064,12 +1209,14 @@ mod tests {
                    "answeredShare":0.96,"answeredLowerBound":0.86,"called":48,"requests":48,
                    "redactedLines":100,"inputTokens":0,"p50Ms":230,"p95Ms":410,
                    "failures":[{"token":"not_consented","rows":2}]},
-           "costUsd":0.01,"riseFloorPermille":900,"clearsRiseFloor":false,"rowsToNextJudgment":10,
+           "costUsd":0.01,"askedModel":"jev-latest","model":"jev-1.13.0",
+           "riseFloorPermille":900,"clearsRiseFloor":false,"rowsToNextJudgment":10,
            "judged":{"window":{"rows":34,"answered":34,"answeredShare":1.0,"answeredLowerBound":0.89,
                      "called":34,"requests":34,"redactedLines":0,"inputTokens":0,"p50Ms":230,"p95Ms":410,
                      "failures":[]},"windowWanted":34,
                      "agreement":{"compared":44,"agreed":16,"lowerBound":0.24,"controlRows":0}},
-           "stand":"recording","applies":true,"verdict":{"verdict":"hold","line":"answered"},
+           "stand":"recording","applies":true,
+           "verdict":{"verdict":"hold","line":"answered","cutModel":"jev-1.12.0"},
            "days":[{"startMs":1789900000000,"tally":{"rows":3,"answered":3,"answeredShare":1.0,
                     "answeredLowerBound":0.43,"p50Ms":220},"agreement":{"compared":3,"agreed":1}}],
            "recent":[{"at":1790001955550,"outcome":"answered","elapsedMs":227,"cached":false,
@@ -1078,6 +1225,20 @@ mod tests {
         ]}"#;
         let seats = read_summary(stdout).expect("a summary");
         let summon = &seats[0];
+        // The id asked, the version that answered and the version cut away
+        // ride through to the card (t-6187).
+        assert_eq!(summon.asked_model.as_deref(), Some("jev-latest"));
+        assert_eq!(summon.model.as_deref(), Some("jev-1.13.0"));
+        assert_eq!(
+            summon
+                .verdict
+                .as_ref()
+                .and_then(|verdict| verdict.cut_model.as_deref()),
+            Some("jev-1.12.0")
+        );
+        let drawn = serde_json::to_value(summon).expect("serializes");
+        assert_eq!(drawn["askedModel"], "jev-latest");
+        assert_eq!(drawn["verdict"]["cutModel"], "jev-1.12.0");
         assert_eq!(summon.clears_rise_floor, Some(false));
         assert_eq!(summon.week.p50_ms, Some(230));
         assert_eq!(summon.week.called, 48);
@@ -1230,6 +1391,14 @@ pub struct SeatNumbers {
     pub agreement_week: Option<SeatAgreement>,
     #[serde(default)]
     pub cost_usd: Option<f64>,
+    /// The id the seat asks with — the person's pin or the alias — and the
+    /// version the newest answer named (t-6187): the two halves of the line
+    /// the card and the dashboard draw under every seat. Absent from a zo
+    /// older than the pin, and `model` from a seat nothing answered.
+    #[serde(default)]
+    pub asked_model: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     /// Today and the days before it, oldest first — the trend the dashboard
     /// draws; empty from a zo that counts only the week.
     #[serde(default)]
@@ -1318,6 +1487,10 @@ pub struct SeatVerdict {
     pub verdict: String,
     #[serde(default)]
     pub line: Option<String>,
+    /// The version the window's rows were cut away from at the last change
+    /// of version, beside the line it holds on (t-6187).
+    #[serde(default)]
+    pub cut_model: Option<String>,
 }
 
 /// One window of a seat's ledger, counted.

@@ -6,12 +6,12 @@ use std::time::Instant;
 
 use serde_json::{Map, json};
 use zerocode_core::browser_read::ReadBlock;
-use zerocode_core::jev::door::Refused;
+use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY, Refused};
 use zerocode_core::jev::{BROWSER_READ_CHROME, BROWSER_READ_CONTENT, SMART_SETTINGS_KEY};
 
 use super::*;
 use crate::cmd::browser::BrowserReadReport;
-use crate::systemone::tests::Endpoint;
+use crate::systemone::tests::{ANSWERING_VERSION, Endpoint};
 use crate::systemone::{SYSTEMONE_MODEL, TIMEOUT};
 
 const PANE: &str = "browser-7";
@@ -73,7 +73,7 @@ fn body(count: usize, chrome: &[(usize, f64)]) -> String {
         );
     }
     json!({
-        "model": SYSTEMONE_MODEL,
+        "model": ANSWERING_VERSION,
         "answers": answers,
         "usage": { "input_tokens": 700, "output_tokens": 0 },
     })
@@ -174,6 +174,11 @@ fn shadow_records_the_judgment_and_hands_back_the_page_whole() {
     assert_eq!(row["pane"], PANE);
     assert_eq!(row[READ_KEY], format!("{PANE}@1790050000000"));
     assert_eq!(row[REQUESTS_KEY], 1);
+    assert_eq!(
+        row[zerocode_core::jev::summary::MODEL.canonical],
+        ANSWERING_VERSION,
+        "the version that answered"
+    );
     assert_eq!(row[INPUT_TOKENS.canonical], 700);
     assert!(row[ELAPSED_MS.canonical].is_u64());
     assert!(row[AT.canonical].is_i64());

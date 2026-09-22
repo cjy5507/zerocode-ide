@@ -91,6 +91,175 @@ fn a_seat_with_no_marks_holds_at_the_sample_floor_whatever_its_kind() {
     }
 }
 
+/// Thirty marks that agree nine times in ten, the three that disagree the
+/// oldest, after a full window of answered rows — the ledger a seat keeps
+/// when the vendor's alias moves under it (t-6187). `on_b` of the marks,
+/// the newest, name version `B`; the rest name `A`; `None` writes no
+/// version at all, the shape of every row before versions were recorded.
+fn marks_across_a_version_change(seat: &JevUse, on_b: Option<usize>) -> Vec<Value> {
+    const MARKS: usize = 30;
+    const MISSES: usize = 3;
+    let wanted = window_wanted_for(seat).expect("a promoting seat");
+    let mut rows: Vec<Value> = (0..wanted)
+        .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 1}))
+        .collect();
+    rows.extend((0..MARKS).map(|n| {
+        let mut mark = json!({"at": wanted + n, "label": n, "agreed": n >= MISSES});
+        if let Some(on_b) = on_b {
+            mark[crate::jev::summary::MODEL.canonical] =
+                json!(if n + on_b >= MARKS { "B" } else { "A" });
+        }
+        mark
+    }));
+    rows
+}
+
+/// A version change cuts the marks a seat is judged on (t-6187): the
+/// newest five of thirty marks on `B` are five comparisons, not thirty, and
+/// the seat holds at the sample floor naming the version it cut away; the
+/// newest twenty-five on `B` are a sample of their own, and it rises. The
+/// same thirty marks with no version recorded are one sample of 27 in 30,
+/// which bounds under the agreement line.
+#[test]
+fn a_seat_is_judged_on_the_marks_of_the_version_that_answers_now() {
+    for seat in [&crate::jev::PLACEMENT, &crate::jev::SUMMON] {
+        let floor = seat.agreement_rows_wanted.expect("a label sample floor");
+        let judged =
+            judge_seat(seat, &marks_across_a_version_change(seat, Some(5))).expect("judged");
+        assert_eq!(
+            judged.verdict,
+            Verdict::Hold(Line::TooFewCompared {
+                compared: 5,
+                wanted: floor
+            }),
+            "{}: version A's marks judged version B",
+            seat.id
+        );
+        assert_eq!(
+            (judged.model.as_deref(), judged.cut.as_deref()),
+            (Some("B"), Some("A")),
+            "{}: the verdict names the version it was read on and the one it cut",
+            seat.id
+        );
+        assert_eq!(
+            judged.window.rows,
+            window_wanted_for(seat).expect("a promoting seat"),
+            "{}: requests that name no version are not cut",
+            seat.id
+        );
+        assert_eq!(
+            judge_seat(seat, &marks_across_a_version_change(seat, Some(25)))
+                .expect("judged")
+                .verdict,
+            Verdict::Rise,
+            "{}: twenty-five of version B's own marks, all agreeing",
+            seat.id
+        );
+        let whole = judge_seat(seat, &marks_across_a_version_change(seat, None)).expect("judged");
+        assert!(
+            matches!(whole.verdict, Verdict::Hold(Line::Agreement { .. })),
+            "{}: with no versions recorded the thirty are one sample",
+            seat.id
+        );
+        assert_eq!((whole.model, whole.cut), (None, None));
+    }
+}
+
+/// The cut is where the version changed, counted back from the newest row,
+/// and nowhere else (t-6187): rows that name no version belong to the
+/// nearest named row after them, a version that comes back after another is
+/// a new run of rows, and a request another version answered takes the
+/// window's requests with it while the marks written after it stay.
+#[test]
+fn the_rows_of_the_newest_version_start_after_the_last_row_another_answered() {
+    let answered = |at: i64, model: Option<&str>| {
+        let mut row = json!({"at": at, "outcome": "answered", "elapsedMs": 1});
+        if let Some(model) = model {
+            row[crate::jev::summary::MODEL.canonical] = json!(model);
+        }
+        row
+    };
+    let rows = [
+        answered(1, Some("B")),
+        answered(2, None),
+        answered(3, Some("A")),
+        json!({"at": 4, "outcome": "timeout"}),
+        answered(5, Some("B")),
+        json!({"at": 6, "label": "x", "agreed": true}),
+        answered(7, None),
+        json!({"at": 8, "transition": ROSE}),
+    ];
+    let version = on_the_newest_version(&rows);
+    assert_eq!((version.model, version.cut), (Some("B"), Some("A")));
+    assert_eq!(
+        version.requests,
+        &rows[3..],
+        "after the newest request A answered"
+    );
+    assert_eq!(version.marks, &rows[3..]);
+    assert_eq!(
+        asked_toward_judgment(&rows),
+        3,
+        "the timeout, B and the unnamed answer"
+    );
+
+    let unnamed = [
+        answered(1, None),
+        json!({"at": 2, "label": "x", "agreed": false}),
+    ];
+    let version = on_the_newest_version(&unnamed);
+    assert_eq!((version.model, version.cut), (None, None));
+    assert_eq!(
+        version.requests,
+        &unnamed[..],
+        "a ledger with no versions is read whole"
+    );
+
+    // A label that names the version it graded is cut with that version,
+    // though written after the other version's last request — and it does
+    // not move which version is answering now: a request says that.
+    let late = [
+        answered(1, Some("A")),
+        answered(2, Some("B")),
+        json!({"at": 3, "label": "a", "agreed": false, "model": "A"}),
+        json!({"at": 4, "label": "b", "agreed": true}),
+    ];
+    let version = on_the_newest_version(&late);
+    assert_eq!((version.model, version.cut), (Some("B"), Some("A")));
+    assert_eq!(version.requests, &late[1..]);
+    assert_eq!(
+        version.marks,
+        &late[3..],
+        "the late label of A's answer is A's"
+    );
+}
+
+/// A seat already acting is judged on the new version's rows and keeps
+/// acting while they are too few to say anything — the standing is read from
+/// the whole ledger — and the judgment's cadence starts again with the
+/// version, so the screen's countdown and the judgment still land on one row.
+#[test]
+fn a_change_of_version_restarts_the_window_and_leaves_the_standing() {
+    let seat = &crate::jev::SUMMON;
+    let wanted = window_wanted_for(seat).expect("summon rises");
+    let row = |at: usize, model: &str| json!({"at": at, "outcome": "answered", "elapsedMs": 1, "agreed": true, "model": model});
+    let mut rows: Vec<Value> = (0..wanted).map(|at| row(at, "A")).collect();
+    rows.push(json!({"at": wanted, (TRANSITION.canonical): ROSE}));
+    rows.extend((0..3).map(|n| row(wanted + 1 + n, "B")));
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(judged.verdict, Verdict::Keep, "{judged:?}");
+    assert_eq!(judged.window.rows, 3);
+    assert_eq!(asked_toward_judgment(&rows), 3);
+    assert_eq!(
+        rows_to_next_judgment(seat, asked_toward_judgment(&rows)),
+        Some(wanted - 3)
+    );
+    assert!(
+        !judgment_due(seat, &rows),
+        "a judgment of three rows has one thing to say"
+    );
+}
+
 #[test]
 fn one_forgiven_timeout_does_not_forgive_a_second_one() {
     for seat in [&crate::jev::RECALL, &crate::jev::PLACEMENT] {

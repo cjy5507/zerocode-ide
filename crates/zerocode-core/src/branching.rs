@@ -404,6 +404,7 @@ mod tests {
             chosen: Chosen::Mark(chosen),
             probabilities,
             confidence: 0.6,
+            guard: None,
         }
     }
 

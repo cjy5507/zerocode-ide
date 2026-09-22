@@ -154,6 +154,8 @@ function jevSeatWords(held) {
   if (held.week.p95Ms !== null && held.week.p95Ms !== undefined) {
     words.push(t("settings.typesafe.seatP95", "p95 {{ms}} ms", { ms: String(held.week.p95Ms) }));
   }
+  const version = jevVersionWords(held);
+  if (version) words.push(version);
   if (held.verdict) {
     const because = jevLineWords(held.verdict.line);
     words.push(held.applies
@@ -161,6 +163,38 @@ function jevSeatWords(held) {
       : t("settings.typesafe.seatHolding", "아직 기록만 합니다 — {{because}}", { because }));
   }
   return words;
+}
+
+/* Which id the seat asked with and which version answered it (t-6187): the
+ * pin or the alias beside the `model` the newest answer named. Empty for a
+ * seat nothing answered, or from a zo older than the pin. The card and the
+ * dashboard both read it here, so the two say it the same way. */
+function jevModelWords(held) {
+  if (!held.model || !held.askedModel) return "";
+  return t("settings.typesafe.seatVersion", "물은 {{asked}} · 답한 {{model}}",
+    { asked: held.askedModel, model: held.model });
+}
+
+/* The version a change of version cut away from the judged window, when one
+ * did — the reason a thin window gives for itself. */
+function jevCutWords(held) {
+  if (!held.verdict?.cutModel) return "";
+  return t("settings.typesafe.seatCut", "{{cut}} 행은 창에서 뺌", { cut: held.verdict.cutModel });
+}
+
+/* The card's version line: the models, the rows the judged window holds and
+ * the version cut away. Before the verdict's words, which stay last. */
+function jevVersionWords(held) {
+  const models = jevModelWords(held);
+  if (!models) return "";
+  const words = [models];
+  if (held.judged) {
+    words.push(t("settings.typesafe.seatWindowRows", "창 안 {{rows}}행",
+      { rows: String(held.judged.window.rows) }));
+  }
+  const cut = jevCutWords(held);
+  if (cut) words.push(cut);
+  return words.join(" · ");
 }
 
 /* The one line under a seat's switch, and the same line in the dashboard's
@@ -479,10 +513,14 @@ function jevWhyCell(held, byHand) {
   cell.append(verdict);
   if (held.week.rows === 0) return cell;
   const facts = [];
+  const models = jevModelWords(held);
+  if (models) facts.push(models);
   if (held.judged) {
     facts.push(t("jev.window", "창 {{rows}}/{{wanted}}행", {
       rows: String(held.judged.window.rows), wanted: String(held.judged.windowWanted) }));
   }
+  const cut = jevCutWords(held);
+  if (cut) facts.push(cut);
   if (held.clearsRiseFloor !== null && held.clearsRiseFloor !== undefined) {
     facts.push(held.clearsRiseFloor
       ? t("jev.clearsFloor", "답률 하한이 문턱({{floor}}‰)을 넘음", { floor: String(held.riseFloorPermille) })

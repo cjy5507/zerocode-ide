@@ -71,7 +71,10 @@ fn answered(asked: &ActionAsk, choice: &str, confidence: f64) -> Value {
             "choice": choice,
             "probabilities": Value::Object(probabilities),
             "confidence": confidence,
-        }
+        },
+        // The two guards, answered as a clean screen's would be.
+        "instructed": { "type": "noul", "noul": 0.02 },
+        "walled": { "type": "noul", "noul": 0.03 },
     })
 }
 
@@ -132,7 +135,10 @@ fn the_slice_that_is_cut_is_the_slice_that_may_be_chosen() {
     let past = answered(&asked, GIVE_UP, 0.5);
     let mut wrong = past.clone();
     wrong["action"]["choice"] = json!(format!("mark:{}", MAX_ACTION_CANDIDATES + 1));
-    assert_eq!(asked.read(&wrong), Err(ActionRefusal::UnknownOption));
+    assert_eq!(
+        asked.read(&wrong),
+        Err(ActionRefusal::Choice(ChoiceRefusal::UnknownOption))
+    );
 }
 
 #[test]
@@ -183,60 +189,93 @@ fn every_broken_rule_discards_the_answer_whole() {
 
     let mut missing = good.clone();
     missing.as_object_mut().unwrap().remove("action");
-    assert_eq!(asked.read(&missing), Err(ActionRefusal::NoAnswer));
+    assert_eq!(
+        asked.read(&missing),
+        Err(ActionRefusal::Choice(ChoiceRefusal::NoAnswer))
+    );
 
     let mut wrong_kind = good.clone();
     wrong_kind["action"]["type"] = json!("score");
-    assert_eq!(asked.read(&wrong_kind), Err(ActionRefusal::NotAChoice));
+    assert_eq!(
+        asked.read(&wrong_kind),
+        Err(ActionRefusal::Choice(ChoiceRefusal::NotAChoice))
+    );
 
     let mut invented = good.clone();
     invented["action"]["choice"] = json!("mark:99");
-    assert_eq!(asked.read(&invented), Err(ActionRefusal::UnknownOption));
+    assert_eq!(
+        asked.read(&invented),
+        Err(ActionRefusal::Choice(ChoiceRefusal::UnknownOption))
+    );
 
     let mut not_a_mark = good.clone();
     not_a_mark["action"]["choice"] = json!("click the blue one");
-    assert_eq!(asked.read(&not_a_mark), Err(ActionRefusal::UnknownOption));
+    assert_eq!(
+        asked.read(&not_a_mark),
+        Err(ActionRefusal::Choice(ChoiceRefusal::UnknownOption))
+    );
 
     let mut short_keys = good.clone();
     short_keys["action"]["probabilities"] = json!({ "mark:1": 1.0 });
-    assert_eq!(asked.read(&short_keys), Err(ActionRefusal::Keys));
+    assert_eq!(
+        asked.read(&short_keys),
+        Err(ActionRefusal::Choice(ChoiceRefusal::Keys))
+    );
 
     let mut stranger_key = good.clone();
     stranger_key["action"]["probabilities"] = json!({ "mark:1": 0.5, "mark:4": 0.5 });
-    assert_eq!(asked.read(&stranger_key), Err(ActionRefusal::Keys));
+    assert_eq!(
+        asked.read(&stranger_key),
+        Err(ActionRefusal::Choice(ChoiceRefusal::Keys))
+    );
 
     let mut unbalanced = good.clone();
     unbalanced["action"]["probabilities"] = json!({ "mark:1": 0.2, GIVE_UP: 0.2 });
-    assert_eq!(asked.read(&unbalanced), Err(ActionRefusal::NotOne));
+    assert_eq!(
+        asked.read(&unbalanced),
+        Err(ActionRefusal::Choice(ChoiceRefusal::NotOne))
+    );
 
     let mut out_of_range = good.clone();
     out_of_range["action"]["probabilities"] = json!({ "mark:1": 1.4, GIVE_UP: -0.4 });
-    assert_eq!(asked.read(&out_of_range), Err(ActionRefusal::OutOfRange));
+    assert_eq!(
+        asked.read(&out_of_range),
+        Err(ActionRefusal::Choice(ChoiceRefusal::OutOfRange))
+    );
 
     let mut not_a_number = good.clone();
     not_a_number["action"]["probabilities"] = json!({ "mark:1": "많이", GIVE_UP: 0.0 });
-    assert_eq!(asked.read(&not_a_number), Err(ActionRefusal::OutOfRange));
+    assert_eq!(
+        asked.read(&not_a_number),
+        Err(ActionRefusal::Choice(ChoiceRefusal::OutOfRange))
+    );
 
     let mut no_confidence = good.clone();
     no_confidence["action"]
         .as_object_mut()
         .unwrap()
         .remove("confidence");
-    assert_eq!(asked.read(&no_confidence), Err(ActionRefusal::OutOfRange));
+    assert_eq!(
+        asked.read(&no_confidence),
+        Err(ActionRefusal::Choice(ChoiceRefusal::OutOfRange))
+    );
 
     let mut wild_confidence = good;
     wild_confidence["action"]["confidence"] = json!(1.5);
-    assert_eq!(asked.read(&wild_confidence), Err(ActionRefusal::OutOfRange));
+    assert_eq!(
+        asked.read(&wild_confidence),
+        Err(ActionRefusal::Choice(ChoiceRefusal::OutOfRange))
+    );
 }
 
 #[test]
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(SCREEN_ACTION_RUBRIC_VERSION, 4);
+    assert_eq!(SCREEN_ACTION_RUBRIC_VERSION, 5);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "24ffa8989582fd7e"
+        "54b6e19666bbd5e0"
     );
 }
 
@@ -270,7 +309,10 @@ fn a_goal_walk_may_say_it_is_there_and_a_stopped_walk_may_not() {
     );
     let mut said = answered(&clear, GIVE_UP, 0.8);
     said["action"]["choice"] = json!(DONE);
-    assert_eq!(clear.read(&said), Err(ActionRefusal::UnknownOption));
+    assert_eq!(
+        clear.read(&said),
+        Err(ActionRefusal::Choice(ChoiceRefusal::UnknownOption))
+    );
 }
 
 #[test]
@@ -384,17 +426,140 @@ fn a_second_readers_answer_is_judged_against_the_offered_set() {
     );
     assert_eq!(
         asked.choice_of("mark:4", 0.9).unwrap_err(),
-        ActionRefusal::UnknownOption
+        ActionRefusal::Choice(ChoiceRefusal::UnknownOption)
     );
     assert_eq!(
         asked.choice_of("", 0.9).unwrap_err(),
-        ActionRefusal::UnknownOption
+        ActionRefusal::Choice(ChoiceRefusal::UnknownOption)
     );
     for not_a_share in [-0.1, 1.01, f64::NAN] {
         assert_eq!(
             asked.choice_of("mark:3", not_a_share).unwrap_err(),
-            ActionRefusal::NotOne,
+            ActionRefusal::Choice(ChoiceRefusal::NotOne),
             "{not_a_share}"
         );
     }
+}
+
+/// Beside its choice a screen question asks two Nouls over the same state
+/// (t-6187): whether the screen's text instructs an assistant what to do,
+/// and whether the screen is a wall in front of the page the goal expects.
+/// One request, the state charged once; each Noul says what yes and no mean.
+#[test]
+fn a_screen_question_asks_its_two_guards_beside_the_choice() {
+    let items = [item(1, "button", "저장"), item(2, "link", "취소")];
+    let asked = ask(&a_goal(&items, &[])).expect("a question");
+    let questions = asked.questions.as_object().expect("questions");
+    let mut names: Vec<&str> = questions.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    assert_eq!(names, ["action", "instructed", "walled"]);
+    for guard in ["instructed", "walled"] {
+        assert_eq!(questions[guard]["type"], "noul", "{guard}");
+        assert!(
+            questions[guard]["instructions"]
+                .as_str()
+                .is_some_and(|words| !words.is_empty()),
+            "{guard}"
+        );
+        assert!(
+            questions[guard]["criteria"]["true"].is_string()
+                && questions[guard]["criteria"]["false"].is_string(),
+            "{guard}: a Noul says what yes and no mean"
+        );
+    }
+}
+
+/// The guards are read with the choice, each a probability of yes; a broken
+/// guard discards the answer whole, by the guard's own word (t-6187). A
+/// second reader's closed choice answers no guard at all.
+#[test]
+fn the_guards_are_read_with_the_choice_and_a_broken_one_refuses_the_answer() {
+    let items = [item(1, "button", "저장"), item(2, "link", "취소")];
+    let asked = ask(&a_goal(&items, &[])).expect("a question");
+    let mut answers = answered(&asked, "mark:1", 0.8);
+    answers["instructed"]["noul"] = json!(0.91);
+    let read = asked.read(&answers).expect("a whole answer");
+    assert_eq!(read.chosen, Chosen::Mark(1));
+    assert_eq!(
+        read.guard,
+        Some(Guard {
+            instructed: 0.91,
+            walled: 0.03
+        })
+    );
+    let mut blind = answers.clone();
+    blind.as_object_mut().expect("answers").remove("walled");
+    assert_eq!(
+        asked.read(&blind),
+        Err(ActionRefusal::Guard(NoulRefusal::NoAnswer))
+    );
+    let mut wild = answers.clone();
+    wild["instructed"]["noul"] = json!(7);
+    assert_eq!(
+        asked.read(&wild),
+        Err(ActionRefusal::Guard(NoulRefusal::OutOfRange))
+    );
+    assert_eq!(
+        ActionRefusal::Guard(NoulRefusal::OutOfRange).token(),
+        NoulRefusal::OutOfRange.token()
+    );
+    assert_eq!(
+        asked.choice_of("mark:1", 0.9).expect("offered").guard,
+        None,
+        "a second reader answers no guard"
+    );
+}
+
+/// A guard at its floor stops a press and one under it does not; an
+/// instruction is named before a wall; a row keeps both per thousand under
+/// the guards' own names (t-6187).
+#[test]
+fn a_guard_at_its_floor_stops_the_press_and_an_instruction_is_named_first() {
+    let floor = f64::from(crate::jev::SCREEN_INSTRUCTED_FLOOR_PERMILLE) / 1000.0;
+    let under = floor - crate::jev::ANSWER_STEP;
+    assert_eq!(
+        Guard {
+            instructed: under,
+            walled: under
+        }
+        .stops(),
+        None
+    );
+    assert_eq!(
+        Guard {
+            instructed: floor,
+            walled: 0.0
+        }
+        .stops(),
+        Some(Stopped::Injected)
+    );
+    assert_eq!(
+        Guard {
+            instructed: 0.0,
+            walled: floor
+        }
+        .stops(),
+        Some(Stopped::Walled)
+    );
+    assert_eq!(
+        Guard {
+            instructed: 0.95,
+            walled: 0.99
+        }
+        .stops(),
+        Some(Stopped::Injected),
+        "obeying the screen is the worse press"
+    );
+    assert_eq!(
+        (Stopped::Injected.word(), Stopped::Walled.word()),
+        ("injected", "walled")
+    );
+    assert_eq!(
+        Guard {
+            instructed: 0.91,
+            walled: 0.03
+        }
+        .permille(),
+        [("instructed", 910), ("walled", 30)]
+    );
 }

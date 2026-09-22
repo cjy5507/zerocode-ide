@@ -30,16 +30,22 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
-use zerocode_core::jev::door::{self, JevSettings, Memo, Memoed, Passed, Refused};
+use zerocode_core::jev::door::{
+    self, JevSettings, Memo, Memoed, Passed, REDACTED_LINES_KEY, REQUESTS_KEY, Refused,
+};
+use zerocode_core::jev::summary::MODEL;
 use zerocode_core::jev::{JevUse, count, memo};
 
 use crate::api_routers::{Keychain, RouterKeys};
 
 /// The public endpoint, its route and the model the SDKs call by default —
 /// the same three words zo's client holds, because they are the vendor's.
+/// The model is the pin's default (`smart.jevModel`, t-6187): a body is
+/// built with it, and the door writes the person's pin over it
+/// ([`door::may_send`]).
 pub const SYSTEMONE_BASE_URL: &str = "https://api.typesafe.ai";
 pub const SYSTEMONE_PATH: &str = "/v1/systemone";
-pub const SYSTEMONE_MODEL: &str = "jev-latest";
+pub const SYSTEMONE_MODEL: &str = zerocode_core::jev::DEFAULT_MODEL;
 
 /// Test and diagnostic origin override, for the same reason zo's client has
 /// one: only a call that crosses a real socket catches a wire-shaped failure.
@@ -91,9 +97,24 @@ pub fn token_for(status: u16) -> String {
 pub fn request_body(state: &Value, questions: &Value) -> Value {
     json!({
         "state": state,
-        "model": SYSTEMONE_MODEL,
+        (door::WIRE_MODEL_KEY): SYSTEMONE_MODEL,
         "questions": questions,
     })
+}
+
+/// The version an answer's body says answered it — its own `model`
+/// (`jev-1.13.0` for a request that asked `jev-latest`) — or `None` for a
+/// body that is not an answer or names none. Read by the wire and by the
+/// memo's rows alike, so a remembered answer names the version that gave it.
+#[must_use]
+pub fn answered_by(body: &str) -> Option<String> {
+    serde_json::from_str::<Value>(body)
+        .ok()?
+        .get(door::WIRE_MODEL_KEY)?
+        .as_str()
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_string)
 }
 
 /// Where one use's rows live: under zo's config home, in the folder the Jev
@@ -223,12 +244,51 @@ fn base_url() -> String {
         .unwrap_or_else(|| SYSTEMONE_BASE_URL.to_string())
 }
 
-/// What asking cost at the Jev door: the requests it sent, and the lines the
-/// door withheld from them — the two numbers every Jev ledger row carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What asking came to at the Jev door: the requests it sent, the lines the
+/// door withheld from them, and the version that answered — what every Jev
+/// ledger row the window writes carries.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Spent {
     pub requests: u32,
     pub redacted_lines: usize,
+    /// The version the answer named ([`answered_by`], t-6187); `None` when
+    /// nothing answered — a refusal at the door, a failure, a wall.
+    pub model: Option<String>,
+}
+
+impl Spent {
+    /// Write this ask's account onto `row`: the door's two counts and, when
+    /// an answer named one, the version that answered, under the key table's
+    /// spelling ([`MODEL`]).
+    ///
+    /// The one writer of those keys for every seat the window asks — each
+    /// seat writes its own words and hands its row here — so a seat cannot
+    /// forget the version, and a row nothing answered carries none.
+    pub fn stamp(&self, row: &mut Value) {
+        let Some(fields) = row.as_object_mut() else {
+            return;
+        };
+        fields.insert(REQUESTS_KEY.to_string(), json!(self.requests));
+        fields.insert(REDACTED_LINES_KEY.to_string(), json!(self.redacted_lines));
+        if let Some(model) = self.model.as_deref() {
+            fields.insert(MODEL.canonical.to_string(), json!(model));
+        }
+    }
+
+    /// What several asks of one judgment came to together — a sharded
+    /// question's requests side by side: their requests and withheld lines
+    /// added, and the version the first answer among them named.
+    #[must_use]
+    pub fn together<'spent>(asks: impl IntoIterator<Item = &'spent Self>) -> Self {
+        asks.into_iter().fold(Self::default(), |mut all, one| {
+            all.requests += one.requests;
+            all.redacted_lines += one.redacted_lines;
+            if all.model.is_none() {
+                all.model.clone_from(&one.model);
+            }
+            all
+        })
+    }
 }
 
 /// What one question came to.
@@ -444,10 +504,7 @@ impl Wire {
         let deadline = Instant::now() + deadline;
         let refused = |refusal: Refused| Asked {
             answer: Err(refusal.token().to_string()),
-            spent: Spent {
-                requests: 0,
-                redacted_lines: 0,
-            },
+            spent: Spent::default(),
             request_bytes: 0,
             memo: None,
         };
@@ -473,19 +530,23 @@ impl Wire {
                 spent: Spent {
                     requests: 0,
                     redacted_lines,
+                    // The version that gave the remembered answer, read off
+                    // the body the memo kept whole.
+                    model: answered_by(&remembered.answer),
                 },
                 request_bytes,
                 memo,
             };
         }
-        let spent = Spent {
-            requests: 1,
-            redacted_lines,
-        };
         // Every caller is sync — a walk drives sync roads, a question asked
         // off the beat has a thread of its own — and blocks on the window's
         // runtime the same way.
         let answer = tauri::async_runtime::block_on(self.ask_once(&key, cleared, deadline));
+        let spent = Spent {
+            requests: 1,
+            redacted_lines,
+            model: answer.as_deref().ok().and_then(answered_by),
+        };
         Asked {
             answer,
             spent,

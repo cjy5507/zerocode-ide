@@ -11,6 +11,12 @@ use std::time::Duration;
 
 use super::*;
 
+/// The version a fake endpoint's answers name as the one that answered: what
+/// the real endpoint says for a request that asked the alias — a version, not
+/// the alias (docs.typesafe.ai/api; every one of the 3,179 zo rows on this
+/// machine that names a version names this one, 2026-09-23).
+pub(crate) const ANSWERING_VERSION: &str = "jev-1.13.0";
+
 /// A loopback System One that answers every request it is sent with one
 /// status and one body, and remembers each request as it arrived.
 pub(crate) struct Endpoint {
@@ -210,6 +216,81 @@ fn the_door_is_the_only_road_to_the_wire_in_the_window() {
             .all(|path| path.ends_with("src/systemone.rs") || test_file(path)),
         "the System One route is named outside the window's wire: {naming:?}"
     );
+}
+
+/// What the wire hands back names the version that answered — the answer's
+/// own `model`, not the alias the request asked for — and the one writer
+/// every seat's row goes through puts it on the row under the key table's
+/// spelling, beside the door's two counts (t-6187). An ask nothing answered
+/// names no version, and its row carries no such key: a refusal at the door,
+/// and a wall the answer never came back inside. The request itself names
+/// the person's pin, whatever the body was built with.
+#[test]
+fn an_answer_names_its_version_on_the_row_and_an_unanswered_ask_names_none() {
+    use zerocode_core::jev::STALL;
+    use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
+    use zerocode_core::jev::summary::MODEL;
+
+    let home = tempfile::tempdir().expect("a zo home");
+    let workspace = tempfile::tempdir().expect("a workspace");
+    let settings = home.path().join("settings.json");
+    std::fs::write(
+        &settings,
+        json!({"smart": {"jevModel": "jev-1.13.0",
+                         "jev": {"workspaces": [door::resolved_path(workspace.path())]}}})
+        .to_string(),
+    )
+    .expect("settings");
+    let answer = json!({"model": "jev-1.13.0", "answers": {},
+                        "usage": {"input_tokens": 1, "output_tokens": 0}});
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", answer.to_string(), 0);
+    let wire = Wire::at(&endpoint.base(), "test-key", Some(settings.clone()));
+    let body = request_body(&json!({"screen": "a quiet pane"}), &json!({}));
+    let asked = wire.ask(
+        &STALL,
+        Some(workspace.path()),
+        body.clone(),
+        Duration::from_secs(5),
+    );
+    assert_eq!(asked.spent.model.as_deref(), Some("jev-1.13.0"));
+    let mut row = json!({"outcome": "answered"});
+    asked.spent.stamp(&mut row);
+    assert_eq!(row[MODEL.canonical], json!("jev-1.13.0"));
+    assert_eq!(row[REQUESTS_KEY], json!(1));
+    assert_eq!(row[REDACTED_LINES_KEY], json!(0));
+    let sent = endpoint.asked();
+    let sent: Value = serde_json::from_str(sent[0].split("\r\n\r\n").nth(1).expect("a body"))
+        .expect("the body is JSON");
+    assert_eq!(
+        sent["model"],
+        json!("jev-1.13.0"),
+        "the request asked the pin"
+    );
+
+    // Refused at the door: no settings consent to nothing, and nothing
+    // answered the ask.
+    let refused = Wire::at(&endpoint.base(), "test-key", None).ask(
+        &STALL,
+        Some(workspace.path()),
+        body.clone(),
+        Duration::from_secs(5),
+    );
+    assert!(refused.answer.is_err());
+    let mut row = json!({"outcome": "not_consented"});
+    refused.spent.stamp(&mut row);
+    assert_eq!(refused.spent.model, None);
+    assert!(row.get(MODEL.canonical).is_none(), "{row}");
+
+    // Past the wall: an answer that arrives too late is no answer.
+    let slow = Endpoint::serving("HTTP/1.1 200 OK", answer.to_string(), 500);
+    let late = Wire::at(&slow.base(), "test-key", Some(settings)).ask(
+        &STALL,
+        Some(workspace.path()),
+        body,
+        Duration::from_millis(100),
+    );
+    assert_eq!(late.answer, Err(TIMEOUT.to_string()));
+    assert_eq!(late.spent.model, None);
 }
 
 /// Every request `endpoint` has heard once it has heard `many` of them, or

@@ -220,95 +220,14 @@ pub fn desktop_run_output(bytes: &[u8]) -> (String, bool) {
     (String::from_utf8_lossy(kept).into_owned(), cut)
 }
 
-/// The last step where money moves or things vanish (§1.5): the kinds a
-/// person confirms by default, each with the words a control carries in the
-/// five languages the window speaks. The helper matches labels against
-/// these; the window asks; the person presses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ConfirmKind {
-    Payment,
-    Transfer,
-    Delete,
-}
-
-pub const CONFIRM_WORDS_PAYMENT: &[&str] = &[
-    "결제",
-    "구매",
-    "주문",
-    "pay",
-    "buy",
-    "purchase",
-    "place order",
-    "checkout",
-    "支払",
-    "購入",
-    "注文",
-    "支付",
-    "购买",
-    "下单",
-    "pagar",
-    "comprar",
-];
-pub const CONFIRM_WORDS_TRANSFER: &[&str] = &[
-    "이체",
-    "송금",
-    "transfer",
-    "send money",
-    "wire",
-    "振込",
-    "送金",
-    "转账",
-    "汇款",
-    "transferir",
-    "enviar dinero",
-];
-pub const CONFIRM_WORDS_DELETE: &[&str] = &[
-    "삭제", "제거", "delete", "remove", "erase", "削除", "删除", "eliminar", "borrar",
-];
+/// The kinds a person confirms by default and the words their controls
+/// carry live in [`crate::guarded`], the one table a walk by judgment reads
+/// too (t-6187); the gate reads them from there.
+pub use crate::guarded::{ConfirmKind, confirm_kind_of};
 
 /// How long the window waits for the person's answer before the press is
 /// refused as unanswered.
 pub const COMPUTER_CONFIRM_TIMEOUT_MS: u64 = 120_000;
-
-impl ConfirmKind {
-    pub const ALL: [Self; 3] = [Self::Payment, Self::Transfer, Self::Delete];
-
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Payment => "payment",
-            Self::Transfer => "transfer",
-            Self::Delete => "delete",
-        }
-    }
-
-    #[must_use]
-    pub fn parse(word: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|kind| kind.as_str() == word.trim().to_lowercase())
-    }
-
-    #[must_use]
-    pub const fn words(self) -> &'static [&'static str] {
-        match self {
-            Self::Payment => CONFIRM_WORDS_PAYMENT,
-            Self::Transfer => CONFIRM_WORDS_TRANSFER,
-            Self::Delete => CONFIRM_WORDS_DELETE,
-        }
-    }
-}
-
-/// Which kind a control's label answers to, if any — the table's order is
-/// the tie-break, the match is a case-insensitive fragment.
-#[must_use]
-pub fn confirm_kind_of(label: &str) -> Option<ConfirmKind> {
-    let shown = label.to_lowercase();
-    ConfirmKind::ALL
-        .into_iter()
-        .find(|kind| kind.words().iter().any(|word| shown.contains(word)))
-}
 
 /// The helper's `confirmation_required` message, `<kind>: <label>`, read back.
 #[must_use]

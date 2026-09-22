@@ -117,6 +117,23 @@ impl JevDoor {
         }
     }
 
+    /// The model every request this door clears names — the person's pin
+    /// (`smart.jevModel`, t-6187), or the vendor's alias when they pinned
+    /// none. The door writes it into the body it clears, whatever the seat
+    /// built the body with; a seat reads it here only to key what it
+    /// remembers by the model it actually asked.
+    #[must_use]
+    pub fn model(&self) -> &str {
+        &self.settings.model
+    }
+
+    /// [`Self::model`] as the fingerprint an in-process memo keys on
+    /// ([`model_key`]).
+    #[must_use]
+    pub fn model_key(&self) -> u64 {
+        model_key(self.model())
+    }
+
     /// Ask the door about one request of `row`'s whose body is `body`; cleared,
     /// the request is counted in the day.
     ///
@@ -243,6 +260,14 @@ impl Timed {
         let one_request = !self.cached && self.retries == 0 && !self.hedge_fired;
         (self.outcome == door::ANSWERED_OUTCOME && one_request).then_some(self.elapsed_ms)
     }
+}
+
+/// A requested model as the fingerprint an in-process memo keys on, so a
+/// judgment one pin answered is never recalled under another (t-6187). One
+/// reading for every seat that keeps a memo.
+#[must_use]
+pub fn model_key(model: &str) -> u64 {
+    super::probe_exec::task_fingerprint(model, "")
 }
 
 /// A latency or a planned delay as the whole milliseconds a ledger column
@@ -528,7 +553,12 @@ mod tests {
             )
             .expect("a sample row");
         }
-        let settings = JevSettings { enabled: true, workspaces: vec!["/work/zo".to_string()], daily_requests: None };
+        let settings = JevSettings {
+            enabled: true,
+            workspaces: vec!["/work/zo".to_string()],
+            daily_requests: None,
+            model: zerocode_core::jev::DEFAULT_MODEL.to_string(),
+        };
         let door = JevDoor::at(settings, Path::new("/work/zo"), home.path());
         let wall = Duration::from_millis(1_500);
 
@@ -586,6 +616,36 @@ mod tests {
     #[test]
     fn a_door_with_no_project_plans_no_hedge() {
         assert_eq!(JevDoor::for_key_check().hedge_for(&ROUTING, Duration::from_millis(1_500)), None);
+    }
+
+    /// zo's client cannot read the core crate, so it spells the vendor's
+    /// alias itself; the pin's default is that word, or an unpinned zo would
+    /// ask for another model than an unpinned window does (t-6187).
+    #[test]
+    fn the_clients_alias_is_the_pins_default() {
+        assert_eq!(api::SYSTEMONE_MODEL, zerocode_core::jev::DEFAULT_MODEL);
+    }
+
+    /// The model a seat keys its memo by is the one the door asks for: two
+    /// pins are two keys, so a judgment one pin answered is never recalled
+    /// under the other (t-6187).
+    #[test]
+    fn a_memo_is_keyed_by_the_model_the_door_asks_for() {
+        let home = tempfile::tempdir().expect("a config home");
+        let door_for = |model: &str| {
+            let settings = JevSettings {
+                enabled: true,
+                workspaces: vec!["/work/zo".to_string()],
+                daily_requests: None,
+                model: model.to_string(),
+            };
+            JevDoor::at(settings, Path::new("/work/zo"), home.path())
+        };
+        let pinned = door_for("jev-1.13.0");
+        let alias = door_for(zerocode_core::jev::DEFAULT_MODEL);
+        assert_eq!(pinned.model(), "jev-1.13.0");
+        assert_eq!(pinned.model_key(), model_key("jev-1.13.0"));
+        assert_ne!(pinned.model_key(), alias.model_key());
     }
 
     #[test]

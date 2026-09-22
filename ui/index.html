@@ -3995,6 +3995,21 @@
                    autocomplete="off" spellcheck="false" placeholder="apikey_..." />
           </label>
 
+          <!-- The model every Jev request names (`smart.jevModel`, t-6187):
+               empty is the vendor's alias, a version pins it. The alias the
+               placeholder shows is the backend's (`model.alias`), set by
+               `paintTypeSafe`; this file spells no model. -->
+          <label class="settings-field" data-field="md" for="typesafe-model-input">
+            <span class="settings-field-copy">
+              <span class="settings-label" data-i18n="settings.typesafe.model">묻는 모델</span>
+              <span class="settings-row-desc" data-i18n="settings.typesafe.modelSummary">
+                비워 두면 늘 최신 버전에 묻습니다. 버전을 적으면 그 버전에 고정해, 공급자가 새 버전을 내도 판정의 바닥과 승격 창이 같은 모델을 잽니다.
+              </span>
+            </span>
+            <input class="settings-input" id="typesafe-model-input" type="text"
+                   autocomplete="off" spellcheck="false" />
+          </label>
+
           <div class="settings-status" id="typesafe-status" role="status" aria-live="polite"></div>
 
           <div class="settings-action-row">

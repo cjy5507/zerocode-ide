@@ -52,6 +52,15 @@ pub(crate) fn set_route_classifier(mode: String) -> Result<TypeSafeSettings, Rou
     settings_now()
 }
 
+/// Pin the model every Jev request names, or unpin it with an empty word
+/// (`smart.jevModel`, t-6187). Its own door, like the classifier's: no seat's
+/// switch, and a model id rather than a mode.
+#[tauri::command(async)]
+pub(crate) fn set_jev_model(model: String) -> Result<TypeSafeSettings, RouterRefusal> {
+    typesafe_settings::set_model(&settings_path()?, &model)?;
+    settings_now()
+}
+
 /// Ask the installed zo whether System One answers with the key it would use:
 /// `zo decision-shadow check --json`, the shadow's own question about a task
 /// nobody wrote. A check nothing answered is still an answer (its failure

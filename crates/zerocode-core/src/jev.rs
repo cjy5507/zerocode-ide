@@ -32,6 +32,7 @@ pub mod count;
 pub mod door;
 pub mod hedge;
 pub mod memo;
+pub mod noul;
 pub mod promote;
 pub mod recent;
 pub mod shard;
@@ -39,6 +40,60 @@ pub mod summary;
 
 /// The object zo's settings keep every Jev switch under.
 pub const SMART_SETTINGS_KEY: &str = "smart";
+
+/// The key under [`SMART_SETTINGS_KEY`] naming the model every Jev request
+/// asks for (t-6187): the vendor's alias unless a person pinned a version.
+///
+/// One switch for every seat of both programs, because what it decides is
+/// not a seat's: an alias answers with whatever version the vendor ships
+/// under it, and a floor or a promotion window fitted to one version
+/// silently measures the next. A person who wants the numbers to stay put
+/// pins the version the rows say answered (`jev-1.13.0`). The door writes
+/// it into every request it clears ([`door::may_send`]), so no seat can ask
+/// under another.
+pub const MODEL_SETTING: &str = "jevModel";
+
+/// The model a request names when nobody pinned one: the vendor's alias —
+/// the word the SDKs call by default, which named `jev-1.13.0` as the
+/// answering version on every one of the 3,179 routing, recall and step
+/// rows zo had recorded a version on by 2026-09-23. The window's wire and
+/// zo's client spell the alias as this word; a contract holds zo's copy,
+/// which cannot read this crate, to it.
+pub const DEFAULT_MODEL: &str = "jev-latest";
+
+/// The model a settings document pins (`smart.jevModel`), or
+/// [`DEFAULT_MODEL`] when it pins none. A value that is not a pin
+/// ([`pinned_model`]) reads as no pin, as an unknown mode word reads as
+/// `off`: a slip never sends a model nobody named.
+#[must_use]
+pub fn model_in(root: &Value) -> &str {
+    pin_in(root).unwrap_or(DEFAULT_MODEL)
+}
+
+/// The pin a settings document holds, if it holds one ([`model_in`] without
+/// the alias behind it) — what a screen reads to say whether the model it
+/// shows was a person's choice.
+#[must_use]
+pub fn pin_in(root: &Value) -> Option<&str> {
+    root.get(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(MODEL_SETTING))
+        .and_then(Value::as_str)
+        .and_then(pinned_model)
+}
+
+/// `word` as a pin: trimmed, and one word — not empty, no space and no
+/// control character in it, which is the shape of every model id the
+/// vendor names. The settings writer refuses what this refuses, so a pin
+/// the reader would ignore is never written.
+#[must_use]
+pub fn pinned_model(word: &str) -> Option<&str> {
+    let word = word.trim();
+    (!word.is_empty()
+        && !word
+            .chars()
+            .any(|glyph| glyph.is_whitespace() || glyph.is_control()))
+    .then_some(word)
+}
 
 /// Characters of a task a routing judgment reads — the chat probe's prompt and
 /// Jev's state alike. The head of a brief is what bands it; the cap bounds
@@ -371,6 +426,40 @@ pub const ROUTE_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 /// Initial conservative screen-press floor, above the observed wrong choice
 /// at confidence 0.29. This is a policy line, not a calibrated accuracy claim.
 pub const SCREEN_PRESS_FLOOR_PERMILLE: u16 = 500;
+
+/// What either of the two guards a screen question carries beside its
+/// choice must reach, per thousand, before a seat that is pressing presses
+/// nothing and steps back to the person (t-6187,
+/// `crate::screen_action::Guard`): seven in ten that the screen's own text
+/// tells an assistant what to do, or that the screen is a wall — a sign-in,
+/// a captcha, an error dialog — in front of the page the goal expects.
+///
+/// A policy line, not a calibrated accuracy claim, like
+/// [`SCREEN_PRESS_FLOOR_PERMILLE`]. A Noul near a half says yes and no are
+/// about as likely, so the line sits where yes clearly leads — the lean the
+/// skill seat's relevance floor is drawn at
+/// ([`SKILL_RELEVANCE_FLOOR_PERMILLE`]), written as this seat's own number
+/// because two lines that coincide are still two policies. The two guards
+/// share it because they are one judgment's two halves: this is not a
+/// screen to press on unasked. The guards cost the request nothing but
+/// their own two lines — the state is charged once.
+pub const SCREEN_INSTRUCTED_FLOOR_PERMILLE: u16 = 700;
+
+/// What a seat's answer must reach, per thousand, before it presses a
+/// control that cannot be taken back — one that pays, moves money, deletes,
+/// sends, submits or settles something ([`crate::guarded::kind_of`], t-6187):
+/// nine in ten, where a plain control asks the seat's own press floor.
+///
+/// A policy line, not a calibrated accuracy claim, like
+/// [`SCREEN_PRESS_FLOOR_PERMILLE`] — the line the vendor's own guide draws
+/// for destructive actions (reads at a half, destructive at nine in ten), and
+/// the one this table already asks of a seat's answers before it may act at
+/// all ([`SCREEN_ANSWER_FLOOR_PERMILLE`]). A plain press the walk gets wrong
+/// costs one more press; a delete or a payment it gets wrong is the person's
+/// to undo, if it can be undone. Under this line the walk does what it does
+/// with any answer under its floor: the second reader, when it was handed
+/// one, or the person.
+pub const SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE: u16 = 900;
 
 /// What a screen seat's answers must bound above before `auto` rises to
 /// pressing (docs/design/jev-seats-accuracy-wave-20260921.md §4): nine in ten.
@@ -2312,12 +2401,23 @@ pub static JEV_USES: [JevUse; 19] = [
 ];
 
 impl JevUse {
-    /// Whether a validated screen choice meets this seat's press policy.
+    /// Whether a validated screen choice meets this seat's press policy for
+    /// a control of `kind`: the seat's own press floor for a plain one, and
+    /// never less than [`SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE`] for one a
+    /// press cannot take back (t-6187). A seat with no press floor presses
+    /// nothing, of either kind.
     #[must_use]
-    pub fn permits_press(&self, confidence: f64) -> bool {
-        self.press_floor_permille.is_some_and(|floor| {
-            (0.0..=1.0).contains(&confidence) && confidence >= f64::from(floor) / 1_000.0
-        })
+    pub fn permits_press(&self, confidence: f64, kind: crate::guarded::ControlKind) -> bool {
+        self.press_floor_permille
+            .map(|floor| match kind {
+                crate::guarded::ControlKind::Plain => floor,
+                crate::guarded::ControlKind::Destructive => {
+                    floor.max(SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE)
+                }
+            })
+            .is_some_and(|floor| {
+                (0.0..=1.0).contains(&confidence) && confidence >= f64::from(floor) / 1_000.0
+            })
     }
 
     /// The mode `value` names for this use: one of this use's own words,

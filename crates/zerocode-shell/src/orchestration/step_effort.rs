@@ -455,8 +455,7 @@ fn settle(
     );
     row["elapsedMs"] = json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
     row["requestBytes"] = json!(answer.request_bytes);
-    row[REQUESTS_KEY] = json!(answer.spent.requests);
-    row[REDACTED_LINES_KEY] = json!(answer.spent.redacted_lines);
+    answer.spent.stamp(&mut row);
     let read = answer.answer.and_then(|body| {
         serde_json::from_str::<Value>(&body)
             .ok()

@@ -46,6 +46,7 @@ pub mod git_config;
 pub mod git_dir;
 pub mod git_graph;
 pub mod git_prompt;
+pub mod guarded;
 pub mod guide;
 pub mod hook;
 pub mod hook_continuation;

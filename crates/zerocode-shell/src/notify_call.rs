@@ -32,7 +32,6 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
 use zerocode_core::jev::summary::{AGREED, APPLIED, LABEL};
 use zerocode_core::jev::{JevMode, NOTIFY, NOTIFY_APPLY_DEADLINE_MS, NOTIFY_RECENT_CAP};
 use zerocode_core::notify::{self, Notice, Ring};
@@ -492,8 +491,7 @@ fn settle(wire: &Wire, question: Question) -> Settled {
     );
     row["elapsedMs"] = json!(u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX));
     row["requestBytes"] = json!(answer.request_bytes);
-    row[REQUESTS_KEY] = json!(answer.spent.requests);
-    row[REDACTED_LINES_KEY] = json!(answer.spent.redacted_lines);
+    answer.spent.stamp(&mut row);
     let read = answer.answer.and_then(|body| {
         serde_json::from_str::<Value>(&body)
             .ok()

@@ -62,12 +62,31 @@ const CHOICE: &str = "choice";
 pub fn asked(question: &str, instructions: &str, criteria: Map<String, Value>) -> Value {
     Value::Object(Map::from_iter([(
         question.to_string(),
-        Value::Object(Map::from_iter([
-            ("type".to_string(), Value::from(CHOICE)),
-            ("instructions".to_string(), Value::from(instructions)),
-            ("criteria".to_string(), Value::Object(criteria)),
-        ])),
+        envelope(CHOICE, instructions, criteria),
     )]))
+}
+
+/// The key a question and its answer name their primitive under — the
+/// union tag's own key.
+const TAG_KEY: &str = "type";
+
+/// One question's object as the endpoint reads every primitive: the union
+/// tag naming its kind, what it asks, and what each answer means. The one
+/// spelling of the envelope — a closed choice ([`asked`]) and a Noul
+/// (`crate::jev::noul`, t-6187) both wear it, so a second primitive cannot
+/// come to spell a key the endpoint reads differently.
+pub(super) fn envelope(tag: &str, instructions: &str, criteria: Map<String, Value>) -> Value {
+    Value::Object(Map::from_iter([
+        (TAG_KEY.to_string(), Value::from(tag)),
+        ("instructions".to_string(), Value::from(instructions)),
+        ("criteria".to_string(), Value::Object(criteria)),
+    ]))
+}
+
+/// Whether an answer names `tag` as its kind, read off the key the envelope
+/// wrote it under.
+pub(super) fn tagged(answer: &Value, tag: &str) -> bool {
+    answer.get(TAG_KEY).and_then(Value::as_str) == Some(tag)
 }
 
 /// A validated answer: the option it chose, every option's probability, and
@@ -145,7 +164,7 @@ pub fn read(
     offered: &BTreeSet<String>,
 ) -> Result<Choice, ChoiceRefusal> {
     let answer = answers.get(question).ok_or(ChoiceRefusal::NoAnswer)?;
-    if answer.get("type").and_then(Value::as_str) != Some(CHOICE) {
+    if !tagged(answer, CHOICE) {
         return Err(ChoiceRefusal::NotAChoice);
     }
     let chosen = answer

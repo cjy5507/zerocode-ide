@@ -281,7 +281,10 @@ impl Verdict {
     pub fn droppable(&self, seat: &JevUse) -> Vec<usize> {
         self.chrome
             .iter()
-            .filter(|(_, confidence)| seat.permits_press(**confidence))
+            // A block is no control: the fold reads the seat's own floor.
+            .filter(|(_, confidence)| {
+                seat.permits_press(**confidence, crate::guarded::ControlKind::Plain)
+            })
             .map(|(index, _)| *index)
             .collect()
     }

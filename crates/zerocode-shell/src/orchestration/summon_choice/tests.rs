@@ -178,7 +178,12 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
     assert_eq!(row["outcome"], json!("answered"));
     assert_eq!(row["chosen"], json!("kimi"));
     assert_eq!(row["agent"], json!("claude"));
-    assert_eq!(row["model"], json!("claude-opus-5"));
+    assert_eq!(row[WORKER_MODEL_KEY], json!("claude-opus-5"));
+    assert_eq!(
+        row[zerocode_core::jev::summary::MODEL.canonical],
+        json!("jev-1.13.0"),
+        "the Jev version that judged the summons, beside the worker's model"
+    );
     assert_eq!(row["effort"], json!("max"));
     assert_eq!(row["modelWasPinned"], json!(true));
     assert_eq!(row["agreed"], json!(false), "two agents, two answers");

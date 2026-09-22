@@ -22,7 +22,7 @@ fn candidates(count: usize) -> Vec<SkillCandidate> {
 }
 
 fn key(candidates: &[SkillCandidate]) -> MemoKey {
-    MemoKey::for_search("a task", candidates)
+    MemoKey::for_search("a task", candidates, jev_gate::model_key(SYSTEMONE_MODEL))
 }
 
 fn reading(candidate: &SkillCandidate, score: f64) -> SkillReading {
