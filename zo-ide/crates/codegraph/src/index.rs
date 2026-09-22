@@ -242,6 +242,31 @@ impl CodeGraph {
         self.store.references(name)
     }
 
+    /// The references of one definition — `name` as `file` defines it —
+    /// rather than of a spelling: the occurrences in `file`, those in files
+    /// whose imports spell the name ([`Import::spells`]), and every one when
+    /// no other file defines the name. `None` when `file` defines no `name`.
+    ///
+    /// Against rust-analyzer on 267 definitions drawn from this repository's
+    /// Rust (three seeds of 100; t-5970), the spelling alone kept 38,364
+    /// occurrences and 3.6% of them were right — 75.9% for a name one file
+    /// defines, 0.2% for a name ten or more files define (`new`, `finish`).
+    /// This answer keeps 2,323, 57.1% right, and 96.4% of the real
+    /// references. A name one file defines is answered as spelled. For a
+    /// shared name the defining file's own occurrences are kept whole, which
+    /// is what still misleads for the most shared names (7.5% right at ten or
+    /// more definers); what it misses is a method called in another file
+    /// without an import naming it.
+    pub fn references_to(
+        &mut self,
+        file: impl AsRef<Path>,
+        name: &str,
+    ) -> Result<Option<Vec<Reference>>, CodeGraphError> {
+        self.refresh()?;
+        let path = self.relative_path(file.as_ref())?;
+        self.store.references_to(&path, name)
+    }
+
     pub fn file_outline(
         &mut self,
         path: impl AsRef<Path>,

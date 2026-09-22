@@ -46,6 +46,17 @@ from urllib.parse import unquote, urlparse
 # How many of one relation a neighbour line can show (runtime
 # file_neighbours: MAX_PER_RELATION) — the cut the "shown" precision uses.
 SHOWN_PER_RELATION = 8
+# Buckets of how many files define a sampled name: the one number that
+# explains an exact-name answer's precision (a name one file defines is
+# almost always meant for it; `new` is defined in hundreds).
+DEFINER_BUCKETS = ((1, 1, "1"), (2, 9, "2-9"), (10, None, "10+"))
+
+
+def definer_bucket(definers: int) -> str:
+    for low, high, label in DEFINER_BUCKETS:
+        if definers >= low and (high is None or definers <= high):
+            return label
+    return DEFINER_BUCKETS[0][2]
 
 
 class Lsif:
@@ -291,17 +302,29 @@ FILTERS = {
         or occurrence["imports_spell"]
         or occurrence["file"] == sample["definition"]["file"]
     ),
+    # A method's container type imported counts too. Measured and not
+    # adopted (t-5970): over three seeds it moved recall 96.4% → 97.8% and
+    # precision 57.1% → 55.0% — within what one heavy name moves.
+    "unique_or_imports_spell_name_or_container": lambda sample, occurrence: (
+        sample["definers"] == 1
+        or occurrence["imports_spell"]
+        or occurrence.get("imports_spell_container", False)
+        or occurrence["file"] == sample["definition"]["file"]
+    ),
 }
 
 
 def judge_references(sample: dict, lsif: Lsif, root: Path) -> dict:
     """Per filter: pooled and per-definition precision and recall of the
-    occurrences it keeps, against the definitions rust-analyzer resolves."""
+    occurrences it keeps, against the definitions rust-analyzer resolves —
+    overall and per bucket of how many files define the name."""
     covered = set(lsif.documents.values())
     by_start = lsif.ranges_by_start()
     columns = Columns(root)
     tallies = {name: defaultdict(int) for name in FILTERS}
     per_definition = {name: {"precision": [], "recall": []} for name in FILTERS}
+    buckets = {name: defaultdict(lambda: defaultdict(int)) for name in FILTERS}
+    bucket_sizes = defaultdict(int)
     judged = unresolved = skipped = 0
     targets = {}
     for position, drawn in enumerate(sample["samples"]):
@@ -322,6 +345,8 @@ def judge_references(sample: dict, lsif: Lsif, root: Path) -> dict:
             skipped += 1
             continue
         judged += 1
+        bucket = definer_bucket(drawn["definers"])
+        bucket_sizes[bucket] += 1
         truth = referrers.get(target, set())
         verdicts = []
         for occurrence in drawn["occurrences"]:
@@ -335,10 +360,10 @@ def judge_references(sample: dict, lsif: Lsif, root: Path) -> dict:
             verdicts.append((occurrence, target in lsif.definitions(range_id)))
         for name, keeps in FILTERS.items():
             kept = [hit for occurrence, hit in verdicts if keeps(drawn, occurrence)]
-            tally = tallies[name]
-            tally["kept"] += len(kept)
-            tally["kept_true"] += sum(kept)
-            tally["true"] += len(truth)
+            for tally in (tallies[name], buckets[name][bucket]):
+                tally["kept"] += len(kept)
+                tally["kept_true"] += sum(kept)
+                tally["true"] += len(truth)
             if kept:
                 per_definition[name]["precision"].append(sum(kept) / len(kept))
             if truth:
@@ -355,6 +380,19 @@ def judge_references(sample: dict, lsif: Lsif, root: Path) -> dict:
             "pooled_recall": precision(tally["kept_true"], tally["true"]),
             "median_precision": statistics.median(precisions) if precisions else None,
             "median_recall": statistics.median(recalls) if recalls else None,
+            "by_definers": {
+                label: {
+                    "definitions": bucket_sizes[label],
+                    "kept": buckets[name][label]["kept"],
+                    "precision": precision(
+                        buckets[name][label]["kept_true"], buckets[name][label]["kept"]
+                    ),
+                    "recall": precision(
+                        buckets[name][label]["kept_true"], buckets[name][label]["true"]
+                    ),
+                }
+                for _, _, label in DEFINER_BUCKETS
+            },
         }
     return report
 
@@ -367,7 +405,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--links", type=Path, help="`index_cost links` output")
     parser.add_argument("--neighbours", type=Path,
                         help="`runtime --test neighbours_measure` output (needs --links)")
-    parser.add_argument("--sample", type=Path, help="`index_cost sample` output")
+    parser.add_argument("--sample", type=Path, action="append", default=[],
+                        help="`index_cost sample` output; repeat to pool several seeds")
     parser.add_argument("--out", type=Path, help="write the report as JSON")
     arguments = parser.parse_args(argv)
     root = arguments.root.resolve()
@@ -382,9 +421,10 @@ def main(argv: list[str] | None = None) -> int:
                 json.loads(arguments.neighbours.read_text()), links, lsif
             )
     if arguments.sample:
-        report["references"] = judge_references(
-            json.loads(arguments.sample.read_text()), lsif, root
-        )
+        pooled = {"samples": []}
+        for path in arguments.sample:
+            pooled["samples"].extend(json.loads(path.read_text())["samples"])
+        report["references"] = judge_references(pooled, lsif, root)
     text = json.dumps(report, indent=2, ensure_ascii=False)
     if arguments.out:
         arguments.out.write_text(text + "\n")

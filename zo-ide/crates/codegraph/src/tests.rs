@@ -436,6 +436,55 @@ fn file_links_follow_names_only_one_file_defines_and_the_user_imports() {
 }
 
 #[test]
+fn references_to_keep_what_the_defining_file_or_an_import_vouches_for() {
+    let (_workspace, mut graph) = fixture_graph(&[
+        ("src/a.rs", "pub fn build() {}\nfn local() { build(); }\n"),
+        ("src/b.rs", "pub fn build() {}\n"),
+        ("src/c.rs", "use crate::a::build;\nfn c() { build(); }\n"),
+        ("src/d.rs", "fn d(thing: Thing) { thing.build(); }\n"),
+        ("src/e.rs", "pub fn only_here() {}\n"),
+        ("src/f.rs", "fn f() { only_here(); }\n"),
+    ]);
+    let files = |references: Vec<Reference>| {
+        references
+            .into_iter()
+            .map(|reference| reference.file)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        graph.find_references("build").expect("spelling").len(),
+        4,
+        "the spelling alone answers every file"
+    );
+    // Two files define `build`: only a.rs itself and the file whose import
+    // names it are a.rs's; d.rs's method call is not.
+    assert_eq!(
+        files(
+            graph
+                .references_to("src/a.rs", "build")
+                .expect("query")
+                .expect("a.rs defines build")
+        ),
+        vec![
+            PathBuf::from("src/a.rs"),
+            PathBuf::from("src/c.rs"),
+            PathBuf::from("src/c.rs"),
+        ]
+    );
+    // One file defines `only_here`: every occurrence is its.
+    assert_eq!(
+        files(
+            graph
+                .references_to("src/e.rs", "only_here")
+                .expect("query")
+                .expect("e.rs defines only_here")
+        ),
+        vec![PathBuf::from("src/f.rs")]
+    );
+    assert_eq!(graph.references_to("src/f.rs", "only_here").expect("query"), None);
+}
+
+#[test]
 fn an_import_spells_a_name_as_a_whole_identifier_or_as_what_it_binds() {
     let import = |path: &str, name: Option<&str>| Import {
         path: path.to_string(),

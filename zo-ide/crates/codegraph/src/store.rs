@@ -172,6 +172,7 @@ const SELECT_USED_BY: &str = "SELECT DISTINCT refs.file_id, names.name, refs.occ
     WHERE symbols.file_id = ?1 AND refs.file_id != ?1
       AND NOT EXISTS (SELECT 1 FROM symbols AS other
           WHERE other.name_id = symbols.name_id AND other.file_id != ?1)";
+const SELECT_DEFINERS: &str = "SELECT DISTINCT file_id FROM symbols WHERE name_id = ?1";
 const SELECT_SKIPPED: &str =
     "SELECT path, skip_reason FROM files WHERE skip_reason IS NOT NULL";
 
@@ -460,6 +461,47 @@ impl Store {
             })?;
         }
         Ok(references)
+    }
+
+    /// The occurrences of `name` meant for its definition in `path`: those in
+    /// that file, those in files whose imports spell the name, and — when no
+    /// other file defines it — all of them. `None` when `path` defines no
+    /// `name`.
+    pub(crate) fn references_to(
+        &self,
+        path: &Path,
+        name: &str,
+    ) -> Result<Option<Vec<Reference>>, CodeGraphError> {
+        let fail = |source| index_error(&self.path, source);
+        let (Some(file), Some(name_id)) = (self.stored(path), self.name_id(name)?) else {
+            return Ok(None);
+        };
+        let mut statement = self.connection.prepare_cached(SELECT_DEFINERS).map_err(fail)?;
+        let definers = statement
+            .query_map([name_id], |row| row.get::<_, i64>(0))
+            .map_err(fail)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(fail)?;
+        if !definers.contains(&file.id) {
+            return Ok(None);
+        }
+        let references = self.references(name)?;
+        if definers.len() == 1 {
+            return Ok(Some(references));
+        }
+        let mut imports = HashMap::new();
+        let mut kept = Vec::with_capacity(references.len());
+        for reference in references {
+            let vouched = reference.file == path
+                || match self.stored(&reference.file) {
+                    Some(stored) => self.imports_spell(&mut imports, stored.id, name)?,
+                    None => false,
+                };
+            if vouched {
+                kept.push(reference);
+            }
+        }
+        Ok(Some(kept))
     }
 
     /// Every definition spelled `name` (of `kind`, when given), in path

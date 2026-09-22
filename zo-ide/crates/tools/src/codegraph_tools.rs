@@ -35,7 +35,15 @@ struct FindSymbolInput {
 #[derive(Debug, Deserialize)]
 struct FindReferencesInput {
     name: String,
+    /// The workspace-relative file defining `name`: narrows the answer to
+    /// that definition's references (`CodeGraph::references_to`).
+    #[serde(default)]
+    file: Option<String>,
 }
+
+/// How a `find_references` answer was chosen — the output's `resolution`.
+const RESOLUTION_EXACT_NAME: &str = "exact_name_match";
+const RESOLUTION_DEFINITION_IN_FILE: &str = "definition_in_file";
 
 #[derive(Debug, Deserialize)]
 struct FileOutlineInput {
@@ -133,12 +141,13 @@ pub(crate) fn tool_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "find_references",
             description: codegraph_description!(
-                "Find identifier occurrences with exactly the requested spelling, grouped by file. Results are capped and report `truncated` honestly."
+                "Find identifier occurrences with exactly the requested spelling, grouped by file. Pass `file` (the workspace-relative file that defines the name) to keep only that definition's references: occurrences in that file, in files whose imports name it, or all of them when no other file defines it. Results are capped and report `truncated` honestly."
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "name": { "type": "string", "minLength": 1 }
+                    "name": { "type": "string", "minLength": 1 },
+                    "file": { "type": "string", "minLength": 1 }
                 },
                 "required": ["name"],
                 "additionalProperties": false
@@ -224,10 +233,31 @@ fn run_find_references(
     input: &FindReferencesInput,
 ) -> Result<String, ToolError> {
     let name = required_text("name", &input.name)?;
+    let file = input
+        .file
+        .as_deref()
+        .map(|file| required_text("file", file))
+        .transpose()?;
     with_codegraph(ctx, |graph| {
-        let mut references = graph
-            .find_references(name)
-            .map_err(|error| codegraph_error(&error))?;
+        let (mut references, resolution) = match file {
+            Some(file) => (
+                graph
+                    .references_to(file, name)
+                    .map_err(|error| codegraph_error(&error))?
+                    .ok_or_else(|| {
+                        ToolError::InvalidInput(format!(
+                            "`{file}` defines no `{name}`; find_symbol names the files that do"
+                        ))
+                    })?,
+                RESOLUTION_DEFINITION_IN_FILE,
+            ),
+            None => (
+                graph
+                    .find_references(name)
+                    .map_err(|error| codegraph_error(&error))?,
+                RESOLUTION_EXACT_NAME,
+            ),
+        };
         let total_matches = references.len();
         references.truncate(MAX_CODEGRAPH_RESULTS);
         let mut grouped = BTreeMap::<String, Vec<ReferenceMatch>>::new();
@@ -250,7 +280,7 @@ fn run_find_references(
             files,
             total_matches,
             truncated: total_matches > MAX_CODEGRAPH_RESULTS,
-            resolution: "exact_name_match",
+            resolution,
             index: status,
             index_warning: index_warning(status),
         })
@@ -639,6 +669,60 @@ mod tests {
 
         let window = read(json!({ "path": "src/graph.rs", "offset": 1 }));
         assert!(window["file"]["neighbours"].is_null());
+    }
+
+    /// With `file`, the answer is that definition's references; a file that
+    /// does not define the name is refused rather than answered empty.
+    #[test]
+    fn find_references_narrows_to_the_definition_a_file_holds() {
+        let workspace = tempfile::tempdir().expect("temp workspace");
+        for (path, source) in [
+            ("a.rs", "pub fn build() {}\n"),
+            ("b.rs", "pub fn build() {}\n"),
+            ("c.rs", "use crate::a::build;\nfn c() { build(); }\n"),
+            ("d.rs", "fn d(thing: Thing) { thing.build(); }\n"),
+        ] {
+            fs::write(workspace.path().join(path), source).expect("fixture source");
+        }
+        let graph = CodeGraph::load_or_build(
+            workspace.path(),
+            workspace.path().join("cache").join(DEFAULT_CACHE_FILE_NAME),
+        )
+        .expect("fixture graph");
+        let ctx = ToolContext::new().with_cwd(workspace.path());
+        *ctx.codegraph
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(graph);
+
+        let narrowed = dispatch(
+            &ctx,
+            None,
+            "find_references",
+            &json!({ "name": "build", "file": "a.rs" }),
+        )
+        .expect("handled references")
+        .expect("successful references");
+        let narrowed: Value = serde_json::from_str(&narrowed).expect("JSON references");
+        assert_eq!(narrowed["resolution"], RESOLUTION_DEFINITION_IN_FILE);
+        assert_eq!(narrowed["total_matches"], 2);
+        assert_eq!(narrowed["files"][0]["file"], "c.rs");
+
+        let spelled = dispatch(&ctx, None, "find_references", &json!({ "name": "build" }))
+            .expect("handled references")
+            .expect("successful references");
+        let spelled: Value = serde_json::from_str(&spelled).expect("JSON references");
+        assert_eq!(spelled["resolution"], RESOLUTION_EXACT_NAME);
+        assert_eq!(spelled["total_matches"], 3);
+
+        let error = dispatch(
+            &ctx,
+            None,
+            "find_references",
+            &json!({ "name": "build", "file": "c.rs" }),
+        )
+        .expect("handled references")
+        .expect_err("c.rs defines no build");
+        assert!(matches!(error, ToolError::InvalidInput(_)));
     }
 
     #[test]

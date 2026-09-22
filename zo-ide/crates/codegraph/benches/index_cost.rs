@@ -242,6 +242,23 @@ fn query(options: &Options) -> PhaseResult {
             .map_or(0, |symbols| symbols.len());
         outline_samples.push(elapsed_ms(started));
     }
+    // `find_references` narrowed to a definition: the symbol names the
+    // outline file itself defines.
+    let mut narrowed_samples = Vec::new();
+    let mut narrowed_counts = BTreeMap::new();
+    for name in &symbol_names {
+        for _ in 0..repetitions {
+            let started = Instant::now();
+            let Some(found) = graph
+                .references_to(&outline_file, name)
+                .map_err(describe)?
+            else {
+                break;
+            };
+            narrowed_samples.push(elapsed_ms(started));
+            narrowed_counts.insert(name.clone(), found.len());
+        }
+    }
     // The neighbour list's question, every link kept: the cost does not
     // depend on how many the caller shows.
     let mut links_samples = Vec::new();
@@ -263,6 +280,8 @@ fn query(options: &Options) -> PhaseResult {
     }
     Ok(json!({
         "phase": "query",
+        "references_to_ms": percentiles(&mut narrowed_samples),
+        "references_to_matches": narrowed_counts,
         "file_links_ms": percentiles(&mut links_samples),
         "file_links_found": { "uses": links_found.0, "used_by": links_found.1 },
         "repetitions": repetitions,
@@ -407,7 +426,9 @@ fn sample(options: &Options) -> PhaseResult {
     }
     let population = definitions.len();
     let drawn = draw(&mut definitions, count, seed);
-    let mut imports_spell = BTreeMap::<(PathBuf, String), bool>::new();
+    // Each file's imports, read once: every `file_imports` call pays the
+    // freshness walk, and the heaviest names occur in most files.
+    let mut imports = BTreeMap::<PathBuf, Vec<codegraph::Import>>::new();
     let mut samples = Vec::new();
     for definition in drawn {
         let definers = graph
@@ -419,19 +440,21 @@ fn sample(options: &Options) -> PhaseResult {
             .len();
         let mut occurrences = Vec::new();
         for reference in graph.find_references(&definition.name).map_err(describe)? {
-            let key = (reference.file.clone(), definition.name.clone());
-            let spelled = if let Some(spelled) = imports_spell.get(&key) {
-                *spelled
-            } else {
-                let spelled = imports_spell_name(&mut graph, &reference.file, &definition.name)?;
-                imports_spell.insert(key, spelled);
-                spelled
+            if !imports.contains_key(&reference.file) {
+                let read = graph.file_imports(&reference.file).map_err(describe)?;
+                imports.insert(reference.file.clone(), read.unwrap_or_default());
+            }
+            let spelled_by = |name: &str| {
+                imports[&reference.file]
+                    .iter()
+                    .any(|import| import.spells(name))
             };
             occurrences.push(json!({
                 "file": reference.file,
                 "row": reference.range.start.row,
                 "column": reference.range.start.column,
-                "imports_spell": spelled,
+                "imports_spell": spelled_by(&definition.name),
+                "imports_spell_container": definition.container.as_deref().is_some_and(spelled_by),
             }));
         }
         samples.push(json!({
@@ -446,17 +469,6 @@ fn sample(options: &Options) -> PhaseResult {
         "seed": seed,
         "samples": samples,
     }))
-}
-
-/// Whether one of `file`'s imports spells `name` — in its path or as the
-/// name it binds.
-fn imports_spell_name(graph: &mut CodeGraph, file: &Path, name: &str) -> Result<bool, String> {
-    Ok(graph
-        .file_imports(file)
-        .map_err(describe)?
-        .unwrap_or_default()
-        .iter()
-        .any(|import| import.spells(name)))
 }
 
 /// `count` items drawn without replacement by a seeded xorshift64* — the
