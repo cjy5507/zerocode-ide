@@ -195,6 +195,7 @@ def summary(run: dict) -> dict:
         phases["build"], phases["load"], phases["query"], phases["edit"]
     )
     build_ms = median(builds, "build_ms")
+    definitions = [query["definition_queries"] for query in queries if "definition_queries" in query]
     return {
         "runs": len(queries),
         "load_average": statistics.median(run["load_averages"]),
@@ -217,7 +218,8 @@ def summary(run: dict) -> dict:
         "find_symbol_p95_ms": median_of(queries, "find_symbol_ms", "p95"),
         "file_outline_p50_ms": median_of(queries, "file_outline_ms", "p50"),
         "file_links_p50_ms": median_of(queries, "file_links_ms", "p50"),
-        "references_to_p50_ms": median_of(queries, "references_to_ms", "p50"),
+        "references_to_p50_ms": median_of(definitions, "references_to_ms", "p50"),
+        "impact_p50_ms": median_of(definitions, "impact_ms", "p50"),
         "unchanged_refresh_p50_ms": median_of(queries, "unchanged_refresh_ms", "p50"),
         "query_resident_mb": median(queries, "resident_mb"),
     }
@@ -247,6 +249,7 @@ ROWS = (
     ("file_outline_p50_ms", "file_outline p50 (ms)", "{:.2f}"),
     ("file_links_p50_ms", "file_links p50 (ms, 이웃 한 줄의 질문)", "{:.2f}"),
     ("references_to_p50_ms", "정의로 좁힌 find_references p50 (ms)", "{:.2f}"),
+    ("impact_p50_ms", "impact p50 (ms)", "{:.2f}"),
     ("unchanged_refresh_p50_ms", "변화 없는 신선도 확인 p50 (ms)", "{:.2f}"),
     ("query_resident_mb", "질의 뒤 상주 RSS (MB)", "{:.0f}"),
 )

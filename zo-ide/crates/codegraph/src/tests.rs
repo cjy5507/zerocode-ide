@@ -485,6 +485,38 @@ fn references_to_keep_what_the_defining_file_or_an_import_vouches_for() {
 }
 
 #[test]
+fn impact_counts_the_callers_and_tests_one_definition_reaches() {
+    let (_workspace, mut graph) = fixture_graph(&[
+        ("src/a.rs", "pub fn build() {}\nfn local() { build(); }\n"),
+        ("src/b.rs", "pub fn build() {}\n"),
+        ("src/c.rs", "use crate::a::build;\nfn c() { build(); }\n"),
+        ("src/d.rs", "fn d(thing: Thing) { thing.build(); }\n"),
+        ("tests/build.rs", "use acme::a::build;\nfn t() { build(); build(); }\n"),
+    ]);
+    let impact = graph
+        .impact("src/a.rs", "build")
+        .expect("impact query")
+        .expect("a.rs defines build");
+    assert_eq!(impact.file, PathBuf::from("src/a.rs"));
+    assert_eq!(impact.definitions.len(), 1);
+    assert_eq!(impact.references, 6);
+    assert_eq!(
+        impact
+            .files
+            .iter()
+            .map(|linked| (linked.file.clone(), linked.references, linked.test))
+            .collect::<Vec<_>>(),
+        vec![
+            (PathBuf::from("tests/build.rs"), 3, true),
+            (PathBuf::from("src/c.rs"), 2, false),
+            (PathBuf::from("src/a.rs"), 1, false),
+        ]
+    );
+    assert_eq!((impact.callers(), impact.tests()), (2, 1));
+    assert_eq!(graph.impact("src/d.rs", "build").expect("impact query"), None);
+}
+
+#[test]
 fn an_import_spells_a_name_as_a_whole_identifier_or_as_what_it_binds() {
     let import = |path: &str, name: Option<&str>| Import {
         path: path.to_string(),

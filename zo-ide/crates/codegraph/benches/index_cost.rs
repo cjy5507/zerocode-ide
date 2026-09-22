@@ -242,23 +242,8 @@ fn query(options: &Options) -> PhaseResult {
             .map_or(0, |symbols| symbols.len());
         outline_samples.push(elapsed_ms(started));
     }
-    // `find_references` narrowed to a definition: the symbol names the
-    // outline file itself defines.
-    let mut narrowed_samples = Vec::new();
-    let mut narrowed_counts = BTreeMap::new();
-    for name in &symbol_names {
-        for _ in 0..repetitions {
-            let started = Instant::now();
-            let Some(found) = graph
-                .references_to(&outline_file, name)
-                .map_err(describe)?
-            else {
-                break;
-            };
-            narrowed_samples.push(elapsed_ms(started));
-            narrowed_counts.insert(name.clone(), found.len());
-        }
-    }
+    let definition_queries =
+        definition_queries(&mut graph, &outline_file, &symbol_names, repetitions)?;
     // The neighbour list's question, every link kept: the cost does not
     // depend on how many the caller shows.
     let mut links_samples = Vec::new();
@@ -280,8 +265,7 @@ fn query(options: &Options) -> PhaseResult {
     }
     Ok(json!({
         "phase": "query",
-        "references_to_ms": percentiles(&mut narrowed_samples),
-        "references_to_matches": narrowed_counts,
+        "definition_queries": definition_queries,
         "file_links_ms": percentiles(&mut links_samples),
         "file_links_found": { "uses": links_found.0, "used_by": links_found.1 },
         "repetitions": repetitions,
@@ -379,6 +363,59 @@ fn count_functions(graph: &mut CodeGraph, name: &str) -> Result<usize, String> {
         .find_symbols(name, Some(SymbolKind::Function))
         .map(|symbols| symbols.len())
         .map_err(describe)
+}
+
+/// The two questions asked of one definition — `find_references` narrowed
+/// to it and `impact` — for each of `names` that `file` defines.
+fn definition_queries(
+    graph: &mut CodeGraph,
+    file: &Path,
+    names: &[String],
+    repetitions: usize,
+) -> PhaseResult {
+    // `find_references` narrowed to a definition: the symbol names the
+    // outline file itself defines.
+    let mut narrowed_samples = Vec::new();
+    let mut narrowed_counts = BTreeMap::new();
+    for name in names {
+        for _ in 0..repetitions {
+            let started = Instant::now();
+            let Some(found) = graph
+                .references_to(file, name)
+                .map_err(describe)?
+            else {
+                break;
+            };
+            narrowed_samples.push(elapsed_ms(started));
+            narrowed_counts.insert(name.clone(), found.len());
+        }
+    }
+    // The `impact` tool's question for the same names.
+    let mut impact_samples = Vec::new();
+    let mut impact_found = BTreeMap::new();
+    for name in names {
+        for _ in 0..repetitions {
+            let started = Instant::now();
+            let Some(impact) = graph.impact(file, name).map_err(describe)? else {
+                break;
+            };
+            impact_samples.push(elapsed_ms(started));
+            impact_found.insert(
+                name.clone(),
+                json!({
+                    "references": impact.references,
+                    "callers": impact.callers(),
+                    "tests": impact.tests(),
+                }),
+            );
+        }
+    }
+    Ok(json!({
+        "references_to_ms": percentiles(&mut narrowed_samples),
+        "references_to_matches": narrowed_counts,
+        "impact_ms": percentiles(&mut impact_samples),
+        "impact_found": impact_found,
+    }))
 }
 
 /// Every indexed file's links, every link kept — the neighbour list's source,

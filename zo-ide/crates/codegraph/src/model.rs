@@ -1,6 +1,9 @@
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::test_path::is_test_path;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct Position {
@@ -215,6 +218,58 @@ pub struct LinkedFile {
     pub references: usize,
     /// Whether `file` reads as a test file (`is_test_path`).
     pub test: bool,
+}
+
+impl LinkedFile {
+    /// Sum `(file, occurrences)` pairs per file: the most referenced first,
+    /// path order between equals, each marked test or not.
+    pub(crate) fn tally<'a>(pairs: impl IntoIterator<Item = (&'a Path, usize)>) -> Vec<Self> {
+        let mut totals = BTreeMap::<&Path, usize>::new();
+        for (file, occurrences) in pairs {
+            *totals.entry(file).or_default() += occurrences;
+        }
+        let mut linked = totals
+            .into_iter()
+            .map(|(file, references)| Self {
+                test: is_test_path(file),
+                file: file.to_path_buf(),
+                references,
+            })
+            .collect::<Vec<_>>();
+        // Stable: equals keep the path order the map gave them.
+        linked.sort_by(|left, right| right.references.cmp(&left.references));
+        linked
+    }
+}
+
+/// What changing one definition reaches, counted before the change — the
+/// callers and the tests as one answer (`CodeGraph::impact`).
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct Impact {
+    /// The workspace-relative file holding the definition.
+    pub file: PathBuf,
+    /// The name's definitions in that file, in source order — a method two
+    /// types there define is two.
+    pub definitions: Vec<Symbol>,
+    /// Occurrences meant for them (`CodeGraph::references_to`).
+    pub references: usize,
+    /// The files those occurrences sit in, the most first; the defining file
+    /// too when it uses its own definition.
+    pub files: Vec<LinkedFile>,
+}
+
+impl Impact {
+    /// Files other than the defining one that reference the definition.
+    #[must_use]
+    pub fn callers(&self) -> usize {
+        self.files.iter().filter(|linked| linked.file != self.file).count()
+    }
+
+    /// Referencing files that read as tests.
+    #[must_use]
+    pub fn tests(&self) -> usize {
+        self.files.iter().filter(|linked| linked.test).count()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

@@ -8,8 +8,8 @@ use thiserror::Error;
 use crate::extract::extract;
 use crate::language::spec_for_path;
 use crate::model::{
-    FileFingerprint, FileLinks, Import, IndexStatus, Reference, SkipReason, SkippedFile, Symbol,
-    SymbolKind,
+    FileFingerprint, FileLinks, Impact, Import, IndexStatus, LinkedFile, Reference, SkipReason,
+    SkippedFile, Symbol, SymbolKind,
 };
 use crate::positions::{pack_by_name, PackedName};
 use crate::scan::{fingerprint, scan_workspace, ScanEntry};
@@ -265,6 +265,40 @@ impl CodeGraph {
         self.refresh()?;
         let path = self.relative_path(file.as_ref())?;
         self.store.references_to(&path, name)
+    }
+
+    /// What changing `name` as `file` defines it reaches: its references
+    /// narrowed to it ([`Self::references_to`]), the files they sit in, and
+    /// which of those are tests ([`Impact`]). `None` when `file` defines no
+    /// `name`.
+    pub fn impact(
+        &mut self,
+        file: impl AsRef<Path>,
+        name: &str,
+    ) -> Result<Option<Impact>, CodeGraphError> {
+        let file = file.as_ref();
+        let Some(references) = self.references_to(file, name)? else {
+            return Ok(None);
+        };
+        let path = self.relative_path(file)?;
+        let definitions = self
+            .store
+            .outline(&path)?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|symbol| symbol.name == name)
+            .collect();
+        let files = LinkedFile::tally(
+            references
+                .iter()
+                .map(|reference| (reference.file.as_path(), 1)),
+        );
+        Ok(Some(Impact {
+            file: path,
+            definitions,
+            references: references.len(),
+            files,
+        }))
     }
 
     pub fn file_outline(

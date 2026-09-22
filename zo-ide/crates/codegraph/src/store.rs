@@ -25,7 +25,6 @@ use crate::model::{
     FileFingerprint, FileLinks, Import, IndexStatus, LinkedFile, Position, Reference, SkipReason,
     SkippedFile, SourceRange, Symbol, SymbolKind,
 };
-use crate::test_path::is_test_path;
 
 /// Written into `meta` beside the workspace root. An index that says anything
 /// else — another schema, another root, nothing at all — is rebuilt, never
@@ -674,27 +673,19 @@ impl Store {
         })
     }
 
-    /// Sum occurrences per file, most first (path order breaks ties).
+    /// `(file id, occurrences)` rows as links, most first, cut at `limit`.
     fn linked_files(
         &self,
         rows: impl IntoIterator<Item = (i64, i64)>,
         limit: usize,
     ) -> Vec<LinkedFile> {
-        let mut totals = BTreeMap::<usize, (usize, &PathBuf)>::new();
-        for (file_id, occurrences) in rows {
-            if let Some((rank, path)) = self.files.by_id.get(&file_id) {
-                totals.entry(*rank).or_insert((0, path)).0 += loaded_count(occurrences);
-            }
-        }
-        let mut linked = totals
-            .into_values()
-            .map(|(references, path)| LinkedFile {
-                test: is_test_path(path),
-                file: path.clone(),
-                references,
-            })
-            .collect::<Vec<_>>();
-        linked.sort_by(|left, right| right.references.cmp(&left.references));
+        let pairs = rows.into_iter().filter_map(|(file_id, occurrences)| {
+            self.files
+                .by_id
+                .get(&file_id)
+                .map(|(_, path)| (path.as_path(), loaded_count(occurrences)))
+        });
+        let mut linked = LinkedFile::tally(pairs);
         linked.truncate(limit);
         linked
     }
