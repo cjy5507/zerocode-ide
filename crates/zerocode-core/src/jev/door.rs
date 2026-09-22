@@ -330,7 +330,8 @@ pub fn within_budget(settings: &JevSettings, sent: u64) -> bool {
 /// Ask the door about one request of `row`'s, its body built as the use
 /// builds it. Cleared, the body's pointed-at texts have lost every line that
 /// may carry a credential and are cut to their caps, and the body names the
-/// model the person pinned ([`name_the_model`]).
+/// model the person pinned ([`JevSettings::model`]), over whatever the
+/// program wrote there.
 ///
 /// # Errors
 /// The first of the door's four questions the request fails.
