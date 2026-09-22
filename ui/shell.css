@@ -36039,6 +36039,26 @@ details.task-board-section > summary {
   --knowledge-supply-stroke-width: var(--knowledge-informational-stroke);
 }
 
+/* 코드 층의 점(t-5970) — 파일 ⬢과 정의 ✚는 제 잉크의 몸과 바탕의 테두리(구성요소의 점과 같은 옷).
+ * 주변 탐색의 군집 색 규칙보다 한 단 무거운 짝으로 제 잉크를 지키는 것도 공급망의 점과 같다. GL
+ * 손은 같은 옷을 입힌 견본에서 이 값을 읽고, 테두리 굵기는 같은 토큰이다(`knowledgeRestingNodeInk`). */
+.knowledge-view .is-code_file { --knowledge-code-ink: var(--knowledge-code-file-ink); }
+.knowledge-view .is-code_symbol { --knowledge-code-ink: var(--knowledge-code-symbol-ink); }
+.knowledge-node.is-code_file .knowledge-dot,
+.knowledge-node.is-code_symbol .knowledge-dot,
+.knowledge-picture.is-local .knowledge-node.is-code_file:not(.is-ghost):not(.is-source) .knowledge-dot,
+.knowledge-picture.is-local .knowledge-node.is-code_symbol:not(.is-ghost):not(.is-source) .knowledge-dot {
+  fill: var(--knowledge-code-ink);
+  stroke: var(--knowledge-ground);
+  stroke-width: var(--knowledge-node-stroke);
+  filter: none;
+}
+
+.knowledge-legend-node.is-code_file .knowledge-legend-ink,
+.knowledge-legend-node.is-code_symbol .knowledge-legend-ink {
+  fill: var(--knowledge-code-ink);
+}
+
 /* 주변 탐색의 점 규칙(`.is-local … :not(.is-ghost):not(.is-source)`, (0,6,0))은 페이지의 군집 색을
  * 입히는 규칙이라, 공급망의 점은 한 단 더 무거운 짝으로 제 잉크를 지킨다. */
 .knowledge-node.is-component .knowledge-dot,

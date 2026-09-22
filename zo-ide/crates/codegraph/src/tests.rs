@@ -517,6 +517,54 @@ fn impact_counts_the_callers_and_tests_one_definition_reaches() {
 }
 
 #[test]
+fn a_mention_resolves_only_to_code_the_index_can_place() {
+    let (_workspace, mut graph) = fixture_graph(&[
+        ("crates/core/src/scan.rs", "pub fn scan_workspace() {}\npub fn new() {}\n"),
+        ("crates/core/src/graph.rs", "pub struct GraphCache;\nimpl GraphCache { pub fn scan() {} }\npub fn new() {}\n"),
+        ("crates/other/src/scan.rs", "fn other() {}\n"),
+        ("crates/core/src/lone.rs", "fn lone() {}\n"),
+    ]);
+    let mentions = [
+        "crates/core/src/scan.rs",
+        "core/src/scan.rs",
+        "scan.rs",
+        "lone.rs",
+        "scan_workspace",
+        "GraphCache::scan",
+        "graph::GraphCache",
+        "new",
+        "crates/core",
+        "nowhere_at_all",
+    ]
+    .map(str::to_string);
+    let resolved = graph.resolve_mentions(&mentions).expect("resolve");
+    let file = |path: &str| Some(Resolved::File(PathBuf::from(path)));
+    assert_eq!(resolved[0], file("crates/core/src/scan.rs"), "exact path");
+    assert_eq!(resolved[1], file("crates/core/src/scan.rs"), "the one path ending so");
+    assert_eq!(resolved[2], None, "two files are called scan.rs");
+    assert_eq!(resolved[3], file("crates/core/src/lone.rs"));
+    let symbol = |at: usize| match &resolved[at] {
+        Some(Resolved::Symbol(symbol)) => Some((symbol.name.clone(), symbol.file.clone())),
+        _ => None,
+    };
+    assert_eq!(
+        symbol(4),
+        Some(("scan_workspace".to_string(), PathBuf::from("crates/core/src/scan.rs")))
+    );
+    assert_eq!(
+        symbol(5),
+        Some(("scan".to_string(), PathBuf::from("crates/core/src/graph.rs")))
+    );
+    assert_eq!(
+        symbol(6),
+        Some(("GraphCache".to_string(), PathBuf::from("crates/core/src/graph.rs")))
+    );
+    assert_eq!(resolved[7], None, "two files define `new`");
+    assert_eq!(resolved[8], None, "a folder is not a file");
+    assert_eq!(resolved[9], None);
+}
+
+#[test]
 fn an_import_spells_a_name_as_a_whole_identifier_or_as_what_it_binds() {
     let import = |path: &str, name: Option<&str>| Import {
         path: path.to_string(),

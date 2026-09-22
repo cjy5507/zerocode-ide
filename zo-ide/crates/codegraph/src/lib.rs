@@ -20,7 +20,7 @@ pub use index::{
 pub use language::LanguageSpec;
 pub use model::{
     ExtractedFile, FileFingerprint, FileLinks, Impact, Import, IndexStatus, LinkedFile, Position,
-    Reference, SkippedFile, SkipReason, SourceRange, Symbol, SymbolKind,
+    Reference, Resolved, SkippedFile, SkipReason, SourceRange, Symbol, SymbolKind,
 };
 pub use test_path::is_test_path;
 

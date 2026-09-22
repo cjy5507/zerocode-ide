@@ -242,6 +242,15 @@ impl LinkedFile {
     }
 }
 
+/// What a mention of code names in the index
+/// (`CodeGraph::resolve_mentions`): a file, or one definition.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "resolved", content = "at", rename_all = "snake_case")]
+pub enum Resolved {
+    File(PathBuf),
+    Symbol(Symbol),
+}
+
 /// What changing one definition reaches, counted before the change — the
 /// callers and the tests as one answer (`CodeGraph::impact`).
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

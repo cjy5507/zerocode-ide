@@ -242,6 +242,25 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
         title: `RUSTSEC-2026-${String(at).padStart(4, "0")}`, tags: [], kind: "vulnerability",
         modified_ms: 0, out_links: 0, in_links: 0, source: null, excerpt: "", folder: "" });
     }
+    /* 코드 층(t-5970): 렌즈가 켜지고 워크스페이스가 있을 때만 — 백엔드처럼. 파일은 육각, 정의는
+     * 십자로 서야 한다(`KNOWLEDGE_NODE_SHAPES`). 선은 코드 → 페이지(implements)와 파일 → 파일
+     * (depends_on), 전부 measured다. `spec.code.error`는 백엔드의 거절 문장이다. */
+    const codeWanted = args.code === true && typeof args.project === "string" && args.project !== "";
+    const codeError = codeWanted ? spec.code?.error ?? null : null;
+    const codeFiles = codeWanted && codeError === null ? spec.code?.files ?? 0 : 0;
+    const codeSymbols = codeWanted && codeError === null ? spec.code?.symbols ?? 0 : 0;
+    const codeFrom = nodes.length;
+    for (let at = 0; at < codeFiles; at += 1) {
+      nodes.push({ id: `code:src/part-${at}.rs`, title: `part-${at}.rs`, tags: [], kind: "code_file",
+        modified_ms: 0, out_links: 0, in_links: 0, source: `src/part-${at}.rs`, excerpt: "src", folder: "" });
+    }
+    const symbolFrom = nodes.length;
+    for (let at = 0; at < codeSymbols; at += 1) {
+      const file = `src/part-${at % Math.max(1, codeFiles)}.rs`;
+      nodes.push({ id: `code:${file}#build_${at}@${at + 1}`, title: `build_${at}`, tags: [],
+        kind: "code_symbol", modified_ms: 0, out_links: 0, in_links: 0, source: file, excerpt: "fn",
+        folder: "" });
+    }
     const seen = new Set();
     const edges = [];
     const join = (from, to, kind = "mentions") => {
@@ -251,7 +270,8 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
       seen.add(key);
       /* 근거(t-5966)는 백엔드의 세 길 그대로: 본문 링크는 inferred, 키(원본 `source:` 포함)는
          declared. 기계가 잰 선은 볼트 그림에 없다. */
-      const provenance = kind !== "mentions" || nodes[to]?.kind === "source" ? "declared" : "inferred";
+      const provenance = nodes[from]?.kind?.startsWith("code_") ? "measured"
+        : kind !== "mentions" || nodes[to]?.kind === "source" ? "declared" : "inferred";
       edges.push(spec.untyped ? { from, to } : { from, to, kind, provenance });
     };
     const lonely = (at) => at % 5 === 4;
@@ -288,6 +308,13 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
         join(from, ghostFrom + at);
       }
       for (let at = 0; at < components; at += 1) join(0, componentFrom + at);
+      for (let at = 0; at < codeFiles; at += 1) {
+        join(codeFrom + at, at % Math.max(1, pages), "implements");
+        if (at + 1 < codeFiles) join(codeFrom + at, codeFrom + at + 1, "depends_on");
+      }
+      for (let at = 0; at < codeSymbols; at += 1) {
+        join(symbolFrom + at, (at + 1) % Math.max(1, pages), "implements");
+      }
       for (let at = 0; at < vulnerabilities; at += 1) {
         join(vulnerabilityFrom + at, componentFrom + (at % Math.max(1, components)));
       }
@@ -329,6 +356,15 @@ export const seedKnowledgeWindow = (target) => target.addInitScript((boot) => {
       scanned_ms: 4,
       /* 라이브 층은 시험이 준 그대로 — 창 하네스의 같은 픽스처와 같은 손(t-4140 S4). */
       ...(spec.live ? { live: spec.live } : {}),
+      /* 코드 렌즈의 답(t-5970) — 백엔드 `CodeLens`의 모양 그대로. */
+      ...(codeWanted ? { code: {
+        project: args.project,
+        mentions: codeFiles + codeSymbols + 1,
+        resolved: codeFiles + codeSymbols,
+        grafted: { nodes: codeFiles + codeSymbols,
+          edges: edges.filter((edge) => edge.provenance === "measured").length, capped: false },
+        error: codeError,
+      } } : {}),
     };
   };
   /* 공급망의 답(`supply_chain_graph`, docs/design/knowledge-supply-chain-20260917.md §5.3) —

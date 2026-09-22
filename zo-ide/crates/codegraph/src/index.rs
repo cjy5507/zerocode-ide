@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::sync::mpsc;
@@ -8,8 +10,8 @@ use thiserror::Error;
 use crate::extract::extract;
 use crate::language::spec_for_path;
 use crate::model::{
-    FileFingerprint, FileLinks, Impact, Import, IndexStatus, LinkedFile, Reference, SkipReason,
-    SkippedFile, Symbol, SymbolKind,
+    FileFingerprint, FileLinks, Impact, Import, IndexStatus, LinkedFile, Reference, Resolved,
+    SkipReason, SkippedFile, Symbol, SymbolKind,
 };
 use crate::positions::{pack_by_name, PackedName};
 use crate::scan::{fingerprint, scan_workspace, ScanEntry};
@@ -22,6 +24,9 @@ pub const DEFAULT_CACHE_FILE_NAME: &str = "index-v2.sqlite";
 /// now lives. Nothing reads them any more; the v1 JSON was 352 MB on this
 /// repository, so it is removed rather than left to sit.
 pub(crate) const LEGACY_CACHE_FILE_NAMES: [&str; 1] = ["index-v1.json"];
+/// Between a Rust path's segments in a symbol mention (`Type::name`).
+const MENTION_PATH_SEPARATOR: &str = "::";
+
 /// Files a first build extracts at a time: parallel within a chunk, and the
 /// next chunk is parsed while this one is written, so at most three chunks'
 /// facts are held at once.
@@ -344,6 +349,76 @@ impl CodeGraph {
             return Ok(None);
         }
         self.store.links(stored.id, limit).map(Some)
+    }
+
+    /// What each of `mentions` names, after one refresh for the whole batch:
+    /// a path that is an indexed file — exactly, or as the one indexed path
+    /// ending in it (`scan.rs`, `codegraph/src/scan.rs`) — or a symbol whose
+    /// definitions all sit in one file, `Type::name` narrowed to that
+    /// container or module. A word, a folder, or a name several files define
+    /// is `None`: a picture draws what the index can place, not what it could
+    /// guess.
+    pub fn resolve_mentions(
+        &mut self,
+        mentions: &[String],
+    ) -> Result<Vec<Option<Resolved>>, CodeGraphError> {
+        self.refresh()?;
+        let mut by_name = HashMap::<OsString, Vec<PathBuf>>::new();
+        for path in self.store.indexed_paths() {
+            if let Some(name) = path.file_name().map(OsStr::to_os_string) {
+                by_name.entry(name).or_default().push(path);
+            }
+        }
+        mentions
+            .iter()
+            .map(|mention| {
+                if let Some(file) = self.resolve_path(mention, &by_name) {
+                    return Ok(Some(Resolved::File(file)));
+                }
+                self.resolve_symbol(mention)
+                    .map(|symbol| symbol.map(Resolved::Symbol))
+            })
+            .collect()
+    }
+
+    fn resolve_path(
+        &self,
+        mention: &str,
+        by_name: &HashMap<OsString, Vec<PathBuf>>,
+    ) -> Option<PathBuf> {
+        let wanted = mention.split('/').collect::<PathBuf>();
+        if self.store.stored(&wanted).is_some_and(|file| file.indexed) {
+            return Some(wanted);
+        }
+        let mut ending = by_name
+            .get(wanted.file_name()?)?
+            .iter()
+            .filter(|path| path.ends_with(&wanted));
+        let only = ending.next()?;
+        ending.next().is_none().then(|| only.clone())
+    }
+
+    fn resolve_symbol(&self, mention: &str) -> Result<Option<Symbol>, CodeGraphError> {
+        let segments = mention.split(MENTION_PATH_SEPARATOR).collect::<Vec<_>>();
+        let Some((name, qualifiers)) = segments.split_last() else {
+            return Ok(None);
+        };
+        let mut found = self.store.symbols_named(name, None)?;
+        if let Some(qualifier) = qualifiers.last() {
+            // `Type::name` is a member of `Type`; `module::name` lives in a
+            // file named after the module.
+            found.retain(|symbol| {
+                symbol.container.as_deref() == Some(*qualifier)
+                    || symbol.file.file_stem() == Some(OsStr::new(qualifier))
+            });
+        }
+        let Some(first) = found.first() else {
+            return Ok(None);
+        };
+        Ok(found
+            .iter()
+            .all(|symbol| symbol.file == first.file)
+            .then(|| first.clone()))
     }
 
     /// Every file the index holds parsed, in path order, as the last refresh

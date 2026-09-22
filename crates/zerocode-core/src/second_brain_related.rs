@@ -150,7 +150,9 @@ pub fn slug_of(node: &GraphNode) -> Option<String> {
                 .to_string(),
         ),
         NodeKind::Ghost => Some(node.id.strip_prefix(GHOST_PREFIX)?.to_string()),
-        NodeKind::Source => None,
+        // Evidence rather than pages to read: a raw file, and the project's
+        // code the layer grafts beside the vault.
+        NodeKind::Source | NodeKind::CodeFile | NodeKind::CodeSymbol => None,
     }
 }
 

@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { KNOWLEDGE_SCENES, knowledgeSweepFor, measureKnowledgeGlParity, measureKnowledgePainterSwap,
   measureKnowledgeScenes,
   testKnowledgePerformance } from "./knowledge-performance.mjs";
+import { testKnowledgeCode, measureKnowledgeCodeScene } from "./knowledge-code.mjs";
 import { seedKnowledgeWindow } from "./knowledge-fixture.mjs";
 import { measureKnowledgeSupplyParity, measureKnowledgeSupplyScene, testKnowledgeSupply } from "./knowledge-supply.mjs";
 
@@ -3943,12 +3944,15 @@ await measureKnowledgeScenes(page, ok, { frames: sweep.frames });
  * 하네스는 끝까지 달린다(모양의 표가 없는 제품에서도 뒤의 METRIC이 선다). */
 const PAINTER_WORDS = /\b(?:SVG|GL|WebGL\d*)\b/iu;
 const grammarVault = { pages: 12, linksPer: 2, ghosts: 2, tags: ["core", "reading"],
-  supply: { components: 2, vulnerabilities: 1 } };
-/* 원본은 볼트의 앞 다섯 쪽이 하나씩 인용한다(`knowledge-fixture.mjs`). */
+  supply: { components: 2, vulnerabilities: 1 }, code: { files: 1, symbols: 1 } };
+/* 원본은 볼트의 앞 다섯 쪽이 하나씩 인용한다(`knowledge-fixture.mjs`). 코드 층(t-5970)은 렌즈가 켜지고
+ * 워크스페이스가 있을 때만 선다 — 이 판은 둘 다 세운다. */
 const grammarCount = grammarVault.pages + grammarVault.ghosts + Math.min(5, grammarVault.pages)
-  + grammarVault.supply.components + grammarVault.supply.vulnerabilities;
+  + grammarVault.supply.components + grammarVault.supply.vulnerabilities
+  + grammarVault.code.files + grammarVault.code.symbols;
+const GRAMMAR_WORKSPACE = "/workspace/acme";
 await page.setViewportSize({ width: 1280, height: 860 });
-const grammarOpened = await page.evaluate((vault) => {
+const grammarOpened = await page.evaluate(({ vault, workspace }) => {
   try {
     knowledgeQuery = "";
     knowledgeTagsPicked.clear();
@@ -3964,6 +3968,9 @@ const grammarOpened = await page.evaluate((vault) => {
     /* 창이 손을 고르는 판 — 앞 케이스가 못박은 손을 놓는다. */
     knowledgePainterKind = null;
     knowledgeShowSources = true;
+    knowledgeShowCode = true;
+    window.__GRAMMAR_HELD_WORKTREE__ = activeWorktreePath;
+    activeWorktreePath = workspace;
     knowledgeReport = null;
     knowledgeAskedAt = 0;
     window.__VAULT__ = vault;
@@ -3973,7 +3980,7 @@ const grammarOpened = await page.evaluate((vault) => {
   } catch (error) {
     return String(error?.stack ?? error);
   }
-}, grammarVault);
+}, { vault: grammarVault, workspace: GRAMMAR_WORKSPACE });
 const grammarStood = grammarOpened === "" && await page.waitForFunction((count) => {
   const view = document.querySelector(".knowledge-view:not([hidden])");
   const layout = view ? knowledgeLayouts.get(view) : undefined;
@@ -4146,6 +4153,8 @@ const shapeGrammar = await grammarAsk(async () => {
   } finally {
     knowledgePainterKind = null;
     knowledgeShowSources = false;
+    knowledgeShowCode = false;
+    activeWorktreePath = window.__GRAMMAR_HELD_WORKTREE__ ?? null;
     await paintKnowledgeView();
   }
 });
@@ -4153,9 +4162,10 @@ const shapeGrammar = await grammarAsk(async () => {
  * 설계의 합격선은 2%다(§2 G3). */
 const AREA_SLACK = 0.02;
 const shapeDetail = JSON.stringify(shapeGrammar);
-ok("P1 G3: five kinds meet five shapes one to one, and every shape has one geometry row",
+ok("P1 G3: seven kinds meet seven shapes one to one, and every shape has one geometry row",
   !shapeGrammar.thrown
-    && shapeGrammar.table.kinds.join(",") === "page,ghost,source,component,vulnerability"
+    && shapeGrammar.table.kinds.join(",")
+      === "page,ghost,source,component,vulnerability,code_file,code_symbol"
     && shapeGrammar.table.distinct === shapeGrammar.table.kinds.length && shapeGrammar.table.geometry,
   shapeDetail);
 ok("P1 G3: every kind stands in its own shape, drawn from its geometry row, at the area its size promises",
@@ -4164,7 +4174,7 @@ ok("P1 G3: every kind stands in its own shape, drawn from its geometry row, at t
     && Math.abs(row.areaRatio - 1) < AREA_SLACK && row.dashedAgrees),
   shapeDetail);
 ok("P1 G4: every legend row draws the picture's own shape from the same geometry row",
-  !shapeGrammar.thrown && ["page", "ghost", "source", "recalled"]
+  !shapeGrammar.thrown && ["page", "ghost", "source", "recalled", "code_file", "code_symbol"]
     .every((kind) => shapeGrammar.legend.some((row) => row.kind === kind))
     && shapeGrammar.legend.every((row) => row.sameAsPicture && row.fromTable),
   shapeDetail);
@@ -4183,6 +4193,10 @@ ok("P1 G2: the window, not a person, picks the painter — unpinned, the table's
  * 첫 그림은 이 판(SVG)과 GL 판(아래)에서 적고, 진짜 GPU의 시간은 `knowledge-gpu.mjs`가 WebKit에서 잰다. */
 await testKnowledgeSupply(page, ok);
 await measureKnowledgeSupplyScene(page, ok, { painter: "svg" });
+
+/* 코드 층(t-5970 G2) — 같은 모양의 문법 위에 서는 또 하나의 렌즈. 계약과 실측은 `knowledge-code.mjs`. */
+await testKnowledgeCode(page, ok);
+await measureKnowledgeCodeScene(page, ok);
 
 /* GL의 계약은 제 판에서 묻는다(위의 `GL_ARGS` 주석). 그 판의 시간은 소프트웨어의
  * 것이므로 훑는 프레임을 짧게 잡는다 — 여기서 세는 것은 드로우와 자리이지 ms가
@@ -4249,8 +4263,9 @@ const SHAPE_PIXELS = Object.freeze({
   pad: 6,
   /* 칠해졌는가: 배경에서 벗어난 폭이 점의 잉크가 벗어난 폭의 절반을 넘는다. */
   inkShare: 0.5,
-  /* 겹침의 하한 0.9: 같은 넓이의 서로 다른 모양끼리는 최대 0.839(원·마름모)이고, 같은 모양을
-   * 1 px 안쪽으로 줄인 것과는 최소 0.938(사각)이다 — 둘 사이에 선다. */
+  /* 겹침의 하한 0.9: 같은 넓이의 서로 다른 모양끼리는 원·마름모 0.834, 같은 모양을 1 px 안쪽으로
+   * 줄인 것과는 최소 0.938(사각)이다 — 둘 사이에 선다. 정육각형과 원(t-5970)만은 같은 넓이에서
+   * 0.928로 이 선을 넘는다: 그 둘은 「가장 잘 맞는 모양이 제 모양인가」(`best`)가 가른다. */
   overlap: 0.9,
   /* 고리의 잉크를 찾는 둘레 띠(px) — 유령의 테두리 굵기(1.5 px)만큼 안팎으로. */
   ringBand: 1.5,
@@ -4275,7 +4290,8 @@ const SHAPE_PIXELS = Object.freeze({
 /* 같은 넓이의 네 모양의 외접원 비율 — 제품의 표가 아니라 넓이의 식에서(시험이 제품의 수로
  * 제품을 재지 않게). 점의 상자는 가장 멀리 닿는 후보까지 담는다. */
 const IDEAL_REACH = Object.freeze({ circle: 1, square: Math.sqrt(Math.PI / 2), diamond: Math.sqrt(Math.PI / 2),
-  triangle: Math.sqrt((4 * Math.PI) / (3 * Math.sqrt(3))) });
+  triangle: Math.sqrt((4 * Math.PI) / (3 * Math.sqrt(3))),
+  hexagon: Math.sqrt((2 * Math.PI) / (3 * Math.sqrt(3))), cross: Math.sqrt(Math.PI / 2) });
 
 /* 한 판에서 두 손을 찍어 견준다 — 판의 기기 픽셀 비율이 무엇이든. 찍은 그림은 기기 픽셀이고,
  * 모양의 판정은 CSS 픽셀로 한다(점의 크기는 CSS 픽셀의 약속이다). */
@@ -4293,9 +4309,10 @@ const shapePixelsOn = async (target) => {
       }
       knowledgeTunings.delete(view);
       const spec = { pages: 1, ghosts: 1, tags: [], customEdges: [],
-        supply: { components: 1, vulnerabilities: 1 } };
+        supply: { components: 1, vulnerabilities: 1 }, code: { files: 1, symbols: 1 } };
       window.__VAULT__ = spec;
       knowledgeShowSources = true;
+      knowledgeShowCode = true;
       knowledgeQuery = "";
       knowledgeTagsPicked.clear();
       knowledgeSelectedKey = null;
@@ -4313,7 +4330,8 @@ const shapePixelsOn = async (target) => {
       view.querySelector(".knowledge-edges").replaceChildren();
       /* 늦게 온 백엔드의 답이 이 그림을 덮지 않게 — 바닥 시간 안의 청은 버려진다. */
       knowledgeAskedAt = Date.now();
-      knowledgeReport = window.__buildVaultGraph__({ path: "/shapes", sources: true }, spec);
+      knowledgeReport = window.__buildVaultGraph__({ path: "/shapes", sources: true, code: true,
+        project: "/workspace/acme" }, spec);
       knowledgePainterKind = "svg";
       await paintKnowledgeView();
       for (let round = 0; round < 600 && (knowledgeLayouts.get(view)?.left ?? 1) > 0; round += 1) {
@@ -4405,6 +4423,13 @@ const shapePixelsOn = async (target) => {
         square: (x, y) => Math.abs(x) <= ROOT_HALF && Math.abs(y) <= ROOT_HALF,
         diamond: (x, y) => Math.abs(x) + Math.abs(y) <= 1,
         triangle: (x, y) => y <= 0.5 && y >= -1 + ROOT3 * Math.abs(x),
+        /* 위아래가 평평한 정육각형(꼭짓점 (±1, 0))과, 팔 끝 모서리가 외접원 위에 선 십자. */
+        hexagon: (x, y) => Math.abs(y) <= ROOT3 / 2 && ROOT3 * Math.abs(x) + Math.abs(y) <= ROOT3,
+        cross: (x, y) => {
+          const arm = 3 / Math.sqrt(10);
+          const side = 1 / Math.sqrt(10);
+          return (Math.abs(x) <= side && Math.abs(y) <= arm) || (Math.abs(y) <= side && Math.abs(x) <= arm);
+        },
       };
       const most = Math.max(...Object.values(ideal));
       const median = (values) => values.slice().sort((one, two) => one - two)[Math.floor(values.length / 2)];
@@ -4520,6 +4545,9 @@ const shapePixelsOn = async (target) => {
             circle: [["the same corner point on a circle", 0.78 * r, 0.78 * r, false]],
             triangle: [["toward the apex", 0, -0.75 * R, true], ["below the base", 0, 0.75 * R, false]],
             diamond: [["toward the top tip", 0, -0.85 * R, true], ["at the corner a square would fill", 0.6 * R, 0.6 * R, false]],
+            hexagon: [["toward a vertex, past the circle of its size", 0.96 * R, 0, true]],
+            cross: [["down an arm, past the circle of its size", 0, -0.88 * R, true],
+              ["between two arms, where a circle or a square would fill", 0.5 * R, 0.5 * R, false]],
           }[node.shape] ?? [];
           row.points = points.map(([name, dx, dy, want]) => ({ name, want,
             svg: inkedAt(masks.svg, dx, dy), gl: inkedAt(masks.gl, dx, dy) }));
@@ -4542,6 +4570,7 @@ const shapePixelsOn = async (target) => {
     if (view) knowledgeTunings.delete(view);
     knowledgePainterKind = null;
     knowledgeShowSources = false;
+    knowledgeShowCode = false;
   });
   if (seatWas) await target.setViewportSize(seatWas);
   return pixels;
@@ -4569,20 +4598,20 @@ if (skipped) {
   const pixelDetail = JSON.stringify(pixelRuns);
   const ratiosSeen = pixelRuns.map((run) => run.ratio).join(",") === `1,${RETINA_RATIO}`;
   const filledOf = (run) => (run.thrown ? [] : Object.values(run.rows).filter((row) => row.shape !== "ring"));
-  ok("P1 G3: at 1x and 2x device pixels the two painters stand the five kinds on the same seats, apart and unhidden, one with elements and one without",
+  ok("P1 G3: at 1x and 2x device pixels the two painters stand the seven kinds on the same seats, apart and unhidden, one with elements and one without",
     ratiosSeen && pixelRuns.every((run) => !run.thrown && run.hands.join(",") === "svg,gl"
-      && run.elements[0] === 5 && run.elements[1] === 0 && Object.values(run.rows).length === 5
+      && run.elements[0] === 7 && run.elements[1] === 0 && Object.values(run.rows).length === 7
       && Object.values(run.rows).every((row) => row.sameSeat && row.open && row.apart)),
     pixelDetail);
   ok("P1 G3: at 1x and 2x device pixels each filled kind is its table shape in both painters, the two painters' ink overlaps, and its centre is the same colour",
-    ratiosSeen && pixelRuns.every((run) => filledOf(run).length === 4 && filledOf(run).every((row) => row.best.svg === row.shape
+    ratiosSeen && pixelRuns.every((run) => filledOf(run).length === 6 && filledOf(run).every((row) => row.best.svg === row.shape
       && row.best.gl === row.shape
       && row.fit.svg[row.shape] >= SHAPE_PIXELS.overlap && row.fit.gl[row.shape] >= SHAPE_PIXELS.overlap
       && row.hands >= SHAPE_PIXELS.overlap
       && row.centre.svg.every((value, channel) => Math.abs(value - row.centre.gl[channel]) <= SHAPE_PIXELS.centreLevels))),
     pixelDetail);
-  ok("P1 G3: at 1x and 2x device pixels the square's corner fills where a circle's does not, the triangle points up and the diamond fills its tips, in both painters",
-    ratiosSeen && pixelRuns.every((run) => filledOf(run).length === 4 && filledOf(run).every((row) => row.points.length > 0
+  ok("P1 G3: at 1x and 2x device pixels the square's corner fills where a circle's does not, the triangle points up, the diamond fills its tips, the hexagon reaches its vertices and the cross leaves its corners open, in both painters",
+    ratiosSeen && pixelRuns.every((run) => filledOf(run).length === 6 && filledOf(run).every((row) => row.points.length > 0
       && row.points.every((point) => point.svg === point.want && point.gl === point.want))),
     pixelDetail);
   /* 고리는 모양으로 고른다 — 유령이 다른 모양을 입은 판에서도 판정이 던지지 않고 빨갛게 서게. */

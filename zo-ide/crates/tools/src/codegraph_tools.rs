@@ -474,7 +474,7 @@ pub(crate) fn neighbours_for_read(
     match slot.as_ref() {
         Some(graph) if graph.workspace_root() != root => return None,
         Some(_) => {}
-        None => *slot = CodeGraph::open_existing(&root, index_cache_path(&root)).ok()?,
+        None => *slot = CodeGraph::open_existing(&root, codegraph_cache_path(&root)).ok()?,
     }
     let links = slot
         .as_mut()?
@@ -508,7 +508,7 @@ fn with_codegraph<T>(
     }
     if slot.is_none() {
         *slot = Some(
-            CodeGraph::load_or_build(&root, index_cache_path(&root))
+            CodeGraph::load_or_build(&root, codegraph_cache_path(&root))
                 .map_err(|error| codegraph_error(&error))?,
         );
     }
@@ -516,7 +516,10 @@ fn with_codegraph<T>(
 }
 
 /// Where a workspace's index lives: the project's zo state, never the tree.
-fn index_cache_path(root: &Path) -> PathBuf {
+/// The codegraph tools, a read's neighbours and `zo vault code` open this one
+/// file.
+#[must_use]
+pub fn codegraph_cache_path(root: &Path) -> PathBuf {
     runtime::zo_project_state_dir(root)
         .join(CODEGRAPH_CACHE_DIR_NAME)
         .join(DEFAULT_CACHE_FILE_NAME)

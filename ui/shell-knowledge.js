@@ -370,6 +370,9 @@ let knowledgeLintLens = null;
 /* 근거 렌즈(t-5966): 숨긴 근거의 낱말들. 비어 있으면 전부 보인다 — 기본이다. */
 const knowledgeProvenanceHidden = new Set();
 let knowledgeShowSources = false;
+/* 코드 렌즈(t-5970): 볼트의 페이지가 부르는 활성 워크스페이스의 파일·정의를 그림에 접붙인다.
+ * 답에 없는 점을 만드는 렌즈라 켜면 백엔드에 묻고, 기본은 꺼짐이다. */
+let knowledgeShowCode = false;
 /* 라이브 층의 렌즈 셋(t-2931): 창 안에서 회상되거나 바뀐 것만, 한 번도 회상되지
  * 않은 것만, 그리고 merge 후보 쌍만. 창의 길이는 백엔드의 한 표가 정한다. */
 let knowledgeAliveOnly = false;
@@ -538,20 +541,28 @@ function knowledgeHubFloor(degree, count, tuning) {
 }
 
 /* 점의 모양 — 종류마다 하나이고, 모양이 곧 뜻이다(「포자 형태의 동그라미로만
- * 되어있는데 의미를 넣어서」, 2026-09-17). 종류 다섯이 모양 다섯에 하나씩 닿는다 —
+ * 되어있는데 의미를 넣어서」, 2026-09-17). 종류 일곱이 모양 일곱에 하나씩 닿는다 —
  * 두 종류가 한 모양을 나눠 쓰면 모양은 다시 뜻을 가르지 못한다.
  *
  *   ● circle    page           볼트의 지식 페이지
  *   ◌ ring      ghost          링크만 있고 아직 없는 페이지 — 채우지 않은 점선 고리
  *   ◆ diamond   source         페이지가 인용한 원본
  *   ■ square    component      소프트웨어 구성요소(SBOM의 패키지·크레이트)
- *   ▲ triangle  vulnerability  알려진 취약점(SCA의 발견) */
+ *   ▲ triangle  vulnerability  알려진 취약점(SCA의 발견)
+ *   ⬢ hexagon   code_file      페이지가 부르는 활성 워크스페이스의 코드 파일(t-5970)
+ *   ✚ cross     code_symbol    페이지가 부르는 코드의 정의 하나 */
+/* 볼트의 페이지가 아니라 근거인 종류 — 원본, 그리고 코드 층(t-5970)의 둘. 볼트의 새 선이
+ * 맥박치는 일은 이것들에 닿지 않는다. */
+const KNOWLEDGE_EVIDENCE_KINDS = new Set(["source", "code_file", "code_symbol"]);
+
 const KNOWLEDGE_NODE_SHAPES = Object.freeze({
   page: "circle",
   ghost: "ring",
   source: "diamond",
   component: "square",
   vulnerability: "triangle",
+  code_file: "hexagon",
+  code_symbol: "cross",
 });
 
 /* 윤곽의 좌표는 화면 픽셀의 소수 둘째 자리까지 쓴다. 점의 자리(`coordinateDigits`, 한
@@ -574,10 +585,12 @@ function knowledgePathNumber(value) {
  * 나온다(외접원 반지름 R, 원의 반지름 r):
  *   사각·마름모  2R² = πr²              → R/r = √(π/2)
  *   정삼각형     (3√3/4)R² = πr²        → R/r = √(4π/(3√3))
+ *   정육각형   (3√3/2)R² = πr²        → R/r = √(2π/(3√3))
+ *   십자       팔 반길이 L = 3R/√10, 반폭 w = R/√10 → 넓이 8Lw − 4w² = 2R² → R/r = √(π/2)
  * 고리는 채우지 않지만 그것이 두른 넓이가 원과 같다.
  *
  * `code`는 GL 손의 조각 셰이더가 고르는 거리 함수의 번호이고(원·고리 0, 사각 1,
- * 마름모 2, 삼각 3), `dashed`는 테두리를 점선으로 끊는가다 — 고리의 점선은 GL에서는
+ * 마름모 2, 삼각 3, 육각 4, 십자 5), `dashed`는 테두리를 점선으로 끊는가다 — 고리의 점선은 GL에서는
  * 이 칸이, SVG에서는 같은 종류의 옷(`.is-ghost`)이 긋고, 두 손의 픽셀 대조가 둘이
  * 같은 그림인지 묻는다. `outline`은 외접원 반지름 R에 내접한 윤곽의 SVG 경로이고,
  * `null`이면 경로가 아니라 `<circle r=R>`이다. */
@@ -614,6 +627,35 @@ const KNOWLEDGE_SHAPES = Object.freeze({
       const back = knowledgePathNumber((-reach * Math.sqrt(3)) / 2);
       const base = knowledgePathNumber(reach / 2);
       return `M0 ${knowledgePathNumber(-reach)}L${across} ${base}L${back} ${base}Z`;
+    },
+  }),
+  /* 위아래가 평평한 정육각형 — 꼭짓점이 (±R, 0), 윗변·밑변이 y = ±R√3/2. */
+  hexagon: Object.freeze({
+    reach: Math.sqrt((2 * Math.PI) / (3 * Math.sqrt(3))),
+    code: 4,
+    dashed: false,
+    outline: (reach) => {
+      const tip = knowledgePathNumber(reach);
+      const back = knowledgePathNumber(-reach);
+      const half = knowledgePathNumber(reach / 2);
+      const halfBack = knowledgePathNumber(-reach / 2);
+      const rise = knowledgePathNumber((reach * Math.sqrt(3)) / 2);
+      const fall = knowledgePathNumber((-reach * Math.sqrt(3)) / 2);
+      return `M${tip} 0L${half} ${rise}L${halfBack} ${rise}L${back} 0L${halfBack} ${fall}L${half} ${fall}Z`;
+    },
+  }),
+  /* 십자 — 팔 끝의 모서리가 외접원 위에 선다(반길이 3R/√10, 반폭 R/√10). */
+  cross: Object.freeze({
+    reach: Math.sqrt(Math.PI / 2),
+    code: 5,
+    dashed: false,
+    outline: (reach) => {
+      const arm = knowledgePathNumber((3 * reach) / Math.sqrt(10));
+      const armBack = knowledgePathNumber((-3 * reach) / Math.sqrt(10));
+      const side = knowledgePathNumber(reach / Math.sqrt(10));
+      const sideBack = knowledgePathNumber(-reach / Math.sqrt(10));
+      return `M${sideBack} ${armBack}H${side}V${sideBack}H${arm}V${side}H${side}V${arm}`
+        + `H${sideBack}V${side}H${armBack}V${sideBack}H${sideBack}Z`;
     },
   }),
 });
@@ -983,6 +1025,10 @@ function buildKnowledgeView() {
       short: { key: "knowledge.typedShort", word: "타입" }, glyph: "link" },
     { flag: "sources", key: "knowledge.showSources", word: "원본도",
       short: { key: "knowledge.sourcesShort", word: "원본" }, glyph: "file" },
+    /* 코드 층(t-5970): 활성 워크스페이스의 파일 ⬢과 정의 ✚를 그것을 부르는 페이지에 잇는다 —
+     * 인덱스는 zo가 읽고(`zo vault code`), 창은 답을 core가 접붙인 그림으로 받는다. */
+    { flag: "code", key: "knowledge.codeLens", word: "코드 — 볼트가 부르는 파일과 정의",
+      short: { key: "knowledge.codeShort", word: "코드" }, glyph: "code" },
     /* 라이브 층의 둘(t-2931). 「살아 있는 것만」은 창 안에서 회상되거나 바뀐
      * 페이지, 「합칠 후보만」은 백엔드가 센 쌍의 양 끝. 답에 라이브 층이 없으면
      * (옛 백엔드) 둘 다 서지 않는다. */
@@ -1294,6 +1340,9 @@ function buildKnowledgeView() {
       words: { severity: one.id } })),
     { kind: "vulnerability", key: "knowledge.supplyInformational", word: "정보성 권고", supply: true,
       words: { severity: "unknown", informational: "unmaintained" } },
+    /* 코드 층(t-5970)의 줄도 렌즈가 켜졌을 때만 선다(`code`). */
+    { kind: "code_file", key: "knowledge.nodeCodeFile", word: "코드 파일", code: true },
+    { kind: "code_symbol", key: "knowledge.nodeCodeSymbol", word: "코드 정의", code: true },
   ]) {
     const item = document.createElement("li");
     item.dataset.nodeKind = row.kind;
@@ -1308,6 +1357,10 @@ function buildKnowledgeView() {
     }
     if (row.supply) {
       item.dataset.legendSupply = "true";
+      item.hidden = true;
+    }
+    if (row.code) {
+      item.dataset.legendCode = "true";
       item.hidden = true;
     }
     item.append(mark, word);
@@ -1833,6 +1886,24 @@ function buildKnowledgeLinkForm() {
   acts.append(save, cancel);
   form.append(head, target, candidates, kind, directions, preview, acts);
   return form;
+}
+
+/* 코드 렌즈(t-5970)의 한 줄: 꺼져 있으면 렌즈의 이름, 켜져 있으면 백엔드의 답 — 접붙인 점과
+ * 선의 수, 볼트의 언급 중 인덱스가 놓은 몫 — 이거나 거절의 문장 그대로. 창은 셈하지 않는다. */
+function knowledgeCodeSentence(answer) {
+  if (!knowledgeShowCode) return t("knowledge.codeLens", "코드 — 볼트가 부르는 파일과 정의");
+  if (!answer) {
+    return activeWorktreePath
+      ? t("knowledge.codeAsking", "코드를 묻는 중…")
+      : t("knowledge.codeNoProject", "열린 워크스페이스가 없어 코드를 물을 수 없습니다");
+  }
+  if (answer.error) return t("knowledge.codeError", "코드를 받지 못했습니다: {{error}}", { error: answer.error });
+  return t("knowledge.codeStatus", "코드 점 {{nodes}}개 · 잰 선 {{edges}}개 — 볼트의 코드 언급 {{mentions}}개 중 {{resolved}}개가 인덱스에 있음", {
+    nodes: answer.grafted?.nodes ?? 0,
+    edges: answer.grafted?.edges ?? 0,
+    mentions: answer.mentions ?? 0,
+    resolved: answer.resolved ?? 0,
+  });
 }
 
 /* ---- 그림에 서는 것 고르기 ----
@@ -2615,6 +2686,7 @@ function captureCurrentKnowledgeScene(name, view, layout) {
       ghosts: knowledgeGhostsOnly,
       typed: knowledgeTypedOnly,
       sources: knowledgeShowSources,
+      code: knowledgeShowCode,
       alive: knowledgeAliveOnly,
       cold: knowledgeColdOnly,
       merge: knowledgeMergeOnly,
@@ -2650,8 +2722,11 @@ async function restoreKnowledgeScene(view, scene) {
   /* 「원본도」는 답에 없는 점을 만드는 렌즈다 — 깃발이 바뀌면 툴바의 깃발과 같은 문으로
    * 백엔드에 다시 묻는다. 깃발만 세우면 원본 점이 서지 않고, 시야가 고른 원본 점은
    * 「없는 점」으로 떨어졌다. */
-  const refetch = knowledgeShowSources !== !!scene.lens?.sources;
+  const refetch = knowledgeShowSources !== !!scene.lens?.sources
+    || knowledgeShowCode !== (scene.lens?.code === true);
   knowledgeShowSources = !!scene.lens?.sources;
+  /* 코드 렌즈(t-5970)도 답에 없는 점을 만든다 — 같은 이유로 다시 묻는다. 옛 시야는 꺼진 채다. */
+  knowledgeShowCode = scene.lens?.code === true;
   knowledgeAliveOnly = !!scene.lens?.alive;
   /* 냉각 렌즈(건강 카드의 「회상된 적 없음」)도 멤버십을 바꾸는 렌즈라 시야에 든다. */
   knowledgeColdOnly = !!scene.lens?.cold;
@@ -5169,7 +5244,8 @@ function noteKnowledgeFresh(before, after) {
   const keyOf = (graph, edge) => {
     const from = graph.nodes[edge.from];
     const to = graph.nodes[edge.to];
-    if (!from || !to || from.kind === "source" || to.kind === "source") return null;
+    if (!from || !to || KNOWLEDGE_EVIDENCE_KINDS.has(from.kind)
+      || KNOWLEDGE_EVIDENCE_KINDS.has(to.kind)) return null;
     return `${from.id}>${to.id}>${edge.kind ?? "mentions"}`;
   };
   const had = new Set(before.graph.edges.map((edge) => keyOf(before.graph, edge)));
@@ -6942,7 +7018,8 @@ function paintKnowledgeHead(view, layout, matches) {
             : flag === "merge" ? knowledgeMergeOnly
               : flag === "nav" ? knowledgeNavShown
                 : flag === "supply" ? knowledgeSupplyShown
-                  : knowledgeShowSources;
+                  : flag === "code" ? knowledgeShowCode
+                    : knowledgeShowSources;
     writeAttribute(button, "aria-pressed", String(on));
     button.classList.toggle("is-active", on);
     /* 타입 관계가 한 줄도 없는 볼트에서 이 칩은 아무것도 고르지 못한다 — 눌러
@@ -6961,6 +7038,14 @@ function paintKnowledgeHead(view, layout, matches) {
   /* 공급망의 낱말들(P4) — `sev:` 칩과 범례의 줄은 렌즈가 켜졌을 때만 선다. */
   for (const held of view.querySelectorAll('.knowledge-token-chip[data-token="sev:"], .knowledge-legend [data-legend-supply]')) {
     held.hidden = !knowledgeSupplyShown;
+  }
+  /* 코드 층(t-5970)의 범례 줄과, 깃발이 짚을 때 말하는 한 줄 — 답의 수와 거절을 그대로. */
+  for (const held of view.querySelectorAll(".knowledge-legend [data-legend-code]")) {
+    held.hidden = !knowledgeShowCode;
+  }
+  const codeSentence = knowledgeCodeSentence(knowledgeReport?.code);
+  for (const codeFlag of view.querySelectorAll('[data-knowledge-flag="code"]')) {
+    codeFlag.dataset.tip = codeSentence;
   }
   const tags = view.querySelector(".knowledge-tags");
   const paintChips = (host, rows) => {
@@ -7736,6 +7821,11 @@ function wireKnowledgeView(view) {
         /* 공급망(P4)은 답에 없는 점을 만드는 렌즈라 켜면 백엔드에 묻는다 — 그리는 일도 그 문이 한다. */
         toggleKnowledgeSupply();
         return;
+      } else if (flag === "code") {
+        /* 코드 층(t-5970)도 답에 없는 점을 만든다 — 백엔드에 다시 묻는다. */
+        knowledgeShowCode = !knowledgeShowCode;
+        void refreshKnowledgeGraph({ force: true });
+        return;
       } else {
         // 원본 노드는 답에 없는 점을 만드는 일이라 백엔드에 다시 묻는다.
         knowledgeShowSources = !knowledgeShowSources;
@@ -7906,6 +7996,9 @@ async function refreshKnowledgeGraph({ force = false, trailing = false } = {}) {
     const answer = await invoke("second_brain_graph", {
       path: vault,
       sources: knowledgeShowSources,
+      /* 코드 층(t-5970)은 창이 보고 있는 체크아웃의 것이다 — 없으면 묻지 않는다. */
+      code: knowledgeShowCode,
+      project: knowledgeShowCode ? (activeWorktreePath ?? null) : null,
       /* 일지의 시각은 벽시계이고 백엔드는 시간대 표가 없다 — 창의 것을 준다. */
       utcOffsetMinutes: new Date().getTimezoneOffset(),
     });

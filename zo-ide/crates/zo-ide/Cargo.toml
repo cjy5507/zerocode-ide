@@ -21,6 +21,9 @@ futures-util.workspace = true
 plugins = { path = "../plugins" }
 runtime = { path = "../runtime" }
 tools = { path = "../tools" }
+# `zo vault code` (t-5970) resolves the vault's code mentions against the
+# project's index; the same crate the tools already link.
+codegraph = { path = "../codegraph" }
 pulldown-cmark = "0.13"
 # 코드 담장 문법 강조 — codex `render/highlight.rs` 가 쓰는 그 강조기다
 # (codex-rs/tui/Cargo.toml: `syntect = "5"` + `two-face`). two-face 는 syntect

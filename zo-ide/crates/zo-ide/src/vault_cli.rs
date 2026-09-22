@@ -1,13 +1,18 @@
 //! `zo vault …` — the second brain's graph, from outside a session.
 //!
-//! One verb today: `path`, the question Graphify answers with "how do these
-//! two concepts connect" (t-5966 G3). The calculator is the window's own,
+//! Two verbs. `path`, the question Graphify answers with "how do these two
+//! concepts connect" (t-5966 G3): the calculator is the window's own,
 //! [`zerocode_core::second_brain_paths::report`] over the same scanner the
 //! knowledge graph and `zerocode vault-lint` read — this door prints the
-//! answer on a pane and counts nothing itself.
+//! answer on a pane and counts nothing itself. And `code` (t-5970 G2): the
+//! code the vault's pages name, resolved against a project's codegraph index
+//! into the [`CodeLayer`] the window grafts onto its picture
+//! ([`zerocode_core::second_brain_code::graft`]) — the index is read here,
+//! once, and nowhere in the window.
 //!
 //! ```text
 //! zo vault path <from> <to> [--k <n>] [--json] [--vault <dir>] [--cwd <dir>]
+//! zo vault code [--project <dir>] [--json] [--vault <dir>] [--cwd <dir>]
 //! ```
 //!
 //! Where the vault is comes from the same roads every zo surface reads:
@@ -15,37 +20,58 @@
 //! `ZEROCODE_SECOND_BRAIN`, else the merged settings' `secondBrain.vault`).
 //! No session, no credentials, no workspace trust — `--doctor`'s principle.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use codegraph::{CodeGraph, Resolved};
+
 use runtime::second_brain::{SecondBrain, WIKI_DIR};
 use runtime::ConfigLoader;
 use serde_json::{json, Value};
-use zerocode_core::second_brain_graph::{GraphCache, VaultGraph};
+use zerocode_core::second_brain_code::{
+    file_id, symbol_id, CodeEdge, CodeLayer, CodeLimits, CodeNode,
+};
+use zerocode_core::second_brain_graph::{EdgeKind, GraphCache, NodeKind, VaultGraph};
 use zerocode_core::second_brain_paths::{render_chain, report, PathReport, PATH_LIMITS};
 
 pub const USAGE: &str = "\
 zo vault path <from> <to> [--k <n>] [--json] [--vault <dir>] [--cwd <dir>]
+zo vault code [--project <dir>] [--json] [--vault <dir>] [--cwd <dir>]
 
-  Paths between two pages of the second brain, shortest first, each hop
-  naming the relation and the road that wrote it (measured · declared ·
+  path: paths between two pages of the second brain, shortest first, each
+  hop naming the relation and the road that wrote it (measured · declared ·
   inferred). A page is named by its id (wiki/a/b.md), its path below wiki/,
-  its file stem or its title. The vault is --vault, else the pane's
-  ZEROCODE_SECOND_BRAIN, else the merged settings' secondBrain.vault.
+  its file stem or its title.
+  code: the files and definitions of a project (--project, else the working
+  directory) that the pages name in their source: and backtick spans, as the
+  project's codegraph index places them — each joined to the pages naming it,
+  and the files to the files they import from. Builds the index if the
+  project has none.
+  The vault is --vault, else the pane's ZEROCODE_SECOND_BRAIN, else the
+  merged settings' secondBrain.vault.
 ";
 
 /// The verbs, in a table so the parser names the word that is not one.
-const VERBS: [&str; 1] = ["path"];
+const VERBS: [&str; 2] = ["path", "code"];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verb {
+    Path,
+    Code,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Request {
+    verb: Verb,
     from: String,
     to: String,
     k: usize,
     json: bool,
     vault: Option<PathBuf>,
     cwd: Option<PathBuf>,
+    project: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,8 +80,9 @@ pub struct Report {
 }
 
 fn parse(args: &[String]) -> Result<Request, String> {
-    match args.first().map(String::as_str) {
-        Some("path") => {}
+    let verb = match args.first().map(String::as_str) {
+        Some("path") => Verb::Path,
+        Some("code") => Verb::Code,
         Some("-h" | "--help") | None => return Err(USAGE.to_string()),
         Some(other) => {
             return Err(format!(
@@ -63,14 +90,16 @@ fn parse(args: &[String]) -> Result<Request, String> {
                 VERBS.join(", ")
             ))
         }
-    }
+    };
     let mut request = Request {
+        verb,
         from: String::new(),
         to: String::new(),
         k: PATH_LIMITS.k_max,
         json: false,
         vault: None,
         cwd: None,
+        project: None,
     };
     let mut named: Vec<String> = Vec::new();
     let mut rest = args[1..].iter();
@@ -91,12 +120,23 @@ fn parse(args: &[String]) -> Result<Request, String> {
             "--cwd" => {
                 request.cwd = Some(PathBuf::from(rest.next().ok_or("--cwd needs a directory")?));
             }
+            "--project" if verb == Verb::Code => {
+                request.project = Some(PathBuf::from(
+                    rest.next().ok_or("--project needs a directory")?,
+                ));
+            }
             "-h" | "--help" => return Err(USAGE.to_string()),
             other if other.starts_with("--") => {
                 return Err(format!("unknown argument `{other}`\n\n{USAGE}"))
             }
             other => named.push(other.to_string()),
         }
+    }
+    if verb == Verb::Code {
+        if let Some(stray) = named.first() {
+            return Err(format!("`zo vault code` takes no pages, got `{stray}`\n\n{USAGE}"));
+        }
+        return Ok(request);
     }
     if named.len() != 2 {
         return Err(format!(
@@ -139,6 +179,9 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Report, String> {
             vault.root().display()
         ));
     }
+    if request.verb == Verb::Code {
+        return run_code(&request, &cwd, vault.root());
+    }
     let began = Instant::now();
     let graph = GraphCache::new().scan(vault.root(), false);
     let scanned_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -150,6 +193,181 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Report, String> {
             text_receipt(vault.root(), scanned_ms, &graph, &answer)
         },
     })
+}
+
+/// `zo vault code`: the vault's code mentions over the project's index.
+fn run_code(request: &Request, cwd: &Path, vault: &Path) -> Result<Report, String> {
+    let project = request.project.clone().unwrap_or_else(|| cwd.to_path_buf());
+    let project = project
+        .canonicalize()
+        .map_err(|error| format!("{}: {error}", project.display()))?;
+    let began = Instant::now();
+    let mut pages = GraphCache::new();
+    pages.scan(vault, false);
+    let mut graph = CodeGraph::load_or_build(&project, tools::codegraph_cache_path(&project))
+        .map_err(|error| error.to_string())?;
+    let layer = code_layer(
+        &pages.code_mentions(),
+        &mut graph,
+        &project.display().to_string(),
+        &CodeLimits::default(),
+    )?;
+    let elapsed_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
+    Ok(Report {
+        text: if request.json {
+            serde_json::to_string(&layer).map_err(|error| error.to_string())?
+        } else {
+            code_receipt(vault, elapsed_ms, &layer)
+        },
+    })
+}
+
+/// The code layer for a vault's pages over one project's index: every
+/// page's code mentions resolved in one batch (`CodeGraph::resolve_mentions`),
+/// a node per file or definition named, an `implements` line from it to each
+/// page naming it, and the index's links (`CodeGraph::file_links`) between
+/// the files the layer holds as `depends_on`. Bounded by `limits`.
+///
+/// # Errors
+///
+/// The index could not be read.
+pub fn code_layer(
+    pages: &BTreeMap<&str, &[String]>,
+    graph: &mut CodeGraph,
+    project: &str,
+    limits: &CodeLimits,
+) -> Result<CodeLayer, String> {
+    let distinct = pages
+        .values()
+        .flat_map(|mentions| mentions.iter().cloned())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let resolved = graph
+        .resolve_mentions(&distinct)
+        .map_err(|error| error.to_string())?;
+    let placed = distinct
+        .iter()
+        .zip(&resolved)
+        .filter_map(|(mention, answer)| Some((mention.as_str(), code_node(answer.as_ref()?))))
+        .collect::<HashMap<_, _>>();
+    let mut layer = CodeLayer {
+        project: project.to_string(),
+        mentions: distinct.len(),
+        resolved: placed.len(),
+        ..CodeLayer::default()
+    };
+    // Every placed node with the pages naming it; past the bound, the nodes
+    // the most pages name stay — a picture keeps what the vault leans on,
+    // not what the first pages in id order happened to name.
+    let mut named = BTreeMap::<String, (CodeNode, BTreeSet<&str>)>::new();
+    for (page, mentions) in pages {
+        for node in mentions.iter().filter_map(|mention| placed.get(mention.as_str())) {
+            named
+                .entry(node.id.clone())
+                .or_insert_with(|| (node.clone(), BTreeSet::new()))
+                .1
+                .insert(page);
+        }
+    }
+    let mut ranked = named.into_values().collect::<Vec<_>>();
+    // Stable: equals keep the id order the map gave them.
+    ranked.sort_by(|left, right| right.1.len().cmp(&left.1.len()));
+    if ranked.len() > limits.layer_nodes_max {
+        ranked.truncate(limits.layer_nodes_max);
+        layer.capped = true;
+    }
+    let mut nodes = BTreeMap::<String, CodeNode>::new();
+    for (node, naming) in ranked {
+        for page in naming {
+            layer.edges.push(CodeEdge {
+                from: node.id.clone(),
+                to: page.to_string(),
+                kind: EdgeKind::Implements,
+            });
+        }
+        nodes.insert(node.id.clone(), node);
+    }
+    let files = nodes
+        .values()
+        .filter(|node| node.kind == NodeKind::CodeFile)
+        .map(|node| PathBuf::from(&node.file))
+        .collect::<BTreeSet<_>>();
+    for file in &files {
+        let links = graph
+            .file_links(file, limits.layer_edges_max)
+            .map_err(|error| error.to_string())?
+            .unwrap_or_default();
+        for used in links.uses.iter().filter(|used| files.contains(&used.file)) {
+            layer.edges.push(CodeEdge {
+                from: file_id(&wire_path(file)),
+                to: file_id(&wire_path(&used.file)),
+                kind: EdgeKind::DependsOn,
+            });
+        }
+    }
+    if layer.edges.len() > limits.layer_edges_max {
+        layer.edges.truncate(limits.layer_edges_max);
+        layer.capped = true;
+    }
+    layer.nodes = nodes.into_values().collect();
+    Ok(layer)
+}
+
+/// The node a resolved mention stands for.
+fn code_node(resolved: &Resolved) -> CodeNode {
+    match resolved {
+        Resolved::File(file) => {
+            let file = wire_path(file);
+            CodeNode {
+                id: file_id(&file),
+                kind: NodeKind::CodeFile,
+                title: file.rsplit('/').next().unwrap_or(&file).to_string(),
+                detail: file.rsplit_once('/').map_or_else(String::new, |(folder, _)| folder.to_string()),
+                file,
+                line: None,
+            }
+        }
+        Resolved::Symbol(symbol) => {
+            let file = wire_path(&symbol.file);
+            let line = u32::try_from(symbol.range.start.row + 1).unwrap_or(u32::MAX);
+            CodeNode {
+                id: symbol_id(&file, &symbol.name, line),
+                kind: NodeKind::CodeSymbol,
+                title: symbol
+                    .container
+                    .as_ref()
+                    .map_or_else(|| symbol.name.clone(), |container| format!("{container}::{}", symbol.name)),
+                detail: symbol.kind.as_str().to_string(),
+                file,
+                line: Some(line),
+            }
+        }
+    }
+}
+
+/// A project path as the layer spells it: `/`-separated on every platform.
+fn wire_path(path: &Path) -> String {
+    path.components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn code_receipt(vault: &Path, elapsed_ms: u64, layer: &CodeLayer) -> String {
+    let files = layer.nodes.iter().filter(|node| node.kind == NodeKind::CodeFile).count();
+    let implements = layer.edges.iter().filter(|edge| edge.kind == EdgeKind::Implements).count();
+    let mut out = format!("vault: {}\nproject: {}\n", vault.display(), layer.project);
+    let _ = writeln!(
+        out,
+        "mentions {} · placed {} · files {files} · definitions {} · implements {implements} · depends_on {} · {elapsed_ms} ms{}",
+        layer.mentions,
+        layer.resolved,
+        layer.nodes.len() - files,
+        layer.edges.len() - implements,
+        if layer.capped { " · cut at a bound" } else { "" }
+    );
+    out
 }
 
 /// The picture's size line — the same three counts the report's table reads.
@@ -258,6 +476,68 @@ mod tests {
         assert_eq!(json["report"]["shortest"], 2);
         assert!(json["report"]["elapsedUs"].is_null(), "serde keeps snake_case on the wire");
         assert!(json["report"]["elapsed_us"].is_u64());
+    }
+
+    #[test]
+    fn the_code_verb_takes_a_project_and_no_pages() {
+        let request = parse(&args(&["code", "--project", "/p", "--json"])).unwrap();
+        assert_eq!(request.verb, Verb::Code);
+        assert_eq!(request.project, Some(PathBuf::from("/p")));
+        assert!(parse(&args(&["code", "A"])).unwrap_err().starts_with("`zo vault code` takes no pages"));
+        assert!(parse(&args(&["path", "A", "B", "--project", "/p"])).unwrap_err().contains("unknown argument"));
+    }
+
+    /// The pages name a file, a definition, a word and a file the project
+    /// does not have; the layer holds what the index placed, each joined to
+    /// the pages naming it, and the one import between the two files.
+    #[test]
+    fn the_code_layer_joins_what_the_index_places_to_the_pages_naming_it() {
+        let project = tempfile::tempdir().expect("project");
+        let src = project.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("scan.rs"), "pub fn scan_workspace() {}\n").unwrap();
+        std::fs::write(src.join("graph.rs"), "use crate::scan::scan_workspace;\nfn graph() { scan_workspace(); }\n").unwrap();
+        let mut graph = CodeGraph::load_or_build(project.path(), project.path().join("state/index.sqlite")).unwrap();
+        let graph_page = vec!["src/graph.rs".to_string(), "missing.rs".to_string(), "words_only".to_string()];
+        let scan_page = vec!["scan_workspace".to_string(), "src/graph.rs".to_string()];
+        let named_pages = BTreeMap::from([("wiki/Graph.md", graph_page.as_slice()), ("wiki/Scan.md", scan_page.as_slice())]);
+        let layer = code_layer(&named_pages, &mut graph, "acme", &CodeLimits::default()).unwrap();
+        assert_eq!((layer.mentions, layer.resolved, layer.capped), (4, 2, false));
+        let ids = layer.nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(ids, ["code:src/graph.rs", "code:src/scan.rs#scan_workspace@1"]);
+        let edges = layer
+            .edges
+            .iter()
+            .map(|edge| (edge.from.as_str(), edge.to.as_str(), edge.kind))
+            .collect::<Vec<_>>();
+        // Most named first: graph.rs by two pages, then the definition by one.
+        assert_eq!(
+            edges,
+            [
+                ("code:src/graph.rs", "wiki/Graph.md", EdgeKind::Implements),
+                ("code:src/graph.rs", "wiki/Scan.md", EdgeKind::Implements),
+                ("code:src/scan.rs#scan_workspace@1", "wiki/Scan.md", EdgeKind::Implements),
+            ]
+        );
+
+        // Past the bound, the most named node is the one kept.
+        let one = CodeLimits {
+            layer_nodes_max: 1,
+            ..CodeLimits::default()
+        };
+        let cut = code_layer(&named_pages, &mut graph, "acme", &one).unwrap();
+        assert!(cut.capped);
+        assert_eq!(cut.nodes.len(), 1);
+        assert_eq!(cut.nodes[0].id, "code:src/graph.rs");
+        // With the scanned file named too, the import between them is a line.
+        let both = vec!["src/graph.rs".to_string(), "src/scan.rs".to_string()];
+        let pages = BTreeMap::from([("wiki/Graph.md", both.as_slice())]);
+        let layer = code_layer(&pages, &mut graph, "acme", &CodeLimits::default()).unwrap();
+        assert!(layer.edges.contains(&CodeEdge {
+            from: "code:src/graph.rs".to_string(),
+            to: "code:src/scan.rs".to_string(),
+            kind: EdgeKind::DependsOn,
+        }));
     }
 
     #[test]

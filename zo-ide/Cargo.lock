@@ -4994,6 +4994,7 @@ dependencies = [
  "api",
  "arboard",
  "base64 0.22.1",
+ "codegraph",
  "commands",
  "core-types",
  "crossterm",

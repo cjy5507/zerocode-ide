@@ -56,6 +56,7 @@ mod worktree_tools;
 
 // Public API.
 pub use tool_digest::{configure_tool_digest, ToolDigestMode, TOOL_DIGEST_ENV};
+pub use codegraph_tools::codegraph_cache_path;
 pub use aliases::canonical_tool_name;
 pub use computer_tools::COMPUTER_SHIM;
 pub use artifacts::ARTIFACT_STORE_ENV;
