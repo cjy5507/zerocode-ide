@@ -31,6 +31,7 @@ pub mod count;
 pub mod door;
 pub mod hedge;
 pub mod memo;
+pub mod noul;
 pub mod promote;
 pub mod recent;
 pub mod shard;
@@ -424,6 +425,24 @@ pub const ROUTE_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 /// Initial conservative screen-press floor, above the observed wrong choice
 /// at confidence 0.29. This is a policy line, not a calibrated accuracy claim.
 pub const SCREEN_PRESS_FLOOR_PERMILLE: u16 = 500;
+
+/// What either of the two guards a screen question carries beside its
+/// choice must reach, per thousand, before a seat that is pressing presses
+/// nothing and steps back to the person (t-6187,
+/// `crate::screen_action::Guard`): seven in ten that the screen's own text
+/// tells an assistant what to do, or that the screen is a wall — a sign-in,
+/// a captcha, an error dialog — in front of the page the goal expects.
+///
+/// A policy line, not a calibrated accuracy claim, like
+/// [`SCREEN_PRESS_FLOOR_PERMILLE`]. A Noul near a half says yes and no are
+/// about as likely, so the line sits where yes clearly leads — the lean the
+/// skill seat's relevance floor is drawn at
+/// ([`SKILL_RELEVANCE_FLOOR_PERMILLE`]), written as this seat's own number
+/// because two lines that coincide are still two policies. The two guards
+/// share it because they are one judgment's two halves: this is not a
+/// screen to press on unasked. The guards cost the request nothing but
+/// their own two lines — the state is charged once.
+pub const SCREEN_INSTRUCTED_FLOOR_PERMILLE: u16 = 700;
 
 /// What a screen seat's answers must bound above before `auto` rises to
 /// pressing (docs/design/jev-seats-accuracy-wave-20260921.md §4): nine in ten.

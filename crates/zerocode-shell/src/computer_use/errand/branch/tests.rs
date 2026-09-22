@@ -560,6 +560,7 @@ fn the_walks_next_step_grades_the_fork() {
             chosen: Chosen::GiveUp,
             probabilities: BTreeMap::new(),
             confidence: 0.7,
+            guard: None,
         }),
         compared(1, 0.8),
     );
@@ -1193,6 +1194,7 @@ fn the_forks_this_desk_would_take() {
                 chosen,
                 probabilities: row.probabilities.clone(),
                 confidence: 0.0,
+                guard: None,
             };
             if fork_wanted(&choice).len() >= 2 {
                 would_fork += 1;

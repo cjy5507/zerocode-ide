@@ -56,7 +56,8 @@ use zerocode_core::jev::promote::SEAT_RECORDING;
 use zerocode_core::jev::summary::{AGREED, AT, CACHED, ELAPSED_MS};
 use zerocode_core::jev::{BROWSER, DESKTOP, EMULATOR, JevMode, JevUse, SCREEN_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{
-    ActionAsk, ActionChoice, ActionLook, Chosen, SCREEN_ACTION_RUBRIC_VERSION, Where, ask,
+    ActionAsk, ActionChoice, ActionLook, Chosen, Guard, SCREEN_ACTION_RUBRIC_VERSION, Stopped,
+    Where, ask,
 };
 
 pub use branch::{Branching, Compared, Saved};
@@ -488,6 +489,22 @@ pub enum Barred {
     NoSteps,
     /// A valid choice does not meet its seat's screen-press confidence floor.
     LowConfidence,
+    /// The screen's own text tells an assistant what to do (t-6187): the
+    /// walk steps back to the person rather than press on a screen that is
+    /// giving it orders.
+    Injected,
+    /// The screen is a wall — a sign-in, a robot check, an error dialog — in
+    /// front of the page the goal needs (t-6187).
+    Walled,
+}
+
+impl From<Stopped> for Barred {
+    fn from(stopped: Stopped) -> Self {
+        match stopped {
+            Stopped::Injected => Self::Injected,
+            Stopped::Walled => Self::Walled,
+        }
+    }
 }
 
 impl Barred {
@@ -502,6 +519,8 @@ impl Barred {
             Self::NoBudget => "no_budget",
             Self::NoSteps => "no_steps",
             Self::LowConfidence => "low_confidence",
+            Self::Injected => Stopped::Injected.word(),
+            Self::Walled => Stopped::Walled.word(),
         }
     }
 }
@@ -1038,6 +1057,13 @@ fn walk(
         if judge.cached() {
             note(&mut said, CACHED.canonical, json!(true));
         }
+        // What the two guards asked beside the choice said, per thousand,
+        // on every answered row — recording or acting (t-6187).
+        if let Some(guard) = choice.guard {
+            for (key, permille) in guard.permille() {
+                note(&mut said, key, json!(permille));
+            }
+        }
         let chosen = match choice.chosen {
             Chosen::Mark(mark) => mark,
             Chosen::GiveUp | Chosen::Done => {
@@ -1076,6 +1102,22 @@ fn walk(
             note(&mut said, "routeUse", json!(USE_SHADOW));
             note(&mut said, "pressed", json!(false));
             note(&mut said, REASON, json!(SEAT_RECORDING));
+            walked.rows.push(row(mode, at, attempt, said));
+            return walked;
+        }
+
+        // A screen whose text gives the walk orders, or a wall in front of
+        // the page the goal needs, is not pressed on — by this judgment or by
+        // a second reader's (t-6187). The walk steps back to the person, as a
+        // judgment under the press floor does, and the row names the stop.
+        if let Some(stopped) = choice.guard.and_then(Guard::stops) {
+            let word = Barred::from(stopped).as_str();
+            note(&mut said, "barred", json!(word));
+            // The walk's own answer says why no hand went out
+            // ([`no_press_reason`]), so the one who asked can tell the person.
+            note(&mut said, REASON, json!(word));
+            note(&mut said, "pressed", json!(false));
+            note(&mut said, "routeUse", json!(USE_FALLBACK));
             walked.rows.push(row(mode, at, attempt, said));
             return walked;
         }
@@ -1400,6 +1442,8 @@ fn cleared_past(report: &Value, was: usize) -> bool {
 
 pub mod branch;
 pub mod desk;
+#[cfg(test)]
+pub(crate) mod guard_fixtures;
 pub mod live;
 pub mod team;
 pub mod walk;
