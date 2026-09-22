@@ -7,7 +7,8 @@
 //! no, and the one number says both. A value near a half is a judgment that
 //! yes and no are about as likely — not a middling degree of the condition.
 //!
-//! [`question`] builds one question's object; [`read`] reads its answer. An
+//! [`question`] builds one question's object, in the envelope a closed
+//! choice wears too (`crate::jev::choice`); [`read`] reads its answer. An
 //! answer that breaks a rule below is refused whole, by its own word, as a
 //! closed choice's is: a caller never spends half of one.
 
@@ -26,17 +27,14 @@ const NO: &str = "false";
 /// alone leaves open.
 #[must_use]
 pub fn question(instructions: &str, yes: &str, no: &str) -> Value {
-    Value::Object(Map::from_iter([
-        ("type".to_string(), Value::from(NOUL)),
-        ("instructions".to_string(), Value::from(instructions)),
-        (
-            "criteria".to_string(),
-            Value::Object(Map::from_iter([
-                (YES.to_string(), Value::from(yes)),
-                (NO.to_string(), Value::from(no)),
-            ])),
-        ),
-    ]))
+    super::choice::envelope(
+        NOUL,
+        instructions,
+        Map::from_iter([
+            (YES.to_string(), Value::from(yes)),
+            (NO.to_string(), Value::from(no)),
+        ]),
+    )
 }
 
 /// Every way a Noul's answer fails to be one. Each discards the answer whole
@@ -74,7 +72,7 @@ impl NoulRefusal {
 /// [`NoulRefusal`] names the rule the answer broke.
 pub fn read(answers: &Value, question: &str) -> Result<f64, NoulRefusal> {
     let answer = answers.get(question).ok_or(NoulRefusal::NoAnswer)?;
-    if answer.get("type").and_then(Value::as_str) != Some(NOUL) {
+    if !super::choice::tagged(answer, NOUL) {
         return Err(NoulRefusal::NotANoul);
     }
     let yes = answer
