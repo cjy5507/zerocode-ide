@@ -960,9 +960,11 @@ fn scenario_ask(scenario: &Scenario) -> zerocode_core::branching::BranchAsk {
 
 /// The fake desk's forks, put to the real endpoint as the shipped question
 /// (`branching::ask`), and read against the scenario's own right answer:
-/// how often the comparison named it, how often it named what the emulator
-/// seat would have pressed (the first candidate), its latency and what it
-/// cost. With a seed, also how many of this machine's phone presses a fork
+/// how often the comparison named it — pass by pass, a Wilson bound on the
+/// first alone — how often it named what the emulator seat would have
+/// pressed (the first candidate), its latency and what it cost. The right
+/// answers are the scenarios' own, a synthetic golden and not this machine's
+/// walks. With a seed, also how many of this machine's phone presses a fork
 /// would have been offered at (`branching::fork_wanted` over the seat's own
 /// probabilities) and what those steps' looks and presses cost.
 ///
@@ -1057,8 +1059,12 @@ fn the_forks_this_desk_would_take() {
         BRANCHING_APPLY_DEADLINE_MS
     );
 
-    let mut right = zerocode_core::jev::promote::Agreement::default();
-    let mut as_today = 0usize;
+    // Per pass, as the notify harness counts (t-6155 F2): only the first
+    // pass is an independent sample and carries a Wilson bound; a later pass
+    // asks the same eight questions again and says only whether the answer
+    // repeated.
+    let mut right_by_pass = vec![zerocode_core::jev::promote::Agreement::default(); runs];
+    let mut as_today_by_pass = vec![0usize; runs];
     let mut elapsed = Vec::new();
     let mut refusals: BTreeMap<String, usize> = BTreeMap::new();
     let mut input_tokens = 0u64;
@@ -1086,9 +1092,9 @@ fn the_forks_this_desk_would_take() {
             });
             match read {
                 Ok(choice) => {
-                    right.compared += 1;
-                    right.agreed += usize::from(choice.mark == scenario.right);
-                    as_today += usize::from(choice.mark == scenario.candidates[0].0);
+                    right_by_pass[pass].compared += 1;
+                    right_by_pass[pass].agreed += usize::from(choice.mark == scenario.right);
+                    as_today_by_pass[pass] += usize::from(choice.mark == scenario.candidates[0].0);
                     if pass == 0 {
                         first[index] = Some(choice.mark);
                     } else if let Some(was) = first[index] {
@@ -1117,18 +1123,37 @@ fn the_forks_this_desk_would_take() {
     elapsed.sort_unstable();
     let asked_count = elapsed.len();
     let cost = rate.map(|rate| rate.input_cost_usd(input_tokens));
+    #[allow(clippy::cast_precision_loss)]
+    let share = |part: usize, whole: usize| {
+        if whole == 0 {
+            0.0
+        } else {
+            100.0 * part as f64 / whole as f64
+        }
+    };
     println!(
-        "\nright {}/{} ({}) · named today's press {}/{} · repeat {}/{} · refusals {refusals:?}",
-        right.agreed,
-        right.compared,
-        right.lower_bound().map_or_else(
-            || "—".to_string(),
-            |bound| format!("Wilson lower {:.1}%", bound * 100.0)
-        ),
-        as_today,
-        right.compared,
-        repeated.agreed,
-        repeated.compared,
+        "\nRepeated asks are dependent observations; only the first pass carries a Wilson bound."
+    );
+    println!("| pass | compared | right | share | Wilson lower | named today's press |");
+    println!("| --- | --- | --- | --- | --- | --- |");
+    for (pass, (right, today)) in right_by_pass.iter().zip(&as_today_by_pass).enumerate() {
+        let bound = if pass == 0 {
+            right
+                .lower_bound()
+                .map_or_else(|| "—".to_string(), |bound| format!("{:.1}%", bound * 100.0))
+        } else {
+            "repeated".to_string()
+        };
+        println!(
+            "| #{pass} | {} | {} | {:.1}% | {bound} | {today} |",
+            right.compared,
+            right.agreed,
+            share(right.agreed, right.compared)
+        );
+    }
+    println!(
+        "repeat {}/{} · refusals {refusals:?}",
+        repeated.agreed, repeated.compared,
     );
     println!(
         "latency p50 {:?} ms · p95 {:?} ms · max {:?} ms over {asked_count} asks; input tokens {input_tokens}; cost {}",
