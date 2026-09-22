@@ -164,7 +164,19 @@ fn shadow_asks_over_actions_alone_and_presses_todays_number() {
         assert_eq!(row["routeUse"], "shadow");
         assert_eq!(row["reason"], "seat_recording");
         assert_eq!(row["platform"], "android");
-        assert_eq!(row["device"], "Pixel_6");
+        // Neither the device's name nor the goal's words are in the row
+        // (t-6155 F12): their fingerprints are.
+        assert_eq!(
+            row["deviceFingerprint"],
+            zerocode_core::jev::fingerprint_of("Pixel_6")
+        );
+        assert!(row.get("device").is_none() && row.get("flow").is_none());
+        assert!(row["flowFingerprint"].is_string());
+        let printed = row.to_string();
+        assert!(
+            !printed.contains("Pixel_6") && !printed.contains(goal(1).goal),
+            "{printed}"
+        );
         assert!(row["branching"].is_string() && row["at"].is_i64());
         assert!(
             walked.rows[0].get("forked").is_none(),
