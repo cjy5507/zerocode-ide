@@ -35,6 +35,8 @@ pub struct Identity {
 
 /// What a checkout names its git directory, or the file that points at one.
 const GIT_DIR_NAME: &str = ".git";
+const WORKTREES_DIR_NAME: &str = "worktrees";
+const WORKTREE_BACKLINK: &str = "gitdir";
 
 /// The git directory of the checkout rooted at `root`.
 ///
@@ -102,12 +104,32 @@ pub fn common_of(root: &Path) -> Option<PathBuf> {
 /// is a bad trade for a string read from two small files.
 #[must_use]
 pub fn owning_checkout_of(path: &Path) -> Option<PathBuf> {
-    let shared = normalized(path.ancestors().find_map(common_of)?);
-    shared
-        .file_name()
-        .filter(|name| *name == OsStr::new(GIT_DIR_NAME))
-        .and(shared.parent())
-        .map(Path::to_path_buf)
+    let path = normalized(path.to_path_buf());
+    let (root, own) = path
+        .ancestors()
+        .find_map(|root| of(root).map(|own| (root, own)))?;
+    let root = root.canonicalize().ok()?;
+    let own = own.canonicalize().ok()?;
+    let shared = common_of(&root)?.canonicalize().ok()?;
+    if shared.file_name()? != OsStr::new(GIT_DIR_NAME) {
+        return None;
+    }
+    let owner = shared.parent()?;
+    if root == owner && own == shared {
+        return Some(owner.to_path_buf());
+    }
+    // A checkout may write its own .git pointer. Only the owning repository
+    // can register the matching backlink: a one-way pointer is not consent.
+    if own.parent()? != shared.join(WORKTREES_DIR_NAME) {
+        return None;
+    }
+    let backlink = std::fs::read_to_string(own.join(WORKTREE_BACKLINK)).ok()?;
+    let registered = own.join(backlink.trim());
+    // Resolve the registered folder, not the .git file: an unregistered
+    // folder can symlink that file without becoming the registered checkout.
+    (registered.file_name()? == OsStr::new(GIT_DIR_NAME)
+        && registered.parent()?.canonicalize().ok()? == root)
+        .then(|| owner.to_path_buf())
 }
 
 /// Stable local identity of a checkout without spawning Git.
@@ -264,6 +286,11 @@ mod tests {
         std::fs::write(linked.join(".git"), format!("gitdir: {}\n", own.display()))
             .expect("pointer");
         std::fs::write(own.join("commondir"), "../..\n").expect("common pointer");
+        std::fs::write(
+            own.join("gitdir"),
+            linked.join(".git").to_string_lossy().as_bytes(),
+        )
+        .expect("registered backlink");
         for asked in [linked.clone(), linked.join("ui")] {
             assert_eq!(
                 owning_checkout_of(&asked).as_deref(),
@@ -285,6 +312,11 @@ mod tests {
         )
         .expect("pointer");
         std::fs::write(stranger_own.join("commondir"), "../..\n").expect("common pointer");
+        std::fs::write(
+            stranger_own.join("gitdir"),
+            side.join(".git").to_string_lossy().as_bytes(),
+        )
+        .expect("registered backlink");
         assert_eq!(
             owning_checkout_of(&side).as_deref(),
             Some(normalized(stranger).as_path())

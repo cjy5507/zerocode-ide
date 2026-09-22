@@ -37,7 +37,7 @@
 
 use serde_json::{Value, json};
 
-use crate::jev::{A_WINDOW_OF_COMPARISONS, JevUse};
+use crate::jev::{A_WINDOW_OF_COMPARISONS, AgreementKind, JevUse};
 
 use crate::jev::summary::{
     AT, JUDGED_EVERY_ROWS, TRANSITION, Tally, WILSON_Z_95, rows_that_can_clear_forgiving,
@@ -100,6 +100,7 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
             agreement_rows_wanted: seat
                 .agreement_rows_wanted
                 .unwrap_or(A_WINDOW_OF_COMPARISONS),
+            agreement_kind: seat.agreement_kind,
             window_forgives: seat.window_forgives.unwrap_or(0),
             labels: None,
             fallbacks_in_a_row: crate::jev::summary::failures_in_a_row(rows),
@@ -287,10 +288,11 @@ pub struct Evidence<'window> {
     /// How often it did, over the window.
     pub agreement: Agreement,
     /// How many comparisons must be in hand before that budget binds at all
-    /// ([`JevUse::agreement_rows_wanted`]). Zero says this seat has no reader
-    /// to be compared against, so a window with no marks is not a reason to
-    /// hold it.
+    /// ([`JevUse::agreement_rows_wanted`]). The agreement kind says whether
+    /// a thinner sample holds promotion or leaves the other lines to decide.
     pub agreement_rows_wanted: usize,
+    /// What a thin sample means, declared by the seat.
+    pub agreement_kind: AgreementKind,
     /// How many of the window's rows may have missed and the seat still clear
     /// its answer floor ([`JevUse::window_forgives`]) — what the window's own
     /// width was derived from.
@@ -410,17 +412,14 @@ pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
     }
     let agreement = evidence.agreement;
     if agreement.compared < evidence.agreement_rows_wanted {
-        return Some(Line::TooFewCompared {
-            compared: agreement.compared,
-            wanted: evidence.agreement_rows_wanted,
-        });
+        return (evidence.agreement_kind == AgreementKind::Comparison).then_some(
+            Line::TooFewCompared {
+                compared: agreement.compared,
+                wanted: evidence.agreement_rows_wanted,
+            },
+        );
     }
-    // A seat that wants none and has none is judged on its own ledger: the
-    // route-change budget asks how often this reader said what the OTHER one
-    // said, and a seat with no other reader has no such number — held to it,
-    // it waits on a mark nothing writes. A mark it does have is still read,
-    // whatever the seat wants, and one that says the judgment was wrong takes
-    // it back down.
+    // Once the sample floor is met, both kinds use the same Wilson line.
     let bound = agreement.lower_bound().map(permille)?;
     (bound < evidence.agreement_floor_permille).then_some(Line::Agreement {
         bound_permille: bound,

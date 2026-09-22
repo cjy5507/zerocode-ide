@@ -298,23 +298,12 @@ pub struct JevUse {
     /// A use that does not promote forgives nothing, because nothing is
     /// judged.
     pub window_forgives: Option<usize>,
-    /// How many comparisons must be in hand before the route-change budget
-    /// ([`Self::agreement_floor_permille`]) binds — and, when that many are
-    /// not, whether the seat waits for them or is judged on its own ledger.
-    ///
-    /// Zero says the seat has no reader to be compared against, so the budget
-    /// has no subject and the seat rises on what its ledger alone shows: that
-    /// it answers, in time, well-formed. A comparison it does have is still
-    /// read, and one that says the seat is wrong takes it back down.
-    ///
-    /// It is the use's own for the same reason the floors are. `too_few_
-    /// compared` is the only line in §4 with no road out — a seat whose rows
-    /// carry no mark is held by it forever, which is the door with no handle
-    /// the labels rule was rewritten to remove. Recall's ledger cleared its
-    /// answer line at 18 of the 50 judgments in its 1,005 rows and was held
-    /// at `0 of 20` on every one of them (2026-09-22). A use that does not
-    /// promote names none.
+    /// The sample floor at which the agreement line may speak. For a peer
+    /// comparison, a thinner sample holds promotion; hindsight labels leave
+    /// the other lines to decide until this many marks have arrived.
     pub agreement_rows_wanted: Option<usize>,
+    /// Whether agreement compares a second reader or grades a later outcome.
+    pub agreement_kind: AgreementKind,
 }
 
 /// What a seat forgives whose miss the product was going to cover anyway: one
@@ -342,14 +331,16 @@ pub const FORGIVES_NOTHING: usize = 0;
 /// ([`JevUse::agreement_rows_wanted`]).
 pub const A_WINDOW_OF_COMPARISONS: usize = summary::JUDGED_EVERY_ROWS;
 
-/// What a seat with no reader to be compared against must show: nothing.
-///
-/// Not a lowered bar — there is no probe beside these judgments and no rule
-/// they overrule, so the route-change budget has nothing to be a budget of.
-/// What the seat is held to instead is every other line of §4, and the marks
-/// its own writer leaves once they exist: the moment one arrives that says the
-/// seat was wrong, the agreement line binds and takes it back down.
-pub const NO_READER_TO_COMPARE: usize = 0;
+/// What an agreement mark can establish, before its sample is large enough
+/// to read a Wilson bound. Kept in the seat table rather than inferred from
+/// a zero width: a single positive label must not revoke a no-label rise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgreementKind {
+    /// A replacement reader needs comparison evidence before it may act.
+    Comparison,
+    /// Later outcome labels grade an otherwise eligible seat once populated.
+    Hindsight,
+}
 
 /// The routing seat's route-change budget: four compared axes in five must
 /// agree with the chat probe, as a 95% lower bound.
@@ -435,6 +426,7 @@ pub const ROUTING: JevUse = JevUse {
     apply_deadline_ms: Some(ROUTING_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_NOTHING),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
 };
 
 /// The wall zo's routing waits for a judgment when the seat acts: the batch
@@ -508,6 +500,8 @@ pub const RECALL_AGREEMENT_FLOOR_PERMILLE: u16 = SKILL_AGREEMENT_FLOOR_PERMILLE;
 /// [`RECALL_ANSWER_FLOOR_PERMILLE`] and [`RECALL_AGREEMENT_FLOOR_PERMILLE`];
 /// the judge writes the rise in the seat's own ledger, and the seat reads it
 /// back per recall (`rerank_shadow::settle`).
+/// Hindsight labels enter that decision only at [`A_WINDOW_OF_COMPARISONS`];
+/// below the sample floor, the answer, latency and schema lines decide alone.
 ///
 /// The apply also LEAVES OUT the notes the judgment put on its bottom level —
 /// *nothing in it bears on the request* — which the same ledger says is 24.5%
@@ -559,7 +553,8 @@ pub const RECALL: JevUse = JevUse {
     // seat against the wall the stage actually holds.
     apply_deadline_ms: Some(ROUTING_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
-    agreement_rows_wanted: Some(NO_READER_TO_COMPARE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Hindsight,
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -657,6 +652,7 @@ pub const BROWSER: JevUse = JevUse {
     apply_deadline_ms: Some(SCREEN_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -692,6 +688,7 @@ pub const DESKTOP: JevUse = JevUse {
     apply_deadline_ms: Some(SCREEN_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
@@ -724,6 +721,7 @@ pub const EMULATOR: JevUse = JevUse {
     apply_deadline_ms: Some(SCREEN_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -753,6 +751,7 @@ pub const STALL: JevUse = JevUse {
     apply_deadline_ms: Some(STALL_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
 };
 
 /// What the placement seat's answers must bound above before `auto` rises to
@@ -780,6 +779,8 @@ pub const PLACEMENT_ANSWER_FLOOR_PERMILLE: u16 = 800;
 
 /// The window's worker placement: which of [`PLACEMENT_OPTIONS`] a worker it
 /// just started belongs in.
+/// Its hindsight marks bind only at [`A_WINDOW_OF_COMPARISONS`]. Before then,
+/// even a mixed thin sample leaves the other eligibility lines to decide.
 ///
 /// The measured rule (`tilePlacement`, `ui/shell-term.js`) answers a
 /// different question well — given that a pane IS being cut, which way and
@@ -835,7 +836,8 @@ pub const PLACEMENT: JevUse = JevUse {
     agreement_floor_permille: Some(ORCHESTRATION_AGREEMENT_FLOOR_PERMILLE),
     apply_deadline_ms: Some(PLACEMENT_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
-    agreement_rows_wanted: Some(NO_READER_TO_COMPARE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Hindsight,
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -924,6 +926,7 @@ pub const SUMMON: JevUse = JevUse {
     apply_deadline_ms: Some(SUMMON_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
 };
 
 /// Characters of the repeated tool call one step-effort question carries —
@@ -978,6 +981,7 @@ pub const STEP_EFFORT: JevUse = JevUse {
     apply_deadline_ms: Some(STEP_EFFORT_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
 };
 
 /// Characters of the task a skill ranking reads — what the turn is about, in
@@ -1141,6 +1145,7 @@ pub const SKILLS: JevUse = JevUse {
     apply_deadline_ms: Some(SKILL_SEARCH_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
 };
 
 /// The wall zo's step effort governor holds a step judgment to, in
@@ -1191,6 +1196,7 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     apply_deadline_ms: Some(ZO_STEP_EFFORT_APPLY_DEADLINE_MS),
     window_forgives: Some(FORGIVES_NOTHING),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
 };
 
 /// Every place this product asks Jev something.

@@ -23,7 +23,7 @@ pub(crate) fn normalize_tool_name(value: &str) -> String {
 ///
 pub(crate) const TOOL_NAME_ALIASES: &[(&str, &str)] = &[
     // File tools — PascalCase and short forms route to their handlers.
-    ("read", "read_file"),
+    ("read", crate::file_tools::READ_FILE_TOOL_NAME),
     ("write", "write_file"),
     ("edit", "edit_file"),
     ("multi_edit", "MultiEdit"),

@@ -7923,6 +7923,7 @@ fn recall_reminder_section_async_matches_sync_path() {
         runtime.recall_query_text().map(std::borrow::Cow::into_owned),
         runtime.session_tracer.clone(),
         None,
+        runtime.attempt().to_string(),
     ));
 
     // The streaming loop assembles transient reminders + recall section; with
@@ -8491,6 +8492,7 @@ fn recall_panic_degrades_and_reports_to_tracer() {
             Some("anything".to_string()),
             Some(tracer),
             None,
+            "session@turn".to_string(),
         ),
     );
 

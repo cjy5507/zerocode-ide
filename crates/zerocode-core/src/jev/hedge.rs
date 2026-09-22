@@ -87,19 +87,17 @@
 //!    of calls leaving twice reached 0.39 against the 0.25 this module
 //!    promises. Reading the delay from the load rank alone bounds it by
 //!    construction: 0.25 is now the measured maximum, not an aspiration.
-//! 3. **The two copies are not independent draws**, which is what
-//!    [`cleared_share`]'s second number assumes and what every published
-//!    hedge rests on. Of the 14 firings whose call missed the wall — the only
-//!    firings with a rescue to make — the second copy missed it too in
-//!    **14 of 14**, each one's `loser_ms` landing within 2 ms of `wall -
-//!    delay`: the copy ran out the same clock. On the one firing outside a
-//!    timeout where both latencies were recorded, they were 1,397 ms and
-//!    1,398 ms. The wire is slow by the moment, not by the request.
+//! 3. **The joint latency distribution is not observed.** Fourteen races
+//!    timed out with both copies still unanswered, and eleven were won by
+//!    the second copy without the first copy's eventual latency. A timeout
+//!    already means neither copy answered: selecting those fourteen cannot
+//!    test independence or count rescues among the eleven wins. One other
+//!    race recorded both latencies, 1,397 ms and 1,398 ms; one pair is not a
+//!    distribution. [`cleared_share`] therefore remains an independent-draw
+//!    estimate, not a measured rescue rate or a statistical upper bound.
 //!
-//! Reading 3 is the one this module cannot fix, only refuse to spend into,
-//! and it is why the gate is the room rather than a cleverer delay: where the
-//! copy has time for two ordinary answers there is slack in the moment, and
-//! where it has time for one there is not.
+//! The room rule is supported here by the replay's observed race outcomes.
+//! Its effect on uncensored completion latencies still needs measurement.
 
 use core::time::Duration;
 
@@ -222,14 +220,11 @@ pub fn plan(samples: &[u64], wall: Duration) -> Option<HedgePlan> {
 /// was stated here as arithmetic on a sample so a ledger of real hedges could
 /// contradict it, which is the only way to find out.
 ///
-/// It has now been asked, and it is contradicted (t-5874). Of this machine's
-/// 68 firings, 14 were calls that missed the wall — the only firings with a
-/// rescue to make — and the second copy missed it on 14 of 14, each `loser_ms`
-/// within 2 ms of `wall - delay`. This arithmetic, read on the same windows,
-/// expected most of them to land. So the number below is kept as what
-/// independence would buy, and is read as an upper bound rather than a
-/// forecast; what the rule actually spends on is [`HedgePlan::room`], which
-/// the same ledger does support.
+/// The ledger does not identify that joint distribution: a winning race
+/// usually cancels its loser, and conditioning on a timeout selects races
+/// where both copies failed by definition. This is an estimate under the
+/// stated assumption, not a forecast or an upper bound for arbitrary
+/// dependence. The plan itself is decided by [`HedgePlan::room`].
 #[must_use]
 pub fn cleared_share(samples: &[u64], wall: Duration, plan: Option<&HedgePlan>) -> (f64, f64) {
     let wall_ms = u64::try_from(wall.as_millis()).unwrap_or(u64::MAX);

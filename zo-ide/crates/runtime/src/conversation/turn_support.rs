@@ -363,6 +363,7 @@ where
         query: Option<String>,
         tracer: Option<SessionTracer>,
         seat: Option<Arc<dyn crate::RecallSeat>>,
+        attempt: String,
     ) -> Vec<String> {
         let (Some(retriever), Some(query)) = (retriever, query) else {
             return Vec::new();
@@ -373,7 +374,7 @@ where
             // sees exactly what recall chose and its answer is what the turn
             // reads. A seat in a record-only mode hands the same hits back.
             let hits = match seat {
-                Some(seat) => seat.settle(&query, hits),
+                Some(seat) => seat.settle(&attempt, &query, hits),
                 None => hits,
             };
             recall_and_reminder_sections(&hits)

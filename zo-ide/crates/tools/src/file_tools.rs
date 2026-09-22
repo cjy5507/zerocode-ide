@@ -15,6 +15,8 @@ use runtime::{
     FileReadRegistry, GrepSearchInput, PermissionMode,
 };
 
+pub(crate) const READ_FILE_TOOL_NAME: &str = "read_file";
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct ReadFileInput {
     pub path: String,
@@ -99,7 +101,7 @@ pub(crate) struct DebugHypothesisInput {
 pub(crate) fn tool_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
-            name: "read_file",
+            name: READ_FILE_TOOL_NAME,
             description: "Read workspace text, PDF pages, or notebook cells and outputs. Read one generous range and batch independent files. Do not reread after a successful edit unless disk may have changed. A whole code-file read ends with [neighbours].",
             input_schema: json!({
                 "type": "object",
@@ -269,7 +271,7 @@ pub(crate) fn dispatch(
     input: &Value,
 ) -> Option<Result<String, ToolError>> {
     match name {
-        "read_file" => Some(
+        READ_FILE_TOOL_NAME => Some(
             maybe_enforce_permission_check(enforcer, name, input).and_then(|()| {
                 from_value::<ReadFileInput>(input).and_then(|inp| {
                     run_read_file(

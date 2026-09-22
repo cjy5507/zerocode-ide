@@ -156,11 +156,18 @@ impl JevSettings {
     /// cannot make itself a worktree of a consented checkout — only that
     /// checkout can cut one.
     ///
-    /// The cost is a read of at most two small files, and only on the arm
-    /// that is about to refuse: a consented root answers before git is asked
-    /// at all.
+    /// A linked checkout must be registered by its owning repository: the
+    /// untrusted checkout's own pointer alone cannot grant consent. A root
+    /// that is directly consented needs no Git ownership lookup.
     #[must_use]
     pub fn consents(&self, workspace: &str) -> bool {
+        let resolved;
+        let workspace = if Path::new(workspace).is_absolute() {
+            resolved = resolved_path(Path::new(workspace));
+            resolved.as_str()
+        } else {
+            workspace
+        };
         self.names(workspace) || self.owns_a_consented_checkout(Path::new(workspace))
     }
 
@@ -180,6 +187,12 @@ impl JevSettings {
     /// One of the consented roots IS `workspace` or holds it, compared segment
     /// by segment (`/a/bc` is not under `/a/b`).
     fn names(&self, workspace: &str) -> bool {
+        if Path::new(workspace)
+            .components()
+            .any(|part| part == std::path::Component::ParentDir)
+        {
+            return false;
+        }
         self.workspaces
             .iter()
             .any(|root| crate::vault::inside_or_equal(root, workspace))

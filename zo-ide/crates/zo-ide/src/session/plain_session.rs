@@ -822,9 +822,10 @@ impl PlainSession {
         // seat put first was read. Judged on what is already in memory — the
         // switch the observer saw, and the messages this turn appended — and
         // not on a cancelled turn, which says nothing about either.
-        if !user_cancel_requested.load(Ordering::SeqCst) && !hook_abort_signal.is_aborted() {
-            self.label_jev_seats(installed.route_watch.taken(), turn_from);
-        }
+        self.label_jev_seats(
+            installed.route_watch.taken(), turn_from,
+            user_cancel_requested.load(Ordering::SeqCst) || hook_abort_signal.is_aborted(),
+        );
         let summary = result?;
         self.persist().map_err(|error| error.to_string())?;
         Ok(summary)
@@ -898,11 +899,15 @@ impl PlainSession {
     /// messages from `turn_from` on. A session compaction may have shrunk the
     /// transcript under that index; the turn is then read from its own user
     /// message, the last one the session holds.
-    fn label_jev_seats(&self, unseated: Option<runtime::SwitchTrigger>, turn_from: usize) {
+    fn label_jev_seats(&self, unseated: Option<runtime::SwitchTrigger>, turn_from: usize, cancelled: bool) {
         let Some(inner) = self.runtime.try_runtime() else {
             return;
         };
         let attempt = inner.attempt().to_string();
+        if cancelled {
+            let _ = tools::note_recall_read(&self.cwd, &attempt, None);
+            return;
+        }
         let messages = Arc::clone(&inner.session().messages);
         let from = if turn_from <= messages.len() {
             turn_from
@@ -914,7 +919,7 @@ impl PlainSession {
         };
         // Whether a row was written is the ledger's business, not the turn's.
         let _ = tools::note_route_followed(&self.cwd, &attempt, unseated);
-        let _ = tools::note_recall_read(&self.cwd, &messages[from..]);
+        let _ = tools::note_recall_read(&self.cwd, &attempt, Some(&messages[from..]));
     }
 
     /// 턴 후 영속 — 메시지는 이미 append 됐고, 헤더/압축 변경만 스냅샷.

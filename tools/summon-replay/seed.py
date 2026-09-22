@@ -28,14 +28,13 @@ Usage:
 """
 
 import argparse
+from contextlib import closing
 import json
 import os
 import pathlib
-import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
 
 #: The row key that names the agent a summons landed on — the label.
 LABEL_KEY = "agent"
@@ -64,69 +63,79 @@ def option_ids(row: dict) -> list[str]:
     return [held if isinstance(held, str) else held["id"] for held in offered]
 
 
-def store_facts(store: pathlib.Path) -> tuple[list[dict], dict[str, dict]]:
-    """Every summons this ledger holds, and every task's own words.
+def snapshot(store: pathlib.Path) -> sqlite3.Connection:
+    """Read a consistent SQLite snapshot, including committed WAL pages."""
+    db = sqlite3.connect(":memory:")
+    with closing(sqlite3.connect(store.resolve().as_uri() + "?mode=ro", uri=True)) as source:
+        source.backup(db)
+    db.row_factory = sqlite3.Row
+    return db
 
-    The store is copied first: a live window holds it open, and a reader that
-    opens the file in place can be handed a page a writer is mid-way through.
+
+def facts_at(db: sqlite3.Connection, row: dict) -> tuple[list[dict], dict] | None:
+    """Extract facts known before this row; the Rust fold still does all scoring.
+
+    A worker's latest dispatch today may have started after the replayed row.
+    Select its latest dispatch THEN, and mask an outcome that had not landed.
+    Task wording has no version history in this store and remains a reconstruction.
     """
-    with tempfile.TemporaryDirectory() as scratch:
-        copy = pathlib.Path(scratch) / "authority.sqlite"
-        shutil.copy(store, copy)
-        db = sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
-        db.row_factory = sqlite3.Row
-        carried = [
-            {
-                "agent": held["agent"],
-                "startedMs": held["started_ms"],
-                "endedMs": held["ended_ms"],
-                "succeeded": None if held["succeeded"] is None else bool(held["succeeded"]),
-                "title": held["title"] or None,
-            }
-            for held in db.execute(
-                """
-                SELECT w.agent            AS agent,
-                       w.started_ms       AS started_ms,
-                       max(d.started_ms)  AS newest_attempt,
-                       d.ended_ms         AS ended_ms,
-                       d.succeeded        AS succeeded,
-                       trim(t.title)      AS title
-                  FROM ledger_workers w
-                  -- The link lives on the DISPATCH. A worker's own `dispatch`
-                  -- names the attempt only while it carries one and is
-                  -- cleared when that attempt ends: 4 of 556 worker rows on
-                  -- this machine still hold one, against 549 dispatches that
-                  -- name their worker.
-                  LEFT JOIN ledger_dispatches d
-                         ON d.ledger_id = w.ledger_id
-                        AND d.run = w.run
-                        AND d.worker = w.id
-                  LEFT JOIN ledger_tasks t
-                         ON t.ledger_id = d.ledger_id
-                        AND t.run = d.run
-                        AND t.id = d.task
-                 -- One row per worker: the newest attempt it was given, the
-                 -- same one the fold reads. SQLite hands the bare columns
-                 -- from the row `max()` picked, so a worker with two
-                 -- attempts is still one summons.
-                 GROUP BY w.ledger_id, w.run, w.id
-                HAVING d.started_ms IS NULL OR d.started_ms = max(d.started_ms)
-                """
-            )
-        ]
-        tasks = {
-            held["id"]: {"title": held["title"] or "", "spec": held["spec"] or "", "failures": held["failures"]}
-            for held in db.execute(
-                "SELECT id, title, spec, failures FROM ledger_tasks"
-            )
+    at = row["at"]
+    tasks = list(db.execute(
+        "SELECT * FROM ledger_tasks WHERE run = ? AND id = ? AND created_ms < ?",
+        (row.get("run"), row.get("task"), at),
+    ))
+    if not tasks:
+        return None
+    if len(tasks) != 1:
+        raise ValueError("the row does not identify a unique ledger task")
+    task = tasks[0]
+    ledger = task["ledger_id"]
+    carried = [
+        {
+            "agent": held["agent"], "startedMs": held["started_ms"],
+            "endedMs": held["ended_ms"] if held["ended_ms"] is not None and held["ended_ms"] <= at else None,
+            "succeeded": bool(held["succeeded"]) if held["ended_ms"] is not None and held["ended_ms"] <= at and held["succeeded"] is not None else None,
+            "title": held["title"] or None,
         }
-        attempts: dict[str, int] = {}
-        for held in db.execute("SELECT task, count(*) AS n FROM ledger_dispatches GROUP BY task"):
-            attempts[held["task"]] = held["n"]
-        for task, held in tasks.items():
-            held["attempts"] = attempts.get(task, 0)
-        db.close()
-    return carried, tasks
+        for held in db.execute(
+            """
+            WITH attempts AS (
+                SELECT w.agent, w.started_ms, d.ended_ms, d.succeeded, trim(t.title) AS title,
+                       row_number() OVER (
+                           PARTITION BY w.ledger_id, w.run, w.id
+                           ORDER BY d.started_ms DESC, d.id DESC
+                       ) AS newest
+                  FROM ledger_workers w
+                  LEFT JOIN ledger_dispatches d
+                    ON d.ledger_id = w.ledger_id AND d.run = w.run AND d.worker = w.id
+                   AND d.started_ms < ?
+                  LEFT JOIN ledger_tasks t
+                    ON t.ledger_id = d.ledger_id AND t.run = d.run AND t.id = d.task
+                 WHERE w.ledger_id = ? AND w.started_ms < ?
+            ) SELECT * FROM attempts WHERE newest = 1
+            """, (at, ledger, at),
+        )
+    ]
+    prior = list(db.execute(
+        "SELECT ended_ms, succeeded FROM ledger_dispatches "
+        "WHERE ledger_id = ? AND run = ? AND task = ? AND started_ms < ? "
+        "ORDER BY ended_ms DESC, started_ms DESC, id DESC",
+        (ledger, task["run"], task["id"], at),
+    ))
+    # The task's current failure streak includes later attempts. Only closed
+    # attempts known then count, stopping at the latest successful one.
+    failures = 0
+    for held in prior:
+        if held["ended_ms"] is None or held["ended_ms"] > at or held["succeeded"] is None:
+            continue
+        if held["succeeded"]:
+            break
+        failures += 1
+    return carried, {
+        "title": task["title"] or "", "spec": task["spec"] or "",
+        "attempts": row.get("attempts", len(prior)),
+        "failures": row.get("failures", failures),
+    }
 
 
 def gauges() -> dict[str, dict]:
@@ -159,7 +168,7 @@ def main() -> int:
     store = pathlib.Path(os.path.expanduser(said.store))
     out = pathlib.Path(os.path.expanduser(said.out))
 
-    carried, tasks = store_facts(store)
+    db = snapshot(store)
     gauge = gauges()
 
     replays = []
@@ -169,12 +178,14 @@ def main() -> int:
             # agent, a question nobody answered. Nothing to agree about, so
             # nothing to replay.
             continue
-        task = tasks.get(row.get("task"))
-        if task is None:
+        facts = facts_at(db, row)
+        if facts is None:
             continue
+        carried, task = facts
         replays.append(
             {
                 "at": row["at"],
+                "carried": carried,
                 "task": row["task"],
                 "rubricVersion": row.get("rubricVersion"),
                 "label": row[LABEL_KEY],
@@ -193,16 +204,17 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
         json.dumps(
-            {"carried": carried, "gauges": gauge, "replays": replays},
+            {"gauges": gauge, "replays": replays},
             ensure_ascii=False,
             indent=1,
         )
     )
     print(
-        f"{out}: {len(replays)} rows to replay, {len(carried)} summonses in the ledger, "
+        f"{out}: {len(replays)} rows with historical dispatch snapshots, "
         f"{len(gauge)} agents",
         file=sys.stderr,
     )
+    db.close()
     return 0
 
 

@@ -321,16 +321,19 @@ fn a_seats_first_judgment_waits_for_a_window_it_can_fill() {
 /// move — everything else must show a window of comparisons first.
 #[test]
 fn only_the_seats_with_no_reader_to_compare_rise_on_their_own_ledger() {
+    // The counter and both writers ask one judge; the thin-sample policy
+    // belongs to its named table field, never to a seat id in a reader.
+    let judge = include_str!("promote.rs");
+    assert!(judge.contains("evidence.agreement_kind == AgreementKind::Comparison"));
+    assert!(judge.contains("agreement.compared < evidence.agreement_rows_wanted"));
+
     let on_their_own: Vec<&str> = JEV_USES
         .iter()
-        .filter(|row| row.agreement_rows_wanted == Some(NO_READER_TO_COMPARE))
+        .filter(|row| row.agreement_kind == AgreementKind::Hindsight)
         .map(|row| row.id)
         .collect();
     assert_eq!(on_their_own, vec![RECALL.id, PLACEMENT.id]);
-    for row in JEV_USES
-        .iter()
-        .filter(|row| !on_their_own.contains(&row.id) && row.promotes)
-    {
+    for row in JEV_USES.iter().filter(|row| row.promotes) {
         assert_eq!(
             row.agreement_rows_wanted,
             Some(A_WINDOW_OF_COMPARISONS),
