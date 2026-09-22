@@ -406,7 +406,8 @@ export async function testKnowledgeLive(page, ok) {
     /* 후보 선의 낱말은 밝을 때 선다: 한 끝을 짚으면 「merge?」. */
     const seat = view.querySelector('.knowledge-node[data-graph-key="wiki/Page-0000.md"]');
     litKnowledge(view, knowledgeLayouts.get(view), seat?.dataset.graphKey ?? null);
-    const labels = [...view.querySelectorAll(".knowledge-edge-label")].map((one) => one.textContent);
+    /* 낱말은 첫 텍스트 노드다 — 그 뒤의 <title>은 툴팁(관계 · 근거, t-5966)이라 `textContent`에 섞인다. */
+    const labels = [...view.querySelectorAll(".knowledge-edge-label")].map((one) => one.firstChild?.textContent ?? "");
     litKnowledge(view, knowledgeLayouts.get(view), null);
     const health = {
       merge: lintRow("merge")?.querySelector(".knowledge-inspector-note")?.textContent ?? null,
