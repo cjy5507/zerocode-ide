@@ -492,9 +492,10 @@ fn a_transcript_is_replayed_at_one_point_recorded_first() {
     assert_eq!(kind, "threshold");
     assert!((1..=6).contains(&cut));
     assert_eq!(replay_point(&[], &history, u64::MAX), None, "an estimate that never crosses is no point");
-    assert_eq!(median(&mut [3.0, 1.0, 2.0]), 2.0);
-    assert_eq!(median(&mut [4.0, 1.0, 3.0, 2.0]), 2.5);
-    assert_eq!(median(&mut []), 0.0);
+    for (shares, expected) in [(vec![3.0, 1.0, 2.0], 2.0), (vec![4.0, 1.0, 3.0, 2.0], 2.5), (Vec::new(), 0.0)] {
+        let mut shares = shares;
+        assert!((median(&mut shares) - expected).abs() < f64::EPSILON, "{shares:?} -> {expected}");
+    }
 }
 
 /// Replays this machine's own compaction points against the real endpoint
