@@ -2554,9 +2554,9 @@
   --jev-spark-width: 44px;
   --jev-spark-height: 18px;
   --jev-cell-min: 56px;
-  --jev-why-width: 180px;
+  --jev-status-width: 200px;
   /* Wide enough for the longest mode word, 자동 (근거가 쌓이면 적용), whole. */
-  --jev-mode-width: 15em;
+  --jev-mode-width: 17em;
   --jev-trend: var(--lane-1);
   --jev-dot: var(--ink-chalk);
   /* The strip over the table (t-6243 D1). */
@@ -2570,6 +2570,10 @@
   --jev-tone-under: var(--signal-wait-ink);
   --jev-tone-blocked: var(--signal-halt-ink);
   --jev-tone-unused: var(--ink-mist);
+  /* The samples still owed, as a bar filling toward the judge's window. */
+  --jev-progress-width: 72px;
+  --jev-progress-height: 6px;
+  --jev-progress-ink: var(--lane-1);
 }
 
 /* Skill library geometry; colours inherit the semantic palette in both themes. */

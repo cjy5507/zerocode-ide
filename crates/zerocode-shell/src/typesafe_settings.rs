@@ -92,6 +92,12 @@ pub struct SwitchRow {
     pub setting: &'static str,
     pub mode: &'static str,
     pub modes: Vec<ModeChoice>,
+    /// How many compared marks the judge wants before the seat's accuracy
+    /// may speak ([`JevUse::agreement_rows_wanted`]) — the sample the
+    /// dashboard fills its bar toward, and under half of which it says the
+    /// sample rather than a share (t-6243 D2/D3). `None` for a seat that
+    /// never rises.
+    pub agreement_rows_wanted: Option<usize>,
 }
 
 /// One word the routing classifier may hold, as the pane lists it: the word it
@@ -210,6 +216,7 @@ pub fn read_settings(
                 setting: row.setting,
                 mode: mode_in(&root, row).key(),
                 modes: choices(row),
+                agreement_rows_wanted: row.agreement_rows_wanted,
             })
             .collect(),
         classifier: ClassifierRow {
@@ -688,6 +695,13 @@ mod tests {
         for (row, painted) in JEV_USES.iter().zip(&state.switches) {
             assert_eq!(painted.id, row.id, "the card keeps the table's order");
             assert_eq!(painted.setting, row.setting, "{}", row.id);
+            // The comparison sample the judge wants before accuracy may speak,
+            // which the dashboard fills its bar toward (t-6243 D2).
+            assert_eq!(
+                painted.agreement_rows_wanted, row.agreement_rows_wanted,
+                "{}",
+                row.id
+            );
             let offered = &painted.modes;
             let words: Vec<&str> = offered.iter().map(|choice| choice.mode).collect();
             let expected: Vec<&str> = row.modes.iter().map(|mode| mode.key()).collect();

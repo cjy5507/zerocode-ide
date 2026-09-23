@@ -37616,7 +37616,7 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-eyebrow, .jev-about, .jev-freshness, .jev-bound, .jev-trend-name, .jev-trend-last,
-.jev-why-facts, .jev-decision-when, .jev-decision-marks, .jev-recent-empty {
+.jev-decision-when, .jev-decision-marks, .jev-recent-empty {
   color: var(--ink-mist);
   font-size: var(--jev-meta-size);
   margin: 0;
@@ -37779,7 +37779,9 @@ h4.knowledge-inspector-head::after {
   border-radius: var(--radius-sm);
   padding: var(--space-1) var(--space-2);
   font: inherit;
-  max-width: var(--jev-mode-width);
+  /* A width of its own: the shared field width is a share of the cell, and
+     a table cell sized by a share clips the longest mode word. */
+  width: var(--jev-mode-width);
 }
 
 .jev-share {
@@ -37799,9 +37801,88 @@ h4.knowledge-inspector-head::after {
   gap: 1px;
 }
 
-.jev-table [data-jev-cell="why"] {
-  min-width: var(--jev-why-width);
+.jev-table [data-jev-cell="status"] {
+  min-width: var(--jev-status-width);
   font-size: var(--jev-meta-size);
+}
+
+/* The model the table's judgments come from, named once over it. */
+.jev-caption {
+  caption-side: top;
+  padding: var(--space-2);
+  text-align: left;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+/* A feature's state (t-6243 D2): the chip in its state's tone, one sentence
+   of why, the samples still owed, and any fact beside them. */
+.jev-status {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+}
+
+.jev-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--jev-tone) 12%, transparent);
+  color: var(--jev-tone);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* A light tint keeps the chip's ink at AA on the light panel, as the
+   settings card's state pill does. */
+:root[data-theme="light"] .jev-chip {
+  background: color-mix(in srgb, var(--jev-tone) 6%, transparent);
+}
+
+/* Not in use says itself in words alone. */
+.jev-chip[data-status="unused"] {
+  padding-inline: 0;
+  background: none;
+  font-weight: 500;
+}
+
+.jev-status-reason, .jev-status-fact {
+  margin: 0;
+}
+
+.jev-status-fact {
+  color: var(--ink-mist);
+}
+
+.jev-owed {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-mist);
+}
+
+.jev-progress {
+  position: relative;
+  flex: none;
+  width: var(--jev-progress-width);
+  height: var(--jev-progress-height);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink-mist) 24%, transparent);
+  overflow: hidden;
+}
+
+.jev-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(var(--jev-filled, 0) * 100%);
+  background: var(--jev-progress-ink);
+}
+
+/* A lower bound under the line for acting by itself wears the tone of a
+   feature under its bar. */
+.jev-bound.is-under {
+  color: var(--jev-tone-under);
 }
 
 .jev-spark {
@@ -37820,14 +37901,6 @@ h4.knowledge-inspector-head::after {
 
 .jev-spark-dot {
   fill: var(--jev-dot);
-}
-
-.jev-why p {
-  margin: 0;
-}
-
-.jev-why-verdict {
-  color: var(--ink-chalk);
 }
 
 .jev-recent {

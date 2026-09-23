@@ -301,7 +301,7 @@ const JEV_COLUMNS = Object.freeze([
   { cell: "latency", key: "jev.col.latency", word: "응답 시간" },
   { cell: "acted", key: "jev.col.acted", word: "실제 적용 · 정확도", tipKey: "jev.col.actedTip", tip: "정확도는 판단이 기존 방식의 판단이나 나중에 확인된 결과와 같았던 비율입니다." },
   { cell: "cost", key: "jev.col.cost", word: "비용 (USD)" },
-  { cell: "why", key: "jev.col.why", word: "상태와 다음 단계" },
+  { cell: "status", key: "jev.col.why", word: "상태와 다음 단계" },
   { cell: "trend", key: "jev.col.trend", word: "지난 7일 (응답률 · 정확도 · 응답 시간)" },
 ]);
 
@@ -338,12 +338,13 @@ const JEV_TOTALS = Object.freeze([
  * `not_consented` the folder's consent. */
 const JEV_FIXES = Object.freeze({ no_key: "key", unauthorized: "key", not_consented: "consent" });
 
-/* Where `held` stands. Nothing asked all week is unused; a feature the door
- * refused for a key or for consent at least as often as anything answered
- * waits on a person first; then it acts, or it was measured under a line of
- * its own, or it is still recording. */
-function jevSeatStatus(held) {
-  if (held.week.rows === 0) return "unused";
+/* Where `held` stands, given the switch's `choice` (what its mode does).
+ * Nothing asked all week, or a switch that asks nothing, is unused; a feature
+ * the door refused for a key or for consent at least as often as anything
+ * answered waits on a person first; then it acts, or it was measured under a
+ * line of its own, or it is still recording. */
+function jevSeatStatus(held, choice) {
+  if (held.week.rows === 0 || (choice && !choice.asks)) return "unused";
   const refused = (held.week.failures ?? [])
     .reduce((sum, one) => sum + (JEV_FIXES[one.token] ? one.rows : 0), 0);
   if (refused > 0 && refused >= held.week.answered) return "blocked";
@@ -426,7 +427,11 @@ function buildJevView() {
   }
   const body = document.createElement("tbody");
   body.dataset.jevRows = "";
-  const table = jevNode("table", "jev-table", jevNode("thead", "", head), body);
+  // The version the table's judgments come from, named once over it
+  // (t-6243 D2); a row names one only when it is another.
+  const caption = jevNode("caption", "jev-caption");
+  caption.hidden = true;
+  const table = jevNode("table", "jev-table", caption, jevNode("thead", "", head), body);
   root.append(jevNode("div", "jev-table-wrap", table));
 
   const picker = document.createElement("select");
@@ -645,53 +650,121 @@ function jevTrendCell(held) {
   return cell;
 }
 
-/* Why the seat is not acting, or that it is: the judge's line in words, the
- * window it was read on, and the rows still owed before the next reading.
- *
- * A seat a person switched to acting is acting by hand, whatever the judge
- * says — the card's line says "applying" of it, and this column says whose
- * doing that is and what the judge would have said: the one place a person
- * can see that their `on` is carrying a seat the evidence would not. `byHand`
- * is the switch's own word for its mode (a mode that applies unconditionally),
- * not a stand token respelled here. */
-function jevWhyCell(held, byHand) {
-  const cell = jevNode("div", "jev-why");
-  const words = jevSeatWords(held);
-  const verdict = jevNode("p", "jev-why-verdict");
-  const because = held.verdict ? jevLineWords(held.verdict.line) : "";
-  if (held.week.rows === 0) verdict.textContent = words[0];
-  else if (held.applies && byHand && held.verdict) {
-    verdict.textContent = t("jev.byHand", "직접 켜서 적용 중 — {{because}}", { because });
-  } else if (held.applies && byHand) {
-    verdict.textContent = t("jev.byHandNoJudge", "직접 켜서 적용 중 — 이 기능은 자동 적용 대상이 아닙니다");
-  } else if (!held.applies && !held.verdict) {
-    verdict.textContent = t("jev.neverRises", "자동 적용 대상이 아니라 기록만 합니다");
-  } else verdict.textContent = words.at(-1) ?? "";
-  cell.append(verdict);
-  if (held.week.rows === 0) return cell;
-  const facts = [];
-  const models = jevModelWords(held);
-  if (models) facts.push(models);
-  if (held.judged) {
-    facts.push(t("jev.window", "판정 표본 {{rows}}/{{wanted}}건", {
-      rows: jevCount(held.judged.window.rows), wanted: jevCount(held.judged.windowWanted) }));
-  }
-  const cut = jevCutWords(held);
-  if (cut) facts.push(cut);
-  if (held.clearsRiseFloor !== null && held.clearsRiseFloor !== undefined) {
-    facts.push(held.clearsRiseFloor
-      ? t("jev.clearsFloor", "응답률 신뢰 하한이 자동 적용 기준({{floor}}) 이상", { floor: jevFloor(held.riseFloorPermille) })
-      : t("jev.underFloor", "응답률 신뢰 하한이 자동 적용 기준({{floor}}) 미만", { floor: jevFloor(held.riseFloorPermille) }));
-  }
-  if (held.rowsToNextJudgment !== null && held.rowsToNextJudgment !== undefined) {
-    facts.push(t("jev.rowsToJudgment", "다음 판정까지 {{rows}}건", { rows: jevCount(held.rowsToNextJudgment) }));
-  }
-  if (facts.length > 0) {
-    const line = jevNode("p", "jev-why-facts");
-    line.textContent = facts.join(" · ");
-    cell.append(line);
+/* The samples a feature still owes before the judge can speak, by the line
+ * that wants them: the judged window while it fills, then the compared marks.
+ * Keyed by `JEV_LINES`' `wants`. */
+const JEV_SAMPLES = Object.freeze({
+  rows: { key: "jev.window", word: "판정 표본 {{rows}}/{{wanted}}건" },
+  compared: { key: "jev.compared", word: "비교 표본 {{rows}}/{{wanted}}건" },
+});
+
+/* The version the table's judgments come from: the pin when the person
+ * pinned one, else the version most features' newest answers named. `null`
+ * while nothing has answered. */
+function jevHeadModel(numbers) {
+  if (typesafeState?.model?.pinned) return typesafeState.model.model;
+  const tally = new Map();
+  for (const held of numbers) if (held.model) tally.set(held.model, (tally.get(held.model) ?? 0) + 1);
+  let best = null;
+  for (const [model, count] of tally) if (best === null || count > tally.get(best)) best = model;
+  return best;
+}
+
+function paintJevCaption(view, numbers) {
+  const caption = view.querySelector(".jev-caption");
+  const model = jevHeadModel(numbers);
+  caption.hidden = !model;
+  caption.textContent = !model ? "" : typesafeState?.model?.pinned
+    ? t("settings.typesafe.seatVersionPinned", "고정 모델 {{model}}", { model })
+    : t("settings.typesafe.seatVersion", "모델 {{model}}", { model });
+}
+
+/* A feature's state as a person reads it (t-6243 D2): one chip in the
+ * state's tone, one sentence of why, the samples still owed while the judge
+ * wants some, and a version only when it is not the one over the table —
+ * each said once. */
+function jevStatusCell(held, choice, standing, head) {
+  const status = jevSeatStatus(held, choice);
+  const state = JEV_STATUSES.find((one) => one.status === status);
+  const chip = jevNode("span", "jev-chip");
+  chip.dataset.status = status;
+  chip.textContent = t(state.key, state.word);
+  const cell = jevNode("div", "jev-status", chip);
+  const reason = jevStatusReason(held, status, choice);
+  if (reason) cell.append(jevNode("p", "jev-status-reason", document.createTextNode(reason)));
+  const owed = jevSamplesOwed(held, standing);
+  if (owed) cell.append(owed);
+  const other = held.model && held.model !== head
+    ? t("settings.typesafe.seatVersion", "모델 {{model}}", { model: held.model }) : "";
+  for (const fact of [other, jevCutWords(held)]) {
+    if (fact) cell.append(jevNode("p", "jev-status-fact", document.createTextNode(fact)));
   }
   return cell;
+}
+
+/* The one sentence under the chip: what keeps the feature where it is. A
+ * switch a person turned on applies whatever the judge says, so its sentence
+ * says whose doing that is and what the judge would have said. */
+function jevStatusReason(held, status, choice) {
+  const because = held.verdict ? jevLineWords(held.verdict.line) : "";
+  if (status === "unused") {
+    return held.week.rows > 0 ? t("jev.switchedOff", "꺼져 있어 새 판단을 요청하지 않습니다") : "";
+  }
+  if (status === "blocked") return jevBlockedWords(held);
+  if (status === "applying") {
+    if (!choice?.applies) return t("jev.risen", "근거가 충분해 자동으로 켜졌습니다");
+    if (!held.verdict) return t("jev.byHandNoJudge", "직접 켰습니다 — 이 기능은 자동 적용 대상이 아닙니다");
+    return because
+      ? t("jev.byHand", "직접 켰습니다 — {{because}}", { because })
+      : t("jev.byHandClear", "직접 켰습니다 — 자동 적용 기준도 넘었습니다");
+  }
+  if (because) return because;
+  if (!held.verdict) return t("jev.neverRises", "자동 적용 대상이 아니라 기록만 합니다");
+  // The judge found nothing to hold it on: it acts at the next judgment
+  // under `auto`, and never under a switch that only records.
+  return choice?.automatic
+    ? t("jev.risingNext", "기준을 넘었습니다 — 다음 판정에서 자동 적용됩니다")
+    : t("jev.risingHeld", "기준을 넘었지만 기록만으로 설정되어 있습니다");
+}
+
+/* Why the door refused a feature that waits on a person: the key or the
+ * folder's consent, whichever it refused more often. */
+function jevBlockedWords(held) {
+  const fixes = { key: 0, consent: 0 };
+  for (const one of held.week.failures ?? []) {
+    if (JEV_FIXES[one.token]) fixes[JEV_FIXES[one.token]] += one.rows;
+  }
+  return fixes.key >= fixes.consent
+    ? t("jev.needs.key", "API 키가 없거나 거절되어 판단을 요청하지 못했습니다")
+    : t("jev.needs.consent", "동의하지 않은 폴더라 판단을 보내지 않았습니다");
+}
+
+/* The samples a feature still owes before the judge can speak, as a bar and
+ * one number: the judged window while it fills, then the compared marks.
+ * Nothing once the judge has what it wants — the sentence then says what it
+ * found. The countdown is the core's while the window fills
+ * (`rowsToNextJudgment`), so the bar and the judgment land on the same row. */
+function jevSamplesOwed(held, standing) {
+  const wants = JEV_LINES[held.verdict?.line ?? ""]?.wants;
+  const sample = JEV_SAMPLES[wants];
+  if (!sample || !held.judged) return null;
+  const [have, want] = wants === "rows"
+    ? [held.judged.window.rows, held.judged.windowWanted]
+    : [held.judged.agreement?.compared ?? 0, standing?.agreementRowsWanted];
+  if (!want) return null;
+  const owed = wants === "rows" ? (held.rowsToNextJudgment ?? Math.max(0, want - have)) : Math.max(0, want - have);
+  const bar = jevNode("div", "jev-progress", jevNode("span", "jev-progress-fill"));
+  bar.setAttribute("role", "progressbar");
+  bar.setAttribute("aria-valuemin", "0");
+  bar.setAttribute("aria-valuemax", String(want));
+  bar.setAttribute("aria-valuenow", String(Math.min(have, want)));
+  const said = t(sample.key, sample.word, { rows: jevCount(have), wanted: jevCount(want) });
+  bar.setAttribute("aria-label", said);
+  bar.dataset.tip = said;
+  bar.style.setProperty("--jev-filled", String(Math.min(1, have / want)));
+  const label = jevNode("span", "jev-progress-label");
+  label.textContent = t("jev.needMore", "{{count}}건 더 필요", { count: jevCount(owed) });
+  return jevNode("div", "jev-owed", bar, label);
 }
 
 function jevRefusalWords(window) {
@@ -727,7 +800,7 @@ function paintJevView(view) {
   const drawn = [];
   for (const id of [...inUse, ...(jevUnusedOpen ? unused : [])]) {
     const row = jevDashRow(body, id);
-    paintJevRow(row, id, heldOf.get(id) ?? null, switches.find((one) => one.id === id) ?? null);
+    paintJevRow(row, id, heldOf.get(id) ?? null, switches.find((one) => one.id === id) ?? null, jevHeadModel(numbers));
     drawn.push(row);
   }
   const fold = unused.length > 0 ? jevFoldRow(body, unused.length) : null;
@@ -736,6 +809,7 @@ function paintJevView(view) {
     if (!drawn.includes(row)) row.remove();
   }
   jevArrange(body, drawn);
+  paintJevCaption(view, numbers);
   paintJevSummary(view, order, heldOf);
   paintJevFreshness(view);
   paintJevRecent(view, order);
@@ -763,7 +837,7 @@ function jevDashRow(body, id) {
   return row;
 }
 
-function paintJevRow(row, id, held, standing) {
+function paintJevRow(row, id, held, standing, head) {
   const cell = (name) => row.querySelector(`[data-jev-cell="${name}"]`);
   cell("seat").textContent = jevSeatName(id);
   const select = cell("mode").querySelector("select");
@@ -776,8 +850,8 @@ function paintJevRow(row, id, held, standing) {
   } else {
     select.hidden = true;
   }
-  const byHand = standing ? Boolean(jevSeatChoice(typesafeState, id)?.applies) : false;
-  const applying = held ? held.applies : byHand;
+  const choice = standing ? jevSeatChoice(typesafeState, id) : null;
+  const applying = held ? held.applies : Boolean(choice?.applies);
   row.classList.toggle("is-applying", Boolean(applying));
   row.classList.toggle("is-quiet", !held || held.week.rows === 0);
   if (!held) {
@@ -807,8 +881,17 @@ function paintJevRow(row, id, held, standing) {
   if (held.week.rows === 0) {
     share.textContent = "—";
   } else {
-    share.append(fact("share", jevPercent(held.week.answeredShare), "jev-share"), document.createTextNode(" "),
-      fact("bound", t("jev.bound", "신뢰 하한 {{pct}}", { pct: jevPercent(held.week.answeredLowerBound) }), "jev-bound"));
+    const bound = fact("bound", t("jev.bound", "신뢰 하한 {{pct}}", { pct: jevPercent(held.week.answeredLowerBound) }), "jev-bound");
+    // Where that bound stands against the line for acting by itself, said
+    // as its tip — the number a person hovers, not a fact beside it.
+    if (held.clearsRiseFloor !== null && held.clearsRiseFloor !== undefined && held.riseFloorPermille) {
+      const floor = jevFloor(held.riseFloorPermille);
+      bound.dataset.tip = held.clearsRiseFloor
+        ? t("jev.clearsFloor", "응답률 신뢰 하한이 자동 적용 기준({{floor}}) 이상", { floor })
+        : t("jev.underFloor", "응답률 신뢰 하한이 자동 적용 기준({{floor}}) 미만", { floor });
+      bound.classList.toggle("is-under", !held.clearsRiseFloor);
+    }
+    share.append(fact("share", jevPercent(held.week.answeredShare), "jev-share"), document.createTextNode(" "), bound);
   }
   cell("latency").textContent = jevLatencyWords(held.week);
   const acted = cell("acted");
@@ -817,7 +900,7 @@ function paintJevRow(row, id, held, standing) {
     fact("agreement", jevAgreementWords(held)));
   cell("cost").textContent = jevCost(held.costUsd);
   cell("trend").replaceChildren(jevTrendCell(held));
-  cell("why").replaceChildren(jevWhyCell(held, byHand));
+  cell("status").replaceChildren(jevStatusCell(held, choice, standing, head));
 }
 
 /* The row the unused features fold into: one press shows or hides them all,
@@ -871,7 +954,8 @@ function paintJevSummary(view, order, heldOf) {
   said("week", counted.length ? jevCount(sum((held) => held.week.rows)) : "—");
   const costs = counted.filter((held) => held.costUsd !== null && held.costUsd !== undefined);
   said("cost", costs.length ? jevCost(costs.reduce((total, held) => total + held.costUsd, 0)) : "—");
-  const standing = counted.map(jevSeatStatus);
+  const standing = order.filter((id) => heldOf.has(id))
+    .map((id) => jevSeatStatus(heldOf.get(id), jevSeatChoice(typesafeState, id)));
   for (const state of JEV_STATUSES) {
     if (state.status === "unused") continue;
     said(state.status, counted.length ? jevCount(standing.filter((one) => one === state.status).length) : "—");
