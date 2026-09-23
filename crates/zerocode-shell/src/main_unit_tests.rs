@@ -17155,6 +17155,9 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         // What a row folds (t-6323): the door's two words.
         "worker.showMore",
         "worker.showLess",
+        // A read's lines beside its file's door (t-6323 A2).
+        "worker.readLines",
+        "worker.readFrom",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -17180,6 +17183,10 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         (
             "function paintExpandDoor(door, open) {",
             vec!["worker.showMore", "worker.showLess"],
+        ),
+        (
+            "function dressToolFile(row, turn, run) {",
+            vec!["worker.readLines", "worker.readFrom"],
         ),
         // The fold's label lives in `thoughtLabel` (the bare word, or the
         // extension's 「Thought for Ns」 once the thought's length is known);
@@ -17365,6 +17372,9 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ".helper-turn.is-user > .helper-said.is-clipped:not(.is-open) {",
         ".helper-turn.is-user > .helper-said.is-clipped:not(.is-open)::after {",
         ".helper-turn.is-user > .helper-said.is-clipped:not(.is-open) + .helper-expand {",
+        // A call's file as a door, and the lines a read covered (A2).
+        ".helper-tool-arg.is-door {",
+        ".helper-tool-where {",
         ".helper-status {",
         ".pane-chat-ask {",
         ".helper-tail {",

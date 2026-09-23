@@ -528,6 +528,88 @@ pub struct TranscriptTool {
     /// extension's inline diff. Empty for a call that edits nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub edits: Vec<TranscriptEdit>,
+    /// The file the call read or wrote, and where in it ([`file_in`]) —
+    /// what the page's tool row opens. `None` for a call that names none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<TranscriptFile>,
+}
+
+/// The file a tool call read or wrote, and where in it — what the Claude
+/// Code extension's tool header links (`fileToolHeader`, 2.1.280): a read
+/// opens where it began, an edit where its new text stands, a write at the
+/// file's top.
+///
+/// Carried as the call said it. `offset` and `limit` are the CLI's own count
+/// and are not converted here: Claude Code's `offset` IS the first line it
+/// returns (measured 2026-09-23 — `offset: 10930` came back opening
+/// `10930→`), zo's `read_file` counts from 0 (its schema). Which one a page
+/// holds is the agent's catalog fact (`AgentVoice::read_offset_base`); this
+/// reader cannot know it and does not guess.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TranscriptFile {
+    pub path: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u64>,
+    /// The start of the text an edit wrote, to find its place by (the
+    /// extension hands its host the new string as `searchText`) — at most
+    /// [`FILE_SEARCH_CHARS`], which places it as surely as the whole.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+}
+
+/// How much of an edit's new text the page searches its file for.
+pub const FILE_SEARCH_CHARS: usize = 400;
+
+/// The file a tool call names, when the call is a read, an edit or a write
+/// (`hook::Tool::named` — the tool's reduced name, never its vendor): a
+/// search names a directory to look in and a command a line to run, and
+/// neither is a file to open. Field names are the whole test, as for
+/// [`edits_in`]: `file_path` (Claude Code, Gemini CLI), `notebook_path`, and
+/// zo's `path`, camelCase accepted.
+#[must_use]
+pub fn file_in(name: &str, input: Option<&serde_json::Value>) -> Option<TranscriptFile> {
+    use crate::hook::Tool;
+    let tool = Tool::named(name)?;
+    if !matches!(tool, Tool::Read | Tool::Edit | Tool::Write) {
+        return None;
+    }
+    let map = tool_input(input)?;
+    let text_at = |map: &serde_json::Map<String, serde_json::Value>, keys: &[&str]| {
+        keys.iter()
+            .find_map(|key| map.get(*key)?.as_str())
+            .map(str::to_string)
+    };
+    let path = text_at(
+        &map,
+        &[
+            "file_path",
+            "filePath",
+            "notebook_path",
+            "notebookPath",
+            "path",
+        ],
+    )
+    .filter(|path| !path.trim().is_empty())?;
+    let reads = matches!(tool, Tool::Read);
+    let number = |key: &str| reads.then(|| map.get(key)?.as_u64()).flatten();
+    let search = matches!(tool, Tool::Edit)
+        .then(|| {
+            text_at(&map, &["new_string", "newString"]).or_else(|| {
+                let first = map.get("edits")?.as_array()?.first()?.as_object()?;
+                text_at(first, &["new_string", "newString"])
+            })
+        })
+        .flatten()
+        .filter(|text| !text.trim().is_empty())
+        .map(|text| text.chars().take(FILE_SEARCH_CHARS).collect());
+    Some(TranscriptFile {
+        path,
+        offset: number("offset"),
+        limit: number("limit"),
+        search,
+    })
 }
 
 /// One file's change inside a tool call, drawn as an inline diff under the
@@ -924,6 +1006,11 @@ fn transcript_tool(part: &serde_json::Value, result: bool) -> TranscriptTool {
             Vec::new()
         } else {
             edits_in(name, part.get("input").or_else(|| part.get("arguments")))
+        },
+        file: if result {
+            None
+        } else {
+            file_in(name, part.get("input").or_else(|| part.get("arguments")))
         },
         is_error: part
             .get("is_error")
@@ -1522,6 +1609,92 @@ mod tests {
         assert!(
             json["tool"]["edits"][0].get("truncated").is_none(),
             "zero is left off the wire"
+        );
+    }
+
+    #[test]
+    fn a_call_names_the_file_it_read_or_wrote_and_where_as_it_said_it() {
+        use serde_json::json;
+        // Claude Code's Read: the file and its window, in the CLI's own count.
+        let read = file_in(
+            "Read",
+            Some(&json!({"file_path": "/w/a.rs", "offset": 10930, "limit": 480})),
+        )
+        .expect("a read names its file");
+        assert_eq!(
+            read,
+            TranscriptFile {
+                path: "/w/a.rs".into(),
+                offset: Some(10930),
+                limit: Some(480),
+                search: None,
+            }
+        );
+        // An edit is found by the text it wrote; a multi-edit by its first.
+        let edit = file_in(
+            "Edit",
+            Some(&json!({"file_path": "/w/b.rs", "old_string": "a", "new_string": "let fixed = true;"})),
+        )
+        .expect("an edit names its file");
+        assert_eq!(edit.search.as_deref(), Some("let fixed = true;"));
+        assert_eq!((edit.offset, edit.limit), (None, None));
+        let multi = file_in(
+            "MultiEdit",
+            Some(&json!({"file_path": "/w/c.rs", "edits": [{"old_string": "x", "new_string": "y = 1"}]})),
+        )
+        .expect("a multi-edit names its file");
+        assert_eq!(multi.search.as_deref(), Some("y = 1"));
+        // A write opens at the top; zo's read names its file `path`.
+        let write = file_in(
+            "Write",
+            Some(&json!({"file_path": "/w/d.rs", "content": "x"})),
+        )
+        .expect("a write names its file");
+        assert_eq!((write.search, write.offset), (None, None));
+        let zo = file_in(
+            "read_file",
+            Some(&json!({"path": "src/e.rs", "offset": 0, "limit": 20})),
+        )
+        .expect("zo's read names its file");
+        assert_eq!(
+            (zo.path.as_str(), zo.offset, zo.limit),
+            ("src/e.rs", Some(0), Some(20))
+        );
+        // A search names a directory and a command a line: no file.
+        assert_eq!(
+            file_in("Grep", Some(&json!({"pattern": "x", "path": "/w"}))),
+            None
+        );
+        assert_eq!(
+            file_in("Bash", Some(&json!({"command": "cat /w/a.rs"}))),
+            None
+        );
+        // A patch's files are its diff's, not one path to open.
+        assert_eq!(
+            file_in("apply_patch", Some(&json!("*** Begin Patch"))),
+            None
+        );
+        // A long new text is searched by its start.
+        let long = "x".repeat(FILE_SEARCH_CHARS * 2);
+        let searched = file_in(
+            "Edit",
+            Some(&json!({"file_path": "/w/f.rs", "new_string": long})),
+        )
+        .and_then(|file| file.search)
+        .expect("an edit's text is searched");
+        assert_eq!(searched.chars().count(), FILE_SEARCH_CHARS);
+        // And the transcript's own turn carries it.
+        let call = json!({"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "/w/a.rs", "offset": 5}}
+        ]}});
+        let turns = turns_in(&format!("{call}\n"));
+        assert_eq!(
+            turns[0]
+                .tool
+                .as_ref()
+                .and_then(|tool| tool.file.as_ref())
+                .and_then(|file| file.offset),
+            Some(5)
         );
     }
 

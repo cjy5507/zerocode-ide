@@ -1154,7 +1154,7 @@ const stubBackend = ({ boot, pollers }) => {
         found_as: "claude", unsupported_here: false, missing_requirement: null,
         takes_a_paste: false, ready: "quiet", glyph: "✻", busy_word: "Pondering…", models_provider: "claude", model_command: "/model", model_command_takes_id: true, permission_road: "shift-tab",
         permission_modes: [{ mode: "acceptEdits", reach: "edits" }, { mode: "plan", reach: "plan" }, { mode: "bypassPermissions", reach: "bypass" }, { mode: "auto", reach: "bypass" }],
-        wire: "claude-stream", wire_resumes: true, compact_command: "/compact" },
+        wire: "claude-stream", wire_resumes: true, compact_command: "/compact", read_offset_base: 1 },
       { id: "codex", name: "Codex", favicon_domain: "openai.com",
         homepage_url: "https://github.com/openai/codex", installed: true,
         found_as: "codex", unsupported_here: false, missing_requirement: null,

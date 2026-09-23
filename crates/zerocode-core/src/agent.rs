@@ -1552,6 +1552,10 @@ pub struct AgentPresence {
     /// that chip a reading with no door — the window never invents a
     /// command a CLI did not name.
     pub compact_command: Option<&'static str>,
+    /// Where the CLI's read tool counts its `offset` from
+    /// ([`AgentVoice::read_offset_base`]) — what the conversation's tool row
+    /// opens a read's file at.
+    pub read_offset_base: Option<u8>,
 }
 
 /// How far a permission mode lets the agent act before it asks — the one
@@ -1641,6 +1645,12 @@ pub struct AgentVoice {
     /// The composer's context meter IS that button, so the word has to be
     /// this CLI's own; `None` leaves the meter a reading and no door.
     pub compact_command: Option<&'static str>,
+    /// The line its read tool's `offset` counts from — `1` when the offset
+    /// IS the first line returned, `0` when it is 0-based. The page opens a
+    /// read's file where the read began (the extension's tool header does)
+    /// and says the lines it read, so the count must be the CLI's own. `None`
+    /// where it was not measured: the file then opens at its top.
+    pub read_offset_base: Option<u8>,
 }
 
 /// The consoles this catalog knows — read off each CLI's own screen and its
@@ -1701,6 +1711,9 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // the stream-json wire named `compact` among 138 slash commands,
             // and the command answered down that wire (measured 2026-09-21).
             compact_command: Some("/compact"),
+            // `Read {offset: 10930}` came back opening `10930→` (2.1.280,
+            // measured 2026-09-23): the offset is the first line itself.
+            read_offset_base: Some(1),
         },
     ),
     (
@@ -1733,6 +1746,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // conversation to prevent hitting the context limit"
             // (docs/design/zo-vs-codex-gaps-20260921.md #23, `S:53003`).
             compact_command: Some("/compact"),
+            // Codex reads files through its shell; it has no read tool.
+            read_offset_base: None,
         },
     ),
     (
@@ -1756,6 +1771,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             plan_tool: None,
             // zo's own twelve (`zo-ide/README.md:36`).
             compact_command: Some("/compact"),
+            // `read_file`'s schema: "a 0-based line window".
+            read_offset_base: Some(0),
         },
     ),
     (
@@ -1779,6 +1796,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             plan_tool: None,
             // agy's compaction word is not measured here.
             compact_command: None,
+            // agy's read tool is not measured here.
+            read_offset_base: None,
         },
     ),
 ];
@@ -1795,6 +1814,7 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     exit_command: None,
     plan_tool: None,
     compact_command: None,
+    read_offset_base: None,
 };
 
 /// One agent's console, or the silent one for an agent the table does not
@@ -1889,6 +1909,7 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                     .is_some_and(|road| road.resume.is_some())
                     && agent_voice(spec.id).exit_command.is_some(),
                 compact_command: agent_voice(spec.id).compact_command,
+                read_offset_base: agent_voice(spec.id).read_offset_base,
             }
         })
         .collect()
@@ -1995,6 +2016,17 @@ mod tests {
         }
         assert!(super::agent_voice("antigravity").compact_command.is_none());
         assert!(super::SILENT_CONSOLE.compact_command.is_none());
+        // Where a read's offset counts from is each CLI's own (measured for
+        // two), and the presence row the page reads carries it.
+        assert_eq!(super::agent_voice("claude").read_offset_base, Some(1));
+        assert_eq!(super::agent_voice("zo").read_offset_base, Some(0));
+        assert!(super::agent_voice("codex").read_offset_base.is_none());
+        assert!(super::SILENT_CONSOLE.read_offset_base.is_none());
+        let rows = super::agent_presence(None, "macos");
+        assert!(
+            rows.iter()
+                .all(|row| row.read_offset_base == super::agent_voice(row.id).read_offset_base)
+        );
         assert!(super::wire_road("zo").is_none());
         let silent = super::agent_voice("nobody");
         assert_eq!(silent, super::SILENT_CONSOLE);

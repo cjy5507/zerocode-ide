@@ -13978,6 +13978,26 @@ details.worker-command {
   color: var(--chat-link);
 }
 
+/* The target as a door to its file (t-6323 A2) — the extension's link in the
+ * tool header — and the lines a read covered beside it, in the header's own
+ * type rather than the target's mono. */
+.helper-tool-arg.is-door {
+  cursor: pointer;
+  text-decoration: none;
+  transition: text-decoration-color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-tool-arg.is-door:hover {
+  text-decoration: underline;
+}
+
+.helper-tool-where {
+  flex: none;
+  font-family: var(--font-ui);
+  font-size: var(--chat-prose-size);
+  color: var(--chat-work-ink);
+}
+
 /* What came back, in one line under the call — the extension's secondary
  * line (`secondaryLine`): the window's type in the quieter ink. */
 .helper-tool-result {
@@ -15197,7 +15217,7 @@ button.worker-composer-pill:hover {
 /* 이 페이지의 키보드 초점 — 플랫폼 계약의 잉크 외곽선. 입력 상자만 전역
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`). */
 .worker-view
-  :is(.helper-cap, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-preview-lid, .helper-preview-door):focus-visible {
+  :is(.helper-cap, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }

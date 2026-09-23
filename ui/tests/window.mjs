@@ -64,7 +64,7 @@ import { testComposerAttach } from "./attach.mjs";
 import { testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testWorkers } from "./workers.mjs";
-import { testConversationFolds, testConversationFont } from "./conversation-parity.mjs";
+import { testConversationFolds, testConversationFont, testConversationPaths } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -215,6 +215,7 @@ suite("workers", testWorkers);
  * §10): each suite one difference that was closed, read off the laid-out page. */
 suite("conversation-font", ({ browser, origin, ok }) => testConversationFont(browser, origin, ok));
 suite("conversation-folds", ({ browser, origin, ok }) => testConversationFolds(browser, origin, ok));
+suite("conversation-paths", ({ browser, origin, ok }) => testConversationPaths(browser, origin, ok));
 /* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
  * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
  * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs

@@ -11639,6 +11639,8 @@ function dressToolTurn(row, turn, run, spoken) {
   // name for it, which the row already shows. Guarded like every other
   // write here: a quiet poll costs no mutation.
   writeAttribute(row, "aria-label", t("worker.toolRow", "{{name}} 도구", { name: words.name }));
+  // The file the call read or wrote is a door to the file tab (A2).
+  dressToolFile(row, turn, run);
   // What the call took, once its result is in — the CLI feeds say it beside
   // the call (Hermes: `┊ 💻 terminal  ls -la  (0.3s)`), and so does this row.
   if (turn.outputAt !== undefined && turn.at !== undefined && !row.querySelector(".helper-tool-took")) {
@@ -11852,7 +11854,9 @@ function linkifyHelperProse(host) {
 }
 
 function helperLinkNode(said, isUrl) {
-  const link = mdLink(said, isUrl ? said : said.replace(HELPER_LINK_LINE_RE, ""));
+  // A bare path keeps its `:line` (t-6323 A2): the door opens the file there.
+  const line = isUrl ? null : said.match(HELPER_LINK_LINE_RE)?.[0].slice(1).split("-")[0] ?? null;
+  const link = mdLink(said, isUrl ? said : said.replace(HELPER_LINK_LINE_RE, ""), line === null ? undefined : Number(line));
   link.classList.add("helper-link");
   link.prepend(iconNode(isUrl ? "globe" : "file"));
   return link;

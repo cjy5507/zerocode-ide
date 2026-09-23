@@ -332,6 +332,12 @@ impl WireState {
         } else {
             format!("{name} · {}", zerocode_core::transcript::clamp(target))
         };
+        // The file the call names, read off its input the way a transcript's
+        // call is (`file_in`): Codex's and ACP's calls say it in fields too.
+        let file = zerocode_core::transcript::file_in(
+            name,
+            Some(&serde_json::Value::String(input.clone())),
+        );
         self.push(TranscriptTurn {
             role: "tool".to_string(),
             text,
@@ -342,6 +348,7 @@ impl WireState {
                 input,
                 is_error: false,
                 edits,
+                file,
             }),
         });
     }
@@ -364,6 +371,7 @@ impl WireState {
                 input: String::new(),
                 is_error,
                 edits,
+                file: None,
             }),
         });
     }

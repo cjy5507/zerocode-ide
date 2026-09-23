@@ -161,3 +161,48 @@ function clipPersonRows(rows) {
   }
   for (const said of tall) clipWith(said, true);
 }
+
+/* ---- a tool's file is a door (t-6323 A2) -----------------------------------
+ *
+ * The extension's tool header links the file a call read or wrote
+ * (`fileToolHeader`, 2.1.280): a read opens where it began and says which
+ * lines it read, an edit where its new text stands, a write at its top. The
+ * call's file is the backend's reading (`tool.file`, `transcript::file_in` —
+ * only reads, edits and writes name one); where a read began is the CLI's own
+ * count (`read_offset_base` on its catalog row), and a CLI whose count was
+ * not measured opens at the top rather than at a guessed line. The door is
+ * the document viewer's (`openPath`), measured from the session's checkout
+ * as a link in the answer is (`helperBase`). */
+function toolFilePlace(file, agent) {
+  const base = installedAgents().find((row) => row.id === agent)?.read_offset_base;
+  if (typeof file.offset !== "number" || typeof base !== "number") return {};
+  const line = file.offset + 1 - base;
+  return { line, end: typeof file.limit === "number" ? line + file.limit - 1 : undefined };
+}
+
+/* The call line's target made the door, once — a poll that re-dresses a live
+ * row never rebuilds it. A read's lines stand after it in the extension's
+ * words: 「(11–60행)」 / 「(11행부터)」. */
+function dressToolFile(row, turn, run) {
+  const file = turn.tool?.file;
+  if (!file?.path || row.__fileDoor) return;
+  row.__fileDoor = true;
+  const arg = row.querySelector(".helper-tool-arg");
+  const place = toolFilePlace(file, run.agent);
+  arg.classList.add("is-door");
+  actsAsButton(arg, (event) => {
+    event.stopPropagation();
+    openPath(resolveDocPath(helperBase(run), file.path), {
+      preview: true,
+      line: place.line,
+      search: place.line === undefined ? file.search : undefined,
+    });
+  });
+  if (place.line === undefined) return;
+  const where = document.createElement("span");
+  where.className = "helper-tool-where";
+  where.textContent = place.end !== undefined
+    ? t("worker.readLines", "({{from}}–{{to}}행)", { from: place.line, to: place.end })
+    : t("worker.readFrom", "({{from}}행부터)", { from: place.line });
+  arg.after(where);
+}

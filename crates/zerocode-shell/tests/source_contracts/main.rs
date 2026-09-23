@@ -7972,7 +7972,7 @@ mod tests {
             "a bare click on a terminal URL lost its action popover"
         );
         assert!(
-            block_after(window, "function mdLink(label, href) {")
+            block_after(window, "function mdLink(label, href, line = undefined) {")
                 .contains("routeHttpLink(href, event)"),
             "Markdown URLs bypass Browser Link Routing"
         );
@@ -12878,7 +12878,7 @@ mod tests {
         // A link that leaves the project is drawn as text. An `<a href>` in a
         // webview navigates the window away from the application, which is
         // not a thing a viewer should be able to do to you.
-        let link = block_after(window, "function mdLink(label, href) {");
+        let link = block_after(window, "function mdLink(label, href, line = undefined) {");
         assert!(
             !link.contains("\"a\""),
             "a markdown link is an anchor, which would navigate the app \

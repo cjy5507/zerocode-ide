@@ -1167,8 +1167,18 @@ async function openFile(path, opts = {}) {
   // A caller that named a line meant that line — a terminal printed
   // `src/foo.rs:42` and somebody clicked it. Asked for AFTER the tab exists,
   // because the editor is built from the tab and there is nothing to move
-  // until there is one.
-  if (opts.line !== undefined) revealLine(`file:${path}`, opts.line);
+  // until there is one. A caller that named TEXT meant where it stands — a
+  // conversation's edit row opens at what the edit wrote (t-6323 A2; the
+  // extension hands its host the new string as `searchText`).
+  const line = opts.line ?? lineOfText(opened.text, opts.search);
+  if (line !== undefined) revealLine(`file:${path}`, line);
+}
+
+/* The 1-based line where `search` first stands in `text`, or nothing. */
+function lineOfText(text, search) {
+  if (!search) return undefined;
+  const at = text.indexOf(search);
+  return at < 0 ? undefined : text.slice(0, at).split("\n").length;
 }
 
 /* Put a 1-based line of an open document under the reader's eye.
@@ -3347,7 +3357,18 @@ function mdAlign(cell) {
  * 링크와 같은 주인이 설정이 정한 문으로 보낸다), `#`은 이
  * 문서 안의 제목으로, 그 밖의 상대 경로는 문서의 자리에서 재어 편집기로.
  * 알 수 없는 스킴은 문이 아니다 — 주소를 단 글자로만 남는다. */
-function mdLink(label, href) {
+/* Where a link points inside its file — the extension reads a link's tail
+ * the same way (`wg`, 2.1.280): `path:12`, `path:12-20`, `path#L12`,
+ * `path#L12-L20` open at their first line; any other fragment is a heading,
+ * left off the path as it always was. */
+const DOC_HREF_PLACE = /^([^:#]+?)(?:[:#]L?(\d+)(?:-L?\d+)?)?$/;
+
+function docHrefPlace(href) {
+  const hit = DOC_HREF_PLACE.exec(href);
+  return hit?.[2] !== undefined ? { path: hit[1], line: Number(hit[2]) } : { path: href.split("#")[0] };
+}
+
+function mdLink(label, href, line = undefined) {
   const where = mdWhere;
   const node = document.createElement("span");
   node.className = "md-link";
@@ -3367,8 +3388,10 @@ function mdLink(label, href) {
     actsAsButton(node, () => scrollToDocHeading(where?.page ?? null, href.slice(1)));
     return node;
   }
+  const place = docHrefPlace(href);
+  const at = line ?? place.line;
   actsAsButton(node, () =>
-    openPath(resolveDocPath(where?.base ?? "", href.split("#")[0]), { preview: true }),
+    openPath(resolveDocPath(where?.base ?? "", place.path), { preview: true, ...(at !== undefined && { line: at }) }),
   );
   return node;
 }

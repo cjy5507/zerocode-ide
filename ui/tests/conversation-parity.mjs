@@ -16,8 +16,8 @@ export async function openConversation(page, history, { status = "idle", live = 
       const held = window.__CONVERSATION__;
       return {
         found: true, skipped: false, next: held.turns.length, turns: held.turns.slice(args.after ?? 0),
-        status: held.status, asks: [], live: held.live, agent: "claude", protocol: "claude-stream",
-        models: [], modes: [], commands: [], version: "2.1.280",
+        status: held.status, asks: held.asks ?? [], live: held.live, agent: "claude", protocol: "claude-stream",
+        models: [], mode: held.mode ?? null, modes: held.modes ?? [], commands: [], version: "2.1.280",
       };
     };
     window.__ANSWER__.wire_stop = () => null;
@@ -270,3 +270,100 @@ export async function testConversationFolds(browser, origin, ok) {
   }
 }
 
+/* A2 — a path is a door to the file tab. The extension's tool header links
+ * the file a call read or wrote (`fileToolHeader`, 2.1.280): a Read opens at
+ * the lines it read and says them — "(lines a-b)" / "(from line a)" — an
+ * Edit at the text it wrote (`searchText`), a Write at the top; Grep and
+ * Bash name no file and link nothing. Inside an answer, a markdown link
+ * `path:12` / `path#L20-L30` opens at its line (`wg`). Here the door is the
+ * document viewer's (`openPath`), measured from the session's checkout, and
+ * a bare path the answer names keeps its `:line` too. Where a read began is
+ * the CLI's own count: Claude Code's `offset` IS the first line it returned
+ * (measured 2026-09-23: offset 10930 → the result opens `10930→`), zo's is
+ * 0-based (`read_file`'s schema) — a catalog fact, never guessed here. */
+export async function testConversationPaths(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const root = "/tmp/zerocode-window-test";
+    await page.evaluate(() => {
+      const lines = Array.from({ length: 120 }, (_, at) => `line ${at + 1}`);
+      window.__READS__ = [];
+      window.__ANSWER__.read_text_file = (args) => {
+        window.__READS__.push(args.path);
+        const text = args.path.endsWith("edit.rs")
+          ? [...lines.slice(0, 40), "let fixed = true;", ...lines.slice(41)].join("\n")
+          : lines.join("\n");
+        return { text, version: 1, missing: false };
+      };
+    });
+    await openConversation(page, [
+      { role: "tool", text: `Read · ${root}/src/app.rs`, tool: { call_id: "r1", name: "Read", is_error: false,
+        input: JSON.stringify({ file_path: `${root}/src/app.rs`, offset: 11, limit: 50 }, null, 2),
+        file: { path: `${root}/src/app.rs`, offset: 11, limit: 50 } } },
+      { role: "tool_result", text: "    11→line 11", tool: { call_id: "r1", is_error: false } },
+      { role: "tool", text: `Edit · ${root}/src/edit.rs`, tool: { call_id: "e1", name: "Edit", is_error: false,
+        input: "{}", file: { path: `${root}/src/edit.rs`, search: "let fixed = true;" },
+        edits: [{ path: `${root}/src/edit.rs`, lines: [{ kind: "add", text: "let fixed = true;", old: null, new: null }] }] } },
+      { role: "tool_result", text: "updated", tool: { call_id: "e1", is_error: false } },
+      { role: "tool", text: "Grep · needle", tool: { call_id: "g1", name: "Grep", is_error: false, input: "{}" } },
+      { role: "tool_result", text: "3 matches", tool: { call_id: "g1", is_error: false } },
+      { role: "assistant", text: "보세요: [app](src/app.rs:12), [범위](src/lib.rs#L20-L30), 그리고 ui/shell.js:42 에 있습니다." },
+    ]);
+    const seen = await page.evaluate(async () => {
+      const seen = {};
+      const face = document.querySelector("#worker-view");
+      const tools = [...face.querySelectorAll(".helper-turn.is-tool")];
+      const doorOf = (row) => row.querySelector(".helper-tool-arg[role=button]");
+      const openedAt = async (press) => {
+        press();
+        for (let beat = 0; beat < 6; beat += 1) await window.__PAINTED__();
+        const editor = window.__EDITOR__();
+        const tab = tabs.find((one) => one.id === activeTabId);
+        return {
+          tab: tab?.id ?? null,
+          line: editor ? editor.state.doc.lineAt(editor.state.selection.main.head).number : null,
+        };
+      };
+      const [read, edit, grep] = tools;
+      seen.readDoor = doorOf(read) !== null;
+      seen.readWhere = read.querySelector(".helper-tool-where")?.textContent ?? "";
+      seen.wantReadWhere = t("worker.readLines", "({{from}}–{{to}}행)", { from: 11, to: 60 });
+      seen.grepDoor = doorOf(grep) === null && grep.querySelector(".helper-tool-where") === null;
+      const pageTab = activeTabId;
+      seen.read = await openedAt(() => doorOf(read)?.click());
+      setActiveTab(pageTab);
+      await window.__PAINTED__();
+      seen.edit = await openedAt(() => doorOf(edit)?.click());
+      setActiveTab(pageTab);
+      await window.__PAINTED__();
+      const links = [...face.querySelectorAll(".helper-turn.is-assistant .md-link")];
+      const byLabel = (label) => links.find((one) => one.textContent.includes(label));
+      seen.mdLine = await openedAt(() => byLabel("app")?.click());
+      setActiveTab(pageTab);
+      await window.__PAINTED__();
+      seen.mdRange = await openedAt(() => byLabel("범위")?.click());
+      setActiveTab(pageTab);
+      await window.__PAINTED__();
+      seen.bare = await openedAt(() => byLabel("ui/shell.js:42")?.click());
+      seen.reads = window.__READS__;
+      return seen;
+    });
+    ok(
+      "A2: a Read row's file is a door that says the lines it read and opens the file tab at the first of them — the CLI's own count — an Edit row's opens where its new text stands, and a Grep row names no file and links nothing",
+      seen.readDoor && seen.readWhere === seen.wantReadWhere && seen.grepDoor &&
+        seen.read.tab === `file:${root}/src/app.rs` && seen.read.line === 11 &&
+        seen.edit.tab === `file:${root}/src/edit.rs` && seen.edit.line === 41,
+      JSON.stringify(seen),
+    );
+    ok(
+      "A2: inside an answer a markdown link opens its file at its line (`path:12`, `path#L20-L30`), and a bare path the answer names keeps its `:line`",
+      seen.mdLine.tab === `file:${root}/src/app.rs` && seen.mdLine.line === 12 &&
+        seen.mdRange.tab === `file:${root}/src/lib.rs` && seen.mdRange.line === 20 &&
+        seen.bare.tab === `file:${root}/ui/shell.js` && seen.bare.line === 42,
+      JSON.stringify(seen),
+    );
+    ok("A2: the doors raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
