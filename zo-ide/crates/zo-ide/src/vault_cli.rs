@@ -1,6 +1,6 @@
 //! `zo vault …` — the second brain's graph, from outside a session.
 //!
-//! Two verbs. `path`, the question Graphify answers with "how do these two
+//! Three verbs. `path`, the question Graphify answers with "how do these two
 //! concepts connect" (t-5966 G3): the calculator is the window's own,
 //! [`zerocode_core::second_brain_paths::report`] over the same scanner the
 //! knowledge graph and `zerocode vault-lint` read — this door prints the
@@ -39,6 +39,8 @@ use zerocode_core::second_brain_paths::{render_chain, report, PathReport, PATH_L
 pub const USAGE: &str = "\
 zo vault path <from> <to> [--k <n>] [--json] [--vault <dir>] [--cwd <dir>]
 zo vault code [--project <dir>] [--json] [--vault <dir>] [--cwd <dir>]
+zo vault pairs [--limit <n>] [--json] [--vault <dir>] [--cwd <dir>]
+zo vault mark <left> <right> <merge|related|supersedes|contradicts|none> [--vault <dir>]
 
   path: paths between two pages of the second brain, shortest first, each
   hop naming the relation and the road that wrote it (measured · declared ·
@@ -54,12 +56,14 @@ zo vault code [--project <dir>] [--json] [--vault <dir>] [--cwd <dir>]
 ";
 
 /// The verbs, in a table so the parser names the word that is not one.
-const VERBS: [&str; 2] = ["path", "code"];
+const VERBS: [&str; 4] = ["path", "code", "pairs", "mark"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Verb {
     Path,
     Code,
+    Pairs,
+    Mark,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +76,8 @@ struct Request {
     vault: Option<PathBuf>,
     cwd: Option<PathBuf>,
     project: Option<PathBuf>,
+    limit: usize,
+    label: Option<zerocode_core::second_brain_pairs::Suggestion>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +89,8 @@ fn parse(args: &[String]) -> Result<Request, String> {
     let verb = match args.first().map(String::as_str) {
         Some("path") => Verb::Path,
         Some("code") => Verb::Code,
+        Some("pairs") => Verb::Pairs,
+        Some("mark") => Verb::Mark,
         Some("-h" | "--help") | None => return Err(USAGE.to_string()),
         Some(other) => {
             return Err(format!(
@@ -100,6 +108,8 @@ fn parse(args: &[String]) -> Result<Request, String> {
         vault: None,
         cwd: None,
         project: None,
+        limit: zerocode_core::second_brain_pairs::PAIR_LIMIT,
+        label: None,
     };
     let mut named: Vec<String> = Vec::new();
     let mut rest = args[1..].iter();
@@ -125,6 +135,13 @@ fn parse(args: &[String]) -> Result<Request, String> {
                     rest.next().ok_or("--project needs a directory")?,
                 ));
             }
+            "--limit" if verb == Verb::Pairs => {
+                let value = rest.next().ok_or("--limit needs a number")?;
+                request.limit = value.parse().map_err(|_| format!("--limit needs a number, not `{value}`"))?;
+                if request.limit > zerocode_core::second_brain_pairs::PAIR_LIMIT {
+                    return Err(format!("--limit exceeds {}", zerocode_core::second_brain_pairs::PAIR_LIMIT));
+                }
+            }
             "-h" | "--help" => return Err(USAGE.to_string()),
             other if other.starts_with("--") => {
                 return Err(format!("unknown argument `{other}`\n\n{USAGE}"))
@@ -132,10 +149,22 @@ fn parse(args: &[String]) -> Result<Request, String> {
             other => named.push(other.to_string()),
         }
     }
-    if verb == Verb::Code {
+    if matches!(verb, Verb::Code | Verb::Pairs) {
         if let Some(stray) = named.first() {
-            return Err(format!("`zo vault code` takes no pages, got `{stray}`\n\n{USAGE}"));
+            return Err(format!("`zo vault {}` takes no pages, got `{stray}`\n\n{USAGE}", if verb == Verb::Code { "code" } else { "pairs" }));
         }
+        return Ok(request);
+    }
+    if verb == Verb::Mark {
+        if named.len() != 3 {
+            return Err(format!("`zo vault mark` needs two pages and one review decision\n\n{USAGE}"));
+        }
+        request.label = zerocode_core::second_brain_pairs::Suggestion::from_word(&named[2]);
+        if request.label.is_none() {
+            return Err(format!("unknown review decision `{}`\n\n{USAGE}", named[2]));
+        }
+        request.from.clone_from(&named[0]);
+        request.to.clone_from(&named[1]);
         return Ok(request);
     }
     if named.len() != 2 {
@@ -182,6 +211,12 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Report, String> {
     if request.verb == Verb::Code {
         return run_code(&request, &cwd, vault.root());
     }
+    if request.verb == Verb::Pairs {
+        return run_pairs(&request, vault.root());
+    }
+    if request.verb == Verb::Mark {
+        return run_mark(&request, vault.root());
+    }
     let began = Instant::now();
     let graph = GraphCache::new().scan(vault.root(), false);
     let scanned_ms = u64::try_from(began.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -193,6 +228,62 @@ pub fn run(args: &[String], cwd: &Path) -> Result<Report, String> {
             text_receipt(vault.root(), scanned_ms, &graph, &answer)
         },
     })
+}
+
+fn run_mark(request: &Request, vault: &Path) -> Result<Report, String> {
+    let graph = GraphCache::new().scan(vault, false);
+    let actual = request.label.ok_or("missing review decision")?;
+    let now_ms = i64::try_from(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()).unwrap_or(i64::MAX);
+    let label = tools::mark_vault_pair(&graph, vault, &request.from, &request.to, actual, now_ms)?;
+    let text = if request.json {
+        serde_json::to_string_pretty(&label).map_err(|error| error.to_string())?
+    } else {
+        format!("{} ≈ {}: {} · agreed {} · baselineAgreed {}",
+            label.left, label.right, label.actual.word(), label.agreed, label.baseline_agreed)
+    };
+    Ok(Report { text })
+}
+
+fn run_pairs(request: &Request, vault: &Path) -> Result<Report, String> {
+    let graph = GraphCache::new().scan(vault, false);
+    let mut old = zerocode_core::second_brain_pairs::valid_proposals(vault, &graph);
+    let now_ms = i64::try_from(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis()).unwrap_or(i64::MAX);
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()
+        .map_err(|error| error.to_string())?;
+    let report = runtime.block_on(tools::judge_vault_pairs(&graph, vault, request.limit, now_ms));
+    old.extend(tools::recorded_vault_pair_proposals(&graph, vault));
+    for row in &report.rows {
+        if row.outcome != "answered" { continue; }
+        let left = graph.nodes.iter().find(|node| node.id == row.left);
+        let right = graph.nodes.iter().find(|node| node.id == row.right);
+        if let (Some(left), Some(right)) = (left, right) {
+            old.push(zerocode_core::second_brain_pairs::ProposalRecord {
+                left: row.left.clone(), right: row.right.clone(),
+                reason: row.reason.clone(),
+                left_modified_ms: left.modified_ms, right_modified_ms: right.modified_ms,
+                suggestion: row.proposal,
+            });
+        }
+    }
+    if !old.is_empty() && report.mode != "off" {
+        let mut unique = BTreeMap::new();
+        for row in old {
+            unique.insert((row.left.clone(), row.right.clone()), row);
+        }
+        let rows = unique.into_values().collect::<Vec<_>>();
+        zerocode_core::second_brain_pairs::save_proposals(vault, &rows)
+            .map_err(|error| format!("pair proposals could not be saved: {error}"))?;
+    }
+    let text = if request.json {
+        serde_json::to_string_pretty(&report).map_err(|error| error.to_string())?
+    } else {
+        format!("status {} · mode {} · pages {} · candidates {} · asked {} · answered {} · proposals {} · input tokens {} · cost USD {:?} · requests {}",
+            report.status, report.mode, report.pages, report.candidates, report.asked, report.answered,
+            report.proposals, report.input_tokens, report.cost_usd, report.requests)
+    };
+    Ok(Report { text })
 }
 
 /// `zo vault code`: the vault's code mentions over the project's index.
@@ -485,6 +576,20 @@ mod tests {
         assert_eq!(request.project, Some(PathBuf::from("/p")));
         assert!(parse(&args(&["code", "A"])).unwrap_err().starts_with("`zo vault code` takes no pages"));
         assert!(parse(&args(&["path", "A", "B", "--project", "/p"])).unwrap_err().contains("unknown argument"));
+    }
+
+    #[test]
+    fn pair_run_is_bounded_and_a_review_names_an_explicit_outcome() {
+        let pairs = parse(&args(&["pairs", "--limit", "50", "--vault", "/v"])).expect("pair run");
+        assert_eq!(pairs.verb, Verb::Pairs);
+        assert_eq!(pairs.limit, 50);
+        let over = (zerocode_core::second_brain_pairs::PAIR_LIMIT + 1).to_string();
+        assert!(parse(&args(&["pairs", "--limit", &over])).is_err());
+        let review = parse(&args(&["mark", "wiki/a.md", "wiki/b.md", "none"]))
+            .expect("review mark");
+        assert_eq!(review.verb, Verb::Mark);
+        assert_eq!(review.label, Some(zerocode_core::second_brain_pairs::Suggestion::None));
+        assert!(parse(&args(&["mark", "wiki/a.md", "wiki/b.md", "maybe"])).is_err());
     }
 
     /// The pages name a file, a definition, a word and a file the project

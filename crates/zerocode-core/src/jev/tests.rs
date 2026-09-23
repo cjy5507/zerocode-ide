@@ -182,6 +182,7 @@ fn every_use_is_off_until_a_person_says_otherwise() {
 /// use offers it, and the agent's own tool, which has nothing to rise on,
 /// answers the agent.
 ///
+/// `shadow` for new seats whose labels have not been reviewed yet.
 /// `off` only for a seat stopped on its own evidence until it is redesigned
 /// (docs/design/jev-engineering-review-20260923.md §7, t-6342): the patch
 /// review and the window's worker effort. Anywhere else a switch turned on
@@ -189,6 +190,7 @@ fn every_use_is_off_until_a_person_says_otherwise() {
 #[test]
 fn every_use_recommends_one_of_its_own_modes_and_off_only_where_stopped() {
     let stopped = [PATCH_REVIEW.id, STEP_EFFORT.id];
+    let recording = [CLAIM.id, VAULT_PAIRS.id];
     for row in &JEV_USES {
         assert!(
             row.modes.contains(&row.recommended),
@@ -198,6 +200,8 @@ fn every_use_recommends_one_of_its_own_modes_and_off_only_where_stopped() {
         );
         let expected = if stopped.contains(&row.id) {
             JevMode::Off
+        } else if recording.contains(&row.id) {
+            JevMode::Shadow
         } else if row.modes.contains(&JevMode::Auto) {
             JevMode::Auto
         } else {
@@ -522,7 +526,14 @@ fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
         .collect();
     assert_eq!(
         hindsight,
-        vec![RECALL.id, PLACEMENT.id, COMPACTION.id, PATCH_REVIEW.id]
+        vec![
+            RECALL.id,
+            PLACEMENT.id,
+            COMPACTION.id,
+            PATCH_REVIEW.id,
+            CLAIM.id,
+            VAULT_PAIRS.id,
+        ]
     );
     for row in JEV_USES.iter().filter(|row| row.promotes) {
         assert_eq!(
@@ -1407,7 +1418,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 21);
+    assert_eq!(JEV_USES.len(), 22);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1654,9 +1665,25 @@ fn the_patch_review_seat_sends_a_patch_and_its_evidence_and_rises_on_hindsight()
             .applies_with(true)
     );
     assert_eq!(PATCH_REVIEW.mode_in(&json!({})), JevMode::Off);
-    // The patch review remains before the new claim seat.
-    assert_eq!(JEV_USES[JEV_USES.len() - 2], PATCH_REVIEW);
-    assert_eq!(JEV_USES[JEV_USES.len() - 3], CHALLENGER);
+    // The patch review remains before claim and the vault-pair seat.
+    assert_eq!(JEV_USES[JEV_USES.len() - 3], PATCH_REVIEW);
+    assert_eq!(JEV_USES[JEV_USES.len() - 4], CHALLENGER);
+}
+
+#[test]
+fn vault_pairs_are_recorded_for_review_without_automatic_promotion() {
+    let row = jev_use("vault_pairs").expect("vault-pair seat");
+    assert_eq!(row, &VAULT_PAIRS);
+    assert_eq!(row.recommended, JevMode::Shadow);
+    assert_eq!(row.modes, &[JevMode::Off, JevMode::Shadow, JevMode::On]);
+    assert!(!row.promotes);
+    assert_eq!(row.baseline, Baseline::AlwaysSame("none"));
+    assert!(
+        row.sends
+            .iter()
+            .any(|sent| sent.at == "/state/page_a/summary"
+                && sent.cap == Cap::Bytes(VAULT_PAIR_SUMMARY_BYTE_CAP))
+    );
 }
 
 #[test]
@@ -1671,7 +1698,7 @@ fn completion_claims_are_a_recording_hindsight_seat_with_bounded_evidence() {
     assert_eq!(CLAIM.sends[0].cap, Cap::Items(CLAIM_LIMIT));
     assert_eq!(CLAIM.sends[1].cap, Cap::Chars(CLAIM_TEXT_CHAR_CAP));
     assert_eq!(CLAIM.sends[2].cap, Cap::Bytes(CLAIM_EVIDENCE_BYTE_CAP));
-    assert_eq!(JEV_USES.last(), Some(&CLAIM));
+    assert_eq!(JEV_USES.get(JEV_USES.len() - 2), Some(&CLAIM));
 }
 
 /// A request's receipt is the whole SHA-256 of the seat, the rubric version,
@@ -1718,14 +1745,15 @@ fn a_request_digest_vouches_for_the_seat_the_rubric_the_model_and_the_bytes() {
     );
 }
 
-/// Every seat that may rise names the cheapest reader it is held against,
-/// how many times its label must have said no, and the confidence bands its
-/// answers fall in (t-6342); a seat that never rises names none of them.
+/// A seat with comparison labels names the cheapest reader, the negative
+/// sample requirement, and its confidence bands. Vault pairs records those
+/// facts for weekly review even though it never promotes automatically.
 #[test]
 fn every_promoting_row_names_a_baseline_and_an_abstain_band() {
     for row in &JEV_USES {
+        let compared = row.promotes || row.id == VAULT_PAIRS.id;
         assert_eq!(
-            row.promotes,
+            compared,
             row.negatives_wanted.is_some(),
             "{} promotes={} negatives={:?}",
             row.id,
@@ -1733,7 +1761,7 @@ fn every_promoting_row_names_a_baseline_and_an_abstain_band() {
             row.negatives_wanted
         );
         assert_eq!(
-            row.promotes,
+            compared,
             row.confidence_bands.is_some(),
             "{} promotes={} bands={:?}",
             row.id,
@@ -1751,7 +1779,7 @@ fn every_promoting_row_names_a_baseline_and_an_abstain_band() {
         if let Some(wanted) = row.negatives_wanted {
             assert_eq!(wanted, NEGATIVES_WANTED, "{}", row.id);
         }
-        if !row.promotes {
+        if !compared {
             assert_eq!(row.baseline, Baseline::None, "{}", row.id);
         }
         if let Baseline::AlwaysSame(word) = row.baseline {

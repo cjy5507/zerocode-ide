@@ -120,6 +120,7 @@ pub const WEEKLY_REVIEW_SCHEDULE: &str = "0 21 * * 6";
 #[must_use]
 pub fn weekly_review_prompt(vault: &Path) -> String {
     let path = vault.display();
+    let weekly_pair_limit = crate::second_brain_pairs::WEEKLY_PAIR_LIMIT;
     format!(
         "주간 리뷰 — ZeroCode 세컨드 브레인, 자동 실행(cron `{WEEKLY_REVIEW_CRON_MARKER}`).\n\
          볼트: `{path}` (판 환경 변수 `{VAULT_ENV}`). `second-brain` 스킬의 「주간 리뷰」 절차를 따른다.\n\
@@ -127,8 +128,12 @@ pub fn weekly_review_prompt(vault: &Path) -> String {
          1. 이번 주 `{WIKI_LOG_FILE}` 항목을 읽고 들어온 주제와 새 연결을 짧게 요약한다.\n\
          2. 찾는다: 다른 페이지가 링크하지 않는 고아 페이지, 문장으로 밝힌 관계인데 frontmatter 관계 키가 없는 페이지, \
          아직 취합되지 않은 `{RAW_DIR}/` 항목, 이어야 하거나 합쳐야 할 개념, 다음에 읽을 원본. \
-         `just vault-lint`(ZeroCode 저장소 안) 또는 `zerocode vault-lint`가 있으면 그 표로 확인하고, 없으면 `{WIKI_INDEX_FILE}`과 frontmatter를 직접 본다.\n\
-         3. 고치는 것은 색인과 링크뿐이다: `{WIKI_INDEX_FILE}`에 빠진 페이지를 알맞은 주제 목록에 추가하고, 유령 링크를 있는 페이지로 재조준하고, \
+         `zo vault pairs --limit {weekly_pair_limit} --vault <볼트>`로 새 쌍만 기록하고 `zerocode vault-lint`의 merge_candidates 제안을 읽는다. \
+         Jev 제안은 사실 확인 전의 후보일 뿐이다. 명령이 없으면 `{WIKI_INDEX_FILE}`과 frontmatter를 직접 본다.\n\
+         3. 각 검토 쌍의 두 페이지를 읽고 같은 주장인지, 옛 측정이 대체됐는지, 모순인지 판단한다. \
+         채택한 관계는 `zo vault mark <왼쪽> <오른쪽> <merge|related|supersedes|contradicts> --vault <볼트>`로, \
+         기각한 관계는 같은 명령의 마지막 값을 `none`으로 기록한다. 읽지 않은 쌍은 기록하지 않는다. \
+         고치는 것은 색인과 링크뿐이다: `{WIKI_INDEX_FILE}`에 빠진 페이지를 알맞은 주제 목록에 추가하고, 유령 링크를 있는 페이지로 재조준하고, \
          문장이 이미 밝힌 관계를 관계 키(`related`·`implements`·`depends_on`·`supersedes`·`contradicts`)로 적는다. \
          페이지를 새로 만들거나 지우거나 옮기지 않고, `{RAW_DIR}/`는 건드리지 않는다.\n\
          4. `{WIKI_LOG_FILE}` 맨 끝에 정확히 한 줄을 남긴다: `- YYYY-MM-DD HH:MM — 주간 리뷰(cron) → 요약 한 문장과 고친 것`.\n\
@@ -676,6 +681,16 @@ mod tests {
         assert!(prompt.contains(WIKI_LOG_FILE) && prompt.contains(WIKI_INDEX_FILE));
         // Five fields, and a real minute: what zo's registry validates.
         assert_eq!(WEEKLY_REVIEW_SCHEDULE.split_whitespace().count(), 5);
+    }
+
+    #[test]
+    fn weekly_review_reads_pair_proposals_and_records_both_acceptance_and_rejection() {
+        let prompt = weekly_review_prompt(Path::new("/Users/dev/Knowledge"));
+        assert!(prompt.contains("zo vault pairs"));
+        assert!(prompt.contains("채택"));
+        assert!(prompt.contains("기각"));
+        assert!(prompt.contains("supersedes"));
+        assert!(prompt.contains("contradicts"));
     }
 
     #[test]

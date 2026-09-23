@@ -35,6 +35,7 @@ pub mod hedge;
 pub mod memo;
 pub mod noul;
 pub mod promote;
+pub mod questions;
 pub mod recent;
 pub mod shard;
 pub mod summary;
@@ -3023,8 +3024,73 @@ pub const CLAIM: JevUse = JevUse {
     }),
 };
 
+/// The vault pair seat only suggests relations for a person's weekly review.
+/// A proposal is never a page edit, so it has no automatic promotion.
+pub const VAULT_PAIR_SUMMARY_BYTE_CAP: usize = 600;
+pub const VAULT_PAIR_TAG_CAP: usize = 8;
+pub const VAULT_PAIR_DEADLINE_MS: u64 = 1_500;
+pub const VAULT_PAIR_OPPOSITE_FLOOR_PERMILLE: u16 = 700;
+pub const VAULT_PAIR_REPLACES_FLOOR_PERMILLE: u16 = 700;
+pub const VAULT_PAIR_SAME_FLOOR_PERMILLE: u16 = 500;
+pub const VAULT_PAIRS: JevUse = JevUse {
+    id: "vault_pairs",
+    setting: "jevVaultPairs",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On],
+    recommended: JevMode::Shadow,
+    repeat: None,
+    sends: &[
+        Sent {
+            at: "/state/page_a/title",
+            cap: Cap::Bytes(VAULT_PAIR_SUMMARY_BYTE_CAP),
+        },
+        Sent {
+            at: "/state/page_a/summary",
+            cap: Cap::Bytes(VAULT_PAIR_SUMMARY_BYTE_CAP),
+        },
+        Sent {
+            at: "/state/page_a/tags",
+            cap: Cap::Items(VAULT_PAIR_TAG_CAP),
+        },
+        Sent {
+            at: "/state/page_a/tags/*",
+            cap: Cap::Bytes(VAULT_PAIR_SUMMARY_BYTE_CAP),
+        },
+        Sent {
+            at: "/state/page_b/title",
+            cap: Cap::Bytes(VAULT_PAIR_SUMMARY_BYTE_CAP),
+        },
+        Sent {
+            at: "/state/page_b/summary",
+            cap: Cap::Bytes(VAULT_PAIR_SUMMARY_BYTE_CAP),
+        },
+        Sent {
+            at: "/state/page_b/tags",
+            cap: Cap::Items(VAULT_PAIR_TAG_CAP),
+        },
+        Sent {
+            at: "/state/page_b/tags/*",
+            cap: Cap::Bytes(VAULT_PAIR_SUMMARY_BYTE_CAP),
+        },
+    ],
+    ledger: "vault-pairs.jsonl",
+    promotes: false,
+    answer_floor_permille: None,
+    press_floor_permille: None,
+    agreement_floor_permille: None,
+    apply_deadline_ms: Some(VAULT_PAIR_DEADLINE_MS),
+    window_forgives: None,
+    agreement_rows_wanted: None,
+    agreement_kind: AgreementKind::Hindsight,
+    baseline: Baseline::AlwaysSame("none"),
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::on_a_noul(
+        NOUL_UNCERTAIN_TO_PERMILLE,
+        VAULT_PAIR_OPPOSITE_FLOOR_PERMILLE,
+    )),
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 21] = [
+pub static JEV_USES: [JevUse; 22] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -3046,6 +3112,7 @@ pub static JEV_USES: [JevUse; 21] = [
     CHALLENGER,
     PATCH_REVIEW,
     CLAIM,
+    VAULT_PAIRS,
 ];
 
 impl JevUse {

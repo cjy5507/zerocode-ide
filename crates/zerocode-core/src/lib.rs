@@ -84,6 +84,7 @@ pub mod second_brain_export;
 pub mod second_brain_graph;
 pub mod second_brain_lint;
 pub mod second_brain_live;
+pub mod second_brain_pairs;
 pub mod second_brain_paths;
 pub mod second_brain_relate;
 pub mod second_brain_related;

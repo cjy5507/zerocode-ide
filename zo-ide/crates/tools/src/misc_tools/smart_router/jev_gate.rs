@@ -27,7 +27,7 @@ use api::{SystemOneCall, SystemOneClient, SystemOneRequest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use zerocode_core::jev::door::{self, Cleared, JevSettings, Refused};
-use zerocode_core::jev::{count, hedge, JevUse, RECALL, ROUTING, SMART_SETTINGS_KEY};
+use zerocode_core::jev::{count, hedge, JevMode, JevUse, RECALL, ROUTING, SMART_SETTINGS_KEY};
 
 use super::shadow_ledger::{last_shadow_line, last_shadow_lines, shadow_ledger_dir, shadow_ledger_path};
 
@@ -302,11 +302,21 @@ pub async fn send(
 /// filesystem spells it. A file that cannot be read or parsed consents to
 /// nothing.
 fn read_settings(path: &Path) -> JevSettings {
-    let root = std::fs::read_to_string(path)
+    JevSettings::from_root(&read_settings_root(path)).resolved()
+}
+
+fn read_settings_root(path: &Path) -> Value {
+    std::fs::read_to_string(path)
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
-        .unwrap_or(Value::Null);
-    JevSettings::from_root(&root).resolved()
+        .unwrap_or(Value::Null)
+}
+
+/// The person's own mode word for a seat. Project settings never turn on a
+/// judgment of the vault's private pages.
+#[must_use]
+pub fn mode_in_person_settings(row: &JevUse) -> JevMode {
+    row.mode_in(&read_settings_root(&runtime::default_config_home().join(SETTINGS_FILE)))
 }
 
 /// Today's count file under `home`, the day read on this machine's clock.

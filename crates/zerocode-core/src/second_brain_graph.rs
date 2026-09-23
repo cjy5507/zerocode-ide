@@ -420,9 +420,10 @@ impl GraphCache {
         // dedupe lens draws from (t-2931): the recipe prints the pairs the
         // graph shows, by page id. A proposal, not a finding — `settle`
         // leaves `findings` alone.
-        let live_limits = second_brain_live::Limits::default();
-        let pairs = second_brain_live::merge_candidates(&graph, &live_limits);
-        let seated: Vec<second_brain_lint::MergeCandidate> = pairs
+        let pairs =
+            second_brain_live::merge_candidates(&graph, &second_brain_live::Limits::default());
+        let proposals = crate::second_brain_pairs::valid_proposals(root, &graph);
+        let mut seated: Vec<second_brain_lint::MergeCandidate> = pairs
             .iter()
             .filter_map(|pair| {
                 let left = graph.nodes.get(pair.left as usize)?;
@@ -431,9 +432,28 @@ impl GraphCache {
                     left: left.id.clone(),
                     right: right.id.clone(),
                     reason: pair.reason.as_str().to_string(),
+                    proposal: None,
                 })
             })
             .collect();
+        for record in proposals {
+            if record.suggestion == crate::second_brain_pairs::Suggestion::None {
+                continue;
+            }
+            if let Some(existing) = seated.iter_mut().find(|pair| {
+                (pair.left == record.left && pair.right == record.right)
+                    || (pair.left == record.right && pair.right == record.left)
+            }) {
+                existing.proposal = Some(record.suggestion.word().to_string());
+            } else {
+                seated.push(second_brain_lint::MergeCandidate {
+                    left: record.left,
+                    right: record.right,
+                    reason: record.reason,
+                    proposal: Some(record.suggestion.word().to_string()),
+                });
+            }
+        }
         graph.lint = graph.lint.with_merge_candidates(seated);
         graph.orphans = graph.lint.orphans.len();
         graph
