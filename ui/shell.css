@@ -37637,6 +37637,82 @@ h4.knowledge-inspector-head::after {
   color: var(--signal-halt);
 }
 
+/* The strip over the table (t-6243 D1): the week's sums, how many features
+   stand where, and the day's requests against the limit. */
+.jev-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.jev-stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: var(--jev-stat-min);
+  padding: var(--space-2) var(--space-3);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+}
+
+.jev-stat dt {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-stat dd {
+  margin: 0;
+  font-size: var(--jev-stat-size);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A state's count wears the state's tone — the tone its rows wear. */
+.jev-stat[data-status] dt::before {
+  content: "";
+  flex: none;
+  width: var(--jev-tone-dot);
+  height: var(--jev-tone-dot);
+  border-radius: 50%;
+  background: var(--jev-tone);
+}
+
+.jev-view [data-status="applying"] { --jev-tone: var(--jev-tone-applying); }
+.jev-view [data-status="recording"] { --jev-tone: var(--jev-tone-recording); }
+.jev-view [data-status="under"] { --jev-tone: var(--jev-tone-under); }
+.jev-view [data-status="blocked"] { --jev-tone: var(--jev-tone-blocked); }
+.jev-view [data-status="unused"] { --jev-tone: var(--jev-tone-unused); }
+
+/* The row the unused features fold into: one line, one press. */
+.jev-fold-row td {
+  padding: 0;
+}
+
+.jev-fold {
+  width: 100%;
+  padding: var(--space-2);
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--jev-meta-size);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.jev-fold:hover {
+  color: var(--ink-chalk);
+  background: var(--row-hover);
+}
+
 /* The table takes its own height and the view scrolls as one page; a table
    scrolling inside a page that also scrolls is two scrollbars for one list. */
 .jev-table-wrap {

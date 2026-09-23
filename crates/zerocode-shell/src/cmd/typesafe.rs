@@ -1,6 +1,6 @@
 //! TypeSafe (Jev) settings IPC — the key and every seat's switch.
 use crate::api_routers::{self, Keychain, RouterRefusal};
-use crate::typesafe_settings::{self, SeatNumbers, TypeSafeCheck, TypeSafeSettings};
+use crate::typesafe_settings::{self, DayBudget, SeatNumbers, TypeSafeCheck, TypeSafeSettings};
 use tauri::State;
 
 use crate::*;
@@ -33,6 +33,14 @@ pub(crate) fn save_typesafe_key(key: String) -> Result<TypeSafeSettings, RouterR
 pub(crate) fn remove_typesafe_key() -> Result<TypeSafeSettings, RouterRefusal> {
     typesafe_settings::remove_key(&Keychain::of_this_machine())?;
     settings_now()
+}
+
+/// The day's Jev requests from this machine against the person's limit, for
+/// the dashboard's strip (t-6243 D1): a file's length and the settings file,
+/// no keychain and no process, so it rides every refresh.
+#[tauri::command(async)]
+pub(crate) fn jev_day() -> Result<DayBudget, RouterRefusal> {
+    Ok(typesafe_settings::read_day(&settings_path()?))
 }
 
 /// Move one seat's switch — the card sends back the use's own name, so every

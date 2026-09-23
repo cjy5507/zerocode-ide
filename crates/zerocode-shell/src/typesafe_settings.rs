@@ -15,9 +15,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use zerocode_core::jev::door::JevSettings;
 use zerocode_core::jev::{
     CLASSIFIER_SETTING, ClassifierMode, DEFAULT_MODEL, JEV_USES, JevMode, JevUse, MODEL_SETTING,
-    ROUTING, SMART_SETTINGS_KEY, jev_use, model_in, pin_in, pinned_model,
+    ROUTING, SMART_SETTINGS_KEY, count, jev_use, model_in, pin_in, pinned_model,
 };
 use zerocode_harness::{SERVICE_KEYCHAIN_SERVICE_PREFIX, TYPESAFE_API_KEY_ENV};
 
@@ -392,6 +393,36 @@ pub fn read_check(stdout: &[u8]) -> Option<TypeSafeCheck> {
         .find_map(|line| serde_json::from_str::<TypeSafeCheck>(line.trim()).ok())
 }
 
+/// How many Jev requests this machine has sent today, and the most one day
+/// may send (`smart.jev.dailyRequests`) — `None` when the person set no limit.
+/// The dashboard draws it over the table (t-6243 D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayBudget {
+    pub sent: u64,
+    pub most: Option<u64>,
+}
+
+/// The day's budget, read where the door reads it (`systemone::Wire::pass`):
+/// the count file beside the settings file for the day the window counts in,
+/// and the limit by the door's own reader of the settings. A settings file
+/// that does not read limits nothing, as it limits nothing at the door.
+///
+/// Its own read rather than a field of [`TypeSafeSettings`]: the dashboard
+/// asks it on every refresh, and the settings answer reads the keychain,
+/// which is a `security` process each time.
+#[must_use]
+pub fn read_day(path: &Path) -> DayBudget {
+    let root = crate::api_routers::read_zo_settings_root(path).map_or(Value::Null, Value::Object);
+    let sent = path.parent().map_or(0, |home| {
+        count::sent(&count::requests_path(home, &crate::systemone::today()))
+    });
+    DayBudget {
+        sent,
+        most: JevSettings::from_root(&root).daily_requests,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -717,6 +748,7 @@ mod tests {
             "set_jev_model",
             "check_typesafe_key",
             "jev_summary",
+            "jev_day",
         ] {
             assert!(
                 handlers.contains(&format!("{command},")),
@@ -1383,6 +1415,42 @@ mod tests {
                 "the pane no longer words `{token}`"
             );
         }
+    }
+
+    /// The day's count the dashboard draws is the door's own: the file the
+    /// door counts one byte per request into, for the day the window counts
+    /// in, against the limit the door reads — and a day nothing was sent is
+    /// zero, a person who set no limit has none (t-6243 D1).
+    #[test]
+    fn the_day_is_counted_where_the_door_counts_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        assert_eq!(
+            read_day(&path),
+            DayBudget {
+                sent: 0,
+                most: None
+            },
+            "no file and no setting is nothing sent and no limit"
+        );
+        let today = count::requests_path(dir.path(), &crate::systemone::today());
+        for _ in 0..3 {
+            count::count_one(&today).expect("count one");
+        }
+        std::fs::write(
+            &path,
+            r#"{"smart":{"jev":{"dailyRequests":500,"workspaces":["/x"]}}}"#,
+        )
+        .expect("write settings");
+        assert_eq!(
+            read_day(&path),
+            DayBudget {
+                sent: 3,
+                most: Some(500)
+            }
+        );
+        let drawn = serde_json::to_value(read_day(&path)).expect("serializes");
+        assert_eq!(drawn, serde_json::json!({ "sent": 3, "most": 500 }));
     }
 
     /// The summary flag the window passes is one zo's CLI documents.

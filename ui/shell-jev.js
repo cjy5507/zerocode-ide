@@ -63,6 +63,32 @@ let jevNumbersError = null;
 let jevRecentSeat = null;
 let jevSettleTimer = null;
 const jevViewsWired = new WeakSet();
+/* The day's requests from this machine against the person's limit
+ * (`jev_day`), `null` until asked or from a window too old to answer. */
+let jevDay = null;
+
+/* Whether the features nothing asked all week stand unfolded under their
+ * row — the person's last choice, kept in this browser (t-6243 D1). A store
+ * that cannot be read or written is a fold that starts closed. */
+const JEV_UNUSED_OPEN_KEY = "zerocode.jev-unused-open.v1";
+
+function jevReadUnusedOpen() {
+  try {
+    return localStorage.getItem(JEV_UNUSED_OPEN_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function jevRememberUnusedOpen(open) {
+  try {
+    localStorage.setItem(JEV_UNUSED_OPEN_KEY, open ? "1" : "0");
+  } catch {
+    // Unsaved, the fold is only closed again on the next start.
+  }
+}
+
+let jevUnusedOpen = jevReadUnusedOpen();
 
 function jevViewsShowing() {
   return tabs.some((tab) => tab.kind === "jev" && stillShowing(tab));
@@ -86,7 +112,12 @@ async function loadJevNumbers({ recent = jevViewsShowing() } = {}) {
     const began = performance.now();
     let held = null;
     try {
-      held = await invoke("jev_summary", recent ? { recent: JEV_RECENT_ROWS } : {});
+      [held, jevDay] = await Promise.all([
+        invoke("jev_summary", recent ? { recent: JEV_RECENT_ROWS } : {}),
+        // The dashboard's strip reads the day's count beside the ledgers: a
+        // file's length, so it rides every refresh; the card draws none.
+        recent ? invoke("jev_day").catch(() => null) : jevDay,
+      ]);
       jevNumbersError = null;
     } catch (error) {
       held = null;
@@ -121,21 +152,24 @@ function moveJevSeat(seat, mode, said) {
   return runTypeSafe(() => invoke("set_jev_mode", { use: seat, mode }), said);
 }
 
-/* The word for the line a judgment turned on. The tokens are the core's
- * (`promote::Line::token`); what each one MEANS to a person is this page's,
- * said once here rather than in seven rows of markup. */
+/* The line a judgment turned on, by the core's token
+ * (`promote::Line::token`): what each one MEANS to a person is this page's,
+ * said once here. A line that `wants` more samples holds a seat that has not
+ * been measured yet; every other line holds one measured under its bar. */
+const JEV_LINES = Object.freeze({
+  too_few_rows: { key: "settings.typesafe.lineTooFewRows", word: "판단 기록이 더 쌓여야 합니다", wants: "rows" },
+  answered: { key: "settings.typesafe.lineAnswered", word: "응답률이 기준에 못 미칩니다" },
+  latency: { key: "settings.typesafe.lineLatency", word: "응답이 너무 느립니다" },
+  schema: { key: "settings.typesafe.lineSchema", word: "형식이 잘못된 응답이 있었습니다" },
+  too_few_compared: { key: "settings.typesafe.lineTooFewCompared", word: "정확도를 비교할 표본이 더 필요합니다", wants: "compared" },
+  agreement: { key: "settings.typesafe.lineAgreement", word: "정확도가 기준에 못 미칩니다" },
+  labels: { key: "settings.typesafe.lineLabels", word: "사람의 평가에서 기존 방식이 더 나았습니다" },
+  fallbacks: { key: "settings.typesafe.lineFallbacks", word: "연속으로 기존 방식으로 되돌아갔습니다" },
+});
+
 function jevLineWords(line) {
-  switch (line) {
-    case "too_few_rows": return t("settings.typesafe.lineTooFewRows", "판단 기록이 더 쌓여야 합니다");
-    case "answered": return t("settings.typesafe.lineAnswered", "응답률이 기준에 못 미칩니다");
-    case "latency": return t("settings.typesafe.lineLatency", "응답이 너무 느립니다");
-    case "schema": return t("settings.typesafe.lineSchema", "형식이 잘못된 응답이 있었습니다");
-    case "too_few_compared": return t("settings.typesafe.lineTooFewCompared", "정확도를 비교할 표본이 더 필요합니다");
-    case "agreement": return t("settings.typesafe.lineAgreement", "정확도가 기준에 못 미칩니다");
-    case "labels": return t("settings.typesafe.lineLabels", "사람의 평가에서 기존 방식이 더 나았습니다");
-    case "fallbacks": return t("settings.typesafe.lineFallbacks", "연속으로 기존 방식으로 되돌아갔습니다");
-    default: return "";
-  }
+  const said = JEV_LINES[line];
+  return said ? t(said.key, said.word) : "";
 }
 
 /* One seat's numbers as words — what it did today, how it answered over the
@@ -239,6 +273,15 @@ function jevText(key, fallback, tag = "span", className = "") {
   return node;
 }
 
+/* A tip whose words are a catalog key's — the attribute twin of `jevText`:
+ * `applyLocale` re-reads it from the key when the language moves. */
+function jevHint(key, fallback, node) {
+  node.dataset.i18nTitle = key;
+  node.dataset.i18nSourcedatatip = fallback;
+  node.dataset.tip = t(key, fallback);
+  return node;
+}
+
 function jevNode(tag, className, ...children) {
   const node = document.createElement(tag);
   if (className) node.className = className;
@@ -271,6 +314,54 @@ const JEV_TRENDS = Object.freeze([
   { line: "p50", key: "jev.trend.p50", word: "응답 시간", read: (day) => day.tally.p50Ms ?? null, unit: "ms" },
 ]);
 
+/* Where a feature stands, one word per state: the strip over the table
+ * counts them and each row wears its own (t-6243 D1/D2), in the tone the
+ * stylesheet gives the state (`--jev-tone-*`). Read off the numbers zo
+ * answered, never off a mode word (`jevSeatStatus`). */
+const JEV_STATUSES = Object.freeze([
+  { status: "applying", key: "jev.status.applying", word: "적용 중" },
+  { status: "recording", key: "jev.status.recording", word: "기록 중" },
+  { status: "under", key: "jev.status.under", word: "기준 미달" },
+  { status: "blocked", key: "jev.status.blocked", word: "키·동의 필요" },
+  { status: "unused", key: "jev.status.unused", word: "미사용" },
+]);
+
+/* The strip's sums over every feature, before the states' counts. */
+const JEV_TOTALS = Object.freeze([
+  { stat: "today", key: "jev.stat.today", word: "오늘 요청" },
+  { stat: "week", key: "jev.stat.week", word: "7일 요청" },
+  { stat: "cost", key: "jev.stat.cost", word: "7일 비용" },
+]);
+
+/* The outcome tokens only a person can clear, and what clears them: the
+ * door's `no_key` and zo's `unauthorized` are the key, the door's
+ * `not_consented` the folder's consent. */
+const JEV_FIXES = Object.freeze({ no_key: "key", unauthorized: "key", not_consented: "consent" });
+
+/* Where `held` stands. Nothing asked all week is unused; a feature the door
+ * refused for a key or for consent at least as often as anything answered
+ * waits on a person first; then it acts, or it was measured under a line of
+ * its own, or it is still recording. */
+function jevSeatStatus(held) {
+  if (held.week.rows === 0) return "unused";
+  const refused = (held.week.failures ?? [])
+    .reduce((sum, one) => sum + (JEV_FIXES[one.token] ? one.rows : 0), 0);
+  if (refused > 0 && refused >= held.week.answered) return "blocked";
+  if (held.applies) return "applying";
+  if (held.verdict?.line && !JEV_LINES[held.verdict.line]?.wants) return "under";
+  return "recording";
+}
+
+/* The busiest first: today's requests, then the week's, then the card's own
+ * order — the order a person reading "what is running" wants, and the one
+ * the card keeps when nothing tells two features apart. */
+function jevActivityOrder(ids, heldOf) {
+  const at = new Map(ids.map((id, index) => [id, index]));
+  const count = (id, window) => heldOf.get(id)?.[window].rows ?? 0;
+  return [...ids].sort((a, b) =>
+    count(b, "today") - count(a, "today") || count(b, "week") - count(a, "week") || at.get(a) - at.get(b));
+}
+
 function buildJevView() {
   const root = document.createElement("section");
   root.className = "file-view jev-view";
@@ -302,17 +393,35 @@ function buildJevView() {
   error.hidden = true;
   root.append(status, error);
 
+  // The strip over the table: the sums, how many features stand where, and
+  // the day's requests against the limit (t-6243 D1).
+  const summary = document.createElement("dl");
+  summary.className = "jev-summary";
+  summary.dataset.i18nAria = "jev.summary";
+  summary.setAttribute("aria-label", t("jev.summary", "요약"));
+  const stat = (name, label) => {
+    const holder = jevNode("div", "jev-stat", label, document.createElement("dd"));
+    holder.dataset.jevStat = name;
+    return holder;
+  };
+  for (const total of JEV_TOTALS) summary.append(stat(total.stat, jevText(total.key, total.word, "dt")));
+  for (const state of JEV_STATUSES) {
+    if (state.status === "unused") continue;
+    const holder = stat(state.status, jevText(state.key, state.word, "dt"));
+    holder.dataset.status = state.status;
+    summary.append(holder);
+  }
+  const day = stat("day", jevText("jev.stat.day", "하루 한도", "dt"));
+  jevHint("jev.stat.dayTip", "이 컴퓨터가 오늘 Jev에 보낸 요청 수와 하루 한도(smart.jev.dailyRequests)입니다.", day);
+  day.hidden = true;
+  summary.append(day);
+  root.append(summary);
+
   const head = document.createElement("tr");
   for (const column of JEV_COLUMNS) {
     const cell = jevText(column.key, column.word, "th", `jev-col-${column.cell}`);
     cell.scope = "col";
-    if (column.tipKey) {
-      // `applyLocale` re-reads the tip from its key when the language moves,
-      // the way it re-reads the head's words.
-      cell.dataset.i18nTitle = column.tipKey;
-      cell.dataset.i18nSourcedatatip = column.tip;
-      cell.dataset.tip = t(column.tipKey, column.tip);
-    }
+    if (column.tipKey) jevHint(column.tipKey, column.tip, cell);
     head.append(cell);
   }
   const body = document.createElement("tbody");
@@ -597,98 +706,180 @@ function jevAgreementWords(held) {
   return `${jevCount(agreement.agreed)}/${jevCount(agreement.compared)} (${jevPercent(agreement.lowerBound)})`;
 }
 
-/* Draw the table and the recent list from what is in hand: the switches
- * from the settings answer, the numbers from zo's, in the use table's
- * order. Rows are keyed by seat and updated in place, so a repaint never
- * moves a switch somebody is using. */
+/* Draw the strip, the table and the recent list from what is in hand: the
+ * switches from the settings answer, the numbers from zo's. The features in
+ * use lead, busiest first; the ones nothing asked all week fold into one row
+ * after them, unfolded when the person last left them so (t-6243 D1). Rows
+ * are keyed by feature and updated in place, and the table is not reordered
+ * while something in it has focus, so a repaint never moves a switch
+ * somebody is using. */
 function paintJevView(view) {
   wireJevView(view);
   const switches = typesafeState?.switches ?? [];
   const numbers = jevNumbers ?? [];
   const order = switches.length > 0 ? switches.map((row) => row.id) : numbers.map((row) => row.id);
+  const heldOf = new Map(numbers.map((one) => [one.id, one]));
+  // A feature zo did not count stands with its dashes, never folded: only a
+  // count of nothing says a feature was not used.
+  const unused = order.filter((id) => heldOf.get(id)?.week.rows === 0);
+  const inUse = jevActivityOrder(order.filter((id) => !unused.includes(id)), heldOf);
   const body = view.querySelector("[data-jev-rows]");
-  const seen = new Set();
-  for (const id of order) {
-    seen.add(id);
-    let row = body.querySelector(`[data-jev-dash-row="${id}"]`);
-    if (!row) {
-      row = document.createElement("tr");
-      row.dataset.jevDashRow = id;
-      for (const column of JEV_COLUMNS) {
-        const cell = document.createElement("td");
-        cell.dataset.jevCell = column.cell;
-        if (column.cell === "mode") {
-          const select = document.createElement("select");
-          select.className = "settings-input jev-mode";
-          select.dataset.jevDashSeat = id;
-          cell.append(select);
-        }
-        row.append(cell);
-      }
-      body.append(row);
-    }
-    const cell = (name) => row.querySelector(`[data-jev-cell="${name}"]`);
-    cell("seat").textContent = jevSeatName(id);
-    const held = numbers.find((one) => one.id === id) ?? null;
-    const standing = switches.find((one) => one.id === id) ?? null;
-    const select = cell("mode").querySelector("select");
-    if (standing) {
-      paintJevModes(select, standing.modes ?? []);
-      select.value = standing.mode;
-      select.disabled = typesafeBusy;
-      select.hidden = false;
-      select.setAttribute("aria-label", `${t("jev.col.mode", "설정")} · ${jevSeatName(id)}`);
-    } else {
-      select.hidden = true;
-    }
-    const byHand = standing ? Boolean(jevSeatChoice(typesafeState, id)?.applies) : false;
-    const applying = held ? held.applies : byHand;
-    row.classList.toggle("is-applying", Boolean(applying));
-    row.classList.toggle("is-quiet", !held || held.week.rows === 0);
-    if (!held) {
-      for (const column of JEV_COLUMNS) {
-        if (column.cell === "seat" || column.cell === "mode") continue;
-        cell(column.cell).textContent = "—";
-      }
-      continue;
-    }
-    // Facts inside a cell wear their own names, so a reader (or a test)
-    // finds "today" whether or not it shares a column with "week".
-    const fact = (name, text, className = "") => {
-      const node = jevNode("span", className);
-      node.dataset.jevFact = name;
-      node.textContent = text;
-      return node;
-    };
-    const rows = cell("rows");
-    rows.replaceChildren(
-      fact("today", jevCount(held.today.rows), "jev-fact-strong"), document.createTextNode(" · "),
-      fact("week", jevCount(held.week.rows)));
-    if (held.week.refused > 0) {
-      rows.append(document.createElement("br"), fact("refusals", jevRefusalWords(held.week), "jev-fact-mist"));
-    }
-    const share = cell("answered");
-    share.replaceChildren();
-    if (held.week.rows === 0) {
-      share.textContent = "—";
-    } else {
-      share.append(fact("share", jevPercent(held.week.answeredShare), "jev-share"), document.createTextNode(" "),
-        fact("bound", t("jev.bound", "신뢰 하한 {{pct}}", { pct: jevPercent(held.week.answeredLowerBound) }), "jev-bound"));
-    }
-    cell("latency").textContent = jevLatencyWords(held.week);
-    const acted = cell("acted");
-    acted.replaceChildren(
-      fact("applied", held.week.rows === 0 ? "—" : jevCount(held.week.applied ?? 0)), document.createTextNode(" · "),
-      fact("agreement", jevAgreementWords(held)));
-    cell("cost").textContent = jevCost(held.costUsd);
-    cell("trend").replaceChildren(jevTrendCell(held));
-    cell("why").replaceChildren(jevWhyCell(held, byHand));
+  const drawn = [];
+  for (const id of [...inUse, ...(jevUnusedOpen ? unused : [])]) {
+    const row = jevDashRow(body, id);
+    paintJevRow(row, id, heldOf.get(id) ?? null, switches.find((one) => one.id === id) ?? null);
+    drawn.push(row);
   }
-  for (const row of body.querySelectorAll("[data-jev-dash-row]")) {
-    if (!seen.has(row.dataset.jevDashRow)) row.remove();
+  const fold = unused.length > 0 ? jevFoldRow(body, unused.length) : null;
+  if (fold) drawn.splice(inUse.length, 0, fold);
+  for (const row of body.querySelectorAll("[data-jev-dash-row], [data-jev-fold]")) {
+    if (!drawn.includes(row)) row.remove();
   }
+  jevArrange(body, drawn);
+  paintJevSummary(view, order, heldOf);
   paintJevFreshness(view);
   paintJevRecent(view, order);
+}
+
+/* One feature's row, built once: a cell per column, the mode's switch in
+ * its own. */
+function jevDashRow(body, id) {
+  let row = body.querySelector(`[data-jev-dash-row="${id}"]`);
+  if (row) return row;
+  row = document.createElement("tr");
+  row.dataset.jevDashRow = id;
+  for (const column of JEV_COLUMNS) {
+    const cell = document.createElement("td");
+    cell.dataset.jevCell = column.cell;
+    if (column.cell === "mode") {
+      const select = document.createElement("select");
+      select.className = "settings-input jev-mode";
+      select.dataset.jevDashSeat = id;
+      cell.append(select);
+    }
+    row.append(cell);
+  }
+  body.append(row);
+  return row;
+}
+
+function paintJevRow(row, id, held, standing) {
+  const cell = (name) => row.querySelector(`[data-jev-cell="${name}"]`);
+  cell("seat").textContent = jevSeatName(id);
+  const select = cell("mode").querySelector("select");
+  if (standing) {
+    paintJevModes(select, standing.modes ?? []);
+    select.value = standing.mode;
+    select.disabled = typesafeBusy;
+    select.hidden = false;
+    select.setAttribute("aria-label", `${t("jev.col.mode", "설정")} · ${jevSeatName(id)}`);
+  } else {
+    select.hidden = true;
+  }
+  const byHand = standing ? Boolean(jevSeatChoice(typesafeState, id)?.applies) : false;
+  const applying = held ? held.applies : byHand;
+  row.classList.toggle("is-applying", Boolean(applying));
+  row.classList.toggle("is-quiet", !held || held.week.rows === 0);
+  if (!held) {
+    for (const column of JEV_COLUMNS) {
+      if (column.cell === "seat" || column.cell === "mode") continue;
+      cell(column.cell).textContent = "—";
+    }
+    return;
+  }
+  // Facts inside a cell wear their own names, so a reader (or a test)
+  // finds "today" whether or not it shares a column with "week".
+  const fact = (name, text, className = "") => {
+    const node = jevNode("span", className);
+    node.dataset.jevFact = name;
+    node.textContent = text;
+    return node;
+  };
+  const rows = cell("rows");
+  rows.replaceChildren(
+    fact("today", jevCount(held.today.rows), "jev-fact-strong"), document.createTextNode(" · "),
+    fact("week", jevCount(held.week.rows)));
+  if (held.week.refused > 0) {
+    rows.append(document.createElement("br"), fact("refusals", jevRefusalWords(held.week), "jev-fact-mist"));
+  }
+  const share = cell("answered");
+  share.replaceChildren();
+  if (held.week.rows === 0) {
+    share.textContent = "—";
+  } else {
+    share.append(fact("share", jevPercent(held.week.answeredShare), "jev-share"), document.createTextNode(" "),
+      fact("bound", t("jev.bound", "신뢰 하한 {{pct}}", { pct: jevPercent(held.week.answeredLowerBound) }), "jev-bound"));
+  }
+  cell("latency").textContent = jevLatencyWords(held.week);
+  const acted = cell("acted");
+  acted.replaceChildren(
+    fact("applied", held.week.rows === 0 ? "—" : jevCount(held.week.applied ?? 0)), document.createTextNode(" · "),
+    fact("agreement", jevAgreementWords(held)));
+  cell("cost").textContent = jevCost(held.costUsd);
+  cell("trend").replaceChildren(jevTrendCell(held));
+  cell("why").replaceChildren(jevWhyCell(held, byHand));
+}
+
+/* The row the unused features fold into: one press shows or hides them all,
+ * and the choice is kept for the next open. */
+function jevFoldRow(body, count) {
+  let row = body.querySelector("[data-jev-fold]");
+  if (!row) {
+    const press = document.createElement("button");
+    press.type = "button";
+    press.className = "jev-fold";
+    press.addEventListener("click", () => {
+      jevUnusedOpen = !jevUnusedOpen;
+      jevRememberUnusedOpen(jevUnusedOpen);
+      paintJevViews();
+    });
+    const cell = jevNode("td", "", press);
+    cell.colSpan = JEV_COLUMNS.length;
+    row = jevNode("tr", "jev-fold-row", cell);
+    row.dataset.jevFold = "";
+    body.append(row);
+  }
+  const press = row.querySelector(".jev-fold");
+  press.setAttribute("aria-expanded", String(jevUnusedOpen));
+  press.textContent = jevUnusedOpen
+    ? t("jev.unused.hide", "사용 안 한 기능 {{count}}개 접기", { count: jevCount(count) })
+    : t("jev.unused.show", "사용 안 한 기능 {{count}}개 보기", { count: jevCount(count) });
+  return row;
+}
+
+/* Put the table's rows in `drawn`'s order, moving only the rows out of place
+ * — and none while focus is inside the table, where moving a row would take
+ * the focus with it; the next paint puts them right. */
+function jevArrange(body, drawn) {
+  if (body.contains(document.activeElement)) return;
+  drawn.forEach((row, at) => {
+    if (body.children[at] !== row) body.insertBefore(row, body.children[at] ?? null);
+  });
+}
+
+/* The strip: the sums over every feature the card names, how many stand in
+ * each state, and the day's requests against the limit. */
+function paintJevSummary(view, order, heldOf) {
+  const said = (name, text) => {
+    const holder = view.querySelector(`[data-jev-stat="${name}"]`);
+    holder.querySelector("dd").textContent = text;
+    return holder;
+  };
+  const counted = order.map((id) => heldOf.get(id)).filter(Boolean);
+  const sum = (read) => counted.reduce((total, held) => total + read(held), 0);
+  said("today", counted.length ? jevCount(sum((held) => held.today.rows)) : "—");
+  said("week", counted.length ? jevCount(sum((held) => held.week.rows)) : "—");
+  const costs = counted.filter((held) => held.costUsd !== null && held.costUsd !== undefined);
+  said("cost", costs.length ? jevCost(costs.reduce((total, held) => total + held.costUsd, 0)) : "—");
+  const standing = counted.map(jevSeatStatus);
+  for (const state of JEV_STATUSES) {
+    if (state.status === "unused") continue;
+    said(state.status, counted.length ? jevCount(standing.filter((one) => one === state.status).length) : "—");
+  }
+  const day = said("day", !jevDay ? "" : jevDay.most === null || jevDay.most === undefined
+    ? t("jev.stat.dayOpen", "{{sent}} / 제한 없음", { sent: jevCount(jevDay.sent) })
+    : `${jevCount(jevDay.sent)} / ${jevCount(jevDay.most)}`);
+  day.hidden = !jevDay;
 }
 
 function paintJevFreshness(view) {

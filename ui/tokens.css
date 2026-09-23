@@ -2555,9 +2555,21 @@
   --jev-spark-height: 18px;
   --jev-cell-min: 56px;
   --jev-why-width: 180px;
-  --jev-mode-width: 9em;
+  /* Wide enough for the longest mode word, 자동 (근거가 쌓이면 적용), whole. */
+  --jev-mode-width: 15em;
   --jev-trend: var(--lane-1);
   --jev-dot: var(--ink-chalk);
+  /* The strip over the table (t-6243 D1). */
+  --jev-stat-size: 18px;
+  --jev-stat-min: 96px;
+  /* Where a feature stands, one tone per state — the strip's counts and the
+     rows' chips wear the same one (t-6243 D1/D2). */
+  --jev-tone-dot: 8px;
+  --jev-tone-applying: var(--signal-ready);
+  --jev-tone-recording: var(--ink-mist);
+  --jev-tone-under: var(--signal-wait-ink);
+  --jev-tone-blocked: var(--signal-halt-ink);
+  --jev-tone-unused: var(--ink-mist);
 }
 
 /* Skill library geometry; colours inherit the semantic palette in both themes. */
