@@ -2551,12 +2551,20 @@
   --jev-meta-size: 12px;
   --jev-body-size: 13px;
   --jev-line: 1px;
-  --jev-spark-width: 96px;
+  --jev-spark-width: 72px;
   --jev-spark-height: 24px;
   --jev-cell-min: 56px;
-  --jev-status-width: 200px;
-  /* Wide enough for the longest mode word, 자동 (근거가 쌓이면 적용), whole. */
-  --jev-mode-width: 17em;
+  /* A state's chip and bar on one line, its sentence on one or two: a row
+     stays three lines tall and the table fits a 1080p stage (t-6243 D2). */
+  --jev-status-width: 240px;
+  /* A feature's name in at most two lines. */
+  --jev-name-min: 96px;
+  /* The narrowest a state's sentence may run beside its chip before it
+     starts a line of its own. */
+  --jev-reason-min: 10em;
+  /* Wide enough for the longest mode word, 자동 (근거가 쌓이면 적용), whole,
+     at the dashboard's meta size. */
+  --jev-mode-width: 16.5em;
   --jev-trend: var(--lane-1);
   /* The week's second line, accuracy: the ink and a dash, so it reads apart
      from the response rate in both treatments (the light one draws every

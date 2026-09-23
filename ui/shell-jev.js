@@ -681,8 +681,8 @@ function jevTrendCell(held) {
  * that wants them: the judged window while it fills, then the compared marks.
  * Keyed by `JEV_LINES`' `wants`. */
 const JEV_SAMPLES = Object.freeze({
-  rows: { key: "jev.window", word: "판정 표본 {{rows}}/{{wanted}}건" },
-  compared: { key: "jev.compared", word: "비교 표본 {{rows}}/{{wanted}}건" },
+  rows: { key: "jev.window", word: "판정 표본 {{rows}}/{{wanted}}건", owedKey: "jev.owed.rows", owed: "판정까지 {{count}}건" },
+  compared: { key: "jev.compared", word: "비교 표본 {{rows}}/{{wanted}}건", owedKey: "jev.owed.compared", owed: "정확도 판정까지 {{count}}건" },
 });
 
 /* The version the table's judgments come from: the pin when the person
@@ -707,20 +707,22 @@ function paintJevCaption(view, numbers) {
 }
 
 /* A feature's state as a person reads it (t-6243 D2): one chip in the
- * state's tone, one sentence of why, the samples still owed while the judge
- * wants some, and a version only when it is not the one over the table —
- * each said once. */
+ * state's tone and, from its line on, the samples still owed while the judge
+ * wants some and one sentence of why, unless the bar already is the why; and
+ * a version only when it is not the one over the table — each said once, in
+ * as few lines as a row can hold. */
 function jevStatusCell(held, choice, standing, head) {
   const status = jevSeatStatus(held, choice);
   const state = JEV_STATUSES.find((one) => one.status === status);
   const chip = jevNode("span", "jev-chip");
   chip.dataset.status = status;
   chip.textContent = t(state.key, state.word);
-  const cell = jevNode("div", "jev-status", chip);
-  const reason = jevStatusReason(held, status, choice);
-  if (reason) cell.append(jevNode("p", "jev-status-reason", document.createTextNode(reason)));
   const owed = jevSamplesOwed(held, standing);
-  if (owed) cell.append(owed);
+  const lead = jevNode("div", "jev-status-lead", chip);
+  if (owed) lead.append(owed);
+  const reason = jevStatusReason(held, status, choice, owed !== null);
+  if (reason) lead.append(jevNode("p", "jev-status-reason", document.createTextNode(reason)));
+  const cell = jevNode("div", "jev-status", lead);
   const other = held.model && held.model !== head
     ? t("settings.typesafe.seatVersion", "모델 {{model}}", { model: held.model }) : "";
   for (const fact of [other, jevCutWords(held)]) {
@@ -731,8 +733,9 @@ function jevStatusCell(held, choice, standing, head) {
 
 /* The one sentence under the chip: what keeps the feature where it is. A
  * switch a person turned on applies whatever the judge says, so its sentence
- * says whose doing that is and what the judge would have said. */
-function jevStatusReason(held, status, choice) {
+ * says whose doing that is and what the judge would have said — except where
+ * the samples still owed are `counting`: the bar says that, once. */
+function jevStatusReason(held, status, choice, counting) {
   const because = held.verdict ? jevLineWords(held.verdict.line) : "";
   if (status === "unused") {
     return held.week.rows > 0 ? t("jev.switchedOff", "꺼져 있어 새 판단을 요청하지 않습니다") : "";
@@ -741,11 +744,12 @@ function jevStatusReason(held, status, choice) {
   if (status === "applying") {
     if (!choice?.applies) return t("jev.risen", "근거가 충분해 자동으로 켜졌습니다");
     if (!held.verdict) return t("jev.byHandNoJudge", "직접 켰습니다 — 이 기능은 자동 적용 대상이 아닙니다");
+    if (counting) return t("jev.byHandShort", "직접 켰습니다");
     return because
       ? t("jev.byHand", "직접 켰습니다 — {{because}}", { because })
       : t("jev.byHandClear", "직접 켰습니다 — 자동 적용 기준도 넘었습니다");
   }
-  if (because) return because;
+  if (because) return counting ? "" : because;
   if (!held.verdict) return t("jev.neverRises", "자동 적용 대상이 아니라 기록만 합니다");
   // The judge found nothing to hold it on: it acts at the next judgment
   // under `auto`, and never under a switch that only records.
@@ -767,7 +771,8 @@ function jevBlockedWords(held) {
 }
 
 /* The samples a feature still owes before the judge can speak, as a bar and
- * one number: the judged window while it fills, then the compared marks.
+ * how many remain until the check: the judged window while it fills, then the
+ * compared marks.
  * Nothing once the judge has what it wants — the sentence then says what it
  * found. The countdown is the core's while the window fills
  * (`rowsToNextJudgment`), so the bar and the judgment land on the same row. */
@@ -790,7 +795,7 @@ function jevSamplesOwed(held, standing) {
   bar.dataset.tip = said;
   bar.style.setProperty("--jev-filled", String(Math.min(1, have / want)));
   const label = jevNode("span", "jev-progress-label");
-  label.textContent = t("jev.needMore", "{{count}}건 더 필요", { count: jevCount(owed) });
+  label.textContent = t(sample.owedKey, sample.owed, { count: jevCount(owed) });
   return jevNode("div", "jev-owed", bar, label);
 }
 

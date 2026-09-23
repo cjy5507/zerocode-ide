@@ -295,6 +295,9 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
         return {
           faults: window.__JEV_TEXT_FAULTS__(view),
           oneScreen: view.scrollHeight <= view.clientHeight + 1,
+          // The rows in use stay short: a status line, a bar and a fact at
+          // most, so a 1080p screen holds them (t-6243 D1/D2).
+          rowHeights: [...view.querySelectorAll("[data-jev-dash-row]")].map((row) => Math.round(row.getBoundingClientRect().height)),
           tableFits: (() => { const wrap = view.querySelector(".jev-table-wrap"); return wrap.scrollWidth <= wrap.clientWidth + 1; })(),
           rows: view.querySelectorAll("[data-jev-dash-row]").length,
           // The features nothing asked all week fold into one row (t-6243
@@ -482,10 +485,21 @@ export async function testJevDashboard(browser, origin, ok) {
       return {
         rows: rows.length,
         inside: rows.filter((row) => { const rect = row.getBoundingClientRect(); return rect.top >= box.top - 1 && rect.bottom <= bottom + 1; }).length,
+        // Room under the first row, and the tallest row: nine rows of that
+        // height must fit — this machine's features in use on 2026-09-23.
+        room: Math.round(bottom - rows[0].getBoundingClientRect().top),
+        tallest: Math.round(Math.max(...rows.map((row) => row.getBoundingClientRect().height))),
+        // Which cell holds the tallest row up, for the reader of a failure.
+        tallestCells: (() => {
+          const row = rows.reduce((a, b) => (b.getBoundingClientRect().height > a.getBoundingClientRect().height ? b : a));
+          return [row.dataset.jevDashRow, ...[...row.querySelectorAll("td")]
+            .map((td) => `${td.dataset.jevCell}:${Math.round(td.firstElementChild?.getBoundingClientRect().height ?? td.getBoundingClientRect().height)}`)];
+        })(),
       };
     });
-    ok("a 1080p screen holds every feature in use before any scroll",
-      firstScreen.rows === 6 && firstScreen.inside === 6, JSON.stringify(firstScreen));
+    ok("a 1080p screen holds every feature in use before any scroll, and room for nine",
+      firstScreen.rows === 6 && firstScreen.inside === 6 && firstScreen.tallest * 9 <= firstScreen.room,
+      JSON.stringify(firstScreen));
     ok("from the click to the drawn table is under the design's 200 ms with the backend answering at once",
       opened.ms < 200, `${opened.ms.toFixed(1)} ms`);
     ok("a counted seat's numbers stand in its cells",
@@ -496,13 +510,14 @@ export async function testJevDashboard(browser, origin, ok) {
         && opened.summon.latency === "230 ms (느릴 때 410)" && opened.recallWeek === "1,005",
       JSON.stringify(opened.summon));
     // One chip, one reason, and — while the feature still wants samples —
-    // a bar with how many more; nothing said twice (t-6243 D2).
+    // a bar with how many remain until the check, which then is the reason:
+    // nothing said twice (t-6243 D2).
     const st = opened.statuses;
-    ok("each feature's state is one chip, one reason and, while it wants samples, how many more",
+    ok("each feature's state is one chip, one reason and, while it wants samples, how many remain until the check",
       st.summon.chip === "적용 중" && st.summon.tone === "applying" && st.summon.reason === "직접 켰습니다 — 응답률이 기준에 못 미칩니다"
         && st.summon.progress === null && st.summon.facts.join("|") === "이전 버전 jev-1.12.0의 기록은 제외"
-        && st.routing.chip === "적용 중" && st.routing.reason === "직접 켰습니다 — 판단 기록이 더 쌓여야 합니다"
-        && st.routing.progress?.now === "35" && st.routing.progress?.max === "73" && st.routing.progress?.label === "38건 더 필요"
+        && st.routing.chip === "적용 중" && st.routing.reason === "직접 켰습니다"
+        && st.routing.progress?.now === "35" && st.routing.progress?.max === "73" && st.routing.progress?.label === "판정까지 38건"
         && st.recall.chip === "기록 중" && st.recall.tone === "recording" && st.recall.reason === "자동 적용 대상이 아니라 기록만 합니다"
         && st.placement.chip === "기준 미달" && st.placement.tone === "under" && st.placement.reason === "정확도가 기준에 못 미칩니다"
         && st.notify.chip === "키·동의 필요" && st.notify.tone === "blocked"

@@ -37735,11 +37735,22 @@ h4.knowledge-inspector-head::after {
   border-bottom: var(--jev-line) solid var(--edge-rule);
 }
 
-/* The counted cells stay on one line; the words wrap. */
-.jev-table [data-jev-cell="rows"], .jev-table [data-jev-cell="answered"], .jev-table [data-jev-cell="latency"],
-.jev-table [data-jev-cell="acted"], .jev-table [data-jev-cell="cost"], .jev-table [data-jev-cell="seat"] {
+/* The counted cells stay on one line; the words wrap — a feature's name and
+   the response time's slow figure among them, which take a second line
+   rather than push the table past a 1080p stage (t-6243 D1/D2). */
+.jev-table [data-jev-cell="rows"], .jev-table [data-jev-cell="answered"],
+.jev-table [data-jev-cell="acted"], .jev-table [data-jev-cell="cost"] {
   white-space: nowrap;
   min-width: var(--jev-cell-min);
+}
+
+.jev-table [data-jev-cell="seat"] {
+  min-width: var(--jev-name-min);
+}
+
+/* The rate's lower bound sits under the rate, small. */
+.jev-table .jev-bound {
+  display: block;
 }
 
 .jev-fact-strong {
@@ -37779,6 +37790,7 @@ h4.knowledge-inspector-head::after {
   border-radius: var(--radius-sm);
   padding: var(--space-1) var(--space-2);
   font: inherit;
+  font-size: var(--jev-meta-size);
   /* A width of its own: the shared field width is a share of the cell, and
      a table cell sized by a share clips the longest mode word. */
   width: var(--jev-mode-width);
@@ -37791,17 +37803,16 @@ h4.knowledge-inspector-head::after {
 /* The week as one picture of two lines, each line's latest value under it,
    marked the way its line is drawn (t-6243 D4). */
 .jev-trends {
-  display: grid;
-  justify-items: start;
-  gap: var(--space-1);
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   color: var(--ink-mist);
   font-size: var(--jev-meta-size);
 }
 
+/* Beside the picture, one line per line of it — the row keeps its height. */
 .jev-trend-legend {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
+  display: grid;
 }
 
 .jev-trend-last {
@@ -37842,6 +37853,20 @@ h4.knowledge-inspector-head::after {
   display: grid;
   justify-items: start;
   gap: var(--space-1);
+}
+
+/* The chip, the samples still owed and the sentence start on one line; the
+   sentence takes the width left beside them and wraps inside it. */
+.jev-status-lead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.jev-status-lead .jev-status-reason {
+  flex: 1 1 var(--jev-reason-min);
+  min-width: 0;
 }
 
 .jev-chip {
