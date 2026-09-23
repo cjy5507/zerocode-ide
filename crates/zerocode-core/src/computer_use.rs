@@ -1564,6 +1564,23 @@ pub fn walk_rescues(params: &Value) -> bool {
     params.get(WALK_RESCUE_PARAM) == Some(&Value::Bool(true))
 }
 
+/// `walk --replay`: this walk repeats one walked before — a QA run, a Flow
+/// walked again (t-6385) — so the uses the Jev table moves in a repeated run
+/// stand where it says (`jev::JevUse::repeat`): the judgment cache answers a
+/// question it has answered before rather than only recording it.
+pub const WALK_REPLAY_FLAG: &str = "replay";
+pub const WALK_REPLAY_PARAM: &str = "replay";
+
+/// The run a walk was asked in: repeated when it said `--replay`.
+#[must_use]
+pub fn walk_run(params: &Value) -> crate::jev::Run {
+    if params.get(WALK_REPLAY_PARAM) == Some(&Value::Bool(true)) {
+        crate::jev::Run::Repeated
+    } else {
+        crate::jev::Run::Fresh
+    }
+}
+
 #[must_use]
 pub fn walk_steps(params: &Value) -> usize {
     params
@@ -2974,6 +2991,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ("repeat", "repeat"),
         (WALK_OVERLAP_FLAG, WALK_OVERLAP_PARAM),
         (WALK_RESCUE_FLAG, WALK_RESCUE_PARAM),
+        (WALK_REPLAY_FLAG, WALK_REPLAY_PARAM),
     ] {
         if flags.contains_key(flag) {
             params.insert(key.into(), Value::Bool(true));
@@ -3064,6 +3082,7 @@ fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
                 | "repeat"
                 | WALK_OVERLAP_FLAG
                 | WALK_RESCUE_FLAG
+                | WALK_REPLAY_FLAG
                 | EMULATOR_PREVIEW_FLAG
         );
         if flags.contains_key(name) {
@@ -3337,6 +3356,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "steps",
             WALK_OVERLAP_FLAG,
             WALK_RESCUE_FLAG,
+            WALK_REPLAY_FLAG,
         ],
         ComputerMethod::Compare => &[
             "json", "baseline", "against", "region", "display", "max-diff",
@@ -4037,7 +4057,8 @@ pub fn usage() -> String {
         "  zerocode-computer recipe-list [--json]",
         "  zerocode-computer recipe-show --name <name> [--json]",
         "  zerocode-computer recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--end N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--rescue] [--json]",
-        "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane> | --platform <ios|android> --device <id>) [--until <text on screen when it worked>] [--steps N] [--overlap] [--rescue] [--json]",
+        "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane> | --platform <ios|android> --device <id>) [--until <text on screen when it worked>] [--steps N] [--overlap] [--rescue] [--replay] [--json]",
+        "      (--replay: this walk repeats one walked before, so a question it asked then is answered from the judgment memo)",
         "      (walks the steps in one call, filling {{name}} from --params; stops at the person's turn or last step,",
         "       a step naming the saved screen's element or window, a check the screen fails, an act that changed",
         "       nothing, or a person's hand on the pointer — and answers the step to resume from; a guarded Flow's",
@@ -7451,6 +7472,24 @@ mod tests {
         for shown in ["--repeat [--until <HH:MM|N>]", "--arena <evidence dir>"] {
             assert!(usage.contains(shown), "{shown} is not in the manual");
         }
+    }
+
+    /// `--replay` (t-6385) is a walk's own word too: it says the walk runs
+    /// in a repeated run, and a plain walk runs fresh.
+    #[test]
+    fn a_walk_may_say_it_repeats_one_walked_before_and_a_plain_walk_does_not() {
+        let argv = |words: &[&str]| words.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        let plain =
+            parse_command(&argv(&["walk", "--goal", "pay", "--pane", "b"])).expect("a walk");
+        assert_eq!(walk_run(&plain.params), crate::jev::Run::Fresh);
+        let replay = parse_command(&argv(&["walk", "--goal", "pay", "--pane", "b", "--replay"]))
+            .expect("a replayed walk");
+        assert_eq!(walk_run(&replay.params), crate::jev::Run::Repeated);
+        assert!(usage().contains("[--replay]"));
+        assert!(
+            parse_command(&argv(&["click", "--x", "1", "--y", "2", "--replay"])).is_err(),
+            "no other verb takes it"
+        );
     }
 
     /// `--overlap` (t-6132 S2) is a walk's own word: the walk reads it, the

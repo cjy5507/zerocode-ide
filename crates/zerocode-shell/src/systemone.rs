@@ -191,7 +191,15 @@ pub fn read_rows(ledger: &Path) -> Vec<Value> {
 /// so the answer and the standing come from the same file.
 #[must_use]
 pub fn applies(wire: &Wire, seat: &JevUse) -> bool {
-    let mode = seat.mode_in(&wire.settings_root());
+    applies_in(wire, seat, zerocode_core::jev::Run::Fresh)
+}
+
+/// [`applies`], in a run that may repeat one before it (t-6385): a use its
+/// person left `auto` stands at its row's repeat mode in a repeated run
+/// ([`JevUse::mode_in_run`]).
+#[must_use]
+pub fn applies_in(wire: &Wire, seat: &JevUse, run: zerocode_core::jev::Run) -> bool {
+    let mode = seat.mode_in_run(&wire.settings_root(), run);
     let raised = ledger_of(wire, seat)
         .map(|ledger| {
             zerocode_core::jev::promote::stand_from(&read_rows(&ledger))

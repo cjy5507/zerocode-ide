@@ -168,6 +168,12 @@ fn a_phone_walk_timed_on_a_simulator_of_our_own() {
         Err(_) => Some(UNTIL.to_string()),
     };
     let overlap = knob("ZEROCODE_WALK_BENCH_OVERLAP").is_some_and(|flag| flag == "1");
+    // `walk --replay`: the run the walk is asked in.
+    let run = if knob("ZEROCODE_WALK_BENCH_REPLAY").is_some_and(|flag| flag == "1") {
+        zerocode_core::jev::Run::Repeated
+    } else {
+        zerocode_core::jev::Run::Fresh
+    };
     let cache = knob("ZEROCODE_WALK_BENCH_CACHE").unwrap_or_else(|| "off".to_string());
     let label = knob("ZEROCODE_WALK_BENCH_LABEL").unwrap_or_default();
     let base = knob("ZO_SYSTEMONE_BASE_URL").unwrap_or_else(|| "https://api.typesafe.ai".into());
@@ -212,7 +218,8 @@ fn a_phone_walk_timed_on_a_simulator_of_our_own() {
                 workspace: Some(work.clone()),
                 seat: &EMULATOR,
             },
-        );
+        )
+        .in_run(run);
         let at = errand::Errand {
             goal: &goal,
             why: errand::Why::Goal { steps },
@@ -259,6 +266,7 @@ fn a_phone_walk_timed_on_a_simulator_of_our_own() {
             "helper": knob("ZEROCODE_WALK_BENCH_HELPER"),
             "overlap": overlap,
             "cache": cache,
+            "run": run.key(),
             "until": until,
             "walkMs": walk_ms.round(),
             "pressed": walked.pressed,

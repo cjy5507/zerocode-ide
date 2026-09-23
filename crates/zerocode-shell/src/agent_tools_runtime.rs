@@ -2957,11 +2957,15 @@ pub(super) fn run_recipe(
             // and a walk's workspace is the folder it was asked from; asked
             // from nowhere known, the door refuses and the row says so
             // (docs/design/jev-settings-20260917.md §3).
+            // A recipe walked again is a repeated run by what it is: its
+            // stopped step asks the questions a walk of it asked before
+            // (t-6385).
             let mut judge = computer_use::errand::live::LiveJudge::new(
                 &crate::api_routers::Keychain::of_this_machine(),
                 workspace,
                 seat,
-            );
+            )
+            .in_run(zerocode_core::jev::Run::Repeated);
             // No key, nothing to ask — and so no reason to measure the page or
             // number its controls first.
             if let Some(read) =
@@ -3190,7 +3194,8 @@ pub(super) fn run_goal(
         &crate::api_routers::Keychain::of_this_machine(),
         workspace,
         seat,
-    );
+    )
+    .in_run(zerocode_core::computer_use::walk_run(&command.params));
     if mode == errand::Mode::Off || !judge.armed() {
         // Off is today's product exactly: no look is taken, nothing is sent,
         // and the answer says plainly that nothing walked.

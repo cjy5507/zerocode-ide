@@ -301,6 +301,30 @@ pub struct Sent {
     pub cap: Cap,
 }
 
+/// Whether the run a use is asked in walks something already walked
+/// (t-6385): a saved recipe or Flow walked again (`recipe-run`), a walk its
+/// caller marks as a replay (`walk --replay`). What that changes is each
+/// use's own row ([`JevUse::repeat`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Run {
+    /// A run nobody said repeats one before it.
+    #[default]
+    Fresh,
+    /// A run that walks what was walked before.
+    Repeated,
+}
+
+impl Run {
+    /// The word a row names a repeated run by.
+    #[must_use]
+    pub const fn key(self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Repeated => "repeated",
+        }
+    }
+}
+
 /// One place this product asks Jev something.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JevUse {
@@ -323,6 +347,18 @@ pub struct JevUse {
     /// of the use's own modes and never `off`, since a switch turned on that
     /// left a use off would be a switch that says one thing and does another.
     pub recommended: JevMode,
+    /// The mode this use stands at in a repeated run ([`Run::Repeated`]: a
+    /// saved recipe or Flow walked again, a walk its caller marks as a
+    /// replay) when the person left it `auto` — by word, or by writing none
+    /// while Jev is on (t-6385). `None`: a repeat changes nothing for this
+    /// use. A word the person did write otherwise — `off`, `shadow`, `on` —
+    /// stands as written, and a use nobody wrote a word for is off in every
+    /// run while Jev is switched off.
+    ///
+    /// A column beside [`Self::recommended`] because it is the same kind of
+    /// policy — the mode a use stands at when nobody chose one — for one more
+    /// fact about the run; a contract holds it to the use's own modes.
+    pub repeat: Option<JevMode>,
     /// Every place a request carries words the product did not write itself.
     pub sends: &'static [Sent],
     /// The ledger file this use appends one row per request to.
@@ -561,6 +597,7 @@ pub const ROUTING: JevUse = JevUse {
     setting: "decisionShadow",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[Sent {
         at: "/state",
         cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
@@ -673,6 +710,7 @@ pub const RECALL: JevUse = JevUse {
     setting: "rerankShadow",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/request",
@@ -792,6 +830,7 @@ pub const BROWSER: JevUse = JevUse {
     setting: "browserAction",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &BROWSER_SENDS,
     ledger: "browser-action.jsonl",
     promotes: true,
@@ -829,6 +868,7 @@ pub const DESKTOP: JevUse = JevUse {
     setting: "desktopAction",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &DESKTOP_SENDS,
     ledger: "desktop-action.jsonl",
     promotes: true,
@@ -850,6 +890,7 @@ pub const EMULATOR: JevUse = JevUse {
     setting: "emulatorAction",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/where/platform",
@@ -885,6 +926,7 @@ pub const STALL: JevUse = JevUse {
     setting: "stallCause",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/screen",
@@ -978,6 +1020,7 @@ pub const PLACEMENT: JevUse = JevUse {
     setting: "workerPlacement",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[Sent {
         at: "/state/brief",
         cap: Cap::Chars(PLACEMENT_BRIEF_CHAR_CAP),
@@ -1068,6 +1111,7 @@ pub const SUMMON: JevUse = JevUse {
     setting: "summonChoice",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[Sent {
         at: "/state/brief",
         cap: Cap::Chars(SUMMON_BRIEF_CHAR_CAP),
@@ -1124,6 +1168,7 @@ pub const STEP_EFFORT: JevUse = JevUse {
     setting: "stepEffort",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[Sent {
         at: "/state/repeated",
         cap: Cap::Chars(STEP_EFFORT_REPEATED_CHAR_CAP),
@@ -1275,6 +1320,7 @@ pub const SKILLS: JevUse = JevUse {
     setting: "skillSearch",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/task",
@@ -1341,6 +1387,7 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     setting: "zoStepEffort",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[Sent {
         at: "/state",
         cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
@@ -1490,6 +1537,7 @@ pub const COMPACTION: JevUse = JevUse {
     setting: "jevCompaction",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/goal",
@@ -1590,6 +1638,7 @@ pub const AGENT_TOOL: JevUse = JevUse {
     setting: "agentTool",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On],
     recommended: JevMode::On,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/question",
@@ -1769,6 +1818,7 @@ pub const BROWSER_READ: JevUse = JevUse {
     setting: "jevBrowserRead",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/title",
@@ -1931,6 +1981,7 @@ pub const NOTIFY: JevUse = JevUse {
     setting: "jevNotify",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/pane",
@@ -2039,6 +2090,7 @@ pub const MENTION_RERANK: JevUse = JevUse {
     setting: "jevMentionRerank",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/intent",
@@ -2194,6 +2246,7 @@ pub const BRANCHING: JevUse = JevUse {
     setting: "jevBranching",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/goal",
@@ -2280,6 +2333,12 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     setting: "jevJudgmentCache",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    // In a repeated run the questions are the ones asked before, to the byte
+    // (20 of 20 steps of a repeated Settings walk hit, t-6350), so a hit
+    // answers: recording it only spends a wire request on an answer already
+    // in hand. Outside a repeat `auto` keeps comparing, and those
+    // comparisons are what raise it.
+    repeat: Some(JevMode::On),
     sends: &[],
     ledger: "judgment-cache.jsonl",
     promotes: true,
@@ -2385,6 +2444,7 @@ pub const CHALLENGER: JevUse = JevUse {
     setting: "jevChallenger",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/task",
@@ -2522,6 +2582,7 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     setting: "jevPatchReview",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
+    repeat: None,
     sends: &[
         Sent {
             at: "/state/task",
@@ -2613,6 +2674,18 @@ impl JevUse {
                     .find(|mode| mode.key().eq_ignore_ascii_case(word))
             })
             .unwrap_or_default()
+    }
+
+    /// [`Self::mode_in`], in a run that may repeat one before it (t-6385): a
+    /// use its person left `auto` stands at its [`Self::repeat`] mode in a
+    /// repeated run; every other word, and every other run, reads as ever.
+    #[must_use]
+    pub fn mode_in_run(&self, root: &Value, run: Run) -> JevMode {
+        let mode = self.mode_in(root);
+        match (run, self.repeat) {
+            (Run::Repeated, Some(repeated)) if mode == JevMode::Auto => repeated,
+            _ => mode,
+        }
     }
 
     /// This use's mode in a settings document: the word written under
