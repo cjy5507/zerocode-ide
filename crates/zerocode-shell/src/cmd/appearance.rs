@@ -1040,6 +1040,28 @@ pub(crate) fn busy_census(
     Ok(leave_census(&app, asking_of(&road, door.as_deref())?))
 }
 
+/// Whether closing the main window asks first (t-6428) — the road the
+/// window was left by nine times in nine before this. A close the person
+/// chose, or one the road went for them, passes; a close that already has
+/// a question standing or a wait armed keeps it; otherwise the census is
+/// read, and work in progress holds the close and asks, the question's
+/// minute running on the beat.
+pub(crate) fn close_asks_first(app: &AppHandle) -> bool {
+    if exit_runtime::confirmed() {
+        return false;
+    }
+    if exit_runtime::holding_close() {
+        return true;
+    }
+    let census = leave_census(app, exit_runtime::Asking::Close);
+    if !census.busy.busy {
+        return false;
+    }
+    exit_runtime::ask(exit_runtime::Asking::Close, crate::now_epoch_ms());
+    let _ = app.emit_to(crate::MAIN_WINDOW_LABEL, "exit:ask", census);
+    true
+}
+
 /// 「끝나면」: wait on this road for the first gap (t-6428), answering the
 /// line the wait stands as from its first second — the census as it is.
 #[tauri::command(async)]

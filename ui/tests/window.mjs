@@ -53726,6 +53726,128 @@ ok(
   JSON.stringify(restartAsked),
 );
 
+/* ---- 닫기 전에 (t-6428) ----------------------------------------------------
+ *
+ * The window's close — the road the window was left by nine times in nine
+ * before this — asks the same census when it would cut work: the backend
+ * holds the close and says `exit:ask`, and the window asks in the close's
+ * words, with the close's patience and the minute the question stands.
+ * 「끝나면 종료」 arms the close's wait and stands the close's line, 「지금
+ * 종료」 goes now, 「취소」 lets the window stay. Five catalogs. */
+const closeAsked = await page.evaluate(async () => {
+  const seen = {};
+  const tick = () => new Promise((done) => setTimeout(done, 40));
+  const held = {
+    leave_when_idle: window.__ANSWER__.leave_when_idle,
+    leave_now: window.__ANSWER__.leave_now,
+    leave_cancel: window.__ANSWER__.leave_cancel,
+  };
+  const calls = [];
+  const busy = { busy: true, workers: 2, turning: 2, background: 0, unknown: 0, running: 1, gap: false };
+  const census = { road: "close", door: null, busy, waitMin: 10, answerSec: 60 };
+  const standing = () =>
+    [...document.querySelectorAll(".toast")].filter(
+      (one) => one.dataset.notice === "exit-wait" && !one.classList.contains("is-closing"),
+    );
+  const shown = () => !document.getElementById("ask-scrim").hidden;
+  const fire = (name, payload) => {
+    for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+  };
+  const called = (kind) => calls.some(([seenKind, args]) => seenKind === kind && args?.road === "close");
+  try {
+    for (const note of document.querySelectorAll(".toast")) note.remove();
+    window.__ANSWER__.leave_when_idle = (args) => {
+      calls.push(["arm", args]);
+      return { road: args.road, running: 1, unknown: 0, waitedMin: 0, waitMin: 10 };
+    };
+    window.__ANSWER__.leave_now = (args) => { calls.push(["now", args]); return null; };
+    window.__ANSWER__.leave_cancel = () => { calls.push(["cancel", { road: "close" }]); return null; };
+    // ① The backend held the close: the close's question, in place of a
+    // restart's wait standing before it.
+    fire("exit:waiting", { road: "restart", running: 2, unknown: 0, waitedMin: 3, waitMin: 30 });
+    await tick();
+    seen.restartLineBefore = standing().length === 1;
+    fire("exit:ask", census);
+    await tick();
+    seen.restartLineGone = standing().length === 0;
+    seen.asked = shown();
+    seen.title = document.getElementById("ask-title").textContent
+      === t("exit.closeTitle", "지금 닫으면 도는 일이 끊깁니다");
+    const body = document.getElementById("ask-body").textContent;
+    seen.census = body.includes(busyWords(busy));
+    seen.patience = body.includes(t(
+      "exit.closeNote",
+      "「끝나면 종료」는 워커 판 아래 도는 명령이 없는 첫 틈에 종료합니다 · 최대 {{minutes}}분 · {{seconds}}초 안에 답이 없으면 지금 종료합니다",
+      { minutes: 10, seconds: 60 },
+    ));
+    seen.yes = document.getElementById("ask-yes").textContent === t("exit.whenIdleClose", "끝나면 종료");
+    seen.no = document.getElementById("ask-no").textContent === t("exit.nowClose", "지금 종료");
+    // ② 「끝나면 종료」: the close's wait, and the close's line.
+    document.getElementById("ask-yes").click();
+    await tick();
+    seen.armed = called("arm");
+    seen.line = standing()[0]?.querySelector(".toast-text")?.textContent
+      === t("exit.waitingClose", "끝나면 종료합니다 · {{state}}", {
+        state: [
+          t("exit.running", "도는 명령 {{n}}개", { n: 1 }),
+          t("exit.waited", "{{minutes}}분째", { minutes: 0 }),
+        ].join(" · "),
+      });
+    standing()[0]?.querySelector(".toast-action")?.click();
+    await tick();
+    seen.cancelledWait = called("cancel") && standing().length === 0;
+    // ③ 「지금 종료」 goes now.
+    fire("exit:ask", census);
+    await tick();
+    document.getElementById("ask-no").click();
+    await tick();
+    seen.now = called("now");
+    // ④ 「취소」: the window stays, and the backend hears it.
+    calls.length = 0;
+    fire("exit:ask", census);
+    await tick();
+    document.getElementById("ask-cancel").click();
+    await tick();
+    seen.stayed = !shown() && called("cancel") && !called("now");
+    const KEYS = ["exit.closeTitle", "exit.closeNote", "exit.whenIdleClose", "exit.nowClose", "exit.waitingClose"];
+    seen.catalogued = ["en", "ja", "zh", "es"].every((code) => KEYS.every((key) => typeof CATALOG[code]?.[key] === "string"));
+  } catch (error) {
+    seen.error = String(error?.stack ?? error);
+  } finally {
+    try {
+      for (const [name, answer] of Object.entries(held)) {
+        if (answer) window.__ANSWER__[name] = answer;
+        else delete window.__ANSWER__[name];
+      }
+      if (!document.getElementById("ask-scrim").hidden) document.getElementById("ask-cancel").click();
+      for (const note of document.querySelectorAll(".toast")) note.remove();
+    } catch (error) {
+      seen.cleanupError = String(error?.stack ?? error);
+    }
+  }
+  return seen;
+});
+ok(
+  "the window's close asks the same census when it would cut work (t-6428): the close's words, its ten-minute wait and its one-minute question, 「끝나면 종료」 arming the close's wait with the close's line, 「지금 종료」 going now, 「취소」 keeping the window — in five catalogs",
+  !closeAsked.error &&
+    !closeAsked.cleanupError &&
+    closeAsked.restartLineBefore &&
+    closeAsked.restartLineGone &&
+    closeAsked.asked &&
+    closeAsked.title &&
+    closeAsked.census &&
+    closeAsked.patience &&
+    closeAsked.yes &&
+    closeAsked.no &&
+    closeAsked.armed &&
+    closeAsked.line &&
+    closeAsked.cancelledWait &&
+    closeAsked.now &&
+    closeAsked.stayed &&
+    closeAsked.catalogued,
+  JSON.stringify(closeAsked),
+);
+
 /* ---- 「업데이트」 (t-3191) ----------------------------------------------------
  *
  * The settings page for versioned updates (docs/design/versioned-auto-update.md

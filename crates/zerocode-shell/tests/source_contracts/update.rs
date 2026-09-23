@@ -524,3 +524,48 @@ fn the_way_out_waits_on_the_beat_and_goes_by_the_one_restart_road() {
         );
     }
 }
+
+/// t-6428: the main window's close — the road the window was left by nine
+/// times in nine over the 37 hours measured before this — asks the same
+/// census before it goes. The tray's hide still comes first; a close the
+/// person chose, or one the road went for them, passes; one already asked
+/// about keeps its question or its wait; otherwise work in progress holds
+/// the close and the window asks through the one question function.
+#[test]
+fn closing_the_window_asks_the_one_census_first() {
+    let main = strip_rust_comments(include_str!("../../src/main.rs"));
+    let tray = main
+        .find(".hide_main_on_close(handle)")
+        .expect("the tray's close");
+    let asks = main
+        .find("cmd::appearance::close_asks_first(handle)")
+        .expect("the close asks first");
+    assert!(
+        tray < asks,
+        "the tray hides a close before it is asked about"
+    );
+    let backend = shipped_backend();
+    let asking = block_after(backend, "pub(crate) fn close_asks_first(");
+    let order = [
+        "exit_runtime::confirmed()",
+        "exit_runtime::holding_close()",
+        "leave_census(app, exit_runtime::Asking::Close)",
+        "exit_runtime::ask(exit_runtime::Asking::Close",
+        "\"exit:ask\"",
+    ]
+    .map(|needle| {
+        asking
+            .find(needle)
+            .unwrap_or_else(|| panic!("the close's question lost `{needle}`:\n{asking}"))
+    });
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "the close asks out of order:\n{asking}"
+    );
+    let window = window_source();
+    let heard = block_after(window, "listen(\"exit:ask\"");
+    assert!(
+        heard.contains("askLeaving(census"),
+        "the window's close is asked some other way:\n{heard}"
+    );
+}

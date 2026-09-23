@@ -283,6 +283,13 @@ pub(crate) fn choice() -> Choice {
     exiting().choice
 }
 
+/// A question stands on this road, from now: the close's minute runs.
+pub(crate) fn ask(asking: Asking, now_ms: i64) {
+    let mut state = exiting();
+    state.question = Some((asking, now_ms));
+    state.wait = None;
+}
+
 /// 「끝나면」: wait on this road for the first gap, from now.
 pub(crate) fn arm(asking: Asking, now_ms: i64) {
     let mut state = exiting();
@@ -304,6 +311,28 @@ pub(crate) fn cancel() {
     let mut state = exiting();
     state.question = None;
     state.wait = None;
+}
+
+/// Whether a close passes without a question: the person chose to go, or
+/// the road went for them.
+pub(crate) fn confirmed() -> bool {
+    exiting().confirmed
+}
+
+/// Whether the close already has a question standing or a wait armed: a
+/// second press of the close keeps it rather than asking twice.
+pub(crate) fn holding_close() -> bool {
+    holds_close(&exiting())
+}
+
+fn holds_close(state: &Exiting) -> bool {
+    state
+        .question
+        .is_some_and(|(asking, _)| asking == Asking::Close)
+        || state
+            .wait
+            .as_ref()
+            .is_some_and(|wait| wait.asking == Asking::Close)
 }
 
 /// Whether anything on the way out needs the beat: a question standing or
@@ -495,6 +524,27 @@ mod tests {
             step(&mut restart, 24 * 60 * MINUTE, None),
             ExitBeat::Nothing
         );
+    }
+
+    #[test]
+    fn a_second_close_keeps_its_question_or_its_wait_and_a_chosen_close_passes() {
+        let mut state = Exiting::default();
+        assert!(!holds_close(&state) && !state.confirmed);
+        state.question = Some((Asking::Close, 0));
+        assert!(holds_close(&state), "a question standing holds the close");
+        let mut waiting = waiting_on(Asking::Close);
+        assert!(holds_close(&waiting), "「끝나면 종료」 holds the close");
+        assert!(
+            !holds_close(&waiting_on(Asking::Restart(None))),
+            "a restart's wait is not the close's"
+        );
+        // 「지금 종료」: nothing holds it, and the close it makes passes.
+        assert_eq!(
+            settle(&mut waiting, Asking::Close, Choice::Now),
+            ExitBeat::Leave(Asking::Close)
+        );
+        assert!(!holds_close(&waiting) && waiting.confirmed);
+        assert_eq!(waiting.choice, Choice::Now);
     }
 
     #[test]

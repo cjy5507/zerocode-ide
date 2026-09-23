@@ -153,16 +153,26 @@ async function askBeforeRestart(door) {
   await askLeaving(census ?? { road: "restart", door, busy: null, waitMin: null }, "");
 }
 
-/* The question itself, asked by a door and asked again when a wait ran
- * out: the census's words (or that nobody could read it), the road's
- * patience, and the two ways on. `lead` is what is said first. */
-async function askLeaving(census, lead) {
-  const road = census.road;
-  const door = census.door ?? null;
-  const said = busyWords(census.busy) || t("exit.unread", "도는 일을 읽지 못했습니다");
-  const answer = await askConfirm({
+/* How each road asks: a restart and the window's close say the same
+ * census and ask it differently — the close with the minute its question
+ * stands before it goes anyway. */
+function leavingWords(census) {
+  if (census.road === "close") {
+    return {
+      title: t("exit.closeTitle", "지금 닫으면 도는 일이 끊깁니다"),
+      note: census.waitMin === null
+        ? ""
+        : t(
+            "exit.closeNote",
+            "「끝나면 종료」는 워커 판 아래 도는 명령이 없는 첫 틈에 종료합니다 · 최대 {{minutes}}분 · {{seconds}}초 안에 답이 없으면 지금 종료합니다",
+            { minutes: census.waitMin, seconds: census.answerSec },
+          ),
+      confirm: t("exit.whenIdleClose", "끝나면 종료"),
+      deny: t("exit.nowClose", "지금 종료"),
+    };
+  }
+  return {
     title: t("exit.restartTitle", "다시 시작하면 도는 일이 끊깁니다"),
-    body: lead ? `${lead} ${said}` : said,
     note: census.waitMin === null
       ? ""
       : t(
@@ -172,6 +182,24 @@ async function askLeaving(census, lead) {
         ),
     confirm: t("exit.whenIdleRestart", "끝나면 다시 시작"),
     deny: t("exit.nowRestart", "지금 다시 시작"),
+  };
+}
+
+/* The question itself — asked by a restart door, by the window's close
+ * (`exit:ask`), and again when a wait ran out: the census's words (or that
+ * nobody could read it), the road's patience, and the two ways on. `lead`
+ * is what is said first. */
+async function askLeaving(census, lead) {
+  const road = census.road;
+  const door = census.door ?? null;
+  const said = busyWords(census.busy) || t("exit.unread", "도는 일을 읽지 못했습니다");
+  const words = leavingWords(census);
+  const answer = await askConfirm({
+    title: words.title,
+    body: lead ? `${lead} ${said}` : said,
+    note: words.note,
+    confirm: words.confirm,
+    deny: words.deny,
   });
   if (answer === true) {
     try {
@@ -181,6 +209,9 @@ async function askLeaving(census, lead) {
     }
   } else if (answer === false) {
     invoke("leave_now", { road, door }).catch(showError);
+  } else if (road === "close") {
+    // The close waits on this question; 「취소」 keeps the window.
+    invoke("leave_cancel").catch(() => {});
   }
 }
 
@@ -193,7 +224,9 @@ function exitWaitWords(line) {
   }
   parts.push(t("exit.waited", "{{minutes}}분째", { minutes: line.waitedMin }));
   const state = parts.join(" · ");
-  return t("exit.waitingRestart", "끝나면 다시 시작합니다 · {{state}}", { state });
+  return line.road === "close"
+    ? t("exit.waitingClose", "끝나면 종료합니다 · {{state}}", { state })
+    : t("exit.waitingRestart", "끝나면 다시 시작합니다 · {{state}}", { state });
 }
 
 /* One line stands for the wait: said again in place when the beat moves it,
@@ -225,6 +258,16 @@ function cancelExitWait() {
 }
 
 listen("exit:waiting", (event) => standExitWait(event?.payload));
+
+/* The window's close held by the backend because it would cut work: the
+ * same question, in the close's words. A restart's wait standing before it
+ * is gone — the backend put the close's question in its place. */
+listen("exit:ask", (event) => {
+  const census = event?.payload;
+  if (!census || typeof census !== "object") return;
+  dropExitWait();
+  void askLeaving(census, "");
+});
 
 listen("exit:overdue", (event) => {
   const census = event?.payload;

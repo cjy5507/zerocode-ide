@@ -3552,6 +3552,16 @@ fn main() -> ExitCode {
             {
                 api.prevent_close();
             }
+            // A close that would cut work in progress asks the one census
+            // first (t-6428); the window's question holds it, and the
+            // road's own table lets it go.
+            tauri::RunEvent::WindowEvent {
+                label,
+                event: tauri::WindowEvent::CloseRequested { api, .. },
+                ..
+            } if label == MAIN_WINDOW_LABEL && cmd::appearance::close_asks_first(handle) => {
+                api.prevent_close();
+            }
             tauri::RunEvent::WindowEvent { label, event, .. }
                 if label == MAIN_WINDOW_LABEL
                     && matches!(event, tauri::WindowEvent::Focused(true)) =>
