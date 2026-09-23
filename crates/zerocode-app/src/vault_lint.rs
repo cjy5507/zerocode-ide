@@ -303,7 +303,15 @@ pub fn render(root: &Path, road: &str, graph: &VaultGraph, scanned_ms: u128) -> 
         for pair in pairs {
             under(
                 &mut out,
-                format!("{} ≈ {} ({})", pair.left, pair.right, pair.reason),
+                format!(
+                    "{} ≈ {} ({}){}",
+                    pair.left,
+                    pair.right,
+                    pair.reason,
+                    pair.proposal
+                        .as_deref()
+                        .map_or(String::new(), |word| format!(" → {word}"))
+                ),
             );
         }
     }

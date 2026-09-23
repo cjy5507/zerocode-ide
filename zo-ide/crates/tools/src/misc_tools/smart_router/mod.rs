@@ -15,6 +15,7 @@ mod mention_rerank;
 mod metadata;
 mod patch_review;
 mod claim_check;
+mod vault_pairs;
 pub mod jev_summary;
 mod plan_shadow;
 mod planner;
@@ -69,6 +70,10 @@ pub use patch_review::{
     PATCH_REVIEW_DEADLINE, PATCH_REVIEW_FILE, PATCH_REVIEW_OUTCOME_ANSWERED,
 };
 pub use claim_check::{claim_check_path, note_claim_turn, ClaimCheckRow, ClaimLabelRow};
+pub use vault_pairs::{
+    judge_vault_pairs, mark_vault_pair, recorded_vault_pair_proposals,
+    PairJudgment, PairLabel, PairRun,
+};
 pub use mention_rerank::{
     mention_rerank_path, MentionAnswer, MentionAsk, MentionCandidate, MentionJudged, MentionLabelRow,
     MentionRerank, MentionRerankRow, MentionSurface, MENTION_OUTCOME_ANSWERED, MENTION_RERANK_DEADLINE,

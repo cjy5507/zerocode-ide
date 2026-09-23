@@ -4208,6 +4208,11 @@
             <span data-jev-summary data-i18n="settings.typesafe.claimSummary">답의 완료·검사 통과 주장을 이 턴의 도구 결과와 대조해 기록합니다.</span>
             <p data-jev-hint data-i18n="settings.typesafe.claimHint">마지막 답에서 완료·통과 주장을 최대 여덟 개 골라, 이 턴에 실행한 명령과 결과에서 근거 줄만 판단합니다. 실행하지 않은 명령이나 실패한 검사는 코드가 먼저 가릅니다. 보내는 글은 주장마다 최대 400자와 도구 출력의 선택된 줄 최대 2 KiB입니다. 현재는 기록만 하며 답과 r43 되묻기를 바꾸지 않습니다. 다음 사람 말이 「안 됐다」로 시작하는지를 결과 표식으로 기록하고, 음성 표본과 기준선보다 나은 정확도가 쌓여야 자동 적용이 가능합니다. 보내기는 동의한 폴더에서만 하고 비밀일 수 있는 줄은 보류합니다.</p>
           </div>
+          <div data-jev-feature="vault_pairs">
+            <span data-jev-name data-i18n="settings.typesafe.vault_pairs">볼트 쌍 검토</span>
+            <span data-jev-summary data-i18n="settings.typesafe.vault_pairsSummary">제목과 요약이 비슷한 두 페이지의 중복·모순 관계를 주간 리뷰에 제안합니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.vault_pairsHint">코드가 제목·요약으로 후보 쌍을 고르고 이미 관계가 선언된 쌍을 뺍니다. Jev는 같은 주장인지, 반대 주장인지, 새 페이지가 옛 측정을 대체하는지 묻습니다. 제목·태그·요약은 페이지마다 최대 600바이트씩 보내며 동의한 볼트에서만 실행합니다. 결과는 merge_candidates 칸과 주간 리뷰에 제안으로만 남고 페이지나 raw 원본을 고치지 않습니다. 리뷰어가 채택 또는 기각을 표시하면 그 결과를 기록합니다.</p>
+          </div>
         </template>
         </section>
 

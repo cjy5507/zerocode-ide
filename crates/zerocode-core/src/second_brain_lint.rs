@@ -90,6 +90,9 @@ pub struct MergeCandidate {
     pub right: String,
     /// Why the pair was proposed, in the producer's own words.
     pub reason: String,
+    /// A Jev suggestion for review, if the source pages have not changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proposal: Option<String>,
 }
 
 /// The counts a card paints and a recipe prints — one per row, in row order.
