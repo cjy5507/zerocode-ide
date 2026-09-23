@@ -1,7 +1,7 @@
 {
   "source": "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/2.1.280/vspackage",
   "version": "2.1.280",
-  "fetched_at": "2026-09-23T06:42:56+00:00",
+  "fetched_at": "2026-09-23T07:09:54+00:00",
   "stylesheet": "extension/webview/index.css",
   "script": "extension/webview/index.js",
   "vars": {
@@ -324,7 +324,10 @@
     "spinnerVerbAfter3": 5000,
     "spinnerVerbEvery": 5000,
     "spinnerRevealStep": 40,
-    "spinnerGlyphStep": 120
+    "spinnerGlyphStep": 120,
+    "followSlack": 50,
+    "followGlide": 2000,
+    "followIntent": 300
   },
   "words": {
     "spinnerVerbs": [
@@ -412,6 +415,19 @@
       "Wibbling",
       "Working",
       "Wrangling"
+    ],
+    "followUpKeys": [
+      "ArrowUp",
+      "PageUp",
+      "Home"
+    ],
+    "followDownKeys": [
+      "ArrowDown",
+      "PageDown",
+      "End"
+    ],
+    "followControls": [
+      "button, [role=\"button\"], input, textarea, [contenteditable]:not([contenteditable=\"false\"])"
     ]
   }
 }

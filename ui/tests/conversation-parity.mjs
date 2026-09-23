@@ -607,3 +607,133 @@ export async function testConversationStatus(browser, origin, ok) {
     await page.close();
   }
 }
+
+/* A5 — the scroll. The extension's list (2.1.280 `VG0`, `lF1`): within 50px
+ * of its foot (`TF`) and not scrolled away, new words keep it at its foot.
+ * Leaving is an intent, not a distance: an upward wheel or key (ArrowUp,
+ * PageUp, Home, Shift+Space) leaves at once however near the foot the list
+ * stood, and a move up the page did not cause (the thumb) leaves too; a move
+ * back into the last 50px comes back. A wheel a box inside the list can still
+ * scroll is that box's. Sending comes back and takes the list to its foot
+ * (`scrollToBottomOnSend`, on by default). The extension grows no "jump to
+ * latest" button, so this page grows none either. */
+export async function testConversationScroll(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const history = [];
+    for (let at = 0; at < 40; at += 1) {
+      history.push({ role: "user", text: `부탁 ${at}` });
+      history.push({ role: "assistant", text: `답 ${at}: ${"긴 문장이 여러 줄로 이어진다. ".repeat(6)}` });
+    }
+    await openConversation(page, history, { status: "working", live: [{ role: "assistant", text: "흐르는" }] });
+    // The list's place once it has stopped moving (a wheel may glide).
+    const still = () => page.evaluate(async () => {
+      const list = document.querySelector("#worker-view .helper-turns");
+      let last = -1;
+      let same = 0;
+      for (let beat = 0; beat < 180 && same < 5; beat += 1) {
+        await new Promise((done) => requestAnimationFrame(done));
+        same = list.scrollTop === last ? same + 1 : 0;
+        last = list.scrollTop;
+      }
+      return { top: Math.round(list.scrollTop), gap: Math.round(list.scrollHeight - list.scrollTop - list.clientHeight) };
+    });
+    let grown = 0;
+    const grow = async () => {
+      grown += 1;
+      await page.evaluate(async (grown) => {
+        window.__CONVERSATION__.live = [{ role: "assistant", text: `흐르는 ${"새로 온 말이 한 줄 더 붙는다. ".repeat(30 * grown)}` }];
+        await pollHelperPages();
+        for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      }, grown);
+      return still();
+    };
+    const box = await page.evaluate(() => {
+      const rect = document.querySelector("#worker-view .helper-turns").getBoundingClientRect();
+      return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
+    });
+    await page.mouse.move(box.x, box.y);
+    const seen = {};
+    seen.start = await grow();
+    // A small wheel upward, still inside the last 50px, leaves at once.
+    await page.mouse.wheel(0, -30);
+    seen.wheeledUp = await still();
+    seen.afterWheelUp = await grow();
+    // Back down into the last 50px: the words are followed again.
+    await page.mouse.wheel(0, 100000);
+    await still();
+    seen.afterWheelDown = await grow();
+    // A key upward leaves by itself, before anything moved.
+    await page.evaluate(() => {
+      const list = document.querySelector("#worker-view .helper-turns");
+      list.focus();
+      list.dispatchEvent(new KeyboardEvent("keydown", { key: "PageUp", bubbles: true, cancelable: true }));
+    });
+    seen.keyedUp = await still();
+    seen.afterKeyUp = await grow();
+    // The End key and a move to the foot come back.
+    await page.evaluate(() => {
+      const list = document.querySelector("#worker-view .helper-turns");
+      list.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true, cancelable: true }));
+      list.scrollTop = list.scrollHeight;
+    });
+    await still();
+    seen.afterEnd = await grow();
+    // The thumb dragged up — no key, no wheel — leaves too.
+    await page.evaluate(() => {
+      document.querySelector("#worker-view .helper-turns").scrollTop -= 300;
+    });
+    seen.dragged = await still();
+    seen.afterDrag = await grow();
+    // A box inside the list that can still scroll takes the wheel for itself.
+    seen.inner = await page.evaluate(() => {
+      const list = document.querySelector("#worker-view .helper-turns");
+      const well = document.createElement("div");
+      well.style.cssText = "overflow-y: auto; height: 40px;";
+      well.innerHTML = "<div style='height: 400px'>안</div>";
+      list.appendChild(well);
+      well.scrollTop = 100;
+      const inside = well.firstElementChild;
+      const answer = typeof innerScrolls === "function"
+        ? { up: innerScrolls(list, inside, true), down: innerScrolls(list, inside, false), outside: innerScrolls(list, list, true) }
+        : null;
+      well.remove();
+      return answer;
+    });
+    // Sending comes back and takes the list to its foot.
+    await page.evaluate(async () => {
+      window.__CONVERSATION__.status = "idle";
+      window.__ANSWER__.wire_send = () => null;
+      await pollHelperPages();
+      const face = document.querySelector("#worker-view");
+      const input = face.querySelector(".worker-composer-box");
+      input.value = "다음 부탁";
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      face.querySelector(".worker-composer").requestSubmit();
+    });
+    seen.afterSend = await still();
+    seen.noLatestDoor = await page.evaluate(() =>
+      document.querySelector("#worker-view").querySelectorAll("[class*='latest'], [class*='jump']").length === 0);
+    ok(
+      "A5: new words keep a list at its foot there; a wheel upward — even inside the last 50px — leaves at once and later words leave it where it stands; a wheel back to the foot comes back",
+      seen.start.gap <= 1 && seen.wheeledUp.gap > 1 && seen.afterWheelUp.top === seen.wheeledUp.top &&
+        seen.afterWheelUp.gap > 50 && seen.afterWheelDown.gap <= 1,
+      JSON.stringify(seen),
+    );
+    ok(
+      "A5: an upward key leaves before anything moved, End at the foot comes back, a thumb dragged up leaves, and a box inside the list that can still scroll keeps the wheel for itself",
+      seen.afterKeyUp.top === seen.keyedUp.top && seen.afterKeyUp.gap > 50 && seen.afterEnd.gap <= 1 &&
+        seen.afterDrag.top === seen.dragged.top && seen.afterDrag.gap > 50 &&
+        JSON.stringify(seen.inner) === JSON.stringify({ up: true, down: true, outside: false }),
+      JSON.stringify(seen),
+    );
+    ok(
+      "A5: sending takes the list to its foot, and no jump-to-latest door stands on the page — the extension has none",
+      seen.afterSend.gap <= 1 && seen.noLatestDoor,
+      JSON.stringify(seen),
+    );
+    ok("A5: the scroll raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}

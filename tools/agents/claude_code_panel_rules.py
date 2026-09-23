@@ -132,6 +132,24 @@ WANTED_CONSTANTS = [
         "keys": ["spinnerGlyphStep"],
         "pattern": rf"setInterval\(\(\)=>\{{{_NAME}\(\({_NAME}\)=>\({_NAME}\+1\)%{_NAME}\.length\)\}},(\d+)\)",
     },
+    # The list stands at its foot within this many pixels (`TF`, right before
+    # `dH`, the distance to the foot).
+    {
+        "keys": ["followSlack"],
+        "pattern": rf"var {_NAME}=(\d+);function {_NAME}\({_NAME}\)\{{return {_NAME}\.scrollHeight-{_NAME}\.scrollTop-{_NAME}\.clientHeight\}}",
+    },
+    # A send's glide home keeps gliding while it is younger than this (`g25`,
+    # right before the follow judge `lF1`).
+    {
+        "keys": ["followGlide"],
+        "pattern": rf"var {_NAME}=(\d+);function {_NAME}\(\{{atBottom:",
+    },
+    # A wheel, a touch or a key is the person's intent for this long (`c25`,
+    # after the two key sets and before the controls that keep a Space).
+    {
+        "keys": ["followIntent"],
+        "pattern": rf"{_NAME}=new Set\(\[[^\]]+\]\),{_NAME}=new Set\(\[[^\]]+\]\),{_NAME}=(\d+),{_NAME}='",
+    },
 ]
 
 # Words the panel keeps in its script — lists read whole, as JSON: the
@@ -148,6 +166,21 @@ WANTED_WORDS = [
         + r"\]\.reverse\(\)\],"
         + _NAME
         + r"=\[([^\]]+)\]",
+    },
+    # The keys that scroll the list up and down (`u25`, `m25`), and what keeps
+    # a Space for itself (`l25`) — one selector, kept whole.
+    {
+        "key": "followUpKeys",
+        "pattern": _NAME + r"=new Set\(\[([^\]]+)\]\)," + _NAME + r"=new Set\(\[[^\]]+\]\)," + _NAME + r"=\d+," + _NAME + r"='",
+    },
+    {
+        "key": "followDownKeys",
+        "pattern": _NAME + r"=new Set\(\[[^\]]+\]\)," + _NAME + r"=new Set\(\[([^\]]+)\]\)," + _NAME + r"=\d+," + _NAME + r"='",
+    },
+    {
+        "key": "followControls",
+        "whole": True,
+        "pattern": _NAME + r"=new Set\(\[[^\]]+\]\)," + _NAME + r"=new Set\(\[[^\]]+\]\)," + _NAME + r"=\d+," + _NAME + r"='([^']+)'",
     },
 ]
 # The panel's own variables, read off its `html` rule.
@@ -199,12 +232,13 @@ def constants_of(script: str) -> dict[str, int]:
 
 
 def words_of(script: str) -> dict[str, list[str]]:
-    """The script's word lists (`WANTED_WORDS`), each found exactly once."""
+    """The script's word lists (`WANTED_WORDS`), each found exactly once; a
+    `whole` entry is one string, kept as a list of one."""
     found: dict[str, list[str]] = {}
     for want in WANTED_WORDS:
         hits = re.findall(want["pattern"], script)
         if len(hits) == 1:
-            found[want["key"]] = json.loads("[" + hits[0] + "]")
+            found[want["key"]] = [hits[0]] if want.get("whole") else json.loads("[" + hits[0] + "]")
     return found
 
 

@@ -291,7 +291,7 @@ function stopStatusVerb(word) {
 function revealStatusVerb(word, to, width) {
   if (word.__revealFrame) cancelAnimationFrame(word.__revealFrame);
   word.__revealFrame = null;
-  if (document.hidden || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+  if (document.hidden || motionReduced()) {
     writeTextContent(word, to);
     return;
   }
@@ -318,4 +318,172 @@ function revealStatusVerb(word, to, width) {
     word.__revealFrame = requestAnimationFrame(frame);
   };
   word.__revealFrame = requestAnimationFrame(frame);
+}
+
+/* ---- the list keeps to its foot until the person leaves it (t-6323 A5) -----
+ *
+ * The extension's list (2.1.280 `VG0`, `lF1`): standing within 50px of its
+ * foot (`TF`) and not scrolled away, it follows the words as they come.
+ * Leaving is an intent, not a distance — an upward wheel, touch or key
+ * (ArrowUp, PageUp, Home, Shift+Space) leaves at once however near the foot
+ * the list stood, and so does a move up the page did not cause (the thumb
+ * dragged); a move back down into the last 50px comes back. A wheel or a
+ * touch that a box inside the list can still scroll (a tool's well, a diff,
+ * a code block) is that box's. Sending comes back as well and glides home
+ * (`scrollToBottomOnSend`, on by default), and while the glide is young
+ * (`g25`) new words keep it gliding. The extension grows no "jump to latest"
+ * button, and neither does this page. The numbers, the keys and what keeps a
+ * Space for itself are the panel's own, held to its snapshot by
+ * `the_conversation_wears_the_extensions_own_measures`. */
+const CHAT_FOLLOW = Object.freeze({ slack: 50, intent: 300, glide: 2000 });
+const CHAT_FOLLOW_KEYS = Object.freeze({ up: new Set(["ArrowUp", "PageUp", "Home"]), down: new Set(["ArrowDown", "PageDown", "End"]) });
+const CHAT_FOLLOW_CONTROL = "button, [role=\"button\"], input, textarea, [contenteditable]:not([contenteditable=\"false\"])";
+
+/* Whether the page is asked for less motion. */
+function motionReduced() {
+  return window.matchMedia?.("(prefers-reduced-motion: reduce)").matches === true;
+}
+
+/* How far the list stands above its foot. */
+function chatFootGap(list) {
+  return list.scrollHeight - list.scrollTop - list.clientHeight;
+}
+
+/* The list's following, brought up to where the list stands now: a move its
+ * `scroll` event has not told yet — a place set a moment ago in this same
+ * task — is read here as that event would read it, so no answer lags the
+ * list. */
+function chatFollowState(list) {
+  list.__follow ??= {
+    away: false, top: list.scrollTop, height: list.scrollHeight, intent: null, at: 0, touch: null, gliding: null,
+  };
+  noteChatScroll(list, list.__follow);
+  return list.__follow;
+}
+
+/* One move of the list, read as the extension reads its `scroll`: up is
+ * leaving — unless the list only shrank under a reader who never asked to go
+ * up, or it stands at its very foot — and down into the last 50px is coming
+ * back, unless the person was on the way up or the move only kept pace with
+ * rows that grew above. */
+function noteChatScroll(list, state) {
+  const top = list.scrollTop;
+  if (top === state.top) return;
+  const height = list.scrollHeight;
+  const gap = height - top - list.clientHeight;
+  const intent = Date.now() - state.at < CHAT_FOLLOW.intent ? state.intent : null;
+  const grew = height - state.height;
+  const kept = intent === null && grew > 0 && Math.abs(top - state.top - grew) <= 1;
+  const up = top < state.top;
+  state.top = top;
+  state.height = height;
+  state.intent = null;
+  if (gap < CHAT_FOLLOW.slack) state.gliding = null;
+  if (up) {
+    if (grew < 0 && gap > 1 && intent !== "up") return;
+    state.away = gap > 1 || intent === "up";
+  } else if (gap < CHAT_FOLLOW.slack && intent !== "up" && !kept) {
+    state.away = false;
+  }
+}
+
+/* Whether the person has left the list's foot. */
+function chatAway(list) {
+  return chatFollowState(list).away;
+}
+
+/* Whether new words should carry the list to its foot — asked before they
+ * are drawn, as the extension asks: never once the person has left, yes
+ * within the last 50px, and yes while a send's glide is under way. A new turn
+ * is no reason to take the scroll from a reader above (09-18: following on
+ * every new turn dragged them to the foot at each poll). */
+function chatFollows(list) {
+  if (!list) return false;
+  const state = chatFollowState(list);
+  return !state.away && (chatFootGap(list) < CHAT_FOLLOW.slack || state.gliding !== null);
+}
+
+/* To the foot — gliding while a send's glide is young and motion is welcome,
+ * at once otherwise. */
+function carryToFoot(list) {
+  const state = chatFollowState(list);
+  const young = state.gliding !== null && Date.now() - state.gliding < CHAT_FOLLOW.glide;
+  if (!young) state.gliding = null;
+  if (young && !motionReduced()) list.scrollTo({ top: list.scrollHeight, behavior: "smooth" });
+  else list.scrollTop = list.scrollHeight;
+}
+
+/* A send brings the person back: the list follows again and goes home,
+ * gliding when it stood more than the slack away. */
+function returnToFoot(list) {
+  if (!list) return;
+  const state = chatFollowState(list);
+  state.away = false;
+  if (chatFootGap(list) >= CHAT_FOLLOW.slack) state.gliding = Date.now();
+  carryToFoot(list);
+}
+
+/* The conversation list of the page `node` stands on, or null. */
+function pageTurnsOf(node) {
+  for (let at = node; at; at = at.parentElement) if (at.__helperPage) return at.__helperPage.turns;
+  return null;
+}
+
+/* Whether a box between `target` and the list can still scroll that way —
+ * then the wheel or the touch is that box's, not the list's. */
+function innerScrolls(list, target, up) {
+  for (let box = target instanceof Element ? target : null; box && box !== list; box = box.parentElement) {
+    if (box.scrollHeight <= box.clientHeight + 1) continue;
+    const overflow = getComputedStyle(box).overflowY;
+    if (overflow !== "auto" && overflow !== "scroll") continue;
+    if (up ? box.scrollTop > 0 : box.scrollTop + box.clientHeight < box.scrollHeight - 1) return true;
+  }
+  return false;
+}
+
+/* The person's hand on the list: a wheel, a touch or a key says which way
+ * they mean to go, and the scroll says where the list went. The listeners
+ * live on the list and go with it. */
+function keepToFoot(list) {
+  const state = chatFollowState(list);
+  const leave = () => {
+    if (list.scrollTop <= 0) return;
+    state.away = true;
+    state.intent = "up";
+    state.at = Date.now();
+  };
+  const toward = () => {
+    state.intent = "down";
+    state.at = Date.now();
+    if (chatFootGap(list) < CHAT_FOLLOW.slack) state.away = false;
+  };
+  const go = (up, target) => {
+    if (innerScrolls(list, target, up)) return;
+    if (up) leave();
+    else toward();
+  };
+  list.addEventListener("wheel", (event) => {
+    if (event.ctrlKey || event.shiftKey || Math.abs(event.deltaY) <= Math.abs(event.deltaX)) return;
+    go(event.deltaY < 0, event.target);
+  }, { passive: true });
+  list.addEventListener("touchstart", (event) => {
+    state.touch = event.touches[0]?.clientY ?? null;
+  }, { passive: true });
+  list.addEventListener("touchmove", (event) => {
+    const y = event.touches[0]?.clientY;
+    if (y === undefined || state.touch === null || y === state.touch) return;
+    const up = y > state.touch;
+    state.touch = y;
+    go(up, event.target);
+  }, { passive: true });
+  list.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented) return;
+    if (event.key === " ") {
+      if (event.target instanceof Element && event.target.closest(CHAT_FOLLOW_CONTROL)) return;
+      if (event.shiftKey) leave();
+      else toward();
+    } else if (CHAT_FOLLOW_KEYS.up.has(event.key)) leave();
+    else if (CHAT_FOLLOW_KEYS.down.has(event.key)) toward();
+  });
+  list.addEventListener("scroll", () => noteChatScroll(list, state), { passive: true });
 }

@@ -12008,13 +12008,14 @@ function helperListTail(list) {
 
 function scrollHelperToBottom(list) {
   if (!list) return;
-  list.scrollTop = list.scrollHeight;
+  carryToFoot(list);
   requestAnimationFrame(() => {
     // 늦게 도착한 프레임은 그 사이 일어난 일을 모른다: 이 줄을 예약할 때
     // 바닥이던 사람이 프레임이 오기 전에 위를 읽기 시작했을 수 있고, 부하가
-    // 클수록 그 틈이 넓다. 다시 묻고 나서 옮긴다 — 방금 바닥으로 보낸 판은
-    // 여전히 바닥이므로 따라가던 사람은 그대로 따라간다.
-    if (!list.isConnected || !helperFollowsTail(list)) return;
+    // 클수록 그 틈이 넓다. 다시 묻고 나서 옮긴다 — 떠났다는 것은 거리가
+    // 아니라 사람의 뜻이므로(`chatAway`), 늦게 선 행이 바닥을 밀어냈어도
+    // 따라가던 사람은 그대로 따라간다.
+    if (!list.isConnected || chatAway(list)) return;
     // The list is the one thing on this page that scrolls, so it is the one
     // thing this moves. `scrollIntoView` on the last row is not the same
     // move: it scrolls every scrollable ancestor as well — the document
@@ -12022,23 +12023,8 @@ function scrollHelperToBottom(list) {
     // conversation stood a title bar's height below the viewport was dragged
     // down (and, on a wide row, sideways) until the tab strip and the side
     // rail were out of the window (2026-09-21, installed 1.1.11).
-    list.scrollTop = list.scrollHeight;
+    carryToFoot(list);
   });
-}
-
-/* 바닥 근처의 폭. 이 안에 있으면 새 턴을 따라가고, 위를 읽는 중이면 자리를
- * 지킨다. 그리는 픽셀이 아니라 스크롤 판정의 문턱이라 간격 스케일 밖의
- * px다. */
-const HELPER_FOLLOW_SLACK_PX = 160;
-
-/* 읽는 사람이 꼬리를 따라가는 중인가 — 판정은 이 한 곳에서만 한다.
- *
- * 새 턴이 왔다는 것은 스크롤을 빼앗을 이유가 되지 못한다: 09-18의 자동 스크롤
- * 최적화가 이 조건을 잃고 `newest || follow`로 부르면서, 위를 읽던 사람을 폴
- * 마다 바닥으로 끌어내렸고 앞쪽이 잘릴 때의 자리 보정까지 덮어썼다. 창 하네스
- * 둘(`heldPlace`·`anchorHeld`)이 그날부터 그것을 말하고 있었다. */
-function helperFollowsTail(list) {
-  return !!list && list.scrollHeight - list.scrollTop - list.clientHeight <= HELPER_FOLLOW_SLACK_PX;
 }
 
 /* ---- Focus view: 한 턴의 도구 일을 요약 한 줄 뒤로 ----
@@ -12319,7 +12305,7 @@ function syncHelperTurns(list, run) {
     return;
   }
   const first = held[0].seq;
-  const follow = helperFollowsTail(list);
+  const follow = chatFollows(list);
   const beforeHeight = list.scrollHeight;
   const beforeTop = list.scrollTop;
   let dropped = false;
@@ -12495,7 +12481,7 @@ function paintLiveAnswerNow(row, text, run) {
     row.__tailText = "";
   }
   const list = row.closest(".helper-turns");
-  const follow = helperFollowsTail(list);
+  const follow = chatFollows(list);
   const cut = settledCut(text, text.length);
   if (cut > row.__settledEnd) {
     settled.replaceChildren();
@@ -12508,7 +12494,7 @@ function paintLiveAnswerNow(row, text, run) {
     tail.replaceChildren();
     if (rest.trim() !== "") paintHelperProse(tail, rest, helperBase(run));
   }
-  if (follow) list.scrollTop = list.scrollHeight;
+  if (follow) carryToFoot(list);
 }
 
 /* The row a voice streams into: an answer's row before it closes (the same
@@ -12541,6 +12527,8 @@ function helperTurnsNode(run) {
   list.setAttribute("role", "log");
   list.setAttribute("aria-label", t("worker.transcript", "헬퍼 대화 기록"));
   list.tabIndex = 0;
+  // It keeps to its foot until the person leaves it (t-6323 A5).
+  keepToFoot(list);
   // A person's words stuck at the top (the extension's sticky header) are a
   // door back to where they were said: a click scrolls the row home.
   list.addEventListener("click", (event) => {
@@ -12806,6 +12794,9 @@ function workerComposerNode(run, owner = null) {
       // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
       // 상자에 있다는 사실을 남긴다.
       else await composerDeliver(run, message, () => { pasted = true; });
+      // Sent: the page goes back to its foot, as the extension's does
+      // (`scrollToBottomOnSend`, t-6323 A5).
+      returnToFoot(pageTurnsOf(form));
       if (run.draft === draft && box.value === draft) {
         box.value = "";
         run.draft = "";
@@ -13027,7 +13018,13 @@ function chatDockNode(host, composer) {
   dock.appendChild(composer);
   if (typeof ResizeObserver === "function") {
     const watch = new ResizeObserver(() => {
+      // The list's foot moves with the dock (the dock's height is the list's
+      // padding): a list at its foot stays there, as the extension's follows
+      // its input's height (t-6323 A5).
+      const list = host.__helperPage?.turns ?? null;
+      const follow = chatFollows(list);
       host.style.setProperty("--chat-dock-h", `${dock.offsetHeight}px`);
+      if (follow) carryToFoot(list);
     });
     watch.observe(dock);
     host.__dockWatch = watch;
@@ -14170,7 +14167,7 @@ function paintPaneLive(term) {
   if (!held?.on || !held.host || held.host.hidden) return;
   const list = held.host.querySelector(".helper-turns");
   if (!list) return;
-  const follow = helperFollowsTail(list);
+  const follow = chatFollows(list);
   syncStreamingTurns(list, held.tab.worker);
   if (follow) scrollHelperToBottom(list);
 }

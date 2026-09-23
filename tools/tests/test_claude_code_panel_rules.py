@@ -37,7 +37,18 @@ SCRIPT = (
     "cx(()=>{U(Be(Y))},(B)=>{let K=[2000,3000,5000];return B<K.length?K[B]:5000});"
     "let Q=null,z=0,G=40,q=(U)=>{if(U-z<G){Q=requestAnimationFrame(q);return}z=U};"
     'var wU0=["·","✢","*","✶","✻","✽"],OU0=[...wU0,...[...wU0].reverse()],tD1=["Baking","Pondering"];'
+    "b1();var TF=50;function dH($){return $.scrollHeight-$.scrollTop-$.clientHeight}var g25=2000;"
+    "function lF1({atBottom:$,scrolledAway:J,settlingSince:Z,now:X}){if(J)return null}"
+    'var u25=new Set(["ArrowUp","PageUp","Home"]),m25=new Set(["ArrowDown","PageDown","End"]),c25=300,'
+    "l25='button, [role=\"button\"], input',cF1=new WeakMap;"
 )
+# The word lists that script carries, as the snapshot keeps them.
+WORDS = {
+    "spinnerVerbs": ["Baking", "Pondering"],
+    "followUpKeys": ["ArrowUp", "PageUp", "Home"],
+    "followDownKeys": ["ArrowDown", "PageDown", "End"],
+    "followControls": ['button, [role="button"], input'],
+}
 
 
 class RuleReading(unittest.TestCase):
@@ -89,7 +100,7 @@ class RuleReading(unittest.TestCase):
         self.assertEqual(written["vars"], {"--corner-radius-small": "4px"})
         self.assertEqual(written["rules"]["sendButton"]["border-radius"], "5px")
         self.assertEqual((bare["constants"], bare["words"]), ({}, {}))
-        self.assertEqual(written["words"], {"spinnerVerbs": ["Baking", "Pondering"]})
+        self.assertEqual(written["words"], WORDS)
         self.assertTrue(rules.same_measures(written, dict(written, fetched_at="later")))
         self.assertFalse(rules.same_measures(written, dict(written, version="0.0.1")))
         self.assertFalse(rules.same_measures(written, dict(written, constants={"diffMaxHeight": 201})))
@@ -111,9 +122,12 @@ class ScriptMeasures(unittest.TestCase):
                 "spinnerVerbEvery": 5000,
                 "spinnerRevealStep": 40,
                 "spinnerGlyphStep": 120,
+                "followSlack": 50,
+                "followGlide": 2000,
+                "followIntent": 300,
             },
         )
-        self.assertEqual(rules.words_of(SCRIPT), {"spinnerVerbs": ["Baking", "Pondering"]})
+        self.assertEqual(rules.words_of(SCRIPT), WORDS)
         renamed = SCRIPT.replace("EV0", "Qz9").replace("WG0", "a1$").replace("cN", "zz")
         self.assertEqual(rules.constants_of(renamed)["userMessageMaxHeight"], 60)
         self.assertEqual(rules.constants_of(renamed)["longTextChars"], 250)

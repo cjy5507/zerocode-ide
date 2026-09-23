@@ -17661,16 +17661,59 @@ fn the_conversation_wears_the_extensions_own_measures() {
     }
     // What makes a tool's words long is words, not pixels: the page's one
     // table of it (`CHAT_CLIP`) says the panel's own numbers (`cN`).
-    let clip = window_source();
     let wanted_clip = format!(
         "const CHAT_CLIP = Object.freeze({{ lines: {}, chars: {} }});",
         constant("longTextLines"),
         constant("longTextChars")
     );
-    if !clip.contains(&wanted_clip) {
+    if !source.contains(&wanted_clip) {
         drifted.push(format!(
             "the page's `CHAT_CLIP` is not the panel's `cN` — wanted `{wanted_clip}`"
         ));
+    }
+    // The list keeps to its foot by the panel's own rule (t-6323 A5): the
+    // slack, the intent's window and the glide's (`CHAT_FOLLOW`), the keys
+    // that scroll it (`CHAT_FOLLOW_KEYS`) and what keeps a Space for itself
+    // (`CHAT_FOLLOW_CONTROL`).
+    let words = |key: &str| -> Vec<String> {
+        panel["words"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("the snapshot has no word list `{key}`"))
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect()
+    };
+    let keys = |key: &str| -> String {
+        words(key)
+            .iter()
+            .map(|word| format!("\"{word}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let wanted_follow = [
+        format!(
+            "const CHAT_FOLLOW = Object.freeze({{ slack: {}, intent: {}, glide: {} }});",
+            constant("followSlack"),
+            constant("followIntent"),
+            constant("followGlide")
+        ),
+        format!(
+            "const CHAT_FOLLOW_KEYS = Object.freeze({{ up: new Set([{}]), down: new Set([{}]) }});",
+            keys("followUpKeys"),
+            keys("followDownKeys")
+        ),
+        format!(
+            "const CHAT_FOLLOW_CONTROL = \"{}\";",
+            words("followControls").concat().replace('"', "\\\"")
+        ),
+    ];
+    for wanted in wanted_follow {
+        if !source.contains(&wanted) {
+            drifted.push(format!(
+                "the list does not keep to its foot by the panel's rule — wanted `{wanted}`"
+            ));
+        }
     }
     assert!(
         drifted.is_empty(),
