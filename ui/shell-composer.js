@@ -43,14 +43,51 @@ function showPaneScreen(term) {
   if (typeof paneChatOn === "function" && paneChatOn(term)) setPaneChat(term, false);
 }
 
-/* The CLI's spelling as words a person reads: `bypassPermissions` →
- * "bypass permissions", `workspace-write` → "workspace write". No table of
- * translations — the mode is the CLI's vocabulary, only its casing is opened. */
-function permissionModeWords(mode) {
+/* The mode as a person reads it: the CLI's own word when the catalog has it
+ * (Claude Code's panel says "Manual", "Edit automatically" — `AB0`, 2.1.280),
+ * else the CLI's spelling opened up: `bypassPermissions` → "bypass
+ * permissions", `workspace-write` → "workspace write". No table of
+ * translations — the mode is the CLI's vocabulary. */
+function permissionModeWords(mode, spec = null) {
+  const said = permissionModeRow(spec, mode)?.label;
+  if (said) return said;
   return String(mode)
     .replace(/([a-z])([A-Z])/g, "$1 $2")
     .replace(/[-_]+/g, " ")
     .toLowerCase();
+}
+
+/* The catalog's row for a mode, by its reported spelling or another the CLI
+ * gives it (Claude Code 2.1.280's `--help` says `manual` for `default`). */
+function permissionModeRow(spec, mode) {
+  return (spec?.permission_modes ?? []).find((row) => row.mode === mode || row.aliases?.includes(mode)) ?? null;
+}
+
+/* The mode Shift+Tab — or the chip — steps to next. A CLI whose cycle the
+ * catalog orders (its rows carry the CLI's words) steps in that order, the
+ * extension's own (`d6`: a mode kept only while current drops out once left),
+ * over the modes the session says it takes; any other steps through the
+ * session's list as the session gave it. */
+function nextPermissionMode(spec, current, offered) {
+  const worded = (spec?.permission_modes ?? []).filter((row) => row.label);
+  if (worded.length) {
+    const takes = (row) => !offered.length || [row.mode, ...(row.aliases ?? [])].some((id) => offered.includes(id));
+    const cycle = worded.filter((row) => (row.cycles || row.mode === current) && takes(row));
+    if (!cycle.length) return null;
+    const at = cycle.findIndex((row) => row.mode === current || row.aliases?.includes(current));
+    return cycle[(at + 1) % cycle.length].mode;
+  }
+  if (!offered.length) return null;
+  return offered[(offered.indexOf(current) + 1) % offered.length];
+}
+
+/* What stops a pane's turn: the key its CLI names on its own screen
+ * (`interrupt_key`: Claude Code and zo say "esc to interrupt"), else the
+ * terminal's own interrupt. */
+function interruptPress(spec) {
+  return spec?.interrupt_key
+    ? { key: spec.interrupt_key, ctrl: false, alt: false }
+    : { key: "c", ctrl: true, alt: false };
 }
 
 /* How far the run's permission mode reaches, off the catalog's console table
@@ -83,6 +120,7 @@ function wearReach(node, reach) {
 function composerRoad(run, spec = null) {
   if (run.wire) {
     const log = () => run.wireLog ?? {};
+    const voiced = () => spec ?? installedAgents().find((row) => row.id === run.agent) ?? null;
     return {
       model: () => log().model ?? "",
       models: async () => {
@@ -101,11 +139,12 @@ function composerRoad(run, spec = null) {
       mode: () => log().mode ?? "",
       canChangeMode: () => (log().modes?.length ?? 0) > 1,
       cycleMode: () => {
-        const modes = log().modes ?? [];
-        const at = modes.findIndex((mode) => mode.id === log().mode);
-        const next = modes[(at + 1) % modes.length];
-        return next ? invoke("wire_set_mode", { id: run.wire, mode: next.id }) : Promise.resolve();
+        const next = nextPermissionMode(voiced(), log().mode, (log().modes ?? []).map((mode) => mode.id));
+        return next ? invoke("wire_set_mode", { id: run.wire, mode: next }) : Promise.resolve();
       },
+      // The session's own interrupt request (`wire_interrupt`) — the stop
+      // button and Esc both send it.
+      interrupt: () => invoke("wire_interrupt", { id: run.wire }),
       // The commands the wire itself announced (ACP's available commands,
       // Claude Code's `slash_commands`); the window's own ride along in the
       // palette as everywhere. A wire that announces names alone borrows
@@ -141,6 +180,7 @@ function composerRoad(run, spec = null) {
     cycleMode: () => cyclePanePermission(run, spec),
     catalog: (cwd, refresh) => slashCatalogFor(spec.id, cwd, refresh),
     send: (text) => deliverToPane(run.term, text),
+    interrupt: () => invoke("term_key", { term: run.term, press: interruptPress(spec) }),
     // 판에게는 출처가 둘이다. 제 전사가 말한 것이 먼저고(모든 CLI가
     // 남긴다), 그것이 없으면 zo 채널이 세션에 대해 말한 것. 셋째는 없다 —
     // 훅은 토큰을 나르지 않는다.
@@ -681,7 +721,7 @@ function paintComposerModeChip(chip, run, spec) {
   const shown = Boolean(mode);
   writeHidden(chip, !shown);
   if (!shown) return;
-  writeTextContent(chip.querySelector(".worker-composer-pill-words"), permissionModeWords(mode));
+  writeTextContent(chip.querySelector(".worker-composer-pill-words"), permissionModeWords(mode, spec));
   const tip = run.wire
     ? road.canChangeMode()
       ? t("composer.mode.wireTip", "권한 모드 바꾸기 (선의 다음 모드)")
@@ -1053,4 +1093,112 @@ function composerSlash(form, box, run, spec, cwd) {
     void open();
   });
   return { slash, refresh: () => open(true), close };
+}
+
+/* ---- the keys (t-6323 A3) ---------------------------------------------------
+ *
+ * The extension's prompt keys (2.1.280 webview `dB0`): Enter sends and Shift+
+ * Enter or Ctrl+J breaks the line (`zC1`; an Enter inside a composition is
+ * the composition's); Shift+Tab steps the permission mode (`d6`); ArrowUp at
+ * the very start of the box recalls the previous prompt and ArrowDown at the
+ * very end walks back toward the draft (`Uq0` — the session's prompts and
+ * the queued ones, newest first, no wrap). The palette and the menus take
+ * their keys first (the palette listens in the capture phase and prevents
+ * what it takes), so a key they used is not one of these. */
+function composerKeys(form, box, run, spec) {
+  box.addEventListener("keydown", (event) => {
+    if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      form.requestSubmit();
+      return;
+    }
+    if (event.key.toLowerCase() === "j" && event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
+      event.preventDefault();
+      box.setRangeText("\n", box.selectionStart, box.selectionEnd, "end");
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      return;
+    }
+    if (event.key === "Tab" && event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey) {
+      const road = composerRoad(run, spec);
+      if (!road.canChangeMode()) return;
+      event.preventDefault();
+      road.cycleMode().catch((error) => showError(error));
+      return;
+    }
+    if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+      if (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (recallComposerHistory(box, run, event.key === "ArrowUp" ? 1 : -1)) event.preventDefault();
+    }
+  });
+  // Emptied by hand or sent: the walk starts again from the newest.
+  box.addEventListener("input", () => {
+    if (box.value === "" && !box.__recalling) box.__recall = null;
+  });
+  form.addEventListener("submit", () => {
+    box.__recall = null;
+  });
+}
+
+/* The prompts ArrowUp walks through, newest first: what is queued, then what
+ * the person said on this page. */
+function composerHistory(run) {
+  const said = (run.helper?.turns ?? []).filter((turn) => turn.role === "user").map((turn) => turn.text);
+  return [...(run.queue ?? [])].reverse().concat(said.reverse()).filter((text) => text.trim() !== "");
+}
+
+/* One step through the history (`by` 1 = older, -1 = newer), under the
+ * extension's own rule: older only with the caret at the very start of the
+ * box, newer only at the very end and only while a recall stands; past the
+ * newest the draft comes back. Answers whether it moved, so the key does its
+ * ordinary work when it did not. */
+function recallComposerHistory(box, run, by) {
+  const start = box.selectionStart === 0 && box.selectionEnd === 0;
+  const end = box.selectionStart === box.value.length && box.selectionEnd === box.value.length;
+  const held = box.__recall ?? { at: -1, draft: "" };
+  const history = composerHistory(run);
+  let at;
+  if (by > 0) {
+    if (!start || held.at + 1 >= history.length) return false;
+    if (held.at === -1) held.draft = box.value;
+    at = held.at + 1;
+  } else {
+    if (!end || held.at === -1) return false;
+    at = held.at - 1;
+  }
+  held.at = at;
+  box.__recall = held;
+  box.__recalling = true;
+  box.value = at === -1 ? held.draft : history[at];
+  box.dispatchEvent(new Event("input", { bubbles: true }));
+  box.__recalling = false;
+  if (at === -1) box.__recall = null;
+  // Back through the history the caret stays at the start, so the next
+  // ArrowUp walks on; forward it goes to the end.
+  const caret = by > 0 ? 0 : box.value.length;
+  box.setSelectionRange(caret, caret);
+  return true;
+}
+
+/* A plain Esc anywhere on a conversation page interrupts its turn — the
+ * extension's own (`zU0`, listening on the whole panel): no modifier, no
+ * repeat, no composition, and only while the turn is out. A popup that took
+ * the key first (the palette, a menu) prevented it; a question standing as
+ * its card is answered there, unless the person is typing in the box. The
+ * page's run is read when the key comes: one host carries several pages. */
+function interruptOnEscape(host) {
+  if (host.__interruptKeys) return;
+  host.__interruptKeys = true;
+  host.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.defaultPrevented || event.repeat) return;
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+    if (event.isComposing || event.keyCode === 229) return;
+    const run = host.__helperPage?.run;
+    if (!run || !composerWorking(run)) return;
+    const typing = event.target?.closest?.(".worker-composer-box") !== null && event.target?.closest?.(".worker-composer-box") !== undefined;
+    if (host.querySelector(".pane-chat-ask") && !typing) return;
+    event.preventDefault();
+    const spec = installedAgents().find((row) => row.id === run.agent) ?? null;
+    void composerRoad(run, spec).interrupt().catch((error) => showError(error));
+  });
 }

@@ -367,3 +367,179 @@ export async function testConversationPaths(browser, origin, ok) {
     await page.close();
   }
 }
+
+/* A3 — the keyboard. The extension's prompt keys (2.1.280 webview): a plain
+ * Esc interrupts the turn from anywhere on the panel (`zU0` on body; a popup
+ * takes it first, a permission card too); Shift+Tab steps the permission
+ * mode through `d6` — [Don't ask while in it] Manual, Edit automatically,
+ * Plan, Auto, Bypass permissions — in the CLI's own words; ArrowUp at the
+ * very start of the box recalls the previous prompt (the session's, newest
+ * first, queued ones included) and ArrowDown at the very end walks back to
+ * the draft; Enter sends, Shift+Enter or Ctrl+J breaks the line. The wire's
+ * interrupt is its own request; a pane's is the key its CLI names
+ * (`interrupt_key`: Claude Code and zo say "esc to interrupt" on their own
+ * screens). The stop button is the same interrupt. */
+export async function testConversationKeys(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.evaluate(() => {
+      window.__CALLS__ = [];
+      for (const name of ["wire_interrupt", "wire_set_mode", "wire_send", "term_key"]) {
+        const before = window.__ANSWER__[name];
+        window.__ANSWER__[name] = (args) => {
+          window.__CALLS__.push([name, args]);
+          return typeof before === "function" ? before(args) : null;
+        };
+      }
+    });
+    await openConversation(page, [
+      { role: "user", text: "첫째 부탁" },
+      { role: "assistant", text: "네." },
+      { role: "user", text: "둘째 부탁" },
+      { role: "assistant", text: "알겠습니다." },
+    ], { status: "working" });
+    const seen = await page.evaluate(async () => {
+      const seen = {};
+      const settle = async () => {
+        await pollHelperPages();
+        for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      };
+      const face = document.querySelector("#worker-view");
+      const box = face.querySelector(".worker-composer-box");
+      const press = (target, key, extra = {}) => target.dispatchEvent(new KeyboardEvent("keydown", {
+        key, bubbles: true, cancelable: true, ...extra,
+      }));
+      const calls = (name) => window.__CALLS__.filter(([called]) => called === name).map(([, args]) => args);
+      const tab = tabs.find((one) => one.id === activeTabId);
+      const log = window.__CONVERSATION__;
+      log.status = "working";
+      log.modes = ["acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk", "plan"].map((id) => ({ id, name: id }));
+      await settle();
+
+      // Esc from the list (not only the box) interrupts a working turn.
+      box.blur();
+      press(face.querySelector(".helper-turns"), "Escape");
+      await settle();
+      seen.escWorking = JSON.stringify(calls("wire_interrupt"));
+      // A modifier, a repeat or a composition is not the interrupt.
+      press(box, "Escape", { shiftKey: true });
+      press(box, "Escape", { repeat: true });
+      press(box, "Escape", { isComposing: true });
+      await settle();
+      seen.escIgnored = calls("wire_interrupt").length;
+      // The stop button is the same interrupt (it threw before: the road had none).
+      face.querySelector(".worker-composer-send.is-stop")?.click();
+      await settle();
+      seen.stopInterrupts = calls("wire_interrupt").length;
+      // Idle: nothing to interrupt.
+      log.status = "idle";
+      await settle();
+      press(box, "Escape");
+      await settle();
+      seen.escIdle = calls("wire_interrupt").length;
+
+      // Shift+Tab: the extension's order, the CLI's words, from the box.
+      const chipWords = () => face.querySelector(".worker-composer-mode .worker-composer-pill-words")?.textContent ?? "";
+      const steps = [];
+      const walk = ["default", "acceptEdits", "plan", "auto", "bypassPermissions"];
+      for (const mode of walk) {
+        log.mode = mode;
+        await settle();
+        const words = chipWords();
+        const before = calls("wire_set_mode").length;
+        press(box, "Tab", { shiftKey: true });
+        await settle();
+        steps.push([mode, words, calls("wire_set_mode")[before]?.mode ?? null]);
+      }
+      seen.steps = steps;
+      log.mode = "dontAsk";
+      await settle();
+      seen.dontAskWords = chipWords();
+      const beforeDontAsk = calls("wire_set_mode").length;
+      press(box, "Tab", { shiftKey: true });
+      await settle();
+      seen.dontAskNext = calls("wire_set_mode")[beforeDontAsk]?.mode ?? null;
+
+      // ArrowUp at the start recalls, newest first; ArrowDown at the end walks back.
+      box.focus();
+      box.value = "쓰던 글";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      box.setSelectionRange(2, 2);
+      press(box, "ArrowUp");
+      seen.midCaret = box.value;
+      box.setSelectionRange(0, 0);
+      press(box, "ArrowUp");
+      seen.up1 = box.value;
+      box.setSelectionRange(0, 0);
+      press(box, "ArrowUp");
+      seen.up2 = box.value;
+      box.setSelectionRange(0, 0);
+      press(box, "ArrowUp");
+      seen.upPastOldest = box.value;
+      box.setSelectionRange(box.value.length, box.value.length);
+      press(box, "ArrowDown");
+      seen.down1 = box.value;
+      box.setSelectionRange(box.value.length, box.value.length);
+      press(box, "ArrowDown");
+      seen.downToDraft = box.value;
+
+      // Ctrl+J breaks the line where the caret stands; Enter sends.
+      box.value = "한 줄";
+      box.dispatchEvent(new Event("input", { bubbles: true }));
+      box.setSelectionRange(1, 1);
+      press(box, "j", { ctrlKey: true });
+      seen.ctrlJ = JSON.stringify(box.value);
+      press(box, "Enter");
+      await settle();
+      seen.sent = JSON.stringify(calls("wire_send").map((args) => args.text));
+
+      // A pane's conversation: Esc and the stop button press the key its CLI
+      // names (Claude Code: "esc to interrupt"), not the terminal's ^C.
+      const term = await openTermTab({ placement: "tab" });
+      paneAgents.set(term, "claude");
+      hookStates.set(term, "working");
+      window.__ANSWER__.pane_log = () => ({ found: true, next: 1, skipped: false, more: false, folded: false,
+        turns: [{ role: "user", text: "판의 부탁" }] });
+      await setPaneChat(term, true);
+      for (let beat = 0; beat < 4; beat += 1) await window.__PAINTED__();
+      const held = paneChats.get(term);
+      const keysFor = () => calls("term_key").filter((args) => args.term === term).map((args) => args.press);
+      press(held.host.querySelector(".helper-turns"), "Escape");
+      await settle();
+      seen.paneEsc = JSON.stringify(keysFor());
+      held.host.querySelector(".worker-composer-send.is-stop")?.click();
+      await settle();
+      seen.paneStop = JSON.stringify(keysFor());
+      return seen;
+    });
+    ok(
+      "A3: a plain Esc anywhere on the conversation interrupts the turn — down the wire, or on a pane by the key its CLI names (Esc, not ^C) — while a modifier, a repeat, a composition or an idle turn does not, and the stop button is that same interrupt",
+      seen.escWorking === JSON.stringify([{ id: 41 }]) && seen.escIgnored === 1 && seen.stopInterrupts === 2 &&
+        seen.escIdle === 2 &&
+        seen.paneEsc === JSON.stringify([{ key: "Escape", ctrl: false, alt: false }]) &&
+        seen.paneStop === JSON.stringify([{ key: "Escape", ctrl: false, alt: false }, { key: "Escape", ctrl: false, alt: false }]),
+      JSON.stringify(seen),
+    );
+    ok(
+      "A3: Shift+Tab steps the permission mode in the extension's order and the chip says the CLI's words — Manual → Edit automatically → Plan → Auto → Bypass permissions → Manual — and Don't ask steps out to Manual",
+      JSON.stringify(seen.steps) === JSON.stringify([
+        ["default", "Manual", "acceptEdits"],
+        ["acceptEdits", "Edit automatically", "plan"],
+        ["plan", "Plan", "auto"],
+        ["auto", "Auto", "bypassPermissions"],
+        ["bypassPermissions", "Bypass permissions", "default"],
+      ]) && seen.dontAskWords === "Don't ask" && seen.dontAskNext === "default",
+      JSON.stringify(seen),
+    );
+    ok(
+      "A3: ArrowUp at the very start of the box recalls the session's prompts newest first and stops at the oldest, ArrowDown at the very end walks back to the draft, a caret mid-text moves as text does, Ctrl+J breaks the line and Enter sends",
+      seen.midCaret === "쓰던 글" && seen.up1 === "둘째 부탁" && seen.up2 === "첫째 부탁" &&
+        seen.upPastOldest === "첫째 부탁" && seen.down1 === "둘째 부탁" && seen.downToDraft === "쓰던 글" &&
+        seen.ctrlJ === JSON.stringify("한\n 줄") && seen.sent === JSON.stringify(["한\n 줄"]),
+      JSON.stringify(seen),
+    );
+    ok("A3: the keys raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}

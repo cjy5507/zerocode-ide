@@ -1556,6 +1556,8 @@ pub struct AgentPresence {
     /// ([`AgentVoice::read_offset_base`]) — what the conversation's tool row
     /// opens a read's file at.
     pub read_offset_base: Option<u8>,
+    /// The key that interrupts the CLI's turn ([`AgentVoice::interrupt_key`]).
+    pub interrupt_key: Option<&'static str>,
 }
 
 /// How far a permission mode lets the agent act before it asks — the one
@@ -1582,10 +1584,38 @@ pub enum PermissionReach {
 pub struct PermissionMode {
     pub mode: &'static str,
     pub reach: PermissionReach,
+    /// The CLI's own word for the mode, as its screen and its panel say it
+    /// (Claude Code 2.1.280: "Manual", "Edit automatically", …). Empty where
+    /// it was not measured; the page then opens the mode's own spelling.
+    pub label: &'static str,
+    /// Whether Shift+Tab steps through the mode. `false` for a mode the CLI
+    /// keeps in its cycle only while it is already in it (Claude Code's
+    /// `dontAsk`: the first press leaves it and it drops out).
+    pub cycles: bool,
+    /// Other spellings the CLI gives the same mode — Claude Code 2.1.280's
+    /// `--help` lists `manual` where its sessions report `default`.
+    pub aliases: &'static [&'static str],
 }
 
 const fn mode(mode: &'static str, reach: PermissionReach) -> PermissionMode {
-    PermissionMode { mode, reach }
+    PermissionMode {
+        mode,
+        reach,
+        label: "",
+        cycles: true,
+        aliases: &[],
+    }
+}
+
+/// A mode with the CLI's own word for it, in its cycle.
+const fn worded(mode: &'static str, reach: PermissionReach, label: &'static str) -> PermissionMode {
+    PermissionMode {
+        mode,
+        reach,
+        label,
+        cycles: true,
+        aliases: &[],
+    }
 }
 
 /// How a CLI is driven without its screen: the arguments that start it on a
@@ -1651,6 +1681,10 @@ pub struct AgentVoice {
     /// and says the lines it read, so the count must be the CLI's own. `None`
     /// where it was not measured: the file then opens at its top.
     pub read_offset_base: Option<u8>,
+    /// The key that interrupts the CLI's turn on its own screen — what a
+    /// pane's Esc and its stop button press. `None` where the CLI's screen
+    /// was not read for it; the page then sends the terminal's own interrupt.
+    pub interrupt_key: Option<&'static str>,
 }
 
 /// The consoles this catalog knows — read off each CLI's own screen and its
@@ -1674,15 +1708,31 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             models_provider: Some("claude"),
             // `shift+tab to cycle`, on Claude Code's own status line.
             permission_road: Some("shift-tab"),
-            // The modes the extension's own stylesheet colours (2.1.278
-            // `sendButton[data-permission-mode=…]`): acceptEdits inverts the
-            // button, plan wears the plan colour, bypassPermissions and auto
-            // the error colour. `default` and the rest ask.
+            // In the order Shift+Tab steps through them and in Claude Code's
+            // own words — the extension's cycle (2.1.280 `d6`: dontAsk only
+            // while it is the mode, then default, acceptEdits, plan, auto,
+            // bypassPermissions) and its labels (`AB0`). The reach is what the
+            // extension's stylesheet colours (`sendButton[data-permission-
+            // mode=…]`): acceptEdits inverts the button, plan wears the plan
+            // colour, bypassPermissions and auto the error colour; the two
+            // that ask wear nothing.
             permission_modes: &[
-                mode("acceptEdits", PermissionReach::Edits),
-                mode("plan", PermissionReach::Plan),
-                mode("bypassPermissions", PermissionReach::Bypass),
-                mode("auto", PermissionReach::Bypass),
+                PermissionMode {
+                    cycles: false,
+                    ..worded("dontAsk", PermissionReach::Ask, "Don't ask")
+                },
+                PermissionMode {
+                    aliases: &["manual"],
+                    ..worded("default", PermissionReach::Ask, "Manual")
+                },
+                worded("acceptEdits", PermissionReach::Edits, "Edit automatically"),
+                worded("plan", PermissionReach::Plan, "Plan"),
+                worded("auto", PermissionReach::Bypass, "Auto"),
+                worded(
+                    "bypassPermissions",
+                    PermissionReach::Bypass,
+                    "Bypass permissions",
+                ),
             ],
             // `claude -p` fed and read as stream-json: the lines its own
             // panel streams from (`--include-partial-messages`), permission
@@ -1714,6 +1764,9 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // `Read {offset: 10930}` came back opening `10930→` (2.1.280,
             // measured 2026-09-23): the offset is the first line itself.
             read_offset_base: Some(1),
+            // "esc to interrupt" on its own status line (the 2.1.280 binary
+            // says it twice; the extension's Esc is the same interrupt).
+            interrupt_key: Some("Escape"),
         },
     ),
     (
@@ -1748,6 +1801,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             compact_command: Some("/compact"),
             // Codex reads files through its shell; it has no read tool.
             read_offset_base: None,
+            // The 0.156.0 binary names no interrupt key in its words.
+            interrupt_key: None,
         },
     ),
     (
@@ -1773,6 +1828,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             compact_command: Some("/compact"),
             // `read_file`'s schema: "a 0-based line window".
             read_offset_base: Some(0),
+            // Its status line: "Working (0s • esc to interrupt)" (tui/view.rs).
+            interrupt_key: Some("Escape"),
         },
     ),
     (
@@ -1798,6 +1855,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             compact_command: None,
             // agy's read tool is not measured here.
             read_offset_base: None,
+            // Nor its interrupt key.
+            interrupt_key: None,
         },
     ),
 ];
@@ -1815,6 +1874,7 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     plan_tool: None,
     compact_command: None,
     read_offset_base: None,
+    interrupt_key: None,
 };
 
 /// One agent's console, or the silent one for an agent the table does not
@@ -1910,6 +1970,7 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                     && agent_voice(spec.id).exit_command.is_some(),
                 compact_command: agent_voice(spec.id).compact_command,
                 read_offset_base: agent_voice(spec.id).read_offset_base,
+                interrupt_key: agent_voice(spec.id).interrupt_key,
             }
         })
         .collect()
@@ -1923,13 +1984,14 @@ pub fn wire_road(id: &str) -> Option<WireRoad> {
 }
 
 /// How far `mode` lets `agent` act on its own — [`PermissionReach::Ask`] for
-/// a mode the console does not name, or no mode at all.
+/// a mode the console does not name, or no mode at all. A mode is known by
+/// its reported spelling or any other the CLI gives it.
 #[must_use]
 pub fn permission_reach(agent: &str, mode: &str) -> PermissionReach {
     agent_voice(agent)
         .permission_modes
         .iter()
-        .find(|row| row.mode == mode)
+        .find(|row| row.mode == mode || row.aliases.contains(&mode))
         .map_or(PermissionReach::Ask, |row| row.reach)
 }
 
@@ -2087,10 +2149,56 @@ mod tests {
             PermissionReach::Ask
         );
         assert_eq!(permission_reach("nobody", "anything"), PermissionReach::Ask);
+        assert_eq!(permission_reach("claude", "manual"), PermissionReach::Ask);
+        let claude = super::agent_voice("claude").permission_modes;
+        let edits = claude
+            .iter()
+            .find(|row| row.mode == "acceptEdits")
+            .expect("acceptEdits is named");
         assert_eq!(
-            serde_json::to_value(super::agent_voice("claude").permission_modes[0]).unwrap(),
-            serde_json::json!({"mode": "acceptEdits", "reach": "edits"})
+            serde_json::to_value(edits).unwrap(),
+            serde_json::json!({"mode": "acceptEdits", "reach": "edits",
+                "label": "Edit automatically", "cycles": true, "aliases": []})
         );
+    }
+
+    /// Claude Code's modes stand in the order its panel's Shift+Tab steps
+    /// through them (2.1.280 `d6`), each in its own word (`AB0`): `dontAsk`
+    /// only while it is the mode, `default` also spelled `manual` by `--help`.
+    #[test]
+    fn claude_codes_modes_are_its_cycle_in_its_own_words() {
+        let claude = super::agent_voice("claude").permission_modes;
+        let order: Vec<(&str, &str, bool)> = claude
+            .iter()
+            .map(|row| (row.mode, row.label, row.cycles))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("dontAsk", "Don't ask", false),
+                ("default", "Manual", true),
+                ("acceptEdits", "Edit automatically", true),
+                ("plan", "Plan", true),
+                ("auto", "Auto", true),
+                ("bypassPermissions", "Bypass permissions", true),
+            ]
+        );
+        assert_eq!(claude[1].aliases, ["manual"]);
+        // The other consoles name their modes without words of their own.
+        for id in ["codex", "zo"] {
+            assert!(
+                super::agent_voice(id)
+                    .permission_modes
+                    .iter()
+                    .all(|row| row.label.is_empty() && row.cycles && row.aliases.is_empty()),
+                "{id}"
+            );
+        }
+        // The interrupt key is named where the CLI's own screen says it.
+        assert_eq!(super::agent_voice("claude").interrupt_key, Some("Escape"));
+        assert_eq!(super::agent_voice("zo").interrupt_key, Some("Escape"));
+        assert!(super::agent_voice("codex").interrupt_key.is_none());
+        assert!(super::SILENT_CONSOLE.interrupt_key.is_none());
     }
 
     use super::*;

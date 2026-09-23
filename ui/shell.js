@@ -12685,12 +12685,6 @@ function workerComposerNode(run, owner = null) {
     run.draft = box.value;
     fit();
   });
-  box.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" || event.shiftKey) return;
-    if (event.isComposing || event.keyCode === 229) return;
-    event.preventDefault();
-    form.requestSubmit();
-  });
   const tools = document.createElement("div");
   tools.className = "worker-composer-tools";
   // 첨부(t-2993)는 제 모듈의 것 — 칩 줄은 상자 위에, 「+」는 도구 줄 맨 왼쪽에.
@@ -12726,6 +12720,9 @@ function workerComposerNode(run, owner = null) {
   const right = document.createElement("div");
   right.className = "worker-composer-right";
   const palette = composerSlash(form, box, run, spec ?? { id: run.agent, name: agentName(run.agent) }, cwd);
+  // Enter, Ctrl+J, Shift+Tab and the history keys — after the palette's, so
+  // a key it took is not taken twice (t-6323 A3).
+  composerKeys(form, box, run, spec);
   right.appendChild(palette.slash);
   const send = document.createElement("button");
   send.type = "submit";
@@ -12737,10 +12734,10 @@ function workerComposerNode(run, owner = null) {
     if (send.classList.contains("is-stop")) {
       event.preventDefault();
       event.stopPropagation();
-      if (run.wire) {
-        void composerRoad(run).interrupt();
-      } else if (run.term !== undefined && run.term !== null) {
-        void invoke("term_key", { term: run.term, press: { key: "c", ctrl: true, alt: false } });
+      // The same interrupt Esc sends: the wire's request, or the key the
+      // pane's CLI names (t-6323 A3 — the wire's road had none, and threw).
+      if (run.wire || (run.term !== undefined && run.term !== null)) {
+        void composerRoad(run, spec).interrupt().catch((error) => showError(error));
       }
       run.status = "idle";
       run.sending = false;
@@ -12998,7 +12995,9 @@ function paintHelperPage(host, tab) {
   if (run.wire) paintWireAsk(host, run);
   // 처음 서는 페이지는 끝에서 연다 — 사람이 읽는 것은 언제나 끝이다.
   turns.scrollTop = turns.scrollHeight;
-  host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status };
+  host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status, run };
+  // A plain Esc on the page interrupts its turn (t-6323 A3).
+  interruptOnEscape(host);
 }
 
 /* The extension's dock at the foot of the conversation (`inputContainer`):

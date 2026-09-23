@@ -1153,8 +1153,17 @@ const stubBackend = ({ boot, pollers }) => {
         homepage_url: "https://docs.anthropic.com/claude/docs/claude-code", installed: true,
         found_as: "claude", unsupported_here: false, missing_requirement: null,
         takes_a_paste: false, ready: "quiet", glyph: "✻", busy_word: "Pondering…", models_provider: "claude", model_command: "/model", model_command_takes_id: true, permission_road: "shift-tab",
-        permission_modes: [{ mode: "acceptEdits", reach: "edits" }, { mode: "plan", reach: "plan" }, { mode: "bypassPermissions", reach: "bypass" }, { mode: "auto", reach: "bypass" }],
-        wire: "claude-stream", wire_resumes: true, compact_command: "/compact", read_offset_base: 1 },
+        // The catalog's own rows (core `AGENT_VOICES`): Shift+Tab's order and
+        // Claude Code's words for each mode (t-6323 A3).
+        permission_modes: [
+          { mode: "dontAsk", reach: "ask", label: "Don't ask", cycles: false, aliases: [] },
+          { mode: "default", reach: "ask", label: "Manual", cycles: true, aliases: ["manual"] },
+          { mode: "acceptEdits", reach: "edits", label: "Edit automatically", cycles: true, aliases: [] },
+          { mode: "plan", reach: "plan", label: "Plan", cycles: true, aliases: [] },
+          { mode: "auto", reach: "bypass", label: "Auto", cycles: true, aliases: [] },
+          { mode: "bypassPermissions", reach: "bypass", label: "Bypass permissions", cycles: true, aliases: [] },
+        ],
+        wire: "claude-stream", wire_resumes: true, compact_command: "/compact", read_offset_base: 1, interrupt_key: "Escape" },
       { id: "codex", name: "Codex", favicon_domain: "openai.com",
         homepage_url: "https://github.com/openai/codex", installed: true,
         found_as: "codex", unsupported_here: false, missing_requirement: null,
