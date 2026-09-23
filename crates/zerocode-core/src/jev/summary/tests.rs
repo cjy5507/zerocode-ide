@@ -310,6 +310,30 @@ fn a_control_row_is_not_a_request_and_is_counted_nowhere_but_by_name() {
     );
 }
 
+/// The rows the judge weighs are the requests, the marks and the control
+/// rows; the judge's own note and a seat's bookkeeping between them are not
+/// (t-6284) — zo's step governor files a `step` row, with no outcome and no
+/// mark, for every request of a turn.
+#[test]
+fn a_request_a_mark_and_a_control_row_are_weighed_and_a_note_or_a_step_is_not() {
+    let weighed = [
+        json!({"at": 1, "outcome": "answered", "model": "jev-1.13.0"}),
+        json!({"at": 2, "outcome": "no_key"}),
+        json!({"at": 3, "label": "s@1", "agreed": false}),
+        json!({"at": 4, "outcome": CONTROL, "task": 5}),
+    ];
+    let not_weighed = [
+        json!({"at": 5, (TRANSITION.canonical): "rise", "rows": 20}),
+        json!({"at": 6, "kind": "step", "model": "claude-opus-5", "delta": 1}),
+    ];
+    for row in &weighed {
+        assert!(is_request_or_mark(row), "{row}");
+    }
+    for row in &not_weighed {
+        assert!(!is_request_or_mark(row), "{row}");
+    }
+}
+
 #[test]
 fn the_rows_whose_answer_was_acted_on_are_counted_off_whichever_word_the_seat_spelled() {
     let rows = [

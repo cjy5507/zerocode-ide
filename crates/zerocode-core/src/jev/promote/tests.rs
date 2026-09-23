@@ -234,6 +234,56 @@ fn the_rows_of_the_newest_version_start_after_the_last_row_another_answered() {
     );
 }
 
+/// A row that is neither a request nor a mark names no version, whatever it
+/// spells under `model` (t-6284). zo's step governor files one `step` row
+/// per request of a turn between its seat's judgments and labels, and until
+/// then named on it the model the step ran on: read as versions, every step
+/// cut the marks away, and this machine's ledger (56 judgments, 213 labels,
+/// 316 steps) summed to a window cut at `claude-fable-5-1` with nothing
+/// compared. The same shape here: each judgment Jev answered, a step on one
+/// chat model, the label, a step on the next — and the window is the whole
+/// ledger, the marks every label, and the seat rises on them.
+#[test]
+fn a_row_that_is_neither_a_request_nor_a_mark_cuts_no_window() {
+    let seat = &crate::jev::ZO_STEP_EFFORT;
+    let wanted = window_wanted_for(seat).expect("the step seat rises");
+    let chat = ["claude-fable-5-1", "claude-opus-5", "gpt-6-sol"];
+    let model = crate::jev::summary::MODEL.canonical;
+    let mut rows: Vec<Value> = Vec::new();
+    for n in 0..wanted {
+        let at = n * 4;
+        rows.push(json!({"kind": "judgment", "at": at, "outcome": "answered", "elapsedMs": 1, model: "jev-1.13.0"}));
+        rows.push(json!({"kind": "step", "at": at + 1, model: chat[n % chat.len()]}));
+        rows.push(json!({"kind": "label", "at": at + 2, "agreed": true}));
+        rows.push(json!({"kind": "step", "at": at + 3, model: chat[(n + 1) % chat.len()]}));
+    }
+    let version = on_the_newest_version(&rows);
+    assert_eq!(
+        (version.model, version.cut),
+        (Some("jev-1.13.0"), None),
+        "a step's chat model is not the version that answered"
+    );
+    assert_eq!(version.requests, &rows[..]);
+    assert_eq!(version.marks, &rows[..], "no step cuts the labels away");
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(
+        (judged.agreement.compared, judged.cut.as_deref()),
+        (wanted, None)
+    );
+    assert_eq!(judged.verdict, Verdict::Rise, "{judged:?}");
+
+    // A ledger whose requests all went unanswered names no version at all —
+    // not the chat model its steps ran on.
+    let unanswered = [
+        json!({"kind": "judgment", "at": 1, "outcome": "no_key"}),
+        json!({"kind": "step", "at": 2, model: "claude-opus-5"}),
+        json!({"kind": "label", "at": 3, "agreed": false}),
+    ];
+    let version = on_the_newest_version(&unanswered);
+    assert_eq!((version.model, version.cut), (None, None));
+    assert_eq!(version.marks, &unanswered[..]);
+}
+
 /// A seat already acting is judged on the new version's rows and keeps
 /// acting while they are too few to say anything — the standing is read from
 /// the whole ledger — and the judgment's cadence starts again with the

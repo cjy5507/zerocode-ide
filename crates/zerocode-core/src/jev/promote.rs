@@ -49,7 +49,11 @@
 //! a refusal, a timeout, a label, every row written before versions were
 //! recorded — belongs to the version of the nearest row after it that names
 //! one: the seats already standing on their ledgers keep the evidence they
-//! stand on, and only a real change of version starts a window again.
+//! stand on, and only a real change of version starts a window again. Only
+//! a request or a mark names one (t-6284): zo's step seat files a row for
+//! every step of a turn between its judgments and labels, and those rows
+//! carried the chat model each step ran on under the same key — read as
+//! versions, they cut the seat's marks away at every step.
 
 use serde_json::{Value, json};
 
@@ -57,7 +61,7 @@ use crate::jev::{A_WINDOW_OF_COMPARISONS, JevUse};
 
 use crate::jev::summary::{
     AT, JUDGED_EVERY_ROWS, MODEL, TRANSITION, Tally, WILSON_Z_95, asked_something,
-    rows_that_can_clear_forgiving, wilson_lower,
+    is_request_or_mark, rows_that_can_clear_forgiving, wilson_lower,
 };
 
 /// What the judge said of a ledger's rows, and the window it said it on —
@@ -108,15 +112,21 @@ pub struct OnVersion<'rows> {
     /// The rows the window's requests are counted from: every row after the
     /// newest request another version answered.
     pub requests: &'rows [Value],
-    /// The rows the marks are counted from: every row after the newest row
-    /// of any kind that names another version — so a label written down
+    /// The rows the marks are counted from: every row after the newest
+    /// request or mark that names another version — so a label written down
     /// with the version it graded is cut with that version even when it
     /// was written after the other version's last request.
     pub marks: &'rows [Value],
 }
 
-/// The version `row` names as the one that answered it, if it names one.
+/// The version `row` names as the one that answered it, if it names one —
+/// read off a request or a mark alone ([`is_request_or_mark`]), because a
+/// row that is neither answered nothing whatever it spells under
+/// [`MODEL`] (t-6284).
 fn named_version(row: &Value) -> Option<&str> {
+    if !is_request_or_mark(row) {
+        return None;
+    }
     MODEL
         .read(row)
         .and_then(Value::as_str)

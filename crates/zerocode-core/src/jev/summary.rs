@@ -147,7 +147,9 @@ pub const LABEL: LedgerKey = LedgerKey {
 ///
 /// Read by the judge ([`crate::jev::promote::on_the_newest_version`]): an
 /// alias moves when the vendor ships a version, and a floor or a window
-/// fitted to one version silently measures the next (t-6187).
+/// fitted to one version silently measures the next (t-6187). Read off a
+/// request or a mark alone ([`is_request_or_mark`]): a row that is neither
+/// names no version, whatever it carries under this key.
 pub const MODEL: LedgerKey = LedgerKey {
     canonical: "model",
     also: &[],
@@ -387,6 +389,22 @@ pub fn asked_something(row: &Value) -> Option<&str> {
 #[must_use]
 pub fn is_control_row(row: &Value) -> bool {
     OUTCOME.read(row).and_then(Value::as_str) == Some(CONTROL)
+}
+
+/// Whether a row is one the judge weighs: a request ([`asked_something`]), a
+/// mark that grades one ([`AGREED`]), or a control row the routing seat
+/// joins to its agreement ([`is_control_row`]).
+///
+/// A ledger holds other lines beside them — the judge's own notes, and a
+/// seat's bookkeeping that nobody asked or graded, such as the `step` row
+/// zo's step governor files for every request of a turn between its seat's
+/// judgments and labels. None of those is evidence of anything that
+/// answered, so the version a row names ([`MODEL`]) is read off these rows
+/// alone: every step row written before 2026-09-23 still names the chat
+/// model it ran on there (t-6284).
+#[must_use]
+pub fn is_request_or_mark(row: &Value) -> bool {
+    asked_something(row).is_some() || is_control_row(row) || AGREED.read(row).is_some()
 }
 
 /// The last `n` requests, counted — the window §4 judges on.
