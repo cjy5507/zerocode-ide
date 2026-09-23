@@ -29711,6 +29711,132 @@ details.task-board-section > summary {
   font-weight: 600;
 }
 
+/* 과업 흐름: 흐름의 다섯 단계는 작은 꺾쇠로 이어지고, 멈춰 선 셋은 한 칸 떨어져
+ * 선다. 과업이 있는 멈춘 단계만 제 신호의 잉크를 입는다. 누른 단계는 필터 알약과
+ * 같은 옷(보기의 색)이다. */
+.board-desk-stages {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.board-desk-stage {
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-label);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.board-desk-stage:hover {
+  border-color: var(--edge-mark);
+  color: var(--ink-chalk);
+}
+
+.board-desk-stage-count {
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.board-desk-stage.is-flow + .board-desk-stage.is-flow {
+  margin-left: var(--space-3);
+}
+
+.board-desk-stage.is-flow + .board-desk-stage.is-flow::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: calc(100% + var(--space-2) - var(--space-1));
+  width: var(--space-1);
+  height: var(--space-1);
+  border-top: var(--rule-width) solid var(--ink-glyph);
+  border-right: var(--rule-width) solid var(--ink-glyph);
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.board-desk-stage.is-flow + .board-desk-stage:not(.is-flow) {
+  margin-left: var(--space-4);
+}
+
+.board-desk-stage.is-wait {
+  border-color: color-mix(in srgb, var(--signal-wait) 55%, var(--edge-rule));
+  color: var(--signal-wait-ink);
+}
+
+.board-desk-stage.is-halt {
+  border-color: color-mix(in srgb, var(--signal-halt) 55%, var(--edge-rule));
+  color: var(--signal-halt-ink);
+}
+
+.board-desk-stage[aria-pressed="true"] {
+  border-color: var(--workbench-edge);
+  background: var(--workbench-tint);
+  color: var(--ink-chalk);
+}
+
+.board-desk-tasks {
+  display: grid;
+  gap: var(--space-1);
+  max-height: calc(var(--control-height-sm) * 8);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.board-desk-task {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  color: var(--ink-chalk);
+  font-size: var(--text-xs);
+}
+
+.board-desk-task-id {
+  color: var(--ink-label);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+}
+
+.board-desk-task-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-desk-task-note {
+  grid-column: 2;
+  color: var(--ink-label);
+  overflow-wrap: anywhere;
+}
+
+.board-desk-more {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+}
+
+.board-desk-tasks[hidden],
+.board-desk-task-note[hidden],
+.board-desk-more[hidden] {
+  display: none;
+}
+
 .board-desk-release-line {
   display: flex;
   flex-wrap: wrap;

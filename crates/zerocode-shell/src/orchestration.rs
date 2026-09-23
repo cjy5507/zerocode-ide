@@ -1253,6 +1253,9 @@ pub(crate) struct BoardLedgerSnapshot {
     /// summons counts them ([`zerocode_core::orchestration::held_checkouts`]) —
     /// what the task board's machine strip judges the disk beside (t-6588).
     pub(crate) held_checkouts: usize,
+    /// The task board's coordinator desk: the runs in play, their tasks by
+    /// pipeline stage (t-6588, [`desk::desk_snapshot`]).
+    pub(crate) desk: Arc<desk::DeskSnapshot>,
 }
 
 pub(crate) fn board_ledger_snapshot() -> Arc<BoardLedgerSnapshot> {
@@ -1271,6 +1274,9 @@ pub(crate) fn refresh_board_ledger() {
         states: Arc::new(ledger_states_for_seats(ledger, seats)),
         overlays: Arc::new(graph_overlay_snapshot_for_seats(ledger, seats)),
         held_checkouts: zerocode_core::orchestration::held_checkouts(ledger).len(),
+        desk: Arc::new(desk::desk_snapshot(ledger, |seat| {
+            seat_is_held(seats, seat)
+        })),
     }) else {
         return;
     };
@@ -1414,6 +1420,15 @@ pub(crate) fn ledger_revision() -> Option<u64> {
 }
 
 type TeamSeatIndex = std::collections::HashMap<String, std::collections::HashMap<String, u32>>;
+
+/// Whether this window holds the pane a seat names (`team/pane`).
+fn seat_is_held(seats: &TeamSeatIndex, seat: &str) -> bool {
+    seat.split_once('/').is_some_and(|(team, pane)| {
+        seats
+            .get(team)
+            .is_some_and(|panes| panes.contains_key(pane))
+    })
+}
 
 fn index_team_seats(
     teams: &std::collections::HashMap<String, zerocode_core::agent_teams::Team>,

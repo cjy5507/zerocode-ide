@@ -1053,6 +1053,21 @@ fn ledger_state_for_a_reused_seat_comes_from_its_current_worker() {
     );
 }
 
+/// The desk calls a run's coordinator seat this window's only where the pane
+/// the seat names (`team/pane`) is in this window's pane table (t-6588) —
+/// the seat a reply from the board is written as.
+#[test]
+fn a_seat_is_held_only_where_this_window_holds_its_pane() {
+    let seats = super::TeamSeatIndex::from([(
+        "team-1".to_string(),
+        std::collections::HashMap::from([("%0".to_string(), 7_u32)]),
+    )]);
+    assert!(super::seat_is_held(&seats, "team-1/%0"));
+    assert!(!super::seat_is_held(&seats, "team-1/%2"));
+    assert!(!super::seat_is_held(&seats, "team-2/%0"));
+    assert!(!super::seat_is_held(&seats, "team-1"));
+}
+
 /// What the board's ledger readings cost, on this window's real shape.
 ///
 /// In the tree and `#[ignore]`d on purpose. A ledger read was put on the

@@ -113,7 +113,7 @@ pub(crate) use agent_launch::{
 };
 
 pub(crate) use board::{
-    ack_board_agent, agent_icon, board_columns, board_snapshot, claim_coordinator_seat,
+    ack_board_agent, agent_icon, board_columns, board_desk, board_snapshot, claim_coordinator_seat,
     clipboard_has_image, continuation_source, coordinator_handover_status, coordinator_seat_runs,
     create_untitled_markdown, delete_untitled_markdown, hooks_report, install_hooks, ledger_agents,
     machine_load, open_board_popout, orchestration_accuracy, pane_activities, pane_agents,

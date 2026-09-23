@@ -253,6 +253,16 @@ pub(crate) fn ledger_agents() -> std::sync::Arc<Vec<crate::orchestration::Ledger
     std::sync::Arc::clone(&crate::orchestration::board_ledger_snapshot().agents)
 }
 
+/// The task board's coordinator desk (t-6588): the runs in play and their
+/// tasks by pipeline stage, as the standing-order beat last published them
+/// — the same board snapshot `ledger_agents` reads, so no actor request,
+/// revision rebuild or pane-table walk runs on this thread.
+#[tauri::command]
+pub(crate) fn board_desk() -> std::sync::Arc<crate::orchestration::desk::DeskSnapshot> {
+    let _crumb = crate::crumbs::Command::enter("board_desk");
+    std::sync::Arc::clone(&crate::orchestration::board_ledger_snapshot().desk)
+}
+
 /// The task board's machine strip (t-6588): the ledger's volume with the
 /// verdict the next `--worktree` summons would meet, the load against the
 /// cores, and the booted simulators and emulators — what `df -g`, `uptime`

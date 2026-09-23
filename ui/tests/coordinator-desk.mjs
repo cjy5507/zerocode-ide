@@ -257,6 +257,62 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       refused.load === "부하 3.2 · 코어 12" && !refused.loadTone.includes("is-wait") && !refused.ios &&
       refused.android === "Android 에뮬레이터 1" && refused.gone, JSON.stringify(refused));
 
+    /* ---- 과업 흐름: `task-list`의 자리, 멈춰 선 단계가 먼저 펼쳐진다 ---------- */
+    const settleDesk = () => page.evaluate(async () => {
+      for (let beat = 0; beat < 20 && (deskLedgerAsking || deskPaintFrame !== null); beat += 1) {
+        await new Promise((done) => requestAnimationFrame(done));
+      }
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    });
+    await settleDesk();
+    const readPipeline = () => page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-desk-block="pipeline"]');
+      return {
+        shown: Boolean(block) && !block.hidden,
+        head: block?.querySelector(".board-desk-head")?.textContent,
+        chips: [...(block?.querySelectorAll(".board-desk-stage") ?? [])].map((chip) =>
+          `${chip.dataset.stage}:${chip.querySelector(".board-desk-stage-count").textContent}:${chip.getAttribute("aria-pressed")}:${chip.className.replace("board-desk-stage", "").trim()}`),
+        words: [...(block?.querySelectorAll(".board-desk-stage-word") ?? [])].map((node) => node.textContent),
+        rows: [...(block?.querySelectorAll(".board-desk-task") ?? [])].map((row) => ({
+          id: row.querySelector(".board-desk-task-id").textContent,
+          note: row.querySelector(".board-desk-task-note").hidden ? "" : row.querySelector(".board-desk-task-note").textContent })),
+        more: block?.querySelector(".board-desk-more")?.hidden ? "" : block?.querySelector(".board-desk-more")?.textContent,
+      };
+    });
+    const pipeline = await readPipeline();
+    ok("the task flow counts every stage the ledger gives, in the flow's order, stuck stages last",
+      pipeline.shown && pipeline.head === "과업 흐름 · 60" &&
+      pipeline.chips.map((chip) => chip.split(":").slice(0, 2).join(":")).join() ===
+        "pending:6,ready:20,dispatched:5,reported:6,merged:18,gate:2,blocked:2,failed:1" &&
+      pipeline.words.join() === "선행 대기,준비,진행,보고됨,병합,게이트,막힘,실패", JSON.stringify(pipeline));
+    ok("a stuck stage with tasks wears its signal and opens first, naming the gate and its question",
+      pipeline.chips.includes("gate:2:true:is-wait") && pipeline.chips.includes("failed:1:false:is-halt") &&
+      pipeline.chips.includes("blocked:2:false:is-wait") && pipeline.chips.includes("ready:20:false:is-flow") &&
+      pipeline.rows.length === 2 && pipeline.rows.every((row) => /^gate-\d+ · w-\d+ 체크아웃을 수확할까요/.test(row.note)),
+      JSON.stringify(pipeline));
+    await page.click('#board-view [data-desk-block="pipeline"] [data-stage="blocked"]');
+    const blocked = await readPipeline();
+    await page.click('#board-view [data-desk-block="pipeline"] [data-stage="blocked"]');
+    const closed = await readPipeline();
+    ok("a pressed stage lists its tasks with what holds them; pressing it again folds the list",
+      blocked.chips.includes("blocked:2:true:is-wait") && blocked.chips.includes("gate:2:false:is-wait") &&
+      blocked.rows.length === 2 && blocked.rows.every((row) => row.note.startsWith("실패한 선행: t-")) &&
+      closed.rows.length === 0 && closed.chips.every((chip) => chip.split(":")[2] === "false"),
+      JSON.stringify({ blocked, closed }));
+    const long = await page.evaluate(async () => {
+      window.__DESK__ = { ...window.__DESK__, stages: window.__DESK__.stages.map((one) =>
+        one.stage === "ready" ? { ...one, count: 44 } : one) };
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+      return true;
+    });
+    await settleDesk();
+    await page.click('#board-view [data-desk-block="pipeline"] [data-stage="ready"]');
+    const window44 = await readPipeline();
+    ok("a stage longer than the rows the ledger sent says how many more the ledger holds",
+      long && window44.rows.length === 20 && window44.more === "24개 더 — 원장에 있음" &&
+      window44.head === "과업 흐름 · 84", JSON.stringify(window44));
+
     /* ---- 릴리즈 레인: 레인의 `status.json` 그대로 ---------------------- */
     const release = await page.evaluate(() => {
       const card = document.querySelector('#board-view [data-desk-block="release"]');
