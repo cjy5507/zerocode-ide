@@ -473,6 +473,7 @@ mod tests {
             step,
             agreed: Some(agreed),
             not_compared: None,
+            baseline_agreed: None,
         })
     }
 

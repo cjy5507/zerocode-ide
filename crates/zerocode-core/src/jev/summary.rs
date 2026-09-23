@@ -152,6 +152,16 @@ pub const NOT_COMPARED: LedgerKey = LedgerKey {
     canonical: "notCompared",
     also: &[],
 };
+/// Whether the seat's cheapest baseline ([`crate::jev::Baseline`]) would have
+/// been right on the fact a label row grades (t-6342) — written beside
+/// [`AGREED`] by the writer that knows both, or alone on a row whose act was
+/// the baseline's own (an effort move the rule made and carried). The judge
+/// holds the seat's lower bound over its marks to this mark's share
+/// ([`crate::jev::promote::Line::Baseline`]).
+pub const BASELINE_AGREED: LedgerKey = LedgerKey {
+    canonical: "baselineAgreed",
+    also: &[],
+};
 
 /// The model that answered, as the response named it — the version, not the
 /// alias the request asked for (`jev-1.13.0` for `jev-latest`). Written on
@@ -212,6 +222,7 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     PRESSED,
     LABEL,
     NOT_COMPARED,
+    BASELINE_AGREED,
     MODEL,
     BARRED,
     CONTROL_KIND,
@@ -556,7 +567,9 @@ pub fn failures_in_a_row(rows: &[Value]) -> u32 {
 
 /// How often, at or after `since_ms`, a row said the judgment agreed with the
 /// reader it would replace — one comparison per row that carries
-/// [`AGREED`], asked rows and label rows alike.
+/// [`AGREED`], asked rows and label rows alike — beside what the seat's
+/// baseline said ([`BASELINE_AGREED`]) and how many rows said why they
+/// compare nothing ([`NOT_COMPARED`], t-6342).
 #[must_use]
 pub fn agreement_since(rows: &[Value], since_ms: i64) -> crate::jev::promote::Agreement {
     agreement_rows(rows.iter(), since_ms)
@@ -571,14 +584,20 @@ pub fn agreement_rows<'a>(
 ) -> crate::jev::promote::Agreement {
     let mut agreement = crate::jev::promote::Agreement::default();
     for row in rows {
-        let Some(agreed) = AGREED.read(row).and_then(Value::as_bool) else {
-            continue;
-        };
         if AT.read(row).and_then(Value::as_i64).unwrap_or(0) < since_ms {
             continue;
         }
-        agreement.compared += 1;
-        agreement.agreed += usize::from(agreed);
+        let agreed = AGREED.read(row).and_then(Value::as_bool);
+        if let Some(agreed) = agreed {
+            agreement.compared += 1;
+            agreement.agreed += usize::from(agreed);
+        } else if NOT_COMPARED.read(row).is_some() {
+            agreement.not_compared += 1;
+        }
+        if let Some(baseline) = BASELINE_AGREED.read(row).and_then(Value::as_bool) {
+            agreement.baseline_compared += 1;
+            agreement.baseline_agreed += usize::from(baseline);
+        }
     }
     agreement
 }

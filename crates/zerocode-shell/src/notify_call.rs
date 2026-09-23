@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use zerocode_core::jev::summary::{AGREED, APPLIED, LABEL};
+use zerocode_core::jev::summary::{AGREED, APPLIED, BASELINE_AGREED, LABEL};
 use zerocode_core::jev::{JevMode, NOTIFY, NOTIFY_APPLY_DEADLINE_MS, NOTIFY_RECENT_CAP};
 use zerocode_core::notify::{self, Notice, Ring};
 use zerocode_core::notify_call::{
@@ -253,6 +253,10 @@ fn label_row(one: &Waiting, reacted: bool, now_ms: i64) -> Value {
     });
     if let Some(agreed) = notify_call::agreed(one.call, reacted, one.attendance) {
         label[AGREED.canonical] = json!(agreed);
+        // Today's rule on the same ring: the seat's baseline (t-6342).
+        if let Some(baseline) = notify_call::agreed(Call::today(), reacted, one.attendance) {
+            label[BASELINE_AGREED.canonical] = json!(baseline);
+        }
     }
     label
 }

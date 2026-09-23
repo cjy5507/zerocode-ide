@@ -315,6 +315,11 @@ pub struct MentionLabelRow {
     pub rank: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub not_compared: Option<String>,
+    /// Whether the fuzzy page's own first row was the one taken — the
+    /// seat's baseline, today's order (`zerocode_core::jev::MENTION_RERANK`),
+    /// marked beside `agreed` (t-6342).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_agreed: Option<bool>,
 }
 
 /// A page's judgment as this process remembers it. The key carries the
@@ -808,6 +813,7 @@ fn label_row(settled: &Settled, chosen: Option<usize>, reordered: bool) -> Menti
         agreed: chosen.map(|_| rank == Some(0)),
         rank,
         not_compared: chosen.is_none().then(|| zerocode_core::summon_choice::NOT_OFFERED.to_string()),
+        baseline_agreed: chosen.map(|chosen| chosen == 0),
     }
 }
 

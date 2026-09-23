@@ -59,8 +59,8 @@ use serde::{Deserialize, Serialize};
 use zerocode_core::jev::door::Refused;
 use zerocode_core::jev::promote;
 use zerocode_core::jev::{
-    digest_of, fingerprint_of, JevMode, PATCH_REVIEW, PATCH_REVIEW_APPLY_DEADLINE_MS, ROUTE_USE_APPLIED,
-    ROUTE_USE_FALLBACK,
+    digest_of, fingerprint_of, Baseline, JevMode, PATCH_REVIEW, PATCH_REVIEW_APPLY_DEADLINE_MS,
+    ROUTE_USE_APPLIED, ROUTE_USE_FALLBACK,
 };
 
 use super::jev_gate::{self, JevDoor};
@@ -209,6 +209,11 @@ pub struct PatchReviewLabelRow {
     pub applied: bool,
     /// Whether the verdict called what became of the patch.
     pub agreed: bool,
+    /// Whether the seat's baseline — the one verdict the table holds it
+    /// against — called it too (`zerocode_core::jev::summary::BASELINE_AGREED`,
+    /// t-6342).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_agreed: Option<bool>,
     /// What settled it: `receipt` (a check green after the turn's last
     /// edit) and `window` (its turns passed quietly) are a patch that stood,
     /// `regret` one whose lines were edited again (`Hindsight::word`).
@@ -555,6 +560,17 @@ fn label_turn(cwd: &Path, ledger: &Path, turn: Option<&[ConversationMessage]>) -
     write_labels(ledger, done)
 }
 
+/// The verdict the seat's baseline would have given every patch — the table's
+/// own word (`PATCH_REVIEW.baseline`), read rather than spelled here.
+fn baseline_verdict() -> Option<Verdict> {
+    let Baseline::AlwaysSame(word) = PATCH_REVIEW.baseline else {
+        return None;
+    };
+    [Verdict::Permit, Verdict::ProposalOnly]
+        .into_iter()
+        .find(|verdict| verdict.word() == word)
+}
+
 /// One label row per decided review, and the judge run over what they add.
 fn write_labels(ledger: &Path, done: Vec<Waiting>) -> usize {
     let at = super::decision_shadow::unix_millis();
@@ -570,6 +586,7 @@ fn write_labels(ledger: &Path, done: Vec<Waiting>) -> usize {
                 verdict: verdict.word().to_string(),
                 applied: one.applied,
                 agreed: hindsight.agrees_with(verdict)?,
+                baseline_agreed: baseline_verdict().and_then(|baseline| hindsight.agrees_with(baseline)),
                 hindsight: hindsight.word().to_string(),
                 turns_later: one.watched.turns,
             })

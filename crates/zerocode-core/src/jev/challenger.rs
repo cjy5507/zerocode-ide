@@ -27,7 +27,9 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::jev::choice::{self, ChoiceRefusal};
-use crate::jev::summary::{AGREED, AT, LABEL, LedgerKey, WILSON_Z_95, wilson_lower};
+use crate::jev::summary::{
+    AGREED, AT, BASELINE_AGREED, LABEL, LedgerKey, WILSON_Z_95, wilson_lower,
+};
 use crate::jev::{
     A_WINDOW_OF_COMPARISONS, CHALLENGER_DAY_SPEND_PERMILLE, CHALLENGER_DESIGN_CAP,
     CHALLENGER_ONE_IN,
@@ -652,6 +654,14 @@ pub fn label_row(attempt: &str, receipt: Receipt, preferred: Preferred, at_ms: i
     ]);
     if let Some(agreed) = graded.agreed {
         row.insert(AGREED.canonical.to_string(), Value::from(agreed));
+        // The seat's baseline, today's rule: the incumbent's design, which
+        // the attempt acts on anyway — marked on the same receipt (t-6342).
+        if let Some(incumbent) = quality(Some(receipt), Preferred::Incumbent).agreed {
+            row.insert(
+                BASELINE_AGREED.canonical.to_string(),
+                Value::from(incumbent),
+            );
+        }
     }
     Value::Object(row)
 }

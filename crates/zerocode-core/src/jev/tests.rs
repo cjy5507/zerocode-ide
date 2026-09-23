@@ -1623,3 +1623,53 @@ fn a_request_digest_vouches_for_the_seat_the_rubric_the_model_and_the_bytes() {
         "SHA-256 of nothing, cut"
     );
 }
+
+/// Every seat that may rise names the cheapest reader it is held against and
+/// how many times its label must have said no (t-6342); a seat that never
+/// rises names neither.
+#[test]
+fn every_promoting_row_names_a_baseline_and_the_negatives_it_wants() {
+    for row in &JEV_USES {
+        assert_eq!(
+            row.promotes,
+            row.negatives_wanted.is_some(),
+            "{} promotes={} negatives={:?}",
+            row.id,
+            row.promotes,
+            row.negatives_wanted
+        );
+        if let Some(wanted) = row.negatives_wanted {
+            assert_eq!(wanted, NEGATIVES_WANTED, "{}", row.id);
+        }
+        if !row.promotes {
+            assert_eq!(row.baseline, Baseline::None, "{}", row.id);
+        }
+        if let Baseline::AlwaysSame(word) = row.baseline {
+            assert!(!word.trim().is_empty(), "{}", row.id);
+        }
+    }
+    // The two constant answers are words their own seats write.
+    assert_eq!(
+        STALL.baseline,
+        Baseline::AlwaysSame(crate::stall_cause::Cause::LongRunningTool.word())
+    );
+    assert_eq!(
+        PATCH_REVIEW.baseline,
+        Baseline::AlwaysSame(PATCH_REVIEW_PERMIT)
+    );
+    // A seat whose marks grade only its own act has no cheaper reader.
+    for seat in [
+        &BROWSER,
+        &DESKTOP,
+        &EMULATOR,
+        &BROWSER_READ,
+        &JUDGMENT_CACHE,
+    ] {
+        assert_eq!(seat.baseline, Baseline::None, "{}", seat.id);
+    }
+    assert_eq!(Baseline::TodaysRule.kind(), "todays_rule");
+    assert!(!Baseline::None.binds());
+    // What `NEGATIVES_WANTED` says it costs: forty marks at the 800‰ line.
+    assert_eq!(promote::marks_that_can_clear(&PLACEMENT), Some(40));
+    assert_eq!(promote::marks_that_can_clear(&AGENT_TOOL), None);
+}

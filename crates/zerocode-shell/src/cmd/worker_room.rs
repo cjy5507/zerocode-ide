@@ -42,7 +42,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
-use zerocode_core::jev::summary::{AGREED, LABEL, NOT_COMPARED};
+use zerocode_core::jev::summary::{AGREED, BASELINE_AGREED, LABEL, NOT_COMPARED};
 use zerocode_core::jev::{PLACEMENT, PLACEMENT_LABEL_WINDOW_MS, PLACEMENT_SEEN_DWELL_MS};
 use zerocode_core::worker_placement::{
     self, InFront, Placement, PlacementLook, StartedBy, WORKER_PLACEMENT_RUBRIC_VERSION,
@@ -346,7 +346,13 @@ fn label_row(
     // beside it for a reader who wants the finer question; a pane nobody was
     // in front of carries its word and no mark.
     match worker_placement::mark(placed.chosen, ended_in, seen) {
-        Ok(agreed) => label[AGREED.canonical] = json!(agreed),
+        Ok(agreed) => {
+            label[AGREED.canonical] = json!(agreed);
+            // Today's room on the same pane: the seat's baseline (t-6342).
+            if let Some(baseline) = worker_placement::baseline_mark(ended_in, seen) {
+                label[BASELINE_AGREED.canonical] = json!(baseline);
+            }
+        }
         Err(why) => label[NOT_COMPARED.canonical] = json!(why),
     }
     label

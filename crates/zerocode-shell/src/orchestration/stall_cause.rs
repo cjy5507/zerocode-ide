@@ -414,7 +414,13 @@ pub(super) fn label(host: &dyn Host, book: &Arc<Mutex<StallBook>>, ledger: &Ledg
             // nothing (`unknown`, a terminal that died) leaves its own word
             // instead of a mark it has no right to.
             match stall_cause::mark(one.cause, what) {
-                Ok(agreed) => label[summary::AGREED.canonical] = json!(agreed),
+                Ok(agreed) => {
+                    label[summary::AGREED.canonical] = json!(agreed);
+                    // The seat's baseline on the same silence (t-6342).
+                    if let Some(baseline) = stall_cause::baseline_mark(what) {
+                        label[summary::BASELINE_AGREED.canonical] = json!(baseline);
+                    }
+                }
                 Err(why) => label[summary::NOT_COMPARED.canonical] = json!(why),
             }
             labels.push(label);

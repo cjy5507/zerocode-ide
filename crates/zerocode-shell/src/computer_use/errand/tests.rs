@@ -1406,9 +1406,12 @@ fn a_screen_seats_auto_rises_on_its_own_rows_and_falls_when_the_wire_does() {
     // own width, read from the table, so the count lands on the judgment's
     // first cadence and the window it reads is full. The width is not spelled
     // here: it moves with the seat's floor and with what its window forgives.
+    // The oldest few the walks were still stuck after: a label that has
+    // never said no is not evidence (t-6342).
     let wanted = zerocode_core::jev::promote::window_wanted_for(seat).expect("a screen seat rises");
+    let misses = seat.negatives_wanted.expect("a screen seat rises") as i64;
     let rows: Vec<Value> = (0..wanted as i64)
-        .map(|n| answered_press(1_000 + n, true))
+        .map(|n| answered_press(1_000 + n, n >= misses))
         .collect();
     write_rows(seat, &wire, None, &rows, 90_000);
 

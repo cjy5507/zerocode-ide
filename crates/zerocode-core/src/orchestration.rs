@@ -11455,6 +11455,20 @@ pub fn runs_model(agent: &str, model: &str) -> bool {
         }
 }
 
+/// The pinned model's own vendor CLI — the agent whose gauge is the one the
+/// model's family names (`claude` for Anthropic's families, `codex` for
+/// OpenAI's) — the summon seat's baseline, today's rule (t-6342): on this
+/// machine every one of the 82 summonses that pinned a model landed on it.
+/// `None` for a family the table gives no provider.
+#[must_use]
+pub fn native_agent(model: &str) -> Option<&'static str> {
+    let gauge = family_gauge(model).flatten()?;
+    QUOTA_GAUGE
+        .iter()
+        .find(|(_, held)| *held == gauge)
+        .map(|(agent, _)| *agent)
+}
+
 /// The gauge `agent` — launched with `model` — draws on, or `None` when this
 /// window reads no gauge for it.
 #[must_use]

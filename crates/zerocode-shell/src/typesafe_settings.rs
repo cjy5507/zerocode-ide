@@ -1768,7 +1768,9 @@ mod tests {
            "judged":{"window":{"rows":34,"answered":34,"answeredShare":1.0,"answeredLowerBound":0.89,
                      "called":34,"requests":34,"redactedLines":0,"inputTokens":0,"p50Ms":230,"p95Ms":410,
                      "failures":[]},"windowWanted":34,
-                     "agreement":{"compared":44,"agreed":16,"lowerBound":0.24,"controlRows":0}},
+                     "agreement":{"compared":44,"agreed":16,"lowerBound":0.24,"controlRows":0,
+                                  "baselineCompared":44,"baselineAgreed":40,"baselineShare":0.91,"notCompared":3}},
+           "baseline":"todays_rule","negativesWanted":3,
            "stand":"recording","applies":true,
            "verdict":{"verdict":"hold","line":"answered","cutModel":"jev-1.12.0"},
            "days":[{"startMs":1789900000000,"tally":{"rows":3,"answered":3,"answeredShare":1.0,
@@ -1808,6 +1810,19 @@ mod tests {
             (judged.agreement.compared, judged.agreement.agreed),
             (44, 16)
         );
+        // The cheapest reader beside it, and what compared nothing, ride
+        // through to the drawer (t-6342).
+        assert_eq!(
+            (
+                judged.agreement.baseline_compared,
+                judged.agreement.baseline_agreed,
+                judged.agreement.not_compared
+            ),
+            (44, 40, 3)
+        );
+        assert_eq!(summon.baseline.as_deref(), Some("todays_rule"));
+        assert_eq!(summon.negatives_wanted, Some(3));
+        assert_eq!(drawn["judged"]["agreement"]["baselineShare"], 0.91);
         assert_eq!(summon.days.len(), 1);
         assert_eq!(summon.days[0].start_ms, 1_789_900_000_000);
         assert_eq!(summon.days[0].tally.rows, 3);
@@ -1965,6 +1980,13 @@ pub struct SeatNumbers {
     /// absent from a zo older than the label rows (t-5806).
     #[serde(default)]
     pub agreement_week: Option<SeatAgreement>,
+    /// The cheapest reader the seat is held against, by the table's word
+    /// (`always_same`, `todays_rule`, `none`), and how many times its label
+    /// must have said no (t-6342) — absent from a zo older than the baseline.
+    #[serde(default)]
+    pub baseline: Option<String>,
+    #[serde(default)]
+    pub negatives_wanted: Option<usize>,
     #[serde(default)]
     pub cost_usd: Option<f64>,
     /// The id the seat asks with — the person's pin or the alias — and the
@@ -2054,6 +2076,17 @@ pub struct SeatAgreement {
     /// once more beside a judgment already acted on; zero elsewhere.
     #[serde(default)]
     pub control_rows: usize,
+    /// The seat's cheapest baseline over the same marks, and its share
+    /// (t-6342); zeros and `None` from a zo older than the baseline.
+    #[serde(default)]
+    pub baseline_compared: usize,
+    #[serde(default)]
+    pub baseline_agreed: usize,
+    #[serde(default)]
+    pub baseline_share: Option<f64>,
+    /// Label rows that compared nothing and said why.
+    #[serde(default)]
+    pub not_compared: usize,
 }
 
 /// What the judge said of a seat's recent window.

@@ -1007,6 +1007,9 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
     let window = jev_ledger::summarize_rows(held.iter().copied(), i64::MIN);
     let (compared, control_rows) = with_control_rows(version.marks, &held);
     let agreement = agreement_in(&compared);
+    // The label's whole record on this version, as every seat's is read
+    // (`promote::judge_seat`, t-6342).
+    let record = agreement_in(&version.marks.iter().collect::<Vec<_>>());
     let verdict = promote::judge(
         promote::stand_from(rows),
         &promote::Evidence {
@@ -1021,6 +1024,9 @@ pub fn judge_rows(rows: &[serde_json::Value], settings: Option<&serde_json::Valu
             window_forgives: ROUTING.window_forgives.unwrap_or(0),
             labels: labels_standing(settings, version.requests),
             fallbacks_in_a_row: jev_summary::failures_in_a_row(version.requests),
+            negatives_wanted: ROUTING.negatives_wanted.unwrap_or(0),
+            disagreed_on_record: record.disagreed(),
+            baseline: ROUTING.baseline,
         },
     );
     Some(Judged {

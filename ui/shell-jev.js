@@ -242,6 +242,10 @@ const JEV_LINES = Object.freeze({
   schema: { key: "settings.typesafe.lineSchema", word: "형식이 잘못된 응답이 있었습니다" },
   too_few_compared: { key: "settings.typesafe.lineTooFewCompared", word: "정확도를 비교할 표본이 더 필요합니다", wants: "compared" },
   agreement: { key: "settings.typesafe.lineAgreement", word: "정확도가 기준에 못 미칩니다" },
+  unlabeled: { key: "settings.typesafe.lineUnlabeled", word: "정확도를 잴 결과가 아직 없습니다", wants: "compared" },
+  one_sided: { key: "settings.typesafe.lineOneSided", word: "틀렸다는 결과가 거의 없어 정확도를 믿을 수 없습니다" },
+  too_few_baseline: { key: "settings.typesafe.lineTooFewBaseline", word: "가장 단순한 방식과 비교할 표본이 더 필요합니다", wants: "baseline" },
+  baseline: { key: "settings.typesafe.lineBaseline", word: "가장 단순한 방식보다 낫지 않습니다" },
   labels: { key: "settings.typesafe.lineLabels", word: "사람의 평가에서 기존 방식이 더 나았습니다" },
   fallbacks: { key: "settings.typesafe.lineFallbacks", word: "연속으로 기존 방식으로 되돌아갔습니다" },
 });
@@ -782,6 +786,16 @@ function jevTrendCell(held) {
 const JEV_SAMPLES = Object.freeze({
   rows: { key: "jev.window", word: "판정 표본 {{rows}}/{{wanted}}건", owedKey: "jev.owed.rows", owed: "판정까지 {{count}}건" },
   compared: { key: "jev.compared", word: "비교 표본 {{rows}}/{{wanted}}건", owedKey: "jev.owed.compared", owed: "정확도 판정까지 {{count}}건" },
+  baseline: { key: "jev.baselineCompared", word: "기준 비교 표본 {{rows}}/{{wanted}}건", owedKey: "jev.owed.baseline", owed: "기준 비교까지 {{count}}건" },
+});
+
+/* The cheapest reader each feature is held against, by the table's word
+ * (`Baseline::kind`, t-6342): what it would have scored had it always given
+ * one answer, or had it been today's rule. A feature with no such reader
+ * names none. */
+const JEV_BASELINES = Object.freeze({
+  always_same: { key: "jev.baseline.always_same", word: "늘 같은 답" },
+  todays_rule: { key: "jev.baseline.todays_rule", word: "지금의 규칙" },
 });
 
 /* The version the table's judgments come from: the pin when the person
@@ -886,7 +900,9 @@ function jevSamplesOwed(held, standing) {
   if (!sample || !held.judged) return null;
   const [have, want] = wants === "rows"
     ? [held.judged.window.rows, held.judged.windowWanted]
-    : [held.judged.agreement?.compared ?? 0, standing?.agreementRowsWanted];
+    : wants === "baseline"
+      ? [held.judged.agreement?.baselineCompared ?? 0, standing?.agreementRowsWanted]
+      : [held.judged.agreement?.compared ?? 0, standing?.agreementRowsWanted];
   if (!want) return null;
   const owed = wants === "rows" ? (held.rowsToNextJudgment ?? Math.max(0, want - have)) : Math.max(0, want - have);
   const bar = jevNode("div", "jev-progress", jevNode("span", "jev-progress-fill"));
@@ -1057,6 +1073,21 @@ function paintJevDrawer(view, id, held) {
   if (week?.compared) comparisons.push({ key: "jev.drawer.week", word: "지난 7일", said: matched(week) });
   if (comparisons.length === 0) {
     comparisons.push({ key: "jev.drawer.judged", word: "판정 표본", said: t("jev.drawer.noComparison", "아직 비교한 판단이 없습니다.") });
+  }
+  // The cheapest reader over the same marks — the bar a feature has to beat,
+  // not only its own — and the judgments whose outcome could not tell right
+  // from wrong (t-6342).
+  const reader = JEV_BASELINES[held?.baseline];
+  const beside = judged?.baselineCompared ? judged : week?.baselineCompared ? week : null;
+  if (reader && beside) {
+    comparisons.push({ key: "jev.drawer.baseline", word: "가장 단순한 방식", said: t("jev.drawer.baselineSaid", "{{kind}}: {{agreed}}/{{compared}}건 일치", {
+      kind: t(reader.key, reader.word), agreed: jevCount(beside.baselineAgreed), compared: jevCount(beside.baselineCompared),
+    }) });
+  }
+  if (week?.notCompared) {
+    comparisons.push({ key: "jev.drawer.notCompared", word: "비교하지 않은 판단", said: t("jev.drawer.notComparedSaid", "{{count}}건 (맞았는지 가를 결과가 없음)", {
+      count: jevCount(week.notCompared),
+    }) });
   }
   jevFacts(part("agreement").querySelector("dl"), comparisons);
 

@@ -229,6 +229,11 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
         zerocode_core::jev::promote::Agreement {
             compared: 1,
             agreed: 1,
+            // The pinned model's own vendor CLI named the same agent: the
+            // seat's baseline on the same summons (t-6342).
+            baseline_compared: 1,
+            baseline_agreed: 1,
+            not_compared: 0,
         },
         "a marked row is the one comparison the seat rises on"
     );
@@ -292,8 +297,11 @@ fn a_summons_the_options_never_offered_is_no_comparison_at_all() {
     // And the judge reads it the way the row means it.
     assert_eq!(
         zerocode_core::jev::summary::agreement_since(std::slice::from_ref(&row), 0),
-        zerocode_core::jev::promote::Agreement::default(),
-        "evidence about nothing reached the seat's agreement statistics"
+        zerocode_core::jev::promote::Agreement {
+            not_compared: 1,
+            ..zerocode_core::jev::promote::Agreement::default()
+        },
+        "evidence about nothing reached the seat's agreement statistics, or went uncounted as such"
     );
 }
 

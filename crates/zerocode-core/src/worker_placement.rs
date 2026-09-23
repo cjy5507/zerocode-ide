@@ -344,6 +344,14 @@ pub fn mark(chosen: Placement, ended_in: Placement, seen: bool) -> Result<bool, 
     }
 }
 
+/// What the placement seat's baseline — today's room, the tab — would have
+/// been marked on the same pane (t-6342): the same rule as [`mark`], with
+/// [`Placement::TODAYS`] as the answer.
+#[must_use]
+pub fn baseline_mark(ended_in: Placement, seen: bool) -> Option<bool> {
+    mark(Placement::TODAYS, ended_in, seen).ok()
+}
+
 /// Every room, in the order the table spells them — what a reader of
 /// [`PLACEMENT_OPTIONS`] gets as typed values.
 #[must_use]

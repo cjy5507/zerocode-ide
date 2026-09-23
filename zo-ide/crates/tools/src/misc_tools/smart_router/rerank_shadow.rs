@@ -519,6 +519,9 @@ struct Settled {
     applied: bool,
     /// The judgment's order, each note with the path recall handed it under.
     proposed: Vec<(String, String)>,
+    /// Recall's own first note, before any judgment — the seat's baseline,
+    /// today's rule (`zerocode_core::jev::RECALL`, t-6342).
+    recall_first: Option<(String, String)>,
 }
 
 type ReadingSlot = Arc<Mutex<Option<Settled>>>;
@@ -558,8 +561,9 @@ fn note_settled(slot: &ReadingSlot, row: &RerankShadowRow, hits: &[MemoryHit]) {
     if proposed.is_empty() {
         return;
     }
+    let recall_first = hits.first().map(|hit| (hit.entry.slug.clone(), hit.entry.path.clone()));
     if let Ok(mut settled) = slot.lock() {
-        *settled = Some(Settled { query: row.query, notes: row.notes, applied: row.applied, proposed });
+        *settled = Some(Settled { query: row.query, notes: row.notes, applied: row.applied, proposed, recall_first });
     }
 }
 
@@ -592,6 +596,11 @@ pub struct RerankLabelRow {
     /// (`zerocode_core::jev::summary::NOT_COMPARED`).
     #[serde(default, rename = "notCompared", skip_serializing_if = "Option::is_none")]
     pub not_compared: Option<String>,
+    /// Whether recall's own first note was touched on the same turn — the
+    /// seat's baseline's mark (`zerocode_core::jev::summary::BASELINE_AGREED`),
+    /// written beside `agreed` (t-6342).
+    #[serde(default, rename = "baselineAgreed", skip_serializing_if = "Option::is_none")]
+    pub baseline_agreed: Option<bool>,
 }
 
 /// Write the recall seat's mark for the turn that just ended, judged on
@@ -651,6 +660,15 @@ pub fn mark(touched: &[usize]) -> Result<bool, &'static str> {
 fn label_row(settled: &Settled, turn: &[ConversationMessage]) -> RerankLabelRow {
     let touched: Vec<usize> = touched_in_order(&settled.proposed, turn);
     let graded = mark(&touched);
+    // Today's rule on the same turn: whether recall's own first note was
+    // touched — marked only beside a mark of the seat's, so the two are read
+    // over the same turns.
+    let baseline_agreed = graded.is_ok().then(|| {
+        settled
+            .recall_first
+            .as_ref()
+            .is_some_and(|first| !touched_in_order(std::slice::from_ref(first), turn).is_empty())
+    });
     RerankLabelRow {
         at: unix_millis(),
         label: format!("{}:{}", settled.query, settled.notes),
@@ -660,6 +678,7 @@ fn label_row(settled: &Settled, turn: &[ConversationMessage]) -> RerankLabelRow 
         agreed: graded.ok(),
         rank: touched.first().copied(),
         not_compared: graded.err().map(str::to_string),
+        baseline_agreed,
     }
 }
 
@@ -2078,8 +2097,7 @@ mod tests {
     /// judgment's order — where the recall before the rise read recall's own.
     #[test]
     fn auto_rises_on_its_own_labels_and_the_next_recall_reads_the_judgments_order() {
-        use zerocode_core::jev::promote::{window_wanted_for, Verdict, ROSE};
-        use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+        use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for, Verdict, ROSE};
         let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
         let hits = three();
         let (before, verdict, rose, after, applied) = machine(zerocode_core::jev::JevMode::Auto.key(), &mock.base_url, |cwd| {
@@ -2119,10 +2137,15 @@ mod tests {
             )
             .unwrap_or(i64::MAX / 2)
                 + 60_000;
-            for at in 0..JUDGED_EVERY_ROWS {
+            // Enough turns to bound above the budget with the three the label
+            // said no to inside, and recall's own first note beside each
+            // (t-6342).
+            let misses = RECALL.negatives_wanted.expect("recall rises");
+            let marks = marks_that_can_clear(&RECALL).expect("recall rises");
+            for at in 0..marks {
                 let label = serde_json::json!({
                     "at": after_the_window + i64::try_from(at).unwrap_or_default(), "label": format!("{at}:{at}"), "query": at, "notes": at,
-                    "applied": false, "agreed": true, "rank": 0,
+                    "applied": false, "agreed": at >= misses, "baselineAgreed": at % 2 == 0, "rank": 0,
                 });
                 append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
             }

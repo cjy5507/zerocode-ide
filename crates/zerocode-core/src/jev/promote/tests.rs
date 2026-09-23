@@ -62,7 +62,6 @@ fn hindsight_waits_for_the_sample_floor_then_uses_the_same_wilson_line() {
 /// the floor's worth of agreeing marks rise.
 #[test]
 fn a_seat_with_no_marks_holds_at_the_sample_floor_whatever_its_kind() {
-    use crate::jev::summary::rows_that_can_clear;
     for seat in crate::jev::JEV_USES.iter().filter(|row| row.promotes) {
         let wanted = window_wanted_for(seat).expect("a promoting seat");
         let floor = seat.agreement_rows_wanted.expect("a label sample floor");
@@ -78,10 +77,8 @@ fn a_seat_with_no_marks_holds_at_the_sample_floor_whatever_its_kind() {
             "{}: answer rate, latency and shape alone never make a seat act",
             seat.id
         );
-        let marks =
-            rows_that_can_clear(seat.agreement_floor_permille.expect("a budget")).max(floor);
         let mut marked = rows.clone();
-        marked.extend((0..marks).map(|at| json!({"at": wanted + at, "label": at, "agreed": true})));
+        marked.extend(marks_that_rise(seat, wanted));
         assert_eq!(
             judge_seat(seat, &marked).expect("judged").verdict,
             Verdict::Rise,
@@ -92,40 +89,52 @@ fn a_seat_with_no_marks_holds_at_the_sample_floor_whatever_its_kind() {
 }
 
 /// Thirty marks that agree nine times in ten, the three that disagree the
-/// oldest, after a full window of answered rows — the ledger a seat keeps
-/// when the vendor's alias moves under it (t-6187). `on_b` of the marks,
-/// the newest, name version `B`; the rest name `A`; `None` writes no
-/// version at all, the shape of every row before versions were recorded.
-fn marks_across_a_version_change(seat: &JevUse, on_b: Option<usize>) -> Vec<Value> {
+/// oldest, from `at` on.
+fn thirty_marks(at: usize) -> Vec<Value> {
     const MARKS: usize = 30;
     const MISSES: usize = 3;
+    (0..MARKS)
+        .map(|n| json!({"at": at + n, "label": n, "agreed": n >= MISSES}))
+        .collect()
+}
+
+/// A full window of answered rows, then `marks` — the ledger a seat keeps
+/// when the vendor's alias moves under it (t-6187). `on_b` of the marks, the
+/// newest, name version `B`; the rest name `A`; `None` writes no version at
+/// all, the shape of every row before versions were recorded.
+fn marks_across_a_version_change(
+    seat: &JevUse,
+    marks: impl FnOnce(usize) -> Vec<Value>,
+    on_b: Option<usize>,
+) -> Vec<Value> {
     let wanted = window_wanted_for(seat).expect("a promoting seat");
-    let mut rows: Vec<Value> = (0..wanted)
-        .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 1}))
-        .collect();
-    rows.extend((0..MARKS).map(|n| {
-        let mut mark = json!({"at": wanted + n, "label": n, "agreed": n >= MISSES});
-        if let Some(on_b) = on_b {
+    let mut rows = window_then(seat, marks);
+    if let Some(on_b) = on_b {
+        let count = rows.len() - wanted;
+        for (n, mark) in rows[wanted..].iter_mut().enumerate() {
             mark[crate::jev::summary::MODEL.canonical] =
-                json!(if n + on_b >= MARKS { "B" } else { "A" });
+                json!(if n + on_b >= count { "B" } else { "A" });
         }
-        mark
-    }));
+    }
     rows
 }
 
 /// A version change cuts the marks a seat is judged on (t-6187): the
 /// newest five of thirty marks on `B` are five comparisons, not thirty, and
-/// the seat holds at the sample floor naming the version it cut away; the
-/// newest twenty-five on `B` are a sample of their own, and it rises. The
-/// same thirty marks with no version recorded are one sample of 27 in 30,
-/// which bounds under the agreement line.
+/// the seat holds at the sample floor naming the version it cut away; marks
+/// on `B` that clear every line on their own — with the three disagreements
+/// the label's record must hold (t-6342) — are a sample of their own, and it
+/// rises. The same thirty marks with no version recorded are one sample of
+/// 27 in 30, which bounds under the agreement line.
 #[test]
 fn a_seat_is_judged_on_the_marks_of_the_version_that_answers_now() {
     for seat in [&crate::jev::PLACEMENT, &crate::jev::SUMMON] {
         let floor = seat.agreement_rows_wanted.expect("a label sample floor");
-        let judged =
-            judge_seat(seat, &marks_across_a_version_change(seat, Some(5))).expect("judged");
+        let judged = judge_seat(
+            seat,
+            &marks_across_a_version_change(seat, thirty_marks, Some(5)),
+        )
+        .expect("judged");
         assert_eq!(
             judged.verdict,
             Verdict::Hold(Line::TooFewCompared {
@@ -147,15 +156,27 @@ fn a_seat_is_judged_on_the_marks_of_the_version_that_answers_now() {
             "{}: requests that name no version are not cut",
             seat.id
         );
+        let on_b = marks_that_rise(seat, 0).len();
+        let risen = marks_across_a_version_change(
+            seat,
+            |at| {
+                let mut marks = thirty_marks(at);
+                marks.extend(marks_that_rise(seat, at + marks.len()));
+                marks
+            },
+            Some(on_b),
+        );
         assert_eq!(
-            judge_seat(seat, &marks_across_a_version_change(seat, Some(25)))
-                .expect("judged")
-                .verdict,
+            judge_seat(seat, &risen).expect("judged").verdict,
             Verdict::Rise,
-            "{}: twenty-five of version B's own marks, all agreeing",
+            "{}: version B's own marks, clearing every line",
             seat.id
         );
-        let whole = judge_seat(seat, &marks_across_a_version_change(seat, None)).expect("judged");
+        let whole = judge_seat(
+            seat,
+            &marks_across_a_version_change(seat, thirty_marks, None),
+        )
+        .expect("judged");
         assert!(
             matches!(whole.verdict, Verdict::Hold(Line::Agreement { .. })),
             "{}: with no versions recorded the thirty are one sample",
@@ -254,7 +275,7 @@ fn a_row_that_is_neither_a_request_nor_a_mark_cuts_no_window() {
         let at = n * 4;
         rows.push(json!({"kind": "judgment", "at": at, "outcome": "answered", "elapsedMs": 1, model: "jev-1.13.0"}));
         rows.push(json!({"kind": "step", "at": at + 1, model: chat[n % chat.len()]}));
-        rows.push(json!({"kind": "label", "at": at + 2, "agreed": true}));
+        rows.push(json!({"kind": "label", "at": at + 2, "agreed": n >= crate::jev::NEGATIVES_WANTED, "baselineAgreed": n % 2 == 0}));
         rows.push(json!({"kind": "step", "at": at + 3, model: chat[(n + 1) % chat.len()]}));
     }
     let version = on_the_newest_version(&rows);
@@ -314,16 +335,13 @@ fn a_change_of_version_restarts_the_window_and_leaves_the_standing() {
 fn one_forgiven_timeout_does_not_forgive_a_second_one() {
     for seat in [&crate::jev::RECALL, &crate::jev::PLACEMENT] {
         let wanted = window_wanted_for(seat).expect("a promoting seat");
-        let floor = seat.agreement_rows_wanted.expect("a label sample floor");
         for misses in [1, 2] {
-            // A window with the floor's worth of marks, so the one line left
-            // to clear is the answer line.
+            // A window with marks that clear every agreement line, so the
+            // one line left to clear is the answer line.
             let mut rows: Vec<Value> = (0..wanted)
                 .map(|at| json!({"at": at, "outcome": if at < misses {"timeout"} else {"answered"}, "elapsedMs": 1}))
                 .collect();
-            rows.extend(
-                (0..floor).map(|at| json!({"at": wanted + at, "label": at, "agreed": true})),
-            );
+            rows.extend(marks_that_rise(seat, wanted));
             let verdict = judge_seat(seat, &rows).expect("judged").verdict;
             assert_eq!(
                 verdict == Verdict::Rise,
@@ -356,6 +374,7 @@ fn clean() -> Evidence<'static> {
         agreement: Agreement {
             compared: 60,
             agreed: 57,
+            ..Agreement::default()
         },
         agreement_rows_wanted: A_WINDOW_OF_COMPARISONS,
         window_forgives: 0,
@@ -365,6 +384,9 @@ fn clean() -> Evidence<'static> {
             probe_right: 31,
         }),
         fallbacks_in_a_row: 0,
+        negatives_wanted: crate::jev::NEGATIVES_WANTED,
+        disagreed_on_record: crate::jev::NEGATIVES_WANTED,
+        baseline: Baseline::None,
     }
 }
 
@@ -552,6 +574,7 @@ fn with_no_labels_a_seat_rises_on_its_route_change_budget_and_holds_under_it() {
         agreement: Agreement {
             compared: JUDGED_EVERY_ROWS - 1,
             agreed: JUDGED_EVERY_ROWS - 1,
+            ..Agreement::default()
         },
         ..clean()
     };
@@ -570,6 +593,7 @@ fn with_no_labels_a_seat_rises_on_its_route_change_budget_and_holds_under_it() {
         agreement: Agreement {
             compared: 30,
             agreed: 16,
+            ..Agreement::default()
         },
         ..clean()
     };
@@ -592,6 +616,7 @@ fn with_no_labels_a_seat_rises_on_its_route_change_budget_and_holds_under_it() {
         agreement: Agreement {
             compared: JUDGED_EVERY_ROWS,
             agreed: JUDGED_EVERY_ROWS,
+            ..Agreement::default()
         },
         ..clean()
     };
@@ -607,6 +632,7 @@ fn a_persons_labels_outrank_agreement_and_thin_ones_fall_through_to_it() {
         agreement: Agreement {
             compared: 30,
             agreed: 16,
+            ..Agreement::default()
         },
         ..clean()
     };
@@ -624,6 +650,7 @@ fn a_persons_labels_outrank_agreement_and_thin_ones_fall_through_to_it() {
         agreement: Agreement {
             compared: 30,
             agreed: 16,
+            ..Agreement::default()
         },
         ..clean()
     };
@@ -972,8 +999,15 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
             .map(|at| row(at, true))
             .collect::<Vec<_>>()
     ));
-    // Full and agreeing: rises.
-    let full: Vec<serde_json::Value> = (0..wanted as i64).map(|at| row(at, true)).collect();
+    // Full, agreeing but for the three the label said no to, and beating the
+    // seat's baseline beside it: rises (t-6342).
+    let full: Vec<serde_json::Value> = (0..wanted as i64)
+        .map(|at| {
+            let mut marked = row(at, at >= crate::jev::NEGATIVES_WANTED as i64);
+            marked["baselineAgreed"] = json!(at % 2 == 0);
+            marked
+        })
+        .collect();
     let judged = judge_seat(seat, &full).expect("judged");
     assert_eq!(judged.verdict, Verdict::Rise, "{judged:?}");
     assert_eq!(judged.agreement.compared, wanted);
@@ -988,21 +1022,193 @@ fn an_orchestration_seat_is_judged_by_the_table_on_its_own_agreed_marks() {
     let mut labelled: Vec<serde_json::Value> = (0..wanted as i64)
         .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 600, "requests": 1}))
         .collect();
+    labelled.extend((0..wanted as i64).map(|at| {
+        json!({"at": at, "label": format!("k{at}"), "agreed": true, "baselineAgreed": at % 2 == 0})
+    }));
+    // Three old marks that said no: outside the window, and on the record the
+    // label is known to be able to say no by (t-6342).
     labelled.extend(
-        (0..wanted as i64).map(|at| json!({"at": at, "label": format!("k{at}"), "agreed": true})),
+        (1..=3).map(|n: i64| json!({"at": -n, "label": format!("old{n}"), "agreed": false})),
     );
-    labelled.push(json!({"at": -5, "label": "old", "agreed": false}));
     let judged = judge_seat(seat, &labelled).expect("judged");
     assert_eq!(
         judged.agreement,
         Agreement {
             compared: wanted,
-            agreed: wanted
+            agreed: wanted,
+            baseline_compared: wanted,
+            baseline_agreed: wanted.div_ceil(2),
+            not_compared: 0,
         },
-        "the old mark is outside the window"
+        "the old marks are outside the window"
     );
     assert_eq!(judged.verdict, Verdict::Rise);
     // Every seat in the table rises now (t-5806): recall is judged on the
     // same marks, on its own lines.
     assert!(judge_seat(&crate::jev::RECALL, &full).is_some());
+}
+
+/// Marks that clear every agreement line of `seat` from `at` on (t-6342):
+/// three that say no — the record's evidence that the label can — then as
+/// many that say yes as the seat's budget needs to bound above its line with
+/// those three inside, each beside a baseline mark that is right half the
+/// time.
+fn marks_that_rise(seat: &JevUse, at: usize) -> Vec<Value> {
+    let misses = seat.negatives_wanted.expect("a promoting seat");
+    let marks = marks_that_can_clear(seat).expect("a width the line can be cleared on");
+    (0..marks)
+        .map(|n| {
+            json!({"at": at + n, "label": n, "agreed": n >= misses, "baselineAgreed": n % 2 == 0})
+        })
+        .collect()
+}
+
+/// A window of answered rows, then `marks`.
+fn window_then(seat: &JevUse, marks: impl FnOnce(usize) -> Vec<Value>) -> Vec<Value> {
+    let wanted = window_wanted_for(seat).expect("a promoting seat");
+    let mut rows: Vec<Value> = (0..wanted)
+        .map(|at| json!({"at": at, "outcome": "answered", "elapsedMs": 1}))
+        .collect();
+    rows.extend(marks(wanted));
+    rows
+}
+
+/// A label that never says no is not evidence, however many times it says
+/// yes (t-6342): this machine's placement seat rose on thirty marks that all
+/// said yes, and any answer would have earned them. Every promoting seat
+/// holds on a record with fewer disagreements than it asks for — and the
+/// same record with three of them, counted over the version's whole record
+/// rather than the window, rises.
+#[test]
+fn a_seat_whose_labels_never_say_no_cannot_rise() {
+    for seat in crate::jev::JEV_USES.iter().filter(|row| row.promotes) {
+        let all_yes = window_then(seat, |at| {
+            marks_that_rise(seat, at)
+                .into_iter()
+                .map(|mut mark| {
+                    mark["agreed"] = json!(true);
+                    mark
+                })
+                .collect()
+        });
+        assert_eq!(
+            judge_seat(seat, &all_yes).expect("judged").verdict,
+            Verdict::Hold(Line::OneSided {
+                disagreed: 0,
+                wanted: crate::jev::NEGATIVES_WANTED
+            }),
+            "{}",
+            seat.id
+        );
+        let said_no = window_then(seat, |at| marks_that_rise(seat, at));
+        assert_eq!(
+            judge_seat(seat, &said_no).expect("judged").verdict,
+            Verdict::Rise,
+            "{}",
+            seat.id
+        );
+    }
+}
+
+/// A seat's agreement is held to its cheapest reader's share over the same
+/// marks, not only to its own floor (t-6342): a placement seat right four
+/// times in five beside a "today's tab" that was right every time has
+/// earned nothing, and one with no baseline marks at all has not been
+/// compared with anything yet. A seat whose marks grade only its own act has
+/// no such reader and is held to its floor alone.
+#[test]
+fn a_seat_must_beat_its_baseline_not_only_its_floor() {
+    let seat = &crate::jev::PLACEMENT;
+    assert!(seat.baseline.binds());
+    let beaten = window_then(seat, |at| {
+        marks_that_rise(seat, at)
+            .into_iter()
+            .map(|mut mark| {
+                mark["baselineAgreed"] = json!(true);
+                mark
+            })
+            .collect()
+    });
+    let Verdict::Hold(Line::Baseline {
+        bound_permille,
+        baseline_permille,
+    }) = judge_seat(seat, &beaten).expect("judged").verdict
+    else {
+        panic!("a seat the baseline matches rose");
+    };
+    assert_eq!(baseline_permille, 1_000);
+    assert!(bound_permille >= seat.agreement_floor_permille.expect("a budget"));
+    // An acting seat the baseline matches falls.
+    let mut acting = beaten.clone();
+    acting.insert(0, json!({"transition": ROSE}));
+    assert!(matches!(
+        judge_seat(seat, &acting).expect("judged").verdict,
+        Verdict::Fall(Line::Baseline { .. })
+    ));
+    // No baseline marks: nothing to beat yet.
+    let unmeasured = window_then(seat, |at| {
+        marks_that_rise(seat, at)
+            .into_iter()
+            .map(|mut mark| {
+                mark.as_object_mut()
+                    .expect("a mark")
+                    .remove("baselineAgreed");
+                mark
+            })
+            .collect()
+    });
+    assert!(matches!(
+        judge_seat(seat, &unmeasured).expect("judged").verdict,
+        Verdict::Hold(Line::TooFewBaseline { compared: 0, .. })
+    ));
+    // Beaten comfortably: it rises.
+    assert_eq!(
+        judge_seat(seat, &window_then(seat, |at| marks_that_rise(seat, at)))
+            .expect("judged")
+            .verdict,
+        Verdict::Rise
+    );
+    // A seat with no baseline is held to its floor alone.
+    let own = &crate::jev::BROWSER_READ;
+    assert!(!own.baseline.binds());
+    let unmarked = window_then(own, |at| {
+        marks_that_rise(own, at)
+            .into_iter()
+            .map(|mut mark| {
+                mark.as_object_mut()
+                    .expect("a mark")
+                    .remove("baselineAgreed");
+                mark
+            })
+            .collect()
+    });
+    assert_eq!(
+        judge_seat(own, &unmarked).expect("judged").verdict,
+        Verdict::Rise
+    );
+}
+
+/// A seat whose label found nothing to grade says so — "no label" — rather
+/// than reading as one still counting a thin sample (t-6342): the step seat's
+/// every judgment was held back on its wire, so each label row names why it
+/// compares nothing and not one carries a mark.
+#[test]
+fn a_seat_whose_rows_all_compare_nothing_has_no_label() {
+    let seat = &crate::jev::ZO_STEP_EFFORT;
+    let rows = window_then(seat, |at| {
+        (0..5)
+            .map(|n| json!({"at": at + n, "label": n, "notCompared": "not_carried"}))
+            .collect()
+    });
+    assert_eq!(
+        judge_seat(seat, &rows).expect("judged").verdict,
+        Verdict::Hold(Line::Unlabeled { withheld: 5 })
+    );
+    let mut acting = rows;
+    acting.insert(0, json!({"transition": ROSE}));
+    assert_eq!(
+        judge_seat(seat, &acting).expect("judged").verdict,
+        Verdict::Keep,
+        "a fresh window with nothing to grade is not evidence against an acting seat"
+    );
 }

@@ -444,6 +444,10 @@ pub struct StepLabel {
     pub agreed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub not_compared: Option<&'static str>,
+    /// The table's own move, carried: the seat's baseline, marked by the same
+    /// next step (`zerocode_core::jev::summary::BASELINE_AGREED`, t-6342).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_agreed: Option<bool>,
 }
 
 /// The word a decision row carries as its kind.
@@ -852,6 +856,7 @@ impl StepEffortState {
                 step: due.step,
                 agreed: graded.ok(),
                 not_compared: graded.err(),
+                baseline_agreed: (due.carried && !due.seat_moved_it).then_some(progressed),
             }
         });
         let shifted = shift(self.config.floor, self.config.ceiling, self.config.cap(), decision.delta);
@@ -1166,6 +1171,7 @@ mod tests {
             step: 2,
             agreed: Some(true),
             not_compared: None,
+            baseline_agreed: None,
         }))
         .expect("label");
         assert_eq!(label["kind"], "label");

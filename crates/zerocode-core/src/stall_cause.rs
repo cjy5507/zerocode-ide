@@ -333,6 +333,18 @@ pub fn mark(cause: Cause, followed: Followed) -> Result<bool, &'static str> {
     Ok(predicted == shown)
 }
 
+/// What the stall seat's baseline ([`crate::jev::STALL`]'s `baseline`: the
+/// same answer every time) would have been marked on the same silence —
+/// `None` when the baseline is not a constant answer this table knows, or
+/// when what followed says nothing (t-6342).
+#[must_use]
+pub fn baseline_mark(followed: Followed) -> Option<bool> {
+    match crate::jev::STALL.baseline {
+        crate::jev::Baseline::AlwaysSame(word) => mark(Cause::from_word(word)?, followed).ok(),
+        crate::jev::Baseline::TodaysRule | crate::jev::Baseline::None => None,
+    }
+}
+
 /// What followed a silence — the first of these the ledger holds after it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Followed {

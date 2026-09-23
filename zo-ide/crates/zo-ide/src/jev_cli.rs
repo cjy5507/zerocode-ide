@@ -386,6 +386,12 @@ fn agreement_json(agreement: &jev_summary::SeatAgreement) -> Value {
         "compared": agreement.compared,
         "agreed": agreement.agreed,
         "lowerBound": agreement.lower_bound(),
+        // The cheapest reader over the same marks, and the rows that
+        // compared nothing (t-6342): the verdict's other half.
+        "baselineCompared": agreement.baseline_compared,
+        "baselineAgreed": agreement.baseline_agreed,
+        "baselineShare": agreement.baseline_share(),
+        "notCompared": agreement.not_compared,
     })
 }
 
@@ -459,11 +465,11 @@ fn render_json(seats: &[SeatReport]) -> Value {
                 // Every `agreed` mark of the week, counted whether or not the
                 // seat rises — the recall seat's only agreement number, and
                 // the routing seat's turn labels beside its probe axes.
-                "agreementWeek": {
-                    "compared": seat.agreement_week.compared,
-                    "agreed": seat.agreement_week.agreed,
-                    "lowerBound": seat.agreement_week.lower_bound(),
-                },
+                "agreementWeek": agreement_json(&seat.agreement_week),
+                // The reader the seat is held against and how many times its
+                // label must have said no (t-6342), from the table.
+                "baseline": seat.baseline,
+                "negativesWanted": seat.negatives_wanted,
                 "stand": seat.stand.token(),
                 "applies": seat.applies,
                 "verdict": seat.judged.as_ref().map(|judged| json!({
@@ -512,6 +518,21 @@ fn render_text(seats: &[SeatReport]) -> String {
                 " · agrees {} of {}",
                 judged.agreement.agreed, judged.agreement.compared
             );
+            // The cheapest reader on the same marks, when it marked any, and
+            // the rows that compared nothing (t-6342).
+            if let Some(share) = judged.agreement.baseline_share() {
+                let _ = write!(
+                    notes,
+                    " · {} baseline {}/{} ({:.1}%)",
+                    seat.baseline,
+                    judged.agreement.baseline_agreed,
+                    judged.agreement.baseline_compared,
+                    share * 100.0
+                );
+            }
+            if judged.agreement.not_compared > 0 {
+                let _ = write!(notes, " · {} not compared", judged.agreement.not_compared);
+            }
             // The rows that comparison borrowed from the control sample, when
             // it borrowed any: an acting seat's own rows compare nothing.
             if judged.control_rows > 0 {

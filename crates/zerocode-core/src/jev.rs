@@ -383,6 +383,14 @@ pub struct JevUse {
     /// Where the seat's `agreed` marks come from: a second reader, or a
     /// later fact.
     pub agreement_kind: AgreementKind,
+    /// The cheapest reader this seat's accuracy is held against ([`Baseline`],
+    /// t-6342): its share over the same marks is the line the seat's lower
+    /// bound has to clear before `auto` may rise.
+    pub baseline: Baseline,
+    /// How many disagreeing marks the answering version's record must hold
+    /// before the seat's agreement may speak at all (t-6342,
+    /// [`NEGATIVES_WANTED`]). `None` for a seat that never rises.
+    pub negatives_wanted: Option<usize>,
 }
 
 /// What a seat forgives whose miss the product was going to cover anyway: one
@@ -423,6 +431,70 @@ pub enum AgreementKind {
     /// Later outcome labels grade an otherwise eligible seat once populated.
     Hindsight,
 }
+
+/// The cheapest reader a seat's accuracy is held against (t-6342).
+///
+/// An agreement share means nothing next to nothing. On 2026-09-23 this
+/// machine's placement seat had risen on thirty marks that all said yes —
+/// marks any answer would have earned — and the step seat's 522 agreeing
+/// marks of 547 were the rate at which steps progress at all; neither had
+/// ever been put beside the cheapest reader that could have taken its place.
+/// TypeSafe's own guide holds a feature to its baselines (always the same
+/// answer, today's rule, a size) before it is worth keeping, and so does the
+/// judge now: a seat rises only when its agreement's lower bound clears its
+/// baseline's share over the same marks ([`promote::Line::Baseline`]).
+///
+/// The seat's label writer stamps [`summary::BASELINE_AGREED`] — the
+/// baseline's own mark for the fact the seat's `agreed` grades — so the
+/// summary counts both in one pass. A seat whose writer stamps none yet holds
+/// at `too_few_baseline`, as a seat with no marks holds at
+/// `too_few_compared`. A size rule was the third reader weighed; no seat's
+/// cheapest reader is one today (the patch review's size ranks regret at
+/// AUC 0.688, but "always permit" is cheaper and higher on the agreement
+/// line, 79.2% against the seat's 21.1%).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Baseline {
+    /// The same answer every time — this option word.
+    AlwaysSame(&'static str),
+    /// What the product does without the seat: the reader it would replace,
+    /// as it decides today.
+    TodaysRule,
+    /// No cheaper reader answers what the marks grade: they grade the seat's
+    /// own act (a fold, a press, a memo's answer), whose absence leaves
+    /// nothing to mark, or the seat never rises.
+    None,
+}
+
+impl Baseline {
+    /// The word a report and a screen name the reader by.
+    #[must_use]
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::AlwaysSame(_) => "always_same",
+            Self::TodaysRule => "todays_rule",
+            Self::None => "none",
+        }
+    }
+
+    /// Whether the judge holds the seat to it.
+    #[must_use]
+    pub const fn binds(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// How many disagreeing marks the answering version's record must hold
+/// before a seat's agreement may speak (t-6342): three.
+///
+/// A label that never says no is not evidence, however many times it says
+/// yes — the placement seat's thirty marks and the stall seat's eleven after
+/// its label was read right are both all one word. One disagreement could be
+/// a writer's slip and two a coincidence; three is a label that has shown it
+/// can say no. Counted over the version's whole record rather than the
+/// judged window, so a seat that is right almost every time is not held for
+/// being right: at the 800‰ line a window needs forty marks to bound above
+/// it with three misses inside (39 bound at 796‰, 40 at 801‰).
+pub const NEGATIVES_WANTED: usize = 3;
 
 /// The routing seat's route-change budget: four compared axes in five must
 /// agree with the chat probe, as a 95% lower bound.
@@ -574,6 +646,11 @@ pub const ROUTING: JevUse = JevUse {
     window_forgives: Some(FORGIVES_NOTHING),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The keyword tables that route a turn with no judgment at all; the
+    // chat probe is the second reader both are graded by. Its writer stamps
+    // no baseline mark yet, so the seat holds at `too_few_baseline`.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// The wall zo's routing waits for a judgment when the seat acts: the batch
@@ -723,6 +800,9 @@ pub const RECALL: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
+    // Recall's own order: the note it put first before any judgment.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -822,6 +902,9 @@ pub const BROWSER: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The walk's end grades the press the seat made; no press, no mark.
+    baseline: Baseline::None,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -859,6 +942,9 @@ pub const DESKTOP: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The walk's end grades the press the seat made; no press, no mark.
+    baseline: Baseline::None,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
@@ -893,6 +979,9 @@ pub const EMULATOR: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The walk's end grades the press the seat made; no press, no mark.
+    baseline: Baseline::None,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -924,6 +1013,9 @@ pub const STALL: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The answer eleven of this machine's twelve stall answers named.
+    baseline: Baseline::AlwaysSame(crate::stall_cause::Cause::LongRunningTool.word()),
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// What the placement seat's answers must bound above before `auto` rises to
@@ -1019,6 +1111,9 @@ pub const PLACEMENT: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
+    // Today's room, the tab (`worker_placement::Placement::TODAYS`).
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -1109,6 +1204,9 @@ pub const SUMMON: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The pinned model's own vendor CLI (`orchestration::native_agent`).
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// Characters of the repeated tool call one step-effort question carries —
@@ -1168,6 +1266,9 @@ pub const STEP_EFFORT: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The rule's own move between turns.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// Characters of the task a skill ranking reads — what the turn is about, in
@@ -1333,6 +1434,10 @@ pub const SKILLS: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The word match that ranks the skills without a judgment. Its writer
+    // stamps no baseline mark yet: the seat holds at `too_few_baseline`.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// The wall zo's step effort governor holds a step judgment to, in
@@ -1389,6 +1494,9 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     window_forgives: Some(FORGIVES_NOTHING),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The governor's own table.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// Characters of the person's last request one compaction judgment reads
@@ -1560,6 +1668,10 @@ pub const COMPACTION: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
+    // Microcompact's age rule, which drops the oldest results. Its writer
+    // stamps no baseline mark yet: the seat holds at `too_few_baseline`.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// Characters of one text an agent's own question carries — the question,
@@ -1656,6 +1768,8 @@ pub const AGENT_TOOL: JevUse = JevUse {
     window_forgives: None,
     agreement_rows_wanted: None,
     agreement_kind: AgreementKind::Comparison,
+    baseline: Baseline::None,
+    negatives_wanted: None,
 };
 
 /// Characters of a page's title one browser-read question carries — the head
@@ -1831,6 +1945,9 @@ pub const BROWSER_READ: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // A fold is graded by the press that lands in it; no fold, no mark.
+    baseline: Baseline::None,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// The closed answer every notify question offers, spelled once: ring now,
@@ -1989,6 +2106,9 @@ pub const NOTIFY: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // Today's rule table (`notify_call::Call::today`).
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// Characters of the sentence a person is writing that one mention
@@ -2108,6 +2228,9 @@ pub const MENTION_RERANK: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The fuzzy page's own first row.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// How many of the emulator seat's candidates a forked phone step tries
@@ -2280,6 +2403,10 @@ pub const BRANCHING: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The emulator seat's own press, the first candidate. Its writer stamps
+    // no baseline mark yet: the seat holds at `too_few_baseline`.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// The judgment cache: a memo in front of the wire that answers a screen
@@ -2325,6 +2452,9 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     window_forgives: Some(FORGIVES_NOTHING),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The fresh answer it is compared with IS the reader it replaces.
+    baseline: Baseline::None,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// How many of a role's eligible attempts try the model nobody has evidence
@@ -2443,6 +2573,9 @@ pub const CHALLENGER: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The incumbent's design, which the attempt acts on anyway.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// Characters of the person's words one patch review reads as the task the
@@ -2481,6 +2614,11 @@ pub const PATCH_REVIEW_EVIDENCE_BYTE_CAP: usize = 4 * 1024;
 /// table's units. It is not [`PATCH_REVIEW_ANSWER_FLOOR_PERMILLE`], which is a
 /// line under how often the SEAT answers at all.
 pub const PATCH_REVIEW_PERMIT_FLOOR_PERMILLE: u16 = 800;
+
+/// The patch review's word for a patch it lets stand — spelled here, where
+/// the seat's baseline reads it ([`Baseline::AlwaysSame`]), and read by zo's
+/// verdict (`runtime::patch_review::Verdict::Permit`).
+pub const PATCH_REVIEW_PERMIT: &str = "permit";
 
 /// What the patch review seat's answers must bound above before `auto` rises
 /// to noting (§4): nine in ten. The orchestration seats' reasoning, reached
@@ -2587,6 +2725,9 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
+    // "Always permit": 79.2% of this machine's 1,661 replayed reviews against the seat's 21.1%.
+    baseline: Baseline::AlwaysSame(PATCH_REVIEW_PERMIT),
+    negatives_wanted: Some(NEGATIVES_WANTED),
 };
 
 /// Every place this product asks Jev something.

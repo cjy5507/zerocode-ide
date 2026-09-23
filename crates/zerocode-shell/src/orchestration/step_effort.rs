@@ -661,6 +661,12 @@ fn advance(
                     Ok(agreed) => label[summary::AGREED.canonical] = json!(agreed),
                     Err(why) => label[summary::NOT_COMPARED.canonical] = json!(why),
                 }
+                // The rule's own move, carried: the seat's baseline, marked by
+                // the same next turn (t-6342).
+                if ended && applied && chosen == open.ruled {
+                    label[summary::BASELINE_AGREED.canonical] =
+                        json!(followed == Followed::Progressed);
+                }
                 crate::systemone::record_rows(&STEP_EFFORT, ledger_path, &[label], now_ms);
                 let mut book = held.moves.lock().unwrap_or_else(|held| held.into_inner());
                 if let Some(seat) = book.seats.get_mut(&open.dispatch)
