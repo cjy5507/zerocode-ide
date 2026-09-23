@@ -208,6 +208,79 @@ fn every_use_recommends_one_of_its_own_modes_and_off_only_where_stopped() {
     assert_eq!(AGENT_TOOL.recommended, JevMode::On);
 }
 
+/// A repeated run moves only the rows that say so (t-6385): the judgment
+/// cache, left `auto` by word or by the switch, stands `on` when the run
+/// walks what was walked before; any other word its person wrote stands; an
+/// unwritten use is off in every run while Jev is switched off; and every
+/// other use reads as it always did.
+#[test]
+fn a_repeated_run_moves_only_the_rows_that_say_so() {
+    for row in &JEV_USES {
+        if let Some(repeated) = row.repeat {
+            assert!(
+                row.modes.contains(&repeated),
+                "{} repeats as {repeated:?}",
+                row.id
+            );
+            assert_ne!(repeated, JevMode::Off, "{} turns off in a repeat", row.id);
+        }
+    }
+    assert_eq!(
+        JEV_USES
+            .iter()
+            .filter(|row| row.repeat.is_some())
+            .map(|row| row.id)
+            .collect::<Vec<_>>(),
+        [JUDGMENT_CACHE.id]
+    );
+    let on = json!({ door::ENABLED_SETTING: true });
+    let off = json!({ door::ENABLED_SETTING: false });
+    let root = |jev: &Value, word: Option<&str>| {
+        let mut root = json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: jev } });
+        if let Some(word) = word {
+            root[SMART_SETTINGS_KEY][JUDGMENT_CACHE.setting] = json!(word);
+        }
+        root
+    };
+    for (jev, word, fresh, repeated) in [
+        (&on, None, JevMode::Auto, JevMode::On),
+        (&on, Some("auto"), JevMode::Auto, JevMode::On),
+        (&off, Some("auto"), JevMode::Auto, JevMode::On),
+        (&on, Some("shadow"), JevMode::Shadow, JevMode::Shadow),
+        (&on, Some("off"), JevMode::Off, JevMode::Off),
+        (&on, Some("on"), JevMode::On, JevMode::On),
+        (&off, None, JevMode::Off, JevMode::Off),
+    ] {
+        let root = root(jev, word);
+        assert_eq!(
+            JUDGMENT_CACHE.mode_in_run(&root, Run::Fresh),
+            fresh,
+            "{root}"
+        );
+        assert_eq!(
+            JUDGMENT_CACHE.mode_in_run(&root, Run::Repeated),
+            repeated,
+            "{root}"
+        );
+    }
+    let switched = json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: on } });
+    for row in &JEV_USES {
+        if row.repeat.is_none() {
+            assert_eq!(
+                row.mode_in_run(&switched, Run::Repeated),
+                row.mode_in(&switched),
+                "{}",
+                row.id
+            );
+        }
+    }
+    assert_eq!(Run::default(), Run::Fresh);
+    assert_eq!(
+        (Run::Fresh.key(), Run::Repeated.key()),
+        ("fresh", "repeated")
+    );
+}
+
 /// The switch decides a use nobody wrote a word for: its recommendation
 /// while Jev is switched on, `off` while it is off or was never touched —
 /// a machine that has not met Jev asks nothing. A word a person did write is

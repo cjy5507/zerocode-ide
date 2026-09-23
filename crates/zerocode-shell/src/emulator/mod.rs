@@ -17,6 +17,8 @@ mod prefs;
 mod process;
 mod pump;
 mod session;
+#[cfg(all(test, target_os = "macos"))]
+mod walk_bench;
 
 use std::path::Path;
 use std::sync::Arc;

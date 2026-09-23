@@ -16,7 +16,7 @@ use zerocode_core::branching::BranchAsk;
 use zerocode_core::jev::door::{Memo, Memoed};
 use zerocode_core::jev::summary::{AGREED, AT, ELAPSED_MS};
 use zerocode_core::jev::{
-    BRANCHING, BRANCHING_APPLY_DEADLINE_MS, JUDGMENT_CACHE, JevMode, JevUse, memo,
+    BRANCHING, BRANCHING_APPLY_DEADLINE_MS, JUDGMENT_CACHE, JevMode, JevUse, Run, memo,
 };
 use zerocode_core::screen_action::ActionAsk;
 
@@ -31,6 +31,9 @@ const MEMO_KEY: &str = "key";
 /// The key a lookup that found nothing is written under — a row with no
 /// `outcome`, which the judge does not count and a hit-rate reader does.
 const MISS_KEY: &str = "miss";
+/// The key a lookup made in a repeated run says so under (t-6385): the
+/// cache's `on` there is the row's repeat mode, not a person's word.
+const RUN_KEY: &str = "run";
 
 /// What a successful body says about the question, or why it says nothing.
 /// Every shape rule is `browser_action`'s: this reads the envelope and hands
@@ -115,6 +118,9 @@ pub struct LiveJudge {
     /// written to its ledger by the walk's caller ([`Self::write_memo_rows`])
     /// through the same road every seat's rows take.
     memo_rows: Vec<Value>,
+    /// Whether the walk repeats one walked before (t-6385): what the Jev
+    /// table says a use stands at then ([`zerocode_core::jev::JevUse::repeat`]).
+    run: Run,
 }
 
 /// How the judgment cache stands for one question: the seat's mode as the
@@ -141,7 +147,17 @@ impl LiveJudge {
             spent: None,
             cached: false,
             memo_rows: Vec::new(),
+            run: Run::Fresh,
         }
+    }
+
+    /// The same judge, asking in `run` — a recipe walked again, a walk its
+    /// caller marked as a replay — so the uses the Jev table moves in a
+    /// repeated run stand where it says (t-6385).
+    #[must_use]
+    pub const fn in_run(mut self, run: Run) -> Self {
+        self.run = run;
+        self
     }
 
     /// A judge pointed at one origin with one key, behind the door `doorway`
@@ -156,6 +172,7 @@ impl LiveJudge {
             spent: None,
             cached: false,
             memo_rows: Vec::new(),
+            run: Run::Fresh,
         }
     }
 
@@ -183,10 +200,10 @@ impl LiveJudge {
     /// the cache is off — and then no memo is asked, no file is touched and
     /// no row is written: today's walk to the byte.
     fn cache_stand(&self) -> Option<CacheStand> {
-        let mode = JUDGMENT_CACHE.mode_in(&self.wire.settings_root());
+        let mode = JUDGMENT_CACHE.mode_in_run(&self.wire.settings_root(), self.run);
         mode.asks().then(|| CacheStand {
             mode,
-            applying: crate::systemone::applies(&self.wire, &JUDGMENT_CACHE),
+            applying: crate::systemone::applies_in(&self.wire, &JUDGMENT_CACHE, self.run),
         })
     }
 
@@ -235,6 +252,9 @@ impl LiveJudge {
             MEMO_KEY: memoed.key,
             "mode": stand.mode.key(),
         });
+        if self.run == Run::Repeated {
+            row[RUN_KEY] = json!(self.run.key());
+        }
         let Some(recalled) = memoed.recalled.as_ref() else {
             // A miss: the wire answers as ever, and what it answered is
             // remembered for the next walk that asks these bytes.
@@ -354,6 +374,7 @@ impl LiveJudge {
             spent: None,
             cached: false,
             memo_rows: Vec::new(),
+            run: self.run,
         }
     }
 }

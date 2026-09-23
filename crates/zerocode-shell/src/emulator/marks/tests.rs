@@ -695,6 +695,386 @@ fn a_replaced_parent_with_the_same_label_cannot_inherit_the_childs_pin() {
     assert_eq!(taps, 0);
 }
 
+/// The node the fold numbered `index`, in the fold's own preorder.
+fn node_at(tree: &Value, index: usize) -> Value {
+    let mut pending: Vec<&Value> = tree.as_array().unwrap().iter().rev().collect();
+    let mut at = 0;
+    while let Some(node) = pending.pop() {
+        if at == index {
+            return node.clone();
+        }
+        at += 1;
+        if let Some(children) = node.get("children").and_then(Value::as_array) {
+            pending.extend(children.iter().rev());
+        }
+    }
+    panic!("no node {index}");
+}
+
+/// What the exporter answers about one point (`AccessibilityBridge.elementAt`):
+/// the application's own node holding the one element on top there, each
+/// read as the walk reads an element — no centre answer, no children of the
+/// element's own.
+fn point_answer(tree: &Value, element: Option<&Value>) -> Value {
+    fn bare(node: &Value) -> Value {
+        let mut node = node.clone();
+        let object = node.as_object_mut().unwrap();
+        object.remove(HIT_AT_CENTRE_KEY);
+        object.insert("children".into(), json!([]));
+        node
+    }
+    let mut root = bare(&tree[0]);
+    root["children"] = json!(element.map(bare).into_iter().collect::<Vec<_>>());
+    json!([root])
+}
+
+const NOBODY_ASKED: crate::computer_use::confirm::Policy = crate::computer_use::confirm::Policy {
+    payment: false,
+    transfer: false,
+    delete: false,
+};
+
+/// Every press the tree proves, the point proves too, at the same spot
+/// (t-6385): on each fixture screen, a hit-test at a mark's centre that
+/// answers that mark's own element is the same control to both roads.
+#[test]
+fn a_press_by_number_is_proven_at_its_centre_where_the_tree_would_prove_it() {
+    let mut pressed = 0;
+    for tree in [ios_tree(), ios_settings_tree(), ios_home_tree()] {
+        let snapshot = Snapshot::ios(&tree).unwrap();
+        let table = Table {
+            platform: EmulatorPlatform::Ios,
+            device: device("phone"),
+            plan: numbered(&snapshot.faces, snapshot.screen),
+            screen: snapshot.screen,
+            made: Instant::now(),
+        };
+        for placed in &table.plan.marks {
+            let request = table
+                .request(EmulatorPlatform::Ios, &table.device, placed.mark)
+                .unwrap();
+            let mut on_tree = None;
+            request
+                .perform_with_policy(&snapshot.faces, snapshot.screen, NOBODY_ASKED, |x, y| {
+                    on_tree = Some((x, y));
+                    Ok(())
+                })
+                .unwrap();
+            let answer = point_answer(&tree, Some(&node_at(&tree, placed.element_index)));
+            let mut at_centre = None;
+            request
+                .perform_at_centre(&answer, NOBODY_ASKED, |x, y| {
+                    at_centre = Some((x, y));
+                    Ok(())
+                })
+                .expect("the point proves the control the tree proves")
+                .unwrap();
+            assert_eq!(at_centre, on_tree, "mark {}", placed.mark);
+            pressed += 1;
+        }
+    }
+    assert!(pressed > 10, "the fixtures numbered {pressed} controls");
+}
+
+/// A point that answers anything but the pinned control proves nothing, and
+/// the press is left to the tree — never pressed, never refused, here.
+#[test]
+fn a_point_that_finds_another_element_leaves_the_press_to_the_tree() {
+    let (table, _) = table();
+    let request = table.request(table.platform, &table.device, 1).unwrap();
+    let tree = ios_tree();
+    let element = node_at(&tree, 1);
+    let mut variants = Vec::new();
+    let mut moved = element.clone();
+    moved["frame"]["y"] = json!(80.0 + MARK_PIN_TOLERANCE_POINTS + 1.0);
+    variants.push((
+        "moved past the tolerance",
+        point_answer(&tree, Some(&moved)),
+    ));
+    let mut other_role = element.clone();
+    other_role["type"] = json!("StaticText");
+    variants.push((
+        "the same words in another role",
+        point_answer(&tree, Some(&other_role)),
+    ));
+    let mut other_words = element.clone();
+    other_words["AXLabel"] = json!("다른 항목");
+    variants.push(("other words", point_answer(&tree, Some(&other_words))));
+    let mut other_app = tree.clone();
+    other_app[0]["AXUniqueId"] = json!("another.application");
+    variants.push((
+        "another application in front",
+        point_answer(&other_app, Some(&element)),
+    ));
+    variants.push(("nothing at the point", point_answer(&tree, None)));
+    variants.push(("an answer that does not read", Value::Null));
+    for (why, answer) in variants {
+        assert!(
+            request
+                .perform_at_centre(&answer, NOBODY_ASKED, |_, _| panic!("pressed on {why}"))
+                .is_none(),
+            "{why}"
+        );
+    }
+}
+
+/// What the tree refuses outright the point refuses too: a screen that
+/// turned, a look past its age, a person's guarded step. Within the
+/// tolerance the press goes to the fresh centre, as on the tree.
+#[test]
+fn a_point_refuses_what_the_tree_refuses_and_presses_the_fresh_centre() {
+    let (table, _) = table();
+    let tree = ios_tree();
+    let element = node_at(&tree, 1);
+    let request = table.request(table.platform, &table.device, 1).unwrap();
+
+    let mut turned = tree.clone();
+    turned[0]["frame"] = json!({"x": 0, "y": 0, "width": 844, "height": 390});
+    let refused = request
+        .perform_at_centre(
+            &point_answer(&turned, Some(&element)),
+            NOBODY_ASKED,
+            |_, _| panic!("a turned screen pressed"),
+        )
+        .expect("a turned screen is the tree's refusal too")
+        .unwrap_err();
+    assert_eq!(refused.code, error_code::PIN_BROKEN);
+
+    let mut aged = table.request(table.platform, &table.device, 1).unwrap();
+    aged.made -= cache::MAX_AGE + std::time::Duration::from_secs(1);
+    let refused = aged
+        .perform_at_centre(
+            &point_answer(&tree, Some(&element)),
+            NOBODY_ASKED,
+            |_, _| panic!("an aged look pressed"),
+        )
+        .expect("an aged look is refused")
+        .unwrap_err();
+    assert_eq!(refused.code, error_code::PIN_BROKEN);
+
+    let guarded = request
+        .perform_at_centre(
+            &point_answer(&tree, Some(&element)),
+            crate::computer_use::confirm::Policy {
+                payment: true,
+                transfer: true,
+                delete: true,
+            },
+            |_, _| Ok(()),
+        )
+        .expect("the point proves the control");
+    // 「일반」 is nobody's guarded step: the policy lets it through.
+    assert!(guarded.is_ok());
+
+    let mut nudged = element.clone();
+    nudged["frame"]["x"] = json!(20.0 + MARK_PIN_TOLERANCE_POINTS);
+    let (x, y) = request.centre();
+    assert!((x - (20.0 + 60.0)).abs() < f64::EPSILON && (y - (80.0 + 22.0)).abs() < f64::EPSILON);
+    request
+        .perform_at_centre(&point_answer(&tree, Some(&nudged)), NOBODY_ASKED, |x, _| {
+            let fresh = (20.0 + MARK_PIN_TOLERANCE_POINTS + 60.0) / table.screen.width;
+            assert!(
+                (x - fresh).abs() < f64::EPSILON,
+                "{x} is not the fresh centre"
+            );
+            Ok(())
+        })
+        .expect("within the tolerance")
+        .unwrap();
+}
+
+/// A guarded step's words stop a press proven at a point exactly as they stop
+/// one proven on the tree.
+#[test]
+fn a_point_stops_before_a_persons_guarded_step() {
+    for kind in zerocode_core::computer_use::ConfirmKind::ALL {
+        let mut tree = ios_tree();
+        tree[0]["children"][0]["AXLabel"] = json!(kind.words()[0]);
+        let snapshot = Snapshot::ios(&tree).unwrap();
+        let table = Table {
+            platform: EmulatorPlatform::Ios,
+            device: device("phone"),
+            plan: numbered(&snapshot.faces, snapshot.screen),
+            screen: snapshot.screen,
+            made: Instant::now(),
+        };
+        let request = table
+            .request(EmulatorPlatform::Ios, &table.device, 1)
+            .unwrap();
+        let refused = request
+            .perform_at_centre(
+                &point_answer(&tree, Some(&node_at(&tree, 1))),
+                crate::computer_use::confirm::Policy::default(),
+                |_, _| panic!("a guarded step pressed"),
+            )
+            .expect("the point proves the control")
+            .unwrap_err();
+        assert_eq!(refused.code, error_code::CONFIRMATION_REQUIRED, "{kind:?}");
+    }
+}
+
+/// The settling a press waits through, read by read at the times the reads
+/// came back (t-6385), with the table's own windows.
+fn settle_through(reads: &[(u64, Option<&str>)]) -> (Settle, usize) {
+    use zerocode_core::agent_emulator::{EMULATOR_SETTLE_CEILING_MS, EMULATOR_SETTLE_QUIET_MS};
+    let mut settling = Settling::new(
+        std::time::Duration::from_millis(EMULATOR_SETTLE_QUIET_MS),
+        std::time::Duration::from_millis(EMULATOR_SETTLE_CEILING_MS),
+    );
+    for (at, shape) in reads {
+        let settle = settling.read(
+            shape.map(str::to_string),
+            std::time::Duration::from_millis(*at),
+        );
+        if settle != Settle::Reading {
+            return (settle, settling.reads());
+        }
+    }
+    (Settle::Reading, settling.reads())
+}
+
+/// A press that navigates (t-6350's Settings → General: the tree changed two
+/// to four times and stood still at 1,080 ms) settles on the first two alike
+/// reads after a change — and the first reads, alike because the press has
+/// not landed yet, settle nothing.
+#[test]
+fn a_pressed_screen_settles_on_two_alike_reads_after_it_changed() {
+    let (settle, reads) = settle_through(&[
+        (60, Some("settings")),
+        (120, Some("settings")),
+        (180, Some("settings")),
+        (340, Some("sliding 1")),
+        (400, Some("sliding 2")),
+        (1_020, Some("general")),
+        (1_080, Some("general")),
+        (1_140, Some("never read")),
+    ]);
+    assert_eq!((settle, reads), (Settle::Still, 7));
+}
+
+/// A press that moves nothing ends once the quiet window passes, not at the
+/// ceiling; one whose screen never stands still ends at the ceiling.
+#[test]
+fn a_press_that_moved_nothing_ends_quietly_and_a_screen_that_never_stands_still_at_the_ceiling() {
+    use zerocode_core::agent_emulator::{EMULATOR_SETTLE_CEILING_MS, EMULATOR_SETTLE_QUIET_MS};
+    let quiet: Vec<(u64, Option<&str>)> = (1..=20).map(|n| (n * 60, Some("inert"))).collect();
+    let (settle, reads) = settle_through(&quiet);
+    assert_eq!(settle, Settle::Unmoved);
+    assert_eq!(reads as u64, EMULATOR_SETTLE_QUIET_MS.div_ceil(60));
+
+    let labels: Vec<String> = (0..60).map(|n| format!("clock {n}")).collect();
+    let restless: Vec<(u64, Option<&str>)> = labels
+        .iter()
+        .enumerate()
+        .map(|(n, label)| ((n as u64 + 1) * 60, Some(label.as_str())))
+        .collect();
+    let (settle, reads) = settle_through(&restless);
+    assert_eq!(settle, Settle::Ceiling);
+    assert_eq!(reads as u64, EMULATOR_SETTLE_CEILING_MS.div_ceil(60));
+}
+
+/// A press's preview is the numbering a look of the same tree answers
+/// (t-6385): the question begun on it can be the very bytes the look asks.
+#[test]
+fn a_preview_numbers_the_screen_as_a_look_of_it_would() {
+    for tree in [ios_tree(), ios_settings_tree(), ios_home_tree()] {
+        let snapshot = Snapshot::ios(&tree).unwrap();
+        let table = Table {
+            platform: EmulatorPlatform::Ios,
+            device: device("phone"),
+            plan: numbered(&snapshot.faces, snapshot.screen),
+            screen: snapshot.screen,
+            made: Instant::now(),
+        };
+        let look = table.answer("look");
+        let preview = preview_of(&snapshot);
+        assert_eq!(preview[ITEMS_KEY], look[ITEMS_KEY]);
+        assert_eq!(preview[LEGEND_KEY], look[LEGEND_KEY]);
+        assert!(
+            preview.get(LOOK_ID_KEY).is_none(),
+            "a preview is not a look"
+        );
+    }
+}
+
+/// A read without the pressed control where it stood has moved, however the
+/// reads compare: a screen that changed before its first read came back
+/// settles on two alike reads, not at the quiet window (t-6385).
+#[test]
+fn a_screen_that_changed_before_its_first_read_settles_without_waiting_the_quiet() {
+    use zerocode_core::agent_emulator::{EMULATOR_SETTLE_CEILING_MS, EMULATOR_SETTLE_QUIET_MS};
+    let mut settling = Settling::new(
+        std::time::Duration::from_millis(EMULATOR_SETTLE_QUIET_MS),
+        std::time::Duration::from_millis(EMULATOR_SETTLE_CEILING_MS),
+    );
+    // The first read already shows the screen the press led to.
+    settling.moved();
+    let at = std::time::Duration::from_millis;
+    assert_eq!(settling.read(Some("about"), at(300)), Settle::Reading);
+    assert_eq!(settling.read(Some("about"), at(360)), Settle::Still);
+}
+
+/// The pressed control stands in a read when its own identity is there with
+/// its words, in its frame within the pin; a row that slid away or was
+/// renamed does not stand.
+#[test]
+fn a_pressed_control_stands_where_the_pin_holds_it() {
+    let (table, faces) = table();
+    let request = table.request(table.platform, &table.device, 1).unwrap();
+    assert!(request.stands_in(&faces));
+    let mut slid = faces.clone();
+    slid[1].x += 120.0;
+    assert!(!request.stands_in(&slid));
+    let mut renamed = faces.clone();
+    renamed[1].name = Some("다른 항목".into());
+    assert!(!request.stands_in(&renamed));
+    assert!(!request.stands_in(&[]));
+}
+
+/// A read that failed breaks a run of alike reads and proves nothing; a
+/// screen that flashed and came back is settled like any other.
+#[test]
+fn a_failed_read_breaks_a_run_and_a_flash_that_came_back_still_settles() {
+    let (settle, reads) = settle_through(&[
+        (60, Some("list")),
+        (120, Some("detail")),
+        (180, None),
+        (240, Some("detail")),
+        (300, Some("detail")),
+    ]);
+    assert_eq!((settle, reads), (Settle::Still, 5));
+    let (settle, reads) = settle_through(&[
+        (60, Some("row")),
+        (120, Some("row pressed")),
+        (180, Some("row")),
+        (240, Some("row")),
+    ]);
+    assert_eq!((settle, reads), (Settle::Still, 4));
+}
+
+/// What a settling press compares: roles, words, whole-point frames and the
+/// centre's answer — a fraction of a point is the same screen, a row that
+/// slid is not.
+#[test]
+fn a_settling_press_compares_whole_points_and_the_centres_answer() {
+    let faces = Snapshot::ios(&ios_tree()).unwrap().faces;
+    let mut wobbled = faces.clone();
+    wobbled[1].x += 0.3;
+    assert_eq!(shape(&faces), shape(&wobbled));
+    let mut slid = faces.clone();
+    slid[1].x += 40.0;
+    assert_ne!(shape(&faces), shape(&slid));
+    // Something came to sit on its centre.
+    let mut covered = faces.clone();
+    covered[1].visible = Some(FaceFrame {
+        x: covered[1].x,
+        y: covered[1].y,
+        width: 0.0,
+        height: 0.0,
+    });
+    assert_ne!(shape(&faces), shape(&covered));
+}
+
 #[test]
 fn an_overlapping_search_field_cannot_leave_a_number_on_the_row_under_it() {
     // Observed on the iOS Settings screen with large accessibility text:

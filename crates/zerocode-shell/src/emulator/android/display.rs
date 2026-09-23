@@ -6,6 +6,14 @@ pub(super) struct Geometry {
     rotation: u32,
 }
 
+impl Geometry {
+    /// The rotation the logical frame is in (0–3) — what a dump's own
+    /// `rotation` is held against before a kept geometry is trusted.
+    pub(super) const fn rotation(&self) -> u32 {
+        self.rotation
+    }
+}
+
 const UNAVAILABLE: &str = "Android has no unambiguous active default logical display";
 
 /// `DisplayViewport::toString` in AOSP's `include/input/DisplayViewport.h`

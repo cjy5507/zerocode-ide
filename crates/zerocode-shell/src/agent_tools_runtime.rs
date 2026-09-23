@@ -2957,11 +2957,15 @@ pub(super) fn run_recipe(
             // and a walk's workspace is the folder it was asked from; asked
             // from nowhere known, the door refuses and the row says so
             // (docs/design/jev-settings-20260917.md §3).
+            // A recipe walked again is a repeated run by what it is: its
+            // stopped step asks the questions a walk of it asked before
+            // (t-6385).
             let mut judge = computer_use::errand::live::LiveJudge::new(
                 &crate::api_routers::Keychain::of_this_machine(),
                 workspace,
                 seat,
-            );
+            )
+            .in_run(zerocode_core::jev::Run::Repeated);
             // No key, nothing to ask — and so no reason to measure the page or
             // number its controls first.
             if let Some(read) =
@@ -3190,7 +3194,8 @@ pub(super) fn run_goal(
         &crate::api_routers::Keychain::of_this_machine(),
         workspace,
         seat,
-    );
+    )
+    .in_run(zerocode_core::computer_use::walk_run(&command.params));
     if mode == errand::Mode::Off || !judge.armed() {
         // Off is today's product exactly: no look is taken, nothing is sent,
         // and the answer says plainly that nothing walked.
@@ -3215,12 +3220,13 @@ pub(super) fn run_goal(
     let snapshots: Box<dyn desk::Snapshots> = Box::new(AvdSnapshots {
         device: word("device").unwrap_or_default(),
     });
-    let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0)
-        .with_snapshots(snapshots);
     let options = errand::Options {
         overlap: zerocode_core::computer_use::walk_overlaps(&command.params),
         rescue: rescue.is_some(),
     };
+    let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0)
+        .with_snapshots(snapshots)
+        .previewing(options.overlap);
     let walked = errand::run_with(
         mode,
         acting,
@@ -3587,7 +3593,7 @@ pub(super) async fn answer_emulator_command(
     )
 }
 
-async fn answer_emulator_observation(
+pub(super) async fn answer_emulator_observation(
     command: zerocode_core::computer_use::EmulatorCommand,
 ) -> zerocode_hookd::TeamAnswer {
     use crate::emulator::marks;
@@ -3613,7 +3619,9 @@ async fn answer_emulator_observation(
             },
         };
         match command.method {
-            EmulatorMethod::Marks => marks::observe(platform, device).await,
+            EmulatorMethod::Marks => {
+                marks::observe(platform, device, command.text.as_deref()).await
+            }
             EmulatorMethod::Find | EmulatorMethod::Foreground => {
                 crate::emulator::checks::observe(
                     platform,
@@ -3634,6 +3642,8 @@ async fn answer_emulator_observation(
                     device,
                     command.mark.unwrap_or_default(),
                     command.look.as_deref().unwrap_or_default(),
+                    command.text.as_deref(),
+                    command.preview,
                 )
                 .await
             }

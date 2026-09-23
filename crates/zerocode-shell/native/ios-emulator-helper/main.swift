@@ -972,6 +972,20 @@ private func handle(
     case "ax":
         let data = try AccessibilityBridge.shared.describeUI(udid: CommandLine.arguments[1])
         return Answer(data: String(decoding: data, as: UTF8.self))
+    case "walk":
+        let data = try AccessibilityBridge.shared.describeUI(udid: CommandLine.arguments[1], grid: false)
+        return Answer(data: String(decoding: data, as: UTF8.self))
+    case "hit":
+        // A press by number's last-moment check: the one element on top at
+        // the point the press will land on, in the tree's own points.
+        guard let x = request.x, let y = request.y, x.isFinite, y.isFinite else {
+            throw HelperError.message("유효하지 않은 좌표입니다")
+        }
+        let data = try AccessibilityBridge.shared.elementAt(
+            udid: CommandLine.arguments[1],
+            point: CGPoint(x: x, y: y)
+        )
+        return Answer(data: String(decoding: data, as: UTF8.self))
     case "stream":
         try pusher.start(
             longEdge: request.longEdge ?? 0,

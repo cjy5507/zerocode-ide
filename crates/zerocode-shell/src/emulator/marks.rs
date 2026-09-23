@@ -410,6 +410,104 @@ impl PinnedTap {
         {
             return Err(broken());
         }
+        self.press(face, screen, policy, tap)
+    }
+
+    /// The point a press proven at its centre asks about: the pinned frame's
+    /// centre, in the tree's own points (the look's screen origin put back).
+    #[cfg(any(target_os = "macos", test))]
+    pub fn centre(&self) -> (f64, f64) {
+        (
+            self.screen.x + self.pin.frame.mid_x(),
+            self.screen.y + self.pin.frame.mid_y(),
+        )
+    }
+
+    /// Whether the control the mark was drawn on still stands where it did in
+    /// `faces` — by the rule a point proves it with: its own identity and
+    /// its words and frame within the pin (t-6385). A read after the press
+    /// without it has moved, however the reads before it compare.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn stands_in(&self, faces: &[ElementFace]) -> bool {
+        let pinned = lineage_ends(&self.pin.signature);
+        pinned.is_some()
+            && faces.iter().any(|face| {
+                lineage_ends(&face.signature) == pinned
+                    && self
+                        .pin
+                        .holds_at_point(Some(face.words()), Some(face.local()))
+            })
+    }
+
+    /// [`Self::perform_at_centre`] inside the device gate, as
+    /// [`Self::perform_in`] is: the stream the look was taken on must still
+    /// be alive at the tap.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn perform_at_centre_in(
+        &self,
+        input: &super::session::SessionInput<'_>,
+        answer: &Value,
+        tap: impl FnOnce(f64, f64) -> Result<(), ProviderError>,
+    ) -> Option<Result<(), ProviderError>> {
+        self.perform_at_centre(answer, crate::computer_use::confirm::policy(), |x, y| {
+            if input.is_alive() {
+                tap(x, y)
+            } else {
+                Err(self.broken())
+            }
+        })
+    }
+
+    /// A press proven at the one point it lands on (t-6385) instead of on the
+    /// whole tree read again: 633 ms a press on iOS, 3.5 ms a point
+    /// (t-6350). `answer` is what the exporter found on top at
+    /// [`Self::centre`] — the application's node holding that one element,
+    /// the tree's own shape — read by the fold every tree is read by.
+    ///
+    /// The element is the control the mark was drawn on when the look's
+    /// application is still the one in front, the element's own identity is
+    /// the one the look pinned (the first and last links of the lineage), and
+    /// its words and frame hold as the whole pin holds them
+    /// ([`Pin::holds_at_point`]). The links between — the parents, the row a
+    /// star sits in — are what one point cannot show, and every press the
+    /// point cannot prove answers `None`: the tree is read and decides
+    /// exactly as it did before. A screen that turned, a look that aged and a
+    /// person's guarded step are refused here as the tree refuses them.
+    #[cfg(any(target_os = "macos", test))]
+    fn perform_at_centre(
+        &self,
+        answer: &Value,
+        policy: crate::computer_use::confirm::Policy,
+        tap: impl FnOnce(f64, f64) -> Result<(), ProviderError>,
+    ) -> Option<Result<(), ProviderError>> {
+        if cache::is_expired(self.made, Instant::now()) {
+            return Some(Err(self.broken()));
+        }
+        let found = Snapshot::ios(answer).ok()?;
+        if !self.screen.matches_within(&found.screen, 0.0) {
+            return Some(Err(self.broken()));
+        }
+        // The application is the root; the element is the one node under it.
+        let face = found.faces.iter().find(|face| face.index > 0)?;
+        let same_control = matches!(
+            (lineage_ends(&face.signature), lineage_ends(&self.pin.signature)),
+            (Some(seen), Some(pinned)) if seen == pinned
+        ) && self
+            .pin
+            .holds_at_point(Some(face.words()), Some(face.local()));
+        same_control.then(|| self.press(face, found.screen, policy, tap))
+    }
+
+    /// The press itself, once a face is proven the control its mark was
+    /// drawn on — on the tree or at its centre: a person's guarded step stops
+    /// here, and the fresh centre becomes the door's own units.
+    fn press(
+        &self,
+        face: &ElementFace,
+        screen: Rect,
+        policy: crate::computer_use::confirm::Policy,
+        tap: impl FnOnce(f64, f64) -> Result<(), ProviderError>,
+    ) -> Result<(), ProviderError> {
         if let Some(kind) = zerocode_core::computer_use::confirm_kind_of(face.words())
             .filter(|kind| policy.asks(*kind))
         {
@@ -429,9 +527,189 @@ impl PinnedTap {
         let x = face.local().mid_x() / (screen.width - edge);
         let y = face.local().mid_y() / (screen.height - edge);
         if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
-            return Err(broken());
+            return Err(self.broken());
         }
         tap(x, y)
+    }
+}
+
+/// The first and last links of a face's lineage (the signature [`faces`]
+/// writes): the application the look was taken in, and the element's own
+/// identity. The links between are its parents — what one point cannot show.
+#[cfg(any(target_os = "macos", test))]
+fn lineage_ends(signature: &str) -> Option<(Value, Value)> {
+    let lineage: Value = serde_json::from_str(signature).ok()?;
+    let lineage = lineage.as_array()?;
+    Some((lineage.first()?.clone(), lineage.last()?.clone()))
+}
+
+/// Which proof a press by number went out on (t-6385), in the word its
+/// answer names it by under [`CONFIRMED_BY_KEY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Proof {
+    /// The element on top at the one point the press lands on.
+    Point,
+    /// The whole tree, read again.
+    Tree,
+}
+
+impl Proof {
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Point => "point",
+            Self::Tree => "tree",
+        }
+    }
+}
+
+/// The key a mark click's answer names its [`Proof`] under.
+pub(crate) const CONFIRMED_BY_KEY: &str = "confirmedBy";
+
+/// What a mark click came to: the proof it went out on, and — where its door
+/// waits for the screen it led to (iOS, t-6385) — how that screen settled.
+pub(super) struct Pressed {
+    pub proof: Proof,
+    pub settled: Option<Settled>,
+}
+
+/// One face as a settling press compares two reads of a tree (t-6385): its
+/// role and words, its frame to the whole point — a frame wobbles by a
+/// fraction of one between two fetches of a still screen — and what its
+/// centre answered.
+pub(super) type FaceShape = (String, String, [i64; 4], Option<bool>);
+
+/// A tree's faces as a settling press compares them, in the fold's order.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) fn shape(faces: &[ElementFace]) -> Vec<FaceShape> {
+    faces
+        .iter()
+        .map(|face| {
+            (
+                face.role.clone(),
+                face.words().to_string(),
+                [face.x, face.y, face.width, face.height].map(|side| side.round() as i64),
+                face.visible.map(|seen| seen.width > 0.0),
+            )
+        })
+        .collect()
+}
+
+/// How a pressed screen's settling ended (t-6385), in the word a click's
+/// answer and a walk's row name it by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) enum Settle {
+    /// Not yet decided: read again.
+    Reading,
+    /// It changed after the press and then read the same twice running.
+    Still,
+    /// Nothing changed within the quiet window: the press moved nothing.
+    Unmoved,
+    /// The ceiling passed with the tree still changing.
+    Ceiling,
+}
+
+impl Settle {
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Reading => "reading",
+            Self::Still => "still",
+            Self::Unmoved => "unmoved",
+            Self::Ceiling => "ceiling",
+        }
+    }
+}
+
+/// Whether a pressed screen has stopped changing, decided read by read
+/// (t-6385).
+///
+/// The first read after the tap is the screen as the press found it: a tap
+/// lands about 280 ms before the app paints anything (t-6350), so two reads
+/// alike at once prove nothing. The screen has settled once a read differs
+/// from that first one and the next reads the same again; it moved nothing
+/// when no read differs within the quiet window; past the ceiling it is
+/// answered as it last read, unsettled. A read that failed breaks a run of
+/// alike reads and decides nothing.
+#[derive(Debug)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) struct Settling<S> {
+    quiet: std::time::Duration,
+    ceiling: std::time::Duration,
+    first: Option<S>,
+    last: Option<S>,
+    moved: bool,
+    reads: usize,
+}
+
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+impl<S: Clone + PartialEq> Settling<S> {
+    pub const fn new(quiet: std::time::Duration, ceiling: std::time::Duration) -> Self {
+        Self {
+            quiet,
+            ceiling,
+            first: None,
+            last: None,
+            moved: false,
+            reads: 0,
+        }
+    }
+
+    /// One more read, `since` the tap: what the settling has come to.
+    pub fn read(&mut self, shape: Option<S>, since: std::time::Duration) -> Settle {
+        self.reads += 1;
+        let Some(shape) = shape else {
+            self.last = None;
+            return if since >= self.ceiling {
+                Settle::Ceiling
+            } else {
+                Settle::Reading
+            };
+        };
+        let repeated = self.last.as_ref() == Some(&shape);
+        match &self.first {
+            None => self.first = Some(shape.clone()),
+            Some(first) if *first != shape => self.moved = true,
+            Some(_) => {}
+        }
+        self.last = Some(shape);
+        if self.moved && repeated {
+            Settle::Still
+        } else if !self.moved && since >= self.quiet {
+            Settle::Unmoved
+        } else if since >= self.ceiling {
+            Settle::Ceiling
+        } else {
+            Settle::Reading
+        }
+    }
+
+    pub const fn reads(&self) -> usize {
+        self.reads
+    }
+
+    /// The screen has moved whatever the reads compare to: the pressed
+    /// control is no longer where it stood — a press whose screen changed
+    /// before its first read came back.
+    pub const fn moved(&mut self) {
+        self.moved = true;
+    }
+}
+
+/// What a pressed screen did before the press answered (t-6385). Only an iOS
+/// press waits for its screen yet.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(super) struct Settled {
+    pub settle: Settle,
+    pub reads: usize,
+    pub ms: u64,
+    /// The last tree it read: what the screen settled on, or was left on.
+    pub last: Option<Snapshot>,
+}
+
+impl Settled {
+    /// What a click's answer and a walk's row say of it.
+    fn said(&self) -> Value {
+        json!({ "ms": self.ms, "reads": self.reads, "settle": self.settle.word() })
     }
 }
 
@@ -475,15 +753,31 @@ impl Table {
     }
 
     fn answer(&self, look: &str) -> Value {
-        let items = shared::items(&self.plan);
-        let legend = items
-            .iter()
-            .filter_map(shared::legend_line)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let (items, legend) = items_and_legend(&self.plan);
         json!({ LOOK_ID_KEY: look, ITEMS_KEY: items, LEGEND_KEY: legend,
             "candidates": self.plan.candidates, "omitted": self.plan.omitted })
     }
+}
+
+/// A plan's items and the legend a model reads them by — what a look
+/// answers, and what a press's preview answers of the screen it settled on.
+fn items_and_legend(plan: &MarkPlan) -> (Vec<Value>, String) {
+    let items = shared::items(plan);
+    let legend = items
+        .iter()
+        .filter_map(shared::legend_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    (items, legend)
+}
+
+/// What a press answers of the screen it settled on when asked for a
+/// preview (t-6385): the items and legend a look of that tree would answer,
+/// numbered by the same plan — with no look id, since nothing in it can be
+/// pressed.
+pub(super) fn preview_of(snapshot: &Snapshot) -> Value {
+    let (items, legend) = items_and_legend(&numbered(&snapshot.faces, snapshot.screen));
+    json!({ ITEMS_KEY: items, LEGEND_KEY: legend })
 }
 
 static TABLES: Mutex<Kept<Table>> = Mutex::new(Kept::new(MARK_LOOKS_KEPT));
@@ -515,11 +809,18 @@ pub(super) async fn snapshot(
 }
 
 /// Number the device's current tree without capturing or drawing a picture.
+///
+/// `count`, when given, is counted in the same tree the way `find` counts it
+/// (`checks::found`), under the answer's `count` — so a walk that looks at
+/// the screen and asks whether its words are there reads the tree once
+/// (t-6385; a separate `find` read the same screen again, 946 ms a step).
 pub(crate) async fn observe(
     platform: EmulatorPlatform,
     device: Device,
+    count: Option<&str>,
 ) -> Result<Value, ProviderError> {
     let snapshot = snapshot(platform, &device).await?;
+    let counted = count.map(|subject| super::checks::found(&snapshot, subject));
     let table = Table {
         platform,
         device,
@@ -528,7 +829,10 @@ pub(crate) async fn observe(
         made: Instant::now(),
     };
     let look = uuid::Uuid::new_v4().to_string();
-    let answer = table.answer(&look);
+    let mut answer = table.answer(&look);
+    if let Some(counted) = counted {
+        answer[super::checks::COUNT_KEY] = json!(counted);
+    }
     TABLES
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -542,6 +846,8 @@ pub(crate) async fn click(
     device: Device,
     mark: usize,
     look: &str,
+    count: Option<&str>,
+    preview: bool,
 ) -> Result<Value, ProviderError> {
     let (request, legend) = {
         let held = TABLES
@@ -566,13 +872,27 @@ pub(crate) async fn click(
             .unwrap_or_default();
         (request, legend)
     };
-    match platform {
+    let pressed = match platform {
         EmulatorPlatform::Ios => super::ios::click_mark_direct(device.address, request).await?,
         EmulatorPlatform::Android => {
             super::android::click_mark_direct(device.address, request).await?
         }
+    };
+    let mut answer = json!({ "performed": true, "mark": mark, LOOK_ID_KEY: look,
+        LEGEND_KEY: legend, CONFIRMED_BY_KEY: pressed.proof.word() });
+    if let Some(settled) = &pressed.settled {
+        answer[zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY] = settled.said();
+        // The caller's words, counted in the tree the press settled on — the
+        // walk alone, so a count is proof they are there and a zero is not
+        // proof they are absent (only a look's grid finds some elements).
+        if let (Some(subject), Some(last)) = (count, &settled.last) {
+            answer[super::checks::COUNT_KEY] = json!(super::checks::found(last, subject));
+        }
+        if preview && let Some(last) = &settled.last {
+            answer[zerocode_core::computer_use::EMULATOR_PREVIEW_FLAG] = preview_of(last);
+        }
     }
-    Ok(json!({ "performed": true, "mark": mark, LOOK_ID_KEY: look, LEGEND_KEY: legend }))
+    Ok(answer)
 }
 
 #[cfg(test)]

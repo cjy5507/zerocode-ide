@@ -127,6 +127,16 @@ pub(super) enum InputRequest {
         rotation: u32,
     },
     Ax,
+    /// The tree without the grid's point queries — the walk from the
+    /// application down, each element's centre still asked: what a press
+    /// reads again and again while its screen settles (t-6385).
+    Walk,
+    /// What is on top at one point of the screen, in the accessibility tree's
+    /// own points — a press by number's last-moment check (t-6385).
+    Hit {
+        x: f64,
+        y: f64,
+    },
     Ping,
     Paste,
     /// One picture of the device's own framebuffer, asked for and waited on.
@@ -175,6 +185,8 @@ impl InputRequest {
             Self::Button { .. } => "button",
             Self::Rotate { .. } => "rotate",
             Self::Ax => "ax",
+            Self::Walk => "walk",
+            Self::Hit { .. } => "hit",
             Self::Frame { .. } => "frame",
             Self::Stream { .. } => "stream",
             Self::StreamStop => "streamstop",
@@ -1210,11 +1222,32 @@ pub(super) fn accessibility_tree(udid: &str) -> Result<serde_json::Value, String
 
 /// Marks need the raw AX frame, before the display tree rounds it to 0..1.
 pub(super) fn accessibility_roots(udid: &str) -> Result<Vec<serde_json::Value>, String> {
-    let json = ask_device(udid, &InputRequest::Ax)?
+    tree_of(udid, &InputRequest::Ax)
+}
+
+/// [`accessibility_roots`] without the grid: the walk alone, a tenth of the
+/// cost (55 of 580 ms on Settings, t-6350) — what a settling press reads.
+pub(super) fn accessibility_walk(udid: &str) -> Result<Vec<serde_json::Value>, String> {
+    tree_of(udid, &InputRequest::Walk)
+}
+
+fn tree_of(udid: &str, request: &InputRequest) -> Result<Vec<serde_json::Value>, String> {
+    let json = ask_device(udid, request)?
         .data
         .ok_or("iOS 접근성 트리가 비어 있습니다")?;
     serde_json::from_str(&json)
         .map_err(|error| format!("iOS 접근성 트리를 읽지 못했습니다: {error}"))
+}
+
+/// The element on top at one point, inside the application it is in — the
+/// `ax` answer's own shape cut to that one element (`elementAt`). Nothing
+/// reaches the device, so the pane is not nudged.
+pub(super) fn element_at(udid: &str, x: f64, y: f64) -> Result<serde_json::Value, String> {
+    let json = ask_device(udid, &InputRequest::Hit { x, y })?
+        .data
+        .ok_or("iOS 접근성 한 점 답이 비어 있습니다")?;
+    serde_json::from_str(&json)
+        .map_err(|error| format!("iOS 접근성 한 점 답을 읽지 못했습니다: {error}"))
 }
 
 #[derive(Clone, Copy)]
@@ -1383,6 +1416,13 @@ fn helper_program() -> Result<PathBuf, String> {
 #[cfg(test)]
 static HELPER_STAND_IN: Mutex<Option<PathBuf>> = Mutex::new(None);
 
+/// A helper program of the caller's in place of the embedded one — how the
+/// walk bench runs one helper build against another on the same Rust code.
+#[cfg(test)]
+pub(super) fn use_helper(program: PathBuf) {
+    *held(&HELPER_STAND_IN) = Some(program);
+}
+
 fn helper_path() -> Result<&'static Path, String> {
     static HELPER: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     HELPER
@@ -1513,6 +1553,23 @@ mod tests {
         .unwrap();
         assert_eq!(multi["kind"], "multitouch");
         assert_eq!(multi["x4"], 0.7);
+    }
+
+    /// A press by number's last-moment question reaches the helper as the
+    /// kind its request loop answers (`main.swift`, `case "hit"`, a source
+    /// contract holds the other side), with the point in the tree's points.
+    #[test]
+    fn a_point_query_crosses_the_wire_as_the_helper_reads_it() {
+        let wire = serde_json::to_value(WireRequest {
+            id: 9,
+            request: &InputRequest::Hit { x: 80.0, y: 102.5 },
+        })
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({ "id": 9, "kind": "hit", "x": 80.0, "y": 102.5 })
+        );
+        assert_eq!(InputRequest::Hit { x: 0.0, y: 0.0 }.name(), "hit");
     }
 
     fn pushed(seed: u32, width: u32, height: u32, body: &[u8]) -> Vec<u8> {

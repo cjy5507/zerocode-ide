@@ -31,6 +31,31 @@ pub const EMULATOR_SWIPE_MS_MAX: u32 = 3_000;
 /// the tree before input; deterministic checks keep this same policy.
 pub const EMULATOR_HOLD_MS: u64 = EMULATOR_SWIPE_MS_MAX as u64;
 
+/// The longest a press by number waits, after its tap, for the tree it led
+/// to to stop changing before it answers (t-6385). A phone's look right after
+/// a press reads the screen it is leaving — a walk that looked at once was
+/// refused its next press 5 times of 5 (t-6350) — and the tree stops
+/// changing a second before the paint does: p50 1,080 ms, at most 1,201,
+/// against 2,258 for the pixels, on an iPhone 17 simulator under load 10–36.
+/// Past this the press answers with the tree as it last read it, and says it
+/// did not settle.
+pub const EMULATOR_SETTLE_CEILING_MS: u64 = 2_000;
+
+/// How long a press waits for its tree to start changing at all before it
+/// says the press moved nothing: about twice the first paint after a tap
+/// (273–301 ms, t-6350) — a press on an inert spot, or one whose screen
+/// answers later than a person would call the same moment.
+pub const EMULATOR_SETTLE_QUIET_MS: u64 = 600;
+
+/// How long a mark click may hold a walk: the door's own ceiling, then its
+/// screen settling.
+pub const EMULATOR_CLICK_HOLD_MS: u64 = EMULATOR_HOLD_MS + EMULATOR_SETTLE_CEILING_MS;
+
+/// The key a mark click's answer says how its screen settled under — how
+/// long, in how many reads, and how it ended (`still`, `unmoved`,
+/// `ceiling`) — when its door waits for that; a walk's row carries it too.
+pub const EMULATOR_SETTLE_KEY: &str = "settle";
+
 /// The one table of the emulator door's verbs (`EmulatorMethod`, the words
 /// `parse_emulator_command` accepts): the words a recipe line may start with,
 /// how many words each takes after itself (its flags and their values, a
@@ -42,10 +67,10 @@ pub const EMULATOR_VERBS: [BrowserVerb; 13] = [
     verb("list", 0, 1, EMULATOR_HOLD_MS),
     verb("open", 2, 5, EMULATOR_HOLD_MS),
     verb("tree", 4, 5, EMULATOR_HOLD_MS),
-    verb("marks", 4, 5, EMULATOR_HOLD_MS),
+    verb("marks", 4, 7, EMULATOR_HOLD_MS),
     check_verb("find", 6, 7, EMULATOR_HOLD_MS),
     check_verb("foreground", 6, 7, EMULATOR_HOLD_MS),
-    act_verb("click", 8, 9, EMULATOR_HOLD_MS),
+    act_verb("click", 8, 12, EMULATOR_CLICK_HOLD_MS),
     act_verb("tap", 8, 9, EMULATOR_HOLD_MS),
     act_verb("swipe", 12, 15, EMULATOR_HOLD_MS),
     act_verb("text", 6, 7, EMULATOR_HOLD_MS),
@@ -107,10 +132,17 @@ mod tests {
 
     #[test]
     fn emulator_marks_and_click_share_the_verb_table_contract() {
-        for (word, min, max, acts) in [("marks", 4, 5, false), ("click", 8, 9, true)] {
+        // `marks … --text <words>` counts a check's words in the same look,
+        // and a click holds its screen's settling, may count them in the tree
+        // it settled on and may answer what that screen would carry
+        // (`--preview`, t-6385).
+        for (word, min, max, acts, hold) in [
+            ("marks", 4, 7, false, EMULATOR_HOLD_MS),
+            ("click", 8, 12, true, EMULATOR_CLICK_HOLD_MS),
+        ] {
             let row = emulator_verb(word).expect("the mobile marks door is registered");
             assert_eq!((row.arity.min, row.arity.max), (min, max));
-            assert_eq!(holds_ms(word), Some(EMULATOR_HOLD_MS));
+            assert_eq!(holds_ms(word), Some(hold));
             assert_eq!(super::acts(word), acts);
             assert!(!is_check(word));
             for count in [min, max] {
@@ -137,8 +169,14 @@ mod tests {
         for row in &EMULATOR_VERBS {
             assert!(seen.insert(row.word), "`{}` twice in the table", row.word);
             assert!(row.arity.min <= row.arity.max, "{row:?}");
-            // Reads and gestures share the device hold ceiling.
-            assert_eq!(row.hold_ms, EMULATOR_HOLD_MS, "{row:?}");
+            // Reads and gestures share the device hold ceiling; a mark click
+            // holds its screen's settling on top of it.
+            let hold = if row.word == "click" {
+                EMULATOR_CLICK_HOLD_MS
+            } else {
+                EMULATOR_HOLD_MS
+            };
+            assert_eq!(row.hold_ms, hold, "{row:?}");
             assert!(!row.check || !row.acts, "checks never act: {row:?}");
             // The door's readers are the browser's, given this table: one
             // implementation, never a second.

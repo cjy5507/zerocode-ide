@@ -24,8 +24,13 @@ const DESKTOP_APPS: &str = include_str!(
     "../../native/computer-use-macos/Sources/ZeroCodeComputerUseMacOSCore/DesktopApps.swift"
 );
 const IOS_BRIDGE: &str = include_str!("../../native/ios-emulator-helper/AccessibilityBridge.swift");
+const IOS_HELPER: &str = include_str!("../../native/ios-emulator-helper/main.swift");
+const IOS_HID: &str = include_str!("../../src/emulator/ios_hid.rs");
 const IOS_CHILD_TALLY: &str = include_str!(
     "../../native/ios-emulator-helper/Sources/ZeroCodeIosEmulatorHelperCore/AccessibilityChildTally.swift"
+);
+const IOS_LEAF: &str = include_str!(
+    "../../native/ios-emulator-helper/Sources/ZeroCodeIosEmulatorHelperCore/AccessibilityLeaf.swift"
 );
 const MOBILE_MARKS: &str = include_str!("../../src/emulator/marks.rs");
 
@@ -748,6 +753,86 @@ fn the_ios_exporters_centre_answer_is_read_by_the_key_it_writes() {
         "the bridge writes its answer under another key"
     );
 }
+/// A press by number's last-moment question (t-6385) is asked by the kind
+/// the helper answers, and answered in the tree's own shape — the exporter's
+/// one element description, not a second spelling of it — so the reader can
+/// fold a point's answer with the fold it reads every tree with.
+#[test]
+fn the_ios_helper_answers_a_point_in_the_trees_own_shape() {
+    assert!(
+        IOS_HID.contains("Self::Hit { .. } => \"hit\""),
+        "the window asks for a point under another kind"
+    );
+    let handled = IOS_HELPER
+        .split("case \"hit\":")
+        .nth(1)
+        .expect("the helper no longer answers a point");
+    assert!(
+        handled
+            .split("case \"")
+            .next()
+            .is_some_and(|arm| arm.contains("AccessibilityBridge.shared.elementAt(")),
+        "the helper answers a point with something other than elementAt"
+    );
+    let at = IOS_BRIDGE
+        .split("func elementAt(")
+        .nth(1)
+        .and_then(|body| body.split("\n    }\n").next())
+        .expect("elementAt is gone");
+    assert!(
+        at.contains("describe(rootElement, frame: screen)")
+            && at.contains("describe(element, frame: frame)"),
+        "a point's answer describes its elements some other way than the walk"
+    );
+    let walk = IOS_BRIDGE
+        .split("private func serialize(")
+        .nth(1)
+        .expect("the walk is gone");
+    assert!(
+        walk.contains("var dict = describe(element, frame: frame)"),
+        "the walk describes an element some other way than a point's answer"
+    );
+}
+
+/// The exporter's canvas is the core's page (t-6385): an element over this
+/// share of the screen blocks no grid point whatever its centre answered,
+/// for the reason a mark refuses one — its centre is nobody's target, and
+/// controls float over the rest of it.
+#[test]
+fn the_ios_exporters_canvas_is_the_cores_page() {
+    use zerocode_core::computer_use::MARK_MAX_WINDOW_SHARE;
+    assert!(
+        IOS_LEAF.contains(&format!(
+            "static let canvasShare: CGFloat = {MARK_MAX_WINDOW_SHARE}"
+        )),
+        "the exporter's canvas share drifted from MARK_MAX_WINDOW_SHARE"
+    );
+    assert!(
+        IOS_BRIDGE.contains("AccessibilityLeaf.blocksGrid("),
+        "the walk decides what blocks the grid some other way"
+    );
+}
+
+/// A settling press reads the walk without the grid (t-6385): the window
+/// asks for it by the kind the helper answers, and the helper answers it by
+/// the tree's own exporter with the grid left out.
+#[test]
+fn the_ios_helper_walks_without_the_grid_for_a_settling_press() {
+    assert!(
+        IOS_HID.contains("Self::Walk => \"walk\""),
+        "the window asks for the walk under another kind"
+    );
+    let handled = IOS_HELPER
+        .split("case \"walk\":")
+        .nth(1)
+        .and_then(|rest| rest.split("case \"").next())
+        .expect("the helper no longer answers the walk alone");
+    assert!(
+        handled.contains("describeUI(udid: CommandLine.arguments[1], grid: false)"),
+        "the walk alone is answered by something other than the exporter without its grid"
+    );
+}
+
 /// A subview two parents reference is not a missing observation.
 ///
 /// `Snapshot::new` refuses a truncated tree outright, so the exporter's word

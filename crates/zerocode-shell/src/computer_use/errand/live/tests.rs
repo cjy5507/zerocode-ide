@@ -798,6 +798,52 @@ fn a_risen_auto_answers_the_same_bytes_from_the_memo_and_sends_nothing() {
     assert_eq!(endpoint.asked().len(), 3);
 }
 
+/// A repeated run (a recipe walked again, `walk --replay`, t-6385) answers
+/// from the memo under an `auto` nobody has raised — the cache's repeat mode
+/// in the Jev table — and its row says it was a repeat; a fresh run of the
+/// same settings still compares, and a person's `shadow` stands in a repeat.
+#[test]
+fn a_repeated_run_answers_from_the_memo_under_an_auto_nobody_raised() {
+    use zerocode_core::jev::{JevMode, Run};
+    let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:1"), 0);
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_caching(&home, Some(JevMode::Auto.key()));
+    let asked = asked();
+
+    // Fresh: the first question is remembered, the second compared.
+    let mut fresh = LiveJudge::at(&endpoint.base(), "test-key", door.clone());
+    assert!(matches!(fresh.choose(&asked), Judged::Chose(_)));
+    assert!(matches!(fresh.choose(&asked), Judged::Chose(_)));
+    assert!(!fresh.cached());
+    assert_eq!(endpoint.asked().len(), 2);
+
+    // Repeated, the cache still not raised: the memo answers, nothing leaves.
+    let mut replay = LiveJudge::at(&endpoint.base(), "test-key", door).in_run(Run::Repeated);
+    let Judged::Chose(choice) = replay.choose(&asked) else {
+        panic!("the memo answers a repeat");
+    };
+    assert_eq!(choice.chosen, Chosen::Mark(1));
+    assert!(replay.cached());
+    assert_eq!(endpoint.asked().len(), 2, "the repeat sent nothing");
+    let rows = cache_rows(&mut replay, &home);
+    let hit = rows.last().expect("a row for the hit");
+    assert_eq!(
+        hit["routeUse"],
+        json!(zerocode_core::jev::ROUTE_USE_APPLIED)
+    );
+    assert_eq!(hit["mode"], json!(JevMode::On.key()));
+    assert_eq!(hit["run"], json!(Run::Repeated.key()));
+
+    // A person's shadow is theirs in a repeat as well: the wire is asked.
+    let home = tempfile::tempdir().expect("a zo home");
+    let door = door_caching(&home, Some(JevMode::Shadow.key()));
+    let mut shadow = LiveJudge::at(&endpoint.base(), "test-key", door).in_run(Run::Repeated);
+    assert!(matches!(shadow.choose(&asked), Judged::Chose(_)));
+    assert!(matches!(shadow.choose(&asked), Judged::Chose(_)));
+    assert!(!shadow.cached());
+    assert_eq!(endpoint.asked().len(), 4);
+}
+
 #[test]
 fn a_memo_hit_still_passes_the_door_first() {
     let endpoint = Endpoint::serving("HTTP/1.1 200 OK", body_choosing("mark:1"), 0);

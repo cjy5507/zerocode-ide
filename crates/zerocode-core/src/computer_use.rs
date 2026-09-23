@@ -1564,6 +1564,23 @@ pub fn walk_rescues(params: &Value) -> bool {
     params.get(WALK_RESCUE_PARAM) == Some(&Value::Bool(true))
 }
 
+/// `walk --replay`: this walk repeats one walked before — a QA run, a Flow
+/// walked again (t-6385) — so the uses the Jev table moves in a repeated run
+/// stand where it says (`jev::JevUse::repeat`): the judgment cache answers a
+/// question it has answered before rather than only recording it.
+pub const WALK_REPLAY_FLAG: &str = "replay";
+pub const WALK_REPLAY_PARAM: &str = "replay";
+
+/// The run a walk was asked in: repeated when it said `--replay`.
+#[must_use]
+pub fn walk_run(params: &Value) -> crate::jev::Run {
+    if params.get(WALK_REPLAY_PARAM) == Some(&Value::Bool(true)) {
+        crate::jev::Run::Repeated
+    } else {
+        crate::jev::Run::Fresh
+    }
+}
+
 #[must_use]
 pub fn walk_steps(params: &Value) -> usize {
     params
@@ -2322,8 +2339,18 @@ pub struct EmulatorCommand {
     pub out: Option<String>,
     pub mark: Option<usize>,
     pub look: Option<String>,
+    /// `click … --preview`: answer the marks the screen the press settled on
+    /// would carry ([`EMULATOR_PREVIEW_FLAG`]).
+    pub preview: bool,
     pub json: bool,
 }
+
+/// `zerocode-emulator click … --preview` (t-6385): besides the press, answer
+/// the marks the screen it settled on would carry, numbered off the tree the
+/// press waited on, under the answer's own key of the same word. Not a look —
+/// nothing in it can be pressed: a walk begins its next judgment on it while
+/// the look is taken.
+pub const EMULATOR_PREVIEW_FLAG: &str = "preview";
 
 /// Parse the built-in-emulator CLI without forwarding unknown or partial
 /// gestures. Coordinates are normalized because both pane backends speak the
@@ -2348,8 +2375,17 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
     let allowed: &[&str] = match method {
         EmulatorMethod::List => &["json"],
         EmulatorMethod::Open => &["json", "platform", "device"],
-        EmulatorMethod::Tree | EmulatorMethod::Marks => &["json", "platform", "device"],
-        EmulatorMethod::Click => &["json", "platform", "device", "mark", "look"],
+        EmulatorMethod::Tree => &["json", "platform", "device"],
+        EmulatorMethod::Marks => &["json", "platform", "device", "text"],
+        EmulatorMethod::Click => &[
+            "json",
+            "platform",
+            "device",
+            "mark",
+            "look",
+            "text",
+            EMULATOR_PREVIEW_FLAG,
+        ],
         EmulatorMethod::Tap => &["json", "platform", "device", "x", "y"],
         EmulatorMethod::Swipe => &["json", "platform", "device", "x1", "y1", "x2", "y2", "ms"],
         EmulatorMethod::Text | EmulatorMethod::Find => &["json", "platform", "device", "text"],
@@ -2425,6 +2461,11 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
                 return Err("--text must not be empty".into());
             }
         }
+        EmulatorMethod::Marks | EmulatorMethod::Click
+            if text.as_deref().is_some_and(|value| value.trim().is_empty()) =>
+        {
+            return Err("--text must not be empty".into());
+        }
         EmulatorMethod::Foreground => {
             let value = app.as_deref().ok_or("missing required --app")?;
             if value.trim().is_empty() {
@@ -2475,6 +2516,7 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         out,
         mark,
         look,
+        preview: flags.contains_key(EMULATOR_PREVIEW_FLAG),
         json: flags.contains_key("json"),
     })
 }
@@ -2949,6 +2991,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ("repeat", "repeat"),
         (WALK_OVERLAP_FLAG, WALK_OVERLAP_PARAM),
         (WALK_RESCUE_FLAG, WALK_RESCUE_PARAM),
+        (WALK_REPLAY_FLAG, WALK_REPLAY_PARAM),
     ] {
         if flags.contains_key(flag) {
             params.insert(key.into(), Value::Bool(true));
@@ -3039,6 +3082,8 @@ fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
                 | "repeat"
                 | WALK_OVERLAP_FLAG
                 | WALK_RESCUE_FLAG
+                | WALK_REPLAY_FLAG
+                | EMULATOR_PREVIEW_FLAG
         );
         if flags.contains_key(name) {
             return Err(format!("duplicate --{name}"));
@@ -3311,6 +3356,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "steps",
             WALK_OVERLAP_FLAG,
             WALK_RESCUE_FLAG,
+            WALK_REPLAY_FLAG,
         ],
         ComputerMethod::Compare => &[
             "json", "baseline", "against", "region", "display", "max-diff",
@@ -4011,7 +4057,8 @@ pub fn usage() -> String {
         "  zerocode-computer recipe-list [--json]",
         "  zerocode-computer recipe-show --name <name> [--json]",
         "  zerocode-computer recipe-run --name <name> [--params '{\"name\":\"value\"}'] [--start N] [--end N] [--confirm <txn>] [--repeat [--until <HH:MM|N>]] [--arena <evidence dir>] [--rescue] [--json]",
-        "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane> | --platform <ios|android> --device <id>) [--until <text on screen when it worked>] [--steps N] [--overlap] [--rescue] [--json]",
+        "  zerocode-computer walk --goal <what to reach> (--app <app> | --pane <browser pane> | --platform <ios|android> --device <id>) [--until <text on screen when it worked>] [--steps N] [--overlap] [--rescue] [--replay] [--json]",
+        "      (--replay: this walk repeats one walked before, so a question it asked then is answered from the judgment memo)",
         "      (walks the steps in one call, filling {{name}} from --params; stops at the person's turn or last step,",
         "       a step naming the saved screen's element or window, a check the screen fails, an act that changed",
         "       nothing, or a person's hand on the pointer — and answers the step to resume from; a guarded Flow's",
@@ -4081,12 +4128,16 @@ pub fn emulator_usage() -> String {
         "  zerocode-emulator list [--json]",
         "  zerocode-emulator open --platform ios|android [--device <id>] [--json]",
         "  zerocode-emulator tree --platform ios|android --device <id> [--json]",
-        "  zerocode-emulator marks --platform ios|android --device <id> [--json]",
+        "  zerocode-emulator marks --platform ios|android --device <id> [--text <fragment>] [--json]",
+        "    --text also counts, in the same look, what find would (count; 0 means absent).",
         "  zerocode-emulator find --platform ios|android --device <id> --text <fragment> [--json]",
         "  zerocode-emulator foreground --platform ios|android --device <id> --app <package|bundle> [--json]",
         "    Checks answer count (0 means absent). find matches a case-insensitive name fragment.",
         "    foreground requires an exported app package; unavailable metadata is an error (including iOS).",
-        "  zerocode-emulator click --platform ios|android --device <id> --mark <n> --look <id> [--json]",
+        "  zerocode-emulator click --platform ios|android --device <id> --mark <n> --look <id> [--text <fragment>] [--preview] [--json]",
+        "    On iOS a click answers once the screen it led to stops changing; --text counts what find would",
+        "    in the tree it stopped on (count; 0 is not proof of absence — look with marks --text); --preview",
+        "    answers the marks that screen would carry (not a look: look again before pressing one).",
         "  zerocode-emulator tap --platform ios|android --device <id> --x <0..1> --y <0..1> [--json]",
         "  zerocode-emulator swipe --platform ios|android --device <id> --x1 N --y1 N --x2 N --y2 N [--ms N] [--json]",
         "  zerocode-emulator text --platform ios|android --device <id> (--text <text>|--text-stdin) [--json]",
@@ -5889,6 +5940,80 @@ mod tests {
         }
     }
 
+    /// A click may count a check's words in the tree it settled on (t-6385),
+    /// and refuses an empty fragment as a look does.
+    #[test]
+    fn an_emulator_click_counts_words_in_its_settled_screen_only_when_it_names_some() {
+        let click = |text: &str| {
+            parse_emulator_command(&words(&[
+                "click",
+                "--platform",
+                "ios",
+                "--device",
+                "phone",
+                "--mark",
+                "2",
+                "--look",
+                "L1",
+                "--text",
+                text,
+                "--json",
+            ]))
+        };
+        assert_eq!(click("iOS 버전").unwrap().text.as_deref(), Some("iOS 버전"));
+        assert!(click(" ").unwrap_err().contains("--text"));
+        assert!(emulator_usage().contains("--look <id> [--text <fragment>]"));
+    }
+
+    /// A look may also count a check's words in the same tree (t-6385); an
+    /// empty fragment counts nothing and is refused as `find` refuses it.
+    #[test]
+    fn an_emulator_look_counts_words_only_when_it_names_some() {
+        let look = |text: &str| {
+            parse_emulator_command(&words(&[
+                "marks",
+                "--platform",
+                "ios",
+                "--device",
+                "phone",
+                "--text",
+                text,
+                "--json",
+            ]))
+        };
+        assert_eq!(look("iOS 버전").unwrap().text.as_deref(), Some("iOS 버전"));
+        assert!(look("  ").unwrap_err().contains("--text"));
+        let plain =
+            parse_emulator_command(&words(&["marks", "--platform", "ios", "--device", "phone"]))
+                .unwrap();
+        assert_eq!(plain.text, None);
+        assert!(emulator_usage().contains("marks --platform ios|android --device <id> [--text"));
+    }
+
+    /// A click may ask for a preview of the screen it settles on (t-6385);
+    /// a plain click asks for none.
+    #[test]
+    fn an_emulator_click_asks_for_a_preview_only_when_it_says_so() {
+        let click = |more: &[&str]| {
+            let mut line = vec![
+                "click",
+                "--platform",
+                "ios",
+                "--device",
+                "phone",
+                "--mark",
+                "2",
+                "--look",
+                "L1",
+            ];
+            line.extend_from_slice(more);
+            parse_emulator_command(&words(&line)).unwrap()
+        };
+        assert!(click(&["--preview", "--json"]).preview);
+        assert!(!click(&["--json"]).preview);
+        assert!(emulator_usage().contains("[--preview]"));
+    }
+
     #[test]
     fn emulator_click_refuses_zero_mark_by_name() {
         emulator_click_refusal(&["--mark", "0", "--look", "L1"], "--mark");
@@ -7347,6 +7472,24 @@ mod tests {
         for shown in ["--repeat [--until <HH:MM|N>]", "--arena <evidence dir>"] {
             assert!(usage.contains(shown), "{shown} is not in the manual");
         }
+    }
+
+    /// `--replay` (t-6385) is a walk's own word too: it says the walk runs
+    /// in a repeated run, and a plain walk runs fresh.
+    #[test]
+    fn a_walk_may_say_it_repeats_one_walked_before_and_a_plain_walk_does_not() {
+        let argv = |words: &[&str]| words.iter().map(|w| (*w).to_string()).collect::<Vec<_>>();
+        let plain =
+            parse_command(&argv(&["walk", "--goal", "pay", "--pane", "b"])).expect("a walk");
+        assert_eq!(walk_run(&plain.params), crate::jev::Run::Fresh);
+        let replay = parse_command(&argv(&["walk", "--goal", "pay", "--pane", "b", "--replay"]))
+            .expect("a replayed walk");
+        assert_eq!(walk_run(&replay.params), crate::jev::Run::Repeated);
+        assert!(usage().contains("[--replay]"));
+        assert!(
+            parse_command(&argv(&["click", "--x", "1", "--y", "2", "--replay"])).is_err(),
+            "no other verb takes it"
+        );
     }
 
     /// `--overlap` (t-6132 S2) is a walk's own word: the walk reads it, the

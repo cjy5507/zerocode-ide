@@ -25,11 +25,13 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 use zerocode_core::computer_recipe::{RecipeTool, recipe_line_holds_ms};
-use zerocode_core::computer_use::{EmulatorPlatform, FLOW_BASELINE_PROBE_MS};
+use zerocode_core::computer_use::{
+    EMULATOR_PREVIEW_FLAG, EmulatorPlatform, FLOW_BASELINE_PROBE_MS,
+};
 use zerocode_core::computer_use_protocol::marks::{ITEMS_KEY, LOOK_ID_KEY};
 use zerocode_hookd::TeamAnswer;
 
-use super::{Saved, Screen, Seen, Surface, World};
+use super::{Saved, Screen, Seen, Settled, Surface, World};
 
 /// The flag every road here asks its answer as JSON with — the word both
 /// CLIs already take, spelled once.
@@ -321,6 +323,21 @@ pub struct GoalWorld<'a, Road> {
     began: Instant,
     /// The device's saved states, when this surface has them (t-6044).
     snapshots: Option<Box<dyn Snapshots>>,
+    /// What the last press said of its screen settling, when its door waits
+    /// for the screen to stop changing (a phone's, t-6385).
+    settled: Option<Settled>,
+    /// Whether a press asks for a preview of the screen it settles on
+    /// (`click --preview`, t-6385) — what a walk that asks ahead begins its
+    /// next judgment on.
+    previewing: bool,
+    /// How many of the caller's words that press counted in the tree it
+    /// settled on — the walk alone, so a count proves they are there and a
+    /// zero proves nothing.
+    counted: Option<u64>,
+    /// The look a reach check took after a press whose screen settled, kept
+    /// for the step that looks next: the screen is still, so one tree read
+    /// serves both (t-6385).
+    kept: Option<(Screen, String)>,
 }
 
 impl<'a, Road> GoalWorld<'a, Road> {
@@ -342,7 +359,35 @@ impl<'a, Road> GoalWorld<'a, Road> {
             spent_ms,
             began: Instant::now(),
             snapshots: None,
+            settled: None,
+            previewing: false,
+            counted: None,
+            kept: None,
         }
+    }
+
+    /// The same world, asking each press for a preview of the screen it
+    /// settles on (t-6385) — for a walk that begins its next judgment there
+    /// ([`super::Options::overlap`]). Only a phone's door answers one.
+    #[must_use]
+    pub const fn previewing(mut self, on: bool) -> Self {
+        self.previewing = on;
+        self
+    }
+
+    /// A press's preview as the screen a look of it would be.
+    fn preview_screen(&self, preview: &Value) -> Option<Screen> {
+        let Aim::Phone { platform, device } = &self.aim else {
+            return None;
+        };
+        Some(Screen {
+            at: Seen::Phone {
+                platform: *platform,
+                device: device.clone(),
+            },
+            items: preview.get(ITEMS_KEY)?.as_array()?.clone(),
+            shows: Vec::new(),
+        })
     }
 
     /// The same world, able to save and load the device it is aimed at — an
@@ -369,6 +414,10 @@ where
     Road: FnMut(RecipeTool, &[String], &[String]) -> TeamAnswer,
 {
     fn look(&mut self) -> Option<Screen> {
+        if let Some((screen, look)) = self.kept.take() {
+            self.look = look;
+            return Some(screen);
+        }
         let argv = self.aim.look_argv();
         let answer = read_unjudged(self.road, self.aim.tool(), &argv);
         let said = answer_value(&answer)?;
@@ -392,18 +441,71 @@ where
     fn press(&mut self, mark: usize) -> bool {
         // By number, never by selector or a point: the surface re-measures the
         // element it handed that number to and refuses a press whose pin no
-        // longer holds.
-        let argv = self.aim.press_argv(mark, &self.look);
+        // longer holds. A phone's press is asked to count the caller's words
+        // in the screen it settles on, so a walk that got there looks no more.
+        let mut argv = self.aim.press_argv(mark, &self.look);
+        if let (Aim::Phone { .. }, Some(until)) = (&self.aim, &self.until) {
+            argv.extend(["--text".to_string(), until.clone()]);
+        }
+        if self.previewing && matches!(self.aim, Aim::Phone { .. }) {
+            argv.push(format!("--{EMULATOR_PREVIEW_FLAG}"));
+        }
         let holds = recipe_line_holds_ms(self.aim.tool(), &argv);
         let left = self.left_ms();
         if left == 0 || left < holds {
             return false;
         }
-        (self.road)(self.aim.tool(), &argv, &argv).exit_code == 0
+        self.kept = None;
+        let answer = (self.road)(self.aim.tool(), &argv, &argv);
+        let said = answer_value(&answer);
+        self.settled = said.as_ref().and_then(|said| {
+            Some(Settled {
+                note: said
+                    .get(zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY)?
+                    .clone(),
+                screen: said
+                    .get(EMULATOR_PREVIEW_FLAG)
+                    .and_then(|preview| self.preview_screen(preview)),
+            })
+        });
+        self.counted = said
+            .as_ref()
+            .and_then(|said| said.get(crate::emulator::checks::COUNT_KEY)?.as_u64());
+        answer.exit_code == 0
+    }
+
+    fn settled(&mut self) -> Option<Settled> {
+        self.settled.clone()
+    }
+
+    fn asks_ahead_of_the_press(&self) -> bool {
+        !matches!(self.aim, Aim::Phone { .. })
     }
 
     fn reached(&mut self) -> Option<bool> {
         let until = self.until.clone()?;
+        if self.settled.is_some() {
+            // The press waited for its screen to stop changing and counted
+            // the caller's words in the tree it stopped on: found there, the
+            // walk got there and looks no more.
+            if self.counted.is_some_and(|count| count > 0) {
+                return Some(true);
+            }
+            // Not found in the walk alone: the look the next step takes is
+            // the screen to count them in — only its grid finds some
+            // elements — so it is taken now, counted by the check's own rule
+            // and kept for that step: one tree read where a `find` read the
+            // same screen again (946 ms a step, t-6350).
+            let mut argv = self.aim.look_argv();
+            argv.extend(["--text".to_string(), until]);
+            let answer = read_unjudged(self.road, self.aim.tool(), &argv);
+            let said = answer_value(&answer);
+            let count = said
+                .as_ref()
+                .and_then(|said| said.get(crate::emulator::checks::COUNT_KEY)?.as_u64());
+            self.kept = said.as_ref().and_then(|said| screen_of(&self.aim, said));
+            return Some(count.is_some_and(|count| count > 0));
+        }
         let argv = self.aim.reached_argv(&until);
         let answer = read_unjudged(self.road, self.aim.tool(), &argv);
         if matches!(self.aim, Aim::App { .. }) {

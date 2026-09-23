@@ -361,6 +361,7 @@ fn build_ios_emulator_helper() {
         helper.join("main.swift"),
         helper.join("AccessibilityBridge.swift"),
         helper.join("Sources/ZeroCodeIosEmulatorHelperCore/AccessibilityChildTally.swift"),
+        helper.join("Sources/ZeroCodeIosEmulatorHelperCore/AccessibilityLeaf.swift"),
     ];
     for input in &inputs {
         println!("cargo:rerun-if-changed={}", input.display());

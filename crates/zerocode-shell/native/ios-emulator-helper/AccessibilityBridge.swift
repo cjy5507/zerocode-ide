@@ -92,54 +92,20 @@ final class AccessibilityBridge: NSObject {
     /// matching the `axe describe-ui` flat-array output. Throws on
     /// framework load failure or if the simulator returns no frontmost
     /// application (e.g. SpringBoard hasn't come up yet).
-    func describeUI(udid: String) throws -> Data {
-        try ensureLoaded()
-
-        guard let device = try? simulatorDevice(udid: udid) else {
-            throw NSError(domain: "Accessibility", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "Device \(udid) not found"])
-        }
-        guard device.responds(to: NSSelectorFromString("sendAccessibilityRequestAsync:completionQueue:completionHandler:")) else {
-            throw NSError(domain: "Accessibility", code: 2, userInfo: [
-                NSLocalizedDescriptionKey: "SimDevice lacks sendAccessibilityRequestAsync — install Xcode 12+",
-            ])
-        }
-        guard let translator = translator else {
-            throw AccessibilityError.translatorUnavailable
-        }
-
-        let token = UUID().uuidString
-        registerToken(token, device: device)
+    ///
+    /// `grid: false` is the walk alone — every element's centre still asked,
+    /// no point sampled between them: a tenth of the cost (55 of 580 ms on
+    /// Settings, t-6350), what a press reads again and again while its
+    /// screen settles (t-6385).
+    func describeUI(udid: String, grid: Bool = true) throws -> Data {
+        let (token, rootElement) = try frontmostApplication(udid: udid)
         defer { unregisterToken(token) }
 
-        // Ask the translator for the frontmost application's translation
-        // object. This blocks while AXPTranslator pumps its delegate
-        // callbacks (which we route to the SimDevice).
-        let frontmostSel = NSSelectorFromString("frontmostApplicationWithDisplayId:bridgeDelegateToken:")
-        typealias FrontmostFunc = @convention(c) (AnyObject, Selector, UInt32, NSString) -> AnyObject?
-        guard let frontmostIMP = translator.method(for: frontmostSel) else {
-            throw AccessibilityError.translatorUnavailable
-        }
-        let frontmost = unsafeBitCast(frontmostIMP, to: FrontmostFunc.self)
-        guard let translation = frontmost(translator, frontmostSel, 0, token as NSString) as? NSObject else {
-            throw AccessibilityError.noFrontmostApplication
-        }
-        translation.setValue(token, forKey: "bridgeDelegateToken")
-
-        // Convert the translation object to a real AXPMacPlatformElement —
-        // an NSAccessibilityElement subclass whose accessibility properties
-        // lazily fault in via more delegate callbacks.
-        let macElementSel = NSSelectorFromString("macPlatformElementFromTranslation:")
-        typealias MacElementFunc = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
-        guard let macIMP = translator.method(for: macElementSel) else {
-            throw AccessibilityError.translatorUnavailable
-        }
-        let toMacElement = unsafeBitCast(macIMP, to: MacElementFunc.self)
-        guard let rootElement = toMacElement(translator, macElementSel, translation) as? NSObject else {
-            throw AccessibilityError.noFrontmostApplication
-        }
-        if let rootTranslation = rootElement.value(forKey: "translation") as? NSObject {
-            rootTranslation.setValue(token, forKey: "bridgeDelegateToken")
+        let screenFrame: NSRect
+        if let app = rootElement as? NSAccessibilityElement {
+            screenFrame = app.accessibilityFrame()
+        } else {
+            screenFrame = .zero
         }
 
         // 1. Recursive walk from the application element, collecting the
@@ -151,18 +117,13 @@ final class AccessibilityBridge: NSObject {
         guard case .seated(var root) = serialize(
             element: rootElement,
             token: token,
+            screen: screenFrame,
             coverage: &coverage,
             visited: &visited,
             remainingElements: &remainingElements,
             depth: 0
         ) else {
             throw AccessibilityError.noFrontmostApplication
-        }
-        let screenFrame: NSRect
-        if let app = rootElement as? NSAccessibilityElement {
-            screenFrame = app.accessibilityFrame()
-        } else {
-            screenFrame = .zero
         }
 
         // 2. Grid hit-test discovery: many iOS containers (UIScrollView,
@@ -171,7 +132,7 @@ final class AccessibilityBridge: NSObject {
         //    screen and ask the translator what's under each — anything
         //    that's still a real accessibility element shows up here. Same
         //    technique as idb's processRemoteContent path.
-        if screenFrame.width > 1, screenFrame.height > 1 {
+        if grid, screenFrame.width > 1, screenFrame.height > 1 {
             var children = (root["children"] as? [[String: Any]]) ?? []
             let discovered = discoverByGrid(
                 token: token,
@@ -189,6 +150,89 @@ final class AccessibilityBridge: NSObject {
         if remainingElements == 0 { root["truncated"] = true }
         let json: [Any] = [root]
         return try JSONSerialization.data(withJSONObject: json)
+    }
+
+    /// The simulator's frontmost application as a platform element, and the
+    /// token registered for it — the prologue every question about the screen
+    /// shares. The caller unregisters the token once it has read through it.
+    private func frontmostApplication(udid: String) throws -> (String, NSObject) {
+        try ensureLoaded()
+
+        guard let device = try? simulatorDevice(udid: udid) else {
+            throw NSError(domain: "Accessibility", code: 1,
+                          userInfo: [NSLocalizedDescriptionKey: "Device \(udid) not found"])
+        }
+        guard device.responds(to: NSSelectorFromString("sendAccessibilityRequestAsync:completionQueue:completionHandler:")) else {
+            throw NSError(domain: "Accessibility", code: 2, userInfo: [
+                NSLocalizedDescriptionKey: "SimDevice lacks sendAccessibilityRequestAsync — install Xcode 12+",
+            ])
+        }
+        guard let translator = translator else {
+            throw AccessibilityError.translatorUnavailable
+        }
+
+        let token = UUID().uuidString
+        registerToken(token, device: device)
+        do {
+            // Ask the translator for the frontmost application's translation
+            // object. This blocks while AXPTranslator pumps its delegate
+            // callbacks (which we route to the SimDevice).
+            let frontmostSel = NSSelectorFromString("frontmostApplicationWithDisplayId:bridgeDelegateToken:")
+            typealias FrontmostFunc = @convention(c) (AnyObject, Selector, UInt32, NSString) -> AnyObject?
+            guard let frontmostIMP = translator.method(for: frontmostSel) else {
+                throw AccessibilityError.translatorUnavailable
+            }
+            let frontmost = unsafeBitCast(frontmostIMP, to: FrontmostFunc.self)
+            guard let translation = frontmost(translator, frontmostSel, 0, token as NSString) as? NSObject else {
+                throw AccessibilityError.noFrontmostApplication
+            }
+            translation.setValue(token, forKey: "bridgeDelegateToken")
+
+            // Convert the translation object to a real AXPMacPlatformElement —
+            // an NSAccessibilityElement subclass whose accessibility properties
+            // lazily fault in via more delegate callbacks.
+            let macElementSel = NSSelectorFromString("macPlatformElementFromTranslation:")
+            typealias MacElementFunc = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
+            guard let macIMP = translator.method(for: macElementSel) else {
+                throw AccessibilityError.translatorUnavailable
+            }
+            let toMacElement = unsafeBitCast(macIMP, to: MacElementFunc.self)
+            guard let rootElement = toMacElement(translator, macElementSel, translation) as? NSObject else {
+                throw AccessibilityError.noFrontmostApplication
+            }
+            if let rootTranslation = rootElement.value(forKey: "translation") as? NSObject {
+                rootTranslation.setValue(token, forKey: "bridgeDelegateToken")
+            }
+            return (token, rootElement)
+        } catch {
+            unregisterToken(token)
+            throw error
+        }
+    }
+
+    /// What is on top at one screen point, exported in `describeUI`'s own
+    /// shape: the application element with its frame, holding the one element
+    /// a hit-test answers there — or no child when nothing does. What a press
+    /// by number asks at the last moment instead of walking the whole tree
+    /// again (t-6385): the caller reads it with the fold it reads every tree
+    /// with, so the two can only disagree about what one point cannot show.
+    func elementAt(udid: String, point: CGPoint) throws -> Data {
+        let (token, rootElement) = try frontmostApplication(udid: udid)
+        defer { unregisterToken(token) }
+        guard let query = PointQuery(translator: translator, token: token) else {
+            throw AccessibilityError.translatorUnavailable
+        }
+        let screen = (rootElement as? NSAccessibilityElement)?.accessibilityFrame() ?? .zero
+        var root = describe(rootElement, frame: screen)
+        var children: [[String: Any]] = []
+        if let element = query.element(at: point) {
+            let frame = (element as? NSAccessibilityElement)?.accessibilityFrame() ?? .zero
+            var child = describe(element, frame: frame)
+            child["children"] = [[String: Any]]()
+            children.append(child)
+        }
+        root["children"] = children
+        return try JSONSerialization.data(withJSONObject: [root])
     }
 
     /// Cheap point-query for the frontmost app on a simulator: returns
@@ -301,17 +345,7 @@ final class AccessibilityBridge: NSObject {
         visited: inout Set<ObjectIdentifier>,
         remainingElements: inout Int
     ) -> [[String: Any]] {
-        guard let translator = translator else { return [] }
-
-        let pointSel = NSSelectorFromString("objectAtPoint:displayId:bridgeDelegateToken:")
-        typealias PointFunc = @convention(c) (AnyObject, Selector, CGPoint, UInt32, NSString) -> AnyObject?
-        guard let pointIMP = translator.method(for: pointSel) else { return [] }
-        let objectAtPoint = unsafeBitCast(pointIMP, to: PointFunc.self)
-
-        let macSel = NSSelectorFromString("macPlatformElementFromTranslation:")
-        typealias MacFunc = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
-        guard let macIMP = translator.method(for: macSel) else { return [] }
-        let toMacElement = unsafeBitCast(macIMP, to: MacFunc.self)
+        guard let query = PointQuery(translator: translator, token: token) else { return [] }
 
         let step: CGFloat = 32
         var pointBudget = 600  // safety cap for misbehaving sims
@@ -331,15 +365,8 @@ final class AccessibilityBridge: NSObject {
                 if coverage.contains(point) { continue }
                 pointBudget -= 1
 
-                guard let translation = objectAtPoint(translator, pointSel, point, 0, token as NSString) as? NSObject else {
+                guard let element = query.element(at: point) else {
                     continue
-                }
-                translation.setValue(token, forKey: "bridgeDelegateToken")
-                guard let element = toMacElement(translator, macSel, translation) as? NSObject else {
-                    continue
-                }
-                if let t = element.value(forKey: "translation") as? NSObject {
-                    t.setValue(token, forKey: "bridgeDelegateToken")
                 }
 
                 // Read the frame once; serialize() will read it again for
@@ -357,6 +384,7 @@ final class AccessibilityBridge: NSObject {
                 if case .seated(let serialized) = serialize(
                     element: element,
                     token: token,
+                    screen: bounds,
                     coverage: &coverage,
                     visited: &visited,
                     remainingElements: &remainingElements,
@@ -395,6 +423,7 @@ final class AccessibilityBridge: NSObject {
     private func serialize(
         element: NSObject,
         token: String,
+        screen: NSRect,
         coverage: inout AccessibilityCoverage,
         visited: inout Set<ObjectIdentifier>,
         remainingElements: inout Int,
@@ -417,8 +446,6 @@ final class AccessibilityBridge: NSObject {
             translation.setValue(token, forKey: "bridgeDelegateToken")
         }
 
-        var dict: [String: Any] = [:]
-
         // Frame — fetched once and emitted as a {x,y,w,h} dict to match
         // axe's output (idb's FBAXKeysFrameDict shape).
         var frame = NSRect.zero
@@ -430,34 +457,14 @@ final class AccessibilityBridge: NSObject {
                 frame = value.rectValue
             }
         }
-        dict["frame"] = [
-            "x": frame.origin.x,
-            "y": frame.origin.y,
-            "width": frame.size.width,
-            "height": frame.size.height,
-        ]
+        var dict = describe(element, frame: frame)
         // Whether the element's own centre is its to press. The walk proves
         // no z-order — a floating search field's rectangle can hold a row's
         // centre — so the exporter is asked what is on top there.
-        if let answered = centreAnswers(to: element, frame: frame, token: token) {
+        let centre = centreAnswers(to: element, frame: frame, token: token)
+        if let answered = centre?.isItsOwn {
             dict["hit_at_centre"] = answered
         }
-
-        // Role → "type" with the AX prefix stripped, matching SimulatorBridge.
-        let rawRole = stringValue(element, key: "accessibilityRole")
-        let role: String
-        if let r = rawRole, r.hasPrefix(Self.axPrefix) {
-            role = String(r.dropFirst(Self.axPrefix.count))
-        } else {
-            role = rawRole ?? ""
-        }
-        dict["type"] = role
-
-        dict["AXLabel"] = stringValue(element, key: "accessibilityLabel") ?? NSNull()
-        dict["AXValue"] = stringValue(element, key: "accessibilityValue") ?? NSNull()
-        dict["AXUniqueId"] = stringValue(element, key: "accessibilityIdentifier") ?? NSNull()
-        dict["role_description"] = stringValue(element, key: "accessibilityRoleDescription") ?? ""
-        dict["enabled"] = boolValue(element, key: "accessibilityEnabled") ?? true
 
         // Children — NSAccessibilityElement exposes accessibilityChildren()
         // returning [Any]?. Each child's translation needs the same token.
@@ -476,6 +483,7 @@ final class AccessibilityBridge: NSObject {
                 tally.record(serialize(
                     element: childObj,
                     token: token,
+                    screen: screen,
                     coverage: &coverage,
                     visited: &visited,
                     remainingElements: &remainingElements,
@@ -486,59 +494,76 @@ final class AccessibilityBridge: NSObject {
             if tally.truncated { dict["truncated"] = true }
         }
 
-        // Record this element. Only true leaves block the grid — anything
-        // that looks like a container (had walked children, or is just
-        // physically too large to be a single tappable element) stays
-        // probe-able so we can discover "remote" elements iOS hid under
-        // empty-children Groups (Nav bar / Tab Bar / scroll views).
-        if !childDicts.isEmpty || isLikelyContainer(frame: frame) {
-            coverage.insertContainer(frame)
-        } else {
+        // Record this element. Only leaves block the grid — anything that
+        // may be hiding "remote" elements under it (Nav bar / Tab Bar / scroll
+        // views) stays probe-able; `AccessibilityLeaf` says which is which.
+        if AccessibilityLeaf.blocksGrid(
+            walkedChildren: childDicts.count, frame: frame, centre: centre, screen: screen
+        ) {
             coverage.insertLeaf(frame)
+        } else {
+            coverage.insertContainer(frame)
         }
         dict["children"] = childDicts
 
         return .seated(dict)
     }
 
+    /// One element's own words, as `axe describe-ui` names them: its frame
+    /// (as a {x,y,w,h} dict, idb's FBAXKeysFrameDict shape), its role with the
+    /// AX prefix stripped, its label, value, identifier, role description and
+    /// whether it is enabled. The walk and a point's answer (`elementAt`)
+    /// read an element the same way, so a reader folds both with one rule.
+    private func describe(_ element: NSObject, frame: NSRect) -> [String: Any] {
+        var dict: [String: Any] = [:]
+        dict["frame"] = [
+            "x": frame.origin.x,
+            "y": frame.origin.y,
+            "width": frame.size.width,
+            "height": frame.size.height,
+        ]
+
+        // Role → "type" with the AX prefix stripped, matching SimulatorBridge.
+        let rawRole = stringValue(element, key: "accessibilityRole")
+        let role: String
+        if let r = rawRole, r.hasPrefix(Self.axPrefix) {
+            role = String(r.dropFirst(Self.axPrefix.count))
+        } else {
+            role = rawRole ?? ""
+        }
+        dict["type"] = role
+
+        dict["AXLabel"] = stringValue(element, key: "accessibilityLabel") ?? NSNull()
+        dict["AXValue"] = stringValue(element, key: "accessibilityValue") ?? NSNull()
+        dict["AXUniqueId"] = stringValue(element, key: "accessibilityIdentifier") ?? NSNull()
+        dict["role_description"] = stringValue(element, key: "accessibilityRoleDescription") ?? ""
+        dict["enabled"] = boolValue(element, key: "accessibilityEnabled") ?? true
+        return dict
+    }
+
     /// What the exporter puts under this element's centre — asked with the
     /// same point query the grid walk uses — judged by the desktop's rule for
     /// a mark's hit-test (`MARK_HIT_DEPTH` in the core): the answer must be
-    /// the control, something inside it, or something around it. `true` when
-    /// it is, `false` when something else is on top there or the centre is off
-    /// the screen, `nil` when the question could not be asked (no frame, no
-    /// translator) or the answer has no frame to judge by.
+    /// the control, something inside it, or something around it. `.itself`
+    /// when the control is on top there, `.near` when something inside or
+    /// around it is, `.elsewhere` when something else is on top or the centre
+    /// is off the screen, `nil` when the question could not be asked (no
+    /// frame, no translator) or the answer has no frame to judge by.
     ///
     /// One point query per element, on top of the walk's own reads. Measured
     /// 2026-09-21 on an iPhone simulator (iOS 26.5), the `ax` request alone
     /// on a warm helper, best of three, twice: home (19 elements) 1,457 →
     /// 1,521 ms; Settings (13 elements) 1,193 → 1,255 ms — about 4 ms an
     /// element, against the grid walk's own budget of 600 such queries.
-    private func centreAnswers(to element: NSObject, frame: NSRect, token: String) -> Bool? {
-        guard frame.width > 0, frame.height > 0, let translator else { return nil }
-        let pointSel = NSSelectorFromString("objectAtPoint:displayId:bridgeDelegateToken:")
-        typealias PointFunc = @convention(c) (AnyObject, Selector, CGPoint, UInt32, NSString) -> AnyObject?
-        guard let pointIMP = translator.method(for: pointSel) else { return nil }
-        let objectAtPoint = unsafeBitCast(pointIMP, to: PointFunc.self)
-        let macSel = NSSelectorFromString("macPlatformElementFromTranslation:")
-        typealias MacFunc = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
-        guard let macIMP = translator.method(for: macSel) else { return nil }
-        let toMacElement = unsafeBitCast(macIMP, to: MacFunc.self)
-
-        let centre = CGPoint(x: frame.midX, y: frame.midY)
-        guard let translation = objectAtPoint(translator, pointSel, centre, 0, token as NSString) as? NSObject else {
-            return false
+    private func centreAnswers(to element: NSObject, frame: NSRect, token: String) -> AccessibilityCentreHit? {
+        guard frame.width > 0, frame.height > 0,
+              let query = PointQuery(translator: translator, token: token) else { return nil }
+        guard let hit = query.element(at: CGPoint(x: frame.midX, y: frame.midY)) else {
+            return .elsewhere
         }
-        translation.setValue(token, forKey: "bridgeDelegateToken")
-        guard let hit = toMacElement(translator, macSel, translation) as? NSObject else {
-            return false
-        }
-        if hit === element { return true }
-        if let t = hit.value(forKey: "translation") as? NSObject {
-            t.setValue(token, forKey: "bridgeDelegateToken")
-        }
+        if hit === element { return .itself }
         let hitFrame: NSRect = (hit as? NSAccessibilityElement)?.accessibilityFrame() ?? .zero
-        return AccessibilityCentre.answers(frame, hitFrame: hitFrame)
+        return AccessibilityCentre.answers(frame, hitFrame: hitFrame).map { $0 ? .near : .elsewhere }
     }
 
     private func stringValue(_ obj: NSObject, key: String) -> String? {
@@ -555,15 +580,6 @@ final class AccessibilityBridge: NSObject {
     private func boolValue(_ obj: NSObject, key: String) -> Bool? {
         if let n = obj.value(forKey: key) as? NSNumber { return n.boolValue }
         return nil
-    }
-
-    /// Heuristic: anything with a dimension >= 250pt is too big to be a
-    /// single tappable element, so we treat it as a container even when
-    /// it reports no AX children. Picks up the iOS pattern where a Group
-    /// (Nav bar, Tab Bar, scroll views) hides its content from the
-    /// recursive walk but exposes it to hit-testing.
-    private func isLikelyContainer(frame: NSRect) -> Bool {
-        return max(frame.width, frame.height) >= 250
     }
 
     // MARK: - AXPTranslationTokenDelegateHelper
@@ -642,6 +658,49 @@ final class AccessibilityBridge: NSObject {
             return nil
         }
         return cls.perform(NSSelectorFromString("emptyResponse"))?.takeUnretainedValue() as AnyObject?
+    }
+}
+
+/// A translator's point query with its two methods looked up once: what is on
+/// top at a screen point, as a platform element whose attributes answer
+/// through `token`. The grid walk, the centre check and a press's last-moment
+/// check (`elementAt`) all ask it; `nil` from `init` is a translator that
+/// cannot be asked at all.
+private struct PointQuery {
+    typealias PointFunc = @convention(c) (AnyObject, Selector, CGPoint, UInt32, NSString) -> AnyObject?
+    typealias MacFunc = @convention(c) (AnyObject, Selector, AnyObject) -> AnyObject?
+    static let pointSelector = NSSelectorFromString("objectAtPoint:displayId:bridgeDelegateToken:")
+    static let macSelector = NSSelectorFromString("macPlatformElementFromTranslation:")
+
+    let translator: NSObject
+    let token: String
+    let objectAtPoint: PointFunc
+    let toMacElement: MacFunc
+
+    init?(translator: NSObject?, token: String) {
+        guard let translator,
+              let pointIMP = translator.method(for: Self.pointSelector),
+              let macIMP = translator.method(for: Self.macSelector) else { return nil }
+        self.translator = translator
+        self.token = token
+        objectAtPoint = unsafeBitCast(pointIMP, to: PointFunc.self)
+        toMacElement = unsafeBitCast(macIMP, to: MacFunc.self)
+    }
+
+    /// The element on top at `point`, its translation stamped with the token
+    /// so its attributes can be read; `nil` when nothing answers there.
+    func element(at point: CGPoint) -> NSObject? {
+        guard let translation = objectAtPoint(translator, Self.pointSelector, point, 0, token as NSString) as? NSObject else {
+            return nil
+        }
+        translation.setValue(token, forKey: "bridgeDelegateToken")
+        guard let element = toMacElement(translator, Self.macSelector, translation) as? NSObject else {
+            return nil
+        }
+        if let stamped = element.value(forKey: "translation") as? NSObject {
+            stamped.setValue(token, forKey: "bridgeDelegateToken")
+        }
+        return element
     }
 }
 
