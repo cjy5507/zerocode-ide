@@ -948,6 +948,9 @@ impl PlainSession {
         // And the patch review seat's: whether a patch's lines were edited
         // again, or a check ran green after the turn's last edit (t-6203).
         let _ = tools::note_patch_review_turn(&self.cwd, Some(&messages[from..]));
+        // The same turn's completion claims and tool lines meet beside r43;
+        // the next person's turn labels the preceding answer.
+        tools::note_claim_turn(&self.cwd, &self.handle.path, &attempt, &messages[from..]);
     }
 
     /// 턴 후 영속 — 메시지는 이미 append 됐고, 헤더/압축 변경만 스냅샷.

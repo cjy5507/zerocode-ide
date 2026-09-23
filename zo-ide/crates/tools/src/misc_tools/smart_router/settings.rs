@@ -395,6 +395,13 @@ pub fn jev_patch_review_mode_from(loader: &runtime::ConfigLoader) -> Option<Deci
     merged_settings_root_from(loader).map(|root| zerocode_core::jev::PATCH_REVIEW.mode_in(&root))
 }
 
+/// Mode of the completion-claim seat, read from the same merged settings as
+/// every other zo Jev seat.
+#[must_use]
+pub fn jev_claim_mode_from(loader: &runtime::ConfigLoader) -> Option<DecisionShadowMode> {
+    merged_settings_root_from(loader).map(|root| zerocode_core::jev::CLAIM.mode_in(&root))
+}
+
 /// `smart.agentTool`: whether an agent's own question — zo's `Jev` tool, `zo
 /// jev ask|choose|score` — is put to a System One judgment (t-6040). Its own
 /// switch, because it sends something else off the machine again: not the
