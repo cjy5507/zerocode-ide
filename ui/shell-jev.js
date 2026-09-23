@@ -318,8 +318,8 @@ const JEV_TRENDS = Object.freeze([
 ]);
 
 /* Where a feature stands — one chip per row, one of four (t-6277 D8):
- * dormant (its mode asks nothing), recording, applying, or waiting on a person, in the tone the stylesheet
- * gives the state (`--jev-tone-*`). A feature that waits on a person wears
+ * dormant (its mode asks nothing), recording, applying, or waiting on a
+ * person, in the tone the stylesheet gives the state (`--jev-tone-*`). A feature that waits on a person wears
  * what it waits for — the key, or a folder's consent — and the strip over
  * the table counts the two as one (`word`). Read off what the switch does
  * and the numbers zo answered, never off a mode word (`jevSeatStatus`). */
