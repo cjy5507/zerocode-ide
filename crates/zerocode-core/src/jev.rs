@@ -667,7 +667,13 @@ pub const RECALL_AGREEMENT_FLOOR_PERMILLE: u16 = SKILL_AGREEMENT_FLOOR_PERMILLE;
 /// touched none), and `applied`, so an applied order and a recorded one can
 /// be compared on the same mark. Written by the host at the turn's end
 /// (`rerank_shadow::note_recall_read`), and read by the judge as this seat's
-/// agreement — one comparison per label row.
+/// agreement — one comparison per label row that carries a mark.
+///
+/// A turn that read and cited none of the notes it was handed carries no mark
+/// (t-6342): it compared the order with nothing, and 82 of the 88 marks this
+/// machine's ledger held on 2026-09-23 were such turns — the seat's agreement
+/// was counting how often recall went unused. Its row says so under
+/// [`summary::NOT_COMPARED`] instead (`rerank_shadow::mark`).
 pub const RECALL: JevUse = JevUse {
     id: "recall",
     setting: "rerankShadow",
