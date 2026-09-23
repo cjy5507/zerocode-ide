@@ -17,6 +17,27 @@ pub(super) const RESEATED_NUDGE: &str = "Your ledger seat was restored with the 
 dispatch and task, so report through the same verbs as before. Continue from your last tool \
 result; re-run only the gates for what changed after your last commit.";
 
+/// What a resumed worker is told about the commands the restart cut under
+/// its pane (t-6428 ⑤) — the goodbye read them there as the window went and
+/// summarized each in a few words. English, like the rest of the nudge,
+/// because it is spoken to the agent; it reads the same after the turn
+/// sentence and alone, for a turn that had ended with a gate still running.
+pub(super) const CUT_COMMANDS_NUDGE: &str =
+    "Commands still running under you when the window restarted were cut:";
+/// What the worker does about them: its own call, command by command.
+pub(super) const CUT_COMMANDS_TAIL: &str = "— run again whichever you still need.";
+
+/// The sentence naming the cut commands, when there were any.
+fn cut_line(cut: &[String]) -> Option<String> {
+    (!cut.is_empty()).then(|| {
+        let named: Vec<String> = cut.iter().map(|command| format!("`{command}`")).collect();
+        format!(
+            "{CUT_COMMANDS_NUDGE} {} {CUT_COMMANDS_TAIL}",
+            named.join("; ")
+        )
+    })
+}
+
 /// One line of where the checkout stands, read at the wake so the resumed
 /// agent does not spend its first turns re-discovering it (t-3058).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,21 +108,31 @@ pub(super) fn worktree_state(checkout: &Path, now_secs: u64) -> Option<WorktreeS
     })
 }
 
-/// The words a resumed pane is nudged with: the restart nudge, the checkout
-/// line when git could give one, and — for a pane the ledger seated again
-/// as its worker — the seat sentence. One line, so both delivery roads
-/// (Claude's argv, Codex's composer paste) carry it the same.
-pub(super) fn resume_nudge(reseated: bool, state: Option<&WorktreeState>) -> String {
-    let mut words = RESTART_NUDGE.to_string();
+/// The words a resumed pane is nudged with: the restart nudge when the turn
+/// was cut, the commands the restart cut under the pane when there were any
+/// (t-6428 ⑤), the checkout line when git could give one, and — for a pane
+/// the ledger seated again as its worker — the seat sentence. One line, so
+/// both delivery roads (Claude's argv, Codex's composer paste) carry it the
+/// same.
+pub(super) fn resume_nudge(
+    turn_cut: bool,
+    reseated: bool,
+    state: Option<&WorktreeState>,
+    cut: &[String],
+) -> String {
+    let said = cut_line(cut);
+    let mut parts = Vec::new();
+    if turn_cut || said.is_none() {
+        parts.push(RESTART_NUDGE.to_string());
+    }
+    parts.extend(said);
     if let Some(state) = state {
-        words.push(' ');
-        words.push_str(&state.line());
+        parts.push(state.line());
     }
     if reseated {
-        words.push(' ');
-        words.push_str(RESEATED_NUDGE);
+        parts.push(RESEATED_NUDGE.to_string());
     }
-    words
+    parts.join(" ")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,6 +459,33 @@ mod tests {
     /// from scratch and re-running every gate — and rides only on a pane the
     /// ledger seated again; the checkout line rides on any resume that git
     /// could answer for. One line, whichever road delivers it.
+    /// t-6428 ⑤: a wake names the commands the restart cut under its pane,
+    /// in the goodbye's own summaries, after the turn sentence when the turn
+    /// was cut and alone when it had ended; nothing cut leaves the nudge as
+    /// it always was.
+    #[test]
+    fn a_wake_names_the_commands_its_restart_cut() {
+        let cut = vec![
+            "cargo test -p zerocode-shell".to_string(),
+            "just gate".to_string(),
+        ];
+        let both = resume_nudge(true, true, None, &cut);
+        assert_eq!(
+            both,
+            format!(
+                "{RESTART_NUDGE} {CUT_COMMANDS_NUDGE} `cargo test -p zerocode-shell`; `just gate` \
+                 {CUT_COMMANDS_TAIL} {RESEATED_NUDGE}"
+            )
+        );
+        assert!(!both.contains('\n'), "the nudge must stay one line");
+        let ended = resume_nudge(false, true, None, &cut);
+        assert!(
+            ended.starts_with(CUT_COMMANDS_NUDGE) && !ended.contains(RESTART_NUDGE),
+            "a turn that had ended was told it was cut: {ended}"
+        );
+        assert_eq!(resume_nudge(true, false, None, &[]), RESTART_NUDGE);
+    }
+
     #[test]
     fn a_reseated_worker_is_told_its_seat_stands_and_where_the_checkout_is() {
         let state = WorktreeState {
@@ -441,9 +499,9 @@ mod tests {
             "Worktree now: HEAD 1248312 \"docs(product): base commit 78a67e5f\" · 3 uncommitted \
              file(s) · last commit 12 min ago."
         );
-        let plain = resume_nudge(false, None);
+        let plain = resume_nudge(true, false, None, &[]);
         assert_eq!(plain, RESTART_NUDGE);
-        let seated = resume_nudge(true, Some(&state));
+        let seated = resume_nudge(true, true, Some(&state), &[]);
         assert_eq!(
             seated,
             format!("{RESTART_NUDGE} {} {RESEATED_NUDGE}", state.line())
@@ -457,7 +515,7 @@ mod tests {
         ] {
             assert!(RESEATED_NUDGE.contains(words), "{words}");
         }
-        let unseated = resume_nudge(false, Some(&state));
+        let unseated = resume_nudge(true, false, Some(&state), &[]);
         assert!(unseated.contains(&state.line()) && !unseated.contains(RESEATED_NUDGE));
         assert_eq!(age_words(30), "moments ago");
         assert_eq!(age_words(3 * 3_600 + 5), "3 h ago");

@@ -2043,7 +2043,7 @@ el("window-blur").addEventListener("change", () => {
 });
 
 el("blur-relaunch").addEventListener("click", () => {
-  invoke("relaunch_window").catch(showError);
+  void askBeforeRestart("window-material");
 });
 
 /* ---- 「새 빌드 준비됨」, the settings half ----
@@ -2104,7 +2104,7 @@ function paintUpdateNotice() {
 }
 
 el("update-relaunch").addEventListener("click", () => {
-  invoke("relaunch_window").catch(showError);
+  void askBeforeRestart("settings-notice");
 });
 
 /* ---- the agents this machine can run ----

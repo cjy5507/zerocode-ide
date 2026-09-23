@@ -945,6 +945,20 @@ pub(crate) fn set_window_blur(
     )
 }
 
+/// Who leaving this window would cut, as the window reads it (t-6428): its
+/// own pty table names the process at the root of each terminal, and the
+/// host's process table what runs under it.
+pub(crate) fn take_census(app: &AppHandle) -> crate::orchestration::restart_census::RestartCensus {
+    let state = app.state::<AppState>();
+    let root_of = |term: u32| {
+        state
+            .terminals()
+            .handle(term)
+            .and_then(|held| lock_pty(&held).pid())
+    };
+    crate::orchestration::restart_census::take(&root_of, &resource_usage::enumerate_processes)
+}
+
 /// Close and reopen this process, so a material asked for at startup can be
 /// asked for again. Orca's `window.api.app.relaunch()` behind the same banner.
 ///
@@ -953,12 +967,19 @@ pub(crate) fn set_window_blur(
 /// one takes its name by rename, right here and never earlier, so no running
 /// binary is ever overwritten (deploy-overwrite-kills-running-binary). A
 /// swap that fails leaves the running bundle as it was and restarts it.
+///
+/// `door` is the button the window restarted from (t-6428), said back in
+/// the goodbye's line; a word no door wears is a restart all the same.
 #[tauri::command]
-pub(crate) fn relaunch_window(app: AppHandle) {
+pub(crate) fn relaunch_window(app: AppHandle, door: Option<String>) {
     let _crumb = crate::crumbs::Command::enter("relaunch_window");
+    let road = crate::exit_runtime::begin(crate::exit_runtime::ExitRoad::Restart(
+        door.as_deref()
+            .and_then(crate::exit_runtime::RestartDoor::named),
+    ));
     // The ledger's goodbye first (t-3058): every seated worker sleeps with
     // its dispatch open, so the panes this restart takes settle nothing.
-    crate::orchestration::window_exiting(crate::now_epoch_ms());
+    crate::orchestration::window_exiting(crate::now_epoch_ms(), road, &|| take_census(&app));
     if let Some(staged) = app
         .try_state::<cmd::update::UpdateState>()
         .and_then(|held| held.staged())
@@ -970,4 +991,152 @@ pub(crate) fn relaunch_window(app: AppHandle) {
     }
     let _ = crash::clean_exit(app.state::<AppState>().local_data_root());
     app.restart();
+}
+
+/// The census as a road's question says it (t-6428): the road and its door,
+/// who leaving would cut, and how long 「끝나면」 waits on this road — the
+/// table's numbers, never the window's.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LeaveCensus {
+    road: &'static str,
+    door: Option<&'static str>,
+    busy: crate::orchestration::restart_census::Busy,
+    /// The most 「끝나면」 waits on this road, in whole minutes.
+    wait_min: i64,
+    /// How long this road's question stands unanswered, in seconds; `None`
+    /// stands until someone answers.
+    answer_sec: Option<i64>,
+}
+
+fn leave_census(app: &AppHandle, asking: exit_runtime::Asking) -> LeaveCensus {
+    let patience = asking.patience();
+    LeaveCensus {
+        road: asking.word(),
+        door: match asking {
+            exit_runtime::Asking::Restart(door) => door.map(exit_runtime::RestartDoor::word),
+            exit_runtime::Asking::Close => None,
+        },
+        busy: take_census(app).busy(),
+        wait_min: patience.gap_wait_ms / exit_runtime::MINUTE_MS,
+        answer_sec: patience.answer_ms.map(|ms| ms / 1_000),
+    }
+}
+
+fn asking_of(road: &str, door: Option<&str>) -> Result<exit_runtime::Asking, String> {
+    exit_runtime::Asking::named(road, door)
+        .ok_or_else(|| format!("창을 나가는 길 중에 「{road}」는 없습니다"))
+}
+
+/// Who leaving by this road would cut, asked by a restart button before
+/// it goes (t-6428).
+#[tauri::command(async)]
+pub(crate) fn busy_census(
+    app: AppHandle,
+    road: String,
+    door: Option<String>,
+) -> Result<LeaveCensus, String> {
+    let _crumb = crate::crumbs::Command::enter("busy_census");
+    Ok(leave_census(&app, asking_of(&road, door.as_deref())?))
+}
+
+/// Whether closing the main window asks first (t-6428) — the road the
+/// window was left by nine times in nine before this. A close the person
+/// chose, or one the road went for them, passes; a close that already has
+/// a question standing or a wait armed keeps it; otherwise the census is
+/// read, and work in progress holds the close and asks, the question's
+/// minute running on the beat.
+pub(crate) fn close_asks_first(app: &AppHandle) -> bool {
+    if exit_runtime::confirmed() {
+        return false;
+    }
+    if exit_runtime::holding_close() {
+        return true;
+    }
+    let census = leave_census(app, exit_runtime::Asking::Close);
+    if !census.busy.busy {
+        return false;
+    }
+    exit_runtime::ask(exit_runtime::Asking::Close, crate::now_epoch_ms());
+    let _ = app.emit_to(crate::MAIN_WINDOW_LABEL, "exit:ask", census);
+    true
+}
+
+/// 「끝나면」: wait on this road for the first gap (t-6428), answering the
+/// line the wait stands as from its first second — the census as it is.
+#[tauri::command(async)]
+pub(crate) fn leave_when_idle(
+    app: AppHandle,
+    road: String,
+    door: Option<String>,
+) -> Result<exit_runtime::WaitLine, String> {
+    let _crumb = crate::crumbs::Command::enter("leave_when_idle");
+    let asking = asking_of(&road, door.as_deref())?;
+    exit_runtime::arm(asking, crate::now_epoch_ms());
+    Ok(exit_runtime::WaitLine::of(
+        asking,
+        take_census(&app).busy(),
+        0,
+    ))
+}
+
+/// 「지금」: this road goes now, and the goodbye says it was chosen.
+#[tauri::command]
+pub(crate) fn leave_now(app: AppHandle, road: String, door: Option<String>) -> Result<(), String> {
+    let _crumb = crate::crumbs::Command::enter("leave_now");
+    let asking = asking_of(&road, door.as_deref())?;
+    exit_runtime::leave_now(asking);
+    leave(&app, asking);
+    Ok(())
+}
+
+/// 「취소」: nothing waits and no question stands.
+#[tauri::command]
+pub(crate) fn leave_cancel() {
+    let _crumb = crate::crumbs::Command::enter("leave_cancel");
+    exit_runtime::cancel();
+}
+
+/// The way out on the beat's second (t-6428). Nothing is read unless a wait
+/// is armed or a question stands; a wait reads the census and goes at the
+/// first gap, says its line when the line moves, and asks again or goes
+/// when the table's time runs out; a question nobody answers goes when its
+/// own time does.
+pub(crate) fn beat_leaving(app: &AppHandle) {
+    if !exit_runtime::watching() {
+        return;
+    }
+    let busy = exit_runtime::waiting().then(|| take_census(app).busy());
+    match exit_runtime::beat(crate::now_epoch_ms(), busy) {
+        exit_runtime::ExitBeat::Nothing => {}
+        exit_runtime::ExitBeat::Tell(line) => {
+            let _ = app.emit_to(crate::MAIN_WINDOW_LABEL, "exit:waiting", line);
+        }
+        exit_runtime::ExitBeat::AskAgain(asking) => {
+            let _ = app.emit_to(
+                crate::MAIN_WINDOW_LABEL,
+                "exit:overdue",
+                leave_census(app, asking),
+            );
+        }
+        exit_runtime::ExitBeat::Leave(asking) => {
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || leave(&handle, asking));
+        }
+    }
+}
+
+/// Go by a road that asked: a restart through the one restart road, a
+/// close by closing the main window — which, chosen, closes.
+fn leave(app: &AppHandle, asking: exit_runtime::Asking) {
+    match asking {
+        exit_runtime::Asking::Restart(door) => {
+            relaunch_window(app.clone(), door.map(|door| door.word().to_string()));
+        }
+        exit_runtime::Asking::Close => {
+            if let Some(window) = app.get_webview_window(crate::MAIN_WINDOW_LABEL) {
+                let _ = window.close();
+            }
+        }
+    }
 }

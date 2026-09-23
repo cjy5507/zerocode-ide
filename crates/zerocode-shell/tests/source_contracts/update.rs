@@ -249,8 +249,8 @@ fn the_update_pane_is_one_module_with_the_designs_controls_and_words() {
     );
     let restart = block_after(window, "function restartToInstall(");
     assert!(
-        restart.contains("invoke(\"relaunch_window\")"),
-        "the pane's restart is the one road:\n{restart}"
+        restart.contains("askBeforeRestart(\"update-install\")"),
+        "the pane's restart is the one road, asked about first (t-6428):\n{restart}"
     );
 
     let markup = include_str!("../../../../ui/index.html");
@@ -481,4 +481,91 @@ fn zo_rides_in_the_release_bundle_and_the_boot_installs_it_beside_the_old_inode(
         "once, on the boot thread that already exists"
     );
     let _ = shipped_backend();
+}
+
+/// t-6428: leaving the window waits on the beat that already exists, and
+/// goes by the roads that already exist. The beat walks a 「끝나면」 armed or
+/// a question standing — reading a census only while a wait is armed — and
+/// a road that goes restarts through `relaunch_window`, the one restart
+/// road, or closes the main window; the four commands the window's question
+/// needs are registered.
+#[test]
+fn the_way_out_waits_on_the_beat_and_goes_by_the_one_restart_road() {
+    let backend = shipped_backend();
+    let beat = block_after(backend, "fn beat_standing_orders(");
+    assert!(
+        beat.contains("crate::cmd::appearance::beat_leaving(&beating);"),
+        "the way out is not walked on the beat:\n{beat}"
+    );
+    let watching = block_after(backend, "pub(crate) fn beat_leaving(");
+    assert!(
+        watching.contains("if !exit_runtime::watching() {")
+            && watching.contains("exit_runtime::waiting().then(|| take_census(app).busy())"),
+        "the beat reads a census when nothing waits:\n{watching}"
+    );
+    let leave = block_after(
+        backend,
+        "fn leave(app: &AppHandle, asking: exit_runtime::Asking)",
+    );
+    assert!(
+        leave.contains("relaunch_window(app.clone()") && leave.contains("window.close()"),
+        "a road that asked goes some other way:\n{leave}"
+    );
+    let main = strip_rust_comments(include_str!("../../src/main.rs"));
+    for command in [
+        "busy_census",
+        "leave_when_idle",
+        "leave_now",
+        "leave_cancel",
+    ] {
+        assert!(
+            main.contains(&format!("            {command},\n")),
+            "{command} is registered in generate_handler!"
+        );
+    }
+}
+
+/// t-6428: the main window's close — the road the window was left by nine
+/// times in nine over the 37 hours measured before this — asks the same
+/// census before it goes. The tray's hide still comes first; a close the
+/// person chose, or one the road went for them, passes; one already asked
+/// about keeps its question or its wait; otherwise work in progress holds
+/// the close and the window asks through the one question function.
+#[test]
+fn closing_the_window_asks_the_one_census_first() {
+    let main = strip_rust_comments(include_str!("../../src/main.rs"));
+    let tray = main
+        .find(".hide_main_on_close(handle)")
+        .expect("the tray's close");
+    let asks = main
+        .find("cmd::appearance::close_asks_first(handle)")
+        .expect("the close asks first");
+    assert!(
+        tray < asks,
+        "the tray hides a close before it is asked about"
+    );
+    let backend = shipped_backend();
+    let asking = block_after(backend, "pub(crate) fn close_asks_first(");
+    let order = [
+        "exit_runtime::confirmed()",
+        "exit_runtime::holding_close()",
+        "leave_census(app, exit_runtime::Asking::Close)",
+        "exit_runtime::ask(exit_runtime::Asking::Close",
+        "\"exit:ask\"",
+    ]
+    .map(|needle| {
+        asking
+            .find(needle)
+            .unwrap_or_else(|| panic!("the close's question lost `{needle}`:\n{asking}"))
+    });
+    assert!(
+        order.windows(2).all(|pair| pair[0] < pair[1]),
+        "the close asks out of order:\n{asking}"
+    );
+    let window = window_source();
+    let heard = block_after(window, "listen(\"exit:ask\"");
+    assert!(
+        heard.contains("askLeaving(census"),
+        "the window's close is asked some other way:\n{heard}"
+    );
 }

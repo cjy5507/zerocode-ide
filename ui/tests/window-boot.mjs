@@ -860,6 +860,15 @@ const stubBackend = ({ boot, pollers }) => {
       git_bash_available: true,
     }),
     list_dir: () => [],
+    // 떠나기 전의 집계(t-6428): 이 픽스처의 창에는 앉은 워커가 없다 — 끊을
+    // 것이 없으니 재시작 문은 묻지 않고 곧장 간다. 케이스가 제 답을 깔아 쓴다.
+    busy_census: (args) => ({
+      road: args?.road ?? "restart",
+      door: args?.door ?? null,
+      busy: { busy: false, workers: 0, turning: 0, background: 0, unknown: 0, running: 0, gap: true },
+      waitMin: 30,
+      answerSec: null,
+    }),
     // 업데이트(t-3191): 이 픽스처의 빌드는 피드를 묻지 않은 채 서 있고, 이력은
     // 아직 공개된 버전이 없다. 케이스가 제 답을 깔아 쓴다.
     update_check: () => ({

@@ -87,11 +87,11 @@ pub(crate) use usage::{
 };
 
 pub(crate) use appearance::{
-    apply_ghostty_import, apply_ui_zoom, computer_awake_status, listening_ports, log_window_error,
-    patch_left_sidebar_appearance, patch_terminal_prefs, preview_ghostty_import,
-    preview_warp_terminal_themes, process_memory, relaunch_window, resource_snapshot,
-    set_agent_activity_display, set_app_font_family, set_compact_worktree_cards,
-    set_computer_awake_mode, set_locale, set_minimize_to_tray_on_close,
+    apply_ghostty_import, apply_ui_zoom, busy_census, computer_awake_status, leave_cancel,
+    leave_now, leave_when_idle, listening_ports, log_window_error, patch_left_sidebar_appearance,
+    patch_terminal_prefs, preview_ghostty_import, preview_warp_terminal_themes, process_memory,
+    relaunch_window, resource_snapshot, set_agent_activity_display, set_app_font_family,
+    set_compact_worktree_cards, set_computer_awake_mode, set_locale, set_minimize_to_tray_on_close,
     set_refresh_local_base_ref_on_worktree_create, set_setup_script_launch_mode,
     set_show_git_ignored_files, set_show_menu_bar_icon, set_show_titlebar_app_name,
     set_source_control_compare_base, set_source_control_group_order, set_status_bar_item,

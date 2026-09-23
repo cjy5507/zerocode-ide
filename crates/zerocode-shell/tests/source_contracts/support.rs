@@ -58,6 +58,7 @@ pub(crate) const BACKEND_PARTS: &[(&str, &str)] = &[
         "evidence_runtime.rs",
         include_str!("../../src/evidence_runtime.rs"),
     ),
+    ("exit_runtime.rs", include_str!("../../src/exit_runtime.rs")),
     (
         "artifact_runtime.rs",
         include_str!("../../src/artifact_runtime.rs"),

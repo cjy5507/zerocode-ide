@@ -46,8 +46,13 @@ mod tests {
         );
         let command = block_after(backend, "pub(crate) fn release_status(");
         assert!(
-            command.contains("answer.workers = crate::orchestration::live_worker_count();"),
-            "the notice's worker count is the ledger's, read by the command (t-3058):\n{command}"
+            command.contains("answer.busy = crate::cmd::appearance::take_census(&app).busy();"),
+            "the notice's words are the one census's, read by the command (t-3058, \
+             t-6428):\n{command}"
+        );
+        assert!(
+            !backend.contains("fn live_worker_count("),
+            "a second count of the work a restart would cut (t-6428)"
         );
         assert!(
             command.contains("zo_integration_runtime::running_zo_builds(&state)")
@@ -80,12 +85,42 @@ mod tests {
         );
 
         let window = window_source();
+        // One question before every restart (t-6428): the four doors — the
+        // update toast's action, the update pane's `restartToInstall`
+        // (t-3191), the settings notice's button and the window material's
+        // relaunch — each ask `askBeforeRestart` with their own word, and
+        // only it reaches the one restart road, when nothing is busy.
         assert_eq!(
-            window.matches("invoke(\"relaunch_window\")").count(),
-            4,
-            "blur-restart, the update toast's action, the settings notice's button, and \
-             the update pane's `restartToInstall` (t-3191) — one road, four doors"
+            window.matches("invoke(\"relaunch_window\"").count(),
+            1,
+            "a door restarts without the one question"
         );
+        let asking = block_after(window, "async function askBeforeRestart(");
+        assert!(
+            asking.contains("invoke(\"busy_census\", { road: \"restart\", door })")
+                && asking.contains("if (census && !census.busy?.busy) {")
+                && asking.contains("invoke(\"relaunch_window\", { door })"),
+            "the restart question lost its census or its road:\n{asking}"
+        );
+        let doors = include_str!("../../src/exit_runtime.rs");
+        for door in [
+            "update-toast",
+            "update-install",
+            "settings-notice",
+            "window-material",
+        ] {
+            assert_eq!(
+                window
+                    .matches(&format!("askBeforeRestart(\"{door}\")"))
+                    .count(),
+                1,
+                "the {door} door asks once"
+            );
+            assert!(
+                doors.contains(&format!(", \"{door}\"),")),
+                "the {door} door is not a word of the backend's one table"
+            );
+        }
         assert!(
             !window.contains("invoke(\"restart")
                 && !window.contains("app.restart")
@@ -104,7 +139,7 @@ mod tests {
         let toast = block_after(window, "function raiseUpdateToast(");
         for needle in [
             "sticky: true",
-            "invoke(\"relaunch_window\")",
+            "askBeforeRestart(\"update-toast\")",
             "updateToastAppWords(",
             "updateReadyZoWords(",
             "update.restart",
@@ -154,15 +189,29 @@ mod tests {
             1,
             "settings.update.running is spoken from one place"
         );
-        let busy = block_after(window, "function updateWorkersWords(");
+        // The census's words are built once (t-6428): each part through
+        // t() only when it counts, nothing at all when nothing would be cut.
+        let busy = block_after(window, "function busyWords(");
         assert!(
-            busy.contains("t(\"update.workersBusy\", \"워커 {{n}}개 진행 중 — 착지 뒤 재시작 권장\", { n: releaseWorkers })")
-                && busy.contains("if (!(releaseWorkers > 0)) return \"\";"),
-            "the worker suffix is not the one t() over the ledger's count:\n{busy}"
+            busy.contains("if (!busy?.busy) return \"\";")
+                && busy.contains(
+                    "t(\"exit.busyTurning\", \"워커 {{n}}명 턴 중\", { n: busy.turning })"
+                )
+                && busy.contains(
+                    "t(\"exit.busyBackground\", \"배경 작업 {{n}}개\", { n: busy.background })"
+                )
+                && busy.contains(
+                    "t(\"exit.busyUnknown\", \"상태를 모르는 워커 {{n}}명\", { n: busy.unknown })"
+                ),
+            "the census's words lost their one builder:\n{busy}"
         );
         assert!(
-            block_after(window, "function absorbReleaseStatus(").contains("releaseWorkers = "),
-            "the worker count is not read off the release_status answer"
+            block_after(window, "function updateWorkersWords(").contains("busyWords(releaseBusy)"),
+            "the notice's suffix is not the census's words"
+        );
+        assert!(
+            block_after(window, "function absorbReleaseStatus(").contains("releaseBusy = "),
+            "the census is not read off the release_status answer"
         );
         assert!(
             !window.contains("localStorage.setItem(\"update"),
@@ -211,7 +260,9 @@ mod tests {
             "update.readyZoVersion",
             "update.readyZoBuild",
             "update.restart",
-            "update.workersBusy",
+            "exit.busyTurning",
+            "exit.busyBackground",
+            "exit.busyUnknown",
             "settings.update.title",
             "settings.update.running",
         ] {
@@ -228,6 +279,8 @@ mod tests {
             "update.readyZo",
             "settings.update.app",
             "settings.update.zo",
+            // The worker count the census replaced (t-6428).
+            "update.workersBusy",
         ] {
             assert_eq!(
                 i18n.matches(&format!("\"{key}\"")).count(),
@@ -389,6 +442,10 @@ mod tests {
                             // t-3996: the readiness probe's three verdicts and
                             // its table are tested beside the probe.
                             | "readiness_runtime.rs"
+                            // t-6428: the roads out of the window and their
+                            // first-named-wins rule are tested beside the one
+                            // table that names them.
+                            | "exit_runtime.rs"
                             // 2026-09-15: the wire adapters are pure functions
                             // over the state, tested beside them with the two
                             // protocols' own messages and no child process.

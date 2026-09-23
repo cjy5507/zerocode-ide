@@ -155,6 +155,15 @@ pub struct ProcessSample {
     sampler_pid: Option<u32>,
 }
 
+/// One command an agent is running under its pane (t-6428): a process the
+/// agent started in a process group of its own. The line is the table's,
+/// bounded and unmasked — what of it may be said is the caller's to decide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentCommand {
+    pub(crate) pid: u32,
+    pub(crate) command: String,
+}
+
 /// One process-table row whose real uid and native-authored argv have both
 /// been checked by the sampler. This stays crate-private: it is process
 /// authority for native cleanup, never a renderer-facing process browser.
@@ -228,6 +237,74 @@ impl ProcessSample {
 
     pub(crate) fn contains_pid(&self, pid: u32) -> bool {
         self.rows.iter().any(|row| row.pid == pid)
+    }
+
+    /// The commands an agent is running under the pane rooted at `root`
+    /// (t-6428): what a restart would cut besides the agent's own turn.
+    ///
+    /// Claude Code, Codex and zo each start a tool's command as the leader
+    /// of a process group of its own, so an interrupt can signal the whole
+    /// command, and keep their helpers — `caffeinate`, a language server, an
+    /// MCP server, Codex's native binary under its Node launcher — in the
+    /// agent's own group (measured on this machine's panes, 2026-09-24). So
+    /// a command is a child of the agent's body outside the agent's group.
+    /// The body is the root and every process in its group whose program is
+    /// one of `body` — the catalog's names for the agent. A helper's own
+    /// children are not the agent's commands: the browser an MCP server
+    /// starts in a group of its own belongs to the server, and a pane that
+    /// merely has one open is not running anything a restart would cut.
+    ///
+    /// `None` when this table cannot say: the root is not in it, or the
+    /// platform's table carries no process groups (Windows).
+    pub(crate) fn agent_commands(&self, root: u32, body: &[&str]) -> Option<Vec<AgentCommand>> {
+        let group = *self.process_groups.get(&root)?;
+        if !self.contains_pid(root) {
+            return None;
+        }
+        let mut children: HashMap<u32, Vec<u32>> = HashMap::new();
+        for row in &self.rows {
+            if row.pid != row.ppid {
+                children.entry(row.ppid).or_default().push(row.pid);
+            }
+        }
+        let mut found = Vec::new();
+        let mut seen = HashSet::new();
+        let mut walking = vec![root];
+        while let Some(parent) = walking.pop() {
+            if !seen.insert(parent) {
+                continue;
+            }
+            for &child in children.get(&parent).into_iter().flatten() {
+                let command = self.commands.get(&child).cloned().unwrap_or_default();
+                if self.process_groups.get(&child) != Some(&group) {
+                    found.push(AgentCommand {
+                        pid: child,
+                        command,
+                    });
+                } else if program_is_one_of(&command, body) {
+                    walking.push(child);
+                }
+            }
+        }
+        found.sort_by_key(|one| one.pid);
+        Some(found)
+    }
+
+    /// A sample read from `ps`-shaped text — the listing `enumerate_unix`
+    /// parses — so a test can hold a process tree with its groups and argv.
+    #[cfg(test)]
+    pub(crate) fn from_ps_listing(listing: &str) -> ProcessSample {
+        let parsed = parse_ps_output(listing);
+        ProcessSample {
+            rows: parsed.rows,
+            counters: parsed.counters,
+            identities: parsed.identities,
+            commands: parsed.commands,
+            uids: parsed.uids,
+            process_groups: parsed.process_groups,
+            sampled_at: Instant::now(),
+            sampler_pid: None,
+        }
     }
 
     #[cfg(test)]
@@ -339,6 +416,14 @@ impl ProcessIndex {
         }
         found
     }
+}
+
+/// Whether the program a command line runs is named one of `names` — the
+/// first word, by its file name, so a path and a bare name read the same.
+fn program_is_one_of(command: &str, names: &[&str]) -> bool {
+    let program = command.split_ascii_whitespace().next().unwrap_or_default();
+    let name = program.rsplit(['/', '\\']).next().unwrap_or(program);
+    !name.is_empty() && names.contains(&name)
 }
 
 fn command_has_args(command: &str, required: &[&str]) -> bool {
@@ -1093,6 +1178,73 @@ mod tests {
         assert_eq!(parsed.commands[&10], "/sdk/emulator -avd Pixel");
         assert_eq!(parsed.uids[&10], 501);
         assert_eq!(parsed.process_groups[&10], 7);
+    }
+
+    /// The three pane shapes measured on this machine (t-6428, 2026-09-24),
+    /// as `ps -eo uid,pid,ppid,pgid,pcpu,rss,lstart,command` lists them:
+    /// Claude Code with `caffeinate` and a language server beside a tool
+    /// shell; Codex's Node launcher over its native binary, an MCP server
+    /// whose browser leads a group of its own, and a tool shell; zo with an
+    /// MCP server whose child leads its own group, and a tool shell.
+    const THREE_PANES: &str = "\
+501 100 1 100 0 1 Thu Sep 24 01:00:00 2026 /Users/dev/.local/bin/claude --resume abc
+501 101 100 100 0 1 Thu Sep 24 01:00:00 2026 caffeinate -i -t 300
+501 102 100 100 0 1 Thu Sep 24 01:00:00 2026 /Users/dev/.rustup/toolchains/stable/bin/rust-analyzer
+501 103 102 100 0 1 Thu Sep 24 01:00:00 2026 /Users/dev/.rustup/toolchains/stable/libexec/rust-analyzer-proc-macro-srv
+501 110 100 110 0 1 Thu Sep 24 01:00:00 2026 /bin/zsh -c source /tmp/snapshot.sh && eval 'cargo test -p zerocode-shell' < /dev/null
+501 111 110 110 0 1 Thu Sep 24 01:00:00 2026 cargo test -p zerocode-shell
+501 200 1 200 0 1 Thu Sep 24 01:00:00 2026 node /opt/homebrew/bin/codex resume 01a0
+501 201 200 200 0 1 Thu Sep 24 01:00:00 2026 /opt/homebrew/lib/node_modules/@openai/codex/vendor/bin/codex resume 01a0
+501 202 201 200 0 1 Thu Sep 24 01:00:00 2026 node /Users/dev/mcp/server.js
+501 203 202 203 0 1 Thu Sep 24 01:00:00 2026 /Applications/Chrome.app/Contents/MacOS/Chrome --headless
+501 210 201 210 0 1 Thu Sep 24 01:00:00 2026 /bin/zsh -lc just shell-test
+501 300 1 300 0 1 Thu Sep 24 01:00:00 2026 /Users/dev/.local/bin/zo --resume s-1
+501 301 300 300 0 1 Thu Sep 24 01:00:00 2026 npm exec chrome-devtools-mcp@latest --isolated=true
+501 302 301 300 0 1 Thu Sep 24 01:00:00 2026 chrome-devtools-mcp
+501 303 302 303 0 1 Thu Sep 24 01:00:00 2026 node /Users/dev/.npm/chrome-devtools-mcp/browser.js
+501 310 300 310 0 1 Thu Sep 24 01:00:00 2026 sh -lc node ui/tests/window.mjs --suite update
+";
+
+    fn pids(found: Option<Vec<AgentCommand>>) -> Option<Vec<u32>> {
+        found.map(|found| found.into_iter().map(|one| one.pid).collect())
+    }
+
+    #[test]
+    fn an_agents_commands_are_the_groups_it_started_and_never_its_helpers() {
+        let table = ProcessSample::from_ps_listing(THREE_PANES);
+        // Claude: the tool shell, not caffeinate, not the language server.
+        assert_eq!(
+            pids(table.agent_commands(100, &["claude"])),
+            Some(vec![110])
+        );
+        // Codex: the shell its native binary started — walked through the
+        // launcher by name — and never the browser its MCP server leads.
+        assert_eq!(pids(table.agent_commands(200, &["codex"])), Some(vec![210]));
+        // zo: the tool shell; the MCP server's own group leader is its own.
+        assert_eq!(pids(table.agent_commands(300, &["zo"])), Some(vec![310]));
+        let shell = table
+            .agent_commands(300, &["zo"])
+            .and_then(|found| found.into_iter().next())
+            .expect("zo's shell");
+        assert_eq!(
+            shell.command,
+            "sh -lc node ui/tests/window.mjs --suite update"
+        );
+    }
+
+    #[test]
+    fn a_table_that_cannot_say_answers_none_rather_than_nothing_running() {
+        let table = ProcessSample::from_ps_listing(THREE_PANES);
+        // A root the table does not hold: the pane's process is gone or
+        // was never read — not "idle".
+        assert_eq!(table.agent_commands(999, &["claude"]), None);
+        // A table with no process groups — Windows reads none — cannot tell
+        // a command from a helper at all.
+        let grouped_nowhere = ProcessSample::fixture(&[
+            (100, 1, 0.0, 1, "t", "claude"),
+            (110, 100, 0.0, 1, "t", "/bin/zsh -c cargo test"),
+        ]);
+        assert_eq!(grouped_nowhere.agent_commands(100, &["claude"]), None);
     }
 
     #[test]

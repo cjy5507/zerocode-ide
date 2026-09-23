@@ -23,9 +23,13 @@ pub(crate) fn build_stamp() -> update_runtime::BuildStamp {
 ///
 /// Polled on the status bar's period rather than watched: a release is a
 /// minutes-scale event.
-#[tauri::command]
-pub(crate) fn release_status(state: State<'_, AppState>) -> update_runtime::ReleaseStatus {
+///
+/// Off the main thread since t-6428: the census it answers with reads the
+/// process table.
+#[tauri::command(async)]
+pub(crate) fn release_status(app: AppHandle) -> update_runtime::ReleaseStatus {
     let _crumb = crate::crumbs::Command::enter("release_status");
+    let state = app.state::<AppState>();
     let running = update_runtime::build_stamp();
     let zo_running = zo_integration_runtime::running_zo_builds(&state);
     let mut answer = match update_runtime::release_dir() {
@@ -34,12 +38,13 @@ pub(crate) fn release_status(state: State<'_, AppState>) -> update_runtime::Rele
             status: serde_json::Value::Null,
             installed: serde_json::Value::Null,
             notice: None,
-            workers: 0,
+            busy: crate::orchestration::restart_census::Busy::default(),
         },
     };
-    // And who a restart would cut (t-3058): the workers at work in this
-    // window's panes, by the ledger's seat table — so the notice can say
-    // 「워커 N개 진행 중 — 착지 뒤 재시작 권장」 beside its button.
-    answer.workers = crate::orchestration::live_worker_count();
+    // And who a restart would cut (t-3058, t-6428): the one census every
+    // road out of the window asks — workers mid-turn, background jobs under
+    // workers at rest, workers nobody could read — so the notice says it
+    // beside its button in the question's own words.
+    answer.busy = crate::cmd::appearance::take_census(&app).busy();
     answer
 }

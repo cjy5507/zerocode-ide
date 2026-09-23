@@ -53258,7 +53258,12 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
   // The dim auxiliary: the sha, only when the sentence names a version.
   const aux = (half) => (half.change === "version" ? short(half.installed) : "");
   const spoken = (words, dim) => (dim ? `${words} ${dim}` : words);
-  const busyWords = (n) => t("update.workersBusy", "워커 {{n}}개 진행 중 — 착지 뒤 재시작 권장", { n });
+  // The census's words (t-6428): each part only when it counts.
+  const busyWords = (census) => [
+    census.turning > 0 ? t("exit.busyTurning", "워커 {{n}}명 턴 중", { n: census.turning }) : "",
+    census.background > 0 ? t("exit.busyBackground", "배경 작업 {{n}}개", { n: census.background }) : "",
+    census.unknown > 0 ? t("exit.busyUnknown", "상태를 모르는 워커 {{n}}명", { n: census.unknown }) : "",
+  ].filter(Boolean).join(" · ");
   const runningWords = () =>
     t("settings.update.running", "ZeroCode {{version}} · 빌드 {{sha}} · {{channel}}", {
       version: runningVersion,
@@ -53288,9 +53293,12 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
   const pane = settingsPane;
   const KEYS = [
     "update.readyAppVersion", "update.readyAppBuild", "update.readyZoVersion", "update.readyZoBuild",
-    "update.restart", "update.workersBusy", "settings.update.title", "settings.update.running",
+    "update.restart", "exit.busyTurning", "exit.busyBackground", "exit.busyUnknown",
+    "settings.update.title", "settings.update.running",
   ];
-  const GONE = ["update.readyApp", "update.readyZo", "settings.update.app", "settings.update.zo"];
+  const GONE = [
+    "update.readyApp", "update.readyZo", "settings.update.app", "settings.update.zo", "update.workersBusy",
+  ];
   try {
     for (const note of document.querySelectorAll(".toast")) note.remove();
     const before = window.__COUNTS__.relaunch_window ?? 0;
@@ -53425,27 +53433,30 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
     await tick();
     seen.repeatToasts = standing().length;
     seen.repeatNoticeShown = !document.getElementById("update-notice").hidden;
-    // ⑧ Workers at work (t-3058): the app toast says how many after its
-    // sentence and before the dim sha; the notice says it on its own line,
-    // and recommends restarting after they land — the button stays. Zero
-    // says nothing, in the toast or the notice.
+    // ⑧ Work a restart would cut (t-3058, t-6428): the app toast says the
+    // one census after its sentence and before the dim sha — workers
+    // mid-turn, background jobs under workers at rest, workers nobody could
+    // read — and the notice says it on its own line; the button stays.
+    // Workers at rest with nothing under them say nothing, in either.
     const busy = appDrift(`b${drift.installed.slice(1)}`, installed.app.version);
-    window.__ANSWER__.release_status = () => ({ ...answer(busy, null), workers: 2 });
+    const census = { busy: true, workers: 3, turning: 1, background: 2, unknown: 1 };
+    window.__ANSWER__.release_status = () => ({ ...answer(busy, null), busy: census });
     await askReleaseStatus();
     await tick();
     const busyToast = standing().at(-1);
     seen.busyToasts = standing().length;
     seen.busyToast = toastText(busyToast);
-    seen.busyWord = spoken(`${appWords(busy)} ${busyWords(2)}`, aux(busy));
+    seen.busyWord = spoken(`${appWords(busy)} — ${busyWords(census)}`, aux(busy));
     seen.busyAction = !!busyToast?.querySelector(".toast-action");
     seen.busyNoticeApp = noticeLine("update-notice-app").textContent === spoken(appWords(busy), aux(busy));
     seen.busyNoticeShown = !noticeLine("update-notice-workers").hidden;
     seen.busyNotice = noticeLine("update-notice-workers").textContent;
-    seen.busyNoticeWord = busyWords(2);
+    seen.busyNoticeWord = busyWords(census);
     seen.busyButtonShown = !document.getElementById("update-relaunch").hidden;
-    // The count moves while the sha stands: the standing toast follows it,
-    // and keeps its dim sha.
-    window.__ANSWER__.release_status = () => ({ ...answer(busy, null), workers: 0 });
+    // The census moves while the sha stands: the standing toast follows it,
+    // and keeps its dim sha — three workers, all at rest, cut nothing.
+    const atRest = { busy: false, workers: 3, turning: 0, background: 0, unknown: 0 };
+    window.__ANSWER__.release_status = () => ({ ...answer(busy, null), busy: atRest });
     await askReleaseStatus();
     await tick();
     seen.settledToasts = standing().length;
@@ -53455,7 +53466,7 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
     seen.settledNoticeHidden = noticeLine("update-notice-workers").hidden;
     // And a fresh sha with nobody at work carries no suffix at all.
     const quiet = appDrift(`c${drift.installed.slice(1)}`, installed.app.version);
-    window.__ANSWER__.release_status = () => ({ ...answer(quiet, null), workers: 0 });
+    window.__ANSWER__.release_status = () => ({ ...answer(quiet, null), busy: atRest });
     await askReleaseStatus();
     await tick();
     seen.quietToast = toastText(standing().at(-1));
@@ -53487,7 +53498,7 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
   zoRunning: ["5205ab00cccccccccccccccccccccccccccccccc"],
 });
 ok(
-  "a newer installed build is one sticky toast per sha and the settings notice saying the same sentence — 「새 버전 {{version}}이(가) 설치되었습니다」 with the sha dim beside it when the lane's version is not the running one, 「새 빌드({{sha}})가 설치되었습니다」 when it is — the notice adding t-3191's one running line, both on the one restart road, worded by t() in five catalogs with the sha-only rows gone, zo saying 「zo {{version}} 설치됨」 by the same rule without a button, gone when the builds are equal, and 「워커 N개 진행 중 — 착지 뒤 재시작 권장」 while the ledger counts workers at work",
+  "a newer installed build is one sticky toast per sha and the settings notice saying the same sentence — 「새 버전 {{version}}이(가) 설치되었습니다」 with the sha dim beside it when the lane's version is not the running one, 「새 빌드({{sha}})가 설치되었습니다」 when it is — the notice adding t-3191's one running line, both on the one restart road, worded by t() in five catalogs with the sha-only rows gone, zo saying 「zo {{version}} 설치됨」 by the same rule without a button, gone when the builds are equal, and the one census's 「워커 N명 턴 중 · 배경 작업 M개」 while a restart would cut work (t-6428)",
   !updateNotice.error &&
     !updateNotice.cleanupError &&
     updateNotice.toasts === 1 &&
@@ -53540,6 +53551,305 @@ ok(
     updateNotice.settledNoticeHidden &&
     updateNotice.quietToast === updateNotice.quietWord,
   JSON.stringify(updateNotice),
+);
+
+/* ---- 떠나기 전에 (t-6428) --------------------------------------------------
+ *
+ * Every restart door asks the one census first. Nothing a restart would
+ * cut: the door restarts at once through the one restart road, naming
+ * itself. Work in progress: the question — the census's words and the
+ * backend's patience — where 「끝나면 다시 시작」 arms the backend's wait
+ * for this door and stands one line that follows the beat and cancels,
+ * 「지금 다시 시작」 goes now by this door, a wait the table ran out of asks
+ * again saying so first, and a census nobody could read is asked about as
+ * busy. Five catalogs. */
+const restartAsked = await page.evaluate(async () => {
+  const seen = {};
+  const tick = () => new Promise((done) => setTimeout(done, 40));
+  const held = {
+    busy_census: window.__ANSWER__.busy_census,
+    leave_when_idle: window.__ANSWER__.leave_when_idle,
+    leave_now: window.__ANSWER__.leave_now,
+    leave_cancel: window.__ANSWER__.leave_cancel,
+    relaunch_window: window.__ANSWER__.relaunch_window,
+  };
+  const calls = [];
+  const idle = { busy: false, workers: 2, turning: 0, background: 0, unknown: 0, running: 0, gap: true };
+  const busy = { busy: true, workers: 3, turning: 1, background: 2, unknown: 0, running: 3, gap: false };
+  const census = (state) => (args) => {
+    calls.push(["census", args]);
+    return { road: args.road, door: args.door ?? null, busy: state, waitMin: 30, answerSec: null };
+  };
+  const line = (over = {}) => ({ road: "restart", running: 3, unknown: 0, waitedMin: 0, waitMin: 30, ...over });
+  const waitWords = (said) => t("exit.waitingRestart", "끝나면 다시 시작합니다 · {{state}}", {
+    state: [
+      t("exit.running", "도는 명령 {{n}}개", { n: said.running }),
+      ...(said.unknown > 0 ? [t("exit.busyUnknown", "상태를 모르는 워커 {{n}}명", { n: said.unknown })] : []),
+      t("exit.waited", "{{minutes}}분째", { minutes: said.waitedMin }),
+    ].join(" · "),
+  });
+  const standing = () =>
+    [...document.querySelectorAll(".toast")].filter(
+      (one) => one.dataset.notice === "exit-wait" && !one.classList.contains("is-closing"),
+    );
+  const lineText = () => standing()[0]?.querySelector(".toast-text")?.textContent ?? null;
+  const shown = () => !document.getElementById("ask-scrim").hidden;
+  const fire = (name, payload) => {
+    for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+  };
+  const called = (kind, road, door) =>
+    calls.some(([seenKind, args]) => seenKind === kind && args?.road === road && (args?.door ?? null) === door);
+  try {
+    for (const note of document.querySelectorAll(".toast")) note.remove();
+    window.__ANSWER__.relaunch_window = (args) => { calls.push(["relaunch", args]); return null; };
+    window.__ANSWER__.leave_when_idle = (args) => { calls.push(["arm", args]); return line({ road: args.road }); };
+    window.__ANSWER__.leave_now = (args) => { calls.push(["now", args]); return null; };
+    window.__ANSWER__.leave_cancel = () => { calls.push(["cancel", {}]); return null; };
+    // ① Nothing a restart would cut: the door goes at once, naming itself.
+    window.__ANSWER__.busy_census = census(idle);
+    await askBeforeRestart("update-toast");
+    await tick();
+    seen.idleRestarted = calls.some(([kind, args]) => kind === "relaunch" && args?.door === "update-toast");
+    seen.idleAsked = shown();
+    seen.idleCensusDoor = called("census", "restart", "update-toast");
+    // ② Work in progress: the question, never the restart.
+    window.__ANSWER__.busy_census = census(busy);
+    const asked = askBeforeRestart("window-material");
+    await tick();
+    seen.busyAsked = shown();
+    seen.busyRestarted = calls.some(([kind, args]) => kind === "relaunch" && args?.door === "window-material");
+    seen.title = document.getElementById("ask-title").textContent
+      === t("exit.restartTitle", "다시 시작하면 도는 일이 끊깁니다");
+    const body = document.getElementById("ask-body").textContent;
+    seen.bodyCensus = body.includes(busyWords(busy));
+    seen.bodyPatience = body.includes(t(
+      "exit.restartNote",
+      "「끝나면 다시 시작」은 워커 판 아래 도는 명령이 없는 첫 틈에 다시 시작합니다 · 최대 {{minutes}}분 기다립니다",
+      { minutes: 30 },
+    ));
+    seen.yes = document.getElementById("ask-yes").textContent === t("exit.whenIdleRestart", "끝나면 다시 시작");
+    seen.no = document.getElementById("ask-no").textContent === t("exit.nowRestart", "지금 다시 시작");
+    // ③ 「끝나면 다시 시작」: the backend waits for this door; one line stands.
+    document.getElementById("ask-yes").click();
+    await asked;
+    await tick();
+    seen.armed = called("arm", "restart", "window-material");
+    seen.lines = standing().length;
+    seen.lineSaid = lineText() === waitWords(line());
+    // The beat says the line moved: the same line says it; no second stands.
+    fire("exit:waiting", line({ running: 1, unknown: 1, waitedMin: 4 }));
+    await tick();
+    seen.movedLines = standing().length;
+    seen.movedSaid = lineText() === waitWords(line({ running: 1, unknown: 1, waitedMin: 4 }));
+    // 「취소」: the line goes, and the backend hears it.
+    standing()[0]?.querySelector(".toast-action")?.click();
+    await tick();
+    seen.cancelled = calls.some(([kind]) => kind === "cancel");
+    seen.cancelledLines = standing().length;
+    // ④ 「지금 다시 시작」: this door goes now.
+    const again = askBeforeRestart("settings-notice");
+    await tick();
+    document.getElementById("ask-no").click();
+    await again;
+    await tick();
+    seen.now = called("now", "restart", "settings-notice");
+    // ⑤ A wait the table ran out of asks again, and says so first.
+    fire("exit:overdue", { road: "restart", door: "update-install", busy, waitMin: 30, answerSec: null });
+    await tick();
+    seen.overdueAsked = shown();
+    seen.overdueLead = document.getElementById("ask-body").textContent.startsWith(
+      t("exit.overdue", "{{minutes}}분을 기다렸지만 아직 도는 명령이 있습니다.", { minutes: 30 }),
+    );
+    document.getElementById("ask-cancel").click();
+    await tick();
+    seen.overdueClosed = !shown();
+    // ⑥ A census nobody could read is busy: the question says so.
+    window.__ANSWER__.busy_census = () => {
+      throw new Error("no census");
+    };
+    const unread = askBeforeRestart("update-install");
+    await tick();
+    seen.unreadAsked = shown()
+      && document.getElementById("ask-body").textContent.includes(t("exit.unread", "도는 일을 읽지 못했습니다"));
+    document.getElementById("ask-cancel").click();
+    await unread;
+    await tick();
+    seen.unreadRestarted = calls.some(([kind, args]) => kind === "relaunch" && args?.door === "update-install");
+    // ⑦ Five catalogs.
+    const KEYS = [
+      "exit.restartTitle", "exit.restartNote", "exit.whenIdleRestart", "exit.nowRestart", "exit.unread",
+      "exit.waitingRestart", "exit.running", "exit.waited", "exit.overdue",
+    ];
+    seen.catalogued = ["en", "ja", "zh", "es"].every((code) => KEYS.every((key) => typeof CATALOG[code]?.[key] === "string"));
+  } catch (error) {
+    seen.error = String(error?.stack ?? error);
+  } finally {
+    // A pin that throws while tidying kills the suite behind it; what the
+    // tidying could not do is recorded instead.
+    try {
+      for (const [name, answer] of Object.entries(held)) {
+        if (answer) window.__ANSWER__[name] = answer;
+        else delete window.__ANSWER__[name];
+      }
+      if (!document.getElementById("ask-scrim").hidden) document.getElementById("ask-cancel").click();
+      for (const note of document.querySelectorAll(".toast")) note.remove();
+    } catch (error) {
+      seen.cleanupError = String(error?.stack ?? error);
+    }
+  }
+  return seen;
+});
+ok(
+  "every restart door asks the one census first (t-6428): nothing busy restarts at once by that door; work in progress asks with the census's words and the backend's patience, 「끝나면 다시 시작」 arms the backend's wait and stands one line that follows the beat and cancels, 「지금 다시 시작」 goes now, a wait run out asks again saying so, an unread census is asked about as busy — in five catalogs",
+  !restartAsked.error &&
+    !restartAsked.cleanupError &&
+    restartAsked.idleRestarted &&
+    !restartAsked.idleAsked &&
+    restartAsked.idleCensusDoor &&
+    restartAsked.busyAsked &&
+    !restartAsked.busyRestarted &&
+    restartAsked.title &&
+    restartAsked.bodyCensus &&
+    restartAsked.bodyPatience &&
+    restartAsked.yes &&
+    restartAsked.no &&
+    restartAsked.armed &&
+    restartAsked.lines === 1 &&
+    restartAsked.lineSaid &&
+    restartAsked.movedLines === 1 &&
+    restartAsked.movedSaid &&
+    restartAsked.cancelled &&
+    restartAsked.cancelledLines === 0 &&
+    restartAsked.now &&
+    restartAsked.overdueAsked &&
+    restartAsked.overdueLead &&
+    restartAsked.overdueClosed &&
+    restartAsked.unreadAsked &&
+    !restartAsked.unreadRestarted &&
+    restartAsked.catalogued,
+  JSON.stringify(restartAsked),
+);
+
+/* ---- 닫기 전에 (t-6428) ----------------------------------------------------
+ *
+ * The window's close — the road the window was left by nine times in nine
+ * before this — asks the same census when it would cut work: the backend
+ * holds the close and says `exit:ask`, and the window asks in the close's
+ * words, with the close's patience and the minute the question stands.
+ * 「끝나면 종료」 arms the close's wait and stands the close's line, 「지금
+ * 종료」 goes now, 「취소」 lets the window stay. Five catalogs. */
+const closeAsked = await page.evaluate(async () => {
+  const seen = {};
+  const tick = () => new Promise((done) => setTimeout(done, 40));
+  const held = {
+    leave_when_idle: window.__ANSWER__.leave_when_idle,
+    leave_now: window.__ANSWER__.leave_now,
+    leave_cancel: window.__ANSWER__.leave_cancel,
+  };
+  const calls = [];
+  const busy = { busy: true, workers: 2, turning: 2, background: 0, unknown: 0, running: 1, gap: false };
+  const census = { road: "close", door: null, busy, waitMin: 10, answerSec: 60 };
+  const standing = () =>
+    [...document.querySelectorAll(".toast")].filter(
+      (one) => one.dataset.notice === "exit-wait" && !one.classList.contains("is-closing"),
+    );
+  const shown = () => !document.getElementById("ask-scrim").hidden;
+  const fire = (name, payload) => {
+    for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+  };
+  const called = (kind) => calls.some(([seenKind, args]) => seenKind === kind && args?.road === "close");
+  try {
+    for (const note of document.querySelectorAll(".toast")) note.remove();
+    window.__ANSWER__.leave_when_idle = (args) => {
+      calls.push(["arm", args]);
+      return { road: args.road, running: 1, unknown: 0, waitedMin: 0, waitMin: 10 };
+    };
+    window.__ANSWER__.leave_now = (args) => { calls.push(["now", args]); return null; };
+    window.__ANSWER__.leave_cancel = () => { calls.push(["cancel", { road: "close" }]); return null; };
+    // ① The backend held the close: the close's question, in place of a
+    // restart's wait standing before it.
+    fire("exit:waiting", { road: "restart", running: 2, unknown: 0, waitedMin: 3, waitMin: 30 });
+    await tick();
+    seen.restartLineBefore = standing().length === 1;
+    fire("exit:ask", census);
+    await tick();
+    seen.restartLineGone = standing().length === 0;
+    seen.asked = shown();
+    seen.title = document.getElementById("ask-title").textContent
+      === t("exit.closeTitle", "지금 닫으면 도는 일이 끊깁니다");
+    const body = document.getElementById("ask-body").textContent;
+    seen.census = body.includes(busyWords(busy));
+    seen.patience = body.includes(t(
+      "exit.closeNote",
+      "「끝나면 종료」는 워커 판 아래 도는 명령이 없는 첫 틈에 종료합니다 · 최대 {{minutes}}분 · {{seconds}}초 안에 답이 없으면 지금 종료합니다",
+      { minutes: 10, seconds: 60 },
+    ));
+    seen.yes = document.getElementById("ask-yes").textContent === t("exit.whenIdleClose", "끝나면 종료");
+    seen.no = document.getElementById("ask-no").textContent === t("exit.nowClose", "지금 종료");
+    // ② 「끝나면 종료」: the close's wait, and the close's line.
+    document.getElementById("ask-yes").click();
+    await tick();
+    seen.armed = called("arm");
+    seen.line = standing()[0]?.querySelector(".toast-text")?.textContent
+      === t("exit.waitingClose", "끝나면 종료합니다 · {{state}}", {
+        state: [
+          t("exit.running", "도는 명령 {{n}}개", { n: 1 }),
+          t("exit.waited", "{{minutes}}분째", { minutes: 0 }),
+        ].join(" · "),
+      });
+    standing()[0]?.querySelector(".toast-action")?.click();
+    await tick();
+    seen.cancelledWait = called("cancel") && standing().length === 0;
+    // ③ 「지금 종료」 goes now.
+    fire("exit:ask", census);
+    await tick();
+    document.getElementById("ask-no").click();
+    await tick();
+    seen.now = called("now");
+    // ④ 「취소」: the window stays, and the backend hears it.
+    calls.length = 0;
+    fire("exit:ask", census);
+    await tick();
+    document.getElementById("ask-cancel").click();
+    await tick();
+    seen.stayed = !shown() && called("cancel") && !called("now");
+    const KEYS = ["exit.closeTitle", "exit.closeNote", "exit.whenIdleClose", "exit.nowClose", "exit.waitingClose"];
+    seen.catalogued = ["en", "ja", "zh", "es"].every((code) => KEYS.every((key) => typeof CATALOG[code]?.[key] === "string"));
+  } catch (error) {
+    seen.error = String(error?.stack ?? error);
+  } finally {
+    try {
+      for (const [name, answer] of Object.entries(held)) {
+        if (answer) window.__ANSWER__[name] = answer;
+        else delete window.__ANSWER__[name];
+      }
+      if (!document.getElementById("ask-scrim").hidden) document.getElementById("ask-cancel").click();
+      for (const note of document.querySelectorAll(".toast")) note.remove();
+    } catch (error) {
+      seen.cleanupError = String(error?.stack ?? error);
+    }
+  }
+  return seen;
+});
+ok(
+  "the window's close asks the same census when it would cut work (t-6428): the close's words, its ten-minute wait and its one-minute question, 「끝나면 종료」 arming the close's wait with the close's line, 「지금 종료」 going now, 「취소」 keeping the window — in five catalogs",
+  !closeAsked.error &&
+    !closeAsked.cleanupError &&
+    closeAsked.restartLineBefore &&
+    closeAsked.restartLineGone &&
+    closeAsked.asked &&
+    closeAsked.title &&
+    closeAsked.census &&
+    closeAsked.patience &&
+    closeAsked.yes &&
+    closeAsked.no &&
+    closeAsked.armed &&
+    closeAsked.line &&
+    closeAsked.cancelledWait &&
+    closeAsked.now &&
+    closeAsked.stayed &&
+    closeAsked.catalogued,
+  JSON.stringify(closeAsked),
 );
 
 /* ---- 「업데이트」 (t-3191) ----------------------------------------------------
