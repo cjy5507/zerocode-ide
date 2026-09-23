@@ -167,3 +167,51 @@ fn the_desk_answers_and_acknowledges_through_the_ledgers_own_verbs_and_invents_n
         "an ack is offered for a letter the coordinator has not been handed:\n{act}"
     );
 }
+
+/// The worker roster reads the rows the board and the navigator already read
+/// — `ledger_agents`, through the one shared reader — and every fact of a
+/// worker's health is the ledger's own function: the question it waits on
+/// (`Run::awaiting_reply`), the wall its attempt met as the ledger reads it
+/// back (`newest_wall`), the reconciler's proof its pane is gone. Its git
+/// facts are the reclaim sweep's and the cleanup screen's own counts, for
+/// checkouts this window catalogues, bounded, off the main thread.
+#[test]
+fn the_roster_reads_the_ledgers_rows_and_the_trees_own_counts() {
+    let orchestration = shell_source("orchestration.rs");
+    let rows = block_after(&orchestration, "fn ledger_agents_for_seats(");
+    for fact in [
+        "run.awaiting_reply(&worker.id)",
+        "zerocode_core::orchestration::newest_wall(run, &one.id)",
+        "worker.pane_missing_since_ms",
+        "worker.model.clone()",
+        "worker.effort.clone()",
+    ] {
+        assert!(rows.contains(fact), "the worker row lost `{fact}`:\n{rows}");
+    }
+    let runtime = shell_source("worktree_runtime.rs");
+    let facts = block_after(&runtime, "pub(super) fn desk_checkout_facts(");
+    for count in [
+        ".commits_beyond(&worktree.path, base, branch)",
+        "cleanup_git_evidence(",
+        ".take(DESK_CHECKOUTS_MAX)",
+        "orchestrator.list()",
+    ] {
+        assert!(
+            facts.contains(count),
+            "the checkout facts lost `{count}`:\n{facts}"
+        );
+    }
+    let board = shell_source("cmd/board.rs");
+    let door = block_after(&board, "pub(crate) async fn desk_checkouts(");
+    assert!(
+        door.contains("spawn_blocking"),
+        "the roster's git runs on the main thread:\n{door}"
+    );
+
+    let window = window_source();
+    let refresh = block_after(window, "function refreshDeskLedger(");
+    assert!(
+        refresh.contains("readLedgerAgents()") && !refresh.contains("invoke(\"ledger_agents\""),
+        "the roster reads the ledger's workers a second way:\n{refresh}"
+    );
+}

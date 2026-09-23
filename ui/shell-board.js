@@ -29,8 +29,15 @@ const DESK = Object.freeze({
 
 /* 원장의 데스크 읽기(`board_desk`): 판 위의 런, 그 과업의 단계와 수. 1초
  * 박자가 게시한 것을 원장이 움직였다고 말할 때(`ledger:changed`)만 다시 읽는다.
- * `null`은 아직 읽지 않았거나 이 창에 원장이 없는 것이다. */
+ * `null`은 아직 읽지 않았거나 이 창에 원장이 없는 것이다. 워커 행은 사이드바와
+ * 보드가 이미 나눠 읽는 그 답(`readLedgerAgents`)이다 — 같은 순간에 물으면 한
+ * 번만 간다. */
 let deskLedger = null;
+let deskAgents = [];
+/* 워커 체크아웃의 git 사실(`desk_checkouts`): 경로마다 앞선 커밋·바뀐 파일.
+ * 느린 박자에 한 번 — git은 프로세스다. */
+const deskCheckouts = new Map();
+let deskCheckoutsAsking = false;
 let deskLedgerSaid = "";
 let deskLedgerAsking = false;
 let deskLedgerAgain = false;
@@ -80,12 +87,15 @@ function refreshDeskLedger() {
     return;
   }
   deskLedgerAsking = true;
-  invoke("board_desk")
-    .then((answer) => {
-      const said = JSON.stringify(answer ?? null);
+  Promise.all([invoke("board_desk"), readLedgerAgents()])
+    .then(([answer, agents]) => {
+      const said = JSON.stringify([answer ?? null, agents ?? []]);
       if (said === deskLedgerSaid) return;
+      const fresh = deskAgents.length === 0 && Array.isArray(agents) && agents.length > 0;
       deskLedgerSaid = said;
       deskLedger = answer && typeof answer === "object" ? answer : null;
+      deskAgents = Array.isArray(agents) ? agents : [];
+      if (fresh) askDeskCheckouts();
       scheduleDeskPaint();
     })
     .catch(() => {})
@@ -106,6 +116,22 @@ function refreshDeskAmbient() {
   deskAmbientAt = Date.now();
   void askReleaseStatus().then(scheduleDeskPaint);
   void askMachineLoad();
+  void askDeskCheckouts();
+}
+
+/* 워커 체크아웃마다 앞선 커밋과 바뀐 파일을 묻는다 — 판 위의 워커가 든 것만. */
+function askDeskCheckouts() {
+  const paths = [...new Set(deskAgents.map((row) => row.checkout).filter(Boolean))];
+  if (deskCheckoutsAsking || paths.length === 0) return;
+  deskCheckoutsAsking = true;
+  invoke("desk_checkouts", { paths })
+    .then((rows) => {
+      deskCheckouts.clear();
+      for (const row of Array.isArray(rows) ? rows : []) deskCheckouts.set(row.path, row);
+      scheduleDeskPaint();
+    })
+    .catch(() => {})
+    .finally(() => { deskCheckoutsAsking = false; });
 }
 
 function deskElement(tag, className, text = "") {
@@ -133,6 +159,7 @@ function deskBlock(desk, { id, quietHead = false }) {
 const DESK_BLOCKS = Object.freeze([
   { id: "machine", paint: paintDeskMachine, quietHead: true },
   { id: "mail", paint: paintDeskMail },
+  { id: "workers", paint: paintDeskWorkers },
   { id: "pipeline", paint: paintDeskPipeline },
   { id: "release", paint: paintDeskRelease },
 ]);
@@ -454,7 +481,7 @@ function paintDeskLetter(row, letter, seat, now, view) {
   const act = row.querySelector(".board-desk-letter-act");
   const does = deskLetterAct(letter, seat);
   writeHidden(act, does === null || Boolean(draft?.sent) || Boolean(ack?.sent));
-  act.disabled = Boolean(draft?.sending || ack?.sending);
+  writeDisabled(act, Boolean(draft?.sending || ack?.sending));
   writeTextContent(act, does === "reply"
     ? t("board.desk.reply", "답하기")
     : ack?.sending
@@ -469,9 +496,9 @@ function paintDeskLetter(row, letter, seat, now, view) {
     writeAttribute(field, "placeholder", t("board.desk.replyPlaceholder", "코디네이터로서 답을 적어요 — 원장의 reply로 워커에게 갑니다"));
     writeAttribute(field, "aria-label", t("board.desk.reply", "답하기"));
     if (draft && field.value !== draft.text && document.activeElement !== field) field.value = draft.text;
-    field.disabled = Boolean(draft?.sending);
+    writeDisabled(field, Boolean(draft?.sending));
     const send = form.querySelector(".board-desk-reply-send");
-    send.disabled = Boolean(draft?.sending);
+    writeDisabled(send, Boolean(draft?.sending));
     writeTextContent(send, draft?.sending ? t("board.desk.replySending", "보내는 중…") : t("board.desk.replySend", "답 보내기"));
     writeTextContent(form.querySelector(".board-desk-reply-cancel"), t("board.desk.replyCancel", "취소"));
     const error = form.querySelector(".board-desk-reply-error");
@@ -516,6 +543,110 @@ function paintDeskMail(block, now, view) {
   for (const id of deskDrafts.keys()) if (!standing.has(id)) deskDrafts.delete(id);
   const batches = new Set(letters.map((letter) => letter.delivery_id).filter(Boolean));
   for (const id of deskAcks.keys()) if (!batches.has(id)) deskAcks.delete(id);
+  return true;
+}
+
+/* ---- 워커 ------------------------------------------------------------------
+ *
+ * `worker-list`의 자리: 원장이 아직 부르고 있는 워커마다 한 줄 — 건강 한 낱말,
+ * 마지막 활동의 나이, 에이전트·모델·판·체크아웃, 그 체크아웃의 앞선 커밋과 바뀐
+ * 파일. 건강의 사실은 원장의 것이다(판 없음은 조정자의 증명, 한도 벽은 원장이 다시
+ * 읽은 벽, 답 기다림은 원장의 `awaiting_reply`, 잠듦은 원장의 낱말). 턴 중과
+ * 유휴는 판의 훅이 말한 상태다. 이 표는 그 사실들에 붙는 낱말과 차례일 뿐이다 —
+ * 위의 것이 먼저 맞으면 아래는 묻지 않는다. */
+const DESK_HEALTH = Object.freeze([
+  { id: "gone", state: "failed", key: "board.desk.healthGone", word: "판 없음",
+    holds: (row) => Number.isFinite(row.pane_missing_since_ms) },
+  { id: "walled", state: "needs-attention", key: "board.desk.healthWalled", word: "한도 벽",
+    holds: (row, card, now) => Boolean(row.wall) && now < row.wall.stands_until_ms },
+  { id: "asking", state: "needs-attention", key: "board.desk.healthAsking", word: "답 기다림",
+    holds: (row, card) => row.asking === true || card?.state === "needs-attention" },
+  { id: "asleep", state: "idle", key: "board.desk.healthAsleep", word: "잠듦",
+    holds: (row) => row.ledger === "sleeping" },
+  { id: "turn", state: "working", key: "board.desk.healthTurn", word: "턴 중",
+    holds: (row, card) => card?.state === "working" },
+  { id: "idle", state: "idle", key: "board.desk.healthIdle", word: "유휴", holds: () => true },
+]);
+
+function deskWorkerHealth(row, card, now) {
+  return DESK_HEALTH.find((health) => health.holds(row, card, now));
+}
+
+/* 마지막 활동: 판의 훅이 말한 때, 없으면 원장이 들은 가장 늦은 때. */
+function deskWorkerAt(row, card) {
+  return Math.max(Number(card?.at) || 0, Number(row.quiet_at) || 0, Number(row.hearing_at) || 0,
+    Number(row.dispatch_started_ms) || 0, Number(row.at) || 0);
+}
+
+function deskWorkerFacts(row, now) {
+  const model = (row.term != null ? paneModels.get(row.term) : null) ?? row.model ?? "";
+  const git = deskCheckouts.get(row.checkout);
+  return [
+    agentName(row.agent),
+    model && row.effort ? t("board.desk.workerModel", "{{model}} · {{effort}}", { model, effort: row.effort }) : model,
+    row.term != null ? t("board.desk.workerTerm", "판 {{term}}", { term: row.term }) : row.pane,
+    row.checkout ? basename(row.checkout) : "",
+    Number.isInteger(git?.beyond_base) ? t("board.desk.workerAhead", "커밋 {{count}}개 앞섬", { count: git.beyond_base }) : "",
+    Number.isInteger(git?.dirty_files) ? t("board.desk.workerDirty", "바뀐 파일 {{count}}", { count: git.dirty_files }) : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function deskWorkerRow(view) {
+  const row = deskElement("li", "board-desk-worker");
+  const button = deskElement("button", "board-desk-worker-main");
+  button.type = "button";
+  const line = deskElement("span", "board-desk-worker-line");
+  line.append(agentGraphStateMark("idle"), deskElement("strong", "board-desk-worker-id"),
+    deskElement("span", "board-desk-worker-health"), deskElement("span", "board-desk-worker-age"));
+  button.append(line, deskElement("span", "board-desk-worker-task"), deskElement("span", "board-desk-worker-facts"));
+  button.onclick = () => {
+    const term = row.__term;
+    if (term != null) selectTaskBoardMember(view, `agent:term:${term}`);
+  };
+  row.append(button);
+  return row;
+}
+
+function paintDeskWorkers(block, now, view) {
+  const rows = deskAgents;
+  if (rows.length === 0) return false;
+  writeTextContent(block.firstElementChild, t("board.desk.workers", "워커 · {{count}}", { count: rows.length }));
+  const body = block.lastElementChild;
+  let list = body.firstElementChild;
+  if (!list) {
+    list = deskElement("ol", "board-desk-workers");
+    body.replaceChildren(list);
+  }
+  const model = agentGraphModels.get(view);
+  const cards = new Map((model?.agents ?? []).map((entry) => [entry.card.pane, entry.card]));
+  const judged = rows.map((row) => {
+    const card = row.term != null ? cards.get(`term:${row.term}`) : null;
+    return { row, card, health: deskWorkerHealth(row, card, now) };
+  }).sort((a, b) => DESK_HEALTH.indexOf(a.health) - DESK_HEALTH.indexOf(b.health) ||
+    (Number(a.row.at) || 0) - (Number(b.row.at) || 0));
+  const held = new Map([...list.children].map((node) => [node.dataset.worker, node]));
+  reconcileElementOrder(list, judged.map(({ row, card, health }) => {
+    const node = held.get(`${row.run}/${row.worker}`) ?? deskWorkerRow(view);
+    node.__term = card ? row.term : null;
+    writeAttribute(node, "data-worker", `${row.run}/${row.worker}`);
+    writeClassName(node, `board-desk-worker is-${health.id}`);
+    dressAgentGraphStateMark(node.querySelector(".agent-graph-node-state"), health.state);
+    writeTextContent(node.querySelector(".board-desk-worker-id"), row.worker);
+    const word = t(health.key, health.word);
+    const reset = health.id === "walled" && Number.isFinite(row.wall?.resets_at_ms)
+      ? usageCountdown(row.wall.resets_at_ms - now) : "";
+    writeTextContent(node.querySelector(".board-desk-worker-health"), reset ? [word, reset].join(" · ") : word);
+    const at = deskWorkerAt(row, card);
+    writeTextContent(node.querySelector(".board-desk-worker-age"), at > 0
+      ? t("board.desk.mailAge", "{{time}} 전", { time: agoWord(at, now) }) : "");
+    const review = ledgerReviewWord({ reported: row.reported, review: row.review });
+    writeTextContent(node.querySelector(".board-desk-worker-task"),
+      [row.task || row.task_id, review].filter(Boolean).join(" · "));
+    writeTextContent(node.querySelector(".board-desk-worker-facts"), deskWorkerFacts(row, now));
+    const main = node.querySelector(".board-desk-worker-main");
+    writeDisabled(main, node.__term == null);
+    return node;
+  }));
   return true;
 }
 

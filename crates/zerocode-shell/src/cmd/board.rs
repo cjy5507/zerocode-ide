@@ -311,6 +311,26 @@ pub(crate) async fn desk_ack(
     .map_err(|error| error.to_string())?
 }
 
+/// The task board's worker roster's git facts (t-6588): commits past the
+/// base and changed files for each worker checkout this window catalogues
+/// (`desk_checkout_facts`). git is a process, so the blocking pool.
+#[tauri::command]
+pub(crate) async fn desk_checkouts(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<Vec<DeskCheckout>, String> {
+    let here = state.active();
+    let active_project = here
+        .orchestrator
+        .map_or_else(|| here.root.clone(), |open| open.repo_root().to_path_buf());
+    let config_root = state.config_root().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        desk_checkout_facts(&config_root, &active_project, &paths)
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
 /// The task board's machine strip (t-6588): the ledger's volume with the
 /// verdict the next `--worktree` summons would meet, the load against the
 /// cores, and the booted simulators and emulators — what `df -g`, `uptime`

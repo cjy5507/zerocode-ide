@@ -11812,7 +11812,7 @@ pub const QUOTA_WAIT_POLICY: QuotaWaitPolicy = QuotaWaitPolicy {
 /// One attempt's newest quota wall, read off its own `quota_walled` row:
 /// when its two witnesses met, the reset the provider named, and until when
 /// it explains the worker's silence.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct WallAt {
     /// The `quota_walled` row.
     pub wall: String,

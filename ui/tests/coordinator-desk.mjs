@@ -372,6 +372,71 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       unseated.act && unseated.delivery === "이 창에 그 런의 코디네이터 자리가 없어 여기서는 답할 수 없어요", JSON.stringify(unseated));
     await settleMail();
 
+    /* ---- 워커: `worker-list`의 자리, 건강이 나쁜 워커가 먼저 ------------------- */
+    await page.evaluate(async () => {
+      askDeskCheckouts();
+      await new Promise((done) => setTimeout(done, 0));
+    });
+    await settleMail();
+    const readWorkers = () => page.evaluate(() => {
+      const block = document.querySelector('#board-view [data-desk-block="workers"]');
+      return {
+        shown: Boolean(block) && !block.hidden,
+        head: block?.querySelector(".board-desk-head")?.textContent,
+        order: [...(block?.children[0] ? block.querySelectorAll(".board-desk-worker") : [])].map((row) => row.dataset.worker),
+        rows: Object.fromEntries([...(block?.querySelectorAll(".board-desk-worker") ?? [])].map((row) => [
+          row.dataset.worker.split("/")[1], {
+            health: row.querySelector(".board-desk-worker-health").textContent,
+            cls: row.className.replace("board-desk-worker", "").trim(),
+            age: row.querySelector(".board-desk-worker-age").textContent,
+            task: row.querySelector(".board-desk-worker-task").textContent,
+            facts: row.querySelector(".board-desk-worker-facts").textContent,
+            disabled: row.querySelector(".board-desk-worker-main").disabled,
+          }])),
+      };
+    });
+    const roster = await readWorkers();
+    ok("the roster answers worker-list with the unhealthy first: wall, question, asleep, in a turn, idle",
+      roster.shown && roster.head === "워커 · 5" &&
+      roster.order.join() === "run-desk/w-4,run-desk/w-3,run-desk/w-5,run-desk/w-1,run-desk/w-2", JSON.stringify(roster));
+    ok("each worker's health is one word from the ledger's facts, the wall with its reset",
+      /^한도 벽 · 재설정까지 4\d분$/.test(roster.rows["w-4"].health) && roster.rows["w-4"].cls === "is-walled" &&
+      roster.rows["w-3"].health === "답 기다림" && roster.rows["w-5"].health === "잠듦" &&
+      roster.rows["w-1"].health === "턴 중" && roster.rows["w-2"].health === "유휴" &&
+      /^\d+분 전$/.test(roster.rows["w-1"].age), JSON.stringify(roster.rows));
+    ok("each worker says its agent, model and effort, pane, checkout, commits ahead and changed files, and the ledger's review word",
+      roster.rows["w-1"].facts === "Claude · claude-opus-5-5 · max · 판 201 · t-1 · 커밋 1개 앞섬 · 바뀐 파일 2" &&
+      roster.rows["w-5"].facts.includes("%5") && roster.rows["w-5"].facts.includes("t-5") &&
+      roster.rows["w-2"].task === "데스크 과업 2 · 검증 대기" && roster.rows["w-5"].disabled && !roster.rows["w-3"].disabled,
+      JSON.stringify(roster.rows));
+    await page.click('#board-view [data-worker="run-desk/w-3"] .board-desk-worker-main');
+    const picked = await page.evaluate(() => ({
+      key: agentGraphSelectedKey,
+      open: document.querySelector("#board-view").classList.contains("is-inspector-open"),
+      title: document.querySelector("#board-view .agent-inspector-title").textContent,
+    }));
+    ok("a worker with a pane opens its task in the inspector", picked.key === "agent:term:203" && picked.open &&
+      picked.title === "데스크 과업 3", JSON.stringify(picked));
+    await page.evaluate(async () => {
+      agentGraphSelectedKey = null;
+      setAgentGraphInspectorOpen(document.querySelector("#board-view"), false);
+      await paintBoardView(boardTab(), { force: true });
+    });
+    const turned = await page.evaluate(async () => {
+      const w2 = window.__LEDGER__.find((row) => row.worker === "w-2");
+      const w4 = window.__LEDGER__.find((row) => row.worker === "w-4");
+      w2.pane_missing_since_ms = Date.now() - 60_000;
+      w4.wall = { ...w4.wall, stands_until_ms: Date.now() - 1 };
+      refreshDeskLedger();
+      await new Promise((done) => setTimeout(done, 0));
+      return true;
+    });
+    await settleMail();
+    const after = await readWorkers();
+    ok("a pane the reconciler proved gone comes first in the halt ink; a wall that no longer stands stops explaining the silence",
+      turned && after.order[0] === "run-desk/w-2" && after.rows["w-2"].health === "판 없음" &&
+      after.rows["w-2"].cls === "is-gone" && after.rows["w-4"].health === "유휴", JSON.stringify(after));
+
     /* ---- 과업 흐름: `task-list`의 자리, 멈춰 선 단계가 먼저 펼쳐진다 ---------- */
     const settleDesk = () => page.evaluate(async () => {
       for (let beat = 0; beat < 20 && (deskLedgerAsking || deskPaintFrame !== null); beat += 1) {

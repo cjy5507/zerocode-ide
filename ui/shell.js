@@ -252,7 +252,12 @@ listen("ledger:changed", () => {
  * not "awaiting review" — nothing was handed in. */
 function paneLedgerWord(term) {
   const facts = paneLedger.get(term);
-  if (!facts) return "";
+  return facts ? ledgerReviewWord(facts) : "";
+}
+
+/* The same words for any ledger row — a seated pane's (above) or one the
+ * task board's worker roster draws (t-6588). */
+function ledgerReviewWord(facts) {
   const review = facts.review ?? {};
   if (review.deployed) return t("board.deployed", "배포됨");
   if (review.merged) return t("board.merged", "병합됨");

@@ -977,6 +977,26 @@ pub(crate) struct LedgerAgent {
     /// rather than drawing the agent twice.
     pub(crate) term: Option<u32>,
     pub(crate) at: i64,
+    /// What the summons asked it to run as — the launch receipt `worker-list`
+    /// prints, `None` where the agent's own default was taken. The task
+    /// board's worker roster reads these and the facts below (t-6588).
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
+    /// The pane id inside its team (`%3`) — the half of the seat a person
+    /// types `worker-read` with when this window holds no terminal for it.
+    pub(crate) pane: String,
+    /// Whether it asked a question nobody has answered yet
+    /// (`Run::awaiting_reply`, the silence the stall sweep keeps quiet).
+    pub(crate) asking: bool,
+    /// The newest quota wall its current attempt met, as the ledger reads it
+    /// back (`newest_wall`): the reset the provider named and until when the
+    /// wall explains its silence. Standing is the reader's `now` against
+    /// `stands_until_ms`.
+    pub(crate) wall: Option<zerocode_core::orchestration::WallAt>,
+    /// The last quiet turn its hook reported (`Worker::quiet_at`).
+    pub(crate) quiet_at: Option<i64>,
+    /// The reconciler's proof that its pane is gone (`Worker::pane_missing_since_ms`).
+    pub(crate) pane_missing_since_ms: Option<i64>,
 }
 
 /// Volatile relations layered over the board's two permanent graph edges.
@@ -1403,6 +1423,14 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 review,
                 term,
                 at: worker.started_ms,
+                model: worker.model.clone(),
+                effort: worker.effort.clone(),
+                pane: worker.pane.clone(),
+                asking: run.awaiting_reply(&worker.id),
+                wall: dispatch
+                    .and_then(|one| zerocode_core::orchestration::newest_wall(run, &one.id)),
+                quiet_at: worker.quiet_at,
+                pane_missing_since_ms: worker.pane_missing_since_ms,
             });
         }
     }

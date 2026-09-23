@@ -5601,6 +5601,12 @@ function writeTextContent(node, value) {
   if (node.textContent !== value) node.textContent = value;
 }
 
+/* 그리고 단추의 `disabled`. 참을 같은 참으로 다시 쓰는 것도 속성을 다시 세우는
+ * 쓰기라, 조용한 폴이 기록을 남긴다(t-6588 데스크에서 잰 것). */
+function writeDisabled(node, disabled) {
+  if (node.disabled !== disabled) node.disabled = disabled;
+}
+
 function reconcileElementOrder(host, wanted) {
   if (host.children.length === 0) {
     host.append(...wanted);

@@ -2071,6 +2071,83 @@ pub(super) struct SpaceGitRow {
     pub(super) ahead: usize,
 }
 
+/// What the task board's worker roster says of one checkout (t-6588): how far
+/// its branch is past the base it was cut from and how many files are changed
+/// in it — what a coordinator typed `git rev-list`/`git status` for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(super) struct DeskCheckout {
+    pub(super) path: String,
+    pub(super) branch: Option<String>,
+    /// What the branch was cut from, as the cut wrote it down.
+    pub(super) base: Option<String>,
+    /// Commits on the branch its base does not have — the reclaim sweep's own
+    /// count (`Orchestrator::commits_beyond`). `None`: nobody recorded the
+    /// base, or git could not compare.
+    pub(super) beyond_base: Option<usize>,
+    /// Changed files, the cleanup screen's own count (`cleanup_git_evidence`).
+    /// `None`: git did not answer.
+    pub(super) dirty_files: Option<usize>,
+}
+
+/// The most checkouts one ask reads. A roster is a handful of workers; the
+/// bound keeps a webview list from becoming a git storm.
+pub(super) const DESK_CHECKOUTS_MAX: usize = 32;
+
+/// The roster's git facts for `paths`, each a checkout this window catalogues
+/// — the same listing `workspace_space_git` walks (stored projects and the
+/// active one, one `worktree list` each), so no string from the webview
+/// reaches git. Read in series: a roster is a handful of trees.
+pub(super) fn desk_checkout_facts(
+    config_root: &Path,
+    active_project: &Path,
+    paths: &[String],
+) -> Vec<DeskCheckout> {
+    let wanted: HashSet<PathBuf> = paths
+        .iter()
+        .take(DESK_CHECKOUTS_MAX)
+        .map(PathBuf::from)
+        .collect();
+    let mut projects = stored_projects(config_root);
+    projects.push(active_project.to_string_lossy().into_owned());
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut facts = Vec::new();
+    for stored in projects {
+        let Ok(orchestrator) = Orchestrator::open(Path::new(&stored)) else {
+            continue;
+        };
+        if !seen.insert(orchestrator.repo_root().to_path_buf()) {
+            continue;
+        }
+        let bases = orchestrator.creation_bases();
+        for worktree in orchestrator.list().unwrap_or_default() {
+            if !wanted.contains(&worktree.path) {
+                continue;
+            }
+            let base = worktree
+                .branch
+                .as_deref()
+                .and_then(|branch| bases.get(branch))
+                .cloned();
+            let beyond_base = match (worktree.branch.as_deref(), base.as_deref()) {
+                (Some(branch), Some(base)) => orchestrator
+                    .commits_beyond(&worktree.path, base, branch)
+                    .ok()
+                    .flatten(),
+                _ => None,
+            };
+            let git = cleanup_git_evidence(&Host::for_workspace(&worktree.path), &worktree.path);
+            facts.push(DeskCheckout {
+                path: worktree.path.to_string_lossy().into_owned(),
+                branch: worktree.branch.clone(),
+                base,
+                beyond_base,
+                dirty_files: (!git.errored).then_some(git.dirty_files),
+            });
+        }
+    }
+    facts
+}
+
 /// 이 창이 이 체크아웃 안에서 열어 두고 있는 터미널의 수 — 두 레지스트리를
 /// **한 함수로** 센 하나의 답.
 ///

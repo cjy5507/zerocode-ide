@@ -1180,6 +1180,70 @@ fn the_desks_mail_is_the_coordinators_inbox_letter_by_letter() {
     );
 }
 
+/// A worker's row carries what the task board's roster reads its health from
+/// (t-6588): the question it is waiting on (`Run::awaiting_reply`), the newest
+/// quota wall its attempt met as the ledger reads it back (`newest_wall`), and
+/// its pane inside the team — and nothing about a wall another attempt met.
+#[test]
+fn a_workers_row_carries_its_question_its_wall_and_its_pane() {
+    use zerocode_core::orchestration::{Draft, MessageKind, Priority, Text};
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("roster", 1);
+    let task = ledger
+        .create_task(&run, "do".into(), "roster task".into(), vec![], None, 2)
+        .expect("a task");
+    let started = ledger
+        .start_worker(&run, "codex", ("team-roster", "%2"), Some(&task), 3)
+        .expect("a worker");
+    let dispatch = started.dispatch.clone().expect("it carries the task");
+    let address = ledger.run(&run).expect("the run").address();
+    let row = |ledger: &Ledger| {
+        super::ledger_agents_for_seats(ledger, &super::TeamSeatIndex::new())
+            .into_iter()
+            .find(|one| one.worker == started.worker)
+            .expect("the worker's row")
+    };
+    let quiet = row(&ledger);
+    assert!(!quiet.asking && quiet.wall.is_none(), "{quiet:?}");
+    assert_eq!(quiet.pane, "%2");
+
+    let from = zerocode_core::orchestration::worker_address(&started.worker);
+    let letter = |kind: MessageKind, body: String| Draft {
+        from: from.clone(),
+        to: address.clone(),
+        kind,
+        body: Text::from(body),
+        subject: Text::default(),
+        priority: Priority::Normal,
+        payload: Text::default(),
+        thread: None,
+        task: Some(task.clone()),
+        dispatch: Some(dispatch.clone()),
+    };
+    ledger
+        .post(
+            &run,
+            letter(MessageKind::Question, "which base?".into()),
+            10,
+        )
+        .expect("a question");
+    ledger
+        .post(
+            &run,
+            letter(
+                MessageKind::QuotaWalled,
+                serde_json::json!({ "observedAtMs": 20, "resetsAtMs": 2_700_020 }).to_string(),
+            ),
+            20,
+        )
+        .expect("a wall");
+    let walled = row(&ledger);
+    assert!(walled.asking, "{walled:?}");
+    let wall = walled.wall.expect("the wall is read back");
+    assert_eq!(wall.resets_at_ms, Some(2_700_020));
+    assert!(wall.stands_until_ms > 2_700_020, "{wall:?}");
+}
+
 /// The desk calls a run's coordinator seat this window's only where the pane
 /// the seat names (`team/pane`) is in this window's pane table (t-6588) —
 /// the seat a reply from the board is written as.

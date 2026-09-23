@@ -29879,6 +29879,90 @@ details.task-board-section > summary {
   display: none;
 }
 
+/* 워커: 한 사람 한 장, 두 줄 반. 건강 낱말만 제 상태의 잉크를 입고(판 없음은
+ * 멈춤, 한도 벽·답 기다림은 기다림, 턴 중은 준비의 초록), 나머지 사실은 조용한
+ * 셋째 줄이다. 판을 든 워커는 누르면 그 작업을 인스펙터에 연다. */
+.board-desk-workers {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.board-desk-worker-main {
+  display: grid;
+  gap: var(--space-1);
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  color: var(--ink-chalk);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+
+.board-desk-worker-main:hover:not(:disabled) {
+  border-color: var(--edge-mark);
+}
+
+.board-desk-worker-main:disabled {
+  cursor: default;
+}
+
+.board-desk-worker-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-xs);
+}
+
+.board-desk-worker-id {
+  color: var(--ink-label);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-weight: 400;
+}
+
+.board-desk-worker-health {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-desk-worker.is-gone .board-desk-worker-health { color: var(--signal-halt-ink); }
+.board-desk-worker.is-walled .board-desk-worker-health,
+.board-desk-worker.is-asking .board-desk-worker-health { color: var(--signal-wait-ink); }
+.board-desk-worker.is-turn .board-desk-worker-health { color: var(--signal-ready); }
+.board-desk-worker.is-idle .board-desk-worker-health,
+.board-desk-worker.is-asleep .board-desk-worker-health { color: var(--ink-label); }
+
+.board-desk-worker-age {
+  flex: none;
+  margin-left: auto;
+  color: var(--ink-label);
+  font-variant-numeric: tabular-nums;
+}
+
+.board-desk-worker-task {
+  overflow: hidden;
+  font-size: var(--text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-desk-worker-facts {
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+  overflow-wrap: anywhere;
+}
+
 /* 과업 흐름: 흐름의 다섯 단계는 작은 꺾쇠로 이어지고, 멈춰 선 셋은 한 칸 떨어져
  * 선다. 과업이 있는 멈춘 단계만 제 신호의 잉크를 입는다. 누른 단계는 필터 알약과
  * 같은 옷(보기의 색)이다. */
