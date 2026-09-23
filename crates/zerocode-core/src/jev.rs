@@ -1146,7 +1146,10 @@ pub const STEP_EFFORT_APPLY_DEADLINE_MS: u64 = SUMMON_APPLY_DEADLINE_MS;
 /// answer is what moves — and the rule's own move when the answer does not
 /// arrive within [`STEP_EFFORT_APPLY_DEADLINE_MS`]; a person's `shadow`
 /// records both beside each other and types nothing. The label is what the
-/// next turn did: progressed, or the same stuck shape again.
+/// next turn did — progressed, or the same stuck shape again — and it is a
+/// mark only where the answer moved the effort away from the rule's own move
+/// and the door carried it (`crate::step_effort::move_mark`, t-6342); every
+/// other label names why it compares nothing.
 pub const STEP_EFFORT: JevUse = JevUse {
     id: "effort",
     setting: "stepEffort",
@@ -1363,7 +1366,11 @@ pub const ZO_STEP_EFFORT_APPLY_DEADLINE_MS: u64 = 1_500;
 /// leaves one step after the judgment was consulted — whether that step
 /// made progress (no repeated call, no error, no red check) — is what the
 /// judge counts, held to the routing seat's own lines because the answer
-/// moves a request field the same way a route does.
+/// moves a request field the same way a route does. The mark is written only
+/// where the judgment changed the effort the request carried
+/// (`crate::step_effort::move_mark`, t-6342): 522 of this machine's 547
+/// marks were steps that progressed whatever the judgment said, on a wire
+/// whose every differing judgment had been held back.
 pub const ZO_STEP_EFFORT: JevUse = JevUse {
     id: "step_effort",
     setting: "zoStepEffort",

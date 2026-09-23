@@ -388,16 +388,45 @@ impl Followed {
     }
 }
 
-/// What a move leads to when it was right — the mark the judge counts. A
-/// raise was right when the next turn went through; so was a lower, which
-/// bet the turn did not need the effort. A hold is never asked about, so it
-/// leaves no mark.
-#[must_use]
-pub const fn expected_followed(mv: Move) -> Option<Followed> {
-    match mv {
-        Move::Raise | Move::Lower => Some(Followed::Progressed),
-        Move::Hold => None,
+/// The word an effort move's label carries under the summary's `notCompared`
+/// when the move never reached the request or the composer: the seat was
+/// recording, the host held it back, or the door withheld it.
+pub const NOT_CARRIED: &str = "not_carried";
+
+/// The word an effort move's label carries under the summary's `notCompared`
+/// when the seat's answer moved nothing the rule would not have moved.
+pub const SAME_AS_RULE: &str = "same_as_rule";
+
+/// The mark an effort move earns from what came after it — the one rule both
+/// effort seats label by (t-6342): the window's, between two turns of a
+/// worker, and zo's step governor, between two requests of a turn.
+///
+/// "What came after went through" is not a label by itself. On zo's ledger
+/// 522 of 547 steps after a judgment progressed whatever the judgment said
+/// (2026-09-23), and every one of the 440 judgments that differed from the
+/// governor's table was held back on an Anthropic wire, so none of them moved
+/// anything the next step could answer for. A move is graded only where the
+/// answer had an effect to grade: it moved the effort away from the rule's
+/// own move, and the move was carried. Where it had none the row names why
+/// and carries no mark, which is how a seat with no such moves reads as a
+/// seat with no label rather than one that is always right.
+///
+/// # Errors
+///
+/// [`NOT_CARRIED`] for a move that never reached the request or the
+/// composer, and [`SAME_AS_RULE`] for one the rule would have made anyway.
+pub fn move_mark(
+    seat_moved_it: bool,
+    carried: bool,
+    progressed: bool,
+) -> Result<bool, &'static str> {
+    if !carried {
+        return Err(NOT_CARRIED);
     }
+    if !seat_moved_it {
+        return Err(SAME_AS_RULE);
+    }
+    Ok(progressed)
 }
 
 #[cfg(test)]

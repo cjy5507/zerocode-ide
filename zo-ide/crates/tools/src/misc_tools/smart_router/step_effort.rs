@@ -471,7 +471,8 @@ mod tests {
             at: u64::from(step) + 1,
             attempt: "s@1".to_string(),
             step,
-            agreed,
+            agreed: Some(agreed),
+            not_compared: None,
         })
     }
 
