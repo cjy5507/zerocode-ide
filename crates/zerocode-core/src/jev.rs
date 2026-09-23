@@ -2990,7 +2990,10 @@ pub const CLAIM: JevUse = JevUse {
     id: "claim",
     setting: "jevClaimCheck",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
-    recommended: JevMode::Shadow,
+    // `auto`, like every seat that promotes: it stands at shadow until the
+    // judge raises it, and with no failure label yet on this machine the judge
+    // cannot (report §남은 조건) — the same word as the table's other rows.
+    recommended: JevMode::Auto,
     repeat: None,
     sends: &[
         Sent {

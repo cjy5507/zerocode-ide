@@ -522,7 +522,13 @@ fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
         .collect();
     assert_eq!(
         hindsight,
-        vec![RECALL.id, PLACEMENT.id, COMPACTION.id, PATCH_REVIEW.id]
+        vec![
+            RECALL.id,
+            PLACEMENT.id,
+            COMPACTION.id,
+            PATCH_REVIEW.id,
+            CLAIM.id
+        ]
     );
     for row in JEV_USES.iter().filter(|row| row.promotes) {
         assert_eq!(
@@ -1663,7 +1669,7 @@ fn the_patch_review_seat_sends_a_patch_and_its_evidence_and_rises_on_hindsight()
 fn completion_claims_are_a_recording_hindsight_seat_with_bounded_evidence() {
     assert_eq!(jev_use("claim"), Some(&CLAIM));
     assert_eq!(CLAIM.setting, "jevClaimCheck");
-    assert_eq!(CLAIM.recommended, JevMode::Shadow);
+    assert_eq!(CLAIM.recommended, JevMode::Auto);
     assert_eq!(CLAIM.ledger, "claim-check.jsonl");
     assert_eq!(CLAIM.agreement_kind, AgreementKind::Hindsight);
     assert_eq!(CLAIM.baseline, Baseline::AlwaysSame(CLAIM_CRITERIA[0].0));
