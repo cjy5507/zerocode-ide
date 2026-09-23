@@ -79,7 +79,7 @@ impl RouteFact {
         }
         Some(Self {
             who: if row.jev.is_some() { RouteJudge::Jev } else { RouteJudge::Step },
-            model: row.model.clone(),
+            model: row.step_model.clone(),
             effort: row.effort_after,
             reason: row.reason,
         })
@@ -131,7 +131,7 @@ mod tests {
             at: 0,
             attempt: "turn-1@1".to_string(),
             step: 3,
-            model: Some("claude-opus-5".to_string()),
+            step_model: Some("claude-opus-5".to_string()),
             band: "large",
             batch: "check",
             repeats: 0,
