@@ -64,6 +64,7 @@ import { testComposerAttach } from "./attach.mjs";
 import { testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testWorkers } from "./workers.mjs";
+import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import { createServer } from "node:http";
@@ -208,6 +209,22 @@ suite("vault", async ({ browser, origin }) => {
   }
 });
 suite("workers", testWorkers);
+/* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
+ * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
+ * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs
+ * --rounds 5 [--engine webkit]`로, 구조적 약속(노드가 보이는 창에 비례한다)은
+ * 기본 실행의 스위트가 지킨다. */
+suite("conversation-perf", async ({ browser, origin, ok }) => {
+  const before = standingPids();
+  const { page } = await openWindowTestPage(browser, origin);
+  try {
+    const measured = await measureConversation(page, { before });
+    ok("B0: the 400-turn conversation was measured — rows, nodes, heap, renderer RSS, delta paint, scroll frames",
+      measured.rows === 400 && measured.paints > 0 && measured.scrollFrames > 0, JSON.stringify(measured));
+  } finally {
+    await page.close();
+  }
+}, { onlyByName: true });
 /* 터미널 출력 경로의 자 (terminal-throughput.mjs). 판정 둘은 셈이고 — 흐르는
  * 프레임이 레이아웃을 읽지 않는 것, span 이 쌓이지 않는 것 — 시간은 자릿수만
  * 본다. 숫자 자체는 PASS 줄의 detail 에 실려 레인의 로그에 남으므로, 전송로나
