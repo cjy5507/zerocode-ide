@@ -11532,9 +11532,9 @@ function cleanseAssistantText(text) {
 /* One row per turn, whatever the turn is — the sync appends these in order
  * and keys them by `data-turn`. `spoken` is the seq of the last thing said
  * (person or agent): a call after it with no result yet is still out. */
-function helperTurnRowNode(run, turn, spoken) {
+function helperTurnRowNode(run, turn, spoken, cold = false) {
   if (turn.role === "thinking") return thoughtTurnNode(run, turn);
-  if (turn.role === "tool" || turn.role === "tool_result") return toolTurnNode(run, turn, spoken);
+  if (turn.role === "tool" || turn.role === "tool_result") return toolTurnNode(run, turn, spoken, cold);
   const briefing = turn.role === "user" && turn.seq === 0;
   const row = document.createElement("article");
   const said = document.createElement("div");
@@ -11560,15 +11560,25 @@ function helperTurnRowNode(run, turn, spoken) {
     // (2.1.272): the person's rows say 「나」 above, an answer says the
     // agent's own name — the catalog's, never a word invented here.
     if (turn.role === "assistant") row.setAttribute("aria-label", agentName(run.agent));
-    const clean = turn.role === "assistant" ? cleanseAssistantText(turn.text) : turn.text;
-    paintHelperProse(said, clean || turn.text, helperBase(run));
+    // An answer born far from view waits for its prose (B1).
+    if (cold && turn.role === "assistant") shelveBorn(row);
+    else paintAnswerProse(said, turn, run);
   }
   row.appendChild(said);
   // Every answer carries the extension's action row (`assistantActions`):
   // a copy, shown while the pointer or the focus is on the answer.
   if (turn.role === "assistant") row.appendChild(helperActionsNode(turn));
   row.dataset.turn = String(turn.seq);
+  row.__turn = turn;
   return row;
+}
+
+/* What an answer's row says, as prose: the words without the CLI's own
+ * plumbing (`cleanseAssistantText`), painted by the one markdown road — at
+ * birth, and again when a row far from view takes its body back (B1). */
+function paintAnswerProse(said, turn, run) {
+  const clean = turn.role === "assistant" ? cleanseAssistantText(turn.text) : turn.text;
+  paintHelperProse(said, clean || turn.text, helperBase(run));
 }
 
 /* `● Read ui/shell.js` / `└ 256 lines` — the extension's tool row. The name
@@ -11578,7 +11588,7 @@ function helperTurnRowNode(run, turn, spoken) {
  * never widens the page. The dot in the gutter is the row's `::before`, and
  * its state is the row's class: live (out, on the accent), done (green),
  * failed (halt). */
-function toolTurnNode(run, turn, spoken) {
+function toolTurnNode(run, turn, spoken, cold = false) {
   const row = document.createElement("article");
   row.className = "helper-turn is-tool is-step";
   const call = document.createElement("p");
@@ -11591,6 +11601,8 @@ function toolTurnNode(run, turn, spoken) {
   row.appendChild(call);
   row.dataset.turn = String(turn.seq);
   row.__turn = turn;
+  // A call born far from view waits for its body (B1).
+  if (cold) shelveBorn(row);
   dressToolTurn(row, turn, run, spoken);
   return row;
 }
@@ -11675,6 +11687,16 @@ function dressToolTurn(row, turn, run, spoken) {
     }
     writeTextContent(result, output.split("\n", 1)[0] || t("worker.noOutput", "출력 없음"));
   }
+  // The row's body — unless it stands far from view with its body given up
+  // (B1); it is dressed again when it comes back.
+  if (!row.__shelved) dressToolParts(row, turn, run);
+}
+
+/* A tool row's body: the pictures its result handed back, its edit's diff,
+ * and its IN/OUT box — each built once, when the row first has it. */
+function dressToolParts(row, turn, run) {
+  const words = toolWords(turn);
+  const output = turn.role === "tool_result" ? turn.text : turn.output;
   // The pictures the result handed back, under the line that says it (A8).
   const images = turn.role === "tool_result" ? turn.images : turn.outputImages;
   if (images?.length > 0 && !row.querySelector(":scope > .helper-images")) {
@@ -11692,7 +11714,7 @@ function dressToolTurn(row, turn, run, spoken) {
   // What the call line and the result line do not already say stands in the
   // row's body — the extension's box, each side cut at its clip with its
   // door (`dressToolBody`), never behind a fold a person must press first.
-  if (todo) return;
+  if (row.__todos) return;
   dressToolBody(
     row,
     edits.length === 0 && chatFolds(words.input) ? words.input : "",
@@ -12276,11 +12298,16 @@ function paintFocusGroup(group) {
 /* 묶음을 펼치거나 접는다 — 구성원만 따라가며, 사람의 한 동작에만. */
 function openFocusGroup(group, open) {
   group.__open = open;
+  const list = group.parentElement;
   let row = group.nextElementSibling;
   while (row && row.__group === group) {
     writeHidden(row, !open && !row.__standing);
+    // A row that gave up its body before the fold hid it takes it back
+    // now, beside the head the person pressed (B1).
+    if (open && row.__shelved && list?.__run) unshelveRow(row, list.__run);
     row = row.nextElementSibling;
   }
+  if (list) askShelfAgain(list);
   paintFocusGroup(group);
 }
 
@@ -12313,6 +12340,8 @@ function applyFocusView(list, on) {
   }
   // The newest todo list stands out of its fold, or goes back (A7).
   standLatestTodo(list, on);
+  // Rows the fold had hidden are judged again where they now stand (B1).
+  askShelfAgain(list);
 }
 
 /* 전사를 장부에 맞춘다 — 통째로 다시 세우지 않고.
@@ -12327,6 +12356,7 @@ function applyFocusView(list, on) {
  * 거짓말이 된다). */
 function syncHelperTurns(list, run) {
   const held = run.helper.turns;
+  list.__run = run;
   // 이 목록이 입고 있는 값이 토글의 값과 다르면 먼저 맞춘다 — 같으면
   // 아무것도 만지지 않으므로 조용한 폴은 여기서 값을 치르지 않는다.
   const focus = focusViewOn();
@@ -12359,6 +12389,7 @@ function syncHelperTurns(list, run) {
     }
     if (Number(front.dataset.turn) >= first) break;
     dropFocusMember(front);
+    forgetShelf(list, front);
     front.remove();
     dropped = true;
     front = next;
@@ -12376,12 +12407,18 @@ function syncHelperTurns(list, run) {
   const spoken = held.findLast((turn) => turn.role === "user" || turn.role === "assistant")?.seq ?? -1;
   let newest = null;
   const people = [];
+  // A batch builds whole only its last rows; the rest are born without their
+  // bodies, and the shelf's watcher builds each as it comes within reach (B1).
+  let cold = held.reduce((count, turn) => count + (turn.seq > drawn ? 1 : 0), 0) - CHAT_SHELF.warm;
   for (const turn of held) {
     if (turn.seq <= drawn) continue;
-    const row = helperTurnRowNode(run, turn, spoken);
+    const row = helperTurnRowNode(run, turn, spoken, cold > 0);
+    cold -= 1;
     list.insertBefore(row, streaming ?? helperListTail(list));
-    // Its pictures are watched once it stands in the list (A8).
+    // Its pictures are watched once it stands in the list (A8), and so is
+    // the row itself, whose body goes when it is far from view (B1).
     if (row.querySelector(":scope > .helper-images")) watchImagePills(list, row);
+    watchShelf(list, row);
     if (turn.role === "assistant") newest = { row, turn };
     if (turn.role === "user") people.push(row);
     // The words this turn carries were streaming a moment ago: their
@@ -12419,6 +12456,7 @@ function syncHelperTurns(list, run) {
   // wire's page streams the words themselves (`syncStreamingTurns`).
   dressLastAnswer(list, run, newest);
   standLatestTodo(list, focus);
+  askShelfAgain(list);
   syncHelperTasks(list, run);
   syncStreamingTurns(list, run);
   // What the person said is cut at the clip when it stands taller — measured
@@ -12566,6 +12604,7 @@ function helperTurnsNode(run) {
   list.setAttribute("role", "log");
   list.setAttribute("aria-label", t("worker.transcript", "헬퍼 대화 기록"));
   list.tabIndex = 0;
+  list.__run = run;
   // It keeps to its foot until the person leaves it (t-6323 A5).
   keepToFoot(list);
   // A person's words stuck at the top (the extension's sticky header) are a

@@ -5,7 +5,7 @@
  * a browser actually laid out — a font is the face the engine drew with, a
  * fold is the height the row stood at — never the source's own spelling. */
 import { openWindowTestPage } from "./window-boot.mjs";
-import { FIXTURE_PNG } from "./conversation-perf.mjs";
+import { FIXTURE_PNG, conversationFixture, openFixtureConversation } from "./conversation-perf.mjs";
 
 /* A wire session's page opened on `history` — the page with the most roads
  * on it (turns, a live answer, the composer's wire) — painted once. */
@@ -1153,6 +1153,162 @@ export async function testConversationCopies(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok("A9: the copies raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* B1 — a row far from view keeps its height, not its body. The 400-turn
+ * page (B0's fixture) builds whole only the rows at its foot — the rest are
+ * born without their bodies — and stands bodies (answers' prose, calls' diffs
+ * and IN/OUT boxes, pictures) only within two screens of the view; a row that
+ * leaves reach keeps the height it stood at. Scrolling brings bodies back
+ * before they are seen and the reader's row never moves, even as rows born
+ * without their bodies take them above it; once every row has stood whole,
+ * the list is as tall at the top as back at the foot. A row the person
+ * opened, or holds a selection in, keeps its body; a quiet poll still writes
+ * nothing. */
+export async function testConversationShelf(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openFixtureConversation(page, conversationFixture());
+    const seen = await page.evaluate(async () => {
+      const seen = {};
+      const face = document.querySelector("#worker-view");
+      const list = face.querySelector(".helper-turns");
+      const frames = async (n) => {
+        for (let beat = 0; beat < n; beat += 1) await window.__PAINTED__();
+      };
+      // The watcher answers after a frame is laid out: let it.
+      await frames(4);
+      await new Promise((done) => setTimeout(done, 50));
+      const rows = () => [...list.querySelectorAll(":scope > .helper-turn")];
+      const reach = () => {
+        const view = list.getBoundingClientRect();
+        const margin = view.height * CHAT_SHELF.screens;
+        return (row) => {
+          const box = row.getBoundingClientRect();
+          return box.bottom >= view.top - margin && box.top <= view.bottom + margin;
+        };
+      };
+      const bodyOf = (row) => row.querySelector(":scope > .helper-tool-diff, :scope > .helper-tool-body, :scope > .helper-images") !== null ||
+        (row.classList.contains("is-assistant") && row.querySelector(":scope > .helper-said")?.childElementCount > 0);
+      const judge = () => {
+        const near = reach();
+        let farBuilt = 0;
+        let nearShelved = 0;
+        let shelved = 0;
+        let born = 0;
+        let heightsKept = true;
+        for (const row of rows()) {
+          if (!shelvable(row)) continue;
+          if (row.__shelved) {
+            shelved += 1;
+            if (row.__shelved.height === null) born += 1;
+            else if (Math.abs(row.getBoundingClientRect().height - row.__shelved.height) > 0.5) heightsKept = false;
+            if (bodyOf(row)) farBuilt += 1;
+          }
+          if (near(row) && row.__shelved) nearShelved += 1;
+          if (!near(row) && !row.__shelved && bodyOf(row) && !row.classList.contains("is-live")) farBuilt += 1;
+        }
+        return { shelved, born, farBuilt, nearShelved, heightsKept };
+      };
+      seen.atFoot = judge();
+      seen.elements = list.getElementsByTagName("*").length;
+      seen.height = list.scrollHeight;
+      // Up through the history, a screen at a time, to the very top: the row
+      // at the view's top stays where the scroll put it — bodies come back, or
+      // stand for the first time, before they are seen (a row born without
+      // its body grows above the view, and the list is moved by the growth,
+      // so the walk takes more than a screen's worth of steps).
+      const moves = [];
+      for (let step = 0; step < 400 && list.scrollTop > 0; step += 1) {
+        const before = list.scrollTop;
+        list.scrollTop = Math.max(0, before - list.clientHeight);
+        await frames(2);
+        const probe = document.elementFromPoint(list.getBoundingClientRect().left + 40, list.getBoundingClientRect().top + 20)?.closest(".helper-turn");
+        const top = probe?.getBoundingClientRect().top ?? 0;
+        await frames(2);
+        moves.push(Math.abs((probe?.getBoundingClientRect().top ?? 0) - top));
+        // What the person sees is never a row without its body.
+        const view = list.getBoundingClientRect();
+        const blank = rows().filter((row) => {
+          if (!row.__shelved || row.hidden) return false;
+          const box = row.getBoundingClientRect();
+          return box.bottom > view.top && box.top < view.bottom;
+        }).length;
+        if (blank > 0) seen.blankSeen = (seen.blankSeen ?? 0) + 1;
+      }
+      seen.maxMove = Math.max(0, ...moves);
+      seen.atTop = judge();
+      seen.heightAtTop = list.scrollHeight;
+      // Back down to the foot: the list is as tall as it stood.
+      for (let step = 0; step < 400 && chatFootGap(list) > 1; step += 1) {
+        list.scrollTop += list.clientHeight;
+        await frames(2);
+      }
+      await frames(2);
+      seen.backAtFoot = judge();
+      seen.heightAtFoot = list.scrollHeight;
+      list.scrollTop = 0;
+      await frames(3);
+      // A row the person opened keeps its body far from view.
+      const bigDiff = rows().find((row) => row.querySelector(":scope > .helper-tool-diff .helper-expand"));
+      bigDiff?.querySelector(".helper-expand")?.click();
+      await frames(1);
+      // A row holding the person's selection keeps its body too.
+      const answer = rows().find((row) => row.classList.contains("is-assistant") && row !== bigDiff && reach()(row) && row.querySelector(".helper-said p"));
+      const range = document.createRange();
+      range.selectNodeContents(answer.querySelector(".helper-said p"));
+      getSelection().removeAllRanges();
+      getSelection().addRange(range);
+      list.scrollTop = list.scrollHeight;
+      await frames(4);
+      await new Promise((done) => setTimeout(done, 50));
+      seen.openedKept = bigDiff ? !bigDiff.__shelved && bigDiff.querySelector(":scope > .helper-tool-diff") !== null : null;
+      seen.selectionKept = !answer.__shelved && answer.querySelector(".helper-said p") !== null;
+      getSelection().removeAllRanges();
+      // A row holding the keyboard's focus keeps its body too: the door the
+      // person stands on is not taken from under them by a wheel.
+      list.scrollTop = 0;
+      await frames(4);
+      await new Promise((done) => setTimeout(done, 50));
+      const focused = rows().find((row) => row !== bigDiff && reach()(row) && row.querySelector(":scope > .helper-tool-body .helper-expand"));
+      const door = focused?.querySelector(":scope > .helper-tool-body .helper-expand") ?? null;
+      door?.focus();
+      list.scrollTop = list.scrollHeight;
+      await frames(4);
+      await new Promise((done) => setTimeout(done, 50));
+      seen.focusKept = door ? !focused.__shelved && document.activeElement === door : null;
+      door?.blur();
+      // A quiet poll writes nothing.
+      const watch = new MutationObserver(() => {});
+      watch.observe(list, { childList: true, subtree: true, characterData: true, attributes: true });
+      window.__PERF_LIVE__ = [];
+      await pollHelperPages();
+      await pollHelperPages();
+      seen.quiet = watch.takeRecords().length;
+      watch.disconnect();
+      return seen;
+    });
+    ok(
+      "B1: a 400-turn page opens with only the rows within two screens of its foot standing their bodies — the rows beyond were born without theirs — and a row that gave its body up keeps the height it stood at",
+      seen.atFoot.shelved > 250 && seen.atFoot.born > 250 && seen.atFoot.farBuilt === 0 && seen.atFoot.nearShelved === 0 && seen.atFoot.heightsKept,
+      JSON.stringify(seen),
+    );
+    ok(
+      "B1: scrolling up through the history, rows come back — or stand for the first time — before they are seen and the reader's row never moves; at the top the foot's rows have gone in turn, and once every row has stood the list is as tall back at the foot as at the top",
+      seen.maxMove <= 1 && !seen.blankSeen && seen.atTop.farBuilt === 0 && seen.atTop.nearShelved === 0 && seen.atTop.heightsKept &&
+        seen.atTop.born === 0 && Math.abs(seen.heightAtFoot - seen.heightAtTop) <= 2 &&
+        seen.backAtFoot.farBuilt === 0 && seen.backAtFoot.nearShelved === 0,
+      JSON.stringify(seen),
+    );
+    ok(
+      "B1: a row whose door the person opened, a row holding the person's selection and a row holding the keyboard's focus keep their bodies far from view; a quiet poll writes nothing",
+      seen.openedKept === true && seen.selectionKept && seen.focusKept === true && seen.quiet === 0,
+      JSON.stringify(seen),
+    );
+    ok("B1: the shelf raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }

@@ -276,6 +276,9 @@ export async function measureConversation(page, { engine = "chromium", before = 
   };
   const counters = async () => (cdp ? await cdp.send("Memory.getDOMCounters") : null);
   const heapBefore = await heap();
+  // The window's own weight before the conversation, so the conversation's
+  // share of the renderer can be told from the window's.
+  const rssBefore = rendererRss(engine, before);
   await openFixtureConversation(page, conversationFixture());
   // Two beats for anything the first paint deferred (a lazy body, an observer).
   await page.evaluate(async () => {
@@ -290,8 +293,10 @@ export async function measureConversation(page, { engine = "chromium", before = 
       diffRows: list?.querySelectorAll(".diff-line").length ?? 0,
     };
   });
-  const domCounters = await counters();
+  // The heap first: its two collections take the nodes the page let go, so
+  // the counters that follow count what the page holds, not what it dropped.
   const heapOpen = await heap();
+  const domCounters = await counters();
   const rss = rendererRss(engine, before);
 
   // (4) One delta's paint: `paintLiveAnswerNow` wrapped where it is looked up.
@@ -360,6 +365,8 @@ export async function measureConversation(page, { engine = "chromium", before = 
     heapBytes: heapOpen !== null && heapBefore !== null ? heapOpen.js - heapBefore.js : null,
     embedderBytes: heapOpen !== null && heapBefore !== null ? heapOpen.embedder - heapBefore.embedder : null,
     rssBytes: rss,
+    rssBeforeBytes: rssBefore,
+    rssConversationBytes: rss - rssBefore,
     paintP50: median(paint),
     paintP95: quantile(paint, 0.95),
     paints: paint.length,
@@ -426,7 +433,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   console.log(`engine ${summary.engine}, ${summary.rounds} rounds (medians)`);
   console.log(`  rows ${summary.rows} · list elements ${summary.listElements} · document elements ${summary.documentElements} · diff rows ${summary.diffRows}`);
   console.log(`  nodes (DOM counters) ${summary.nodes ?? "—"} · listeners ${summary.listeners ?? "—"}`);
-  console.log(`  JS heap ${mb(summary.heapBytes)} · embedder (DOM) heap ${mb(summary.embedderBytes)} · renderer RSS ${mb(summary.rssBytes)}`);
+  console.log(`  JS heap ${mb(summary.heapBytes)} · embedder (DOM) heap ${mb(summary.embedderBytes)} · renderer RSS ${mb(summary.rssBytes)} (the conversation's share ${mb(summary.rssConversationBytes)}, the window before it ${mb(summary.rssBeforeBytes)})`);
   console.log(`  delta paint p50 ${summary.paintP50.toFixed(2)} ms · p95 ${summary.paintP95.toFixed(2)} ms (${summary.paints} paints)`);
   console.log(`  scroll frames ${summary.scrollFrames} · >16.7 ms ${(summary.over16 * 100).toFixed(1)}% · >20 ms ${(summary.over20 * 100).toFixed(1)}% · p95 ${summary.scrollP95.toFixed(1)} ms`);
   console.log(`  list elements after the scroll ${summary.listElementsAfterScroll}`);

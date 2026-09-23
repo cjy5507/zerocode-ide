@@ -64,7 +64,7 @@ import { testComposerAttach } from "./attach.mjs";
 import { testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testWorkers } from "./workers.mjs";
-import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies } from "./conversation-parity.mjs";
+import { testConversationAgents, testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationScroll, testConversationStatus, testConversationTodos, testConversationImages, testConversationCopies, testConversationShelf } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -223,6 +223,7 @@ suite("conversation-agents", ({ browser, origin, ok }) => testConversationAgents
 suite("conversation-todos", ({ browser, origin, ok }) => testConversationTodos(browser, origin, ok));
 suite("conversation-images", ({ browser, origin, ok }) => testConversationImages(browser, origin, ok));
 suite("conversation-copies", ({ browser, origin, ok }) => testConversationCopies(browser, origin, ok));
+suite("conversation-shelf", ({ browser, origin, ok }) => testConversationShelf(browser, origin, ok));
 /* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
  * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
  * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs
@@ -36747,13 +36748,22 @@ const flatTranscript = await page.evaluate(async () => {
   // 문(「더 보기」, t-6323 A1)은 초점을 받고 잉크 고리를 입고 우물을 연다.
   seen.logLabeled = list.getAttribute("role") === "log" &&
     Boolean(list.getAttribute("aria-label")) && list.tabIndex === 0;
-  const cap = foldRow?.querySelector(".helper-expand") ?? null;
+  // The top of the list left the long dump more than two screens away, and a
+  // row that far keeps its height, not its body (t-6323 B1): the reader comes
+  // back to it — its body stands again, door and all — before the door is
+  // asked.
+  foldTool?.scrollIntoView({ block: "nearest" });
+  await new Promise(requestAnimationFrame);
+  await new Promise(requestAnimationFrame);
+  await new Promise((done) => setTimeout(done, 50));
+  const foldBody = foldTool?.querySelector(":scope > .helper-tool-body") ?? null;
+  const cap = foldBody?.querySelector(".helper-expand") ?? null;
   cap?.focus();
   const capStyle = cap ? getComputedStyle(cap) : null;
   seen.capFocus = cap !== null && document.activeElement === cap &&
     capStyle.outlineWidth === "2px" && capStyle.outlineStyle === "solid";
   cap?.click();
-  seen.capToggles = foldRow?.querySelector(".helper-tool-input")?.classList.contains("is-open") === true;
+  seen.capToggles = foldBody?.querySelector(".helper-tool-input")?.classList.contains("is-open") === true;
   cap?.click();
 
   // 무게의 실측 1 — 폴은 온 턴만 잇고, 상한은 DOM과 데이터를 함께 지운다.
@@ -36847,9 +36857,17 @@ const flatLight = await page.evaluate(() => {
   };
 });
 await page.emulateMedia({ reducedMotion: "reduce" });
-const flatReduced = await page.evaluate(() => {
-  // The row's fold is its door now (t-6323 A1): the briefing and the long
-  // dump are cut at their clips, each with 「더 보기」 after it.
+const flatReduced = await page.evaluate(async () => {
+  // The row's fold is its door now (t-6323 A1): the long dump is cut at its
+  // clip with 「더 보기」 after it (the briefing, cut the same way, has left
+  // under the cap by now). The reader was left at the list's middle, and a
+  // row that far keeps its height, not its body (t-6323 B1) — back at the
+  // foot, the dump's body stands again with its door.
+  const list = document.querySelector("#worker-view .helper-turns");
+  list.scrollTop = list.scrollHeight;
+  await new Promise(requestAnimationFrame);
+  await new Promise(requestAnimationFrame);
+  await new Promise((done) => setTimeout(done, 50));
   const cap = document.querySelector("#worker-view .helper-expand");
   const door = document.querySelector("#worker-view button.worker-where.is-door");
   return {

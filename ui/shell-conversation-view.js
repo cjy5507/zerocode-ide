@@ -950,3 +950,155 @@ function dressCodeCopies(host) {
     frame.append(copy, block);
   }
 }
+
+/* ---- a row far from view keeps its height, not its body (t-6323 B1) ---------
+ *
+ * The extension keeps every message's DOM and trims the list instead — past
+ * 600 messages it drops back to 500, finished tool rows first (2.1.280 `wf1`,
+ * `Of1`, `bf1`). This page keeps 400 turns (`HELPER_TURN_CAP`), and a 400-turn
+ * page stood 8,127 elements, half of them the diff rows of edits nobody was
+ * looking at (B0). So a row more than `CHAT_SHELF.screens` screens from the
+ * list's view gives up its body — an answer's prose, a call's diff, its IN/OUT
+ * box and its pictures — and keeps the height it stood at; coming back within
+ * reach, it is dressed again from its turn, the way a folded thought paints
+ * its body the first time it opens (t-2973). Nothing is lost: the page's
+ * memory is the turns, and a body is only their drawing.
+ *
+ * A batch of rows — a page opening on a long conversation — builds whole only
+ * its last `CHAT_SHELF.warm`, which cover the view at the foot and its reach;
+ * the rest are born the way a shelved row stands, so the page never builds
+ * 400 bodies to give 380 of them up a frame later (the memory that build
+ * took is what the renderer keeps).
+ *
+ * What never gives up its body: a row still out (it changes), a row whose
+ * door the person opened, a row holding the person's selection, a row holding
+ * the keyboard's focus (the control the person stands on is not taken from
+ * under them by a wheel), and a row the Focus view folded away (it stands at
+ * no height, and will be judged when it stands again). One watcher per list
+ * (`root: list`), so it goes with the list; a list that is not laid out (a
+ * page behind another tab) answers nothing, and its rows are asked again when
+ * it is. */
+const CHAT_SHELF = Object.freeze({ screens: 2, warm: 30 });
+
+/* The parts of a row that go and come back. */
+const CHAT_SHELF_PARTS = ":scope > .helper-tool-diff, :scope > .helper-tool-body, :scope > .helper-images";
+
+function shelfWatch(list) {
+  list.__shelf ??= new IntersectionObserver((entries) => judgeShelf(list, entries), {
+    root: list,
+    rootMargin: `${CHAT_SHELF.screens * 100}% 0px`,
+  });
+  return list.__shelf;
+}
+
+/* A row born far from view: no body, and no height of its own to keep yet —
+ * it stands at what its call line or its actions take until the watcher
+ * builds it within reach. */
+function shelveBorn(row) {
+  row.__shelved = { height: null };
+  row.classList.add("is-shelved");
+}
+
+/* A row the watcher should judge: an answer or a call with a turn behind it. */
+function shelvable(row) {
+  return row.__turn !== undefined && (row.classList.contains("is-assistant") || row.classList.contains("is-tool")) &&
+    !row.classList.contains("is-streaming");
+}
+
+function watchShelf(list, row) {
+  if (shelvable(row)) shelfWatch(list).observe(row);
+}
+
+function forgetShelf(list, row) {
+  list.__shelf?.unobserve(row);
+}
+
+/* Whether `row` may give up its body now. */
+function mayShelve(row) {
+  if (row.classList.contains("is-live") || row.querySelector(".is-open") || row.contains(document.activeElement)) return false;
+  const selection = document.getSelection();
+  return !(selection && selection.rangeCount > 0 && !selection.isCollapsed && selection.containsNode(row, true));
+}
+
+/* One answer of the watcher: rows that left reach give up their bodies at the
+ * height they stood; rows that came back are dressed again, and a row that
+ * came back above the view with another height than it stood at — a row born
+ * without its body, or one kept while the pane was resized — moves the list
+ * by the difference, so what the person reads stays put. All the reads come
+ * after all the writes: one layout. */
+function judgeShelf(list, entries) {
+  const run = list.__run;
+  if (!run || !list.isConnected) return;
+  const back = [];
+  for (const entry of entries) {
+    const row = entry.target;
+    if (!row.isConnected) continue;
+    if (!entry.rootBounds || entry.rootBounds.height === 0 || entry.boundingClientRect.height === 0) {
+      // Not laid out (the page, or the row, stands at no height): asked again
+      // when it stands (`askShelfAgain`).
+      list.__shelf.unobserve(row);
+      (list.__shelfLater ??= new Set()).add(row);
+      continue;
+    }
+    if (entry.isIntersecting) {
+      // The watcher's bounds are the view grown by its margin on each side;
+      // the view itself starts a margin below their top.
+      const view = entry.rootBounds.top + CHAT_SHELF.screens * (entry.rootBounds.height / (1 + 2 * CHAT_SHELF.screens));
+      // What it stands at now — its kept height, or a born row's own.
+      if (row.__shelved) back.push({ row, kept: entry.boundingClientRect.height, above: entry.boundingClientRect.bottom <= view });
+    } else if (!row.__shelved && mayShelve(row)) {
+      shelveRow(list, row, entry.boundingClientRect.height);
+    }
+  }
+  if (back.length === 0) return;
+  for (const one of back) unshelveRow(one.row, run);
+  let moved = 0;
+  for (const one of back) if (one.above) moved += one.row.offsetHeight - one.kept;
+  if (moved !== 0) list.scrollTop += moved;
+}
+
+/* A row gives up its body and keeps its height — as its least height: the
+ * list is a column flex box, and an item's plain height is only where it
+ * starts before the box shrinks it to its content. Its pictures leave the
+ * list's picture watcher with it, and come back new — fetched again when they
+ * are in view — so a picture scrolled past is not kept for the page's life. */
+function shelveRow(list, row, height) {
+  row.__shelved = { height };
+  row.style.minHeight = `${height}px`;
+  row.classList.add("is-shelved");
+  if (row.classList.contains("is-assistant")) {
+    row.querySelector(":scope > .helper-said")?.replaceChildren();
+    return;
+  }
+  for (const pill of row.querySelectorAll(".helper-image")) list.__imageWatch?.unobserve(pill);
+  for (const part of row.querySelectorAll(CHAT_SHELF_PARTS)) part.remove();
+}
+
+/* A row takes its body back from its turn. */
+function unshelveRow(row, run) {
+  row.__shelved = null;
+  row.style.minHeight = "";
+  row.classList.remove("is-shelved");
+  if (row.classList.contains("is-assistant")) {
+    paintAnswerProse(row.querySelector(":scope > .helper-said"), row.__turn, run);
+    return;
+  }
+  dressToolParts(row, row.__turn, run);
+}
+
+/* Rows that were not laid out when the watcher looked, asked again once they
+ * stand — the page came back from behind another tab, or the Focus view let
+ * the row out of its fold. Cheap when there are none. */
+function askShelfAgain(list) {
+  const later = list.__shelfLater;
+  if (!later || later.size === 0 || list.clientHeight === 0) return;
+  for (const row of later) {
+    if (!row.isConnected) {
+      later.delete(row);
+      continue;
+    }
+    if (row.hidden) continue;
+    later.delete(row);
+    list.__shelf.observe(row);
+  }
+}
