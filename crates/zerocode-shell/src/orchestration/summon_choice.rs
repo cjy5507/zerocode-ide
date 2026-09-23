@@ -230,6 +230,17 @@ fn settle(
             if !shadow.auto {
                 if ask.offered(&shadow.pinned.agent) {
                     row["agreed"] = json!(pick.chosen == shadow.pinned.agent);
+                    // The seat's baseline on the same summons, today's rule:
+                    // the pinned model's own vendor CLI (t-6342).
+                    if let Some(native) = shadow
+                        .pinned
+                        .model
+                        .as_deref()
+                        .and_then(zerocode_core::orchestration::native_agent)
+                    {
+                        row[zerocode_core::jev::summary::BASELINE_AGREED.canonical] =
+                            json!(native == shadow.pinned.agent);
+                    }
                 } else {
                     row[summon_choice::NOT_COMPARED_KEY] = json!(summon_choice::NOT_OFFERED);
                 }

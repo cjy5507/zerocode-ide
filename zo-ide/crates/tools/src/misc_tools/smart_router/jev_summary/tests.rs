@@ -148,6 +148,9 @@ fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
     let roots = [home.path().join("jev")];
     let seat = &zerocode_core::jev::BROWSER;
     let wanted = promote::window_wanted_for(seat).expect("a rise line");
+    // The oldest few presses left the walk stuck: a label that never says no
+    // is not evidence (t-6342).
+    let misses = seat.negatives_wanted.expect("a rise line");
     let walk: Vec<Value> = (0..wanted)
         .map(|n| {
             json!({
@@ -156,7 +159,7 @@ fn a_screen_seats_root_ledger_carries_it_to_a_rise_the_card_can_draw() {
                 "elapsedMs": 300,
                 "requests": 1,
                 "pressed": true,
-                "agreed": true,
+                "agreed": n >= misses,
             })
         })
         .collect();
@@ -294,7 +297,7 @@ fn agreement_is_one_comparison_per_axis_where_both_readers_answered() {
     let held: Vec<&Value> = rows.iter().collect();
     assert_eq!(
         super::super::decision_shadow::agreement_in(&held),
-        Agreement { compared: 6, agreed: 4 },
+        Agreement { compared: 6, agreed: 4, ..Agreement::default() },
         "two rows both answered (six axes, four the same); a timeout and a refusal compare nothing"
     );
     assert_eq!(super::super::decision_shadow::agreement_in(&[]), Agreement::default());
@@ -626,7 +629,7 @@ fn a_control_row_is_compared_beside_its_windows_row_and_counted_nowhere_else() {
     assert_eq!(judged.window.rows, 25, "a control row was counted in the window");
     assert_eq!(judged.window.answered, 25);
     assert_eq!(judged.window.p95_ms, Some(400), "a control row's zero elapsed joined the latency");
-    assert_eq!(judged.agreement, Agreement { compared: 6, agreed: 5 }, "two control rows, three axes each");
+    assert_eq!(judged.agreement, Agreement { compared: 6, agreed: 5, ..Agreement::default() }, "two control rows, three axes each");
     assert_eq!(judged.control_rows, 2, "the control row of a task outside the window was joined");
     assert!(
         matches!(judged.verdict, Verdict::Hold(Line::TooFewRows { rows: 25, .. })),
@@ -841,13 +844,13 @@ fn a_turn_label_is_one_comparison_in_the_window_of_the_turn_it_grades() {
 
     let judged = super::super::decision_shadow::judge_rows(&rows, None).expect("routing is judged");
     assert_eq!(judged.window.rows, 25, "a label was counted as a request");
-    assert_eq!(judged.agreement, Agreement { compared: 2, agreed: 1 }, "two labels of held turns, one of a turn gone");
+    assert_eq!(judged.agreement, Agreement { compared: 2, agreed: 1, ..Agreement::default() }, "two labels of held turns, one of a turn gone");
     assert_eq!(judged.control_rows, 0, "a label was counted as a control row");
     let report = one(seat, &roots, None, None, 1_000, 0);
     assert_eq!(report.judged, Some(judged));
     assert_eq!(report.asked_toward_judgment, 25);
     // The week counts every mark, held turn or not: three labels, two agreed.
-    assert_eq!(report.agreement_week, Agreement { compared: 3, agreed: 2 });
+    assert_eq!(report.agreement_week, Agreement { compared: 3, agreed: 2, ..Agreement::default() });
 }
 
 /// A seat's week of marks is counted beside its judged window (t-5806): the
@@ -872,8 +875,8 @@ fn a_seats_week_of_marks_is_counted_beside_its_judged_window() {
     );
     let report = one(seat, &roots, None, None, 1_000, 0);
     assert!(matches!(report.verdict(), Some(Verdict::Hold(Line::TooFewRows { rows: 1, .. }))), "{:?}", report.verdict());
-    assert_eq!(report.judged.as_ref().map(|judged| judged.agreement), Some(Agreement { compared: 2, agreed: 1 }));
-    assert_eq!(report.agreement_week, Agreement { compared: 2, agreed: 1 });
+    assert_eq!(report.judged.as_ref().map(|judged| judged.agreement), Some(Agreement { compared: 2, agreed: 1, ..Agreement::default() }));
+    assert_eq!(report.agreement_week, Agreement { compared: 2, agreed: 1, ..Agreement::default() });
     assert_eq!((report.week.rows, report.asked_toward_judgment), (1, 1), "a label was counted as a request");
 }
 

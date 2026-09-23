@@ -278,25 +278,70 @@ pub fn transcript_tail(lines: &[String]) -> String {
     newest_within(&said, STALL_TRANSCRIPT_BYTE_CAP)
 }
 
-/// What a cause leads to, when it leads anywhere in particular — the mark a
-/// label row carries for the judge (§4 of the settings design): the answer
-/// was right when what followed the silence is what its cause leads to. A
-/// transient error and a quota wall lead to a continuation or a handover
-/// (`Resumed`); a worker waiting on its own CLI's question needs a word from
-/// its coordinator (`Mail`); one that finished without reporting reports when
-/// asked (`WorkerDone`); a long tool and a person at the keyboard lead to
-/// nothing the ledger does. `Unknown` leads nowhere, so it leaves no mark.
+/// The one question a stall answer's label asks of both sides: did the
+/// silence need its coordinator's hand (t-6342).
+///
+/// The label used to pair each cause with ONE follow-up, and read anything
+/// else as a miss. That is how this machine's ledger came to hold eleven
+/// misses out of eleven marks (2026-09-23): every answer read a command still
+/// running, every worker then reported on its own, and a long tool's pair was
+/// "nothing" — so each worker that came back by itself was written down as
+/// the answer being wrong. A cause does not say which message arrives first;
+/// it says whether somebody will have to act. So does what followed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Hand {
+    /// Somebody had to act: write to the worker, type a continuation, or end
+    /// the attempt.
+    Needed,
+    /// Nobody had to: the worker came back on its own, or nothing happened
+    /// before the label's window closed.
+    NotNeeded,
+}
+
+impl Cause {
+    /// What this cause says about the silence's end. A wall, a transient
+    /// error, a dead login, a question box and a worker that finished without
+    /// saying so all wait for somebody — the last one until it is asked for
+    /// its report. A command still running and a person at the keyboard end
+    /// on their own. `Unknown` says nothing either way.
+    #[must_use]
+    pub const fn predicts(self) -> Option<Hand> {
+        match self {
+            Self::TransientApiError
+            | Self::QuotaWall
+            | Self::AuthFailure
+            | Self::WaitingOnOwnCliQuestion
+            | Self::FinishedWithoutReport => Some(Hand::Needed),
+            Self::LongRunningTool | Self::HumanTookOver => Some(Hand::NotNeeded),
+            Self::Unknown => None,
+        }
+    }
+}
+
+/// The stall seat's mark for one silence: whether the answer named a cause
+/// that predicts what the ledger then showed — the one table the label reads
+/// ([`Cause::predicts`] beside [`Followed::shows`]).
+///
+/// # Errors
+///
+/// The word of the side that says nothing — `unknown`, or `worker_died` — for
+/// a label row to carry in place of a mark it has no right to
+/// ([`crate::jev::summary::NOT_COMPARED`]).
+pub fn mark(cause: Cause, followed: Followed) -> Result<bool, &'static str> {
+    let predicted = cause.predicts().ok_or(cause.word())?;
+    let shown = followed.shows().ok_or(followed.word())?;
+    Ok(predicted == shown)
+}
+
+/// What the stall seat's baseline ([`crate::jev::STALL`]'s `baseline`: the
+/// same answer every time) would have been marked on the same silence —
+/// `None` when the baseline is not a constant answer this table knows, or
+/// when what followed says nothing (t-6342).
 #[must_use]
-pub const fn expected_followed(cause: Cause) -> Option<Followed> {
-    match cause {
-        Cause::TransientApiError | Cause::QuotaWall => Some(Followed::Resumed),
-        // A dead login is not waited out: the attempt is stopped or abandoned
-        // and the work summoned again on an agent that can sign in.
-        Cause::AuthFailure => Some(Followed::WorkerStop),
-        Cause::WaitingOnOwnCliQuestion => Some(Followed::Mail),
-        Cause::FinishedWithoutReport => Some(Followed::WorkerDone),
-        Cause::LongRunningTool | Cause::HumanTookOver => Some(Followed::Nothing),
-        Cause::Unknown => None,
+pub fn baseline_mark(followed: Followed) -> Option<bool> {
+    match crate::jev::STALL.baseline {
+        crate::jev::Baseline::AlwaysSame(word) => mark(Cause::from_word(word)?, followed).ok(),
+        crate::jev::Baseline::TodaysRule | crate::jev::Baseline::None => None,
     }
 }
 
@@ -320,6 +365,16 @@ pub enum Followed {
 }
 
 impl Followed {
+    /// Everything that can follow a silence, in the order the ledger is read.
+    pub const ALL: [Self; 6] = [
+        Self::Mail,
+        Self::Resumed,
+        Self::WorkerDone,
+        Self::WorkerStop,
+        Self::WorkerDied,
+        Self::Nothing,
+    ];
+
     /// The word a label row keeps.
     #[must_use]
     pub const fn word(self) -> &'static str {
@@ -330,6 +385,20 @@ impl Followed {
             Self::WorkerStop => "worker_stop",
             Self::WorkerDied => "worker_died",
             Self::Nothing => "none",
+        }
+    }
+
+    /// What this follow-up says about the same question [`Cause::predicts`]
+    /// answers. Mail, a continuation and a stop are somebody acting; the
+    /// worker's own report and a window that closed on nothing are nobody
+    /// having to. A terminal that exited says nothing either way — a window
+    /// restart and a crash both end a silence for reasons no cause names.
+    #[must_use]
+    pub const fn shows(self) -> Option<Hand> {
+        match self {
+            Self::Mail | Self::Resumed | Self::WorkerStop => Some(Hand::Needed),
+            Self::WorkerDone | Self::Nothing => Some(Hand::NotNeeded),
+            Self::WorkerDied => None,
         }
     }
 }

@@ -1552,6 +1552,95 @@ export async function testWorkers({ browser, origin, ok, faults }) {
         placedMove.afterRestored === 1,
       JSON.stringify(placedMove),
     );
+
+    /* ---- the placement seat's label: a sight, reported once (t-6342) ----
+     *
+     * A placed worker's pane that stands on the stage, with the window in
+     * front, for the dwell the door named reports one sight through its own
+     * door — and only one, however many times the stage is drawn again. A
+     * placed pane that never reaches the stage reports none: nobody was in
+     * front of it, and its label is left unmarked. */
+    const placedSight = await page.evaluate(async () => {
+      const path = "/tmp/zerocode-window-test/wt-sighted";
+      const leader = await openTermTab({ placement: "tab" });
+      const sights = [];
+      window.__ANSWER__.note_worker_room_seen = (args) => {
+        sights.push(JSON.parse(JSON.stringify(args)));
+        return true;
+      };
+      window.__ANSWER__.judge_worker_room = () => ({
+        outcome: "answered",
+        chosen: "tab",
+        applied: false,
+        offered: ["tab", "background"],
+        placed: true,
+        seenAfterMs: 30,
+      });
+      const hadFocus = document.hasFocus;
+      document.hasFocus = () => true;
+      const sighted = 13530;
+      const unseen = 13531;
+      for (const [term, worker] of [[sighted, "w-13530"], [unseen, "w-13531"]]) {
+        for (const handler of window.__LISTENERS__["term:worker"] ?? []) {
+          handler({
+            payload: {
+              parent: leader,
+              term,
+              worktree: path,
+              agent: "codex",
+              seat: { run: "run-1", worker, dispatch: "dp-1", task: "t-1", brief: "look at the frame time", briefChars: 22 },
+            },
+          });
+        }
+      }
+      const waited = Date.now();
+      while ((!placedWorkers.has(sighted) || !placedWorkers.has(unseen)) && Date.now() - waited < 2_000) {
+        await new Promise((done) => setTimeout(done, 10));
+      }
+      // The person opens that checkout with the first worker's tab in front.
+      const previousPath = activeWorktreePath;
+      const previousTree = stageTree();
+      const previousFocus = focusedPane;
+      activeWorktreePath = path;
+      activeTabId = tabOfTerm(sighted)?.id ?? null;
+      updateStage();
+      const onStage = readingTerms().has(sighted) && !readingTerms().has(unseen);
+      await new Promise((done) => setTimeout(done, 150));
+      const afterDwell = sights.length;
+      updateStage();
+      await new Promise((done) => setTimeout(done, 150));
+      const afterAgain = sights.length;
+      document.hasFocus = hadFocus;
+      for (const term of [sighted, unseen]) {
+        const tab = tabOfTerm(term);
+        if (tab) dropTab(tab.id);
+        dropTermView(term);
+      }
+      const leaderTab = tabOfTerm(leader);
+      if (leaderTab) dropTab(leaderTab.id);
+      dropTermView(leader);
+      const forgotten = !placedWorkers.has(sighted) && !placedWorkers.has(unseen);
+      delete window.__ANSWER__.note_worker_room_seen;
+      delete window.__ANSWER__.judge_worker_room;
+      activeWorktreePath = previousPath;
+      setStageTree(previousTree);
+      focusedPane = previousFocus;
+      updateStage();
+      return { onStage, afterDwell, afterAgain, forgotten, sights };
+    });
+    ok(
+      "a placed worker's pane on the stage, with the window in front, reports one sight after the dwell",
+      placedSight.onStage === true &&
+        placedSight.afterDwell === 1 &&
+        placedSight.sights[0]?.worker === "w-13530" &&
+        placedSight.afterAgain === 1,
+      JSON.stringify(placedSight),
+    );
+    ok(
+      "a placed pane that ends is forgotten with its sight clock",
+      placedSight.forgotten === true,
+      JSON.stringify(placedSight),
+    );
   } finally {
     await page.close();
   }

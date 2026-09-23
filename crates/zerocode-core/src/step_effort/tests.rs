@@ -298,8 +298,7 @@ fn the_question_carries_the_state_and_the_answer_is_a_closed_choice() {
     assert_eq!(asked.state["effort"], Value::Null);
 }
 
-/// A move's label is the next turn's shape, and the mark the judge counts is
-/// whether that was what the move bet on.
+/// A move's label is the next turn's shape.
 #[test]
 fn a_move_is_graded_by_the_turn_after_it() {
     let stuck = Signals {
@@ -308,12 +307,25 @@ fn a_move_is_graded_by_the_turn_after_it() {
     };
     assert_eq!(Followed::of(&stuck), Followed::Stuck);
     assert_eq!(Followed::of(&Signals::default()), Followed::Progressed);
-    assert_eq!(expected_followed(Move::Raise), Some(Followed::Progressed));
-    assert_eq!(expected_followed(Move::Lower), Some(Followed::Progressed));
-    assert_eq!(expected_followed(Move::Hold), None);
     for mv in Move::ALL {
         assert_eq!(Move::from_word(mv.word()), Some(mv));
     }
     assert_eq!(Move::from_word("faster"), None);
     assert_eq!(Followed::Nothing.word(), "none");
+}
+
+/// "The next turn went through" is not a label by itself (t-6342): it happens
+/// whatever an answer nobody carried out said, and whatever an answer that
+/// only repeated the rule's own move said. A move is graded only where the
+/// seat's answer had an effect: it moved the effort away from the rule's
+/// move, and the move reached the request or the composer.
+#[test]
+fn an_effort_move_is_graded_only_where_the_answer_moved_what_was_carried() {
+    assert_eq!(move_mark(true, true, true), Ok(true));
+    assert_eq!(move_mark(true, true, false), Ok(false));
+    for progressed in [true, false] {
+        assert_eq!(move_mark(true, false, progressed), Err(NOT_CARRIED));
+        assert_eq!(move_mark(false, false, progressed), Err(NOT_CARRIED));
+        assert_eq!(move_mark(false, true, progressed), Err(SAME_AS_RULE));
+    }
 }

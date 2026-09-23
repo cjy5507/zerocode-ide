@@ -588,20 +588,37 @@ fn the_seat_judge_reads_the_rows_this_module_writes_and_raises_the_seat_on_recei
             )
         })
         .collect();
-    let labels = A_WINDOW_OF_COMPARISONS + 5;
+    // Enough receipts to bound above the line with the three the label said
+    // no to inside — a judge that preferred the incumbent on an attempt the
+    // receipt failed (t-6342).
+    let labels = 45;
+    let misses = crate::jev::NEGATIVES_WANTED;
     let first_labeled = requests - labels;
     for n in first_labeled..requests {
+        let preferred = if n - first_labeled < misses {
+            Preferred::Incumbent
+        } else {
+            Preferred::Challenger
+        };
         rows.push(label_row(
             &format!("dp-{n}"),
             Receipt::Failed,
-            Preferred::Challenger,
+            preferred,
             i64::try_from(requests + n).expect("small"),
         ));
     }
 
     let judged = judge_seat(&CHALLENGER, &rows).expect("the seat promotes");
     assert_eq!(judged.agreement.compared, labels);
-    assert_eq!(judged.agreement.agreed, labels);
+    assert_eq!(judged.agreement.agreed, labels - misses);
+    // The incumbent's design is what every one of those receipts failed.
+    assert_eq!(
+        (
+            judged.agreement.baseline_compared,
+            judged.agreement.baseline_agreed
+        ),
+        (labels, 0)
+    );
     assert_eq!(judged.model.as_deref(), Some("jev-1.13.0"));
     assert_eq!(judged.verdict, Verdict::Rise, "{judged:?}");
 
@@ -609,7 +626,7 @@ fn the_seat_judge_reads_the_rows_this_module_writes_and_raises_the_seat_on_recei
         standing(&rows, "coding", "claude-opus-5-2"),
         Standing {
             compared: requests,
-            won: requests
+            won: requests - misses
         }
     );
 }

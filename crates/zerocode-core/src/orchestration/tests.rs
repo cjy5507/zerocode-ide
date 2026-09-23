@@ -13502,7 +13502,10 @@ fn a_summons_is_judged_over_the_agents_that_could_carry_it_this_minute() {
         &mut ledger,
         &mut team,
         &machine,
-        "worker-start --agent claude --model claude-opus-5 --effort max --worktree \
+        // No model pinned: a pin narrows the set to the agents that run it
+        // (`a_pinned_model_offers_only_agents_that_run_it…`), and this case
+        // is about the wall and the unread gauge.
+        "worker-start --agent claude --worktree \
          --prompt measure-the-frame-time-again-and-put-the-numbers-in-the-commit",
         NOW + 1,
     );
@@ -13547,18 +13550,20 @@ fn a_summons_is_judged_over_the_agents_that_could_carry_it_this_minute() {
     // What the judgment is written down beside, and the shape it is asked
     // about — the brief's head, never the briefing this road wraps around
     // it, and never the agent already typed.
-    assert_eq!(
-        shadow.pinned,
-        pinned("claude", Some("claude-opus-5"), Some("max"))
-    );
-    assert!(shadow.model_was_pinned);
+    assert_eq!(shadow.pinned, pinned("claude", None, None));
+    assert!(!shadow.model_was_pinned);
     assert!(shadow.brief.starts_with("measure-the-frame-time"));
     assert_eq!(shadow.brief_chars, shadow.brief.chars().count());
     assert!(shadow.worktree && !shadow.replaces_an_attempt && !shadow.carries_a_task);
     let asked = crate::summon_choice::ask(&shadow.look(), &shadow.options)
         .expect("two agents are a question");
     assert_eq!(asked.options(), ["claude", "kimi"]);
-    assert!(!asked.state.to_string().contains("opus"));
+    assert!(
+        !asked.state.to_string().contains("claude"),
+        "the state named the agent already typed: {}",
+        asked.state
+    );
+    assert_eq!(asked.state["pinnedModel"], serde_json::Value::Null);
     assert!(
         !asked
             .questions
@@ -19952,5 +19957,77 @@ fn a_pr_observation_receipt_survives_restart_and_lost_ack_without_duplicate_mail
             .filter(|m| m.subject.as_str().starts_with("scm:"))
             .count(),
         2
+    );
+}
+
+/// A coordinator who pinned a model already chose among the agents (t-6342):
+/// 82 of the 85 summonses the seat was asked about on this machine named
+/// one, and the question offered every installed agent anyway — codex was
+/// offered on 13 of the 14 `gpt-6-astra` summonses and never named, because
+/// nothing in the state tied the family word to the catalog's id. The code
+/// now keeps only the agents that take a launch model AND draw on the gauge
+/// the pinned model's family names (`zo` draws on its model's), and a
+/// summons left with one asks nothing.
+#[test]
+fn a_pinned_model_offers_only_agents_that_run_it_and_asks_nothing_when_one_remains() {
+    assert!(runs_model("claude", "opus"));
+    assert!(runs_model("zo", "opus"));
+    assert!(!runs_model("codex", "opus"));
+    assert!(
+        !runs_model("opencode", "opus"),
+        "takes no launch model at all"
+    );
+    assert!(runs_model("codex", "gpt-6-astra"));
+    assert!(runs_model("zo", "gpt-6-astra"));
+    assert!(!runs_model("claude", "gpt-6-astra"));
+    assert!(!runs_model("antigravity", "claude-fable-5-1"));
+    // A family no table gives a provider filters nothing it cannot read.
+    assert!(runs_model("antigravity", "gemini-3-pro"));
+    assert!(runs_model("claude", "mystery-9"));
+
+    let machine = Looked::at(&["zo", "claude", "codex", "opencode"]);
+    let ledger = Ledger::new();
+    let ids = |model: Option<&str>| -> Vec<String> {
+        summonable(&machine, &ledger, 1_000, model)
+            .into_iter()
+            .map(|agent| agent.id)
+            .collect()
+    };
+    assert_eq!(ids(None), ["zo", "claude", "codex", "opencode"]);
+    assert_eq!(ids(Some("opus")), ["zo", "claude"]);
+    assert_eq!(ids(Some("gpt-6-astra")), ["zo", "codex"]);
+
+    // Two left is a question, asked under the fact the coordinator had.
+    let pair = summonable(&machine, &ledger, 1_000, Some("gpt-6-astra"));
+    let look = crate::summon_choice::SummonLook {
+        brief: "review the patch adversarially",
+        brief_chars: 30,
+        worktree: true,
+        replaces_an_attempt: false,
+        carries_a_task: true,
+        attempts: 0,
+        failures: 0,
+        pinned_model: Some("gpt-6-astra"),
+    };
+    let asked = crate::summon_choice::ask(&look, &pair).expect("two agents are a question");
+    assert_eq!(asked.options(), ["zo", "codex"]);
+    assert_eq!(asked.state["pinnedModel"], "gpt-6-astra");
+
+    let without_zo = Looked::at(&["claude", "codex", "opencode"]);
+    let options = summonable(&without_zo, &ledger, 1_000, Some("opus"));
+    assert_eq!(options.len(), 1);
+    let look = crate::summon_choice::SummonLook {
+        brief: "measure the terminal's frame time",
+        brief_chars: 32,
+        worktree: true,
+        replaces_an_attempt: false,
+        carries_a_task: true,
+        attempts: 0,
+        failures: 0,
+        pinned_model: Some("opus"),
+    };
+    assert!(
+        crate::summon_choice::ask(&look, &options).is_none(),
+        "one agent left is not a question"
     );
 }

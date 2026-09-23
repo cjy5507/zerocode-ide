@@ -34,7 +34,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 use zerocode_core::capabilities::{MoveRoad, TurnMoves, agent_capabilities};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
-use zerocode_core::jev::{JevMode, STEP_EFFORT};
+use zerocode_core::jev::{JevMode, STEP_EFFORT, summary};
 use zerocode_core::orchestration::Ledger;
 use zerocode_core::step_effort::{
     self, Followed, Move, STEP_EFFORT_LABEL_WINDOW_MS, STEP_EFFORT_RUBRIC_VERSION, Standing,
@@ -642,13 +642,30 @@ fn advance(
                     "followed": followed.word(),
                     "afterMs": now_ms.saturating_sub(at_ms),
                 });
-                // The mark the judge counts: a move that bet on progress was
-                // right when the next turn progressed. A move nobody applied
-                // is graded the same way — the label says what the turn did
-                // at the effort it kept, which is what a `shadow` row is for.
-                if let (Some(expected), true) = (step_effort::expected_followed(chosen), ended) {
-                    label[zerocode_core::jev::summary::AGREED.canonical] =
-                        json!(expected == followed);
+                // The mark the judge counts (t-6342): a move is graded by
+                // whether the next turn went through only where the seat's
+                // answer had an effect to grade — it moved the effort away
+                // from the rule's own move, and the door carried it. A move
+                // nobody applied, one the rule would have made anyway, and a
+                // window no turn ended in carry their reason and no mark.
+                let graded = if ended {
+                    step_effort::move_mark(
+                        chosen != open.ruled,
+                        applied,
+                        followed == Followed::Progressed,
+                    )
+                } else {
+                    Err(Followed::Nothing.word())
+                };
+                match graded {
+                    Ok(agreed) => label[summary::AGREED.canonical] = json!(agreed),
+                    Err(why) => label[summary::NOT_COMPARED.canonical] = json!(why),
+                }
+                // The rule's own move, carried: the seat's baseline, marked by
+                // the same next turn (t-6342).
+                if ended && applied && chosen == open.ruled {
+                    label[summary::BASELINE_AGREED.canonical] =
+                        json!(followed == Followed::Progressed);
                 }
                 crate::systemone::record_rows(&STEP_EFFORT, ledger_path, &[label], now_ms);
                 let mut book = held.moves.lock().unwrap_or_else(|held| held.into_inner());

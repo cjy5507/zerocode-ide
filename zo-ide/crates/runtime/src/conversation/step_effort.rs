@@ -427,8 +427,11 @@ pub enum StepEvent {
     Label(StepLabel),
 }
 
-/// Whether the step after a judgment made progress: its batch neither
-/// repeated a call, nor errored, nor turned a check red.
+/// The mark one step after a judgment was consulted: whether that step made
+/// progress — its batch neither repeated a call, nor errored, nor turned a
+/// check red — graded only where the judgment's answer had an effect to
+/// grade (`zerocode_core::step_effort::move_mark`, t-6342). Where it had
+/// none, the row names why under the summary's `notCompared` instead.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StepLabel {
@@ -437,7 +440,14 @@ pub struct StepLabel {
     pub attempt: String,
     /// The step the judgment was consulted at.
     pub step: u32,
-    pub agreed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agreed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub not_compared: Option<&'static str>,
+    /// The table's own move, carried: the seat's baseline, marked by the same
+    /// next step (`zerocode_core::jev::summary::BASELINE_AGREED`, t-6342).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub baseline_agreed: Option<bool>,
 }
 
 /// The word a decision row carries as its kind.
@@ -551,6 +561,20 @@ impl BatchSeen {
     }
 }
 
+/// A judged step awaiting the mark the next step writes, with the two facts
+/// that decide whether the mark can say anything about the judgment
+/// (`zerocode_core::step_effort::move_mark`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LabelDue {
+    step: u32,
+    /// The request's effort is not the one the table alone would have given
+    /// it: the judgment moved it.
+    seat_moved_it: bool,
+    /// The request carried the governor's effort at all — the seat acts, and
+    /// the host held nothing back on this wire.
+    carried: bool,
+}
+
 /// The governor's state for one turn.
 #[derive(Debug)]
 pub(super) struct StepEffortState {
@@ -563,7 +587,7 @@ pub(super) struct StepEffortState {
     strong_streak: u32,
     judgment: Option<StepJudgment>,
     /// The step a fresh judgment was consulted at, awaiting its progress mark.
-    label_due: Option<u32>,
+    label_due: Option<LabelDue>,
     /// The effort the next request carries, when the governor applies.
     next: Option<EffortStep>,
     /// The model the governor moved the turn onto, if it did.
@@ -796,6 +820,37 @@ struct PlannedStep {
 }
 
 impl StepEffortState {
+    /// The progress mark for the judgment consulted one step ago, now that
+    /// this step says whether it `progressed` (t-6342).
+    fn label_owed(&mut self, attempt: &str, progressed: bool) -> Option<StepLabel> {
+        self.label_due.take().map(|due| {
+            let graded = zerocode_core::step_effort::move_mark(due.seat_moved_it, due.carried, progressed);
+            StepLabel {
+                kind: LABEL_ROW_KIND,
+                at: unix_millis(),
+                attempt: attempt.to_string(),
+                step: due.step,
+                agreed: graded.ok(),
+                not_compared: graded.err(),
+                baseline_agreed: (due.carried && !due.seat_moved_it).then_some(progressed),
+            }
+        })
+    }
+
+    /// Owe the next step a label for the judgment that spoke to this one:
+    /// whether it moved the effort away from what the table alone would have
+    /// given the request (`shifted` against the table's own), and whether
+    /// the request carried it.
+    fn owe_label(&mut self, step: u32, signals: &StepSignals, shifted: EffortStep) {
+        let table = decide(step, signals, None);
+        let ruled = shift(self.config.floor, self.config.ceiling, self.config.cap(), table.delta);
+        self.label_due = Some(LabelDue {
+            step,
+            seat_moved_it: shifted != ruled,
+            carried: self.config.applies,
+        });
+    }
+
     /// Read the batch that just finished and decide the next request: the
     /// signals to the table, the table to a rung, the rung to the request.
     fn plan(&mut self, wire: Option<&str>, attempt: &str) -> PlannedStep {
@@ -821,18 +876,12 @@ impl StepEffortState {
         };
         let decision = decide(step, &signals, self.judgment);
         self.strong_streak = if decision.strong { self.strong_streak + 1 } else { 0 };
-        // The progress mark for the judgment consulted one step ago.
-        let label = self.label_due.take().map(|judged_step| StepLabel {
-            kind: LABEL_ROW_KIND,
-            at: unix_millis(),
-            attempt: attempt.to_string(),
-            step: judged_step,
-            agreed: batch.calls > 0 && !decision.strong && !decision.slipping && !batch.check_red,
-        });
-        if decision.judged.is_some() {
-            self.label_due = Some(step);
-        }
+        let progressed = batch.calls > 0 && !decision.strong && !decision.slipping && !batch.check_red;
+        let label = self.label_owed(attempt, progressed);
         let shifted = shift(self.config.floor, self.config.ceiling, self.config.cap(), decision.delta);
+        if decision.judged.is_some() {
+            self.owe_label(step, &signals, shifted);
+        }
         self.next = Some(shifted);
         let rung_move = plan_move(&self.config, &decision, self.strong_streak, self.routine_streak, shifted);
         let applied = self.config.applies;
@@ -1131,10 +1180,69 @@ mod tests {
             at: 2,
             attempt: "s@1".to_string(),
             step: 2,
-            agreed: true,
+            agreed: Some(true),
+            not_compared: None,
+            baseline_agreed: None,
         }))
         .expect("label");
         assert_eq!(label["kind"], "label");
         assert_eq!(label["agreed"], true);
+        assert!(label.get("notCompared").is_none(), "{label}");
+    }
+
+    /// A seat that hands back the answer it was built with, once.
+    struct Answering(std::sync::Mutex<Option<StepJudgment>>);
+
+    impl StepEffortSeat for Answering {
+        fn ask(&self, _ask: &StepAskContext<'_>) {}
+        fn take(&self) -> Option<StepJudgment> {
+            self.0.lock().ok().and_then(|mut held| held.take())
+        }
+    }
+
+    /// The turn's steps after a judgment answered at step 1 that the task is
+    /// `complexity`: a routine read (the table would lower the effort), then
+    /// a clean edit — the step the mark grades. Answers the one label filed.
+    fn graded_after(complexity: RouteTaskComplexity, applies: bool, held: Option<&'static str>) -> StepLabel {
+        let mut config = config(applies);
+        config.held = held;
+        config.seat = Some(Arc::new(Answering(std::sync::Mutex::new(Some(StepJudgment {
+            complexity,
+            at_step: 1,
+        })))));
+        let mut state = StepEffortState::new(config);
+        state.step = 1;
+        state.batch = BatchSeen { calls: 1, read_only: true, ..BatchSeen::default() };
+        state.routine_streak = 1;
+        let judged = state.plan(Some("m"), "s@1");
+        assert!(judged.label.is_none(), "nothing was consulted before step 2");
+        assert!(judged.row.jev.is_some(), "the step consulted the judgment: {:?}", judged.row);
+        state.batch = BatchSeen { calls: 1, edited: true, ..BatchSeen::default() };
+        state.plan(Some("m"), "s@1").label.expect("the judged step's mark")
+    }
+
+    /// "The next step made progress" is not a label by itself (t-6342): on
+    /// this machine's ledger 522 of 547 steps after a judgment progressed
+    /// whatever the judgment said, and all 440 judgments that differed from
+    /// the table were held back on an Anthropic wire — none of them moved a
+    /// request the next step could answer for. The mark is written only where
+    /// the judgment changed the effort a request carried.
+    #[test]
+    fn a_step_is_graded_only_where_the_judgment_moved_what_the_request_carried() {
+        use zerocode_core::step_effort::{NOT_CARRIED, SAME_AS_RULE};
+        // Held on this wire: the request never carried the move.
+        let held = graded_after(RouteTaskComplexity::Large, false, Some("anthropic_cache_prefix"));
+        assert_eq!((held.agreed, held.not_compared), (None, Some(NOT_CARRIED)));
+        // A recording seat: nothing carried either.
+        let recording = graded_after(RouteTaskComplexity::Large, false, None);
+        assert_eq!((recording.agreed, recording.not_compared), (None, Some(NOT_CARRIED)));
+        // Carried, and the judgment moved the effort (a large task held the
+        // rung the table would have lowered): the next step's progress is
+        // its grade.
+        let moved = graded_after(RouteTaskComplexity::Large, true, None);
+        assert_eq!((moved.agreed, moved.not_compared), (Some(true), None));
+        // Carried, but the judgment said what the table said: nothing to grade.
+        let same = graded_after(RouteTaskComplexity::Small, true, None);
+        assert_eq!((same.agreed, same.not_compared), (None, Some(SAME_AS_RULE)));
     }
 }

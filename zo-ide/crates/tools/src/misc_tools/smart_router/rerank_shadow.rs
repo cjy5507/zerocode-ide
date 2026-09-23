@@ -519,6 +519,9 @@ struct Settled {
     applied: bool,
     /// The judgment's order, each note with the path recall handed it under.
     proposed: Vec<(String, String)>,
+    /// Recall's own first note, before any judgment — the seat's baseline,
+    /// today's rule (`zerocode_core::jev::RECALL`, t-6342).
+    recall_first: Option<(String, String)>,
 }
 
 type ReadingSlot = Arc<Mutex<Option<Settled>>>;
@@ -558,14 +561,17 @@ fn note_settled(slot: &ReadingSlot, row: &RerankShadowRow, hits: &[MemoryHit]) {
     if proposed.is_empty() {
         return;
     }
+    let recall_first = hits.first().map(|hit| (hit.entry.slug.clone(), hit.entry.path.clone()));
     if let Ok(mut settled) = slot.lock() {
-        *settled = Some(Settled { query: row.query, notes: row.notes, applied: row.applied, proposed });
+        *settled = Some(Settled { query: row.query, notes: row.notes, applied: row.applied, proposed, recall_first });
     }
 }
 
 /// The recall seat's `agreed` mark, one row per turn that was handed a
 /// judged order: whether the note the judgment put FIRST was read or cited
-/// before the turn ended.
+/// before the turn ended — written only for a turn that touched some note it
+/// was handed (`rerank_shadow::mark`, t-6342); a turn that touched none
+/// carries `rerank_shadow::NO_NOTE_TOUCHED` under `notCompared` instead.
 ///
 /// A row of its own, keyed like the reading it grades (`query`, `notes`) and
 /// carrying `applied` from it, so an order the turn read and an order only
@@ -582,9 +588,19 @@ pub struct RerankLabelRow {
     pub query: u64,
     pub notes: u64,
     pub applied: bool,
-    pub agreed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agreed: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rank: Option<usize>,
+    /// Why the row carries no `agreed`, under the summary's key
+    /// (`zerocode_core::jev::summary::NOT_COMPARED`).
+    #[serde(default, rename = "notCompared", skip_serializing_if = "Option::is_none")]
+    pub not_compared: Option<String>,
+    /// Whether recall's own first note was touched on the same turn — the
+    /// seat's baseline's mark (`zerocode_core::jev::summary::BASELINE_AGREED`),
+    /// written beside `agreed` (t-6342).
+    #[serde(default, rename = "baselineAgreed", skip_serializing_if = "Option::is_none")]
+    pub baseline_agreed: Option<bool>,
 }
 
 /// Write the recall seat's mark for the turn that just ended, judged on
@@ -616,18 +632,53 @@ pub fn note_recall_read(cwd: &Path, attempt: &str, turn: Option<&[ConversationMe
     written
 }
 
-/// The mark itself: whether the first proposed note was touched, and the
-/// rank of the first note touched.
+/// The word a recall label carries under the summary's `notCompared` when
+/// the turn read and cited none of the notes it was handed: the order was
+/// never compared with anything (t-6342).
+pub const NO_NOTE_TOUCHED: &str = "no_note_touched";
+
+/// The recall seat's mark for one turn (t-6342): whether the note the
+/// judgment put first was among the notes the turn touched — counted only for
+/// a turn that touched one. `touched` is the judgment's ranks of the notes
+/// the turn touched, in the order it touched them.
+///
+/// # Errors
+///
+/// [`NO_NOTE_TOUCHED`] for a turn that read and cited none of them: the order
+/// was compared with nothing, and on this machine that was 82 of the 88 turns
+/// the seat had been graded on.
+pub fn mark(touched: &[usize]) -> Result<bool, &'static str> {
+    if touched.is_empty() {
+        Err(NO_NOTE_TOUCHED)
+    } else {
+        Ok(touched.contains(&0))
+    }
+}
+
+/// The label row itself: the mark, or why there is none, and the rank of the
+/// first note touched.
 fn label_row(settled: &Settled, turn: &[ConversationMessage]) -> RerankLabelRow {
     let touched: Vec<usize> = touched_in_order(&settled.proposed, turn);
+    let graded = mark(&touched);
+    // Today's rule on the same turn: whether recall's own first note was
+    // touched — marked only beside a mark of the seat's, so the two are read
+    // over the same turns.
+    let baseline_agreed = graded.is_ok().then(|| {
+        settled
+            .recall_first
+            .as_ref()
+            .is_some_and(|first| !touched_in_order(std::slice::from_ref(first), turn).is_empty())
+    });
     RerankLabelRow {
         at: unix_millis(),
         label: format!("{}:{}", settled.query, settled.notes),
         query: settled.query,
         notes: settled.notes,
         applied: settled.applied,
-        agreed: touched.contains(&0),
+        agreed: graded.ok(),
         rank: touched.first().copied(),
+        not_compared: graded.err().map(str::to_string),
+        baseline_agreed,
     }
 }
 
@@ -1937,7 +1988,7 @@ mod tests {
         assert_eq!(slugs(&read), ["wiki/b", "wiki/c", "wiki/a"]);
         assert_eq!(labeled.len(), 1, "{labeled:?}");
         let label = &labeled[0];
-        assert_eq!((label.agreed, label.rank, label.applied), (true, Some(0), true));
+        assert_eq!((label.agreed, label.rank, label.applied), (Some(true), Some(0), true));
         assert_eq!(label.label, format!("{}:{}", label.query, label.notes));
     }
 
@@ -1955,11 +2006,17 @@ mod tests {
             ));
             labels(cwd)
         });
-        assert_eq!((labeled[0].agreed, labeled[0].rank), (false, Some(1)), "{labeled:?}");
+        assert_eq!((labeled[0].agreed, labeled[0].rank), (Some(false), Some(1)), "{labeled:?}");
     }
 
+    /// A turn that read and cited none of the notes it was handed compared no
+    /// order at all (t-6342): 82 of the 88 marks this machine's ledger held
+    /// were such turns, so the seat's agreement counted how often recall went
+    /// unused rather than how often its order was right. The row stays — the
+    /// reading was graded, and "nothing was touched" is a fact a reader counts
+    /// — with no mark and the reason under the summary's key.
     #[test]
-    fn a_turn_that_touched_no_proposed_note_disagrees_with_no_rank() {
+    fn a_turn_that_touched_no_note_is_not_a_comparison() {
         let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
         let hits = three();
         let labeled = machine(zerocode_core::jev::JevMode::On.key(), &mock.base_url, |cwd| {
@@ -1971,7 +2028,21 @@ mod tests {
             assert!(note_recall_read(cwd, &messages));
             labels(cwd)
         });
-        assert_eq!((labeled[0].agreed, labeled[0].rank), (false, None), "{labeled:?}");
+        assert_eq!(
+            (labeled[0].agreed, labeled[0].rank, labeled[0].not_compared.as_deref()),
+            (None, None, Some(NO_NOTE_TOUCHED)),
+            "{labeled:?}"
+        );
+        // Written under the key every labeled seat's reader counts.
+        let written = serde_json::to_value(&labeled[0]).expect("a row");
+        assert_eq!(
+            written[zerocode_core::jev::summary::NOT_COMPARED.canonical],
+            serde_json::json!(NO_NOTE_TOUCHED)
+        );
+        assert!(written.get(zerocode_core::jev::summary::AGREED.canonical).is_none(), "{written}");
+        // And the judge counts nothing for it.
+        let rows = vec![written];
+        assert_eq!(zerocode_core::jev::summary::agreement_since(&rows, 0).compared, 0);
     }
 
     /// A recorded reading (`shadow`) is labeled too, with `applied: false`,
@@ -1999,7 +2070,7 @@ mod tests {
             labels(cwd)
         });
         assert_eq!(labeled.len(), 1, "{labeled:?}");
-        assert_eq!((labeled[0].agreed, labeled[0].rank, labeled[0].applied), (true, Some(0), false));
+        assert_eq!((labeled[0].agreed, labeled[0].rank, labeled[0].applied), (Some(true), Some(0), false));
     }
 
     #[test]
@@ -2026,8 +2097,7 @@ mod tests {
     /// judgment's order — where the recall before the rise read recall's own.
     #[test]
     fn auto_rises_on_its_own_labels_and_the_next_recall_reads_the_judgments_order() {
-        use zerocode_core::jev::promote::{window_wanted_for, Verdict, ROSE};
-        use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+        use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for, Verdict, ROSE};
         let mock = Mock::serving(200, reply_for(&[1, 3, 2]));
         let hits = three();
         let (before, verdict, rose, after, applied) = machine(zerocode_core::jev::JevMode::Auto.key(), &mock.base_url, |cwd| {
@@ -2067,10 +2137,15 @@ mod tests {
             )
             .unwrap_or(i64::MAX / 2)
                 + 60_000;
-            for at in 0..JUDGED_EVERY_ROWS {
+            // Enough turns to bound above the budget with the three the label
+            // said no to inside, and recall's own first note beside each
+            // (t-6342).
+            let misses = RECALL.negatives_wanted.expect("recall rises");
+            let marks = marks_that_can_clear(&RECALL).expect("recall rises");
+            for at in 0..marks {
                 let label = serde_json::json!({
                     "at": after_the_window + i64::try_from(at).unwrap_or_default(), "label": format!("{at}:{at}"), "query": at, "notes": at,
-                    "applied": false, "agreed": true, "rank": 0,
+                    "applied": false, "agreed": at >= misses, "baselineAgreed": at % 2 == 0, "rank": 0,
                 });
                 append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
             }

@@ -168,8 +168,12 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
             .expect("kimi's room")
             .contains("no quota gauge")
     );
+    // The model the coordinator pinned is a constraint the options were
+    // already narrowed by, and the state says it (t-6342); the agent it typed
+    // is still nowhere in it.
+    assert_eq!(sent["state"]["pinnedModel"], json!("claude-opus-5"));
     assert!(
-        !sent["state"].to_string().contains("opus"),
+        sent["state"].get("agent").is_none(),
         "the state showed the answer somebody already wrote down: {}",
         sent["state"]
     );
@@ -196,7 +200,10 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
     assert_eq!(row["dispatch"], json!("dp-4712"));
     assert_eq!(row["task"], json!("t-4711"));
     assert_eq!(row["mode"], json!("shadow"));
-    assert_eq!(row["rubricVersion"], json!(3));
+    assert_eq!(
+        row["rubricVersion"],
+        json!(zerocode_core::summon_choice::SUMMON_CHOICE_RUBRIC_VERSION)
+    );
     // The task's own history travelled with the shape, so a reader of the
     // row sees the difficulty grade the question was given.
     assert_eq!(row["attempts"], json!(1));
@@ -222,6 +229,11 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
         zerocode_core::jev::promote::Agreement {
             compared: 1,
             agreed: 1,
+            // The pinned model's own vendor CLI named the same agent: the
+            // seat's baseline on the same summons (t-6342).
+            baseline_compared: 1,
+            baseline_agreed: 1,
+            not_compared: 0,
         },
         "a marked row is the one comparison the seat rises on"
     );
@@ -285,8 +297,11 @@ fn a_summons_the_options_never_offered_is_no_comparison_at_all() {
     // And the judge reads it the way the row means it.
     assert_eq!(
         zerocode_core::jev::summary::agreement_since(std::slice::from_ref(&row), 0),
-        zerocode_core::jev::promote::Agreement::default(),
-        "evidence about nothing reached the seat's agreement statistics"
+        zerocode_core::jev::promote::Agreement {
+            not_compared: 1,
+            ..zerocode_core::jev::promote::Agreement::default()
+        },
+        "evidence about nothing reached the seat's agreement statistics, or went uncounted as such"
     );
 }
 
@@ -593,6 +608,7 @@ fn the_seats_agreement_over_the_rows_that_already_happened() {
             carries_a_task: replay.carries_a_task,
             attempts: replay.attempts,
             failures: replay.failures,
+            pinned_model: None,
         };
         let Some(ask) = summon_choice::ask(&look, &options) else {
             continue;

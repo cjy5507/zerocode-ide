@@ -178,12 +178,17 @@ fn every_use_is_off_until_a_person_says_otherwise() {
 }
 
 /// What a use stands at when a person turned Jev on and chose nothing seat by
-/// seat (2026-09-23, §6.1): one of the use's own modes, and never `off` — a
-/// switch turned on that left a use off would say one thing and do another.
-/// `auto` wherever the use offers it; the agent's own tool, which has
-/// nothing to rise on, answers the agent.
+/// seat (2026-09-23, §6.1): one of the use's own modes — `auto` wherever the
+/// use offers it, and the agent's own tool, which has nothing to rise on,
+/// answers the agent.
+///
+/// `off` only for a seat stopped on its own evidence until it is redesigned
+/// (docs/design/jev-engineering-review-20260923.md §7, t-6342): the patch
+/// review and the window's worker effort. Anywhere else a switch turned on
+/// that left a use off would say one thing and do another.
 #[test]
-fn every_use_recommends_one_of_its_own_modes_and_never_off() {
+fn every_use_recommends_one_of_its_own_modes_and_off_only_where_stopped() {
+    let stopped = [PATCH_REVIEW.id, STEP_EFFORT.id];
     for row in &JEV_USES {
         assert!(
             row.modes.contains(&row.recommended),
@@ -191,8 +196,9 @@ fn every_use_recommends_one_of_its_own_modes_and_never_off() {
             row.id,
             row.recommended
         );
-        assert_ne!(row.recommended, JevMode::Off, "{} recommends off", row.id);
-        let expected = if row.modes.contains(&JevMode::Auto) {
+        let expected = if stopped.contains(&row.id) {
+            JevMode::Off
+        } else if row.modes.contains(&JevMode::Auto) {
             JevMode::Auto
         } else {
             JevMode::On
@@ -1622,4 +1628,150 @@ fn a_request_digest_vouches_for_the_seat_the_rubric_the_model_and_the_bytes() {
         "e3b0c44298fc1c14",
         "SHA-256 of nothing, cut"
     );
+}
+
+/// Every seat that may rise names the cheapest reader it is held against,
+/// how many times its label must have said no, and the confidence bands its
+/// answers fall in (t-6342); a seat that never rises names none of them.
+#[test]
+fn every_promoting_row_names_a_baseline_and_an_abstain_band() {
+    for row in &JEV_USES {
+        assert_eq!(
+            row.promotes,
+            row.negatives_wanted.is_some(),
+            "{} promotes={} negatives={:?}",
+            row.id,
+            row.promotes,
+            row.negatives_wanted
+        );
+        assert_eq!(
+            row.promotes,
+            row.confidence_bands.is_some(),
+            "{} promotes={} bands={:?}",
+            row.id,
+            row.promotes,
+            row.confidence_bands
+        );
+        if let Some(bands) = row.confidence_bands {
+            assert!(
+                bands.abstain_below_permille <= bands.act_from_permille
+                    && bands.act_from_permille <= 1_000,
+                "{} {bands:?}",
+                row.id
+            );
+        }
+        if let Some(wanted) = row.negatives_wanted {
+            assert_eq!(wanted, NEGATIVES_WANTED, "{}", row.id);
+        }
+        if !row.promotes {
+            assert_eq!(row.baseline, Baseline::None, "{}", row.id);
+        }
+        if let Baseline::AlwaysSame(word) = row.baseline {
+            assert!(!word.trim().is_empty(), "{}", row.id);
+        }
+    }
+    // The two constant answers are words their own seats write.
+    assert_eq!(
+        STALL.baseline,
+        Baseline::AlwaysSame(crate::stall_cause::Cause::LongRunningTool.word())
+    );
+    assert_eq!(
+        PATCH_REVIEW.baseline,
+        Baseline::AlwaysSame(PATCH_REVIEW_PERMIT)
+    );
+    // A seat whose marks grade only its own act has no cheaper reader.
+    for seat in [
+        &BROWSER,
+        &DESKTOP,
+        &EMULATOR,
+        &BROWSER_READ,
+        &JUDGMENT_CACHE,
+    ] {
+        assert_eq!(seat.baseline, Baseline::None, "{}", seat.id);
+    }
+    assert_eq!(Baseline::TodaysRule.kind(), "todays_rule");
+    assert!(!Baseline::None.binds());
+    // What `NEGATIVES_WANTED` says it costs: forty marks at the 800‰ line.
+    assert_eq!(promote::marks_that_can_clear(&PLACEMENT), Some(40));
+    assert_eq!(promote::marks_that_can_clear(&AGENT_TOOL), None);
+}
+
+/// A seat that presses acts from its press floor and has nothing between:
+/// inside a walk there is nobody to confirm a press with, so the band that
+/// acts is exactly the answers the press gate lets through (t-6342).
+#[test]
+fn a_pressing_seat_acts_from_its_press_floor_with_nothing_between() {
+    for row in JEV_USES
+        .iter()
+        .filter(|row| row.press_floor_permille.is_some())
+    {
+        let floor = row.press_floor_permille.expect("filtered");
+        assert_eq!(
+            row.confidence_bands,
+            Some(ConfidenceBands::pressing(floor)),
+            "{}",
+            row.id
+        );
+        for confidence in [0.0, 0.29, 0.499_999, 0.5, 0.699_999, 0.7, 0.95, 1.0] {
+            assert_eq!(
+                row.band_of(confidence) == Some(Band::Act),
+                row.permits_press(confidence, crate::guarded::ControlKind::Plain),
+                "{} at {confidence}",
+                row.id
+            );
+            assert_ne!(row.band_of(confidence), Some(Band::Confirm), "{}", row.id);
+        }
+    }
+}
+
+/// One answer's confidence falls in exactly one band: under the first line
+/// it abstains, from the second it acts, and between the two it wants a
+/// confirmation — the three bands of TypeSafe's confidence-routing pattern
+/// at the pattern's own lines (t-6342). A reading outside 0..=1 is none.
+#[test]
+fn an_answer_falls_in_one_band_by_its_confidence() {
+    let routed = ConfidenceBands::ROUTED;
+    assert_eq!(
+        (routed.abstain_below_permille, routed.act_from_permille),
+        (600, 850)
+    );
+    for (confidence, band) in [
+        (0.0, Band::Abstain),
+        (0.599, Band::Abstain),
+        (0.6, Band::Confirm),
+        (0.849, Band::Confirm),
+        (0.85, Band::Act),
+        (1.0, Band::Act),
+    ] {
+        assert_eq!(routed.band_of(confidence), Some(band), "{confidence}");
+    }
+    for stray in [-0.1, 1.01, f64::NAN, f64::INFINITY] {
+        assert_eq!(routed.band_of(stray), None, "{stray}");
+    }
+    // A seat whose wrong act the person undoes in one move acts from the
+    // same floor with nothing between.
+    let low = ConfidenceBands::LOW_STAKES;
+    assert_eq!(low.band_of(0.6), Some(Band::Act));
+    assert_eq!(low.band_of(0.599), Some(Band::Abstain));
+    assert_eq!(Band::ALL.map(Band::word), ["abstain", "confirm", "act"]);
+    // A seat that decides on Nouls reads a Noul's lean |2p − 1|: the
+    // cookbook's uncertain 0.30–0.70 is a lean under 400‰, and the patch
+    // review's 800‰ permit line a lean of 600‰.
+    assert_eq!(
+        PATCH_REVIEW.confidence_bands,
+        Some(ConfidenceBands {
+            abstain_below_permille: 400,
+            act_from_permille: 600
+        })
+    );
+    assert_eq!(
+        ConfidenceBands::on_a_noul(300, 200),
+        ConfidenceBands::on_a_noul(
+            NOUL_UNCERTAIN_TO_PERMILLE,
+            PATCH_REVIEW_PERMIT_FLOOR_PERMILLE
+        ),
+        "a no leans as far as the yes it mirrors"
+    );
+    // A seat that never rises reads no band.
+    assert_eq!(AGENT_TOOL.band_of(0.99), None);
 }

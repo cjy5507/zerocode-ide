@@ -450,6 +450,9 @@ fn the_label_says_whether_the_person_took_what_the_judgment_put_first() {
         assert_eq!(labels.len(), 1, "{labels:?}");
         let label = &labels[0];
         assert_eq!((label.agreed, label.rank, label.applied), (Some(true), Some(0), true));
+        // The fuzzy page's own first row was not the one taken: the baseline
+        // missed where the judgment called it (t-6342).
+        assert_eq!(label.baseline_agreed, Some(false));
         assert_eq!(label.kind, LABEL_ROW_KIND);
         assert_eq!(label.surface, MentionSurface::Mention);
         assert_eq!(label.not_compared, None);
@@ -474,7 +477,9 @@ fn a_pick_of_another_row_disagrees_at_its_rank_and_a_pick_off_the_page_is_not_co
         let labels = labels(cwd);
         assert_eq!(labels.len(), 2, "{labels:?}");
         assert_eq!((labels[0].agreed, labels[0].rank, labels[0].applied), (Some(false), Some(2), false));
-        assert_eq!((labels[1].agreed, labels[1].rank), (None, None));
+        // The page's own first row was taken: the baseline called it.
+        assert_eq!(labels[0].baseline_agreed, Some(true));
+        assert_eq!((labels[1].agreed, labels[1].rank, labels[1].baseline_agreed), (None, None, None));
         assert_eq!(labels[1].not_compared.as_deref(), Some(zerocode_core::summon_choice::NOT_OFFERED));
         let line = serde_json::to_string(&labels[1]).expect("a line");
         assert!(line.contains(&format!("\"{}\"", zerocode_core::summon_choice::NOT_COMPARED_KEY)), "{line}");
@@ -510,8 +515,7 @@ fn a_pick_against_another_ticket_labels_nothing() {
 /// before the rise stood.
 #[test]
 fn auto_rises_on_its_own_labels_and_the_next_page_takes_the_judgments_order() {
-    use zerocode_core::jev::promote::{window_wanted_for, Verdict, ROSE};
-    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
+    use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for, Verdict, ROSE};
     let mock = Mock::serving(200, reply(&[0.1, 0.7, 0.2]));
     machine(JevMode::Auto.key(), &mock.base_url, |cwd| {
         let (seat, rx) = seat(cwd);
@@ -535,10 +539,15 @@ fn auto_rises_on_its_own_labels_and_the_next_page_takes_the_judgments_order() {
             });
             append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).expect("a reading");
         }
-        for at in 0..JUDGED_EVERY_ROWS {
+        // Enough picks to bound above the budget with the three the label
+        // said no to inside, and the fuzzy page's own first row beside each
+        // (t-6342).
+        let misses = MENTION_RERANK.negatives_wanted.expect("the seat rises");
+        let marks = marks_that_can_clear(&MENTION_RERANK).expect("the seat rises");
+        for at in 0..marks {
             let label = serde_json::json!({
                 "kind": LABEL_ROW_KIND, "at": now + 5_000 + at as u64, "surface": "mention", "label": format!("{at}:{at}"),
-                "query": at, "notes": at, "applied": false, "agreed": true, "rank": 0,
+                "query": at, "notes": at, "applied": false, "agreed": at >= misses, "baselineAgreed": at % 2 == 0, "rank": 0,
             });
             append_shadow_row(&ledger, &label, SHADOW_LEDGER_MAX_BYTES).expect("a label");
         }

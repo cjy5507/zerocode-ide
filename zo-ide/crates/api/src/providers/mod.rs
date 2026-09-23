@@ -1217,6 +1217,17 @@ struct ProviderProfile {
     supports_thinking: bool,
     /// Provider-specific prompt-cache request strategy.
     prompt_cache_strategy: PromptCacheStrategy,
+    /// Whether the provider's prompt cache keys the conversation on the
+    /// request's effort, so a request whose effort differs from the one
+    /// before it re-writes the whole cached prefix. Anthropic's does: its
+    /// cache keys the message prefix on the thinking parameters, and on
+    /// 2026-09-21 (claude-opus-5, session-1789973703305-0, turn 6) one step
+    /// lowered to `high` re-billed 53,400 tokens of cache write against 9,610
+    /// read, and the step back to `xhigh` another 54,894, where the steps
+    /// around them read 58k–65k and wrote under a thousand. OpenAI's
+    /// `reasoning_effort` and Gemini's `thinkingLevel` sit outside the prefix
+    /// their caches are keyed on.
+    effort_keys_the_cache: bool,
 }
 
 impl ProviderKind {
@@ -1233,6 +1244,7 @@ impl ProviderKind {
                 supports_cache_tokens: true,
                 supports_thinking: true,
                 prompt_cache_strategy: PromptCacheStrategy::AnthropicCacheControl,
+                effort_keys_the_cache: true,
             },
             Self::Xai => ProviderProfile {
                 display_name: "xAI",
@@ -1243,6 +1255,7 @@ impl ProviderKind {
                 supports_cache_tokens: false,
                 supports_thinking: false,
                 prompt_cache_strategy: PromptCacheStrategy::NoRequestControls,
+                effort_keys_the_cache: false,
             },
             Self::OpenAi => ProviderProfile {
                 display_name: "OpenAI",
@@ -1253,6 +1266,7 @@ impl ProviderKind {
                 supports_cache_tokens: true,
                 supports_thinking: false,
                 prompt_cache_strategy: PromptCacheStrategy::OpenAiPromptCacheKey,
+                effort_keys_the_cache: false,
             },
             Self::Google => ProviderProfile {
                 display_name: "Google",
@@ -1263,6 +1277,7 @@ impl ProviderKind {
                 supports_cache_tokens: false,
                 supports_thinking: false,
                 prompt_cache_strategy: PromptCacheStrategy::NoRequestControls,
+                effort_keys_the_cache: false,
             },
             Self::Ollama => ProviderProfile {
                 display_name: "Ollama",
@@ -1273,6 +1288,7 @@ impl ProviderKind {
                 supports_cache_tokens: false,
                 supports_thinking: false,
                 prompt_cache_strategy: PromptCacheStrategy::NoRequestControls,
+                effort_keys_the_cache: false,
             },
         }
     }
@@ -1314,6 +1330,14 @@ impl ProviderKind {
     #[must_use]
     pub const fn rate_limit_key(self) -> &'static str {
         self.profile().rate_limit_key
+    }
+
+    /// Whether the provider's prompt cache keys the conversation on the
+    /// request's effort — where moving effort between requests re-writes the
+    /// cached prefix, so a step effort governor may not move it.
+    #[must_use]
+    pub const fn effort_keys_the_cache(self) -> bool {
+        self.profile().effort_keys_the_cache
     }
 }
 
@@ -6234,6 +6258,22 @@ mod tests {
         }
         assert_eq!(ProviderKind::Anthropic.rate_limit_key(), "anthropic");
         assert_eq!(ProviderKind::OpenAi.rate_limit_key(), "openai");
+    }
+
+    /// Only Anthropic's prompt cache keys the conversation on the request's
+    /// effort (t-6342): the step effort governor is held there, and its seat
+    /// is never asked on that wire.
+    #[test]
+    fn only_anthropics_cache_is_keyed_on_effort() {
+        assert!(ProviderKind::Anthropic.effort_keys_the_cache());
+        for kind in [
+            ProviderKind::Xai,
+            ProviderKind::OpenAi,
+            ProviderKind::Google,
+            ProviderKind::Ollama,
+        ] {
+            assert!(!kind.effort_keys_the_cache(), "{kind}");
+        }
     }
 
     #[test]

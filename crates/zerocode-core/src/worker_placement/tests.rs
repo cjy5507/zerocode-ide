@@ -133,3 +133,53 @@ fn every_offered_room_carries_its_own_words() {
     }
     assert!(!criteria.contains_key("split"));
 }
+
+/// A pane nobody was in front of says nothing about the room it was put in
+/// (t-6342): all thirty marks this machine's ledger held said the pane was
+/// left where it stood, as any answer's would have — the label could not
+/// tell "nobody looked" from "looked and kept it". So a pane nobody moved is
+/// graded only once somebody could have seen it, and otherwise names why it
+/// carries no mark.
+#[test]
+fn a_pane_nobody_was_present_for_leaves_no_placement_mark() {
+    for chosen in every_room() {
+        assert_eq!(
+            mark(chosen, stood_in(chosen, true), false),
+            Err(UNSEEN),
+            "{}",
+            chosen.key()
+        );
+    }
+    // Seen and left alone: the room it stood in is the person's answer.
+    assert_eq!(
+        mark(Placement::Tab, stood_in(Placement::Tab, true), true),
+        Ok(true)
+    );
+    // A move is always seen: the person's room is the label.
+    assert_eq!(
+        mark(Placement::Split, Placement::Background, true),
+        Ok(false)
+    );
+    assert_eq!(mark(Placement::Split, Placement::Split, true), Ok(true));
+}
+
+/// A recording seat's answer never seated anything: the window put the
+/// worker in today's room, its own tab, and that is where a pane nobody moved
+/// stood. Eleven of the thirty marks were recorded `split` answers whose pane
+/// sat in a tab for five minutes and were written down as a split the person
+/// had left alone.
+#[test]
+fn a_recorded_answer_is_graded_against_the_room_the_pane_stood_in() {
+    assert_eq!(Placement::TODAYS, Placement::Tab);
+    assert_eq!(stood_in(Placement::Split, false), Placement::Tab);
+    assert_eq!(stood_in(Placement::Background, false), Placement::Tab);
+    assert_eq!(stood_in(Placement::Split, true), Placement::Split);
+    assert_eq!(
+        mark(Placement::Split, stood_in(Placement::Split, false), true),
+        Ok(false)
+    );
+    assert_eq!(
+        mark(Placement::Tab, stood_in(Placement::Tab, false), true),
+        Ok(true)
+    );
+}

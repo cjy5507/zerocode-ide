@@ -33,6 +33,7 @@ fn look() -> SummonLook<'static> {
         carries_a_task: true,
         attempts: 0,
         failures: 0,
+        pinned_model: None,
     }
 }
 
@@ -40,10 +41,10 @@ fn look() -> SummonLook<'static> {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(SUMMON_CHOICE_RUBRIC_VERSION, 3);
+    assert_eq!(SUMMON_CHOICE_RUBRIC_VERSION, 4);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "8c843f3f92f0c776"
+        "1d5d6af8efffc1de"
     );
 }
 

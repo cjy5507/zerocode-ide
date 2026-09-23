@@ -15197,7 +15197,13 @@ fn a_stuck_turn_raises_the_effort_one_rung_for_this_session_and_progress_brings_
     assert_eq!(label["doorOutcome"], "keyed");
     assert_eq!(label["followed"], "progressed");
     assert_eq!(label["landed"], "high");
-    assert_eq!(label["agreed"], true);
+    // The seat raised where the rule raised: the next turn going through
+    // grades the rule, not the answer (t-6342).
+    assert!(label.get("agreed").is_none(), "{label}");
+    assert_eq!(
+        label[zerocode_core::jev::summary::NOT_COMPARED.canonical],
+        zerocode_core::step_effort::SAME_AS_RULE
+    );
     tick(&stood.host, &[], began + 9_000);
     let rows = StoppedWorker::rows_of(&home, &STEP_EFFORT);
     assert_eq!(rows.len(), 3, "{rows:?}");
@@ -15261,7 +15267,12 @@ fn a_recording_step_effort_seat_writes_its_rows_and_types_nothing() {
     assert_eq!(rows[1]["applied"], false);
     assert_eq!(rows[1]["doorOutcome"], "recorded");
     assert_eq!(rows[1]["followed"], "stuck");
-    assert_eq!(rows[1]["agreed"], false);
+    // Nothing was carried: the turn after says nothing about the answer.
+    assert!(rows[1].get("agreed").is_none(), "{:?}", rows[1]);
+    assert_eq!(
+        rows[1][zerocode_core::jev::summary::NOT_COMPARED.canonical],
+        zerocode_core::step_effort::NOT_CARRIED
+    );
     assert!(stood.sent_at_worker().is_empty());
 }
 

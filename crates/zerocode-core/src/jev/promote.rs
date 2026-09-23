@@ -57,7 +57,7 @@
 
 use serde_json::{Value, json};
 
-use crate::jev::{A_WINDOW_OF_COMPARISONS, JevUse};
+use crate::jev::{A_WINDOW_OF_COMPARISONS, Baseline, JevUse};
 
 use crate::jev::summary::{
     AT, JUDGED_EVERY_ROWS, MODEL, TRANSITION, Tally, WILSON_Z_95, asked_something,
@@ -204,6 +204,9 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
         .unwrap_or(i64::MIN);
     let window = crate::jev::summary::summarize_rows(held.iter().copied(), i64::MIN);
     let agreement = crate::jev::summary::agreement_since(version.marks, since_ms);
+    // The label's whole record on this version, not the window's: a seat
+    // that is right almost every time is not held for being right lately.
+    let record = crate::jev::summary::agreement_since(version.marks, i64::MIN);
     let verdict = judge(
         stand_from(rows),
         &Evidence {
@@ -218,6 +221,9 @@ pub fn judge_seat(seat: &JevUse, rows: &[Value]) -> Option<Judged> {
             window_forgives: seat.window_forgives.unwrap_or(0),
             labels: None,
             fallbacks_in_a_row: crate::jev::summary::failures_in_a_row(version.requests),
+            negatives_wanted: seat.negatives_wanted.unwrap_or(0),
+            disagreed_on_record: record.disagreed(),
+            baseline: seat.baseline,
         },
     );
     Some(Judged {
@@ -244,6 +250,25 @@ pub fn window_wanted_for(seat: &JevUse) -> Option<usize> {
         seat.answer_floor_permille?,
         seat.window_forgives.unwrap_or(0),
     ))
+}
+
+/// The fewest marks on which `seat`'s agreement can bound above its budget
+/// with the disagreements its record must hold inside them (t-6342) — never
+/// fewer than the sample floor. Forty at the 800‰ line with three
+/// disagreements ([`crate::jev::NEGATIVES_WANTED`]). `None` for a seat that
+/// never rises.
+#[must_use]
+pub fn marks_that_can_clear(seat: &JevUse) -> Option<usize> {
+    let floor = seat.agreement_floor_permille?;
+    let misses = seat.negatives_wanted?;
+    let sample = seat.agreement_rows_wanted?;
+    (sample.max(misses)..).find(|marks| {
+        permille(crate::jev::summary::wilson_lower(
+            marks - misses,
+            *marks,
+            WILSON_Z_95,
+        )) >= floor
+    })
 }
 
 /// Whether the rows say a judgment of `seat` is due: every
@@ -355,6 +380,15 @@ pub struct Agreement {
     pub compared: usize,
     /// Of those, the ones where the judgment's choice was the probe's.
     pub agreed: usize,
+    /// Marks of the seat's cheapest baseline over the same ledger
+    /// ([`crate::jev::summary::BASELINE_AGREED`], t-6342).
+    pub baseline_compared: usize,
+    /// Of those, the ones where the baseline was right.
+    pub baseline_agreed: usize,
+    /// Label rows that compared nothing and said why
+    /// ([`crate::jev::summary::NOT_COMPARED`]) — a recall turn that touched no
+    /// note, a pane nobody was in front of, a move nobody carried.
+    pub not_compared: usize,
 }
 
 impl Agreement {
@@ -363,6 +397,24 @@ impl Agreement {
     #[must_use]
     pub fn lower_bound(&self) -> Option<f64> {
         (self.compared > 0).then(|| wilson_lower(self.agreed, self.compared, WILSON_Z_95))
+    }
+
+    /// The baseline's share over its marks — the line a seat's lower bound
+    /// has to clear — `None` when the baseline marked nothing.
+    #[must_use]
+    pub fn baseline_share(&self) -> Option<f64> {
+        (self.baseline_compared > 0).then(|| {
+            #[allow(clippy::cast_precision_loss)]
+            {
+                self.baseline_agreed as f64 / self.baseline_compared as f64
+            }
+        })
+    }
+
+    /// The marks that said the judgment was wrong.
+    #[must_use]
+    pub const fn disagreed(&self) -> usize {
+        self.compared.saturating_sub(self.agreed)
     }
 }
 
@@ -418,6 +470,14 @@ pub struct Evidence<'window> {
     pub labels: Option<Labels>,
     /// Fallbacks in a row while applying.
     pub fallbacks_in_a_row: u32,
+    /// How many disagreeing marks the record must hold before the agreement
+    /// may speak ([`JevUse::negatives_wanted`], t-6342).
+    pub negatives_wanted: usize,
+    /// The disagreeing marks the answering version's whole record holds —
+    /// the evidence that the seat's label can say no at all.
+    pub disagreed_on_record: usize,
+    /// The cheapest reader the seat is held against ([`JevUse::baseline`]).
+    pub baseline: Baseline,
 }
 
 /// Why a seat may not act, in the order §4 asks.
@@ -449,6 +509,21 @@ pub enum Line {
     },
     /// It fell back this many times in a row while acting.
     Fallbacks { in_a_row: u32 },
+    /// No mark at all, and label rows that said why each compares nothing
+    /// (t-6342): the seat's label found nothing to grade — "no label" —
+    /// which is not a seat still counting a thin sample.
+    Unlabeled { withheld: usize },
+    /// The label has said no fewer times than the seat asks of it (t-6342):
+    /// agreement from a label that cannot say no is not evidence.
+    OneSided { disagreed: usize, wanted: usize },
+    /// Too few of the baseline's own marks to hold the seat to it (t-6342).
+    TooFewBaseline { compared: usize, wanted: usize },
+    /// The agreement's lower bound does not clear the baseline's share over
+    /// the same marks (t-6342): the cheapest reader does as well.
+    Baseline {
+        bound_permille: u16,
+        baseline_permille: u16,
+    },
 }
 
 /// What the judgment decided.
@@ -529,18 +604,50 @@ pub fn first_broken_line(evidence: &Evidence) -> Option<Line> {
     }
     // The sample floor holds every seat, whatever kind of mark it writes
     // (t-6155 F1): a hindsight seat with no marks yet is a seat nothing has
-    // graded, not one that has passed.
+    // graded, not one that has passed. One whose every label row said why it
+    // compares nothing has no label at all, which is a different sentence.
     let agreement = evidence.agreement;
     if agreement.compared < evidence.agreement_rows_wanted {
+        if agreement.compared == 0 && agreement.not_compared > 0 {
+            return Some(Line::Unlabeled {
+                withheld: agreement.not_compared,
+            });
+        }
         return Some(Line::TooFewCompared {
             compared: agreement.compared,
             wanted: evidence.agreement_rows_wanted,
         });
     }
+    // A label that has never said no is not evidence (t-6342), counted over
+    // the answering version's whole record.
+    if evidence.disagreed_on_record < evidence.negatives_wanted {
+        return Some(Line::OneSided {
+            disagreed: evidence.disagreed_on_record,
+            wanted: evidence.negatives_wanted,
+        });
+    }
     let bound = agreement.lower_bound().map(permille)?;
-    (bound < evidence.agreement_floor_permille).then_some(Line::Agreement {
+    if bound < evidence.agreement_floor_permille {
+        return Some(Line::Agreement {
+            bound_permille: bound,
+            floor_permille: evidence.agreement_floor_permille,
+        });
+    }
+    // And a floor is not enough: the cheapest reader over the same marks
+    // has to be beaten (t-6342).
+    if !evidence.baseline.binds() {
+        return None;
+    }
+    if agreement.baseline_compared < evidence.agreement_rows_wanted {
+        return Some(Line::TooFewBaseline {
+            compared: agreement.baseline_compared,
+            wanted: evidence.agreement_rows_wanted,
+        });
+    }
+    let baseline = agreement.baseline_share().map(permille)?;
+    (bound <= baseline).then_some(Line::Baseline {
         bound_permille: bound,
-        floor_permille: evidence.agreement_floor_permille,
+        baseline_permille: baseline,
     })
 }
 
@@ -564,9 +671,15 @@ pub fn judge(stand: Stand, evidence: &Evidence) -> Verdict {
         // A seat already acting is not held to the window's width: it earned
         // its place on a full one, and a fresh window is not evidence against
         // it. Only a line it actually breaks takes it back.
-        (Stand::Applying, Some(Line::TooFewRows { .. } | Line::TooFewCompared { .. })) => {
-            Verdict::Keep
-        }
+        (
+            Stand::Applying,
+            Some(
+                Line::TooFewRows { .. }
+                | Line::TooFewCompared { .. }
+                | Line::Unlabeled { .. }
+                | Line::TooFewBaseline { .. },
+            ),
+        ) => Verdict::Keep,
         (Stand::Applying, Some(line)) => Verdict::Fall(line),
     }
 }
@@ -595,6 +708,10 @@ impl Line {
             Self::Agreement { .. } => "agreement",
             Self::Labels { .. } => "labels",
             Self::Fallbacks { .. } => "fallbacks",
+            Self::Unlabeled { .. } => "unlabeled",
+            Self::OneSided { .. } => "one_sided",
+            Self::TooFewBaseline { .. } => "too_few_baseline",
+            Self::Baseline { .. } => "baseline",
         }
     }
 }

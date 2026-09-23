@@ -11418,16 +11418,64 @@ const ZO_MODEL_GAUGE: &[(&str, Option<&str>)] = &[
     ("gemini", None),
 ];
 
+/// The gauge the provider of `model`'s family draws on, as
+/// [`ZO_MODEL_GAUGE`] names it: `Some(Some(gauge))` for a family the table
+/// gives a provider, `Some(None)` for one it knows has no gauge here
+/// (Gemini), and `None` for a family nobody wrote down.
+fn family_gauge(model: &str) -> Option<Option<&'static str>> {
+    let family = model.to_ascii_lowercase();
+    ZO_MODEL_GAUGE
+        .iter()
+        .find(|(prefix, _)| family.starts_with(prefix))
+        .map(|(_, gauge)| *gauge)
+}
+
+/// Whether `agent` can carry a summons whose coordinator pinned `model`
+/// (t-6342) — read off the tables this file already keeps and nothing else.
+///
+/// The agent has to take a model at launch at all (`TUNABLE`: a summons
+/// that pins one on any other agent is refused before a row is written), and
+/// the model's family has to name the provider whose gauge the agent draws
+/// on (`ZO_MODEL_GAUGE` beside `QUOTA_GAUGE`; `zo` draws on its model's,
+/// so it carries every family the table names). A family the table gives no
+/// provider filters nothing: the model id stays opaque, and a filter that
+/// guessed would take a real answer out of the choice.
+///
+/// The question used to offer every installed agent whatever the pin, and
+/// nothing in its state tied the family word to the catalog's id: on the
+/// fourteen `gpt-6-astra` summonses this machine's seat was asked about,
+/// codex was offered thirteen times and named none (2026-09-23).
+#[must_use]
+pub fn runs_model(agent: &str, model: &str) -> bool {
+    let takes_a_model = TUNABLE.iter().any(|(id, _, _)| *id == agent);
+    takes_a_model
+        && match family_gauge(model) {
+            Some(Some(gauge)) => quota_gauge_for(agent, Some(model)) == Some(gauge),
+            Some(None) | None => true,
+        }
+}
+
+/// The pinned model's own vendor CLI — the agent whose gauge is the one the
+/// model's family names (`claude` for Anthropic's families, `codex` for
+/// OpenAI's) — the summon seat's baseline, today's rule (t-6342): on this
+/// machine every one of the 88 summonses that pinned a model landed on it
+/// (2026-09-23).
+/// `None` for a family the table gives no provider.
+#[must_use]
+pub fn native_agent(model: &str) -> Option<&'static str> {
+    let gauge = family_gauge(model).flatten()?;
+    QUOTA_GAUGE
+        .iter()
+        .find(|(_, held)| *held == gauge)
+        .map(|(agent, _)| *agent)
+}
+
 /// The gauge `agent` — launched with `model` — draws on, or `None` when this
 /// window reads no gauge for it.
 #[must_use]
 pub fn quota_gauge_for(agent: &str, model: Option<&str>) -> Option<&'static str> {
     if agent == "zo" {
-        let family = model?.to_ascii_lowercase();
-        return ZO_MODEL_GAUGE
-            .iter()
-            .find(|(prefix, _)| family.starts_with(prefix))
-            .and_then(|(_, gauge)| *gauge);
+        return family_gauge(model?).flatten();
     }
     QUOTA_GAUGE
         .iter()
@@ -12203,9 +12251,11 @@ fn installed_rooms(launcher: &dyn Launcher, now_ms: i64) -> Option<Vec<AgentRoom
     )
 }
 
-/// The agents a summons could actually land on this minute — installed, and
-/// not at their wall — for a judgment that has to choose between things it
-/// can carry out ([`crate::summon_choice`]).
+/// The agents a summons could actually land on this minute — installed, not
+/// at their wall, and able to run the model the coordinator pinned, when one
+/// was pinned ([`runs_model`], t-6342) — for a judgment that has to choose
+/// between things it can carry out ([`crate::summon_choice`]). A pin that
+/// leaves one agent leaves nothing to ask: the question is never sent.
 ///
 /// An agent whose gauge nobody has read is here: unread is not a wall, and
 /// the quota gate itself lets such a summons through. Its option says so in
@@ -12218,12 +12268,14 @@ pub fn summonable(
     launcher: &dyn Launcher,
     ledger: &Ledger,
     now_ms: i64,
+    model: Option<&str>,
 ) -> Vec<crate::summon_choice::Summonable> {
     let history = summons_history(ledger);
     installed_rooms(launcher, now_ms)
         .unwrap_or_default()
         .into_iter()
         .filter(|room| !room.at_wall)
+        .filter(|room| model.is_none_or(|model| runs_model(&room.id, model)))
         .map(|room| {
             let record = history.get(&room.id).cloned().unwrap_or_default();
             crate::summon_choice::Summonable {
@@ -13205,6 +13257,7 @@ impl SummonShadow {
             carries_a_task: self.carries_a_task,
             attempts: self.attempts,
             failures: self.failures,
+            pinned_model: self.pinned.model.as_deref(),
         }
     }
 }
@@ -15619,7 +15672,7 @@ fn plan_inner(
             // agent being summoned would count this summons and quote this
             // task's title as its newest brief — the work being judged,
             // which the state must never show (w-5540's finding, t-4839).
-            let summon_options = summonable(launcher, ledger, now_ms);
+            let summon_options = summonable(launcher, ledger, now_ms, model.as_deref());
             let (agent, agent_by_seat) = if agent == SUMMON_AUTO_AGENT {
                 let (brief, brief_chars) =
                     crate::summon_choice::brief_shape(summon_brief(written.as_ref(), asked));
@@ -15631,6 +15684,7 @@ fn plan_inner(
                     carries_a_task: task.is_some(),
                     attempts: written.as_ref().map_or(0, |written| written.attempts),
                     failures: written.as_ref().map_or(0, |written| written.failures),
+                    pinned_model: model.as_deref(),
                 };
                 let chosen = launcher
                     .choose_agent(&look, &summon_options)

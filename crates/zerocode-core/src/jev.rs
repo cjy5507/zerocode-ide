@@ -383,6 +383,18 @@ pub struct JevUse {
     /// Where the seat's `agreed` marks come from: a second reader, or a
     /// later fact.
     pub agreement_kind: AgreementKind,
+    /// The cheapest reader this seat's accuracy is held against ([`Baseline`],
+    /// t-6342): its share over the same marks is the line the seat's lower
+    /// bound has to clear before `auto` may rise.
+    pub baseline: Baseline,
+    /// How many disagreeing marks the answering version's record must hold
+    /// before the seat's agreement may speak at all (t-6342,
+    /// [`NEGATIVES_WANTED`]). `None` for a seat that never rises.
+    pub negatives_wanted: Option<usize>,
+    /// Where one answer's confidence puts it — abstain, confirm, act
+    /// ([`ConfidenceBands`], t-6342). Recorded, not yet read. `None` for a
+    /// seat that never rises.
+    pub confidence_bands: Option<ConfidenceBands>,
 }
 
 /// What a seat forgives whose miss the product was going to cover anyway: one
@@ -422,6 +434,199 @@ pub enum AgreementKind {
     Comparison,
     /// Later outcome labels grade an otherwise eligible seat once populated.
     Hindsight,
+}
+
+/// The cheapest reader a seat's accuracy is held against (t-6342).
+///
+/// An agreement share means nothing next to nothing. On 2026-09-23 this
+/// machine's placement seat had risen on thirty marks that all said yes —
+/// marks any answer would have earned — and the step seat's 522 agreeing
+/// marks of 547 were the rate at which steps progress at all; neither had
+/// ever been put beside the cheapest reader that could have taken its place.
+/// TypeSafe's own guide holds a feature to its baselines (always the same
+/// answer, today's rule, a size) before it is worth keeping, and so does the
+/// judge now: a seat rises only when its agreement's lower bound clears its
+/// baseline's share over the same marks ([`promote::Line::Baseline`]).
+///
+/// The seat's label writer stamps [`summary::BASELINE_AGREED`] — the
+/// baseline's own mark for the fact the seat's `agreed` grades — so the
+/// summary counts both in one pass. A seat whose writer stamps none yet holds
+/// at `too_few_baseline`, as a seat with no marks holds at
+/// `too_few_compared`. A size rule was the third reader weighed; no seat's
+/// cheapest reader is one today (the patch review's size ranks regret at
+/// AUC 0.688, but "always permit" is cheaper and higher on the agreement
+/// line, 79.2% against the seat's 21.1%).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Baseline {
+    /// The same answer every time — this option word.
+    AlwaysSame(&'static str),
+    /// What the product does without the seat: the reader it would replace,
+    /// as it decides today.
+    TodaysRule,
+    /// No cheaper reader answers what the marks grade: they grade the seat's
+    /// own act (a fold, a press, a memo's answer), whose absence leaves
+    /// nothing to mark, or the seat never rises.
+    None,
+}
+
+impl Baseline {
+    /// The word a report and a screen name the reader by.
+    #[must_use]
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::AlwaysSame(_) => "always_same",
+            Self::TodaysRule => "todays_rule",
+            Self::None => "none",
+        }
+    }
+
+    /// Whether the judge holds the seat to it.
+    #[must_use]
+    pub const fn binds(self) -> bool {
+        !matches!(self, Self::None)
+    }
+}
+
+/// How many disagreeing marks the answering version's record must hold
+/// before a seat's agreement may speak (t-6342): three.
+///
+/// A label that never says no is not evidence, however many times it says
+/// yes — the placement seat's thirty marks and the stall seat's eleven after
+/// its label was read right are both all one word. One disagreement could be
+/// a writer's slip and two a coincidence; three is a label that has shown it
+/// can say no. Counted over the version's whole record rather than the
+/// judged window, so a seat that is right almost every time is not held for
+/// being right: at the 800‰ line a window needs forty marks to bound above
+/// it with three misses inside (39 bound at 796‰, 40 at 801‰).
+pub const NEGATIVES_WANTED: usize = 3;
+
+/// The two lines that split a seat's answers by their own confidence into
+/// three bands (t-6342): under the first the answer abstains and today's
+/// path decides as if the seat had not been asked, from the second it may act
+/// alone, and between the two it wants a confirmation — the chat probe, the
+/// coordinator, or the person.
+///
+/// TypeSafe's confidence-routing pattern draws exactly these three bands
+/// (patterns/confidence-routing: under 0.6 to a person, 0.6 to 0.85 "ask the
+/// user to confirm", above 0.85 act), and both its pages say the numbers are
+/// the reader's to set from their own data — "test thresholds by plotting
+/// confidence against accuracy". The starting lines below are the pattern's
+/// and the seats' existing floors; `tools/label-audit` draws each seat's
+/// curve from its ledger for the day they are moved.
+///
+/// Recorded, not yet read: no seat routes on its band today. The model
+/// choice's second version (docs/design/jev-engineering-review-20260923.md
+/// §6-5, the chat probe only for an unsure answer) is its first reader.
+///
+/// Read on the answer's `confidence`: a Choice's spread collapsed into one
+/// number and normalized by its option count. A Noul carries none
+/// (confidence.md), so a seat that decides on Nouls reads its bands on a
+/// Noul's lean, `|2p − 1|` — the normalization a two-option Choice gets
+/// ([`Self::on_a_noul`]).
+///
+/// A seat that presses acts from its press floor with nothing between
+/// ([`Self::pressing`]): a walk has nobody to confirm a press with, so the
+/// band that acts is exactly the answers [`JevUse::permits_press`] lets
+/// through (a contract holds the two together). The line a press that cannot
+/// be taken back must clear ([`SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE`])
+/// stays the press gate's own, on top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfidenceBands {
+    /// Under this, per thousand, the answer abstains.
+    pub abstain_below_permille: u16,
+    /// From this up, per thousand, the answer may act alone.
+    pub act_from_permille: u16,
+}
+
+/// The band one answer falls in ([`ConfidenceBands`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Band {
+    Abstain,
+    Confirm,
+    Act,
+}
+
+impl Band {
+    pub const ALL: [Self; 3] = [Self::Abstain, Self::Confirm, Self::Act];
+
+    /// The word a report names the band by.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Abstain => "abstain",
+            Self::Confirm => "confirm",
+            Self::Act => "act",
+        }
+    }
+}
+
+/// Where the Noul cookbook's uncertain middle ends, per thousand: `no`
+/// under 0.30, `uncertain` from 0.30 through 0.70, `yes` above
+/// (cookbooks/consistency_noul — "uncertain cases go to a human").
+pub const NOUL_UNCERTAIN_TO_PERMILLE: u16 = 700;
+
+impl ConfidenceBands {
+    /// The confidence-routing pattern's own lines, for a seat whose wrong
+    /// act costs a turn, a worker or a person's attention: under 0.6 today's
+    /// path, 0.6 to 0.85 a confirmation, from 0.85 act.
+    pub const ROUTED: Self = Self {
+        abstain_below_permille: 600,
+        act_from_permille: 850,
+    };
+
+    /// A seat whose wrong act the person undoes in one move — a list's
+    /// order, a pane's place: the pattern's low-stakes action ("checking a
+    /// balance at 0.6 is fine") acts from the same floor with nothing
+    /// between.
+    pub const LOW_STAKES: Self = Self {
+        abstain_below_permille: 600,
+        act_from_permille: 600,
+    };
+
+    /// A seat that presses: from its press floor, nothing between.
+    #[must_use]
+    pub const fn pressing(floor_permille: u16) -> Self {
+        Self {
+            abstain_below_permille: floor_permille,
+            act_from_permille: floor_permille,
+        }
+    }
+
+    /// A seat that decides on Nouls, read on a Noul's lean `|2p − 1|`: it
+    /// abstains inside the cookbook's uncertain middle (`uncertain_to`, a
+    /// probability of yes) and acts from the lean of the seat's own yes line
+    /// (`act_from_yes`).
+    #[must_use]
+    pub const fn on_a_noul(uncertain_to_permille: u16, act_from_yes_permille: u16) -> Self {
+        Self {
+            abstain_below_permille: noul_lean(uncertain_to_permille),
+            act_from_permille: noul_lean(act_from_yes_permille),
+        }
+    }
+
+    /// The band `confidence` falls in — `None` for a reading outside
+    /// `0..=1`. The lines are compared as the press gate compares its floor,
+    /// so a pressing seat's `Act` is exactly [`JevUse::permits_press`].
+    #[must_use]
+    pub fn band_of(self, confidence: f64) -> Option<Band> {
+        if !(0.0..=1.0).contains(&confidence) {
+            return None;
+        }
+        let from = |permille: u16| confidence >= f64::from(permille) / 1_000.0;
+        Some(if !from(self.abstain_below_permille) {
+            Band::Abstain
+        } else if !from(self.act_from_permille) {
+            Band::Confirm
+        } else {
+            Band::Act
+        })
+    }
+}
+
+/// A Noul probability of yes, per thousand, as a lean from the middle:
+/// `|2p − 1|`, per thousand.
+const fn noul_lean(probability_permille: u16) -> u16 {
+    probability_permille.saturating_mul(2).abs_diff(1_000)
 }
 
 /// The routing seat's route-change budget: four compared axes in five must
@@ -574,6 +779,12 @@ pub const ROUTING: JevUse = JevUse {
     window_forgives: Some(FORGIVES_NOTHING),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The keyword tables that route a turn with no judgment at all; the
+    // chat probe is the second reader both are graded by. Its writer stamps
+    // no baseline mark yet, so the seat holds at `too_few_baseline`.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// The wall zo's routing waits for a judgment when the seat acts: the batch
@@ -616,6 +827,20 @@ pub const SUMMON_APPLY_DEADLINE_MS: u64 = 10_000;
 /// reads it to write the `agreed` row once the window has passed, and the
 /// window's move recorder reads it to refuse a move that came too late.
 pub const PLACEMENT_LABEL_WINDOW_MS: i64 = 5 * 60 * 1_000;
+
+/// How long a placed worker's pane must stand on the stage, with the window
+/// in front, before a person counts as having seen it (t-6342) — the
+/// placement label's condition for a pane nobody moved
+/// (`worker_placement::mark`).
+///
+/// Measured on this machine's own stage (2026-09-22..23, the 1,367 stays the
+/// window's black box recorded as `watch` declarations): 4.3% of the times a
+/// terminal came on stage it left within a second and 13.8% within two — the
+/// passes a person makes cycling tabs — while the median stay was 10.9 s.
+/// Two seconds keeps a glance that decided to leave the pane where it was,
+/// and drops a tab flicked past on the way to another. The window's surface
+/// is handed the number with the answer and spells none of its own.
+pub const PLACEMENT_SEEN_DWELL_MS: i64 = 2_000;
 
 /// What the recall seat's answers must bound above before `auto` rises to
 /// ordering what a turn reads (§4): nine in ten — the skill seat's line, read
@@ -667,7 +892,13 @@ pub const RECALL_AGREEMENT_FLOOR_PERMILLE: u16 = SKILL_AGREEMENT_FLOOR_PERMILLE;
 /// touched none), and `applied`, so an applied order and a recorded one can
 /// be compared on the same mark. Written by the host at the turn's end
 /// (`rerank_shadow::note_recall_read`), and read by the judge as this seat's
-/// agreement — one comparison per label row.
+/// agreement — one comparison per label row that carries a mark.
+///
+/// A turn that read and cited none of the notes it was handed carries no mark
+/// (t-6342): it compared the order with nothing, and 82 of the 88 marks this
+/// machine's ledger held on 2026-09-23 were such turns — the seat's agreement
+/// was counting how often recall went unused. Its row says so under
+/// [`summary::NOT_COMPARED`] instead (`rerank_shadow::mark`).
 pub const RECALL: JevUse = JevUse {
     id: "recall",
     setting: "rerankShadow",
@@ -703,6 +934,10 @@ pub const RECALL: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
+    // Recall's own order: the note it put first before any judgment.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::LOW_STAKES),
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -802,6 +1037,10 @@ pub const BROWSER: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The walk's end grades the press the seat made; no press, no mark.
+    baseline: Baseline::None,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -839,6 +1078,10 @@ pub const DESKTOP: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The walk's end grades the press the seat made; no press, no mark.
+    baseline: Baseline::None,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
@@ -873,6 +1116,10 @@ pub const EMULATOR: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The walk's end grades the press the seat made; no press, no mark.
+    baseline: Baseline::None,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -904,6 +1151,10 @@ pub const STALL: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The answer eleven of this machine's twelve stall answers named.
+    baseline: Baseline::AlwaysSame(crate::stall_cause::Cause::LongRunningTool.word()),
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// What the placement seat's answers must bound above before `auto` rises to
@@ -961,18 +1212,26 @@ pub const PLACEMENT_ANSWER_FLOOR_PERMILLE: u16 = 800;
 /// (`crate::worker_placement`, `cmd::worker_room`); nothing calls it, and
 /// nothing should until those rows exist.
 ///
-/// The `agreed` rule (t-5806): the answer agreed when the person left the
-/// worker's pane in the room the seat named for [`PLACEMENT_LABEL_WINDOW_MS`]
-/// after the answer, and disagreed when they moved it to another room inside
-/// that window — closed a tiled pane to the background, dragged its tab out
-/// beside something else, brought a parked worker back to a tab. A move
-/// that keeps the room (a tab dragged to another group) is still written
-/// down, as a move the answer survived. The window's surface reports the
-/// move through one door (`note_worker_room_change`) and the beat writes the
-/// quiet case once the window has passed (`worker_room::label_rooms`); a
+/// The `agreed` rule (t-5806, t-6342): the answer agreed when the room the
+/// worker's pane ended [`PLACEMENT_LABEL_WINDOW_MS`] in is the room the seat
+/// named, and disagreed when it is another — the room the person moved it to
+/// (closed a tiled pane to the background, dragged its tab out beside
+/// something else, brought a parked worker back to a tab), or, for a pane
+/// nobody moved, the room it stood in: the answer's own when the seat seated
+/// it, today's tab when the seat only recorded (`worker_placement::stood_in`).
+/// A move that keeps the room (a tab dragged to another group) is still
+/// written down, as a move the answer survived. A pane nobody moved is graded
+/// only if it stood on the stage, with the window in front, for
+/// [`PLACEMENT_SEEN_DWELL_MS`]; otherwise its row carries
+/// `worker_placement::UNSEEN` under [`summary::NOT_COMPARED`] and no mark —
+/// a label that cannot tell "nobody looked" from "looked and kept it" cannot
+/// say no, and all thirty of this machine's marks said yes (2026-09-23). The
+/// window's surface reports a move and a sight through one door each
+/// (`note_worker_room_change`, `note_worker_room_seen`) and the beat writes
+/// the quiet case once the window has passed (`worker_room::label_rooms`); a
 /// pane placed before this window process started is not labeled, because
-/// nothing saw what became of it. The row it labels is named by its
-/// `label` key, the worker id the answered row carries as `placement`.
+/// nothing saw what became of it. The row it labels is named by its `label`
+/// key, the worker id the answered row carries as `placement`.
 pub const PLACEMENT: JevUse = JevUse {
     id: "placement",
     setting: "workerPlacement",
@@ -991,6 +1250,10 @@ pub const PLACEMENT: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
+    // Today's room, the tab (`worker_placement::Placement::TODAYS`).
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::LOW_STAKES),
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -1081,6 +1344,10 @@ pub const SUMMON: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The pinned model's own vendor CLI (`orchestration::native_agent`).
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of the repeated tool call one step-effort question carries —
@@ -1118,12 +1385,20 @@ pub const STEP_EFFORT_APPLY_DEADLINE_MS: u64 = SUMMON_APPLY_DEADLINE_MS;
 /// answer is what moves — and the rule's own move when the answer does not
 /// arrive within [`STEP_EFFORT_APPLY_DEADLINE_MS`]; a person's `shadow`
 /// records both beside each other and types nothing. The label is what the
-/// next turn did: progressed, or the same stuck shape again.
+/// next turn did — progressed, or the same stuck shape again — and it is a
+/// mark only where the answer moved the effort away from the rule's own move
+/// and the door carried it (`crate::step_effort::move_mark`, t-6342); every
+/// other label names why it compares nothing.
 pub const STEP_EFFORT: JevUse = JevUse {
     id: "effort",
     setting: "stepEffort",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
-    recommended: JevMode::Auto,
+    // Stopped until it is redesigned (docs/design/jev-engineering-review-20260923.md
+    // §7, t-6342): this machine's ledger holds no row of it, and a Codex
+    // worker takes no effort typed at its composer, so the move could only
+    // ever be a relaunch. It comes back as a fact question — is this attempt
+    // spinning on itself — with the move left to code, once a replay says so.
+    recommended: JevMode::Off,
     sends: &[Sent {
         at: "/state/repeated",
         cap: Cap::Chars(STEP_EFFORT_REPEATED_CHAR_CAP),
@@ -1137,6 +1412,10 @@ pub const STEP_EFFORT: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The rule's own move between turns.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of the task a skill ranking reads — what the turn is about, in
@@ -1302,6 +1581,11 @@ pub const SKILLS: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The word match that ranks the skills without a judgment. Its writer
+    // stamps no baseline mark yet: the seat holds at `too_few_baseline`.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::LOW_STAKES),
 };
 
 /// The wall zo's step effort governor holds a step judgment to, in
@@ -1335,7 +1619,11 @@ pub const ZO_STEP_EFFORT_APPLY_DEADLINE_MS: u64 = 1_500;
 /// leaves one step after the judgment was consulted — whether that step
 /// made progress (no repeated call, no error, no red check) — is what the
 /// judge counts, held to the routing seat's own lines because the answer
-/// moves a request field the same way a route does.
+/// moves a request field the same way a route does. The mark is written only
+/// where the judgment changed the effort the request carried
+/// (`crate::step_effort::move_mark`, t-6342): 522 of this machine's 547
+/// marks were steps that progressed whatever the judgment said, on a wire
+/// whose every differing judgment had been held back.
 pub const ZO_STEP_EFFORT: JevUse = JevUse {
     id: "step_effort",
     setting: "zoStepEffort",
@@ -1354,6 +1642,10 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     window_forgives: Some(FORGIVES_NOTHING),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The governor's own table.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of the person's last request one compaction judgment reads
@@ -1525,6 +1817,11 @@ pub const COMPACTION: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
+    // Microcompact's age rule, which drops the oldest results. Its writer
+    // stamps no baseline mark yet: the seat holds at `too_few_baseline`.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of one text an agent's own question carries — the question,
@@ -1621,6 +1918,9 @@ pub const AGENT_TOOL: JevUse = JevUse {
     window_forgives: None,
     agreement_rows_wanted: None,
     agreement_kind: AgreementKind::Comparison,
+    baseline: Baseline::None,
+    negatives_wanted: None,
+    confidence_bands: None,
 };
 
 /// Characters of a page's title one browser-read question carries — the head
@@ -1796,6 +2096,10 @@ pub const BROWSER_READ: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // A fold is graded by the press that lands in it; no fold, no mark.
+    baseline: Baseline::None,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::pressing(BROWSER_READ_FOLD_FLOOR_PERMILLE)),
 };
 
 /// The closed answer every notify question offers, spelled once: ring now,
@@ -1930,6 +2234,10 @@ pub const NOTIFY: JevUse = JevUse {
     id: "notify",
     setting: "jevNotify",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    // Stands until the question search (§6-8) decides (§7, t-6342): replayed
+    // twice over 1,051 calls it agreed 47.7% where today's rule agreed
+    // 54.7%. Its redesign — fact questions, the call left to code — is
+    // judged on the same replay, and it stops if that loses too.
     recommended: JevMode::Auto,
     sends: &[
         Sent {
@@ -1954,6 +2262,10 @@ pub const NOTIFY: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // Today's rule table (`notify_call::Call::today`).
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of the sentence a person is writing that one mention
@@ -2073,6 +2385,10 @@ pub const MENTION_RERANK: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The fuzzy page's own first row.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::LOW_STAKES),
 };
 
 /// How many of the emulator seat's candidates a forked phone step tries
@@ -2245,6 +2561,11 @@ pub const BRANCHING: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The emulator seat's own press, the first candidate. Its writer stamps
+    // no baseline mark yet: the seat holds at `too_few_baseline`.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
 };
 
 /// The judgment cache: a memo in front of the wire that answers a screen
@@ -2290,6 +2611,11 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     window_forgives: Some(FORGIVES_NOTHING),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The fresh answer it is compared with IS the reader it replaces.
+    baseline: Baseline::None,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    // The screen seats' line: the answer it hands back is pressed under theirs.
+    confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
 };
 
 /// How many of a role's eligible attempts try the model nobody has evidence
@@ -2408,6 +2734,10 @@ pub const CHALLENGER: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
+    // The incumbent's design, which the attempt acts on anyway.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of the person's words one patch review reads as the task the
@@ -2446,6 +2776,11 @@ pub const PATCH_REVIEW_EVIDENCE_BYTE_CAP: usize = 4 * 1024;
 /// table's units. It is not [`PATCH_REVIEW_ANSWER_FLOOR_PERMILLE`], which is a
 /// line under how often the SEAT answers at all.
 pub const PATCH_REVIEW_PERMIT_FLOOR_PERMILLE: u16 = 800;
+
+/// The patch review's word for a patch it lets stand — spelled here, where
+/// the seat's baseline reads it ([`Baseline::AlwaysSame`]), and read by zo's
+/// verdict (`runtime::patch_review::Verdict::Permit`).
+pub const PATCH_REVIEW_PERMIT: &str = "permit";
 
 /// What the patch review seat's answers must bound above before `auto` rises
 /// to noting (§4): nine in ten. The orchestration seats' reasoning, reached
@@ -2521,7 +2856,13 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     id: "patch_review",
     setting: "jevPatchReview",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
-    recommended: JevMode::Auto,
+    // Stopped (§7, t-6342): over 1,661 replayed reviews it permitted 1.1%
+    // and agreed 21.1% where "always permit" agreed 79.2%, and its answers
+    // ranked the regretted patches at AUC 0.48–0.59, under the patch's size
+    // alone (0.688) — one request per edit, about 153 a day, all noise. It
+    // comes back when a question per hunk beats the size on labels a person
+    // left (a revert, a refusal).
+    recommended: JevMode::Off,
     sends: &[
         Sent {
             at: "/state/task",
@@ -2552,6 +2893,15 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Hindsight,
+    // "Always permit": 79.2% of this machine's 1,661 replayed reviews against the seat's 21.1%.
+    baseline: Baseline::AlwaysSame(PATCH_REVIEW_PERMIT),
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    // Four Nouls: abstain inside the cookbook's uncertain middle, act from
+    // the permit line's lean (an 800‰ yes is a 600‰ lean).
+    confidence_bands: Some(ConfidenceBands::on_a_noul(
+        NOUL_UNCERTAIN_TO_PERMILLE,
+        PATCH_REVIEW_PERMIT_FLOOR_PERMILLE,
+    )),
 };
 
 /// Every place this product asks Jev something.
@@ -2579,6 +2929,14 @@ pub static JEV_USES: [JevUse; 20] = [
 ];
 
 impl JevUse {
+    /// The band an answer of this seat's at `confidence` falls in
+    /// ([`ConfidenceBands::band_of`]) — `None` for a seat that names no bands.
+    #[must_use]
+    pub fn band_of(&self, confidence: f64) -> Option<Band> {
+        self.confidence_bands
+            .and_then(|bands| bands.band_of(confidence))
+    }
+
     /// Whether a validated screen choice meets this seat's press policy for
     /// a control of `kind`: the seat's own press floor for a plain one, and
     /// never less than [`SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE`] for one a

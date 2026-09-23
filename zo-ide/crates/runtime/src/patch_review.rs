@@ -595,7 +595,8 @@ impl Verdict {
     #[must_use]
     pub const fn word(self) -> &'static str {
         match self {
-            Self::Permit => "permit",
+            // The table's word: the seat's baseline reads the same one.
+            Self::Permit => zerocode_core::jev::PATCH_REVIEW_PERMIT,
             Self::ProposalOnly => "proposal_only",
             Self::Unavailable => "unavailable",
         }

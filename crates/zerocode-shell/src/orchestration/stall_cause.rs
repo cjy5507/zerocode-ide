@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
-use zerocode_core::jev::{JevMode, STALL};
+use zerocode_core::jev::{JevMode, STALL, summary};
 use zerocode_core::orchestration::Ledger;
 use zerocode_core::stall_cause::{self, STALL_CAUSE_RUBRIC_VERSION, StallAsk, StallLook};
 
@@ -86,7 +86,7 @@ struct Waiting {
     dispatch: String,
     asked_ms: i64,
     /// The cause the answer named, so its label can say whether what
-    /// followed was what that cause leads to (`agreed`).
+    /// followed is what that cause predicts (`agreed`).
     cause: stall_cause::Cause,
     /// How sure the answer was, as the notice to the coordinator says it.
     confidence: f64,
@@ -408,12 +408,20 @@ pub(super) fn label(host: &dyn Host, book: &Arc<Mutex<StallBook>>, ledger: &Ledg
                 "followedAtMs": at,
                 "afterMs": at.saturating_sub(one.asked_ms),
             });
-            // The mark the judge counts (§4): a cause that leads somewhere
-            // was right when that is what followed. A cause that leads
-            // nowhere in particular (`unknown`) leaves no mark rather than a
-            // false one.
-            if let Some(expected) = stall_cause::expected_followed(one.cause) {
-                label[zerocode_core::jev::summary::AGREED.canonical] = json!(expected == what);
+            // The mark the judge counts (§4): the answer was right when its
+            // cause predicts what the ledger then showed — whether the
+            // silence needed the coordinator's hand. A side that says
+            // nothing (`unknown`, a terminal that died) leaves its own word
+            // instead of a mark it has no right to.
+            match stall_cause::mark(one.cause, what) {
+                Ok(agreed) => {
+                    label[summary::AGREED.canonical] = json!(agreed);
+                    // The seat's baseline on the same silence (t-6342).
+                    if let Some(baseline) = stall_cause::baseline_mark(what) {
+                        label[summary::BASELINE_AGREED.canonical] = json!(baseline);
+                    }
+                }
+                Err(why) => label[summary::NOT_COMPARED.canonical] = json!(why),
             }
             labels.push(label);
             false

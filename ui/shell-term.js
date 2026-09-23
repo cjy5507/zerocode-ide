@@ -5220,6 +5220,10 @@ function applyPulledScreens(answer) {
  * 있고, 두 선언이 순서를 바꿔 도착하면 백엔드는 지나간 집합을 들고 남는다 —
  * 그 값이 곧 보고 있는데 안 그려지는 터미널이다. */
 function syncWatchedTerms() {
+  // What the stage shows was just decided, and a placed worker's pane on it
+  // is one a person may now be reading (t-6342) — a check of a map that is
+  // empty on every switch but the few after a summons, and no IPC of its own.
+  notePlacedWorkersSeen();
   watchTail = watchTail.then(declareWatchedTerms, declareWatchedTerms);
   return watchTail;
 }
@@ -5457,7 +5461,7 @@ function dropTermView(term) {
   // 없는 행을 그린다(사용자 계약의 마지막 절: "종료되면 자동 에이전트 종료").
   detachedAgents.delete(term);
   // 자리 판정의 라벨을 기다리던 판이었다면 그것도 — 끝난 판은 옮길 곳이 없다.
-  placedWorkers.delete(term);
+  forgetPlacedWorker(term);
   // 그리고 이 셸의 카드 화면도. **여기지 `dropTermScreen`이 아니다** — 저쪽은
   // 미리보기가 빌려 간 화면을 돌려주는 길이기도 하고, 그때 그 에이전트는 여전히
   // 살아 있어서 카드도 서 있다. 거기서 지우면 들여다본 카드는 닫는 순간 두 번째

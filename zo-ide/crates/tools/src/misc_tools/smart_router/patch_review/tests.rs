@@ -358,6 +358,9 @@ fn a_permit_on_a_patch_fixed_again_disagrees_and_a_proposal_agrees() {
     assert_eq!(permit.path, fingerprint_of("/work/zo/src/flag.rs"));
     let proposal = label("proposal_only");
     assert!(proposal.agreed, "a proposal on a patch that was fixed again called it");
+    // "Always permit", the seat's baseline, missed both: each patch was
+    // fixed again, whatever the review said of it (t-6342).
+    assert_eq!((permit.baseline_agreed, proposal.baseline_agreed), (Some(false), Some(false)));
     assert!(book().lock().expect("book").get(cwd.path()).is_none(), "nothing left waiting");
 }
 
@@ -401,6 +404,8 @@ fn a_label_waits_for_a_review_still_on_the_wire() {
     let labels: Vec<PatchReviewLabelRow> = read_shadow_rows(&ledger);
     assert_eq!(labels.len(), 1);
     assert_eq!((labels[0].verdict.as_str(), labels[0].agreed, labels[0].hindsight.as_str()), ("proposal_only", false, "receipt"));
+    // The patch stood: "always permit" called what the proposal missed.
+    assert_eq!(labels[0].baseline_agreed, Some(true));
     assert!(book().lock().expect("book").get(cwd.path()).is_none_or(Vec::is_empty));
 }
 

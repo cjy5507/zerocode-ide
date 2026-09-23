@@ -229,21 +229,79 @@ fn the_transcript_tail_is_the_boards_turns_one_line_each() {
 fn every_cause_but_unknown_names_what_follows_it() {
     for cause in Cause::ALL {
         assert_eq!(
-            expected_followed(cause).is_some(),
+            mark(cause, Followed::Nothing).is_ok(),
             cause != Cause::Unknown,
             "{}",
             cause.word()
         );
     }
-    assert_eq!(expected_followed(Cause::QuotaWall), Some(Followed::Resumed));
+    assert_eq!(mark(Cause::QuotaWall, Followed::Resumed), Ok(true));
     assert_eq!(
-        expected_followed(Cause::WaitingOnOwnCliQuestion),
-        Some(Followed::Mail)
+        mark(Cause::WaitingOnOwnCliQuestion, Followed::Mail),
+        Ok(true)
     );
     assert_eq!(
-        expected_followed(Cause::FinishedWithoutReport),
-        Some(Followed::WorkerDone)
+        mark(Cause::FinishedWithoutReport, Followed::WorkerDone),
+        Ok(false)
     );
+}
+
+/// The eleven marks this machine's ledger held against the seat (2026-09-23):
+/// every answer read a command still running, and every worker then reported
+/// on its own — nobody had to do anything, which is exactly what that cause
+/// says. The label asks one question of both sides — did the silence need
+/// its coordinator's hand — so a long tool the coordinator had to mail about
+/// is still a wrong reading, and a finished worker that reported only once
+/// it was asked is a right one.
+#[test]
+fn a_long_tool_that_ends_in_the_workers_own_report_agrees() {
+    assert_eq!(mark(Cause::LongRunningTool, Followed::WorkerDone), Ok(true));
+    assert_eq!(mark(Cause::LongRunningTool, Followed::Nothing), Ok(true));
+    assert_eq!(mark(Cause::HumanTookOver, Followed::WorkerDone), Ok(true));
+    assert_eq!(mark(Cause::LongRunningTool, Followed::Mail), Ok(false));
+    assert_eq!(
+        mark(Cause::LongRunningTool, Followed::WorkerStop),
+        Ok(false)
+    );
+    assert_eq!(mark(Cause::FinishedWithoutReport, Followed::Mail), Ok(true));
+    assert_eq!(mark(Cause::TransientApiError, Followed::Resumed), Ok(true));
+    assert_eq!(
+        mark(Cause::TransientApiError, Followed::WorkerDone),
+        Ok(false)
+    );
+    // A side that says nothing leaves no mark, and names itself instead.
+    assert_eq!(
+        mark(Cause::Unknown, Followed::WorkerDone),
+        Err(Cause::Unknown.word())
+    );
+    assert_eq!(
+        mark(Cause::QuotaWall, Followed::WorkerDied),
+        Err(Followed::WorkerDied.word())
+    );
+}
+
+/// Every cause and every thing that can follow a silence is read against the
+/// one question, or says in so many words that it is not — so a variant added
+/// to either list without a place in the table is a red test rather than a
+/// label that quietly marks nothing.
+#[test]
+fn the_label_table_places_every_cause_and_every_follow_up() {
+    let placed = |cause: Cause| mark(cause, Followed::Nothing).is_ok();
+    assert_eq!(
+        Cause::ALL
+            .into_iter()
+            .filter(|cause| !placed(*cause))
+            .collect::<Vec<_>>(),
+        [Cause::Unknown]
+    );
+    for followed in Followed::ALL {
+        assert_eq!(
+            mark(Cause::LongRunningTool, followed).is_ok(),
+            followed != Followed::WorkerDied,
+            "{}",
+            followed.word()
+        );
+    }
 }
 
 /// A dead login is its own answer, offered by the word a ledger row keeps and
@@ -270,8 +328,6 @@ fn a_dead_login_is_offered_and_labeled_as_the_end_of_the_attempt() {
         "the criterion quotes the words this machine's pane showed"
     );
     assert_eq!(Cause::from_word("auth_failure"), Some(Cause::AuthFailure));
-    assert_eq!(
-        expected_followed(Cause::AuthFailure),
-        Some(Followed::WorkerStop)
-    );
+    assert_eq!(mark(Cause::AuthFailure, Followed::WorkerStop), Ok(true));
+    assert_eq!(mark(Cause::AuthFailure, Followed::WorkerDone), Ok(false));
 }

@@ -383,8 +383,9 @@ fn a_second_warm_up_inside_the_pools_idle_window_opens_no_socket() {
 #[test]
 fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
     use serde_json::json;
-    use zerocode_core::jev::promote::{ROSE, Stand, stand_from, window_wanted_for};
-    use zerocode_core::jev::summary::rows_that_can_clear;
+    use zerocode_core::jev::promote::{
+        ROSE, Stand, marks_that_can_clear, stand_from, window_wanted_for,
+    };
     use zerocode_core::jev::{JevMode, PLACEMENT};
 
     let home = tempfile::tempdir().expect("a zo home");
@@ -396,12 +397,13 @@ fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
     for at in 0..wanted as i64 - 1 {
         record_rows(&PLACEMENT, &ledger, &[answered(at)], at);
     }
-    // The marks the seat's own later facts wrote: a window's worth, and
-    // enough agreeing ones to clear its budget, dated inside the window.
-    let marks = rows_that_can_clear(PLACEMENT.agreement_floor_permille.expect("a budget"))
-        .max(PLACEMENT.agreement_rows_wanted.expect("a sample floor"));
+    // The marks the seat's own later facts wrote, dated inside the window:
+    // the three the label said no to (t-6342), enough agreeing ones to bound
+    // above its budget with those inside, and today's room beside each.
+    let misses = PLACEMENT.negatives_wanted.expect("placement rises");
+    let marks = marks_that_can_clear(&PLACEMENT).expect("a width the budget can be cleared on");
     let labels: Vec<serde_json::Value> = (0..marks)
-        .map(|n| json!({"at": 1, "label": format!("placement-{n}"), "agreed": true}))
+        .map(|n| json!({"at": 1, "label": format!("placement-{n}"), "agreed": n >= misses, "baselineAgreed": n % 2 == 0}))
         .collect();
     record_rows(&PLACEMENT, &ledger, &labels, 1);
     assert_eq!(

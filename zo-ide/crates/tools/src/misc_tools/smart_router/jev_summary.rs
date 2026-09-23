@@ -106,6 +106,11 @@ pub struct SeatReport {
     /// The requests the judgment's cadence counts: every one the newest
     /// answering version was asked ([`promote::asked_toward_judgment`]).
     pub asked_toward_judgment: usize,
+    /// The cheapest reader the seat is held against, as the table names it
+    /// ([`zerocode_core::jev::Baseline::kind`], t-6342).
+    pub baseline: &'static str,
+    /// How many disagreeing marks the table asks the seat's record to hold.
+    pub negatives_wanted: Option<usize>,
     /// Where the seat stands, read back from its own transitions.
     pub stand: Stand,
     /// Whether the seat acts right now: its mode, and for `auto` its standing.
@@ -325,6 +330,8 @@ fn one_with(
         judged,
         agreement_week,
         asked_toward_judgment,
+        baseline: seat.baseline.kind(),
+        negatives_wanted: seat.negatives_wanted,
         stand,
         applies: seat
             .mode_in(settings.unwrap_or(&Value::Null))
@@ -375,6 +382,11 @@ pub(super) fn cost_of(input_tokens: u64, asked: &str) -> Option<f64> {
 
 #[cfg(test)]
 mod tests;
+
+/// Every seat's ledger on this machine graded again by t-6342's rules — the
+/// label audit's measurement (`tools/label-audit`).
+#[cfg(test)]
+mod label_audit_tests;
 
 /// A line's own word, as a function a caller can hand to `map` — the word
 /// itself is the line's to say, and this only saves a reader from naming the

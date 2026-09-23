@@ -48,6 +48,15 @@
 //! a second opinion; the row's whole value is that the two were arrived at
 //! separately.
 //!
+//! **What it does carry of the coordinator's words** is the model, when one
+//! was pinned (t-6342). A pinned model is not an opinion about the agent but
+//! a constraint on it: the code keeps only the agents that can run it
+//! ([`crate::orchestration::runs_model`]) and asks nothing when one is left,
+//! and the state says the model so the judgment reads the options under the
+//! fact the coordinator had. Without it, on this machine's fourteen
+//! `gpt-6-astra` summonses the question offered codex thirteen times and
+//! never named it — nothing in the state tied `gpt` to `codex`.
+//!
 //! Nothing acts on the answer. [`crate::jev::SUMMON`] offers no mode that
 //! applies: the coordinator's own three words summon every worker, and the
 //! judgment is a row beside them.
@@ -65,7 +74,7 @@ const QUESTION: &str = "summon";
 
 /// The words of the question. They are ours: a summons's own text reaches the
 /// model as state, never as an instruction.
-const INSTRUCTIONS: &str = "An agent is about to be summoned to carry out the work described in `brief`, in a pane of its own. Choose which of the agents offered should be the one. Judge what the work asks for — how hard it is, how much of a codebase it has to hold at once, how many files it will touch, whether it has to measure something and report numbers, and whether earlier attempts on it already failed — against what each agent is, and against how much of its provider's quota this machine has already spent. Every agent offered can be started right now. Each option also carries this machine's own record of that agent: how often this window summoned it, how much of that work reached `worker_done`, and how long it took. That record is the only measured evidence here about how an agent actually does, and how much of it there is counts as much as what it says: a record built on a handful of summonses is weak evidence about the next one, however clean it looks, while one built on hundreds is strong. An agent with no record has not been shown to carry work like this, which is not the same as having been shown to.";
+const INSTRUCTIONS: &str = "An agent is about to be summoned to carry out the work described in `brief`, in a pane of its own. Choose which of the agents offered should be the one. Judge what the work asks for — how hard it is, how much of a codebase it has to hold at once, how many files it will touch, whether it has to measure something and report numbers, and whether earlier attempts on it already failed — against what each agent is, and against how much of its provider's quota this machine has already spent. Every agent offered can be started right now. When `pinnedModel` is not null, the coordinator already chose the model this work runs on, and every agent offered can run it. Each option also carries this machine's own record of that agent: how often this window summoned it, how much of that work reached `worker_done`, and how long it took. That record is the only measured evidence here about how an agent actually does, and how much of it there is counts as much as what it says: a record built on a handful of summonses is weak evidence about the next one, however clean it looks, while one built on hundreds is strong. An agent with no record has not been shown to carry work like this, which is not the same as having been shown to.";
 
 /// What an option says about an agent whose gauge this window has read.
 const ROOM_READ: &str = "{agent}. {spent}% of its {window} quota is already spent on this machine.";
@@ -133,7 +142,7 @@ pub const SUMMON_RECENT_BRIEFS: usize = 3;
 const BRIEF_SEPARATOR: &str = "; ";
 
 /// The state's keys, in the order the fingerprint reads them.
-const STATE_KEYS: [&str; 7] = [
+const STATE_KEYS: [&str; 8] = [
     "brief",
     "briefChars",
     "worktree",
@@ -141,6 +150,7 @@ const STATE_KEYS: [&str; 7] = [
     "task",
     "attempts",
     "failures",
+    "pinnedModel",
 ];
 
 /// The version of the words above. Bump it when any of them changes: a
@@ -148,7 +158,7 @@ const STATE_KEYS: [&str; 7] = [
 /// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`],
 /// so changing a word without bumping the version is a red test rather than a
 /// quiet drift.
-pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 3;
+pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 4;
 
 /// The fewest options that make a choice. One agent is not a question, and a
 /// question asked where there was nothing to decide is a row that says the
@@ -156,7 +166,9 @@ pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 3;
 pub const FEWEST_OPTIONS: usize = 2;
 
 /// The row's key for why it carries no `agreed` mark
-/// ([`crate::jev::summary::AGREED`]).
+/// ([`crate::jev::summary::AGREED`]) — the summary's own key
+/// ([`crate::jev::summary::NOT_COMPARED`]), which every labeled seat writes
+/// since t-6342 and which this seat wrote first.
 ///
 /// A word rather than a flag: `agreed` is left unwritten for more than one
 /// reason — a summons the seat itself chose for has no coordinator's word to
@@ -164,7 +176,7 @@ pub const FEWEST_OPTIONS: usize = 2;
 /// which. The judge needs nothing from it: it counts the rows that carry a
 /// mark, so a row without one is already out of every comparison. This is for
 /// whoever asks WHY.
-pub const NOT_COMPARED_KEY: &str = "notCompared";
+pub const NOT_COMPARED_KEY: &str = crate::jev::summary::NOT_COMPARED.canonical;
 
 /// [`NOT_COMPARED_KEY`]'s word for a summons whose own agent was not among the
 /// options — [`SummonAsk::offered`] says whether it was.
@@ -402,6 +414,8 @@ pub struct SummonLook<'a> {
     /// The task's consecutive failures, as [`crate::orchestration::Task`]
     /// counts them — three ends a task rather than dispatching a fourth.
     pub failures: u32,
+    /// The model the coordinator pinned for this summons, when it pinned one.
+    pub pinned_model: Option<&'a str>,
 }
 
 /// One question and the set its answer is judged against — the two travel
@@ -490,6 +504,7 @@ pub fn ask(look: &SummonLook<'_>, summonable: &[Summonable]) -> Option<SummonAsk
         ("task".to_string(), Value::from(look.carries_a_task)),
         ("attempts".to_string(), Value::from(look.attempts)),
         ("failures".to_string(), Value::from(look.failures)),
+        ("pinnedModel".to_string(), Value::from(look.pinned_model)),
     ]));
     let questions = choice::asked(QUESTION, INSTRUCTIONS, criteria);
     Some(SummonAsk {

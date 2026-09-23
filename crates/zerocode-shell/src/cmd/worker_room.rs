@@ -42,10 +42,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use zerocode_core::jev::door::{REDACTED_LINES_KEY, REQUESTS_KEY};
-use zerocode_core::jev::summary::{AGREED, LABEL};
-use zerocode_core::jev::{PLACEMENT, PLACEMENT_LABEL_WINDOW_MS, PLACEMENT_OPTIONS};
+use zerocode_core::jev::summary::{AGREED, BASELINE_AGREED, LABEL, NOT_COMPARED};
+use zerocode_core::jev::{PLACEMENT, PLACEMENT_LABEL_WINDOW_MS, PLACEMENT_SEEN_DWELL_MS};
 use zerocode_core::worker_placement::{
-    self, InFront, PlacementLook, StartedBy, WORKER_PLACEMENT_RUBRIC_VERSION,
+    self, InFront, Placement, PlacementLook, StartedBy, WORKER_PLACEMENT_RUBRIC_VERSION,
 };
 
 use crate::systemone::{SCHEMA, Wire, request_body};
@@ -122,6 +122,11 @@ pub(crate) struct WorkerRoomJudged {
     /// reports the person's moves of this worker's pane only then, and stops
     /// once it has reported one (t-5806).
     placed: bool,
+    /// How long the pane must stand on the stage, with the window in front,
+    /// before the surface reports it seen ([`PLACEMENT_SEEN_DWELL_MS`]) — the
+    /// label's condition for a pane nobody moved (t-6342). Handed over with
+    /// the answer so the surface spells no number of its own.
+    seen_after_ms: i64,
 }
 
 impl WorkerRoomJudged {
@@ -133,6 +138,7 @@ impl WorkerRoomJudged {
             applied: false,
             offered,
             placed: false,
+            seen_after_ms: PLACEMENT_SEEN_DWELL_MS,
         }
     }
 }
@@ -144,13 +150,17 @@ struct Placed {
     dispatch: Option<String>,
     task: Option<String>,
     /// The room the seat named.
-    chosen: String,
+    chosen: Placement,
     /// Whether the seat's answer is what seated the pane, or the tab it got
     /// anyway — the label carries it so the two populations can be told
     /// apart, as the row does.
     applied: bool,
     /// When the answer was written, the window's clock.
     at_ms: i64,
+    /// Whether the surface reported the pane standing on the stage, with the
+    /// window in front, for [`PLACEMENT_SEEN_DWELL_MS`] inside the label's
+    /// window (`note_worker_room_seen`, t-6342).
+    seen: bool,
 }
 
 /// The answers this window has given rooms to and not yet graded, by worker.
@@ -205,7 +215,7 @@ pub(crate) async fn judge_worker_room(look: WorkerRoomLook) -> Result<WorkerRoom
 }
 
 /// The window's surface saying the person moved a placed worker's pane to
-/// `room` — one of [`PLACEMENT_OPTIONS`] — the one door the label has for a
+/// `room` — one of [`zerocode_core::jev::PLACEMENT_OPTIONS`] — the one door the label has for a
 /// move (t-5806). Blocking on the ledger, so it runs off the window's own
 /// runtime. Answers whether a label was written for it.
 #[tauri::command]
@@ -221,6 +231,31 @@ pub(crate) async fn note_worker_room_change(worker: String, room: String) -> Res
     })
     .await
     .map_err(|error| error.to_string())
+}
+
+/// The window's surface saying a placed worker's pane stood on the stage,
+/// with the window in front, for [`PLACEMENT_SEEN_DWELL_MS`] (t-6342) — the
+/// fact that lets a quiet window grade the answer at all. A lock and nothing
+/// else, so it waits on no ledger. Answers whether a pane in the book was
+/// marked.
+#[tauri::command(async)]
+pub(crate) fn note_worker_room_seen(worker: String) -> bool {
+    room_seen(rooms(), &worker, crate::now_epoch_ms())
+}
+
+/// Mark a placed worker as seen, while its label's window is still open. A
+/// worker the book does not hold, or one whose window has passed, is left as
+/// it was: a sight after the window is not the window's.
+pub(crate) fn room_seen(book: &Mutex<RoomBook>, worker: &str, now_ms: i64) -> bool {
+    let mut held = book.lock().unwrap_or_else(|held| held.into_inner());
+    let Some(placed) = held.placed.get_mut(worker) else {
+        return false;
+    };
+    if now_ms.saturating_sub(placed.at_ms) > PLACEMENT_LABEL_WINDOW_MS {
+        return false;
+    }
+    placed.seen = true;
+    true
 }
 
 /// The beat's half of the label: every answer whose window has passed with
@@ -255,7 +290,7 @@ fn judged_into(
 ) -> WorkerRoomJudged {
     let mut judged = judged(wire, look, now_ms);
     if judged.outcome == ANSWERED
-        && let Some(chosen) = judged.chosen.as_deref()
+        && let Some(chosen) = judged.chosen.as_deref().and_then(Placement::of)
     {
         book.lock()
             .unwrap_or_else(|held| held.into_inner())
@@ -266,9 +301,10 @@ fn judged_into(
                     run: look.run.clone(),
                     dispatch: look.dispatch.clone(),
                     task: look.task.clone(),
-                    chosen: chosen.to_string(),
+                    chosen,
                     applied: judged.applied,
                     at_ms: now_ms,
+                    seen: false,
                 },
             );
         judged.placed = true;
@@ -276,9 +312,18 @@ fn judged_into(
     judged
 }
 
-/// The word a label carries under `followed` when the person moved nothing:
-/// the room the seat named, which is where the pane stayed.
-fn label_row(worker: &str, placed: &Placed, followed: &str, moved: bool, now_ms: i64) -> Value {
+/// One placed worker's label row: the room its pane ended the window in —
+/// the room the person moved it to, or, when nobody moved it, the room it
+/// stood in ([`worker_placement::stood_in`]) — and the seat's mark for it.
+fn label_row(
+    worker: &str,
+    placed: &Placed,
+    ended_in: Placement,
+    moved: bool,
+    now_ms: i64,
+) -> Value {
+    // A move is a person's hand on the pane: it was seen.
+    let seen = moved || placed.seen;
     let mut label = json!({
         "at": now_ms,
         LABEL.canonical: worker,
@@ -286,19 +331,30 @@ fn label_row(worker: &str, placed: &Placed, followed: &str, moved: bool, now_ms:
         "worker": worker,
         "dispatch": placed.dispatch,
         "task": placed.task,
-        "chosen": placed.chosen,
+        "chosen": placed.chosen.key(),
         "applied": placed.applied,
         // Where the pane was when the label was written: the room the
-        // person moved it to, or the one it stayed in.
-        "followed": followed,
+        // person moved it to, or the one it stood in.
+        "followed": ended_in.key(),
         "moved": moved,
+        "seen": seen,
         "afterMs": now_ms.saturating_sub(placed.at_ms),
     });
     // The mark the judge counts (§4): the seat named the room the pane ended
-    // the window in. A tab dragged to another group kept its room, and the
-    // label says so — with `moved` beside it for a reader who wants the
-    // finer question.
-    label[AGREED.canonical] = json!(followed == placed.chosen);
+    // the window in — for a pane somebody could have moved. A tab dragged to
+    // another group kept its room, and the label says so, with `moved`
+    // beside it for a reader who wants the finer question; a pane nobody was
+    // in front of carries its word and no mark.
+    match worker_placement::mark(placed.chosen, ended_in, seen) {
+        Ok(agreed) => {
+            label[AGREED.canonical] = json!(agreed);
+            // Today's room on the same pane: the seat's baseline (t-6342).
+            if let Some(baseline) = worker_placement::baseline_mark(ended_in, seen) {
+                label[BASELINE_AGREED.canonical] = json!(baseline);
+            }
+        }
+        Err(why) => label[NOT_COMPARED.canonical] = json!(why),
+    }
     label
 }
 
@@ -314,9 +370,9 @@ pub(crate) fn room_changed(
     room: &str,
     now_ms: i64,
 ) -> bool {
-    if !PLACEMENT_OPTIONS.contains(&room) {
+    let Some(room) = Placement::of(room) else {
         return false;
-    }
+    };
     let Some(placed) = book
         .lock()
         .unwrap_or_else(|held| held.into_inner())
@@ -332,15 +388,16 @@ pub(crate) fn room_changed(
     let label = if in_window {
         label_row(worker, &placed, room, true, now_ms)
     } else {
-        label_row(worker, &placed, &placed.chosen, false, now_ms)
+        let stood = worker_placement::stood_in(placed.chosen, placed.applied);
+        label_row(worker, &placed, stood, false, now_ms)
     };
     crate::systemone::record_rows(&PLACEMENT, &ledger, std::slice::from_ref(&label), now_ms);
     in_window
 }
 
 /// Write the quiet label for every answer whose window has passed — the
-/// pane stayed where the seat put it, as far as the window saw. Answers how
-/// many were written.
+/// pane stayed in the room it stood in, as far as the window saw, and was
+/// graded if somebody was in front of it. Answers how many were written.
 pub(crate) fn label_rooms(wire: &Wire, book: &Mutex<RoomBook>, now_ms: i64) -> usize {
     let due: Vec<(String, Placed)> = {
         let mut held = book.lock().unwrap_or_else(|held| held.into_inner());
@@ -362,7 +419,10 @@ pub(crate) fn label_rooms(wire: &Wire, book: &Mutex<RoomBook>, now_ms: i64) -> u
     };
     let labels: Vec<Value> = due
         .iter()
-        .map(|(worker, placed)| label_row(worker, placed, &placed.chosen, false, now_ms))
+        .map(|(worker, placed)| {
+            let stood = worker_placement::stood_in(placed.chosen, placed.applied);
+            label_row(worker, placed, stood, false, now_ms)
+        })
         .collect();
     crate::systemone::record_rows(&PLACEMENT, &ledger, &labels, now_ms);
     labels.len()
@@ -451,6 +511,7 @@ fn judged(wire: &Wire, look: &WorkerRoomLook, now_ms: i64) -> WorkerRoomJudged {
                 applied: crate::systemone::applies(wire, &PLACEMENT),
                 offered,
                 placed: false,
+                seen_after_ms: PLACEMENT_SEEN_DWELL_MS,
             }
         }
         Err(token) => {
@@ -795,12 +856,13 @@ mod tests {
             .collect()
     }
 
-    /// The label (t-5806): an answer goes in the book, and what the person
-    /// did with the pane inside the window grades it. A move to another room
-    /// disagrees and names the room; a move that keeps the room agrees and
-    /// still says it moved; the beat's quiet label agrees once the window has
-    /// passed; and every label is one row, named by the worker the answer
-    /// was about.
+    /// The label (t-5806, t-6342): an answer goes in the book, and what the
+    /// person did with the pane inside the window grades it. A move to
+    /// another room disagrees and names the room; a move that keeps the room
+    /// agrees and still says it moved; the beat's quiet label names the room
+    /// the pane stood in — the tab, for a seat that only records — and grades
+    /// nothing for a pane nobody was in front of; and every label is one row,
+    /// named by the worker the answer was about.
     #[test]
     fn a_placed_pane_is_graded_by_where_the_person_left_it() {
         let work = tempfile::tempdir().expect("a checkout");
@@ -932,16 +994,22 @@ mod tests {
         );
         assert_eq!(regrouped[AGREED.canonical], json!(false));
         let stayed = by_worker("w-3");
-        assert_eq!(stayed["followed"], json!("split"));
+        // A recording seat seated nothing: the pane stood in its own tab.
+        assert_eq!(stayed["followed"], json!("tab"));
         assert_eq!(stayed["moved"], json!(false));
+        assert_eq!(stayed["seen"], json!(false));
         assert_eq!(stayed["afterMs"], json!(PLACEMENT_LABEL_WINDOW_MS + 1));
-        assert_eq!(stayed[AGREED.canonical], json!(true));
+        assert!(stayed.get(AGREED.canonical).is_none(), "{stayed}");
+        assert_eq!(
+            stayed[NOT_COMPARED.canonical],
+            json!(worker_placement::UNSEEN)
+        );
         // The judge reads the marks as the seat's agreement, and the labels
         // are not requests.
         let every = rows(&ledger);
         let judged =
             zerocode_core::jev::promote::judge_seat(&PLACEMENT, &every).expect("placement rises");
-        assert_eq!((judged.agreement.compared, judged.agreement.agreed), (3, 1));
+        assert_eq!((judged.agreement.compared, judged.agreement.agreed), (2, 0));
         assert_eq!(judged.window.rows, 3, "a label was counted as a request");
     }
 
@@ -977,6 +1045,65 @@ mod tests {
             (json!("tab"), json!(true))
         );
         assert_eq!(label[AGREED.canonical], json!(true));
+    }
+
+    /// A pane the surface reported on the stage is graded when its window
+    /// closes, against the room it stood in (t-6342): a recorded `split` whose
+    /// pane sat in its own tab is a split the person did not ask for — and a
+    /// sight is taken only inside the window, for a worker the book holds.
+    #[test]
+    fn a_pane_seen_on_the_stage_is_graded_against_the_room_it_stood_in() {
+        let work = tempfile::tempdir().expect("a checkout");
+        let home = tempfile::tempdir().expect("a zo home");
+        let endpoint = Endpoint::serving("HTTP/1.1 200 OK", a_room_answer("split"), 0);
+        let wire = Wire::at(
+            &endpoint.base(),
+            "test-key",
+            Some(settings(
+                &home,
+                JevMode::Shadow,
+                &work.path().display().to_string(),
+            )),
+        );
+        let book = Mutex::new(RoomBook::default());
+        let mut look = look();
+        look.checkout = Some(work.path().display().to_string());
+        let placed_at = 1_789_700_000_000;
+        let judged = judged_into(&wire, &look, placed_at, &book);
+        assert!(judged.placed, "{judged:?}");
+        assert_eq!(
+            judged.seen_after_ms, PLACEMENT_SEEN_DWELL_MS,
+            "the surface is handed the dwell, not left to spell one"
+        );
+
+        assert!(
+            !room_seen(&book, "w-9", placed_at + 1_000),
+            "nobody placed w-9"
+        );
+        assert!(room_seen(&book, "w-4781", placed_at + 30_000));
+        assert!(
+            !room_seen(&book, "w-4781", placed_at + PLACEMENT_LABEL_WINDOW_MS + 1),
+            "a sight after the window is not the window's"
+        );
+        assert_eq!(
+            label_rooms(&wire, &book, placed_at + PLACEMENT_LABEL_WINDOW_MS + 1),
+            1
+        );
+        let ledger = home
+            .path()
+            .join(zerocode_core::jev::count::REQUESTS_DIR)
+            .join(PLACEMENT.ledger);
+        let label = labels(&ledger).pop().expect("a label");
+        assert_eq!(
+            (
+                label["chosen"].clone(),
+                label["followed"].clone(),
+                label["seen"].clone()
+            ),
+            (json!("split"), json!("tab"), json!(true))
+        );
+        assert_eq!(label[AGREED.canonical], json!(false), "{label}");
+        assert!(label.get(NOT_COMPARED.canonical).is_none(), "{label}");
     }
 
     /// An answer that never came back whole has nothing to grade: the book

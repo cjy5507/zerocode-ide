@@ -162,6 +162,11 @@ impl Placement {
         }
     }
 
+    /// The room every worker stood in before the seat existed, and still
+    /// stands in when the seat only records: its own tab — the fallback of
+    /// the surface that seats it (`roomForWorker`, `ui/shell.js`).
+    pub const TODAYS: Self = Self::Tab;
+
     /// The room an option names, if it names one this file knows.
     #[must_use]
     pub fn of(option: &str) -> Option<Self> {
@@ -298,6 +303,53 @@ impl PlacementAsk {
             confidence: choice.confidence,
         })
     }
+}
+
+/// The room a placed worker's pane stood in while nobody moved it (t-6342):
+/// the room the answer named when the seat seated it, and today's room
+/// ([`Placement::TODAYS`]) when the seat only recorded.
+///
+/// The quiet label used to write the answer's room either way, so a recorded
+/// `split` whose pane sat in its own tab for five minutes went down as a split
+/// the person had left alone — eleven of the thirty marks this machine's
+/// ledger held on 2026-09-23 were such panes.
+#[must_use]
+pub const fn stood_in(chosen: Placement, applied: bool) -> Placement {
+    if applied { chosen } else { Placement::TODAYS }
+}
+
+/// The word a placement label carries under the summary's `notCompared` when
+/// nobody was in front of the pane while its label's window was open.
+pub const UNSEEN: &str = "unseen";
+
+/// The placement seat's mark (t-6342): whether the room the pane ended the
+/// label's window in is the room the answer named — counted only for a pane
+/// somebody could have moved.
+///
+/// A pane the person moved was seen. One nobody moved says something only if
+/// it stood on the stage, with the window in front, for
+/// [`crate::jev::PLACEMENT_SEEN_DWELL_MS`]: every one of the thirty marks
+/// this machine's ledger held said the pane was left where it was, and so
+/// would any answer's have — a label that cannot tell "nobody looked" from
+/// "looked and kept it" cannot say no.
+///
+/// # Errors
+///
+/// [`UNSEEN`] for a pane nobody was in front of.
+pub fn mark(chosen: Placement, ended_in: Placement, seen: bool) -> Result<bool, &'static str> {
+    if seen {
+        Ok(chosen == ended_in)
+    } else {
+        Err(UNSEEN)
+    }
+}
+
+/// What the placement seat's baseline — today's room, the tab — would have
+/// been marked on the same pane (t-6342): the same rule as [`mark`], with
+/// [`Placement::TODAYS`] as the answer.
+#[must_use]
+pub fn baseline_mark(ended_in: Placement, seen: bool) -> Option<bool> {
+    mark(Placement::TODAYS, ended_in, seen).ok()
 }
 
 /// Every room, in the order the table spells them — what a reader of
