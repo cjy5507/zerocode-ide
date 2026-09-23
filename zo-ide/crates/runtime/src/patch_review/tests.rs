@@ -186,6 +186,187 @@ fn an_ask_reads_the_patch_the_persons_words_and_the_evidences_tail() {
     assert_eq!(ask_for(&first, "turn-1", "t2", "edit_file", &one_hunk()).expect("asked").evidence, "");
 }
 
+/* ---- the task readings (t-6232) ---------------------------------------------- */
+
+fn said(text: &str) -> ConversationMessage {
+    ConversationMessage::assistant(vec![ContentBlock::Text { text: text.to_string() }])
+}
+
+/// The model's words and its edit call in one message, as a model writes them.
+fn said_then_edits(text: &str, id: &str) -> ConversationMessage {
+    ConversationMessage::assistant(vec![
+        ContentBlock::Text { text: text.to_string() },
+        ContentBlock::ToolUse {
+            id: id.to_string(),
+            name: "edit_file".to_string(),
+            input: "{}".to_string(),
+        },
+    ])
+}
+
+/// A `TodoWrite` result in the shape the tool writes it.
+fn todo_result(id: &str, todos: &[(&str, &str, &str)]) -> ConversationMessage {
+    let new_todos: Vec<serde_json::Value> = todos
+        .iter()
+        .map(|(content, active, status)| json!({"content": content, "activeForm": active, "status": status}))
+        .collect();
+    result(
+        id,
+        "TodoWrite",
+        &serde_json::to_string_pretty(&json!({"oldTodos": [], "newTodos": new_todos, "verificationNudgeNeeded": null}))
+            .expect("an envelope"),
+    )
+}
+
+/// Three turns before an edit: the person's words in each, the harness
+/// speaking between, the model planning in writing and in words.
+fn three_turns() -> Vec<ConversationMessage> {
+    vec![
+        user_text("the parser reads `1+2` as 12"),
+        said("It concatenates digits across the operator."),
+        user_text("fix it so it reads 3"),
+        todo_result("p0", &[("Fix the tokenizer", "Fixing the tokenizer", "in_progress")]),
+        user_text("[zo:turn-end-gate] <system-reminder>keep going</system-reminder>"),
+        user_text("go on"),
+        todo_result(
+            "p1",
+            &[
+                ("Read the parser", "Reading the parser", "completed"),
+                ("Split tokens at operators", "Splitting tokens at operators", "in_progress"),
+                ("Add a test for 1+2", "Adding a test", "pending"),
+            ],
+        ),
+        said_then_edits("The tokenizer never ends a number at `+`; I'll end it there.", "t2"),
+    ]
+}
+
+#[test]
+fn every_reading_asks_about_the_same_patches_and_the_seats_own_reads_as_before() {
+    assert_eq!(TaskReading::ALL.map(TaskReading::word), ["v1", "v2a", "v2b", "v2c"]);
+    for reading in TaskReading::ALL {
+        assert_eq!(TaskReading::named(reading.word()), Some(reading));
+    }
+    assert_eq!(TaskReading::named("v3"), None);
+
+    let conversations = [
+        before_the_edit(),
+        three_turns(),
+        vec![user_text("rename it")],
+        vec![user_text("[zo:goal-plan] next step"), said("On it.")],
+        Vec::new(),
+    ];
+    for messages in &conversations {
+        let seats = ask_for(messages, "turn-1", "t2", "edit_file", &one_hunk());
+        assert_eq!(
+            ask_reading(messages, "turn-1", "t2", "edit_file", &one_hunk(), TaskReading::PersonsNewest),
+            seats,
+            "the seat's reading is v1"
+        );
+        for reading in TaskReading::ALL {
+            let asked = ask_reading(messages, "turn-1", "t2", "edit_file", &one_hunk(), reading);
+            assert_eq!(asked.is_some(), seats.is_some(), "{} asks about the same patches", reading.word());
+            if let (Some(asked), Some(seats)) = (asked, &seats) {
+                // Only the task moves.
+                assert_eq!(PatchAsk { task: seats.task.clone(), ..asked }, *seats, "{}", reading.word());
+            }
+        }
+        assert_eq!(
+            task_by(messages, TaskReading::PersonsNewest),
+            persons_words(messages),
+            "v1 is the person's newest words, uncut"
+        );
+    }
+}
+
+#[test]
+fn the_recent_reading_is_the_persons_last_three_messages_in_the_order_said() {
+    assert_eq!(
+        task_by(&three_turns(), TaskReading::PersonsRecent),
+        "the parser reads `1+2` as 12\n\nfix it so it reads 3\n\ngo on",
+        "the harness's words are not the person's"
+    );
+    let mut four = three_turns();
+    four.insert(0, user_text("hello"));
+    assert_eq!(
+        task_by(&four, TaskReading::PersonsRecent),
+        task_by(&three_turns(), TaskReading::PersonsRecent),
+        "three, the newest"
+    );
+    assert_eq!(task_by(&[user_text("rename it")], TaskReading::PersonsRecent), "rename it");
+}
+
+#[test]
+fn the_plan_reading_is_the_persons_words_then_the_models_since_them() {
+    assert_eq!(
+        task_by(&three_turns(), TaskReading::ModelsPlan),
+        "go on\n\nThe tokenizer never ends a number at `+`; I'll end it there."
+    );
+    // The model's words from before the person last spoke are not its plan
+    // for this edit.
+    let silent = vec![user_text("fix it"), said("I will fix it."), user_text("and rename it")];
+    assert_eq!(task_by(&silent, TaskReading::ModelsPlan), "and rename it");
+    // The newest words the model said since, wherever the call came after them.
+    let mut earlier = silent.clone();
+    earlier.extend([said("Renaming `old` to `new`."), call("t1", "edit_file", "{}")]);
+    assert_eq!(task_by(&earlier, TaskReading::ModelsPlan), "and rename it\n\nRenaming `old` to `new`.");
+}
+
+#[test]
+fn the_todo_reading_is_the_turns_open_plan_or_else_the_models_words() {
+    // The newest plan of the turn, what is open first; the one before the
+    // person last spoke is not this turn's.
+    assert_eq!(
+        task_by(&three_turns(), TaskReading::TodoPlan),
+        "[~] Splitting tokens at operators\n[ ] Add a test for 1+2\n[x] Read the parser"
+    );
+    // A turn without a plan of its own reads as v2b.
+    let mut unplanned = three_turns();
+    unplanned.retain(|message| {
+        !message.blocks.iter().any(|block| matches!(block, ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "p1"))
+    });
+    assert_eq!(
+        task_by(&unplanned, TaskReading::TodoPlan),
+        task_by(&unplanned, TaskReading::ModelsPlan)
+    );
+    // A plan with nothing open says nothing about the next patch.
+    let mut done = three_turns();
+    done.insert(7, todo_result("p2", &[("Split tokens at operators", "Splitting tokens", "completed")]));
+    assert_eq!(task_by(&done, TaskReading::TodoPlan), task_by(&done, TaskReading::ModelsPlan));
+    // A failed write is no plan, and text a hook appended hides none.
+    let mut failed = unplanned.clone();
+    failed.insert(6, ConversationMessage::tool_result("p3", "TodoWrite", "todos must not be empty", true));
+    assert_eq!(task_by(&failed, TaskReading::TodoPlan), task_by(&failed, TaskReading::ModelsPlan));
+    let mut hooked = unplanned;
+    let ContentBlock::ToolResult { output, .. } = &todo_result("p4", &[("Split", "Splitting", "in_progress")]).blocks[0] else {
+        unreachable!("a tool result");
+    };
+    hooked.insert(6, result("p4", "todo_write", &format!("{output}\n\nhook: noted")));
+    assert_eq!(task_by(&hooked, TaskReading::TodoPlan), "[~] Splitting");
+}
+
+/// A joined task fits the row's cap itself, the newest words first: the door
+/// cuts a task to its head, and a pasted brief said before must not push
+/// "go on" off its end.
+#[test]
+fn a_joined_task_keeps_the_newest_words_within_the_cap() {
+    let brief = "b".repeat(PATCH_REVIEW_TASK_CHAR_CAP * 3);
+    let messages = vec![user_text(&brief), said("Read it."), user_text("go on")];
+    let recent = task_by(&messages, TaskReading::PersonsRecent);
+    assert_eq!(recent.chars().count(), PATCH_REVIEW_TASK_CHAR_CAP);
+    assert!(recent.starts_with("bbb") && recent.ends_with("bb\n\ngo on"), "the brief's head, then the newest whole");
+    let ask = ask_reading(&messages, "turn-1", "t2", "edit_file", &one_hunk(), TaskReading::PersonsRecent).expect("asked");
+    assert_eq!(state(&ask)["task"], recent, "the state carries it as fitted");
+    // The model's words are the newest: past the whole cap, the person's go.
+    let long = vec![user_text("go on"), said_then_edits(&"m".repeat(PATCH_REVIEW_TASK_CHAR_CAP + 5), "t2")];
+    assert_eq!(task_by(&long, TaskReading::ModelsPlan), "m".repeat(PATCH_REVIEW_TASK_CHAR_CAP));
+    // Short of it, the person's words keep the head of the room left.
+    let tight = vec![user_text("go on"), said_then_edits(&"m".repeat(PATCH_REVIEW_TASK_CHAR_CAP - 5), "t2")];
+    assert_eq!(
+        task_by(&tight, TaskReading::ModelsPlan),
+        format!("go \n\n{}", "m".repeat(PATCH_REVIEW_TASK_CHAR_CAP - 5))
+    );
+}
+
 /// A mutation's own result is not evidence for the next patch: the evidence
 /// is the newest result that is not one.
 #[test]

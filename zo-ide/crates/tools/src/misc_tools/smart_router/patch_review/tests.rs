@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use api::SystemOneClient;
-use runtime::patch_review::{ask_for, Verdict};
+use runtime::patch_review::{ask_for, ask_reading, task_by, TaskReading, Verdict};
 use runtime::{ContentBlock, ConversationMessage, MessageRole, PatchAsk};
 use zerocode_core::jev::door::{JevSettings, Refused};
 use zerocode_core::jev::{digest_of, fingerprint_of, JevMode, PATCH_REVIEW, PATCH_REVIEW_REGRET_TURNS};
@@ -447,9 +447,20 @@ const REPLAY_SEED_ENV: &str = "ZEROCODE_PATCH_REVIEW_REPLAY_SEED";
 /// than the seed holds — spread evenly over its points.
 const REPLAY_LIMIT_ENV: &str = "ZEROCODE_PATCH_REVIEW_REPLAY_LIMIT";
 
-/// What one replay may spend, in dollars — the brief's ceiling: the replay
-/// stops asking once the reviews it has paid for reach it.
-const REPLAY_SPEND_CAP_USD: f64 = 0.20;
+/// Which task reading the replay asks under — a `TaskReading` word (`v1`, the
+/// seat's own, when unset): the same patches, the same labels, only
+/// `/state/task` read another way (t-6232).
+const REPLAY_STATE_ENV: &str = "ZEROCODE_PATCH_REVIEW_REPLAY_STATE";
+
+/// What comparing the task readings on one sample may spend in all, in
+/// dollars — the brief's ceiling (t-6232).
+const REPLAY_COMPARISON_CAP_USD: f64 = 0.30;
+
+/// What one replay may spend, in dollars: one reading's share of the
+/// comparison's ceiling. The replay stops asking once the reviews it has paid
+/// for reach it.
+#[allow(clippy::cast_precision_loss)]
+const REPLAY_SPEND_CAP_USD: f64 = REPLAY_COMPARISON_CAP_USD / TaskReading::ALL.len() as f64;
 
 /// How many of the first reviews to print whole — the state that was sent and
 /// the four answers — when a person wants to read what the seat was asked.
@@ -470,6 +481,10 @@ const REPLAY_IN_FLIGHT: usize = 4;
 struct ReplayPoint {
     ask: PatchAsk,
     hindsight: Option<runtime::patch_review::Hindsight>,
+    /// The task every reading reads at this patch, in `TaskReading::ALL`'s
+    /// order — read here, never sent, so one replay shows what the others
+    /// would have asked about the same sample.
+    tasks: Vec<String>,
 }
 
 /// What became of the patch `ask` names, read off the turns from the one it
@@ -494,8 +509,9 @@ fn hindsight_in(history: &[ConversationMessage], at: usize, ask: &PatchAsk) -> O
 }
 
 /// Every patch in `history` a review would have been asked about: an edit's
-/// result that wrote one, asked from the messages before it.
-fn replay_points(history: &[ConversationMessage]) -> Vec<ReplayPoint> {
+/// result that wrote one, asked from the messages before it with the task
+/// read as `reading` reads it.
+fn replay_points(history: &[ConversationMessage], reading: TaskReading) -> Vec<ReplayPoint> {
     let mut points = Vec::new();
     for (at, message) in history.iter().enumerate() {
         for block in &message.blocks {
@@ -505,14 +521,41 @@ fn replay_points(history: &[ConversationMessage]) -> Vec<ReplayPoint> {
             if *is_error {
                 continue;
             }
-            let Some(asked) = ask_for(&history[..at], "replay", tool_use_id, tool_name, output) else {
+            let before = &history[..at];
+            let Some(asked) = ask_reading(before, "replay", tool_use_id, tool_name, output, reading) else {
                 continue;
             };
             let hindsight = hindsight_in(history, at, &asked);
-            points.push(ReplayPoint { ask: asked, hindsight });
+            let tasks = TaskReading::ALL.iter().map(|other| task_by(before, *other)).collect();
+            points.push(ReplayPoint { ask: asked, hindsight, tasks });
         }
     }
     points
+}
+
+/// What each reading read over the replay's sample: on how many patches its
+/// task differed from the seat's own and from `v2b`'s, and how long it ran —
+/// so a table of one reading's answers can be read beside what it was asked.
+fn print_readings(points: &[ReplayPoint]) {
+    use zerocode_core::jev::summary::percentile;
+    let at = |reading: TaskReading| TaskReading::ALL.iter().position(|one| *one == reading).unwrap_or_default();
+    for (index, reading) in TaskReading::ALL.iter().enumerate() {
+        let differs = |from: TaskReading| points.iter().filter(|point| point.tasks[index] != point.tasks[at(from)]).count();
+        let mut chars: Vec<u64> =
+            points.iter().map(|point| u64::try_from(point.tasks[index].chars().count()).unwrap_or(u64::MAX)).collect();
+        chars.sort_unstable();
+        let share = |share| percentile(&chars, share).unwrap_or(0);
+        println!(
+            "  reading {:<3} task differs from v1 on {} of {}, from v2b on {}; chars p50 {} p90 {} max {}",
+            reading.word(),
+            differs(TaskReading::PersonsNewest),
+            points.len(),
+            differs(TaskReading::ModelsPlan),
+            share(0.5),
+            share(0.9),
+            chars.last().copied().unwrap_or(0)
+        );
+    }
 }
 
 /// How well `score` puts the regretted patches above the ones that stood —
@@ -567,6 +610,13 @@ fn the_patches_this_machine_wrote_reviewed_in_hindsight() {
         "the seed was made for another window"
     );
     let limit: usize = std::env::var(REPLAY_LIMIT_ENV).ok().and_then(|raw| raw.trim().parse().ok()).unwrap_or(usize::MAX);
+    let reading = std::env::var(REPLAY_STATE_ENV).map_or(Some(TaskReading::PersonsNewest), |word| TaskReading::named(&word));
+    let reading = reading.unwrap_or_else(|| {
+        panic!(
+            "{REPLAY_STATE_ENV} names one of {:?}",
+            TaskReading::ALL.map(TaskReading::word)
+        )
+    });
     let client = api::SystemOneConfig::from_env().expect("TYPESAFE_API_KEY in the environment").into_client();
     // A home of the replay's own: the person's ledgers and day count never move.
     let home = tempfile::tempdir().expect("a config home of the replay's own");
@@ -586,8 +636,9 @@ fn the_patches_this_machine_wrote_reviewed_in_hindsight() {
             continue;
         };
         read += 1;
-        points.extend(replay_points(&history));
+        points.extend(replay_points(&history, reading));
     }
+    let in_seed = points.len();
     // A limit takes points spread evenly over the seed, not its head: the
     // seed is ordered by how many patches a transcript wrote, and its head is
     // a handful of the busiest sessions.
@@ -595,6 +646,15 @@ fn the_patches_this_machine_wrote_reviewed_in_hindsight() {
         let every = points.len().div_ceil(limit);
         points = points.into_iter().step_by(every).collect();
     }
+    // Every reading asks about the same patches, so two replays of one seed
+    // and one limit ask the same sample — this fingerprint says so.
+    let sample = fingerprint_of(&points.iter().map(|point| point.ask.tool_use_id.as_str()).collect::<Vec<_>>().join("\n"));
+    println!(
+        "--- patch review replay, task reading {}: {} of the {in_seed} patches in the seed's transcripts, sample {sample}",
+        reading.word(),
+        points.len()
+    );
+    print_readings(&points);
 
     let mut rows: Vec<(PatchReviewRow, Option<runtime::patch_review::Answers>, Option<Hindsight>)> = Vec::new();
     let mut spent = 0.0;
@@ -687,7 +747,7 @@ fn the_patches_this_machine_wrote_reviewed_in_hindsight() {
         .count();
     let answered = permits + proposals;
     let decided_stood = stood;
-    println!("--- patch review replay: {} reviews over {read} transcripts ({skipped} skipped), {} points in the seed's transcripts", rows.len(), points.len());
+    println!("--- {} reviews asked over {read} transcripts ({skipped} skipped)", rows.len());
     println!("outcomes: {outcomes:?}");
     println!("evidence still a cleared placeholder after healing: {blanked} of {}", rows.len());
     println!(
@@ -748,8 +808,12 @@ fn the_patches_this_machine_wrote_reviewed_in_hindsight() {
     if let Ok(out) = std::env::var(REPLAY_OUT_ENV) {
         let lines: Vec<String> = rows
             .iter()
-            .map(|(row, answers, hindsight)| {
+            .zip(&points)
+            .map(|((row, answers, hindsight), point)| {
                 serde_json::json!({
+                    "reading": reading.word(),
+                    "judged": row.judged,
+                    "taskChars": point.ask.task.chars().count(),
                     "tool": row.tool,
                     "hunks": row.hunks,
                     "patchBytes": row.patch_bytes,
@@ -759,6 +823,7 @@ fn the_patches_this_machine_wrote_reviewed_in_hindsight() {
                     "hindsight": hindsight.map(Hindsight::word),
                     "elapsedMs": row.elapsed_ms,
                     "inputTokens": row.input_tokens,
+                    "model": row.model,
                 })
                 .to_string()
             })
@@ -780,7 +845,7 @@ fn the_patches_this_machine_wrote_reviewed_in_hindsight() {
     #[allow(clippy::cast_precision_loss)]
     let per_review = if rows.is_empty() { 0.0 } else { spent / rows.len() as f64 };
     println!(
-        "input tokens {input_tokens}, cost ${spent:.4} (${per_review:.6} per review), cap ${REPLAY_SPEND_CAP_USD:.2}"
+        "input tokens {input_tokens}, cost ${spent:.4} (${per_review:.6} per review), cap ${REPLAY_SPEND_CAP_USD:.3}"
     );
 }
 
