@@ -377,6 +377,14 @@ pub enum RuntimeRequest {
         walled: Vec<zerocode_core::orchestration::QuotaWallWitness>,
         now_ms: i64,
     },
+    /// Walls the wait rung held that lifted while their workers stayed
+    /// stopped at them (t-6427) — both witnesses already in hand
+    /// (`read_lift` builds nothing with one). The ledger revalidates and
+    /// tells each wall once.
+    QuotaLifts {
+        lifted: Vec<zerocode_core::orchestration::QuotaLift>,
+        now_ms: i64,
+    },
     /// What the stall seat read off quiet panes this beat, when the seat
     /// acts. The ledger revalidates lifecycle and writes one notice per
     /// silence.
@@ -669,6 +677,12 @@ impl std::fmt::Debug for RuntimeRequest {
             Self::QuotaWalls { walled, now_ms } => formatter
                 .debug_struct("RuntimeRequest::QuotaWalls")
                 .field("workers", &walled.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            // A count, for the same reason: a lift carries the agent's words.
+            Self::QuotaLifts { lifted, now_ms } => formatter
+                .debug_struct("RuntimeRequest::QuotaLifts")
+                .field("workers", &lifted.len())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::StallCauses { judged, now_ms } => formatter
@@ -1672,6 +1686,20 @@ impl RuntimeActor {
         now_ms: i64,
     ) -> Result<(bool, u64), RuntimeError> {
         match self.request(RuntimeRequest::QuotaWalls { walled, now_ms })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// The beat's lifted walls (t-6427). Answers whether a notice was
+    /// written, and the revision that answer speaks for; a wall already told
+    /// moves nothing.
+    pub fn quota_lifts(
+        &self,
+        lifted: Vec<zerocode_core::orchestration::QuotaLift>,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::QuotaLifts { lifted, now_ms })? {
             RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
             _ => Err(RuntimeError::AuthorityRejected),
         }
@@ -2747,6 +2775,7 @@ impl RuntimeState {
             } => self.turn_ended(term, turn_started_ms, interrupted, now_ms),
             RuntimeRequest::QuietSweep { stalled, now_ms } => self.quiet_swept(&stalled, now_ms),
             RuntimeRequest::QuotaWalls { walled, now_ms } => self.quota_walled(&walled, now_ms),
+            RuntimeRequest::QuotaLifts { lifted, now_ms } => self.quota_lifted(&lifted, now_ms),
             RuntimeRequest::StallCauses { judged, now_ms } => {
                 self.stall_causes_judged(&judged, now_ms)
             }
@@ -3716,6 +3745,39 @@ impl RuntimeState {
             return Err(RuntimeError::RecoveryRequired);
         }
         let told = self.ledger.workers_quota_walled(walled, now_ms);
+        if told == 0 {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn quota_lifted(
+        &mut self,
+        lifted: &[zerocode_core::orchestration::QuotaLift],
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || lifted.len() > MAX_LIST
+            || lifted.iter().any(|one| {
+                [&one.worker, &one.wall, &one.marker.source]
+                    .iter()
+                    .any(|name| name.is_empty() || name.len() > MAX_NAME)
+                    || one.marker.line.as_str().len() > MAX_PROSE
+            })
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let told = self.ledger.workers_quota_lifted(lifted, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
                 moved: false,

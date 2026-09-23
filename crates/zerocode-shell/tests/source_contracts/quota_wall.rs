@@ -48,9 +48,13 @@ fn the_wall_witness_is_asked_beside_the_stall_probe_and_outside_the_team_table()
         "held.actor.quota_walls(",
         "held.actor.quiet_sweep(",
         "walled_already",
-        // A wall silences its attempt while it stands, and no longer (t-6427).
-        "zerocode_core::orchestration::newest_wall(run, &dispatch.id)",
-        ".is_some_and(|wall| wall.stands(now_ms))",
+        // A wall silences its attempt while it stands, and no longer; the
+        // wait rung asks the gauge from the reset on and judges the lift with
+        // both witnesses before the silence is anything else (t-6427).
+        "zerocode_core::orchestration::wall_phase(run, worker, &dispatch.id, now_ms)",
+        "zerocode_core::orchestration::read_lift(",
+        "held.actor.quota_lifts(",
+        "host.ask_usage(gauge);",
     ] {
         assert!(
             sweep.contains(needed),
@@ -351,6 +355,8 @@ fn the_orchestration_guide_teaches_the_handover_order_and_its_flags() {
         "`wait,<agent[:model[:effort]]>`",
         "`run-show.handover.ladder`",
         "`rung: \"handover\"`",
+        "`reason: \"quota_lifted\"`",
+        "Nothing is typed for you.",
     ] {
         assert!(
             skill.contains(needed),

@@ -1492,6 +1492,10 @@ impl agent_teams::Host for TeamWindow {
         Some(text)
     }
 
+    fn ask_usage(&self, gauge: &str) {
+        crate::cmd::usage::ask_usage(self.app.state::<AppState>(), gauge);
+    }
+
     fn quota_wall_marker(
         &self,
         term: TermId,

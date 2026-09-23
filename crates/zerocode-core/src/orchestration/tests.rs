@@ -12625,6 +12625,160 @@ fn a_declared_wait_holds_the_handover_while_the_wall_it_waits_for_stands() {
     );
 }
 
+/// A wall the wait rung held, that lifted while its worker stayed stopped at
+/// it, is told to the coordinator once (t-6427) — the wall's follow-up, on the
+/// same two-witness rule: the agent's own words still stand at the wall, and
+/// the provider's number, read after the reset, is under it. Claude Code
+/// continues by itself about a minute after its reset, so on this machine the
+/// notice is for the walls that did not: a CLI that does not wait (Codex, zo),
+/// or a countdown somebody cancelled. While the wall stands the gauge is asked
+/// for a reading from the reset on; a number not yet read after the reset is
+/// waited for, one still at the wall is the next window's wall, and words
+/// that moved past the wall are some other silence. Only under a declared
+/// wait: without one the silence is ordinary news once the wall stops standing.
+#[test]
+fn a_lifted_wall_its_worker_stayed_stopped_at_is_told_once_under_a_wait() {
+    const NOW: i64 = 5_000_000;
+    let reset = NOW + 42 * 60_000;
+    let stops_standing = reset + QUOTA_WAIT_POLICY.slack_ms;
+    let lift_read_by = stops_standing + QUOTA_WAIT_POLICY.lift_read_ms;
+    let mut bench = Bench::new();
+    bench.json("run-create --name lifted");
+    bench.json("handover-policy --on-quota-wall wait");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/lifted", NOW);
+    let phase = |bench: &Bench, at: i64| {
+        let run = &bench.ledger.runs()[0];
+        wall_phase(run, run.worker(&worker).expect("the worker"), &dispatch, at)
+            .map(|(_, phase)| phase)
+    };
+    assert_eq!(
+        phase(&bench, NOW + 1),
+        Some(WallPhase::Stands { reread: false })
+    );
+    assert_eq!(
+        phase(&bench, reset),
+        Some(WallPhase::Stands { reread: true }),
+        "the gauge was not asked for from the reset on"
+    );
+    assert_eq!(phase(&bench, stops_standing), Some(WallPhase::Lifting));
+    assert_eq!(phase(&bench, lift_read_by), Some(WallPhase::Past));
+
+    let wall = newest_wall(&bench.ledger.runs()[0], &dispatch).expect("the wall");
+    let words = || Some(a_wall_marker("screen", "You've hit your usage limit"));
+    let quiet_since = NOW - QUIET_GRACE_MS;
+    let read = |marker, headroom: Option<Headroom>| {
+        read_lift(
+            &worker,
+            &wall,
+            quiet_since,
+            marker,
+            headroom.as_ref(),
+            stops_standing,
+        )
+    };
+    let next_window = Some(reset + 5 * 60 * 60_000);
+    assert_eq!(
+        read(None, Some(gauge("codex", 3, reset + 60_000, next_window))),
+        LiftReading::MovedOn
+    );
+    assert_eq!(read(words(), None), LiftReading::Unread);
+    assert_eq!(
+        read(
+            words(),
+            Some(gauge("codex", 98, reset - 60_000, Some(reset)))
+        ),
+        LiftReading::Unread,
+        "a number read before the reset lifted the wall"
+    );
+    assert_eq!(
+        read(
+            words(),
+            Some(gauge("codex", 98, reset + 60_000, next_window))
+        ),
+        LiftReading::StillWalled
+    );
+    let LiftReading::Lifted(lift) = read(
+        words(),
+        Some(gauge("codex", 3, reset + 60_000, next_window)),
+    ) else {
+        panic!("a number under the wall, read after the reset, did not lift it");
+    };
+    assert_eq!(lift.wall, wall.wall);
+
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_lifted(std::slice::from_ref(&lift), stops_standing - 1),
+        0,
+        "a lift was told while the wall still stood"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_lifted(std::slice::from_ref(&lift), stops_standing),
+        1
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_lifted(&[lift], stops_standing + 1_000),
+        0,
+        "the same lift was told twice"
+    );
+    assert_eq!(phase(&bench, stops_standing + 1_000), Some(WallPhase::Past));
+    let told = bench.json("check --peek --types went_quiet");
+    assert_eq!(told["count"], 1, "{told}");
+    let body: serde_json::Value =
+        serde_json::from_str(told["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["reason"], QUOTA_LIFTED_REASON);
+    assert_eq!(body["rung"], "wait");
+    assert_eq!(body["workerId"], worker);
+    assert_eq!(body["dispatchId"], dispatch);
+    assert_eq!(body["wallId"], wall.wall);
+    assert_eq!(body["resetsAtMs"], reset);
+    assert_eq!(body["gauge"]["usedPercent"], 3);
+    assert_eq!(body["gauge"]["updatedAtMs"], reset + 60_000);
+    assert_eq!(body["marker"]["line"], "You've hit your usage limit");
+    assert_eq!(body["stalledSinceMs"], quiet_since);
+    assert_eq!(body["notification"], true);
+
+    // Without a declared wait the rung owes nothing: the wall stops standing
+    // and the silence is the ordinary road's.
+    let mut plain = Bench::new();
+    plain.json("run-create --name plain");
+    let task = plain.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _, dispatch) = a_walled_worker(&mut plain, &task, "", "/wt/plain", NOW);
+    let run = &plain.ledger.runs()[0];
+    assert_eq!(
+        wall_phase(
+            run,
+            run.worker(&worker).expect("the worker"),
+            &dispatch,
+            reset
+        )
+        .map(|(_, phase)| phase),
+        Some(WallPhase::Stands { reread: false }),
+        "an undeclared wait asked the gauge"
+    );
+    assert_eq!(
+        wall_phase(
+            run,
+            run.worker(&worker).expect("the worker"),
+            &dispatch,
+            stops_standing
+        )
+        .map(|(_, phase)| phase),
+        Some(WallPhase::Past)
+    );
+}
+
 /// A launcher that can say whether a checkout still exists — what the
 /// window answers from `is_dir`, handed over here.
 struct Checkouts {

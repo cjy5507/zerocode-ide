@@ -235,6 +235,32 @@ pub(crate) fn claude_usage(state: State<'_, AppState>, force: bool) -> UsageRepo
     )
 }
 
+/// One gauge's ask, as the status bar makes it.
+type AskUsage = for<'a> fn(State<'a, AppState>, bool) -> UsageReport;
+
+/// Every gauge the ledger reads, by the name its table answers
+/// (`zerocode_core::orchestration::quota_gauge_for`), and the command the
+/// status bar asks it through — one table, so the beat's re-read and the
+/// cache it reads name the same gauges (t-6427).
+pub(crate) const USAGE_ASKS: [(&str, AskUsage); 6] = [
+    ("claude", claude_usage),
+    ("codex", codex_usage),
+    ("opencode", opencode_usage),
+    ("grok", grok_usage),
+    ("kimi", kimi_usage),
+    ("antigravity", antigravity_usage),
+];
+
+/// Ask one gauge to read its provider again, never forced: the refetch
+/// floor, the failure backoff and one scan at a time all hold
+/// ([`usage_report`]), and nothing waits on the answer (t-6427). A name with
+/// no gauge here asks nothing.
+pub(crate) fn ask_usage(state: State<'_, AppState>, gauge: &str) {
+    if let Some((_, ask)) = USAGE_ASKS.iter().find(|(name, _)| *name == gauge) {
+        let _ = ask(state, false);
+    }
+}
+
 /// The same contract as [`claude_usage`], against Codex's own screen: never
 /// blocks, never repeats within [`usage::MIN_REFETCH`] unless forced, never
 /// runs two scans at once, and never shows another account's figure.

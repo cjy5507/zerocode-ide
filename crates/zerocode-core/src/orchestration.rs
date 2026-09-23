@@ -9005,8 +9005,10 @@ impl Ledger {
                     "nothing was settled: the attempt is open and the task is carried, and \
                      the wait rung holds this wall until `wait.standsUntilMs` — its agent \
                      may continue by itself after the reset (Claude Code does, about a \
-                     minute after it), and nothing is handed over before then; after it, \
-                     the worker's silence is news again"
+                     minute after it), and nothing is handed over before then. If it is \
+                     still stopped at the wall once the provider's number says the wall \
+                     lifted, a `went_quiet` notice with `reason: quota_lifted` says so; \
+                     after that its silence is ordinary news"
                 } else {
                     "nothing was settled: the attempt is open and the task is carried. Hand \
                      it over yourself (commit the WIP in its checkout, `worker-stop \
@@ -9055,6 +9057,87 @@ impl Ledger {
                 continue;
             };
             if self.post(&run_id, draft, now_ms).is_ok() {
+                told += 1;
+            }
+        }
+        told
+    }
+
+    /// A wall the wait rung held lifted while its worker stayed stopped at
+    /// it: the coordinator is told, once per wall (t-6427).
+    ///
+    /// The beat hands over only [`QuotaLift`]s, which [`read_lift`] builds
+    /// with both witnesses; the ledger revalidates what it owns — a live
+    /// worker in its seat, no person's hand on the pane, an open attempt, no
+    /// answer it waits on, and the wall it names still the attempt's newest
+    /// and owed its word ([`wall_phase`]). The word is a `went_quiet` notice,
+    /// `reason: quota_lifted`: the silence the wall explained is a silence
+    /// again, and after it the ordinary road reminds as it always does.
+    /// Answers how many were told.
+    pub fn workers_quota_lifted(&mut self, lifted: &[QuotaLift], now_ms: i64) -> usize {
+        if now_ms < 0 {
+            return 0;
+        }
+        let mut told = 0;
+        for lift in lifted {
+            if lift.since_ms < 0 {
+                continue;
+            }
+            let Some((run_id, body, task, dispatch)) = self.runs.iter().find_map(|run| {
+                let worker = run.worker(&lift.worker)?;
+                if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
+                    return None;
+                }
+                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+                if !dispatch.is_open() || awaiting_reply(run, &worker.id) {
+                    return None;
+                }
+                let (wall, phase) = wall_phase(run, worker, &dispatch.id, now_ms)?;
+                if wall.wall != lift.wall || phase != WallPhase::Lifting {
+                    return None;
+                }
+                Some((
+                    run.id.clone(),
+                    serde_json::json!({
+                        "workerId": worker.id,
+                        "agent": worker.agent,
+                        "pane": worker.pane,
+                        "taskId": dispatch.task,
+                        "dispatchId": dispatch.id,
+                        "reason": QUOTA_LIFTED_REASON,
+                        "rung": QuotaWallRung::Wait.as_str(),
+                        "wallId": wall.wall,
+                        "stalledSinceMs": lift.since_ms,
+                        "observedAtMs": now_ms,
+                        "resetsAtMs": wall.resets_at_ms,
+                        "gauge": {
+                            "provider": lift.headroom.provider,
+                            "usedPercent": lift.headroom.used_percent,
+                            "window": lift.headroom.window.as_str(),
+                            "updatedAtMs": lift.headroom.updated_at_ms,
+                            "resetsAtMs": lift.headroom.resets_at_ms,
+                        },
+                        "marker": {
+                            "source": lift.marker.source,
+                            "line": lift.marker.line,
+                        },
+                        "next": "the wall lifted — the provider's number, read after its \
+                                 reset, is under it — and the worker is still stopped at it: \
+                                 its own continuation did not come. Wake it with a line of \
+                                 mail (`send --to worker:<id>`, which the pointer types into \
+                                 its composer), or hand it over",
+                        "notification": true,
+                    }),
+                    dispatch.task.clone(),
+                    dispatch.id.clone(),
+                ))
+            }) else {
+                continue;
+            };
+            if self
+                .record_quiet_observation(&run_id, body, task, dispatch, now_ms, true)
+                .is_some()
+            {
                 told += 1;
             }
         }
@@ -11644,6 +11727,10 @@ pub struct QuotaWaitPolicy {
     /// The longest a wall stands, from the moment its two witnesses met,
     /// when its row names no reset — or one further away than this.
     pub max_wait_ms: i64,
+    /// Under a declared wait, how long after the wall stops standing the
+    /// beat waits for the provider's number read after the reset, before the
+    /// silence is ordinary news without it.
+    pub lift_read_ms: i64,
 }
 
 /// The table as measured on this machine (2026-09-24, the ledger's seven
@@ -11661,6 +11748,7 @@ pub struct QuotaWaitPolicy {
 pub const QUOTA_WAIT_POLICY: QuotaWaitPolicy = QuotaWaitPolicy {
     slack_ms: QUIET_GRACE_MS,
     max_wait_ms: 6 * 60 * 60 * 1000,
+    lift_read_ms: 5 * 60 * 1000,
 };
 
 /// One attempt's newest quota wall, read off its own `quota_walled` row:
@@ -11735,6 +11823,138 @@ fn wall_window(observed_at_ms: i64, resets_at_ms: Option<i64>) -> (i64, Result<(
         );
     }
     (until, Ok(()))
+}
+
+/// What the beat owes a quiet worker's newest wall now (t-6427).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallPhase {
+    /// The wall still explains the silence: nothing is said. `reread` asks
+    /// the window's gauge for a reading, so the lift can be judged the
+    /// moment the wall stops standing.
+    Stands { reread: bool },
+    /// The wall stopped standing, and the wait rung owes the coordinator a
+    /// word if the worker is still at it: judge the lift before the silence
+    /// is anything else.
+    Lifting,
+    /// Past: the silence is the ordinary road's again.
+    Past,
+}
+
+/// The `reason` a quiet notice carries when it is the wait rung's word
+/// about a wall that lifted while its worker stayed stopped at it.
+pub const QUOTA_LIFTED_REASON: &str = "quota_lifted";
+
+/// A wall's lift, with both witnesses (t-6427): the agent's own words still
+/// at the wall, and the provider's number read after the reset, under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaLift {
+    pub worker: String,
+    /// The `quota_walled` row that lifted.
+    pub wall: String,
+    /// Since when the worker has been quiet, by the stall probe.
+    pub since_ms: i64,
+    pub marker: QuotaWallMarker,
+    pub headroom: Headroom,
+}
+
+/// What the provider's number and the agent's words say about a wall that
+/// stopped standing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiftReading {
+    /// Both witnesses: the wall lifted and the worker did not move.
+    Lifted(QuotaLift),
+    /// No number read since the reset: ask for one, and wait.
+    Unread,
+    /// Read after the reset and still at the wall — the next window's wall,
+    /// the wall witness's to write.
+    StillWalled,
+    /// The agent's own words moved past the wall: its silence is another.
+    MovedOn,
+}
+
+/// Where `worker`'s attempt `dispatch_id` stands against its newest wall —
+/// one reading for the beat and for the ledger's revalidation (t-6427).
+///
+/// The wait rung holds a wall only when `worker`'s standing order declares
+/// it and the wall's reset is one to wait for. It asks for the provider's
+/// number from the reset on, and once the wall stops standing it owes the
+/// coordinator one word about the lift, for [`QUOTA_WAIT_POLICY`]'s
+/// `lift_read_ms` at most — unless that word was already said.
+pub fn wall_phase(
+    run: &Run,
+    worker: &Worker,
+    dispatch_id: &str,
+    now_ms: i64,
+) -> Option<(WallAt, WallPhase)> {
+    let wall = newest_wall(run, dispatch_id)?;
+    let (waits, _) = standing_order(run, worker);
+    let held = waits && wall.reset_waitable;
+    let phase = if wall.stands(now_ms) {
+        WallPhase::Stands {
+            reread: held && wall.resets_at_ms.is_some_and(|at| now_ms >= at),
+        }
+    } else if held
+        && now_ms
+            < wall
+                .stands_until_ms
+                .saturating_add(QUOTA_WAIT_POLICY.lift_read_ms)
+        && !lift_told(run, dispatch_id, &wall.wall)
+    {
+        WallPhase::Lifting
+    } else {
+        WallPhase::Past
+    };
+    Some((wall, phase))
+}
+
+/// Whether the wait rung already told this wall's lift.
+fn lift_told(run: &Run, dispatch_id: &str, wall_id: &str) -> bool {
+    run.messages.iter().any(|held| {
+        held.kind == MessageKind::WentQuiet
+            && held.dispatch.as_deref() == Some(dispatch_id)
+            && serde_json::from_str::<serde_json::Value>(held.body.as_str()).is_ok_and(|body| {
+                body["reason"] == QUOTA_LIFTED_REASON && body["wallId"] == wall_id
+            })
+    })
+}
+
+/// Read one wall's lift off the agent's own words and the provider's number
+/// (t-6427) — two witnesses, the wall's own rule turned round. Words that
+/// moved past the wall are another silence; a number taken before the reset,
+/// or too old to act on, has not been read yet; one still at the wall is the
+/// next window's wall; one under it, beside words still at the wall, is the
+/// lift.
+pub fn read_lift(
+    worker: &str,
+    wall: &WallAt,
+    since_ms: i64,
+    marker: Option<QuotaWallMarker>,
+    headroom: Option<&Headroom>,
+    now_ms: i64,
+) -> LiftReading {
+    let Some(marker) = marker else {
+        return LiftReading::MovedOn;
+    };
+    let Some(held) = headroom.filter(|held| {
+        wall.resets_at_ms
+            .is_some_and(|at| held.updated_at_ms >= at && held.updated_at_ms <= now_ms)
+    }) else {
+        return LiftReading::Unread;
+    };
+    let reading = read_gauge(held, now_ms);
+    if reading.wall_to_act_on() {
+        return LiftReading::StillWalled;
+    }
+    if reading.stale {
+        return LiftReading::Unread;
+    }
+    LiftReading::Lifted(QuotaLift {
+        worker: worker.to_string(),
+        wall: wall.wall.clone(),
+        since_ms,
+        marker,
+        headroom: held.clone(),
+    })
 }
 
 /* ---- the transient-error continuation (t-4537) ------------------------ */

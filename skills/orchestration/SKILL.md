@@ -679,6 +679,16 @@ reaches it — the way to keep a worker pinned to its model and effort.
 `run-show.handover.ladder` reads the rungs back in walking order; the
 `quota_walled` news carries `ladder` and `wait: {standsUntilMs}` (or
 `{skipped: <why>}`), and a `handover` receipt carries `rung: "handover"`.
+Under `wait` the beat also asks the window's usage gauge for a fresh
+reading from the reset on (never forced — the status bar's own floor and
+backoff hold), and if the worker is still stopped at its wall once the wall
+stops standing — its own words still at the wall, the provider's number
+read after the reset under it — you get ONE `went_quiet` notice with
+`reason: "quota_lifted"` and `rung: "wait"`, the `wallId`, and the `gauge`
+that says so: its own continuation did not come (a CLI that does not wait,
+or a countdown somebody cancelled), so wake it with a line of mail or hand
+it over. Nothing is typed for you. With no reading after the reset within
+five minutes, or without `wait`, the silence is ordinary `went_quiet` news.
 
 If what you were asked for is "give this to another agent" and nobody asked
 you to watch it or collect a result, you do not need this skill. Make a

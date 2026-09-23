@@ -881,6 +881,18 @@ pub trait Host {
     ) {
     }
 
+    /// Ask the window's usage gauge `gauge` to read its provider again, the
+    /// way the status bar asks — never forced, so at most one read runs at a
+    /// time, none inside its refetch floor and none while a failed read
+    /// backs off (t-6427). Nothing waits on it: the answer lands in the
+    /// cache the beat reads.
+    ///
+    /// The wait rung asks, from a held wall's reset on: the lift is judged
+    /// by a number read after the reset, and the window's own poll stops
+    /// while nobody looks at the window. Test and tmux-only hosts read
+    /// nothing.
+    fn ask_usage(&self, _gauge: &str) {}
+
     /// Publish a restored worker only after its durable seat has moved. Fake
     /// hosts need no renderer surface and therefore default to doing nothing.
     fn announce_reseated_worker(
