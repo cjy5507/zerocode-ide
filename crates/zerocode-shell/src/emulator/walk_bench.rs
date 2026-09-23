@@ -45,7 +45,7 @@ fn knob(name: &str) -> Option<String> {
 }
 
 fn simctl(words: &[&str]) {
-    let _ = std::process::Command::new("xcrun")
+    let _ = crate::proc::quiet_command("xcrun")
         .arg("simctl")
         .args(words)
         .output();
@@ -81,6 +81,7 @@ fn call_row(argv: &[String], ms: f64, answer: &TeamAnswer) -> Value {
             .and_then(Value::as_str)
             .map(|message| message.chars().take(160).collect::<String>()),
         "items": result.get("items").and_then(Value::as_array).map(Vec::len),
+        "legend": result.get("legend"),
         "count": result.get("count"),
         "settle": result.get("settle"),
         "confirmedBy": result.get("confirmedBy"),
@@ -117,7 +118,7 @@ fn to_the_first_screen(udid: &str) -> Option<usize> {
 /// The machine's one-minute load average, as `sysctl` says it — the bench's
 /// numbers are only comparable between walks taken under similar load.
 fn load() -> Option<f64> {
-    let said = std::process::Command::new("sysctl")
+    let said = crate::proc::quiet_command("sysctl")
         .args(["-n", "vm.loadavg"])
         .output()
         .ok()?;
