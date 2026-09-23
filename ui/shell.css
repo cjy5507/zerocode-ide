@@ -37693,6 +37693,7 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-row-open {
+  display: block;
   padding: 0;
   border: 0;
   background: none;
@@ -37700,6 +37701,16 @@ h4.knowledge-inspector-head::after {
   font: inherit;
   text-align: left;
   cursor: pointer;
+}
+
+/* The feature's id under its name, small (t-6277 D7): the word its settings
+   key and its ledger rows are found by. */
+.jev-row-id {
+  display: block;
+  color: var(--ink-mist);
+  font-family: var(--font-mono);
+  font-size: var(--jev-meta-size);
+  font-weight: 400;
 }
 
 /* The drawer rides a dock pinned to the top of the page's window, so it

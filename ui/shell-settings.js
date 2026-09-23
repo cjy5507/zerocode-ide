@@ -6294,8 +6294,9 @@ function setLocale(code) {
   // row's next-run line, and the sentence under the form.
   paintAutoPickers();
   if (!el("flow-console").hidden) paintFlowConsole();
-  // The TypeSafe switch builds its options from the backend's list of modes,
-  // so `applyLocale` has no key on them to sweep.
+  // The TypeSafe card's switch line and the Jev dashboard build their words
+  // from the backend's answer and the features' template — each feature's
+  // name and one-sentence tip — so `applyLocale` has no key on them to sweep.
   if (typesafeState) paintTypeSafe(typesafeState);
   paintAutomations();
   // 정리 목록은 행을 직접 짓는다 — 칩과 필과 버튼의 말이 전부 여기서 나오므로,

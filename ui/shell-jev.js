@@ -600,6 +600,19 @@ function paintJevViews() {
   }
 }
 
+/* What a feature judges, in one sentence: the first of the paragraph its
+ * drawer shows whole (`…Hint`, the same key, in the language in force), cut
+ * where a sentence ends in any of the catalog's languages — a stop and a
+ * space or the end (ko, en, es), or an ideographic stop (ja, zh). A version
+ * like 1.5 or a host like api.typesafe.ai is not an end (t-6277 D7). */
+function jevHintLead(id) {
+  const hint = jevFeature(id).hint;
+  if (!hint) return "";
+  const words = t(hint.key, hint.source);
+  const end = words.search(/[.!?](\s|$)|[。！？]/u);
+  return end < 0 ? words : words.slice(0, end + 1).trim();
+}
+
 /* A feature's name, in the language in force: the settings markup's
  * (`jevFeature`), so the dashboard carries no second list of names. */
 function jevSeatName(id) {
@@ -1061,16 +1074,20 @@ function jevDashRow(body, id) {
 function paintJevRow(row, id, held, standing, head) {
   const cell = (name) => row.querySelector(`[data-jev-cell="${name}"]`);
   // The name opens the feature's drawer — a button, so the row opens from
-  // the keyboard as well as from a click anywhere on it (t-6277 D6).
+  // the keyboard as well as from a click anywhere on it (t-6277 D6) — with
+  // the feature's id under it, small, and as its tip what the feature judges
+  // in one sentence (D7).
   const seat = cell("seat");
   let open = seat.querySelector(".jev-row-open");
   if (!open) {
     open = document.createElement("button");
     open.type = "button";
     open.className = "jev-row-open";
-    seat.replaceChildren(open);
+    seat.replaceChildren(open, jevNode("span", "jev-row-id"));
   }
   open.textContent = jevSeatName(id);
+  open.dataset.tip = jevHintLead(id);
+  seat.querySelector(".jev-row-id").textContent = id;
   const choice = standing ? jevSeatChoice(typesafeState, id) : null;
   const applying = held ? held.applies : Boolean(choice?.applies);
   row.classList.toggle("is-applying", Boolean(applying));

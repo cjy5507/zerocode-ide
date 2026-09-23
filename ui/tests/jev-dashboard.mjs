@@ -472,7 +472,7 @@ export async function testJevDashboard(browser, origin, ok) {
       return {
         ms, active: activeTabId, visible: !view().hidden, hiddenAttr: view().hidden,
         rowIds: rows.map((row) => row.dataset.jevDashRow),
-        rowNames: rows.map((row) => row.querySelector('[data-jev-cell="seat"]').textContent),
+        rowNames: rows.map((row) => row.querySelector('[data-jev-cell="seat"] .jev-row-open').textContent),
         cardNames, cardSeats: window.__JEV__.seats, summon, recallWeek, statuses, caption, small, trends, switchOver, tableSelects,
         strip, fold, bodyRows: bodyRows.length,
         asks: window.__JEV__.asks.slice(), settingsAsks: window.__COUNTS__.typesafe_settings ?? 0,
@@ -754,6 +754,52 @@ export async function testJevDashboard(browser, origin, ok) {
       dr.pinned.scrolled > 0 && Math.abs(dr.pinned.top) <= 1 && Math.abs(dr.pinned.bottom) <= 1 && Math.abs(dr.pinned.right) <= 1
         && dr.escaped.hidden && dr.escaped.focus === "browser" && dr.toggled,
       JSON.stringify({ pinned: dr.pinned, escaped: dr.escaped, toggled: dr.toggled }));
+
+    // Each feature names its id under its name, small, and says what it
+    // judges in one sentence as its tip — the first sentence of the paragraph
+    // the drawer shows whole, read from the same key (t-6277 D7). The tip is
+    // the window's own node, never the operating system's `title`.
+    const named = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const folded = !jevUnusedOpen;
+      if (folded) {
+        view.querySelector("[data-jev-fold] button").click();
+        await window.__PAINTED__();
+      }
+      const template = document.getElementById("jev-features").content;
+      const firstSentence = (text) => {
+        const end = text.search(/[.!?](\s|$)|[。！？]/u);
+        return end < 0 ? text : text.slice(0, end + 1).trim();
+      };
+      const rows = [...view.querySelectorAll("[data-jev-dash-row]")].map((row) => {
+        const id = row.dataset.jevDashRow;
+        const hint = template.querySelector(`[data-jev-feature="${id}"] [data-jev-hint]`);
+        return {
+          id,
+          shownId: row.querySelector(".jev-row-id")?.textContent ?? null,
+          tip: row.querySelector(".jev-row-open")?.dataset.tip ?? null,
+          expected: firstSentence(t(hint.dataset.i18n, hint.textContent.replace(/\s+/g, " ").trim())),
+        };
+      });
+      const titled = view.querySelectorAll("[title]").length;
+      const button = view.querySelector('[data-jev-dash-row="placement"] .jev-row-open');
+      button.focus();
+      await window.__PAINTED__();
+      const tooltip = document.querySelector(".tooltip");
+      const shown = { text: tooltip?.textContent ?? null, hidden: tooltip?.hidden ?? true };
+      button.blur();
+      if (folded) {
+        view.querySelector("[data-jev-fold] button").click();
+        await window.__PAINTED__();
+      }
+      return { rows, titled, shown };
+    });
+    const unnamed = named.rows.filter((row) => row.shownId !== row.id || !row.tip || row.tip !== row.expected);
+    ok("every feature names its id under its name and tips what it judges in one sentence, from its own key",
+      named.rows.length === SEATS && unnamed.length === 0 && named.rows.every((row) => row.tip.length < row.expected.length + 1)
+        && named.titled === 0 && !named.shown.hidden
+        && named.shown.text === named.rows.find((row) => row.id === "placement").tip,
+      JSON.stringify({ rows: named.rows.length, unnamed: unnamed.slice(0, 3), titled: named.titled, shown: named.shown }));
 
     // The switch over the table goes through the card's door, and the card's
     // own switch follows — one state, two surfaces (§6.1): the line's press
