@@ -944,14 +944,27 @@ pub(crate) fn resume_session(
         });
     // Nothing was said, so nothing was cut.
     let interrupted = interrupted && !fresh;
-    let nudge = interrupted.then(|| {
+    // What the restart cut under this worker's pane, read at the goodbye
+    // (t-6428 ⑤): a wake whose turn had ended is still nudged when commands
+    // it left running were cut, and the nudge names them — the same road,
+    // the same receipt.
+    let cut = reseating
+        .as_deref()
+        .map(|worker| {
+            crate::orchestration::restart_census::take_cut(state.local_data_root(), worker)
+        })
+        .unwrap_or_default();
+    let marked = interrupted || !cut.is_empty();
+    let nudge = marked.then(|| {
         restart_nudge_runtime::resume_nudge(
+            interrupted,
             reseating.is_some(),
             restart_nudge_runtime::worktree_state(
                 &root,
                 u64::try_from(now_epoch_ms() / 1_000).unwrap_or_default(),
             )
             .as_ref(),
+            &cut,
         )
     });
     let ResumeCommand {
@@ -1126,7 +1139,7 @@ pub(crate) fn resume_session(
         term,
         kind.slug(),
         &resumed_session_id,
-        interrupted,
+        marked,
         nudge.as_deref().unwrap_or_default(),
     );
     if let Some((addr, token, session_id, observation)) = zo_channel {

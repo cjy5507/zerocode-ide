@@ -483,8 +483,14 @@ pub(crate) fn reseat_sleeping(
             continue;
         }
         // The same words a resumed pane's witness road carries (t-3058):
-        // the seat sentence, and where the checkout stands by git's word.
+        // the seat sentence, where the checkout stands by git's word, and
+        // the commands the restart cut under its pane (t-6428 ⑤).
+        let cut = BLACKBOX
+            .get()
+            .map(|root| restart_census::take_cut(root, &worker))
+            .unwrap_or_default();
         let nudge = crate::restart_nudge_runtime::resume_nudge(
+            true,
             true,
             checkout
                 .as_deref()
@@ -495,6 +501,7 @@ pub(crate) fn reseat_sleeping(
                     )
                 })
                 .as_ref(),
+            &cut,
         );
         let decided = match held.actor.prepare_worker_reseat(
             &run_id,
@@ -3131,6 +3138,14 @@ pub(crate) fn window_exiting(
     if (first || !taken.workers.is_empty())
         && let Some(root) = BLACKBOX.get()
     {
+        // What each worker's wake will be told was cut (t-6428 ⑤) — left
+        // before the lines, and replaced whole: an older note is stale.
+        if let Err(error) = restart_census::leave_cut(root, &taken) {
+            crate::note_window_event(
+                root,
+                &format!("exit: the cut commands were not left for the wakes: {error}"),
+            );
+        }
         for line in restart_census::goodbye_lines(
             &road.to_string(),
             crate::exit_runtime::choice().word(),

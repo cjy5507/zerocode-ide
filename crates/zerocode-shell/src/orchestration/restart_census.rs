@@ -22,7 +22,9 @@
 //! that turn: the census counts the turn once, and names its commands only in
 //! the goodbye's own lines.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Instant;
 
 use super::PaneTurn;
@@ -335,6 +337,68 @@ fn file_name(program: &str) -> &str {
     program.rsplit(['/', '\\']).next().unwrap_or(program)
 }
 
+/// Where the goodbye leaves each worker's cut commands for its wake
+/// (t-6428 ⑤): beside the window's log, in the local data root.
+const CUT_FILE: &str = "restart-cut.json";
+
+/// What the goodbye left for the wakes, loaded once per data root per
+/// process: the old window writes it on its way out, and the new one reads
+/// it at its first wake.
+type CutBook = HashMap<PathBuf, HashMap<String, Vec<String>>>;
+
+fn cut_book() -> &'static Mutex<CutBook> {
+    static BOOK: OnceLock<Mutex<CutBook>> = OnceLock::new();
+    BOOK.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Leave each worker's cut commands for its wake (t-6428 ⑤): the workers
+/// that had commands running under their panes as the window went. A
+/// goodbye that cut nothing leaves no file — not even an older one.
+pub(crate) fn leave_cut(root: &Path, census: &RestartCensus) -> std::io::Result<()> {
+    let cut: BTreeMap<&str, &Vec<String>> = census
+        .workers
+        .iter()
+        .filter_map(|one| {
+            one.commands
+                .as_ref()
+                .filter(|commands| !commands.is_empty())
+                .map(|commands| (one.worker.as_str(), commands))
+        })
+        .collect();
+    let path = root.join(CUT_FILE);
+    if cut.is_empty() {
+        return match crate::durable_file::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        };
+    }
+    let bytes = serde_json::to_vec(&cut).map_err(std::io::Error::other)?;
+    crate::durable_file::replace_bytes(&path, &bytes).map(|_| ())
+}
+
+/// The commands the goodbye cut under this worker's pane, said once
+/// (t-6428 ⑤). The first wake after a boot takes the file the goodbye left
+/// and removes it; each worker's entry goes to its own wake and no other.
+pub(crate) fn take_cut(root: &Path, worker: &str) -> Vec<String> {
+    let mut book = cut_book().lock().unwrap_or_else(|held| held.into_inner());
+    book.entry(root.to_path_buf())
+        .or_insert_with(|| load_cut(root))
+        .remove(worker)
+        .unwrap_or_default()
+}
+
+/// The note as the goodbye left it, taken off the disk: nothing, or a note
+/// nobody can read, is nothing cut.
+fn load_cut(root: &Path) -> HashMap<String, Vec<String>> {
+    let path = root.join(CUT_FILE);
+    let loaded = crate::durable_file::read_plain_file(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    let _ = crate::durable_file::remove_file(&path);
+    loaded
+}
+
 /// The goodbye's lines (t-6428 ①): one for the road, the census's numbers
 /// at the moment the window actually went and what the person chose when
 /// asked, then one per worker with its turn and what ran under it — the
@@ -439,6 +503,46 @@ mod tests {
         assert!(census(Vec::new()).gap);
         let idle = census(vec![worker(Turn::Rest, Some(&[]))]);
         assert!(idle.gap && !idle.busy);
+    }
+
+    #[test]
+    fn the_goodbye_leaves_each_workers_cut_commands_for_its_own_wake_once() {
+        let root = tempfile::tempdir().expect("a data root");
+        let file = root.path().join(CUT_FILE);
+        let named = |id: &str, commands: Option<&[&str]>| WorkerCut {
+            worker: id.to_string(),
+            ..worker(Turn::Rest, commands)
+        };
+        let census = RestartCensus {
+            workers: vec![
+                named("w-1", Some(&["cargo test -p zerocode-shell", "just gate"])),
+                named("w-2", Some(&[])),
+                named("w-3", None),
+            ],
+            took_ms: 0,
+        };
+        leave_cut(root.path(), &census).expect("the goodbye leaves its note");
+        assert!(file.exists(), "nothing was left for the wakes");
+        assert_eq!(
+            take_cut(root.path(), "w-1"),
+            vec!["cargo test -p zerocode-shell", "just gate"]
+        );
+        assert!(!file.exists(), "the first wake takes the note");
+        assert!(take_cut(root.path(), "w-1").is_empty(), "said once");
+        assert!(take_cut(root.path(), "w-2").is_empty());
+        assert!(take_cut(root.path(), "w-3").is_empty());
+        // A goodbye that cut nothing leaves nothing, not even an older note.
+        let later = tempfile::tempdir().expect("another data root");
+        leave_cut(later.path(), &census).expect("a note");
+        leave_cut(
+            later.path(),
+            &RestartCensus {
+                workers: vec![named("w-4", Some(&[]))],
+                took_ms: 0,
+            },
+        )
+        .expect("no note");
+        assert!(!later.path().join(CUT_FILE).exists());
     }
 
     #[test]

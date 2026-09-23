@@ -12354,7 +12354,9 @@ fn a_wake_with_nothing_written_starts_what_the_launch_button_starts() {
     let judged = waking
         .find("zerocode_core::conversation_never_written(")
         .expect("the wake no longer asks whether anything was written");
-    let nudged = waking.find("interrupted.then(|| {").expect("the nudge");
+    // The mark is the rollout's verdict or the commands the restart cut
+    // (t-6428); a pane nothing was ever written in has neither.
+    let nudged = waking.find("marked.then(|| {").expect("the nudge");
     let chosen = waking.find("fresh_command(&agent").expect("the fresh road");
     assert!(
         judged < nudged && nudged < chosen,
@@ -12441,12 +12443,18 @@ fn a_codex_wake_asks_its_rollout_before_it_builds_the_nudge() {
     let asked = resuming
         .find("restart_nudge_runtime::wake_interrupted(")
         .expect("the wake no longer asks the rollout for its mark");
+    // The mark is the rollout's verdict, or the commands the restart cut
+    // under a pane whose turn had ended (t-6428): either nudges.
     let built = resuming
-        .find("interrupted.then(|| {")
+        .find("marked.then(|| {")
         .expect("the nudge is no longer built from the mark");
     assert!(
+        resuming.contains("let marked = interrupted || !cut.is_empty();"),
+        "the mark is no longer the verdict and the cut commands:\n{resuming}"
+    );
+    assert!(
         resuming[built..]
-            .starts_with("interrupted.then(|| {\n        restart_nudge_runtime::resume_nudge("),
+            .starts_with("marked.then(|| {\n        restart_nudge_runtime::resume_nudge("),
         "the nudge's words come from resume_nudge, the one builder (t-3058):\n{resuming}"
     );
     let armed = resuming
