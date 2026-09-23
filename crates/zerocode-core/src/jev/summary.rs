@@ -155,6 +155,19 @@ pub const MODEL: LedgerKey = LedgerKey {
     also: &[],
 };
 
+/// The model a step of a zo turn ran on, on the step governor's own rows —
+/// never the version that answered anything, which is [`MODEL`]'s alone.
+///
+/// Those rows named it under [`MODEL`] until 2026-09-23 (t-6284), between
+/// the step seat's judgments and its labels, one for every request of a
+/// turn; read as versions, each step's chat model cut the seat's marks away.
+/// Not read here — spelled here so the two keys are told apart in one table.
+/// The rows already written are left out by [`is_request_or_mark`].
+pub const STEP_MODEL: LedgerKey = LedgerKey {
+    canonical: "stepModel",
+    also: &[],
+};
+
 /// Every key this module reads, so a contract can walk them.
 pub const LEDGER_KEYS: &[LedgerKey] = &[
     AT,

@@ -383,8 +383,12 @@ pub struct StepRow {
     pub at: u64,
     pub attempt: String,
     pub step: u32,
+    /// The chat model the request that follows goes out on. Filed as
+    /// `stepModel`, never `model`: that key is the Jev version that answered
+    /// a row of the same ledger, and read as one, each step's model cut the
+    /// seat's marks away (`zerocode_core::jev::summary::STEP_MODEL`, t-6284).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
+    pub step_model: Option<String>,
     pub band: &'static str,
     pub batch: &'static str,
     pub repeats: usize,
@@ -856,7 +860,7 @@ impl StepEffortState {
             at: unix_millis(),
             attempt: attempt.to_string(),
             step,
-            model: wire.map(str::to_string),
+            step_model: wire.map(str::to_string),
             band: signals.band.as_label(),
             batch: kind.label(),
             repeats: signals.repeats,
@@ -1087,7 +1091,7 @@ mod tests {
             at: 1,
             attempt: "s@1".to_string(),
             step: 2,
-            model: Some("m".to_string()),
+            step_model: Some("m".to_string()),
             band: "medium",
             batch: "read_only",
             repeats: 1,
@@ -1117,6 +1121,11 @@ mod tests {
         assert_eq!(value["move"]["why"], NO_IN_TURN_ROAD);
         assert_eq!(value["errorStreak"], 0);
         assert!(value.get("outcome").is_none(), "a decision is not a request the seat answered");
+        // The chat model the step ran on has a key of its own: `model` is the
+        // version that answered a Jev row, and read as one, each step cut the
+        // seat's marks away (t-6284).
+        assert_eq!(value[zerocode_core::jev::summary::STEP_MODEL.canonical], "m");
+        assert!(zerocode_core::jev::summary::MODEL.read(&value).is_none(), "a step names no version: {value}");
         let label = serde_json::to_value(StepEvent::Label(StepLabel {
             kind: LABEL_ROW_KIND,
             at: 2,
