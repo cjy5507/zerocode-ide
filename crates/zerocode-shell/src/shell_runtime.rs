@@ -2590,6 +2590,10 @@ pub(super) fn forget_term_state(state: &AppState, term: TermId, settlement: Term
     // of this id inherit the last one's identity.
     state.launch_tokens().remove(&term);
     hooks::revoke_pane_capabilities(term);
+    // And what its agent borrowed: a device the emulator door booted for this
+    // pane goes down with it (t-6336) — unless another pane borrows it too,
+    // or the person opened it.
+    crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::PaneClosed);
     // A pid-discovered channel is released by the process that claimed it.
     // A duplicate session belongs to the lane/pane that won the session-id
     // claim, so this term must not tear that subscriber down on exit.

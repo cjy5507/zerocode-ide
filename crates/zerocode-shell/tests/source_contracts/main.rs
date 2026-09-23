@@ -8862,6 +8862,55 @@ mod tests {
         );
     }
 
+    /// A device the emulator door booted for an agent's pane goes down when
+    /// that pane's work ends (t-6336), and every way it ends reaches the one
+    /// return: the pane closing (the door every terminal ending passes), its
+    /// worker's `worker_done` once the ledger took it, and its agent's
+    /// `SessionEnd`. The door's own verbs move a loan's last use, and the
+    /// status bar can ask the book when the window opens.
+    #[test]
+    fn every_end_of_a_borrowers_work_returns_what_it_borrowed() {
+        let shell = shipped_backend();
+        let closing = block_after(shell, "fn forget_term_state(");
+        assert!(
+            closing.contains(
+                "crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::PaneClosed)"
+            ),
+            "a pane that closes keeps the devices it borrowed:\n{closing}"
+        );
+        let team = block_after(shell, "fn answer_team_command(");
+        assert!(
+            team.contains("is_worker_done(&request.argv)")
+                && team.contains(
+                    "crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::WorkerDone)"
+                ),
+            "a worker that reports done keeps the devices it borrowed:\n{team}"
+        );
+        let hooks = block_after(shell, "async fn hook_loop(");
+        assert!(
+            hooks.contains("hooks::session_end_of(&envelope")
+                && hooks.contains(
+                    "crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::SessionEnded)"
+                ),
+            "an agent whose session ends keeps the devices it borrowed"
+        );
+        let door = block_after(shell, "async fn answer_emulator_command(");
+        assert!(
+            door.contains("crate::emulator::used_through_the_door("),
+            "the door's verbs no longer move a loan's last use:\n{door}"
+        );
+        assert!(
+            shell.contains("emulator_loans,"),
+            "the status bar cannot ask the loan book"
+        );
+        let book = include_str!("../../src/emulator/mod.rs");
+        assert!(
+            block_after(book, "pub(crate) fn emulator_loans(")
+                .contains("from_the_main_webview(&webview)?"),
+            "the loan line's command stopped asking who is calling"
+        );
+    }
+
     #[test]
     fn computer_use_routes_pages_and_devices_to_zerocodes_owned_surfaces() {
         let shell = shipped_backend();
@@ -16115,12 +16164,14 @@ mod tests {
             "a nested run is registered before the envelope is known to speak \
              for the pane:\n{looping}"
         );
-        // THREE roads ask, through one door: the tool call, the helper
+        // FOUR roads ask, through one door: the tool call, the helper
         // lifecycle (which also ends in a `continue`, so an ungated child put a
-        // row on the lead's card and left), and the report itself.
+        // row on the lead's card and left), the session's end (a nested run's
+        // `SessionEnd` must not return what the pane borrowed, t-6336), and
+        // the report itself.
         assert_eq!(
             looping.matches("speaks_for_its_pane(").count(),
-            3,
+            4,
             "a road into the pane's facts stopped asking whose word it \
              is:\n{looping}"
         );

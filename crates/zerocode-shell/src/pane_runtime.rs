@@ -600,6 +600,23 @@ pub(super) async fn hook_loop(
             publish_pane_subagents(&app, term, rows);
             continue;
         }
+        // An agent whose session ended has no more use for what it borrowed
+        // (t-6336) — and its shell may stay, so the pane closing would never
+        // say so. Gated like every road here: a nested run's `SessionEnd`
+        // wears the pane's key, and it is not the pane's session ending.
+        if let Some(term) = hooks::session_end_of(&envelope, expected.as_deref())
+            && speaks_for_its_pane(
+                &app,
+                term,
+                envelope.agent.slug(),
+                zerocode_core::session_in_payload(envelope.agent, &envelope.payload)
+                    .as_ref()
+                    .map(|session| session.id.as_str()),
+                true,
+            )
+        {
+            crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::SessionEnded);
+        }
         let Some(mut report) = hooks::report_of(&envelope, expected.as_deref()) else {
             continue;
         };

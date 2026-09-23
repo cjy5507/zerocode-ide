@@ -1972,6 +1972,15 @@ pub(super) fn answer_team_command(
             &request.argv,
             now_epoch_ms(),
         );
+        // A worker that reported done has no more use for what it borrowed
+        // (t-6336): the devices the emulator door booted for its pane go
+        // down now, not when somebody notices the memory they hold.
+        if answer.exit_code == 0
+            && is_worker_done(&request.argv)
+            && let Some(term) = term
+        {
+            crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::WorkerDone);
+        }
         if answer.exit_code == 0
             && verb == Some("run-use")
             && let Some(term) = term
@@ -3471,6 +3480,9 @@ pub(super) async fn answer_emulator_command(
     };
     let platform = command.platform;
     let device = command.device.clone();
+    if let (Some(platform), Some(device)) = (platform, device.as_deref()) {
+        crate::emulator::used_through_the_door(platform, device);
+    }
     let result: Result<serde_json::Value, String> = match command.method {
         EmulatorMethod::Marks
         | EmulatorMethod::Click

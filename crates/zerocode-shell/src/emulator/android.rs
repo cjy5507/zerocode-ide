@@ -571,7 +571,8 @@ fn preboot_candidate(local_data_root: &Path, now_ms: i64) -> Option<String> {
 }
 
 fn forget_managed_process(process: &Arc<ManagedEmulatorProcess>) {
-    let token = process.record().token;
+    let record = process.record();
+    let token = record.token;
     let removed = {
         let mut devices = held(managed_devices());
         if devices
@@ -586,6 +587,24 @@ fn forget_managed_process(process: &Arc<ManagedEmulatorProcess>) {
     };
     if removed {
         let _ = write_managed_records(&process.local_data_root);
+        // Its process is gone — put away by one of this window's roads, or
+        // gone on its own: whoever it was lent to, it is nobody's loan now.
+        super::loan_put_down(EmulatorPlatform::Android, &record.avd);
+    }
+}
+
+/// Put a lent AVD away (t-6336) — the saved exit every other road takes
+/// ([`ManagedEmulatorProcess::stop`]). An AVD this window is not running is
+/// already away.
+pub(super) fn put_away(local_data_root: &Path, avd: &str) -> Result<(), String> {
+    let Some(process) = managed_process_for_avd(local_data_root, avd) else {
+        return Ok(());
+    };
+    if process.stop() {
+        forget_managed_process(&process);
+        Ok(())
+    } else {
+        Err(format!("the emulator process for {avd} would not stop"))
     }
 }
 
@@ -1993,12 +2012,17 @@ fn pump_android_frames(
     let _ = std::fs::remove_file(frame);
 }
 
+/// `borrower` is the terminal whose agent asked for this AVD through the
+/// emulator door (the window passes it only for an agent's `open`); none is
+/// the person. An AVD this start launches for a borrower is lent to it
+/// (t-6336) and goes down when that pane's work ends.
 #[tauri::command]
 pub(crate) async fn start_android_stream(
     app: AppHandle,
     webview: tauri::Webview,
     avd: Option<String>,
     on_frame: BinaryChannel,
+    borrower: Option<u32>,
 ) -> Result<EmulatorStream, String> {
     crate::from_the_main_webview(&webview)?;
     // The same door as iOS's, warmed for the same reason (t-5535): a walk on
@@ -2008,14 +2032,18 @@ pub(crate) async fn start_android_stream(
         let sdk = android_sdk().map_err(|search| search.to_string())?;
         reconcile_managed_devices_now(app.state::<crate::AppState>().local_data_root());
         let chosen = selected_android_device(&list_android_devices()?, avd.as_deref())?;
+        let local_data_root = app
+            .state::<crate::AppState>()
+            .local_data_root()
+            .to_path_buf();
         // Before the claim, because a pane handed an existing session returns
         // from inside it — and a device somebody just opened a second pane on
-        // is exactly the one the next window should put up (D4).
-        note_last_used_device(
-            app.state::<crate::AppState>().local_data_root(),
-            &chosen.avd,
-            crate::now_epoch_ms(),
-        );
+        // is exactly the one the next window should put up (D4). The
+        // person's device, never an agent's: an audit's AVD written down
+        // here was put up by every window for two days after it (t-6336).
+        if borrower.is_none() {
+            note_last_used_device(&local_data_root, &chosen.avd, crate::now_epoch_ms());
+        }
         let lease = match registry().claim(SessionKey::frames(
             EmulatorPlatform::Android,
             chosen.avd.clone(),
@@ -2024,11 +2052,32 @@ pub(crate) async fn start_android_stream(
                 // Same rule as iOS: the reused session adopts the newest
                 // caller's door, or it posts into one that is already closed.
                 registry().hand_frames_to(&stream.stream, on_frame);
+                // Up already: another pane joins a loan, or the person keeps it.
+                super::note_start(
+                    &app,
+                    EmulatorPlatform::Android,
+                    &chosen.avd,
+                    &chosen.avd,
+                    borrower,
+                    false,
+                );
                 return Ok(stream);
             }
             StartClaim::Acquired(lease) => lease,
         };
+        // Whether this start is what puts the AVD up: nothing running it, and
+        // no launch of this window's (a preboot) already on its way.
+        let launched_here = chosen.serial.is_none()
+            && managed_process_for_avd(&local_data_root, &chosen.avd).is_none();
         let serial = boot_android_device(&app, &sdk, &chosen)?;
+        super::note_start(
+            &app,
+            EmulatorPlatform::Android,
+            &chosen.avd,
+            &chosen.avd,
+            borrower,
+            launched_here,
+        );
         let stream_id = crate::hooks::random_token().ok_or("스트림 id를 만들 수 없습니다")?;
         let descriptor = EmulatorStream {
             stream: stream_id.clone(),
@@ -2904,6 +2953,46 @@ mod tests {
             }
         }
         assert!(held(&process.child).is_none());
+    }
+
+    /// A lent AVD is put away by the saved-exit road every other road takes,
+    /// and only the one lent (t-6336): the stand-in for its emulator stops and
+    /// its row is forgotten, while a second AVD this window runs for the
+    /// person keeps running — and an AVD this window is not running is
+    /// already away.
+    #[cfg(unix)]
+    #[test]
+    fn a_lent_avd_is_put_away_and_the_persons_keeps_running() {
+        let root = tempfile::tempdir().expect("local data root");
+        let running = |avd: &str, token: char| {
+            let child = crate::proc::quiet_command("sleep")
+                .arg("30")
+                .spawn()
+                .expect("a stand-in emulator");
+            let process = ManagedEmulatorProcess::new_launch(
+                root.path().to_path_buf(),
+                avd.to_string(),
+                token.to_string().repeat(48),
+            );
+            let pid = child.id();
+            {
+                let mut record = held(&process.record);
+                record.pid = Some(pid);
+                record.started = crate::resource_usage::process_start_identity(pid).ok();
+            }
+            *held(&process.child) = Some(child);
+            process.launching.store(false, Ordering::Release);
+            held(managed_devices()).insert(process.record().token, process.clone());
+            process
+        };
+        let lent = running("lent_avd", 'e');
+        let persons = running("persons_avd", 'f');
+        assert_eq!(put_away(root.path(), "lent_avd"), Ok(()));
+        assert!(!lent.is_running() && managed_process_for_avd(root.path(), "lent_avd").is_none());
+        assert!(persons.is_running());
+        assert_eq!(put_away(root.path(), "never_run"), Ok(()));
+        assert!(persons.stop());
+        forget_managed_process(&persons);
     }
 
     fn managed_record(token: char) -> ManagedEmulatorRecord {
