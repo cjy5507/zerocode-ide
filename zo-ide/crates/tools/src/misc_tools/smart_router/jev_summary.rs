@@ -383,6 +383,11 @@ pub(super) fn cost_of(input_tokens: u64, asked: &str) -> Option<f64> {
 #[cfg(test)]
 mod tests;
 
+/// Every seat's ledger on this machine graded again by t-6342's rules — the
+/// label audit's measurement (`tools/label-audit`).
+#[cfg(test)]
+mod label_audit_tests;
+
 /// A line's own word, as a function a caller can hand to `map` — the word
 /// itself is the line's to say, and this only saves a reader from naming the
 /// core's path to reach it.
