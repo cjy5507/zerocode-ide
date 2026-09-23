@@ -37885,6 +37885,18 @@ h4.knowledge-inspector-head::after {
   color: var(--jev-tone-under);
 }
 
+/* A sample too small for a share says its size quietly; a feature the door
+   refused throughout says so in the tone of one waiting on a person
+   (t-6243 D3). */
+.jev-sample {
+  color: var(--ink-mist);
+}
+
+.jev-refused {
+  color: var(--jev-tone-blocked);
+  font-weight: 600;
+}
+
 .jev-spark {
   width: var(--jev-spark-width);
   height: var(--jev-spark-height);

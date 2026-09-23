@@ -543,6 +543,17 @@ function jevSeatName(id) {
   return t(label.dataset.i18n, label.dataset.i18nSource ?? label.textContent);
 }
 
+/* Under this many rows a lower bound is the width of its interval rather
+ * than a measurement — one answer in one bounds at 21%, which a person reads
+ * as a failing feature — so the dashboard says the sample instead of a share
+ * (t-6243 D3, the plan's "하한은 n≥5부터"). */
+const JEV_SAMPLE_FLOOR = 5;
+
+/* A sample too small for a share, said as its size. */
+function jevSampleWords(count) {
+  return t("jev.sample", "표본 {{count}}건", { count: jevCount(count) });
+}
+
 function jevPercent(share) {
   if (share === null || share === undefined) return "—";
   return `${Math.round(share * 100)}%`;
@@ -773,9 +784,15 @@ function jevRefusalWords(window) {
   return refusals.map((one) => `${one.token} ${jevCount(one.rows)}`).join(" · ");
 }
 
-function jevAgreementWords(held) {
+/* How often the judgment matched, over the judged window — or, while the
+ * comparisons are under half of what the judge wants before accuracy may
+ * speak, how many there are: 0/3 is a feature not yet judged, not a failing
+ * one (t-6243 D3). */
+function jevAgreementWords(held, standing) {
   const agreement = held.judged?.agreement;
   if (!agreement || !agreement.compared) return "—";
+  const wanted = standing?.agreementRowsWanted;
+  if (wanted && agreement.compared * 2 < wanted) return jevSampleWords(agreement.compared);
   return `${jevCount(agreement.agreed)}/${jevCount(agreement.compared)} (${jevPercent(agreement.lowerBound)})`;
 }
 
@@ -880,6 +897,12 @@ function paintJevRow(row, id, held, standing, head) {
   share.replaceChildren();
   if (held.week.rows === 0) {
     share.textContent = "—";
+  } else if (held.week.answered === 0 && held.week.refused > 0) {
+    // Nothing answered because the door refused everything: that, not a
+    // share of zero and an empty bound, is the fact (t-6243 D3).
+    share.append(fact("refused", t("jev.refusedCount", "거절 {{count}}건", { count: jevCount(held.week.refused) }), "jev-refused"));
+  } else if (held.week.rows < JEV_SAMPLE_FLOOR) {
+    share.append(fact("sample", jevSampleWords(held.week.rows), "jev-sample"));
   } else {
     const bound = fact("bound", t("jev.bound", "신뢰 하한 {{pct}}", { pct: jevPercent(held.week.answeredLowerBound) }), "jev-bound");
     // Where that bound stands against the line for acting by itself, said
@@ -897,7 +920,7 @@ function paintJevRow(row, id, held, standing, head) {
   const acted = cell("acted");
   acted.replaceChildren(
     fact("applied", held.week.rows === 0 ? "—" : jevCount(held.week.applied ?? 0)), document.createTextNode(" · "),
-    fact("agreement", jevAgreementWords(held)));
+    fact("agreement", jevAgreementWords(held, standing)));
   cell("cost").textContent = jevCost(held.costUsd);
   cell("trend").replaceChildren(jevTrendCell(held));
   cell("status").replaceChildren(jevStatusCell(held, choice, standing, head));
