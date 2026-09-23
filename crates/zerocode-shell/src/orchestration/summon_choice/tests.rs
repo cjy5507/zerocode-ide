@@ -168,8 +168,12 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
             .expect("kimi's room")
             .contains("no quota gauge")
     );
+    // The model the coordinator pinned is a constraint the options were
+    // already narrowed by, and the state says it (t-6342); the agent it typed
+    // is still nowhere in it.
+    assert_eq!(sent["state"]["pinnedModel"], json!("claude-opus-5"));
     assert!(
-        !sent["state"].to_string().contains("opus"),
+        sent["state"].get("agent").is_none(),
         "the state showed the answer somebody already wrote down: {}",
         sent["state"]
     );
@@ -196,7 +200,10 @@ fn a_summons_row_carries_both_answers_and_says_whether_they_agreed() {
     assert_eq!(row["dispatch"], json!("dp-4712"));
     assert_eq!(row["task"], json!("t-4711"));
     assert_eq!(row["mode"], json!("shadow"));
-    assert_eq!(row["rubricVersion"], json!(3));
+    assert_eq!(
+        row["rubricVersion"],
+        json!(zerocode_core::summon_choice::SUMMON_CHOICE_RUBRIC_VERSION)
+    );
     // The task's own history travelled with the shape, so a reader of the
     // row sees the difficulty grade the question was given.
     assert_eq!(row["attempts"], json!(1));
@@ -593,6 +600,7 @@ fn the_seats_agreement_over_the_rows_that_already_happened() {
             carries_a_task: replay.carries_a_task,
             attempts: replay.attempts,
             failures: replay.failures,
+            pinned_model: None,
         };
         let Some(ask) = summon_choice::ask(&look, &options) else {
             continue;
