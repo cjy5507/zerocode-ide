@@ -880,8 +880,10 @@ mod tests {
             super::AuthRoute::OAuth,
         )
         .expect("the Grok login is xAI's OAuth route");
-        assert!(matches!(&oauth, super::ProviderClient::Xai(_)));
-        assert!(format!("{oauth:?}").contains("grok-cli-session-token"));
+        assert!(
+            matches!(&oauth, super::ProviderClient::Xai(client) if client.speaks_with_bearer("grok-cli-session-token")),
+            "the OAuth route speaks as the Grok login"
+        );
 
         let _gate = EnvVarGuard::set(NON_CLAUDE_ADAPTERS_ENV, Some("1"));
         let auto = super::ProviderClient::from_provider_kind_with_auth_route(
@@ -889,7 +891,10 @@ mod tests {
             super::AuthRoute::Auto,
         )
         .expect("no key: the automatic route speaks as the Grok login");
-        assert!(format!("{auto:?}").contains("grok-cli-session-token"));
+        assert!(
+            matches!(&auto, super::ProviderClient::Xai(client) if client.speaks_with_bearer("grok-cli-session-token")),
+            "the automatic route speaks as the Grok login"
+        );
 
         std::fs::write(
             &login_file,

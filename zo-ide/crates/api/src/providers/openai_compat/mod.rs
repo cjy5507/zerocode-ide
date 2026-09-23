@@ -485,7 +485,7 @@ impl CustomProviderConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 enum OpenAiCompatAuth {
     /// No authentication header (custom/self-hosted endpoints only).
     None,
@@ -495,6 +495,29 @@ enum OpenAiCompatAuth {
     /// Resolve a fresh Google OAuth access token for Gemini requests from ADC
     /// or gcloud, using the cache in `google_auth` to avoid per-request mints.
     GoogleGeminiOAuth,
+}
+
+/// A client's debug line names how it authenticates, never with what: a
+/// bearer is a key or a login token, and a `{client:?}` in a panic or a log
+/// must not carry it (a test's expect message once did).
+/// Whether a client authenticates with exactly `bearer` — the answer a test
+/// needs from a client whose debug line names no secret.
+#[cfg(test)]
+impl OpenAiCompatClient {
+    #[must_use]
+    pub(crate) fn speaks_with_bearer(&self, bearer: &str) -> bool {
+        matches!(&self.auth, OpenAiCompatAuth::StaticBearer(held) if held == bearer)
+    }
+}
+
+impl std::fmt::Debug for OpenAiCompatAuth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("None"),
+            Self::StaticBearer(_) => f.write_str("StaticBearer(<redacted>)"),
+            Self::GoogleGeminiOAuth => f.write_str("GoogleGeminiOAuth"),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

@@ -24,9 +24,17 @@ fn provider_client_reports_missing_xai_credentials_for_grok_models() {
     let _experimental_gate = EnvVarGuard::set(EXPERIMENTAL_PROVIDERS_ENV, Some("1"));
     let _provider_gate = EnvVarGuard::set(NON_CLAUDE_ADAPTERS_ENV, Some("1"));
     let _xai_api_key = EnvVarGuard::set("XAI_API_KEY", None);
+    // The Grok CLI's session speaks for xAI when no key is set (t-6248 C5), so
+    // this machine's own login must not answer: point the CLI's home at an
+    // empty directory for the test's duration.
+    let empty_grok_home = tempfile::tempdir().expect("an empty Grok home");
+    let _grok_home = EnvVarGuard::set(
+        api::cli_sessions::GROK_HOME_ENV,
+        Some(empty_grok_home.path().to_str().expect("utf-8 temp path")),
+    );
 
     let error = ProviderClient::from_model("grok-3")
-        .expect_err("grok requests without XAI_API_KEY should fail fast");
+        .expect_err("grok requests without a key or a Grok CLI login should fail fast");
 
     match error {
         ApiError::MissingCredentials { provider, env_vars } => {
