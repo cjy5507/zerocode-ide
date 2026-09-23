@@ -129,7 +129,7 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, now
   };
   window.__ANSWER__.board_desk = () => window.__DESK__;
   window.__MACHINE__ = {
-    disk: { free_bytes: 21 * 1024 ** 3, at: "/Users/dev/Library/Application Support/dev.zerocode.app",
+    disk: { free_bytes: 21 * 1024 ** 3, free: "21.0 GB", at: "/Users/dev/Library/Application Support/dev.zerocode.app",
       room: "tight", held_checkouts: workers },
     load: { one_minute: 55.9, cores: 12, loud: true },
     devices: { ios_booted: 2, android_booted: 0 },
@@ -211,6 +211,51 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       await askReleaseStatus();
       await paintBoardView();
     });
+
+    /* ---- 기계 띠: `df`·`uptime`·`simctl`의 자리, 빌린 기기는 상태 바의 문장 ---- */
+    const machine = await page.evaluate(async () => {
+      paintEmulatorLoans({ count: 1, lastUsedMs: Date.now() });
+      askMachineLoad();
+      await new Promise((done) => setTimeout(done, 0));
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+      const strip = document.querySelector('#board-view [data-desk-block="machine"]');
+      const segment = (id) => strip?.querySelector(`[data-segment="${id}"]`);
+      const read = (id) => ({ text: segment(id)?.textContent, tone: segment(id)?.className });
+      return { shown: Boolean(strip) && !strip.hidden, first: strip === strip?.parentElement.firstElementChild,
+        disk: read("disk"), load: read("load"), ios: read("ios"), android: read("android"), loans: read("loans"),
+        chip: document.querySelector("#sb-loans-words").textContent,
+        order: [...(strip?.querySelectorAll("[data-segment]") ?? [])].map((node) => node.dataset.segment) };
+    });
+    ok("the machine strip answers df, uptime and simctl: disk with the ledger's worktree rule, load against the cores, booted devices",
+      machine.shown && machine.first &&
+      machine.disk.text === "디스크 21.0 GB 남음 · 워커 체크아웃 5개가 자라면 모자람" && machine.disk.tone.includes("is-wait") &&
+      machine.load.text === "부하 55.9 · 코어 12 · 붐빔" && machine.load.tone.includes("is-wait") &&
+      machine.ios.text === "iOS 시뮬레이터 2" && machine.android.text === "Android 에뮬레이터 0" &&
+      machine.order.join() === "disk,load,ios,android,loans", JSON.stringify(machine));
+    ok("lent devices are the status bar's own sentence from the same state, not a second count",
+      machine.loans.text === machine.chip && machine.chip === "빌린 기기 1 · 방금 사용", JSON.stringify(machine));
+    const refused = await page.evaluate(async () => {
+      window.__MACHINE__ = { disk: { ...window.__MACHINE__.disk, free: "8.0 GB", room: "refused" },
+        load: { one_minute: 3.2, cores: 12, loud: false }, devices: { ios_booted: null, android_booted: 1 } };
+      askMachineLoad();
+      await new Promise((done) => setTimeout(done, 0));
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+      const strip = document.querySelector('#board-view [data-desk-block="machine"]');
+      const segment = (id) => strip.querySelector(`[data-segment="${id}"]`);
+      const out = { disk: segment("disk").textContent, tone: segment("disk").className, load: segment("load").textContent,
+        loadTone: segment("load").className, ios: Boolean(segment("ios")), android: segment("android")?.textContent };
+      window.__MACHINE__ = null;
+      paintEmulatorLoans({ count: 0 });
+      askMachineLoad();
+      await new Promise((done) => setTimeout(done, 0));
+      paintCoordinatorDesk(document.querySelector("#board-view"));
+      out.gone = strip.hidden;
+      return out;
+    });
+    ok("a disk too small for one worktree is said in the halt ink; an unknown count is not drawn; nothing known folds the strip",
+      refused.disk === "디스크 8.0 GB 남음 · 새 워크트리 하나도 들어가지 않음" && refused.tone.includes("is-halt") &&
+      refused.load === "부하 3.2 · 코어 12" && !refused.loadTone.includes("is-wait") && !refused.ios &&
+      refused.android === "Android 에뮬레이터 1" && refused.gone, JSON.stringify(refused));
 
     /* ---- 릴리즈 레인: 레인의 `status.json` 그대로 ---------------------- */
     const release = await page.evaluate(() => {

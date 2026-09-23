@@ -26,6 +26,7 @@
 //! [`RuntimeActor`]: zerocode_orchestrator::runtime_actor::RuntimeActor
 
 pub(crate) mod coordinator_handover;
+pub(crate) mod desk;
 mod stall_cause;
 mod step_effort;
 mod summon_choice;
@@ -1248,6 +1249,10 @@ pub(crate) struct BoardLedgerSnapshot {
     pub(crate) agents: Arc<Vec<LedgerAgent>>,
     states: Arc<std::collections::HashMap<u32, LedgerPaneState>>,
     overlays: Arc<GraphOverlaySnapshot>,
+    /// The checkouts live workers hold, counted the way a `--worktree`
+    /// summons counts them ([`zerocode_core::orchestration::held_checkouts`]) —
+    /// what the task board's machine strip judges the disk beside (t-6588).
+    pub(crate) held_checkouts: usize,
 }
 
 pub(crate) fn board_ledger_snapshot() -> Arc<BoardLedgerSnapshot> {
@@ -1265,6 +1270,7 @@ pub(crate) fn refresh_board_ledger() {
         agents: Arc::new(ledger_agents_for_seats(ledger, seats)),
         states: Arc::new(ledger_states_for_seats(ledger, seats)),
         overlays: Arc::new(graph_overlay_snapshot_for_seats(ledger, seats)),
+        held_checkouts: zerocode_core::orchestration::held_checkouts(ledger).len(),
     }) else {
         return;
     };
@@ -1979,7 +1985,7 @@ fn with_usage_headroom<R>(
 ///
 /// `None` is "nobody looked": a path that does not exist, a NUL in it, a
 /// platform with no `statvfs` — all answered as unmeasured, never as empty.
-fn free_bytes_at(path: &Path) -> Option<u64> {
+pub(crate) fn free_bytes_at(path: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;

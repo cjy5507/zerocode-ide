@@ -29682,6 +29682,35 @@ details.task-board-section > summary {
   animation: none;
 }
 
+/* 기계 띠: 한 줄, 조각마다 제 말. 붐빔·빠듯은 기다림의 잉크, 거절은 멈춤의 잉크 —
+ * 보드의 색 어휘 그대로다. */
+.board-desk-block[data-desk-block="machine"] {
+  grid-column: 1 / -1;
+}
+
+.board-desk-machine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.board-desk-machine-segment.is-wait {
+  color: var(--signal-wait-ink);
+}
+
+.board-desk-machine-segment.is-halt {
+  color: var(--signal-halt-ink);
+  font-weight: 600;
+}
+
 .board-desk-release-line {
   display: flex;
   flex-wrap: wrap;

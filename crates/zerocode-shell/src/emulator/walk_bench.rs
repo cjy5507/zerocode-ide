@@ -115,16 +115,11 @@ fn to_the_first_screen(udid: &str) -> Option<usize> {
     None
 }
 
-/// The machine's one-minute load average, as `sysctl` says it — the bench's
-/// numbers are only comparable between walks taken under similar load.
+/// The machine's one-minute load average — the bench's numbers are only
+/// comparable between walks taken under similar load. The window's one
+/// reader of it (the task board's machine strip reads the same).
 fn load() -> Option<f64> {
-    let said = crate::proc::quiet_command("sysctl")
-        .args(["-n", "vm.loadavg"])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&said.stdout)
-        .split_whitespace()
-        .find_map(|word| word.parse().ok())
+    crate::orchestration::desk::load_average().map(|reading| reading.one_minute)
 }
 
 /// Register `udid` the way an open pane does, and start this build's helper

@@ -282,6 +282,16 @@ pub(super) fn list_ios_simulators() -> Vec<SimulatorDevice> {
         .collect()
 }
 
+/// How many of this machine's simulators are booted, whoever booted them —
+/// the task board's machine strip (t-6588), off the same `simctl list` the
+/// picker reads.
+pub(super) fn booted_simulators() -> usize {
+    list_ios_simulators()
+        .iter()
+        .filter(|device| device.booted)
+        .count()
+}
+
 fn pick_default_simulator(devices: &[SimulatorDevice]) -> Option<&SimulatorDevice> {
     let iphone = |device: &&SimulatorDevice| device.name.to_lowercase().contains("iphone");
     devices

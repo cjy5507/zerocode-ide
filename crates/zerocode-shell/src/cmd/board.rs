@@ -253,6 +253,21 @@ pub(crate) fn ledger_agents() -> std::sync::Arc<Vec<crate::orchestration::Ledger
     std::sync::Arc::clone(&crate::orchestration::board_ledger_snapshot().agents)
 }
 
+/// The task board's machine strip (t-6588): the ledger's volume with the
+/// verdict the next `--worktree` summons would meet, the load against the
+/// cores, and the booted simulators and emulators — what `df -g`, `uptime`
+/// and `xcrun simctl list` were typed for. `simctl` and `adb` are processes,
+/// so the answer is read on the blocking pool.
+#[tauri::command]
+pub(crate) async fn machine_load(
+    state: State<'_, AppState>,
+) -> Result<crate::orchestration::desk::MachineLoad, String> {
+    let volume = state.local_data_root().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || crate::orchestration::desk::machine_load(&volume))
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Bounded recent active/pending runs for the manual coordinator picker.
 #[tauri::command]
 pub(crate) async fn coordinator_seat_runs(

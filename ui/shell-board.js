@@ -54,6 +54,7 @@ function scheduleDeskPaint() {
 function refreshDeskAmbient() {
   deskAmbientAt = Date.now();
   void askReleaseStatus().then(scheduleDeskPaint);
+  void askMachineLoad();
 }
 
 function deskElement(tag, className, text = "") {
@@ -63,13 +64,14 @@ function deskElement(tag, className, text = "") {
   return node;
 }
 
-/* 블록 하나: 장의 머리(낱말 · 수) 아래 몸. 한 번 짓고 키로 살아남는다. */
-function deskBlock(desk, id) {
+/* 블록 하나: 장의 머리(낱말 · 수) 아래 몸. 한 번 짓고 키로 살아남는다. 한 줄로
+ * 읽히는 블록(기계 띠)의 머리는 낭독기에게만 선다. */
+function deskBlock(desk, { id, quietHead = false }) {
   let block = desk.querySelector(`:scope > [data-desk-block="${id}"]`);
   if (!block) {
     block = deskElement("section", "board-desk-block");
     block.dataset.deskBlock = id;
-    block.append(deskElement("h3", "task-board-section-head board-desk-head"),
+    block.append(deskElement("h3", quietHead ? "sr" : "task-board-section-head board-desk-head"),
       deskElement("div", "board-desk-body"));
   }
   return block;
@@ -78,6 +80,7 @@ function deskBlock(desk, id) {
 /* 데스크 블록, 읽는 차례대로 — DOM 순서가 곧 좁은 판의 순서다. 그리는 손은
  * 블록에 쓸 것이 있으면 참을 돌려주고, 거짓이면 그 블록은 접힌다. */
 const DESK_BLOCKS = Object.freeze([
+  { id: "machine", paint: paintDeskMachine, quietHead: true },
   { id: "release", paint: paintDeskRelease },
 ]);
 
@@ -91,14 +94,105 @@ function paintCoordinatorDesk(view) {
   deskAmbient.sync();
   const now = Date.now();
   if (now - deskAmbientAt >= DESK.ambientEveryMs) refreshDeskAmbient();
-  const blocks = DESK_BLOCKS.map(({ id, paint }) => {
-    const block = deskBlock(desk, id);
-    writeHidden(block, !paint(block, now, view));
+  const blocks = DESK_BLOCKS.map((entry) => {
+    const block = deskBlock(desk, entry);
+    writeHidden(block, !entry.paint(block, now, view));
     return block;
   });
   reconcileElementOrder(desk, blocks);
   writeHidden(desk, blocks.every((block) => block.hidden));
 }
+
+/* ---- 기계 띠 ---------------------------------------------------------------
+ *
+ * `df -g`·`uptime`·`xcrun simctl list`의 자리(`machine_load`): 디스크 여유와 그
+ * 말 — 원장이 `--worktree` 소환을 거절하고 경고하는 바로 그 규칙(새 워크트리 하나가
+ * 들어가는가, 워커 체크아웃이 다 자라도 들어가는가) — 1분 부하와 코어 수(레인의
+ * 조용한 기다림·하네스의 `machine-load.mjs`와 같은 잣대: 코어보다 크면 붐빔), 켠
+ * iOS 시뮬레이터와 Android 에뮬레이터 수. 빌린 기기는 상태 바 칩과 같은 상태의 같은
+ * 문장(`emulatorLoansWords`)이다 — 따로 세지 않는다. */
+
+/* `machine_load`의 마지막 답. `null`은 아직 묻지 않았거나 답하지 못한 것이다. */
+let deskMachine = null;
+let deskMachineAsking = false;
+
+/* 디스크의 말 셋: 원장의 워크트리 규칙이 낸 판정(`WorktreeRoom`)과 그 색. */
+const DESK_DISK_ROOM = Object.freeze({
+  refused: { tone: "halt", key: "board.desk.diskRefused", word: "새 워크트리 하나도 들어가지 않음" },
+  tight: { tone: "wait", key: "board.desk.diskTight", word: "워커 체크아웃 {{held}}개가 자라면 모자람" },
+  room: { tone: "", key: "", word: "" },
+});
+
+function askMachineLoad() {
+  if (deskMachineAsking) return;
+  deskMachineAsking = true;
+  invoke("machine_load")
+    .then((answer) => {
+      deskMachine = answer && typeof answer === "object" ? answer : null;
+      scheduleDeskPaint();
+    })
+    .catch(() => {})
+    .finally(() => { deskMachineAsking = false; });
+}
+
+/* 띠의 조각들, 차례대로: 무엇이라 말하고 어떤 색인가. 모르는 조각은 서지 않는다. */
+function deskMachineSegments(machine, now) {
+  const segments = [];
+  const disk = machine?.disk;
+  if (disk && typeof disk.free === "string") {
+    const room = DESK_DISK_ROOM[disk.room] ?? DESK_DISK_ROOM.room;
+    const free = t("board.desk.disk", "디스크 {{free}} 남음", { free: disk.free });
+    const note = room.key ? t(room.key, room.word, { held: disk.held_checkouts }) : "";
+    segments.push({ id: "disk", tone: room.tone, text: [free, note].filter(Boolean).join(" · "), tip: disk.at ?? "" });
+  }
+  const load = machine?.load;
+  if (load && Number.isFinite(load.one_minute)) {
+    const figures = { load: load.one_minute.toFixed(1), cores: load.cores };
+    segments.push({
+      id: "load", tone: load.loud ? "wait" : "",
+      text: load.loud
+        ? t("board.desk.loadBusy", "부하 {{load}} · 코어 {{cores}} · 붐빔", figures)
+        : t("board.desk.load", "부하 {{load}} · 코어 {{cores}}", figures),
+    });
+  }
+  const devices = machine?.devices ?? {};
+  if (Number.isInteger(devices.ios_booted)) {
+    segments.push({ id: "ios", tone: "",
+      text: t("board.desk.ios", "iOS 시뮬레이터 {{count}}", { count: devices.ios_booted }) });
+  }
+  if (Number.isInteger(devices.android_booted)) {
+    segments.push({ id: "android", tone: "",
+      text: t("board.desk.android", "Android 에뮬레이터 {{count}}", { count: devices.android_booted }) });
+  }
+  const loans = emulatorLoansWords(now);
+  if (loans) segments.push({ id: "loans", tone: "", text: loans });
+  return segments;
+}
+
+function paintDeskMachine(block, now) {
+  const segments = deskMachineSegments(deskMachine, now);
+  if (segments.length === 0) return false;
+  writeTextContent(block.firstElementChild, t("board.desk.machine", "이 기계"));
+  const body = block.lastElementChild;
+  let line = body.firstElementChild;
+  if (!line) {
+    line = deskElement("p", "board-desk-machine");
+    body.replaceChildren(line);
+  }
+  const held = new Map([...line.children].map((node) => [node.dataset.segment, node]));
+  reconcileElementOrder(line, segments.map((segment) => {
+    const node = held.get(segment.id) ?? deskElement("span", "");
+    writeAttribute(node, "data-segment", segment.id);
+    writeClassName(node, `board-desk-machine-segment${segment.tone ? ` is-${segment.tone}` : ""}`);
+    writeTextContent(node, segment.text);
+    if (segment.tip) writeAttribute(node, "data-tip", segment.tip);
+    return node;
+  }));
+  return true;
+}
+
+/* 빌린 기기가 바뀌면 띠도 — 상태 바가 먼저 제 상태를 고친 뒤다(리스너 순서). */
+listen("emulator:loans", () => scheduleDeskPaint());
 
 /* ---- 릴리즈 레인 ----------------------------------------------------------
  *

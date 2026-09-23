@@ -14641,6 +14641,56 @@ fn a_summons_says_when_live_checkouts_could_outgrow_the_disk() {
     );
 }
 
+/// The verdict without its sentence (t-6588): the window's machine strip
+/// draws the words a summons is refused and warned by, at the same edges —
+/// one budget, then one per held checkout plus this one — and it counts the
+/// held checkouts the way the summons does, each tree once.
+#[test]
+fn the_disk_verdict_the_board_draws_is_the_summons_own() {
+    for (free, held, verdict) in [
+        (10 * GIB - 1, 0, WorktreeRoom::Refused),
+        (10 * GIB, 0, WorktreeRoom::Room),
+        (15 * GIB, 1, WorktreeRoom::Tight),
+        (20 * GIB, 1, WorktreeRoom::Room),
+        (25 * GIB, 3, WorktreeRoom::Tight),
+    ] {
+        assert_eq!(
+            worktree_room(free, held),
+            verdict,
+            "{free} bytes beside {held} held checkout(s)"
+        );
+    }
+    let roomy = Squeezed {
+        free_bytes: Some(80 * GIB),
+    };
+    let mut ledger = Ledger::new();
+    let mut team = Team::new("team-1", "token", 7);
+    planned_on(
+        &mut ledger,
+        &mut team,
+        &roomy,
+        "run-create --name held",
+        3_001,
+    );
+    for (at, tree) in [(3_002, "/wt/one"), (3_003, "/wt/one"), (3_004, "/wt/two")] {
+        let started = planned_on(
+            &mut ledger,
+            &mut team,
+            &roomy,
+            "worker-start --agent codex --worktree",
+            at,
+        );
+        assert_eq!(started.reply.exit_code, 0, "{}", started.reply.stderr);
+        let Effect::Split { ref pane, .. } = started.effect else {
+            panic!("no split: {:?}", started.effect);
+        };
+        assert!(ledger.worker_seated(("team-1", pane), tree));
+    }
+    let held = held_checkouts(&ledger);
+    assert_eq!(held.len(), 2, "{held:?}");
+    assert_eq!(worktree_room(25 * GIB, held.len()), WorktreeRoom::Tight);
+}
+
 /// A worker that exits in a checkout of its own does not hand its task
 /// straight back: the ledger holds it until somebody has looked.
 ///

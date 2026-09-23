@@ -11416,6 +11416,58 @@ pub struct DiskHeadroom {
 /// checkout grew is warned.
 pub const WORKTREE_BUDGET_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
+/// The disk's verdict on one more `--worktree` summons, without its sentence.
+///
+/// One rule with two readers: [`disk_room_for_a_worktree`] refuses and warns
+/// by it before the ledger moves, and the window's task board draws it on its
+/// machine strip (t-6588) — so the strip can never call "room" a disk the
+/// next summons would be refused on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorktreeRoom {
+    /// Below one budget: the tree could not run its own gate, and the
+    /// summons is refused.
+    Refused,
+    /// Above one budget but below one per held checkout plus this one: the
+    /// summons goes ahead and its receipt says the arithmetic.
+    Tight,
+    /// Every held checkout can grow to its budget and one more still fits.
+    Room,
+}
+
+/// Which [`WorktreeRoom`] `free_bytes` earns beside `held` checkouts that
+/// live workers hold ([`held_checkouts`]).
+#[must_use]
+pub fn worktree_room(free_bytes: u64, held: usize) -> WorktreeRoom {
+    if free_bytes < WORKTREE_BUDGET_BYTES {
+        return WorktreeRoom::Refused;
+    }
+    if free_bytes < if_every_checkout_grows(held) {
+        return WorktreeRoom::Tight;
+    }
+    WorktreeRoom::Room
+}
+
+/// The bytes one more tree and every held one reach at their budget.
+fn if_every_checkout_grows(held: usize) -> u64 {
+    let trees = u64::try_from(held).unwrap_or(u64::MAX).saturating_add(1);
+    WORKTREE_BUDGET_BYTES.saturating_mul(trees)
+}
+
+/// Every checkout a live worker still holds, each once — counted in
+/// checkouts rather than workers, because two readers in one tree share one
+/// `target/`. A row that never reported its checkout holds none.
+#[must_use]
+pub fn held_checkouts(ledger: &Ledger) -> std::collections::HashSet<&str> {
+    ledger
+        .runs()
+        .iter()
+        .flat_map(|run| run.workers.iter())
+        .filter(|worker| worker.state.still_summoned())
+        .filter_map(|worker| worker.checkout.as_deref())
+        .collect()
+}
+
 /// The disk's answer to one `--worktree` summons: a refusal, a notice, or
 /// nothing to say.
 ///
@@ -11438,42 +11490,28 @@ fn disk_room_for_a_worktree(
                 .to_string(),
         ));
     };
-    if room.free_bytes < WORKTREE_BUDGET_BYTES {
-        return Err(format!(
+    // Every checkout a live worker still holds may grow toward the budget.
+    let held = held_checkouts(ledger).len();
+    match worktree_room(room.free_bytes, held) {
+        WorktreeRoom::Refused => Err(format!(
             "{} free at {}, and a worktree that runs the gate measured about {}; \
              nothing was written — release a finished worker or clear a target/ \
              and ask again",
             format_bytes(room.free_bytes),
             room.at,
             format_bytes(WORKTREE_BUDGET_BYTES),
-        ));
-    }
-    // Every checkout a live worker still holds may grow toward the budget
-    // — counted in checkouts rather than workers, because two readers in one
-    // tree share one `target/`.
-    let held: std::collections::HashSet<&str> = ledger
-        .runs()
-        .iter()
-        .flat_map(|run| run.workers.iter())
-        .filter(|worker| worker.state.still_summoned())
-        .filter_map(|worker| worker.checkout.as_deref())
-        .collect();
-    let trees = u64::try_from(held.len())
-        .unwrap_or(u64::MAX)
-        .saturating_add(1);
-    let if_all_grow = WORKTREE_BUDGET_BYTES.saturating_mul(trees);
-    if room.free_bytes < if_all_grow {
-        return Ok(Some(format!(
+        )),
+        WorktreeRoom::Tight => Ok(Some(format!(
             "{} free at {}; {} checkout(s) are held by live workers and may still \
              grow toward {} each, which with this one is {}",
             format_bytes(room.free_bytes),
             room.at,
-            held.len(),
+            held,
             format_bytes(WORKTREE_BUDGET_BYTES),
-            format_bytes(if_all_grow),
-        )));
+            format_bytes(if_every_checkout_grows(held)),
+        ))),
+        WorktreeRoom::Room => Ok(None),
     }
-    Ok(None)
 }
 
 /// One provider gauge, as the window's usage cache last read it — the answer
