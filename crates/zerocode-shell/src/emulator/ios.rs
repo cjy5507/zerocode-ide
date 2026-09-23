@@ -2051,6 +2051,63 @@ mod tests {
         );
     }
 
+    /// On a real simulator this task owns (t-6336, named by
+    /// `ZEROCODE_LIVE_SIMULATOR`): a device up and lent to nobody stays up when
+    /// a pane's work ends, and the same device lent to that pane goes down by
+    /// the one `simctl shutdown` — the book's verdict and the power road end
+    /// to end, with how long the return took. Never name a device another
+    /// session is using: the second half shuts it down.
+    #[test]
+    #[ignore = "boots a real iOS simulator and shuts it down again"]
+    fn a_lent_simulator_goes_down_with_its_borrower_and_an_unlent_one_stays_up() {
+        use super::super::session::{LoanEnd, loans};
+        let Ok(udid) = std::env::var("ZEROCODE_LIVE_SIMULATOR") else {
+            println!("LIVE: no simulator named; nothing measured");
+            return;
+        };
+        const TERM: u32 = 4_242_001;
+        let named = || {
+            list_ios_simulators()
+                .into_iter()
+                .find(|device| device.udid == udid)
+                .expect("the named simulator is on this machine")
+        };
+        boot_simulator(&named()).expect("the named simulator boots");
+        // Up, and a person's start: nobody's loan, so the pane's end leaves it.
+        loans().note_start(
+            EmulatorPlatform::Ios,
+            &udid,
+            None,
+            true,
+            crate::now_epoch_ms(),
+        );
+        super::super::borrower_gone(TERM, LoanEnd::PaneClosed);
+        std::thread::sleep(Duration::from_secs(3));
+        let kept = named().booted;
+        println!("LIVE: unlent device after its pane's end: booted={kept}");
+        assert!(kept, "a device nobody lent went down with a pane");
+        // Lent to the pane: its end puts it down.
+        loans().note_start(
+            EmulatorPlatform::Ios,
+            &udid,
+            Some(TERM),
+            true,
+            crate::now_epoch_ms(),
+        );
+        let began = Instant::now();
+        super::super::borrower_gone(TERM, LoanEnd::PaneClosed);
+        let deadline = began + Duration::from_secs(60);
+        while named().booted && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let down = !named().booted;
+        println!(
+            "LIVE: lent device after its pane's end: shut down={down} in {} ms",
+            began.elapsed().as_millis()
+        );
+        assert!(down, "a lent device outlived its borrower");
+    }
+
     fn device(name: &str, booted: bool) -> SimulatorDevice {
         SimulatorDevice {
             udid: name.to_string(),
