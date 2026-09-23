@@ -2962,6 +2962,17 @@ fn a_worker_still_at_its_wall_after_the_lift_is_told_once_under_a_wait() {
     assert_eq!(notices(stops_standing + 3_001).len(), 1, "told twice");
 }
 
+/// The wait rung waits for a number read after the reset exactly as long as
+/// a re-read it asks for can take to be allowed (t-6427): the ledger's table
+/// and the window's refetch floor are one number.
+#[test]
+fn the_wait_rung_waits_one_refetch_floor_for_a_number_read_after_the_reset() {
+    assert_eq!(
+        zerocode_core::orchestration::QUOTA_WAIT_POLICY.lift_read_ms,
+        i64::try_from(crate::usage::MIN_REFETCH.as_millis()).expect("a floor in ms"),
+    );
+}
+
 /// Every gauge the ledger's table can name for an agent is one the beat can
 /// ask the window to read again (t-6427): a gauge with no ask would leave a
 /// lifted wall unread until the rung stopped waiting for its number.

@@ -11745,6 +11745,10 @@ pub struct QuotaWaitPolicy {
 /// - `max_wait_ms` — six hours. A session window is five, so a session wall
 ///   always resets inside it; a weekly or monthly wall never does. Traycer's
 ///   fallback ladder waits the same by default (`fallback-policy.ts:365-379`).
+/// - `lift_read_ms` — one usage refetch floor (the window's `MIN_REFETCH`,
+///   five minutes; a test in the window pins the two together): the re-read
+///   the beat asks for from the reset on is never allowed sooner than that,
+///   so by then it has had its chance.
 pub const QUOTA_WAIT_POLICY: QuotaWaitPolicy = QuotaWaitPolicy {
     slack_ms: QUIET_GRACE_MS,
     max_wait_ms: 6 * 60 * 60 * 1000,
