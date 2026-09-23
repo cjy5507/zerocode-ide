@@ -820,6 +820,37 @@ struct PlannedStep {
 }
 
 impl StepEffortState {
+    /// The progress mark for the judgment consulted one step ago, now that
+    /// this step says whether it `progressed` (t-6342).
+    fn label_owed(&mut self, attempt: &str, progressed: bool) -> Option<StepLabel> {
+        self.label_due.take().map(|due| {
+            let graded = zerocode_core::step_effort::move_mark(due.seat_moved_it, due.carried, progressed);
+            StepLabel {
+                kind: LABEL_ROW_KIND,
+                at: unix_millis(),
+                attempt: attempt.to_string(),
+                step: due.step,
+                agreed: graded.ok(),
+                not_compared: graded.err(),
+                baseline_agreed: (due.carried && !due.seat_moved_it).then_some(progressed),
+            }
+        })
+    }
+
+    /// Owe the next step a label for the judgment that spoke to this one:
+    /// whether it moved the effort away from what the table alone would have
+    /// given the request (`shifted` against the table's own), and whether
+    /// the request carried it.
+    fn owe_label(&mut self, step: u32, signals: &StepSignals, shifted: EffortStep) {
+        let table = decide(step, signals, None);
+        let ruled = shift(self.config.floor, self.config.ceiling, self.config.cap(), table.delta);
+        self.label_due = Some(LabelDue {
+            step,
+            seat_moved_it: shifted != ruled,
+            carried: self.config.applies,
+        });
+    }
+
     /// Read the batch that just finished and decide the next request: the
     /// signals to the table, the table to a rung, the rung to the request.
     fn plan(&mut self, wire: Option<&str>, attempt: &str) -> PlannedStep {
@@ -845,31 +876,11 @@ impl StepEffortState {
         };
         let decision = decide(step, &signals, self.judgment);
         self.strong_streak = if decision.strong { self.strong_streak + 1 } else { 0 };
-        // The progress mark for the judgment consulted one step ago.
-        let label = self.label_due.take().map(|due| {
-            let progressed = batch.calls > 0 && !decision.strong && !decision.slipping && !batch.check_red;
-            let graded = zerocode_core::step_effort::move_mark(due.seat_moved_it, due.carried, progressed);
-            StepLabel {
-                kind: LABEL_ROW_KIND,
-                at: unix_millis(),
-                attempt: attempt.to_string(),
-                step: due.step,
-                agreed: graded.ok(),
-                not_compared: graded.err(),
-                baseline_agreed: (due.carried && !due.seat_moved_it).then_some(progressed),
-            }
-        });
+        let progressed = batch.calls > 0 && !decision.strong && !decision.slipping && !batch.check_red;
+        let label = self.label_owed(attempt, progressed);
         let shifted = shift(self.config.floor, self.config.ceiling, self.config.cap(), decision.delta);
         if decision.judged.is_some() {
-            // What the table alone would have given the request: the
-            // judgment moved the effort only where the two differ.
-            let table = decide(step, &signals, None);
-            let ruled = shift(self.config.floor, self.config.ceiling, self.config.cap(), table.delta);
-            self.label_due = Some(LabelDue {
-                step,
-                seat_moved_it: shifted != ruled,
-                carried: self.config.applies,
-            });
+            self.owe_label(step, &signals, shifted);
         }
         self.next = Some(shifted);
         let rung_move = plan_move(&self.config, &decision, self.strong_streak, self.routine_streak, shifted);
