@@ -938,7 +938,7 @@ fn all_ledger_image_readers_use_the_revision_cache() {
     // The background publisher and two fresh readers reach the same door. Named here
     // rather than left out, because "does not call `Ledger::rebuild`" is
     // satisfied by a reader that calls nothing at all.
-    for delegating in ["refresh_board_ledger", "ledger_agents", "live_worker_count"] {
+    for delegating in ["refresh_board_ledger", "ledger_agents", "seated_live_workers"] {
         let start = shipped
             .find(&format!("fn {delegating}()"))
             .unwrap_or_else(|| panic!("missing reader {delegating}"));
@@ -10428,7 +10428,11 @@ fn a_window_exiting_puts_the_seat_to_sleep_before_its_pane_exits() {
         .and_then(|held| held.dispatch.clone())
         .expect("the dispatch");
 
-    super::window_exiting(clock());
+    super::window_exiting(
+        clock(),
+        crate::exit_runtime::ExitRoad::App,
+        &super::restart_census::RestartCensus::default,
+    );
     // The pane reaper reaches the seat afterwards, as it always could.
     super::terminal_gone(WORKER, clock());
 
@@ -10462,6 +10466,76 @@ fn a_window_exiting_puts_the_seat_to_sleep_before_its_pane_exits() {
     crate::agent_teams::forget_term(WORKER);
 }
 
+/// t-6428 ①: the goodbye names what it cuts. Before any seat sleeps the
+/// census reads the worker's turn and the commands under its pane — here a
+/// codex worker mid-turn, with a gate its native binary started under its
+/// Node launcher — and the window's log says the road once and the worker
+/// once. The census only reads: the seat still sleeps.
+#[test]
+fn the_goodbye_names_its_road_and_what_it_cuts_under_each_worker() {
+    const LEADER: u32 = 93_070;
+    const WORKER: u32 = 93_071;
+    const ROOT: u32 = 64_280;
+    let (_window, _store) = PrivateWindow::boot();
+    let host = Seating {
+        onto: WORKER,
+        checkout: "/tmp",
+    };
+    let (_team, _task, worker) =
+        a_seated_worker_with_a_session(&host, LEADER, WORKER, "session-goodbye");
+    super::pane_turn_began(WORKER);
+    let listing = format!(
+        "501 {ROOT} 1 {ROOT} 0 1 Thu Sep 24 01:00:00 2026 node /opt/homebrew/bin/codex resume s\n\
+         501 64281 {ROOT} {ROOT} 0 1 Thu Sep 24 01:00:00 2026 /opt/codex/vendor/bin/codex resume s\n\
+         501 64282 64281 64282 0 1 Thu Sep 24 01:00:00 2026 /bin/zsh -lc just shell-test\n"
+    );
+    let census = || {
+        super::restart_census::take(&|term| (term == WORKER).then_some(ROOT), &|| {
+            Ok(crate::resource_usage::ProcessSample::from_ps_listing(
+                &listing,
+            ))
+        })
+    };
+
+    super::window_exiting(clock(), crate::exit_runtime::ExitRoad::Close, &census);
+
+    let blackbox = super::BLACKBOX
+        .get()
+        .expect("the bench window's black box")
+        .join("window-errors.log");
+    let log = std::fs::read_to_string(&blackbox).unwrap_or_default();
+    let named = format!(
+        "exit: worker {worker} on terminal {WORKER} (codex) · turn running · 1 command(s): \
+         just shell-test"
+    );
+    assert_eq!(
+        log.lines().filter(|line| line.ends_with(&named)).count(),
+        1,
+        "the goodbye did not name the worker once:\n{log}"
+    );
+    assert!(
+        log.lines()
+            .any(|line| line.contains("exit by close · workers 1 · mid-turn 1 · background 0")),
+        "the goodbye did not say its road and numbers:\n{log}"
+    );
+    let slept = the_rows()
+        .workers
+        .iter()
+        .find(|held| held.id == worker)
+        .map(|held| held.state);
+    assert_eq!(slept, Some(WorkerState::Sleeping));
+    // A second goodbye on the same way out finds nobody live to name.
+    super::window_exiting(clock(), crate::exit_runtime::ExitRoad::App, &census);
+    let again = std::fs::read_to_string(&blackbox).unwrap_or_default();
+    assert_eq!(
+        again.lines().filter(|line| line.ends_with(&named)).count(),
+        1,
+        "the worker was named twice"
+    );
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+}
+
 /// t-3058 (1), the witness road through the production doors. After the
 /// exit the next window resumes the same conversation into the same
 /// checkout — the person's own restored tab, a leader of its own team —
@@ -10480,7 +10554,11 @@ fn a_resumed_pane_is_seated_as_the_sleeper_it_is_and_reports_done_from_there() {
     };
     let (_team, task, worker) =
         a_seated_worker_with_a_session(&host, LEADER, WORKER, "session-witness");
-    super::window_exiting(clock());
+    super::window_exiting(
+        clock(),
+        crate::exit_runtime::ExitRoad::App,
+        &super::restart_census::RestartCensus::default,
+    );
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 
@@ -10573,7 +10651,11 @@ fn a_sleeper_nobody_resumed_dies_on_the_beat_after_the_grace() {
         .find(|held| held.id == worker)
         .and_then(|held| held.dispatch.clone())
         .expect("the dispatch");
-    super::window_exiting(clock());
+    super::window_exiting(
+        clock(),
+        crate::exit_runtime::ExitRoad::App,
+        &super::restart_census::RestartCensus::default,
+    );
     crate::agent_teams::forget_term(LEADER);
     crate::agent_teams::forget_term(WORKER);
 

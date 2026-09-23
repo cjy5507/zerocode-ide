@@ -945,6 +945,20 @@ pub(crate) fn set_window_blur(
     )
 }
 
+/// Who leaving this window would cut, as the window reads it (t-6428): its
+/// own pty table names the process at the root of each terminal, and the
+/// host's process table what runs under it.
+pub(crate) fn take_census(app: &AppHandle) -> crate::orchestration::restart_census::RestartCensus {
+    let state = app.state::<AppState>();
+    let root_of = |term: u32| {
+        state
+            .terminals()
+            .handle(term)
+            .and_then(|held| lock_pty(&held).pid())
+    };
+    crate::orchestration::restart_census::take(&root_of, &resource_usage::enumerate_processes)
+}
+
 /// Close and reopen this process, so a material asked for at startup can be
 /// asked for again. Orca's `window.api.app.relaunch()` behind the same banner.
 ///
@@ -953,12 +967,19 @@ pub(crate) fn set_window_blur(
 /// one takes its name by rename, right here and never earlier, so no running
 /// binary is ever overwritten (deploy-overwrite-kills-running-binary). A
 /// swap that fails leaves the running bundle as it was and restarts it.
+///
+/// `door` is the button the window restarted from (t-6428), said back in
+/// the goodbye's line; a word no door wears is a restart all the same.
 #[tauri::command]
-pub(crate) fn relaunch_window(app: AppHandle) {
+pub(crate) fn relaunch_window(app: AppHandle, door: Option<String>) {
     let _crumb = crate::crumbs::Command::enter("relaunch_window");
+    let road = crate::exit_runtime::begin(crate::exit_runtime::ExitRoad::Restart(
+        door.as_deref()
+            .and_then(crate::exit_runtime::RestartDoor::named),
+    ));
     // The ledger's goodbye first (t-3058): every seated worker sleeps with
     // its dispatch open, so the panes this restart takes settle nothing.
-    crate::orchestration::window_exiting(crate::now_epoch_ms());
+    crate::orchestration::window_exiting(crate::now_epoch_ms(), road, &|| take_census(&app));
     if let Some(staged) = app
         .try_state::<cmd::update::UpdateState>()
         .and_then(|held| held.staged())

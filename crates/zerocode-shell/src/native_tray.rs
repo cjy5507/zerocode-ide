@@ -93,7 +93,10 @@ impl NativeTray {
                     "exit requested: native tray quit",
                 );
                 state.native_tray().begin_exit();
-                crate::orchestration::window_exiting(crate::now_epoch_ms());
+                let road = crate::exit_runtime::begin(crate::exit_runtime::ExitRoad::Tray);
+                crate::orchestration::window_exiting(crate::now_epoch_ms(), road, &|| {
+                    crate::cmd::appearance::take_census(app)
+                });
                 app.exit(0);
             }
             _ => {}

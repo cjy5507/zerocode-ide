@@ -96,6 +96,7 @@ mod durable_lifecycle;
 mod durable_split;
 mod emulator;
 mod evidence_runtime;
+mod exit_runtime;
 mod explorer_policy;
 mod explorer_runtime;
 mod fetch_refusal;
@@ -3468,6 +3469,15 @@ fn main() -> ExitCode {
         }
         match event {
             tauri::RunEvent::ExitRequested { api, code, .. } => {
+                // Which road this is (t-6428), named before anything can
+                // defer it: no code is the last window gone — a close — and
+                // a code is the window's own `app.exit`, which after a close
+                // is the embedded browser finishing that same close.
+                let road = exit_runtime::begin(if code.is_none() {
+                    exit_runtime::ExitRoad::Close
+                } else {
+                    exit_runtime::ExitRoad::App
+                });
                 #[cfg(all(target_os = "macos", feature = "chromium-browser"))]
                 if chromium_browser::defer_exit(handle, code.unwrap_or(0)) {
                     api.prevent_exit();
@@ -3476,7 +3486,9 @@ fn main() -> ExitCode {
                 // The ledger hears the goodbye before any pane goes (t-3058):
                 // seated workers sleep instead of being settled by their own
                 // panes' exits on the way out.
-                orchestration::window_exiting(now_epoch_ms());
+                orchestration::window_exiting(now_epoch_ms(), road, &|| {
+                    cmd::appearance::take_census(handle)
+                });
                 handle.state::<AppState>().native_tray().begin_exit();
                 emulator::shutdown_all(handle);
                 codex_queue::shutdown_all();
@@ -3490,8 +3502,13 @@ fn main() -> ExitCode {
                 chromium_browser::shutdown();
                 // Again, idempotently: a restart from the main thread skips
                 // `ExitRequested` (tauri's own note on `restart`), and the
-                // log of every restart today shows exactly that.
-                orchestration::window_exiting(now_epoch_ms());
+                // log of every restart today shows exactly that. With no
+                // road named before it this is `terminate:` — ⌘Q, the Dock,
+                // a logout — which the app hears only here (t-6428).
+                let road = exit_runtime::begin(exit_runtime::ExitRoad::Terminate);
+                orchestration::window_exiting(now_epoch_ms(), road, &|| {
+                    cmd::appearance::take_census(handle)
+                });
                 if let Err(error) = crash::clean_exit(handle.state::<AppState>().local_data_root())
                 {
                     note_window_event(

@@ -26,6 +26,7 @@
 //! [`RuntimeActor`]: zerocode_orchestrator::runtime_actor::RuntimeActor
 
 pub(crate) mod coordinator_handover;
+pub(crate) mod restart_census;
 mod stall_cause;
 mod step_effort;
 mod summon_choice;
@@ -1511,6 +1512,12 @@ fn host_epoch() -> Option<&'static str> {
 /// that by accident; the actor's row-writes do not, so the black box is the
 /// honest remainder.
 static BLACKBOX: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+/// Whether this process has said its goodbye's road line (t-6428). The
+/// goodbye is heard up to three times on one way out — a close, the
+/// embedded browser's own `app.exit(0)`, tauri's `Exit` — and the road is
+/// said once; the workers are named whenever a call still finds them.
+static GOODBYE_SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The authority store this window opened, for readers that only read it.
 ///
@@ -3106,7 +3113,28 @@ pub(crate) fn pane_taken_over(term: u32, now_ms: i64) {
 /// dead (`the terminal holding this worker exited`, a gate on its task)
 /// while the next window resumed the very same conversation into the very
 /// same checkout with no seat to report from.
-pub(crate) fn window_exiting(now_ms: i64) {
+///
+/// And before any seat sleeps, the census is read (t-6428): the goodbye
+/// names the road the window is leaving by and, for every live worker, the
+/// turn and the commands it cuts — `census` is the window's reading
+/// ([`restart_census::take`]), asked on every call and cheap on every call
+/// after the first, when nobody live is left to read.
+pub(crate) fn window_exiting(
+    now_ms: i64,
+    road: crate::exit_runtime::ExitRoad,
+    census: &dyn Fn() -> restart_census::RestartCensus,
+) {
+    let taken = census();
+    // Once per exit for the road, and whenever there are workers to name:
+    // the first call is the one that finds them, before they sleep.
+    let first = !GOODBYE_SAID.swap(true, std::sync::atomic::Ordering::SeqCst);
+    if (first || !taken.workers.is_empty())
+        && let Some(root) = BLACKBOX.get()
+    {
+        for line in restart_census::goodbye_lines(&road.to_string(), &taken) {
+            crate::note_window_event(root, &line);
+        }
+    }
     if unavailable().is_some() {
         return;
     }
@@ -3311,20 +3339,34 @@ fn expire_sleepers(host: &dyn Host, now_ms: i64) {
 /// A live row with a seat this window maps; sleepers, orphans nobody maps
 /// and released rows are not panes a restart would cut.
 pub(crate) fn live_worker_count() -> usize {
+    seated_live_workers().len()
+}
+
+/// The live workers seated in THIS window's panes, each with the terminal
+/// that holds it — who leaving the window would cut (t-3058, t-6428). A live
+/// row with a seat this window maps; sleepers, orphans nobody maps and
+/// released rows are not panes a restart would cut. The restart census
+/// ([`restart_census::take`]) reads its workers here and nowhere else.
+pub(crate) fn seated_live_workers() -> Vec<restart_census::Seated> {
     with_ledger_seats(|ledger, seats| {
         ledger
             .runs()
             .iter()
             .flat_map(|run| run.workers.iter())
             .filter(|worker| worker.state.is_live() && worker.state.may_occupy_pane())
-            .filter(|worker| {
-                seats
+            .filter_map(|worker| {
+                let term = seats
                     .get(worker.team.as_str())
-                    .is_some_and(|panes| panes.contains_key(worker.pane.as_str()))
+                    .and_then(|panes| panes.get(worker.pane.as_str()))?;
+                Some(restart_census::Seated {
+                    worker: worker.id.clone(),
+                    agent: worker.agent.clone(),
+                    term: *term,
+                })
             })
-            .count()
+            .collect()
     })
-    .unwrap_or(0)
+    .unwrap_or_default()
 }
 
 /// A hook observed a provider session in this terminal.

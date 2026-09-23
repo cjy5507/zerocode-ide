@@ -389,6 +389,10 @@ mod tests {
                             // t-3996: the readiness probe's three verdicts and
                             // its table are tested beside the probe.
                             | "readiness_runtime.rs"
+                            // t-6428: the roads out of the window and their
+                            // first-named-wins rule are tested beside the one
+                            // table that names them.
+                            | "exit_runtime.rs"
                             // 2026-09-15: the wire adapters are pure functions
                             // over the state, tested beside them with the two
                             // protocols' own messages and no child process.
