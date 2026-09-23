@@ -143,20 +143,23 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
     // The OAuth road FIRST — one round trip against the endpoint the CLI
     // itself reads, exactly Orca's order (claude-fetcher.ts:46; the hidden
     // terminal below is its fallback, not its peer). This is what ends the
-    // twenty-five-second waits the map filed under P0-11. Read as the
-    // SELECTED account for the terminal road's own reason: the credentials
-    // file lives in the account's config directory.
-    let config_dir = accounts::reading_env_for(config_root, "claude")
-        .into_iter()
-        .find(|(key, _)| key == zerocode_core::account::CONFIG_DIR_VAR)
-        .map(|(_, value)| PathBuf::from(value));
+    // twenty-five-second waits the map filed under P0-11. Asked with the
+    // login the SELECTED account's CLI is using, out of the same reading
+    // environment the terminal road below is handed — and out of the store
+    // that CLI refreshes, not the copy this window wrote at the last switch,
+    // which had expired and answered 401 on every read (t-6583).
     if let Err(error) = accounts::prepare_selected_store(config_root) {
         return Scanned {
             usage: failed("error", error),
             road: UsageRoad::Local,
         };
     }
-    let asked = usage_oauth::claude(config_dir.as_deref(), epoch_ms_now());
+    let login = accounts::usage_login(&accounts::reading_env_for(config_root, "claude"));
+    let from = login.as_ref().map(|(_, from)| *from);
+    let asked = usage_oauth::claude(
+        login.as_ref().map(|(document, _)| document.as_str()),
+        epoch_ms_now(),
+    );
     // An auth or limit answer from the API IS the user-visible answer. Walking
     // the terminal road after it spawns Claude Code, waits up to twenty-five
     // seconds, and is told the same thing (`claude-oauth-usage-error.ts:19-21`).
@@ -180,7 +183,7 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
                 reset_credits: None,
                 account: whose,
             },
-            road: UsageRoad::Oauth,
+            road: UsageRoad::Oauth { login: from },
         };
     }
     let oauth = match asked {
@@ -202,7 +205,7 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
                     reset_credits: None,
                     account: whose,
                 },
-                road: UsageRoad::Oauth,
+                road: UsageRoad::Oauth { login: from },
             };
         }
         Err(failure) => failure.recovery.kind,
@@ -414,7 +417,9 @@ pub(super) fn scan_codex_usage_now(config_root: &Path) -> Scanned {
                 retry_at_ms: failure.retry_at_ms,
                 ..done("error", Some(failure.message.clone()), None, None)
             },
-            road: UsageRoad::Oauth,
+            road: UsageRoad::Oauth {
+                login: Some(accounts::LoginFrom::File),
+            },
         };
     }
     let oauth = match asked {
@@ -434,7 +439,9 @@ pub(super) fn scan_codex_usage_now(config_root: &Path) -> Scanned {
                         read.weekly.map(oauth_usage_window),
                     )
                 },
-                road: UsageRoad::Oauth,
+                road: UsageRoad::Oauth {
+                    login: Some(accounts::LoginFrom::File),
+                },
             };
         }
         Some(Err(failure)) => Some(failure.recovery.kind),
@@ -1075,8 +1082,9 @@ pub(super) struct UsageGauge {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum UsageRoad {
     /// The provider's OAuth usage endpoint answered — with its figures, or
-    /// with a refusal that is itself the answer (`skip_cli_fallback`).
-    Oauth,
+    /// with a refusal that is itself the answer (`skip_cli_fallback`) —
+    /// asked with the login found where `login` says.
+    Oauth { login: Option<accounts::LoginFrom> },
     /// The hidden terminal, walked because the OAuth road could not answer;
     /// `oauth` is what that road failed of, when it was asked at all.
     Terminal {
@@ -1096,7 +1104,7 @@ impl UsageRoad {
     /// The road's word on the log line.
     const fn word(self) -> &'static str {
         match self {
-            Self::Oauth => "oauth",
+            Self::Oauth { .. } => "oauth",
             Self::Terminal { .. } => "terminal",
             Self::Api => "api",
             Self::Local => "local",
@@ -1141,8 +1149,8 @@ pub(super) fn failure_word(kind: zerocode_core::usage_limit::FailureKind) -> Str
 }
 
 /// One usage read, as the window's log says it:
-/// `usage <provider> road=<road> [oauth=<kind>] ms=<ms> status=<status>
-/// [kind=<kind>] [forced] [reason=<sentence>]`.
+/// `usage <provider> road=<road> [login=<where>|oauth=<kind>] ms=<ms>
+/// status=<status> [kind=<kind>] [forced] [reason=<sentence>]`.
 ///
 /// Closed words, the elapsed time and this window's own sentence for why —
 /// never a token and never whose login it was. The line exists to tell a slow
@@ -1156,8 +1164,14 @@ pub(super) fn usage_read_line(
 ) -> String {
     use std::fmt::Write as _;
     let mut line = format!("usage {provider} road={}", road.word());
-    if let UsageRoad::Terminal { oauth: Some(kind) } = road {
-        let _ = write!(line, " oauth={}", failure_word(kind));
+    match road {
+        UsageRoad::Oauth { login: Some(from) } => {
+            let _ = write!(line, " login={}", from.word());
+        }
+        UsageRoad::Terminal { oauth: Some(kind) } => {
+            let _ = write!(line, " oauth={}", failure_word(kind));
+        }
+        _ => {}
     }
     let _ = write!(
         line,

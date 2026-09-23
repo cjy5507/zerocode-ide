@@ -12070,16 +12070,23 @@ fn a_usage_read_line_names_its_road_and_never_whose_login_it_was() {
         };
     let answered = usage_read_line(
         "claude",
-        UsageRoad::Oauth,
+        UsageRoad::Oauth {
+            login: Some(accounts::LoginFrom::Keychain),
+        },
         418,
         Some(&read("ok", None, None)),
         true,
     );
-    assert_eq!(answered, "usage claude road=oauth ms=418 status=ok forced");
+    assert_eq!(
+        answered,
+        "usage claude road=oauth login=keychain ms=418 status=ok forced"
+    );
     // The API's own refusal stands as the answer, and says what it was.
     let refused = usage_read_line(
         "claude",
-        UsageRoad::Oauth,
+        UsageRoad::Oauth {
+            login: Some(accounts::LoginFrom::File),
+        },
         301,
         Some(&read(
             "error",
@@ -12090,7 +12097,8 @@ fn a_usage_read_line_names_its_road_and_never_whose_login_it_was() {
     );
     assert_eq!(
         refused,
-        "usage claude road=oauth ms=301 status=error kind=stale-token reason=HTTP 401"
+        "usage claude road=oauth login=file ms=301 status=error kind=stale-token \
+         reason=HTTP 401"
     );
     // The slow road names what the fast one failed of, and a sentence with a
     // newline in it is still one line.
@@ -12195,7 +12203,9 @@ fn every_usage_read_leaves_its_line_and_a_poll_leaves_none() {
             hold.recv().ok();
             Scanned {
                 usage: answered,
-                road: UsageRoad::Oauth,
+                road: UsageRoad::Oauth {
+                    login: Some(accounts::LoginFrom::Keychain),
+                },
             }
         },
     );
@@ -12227,7 +12237,8 @@ fn every_usage_read_leaves_its_line_and_a_poll_leaves_none() {
         "the press that joined a read left no cache line: {seen:?}"
     );
     assert!(
-        seen[1].contains(" usage claude road=oauth ms=") && seen[1].ends_with(" status=ok forced"),
+        seen[1].contains(" usage claude road=oauth login=keychain ms=")
+            && seen[1].ends_with(" status=ok forced"),
         "the read left no line naming its road: {seen:?}"
     );
     // The floor holds the next poll, and a held poll is not a read either.
