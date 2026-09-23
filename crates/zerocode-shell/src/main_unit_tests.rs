@@ -7949,10 +7949,10 @@ fn a_helpers_line_counts_its_tool_uses_whoever_counted_them() {
     );
     assert_eq!(
         window.matches("toolUsesWords(").count(),
-        4,
+        5,
         "the count's word grew a second speller — the definition, the row \
-         builder, the re-dress's fit and the page head are its only \
-         mentions"
+         builder, the re-dress's fit, the page head and the conversation's \
+         helpers at work (`helperSpent`, t-6323 A6) are its only mentions"
     );
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -17152,6 +17152,12 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.focusThinking",
         "worker.focusExpand",
         "worker.focusCollapse",
+        // What a row folds (t-6323): the door's two words.
+        "worker.showMore",
+        "worker.showLess",
+        // A read's lines beside its file's door (t-6323 A2).
+        "worker.readLines",
+        "worker.readFrom",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -17166,7 +17172,21 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
     let reads = [
         (
             "function dressToolTurn(row, turn, run, spoken) {",
-            vec!["worker.moreLines", "worker.toolRow"],
+            vec!["worker.toolRow"],
+        ),
+        // The rows a diff's ceiling left out are counted where the rows are
+        // built; the door says 「더 보기」 / 「접기」 in one place (t-6323).
+        (
+            "function diffRowsNode(edit, words) {",
+            vec!["worker.moreLines"],
+        ),
+        (
+            "function paintExpandDoor(door, open) {",
+            vec!["worker.showMore", "worker.showLess"],
+        ),
+        (
+            "function dressToolFile(row, turn, run) {",
+            vec!["worker.readLines", "worker.readFrom"],
         ),
         // The fold's label lives in `thoughtLabel` (the bare word, or the
         // extension's 「Thought for Ns」 once the thought's length is known);
@@ -17306,6 +17326,14 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "meta-alpha",
         "radius-small",
         "font-ui",
+        // What a row folds (t-6323), the extension's own measures.
+        "tool-clip-h",
+        "tool-clip-fade",
+        "diff-clip-h",
+        "diff-clip-fade",
+        "diff-leading",
+        "user-clip-h",
+        "user-clip-fade",
     ] {
         let declared = format!("\n  --chat-{name}:");
         assert_eq!(
@@ -17333,8 +17361,20 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ".helper-turn.is-tool {",
         ".helper-tool-call {",
         ".helper-tool-result {",
-        ".helper-tool-more {",
+        ".helper-tool-body {",
         ".helper-tool-diff-rows {",
+        // What a row folds (t-6323): the cut, the fade, the door.
+        ".helper-tool-well > .helper-fold-body.is-clipped:not(.is-open) {",
+        ".helper-expand {",
+        ".is-clipped:not(.is-open) + .helper-expand {",
+        ".helper-tool-diff-rows.is-clipped:not(.is-open) {",
+        ".helper-tool-diff-rows.is-clipped:not(.is-open)::after {",
+        ".helper-turn.is-user > .helper-said.is-clipped:not(.is-open) {",
+        ".helper-turn.is-user > .helper-said.is-clipped:not(.is-open)::after {",
+        ".helper-turn.is-user > .helper-said.is-clipped:not(.is-open) + .helper-expand {",
+        // A call's file as a door, and the lines a read covered (A2).
+        ".helper-tool-arg.is-door {",
+        ".helper-tool-where {",
         ".helper-status {",
         ".pane-chat-ask {",
         ".helper-tail {",
@@ -17371,6 +17411,83 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
     assert!(
         offenders.is_empty(),
         "the helper page writes a pixel where a --chat-* token belongs:\n{}",
+        offenders.join("\n")
+    );
+}
+
+/// A sibling combinator whose right side names no class, id or attribute —
+/// `* + *`, `div + div` — is keyed on every element of that kind in the
+/// window, so the style engine takes each child inserted or removed anywhere
+/// as a reason to restyle its parent's whole subtree. On a 400-turn
+/// conversation every poll at the cap removes the front rows, and four such
+/// rules — a worktree row's meta, a notebook's outputs, the settings grid (in
+/// two places), a board card's asks — made each of those polls restyle about
+/// 10,500 elements, 17–30 ms, where the rows that moved are a few dozen
+/// (t-6323 B3, read off the renderer's own invalidation trace: "Invalidation
+/// set invalidates subtree" on the list, `allDescendantsMightBeInvalid`).
+/// Said as `:not(:first-child)` — the same elements — they cost the one child
+/// that moved: 1,130 elements, ~3 ms.
+#[test]
+fn no_sibling_rule_is_keyed_on_every_element() {
+    let styles = strip_comments(include_str!("../../../ui/shell.css"));
+    // A selector list split at its own commas, never at the commas of an
+    // argument (`:is(a, b)`).
+    let selectors_of = |list: &str| -> Vec<String> {
+        let mut depth = 0usize;
+        let mut start = 0;
+        let mut out = Vec::new();
+        for (at, glyph) in list.char_indices() {
+            match glyph {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    out.push(list[start..at].trim().to_string());
+                    start = at + 1;
+                }
+                _ => {}
+            }
+        }
+        out.push(list[start..].trim().to_string());
+        out
+    };
+    let mut offenders = Vec::new();
+    for block in styles.split('}') {
+        let Some((list, _)) = block.rsplit_once('{') else {
+            continue;
+        };
+        for selector in selectors_of(list) {
+            if selector.is_empty() || selector.starts_with('@') {
+                continue;
+            }
+            // The compound after each sibling combinator of the selector
+            // itself (one inside an argument is that argument's).
+            let mut depth = 0usize;
+            for (at, glyph) in selector.char_indices() {
+                match glyph {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    '+' | '~'
+                        if depth == 0
+                            && selector[..at].ends_with(' ')
+                            && selector[at + 1..].starts_with(' ') =>
+                    {
+                        let compound = selector[at + 2..]
+                            .split([' ', '>', '+', '~'])
+                            .next()
+                            .unwrap_or_default();
+                        if !compound.is_empty() && !compound.contains(['.', '#', '[']) {
+                            offenders.push(selector.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a sibling rule keyed on every element restyles whole subtrees on each \
+         insertion — name the sibling's class, or say `:not(:first-child)`:\n{}",
         offenders.join("\n")
     );
 }
@@ -17414,6 +17531,13 @@ fn the_conversation_wears_the_extensions_own_measures() {
             .as_str()
             .unwrap_or_else(|| panic!("the snapshot has no `{name}`"))
             .to_string()
+    };
+    // A measure the panel keeps in its script, not its stylesheet (t-6323):
+    // read off `index.js` by its shape, a bare number of pixels there.
+    let constant = |name: &str| -> u64 {
+        panel["constants"][name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("the snapshot has no script measure `{name}`"))
     };
     let nth = |value: String, at: usize| -> String {
         value
@@ -17518,6 +17642,55 @@ fn the_conversation_wears_the_extensions_own_measures() {
             "chat-dot-failed",
             rule("timelineMessage.dotFailure:before", "background-color"),
         ),
+        // What a row folds (t-6323): a tool body's row, the two fades, and
+        // the two heights that live in the panel's script.
+        ("chat-tool-clip-h", rule("toolBodyRowContent", "max-height")),
+        (
+            "chat-user-clip-fade",
+            rule("userMessage truncationGradient", "height"),
+        ),
+        (
+            "chat-diff-clip-fade",
+            rule("diff truncationGradient", "height"),
+        ),
+        (
+            "chat-diff-clip-h",
+            format!("{}px", constant("diffMaxHeight")),
+        ),
+        (
+            "chat-user-clip-h",
+            format!("{}px", constant("userMessageMaxHeight")),
+        ),
+        // A todo call's list (t-6323 A7).
+        ("chat-todo-done-alpha", rule("todo completed", "opacity")),
+        ("chat-todo-box-gap", rule("todo checkbox", "margin")),
+        // An image a message carries, and its preview (t-6323 A8).
+        ("chat-image-pill-h", rule("attachment pill", "height")),
+        ("chat-image-pill-max", rule("attachment pill", "max-width")),
+        ("chat-image-pad", rule("attachment pill", "--pill-padding")),
+        ("chat-image-gap", rule("attachment pill", "gap")),
+        ("chat-image-thumb", rule("attachment thumbIcon", "width")),
+        ("chat-image-meta-alpha", rule("attachment meta", "opacity")),
+        (
+            "chat-image-under",
+            nth(rule("userMessageAttachments", "padding"), 2),
+        ),
+        ("chat-preview-ground", rule("previewOverlay", "background")),
+        ("chat-preview-max", rule("previewImage", "max-width")),
+        ("chat-preview-max-h", rule("previewImage", "max-height")),
+        ("chat-preview-radius", rule("previewImage", "border-radius")),
+        ("chat-preview-shadow", rule("previewImage", "box-shadow")),
+        ("chat-preview-close", rule("previewCloseButton", "width")),
+        ("chat-preview-close-out", rule("previewCloseButton", "top")),
+        ("chat-preview-close-icon", rule("previewCloseIcon", "width")),
+        // A code block's copy (t-6323 A9).
+        ("chat-code-copy-inset", rule("code copyButton", "top")),
+        ("chat-code-copy-pad", rule("copyButton", "padding")),
+        ("chat-code-copy-icon", rule("copyIcon", "width")),
+        (
+            "chat-copy-pressed-alpha",
+            rule("copyButton:active", "opacity"),
+        ),
         ("agent-accent-claude", var("--app-claude-orange")),
         ("agent-send-claude", var("--app-claude-clay-button-orange")),
         ("chat-send-ink", var("--app-claude-ivory")),
@@ -17528,6 +17701,138 @@ fn the_conversation_wears_the_extensions_own_measures() {
         if measure(&have) != measure(want) {
             drifted.push(format!(
                 "--{name} is `{have}`, the panel's stylesheet says `{want}`"
+            ));
+        }
+    }
+    // The tool row's fade is the mask's own span: opaque to 50px, gone at 60.
+    let mask = rule("toolBodyRowContent", "mask-image");
+    let stops: Vec<f64> = mask
+        .split("px")
+        .filter_map(|part| {
+            let digits: String = part
+                .chars()
+                .rev()
+                .take_while(|glyph| glyph.is_ascii_digit() || *glyph == '.')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            digits.parse().ok()
+        })
+        .collect();
+    let fade = format!(
+        "{}px",
+        stops.last().copied().unwrap_or(0.0) - stops.first().copied().unwrap_or(0.0)
+    );
+    if measure(&token("chat-tool-clip-fade")) != measure(&fade) {
+        drifted.push(format!(
+            "--chat-tool-clip-fade is `{}`, the panel's mask fades over `{fade}` (`{mask}`)",
+            token("chat-tool-clip-fade")
+        ));
+    }
+    // The spinner's clock and its words are the panel's own (t-6323 A4): the
+    // page's one table of the verb's beats and sweep (`STATUS_VERB`), the
+    // glyph's step (`STATUS_CYCLE_MS`), and the catalog's verbs — Claude
+    // Code's list, which the panel carries whole.
+    let source = window_source();
+    let wanted_verb = format!(
+        "const STATUS_VERB = Object.freeze({{ after: [{}, {}, {}], every: {}, step: {}, tail: 3, suffix: \"...\" }});",
+        constant("spinnerVerbAfter1"),
+        constant("spinnerVerbAfter2"),
+        constant("spinnerVerbAfter3"),
+        constant("spinnerVerbEvery"),
+        constant("spinnerRevealStep")
+    );
+    if !source.contains(&wanted_verb) {
+        drifted.push(format!(
+            "the page's `STATUS_VERB` is not the panel's spinner — wanted `{wanted_verb}`"
+        ));
+    }
+    // A copy says it copied for the panel's own while (t-6323 A9, `gN`).
+    let wanted_copied = format!("const CHAT_COPIED_MS = {};", constant("copiedFor"));
+    if !source.contains(&wanted_copied) {
+        drifted.push(format!(
+            "the page's copy does not say it copied for the panel's while — wanted `{wanted_copied}`"
+        ));
+    }
+    let wanted_cycle = format!("const STATUS_CYCLE_MS = {};", constant("spinnerGlyphStep"));
+    if !source.contains(&wanted_cycle) {
+        drifted.push(format!(
+            "the spinner's glyph does not turn at the panel's step — wanted `{wanted_cycle}`"
+        ));
+    }
+    let verbs: Vec<&str> = panel["words"]["spinnerVerbs"]
+        .as_array()
+        .expect("the snapshot has the spinner's verbs")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    if zerocode_core::agent::CLAUDE_SPINNER_VERBS != verbs.as_slice() {
+        drifted.push(
+            "the catalog's spinner verbs are not the panel's list (`words.spinnerVerbs`)"
+                .to_string(),
+        );
+    }
+    // What makes a tool's words long is words, not pixels: the page's one
+    // table of it (`CHAT_CLIP`) says the panel's own numbers (`cN`).
+    let wanted_clip = format!(
+        "const CHAT_CLIP = Object.freeze({{ lines: {}, chars: {} }});",
+        constant("longTextLines"),
+        constant("longTextChars")
+    );
+    if !source.contains(&wanted_clip) {
+        drifted.push(format!(
+            "the page's `CHAT_CLIP` is not the panel's `cN` — wanted `{wanted_clip}`"
+        ));
+    }
+    // The list keeps to its foot by the panel's own rule (t-6323 A5): the
+    // slack, the intent's window and the glide's (`CHAT_FOLLOW`), the keys
+    // that scroll it (`CHAT_FOLLOW_KEYS`) and what keeps a Space for itself
+    // (`CHAT_FOLLOW_CONTROL`).
+    let words = |key: &str| -> Vec<String> {
+        panel["words"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("the snapshot has no word list `{key}`"))
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .map(str::to_string)
+            .collect()
+    };
+    let keys = |key: &str| -> String {
+        words(key)
+            .iter()
+            .map(|word| format!("\"{word}\""))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let wanted_follow = [
+        format!(
+            "const CHAT_FOLLOW = Object.freeze({{ slack: {}, intent: {}, glide: {} }});",
+            constant("followSlack"),
+            constant("followIntent"),
+            constant("followGlide")
+        ),
+        format!(
+            "const CHAT_FOLLOW_KEYS = Object.freeze({{ up: new Set([{}]), down: new Set([{}]) }});",
+            keys("followUpKeys"),
+            keys("followDownKeys")
+        ),
+        format!(
+            "const CHAT_FOLLOW_CONTROL = \"{}\";",
+            words("followControls").concat().replace('"', "\\\"")
+        ),
+    ];
+    // Helpers at work stand as the panel's own number of rows (t-6323 A6).
+    let wanted_rows = format!("const CHAT_AGENT_ROWS = {};", constant("agentRowsShown"));
+    if !source.contains(&wanted_rows) {
+        drifted.push(format!(
+            "the helpers' rows are not the panel's number — wanted `{wanted_rows}`"
+        ));
+    }
+    for wanted in wanted_follow {
+        if !source.contains(&wanted) {
+            drifted.push(format!(
+                "the list does not keep to its foot by the panel's rule — wanted `{wanted}`"
             ));
         }
     }
@@ -19282,6 +19587,69 @@ fn a_transcript_log_says_whether_the_file_goes_on() {
         !short_tail.folded && short_tail.turns.len() == 3,
         "a short file's tail is the whole file, nothing folded"
     );
+}
+
+/// A line past the read — nearly always one carrying an image (135 of
+/// this machine's last 146 image lines) — is read whole instead of
+/// dropped (t-6323 A8): the words on it are a turn, and the reads around
+/// it go on.
+#[test]
+fn a_line_carrying_an_image_is_read_whole_with_its_payload_set_aside() {
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let path = temp.path().join("shot.jsonl");
+    let payload = "iVBORw0KGgo".repeat(40_000);
+    let said = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"look\"}}\n";
+    let shot = format!(
+        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"[Image #1] 이 화면\"}},{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"{payload}\"}}}}]}}}}\n"
+    );
+    assert!(
+        shot.len() as u64 > crate::shell_runtime::SUBAGENT_LOG_CHUNK,
+        "the fixture's line is past the read"
+    );
+    std::fs::write(&path, format!("{said}{shot}{said}")).expect("written");
+    let size = std::fs::metadata(&path).expect("size").len();
+    let mut after = 0;
+    let mut turns = Vec::new();
+    for _ in 0..8 {
+        let read = crate::cmd::terminal::transcript_log_at(&path, Some(after)).expect("read");
+        turns.extend(read.turns);
+        after = read.next;
+        if !read.more {
+            break;
+        }
+    }
+    assert_eq!(after, size);
+    let words: Vec<&str> = turns.iter().map(|turn| turn.text.as_str()).collect();
+    assert_eq!(
+        words,
+        ["look", "[Image #1] 이 화면", "look"],
+        "the long line's words are a turn"
+    );
+    // Its image is a place in the file, and the place hands back the
+    // payload — and nothing that is not one.
+    let image = &turns[1].images[0];
+    assert_eq!(image.media_type, "image/png");
+    assert_eq!(
+        crate::cmd::terminal::payload_at(&path, &image.at).expect("the payload"),
+        payload,
+        "the place hands back the payload"
+    );
+    assert!(
+        crate::cmd::terminal::payload_at(&path, "0:12").is_err(),
+        "a place that is not base64 hands back nothing"
+    );
+    // The tail opens on a long last line whole.
+    std::fs::write(&path, format!("{said}{shot}")).expect("rewritten");
+    let tail = crate::cmd::terminal::transcript_log_at(&path, None).expect("read");
+    assert!(
+        tail.turns.iter().any(|turn| !turn.images.is_empty()),
+        "the tail's long line is read"
+    );
+    // Not yet ended: nothing yet, and the cursor waits at its start.
+    std::fs::write(&path, format!("{said}{}", shot.trim_end())).expect("rewritten");
+    let waiting =
+        crate::cmd::terminal::transcript_log_at(&path, Some(said.len() as u64)).expect("read");
+    assert!(waiting.turns.is_empty() && waiting.next == said.len() as u64);
 }
 
 /// A pane's 「대화」 hands its conversation to a wire only when the screen

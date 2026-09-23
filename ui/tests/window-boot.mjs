@@ -13,6 +13,13 @@ export const PRIMARY_EVENT = process.platform === "darwin"
   ? Object.freeze({ metaKey: true })
   : Object.freeze({ ctrlKey: true });
 const TERMINAL_THEME_CATALOG = Object.freeze(JSON.parse(await readFile(resolve(UI, "..", "crates/zerocode-shell/src/terminal_themes.json"), "utf8")));
+/* Claude Code's spinner verbs, read off the core catalog (`CLAUDE_SPINNER_
+ * VERBS`, agent.rs) rather than copied — the stub row speaks the one list. */
+const CLAUDE_SPINNER_VERBS = Object.freeze(
+  [...((await readFile(resolve(UI, "..", "crates/zerocode-core/src/agent.rs"), "utf8"))
+    .match(/pub const CLAUDE_SPINNER_VERBS: &\[&str\] = &\[([\s\S]*?)\];/)?.[1] ?? "")
+    .matchAll(/"([^"]+)"/g)].map((hit) => hit[1]),
+);
 let chromium;
 try {
   // Resolved from wherever node can see it, including a global install —
@@ -47,6 +54,7 @@ const BOOT = {
      첫 방문(줄 없음 → 주변 탐색)은 그래프 하네스의 S2가 검사한다. */
   second_brain_explore: { "/vault": JSON.stringify({ mode: "global" }) },
   explorer_policy: JSON.parse(await readFile(resolve(UI, "..", "crates/zerocode-shell/src/explorer_policy.json"), "utf8")),
+  claude_spinner_verbs: CLAUDE_SPINNER_VERBS,
   project_root: "/tmp/zerocode-window-test",
   active_root: "/tmp/zerocode-window-test",
   project: "zerocode",
@@ -1153,8 +1161,18 @@ const stubBackend = ({ boot, pollers }) => {
         homepage_url: "https://docs.anthropic.com/claude/docs/claude-code", installed: true,
         found_as: "claude", unsupported_here: false, missing_requirement: null,
         takes_a_paste: false, ready: "quiet", glyph: "✻", busy_word: "Pondering…", models_provider: "claude", model_command: "/model", model_command_takes_id: true, permission_road: "shift-tab",
-        permission_modes: [{ mode: "acceptEdits", reach: "edits" }, { mode: "plan", reach: "plan" }, { mode: "bypassPermissions", reach: "bypass" }, { mode: "auto", reach: "bypass" }],
-        wire: "claude-stream", wire_resumes: true, compact_command: "/compact" },
+        // The catalog's own rows (core `AGENT_VOICES`): Shift+Tab's order and
+        // Claude Code's words for each mode (t-6323 A3).
+        permission_modes: [
+          { mode: "dontAsk", reach: "ask", label: "Don't ask", cycles: false, aliases: [] },
+          { mode: "default", reach: "ask", label: "Manual", cycles: true, aliases: ["manual"] },
+          { mode: "acceptEdits", reach: "edits", label: "Edit automatically", cycles: true, aliases: [] },
+          { mode: "plan", reach: "plan", label: "Plan", cycles: true, aliases: [] },
+          { mode: "auto", reach: "bypass", label: "Auto", cycles: true, aliases: [] },
+          { mode: "bypassPermissions", reach: "bypass", label: "Bypass permissions", cycles: true, aliases: [] },
+        ],
+        wire: "claude-stream", wire_resumes: true, compact_command: "/compact", read_offset_base: 1, interrupt_key: "Escape",
+        spinner_verbs: boot.claude_spinner_verbs, todo_tool: "TodoWrite" },
       { id: "codex", name: "Codex", favicon_domain: "openai.com",
         homepage_url: "https://github.com/openai/codex", installed: true,
         found_as: "codex", unsupported_here: false, missing_requirement: null,

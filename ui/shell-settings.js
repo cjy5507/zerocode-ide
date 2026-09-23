@@ -1751,12 +1751,39 @@ const CSS_GENERIC_FONT_FAMILIES = new Set([
   "blinkmacsystemfont",
 ]);
 
+/* What a person typed into a font field, as a `font-family` value. They type
+ * the way CSS is written: one face, a face in quotes, or a list — and each of
+ * those must stay what it was. Escaping the whole text as one name turned
+ * `"Pretendard"` into a face whose name has quote marks in it and `A, B` into
+ * one face called "A, B" — neither exists, and the page fell to the engine's
+ * default face (t-6323 A0). So: split on the commas outside quotes, take one
+ * layer of quotes off each name, leave the generic families and the
+ * platform's `-apple-system`-style keywords bare, and escape the rest. */
 function cssFontFamilyChoice(family) {
-  const normalized = String(family ?? "").trim();
-  const lower = normalized.toLocaleLowerCase();
-  return normalized.startsWith("-") || CSS_GENERIC_FONT_FAMILIES.has(lower)
-    ? normalized
-    : CSS.escape(normalized);
+  const names = [];
+  let name = "";
+  let quote = null;
+  for (const glyph of String(family ?? "")) {
+    if (quote) {
+      if (glyph === quote) quote = null;
+      else name += glyph;
+    } else if (glyph === "\"" || glyph === "'") {
+      quote = glyph;
+    } else if (glyph === ",") {
+      names.push(name);
+      name = "";
+    } else {
+      name += glyph;
+    }
+  }
+  names.push(name);
+  return names
+    .map((one) => one.trim())
+    .filter(Boolean)
+    .map((one) => (one.startsWith("-") || CSS_GENERIC_FONT_FAMILIES.has(one.toLocaleLowerCase())
+      ? one
+      : CSS.escape(one)))
+    .join(", ");
 }
 
 function applyAppFontFamily() {
@@ -3558,6 +3585,10 @@ function agentVoice(id) {
     // The marks its spinner cycles through, in order; empty for a still mark.
     glyph_cycle: Array.isArray(row?.glyph_cycle) ? row.glyph_cycle : [],
     busy_word: row?.busy_word || t("worker.busy", "작업 중…"),
+    // The verbs its spinner turns through while it works (t-6323 A4).
+    spinner_verbs: Array.isArray(row?.spinner_verbs) ? row.spinner_verbs : [],
+    // The tool it keeps its todo list with (t-6323 A7).
+    todo_tool: row?.todo_tool ?? null,
   };
 }
 

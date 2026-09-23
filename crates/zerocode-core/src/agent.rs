@@ -1552,6 +1552,16 @@ pub struct AgentPresence {
     /// that chip a reading with no door — the window never invents a
     /// command a CLI did not name.
     pub compact_command: Option<&'static str>,
+    /// Where the CLI's read tool counts its `offset` from
+    /// ([`AgentVoice::read_offset_base`]) — what the conversation's tool row
+    /// opens a read's file at.
+    pub read_offset_base: Option<u8>,
+    /// The key that interrupts the CLI's turn ([`AgentVoice::interrupt_key`]).
+    pub interrupt_key: Option<&'static str>,
+    /// The verbs the CLI's spinner turns through ([`AgentVoice::spinner_verbs`]).
+    pub spinner_verbs: &'static [&'static str],
+    /// The CLI's todo tool ([`AgentVoice::todo_tool`]).
+    pub todo_tool: Option<&'static str>,
 }
 
 /// How far a permission mode lets the agent act before it asks — the one
@@ -1578,10 +1588,38 @@ pub enum PermissionReach {
 pub struct PermissionMode {
     pub mode: &'static str,
     pub reach: PermissionReach,
+    /// The CLI's own word for the mode, as its screen and its panel say it
+    /// (Claude Code 2.1.280: "Manual", "Edit automatically", …). Empty where
+    /// it was not measured; the page then opens the mode's own spelling.
+    pub label: &'static str,
+    /// Whether Shift+Tab steps through the mode. `false` for a mode the CLI
+    /// keeps in its cycle only while it is already in it (Claude Code's
+    /// `dontAsk`: the first press leaves it and it drops out).
+    pub cycles: bool,
+    /// Other spellings the CLI gives the same mode — Claude Code 2.1.280's
+    /// `--help` lists `manual` where its sessions report `default`.
+    pub aliases: &'static [&'static str],
 }
 
 const fn mode(mode: &'static str, reach: PermissionReach) -> PermissionMode {
-    PermissionMode { mode, reach }
+    PermissionMode {
+        mode,
+        reach,
+        label: "",
+        cycles: true,
+        aliases: &[],
+    }
+}
+
+/// A mode with the CLI's own word for it, in its cycle.
+const fn worded(mode: &'static str, reach: PermissionReach, label: &'static str) -> PermissionMode {
+    PermissionMode {
+        mode,
+        reach,
+        label,
+        cycles: true,
+        aliases: &[],
+    }
 }
 
 /// How a CLI is driven without its screen: the arguments that start it on a
@@ -1641,7 +1679,119 @@ pub struct AgentVoice {
     /// The composer's context meter IS that button, so the word has to be
     /// this CLI's own; `None` leaves the meter a reading and no door.
     pub compact_command: Option<&'static str>,
+    /// The line its read tool's `offset` counts from — `1` when the offset
+    /// IS the first line returned, `0` when it is 0-based. The page opens a
+    /// read's file where the read began (the extension's tool header does)
+    /// and says the lines it read, so the count must be the CLI's own. `None`
+    /// where it was not measured: the file then opens at its top.
+    pub read_offset_base: Option<u8>,
+    /// The key that interrupts the CLI's turn on its own screen — what a
+    /// pane's Esc and its stop button press. `None` where the CLI's screen
+    /// was not read for it; the page then sends the terminal's own interrupt.
+    pub interrupt_key: Option<&'static str>,
+    /// The verbs the CLI's spinner says while it works, one picked at random
+    /// and picked again as the turn goes on ([`CLAUDE_SPINNER_VERBS`]). Empty
+    /// for a console that says one word (`busy_word`) the whole turn.
+    pub spinner_verbs: &'static [&'static str],
+    /// The tool the CLI keeps its todo list with — a call whose input is
+    /// `{todos: [{content, status}]}` — which the conversation draws as that
+    /// list, as the extension draws `TodoWrite` (2.1.280 `qD1`). `None`
+    /// where the CLI has none or its shape was not read.
+    pub todo_tool: Option<&'static str>,
 }
+
+/// Claude Code's spinner verbs — the words its own screen and its panel say
+/// while it works (the 2.1.280 binary carries them; the extension's webview
+/// holds the same 84, `tD1`, and picks one at random, again at 2 s, 5 s, 10 s
+/// and every 5 s after). Words read off the package, not code: the gate
+/// `the_conversation_wears_the_extensions_own_measures` holds this list to
+/// the panel snapshot's (`claude-code-panel.json` `words.spinnerVerbs`).
+pub const CLAUDE_SPINNER_VERBS: &[&str] = &[
+    "Accomplishing",
+    "Actioning",
+    "Actualizing",
+    "Baking",
+    "Booping",
+    "Brewing",
+    "Calculating",
+    "Cerebrating",
+    "Channeling",
+    "Churning",
+    "Clauding",
+    "Coalescing",
+    "Cogitating",
+    "Computing",
+    "Combobulating",
+    "Concocting",
+    "Considering",
+    "Contemplating",
+    "Cooking",
+    "Crafting",
+    "Creating",
+    "Crunching",
+    "Deciphering",
+    "Deliberating",
+    "Determining",
+    "Discombobulating",
+    "Doing",
+    "Effecting",
+    "Elucidating",
+    "Enchanting",
+    "Envisioning",
+    "Finagling",
+    "Flibbertigibbeting",
+    "Forging",
+    "Forming",
+    "Frolicking",
+    "Generating",
+    "Germinating",
+    "Hatching",
+    "Herding",
+    "Honking",
+    "Ideating",
+    "Imagining",
+    "Incubating",
+    "Inferring",
+    "Manifesting",
+    "Marinating",
+    "Meandering",
+    "Moseying",
+    "Mulling",
+    "Mustering",
+    "Musing",
+    "Noodling",
+    "Percolating",
+    "Perusing",
+    "Philosophizing",
+    "Pontificating",
+    "Pondering",
+    "Processing",
+    "Puttering",
+    "Puzzling",
+    "Reticulating",
+    "Ruminating",
+    "Scheming",
+    "Schlepping",
+    "Shimmying",
+    "Simmering",
+    "Smooshing",
+    "Spelunking",
+    "Spinning",
+    "Stewing",
+    "Sussing",
+    "Synthesizing",
+    "Thinking",
+    "Tinkering",
+    "Transmuting",
+    "Unfurling",
+    "Unraveling",
+    "Vibing",
+    "Wandering",
+    "Whirring",
+    "Wibbling",
+    "Working",
+    "Wrangling",
+];
 
 /// The consoles this catalog knows — read off each CLI's own screen and its
 /// documentation, so the conversation view's status line says what the
@@ -1664,15 +1814,31 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             models_provider: Some("claude"),
             // `shift+tab to cycle`, on Claude Code's own status line.
             permission_road: Some("shift-tab"),
-            // The modes the extension's own stylesheet colours (2.1.278
-            // `sendButton[data-permission-mode=…]`): acceptEdits inverts the
-            // button, plan wears the plan colour, bypassPermissions and auto
-            // the error colour. `default` and the rest ask.
+            // In the order Shift+Tab steps through them and in Claude Code's
+            // own words — the extension's cycle (2.1.280 `d6`: dontAsk only
+            // while it is the mode, then default, acceptEdits, plan, auto,
+            // bypassPermissions) and its labels (`AB0`). The reach is what the
+            // extension's stylesheet colours (`sendButton[data-permission-
+            // mode=…]`): acceptEdits inverts the button, plan wears the plan
+            // colour, bypassPermissions and auto the error colour; the two
+            // that ask wear nothing.
             permission_modes: &[
-                mode("acceptEdits", PermissionReach::Edits),
-                mode("plan", PermissionReach::Plan),
-                mode("bypassPermissions", PermissionReach::Bypass),
-                mode("auto", PermissionReach::Bypass),
+                PermissionMode {
+                    cycles: false,
+                    ..worded("dontAsk", PermissionReach::Ask, "Don't ask")
+                },
+                PermissionMode {
+                    aliases: &["manual"],
+                    ..worded("default", PermissionReach::Ask, "Manual")
+                },
+                worded("acceptEdits", PermissionReach::Edits, "Edit automatically"),
+                worded("plan", PermissionReach::Plan, "Plan"),
+                worded("auto", PermissionReach::Bypass, "Auto"),
+                worded(
+                    "bypassPermissions",
+                    PermissionReach::Bypass,
+                    "Bypass permissions",
+                ),
             ],
             // `claude -p` fed and read as stream-json: the lines its own
             // panel streams from (`--include-partial-messages`), permission
@@ -1701,6 +1867,15 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // the stream-json wire named `compact` among 138 slash commands,
             // and the command answered down that wire (measured 2026-09-21).
             compact_command: Some("/compact"),
+            // `Read {offset: 10930}` came back opening `10930→` (2.1.280,
+            // measured 2026-09-23): the offset is the first line itself.
+            read_offset_base: Some(1),
+            // "esc to interrupt" on its own status line (the 2.1.280 binary
+            // says it twice; the extension's Esc is the same interrupt).
+            interrupt_key: Some("Escape"),
+            spinner_verbs: CLAUDE_SPINNER_VERBS,
+            // The extension's own name for it (`XN="TodoWrite"`).
+            todo_tool: Some("TodoWrite"),
         },
     ),
     (
@@ -1733,6 +1908,12 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // conversation to prevent hitting the context limit"
             // (docs/design/zo-vs-codex-gaps-20260921.md #23, `S:53003`).
             compact_command: Some("/compact"),
+            // Codex reads files through its shell; it has no read tool.
+            read_offset_base: None,
+            // The 0.156.0 binary names no interrupt key in its words.
+            interrupt_key: None,
+            spinner_verbs: &[],
+            todo_tool: None,
         },
     ),
     (
@@ -1756,6 +1937,14 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             plan_tool: None,
             // zo's own twelve (`zo-ide/README.md:36`).
             compact_command: Some("/compact"),
+            // `read_file`'s schema: "a 0-based line window".
+            read_offset_base: Some(0),
+            // Its status line: "Working (0s • esc to interrupt)" (tui/view.rs).
+            interrupt_key: Some("Escape"),
+            spinner_verbs: &[],
+            // zo-ide's `TodoWrite` (tools/task_tools.rs) takes the same
+            // `todos: [{content, status, activeForm}]`.
+            todo_tool: Some("TodoWrite"),
         },
     ),
     (
@@ -1779,6 +1968,12 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             plan_tool: None,
             // agy's compaction word is not measured here.
             compact_command: None,
+            // agy's read tool is not measured here.
+            read_offset_base: None,
+            // Nor its interrupt key.
+            interrupt_key: None,
+            spinner_verbs: &[],
+            todo_tool: None,
         },
     ),
 ];
@@ -1795,6 +1990,10 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     exit_command: None,
     plan_tool: None,
     compact_command: None,
+    read_offset_base: None,
+    interrupt_key: None,
+    spinner_verbs: &[],
+    todo_tool: None,
 };
 
 /// One agent's console, or the silent one for an agent the table does not
@@ -1889,6 +2088,10 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                     .is_some_and(|road| road.resume.is_some())
                     && agent_voice(spec.id).exit_command.is_some(),
                 compact_command: agent_voice(spec.id).compact_command,
+                read_offset_base: agent_voice(spec.id).read_offset_base,
+                interrupt_key: agent_voice(spec.id).interrupt_key,
+                spinner_verbs: agent_voice(spec.id).spinner_verbs,
+                todo_tool: agent_voice(spec.id).todo_tool,
             }
         })
         .collect()
@@ -1902,13 +2105,14 @@ pub fn wire_road(id: &str) -> Option<WireRoad> {
 }
 
 /// How far `mode` lets `agent` act on its own — [`PermissionReach::Ask`] for
-/// a mode the console does not name, or no mode at all.
+/// a mode the console does not name, or no mode at all. A mode is known by
+/// its reported spelling or any other the CLI gives it.
 #[must_use]
 pub fn permission_reach(agent: &str, mode: &str) -> PermissionReach {
     agent_voice(agent)
         .permission_modes
         .iter()
-        .find(|row| row.mode == mode)
+        .find(|row| row.mode == mode || row.aliases.contains(&mode))
         .map_or(PermissionReach::Ask, |row| row.reach)
 }
 
@@ -1995,6 +2199,17 @@ mod tests {
         }
         assert!(super::agent_voice("antigravity").compact_command.is_none());
         assert!(super::SILENT_CONSOLE.compact_command.is_none());
+        // Where a read's offset counts from is each CLI's own (measured for
+        // two), and the presence row the page reads carries it.
+        assert_eq!(super::agent_voice("claude").read_offset_base, Some(1));
+        assert_eq!(super::agent_voice("zo").read_offset_base, Some(0));
+        assert!(super::agent_voice("codex").read_offset_base.is_none());
+        assert!(super::SILENT_CONSOLE.read_offset_base.is_none());
+        let rows = super::agent_presence(None, "macos");
+        assert!(
+            rows.iter()
+                .all(|row| row.read_offset_base == super::agent_voice(row.id).read_offset_base)
+        );
         assert!(super::wire_road("zo").is_none());
         let silent = super::agent_voice("nobody");
         assert_eq!(silent, super::SILENT_CONSOLE);
@@ -2055,10 +2270,71 @@ mod tests {
             PermissionReach::Ask
         );
         assert_eq!(permission_reach("nobody", "anything"), PermissionReach::Ask);
+        assert_eq!(permission_reach("claude", "manual"), PermissionReach::Ask);
+        let claude = super::agent_voice("claude").permission_modes;
+        let edits = claude
+            .iter()
+            .find(|row| row.mode == "acceptEdits")
+            .expect("acceptEdits is named");
         assert_eq!(
-            serde_json::to_value(super::agent_voice("claude").permission_modes[0]).unwrap(),
-            serde_json::json!({"mode": "acceptEdits", "reach": "edits"})
+            serde_json::to_value(edits).unwrap(),
+            serde_json::json!({"mode": "acceptEdits", "reach": "edits",
+                "label": "Edit automatically", "cycles": true, "aliases": []})
         );
+    }
+
+    /// Claude Code's modes stand in the order its panel's Shift+Tab steps
+    /// through them (2.1.280 `d6`), each in its own word (`AB0`): `dontAsk`
+    /// only while it is the mode, `default` also spelled `manual` by `--help`.
+    #[test]
+    fn claude_codes_modes_are_its_cycle_in_its_own_words() {
+        let claude = super::agent_voice("claude").permission_modes;
+        let order: Vec<(&str, &str, bool)> = claude
+            .iter()
+            .map(|row| (row.mode, row.label, row.cycles))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                ("dontAsk", "Don't ask", false),
+                ("default", "Manual", true),
+                ("acceptEdits", "Edit automatically", true),
+                ("plan", "Plan", true),
+                ("auto", "Auto", true),
+                ("bypassPermissions", "Bypass permissions", true),
+            ]
+        );
+        assert_eq!(claude[1].aliases, ["manual"]);
+        // The other consoles name their modes without words of their own.
+        for id in ["codex", "zo"] {
+            assert!(
+                super::agent_voice(id)
+                    .permission_modes
+                    .iter()
+                    .all(|row| row.label.is_empty() && row.cycles && row.aliases.is_empty()),
+                "{id}"
+            );
+        }
+        // The interrupt key is named where the CLI's own screen says it.
+        assert_eq!(super::agent_voice("claude").interrupt_key, Some("Escape"));
+        assert_eq!(super::agent_voice("zo").interrupt_key, Some("Escape"));
+        assert!(super::agent_voice("codex").interrupt_key.is_none());
+        assert!(super::SILENT_CONSOLE.interrupt_key.is_none());
+        // The spinner's verbs are Claude Code's own list, and only its.
+        let verbs = super::agent_voice("claude").spinner_verbs;
+        assert_eq!(verbs.len(), 84);
+        assert_eq!((verbs[0], verbs[83]), ("Accomplishing", "Wrangling"));
+        let unique: std::collections::BTreeSet<_> = verbs.iter().collect();
+        assert_eq!(unique.len(), verbs.len(), "a verb stands twice");
+        for id in ["codex", "zo", "antigravity"] {
+            assert!(super::agent_voice(id).spinner_verbs.is_empty(), "{id}");
+        }
+        // The todo tool is named where its shape was read: Claude Code's and
+        // zo's `TodoWrite`; Codex's plan tool keeps another shape.
+        assert_eq!(super::agent_voice("claude").todo_tool, Some("TodoWrite"));
+        assert_eq!(super::agent_voice("zo").todo_tool, Some("TodoWrite"));
+        assert!(super::agent_voice("codex").todo_tool.is_none());
+        assert!(super::SILENT_CONSOLE.todo_tool.is_none());
     }
 
     use super::*;

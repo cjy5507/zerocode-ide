@@ -24,25 +24,30 @@ export async function testAgentConversation(browser, origin, ok) {
       window.__ANSWER__.subagent_log = () => ({ found: true, next: 1, turns: [] });
     });
     await page.waitForSelector(".helper-turn.is-tool");
-    await page.locator(".helper-turn.is-tool .helper-tool-more > summary").first().click();
     const paired = await page.evaluate(() => {
       const tab = window.__CHAT_TAB__;
       const original = document.querySelector(".helper-turn.is-tool");
+      window.__CHAT_BODY__ = original.querySelector(".helper-tool-body");
       holdHelperTurns(tab.worker.helper, [
         { role: "tool_result", text: "SECOND OUTPUT", tool: { call_id: "b", is_error: false } },
         { role: "tool_result", text: "FIRST OUTPUT\nexit 1", tool: { call_id: "a", is_error: true } },
       ]);
       paintWorkerView(tab);
       const rows = [...document.querySelectorAll(".helper-turn.is-tool")];
-      return { count: rows.length, same: rows[0] === original, open: rows[0].querySelector(".helper-tool-more").open,
+      // The rest stands in the row's body with no fold to press (t-6323
+      // A1): the body that stood for the two-line command before the result
+      // came is the same node after it, now carrying the output too.
+      return { count: rows.length, same: rows[0] === original,
+        open: rows[0].querySelector(".helper-tool-body") === window.__CHAT_BODY__ &&
+          rows[0].querySelector(".helper-tool-output").checkVisibility(),
         command: rows[0].querySelector(".helper-tool-input").textContent,
         results: rows.map((row) => row.querySelector(".helper-tool-result").textContent),
         output: rows[0].querySelector(".helper-tool-output").textContent,
-        secondBare: rows[1].querySelector(".helper-tool-more") === null,
+        secondBare: rows[1].querySelector(".helper-tool-body") === null,
         failed: rows.map((row) => row.classList.contains("is-failed")),
         done: rows.map((row) => row.classList.contains("is-done")) };
     });
-    ok("interleaved tool results join their call IDs: each dresses its own row — first line under the call, the rest behind the fold that stayed open, the failed one in the halt state",
+    ok("interleaved tool results join their call IDs: each dresses its own row — first line under the call, the rest in the row's same body, the failed one in the halt state",
       paired.count === 2 && paired.same && paired.open && paired.command.includes("printf done") &&
       paired.results.join("|") === "FIRST OUTPUT|SECOND OUTPUT" && paired.output === "FIRST OUTPUT\nexit 1" &&
       paired.secondBare && paired.failed.join() === "true,false" && paired.done.join() === "false,true", JSON.stringify(paired));

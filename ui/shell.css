@@ -1789,7 +1789,7 @@ svg.wt-agent-dot {
   content: "";
 }
 
-.wt-agent.is-live .wt-agent-meta > * + *::before {
+.wt-agent.is-live .wt-agent-meta > :not(:first-child)::before {
   content: " · ";
 }
 
@@ -6192,7 +6192,7 @@ body.is-dragging-pane {
 }
 
 .nb-display + .nb-display,
-.nb-outputs > * + * {
+.nb-outputs > :not(:first-child) {
   border-top: var(--rule-width) solid color-mix(in srgb, var(--edge-rule) 60%, transparent);
 }
 
@@ -13670,6 +13670,55 @@ details.worker-command {
   background: var(--chat-code-bg);
 }
 
+/* A code block's wrapper (`codeBlockWrapper`, t-6323 A9) keeps the block's
+ * place and hangs the copy over its top right corner, 4px in, shown while
+ * the block is under the pointer — or while the copy has the keyboard's
+ * focus, which the extension's leaves unseen. A pressed copy wears a check
+ * for 2 s. */
+.is-chat-page .helper-said .helper-code {
+  position: relative;
+  margin: var(--space-2) 0;
+}
+
+.is-chat-page .helper-said .helper-code > pre {
+  margin: 0;
+}
+
+.helper-code-copy {
+  position: absolute;
+  top: var(--chat-code-copy-inset);
+  right: var(--chat-code-copy-inset);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--chat-code-copy-pad);
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--chat-radius-small);
+  background: var(--surface-raised);
+  color: var(--chat-work-ink);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-code:hover > .helper-code-copy,
+.helper-code-copy:focus-visible {
+  opacity: 1;
+}
+
+.helper-code-copy:hover {
+  background: var(--chat-pill-bg);
+}
+
+.helper-code-copy:active {
+  opacity: var(--chat-copy-pressed-alpha);
+}
+
+.helper-code-copy .icon {
+  width: var(--chat-code-copy-icon);
+  height: var(--chat-code-copy-icon);
+}
+
 /* 인라인 코드는 둥근 칩 — 블록(`pre`) 안의 코드는 제 우물의 옷을 입는다. */
 .is-chat-page .helper-said :not(pre) > code {
   padding: 0 0.35em;
@@ -13877,6 +13926,30 @@ details.worker-command {
   cursor: pointer;
 }
 
+/* What the person said, taller than the extension's clip: 60px of its words
+ * (the box keeps its padding and edge around them), the last 50px fading to
+ * the box's ground, the door over the fade (`EV0`). */
+.helper-turn.is-user > .helper-said.is-clipped:not(.is-open) {
+  position: relative;
+  max-height: calc(var(--chat-user-clip-h) + 2 * (var(--chat-bubble-pad-y) + 1px));
+  overflow: hidden;
+}
+
+.helper-turn.is-user > .helper-said.is-clipped:not(.is-open)::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: var(--chat-user-clip-fade);
+  background: linear-gradient(to bottom, transparent, var(--chat-composer-bg));
+  pointer-events: none;
+}
+
+.helper-turn.is-user > .helper-said.is-clipped:not(.is-open) + .helper-expand {
+  bottom: calc(var(--chat-sticky-pad-bottom) + var(--space-1));
+}
+
 .helper-who {
   flex: none;
   font-family: var(--font-ui);
@@ -13909,9 +13982,11 @@ details.worker-command {
 }
 
 /* A call still out: the agent's accent with its halo, blinking at the
- * extension's beat (`dotProgress`: 1s, linear). */
+ * extension's beat (`dotProgress`: 1s, linear) — and a helper at work
+ * wears the same dot (t-6323 A6). */
 .helper-turn.is-tool.is-live::before,
-.helper-group.is-live::before {
+.helper-group.is-live::before,
+.helper-agent-dot {
   background: var(--chat-accent);
   box-shadow: 0 0 0 var(--chat-dot-halo) color-mix(in srgb, var(--chat-accent) 18%, transparent);
   animation: helper-live-pulse 1s linear infinite;
@@ -13954,6 +14029,26 @@ details.worker-command {
   color: var(--chat-link);
 }
 
+/* The target as a door to its file (t-6323 A2) — the extension's link in the
+ * tool header — and the lines a read covered beside it, in the header's own
+ * type rather than the target's mono. */
+.helper-tool-arg.is-door {
+  cursor: pointer;
+  text-decoration: none;
+  transition: text-decoration-color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-tool-arg.is-door:hover {
+  text-decoration: underline;
+}
+
+.helper-tool-where {
+  flex: none;
+  font-family: var(--font-ui);
+  font-size: var(--chat-prose-size);
+  color: var(--chat-work-ink);
+}
+
 /* What came back, in one line under the call — the extension's secondary
  * line (`secondaryLine`): the window's type in the quieter ink. */
 .helper-tool-result {
@@ -13972,19 +14067,12 @@ details.worker-command {
 }
 
 /* The rest — an input past its first line, an output past its first line —
- * behind one fold, in the window's words on the cap; opened, the wells are
- * the extension's tool body (`toolBody`): one bordered box, a row per
- * side, each with its label (`IN` / `OUT`) in a mono column at the left. */
-.helper-tool-more {
-  font-size: var(--chat-prose-size);
-  color: var(--chat-work-ink);
-}
-
-.helper-tool-more > .helper-cap .helper-cue {
-  font-family: var(--font-ui);
-}
-
-.helper-tool-more-body {
+ * in the extension's tool body (`toolBody`), standing under the call with no
+ * fold to press first: one bordered box, a row per side, each with its label
+ * (`IN` / `OUT`) in a mono column at the left. A side that is long by the
+ * extension's test stops at the clip, its last lines fading out, with its
+ * door after it (t-6323 A1); opened, it is the well it always was. */
+.helper-tool-body {
   display: grid;
   gap: 0;
   min-width: 0;
@@ -13993,17 +14081,79 @@ details.worker-command {
   border: 1px solid var(--chat-composer-edge);
   border-radius: var(--chat-radius-tool);
   background: var(--chat-tool-bg);
+  font-size: var(--chat-prose-size);
+  color: var(--chat-work-ink);
 }
 
-.helper-tool-more-body > .helper-fold-body {
+.helper-tool-well {
+  position: relative;
+  min-width: 0;
+}
+
+.helper-tool-well[hidden] {
+  display: none;
+}
+
+.helper-tool-well:not([hidden]) ~ .helper-tool-well:not([hidden]) {
+  border-top: 1px solid var(--chat-composer-edge);
+}
+
+.helper-tool-well > .helper-fold-body {
   display: grid;
   grid-template-columns: var(--chat-tool-label) minmax(0, 1fr);
   margin: 0;
   padding: var(--space-1) var(--space-2) var(--space-1) 0;
 }
 
-.helper-tool-more-body > .helper-fold-body + .helper-fold-body {
-  border-top: 1px solid var(--chat-composer-edge);
+/* Cut at the clip: the words' own height (the extension's box is sized by
+ * its content, not its padding), the last stretch fading out. */
+.helper-tool-well > .helper-fold-body.is-clipped:not(.is-open) {
+  box-sizing: content-box;
+  max-height: var(--chat-tool-clip-h);
+  overflow: hidden;
+  mask-image: linear-gradient(
+    to bottom,
+    var(--ink-chalk) calc(var(--chat-tool-clip-h) - var(--chat-tool-clip-fade)),
+    transparent var(--chat-tool-clip-h)
+  );
+}
+
+/* The door after a clipped thing — 「더 보기」 over the cut while the pointer
+ * or the focus is on what it opens (the extension shows its own only then),
+ * and 「접기」 under the thing once it is open. */
+.helper-expand {
+  display: flex;
+  width: fit-content;
+  margin: var(--space-1) 0 0 auto;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--chat-radius-small);
+  background: var(--surface-raised);
+  color: var(--ink-chalk);
+  font: inherit;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+  transition: opacity var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-expand:hover {
+  border-color: var(--edge-glint);
+}
+
+.is-clipped:not(.is-open) + .helper-expand {
+  position: absolute;
+  right: var(--space-1);
+  bottom: var(--space-1);
+  margin: 0;
+  opacity: 0;
+}
+
+.helper-tool-well:hover > .is-clipped:not(.is-open) + .helper-expand,
+.helper-tool-diff-file:hover > .is-clipped:not(.is-open) + .helper-expand,
+.helper-turn.is-user:hover > .is-clipped:not(.is-open) + .helper-expand,
+.is-clipped:not(.is-open) + .helper-expand:focus-visible {
+  opacity: 1;
 }
 
 .helper-tool-input::before,
@@ -14024,10 +14174,6 @@ details.worker-command {
   content: "OUT";
 }
 
-.helper-tool-input[hidden],
-.helper-tool-output[hidden] {
-  display: none;
-}
 
 /* The inline diff under an edit's row — the extension's block beneath
  * `● Write`: the review surface's rows (`.diff-line`, `.diff-word`) in a
@@ -14039,7 +14185,13 @@ details.worker-command {
   min-width: 0;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  line-height: 1.5;
+  line-height: var(--chat-diff-leading);
+}
+
+/* One file's rows and the door after them. */
+.helper-tool-diff-file {
+  position: relative;
+  min-width: 0;
 }
 
 .helper-tool-diff-path {
@@ -14057,6 +14209,26 @@ details.worker-command {
   border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius-sm);
   background: var(--chat-bubble);
+}
+
+/* A diff taller than the extension's 200px box stops there, its foot fading
+ * into the well (`truncationGradient`) — the rows behind the fade are built
+ * only when the door opens it (`diffRowsNode`). */
+.helper-tool-diff-rows.is-clipped:not(.is-open) {
+  position: relative;
+  max-height: var(--chat-diff-clip-h);
+  overflow: hidden;
+}
+
+.helper-tool-diff-rows.is-clipped:not(.is-open)::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: var(--chat-diff-clip-fade);
+  background: linear-gradient(to bottom, transparent, var(--chat-bubble));
+  pointer-events: none;
 }
 
 .helper-tool-diff .diff-num {
@@ -14176,6 +14348,240 @@ details.worker-command {
  * 같은 이유로 제 규칙을 갖는다). */
 .helper-turn[hidden] {
   display: none;
+}
+
+/* A helper at work (t-6323 A6), the extension's live helper row
+ * (`focusFoldRow` with `dotProgress`): on the step's own rule — its gutter,
+ * and its dot where the rail's dot stands — what it is doing, cut to one
+ * line, then its measure in the quiet ink. */
+.helper-agent {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--chat-row-pad) 0 var(--chat-row-pad) var(--chat-gutter);
+  font-size: var(--chat-prose-size);
+  line-height: var(--chat-prose-leading);
+  color: var(--chat-work-ink);
+}
+
+.helper-agent-dot {
+  position: absolute;
+  left: var(--chat-rail-dot-x);
+  top: calc(var(--chat-row-pad) + var(--chat-rail-dot-y));
+  width: var(--chat-dot);
+  height: var(--chat-dot);
+  border-radius: 50%;
+}
+
+.helper-agent-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-chalk);
+}
+
+.helper-agent-meta {
+  flex: none;
+}
+
+/* An image a message carries (t-6323 A8), the extension's pill (`pill`,
+ * `thumbIcon`, `label`, `meta`): a 12px thumbnail, its name and — once the
+ * picture has loaded — its size, in a 24px box a shade off the input's
+ * ground; the person's pills stand in a row above their words
+ * (`userMessageAttachments`), a tool's under the line that says what it
+ * handed back. A pill whose picture could not be read keeps its name. */
+.helper-images {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--chat-image-gap);
+  max-width: 100%;
+  padding-bottom: var(--chat-image-under);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.helper-image {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--chat-image-gap);
+  flex: none;
+  min-width: 0;
+  max-width: var(--chat-image-pill-max);
+  height: var(--chat-image-pill-h);
+  padding: var(--chat-image-pad) var(--chat-image-pad-end) var(--chat-image-pad) var(--chat-image-pad);
+  overflow: hidden;
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--chat-radius-small);
+  background: color-mix(in srgb, var(--chat-composer-bg) 85%, var(--chat-work-ink));
+  color: var(--ink-chalk);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-image:hover {
+  border-color: color-mix(in srgb, var(--chat-composer-edge) 60%, var(--ink-chalk));
+}
+
+.helper-image-thumb {
+  flex: none;
+  width: var(--chat-image-thumb);
+  height: var(--chat-image-thumb);
+  border-radius: var(--chat-image-thumb-radius);
+  object-fit: cover;
+}
+
+/* No picture yet: the thumbnail's place stands empty, not a broken image. */
+.helper-image-thumb:not([src]) {
+  visibility: hidden;
+}
+
+.helper-image-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-2xs);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.helper-image-size {
+  flex: none;
+  font-size: var(--text-2xs);
+  color: var(--chat-work-ink);
+  opacity: var(--chat-image-meta-alpha);
+  white-space: nowrap;
+}
+
+.helper-image.is-missing .helper-image-thumb {
+  display: none;
+}
+
+/* The picture whole, over everything (the extension's `previewOverlay`). */
+.chat-image-preview {
+  position: fixed;
+  inset: 0;
+  z-index: var(--chat-preview-layer);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--chat-preview-ground);
+}
+
+.chat-image-preview-frame {
+  position: relative;
+  max-width: var(--chat-preview-max);
+  max-height: var(--chat-preview-max-h);
+  cursor: default;
+}
+
+.chat-image-preview-image {
+  display: block;
+  max-width: var(--chat-preview-max);
+  max-height: var(--chat-preview-max-h);
+  border-radius: var(--chat-preview-radius);
+  object-fit: contain;
+  box-shadow: var(--chat-preview-shadow);
+}
+
+.chat-image-preview-close {
+  position: absolute;
+  top: var(--chat-preview-close-out);
+  right: var(--chat-preview-close-out);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--chat-preview-close);
+  height: var(--chat-preview-close);
+  padding: 0;
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--ink-chalk);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.chat-image-preview-close:hover {
+  background: var(--chat-composer-bg);
+}
+
+.chat-image-preview-close .icon {
+  width: var(--chat-preview-close-icon);
+  height: var(--chat-preview-close-icon);
+}
+
+/* A todo call's list (t-6323 A7), the extension's `todoList`: the items
+ * stacked a little apart, each a box beside its words; a done item faded
+ * and struck through in the quiet ink. The box is the extension's disabled
+ * checkbox, drawn by hand — a tick when done, `✽` a size smaller while under
+ * way, empty while it waits. */
+.helper-todos {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-2) 0;
+  list-style: none;
+}
+
+.helper-todo {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  border-radius: var(--radius-xs);
+  font-size: var(--chat-prose-size);
+  line-height: var(--chat-prose-leading);
+  color: var(--ink-chalk);
+}
+
+.helper-todo-box {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 1em;
+  height: 1em;
+  margin: var(--chat-todo-box-gap);
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--radius-xs);
+  background: var(--chat-composer-bg);
+  font-size: inherit;
+  line-height: 1;
+  color: var(--ink-chalk);
+}
+
+.helper-todo-box:checked {
+  opacity: var(--chat-todo-done-alpha);
+}
+
+.helper-todo-box:checked::after {
+  content: "✓";
+  font-size: 0.9em;
+}
+
+.helper-todo-box:indeterminate::after {
+  content: "✽";
+  font-size: 0.8em;
+}
+
+.helper-todo-content {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.helper-todo.is-completed {
+  opacity: var(--chat-todo-done-alpha);
+}
+
+.helper-todo.is-completed .helper-todo-content {
+  text-decoration: line-through;
+  color: var(--chat-work-ink);
+  opacity: var(--chat-todo-done-alpha);
 }
 
 /* 묶음 머리는 도구 행의 자를 그대로 쓴다: `.is-step`이 여백과 레일과 점을
@@ -15096,7 +15502,7 @@ button.worker-composer-pill:hover {
 /* 이 페이지의 키보드 초점 — 플랫폼 계약의 잉크 외곽선. 입력 상자만 전역
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`). */
 .worker-view
-  :is(.helper-cap, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-preview-lid, .helper-preview-door):focus-visible {
+  :is(.helper-cap, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-tool-arg.is-door, .helper-preview-lid, .helper-preview-door):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -15114,6 +15520,7 @@ button.worker-composer-pill:hover {
   button.worker-where.is-door,
   .helper-preview-door,
   .helper-copy,
+  .helper-expand,
   .composer-menu-item,
   .composer-slash-row,
   .worker-composer-slash {
@@ -15122,6 +15529,7 @@ button.worker-composer-pill:hover {
 
   .helper-turn.is-tool.is-live::before,
   .helper-group.is-live::before,
+  .helper-agent-dot,
   .helper-status-mark {
     animation: none;
   }
@@ -16707,7 +17115,7 @@ button.worker-composer-pill:hover {
   padding: var(--space-2) var(--space-3);
 }
 
-.integration-facts > div + div {
+.integration-facts > div:not(:first-child) {
   border-left: var(--rule-width) solid var(--edge-rule);
 }
 
@@ -18936,7 +19344,7 @@ button.worker-composer-pill:hover {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .integration-facts > div + div {
+  .integration-facts > div:not(:first-child) {
     border-top: var(--rule-width) solid var(--edge-rule);
     border-left: 0;
   }
@@ -30481,7 +30889,7 @@ details.task-board-section > summary {
   background: var(--surface-well);
 }
 
-.board-ask-rows > * + * {
+.board-ask-rows > :not(:first-child) {
   border-top: var(--rule-width) solid var(--edge-rule);
 }
 

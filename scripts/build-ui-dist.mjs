@@ -36,6 +36,7 @@ const FILES = Object.freeze([
   "shell-explorer-tree.js",
   "shell-attach.js",
   "shell-composer.js",
+  "shell-conversation-view.js",
   "shell-path-browser.js",
   "shell-remote.js",
   "shell-sftp.js",

@@ -10564,6 +10564,8 @@ function holdHelperTurns(held, turns) {
         call.output = turn.text;
         call.outputError = turn.tool.is_error === true;
         call.outputAt = turn.at_ms ?? now;
+        // What the result handed back beside its words: pictures (A8).
+        if (turn.images?.length > 0) call.outputImages = turn.images;
         // An edit the result describes and the call did not (ACP hands the
         // diff over on the update) dresses the call's row.
         if (turn.tool.edits?.length > 0 && !(call.tool?.edits?.length > 0)) {
@@ -10585,7 +10587,7 @@ function holdHelperTurns(held, turns) {
       if (lasted > 0) last.thoughtMs = lasted;
     }
     held.turns.push({ role: turn.role, text: turn.text, tool: turn.tool ?? null,
-      seq: held.seq, at: turn.at_ms ?? now, fromClock });
+      seq: held.seq, at: turn.at_ms ?? now, fromClock, ...(turn.images?.length > 0 && { images: turn.images }) });
     held.seq += 1;
   }
   if (held.turns.length > HELPER_TURN_CAP) {
@@ -10819,14 +10821,14 @@ function wireRunStatus(status) {
 function holdWireState(run, log) {
   const before = run.wireLog
     ? JSON.stringify([run.wireLog.status, run.wireLog.asks, run.wireLog.model, run.wireLog.mode,
-      run.wireLog.modes, run.wireLog.commands, run.wireLog.live, run.wireLog.usage ?? null])
+      run.wireLog.modes, run.wireLog.commands, run.wireLog.live, run.wireLog.usage ?? null, run.wireLog.tasks ?? []])
     : "";
   run.wireLog = log;
   run.status = wireRunStatus(log.status);
   if (log.status === "ended" && run.endedAt === null) run.endedAt = Date.now();
   run.toolCalls = run.helper.turns.filter((turn) => turn.role === "tool").length;
   return before !== JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands,
-    log.live, log.usage ?? null]);
+    log.live, log.usage ?? null, log.tasks ?? []]);
 }
 
 /* A wire session said it has something new — a delta of what it is saying, a
@@ -11530,9 +11532,9 @@ function cleanseAssistantText(text) {
 /* One row per turn, whatever the turn is — the sync appends these in order
  * and keys them by `data-turn`. `spoken` is the seq of the last thing said
  * (person or agent): a call after it with no result yet is still out. */
-function helperTurnRowNode(run, turn, spoken) {
+function helperTurnRowNode(run, turn, spoken, cold = false) {
   if (turn.role === "thinking") return thoughtTurnNode(run, turn);
-  if (turn.role === "tool" || turn.role === "tool_result") return toolTurnNode(run, turn, spoken);
+  if (turn.role === "tool" || turn.role === "tool_result") return toolTurnNode(run, turn, spoken, cold);
   const briefing = turn.role === "user" && turn.seq === 0;
   const row = document.createElement("article");
   const said = document.createElement("div");
@@ -11546,6 +11548,10 @@ function helperTurnRowNode(run, turn, spoken) {
     row.setAttribute("aria-label", who);
     if (briefing) row.dataset.tip = who;
     said.textContent = turn.text;
+    // The pictures they sent stand above their words (A8), and a picture sent
+    // alone stands with no empty bubble under it.
+    if (turn.images) row.appendChild(imagePillsNode(run, turn.images));
+    said.hidden = turn.text === "";
   } else {
     // The agent's rows stand on the timeline rail (`is-step`); a system line
     // stands off it, the way the extension's meta messages do.
@@ -11554,15 +11560,25 @@ function helperTurnRowNode(run, turn, spoken) {
     // (2.1.272): the person's rows say 「나」 above, an answer says the
     // agent's own name — the catalog's, never a word invented here.
     if (turn.role === "assistant") row.setAttribute("aria-label", agentName(run.agent));
-    const clean = turn.role === "assistant" ? cleanseAssistantText(turn.text) : turn.text;
-    paintHelperProse(said, clean || turn.text, helperBase(run));
+    // An answer born far from view waits for its prose (B1).
+    if (cold && turn.role === "assistant") shelveBorn(row);
+    else paintAnswerProse(said, turn, run);
   }
   row.appendChild(said);
   // Every answer carries the extension's action row (`assistantActions`):
   // a copy, shown while the pointer or the focus is on the answer.
   if (turn.role === "assistant") row.appendChild(helperActionsNode(turn));
   row.dataset.turn = String(turn.seq);
+  row.__turn = turn;
   return row;
+}
+
+/* What an answer's row says, as prose: the words without the CLI's own
+ * plumbing (`cleanseAssistantText`), painted by the one markdown road — at
+ * birth, and again when a row far from view takes its body back (B1). */
+function paintAnswerProse(said, turn, run) {
+  const clean = turn.role === "assistant" ? cleanseAssistantText(turn.text) : turn.text;
+  paintHelperProse(said, clean || turn.text, helperBase(run));
 }
 
 /* `● Read ui/shell.js` / `└ 256 lines` — the extension's tool row. The name
@@ -11572,7 +11588,7 @@ function helperTurnRowNode(run, turn, spoken) {
  * never widens the page. The dot in the gutter is the row's `::before`, and
  * its state is the row's class: live (out, on the accent), done (green),
  * failed (halt). */
-function toolTurnNode(run, turn, spoken) {
+function toolTurnNode(run, turn, spoken, cold = false) {
   const row = document.createElement("article");
   row.className = "helper-turn is-tool is-step";
   const call = document.createElement("p");
@@ -11585,52 +11601,37 @@ function toolTurnNode(run, turn, spoken) {
   row.appendChild(call);
   row.dataset.turn = String(turn.seq);
   row.__turn = turn;
+  // A call born far from view waits for its body (B1).
+  if (cold) shelveBorn(row);
   dressToolTurn(row, turn, run, spoken);
   return row;
-}
-
-/* The fold under a tool row: the input past its first line, the output past
- * its first line — each its own well, shown only when it has something. */
-function toolMoreNode() {
-  const body = document.createElement("div");
-  body.className = "helper-tool-more-body";
-  for (const kind of ["input", "output"]) {
-    const well = document.createElement("pre");
-    well.className = `helper-fold-body helper-tool-${kind}`;
-    well.hidden = true;
-    body.appendChild(well);
-  }
-  return foldCardNode("helper-tool-more", [foldCueNode("")], body);
 }
 
 /* The extension's inline diff under `● Edit path` / `● Write path`: the rows
  * the backend cut from the call's own input (`tool.edits` — an Edit's old and
  * new strings, a Write's whole content, a Codex patch), drawn with the review
- * surface's row (`diffLineNode`) and its word marks, in a well that scrolls
- * on its own. One block per file; the file's name stands over its rows only
- * when the call touched more than one or the name is not the one already on
- * the call line. Built once — an edit never changes after it was written. */
+ * surface's row (`diffLineNode`) and its word marks, cut at the extension's
+ * 200px with the door after them (`diffRowsNode`, t-6323 A1). One block per
+ * file; the file's name stands over its rows only when the call touched more
+ * than one or the name is not the one already on the call line. Built once —
+ * an edit never changes after it was written. */
 function toolDiffNode(edits, spoken = "") {
   const block = document.createElement("div");
   block.className = "helper-tool-diff";
   for (const edit of edits) {
+    const file = document.createElement("div");
+    file.className = "helper-tool-diff-file";
     if (edits.length > 1 || (edit.path && edit.path !== spoken)) {
       const path = document.createElement("p");
       path.className = "helper-tool-diff-path";
       path.textContent = edit.path;
-      block.appendChild(path);
+      file.appendChild(path);
     }
-    const rows = document.createElement("div");
-    rows.className = "helper-tool-diff-rows";
     const words = diffWordSpans(edit.lines);
-    edit.lines.forEach((line, index) => rows.appendChild(diffLineNode(line, words.get(index))));
-    if (edit.truncated > 0) {
-      const more = document.createElement("div");
-      more.className = "diff-line diff-line--meta";
-      more.textContent = t("worker.moreLines", "{{n}}줄 더", { n: edit.truncated });
-      rows.appendChild(more);
-    }
-    block.appendChild(rows);
+    const { rows, rest } = diffRowsNode(edit, words);
+    file.appendChild(rows);
+    if (rest) clipWith(rows, true, rest);
+    block.appendChild(file);
   }
   return block;
 }
@@ -11650,12 +11651,17 @@ function writeHidden(node, hidden) {
  * state turns. Every write is guarded, so a quiet poll costs no mutation. */
 function dressToolTurn(row, turn, run, spoken) {
   const words = toolWords(turn);
-  writeTextContent(row.querySelector(".helper-tool-name"), words.name);
-  writeTextContent(row.querySelector(".helper-tool-arg"), words.arg);
+  // A todo call is its list under the extension's head (A7): nothing beside
+  // the head, no result line, no generic body.
+  const todo = dressTodoRow(row, turn, run);
+  writeTextContent(row.querySelector(".helper-tool-name"), todo ? t("worker.todoHead", "할 일 갱신") : words.name);
+  writeTextContent(row.querySelector(".helper-tool-arg"), todo ? "" : words.arg);
   // A tool row is announced by the tool it ran (2.1.272) — the CLI's own
   // name for it, which the row already shows. Guarded like every other
   // write here: a quiet poll costs no mutation.
   writeAttribute(row, "aria-label", t("worker.toolRow", "{{name}} 도구", { name: words.name }));
+  // The file the call read or wrote is a door to the file tab (A2).
+  dressToolFile(row, turn, run);
   // What the call took, once its result is in — the CLI feeds say it beside
   // the call (Hermes: `┊ 💻 terminal  ls -la  (0.3s)`), and so does this row.
   if (turn.outputAt !== undefined && turn.at !== undefined && !row.querySelector(".helper-tool-took")) {
@@ -11669,7 +11675,10 @@ function dressToolTurn(row, turn, run, spoken) {
   writeClass(row, "is-live", output === undefined && run.status === "running" && turn.seq > spoken);
   writeClass(row, "is-done", output !== undefined && !failed);
   writeClass(row, "is-failed", failed);
-  if (output !== undefined) {
+  // What came back as pictures alone says itself as pills (A8), not as
+  // 「출력 없음」 over them.
+  const pictured = (turn.role === "tool_result" ? turn.images : turn.outputImages)?.length > 0;
+  if (output !== undefined && !todo && !(pictured && output.trim() === "")) {
     let result = row.querySelector(":scope > .helper-tool-result");
     if (!result) {
       result = document.createElement("p");
@@ -11678,28 +11687,39 @@ function dressToolTurn(row, turn, run, spoken) {
     }
     writeTextContent(result, output.split("\n", 1)[0] || t("worker.noOutput", "출력 없음"));
   }
+  // The row's body — unless it stands far from view with its body given up
+  // (B1); it is dressed again when it comes back.
+  if (!row.__shelved) dressToolParts(row, turn, run);
+}
+
+/* A tool row's body: the pictures its result handed back, its edit's diff,
+ * and its IN/OUT box — each built once, when the row first has it. */
+function dressToolParts(row, turn, run) {
+  const words = toolWords(turn);
+  const output = turn.role === "tool_result" ? turn.text : turn.output;
+  // The pictures the result handed back, under the line that says it (A8).
+  const images = turn.role === "tool_result" ? turn.images : turn.outputImages;
+  if (images?.length > 0 && !row.querySelector(":scope > .helper-images")) {
+    const pills = imagePillsNode(run, images);
+    const after = row.querySelector(":scope > .helper-tool-result") ?? row.querySelector(":scope > .helper-tool-call");
+    after.after(pills);
+    if (row.parentElement) watchImagePills(row.parentElement, pills);
+  }
   // The edit under its row, once. The diff IS the input — the well would
-  // only repeat it as JSON — so an edit row folds its output alone.
+  // only repeat it as JSON — so an edit row's body carries its output alone.
   const edits = turn.tool?.edits ?? [];
   if (edits.length > 0 && !row.querySelector(":scope > .helper-tool-diff")) {
     row.appendChild(toolDiffNode(edits, words.arg));
   }
-  const inputMore = edits.length === 0 && chatFolds(words.input) ? words.input : "";
-  const outputMore = output !== undefined && chatFolds(output) ? output : "";
-  let more = row.querySelector(":scope > .helper-tool-more");
-  if (!inputMore && !outputMore) return;
-  if (!more) {
-    more = toolMoreNode();
-    row.appendChild(more);
-  }
-  const lines = (inputMore ? inputMore.split("\n").length : 0) +
-    (outputMore ? outputMore.split("\n").length : 0);
-  writeTextContent(more.querySelector(".helper-cue"), t("worker.moreLines", "{{n}}줄 더", { n: lines }));
-  for (const [kind, text] of [["input", inputMore], ["output", outputMore]]) {
-    const well = more.querySelector(`.helper-tool-${kind}`);
-    writeHidden(well, text === "");
-    writeTextContent(well, text);
-  }
+  // What the call line and the result line do not already say stands in the
+  // row's body — the extension's box, each side cut at its clip with its
+  // door (`dressToolBody`), never behind a fold a person must press first.
+  if (row.__todos) return;
+  dressToolBody(
+    row,
+    edits.length === 0 && chatFolds(words.input) ? words.input : "",
+    output !== undefined && chatFolds(output) ? output : "",
+  );
 }
 
 /* The model's reasoning, folded behind its own heading (the bold first line
@@ -11755,7 +11775,14 @@ function agentMarkNode(className, glyph) {
 function helperStatusNode(run) {
   const line = document.createElement("p");
   line.className = "helper-status";
-  line.append(agentMarkNode("helper-status-mark", ""), agentMarkNode("helper-status-word", ""));
+  const mark = agentMarkNode("helper-status-mark", "");
+  const word = agentMarkNode("helper-status-word", "");
+  // The turning glyph and the turning verb are for the eye; the list is a
+  // log a screen reader reads out, so it hears the CLI's one word instead,
+  // once (the extension's own "Claude is working").
+  mark.setAttribute("aria-hidden", "true");
+  word.setAttribute("aria-hidden", "true");
+  line.append(mark, word, agentMarkNode("helper-status-said sr", ""));
   updateHelperStatus(line, run);
   return line;
 }
@@ -11772,7 +11799,16 @@ function updateHelperStatus(line, run) {
   // does (`[data-permission-mode]` on its container).
   wearReach(line, composerReachOf(run));
   const mark = line.querySelector(".helper-status-mark");
-  writeTextContent(line.querySelector(".helper-status-word"), voice.busy_word);
+  writeTextContent(line.querySelector(".helper-status-said"), voice.busy_word);
+  // A CLI with verbs turns through them while the turn is out (t-6323 A4);
+  // the rest say their one word.
+  const word = line.querySelector(".helper-status-word");
+  if (shown && voice.spinner_verbs.length > 0) {
+    turnStatusVerb(word, voice.spinner_verbs);
+  } else {
+    stopStatusVerb(word);
+    writeTextContent(word, voice.busy_word);
+  }
   // Forward and back, as the CLI plays it; a console with one mark keeps it.
   const cycle = shown && voice.glyph_cycle.length > 1
     ? [...voice.glyph_cycle, ...[...voice.glyph_cycle].reverse()]
@@ -11821,6 +11857,8 @@ function paintHelperProse(host, text, base) {
   try {
     paintMarkdown(host, text);
     linkifyHelperProse(host);
+    // Each code block wears the extension's copy over its corner (A9).
+    dressCodeCopies(host);
   } catch {
     host.replaceChildren();
     host.textContent = text;
@@ -11877,7 +11915,9 @@ function linkifyHelperProse(host) {
 }
 
 function helperLinkNode(said, isUrl) {
-  const link = mdLink(said, isUrl ? said : said.replace(HELPER_LINK_LINE_RE, ""));
+  // A bare path keeps its `:line` (t-6323 A2): the door opens the file there.
+  const line = isUrl ? null : said.match(HELPER_LINK_LINE_RE)?.[0].slice(1).split("-")[0] ?? null;
+  const link = mdLink(said, isUrl ? said : said.replace(HELPER_LINK_LINE_RE, ""), line === null ? undefined : Number(line));
   link.classList.add("helper-link");
   link.prepend(iconNode(isUrl ? "globe" : "file"));
   return link;
@@ -11922,7 +11962,7 @@ function helperActionsNode(turn) {
   copy.setAttribute("aria-label", copyWords);
   copy.dataset.tip = copyWords;
   copy.appendChild(iconNode("copy"));
-  copy.addEventListener("click", () => void clipboardText.write(turn.text));
+  copyOnPress(copy, () => answerCopyText(turn.text));
   actions.appendChild(copy);
   return actions;
 }
@@ -11935,6 +11975,13 @@ function lastAnswerOf(run) {
   return (run?.helper?.turns ?? []).findLast((turn) => turn.role === "assistant")?.text ?? "";
 }
 
+/* What an answer's copy writes: the words the answer shows — the CLI's own
+ * plumbing that the page leaves out (`cleanseAssistantText`) is left out of
+ * the copy too, as the extension strips its memory tags (`xD1`). */
+function answerCopyText(text) {
+  return cleanseAssistantText(text) || text;
+}
+
 /* `/copy` — the last answer to the clipboard, through the one clipboard door
  * this window has. A page that has been answered nothing does not list the
  * command at all (`windowSlashCommands`), so this is never a press that does
@@ -11943,7 +11990,7 @@ function lastAnswerOf(run) {
 function copyLastAnswer(run) {
   const said = lastAnswerOf(run);
   if (!said) return;
-  void clipboardText.write(said);
+  void clipboardText.write(answerCopyText(said));
 }
 
 function helperPreviewNode(run, target) {
@@ -12004,22 +12051,24 @@ function dressLastAnswer(list, run, newest) {
   list.__lastAnswer = newest.row;
 }
 
-/* The list's fixed tail — the status line the extension's panel keeps under
- * the last row (`spinnerRow`) — that every turn and streaming row stands
- * before. `null` while the page has none. */
+/* The list's fixed tail — the helpers at work (t-6323 A6), then the status
+ * line the extension's panel keeps under the last row (`spinnerRow`) — that
+ * every turn and streaming row stands before. `null` while the page has
+ * none. */
 function helperListTail(list) {
-  return list.querySelector(":scope > .helper-status");
+  return list.querySelector(":scope > .helper-agents, :scope > .helper-status");
 }
 
 function scrollHelperToBottom(list) {
   if (!list) return;
-  list.scrollTop = list.scrollHeight;
+  carryToFoot(list);
   requestAnimationFrame(() => {
     // 늦게 도착한 프레임은 그 사이 일어난 일을 모른다: 이 줄을 예약할 때
     // 바닥이던 사람이 프레임이 오기 전에 위를 읽기 시작했을 수 있고, 부하가
-    // 클수록 그 틈이 넓다. 다시 묻고 나서 옮긴다 — 방금 바닥으로 보낸 판은
-    // 여전히 바닥이므로 따라가던 사람은 그대로 따라간다.
-    if (!list.isConnected || !helperFollowsTail(list)) return;
+    // 클수록 그 틈이 넓다. 다시 묻고 나서 옮긴다 — 떠났다는 것은 거리가
+    // 아니라 사람의 뜻이므로(`chatAway`), 늦게 선 행이 바닥을 밀어냈어도
+    // 따라가던 사람은 그대로 따라간다.
+    if (!list.isConnected || chatAway(list)) return;
     // The list is the one thing on this page that scrolls, so it is the one
     // thing this moves. `scrollIntoView` on the last row is not the same
     // move: it scrolls every scrollable ancestor as well — the document
@@ -12027,23 +12076,8 @@ function scrollHelperToBottom(list) {
     // conversation stood a title bar's height below the viewport was dragged
     // down (and, on a wide row, sideways) until the tab strip and the side
     // rail were out of the window (2026-09-21, installed 1.1.11).
-    list.scrollTop = list.scrollHeight;
+    carryToFoot(list);
   });
-}
-
-/* 바닥 근처의 폭. 이 안에 있으면 새 턴을 따라가고, 위를 읽는 중이면 자리를
- * 지킨다. 그리는 픽셀이 아니라 스크롤 판정의 문턱이라 간격 스케일 밖의
- * px다. */
-const HELPER_FOLLOW_SLACK_PX = 160;
-
-/* 읽는 사람이 꼬리를 따라가는 중인가 — 판정은 이 한 곳에서만 한다.
- *
- * 새 턴이 왔다는 것은 스크롤을 빼앗을 이유가 되지 못한다: 09-18의 자동 스크롤
- * 최적화가 이 조건을 잃고 `newest || follow`로 부르면서, 위를 읽던 사람을 폴
- * 마다 바닥으로 끌어내렸고 앞쪽이 잘릴 때의 자리 보정까지 덮어썼다. 창 하네스
- * 둘(`heldPlace`·`anchorHeld`)이 그날부터 그것을 말하고 있었다. */
-function helperFollowsTail(list) {
-  return !!list && list.scrollHeight - list.scrollTop - list.clientHeight <= HELPER_FOLLOW_SLACK_PX;
 }
 
 /* ---- Focus view: 한 턴의 도구 일을 요약 한 줄 뒤로 ----
@@ -12194,7 +12228,7 @@ function attachFocusRow(list, row) {
   row.__group = group;
   group.__members += 1;
   accountFocusMember(group, row);
-  writeHidden(row, !group.__open);
+  writeHidden(row, !group.__open && !row.__standing);
   paintFocusGroup(group);
 }
 
@@ -12264,11 +12298,16 @@ function paintFocusGroup(group) {
 /* 묶음을 펼치거나 접는다 — 구성원만 따라가며, 사람의 한 동작에만. */
 function openFocusGroup(group, open) {
   group.__open = open;
+  const list = group.parentElement;
   let row = group.nextElementSibling;
   while (row && row.__group === group) {
-    writeHidden(row, !open);
+    writeHidden(row, !open && !row.__standing);
+    // A row that gave up its body before the fold hid it takes it back
+    // now, beside the head the person pressed (B1).
+    if (open && row.__shelved && list?.__run) unshelveRow(row, list.__run);
     row = row.nextElementSibling;
   }
+  if (list) askShelfAgain(list);
   paintFocusGroup(group);
 }
 
@@ -12291,13 +12330,18 @@ function applyFocusView(list, on) {
   if (list.__focus === on) return;
   clearFocusGroups(list);
   list.__focus = on;
-  if (!on) return;
-  for (const row of [...list.children]) {
-    // 묶음 머리·스트리밍 행·상태 행은 턴이 아니다.
-    if (row.dataset.turn === undefined) continue;
-    if (isFocusActivityRow(row)) attachFocusRow(list, row);
-    else list.__focusOpen = null;
+  if (on) {
+    for (const row of [...list.children]) {
+      // 묶음 머리·스트리밍 행·상태 행은 턴이 아니다.
+      if (row.dataset.turn === undefined) continue;
+      if (isFocusActivityRow(row)) attachFocusRow(list, row);
+      else list.__focusOpen = null;
+    }
   }
+  // The newest todo list stands out of its fold, or goes back (A7).
+  standLatestTodo(list, on);
+  // Rows the fold had hidden are judged again where they now stand (B1).
+  askShelfAgain(list);
 }
 
 /* 전사를 장부에 맞춘다 — 통째로 다시 세우지 않고.
@@ -12312,6 +12356,7 @@ function applyFocusView(list, on) {
  * 거짓말이 된다). */
 function syncHelperTurns(list, run) {
   const held = run.helper.turns;
+  list.__run = run;
   // 이 목록이 입고 있는 값이 토글의 값과 다르면 먼저 맞춘다 — 같으면
   // 아무것도 만지지 않으므로 조용한 폴은 여기서 값을 치르지 않는다.
   const focus = focusViewOn();
@@ -12320,11 +12365,12 @@ function syncHelperTurns(list, run) {
     clearFocusGroups(list);
     for (const row of list.querySelectorAll(":scope > [data-turn]")) row.remove();
     list.__lastAnswer = null;
+    syncHelperTasks(list, run);
     syncStreamingTurns(list, run);
     return;
   }
   const first = held[0].seq;
-  const follow = helperFollowsTail(list);
+  const follow = chatFollows(list);
   const beforeHeight = list.scrollHeight;
   const beforeTop = list.scrollTop;
   let dropped = false;
@@ -12343,6 +12389,7 @@ function syncHelperTurns(list, run) {
     }
     if (Number(front.dataset.turn) >= first) break;
     dropFocusMember(front);
+    forgetShelf(list, front);
     front.remove();
     dropped = true;
     front = next;
@@ -12359,11 +12406,21 @@ function syncHelperTurns(list, run) {
   // What was last said, by either voice: a call after it is still out.
   const spoken = held.findLast((turn) => turn.role === "user" || turn.role === "assistant")?.seq ?? -1;
   let newest = null;
+  const people = [];
+  // A batch builds whole only its last rows; the rest are born without their
+  // bodies, and the shelf's watcher builds each as it comes within reach (B1).
+  let cold = held.reduce((count, turn) => count + (turn.seq > drawn ? 1 : 0), 0) - CHAT_SHELF.warm;
   for (const turn of held) {
     if (turn.seq <= drawn) continue;
-    const row = helperTurnRowNode(run, turn, spoken);
+    const row = helperTurnRowNode(run, turn, spoken, cold > 0);
+    cold -= 1;
     list.insertBefore(row, streaming ?? helperListTail(list));
+    // Its pictures are watched once it stands in the list (A8), and so is
+    // the row itself, whose body goes when it is far from view (B1).
+    if (row.querySelector(":scope > .helper-images")) watchImagePills(list, row);
+    watchShelf(list, row);
     if (turn.role === "assistant") newest = { row, turn };
+    if (turn.role === "user") people.push(row);
     // The words this turn carries were streaming a moment ago: their
     // finished piece leaves in this same paint (`syncStreamingTurns` below).
     settlePaneLive(run, turn.role);
@@ -12398,7 +12455,15 @@ function syncHelperTurns(list, run) {
   // them again a word at a time (09-16 → 09-20) only lagged behind it. The
   // wire's page streams the words themselves (`syncStreamingTurns`).
   dressLastAnswer(list, run, newest);
+  standLatestTodo(list, focus);
+  askShelfAgain(list);
+  syncHelperTasks(list, run);
   syncStreamingTurns(list, run);
+  // What the person said is cut at the clip when it stands taller — measured
+  // once for every new row of this paint, and on the list's first frame when
+  // it was built before the page took it in (a detached row has no height).
+  if (people.length && list.isConnected) clipPersonRows(people);
+  else if (people.length) requestAnimationFrame(() => clipPersonRows(people.filter((row) => row.isConnected)));
   if (follow) scrollHelperToBottom(list);
 }
 
@@ -12493,7 +12558,7 @@ function paintLiveAnswerNow(row, text, run) {
     row.__tailText = "";
   }
   const list = row.closest(".helper-turns");
-  const follow = helperFollowsTail(list);
+  const follow = chatFollows(list);
   const cut = settledCut(text, text.length);
   if (cut > row.__settledEnd) {
     settled.replaceChildren();
@@ -12506,7 +12571,7 @@ function paintLiveAnswerNow(row, text, run) {
     tail.replaceChildren();
     if (rest.trim() !== "") paintHelperProse(tail, rest, helperBase(run));
   }
-  if (follow) list.scrollTop = list.scrollHeight;
+  if (follow) carryToFoot(list);
 }
 
 /* The row a voice streams into: an answer's row before it closes (the same
@@ -12539,6 +12604,9 @@ function helperTurnsNode(run) {
   list.setAttribute("role", "log");
   list.setAttribute("aria-label", t("worker.transcript", "헬퍼 대화 기록"));
   list.tabIndex = 0;
+  list.__run = run;
+  // It keeps to its foot until the person leaves it (t-6323 A5).
+  keepToFoot(list);
   // A person's words stuck at the top (the extension's sticky header) are a
   // door back to where they were said: a click scrolls the row home.
   list.addEventListener("click", (event) => {
@@ -12699,12 +12767,6 @@ function workerComposerNode(run, owner = null) {
     run.draft = box.value;
     fit();
   });
-  box.addEventListener("keydown", (event) => {
-    if (event.key !== "Enter" || event.shiftKey) return;
-    if (event.isComposing || event.keyCode === 229) return;
-    event.preventDefault();
-    form.requestSubmit();
-  });
   const tools = document.createElement("div");
   tools.className = "worker-composer-tools";
   // 첨부(t-2993)는 제 모듈의 것 — 칩 줄은 상자 위에, 「+」는 도구 줄 맨 왼쪽에.
@@ -12740,6 +12802,9 @@ function workerComposerNode(run, owner = null) {
   const right = document.createElement("div");
   right.className = "worker-composer-right";
   const palette = composerSlash(form, box, run, spec ?? { id: run.agent, name: agentName(run.agent) }, cwd);
+  // Enter, Ctrl+J, Shift+Tab and the history keys — after the palette's, so
+  // a key it took is not taken twice (t-6323 A3).
+  composerKeys(form, box, run, spec);
   right.appendChild(palette.slash);
   const send = document.createElement("button");
   send.type = "submit";
@@ -12751,10 +12816,10 @@ function workerComposerNode(run, owner = null) {
     if (send.classList.contains("is-stop")) {
       event.preventDefault();
       event.stopPropagation();
-      if (run.wire) {
-        void composerRoad(run).interrupt();
-      } else if (run.term !== undefined && run.term !== null) {
-        void invoke("term_key", { term: run.term, press: { key: "c", ctrl: true, alt: false } });
+      // The same interrupt Esc sends: the wire's request, or the key the
+      // pane's CLI names (t-6323 A3 — the wire's road had none, and threw).
+      if (run.wire || (run.term !== undefined && run.term !== null)) {
+        void composerRoad(run, spec).interrupt().catch((error) => showError(error));
       }
       run.status = "idle";
       run.sending = false;
@@ -12807,6 +12872,9 @@ function workerComposerNode(run, owner = null) {
       // 붙여넣기·숨·Enter. `pasted`는 Enter가 실패했을 때 글이 이미 부모의
       // 상자에 있다는 사실을 남긴다.
       else await composerDeliver(run, message, () => { pasted = true; });
+      // Sent: the page goes back to its foot, as the extension's does
+      // (`scrollToBottomOnSend`, t-6323 A5).
+      returnToFoot(pageTurnsOf(form));
       if (run.draft === draft && box.value === draft) {
         box.value = "";
         run.draft = "";
@@ -13012,7 +13080,34 @@ function paintHelperPage(host, tab) {
   if (run.wire) paintWireAsk(host, run);
   // 처음 서는 페이지는 끝에서 연다 — 사람이 읽는 것은 언제나 끝이다.
   turns.scrollTop = turns.scrollHeight;
-  host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status };
+  host.__helperPage = { id: tab.id, owned: Boolean(owner), locale, head, turns, status, run };
+  // A plain Esc on the page interrupts its turn (t-6323 A3).
+  interruptOnEscape(host);
+}
+
+/* A closed conversation's page leaves the host it stood in (t-6323 B2). The
+ * host is the leaf's — one per leaf, whichever conversation stands in it —
+ * and it kept the last page it drew (its rows, its turns, its watchers, its
+ * dock's observer) until another page took the host: after the last
+ * conversation in a leaf closed, for the window's life. Measured on the
+ * 400-turn page: closing it left 14,000 nodes and 4.5 MB of the embedder's
+ * heap behind, every time; with the page released, the status line's verb
+ * clock still held it until its next pick, so the clocks stop here too. */
+function releaseWorkerPage(tab) {
+  const host = groups.get(tab.pane)?.workerView;
+  const held = host?.__helperPage;
+  if (!held || held.id !== tab.id) return;
+  // The status line's clocks — the verb's, which would otherwise keep the
+  // page alive up to its next pick (5 s), and the glyph's.
+  stopStatusVerb(held.status.querySelector(".helper-status-word"));
+  stopStatusCycle(held.status);
+  held.turns.__shelf?.disconnect();
+  held.turns.__imageWatch?.disconnect();
+  host.__dockWatch?.disconnect();
+  host.__dockWatch = null;
+  host.__helperPage = null;
+  host.classList.remove("is-chat-page");
+  host.replaceChildren();
 }
 
 /* The extension's dock at the foot of the conversation (`inputContainer`):
@@ -13026,7 +13121,13 @@ function chatDockNode(host, composer) {
   dock.appendChild(composer);
   if (typeof ResizeObserver === "function") {
     const watch = new ResizeObserver(() => {
+      // The list's foot moves with the dock (the dock's height is the list's
+      // padding): a list at its foot stays there, as the extension's follows
+      // its input's height (t-6323 A5).
+      const list = host.__helperPage?.turns ?? null;
+      const follow = chatFollows(list);
       host.style.setProperty("--chat-dock-h", `${dock.offsetHeight}px`);
+      if (follow) carryToFoot(list);
     });
     watch.observe(dock);
     host.__dockWatch = watch;
@@ -14169,7 +14270,7 @@ function paintPaneLive(term) {
   if (!held?.on || !held.host || held.host.hidden) return;
   const list = held.host.querySelector(".helper-turns");
   if (!list) return;
-  const follow = helperFollowsTail(list);
+  const follow = chatFollows(list);
   syncStreamingTurns(list, held.tab.worker);
   if (follow) scrollHelperToBottom(list);
 }

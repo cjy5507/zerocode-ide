@@ -142,33 +142,86 @@ pub(crate) fn subagent_log(
         folded: false,
         usage: None,
     };
-    // Where the helper's conversation is. The vendor may have said so itself —
-    // zo names each running helper's session file in its `subagents` frame and
-    // the row remembers it — and failing that, Claude Code's helpers live under
-    // the pane's own transcript, the path the agent reported when it started.
+    let Some(path) = helper_transcript_path(&state, term, &id) else {
+        return Ok(missing());
+    };
+    transcript_log_at(&path, after)
+}
+
+/// Where a pane's helper keeps its conversation. The vendor may have said so
+/// itself — zo names each running helper's session file in its `subagents`
+/// frame and the row remembers it — and failing that, Claude Code's helpers
+/// live under the pane's own transcript, the path the agent reported when it
+/// started. The window names a pane and an id, never a path.
+fn helper_transcript_path(state: &AppState, term: TermId, id: &str) -> Option<PathBuf> {
     let named = state
         .subagents()
         .get(&term)
         .and_then(|rows| rows.iter().find(|row| row.id == id))
         .and_then(|row| row.transcript.clone());
-    let path = match named {
-        Some(path) => path,
-        None => {
-            let Some(transcript) = state
-                .pane_sessions()
-                .get(&term)
-                .and_then(|session| session.transcript_path.clone())
-            else {
-                return Ok(missing());
-            };
-            let root = subagent_transcript_root(&transcript);
-            let Some(path) = find_subagent_transcript(&root, &id, 3) else {
-                return Ok(missing());
-            };
-            path
+    if named.is_some() {
+        return named;
+    }
+    let transcript = state
+        .pane_sessions()
+        .get(&term)
+        .and_then(|session| session.transcript_path.clone())?;
+    find_subagent_transcript(&subagent_transcript_root(&transcript), id, 3)
+}
+
+/// One image of a pane's conversation, or of its helper's, by the place its
+/// reader set the payload aside at (`"<offset>:<len>"`,
+/// `zerocode_core::transcript::elide_payloads`): its base64, for the page to
+/// draw when the image comes into view (t-6323 A8). The window names a pane
+/// and a helper id, never a path, as `pane_log` and `subagent_log` do; the
+/// place must lie inside the file and hold base64 alone, so nothing else the
+/// file holds can come back through it.
+#[tauri::command(async)]
+pub(crate) fn pane_image(
+    state: State<'_, AppState>,
+    term: TermId,
+    helper: Option<String>,
+    at: String,
+) -> Result<String, String> {
+    let path = match helper {
+        Some(id) => {
+            if !is_subagent_id(&id) {
+                return Err("helper id가 아닙니다".to_string());
+            }
+            helper_transcript_path(&state, term, &id)
         }
-    };
-    transcript_log_at(&path, after)
+        None => state
+            .pane_sessions()
+            .get(&term)
+            .and_then(|session| session.transcript_path.clone())
+            .map(PathBuf::from),
+    }
+    .ok_or_else(|| "이 판의 전사를 찾지 못했습니다".to_string())?;
+    payload_at(&path, &at)
+}
+
+/// The largest payload one image may be fetched as: well past a Retina
+/// screenshot's base64, short of a file read whole by mistake.
+const IMAGE_PAYLOAD_CAP: usize = 32 * 1024 * 1024;
+
+/// The base64 at `at` (`"<offset>:<len>"`) in `path`, or why not.
+pub(crate) fn payload_at(path: &Path, at: &str) -> Result<String, String> {
+    use std::io::{Read, Seek};
+    let (offset, len) = at
+        .split_once(':')
+        .and_then(|(offset, len)| Some((offset.parse::<u64>().ok()?, len.parse::<usize>().ok()?)))
+        .filter(|(_, len)| *len > 0 && *len <= IMAGE_PAYLOAD_CAP)
+        .ok_or_else(|| format!("이미지 자리가 아닙니다: {at}"))?;
+    let mut file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    file.seek(std::io::SeekFrom::Start(offset))
+        .map_err(|error| error.to_string())?;
+    let mut payload = vec![0u8; len];
+    file.read_exact(&mut payload)
+        .map_err(|error| error.to_string())?;
+    if !zerocode_core::transcript::is_payload(&payload) {
+        return Err(format!("이미지 자리가 아닙니다: {at}"));
+    }
+    String::from_utf8(payload).map_err(|error| error.to_string())
 }
 
 /// A pane's own conversation, out of the transcript its agent reported when
@@ -199,6 +252,92 @@ pub(crate) fn pane_log(
         });
     };
     transcript_log_at(&path, after)
+}
+
+/// The longest line a transcript read takes whole: past a message with a
+/// handful of screenshots in it, short of reading a runaway file into memory.
+/// A longer one is skipped, as every long line was before.
+const LONG_LINE_CAP: u64 = 32 * 1024 * 1024;
+
+/// The one line a read found no end inside, read whole with its payloads set
+/// aside. It begins at `from`, or — for a read that opened inside it, the
+/// tail's — after the line end before `from`. `None` when it runs past
+/// [`LONG_LINE_CAP`] (the caller skips it); an answer with nothing new, and
+/// the cursor left at the line's start, when it has no end yet — it is still
+/// being written.
+fn long_line_log(
+    file: &mut std::fs::File,
+    from: u64,
+    starts_mid_line: bool,
+    size: u64,
+    folded: bool,
+) -> Result<Option<SubagentLog>, String> {
+    use std::io::{Read, Seek};
+    let block = usize::try_from(SUBAGENT_LOG_CHUNK).unwrap_or(1 << 18);
+    let mut start = from;
+    if starts_mid_line {
+        // Back to the line end before `from`, a block at a time.
+        let floor = from.saturating_sub(LONG_LINE_CAP);
+        let mut cursor = from;
+        start = floor;
+        while cursor > floor {
+            let step = (cursor - floor).min(SUBAGENT_LOG_CHUNK);
+            let mut back = vec![0u8; usize::try_from(step).unwrap_or_default()];
+            file.seek(std::io::SeekFrom::Start(cursor - step))
+                .map_err(|error| error.to_string())?;
+            file.read_exact(&mut back)
+                .map_err(|error| error.to_string())?;
+            if let Some(at) = back.iter().rposition(|byte| *byte == b'\n') {
+                start = cursor - step + at as u64 + 1;
+                break;
+            }
+            cursor -= step;
+        }
+        if start == floor && floor > 0 {
+            return Ok(None);
+        }
+    }
+    file.seek(std::io::SeekFrom::Start(start))
+        .map_err(|error| error.to_string())?;
+    let mut line = Vec::new();
+    let mut piece = vec![0u8; block];
+    loop {
+        let got = file.read(&mut piece).map_err(|error| error.to_string())?;
+        if got == 0 {
+            // No end yet: the line is still being written.
+            return Ok(Some(SubagentLog {
+                turns: Vec::new(),
+                model: None,
+                next: start,
+                found: true,
+                skipped: false,
+                more: false,
+                folded: folded || start > 0,
+                usage: None,
+            }));
+        }
+        if let Some(at) = piece[..got].iter().position(|byte| *byte == b'\n') {
+            line.extend_from_slice(&piece[..=at]);
+            break;
+        }
+        line.extend_from_slice(&piece[..got]);
+        if line.len() as u64 > LONG_LINE_CAP {
+            return Ok(None);
+        }
+    }
+    let bytes = zerocode_core::transcript::elide_payloads(&line, start);
+    let text = String::from_utf8_lossy(&bytes);
+    let next = start + line.len() as u64;
+    Ok(Some(SubagentLog {
+        turns: zerocode_core::transcript::turns_in(&text),
+        model: zerocode_core::transcript::model_in(&text),
+        next,
+        found: true,
+        skipped: false,
+        more: next < size,
+        folded: folded || start > 0,
+        usage: zerocode_core::transcript::usage_in(&text),
+    }))
 }
 
 /// One transcript's turns from `after` on — complete lines only, never more
@@ -245,7 +384,21 @@ pub(crate) fn transcript_log_at(
         starts_mid_line,
         read == SUBAGENT_LOG_CHUNK,
     );
-    let text = String::from_utf8_lossy(chunk.bytes);
+    // A read with no line end inside it stands inside one long line — nearly
+    // always one carrying an image: 135 of the 146 image lines in this
+    // machine's last 40 transcripts were past the read, and skipping them
+    // dropped the words on them too (t-6323 A8). That line is read whole,
+    // once, its payloads set aside.
+    if chunk.bytes.is_empty()
+        && read == SUBAGENT_LOG_CHUNK
+        && let Some(log) = long_line_log(&mut file, from, starts_mid_line, size, folded)?
+    {
+        return Ok(log);
+    }
+    // The payloads step aside, leaving where they stand in the file.
+    let base = from + u64::try_from(chunk.start).unwrap_or_default();
+    let bytes = zerocode_core::transcript::elide_payloads(chunk.bytes, base);
+    let text = String::from_utf8_lossy(&bytes);
     let next = from + u64::try_from(chunk.consumed).unwrap_or_default();
     Ok(SubagentLog {
         turns: zerocode_core::transcript::turns_in(&text),
