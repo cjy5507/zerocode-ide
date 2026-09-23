@@ -2111,6 +2111,22 @@
    * the one thing `the_helper_page_speaks_from_its_catalogs_and_paints_from
    * _its_tokens` exists to catch, and it had been red on `main` for it. */
   --chat-tool-gap: 2px;
+
+  /* What a row folds (t-6323 A1), read off the extension's webview
+   * (2.1.280): a tool body's row stops at 60px and its last 10px fade out
+   * (`toolBodyRowContent`: max-height 60px, mask 50px → 60px); a diff's box
+   * stops at 200px with a 30px fade (`Math.min(200, contentHeight + 20)`,
+   * `truncationGradient`); what the person said stops at 60px of its words
+   * with a 50px fade (`EV0` `maxHeight: 60`, its `truncationGradient`). The
+   * diff's rows stand at their own leading, which is what tells the page how
+   * many rows a closed diff has to build before its door opens it. */
+  --chat-tool-clip-h: 60px;
+  --chat-tool-clip-fade: 10px;
+  --chat-diff-clip-h: 200px;
+  --chat-diff-clip-fade: 30px;
+  --chat-diff-leading: 1.5;
+  --chat-user-clip-h: 60px;
+  --chat-user-clip-fade: 50px;
 }
 
 /* The light treatment, which this product draws as GLASS.

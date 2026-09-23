@@ -11589,48 +11589,31 @@ function toolTurnNode(run, turn, spoken) {
   return row;
 }
 
-/* The fold under a tool row: the input past its first line, the output past
- * its first line — each its own well, shown only when it has something. */
-function toolMoreNode() {
-  const body = document.createElement("div");
-  body.className = "helper-tool-more-body";
-  for (const kind of ["input", "output"]) {
-    const well = document.createElement("pre");
-    well.className = `helper-fold-body helper-tool-${kind}`;
-    well.hidden = true;
-    body.appendChild(well);
-  }
-  return foldCardNode("helper-tool-more", [foldCueNode("")], body);
-}
-
 /* The extension's inline diff under `● Edit path` / `● Write path`: the rows
  * the backend cut from the call's own input (`tool.edits` — an Edit's old and
  * new strings, a Write's whole content, a Codex patch), drawn with the review
- * surface's row (`diffLineNode`) and its word marks, in a well that scrolls
- * on its own. One block per file; the file's name stands over its rows only
- * when the call touched more than one or the name is not the one already on
- * the call line. Built once — an edit never changes after it was written. */
+ * surface's row (`diffLineNode`) and its word marks, cut at the extension's
+ * 200px with the door after them (`diffRowsNode`, t-6323 A1). One block per
+ * file; the file's name stands over its rows only when the call touched more
+ * than one or the name is not the one already on the call line. Built once —
+ * an edit never changes after it was written. */
 function toolDiffNode(edits, spoken = "") {
   const block = document.createElement("div");
   block.className = "helper-tool-diff";
   for (const edit of edits) {
+    const file = document.createElement("div");
+    file.className = "helper-tool-diff-file";
     if (edits.length > 1 || (edit.path && edit.path !== spoken)) {
       const path = document.createElement("p");
       path.className = "helper-tool-diff-path";
       path.textContent = edit.path;
-      block.appendChild(path);
+      file.appendChild(path);
     }
-    const rows = document.createElement("div");
-    rows.className = "helper-tool-diff-rows";
     const words = diffWordSpans(edit.lines);
-    edit.lines.forEach((line, index) => rows.appendChild(diffLineNode(line, words.get(index))));
-    if (edit.truncated > 0) {
-      const more = document.createElement("div");
-      more.className = "diff-line diff-line--meta";
-      more.textContent = t("worker.moreLines", "{{n}}줄 더", { n: edit.truncated });
-      rows.appendChild(more);
-    }
-    block.appendChild(rows);
+    const { rows, rest } = diffRowsNode(edit, words);
+    file.appendChild(rows);
+    if (rest) clipWith(rows, true, rest);
+    block.appendChild(file);
   }
   return block;
 }
@@ -11679,27 +11662,19 @@ function dressToolTurn(row, turn, run, spoken) {
     writeTextContent(result, output.split("\n", 1)[0] || t("worker.noOutput", "출력 없음"));
   }
   // The edit under its row, once. The diff IS the input — the well would
-  // only repeat it as JSON — so an edit row folds its output alone.
+  // only repeat it as JSON — so an edit row's body carries its output alone.
   const edits = turn.tool?.edits ?? [];
   if (edits.length > 0 && !row.querySelector(":scope > .helper-tool-diff")) {
     row.appendChild(toolDiffNode(edits, words.arg));
   }
-  const inputMore = edits.length === 0 && chatFolds(words.input) ? words.input : "";
-  const outputMore = output !== undefined && chatFolds(output) ? output : "";
-  let more = row.querySelector(":scope > .helper-tool-more");
-  if (!inputMore && !outputMore) return;
-  if (!more) {
-    more = toolMoreNode();
-    row.appendChild(more);
-  }
-  const lines = (inputMore ? inputMore.split("\n").length : 0) +
-    (outputMore ? outputMore.split("\n").length : 0);
-  writeTextContent(more.querySelector(".helper-cue"), t("worker.moreLines", "{{n}}줄 더", { n: lines }));
-  for (const [kind, text] of [["input", inputMore], ["output", outputMore]]) {
-    const well = more.querySelector(`.helper-tool-${kind}`);
-    writeHidden(well, text === "");
-    writeTextContent(well, text);
-  }
+  // What the call line and the result line do not already say stands in the
+  // row's body — the extension's box, each side cut at its clip with its
+  // door (`dressToolBody`), never behind a fold a person must press first.
+  dressToolBody(
+    row,
+    edits.length === 0 && chatFolds(words.input) ? words.input : "",
+    output !== undefined && chatFolds(output) ? output : "",
+  );
 }
 
 /* The model's reasoning, folded behind its own heading (the bold first line
@@ -12359,11 +12334,13 @@ function syncHelperTurns(list, run) {
   // What was last said, by either voice: a call after it is still out.
   const spoken = held.findLast((turn) => turn.role === "user" || turn.role === "assistant")?.seq ?? -1;
   let newest = null;
+  const people = [];
   for (const turn of held) {
     if (turn.seq <= drawn) continue;
     const row = helperTurnRowNode(run, turn, spoken);
     list.insertBefore(row, streaming ?? helperListTail(list));
     if (turn.role === "assistant") newest = { row, turn };
+    if (turn.role === "user") people.push(row);
     // The words this turn carries were streaming a moment ago: their
     // finished piece leaves in this same paint (`syncStreamingTurns` below).
     settlePaneLive(run, turn.role);
@@ -12399,6 +12376,11 @@ function syncHelperTurns(list, run) {
   // wire's page streams the words themselves (`syncStreamingTurns`).
   dressLastAnswer(list, run, newest);
   syncStreamingTurns(list, run);
+  // What the person said is cut at the clip when it stands taller — measured
+  // once for every new row of this paint, and on the list's first frame when
+  // it was built before the page took it in (a detached row has no height).
+  if (people.length && list.isConnected) clipPersonRows(people);
+  else if (people.length) requestAnimationFrame(() => clipPersonRows(people.filter((row) => row.isConnected)));
   if (follow) scrollHelperToBottom(list);
 }
 

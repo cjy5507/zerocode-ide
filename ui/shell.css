@@ -13877,6 +13877,30 @@ details.worker-command {
   cursor: pointer;
 }
 
+/* What the person said, taller than the extension's clip: 60px of its words
+ * (the box keeps its padding and edge around them), the last 50px fading to
+ * the box's ground, the door over the fade (`EV0`). */
+.helper-turn.is-user > .helper-said.is-clipped:not(.is-open) {
+  position: relative;
+  max-height: calc(var(--chat-user-clip-h) + 2 * (var(--chat-bubble-pad-y) + 1px));
+  overflow: hidden;
+}
+
+.helper-turn.is-user > .helper-said.is-clipped:not(.is-open)::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: var(--chat-user-clip-fade);
+  background: linear-gradient(to bottom, transparent, var(--chat-composer-bg));
+  pointer-events: none;
+}
+
+.helper-turn.is-user > .helper-said.is-clipped:not(.is-open) + .helper-expand {
+  bottom: calc(var(--chat-sticky-pad-bottom) + var(--space-1));
+}
+
 .helper-who {
   flex: none;
   font-family: var(--font-ui);
@@ -13972,19 +13996,12 @@ details.worker-command {
 }
 
 /* The rest — an input past its first line, an output past its first line —
- * behind one fold, in the window's words on the cap; opened, the wells are
- * the extension's tool body (`toolBody`): one bordered box, a row per
- * side, each with its label (`IN` / `OUT`) in a mono column at the left. */
-.helper-tool-more {
-  font-size: var(--chat-prose-size);
-  color: var(--chat-work-ink);
-}
-
-.helper-tool-more > .helper-cap .helper-cue {
-  font-family: var(--font-ui);
-}
-
-.helper-tool-more-body {
+ * in the extension's tool body (`toolBody`), standing under the call with no
+ * fold to press first: one bordered box, a row per side, each with its label
+ * (`IN` / `OUT`) in a mono column at the left. A side that is long by the
+ * extension's test stops at the clip, its last lines fading out, with its
+ * door after it (t-6323 A1); opened, it is the well it always was. */
+.helper-tool-body {
   display: grid;
   gap: 0;
   min-width: 0;
@@ -13993,17 +14010,79 @@ details.worker-command {
   border: 1px solid var(--chat-composer-edge);
   border-radius: var(--chat-radius-tool);
   background: var(--chat-tool-bg);
+  font-size: var(--chat-prose-size);
+  color: var(--chat-work-ink);
 }
 
-.helper-tool-more-body > .helper-fold-body {
+.helper-tool-well {
+  position: relative;
+  min-width: 0;
+}
+
+.helper-tool-well[hidden] {
+  display: none;
+}
+
+.helper-tool-well:not([hidden]) ~ .helper-tool-well:not([hidden]) {
+  border-top: 1px solid var(--chat-composer-edge);
+}
+
+.helper-tool-well > .helper-fold-body {
   display: grid;
   grid-template-columns: var(--chat-tool-label) minmax(0, 1fr);
   margin: 0;
   padding: var(--space-1) var(--space-2) var(--space-1) 0;
 }
 
-.helper-tool-more-body > .helper-fold-body + .helper-fold-body {
-  border-top: 1px solid var(--chat-composer-edge);
+/* Cut at the clip: the words' own height (the extension's box is sized by
+ * its content, not its padding), the last stretch fading out. */
+.helper-tool-well > .helper-fold-body.is-clipped:not(.is-open) {
+  box-sizing: content-box;
+  max-height: var(--chat-tool-clip-h);
+  overflow: hidden;
+  mask-image: linear-gradient(
+    to bottom,
+    var(--ink-chalk) calc(var(--chat-tool-clip-h) - var(--chat-tool-clip-fade)),
+    transparent var(--chat-tool-clip-h)
+  );
+}
+
+/* The door after a clipped thing — 「더 보기」 over the cut while the pointer
+ * or the focus is on what it opens (the extension shows its own only then),
+ * and 「접기」 under the thing once it is open. */
+.helper-expand {
+  display: flex;
+  width: fit-content;
+  margin: var(--space-1) 0 0 auto;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--chat-radius-small);
+  background: var(--surface-raised);
+  color: var(--ink-chalk);
+  font: inherit;
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+  transition: opacity var(--motion-fast) var(--ease-standard), border-color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-expand:hover {
+  border-color: var(--edge-glint);
+}
+
+.is-clipped:not(.is-open) + .helper-expand {
+  position: absolute;
+  right: var(--space-1);
+  bottom: var(--space-1);
+  margin: 0;
+  opacity: 0;
+}
+
+.helper-tool-well:hover > .is-clipped:not(.is-open) + .helper-expand,
+.helper-tool-diff-file:hover > .is-clipped:not(.is-open) + .helper-expand,
+.helper-turn.is-user:hover > .is-clipped:not(.is-open) + .helper-expand,
+.is-clipped:not(.is-open) + .helper-expand:focus-visible {
+  opacity: 1;
 }
 
 .helper-tool-input::before,
@@ -14024,10 +14103,6 @@ details.worker-command {
   content: "OUT";
 }
 
-.helper-tool-input[hidden],
-.helper-tool-output[hidden] {
-  display: none;
-}
 
 /* The inline diff under an edit's row — the extension's block beneath
  * `● Write`: the review surface's rows (`.diff-line`, `.diff-word`) in a
@@ -14039,7 +14114,13 @@ details.worker-command {
   min-width: 0;
   font-family: var(--font-mono);
   font-size: var(--text-xs);
-  line-height: 1.5;
+  line-height: var(--chat-diff-leading);
+}
+
+/* One file's rows and the door after them. */
+.helper-tool-diff-file {
+  position: relative;
+  min-width: 0;
 }
 
 .helper-tool-diff-path {
@@ -14057,6 +14138,26 @@ details.worker-command {
   border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius-sm);
   background: var(--chat-bubble);
+}
+
+/* A diff taller than the extension's 200px box stops there, its foot fading
+ * into the well (`truncationGradient`) — the rows behind the fade are built
+ * only when the door opens it (`diffRowsNode`). */
+.helper-tool-diff-rows.is-clipped:not(.is-open) {
+  position: relative;
+  max-height: var(--chat-diff-clip-h);
+  overflow: hidden;
+}
+
+.helper-tool-diff-rows.is-clipped:not(.is-open)::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: var(--chat-diff-clip-fade);
+  background: linear-gradient(to bottom, transparent, var(--chat-bubble));
+  pointer-events: none;
 }
 
 .helper-tool-diff .diff-num {
@@ -15096,7 +15197,7 @@ button.worker-composer-pill:hover {
 /* 이 페이지의 키보드 초점 — 플랫폼 계약의 잉크 외곽선. 입력 상자만 전역
  * 규칙의 액센트 테두리를 그대로 쓴다(`.worker-composer-box:focus-visible`). */
 .worker-view
-  :is(.helper-cap, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-preview-lid, .helper-preview-door):focus-visible {
+  :is(.helper-cap, .helper-turns, button.worker-where.is-door, .worker-open-live, .worker-composer-door, .worker-composer-agent, .worker-composer-mode, .worker-composer-slash, .worker-composer-send, .composer-attach-plus, .composer-attach-drop, .composer-menu-item, .composer-slash-row, .helper-link, .helper-copy, .helper-expand, .helper-preview-lid, .helper-preview-door):focus-visible {
   outline: 2px solid var(--ink-chalk);
   outline-offset: 2px;
 }
@@ -15114,6 +15215,7 @@ button.worker-composer-pill:hover {
   button.worker-where.is-door,
   .helper-preview-door,
   .helper-copy,
+  .helper-expand,
   .composer-menu-item,
   .composer-slash-row,
   .worker-composer-slash {

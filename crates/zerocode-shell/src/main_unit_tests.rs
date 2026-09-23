@@ -17152,6 +17152,9 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "worker.focusThinking",
         "worker.focusExpand",
         "worker.focusCollapse",
+        // What a row folds (t-6323): the door's two words.
+        "worker.showMore",
+        "worker.showLess",
     ];
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -17166,7 +17169,17 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
     let reads = [
         (
             "function dressToolTurn(row, turn, run, spoken) {",
-            vec!["worker.moreLines", "worker.toolRow"],
+            vec!["worker.toolRow"],
+        ),
+        // The rows a diff's ceiling left out are counted where the rows are
+        // built; the door says 「더 보기」 / 「접기」 in one place (t-6323).
+        (
+            "function diffRowsNode(edit, words) {",
+            vec!["worker.moreLines"],
+        ),
+        (
+            "function paintExpandDoor(door, open) {",
+            vec!["worker.showMore", "worker.showLess"],
         ),
         // The fold's label lives in `thoughtLabel` (the bare word, or the
         // extension's 「Thought for Ns」 once the thought's length is known);
@@ -17306,6 +17319,14 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         "meta-alpha",
         "radius-small",
         "font-ui",
+        // What a row folds (t-6323), the extension's own measures.
+        "tool-clip-h",
+        "tool-clip-fade",
+        "diff-clip-h",
+        "diff-clip-fade",
+        "diff-leading",
+        "user-clip-h",
+        "user-clip-fade",
     ] {
         let declared = format!("\n  --chat-{name}:");
         assert_eq!(
@@ -17333,8 +17354,17 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
         ".helper-turn.is-tool {",
         ".helper-tool-call {",
         ".helper-tool-result {",
-        ".helper-tool-more {",
+        ".helper-tool-body {",
         ".helper-tool-diff-rows {",
+        // What a row folds (t-6323): the cut, the fade, the door.
+        ".helper-tool-well > .helper-fold-body.is-clipped:not(.is-open) {",
+        ".helper-expand {",
+        ".is-clipped:not(.is-open) + .helper-expand {",
+        ".helper-tool-diff-rows.is-clipped:not(.is-open) {",
+        ".helper-tool-diff-rows.is-clipped:not(.is-open)::after {",
+        ".helper-turn.is-user > .helper-said.is-clipped:not(.is-open) {",
+        ".helper-turn.is-user > .helper-said.is-clipped:not(.is-open)::after {",
+        ".helper-turn.is-user > .helper-said.is-clipped:not(.is-open) + .helper-expand {",
         ".helper-status {",
         ".pane-chat-ask {",
         ".helper-tail {",
@@ -17414,6 +17444,13 @@ fn the_conversation_wears_the_extensions_own_measures() {
             .as_str()
             .unwrap_or_else(|| panic!("the snapshot has no `{name}`"))
             .to_string()
+    };
+    // A measure the panel keeps in its script, not its stylesheet (t-6323):
+    // read off `index.js` by its shape, a bare number of pixels there.
+    let constant = |name: &str| -> u64 {
+        panel["constants"][name]
+            .as_u64()
+            .unwrap_or_else(|| panic!("the snapshot has no script measure `{name}`"))
     };
     let nth = |value: String, at: usize| -> String {
         value
@@ -17518,6 +17555,25 @@ fn the_conversation_wears_the_extensions_own_measures() {
             "chat-dot-failed",
             rule("timelineMessage.dotFailure:before", "background-color"),
         ),
+        // What a row folds (t-6323): a tool body's row, the two fades, and
+        // the two heights that live in the panel's script.
+        ("chat-tool-clip-h", rule("toolBodyRowContent", "max-height")),
+        (
+            "chat-user-clip-fade",
+            rule("userMessage truncationGradient", "height"),
+        ),
+        (
+            "chat-diff-clip-fade",
+            rule("diff truncationGradient", "height"),
+        ),
+        (
+            "chat-diff-clip-h",
+            format!("{}px", constant("diffMaxHeight")),
+        ),
+        (
+            "chat-user-clip-h",
+            format!("{}px", constant("userMessageMaxHeight")),
+        ),
         ("agent-accent-claude", var("--app-claude-orange")),
         ("agent-send-claude", var("--app-claude-clay-button-orange")),
         ("chat-send-ink", var("--app-claude-ivory")),
@@ -17530,6 +17586,45 @@ fn the_conversation_wears_the_extensions_own_measures() {
                 "--{name} is `{have}`, the panel's stylesheet says `{want}`"
             ));
         }
+    }
+    // The tool row's fade is the mask's own span: opaque to 50px, gone at 60.
+    let mask = rule("toolBodyRowContent", "mask-image");
+    let stops: Vec<f64> = mask
+        .split("px")
+        .filter_map(|part| {
+            let digits: String = part
+                .chars()
+                .rev()
+                .take_while(|glyph| glyph.is_ascii_digit() || *glyph == '.')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            digits.parse().ok()
+        })
+        .collect();
+    let fade = format!(
+        "{}px",
+        stops.last().copied().unwrap_or(0.0) - stops.first().copied().unwrap_or(0.0)
+    );
+    if measure(&token("chat-tool-clip-fade")) != measure(&fade) {
+        drifted.push(format!(
+            "--chat-tool-clip-fade is `{}`, the panel's mask fades over `{fade}` (`{mask}`)",
+            token("chat-tool-clip-fade")
+        ));
+    }
+    // What makes a tool's words long is words, not pixels: the page's one
+    // table of it (`CHAT_CLIP`) says the panel's own numbers (`cN`).
+    let clip = window_source();
+    let wanted_clip = format!(
+        "const CHAT_CLIP = Object.freeze({{ lines: {}, chars: {} }});",
+        constant("longTextLines"),
+        constant("longTextChars")
+    );
+    if !clip.contains(&wanted_clip) {
+        drifted.push(format!(
+            "the page's `CHAT_CLIP` is not the panel's `cN` — wanted `{wanted_clip}`"
+        ));
     }
     assert!(
         drifted.is_empty(),

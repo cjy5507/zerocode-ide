@@ -5817,13 +5817,16 @@ mod tests {
              single view, the combined view and the conversation's inline diff \
              lose them together:\n{lines}\n{row}"
         );
-        // The conversation's inline diff draws that same row, and the
-        // approval card draws the edit it asks about with it.
+        // The conversation's inline diff draws that same row — the rows its
+        // clip shows first, the rest when its door opens them (t-6323) —
+        // and the approval card draws the edit it asks about with it.
         let inline = block_after(window, "function toolDiffNode(edits, spoken = \"\") {");
+        let cut = block_after(window, "function diffRowsNode(edit, words) {");
         assert!(
             inline.contains("const words = diffWordSpans(edit.lines);")
-                && inline.contains("diffLineNode(line, words.get(index))"),
-            "the inline diff under an edit row grew its own row painter:\n{inline}"
+                && inline.contains("diffRowsNode(edit, words)")
+                && cut.contains("diffLineNode(edit.lines[at], words.get(at))"),
+            "the inline diff under an edit row grew its own row painter:\n{inline}\n{cut}"
         );
         let approving = block_after(window, "function approvalPanelNode(card, draft) {");
         assert!(

@@ -1,7 +1,7 @@
 """The panel-rules reader finds a module's rule by its hash-free class names,
 keeps to the module a landmark names, and merges every declaration of that
-rule — the pure part of `tools/agents/claude_code_panel_rules.py`, without
-the marketplace."""
+rule, and reads the script's own measures by their shapes — the pure part of
+`tools/agents/claude_code_panel_rules.py`, without the marketplace."""
 from __future__ import annotations
 
 import sys
@@ -24,6 +24,15 @@ CSS = (
     ".sendButton_gGYT1w{border-radius:5px}"
     ".inputFooterV2_gGYT1w{gap:2px}"
     "html{--corner-radius-small:4px;--app-pill-min-height:18px;--nothing:1}"
+)
+
+# The shapes the script's measures stand in, minified names and all (the
+# 2.1.280 bundle's own spellings, with other names around them).
+SCRIPT = (
+    'let g=I?F("div",{className:C0.userMessageAttachments,children:b}):null;'
+    'return R("div",{className:C0.userMessage,children:[g,F(EV0,{content:A[i]??y,context:Y,maxHeight:60})]})'
+    "function WG0($){let J=Math.max(0,Math.ceil($)),Z=Math.min(200,J+20);return{height:Z,truncated:J>Z}}"
+    "function cN($){return $.length>250||$.split(`\n`).length>3}class c81 extends p2{}"
 )
 
 
@@ -55,19 +64,48 @@ class RuleReading(unittest.TestCase):
     def test_the_snapshot_names_its_source_and_refuses_a_missing_rule(self) -> None:
         with self.assertRaises(SystemExit):
             rules.snapshot(CSS, "0.0.0", "https://example.invalid/vsix")
-        wanted, wanted_vars = rules.WANTED, rules.WANTED_VARS
+        wanted, wanted_vars, wanted_constants = rules.WANTED, rules.WANTED_VARS, rules.WANTED_CONSTANTS
         try:
             rules.WANTED = [{"key": "sendButton", "selector": ".sendButton", "landmark": "inputFooterV2"}]
             rules.WANTED_VARS = ["--corner-radius-small"]
-            written = rules.snapshot(CSS, "0.0.0", "https://example.invalid/vsix")
+            # A snapshot without the script names no script measure: refused.
+            with self.assertRaises(SystemExit):
+                rules.snapshot(CSS, "0.0.0", "https://example.invalid/vsix")
+            written = rules.snapshot(CSS, "0.0.0", "https://example.invalid/vsix", SCRIPT)
+            rules.WANTED_CONSTANTS = []
+            bare = rules.snapshot(CSS, "0.0.0", "https://example.invalid/vsix")
         finally:
-            rules.WANTED, rules.WANTED_VARS = wanted, wanted_vars
+            rules.WANTED, rules.WANTED_VARS, rules.WANTED_CONSTANTS = wanted, wanted_vars, wanted_constants
         self.assertEqual(written["version"], "0.0.0")
         self.assertEqual(written["source"], "https://example.invalid/vsix")
         self.assertEqual(written["vars"], {"--corner-radius-small": "4px"})
         self.assertEqual(written["rules"]["sendButton"]["border-radius"], "5px")
+        self.assertEqual(bare["constants"], {})
         self.assertTrue(rules.same_measures(written, dict(written, fetched_at="later")))
         self.assertFalse(rules.same_measures(written, dict(written, version="0.0.1")))
+        self.assertFalse(rules.same_measures(written, dict(written, constants={"diffMaxHeight": 201})))
+
+
+class ScriptMeasures(unittest.TestCase):
+    def test_each_measure_is_read_by_its_shape_whatever_the_minifier_named(self) -> None:
+        self.assertEqual(
+            rules.constants_of(SCRIPT),
+            {
+                "userMessageMaxHeight": 60,
+                "diffMaxHeight": 200,
+                "diffHeightPad": 20,
+                "longTextChars": 250,
+                "longTextLines": 3,
+            },
+        )
+        renamed = SCRIPT.replace("EV0", "Qz9").replace("WG0", "a1$").replace("cN", "zz")
+        self.assertEqual(rules.constants_of(renamed)["userMessageMaxHeight"], 60)
+        self.assertEqual(rules.constants_of(renamed)["longTextChars"], 250)
+
+    def test_a_shape_found_twice_is_no_measure(self) -> None:
+        twice = SCRIPT + "function WG1($){let J=Math.max(0,Math.ceil($)),Z=Math.min(300,J+20);return{height:Z,truncated:J>Z}}"
+        self.assertNotIn("diffMaxHeight", rules.constants_of(twice))
+        self.assertEqual(rules.constants_of(twice)["userMessageMaxHeight"], 60)
 
 
 if __name__ == "__main__":

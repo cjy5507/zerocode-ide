@@ -1,8 +1,9 @@
 {
-  "source": "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/2.1.278/vspackage",
-  "version": "2.1.278",
-  "fetched_at": "2026-09-21T05:00:35+00:00",
+  "source": "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/2.1.280/vspackage",
+  "version": "2.1.280",
+  "fetched_at": "2026-09-23T05:38:00+00:00",
   "stylesheet": "extension/webview/index.css",
+  "script": "extension/webview/index.js",
   "vars": {
     "--app-claude-orange": "#d97757",
     "--app-claude-clay-button-orange": "#c6613f",
@@ -286,6 +287,37 @@
       "height": "16px",
       "margin-left": "0",
       "transition": "transform .15s"
+    },
+    "toolBodyRowContent": {
+      "mask-image": "linear-gradient(to bottom,var(--app-primary-background)50px,transparent 60px)",
+      "overflow": "hidden",
+      "max-height": "60px"
+    },
+    "userMessage truncationGradient": {
+      "position": "absolute",
+      "background": "linear-gradient(to bottom,transparent 0%,var(--app-input-background)100%)",
+      "pointer-events": "none",
+      "height": "50px",
+      "bottom": "0",
+      "left": "0",
+      "right": "0"
+    },
+    "diff truncationGradient": {
+      "position": "absolute",
+      "background": "linear-gradient(to bottom,transparent 0%,var(--app-diff-editor-background)100%)",
+      "pointer-events": "none",
+      "border-radius": "0 0 4px 4px",
+      "height": "30px",
+      "bottom": "0",
+      "left": "0",
+      "right": "0"
     }
+  },
+  "constants": {
+    "userMessageMaxHeight": 60,
+    "diffMaxHeight": 200,
+    "diffHeightPad": 20,
+    "longTextChars": 250,
+    "longTextLines": 3
   }
 }

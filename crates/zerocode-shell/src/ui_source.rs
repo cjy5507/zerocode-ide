@@ -91,6 +91,10 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
         include_str!("../../../ui/shell-remote.js"),
     ),
     ("shell-sftp.js", include_str!("../../../ui/shell-sftp.js")),
+    (
+        "shell-conversation-view.js",
+        include_str!("../../../ui/shell-conversation-view.js"),
+    ),
     ("shell.js", include_str!("../../../ui/shell.js")),
 ];
 

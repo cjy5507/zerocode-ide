@@ -64,7 +64,7 @@ import { testComposerAttach } from "./attach.mjs";
 import { testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testWorkers } from "./workers.mjs";
-import { testConversationFont } from "./conversation-parity.mjs";
+import { testConversationFolds, testConversationFont } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -214,6 +214,7 @@ suite("workers", testWorkers);
  * (t-6323, docs/design/agent-conversation-claude-code-grammar-20260915.md
  * §10): each suite one difference that was closed, read off the laid-out page. */
 suite("conversation-font", ({ browser, origin, ok }) => testConversationFont(browser, origin, ok));
+suite("conversation-folds", ({ browser, origin, ok }) => testConversationFolds(browser, origin, ok));
 /* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
  * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
  * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs
@@ -35673,26 +35674,29 @@ const chatFace = await page.evaluate(async () => {
   // Two tool rows, both still out (nothing was said after them, the helper
   // runs): the accent dot with its halo. The nameless dump is a tool all the
   // same — the window's word for it, its first line as the target, the rest
-  // behind the row's fold in a well that scrolls on its own.
+  // standing in the row's body (the extension's box, no fold to press first):
+  // its well cut at the clip with its door, and opened, a well that scrolls
+  // on its own (t-6323 A1).
   seen.toolRows = turns.slice(2).map((row) => row.className.replace(/\s+/g, " "));
   seen.dumpName = turns[2]?.querySelector(".helper-tool-name")?.textContent;
   seen.wantDumpName = t("worker.tool", "도구");
   seen.dumpArg = turns[2]?.querySelector(".helper-tool-arg")?.textContent;
-  const more = turns[2]?.querySelector(".helper-tool-more");
-  seen.moreFolded = more?.tagName === "DETAILS" && more.open === false;
-  seen.moreWords = more?.querySelector(".helper-cue")?.textContent;
-  seen.wantMoreWords = t("worker.moreLines", "{{n}}줄 더", { n: 40 });
-  if (more) more.open = true;
-  await new Promise((done) => setTimeout(done, 10));
+  const more = turns[2]?.querySelector(".helper-tool-body");
   const well = more?.querySelector(".helper-tool-input");
+  const wellDoor = well?.nextElementSibling?.classList.contains("helper-expand") ? well.nextElementSibling : null;
+  seen.moreFolded = more?.tagName === "DIV" && well?.classList.contains("is-clipped") === true && well.checkVisibility();
+  seen.moreWords = wellDoor?.textContent;
+  seen.wantMoreWords = t("worker.showMore", "더 보기");
+  wellDoor?.click();
+  await new Promise((done) => setTimeout(done, 10));
   const wellStyle = well ? getComputedStyle(well) : null;
-  seen.wellHolds = Boolean(well?.textContent.includes("line 39")) && well.hidden === false &&
-    more.querySelector(".helper-tool-output").hidden === true;
+  seen.wellHolds = Boolean(well?.textContent.includes("line 39")) && well.checkVisibility() &&
+    more.querySelector(".helper-tool-output").checkVisibility() === false;
   seen.wellScrolls = wellStyle !== null && wellStyle.overflowY === "auto" && wellStyle.maxHeight !== "none";
-  if (more) more.open = false;
+  wellDoor?.click();
   seen.readName = turns[3]?.querySelector(".helper-tool-name")?.textContent;
   seen.readArg = turns[3]?.querySelector(".helper-tool-arg")?.textContent;
-  seen.readBare = turns[3]?.querySelector(".helper-tool-more") === null &&
+  seen.readBare = turns[3]?.querySelector(".helper-tool-body") === null &&
     turns[3]?.querySelector(".helper-tool-result") === null;
   const dot = turns[3] ? getComputedStyle(turns[3], "::before") : null;
   seen.liveDot = dot !== null && dot.content !== "none" &&
@@ -35819,7 +35823,7 @@ const chatFace = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a helper page speaks the Claude Code grammar: the briefing in a left bubble, prose in the window's type, every tool call its own row — a nameless dump under the window's word with its lines behind the row's fold — and the calls still out wearing the accent dot",
+  "a helper page speaks the Claude Code grammar: the briefing in a left bubble, prose in the window's type, every tool call its own row — a nameless dump under the window's word with its lines in the row's body, cut at the clip behind 「더 보기」 — and the calls still out wearing the accent dot",
   chatFace.count === 4 &&
     chatFace.briefingBubble &&
     chatFace.briefingSaid === "briefing line one" &&
@@ -36068,12 +36072,14 @@ const toolStates = await page.evaluate(async () => {
   // The extension's secondary line: no glyph before it, the window's type.
   seen.resultLead = result ? getComputedStyle(result, "::before").content : "";
   seen.resultMono = result ? /mono/i.test(getComputedStyle(result).fontFamily) : false;
-  const more = out.querySelector(".helper-tool-more");
-  // Three lines of argument object and two of output behind the fold.
-  seen.moreWords = more?.querySelector(".helper-cue")?.textContent;
-  seen.wantMoreWords = t("worker.moreLines", "{{n}}줄 더", { n: 5 });
+  const more = out.querySelector(".helper-tool-body");
+  // Three lines of argument object and two of output stand in the body —
+  // both short by the extension's test (three lines, 250 characters), so
+  // neither is cut and no door stands (t-6323 A1).
+  seen.moreWords = more ? String(more.querySelectorAll(".helper-expand").length) : "";
+  seen.wantMoreWords = "0";
   seen.moreOutput = more?.querySelector(".helper-tool-output")?.textContent;
-  seen.moreInput = more?.querySelector(".helper-tool-input")?.hidden === false &&
+  seen.moreInput = more?.querySelector(".helper-tool-input")?.checkVisibility() === true &&
     more?.querySelector(".helper-tool-input")?.textContent.includes('"file_path": "/repo/c.rs"');
   // A failing call: its dot and its result line in the halt ink.
   holdHelperTurns(tab.worker.helper, [
@@ -36147,7 +36153,7 @@ const toolStates = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a tool row's dot is the call's state: calls the answer closed stand plain under the CLI's names, the one still out wears the accent and a halo while the status line says the CLI's word, a result joining by call id turns the same row green with `└ first line` and the rest behind its fold, a failed result wears the halt ink, an edit's row wears the inline diff cut from its input (the review rows and word marks, blank gutters for a snippet, the rows past the ceiling counted, no input well, a path over each file of a patch), a quiet paint touches nothing, and the roster's done takes the accent and the status away",
+  "a tool row's dot is the call's state: calls the answer closed stand plain under the CLI's names, the one still out wears the accent and a halo while the status line says the CLI's word, a result joining by call id turns the same row green with `└ first line` and the rest in its body (short sides whole, no door), a failed result wears the halt ink, an edit's row wears the inline diff cut from its input (the review rows and word marks, blank gutters for a snippet, the rows past the ceiling counted, no input well, a path over each file of a patch), a quiet paint touches nothing, and the roster's done takes the accent and the status away",
   toolStates.rowsTotal === 8 && toolStates.toolCount === 5 &&
     toolStates.fourNames === "Read,Grep,Edit,Bash" && toolStates.fourPlain &&
     toolStates.oneLive && toolStates.statusShown &&
@@ -36584,8 +36590,11 @@ ok(
  * (p + svg + use + 동사 + 대상)이던 때의 실측 1468. 「동안 작업」 접힘은 몸을
  * 펼칠 때 짓는 대신 이 수 아래에 머문다. 09-21: 답마다 확장의 행동 행
  * (`assistantActions`: div·button·svg·use)이 서고 상태 줄이 목록의 것이 되어
- * 같은 400턴이 1745 — 늘어난 것은 확장의 행뿐이다. */
-const HELPER_LIST_NODES_CEILING = 1745;
+ * 같은 400턴이 1745 — 늘어난 것은 확장의 행뿐이다. 09-23(t-6323 A1): 긴
+ * 입력의 접힘(details·summary·cue·몸·우물 둘)이 확장의 도구 몸(몸·우물 둘·
+ * pre 둘·문)으로 바뀌어 같은 수이고, 60px을 넘는 브리핑이 제 「더 보기」 문
+ * 하나를 얻어 1746. */
+const HELPER_LIST_NODES_CEILING = 1746;
 await page.setViewportSize({ width: 1280, height: 860 });
 const flatTranscript = await page.evaluate(async () => {
   const seen = {};
@@ -36675,7 +36684,7 @@ const flatTranscript = await page.evaluate(async () => {
   // the target in mono with an ellipsis — and no fold or result line when
   // there is nothing past the first line.
   const lone = list.querySelector(".helper-turn.is-tool");
-  seen.toolFolded = lone !== null && lone.querySelector(".helper-tool-more") === null &&
+  seen.toolFolded = lone !== null && lone.querySelector(".helper-tool-body") === null &&
     lone.querySelector(".helper-tool-result") === null;
   const toolRow = lone?.querySelector(".helper-tool-call") ?? null;
   seen.toolLine = toolRow !== null && Number.parseFloat(getComputedStyle(lone).paddingLeft) > 0 &&
@@ -36686,19 +36695,20 @@ const flatTranscript = await page.evaluate(async () => {
   const cueStyle = cue ? getComputedStyle(cue) : null;
   seen.cueMono = cueStyle !== null &&
     /mono/i.test(cueStyle.fontFamily) && cueStyle.textOverflow === "ellipsis";
-  // A long input folds behind its row into a well of its own — the
-  // transcript never widens.
+  // A long input stands in its row's body cut at the clip, and its door opens
+  // a well of its own that scrolls — the transcript never widens (A1).
   const foldTool = [...list.querySelectorAll(".helper-turn.is-tool")]
     .find((one) => one.__turn.text.includes("out 299")) ?? null;
-  const foldRow = foldTool?.querySelector(".helper-tool-more") ?? null;
-  if (foldRow) foldRow.open = true;
-  await new Promise(requestAnimationFrame);
+  const foldRow = foldTool?.querySelector(".helper-tool-body") ?? null;
   const well = foldRow?.querySelector(".helper-tool-input");
+  const wellDoor = well?.nextElementSibling?.classList.contains("helper-expand") ? well.nextElementSibling : null;
+  wellDoor?.click();
+  await new Promise(requestAnimationFrame);
   const wellStyle = well ? getComputedStyle(well) : null;
-  seen.wellBound = wellStyle !== null && well.hidden === false &&
+  seen.wellBound = wellDoor !== null && wellStyle !== null && well.checkVisibility() &&
     wellStyle.overflowY === "auto" && wellStyle.maxHeight !== "none";
   seen.noSideScroll = list.scrollWidth <= list.clientWidth + 1;
-  if (foldRow) foldRow.open = false;
+  wellDoor?.click();
   // The run's being out shows as the tail call's accent dot and the status
   // line under the transcript — one live row, nothing else.
   const liveLine = list.querySelector(".helper-turn.is-tool.is-live");
@@ -36720,16 +36730,16 @@ const flatTranscript = await page.evaluate(async () => {
     Math.abs(head.getBoundingClientRect().top - headTop) <= 1 &&
     Math.abs(composerForm.getBoundingClientRect().bottom - composerBottom) <= 1;
   // 읽어 주는 지역과 키보드: 전사는 이름을 달고 탭 멈춤이 있으며, 접힘의
-  // 요약 줄은 초점을 받고 잉크 고리를 입는다.
+  // 문(「더 보기」, t-6323 A1)은 초점을 받고 잉크 고리를 입고 우물을 연다.
   seen.logLabeled = list.getAttribute("role") === "log" &&
     Boolean(list.getAttribute("aria-label")) && list.tabIndex === 0;
-  const cap = foldTool?.querySelector(".helper-cap") ?? null;
+  const cap = foldRow?.querySelector(".helper-expand") ?? null;
   cap?.focus();
   const capStyle = cap ? getComputedStyle(cap) : null;
   seen.capFocus = cap !== null && document.activeElement === cap &&
     capStyle.outlineWidth === "2px" && capStyle.outlineStyle === "solid";
   cap?.click();
-  seen.capToggles = foldRow?.open === true;
+  seen.capToggles = foldRow?.querySelector(".helper-tool-input")?.classList.contains("is-open") === true;
   cap?.click();
 
   // 무게의 실측 1 — 폴은 온 턴만 잇고, 상한은 DOM과 데이터를 함께 지운다.
@@ -36824,11 +36834,12 @@ const flatLight = await page.evaluate(() => {
 });
 await page.emulateMedia({ reducedMotion: "reduce" });
 const flatReduced = await page.evaluate(() => {
-  const cap = document.querySelector("#worker-view .helper-cap");
+  // The row's fold is its door now (t-6323 A1): the briefing and the long
+  // dump are cut at their clips, each with 「더 보기」 after it.
+  const cap = document.querySelector("#worker-view .helper-expand");
   const door = document.querySelector("#worker-view button.worker-where.is-door");
   return {
-    cap: getComputedStyle(cap).transitionDuration,
-    chevron: getComputedStyle(cap, "::after").transitionDuration,
+    cap: cap ? getComputedStyle(cap).transitionDuration : "no door",
     door: door ? getComputedStyle(door).transitionDuration : "0s",
   };
 });
@@ -36876,7 +36887,7 @@ await page.evaluate(async (term) => {
 }, flatTranscript.term);
 console.log("HELPER_NODES", JSON.stringify({ turns: flatTranscript.count, listNodes: flatTranscript.listNodes }));
 ok(
-  "the helper page is a flat readable transcript: bare assistant prose behind a quiet dot, the person's bubbles on the left, every tool turn one row under the CLI's own name with mono only for machine excerpts, the rest of a long input behind the row's fold — and no more nodes at 400 turns than the measured ceiling",
+  "the helper page is a flat readable transcript: bare assistant prose behind a quiet dot, the person's bubbles on the left, every tool turn one row under the CLI's own name with mono only for machine excerpts, the rest of a long input in the row's body behind its door — and no more nodes at 400 turns than the measured ceiling",
   flatTranscript.opened && flatTranscript.count === 400 &&
     flatTranscript.listNodes <= HELPER_LIST_NODES_CEILING &&
     flatTranscript.proseFlat && flatTranscript.inkFromToken &&
@@ -36925,7 +36936,7 @@ ok(
   "the transcript survives light, reduced motion and 720px: token inks swap, folds stop easing, nothing overflows sideways and the composer stays on screen",
   flatLight.inkFromToken && flatLight.ink !== flatTranscript.darkInk &&
     flatLight.bg !== flatTranscript.darkBg &&
-    flatReduced.cap === "0s" && flatReduced.chevron === "0s" && flatReduced.door === "0s" &&
+    flatReduced.cap === "0s" && flatReduced.door === "0s" &&
     flatNarrow.noSideScroll && flatNarrow.composerOn && flatNarrow.frame &&
     flatNarrow.light && flatNarrow.narrowPadding < flatTranscript.widePadding,
   JSON.stringify({ light: flatLight, reduced: flatReduced, narrow: flatNarrow }),
