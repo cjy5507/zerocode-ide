@@ -210,16 +210,11 @@ impl ProviderClient {
                 anthropic_auth_for_route(auth_route, anthropic_auth)?,
             ))),
             ProviderKind::Xai => match auth_route {
-                AuthRoute::Auto => Ok(Self::Xai(openai_compat_from_env(
-                    OpenAiCompatConfig::xai(),
-                )?)),
+                AuthRoute::Auto => Ok(Self::Xai(xai_client()?)),
                 AuthRoute::ApiKey => Ok(Self::Xai(openai_compat_api_key_for_route(
                     OpenAiCompatConfig::xai(),
                 )?)),
-                AuthRoute::OAuth => Err(ApiError::unsupported_auth_route(
-                    "xAI",
-                    auth_route.as_str(),
-                )),
+                AuthRoute::OAuth => Ok(Self::Xai(xai_grok_login_client()?)),
             },
             ProviderKind::OpenAi => match auth_route {
                 AuthRoute::Auto => Ok(match load_fresh_openai_oauth() {
@@ -577,6 +572,39 @@ fn openai_compat_from_env(config: OpenAiCompatConfig) -> Result<OpenAiCompatClie
     }
 }
 
+/// The xAI client for the automatic route. A custom `XAI_BASE_URL` keeps the
+/// optional-auth path a self-hosted endpoint needs; the official endpoint
+/// takes whatever the one xAI resolution finds — the API key, else the Grok
+/// CLI's login (t-6248) — the same answer the model list gets.
+fn xai_client() -> Result<OpenAiCompatClient, ApiError> {
+    let config = OpenAiCompatConfig::xai();
+    if openai_compat::has_custom_base_url(config) {
+        return openai_compat_from_env(config);
+    }
+    providers::cli_sessions::resolve_xai_credential()
+        .map(|credential| OpenAiCompatClient::new(credential.bearer, config))
+        .map_err(|miss| match miss {
+            CredentialMiss::Absent => {
+                ApiError::missing_credentials(config.provider_name, config.credential_env_vars())
+            }
+            CredentialMiss::Unusable(why) => ApiError::Auth(why),
+        })
+}
+
+/// The xAI client for the OAuth route: the Grok CLI's own login, the rung
+/// of the same resolution that holds it.
+fn xai_grok_login_client() -> Result<OpenAiCompatClient, ApiError> {
+    let config = OpenAiCompatConfig::xai();
+    providers::cli_sessions::grok_session()
+        .map(|session| OpenAiCompatClient::new(session.bearer, config))
+        .map_err(|miss| match miss {
+            CredentialMiss::Absent => {
+                ApiError::missing_auth_route_credentials(config.provider_name, AuthRoute::OAuth.as_str())
+            }
+            CredentialMiss::Unusable(why) => ApiError::Auth(why),
+        })
+}
+
 fn openai_compat_api_key_for_route(
     config: OpenAiCompatConfig,
 ) -> Result<OpenAiCompatClient, ApiError> {
@@ -824,6 +852,56 @@ mod tests {
             Some("stale-openai-access"),
             "the request path keeps its stale token"
         );
+        drop(isolation);
+    }
+
+    /// C5 (t-6248): the Grok CLI's own login is an xAI credential, read
+    /// through the one xAI resolution the model list reads too — the OAuth
+    /// route speaks as it, and so does the automatic one when no key is set.
+    /// An expired session is refused with the way back in, never refreshed.
+    #[test]
+    fn a_grok_cli_login_speaks_for_xai_when_no_key_is_set() {
+        let _lock = crate::test_env_lock();
+        let isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let grok_home = tempfile::tempdir().expect("a Grok home");
+        let login_file = grok_home.path().join("auth.json");
+        std::fs::write(
+            &login_file,
+            r#"{"https://auth.x.ai::acct-1":{"key":"grok-cli-session-token","expires_at":"2099-01-01T00:00:00.000000Z"}}"#,
+        )
+        .expect("a Grok login");
+        let _grok = EnvVarGuard::set("GROK_HOME", grok_home.path().to_str());
+        let _external = EnvVarGuard::set("ZO_DISABLE_EXTERNAL_CREDENTIALS", None);
+        let _key = EnvVarGuard::set("XAI_API_KEY", None);
+        let _base = EnvVarGuard::set("XAI_BASE_URL", None);
+
+        let oauth = super::ProviderClient::from_provider_kind_with_auth_route(
+            ProviderKind::Xai,
+            super::AuthRoute::OAuth,
+        )
+        .expect("the Grok login is xAI's OAuth route");
+        assert!(matches!(&oauth, super::ProviderClient::Xai(_)));
+        assert!(format!("{oauth:?}").contains("grok-cli-session-token"));
+
+        let _gate = EnvVarGuard::set(NON_CLAUDE_ADAPTERS_ENV, Some("1"));
+        let auto = super::ProviderClient::from_provider_kind_with_auth_route(
+            ProviderKind::Xai,
+            super::AuthRoute::Auto,
+        )
+        .expect("no key: the automatic route speaks as the Grok login");
+        assert!(format!("{auto:?}").contains("grok-cli-session-token"));
+
+        std::fs::write(
+            &login_file,
+            r#"{"https://auth.x.ai::acct-1":{"key":"grok-cli-session-token","expires_at":"2020-01-01T00:00:00Z"}}"#,
+        )
+        .expect("an expired Grok login");
+        let refused = super::ProviderClient::from_provider_kind_with_auth_route(
+            ProviderKind::Xai,
+            super::AuthRoute::OAuth,
+        )
+        .expect_err("an expired session is refused");
+        assert!(refused.to_string().contains("grok login"), "{refused}");
         drop(isolation);
     }
 
@@ -1143,10 +1221,10 @@ mod tests {
     fn unsupported_explicit_auth_route_is_rejected() {
         let unsupported = provider_error(
             super::ProviderClient::from_provider_kind_with_auth_route(
-                ProviderKind::Xai,
+                ProviderKind::Ollama,
                 super::AuthRoute::OAuth,
             ),
-            "xAI OAuth is unsupported",
+            "Ollama OAuth is unsupported",
         );
         assert!(matches!(
             unsupported,

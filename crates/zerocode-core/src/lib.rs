@@ -29,6 +29,7 @@ pub mod browser_read;
 pub mod capabilities;
 pub mod checks;
 pub mod civil;
+pub mod cli_login_files;
 pub mod clone;
 pub mod codex_account;
 pub mod codex_delta;

@@ -126,6 +126,12 @@ impl Report<'_> {
                 "authRoute": row.auth_route,
                 "unlistedSince": self.unlisted_since(row),
             })).collect::<Vec<_>>(),
+            "otherLogins": self.other_logins().iter().map(|model| json!({
+                "provider": model.provider,
+                "id": model.id,
+                "displayName": model.display_name,
+                "source": model.source,
+            })).collect::<Vec<_>>(),
             "customProviders": api::custom_provider_usability_catalog()
                 .into_iter()
                 .map(|provider| serde_json::json!({
@@ -191,6 +197,17 @@ impl Report<'_> {
                 unlisted
             );
         }
+        // What a login zo lists but does not route through this catalog says
+        // it serves (xAI's list for a Grok login, Kimi Code's catalog) —
+        // shown so the login's models are seen, and named by the source that
+        // listed them (t-6248).
+        for model in self.other_logins() {
+            let _ = writeln!(
+                out,
+                "{:<10} {:<34} {:<26} discovered · {}",
+                model.provider, model.id, model.display_name, model.source
+            );
+        }
         // The providers the person connected (settings → API 라우터, or
         // `/connect`), each model as the `<provider>/<model>` a pick uses. One
         // whose key zo cannot see says which variable it is waiting for.
@@ -215,30 +232,7 @@ impl Report<'_> {
         let (alias, model) = ("alias", "model");
         let _ = writeln!(out, "{alias:<22} → {model}");
         for (alias, canonical, provider) in alias_rows_flat() {
-            // A moved alias says where it came from; one minted for a family the
-            // shipped catalog never named has no "from" and says so; one whose
-            // release left its provider's list with nothing living to follow
-            // says there is none (t-6248).
-            let moved = self
-                .overlay
-                .alias_updates
-                .iter()
-                .find(|update| update.alias == alias)
-                .map(|update| {
-                    if update.from.is_empty() {
-                        "   (new)".to_string()
-                    } else {
-                        format!("   (was {})", update.from)
-                    }
-                })
-                .or_else(|| {
-                    self.overlay
-                        .orphaned
-                        .iter()
-                        .find(|update| update.alias == alias)
-                        .map(|update| format!("   (없음 · {} {})", update.from, crate::tui::strings::UNLISTED_SINCE))
-                })
-                .unwrap_or_default();
+            let moved = self.alias_note(&alias);
             let _ = writeln!(out, "{alias:<22} → {canonical:<34} {provider}{moved}");
         }
         if !self.overlay.alias_candidates.is_empty() {
@@ -266,6 +260,42 @@ impl Report<'_> {
             .iter()
             .find(|model| model.id.eq_ignore_ascii_case(&row.id))
             .and_then(|model| model.unlisted_since)
+    }
+
+    /// What an alias line adds: a moved alias says where it came from; one
+    /// minted for a family the shipped catalog never named has no "from" and
+    /// says so; one whose release left its provider's list with nothing
+    /// living to follow says there is none (t-6248).
+    fn alias_note(&self, alias: &str) -> String {
+        self.overlay
+            .alias_updates
+            .iter()
+            .find(|update| update.alias == alias)
+            .map(|update| {
+                if update.from.is_empty() {
+                    "   (new)".to_string()
+                } else {
+                    format!("   (was {})", update.from)
+                }
+            })
+            .or_else(|| {
+                self.overlay
+                    .orphaned
+                    .iter()
+                    .find(|update| update.alias == alias)
+                    .map(|update| format!("   (없음 · {} {})", update.from, crate::tui::strings::UNLISTED_SINCE))
+            })
+            .unwrap_or_default()
+    }
+
+    /// Discovered rows of a provider this catalog screen does not carry —
+    /// the models another login lists (xAI, Kimi Code).
+    fn other_logins(&self) -> Vec<&model_discovery::DiscoveredModel> {
+        self.catalog
+            .models
+            .iter()
+            .filter(|model| CatalogProvider::from_key(&model.provider).is_none())
+            .collect()
     }
 
     /// Which layer put the row on the screen.
@@ -475,6 +505,48 @@ mod tests {
             .expect("the spark row");
         assert_eq!(spark["unlistedSince"], since);
         assert_eq!(json["aliasesWithoutRelease"][0]["alias"], "spark");
+    }
+
+    /// C5 (t-6248): the models another login lists — xAI's for a Grok login
+    /// — are seen in `zo models`, under the source that listed them, and kept
+    /// out of the rows the window offers as picks.
+    #[test]
+    fn another_logins_models_are_listed_apart_from_the_catalog_rows() {
+        use runtime::model_catalog::ModelCatalog;
+        use runtime::model_discovery::{DiscoveredCatalog, DiscoveredModel, Overlay, UpdatePolicy};
+        let home = tempfile::tempdir().expect("an overlay home");
+        let user = ModelCatalog::load_from_home(home.path()).expect("an empty overlay");
+        let rows = user.rows(&super::ALL_PROVIDERS, false);
+        let catalog = DiscoveredCatalog {
+            fetched_at: 1_790_121_000,
+            models: vec![DiscoveredModel {
+                provider: "xai".to_string(),
+                id: "grok-4".to_string(),
+                display_name: "grok-4".to_string(),
+                source: runtime::model_discovery::XAI_SOURCE.to_string(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let overlay = Overlay::default();
+        let report = super::Report {
+            policy: UpdatePolicy::Auto,
+            catalog: &catalog,
+            user: &user,
+            rows: &rows,
+            overlay: &overlay,
+            merged: None,
+            now: 1_790_121_060,
+        };
+        let text = report.text();
+        let line = text.lines().find(|line| line.contains("grok-4")).expect("the xAI row is listed");
+        assert!(line.starts_with("xai") && line.ends_with("discovered · xai-api"), "{line}");
+        let json: serde_json::Value = serde_json::from_str(&report.json().expect("json")).unwrap();
+        assert_eq!(json["otherLogins"][0]["id"], "grok-4");
+        assert!(
+            !json["models"].as_array().unwrap().iter().any(|row| row["id"] == "grok-4"),
+            "not a pick the window offers"
+        );
     }
 
     #[test]

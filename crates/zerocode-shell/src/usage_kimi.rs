@@ -24,20 +24,20 @@ use zerocode_core::usage_limit::FailureKind;
 
 /// The endpoint the CLI's own `/usage` command calls, and the env var the CLI
 /// honours for a self-hosted or staging base (`kimi-fetcher.ts:20`).
-const BASE_URL_VAR: &str = "KIMI_CODE_BASE_URL";
-const DEFAULT_BASE_URL: &str = "https://api.kimi.com/coding/v1";
+const BASE_URL_VAR: &str = zerocode_core::cli_login_files::kimi::BASE_URL_VAR;
+const DEFAULT_BASE_URL: &str = zerocode_core::cli_login_files::kimi::DEFAULT_BASE_URL;
 const USAGE_PATH: &str = "/usages";
 
 /// `KIMI_CODE_HOME ?? ~/.kimi-code`, the CLI's own resolution — read the same
 /// files the running CLI writes (`kimi-runtime-home.ts:17-19`).
-pub(crate) const HOME_VAR: &str = "KIMI_CODE_HOME";
-const HOME_DIR: &str = ".kimi-code";
-const CREDENTIALS_TAIL: [&str; 2] = ["credentials", "kimi-code.json"];
+pub(crate) const HOME_VAR: &str = zerocode_core::cli_login_files::kimi::HOME_VAR;
+const HOME_DIR: &str = zerocode_core::cli_login_files::kimi::HOME_DIR;
+const CREDENTIALS_TAIL: [&str; 2] = zerocode_core::cli_login_files::kimi::CREDENTIALS_TAIL;
 
 /// A token expiring inside this margin is treated as already gone: firing a
 /// request against a token that expires mid-flight spends a round trip to
 /// learn what the stamp already said (`kimi-fetcher.ts:126-127`).
-const EXPIRY_SKEW_SECONDS: i64 = 5;
+const EXPIRY_SKEW_SECONDS: i64 = zerocode_core::cli_login_files::kimi::EXPIRY_SKEW_SECONDS;
 
 /// The two windows Kimi reports, in the durations this window already speaks.
 const SESSION_WINDOW_MINUTES: u32 = crate::usage::SESSION_WINDOW_MINUTES;

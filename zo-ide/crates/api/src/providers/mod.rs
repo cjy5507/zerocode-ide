@@ -10,6 +10,7 @@ use anthropic::keychain::KeychainAnswer;
 pub mod anthropic;
 pub(crate) mod aws_sigv4;
 pub mod chatgpt_backend;
+pub mod cli_sessions;
 pub(crate) mod cloud_gateway;
 pub mod gemini_code_assist;
 pub(crate) mod google_auth;

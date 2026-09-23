@@ -58,6 +58,11 @@ pub use providers::anthropic::{
 pub use providers::chatgpt_backend::{
     ORIGINATOR as CHATGPT_ORIGINATOR, USER_AGENT as CHATGPT_USER_AGENT,
 };
+pub use providers::cli_sessions;
+pub use providers::cli_sessions::{
+    CliSession, XaiCredential, XaiCredentialSource, grok_session, kimi_code_login_configured,
+    kimi_code_models_url, kimi_code_session, resolve_xai_credential, xai_credential_configured,
+};
 pub use providers::cloud_gateway::cloud_gateway_active;
 pub use providers::gemini_code_assist::{
     FETCH_AVAILABLE_MODELS as GOOGLE_CODE_ASSIST_FETCH_AVAILABLE_MODELS,

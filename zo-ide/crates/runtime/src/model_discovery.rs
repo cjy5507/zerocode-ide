@@ -100,6 +100,8 @@ const LEGACY_OPENAI_SOURCE: &str = "codex-cache";
 pub const ANTHROPIC_SOURCE: &str = "anthropic-api";
 pub const GOOGLE_API_SOURCE: &str = "google-api";
 pub const ANTIGRAVITY_SOURCE: &str = "antigravity-registry";
+pub const XAI_SOURCE: &str = "xai-api";
+pub const KIMI_CODE_SOURCE: &str = "kimi-code";
 
 /// One source of model lists: whose rows it answers, what its credential is
 /// called, where it asks, and what it says when it cannot ask. Every source
@@ -131,6 +133,10 @@ pub struct Source {
     /// provider it does not name was withdrawn ([`Withdrawn`]). A registry
     /// that folds tiered ids, or a key list beside an OAuth route, is not.
     pub lists_every_model: bool,
+    /// Refusals the endpoint spells for itself: a marker its body carries,
+    /// and the words a report says instead of the raw body — xAI's
+    /// `spending-limit` is an account without credits, not a bad key.
+    pub refusals: &'static [(&'static str, &'static str)],
 }
 
 impl Source {
@@ -148,10 +154,24 @@ impl Source {
         };
         (self.key.to_string(), detail)
     }
+
+    /// The report's words for an answer that is not a success: the row's own
+    /// sentence when the body carries a marker it knows, else the status
+    /// and the head of the body.
+    #[must_use]
+    pub fn refused(&self, status: &str, body: &str) -> String {
+        self.refusals
+            .iter()
+            .find(|(marker, _)| body.contains(marker))
+            .map_or_else(
+                || format!("HTTP {status}: {}", body.chars().take(160).collect::<String>()),
+                |(_, words)| format!("HTTP {status}: {words}"),
+            )
+    }
 }
 
 /// Every source, in report order.
-pub const SOURCES: [Source; 4] = [
+pub const SOURCES: [Source; 6] = [
     Source {
         provider: "openai",
         key: OPENAI_SOURCE,
@@ -161,6 +181,7 @@ pub const SOURCES: [Source; 4] = [
         configured: api::openai_login_configured,
         ask: openai_models,
         lists_every_model: true,
+        refusals: &[],
     },
     Source {
         provider: "anthropic",
@@ -171,6 +192,7 @@ pub const SOURCES: [Source; 4] = [
         configured: api::claude_credential_configured,
         ask: anthropic_models,
         lists_every_model: true,
+        refusals: &[],
     },
     Source {
         provider: "google",
@@ -181,6 +203,7 @@ pub const SOURCES: [Source; 4] = [
         configured: google_api_key_configured,
         ask: google_models,
         lists_every_model: false,
+        refusals: &[],
     },
     Source {
         provider: "google",
@@ -191,6 +214,32 @@ pub const SOURCES: [Source; 4] = [
         configured: api::google_code_assist_oauth_present,
         ask: antigravity_models,
         lists_every_model: false,
+        refusals: &[],
+    },
+    Source {
+        provider: "xai",
+        key: XAI_SOURCE,
+        credential: "xAI",
+        absent: "no xAI key or Grok CLI login",
+        models_url: xai_models_url,
+        configured: api::xai_credential_configured,
+        ask: xai_models,
+        lists_every_model: true,
+        refusals: &[(
+            "spending-limit",
+            "no subscription or credits on this xAI account — add credits or a Grok subscription (the login itself was accepted)",
+        )],
+    },
+    Source {
+        provider: "kimi",
+        key: KIMI_CODE_SOURCE,
+        credential: "Kimi Code",
+        absent: "no Kimi Code login",
+        models_url: api::kimi_code_models_url,
+        configured: api::kimi_code_login_configured,
+        ask: kimi_code_models,
+        lists_every_model: true,
+        refusals: &[],
     },
 ];
 
@@ -1673,6 +1722,109 @@ fn antigravity_models() -> SourceAnswer {
     Ok(live_answer(source, |source| antigravity_rows(&document, source)))
 }
 
+/// Where xAI lists models — under `XAI_BASE_URL` when one is configured, the
+/// same base the xAI client speaks to.
+fn xai_models_url() -> String {
+    format!("{}/models", api::read_xai_base_url().trim_end_matches('/'))
+}
+
+/// xAI's list, asked with the one xAI credential resolution the client uses —
+/// the API key, else the Grok CLI's login (t-6248, C5).
+fn xai_models() -> SourceAnswer {
+    let row = row(XAI_SOURCE);
+    let credential = api::resolve_xai_credential().map_err(|miss| row.miss(miss))?;
+    bearer_models(row, credential.bearer)
+}
+
+/// Kimi Code's catalog, asked with the Kimi Code CLI's login — read, never
+/// refreshed.
+fn kimi_code_models() -> SourceAnswer {
+    let row = row(KIMI_CODE_SOURCE);
+    let session = api::kimi_code_session().map_err(|miss| row.miss(miss))?;
+    bearer_models(row, session.bearer)
+}
+
+/// `GET <the row's list URL>` with a bearer, answered the OpenAI-compatible
+/// way (`{"data": [{"id", "created"}]}`). A refusal says the row's own words
+/// when it spells one ([`Source::refused`]); the bearer never reaches a
+/// report line.
+fn bearer_models(row: &'static Source, bearer: String) -> SourceAnswer {
+    let url = (row.models_url)();
+    let (status, body) = api::sync_bridge::run_blocking(async move {
+        let client = reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .map_err(|error| error.to_string())?;
+        let response = client
+            .get(&url)
+            .bearer_auth(bearer)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        let status = response.status();
+        let text = response.text().await.map_err(|error| error.to_string())?;
+        Ok::<_, String>((status, text))
+    })
+    .map_err(|detail| (row.key.to_string(), detail))?;
+    if !status.is_success() {
+        return Err((row.key.to_string(), row.refused(&status.to_string(), &body)));
+    }
+    let parsed: Value = serde_json::from_str(&body).map_err(|error| (row.key.to_string(), error.to_string()))?;
+    Ok(live_answer(row.key.to_string(), |source| {
+        openai_compatible_rows(&parsed, row.provider, source)
+    }))
+}
+
+/// Rows from an OpenAI-compatible `GET /models` document for `provider`: every
+/// `data[].id`, in the provider's order, dated from `created` (Unix seconds)
+/// when it carries one.
+#[must_use]
+pub fn openai_compatible_rows(document: &Value, provider: &str, source: &str) -> Vec<DiscoveredModel> {
+    let Some(data) = document.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for (index, model) in data.iter().enumerate() {
+        let Some(id) = model.get("id").and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        rows.push(DiscoveredModel {
+            provider: provider.to_string(),
+            id: id.to_string(),
+            display_name: model
+                .get("display_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(id)
+                .to_string(),
+            released: model
+                .get("created")
+                .and_then(Value::as_i64)
+                .map_or(0, unix_date_ordinal),
+            prominence: u32::try_from(index).unwrap_or(u32::MAX),
+            source: source.to_string(),
+            ..Default::default()
+        });
+    }
+    rows
+}
+
+/// Unix seconds → `YYYYMMDD`; `0` for a time before 1970.
+fn unix_date_ordinal(secs: i64) -> u64 {
+    if secs < 0 {
+        return 0;
+    }
+    let (year, month, day) = core_types::date::civil_from_unix_days(secs.div_euclid(86_400));
+    u64::try_from(year)
+        .ok()
+        .map_or(0, |year| year * 10_000 + u64::from(month) * 100 + u64::from(day))
+}
+
 /// The reasoning-tier suffixes the Antigravity registry folds into a model id,
 /// longest first so `-extra-low` is not read as `-low`.
 const ANTIGRAVITY_TIERS: [(&str, &str); 5] = [
@@ -2347,7 +2499,7 @@ mod tests {
         DiscoveredModel, UpdatePolicy,
     };
     use serde_json::{json, Value};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn model(provider: &str, id: &str, released: u64) -> DiscoveredModel {
         DiscoveredModel {
@@ -2949,10 +3101,16 @@ mod tests {
         };
         assert_eq!(
             super::due_sources(Some(&previous), now, ttl),
-            vec![super::ANTHROPIC_SOURCE, super::GOOGLE_API_SOURCE, super::ANTIGRAVITY_SOURCE],
+            vec![
+                super::ANTHROPIC_SOURCE,
+                super::GOOGLE_API_SOURCE,
+                super::ANTIGRAVITY_SOURCE,
+                super::XAI_SOURCE,
+                super::KIMI_CODE_SOURCE,
+            ],
             "older than the TTL, failed, and never asked are due; the young one is not"
         );
-        assert_eq!(super::due_sources(None, now, ttl).len(), 4, "no catalog: everything is due");
+        assert_eq!(super::due_sources(None, now, ttl).len(), super::SOURCES.len(), "no catalog: everything is due");
         assert!(super::due_sources(Some(&previous), now, 0).contains(&super::OPENAI_SOURCE), "a zero TTL asks every time");
         assert!(super::due_sources(Some(&previous), previous.fetched_at + ttl - 1, ttl).iter().all(|source| *source != super::OPENAI_SOURCE));
 
@@ -2979,7 +3137,7 @@ mod tests {
         assert!(openai.ok);
         let anthropic = fetched.reports.iter().find(|report| report.source == super::ANTHROPIC_SOURCE).unwrap();
         assert_eq!(anthropic.fetched_at, now);
-        assert_eq!(fetched.reports.len(), 4);
+        assert_eq!(fetched.reports.len(), super::SOURCES.len());
         assert_eq!(fetched.fetched_at, now);
 
         // A catalog younger than the TTL on every source asks nothing.
@@ -3512,6 +3670,184 @@ mod tests {
             Err((source.to_string(), "skipped: no ChatGPT login".to_string()))
         });
         assert!(skipped.withdrawn.is_empty(), "a skipped list knows nothing");
+    }
+
+    /// Nothing configured anywhere a source looks: an empty home, the
+    /// keychain and every external store switched off, no key in the
+    /// environment, every endpoint at its default.
+    fn nothing_configured(store: &std::path::Path) -> CredentialScope {
+        let on = Some(std::path::Path::new("1"));
+        CredentialScope::new(&[
+            ("HOME", Some(store)),
+            ("ZO_HOME", Some(store)),
+            ("ZO_CONFIG_HOME", Some(store)),
+            ("CLAUDE_CONFIG_DIR", None),
+            ("CODEX_HOME", None),
+            ("ZO_CODEX_HOME", None),
+            ("GROK_HOME", None),
+            ("KIMI_CODE_HOME", None),
+            ("ZO_DISABLE_KEYCHAIN", on),
+            ("ZO_DISABLE_EXTERNAL_CREDENTIALS", on),
+            ("ANTHROPIC_API_KEY", None),
+            ("ANTHROPIC_AUTH_TOKEN", None),
+            ("ANTHROPIC_BASE_URL", None),
+            ("GOOGLE_API_KEY", None),
+            ("GEMINI_API_KEY", None),
+            ("CODE_ASSIST_ENDPOINT", None),
+            ("XAI_API_KEY", None),
+            ("XAI_BASE_URL", None),
+            ("KIMI_CODE_BASE_URL", None),
+        ])
+    }
+
+    /// C5 (t-6248), the table's contract: every source is one row — its
+    /// credential question, the URL it lists models at, and the words it
+    /// says — and the row's words are what its fetcher actually says. With
+    /// nothing configured, every row answers "not configured" and every
+    /// fetcher skips with exactly the row's words, without a request.
+    #[test]
+    fn every_source_is_one_row_of_credential_list_url_and_words() {
+        let store = scratch("c5-contract");
+        let _scope = nothing_configured(&store);
+        let mut keys = HashSet::new();
+        for row in &super::SOURCES {
+            assert!(keys.insert(row.key), "{} is one row", row.key);
+            assert!(!row.provider.is_empty() && !row.credential.is_empty() && !row.absent.is_empty(), "{row:?}");
+            let url = (row.models_url)();
+            assert!(url.starts_with("https://"), "{}: {url}", row.key);
+            assert!(url.to_ascii_lowercase().contains("models"), "{}: {url}", row.key);
+            assert!(!(row.configured)(), "{}: nothing is configured here", row.key);
+            let (key, detail) = (row.ask)().expect_err("no credential, no rows");
+            assert_eq!(key, row.key);
+            assert!(
+                detail.starts_with("skipped: ") && detail.contains(row.absent),
+                "{}: {detail}",
+                row.key
+            );
+            for (marker, words) in row.refusals {
+                assert!(!marker.is_empty() && !words.is_empty(), "{}", row.key);
+            }
+        }
+        let providers: HashSet<&str> = super::SOURCES.iter().map(|row| row.provider).collect();
+        for oauth in ["openai", "anthropic", "google", "xai", "kimi"] {
+            assert!(providers.contains(oauth), "{oauth} logs in, so it has a row");
+        }
+        let _ = std::fs::remove_dir_all(store);
+    }
+
+    /// C5: xAI's own answer to a Grok login without credits, replayed —
+    /// recorded once from `api.x.ai/v1/models` (2026-09-23, token not kept).
+    /// The login was accepted; the account has no credits. The report says
+    /// that in the row's words, as a failure the next connection asks again,
+    /// and the request carried the bearer to `/v1/models`.
+    const XAI_SPENDING_LIMIT: &str = r#"{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok."}"#;
+
+    #[test]
+    fn xais_spending_limit_is_said_as_no_subscription_and_a_listing_parses() {
+        let store = scratch("c5-xai");
+        let (url, server) = fake_backend(vec![
+            ("403 Forbidden", vec![("content-type", "application/json")], XAI_SPENDING_LIMIT.to_string()),
+            (
+                "200 OK",
+                vec![("content-type", "application/json")],
+                json!({"object": "list", "data": [
+                    {"id": "grok-4", "object": "model", "created": 1_752_019_200, "owned_by": "xai"},
+                    {"id": "grok-code-fast-1", "object": "model", "created": 1_756_000_000, "owned_by": "xai"}
+                ]})
+                .to_string(),
+            ),
+        ]);
+        let base = url.replace("/backend-api/codex/models", "/v1");
+        let refused = {
+            let _scope = nothing_configured(&store);
+            std::env::set_var("XAI_BASE_URL", &base);
+            std::env::set_var("XAI_API_KEY", "xai-test-key");
+            assert!((super::row(super::XAI_SOURCE).configured)());
+            let refused = super::xai_models().expect_err("no credits, no list");
+            let listed = super::xai_models().expect("the listing");
+            let ids: Vec<(&str, &str, u64)> = listed
+                .models
+                .iter()
+                .map(|model| (model.provider.as_str(), model.id.as_str(), model.released))
+                .collect();
+            assert_eq!(
+                ids,
+                vec![("xai", "grok-4", 20_250_709), ("xai", "grok-code-fast-1", 20_250_824)],
+                "rows in the provider's order, dated from `created`"
+            );
+            refused
+        };
+        assert_eq!(refused.0, super::XAI_SOURCE);
+        assert!(
+            refused.1.starts_with("HTTP 403 Forbidden: no subscription or credits on this xAI account"),
+            "{}",
+            refused.1
+        );
+        assert!(!refused.1.contains("xai-test-key"), "the key never reaches a report line");
+        let refreshed = super::refresh_with(None, &[super::XAI_SOURCE], 1_790_121_000, &[], |source| {
+            if source == super::XAI_SOURCE {
+                Err(refused.clone())
+            } else {
+                Err((source.to_string(), "skipped: not in this test".to_string()))
+            }
+        });
+        let report = refreshed
+            .reports
+            .iter()
+            .find(|report| report.source == super::XAI_SOURCE)
+            .expect("the xAI report");
+        assert!(!report.ok && !report.skipped(), "{}", report.detail);
+        assert!(report.due(1_790_121_001, super::LIVE_TTL_SECS, || false), "asked again at the next connection");
+        let heads = server.join().unwrap();
+        assert_eq!(heads.len(), 2);
+        for head in &heads {
+            assert!(head.starts_with("GET /v1/models HTTP/1.1"), "{head}");
+            assert!(head.to_ascii_lowercase().contains("authorization: bearer xai-test-key"), "{head}");
+        }
+        let _ = std::fs::remove_dir_all(store);
+    }
+
+    /// C5: with no key, the Grok CLI's login is the xAI credential the list
+    /// is asked with — the same resolution the xAI client uses; an expired
+    /// one is a failure that names `grok login`, never a refresh.
+    #[test]
+    fn a_grok_cli_login_asks_xais_list_and_an_expired_one_fails_with_the_way_back() {
+        let store = scratch("c5-grok");
+        let grok_home = store.join("grok-home");
+        std::fs::create_dir_all(&grok_home).unwrap();
+        let (url, server) = fake_backend(vec![(
+            "200 OK",
+            vec![("content-type", "application/json")],
+            json!({"data": [{"id": "grok-4", "created": 1_752_019_200}]}).to_string(),
+        )]);
+        let base = url.replace("/backend-api/codex/models", "/v1");
+        {
+            let _scope = nothing_configured(&store);
+            std::env::remove_var("ZO_DISABLE_EXTERNAL_CREDENTIALS");
+            std::env::set_var("GROK_HOME", &grok_home);
+            std::env::set_var("XAI_BASE_URL", &base);
+            assert!(!(super::row(super::XAI_SOURCE).configured)(), "no key and no Grok login yet");
+            std::fs::write(
+                grok_home.join("auth.json"),
+                r#"{"https://auth.x.ai::acct-1":{"key":"grok-session-bearer","expires_at":"2099-01-01T00:00:00Z"}}"#,
+            )
+            .unwrap();
+            assert!((super::row(super::XAI_SOURCE).configured)());
+            let listed = super::xai_models().expect("the Grok login lists xAI's models");
+            assert_eq!(listed.models.len(), 1);
+            std::fs::write(
+                grok_home.join("auth.json"),
+                r#"{"https://auth.x.ai::acct-1":{"key":"grok-session-bearer","expires_at":"2020-01-01T00:00:00Z"}}"#,
+            )
+            .unwrap();
+            let (_, detail) = super::xai_models().expect_err("an expired login lists nothing");
+            assert!(detail.starts_with("xAI credential present but not usable: "), "{detail}");
+            assert!(detail.contains("grok login"), "{detail}");
+        }
+        let heads = server.join().unwrap();
+        assert_eq!(heads.len(), 1, "the expired login asked nothing");
+        assert!(heads[0].to_ascii_lowercase().contains("authorization: bearer grok-session-bearer"), "{}", heads[0]);
+        let _ = std::fs::remove_dir_all(store);
     }
 
     #[test]
