@@ -124,8 +124,12 @@ class ConstantsMatchTheirSource(unittest.TestCase):
         self.assertEqual(seed.CONTROLS_CAP, self.value_of(self.jev, "SCREEN_CANDIDATE_CAP"))
 
     def test_the_ledger_is_the_emulator_seats(self):
-        found = re.search(r'ledger:\s*"([^"]+)",\n(?:.*\n){0,12}?\s*agreement_kind: AgreementKind::Comparison,\n\};\n\n/// The window\'s stall sweep', self.jev)
-        self.assertIsNotNone(found, "the emulator row moved")
+        # The row by its declaration, not by the field that happens to end it:
+        # a column added to every row must not read as the row moving.
+        row = re.search(r'pub const EMULATOR: JevUse = JevUse \{\n(.*?)\n\};', self.jev, re.S)
+        self.assertIsNotNone(row, "the emulator row moved")
+        found = re.search(r'^\s*ledger:\s*"([^"]+)",', row.group(1), re.M)
+        self.assertIsNotNone(found, "the emulator row names no ledger")
         self.assertEqual(seed.EMULATOR_LEDGER, found.group(1))
 
 

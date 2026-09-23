@@ -659,7 +659,7 @@ fn the_audit_grades_old_rows_by_the_new_rules_and_counts_what_they_would_ask() {
                     {"at": 2, "label": "s-1", "followed": "worker_done", "agreed": false},
                 ],
                 "summon-choice.jsonl": [
-                    {"at": 1, "agent": "codex", "model": "gpt-6-astra", "modelWasPinned": true, "options": ["codex", "claude"], "chosen": "claude", "agreed": false, "requests": 1, "outcome": "answered"},
+                    {"at": 1, "agent": "codex", "model": "gpt", "modelWasPinned": true, "options": ["codex", "claude"], "chosen": "claude", "agreed": false, "requests": 1, "outcome": "answered"},
                     {"at": 2, "agent": "claude", "model": "opus", "modelWasPinned": true, "options": ["claude", "zo", "codex"], "chosen": "zo", "confidence": 0.4, "agreed": false, "requests": 1, "outcome": "answered"},
                 ],
             },
@@ -689,7 +689,7 @@ fn the_audit_grades_old_rows_by_the_new_rules_and_counts_what_they_would_ask() {
     assert_eq!(stall.graded, vec![(0.9, true)]);
 
     let summon = of(SUMMON.id);
-    assert_eq!(summon.not_compared.get("decided_by_code"), Some(&1), "gpt-6-astra leaves codex alone of the two");
+    assert_eq!(summon.not_compared.get("decided_by_code"), Some(&1), "an OpenAI model leaves codex alone of the two");
     assert_eq!((summon.requests, summon.requests_after), (2, 1));
     // Opus leaves claude and zo: the old answer stands, and missed where the
     // model's own CLI would have landed.
