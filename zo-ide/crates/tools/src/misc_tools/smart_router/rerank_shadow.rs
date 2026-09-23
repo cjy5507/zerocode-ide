@@ -570,8 +570,8 @@ fn note_settled(slot: &ReadingSlot, row: &RerankShadowRow, hits: &[MemoryHit]) {
 /// The recall seat's `agreed` mark, one row per turn that was handed a
 /// judged order: whether the note the judgment put FIRST was read or cited
 /// before the turn ended — written only for a turn that touched some note it
-/// was handed ([`mark`], t-6342); a turn that touched none carries
-/// [`NO_NOTE_TOUCHED`] under `notCompared` instead.
+/// was handed (`rerank_shadow::mark`, t-6342); a turn that touched none
+/// carries `rerank_shadow::NO_NOTE_TOUCHED` under `notCompared` instead.
 ///
 /// A row of its own, keyed like the reading it grades (`query`, `notes`) and
 /// carrying `applied` from it, so an order the turn read and an order only

@@ -11433,10 +11433,10 @@ fn family_gauge(model: &str) -> Option<Option<&'static str>> {
 /// Whether `agent` can carry a summons whose coordinator pinned `model`
 /// (t-6342) — read off the tables this file already keeps and nothing else.
 ///
-/// The agent has to take a model at launch at all ([`TUNABLE`]: a summons
+/// The agent has to take a model at launch at all (`TUNABLE`: a summons
 /// that pins one on any other agent is refused before a row is written), and
 /// the model's family has to name the provider whose gauge the agent draws
-/// on ([`ZO_MODEL_GAUGE`] beside [`QUOTA_GAUGE`]; `zo` draws on its model's,
+/// on (`ZO_MODEL_GAUGE` beside `QUOTA_GAUGE`; `zo` draws on its model's,
 /// so it carries every family the table names). A family the table gives no
 /// provider filters nothing: the model id stays opaque, and a filter that
 /// guessed would take a real answer out of the choice.
@@ -11458,7 +11458,8 @@ pub fn runs_model(agent: &str, model: &str) -> bool {
 /// The pinned model's own vendor CLI — the agent whose gauge is the one the
 /// model's family names (`claude` for Anthropic's families, `codex` for
 /// OpenAI's) — the summon seat's baseline, today's rule (t-6342): on this
-/// machine every one of the 82 summonses that pinned a model landed on it.
+/// machine every one of the 88 summonses that pinned a model landed on it
+/// (2026-09-23).
 /// `None` for a family the table gives no provider.
 #[must_use]
 pub fn native_agent(model: &str) -> Option<&'static str> {
