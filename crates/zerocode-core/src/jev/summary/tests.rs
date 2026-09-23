@@ -455,3 +455,47 @@ fn a_screen_seats_guards_and_the_controls_it_handed_over_are_counted_once_per_ro
     assert_eq!(quiet.guards, Guards::default());
     assert_eq!(quiet.controls, Controls::default());
 }
+
+/// A seat's graded answers counted per fifth of confidence — the curve a
+/// band's lines are read off — and per band of the seat's own lines
+/// (t-6342). A reading outside `0..=1` is counted nowhere; `1.0` is the top
+/// fifth's.
+#[test]
+fn graded_answers_are_counted_per_fifth_of_confidence_and_per_band() {
+    let graded = [
+        (0.05, false),
+        (0.39, true),
+        (0.41, false),
+        (0.59, true),
+        (0.6, true),
+        (0.84, false),
+        (0.85, true),
+        (1.0, true),
+        (1.2, true),
+        (f64::NAN, true),
+    ];
+    let curve = confidence_curve(graded);
+    let tally = |marks, agreed| ConfidenceTally { marks, agreed };
+    assert_eq!(
+        curve,
+        [
+            tally(1, 0),
+            tally(1, 1),
+            tally(2, 1),
+            tally(1, 1),
+            tally(3, 2)
+        ]
+    );
+    // The confidence-routing pattern's lines: under 0.6, 0.6 to 0.85, from
+    // 0.85.
+    assert_eq!(
+        band_tally(&crate::jev::STALL, graded),
+        Some([tally(4, 2), tally(2, 1), tally(2, 2)])
+    );
+    // A seat whose lines meet has nothing between.
+    assert_eq!(
+        band_tally(&crate::jev::PLACEMENT, graded),
+        Some([tally(4, 2), tally(0, 0), tally(4, 3)])
+    );
+    assert_eq!(band_tally(&crate::jev::AGENT_TOOL, graded), None);
+}

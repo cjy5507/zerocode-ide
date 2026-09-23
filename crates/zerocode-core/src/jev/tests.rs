@@ -1624,11 +1624,11 @@ fn a_request_digest_vouches_for_the_seat_the_rubric_the_model_and_the_bytes() {
     );
 }
 
-/// Every seat that may rise names the cheapest reader it is held against and
-/// how many times its label must have said no (t-6342); a seat that never
-/// rises names neither.
+/// Every seat that may rise names the cheapest reader it is held against,
+/// how many times its label must have said no, and the confidence bands its
+/// answers fall in (t-6342); a seat that never rises names none of them.
 #[test]
-fn every_promoting_row_names_a_baseline_and_the_negatives_it_wants() {
+fn every_promoting_row_names_a_baseline_and_an_abstain_band() {
     for row in &JEV_USES {
         assert_eq!(
             row.promotes,
@@ -1638,6 +1638,22 @@ fn every_promoting_row_names_a_baseline_and_the_negatives_it_wants() {
             row.promotes,
             row.negatives_wanted
         );
+        assert_eq!(
+            row.promotes,
+            row.confidence_bands.is_some(),
+            "{} promotes={} bands={:?}",
+            row.id,
+            row.promotes,
+            row.confidence_bands
+        );
+        if let Some(bands) = row.confidence_bands {
+            assert!(
+                bands.abstain_below_permille <= bands.act_from_permille
+                    && bands.act_from_permille <= 1_000,
+                "{} {bands:?}",
+                row.id
+            );
+        }
         if let Some(wanted) = row.negatives_wanted {
             assert_eq!(wanted, NEGATIVES_WANTED, "{}", row.id);
         }
@@ -1672,4 +1688,84 @@ fn every_promoting_row_names_a_baseline_and_the_negatives_it_wants() {
     // What `NEGATIVES_WANTED` says it costs: forty marks at the 800‰ line.
     assert_eq!(promote::marks_that_can_clear(&PLACEMENT), Some(40));
     assert_eq!(promote::marks_that_can_clear(&AGENT_TOOL), None);
+}
+
+/// A seat that presses acts from its press floor and has nothing between:
+/// inside a walk there is nobody to confirm a press with, so the band that
+/// acts is exactly the answers the press gate lets through (t-6342).
+#[test]
+fn a_pressing_seat_acts_from_its_press_floor_with_nothing_between() {
+    for row in JEV_USES
+        .iter()
+        .filter(|row| row.press_floor_permille.is_some())
+    {
+        let floor = row.press_floor_permille.expect("filtered");
+        assert_eq!(
+            row.confidence_bands,
+            Some(ConfidenceBands::pressing(floor)),
+            "{}",
+            row.id
+        );
+        for confidence in [0.0, 0.29, 0.499_999, 0.5, 0.699_999, 0.7, 0.95, 1.0] {
+            assert_eq!(
+                row.band_of(confidence) == Some(Band::Act),
+                row.permits_press(confidence, crate::guarded::ControlKind::Plain),
+                "{} at {confidence}",
+                row.id
+            );
+            assert_ne!(row.band_of(confidence), Some(Band::Confirm), "{}", row.id);
+        }
+    }
+}
+
+/// One answer's confidence falls in exactly one band: under the first line
+/// it abstains, from the second it acts, and between the two it wants a
+/// confirmation — the three bands of TypeSafe's confidence-routing pattern
+/// at the pattern's own lines (t-6342). A reading outside 0..=1 is none.
+#[test]
+fn an_answer_falls_in_one_band_by_its_confidence() {
+    let routed = ConfidenceBands::ROUTED;
+    assert_eq!(
+        (routed.abstain_below_permille, routed.act_from_permille),
+        (600, 850)
+    );
+    for (confidence, band) in [
+        (0.0, Band::Abstain),
+        (0.599, Band::Abstain),
+        (0.6, Band::Confirm),
+        (0.849, Band::Confirm),
+        (0.85, Band::Act),
+        (1.0, Band::Act),
+    ] {
+        assert_eq!(routed.band_of(confidence), Some(band), "{confidence}");
+    }
+    for stray in [-0.1, 1.01, f64::NAN, f64::INFINITY] {
+        assert_eq!(routed.band_of(stray), None, "{stray}");
+    }
+    // A seat whose wrong act the person undoes in one move acts from the
+    // same floor with nothing between.
+    let low = ConfidenceBands::LOW_STAKES;
+    assert_eq!(low.band_of(0.6), Some(Band::Act));
+    assert_eq!(low.band_of(0.599), Some(Band::Abstain));
+    assert_eq!(Band::ALL.map(Band::word), ["abstain", "confirm", "act"]);
+    // A seat that decides on Nouls reads a Noul's lean |2p − 1|: the
+    // cookbook's uncertain 0.30–0.70 is a lean under 400‰, and the patch
+    // review's 800‰ permit line a lean of 600‰.
+    assert_eq!(
+        PATCH_REVIEW.confidence_bands,
+        Some(ConfidenceBands {
+            abstain_below_permille: 400,
+            act_from_permille: 600
+        })
+    );
+    assert_eq!(
+        ConfidenceBands::on_a_noul(300, 200),
+        ConfidenceBands::on_a_noul(
+            NOUL_UNCERTAIN_TO_PERMILLE,
+            PATCH_REVIEW_PERMIT_FLOOR_PERMILLE
+        ),
+        "a no leans as far as the yes it mirrors"
+    );
+    // A seat that never rises reads no band.
+    assert_eq!(AGENT_TOOL.band_of(0.99), None);
 }

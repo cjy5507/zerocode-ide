@@ -602,6 +602,63 @@ pub fn agreement_rows<'a>(
     agreement
 }
 
+/// How many of a seat's graded answers fell in one stretch of confidence,
+/// and how many of those agreed (t-6342).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConfidenceTally {
+    pub marks: usize,
+    pub agreed: usize,
+}
+
+/// The stretches a seat's confidence curve is drawn over: five fifths.
+pub const CONFIDENCE_CURVE_BINS: usize = 5;
+
+/// A seat's graded answers — each its confidence and whether its mark
+/// agreed — counted per fifth of confidence (t-6342): the curve TypeSafe's
+/// guide reads a threshold off ("plot confidence against accuracy on your
+/// data"), and the evidence a seat's [`crate::jev::ConfidenceBands`] are
+/// moved on. A reading outside `0..=1` is counted nowhere; `1.0` is the top
+/// fifth's.
+#[must_use]
+pub fn confidence_curve(
+    graded: impl IntoIterator<Item = (f64, bool)>,
+) -> [ConfidenceTally; CONFIDENCE_CURVE_BINS] {
+    let mut curve = [ConfidenceTally::default(); CONFIDENCE_CURVE_BINS];
+    for (confidence, agreed) in graded {
+        if !(0.0..=1.0).contains(&confidence) {
+            continue;
+        }
+        let fifth =
+            ((confidence * CONFIDENCE_CURVE_BINS as f64) as usize).min(CONFIDENCE_CURVE_BINS - 1);
+        curve[fifth].marks += 1;
+        curve[fifth].agreed += usize::from(agreed);
+    }
+    curve
+}
+
+/// The same graded answers counted per band of `seat`'s own lines, in
+/// [`crate::jev::Band::ALL`]'s order — `None` for a seat that names no
+/// bands.
+#[must_use]
+pub fn band_tally(
+    seat: &crate::jev::JevUse,
+    graded: impl IntoIterator<Item = (f64, bool)>,
+) -> Option<[ConfidenceTally; 3]> {
+    let bands = seat.confidence_bands?;
+    let mut tally = [ConfidenceTally::default(); 3];
+    for (confidence, agreed) in graded {
+        let Some(band) = bands.band_of(confidence) else {
+            continue;
+        };
+        let Some(slot) = crate::jev::Band::ALL.iter().position(|each| *each == band) else {
+            continue;
+        };
+        tally[slot].marks += 1;
+        tally[slot].agreed += usize::from(agreed);
+    }
+    Some(tally)
+}
+
 /// Whether a row's answer is what the product did, read off whichever of the
 /// three spellings the row carries — [`ROUTE_USE`] first, because a screen
 /// walk writes it beside [`PRESSED`] and the word is the more exact of the

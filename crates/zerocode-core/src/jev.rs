@@ -391,6 +391,10 @@ pub struct JevUse {
     /// before the seat's agreement may speak at all (t-6342,
     /// [`NEGATIVES_WANTED`]). `None` for a seat that never rises.
     pub negatives_wanted: Option<usize>,
+    /// Where one answer's confidence puts it — abstain, confirm, act
+    /// ([`ConfidenceBands`], t-6342). Recorded, not yet read. `None` for a
+    /// seat that never rises.
+    pub confidence_bands: Option<ConfidenceBands>,
 }
 
 /// What a seat forgives whose miss the product was going to cover anyway: one
@@ -495,6 +499,135 @@ impl Baseline {
 /// being right: at the 800‰ line a window needs forty marks to bound above
 /// it with three misses inside (39 bound at 796‰, 40 at 801‰).
 pub const NEGATIVES_WANTED: usize = 3;
+
+/// The two lines that split a seat's answers by their own confidence into
+/// three bands (t-6342): under the first the answer abstains and today's
+/// path decides as if the seat had not been asked, from the second it may act
+/// alone, and between the two it wants a confirmation — the chat probe, the
+/// coordinator, or the person.
+///
+/// TypeSafe's confidence-routing pattern draws exactly these three bands
+/// (patterns/confidence-routing: under 0.6 to a person, 0.6 to 0.85 "ask the
+/// user to confirm", above 0.85 act), and both its pages say the numbers are
+/// the reader's to set from their own data — "test thresholds by plotting
+/// confidence against accuracy". The starting lines below are the pattern's
+/// and the seats' existing floors; `tools/label-audit` draws each seat's
+/// curve from its ledger for the day they are moved.
+///
+/// Recorded, not yet read: no seat routes on its band today. The model
+/// choice's second version (docs/design/jev-engineering-review-20260923.md
+/// §6-5, the chat probe only for an unsure answer) is its first reader.
+///
+/// Read on the answer's `confidence`: a Choice's spread collapsed into one
+/// number and normalized by its option count. A Noul carries none
+/// (confidence.md), so a seat that decides on Nouls reads its bands on a
+/// Noul's lean, `|2p − 1|` — the normalization a two-option Choice gets
+/// ([`Self::on_a_noul`]).
+///
+/// A seat that presses acts from its press floor with nothing between
+/// ([`Self::pressing`]): a walk has nobody to confirm a press with, so the
+/// band that acts is exactly the answers [`JevUse::permits_press`] lets
+/// through (a contract holds the two together). The line a press that cannot
+/// be taken back must clear ([`SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE`])
+/// stays the press gate's own, on top.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfidenceBands {
+    /// Under this, per thousand, the answer abstains.
+    pub abstain_below_permille: u16,
+    /// From this up, per thousand, the answer may act alone.
+    pub act_from_permille: u16,
+}
+
+/// The band one answer falls in ([`ConfidenceBands`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Band {
+    Abstain,
+    Confirm,
+    Act,
+}
+
+impl Band {
+    pub const ALL: [Self; 3] = [Self::Abstain, Self::Confirm, Self::Act];
+
+    /// The word a report names the band by.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Abstain => "abstain",
+            Self::Confirm => "confirm",
+            Self::Act => "act",
+        }
+    }
+}
+
+/// Where the Noul cookbook's uncertain middle ends, per thousand: `no`
+/// under 0.30, `uncertain` from 0.30 through 0.70, `yes` above
+/// (cookbooks/consistency_noul — "uncertain cases go to a human").
+pub const NOUL_UNCERTAIN_TO_PERMILLE: u16 = 700;
+
+impl ConfidenceBands {
+    /// The confidence-routing pattern's own lines, for a seat whose wrong
+    /// act costs a turn, a worker or a person's attention: under 0.6 today's
+    /// path, 0.6 to 0.85 a confirmation, from 0.85 act.
+    pub const ROUTED: Self = Self {
+        abstain_below_permille: 600,
+        act_from_permille: 850,
+    };
+
+    /// A seat whose wrong act the person undoes in one move — a list's
+    /// order, a pane's place: the pattern's low-stakes action ("checking a
+    /// balance at 0.6 is fine") acts from the same floor with nothing
+    /// between.
+    pub const LOW_STAKES: Self = Self {
+        abstain_below_permille: 600,
+        act_from_permille: 600,
+    };
+
+    /// A seat that presses: from its press floor, nothing between.
+    #[must_use]
+    pub const fn pressing(floor_permille: u16) -> Self {
+        Self {
+            abstain_below_permille: floor_permille,
+            act_from_permille: floor_permille,
+        }
+    }
+
+    /// A seat that decides on Nouls, read on a Noul's lean `|2p − 1|`: it
+    /// abstains inside the cookbook's uncertain middle (`uncertain_to`, a
+    /// probability of yes) and acts from the lean of the seat's own yes line
+    /// (`act_from_yes`).
+    #[must_use]
+    pub const fn on_a_noul(uncertain_to_permille: u16, act_from_yes_permille: u16) -> Self {
+        Self {
+            abstain_below_permille: noul_lean(uncertain_to_permille),
+            act_from_permille: noul_lean(act_from_yes_permille),
+        }
+    }
+
+    /// The band `confidence` falls in — `None` for a reading outside
+    /// `0..=1`. The lines are compared as the press gate compares its floor,
+    /// so a pressing seat's `Act` is exactly [`JevUse::permits_press`].
+    #[must_use]
+    pub fn band_of(self, confidence: f64) -> Option<Band> {
+        if !(0.0..=1.0).contains(&confidence) {
+            return None;
+        }
+        let from = |permille: u16| confidence >= f64::from(permille) / 1_000.0;
+        Some(if !from(self.abstain_below_permille) {
+            Band::Abstain
+        } else if !from(self.act_from_permille) {
+            Band::Confirm
+        } else {
+            Band::Act
+        })
+    }
+}
+
+/// A Noul probability of yes, per thousand, as a lean from the middle:
+/// `|2p − 1|`, per thousand.
+const fn noul_lean(probability_permille: u16) -> u16 {
+    probability_permille.saturating_mul(2).abs_diff(1_000)
+}
 
 /// The routing seat's route-change budget: four compared axes in five must
 /// agree with the chat probe, as a 95% lower bound.
@@ -651,6 +784,7 @@ pub const ROUTING: JevUse = JevUse {
     // no baseline mark yet, so the seat holds at `too_few_baseline`.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// The wall zo's routing waits for a judgment when the seat acts: the batch
@@ -803,6 +937,7 @@ pub const RECALL: JevUse = JevUse {
     // Recall's own order: the note it put first before any judgment.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::LOW_STAKES),
 };
 
 /// What every screen question carries, whichever surface answered it
@@ -905,6 +1040,7 @@ pub const BROWSER: JevUse = JevUse {
     // The walk's end grades the press the seat made; no press, no mark.
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
 };
 
 /// The window's desktop walk: which numbered control of an app's
@@ -945,6 +1081,7 @@ pub const DESKTOP: JevUse = JevUse {
     // The walk's end grades the press the seat made; no press, no mark.
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
 };
 
 /// A mobile screen is a separate consent and evidence surface. Existing
@@ -982,6 +1119,7 @@ pub const EMULATOR: JevUse = JevUse {
     // The walk's end grades the press the seat made; no press, no mark.
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
 };
 
 /// The window's stall sweep: why a quiet worker stopped when the measured
@@ -1016,6 +1154,7 @@ pub const STALL: JevUse = JevUse {
     // The answer eleven of this machine's twelve stall answers named.
     baseline: Baseline::AlwaysSame(crate::stall_cause::Cause::LongRunningTool.word()),
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// What the placement seat's answers must bound above before `auto` rises to
@@ -1114,6 +1253,7 @@ pub const PLACEMENT: JevUse = JevUse {
     // Today's room, the tab (`worker_placement::Placement::TODAYS`).
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::LOW_STAKES),
 };
 
 /// The summons' agent choice: which of the agents this window could start
@@ -1207,6 +1347,7 @@ pub const SUMMON: JevUse = JevUse {
     // The pinned model's own vendor CLI (`orchestration::native_agent`).
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of the repeated tool call one step-effort question carries —
@@ -1269,6 +1410,7 @@ pub const STEP_EFFORT: JevUse = JevUse {
     // The rule's own move between turns.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of the task a skill ranking reads — what the turn is about, in
@@ -1438,6 +1580,7 @@ pub const SKILLS: JevUse = JevUse {
     // stamps no baseline mark yet: the seat holds at `too_few_baseline`.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::LOW_STAKES),
 };
 
 /// The wall zo's step effort governor holds a step judgment to, in
@@ -1497,6 +1640,7 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     // The governor's own table.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of the person's last request one compaction judgment reads
@@ -1672,6 +1816,7 @@ pub const COMPACTION: JevUse = JevUse {
     // stamps no baseline mark yet: the seat holds at `too_few_baseline`.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of one text an agent's own question carries — the question,
@@ -1770,6 +1915,7 @@ pub const AGENT_TOOL: JevUse = JevUse {
     agreement_kind: AgreementKind::Comparison,
     baseline: Baseline::None,
     negatives_wanted: None,
+    confidence_bands: None,
 };
 
 /// Characters of a page's title one browser-read question carries — the head
@@ -1948,6 +2094,7 @@ pub const BROWSER_READ: JevUse = JevUse {
     // A fold is graded by the press that lands in it; no fold, no mark.
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::pressing(BROWSER_READ_FOLD_FLOOR_PERMILLE)),
 };
 
 /// The closed answer every notify question offers, spelled once: ring now,
@@ -2109,6 +2256,7 @@ pub const NOTIFY: JevUse = JevUse {
     // Today's rule table (`notify_call::Call::today`).
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of the sentence a person is writing that one mention
@@ -2231,6 +2379,7 @@ pub const MENTION_RERANK: JevUse = JevUse {
     // The fuzzy page's own first row.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::LOW_STAKES),
 };
 
 /// How many of the emulator seat's candidates a forked phone step tries
@@ -2407,6 +2556,7 @@ pub const BRANCHING: JevUse = JevUse {
     // no baseline mark yet: the seat holds at `too_few_baseline`.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
 };
 
 /// The judgment cache: a memo in front of the wire that answers a screen
@@ -2455,6 +2605,8 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     // The fresh answer it is compared with IS the reader it replaces.
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    // The screen seats' line: the answer it hands back is pressed under theirs.
+    confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
 };
 
 /// How many of a role's eligible attempts try the model nobody has evidence
@@ -2576,6 +2728,7 @@ pub const CHALLENGER: JevUse = JevUse {
     // The incumbent's design, which the attempt acts on anyway.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::ROUTED),
 };
 
 /// Characters of the person's words one patch review reads as the task the
@@ -2728,6 +2881,12 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     // "Always permit": 79.2% of this machine's 1,661 replayed reviews against the seat's 21.1%.
     baseline: Baseline::AlwaysSame(PATCH_REVIEW_PERMIT),
     negatives_wanted: Some(NEGATIVES_WANTED),
+    // Four Nouls: abstain inside the cookbook's uncertain middle, act from
+    // the permit line's lean (an 800‰ yes is a 600‰ lean).
+    confidence_bands: Some(ConfidenceBands::on_a_noul(
+        NOUL_UNCERTAIN_TO_PERMILLE,
+        PATCH_REVIEW_PERMIT_FLOOR_PERMILLE,
+    )),
 };
 
 /// Every place this product asks Jev something.
@@ -2755,6 +2914,14 @@ pub static JEV_USES: [JevUse; 20] = [
 ];
 
 impl JevUse {
+    /// The band an answer of this seat's at `confidence` falls in
+    /// ([`ConfidenceBands::band_of`]) — `None` for a seat that names no bands.
+    #[must_use]
+    pub fn band_of(&self, confidence: f64) -> Option<Band> {
+        self.confidence_bands
+            .and_then(|bands| bands.band_of(confidence))
+    }
+
     /// Whether a validated screen choice meets this seat's press policy for
     /// a control of `kind`: the seat's own press floor for a plain one, and
     /// never less than [`SCREEN_DESTRUCTIVE_PRESS_FLOOR_PERMILLE`] for one a
