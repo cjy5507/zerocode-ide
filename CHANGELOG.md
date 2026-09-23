@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.19] — 2026-09-23
+
+_since v1.1.18 (1 commits)_
+
+### test
+- test(knowledge): a frame budget is judged only on a quiet machine — one helper reads the load once, three budgets ask it, and every metric line names the load
+
 ## [1.1.18] — 2026-09-23
 
 _since v1.1.17 (12 commits)_
