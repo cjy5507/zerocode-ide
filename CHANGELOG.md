@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.18] — 2026-09-23
+
+_since v1.1.17 (12 commits)_
+
+### feat
+- feat(jev): the dashboard and the card in one design — sizes, weights and tints are tokens on the window's own scale, every text clears 4.5:1 in both treatments, the head stays while the rows scroll, a week nobody asked says why, the strip's figures stand over quiet labels with the states apart, and the switch over the table wears the card's one frame (t-6277 D10)
+- feat(jev): each feature wears one chip of four — off, recording, applying, or waiting on a person, named for the key or the consent it waits on; a feature under its bar is recording and says why in the tone of a miss (t-6277 D8)
+- feat(jev): each feature on the dashboard names its id under its name and tips what it judges in one sentence — the first of the paragraph its drawer shows, from the same key, in the window's own tooltip (t-6277 D7)
+- feat(jev): a feature's row opens a drawer — its last twelve judgments, how often they matched, what a screen feature's guards stopped and what it handed to the person, the model and the version cut away, and what it sends; the picker under the table is gone (t-6277 D6)
+- feat(jev): a person turns Jev on and off with one switch — the card keeps the key, a line to the dashboard and 고급 folded shut, the dashboard wears the same switch over its table, and no feature offers a mode to choose (t-6277 D9)
+- feat(jev): one switch decides a feature nobody chose for — each use's table row names the mode it stands at while Jev is on, the switch writes every folder as one word, and a press on or off is the core's to spell (t-6277 D9, core)
+
+### fix
+- fix(zo): a step row files the chat model it ran on as `stepModel`, so `model` on the step seat's ledger means only the Jev version that answered (t-6284)
+- fix(jev): only a request or a mark names the version that answered — zo's step rows, which carried each step's chat model under `model`, no longer cut the step seat's marks away at every step (t-6284)
+
+
 ## [1.1.17] — 2026-09-23
 
 _since v1.1.16 (30 commits)_
