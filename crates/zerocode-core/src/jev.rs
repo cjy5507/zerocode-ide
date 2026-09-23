@@ -2965,8 +2965,66 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     )),
 };
 
+/// One turn's completion claims put beside the tool output that can support
+/// them. A new seat records first; its hindsight is the person's next turn.
+pub const CLAIM_LIMIT: usize = 8;
+pub const CLAIM_TEXT_CHAR_CAP: usize = 400;
+pub const CLAIM_EVIDENCE_BYTE_CAP: usize = 2_048;
+pub const CLAIM_CHOICE_FLOOR_PERMILLE: u16 = 800;
+pub const CLAIM_APPLY_DEADLINE_MS: u64 = 1_500;
+pub const CLAIM_CRITERIA: [(&str, &str); 3] = [
+    (
+        "supports",
+        "The lines state the claim or directly imply that it is true.",
+    ),
+    (
+        "contradicts",
+        "The lines state the opposite of the claim or imply it is false.",
+    ),
+    (
+        "says_nothing",
+        "The lines do not address what the claim asserts, either way.",
+    ),
+];
+pub const CLAIM: JevUse = JevUse {
+    id: "claim",
+    setting: "jevClaimCheck",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Shadow,
+    repeat: None,
+    sends: &[
+        Sent {
+            at: "/state/claims",
+            cap: Cap::Items(CLAIM_LIMIT),
+        },
+        Sent {
+            at: "/state/claims/*/text",
+            cap: Cap::Chars(CLAIM_TEXT_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/evidence/*",
+            cap: Cap::Bytes(CLAIM_EVIDENCE_BYTE_CAP),
+        },
+    ],
+    ledger: "claim-check.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(900),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(800),
+    apply_deadline_ms: Some(CLAIM_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Hindsight,
+    baseline: Baseline::AlwaysSame(CLAIM_CRITERIA[0].0),
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands {
+        abstain_below_permille: 600,
+        act_from_permille: CLAIM_CHOICE_FLOOR_PERMILLE,
+    }),
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 20] = [
+pub static JEV_USES: [JevUse; 21] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -2987,6 +3045,7 @@ pub static JEV_USES: [JevUse; 20] = [
     JUDGMENT_CACHE,
     CHALLENGER,
     PATCH_REVIEW,
+    CLAIM,
 ];
 
 impl JevUse {

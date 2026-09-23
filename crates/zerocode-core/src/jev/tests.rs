@@ -1407,7 +1407,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 20);
+    assert_eq!(JEV_USES.len(), 21);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1654,9 +1654,24 @@ fn the_patch_review_seat_sends_a_patch_and_its_evidence_and_rises_on_hindsight()
             .applies_with(true)
     );
     assert_eq!(PATCH_REVIEW.mode_in(&json!({})), JevMode::Off);
-    // The twentieth row, after the challenger seat's (t-6151).
-    assert_eq!(JEV_USES.last(), Some(&PATCH_REVIEW));
-    assert_eq!(JEV_USES[JEV_USES.len() - 2], CHALLENGER);
+    // The patch review remains before the new claim seat.
+    assert_eq!(JEV_USES[JEV_USES.len() - 2], PATCH_REVIEW);
+    assert_eq!(JEV_USES[JEV_USES.len() - 3], CHALLENGER);
+}
+
+#[test]
+fn completion_claims_are_a_recording_hindsight_seat_with_bounded_evidence() {
+    assert_eq!(jev_use("claim"), Some(&CLAIM));
+    assert_eq!(CLAIM.setting, "jevClaimCheck");
+    assert_eq!(CLAIM.recommended, JevMode::Shadow);
+    assert_eq!(CLAIM.ledger, "claim-check.jsonl");
+    assert_eq!(CLAIM.agreement_kind, AgreementKind::Hindsight);
+    assert_eq!(CLAIM.baseline, Baseline::AlwaysSame(CLAIM_CRITERIA[0].0));
+    assert_eq!(CLAIM.negatives_wanted, Some(NEGATIVES_WANTED));
+    assert_eq!(CLAIM.sends[0].cap, Cap::Items(CLAIM_LIMIT));
+    assert_eq!(CLAIM.sends[1].cap, Cap::Chars(CLAIM_TEXT_CHAR_CAP));
+    assert_eq!(CLAIM.sends[2].cap, Cap::Bytes(CLAIM_EVIDENCE_BYTE_CAP));
+    assert_eq!(JEV_USES.last(), Some(&CLAIM));
 }
 
 /// A request's receipt is the whole SHA-256 of the seat, the rubric version,
