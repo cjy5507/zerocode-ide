@@ -17415,6 +17415,83 @@ fn the_helper_page_speaks_from_its_catalogs_and_paints_from_its_tokens() {
     );
 }
 
+/// A sibling combinator whose right side names no class, id or attribute —
+/// `* + *`, `div + div` — is keyed on every element of that kind in the
+/// window, so the style engine takes each child inserted or removed anywhere
+/// as a reason to restyle its parent's whole subtree. On a 400-turn
+/// conversation every poll at the cap removes the front rows, and four such
+/// rules — a worktree row's meta, a notebook's outputs, the settings grid (in
+/// two places), a board card's asks — made each of those polls restyle about
+/// 10,500 elements, 17–30 ms, where the rows that moved are a few dozen
+/// (t-6323 B3, read off the renderer's own invalidation trace: "Invalidation
+/// set invalidates subtree" on the list, `allDescendantsMightBeInvalid`).
+/// Said as `:not(:first-child)` — the same elements — they cost the one child
+/// that moved: 1,130 elements, ~3 ms.
+#[test]
+fn no_sibling_rule_is_keyed_on_every_element() {
+    let styles = strip_comments(include_str!("../../../ui/shell.css"));
+    // A selector list split at its own commas, never at the commas of an
+    // argument (`:is(a, b)`).
+    let selectors_of = |list: &str| -> Vec<String> {
+        let mut depth = 0usize;
+        let mut start = 0;
+        let mut out = Vec::new();
+        for (at, glyph) in list.char_indices() {
+            match glyph {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => {
+                    out.push(list[start..at].trim().to_string());
+                    start = at + 1;
+                }
+                _ => {}
+            }
+        }
+        out.push(list[start..].trim().to_string());
+        out
+    };
+    let mut offenders = Vec::new();
+    for block in styles.split('}') {
+        let Some((list, _)) = block.rsplit_once('{') else {
+            continue;
+        };
+        for selector in selectors_of(list) {
+            if selector.is_empty() || selector.starts_with('@') {
+                continue;
+            }
+            // The compound after each sibling combinator of the selector
+            // itself (one inside an argument is that argument's).
+            let mut depth = 0usize;
+            for (at, glyph) in selector.char_indices() {
+                match glyph {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    '+' | '~'
+                        if depth == 0
+                            && selector[..at].ends_with(' ')
+                            && selector[at + 1..].starts_with(' ') =>
+                    {
+                        let compound = selector[at + 2..]
+                            .split([' ', '>', '+', '~'])
+                            .next()
+                            .unwrap_or_default();
+                        if !compound.is_empty() && !compound.contains(['.', '#', '[']) {
+                            offenders.push(selector.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a sibling rule keyed on every element restyles whole subtrees on each \
+         insertion — name the sibling's class, or say `:not(:first-child)`:\n{}",
+        offenders.join("\n")
+    );
+}
+
 /// The conversation view's measures are the extension panel's own, read off
 /// its stylesheet by `tools/agents/claude_code_panel_rules.py` into
 /// `chat/claude-code-panel.json` — so "like Claude Code's panel" is a table
