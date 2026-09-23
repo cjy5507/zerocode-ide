@@ -514,6 +514,46 @@ pub struct TranscriptTurn {
     pub at_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool: Option<TranscriptTool>,
+    /// The images the turn carries — a person's pasted screenshot, what a
+    /// tool handed back — as references ([`TranscriptImage`]); the page
+    /// asks for each one when it comes into view.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<TranscriptImage>,
+}
+
+/// An image a turn carries, as a reference: its kind and where its base64
+/// stands (`"<offset>:<len>"` bytes into the file the turn was read from, as
+/// [`elide_payloads`] left it), never the payload itself — a screenshot is
+/// half a megabyte, and a page shows a dozen of them as pills (t-6323 A8).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct TranscriptImage {
+    pub media_type: String,
+    pub at: String,
+}
+
+/// The images among a message's parts: `image` blocks whose base64 was set
+/// aside ([`PAYLOAD_AT_KEY`]). An image still inline in the line — one no
+/// reader set aside, or too small to — has no place to be fetched from and
+/// is left out.
+fn images_in(parts: Option<&serde_json::Value>) -> Vec<TranscriptImage> {
+    parts
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| part.get("type").and_then(serde_json::Value::as_str) == Some("image"))
+        .filter_map(|part| {
+            let source = part.get("source")?;
+            let at = source.get(PAYLOAD_AT_KEY)?.as_str()?;
+            Some(TranscriptImage {
+                media_type: source
+                    .get("media_type")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|kind| kind.starts_with("image/"))?
+                    .to_string(),
+                at: at.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// The vendor's call identity and bounded details, used to join a result to
@@ -923,6 +963,9 @@ fn js_string_literal(text: &str, at: usize) -> Option<String> {
 /// bounded steps so it cannot block every subsequent conversation turn.
 pub struct TranscriptChunk<'a> {
     pub bytes: &'a [u8],
+    /// Where `bytes` begins in the read — past a half line the read opened
+    /// inside.
+    pub start: usize,
     pub consumed: usize,
     pub skipped: bool,
 }
@@ -948,9 +991,97 @@ pub fn complete_transcript_chunk(
     let oversized = end == 0 && full;
     TranscriptChunk {
         bytes: &bytes[start..end],
+        start,
         consumed: if oversized { bytes.len() } else { end },
         skipped: starts_mid_line || oversized,
     }
+}
+
+/* ---- inline payloads (t-6323 A8) ---- */
+
+/// The inline payloads a transcript line may carry — a pasted image's or a
+/// tool's screenshot's base64, which Claude Code writes twice on a tool's
+/// line (`message.content[].source.data` and `toolUseResult.file.base64`) —
+/// are what makes such a line too long to read: of the 146 image lines in
+/// this machine's last 40 transcripts, 135 were past the 256 KB read and
+/// were dropped whole, words and all (measured 2026-09-23, t-6323 A8).
+/// Set aside, each payload leaves behind where it stands in the file, and
+/// the page asks for it when the image comes into view.
+const PAYLOAD_KEYS: [&[u8]; 2] = [b"\"data\":\"", b"\"base64\":\""];
+
+/// A base64 run shorter than this stays where it is: it weighs nothing, and
+/// a short run under a `data` key may be a value a person reads (a digest, a
+/// key id) — the smallest picture is well past it.
+pub const PAYLOAD_ELIDE_MIN: usize = 256;
+
+/// The key an elided payload leaves behind: `"<offset>:<len>"`, bytes into
+/// the file the line was read from.
+pub const PAYLOAD_AT_KEY: &str = "zerocode_at";
+
+fn is_base64(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=')
+}
+
+/// `bytes` with every inline payload of at least [`PAYLOAD_ELIDE_MIN`]
+/// base64 bytes set aside: `"data":"<base64>"` becomes `"data":"",
+/// "zerocode_at":"<offset>:<len>"`, the offset counted from the start of the
+/// file (`base` is where `bytes` begins there). A payload is a JSON string
+/// of base64 alone under a `data` or `base64` key, so the text around it
+/// stays valid JSON; a quote inside a string is escaped (`\"`) and never
+/// looks like a key. Borrowed when there is nothing to set aside.
+#[must_use]
+pub fn elide_payloads(bytes: &[u8], base: u64) -> std::borrow::Cow<'_, [u8]> {
+    let mut out: Option<Vec<u8>> = None;
+    let mut kept = 0;
+    let mut at = 0;
+    while at < bytes.len() {
+        let Some((key, hit)) = PAYLOAD_KEYS
+            .iter()
+            .filter_map(|key| find(&bytes[at..], key).map(|hit| (key, at + hit)))
+            .min_by_key(|(_, hit)| *hit)
+        else {
+            break;
+        };
+        let start = hit + key.len();
+        let end = start
+            + bytes[start..]
+                .iter()
+                .take_while(|byte| is_base64(**byte))
+                .count();
+        if end < bytes.len() && bytes[end] == b'"' && end - start >= PAYLOAD_ELIDE_MIN {
+            let out = out.get_or_insert_with(|| Vec::with_capacity(bytes.len() / 4));
+            out.extend_from_slice(&bytes[kept..start]);
+            let offset = base + start as u64;
+            out.extend_from_slice(
+                format!("\",\"{PAYLOAD_AT_KEY}\":\"{offset}:{}", end - start).as_bytes(),
+            );
+            kept = end;
+            at = end + 1;
+        } else {
+            at = start;
+        }
+    }
+    match out {
+        Some(mut out) => {
+            out.extend_from_slice(&bytes[kept..]);
+            std::borrow::Cow::Owned(out)
+        }
+        None => std::borrow::Cow::Borrowed(bytes),
+    }
+}
+
+fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+/// Whether `bytes` is a payload as [`elide_payloads`] sets one aside:
+/// base64 and nothing else — what a place handed back to the window must
+/// hold, so the place cannot be aimed at anything else a file keeps.
+#[must_use]
+pub fn is_payload(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes.iter().all(|byte| is_base64(*byte))
 }
 
 /// A transcript read is bounded by bytes; individual expanded tool cells also
@@ -1154,6 +1285,7 @@ fn tool_result_turn(part: &serde_json::Value, at_ms: Option<i64>) -> TranscriptT
         text: tool_detail(&text),
         at_ms,
         tool: Some(transcript_tool(part, true)),
+        images: images_in(output),
     }
 }
 
@@ -1299,6 +1431,7 @@ pub fn turns_in(chunk: &str) -> Vec<TranscriptTurn> {
                             text,
                             at_ms,
                             tool: Some(transcript_tool(payload, false)),
+                            images: Vec::new(),
                         });
                     }
                     continue;
@@ -1316,6 +1449,7 @@ pub fn turns_in(chunk: &str) -> Vec<TranscriptTurn> {
                             text: summary,
                             at_ms,
                             tool: None,
+                            images: Vec::new(),
                         });
                     }
                     continue;
@@ -1366,6 +1500,7 @@ pub fn turns_in(chunk: &str) -> Vec<TranscriptTurn> {
                     text: thought,
                     at_ms,
                     tool: None,
+                    images: Vec::new(),
                 }),
                 _ => spoken.push(part.clone()),
             }
@@ -1374,7 +1509,14 @@ pub fn turns_in(chunk: &str) -> Vec<TranscriptTurn> {
             Some(serde_json::Value::Array(_)) => Some(serde_json::Value::Array(spoken)),
             other => other.cloned(),
         };
-        if let Some(text) = message_text(said.as_ref()) {
+        let images = if kind == "user" {
+            images_in(content)
+        } else {
+            Vec::new()
+        };
+        if let Some(text) =
+            message_text(said.as_ref()).or_else(|| (!images.is_empty()).then(String::new))
+        {
             // A person's turn may be the CLI's own plumbing replayed rather
             // than anything they said: a slash command reaches the transcript
             // as its caveat, its name, its message, its args and its stdout,
@@ -1388,12 +1530,13 @@ pub fn turns_in(chunk: &str) -> Vec<TranscriptTurn> {
                 text.as_str()
             };
             let text = text.trim();
-            if !text.is_empty() {
+            if !text.is_empty() || !images.is_empty() {
                 turns.push(TranscriptTurn {
                     role: kind.to_string(),
                     text: text.to_string(),
                     at_ms,
                     tool: None,
+                    images,
                 });
             }
         }
@@ -1411,6 +1554,7 @@ pub fn turns_in(chunk: &str) -> Vec<TranscriptTurn> {
                     text: said,
                     at_ms,
                     tool: Some(transcript_tool(part, false)),
+                    images: Vec::new(),
                 });
             }
         }
@@ -1427,6 +1571,90 @@ mod tests {
             .iter()
             .map(|line| (line.kind.as_ref(), line.text.as_str(), line.old, line.new))
             .collect()
+    }
+
+    /// A line's inline payloads step aside (t-6323 A8): each base64 run under
+    /// `data` or `base64` becomes a place in the file — `"<offset>:<len>"`
+    /// counted from where the bytes began — and the line around it is still
+    /// the JSON it was. A short run, a quote escaped inside a string and a
+    /// line with nothing to set aside are left as they are.
+    #[test]
+    fn a_lines_payloads_step_aside_and_leave_their_place_in_the_file() {
+        let payload = "iVBORw0KGgo".repeat(40);
+        let line = format!(
+            "{{\"type\":\"user\",\"uuid\":\"u1\",\"message\":{{\"content\":[{{\"tool_use_id\":\"t1\",\"type\":\"tool_result\",\"content\":[{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"{payload}\"}}}}]}}]}},\"toolUseResult\":{{\"type\":\"image\",\"file\":{{\"base64\":\"{payload}\",\"type\":\"image/png\"}}}}}}\n"
+        );
+        let base: u64 = 1000;
+        let read = elide_payloads(line.as_bytes(), base);
+        let read = std::str::from_utf8(&read).unwrap();
+        assert!(
+            read.len() < 400,
+            "both copies stepped aside: {} bytes left",
+            read.len()
+        );
+        let row: serde_json::Value = serde_json::from_str(read.trim()).expect("still JSON");
+        let at = row["message"]["content"][0]["content"][0]["source"][PAYLOAD_AT_KEY]
+            .as_str()
+            .unwrap();
+        let (offset, len) = at.split_once(':').unwrap();
+        let (offset, len): (usize, usize) = (offset.parse().unwrap(), len.parse().unwrap());
+        let base = usize::try_from(base).unwrap();
+        assert_eq!(
+            &line[offset - base..offset - base + len],
+            payload,
+            "the place is the payload's"
+        );
+        assert!(is_payload(payload.as_bytes()) && !is_payload(b"a\"b"));
+        // The turn says its image by that place.
+        let turns = turns_in(read);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].role, "tool_result");
+        assert_eq!(
+            turns[0].images,
+            vec![TranscriptImage {
+                media_type: "image/png".into(),
+                at: at.to_string()
+            }]
+        );
+        // Left alone: a short run, a digest a person reads, an escaped quote,
+        // a plain line.
+        let short = r#"{"source":{"data":"QUJD"}}"#;
+        assert!(matches!(
+            elide_payloads(short.as_bytes(), 0),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let digest = format!(r#"{{"data":"{}"}}"#, "9f86d081".repeat(8));
+        assert!(matches!(
+            elide_payloads(digest.as_bytes(), 0),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        let quoted = format!(r#"{{"text":"say \"data\":\"{payload}\" here"}}"#);
+        assert_eq!(&*elide_payloads(quoted.as_bytes(), 0), quoted.as_bytes());
+    }
+
+    /// A person's pasted image is on their turn, and a message that is only
+    /// an image is still their turn — with no words.
+    #[test]
+    fn a_persons_image_is_on_their_turn_even_with_no_words() {
+        let payload = "R0lGODlh".repeat(40);
+        let both = format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"[Image #1] 이거 봐\"}},{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/gif\",\"data\":\"{payload}\"}}}}]}}}}\n"
+        );
+        let only = format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/jpeg\",\"data\":\"{payload}\"}}}}]}}}}\n"
+        );
+        let text = format!("{both}{only}");
+        let read = elide_payloads(text.as_bytes(), 0);
+        let turns = turns_in(std::str::from_utf8(&read).unwrap());
+        assert_eq!(turns.len(), 2);
+        assert_eq!(
+            (turns[0].role.as_str(), turns[0].text.as_str()),
+            ("user", "[Image #1] 이거 봐")
+        );
+        assert_eq!(turns[0].images[0].media_type, "image/gif");
+        assert_eq!((turns[1].text.as_str(), turns[1].images.len()), ("", 1));
+        // An image nobody set aside has no place to be fetched from.
+        assert!(turns_in(&both).iter().all(|turn| turn.images.is_empty()));
     }
 
     #[test]
@@ -2059,24 +2287,28 @@ mod tests {
                     text: "map the vault".into(),
                     at_ms: None,
                     tool: None,
+                    images: Vec::new(),
                 },
                 TranscriptTurn {
                     role: "assistant".into(),
                     text: "Reading it now.".into(),
                     at_ms: None,
                     tool: None,
+                    images: Vec::new(),
                 },
                 TranscriptTurn {
                     role: "tool".into(),
                     text: "Read · /repo/vault.rs".into(),
                     at_ms: None,
                     tool: None,
+                    images: Vec::new(),
                 },
                 TranscriptTurn {
                     role: "tool".into(),
                     text: "Bash".into(),
                     at_ms: None,
                     tool: None,
+                    images: Vec::new(),
                 },
             ],
             "the conversation came back with the wire in it, or short of a turn"
@@ -2204,18 +2436,21 @@ mod tests {
                     text: "조사하되 코드는 수정하지 마라".into(),
                     at_ms: None,
                     tool: None,
+                    images: Vec::new(),
                 },
                 TranscriptTurn {
                     role: "assistant".into(),
                     text: "I'll start by exploring.".into(),
                     at_ms: None,
                     tool: None,
+                    images: Vec::new(),
                 },
                 TranscriptTurn {
                     role: "tool".into(),
                     text: "bash · ls -la".into(),
                     at_ms: None,
                     tool: None,
+                    images: Vec::new(),
                 },
             ],
             "zo's store came back with its wire in it, or short of a turn"

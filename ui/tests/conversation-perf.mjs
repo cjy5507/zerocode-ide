@@ -134,7 +134,7 @@ export function conversationFixture({ blocks = 20 } = {}) {
       });
       turns.push({ role: "tool_result", text: "screenshot taken", at_ms: stamp(),
         tool: { call_id: id, name: "", input: "", is_error: false },
-        images: [{ key: `shot-${tool}`, media_type: "image/png", bytes: 184_320 }] });
+        images: [{ media_type: "image/png", at: `wire:${tool}` }] });
     } else {
       const name = ["Read", "Grep", "Glob"][tool % 3];
       turns.push({
@@ -148,7 +148,7 @@ export function conversationFixture({ blocks = 20 } = {}) {
   };
   for (let block = 0; block < blocks; block += 1) {
     const said = user % 10 === 0 ? briefing(user) : `${user}번째 부탁: 이 파일을 고치고 시험을 돌려줘.`;
-    const images = user % 8 === 4 ? [{ key: `pasted-${user}`, media_type: "image/png", bytes: 92_160 }] : undefined;
+    const images = user % 8 === 4 ? [{ media_type: "image/png", at: `wire:${1000 + user}` }] : undefined;
     turns.push({ role: "user", text: said, at_ms: stamp(), ...(images && { images }) });
     user += 1;
     turns.push({ role: "thinking", text: `**읽기 ${block}**\n먼저 파일을 읽고 무엇이 문제인지 본다.`, at_ms: stamp() });
@@ -164,7 +164,7 @@ export function conversationFixture({ blocks = 20 } = {}) {
     turns.push({ role: "assistant", text: answerText(block * 5 + 1), at_ms: stamp() });
     call();
     turns.push({ role: "assistant", text: answerText(block * 5 + 2), at_ms: stamp() });
-    const again = user % 8 === 4 ? [{ key: `pasted-${user}`, media_type: "image/png", bytes: 92_160 }] : undefined;
+    const again = user % 8 === 4 ? [{ media_type: "image/png", at: `wire:${1000 + user}` }] : undefined;
     turns.push({ role: "user", text: `${user}번째 부탁: 계속.`, at_ms: stamp(), ...(again && { images: again }) });
     user += 1;
     turns.push({ role: "thinking", text: `**확인 ${block}**\n시험이 통과하는지 본다.`, at_ms: stamp() });
@@ -208,7 +208,7 @@ export async function openFixtureConversation(page, turns) {
     });
     window.__ANSWER__.wire_stop = () => null;
     // A picture's bytes, when the page asks for one (A8's lazy load).
-    window.__ANSWER__.transcript_image = () => ({ mime: "image/png", data: png });
+    window.__ANSWER__.wire_image = () => png;
     await openWirePage("claude", "/tmp/zerocode-window-test", { history });
     await pollHelperPages();
     await window.__PAINTED__();

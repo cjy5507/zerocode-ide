@@ -96,6 +96,17 @@ WANTED = [
     # mixed state (`✽` under way).
     {"key": "todo completed", "selector": ".completed", "landmark": "todoList"},
     {"key": "todo checkbox", "selector": ".checkbox", "landmark": "checkbox:indeterminate"},
+    # An image a message carries (t-6323 A8): its pill and thumbnail, the
+    # row they stand in above the person's words, and the preview a press
+    # opens.
+    {"key": "attachment pill", "selector": ".pill", "landmark": "thumbIcon"},
+    {"key": "attachment thumbIcon", "selector": ".thumbIcon", "landmark": "thumbIcon"},
+    {"key": "attachment meta", "selector": ".meta", "landmark": "thumbIcon"},
+    {"key": "userMessageAttachments", "selector": ".userMessageAttachments", "landmark": "messagesContainer"},
+    {"key": "previewOverlay", "selector": ".previewOverlay", "landmark": "previewOverlay"},
+    {"key": "previewImage", "selector": ".previewImage", "landmark": "previewOverlay"},
+    {"key": "previewCloseButton", "selector": ".previewCloseButton", "landmark": "previewOverlay"},
+    {"key": "previewCloseIcon", "selector": ".previewCloseIcon", "landmark": "previewOverlay"},
 ]
 
 # The panel's measures that live in its SCRIPT: each found by a shape the

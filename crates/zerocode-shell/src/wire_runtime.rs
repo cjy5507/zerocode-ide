@@ -229,7 +229,29 @@ pub(crate) struct WireState {
     pub(crate) tasks: Vec<WireTask>,
     /// How many times the helpers moved: the page's mark for them.
     task_moves: u64,
+    /// The images the session's tools handed back, newest last, each under
+    /// its own key — held here because the stream is the only place they
+    /// were ever written, and bounded ([`WIRE_IMAGE_CAP`]) because a page
+    /// shows the last few and a long session sends many (t-6323 A8).
+    images: std::collections::VecDeque<(u64, String)>,
+    image_seq: u64,
+    /// The transcript of the pane whose conversation this session continues
+    /// (`wire_start`'s `from_pane`): the page opens with that pane's turns,
+    /// and the pictures they name stand in that file (t-6323 A8).
+    history: Option<std::path::PathBuf>,
 }
+
+/// Where a picture the page asks a session for stands: kept by the session
+/// (`wire:<n>`, what its tools handed back), or in the transcript of the pane
+/// it continues (`"<offset>:<len>"`, what that pane's history named).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WireImage {
+    Held(String),
+    InFile(std::path::PathBuf),
+}
+
+/// How many images a session keeps for its page to fetch.
+const WIRE_IMAGE_CAP: usize = 24;
 
 /// A helper Claude Code runs for the session — a local agent, from its
 /// `task_started` frame to its end — in the words its frames give it.
@@ -351,6 +373,7 @@ impl WireState {
             text,
             at_ms: None,
             tool: None,
+            images: Vec::new(),
         });
     }
 
@@ -385,6 +408,7 @@ impl WireState {
                 edits,
                 file,
             }),
+            images: Vec::new(),
         });
     }
 
@@ -408,7 +432,50 @@ impl WireState {
                 edits,
                 file: None,
             }),
+            images: Vec::new(),
         });
+    }
+
+    /// The images `turn` carries, taken out of `line` (where the reader set
+    /// them aside) into the session's own keeping, each re-keyed `wire:<n>`.
+    fn hold_images(&mut self, line: &str, turn: &mut TranscriptTurn) {
+        for image in &mut turn.images {
+            let Some((offset, len)) = image.at.split_once(':').and_then(|(offset, len)| {
+                Some((offset.parse::<usize>().ok()?, len.parse::<usize>().ok()?))
+            }) else {
+                continue;
+            };
+            let Some(payload) = line.get(offset..offset + len) else {
+                continue;
+            };
+            self.image_seq += 1;
+            self.images.push_back((self.image_seq, payload.to_string()));
+            if self.images.len() > WIRE_IMAGE_CAP {
+                self.images.pop_front();
+            }
+            image.at = format!("wire:{}", self.image_seq);
+        }
+    }
+
+    /// Where the picture at `at` stands, or why there is none: a `wire:<n>`
+    /// key the session no longer keeps (pushed out by newer ones), or a file
+    /// place when the session continues no pane.
+    fn image(&self, at: &str) -> Result<WireImage, String> {
+        let Some(key) = at.strip_prefix("wire:") else {
+            return self
+                .history
+                .clone()
+                .map(WireImage::InFile)
+                .ok_or_else(|| format!("이미지 자리가 아닙니다: {at}"));
+        };
+        let key: u64 = key
+            .parse()
+            .map_err(|_| format!("이미지 자리가 아닙니다: {at}"))?;
+        self.images
+            .iter()
+            .find(|(held, _)| *held == key)
+            .map(|(_, payload)| WireImage::Held(payload.clone()))
+            .ok_or_else(|| "이 이미지는 더 이상 없습니다".to_string())
     }
 
     /// A delta of what the agent is saying, onto the live text: the same
@@ -1380,9 +1447,13 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
         Some("assistant") | Some("user") => {
             // A transcript line; the transcript reader makes its turns
             // (thought, answer, tool call, tool result). The person's own
-            // words were said when they were sent.
-            for turn in zerocode_core::transcript::turns_in(&message.to_string()) {
+            // words were said when they were sent. Its payloads step aside
+            // first, as a file's do, and the wire keeps the images (A8).
+            let line = message.to_string();
+            let read = zerocode_core::transcript::elide_payloads(line.as_bytes(), 0);
+            for mut turn in zerocode_core::transcript::turns_in(&String::from_utf8_lossy(&read)) {
                 if turn.role != "user" {
+                    state.hold_images(&line, &mut turn);
                     state.push(turn);
                 }
             }
@@ -2540,6 +2611,23 @@ pub(crate) fn log_of(session: &WireSession, after: u64) -> Result<WireLog, Strin
     })
 }
 
+/// Where one picture the page asks for stands ([`WireImage`]).
+pub(crate) fn image_of(session: &WireSession, at: &str) -> Result<WireImage, String> {
+    session
+        .state
+        .lock()
+        .map_err(|_| "wire state lock".to_string())?
+        .image(at)
+}
+
+/// The session continues this pane's conversation: its history's pictures
+/// stand in the pane's transcript (`WireState::history`).
+pub(crate) fn remember_history(session: &WireSession, path: std::path::PathBuf) {
+    if let Ok(mut state) = session.state.lock() {
+        state.history = Some(path);
+    }
+}
+
 /// The window log's line for a pane handing its conversation to a wire —
 /// the receipt (how long the screen took to leave) or the refusal (why it
 /// kept it), beside the resume line's vocabulary (`term N …`).
@@ -3145,6 +3233,53 @@ mod tests {
 
     fn claude(state: &mut WireState, message: serde_json::Value) -> Vec<Outgoing> {
         take(Protocol::ClaudeStream, state, &message)
+    }
+
+    /// A tool's screenshot comes down the stream once: the session keeps it
+    /// under its own key (`wire:<n>`) for the page to fetch, the turn carries
+    /// only that key, and the oldest go past the cap (t-6323 A8).
+    #[test]
+    fn a_tools_image_is_kept_by_the_session_under_its_own_key() {
+        let mut state = WireState::default();
+        let shot = |n: usize| serde_json::json!({"type":"user","message":{"role":"user","content":[{"tool_use_id":format!("t{n}"),"type":"tool_result","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":format!("{n}").repeat(300)}}]}]},"session_id":"s1"});
+        claude(&mut state, shot(1));
+        let turn = &state.turns.last().expect("a turn").turn;
+        assert_eq!(turn.role, "tool_result");
+        assert_eq!(turn.images[0].at, "wire:1");
+        assert!(
+            serde_json::to_string(turn).unwrap().len() < 400,
+            "the payload stays off the turn"
+        );
+        assert_eq!(
+            state
+                .images
+                .back()
+                .map(|(key, payload)| (*key, payload.len())),
+            Some((1, 300))
+        );
+        for n in 2..=WIRE_IMAGE_CAP + 1 {
+            claude(&mut state, shot(n % 10));
+        }
+        assert_eq!(state.images.len(), WIRE_IMAGE_CAP);
+        assert!(
+            state.images.iter().all(|(key, _)| *key != 1),
+            "the oldest went past the cap"
+        );
+        // A key the session kept hands its payload back; one pushed out, or
+        // a file place in a session that continues no pane, hands nothing.
+        let newest = format!("wire:{}", state.image_seq);
+        assert!(matches!(state.image(&newest), Ok(WireImage::Held(_))));
+        assert!(state.image("wire:1").is_err());
+        assert!(state.image("120:44").is_err());
+        // A session that continues a pane finds its history's pictures in
+        // that pane's transcript.
+        state.history = Some(std::path::PathBuf::from("/tmp/pane.jsonl"));
+        assert_eq!(
+            state.image("120:44"),
+            Ok(WireImage::InFile(std::path::PathBuf::from(
+                "/tmp/pane.jsonl"
+            )))
+        );
     }
 
     /// Claude Code's helper frames, in the shapes a live `-p` stream sent

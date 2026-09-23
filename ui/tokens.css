@@ -2133,6 +2133,38 @@
    * box 2px off its words (`checkbox{margin:2px}`). */
   --chat-todo-done-alpha: 0.7;
   --chat-todo-box-gap: 2px;
+
+  /* An image a message carries (t-6323 A8), read off the extension's webview
+   * (2.1.280): a pill 24px tall and at most 180px wide, 4px inside (6px at
+   * its end), its parts 4px apart; a 12px thumbnail cornered 1px (the pill's
+   * 4px corner less its 4px inset, never under 1px); the size beside the
+   * name at 60%; the person's row of pills 6px over their words (`pill`,
+   * `thumbIcon`, `meta`, `userMessageAttachments`). Pressed, the image
+   * stands over an 85% black ground within 90% of the window, 8px corners
+   * and a drop shadow, with a 28px round close hung 12px outside its corner
+   * and an 18px cross (`previewOverlay`, `previewImage`,
+   * `previewCloseButton`, `previewCloseIcon`). The ground is the panel's own
+   * in either theme. The layer is the window's own: over every scrim (30–60)
+   * and the stage's layers, under the tab switcher (100) — the extension's
+   * 10000 is a webview with nothing else in it. */
+  --chat-image-pill-h: 24px;
+  --chat-image-pill-max: 180px;
+  --chat-image-pad: 4px;
+  --chat-image-pad-end: 6px;
+  --chat-image-gap: 4px;
+  --chat-image-thumb: 12px;
+  --chat-image-thumb-radius: 1px;
+  --chat-image-meta-alpha: 0.6;
+  --chat-image-under: 6px;
+  --chat-preview-ground: #000000d9;
+  --chat-preview-max: 90vw;
+  --chat-preview-max-h: 90vh;
+  --chat-preview-radius: 8px;
+  --chat-preview-shadow: 0 4px 24px #00000080;
+  --chat-preview-close: 28px;
+  --chat-preview-close-out: -12px;
+  --chat-preview-close-icon: 18px;
+  --chat-preview-layer: 90;
 }
 
 /* The light treatment, which this product draws as GLASS.

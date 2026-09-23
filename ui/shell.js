@@ -10564,6 +10564,8 @@ function holdHelperTurns(held, turns) {
         call.output = turn.text;
         call.outputError = turn.tool.is_error === true;
         call.outputAt = turn.at_ms ?? now;
+        // What the result handed back beside its words: pictures (A8).
+        if (turn.images?.length > 0) call.outputImages = turn.images;
         // An edit the result describes and the call did not (ACP hands the
         // diff over on the update) dresses the call's row.
         if (turn.tool.edits?.length > 0 && !(call.tool?.edits?.length > 0)) {
@@ -10585,7 +10587,7 @@ function holdHelperTurns(held, turns) {
       if (lasted > 0) last.thoughtMs = lasted;
     }
     held.turns.push({ role: turn.role, text: turn.text, tool: turn.tool ?? null,
-      seq: held.seq, at: turn.at_ms ?? now, fromClock });
+      seq: held.seq, at: turn.at_ms ?? now, fromClock, ...(turn.images?.length > 0 && { images: turn.images }) });
     held.seq += 1;
   }
   if (held.turns.length > HELPER_TURN_CAP) {
@@ -11546,6 +11548,10 @@ function helperTurnRowNode(run, turn, spoken) {
     row.setAttribute("aria-label", who);
     if (briefing) row.dataset.tip = who;
     said.textContent = turn.text;
+    // The pictures they sent stand above their words (A8), and a picture sent
+    // alone stands with no empty bubble under it.
+    if (turn.images) row.appendChild(imagePillsNode(run, turn.images));
+    said.hidden = turn.text === "";
   } else {
     // The agent's rows stand on the timeline rail (`is-step`); a system line
     // stands off it, the way the extension's meta messages do.
@@ -11657,7 +11663,10 @@ function dressToolTurn(row, turn, run, spoken) {
   writeClass(row, "is-live", output === undefined && run.status === "running" && turn.seq > spoken);
   writeClass(row, "is-done", output !== undefined && !failed);
   writeClass(row, "is-failed", failed);
-  if (output !== undefined && !todo) {
+  // What came back as pictures alone says itself as pills (A8), not as
+  // 「출력 없음」 over them.
+  const pictured = (turn.role === "tool_result" ? turn.images : turn.outputImages)?.length > 0;
+  if (output !== undefined && !todo && !(pictured && output.trim() === "")) {
     let result = row.querySelector(":scope > .helper-tool-result");
     if (!result) {
       result = document.createElement("p");
@@ -11665,6 +11674,14 @@ function dressToolTurn(row, turn, run, spoken) {
       row.querySelector(".helper-tool-call").after(result);
     }
     writeTextContent(result, output.split("\n", 1)[0] || t("worker.noOutput", "출력 없음"));
+  }
+  // The pictures the result handed back, under the line that says it (A8).
+  const images = turn.role === "tool_result" ? turn.images : turn.outputImages;
+  if (images?.length > 0 && !row.querySelector(":scope > .helper-images")) {
+    const pills = imagePillsNode(run, images);
+    const after = row.querySelector(":scope > .helper-tool-result") ?? row.querySelector(":scope > .helper-tool-call");
+    after.after(pills);
+    if (row.parentElement) watchImagePills(row.parentElement, pills);
   }
   // The edit under its row, once. The diff IS the input — the well would
   // only repeat it as JSON — so an edit row's body carries its output alone.
@@ -12354,6 +12371,8 @@ function syncHelperTurns(list, run) {
     if (turn.seq <= drawn) continue;
     const row = helperTurnRowNode(run, turn, spoken);
     list.insertBefore(row, streaming ?? helperListTail(list));
+    // Its pictures are watched once it stands in the list (A8).
+    if (row.querySelector(":scope > .helper-images")) watchImagePills(list, row);
     if (turn.role === "assistant") newest = { row, turn };
     if (turn.role === "user") people.push(row);
     // The words this turn carries were streaming a moment ago: their

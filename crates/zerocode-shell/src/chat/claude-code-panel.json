@@ -1,7 +1,7 @@
 {
   "source": "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/2.1.280/vspackage",
   "version": "2.1.280",
-  "fetched_at": "2026-09-23T09:13:53+00:00",
+  "fetched_at": "2026-09-23T09:54:12+00:00",
   "stylesheet": "extension/webview/index.css",
   "script": "extension/webview/index.js",
   "vars": {
@@ -327,6 +327,86 @@
       "width": "1em",
       "height": "1em",
       "margin": "2px"
+    },
+    "attachment pill": {
+      "--pill-radius": "4px",
+      "--pill-padding": "4px",
+      "--pill-bg": "color-mix(in srgb,var(--app-input-background)85%,var(--app-secondary-foreground))",
+      "display": "inline-flex",
+      "padding": "var(--pill-padding)6px var(--pill-padding)var(--pill-padding)",
+      "box-sizing": "border-box",
+      "background": "var(--pill-bg)",
+      "border": "1px solid var(--app-input-border)",
+      "border-radius": "var(--pill-radius)",
+      "cursor": "pointer",
+      "position": "relative",
+      "overflow": "hidden",
+      "align-items": "center",
+      "gap": "4px",
+      "min-width": "0",
+      "max-width": "180px",
+      "height": "24px",
+      "transition": "border-color .15s"
+    },
+    "attachment thumbIcon": {
+      "object-fit": "cover",
+      "border-radius": "max(1px,calc(var(--pill-radius) - var(--pill-padding)))",
+      "flex-shrink": "0",
+      "width": "12px",
+      "height": "12px"
+    },
+    "attachment meta": {
+      "color": "var(--app-secondary-foreground)",
+      "opacity": ".6",
+      "white-space": "nowrap",
+      "flex-shrink": "0",
+      "font-size": "11px"
+    },
+    "userMessageAttachments": {
+      "display": "flex",
+      "white-space": "normal",
+      "overflow-x": "auto",
+      "scrollbar-width": "thin",
+      "flex-wrap": "nowrap",
+      "gap": "4px",
+      "padding": "0 0 6px"
+    },
+    "previewOverlay": {
+      "position": "fixed",
+      "display": "flex",
+      "z-index": "10000",
+      "background": "#000000d9",
+      "justify-content": "center",
+      "align-items": "center",
+      "inset": "0"
+    },
+    "previewImage": {
+      "object-fit": "contain",
+      "border-radius": "8px",
+      "max-width": "90vw",
+      "max-height": "90vh",
+      "box-shadow": "0 4px 24px #00000080"
+    },
+    "previewCloseButton": {
+      "position": "absolute",
+      "display": "flex",
+      "background": "var(--app-menu-background)",
+      "border": "1px solid var(--app-input-border)",
+      "cursor": "pointer",
+      "border-radius": "50%",
+      "justify-content": "center",
+      "align-items": "center",
+      "width": "28px",
+      "height": "28px",
+      "padding": "0",
+      "transition": "background-color .15s",
+      "top": "-12px",
+      "right": "-12px"
+    },
+    "previewCloseIcon": {
+      "color": "var(--app-menu-foreground)",
+      "width": "18px",
+      "height": "18px"
     }
   },
   "constants": {

@@ -5,6 +5,7 @@
  * a browser actually laid out — a font is the face the engine drew with, a
  * fold is the height the row stood at — never the source's own spelling. */
 import { openWindowTestPage } from "./window-boot.mjs";
+import { FIXTURE_PNG } from "./conversation-perf.mjs";
 
 /* A wire session's page opened on `history` — the page with the most roads
  * on it (turns, a live answer, the composer's wire) — painted once. */
@@ -944,6 +945,147 @@ export async function testConversationTodos(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok("A7: the todo lists raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* A8 — images. The extension draws an image a message carries as a pill
+ * (2.1.280 `pp`): a 12px thumbnail, `image.<kind>`, and its size once
+ * loaded — the person's above their words, a tool's with what it handed
+ * back — and a press opens it whole (`previewOverlay`): the image within 90%
+ * of the window, the focus on the close button, Esc or the ground to leave,
+ * the focus back. This page asks for a picture only when its pill is in view,
+ * and once. */
+export async function testConversationImages(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await page.evaluate(({ png }) => {
+      window.__IMAGE_ASKS__ = [];
+      window.__ANSWER__.wire_image = (args) => {
+        window.__IMAGE_ASKS__.push(args.at);
+        return png;
+      };
+    }, { png: FIXTURE_PNG });
+    const history = [
+      { role: "user", text: "[Image #1] 이 화면을 봐", images: [{ media_type: "image/png", at: "wire:1" }] },
+      { role: "user", text: "", images: [{ media_type: "image/jpeg", at: "wire:3" }] },
+    ];
+    for (let at = 0; at < 30; at += 1) {
+      history.push({ role: "assistant", text: `답 ${at}: ${"긴 문장이 이어진다. ".repeat(8)}` });
+    }
+    history.push({ role: "tool", text: "mcp__computer-use__screenshot", tool: { call_id: "s1", name: "mcp__computer-use__screenshot", input: "{}", is_error: false } });
+    history.push({ role: "tool_result", text: "screenshot taken", tool: { call_id: "s1", name: "mcp__computer-use__screenshot", input: "", is_error: false }, images: [{ media_type: "image/png", at: "wire:2" }] });
+    await openConversation(page, history);
+    const seen = await page.evaluate(async () => {
+      const seen = {};
+      const face = document.querySelector("#worker-view");
+      const list = face.querySelector(".helper-turns");
+      const frames = async (n) => {
+        for (let beat = 0; beat < n; beat += 1) await window.__PAINTED__();
+      };
+      await frames(6);
+      const pills = [...face.querySelectorAll(".helper-image")];
+      seen.pills = pills.length;
+      const people = [...face.querySelectorAll(".helper-turn.is-user")];
+      seen.personPillFirst = people[0]?.firstElementChild?.classList.contains("helper-images") ?? false;
+      seen.onlyPicture = people[1] ? [people[1].querySelector(".helper-images") !== null, people[1].querySelector(".helper-said")?.hidden] : null;
+      seen.names = pills.map((pill) => pill.querySelector(".helper-image-name")?.textContent);
+      seen.toolPillAfterResult = face.querySelector(".helper-turn.is-tool .helper-tool-result + .helper-images") !== null;
+      // A result that is a picture alone says it with the pill, not 「출력 없음」.
+      window.__CONVERSATION__.turns.push(
+        { role: "tool", text: "mcp__computer-use__zoom", tool: { call_id: "z1", name: "mcp__computer-use__zoom", input: "{}", is_error: false } },
+        { role: "tool_result", text: "", tool: { call_id: "z1", name: "mcp__computer-use__zoom", input: "", is_error: false }, images: [{ media_type: "image/png", at: "wire:4" }] },
+      );
+      await pollHelperPages();
+      await frames(2);
+      const zoom = [...face.querySelectorAll(".helper-turn.is-tool")].at(-1);
+      seen.pictureAlone = zoom ? [zoom.querySelector(".helper-tool-result") === null, zoom.querySelector(".helper-images .helper-image") !== null] : null;
+      // At the foot: the tool's picture is in view, and so is the picture on
+      // the person's row that stands stuck at the list's top (the sticky
+      // header); the earlier person's row, stuck under it, is covered — in
+      // view by geometry only — and not asked for.
+      seen.askedAtFoot = [...window.__IMAGE_ASKS__].sort();
+      const toolPill = face.querySelector(".helper-turn.is-tool .helper-image");
+      const thumb = toolPill?.querySelector(".helper-image-thumb");
+      for (let beat = 0; beat < 60 && !(thumb?.naturalWidth > 0); beat += 1) await frames(1);
+      await frames(2);
+      const rect = thumb?.getBoundingClientRect();
+      seen.thumbBox = rect ? [rect.width, rect.height] : null;
+      seen.pillHeight = toolPill?.getBoundingClientRect().height ?? null;
+      seen.size = toolPill?.querySelector(".helper-image-size")?.textContent ?? null;
+      // Up to the top: now the person's are asked for.
+      list.scrollTop = 0;
+      for (let beat = 0; beat < 60 && window.__IMAGE_ASKS__.length < 4; beat += 1) await frames(1);
+      seen.askedAtTop = [...window.__IMAGE_ASKS__].sort();
+      // A press opens the picture whole; Esc closes it and does not interrupt.
+      window.__CALLS__ = [];
+      const before = window.__ANSWER__.wire_interrupt;
+      window.__ANSWER__.wire_interrupt = () => {
+        window.__CALLS__.push("interrupt");
+        return null;
+      };
+      const first = face.querySelector(".helper-turn.is-user .helper-image");
+      first.focus();
+      first.click();
+      for (let beat = 0; beat < 30 && !document.querySelector(".chat-image-preview"); beat += 1) await frames(1);
+      const ground = document.querySelector(".chat-image-preview");
+      const picture = ground?.querySelector(".chat-image-preview-image");
+      seen.dialog = ground?.querySelector("[role=dialog]")?.getAttribute("aria-modal") ?? null;
+      seen.closeFocused = document.activeElement?.classList.contains("chat-image-preview-close") ?? false;
+      for (let beat = 0; beat < 60 && !(picture?.naturalWidth > 0); beat += 1) await frames(1);
+      const box = picture?.getBoundingClientRect();
+      seen.withinWindow = box ? box.width <= innerWidth * 0.9 + 1 && box.height <= innerHeight * 0.9 + 1 : false;
+      seen.groundFixed = ground ? getComputedStyle(ground).position : null;
+      seen.groundOver = ground ? Number(getComputedStyle(ground).zIndex) > 0 : false;
+      document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      await frames(2);
+      seen.closedByEsc = document.querySelector(".chat-image-preview") === null;
+      seen.focusBack = document.activeElement === first;
+      seen.noInterrupt = window.__CALLS__.length === 0;
+      window.__ANSWER__.wire_interrupt = before;
+      // The ground closes it too; the picture was asked for once.
+      first.click();
+      for (let beat = 0; beat < 30 && !document.querySelector(".chat-image-preview"); beat += 1) await frames(1);
+      document.querySelector(".chat-image-preview")?.click();
+      await frames(2);
+      seen.closedByGround = document.querySelector(".chat-image-preview") === null;
+      seen.askedOnce = window.__IMAGE_ASKS__.length;
+      // A picture that cannot be read keeps its name.
+      window.__ANSWER__.wire_image = () => {
+        throw new Error("이 이미지는 더 이상 없습니다");
+      };
+      window.__CONVERSATION__.turns.push({ role: "user", text: "하나 더", images: [{ media_type: "image/png", at: "wire:9" }] });
+      await pollHelperPages();
+      list.scrollTop = list.scrollHeight;
+      await frames(6);
+      const gone = [...face.querySelectorAll(".helper-turn.is-user .helper-image")].at(-1);
+      for (let beat = 0; beat < 30 && !gone?.classList.contains("is-missing"); beat += 1) await frames(1);
+      seen.missingKeepsName = gone?.classList.contains("is-missing") && gone.querySelector(".helper-image-name")?.textContent === "image.png";
+      return seen;
+    });
+    ok(
+      "A8: an image stands as the extension's pill — a 12px thumbnail in a 24px pill, `image.<kind>` and its size once loaded — above the person's words (a picture sent alone stands with no empty bubble) and under the line a tool handed it back with",
+      seen.pills === 3 && seen.personPillFirst && JSON.stringify(seen.onlyPicture) === JSON.stringify([true, true]) &&
+        JSON.stringify(seen.names) === JSON.stringify(["image.png", "image.jpeg", "image.png"]) && seen.toolPillAfterResult &&
+        JSON.stringify(seen.pictureAlone) === JSON.stringify([true, true]) &&
+        JSON.stringify(seen.thumbBox) === JSON.stringify([12, 12]) && seen.pillHeight === 24 && seen.size === "1×1",
+      JSON.stringify(seen),
+    );
+    ok(
+      "A8: a picture is asked for only when its pill comes into view — a person's row stuck under a later person's sticky header is not in view — and only once; one that cannot be read keeps its name",
+      JSON.stringify(seen.askedAtFoot) === JSON.stringify(["wire:2", "wire:3", "wire:4"]) &&
+        JSON.stringify(seen.askedAtTop) === JSON.stringify(["wire:1", "wire:2", "wire:3", "wire:4"]) && seen.askedOnce === 4 &&
+        seen.missingKeepsName,
+      JSON.stringify(seen),
+    );
+    ok(
+      "A8: a press opens the picture whole in a modal over the page within 90% of the window with the focus on its close; Esc closes it without interrupting the turn and gives the focus back, and so does a press on the ground",
+      seen.dialog === "true" && seen.closeFocused && seen.withinWindow && seen.groundFixed === "fixed" && seen.groundOver &&
+        seen.closedByEsc && seen.focusBack && seen.noInterrupt && seen.closedByGround,
+      JSON.stringify(seen),
+    );
+    ok("A8: the images raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }

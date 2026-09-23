@@ -17587,6 +17587,25 @@ fn the_conversation_wears_the_extensions_own_measures() {
         // A todo call's list (t-6323 A7).
         ("chat-todo-done-alpha", rule("todo completed", "opacity")),
         ("chat-todo-box-gap", rule("todo checkbox", "margin")),
+        // An image a message carries, and its preview (t-6323 A8).
+        ("chat-image-pill-h", rule("attachment pill", "height")),
+        ("chat-image-pill-max", rule("attachment pill", "max-width")),
+        ("chat-image-pad", rule("attachment pill", "--pill-padding")),
+        ("chat-image-gap", rule("attachment pill", "gap")),
+        ("chat-image-thumb", rule("attachment thumbIcon", "width")),
+        ("chat-image-meta-alpha", rule("attachment meta", "opacity")),
+        (
+            "chat-image-under",
+            nth(rule("userMessageAttachments", "padding"), 2),
+        ),
+        ("chat-preview-ground", rule("previewOverlay", "background")),
+        ("chat-preview-max", rule("previewImage", "max-width")),
+        ("chat-preview-max-h", rule("previewImage", "max-height")),
+        ("chat-preview-radius", rule("previewImage", "border-radius")),
+        ("chat-preview-shadow", rule("previewImage", "box-shadow")),
+        ("chat-preview-close", rule("previewCloseButton", "width")),
+        ("chat-preview-close-out", rule("previewCloseButton", "top")),
+        ("chat-preview-close-icon", rule("previewCloseIcon", "width")),
         ("agent-accent-claude", var("--app-claude-orange")),
         ("agent-send-claude", var("--app-claude-clay-button-orange")),
         ("chat-send-ink", var("--app-claude-ivory")),
@@ -19476,6 +19495,69 @@ fn a_transcript_log_says_whether_the_file_goes_on() {
         !short_tail.folded && short_tail.turns.len() == 3,
         "a short file's tail is the whole file, nothing folded"
     );
+}
+
+/// A line past the read — nearly always one carrying an image (135 of
+/// this machine's last 146 image lines) — is read whole instead of
+/// dropped (t-6323 A8): the words on it are a turn, and the reads around
+/// it go on.
+#[test]
+fn a_line_carrying_an_image_is_read_whole_with_its_payload_set_aside() {
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let path = temp.path().join("shot.jsonl");
+    let payload = "iVBORw0KGgo".repeat(40_000);
+    let said = "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"look\"}}\n";
+    let shot = format!(
+        "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":[{{\"type\":\"text\",\"text\":\"[Image #1] 이 화면\"}},{{\"type\":\"image\",\"source\":{{\"type\":\"base64\",\"media_type\":\"image/png\",\"data\":\"{payload}\"}}}}]}}}}\n"
+    );
+    assert!(
+        shot.len() as u64 > crate::shell_runtime::SUBAGENT_LOG_CHUNK,
+        "the fixture's line is past the read"
+    );
+    std::fs::write(&path, format!("{said}{shot}{said}")).expect("written");
+    let size = std::fs::metadata(&path).expect("size").len();
+    let mut after = 0;
+    let mut turns = Vec::new();
+    for _ in 0..8 {
+        let read = crate::cmd::terminal::transcript_log_at(&path, Some(after)).expect("read");
+        turns.extend(read.turns);
+        after = read.next;
+        if !read.more {
+            break;
+        }
+    }
+    assert_eq!(after, size);
+    let words: Vec<&str> = turns.iter().map(|turn| turn.text.as_str()).collect();
+    assert_eq!(
+        words,
+        ["look", "[Image #1] 이 화면", "look"],
+        "the long line's words are a turn"
+    );
+    // Its image is a place in the file, and the place hands back the
+    // payload — and nothing that is not one.
+    let image = &turns[1].images[0];
+    assert_eq!(image.media_type, "image/png");
+    assert_eq!(
+        crate::cmd::terminal::payload_at(&path, &image.at).expect("the payload"),
+        payload,
+        "the place hands back the payload"
+    );
+    assert!(
+        crate::cmd::terminal::payload_at(&path, "0:12").is_err(),
+        "a place that is not base64 hands back nothing"
+    );
+    // The tail opens on a long last line whole.
+    std::fs::write(&path, format!("{said}{shot}")).expect("rewritten");
+    let tail = crate::cmd::terminal::transcript_log_at(&path, None).expect("read");
+    assert!(
+        tail.turns.iter().any(|turn| !turn.images.is_empty()),
+        "the tail's long line is read"
+    );
+    // Not yet ended: nothing yet, and the cursor waits at its start.
+    std::fs::write(&path, format!("{said}{}", shot.trim_end())).expect("rewritten");
+    let waiting =
+        crate::cmd::terminal::transcript_log_at(&path, Some(said.len() as u64)).expect("read");
+    assert!(waiting.turns.is_empty() && waiting.next == said.len() as u64);
 }
 
 /// A pane's 「대화」 hands its conversation to a wire only when the screen

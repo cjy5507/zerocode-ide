@@ -34134,11 +34134,38 @@ mod tests {
             reading.contains("if !is_subagent_id(&id) {"),
             "the helper id reaches a file name unchecked:\n{reading}"
         );
+        // The helper's file is found from the pane, in one place that the
+        // page's two doors to it share — its conversation and its images
+        // (t-6323 A8).
+        let finding = block_after(shipped, "fn helper_transcript_path(");
         assert!(
             !reading.contains("path: String")
-                && reading.contains("session.transcript_path.clone()"),
+                && reading.contains("helper_transcript_path(&state, term, &id)")
+                && finding.contains("session.transcript_path.clone()"),
             "the window names the file to read, instead of the pane whose \
-             agent reported one:\n{reading}"
+             agent reported one:\n{reading}\n{finding}"
+        );
+        let image = block_after(shipped, "fn pane_image(");
+        assert!(
+            !image.contains("path: String")
+                && image.contains("if !is_subagent_id(&id) {")
+                && image.contains("helper_transcript_path(&state, term, &id)")
+                && image.contains("session.transcript_path.clone()")
+                && image.contains("payload_at(&path, &at)"),
+            "the image door names a file, or reads a helper's id unchecked:\n{image}"
+        );
+        // A session's page asks by session and place, and a place in the
+        // pane's transcript is read through the same check.
+        let wire_door = block_after(include_str!("../../src/cmd/wire.rs"), "fn wire_image(");
+        assert!(
+            !wire_door.contains("path: String")
+                && wire_door.contains("crate::cmd::terminal::payload_at(&path, &at)"),
+            "the session's image door names a file, or reads a place unchecked:\n{wire_door}"
+        );
+        let place = block_after(shipped, "fn payload_at(");
+        assert!(
+            place.contains("zerocode_core::transcript::is_payload(&payload)"),
+            "a place hands back what is not a payload:\n{place}"
         );
         // Both doors read down one road: the helper's file and the pane's own
         // transcript (`pane_log`, the terminal's conversation view) go through
@@ -34157,11 +34184,17 @@ mod tests {
         let reading = block_after(shipped, "fn transcript_log_at(");
         // Core owns complete byte records and the bounded oversized-line
         // escape. The shell must decode and advance from that same answer.
+        // The payloads step aside before the words are read, leaving their
+        // place in the file (t-6323 A8), and a line past the read is read
+        // whole instead of dropped.
         assert!(
             reading.contains("zerocode_core::transcript::complete_transcript_chunk(")
-                && reading.contains("String::from_utf8_lossy(chunk.bytes)")
-                && reading.contains("u64::try_from(chunk.consumed)"),
-            "a half-written line is handed over as though it were a turn:\n{reading}"
+                && reading.contains("zerocode_core::transcript::elide_payloads(chunk.bytes, base)")
+                && reading.contains("String::from_utf8_lossy(&bytes)")
+                && reading.contains("u64::try_from(chunk.consumed)")
+                && reading
+                    .contains("long_line_log(&mut file, from, starts_mid_line, size, folded)"),
+            "a half-written line is handed over as though it were a turn, or a payload is read as words:\n{reading}"
         );
         let chunking = block_after(
             include_str!("../../../zerocode-core/src/transcript.rs"),

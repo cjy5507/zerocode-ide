@@ -692,3 +692,210 @@ function standLatestTodo(list, focus) {
   latest.classList.add("is-standing");
   writeHidden(latest, false);
 }
+
+/* ---- images (t-6323 A8) ------------------------------------------------------
+ *
+ * The extension draws an image a message carries as a pill (2.1.280 `LN` →
+ * `pp`): a 12px thumbnail, its name (`image.<kind>`) and, once it has loaded,
+ * its size (`W×H`) — the person's above their words, a tool's with what it
+ * handed back — and a press (or Enter/Space) opens it whole over the page
+ * (`previewOverlay`): a dimmed ground, the image within 90% of the window, a
+ * close button that takes the focus, Esc or a press on the ground to leave,
+ * the focus back where it was. The extension loads every image with its
+ * message; this page asks for a picture only when its pill is in view — the
+ * payload stays where the reader set it aside (`pane_image` for a pane's
+ * transcript or its helper's, `wire_image` for what a wire session keeps),
+ * because a long session carries dozens and each is half a megabyte. The
+ * watcher is the list's own (`root: list`), so a pill up the transcript or on
+ * a page behind another tab is never fetched, and the watcher and every pill
+ * it holds go with the list. */
+
+/* Where `image` is fetched from: the wire session's own keeping, or the
+ * transcript the page reads — the pane's, or its helper's. */
+function imagePlaceOf(run, image) {
+  const id = run.helper?.id;
+  if (id === WIRE_LOG_ID) return ["wire_image", { id: run.wire, at: image.at }];
+  return ["pane_image", { term: run.term, helper: id === PANE_LOG_ID ? null : id, at: image.at }];
+}
+
+/* The pill's name, as the extension names an image block: `image.` and the
+ * kind its media type says (`image.png`, `image.jpeg`), `image.image` when it
+ * says none. */
+function imageName(image) {
+  return `image.${image.media_type.split("/")[1] || "image"}`;
+}
+
+/* A row of pills for `images`, each empty until it is in view. */
+function imagePillsNode(run, images) {
+  const pills = document.createElement("div");
+  pills.className = "helper-images";
+  for (const image of images) {
+    const pill = document.createElement("button");
+    pill.type = "button";
+    pill.className = "helper-image";
+    const thumb = document.createElement("img");
+    thumb.className = "helper-image-thumb";
+    thumb.alt = "";
+    const name = document.createElement("span");
+    name.className = "helper-image-name";
+    name.textContent = imageName(image);
+    const size = document.createElement("span");
+    size.className = "helper-image-size";
+    pill.append(thumb, name, size);
+    labelButton(pill, t("worker.imageOpen", "{{name}} 크게 보기", { name: name.textContent }));
+    pill.addEventListener("click", (event) => {
+      event.stopPropagation();
+      void openImagePreview(pill);
+    });
+    pill.__image = image;
+    pill.__run = run;
+    pills.appendChild(pill);
+  }
+  return pills;
+}
+
+/* The pills in `node` that the list does not watch yet start being watched —
+ * once the row stands in the list, since a row is built before it is put in
+ * its place. */
+function watchImagePills(list, node) {
+  for (const pill of node.querySelectorAll(".helper-image")) {
+    if (pill.__watched) continue;
+    pill.__watched = true;
+    imageWatch(list).observe(pill);
+  }
+}
+
+/* The picture as a data URL, asked for once per pill. */
+function imageSourceOf(pill) {
+  pill.__source ??= (async () => {
+    const [command, args] = imagePlaceOf(pill.__run, pill.__image);
+    const payload = await invoke(command, args);
+    if (typeof payload !== "string" || payload === "") throw new Error(t("worker.imageGone", "이 그림을 읽을 수 없습니다"));
+    return `data:${pill.__image.media_type};base64,${payload}`;
+  })();
+  return pill.__source;
+}
+
+/* A pill that came into view takes its thumbnail, and its size once the
+ * picture has loaded; one whose payload cannot be read keeps its name. */
+async function fillImagePill(pill) {
+  let source;
+  try {
+    source = await imageSourceOf(pill);
+  } catch {
+    pill.classList.add("is-missing");
+    return;
+  }
+  const thumb = pill.querySelector(".helper-image-thumb");
+  thumb.addEventListener("load", () => {
+    writeTextContent(pill.querySelector(".helper-image-size"), `${thumb.naturalWidth}×${thumb.naturalHeight}`);
+  }, { once: true });
+  thumb.src = source;
+}
+
+/* The list's watcher: a pill is filled the first time it is in the list's
+ * view, and then forgotten. */
+function imageWatch(list) {
+  list.__imageWatch ??= new IntersectionObserver((entries, watch) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      if (coveredByLaterHeader(entry.target)) {
+        holdCoveredPill(list, entry.target);
+        continue;
+      }
+      watch.unobserve(entry.target);
+      void fillImagePill(entry.target);
+    }
+  }, { root: list });
+  return list.__imageWatch;
+}
+
+/* A person's row is the extension's sticky header: every one before the
+ * header in view stays stuck at the list's top under it — in view by
+ * geometry, which is all an IntersectionObserver judges, and covered by the
+ * later one. A pill there is not in view until no later header covers it. */
+function coveredByLaterHeader(pill) {
+  const row = pill.closest(".helper-turn.is-user");
+  if (!row) return false;
+  let next = row.nextElementSibling;
+  while (next && !next.classList.contains("is-user")) next = next.nextElementSibling;
+  return next !== null && next.getBoundingClientRect().top <= row.getBoundingClientRect().top + 1;
+}
+
+/* A covered pill waits for the list to scroll it out from under the later
+ * header — asked once a frame while the list moves, and only while some pill
+ * waits. */
+function holdCoveredPill(list, pill) {
+  const held = (list.__coveredPills ??= new Set());
+  held.add(pill);
+  if (list.__coverWatch) return;
+  list.__coverWatch = true;
+  let frame = 0;
+  list.addEventListener("scroll", () => {
+    if (frame || held.size === 0) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      const view = list.getBoundingClientRect();
+      for (const one of held) {
+        if (!one.isConnected) {
+          held.delete(one);
+          continue;
+        }
+        const box = one.getBoundingClientRect();
+        if (box.bottom < view.top || box.top > view.bottom || coveredByLaterHeader(one)) continue;
+        held.delete(one);
+        list.__imageWatch?.unobserve(one);
+        void fillImagePill(one);
+      }
+    });
+  }, { passive: true });
+}
+
+/* The picture whole, over the page. Esc is caught before anything else hears
+ * it — it closes the picture and never interrupts the turn (A3's Esc). */
+async function openImagePreview(pill) {
+  let source;
+  try {
+    source = await imageSourceOf(pill);
+  } catch (error) {
+    showError(error);
+    return;
+  }
+  const back = document.activeElement;
+  const ground = document.createElement("div");
+  ground.className = "chat-image-preview";
+  const frame = document.createElement("div");
+  frame.className = "chat-image-preview-frame";
+  frame.setAttribute("role", "dialog");
+  frame.setAttribute("aria-modal", "true");
+  frame.setAttribute("aria-label", imageName(pill.__image));
+  const picture = document.createElement("img");
+  picture.className = "chat-image-preview-image";
+  picture.alt = imageName(pill.__image);
+  picture.src = source;
+  const close = document.createElement("button");
+  close.type = "button";
+  close.className = "chat-image-preview-close";
+  close.appendChild(iconNode("x"));
+  labelButton(close, t("worker.imagePreviewClose", "미리보기 닫기 (Esc)"));
+  frame.append(picture, close);
+  ground.appendChild(frame);
+  const leave = () => {
+    document.removeEventListener("keydown", onKey, true);
+    ground.remove();
+    if (back?.isConnected) back.focus({ preventScroll: true });
+  };
+  const onKey = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    leave();
+  };
+  ground.addEventListener("click", (event) => {
+    if (event.target === ground) leave();
+  });
+  close.addEventListener("click", leave);
+  document.addEventListener("keydown", onKey, true);
+  document.body.appendChild(ground);
+  close.focus();
+}

@@ -49,6 +49,14 @@ pub(crate) fn wire_start(
     // receipt: a pane that asked for its conversation and kept its screen
     // must leave a line saying why, not only a toast (2026-09-21 — twenty-two
     // Claude panes, no line, no way to tell).
+    // The pane's transcript, read before the pane hands its conversation
+    // over: the pictures its history names stand there (t-6323 A8).
+    let history = from_pane.and_then(|term| {
+        state
+            .pane_sessions()
+            .get(&term)
+            .and_then(|session| session.transcript_path.clone())
+    });
     let session = stand_wire(&app, &state, &agent, &cwd, resume.as_deref(), from_pane)
         .inspect_err(|reason| {
             if let Some(term) = from_pane {
@@ -58,6 +66,9 @@ pub(crate) fn wire_start(
                 );
             }
         })?;
+    if let Some(path) = history {
+        wire_runtime::remember_history(&session, std::path::PathBuf::from(path));
+    }
     if let Some(term) = from_pane {
         let outcome = hand_over_pane(&state, term, &agent);
         crate::system_runtime::note_window_event(
@@ -195,6 +206,24 @@ pub(crate) fn wire_log(
 ) -> Result<wire_runtime::WireLog, String> {
     let session = state.shell_runtime().wires.get(id)?;
     wire_runtime::log_of(&session, after)
+}
+
+/// One picture of a session's page, by its place — a key the wire kept a
+/// tool's picture under (`wire:<n>`), or a place in the transcript of the
+/// pane the session continues, read through the pane door's own check (base64
+/// alone): its base64, for the page to draw when it comes into view (t-6323
+/// A8). The window names a session, never a path.
+#[tauri::command(async)]
+pub(crate) fn wire_image(
+    state: State<'_, AppState>,
+    id: wire_runtime::WireId,
+    at: String,
+) -> Result<String, String> {
+    let session = state.shell_runtime().wires.get(id)?;
+    match wire_runtime::image_of(&session, &at)? {
+        wire_runtime::WireImage::Held(payload) => Ok(payload),
+        wire_runtime::WireImage::InFile(path) => crate::cmd::terminal::payload_at(&path, &at),
+    }
 }
 
 #[tauri::command(async)]

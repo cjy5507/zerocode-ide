@@ -14338,6 +14338,133 @@ details.worker-command {
   flex: none;
 }
 
+/* An image a message carries (t-6323 A8), the extension's pill (`pill`,
+ * `thumbIcon`, `label`, `meta`): a 12px thumbnail, its name and — once the
+ * picture has loaded — its size, in a 24px box a shade off the input's
+ * ground; the person's pills stand in a row above their words
+ * (`userMessageAttachments`), a tool's under the line that says what it
+ * handed back. A pill whose picture could not be read keeps its name. */
+.helper-images {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: var(--chat-image-gap);
+  max-width: 100%;
+  padding-bottom: var(--chat-image-under);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.helper-image {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--chat-image-gap);
+  flex: none;
+  min-width: 0;
+  max-width: var(--chat-image-pill-max);
+  height: var(--chat-image-pill-h);
+  padding: var(--chat-image-pad) var(--chat-image-pad-end) var(--chat-image-pad) var(--chat-image-pad);
+  overflow: hidden;
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--chat-radius-small);
+  background: color-mix(in srgb, var(--chat-composer-bg) 85%, var(--chat-work-ink));
+  color: var(--ink-chalk);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-image:hover {
+  border-color: color-mix(in srgb, var(--chat-composer-edge) 60%, var(--ink-chalk));
+}
+
+.helper-image-thumb {
+  flex: none;
+  width: var(--chat-image-thumb);
+  height: var(--chat-image-thumb);
+  border-radius: var(--chat-image-thumb-radius);
+  object-fit: cover;
+}
+
+/* No picture yet: the thumbnail's place stands empty, not a broken image. */
+.helper-image-thumb:not([src]) {
+  visibility: hidden;
+}
+
+.helper-image-name {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--text-2xs);
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.helper-image-size {
+  flex: none;
+  font-size: var(--text-2xs);
+  color: var(--chat-work-ink);
+  opacity: var(--chat-image-meta-alpha);
+  white-space: nowrap;
+}
+
+.helper-image.is-missing .helper-image-thumb {
+  display: none;
+}
+
+/* The picture whole, over everything (the extension's `previewOverlay`). */
+.chat-image-preview {
+  position: fixed;
+  inset: 0;
+  z-index: var(--chat-preview-layer);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--chat-preview-ground);
+}
+
+.chat-image-preview-frame {
+  position: relative;
+  max-width: var(--chat-preview-max);
+  max-height: var(--chat-preview-max-h);
+  cursor: default;
+}
+
+.chat-image-preview-image {
+  display: block;
+  max-width: var(--chat-preview-max);
+  max-height: var(--chat-preview-max-h);
+  border-radius: var(--chat-preview-radius);
+  object-fit: contain;
+  box-shadow: var(--chat-preview-shadow);
+}
+
+.chat-image-preview-close {
+  position: absolute;
+  top: var(--chat-preview-close-out);
+  right: var(--chat-preview-close-out);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--chat-preview-close);
+  height: var(--chat-preview-close);
+  padding: 0;
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: 50%;
+  background: var(--surface-raised);
+  color: var(--ink-chalk);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.chat-image-preview-close:hover {
+  background: var(--chat-composer-bg);
+}
+
+.chat-image-preview-close .icon {
+  width: var(--chat-preview-close-icon);
+  height: var(--chat-preview-close-icon);
+}
+
 /* A todo call's list (t-6323 A7), the extension's `todoList`: the items
  * stacked a little apart, each a box beside its words; a done item faded
  * and struck through in the quiet ink. The box is the extension's disabled
