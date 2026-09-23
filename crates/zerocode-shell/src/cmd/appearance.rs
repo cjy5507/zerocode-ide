@@ -248,7 +248,14 @@ pub(crate) fn set_computer_awake_mode(
 /// hot gates below PUSH `computer-awake:changed`, and everything slower
 /// (the keeper's staleness tick, a pane forgotten by the reaper) is caught
 /// by the segment re-asking on the events it already hears.
-#[tauri::command]
+///
+/// Asked off the main thread (t-6388): the reading waits for the keeper to
+/// fold in the last request, which can mean a `caffeinate` spawned or
+/// reaped first, and the window asks on `system:resumed` — a wake, when
+/// hooks are nudging the keeper and macOS may not be running it at all. On
+/// 2026-09-23 17:13:44, inside a lid-closed DarkWake, a hang report found
+/// the main thread standing in this command for 15,055 ms.
+#[tauri::command(async)]
 pub(crate) fn computer_awake_status(state: State<'_, AppState>) -> AwakeStatus {
     let _crumb = crate::crumbs::Command::enter("computer_awake_status");
     let (mode, active) = state.awake().status();
