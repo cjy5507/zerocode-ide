@@ -34872,6 +34872,7 @@ mod tests {
             "const FOLDER_PANEL_MAIN_THREAD_BUDGET: Duration",
             "const FOLDER_PANEL_PRESUMED_LOST: Duration",
             "const FOLDER_PANEL_HELPER_WAIT: Duration",
+            "const FOLDER_PANEL_RAISE_DELAY: Duration",
             "const FOLDER_PANEL_OVERDUE_EVENT: &str",
             "const FOLDER_PANEL_STANDING: &str",
             "const FOLDER_BROWSE_ENTRY_CAP: usize",
@@ -34884,7 +34885,7 @@ mod tests {
         }
         assert_eq!(
             shipped.matches("const FOLDER_PANEL_").count(),
-            6,
+            7,
             "a folder-panel number was spelled out somewhere other than the table"
         );
         assert_eq!(
