@@ -125,9 +125,30 @@ pub fn resolve_runtime_home(config_root: &Path) -> PathBuf {
 }
 
 /// Where the active credentials live for reading usage: the managed home if an
-/// account is chosen, or ~/.codex for the system default.
+/// account is chosen, or ~/.codex for the system default — and, for a chosen
+/// account, the shared runtime home instead when it holds a provably fresher
+/// copy of that same login.
+///
+/// The runtime half is t-6583's Codex check. A chosen account's panes run with
+/// `CODEX_HOME` set to the runtime home ([`launch_env`]), so that is where the
+/// CLI refreshes — and rotates — its tokens; the account's own home receives
+/// the fresher copy only at the next launch's read-back ([`materialize_into`],
+/// step 1). A usage read in between asked with the older token. Which copy is
+/// the live one is [`runtime_copy_wins`], the rule the materialize already
+/// judges by, so the two roads cannot come to disagree. A read, never a write.
 pub fn active_home(config_root: &Path) -> Option<PathBuf> {
-    active_home_in(config_root, system_home()).map(|(home, _)| home)
+    let (home, kind) = active_home_in(config_root, system_home())?;
+    if kind == CodexHomeKind::Account {
+        let runtime = resolve_runtime_home(config_root);
+        if let (Ok(live), Ok(stored)) = (
+            std::fs::read_to_string(runtime.join(AUTH_FILE)),
+            std::fs::read_to_string(home.join(AUTH_FILE)),
+        ) && runtime_copy_wins(&live, &stored)
+        {
+            return Some(runtime);
+        }
+    }
+    Some(home)
 }
 
 /// Whose home [`active_home`] chose.
@@ -893,6 +914,46 @@ mod tests {
         };
         write_store(root, &store).expect("store");
         (home, runtime_home(root))
+    }
+
+    /// A usage read asks with the copy the panes refreshed (t-6583).
+    ///
+    /// A chosen account's panes run in the runtime home and rotate their tokens
+    /// there; until the next launch reads that copy back, the account's own
+    /// home holds the older one, and a usage read of it asked with a token the
+    /// pane had already moved past. The same rule as the materialize decides
+    /// which copy is live, and the look writes nothing.
+    #[test]
+    fn a_usage_read_asks_with_the_copy_the_panes_refreshed() {
+        let root = tempfile::tempdir().expect("a data root");
+        let older = auth_fixture("account-one", "2026-09-17T02:48:26Z", "at-old");
+        let newer = auth_fixture("account-one", "2026-09-21T06:32:33Z", "at-new");
+        let (home, runtime) = one_selected_account(root.path(), &older);
+        assert_eq!(active_home(root.path()), Some(home.clone()));
+
+        std::fs::create_dir_all(&runtime).expect("runtime home");
+        std::fs::write(runtime.join(AUTH_FILE), &newer).expect("the pane refreshed");
+        assert_eq!(
+            active_home(root.path()),
+            Some(runtime.clone()),
+            "the usage read asked with the copy the pane had rotated past"
+        );
+
+        // An older runtime copy does not win, and neither does another login.
+        std::fs::write(runtime.join(AUTH_FILE), &older).expect("a stale runtime");
+        std::fs::write(home.join(AUTH_FILE), &newer).expect("the account refreshed");
+        assert_eq!(active_home(root.path()), Some(home.clone()));
+        let stranger = auth_fixture("account-two", "2026-09-22T00:00:00Z", "at-other");
+        std::fs::write(runtime.join(AUTH_FILE), &stranger).expect("another login");
+        assert_eq!(active_home(root.path()), Some(home.clone()));
+        assert_eq!(
+            (
+                std::fs::read_to_string(runtime.join(AUTH_FILE)).expect("runtime"),
+                std::fs::read_to_string(home.join(AUTH_FILE)).expect("home"),
+            ),
+            (stranger, newer),
+            "a usage look wrote a login"
+        );
     }
 
     /// ChatGPT rotates refresh tokens, so the two homes holding one login have
