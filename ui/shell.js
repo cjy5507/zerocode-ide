@@ -7181,6 +7181,7 @@ async function paintAgentGraphView(
   }
   try {
     wireBoardHead(view);
+    if (agentBoardMode === "tasks") primeCoordinatorDesk();
     const cards = snapshot?.cards ?? await boardCards();
     const reviews = new Map();
     const checkouts = new Set();

@@ -112,6 +112,16 @@ listen("ledger:changed", () => {
   if (deskViews().length > 0) refreshDeskLedger();
 });
 
+/* 보드가 작업 보기로 그려지기 **전에** 데스크의 원장 읽기를 한 번 띄운다. 보드의
+ * 첫 그림은 제 두 물음(`pane_agents`·`board_snapshot`)을 기다리므로, 그 사이에 이
+ * 답이 먼저 와 데스크가 작업 목록과 같은 그림에 선다 — 한 프레임 뒤에 따로 서지
+ * 않는다. 이미 읽은 판은 원장 박자가 다시 부른다. */
+function primeCoordinatorDesk() {
+  if (deskLedgerSaid !== "" || deskLedgerAsking) return;
+  refreshDeskLedger();
+  if (Date.now() - deskAmbientAt >= DESK.ambientEveryMs) refreshDeskAmbient();
+}
+
 function refreshDeskAmbient() {
   deskAmbientAt = Date.now();
   void askReleaseStatus().then(scheduleDeskPaint);

@@ -127,11 +127,25 @@ export async function measureDesk(page, { polls = 40, now } = {}) {
   // the round trip that carried it.
   await page.evaluate(`window.__DESK_FIXTURE__ = ${coordinatorDeskFixture.toString()};`);
   const first = await page.evaluate(async ({ now }) => {
+    // Where the first task row stood on the first frame it existed, and where
+    // it stands once everything settled: the difference is the layout shift a
+    // person sees when the desk arrives after the list.
+    let firstTop = null;
+    const watch = () => {
+      const row = document.querySelector("#board-view .task-board-row");
+      if (row) firstTop = row.getBoundingClientRect().top;
+      else requestAnimationFrame(watch);
+    };
+    requestAnimationFrame(watch);
+    window.__PERF_PAINT__ = 0;
     const from = performance.now();
     window.__DESK_FIXTURE__({ now });
     await window.__PERF_SETTLED__();
+    const js = window.__PERF_PAINT__;
     const layout = window.__PERF_LAYOUT__();
-    return { ms: performance.now() - from, layout };
+    const settledTop = document.querySelector("#board-view .task-board-row")?.getBoundingClientRect().top ?? null;
+    return { ms: performance.now() - from, js, layout,
+      shift: firstTop === null || settledTop === null ? null : Math.round(settledTop - firstTop) };
   }, { now });
   // Two more beats for anything the first paint deferred (a lazy fetch).
   await page.evaluate(async () => { await window.__PERF_SETTLED__(); await window.__PERF_SETTLED__(); });
@@ -154,7 +168,9 @@ export async function measureDesk(page, { polls = 40, now } = {}) {
   const pick = (rows, key) => rows.map((row) => row[key]);
   return {
     firstPaintMs: first.ms,
+    firstPaintJsMs: first.js,
     firstLayoutMs: first.layout,
+    firstRowShiftPx: first.shift,
     ...dom,
     quietPaintP50: median(pick(quiet, "paint")),
     quietPaintP95: quantile(pick(quiet, "paint"), 0.95),
@@ -225,7 +241,7 @@ if (import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   });
   const ms = (value) => (value === null ? "—" : `${value.toFixed(2)} ms`);
   console.log(`engine ${summary.engine}, ${summary.rounds} rounds (medians), ${summary.width}×${summary.height}, ${summary.load}`);
-  console.log(`  first paint ${ms(summary.firstPaintMs)} (forced layout after it ${ms(summary.firstLayoutMs)})`);
+  console.log(`  first paint ${ms(summary.firstPaintMs)} (paint JS ${ms(summary.firstPaintJsMs)}, forced layout after it ${ms(summary.firstLayoutMs)}, first task row moved ${summary.firstRowShiftPx} px after it first stood)`);
   console.log(`  rows ${summary.rows} · surface elements ${summary.surfaceElements} · board elements ${summary.boardElements} · desk elements ${summary.deskElements} [${summary.deskBlocks.join(",")}]`);
   console.log(`  quiet poll: paint p50 ${ms(summary.quietPaintP50)} · p95 ${ms(summary.quietPaintP95)} · layout p50 ${ms(summary.quietLayoutP50)} · mutations max ${summary.quietMutationsMax}`);
   console.log(`  moved poll: paint p50 ${ms(summary.movedPaintP50)} · p95 ${ms(summary.movedPaintP95)} · layout p50 ${ms(summary.movedLayoutP50)} p95 ${ms(summary.movedLayoutP95)} · mutations p50 ${summary.movedMutationsP50} max ${summary.movedMutationsMax}`);

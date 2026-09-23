@@ -205,8 +205,31 @@ export async function boardPollMutations(page, change = null) {
 export async function testCoordinatorDesk(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
+    await installBoardWaits(page);
+    // The first frame the list stands in already carries the desk: the rows
+    // never move down under a person's eye when the desk's answers land.
+    await page.evaluate(() => {
+      window.__FIRST_ROW_TOP__ = null;
+      const watch = () => {
+        const row = document.querySelector("#board-view .task-board-row");
+        if (row) window.__FIRST_ROW_TOP__ = row.getBoundingClientRect().top;
+        else requestAnimationFrame(watch);
+      };
+      requestAnimationFrame(watch);
+    });
     await page.evaluate(coordinatorDeskFixture);
     await page.waitForSelector(".task-board-row");
+    const firstFrame = await page.evaluate(async () => {
+      await window.__BOARD_SETTLED__();
+      for (let beat = 0; beat < 20 && (deskLedgerAsking || deskPaintFrame !== null); beat += 1) {
+        await new Promise((done) => requestAnimationFrame(done));
+      }
+      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const settled = document.querySelector("#board-view .task-board-row").getBoundingClientRect().top;
+      return { first: window.__FIRST_ROW_TOP__, settled, moved: Math.round(settled - window.__FIRST_ROW_TOP__) };
+    });
+    ok("the desk stands in the board's first frame: the first task row does not move when the desk's answers land",
+      firstFrame.moved === 0, JSON.stringify(firstFrame));
     await page.evaluate(async () => {
       await askReleaseStatus();
       await paintBoardView();
