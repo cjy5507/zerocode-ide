@@ -92,7 +92,7 @@ fn descriptor_for_catalog_entry(entry: &api::ProviderCatalogEntry) -> ModelDescr
         .capabilities(capabilities_for_model(id))
         .tiers(tiers)
         .tiers_provenance(tiers_provenance)
-        .status(status_for_model(id, true))
+        .status(catalog_status(id, crate::model_discovery::withdrawn_since(id)))
         .release_rank(release_rank_for_model(id))
         .effort_ceiling(effort_ceiling_for_model(id));
     if let Some(context_window) = context_window_for_descriptor(id) {
@@ -527,6 +527,18 @@ fn custom_tiers_for_model(id: &str) -> (Vec<ModelTier>, TiersProvenance) {
 /// id happens to spell. A custom-provider endpoint keeps the name heuristic —
 /// there the token is the only signal available, and staying conservative about
 /// an endpoint zo knows nothing about is the right default.
+/// A shipped row's status: retired once its provider's list stopped naming
+/// it (t-6248) — automatic choice passes it over, while a person's own pick
+/// of it still stands (the main model is always allowed) and the wire
+/// decides — otherwise what the catalog declares.
+fn catalog_status(id: &str, withdrawn_since: Option<u64>) -> ModelStatus {
+    if withdrawn_since.is_some() {
+        ModelStatus::Retired
+    } else {
+        status_for_model(id, true)
+    }
+}
+
 fn status_for_model(id: &str, catalog_declared: bool) -> ModelStatus {
     if catalog_declared {
         return ModelStatus::Stable;
@@ -740,6 +752,17 @@ mod capability_table_tests {
         api::refresh_model_registry_from_json(r#"{"models":[],"aliases":[]}"#);
         assert!(is_small_model("claude-haiku-4-5"), "shipped words are back");
         assert!(!is_small_model("acme-tiny-1"));
+    }
+
+    /// C4 (t-6248): a shipped model its provider's list no longer names is
+    /// retired for automatic choice — Codex dropped `gpt-5.3-codex-spark`
+    /// and answered every request for it "not supported when using Codex
+    /// with a ChatGPT account"; a listed one keeps its declared status.
+    #[test]
+    fn a_withdrawn_shipped_model_is_retired_for_automatic_choice() {
+        use crate::model_router::ModelStatus;
+        assert_eq!(super::catalog_status("gpt-5.3-codex-spark", Some(1_790_121_000)), ModelStatus::Retired);
+        assert_eq!(super::catalog_status("gpt-5.6-sol", None), ModelStatus::Stable);
     }
 
     #[test]

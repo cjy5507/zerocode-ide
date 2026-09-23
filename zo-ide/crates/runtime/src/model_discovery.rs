@@ -127,6 +127,10 @@ pub struct Source {
     pub configured: fn() -> bool,
     /// Ask the source, blocking.
     pub ask: fn() -> SourceAnswer,
+    /// The answer is every model the login may use — so a shipped row of the
+    /// provider it does not name was withdrawn ([`Withdrawn`]). A registry
+    /// that folds tiered ids, or a key list beside an OAuth route, is not.
+    pub lists_every_model: bool,
 }
 
 impl Source {
@@ -156,6 +160,7 @@ pub const SOURCES: [Source; 4] = [
         models_url: chatgpt_models_url,
         configured: api::openai_login_configured,
         ask: openai_models,
+        lists_every_model: true,
     },
     Source {
         provider: "anthropic",
@@ -165,6 +170,7 @@ pub const SOURCES: [Source; 4] = [
         models_url: anthropic_models_url,
         configured: api::claude_credential_configured,
         ask: anthropic_models,
+        lists_every_model: true,
     },
     Source {
         provider: "google",
@@ -174,6 +180,7 @@ pub const SOURCES: [Source; 4] = [
         models_url: google_models_url,
         configured: google_api_key_configured,
         ask: google_models,
+        lists_every_model: false,
     },
     Source {
         provider: "google",
@@ -183,6 +190,7 @@ pub const SOURCES: [Source; 4] = [
         models_url: antigravity_models_url,
         configured: api::google_code_assist_oauth_present,
         ask: antigravity_models,
+        lists_every_model: false,
     },
 ];
 
@@ -392,6 +400,25 @@ impl SourceReport {
     }
 }
 
+/// A shipped model the provider's whole list no longer names (t-6248, C4):
+/// `gpt-5.3-codex-spark` after Codex dropped it, answering "not supported
+/// when using Codex with a ChatGPT account". The row stays — a selected
+/// model never vanishes, and the wire decides — but the picker and `zo
+/// models` say it left the list and when, automatic routing stops choosing
+/// it, and a family alias that named it moves to the newest living release
+/// of its family or says there is none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Withdrawn {
+    /// Catalog provider key.
+    pub provider: String,
+    /// The shipped canonical id.
+    pub id: String,
+    /// The source whose list omits it.
+    pub source: String,
+    /// Unix seconds of the first answer that omitted it.
+    pub since: u64,
+}
+
 /// Everything the last refresh learned, as cached on disk.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DiscoveredCatalog {
@@ -401,6 +428,9 @@ pub struct DiscoveredCatalog {
     pub reports: Vec<SourceReport>,
     #[serde(default)]
     pub models: Vec<DiscoveredModel>,
+    /// Shipped rows the complete lists no longer name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withdrawn: Vec<Withdrawn>,
 }
 
 impl DiscoveredCatalog {
@@ -432,6 +462,10 @@ pub struct Overlay {
     pub alias_updates: Vec<AliasUpdate>,
     /// Moves withheld by policy `notify`, for the person to act on.
     pub alias_candidates: Vec<AliasUpdate>,
+    /// Family aliases whose release left its provider's list with no living
+    /// release of the family to follow (`to` is empty): the alias stays where
+    /// it was — the wire decides — and the catalog says there is none.
+    pub orphaned: Vec<AliasUpdate>,
 }
 
 #[must_use]
@@ -630,7 +664,88 @@ pub fn refresh_with(
         }
     }
     let catalog = carry_forward(catalog, previous);
-    keep_selected(catalog, previous, selected, now_secs)
+    let catalog = keep_selected(catalog, previous, selected, now_secs);
+    withdraw_shipped(catalog, previous, now_secs)
+}
+
+/// The shipped rows each complete list ([`Source::lists_every_model`]) no
+/// longer names. An answer — live, cached or carried unchanged — decides
+/// afresh, keeping the date of the first omission; a failed source keeps
+/// the marks it had, as it keeps its rows; a skipped one knows nothing and
+/// marks nothing.
+#[must_use]
+pub fn withdraw_shipped(
+    mut fresh: DiscoveredCatalog,
+    previous: Option<&DiscoveredCatalog>,
+    now_secs: u64,
+) -> DiscoveredCatalog {
+    let mut withdrawn = Vec::new();
+    for source in SOURCES.iter().filter(|source| source.lists_every_model) {
+        let Some(report) = fresh.reports.iter().find(|report| report.source == source.key) else {
+            continue;
+        };
+        if report.ok {
+            let listed: HashSet<String> = fresh
+                .models
+                .iter()
+                .filter(|model| model.unlisted_since.is_none() && same_source(&model.source, source.key))
+                .map(|model| model.id.to_ascii_lowercase())
+                .collect();
+            let answered_at = if report.fetched_at == 0 { now_secs } else { report.fetched_at };
+            for id in shipped_canonicals(source.provider) {
+                if listed.contains(&id.to_ascii_lowercase()) {
+                    continue;
+                }
+                let since = previous
+                    .and_then(|previous| withdrawn_since_in(previous, id))
+                    .unwrap_or(answered_at);
+                withdrawn.push(Withdrawn {
+                    provider: source.provider.to_string(),
+                    id: id.to_string(),
+                    source: source.key.to_string(),
+                    since,
+                });
+            }
+        } else if !report.skipped() {
+            if let Some(previous) = previous {
+                withdrawn.extend(previous.withdrawn.iter().filter(|row| row.source == source.key).cloned());
+            }
+        }
+    }
+    fresh.withdrawn = withdrawn;
+    fresh
+}
+
+/// Every canonical id the shipped catalog carries for a provider key, once.
+fn shipped_canonicals(provider: &str) -> Vec<&'static str> {
+    let mut ids: Vec<&'static str> = Vec::new();
+    for entry in api::builtin_provider_catalog() {
+        if provider_key(entry.provider) == Some(provider)
+            && !ids.iter().any(|id| id.eq_ignore_ascii_case(entry.canonical_model_id))
+        {
+            ids.push(entry.canonical_model_id);
+        }
+    }
+    ids
+}
+
+/// When `catalog` saw `id` leave its provider's list, if it is a withdrawn
+/// shipped row.
+#[must_use]
+pub fn withdrawn_since_in(catalog: &DiscoveredCatalog, id: &str) -> Option<u64> {
+    catalog
+        .withdrawn
+        .iter()
+        .find(|row| row.id.eq_ignore_ascii_case(id))
+        .map(|row| row.since)
+}
+
+/// [`withdrawn_since_in`] over the process snapshot — what automatic routing
+/// reads before it chooses a model.
+#[must_use]
+pub fn withdrawn_since(id: &str) -> Option<u64> {
+    let catalog = current()?;
+    withdrawn_since_in(&catalog, id)
 }
 
 /// The real fetchers, by source key — each row's own.
@@ -779,15 +894,18 @@ pub fn selected_models() -> Vec<String> {
     ids
 }
 
-/// When the source stopped listing `id`, if the current catalog carries it as
-/// an unlisted row — what the picker dims.
+/// When the provider's list stopped naming `id`, if the current catalog
+/// carries it as an unlisted discovered row or a withdrawn shipped one —
+/// what the picker dims.
 #[must_use]
 pub fn unlisted_since(id: &str) -> Option<u64> {
-    current()?
+    let catalog = current()?;
+    catalog
         .models
         .iter()
         .find(|model| model.id.eq_ignore_ascii_case(id))
         .and_then(|model| model.unlisted_since)
+        .or_else(|| withdrawn_since_in(&catalog, id))
 }
 
 /// One row per id: when the OAuth registry and the API-key list both name a
@@ -1856,7 +1974,8 @@ pub fn overlay(catalog: &DiscoveredCatalog, policy: UpdatePolicy) -> Overlay {
         }));
     }
 
-    let moves = family_alias_moves(&fresh, policy);
+    let mut moves = family_alias_moves(&fresh, policy);
+    let orphaned = follow_withdrawn_aliases(catalog, &fresh, policy, &mut moves, &mut models, &mut aliases);
     aliases.extend(moves.rows);
     let alias_updates = moves.updates;
     let alias_candidates = moves.candidates;
@@ -1869,7 +1988,80 @@ pub fn overlay(catalog: &DiscoveredCatalog, policy: UpdatePolicy) -> Overlay {
         new_models: fresh,
         alias_updates,
         alias_candidates,
+        orphaned,
     }
+}
+
+/// Every alias that names a withdrawn shipped release ([`Withdrawn`]) and no
+/// release itself (a versioned name is a pin, and stays): a family alias
+/// follows the newest release of its family the lists still name, a
+/// provider pointer the newest of its provider — older or newer, the living
+/// one is the answer — unless a newer release already moved it. One with
+/// nothing to follow is returned, for the catalog to say so. A target the
+/// shipped catalog does not carry and that is not news (`fresh`) gets its row
+/// here, so the alias does not name an id nothing describes.
+fn follow_withdrawn_aliases(
+    catalog: &DiscoveredCatalog,
+    fresh: &[DiscoveredModel],
+    policy: UpdatePolicy,
+    moves: &mut AliasMoves,
+    models: &mut Vec<Value>,
+    aliases: &mut Vec<Value>,
+) -> Vec<AliasUpdate> {
+    let shipped = shipped();
+    let mut orphaned: Vec<AliasUpdate> = Vec::new();
+    for entry in api::builtin_provider_catalog() {
+        let Some(provider) = provider_key(entry.provider) else {
+            continue;
+        };
+        if rank(entry.alias) > 0 || withdrawn_since_in(catalog, entry.canonical_model_id).is_none() {
+            continue;
+        }
+        let names_it = |update: &AliasUpdate| update.alias.eq_ignore_ascii_case(entry.alias);
+        if moves.updates.iter().any(names_it)
+            || moves.candidates.iter().any(names_it)
+            || orphaned.iter().any(names_it)
+        {
+            continue;
+        }
+        let is_pointer = entry.alias.to_ascii_lowercase().ends_with(PROVIDER_POINTER_SUFFIX);
+        let family = family_key(provider, entry.canonical_model_id);
+        let living = catalog
+            .models
+            .iter()
+            .filter(|model| model.provider == provider && model.unlisted_since.is_none())
+            .filter(|model| withdrawn_since_in(catalog, &model.id).is_none())
+            .filter(|model| is_pointer || family.is_some() && family_key(provider, &model.id) == family)
+            .max_by_key(|model| recency(model));
+        let Some(living) = living else {
+            orphaned.push(AliasUpdate {
+                provider: provider.to_string(),
+                alias: entry.alias.to_string(),
+                from: entry.canonical_model_id.to_string(),
+                to: String::new(),
+            });
+            continue;
+        };
+        let described = shipped.ids.contains(&living.id.to_ascii_lowercase())
+            || fresh.iter().any(|model| model.id.eq_ignore_ascii_case(&living.id));
+        if !described && policy == UpdatePolicy::Auto {
+            let living_family = family_key(provider, &living.id);
+            let head = living_family
+                .as_ref()
+                .and_then(|family| shipped.heads.get(&(provider, family.clone())).cloned());
+            let prior = head.clone().or_else(|| shipped.pointers.get(provider).cloned());
+            models.push(discovered_row(
+                living,
+                living_family.as_deref(),
+                head.as_deref(),
+                prior.as_deref(),
+                catalog.fetched_at,
+            ));
+            aliases.push(json!({"alias": living.id, "canonical": living.id, "provider": provider}));
+        }
+        moves.record(policy, entry.alias, provider, entry.canonical_model_id, living, Some(entry));
+    }
+    orphaned
 }
 
 /// One discovered release as a catalog row: what the source said, and — for
@@ -2173,6 +2365,7 @@ mod tests {
             fetched_at: 1_700_000_000,
             reports: Vec::new(),
             models,
+            withdrawn: Vec::new(),
         }
     }
 
@@ -2260,6 +2453,7 @@ mod tests {
             fetched_at: 1_700_000_000,
             reports: Vec::new(),
             models: vec![model("openai", "gpt-6", 0)],
+            withdrawn: Vec::new(),
         };
         assert_eq!(new_models(&newer).len(), 1);
     }
@@ -2751,6 +2945,7 @@ mod tests {
                 report(super::GOOGLE_API_SOURCE, false, now - 60),
             ],
             models: vec![row(super::OPENAI_SOURCE, "gpt-6-astra"), row(super::ANTHROPIC_SOURCE, "claude-fable-5-1")],
+            withdrawn: Vec::new(),
         };
         assert_eq!(
             super::due_sources(Some(&previous), now, ttl),
@@ -2792,6 +2987,7 @@ mod tests {
             fetched_at: now - 60,
             reports: super::SOURCES.iter().map(|source| report(source.key, true, now - 60)).collect(),
             models: Vec::new(),
+            withdrawn: Vec::new(),
         };
         assert!(super::due_sources(Some(&young), now, ttl).is_empty());
     }
@@ -2933,6 +3129,7 @@ mod tests {
                 report("antigravity-registry", false, "http error: error sending request", 0),
             ],
             models: vec![new_openai.clone()],
+            withdrawn: Vec::new(),
         };
 
         let merged = super::carry_forward(fresh, Some(&previous));
@@ -2969,6 +3166,7 @@ mod tests {
                 fetched_at: 1,
                 reports: vec![report("antigravity-registry", false, "http error", 0)],
                 models: Vec::new(),
+                withdrawn: Vec::new(),
             },
             None,
         );
@@ -3066,6 +3264,7 @@ mod tests {
                 source: super::ANTHROPIC_SOURCE.to_string(),
                 ..Default::default()
             }],
+            withdrawn: Vec::new(),
         };
 
         let unusable = {
@@ -3126,6 +3325,7 @@ mod tests {
                 })
                 .collect(),
             models: Vec::new(),
+            withdrawn: Vec::new(),
         }
     }
 
@@ -3183,6 +3383,135 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(store);
+    }
+
+    /// Codex's own model list on 2026-09-23 (the window's runtime home,
+    /// `models_cache.json`, rows trimmed to what the parser reads): nine
+    /// rows, seven listed — and no `gpt-5.3-codex-spark`.
+    fn codex_list_20260923() -> Value {
+        json!({"models": [
+            {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "visibility": "list", "priority": 1},
+            {"slug": "gpt-6-sol", "display_name": "GPT-6-Sol", "visibility": "list", "priority": 2},
+            {"slug": "gpt-6-luna", "display_name": "GPT-6-Luna", "visibility": "list", "priority": 3},
+            {"slug": "gpt-reserve", "display_name": "GPT-Reserve", "visibility": "hide", "priority": 3},
+            {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list", "priority": 4},
+            {"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra", "visibility": "list", "priority": 7},
+            {"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list", "priority": 8},
+            {"slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list", "priority": 12},
+            {"slug": "codex-auto-review", "display_name": "Codex Auto Review", "visibility": "hide", "priority": 43}
+        ]})
+    }
+
+    /// What the wire answered a session that asked for spark anyway
+    /// (2026-09-23, an agent's failure record).
+    const CODEX_SPARK_REFUSAL: &str = r#"api returned 400 Bad Request: {"detail":"The 'gpt-5.3-codex-spark' model is not supported when using Codex with a ChatGPT account."}"#;
+
+    /// A refresh where the OpenAI column answers `document` at `now` and
+    /// every other source is skipped.
+    fn codex_refresh(previous: Option<&DiscoveredCatalog>, document: &Value, now: u64) -> DiscoveredCatalog {
+        super::refresh_with(previous, &[super::OPENAI_SOURCE], now, &[], |source| {
+            if source == super::OPENAI_SOURCE {
+                Ok(super::Answered {
+                    source: source.to_string(),
+                    models: codex_cache_rows(document, source),
+                    origin: super::ORIGIN_LIVE.to_string(),
+                    fetched_at: now,
+                    note: None,
+                })
+            } else {
+                Err((source.to_string(), "skipped: not in this test".to_string()))
+            }
+        })
+    }
+
+    /// C4 (t-6248): a shipped model the provider's whole list no longer
+    /// names is marked withdrawn from the first answer that omitted it — the
+    /// very model the wire refuses — and the family alias that pointed at it
+    /// says there is no living release of the family, rather than going on
+    /// naming a dead model.
+    #[test]
+    fn a_shipped_model_codexs_list_no_longer_names_is_withdrawn_and_its_alias_says_none() {
+        let refused = CODEX_SPARK_REFUSAL.split('\'').nth(1).expect("the refused id");
+        let now = 1_790_121_000;
+        let codex = codex_list_20260923();
+        let fresh = codex_refresh(None, &codex, now);
+        let withdrawn: Vec<(&str, &str, u64)> = fresh
+            .withdrawn
+            .iter()
+            .map(|row| (row.id.as_str(), row.source.as_str(), row.since))
+            .collect();
+        assert_eq!(
+            withdrawn,
+            vec![(refused, super::OPENAI_SOURCE, now)],
+            "exactly the model the wire refuses, dated from the first list without it"
+        );
+        assert_eq!(super::withdrawn_since_in(&fresh, refused), Some(now));
+        assert_eq!(super::withdrawn_since_in(&fresh, "gpt-5.6-sol"), None, "a listed model is not withdrawn");
+
+        let later = codex_refresh(Some(&fresh), &codex, now + 3_600);
+        assert_eq!(super::withdrawn_since_in(&later, refused), Some(now), "the first omission keeps its date");
+
+        let overlay = overlay(&fresh, UpdatePolicy::Auto);
+        let orphaned: Vec<(&str, &str)> = overlay
+            .orphaned
+            .iter()
+            .map(|update| (update.alias.as_str(), update.from.as_str()))
+            .collect();
+        assert_eq!(orphaned, vec![("spark", refused)], "spark names no living release; the versioned id stays a pin");
+        assert!(!overlay.alias_updates.iter().any(|update| update.alias == "spark"));
+
+        // Listed again: the mark is gone.
+        let mut back = codex.clone();
+        back["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"slug": refused, "display_name": "GPT-5.3-Codex-Spark", "visibility": "list", "priority": 20}));
+        let relisted = codex_refresh(Some(&later), &back, now + 7_200);
+        assert_eq!(super::withdrawn_since_in(&relisted, refused), None);
+    }
+
+    /// C4, the rest of the rule: the alias follows the newest living release
+    /// of its family — older than the one withdrawn, if that is what lives —
+    /// with a row that describes it; a failed list keeps its marks as it
+    /// keeps its rows; a skipped one knows nothing and marks nothing.
+    #[test]
+    fn a_withdrawn_releases_alias_follows_the_living_family_and_the_marks_follow_the_answers() {
+        let now = 1_790_121_000;
+        let mut codex = codex_list_20260923();
+        codex["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"slug": "gpt-5.2-codex-spark", "display_name": "GPT-5.2-Codex-Spark", "visibility": "list", "priority": 30}));
+        let fresh = codex_refresh(None, &codex, now);
+        let overlay = overlay(&fresh, UpdatePolicy::Auto);
+        assert!(overlay.orphaned.is_empty(), "a spark still lives: {:?}", overlay.orphaned);
+        let spark = overlay
+            .alias_updates
+            .iter()
+            .find(|update| update.alias == "spark")
+            .expect("spark follows the living release");
+        assert_eq!((spark.from.as_str(), spark.to.as_str()), ("gpt-5.3-codex-spark", "gpt-5.2-codex-spark"));
+        let value: Value = serde_json::from_str(overlay.json.as_deref().expect("an overlay")).unwrap();
+        assert!(
+            value["models"].as_array().unwrap().iter().any(|row| row["ids"][0] == "gpt-5.2-codex-spark"),
+            "the alias names an id a row describes"
+        );
+        let withheld = super::overlay(&fresh, UpdatePolicy::Notify);
+        assert!(withheld.alias_candidates.iter().any(|update| update.alias == "spark"));
+        assert!(super::overlay(&fresh, UpdatePolicy::Pinned).orphaned.is_empty());
+
+        let failed = super::refresh_with(Some(&fresh), &[super::OPENAI_SOURCE], now + 60, &[], |source| {
+            Err((source.to_string(), "HTTP 502 Bad Gateway".to_string()))
+        });
+        assert_eq!(
+            super::withdrawn_since_in(&failed, "gpt-5.3-codex-spark"),
+            Some(now),
+            "a failed list keeps its marks"
+        );
+        let skipped = super::refresh_with(Some(&fresh), &[super::OPENAI_SOURCE], now + 120, &[], |source| {
+            Err((source.to_string(), "skipped: no ChatGPT login".to_string()))
+        });
+        assert!(skipped.withdrawn.is_empty(), "a skipped list knows nothing");
     }
 
     #[test]

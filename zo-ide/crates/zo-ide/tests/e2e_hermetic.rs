@@ -3485,7 +3485,7 @@ async fn e2e_model_picker_keeps_the_selected_model_its_source_stopped_listing() 
     run.send(b"/model\r").expect("open model picker");
     run.wait_for_after("Select Model and Effort", picker_at, TEST_TIMEOUT);
     run.wait_for_after("gpt-6-astra (current)", picker_at, TEST_TIMEOUT);
-    run.wait_for_after("출처가 목록에서 뺐음 · 09-0", picker_at, TEST_TIMEOUT);
+    run.wait_for_after("공급자 목록에서 빠짐 · 09-0", picker_at, TEST_TIMEOUT);
     run.wait_for_after("Press enter to confirm or esc to go back", picker_at, TEST_TIMEOUT);
     run.send(b"\x1b").expect("close model picker");
     run.wait_for_after("Ask zo to do anything", picker_at, TEST_TIMEOUT);
@@ -3499,7 +3499,7 @@ async fn e2e_model_picker_keeps_the_selected_model_its_source_stopped_listing() 
     let row_end = screen[label_at..].find("\x1b[0m").map_or(screen.len(), |at| label_at + at);
     let row = &screen[row_start..row_end];
     assert!(
-        row.contains("출처가 목록에서 뺐음"),
+        row.contains("공급자 목록에서 빠짐"),
         "the reason sits on the row itself: {row:?}"
     );
     assert!(

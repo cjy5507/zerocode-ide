@@ -1469,9 +1469,10 @@ pub fn drain_catalog_notices() -> Vec<String> {
 /// moves on every keystroke (2026-09-08).
 static LAST_ANNOUNCED_MOVES: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// What a publish would announce, as one stable key: every alias move and
-/// withheld candidate, sorted, without the fetch stamp the overlay rows
-/// carry. `None` when there is nothing to say.
+/// What a publish would announce, as one stable key: every alias move,
+/// withheld candidate and alias left without a living release, sorted,
+/// without the fetch stamp the overlay rows carry. `None` when there is
+/// nothing to say.
 #[must_use]
 pub(crate) fn alias_moves_key(overlay: &runtime::model_discovery::Overlay) -> Option<String> {
     let mut lines: Vec<String> = overlay
@@ -1484,6 +1485,12 @@ pub(crate) fn alias_moves_key(overlay: &runtime::model_discovery::Overlay) -> Op
                 .iter()
                 .map(|update| format!("?{}→{}←{}", update.alias, update.to, update.from)),
         )
+        .chain(
+            overlay
+                .orphaned
+                .iter()
+                .map(|update| format!("!{}→∅←{}", update.alias, update.from)),
+        )
         .collect();
     if lines.is_empty() {
         return None;
@@ -1493,10 +1500,16 @@ pub(crate) fn alias_moves_key(overlay: &runtime::model_discovery::Overlay) -> Op
 }
 
 /// The words a move is announced with. An alias minted for a family the
-/// shipped catalog never named has no "was".
+/// shipped catalog never named has no "was"; one whose release left its
+/// provider's list with nothing living to follow has no "to" (t-6248).
 #[must_use]
 pub(crate) fn alias_move_words(update: &runtime::model_discovery::AliasUpdate) -> String {
-    if update.from.is_empty() {
+    if update.to.is_empty() {
+        format!(
+            "model catalog: {} → none ({} left the {} list and no release of its family is listed)",
+            update.alias, update.from, update.provider
+        )
+    } else if update.from.is_empty() {
         format!(
             "model catalog: {} → {} (new alias, discovered)",
             update.alias, update.to
@@ -1626,6 +1639,9 @@ fn announce_alias_moves(overlay: &runtime::model_discovery::Overlay) {
             "model catalog: {} could move to {} (now {}) — /model, or set modelUpdatePolicy to auto",
             update.alias, update.to, update.from
         ));
+    }
+    for update in &overlay.orphaned {
+        push_catalog_notice(alias_move_words(update));
     }
 }
 
@@ -3445,6 +3461,7 @@ mod tests {
             new_models: Vec::new(),
             alias_updates: vec![update("openai-latest", "gpt-6-astra", "gpt-5.6-sol"), update("astra", "gpt-6-astra", "")],
             alias_candidates: vec![update("gemini-flash", "gemini-3.8-flash", "gemini-3.6-flash")],
+            orphaned: Vec::new(),
         };
         let refreshed = runtime::model_discovery::Overlay {
             json: Some(r#"{"models":[{"source":"discovered via chatgpt-backend at 1788827387"}]}"#.to_string()),
@@ -3452,6 +3469,7 @@ mod tests {
             // The same moves in another order: still the same answer.
             alias_updates: vec![update("astra", "gpt-6-astra", ""), update("openai-latest", "gpt-6-astra", "gpt-5.6-sol")],
             alias_candidates: first.alias_candidates.clone(),
+            orphaned: Vec::new(),
         };
         assert_ne!(first.json, refreshed.json, "the stamp moved");
         let key = alias_moves_key(&first).expect("moves to announce");
@@ -3476,6 +3494,19 @@ mod tests {
         assert_eq!(
             alias_move_words(&update("openai-latest", "gpt-6-astra", "gpt-5.6-sol")),
             "model catalog: openai-latest → gpt-6-astra (was gpt-5.6-sol, discovered)"
+        );
+        // An alias whose release left the list with nothing living to follow
+        // is news once, and says there is none (t-6248).
+        let orphaned = runtime::model_discovery::Overlay {
+            orphaned: vec![update("spark", "", "gpt-5.3-codex-spark")],
+            ..first.clone()
+        };
+        let with_orphan = alias_moves_key(&orphaned).expect("news");
+        assert!(with_orphan.contains("!spark→∅←gpt-5.3-codex-spark"), "{with_orphan}");
+        assert_ne!(Some(with_orphan), alias_moves_key(&first));
+        assert_eq!(
+            alias_move_words(&update("spark", "", "gpt-5.3-codex-spark")),
+            "model catalog: spark → none (gpt-5.3-codex-spark left the openai list and no release of its family is listed)"
         );
     }
 

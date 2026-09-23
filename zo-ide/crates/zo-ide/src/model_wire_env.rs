@@ -399,6 +399,7 @@ mod tests {
                 source: "test".to_string(),
                 ..Default::default()
             }],
+            withdrawn: Vec::new(),
         };
         let minted = |overlay: &runtime::model_discovery::Overlay| -> Vec<String> {
             overlay

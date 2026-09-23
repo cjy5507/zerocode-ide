@@ -36,13 +36,14 @@ pub fn route_fact(who: &str, model: Option<&str>, effort: &str, reason: &str) ->
         None => format!("{who} · {effort} · {reason}"),
     }
 }
-/// The `/model` picker's description for a row its source stopped listing
-/// while a session had it selected — the row stays, dimmed, with the local
-/// clock of the first refresh that missed it (t-3054). Choosing it still
-/// works; the wire decides.
-pub const UNLISTED_SINCE: &str = "출처가 목록에서 뺐음";
+/// The words for a row its provider's list stopped naming — a discovered
+/// row a session had selected (t-3054), or a shipped one the provider
+/// withdrew (t-6248): the row stays, dimmed, with the local clock of the
+/// first answer that missed it. Choosing it still works; the wire decides.
+/// `zo models` says it in the same words.
+pub const UNLISTED_SINCE: &str = "공급자 목록에서 빠짐";
 
-/// `출처가 목록에서 뺐음 · <시각>` for one unlisted picker row.
+/// `공급자 목록에서 빠짐 · <시각>` for one unlisted row.
 #[must_use]
 pub fn unlisted_since(when: &str) -> String {
     format!("{UNLISTED_SINCE} · {when}")
