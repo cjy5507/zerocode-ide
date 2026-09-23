@@ -90,3 +90,14 @@ root:one_byte_gives_the_shell_its_terminal_back
 # pending-steer resubmit waited past the harness budget for the "interrupted to submit steer" line; green solo x3
 # (3.5-3.8 s each, load 40).
 zo:e2e_esc_with_pending_steer_resubmits_it_as_a_fresh_turn
+# 2026-09-23 t-6342 worker runs (shell-test and zo's tools suite while the machine sat at load 100-533 with other
+# workers' builds beside them): each read a wall clock or a beat count the load stretched, on paths the branch does
+# not change; green solo x3 on the same build. The sidecar reap saw no route on a directory-only walk (0 where 1);
+# the black box was told 3 times in a two-beat window; the beat pointed at 3 messages where 2 were fresh; zo's
+# routing fallback overran its short wall (348 ms); the decision funnel waited 989 ms on the shadow against 206 ms
+# without. The final gate at load 20-60 passed all five.
+root:codex_queue::tests::stale_reap_finds_an_owned_sidecar_after_its_runtime_directory_is_gone
+root:orchestration::tests::a_pane_the_window_never_heard_is_told_apart_from_one_at_work
+root:orchestration::tests::the_beat_points_an_idle_coordinator_at_its_mail_and_enters_once
+zo:misc_tools::smart_router::probe_exec::live_path_tests::decision_shadow::actual_use_timeout_falls_back_with_one_short_total_wait
+zo:misc_tools::smart_router::probe_exec::live_path_tests::decision_shadow::the_funnel_returns_in_the_probes_time_while_a_slow_judgment_is_still_out
