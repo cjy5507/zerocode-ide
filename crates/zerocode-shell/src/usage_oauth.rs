@@ -9,15 +9,22 @@
 //! always had — a slow answer beats no answer, and the terminal is also the
 //! screen a person can open to check the figure themselves.
 //!
-//! One knowing divergence, recorded on the map: Orca reads the macOS
-//! Keychain ahead of the credentials file (`Claude Code-credentials`).
-//! Reading another app's Keychain item from an adhoc-signed binary raises
-//! the password prompt on every rebuild — the exact incident the release
-//! procedure memo records — so this road reads the credentials FILE alone
-//! until the app carries a stable signing identity. A machine whose token
-//! lives only in the Keychain simply falls back to the terminal road.
+//! Where the Claude login comes from is not this file's question: it is handed
+//! the credentials document `accounts::usage_login` found, and that function
+//! reads the keychain item scoped to the store the window's own reading
+//! environment names — through `/usr/bin/security`, the read the scan already
+//! makes — before the runtime home's file. One knowing divergence from Orca
+//! stays recorded on the map: Orca reads the person's own unsuffixed item
+//! (`Claude Code-credentials`) in-process, and reading another app's item from
+//! an adhoc-signed binary raises the password prompt on every rebuild — the
+//! exact incident the release procedure memo records. That item is never read
+//! here; a system-default selection finds no login and walks the terminal.
+//!
+//! The file alone was not enough (t-6583): the CLI refreshes its token in the
+//! keychain, so the file the window wrote at the last switch had expired and
+//! every read of it came back 401.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::usage::{ResetCredit, ResetCredits};
 use crate::usage_http::{self, Failure};
@@ -78,16 +85,17 @@ pub struct OauthUsage {
     pub reset_credits: Option<ResetCredits>,
 }
 
-/// Claude's plan figures for the login in `config_dir` (absent means the
-/// machine's own `~/.claude`).
+/// Claude's plan figures, asked with `login` — the credentials document the
+/// caller found for the selected account (`None`: no login to ask with, which
+/// is also what a system-default selection gets, so the person's own login is
+/// never read to fill a status bar).
 ///
 /// The failure carries a KIND, not just a sentence: whether the caller walks
 /// the terminal road, how long the last good snapshot may keep standing, and
 /// when to ask again all hang off telling a 429 from a dropped packet
 /// ([`zerocode_core::usage_limit`]).
-pub fn claude(config_dir: Option<&Path>, now_ms: i64) -> Result<OauthUsage, Failure> {
-    let token = claude_credentials_file(config_dir)
-        .as_deref()
+pub fn claude(login: Option<&str>, now_ms: i64) -> Result<OauthUsage, Failure> {
+    let token = login
         .and_then(claude_access_token)
         .ok_or_else(Failure::no_credentials)?;
     let body = usage_http::get_json(
@@ -226,27 +234,19 @@ fn whole_count(raw: Option<&serde_json::Value>) -> Option<u32> {
     Some(number.floor().clamp(0.0, f64::from(u32::MAX)) as u32)
 }
 
-/// The file a Claude login leaves beside its config —
-/// `<config_dir>/.credentials.json`, `claudeAiOauth.accessToken` inside.
-fn claude_credentials_file(config_dir: Option<&Path>) -> Option<PathBuf> {
-    // No directory named means no answer — NOT "then read the person's own".
-    //
-    // This scan runs on a fifteen-minute timer, and the fallback made it reach
-    // into `~/.claude/.credentials.json` and take the token of whoever is logged
-    // in on this machine. That is somebody else's login: this window has its own
-    // runtime home, and a figure on our status bar is not worth reading a
-    // credential we were never given. A missing number says "no account
-    // selected", which is true and is what the person can act on.
-    Some(config_dir?.join(".credentials.json"))
-}
-
-/// The access token, and nothing else read or judged: the local `expiresAt`
-/// is deliberately NOT consulted — the usage endpoint authenticates tokens
-/// past their stamp, and Orca lets the server decide for that reason
-/// (claude-fetcher.ts:105).
-fn claude_access_token(file: &Path) -> Option<String> {
-    let raw = std::fs::read_to_string(file).ok()?;
-    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+/// The access token out of a Claude credentials document —
+/// `claudeAiOauth.accessToken` — and nothing else read or judged: the local
+/// `expiresAt` is deliberately NOT consulted, and the server decides, as Orca
+/// lets it (claude-fetcher.ts:105).
+///
+/// Which document is the caller's question (`accounts::usage_login`). What it
+/// must NOT be is a guess at the person's own `~/.claude`: this scan runs on a
+/// fifteen-minute timer, and a fallback there once took the token of whoever
+/// was logged in on this machine — somebody else's login, for a figure on our
+/// status bar. A missing login says "no account selected", which is true and
+/// is what the person can act on.
+fn claude_access_token(document: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(document).ok()?;
     let token = parsed.get("claudeAiOauth")?.get("accessToken")?.as_str()?;
     (!token.trim().is_empty()).then(|| token.to_string())
 }
@@ -748,23 +748,19 @@ mod tests {
     fn the_credential_files_open_only_for_a_real_token() {
         let dir = tempfile::tempdir().expect("sandbox");
 
-        let claude_file = dir.path().join(".credentials.json");
-        assert_eq!(claude_access_token(&claude_file), None, "missing file");
-        std::fs::write(&claude_file, "{not json").expect("write");
-        assert_eq!(claude_access_token(&claude_file), None, "corrupt file");
-        std::fs::write(
-            &claude_file,
-            r#"{ "claudeAiOauth": { "accessToken": "  " } }"#,
-        )
-        .expect("write");
-        assert_eq!(claude_access_token(&claude_file), None, "blank token");
-        std::fs::write(
-            &claude_file,
-            r#"{ "claudeAiOauth": { "accessToken": "sk-ant-oat01-live" } }"#,
-        )
-        .expect("write");
+        // A Claude login arrives as a document — out of the keychain or a
+        // file, whichever `accounts::usage_login` found — and opens only for
+        // a real token.
+        assert_eq!(claude_access_token(""), None, "no document");
+        assert_eq!(claude_access_token("{not json"), None, "corrupt document");
         assert_eq!(
-            claude_access_token(&claude_file).as_deref(),
+            claude_access_token(r#"{ "claudeAiOauth": { "accessToken": "  " } }"#),
+            None,
+            "blank token"
+        );
+        assert_eq!(
+            claude_access_token(r#"{ "claudeAiOauth": { "accessToken": "sk-ant-oat01-live" } }"#)
+                .as_deref(),
             Some("sk-ant-oat01-live")
         );
 

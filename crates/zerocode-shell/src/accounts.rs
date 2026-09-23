@@ -2251,6 +2251,76 @@ pub fn reading_env_for(config_root: &Path, agent: &str) -> Vec<(String, String)>
     runtime_env_for(config_root, agent).0
 }
 
+/// Where a usage read found the login it asks the OAuth endpoint with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoginFrom {
+    /// The keychain item scoped to the store `CLAUDE_SECURESTORAGE_CONFIG_DIR`
+    /// names — the selected account's own directory, or the runtime home when
+    /// no account is selected. The CLI refreshes its token HERE.
+    Keychain,
+    /// A credentials file: the runtime home's `.credentials.json` — the copy
+    /// [`materialize`] wrote at the last switch, and the whole story on a
+    /// platform with no keychain — or Codex's `auth.json`.
+    File,
+}
+
+impl LoginFrom {
+    /// The source's word on a usage read's log line.
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::Keychain => "keychain",
+            Self::File => "file",
+        }
+    }
+}
+
+/// The order a Claude usage read looks for its login in: the store the CLI
+/// refreshes first, the copy this window wrote last. The one statement of it —
+/// [`usage_login`] walks this and nothing else.
+pub(crate) const USAGE_LOGIN_ORDER: [LoginFrom; 2] = [LoginFrom::Keychain, LoginFrom::File];
+
+/// The login a Claude usage read asks with, and where it was found — read out
+/// of `env`, the environment [`reading_env_for`] hands the CLI, so it is the
+/// login the CLI itself is using.
+///
+/// **Why the keychain comes first.** The runtime home's `.credentials.json` is
+/// the copy [`materialize`] wrote when the account was last switched to; the
+/// CLI never writes it back, because on macOS it keeps its login in the item
+/// scoped to its secure-storage directory and refreshes it there. So the file
+/// goes stale at the CLI's first refresh, eight hours at most. Measured on the
+/// machine this was written for (t-6583, 2026-09-24): the runtime file, the
+/// account directory's file and the runtime home's scoped item all held a
+/// token that had expired some 260 minutes earlier, and the endpoint answered
+/// 401 — while the item scoped to the selected account's directory answered
+/// 200 in about 400 ms.
+///
+/// A LOOK, and only ever one: nothing here writes, seeds or copies — a read on
+/// a timer that wrote is what rewrote a person's credentials once already (see
+/// [`reading_env_for`]). The keychain half IS [`keychain_says`], the read the
+/// scan's [`prepare_selected_store`] and the readiness probe already make, of
+/// the item scoped to a directory this window made. The unsuffixed item, the
+/// person's own terminal login, is never asked about; and a system-default
+/// selection hands this an empty environment, so it answers `None` and the
+/// person's own login stays theirs.
+pub(crate) fn usage_login(env: &[(String, String)]) -> Option<(String, LoginFrom)> {
+    let named = |var: &str| {
+        env.iter()
+            .rev()
+            .find(|(key, _)| key == var)
+            .map(|(_, value)| PathBuf::from(value))
+    };
+    USAGE_LOGIN_ORDER.into_iter().find_map(|from| {
+        let login = match from {
+            LoginFrom::Keychain => named(zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR)
+                .and_then(|store| keychain_says(&store).login().map(str::to_string)),
+            LoginFrom::File => named(zerocode_core::account::CONFIG_DIR_VAR)
+                .and_then(|home| std::fs::read_to_string(home.join(CREDENTIALS_FILE)).ok())
+                .filter(|text| holds_login(text)),
+        };
+        login.map(|text| (text, from))
+    })
+}
+
 /// Which home a LOOK at the Claude login reads (t-3996), and whose it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum LoginLook {
@@ -3238,6 +3308,102 @@ JSON
         .expect("seed keychain");
 
         assert_eq!(credentials_at(dir).as_deref(), Some(complete));
+    }
+
+    /// A usage read asks with the login the CLI refreshed — the item scoped to
+    /// the store the reading environment names — ahead of the copy the runtime
+    /// home was handed at the last switch.
+    ///
+    /// The live state this was written from (t-6583, 2026-09-24): the runtime
+    /// home's file and its own scoped item held a token that had expired some
+    /// 260 minutes earlier and the endpoint answered 401 on every read, while
+    /// the item scoped to the selected account's directory — where the CLI
+    /// keeps refreshing — answered 200.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_usage_read_asks_with_the_login_the_cli_refreshed() {
+        let written =
+            r#"{"claudeAiOauth":{"accessToken":"written-at-switch","refreshToken":"r-1"}}"#;
+        let refreshed =
+            r#"{"claudeAiOauth":{"accessToken":"refreshed-by-the-cli","refreshToken":"r-2"}}"#;
+        let config = tempfile::tempdir().expect("no config dir");
+        let account = one_account(config.path(), "u-1", "usage@example.com", "stored-at-add");
+        let store = PathBuf::from(&account.config_dir);
+        let runtime = runtime_home(config.path());
+        // What the last switch left: the runtime home's file and its own item.
+        write_private(&runtime.join(CREDENTIALS_FILE), written).expect("runtime file");
+        write_keychain(&runtime, written).expect("runtime item");
+        // And where the CLI has refreshed since: the selected store's item.
+        write_keychain(&store, refreshed).expect("store item");
+
+        let env = reading_env_for(config.path(), "claude");
+        assert_eq!(
+            usage_login(&env),
+            Some((refreshed.to_string(), LoginFrom::Keychain)),
+            "the usage read asked with the copy the last switch wrote"
+        );
+
+        // A store whose item says nothing — never seeded, or a keychain that
+        // did not answer — reads the runtime file, and the look writes nothing
+        // on the way: the item is as missing afterwards as before.
+        let bare_config = tempfile::tempdir().expect("no config dir");
+        let bare = one_account(bare_config.path(), "u-2", "bare@example.com", "stored");
+        write_private(
+            &runtime_home(bare_config.path()).join(CREDENTIALS_FILE),
+            written,
+        )
+        .expect("runtime file");
+        let bare_store = Path::new(&bare.config_dir);
+        assert!(matches!(keychain_says(bare_store), KeychainSays::Missing));
+        assert_eq!(
+            usage_login(&reading_env_for(bare_config.path(), "claude")),
+            Some((written.to_string(), LoginFrom::File))
+        );
+        assert!(
+            matches!(keychain_says(bare_store), KeychainSays::Missing),
+            "a usage look seeded the store's keychain item"
+        );
+    }
+
+    /// The person's own login is never what a usage read asks with: not the
+    /// unsuffixed item their terminal's CLI keeps, and not anything at all
+    /// once they chose the system default — whatever this window's own homes
+    /// hold (t-6583, condition 2).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_usage_read_never_asks_with_the_persons_own_login() {
+        let own = r#"{"claudeAiOauth":{"accessToken":"the-persons-own","refreshToken":"r-own"}}"#;
+        security_command(
+            &[
+                "add-generic-password",
+                "-U",
+                "-s",
+                "Claude Code-credentials",
+                "-a",
+                &this_machines_account(),
+                "-w",
+                own,
+            ],
+            None,
+        )
+        .expect("the person's own item");
+        // A store and a runtime home with nothing of their own do not borrow it.
+        let config = tempfile::tempdir().expect("no config dir");
+        let _account = one_account(config.path(), "p-1", "person@example.com", "stored");
+        assert_eq!(usage_login(&reading_env_for(config.path(), "claude")), None);
+
+        // And the system default reads nothing, even with a live login in the
+        // store and a copy in the runtime home.
+        let chosen = tempfile::tempdir().expect("no config dir");
+        let held = one_account(chosen.path(), "p-2", "chosen@example.com", "stored");
+        write_keychain(Path::new(&held.config_dir), own).expect("store item");
+        write_private(&runtime_home(chosen.path()).join(CREDENTIALS_FILE), own)
+            .expect("runtime file");
+        assert!(usage_login(&reading_env_for(chosen.path(), "claude")).is_some());
+        use_system_default(chosen.path()).expect("system default");
+        let env = reading_env_for(chosen.path(), "claude");
+        assert!(env.is_empty(), "the system default named a home: {env:?}");
+        assert_eq!(usage_login(&env), None);
     }
 
     #[test]

@@ -18945,6 +18945,84 @@ mod tests {
         }
     }
 
+    /// The Claude usage read asks with the login the CLI keeps refreshing — the
+    /// item scoped to the store the READING door names — through the one
+    /// keychain reader, and it only ever looks (t-6583).
+    ///
+    /// The runtime home's file is the copy the last switch wrote, and it had
+    /// expired: every read of it came back 401 while the store's item answered
+    /// 200. What this must never become on the way to fixing that is a road
+    /// to the person's own login — the unsuffixed item their terminal's CLI
+    /// keeps, or anything at all once they chose the system default — or a
+    /// credential write on a fifteen-minute timer.
+    #[test]
+    fn the_usage_login_is_the_reading_doors_store_and_only_ever_a_look() {
+        let accounts = include_str!("../../src/accounts.rs");
+        let shipped = &accounts[..accounts.find("mod tests {").unwrap_or(accounts.len())];
+        let looking = block_after(shipped, "pub(crate) fn usage_login(");
+        // The one reader, of the store the environment names.
+        assert!(
+            looking.contains("zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR")
+                && looking.contains("keychain_says(&store)"),
+            "the usage login grew a keychain reader of its own, or reads a \
+             store the CLI does not:\n{looking}"
+        );
+        // In the order the one table states.
+        assert!(
+            looking.contains("USAGE_LOGIN_ORDER.into_iter()"),
+            "the usage login stopped walking its order table:\n{looking}"
+        );
+        // A look: nothing written, seeded, materialized or asked of the tool
+        // directly.
+        for writer in [
+            "write_keychain",
+            "write_private",
+            "seed_scoped_keychain",
+            "materialize",
+            "security_command",
+            "std::fs::write",
+        ] {
+            assert!(
+                !looking.contains(writer),
+                "the usage login writes (`{writer}`), and it runs on a timer:\n{looking}"
+            );
+        }
+        // Never the person's own item: the unsuffixed name stays inside the
+        // one function that spells the scoped name from it.
+        assert!(
+            !looking.contains("Claude Code-credentials"),
+            "the usage login names the person's own keychain item:\n{looking}"
+        );
+        // Asked with the READING door's environment, which is empty for the
+        // system default — so that selection reads no login at all.
+        let backend = shipped_backend();
+        let scanning = block_after(backend, "fn scan_claude_usage_now(");
+        assert!(
+            scanning.contains(
+                "accounts::usage_login(&accounts::reading_env_for(config_root, \"claude\"))"
+            ),
+            "the usage read looks for its login somewhere other than the \
+             reading door:\n{scanning}"
+        );
+        let deciding = block_after(shipped, "fn runtime_env_for(");
+        assert!(
+            deciding.contains(
+                "if store.selection.system_default {\n        return (Vec::new(), None);"
+            ),
+            "the reading door names a home for the system default, so a usage \
+             read could reach the person's own login:\n{deciding}"
+        );
+        // And the OAuth road reads no Claude file of its own any more: which
+        // login is the caller's question, answered in one place.
+        let oauth = include_str!("../../src/usage_oauth.rs");
+        let (road, _) = oauth.split_once("#[cfg(test)]").unwrap_or((oauth, ""));
+        assert!(
+            !road.contains(".credentials.json")
+                && road.contains("pub fn claude(login: Option<&str>"),
+            "the Claude OAuth road picks its own credentials file again"
+        );
+    }
+
     /// A second prompt WAITS, and a parked one starts on a fresh clock
     /// (P0-10). Orca serialises chat sends per pty
     /// (native-chat-pty-send-queue.ts) because a second send racing the

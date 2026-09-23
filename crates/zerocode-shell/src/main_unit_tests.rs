@@ -11987,9 +11987,11 @@ fn the_shared_usage_door_keeps_every_reason_a_snapshot_is_dropped() {
         account: account.map(str::to_string),
     };
     let gauge = || UsageGauge {
+        provider: "claude",
         cache: &CACHE,
         file: file.clone(),
         scanning: &SCANNING,
+        log_root: directory.path().to_path_buf(),
     };
     let settle = || {
         while SCANNING.load(Ordering::SeqCst) {
@@ -12011,7 +12013,7 @@ fn the_shared_usage_door_keeps_every_reason_a_snapshot_is_dropped() {
         false,
         move || {
             sent.send(()).ok();
-            fresh
+            Scanned::api(fresh)
         },
     );
     assert!(
@@ -12037,6 +12039,217 @@ fn the_shared_usage_door_keeps_every_reason_a_snapshot_is_dropped() {
         Some("b")
     );
     assert!(!report.fetching);
+}
+
+/// A usage read in the window's log is one line of closed words: the road
+/// that answered, what the road before it failed of, the time it took, and
+/// this window's own sentence for why — never whose login it was.
+///
+/// The live window had no such line at all (t-6583), so "the gauge is slow"
+/// could not be told apart into "the terminal ran" and "the API was slow".
+#[test]
+fn a_usage_read_line_names_its_road_and_never_whose_login_it_was() {
+    use zerocode_core::usage_limit::FailureKind;
+    const WHOSE: &str = "a1000000000000-0";
+    let read =
+        |status: &str, kind: Option<FailureKind>, error: Option<&str>| usage::ProviderUsage {
+            provider: "claude".to_string(),
+            session: None,
+            weekly: None,
+            fable_weekly: None,
+            monthly: None,
+            buckets: None,
+            updated_at: 0,
+            error: error.map(str::to_string),
+            status: status.to_string(),
+            failure_kind: kind,
+            retry_at_ms: None,
+            plan_type: None,
+            reset_credits: None,
+            account: Some(WHOSE.to_string()),
+        };
+    let answered = usage_read_line(
+        "claude",
+        UsageRoad::Oauth {
+            login: Some(accounts::LoginFrom::Keychain),
+        },
+        418,
+        Some(&read("ok", None, None)),
+        true,
+    );
+    assert_eq!(
+        answered,
+        "usage claude road=oauth login=keychain ms=418 status=ok forced"
+    );
+    // The API's own refusal stands as the answer, and says what it was.
+    let refused = usage_read_line(
+        "claude",
+        UsageRoad::Oauth {
+            login: Some(accounts::LoginFrom::File),
+        },
+        301,
+        Some(&read(
+            "error",
+            Some(FailureKind::StaleToken),
+            Some("HTTP 401"),
+        )),
+        false,
+    );
+    assert_eq!(
+        refused,
+        "usage claude road=oauth login=file ms=301 status=error kind=stale-token \
+         reason=HTTP 401"
+    );
+    // The slow road names what the fast one failed of, and a sentence with a
+    // newline in it is still one line.
+    let slow = usage_read_line(
+        "claude",
+        UsageRoad::Terminal {
+            oauth: Some(FailureKind::Network),
+        },
+        24_312,
+        Some(&read(
+            "error",
+            None,
+            Some("/usage 화면이\n렌더되지 않았습니다"),
+        )),
+        false,
+    );
+    assert_eq!(
+        slow,
+        "usage claude road=terminal oauth=network ms=24312 status=error \
+         reason=/usage 화면이 렌더되지 않았습니다"
+    );
+    // A press that found a read already out went nowhere of its own.
+    let joined = usage_read_line("codex", UsageRoad::Cache, 0, None, true);
+    assert_eq!(joined, "usage codex road=cache ms=0 status=none forced");
+    // A reason is bounded.
+    let long = "x".repeat(USAGE_LOG_REASON_CHARS * 2);
+    let bounded = usage_read_line(
+        "kimi",
+        UsageRoad::Api,
+        5,
+        Some(&read("error", None, Some(&long))),
+        false,
+    );
+    assert!(
+        bounded.ends_with(&format!(" reason={}", "x".repeat(USAGE_LOG_REASON_CHARS))),
+        "{bounded}"
+    );
+    for line in [&answered, &refused, &slow, &joined, &bounded] {
+        assert!(
+            !line.contains(WHOSE),
+            "a log line named the account: {line}"
+        );
+        assert!(!line.contains('\n'), "a log line broke in two: {line}");
+    }
+    // One spelling per kind: the log says the word the snapshot file says.
+    let on_file = serde_json::to_value(FailureKind::MissingCredentials).expect("a kind serialises");
+    assert_eq!(
+        Some(failure_word(FailureKind::MissingCredentials).as_str()),
+        on_file.as_str()
+    );
+}
+
+/// Every read that goes out leaves its line once it lands, a person's press
+/// that joins a read already out leaves a `cache` line, and a poll leaves
+/// nothing — the log is for reads, and the window polls far more often than
+/// it reads (t-6583).
+#[test]
+fn every_usage_read_leaves_its_line_and_a_poll_leaves_none() {
+    use std::sync::atomic::Ordering;
+    static CACHE: Mutex<Option<usage::ProviderUsage>> = Mutex::new(None);
+    static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    let directory = tempfile::tempdir().expect("data root");
+    let gauge = || UsageGauge {
+        provider: "claude",
+        cache: &CACHE,
+        file: directory.path().join("usage.json"),
+        scanning: &SCANNING,
+        log_root: directory.path().to_path_buf(),
+    };
+    let lines = || {
+        std::fs::read_to_string(directory.path().join("window-errors.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    };
+    let answered = usage::ProviderUsage {
+        provider: "claude".to_string(),
+        session: None,
+        weekly: None,
+        fable_weekly: None,
+        monthly: None,
+        buckets: None,
+        updated_at: epoch_ms_now(),
+        error: None,
+        status: "ok".to_string(),
+        failure_kind: None,
+        retry_at_ms: None,
+        plan_type: None,
+        reset_credits: None,
+        account: None,
+    };
+
+    // A read goes out, and is held out while two more asks arrive.
+    let (release, hold) = std::sync::mpsc::channel::<()>();
+    let report = usage_report(
+        gauge(),
+        |_| true,
+        true,
+        move || {
+            hold.recv().ok();
+            Scanned {
+                usage: answered,
+                road: UsageRoad::Oauth {
+                    login: Some(accounts::LoginFrom::Keychain),
+                },
+            }
+        },
+    );
+    assert!(report.fetching, "the forced read did not go out");
+    let polled = usage_report(
+        gauge(),
+        |_| true,
+        false,
+        || unreachable!("a second read went out beside the first"),
+    );
+    assert!(polled.fetching);
+    assert!(lines().is_empty(), "a poll left a line: {:?}", lines());
+    let pressed = usage_report(
+        gauge(),
+        |_| true,
+        true,
+        || unreachable!("a second read went out beside the first"),
+    );
+    assert!(pressed.fetching);
+    release.send(()).expect("the held read is waiting");
+    while SCANNING.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+
+    let seen = lines();
+    assert_eq!(seen.len(), 2, "{seen:?}");
+    assert!(
+        seen[0].ends_with(" usage claude road=cache ms=0 status=none forced"),
+        "the press that joined a read left no cache line: {seen:?}"
+    );
+    assert!(
+        seen[1].contains(" usage claude road=oauth login=keychain ms=")
+            && seen[1].ends_with(" status=ok forced"),
+        "the read left no line naming its road: {seen:?}"
+    );
+    // The floor holds the next poll, and a held poll is not a read either.
+    let held = usage_report(
+        gauge(),
+        |_| true,
+        false,
+        || unreachable!("the refetch floor let a read out"),
+    );
+    assert!(!held.fetching);
+    assert_eq!(lines().len(), 2, "{:?}", lines());
 }
 
 /// An editor is asked for by the name its BUNDLE carries, which is not
@@ -19754,6 +19967,10 @@ mod dock_launched_usage_probes {
     /// lines around it are never read as part of it.
     const ANSWER_MARK: &str = "__ZEROCODE_USAGE_PROBE_ANSWER__";
 
+    /// Brackets the log line the same read would leave — which road answered,
+    /// and what the road before it failed of (t-6583).
+    const ROAD_MARK: &str = "__ZEROCODE_USAGE_PROBE_ROAD__";
+
     /// An interpreter only the login shell's PATH has, named by the fake CLIs
     /// the way an npm install names node: `/opt/homebrew/bin/codex` is a
     /// `#!/usr/bin/env node` script, and `env` searches the CHILD's own `PATH`.
@@ -19785,7 +20002,10 @@ mod dock_launched_usage_probes {
     /// Nothing in the stand-in reaches the network or a real login: its config
     /// root and its `HOME` are empty directories, so both OAuth reads find no
     /// credentials and fall through to the terminal road under test.
-    fn scan_in_a_dock_launched_window(provider: &str, screen: &str) -> usage::ProviderUsage {
+    fn scan_in_a_dock_launched_window(
+        provider: &str,
+        screen: &str,
+    ) -> (usage::ProviderUsage, String) {
         let root = tempfile::tempdir().expect("temp root");
         let bin = root.path().join("login-shell-bin");
         let home = root.path().join("home");
@@ -19844,7 +20064,14 @@ mod dock_launched_usage_probes {
                 String::from_utf8_lossy(&output.stderr)
             )
         });
-        serde_json::from_str(answer).expect("the stand-in's snapshot")
+        let road = stdout
+            .split(ROAD_MARK)
+            .nth(1)
+            .unwrap_or_else(|| panic!("the stand-in window named no road:\n{stdout}"));
+        (
+            serde_json::from_str(answer).expect("the stand-in's snapshot"),
+            road.to_string(),
+        )
     }
 
     /// The scan itself, inside the process [`scan_in_a_dock_launched_window`]
@@ -19863,7 +20090,11 @@ mod dock_launched_usage_probes {
         };
         println!(
             "{ANSWER_MARK}{}{ANSWER_MARK}",
-            serde_json::to_string(&read).expect("a snapshot serialises")
+            serde_json::to_string(&read.usage).expect("a snapshot serialises")
+        );
+        println!(
+            "{ROAD_MARK}{}{ROAD_MARK}",
+            usage_read_line(&provider, read.road, 0, Some(&read.usage), false)
         );
     }
 
@@ -19873,7 +20104,7 @@ mod dock_launched_usage_probes {
     /// must find the CLI where a launch finds it, and hand it the same PATH.
     #[test]
     fn a_dock_launched_window_reads_claude_usage_where_a_launch_finds_claude() {
-        let read = scan_in_a_dock_launched_window("claude", CLAUDE_SCREEN);
+        let (read, road) = scan_in_a_dock_launched_window("claude", CLAUDE_SCREEN);
         assert_eq!(
             (read.status.as_str(), read.error.as_deref()),
             ("ok", None),
@@ -19881,12 +20112,22 @@ mod dock_launched_usage_probes {
         );
         assert_eq!(read.session.map(|window| window.used_percent), Some(26));
         assert_eq!(read.weekly.map(|window| window.used_percent), Some(40));
+        // And the line it leaves names the slow road and why the fast one did
+        // not answer: an empty config root has no login to ask with.
+        assert!(
+            road.starts_with("usage claude road=terminal oauth=missing-credentials ms="),
+            "the read's line does not say which road answered: {road}"
+        );
     }
 
     /// The same window, the same fault, on the Codex road.
     #[test]
     fn a_dock_launched_window_reads_codex_usage_where_a_launch_finds_codex() {
-        let read = scan_in_a_dock_launched_window("codex", CODEX_SCREEN);
+        let (read, road) = scan_in_a_dock_launched_window("codex", CODEX_SCREEN);
+        assert!(
+            road.starts_with("usage codex road=terminal oauth=missing-credentials ms="),
+            "the read's line does not say which road answered: {road}"
+        );
         assert_eq!(
             (read.status.as_str(), read.error.as_deref()),
             ("ok", None),
