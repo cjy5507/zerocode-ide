@@ -177,6 +177,88 @@ fn every_use_is_off_until_a_person_says_otherwise() {
     );
 }
 
+/// What a use stands at when a person turned Jev on and chose nothing seat by
+/// seat (2026-09-23, §6.1): one of the use's own modes, and never `off` — a
+/// switch turned on that left a use off would say one thing and do another.
+/// `auto` wherever the use offers it; the agent's own tool, which has
+/// nothing to rise on, answers the agent.
+#[test]
+fn every_use_recommends_one_of_its_own_modes_and_never_off() {
+    for row in &JEV_USES {
+        assert!(
+            row.modes.contains(&row.recommended),
+            "{} recommends {:?}, which it does not offer",
+            row.id,
+            row.recommended
+        );
+        assert_ne!(row.recommended, JevMode::Off, "{} recommends off", row.id);
+        let expected = if row.modes.contains(&JevMode::Auto) {
+            JevMode::Auto
+        } else {
+            JevMode::On
+        };
+        assert_eq!(row.recommended, expected, "{}", row.id);
+    }
+    assert_eq!(AGENT_TOOL.recommended, JevMode::On);
+}
+
+/// The switch decides a use nobody wrote a word for: its recommendation
+/// while Jev is switched on, `off` while it is off or was never touched —
+/// a machine that has not met Jev asks nothing. A word a person did write is
+/// theirs whatever the switch says, and a word the use does not offer is
+/// `off`, as it always was.
+#[test]
+fn a_use_with_no_word_of_its_own_follows_the_switch() {
+    let on =
+        json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: { door::ENABLED_SETTING: true } } });
+    for row in &JEV_USES {
+        assert_eq!(
+            row.mode_in(&on),
+            row.recommended,
+            "{} under the switch",
+            row.id
+        );
+        for untouched in [
+            json!({}),
+            json!({ SMART_SETTINGS_KEY: {} }),
+            json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: { door::WORKSPACES_SETTING: ["/work/app"] } } }),
+            json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: { door::ENABLED_SETTING: false } } }),
+            json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: { door::ENABLED_SETTING: "yes" } } }),
+            json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: true } }),
+        ] {
+            assert_eq!(
+                row.mode_in(&untouched),
+                JevMode::Off,
+                "{} in {untouched}",
+                row.id
+            );
+        }
+        // A person's own word outranks the switch in both directions.
+        let written = |jev: Value, word: &str| json!({ SMART_SETTINGS_KEY: { door::JEV_SETTINGS_KEY: jev, row.setting: word } });
+        assert_eq!(
+            row.mode_in(&written(
+                json!({ door::ENABLED_SETTING: true }),
+                JevMode::Off.key()
+            )),
+            JevMode::Off,
+            "{}: a written off stays off under the switch",
+            row.id
+        );
+        assert_eq!(
+            row.mode_in(&written(json!({ door::ENABLED_SETTING: true }), "shadwo")),
+            JevMode::Off,
+            "{}: a slip is off, never the recommendation",
+            row.id
+        );
+        assert_eq!(
+            row.mode_in(&written(json!({}), JevMode::Shadow.key())),
+            JevMode::Shadow,
+            "{}: a written word stands with the switch untouched",
+            row.id
+        );
+    }
+}
+
 /// Recall has an apply stage (t-4676): `on` reorders what a turn reads. Its
 /// `auto` records until the judge raises it on the seat's own labels
 /// (t-5806), on the skill seat's lines read from there.

@@ -25,9 +25,9 @@ use api::{SystemOneConfig, SystemOneFailure, SYSTEMONE_MODEL};
 use runtime::{RouteTaskComplexity, StepAskContext, StepEffortSeat, StepEvent, StepJudgment};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use zerocode_core::jev::door::Refused;
+use zerocode_core::jev::door::{self, Refused};
 use zerocode_core::jev::promote;
-use zerocode_core::jev::{JevMode, SMART_SETTINGS_KEY, ZO_STEP_EFFORT};
+use zerocode_core::jev::{JevMode, ZO_STEP_EFFORT};
 
 use super::decision_shadow::{judged_axes, JudgedAxis, OUTCOME_ANSWERED};
 use super::jev_gate::{self, JevDoor};
@@ -93,15 +93,15 @@ impl StepEffortWord {
     }
 }
 
-/// `smart.zoStepEffort` in a merged settings document.
+/// `smart.zoStepEffort` in a merged settings document. No word of the seat's
+/// own is the seat's recommendation while Jev is switched on — the use
+/// table's own reading ([`zerocode_core::jev::JevUse::mode_in`]) — and
+/// [`StepEffortWord::Absent`] otherwise.
 #[must_use]
 pub fn step_effort_word_in(root: &Value) -> StepEffortWord {
-    match root
-        .get(SMART_SETTINGS_KEY)
-        .and_then(|smart| smart.get(ZO_STEP_EFFORT.setting))
-    {
-        None => StepEffortWord::Absent,
-        value @ Some(_) => StepEffortWord::Set(ZO_STEP_EFFORT.mode_of(value)),
+    match ZO_STEP_EFFORT.word_in(root) {
+        None if !door::switched_on(root) => StepEffortWord::Absent,
+        _ => StepEffortWord::Set(ZO_STEP_EFFORT.mode_in(root)),
     }
 }
 
@@ -390,6 +390,7 @@ pub fn judge_ledger(ledger: &Path, now_ms: i64) -> Option<promote::Verdict> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use zerocode_core::jev::SMART_SETTINGS_KEY;
 
     #[test]
     fn the_word_is_told_apart_from_no_word_and_reads_the_tables_modes() {
@@ -416,6 +417,23 @@ mod tests {
         let auto = StepEffortWord::Set(JevMode::Auto);
         assert!(auto.governs() && auto.asks());
         assert!(!auto.applies_with(false) && auto.applies_with(true));
+    }
+
+    /// Jev switched on (2026-09-23, the one switch a person sees): no word of
+    /// the seat's own is the seat's recommendation, so the seat is asked like
+    /// every other seat under the switch. Off or never touched, no word is
+    /// still no word — the table runs and nobody is asked. A written word
+    /// stands whatever the switch says.
+    #[test]
+    fn under_the_switch_no_word_is_the_seats_recommendation() {
+        use zerocode_core::jev::door::{ENABLED_SETTING, JEV_SETTINGS_KEY};
+        let switched = |on: bool| json!({ SMART_SETTINGS_KEY: { JEV_SETTINGS_KEY: { ENABLED_SETTING: on } } });
+        assert_eq!(step_effort_word_in(&switched(true)), StepEffortWord::Set(ZO_STEP_EFFORT.recommended));
+        assert!(step_effort_word_in(&switched(true)).asks());
+        assert_eq!(step_effort_word_in(&switched(false)), StepEffortWord::Absent);
+        let written = json!({ SMART_SETTINGS_KEY: {
+            JEV_SETTINGS_KEY: { ENABLED_SETTING: true }, STEP_EFFORT_SETTING: "shadow" } });
+        assert_eq!(step_effort_word_in(&written), StepEffortWord::Set(JevMode::Shadow));
     }
 
     /// A decision row as the governor files it, for a step that ran on the

@@ -368,6 +368,11 @@ fn tally_json(tally: &jev_summary::SeatTally) -> Value {
         "inputTokens": tally.input_tokens,
         "p50Ms": tally.p50_ms,
         "p95Ms": tally.p95_ms,
+        // What a screen seat's guards stopped and the controls it handed to
+        // the person (t-6187), counted once by the core's counter — the
+        // dashboard's drawer reads them (t-6277 D6).
+        "guards": { "instructed": tally.guards.instructed, "walled": tally.guards.walled },
+        "controls": { "named": tally.controls.named, "destructiveHeld": tally.controls.destructive_held },
         "failures": tally
             .failures
             .iter()

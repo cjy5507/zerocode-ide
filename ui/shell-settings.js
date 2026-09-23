@@ -22,9 +22,10 @@ const PANE_OF = {
   "google-account-list": "provider-accounts",
   "router-provider-list": "api-routers",
   "router-preset-select": "api-routers",
-  // The Jev dashboard's "in settings" lands on the first seat's switch, and
-  // its refusal chips on the key field and the key card's status (t-6243 D5).
-  "typesafe-routing-select": "api-routers",
+  // The Jev dashboard's "in settings" and its consent chip land on the one
+  // switch (§6.1), its key chip on the key field and its budget chip on the
+  // key card's status (t-6243 D5).
+  "jev-enabled": "api-routers",
   "typesafe-key-input": "api-routers",
   "typesafe-status": "api-routers",
   "show-automations": "appearance",
@@ -5413,13 +5414,15 @@ function paintRouterKeyStore(kept) {
 
 /* ---- TypeSafe (Jev) ----
  *
- * The key zo's decision shadow asks System One with, and the switch that runs
- * the shadow. The key goes into the keychain item every zo reads and never
- * comes back to this page: the backend only says whether one is saved
+ * The one switch a person turns Jev on and off with (2026-09-23,
+ * docs/design/jev-settings-20260917.md §6.1), and the key Jev is asked with.
+ * The key goes into the keychain item every zo reads and never comes back to
+ * this page: the backend only says whether one is saved
  * (`typesafe_settings`). Whether a saved key works is zo's answer, not this
  * page's — `check_typesafe_key` execs `zo decision-shadow check`, the shadow's
  * own question through the same key road. One action at a time: a save, a
- * removal, a check and a switch each repaint from the answer they get. */
+ * removal, a check and a switch each repaint from the answer they get. Where
+ * each feature stands is the dashboard's (shell-jev.js). */
 let typesafeState = null;
 let typesafeBusy = false;
 let typesafeInitialized = false;
@@ -5429,10 +5432,9 @@ let typesafeInitialized = false;
  * and the standing is read off the key itself. */
 let typesafeChecked = null;
 
-/* What zo last said each seat's ledger holds lives in shell-jev.js
- * (`jevNumbers`, `loadJevNumbers`, `paintJevNumbers`): one cache and one set
- * of words for this card and for the dashboard, so the number under a
- * switch here is the number in the dashboard's row. */
+/* The switch's own paint and door live in shell-jev.js
+ * (`paintJevSwitches`, `setJevEnabled`): one state and one command for this
+ * card and for the dashboard, which wears the same switch over its table. */
 
 function initTypeSafeEvents() {
   if (typesafeInitialized) return;
@@ -5450,13 +5452,16 @@ function initTypeSafeEvents() {
   el("typesafe-check-btn")?.addEventListener("click", () => {
     void checkTypeSafeKey();
   });
-  for (const select of document.querySelectorAll("[data-jev-seat]")) {
-    select.addEventListener("change", (event) => {
-      const seat = event.target.dataset.jevSeat;
-      const mode = event.target.value;
-      void moveJevSeat(seat, mode, (state) => jevSwitchSaid(state, seat));
-    });
-  }
+  el("jev-enabled")?.addEventListener("change", (event) => {
+    void setJevEnabled(event.target.checked);
+  });
+  el("typesafe-card")?.querySelector("[data-jev-everywhere]")?.addEventListener("click", () => {
+    void setJevEnabled(true);
+  });
+  el("jev-open-dashboard")?.addEventListener("click", () => {
+    setSettingsOpen(false);
+    openJevView();
+  });
   el("route-classifier-select")?.addEventListener("change", (event) => {
     const mode = event.target.value;
     void runTypeSafe(() => invoke("set_route_classifier", { mode }), (state) =>
@@ -5500,43 +5505,6 @@ function jevSeatChoice(state, seat) {
   return row?.modes?.find((choice) => choice.mode === row.mode) ?? null;
 }
 
-/* What moving a switch did, said the same way for every seat: the row above
- * the switch names the seat, so these words name only what the mode does. */
-function jevSwitchSaid(state, seat) {
-  const choice = jevSeatChoice(state, seat);
-  if (!choice?.asks) return t("settings.typesafe.turnedOff", "껐습니다. 더는 판단을 요청하지 않습니다.");
-  if (choice.applies) {
-    return t("settings.typesafe.turnedApply", "항상 적용을 켰습니다. 다음 판단부터 실제 동작에 반영합니다.");
-  }
-  if (choice.automatic) {
-    return t("settings.typesafe.turnedAuto", "자동 모드입니다. 정확도 근거가 충분히 쌓일 때까지는 기록만 하고 실제 동작에는 적용하지 않습니다.");
-  }
-  return t("settings.typesafe.turnedRecord", "기록만 켰습니다. 다음 판단부터 기록하되 실제 동작에는 적용하지 않습니다.");
-}
-
-/* A switch's options, one per mode its row offers, each named by what it does
- * in the language in force. The seat itself is named by the label above the
- * switch and spelled out by the hint below it, so these four words are the
- * same on every row of the card. Rebuilt on every paint — a row is four
- * options — and the chosen value is set after, so a repaint never moves it. */
-function paintJevModes(select, choices) {
-  select.replaceChildren();
-  for (const choice of choices) {
-    const option = document.createElement("option");
-    option.value = choice.mode;
-    if (!choice.asks) {
-      option.textContent = t("settings.typesafe.modeOff", "끔");
-    } else if (choice.applies) {
-      option.textContent = t("settings.typesafe.modeApply", "항상 적용");
-    } else if (choice.automatic) {
-      option.textContent = t("settings.typesafe.modeAuto", "자동 (근거가 쌓이면 적용)");
-    } else {
-      option.textContent = t("settings.typesafe.modeRecord", "기록만");
-    }
-    select.appendChild(option);
-  }
-}
-
 /* The routing classifier's four choices, each named by what it DOES — the same
  * rule the seat switches keep, and for the same reason: the words a classifier
  * setting may hold live in `zerocode_core::jev::ClassifierMode` and are
@@ -5562,11 +5530,10 @@ function paintClassifierModes(select, choices) {
   }
 }
 
-/* The seat the classifier gates, as the backend names it, and whether the mode
- * that seat stands at can reach anything at all. A row that asks while nothing
- * calls a probe is a switch promising a judgment that is never made — which is
- * the same sentence the use table already keeps for a seat with no apply
- * stage, said one level up. */
+/* The feature the classifier gates, as the backend names it, and whether the
+ * mode it stands at can reach anything at all. A feature that asks while
+ * nothing calls a probe is a promise of a judgment that is never made — said
+ * beside the classifier, which is what changes it. */
 function paintClassifierGate(state) {
   const classifier = state.classifier;
   const select = el("route-classifier-select");
@@ -5575,11 +5542,10 @@ function paintClassifierGate(state) {
     select.value = classifier.mode;
     select.disabled = typesafeBusy;
   }
-  for (const notice of document.querySelectorAll("[data-jev-unreachable]")) {
-    const seat = notice.closest("[data-jev-row]")?.querySelector("[data-jev-seat]");
-    const gated = Boolean(classifier) && seat?.dataset.jevSeat === classifier.gates;
-    const asks = jevSeatChoice(state, seat?.dataset.jevSeat ?? "")?.asks ?? false;
-    notice.hidden = !(gated && asks && !classifier.probes);
+  const notice = el("route-classifier-unreachable");
+  if (notice) {
+    const asks = Boolean(classifier) && (jevSeatChoice(state, classifier.gates)?.asks ?? false);
+    notice.hidden = !(asks && !classifier.probes);
   }
 }
 
@@ -5590,9 +5556,8 @@ async function refreshTypeSafe() {
   } catch (error) {
     paintTypeSafeStatus(typesafeRefusal(error), typesafeRefusalEvidence(error));
   }
-  // The ledgers are read after the switches stand, not before: a person opening
-  // the card should see their seats now, and the numbers when zo has counted.
-  void loadJevNumbers();
+  // The card draws no numbers; a dashboard on stage refreshes its own.
+  if (jevViewsShowing()) void loadJevNumbers();
 }
 
 /* Where the card stands: what the last check answered if anything has been
@@ -5616,34 +5581,12 @@ function paintTypeSafe(state) {
     const button = el(id);
     if (button) button.disabled = typesafeBusy || !state.keySaved;
   }
-  // The use table is the card's running order, not this page's. A seat the
-  // backend no longer names is hidden rather than left as a switch that
-  // writes nothing, and the seats it does name stand in the order it named
-  // them — `order` rather than a re-append, so nothing that has focus moves
-  // in the document while somebody is using it.
-  let seats = 0;
-  for (const select of document.querySelectorAll("[data-jev-seat]")) {
-    const at = (state.switches ?? []).findIndex((held) => held.id === select.dataset.jevSeat);
-    const row = at < 0 ? null : state.switches[at];
-    const line = select.closest("[data-jev-row]");
-    if (line) {
-      line.toggleAttribute("hidden", !row);
-      line.style.order = row ? String(at) : "";
-    }
-    if (!row) continue;
-    seats += 1;
-    paintJevModes(select, row.modes ?? []);
-    select.value = row.mode;
-    select.disabled = typesafeBusy;
-    if (line) paintJevNumbers(line, row.id);
-  }
-  const count = el("jev-uses-count");
-  if (count) count.textContent = seats > 0 ? String(seats) : "";
   paintTypeSafeModel(state);
   paintClassifierGate(state);
   paintTypeSafeSave();
-  // The dashboard's rows wear the same switches and the same numbers; a
-  // move made here, or a fresh count, reaches it through this one paint.
+  // The dashboard wears the same switch and reads the same features; a press
+  // made here, or a fresh count, reaches it through this one paint.
+  paintJevSwitches();
   paintJevViews();
 }
 
@@ -6351,8 +6294,9 @@ function setLocale(code) {
   // row's next-run line, and the sentence under the form.
   paintAutoPickers();
   if (!el("flow-console").hidden) paintFlowConsole();
-  // The TypeSafe switch builds its options from the backend's list of modes,
-  // so `applyLocale` has no key on them to sweep.
+  // The TypeSafe card's switch line and the Jev dashboard build their words
+  // from the backend's answer and the features' template — each feature's
+  // name and one-sentence tip — so `applyLocale` has no key on them to sweep.
   if (typesafeState) paintTypeSafe(typesafeState);
   paintAutomations();
   // 정리 목록은 행을 직접 짓는다 — 칩과 필과 버튼의 말이 전부 여기서 나오므로,

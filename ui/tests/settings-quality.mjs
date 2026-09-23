@@ -59,6 +59,91 @@ export async function axeViolations(page, AxeBuilder, include) {
   }));
 }
 
+/* The contrast of every text under `include`, as axe's own `color-contrast`
+ * rule measures it (the backgrounds composited, what is hidden or disabled
+ * skipped): one row per text node with its ink, its ground and their ratio.
+ * `verdict` is axe's — `fail` under WCAG AA, `unknown` where axe could not
+ * tell the ground (an image, a gradient, text over text); a caller that holds
+ * a line of its own (t-6277 D10: 4.5:1 for every text, large or not) reads
+ * `ratio`. One script for every surface that is asked this. */
+export async function contrastTable(page, AxeBuilder, include) {
+  const answer = await new AxeBuilder({ page }).include(include).withRules(["color-contrast"]).analyze();
+  const rows = [];
+  for (const [verdict, found] of [["pass", answer.passes], ["fail", answer.violations], ["unknown", answer.incomplete]]) {
+    for (const rule of found) {
+      for (const node of rule.nodes) {
+        const checks = [...node.any, ...node.all, ...node.none];
+        const data = checks
+          .map((check) => check.data)
+          .find((one) => one && (one.contrastRatio !== undefined || one.fgColor !== undefined)) ?? {};
+        rows.push({
+          verdict,
+          target: node.target.join(" "),
+          text: String(node.html ?? "").replace(/<[^>]+>/g, "").trim().slice(0, 48),
+          fg: data.fgColor ?? null,
+          bg: data.bgColor ?? null,
+          ratio: typeof data.contrastRatio === "number" ? Math.round(data.contrastRatio * 100) / 100 : null,
+          size: data.fontSize ?? null,
+          // Why axe could not tell, when it could not.
+          why: verdict === "unknown" ? checks.map((check) => check.message).filter(Boolean).join(" ") : null,
+        });
+      }
+    }
+  }
+  // Where axe could not tell the ground — a text on an overlay with a table
+  // behind it, a select's arrow image, a pill a neighbour grazes — the ground
+  // is read from the text's own ancestors: their backgrounds composited up
+  // to the first opaque one, and the ink over that (`verdict: "computed"`).
+  // What lies behind an opaque ancestor cannot change what is seen.
+  const unknown = rows.filter((row) => row.verdict === "unknown");
+  if (unknown.length > 0) {
+    const measured = await page.evaluate((targets) => {
+      const channels = (colour) => {
+        const rgb = colour.match(/^rgba?\(([^)]+)\)$/);
+        if (rgb) {
+          const [r, g, b, a = 1] = rgb[1].split(/[\s,/]+/).filter(Boolean).map(Number);
+          return [r / 255, g / 255, b / 255, a];
+        }
+        const srgb = colour.match(/^color\(srgb ([^)]+)\)$/);
+        if (srgb) {
+          const [r, g, b, a = 1] = srgb[1].split(/[\s/]+/).filter(Boolean).map(Number);
+          return [r, g, b, a];
+        }
+        return null;
+      };
+      const over = (top, under) => {
+        const a = top[3] + under[3] * (1 - top[3]);
+        if (a === 0) return [0, 0, 0, 0];
+        return [0, 1, 2].map((at) => (top[at] * top[3] + under[at] * under[3] * (1 - top[3])) / a).concat(a);
+      };
+      const luminance = ([r, g, b]) => [r, g, b]
+        .map((c) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4))
+        .reduce((sum, c, at) => sum + c * [0.2126, 0.7152, 0.0722][at], 0);
+      return targets.map((target) => {
+        const node = document.querySelector(target);
+        if (!node) return null;
+        const layers = [];
+        for (let at = node; at; at = at.parentElement) {
+          const colour = channels(getComputedStyle(at).backgroundColor);
+          if (colour && colour[3] > 0) layers.push(colour);
+          if (colour && colour[3] >= 1) break;
+        }
+        let ground = [1, 1, 1, 1];
+        for (const layer of layers.reverse()) ground = over(layer, ground);
+        const ink = over(channels(getComputedStyle(node).color) ?? [0, 0, 0, 1], ground);
+        const [hi, lo] = [luminance(ink), luminance(ground)].sort((a, b) => b - a);
+        return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
+      });
+    }, unknown.map((row) => row.target));
+    unknown.forEach((row, at) => {
+      if (measured[at] === null) return;
+      row.verdict = "computed";
+      row.ratio = measured[at];
+    });
+  }
+  return rows;
+}
+
 export async function inspectSettingsLayout(page) {
   return page.evaluate((interactiveSelector) => {
     const visible = (node) => {

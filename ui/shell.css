@@ -18827,31 +18827,80 @@ button.worker-composer-pill:hover {
   overflow-wrap: anywhere;
 }
 
-/* ---- the seats Jev sits in, one row each -----------------------------
- *
- * Five seats stood as five [label, switch, paragraph] stacks, and the five
- * paragraphs were 616px of the 844px card. A row is now the seat's name, one
- * line saying what it sends, and the mode — and the paragraph is behind the
- * same fold the status line uses. The rows, and their order, are what the use
- * table answered (`paintTypeSafe` reads `switches`), so `order` has to be
- * something this box honours. */
-.settings-jev-list {
+/* ---- Jev on the settings card (2026-09-23, docs/design/jev-settings-20260917.md
+ * §6.1): one switch a person turns on and off, the key, a line to the
+ * dashboard, and what is rarely changed folded under 고급. The switch is the
+ * card's largest row — it is the one decision the card asks for. */
+.settings-jev-switch {
+  margin: var(--space-3) var(--space-4) 0;
+  padding: var(--space-2) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+}
+
+.settings-jev-switch .settings-label {
+  font-size: var(--text-md);
+  font-weight: var(--jev-weight-strong);
+}
+
+/* On, with consent for some folders only: the sentence and the one press
+ * that consents every folder, on one line while there is room. */
+.settings-notice.settings-jev-partial {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
 }
 
-.settings-jev-row {
+/* Where each feature stands is the dashboard's: one quiet line, and the way
+ * there is a link in it rather than a second button above the card's own. */
+.settings-jev-dashboard {
+  margin: var(--space-3) var(--space-4) 0;
+}
+
+.settings-jev-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: var(--jev-link-offset);
+  cursor: pointer;
+  transition: text-decoration-thickness var(--motion-fast) var(--ease-standard);
+}
+
+.settings-jev-link:hover {
+  text-decoration-thickness: var(--jev-link-hover-thickness);
+}
+
+.settings-jev-advanced {
+  margin: var(--space-3) var(--space-4) 0;
+}
+
+/* What the fold holds is fields, not the quiet paragraph a fold holds
+ * elsewhere on this screen: they keep their own size, ink and width. */
+.settings-jev-advanced > :not(summary) {
+  max-width: none;
+  color: inherit;
+  font-size: inherit;
+}
+
+.settings-jev-classifier {
   display: grid;
-  gap: 2px;
-  padding-block: var(--space-2);
-}
-
-.settings-jev-row + .settings-jev-row {
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
   border-top: var(--rule-width) solid var(--edge-rule);
 }
 
-.settings-jev-row > .settings-fold {
-  padding-inline: var(--space-4);
+.settings-jev-advanced-title {
+  margin: 0;
+  color: var(--ink-chalk);
+  font-size: var(--text-sm);
+  font-weight: var(--jev-weight-strong);
 }
 
 /* A row whose mode nothing can reach says so where the mode is, not in a
@@ -37633,6 +37682,151 @@ h4.knowledge-inspector-head::after {
   margin: 0;
 }
 
+/* A feature's row opens its drawer (t-6277 D6): the name is the button, and
+   the whole row answers a pointer. */
+.jev-table tbody tr[data-jev-dash-row] {
+  cursor: pointer;
+}
+
+.jev-table tbody tr[data-jev-dash-row] td {
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.jev-table tbody tr[data-jev-dash-row]:hover td {
+  background: var(--row-hover);
+}
+
+.jev-table tbody tr.is-open td {
+  background: color-mix(in srgb, var(--jev-progress-ink) var(--jev-tint-open), transparent);
+}
+
+.jev-row-open {
+  display: block;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* The feature's id under its name, small (t-6277 D7): the word its settings
+   key and its ledger rows are found by. */
+.jev-row-id {
+  display: block;
+  color: var(--ink-mist);
+  font-family: var(--font-mono);
+  font-size: var(--jev-meta-size);
+  font-weight: var(--jev-weight-plain);
+}
+
+/* The drawer rides a dock pinned to the top of the page's window, so it
+   stays where the eye is while the table scrolls under it; the dock takes
+   no room of its own. A sticky inset is read inside the page's padding, so
+   the dock sticks where it starts, and the drawer reaches back over the
+   padding to the page's own edges. */
+.jev-drawer-dock {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  height: 0;
+  margin-block-end: calc(-1 * var(--space-4));
+}
+
+.jev-drawer {
+  position: absolute;
+  top: calc(-1 * var(--space-5));
+  right: calc(-1 * var(--space-5));
+  width: min(var(--jev-drawer-width), calc(100% + var(--space-5)));
+  height: var(--jev-drawer-height, 70vh);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  overflow: auto;
+  border-left: var(--jev-line) solid var(--edge-rule);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-2);
+}
+
+.jev-drawer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.jev-drawer-title {
+  margin: 0;
+  font-size: var(--jev-drawer-title-size);
+}
+
+.jev-drawer-id {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-mist);
+  font-family: var(--font-mono);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-drawer-summary, .jev-drawer-written, .jev-drawer-text {
+  margin: 0;
+  line-height: var(--leading-body);
+}
+
+.jev-drawer-written {
+  color: var(--jev-tone-under);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-drawer-part {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.jev-drawer-heading {
+  margin: 0;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  font-weight: var(--jev-weight-strong);
+}
+
+.jev-drawer-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+}
+
+.jev-drawer-facts dt {
+  color: var(--ink-mist);
+}
+
+.jev-drawer-facts dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.jev-drawer-text {
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+/* The settings card's switch, worn over the table (§6.1): the same framed
+   row and the same line under it, standing at the page's edges as the strip
+   and the table do. The row's frame is the one frame — a panel around it
+   would be a box around a box (t-6277 D10). */
+.jev-switch {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.jev-switch .settings-jev-switch,
+.jev-switch .settings-notice {
+  margin: 0;
+}
+
 .jev-error {
   color: var(--signal-halt);
 }
@@ -37657,19 +37851,31 @@ h4.knowledge-inspector-head::after {
   background: var(--surface-well);
 }
 
+/* The figure is what the strip is read for: large; its label small and quiet
+   above it (t-6277 D10). */
 .jev-stat dt {
   display: flex;
   align-items: center;
   gap: var(--space-1);
   color: var(--ink-mist);
-  font-size: var(--jev-meta-size);
+  font-size: var(--jev-stat-label-size);
 }
 
 .jev-stat dd {
   margin: 0;
   font-size: var(--jev-stat-size);
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
+  line-height: var(--leading-tight);
   font-variant-numeric: tabular-nums;
+}
+
+/* The states start a group of their own after the sums. */
+.jev-stat[data-group="states"] {
+  background: var(--surface-deck);
+}
+
+.jev-stat.jev-stat--lead {
+  margin-inline-start: var(--space-3);
 }
 
 /* A state's count wears the state's tone — the tone its rows wear. */
@@ -37686,7 +37892,15 @@ h4.knowledge-inspector-head::after {
 .jev-view [data-status="recording"] { --jev-tone: var(--jev-tone-recording); }
 .jev-view [data-status="under"] { --jev-tone: var(--jev-tone-under); }
 .jev-view [data-status="blocked"] { --jev-tone: var(--jev-tone-blocked); }
-.jev-view [data-status="unused"] { --jev-tone: var(--jev-tone-unused); }
+.jev-view [data-status="dormant"] { --jev-tone: var(--jev-tone-dormant); }
+
+/* What the table says when no feature was asked all week (t-6277 D10):
+   whether Jev is off, or on and quiet. */
+.jev-empty-row td {
+  padding: var(--space-4) var(--jev-cell-pad);
+  color: var(--ink-mist);
+  text-align: center;
+}
 
 /* The row the unused features fold into: one line, one press. */
 .jev-fold-row td {
@@ -37717,7 +37931,11 @@ h4.knowledge-inspector-head::after {
    scrolling inside a page that also scrolls is two scrollbars for one list. */
 .jev-table-wrap {
   flex: none;
-  overflow-x: auto;
+  /* Clipped, not scrolled: a wrap that scrolls sideways is a scroll
+     container, and the head could then stick only inside it — which never
+     scrolls down. The table fits a 1080p stage (t-6243 D1), so nothing is
+     lost to the clip, and the head sticks to the page (t-6277 D10). */
+  overflow-x: clip;
   border: var(--jev-line) solid var(--edge-rule);
   border-radius: var(--radius-md);
 }
@@ -37729,7 +37947,8 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-table th, .jev-table td {
-  padding: var(--space-2);
+  padding: var(--jev-cell-pad);
+  line-height: var(--jev-cell-leading);
   text-align: left;
   vertical-align: top;
   border-bottom: var(--jev-line) solid var(--edge-rule);
@@ -37754,7 +37973,7 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-fact-strong {
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 .jev-fact-mist {
@@ -37762,13 +37981,17 @@ h4.knowledge-inspector-head::after {
   font-size: var(--jev-meta-size);
 }
 
+/* The head stays at the page's top edge while the rows scroll under it: a
+   sticky inset is read inside the page's padding, so it reaches back over
+   it (t-6277 D10). */
 .jev-table th {
   color: var(--ink-mist);
-  font-weight: 500;
+  font-weight: var(--jev-weight-medium);
   font-size: var(--jev-meta-size);
   background: var(--surface-well);
   position: sticky;
-  top: 0;
+  top: calc(-1 * var(--space-5));
+  z-index: 2;
 }
 
 .jev-table tbody tr:last-child td {
@@ -37780,24 +38003,11 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-table tr.is-applying [data-jev-cell="seat"] {
-  font-weight: 600;
-}
-
-.jev-view select.jev-mode {
-  background-color: var(--surface-well);
-  color: var(--ink-chalk);
-  border: var(--jev-line) solid var(--edge-mark);
-  border-radius: var(--radius-sm);
-  padding: var(--space-1) var(--space-2);
-  font: inherit;
-  font-size: var(--jev-meta-size);
-  /* A width of its own: the shared field width is a share of the cell, and
-     a table cell sized by a share clips the longest mode word. */
-  width: var(--jev-mode-width);
+  font-weight: var(--jev-weight-strong);
 }
 
 .jev-share {
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 /* The week as one picture of two lines, each line's latest value under it,
@@ -37825,7 +38035,7 @@ h4.knowledge-inspector-head::after {
 .jev-trend-last::before {
   content: "";
   width: var(--space-3);
-  border-top: 2px solid var(--jev-trend);
+  border-top: var(--jev-trend-stroke) solid var(--jev-trend);
 }
 
 .jev-trend-agreement::before {
@@ -37872,29 +38082,35 @@ h4.knowledge-inspector-head::after {
 .jev-chip {
   display: inline-flex;
   align-items: center;
-  padding: 1px var(--space-2);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--jev-tone) 12%, transparent);
+  padding: var(--jev-chip-pad-block) var(--space-2);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--jev-tone) var(--jev-tint), transparent);
   color: var(--jev-tone);
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
   white-space: nowrap;
 }
 
 /* A light tint keeps the chip's ink at AA on the light panel, as the
    settings card's state pill does. */
 :root[data-theme="light"] .jev-chip {
-  background: color-mix(in srgb, var(--jev-tone) 6%, transparent);
+  background: color-mix(in srgb, var(--jev-tone) var(--jev-tint-quiet), transparent);
 }
 
-/* Not in use says itself in words alone. */
-.jev-chip[data-status="unused"] {
+/* A feature that asks nothing says so in words alone. */
+.jev-chip[data-status="dormant"] {
   padding-inline: 0;
   background: none;
-  font-weight: 500;
+  font-weight: var(--jev-weight-medium);
 }
 
 .jev-status-reason, .jev-status-fact {
   margin: 0;
+}
+
+/* A recording feature measured under its bar says why in the tone of a miss
+   (t-6277 D8): the chip stays one of four, the sentence carries the rest. */
+.jev-status-reason.is-under {
+  color: var(--jev-tone-under);
 }
 
 .jev-status-fact {
@@ -37913,8 +38129,8 @@ h4.knowledge-inspector-head::after {
   flex: none;
   width: var(--jev-progress-width);
   height: var(--jev-progress-height);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ink-mist) 24%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--ink-mist) var(--jev-tint-track), transparent);
   overflow: hidden;
 }
 
@@ -37940,7 +38156,7 @@ h4.knowledge-inspector-head::after {
 
 .jev-refused {
   color: var(--jev-tone-blocked);
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 /* What did not come back, by token (t-6243 D5): a quiet word for the wire's
@@ -37953,11 +38169,13 @@ h4.knowledge-inspector-head::after {
   white-space: normal;
 }
 
-/* One text line tall, so a row of them costs a line and not a box. */
+/* One text line tall, so a row of them costs a line and not a box. A word
+   starts where the count above it starts; a button's tint is what lines up,
+   so its words sit inside it (t-6277 D10). */
 .jev-token {
   display: inline-flex;
   align-items: center;
-  padding: 0 var(--space-1);
+  padding: 0;
   border: 0;
   border-radius: var(--radius-sm);
   background: none;
@@ -37969,7 +38187,8 @@ h4.knowledge-inspector-head::after {
 }
 
 button.jev-token {
-  background: color-mix(in srgb, var(--jev-tone-blocked) 12%, transparent);
+  padding-inline: var(--space-1);
+  background: color-mix(in srgb, var(--jev-tone-blocked) var(--jev-tint), transparent);
   color: var(--jev-tone-blocked);
   cursor: pointer;
   transition:
@@ -37978,7 +38197,7 @@ button.jev-token {
 }
 
 button.jev-token:hover {
-  background: color-mix(in srgb, var(--jev-tone-blocked) 22%, transparent);
+  background: color-mix(in srgb, var(--jev-tone-blocked) var(--jev-tint-hover), transparent);
 }
 
 .jev-spark {
@@ -37990,7 +38209,7 @@ button.jev-token:hover {
 .jev-spark-line {
   fill: none;
   stroke: var(--jev-trend);
-  stroke-width: 1.5;
+  stroke-width: var(--jev-trend-stroke);
   stroke-linejoin: round;
   stroke-linecap: round;
 }
@@ -38008,33 +38227,6 @@ button.jev-token:hover {
   fill: var(--jev-trend-accuracy);
 }
 
-.jev-recent {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.jev-recent-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-
-.jev-recent-title {
-  font-size: var(--jev-body-size);
-  margin: 0;
-}
-
-.jev-view select.jev-recent-seat {
-  background-color: var(--surface-well);
-  color: var(--ink-chalk);
-  border: var(--jev-line) solid var(--edge-mark);
-  border-radius: var(--radius-sm);
-  padding: var(--space-1) var(--space-2);
-  font: inherit;
-}
-
 .jev-recent-list {
   list-style: none;
   margin: 0;
@@ -38044,18 +38236,31 @@ button.jev-token:hover {
   gap: var(--space-1);
 }
 
+/* One judgment in the drawer's width: when, what became of it and its
+   marks on the first line; what it was asked, then what it answered, under
+   them. */
 .jev-decision {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 2fr) minmax(0, 1fr) auto;
-  gap: var(--space-3);
+  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-areas:
+    "when outcome marks"
+    "asked asked asked"
+    "answer answer answer";
+  gap: var(--space-1) var(--space-2);
   align-items: baseline;
   padding: var(--space-2) var(--space-3);
   border: var(--jev-line) solid var(--edge-rule);
   border-radius: var(--radius-sm);
 }
 
+.jev-decision-when { grid-area: when; }
+.jev-decision-outcome { grid-area: outcome; }
+.jev-decision-marks { grid-area: marks; text-align: right; }
+.jev-decision-asked { grid-area: asked; }
+.jev-decision-answer { grid-area: answer; }
+
 .jev-decision-outcome {
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 .jev-decision[data-outcome]:not([data-outcome="answered"]) .jev-decision-outcome {

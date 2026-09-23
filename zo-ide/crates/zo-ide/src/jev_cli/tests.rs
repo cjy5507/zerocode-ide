@@ -231,6 +231,10 @@ fn the_json_carries_the_days_the_refusals_the_applied_count_and_the_recent_list(
     assert_eq!(placement["week"]["applied"], 1);
     assert_eq!(placement["week"]["refusals"], serde_json::json!([{"token": "not_consented", "rows": 1}]));
     assert_eq!(placement["week"]["failures"], serde_json::json!([{"token": "not_consented", "rows": 1}]));
+    // A seat whose rows name no control and no guard carries the counts, as
+    // zeros (t-6277 D6) — the drawer reads a screen seat off `named`.
+    assert_eq!(placement["week"]["guards"], serde_json::json!({"instructed": 0, "walled": 0}));
+    assert_eq!(placement["week"]["controls"], serde_json::json!({"named": 0, "destructiveHeld": 0}));
     assert_eq!(placement["days"].as_array().map(Vec::len), Some(7));
     assert_eq!(placement["days"][6]["tally"]["rows"], 2, "today is the last day");
     assert_eq!(placement["days"][6]["agreement"]["compared"], 0);

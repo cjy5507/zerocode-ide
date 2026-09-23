@@ -2545,11 +2545,13 @@
 }
 
 /* Jev dashboard geometry; colours inherit the semantic palette in both
-   themes, the trend lines take the first lane's hue. */
+   themes, the trend lines take the first lane's hue. The type is the
+   window's own scale (--text-*) wherever a step of it fits; the page's title
+   and the strip's figures are the two sizes of its own (t-6277 D10). */
 :root {
   --jev-title-size: 26px;
-  --jev-meta-size: 12px;
-  --jev-body-size: 13px;
+  --jev-meta-size: var(--text-xs);
+  --jev-body-size: var(--text-sm);
   --jev-line: 1px;
   --jev-spark-width: 72px;
   --jev-spark-height: 24px;
@@ -2564,17 +2566,16 @@
   --jev-reason-min: 10em;
   /* A failure's chip is one text line tall (t-6243 D5). */
   --jev-token-line: 16px;
-  /* Wide enough for the longest mode word, 자동 (근거가 쌓이면 적용), whole,
-     at the dashboard's meta size. */
-  --jev-mode-width: 16.5em;
   --jev-trend: var(--lane-1);
   /* The week's second line, accuracy: the ink and a dash, so it reads apart
      from the response rate in both treatments (the light one draws every
      lane in one colour) and without colour at all (t-6243 D4). */
   --jev-trend-accuracy: var(--ink-chalk);
   --jev-trend-dash: 3 2;
-  /* The strip over the table (t-6243 D1). */
-  --jev-stat-size: 18px;
+  /* The strip over the table (t-6243 D1): the figure large and its label
+     small above it (t-6277 D10). */
+  --jev-stat-size: 22px;
+  --jev-stat-label-size: var(--text-2xs);
   --jev-stat-min: 96px;
   /* Where a feature stands, one tone per state — the strip's counts and the
      rows' chips wear the same one (t-6243 D1/D2). */
@@ -2583,11 +2584,35 @@
   --jev-tone-recording: var(--ink-mist);
   --jev-tone-under: var(--signal-wait-ink);
   --jev-tone-blocked: var(--signal-halt-ink);
-  --jev-tone-unused: var(--ink-mist);
+  --jev-tone-dormant: var(--ink-mist);
   /* The samples still owed, as a bar filling toward the judge's window. */
   --jev-progress-width: 72px;
   --jev-progress-height: 6px;
   --jev-progress-ink: var(--lane-1);
+  /* The drawer a feature's row opens (t-6277 D6): wide enough for a
+     judgment's asked facts on one or two lines, narrow enough to leave the
+     table's first columns in view beside it. */
+  --jev-drawer-width: 420px;
+  --jev-drawer-title-size: var(--text-lg);
+  /* One rhythm for every row and chip (t-6277 D10): the cells' padding and
+     leading, the weights the page speaks in, the tints a tone is laid on
+     with, and the trend's stroke. */
+  --jev-cell-pad: var(--space-2);
+  --jev-cell-leading: 1.35;
+  --jev-weight-plain: 400;
+  --jev-weight-medium: 500;
+  --jev-weight-strong: 600;
+  --jev-chip-pad-block: 1px;
+  --jev-tint: 12%;
+  --jev-tint-quiet: 6%;
+  --jev-tint-open: 10%;
+  --jev-tint-hover: 22%;
+  --jev-tint-track: 24%;
+  --jev-trend-stroke: 1.5px;
+  /* The settings card's link to the dashboard: its underline's gap, and how
+     much it thickens under a pointer. */
+  --jev-link-offset: 2px;
+  --jev-link-hover-thickness: 2px;
 }
 
 /* Skill library geometry; colours inherit the semantic palette in both themes. */

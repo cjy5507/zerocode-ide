@@ -49,32 +49,39 @@ const TYPESAFE_DECISION_MODES = Object.freeze([
   Object.freeze({ mode: "auto", asks: true, applies: false, automatic: true }),
 ]);
 /* Every seat of `zerocode_core::jev::JEV_USES`, in the table's order, with the
-   settings key it writes and the modes it offers — a labeled seat offers all
-   four, a seat nothing labels offers no `auto`. `typesafe_settings.rs` holds
-   this list against the table. */
+   settings key a person may write by hand, the modes it offers — a labeled
+   seat offers all four, a seat nothing labels offers no `auto` — and the mode
+   it stands at while Jev is switched on and nobody wrote a word for it
+   (`JevUse::recommended`). `typesafe_settings.rs` holds this list against the
+   table. */
 const JEV_SEATS = Object.freeze([
-  Object.freeze({ id: "routing", setting: "decisionShadow", modes: "off shadow on auto" }),
-  Object.freeze({ id: "recall", setting: "rerankShadow", modes: "off shadow on auto" }),
-  Object.freeze({ id: "skills", setting: "skillSearch", modes: "off shadow on auto" }),
-  Object.freeze({ id: "browser", setting: "browserAction", modes: "off shadow on auto" }),
-  Object.freeze({ id: "desktop", setting: "desktopAction", modes: "off shadow on auto" }),
-  Object.freeze({ id: "emulator", setting: "emulatorAction", modes: "off shadow on auto" }),
-  Object.freeze({ id: "stall", setting: "stallCause", modes: "off shadow on auto" }),
-  Object.freeze({ id: "placement", setting: "workerPlacement", modes: "off shadow on auto" }),
-  Object.freeze({ id: "summon", setting: "summonChoice", modes: "off shadow on auto" }),
-  Object.freeze({ id: "effort", setting: "stepEffort", modes: "off shadow on auto" }),
-  Object.freeze({ id: "step_effort", setting: "zoStepEffort", modes: "off shadow on auto" }),
-  Object.freeze({ id: "compaction", setting: "jevCompaction", modes: "off shadow on auto" }),
-  Object.freeze({ id: "agent_tool", setting: "agentTool", modes: "off shadow on" }),
-  Object.freeze({ id: "browser_read", setting: "jevBrowserRead", modes: "off shadow on auto" }),
-  Object.freeze({ id: "notify", setting: "jevNotify", modes: "off shadow on auto" }),
-  Object.freeze({ id: "mention_rerank", setting: "jevMentionRerank", modes: "off shadow on auto" }),
-  Object.freeze({ id: "branching", setting: "jevBranching", modes: "off shadow on auto" }),
-  Object.freeze({ id: "judgment_cache", setting: "jevJudgmentCache", modes: "off shadow on auto" }),
-  Object.freeze({ id: "challenger", setting: "jevChallenger", modes: "off shadow on auto" }),
-  Object.freeze({ id: "patch_review", setting: "jevPatchReview", modes: "off shadow on auto" }),
+  Object.freeze({ id: "routing", setting: "decisionShadow", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "recall", setting: "rerankShadow", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "skills", setting: "skillSearch", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "browser", setting: "browserAction", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "desktop", setting: "desktopAction", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "emulator", setting: "emulatorAction", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "stall", setting: "stallCause", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "placement", setting: "workerPlacement", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "summon", setting: "summonChoice", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "effort", setting: "stepEffort", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "step_effort", setting: "zoStepEffort", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "compaction", setting: "jevCompaction", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "agent_tool", setting: "agentTool", modes: "off shadow on", recommended: "on" }),
+  Object.freeze({ id: "browser_read", setting: "jevBrowserRead", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "notify", setting: "jevNotify", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "mention_rerank", setting: "jevMentionRerank", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "branching", setting: "jevBranching", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "judgment_cache", setting: "jevJudgmentCache", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "challenger", setting: "jevChallenger", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "patch_review", setting: "jevPatchReview", modes: "off shadow on auto", recommended: "auto" }),
 ]);
-const jevSeat = (id) => JEV_SEATS.find((seat) => seat.id === id) ?? null;
+/* The door's object under `smart` and the one word its folder list may hold
+   that is not a folder (`zerocode_core::jev::door::JEV_SETTINGS_KEY`,
+   `EVERY_WORKSPACE`) — what a press of the one switch writes
+   (`door::switch_on`). `typesafe_settings.rs` holds these to the core's. */
+const JEV_SETTINGS_KEY = "jev";
+const JEV_EVERY_WORKSPACE = "*";
 /* The model pin every Jev request names (`zerocode_core::jev::MODEL_SETTING`)
    and the alias an unpinned request asks (`DEFAULT_MODEL`), as
    `typesafe_settings` answers them — `typesafe_settings.rs` holds these to
@@ -2578,8 +2585,8 @@ class StatefulBackend {
         return clone(this.zoSettings.providers);
       }
       // Mirrors `typesafe_settings.rs`: the key is kept trimmed under the one
-      // item every zo reads and never sent back; the switch is zo's
-      // `smart.decisionShadow`, one of the routing row's modes.
+      // item every zo reads and never sent back; the switch is
+      // `smart.jev.enabled`, written as the core's press writes it.
       case "typesafe_settings": return this.typesafeSettings();
       case "save_typesafe_key": {
         const key = String(args.key ?? "").trim();
@@ -2593,16 +2600,25 @@ class StatefulBackend {
       case "remove_typesafe_key":
         this.keychain.delete(TYPESAFE_SERVICE);
         return this.typesafeSettings();
-      case "set_jev_mode": {
+      case "set_jev_enabled": {
+        // Mirrors `zerocode_core::jev::door::switch_on` / `switch_off`: on is
+        // the switch, every folder and no seat's own word; off is the switch
+        // and nothing else. A `jev` of another shape is refused.
         if (this.typesafeSetFailure) {
           throw { kind: "failed", message: "fixture refused the switch" };
         }
-        const seat = jevSeat(String(args.use ?? ""));
-        if (!seat) throw { kind: "failed", message: `not a seat: ${args.use}` };
-        if (!seat.modes.split(" ").includes(args.mode)) {
-          throw { kind: "failed", message: `not a mode of ${seat.id}: ${args.mode}` };
+        const smart = { ...(this.zoSettings.smart ?? {}) };
+        const jev = smart[JEV_SETTINGS_KEY] ?? {};
+        if (jev === null || typeof jev !== "object" || Array.isArray(jev)) {
+          throw { kind: "failed", message: "smart.jev is not an object" };
         }
-        this.zoSettings.smart = { ...(this.zoSettings.smart ?? {}), [seat.setting]: args.mode };
+        if (args.on) {
+          smart[JEV_SETTINGS_KEY] = { ...jev, enabled: true, workspaces: [JEV_EVERY_WORKSPACE] };
+          for (const seat of JEV_SEATS) delete smart[seat.setting];
+        } else {
+          smart[JEV_SETTINGS_KEY] = { ...jev, enabled: false };
+        }
+        this.zoSettings.smart = smart;
         return this.typesafeSettings();
       }
       case "set_route_classifier": {
@@ -2645,29 +2661,48 @@ class StatefulBackend {
   }
 
   typesafeSettings() {
-    /* Every switch reads its own row's words and anything else is off:
-       `typesafe_settings.rs` `mode_in`. */
+    const smart = this.zoSettings.smart ?? {};
+    const jev = smart[JEV_SETTINGS_KEY];
+    const door = jev !== null && typeof jev === "object" && !Array.isArray(jev) ? jev : null;
+    /* `door::switched_on`: the switch written, and true. */
+    const switchedOn = door?.enabled === true;
+    /* Every seat reads its own row's words and anything else is off; a seat
+       nobody wrote a word for stands at its recommendation while the switch is
+       on and is off otherwise: `JevUse::mode_in`. */
     const mode = (seat, given) => {
-      const word = String(given ?? "").trim().toLowerCase();
       const offered = seat.modes.split(" ");
+      if (given === undefined) return switchedOn ? seat.recommended : offered[0];
+      const word = String(given ?? "").trim().toLowerCase();
       return offered.includes(word) ? word : offered[0];
     };
-    const pin = jevModelPin(this.zoSettings.smart?.[JEV_MODEL_SETTING]);
+    const switches = JEV_SEATS.map((seat) => ({
+      id: seat.id,
+      setting: seat.setting,
+      mode: mode(seat, smart[seat.setting]),
+      modes: clone(jevSeatModes(seat)),
+      written: smart[seat.setting] !== undefined,
+    }));
+    /* `JevSwitch::of`: the door lets a request through (unset is on, anything
+       but `true` is off), some seat asks, and some folder is consented. */
+    const enabled = jev === undefined || (door !== null && (door.enabled === undefined || door.enabled === true));
+    const roots = Array.isArray(door?.workspaces)
+      ? door.workspaces.filter((root) => typeof root === "string" && root.trim())
+      : [];
+    const everywhere = roots.includes(JEV_EVERY_WORKSPACE);
+    const folders = roots.filter((root) => root !== JEV_EVERY_WORKSPACE).length;
+    const asks = switches.some((row) => row.modes.find((choice) => choice.mode === row.mode)?.asks);
+    const pin = jevModelPin(smart[JEV_MODEL_SETTING]);
     return {
       keysKeptHere: !this.routerKeychainUnavailable,
       keySaved: Boolean(this.keychain.get(TYPESAFE_SERVICE)?.trim()),
+      jev: { on: enabled && asks && (everywhere || folders > 0), everywhere, folders },
       model: {
         setting: JEV_MODEL_SETTING,
         model: pin ?? JEV_MODEL_ALIAS,
         pinned: pin !== null,
         alias: JEV_MODEL_ALIAS,
       },
-      switches: JEV_SEATS.map((seat) => ({
-        id: seat.id,
-        setting: seat.setting,
-        mode: mode(seat, this.zoSettings.smart?.[seat.setting]),
-        modes: clone(jevSeatModes(seat)),
-      })),
+      switches,
       classifier: {
         setting: CLASSIFIER_SETTING,
         mode: classifierMode(this.zoSettings.smart?.[CLASSIFIER_SETTING]).mode,
@@ -4227,7 +4262,7 @@ await test("키체인이 없는 컴퓨터: 판이 키체인을 약속하지 않�
   return reason;
 });
 
-await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌리기가 백엔드의 답을 그린다", async () => {
+await test("TypeSafe 키는 키체인에만 가고, Jev는 스위치 하나로 켜고 끈다 — 카드에 고를 모드는 없다", async () => {
   await openSettings(pageA, "api-routers");
   backend.keychain.delete(TYPESAFE_SERVICE);
   delete backend.zoSettings.smart;
@@ -4236,6 +4271,15 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await renderSettled(pageA);
   const said = (key, fallback, vars) => pageA.evaluate(([one, words, values]) => t(one, words, values), [key, fallback, vars]);
   const status = () => statusSaid(pageA, "typesafe-status");
+  const toggle = pageA.locator("#jev-enabled");
+  const partial = pageA.locator("#typesafe-card [data-jev-partial]");
+  // The door's object as the press left it, keys in one order however the
+  // press happened to write them.
+  const doorObject = () => Object.fromEntries(Object.entries(backend.zoSettings.smart[JEV_SETTINGS_KEY]).sort());
+  const statusIs = async (words) => pageA.waitForFunction(
+    (expected) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === expected,
+    words, { timeout: UI_TIMEOUT },
+  );
 
   // Nothing saved: the badge says so, and nothing but typing a key is offered.
   assertEqual(
@@ -4246,23 +4290,20 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   for (const id of ["#typesafe-check-btn", "#typesafe-remove-btn", "#typesafe-save-btn"]) {
     assert(await pageA.locator(id).isDisabled(), `${id} was offered with no key saved`);
   }
-  assertEqual(await pageA.locator("#typesafe-routing-select").inputValue(), "off", "the switch did not read zo's default");
-  // The options are the backend's modes, in its order, each named by what it does.
-  assertEqual(
-    await pageA.locator("#typesafe-routing-select option").evaluateAll((options) => options.map((option) => option.value)),
-    TYPESAFE_DECISION_MODES.map((choice) => choice.mode),
-    "the switch did not list the backend's modes",
-  );
-  assertEqual(
-    await pageA.locator("#typesafe-routing-select option").evaluateAll((options) => options.map((option) => option.textContent)),
-    [
-      await said("settings.typesafe.modeOff", "끔"),
-      await said("settings.typesafe.modeRecord", "기록만"),
-      await said("settings.typesafe.modeApply", "항상 적용"),
-      await said("settings.typesafe.modeAuto", "자동 (근거가 쌓이면 적용)"),
-    ],
-    "an option is not named by what its mode does",
-  );
+  // The card asks one thing (§6.1): a switch, off on a machine that never met
+  // Jev, and no mode to choose — its one select, the classifier, is folded
+  // under 고급 and closed.
+  assert(await toggle.isVisible(), "the card has no switch");
+  assert(!(await toggle.isChecked()), "a machine that never met Jev reads as using it");
+  assert(await partial.isHidden(), "a switch that is off says where it is used");
+  // A closed fold keeps its body's boxes (content-visibility) while nobody
+  // sees them, so what is folded away is counted as out of sight.
+  const selects = await pageA.locator("#typesafe-card select").evaluateAll((all) => ({
+    total: all.length,
+    visible: all.filter((one) => !one.closest("details:not([open])") && one.getClientRects().length > 0).length,
+  }));
+  assertEqual(selects, { total: 1, visible: 0 }, "the card offers a choice of mode");
+  assert(!(await pageA.locator("#typesafe-advanced").evaluate((fold) => fold.open)), "고급 starts open");
 
   // A save sends the trimmed key once, clears the field, and paints the answer.
   await pageA.fill("#typesafe-key-input", "  apikey_fixture  ");
@@ -4289,120 +4330,72 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await pageA.waitForFunction(() => document.querySelector("#typesafe-status .settings-status-said")?.textContent.includes("jev-1.13.0"), null, { timeout: UI_TIMEOUT });
   assertEqual(await status(), await said("settings.typesafe.answered", "응답했습니다 — {{model}}, {{ms}} ms", { model: "jev-1.13.0", ms: 612 }));
   backend.typesafeCheck = { answered: false, failure: "unauthorized", elapsedMs: 515 };
-  const refused = await said("settings.typesafe.unauthorized", "키가 거절되었습니다 — 키를 다시 확인하세요.");
   await pageA.click("#typesafe-check-btn");
-  await pageA.waitForFunction((words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words, refused, { timeout: UI_TIMEOUT });
+  await statusIs(await said("settings.typesafe.unauthorized", "키가 거절되었습니다 — 키를 다시 확인하세요."));
   backend.typesafeCheck = { answered: true, model: "jev-1.13.0", elapsedMs: 612 };
 
-  // The switch writes zo's word and moves nothing else of zo's settings.
+  // One press on: the switch, every folder, every seat at its recommendation —
+  // and nothing else of zo's settings moves.
   const routers = clone(backend.zoSettings.providers);
-  const switchedAt = backend.calls.length;
-  await pageA.selectOption("#typesafe-routing-select", "shadow");
-  assertEqual((await backend.waitForCall("A", "set_jev_mode", switchedAt)).args.mode, "shadow");
-  await pageA.waitForFunction(
-    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedRecord", "기록만 켰습니다. 다음 판단부터 기록하되 실제 동작에는 적용하지 않습니다."),
-    { timeout: UI_TIMEOUT },
-  );
-  assertEqual(backend.zoSettings.smart.decisionShadow, "shadow");
-  assertEqual(backend.zoSettings.providers, routers, "turning the shadow on moved the router rows");
+  const onAt = backend.calls.length;
+  await toggle.click();
+  assertEqual((await backend.waitForCall("A", "set_jev_enabled", onAt)).args.on, true);
+  await statusIs(await said("settings.typesafe.turnedOn", "켰습니다. 모든 폴더에서 기능마다 권장 설정으로 판단을 요청합니다."));
+  assertEqual(doorObject(), { enabled: true, workspaces: [JEV_EVERY_WORKSPACE] });
+  assertEqual(backend.zoSettings.providers, routers, "the switch moved the router rows");
   await pageA.evaluate(() => refreshApiRouters());
-  assertEqual(await pageA.locator("#typesafe-routing-select").inputValue(), "shadow", "a reopened pane lost record-only mode");
+  assert(await toggle.isChecked(), "a reopened card lost the switch");
+  assert(await partial.isHidden(), "every folder read as some");
 
-  const activeAt = backend.calls.length;
-  await pageA.selectOption("#typesafe-routing-select", "on");
-  assertEqual((await backend.waitForCall("A", "set_jev_mode", activeAt)).args.mode, "on");
-  await pageA.waitForFunction(
-    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedApply", "항상 적용을 켰습니다. 다음 판단부터 실제 동작에 반영합니다."),
-    { timeout: UI_TIMEOUT },
-  );
-  assertEqual(backend.zoSettings.smart.decisionShadow, "on");
-  assertEqual(backend.zoSettings.providers, routers, "turning actual use on moved the router rows");
+  // A file set up before the switch: seat words by hand and two folders. Jev
+  // is in use — the switch says so — in two folders only, and the line under
+  // it offers the rest in one press, which is the switch's own.
+  backend.zoSettings.smart = {
+    [JEV_SEATS[0].setting]: "shadow",
+    [JEV_SEATS[1].setting]: "on",
+    [JEV_SETTINGS_KEY]: { workspaces: ["/work/a", "/work/b"], labelDrafts: true },
+  };
   await pageA.evaluate(() => refreshApiRouters());
-  assertEqual(await pageA.locator("#typesafe-routing-select").inputValue(), "on", "a reopened pane lost actual-use mode");
-
-  // The ledgers' numbers stand under the seat they belong to, and a zo too
-  // old to count them leaves the switches standing without any.
-  const numbersOf = (seat) => pageA.evaluate(
-    (id) => document.querySelector(`[data-jev-seat="${id}"]`)
-      ?.closest("[data-jev-row]")?.querySelector("[data-jev-numbers]")?.textContent ?? null,
-    seat,
-  );
-  assertEqual(await numbersOf("routing"), null, "an unanswered summary drew numbers anyway");
-  const window7 = (rows, answered, p95Ms) => ({
-    rows, answered, answeredShare: rows ? answered / rows : null,
-    answeredLowerBound: rows ? 0.71 : null, called: rows, requests: rows,
-    redactedLines: 0, inputTokens: 0, p50Ms: p95Ms, p95Ms, failures: [],
-  });
-  backend.jevSummary = JEV_SEATS.map((seat) => ({
-    id: seat.id, setting: seat.setting, mode: "auto", ledger: `${seat.id}.jsonl`,
-    found: null, today: window7(0, 0, null), week: window7(0, 0, null),
-    costUsd: 0, riseFloorPermille: null, clearsRiseFloor: null,
-    rowsToNextJudgment: null, stand: "recording", applies: false, verdict: null,
-  }));
-  const routingNumbers = backend.jevSummary.find((seat) => seat.id === "routing");
-  routingNumbers.today = window7(1, 1, 616);
-  routingNumbers.week = window7(26, 23, 4847);
-  routingNumbers.riseFloorPermille = 950;
-  routingNumbers.rowsToNextJudgment = 14;
-  routingNumbers.verdict = { verdict: "hold", line: "answered" };
-  await pageA.evaluate(() => refreshApiRouters());
-  const held = [
-    await said("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}}건 응답",
-      { today: 1, rows: 26, answered: 23 }),
-    // Counts are grouped the way the language in force groups them (t-6243).
-    await said("settings.typesafe.seatP95", "느릴 때 {{ms}} ms", { ms: "4,847" }),
-    await said("settings.typesafe.seatHolding", "기록만 하는 중 — {{because}}",
-      { because: await said("settings.typesafe.lineAnswered", "응답률이 기준에 못 미칩니다") }),
-  ].join(" · ");
-  await pageA.waitForFunction(
-    (words) => document.querySelector('[data-jev-seat="routing"]')
-      ?.closest("[data-jev-row]")?.querySelector("[data-jev-numbers]")?.textContent === words,
-    held, { timeout: UI_TIMEOUT },
-  );
+  assert(await toggle.isChecked(), "a file that sends read as off");
+  assert(await partial.isVisible(), "consent for some folders did not say so");
   assertEqual(
-    await numbersOf("summon"),
-    await said("settings.typesafe.seatNeverAsked", "아직 사용된 적이 없습니다."),
-    "a seat nothing has asked read as a seat that answered nothing",
+    (await partial.locator("[data-jev-partial-said]").textContent()).trim(),
+    await said("settings.typesafe.partial", "일부 폴더({{count}}개)에서만 사용 중입니다.", { count: "2" }),
   );
+  const everyAt = backend.calls.length;
+  await partial.locator("[data-jev-everywhere]").click();
+  assertEqual((await backend.waitForCall("A", "set_jev_enabled", everyAt)).args.on, true);
+  await pageA.waitForFunction(() => document.querySelector("#typesafe-card [data-jev-partial]")?.hidden === true, null, { timeout: UI_TIMEOUT });
+  assertEqual(doorObject(), { enabled: true, labelDrafts: true, workspaces: [JEV_EVERY_WORKSPACE] });
+  for (const seat of JEV_SEATS) {
+    assert(!(seat.setting in backend.zoSettings.smart), `${seat.id} kept its own word`);
+  }
 
-  // The id asked and the version that answered, one line with the window's
-  // rows and the version a change cut away (t-6187) — before the verdict,
-  // which stays the line's last words.
-  routingNumbers.askedModel = JEV_MODEL_ALIAS;
-  routingNumbers.model = "jev-1.13.0";
-  routingNumbers.judged = { window: window7(25, 25, 400), windowWanted: 73,
-    agreement: { compared: 0, agreed: 0, lowerBound: null, controlRows: 0 } };
-  routingNumbers.verdict = { verdict: "hold", line: "answered", cutModel: "jev-1.12.0" };
-  await pageA.evaluate(() => refreshApiRouters());
-  const versioned = [
-    await said("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}}건 응답",
-      { today: 1, rows: 26, answered: 23 }),
-    await said("settings.typesafe.seatP95", "느릴 때 {{ms}} ms", { ms: "4,847" }),
-    [
-      await said("settings.typesafe.seatVersion", "모델 {{model}}",
-        { asked: JEV_MODEL_ALIAS, model: "jev-1.13.0" }),
-      await said("settings.typesafe.seatWindowRows", "판정 표본 {{rows}}건", { rows: 25 }),
-      await said("settings.typesafe.seatCut", "이전 버전 {{cut}}의 기록은 제외", { cut: "jev-1.12.0" }),
-    ].join(" · "),
-    await said("settings.typesafe.seatHolding", "기록만 하는 중 — {{because}}",
-      { because: await said("settings.typesafe.lineAnswered", "응답률이 기준에 못 미칩니다") }),
-  ].join(" · ");
-  await pageA.waitForFunction(
-    (words) => document.querySelector('[data-jev-seat="routing"]')
-      ?.closest("[data-jev-row]")?.querySelector("[data-jev-numbers]")?.textContent === words,
-    versioned, { timeout: UI_TIMEOUT },
-  );
-  delete routingNumbers.askedModel;
-  delete routingNumbers.model;
-  delete routingNumbers.judged;
-  routingNumbers.verdict = { verdict: "hold", line: "answered" };
+  // A refused press keeps the card as it stood and says why.
+  backend.typesafeSetFailure = true;
+  try {
+    const refusedAt = backend.calls.length;
+    await toggle.click();
+    await backend.waitForCall("A", "set_jev_enabled", refusedAt);
+    await pageA.waitForFunction(() => document.getElementById("jev-enabled")?.checked === true, null, { timeout: UI_TIMEOUT });
+    assertEqual(backend.zoSettings.smart[JEV_SETTINGS_KEY].enabled, true, "a refused press mutated the backend");
+  } finally {
+    delete backend.typesafeSetFailure;
+  }
 
-  // The model pin (`smart.jevModel`): unpinned, the field is empty with the
-  // alias behind it; a version pins it where the door reads it; an empty
-  // field unpins — the key leaves the file — and a pin the door would not
-  // read is refused and writes nothing.
+  // One press off: the switch alone moves, and nothing is sent.
+  const offAt = backend.calls.length;
+  await toggle.click();
+  assertEqual((await backend.waitForCall("A", "set_jev_enabled", offAt)).args.on, false);
+  await statusIs(await said("settings.typesafe.turnedOffAll", "껐습니다. 아무것도 보내지 않습니다."));
+  assertEqual(doorObject(), { enabled: false, labelDrafts: true, workspaces: [JEV_EVERY_WORKSPACE] });
+  assert(!(await toggle.isChecked()), "the switch stayed on");
+
+  // The model pin (`smart.jevModel`), under 고급: unpinned, the field is empty
+  // with the alias behind it; a version pins it where the door reads it; an
+  // empty field unpins — the key leaves the file — and a pin the door would
+  // not read is refused and writes nothing.
+  await pageA.locator("#typesafe-advanced > summary").click();
   const modelInput = pageA.locator("#typesafe-model-input");
   assertEqual(await modelInput.inputValue(), "", "an unpinned card showed a pin");
   assertEqual(await modelInput.getAttribute("placeholder"), JEV_MODEL_ALIAS);
@@ -4410,27 +4403,11 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await modelInput.fill("jev-1.13.0");
   await modelInput.dispatchEvent("change");
   assertEqual((await backend.waitForCall("A", "set_jev_model", pinAt)).args.model, "jev-1.13.0");
-  await pageA.waitForFunction(
-    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.modelPinned", "{{model}} 버전으로 고정했습니다. 다음 요청부터 이 버전을 씁니다.",
-      { model: "jev-1.13.0" }),
-    { timeout: UI_TIMEOUT },
-  );
+  await statusIs(await said("settings.typesafe.modelPinned", "{{model}} 버전으로 고정했습니다. 다음 요청부터 이 버전을 씁니다.",
+    { model: "jev-1.13.0" }));
   assertEqual(backend.zoSettings.smart[JEV_MODEL_SETTING], "jev-1.13.0");
-  // A pinned seat names its version as the pin, not as the newest answer
-  // (t-6243 D0): the line says the model is held there.
-  routingNumbers.askedModel = "jev-1.13.0";
-  routingNumbers.model = "jev-1.13.0";
   await pageA.evaluate(() => refreshApiRouters());
   assertEqual(await modelInput.inputValue(), "jev-1.13.0", "a reopened card lost the pin");
-  const pinnedLine = await said("settings.typesafe.seatVersionPinned", "고정 모델 {{model}}", { model: "jev-1.13.0" });
-  await pageA.waitForFunction(
-    (words) => document.querySelector('[data-jev-seat="routing"]')
-      ?.closest("[data-jev-row]")?.querySelector("[data-jev-numbers]")?.textContent.includes(words),
-    pinnedLine, { timeout: UI_TIMEOUT },
-  );
-  delete routingNumbers.askedModel;
-  delete routingNumbers.model;
   const slipAt = backend.calls.length;
   await modelInput.fill("jev 1.13");
   await modelInput.dispatchEvent("change");
@@ -4440,154 +4417,9 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await modelInput.fill("");
   await modelInput.dispatchEvent("change");
   await backend.waitForCall("A", "set_jev_model", unpinAt);
-  await pageA.waitForFunction(
-    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.modelUnpinned", "고정을 풀었습니다. 늘 최신 버전을 씁니다."),
-    { timeout: UI_TIMEOUT },
-  );
-  assertEqual(JEV_MODEL_SETTING in backend.zoSettings.smart, false, "unpinned left the key behind");
-
-  const autoAt = backend.calls.length;
-  await pageA.selectOption("#typesafe-routing-select", "auto");
-  assertEqual((await backend.waitForCall("A", "set_jev_mode", autoAt)).args.mode, "auto");
-  await pageA.waitForFunction(
-    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedAuto", "자동 모드입니다. 정확도 근거가 충분히 쌓일 때까지는 기록만 하고 실제 동작에는 적용하지 않습니다."),
-    { timeout: UI_TIMEOUT },
-  );
-  assertEqual(backend.zoSettings.smart.decisionShadow, "auto");
-  await pageA.evaluate(() => refreshApiRouters());
-  assertEqual(await pageA.locator("#typesafe-routing-select").inputValue(), "auto", "a reopened pane lost auto mode");
-  // Back to actual use, answered before the refusal below is tried: a switch
-  // still waiting on its answer takes no second one.
-  const backToOn = backend.calls.length;
-  await pageA.selectOption("#typesafe-routing-select", "on");
-  await backend.waitForCall("A", "set_jev_mode", backToOn);
-  await pageA.waitForFunction(
-    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedApply", "항상 적용을 켰습니다. 다음 판단부터 실제 동작에 반영합니다."),
-    { timeout: UI_TIMEOUT },
-  );
-
-  // The window's own switch: its own key under `smart`, and the router's
-  // untouched — one card, two questions.
-  assertEqual(
-    await pageA.locator("#typesafe-browser-select").inputValue(),
-    "off",
-    "browser recovery did not start off",
-  );
-  const browserAt = backend.calls.length;
-  await pageA.selectOption("#typesafe-browser-select", "on");
-  assertEqual((await backend.waitForCall("A", "set_jev_mode", browserAt)).args.mode, "on");
-  await pageA.waitForFunction(
-    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedApply", "항상 적용을 켰습니다. 다음 판단부터 실제 동작에 반영합니다."),
-    { timeout: UI_TIMEOUT },
-  );
-  assertEqual(backend.zoSettings.smart.browserAction, "on");
-  assertEqual(backend.zoSettings.smart.decisionShadow, "on", "the browser switch moved the router's");
-  assertEqual(backend.zoSettings.providers, routers, "the browser switch moved the router rows");
-  await pageA.evaluate(() => refreshApiRouters());
-  assertEqual(
-    await pageA.locator("#typesafe-browser-select").inputValue(),
-    "on",
-    "a reopened pane lost browser recovery",
-  );
-
-  backend.typesafeSetFailure = true;
-  try {
-    const browserRefusedAt = backend.calls.length;
-    await pageA.selectOption("#typesafe-browser-select", "off");
-    await backend.waitForCall("A", "set_jev_mode", browserRefusedAt);
-    await pageA.waitForFunction(
-      () => document.getElementById("typesafe-browser-select")?.value === "on",
-      null,
-      { timeout: UI_TIMEOUT },
-    );
-    assertEqual(
-      backend.zoSettings.smart.browserAction,
-      "on",
-      "a refused browser change mutated the backend",
-    );
-  } finally {
-    delete backend.typesafeSetFailure;
-  }
-  // The browser switch's own `auto` records and never presses — named so.
-  assertEqual(
-    await pageA.locator("#typesafe-browser-select option").evaluateAll((options) => options.map((option) => option.textContent)),
-    [
-      await said("settings.typesafe.modeOff", "끔"),
-      await said("settings.typesafe.modeRecord", "기록만"),
-      await said("settings.typesafe.modeApply", "항상 적용"),
-      await said("settings.typesafe.modeAuto", "자동 (근거가 쌓이면 적용)"),
-    ],
-    "a browser option is not named by what its mode does",
-  );
-
-  // Every seat Jev sits in has a row on this one card, offering its own row's
-  // modes and no others — a seat with no apply stage offers no way to apply.
-  //
-  // How many each offers is read off the table rather than typed a second
-  // time. It WAS typed a second time, and the copy went stale the day `recall`
-  // gained an apply stage: the fixture said four words, the list beside it
-  // still said three, and this suite was red on main for it.
-  for (const seat of JEV_SEATS) {
-    assertEqual(
-      await pageA.locator(`#typesafe-${seat.id}-select option`).count(),
-      seat.modes.split(" ").length,
-      `the ${seat.id} switch does not offer its row's modes`,
-    );
-    assert(
-      await pageA.locator(`#typesafe-${seat.id}-select`).isVisible(),
-      `the ${seat.id} switch is not on the card`,
-    );
-  }
-  const recallAt = backend.calls.length;
-  await pageA.selectOption("#typesafe-recall-select", "shadow");
-  const asked = await backend.waitForCall("A", "set_jev_mode", recallAt);
-  assertEqual(asked.args.use, "recall", "the card did not say which seat moved");
-  assertEqual(asked.args.mode, "shadow");
-  assertEqual(backend.zoSettings.smart.rerankShadow, "shadow");
-  assertEqual(
-    backend.zoSettings.smart.decisionShadow,
-    "on",
-    "the recall switch moved the router's",
-  );
-  const browserAutoAt = backend.calls.length;
-  await pageA.selectOption("#typesafe-browser-select", "auto");
-  assertEqual((await backend.waitForCall("A", "set_jev_mode", browserAutoAt)).args.mode, "auto");
-  await pageA.waitForFunction(
-    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedAuto", "자동 모드입니다. 정확도 근거가 충분히 쌓일 때까지는 기록만 하고 실제 동작에는 적용하지 않습니다."),
-    { timeout: UI_TIMEOUT },
-  );
-  assertEqual(backend.zoSettings.smart.browserAction, "auto");
-  assertEqual(backend.zoSettings.smart.decisionShadow, "on", "the browser switch moved the router's");
-
-  backend.typesafeSetFailure = true;
-  try {
-    const refusedAt = backend.calls.length;
-    await pageA.selectOption("#typesafe-routing-select", "off");
-    await backend.waitForCall("A", "set_jev_mode", refusedAt);
-    await pageA.waitForFunction(
-      () => document.getElementById("typesafe-routing-select")?.value === "on",
-      null,
-      { timeout: UI_TIMEOUT },
-    );
-    assertEqual(backend.zoSettings.smart.decisionShadow, "on", "a refused change mutated the backend");
-  } finally {
-    delete backend.typesafeSetFailure;
-  }
-
-  const offAt = backend.calls.length;
-  await pageA.selectOption("#typesafe-routing-select", "off");
-  await backend.waitForCall("A", "set_jev_mode", offAt);
-  await pageA.waitForFunction(
-    (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedOff", "껐습니다. 더는 판단을 요청하지 않습니다."),
-    { timeout: UI_TIMEOUT },
-  );
-  assertEqual(backend.zoSettings.smart.decisionShadow, "off");
+  await statusIs(await said("settings.typesafe.modelUnpinned", "고정을 풀었습니다. 늘 최신 버전을 씁니다."));
+  assert(!(JEV_MODEL_SETTING in backend.zoSettings.smart), "an unpin left the key in the file");
+  await pageA.locator("#typesafe-advanced > summary").click();
 
   // A removal forgets the key and takes back what only a saved key offers.
   const removedAt = backend.calls.length;
@@ -4615,6 +4447,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   }
   await pageA.evaluate(() => refreshApiRouters());
   assert(!(await pageA.locator("#typesafe-key-input").isDisabled()), "a machine with a keychain was left without the key field");
+  return `one switch · ${selects.total} select under 고급 · 0 visible`;
 });
 
 await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한다 — 분류기가 라우팅 자리 앞에 선다", async () => {
@@ -4625,6 +4458,8 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await renderSettled(pageA);
   const said = (key, fallback) => pageA.evaluate(([one, words]) => t(one, words), [key, fallback]);
   const unreachable = pageA.locator("[data-jev-unreachable]");
+  // The classifier is folded under 고급 (§6.1): open it to reach it.
+  await pageA.locator("#typesafe-advanced > summary").click();
 
   // The gate is on the card, and it offers the four words the classifier has —
   // named by what each does, never by the word it writes.
@@ -4653,8 +4488,9 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
     "an untouched settings file did not read as the probing word",
   );
 
-  // A seat that asks while nothing calls a probe says so, on the row whose
-  // mode it is about — and which row that is, is the backend's answer.
+  // A feature that asks while nothing calls a probe says so, beside the
+  // classifier that changes it — and which feature that is, is the
+  // backend's answer.
   const quiet = CLASSIFIER_MODES.find((choice) => choice.runs && !choice.probes).mode;
   const chosenAt = backend.calls.length;
   await pageA.selectOption("#route-classifier-select", quiet);
@@ -4665,28 +4501,22 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.autoClassifier, quiet, "the choice was not written to zo's settings");
-  assert(await unreachable.count() === 1, "exactly one row carries this warning");
+  assert(await unreachable.count() === 1, "exactly one warning stands beside the classifier");
   assert(
     await unreachable.isHidden(),
-    "a seat that asks nothing yet was warned about a mode it is not in",
-  );
-  assertEqual(
-    await unreachable.evaluate((node) =>
-      node.closest("[data-jev-row]").querySelector("[data-jev-seat]").dataset.jevSeat),
-    JEV_SEATS[0].id,
-    "the warning does not stand on the seat the classifier gates",
+    "a feature that asks nothing yet was warned about a mode it is not in",
   );
 
-  // Turn the gated seat on: now the card offers a judgment nothing can make,
-  // and says so.
+  // Turn Jev on: the gated feature now stands at its recommendation and asks,
+  // so the card offers a judgment nothing can make, and says so.
   const onAt = backend.calls.length;
-  await pageA.selectOption(`#typesafe-${JEV_SEATS[0].id}-select`, "on");
-  await backend.waitForCall("A", "set_jev_mode", onAt);
+  await pageA.locator("#jev-enabled").click();
+  await backend.waitForCall("A", "set_jev_enabled", onAt);
   await pageA.waitForFunction(() => !document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
   assertEqual(
     (await unreachable.textContent()).trim(),
-    await said("settings.typesafe.routingUnreachable", "지금 분류 방식이 모델에게 묻지 않아 이 기능은 판단을 요청하지 않습니다. 위의 「라우팅 분류기」를 모델에게도 묻는 방식으로 바꾸세요."),
-    "the row does not say why its mode cannot be reached",
+    await said("settings.typesafe.routingUnreachable", "지금 분류 방식이 모델에게 묻지 않아 「모델 선택 판단」은 판단을 요청하지 않습니다. 모델에게도 묻는 방식으로 바꾸면 요청합니다."),
+    "the classifier does not say why the feature it gates cannot be reached",
   );
 
   // Put the probing word back and the warning goes with it.
@@ -10075,32 +9905,22 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
       "the TypeSafe card head does not read from the same table",
     );
 
-    // ---- 5. five seats, one row each, the paragraph folded ---------------
-    const seats = await pageA.evaluate(() => [...document.querySelectorAll("[data-jev-row]")]
-      .filter((row) => !row.hidden)
-      .map((row) => ({
-        order: Number(row.style.order),
-        seat: row.querySelector("[data-jev-seat]")?.dataset.jevSeat ?? null,
-        name: row.querySelector(".settings-label")?.textContent.trim() ?? "",
-        summary: row.querySelector(".settings-row-desc")?.textContent.trim() ?? "",
-        folded: row.querySelector("details.settings-fold")?.open === false,
-        paragraph: row.querySelector("details.settings-fold p")?.textContent.trim().length ?? 0,
-      })));
+    // ---- 5. one switch, and where the features are (§6.1) ---------------
+    const jevCard = await pageA.evaluate(() => {
+      const card = document.getElementById("typesafe-card");
+      const toggle = card.querySelector("[data-jev-switch]");
+      return {
+        switches: card.querySelectorAll("[data-jev-switch]").length,
+        role: toggle?.getAttribute("role") ?? null,
+        type: toggle?.type ?? null,
+        rows: card.querySelectorAll("[data-jev-row]").length,
+        link: card.querySelector("#jev-open-dashboard")?.classList.contains("btn") ?? null,
+      };
+    });
     assertEqual(
-      seats.map((row) => row.seat),
-      JEV_SEATS.map((seat) => seat.id),
-      "the card's rows are not the use table's rows, in its order",
-    );
-    assertEqual(seats.map((row) => row.order), JEV_SEATS.map((_, at) => at), "a row does not take the table's place");
-    assertEqual(
-      seats.filter((row) => row.name === "" || row.summary === "" || !row.folded || row.paragraph < 80),
-      [],
-      "a seat is not [name · mode · one line] with its paragraph folded away",
-    );
-    assertEqual(
-      await pageA.locator("#jev-uses-count").textContent(),
-      String(JEV_SEATS.length),
-      "the card does not count the seats the table named",
+      jevCard,
+      { switches: 1, role: "switch", type: "checkbox", rows: 0, link: false },
+      "the card is not one switch and a way to the dashboard",
     );
 
     // ---- 6. one thing to finish, and it is the only filled button --------
@@ -10111,8 +9931,11 @@ await test("설정 문법: 칸은 제 값만큼 · 남는 폭은 설명이 · �
         const filled = [...box.querySelectorAll(".btn--primary")].map((one) => one.id);
         return {
           actions: last.className,
+          // A notice's own action (the switch's 「모든 폴더에서 사용」) is the
+          // notice's, not a button loose above the card's footer.
           buttonsOutside: [...box.querySelectorAll(".btn")]
-            .filter((one) => one.closest(".settings-action-row") !== last).map((one) => one.id),
+            .filter((one) => one.closest(".settings-action-row") !== last && !one.closest(".settings-notice"))
+            .map((one) => one.id),
           filled,
         };
       }, card);

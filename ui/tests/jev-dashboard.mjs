@@ -1,45 +1,66 @@
 /* The Jev dashboard (t-5807, docs/design/jev-dashboard-and-perfection-20260921.md §2).
  *
  * What is measured: the rail door opens one tab; the table carries every
- * seat the settings card carries, in the card's order and under the card's
- * names; the numbers zo answered stand in their cells, the trend has one
- * point per counted day, and the recent list shows what the digest said;
- * a switch moved on the dashboard goes through the card's door and the card
- * follows; the refresh policy is one ask on open, one settled ask per burst
- * of ledger events, none on a re-open within the beat; and the time from
- * the click to the drawn table, with the backend answering at once, sits
- * under the design's line (§2: ≤ 200 ms).
+ * feature the settings markup names (`#jev-features`), in its order and
+ * under its names; the numbers zo answered stand in their cells, the trend
+ * has one point per counted day, and the recent list shows what the digest
+ * said; the one switch over the table is the card's, pressed through the
+ * card's door (docs/design/jev-settings-20260917.md §6.1), and no feature
+ * offers a mode to choose; the refresh policy is one ask on open, one
+ * settled ask per burst of ledger events, none on a re-open within the
+ * beat; and the time from the click to the drawn table, with the backend
+ * answering at once, sits under the design's line (§2: ≤ 200 ms).
  *
- * The backend is the window harness's stub with three answers swapped in
- * (`window.__ANSWER__`): the settings' switches, zo's summary and the seat
- * switch's door. */
+ * The backend is the window harness's stub with its answers swapped in
+ * (`window.__ANSWER__`): the settings' state, zo's summary, the day's
+ * count and the switch's door. */
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openWindowTestPage } from "./window-boot.mjs";
-import { setQualityTheme, settlePaint } from "./settings-quality.mjs";
+import { createRequire } from "node:module";
+import { contrastTable, setQualityTheme, settlePaint } from "./settings-quality.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 /* Where the evidence goes: a person looks at these (t-5807, the operator's
  * ask), so they are written under the checkout's output folder, which git
  * ignores, and named in the report. */
 const EVIDENCE_DIR = join(ROOT, "output", "t-5807");
-/* How many seats the settings card carries — counted off the card's own
- * markup rather than typed here, so a seat added to the use table (which
- * `typesafe_settings.rs` holds the card to) is not a second number to move. */
+/* How many features the settings markup names — counted off the markup
+ * rather than typed here, so a feature added to the use table (which
+ * `typesafe_settings.rs` holds the markup to) is not a second number to
+ * move. */
 const { readFileSync } = await import("node:fs");
-const SEATS = (readFileSync(join(ROOT, "ui", "index.html"), "utf8").match(/data-jev-seat="/g) ?? []).length;
+const SEATS = (readFileSync(join(ROOT, "ui", "index.html"), "utf8").match(/data-jev-feature="/g) ?? []).length;
 /* The fewest days with a value a trend is drawn from (t-6243 D4). */
 const TREND_DAYS = 3;
+/* The contrast every text on the dashboard and the card clears, in both
+ * treatments, large or not (t-6277 D10): WCAG AA's line for body text. */
+const CONTRAST_FLOOR = 4.5;
 
-/* Installed on the page: the fixture the three answers are drawn from.
+/* axe, for the contrast table (`contrastTable`) — resolved from the
+ * checkout's own node_modules, as the settings gate resolves it; `null` when
+ * it is not installed, which the check then says rather than skipping. */
+function axeBuilder() {
+  try {
+    const require = createRequire(import.meta.url);
+    const found = require(require.resolve("@axe-core/playwright"));
+    return found.default ?? found;
+  } catch {
+    return null;
+  }
+}
+
+/* Installed on the page: the fixture the answers are drawn from — exported
+ * so a measurement draws the same dashboard the gate does.
  * With `real` — this machine's own count, from `realSummary` — the summary
  * answer is that count and every switch stands where that count says. */
-function jevDashboardFixture(real = null) {
-  const seats = [...document.querySelectorAll("[data-jev-seat]")].map((select) => select.dataset.jevSeat);
+export function jevDashboardFixture(real = null) {
+  const seats = [...document.getElementById("jev-features").content.querySelectorAll("[data-jev-feature]")]
+    .map((feature) => feature.dataset.jevFeature);
   const modes = [
     { mode: "off", asks: false, applies: false, automatic: false },
     { mode: "shadow", asks: true, applies: false, automatic: false },
@@ -49,12 +70,15 @@ function jevDashboardFixture(real = null) {
   const modeOf = Object.fromEntries(seats.map((id) => [id, "on"]));
   modeOf.recall = "shadow";
   modeOf.placement = "auto";
+  // A feature a person switched off by hand in the settings file (t-6277 D8).
+  modeOf.skills = "off";
   const now = Date.now();
   const day = 24 * 60 * 60 * 1000;
   const today = now - (now % day);
   const empty = () => ({
     rows: 0, answered: 0, refused: 0, applied: 0, refusals: [], answeredShare: null, answeredLowerBound: null,
     called: 0, requests: 0, redactedLines: 0, inputTokens: 0, p50Ms: null, p95Ms: null, failures: [],
+    guards: { instructed: 0, walled: 0 }, controls: { named: 0, destructiveHeld: 0 },
   });
   const counted = (rows, answered, extra = {}) => ({
     ...empty(), rows, answered, answeredShare: rows ? answered / rows : null,
@@ -94,6 +118,7 @@ function jevDashboardFixture(real = null) {
       seat.askedModel = "jev-latest";
       seat.model = "jev-1.13.0";
       seat.verdict = { verdict: "hold", line: "answered", cutModel: "jev-1.12.0" };
+      seat.agreementWeek = { compared: 50, agreed: 20, lowerBound: 0.28 };
       seat.days = days([null, 0.9, 1, 0.8, null, 1, 0.96]);
       seat.recent = args?.recent ? decisions(Math.min(args.recent, 5)) : [];
     }
@@ -122,8 +147,12 @@ function jevDashboardFixture(real = null) {
     }
     if (id === "browser") {
       // A small sample: four answers in the week, too few for a lower bound
-      // to be a measurement (t-6243 D3).
-      seat.week = counted(4, 4, { p50Ms: 243, p95Ms: 435 });
+      // to be a measurement (t-6243 D3) — and a screen feature: its rows name
+      // the controls it judged, two presses its guard stopped for the
+      // screen's own orders, one at a wall, and one control a press cannot
+      // take back that it handed to the person (t-6277 D6).
+      seat.week = counted(4, 4, { p50Ms: 243, p95Ms: 435,
+        guards: { instructed: 2, walled: 1 }, controls: { named: 4, destructiveHeld: 1 } });
       seat.days = days([null, null, null, null, null, null, 1]);
     }
     if (id === "notify") {
@@ -159,12 +188,15 @@ function jevDashboardFixture(real = null) {
     }
     return seat;
   };
-  window.__JEV__ = { seats, modeOf, asks: [] };
+  // The one switch (§6.1): in use, from four folders — a machine set up
+  // before the switch — until a press says otherwise.
+  const jev = { on: true, everywhere: false, folders: 4 };
+  window.__JEV__ = { seats, modeOf, asks: [], jev, pressed: [] };
   const settings = () => ({
-    keysKeptHere: true, keySaved: true,
+    keysKeptHere: true, keySaved: true, jev: { ...jev },
     // Every seat's comparison sample floor, the use table's
     // (`JevUse::agreement_rows_wanted`, a judgment window's worth).
-    switches: seats.map((id) => ({ id, setting: id, mode: modeOf[id], modes, agreementRowsWanted: 20 })),
+    switches: seats.map((id) => ({ id, setting: id, mode: modeOf[id], modes, written: true, agreementRowsWanted: 20 })),
     classifier: { setting: "autoClassifier", mode: "probed", probes: true, gates: seats[0],
       modes: [{ mode: "probed", runs: true, markers: false, probes: true }] },
   });
@@ -176,8 +208,11 @@ function jevDashboardFixture(real = null) {
     window.__JEV__.asks.push(args ?? {});
     return seats.map((id) => numbers(id, args));
   };
-  window.__ANSWER__.set_jev_mode = (args) => {
-    modeOf[args.use] = args.mode;
+  // The switch's door, as the core presses it: on is every folder and every
+  // seat at its recommendation, off is nothing in use.
+  window.__ANSWER__.set_jev_enabled = (args) => {
+    window.__JEV__.pressed.push(args.on);
+    Object.assign(jev, args.on ? { on: true, everywhere: true, folders: 0 } : { on: false });
     return settings();
   };
   if (real) {
@@ -195,10 +230,14 @@ function jevDashboardFixture(real = null) {
     const faults = [];
     const box = root.getBoundingClientRect();
     // What is folded away is not on the surface: a closed `<details>` keeps
-    // its body's boxes (content-visibility) but nobody sees them.
+    // its body's boxes (content-visibility) but nobody sees them — and a fold
+    // inside a closed fold is out of sight, its own summary with it.
     const folded = (node) => {
-      const fold = node.closest("details:not([open])");
-      return fold !== null && !(node.tagName === "SUMMARY" && node.parentElement === fold) && !node.closest("summary");
+      for (let fold = node.closest("details:not([open])"); fold; fold = fold.parentElement?.closest("details:not([open])") ?? null) {
+        const summary = node.closest("summary");
+        if (!(summary && summary.parentElement === fold)) return true;
+      }
+      return false;
     };
     const held = [...root.querySelectorAll("*")].filter((node) =>
       !(node instanceof SVGElement) && node.tagName !== "OPTION" && node.tagName !== "SELECT"
@@ -330,22 +369,29 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
       true,
       real ? `real: ${real.zo}${real.recent ? " --recent 12" : " (no recent list: that zo predates the flag)"}` : "fixture: no zo answered");
 
-    // The settings card, standing on the same numbers.
+    // The settings card: one switch, the key, and a line to the dashboard
+    // (§6.1) — no choice of mode in sight.
     for (const theme of ["dark", "light"]) {
       await setQualityTheme(page, theme);
-      await page.evaluate(() => setSettingsOpen(true, "typesafe-routing-select"));
-      await page.waitForFunction(() => document.querySelector("#jev-uses-card [data-jev-numbers]") !== null);
+      await page.evaluate(() => setSettingsOpen(true, "jev-enabled"));
+      await page.waitForFunction(() => document.getElementById("jev-enabled")?.checked !== undefined);
       await settlePaint(page);
       const card = await page.evaluate(() => {
-        const card = document.querySelector("#jev-uses-card");
+        const card = document.querySelector("#typesafe-card");
         card.scrollIntoView({ block: "start" });
-        return { faults: window.__JEV_TEXT_FAULTS__(card), lines: card.querySelectorAll("[data-jev-numbers]").length };
+        return {
+          faults: window.__JEV_TEXT_FAULTS__(card),
+          visibleSelects: [...card.querySelectorAll("select")]
+            .filter((one) => !one.closest("details:not([open])") && one.getClientRects().length > 0).length,
+          switches: card.querySelectorAll("[data-jev-switch]").length,
+        };
       });
       const path = join(EVIDENCE_DIR, `jev-settings-card-${theme}.png`);
-      await page.locator("#jev-uses-card").screenshot({ path });
+      await page.locator("#typesafe-card").screenshot({ path });
       await page.evaluate(() => setSettingsOpen(false));
-      ok(`the ${theme} settings card draws the same numbers with no text cut, clipped or overlapping`,
-        card.faults.length === 0 && card.lines === counted, JSON.stringify({ ...card, faults: card.faults.slice(0, 6), path }));
+      ok(`the ${theme} settings card is one switch and the key, with no text cut, clipped or overlapping`,
+        card.faults.length === 0 && card.visibleSelects === 0 && card.switches === 1,
+        JSON.stringify({ ...card, faults: card.faults.slice(0, 6), path, counted }));
     }
     ok("the evidence pages raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {
@@ -376,8 +422,8 @@ export async function testJevDashboard(browser, origin, ok) {
       });
       const ms = performance.now() - began;
       const rows = [...view().querySelectorAll("[data-jev-dash-row]")];
-      const cardNames = window.__JEV__.seats.map((id) => document.querySelector(`[data-jev-seat="${id}"]`)
-        .closest("[data-jev-row]").querySelector(".settings-label").textContent.trim());
+      const cardNames = window.__JEV__.seats.map((id) => document.getElementById("jev-features").content
+        .querySelector(`[data-jev-feature="${id}"] [data-jev-name]`).textContent.trim());
       const cell = (id, name) => view().querySelector(`[data-jev-dash-row="${id}"] [data-jev-cell="${name}"]`);
       const fact = (id, name) => view().querySelector(`[data-jev-dash-row="${id}"] [data-jev-fact="${name}"]`)?.textContent ?? null;
       const summon = {
@@ -386,7 +432,6 @@ export async function testJevDashboard(browser, origin, ok) {
         applied: fact("summon", "applied"),
         agreement: fact("summon", "agreement"), cost: cell("summon", "cost").textContent,
         boundTip: view().querySelector('[data-jev-dash-row="summon"] [data-jev-fact="bound"]')?.dataset.tip ?? null,
-        mode: cell("summon", "mode").querySelector("select").value,
       };
       const recallWeek = fact("recall", "week");
       // Each feature's state (t-6243 D2): its chip and tone, one reason, the
@@ -399,6 +444,8 @@ export async function testJevDashboard(browser, origin, ok) {
         return {
           chip: chip?.textContent ?? null, tone: chip?.dataset.status ?? null,
           reason: holder.querySelector(".jev-status-reason")?.textContent ?? "",
+          under: holder.querySelector(".jev-status-reason")?.classList.contains("is-under") ?? false,
+          chips: holder.querySelectorAll(".jev-chip").length,
           progress: bar ? { now: bar.getAttribute("aria-valuenow"), max: bar.getAttribute("aria-valuemax"),
             label: holder.querySelector(".jev-progress-label")?.textContent ?? "" } : null,
           facts: [...holder.querySelectorAll(".jev-status-fact")].map((one) => one.textContent),
@@ -432,24 +479,30 @@ export async function testJevDashboard(browser, origin, ok) {
       // What the rate and accuracy cells say (t-6243 D3).
       const said = (id) => ({ answered: cell(id, "answered").textContent, agreement: fact(id, "agreement") });
       const small = Object.fromEntries(["summon", "placement", "routing", "notify", "browser"].map((id) => [id, said(id)]));
-      const cardLine = document.querySelector('[data-jev-seat="summon"]').closest("[data-jev-row]")
-        .querySelector("[data-jev-numbers]")?.textContent ?? null;
+      // The switch over the table (§6.1), and whether any feature still
+      // offers a mode to choose.
+      const mirror = view().querySelector(".jev-switch");
+      const switchOver = mirror ? {
+        checked: mirror.querySelector("[data-jev-switch]")?.checked ?? null,
+        id: mirror.querySelector("[id]")?.id ?? null,
+        partial: !mirror.querySelector("[data-jev-partial]")?.hidden,
+        said: mirror.querySelector("[data-jev-partial-said]")?.textContent ?? "",
+        beforeTable: Boolean(mirror.compareDocumentPosition(view().querySelector(".jev-table")) & Node.DOCUMENT_POSITION_FOLLOWING),
+      } : null;
+      const tableSelects = view().querySelectorAll(".jev-table select").length;
       return {
         ms, active: activeTabId, visible: !view().hidden, hiddenAttr: view().hidden,
         rowIds: rows.map((row) => row.dataset.jevDashRow),
-        rowNames: rows.map((row) => row.querySelector('[data-jev-cell="seat"]').textContent),
-        cardNames, cardSeats: window.__JEV__.seats, summon, recallWeek, statuses, caption, cardLine, small, trends,
+        rowNames: rows.map((row) => row.querySelector('[data-jev-cell="seat"] .jev-row-open').textContent),
+        cardNames, cardSeats: window.__JEV__.seats, summon, recallWeek, statuses, caption, small, trends, switchOver, tableSelects,
         strip, fold, bodyRows: bodyRows.length,
         asks: window.__JEV__.asks.slice(), settingsAsks: window.__COUNTS__.typesafe_settings ?? 0,
         summaryAsks: window.__COUNTS__.jev_summary ?? 0, dayAsks: window.__COUNTS__.jev_day ?? 0,
         title: tabLabel(tabs.find((tab) => tab.id === "jev")),
         pressed: el("nav-jev").getAttribute("aria-pressed"),
         heads: [...view().querySelectorAll("thead th")].map((th) => th.scope),
-        recentSeat: view().querySelector(".jev-recent-seat").value,
-        recentCount: view().querySelectorAll(".jev-decision").length,
-        recentFirst: view().querySelector(".jev-decision")?.textContent ?? "",
-        recentRefused: view().querySelector('.jev-decision[data-outcome="not_consented"] .jev-decision-outcome')?.textContent ?? null,
-        recentOptions: [...view().querySelectorAll(".jev-recent-seat option")].map((option) => option.value),
+        selects: view().querySelectorAll("select").length,
+        drawerHidden: view().querySelector(".jev-drawer").hidden,
         pollMs: JEV_POLL_MS, recentRows: JEV_RECENT_ROWS,
         fresh: view().querySelector(".jev-freshness").textContent,
       };
@@ -468,7 +521,7 @@ export async function testJevDashboard(browser, origin, ok) {
       JSON.stringify({ rows: opened.rowIds, names: opened.rowNames, fold: opened.fold, bodyRows: opened.bodyRows }));
     ok("the strip over the table counts today, the week, its cost, where the features stand and the day's limit",
       opened.strip.today === "44" && opened.strip.week === "1,156" && opened.strip.cost === "$0.328"
-        && opened.strip.applying === "3" && opened.strip.recording === "1" && opened.strip.under === "1"
+        && opened.strip.applying === "3" && opened.strip.recording === "2" && opened.strip.under === "1"
         && opened.strip.blocked === "1" && opened.strip.day === "247 / 500",
       JSON.stringify(opened.strip));
     ok("opening costs one settings ask, one summary ask with the recent list, and one read of the day's count",
@@ -510,7 +563,7 @@ export async function testJevDashboard(browser, origin, ok) {
       opened.summon.today === "32" && opened.summon.week === "50" && opened.summon.answered.startsWith("96%")
         && opened.summon.answered.includes("84%")
         && opened.summon.applied === "0"
-        && opened.summon.agreement === "16/44 (24%)" && opened.summon.cost === "$0.0123" && opened.summon.mode === "on"
+        && opened.summon.agreement === "16/44 (24%)" && opened.summon.cost === "$0.0123"
         && opened.summon.latency === "230 ms (느릴 때 410)" && opened.recallWeek === "1,005",
       JSON.stringify(opened.summon));
     // One chip, one reason, and — while the feature still wants samples —
@@ -518,13 +571,15 @@ export async function testJevDashboard(browser, origin, ok) {
     // nothing said twice (t-6243 D2).
     const st = opened.statuses;
     ok("each feature's state is one chip, one reason and, while it wants samples, how many remain until the check",
-      st.summon.chip === "적용 중" && st.summon.tone === "applying" && st.summon.reason === "직접 켰습니다 — 응답률이 기준에 못 미칩니다"
+      Object.values(st).every((one) => one.chips === 1 && ["꺼짐", "기록 중", "적용 중", "키 필요", "동의 필요"].includes(one.chip))
+        && st.summon.chip === "적용 중" && st.summon.tone === "applying" && st.summon.reason === "직접 켰습니다 — 응답률이 기준에 못 미칩니다"
         && st.summon.progress === null && st.summon.facts.join("|") === "이전 버전 jev-1.12.0의 기록은 제외"
         && st.routing.chip === "적용 중" && st.routing.reason === "직접 켰습니다"
         && st.routing.progress?.now === "35" && st.routing.progress?.max === "73" && st.routing.progress?.label === "판정까지 38건"
         && st.recall.chip === "기록 중" && st.recall.tone === "recording" && st.recall.reason === "자동 적용 대상이 아니라 기록만 합니다"
-        && st.placement.chip === "기준 미달" && st.placement.tone === "under" && st.placement.reason === "정확도가 기준에 못 미칩니다"
-        && st.notify.chip === "키·동의 필요" && st.notify.tone === "blocked"
+        && st.placement.chip === "기록 중" && st.placement.tone === "recording" && st.placement.reason === "정확도가 기준에 못 미칩니다"
+        && st.placement.under && !st.recall.under
+        && st.notify.chip === "동의 필요" && st.notify.tone === "blocked"
         && st.notify.reason === "동의하지 않은 폴더라 판단을 보내지 않았습니다",
       JSON.stringify(st));
     // A small sample says its size, not a share: a lower bound over a few
@@ -561,19 +616,25 @@ export async function testJevDashboard(browser, origin, ok) {
       await window.__PAINTED__();
       view.querySelector('[data-jev-dash-row="notify"] .jev-token[data-token="not_consented"]').click();
       await window.__PAINTED__();
-      const consent = { open: !settingsView.hidden, said: document.querySelector("#typesafe-status")?.textContent ?? "" };
+      const consent = { open: !settingsView.hidden, said: document.querySelector("#typesafe-status")?.textContent ?? "",
+        focus: document.activeElement?.id ?? null };
       setSettingsOpen(false);
       await window.__PAINTED__();
       return { key, consent, back: activeTabId };
     });
-    ok("a key chip opens settings on the key field, and a consent chip says where the folder is consented",
+    ok("a key chip opens settings on the key field, and a consent chip lands on the switch that consents every folder",
       fixed.key.open && fixed.key.focus === "typesafe-key-input" && fixed.consent.open
-        && fixed.consent.said.includes("smart.jev.workspaces") && fixed.back === "jev",
+        && fixed.consent.focus === "jev-enabled" && fixed.consent.said.includes("「모든 폴더에서 사용」")
+        && fixed.back === "jev",
       JSON.stringify(fixed));
     ok("the model is named once, over the table, and a row names a version only when it is another",
-      opened.caption === "모델 jev-1.13.0" && Object.values(st).every((one) => !one.facts.some((fact) => fact.startsWith("모델 ")))
-        && (opened.cardLine ?? "").includes("모델 jev-1.13.0 · 판정 표본 34건 · 이전 버전 jev-1.12.0의 기록은 제외"),
-      JSON.stringify({ caption: opened.caption, card: opened.cardLine }));
+      opened.caption === "모델 jev-1.13.0" && Object.values(st).every((one) => !one.facts.some((fact) => fact.startsWith("모델 "))),
+      JSON.stringify({ caption: opened.caption }));
+    ok("the switch stands over the table as the card's, in use from some folders, and no feature offers a mode",
+      opened.switchOver !== null && opened.switchOver.checked === true && opened.switchOver.id === null
+        && opened.switchOver.partial && opened.switchOver.said === "일부 폴더(4개)에서만 사용 중입니다."
+        && opened.switchOver.beforeTable && opened.tableSelects === 0,
+      JSON.stringify({ switchOver: opened.switchOver, tableSelects: opened.tableSelects }));
     ok("a state cell says at most fourteen words and no separator dots",
       Object.values(st).every((one) => one.words <= 14 && !one.dots),
       JSON.stringify(Object.fromEntries(Object.entries(st).map(([id, one]) => [id, one.words]))));
@@ -603,6 +664,11 @@ export async function testJevDashboard(browser, origin, ok) {
         chip: cell("skills", "status").querySelector(".jev-chip")?.textContent ?? null,
         tone: cell("skills", "status").querySelector(".jev-chip")?.dataset.status ?? null,
         reason: cell("skills", "status").querySelector(".jev-status-reason")?.textContent ?? "" };
+      // A feature switched on that nothing asked all week stands where its
+      // switch puts it, and says why its row is empty.
+      opened.idle = { chip: cell("desktop", "status").querySelector(".jev-chip")?.textContent ?? null,
+        tone: cell("desktop", "status").querySelector(".jev-chip")?.dataset.status ?? null,
+        reason: cell("desktop", "status").querySelector(".jev-status-reason")?.textContent ?? "" };
       return opened;
     });
     const inUse = ["summon", "placement", "recall", "routing", "notify", "browser"];
@@ -619,63 +685,187 @@ export async function testJevDashboard(browser, origin, ok) {
         && tr.browser.pictures === 0 && tr.browser.text === "1일치만 있음"
         && unfolded.quiet.pictures === 0 && unfolded.quiet.trend === "—",
       JSON.stringify({ ...tr, quiet: { pictures: unfolded.quiet.pictures, text: unfolded.quiet.trend } }));
-    ok("a seat nothing has asked yet reads as never asked, not as zero",
-      unfolded.quiet.week === "0" && unfolded.quiet.chips === 0 && unfolded.quiet.chip === "미사용"
-        && unfolded.quiet.tone === "unused" && unfolded.quiet.reason === "",
-      JSON.stringify(unfolded.quiet));
-    ok("the recent list opens on the first seat with decisions and lists the digest",
-      opened.recentSeat === "routing" && opened.recentCount === 1 && opened.recentFirst.includes("task: 68212a1194a4e327")
-        && opened.recentFirst.includes("complexity=small") && opened.recentFirst.includes("적용")
-        && opened.recentOptions.length === SEATS,
-      JSON.stringify({ seat: opened.recentSeat, count: opened.recentCount, first: opened.recentFirst }));
+    ok("a feature switched off says so in its one chip; one nothing asked all week says its row is empty, not zero",
+      unfolded.quiet.week === "0" && unfolded.quiet.chips === 0 && unfolded.quiet.chip === "꺼짐"
+        && unfolded.quiet.tone === "dormant" && unfolded.quiet.reason === ""
+        && unfolded.idle.chip === "적용 중" && unfolded.idle.tone === "applying"
+        && unfolded.idle.reason === "지난 7일 판단 요청이 없었습니다",
+      JSON.stringify({ quiet: unfolded.quiet, idle: unfolded.idle }));
+    ok("the dashboard holds no select at all, and its drawer starts closed (t-6277 D6/D9)",
+      opened.selects === 0 && opened.drawerHidden === true,
+      JSON.stringify({ selects: opened.selects, drawerHidden: opened.drawerHidden }));
     ok("the tab is titled and the head cells are column heads",
       opened.title !== null && opened.title.length > 0 && opened.heads.every((scope) => scope === "col"), JSON.stringify({ title: opened.title, heads: opened.heads.length }));
     ok("the freshness line names the ask's own cost", /\d+ ms/.test(opened.fresh), opened.fresh);
 
-    // The recent list follows the picker, and a refused row wears its token.
-    const picked = await page.evaluate(async () => {
+    // A row opens its drawer (t-6277 D6): the feature's last judgments, its
+    // comparisons, what a screen feature's guards stopped, the model and what
+    // it sends — all from what is in hand, so opening asks zo nothing.
+    const drawer = await page.evaluate(async () => {
       const view = document.querySelector("#jev-view");
-      const picker = view.querySelector(".jev-recent-seat");
-      // Counted from here: settings opened earlier asked for itself.
       const before = window.__COUNTS__.jev_summary;
-      picker.value = "summon";
-      picker.dispatchEvent(new Event("change", { bubbles: true }));
-      await window.__PAINTED__();
-      return {
-        count: view.querySelectorAll(".jev-decision").length,
-        refused: view.querySelector('.jev-decision[data-outcome="not_consented"] .jev-decision-outcome')?.textContent ?? null,
-        marks: [...view.querySelectorAll(".jev-decision-marks")].map((one) => one.textContent),
-        asks: window.__COUNTS__.jev_summary - before,
+      const read = () => {
+        const drawer = view.querySelector(".jev-drawer");
+        const part = (name) => drawer.querySelector(`[data-jev-drawer-part="${name}"]`);
+        const facts = (name) => [...part(name).querySelectorAll("dt")].map((term) =>
+          `${term.textContent}=${term.nextElementSibling?.textContent ?? ""}`);
+        return {
+          hidden: drawer.hidden,
+          title: drawer.querySelector(".jev-drawer-title").textContent,
+          id: drawer.querySelector(".jev-drawer-id").textContent,
+          summary: drawer.querySelector(".jev-drawer-summary").textContent,
+          written: !drawer.querySelector(".jev-drawer-written").hidden,
+          decisions: drawer.querySelectorAll(".jev-decision").length,
+          first: drawer.querySelector(".jev-decision")?.textContent ?? "",
+          refused: drawer.querySelector('.jev-decision[data-outcome="not_consented"] .jev-decision-outcome')?.textContent ?? null,
+          marks: [...drawer.querySelectorAll(".jev-decision-marks")].map((one) => one.textContent),
+          agreement: facts("agreement"),
+          guardsHidden: part("guards").hidden,
+          guards: facts("guards"),
+          version: facts("version"),
+          sends: part("sends").querySelector(".jev-drawer-text").textContent,
+          open: [...view.querySelectorAll("[data-jev-dash-row].is-open")].map((row) => row.dataset.jevDashRow),
+          expanded: view.querySelector(`[data-jev-dash-row="${drawer.querySelector(".jev-drawer-id").textContent}"] .jev-row-open`)
+            ?.getAttribute("aria-expanded") ?? null,
+          focus: document.activeElement?.className ?? "",
+        };
       };
-    });
-    ok("choosing another seat lists its decisions without asking zo again",
-      picked.count === 5 && picked.refused === "not_consented" && picked.asks === 0
-        && picked.marks[0].includes("확신도 19%") && picked.marks[0].includes("적용됨") && picked.marks[0].includes("일치")
-        && picked.marks[1].includes("기록만"),
-      JSON.stringify(picked));
-
-    // A switch moved on the dashboard goes through the card's door, and the
-    // card's own switch follows — one state, two surfaces.
-    const moved = await page.evaluate(async () => {
-      const view = document.querySelector("#jev-view");
-      const select = view.querySelector('[data-jev-dash-seat="routing"]');
-      select.value = "shadow";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-      await new Promise((done) => setTimeout(done, 50));
+      view.querySelector('[data-jev-dash-row="routing"] [data-jev-cell="latency"]').click();
       await window.__PAINTED__();
+      const routing = read();
+      view.querySelector('[data-jev-dash-row="summon"] .jev-row-open').click();
+      await window.__PAINTED__();
+      const summon = read();
+      view.querySelector('[data-jev-dash-row="browser"] .jev-row-open').click();
+      await window.__PAINTED__();
+      const browser = read();
+      // The page scrolls; the drawer stays over its window onto the table.
+      view.scrollTop = view.scrollHeight;
+      await window.__PAINTED__();
+      const box = view.getBoundingClientRect();
+      const rect = view.querySelector(".jev-drawer").getBoundingClientRect();
+      const pinned = { top: Math.round(rect.top - box.top), bottom: Math.round(box.bottom - rect.bottom),
+        right: Math.round(box.right - rect.right), scrolled: view.scrollTop };
+      view.scrollTop = 0;
+      // Escape closes it and hands the focus back to the row that opened it;
+      // the open row's own press closes it too.
+      view.querySelector(".jev-drawer-close").dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+      await window.__PAINTED__();
+      const escaped = { hidden: view.querySelector(".jev-drawer").hidden, focus: document.activeElement?.closest("[data-jev-dash-row]")?.dataset.jevDashRow ?? null };
+      view.querySelector('[data-jev-dash-row="summon"] .jev-row-open').click();
+      await window.__PAINTED__();
+      view.querySelector('[data-jev-dash-row="summon"] .jev-row-open').click();
+      await window.__PAINTED__();
+      const toggled = view.querySelector(".jev-drawer").hidden;
+      return { routing, summon, browser, pinned, escaped, toggled, asks: window.__COUNTS__.jev_summary - before };
+    });
+    const dr = drawer;
+    ok("a row opens its drawer on the feature's last judgments, and opening asks zo nothing",
+      !dr.routing.hidden && dr.routing.id === "routing" && dr.routing.title === opened.cardNames[opened.cardSeats.indexOf("routing")]
+        && dr.routing.decisions === 1 && dr.routing.first.includes("task: 68212a1194a4e327")
+        && dr.routing.first.includes("complexity=small") && dr.routing.first.includes("적용")
+        && dr.summon.decisions === 5 && dr.summon.refused === "동의 안 된 폴더"
+        && dr.summon.marks[0].includes("확신도 19%") && dr.summon.marks[0].includes("적용됨") && dr.summon.marks[0].includes("일치")
+        && dr.summon.marks[1].includes("기록만")
+        && dr.summon.open.join(",") === "summon" && dr.summon.expanded === "true" && dr.summon.focus.includes("jev-drawer-close")
+        && dr.asks === 0,
+      JSON.stringify({ routing: dr.routing, summonDecisions: dr.summon.decisions, marks: dr.summon.marks, asks: dr.asks }));
+    ok("the drawer says how often the judgment matched, the model and the version cut away, and what the feature sends",
+      dr.summon.agreement.join("|") === "판정 표본=16/44건 일치 · 신뢰 하한 24%|지난 7일=20/50건 일치"
+        && dr.summon.version.join("|") === "응답한 모델=모델 jev-1.13.0|버전 변경=이전 버전 jev-1.12.0의 기록은 제외"
+        && dr.summon.sends.length > 80 && dr.summon.summary.length > 10 && dr.summon.written
+        && dr.routing.agreement.join("|") === "판정 표본=3/3건 일치 · 신뢰 하한 43% · 대조 표본 1건 포함",
+      JSON.stringify({ agreement: dr.summon.agreement, version: dr.summon.version, routing: dr.routing.agreement }));
+    ok("a screen feature's drawer says what its guards stopped and what it handed to the person; others say nothing of it",
+      dr.summon.guardsHidden && dr.routing.guardsHidden && !dr.browser.guardsHidden
+        && dr.browser.guards.join("|") === "화면의 글이 지시해 멈춤=2|로그인·오류 화면이라 멈춤=1|되돌릴 수 없는 조작을 사람에게=1건 (조작 판단 4건 중)",
+      JSON.stringify({ browser: dr.browser.guards }));
+    ok("the drawer stays over the page's window while the table scrolls, and Escape or a second press closes it",
+      dr.pinned.scrolled > 0 && Math.abs(dr.pinned.top) <= 1 && Math.abs(dr.pinned.bottom) <= 1 && Math.abs(dr.pinned.right) <= 1
+        && dr.escaped.hidden && dr.escaped.focus === "browser" && dr.toggled,
+      JSON.stringify({ pinned: dr.pinned, escaped: dr.escaped, toggled: dr.toggled }));
+
+    // Each feature names its id under its name, small, and says what it
+    // judges in one sentence as its tip — the first sentence of the paragraph
+    // the drawer shows whole, read from the same key (t-6277 D7). The tip is
+    // the window's own node, never the operating system's `title`.
+    const named = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const folded = !jevUnusedOpen;
+      if (folded) {
+        view.querySelector("[data-jev-fold] button").click();
+        await window.__PAINTED__();
+      }
+      const template = document.getElementById("jev-features").content;
+      const firstSentence = (text) => {
+        const end = text.search(/[.!?](\s|$)|[。！？]/u);
+        return end < 0 ? text : text.slice(0, end + 1).trim();
+      };
+      const rows = [...view.querySelectorAll("[data-jev-dash-row]")].map((row) => {
+        const id = row.dataset.jevDashRow;
+        const hint = template.querySelector(`[data-jev-feature="${id}"] [data-jev-hint]`);
+        return {
+          id,
+          shownId: row.querySelector(".jev-row-id")?.textContent ?? null,
+          tip: row.querySelector(".jev-row-open")?.dataset.tip ?? null,
+          expected: firstSentence(t(hint.dataset.i18n, hint.textContent.replace(/\s+/g, " ").trim())),
+        };
+      });
+      const titled = view.querySelectorAll("[title]").length;
+      const button = view.querySelector('[data-jev-dash-row="placement"] .jev-row-open');
+      button.focus();
+      await window.__PAINTED__();
+      const tooltip = document.querySelector(".tooltip");
+      const shown = { text: tooltip?.textContent ?? null, hidden: tooltip?.hidden ?? true };
+      button.blur();
+      if (folded) {
+        view.querySelector("[data-jev-fold] button").click();
+        await window.__PAINTED__();
+      }
+      return { rows, titled, shown };
+    });
+    const unnamed = named.rows.filter((row) => row.shownId !== row.id || !row.tip || row.tip !== row.expected);
+    ok("every feature names its id under its name and tips what it judges in one sentence, from its own key",
+      named.rows.length === SEATS && unnamed.length === 0 && named.rows.every((row) => row.tip.length < row.expected.length + 1)
+        && named.titled === 0 && !named.shown.hidden
+        && named.shown.text === named.rows.find((row) => row.id === "placement").tip,
+      JSON.stringify({ rows: named.rows.length, unnamed: unnamed.slice(0, 3), titled: named.titled, shown: named.shown }));
+
+    // The switch over the table goes through the card's door, and the card's
+    // own switch follows — one state, two surfaces (§6.1): the line's press
+    // consents every folder, and a press off turns both switches off.
+    const pressed = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const settle = async () => {
+        await new Promise((done) => setTimeout(done, 50));
+        await window.__PAINTED__();
+      };
+      view.querySelector(".jev-switch [data-jev-everywhere]").click();
+      await settle();
+      const everywhere = {
+        partial: !view.querySelector(".jev-switch [data-jev-partial]").hidden,
+        card: document.getElementById("jev-enabled").checked,
+        cardPartial: !document.querySelector("#typesafe-card [data-jev-partial]").hidden,
+      };
+      const toggle = view.querySelector(".jev-switch [data-jev-switch]");
+      toggle.click();
+      await settle();
       return {
-        calls: window.__COUNTS__.set_jev_mode ?? 0,
-        held: window.__JEV__.modeOf.routing,
-        dashboard: view.querySelector('[data-jev-dash-seat="routing"]').value,
-        card: document.querySelector("#typesafe-routing-select").value,
+        calls: window.__COUNTS__.set_jev_enabled ?? 0,
+        pressed: window.__JEV__.pressed.slice(),
+        everywhere,
+        dashboard: toggle.checked,
+        card: document.getElementById("jev-enabled").checked,
         status: view.querySelector(".jev-status").textContent,
         statusHidden: view.querySelector(".jev-status").hidden,
       };
     });
-    ok("a switch moved on the dashboard goes through set_jev_mode and the card follows",
-      moved.calls === 1 && moved.held === "shadow" && moved.dashboard === "shadow" && moved.card === "shadow"
-        && !moved.statusHidden && moved.status.includes("기록만"),
-      JSON.stringify(moved));
+    ok("the switch over the table goes through set_jev_enabled and the card follows",
+      pressed.calls === 2 && pressed.pressed.join(",") === "true,false"
+        && !pressed.everywhere.partial && pressed.everywhere.card && !pressed.everywhere.cardPartial
+        && pressed.dashboard === false && pressed.card === false
+        && !pressed.statusHidden && pressed.status === "껐습니다. 아무것도 보내지 않습니다.",
+      JSON.stringify(pressed));
 
     // The refresh policy: a burst of ledger events is one settled ask; a
     // re-open within the beat is none; the beat itself is slower than the
@@ -741,6 +931,177 @@ export async function testJevDashboard(browser, origin, ok) {
     ok("a zo that cannot count leaves the last numbers standing and says so",
       !refused.hidden && refused.error.includes("refused: jev_summary") && refused.rows === SEATS && refused.week === "50",
       JSON.stringify(refused));
+
+    // One frame and one edge (t-6277 D10): the switch over the table is the
+    // card's framed row and the line under it, standing at the page's edges
+    // as the strip and the table do — not a box around a box; and a word
+    // under a count starts where the count starts, while a button's tint is
+    // what lines up with it.
+    const edges = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const holder = view.querySelector(".jev-switch");
+      // On from some folders only, so the line under the switch stands.
+      const held = typesafeState.jev;
+      typesafeState = { ...typesafeState, jev: { ...held, on: true, everywhere: false, folders: 4 } };
+      paintJevSwitches();
+      await window.__PAINTED__();
+      const box = (node) => node.getBoundingClientRect();
+      const framed = (node) => parseFloat(getComputedStyle(node).borderTopWidth) > 0;
+      const text = (node) => {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        return range.getBoundingClientRect();
+      };
+      const table = box(view.querySelector(".jev-table-wrap"));
+      const row = holder.querySelector("[data-jev-switch-row]");
+      const partial = holder.querySelector("[data-jev-partial]");
+      const cell = (id) => view.querySelector(`[data-jev-dash-row="${id}"] [data-jev-cell="rows"]`);
+      const count = (id) => box(cell(id).querySelector('[data-jev-fact="today"]')).left;
+      const word = cell("recall").querySelector("span.jev-token");
+      const button = cell("routing").querySelector("button.jev-token");
+      const seen = {
+        holderFramed: framed(holder),
+        holderGround: getComputedStyle(holder).backgroundColor,
+        rowFramed: framed(row),
+        row: [box(row).left - table.left, box(row).right - table.right].map(Math.round),
+        partialShown: !partial.hidden,
+        partial: [box(partial).left - box(row).left, box(partial).right - box(row).right].map(Math.round),
+        word: Math.round(text(word).left - count("recall")),
+        button: Math.round(box(button).left - count("routing")),
+      };
+      typesafeState = { ...typesafeState, jev: held };
+      paintJevSwitches();
+      return seen;
+    });
+    ok("the switch over the table wears one frame at the table's edges, and a word under a count starts where the count does",
+      !edges.holderFramed && edges.holderGround === "rgba(0, 0, 0, 0)" && edges.rowFramed && edges.partialShown
+        && [...edges.row, ...edges.partial].every((gap) => Math.abs(gap) <= 1)
+        && Math.abs(edges.word) <= 1 && Math.abs(edges.button) <= 1,
+      JSON.stringify(edges));
+
+    // The strip is read for its figures (t-6277 D10): each figure larger and
+    // heavier than its label, and where the features stand set apart from
+    // the sums before it.
+    const strip = await page.evaluate(() => {
+      const view = document.querySelector("#jev-view");
+      const stats = [...view.querySelectorAll(".jev-stat:not([hidden])")];
+      const size = (node) => parseFloat(getComputedStyle(node).fontSize);
+      const lastTotal = stats.filter((one) => one.dataset.group === "totals").at(-1);
+      const firstTotal = stats.find((one) => one.dataset.group === "totals");
+      const firstState = stats.find((one) => one.dataset.group === "states");
+      const between = (a, b) => (a && b ? Math.round(b.getBoundingClientRect().left - a.getBoundingClientRect().right) : null);
+      return {
+        scale: stats.map((one) => size(one.querySelector("dd")) / size(one.querySelector("dt"))),
+        weights: stats.map((one) => Number(getComputedStyle(one.querySelector("dd")).fontWeight)),
+        labels: stats.map((one) => Number(getComputedStyle(one.querySelector("dt")).fontWeight)),
+        withinSums: between(firstTotal, firstTotal?.nextElementSibling),
+        beforeStates: between(lastTotal, firstState),
+      };
+    });
+    ok("the strip's figures are larger and heavier than their labels, and the states stand apart from the sums",
+      strip.scale.every((scale) => scale >= 1.5) && strip.weights.every((weight, at) => weight > strip.labels[at])
+        && strip.withinSums !== null && strip.beforeStates !== null && strip.beforeStates > strip.withinSums,
+      JSON.stringify(strip));
+
+    // The head stays at the page's top edge while the rows scroll under it
+    // (t-6277 D10).
+    const sticky = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      if (!jevUnusedOpen) {
+        view.querySelector("[data-jev-fold] button").click();
+        await window.__PAINTED__();
+      }
+      view.scrollTop = view.scrollHeight;
+      await window.__PAINTED__();
+      const box = view.getBoundingClientRect();
+      const head = view.querySelector(".jev-table thead th").getBoundingClientRect();
+      const seen = { scrolled: view.scrollTop, headTop: Math.round(head.top - box.top), headHeight: Math.round(head.height) };
+      view.scrollTop = 0;
+      view.querySelector("[data-jev-fold] button").click();
+      await window.__PAINTED__();
+      return seen;
+    });
+    ok("the table's head stays at the page's top edge while the rows scroll",
+      sticky.scrolled > 0 && Math.abs(sticky.headTop) <= 1 && sticky.headHeight > 0, JSON.stringify(sticky));
+
+    // No feature asked all week: the table says why — Jev is off, or it is
+    // on and quiet (t-6277 D10).
+    const empty = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const quietDay = (one) => ({ ...one.week, rows: 0, answered: 0, refused: 0, failures: [], refusals: [] });
+      const saved = jevNumbers;
+      jevNumbers = saved.map((one) => ({ ...one, today: quietDay(one), week: quietDay(one), days: [] }));
+      paintJevViews();
+      const said = () => view.querySelector("[data-jev-empty] .jev-empty")?.textContent ?? null;
+      const held = typesafeState.jev;
+      typesafeState = { ...typesafeState, jev: { ...held, on: true } };
+      paintJevViews();
+      const quiet = said();
+      typesafeState = { ...typesafeState, jev: { ...held, on: false } };
+      paintJevViews();
+      const off = said();
+      typesafeState = { ...typesafeState, jev: held };
+      jevNumbers = saved;
+      paintJevViews();
+      return { quiet, off, after: said() };
+    });
+    ok("a week nobody asked anything says so, and says when it is because Jev is off",
+      empty.quiet === "지난 7일 판단 요청이 없었습니다. 기능이 판단을 요청하면 여기에 쌓입니다."
+        && empty.off === "Jev가 꺼져 있어 판단을 요청하지 않습니다. 위의 스위치로 켤 수 있습니다." && empty.after === null,
+      JSON.stringify(empty));
+
+    // Every text on the dashboard — the switch, the strip, the table, a
+    // screen feature's drawer — and on the settings card with 고급 open
+    // clears 4.5:1 in both treatments (t-6277 D10).
+    const AxeBuilder = axeBuilder();
+    const contrast = {};
+    if (AxeBuilder) {
+      for (const theme of ["dark", "light"]) {
+        await setQualityTheme(page, theme);
+        // The page with the drawer shut — an open drawer lies over the
+        // table's right side, and text under it has no ground to measure —
+        // then the drawer of a screen feature on its own.
+        const dashboard = await contrastTable(page, AxeBuilder, "#jev-view");
+        await page.evaluate(async () => {
+          document.querySelector('#jev-view [data-jev-dash-row="browser"] .jev-row-open').click();
+          await window.__PAINTED__();
+        });
+        const drawer = await contrastTable(page, AxeBuilder, "#jev-view .jev-drawer");
+        await page.evaluate(async () => {
+          document.querySelector("#jev-view .jev-drawer-close").click();
+          setSettingsOpen(true, "jev-enabled");
+          document.getElementById("typesafe-advanced").open = true;
+          await window.__PAINTED__();
+        });
+        const card = await contrastTable(page, AxeBuilder, "#typesafe-card");
+        await page.evaluate(() => {
+          document.getElementById("typesafe-advanced").open = false;
+          setSettingsOpen(false);
+        });
+        contrast[theme] = [
+          ...dashboard.map((row) => ({ surface: "dashboard", ...row })),
+          ...drawer.map((row) => ({ surface: "drawer", ...row })),
+          ...card.map((row) => ({ surface: "card", ...row })),
+        ];
+      }
+      await setQualityTheme(page, "dark");
+    }
+    const rows = Object.values(contrast).flat();
+    // The table is evidence a person reads, beside the pictures (t-5807's
+    // folder): every text's ink, ground and ratio, the least first.
+    if (rows.length > 0) {
+      await mkdir(EVIDENCE_DIR, { recursive: true });
+      const least = (list) => [...list].sort((a, b) => (a.ratio ?? 0) - (b.ratio ?? 0));
+      await writeFile(join(EVIDENCE_DIR, "jev-contrast.json"),
+        `${JSON.stringify(Object.fromEntries(Object.entries(contrast).map(([theme, list]) => [theme, least(list)])), null, 2)}\n`);
+    }
+    const under = rows.filter((row) => row.verdict === "fail" || (row.ratio !== null && row.ratio < CONTRAST_FLOOR));
+    const unknown = rows.filter((row) => row.verdict === "unknown" || row.ratio === null);
+    ok(`every text on the dashboard and the card clears ${CONTRAST_FLOOR}:1 in both treatments`,
+      AxeBuilder !== null && rows.length > 0 && under.length === 0 && unknown.length === 0,
+      AxeBuilder === null ? "@axe-core/playwright is not installed" : JSON.stringify({
+        measured: rows.length, least: Math.min(...rows.filter((row) => row.ratio !== null).map((row) => row.ratio)),
+        under: under.slice(0, 6), unknown: unknown.slice(0, 6) }));
 
     ok("the dashboard raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {

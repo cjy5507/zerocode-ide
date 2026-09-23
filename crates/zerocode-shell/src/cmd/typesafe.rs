@@ -1,4 +1,4 @@
-//! TypeSafe (Jev) settings IPC — the key and every seat's switch.
+//! TypeSafe (Jev) settings IPC — the key and the one switch.
 use crate::api_routers::{self, Keychain, RouterRefusal};
 use crate::typesafe_settings::{self, DayBudget, SeatNumbers, TypeSafeCheck, TypeSafeSettings};
 use tauri::State;
@@ -43,11 +43,12 @@ pub(crate) fn jev_day() -> Result<DayBudget, RouterRefusal> {
     Ok(typesafe_settings::read_day(&settings_path()?))
 }
 
-/// Move one seat's switch — the card sends back the use's own name, so every
-/// row of the table is turned on and off through this one door.
+/// Turn Jev on or off — the one switch the card and the dashboard wear
+/// (docs/design/jev-settings-20260917.md §6.1). On consents every folder and
+/// hands every feature its recommended mode; off sends nothing.
 #[tauri::command(async)]
-pub(crate) fn set_jev_mode(r#use: String, mode: String) -> Result<TypeSafeSettings, RouterRefusal> {
-    typesafe_settings::set_use_mode(&settings_path()?, &r#use, &mode)?;
+pub(crate) fn set_jev_enabled(on: bool) -> Result<TypeSafeSettings, RouterRefusal> {
+    typesafe_settings::set_enabled(&settings_path()?, on)?;
     settings_now()
 }
 

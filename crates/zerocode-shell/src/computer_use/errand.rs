@@ -647,8 +647,15 @@ pub(crate) const REASON: &str = "reason";
 
 /// The key a row names the kind of control its judgment named under
 /// ([`ControlKind::word`], t-6187): what the press rule read, and what a
-/// later reader counts destructive presses by.
-pub(crate) const CONTROL_KIND: &str = "controlKind";
+/// later reader counts destructive presses by — the core counter's own key
+/// (`zerocode_core::jev::summary::CONTROL_KIND`), so the writer and the
+/// counter cannot come to spell it two ways.
+pub(crate) const CONTROL_KIND: &str = zerocode_core::jev::summary::CONTROL_KIND.canonical;
+
+/// The key a row names why no hand went out under — a guard's stop, a floor,
+/// a gate — the core counter's own key (`zerocode_core::jev::summary::BARRED`),
+/// which counts the guards' stops off it (t-6277 D6).
+pub(crate) const BARRED: &str = zerocode_core::jev::summary::BARRED.canonical;
 
 /// The key a row says under which way a judgment begun ahead of the walk
 /// went ([`Options::overlap`]), and its two words: the walk asked the very
@@ -883,7 +890,7 @@ fn walk(
                 mode,
                 at,
                 0,
-                json!({ "outcome": "barred", "barred": barred.as_str() }),
+                json!({ "outcome": "barred", BARRED: barred.as_str() }),
             ));
         }
         return walked;
@@ -914,7 +921,7 @@ fn walk(
                 mode,
                 at,
                 attempt,
-                json!({ "outcome": "barred", "barred": Barred::NoBudget.as_str() }),
+                json!({ "outcome": "barred", BARRED: Barred::NoBudget.as_str() }),
             ));
             return walked;
         }
@@ -932,7 +939,7 @@ fn walk(
                 at,
                 attempt,
                 json!({
-                    "outcome": "barred", "barred": reason.as_str(), "look_ms": look_ms,
+                    "outcome": "barred", BARRED: reason.as_str(), "look_ms": look_ms,
                 }),
             ));
             return walked;
@@ -1130,7 +1137,7 @@ fn walk(
         // judgment under the press floor does, and the row names the stop.
         if let Some(stopped) = choice.guard.and_then(Guard::stops) {
             let word = Barred::from(stopped).as_str();
-            note(&mut said, "barred", json!(word));
+            note(&mut said, BARRED, json!(word));
             // The walk's own answer says why no hand went out
             // ([`no_press_reason`]), so the one who asked can tell the person.
             note(&mut said, REASON, json!(word));
@@ -1202,7 +1209,7 @@ fn walk(
                     if options.rescue && rescue.is_some() {
                         walked.rescue_failed += 1;
                     }
-                    note(&mut said, "barred", json!(Barred::LowConfidence.as_str()));
+                    note(&mut said, BARRED, json!(Barred::LowConfidence.as_str()));
                     note(&mut said, "pressed", json!(false));
                     note(&mut said, "routeUse", json!(USE_FALLBACK));
                     walked.rows.push(row(mode, at, attempt, said));
