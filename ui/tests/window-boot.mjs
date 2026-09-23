@@ -2279,16 +2279,22 @@ const files = createServer(async (request, response) => {
     response.writeHead(403).end();
     return;
   }
+  // The file is read before any header goes out: a read that fails after a
+  // 200 was written could only answer with a second `writeHead`, which node
+  // throws on (ERR_HTTP_HEADERS_SENT) and which took a whole suite down with
+  // it once (2026-09-24). A miss is a 404 written exactly once.
+  let content;
   try {
-    const type = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
-    response.writeHead(200, { "content-type": type[extname(path)] ?? "text/plain" });
-    const content = await readFile(path);
-    response.end(bootstrapSource !== null && extname(path) === ".html"
-      ? content.toString("utf8").replace("<head>", '<head><script src="/__window-fixture.js"></script>')
-      : content);
+    content = await readFile(path);
   } catch {
     response.writeHead(404).end();
+    return;
   }
+  const type = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css" };
+  response.writeHead(200, { "content-type": type[extname(path)] ?? "text/plain" });
+  response.end(bootstrapSource !== null && extname(path) === ".html"
+    ? content.toString("utf8").replace("<head>", '<head><script src="/__window-fixture.js"></script>')
+    : content);
 });
 await new Promise((done) => files.listen(0, "127.0.0.1", done));
 const origin = `http://127.0.0.1:${files.address().port}`;
