@@ -1,5 +1,62 @@
 # Changelog
 
+## [1.1.20] — 2026-09-24
+
+_since v1.1.19 (47 commits)_
+
+### feat
+- feat(window): an agent's open names the pane it borrows for, a returned device takes that pane's mirrors, and the status bar counts what is lent (t-6336 D2)
+- feat(jev): a repeated run answers its questions from the judgment memo — the table's `repeat` column says the cache stands `on` there while its person left it `auto` (t-6385 U2)
+- feat(jev): every seat names the two confidence lines that split its answers into abstain, confirm and act — recorded, not yet read, and one counter draws a seat's curve per fifth and per band for the replay and the day the lines move (t-6342 4)
+- feat(jev): every seat is held against its cheapest reader and a label that never says no — the table names each seat's baseline and three wanted disagreements, the writers stamp the baseline's own mark beside theirs, and the judge, the CLI and the dashboard say which line holds a seat (t-6342 3)
+- feat(conversation): every code block wears the extension's copy over its corner, and a copy says it copied with a check for the panel's 2 s (t-6323 A9)
+- feat(conversation): a picture a message carries stands as the extension's pill — fetched only once it is in view — and a press opens it whole; the transcript reader no longer drops a line that carries one (t-6323 A8)
+- feat(jev): a pinned model narrows a summons' options to the agents that run it — the code reads the catalog's launch table and the family's gauge, asks nothing when one agent is left, and tells the question the model when two are (t-6342 2)
+- feat(conversation): a todo call draws its list under the extension's head, and in the Focus view the newest list stands out of its fold (t-6323 A7)
+- feat(conversation): a helper at work stands at the list's foot — its description and latest step, its tokens, tools and time — from the session's own task frames (t-6323 A6)
+- feat(conversation): the list keeps to its foot until the person leaves it — 50px, upward intent leaves at once, a send comes home, as the extension's list does (t-6323 A5)
+- feat(conversation): the spinner says Claude Code's own verbs — picked again at the extension's beats and swept in with its `▌`, while a screen reader hears one word (t-6323 A4)
+- feat(conversation): the extension's keys — Esc interrupts the turn from anywhere on the page, Shift+Tab steps the mode in Claude Code's order and words, ArrowUp/Down walk the prompts, Ctrl+J breaks the line (t-6323 A3)
+- feat(conversation): a tool row's file is a door to the file tab, a read opens where it began and says its lines, and an answer's `path:12` keeps its line (t-6323 A2)
+- feat(conversation): a row folds the way the extension's panel does — a tool body's side stops at 60px, a diff's box at 200px, what the person said at 60px, each with 「더 보기」 (t-6323 A1)
+
+### fix
+- fix(emulator): a device the door booted for an agent's pane is a loan, and goes down when that pane's work ends (t-6336 D1)
+- fix(window): an agent's emulator mirror is seated in the asking pane's checkout, and never turns the person's head from another (t-6379 A2)
+- fix(emulator): the emulator door names the pane that asked, and its open carries that terminal to the window (t-6379 A1)
+- fix(conversation): a closed conversation's page leaves the leaf's host with its tab (t-6323 B2)
+- fix(jev): the two seats stopped on their own evidence stand off when Jev is switched on, and zo asks its step seat nothing on a wire whose cache is keyed on effort — the provider catalog says which wire that is (t-6342 5)
+- fix(jev): an effort move is graded only where the seat's answer moved what was carried — both effort seats read one rule, and a move held back, recorded, or the rule's own says why instead of passing for progress (t-6342 1b)
+- fix(jev): a placed worker's pane is graded against the room it stood in, and only once somebody could have seen it — a quiet window with nobody in front of the pane leaves `unseen` instead of a mark (t-6342 1a)
+- fix(zo): a recall turn that read and cited none of the notes it was handed carries no mark — it compared the order with nothing, and says so under `notCompared` (t-6342 1d)
+- fix(jev): a stall answer is graded by one question — did the silence need the coordinator's hand — so a long tool the worker came back from on its own agrees, and a side that says nothing leaves its word under `notCompared` (t-6342 1c)
+- fix(conversation): the chat's face keeps the platform's sans after the person's choice — the default Geist fell to the engine's serif (t-6323 A0)
+
+### perf
+- perf(emulator): an Android command is answered the moment it exits, and a look reads its display and AVD beside its dump instead of before and after it (t-6385 U3)
+- perf(errand): a phone walk begins its next judgment on the screen its press settled on and answers it while the look is taken, instead of before the press (t-6385 U5)
+- perf(window): a poll at the conversation's cap restyles the rows that moved, not the whole list — five sibling rules elsewhere keyed on every element (t-6323 B3)
+- perf(conversation): a row far from view keeps its height, not its body — the 400-turn page stands the bodies of the rows within two screens (t-6323 B1)
+- perf(emulator): an iOS look skips the grid under rows that answer their own centre, and an iOS press answers once the tree it led to stops changing, counting the walk's words there (t-6385 U4)
+- perf(emulator): an iOS press by number is proven at the one point it lands on, and the tree is read only when that point cannot prove it (t-6385 U1)
+
+### refactor
+- refactor(zo): the step governor's label bookkeeping leaves `plan` — one helper writes the label a step owes, one owes the next step its label — so the function is back under clippy's length line with nothing it does changed (t-6342)
+
+### docs
+- docs(skill): the emulator's open seats its mirror in the agent's checkout and lends the device it boots to the agent's pane (t-6379, t-6336)
+- docs(jev): public docs name the private tables and the recall mark in plain code, not as links — rustdoc's gate refuses a public page that points at a private item (t-6342)
+
+### test
+- test(emulator): a lent simulator goes down with its borrower and an unlent one stays up, on a real device (t-6336)
+- test(window): the harness file server reads a file before it writes a header — a miss answers 404 once instead of throwing on a second writeHead and taking the suite down
+- test(settings): the settings harness answers the loan line's boot question (t-6336 D2)
+- test(jev): the branching seed finds the emulator row by its declaration and the label audit's fixture names the OpenAI family — a column added to every row and a versioned model id in a test module the literal gate reads as source were the gate's two reds (t-6342)
+- test(jev): a label audit grades every seat's ledger on this machine again by t-6342's rules, beside the marks the ledgers hold — with each seat's baseline, its confidence curve and bands, and what the new rules would have asked — and asks nothing (t-6342 6)
+- test(emulator): the walk bench starts its children through the one door and keeps each look's legend (t-6385)
+- test(emulator): a phone walk timed on a simulator of our own, with no window, no mirror tab and none of the person's ledgers (t-6385)
+- test(window): the conversation view's weight — one 400-turn transcript, five numbers (t-6323 B0)
+
 ## [1.1.19] — 2026-09-23
 
 _since v1.1.18 (1 commits)_
