@@ -56,6 +56,18 @@ impl Limits {
         threshold_max_ms: 120000,
     };
 
+    /// How late the watchdog's own beat may come before it cannot testify
+    /// (t-6388): one whole beat. It judges the main thread by an uptime
+    /// clock that keeps running while macOS gives this process no CPU — a
+    /// lid-closed DarkWake, a sleep being entered or left — and nearly every
+    /// hang report of 2026-09-15..24 was that stopped time, not the main
+    /// thread. Measured on the observer's own road on 2026-09-24: under load
+    /// average 88–117 on 12 cores a 250 ms nap overshot p50 6.4 ms, p99
+    /// 12.4 ms, max 21.3 ms (n=469), so a whole missed beat is never load.
+    pub(crate) const fn late_ms(self) -> u64 {
+        self.ping_ms
+    }
+
     pub(crate) fn overlay(value: &serde_json::Value) -> Self {
         let mut limits = Self::DEFAULT;
         limits.watchdog = value["watchdog"].as_bool().unwrap_or(limits.watchdog);

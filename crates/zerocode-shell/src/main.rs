@@ -3424,7 +3424,9 @@ fn main() -> ExitCode {
                     };
                     let Some(slept) = resume_watch::slept_for(resume_watch::POLL, wall_delta)
                     else {
-                        watchdog.tick(&resume_app);
+                        // The nap's real length goes along: a watchdog whose
+                        // own nap came back late was not there to watch.
+                        watchdog.tick(&resume_app, wall_delta);
                         continue;
                     };
                     watchdog.resumed();

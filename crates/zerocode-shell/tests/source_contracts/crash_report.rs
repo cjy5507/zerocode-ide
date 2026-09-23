@@ -47,10 +47,24 @@ fn crash_report_preserves_the_boot_pin_and_uses_existing_panic_and_resume_roads(
     );
     let main = std::fs::read_to_string(src.join("main.rs")).unwrap();
     assert!(main.contains("hang_watchdog::Monitor::new()"));
-    assert!(main.contains("watchdog.resumed()") && main.contains("watchdog.tick(&resume_app)"));
+    assert!(main.contains("watchdog.resumed()"));
     let watchdog = std::fs::read_to_string(src.join("hang_watchdog.rs")).unwrap();
     assert!(watchdog.contains("run_on_main_thread"));
     assert!(!watchdog.contains("thread::spawn"));
+    // t-6388: every beat carries what the observer itself went through — the
+    // nap's real wall length from the resume loop, and whether any screen was
+    // awake. A beat built from the asked-for cadence instead would let the
+    // stopped time of a lid-closed DarkWake back in as a hung main thread.
+    assert!(
+        main.contains("watchdog.tick(&resume_app, wall_delta)"),
+        "the resume loop no longer hands the watchdog its nap's real length"
+    );
+    let beat = super::support::block_after(&watchdog, "let beat = Beat {");
+    assert!(
+        beat.contains("nap: u64::try_from(nap.as_millis())")
+            && beat.contains("seen: screens_awake()"),
+        "the watchdog's beat no longer carries its own nap and the screens:\n{beat}"
+    );
     let crash = std::fs::read_to_string(src.join("crash.rs")).unwrap();
     assert_eq!(crash.matches("pub(crate) struct Limits").count(), 1);
     let environment = super::support::block_after(&crash, "fn environment()");
