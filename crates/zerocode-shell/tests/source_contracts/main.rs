@@ -85,12 +85,42 @@ mod tests {
         );
 
         let window = window_source();
+        // One question before every restart (t-6428): the four doors — the
+        // update toast's action, the update pane's `restartToInstall`
+        // (t-3191), the settings notice's button and the window material's
+        // relaunch — each ask `askBeforeRestart` with their own word, and
+        // only it reaches the one restart road, when nothing is busy.
         assert_eq!(
-            window.matches("invoke(\"relaunch_window\")").count(),
-            4,
-            "blur-restart, the update toast's action, the settings notice's button, and \
-             the update pane's `restartToInstall` (t-3191) — one road, four doors"
+            window.matches("invoke(\"relaunch_window\"").count(),
+            1,
+            "a door restarts without the one question"
         );
+        let asking = block_after(window, "async function askBeforeRestart(");
+        assert!(
+            asking.contains("invoke(\"busy_census\", { road: \"restart\", door })")
+                && asking.contains("if (census && !census.busy?.busy) {")
+                && asking.contains("invoke(\"relaunch_window\", { door })"),
+            "the restart question lost its census or its road:\n{asking}"
+        );
+        let doors = include_str!("../../src/exit_runtime.rs");
+        for door in [
+            "update-toast",
+            "update-install",
+            "settings-notice",
+            "window-material",
+        ] {
+            assert_eq!(
+                window
+                    .matches(&format!("askBeforeRestart(\"{door}\")"))
+                    .count(),
+                1,
+                "the {door} door asks once"
+            );
+            assert!(
+                doors.contains(&format!(", \"{door}\"),")),
+                "the {door} door is not a word of the backend's one table"
+            );
+        }
         assert!(
             !window.contains("invoke(\"restart")
                 && !window.contains("app.restart")
@@ -109,7 +139,7 @@ mod tests {
         let toast = block_after(window, "function raiseUpdateToast(");
         for needle in [
             "sticky: true",
-            "invoke(\"relaunch_window\")",
+            "askBeforeRestart(\"update-toast\")",
             "updateToastAppWords(",
             "updateReadyZoWords(",
             "update.restart",

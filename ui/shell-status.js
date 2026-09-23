@@ -3582,7 +3582,7 @@ function raiseUpdateToast() {
       aux,
       action: {
         label: t("update.restart", "다시 시작"),
-        run: () => void invoke("relaunch_window").catch(showError),
+        run: () => void askBeforeRestart("update-toast"),
       },
     });
   } else {

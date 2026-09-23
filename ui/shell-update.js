@@ -117,11 +117,124 @@ async function runUpdateDownload() {
   }
 }
 
-/* 「다시 시작하여 설치」: the one restart road. The staged bundle is swapped
- * in there, right before the restart, never here. */
+/* 「다시 시작하여 설치」: the one restart road, asked about first (t-6428).
+ * The staged bundle is swapped in there, right before the restart, never
+ * here. */
 function restartToInstall() {
-  invoke("relaunch_window").catch(showError);
+  void askBeforeRestart("update-install");
 }
+
+/* ---- 떠나기 전에 (t-6428) ----
+ *
+ * Every restart door asks the one census before it goes (`busy_census`, the
+ * census `release_status` answers too). Nothing a restart would cut: the
+ * door restarts at once through the one restart road, naming itself.
+ * Anything busy — or a census nobody could read — asks: 「끝나면 다시 시작」
+ * hands the wait to the backend's beat, which goes at the first gap
+ * (nothing running under any worker's pane, nothing unread), and 「지금 다시
+ * 시작」 goes now. The wait stands as one line with its own 「취소」, said
+ * again whenever the beat says it moved; a wait the table ran out of asks
+ * again. Every number — the counts, the minutes, the patience — is the
+ * backend's; this file keeps no clock. */
+const EXIT_WAIT_MARK = "exit-wait";
+let exitWaitToast = null;
+
+async function askBeforeRestart(door) {
+  let census = null;
+  try {
+    census = await invoke("busy_census", { road: "restart", door });
+  } catch {
+    census = null;
+  }
+  if (census && !census.busy?.busy) {
+    invoke("relaunch_window", { door }).catch(showError);
+    return;
+  }
+  await askLeaving(census ?? { road: "restart", door, busy: null, waitMin: null }, "");
+}
+
+/* The question itself, asked by a door and asked again when a wait ran
+ * out: the census's words (or that nobody could read it), the road's
+ * patience, and the two ways on. `lead` is what is said first. */
+async function askLeaving(census, lead) {
+  const road = census.road;
+  const door = census.door ?? null;
+  const said = busyWords(census.busy) || t("exit.unread", "도는 일을 읽지 못했습니다");
+  const answer = await askConfirm({
+    title: t("exit.restartTitle", "다시 시작하면 도는 일이 끊깁니다"),
+    body: lead ? `${lead} ${said}` : said,
+    note: census.waitMin === null
+      ? ""
+      : t(
+          "exit.restartNote",
+          "「끝나면 다시 시작」은 워커 판 아래 도는 명령이 없는 첫 틈에 다시 시작합니다 · 최대 {{minutes}}분 기다립니다",
+          { minutes: census.waitMin },
+        ),
+    confirm: t("exit.whenIdleRestart", "끝나면 다시 시작"),
+    deny: t("exit.nowRestart", "지금 다시 시작"),
+  });
+  if (answer === true) {
+    try {
+      standExitWait(await invoke("leave_when_idle", { road, door }));
+    } catch (error) {
+      showError(error);
+    }
+  } else if (answer === false) {
+    invoke("leave_now", { road, door }).catch(showError);
+  }
+}
+
+/* The wait's words: what still runs, whoever nobody could read, and the
+ * whole minutes waited — the beat's own numbers. */
+function exitWaitWords(line) {
+  const parts = [t("exit.running", "도는 명령 {{n}}개", { n: line.running })];
+  if (line.unknown > 0) {
+    parts.push(t("exit.busyUnknown", "상태를 모르는 워커 {{n}}명", { n: line.unknown }));
+  }
+  parts.push(t("exit.waited", "{{minutes}}분째", { minutes: line.waitedMin }));
+  const state = parts.join(" · ");
+  return t("exit.waitingRestart", "끝나면 다시 시작합니다 · {{state}}", { state });
+}
+
+/* One line stands for the wait: said again in place when the beat moves it,
+ * never a second toast. */
+function standExitWait(line) {
+  if (!line || typeof line !== "object") return;
+  const words = exitWaitWords(line);
+  const node = exitWaitToast?.isConnected ? exitWaitToast.querySelector(".toast-text") : null;
+  if (node) {
+    node.textContent = words;
+    return;
+  }
+  exitWaitToast = toast(words, "", {
+    sticky: true,
+    action: { label: t("app.cancel", "취소"), run: cancelExitWait },
+  });
+  if (exitWaitToast) exitWaitToast.dataset.notice = EXIT_WAIT_MARK;
+}
+
+function dropExitWait() {
+  const note = exitWaitToast;
+  exitWaitToast = null;
+  if (note?.isConnected) closing(note, () => note.remove());
+}
+
+function cancelExitWait() {
+  dropExitWait();
+  invoke("leave_cancel").catch(() => {});
+}
+
+listen("exit:waiting", (event) => standExitWait(event?.payload));
+
+listen("exit:overdue", (event) => {
+  const census = event?.payload;
+  dropExitWait();
+  if (!census || typeof census !== "object") return;
+  void askLeaving(
+    census,
+    t("exit.overdue", "{{minutes}}분을 기다렸지만 아직 도는 명령이 있습니다.", { minutes: census.waitMin }),
+  );
+});
 
 listen("update:progress", (event) => {
   const moved = event?.payload;

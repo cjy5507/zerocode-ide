@@ -53549,6 +53549,183 @@ ok(
   JSON.stringify(updateNotice),
 );
 
+/* ---- 떠나기 전에 (t-6428) --------------------------------------------------
+ *
+ * Every restart door asks the one census first. Nothing a restart would
+ * cut: the door restarts at once through the one restart road, naming
+ * itself. Work in progress: the question — the census's words and the
+ * backend's patience — where 「끝나면 다시 시작」 arms the backend's wait
+ * for this door and stands one line that follows the beat and cancels,
+ * 「지금 다시 시작」 goes now by this door, a wait the table ran out of asks
+ * again saying so first, and a census nobody could read is asked about as
+ * busy. Five catalogs. */
+const restartAsked = await page.evaluate(async () => {
+  const seen = {};
+  const tick = () => new Promise((done) => setTimeout(done, 40));
+  const held = {
+    busy_census: window.__ANSWER__.busy_census,
+    leave_when_idle: window.__ANSWER__.leave_when_idle,
+    leave_now: window.__ANSWER__.leave_now,
+    leave_cancel: window.__ANSWER__.leave_cancel,
+    relaunch_window: window.__ANSWER__.relaunch_window,
+  };
+  const calls = [];
+  const idle = { busy: false, workers: 2, turning: 0, background: 0, unknown: 0, running: 0, gap: true };
+  const busy = { busy: true, workers: 3, turning: 1, background: 2, unknown: 0, running: 3, gap: false };
+  const census = (state) => (args) => {
+    calls.push(["census", args]);
+    return { road: args.road, door: args.door ?? null, busy: state, waitMin: 30, answerSec: null };
+  };
+  const line = (over = {}) => ({ road: "restart", running: 3, unknown: 0, waitedMin: 0, waitMin: 30, ...over });
+  const waitWords = (said) => t("exit.waitingRestart", "끝나면 다시 시작합니다 · {{state}}", {
+    state: [
+      t("exit.running", "도는 명령 {{n}}개", { n: said.running }),
+      ...(said.unknown > 0 ? [t("exit.busyUnknown", "상태를 모르는 워커 {{n}}명", { n: said.unknown })] : []),
+      t("exit.waited", "{{minutes}}분째", { minutes: said.waitedMin }),
+    ].join(" · "),
+  });
+  const standing = () =>
+    [...document.querySelectorAll(".toast")].filter(
+      (one) => one.dataset.notice === "exit-wait" && !one.classList.contains("is-closing"),
+    );
+  const lineText = () => standing()[0]?.querySelector(".toast-text")?.textContent ?? null;
+  const shown = () => !document.getElementById("ask-scrim").hidden;
+  const fire = (name, payload) => {
+    for (const handler of window.__LISTENERS__[name] ?? []) handler({ payload });
+  };
+  const called = (kind, road, door) =>
+    calls.some(([seenKind, args]) => seenKind === kind && args?.road === road && (args?.door ?? null) === door);
+  try {
+    for (const note of document.querySelectorAll(".toast")) note.remove();
+    window.__ANSWER__.relaunch_window = (args) => { calls.push(["relaunch", args]); return null; };
+    window.__ANSWER__.leave_when_idle = (args) => { calls.push(["arm", args]); return line({ road: args.road }); };
+    window.__ANSWER__.leave_now = (args) => { calls.push(["now", args]); return null; };
+    window.__ANSWER__.leave_cancel = () => { calls.push(["cancel", {}]); return null; };
+    // ① Nothing a restart would cut: the door goes at once, naming itself.
+    window.__ANSWER__.busy_census = census(idle);
+    await askBeforeRestart("update-toast");
+    await tick();
+    seen.idleRestarted = calls.some(([kind, args]) => kind === "relaunch" && args?.door === "update-toast");
+    seen.idleAsked = shown();
+    seen.idleCensusDoor = called("census", "restart", "update-toast");
+    // ② Work in progress: the question, never the restart.
+    window.__ANSWER__.busy_census = census(busy);
+    const asked = askBeforeRestart("window-material");
+    await tick();
+    seen.busyAsked = shown();
+    seen.busyRestarted = calls.some(([kind, args]) => kind === "relaunch" && args?.door === "window-material");
+    seen.title = document.getElementById("ask-title").textContent
+      === t("exit.restartTitle", "다시 시작하면 도는 일이 끊깁니다");
+    const body = document.getElementById("ask-body").textContent;
+    seen.bodyCensus = body.includes(busyWords(busy));
+    seen.bodyPatience = body.includes(t(
+      "exit.restartNote",
+      "「끝나면 다시 시작」은 워커 판 아래 도는 명령이 없는 첫 틈에 다시 시작합니다 · 최대 {{minutes}}분 기다립니다",
+      { minutes: 30 },
+    ));
+    seen.yes = document.getElementById("ask-yes").textContent === t("exit.whenIdleRestart", "끝나면 다시 시작");
+    seen.no = document.getElementById("ask-no").textContent === t("exit.nowRestart", "지금 다시 시작");
+    // ③ 「끝나면 다시 시작」: the backend waits for this door; one line stands.
+    document.getElementById("ask-yes").click();
+    await asked;
+    await tick();
+    seen.armed = called("arm", "restart", "window-material");
+    seen.lines = standing().length;
+    seen.lineSaid = lineText() === waitWords(line());
+    // The beat says the line moved: the same line says it; no second stands.
+    fire("exit:waiting", line({ running: 1, unknown: 1, waitedMin: 4 }));
+    await tick();
+    seen.movedLines = standing().length;
+    seen.movedSaid = lineText() === waitWords(line({ running: 1, unknown: 1, waitedMin: 4 }));
+    // 「취소」: the line goes, and the backend hears it.
+    standing()[0]?.querySelector(".toast-action")?.click();
+    await tick();
+    seen.cancelled = calls.some(([kind]) => kind === "cancel");
+    seen.cancelledLines = standing().length;
+    // ④ 「지금 다시 시작」: this door goes now.
+    const again = askBeforeRestart("settings-notice");
+    await tick();
+    document.getElementById("ask-no").click();
+    await again;
+    await tick();
+    seen.now = called("now", "restart", "settings-notice");
+    // ⑤ A wait the table ran out of asks again, and says so first.
+    fire("exit:overdue", { road: "restart", door: "update-install", busy, waitMin: 30, answerSec: null });
+    await tick();
+    seen.overdueAsked = shown();
+    seen.overdueLead = document.getElementById("ask-body").textContent.startsWith(
+      t("exit.overdue", "{{minutes}}분을 기다렸지만 아직 도는 명령이 있습니다.", { minutes: 30 }),
+    );
+    document.getElementById("ask-cancel").click();
+    await tick();
+    seen.overdueClosed = !shown();
+    // ⑥ A census nobody could read is busy: the question says so.
+    window.__ANSWER__.busy_census = () => {
+      throw new Error("no census");
+    };
+    const unread = askBeforeRestart("update-install");
+    await tick();
+    seen.unreadAsked = shown()
+      && document.getElementById("ask-body").textContent.includes(t("exit.unread", "도는 일을 읽지 못했습니다"));
+    document.getElementById("ask-cancel").click();
+    await unread;
+    await tick();
+    seen.unreadRestarted = calls.some(([kind, args]) => kind === "relaunch" && args?.door === "update-install");
+    // ⑦ Five catalogs.
+    const KEYS = [
+      "exit.restartTitle", "exit.restartNote", "exit.whenIdleRestart", "exit.nowRestart", "exit.unread",
+      "exit.waitingRestart", "exit.running", "exit.waited", "exit.overdue",
+    ];
+    seen.catalogued = ["en", "ja", "zh", "es"].every((code) => KEYS.every((key) => typeof CATALOG[code]?.[key] === "string"));
+  } catch (error) {
+    seen.error = String(error?.stack ?? error);
+  } finally {
+    // A pin that throws while tidying kills the suite behind it; what the
+    // tidying could not do is recorded instead.
+    try {
+      for (const [name, answer] of Object.entries(held)) {
+        if (answer) window.__ANSWER__[name] = answer;
+        else delete window.__ANSWER__[name];
+      }
+      if (!document.getElementById("ask-scrim").hidden) document.getElementById("ask-cancel").click();
+      for (const note of document.querySelectorAll(".toast")) note.remove();
+    } catch (error) {
+      seen.cleanupError = String(error?.stack ?? error);
+    }
+  }
+  return seen;
+});
+ok(
+  "every restart door asks the one census first (t-6428): nothing busy restarts at once by that door; work in progress asks with the census's words and the backend's patience, 「끝나면 다시 시작」 arms the backend's wait and stands one line that follows the beat and cancels, 「지금 다시 시작」 goes now, a wait run out asks again saying so, an unread census is asked about as busy — in five catalogs",
+  !restartAsked.error &&
+    !restartAsked.cleanupError &&
+    restartAsked.idleRestarted &&
+    !restartAsked.idleAsked &&
+    restartAsked.idleCensusDoor &&
+    restartAsked.busyAsked &&
+    !restartAsked.busyRestarted &&
+    restartAsked.title &&
+    restartAsked.bodyCensus &&
+    restartAsked.bodyPatience &&
+    restartAsked.yes &&
+    restartAsked.no &&
+    restartAsked.armed &&
+    restartAsked.lines === 1 &&
+    restartAsked.lineSaid &&
+    restartAsked.movedLines === 1 &&
+    restartAsked.movedSaid &&
+    restartAsked.cancelled &&
+    restartAsked.cancelledLines === 0 &&
+    restartAsked.now &&
+    restartAsked.overdueAsked &&
+    restartAsked.overdueLead &&
+    restartAsked.overdueClosed &&
+    restartAsked.unreadAsked &&
+    !restartAsked.unreadRestarted &&
+    restartAsked.catalogued,
+  JSON.stringify(restartAsked),
+);
+
 /* ---- 「업데이트」 (t-3191) ----------------------------------------------------
  *
  * The settings page for versioned updates (docs/design/versioned-auto-update.md

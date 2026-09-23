@@ -115,6 +115,9 @@ impl Asking {
     }
 }
 
+/// A minute, in the table's milliseconds.
+pub(crate) const MINUTE_MS: i64 = 60_000;
+
 /// How long a road that asks will wait, in one table (t-6428).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Patience {
@@ -135,7 +138,7 @@ pub(crate) struct Patience {
 /// within 30 — a turn is not waited out (half run past 56 minutes), only
 /// what runs under it.
 const RESTART_PATIENCE: Patience = Patience {
-    gap_wait_ms: 30 * 60_000,
+    gap_wait_ms: 30 * MINUTE_MS,
     answer_ms: None,
     overdue_leaves: false,
 };
@@ -144,8 +147,8 @@ const RESTART_PATIENCE: Patience = Patience {
 /// goes, because closing is the person leaving; and its question stands one
 /// minute, so a close nobody is there to answer still closes.
 const CLOSE_PATIENCE: Patience = Patience {
-    gap_wait_ms: 10 * 60_000,
-    answer_ms: Some(60_000),
+    gap_wait_ms: 10 * MINUTE_MS,
+    answer_ms: Some(MINUTE_MS),
     overdue_leaves: true,
 };
 
@@ -184,24 +187,44 @@ impl Choice {
 }
 
 /// A 「끝나면」 armed: which road, since when, and what its line last said
-/// (commands running, workers unread).
+/// (commands running, workers unread, whole minutes waited).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Wait {
     asking: Asking,
     since_ms: i64,
-    told: Option<(usize, usize)>,
+    told: Option<(usize, usize, i64)>,
 }
 
 /// The line a wait stands on the screen as: what still runs, what nobody
-/// could read, and since when — the window counts the minutes itself.
+/// could read, how many whole minutes it has waited and the most it will.
+/// Said again when any of them moves — at most once a minute while nothing
+/// else does — so the window keeps no clock of its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WaitLine {
     pub(crate) road: &'static str,
     pub(crate) running: usize,
     pub(crate) unknown: usize,
-    pub(crate) since_ms: i64,
-    pub(crate) wait_ms: i64,
+    pub(crate) waited_min: i64,
+    pub(crate) wait_min: i64,
+}
+
+impl WaitLine {
+    /// The line for a wait on `asking` that has waited `waited_ms` with
+    /// this census.
+    pub(crate) fn of(
+        asking: Asking,
+        busy: crate::orchestration::restart_census::Busy,
+        waited_ms: i64,
+    ) -> Self {
+        Self {
+            road: asking.word(),
+            running: busy.running,
+            unknown: busy.unknown,
+            waited_min: waited_ms / MINUTE_MS,
+            wait_min: asking.patience().gap_wait_ms / MINUTE_MS,
+        }
+    }
 }
 
 /// What the beat does about the way out, this second.
@@ -331,20 +354,15 @@ fn step(
         state.wait = None;
         return ExitBeat::AskAgain(wait.asking);
     }
-    let told = (busy.running, busy.unknown);
+    let line = WaitLine::of(wait.asking, busy, now_ms.saturating_sub(wait.since_ms));
+    let told = (line.running, line.unknown, line.waited_min);
     if wait.told == Some(told) {
         return ExitBeat::Nothing;
     }
     if let Some(held) = state.wait.as_mut() {
         held.told = Some(told);
     }
-    ExitBeat::Tell(WaitLine {
-        road: wait.asking.word(),
-        running: busy.running,
-        unknown: busy.unknown,
-        since_ms: wait.since_ms,
-        wait_ms: patience.gap_wait_ms,
-    })
+    ExitBeat::Tell(line)
 }
 
 fn settle(state: &mut Exiting, asking: Asking, choice: Choice) -> ExitBeat {
@@ -397,8 +415,8 @@ mod tests {
                 road: "restart",
                 running: 2,
                 unknown: 0,
-                since_ms: 0,
-                wait_ms: 30 * MINUTE,
+                waited_min: 0,
+                wait_min: 30,
             })
         );
         // The same numbers again: the line stands as it is.
@@ -406,15 +424,25 @@ mod tests {
             step(&mut state, 2_000, Some(census(2, 0))),
             ExitBeat::Nothing
         );
+        // A whole minute more with the same numbers: said once, for the
+        // minute — the window keeps no clock of its own.
         assert!(matches!(
-            step(&mut state, 3_000, Some(census(1, 0))),
+            step(&mut state, MINUTE + 2_000, Some(census(2, 0))),
+            ExitBeat::Tell(line) if line.waited_min == 1 && line.running == 2
+        ));
+        assert_eq!(
+            step(&mut state, MINUTE + 3_000, Some(census(2, 0))),
+            ExitBeat::Nothing
+        );
+        assert!(matches!(
+            step(&mut state, MINUTE + 4_000, Some(census(1, 0))),
             ExitBeat::Tell(line) if line.running == 1
         ));
         // A second nobody read a census for says nothing.
-        assert_eq!(step(&mut state, 4_000, None), ExitBeat::Nothing);
+        assert_eq!(step(&mut state, MINUTE + 5_000, None), ExitBeat::Nothing);
         // The first gap: the road armed goes, and the goodbye says why.
         assert_eq!(
-            step(&mut state, 5_000, Some(census(0, 0))),
+            step(&mut state, MINUTE + 6_000, Some(census(0, 0))),
             ExitBeat::Leave(toast)
         );
         assert_eq!(state.choice, Choice::Gap);

@@ -1002,8 +1002,11 @@ pub(crate) struct LeaveCensus {
     road: &'static str,
     door: Option<&'static str>,
     busy: crate::orchestration::restart_census::Busy,
-    wait_ms: i64,
-    answer_ms: Option<i64>,
+    /// The most 「끝나면」 waits on this road, in whole minutes.
+    wait_min: i64,
+    /// How long this road's question stands unanswered, in seconds; `None`
+    /// stands until someone answers.
+    answer_sec: Option<i64>,
 }
 
 fn leave_census(app: &AppHandle, asking: exit_runtime::Asking) -> LeaveCensus {
@@ -1015,8 +1018,8 @@ fn leave_census(app: &AppHandle, asking: exit_runtime::Asking) -> LeaveCensus {
             exit_runtime::Asking::Close => None,
         },
         busy: take_census(app).busy(),
-        wait_ms: patience.gap_wait_ms,
-        answer_ms: patience.answer_ms,
+        wait_min: patience.gap_wait_ms / exit_runtime::MINUTE_MS,
+        answer_sec: patience.answer_ms.map(|ms| ms / 1_000),
     }
 }
 
@@ -1038,17 +1041,21 @@ pub(crate) fn busy_census(
 }
 
 /// 「끝나면」: wait on this road for the first gap (t-6428), answering the
-/// census as it stands, for the line the wait shows.
+/// line the wait stands as from its first second — the census as it is.
 #[tauri::command(async)]
 pub(crate) fn leave_when_idle(
     app: AppHandle,
     road: String,
     door: Option<String>,
-) -> Result<LeaveCensus, String> {
+) -> Result<exit_runtime::WaitLine, String> {
     let _crumb = crate::crumbs::Command::enter("leave_when_idle");
     let asking = asking_of(&road, door.as_deref())?;
     exit_runtime::arm(asking, crate::now_epoch_ms());
-    Ok(leave_census(&app, asking))
+    Ok(exit_runtime::WaitLine::of(
+        asking,
+        take_census(&app).busy(),
+        0,
+    ))
 }
 
 /// 「지금」: this road goes now, and the goodbye says it was chosen.

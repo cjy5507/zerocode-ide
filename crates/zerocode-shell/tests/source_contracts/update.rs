@@ -249,8 +249,8 @@ fn the_update_pane_is_one_module_with_the_designs_controls_and_words() {
     );
     let restart = block_after(window, "function restartToInstall(");
     assert!(
-        restart.contains("invoke(\"relaunch_window\")"),
-        "the pane's restart is the one road:\n{restart}"
+        restart.contains("askBeforeRestart(\"update-install\")"),
+        "the pane's restart is the one road, asked about first (t-6428):\n{restart}"
     );
 
     let markup = include_str!("../../../../ui/index.html");
