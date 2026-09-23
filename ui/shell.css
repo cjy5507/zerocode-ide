@@ -37615,7 +37615,7 @@ h4.knowledge-inspector-head::after {
   margin: var(--space-1) 0;
 }
 
-.jev-eyebrow, .jev-about, .jev-freshness, .jev-bound, .jev-trend-name, .jev-trend-last,
+.jev-eyebrow, .jev-about, .jev-freshness, .jev-bound,
 .jev-decision-when, .jev-decision-marks, .jev-recent-empty {
   color: var(--ink-mist);
   font-size: var(--jev-meta-size);
@@ -37788,17 +37788,38 @@ h4.knowledge-inspector-head::after {
   font-weight: 600;
 }
 
-/* Three small trends side by side, the latest value under each: the names
-   are the column head's, so a row stays a row's height. */
+/* The week as one picture of two lines, each line's latest value under it,
+   marked the way its line is drawn (t-6243 D4). */
 .jev-trends {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-trend-legend {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
 }
 
-.jev-trend {
-  display: grid;
-  justify-items: center;
-  gap: 1px;
+.jev-trend-last {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+}
+
+.jev-trend-last::before {
+  content: "";
+  width: var(--space-3);
+  border-top: 2px solid var(--jev-trend);
+}
+
+.jev-trend-agreement::before {
+  border-top-style: dashed;
+  border-top-color: var(--jev-trend-accuracy);
 }
 
 .jev-table [data-jev-cell="status"] {
@@ -37912,7 +37933,16 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-spark-dot {
-  fill: var(--jev-dot);
+  fill: var(--jev-trend);
+}
+
+.jev-spark-agreement .jev-spark-line {
+  stroke: var(--jev-trend-accuracy);
+  stroke-dasharray: var(--jev-trend-dash);
+}
+
+.jev-spark-agreement .jev-spark-dot {
+  fill: var(--jev-trend-accuracy);
 }
 
 .jev-recent {

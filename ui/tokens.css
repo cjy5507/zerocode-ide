@@ -2551,14 +2551,18 @@
   --jev-meta-size: 12px;
   --jev-body-size: 13px;
   --jev-line: 1px;
-  --jev-spark-width: 44px;
-  --jev-spark-height: 18px;
+  --jev-spark-width: 96px;
+  --jev-spark-height: 24px;
   --jev-cell-min: 56px;
   --jev-status-width: 200px;
   /* Wide enough for the longest mode word, 자동 (근거가 쌓이면 적용), whole. */
   --jev-mode-width: 17em;
   --jev-trend: var(--lane-1);
-  --jev-dot: var(--ink-chalk);
+  /* The week's second line, accuracy: the ink and a dash, so it reads apart
+     from the response rate in both treatments (the light one draws every
+     lane in one colour) and without colour at all (t-6243 D4). */
+  --jev-trend-accuracy: var(--ink-chalk);
+  --jev-trend-dash: 3 2;
   /* The strip over the table (t-6243 D1). */
   --jev-stat-size: 18px;
   --jev-stat-min: 96px;

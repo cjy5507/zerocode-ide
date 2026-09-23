@@ -29,11 +29,11 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const EVIDENCE_DIR = join(ROOT, "output", "t-5807");
 /* How many seats the settings card carries — counted off the card's own
  * markup rather than typed here, so a seat added to the use table (which
- * `typesafe_settings.rs` holds the card to) is not a second number to move.
- * Every row draws one trend of three sparks. */
+ * `typesafe_settings.rs` holds the card to) is not a second number to move. */
 const { readFileSync } = await import("node:fs");
 const SEATS = (readFileSync(join(ROOT, "ui", "index.html"), "utf8").match(/data-jev-seat="/g) ?? []).length;
-const SPARKS_PER_SEAT = 3;
+/* The fewest days with a value a trend is drawn from (t-6243 D4). */
+const TREND_DAYS = 3;
 
 /* Installed on the page: the fixture the three answers are drawn from.
  * With `real` — this machine's own count, from `realSummary` — the summary
@@ -290,7 +290,7 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
     for (const theme of ["dark", "light"]) {
       await setQualityTheme(page, theme);
       await settlePaint(page);
-      const seen = await page.evaluate(() => {
+      const seen = await page.evaluate((trendDays) => {
         const view = document.querySelector("#jev-view");
         return {
           faults: window.__JEV_TEXT_FAULTS__(view),
@@ -300,21 +300,23 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
           // The features nothing asked all week fold into one row (t-6243
           // D1); the rest stand, whether or not zo could count them.
           unused: (jevNumbers ?? []).filter((one) => one.week.rows === 0).length,
-          counted: [...view.querySelectorAll("[data-jev-dash-row]")]
-            .filter((row) => (jevNumbers ?? []).some((one) => one.id === row.dataset.jevDashRow)).length,
           fold: view.querySelector("[data-jev-fold]") !== null,
           decisions: view.querySelectorAll(".jev-decision").length,
-          sparks: view.querySelectorAll(".jev-spark[data-points]").length,
+          // One picture per feature with three days of values (t-6243 D4).
+          pictures: view.querySelectorAll(".jev-spark").length,
+          drawable: [...view.querySelectorAll("[data-jev-dash-row]")].filter((row) =>
+            ((jevNumbers ?? []).find((one) => one.id === row.dataset.jevDashRow)?.days ?? [])
+              .filter((day) => day.tally.rows > 0).length >= trendDays).length,
           theme: document.documentElement.dataset.theme ?? "dark",
           viewport: [window.innerWidth, window.innerHeight],
         };
-      });
+      }, TREND_DAYS);
       const path = join(EVIDENCE_DIR, `jev-dashboard-${theme}.png`);
       await page.screenshot({ path });
       shots[theme] = { ...seen, path };
       ok(`the ${theme} dashboard is one readable screen: no text cut, clipped or overlapping`,
         seen.faults.length === 0 && seen.oneScreen && seen.tableFits && seen.rows === SEATS - seen.unused
-          && seen.fold === (seen.unused > 0) && seen.sparks === seen.counted * SPARKS_PER_SEAT && seen.theme === theme,
+          && seen.fold === (seen.unused > 0) && seen.pictures === seen.drawable && seen.theme === theme,
         JSON.stringify({ ...seen, faults: seen.faults.slice(0, 6), path }));
     }
     ok("the evidence carries this machine's own count when zo answers, and says which",
@@ -377,7 +379,6 @@ export async function testJevDashboard(browser, origin, ok) {
         refusals: fact("summon", "refusals"), applied: fact("summon", "applied"),
         agreement: fact("summon", "agreement"), cost: cell("summon", "cost").textContent,
         boundTip: view().querySelector('[data-jev-dash-row="summon"] [data-jev-fact="bound"]')?.dataset.tip ?? null,
-        sparks: [...cell("summon", "trend").querySelectorAll(".jev-spark")].map((svg) => Number(svg.dataset.points)),
         mode: cell("summon", "mode").querySelector("select").value,
       };
       const recallWeek = fact("recall", "week");
@@ -410,6 +411,17 @@ export async function testJevDashboard(browser, origin, ok) {
         text: foldRow.textContent, expanded: foldRow.querySelector("button").getAttribute("aria-expanded"),
         at: bodyRows.indexOf(foldRow),
       } : null;
+      // The week's picture (t-6243 D4): how many, which lines with how many
+      // points, and what the cell says when there is none.
+      const trendOf = (id) => {
+        const holder = cell(id, "trend");
+        return {
+          pictures: holder.querySelectorAll("svg").length,
+          lines: [...holder.querySelectorAll("svg [data-line]")].map((line) => `${line.dataset.line}:${line.dataset.points}`),
+          text: holder.textContent.trim(),
+        };
+      };
+      const trends = Object.fromEntries(["summon", "routing", "notify", "browser"].map((id) => [id, trendOf(id)]));
       // What the rate and accuracy cells say (t-6243 D3).
       const said = (id) => ({ answered: cell(id, "answered").textContent, agreement: fact(id, "agreement") });
       const small = Object.fromEntries(["summon", "placement", "routing", "notify", "browser"].map((id) => [id, said(id)]));
@@ -419,7 +431,7 @@ export async function testJevDashboard(browser, origin, ok) {
         ms, active: activeTabId, visible: !view().hidden, hiddenAttr: view().hidden,
         rowIds: rows.map((row) => row.dataset.jevDashRow),
         rowNames: rows.map((row) => row.querySelector('[data-jev-cell="seat"]').textContent),
-        cardNames, cardSeats: window.__JEV__.seats, summon, recallWeek, statuses, caption, cardLine, small,
+        cardNames, cardSeats: window.__JEV__.seats, summon, recallWeek, statuses, caption, cardLine, small, trends,
         strip, fold, bodyRows: bodyRows.length,
         asks: window.__JEV__.asks.slice(), settingsAsks: window.__COUNTS__.typesafe_settings ?? 0,
         summaryAsks: window.__COUNTS__.jev_summary ?? 0, dayAsks: window.__COUNTS__.jev_day ?? 0,
@@ -535,10 +547,10 @@ export async function testJevDashboard(browser, origin, ok) {
       const cell = (id, name) => again.querySelector(`[data-jev-dash-row="${id}"] [data-jev-cell="${name}"]`);
       const fact = (id, name) => again.querySelector(`[data-jev-dash-row="${id}"] [data-jev-fact="${name}"]`)?.textContent ?? null;
       opened.quiet = { week: fact("skills", "week"), refusals: fact("skills", "refusals"),
+        trend: cell("skills", "trend").textContent.trim(), pictures: cell("skills", "trend").querySelectorAll("svg").length,
         chip: cell("skills", "status").querySelector(".jev-chip")?.textContent ?? null,
         tone: cell("skills", "status").querySelector(".jev-chip")?.dataset.status ?? null,
-        reason: cell("skills", "status").querySelector(".jev-status-reason")?.textContent ?? "",
-        sparks: [...cell("skills", "trend").querySelectorAll(".jev-spark")].map((svg) => Number(svg.dataset.points)) };
+        reason: cell("skills", "status").querySelector(".jev-status-reason")?.textContent ?? "" };
       return opened;
     });
     const inUse = ["summon", "placement", "recall", "routing", "notify", "browser"];
@@ -547,9 +559,14 @@ export async function testJevDashboard(browser, origin, ok) {
       unfolded.rows.join(",") === [...inUse, ...unusedInOrder].join(",")
         && unfolded.expanded === "true" && unfolded.stored === "1" && unfolded.reopened.join(",") === unfolded.rows.join(","),
       JSON.stringify({ rows: unfolded.rows, expanded: unfolded.expanded, stored: unfolded.stored, reopened: unfolded.reopened.length }));
-    ok("the trend has one point per counted day and none for a day nothing was asked",
-      opened.summon.sparks.join(",") === "5,5,5" && unfolded.quiet.sparks.join(",") === "0,0,0",
-      JSON.stringify({ summon: opened.summon.sparks, quiet: unfolded.quiet.sparks }));
+    const tr = opened.trends;
+    ok("the week is one picture of two lines, response rate and accuracy, drawn only from three days with values",
+      tr.summon.pictures === 1 && tr.summon.lines.join(",") === "answered:5,agreement:5"
+        && tr.routing.pictures === 1 && tr.routing.lines.join(",") === "answered:7,agreement:7"
+        && tr.notify.pictures === 0 && tr.notify.text === "1일치만 있음"
+        && tr.browser.pictures === 0 && tr.browser.text === "1일치만 있음"
+        && unfolded.quiet.pictures === 0 && unfolded.quiet.trend === "—",
+      JSON.stringify({ ...tr, quiet: { pictures: unfolded.quiet.pictures, text: unfolded.quiet.trend } }));
     ok("a seat nothing has asked yet reads as never asked, not as zero",
       unfolded.quiet.week === "0" && unfolded.quiet.refusals === null && unfolded.quiet.chip === "미사용"
         && unfolded.quiet.tone === "unused" && unfolded.quiet.reason === "",

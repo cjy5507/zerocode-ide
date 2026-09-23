@@ -37,9 +37,14 @@ const JEV_POLL_MS = 30_000;
  * event, not before it. One ask per burst, however many events. */
 const JEV_EVENT_SETTLE_MS = 1_500;
 
-/* The sparkline's own box; the stylesheet decides how large it draws. */
+/* The trend picture's own box; the stylesheet decides how large it draws. */
 const JEV_SPARK_WIDTH = 64;
 const JEV_SPARK_HEIGHT = 18;
+
+/* The fewest days with a value a feature's week is drawn from: two points
+ * are a line with no shape, three the fewest that can show a turn (t-6243
+ * D4). Fewer, and the cell says how many days there are instead. */
+const JEV_TREND_DAYS = 3;
 
 /* What zo last said each seat's ledger holds. `null` until zo answers, and
  * it stays null on a zo too old to know the verb — the switches then stand
@@ -302,16 +307,17 @@ const JEV_COLUMNS = Object.freeze([
   { cell: "acted", key: "jev.col.acted", word: "실제 적용 · 정확도", tipKey: "jev.col.actedTip", tip: "정확도는 판단이 기존 방식의 판단이나 나중에 확인된 결과와 같았던 비율입니다." },
   { cell: "cost", key: "jev.col.cost", word: "비용 (USD)" },
   { cell: "status", key: "jev.col.why", word: "상태와 다음 단계" },
-  { cell: "trend", key: "jev.col.trend", word: "지난 7일 (응답률 · 정확도 · 응답 시간)" },
+  { cell: "trend", key: "jev.col.trend", word: "지난 7일 (응답률 · 정확도)" },
 ]);
 
-/* The three lines a seat's trend cell draws, each read off one day's count:
- * the share that answered, the share that agreed, and the p50. */
+/* The two lines a feature's week draws, each read off one day's count: the
+ * share that answered and the share that matched. Both are shares, so one
+ * picture holds both on one scale; how long the answers took has its own
+ * column (t-6243 D4). */
 const JEV_TRENDS = Object.freeze([
-  { line: "answered", key: "jev.trend.answered", word: "응답률", read: (day) => day.tally.answeredShare ?? null, unit: "share" },
+  { line: "answered", key: "jev.trend.answered", word: "응답률", read: (day) => day.tally.answeredShare ?? null },
   { line: "agreement", key: "jev.trend.agreement", word: "정확도",
-    read: (day) => (day.agreement?.compared ? day.agreement.agreed / day.agreement.compared : null), unit: "share" },
-  { line: "p50", key: "jev.trend.p50", word: "응답 시간", read: (day) => day.tally.p50Ms ?? null, unit: "ms" },
+    read: (day) => (day.agreement?.compared ? day.agreement.agreed / day.agreement.compared : null) },
 ]);
 
 /* Where a feature stands, one word per state: the strip over the table
@@ -607,57 +613,67 @@ function jevLatencyWords(week) {
   return t("jev.latency", "{{p50}} ms (느릴 때 {{p95}})", { p50: jevMs(week.p50Ms), p95: jevMs(week.p95Ms) });
 }
 
-/* One polyline over the week's days, the newest at the right; a day with
- * nothing to say leaves a gap rather than a zero. The values ride on the
- * node for a reader or a test; the picture is the stylesheet's. */
-function jevSpark(values, unit) {
+/* The week as one picture, every line on the same 0–100% scale over the
+ * days, the newest at the right; a day with nothing to say leaves a gap
+ * rather than a zero. Each line's values ride on its group for a reader or a
+ * test; the picture is the stylesheet's. */
+function jevTrendPicture(series) {
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("class", "jev-spark");
   svg.setAttribute("viewBox", `0 0 ${JEV_SPARK_WIDTH} ${JEV_SPARK_HEIGHT}`);
   svg.setAttribute("aria-hidden", "true");
-  const known = values.filter((value) => value !== null);
-  const top = unit === "share" ? 1 : Math.max(1, ...known);
-  const step = values.length > 1 ? JEV_SPARK_WIDTH / (values.length - 1) : 0;
+  const days = Math.max(0, ...series.map(({ values }) => values.length));
+  const step = days > 1 ? JEV_SPARK_WIDTH / (days - 1) : 0;
   const pad = 2;
-  const points = [];
-  values.forEach((value, at) => {
-    if (value === null) return;
-    const x = at * step;
-    const y = JEV_SPARK_HEIGHT - pad - (value / top) * (JEV_SPARK_HEIGHT - pad * 2);
-    points.push([x, y]);
-  });
-  if (points.length > 1) {
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-    line.setAttribute("class", "jev-spark-line");
-    line.setAttribute("points", points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "));
-    svg.append(line);
+  for (const { line, values } of series) {
+    const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+    group.setAttribute("class", `jev-spark-${line}`);
+    const points = [];
+    values.forEach((value, at) => {
+      if (value === null) return;
+      points.push([at * step, JEV_SPARK_HEIGHT - pad - value * (JEV_SPARK_HEIGHT - pad * 2)]);
+    });
+    if (points.length > 1) {
+      const polyline = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
+      polyline.setAttribute("class", "jev-spark-line");
+      polyline.setAttribute("points", points.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" "));
+      group.append(polyline);
+    }
+    for (const [x, y] of points) {
+      const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      dot.setAttribute("class", "jev-spark-dot");
+      dot.setAttribute("cx", x.toFixed(1));
+      dot.setAttribute("cy", y.toFixed(1));
+      dot.setAttribute("r", "1.5");
+      group.append(dot);
+    }
+    group.dataset.line = line;
+    group.dataset.points = String(points.length);
+    group.dataset.values = values.map((value) => (value === null ? "" : String(value))).join(",");
+    svg.append(group);
   }
-  for (const [x, y] of points) {
-    const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    dot.setAttribute("class", "jev-spark-dot");
-    dot.setAttribute("cx", x.toFixed(1));
-    dot.setAttribute("cy", y.toFixed(1));
-    dot.setAttribute("r", "1.5");
-    svg.append(dot);
-  }
-  svg.dataset.points = String(points.length);
-  svg.dataset.values = values.map((value) => (value === null ? "" : String(value))).join(",");
   return svg;
 }
 
+/* A feature's week: the picture and each line's latest value under it, once
+ * there are enough days to draw; how many days there are, until then. */
 function jevTrendCell(held) {
   const cell = jevNode("div", "jev-trends");
-  for (const trend of JEV_TRENDS) {
-    const values = (held.days ?? []).map((day) => trend.read(day));
-    const last = values.filter((value) => value !== null).at(-1);
-    const face = jevNode("span", "jev-trend-last");
-    face.textContent = last === undefined ? "—" : (trend.unit === "share" ? jevPercent(last) : jevMs(last));
-    // The line's name is the column head's and a reader's (`sr`); the cell
-    // itself is three small lines with the latest value under each.
-    const row = jevNode("div", `jev-trend jev-trend-${trend.line}`,
-      jevText(trend.key, trend.word, "span", "sr"), jevSpark(values, trend.unit), face);
-    cell.append(row);
+  const days = held.days ?? [];
+  const known = days.filter((day) => day.tally.rows > 0).length;
+  if (known < JEV_TREND_DAYS) {
+    cell.textContent = known === 0 ? "—" : t("jev.trendShort", "{{days}}일치만 있음", { days: jevCount(known) });
+    return cell;
   }
+  const series = JEV_TRENDS.map((trend) => ({ line: trend.line, values: days.map((day) => trend.read(day)) }));
+  const legend = jevNode("div", "jev-trend-legend");
+  for (const [at, trend] of JEV_TRENDS.entries()) {
+    const last = series[at].values.filter((value) => value !== null).at(-1);
+    const item = jevNode("span", `jev-trend-last jev-trend-${trend.line}`);
+    item.textContent = `${t(trend.key, trend.word)} ${last === undefined ? "—" : jevPercent(last)}`;
+    legend.append(item);
+  }
+  cell.append(jevTrendPicture(series), legend);
   return cell;
 }
 
