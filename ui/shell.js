@@ -8406,10 +8406,11 @@ const paneSubagents = new Map();
  * `dropTermView`가 지운다. */
 const paneHelpers = new Map();
 /* The workers whose pane the placement seat answered for and whose label is
- * still open (t-5806): term → { worker }. Filled when the door says the
- * answer is in its book (`placed`), emptied by the first move this surface
- * reports of that pane or by the pane ending — a second move of the same
- * pane is a fact about the person's afternoon, not about the answer. */
+ * still open (t-5806): term → { worker, seenAfterMs, seen, seenTimer }.
+ * Filled when the door says the answer is in its book (`placed`), emptied by
+ * the first move this surface reports of that pane or by the pane ending — a
+ * second move of the same pane is a fact about the person's afternoon, not
+ * about the answer. */
 const placedWorkers = new Map();
 
 /* The pane that IS this helper, or `null` — the map above read the other way.
@@ -13589,7 +13590,10 @@ async function roomForWorker({ parent, term, worktree, seat }) {
     // An answer the door put in its book waits for what the person does with
     // the pane; this surface is the only one that can see that, so it keeps
     // the worker's name by the term until it has reported one move.
-    if (judged?.placed && typeof seat.worker === "string") placedWorkers.set(term, { worker: seat.worker });
+    if (judged?.placed && typeof seat.worker === "string") {
+      placedWorkers.set(term, { worker: seat.worker, seenAfterMs: judged.seenAfterMs, seen: false, seenTimer: null });
+      notePlacedWorkersSeen();
+    }
     if (judged?.applied && typeof judged.chosen === "string") return judged.chosen;
   } catch {
     // A backend without the door, or a door that refused: the tab it is.
@@ -13607,8 +13611,45 @@ async function roomForWorker({ parent, term, worktree, seat }) {
 function noteWorkerRoomChange(term, room) {
   const placed = placedWorkers.get(term);
   if (!placed) return;
-  placedWorkers.delete(term);
+  forgetPlacedWorker(term);
   invoke("note_worker_room_change", { worker: placed.worker, room }).catch(() => {});
+}
+
+/* A placed worker's pane counts as seen once it has stood on the stage, with
+ * this window in front, for as long as the door said (`seenAfterMs`,
+ * t-6342): a pane nobody looked at says nothing about the room it was put
+ * in, and its label is left unmarked. Reported once per pane; a pane that
+ * leaves the stage, or a window that loses the person's focus, starts the
+ * clock again. Asked whenever the stage declares what it shows and whenever
+ * the window gains or loses focus — the only moments the answer can change. */
+function notePlacedWorkersSeen() {
+  const shown = readingTerms();
+  const present = document.hasFocus();
+  for (const [term, placed] of placedWorkers) {
+    if (placed.seen || !(placed.seenAfterMs > 0)) continue;
+    if (!present || !shown.has(term)) {
+      clearTimeout(placed.seenTimer);
+      placed.seenTimer = null;
+      continue;
+    }
+    if (placed.seenTimer) continue;
+    placed.seenTimer = setTimeout(() => {
+      placed.seenTimer = null;
+      if (placedWorkers.get(term) !== placed || !document.hasFocus() || !readingTerms().has(term)) return;
+      placed.seen = true;
+      invoke("note_worker_room_seen", { worker: placed.worker }).catch(() => {});
+    }, placed.seenAfterMs);
+  }
+}
+
+window.addEventListener("focus", notePlacedWorkersSeen);
+window.addEventListener("blur", notePlacedWorkersSeen);
+
+/* The pane left the book — moved by the person, or ended — and its clock
+ * with it. */
+function forgetPlacedWorker(term) {
+  clearTimeout(placedWorkers.get(term)?.seenTimer);
+  placedWorkers.delete(term);
 }
 
 /* Move a just-seated worker to the room the placement seat named, when the

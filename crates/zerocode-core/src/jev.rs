@@ -617,6 +617,20 @@ pub const SUMMON_APPLY_DEADLINE_MS: u64 = 10_000;
 /// window's move recorder reads it to refuse a move that came too late.
 pub const PLACEMENT_LABEL_WINDOW_MS: i64 = 5 * 60 * 1_000;
 
+/// How long a placed worker's pane must stand on the stage, with the window
+/// in front, before a person counts as having seen it (t-6342) — the
+/// placement label's condition for a pane nobody moved
+/// (`worker_placement::mark`).
+///
+/// Measured on this machine's own stage (2026-09-22..23, the 1,367 stays the
+/// window's black box recorded as `watch` declarations): 4.3% of the times a
+/// terminal came on stage it left within a second and 13.8% within two — the
+/// passes a person makes cycling tabs — while the median stay was 10.9 s.
+/// Two seconds keeps a glance that decided to leave the pane where it was,
+/// and drops a tab flicked past on the way to another. The window's surface
+/// is handed the number with the answer and spells none of its own.
+pub const PLACEMENT_SEEN_DWELL_MS: i64 = 2_000;
+
 /// What the recall seat's answers must bound above before `auto` rises to
 /// ordering what a turn reads (§4): nine in ten — the skill seat's line, read
 /// from there rather than respelled (t-5806, "모든 승격"), because the two
@@ -967,18 +981,26 @@ pub const PLACEMENT_ANSWER_FLOOR_PERMILLE: u16 = 800;
 /// (`crate::worker_placement`, `cmd::worker_room`); nothing calls it, and
 /// nothing should until those rows exist.
 ///
-/// The `agreed` rule (t-5806): the answer agreed when the person left the
-/// worker's pane in the room the seat named for [`PLACEMENT_LABEL_WINDOW_MS`]
-/// after the answer, and disagreed when they moved it to another room inside
-/// that window — closed a tiled pane to the background, dragged its tab out
-/// beside something else, brought a parked worker back to a tab. A move
-/// that keeps the room (a tab dragged to another group) is still written
-/// down, as a move the answer survived. The window's surface reports the
-/// move through one door (`note_worker_room_change`) and the beat writes the
-/// quiet case once the window has passed (`worker_room::label_rooms`); a
+/// The `agreed` rule (t-5806, t-6342): the answer agreed when the room the
+/// worker's pane ended [`PLACEMENT_LABEL_WINDOW_MS`] in is the room the seat
+/// named, and disagreed when it is another — the room the person moved it to
+/// (closed a tiled pane to the background, dragged its tab out beside
+/// something else, brought a parked worker back to a tab), or, for a pane
+/// nobody moved, the room it stood in: the answer's own when the seat seated
+/// it, today's tab when the seat only recorded (`worker_placement::stood_in`).
+/// A move that keeps the room (a tab dragged to another group) is still
+/// written down, as a move the answer survived. A pane nobody moved is graded
+/// only if it stood on the stage, with the window in front, for
+/// [`PLACEMENT_SEEN_DWELL_MS`]; otherwise its row carries
+/// `worker_placement::UNSEEN` under [`summary::NOT_COMPARED`] and no mark —
+/// a label that cannot tell "nobody looked" from "looked and kept it" cannot
+/// say no, and all thirty of this machine's marks said yes (2026-09-23). The
+/// window's surface reports a move and a sight through one door each
+/// (`note_worker_room_change`, `note_worker_room_seen`) and the beat writes
+/// the quiet case once the window has passed (`worker_room::label_rooms`); a
 /// pane placed before this window process started is not labeled, because
-/// nothing saw what became of it. The row it labels is named by its
-/// `label` key, the worker id the answered row carries as `placement`.
+/// nothing saw what became of it. The row it labels is named by its `label`
+/// key, the worker id the answered row carries as `placement`.
 pub const PLACEMENT: JevUse = JevUse {
     id: "placement",
     setting: "workerPlacement",

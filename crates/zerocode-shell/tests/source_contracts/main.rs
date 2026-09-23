@@ -30750,13 +30750,15 @@ mod tests {
         let asking = block_after(window, "async function roomForWorker(");
         assert!(
             asking.contains("judged?.placed")
-                && asking.contains("placedWorkers.set(term, { worker: seat.worker })"),
-            "the surface no longer remembers which placed worker a term is:\n{asking}"
+                && asking.contains(
+                    "placedWorkers.set(term, { worker: seat.worker, seenAfterMs: judged.seenAfterMs,"
+                ),
+            "the surface no longer remembers which placed worker a term is, or the dwell the door named:\n{asking}"
         );
         // One door, and it forgets the worker on the first report.
         let door = block_after(window, "function noteWorkerRoomChange(term, room) {");
         assert!(
-            door.contains("placedWorkers.delete(term);")
+            door.contains("forgetPlacedWorker(term);")
                 && door.contains(
                     "invoke(\"note_worker_room_change\", { worker: placed.worker, room })"
                 ),
@@ -30795,9 +30797,15 @@ mod tests {
             );
         }
         // And a pane that ended is forgotten, so its worker id cannot be
-        // reported for a pane that no longer exists.
+        // reported for a pane that no longer exists — through the one helper
+        // that also stops the pane's sight clock.
         assert_eq!(
             window.matches("placedWorkers.delete(term);").count(),
+            1,
+            "the placed book is emptied in one place"
+        );
+        assert_eq!(
+            window.matches("forgetPlacedWorker(term);").count(),
             2,
             "the placed book is emptied on the report and on the pane's end, nowhere else"
         );
@@ -30812,16 +30820,63 @@ mod tests {
         );
         let graded = block_after(backend, "pub(crate) fn room_changed(");
         assert!(
-            graded.contains("PLACEMENT_OPTIONS.contains(&room)")
+            graded.contains("Placement::of(room)")
                 && graded.contains("PLACEMENT_LABEL_WINDOW_MS")
+                && graded.contains("worker_placement::stood_in(placed.chosen, placed.applied)")
                 && graded.contains("crate::systemone::record_rows(&PLACEMENT,"),
             "a move is graded outside the table's rooms, the seat's window or the seat's ledger road:\n{graded}"
         );
-        let mark = block_after(backend, "fn label_row(worker: &str, placed: &Placed,");
+        let mark = block_after(backend, "fn label_row(");
         assert!(
-            mark.contains("label[AGREED.canonical] = json!(followed == placed.chosen);")
+            mark.contains("worker_placement::mark(placed.chosen, ended_in, seen)")
+                && mark.contains("NOT_COMPARED.canonical")
                 && mark.contains("LABEL.canonical: worker,"),
             "the placement label spells its mark or its name itself:\n{mark}"
+        );
+    }
+
+    /// A pane nobody moved is graded only if a person was in front of it
+    /// (t-6342): the surface reports a placed worker's pane once it has stood
+    /// on the stage, with the window in front, for the dwell the door named —
+    /// asked where the stage declares what it shows and where the window
+    /// gains or loses focus, and through one door.
+    #[test]
+    fn a_placed_workers_sight_is_reported_once_from_the_stage_and_the_focus() {
+        let window = window_source();
+        let backend = shipped_backend();
+        let seen = block_after(window, "function notePlacedWorkersSeen() {");
+        assert!(
+            seen.contains("document.hasFocus()")
+                && seen.contains("readingTerms()")
+                && seen.contains("placed.seenAfterMs")
+                && seen.contains("placed.seen = true;")
+                && seen.contains("invoke(\"note_worker_room_seen\", { worker: placed.worker })"),
+            "a placed worker's sight is reported without the stage, the focus or the dwell:\n{seen}"
+        );
+        assert_eq!(
+            window.matches("invoke(\"note_worker_room_seen\"").count(),
+            1,
+            "a sight is reported through one door"
+        );
+        let declared = block_after(window, "function syncWatchedTerms() {");
+        assert!(
+            declared.contains("notePlacedWorkersSeen();"),
+            "the stage's declaration no longer asks whether a placed pane is on it:\n{declared}"
+        );
+        assert!(
+            window.contains("window.addEventListener(\"focus\", notePlacedWorkersSeen);")
+                && window.contains("window.addEventListener(\"blur\", notePlacedWorkersSeen);"),
+            "the window's focus no longer moves a placed pane's sight clock"
+        );
+        let door = block_after(backend, "pub(crate) fn note_worker_room_seen(");
+        assert!(
+            door.contains("room_seen(rooms(),") && door.contains("crate::now_epoch_ms()"),
+            "the sight door no longer marks the one book:\n{door}"
+        );
+        let marked = block_after(backend, "pub(crate) fn room_seen(");
+        assert!(
+            marked.contains("PLACEMENT_LABEL_WINDOW_MS") && marked.contains("placed.seen = true;"),
+            "a sight is taken outside the label's window:\n{marked}"
         );
     }
 
