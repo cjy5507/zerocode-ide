@@ -2165,6 +2165,14 @@
   --chat-preview-close-out: -12px;
   --chat-preview-close-icon: 18px;
   --chat-preview-layer: 90;
+
+  /* A code block's copy (t-6323 A9), the extension's (`copyButton` over
+   * `codeBlockWrapper`, 2.1.280): 4px in from the block's corner, 4px
+   * inside, a 14px icon, at 70% while pressed. */
+  --chat-code-copy-inset: 4px;
+  --chat-code-copy-pad: 4px;
+  --chat-code-copy-icon: 14px;
+  --chat-copy-pressed-alpha: 0.7;
 }
 
 /* The light treatment, which this product draws as GLASS.

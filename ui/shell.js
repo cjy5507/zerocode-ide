@@ -11835,6 +11835,8 @@ function paintHelperProse(host, text, base) {
   try {
     paintMarkdown(host, text);
     linkifyHelperProse(host);
+    // Each code block wears the extension's copy over its corner (A9).
+    dressCodeCopies(host);
   } catch {
     host.replaceChildren();
     host.textContent = text;
@@ -11938,7 +11940,7 @@ function helperActionsNode(turn) {
   copy.setAttribute("aria-label", copyWords);
   copy.dataset.tip = copyWords;
   copy.appendChild(iconNode("copy"));
-  copy.addEventListener("click", () => void clipboardText.write(turn.text));
+  copyOnPress(copy, () => answerCopyText(turn.text));
   actions.appendChild(copy);
   return actions;
 }
@@ -11951,6 +11953,13 @@ function lastAnswerOf(run) {
   return (run?.helper?.turns ?? []).findLast((turn) => turn.role === "assistant")?.text ?? "";
 }
 
+/* What an answer's copy writes: the words the answer shows — the CLI's own
+ * plumbing that the page leaves out (`cleanseAssistantText`) is left out of
+ * the copy too, as the extension strips its memory tags (`xD1`). */
+function answerCopyText(text) {
+  return cleanseAssistantText(text) || text;
+}
+
 /* `/copy` — the last answer to the clipboard, through the one clipboard door
  * this window has. A page that has been answered nothing does not list the
  * command at all (`windowSlashCommands`), so this is never a press that does
@@ -11959,7 +11968,7 @@ function lastAnswerOf(run) {
 function copyLastAnswer(run) {
   const said = lastAnswerOf(run);
   if (!said) return;
-  void clipboardText.write(said);
+  void clipboardText.write(answerCopyText(said));
 }
 
 function helperPreviewNode(run, target) {

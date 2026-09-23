@@ -26,6 +26,8 @@ CSS = (
     ".checkbox_FvGYOg{margin:2px;width:1em}"
     ".checkbox_FvGYOg:indeterminate:after{content:\"✽\"}"
     ".checkbox_UxGN1Q{padding:2px;border:1px solid orange}"
+    ".copyButton_CEmTFw{padding:4px}.copyIcon_CEmTFw{width:14px}"
+    ".copyButton_Eg8KCQ{padding:6px}.copyIcon_Eg8KCQ{width:16px}.authUrlInput_Eg8KCQ{outline:none}"
     "html{--corner-radius-small:4px;--app-pill-min-height:18px;--nothing:1}"
 )
 
@@ -45,6 +47,7 @@ SCRIPT = (
     'var u25=new Set(["ArrowUp","PageUp","Home"]),m25=new Set(["ArrowDown","PageDown","End"]),c25=300,'
     "l25='button, [role=\"button\"], input',cF1=new WeakMap;"
     "var sD1=3;function AU0($){if($.length<=sD1+1)return{visible:$,overflow:[]};return{visible:$.slice(0,sD1)}}"
+    "function z(){let G=$();Promise.resolve().then(()=>navigator.clipboard.writeText(G)).then(()=>{Q(!0),setTimeout(()=>Q(!1),2000),X?.(!0)},()=>X?.(!1))}"
 )
 # The word lists that script carries, as the snapshot keeps them.
 WORDS = {
@@ -85,6 +88,10 @@ class RuleReading(unittest.TestCase):
             rules.rule_named(self.rules, ".checkbox", "checkbox:indeterminate"),
             {"margin": "2px", "width": "1em"},
         )
+        # Two modules that share their class names whole are told apart by
+        # what only one of them defines.
+        self.assertEqual(rules.rule_named(self.rules, ".copyButton", "copyIcon", "authUrlInput"), {"padding": "4px"})
+        self.assertEqual(rules.rule_named(self.rules, ".copyButton", "copyIcon")["padding"] in ("4px", "6px"), True)
         self.assertEqual(
             rules.rule_named(self.rules, ".checkbox", "checkbox"),
             {"margin": "2px", "width": "1em", "padding": "2px", "border": "1px solid orange"},
@@ -140,6 +147,7 @@ class ScriptMeasures(unittest.TestCase):
                 "followGlide": 2000,
                 "followIntent": 300,
                 "agentRowsShown": 3,
+                "copiedFor": 2000,
             },
         )
         self.assertEqual(rules.words_of(SCRIPT), WORDS)

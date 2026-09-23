@@ -1,7 +1,7 @@
 {
   "source": "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/2.1.280/vspackage",
   "version": "2.1.280",
-  "fetched_at": "2026-09-23T09:54:12+00:00",
+  "fetched_at": "2026-09-23T13:39:08+00:00",
   "stylesheet": "extension/webview/index.css",
   "script": "extension/webview/index.js",
   "vars": {
@@ -407,6 +407,31 @@
       "color": "var(--app-menu-foreground)",
       "width": "18px",
       "height": "18px"
+    },
+    "code copyButton": {
+      "position": "absolute",
+      "top": "4px",
+      "right": "4px"
+    },
+    "copyButton": {
+      "background": "var(--app-secondary-background)",
+      "border": "1px solid var(--app-input-border)",
+      "cursor": "pointer",
+      "opacity": "0",
+      "display": "flex",
+      "border-radius": "4px",
+      "justify-content": "center",
+      "align-items": "center",
+      "padding": "4px",
+      "transition": "opacity .15s,background .15s"
+    },
+    "copyButton:active": {
+      "opacity": ".7"
+    },
+    "copyIcon": {
+      "color": "var(--app-secondary-foreground)",
+      "width": "14px",
+      "height": "14px"
     }
   },
   "constants": {
@@ -424,6 +449,7 @@
     "followSlack": 50,
     "followGlide": 2000,
     "agentRowsShown": 3,
+    "copiedFor": 2000,
     "followIntent": 300
   },
   "words": {

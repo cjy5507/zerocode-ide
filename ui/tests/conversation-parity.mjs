@@ -1090,3 +1090,70 @@ export async function testConversationImages(browser, origin, ok) {
     await page.close();
   }
 }
+
+/* A9 — copying. The extension's copy button (2.1.280 `gN`) writes the text
+ * and turns its icon to a check for 2 s, with no word and no new name: under
+ * each answer (`Copy response`, the words the answer shows) and over each
+ * code block's top right corner (`Copy code`, shown while the block is under
+ * the pointer, copying the block as it stands). One clipboard door. */
+export async function testConversationCopies(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, [
+      { role: "user", text: "고쳐 줘" },
+      { role: "assistant", text: "고쳤습니다.\n\n```rust\nfn main() {\n    println!(\"hi\");\n}\n```\n\n그리고 하나 더:\n\n```sh\ncargo test\n```\n\n<system-reminder>숨은 줄</system-reminder>" },
+    ]);
+    const seen = await page.evaluate(async () => {
+      const seen = {};
+      const face = document.querySelector("#worker-view");
+      const answer = face.querySelector(".helper-turn.is-assistant");
+      // The harness's clipboard records every write (`__CLIPBOARD_WRITES__`).
+      const written = window.__CLIPBOARD_WRITES__;
+      {
+        const frames = [...answer.querySelectorAll(".helper-said .helper-code")];
+        seen.frames = frames.length;
+        const copies = frames.map((frame) => frame.querySelector(":scope > .helper-code-copy"));
+        seen.names = copies.map((copy) => copy?.getAttribute("aria-label"));
+        seen.want = t("worker.copyCode", "코드 복사");
+        seen.hiddenAtRest = copies.every((copy) => getComputedStyle(copy).opacity === "0");
+        const box = frames[0].getBoundingClientRect();
+        const corner = copies[0].getBoundingClientRect();
+        seen.corner = [Math.round(box.right - corner.right), Math.round(corner.top - box.top)];
+        seen.inset = parseFloat(getComputedStyle(face).getPropertyValue("--chat-code-copy-inset"));
+        seen.blockText = frames[0].querySelector("pre").textContent;
+        copies[0].click();
+        await window.__PAINTED__();
+        seen.codeWritten = written.at(-1);
+        seen.checked = copies[0].querySelector("use")?.getAttribute("href");
+        seen.nameKept = copies[0].getAttribute("aria-label") === seen.want && copies[0].textContent.trim() === "";
+        // The answer's copy: the words the answer shows, then the check.
+        const copy = answer.querySelector(".helper-actions .helper-copy");
+        copy.click();
+        await window.__PAINTED__();
+        seen.answerWritten = written.at(-1);
+        seen.answerChecked = copy.querySelector("use")?.getAttribute("href");
+        // Back to the copy icon after the panel's 2 s.
+        await new Promise((done) => setTimeout(done, CHAT_COPIED_MS + 150));
+        seen.backAfter = [copies[0].querySelector("use")?.getAttribute("href"), copy.querySelector("use")?.getAttribute("href")];
+      }
+      return seen;
+    });
+    ok(
+      "A9: every code block in an answer wears the extension's copy over its top right corner, 4px in (a token), unseen until the block is under the pointer; a press writes the block as it stands and turns the icon to a check, the name unchanged",
+      seen.frames === 2 && seen.names.every((name) => name === seen.want) && seen.hiddenAtRest &&
+        JSON.stringify(seen.corner) === JSON.stringify([seen.inset, seen.inset]) && seen.inset === 4 &&
+        seen.codeWritten === seen.blockText && seen.blockText.startsWith("fn main()") &&
+        seen.checked === "#i-check" && seen.nameKept,
+      JSON.stringify(seen),
+    );
+    ok(
+      "A9: the answer's copy writes the words the answer shows — without the CLI's own plumbing — turns to a check, and both copies turn back after the panel's 2 s",
+      typeof seen.answerWritten === "string" && seen.answerWritten.startsWith("고쳤습니다.") && !seen.answerWritten.includes("system-reminder") &&
+        seen.answerChecked === "#i-check" && JSON.stringify(seen.backAfter) === JSON.stringify(["#i-copy", "#i-copy"]),
+      JSON.stringify(seen),
+    );
+    ok("A9: the copies raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}

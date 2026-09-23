@@ -107,6 +107,13 @@ WANTED = [
     {"key": "previewImage", "selector": ".previewImage", "landmark": "previewOverlay"},
     {"key": "previewCloseButton", "selector": ".previewCloseButton", "landmark": "previewOverlay"},
     {"key": "previewCloseIcon", "selector": ".previewCloseIcon", "landmark": "previewOverlay"},
+    # Copying (t-6323 A9): the code block's copy over its corner, the shared
+    # button's own box and icon — the shared button's module, not the login
+    # screen's, which draws its own copy with the same class names.
+    {"key": "code copyButton", "selector": ".copyButton", "landmark": "codeBlockWrapper"},
+    {"key": "copyButton", "selector": ".copyButton", "landmark": "copyIcon", "without": "authUrlInput"},
+    {"key": "copyButton:active", "selector": ".copyButton:active", "landmark": "copyIcon", "without": "authUrlInput"},
+    {"key": "copyIcon", "selector": ".copyIcon", "landmark": "copyIcon", "without": "authUrlInput"},
 ]
 
 # The panel's measures that live in its SCRIPT: each found by a shape the
@@ -165,6 +172,12 @@ WANTED_CONSTANTS = [
     {
         "keys": ["agentRowsShown"],
         "pattern": rf"var {_NAME}=(\d+);function {_NAME}\({_NAME}\)\{{if\({_NAME}\.length<={_NAME}\+1\)return\{{visible:{_NAME},overflow:\[\]\}}",
+    },
+    # A copy says it copied for this long (`gN`: the check, then the copy
+    # icon again).
+    {
+        "keys": ["copiedFor"],
+        "pattern": rf"navigator\.clipboard\.writeText\({_NAME}\)\)\.then\(\(\)=>\{{{_NAME}\(!0\),setTimeout\(\(\)=>{_NAME}\(!1\),(\d+)\)",
     },
     # A wheel, a touch or a key is the person's intent for this long (`c25`,
     # after the two key sets and before the controls that keep a Space).
@@ -295,8 +308,11 @@ def modules_with(rules: list[tuple[str, str]], landmark: str) -> set[str]:
     return found
 
 
-def rule_named(rules: list[tuple[str, str]], selector: str, landmark: str) -> dict[str, str]:
-    modules = modules_with(rules, landmark)
+def rule_named(rules: list[tuple[str, str]], selector: str, landmark: str, without: str | None = None) -> dict[str, str]:
+    """One module's rule merged across its lines: the module the landmark names,
+    less any that also defines `without` — for class names two modules share
+    whole (the chat's copy button and the login screen's)."""
+    modules = modules_with(rules, landmark) - (modules_with(rules, without) if without else set())
     held: dict[str, str] = {}
     for raw, body in rules:
         if not any(module in raw for module in modules):
@@ -310,7 +326,7 @@ def snapshot(css: str, version: str, source: str, script: str = "") -> dict:
     rules = rules_of(css)
     found: dict[str, dict[str, str]] = {}
     for want in WANTED:
-        found[want["key"]] = rule_named(rules, want["selector"], want["landmark"])
+        found[want["key"]] = rule_named(rules, want["selector"], want["landmark"], want.get("without"))
     variables: dict[str, str] = {}
     for selector, body in rules:
         if selector == "html":

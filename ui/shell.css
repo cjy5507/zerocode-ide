@@ -13670,6 +13670,55 @@ details.worker-command {
   background: var(--chat-code-bg);
 }
 
+/* A code block's wrapper (`codeBlockWrapper`, t-6323 A9) keeps the block's
+ * place and hangs the copy over its top right corner, 4px in, shown while
+ * the block is under the pointer — or while the copy has the keyboard's
+ * focus, which the extension's leaves unseen. A pressed copy wears a check
+ * for 2 s. */
+.is-chat-page .helper-said .helper-code {
+  position: relative;
+  margin: var(--space-2) 0;
+}
+
+.is-chat-page .helper-said .helper-code > pre {
+  margin: 0;
+}
+
+.helper-code-copy {
+  position: absolute;
+  top: var(--chat-code-copy-inset);
+  right: var(--chat-code-copy-inset);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--chat-code-copy-pad);
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--chat-radius-small);
+  background: var(--surface-raised);
+  color: var(--chat-work-ink);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-fast) var(--ease-standard), background-color var(--motion-fast) var(--ease-standard);
+}
+
+.helper-code:hover > .helper-code-copy,
+.helper-code-copy:focus-visible {
+  opacity: 1;
+}
+
+.helper-code-copy:hover {
+  background: var(--chat-pill-bg);
+}
+
+.helper-code-copy:active {
+  opacity: var(--chat-copy-pressed-alpha);
+}
+
+.helper-code-copy .icon {
+  width: var(--chat-code-copy-icon);
+  height: var(--chat-code-copy-icon);
+}
+
 /* 인라인 코드는 둥근 칩 — 블록(`pre`) 안의 코드는 제 우물의 옷을 입는다. */
 .is-chat-page .helper-said :not(pre) > code {
   padding: 0 0.35em;

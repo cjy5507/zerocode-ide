@@ -17606,6 +17606,14 @@ fn the_conversation_wears_the_extensions_own_measures() {
         ("chat-preview-close", rule("previewCloseButton", "width")),
         ("chat-preview-close-out", rule("previewCloseButton", "top")),
         ("chat-preview-close-icon", rule("previewCloseIcon", "width")),
+        // A code block's copy (t-6323 A9).
+        ("chat-code-copy-inset", rule("code copyButton", "top")),
+        ("chat-code-copy-pad", rule("copyButton", "padding")),
+        ("chat-code-copy-icon", rule("copyIcon", "width")),
+        (
+            "chat-copy-pressed-alpha",
+            rule("copyButton:active", "opacity"),
+        ),
         ("agent-accent-claude", var("--app-claude-orange")),
         ("agent-send-claude", var("--app-claude-clay-button-orange")),
         ("chat-send-ink", var("--app-claude-ivory")),
@@ -17661,6 +17669,13 @@ fn the_conversation_wears_the_extensions_own_measures() {
     if !source.contains(&wanted_verb) {
         drifted.push(format!(
             "the page's `STATUS_VERB` is not the panel's spinner — wanted `{wanted_verb}`"
+        ));
+    }
+    // A copy says it copied for the panel's own while (t-6323 A9, `gN`).
+    let wanted_copied = format!("const CHAT_COPIED_MS = {};", constant("copiedFor"));
+    if !source.contains(&wanted_copied) {
+        drifted.push(format!(
+            "the page's copy does not say it copied for the panel's while — wanted `{wanted_copied}`"
         ));
     }
     let wanted_cycle = format!("const STATUS_CYCLE_MS = {};", constant("spinnerGlyphStep"));

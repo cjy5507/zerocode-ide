@@ -899,3 +899,54 @@ async function openImagePreview(pill) {
   document.body.appendChild(ground);
   close.focus();
 }
+
+/* ---- copying (t-6323 A9) ------------------------------------------------------
+ *
+ * The extension's copy button (2.1.280 `gN`): a press writes the text, and the
+ * icon turns to a check for 2 s — no word appears and the name stays. Two of
+ * them stand in the conversation: under each answer (`Copy response`, the
+ * action row the page already carries — `helperActionsNode`), and over the
+ * top right corner of each code block (`Copy code`, `codeBlockWrapper`),
+ * shown while the block is under the pointer, copying the block's text as it
+ * stands. The page's one clipboard door is `clipboardText`; the 2 s is the
+ * panel's own, held to its snapshot. */
+const CHAT_COPIED_MS = 2000;
+
+/* A press on `button` writes what `text()` says then, and says so with the
+ * check for a moment. */
+function copyOnPress(button, text) {
+  button.addEventListener("click", async (event) => {
+    event.stopPropagation();
+    try {
+      await clipboardText.write(text());
+    } catch (error) {
+      showError(error);
+      return;
+    }
+    clearTimeout(button.__copied);
+    button.replaceChildren(iconNode("check"));
+    button.classList.add("is-copied");
+    button.__copied = setTimeout(() => {
+      button.replaceChildren(iconNode("copy"));
+      button.classList.remove("is-copied");
+    }, CHAT_COPIED_MS);
+  });
+}
+
+/* Every code block the prose drew stands in the extension's wrapper with its
+ * copy over its corner. */
+function dressCodeCopies(host) {
+  for (const block of host.querySelectorAll("pre.md-block")) {
+    if (block.parentElement?.classList.contains("helper-code")) continue;
+    const frame = document.createElement("div");
+    frame.className = "helper-code";
+    const copy = document.createElement("button");
+    copy.type = "button";
+    copy.className = "helper-code-copy";
+    copy.appendChild(iconNode("copy"));
+    labelButton(copy, t("worker.copyCode", "코드 복사"));
+    copyOnPress(copy, () => block.textContent);
+    block.replaceWith(frame);
+    frame.append(copy, block);
+  }
+}
