@@ -2326,8 +2326,8 @@ function wireBoardHead(view) {
   // that corner (AgentDashboardToolbar.tsx:100-117). Spelled by the window's
   // one chord speller, so Linux reads Ctrl+K.
   const keys = view.querySelector(".board-search-keys");
-  keys.textContent = chordLabel("mod+k");
-  keys.hidden = boardQuery !== "";
+  writeTextContent(keys, chordLabel("mod+k"));
+  writeHidden(keys, boardQuery !== "");
   query.oninput = (event) => {
     boardQuery = event.target.value;
     keys.hidden = boardQuery !== "";
@@ -5099,7 +5099,7 @@ function paintAgentInspectorGlyph(view, relation, entity) {
   const tile = view.querySelector(".agent-inspector-icon");
   if (!tile) return;
   const subject = relation ? `relation:${relation.type}` : entity ? `${entity.type}:${entity.type === "agent" ? entity.card.agent : ""}` : "";
-  tile.hidden = subject === "";
+  writeHidden(tile, subject === "");
   if (tile.dataset.subject === subject) return;
   tile.dataset.subject = subject;
   if (relation) tile.innerHTML = icon("link");
@@ -6616,9 +6616,9 @@ function updateTaskBoardRow(row, group, view) {
   });
   reconcileElementOrder(host, members);
   // One agent already speaks in the headline. A team exposes the distribution.
-  host.hidden = group.members.length < 2;
+  writeHidden(host, group.members.length < 2);
   const message = row.querySelector(".task-board-message");
-  message.hidden = !group.message || group.message === group.activity;
+  writeHidden(message, !group.message || group.message === group.activity);
   writeTextContent(message.firstElementChild, t("board.tasks.message", "최근 메시지"));
   writeTextContent(message.lastElementChild, group.message);
   writeTextContent(row.querySelector(".task-board-when"), [
@@ -6694,7 +6694,7 @@ function paintTaskBoardInspector(view, tasks) {
   const body = view.querySelector(".agent-inspector-body");
   agentGraphInspectorViews.delete(body);
   const tabs = view.querySelector(".agent-inspector-tabs");
-  if (tabs) tabs.hidden = true;
+  if (tabs) writeHidden(tabs, true);
   paintAgentInspectorGlyph(view, null, null);
   const actions = view.querySelector(".agent-inspector-actions");
   writeTextContent(view.querySelector(".agent-inspector-kind"), t("board.tasks.details", "작업 자세히 보기"));
@@ -6702,7 +6702,7 @@ function paintTaskBoardInspector(view, tasks) {
   writeTextContent(view.querySelector(".agent-inspector-meta"), entry
     ? [group.project, entry.workspace.label, entry.facts.model].filter(Boolean).join(" · ")
     : t("board.tasks.selectCopy", "현재 활동과 응답, 확인이 필요한 내용을 여기서 볼 수 있어요."));
-  actions.hidden = !entry;
+  writeHidden(actions, !entry);
   if (!entry) {
     body.replaceChildren();
     delete body.dataset.taskSignature;
@@ -6779,9 +6779,12 @@ function paintTaskBoard(view, model) {
   const choices = [{ id: "all", word: t("board.tasks.all", "전체") }, ...sections];
   const filterNodes = new Map([...filters.children].map((node) => [node.dataset.taskFilter, node]));
   reconcileElementOrder(filters, choices.map(({ id, word }) => {
-    const button = filterNodes.get(id) || taskBoardElement("button", "task-board-filter");
-    button.type = "button";
-    button.dataset.taskFilter = id;
+    let button = filterNodes.get(id);
+    if (!button) {
+      button = taskBoardElement("button", "task-board-filter");
+      button.type = "button";
+      button.dataset.taskFilter = id;
+    }
     button.onclick = () => {
       taskBoardFilter = id;
       paintTaskBoard(view, agentGraphModels.get(view));
@@ -6829,11 +6832,11 @@ function paintTaskBoard(view, model) {
   }
   reconcileElementOrder(host, wanted);
   const empty = surface.querySelector(".task-board-empty");
-  empty.hidden = shown > 0;
+  writeHidden(empty, shown > 0);
   writeTextContent(empty, tasks.groups.length === 0 ? t("board.tasks.empty", "에이전트에게 일을 맡기면 여기에 표시돼요.")
     : t("board.tasks.noMatch", "이 조건에 맞는 작업이 없어요."));
   const results = view.querySelector(".board-results");
-  results.hidden = !model.searchActive;
+  writeHidden(results, !model.searchActive);
   if (!results.hidden) writeTextContent(results, t("board.results", "총 {{total}}개 중 {{shown}}개 표시", {
     total: tasks.groups.length, shown,
   }));
@@ -6868,8 +6871,8 @@ function paintAgentGraph(view, model) {
   view.classList.toggle("is-task-board", taskMode);
   view.classList.toggle("is-scoped-relations", !taskMode && agentGraphScopeKey !== "");
   view.classList.toggle("is-detailed-relations", agentGraphCardDetails);
-  view.querySelector(".task-board-surface").hidden = !taskMode;
-  view.querySelector(".agent-graph-surface").hidden = taskMode;
+  writeHidden(view.querySelector(".task-board-surface"), !taskMode);
+  writeHidden(view.querySelector(".agent-graph-surface"), taskMode);
   const heading = view.querySelector(".board-title");
   writeAttribute(heading, "data-i18n", taskMode ? "board.tasks.heading" : "board.graph.heading");
   writeTextContent(heading, taskMode
@@ -7226,9 +7229,9 @@ async function paintAgentGraphView(
     const said = agentGraphSaid(answer.columns, reviews, places, now);
     if (!force && view.dataset.said === said) return { cards, answer };
     view.dataset.said = said;
-    view.querySelector(".agent-graph-layout").hidden = false;
+    writeHidden(view.querySelector(".agent-graph-layout"), false);
     const broken = view.querySelector(".board-broken");
-    if (broken) broken.hidden = true;
+    if (broken) writeHidden(broken, true);
     const model = agentGraphModel(
       answer.columns,
       places,
@@ -7247,12 +7250,12 @@ async function paintAgentGraphView(
       ? model.searchMatchCount
       : answer.columns.reduce((total, column) => total + column.cards.length, 0);
     const results = view.querySelector(".board-results");
-    results.hidden = boardQuery.trim() === "";
+    writeHidden(results, boardQuery.trim() === "");
     if (!results.hidden) {
-      results.textContent = t("board.results", "총 {{total}}개 중 {{shown}}개 표시", {
+      writeTextContent(results, t("board.results", "총 {{total}}개 중 {{shown}}개 표시", {
         total: taskCounts ? taskCounts.groups.length : answer.total_count,
         shown,
-      });
+      }));
     }
     void askBoardReviews([...checkouts]);
     agentGraphClockBeat(answer.columns);

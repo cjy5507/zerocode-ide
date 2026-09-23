@@ -2016,7 +2016,7 @@ function paintWorkbenchNavigation(view, current) {
     if (head) head.after(nav);
     else view.prepend(nav);
   }
-  nav.setAttribute("aria-label", t("workbench.navigation", "작업 공간 이동"));
+  writeAttribute(nav, "aria-label", t("workbench.navigation", "작업 공간 이동"));
   for (const button of nav.querySelectorAll("[data-workbench-view]")) {
     const item = WORKBENCH_VIEWS.find((one) => one.id === button.dataset.workbenchView);
     writeTextContent(button, t(item.key, item.word));
@@ -2027,7 +2027,7 @@ function paintWorkbenchNavigation(view, current) {
   }
   const scope = current === "tasks" && agentBoardMode !== "tasks" ? null : workbenchScopes[current];
   const context = nav.querySelector(".workbench-context");
-  context.hidden = !scope;
+  writeHidden(context, !scope);
   if (scope) {
     const label = context.querySelector(".workbench-context-label");
     writeTextContent(label, scope.label || scope.path);

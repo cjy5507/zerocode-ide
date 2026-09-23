@@ -16,6 +16,7 @@ import { mkdir } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { chromium, createWindowServer, openWindowTestPage } from "./window-boot.mjs";
+import { installBoardWaits } from "./board-waits.mjs";
 
 /* The fixture, run inside the page. Self-contained: a page function carries
  * no closure. `now` is passed so a before/after pair draws the same clocks. */
@@ -181,6 +182,26 @@ export async function deskMutations(page, act) {
   });
 }
 
+/* One ledger beat and one hook repaint, as the window takes them, with the
+ * whole board watched — head, list, desk and inspector. `change` (a page
+ * function) moves whatever the beat is to bring before it lands. */
+export async function boardPollMutations(page, change = null) {
+  if (change) await page.evaluate(change);
+  return page.evaluate(async () => {
+    const view = document.querySelector("#board-view");
+    const records = [];
+    const watch = new MutationObserver((batch) => records.push(...batch));
+    watch.observe(view, { subtree: true, childList: true, attributes: true, characterData: true });
+    for (const listener of window.__LISTENERS__["ledger:changed"] ?? []) listener({ payload: Date.now() });
+    scheduleAgentPaint(["board"]);
+    await window.__BOARD_SETTLED__();
+    await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    records.push(...watch.takeRecords());
+    watch.disconnect();
+    return records.map((record) => `${record.type}:${record.target.className || record.target.parentElement?.className}:${record.attributeName ?? ""}`);
+  });
+}
+
 export async function testCoordinatorDesk(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
@@ -251,6 +272,16 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       paintCoordinatorDesk(document.querySelector("#board-view"));
     });
     ok("a quiet poll repaints the board and the desk with zero mutations", quiet === 0, `mutations ${quiet}`);
+    await installBoardWaits(page);
+    await boardPollMutations(page);
+    const beat = await boardPollMutations(page);
+    ok("a quiet ledger beat writes nothing anywhere on the board, its head included", beat.length === 0,
+      JSON.stringify(beat));
+    const moved = await boardPollMutations(page, () => {
+      window.__COLUMNS__.find((column) => column.cards.length > 0).cards[0].said = "한 워커의 말만 바뀐 박자";
+    });
+    ok("a beat that moved one worker's words writes those words and the board's signature, nothing else",
+      moved.length <= 3 && moved.some((one) => one.includes("task-board-message")), JSON.stringify(moved));
 
     /* ---- 폭: 어느 티어도 가로로 흐르지 않는다 --------------------------------- */
     await mkdir("output/playwright/coordinator-desk", { recursive: true });
