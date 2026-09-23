@@ -122,7 +122,7 @@ pub(super) fn probe_path_env() -> Option<(String, String)> {
 
 /// Run the hidden terminal and read the `/usage` screen. Blocking — always
 /// called from its own thread.
-pub(super) fn scan_claude_usage_now(config_root: &Path) -> usage::ProviderUsage {
+pub(super) fn scan_claude_usage_now(config_root: &Path) -> Scanned {
     let whose = active_claude_account_id(config_root);
     let failed = |status: &str, error: String| usage::ProviderUsage {
         provider: "claude".to_string(),
@@ -151,7 +151,10 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> usage::ProviderUsage 
         .find(|(key, _)| key == zerocode_core::account::CONFIG_DIR_VAR)
         .map(|(_, value)| PathBuf::from(value));
     if let Err(error) = accounts::prepare_selected_store(config_root) {
-        return failed("error", error);
+        return Scanned {
+            usage: failed("error", error),
+            road: UsageRoad::Local,
+        };
     }
     let asked = usage_oauth::claude(config_dir.as_deref(), epoch_ms_now());
     // An auth or limit answer from the API IS the user-visible answer. Walking
@@ -160,41 +163,54 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> usage::ProviderUsage 
     if let Err(failure) = &asked
         && failure.skip_cli_fallback
     {
-        return usage::ProviderUsage {
-            provider: "claude".to_string(),
-            session: None,
-            weekly: None,
-            fable_weekly: None,
-            monthly: None,
-            buckets: None,
-            updated_at: epoch_ms_now(),
-            error: Some(failure.message.clone()),
-            status: "error".to_string(),
-            failure_kind: Some(failure.recovery.kind),
-            retry_at_ms: failure.retry_at_ms,
-            plan_type: None,
-            reset_credits: None,
-            account: whose,
+        return Scanned {
+            usage: usage::ProviderUsage {
+                provider: "claude".to_string(),
+                session: None,
+                weekly: None,
+                fable_weekly: None,
+                monthly: None,
+                buckets: None,
+                updated_at: epoch_ms_now(),
+                error: Some(failure.message.clone()),
+                status: "error".to_string(),
+                failure_kind: Some(failure.recovery.kind),
+                retry_at_ms: failure.retry_at_ms,
+                plan_type: None,
+                reset_credits: None,
+                account: whose,
+            },
+            road: UsageRoad::Oauth,
         };
     }
-    if let Ok(read) = asked {
-        return usage::ProviderUsage {
-            provider: "claude".to_string(),
-            session: read.session.map(oauth_usage_window),
-            weekly: read.weekly.map(oauth_usage_window),
-            fable_weekly: read.fable_weekly.map(oauth_usage_window),
-            monthly: None,
-            buckets: None,
-            updated_at: epoch_ms_now(),
-            error: None,
-            status: "ok".to_string(),
-            failure_kind: None,
-            retry_at_ms: None,
-            plan_type: None,
-            reset_credits: None,
-            account: whose,
-        };
-    }
+    let oauth = match asked {
+        Ok(read) => {
+            return Scanned {
+                usage: usage::ProviderUsage {
+                    provider: "claude".to_string(),
+                    session: read.session.map(oauth_usage_window),
+                    weekly: read.weekly.map(oauth_usage_window),
+                    fable_weekly: read.fable_weekly.map(oauth_usage_window),
+                    monthly: None,
+                    buckets: None,
+                    updated_at: epoch_ms_now(),
+                    error: None,
+                    status: "ok".to_string(),
+                    failure_kind: None,
+                    retry_at_ms: None,
+                    plan_type: None,
+                    reset_credits: None,
+                    account: whose,
+                },
+                road: UsageRoad::Oauth,
+            };
+        }
+        Err(failure) => failure.recovery.kind,
+    };
+    // Everything below is the slow road, and the line it leaves says what the
+    // fast one failed of — the only way to tell "no login on file" from "the
+    // network was down" after the fact.
+    let road = UsageRoad::Terminal { oauth: Some(oauth) };
     // Spawned in the home directory, deliberately not the checkout: the scan
     // must not trip a project trust prompt it then has to answer.
     let home = std::env::var_os("HOME").map(PathBuf::from);
@@ -219,10 +235,13 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> usage::ProviderUsage 
     ) {
         Ok(pty) => pty,
         Err(error) => {
-            return failed(
-                "unavailable",
-                format!("claude를 시작하지 못했습니다: {error}"),
-            );
+            return Scanned {
+                usage: failed(
+                    "unavailable",
+                    format!("claude를 시작하지 못했습니다: {error}"),
+                ),
+                road,
+            };
         }
     };
     let started = Instant::now();
@@ -294,30 +313,39 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> usage::ProviderUsage 
             // carries 「다시 로그인」 (`account_relogin`, ui/shell.js). Naming
             // the discarding road here sent people down the one that slice was
             // written to close.
-            return failed(
-                usage::SIGNED_OUT_STATUS,
-                "이 계정은 로그인되어 있지 않습니다 — 설정에서 다시 로그인하세요".to_string(),
-            );
+            return Scanned {
+                usage: failed(
+                    usage::SIGNED_OUT_STATUS,
+                    "이 계정은 로그인되어 있지 않습니다 — 설정에서 다시 로그인하세요".to_string(),
+                ),
+                road,
+            };
         } else {
             "/usage 화면이 렌더되지 않았습니다".to_string()
         };
-        return failed("error", error);
+        return Scanned {
+            usage: failed("error", error),
+            road,
+        };
     }
-    usage::ProviderUsage {
-        provider: "claude".to_string(),
-        session,
-        weekly,
-        fable_weekly,
-        monthly: None,
-        buckets: None,
-        updated_at: epoch_ms_now(),
-        error: None,
-        status: "ok".to_string(),
-        failure_kind: None,
-        retry_at_ms: None,
-        plan_type: None,
-        reset_credits: None,
-        account: whose,
+    Scanned {
+        usage: usage::ProviderUsage {
+            provider: "claude".to_string(),
+            session,
+            weekly,
+            fable_weekly,
+            monthly: None,
+            buckets: None,
+            updated_at: epoch_ms_now(),
+            error: None,
+            status: "ok".to_string(),
+            failure_kind: None,
+            retry_at_ms: None,
+            plan_type: None,
+            reset_credits: None,
+            account: whose,
+        },
+        road,
     }
 }
 
@@ -331,7 +359,7 @@ pub(super) fn scan_claude_usage_now(config_root: &Path) -> usage::ProviderUsage 
 /// against somebody's account is worse than a screen read slowly. The screen is
 /// the same one the person can open themselves, which also makes a wrong figure
 /// something they can check.
-pub(super) fn scan_codex_usage_now(config_root: &Path) -> usage::ProviderUsage {
+pub(super) fn scan_codex_usage_now(config_root: &Path) -> Scanned {
     let whose = active_codex_account_id(config_root);
     let done = |status: &str, error: Option<String>, session, weekly| usage::ProviderUsage {
         provider: "codex".to_string(),
@@ -359,12 +387,15 @@ pub(super) fn scan_codex_usage_now(config_root: &Path) -> usage::ProviderUsage {
         .as_deref()
         .is_some_and(|home| home.join(zerocode_core::codex_account::AUTH_FILE).exists())
     {
-        return done(
-            usage::SIGNED_OUT_STATUS,
-            Some("Codex에 로그인되어 있지 않습니다".to_string()),
-            None,
-            None,
-        );
+        return Scanned {
+            usage: done(
+                usage::SIGNED_OUT_STATUS,
+                Some("Codex에 로그인되어 있지 않습니다".to_string()),
+                None,
+                None,
+            ),
+            road: UsageRoad::Local,
+        };
     }
     // The backend road FIRST, with the login just proven on disk — Codex's
     // own endpoint, one round trip (codex-fetcher.ts:544; Orca keeps the
@@ -377,28 +408,39 @@ pub(super) fn scan_codex_usage_now(config_root: &Path) -> usage::ProviderUsage {
     if let Some(Err(failure)) = &asked
         && failure.skip_cli_fallback
     {
-        return usage::ProviderUsage {
-            failure_kind: Some(failure.recovery.kind),
-            retry_at_ms: failure.retry_at_ms,
-            ..done("error", Some(failure.message.clone()), None, None)
+        return Scanned {
+            usage: usage::ProviderUsage {
+                failure_kind: Some(failure.recovery.kind),
+                retry_at_ms: failure.retry_at_ms,
+                ..done("error", Some(failure.message.clone()), None, None)
+            },
+            road: UsageRoad::Oauth,
         };
     }
-    if let Some(Ok(read)) = asked {
-        // The two facts only this road can know. The terminal road below reads
-        // a screen that prints percentages and nothing else, so a fallback
-        // answer carries no plan and no credits — which is why they are set
-        // HERE and not in `done`.
-        return usage::ProviderUsage {
-            plan_type: read.plan_type,
-            reset_credits: read.reset_credits,
-            ..done(
-                "ok",
-                None,
-                read.session.map(oauth_usage_window),
-                read.weekly.map(oauth_usage_window),
-            )
-        };
-    }
+    let oauth = match asked {
+        Some(Ok(read)) => {
+            // The two facts only this road can know. The terminal road below
+            // reads a screen that prints percentages and nothing else, so a
+            // fallback answer carries no plan and no credits — which is why
+            // they are set HERE and not in `done`.
+            return Scanned {
+                usage: usage::ProviderUsage {
+                    plan_type: read.plan_type,
+                    reset_credits: read.reset_credits,
+                    ..done(
+                        "ok",
+                        None,
+                        read.session.map(oauth_usage_window),
+                        read.weekly.map(oauth_usage_window),
+                    )
+                },
+                road: UsageRoad::Oauth,
+            };
+        }
+        Some(Err(failure)) => Some(failure.recovery.kind),
+        None => None,
+    };
+    let road = UsageRoad::Terminal { oauth };
     let mut env = vec![("TERM".to_string(), "xterm-256color".to_string())];
     env.extend(codex_accounts::launch_env(config_root));
     env.extend(probe_path_env());
@@ -416,12 +458,15 @@ pub(super) fn scan_codex_usage_now(config_root: &Path) -> usage::ProviderUsage {
     ) {
         Ok(pty) => pty,
         Err(error) => {
-            return done(
-                "unavailable",
-                Some(format!("codex를 시작하지 못했습니다: {error}")),
-                None,
-                None,
-            );
+            return Scanned {
+                usage: done(
+                    "unavailable",
+                    Some(format!("codex를 시작하지 못했습니다: {error}")),
+                    None,
+                    None,
+                ),
+                road,
+            };
         }
     };
     let started = Instant::now();
@@ -482,33 +527,42 @@ pub(super) fn scan_codex_usage_now(config_root: &Path) -> usage::ProviderUsage {
     };
     let _ = pty.kill();
     if interrupted {
-        return done(
-            "unavailable",
-            Some("codex가 무언가 묻고 있습니다 — 터미널에서 직접 열어 답해주세요".to_string()),
-            None,
-            None,
-        );
+        return Scanned {
+            usage: done(
+                "unavailable",
+                Some("codex가 무언가 묻고 있습니다 — 터미널에서 직접 열어 답해주세요".to_string()),
+                None,
+                None,
+            ),
+            road,
+        };
     }
     let parsed = usage::parse_codex_status(&screen);
     let session = usage_window_from(parsed.session, usage::SESSION_WINDOW_MINUTES);
     let weekly = usage_window_from(parsed.weekly, usage::WEEKLY_WINDOW_MINUTES);
     if session.is_none() && weekly.is_none() {
-        return done(
-            if usage::shows_codex_signed_out(&screen) {
-                usage::SIGNED_OUT_STATUS
-            } else {
-                "error"
-            },
-            Some(if usage::shows_codex_signed_out(&screen) {
-                "Codex에 로그인되어 있지 않습니다".to_string()
-            } else {
-                "/status 화면이 렌더되지 않았습니다".to_string()
-            }),
-            None,
-            None,
-        );
+        return Scanned {
+            usage: done(
+                if usage::shows_codex_signed_out(&screen) {
+                    usage::SIGNED_OUT_STATUS
+                } else {
+                    "error"
+                },
+                Some(if usage::shows_codex_signed_out(&screen) {
+                    "Codex에 로그인되어 있지 않습니다".to_string()
+                } else {
+                    "/status 화면이 렌더되지 않았습니다".to_string()
+                }),
+                None,
+                None,
+            ),
+            road,
+        };
     }
-    done("ok", None, session, weekly)
+    Scanned {
+        usage: done("ok", None, session, weekly),
+        road,
+    }
 }
 
 /// Which Codex account a scan would run as, or `None` for the machine's own.
@@ -999,10 +1053,133 @@ pub(super) fn land_usage_scan(
 /// saying a scan is already out. They are deliberately NOT shared between
 /// providers — one flag would let the faster scan clear the slower one's, and
 /// one file would show one CLI's figure under another's name.
+///
+/// Plus the two a log line needs: whose gauge this is, for the line an ask
+/// leaves when no snapshot is held yet to name it, and the data root the
+/// window's log lives in.
 pub(super) struct UsageGauge {
+    pub(super) provider: &'static str,
     pub(super) cache: &'static Mutex<Option<usage::ProviderUsage>>,
     pub(super) file: PathBuf,
     pub(super) scanning: &'static std::sync::atomic::AtomicBool,
+    pub(super) log_root: PathBuf,
+}
+
+/// Which road one usage read took to its answer.
+///
+/// Said once per read in the window's log, because the roads cost different
+/// things — one HTTP round trip against a hidden terminal that waits up to
+/// [`usage::SCAN_TIMEOUT`] — and a slow gauge with no line naming its road
+/// could not be measured at all (t-6583: 「하단에 사용량 표시가 빠르게 안
+/// 가져오는 것 같아」, and `window-errors.log` held nothing to read).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum UsageRoad {
+    /// The provider's OAuth usage endpoint answered — with its figures, or
+    /// with a refusal that is itself the answer (`skip_cli_fallback`).
+    Oauth,
+    /// The hidden terminal, walked because the OAuth road could not answer;
+    /// `oauth` is what that road failed of, when it was asked at all.
+    Terminal {
+        oauth: Option<zerocode_core::usage_limit::FailureKind>,
+    },
+    /// A provider's own web API — the gauges with no terminal behind them.
+    Api,
+    /// Answered without asking anybody: no login on disk, or the account's
+    /// store refused before a request could go.
+    Local,
+    /// Nothing went out: a person asked while a read already was, and the
+    /// answer is that read's, whenever it lands.
+    Cache,
+}
+
+impl UsageRoad {
+    /// The road's word on the log line.
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Oauth => "oauth",
+            Self::Terminal { .. } => "terminal",
+            Self::Api => "api",
+            Self::Local => "local",
+            Self::Cache => "cache",
+        }
+    }
+}
+
+/// What one scan brought back: the reading, and the road it came by.
+///
+/// The road rides BESIDE the reading rather than inside it. A snapshot is the
+/// figures and why they are what they are, written to disk and shown after a
+/// restart; how this process happened to fetch it is a fact about one read,
+/// and it goes as far as that read's log line and no further.
+pub(super) struct Scanned {
+    pub(super) usage: usage::ProviderUsage,
+    pub(super) road: UsageRoad,
+}
+
+impl Scanned {
+    /// A gauge whose only road is its provider's web API.
+    pub(super) fn api(usage: usage::ProviderUsage) -> Self {
+        Self {
+            usage,
+            road: UsageRoad::Api,
+        }
+    }
+}
+
+/// How much of a failure's sentence a log line keeps. The sentences are this
+/// window's own and short; the bound is for the one that is not — a transport
+/// error that quotes a URL and its whole cause chain.
+pub(super) const USAGE_LOG_REASON_CHARS: usize = 160;
+
+/// A failure kind in its one spelling: the wire's, which the snapshot file and
+/// Orca already share — not a second list of words that could drift from it.
+pub(super) fn failure_word(kind: zerocode_core::usage_limit::FailureKind) -> String {
+    serde_json::to_value(kind)
+        .ok()
+        .and_then(|word| word.as_str().map(str::to_string))
+        .unwrap_or_else(|| format!("{kind:?}"))
+}
+
+/// One usage read, as the window's log says it:
+/// `usage <provider> road=<road> [oauth=<kind>] ms=<ms> status=<status>
+/// [kind=<kind>] [forced] [reason=<sentence>]`.
+///
+/// Closed words, the elapsed time and this window's own sentence for why —
+/// never a token and never whose login it was. The line exists to tell a slow
+/// road from a fast one, and neither of those helps with that.
+pub(super) fn usage_read_line(
+    provider: &str,
+    road: UsageRoad,
+    elapsed_ms: u128,
+    read: Option<&usage::ProviderUsage>,
+    forced: bool,
+) -> String {
+    use std::fmt::Write as _;
+    let mut line = format!("usage {provider} road={}", road.word());
+    if let UsageRoad::Terminal { oauth: Some(kind) } = road {
+        let _ = write!(line, " oauth={}", failure_word(kind));
+    }
+    let _ = write!(
+        line,
+        " ms={elapsed_ms} status={}",
+        read.map_or("none", |held| held.status.as_str())
+    );
+    if let Some(kind) = read.and_then(|held| held.failure_kind) {
+        let _ = write!(line, " kind={}", failure_word(kind));
+    }
+    if forced {
+        line.push_str(" forced");
+    }
+    // Last, because it is the one field that may hold spaces.
+    if let Some(reason) = read.and_then(|held| held.error.as_deref()) {
+        let said: String = reason
+            .replace(['\r', '\n'], " ")
+            .chars()
+            .take(USAGE_LOG_REASON_CHARS)
+            .collect();
+        let _ = write!(line, " reason={said}");
+    }
+    line
 }
 
 /// The never-block ask, for every provider that has one.
@@ -1026,14 +1203,18 @@ pub(super) struct UsageGauge {
 ///
 /// `scan` is a closure and not a function pointer for a reason that is not
 /// taste: it runs on a spawned thread, so it can only see what it owns. Taking
-/// it as `FnOnce() -> ProviderUsage + Send + 'static` makes the compiler check
-/// that each caller extracted its roots and settings BEFORE the spawn, which
-/// is exactly the discipline the four copies were keeping by hand.
+/// it as `FnOnce() -> Scanned + Send + 'static` makes the compiler check that
+/// each caller extracted its roots and settings BEFORE the spawn, which is
+/// exactly the discipline the four copies were keeping by hand.
+///
+/// And every read that goes out leaves one line in the window's log
+/// ([`usage_read_line`]) — which road answered and how long it took — HERE,
+/// once, rather than in six scanners that would each have to remember to.
 pub(super) fn usage_report(
     gauge: UsageGauge,
     keep: impl Fn(&usage::ProviderUsage) -> bool,
     force: bool,
-    scan: impl FnOnce() -> usage::ProviderUsage + Send + 'static,
+    scan: impl FnOnce() -> Scanned + Send + 'static,
 ) -> UsageReport {
     use std::sync::atomic::Ordering;
     let held = gauge
@@ -1043,6 +1224,15 @@ pub(super) fn usage_report(
         .clone()
         .filter(|snapshot| keep(snapshot));
     if gauge.scanning.load(Ordering::SeqCst) {
+        // A person pressed refresh while a read was already out: their wait is
+        // the rest of that read's, and the line says so. An unforced ask here
+        // is a poll, and a poll is not news.
+        if force {
+            note_window_event(
+                &gauge.log_root,
+                &usage_read_line(gauge.provider, UsageRoad::Cache, 0, held.as_ref(), true),
+            );
+        }
         return UsageReport {
             usage: held,
             fetching: true,
@@ -1060,16 +1250,29 @@ pub(super) fn usage_report(
         };
     }
     let UsageGauge {
+        provider,
         cache,
         file,
         scanning,
+        log_root,
     } = gauge;
     std::thread::spawn(move || {
+        let started = Instant::now();
         // Held for the whole scan: a panic in the parse must not leave the
         // segment saying "reading…" for the rest of the session.
         let _flag = ScanFlag(scanning);
         let result = scan();
-        land_usage_scan(cache, &file, result);
+        // Written from the read's OWN outcome, before it lands: landing may
+        // lend it the previous figures, and the line is about this read.
+        let line = usage_read_line(
+            provider,
+            result.road,
+            started.elapsed().as_millis(),
+            Some(&result.usage),
+            force,
+        );
+        land_usage_scan(cache, &file, result.usage);
+        note_window_event(&log_root, &line);
     });
     UsageReport {
         usage: held,
@@ -1382,13 +1585,15 @@ pub(super) fn antigravity_usage_report(state: &State<'_, AppState>, force: bool)
     let local_data_root = state.local_data_root().to_path_buf();
     usage_report(
         UsageGauge {
+            provider: "antigravity",
             cache: antigravity_usage_cache(&local_data_root),
             file: antigravity_usage_file(&local_data_root),
             scanning: &ANTIGRAVITY_USAGE_SCANNING,
+            log_root: local_data_root,
         },
         |_| true,
         force,
-        move || usage_antigravity::scan(epoch_ms_now()),
+        move || Scanned::api(usage_antigravity::scan(epoch_ms_now())),
     )
 }
 
