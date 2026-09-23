@@ -136,6 +136,8 @@ const CODE_ASSIST_API_VERSION_ENV: &str = "CODE_ASSIST_API_VERSION";
 // (prod, autopush) stays reachable through `CODE_ASSIST_ENDPOINT`.
 const DEFAULT_CODE_ASSIST_ENDPOINT: &str = "https://daily-cloudcode-pa.googleapis.com";
 const DEFAULT_CODE_ASSIST_API_VERSION: &str = "v1internal";
+/// The Code Assist method that answers the account's serving registry.
+pub const FETCH_AVAILABLE_MODELS: &str = "fetchAvailableModels";
 const TOKEN_EXPIRY_SKEW_SECS: u64 = 60;
 const LOGIN_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_INITIAL_BACKOFF: Duration = Duration::from_millis(200);
@@ -695,7 +697,7 @@ impl GeminiCodeAssistClient {
     /// new binary — the registry, not a snapshot of it, is the serving list.
     pub async fn fetch_available_models(&self) -> Result<Value, ApiError> {
         self.post_json_with_timeout::<Value>(
-            "fetchAvailableModels",
+            FETCH_AVAILABLE_MODELS,
             &json!({}),
             Some(LOGIN_HTTP_TIMEOUT),
         )
@@ -2688,7 +2690,10 @@ const fn is_retryable_status(status: reqwest::StatusCode) -> bool {
     matches!(code, 408 | 409 | 429 | 499) || code >= 500
 }
 
-pub(crate) fn method_url(method: &str) -> String {
+/// `<endpoint>/<version>:<method>` — where one Code Assist method is asked,
+/// the endpoint and version as this process's environment names them.
+#[must_use]
+pub fn method_url(method: &str) -> String {
     format!("{}:{method}", base_url())
 }
 

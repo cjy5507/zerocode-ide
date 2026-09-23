@@ -1,3 +1,4 @@
+use crate::credential::CredentialMiss;
 use crate::error::ApiError;
 use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 use crate::providers::anthropic::{self, AnthropicClient, AnthropicRetryNotice, AuthSource};
@@ -624,19 +625,57 @@ pub fn resolve_openai_oauth_fresh() -> Option<OpenAiOAuthTokens> {
     load_fresh_openai_oauth()
 }
 
+/// [`resolve_openai_oauth_fresh`] for a caller that has to say why there is
+/// no usable login: [`CredentialMiss::Absent`] when no ChatGPT login exists,
+/// [`CredentialMiss::Unusable`] when one exists and could not be read, or
+/// expired and would not refresh. The request path keeps its stale token (a
+/// clear 401 beats a quiet api-key downgrade); a model list has nothing to
+/// gain from a request it knows will be refused.
+pub fn resolve_openai_oauth_explained() -> Result<OpenAiOAuthTokens, CredentialMiss> {
+    match load_openai_login()? {
+        OpenAiLogin::Fresh(tokens) => Ok(tokens),
+        OpenAiLogin::Stale(_, why) => Err(CredentialMiss::Unusable(why)),
+    }
+}
+
+/// The ChatGPT login as found: usable now, or expired and not refreshable —
+/// with its tokens, which the request path still sends, and why.
+enum OpenAiLogin {
+    Fresh(OpenAiOAuthTokens),
+    Stale(OpenAiOAuthTokens, String),
+}
+
 /// Load the saved ChatGPT OAuth tokens, refreshing first when expired. Returns
 /// `None` when no ChatGPT login exists so the caller falls back to the api-key
 /// path. A refresh failure yields the existing (expired) tokens so the call can
 /// surface a clear 401 rather than silently downgrading to the api-key path.
 fn load_fresh_openai_oauth() -> Option<OpenAiOAuthTokens> {
-    let (tokens, source) = crate::oauth_store::load_openai_oauth_with_source()
-        .ok()
-        .flatten()?;
+    match load_openai_login().ok()? {
+        OpenAiLogin::Fresh(tokens) | OpenAiLogin::Stale(tokens, _) => Some(tokens),
+    }
+}
+
+fn load_openai_login() -> Result<OpenAiLogin, CredentialMiss> {
+    let (tokens, source) = match crate::oauth_store::load_openai_oauth_with_source() {
+        Ok(Some(found)) => found,
+        Ok(None) => return Err(CredentialMiss::Absent),
+        Err(error) => {
+            return Err(CredentialMiss::Unusable(format!(
+                "the ChatGPT login could not be read ({error})"
+            )));
+        }
+    };
     if !openai_oauth_expired(&tokens) {
-        return Some(tokens);
+        return Ok(OpenAiLogin::Fresh(tokens));
     }
     let Some(refresh_token) = tokens.refresh_token.clone() else {
-        return Some(tokens);
+        return Ok(OpenAiLogin::Stale(
+            tokens,
+            format!(
+                "the ChatGPT login expired and holds no refresh token — {}",
+                openai_reconnect_hint(source)
+            ),
+        ));
     };
     // ChatGPT rotates refresh tokens exactly as Anthropic does, so a branch the
     // endpoint has rejected stays rejected. Without this gate an expired ChatGPT
@@ -644,7 +683,13 @@ fn load_fresh_openai_oauth() -> Option<OpenAiOAuthTokens> {
     // since the failure arm here deliberately serves the stale token so the call
     // surfaces one clear 401 instead of a confusing api-key downgrade.
     if crate::providers::refresh_gate::refresh_blocked(&refresh_token).is_some() {
-        return Some(tokens);
+        return Ok(OpenAiLogin::Stale(
+            tokens,
+            format!(
+                "the ChatGPT login expired and its refresh was refused — {}",
+                openai_reconnect_hint(source)
+            ),
+        ));
     }
     match run_blocking(crate::providers::openai_oauth::refresh_openai_tokens(
         &refresh_token,
@@ -664,7 +709,7 @@ fn load_fresh_openai_oauth() -> Option<OpenAiOAuthTokens> {
                      run `zo login openai` if the next request fails.\x1b[0m"
                 );
             }
-            Some(refreshed)
+            Ok(OpenAiLogin::Fresh(refreshed))
         }
         Err(error) => {
             if crate::providers::refresh_gate::record_failure(&refresh_token, &error) {
@@ -674,7 +719,13 @@ fn load_fresh_openai_oauth() -> Option<OpenAiOAuthTokens> {
                     openai_reconnect_hint(source)
                 );
             }
-            Some(tokens)
+            Ok(OpenAiLogin::Stale(
+                tokens,
+                format!(
+                    "the ChatGPT login expired and could not be refreshed — {}",
+                    openai_reconnect_hint(source)
+                ),
+            ))
         }
     }
 }
@@ -729,6 +780,42 @@ mod tests {
             !borrowed.contains("ZeroCode 창"),
             "the window's own account is already the one that failed: {borrowed}"
         );
+    }
+
+    /// C1 (t-6248): a model list asks the ChatGPT login whether it can be
+    /// used and hears why not. No login is `Absent`; a login that expired
+    /// with nothing to refresh it is `Unusable` and names the way back — while
+    /// the request path still gets the stale token, whose 401 is clearer than
+    /// a quiet fall to an API key.
+    #[test]
+    fn a_chatgpt_login_that_cannot_refresh_is_unusable_and_none_is_absent() {
+        let _lock = crate::test_env_lock();
+        let isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _codex_home = EnvVarGuard::set("CODEX_HOME", None);
+        crate::managed_account::clear();
+        assert_eq!(
+            super::resolve_openai_oauth_explained().err(),
+            Some(super::CredentialMiss::Absent)
+        );
+        crate::oauth_store::save_openai_oauth(&core_types::OpenAiOAuthTokens {
+            access_token: "stale-openai-access".to_string(),
+            refresh_token: None,
+            expires_at: Some(1),
+            account_id: Some("acct".to_string()),
+            scopes: Vec::new(),
+        })
+        .unwrap();
+        let Some(super::CredentialMiss::Unusable(why)) = super::resolve_openai_oauth_explained().err() else {
+            panic!("an expired login is there, so it is not absent");
+        };
+        assert!(why.contains("expired") && why.contains("zo login openai"), "{why}");
+        assert!(!why.contains("stale-openai-access"), "no token in the words: {why}");
+        assert_eq!(
+            super::resolve_openai_oauth_fresh().map(|tokens| tokens.access_token).as_deref(),
+            Some("stale-openai-access"),
+            "the request path keeps its stale token"
+        );
+        drop(isolation);
     }
 
     use crate::providers::{

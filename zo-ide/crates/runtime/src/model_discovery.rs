@@ -100,13 +100,94 @@ const LEGACY_OPENAI_SOURCE: &str = "codex-cache";
 pub const ANTHROPIC_SOURCE: &str = "anthropic-api";
 pub const GOOGLE_API_SOURCE: &str = "google-api";
 pub const ANTIGRAVITY_SOURCE: &str = "antigravity-registry";
-/// Every source, in report order: `(provider, source)`.
-pub const SOURCES: [(&str, &str); 4] = [
-    ("openai", OPENAI_SOURCE),
-    ("anthropic", ANTHROPIC_SOURCE),
-    ("google", GOOGLE_API_SOURCE),
-    ("google", ANTIGRAVITY_SOURCE),
+
+/// One source of model lists: whose rows it answers, what its credential is
+/// called, where it asks, and what it says when it cannot ask. Every source
+/// is one row of [`SOURCES`] and nowhere else — the report order, the
+/// connection rule, the fetchers and the words a report carries all read the
+/// row, so a source cannot say "skipped" in one place and fail in another.
+#[derive(Debug)]
+pub struct Source {
+    /// The catalog provider key of the rows it answers.
+    pub provider: &'static str,
+    /// The report's source key.
+    pub key: &'static str,
+    /// The credential as a failure names it: `<credential> credential present
+    /// but not usable: <why>`.
+    pub credential: &'static str,
+    /// What a skip says when nothing is configured: `skipped: <absent>`.
+    pub absent: &'static str,
+    /// Where the source lists its models — the same function its fetcher
+    /// asks, so the table and the request cannot name two endpoints.
+    pub models_url: fn() -> String,
+    /// Ask the source, blocking.
+    pub ask: fn() -> SourceAnswer,
+}
+
+impl Source {
+    /// The report's words for a credential this source could not use:
+    /// nothing configured is a skip, something configured that did not work
+    /// is a failure — whose rows [`carry_forward`] keeps and whose report
+    /// the next connection asks again (t-6248).
+    #[must_use]
+    pub fn miss(&self, miss: api::CredentialMiss) -> (String, String) {
+        let detail = match miss {
+            api::CredentialMiss::Absent => format!("skipped: {}", self.absent),
+            api::CredentialMiss::Unusable(why) => {
+                format!("{} credential present but not usable: {why}", self.credential)
+            }
+        };
+        (self.key.to_string(), detail)
+    }
+}
+
+/// Every source, in report order.
+pub const SOURCES: [Source; 4] = [
+    Source {
+        provider: "openai",
+        key: OPENAI_SOURCE,
+        credential: "ChatGPT",
+        absent: "no ChatGPT login",
+        models_url: chatgpt_models_url,
+        ask: openai_models,
+    },
+    Source {
+        provider: "anthropic",
+        key: ANTHROPIC_SOURCE,
+        credential: "claude",
+        absent: "no Anthropic credential",
+        models_url: anthropic_models_url,
+        ask: anthropic_models,
+    },
+    Source {
+        provider: "google",
+        key: GOOGLE_API_SOURCE,
+        credential: "Google API key",
+        absent: "no Google API key (OAuth registries serve tiered ids)",
+        models_url: google_models_url,
+        ask: google_models,
+    },
+    Source {
+        provider: "google",
+        key: ANTIGRAVITY_SOURCE,
+        credential: "Google (Antigravity)",
+        absent: "no Google (Antigravity) login",
+        models_url: antigravity_models_url,
+        ask: antigravity_models,
+    },
 ];
+
+/// The row of [`SOURCES`] keyed `key`.
+#[must_use]
+pub fn source(key: &str) -> Option<&'static Source> {
+    SOURCES.iter().find(|source| source.key == key)
+}
+
+/// The row a fetcher belongs to. Every fetcher is named by its own row, so a
+/// missing one is a table that lost a row, not a runtime condition.
+fn row(key: &str) -> &'static Source {
+    source(key).unwrap_or_else(|| unreachable!("{key} is a row of SOURCES"))
+}
 /// The report's word for rows that came from the provider just now.
 pub const ORIGIN_LIVE: &str = "live";
 /// The report's word for rows a failed refresh kept from the previous one.
@@ -431,7 +512,7 @@ pub type SourceAnswer = Result<Answered, (String, String)>;
 #[must_use]
 pub fn discover() -> DiscoveredCatalog {
     let previous = load_cached();
-    let every: Vec<&'static str> = SOURCES.iter().map(|(_, source)| *source).collect();
+    let every: Vec<&'static str> = SOURCES.iter().map(|source| source.key).collect();
     refresh_with(previous.as_ref(), &every, now_secs(), &selected_models(), ask)
 }
 
@@ -452,7 +533,7 @@ pub fn discover_due(now_secs: u64, ttl_secs: u64) -> DiscoveredCatalog {
 pub fn due_sources(previous: Option<&DiscoveredCatalog>, now_secs: u64, ttl_secs: u64) -> Vec<&'static str> {
     SOURCES
         .iter()
-        .map(|(_, source)| *source)
+        .map(|source| source.key)
         .filter(|source| {
             previous
                 .and_then(|catalog| catalog.reports.iter().find(|report| report.source == *source))
@@ -476,7 +557,8 @@ pub fn refresh_with(
         fetched_at: now_secs,
         ..Default::default()
     };
-    for (provider, source) in SOURCES {
+    for Source { provider, key: source, .. } in &SOURCES {
+        let (provider, source) = (*provider, *source);
         if !due.contains(&source) {
             let carried = previous.and_then(|catalog| {
                 catalog
@@ -532,14 +614,11 @@ pub fn refresh_with(
     keep_selected(catalog, previous, selected, now_secs)
 }
 
-/// The real fetchers, by source key.
+/// The real fetchers, by source key — each row's own.
 fn ask(source: &'static str) -> SourceAnswer {
-    match source {
-        OPENAI_SOURCE => openai_models(),
-        ANTHROPIC_SOURCE => anthropic_models(),
-        GOOGLE_API_SOURCE => google_models(),
-        ANTIGRAVITY_SOURCE => antigravity_models(),
-        other => Err((other.to_string(), "skipped: unknown source".to_string())),
+    match self::source(source) {
+        Some(row) => (row.ask)(),
+        None => Err((source.to_string(), "skipped: unknown source".to_string())),
     }
 }
 
@@ -884,20 +963,23 @@ pub struct LiveModels {
     pub not_modified: bool,
 }
 
+/// Where the ChatGPT backend lists a Codex login's models.
+fn chatgpt_models_url() -> String {
+    CHATGPT_MODELS_URL.to_string()
+}
+
 /// The live OpenAI source: the ChatGPT backend's model list for the selected
 /// account, exactly as Codex asks for it, written back into that account's
 /// `models_cache.json` so Codex, the window's sync and zo read one file.
 fn chatgpt_backend_models() -> SourceAnswer {
     let source = OPENAI_SOURCE.to_string();
-    let Some(tokens) = api::resolve_openai_oauth_fresh() else {
-        return Err((source, "skipped: no ChatGPT login".to_string()));
-    };
+    let tokens = api::resolve_openai_oauth_explained().map_err(|miss| row(OPENAI_SOURCE).miss(miss))?;
     let Some(home) = codex_home() else {
         return Err((source, "skipped: no Codex home".to_string()));
     };
     let path = home.join(CODEX_MODELS_CACHE_FILE);
     let cache = read_codex_cache(&path).ok();
-    chatgpt_backend_models_at(CHATGPT_MODELS_URL, &tokens, &path, cache.as_ref(), now_secs())
+    chatgpt_backend_models_at(&chatgpt_models_url(), &tokens, &path, cache.as_ref(), now_secs())
 }
 
 /// `chatgpt_backend_models` against an explicit endpoint and cache file.
@@ -1187,14 +1269,20 @@ pub fn codex_cache_rows(document: &Value, source: &str) -> Vec<DiscoveredModel> 
 /// label adds the maker once, so it comes off here.
 const ANTHROPIC_DISPLAY_PREFIX: &str = "Claude ";
 
-fn anthropic_models() -> SourceAnswer {
-    let source = ANTHROPIC_SOURCE.to_string();
-    let Some(auth) = api::resolve_claude_auth_fresh() else {
-        return Err((source, "skipped: no Anthropic credential".to_string()));
-    };
+/// Where the Anthropic API lists models — under `ANTHROPIC_BASE_URL` when a
+/// gateway is configured, the public endpoint otherwise.
+fn anthropic_models_url() -> String {
     let base = non_empty_env("ANTHROPIC_BASE_URL")
         .unwrap_or_else(|| ANTHROPIC_DEFAULT_BASE_URL.to_string());
-    let url = format!("{}/v1/models?limit=100", base.trim_end_matches('/'));
+    format!("{}/v1/models?limit=100", base.trim_end_matches('/'))
+}
+
+fn anthropic_models() -> SourceAnswer {
+    let source = ANTHROPIC_SOURCE.to_string();
+    let auth = api::resolve_claude_auth_fresh_explained()
+        .map_err(|miss| row(ANTHROPIC_SOURCE).miss(miss))?
+        .auth;
+    let url = anthropic_models_url();
     let bearer = auth.bearer_token().is_some();
     let body = api::sync_bridge::run_blocking(async move {
         let client = reqwest::Client::builder()
@@ -1295,30 +1383,39 @@ fn date_ordinal(stamp: &str) -> u64 {
     }
 }
 
-fn google_api_key() -> Option<String> {
-    non_empty_env("GOOGLE_API_KEY")
-        .or_else(|| non_empty_env("GEMINI_API_KEY"))
-        .or_else(|| {
-            api::oauth_store::load_openai_compat_api_key("GOOGLE_API_KEY")
-                .ok()
-                .flatten()
-                .map(|key| key.trim().to_string())
-                .filter(|key| !key.is_empty())
-        })
+/// The Google API key: the environment's, else the one zo's own store keeps.
+/// A stored key that cannot be read is there all the same — a failure, not
+/// a skip.
+fn google_api_key() -> Result<String, api::CredentialMiss> {
+    if let Some(key) = non_empty_env("GOOGLE_API_KEY").or_else(|| non_empty_env("GEMINI_API_KEY")) {
+        return Ok(key);
+    }
+    match api::oauth_store::load_openai_compat_api_key("GOOGLE_API_KEY") {
+        Ok(stored) => stored
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .ok_or(api::CredentialMiss::Absent),
+        Err(error) => Err(api::CredentialMiss::Unusable(format!(
+            "the saved Google API key could not be read ({error})"
+        ))),
+    }
+}
+
+fn google_models_url() -> String {
+    GOOGLE_MODELS_URL.to_string()
 }
 
 fn google_models() -> SourceAnswer {
     let source = GOOGLE_API_SOURCE.to_string();
-    let Some(key) = google_api_key() else {
-        return Err((source, "skipped: no Google API key (OAuth registries serve tiered ids)".to_string()));
-    };
+    let key = google_api_key().map_err(|miss| row(GOOGLE_API_SOURCE).miss(miss))?;
+    let url = google_models_url();
     let body = api::sync_bridge::run_blocking(async move {
         let client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
             .map_err(|error| error.to_string())?;
         let response = client
-            .get(GOOGLE_MODELS_URL)
+            .get(&url)
             .header("x-goog-api-key", key)
             .header("accept", "application/json")
             .send()
@@ -1408,13 +1505,21 @@ pub fn google_rows(document: &Value, source: &str) -> Vec<DiscoveredModel> {
     rows
 }
 
+/// Where the Antigravity backend answers the account's serving registry.
+fn antigravity_models_url() -> String {
+    api::google_code_assist_method_url(api::GOOGLE_CODE_ASSIST_FETCH_AVAILABLE_MODELS)
+}
+
 fn antigravity_models() -> SourceAnswer {
     let source = ANTIGRAVITY_SOURCE.to_string();
+    let row = row(ANTIGRAVITY_SOURCE);
     if !api::google_code_assist_oauth_present() {
-        return Err((source, "skipped: no Google (Antigravity) login".to_string()));
+        return Err(row.miss(api::CredentialMiss::Absent));
     }
     let Some(tokens) = api::google_code_assist_fresh_oauth() else {
-        return Err((source, "skipped: the Google login could not be read".to_string()));
+        return Err(row.miss(api::CredentialMiss::Unusable(
+            "the saved Google login could not be read".to_string(),
+        )));
     };
     let document = api::sync_bridge::run_blocking(async move {
         api::GeminiCodeAssistClient::new(tokens.access_token)
@@ -2661,7 +2766,7 @@ mod tests {
         // A catalog younger than the TTL on every source asks nothing.
         let young = super::DiscoveredCatalog {
             fetched_at: now - 60,
-            reports: super::SOURCES.iter().map(|(_, source)| report(source, true, now - 60)).collect(),
+            reports: super::SOURCES.iter().map(|source| report(source.key, true, now - 60)).collect(),
             models: Vec::new(),
         };
         assert!(super::due_sources(Some(&young), now, ttl).is_empty());
@@ -2828,6 +2933,139 @@ mod tests {
             None,
         );
         assert!(alone.models.is_empty());
+    }
+
+    /// Sets every variable a credential lookup reads for the length of one
+    /// test, under the process env lock, and puts each back on drop — a
+    /// failing assertion must not hand the next test a redirected `HOME`.
+    struct CredentialScope {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl CredentialScope {
+        fn new(values: &[(&'static str, Option<&std::path::Path>)]) -> Self {
+            let lock = crate::test_env_lock();
+            let previous = values
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect();
+            for (key, value) in values {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            api::managed_account::clear();
+            Self { _lock: lock, previous }
+        }
+    }
+
+    impl Drop for CredentialScope {
+        fn drop(&mut self) {
+            for (key, value) in &self.previous {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            api::managed_account::clear();
+        }
+    }
+
+    /// A store with nothing in it, the keychain switched off, no key in the
+    /// environment, and the Anthropic endpoint pointed at a closed port — a
+    /// resolution that got past the credential would fail loudly, not dial out.
+    fn claude_scope(store: &std::path::Path, managed: Option<&std::path::Path>) -> CredentialScope {
+        CredentialScope::new(&[
+            ("HOME", Some(store)),
+            ("ZO_HOME", Some(store)),
+            ("ZO_CONFIG_HOME", Some(store)),
+            ("CLAUDE_CONFIG_DIR", managed),
+            ("ZO_DISABLE_KEYCHAIN", Some(std::path::Path::new("1"))),
+            ("ANTHROPIC_API_KEY", None),
+            ("ANTHROPIC_AUTH_TOKEN", None),
+            ("ANTHROPIC_BASE_URL", Some(std::path::Path::new("http://127.0.0.1:9"))),
+        ])
+    }
+
+    /// C1 (t-6248): a Claude login that is there but cannot be used — here
+    /// the window's managed credentials file, its session expired and no
+    /// refresh token left to renew it — is a FAILURE, not a skip. A failure
+    /// keeps the rows the source answered last time (`carry_forward`) and is
+    /// asked again at the next connection; only a machine with no Claude
+    /// credential anywhere says "skipped". (2026-09-23: a zo whose Claude Code
+    /// refresh token had been superseded wrote `skipped: no Anthropic
+    /// credential` into the shared cache, and every zo on the machine lost
+    /// Opus 5.5 for the hour.)
+    #[test]
+    fn a_claude_login_that_cannot_be_used_fails_and_only_no_login_at_all_skips() {
+        let store = scratch("c1-store");
+        let managed = scratch("c1-managed");
+        std::fs::write(
+            managed.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"expired-access-value","expiresAt":1000,"scopes":["user:inference"]}}"#,
+        )
+        .unwrap();
+        let now = 1_790_000_000;
+        let previous = DiscoveredCatalog {
+            fetched_at: now - 7_200,
+            reports: vec![super::SourceReport {
+                provider: "anthropic".to_string(),
+                source: super::ANTHROPIC_SOURCE.to_string(),
+                ok: true,
+                detail: "1 model(s)".to_string(),
+                count: 1,
+                fetched_at: now - 7_200,
+                origin: super::ORIGIN_LIVE.to_string(),
+            }],
+            models: vec![DiscoveredModel {
+                provider: "anthropic".to_string(),
+                id: "claude-opus-5-5".to_string(),
+                display_name: "Opus 5.5".to_string(),
+                source: super::ANTHROPIC_SOURCE.to_string(),
+                ..Default::default()
+            }],
+        };
+
+        let unusable = {
+            let _scope = claude_scope(&store, Some(&managed));
+            super::anthropic_models().expect_err("a login that cannot be used lists nothing")
+        };
+        assert_eq!(unusable.0, super::ANTHROPIC_SOURCE);
+        assert!(
+            unusable.1.starts_with("claude credential present but not usable: "),
+            "a configured login that fails says so: {}",
+            unusable.1
+        );
+        assert!(!unusable.1.contains("expired-access-value"), "the token never reaches a report line");
+
+        let refreshed = super::refresh_with(Some(&previous), &[super::ANTHROPIC_SOURCE], now, &[], |source| {
+            match source {
+                super::ANTHROPIC_SOURCE => Err(unusable.clone()),
+                other => Err((other.to_string(), "not asked in this test".to_string())),
+            }
+        });
+        let report = refreshed
+            .reports
+            .iter()
+            .find(|report| report.source == super::ANTHROPIC_SOURCE)
+            .expect("the anthropic report");
+        assert!(!report.ok && !report.skipped(), "{}", report.detail);
+        assert_eq!(report.origin, super::ORIGIN_PREVIOUS, "last time's rows answer for it");
+        assert!(
+            refreshed.models.iter().any(|model| model.id == "claude-opus-5-5"),
+            "Opus 5.5 stays in the catalog while the login is being fixed"
+        );
+        assert!(report.due(now + 1, super::LIVE_TTL_SECS), "and the next connection asks again");
+
+        let absent = {
+            let _scope = claude_scope(&store, None);
+            super::anthropic_models().expect_err("no login lists nothing")
+        };
+        assert_eq!(absent.1, "skipped: no Anthropic credential", "nothing configured is a skip");
+        let _ = std::fs::remove_dir_all(store);
+        let _ = std::fs::remove_dir_all(managed);
     }
 
     #[test]

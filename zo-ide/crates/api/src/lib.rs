@@ -1,4 +1,5 @@
 mod client;
+mod credential;
 mod error;
 pub mod managed_account;
 mod model_price;
@@ -17,10 +18,11 @@ mod types;
 
 pub use client::{
     AuthRoute, MessageStream, OAuthTokenSet, ProviderClient, oauth_token_is_expired, read_base_url,
-    read_xai_base_url, resolve_openai_oauth_fresh, resolve_saved_oauth_token,
-    resolve_startup_auth_source,
+    read_xai_base_url, resolve_openai_oauth_explained, resolve_openai_oauth_fresh,
+    resolve_saved_oauth_token, resolve_startup_auth_source,
 };
 pub use core_types::{RateLimitSnapshot, RateLimitWindow, RateLimitWindowKind};
+pub use credential::CredentialMiss;
 pub use managed_account::{ManagedAccountUpdate, ManagedProvider};
 pub use model_price::{CivilDate, ModelPrice, SystemOneRate, model_price, systemone_rate};
 pub use error::{ApiError, CapacityScope, ProviderErrorClass, context_overflow_ceiling_tokens};
@@ -41,24 +43,27 @@ pub use prompt_cache::{
 pub use providers::anthropic::keychain::{
     KeychainSession, ManagedCredentialsStamp, claude_code_oauth_config,
     invalidate_claude_code_keychain_cache, managed_claude_credentials_stamp,
-    read_claude_code_keychain_session, read_claude_code_keychain_token,
+    read_claude_code_keychain_session, read_claude_code_keychain_session_explained,
+    read_claude_code_keychain_token,
 };
 pub use providers::anthropic::latest_claude_auth_origin;
 pub use providers::anthropic::{
     AnthropicClient, AnthropicClient as ApiClient, AuthSource, ClaudeAuthOrigin,
     ResolvedClaudeAuth, anthropic_context_editing_enabled, managed_claude_auth_changed,
     refresh_claude_auth_after_unauthorized, resolve_claude_auth_fresh,
-    resolve_claude_auth_fresh_detailed,
+    resolve_claude_auth_fresh_detailed, resolve_claude_auth_fresh_explained,
 };
 pub use providers::chatgpt_backend::{
     ORIGINATOR as CHATGPT_ORIGINATOR, USER_AGENT as CHATGPT_USER_AGENT,
 };
 pub use providers::cloud_gateway::cloud_gateway_active;
 pub use providers::gemini_code_assist::{
+    FETCH_AVAILABLE_MODELS as GOOGLE_CODE_ASSIST_FETCH_AVAILABLE_MODELS,
     GEMINI_CODE_ASSIST_OAUTH_CLIENT_ID_ENV, GEMINI_CODE_ASSIST_OAUTH_CLIENT_SECRET_ENV,
     GeminiCodeAssistClient, authorize_url as google_code_assist_authorize_url,
     exchange_code as exchange_google_code_assist_code,
     load_fresh_oauth as google_code_assist_fresh_oauth,
+    method_url as google_code_assist_method_url,
     oauth_config as google_code_assist_oauth_config,
     oauth_present as google_code_assist_oauth_present,
     redirect_uri as google_code_assist_redirect_uri,
