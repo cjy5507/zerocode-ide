@@ -8962,8 +8962,29 @@ mod tests {
         let listener = block_after(window, r#"listen("emulator:agent-open""#);
         assert!(
             listener.contains(r#"platform !== "ios" && platform !== "android""#)
-                && listener.contains("openEmulatorTab(platform, device)"),
+                && listener.contains("openEmulatorTab(platform, device, { from, agent: true })"),
             "the window stopped validating and opening the built-in emulator request:\n{listener}"
+        );
+        // Seated in the asking pane's checkout (t-6379): an agent's mirror
+        // never turns the person's head from another checkout, and one whose
+        // pane is unknown says where it went, in every catalog.
+        let opening = block_after(window, "async function openEmulatorTab(");
+        for owned in [
+            "tabOfTerm(from)",
+            "standBeside(caller.pane)",
+            "{ focus: !away }",
+            "\"emulator.agentOpenUnseated\"",
+        ] {
+            assert!(
+                opening.contains(owned),
+                "an agent's mirror lost {owned}:\n{opening}"
+            );
+        }
+        let i18n = include_str!("../../../../ui/shell-i18n.js");
+        assert_eq!(
+            i18n.matches("\"emulator.agentOpenUnseated\":").count(),
+            4,
+            "`emulator.agentOpenUnseated` is missing from one of the en/ja/zh/es catalogs"
         );
         assert!(
             skill.contains("Website or web app: use `zerocode-browser")
