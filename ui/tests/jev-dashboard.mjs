@@ -16,12 +16,13 @@
  * count and the switch's door. */
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { openWindowTestPage } from "./window-boot.mjs";
-import { setQualityTheme, settlePaint } from "./settings-quality.mjs";
+import { createRequire } from "node:module";
+import { contrastTable, setQualityTheme, settlePaint } from "./settings-quality.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 /* Where the evidence goes: a person looks at these (t-5807, the operator's
@@ -36,6 +37,22 @@ const { readFileSync } = await import("node:fs");
 const SEATS = (readFileSync(join(ROOT, "ui", "index.html"), "utf8").match(/data-jev-feature="/g) ?? []).length;
 /* The fewest days with a value a trend is drawn from (t-6243 D4). */
 const TREND_DAYS = 3;
+/* The contrast every text on the dashboard and the card clears, in both
+ * treatments, large or not (t-6277 D10): WCAG AA's line for body text. */
+const CONTRAST_FLOOR = 4.5;
+
+/* axe, for the contrast table (`contrastTable`) — resolved from the
+ * checkout's own node_modules, as the settings gate resolves it; `null` when
+ * it is not installed, which the check then says rather than skipping. */
+function axeBuilder() {
+  try {
+    const require = createRequire(import.meta.url);
+    const found = require(require.resolve("@axe-core/playwright"));
+    return found.default ?? found;
+  } catch {
+    return null;
+  }
+}
 
 /* Installed on the page: the fixture the answers are drawn from — exported
  * so a measurement draws the same dashboard the gate does.
@@ -914,6 +931,177 @@ export async function testJevDashboard(browser, origin, ok) {
     ok("a zo that cannot count leaves the last numbers standing and says so",
       !refused.hidden && refused.error.includes("refused: jev_summary") && refused.rows === SEATS && refused.week === "50",
       JSON.stringify(refused));
+
+    // One frame and one edge (t-6277 D10): the switch over the table is the
+    // card's framed row and the line under it, standing at the page's edges
+    // as the strip and the table do — not a box around a box; and a word
+    // under a count starts where the count starts, while a button's tint is
+    // what lines up with it.
+    const edges = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const holder = view.querySelector(".jev-switch");
+      // On from some folders only, so the line under the switch stands.
+      const held = typesafeState.jev;
+      typesafeState = { ...typesafeState, jev: { ...held, on: true, everywhere: false, folders: 4 } };
+      paintJevSwitches();
+      await window.__PAINTED__();
+      const box = (node) => node.getBoundingClientRect();
+      const framed = (node) => parseFloat(getComputedStyle(node).borderTopWidth) > 0;
+      const text = (node) => {
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        return range.getBoundingClientRect();
+      };
+      const table = box(view.querySelector(".jev-table-wrap"));
+      const row = holder.querySelector("[data-jev-switch-row]");
+      const partial = holder.querySelector("[data-jev-partial]");
+      const cell = (id) => view.querySelector(`[data-jev-dash-row="${id}"] [data-jev-cell="rows"]`);
+      const count = (id) => box(cell(id).querySelector('[data-jev-fact="today"]')).left;
+      const word = cell("recall").querySelector("span.jev-token");
+      const button = cell("routing").querySelector("button.jev-token");
+      const seen = {
+        holderFramed: framed(holder),
+        holderGround: getComputedStyle(holder).backgroundColor,
+        rowFramed: framed(row),
+        row: [box(row).left - table.left, box(row).right - table.right].map(Math.round),
+        partialShown: !partial.hidden,
+        partial: [box(partial).left - box(row).left, box(partial).right - box(row).right].map(Math.round),
+        word: Math.round(text(word).left - count("recall")),
+        button: Math.round(box(button).left - count("routing")),
+      };
+      typesafeState = { ...typesafeState, jev: held };
+      paintJevSwitches();
+      return seen;
+    });
+    ok("the switch over the table wears one frame at the table's edges, and a word under a count starts where the count does",
+      !edges.holderFramed && edges.holderGround === "rgba(0, 0, 0, 0)" && edges.rowFramed && edges.partialShown
+        && [...edges.row, ...edges.partial].every((gap) => Math.abs(gap) <= 1)
+        && Math.abs(edges.word) <= 1 && Math.abs(edges.button) <= 1,
+      JSON.stringify(edges));
+
+    // The strip is read for its figures (t-6277 D10): each figure larger and
+    // heavier than its label, and where the features stand set apart from
+    // the sums before it.
+    const strip = await page.evaluate(() => {
+      const view = document.querySelector("#jev-view");
+      const stats = [...view.querySelectorAll(".jev-stat:not([hidden])")];
+      const size = (node) => parseFloat(getComputedStyle(node).fontSize);
+      const lastTotal = stats.filter((one) => one.dataset.group === "totals").at(-1);
+      const firstTotal = stats.find((one) => one.dataset.group === "totals");
+      const firstState = stats.find((one) => one.dataset.group === "states");
+      const between = (a, b) => (a && b ? Math.round(b.getBoundingClientRect().left - a.getBoundingClientRect().right) : null);
+      return {
+        scale: stats.map((one) => size(one.querySelector("dd")) / size(one.querySelector("dt"))),
+        weights: stats.map((one) => Number(getComputedStyle(one.querySelector("dd")).fontWeight)),
+        labels: stats.map((one) => Number(getComputedStyle(one.querySelector("dt")).fontWeight)),
+        withinSums: between(firstTotal, firstTotal?.nextElementSibling),
+        beforeStates: between(lastTotal, firstState),
+      };
+    });
+    ok("the strip's figures are larger and heavier than their labels, and the states stand apart from the sums",
+      strip.scale.every((scale) => scale >= 1.5) && strip.weights.every((weight, at) => weight > strip.labels[at])
+        && strip.withinSums !== null && strip.beforeStates !== null && strip.beforeStates > strip.withinSums,
+      JSON.stringify(strip));
+
+    // The head stays at the page's top edge while the rows scroll under it
+    // (t-6277 D10).
+    const sticky = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      if (!jevUnusedOpen) {
+        view.querySelector("[data-jev-fold] button").click();
+        await window.__PAINTED__();
+      }
+      view.scrollTop = view.scrollHeight;
+      await window.__PAINTED__();
+      const box = view.getBoundingClientRect();
+      const head = view.querySelector(".jev-table thead th").getBoundingClientRect();
+      const seen = { scrolled: view.scrollTop, headTop: Math.round(head.top - box.top), headHeight: Math.round(head.height) };
+      view.scrollTop = 0;
+      view.querySelector("[data-jev-fold] button").click();
+      await window.__PAINTED__();
+      return seen;
+    });
+    ok("the table's head stays at the page's top edge while the rows scroll",
+      sticky.scrolled > 0 && Math.abs(sticky.headTop) <= 1 && sticky.headHeight > 0, JSON.stringify(sticky));
+
+    // No feature asked all week: the table says why — Jev is off, or it is
+    // on and quiet (t-6277 D10).
+    const empty = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      const quietDay = (one) => ({ ...one.week, rows: 0, answered: 0, refused: 0, failures: [], refusals: [] });
+      const saved = jevNumbers;
+      jevNumbers = saved.map((one) => ({ ...one, today: quietDay(one), week: quietDay(one), days: [] }));
+      paintJevViews();
+      const said = () => view.querySelector("[data-jev-empty] .jev-empty")?.textContent ?? null;
+      const held = typesafeState.jev;
+      typesafeState = { ...typesafeState, jev: { ...held, on: true } };
+      paintJevViews();
+      const quiet = said();
+      typesafeState = { ...typesafeState, jev: { ...held, on: false } };
+      paintJevViews();
+      const off = said();
+      typesafeState = { ...typesafeState, jev: held };
+      jevNumbers = saved;
+      paintJevViews();
+      return { quiet, off, after: said() };
+    });
+    ok("a week nobody asked anything says so, and says when it is because Jev is off",
+      empty.quiet === "지난 7일 판단 요청이 없었습니다. 기능이 판단을 요청하면 여기에 쌓입니다."
+        && empty.off === "Jev가 꺼져 있어 판단을 요청하지 않습니다. 위의 스위치로 켤 수 있습니다." && empty.after === null,
+      JSON.stringify(empty));
+
+    // Every text on the dashboard — the switch, the strip, the table, a
+    // screen feature's drawer — and on the settings card with 고급 open
+    // clears 4.5:1 in both treatments (t-6277 D10).
+    const AxeBuilder = axeBuilder();
+    const contrast = {};
+    if (AxeBuilder) {
+      for (const theme of ["dark", "light"]) {
+        await setQualityTheme(page, theme);
+        // The page with the drawer shut — an open drawer lies over the
+        // table's right side, and text under it has no ground to measure —
+        // then the drawer of a screen feature on its own.
+        const dashboard = await contrastTable(page, AxeBuilder, "#jev-view");
+        await page.evaluate(async () => {
+          document.querySelector('#jev-view [data-jev-dash-row="browser"] .jev-row-open').click();
+          await window.__PAINTED__();
+        });
+        const drawer = await contrastTable(page, AxeBuilder, "#jev-view .jev-drawer");
+        await page.evaluate(async () => {
+          document.querySelector("#jev-view .jev-drawer-close").click();
+          setSettingsOpen(true, "jev-enabled");
+          document.getElementById("typesafe-advanced").open = true;
+          await window.__PAINTED__();
+        });
+        const card = await contrastTable(page, AxeBuilder, "#typesafe-card");
+        await page.evaluate(() => {
+          document.getElementById("typesafe-advanced").open = false;
+          setSettingsOpen(false);
+        });
+        contrast[theme] = [
+          ...dashboard.map((row) => ({ surface: "dashboard", ...row })),
+          ...drawer.map((row) => ({ surface: "drawer", ...row })),
+          ...card.map((row) => ({ surface: "card", ...row })),
+        ];
+      }
+      await setQualityTheme(page, "dark");
+    }
+    const rows = Object.values(contrast).flat();
+    // The table is evidence a person reads, beside the pictures (t-5807's
+    // folder): every text's ink, ground and ratio, the least first.
+    if (rows.length > 0) {
+      await mkdir(EVIDENCE_DIR, { recursive: true });
+      const least = (list) => [...list].sort((a, b) => (a.ratio ?? 0) - (b.ratio ?? 0));
+      await writeFile(join(EVIDENCE_DIR, "jev-contrast.json"),
+        `${JSON.stringify(Object.fromEntries(Object.entries(contrast).map(([theme, list]) => [theme, least(list)])), null, 2)}\n`);
+    }
+    const under = rows.filter((row) => row.verdict === "fail" || (row.ratio !== null && row.ratio < CONTRAST_FLOOR));
+    const unknown = rows.filter((row) => row.verdict === "unknown" || row.ratio === null);
+    ok(`every text on the dashboard and the card clears ${CONTRAST_FLOOR}:1 in both treatments`,
+      AxeBuilder !== null && rows.length > 0 && under.length === 0 && unknown.length === 0,
+      AxeBuilder === null ? "@axe-core/playwright is not installed" : JSON.stringify({
+        measured: rows.length, least: Math.min(...rows.filter((row) => row.ratio !== null).map((row) => row.ratio)),
+        under: under.slice(0, 6), unknown: unknown.slice(0, 6) }));
 
     ok("the dashboard raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {

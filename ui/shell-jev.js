@@ -35,9 +35,13 @@ const JEV_POLL_MS = 30_000;
  * event, not before it. One ask per burst, however many events. */
 const JEV_EVENT_SETTLE_MS = 1_500;
 
-/* The trend picture's own box; the stylesheet decides how large it draws. */
+/* The trend picture's own box, the room kept above and below its lines and
+ * the size of a day's dot, in the box's own units; the stylesheet decides how
+ * large the box draws. */
 const JEV_SPARK_WIDTH = 64;
 const JEV_SPARK_HEIGHT = 18;
+const JEV_SPARK_PAD = 2;
+const JEV_SPARK_DOT = 1.5;
 
 /* The fewest days with a value a feature's week is drawn from: two points
  * are a line with no shape, three the fewest that can show a turn (t-6243
@@ -460,18 +464,22 @@ function buildJevView() {
   summary.className = "jev-summary";
   summary.dataset.i18nAria = "jev.summary";
   summary.setAttribute("aria-label", t("jev.summary", "요약"));
-  const stat = (name, label) => {
+  // Three groups: the sums, where the features stand, and the day's limit —
+  // the second set apart from the first (t-6277 D10).
+  const stat = (name, label, group) => {
     const holder = jevNode("div", "jev-stat", label, document.createElement("dd"));
     holder.dataset.jevStat = name;
+    holder.dataset.group = group;
     return holder;
   };
-  for (const total of JEV_TOTALS) summary.append(stat(total.stat, jevText(total.key, total.word, "dt")));
-  for (const state of [...JEV_STATUSES.filter((one) => one.counted), { ...JEV_UNDER, status: JEV_UNDER.stat }]) {
-    const holder = stat(state.status, jevText(state.key, state.word, "dt"));
+  for (const total of JEV_TOTALS) summary.append(stat(total.stat, jevText(total.key, total.word, "dt"), "totals"));
+  for (const [at, state] of [...JEV_STATUSES.filter((one) => one.counted), { ...JEV_UNDER, status: JEV_UNDER.stat }].entries()) {
+    const holder = stat(state.status, jevText(state.key, state.word, "dt"), "states");
     holder.dataset.status = state.status;
+    holder.classList.toggle("jev-stat--lead", at === 0);
     summary.append(holder);
   }
-  const day = stat("day", jevText("jev.stat.day", "하루 한도", "dt"));
+  const day = stat("day", jevText("jev.stat.day", "하루 한도", "dt"), "day");
   jevHint("jev.stat.dayTip", "이 컴퓨터가 오늘 Jev에 보낸 요청 수와 하루 한도(smart.jev.dailyRequests)입니다.", day);
   day.hidden = true;
   summary.append(day);
@@ -715,7 +723,7 @@ function jevTrendPicture(series) {
   svg.setAttribute("aria-hidden", "true");
   const days = Math.max(0, ...series.map(({ values }) => values.length));
   const step = days > 1 ? JEV_SPARK_WIDTH / (days - 1) : 0;
-  const pad = 2;
+  const pad = JEV_SPARK_PAD;
   for (const { line, values } of series) {
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
     group.setAttribute("class", `jev-spark-${line}`);
@@ -735,7 +743,7 @@ function jevTrendPicture(series) {
       dot.setAttribute("class", "jev-spark-dot");
       dot.setAttribute("cx", x.toFixed(1));
       dot.setAttribute("cy", y.toFixed(1));
-      dot.setAttribute("r", "1.5");
+      dot.setAttribute("r", String(JEV_SPARK_DOT));
       group.append(dot);
     }
     group.dataset.line = line;
@@ -964,7 +972,11 @@ function paintJevView(view) {
   }
   const fold = unused.length > 0 ? jevFoldRow(body, unused.length) : null;
   if (fold) drawn.splice(inUse.length, 0, fold);
-  for (const row of body.querySelectorAll("[data-jev-dash-row], [data-jev-fold]")) {
+  // Nothing in use all week: the table says why before the fold does
+  // (t-6277 D10) — Jev is off, or on and nothing asked.
+  const empty = inUse.length === 0 && numbers.length > 0 ? jevEmptyRow(body) : null;
+  if (empty) drawn.unshift(empty);
+  for (const row of body.querySelectorAll("[data-jev-dash-row], [data-jev-fold], [data-jev-empty]")) {
     if (!drawn.includes(row)) row.remove();
   }
   jevArrange(body, drawn);
@@ -1175,6 +1187,23 @@ function paintJevRow(row, id, held, standing, head) {
   cell("cost").textContent = jevCost(held.costUsd);
   cell("trend").replaceChildren(jevTrendCell(held));
   cell("status").replaceChildren(jevStatusCell(held, choice, standing, head));
+}
+
+/* The row that stands first when no feature was asked all week: whether Jev
+ * is off — the switch over the table turns it on — or on and quiet. */
+function jevEmptyRow(body) {
+  let row = body.querySelector("[data-jev-empty]");
+  if (!row) {
+    const cell = jevNode("td", "", jevNode("span", "jev-empty"));
+    cell.colSpan = JEV_COLUMNS.length;
+    row = jevNode("tr", "jev-empty-row", cell);
+    row.dataset.jevEmpty = "";
+    body.prepend(row);
+  }
+  row.querySelector(".jev-empty").textContent = typesafeState?.jev && !typesafeState.jev.on
+    ? t("jev.empty.off", "Jev가 꺼져 있어 판단을 요청하지 않습니다. 위의 스위치로 켤 수 있습니다.")
+    : t("jev.empty.quiet", "지난 7일 판단 요청이 없었습니다. 기능이 판단을 요청하면 여기에 쌓입니다.");
+  return row;
 }
 
 /* The row the unused features fold into: one press shows or hides them all,

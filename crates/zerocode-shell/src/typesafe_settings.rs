@@ -1136,6 +1136,97 @@ mod tests {
         );
     }
 
+    /// The Jev surfaces' styles speak in tokens (t-6277 D10): every size, ink,
+    /// weight and tint on the dashboard and on the settings card's Jev part is
+    /// a `var(--…)` from tokens.css, so the two treatments and the contrast the
+    /// window suite measures (`contrastTable`) are decided in one place. A
+    /// share of a box (0%, 50%, 100%) is geometry, not a token.
+    #[test]
+    fn the_jev_styles_read_every_size_ink_and_weight_from_tokens() {
+        fn block<'a>(css: &'a str, from: &str, to: &str) -> &'a str {
+            let start = css.find(from).unwrap_or_else(|| panic!("no `{from}`"));
+            let rest = &css[start..];
+            &rest[..rest
+                .find(to)
+                .unwrap_or_else(|| panic!("nothing ends `{from}`"))]
+        }
+        let css = include_str!("../../../ui/shell.css");
+        let blocks = [
+            (
+                "dashboard",
+                block(css, "/* ---- Jev dashboard (t-5807)", ".skills-view {"),
+            ),
+            (
+                "settings card",
+                block(
+                    css,
+                    "/* ---- Jev on the settings card",
+                    "/* A row whose mode nothing can reach",
+                ),
+            ),
+        ];
+        let mut literals = Vec::new();
+        for (surface, text) in blocks {
+            let bytes = text.as_bytes();
+            let mut at = 0;
+            while at < bytes.len() {
+                let byte = bytes[at];
+                let starts_number = byte.is_ascii_digit()
+                    && (at == 0
+                        || !(bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'-'));
+                if starts_number {
+                    let end = text[at..]
+                        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+                        .map_or(text.len(), |len| at + len);
+                    let number = &text[at..end];
+                    let unit: String = text[end..]
+                        .chars()
+                        .take_while(char::is_ascii_alphabetic)
+                        .collect();
+                    let percent = text[end..].starts_with('%');
+                    let geometry = percent && ["0", "50", "100"].contains(&number);
+                    if (unit == "px" || percent) && !geometry {
+                        literals.push(format!(
+                            "{surface}: {number}{}",
+                            if percent { "%" } else { "px" }
+                        ));
+                    }
+                    at = end.max(at + 1);
+                    continue;
+                }
+                at += 1;
+            }
+            for (at, _) in text.match_indices("font-weight:") {
+                let value = text[at + "font-weight:".len()..].trim_start();
+                if value.starts_with(|c: char| c.is_ascii_digit()) {
+                    literals.push(format!(
+                        "{surface}: font-weight {}",
+                        &value[..3.min(value.len())]
+                    ));
+                }
+            }
+            for marker in ["#", "rgb(", "rgba(", "hsl("] {
+                for (at, _) in text.match_indices(marker) {
+                    let after = &text[at + marker.len()..];
+                    let colour =
+                        marker != "#" || after.starts_with(|c: char| c.is_ascii_hexdigit());
+                    if colour {
+                        literals.push(format!(
+                            "{surface}: {marker}{}",
+                            &after[..6.min(after.len())]
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            literals.is_empty(),
+            "the Jev styles spell a size, ink or weight of their own — name it in \
+             tokens.css's Jev block:\n  {}",
+            literals.join("\n  ")
+        );
+    }
+
     /// The settings harness's fake backend answers every seat the table names,
     /// with the settings key it writes and the modes it offers, so the pane is
     /// driven by the words and meanings it will read. A seat added to the table

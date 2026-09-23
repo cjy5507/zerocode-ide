@@ -18831,9 +18831,17 @@ button.worker-composer-pill:hover {
  * §6.1): one switch a person turns on and off, the key, a line to the
  * dashboard, and what is rarely changed folded under 고급. The switch is the
  * card's largest row — it is the one decision the card asks for. */
+.settings-jev-switch {
+  margin: var(--space-3) var(--space-4) 0;
+  padding: var(--space-2) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+}
+
 .settings-jev-switch .settings-label {
   font-size: var(--text-md);
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 /* On, with consent for some folders only: the sentence and the one press
@@ -18859,13 +18867,13 @@ button.worker-composer-pill:hover {
   color: var(--ink-chalk);
   font: inherit;
   text-decoration: underline;
-  text-underline-offset: 2px;
+  text-underline-offset: var(--jev-link-offset);
   cursor: pointer;
   transition: text-decoration-thickness var(--motion-fast) var(--ease-standard);
 }
 
 .settings-jev-link:hover {
-  text-decoration-thickness: 2px;
+  text-decoration-thickness: var(--jev-link-hover-thickness);
 }
 
 .settings-jev-advanced {
@@ -18892,7 +18900,7 @@ button.worker-composer-pill:hover {
   margin: 0;
   color: var(--ink-chalk);
   font-size: var(--text-sm);
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 /* A row whose mode nothing can reach says so where the mode is, not in a
@@ -37689,7 +37697,7 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-table tbody tr.is-open td {
-  background: color-mix(in srgb, var(--jev-progress-ink) 10%, transparent);
+  background: color-mix(in srgb, var(--jev-progress-ink) var(--jev-tint-open), transparent);
 }
 
 .jev-row-open {
@@ -37710,7 +37718,7 @@ h4.knowledge-inspector-head::after {
   color: var(--ink-mist);
   font-family: var(--font-mono);
   font-size: var(--jev-meta-size);
-  font-weight: 400;
+  font-weight: var(--jev-weight-plain);
 }
 
 /* The drawer rides a dock pinned to the top of the page's window, so it
@@ -37780,7 +37788,7 @@ h4.knowledge-inspector-head::after {
   margin: 0;
   color: var(--ink-mist);
   font-size: var(--jev-meta-size);
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 .jev-drawer-facts {
@@ -37805,17 +37813,16 @@ h4.knowledge-inspector-head::after {
   font-size: var(--jev-meta-size);
 }
 
-/* The settings card's switch, worn over the table (§6.1): the same row and
-   the same line under it, on the dashboard's own panel. */
+/* The settings card's switch, worn over the table (§6.1): the same framed
+   row and the same line under it, standing at the page's edges as the strip
+   and the table do. The row's frame is the one frame — a panel around it
+   would be a box around a box (t-6277 D10). */
 .jev-switch {
   display: grid;
   gap: var(--space-2);
-  padding: var(--space-2) var(--space-3);
-  border: var(--jev-line) solid var(--edge-rule);
-  border-radius: var(--radius-md);
-  background: var(--surface-well);
 }
 
+.jev-switch .settings-jev-switch,
 .jev-switch .settings-notice {
   margin: 0;
 }
@@ -37844,19 +37851,31 @@ h4.knowledge-inspector-head::after {
   background: var(--surface-well);
 }
 
+/* The figure is what the strip is read for: large; its label small and quiet
+   above it (t-6277 D10). */
 .jev-stat dt {
   display: flex;
   align-items: center;
   gap: var(--space-1);
   color: var(--ink-mist);
-  font-size: var(--jev-meta-size);
+  font-size: var(--jev-stat-label-size);
 }
 
 .jev-stat dd {
   margin: 0;
   font-size: var(--jev-stat-size);
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
+  line-height: var(--leading-tight);
   font-variant-numeric: tabular-nums;
+}
+
+/* The states start a group of their own after the sums. */
+.jev-stat[data-group="states"] {
+  background: var(--surface-deck);
+}
+
+.jev-stat.jev-stat--lead {
+  margin-inline-start: var(--space-3);
 }
 
 /* A state's count wears the state's tone — the tone its rows wear. */
@@ -37874,6 +37893,14 @@ h4.knowledge-inspector-head::after {
 .jev-view [data-status="under"] { --jev-tone: var(--jev-tone-under); }
 .jev-view [data-status="blocked"] { --jev-tone: var(--jev-tone-blocked); }
 .jev-view [data-status="dormant"] { --jev-tone: var(--jev-tone-dormant); }
+
+/* What the table says when no feature was asked all week (t-6277 D10):
+   whether Jev is off, or on and quiet. */
+.jev-empty-row td {
+  padding: var(--space-4) var(--jev-cell-pad);
+  color: var(--ink-mist);
+  text-align: center;
+}
 
 /* The row the unused features fold into: one line, one press. */
 .jev-fold-row td {
@@ -37904,7 +37931,11 @@ h4.knowledge-inspector-head::after {
    scrolling inside a page that also scrolls is two scrollbars for one list. */
 .jev-table-wrap {
   flex: none;
-  overflow-x: auto;
+  /* Clipped, not scrolled: a wrap that scrolls sideways is a scroll
+     container, and the head could then stick only inside it — which never
+     scrolls down. The table fits a 1080p stage (t-6243 D1), so nothing is
+     lost to the clip, and the head sticks to the page (t-6277 D10). */
+  overflow-x: clip;
   border: var(--jev-line) solid var(--edge-rule);
   border-radius: var(--radius-md);
 }
@@ -37916,7 +37947,8 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-table th, .jev-table td {
-  padding: var(--space-2);
+  padding: var(--jev-cell-pad);
+  line-height: var(--jev-cell-leading);
   text-align: left;
   vertical-align: top;
   border-bottom: var(--jev-line) solid var(--edge-rule);
@@ -37941,7 +37973,7 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-fact-strong {
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 .jev-fact-mist {
@@ -37949,13 +37981,17 @@ h4.knowledge-inspector-head::after {
   font-size: var(--jev-meta-size);
 }
 
+/* The head stays at the page's top edge while the rows scroll under it: a
+   sticky inset is read inside the page's padding, so it reaches back over
+   it (t-6277 D10). */
 .jev-table th {
   color: var(--ink-mist);
-  font-weight: 500;
+  font-weight: var(--jev-weight-medium);
   font-size: var(--jev-meta-size);
   background: var(--surface-well);
   position: sticky;
-  top: 0;
+  top: calc(-1 * var(--space-5));
+  z-index: 2;
 }
 
 .jev-table tbody tr:last-child td {
@@ -37967,11 +38003,11 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-table tr.is-applying [data-jev-cell="seat"] {
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 .jev-share {
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 /* The week as one picture of two lines, each line's latest value under it,
@@ -37999,7 +38035,7 @@ h4.knowledge-inspector-head::after {
 .jev-trend-last::before {
   content: "";
   width: var(--space-3);
-  border-top: 2px solid var(--jev-trend);
+  border-top: var(--jev-trend-stroke) solid var(--jev-trend);
 }
 
 .jev-trend-agreement::before {
@@ -38046,25 +38082,25 @@ h4.knowledge-inspector-head::after {
 .jev-chip {
   display: inline-flex;
   align-items: center;
-  padding: 1px var(--space-2);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--jev-tone) 12%, transparent);
+  padding: var(--jev-chip-pad-block) var(--space-2);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--jev-tone) var(--jev-tint), transparent);
   color: var(--jev-tone);
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
   white-space: nowrap;
 }
 
 /* A light tint keeps the chip's ink at AA on the light panel, as the
    settings card's state pill does. */
 :root[data-theme="light"] .jev-chip {
-  background: color-mix(in srgb, var(--jev-tone) 6%, transparent);
+  background: color-mix(in srgb, var(--jev-tone) var(--jev-tint-quiet), transparent);
 }
 
 /* A feature that asks nothing says so in words alone. */
 .jev-chip[data-status="dormant"] {
   padding-inline: 0;
   background: none;
-  font-weight: 500;
+  font-weight: var(--jev-weight-medium);
 }
 
 .jev-status-reason, .jev-status-fact {
@@ -38093,8 +38129,8 @@ h4.knowledge-inspector-head::after {
   flex: none;
   width: var(--jev-progress-width);
   height: var(--jev-progress-height);
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--ink-mist) 24%, transparent);
+  border-radius: var(--radius-pill);
+  background: color-mix(in srgb, var(--ink-mist) var(--jev-tint-track), transparent);
   overflow: hidden;
 }
 
@@ -38120,7 +38156,7 @@ h4.knowledge-inspector-head::after {
 
 .jev-refused {
   color: var(--jev-tone-blocked);
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 /* What did not come back, by token (t-6243 D5): a quiet word for the wire's
@@ -38133,11 +38169,13 @@ h4.knowledge-inspector-head::after {
   white-space: normal;
 }
 
-/* One text line tall, so a row of them costs a line and not a box. */
+/* One text line tall, so a row of them costs a line and not a box. A word
+   starts where the count above it starts; a button's tint is what lines up,
+   so its words sit inside it (t-6277 D10). */
 .jev-token {
   display: inline-flex;
   align-items: center;
-  padding: 0 var(--space-1);
+  padding: 0;
   border: 0;
   border-radius: var(--radius-sm);
   background: none;
@@ -38149,7 +38187,8 @@ h4.knowledge-inspector-head::after {
 }
 
 button.jev-token {
-  background: color-mix(in srgb, var(--jev-tone-blocked) 12%, transparent);
+  padding-inline: var(--space-1);
+  background: color-mix(in srgb, var(--jev-tone-blocked) var(--jev-tint), transparent);
   color: var(--jev-tone-blocked);
   cursor: pointer;
   transition:
@@ -38158,7 +38197,7 @@ button.jev-token {
 }
 
 button.jev-token:hover {
-  background: color-mix(in srgb, var(--jev-tone-blocked) 22%, transparent);
+  background: color-mix(in srgb, var(--jev-tone-blocked) var(--jev-tint-hover), transparent);
 }
 
 .jev-spark {
@@ -38170,7 +38209,7 @@ button.jev-token:hover {
 .jev-spark-line {
   fill: none;
   stroke: var(--jev-trend);
-  stroke-width: 1.5;
+  stroke-width: var(--jev-trend-stroke);
   stroke-linejoin: round;
   stroke-linecap: round;
 }
@@ -38221,7 +38260,7 @@ button.jev-token:hover {
 .jev-decision-answer { grid-area: answer; }
 
 .jev-decision-outcome {
-  font-weight: 600;
+  font-weight: var(--jev-weight-strong);
 }
 
 .jev-decision[data-outcome]:not([data-outcome="answered"]) .jev-decision-outcome {
