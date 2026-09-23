@@ -1,13 +1,16 @@
-//! TypeSafe (Jev) in the window's settings: the key zo's decision shadow asks
-//! System One with, and whether the shadow runs.
+//! TypeSafe (Jev) in the window's settings: the key Jev is asked with, and the
+//! one switch a person turns it on and off with (2026-09-23,
+//! docs/design/jev-settings-20260917.md §6.1).
 //!
 //! The key is one keychain item — `dev.zerocode.key.TYPESAFE_API_KEY`, both
 //! halves spelled by `zerocode_harness` — and no launch hands it to anyone:
 //! every zo, started by this window or typed into a shell, reads that item
 //! itself when it first needs the key (`api::find_service_keys_in_keychain`),
-//! so nothing zo spawns inherits it. The switch is `smart.decisionShadow` in
-//! zo's global settings file, the key zo's router reads; nothing else of that
-//! file moves. Whether a saved key works is zo's answer, not this window's:
+//! so nothing zo spawns inherits it. The switch is `smart.jev.enabled` in zo's
+//! global settings file, the key both programs' door reads; what a press
+//! writes beside it is the core's (`door::switch_on`, `door::switch_off`), and
+//! nothing else of that file moves. Whether a saved key works is zo's answer,
+//! not this window's:
 //! the check execs `zo decision-shadow check --json`, which puts the shadow's
 //! own question through the same key road, request and answer check.
 
@@ -15,10 +18,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use zerocode_core::jev::door::JevSettings;
+use zerocode_core::jev::door::{self, JevSettings, NotAnObject};
 use zerocode_core::jev::{
     CLASSIFIER_SETTING, ClassifierMode, DEFAULT_MODEL, JEV_USES, JevMode, JevUse, MODEL_SETTING,
-    ROUTING, SMART_SETTINGS_KEY, count, jev_use, model_in, pin_in, pinned_model,
+    ROUTING, SMART_SETTINGS_KEY, count, model_in, pin_in, pinned_model,
 };
 use zerocode_harness::{SERVICE_KEYCHAIN_SERVICE_PREFIX, TYPESAFE_API_KEY_ENV};
 
@@ -79,12 +82,14 @@ impl ModeChoice {
     }
 }
 
-/// One place Jev sits, as the pane paints it: the use's own name — which is
-/// also the switch's element id and the key its words are looked up under —
-/// the settings key it writes, where it stands now, and the modes it offers.
+/// One feature Jev judges for, as the dashboard paints it: the use's own name
+/// — which is also the key its words are looked up under — the settings key
+/// a person may write by hand, where it stands now, and the modes it offers,
+/// each by what it does.
 ///
 /// There is one of these per row of [`JEV_USES`] and no field named after any
-/// single use, so a seat added to the table arrives on the card with it.
+/// single use, so a feature added to the table arrives on the dashboard with
+/// it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SwitchRow {
@@ -92,6 +97,10 @@ pub struct SwitchRow {
     pub setting: &'static str,
     pub mode: &'static str,
     pub modes: Vec<ModeChoice>,
+    /// Whether the settings file holds a word of this feature's own
+    /// (`smart.<setting>`): a person's hand-written choice, which the switch
+    /// does not govern until the next press on (§6.1).
+    pub written: bool,
     /// How many compared marks the judge wants before the seat's accuracy
     /// may speak ([`JevUse::agreement_rows_wanted`]) — the sample the
     /// dashboard fills its bar toward, and under half of which it says the
@@ -171,20 +180,52 @@ impl ModelRow {
     }
 }
 
+/// The one switch (§6.1), as the card and the dashboard paint it: whether Jev
+/// is in use here, and where it may send from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JevSwitch {
+    /// Something is sent: the door lets a request through
+    /// ([`JevSettings::enabled`]), some feature asks, and some folder is
+    /// consented. Read off what each program will do rather than off
+    /// `smart.jev.enabled` alone, because a machine whose features were set
+    /// by hand before the switch existed never wrote it and does send — and
+    /// a switch that said otherwise would be one a person cannot trust.
+    pub on: bool,
+    /// Every folder is consented — the switch's own consent.
+    pub everywhere: bool,
+    /// Folders consented by name.
+    pub folders: usize,
+}
+
+impl JevSwitch {
+    fn of(document: &Value) -> Self {
+        let door = JevSettings::from_root(document);
+        let folders = door.folders().count();
+        let consented = door.everywhere() || folders > 0;
+        let asks = JEV_USES.iter().any(|row| row.mode_in(document).asks());
+        Self {
+            on: door.enabled && asks && consented,
+            everywhere: door.everywhere(),
+            folders,
+        }
+    }
+}
+
 /// What the pane paints: whether a key could be kept here, whether one is
-/// saved — never the key itself — and every switch as its reader reads it,
-/// with the modes it offers in the table's order.
+/// saved — never the key itself — the one switch, and every feature as its
+/// reader reads it, with the modes it offers in the table's order.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TypeSafeSettings {
     pub keys_kept_here: bool,
     pub key_saved: bool,
+    /// The one switch: whether Jev is in use here.
+    pub jev: JevSwitch,
     /// The model every seat's request names — the pin, or the alias.
     pub model: ModelRow,
-    /// Every row of the use table, in the table's order — zo's two and the
-    /// window's three on one card, because a person reads them together and
-    /// the question each asks is the same: does anything go to the vendor,
-    /// and may it change what the product does.
+    /// Every row of the use table, in the table's order — what the dashboard
+    /// reads each feature's standing off.
     pub switches: Vec<SwitchRow>,
     /// The routing classifier, which decides whether the routing seat is asked
     /// anything at all.
@@ -211,6 +252,7 @@ pub fn read_settings(
     Ok(TypeSafeSettings {
         keys_kept_here,
         key_saved,
+        jev: JevSwitch::of(&document),
         model: ModelRow::of(&root),
         switches: JEV_USES
             .iter()
@@ -219,6 +261,7 @@ pub fn read_settings(
                 setting: row.setting,
                 mode: row.mode_in(&document).key(),
                 modes: choices(row),
+                written: row.word_in(&document).is_some(),
                 agreement_rows_wanted: row.agreement_rows_wanted,
             })
             .collect(),
@@ -267,38 +310,37 @@ pub fn remove_key(keys: &dyn RouterKeys) -> Result<(), RouterRefusal> {
     keys.delete(&typesafe_keychain_service())
 }
 
-/// Set the switch named `use_id` in zo's settings file to one of the modes
-/// that use offers, leaving every other key as it stood.
-///
-/// One door for every seat, because the pane sends the row's own name back:
-/// a use the table does not name is refused rather than written, so a stale
-/// card cannot create a switch nothing reads.
+/// Turn Jev on or off (§6.1) in zo's settings file, under the window's
+/// settings lock and by one atomic replace, leaving every key the press does
+/// not own as it stood. What a press writes is the core's
+/// ([`door::switch_on`], [`door::switch_off`]), where the readers of it live.
 ///
 /// # Errors
-/// A use the table does not name, a word that is not one of that use's modes,
-/// a `smart` value that is not an object (refused rather than overwritten), or
-/// an unreadable or unwritable file.
-pub fn set_use_mode(path: &Path, use_id: &str, mode: &str) -> Result<(), String> {
-    let row = jev_use(use_id).ok_or_else(|| format!("알 수 없는 판단 자리입니다: {use_id}"))?;
-    set_mode(path, row, mode)
-}
-
-/// Write one of a row's own words to its switch under `smart`.
-fn set_mode(path: &Path, row: &JevUse, mode: &str) -> Result<(), String> {
-    let word = row
-        .offered(mode)
-        .ok_or_else(|| format!("알 수 없는 판단 모드입니다: {mode}"))?
-        .key();
+/// A `smart` or `smart.jev` that is not an object (refused rather than
+/// overwritten), or an unreadable or unwritable file.
+pub fn set_enabled(path: &Path, on: bool) -> Result<(), String> {
     update_smart(path, |smart| {
-        smart.insert(row.setting.to_string(), Value::String(word.to_string()));
+        if on {
+            door::switch_on(smart)
+        } else {
+            door::switch_off(smart)
+        }
+        .map_err(|NotAnObject(key)| {
+            format!(
+                "settings.json의 {SMART_SETTINGS_KEY}.{key}가 JSON 객체가 아니라 바꾸지 않았습니다"
+            )
+        })
     })
 }
 
 /// Change `smart` in zo's settings file and nothing else — the one door the
-/// seat switches, the classifier and the model pin write through. A missing
-/// `smart` is made; one that is not an object is refused rather than
-/// overwritten.
-fn update_smart(path: &Path, change: impl FnOnce(&mut Map<String, Value>)) -> Result<(), String> {
+/// switch, the classifier and the model pin write through. A missing `smart`
+/// is made; one that is not an object is refused rather than overwritten, and
+/// a change that refuses writes nothing.
+fn update_smart(
+    path: &Path,
+    change: impl FnOnce(&mut Map<String, Value>) -> Result<(), String>,
+) -> Result<(), String> {
     crate::api_routers::update_zo_settings_root(path, |root| {
         let smart = root
             .entry(SMART_SETTINGS_KEY)
@@ -308,17 +350,15 @@ fn update_smart(path: &Path, change: impl FnOnce(&mut Map<String, Value>)) -> Re
                 "settings.json의 {SMART_SETTINGS_KEY}가 JSON 객체가 아니라 바꾸지 않았습니다"
             ));
         };
-        change(smart);
-        Ok(())
+        change(smart)
     })
 }
 
 /// Set the routing classifier to one of its four words, leaving every other
 /// key as it stood.
 ///
-/// The seat switches have one door each ([`set_use_mode`]); this is its own,
-/// because it is not a seat and writes a different key with a different
-/// vocabulary. A word the table does not offer is refused rather than written:
+/// Its own door, beside the switch's ([`set_enabled`]), because it is not a
+/// feature and writes a different key with a different vocabulary. A word the table does not offer is refused rather than written:
 /// zo reads an unknown word as the provider-free verdict, so a typo here would
 /// quietly stop the routing seat being asked anything.
 ///
@@ -334,6 +374,7 @@ pub fn set_classifier(path: &Path, mode: &str) -> Result<(), String> {
             CLASSIFIER_SETTING.to_string(),
             Value::String(word.to_string()),
         );
+        Ok(())
     })
 }
 
@@ -341,7 +382,7 @@ pub fn set_classifier(path: &Path, mode: &str) -> Result<(), String> {
 /// unpin it with an empty word, leaving every other key as it stood — and
 /// answer the row as the card paints it.
 ///
-/// Its own door, like the classifier's: it is no seat's switch, and its word
+/// Its own door, like the classifier's: it is no feature's switch, and its word
 /// is a model id rather than a mode. Unpinned is no key at all, not the alias
 /// written down, so an unpinned file follows the alias wherever the vendor
 /// moves it. A word the door would not read as a pin — two words, a control
@@ -356,13 +397,16 @@ pub fn set_model(path: &Path, word: &str) -> Result<ModelRow, String> {
     } else {
         Some(pinned_model(word).ok_or_else(|| format!("알 수 없는 모델 이름입니다: {word}"))?)
     };
-    update_smart(path, |smart| match pin {
-        Some(pin) => {
-            smart.insert(MODEL_SETTING.to_string(), Value::String(pin.to_string()));
+    update_smart(path, |smart| {
+        match pin {
+            Some(pin) => {
+                smart.insert(MODEL_SETTING.to_string(), Value::String(pin.to_string()));
+            }
+            None => {
+                smart.remove(MODEL_SETTING);
+            }
         }
-        None => {
-            smart.remove(MODEL_SETTING);
-        }
+        Ok(())
     })?;
     Ok(ModelRow::of(&crate::api_routers::read_zo_settings_root(
         path,
@@ -482,64 +526,112 @@ mod tests {
         assert_eq!(refusal.kind, RouterRefusalKind::KeychainUnavailable);
     }
 
-    /// Each switch is written as its reader reads it and nothing else of the
-    /// file moves: the router rows, other `smart` knobs and unknown keys stay as
-    /// they were. Every mode a row offers goes in and reads back as itself.
+    /// The one switch (§6.1), pressed from the file a person who set every
+    /// feature by hand keeps — twenty words, four folders, and the door's own
+    /// switch never written, as this machine's file holds it on 2026-09-23.
+    /// Before the press the card says Jev is in use in some folders; one press
+    /// on and every feature stands at its recommendation in every folder; one
+    /// press off and nothing is in use. Nothing the press does not own moves:
+    /// the router rows, the model pin, other `smart` knobs, the door's own
+    /// neighbours and unknown keys stay as they were.
     #[test]
-    fn the_switch_is_written_where_zo_reads_it_and_nothing_else_moves() {
+    fn the_one_switch_is_written_where_both_programs_read_it_and_nothing_else_moves() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("settings.json");
+        let mut smart = serde_json::Map::new();
+        for row in &JEV_USES {
+            let word = if row.modes.contains(&JevMode::Auto) {
+                JevMode::Auto
+            } else {
+                JevMode::On
+            };
+            smart.insert(row.setting.to_string(), Value::from(word.key()));
+        }
+        smart.insert(
+            door::JEV_SETTINGS_KEY.to_string(),
+            serde_json::json!({
+                door::WORKSPACES_SETTING: ["/work/a", "/work/b", "/work/c", "/work/d"],
+                "labelDrafts": true,
+            }),
+        );
+        smart.insert(MODEL_SETTING.to_string(), Value::from("jev-1.13.0"));
+        smart.insert("plan".to_string(), serde_json::json!({"minEdge": 3}));
         let before = serde_json::json!({
             "providers": [{"name": "OpenRouter", "base_url": "https://openrouter.ai/api/v1",
                            "models": [], "requires_auth": true, "auth_env": "ZEROCODE_ROUTER_OPENROUTER_KEY"}],
-            "smart": {"plan": {"minEdge": 3}},
             "model": "fable",
+            SMART_SETTINGS_KEY: smart,
         });
         std::fs::write(&path, before.to_string()).expect("write");
         let keys = HeldKeys::default();
         let read = || read_settings(&path, &keys, true).expect("settings");
-        let seat = |state: &TypeSafeSettings, id: &str| {
-            state
-                .switches
-                .iter()
-                .find(|row| row.id == id)
-                .unwrap_or_else(|| panic!("the card has no {id} row"))
-                .mode
+        let file = || -> Value {
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read")).expect("json")
         };
-        for row in &JEV_USES {
-            assert_eq!(seat(&read(), row.id), JevMode::Off.key(), "{}", row.id);
-        }
-
-        for row in &JEV_USES {
-            for mode in row.modes.iter().rev() {
-                set_use_mode(&path, row.id, mode.key()).expect("a mode the row offers");
-                let after: Value =
-                    serde_json::from_str(&std::fs::read_to_string(&path).expect("read"))
-                        .expect("json");
-                assert_eq!(after[SMART_SETTINGS_KEY][row.setting], mode.key());
-                assert_eq!(after["smart"]["plan"], before["smart"]["plan"]);
-                assert_eq!(after["providers"], before["providers"]);
-                assert_eq!(after["model"], before["model"]);
-                assert_eq!(seat(&read(), row.id), mode.key(), "{}", row.id);
+        let untouched = |after: &Value| {
+            for key in ["providers", "model"] {
+                assert_eq!(after[key], before[key], "{key} moved");
             }
-            assert!(
-                set_use_mode(&path, row.id, "actual").is_err(),
-                "{} takes only its row's words",
-                row.id
+            for key in [MODEL_SETTING, "plan"] {
+                assert_eq!(
+                    after[SMART_SETTINGS_KEY][key], before[SMART_SETTINGS_KEY][key],
+                    "smart.{key} moved"
+                );
+            }
+            assert_eq!(
+                after[SMART_SETTINGS_KEY][door::JEV_SETTINGS_KEY]["labelDrafts"],
+                true,
+                "the door's neighbour moved"
             );
-        }
-        assert!(
-            set_use_mode(&path, "a seat the table does not name", JevMode::Off.key()).is_err(),
-            "a use the table does not name writes nothing"
-        );
+        };
 
-        // Every seat now stands at the last word its row offered. Moving one
-        // back to off leaves every other exactly where it was.
-        let before_move: Vec<&str> = JEV_USES.iter().map(|row| seat(&read(), row.id)).collect();
-        set_use_mode(&path, JEV_USES[0].id, JevMode::Off.key()).expect("off");
-        for (row, stood) in JEV_USES.iter().zip(&before_move).skip(1) {
-            assert_eq!(seat(&read(), row.id), *stood, "one switch moved {}", row.id);
+        let held = read();
+        assert_eq!(
+            held.jev,
+            JevSwitch {
+                on: true,
+                everywhere: false,
+                folders: 4,
+            },
+            "a file set by hand sends from its four folders"
+        );
+        assert!(held.switches.iter().all(|row| row.written));
+
+        set_enabled(&path, true).expect("on");
+        let after = file();
+        untouched(&after);
+        let held = read();
+        assert_eq!(
+            held.jev,
+            JevSwitch {
+                on: true,
+                everywhere: true,
+                folders: 0,
+            }
+        );
+        for (row, painted) in JEV_USES.iter().zip(&held.switches) {
+            assert_eq!(painted.mode, row.recommended.key(), "{}", row.id);
+            assert!(!painted.written, "{} kept its own word", row.id);
         }
+
+        set_enabled(&path, false).expect("off");
+        let mut expected = after.clone();
+        expected[SMART_SETTINGS_KEY][door::JEV_SETTINGS_KEY][door::ENABLED_SETTING] =
+            Value::Bool(false);
+        assert_eq!(file(), expected, "off moves the switch and nothing else");
+        let held = read();
+        assert!(!held.jev.on);
+        for painted in &held.switches {
+            assert_eq!(painted.mode, JevMode::Off.key(), "{}", painted.id);
+        }
+
+        // A machine that has never met Jev: nothing in use, and one press on
+        // makes the object it needs.
+        let fresh = dir.path().join("fresh.json");
+        assert!(!read_settings(&fresh, &keys, true).expect("settings").jev.on);
+        set_enabled(&fresh, true).expect("on");
+        let fresh = read_settings(&fresh, &keys, true).expect("settings");
+        assert!(fresh.jev.on && fresh.jev.everywhere);
     }
 
     /// The model pin (`smart.jevModel`, t-6187) is written where both
@@ -625,19 +717,17 @@ mod tests {
 
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("settings.json");
-        std::fs::write(&path, r#"{"smart": "fast"}"#).expect("write");
-        for row in &JEV_USES {
-            assert!(
-                set_use_mode(&path, row.id, row.modes[1].key()).is_err(),
-                "{}",
-                row.id
+        for stranger in [r#"{"smart": "fast"}"#, r#"{"smart": {"jev": ["/work"]}}"#] {
+            std::fs::write(&path, stranger).expect("write");
+            for on in [true, false] {
+                assert!(set_enabled(&path, on).is_err(), "{stranger} {on}");
+            }
+            assert_eq!(
+                std::fs::read_to_string(&path).expect("read"),
+                stranger,
+                "a refused press writes nothing"
             );
         }
-        assert_eq!(
-            std::fs::read_to_string(&path).expect("read"),
-            r#"{"smart": "fast"}"#,
-            "a refused change writes nothing"
-        );
     }
 
     /// zo prints one JSON object whether or not anything answered; anything
@@ -713,25 +803,31 @@ mod tests {
             }
         }
 
-        // Every seat has a row on the card, named by the use's own id, and no
-        // row lists a mode of its own — the options are built from what the
-        // backend answered.
+        // The card offers one switch and no choice of mode: its only select
+        // is the classifier, folded under 고급 and closed until asked for.
         let page = include_str!("../../../ui/index.html");
-        for row in &JEV_USES {
-            let select_id = format!("typesafe-{}-select", row.id);
-            let select = &page[page
-                .find(&format!("id=\"{select_id}\""))
-                .unwrap_or_else(|| panic!("the card has no {select_id}"))..];
-            let select = &select[..select.find("</select>").expect("the switch closes")];
-            assert!(
-                !select.contains("<option"),
-                "{select_id} lists no mode of its own: {select}"
-            );
-            assert!(
-                select.contains(&format!("data-jev-seat=\"{}\"", row.id)),
-                "{select_id} does not say which seat it moves"
-            );
-        }
+        let card = &page[page.find("id=\"typesafe-card\"").expect("the key card")..];
+        let card = &card[..card
+            .find("<template id=\"jev-features\">")
+            .expect("the features follow the card")];
+        assert_eq!(card.matches("data-jev-switch ").count(), 1, "one switch");
+        assert_eq!(card.matches("<select").count(), 1, "{card}");
+        let advanced = &card[card
+            .find("<details class=\"settings-fold settings-jev-advanced\"")
+            .expect("the advanced fold")..];
+        assert!(
+            advanced.contains("id=\"route-classifier-select\""),
+            "the classifier stands under the advanced fold"
+        );
+        let opening = &advanced[..advanced.find('>').expect("the fold opens")];
+        assert!(
+            !opening.contains(" open"),
+            "the advanced fold starts closed"
+        );
+        assert!(
+            !page.contains("data-jev-seat"),
+            "a feature's mode is chosen on the page"
+        );
 
         let main = include_str!("main.rs");
         let handlers = main
@@ -739,17 +835,21 @@ mod tests {
             .map(|(_, list)| list)
             .expect("the handler list");
         // The card's script and the dashboard's: one Jev, two surfaces, and
-        // the seat switch's door (`set_jev_mode`) and the ledgers' numbers
+        // the switch's door (`set_jev_enabled`) and the ledgers' numbers
         // (`jev_summary`) are asked from the file both surfaces share.
         let pane = concat!(
             include_str!("../../../ui/shell-settings.js"),
             include_str!("../../../ui/shell-jev.js")
         );
+        assert!(
+            !handlers.contains("set_jev_mode,"),
+            "a feature's mode is written by the file's own hand, not by a door"
+        );
         for command in [
             "typesafe_settings",
             "save_typesafe_key",
             "remove_typesafe_key",
-            "set_jev_mode",
+            "set_jev_enabled",
             "set_route_classifier",
             "set_jev_model",
             "check_typesafe_key",
@@ -767,44 +867,55 @@ mod tests {
         }
     }
 
-    /// Every seat's card row names itself in the markup's own language and in
-    /// each of the four catalogs — the label, the one-line summary and the
-    /// folded paragraph — so no language falls back to another seat's words
-    /// or to a bare key. A seat added to the table turns this red until its
-    /// row and its words exist.
+    /// Every feature names itself in the markup's own language and in each of
+    /// the four catalogs — its name, the one-line summary and the paragraph of
+    /// what it sends — so no language falls back to another feature's words or
+    /// to a bare key. The markup keeps them once, in the use table's order
+    /// (`#jev-features`), and a feature added to the table turns this red
+    /// until its words exist.
     #[test]
-    fn every_seat_speaks_in_every_catalog() {
+    fn every_feature_speaks_in_every_catalog() {
         let page = include_str!("../../../ui/index.html");
         let i18n = include_str!("../../../ui/shell-i18n.js");
-        for row in &JEV_USES {
-            // The seat's row, from its label to its switch: the label's key
-            // names the row's words (`settings.typesafe.<word>`), and the
-            // summary and the folded paragraph hang off the same word.
-            let switch = page
-                .find(&format!("data-jev-seat=\"{}\"", row.id))
-                .unwrap_or_else(|| panic!("the card has no {} switch", row.id));
-            let before = &page[..switch];
-            let label = before
-                .rfind("class=\"settings-label\" data-i18n=\"")
-                .map(|at| &before[at + "class=\"settings-label\" data-i18n=\"".len()..])
-                .and_then(|rest| rest.split('"').next())
-                .unwrap_or_else(|| panic!("the {} row has no label key", row.id));
+        let template = &page[page
+            .find("<template id=\"jev-features\">")
+            .expect("the features' words")..];
+        let template = &template[..template.find("</template>").expect("the template closes")];
+        let named: Vec<&str> = template
+            .split("data-jev-feature=\"")
+            .skip(1)
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        let table: Vec<&str> = JEV_USES.iter().map(|row| row.id).collect();
+        assert_eq!(named, table, "the features stand in the table's order");
+        for (row, words) in JEV_USES
+            .iter()
+            .zip(template.split("data-jev-feature=\"").skip(1))
+        {
+            let key = |part: &str| {
+                let marker = format!("data-jev-{part} data-i18n=\"");
+                let at = words
+                    .find(&marker)
+                    .unwrap_or_else(|| panic!("{} has no {part}", row.id));
+                words[at + marker.len()..]
+                    .split('"')
+                    .next()
+                    .expect("a key")
+                    .to_string()
+            };
+            let name = key("name");
             assert!(
-                label.starts_with("settings.typesafe."),
-                "{}: {label} is not a seat key",
+                name.starts_with("settings.typesafe."),
+                "{}: {name} is not a feature key",
                 row.id
             );
-            for suffix in ["", "Summary", "Hint"] {
-                let key = format!("{label}{suffix}");
-                assert!(
-                    page.contains(&format!("data-i18n=\"{key}\"")),
-                    "the {} row has no {key}",
-                    row.id
-                );
+            for (part, suffix) in [("name", ""), ("summary", "Summary"), ("hint", "Hint")] {
+                let said = key(part);
+                assert_eq!(said, format!("{name}{suffix}"), "{} {part}", row.id);
                 assert_eq!(
-                    i18n.matches(&format!("\"{key}\"")).count(),
+                    i18n.matches(&format!("\"{said}\"")).count(),
                     4,
-                    "{key} must be in en/ja/zh/es"
+                    "{said} must be in en/ja/zh/es"
                 );
             }
         }
@@ -1044,10 +1155,11 @@ mod tests {
             .map(|row| {
                 let modes: Vec<&str> = row.modes.iter().map(|mode| mode.key()).collect();
                 format!(
-                    "Object.freeze({{ id: \"{}\", setting: \"{}\", modes: \"{}\" }}),",
+                    "Object.freeze({{ id: \"{}\", setting: \"{}\", modes: \"{}\", recommended: \"{}\" }}),",
                     row.id,
                     row.setting,
-                    modes.join(" ")
+                    modes.join(" "),
+                    row.recommended.key()
                 )
             })
             .collect();
@@ -1188,20 +1300,18 @@ mod tests {
                 ),
             ),
             ("dashboard script", include_str!("../../../ui/shell-jev.js")),
+            // The card's switch and the features' words — where a mode word
+            // could stand now that no select offers one (§6.1).
+            (
+                "pane switch",
+                between(page, "data-jev-switch-row", "</label>"),
+            ),
+            (
+                "pane features",
+                between(page, "<template id=\"jev-features\">", "</template>"),
+            ),
         ];
-        let switches: Vec<(String, &str)> = JEV_USES
-            .iter()
-            .map(|row| {
-                let id = format!("typesafe-{}-select", row.id);
-                let cut = between(page, &format!("id=\"{id}\""), "</select>");
-                (format!("pane {} switch", row.id), cut)
-            })
-            .collect();
-        let named = readers
-            .iter()
-            .map(|(reader, source)| ((*reader).to_string(), *source))
-            .chain(switches);
-        for (reader, source) in named {
+        for (reader, source) in readers {
             for mode in JevMode::ALL {
                 assert!(
                     !source.contains(&format!("\"{}\"", mode.key())),
@@ -1276,9 +1386,15 @@ mod tests {
                     "\n}",
                 ),
             ),
+            // The classifier's part of the card, up to where the advanced
+            // fold that holds it closes.
             (
                 "pane card",
-                between(page, "id=\"route-classifier-card\"", "\n        <!--"),
+                between(
+                    page,
+                    "id=\"route-classifier-card\"",
+                    "\n          </details>",
+                ),
             ),
         ];
         for (reader, source) in readers {
@@ -1292,6 +1408,29 @@ mod tests {
             }
         }
         assert_eq!(CLASSIFIER_SETTING, "autoClassifier");
+    }
+
+    /// The harness's fake backend presses the switch the way the core does
+    /// (§6.1): the door's own object and the every-folder word are the
+    /// core's, and the card asks the switch's own door.
+    #[test]
+    fn the_settings_harness_mirrors_the_switch() {
+        let harness = include_str!("../../../ui/tests/settings.mjs");
+        assert!(
+            harness.contains(&format!(
+                "const JEV_SETTINGS_KEY = \"{}\"",
+                door::JEV_SETTINGS_KEY
+            )),
+            "the harness writes the switch under another object than the door reads"
+        );
+        assert!(
+            harness.contains(&format!(
+                "const JEV_EVERY_WORKSPACE = \"{}\"",
+                door::EVERY_WORKSPACE
+            )),
+            "the harness's every-folder word is not the core's"
+        );
+        assert!(harness.contains("case \"set_jev_enabled\""));
     }
 
     /// The harness's fake backend answers the model pin the way the window

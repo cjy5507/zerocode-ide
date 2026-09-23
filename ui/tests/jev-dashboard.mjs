@@ -1,18 +1,19 @@
 /* The Jev dashboard (t-5807, docs/design/jev-dashboard-and-perfection-20260921.md §2).
  *
  * What is measured: the rail door opens one tab; the table carries every
- * seat the settings card carries, in the card's order and under the card's
- * names; the numbers zo answered stand in their cells, the trend has one
- * point per counted day, and the recent list shows what the digest said;
- * a switch moved on the dashboard goes through the card's door and the card
- * follows; the refresh policy is one ask on open, one settled ask per burst
- * of ledger events, none on a re-open within the beat; and the time from
- * the click to the drawn table, with the backend answering at once, sits
- * under the design's line (§2: ≤ 200 ms).
+ * feature the settings markup names (`#jev-features`), in its order and
+ * under its names; the numbers zo answered stand in their cells, the trend
+ * has one point per counted day, and the recent list shows what the digest
+ * said; the one switch over the table is the card's, pressed through the
+ * card's door (docs/design/jev-settings-20260917.md §6.1), and no feature
+ * offers a mode to choose; the refresh policy is one ask on open, one
+ * settled ask per burst of ledger events, none on a re-open within the
+ * beat; and the time from the click to the drawn table, with the backend
+ * answering at once, sits under the design's line (§2: ≤ 200 ms).
  *
- * The backend is the window harness's stub with three answers swapped in
- * (`window.__ANSWER__`): the settings' switches, zo's summary and the seat
- * switch's door. */
+ * The backend is the window harness's stub with its answers swapped in
+ * (`window.__ANSWER__`): the settings' state, zo's summary, the day's
+ * count and the switch's door. */
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
@@ -27,11 +28,12 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
  * ask), so they are written under the checkout's output folder, which git
  * ignores, and named in the report. */
 const EVIDENCE_DIR = join(ROOT, "output", "t-5807");
-/* How many seats the settings card carries — counted off the card's own
- * markup rather than typed here, so a seat added to the use table (which
- * `typesafe_settings.rs` holds the card to) is not a second number to move. */
+/* How many features the settings markup names — counted off the markup
+ * rather than typed here, so a feature added to the use table (which
+ * `typesafe_settings.rs` holds the markup to) is not a second number to
+ * move. */
 const { readFileSync } = await import("node:fs");
-const SEATS = (readFileSync(join(ROOT, "ui", "index.html"), "utf8").match(/data-jev-seat="/g) ?? []).length;
+const SEATS = (readFileSync(join(ROOT, "ui", "index.html"), "utf8").match(/data-jev-feature="/g) ?? []).length;
 /* The fewest days with a value a trend is drawn from (t-6243 D4). */
 const TREND_DAYS = 3;
 
@@ -39,7 +41,8 @@ const TREND_DAYS = 3;
  * With `real` — this machine's own count, from `realSummary` — the summary
  * answer is that count and every switch stands where that count says. */
 function jevDashboardFixture(real = null) {
-  const seats = [...document.querySelectorAll("[data-jev-seat]")].map((select) => select.dataset.jevSeat);
+  const seats = [...document.getElementById("jev-features").content.querySelectorAll("[data-jev-feature]")]
+    .map((feature) => feature.dataset.jevFeature);
   const modes = [
     { mode: "off", asks: false, applies: false, automatic: false },
     { mode: "shadow", asks: true, applies: false, automatic: false },
@@ -159,12 +162,15 @@ function jevDashboardFixture(real = null) {
     }
     return seat;
   };
-  window.__JEV__ = { seats, modeOf, asks: [] };
+  // The one switch (§6.1): in use, from four folders — a machine set up
+  // before the switch — until a press says otherwise.
+  const jev = { on: true, everywhere: false, folders: 4 };
+  window.__JEV__ = { seats, modeOf, asks: [], jev, pressed: [] };
   const settings = () => ({
-    keysKeptHere: true, keySaved: true,
+    keysKeptHere: true, keySaved: true, jev: { ...jev },
     // Every seat's comparison sample floor, the use table's
     // (`JevUse::agreement_rows_wanted`, a judgment window's worth).
-    switches: seats.map((id) => ({ id, setting: id, mode: modeOf[id], modes, agreementRowsWanted: 20 })),
+    switches: seats.map((id) => ({ id, setting: id, mode: modeOf[id], modes, written: true, agreementRowsWanted: 20 })),
     classifier: { setting: "autoClassifier", mode: "probed", probes: true, gates: seats[0],
       modes: [{ mode: "probed", runs: true, markers: false, probes: true }] },
   });
@@ -176,8 +182,11 @@ function jevDashboardFixture(real = null) {
     window.__JEV__.asks.push(args ?? {});
     return seats.map((id) => numbers(id, args));
   };
-  window.__ANSWER__.set_jev_mode = (args) => {
-    modeOf[args.use] = args.mode;
+  // The switch's door, as the core presses it: on is every folder and every
+  // seat at its recommendation, off is nothing in use.
+  window.__ANSWER__.set_jev_enabled = (args) => {
+    window.__JEV__.pressed.push(args.on);
+    Object.assign(jev, args.on ? { on: true, everywhere: true, folders: 0 } : { on: false });
     return settings();
   };
   if (real) {
@@ -195,10 +204,14 @@ function jevDashboardFixture(real = null) {
     const faults = [];
     const box = root.getBoundingClientRect();
     // What is folded away is not on the surface: a closed `<details>` keeps
-    // its body's boxes (content-visibility) but nobody sees them.
+    // its body's boxes (content-visibility) but nobody sees them — and a fold
+    // inside a closed fold is out of sight, its own summary with it.
     const folded = (node) => {
-      const fold = node.closest("details:not([open])");
-      return fold !== null && !(node.tagName === "SUMMARY" && node.parentElement === fold) && !node.closest("summary");
+      for (let fold = node.closest("details:not([open])"); fold; fold = fold.parentElement?.closest("details:not([open])") ?? null) {
+        const summary = node.closest("summary");
+        if (!(summary && summary.parentElement === fold)) return true;
+      }
+      return false;
     };
     const held = [...root.querySelectorAll("*")].filter((node) =>
       !(node instanceof SVGElement) && node.tagName !== "OPTION" && node.tagName !== "SELECT"
@@ -330,22 +343,29 @@ export async function testJevDashboardEvidence(browser, origin, ok) {
       true,
       real ? `real: ${real.zo}${real.recent ? " --recent 12" : " (no recent list: that zo predates the flag)"}` : "fixture: no zo answered");
 
-    // The settings card, standing on the same numbers.
+    // The settings card: one switch, the key, and a line to the dashboard
+    // (§6.1) — no choice of mode in sight.
     for (const theme of ["dark", "light"]) {
       await setQualityTheme(page, theme);
-      await page.evaluate(() => setSettingsOpen(true, "typesafe-routing-select"));
-      await page.waitForFunction(() => document.querySelector("#jev-uses-card [data-jev-numbers]") !== null);
+      await page.evaluate(() => setSettingsOpen(true, "jev-enabled"));
+      await page.waitForFunction(() => document.getElementById("jev-enabled")?.checked !== undefined);
       await settlePaint(page);
       const card = await page.evaluate(() => {
-        const card = document.querySelector("#jev-uses-card");
+        const card = document.querySelector("#typesafe-card");
         card.scrollIntoView({ block: "start" });
-        return { faults: window.__JEV_TEXT_FAULTS__(card), lines: card.querySelectorAll("[data-jev-numbers]").length };
+        return {
+          faults: window.__JEV_TEXT_FAULTS__(card),
+          visibleSelects: [...card.querySelectorAll("select")]
+            .filter((one) => !one.closest("details:not([open])") && one.getClientRects().length > 0).length,
+          switches: card.querySelectorAll("[data-jev-switch]").length,
+        };
       });
       const path = join(EVIDENCE_DIR, `jev-settings-card-${theme}.png`);
-      await page.locator("#jev-uses-card").screenshot({ path });
+      await page.locator("#typesafe-card").screenshot({ path });
       await page.evaluate(() => setSettingsOpen(false));
-      ok(`the ${theme} settings card draws the same numbers with no text cut, clipped or overlapping`,
-        card.faults.length === 0 && card.lines === counted, JSON.stringify({ ...card, faults: card.faults.slice(0, 6), path }));
+      ok(`the ${theme} settings card is one switch and the key, with no text cut, clipped or overlapping`,
+        card.faults.length === 0 && card.visibleSelects === 0 && card.switches === 1,
+        JSON.stringify({ ...card, faults: card.faults.slice(0, 6), path, counted }));
     }
     ok("the evidence pages raised no renderer fault", faults.length === 0, faults.join(" | "));
   } finally {
@@ -376,8 +396,8 @@ export async function testJevDashboard(browser, origin, ok) {
       });
       const ms = performance.now() - began;
       const rows = [...view().querySelectorAll("[data-jev-dash-row]")];
-      const cardNames = window.__JEV__.seats.map((id) => document.querySelector(`[data-jev-seat="${id}"]`)
-        .closest("[data-jev-row]").querySelector(".settings-label").textContent.trim());
+      const cardNames = window.__JEV__.seats.map((id) => document.getElementById("jev-features").content
+        .querySelector(`[data-jev-feature="${id}"] [data-jev-name]`).textContent.trim());
       const cell = (id, name) => view().querySelector(`[data-jev-dash-row="${id}"] [data-jev-cell="${name}"]`);
       const fact = (id, name) => view().querySelector(`[data-jev-dash-row="${id}"] [data-jev-fact="${name}"]`)?.textContent ?? null;
       const summon = {
@@ -386,7 +406,6 @@ export async function testJevDashboard(browser, origin, ok) {
         applied: fact("summon", "applied"),
         agreement: fact("summon", "agreement"), cost: cell("summon", "cost").textContent,
         boundTip: view().querySelector('[data-jev-dash-row="summon"] [data-jev-fact="bound"]')?.dataset.tip ?? null,
-        mode: cell("summon", "mode").querySelector("select").value,
       };
       const recallWeek = fact("recall", "week");
       // Each feature's state (t-6243 D2): its chip and tone, one reason, the
@@ -432,13 +451,22 @@ export async function testJevDashboard(browser, origin, ok) {
       // What the rate and accuracy cells say (t-6243 D3).
       const said = (id) => ({ answered: cell(id, "answered").textContent, agreement: fact(id, "agreement") });
       const small = Object.fromEntries(["summon", "placement", "routing", "notify", "browser"].map((id) => [id, said(id)]));
-      const cardLine = document.querySelector('[data-jev-seat="summon"]').closest("[data-jev-row]")
-        .querySelector("[data-jev-numbers]")?.textContent ?? null;
+      // The switch over the table (§6.1), and whether any feature still
+      // offers a mode to choose.
+      const mirror = view().querySelector(".jev-switch");
+      const switchOver = mirror ? {
+        checked: mirror.querySelector("[data-jev-switch]")?.checked ?? null,
+        id: mirror.querySelector("[id]")?.id ?? null,
+        partial: !mirror.querySelector("[data-jev-partial]")?.hidden,
+        said: mirror.querySelector("[data-jev-partial-said]")?.textContent ?? "",
+        beforeTable: Boolean(mirror.compareDocumentPosition(view().querySelector(".jev-table")) & Node.DOCUMENT_POSITION_FOLLOWING),
+      } : null;
+      const tableSelects = view().querySelectorAll(".jev-table select").length;
       return {
         ms, active: activeTabId, visible: !view().hidden, hiddenAttr: view().hidden,
         rowIds: rows.map((row) => row.dataset.jevDashRow),
         rowNames: rows.map((row) => row.querySelector('[data-jev-cell="seat"]').textContent),
-        cardNames, cardSeats: window.__JEV__.seats, summon, recallWeek, statuses, caption, cardLine, small, trends,
+        cardNames, cardSeats: window.__JEV__.seats, summon, recallWeek, statuses, caption, small, trends, switchOver, tableSelects,
         strip, fold, bodyRows: bodyRows.length,
         asks: window.__JEV__.asks.slice(), settingsAsks: window.__COUNTS__.typesafe_settings ?? 0,
         summaryAsks: window.__COUNTS__.jev_summary ?? 0, dayAsks: window.__COUNTS__.jev_day ?? 0,
@@ -510,7 +538,7 @@ export async function testJevDashboard(browser, origin, ok) {
       opened.summon.today === "32" && opened.summon.week === "50" && opened.summon.answered.startsWith("96%")
         && opened.summon.answered.includes("84%")
         && opened.summon.applied === "0"
-        && opened.summon.agreement === "16/44 (24%)" && opened.summon.cost === "$0.0123" && opened.summon.mode === "on"
+        && opened.summon.agreement === "16/44 (24%)" && opened.summon.cost === "$0.0123"
         && opened.summon.latency === "230 ms (느릴 때 410)" && opened.recallWeek === "1,005",
       JSON.stringify(opened.summon));
     // One chip, one reason, and — while the feature still wants samples —
@@ -561,19 +589,25 @@ export async function testJevDashboard(browser, origin, ok) {
       await window.__PAINTED__();
       view.querySelector('[data-jev-dash-row="notify"] .jev-token[data-token="not_consented"]').click();
       await window.__PAINTED__();
-      const consent = { open: !settingsView.hidden, said: document.querySelector("#typesafe-status")?.textContent ?? "" };
+      const consent = { open: !settingsView.hidden, said: document.querySelector("#typesafe-status")?.textContent ?? "",
+        focus: document.activeElement?.id ?? null };
       setSettingsOpen(false);
       await window.__PAINTED__();
       return { key, consent, back: activeTabId };
     });
-    ok("a key chip opens settings on the key field, and a consent chip says where the folder is consented",
+    ok("a key chip opens settings on the key field, and a consent chip lands on the switch that consents every folder",
       fixed.key.open && fixed.key.focus === "typesafe-key-input" && fixed.consent.open
-        && fixed.consent.said.includes("smart.jev.workspaces") && fixed.back === "jev",
+        && fixed.consent.focus === "jev-enabled" && fixed.consent.said.includes("「모든 폴더에서 사용」")
+        && fixed.back === "jev",
       JSON.stringify(fixed));
     ok("the model is named once, over the table, and a row names a version only when it is another",
-      opened.caption === "모델 jev-1.13.0" && Object.values(st).every((one) => !one.facts.some((fact) => fact.startsWith("모델 ")))
-        && (opened.cardLine ?? "").includes("모델 jev-1.13.0 · 판정 표본 34건 · 이전 버전 jev-1.12.0의 기록은 제외"),
-      JSON.stringify({ caption: opened.caption, card: opened.cardLine }));
+      opened.caption === "모델 jev-1.13.0" && Object.values(st).every((one) => !one.facts.some((fact) => fact.startsWith("모델 "))),
+      JSON.stringify({ caption: opened.caption }));
+    ok("the switch stands over the table as the card's, in use from some folders, and no feature offers a mode",
+      opened.switchOver !== null && opened.switchOver.checked === true && opened.switchOver.id === null
+        && opened.switchOver.partial && opened.switchOver.said === "일부 폴더(4개)에서만 사용 중입니다."
+        && opened.switchOver.beforeTable && opened.tableSelects === 0,
+      JSON.stringify({ switchOver: opened.switchOver, tableSelects: opened.tableSelects }));
     ok("a state cell says at most fourteen words and no separator dots",
       Object.values(st).every((one) => one.words <= 14 && !one.dots),
       JSON.stringify(Object.fromEntries(Object.entries(st).map(([id, one]) => [id, one.words]))));
@@ -654,28 +688,41 @@ export async function testJevDashboard(browser, origin, ok) {
         && picked.marks[1].includes("기록만"),
       JSON.stringify(picked));
 
-    // A switch moved on the dashboard goes through the card's door, and the
-    // card's own switch follows — one state, two surfaces.
-    const moved = await page.evaluate(async () => {
+    // The switch over the table goes through the card's door, and the card's
+    // own switch follows — one state, two surfaces (§6.1): the line's press
+    // consents every folder, and a press off turns both switches off.
+    const pressed = await page.evaluate(async () => {
       const view = document.querySelector("#jev-view");
-      const select = view.querySelector('[data-jev-dash-seat="routing"]');
-      select.value = "shadow";
-      select.dispatchEvent(new Event("change", { bubbles: true }));
-      await new Promise((done) => setTimeout(done, 50));
-      await window.__PAINTED__();
+      const settle = async () => {
+        await new Promise((done) => setTimeout(done, 50));
+        await window.__PAINTED__();
+      };
+      view.querySelector(".jev-switch [data-jev-everywhere]").click();
+      await settle();
+      const everywhere = {
+        partial: !view.querySelector(".jev-switch [data-jev-partial]").hidden,
+        card: document.getElementById("jev-enabled").checked,
+        cardPartial: !document.querySelector("#typesafe-card [data-jev-partial]").hidden,
+      };
+      const toggle = view.querySelector(".jev-switch [data-jev-switch]");
+      toggle.click();
+      await settle();
       return {
-        calls: window.__COUNTS__.set_jev_mode ?? 0,
-        held: window.__JEV__.modeOf.routing,
-        dashboard: view.querySelector('[data-jev-dash-seat="routing"]').value,
-        card: document.querySelector("#typesafe-routing-select").value,
+        calls: window.__COUNTS__.set_jev_enabled ?? 0,
+        pressed: window.__JEV__.pressed.slice(),
+        everywhere,
+        dashboard: toggle.checked,
+        card: document.getElementById("jev-enabled").checked,
         status: view.querySelector(".jev-status").textContent,
         statusHidden: view.querySelector(".jev-status").hidden,
       };
     });
-    ok("a switch moved on the dashboard goes through set_jev_mode and the card follows",
-      moved.calls === 1 && moved.held === "shadow" && moved.dashboard === "shadow" && moved.card === "shadow"
-        && !moved.statusHidden && moved.status.includes("기록만"),
-      JSON.stringify(moved));
+    ok("the switch over the table goes through set_jev_enabled and the card follows",
+      pressed.calls === 2 && pressed.pressed.join(",") === "true,false"
+        && !pressed.everywhere.partial && pressed.everywhere.card && !pressed.everywhere.cardPartial
+        && pressed.dashboard === false && pressed.card === false
+        && !pressed.statusHidden && pressed.status === "껐습니다. 아무것도 보내지 않습니다.",
+      JSON.stringify(pressed));
 
     // The refresh policy: a burst of ledger events is one settled ask; a
     // re-open within the beat is none; the beat itself is slower than the

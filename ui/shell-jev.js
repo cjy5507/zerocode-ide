@@ -1,17 +1,15 @@
-/* ---- Jev: the ledgers' numbers, on the settings card and on the dashboard ----
+/* ---- Jev: the one switch, and the ledgers' numbers on the dashboard ----
  *
- * What zo last said each seat's ledger holds (`zo jev summary --json`,
- * docs/design/jev-settings-20260917.md §5) is one answer with two readers:
- * the settings card draws a line of it under every switch, and the dashboard
- * (docs/design/jev-dashboard-and-perfection-20260921.md §2) draws the table,
- * the recent decisions and the week's trend. Both read from here — one cache,
- * one ask, one set of words — so the number on the card is the number on the
- * dashboard. Neither counts the files: the judge that promotes a seat reads
- * them the same way zo does, and a screen free to disagree with the seat it
- * is drawing is worse than a screen with no numbers.
+ * The switch a person turns Jev on and off with (2026-09-23,
+ * docs/design/jev-settings-20260917.md §6.1) stands on the settings card and
+ * over the dashboard's table: one command, one state, painted here for both.
  *
- * The dashboard's ask is the card's ask with one more flag (`recent`), so a
- * dashboard beside an open card still costs one zo per refresh. */
+ * What zo last said each feature's ledger holds (`zo jev summary --json`,
+ * §5) is the dashboard's (docs/design/jev-dashboard-and-perfection-20260921.md
+ * §2): the table, each feature's recent judgments and the week's trend. It
+ * does not count the files: the judge that promotes a feature reads them the
+ * same way zo does, and a screen free to disagree with the feature it is
+ * drawing is worse than a screen with no numbers. */
 
 /* The tab the dashboard lives in — a document surface like the skills view,
  * built here rather than declared in index.html (`DOC_VIEWS.jev`). */
@@ -150,11 +148,83 @@ async function loadJevNumbers({ recent = jevViewsShowing() } = {}) {
   }
 }
 
-/* Move one seat's switch — the one door every surface's switch goes
- * through (`set_jev_mode`, the use's own name), and the card's own step
- * runner, so a refused move is said the same way wherever it was asked. */
-function moveJevSeat(seat, mode, said) {
-  return runTypeSafe(() => invoke("set_jev_mode", { use: seat, mode }), said);
+/* ---- the one switch ----
+ * `smart.jev.enabled`, pressed on the settings card or over the dashboard's
+ * table: one command (`set_jev_enabled`), one state (`typesafeState.jev`),
+ * and every surface that wears the switch painted from it here. */
+
+/* Turn Jev on or off from any surface that wears the switch: on consents
+ * every folder and hands every feature its recommended mode; off sends
+ * nothing. The card's own step runner, so a refused press is said the same
+ * way wherever it was made. */
+function setJevEnabled(on) {
+  return runTypeSafe(() => invoke("set_jev_enabled", { on }), (state) => {
+    const words = jevEnabledSaid(state);
+    jevSayStatus(words);
+    return words;
+  });
+}
+
+/* What a press did, in the words of where Jev now stands. */
+function jevEnabledSaid(state) {
+  return state.jev?.on
+    ? t("settings.typesafe.turnedOn", "켰습니다. 모든 폴더에서 기능마다 권장 설정으로 판단을 요청합니다.")
+    : t("settings.typesafe.turnedOffAll", "껐습니다. 아무것도 보내지 않습니다.");
+}
+
+/* Every switch under `root` — the card's and each dashboard's — painted from
+ * the one state: thrown while Jev is in use here, still while a step runs, and
+ * the line under it shown while only some folders are consented, with how
+ * many. */
+function paintJevSwitches(root = document) {
+  const jev = typesafeState?.jev ?? null;
+  for (const input of root.querySelectorAll("[data-jev-switch]")) {
+    input.checked = Boolean(jev?.on);
+    input.disabled = typesafeBusy || !jev;
+  }
+  const partial = Boolean(jev?.on) && !jev.everywhere;
+  for (const line of root.querySelectorAll("[data-jev-partial]")) {
+    line.hidden = !partial;
+    const said = line.querySelector("[data-jev-partial-said]");
+    if (said) {
+      said.textContent = partial
+        ? t("settings.typesafe.partial", "일부 폴더({{count}}개)에서만 사용 중입니다.", { count: jevCount(jev.folders) })
+        : "";
+    }
+    const press = line.querySelector("[data-jev-everywhere]");
+    if (press) press.disabled = typesafeBusy;
+  }
+}
+
+/* The card's switch row and the line under it, as a copy a dashboard wears:
+ * the card's own markup, so its words are the card's, with no ids (the card
+ * keeps its own) and no label pointing at the card's input — a press on the
+ * copy throws the copy. */
+function jevSwitchMirror() {
+  const card = el("typesafe-card");
+  const row = card?.querySelector("[data-jev-switch-row]");
+  if (!row) return null;
+  const holder = jevNode("div", "jev-switch", row.cloneNode(true));
+  const partial = card.querySelector("[data-jev-partial]");
+  if (partial) holder.append(partial.cloneNode(true));
+  for (const node of holder.querySelectorAll("[id], [for]")) {
+    node.removeAttribute("id");
+    node.removeAttribute("for");
+  }
+  return holder;
+}
+
+/* A feature's words as the settings markup keeps them (`#jev-features`): its
+ * name, one line of what it does and the paragraph of what it sends, each by
+ * the catalog key it is written under — the markup is the one place the
+ * Korean is written. `null` for a part the markup does not hold. */
+function jevFeature(id) {
+  const holder = el("jev-features")?.content.querySelector(`[data-jev-feature="${id}"]`) ?? null;
+  const part = (name) => {
+    const node = holder?.querySelector(`[data-jev-${name}]`);
+    return node ? { key: node.dataset.i18n, source: node.textContent.replace(/\s+/g, " ").trim() } : null;
+  };
+  return { name: part("name"), summary: part("summary"), hint: part("hint") };
 }
 
 /* The line a judgment turned on, by the core's token
@@ -177,87 +247,11 @@ function jevLineWords(line) {
   return said ? t(said.key, said.word) : "";
 }
 
-/* One seat's numbers as words — what it did today, how it answered over the
- * week, and, for a seat whose `auto` may rise, what the judge said of that
- * window. The card's line and the dashboard's last column are this list,
- * joined; a seat nothing has asked yet is one sentence. */
-function jevSeatWords(held) {
-  if (held.week.rows === 0) {
-    return [t("settings.typesafe.seatNeverAsked", "아직 사용된 적이 없습니다.")];
-  }
-  const words = [t("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}}건 응답", {
-    today: jevCount(held.today.rows),
-    rows: jevCount(held.week.rows),
-    answered: jevCount(held.week.answered),
-  })];
-  if (held.week.p95Ms !== null && held.week.p95Ms !== undefined) {
-    words.push(t("settings.typesafe.seatP95", "느릴 때 {{ms}} ms", { ms: jevMs(held.week.p95Ms) }));
-  }
-  const version = jevVersionWords(held);
-  if (version) words.push(version);
-  if (held.verdict) {
-    const because = jevLineWords(held.verdict.line);
-    words.push(held.applies
-      ? t("settings.typesafe.seatApplying", "근거가 충분해 자동 적용 중입니다.")
-      : t("settings.typesafe.seatHolding", "기록만 하는 중 — {{because}}", { because }));
-  }
-  return words;
-}
-
-/* Which version the seat's judgments come from (t-6187): the pin, when the
- * person pinned one — every request names it — and otherwise the version the
- * newest answer named. Empty for a seat nothing answered, or from a zo older
- * than the pin. The card and the dashboard both read it here, so the two say
- * it the same way. */
-function jevModelWords(held) {
-  if (!held.model || !held.askedModel) return "";
-  return typesafeState?.model?.pinned
-    ? t("settings.typesafe.seatVersionPinned", "고정 모델 {{model}}", { model: held.askedModel })
-    : t("settings.typesafe.seatVersion", "모델 {{model}}", { model: held.model });
-}
-
 /* The version a change of version cut away from the judged window, when one
  * did — the reason a thin window gives for itself. */
 function jevCutWords(held) {
   if (!held.verdict?.cutModel) return "";
   return t("settings.typesafe.seatCut", "이전 버전 {{cut}}의 기록은 제외", { cut: held.verdict.cutModel });
-}
-
-/* The card's version line: the models, the rows the judged window holds and
- * the version cut away. Before the verdict's words, which stay last. */
-function jevVersionWords(held) {
-  const models = jevModelWords(held);
-  if (!models) return "";
-  const words = [models];
-  if (held.judged) {
-    words.push(t("settings.typesafe.seatWindowRows", "판정 표본 {{rows}}건",
-      { rows: jevCount(held.judged.window.rows) }));
-  }
-  const cut = jevCutWords(held);
-  if (cut) words.push(cut);
-  return words.join(" · ");
-}
-
-/* The one line under a seat's switch, and the same line in the dashboard's
- * row: built here for both, so a seat added to the table gets its numbers
- * with it rather than an eighth copy of the same markup. `line` is whatever
- * holds the seat — the card's row or the dashboard's cell. */
-function paintJevNumbers(line, seat) {
-  const held = (jevNumbers ?? []).find((row) => row.id === seat) ?? null;
-  let said = line.querySelector("[data-jev-numbers]");
-  if (!held) {
-    // Nothing counted: no line at all rather than an empty one, so a row with
-    // no numbers reads as a row with no numbers and not as a silent zero.
-    said?.remove();
-    return;
-  }
-  if (!said) {
-    said = document.createElement("p");
-    said.className = "settings-row-desc settings-jev-numbers";
-    said.setAttribute("data-jev-numbers", "");
-    line.append(said);
-  }
-  said.textContent = jevSeatWords(held).join(" · ");
 }
 
 /* ---- the dashboard ---- */
@@ -300,7 +294,6 @@ function jevNode(tag, className, ...children) {
  * meaning said once carries that sentence as its tip (`tipKey`, `tip`). */
 const JEV_COLUMNS = Object.freeze([
   { cell: "seat", key: "jev.col.seat", word: "기능" },
-  { cell: "mode", key: "jev.col.mode", word: "설정" },
   { cell: "rows", key: "jev.col.rows", word: "판단 요청 (오늘 / 7일)" },
   { cell: "answered", key: "jev.col.answered", word: "응답률 (신뢰 하한)", tipKey: "jev.col.answeredTip", tip: "응답률은 판단을 요청한 것 중 응답을 받은 비율이고, 신뢰 하한은 표본이 적을 때를 감안한 보수적인 값입니다." },
   { cell: "latency", key: "jev.col.latency", word: "응답 시간" },
@@ -424,6 +417,9 @@ function buildJevView() {
   const settings = jevText("jev.openSettings", "설정에서 자세히", "button", "btn jev-settings-open");
   settings.type = "button";
   root.append(jevNode("header", "jev-head", heading, jevNode("div", "jev-actions", freshness, refresh, settings)));
+  // The settings card's switch, worn over the table (§6.1).
+  const mirror = jevSwitchMirror();
+  if (mirror) root.append(mirror);
 
   const status = jevNode("p", "jev-status");
   status.setAttribute("role", "status");
@@ -496,7 +492,13 @@ function wireJevView(host) {
     void refreshJevDashboard({ force: true });
   });
   host.querySelector(".jev-settings-open").addEventListener("click", () => {
-    setSettingsOpen(true, "typesafe-routing-select");
+    setSettingsOpen(true, "jev-enabled");
+  });
+  host.querySelector("[data-jev-switch]")?.addEventListener("change", (event) => {
+    void setJevEnabled(event.target.checked);
+  });
+  host.querySelector("[data-jev-everywhere]")?.addEventListener("click", () => {
+    void setJevEnabled(true);
   });
   host.querySelector(".jev-recent-seat").addEventListener("change", (event) => {
     jevRecentSeat = event.target.value;
@@ -506,20 +508,9 @@ function wireJevView(host) {
     const chip = event.target.closest("[data-jev-fix]");
     if (chip) jevFix(chip.dataset.jevFix);
   });
-  host.querySelector("[data-jev-rows]").addEventListener("change", (event) => {
-    const select = event.target.closest("[data-jev-dash-seat]");
-    if (!select) return;
-    const seat = select.dataset.jevDashSeat;
-    void moveJevSeat(seat, select.value, (state) => {
-      const words = jevSwitchSaid(state, seat);
-      jevSayStatus(words);
-      return words;
-    });
-  });
 }
 
-/* What the dashboard says under its head: the last switch moved, until the
- * next paint of the numbers replaces it with the freshness line. */
+/* What the dashboard says under its head: the last press of the switch. */
 function jevSayStatus(words) {
   for (const view of document.querySelectorAll(".jev-view")) {
     const status = view.querySelector(".jev-status");
@@ -576,14 +567,11 @@ function paintJevViews() {
   }
 }
 
-/* The seat's name is the settings card's: the label above its switch, read
- * by the key it is written under, so the dashboard names a seat exactly as
- * the card does and carries no second list of names. */
+/* A feature's name, in the language in force: the settings markup's
+ * (`jevFeature`), so the dashboard carries no second list of names. */
 function jevSeatName(id) {
-  const label = document.querySelector(`[data-jev-seat="${id}"]`)
-    ?.closest("[data-jev-row]")?.querySelector(".settings-label");
-  if (!label) return id;
-  return t(label.dataset.i18n, label.dataset.i18nSource ?? label.textContent);
+  const name = jevFeature(id).name;
+  return name ? t(name.key, name.source) : id;
 }
 
 /* Under this many rows a lower bound is the width of its interval rather
@@ -853,16 +841,17 @@ function jevTokenChip(one) {
 }
 
 /* Take a person to where a token is cleared: the key's own field for a key
- * missing or refused; the key card, saying what to change, for a folder not
- * consented or a day's limit spent — neither has a field of its own. */
+ * missing or refused; the switch for a folder not consented, whose line
+ * offers every folder in one press (§6.1); the key card, saying what to
+ * change, for a day's limit spent — it has no field of its own. */
 function jevFix(fix) {
   if (fix === "key") {
     setSettingsOpen(true, "typesafe-key-input");
     return;
   }
-  setSettingsOpen(true, "typesafe-status");
+  setSettingsOpen(true, fix === "consent" ? "jev-enabled" : "typesafe-status");
   paintTypeSafeStatus(fix === "consent"
-    ? t("jev.help.consent", "동의한 폴더에서만 판단을 보냅니다. zo 설정 파일(settings.json)의 smart.jev.workspaces에 이 프로젝트 폴더를 더하면 보냅니다.")
+    ? t("jev.help.consent", "동의한 폴더에서만 판단을 보냅니다. 「모든 폴더에서 사용」을 누르면 모든 폴더에서 보냅니다.")
     : t("jev.help.budget", "오늘 보낼 수 있는 판단 요청을 다 썼습니다. 하루 한도는 zo 설정 파일(settings.json)의 smart.jev.dailyRequests입니다."));
 }
 
@@ -908,14 +897,14 @@ function paintJevView(view) {
     if (!drawn.includes(row)) row.remove();
   }
   jevArrange(body, drawn);
+  paintJevSwitches(view);
   paintJevCaption(view, numbers);
   paintJevSummary(view, order, heldOf);
   paintJevFreshness(view);
   paintJevRecent(view, order);
 }
 
-/* One feature's row, built once: a cell per column, the mode's switch in
- * its own. */
+/* One feature's row, built once: a cell per column. */
 function jevDashRow(body, id) {
   let row = body.querySelector(`[data-jev-dash-row="${id}"]`);
   if (row) return row;
@@ -924,12 +913,6 @@ function jevDashRow(body, id) {
   for (const column of JEV_COLUMNS) {
     const cell = document.createElement("td");
     cell.dataset.jevCell = column.cell;
-    if (column.cell === "mode") {
-      const select = document.createElement("select");
-      select.className = "settings-input jev-mode";
-      select.dataset.jevDashSeat = id;
-      cell.append(select);
-    }
     row.append(cell);
   }
   body.append(row);
@@ -939,23 +922,13 @@ function jevDashRow(body, id) {
 function paintJevRow(row, id, held, standing, head) {
   const cell = (name) => row.querySelector(`[data-jev-cell="${name}"]`);
   cell("seat").textContent = jevSeatName(id);
-  const select = cell("mode").querySelector("select");
-  if (standing) {
-    paintJevModes(select, standing.modes ?? []);
-    select.value = standing.mode;
-    select.disabled = typesafeBusy;
-    select.hidden = false;
-    select.setAttribute("aria-label", `${t("jev.col.mode", "설정")} · ${jevSeatName(id)}`);
-  } else {
-    select.hidden = true;
-  }
   const choice = standing ? jevSeatChoice(typesafeState, id) : null;
   const applying = held ? held.applies : Boolean(choice?.applies);
   row.classList.toggle("is-applying", Boolean(applying));
   row.classList.toggle("is-quiet", !held || held.week.rows === 0);
   if (!held) {
     for (const column of JEV_COLUMNS) {
-      if (column.cell === "seat" || column.cell === "mode") continue;
+      if (column.cell === "seat") continue;
       cell(column.cell).textContent = "—";
     }
     return;

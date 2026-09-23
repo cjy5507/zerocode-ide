@@ -18827,31 +18827,72 @@ button.worker-composer-pill:hover {
   overflow-wrap: anywhere;
 }
 
-/* ---- the seats Jev sits in, one row each -----------------------------
- *
- * Five seats stood as five [label, switch, paragraph] stacks, and the five
- * paragraphs were 616px of the 844px card. A row is now the seat's name, one
- * line saying what it sends, and the mode — and the paragraph is behind the
- * same fold the status line uses. The rows, and their order, are what the use
- * table answered (`paintTypeSafe` reads `switches`), so `order` has to be
- * something this box honours. */
-.settings-jev-list {
+/* ---- Jev on the settings card (2026-09-23, docs/design/jev-settings-20260917.md
+ * §6.1): one switch a person turns on and off, the key, a line to the
+ * dashboard, and what is rarely changed folded under 고급. The switch is the
+ * card's largest row — it is the one decision the card asks for. */
+.settings-jev-switch .settings-label {
+  font-size: var(--text-md);
+  font-weight: 600;
+}
+
+/* On, with consent for some folders only: the sentence and the one press
+ * that consents every folder, on one line while there is room. */
+.settings-notice.settings-jev-partial {
   display: flex;
-  flex-direction: column;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-2) var(--space-3);
 }
 
-.settings-jev-row {
+/* Where each feature stands is the dashboard's: one quiet line, and the way
+ * there is a link in it rather than a second button above the card's own. */
+.settings-jev-dashboard {
+  margin: var(--space-3) var(--space-4) 0;
+}
+
+.settings-jev-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-chalk);
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  transition: text-decoration-thickness var(--motion-fast) var(--ease-standard);
+}
+
+.settings-jev-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+.settings-jev-advanced {
+  margin: var(--space-3) var(--space-4) 0;
+}
+
+/* What the fold holds is fields, not the quiet paragraph a fold holds
+ * elsewhere on this screen: they keep their own size, ink and width. */
+.settings-jev-advanced > :not(summary) {
+  max-width: none;
+  color: inherit;
+  font-size: inherit;
+}
+
+.settings-jev-classifier {
   display: grid;
-  gap: 2px;
-  padding-block: var(--space-2);
-}
-
-.settings-jev-row + .settings-jev-row {
+  gap: var(--space-1);
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
   border-top: var(--rule-width) solid var(--edge-rule);
 }
 
-.settings-jev-row > .settings-fold {
-  padding-inline: var(--space-4);
+.settings-jev-advanced-title {
+  margin: 0;
+  color: var(--ink-chalk);
+  font-size: var(--text-sm);
+  font-weight: 600;
 }
 
 /* A row whose mode nothing can reach says so where the mode is, not in a
@@ -37633,6 +37674,21 @@ h4.knowledge-inspector-head::after {
   margin: 0;
 }
 
+/* The settings card's switch, worn over the table (§6.1): the same row and
+   the same line under it, on the dashboard's own panel. */
+.jev-switch {
+  display: grid;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+}
+
+.jev-switch .settings-notice {
+  margin: 0;
+}
+
 .jev-error {
   color: var(--signal-halt);
 }
@@ -37781,19 +37837,6 @@ h4.knowledge-inspector-head::after {
 
 .jev-table tr.is-applying [data-jev-cell="seat"] {
   font-weight: 600;
-}
-
-.jev-view select.jev-mode {
-  background-color: var(--surface-well);
-  color: var(--ink-chalk);
-  border: var(--jev-line) solid var(--edge-mark);
-  border-radius: var(--radius-sm);
-  padding: var(--space-1) var(--space-2);
-  font: inherit;
-  font-size: var(--jev-meta-size);
-  /* A width of its own: the shared field width is a share of the cell, and
-     a table cell sized by a share clips the longest mode word. */
-  width: var(--jev-mode-width);
 }
 
 .jev-share {

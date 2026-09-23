@@ -2564,9 +2564,6 @@
   --jev-reason-min: 10em;
   /* A failure's chip is one text line tall (t-6243 D5). */
   --jev-token-line: 16px;
-  /* Wide enough for the longest mode word, 자동 (근거가 쌓이면 적용), whole,
-     at the dashboard's meta size. */
-  --jev-mode-width: 16.5em;
   --jev-trend: var(--lane-1);
   /* The week's second line, accuracy: the ink and a dash, so it reads apart
      from the response rate in both treatments (the light one draws every
