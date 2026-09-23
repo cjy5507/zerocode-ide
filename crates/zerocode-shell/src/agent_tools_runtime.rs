@@ -3587,7 +3587,7 @@ pub(super) async fn answer_emulator_command(
     )
 }
 
-async fn answer_emulator_observation(
+pub(super) async fn answer_emulator_observation(
     command: zerocode_core::computer_use::EmulatorCommand,
 ) -> zerocode_hookd::TeamAnswer {
     use crate::emulator::marks;

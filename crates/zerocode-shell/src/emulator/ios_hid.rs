@@ -1383,6 +1383,13 @@ fn helper_program() -> Result<PathBuf, String> {
 #[cfg(test)]
 static HELPER_STAND_IN: Mutex<Option<PathBuf>> = Mutex::new(None);
 
+/// A helper program of the caller's in place of the embedded one — how the
+/// walk bench runs one helper build against another on the same Rust code.
+#[cfg(test)]
+pub(super) fn use_helper(program: PathBuf) {
+    *held(&HELPER_STAND_IN) = Some(program);
+}
+
 fn helper_path() -> Result<&'static Path, String> {
     static HELPER: OnceLock<Result<PathBuf, String>> = OnceLock::new();
     HELPER
