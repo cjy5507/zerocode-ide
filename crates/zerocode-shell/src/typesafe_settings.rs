@@ -15,9 +15,10 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use zerocode_core::jev::door::JevSettings;
 use zerocode_core::jev::{
     CLASSIFIER_SETTING, ClassifierMode, DEFAULT_MODEL, JEV_USES, JevMode, JevUse, MODEL_SETTING,
-    ROUTING, SMART_SETTINGS_KEY, jev_use, model_in, pin_in, pinned_model,
+    ROUTING, SMART_SETTINGS_KEY, count, jev_use, model_in, pin_in, pinned_model,
 };
 use zerocode_harness::{SERVICE_KEYCHAIN_SERVICE_PREFIX, TYPESAFE_API_KEY_ENV};
 
@@ -91,6 +92,12 @@ pub struct SwitchRow {
     pub setting: &'static str,
     pub mode: &'static str,
     pub modes: Vec<ModeChoice>,
+    /// How many compared marks the judge wants before the seat's accuracy
+    /// may speak ([`JevUse::agreement_rows_wanted`]) — the sample the
+    /// dashboard fills its bar toward, and under half of which it says the
+    /// sample rather than a share (t-6243 D2/D3). `None` for a seat that
+    /// never rises.
+    pub agreement_rows_wanted: Option<usize>,
 }
 
 /// One word the routing classifier may hold, as the pane lists it: the word it
@@ -209,6 +216,7 @@ pub fn read_settings(
                 setting: row.setting,
                 mode: mode_in(&root, row).key(),
                 modes: choices(row),
+                agreement_rows_wanted: row.agreement_rows_wanted,
             })
             .collect(),
         classifier: ClassifierRow {
@@ -390,6 +398,36 @@ pub fn read_check(stdout: &[u8]) -> Option<TypeSafeCheck> {
     String::from_utf8_lossy(stdout)
         .lines()
         .find_map(|line| serde_json::from_str::<TypeSafeCheck>(line.trim()).ok())
+}
+
+/// How many Jev requests this machine has sent today, and the most one day
+/// may send (`smart.jev.dailyRequests`) — `None` when the person set no limit.
+/// The dashboard draws it over the table (t-6243 D1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayBudget {
+    pub sent: u64,
+    pub most: Option<u64>,
+}
+
+/// The day's budget, read where the door reads it (`systemone::Wire::pass`):
+/// the count file beside the settings file for the day the window counts in,
+/// and the limit by the door's own reader of the settings. A settings file
+/// that does not read limits nothing, as it limits nothing at the door.
+///
+/// Its own read rather than a field of [`TypeSafeSettings`]: the dashboard
+/// asks it on every refresh, and the settings answer reads the keychain,
+/// which is a `security` process each time.
+#[must_use]
+pub fn read_day(path: &Path) -> DayBudget {
+    let root = crate::api_routers::read_zo_settings_root(path).map_or(Value::Null, Value::Object);
+    let sent = path.parent().map_or(0, |home| {
+        count::sent(&count::requests_path(home, &crate::systemone::today()))
+    });
+    DayBudget {
+        sent,
+        most: JevSettings::from_root(&root).daily_requests,
+    }
 }
 
 #[cfg(test)]
@@ -657,6 +695,13 @@ mod tests {
         for (row, painted) in JEV_USES.iter().zip(&state.switches) {
             assert_eq!(painted.id, row.id, "the card keeps the table's order");
             assert_eq!(painted.setting, row.setting, "{}", row.id);
+            // The comparison sample the judge wants before accuracy may speak,
+            // which the dashboard fills its bar toward (t-6243 D2).
+            assert_eq!(
+                painted.agreement_rows_wanted, row.agreement_rows_wanted,
+                "{}",
+                row.id
+            );
             let offered = &painted.modes;
             let words: Vec<&str> = offered.iter().map(|choice| choice.mode).collect();
             let expected: Vec<&str> = row.modes.iter().map(|mode| mode.key()).collect();
@@ -717,6 +762,7 @@ mod tests {
             "set_jev_model",
             "check_typesafe_key",
             "jev_summary",
+            "jev_day",
         ] {
             assert!(
                 handlers.contains(&format!("{command},")),
@@ -770,6 +816,221 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// What a person reads about Jev — the key card, the card of features and
+    /// the dashboard — is said in the product's plain words and not in the
+    /// codebase's metaphors (t-6243 D0,
+    /// docs/design/jev-dashboard-improvement-plan-20260923.md): a person asks
+    /// how often a feature asked, how right it was and what is left before it
+    /// applies by itself, and a screen that answers in seats, rows, windows,
+    /// thresholds, ledgers, probes, walks and rising is answering a question
+    /// only the code asks.
+    ///
+    /// Read from where the words are written: the markup's Korean under every
+    /// `settings.typesafe.*` and `jev.*` key, every Korean literal in the
+    /// dashboard's script and in the card's part of the settings script, and
+    /// the English catalog under the same keys.
+    #[test]
+    fn the_jev_surfaces_speak_plain_words_not_the_codebases() {
+        /// The metaphors, each as its word and whether a use of it is
+        /// recognised anywhere inside a word (`false`) or only as a word of
+        /// its own — a noun with its particle, or a counter after a number —
+        /// because `행` is also the second syllable of 진행 and `창` the last
+        /// of 입력창.
+        const KOREAN: [(&str, bool); 11] = [
+            ("자리", false),
+            ("행", true),
+            ("창", true),
+            ("문턱", false),
+            ("원장", false),
+            ("프로브", false),
+            ("걷기", false),
+            ("오르", false),
+            ("오른", true),
+            ("물은", true),
+            ("답한", true),
+        ];
+        /// The particles a noun standing alone may carry.
+        const PARTICLES: [&str; 22] = [
+            "", "은", "는", "이", "가", "을", "를", "의", "만", "도", "에", "과", "와", "으로",
+            "로", "마다", "씩", "에서", "까지", "부터", "뿐", "안",
+        ];
+        /// The uses of a metaphor's word that mean the plain thing, each with
+        /// the reason it is plain here.
+        const PLAIN_USES: [(&str, &str, &str); 2] = [
+            (
+                "창",
+                "워커 창 배치",
+                "the worker's own pane in this app, which is a window",
+            ),
+            (
+                "창",
+                "창 제목",
+                "a desktop app's window title, sent as it is",
+            ),
+        ];
+        /// The English catalog's metaphors, matched as whole words.
+        const ENGLISH: [&str; 14] = [
+            "seat", "seats", "ledger", "ledgers", "probe", "probes", "rise", "rises", "rising",
+            "risen", "rose", "walk", "walks", "walking",
+        ];
+
+        fn hangul(text: &str) -> bool {
+            text.chars().any(|c| ('가'..='힣').contains(&c))
+        }
+        /// The double-quoted and template literals of a script, outside its
+        /// comments.
+        fn literals(source: &str) -> Vec<String> {
+            let mut found = Vec::new();
+            let mut chars = source.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '/' if chars.peek() == Some(&'/') => {
+                        for next in chars.by_ref() {
+                            if next == '\n' {
+                                break;
+                            }
+                        }
+                    }
+                    '/' if chars.peek() == Some(&'*') => {
+                        chars.next();
+                        let mut last = ' ';
+                        for next in chars.by_ref() {
+                            if last == '*' && next == '/' {
+                                break;
+                            }
+                            last = next;
+                        }
+                    }
+                    '"' | '`' | '\'' => {
+                        let mut literal = String::new();
+                        while let Some(next) = chars.next() {
+                            match next {
+                                '\\' => {
+                                    chars.next();
+                                }
+                                _ if next == c => break,
+                                _ => literal.push(next),
+                            }
+                        }
+                        found.push(literal);
+                    }
+                    _ => {}
+                }
+            }
+            found
+        }
+        fn between<'a>(source: &'a str, from: &str, to: &str) -> &'a str {
+            let start = source.find(from).unwrap_or_else(|| panic!("no `{from}`"));
+            let rest = &source[start..];
+            let end = rest[from.len()..]
+                .find(to)
+                .unwrap_or_else(|| panic!("nothing ends `{from}` at `{to}`"));
+            &rest[..from.len() + end]
+        }
+        fn metaphors_in(text: &str) -> Vec<&'static str> {
+            let mut plain = text.to_string();
+            for (_, phrase, _) in PLAIN_USES {
+                plain = plain.replace(phrase, " ");
+            }
+            let words: Vec<&str> = plain
+                .split(|c: char| !(c.is_alphanumeric() || c == '{' || c == '}'))
+                .filter(|word| !word.is_empty())
+                .collect();
+            KOREAN
+                .iter()
+                .filter(|(metaphor, alone)| {
+                    words.iter().any(|word| {
+                        word.match_indices(metaphor).any(|(at, _)| {
+                            if !alone {
+                                return true;
+                            }
+                            let before = &word[..at];
+                            let after = &word[at + metaphor.len()..];
+                            let counted = before
+                                .chars()
+                                .next_back()
+                                .is_some_and(|c| c.is_ascii_digit() || c == '}');
+                            (before.is_empty() || counted) && PARTICLES.contains(&after)
+                        })
+                    })
+                })
+                .map(|(metaphor, _)| *metaphor)
+                .collect()
+        }
+
+        let page = include_str!("../../../ui/index.html");
+        let mut said: Vec<(String, String)> = Vec::new();
+        for prefix in ["data-i18n=\"settings.typesafe.", "data-i18n=\"jev."] {
+            let mut rest = page;
+            while let Some(at) = rest.find(prefix) {
+                rest = &rest[at + "data-i18n=\"".len()..];
+                let key = rest.split('"').next().unwrap_or_default().to_string();
+                let text = rest
+                    .split_once('>')
+                    .map(|(_, body)| body.split('<').next().unwrap_or_default())
+                    .unwrap_or_default();
+                said.push((format!("index.html {key}"), text.trim().to_string()));
+            }
+        }
+        let scripts = [
+            ("shell-jev.js", include_str!("../../../ui/shell-jev.js")),
+            (
+                "shell-settings.js (TypeSafe)",
+                between(
+                    include_str!("../../../ui/shell-settings.js"),
+                    "/* ---- TypeSafe (Jev) ----",
+                    "\n/* ---- ",
+                ),
+            ),
+        ];
+        for (file, source) in scripts {
+            for literal in literals(source) {
+                if hangul(&literal) {
+                    said.push((file.to_string(), literal));
+                }
+            }
+        }
+        let mut offenders: Vec<String> = said
+            .iter()
+            .flat_map(|(from, text)| {
+                metaphors_in(text)
+                    .into_iter()
+                    .map(move |word| format!("{from}: 「{word}」 in {text}"))
+            })
+            .collect();
+
+        let i18n = include_str!("../../../ui/shell-i18n.js");
+        let english = between(i18n, "\n  en: {\n", "\n  ja: {\n");
+        for line in english.lines() {
+            let line = line.trim();
+            let Some((key, value)) = line
+                .strip_prefix('"')
+                .and_then(|rest| rest.split_once("\": \""))
+            else {
+                continue;
+            };
+            if !(key.starts_with("settings.typesafe.") || key.starts_with("jev.")) {
+                continue;
+            }
+            for word in value
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .map(str::to_ascii_lowercase)
+            {
+                if ENGLISH.contains(&word.as_str()) {
+                    offenders.push(format!("en {key}: “{word}” in {value}"));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "{} Jev string(s) speak the codebase's metaphors — say what a person \
+             means (기능·판단·요청·응답·정확도·표본·기준·자동 적용), or add the \
+             plain use to PLAIN_USES with its reason:\n{}",
+            offenders.len(),
+            offenders.join("\n")
+        );
     }
 
     /// The settings harness's fake backend answers every seat the table names,
@@ -1153,21 +1414,92 @@ mod tests {
         );
     }
 
-    /// The failures the pane puts into words are tokens zo's check can print.
+    /// Every outcome token a feature's week can carry has its words in the
+    /// one table the dashboard's chips and the card's key check both read
+    /// (`JEV_TOKENS`, t-6243 D5): each of zo's wire failures, and each of the
+    /// door's refusals but `off`, which is a mode word the dashboard never
+    /// spells. A token zo or the door gains turns this red until it is worded.
     #[test]
     fn the_failures_the_pane_words_are_zos_tokens() {
+        fn between<'a>(source: &'a str, from: &str, to: &str) -> &'a str {
+            let start = source.find(from).unwrap_or_else(|| panic!("no `{from}`"));
+            let rest = &source[start..];
+            let end = rest[from.len()..]
+                .find(to)
+                .unwrap_or_else(|| panic!("nothing ends `{from}` at `{to}`"));
+            &rest[..from.len() + end]
+        }
         let zo = include_str!("../../../zo-ide/crates/api/src/systemone.rs");
-        let pane = include_str!("../../../ui/shell-settings.js");
-        for token in ["unauthorized", "no_key"] {
+        let wire: Vec<&str> = between(zo, "pub const fn token(self)", "\n    }")
+            .lines()
+            .filter_map(|line| line.split_once("=> \""))
+            .filter_map(|(_, rest)| rest.split('"').next())
+            .collect();
+        assert!(
+            wire.contains(&"unauthorized") && wire.contains(&"no_key"),
+            "zo's failure tokens were not read: {wire:?}"
+        );
+        let door = zerocode_core::jev::door::Refused::ALL
+            .into_iter()
+            .filter(|refused| *refused != zerocode_core::jev::door::Refused::Off)
+            .map(zerocode_core::jev::door::Refused::token);
+        let table = between(
+            include_str!("../../../ui/shell-jev.js"),
+            "const JEV_TOKENS = Object.freeze({",
+            "\n});",
+        );
+        for token in wire.iter().copied().chain(door) {
             assert!(
-                zo.contains(&format!("=> \"{token}\"")),
-                "zo has no `{token}` failure"
-            );
-            assert!(
-                pane.contains(&format!("token === \"{token}\"")),
-                "the pane no longer words `{token}`"
+                table.contains(&format!("\n  {token}: {{")),
+                "the dashboard's token table does not word `{token}`"
             );
         }
+        // The card's key check says its failures from the same rows.
+        let check = between(
+            include_str!("../../../ui/shell-settings.js"),
+            "function typesafeCheckFailure(",
+            "\n}",
+        );
+        assert!(
+            check.contains("jevTokenRow("),
+            "the key check words its failures somewhere else"
+        );
+    }
+
+    /// The day's count the dashboard draws is the door's own: the file the
+    /// door counts one byte per request into, for the day the window counts
+    /// in, against the limit the door reads — and a day nothing was sent is
+    /// zero, a person who set no limit has none (t-6243 D1).
+    #[test]
+    fn the_day_is_counted_where_the_door_counts_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("settings.json");
+        assert_eq!(
+            read_day(&path),
+            DayBudget {
+                sent: 0,
+                most: None
+            },
+            "no file and no setting is nothing sent and no limit"
+        );
+        let today = count::requests_path(dir.path(), &crate::systemone::today());
+        for _ in 0..3 {
+            count::count_one(&today).expect("count one");
+        }
+        std::fs::write(
+            &path,
+            r#"{"smart":{"jev":{"dailyRequests":500,"workspaces":["/x"]}}}"#,
+        )
+        .expect("write settings");
+        assert_eq!(
+            read_day(&path),
+            DayBudget {
+                sent: 3,
+                most: Some(500)
+            }
+        );
+        let drawn = serde_json::to_value(read_day(&path)).expect("serializes");
+        assert_eq!(drawn, serde_json::json!({ "sent": 3, "most": 500 }));
     }
 
     /// The summary flag the window passes is one zo's CLI documents.

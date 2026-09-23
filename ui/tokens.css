@@ -2551,13 +2551,43 @@
   --jev-meta-size: 12px;
   --jev-body-size: 13px;
   --jev-line: 1px;
-  --jev-spark-width: 44px;
-  --jev-spark-height: 18px;
+  --jev-spark-width: 72px;
+  --jev-spark-height: 24px;
   --jev-cell-min: 56px;
-  --jev-why-width: 180px;
-  --jev-mode-width: 9em;
+  /* A state's chip and bar on one line, its sentence on one or two: a row
+     stays three lines tall and the table fits a 1080p stage (t-6243 D2). */
+  --jev-status-width: 240px;
+  /* A feature's name in at most two lines. */
+  --jev-name-min: 96px;
+  /* The narrowest a state's sentence may run beside its chip before it
+     starts a line of its own. */
+  --jev-reason-min: 10em;
+  /* A failure's chip is one text line tall (t-6243 D5). */
+  --jev-token-line: 16px;
+  /* Wide enough for the longest mode word, 자동 (근거가 쌓이면 적용), whole,
+     at the dashboard's meta size. */
+  --jev-mode-width: 16.5em;
   --jev-trend: var(--lane-1);
-  --jev-dot: var(--ink-chalk);
+  /* The week's second line, accuracy: the ink and a dash, so it reads apart
+     from the response rate in both treatments (the light one draws every
+     lane in one colour) and without colour at all (t-6243 D4). */
+  --jev-trend-accuracy: var(--ink-chalk);
+  --jev-trend-dash: 3 2;
+  /* The strip over the table (t-6243 D1). */
+  --jev-stat-size: 18px;
+  --jev-stat-min: 96px;
+  /* Where a feature stands, one tone per state — the strip's counts and the
+     rows' chips wear the same one (t-6243 D1/D2). */
+  --jev-tone-dot: 8px;
+  --jev-tone-applying: var(--signal-ready);
+  --jev-tone-recording: var(--ink-mist);
+  --jev-tone-under: var(--signal-wait-ink);
+  --jev-tone-blocked: var(--signal-halt-ink);
+  --jev-tone-unused: var(--ink-mist);
+  /* The samples still owed, as a bar filling toward the judge's window. */
+  --jev-progress-width: 72px;
+  --jev-progress-height: 6px;
+  --jev-progress-ink: var(--lane-1);
 }
 
 /* Skill library geometry; colours inherit the semantic palette in both themes. */

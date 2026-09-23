@@ -37615,8 +37615,8 @@ h4.knowledge-inspector-head::after {
   margin: var(--space-1) 0;
 }
 
-.jev-eyebrow, .jev-about, .jev-freshness, .jev-bound, .jev-trend-name, .jev-trend-last,
-.jev-why-facts, .jev-decision-when, .jev-decision-marks, .jev-recent-empty {
+.jev-eyebrow, .jev-about, .jev-freshness, .jev-bound,
+.jev-decision-when, .jev-decision-marks, .jev-recent-empty {
   color: var(--ink-mist);
   font-size: var(--jev-meta-size);
   margin: 0;
@@ -37635,6 +37635,82 @@ h4.knowledge-inspector-head::after {
 
 .jev-error {
   color: var(--signal-halt);
+}
+
+/* The strip over the table (t-6243 D1): the week's sums, how many features
+   stand where, and the day's requests against the limit. */
+.jev-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin: 0;
+}
+
+.jev-stat {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: var(--jev-stat-min);
+  padding: var(--space-2) var(--space-3);
+  border: var(--jev-line) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-well);
+}
+
+.jev-stat dt {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-stat dd {
+  margin: 0;
+  font-size: var(--jev-stat-size);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A state's count wears the state's tone — the tone its rows wear. */
+.jev-stat[data-status] dt::before {
+  content: "";
+  flex: none;
+  width: var(--jev-tone-dot);
+  height: var(--jev-tone-dot);
+  border-radius: 50%;
+  background: var(--jev-tone);
+}
+
+.jev-view [data-status="applying"] { --jev-tone: var(--jev-tone-applying); }
+.jev-view [data-status="recording"] { --jev-tone: var(--jev-tone-recording); }
+.jev-view [data-status="under"] { --jev-tone: var(--jev-tone-under); }
+.jev-view [data-status="blocked"] { --jev-tone: var(--jev-tone-blocked); }
+.jev-view [data-status="unused"] { --jev-tone: var(--jev-tone-unused); }
+
+/* The row the unused features fold into: one line, one press. */
+.jev-fold-row td {
+  padding: 0;
+}
+
+.jev-fold {
+  width: 100%;
+  padding: var(--space-2);
+  border: 0;
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--jev-meta-size);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.jev-fold:hover {
+  color: var(--ink-chalk);
+  background: var(--row-hover);
 }
 
 /* The table takes its own height and the view scrolls as one page; a table
@@ -37659,11 +37735,22 @@ h4.knowledge-inspector-head::after {
   border-bottom: var(--jev-line) solid var(--edge-rule);
 }
 
-/* The counted cells stay on one line; the words wrap. */
-.jev-table [data-jev-cell="rows"], .jev-table [data-jev-cell="answered"], .jev-table [data-jev-cell="latency"],
-.jev-table [data-jev-cell="acted"], .jev-table [data-jev-cell="cost"], .jev-table [data-jev-cell="seat"] {
+/* The counted cells stay on one line; the words wrap — a feature's name and
+   the response time's slow figure among them, which take a second line
+   rather than push the table past a 1080p stage (t-6243 D1/D2). */
+.jev-table [data-jev-cell="rows"], .jev-table [data-jev-cell="answered"],
+.jev-table [data-jev-cell="acted"], .jev-table [data-jev-cell="cost"] {
   white-space: nowrap;
   min-width: var(--jev-cell-min);
+}
+
+.jev-table [data-jev-cell="seat"] {
+  min-width: var(--jev-name-min);
+}
+
+/* The rate's lower bound sits under the rate, small. */
+.jev-table .jev-bound {
+  display: block;
 }
 
 .jev-fact-strong {
@@ -37703,29 +37790,195 @@ h4.knowledge-inspector-head::after {
   border-radius: var(--radius-sm);
   padding: var(--space-1) var(--space-2);
   font: inherit;
-  max-width: var(--jev-mode-width);
+  font-size: var(--jev-meta-size);
+  /* A width of its own: the shared field width is a share of the cell, and
+     a table cell sized by a share clips the longest mode word. */
+  width: var(--jev-mode-width);
 }
 
 .jev-share {
   font-weight: 600;
 }
 
-/* Three small trends side by side, the latest value under each: the names
-   are the column head's, so a row stays a row's height. */
+/* The week as one picture of two lines, each line's latest value under it,
+   marked the way its line is drawn (t-6243 D4). */
 .jev-trends {
   display: flex;
+  align-items: center;
   gap: var(--space-2);
-}
-
-.jev-trend {
-  display: grid;
-  justify-items: center;
-  gap: 1px;
-}
-
-.jev-table [data-jev-cell="why"] {
-  min-width: var(--jev-why-width);
+  color: var(--ink-mist);
   font-size: var(--jev-meta-size);
+}
+
+/* Beside the picture, one line per line of it — the row keeps its height. */
+.jev-trend-legend {
+  display: grid;
+}
+
+.jev-trend-last {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  white-space: nowrap;
+}
+
+.jev-trend-last::before {
+  content: "";
+  width: var(--space-3);
+  border-top: 2px solid var(--jev-trend);
+}
+
+.jev-trend-agreement::before {
+  border-top-style: dashed;
+  border-top-color: var(--jev-trend-accuracy);
+}
+
+.jev-table [data-jev-cell="status"] {
+  min-width: var(--jev-status-width);
+  font-size: var(--jev-meta-size);
+}
+
+/* The model the table's judgments come from, named once over it. */
+.jev-caption {
+  caption-side: top;
+  padding: var(--space-2);
+  text-align: left;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
+/* A feature's state (t-6243 D2): the chip in its state's tone, one sentence
+   of why, the samples still owed, and any fact beside them. */
+.jev-status {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+}
+
+/* The chip, the samples still owed and the sentence start on one line; the
+   sentence takes the width left beside them and wraps inside it. */
+.jev-status-lead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+}
+
+.jev-status-lead .jev-status-reason {
+  flex: 1 1 var(--jev-reason-min);
+  min-width: 0;
+}
+
+.jev-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px var(--space-2);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--jev-tone) 12%, transparent);
+  color: var(--jev-tone);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* A light tint keeps the chip's ink at AA on the light panel, as the
+   settings card's state pill does. */
+:root[data-theme="light"] .jev-chip {
+  background: color-mix(in srgb, var(--jev-tone) 6%, transparent);
+}
+
+/* Not in use says itself in words alone. */
+.jev-chip[data-status="unused"] {
+  padding-inline: 0;
+  background: none;
+  font-weight: 500;
+}
+
+.jev-status-reason, .jev-status-fact {
+  margin: 0;
+}
+
+.jev-status-fact {
+  color: var(--ink-mist);
+}
+
+.jev-owed {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--ink-mist);
+}
+
+.jev-progress {
+  position: relative;
+  flex: none;
+  width: var(--jev-progress-width);
+  height: var(--jev-progress-height);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink-mist) 24%, transparent);
+  overflow: hidden;
+}
+
+.jev-progress-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(var(--jev-filled, 0) * 100%);
+  background: var(--jev-progress-ink);
+}
+
+/* A lower bound under the line for acting by itself wears the tone of a
+   feature under its bar. */
+.jev-bound.is-under {
+  color: var(--jev-tone-under);
+}
+
+/* A sample too small for a share says its size quietly; a feature the door
+   refused throughout says so in the tone of one waiting on a person
+   (t-6243 D3). */
+.jev-sample {
+  color: var(--ink-mist);
+}
+
+.jev-refused {
+  color: var(--jev-tone-blocked);
+  font-weight: 600;
+}
+
+/* What did not come back, by token (t-6243 D5): a quiet word for the wire's
+   misses, and a button in the tone of a feature waiting on a person for the
+   ones a person clears. */
+.jev-tokens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-1);
+  white-space: normal;
+}
+
+/* One text line tall, so a row of them costs a line and not a box. */
+.jev-token {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--jev-meta-size);
+  line-height: var(--jev-token-line);
+  white-space: nowrap;
+}
+
+button.jev-token {
+  background: color-mix(in srgb, var(--jev-tone-blocked) 12%, transparent);
+  color: var(--jev-tone-blocked);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+button.jev-token:hover {
+  background: color-mix(in srgb, var(--jev-tone-blocked) 22%, transparent);
 }
 
 .jev-spark {
@@ -37743,15 +37996,16 @@ h4.knowledge-inspector-head::after {
 }
 
 .jev-spark-dot {
-  fill: var(--jev-dot);
+  fill: var(--jev-trend);
 }
 
-.jev-why p {
-  margin: 0;
+.jev-spark-agreement .jev-spark-line {
+  stroke: var(--jev-trend-accuracy);
+  stroke-dasharray: var(--jev-trend-dash);
 }
 
-.jev-why-verdict {
-  color: var(--ink-chalk);
+.jev-spark-agreement .jev-spark-dot {
+  fill: var(--jev-trend-accuracy);
 }
 
 .jev-recent {

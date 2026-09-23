@@ -669,8 +669,9 @@ fn failure(err: &reqwest::Error) -> String {
     }
 }
 
-/// The local day, on this machine's clock, a request is counted in.
-fn today() -> String {
+/// The local day, on this machine's clock, a request is counted in — the
+/// door's, and the dashboard's count of it (`typesafe_settings::read_day`).
+pub(crate) fn today() -> String {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| {

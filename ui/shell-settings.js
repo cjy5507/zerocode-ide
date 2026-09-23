@@ -22,8 +22,11 @@ const PANE_OF = {
   "google-account-list": "provider-accounts",
   "router-provider-list": "api-routers",
   "router-preset-select": "api-routers",
-  // The Jev dashboard's "in settings" lands on the first seat's switch.
+  // The Jev dashboard's "in settings" lands on the first seat's switch, and
+  // its refusal chips on the key field and the key card's status (t-6243 D5).
   "typesafe-routing-select": "api-routers",
+  "typesafe-key-input": "api-routers",
+  "typesafe-status": "api-routers",
   "show-automations": "appearance",
   "show-tasks": "appearance",
   "worktree-prefix": "git",
@@ -5458,7 +5461,7 @@ function initTypeSafeEvents() {
     const mode = event.target.value;
     void runTypeSafe(() => invoke("set_route_classifier", { mode }), (state) =>
       state.classifier?.probes
-        ? t("settings.classifier.nowProbes", "이제 모델에게도 묻습니다 — 라우팅 판단도 여기서 물을 수 있습니다.")
+        ? t("settings.classifier.nowProbes", "이제 모델에게도 묻습니다 — 「모델 선택 판단」도 이제 판단을 요청할 수 있습니다.")
         : t("settings.classifier.nowQuiet", "바꿨습니다 — 이 방식은 어디에도 묻지 않습니다."));
   });
   // The model pin (`smart.jevModel`): an empty field unpins. The backend
@@ -5467,9 +5470,9 @@ function initTypeSafeEvents() {
     const model = event.target.value;
     void runTypeSafe(() => invoke("set_jev_model", { model }), (state) =>
       state.model?.pinned
-        ? t("settings.typesafe.modelPinned", "{{model}}에 고정했습니다. 다음 요청부터 이 버전에 묻습니다.",
+        ? t("settings.typesafe.modelPinned", "{{model}} 버전으로 고정했습니다. 다음 요청부터 이 버전을 씁니다.",
           { model: state.model.model })
-        : t("settings.typesafe.modelUnpinned", "고정을 풀었습니다. 늘 최신 버전에 묻습니다."));
+        : t("settings.typesafe.modelUnpinned", "고정을 풀었습니다. 늘 최신 버전을 씁니다."));
   });
 }
 
@@ -5501,14 +5504,14 @@ function jevSeatChoice(state, seat) {
  * the switch names the seat, so these words name only what the mode does. */
 function jevSwitchSaid(state, seat) {
   const choice = jevSeatChoice(state, seat);
-  if (!choice?.asks) return t("settings.typesafe.turnedOff", "껐습니다.");
+  if (!choice?.asks) return t("settings.typesafe.turnedOff", "껐습니다. 더는 판단을 요청하지 않습니다.");
   if (choice.applies) {
-    return t("settings.typesafe.turnedApply", "실제 적용을 켰습니다. 다음 판단부터 반영합니다.");
+    return t("settings.typesafe.turnedApply", "항상 적용을 켰습니다. 다음 판단부터 실제 동작에 반영합니다.");
   }
   if (choice.automatic) {
-    return t("settings.typesafe.turnedAuto", "자동을 켰습니다. 근거가 서기 전까지 원장에 기록만 합니다.");
+    return t("settings.typesafe.turnedAuto", "자동 모드입니다. 정확도 근거가 충분히 쌓일 때까지는 기록만 하고 실제 동작에는 적용하지 않습니다.");
   }
-  return t("settings.typesafe.turnedRecord", "기록만을 켰습니다. 다음 판단부터 원장에 기록합니다.");
+  return t("settings.typesafe.turnedRecord", "기록만 켰습니다. 다음 판단부터 기록하되 실제 동작에는 적용하지 않습니다.");
 }
 
 /* A switch's options, one per mode its row offers, each named by what it does
@@ -5524,9 +5527,9 @@ function paintJevModes(select, choices) {
     if (!choice.asks) {
       option.textContent = t("settings.typesafe.modeOff", "끔");
     } else if (choice.applies) {
-      option.textContent = t("settings.typesafe.modeApply", "실제 적용");
+      option.textContent = t("settings.typesafe.modeApply", "항상 적용");
     } else if (choice.automatic) {
-      option.textContent = t("settings.typesafe.modeAuto", "자동 — 근거가 서기 전까지 기록만");
+      option.textContent = t("settings.typesafe.modeAuto", "자동 (근거가 쌓이면 적용)");
     } else {
       option.textContent = t("settings.typesafe.modeRecord", "기록만");
     }
@@ -5724,13 +5727,10 @@ async function checkTypeSafeKey() {
  * other is a token, which belongs under the fold beside the rest of the
  * evidence rather than in the middle of our own sentence. */
 function typesafeCheckFailure(token) {
-  if (token === "unauthorized") {
-    return t("settings.typesafe.unauthorized", "키가 거절되었습니다 — 키를 다시 확인하세요.");
-  }
-  if (token === "no_key") {
-    return t("settings.typesafe.noKey", "zo가 키를 찾지 못했습니다 — 키를 저장한 뒤 다시 확인하세요.");
-  }
-  return t("settings.typesafe.unanswered", "응답하지 않았습니다.");
+  // The one table of failure tokens (`JEV_TOKENS`, shell-jev.js): the
+  // dashboard's chips read the same rows (t-6243 D5).
+  const row = jevTokenRow(token ?? "");
+  return row?.saidKey ? t(row.saidKey, row.said) : t("settings.typesafe.unanswered", "응답하지 않았습니다.");
 }
 
 /* A refused step, in the reader's language when the backend named why — the

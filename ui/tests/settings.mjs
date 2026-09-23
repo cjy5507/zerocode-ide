@@ -4258,8 +4258,8 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
     [
       await said("settings.typesafe.modeOff", "끔"),
       await said("settings.typesafe.modeRecord", "기록만"),
-      await said("settings.typesafe.modeApply", "실제 적용"),
-      await said("settings.typesafe.modeAuto", "자동 — 근거가 서기 전까지 기록만"),
+      await said("settings.typesafe.modeApply", "항상 적용"),
+      await said("settings.typesafe.modeAuto", "자동 (근거가 쌓이면 적용)"),
     ],
     "an option is not named by what its mode does",
   );
@@ -4301,7 +4301,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   assertEqual((await backend.waitForCall("A", "set_jev_mode", switchedAt)).args.mode, "shadow");
   await pageA.waitForFunction(
     (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedRecord", "기록만을 켰습니다. 다음 판단부터 원장에 기록합니다."),
+    await said("settings.typesafe.turnedRecord", "기록만 켰습니다. 다음 판단부터 기록하되 실제 동작에는 적용하지 않습니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.decisionShadow, "shadow");
@@ -4314,7 +4314,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   assertEqual((await backend.waitForCall("A", "set_jev_mode", activeAt)).args.mode, "on");
   await pageA.waitForFunction(
     (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedApply", "실제 적용을 켰습니다. 다음 판단부터 반영합니다."),
+    await said("settings.typesafe.turnedApply", "항상 적용을 켰습니다. 다음 판단부터 실제 동작에 반영합니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.decisionShadow, "on");
@@ -4349,11 +4349,12 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   routingNumbers.verdict = { verdict: "hold", line: "answered" };
   await pageA.evaluate(() => refreshApiRouters());
   const held = [
-    await said("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}} 답함",
+    await said("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}}건 응답",
       { today: 1, rows: 26, answered: 23 }),
-    await said("settings.typesafe.seatP95", "p95 {{ms}} ms", { ms: 4847 }),
-    await said("settings.typesafe.seatHolding", "아직 기록만 합니다 — {{because}}",
-      { because: await said("settings.typesafe.lineAnswered", "답한 비율이 모자랍니다") }),
+    // Counts are grouped the way the language in force groups them (t-6243).
+    await said("settings.typesafe.seatP95", "느릴 때 {{ms}} ms", { ms: "4,847" }),
+    await said("settings.typesafe.seatHolding", "기록만 하는 중 — {{because}}",
+      { because: await said("settings.typesafe.lineAnswered", "응답률이 기준에 못 미칩니다") }),
   ].join(" · ");
   await pageA.waitForFunction(
     (words) => document.querySelector('[data-jev-seat="routing"]')
@@ -4362,7 +4363,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   );
   assertEqual(
     await numbersOf("summon"),
-    await said("settings.typesafe.seatNeverAsked", "아직 아무것도 묻지 않았습니다."),
+    await said("settings.typesafe.seatNeverAsked", "아직 사용된 적이 없습니다."),
     "a seat nothing has asked read as a seat that answered nothing",
   );
 
@@ -4376,17 +4377,17 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   routingNumbers.verdict = { verdict: "hold", line: "answered", cutModel: "jev-1.12.0" };
   await pageA.evaluate(() => refreshApiRouters());
   const versioned = [
-    await said("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}} 답함",
+    await said("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}}건 응답",
       { today: 1, rows: 26, answered: 23 }),
-    await said("settings.typesafe.seatP95", "p95 {{ms}} ms", { ms: 4847 }),
+    await said("settings.typesafe.seatP95", "느릴 때 {{ms}} ms", { ms: "4,847" }),
     [
-      await said("settings.typesafe.seatVersion", "물은 {{asked}} · 답한 {{model}}",
+      await said("settings.typesafe.seatVersion", "모델 {{model}}",
         { asked: JEV_MODEL_ALIAS, model: "jev-1.13.0" }),
-      await said("settings.typesafe.seatWindowRows", "창 안 {{rows}}행", { rows: 25 }),
-      await said("settings.typesafe.seatCut", "{{cut}} 행은 창에서 뺌", { cut: "jev-1.12.0" }),
+      await said("settings.typesafe.seatWindowRows", "판정 표본 {{rows}}건", { rows: 25 }),
+      await said("settings.typesafe.seatCut", "이전 버전 {{cut}}의 기록은 제외", { cut: "jev-1.12.0" }),
     ].join(" · "),
-    await said("settings.typesafe.seatHolding", "아직 기록만 합니다 — {{because}}",
-      { because: await said("settings.typesafe.lineAnswered", "답한 비율이 모자랍니다") }),
+    await said("settings.typesafe.seatHolding", "기록만 하는 중 — {{because}}",
+      { because: await said("settings.typesafe.lineAnswered", "응답률이 기준에 못 미칩니다") }),
   ].join(" · ");
   await pageA.waitForFunction(
     (words) => document.querySelector('[data-jev-seat="routing"]')
@@ -4411,13 +4412,25 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   assertEqual((await backend.waitForCall("A", "set_jev_model", pinAt)).args.model, "jev-1.13.0");
   await pageA.waitForFunction(
     (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.modelPinned", "{{model}}에 고정했습니다. 다음 요청부터 이 버전에 묻습니다.",
+    await said("settings.typesafe.modelPinned", "{{model}} 버전으로 고정했습니다. 다음 요청부터 이 버전을 씁니다.",
       { model: "jev-1.13.0" }),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart[JEV_MODEL_SETTING], "jev-1.13.0");
+  // A pinned seat names its version as the pin, not as the newest answer
+  // (t-6243 D0): the line says the model is held there.
+  routingNumbers.askedModel = "jev-1.13.0";
+  routingNumbers.model = "jev-1.13.0";
   await pageA.evaluate(() => refreshApiRouters());
   assertEqual(await modelInput.inputValue(), "jev-1.13.0", "a reopened card lost the pin");
+  const pinnedLine = await said("settings.typesafe.seatVersionPinned", "고정 모델 {{model}}", { model: "jev-1.13.0" });
+  await pageA.waitForFunction(
+    (words) => document.querySelector('[data-jev-seat="routing"]')
+      ?.closest("[data-jev-row]")?.querySelector("[data-jev-numbers]")?.textContent.includes(words),
+    pinnedLine, { timeout: UI_TIMEOUT },
+  );
+  delete routingNumbers.askedModel;
+  delete routingNumbers.model;
   const slipAt = backend.calls.length;
   await modelInput.fill("jev 1.13");
   await modelInput.dispatchEvent("change");
@@ -4429,7 +4442,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await backend.waitForCall("A", "set_jev_model", unpinAt);
   await pageA.waitForFunction(
     (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.modelUnpinned", "고정을 풀었습니다. 늘 최신 버전에 묻습니다."),
+    await said("settings.typesafe.modelUnpinned", "고정을 풀었습니다. 늘 최신 버전을 씁니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(JEV_MODEL_SETTING in backend.zoSettings.smart, false, "unpinned left the key behind");
@@ -4439,7 +4452,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   assertEqual((await backend.waitForCall("A", "set_jev_mode", autoAt)).args.mode, "auto");
   await pageA.waitForFunction(
     (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedAuto", "자동을 켰습니다. 근거가 서기 전까지 원장에 기록만 합니다."),
+    await said("settings.typesafe.turnedAuto", "자동 모드입니다. 정확도 근거가 충분히 쌓일 때까지는 기록만 하고 실제 동작에는 적용하지 않습니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.decisionShadow, "auto");
@@ -4452,7 +4465,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await backend.waitForCall("A", "set_jev_mode", backToOn);
   await pageA.waitForFunction(
     (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedApply", "실제 적용을 켰습니다. 다음 판단부터 반영합니다."),
+    await said("settings.typesafe.turnedApply", "항상 적용을 켰습니다. 다음 판단부터 실제 동작에 반영합니다."),
     { timeout: UI_TIMEOUT },
   );
 
@@ -4468,7 +4481,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   assertEqual((await backend.waitForCall("A", "set_jev_mode", browserAt)).args.mode, "on");
   await pageA.waitForFunction(
     (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedApply", "실제 적용을 켰습니다. 다음 판단부터 반영합니다."),
+    await said("settings.typesafe.turnedApply", "항상 적용을 켰습니다. 다음 판단부터 실제 동작에 반영합니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.browserAction, "on");
@@ -4505,8 +4518,8 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
     [
       await said("settings.typesafe.modeOff", "끔"),
       await said("settings.typesafe.modeRecord", "기록만"),
-      await said("settings.typesafe.modeApply", "실제 적용"),
-      await said("settings.typesafe.modeAuto", "자동 — 근거가 서기 전까지 기록만"),
+      await said("settings.typesafe.modeApply", "항상 적용"),
+      await said("settings.typesafe.modeAuto", "자동 (근거가 쌓이면 적용)"),
     ],
     "a browser option is not named by what its mode does",
   );
@@ -4545,7 +4558,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   assertEqual((await backend.waitForCall("A", "set_jev_mode", browserAutoAt)).args.mode, "auto");
   await pageA.waitForFunction(
     (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedAuto", "자동을 켰습니다. 근거가 서기 전까지 원장에 기록만 합니다."),
+    await said("settings.typesafe.turnedAuto", "자동 모드입니다. 정확도 근거가 충분히 쌓일 때까지는 기록만 하고 실제 동작에는 적용하지 않습니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.browserAction, "auto");
@@ -4571,7 +4584,7 @@ await test("TypeSafe 키는 키체인에만 가고 확인·판단 모드·되돌
   await backend.waitForCall("A", "set_jev_mode", offAt);
   await pageA.waitForFunction(
     (words) => document.querySelector("#typesafe-status .settings-status-said")?.textContent === words,
-    await said("settings.typesafe.turnedOff", "껐습니다."),
+    await said("settings.typesafe.turnedOff", "껐습니다. 더는 판단을 요청하지 않습니다."),
     { timeout: UI_TIMEOUT },
   );
   assertEqual(backend.zoSettings.smart.decisionShadow, "off");
@@ -4672,7 +4685,7 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await pageA.waitForFunction(() => !document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
   assertEqual(
     (await unreachable.textContent()).trim(),
-    await said("settings.typesafe.routingUnreachable", "지금 분류기가 프로브를 부르지 않아 이 자리는 아무것도 묻지 않습니다. 위의 「라우팅 분류기」를 모델에게도 묻는 방식으로 바꾸세요."),
+    await said("settings.typesafe.routingUnreachable", "지금 분류 방식이 모델에게 묻지 않아 이 기능은 판단을 요청하지 않습니다. 위의 「라우팅 분류기」를 모델에게도 묻는 방식으로 바꾸세요."),
     "the row does not say why its mode cannot be reached",
   );
 
@@ -4684,7 +4697,7 @@ await test("카드가 제시하는 판단은 실제로 불릴 수 있어야 한�
   await pageA.waitForFunction(() => document.querySelector("[data-jev-unreachable]").hidden, null, { timeout: UI_TIMEOUT });
   assertEqual(
     await statusSaid(pageA, "typesafe-status"),
-    await said("settings.classifier.nowProbes", "이제 모델에게도 묻습니다 — 라우팅 판단도 여기서 물을 수 있습니다."),
+    await said("settings.classifier.nowProbes", "이제 모델에게도 묻습니다 — 「모델 선택 판단」도 이제 판단을 요청할 수 있습니다."),
   );
 
   // A refused change keeps the card as it stood.
