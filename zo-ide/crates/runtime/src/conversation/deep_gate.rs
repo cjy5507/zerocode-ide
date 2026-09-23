@@ -7933,7 +7933,7 @@ mod tests {
         assert_eq!(next_provider_calls.load(Ordering::SeqCst), 1);
         assert_eq!(native_calls.load(Ordering::SeqCst), 0);
         assert_eq!(quota_fallback_calls.load(Ordering::SeqCst), 0);
-        assert!(!runtime.quota_fallback_active);
+        assert!(runtime.active_cross_fallback.is_none());
         assert!(runtime.quota_dry_until.is_none());
         assert!(parse_lens_verifier(&runtime.last_assistant_text()).accepted);
         assert_eq!(

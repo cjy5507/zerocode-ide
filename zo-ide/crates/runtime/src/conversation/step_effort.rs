@@ -636,7 +636,7 @@ where
     /// steps says nothing about that wire — the same suppression the
     /// per-turn model override keeps in `assemble_request`.
     fn step_effort_stands_aside(&self) -> bool {
-        self.deep_leg_owns_the_wire() || self.quota_fallback_active
+        self.deep_leg_owns_the_wire() || self.cross_fallback_active()
     }
 
     /// The effort the next request carries, when the governor applies —

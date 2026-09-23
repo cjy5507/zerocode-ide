@@ -104,7 +104,7 @@ use fallback::{
     is_refusal_stop_reason, overload_demotion_warn, quota_fallback_swap_warn,
     quota_wait_hold_warn,
     refusal_surfaced_message, QuotaEscape, RefusalDecision,
-    REFUSAL_DRY_PREARM_WARN, REFUSAL_FALLBACK_WARN, REFUSAL_SURFACED_NOTICE,
+    REFUSAL_CONTEXT_CLEANED_WARN, REFUSAL_SURFACED_NOTICE,
 };
 // Turn-completion items the turn loops + `deep_gate` still reference.
 use turn_end::{
@@ -1047,6 +1047,13 @@ pub struct ConversationRuntime<C, T> {
     /// warning. Separate from `pending` so consuming the warning cannot cause a
     /// later dry turn begin to latch it again.
     refusal_prearm_notice_latched: bool,
+    /// Whether THIS public turn has already spent its one context-cleaning
+    /// retry: when a refusal has no fallback left to try, the turn drops the
+    /// earlier declined exchange still in history and asks the same model once
+    /// more (a sticky classifier reads the whole context). Capped at one per
+    /// turn and reset at every public turn begin, like the same-model retry.
+    /// See [`RefusalDecision::RetryCleaned`].
+    refusal_context_clean_used: bool,
     /// Per-turn wire-model ESCALATION plumbed onto [`ApiRequest`] as
     /// `model_override` (below the refusal fallback in precedence — a refusal
     /// on the escalated model must still swap to the safe fallback). Installed
@@ -1077,16 +1084,28 @@ pub struct ConversationRuntime<C, T> {
     /// keeps the pre-feature behavior — a quota-exhausted turn fails as before.
     /// See [`Self::set_quota_fallback_client`].
     quota_fallback_client: Option<(Arc<dyn AsyncApiClient>, String)>,
-    /// True while THIS turn is running on [`Self::quota_fallback_client`] rather
-    /// than the native client. Set either when a mid-turn quota exhaustion swaps
-    /// to the fallback, or at turn start when the session cooldown pre-arms it.
-    /// Doubles as the one-shot cap: a fallback that is itself rate-limited ends
-    /// the turn (no second fallback — mirrors the refusal one-shot cap), and it
-    /// routes both the request dispatch and [`Self::effective_request_model`]
-    /// through the fallback so the refusal path judges the *active* model. Reset
-    /// at turn start unless the cooldown re-arms it. See
-    /// [`Self::begin_turn_quota_fallback`] and [`Self::decide_quota_escape`].
-    quota_fallback_active: bool,
+    /// Cross-provider client the refusal path hands the turn to when the active
+    /// model's safety classifier declines and the catalog's refusal fallback for
+    /// it is on another provider (Opus → an OpenAI/Google peer). Installed by the
+    /// host every turn entry, resolved from the refused model's
+    /// [`api::refusal_fallback_candidates`] list (first connected cross-provider
+    /// candidate), or `None` when Smart routing is off or no other provider is
+    /// connected. Separate from [`Self::quota_fallback_client`] because the two
+    /// are chosen differently — the router picks the quota peer, the catalog
+    /// list picks the refusal candidate — but both ride the SAME swap machinery
+    /// via [`Self::active_cross_fallback`]. See [`Self::set_refusal_fallback_client`].
+    refusal_fallback_client: Option<(Arc<dyn AsyncApiClient>, String)>,
+    /// Which installed cross-provider client THIS turn is running on, or `None`
+    /// on the native client. Set when a mid-turn quota exhaustion or a doubly-
+    /// refused cross-provider handoff swaps to a fallback, or at turn start when
+    /// a session cooldown (quota or refusal) pre-arms one. Doubles as the
+    /// one-shot cap: a fallback that itself fails ends the turn (no second
+    /// fallback), and it routes both the request dispatch and
+    /// [`Self::effective_request_model`] through the active client so the
+    /// refusal path judges the *active* model. Reset at turn start unless a
+    /// cooldown re-arms it. See [`Self::begin_turn_quota_fallback`],
+    /// [`Self::begin_turn_refusal_fallback`] and [`Self::decide_quota_escape`].
+    active_cross_fallback: Option<fallback::CrossFallback>,
     /// Session-scoped instant until which the main model is presumed
     /// quota-exhausted. Set when a fallback fires (the provider's `retry_after`
     /// hint if any, else [`QUOTA_FALLBACK_DEFAULT_COOLDOWN`]). While in the
@@ -1748,10 +1767,12 @@ where
             refusal_dry_until: None,
             refusal_prearm_notice_pending: false,
             refusal_prearm_notice_latched: false,
+            refusal_context_clean_used: false,
             escalation_model_override: None,
             escalation_armed_fresh: false,
             quota_fallback_client: None,
-            quota_fallback_active: false,
+            refusal_fallback_client: None,
+            active_cross_fallback: None,
             quota_dry_until: None,
             quota_prearm_notice_pending: false,
             quota_wait_band: std::time::Duration::ZERO,
@@ -2046,6 +2067,7 @@ where
         // session cooldown should re-arm it below.
         self.refusal_fallback_model = None;
         self.refusal_same_model_retry_used = false;
+        self.refusal_context_clean_used = false;
         // Reset the per-turn quota fallback, pre-arming onto it when the session
         // is still inside a recorded quota-dry cooldown. See
         // [`Self::begin_turn_quota_fallback`].
@@ -2346,7 +2368,7 @@ where
             }
             if self.refusal_prearm_notice_pending {
                 self.refusal_prearm_notice_pending = false;
-                eprintln!("[zo] {REFUSAL_DRY_PREARM_WARN}");
+                eprintln!("[zo] {}", self.refusal_prearm_notice_text());
             }
 
             let request = match self.build_request(wrap_up_choice) {
@@ -2415,10 +2437,12 @@ where
             self.check_sync_turn_cancelled(iterations)?;
             let assistant_turn = build_assistant_message(normalize_empty_assistant_stream(events));
             // Anthropic safety-classifier refusal (`stop_reason: "refusal"`):
-            // drop the refused partial (never pushed) and either retry once on
-            // the Opus family head (Fable/Mythos) or surface a notice (already fell back, or
-            // a non-Fable model). Anthropic-only — a non-Anthropic model yields
-            // `Proceed` and falls through unchanged. See `decide_refusal_fallback`.
+            // drop the refused partial (never pushed) and walk the catalog
+            // ladder — same-provider retry, same-model retry, cross-provider
+            // handoff, context-cleaning retry, or surface. Anthropic-only — a
+            // non-Anthropic active model yields `Proceed` and falls through
+            // unchanged. Headless path: notices go to stderr. See
+            // `decide_refusal_fallback`.
             if is_refusal_stop_reason(assistant_turn.stop_reason().unwrap_or_default()) {
                 let refused_usage = assistant_turn.usage();
                 match self.decide_refusal_fallback() {
@@ -2426,6 +2450,26 @@ where
                         if let Some(usage) = refused_usage {
                             self.usage_tracker.record(usage);
                         }
+                        continue;
+                    }
+                    RefusalDecision::CrossProvider => {
+                        if let Some(usage) = refused_usage {
+                            self.usage_tracker.record(usage);
+                        }
+                        if let Some(model) = self.refusal_fallback_client_model() {
+                            eprintln!(
+                                "[zo] {}",
+                                core_types::retry_signal::refusal_cross_provider_warn(model)
+                            );
+                        }
+                        continue;
+                    }
+                    RefusalDecision::RetryCleaned => {
+                        if let Some(usage) = refused_usage {
+                            self.usage_tracker.record(usage);
+                        }
+                        self.drop_last_declined_exchange();
+                        eprintln!("[zo] {REFUSAL_CONTEXT_CLEANED_WARN}");
                         continue;
                     }
                     RefusalDecision::Surface => {

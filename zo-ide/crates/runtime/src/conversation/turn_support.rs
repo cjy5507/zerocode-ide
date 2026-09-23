@@ -588,7 +588,7 @@ where
             // id (400/404) or silently hijacks the verifier.
             model_override: if self.deep_plan_leg_active
                 || self.deep_verify_leg_active
-                || self.quota_fallback_active
+                || self.cross_fallback_active()
             {
                 None
             } else {
