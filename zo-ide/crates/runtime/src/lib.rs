@@ -13,6 +13,7 @@ mod compact;
 mod config;
 pub mod context_compression;
 mod conversation;
+pub use conversation::claim_check;
 mod convert_messages;
 pub mod file_neighbours;
 pub mod file_ops;

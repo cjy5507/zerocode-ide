@@ -29,6 +29,7 @@ mod tool;
 mod tool_call_salvage;
 mod turn_end;
 mod turn_end_gate;
+pub mod claim_check;
 mod turn_support;
 mod verified_state;
 mod verify_treadmill;

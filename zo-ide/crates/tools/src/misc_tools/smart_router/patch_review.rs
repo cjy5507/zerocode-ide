@@ -323,7 +323,7 @@ async fn review_and_write(
 /// Run `review` to its end without anybody waiting on it: on the ambient
 /// runtime when it has worker threads to run it, else on a thread of its own
 /// — a current-thread runtime would run it only while somebody blocks on it.
-fn detach(review: impl Future<Output = ()> + Send + 'static) {
+pub(super) fn detach(review: impl Future<Output = ()> + Send + 'static) {
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
             drop(handle.spawn(review));

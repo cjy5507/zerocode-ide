@@ -14,6 +14,7 @@ mod replay_support;
 mod mention_rerank;
 mod metadata;
 mod patch_review;
+mod claim_check;
 pub mod jev_summary;
 mod plan_shadow;
 mod planner;
@@ -67,6 +68,7 @@ pub use patch_review::{
     note_patch_review_turn, patch_review_path, PatchReviewJudge, PatchReviewLabelRow, PatchReviewRow,
     PATCH_REVIEW_DEADLINE, PATCH_REVIEW_FILE, PATCH_REVIEW_OUTCOME_ANSWERED,
 };
+pub use claim_check::{claim_check_path, note_claim_turn, ClaimCheckRow, ClaimLabelRow};
 pub use mention_rerank::{
     mention_rerank_path, MentionAnswer, MentionAsk, MentionCandidate, MentionJudged, MentionLabelRow,
     MentionRerank, MentionRerankRow, MentionSurface, MENTION_OUTCOME_ANSWERED, MENTION_RERANK_DEADLINE,
@@ -91,6 +93,7 @@ pub use plan_shadow::{
 pub(crate) use settings::live_agent_model_policy;
 pub use settings::{
     agent_tool_mode_from, decision_shadow_mode_from, jev_compaction_mode_from,
+    jev_claim_mode_from,
     jev_mention_rerank_mode_from, jev_patch_review_mode_from, rerank_shadow_mode_from,
     skill_search_mode_from, DecisionShadowMode, AGENT_TOOL_SETTING, DECISION_SHADOW_SETTING,
     JEV_COMPACTION_SETTING, JEV_MENTION_RERANK_SETTING, JEV_PATCH_REVIEW_SETTING,
