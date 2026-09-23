@@ -638,6 +638,15 @@ pub fn resolve_openai_oauth_explained() -> Result<OpenAiOAuthTokens, CredentialM
     }
 }
 
+/// Whether a ChatGPT login is kept where this process reads one — the codex
+/// home the resolution table names, else zo's own store — whether or not it
+/// can be used right now. A store that cannot be read is there all the same.
+/// One file read, no refresh.
+#[must_use]
+pub fn openai_login_configured() -> bool {
+    crate::oauth_store::load_openai_oauth_with_source().map_or(true, |found| found.is_some())
+}
+
 /// The ChatGPT login as found: usable now, or expired and not refreshable —
 /// with its tokens, which the request path still sends, and why.
 enum OpenAiLogin {

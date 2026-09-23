@@ -120,6 +120,11 @@ pub struct Source {
     /// Where the source lists its models — the same function its fetcher
     /// asks, so the table and the request cannot name two endpoints.
     pub models_url: fn() -> String,
+    /// Whether this process holds a credential for the source — configured,
+    /// not necessarily usable. Offline and cheap (an environment variable, a
+    /// file, a keychain item's existence), never a refresh: the connection
+    /// rule asks it of a skip another process may have written (t-6248).
+    pub configured: fn() -> bool,
     /// Ask the source, blocking.
     pub ask: fn() -> SourceAnswer,
 }
@@ -149,6 +154,7 @@ pub const SOURCES: [Source; 4] = [
         credential: "ChatGPT",
         absent: "no ChatGPT login",
         models_url: chatgpt_models_url,
+        configured: api::openai_login_configured,
         ask: openai_models,
     },
     Source {
@@ -157,6 +163,7 @@ pub const SOURCES: [Source; 4] = [
         credential: "claude",
         absent: "no Anthropic credential",
         models_url: anthropic_models_url,
+        configured: api::claude_credential_configured,
         ask: anthropic_models,
     },
     Source {
@@ -165,6 +172,7 @@ pub const SOURCES: [Source; 4] = [
         credential: "Google API key",
         absent: "no Google API key (OAuth registries serve tiered ids)",
         models_url: google_models_url,
+        configured: google_api_key_configured,
         ask: google_models,
     },
     Source {
@@ -173,6 +181,7 @@ pub const SOURCES: [Source; 4] = [
         credential: "Google (Antigravity)",
         absent: "no Google (Antigravity) login",
         models_url: antigravity_models_url,
+        configured: api::google_code_assist_oauth_present,
         ask: antigravity_models,
     },
 ];
@@ -352,21 +361,28 @@ pub struct SourceReport {
 
 impl SourceReport {
     /// Whether this source has to be asked again at a connection — never
-    /// answered, failed last time, or answered longer than `ttl_secs` ago.
+    /// answered, failed last time, answered longer than `ttl_secs` ago, or
+    /// skipped for a credential this process holds.
     ///
     /// A SKIP is an answer, not a failure: "no Google API key" is a fact
-    /// about this machine, dated like any other answer, and asking it again
-    /// on every connection re-stamps the cache for nothing. Left as "due",
-    /// a keyless source made every catalog publish spawn a refresh that
-    /// rewrote `discovered.json` (33 a second under a status line that
-    /// resolves an alias per paint, 2026-09-08). A failure is asked again at
-    /// the next connection, as before.
+    /// about the machine that wrote it, dated like any other answer, and
+    /// asking it again on every connection re-stamps the cache for nothing.
+    /// Left as "due", a keyless source made every catalog publish spawn a
+    /// refresh that rewrote `discovered.json` (33 a second under a status
+    /// line that resolves an alias per paint, 2026-09-08). But the cache is
+    /// shared, so the process reading a skip may hold the very credential the
+    /// writer lacked — then the skip is not its answer, and `configured`
+    /// (asked only of a skip) makes it due at once (t-6248). A failure is
+    /// asked again at the next connection, as before.
     #[must_use]
-    pub fn due(&self, now_secs: u64, ttl_secs: u64) -> bool {
+    pub fn due(&self, now_secs: u64, ttl_secs: u64, configured: impl FnOnce() -> bool) -> bool {
         if self.fetched_at == 0 || now_secs.saturating_sub(self.fetched_at) >= ttl_secs {
             return true;
         }
-        !self.ok && !self.skipped()
+        if self.ok {
+            return false;
+        }
+        !self.skipped() || configured()
     }
 
     /// A source that was deliberately not asked — no key, no login.
@@ -517,28 +533,31 @@ pub fn discover() -> DiscoveredCatalog {
 }
 
 /// Ask only the sources whose last answer is older than `ttl_secs` (or
-/// failed), and carry the others as they are — the connection rule, at a
-/// session start and when the `/model` picker opens.
+/// failed, or skipped for a credential this process holds), and carry the
+/// others as they are — the connection rule, at a session start and when the
+/// `/model` picker opens. `None` when nothing is due: there is no new answer
+/// to write.
 #[must_use]
-pub fn discover_due(now_secs: u64, ttl_secs: u64) -> DiscoveredCatalog {
+pub fn discover_due(now_secs: u64, ttl_secs: u64) -> Option<DiscoveredCatalog> {
     let previous = load_cached();
     let due = due_sources(previous.as_ref(), now_secs, ttl_secs);
-    refresh_with(previous.as_ref(), &due, now_secs, &selected_models(), ask)
+    (!due.is_empty()).then(|| refresh_with(previous.as_ref(), &due, now_secs, &selected_models(), ask))
 }
 
 /// The sources a connection at `now_secs` has to ask again: every source the
 /// previous catalog has no successful answer for that is younger than
-/// `ttl_secs`. Empty when nothing is due — the cheap case, the common one.
+/// `ttl_secs` ([`SourceReport::due`], each row's own `configured` asked of a
+/// skip). Empty when nothing is due — the cheap case, the common one.
 #[must_use]
 pub fn due_sources(previous: Option<&DiscoveredCatalog>, now_secs: u64, ttl_secs: u64) -> Vec<&'static str> {
     SOURCES
         .iter()
-        .map(|source| source.key)
         .filter(|source| {
             previous
-                .and_then(|catalog| catalog.reports.iter().find(|report| report.source == *source))
-                .is_none_or(|report| report.due(now_secs, ttl_secs))
+                .and_then(|catalog| catalog.reports.iter().find(|report| report.source == source.key))
+                .is_none_or(|report| report.due(now_secs, ttl_secs, source.configured))
         })
+        .map(|source| source.key)
         .collect()
 }
 
@@ -1399,6 +1418,11 @@ fn google_api_key() -> Result<String, api::CredentialMiss> {
             "the saved Google API key could not be read ({error})"
         ))),
     }
+}
+
+/// Whether a Google API key is configured here — read, not asked.
+fn google_api_key_configured() -> bool {
+    !matches!(google_api_key(), Err(api::CredentialMiss::Absent))
 }
 
 fn google_models_url() -> String {
@@ -2830,12 +2854,16 @@ mod tests {
     }
 
     /// A keyless source answers "skipped" and that answer keeps for the TTL
-    /// like any other; a source that FAILED is asked again at the very next
-    /// connection; one never asked, or asked longer than the TTL ago, is due
-    /// whatever it said. (2026-09-08: `google-api` skipped for want of a key
-    /// was due on every publish, and every publish spawned a refresh.)
+    /// like any other — where nothing is configured; a source that FAILED is
+    /// asked again at the very next connection; one never asked, or asked
+    /// longer than the TTL ago, is due whatever it said. (2026-09-08:
+    /// `google-api` skipped for want of a key was due on every publish, and
+    /// every publish spawned a refresh.) A skip read by a process that holds
+    /// the credential is due at once (t-6248), and `configured` is asked of a
+    /// skip only — an answer or a failure never pays for the probe.
     #[test]
     fn a_skipped_source_is_due_at_the_ttl_and_a_failed_one_at_every_connection() {
+        use std::cell::Cell;
         let report = |ok: bool, detail: &str, fetched_at: u64| super::SourceReport {
             provider: "google".to_string(),
             source: "google-api".to_string(),
@@ -2846,17 +2874,29 @@ mod tests {
             origin: String::new(),
         };
         let ttl = 3_600;
+        let asked = Cell::new(0);
+        let nothing_here = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        let held_here = || {
+            asked.set(asked.get() + 1);
+            true
+        };
         let skipped = report(false, "skipped: no Google API key", 10_000);
         assert!(skipped.skipped());
-        assert!(!skipped.due(10_000 + ttl - 1, ttl), "a fresh skip was asked again");
-        assert!(skipped.due(10_000 + ttl, ttl), "a skip older than the TTL stands");
+        assert!(!skipped.due(10_000 + ttl - 1, ttl, nothing_here), "a fresh skip was asked again");
+        assert!(skipped.due(10_000 + ttl, ttl, nothing_here), "a skip older than the TTL stands");
+        assert!(skipped.due(10_001, ttl, held_here), "a skip this process could answer is due now");
+        assert_eq!(asked.get(), 2, "the TTL decides before the probe does");
         let failed = report(false, "http error: error sending request", 10_000);
         assert!(!failed.skipped());
-        assert!(failed.due(10_001, ttl), "a failure waits for the TTL");
+        assert!(failed.due(10_001, ttl, nothing_here), "a failure waits for no TTL");
         let answered = report(true, "5 model(s)", 10_000);
-        assert!(!answered.due(10_000 + ttl - 1, ttl));
-        assert!(answered.due(10_000 + ttl, ttl));
-        assert!(report(true, "5 model(s)", 0).due(1, ttl), "never answered is due");
+        assert!(!answered.due(10_000 + ttl - 1, ttl, held_here));
+        assert!(answered.due(10_000 + ttl, ttl, nothing_here));
+        assert!(report(true, "5 model(s)", 0).due(1, ttl, nothing_here), "never answered is due");
+        assert_eq!(asked.get(), 2, "an answer and a failure never ask");
     }
 
     /// One failed registry request must not empty the Gemini column for a
@@ -3057,7 +3097,7 @@ mod tests {
             refreshed.models.iter().any(|model| model.id == "claude-opus-5-5"),
             "Opus 5.5 stays in the catalog while the login is being fixed"
         );
-        assert!(report.due(now + 1, super::LIVE_TTL_SECS), "and the next connection asks again");
+        assert!(report.due(now + 1, super::LIVE_TTL_SECS, || false), "and the next connection asks again");
 
         let absent = {
             let _scope = claude_scope(&store, None);
@@ -3066,6 +3106,83 @@ mod tests {
         assert_eq!(absent.1, "skipped: no Anthropic credential", "nothing configured is a skip");
         let _ = std::fs::remove_dir_all(store);
         let _ = std::fs::remove_dir_all(managed);
+    }
+
+    /// Every source skipped a minute ago — what a process with no credential
+    /// at all leaves in the shared cache.
+    fn skipped_everywhere(now: u64) -> DiscoveredCatalog {
+        DiscoveredCatalog {
+            fetched_at: now - 60,
+            reports: super::SOURCES
+                .iter()
+                .map(|source| super::SourceReport {
+                    provider: source.provider.to_string(),
+                    source: source.key.to_string(),
+                    ok: false,
+                    detail: format!("skipped: {}", source.absent),
+                    count: 0,
+                    fetched_at: now - 60,
+                    origin: String::new(),
+                })
+                .collect(),
+            models: Vec::new(),
+        }
+    }
+
+    /// C2 (t-6248): a skip is an answer about the process that wrote it. A
+    /// process that holds the credential right now does not wait out the
+    /// TTL behind another one's "no credential" — its connection asks at
+    /// once. A process that holds nothing still trusts the skip for the TTL,
+    /// so the 2026-09-08 storm (a keyless source re-asked on every publish)
+    /// stays shut.
+    #[test]
+    fn a_skipped_source_is_due_at_once_where_its_credential_is_configured_and_not_elsewhere() {
+        let store = scratch("c2-store");
+        let now = 1_790_000_000;
+        let ttl = super::LIVE_TTL_SECS;
+        let cache = skipped_everywhere(now);
+        let quiet = |store: &std::path::Path, anthropic_key: Option<&std::path::Path>| {
+            CredentialScope::new(&[
+                ("HOME", Some(store)),
+                ("ZO_HOME", Some(store)),
+                ("ZO_CONFIG_HOME", Some(store)),
+                ("CLAUDE_CONFIG_DIR", None),
+                ("CODEX_HOME", None),
+                ("ZO_CODEX_HOME", None),
+                ("ZO_DISABLE_KEYCHAIN", Some(std::path::Path::new("1"))),
+                ("ZO_DISABLE_EXTERNAL_CREDENTIALS", Some(std::path::Path::new("1"))),
+                ("ANTHROPIC_API_KEY", anthropic_key),
+                ("ANTHROPIC_AUTH_TOKEN", None),
+                ("GOOGLE_API_KEY", None),
+                ("GEMINI_API_KEY", None),
+            ])
+        };
+        {
+            let _scope = quiet(&store, None);
+            assert!(
+                super::due_sources(Some(&cache), now, ttl).is_empty(),
+                "nothing configured here: every skip keeps for the TTL"
+            );
+            assert_eq!(
+                super::due_sources(Some(&cache), now - 60 + ttl, ttl).len(),
+                super::SOURCES.len(),
+                "and is due once the TTL has passed, as any answer is"
+            );
+            super::save_to(&super::cache_path(), &cache).unwrap();
+            assert!(
+                super::discover_due(now, ttl).is_none(),
+                "a connection with nothing due has no new answer to write"
+            );
+        }
+        {
+            let _scope = quiet(&store, Some(std::path::Path::new("sk-ant-configured-here")));
+            assert_eq!(
+                super::due_sources(Some(&cache), now, ttl),
+                vec![super::ANTHROPIC_SOURCE],
+                "this process holds an Anthropic key: that skip is due now, the others still keep"
+            );
+        }
+        let _ = std::fs::remove_dir_all(store);
     }
 
     #[test]

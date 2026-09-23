@@ -18,8 +18,8 @@ mod types;
 
 pub use client::{
     AuthRoute, MessageStream, OAuthTokenSet, ProviderClient, oauth_token_is_expired, read_base_url,
-    read_xai_base_url, resolve_openai_oauth_explained, resolve_openai_oauth_fresh,
-    resolve_saved_oauth_token, resolve_startup_auth_source,
+    openai_login_configured, read_xai_base_url, resolve_openai_oauth_explained,
+    resolve_openai_oauth_fresh, resolve_saved_oauth_token, resolve_startup_auth_source,
 };
 pub use core_types::{RateLimitSnapshot, RateLimitWindow, RateLimitWindowKind};
 pub use credential::CredentialMiss;
@@ -41,15 +41,17 @@ pub use prompt_cache::{
     PROMPT_CACHE_MAX_SESSION_DIRS, PROMPT_CACHE_RETENTION_DAYS,
 };
 pub use providers::anthropic::keychain::{
-    KeychainSession, ManagedCredentialsStamp, claude_code_oauth_config,
-    invalidate_claude_code_keychain_cache, managed_claude_credentials_stamp,
+    KeychainSession, ManagedCredentialsStamp, claude_code_login_configured,
+    claude_code_oauth_config, invalidate_claude_code_keychain_cache,
+    managed_claude_credentials_stamp,
     read_claude_code_keychain_session, read_claude_code_keychain_session_explained,
     read_claude_code_keychain_token,
 };
 pub use providers::anthropic::latest_claude_auth_origin;
 pub use providers::anthropic::{
     AnthropicClient, AnthropicClient as ApiClient, AuthSource, ClaudeAuthOrigin,
-    ResolvedClaudeAuth, anthropic_context_editing_enabled, managed_claude_auth_changed,
+    ResolvedClaudeAuth, anthropic_context_editing_enabled, claude_credential_configured,
+    managed_claude_auth_changed,
     refresh_claude_auth_after_unauthorized, resolve_claude_auth_fresh,
     resolve_claude_auth_fresh_detailed, resolve_claude_auth_fresh_explained,
 };

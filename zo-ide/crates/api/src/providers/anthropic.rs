@@ -1858,6 +1858,20 @@ fn resolve_claude_auth_fresh_inner() -> Result<ResolvedClaudeAuth, CredentialMis
     Err(session_miss.or(saved_miss).or(env_miss))
 }
 
+/// Whether this process holds a Claude credential on any rung of the chain —
+/// configured, not necessarily usable. Offline and cheap: the environment,
+/// zo's saved login (one file read; a store that cannot be read is there all
+/// the same), the managed folder or the keychain item — no token is refreshed
+/// and no secret is read. A model list asks it to tell a skip another process
+/// wrote from this one's credential (t-6248).
+#[must_use]
+pub fn claude_credential_configured() -> bool {
+    read_env_non_empty("ANTHROPIC_API_KEY").map_or(true, |key| key.is_some())
+        || read_env_non_empty("ANTHROPIC_AUTH_TOKEN").map_or(true, |token| token.is_some())
+        || load_oauth_credentials().map_or(true, |saved| saved.is_some())
+        || keychain::claude_code_login_configured()
+}
+
 /// Why zo's own saved Claude login could not be used, for a person to read.
 /// The refresh gate's refusals already name the way out; a token without a
 /// refresh token, or a refresh the endpoint answered with an error, is said

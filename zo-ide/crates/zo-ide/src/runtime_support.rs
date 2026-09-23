@@ -1538,10 +1538,7 @@ pub fn publish_model_catalog() -> Option<crate::model_wire_env::Published> {
 #[allow(clippy::must_use_candidate)]
 pub fn connect_model_catalog() -> Option<crate::model_wire_env::Published> {
     let published = publish_model_catalog();
-    spawn_model_discovery_refresh(
-        runtime::model_discovery::UpdatePolicy::load(),
-        runtime::model_discovery::current().as_deref(),
-    );
+    spawn_model_discovery_refresh(runtime::model_discovery::UpdatePolicy::load());
     published
 }
 
@@ -1568,10 +1565,7 @@ pub fn model_picker_opening() {
         connect_model_catalog();
         return;
     }
-    spawn_model_discovery_refresh(
-        runtime::model_discovery::UpdatePolicy::load(),
-        current.as_deref(),
-    );
+    spawn_model_discovery_refresh(runtime::model_discovery::UpdatePolicy::load());
 }
 
 /// Say once what this publish moved — or, under `notify`, what it withheld.
@@ -1617,14 +1611,15 @@ fn announce_alias_moves(overlay: &runtime::model_discovery::Overlay) {
 /// Refresh the discovery cache on a detached thread when any source's answer
 /// is missing, failed, or past the connection TTL (t-3054: every session
 /// start and every `/model` open asks the providers that have gone quiet
-/// for an hour). One thread at a time: it writes the cache and installs the
-/// snapshot, and the next catalog publish (a runtime rebuild, the next
-/// picker open, or the next launch) makes it live — the bridge writes
-/// process environment, which stays on the thread that owns the runtime.
-fn spawn_model_discovery_refresh(
-    policy: runtime::model_discovery::UpdatePolicy,
-    current: Option<&runtime::model_discovery::DiscoveredCatalog>,
-) {
+/// for an hour), or skipped for a credential this process holds (t-6248).
+/// One thread at a time: it writes the cache and installs the snapshot, and
+/// the next catalog publish (a runtime rebuild, the next picker open, or the
+/// next launch) makes it live — the bridge writes process environment, which
+/// stays on the thread that owns the runtime. Which sources are due is
+/// decided on that thread too: asking a skipped source whether its
+/// credential is here may cost a keychain lookup, and the caller can be the
+/// picker opening under the person's key.
+fn spawn_model_discovery_refresh(policy: runtime::model_discovery::UpdatePolicy) {
     use std::sync::atomic::Ordering;
     if policy == runtime::model_discovery::UpdatePolicy::Pinned
         || std::env::var_os("ZO_DISABLE_MODEL_DISCOVERY").is_some()
@@ -1633,9 +1628,6 @@ fn spawn_model_discovery_refresh(
     }
     let now = runtime::model_discovery::now_secs();
     let ttl = runtime::model_discovery::ttl_secs();
-    if runtime::model_discovery::due_sources(current, now, ttl).is_empty() {
-        return;
-    }
     if DISCOVERY_REFRESH_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -1656,9 +1648,11 @@ fn spawn_model_discovery_refresh(
 
 /// The body of the refresh thread: ask the due sources, cache, and say on
 /// stderr (the log file, in an interactive run) what was learned and which
-/// source refused.
+/// source refused. Nothing due writes nothing.
 fn refresh_model_discovery_cache(now: u64, ttl: u64) {
-    let catalog = runtime::model_discovery::discover_due(now, ttl);
+    let Some(catalog) = runtime::model_discovery::discover_due(now, ttl) else {
+        return;
+    };
     let found = catalog.models.len();
     let failed: Vec<String> = catalog
         .reports

@@ -30,21 +30,20 @@ const ALL_PROVIDERS: [CatalogProvider; 3] = [
 /// is asked again, the rest are trusted.
 pub fn render(refresh: bool, json: bool) -> Result<String, String> {
     let policy = UpdatePolicy::load();
-    let cached = model_discovery::current();
     let now = model_discovery::now_secs();
     let ttl = model_discovery::ttl_secs();
-    let due = !model_discovery::due_sources(cached.as_deref(), now, ttl).is_empty();
-    let catalog: DiscoveredCatalog = if refresh || due {
-        let fresh = if refresh {
-            model_discovery::discover()
-        } else {
-            model_discovery::discover_due(now, ttl)
-        };
-        model_discovery::install(fresh.clone())
-            .map_err(|error| format!("could not write the discovery cache: {error}"))?;
-        fresh
+    let fresh = if refresh {
+        Some(model_discovery::discover())
     } else {
-        cached.as_deref().cloned().unwrap_or_default()
+        model_discovery::discover_due(now, ttl)
+    };
+    let catalog: DiscoveredCatalog = match fresh {
+        Some(fresh) => {
+            model_discovery::install(fresh.clone())
+                .map_err(|error| format!("could not write the discovery cache: {error}"))?;
+            fresh
+        }
+        None => model_discovery::current().as_deref().cloned().unwrap_or_default(),
     };
     // Make the answer live in this process so the alias column shows what a
     // session launched now would resolve — the connected providers included.

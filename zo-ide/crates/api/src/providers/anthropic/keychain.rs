@@ -428,6 +428,43 @@ fn read_claude_code_keychain_session_uncached(
     }
 }
 
+/// Whether a Claude Code login is kept where this process would read one —
+/// kept, not necessarily usable. Never reads a secret and never refreshes:
+/// the managed folder's file or the CLI's scoped item for a managed launch,
+/// the machine's item for a bare one. An answer the memo already holds is
+/// reused; otherwise one `security` attribute lookup (no `-w`, so no access
+/// prompt) settles it.
+#[must_use]
+pub fn claude_code_login_configured() -> bool {
+    let keychain_allowed = std::env::var_os(DISABLE_KEYCHAIN_ENV).is_none();
+    if let Some(dir) = crate::managed_account::claude_config_dir().filter(|dir| !dir.is_empty()) {
+        return credentials_file_override().is_some()
+            || (keychain_allowed && keychain_item_kept(&scoped_keychain_service(&dir)));
+    }
+    if !keychain_allowed {
+        return false;
+    }
+    match cached_keychain_session() {
+        KeychainCacheLookup::Fresh(Ok(_) | Err(CredentialMiss::Unusable(_))) => true,
+        KeychainCacheLookup::Fresh(Err(CredentialMiss::Absent)) => false,
+        KeychainCacheLookup::Stale => keychain_item_kept(KEYCHAIN_SERVICE),
+    }
+}
+
+/// Whether the keychain keeps an item under `service`: its attributes only,
+/// which no access list guards. A keychain that does not answer may well
+/// keep one, and saying so costs one more question at the next connection;
+/// a machine without `security` keeps none.
+fn keychain_item_kept(service: &str) -> bool {
+    match Command::new("security")
+        .args(["find-generic-password", "-s", service])
+        .output()
+    {
+        Ok(output) => output.status.code() != Some(KEYCHAIN_ITEM_NOT_FOUND),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
+    }
+}
+
 /// Token-only convenience over [`read_claude_code_keychain_session`].
 #[must_use]
 pub fn read_claude_code_keychain_token() -> Option<String> {
