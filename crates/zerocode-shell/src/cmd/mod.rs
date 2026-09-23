@@ -115,12 +115,12 @@ pub(crate) use agent_launch::{
 pub(crate) use board::{
     ack_board_agent, agent_icon, board_columns, board_desk, board_snapshot, claim_coordinator_seat,
     clipboard_has_image, continuation_source, coordinator_handover_status, coordinator_seat_runs,
-    create_untitled_markdown, delete_untitled_markdown, hooks_report, install_hooks, ledger_agents,
-    machine_load, open_board_popout, orchestration_accuracy, pane_activities, pane_agents,
-    pane_sessions, pane_subagents, release_untitled_markdown, resume_session, reveal_board_agent,
-    save_clipboard_image, save_pasted_image, set_coordinator_handover, set_dock_badge,
-    set_hooks_enabled, set_previewed_terms, set_watched_terms, term_pull, term_snapshot,
-    worker_screen,
+    create_untitled_markdown, delete_untitled_markdown, desk_ack, desk_reply, hooks_report,
+    install_hooks, ledger_agents, machine_load, open_board_popout, orchestration_accuracy,
+    pane_activities, pane_agents, pane_sessions, pane_subagents, release_untitled_markdown,
+    resume_session, reveal_board_agent, save_clipboard_image, save_pasted_image,
+    set_coordinator_handover, set_dock_badge, set_hooks_enabled, set_previewed_terms,
+    set_watched_terms, term_pull, term_snapshot, worker_screen,
 };
 
 pub(crate) use review::{

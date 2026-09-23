@@ -22,6 +22,9 @@ const DESK = Object.freeze({
    * 못한다 — 레인의 한 단계는 수 분이다. 같은 문(`askReleaseStatus`)을 더
    * 자주 부를 뿐 읽는 손은 하나다. */
   ambientEveryMs: 60_000,
+  /* 답할 우편이 접히기 전에 보이는 통 수. 나머지는 「N통 더 보기」 뒤에 선다 —
+   * 우편이 스무 통이어도 작업 목록이 화면 밖으로 밀려나지 않게. */
+  mailShown: 6,
 });
 
 /* 원장의 데스크 읽기(`board_desk`): 판 위의 런, 그 과업의 단계와 수. 1초
@@ -32,9 +35,15 @@ let deskLedgerSaid = "";
 let deskLedgerAsking = false;
 let deskLedgerAgain = false;
 
-/* 사람이 고른 것: 목록을 펼친 단계. 판이 다시 그려져도 남는다 — 창의 기억이지
- * 원장의 것이 아니다. */
-const deskChoice = { stage: undefined };
+/* 사람이 고른 것: 목록을 펼친 단계, 우편을 다 펼쳤는가. 판이 다시 그려져도
+ * 남는다 — 창의 기억이지 원장의 것이 아니다. */
+const deskChoice = { stage: undefined, mailAll: false };
+
+/* 쓰는 중인 답(편지 id마다)과 누른 확인(묶음 id마다). 초안은 판이 다시 그려져도
+ * 남고, 보낸 요청의 이름(`retry`)은 답이 불확실하면 그대로 남아 다시 누르면 같은
+ * 영수증을 되받는다 — 같은 뜻을 두 번 적지 않는다. */
+const deskDrafts = new Map();
+const deskAcks = new Map();
 
 /* 데스크를 그린 적이 있는 판. 복제된 판(`docHost`)은 첫 판의 노드를 죽은
  * 마크업으로 들고 오므로, 처음 그릴 때 한 번 비운다 — 작업 목록과 같은 규칙. */
@@ -123,6 +132,7 @@ function deskBlock(desk, { id, quietHead = false }) {
  * 블록에 쓸 것이 있으면 참을 돌려주고, 거짓이면 그 블록은 접힌다. */
 const DESK_BLOCKS = Object.freeze([
   { id: "machine", paint: paintDeskMachine, quietHead: true },
+  { id: "mail", paint: paintDeskMail },
   { id: "pipeline", paint: paintDeskPipeline },
   { id: "release", paint: paintDeskRelease },
 ]);
@@ -237,6 +247,277 @@ function paintDeskMachine(block, now) {
 
 /* 빌린 기기가 바뀌면 띠도 — 상태 바가 먼저 제 상태를 고친 뒤다(리스너 순서). */
 listen("emulator:loans", () => scheduleDeskPaint());
+
+/* ---- 답할 우편 --------------------------------------------------------------
+ *
+ * `check --peek`의 자리: 판 위의 런의 코디네이터가 빚진 편지(`desk_mail`) — 답을
+ * 기다리는 질문, 그리고 워커가 멈췄다는 원장의 소식(한도 벽·끝남·조용해짐·서로
+ * 기다림). 오래된 것이 먼저이고, 행마다 받은편지함의 상태(배달 전·받음·확인함)와
+ * 나이를 적는다.
+ *
+ * 답하기와 확인은 원장의 뜻 그대로다(2026-09-24 코디네이터 지시). 질문에는 그
+ * 자리에서 답을 적어 원장의 `reply`로 보낸다 — 이 창이 그 런의 코디네이터 자리를
+ * 들고 있을 때만(`desk_reply`). 확인은 코디네이터가 이미 받아 둔 묶음(열린 배달)에
+ * 그 알림이 있을 때만 그 묶음을 통째로 ack하고, 몇 통인지 누르기 전에 말한다
+ * (`desk_ack`). 배달 전 알림에는 단추가 없다 — 코디네이터가 아직 읽지 않았고, 창이
+ * 가로채면 코디네이터는 영영 못 받는다. 누른 뒤에도 행은 원장이 말할 때까지 그대로다:
+ * 화면은 답도 ack도 지어내지 않는다. */
+
+/* 편지 종류마다 낱말과 다섯 상태의 표식 — 사람이 필요한 것은 기다림, 끝난 워커는
+ * 실패의 표식이다. */
+const DESK_MAIL = Object.freeze({
+  question: { state: "needs-attention", key: "board.desk.mailQuestion", word: "질문" },
+  quota_walled: { state: "needs-attention", key: "board.desk.mailWalled", word: "한도 벽" },
+  worker_died: { state: "failed", key: "board.desk.mailDied", word: "워커 끝남" },
+  went_quiet: { state: "needs-attention", key: "board.desk.mailQuiet", word: "조용해짐" },
+  deadlocked: { state: "needs-attention", key: "board.desk.mailDeadlocked", word: "서로 기다림" },
+});
+
+/* 조용해진 까닭, 원장의 낱말마다. 표에 없는 낱말은 원장의 말 그대로 선다. */
+const DESK_QUIET_REASONS = Object.freeze({
+  stalled: { key: "board.desk.quietStalled", word: "보고 없이 턴이 멈춤" },
+  quota_lifted: { key: "board.desk.quietQuotaLifted", word: "한도가 풀린 뒤에도 멈춰 있음" },
+  pane_missing: { key: "board.desk.quietPaneMissing", word: "판이 보이지 않음" },
+  never_spoke: { key: "board.desk.quietNeverSpoke", word: "한 번도 보고하지 않음" },
+  judged: { key: "board.desk.quietJudged", word: "멈춘 까닭을 따로 판정함" },
+});
+
+/* 받은편지함의 세 상태. */
+const DESK_DELIVERY = Object.freeze({
+  pending: { key: "board.desk.deliveryPending", word: "배달 전 · 코디네이터가 아직 안 읽음" },
+  delivered: { key: "board.desk.deliveryDelivered", word: "받음 · 묶음 {{delivery}}" },
+  acked: { key: "board.desk.deliveryAcked", word: "받아서 확인함 · 아직 답 없음" },
+});
+
+/* 편지의 둘째 줄: 질문은 제 말, 소식은 원장이 적은 사실. */
+function deskLetterDetail(letter, now) {
+  if (letter.kind === "question") return letter.body || "";
+  if (letter.kind === "quota_walled") {
+    return Number.isFinite(letter.resets_at_ms) ? usageCountdown(letter.resets_at_ms - now) : "";
+  }
+  if (letter.kind === "went_quiet") {
+    const reason = DESK_QUIET_REASONS[letter.reason];
+    return reason ? t(reason.key, reason.word) : String(letter.reason ?? "");
+  }
+  if (letter.kind === "worker_died") return t("board.desk.mailDiedCopy", "보고 전에 판이 끝났어요");
+  if (letter.kind === "deadlocked") return t("board.desk.mailDeadlockedCopy", "서로의 답을 기다리는 고리에 들었어요");
+  return "";
+}
+
+function deskLetterKey(letter) {
+  return `${letter.run}/${letter.id}`;
+}
+
+/* 편지 한 통의 단추가 무엇을 하는가: 답하기, 묶음 확인, 또는 아무것도. */
+function deskLetterAct(letter, seat) {
+  if (isPopout || !seat) return null;
+  if (letter.kind === "question") return "reply";
+  return letter.delivery === "delivered" && letter.delivery_id ? "ack" : null;
+}
+
+function deskLetterRow(view) {
+  const row = deskElement("li", "board-desk-letter");
+  const line = deskElement("p", "board-desk-letter-line");
+  line.append(agentGraphStateMark("needs-attention"), deskElement("strong", "board-desk-letter-kind"),
+    deskElement("span", "board-desk-letter-who"), deskElement("span", "board-desk-letter-age"));
+  const foot = deskElement("p", "board-desk-letter-foot");
+  const act = deskElement("button", "board-desk-letter-act");
+  act.type = "button";
+  act.onclick = () => {
+    const letter = row.__letter;
+    if (!letter) return;
+    if (letter.kind === "question") {
+      const draft = deskDrafts.get(letter.id) ?? { open: false, text: "", sending: false, sent: false, error: "", retry: null };
+      draft.open = !draft.open;
+      deskDrafts.set(letter.id, draft);
+      paintCoordinatorDesk(view);
+      if (draft.open) row.querySelector(".board-desk-reply-field")?.focus();
+    } else void ackDeskBatch(view, letter);
+  };
+  foot.append(deskElement("span", "board-desk-letter-delivery"), act);
+  row.append(line, deskElement("p", "board-desk-letter-body"), foot);
+  return row;
+}
+
+/* 답을 쓰는 칸 — 처음 펼 때 한 번 짓고, 그 뒤로는 판이 다시 그려져도 같은 칸이다
+ * (쓰는 중인 글자와 초점이 남는다). */
+function deskReplyForm(row, view) {
+  let form = row.querySelector(".board-desk-reply");
+  if (form) return form;
+  form = deskElement("form", "board-desk-reply");
+  const field = deskElement("textarea", "board-desk-reply-field");
+  field.rows = 3;
+  field.oninput = () => {
+    const draft = deskDrafts.get(row.__letter?.id);
+    if (draft) draft.text = field.value;
+  };
+  field.onkeydown = (event) => {
+    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      void sendDeskReply(view, row.__letter);
+    }
+  };
+  const send = deskElement("button", "board-desk-reply-send");
+  send.type = "submit";
+  const cancel = deskElement("button", "board-desk-reply-cancel");
+  cancel.type = "button";
+  cancel.onclick = () => {
+    const draft = deskDrafts.get(row.__letter?.id);
+    if (draft) draft.open = false;
+    paintCoordinatorDesk(view);
+  };
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    void sendDeskReply(view, row.__letter);
+  };
+  const actions = deskElement("div", "board-desk-reply-actions");
+  actions.append(deskElement("span", "board-desk-reply-error"), cancel, send);
+  form.append(field, actions);
+  row.append(form);
+  return form;
+}
+
+async function sendDeskReply(view, letter) {
+  const draft = letter && deskDrafts.get(letter.id);
+  const body = draft?.text.trim() ?? "";
+  if (!draft || draft.sending || body === "") return;
+  const signature = JSON.stringify([letter.run, letter.id, body]);
+  if (draft.retry?.signature !== signature) {
+    draft.retry = { signature, id: `ui-desk-reply-${crypto.randomUUID()}` };
+  }
+  draft.sending = true;
+  draft.error = "";
+  paintCoordinatorDesk(view);
+  try {
+    await invoke("desk_reply", { run: letter.run, message: letter.id, body, retryRequest: draft.retry.id });
+    draft.sent = true;
+    draft.open = false;
+    draft.retry = null;
+    refreshDeskLedger();
+  } catch (error) {
+    // The name stays: pressing again replays the one receipt rather than
+    // writing a second answer.
+    draft.error = String(error);
+  } finally {
+    draft.sending = false;
+    paintCoordinatorDesk(view);
+  }
+}
+
+async function ackDeskBatch(view, letter) {
+  const key = letter.delivery_id;
+  const held = deskAcks.get(key) ?? { sending: false, sent: false, error: "", retry: null };
+  if (held.sending) return;
+  held.retry ??= { id: `ui-desk-ack-${crypto.randomUUID()}` };
+  held.sending = true;
+  held.error = "";
+  deskAcks.set(key, held);
+  paintCoordinatorDesk(view);
+  try {
+    await invoke("desk_ack", { run: letter.run, delivery: key, retryRequest: held.retry.id });
+    held.sent = true;
+    held.retry = null;
+    refreshDeskLedger();
+  } catch (error) {
+    held.error = String(error);
+  } finally {
+    held.sending = false;
+    paintCoordinatorDesk(view);
+  }
+}
+
+function paintDeskLetter(row, letter, seat, now, view) {
+  row.__letter = letter;
+  writeAttribute(row, "data-letter", deskLetterKey(letter));
+  const kind = DESK_MAIL[letter.kind] ?? DESK_MAIL.went_quiet;
+  writeClassName(row, `board-desk-letter is-${letter.kind} is-${letter.delivery}`);
+  dressAgentGraphStateMark(row.querySelector(".agent-graph-node-state"), kind.state);
+  writeTextContent(row.querySelector(".board-desk-letter-kind"), t(kind.key, kind.word));
+  const who = [letter.worker, letter.task].filter(Boolean).join(" · ");
+  writeTextContent(row.querySelector(".board-desk-letter-who"), who);
+  writeTextContent(row.querySelector(".board-desk-letter-age"),
+    t("board.desk.mailAge", "{{time}} 전", { time: agoWord(letter.created_ms, now) }));
+  const detail = deskLetterDetail(letter, now);
+  const body = row.querySelector(".board-desk-letter-body");
+  writeTextContent(body, detail);
+  writeHidden(body, detail === "");
+  const draft = letter.kind === "question" ? deskDrafts.get(letter.id) : null;
+  const ack = letter.delivery_id ? deskAcks.get(letter.delivery_id) : null;
+  const delivery = DESK_DELIVERY[letter.delivery] ?? DESK_DELIVERY.pending;
+  writeTextContent(row.querySelector(".board-desk-letter-delivery"), draft?.sent
+    ? t("board.desk.replySent", "답을 보냄 · 원장에 적히면 목록에서 빠져요")
+    : ack?.sent
+      ? t("board.desk.ackSent", "묶음을 확인함 · 원장에 적히면 목록에서 빠져요")
+      : !seat && !isPopout
+        ? t("board.desk.noSeat", "이 창에 그 런의 코디네이터 자리가 없어 여기서는 답할 수 없어요")
+        : t(delivery.key, delivery.word, { delivery: letter.delivery_id ?? "" }));
+  const act = row.querySelector(".board-desk-letter-act");
+  const does = deskLetterAct(letter, seat);
+  writeHidden(act, does === null || Boolean(draft?.sent) || Boolean(ack?.sent));
+  act.disabled = Boolean(draft?.sending || ack?.sending);
+  writeTextContent(act, does === "reply"
+    ? t("board.desk.reply", "답하기")
+    : ack?.sending
+      ? t("board.desk.acking", "확인하는 중…")
+      : t("board.desk.ack", "확인 · 이 묶음 {{count}}통", { count: letter.batch ?? 0 }));
+  writeAttribute(act, "aria-expanded", String(does === "reply" && Boolean(draft?.open)));
+  const open = does === "reply" && Boolean(draft?.open);
+  const form = open ? deskReplyForm(row, view) : row.querySelector(".board-desk-reply");
+  if (form) {
+    writeHidden(form, !open);
+    const field = form.querySelector(".board-desk-reply-field");
+    writeAttribute(field, "placeholder", t("board.desk.replyPlaceholder", "코디네이터로서 답을 적어요 — 원장의 reply로 워커에게 갑니다"));
+    writeAttribute(field, "aria-label", t("board.desk.reply", "답하기"));
+    if (draft && field.value !== draft.text && document.activeElement !== field) field.value = draft.text;
+    field.disabled = Boolean(draft?.sending);
+    const send = form.querySelector(".board-desk-reply-send");
+    send.disabled = Boolean(draft?.sending);
+    writeTextContent(send, draft?.sending ? t("board.desk.replySending", "보내는 중…") : t("board.desk.replySend", "답 보내기"));
+    writeTextContent(form.querySelector(".board-desk-reply-cancel"), t("board.desk.replyCancel", "취소"));
+    const error = form.querySelector(".board-desk-reply-error");
+    writeTextContent(error, draft?.error ?? "");
+    writeHidden(error, !draft?.error);
+  }
+  if (ack?.error) writeTextContent(row.querySelector(".board-desk-letter-delivery"), ack.error);
+}
+
+function paintDeskMail(block, now, view) {
+  const letters = Array.isArray(deskLedger?.mail) ? deskLedger.mail : [];
+  if (letters.length === 0) return false;
+  writeTextContent(block.firstElementChild, t("board.desk.mail", "답할 우편 · {{count}}", { count: letters.length }));
+  const body = block.lastElementChild;
+  let list = body.querySelector(":scope > .board-desk-letters");
+  if (!list) {
+    list = deskElement("ol", "board-desk-letters");
+    const more = deskElement("button", "board-desk-letters-more");
+    more.type = "button";
+    more.onclick = () => {
+      deskChoice.mailAll = !deskChoice.mailAll;
+      paintCoordinatorDesk(view);
+    };
+    body.replaceChildren(list, more);
+  }
+  const seats = new Map((deskLedger.runs ?? []).map((run) => [run.run, run.seat === true]));
+  const shown = deskChoice.mailAll ? letters : letters.slice(0, DESK.mailShown);
+  const held = new Map([...list.children].map((node) => [node.dataset.letter, node]));
+  reconcileElementOrder(list, shown.map((letter) => {
+    const row = held.get(deskLetterKey(letter)) ?? deskLetterRow(view);
+    paintDeskLetter(row, letter, seats.get(letter.run) ?? false, now, view);
+    return row;
+  }));
+  const more = body.querySelector(".board-desk-letters-more");
+  const rest = letters.length - DESK.mailShown;
+  writeHidden(more, rest <= 0);
+  writeTextContent(more, deskChoice.mailAll ? t("board.desk.mailFewer", "접기")
+    : t("board.desk.mailMore", "{{count}}통 더 보기", { count: Math.max(0, rest) }));
+  writeAttribute(more, "aria-expanded", String(deskChoice.mailAll));
+  // Letters that left the ledger's list take their drafts and presses with them.
+  const standing = new Set(letters.map((letter) => letter.id));
+  for (const id of deskDrafts.keys()) if (!standing.has(id)) deskDrafts.delete(id);
+  const batches = new Set(letters.map((letter) => letter.delivery_id).filter(Boolean));
+  for (const id of deskAcks.keys()) if (!batches.has(id)) deskAcks.delete(id);
+  return true;
+}
 
 /* ---- 과업 흐름 --------------------------------------------------------------
  *

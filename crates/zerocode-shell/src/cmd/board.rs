@@ -263,6 +263,54 @@ pub(crate) fn board_desk() -> std::sync::Arc<crate::orchestration::desk::DeskSna
     std::sync::Arc::clone(&crate::orchestration::board_ledger_snapshot().desk)
 }
 
+/// Answer, from the task board, a question put to a run's coordinator —
+/// as that seat, which this window must hold (t-6588, `desk::reply`). The
+/// main window only: a popped-out board shows the letter and leaves the
+/// answering to the window that holds the seat.
+#[tauri::command]
+pub(crate) async fn desk_reply(
+    webview: tauri::Webview,
+    run: String,
+    message: String,
+    body: String,
+    retry_request: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::desk::reply(
+            &run,
+            &message,
+            &body,
+            &retry_request,
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Acknowledge, from the task board, the batch a run's coordinator holds —
+/// the whole batch, as that seat (t-6588, `desk::acknowledge`).
+#[tauri::command]
+pub(crate) async fn desk_ack(
+    webview: tauri::Webview,
+    run: String,
+    delivery: String,
+    retry_request: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::desk::acknowledge(
+            &run,
+            &delivery,
+            &retry_request,
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 /// The task board's machine strip (t-6588): the ledger's volume with the
 /// verdict the next `--worktree` summons would meet, the load against the
 /// cores, and the booted simulators and emulators — what `df -g`, `uptime`

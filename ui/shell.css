@@ -29711,6 +29711,174 @@ details.task-board-section > summary {
   font-weight: 600;
 }
 
+/* 답할 우편: 편지 한 통이 한 장이고, 앞 레일이 기다림(끝난 워커는 멈춤)의 잉크다.
+ * 둘째 줄은 두 줄에서 접히고, 단추는 행의 다음 걸음 — 작업 행의 「확인하기」와 같은
+ * 알약이다. 답 칸은 펼칠 때만 선다. */
+.board-desk-letters {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.board-desk-letter {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: inset var(--rail-width) 0 0 var(--signal-wait);
+}
+
+.board-desk-letter.is-worker_died {
+  box-shadow: inset var(--rail-width) 0 0 var(--signal-halt);
+}
+
+.board-desk-letter-line,
+.board-desk-letter-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-2);
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+.board-desk-letter-kind {
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.board-desk-letter-who {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-desk-letter-age {
+  color: var(--ink-label);
+  font-variant-numeric: tabular-nums;
+}
+
+.board-desk-letter-body {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  color: var(--ink-chalk);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.board-desk-letter-foot {
+  justify-content: space-between;
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+}
+
+.board-desk-letter.is-pending .board-desk-letter-delivery {
+  color: var(--signal-wait-ink);
+}
+
+.board-desk-letter-act {
+  flex: none;
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: var(--rule-width) solid color-mix(in srgb, var(--signal-wait) 55%, var(--edge-rule));
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--signal-wait-ink);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.board-desk-letter-act:disabled {
+  color: var(--ink-disabled);
+  cursor: default;
+}
+
+.board-desk-reply {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.board-desk-reply-field {
+  width: 100%;
+  min-height: calc(var(--control-height-sm) * 2);
+  padding: var(--space-2);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+  background: var(--surface-well);
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-sm);
+  resize: vertical;
+}
+
+.board-desk-reply-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.board-desk-reply-error {
+  flex: 1 1 auto;
+  color: var(--signal-halt-ink);
+  font-size: var(--text-2xs);
+  overflow-wrap: anywhere;
+}
+
+.board-desk-reply-send,
+.board-desk-reply-cancel {
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-label);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.board-desk-reply-send {
+  border-color: var(--workbench-edge);
+  background: var(--workbench-tint);
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.board-desk-letters-more {
+  justify-self: start;
+  margin-top: var(--space-2);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--workbench-accent-ink);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.board-desk-letter-body[hidden],
+.board-desk-letter-act[hidden],
+.board-desk-reply[hidden],
+.board-desk-reply-error[hidden],
+.board-desk-letters-more[hidden] {
+  display: none;
+}
+
 /* 과업 흐름: 흐름의 다섯 단계는 작은 꺾쇠로 이어지고, 멈춰 선 셋은 한 칸 떨어져
  * 선다. 과업이 있는 멈춘 단계만 제 신호의 잉크를 입는다. 누른 단계는 필터 알약과
  * 같은 옷(보기의 색)이다. */

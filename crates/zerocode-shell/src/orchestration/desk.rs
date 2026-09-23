@@ -9,10 +9,13 @@
 //! the ledger already judges — the disk's word is the rule a `--worktree`
 //! summons is refused by ([`zerocode_core::orchestration::worktree_room`]).
 
+use std::collections::HashSet;
 use std::path::Path;
 
 use serde::Serialize;
-use zerocode_core::orchestration::{Ledger, Run, Task, TaskStatus, WorktreeRoom, worktree_room};
+use zerocode_core::orchestration::{
+    Ledger, Message, MessageKind, Run, Task, TaskStatus, WorktreeRoom, worktree_room,
+};
 
 /// The desk's reading of the ledger, published beside the board's other
 /// readings on the standing-order beat ([`super::refresh_board_ledger`]) and
@@ -26,6 +29,144 @@ pub(crate) struct DeskSnapshot {
     /// Every task of those runs, counted by stage — the rows above are a
     /// window onto these, never the other way round.
     pub(crate) stages: Vec<StageCount>,
+    /// The letters their coordinators owe, oldest first ([`desk_mail`]).
+    pub(crate) mail: Vec<DeskMail>,
+}
+
+/// One letter a run's coordinator owes: an answer, or an acknowledgement.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct DeskMail {
+    pub(crate) run: String,
+    pub(crate) id: String,
+    pub(crate) kind: &'static str,
+    pub(crate) from: String,
+    /// The worker the letter concerns, where it names one.
+    pub(crate) worker: Option<String>,
+    pub(crate) task_id: Option<String>,
+    pub(crate) task: Option<String>,
+    /// A question's own words. The ledger's notices carry their facts
+    /// below instead — their bodies are the ledger's JSON, not prose.
+    pub(crate) body: String,
+    /// Why a worker went quiet, in the ledger's word (`stalled`,
+    /// `quota_lifted`, `pane_missing`, `never_spoke`, …).
+    pub(crate) reason: Option<String>,
+    /// When the provider said a quota wall resets.
+    pub(crate) resets_at_ms: Option<i64>,
+    pub(crate) created_ms: i64,
+    /// Where the letter stands in the coordinator's inbox: `pending` (not
+    /// yet handed over), `delivered` (in the batch the coordinator holds,
+    /// unacknowledged) or `acked`.
+    pub(crate) delivery: &'static str,
+    /// The batch it is in, while it is `delivered` — what an
+    /// acknowledgement names.
+    pub(crate) delivery_id: Option<String>,
+    /// How many letters that batch holds: the ledger acknowledges a batch,
+    /// never one letter of it.
+    pub(crate) batch: Option<usize>,
+}
+
+/// The letters a coordinator owes something, one table: a question put to it
+/// (owed an answer until one lands, however it was delivered), and the
+/// ledger's news that a worker stopped — at its quota wall, dead, quiet, or
+/// waiting in a ring (owed an acknowledgement until the batch holding it is
+/// acknowledged).
+const DESK_MAIL_KINDS: [MessageKind; 5] = [
+    MessageKind::Question,
+    MessageKind::QuotaWalled,
+    MessageKind::WorkerDied,
+    MessageKind::WentQuiet,
+    MessageKind::Deadlocked,
+];
+
+/// Where one letter stands in the inbox that holds it.
+fn delivery_of(id: &str, pending: &HashSet<&str>, open: &HashSet<&str>) -> &'static str {
+    if pending.contains(id) {
+        "pending"
+    } else if open.contains(id) {
+        "delivered"
+    } else {
+        "acked"
+    }
+}
+
+/// What the coordinator of `run` owes, oldest first. A question is owed until
+/// it is answered or can no longer be (`Run::answer_to`,
+/// `Run::question_is_closed` — the reply verb's own rules); a notice until it
+/// is acknowledged.
+pub(crate) fn desk_mail(run: &Run) -> Vec<DeskMail> {
+    let address = run.address();
+    let pending: HashSet<&str> = run
+        .pending_messages(&address, &DESK_MAIL_KINDS)
+        .into_iter()
+        .map(|message| message.id.as_str())
+        .collect();
+    let batch = run.open_delivery(&address);
+    let open: HashSet<&str> = batch
+        .map(|held| held.messages.iter().map(String::as_str).collect())
+        .unwrap_or_default();
+    run.messages()
+        .iter()
+        .filter(|message| message.to == address && DESK_MAIL_KINDS.contains(&message.kind))
+        .filter_map(|message| {
+            let delivery = delivery_of(&message.id, &pending, &open);
+            let owed = match message.kind {
+                MessageKind::Question => {
+                    message.thread.is_none()
+                        && run.answer_to(message).is_none()
+                        && !run.question_is_closed(message)
+                }
+                _ => delivery != "acked",
+            };
+            owed.then(|| mail_row(run, message, delivery, batch))
+        })
+        .collect()
+}
+
+fn mail_row(
+    run: &Run,
+    message: &Message,
+    delivery: &'static str,
+    batch: Option<&zerocode_core::orchestration::Delivery>,
+) -> DeskMail {
+    let question = message.kind == MessageKind::Question;
+    let said: serde_json::Value = if question {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str(message.body.as_str()).unwrap_or_default()
+    };
+    let worker = message
+        .from
+        .strip_prefix(zerocode_core::orchestration::WORKER_ADDRESS_PREFIX)
+        .map(str::to_string)
+        .or_else(|| said["workerId"].as_str().map(str::to_string));
+    let task_id = message
+        .task
+        .clone()
+        .or_else(|| said["taskId"].as_str().map(str::to_string));
+    let delivered = delivery == "delivered";
+    DeskMail {
+        run: run.id.clone(),
+        id: message.id.clone(),
+        kind: message.kind.as_str(),
+        from: message.from.clone(),
+        task: task_id
+            .as_deref()
+            .and_then(|id| run.task(id))
+            .map(|task| task.display_name().to_string()),
+        worker,
+        task_id,
+        body: if question {
+            message.body.as_str().to_string()
+        } else {
+            String::new()
+        },
+        reason: said["reason"].as_str().map(str::to_string),
+        resets_at_ms: said["resetsAtMs"].as_i64(),
+        created_ms: message.created_ms,
+        delivery,
+        delivery_id: batch.filter(|_| delivered).map(|held| held.id.clone()),
+        batch: batch.filter(|_| delivered).map(|held| held.messages.len()),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -123,7 +264,9 @@ fn in_play(run: &Run) -> bool {
 pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) -> DeskSnapshot {
     let mut runs = Vec::new();
     let mut staged: Vec<(&'static str, DeskTask)> = Vec::new();
+    let mut mail = Vec::new();
     for run in ledger.runs().iter().filter(|run| in_play(run)) {
+        mail.extend(desk_mail(run));
         runs.push(DeskRun {
             run: run.id.clone(),
             name: run.name.clone(),
@@ -170,11 +313,110 @@ pub(crate) fn desk_snapshot(ledger: &Ledger, holds_seat: impl Fn(&str) -> bool) 
         rows.truncate(STAGE_ROWS);
         tasks.extend(rows);
     }
+    mail.sort_by_key(|letter| letter.created_ms);
     DeskSnapshot {
         runs,
         tasks,
         stages,
+        mail,
     }
+}
+
+/// Plan one verb as `run_id`'s live coordinator seat, on the person's behalf:
+/// through the handover's native door, with the seat's own capability and the
+/// human principal, so the ledger records the window — not a provider
+/// session — as the hand that acted, and signs the letter as the seat
+/// (`run:<id>`). Refused where this window does not hold that seat.
+fn as_the_coordinator(
+    run_id: &str,
+    argv: Vec<String>,
+    now_ms: i64,
+) -> Result<serde_json::Value, String> {
+    let seat = {
+        let held = super::runtime().ok_or("orchestration runtime unavailable")?;
+        let image = held.actor.view().map_err(|error| format!("{error:?}"))?;
+        let ledger = super::cached_ledger(&held, &image).map_err(|error| format!("{error:?}"))?;
+        ledger
+            .run(run_id)
+            .and_then(Run::coordinator_live)
+            .map(|seat| seat.seat.clone())
+            .ok_or("the run has no live coordinator seat")?
+    };
+    let (team, pane) = seat
+        .split_once('/')
+        .ok_or("the coordinator seat names no pane")?;
+    let capability = crate::agent_teams::current_pane_capability(team, pane)
+        .ok_or("this window does not hold the run's coordinator seat")?;
+    super::coordinator_handover::command(team, pane, capability, argv, now_ms)
+}
+
+/// Answer a question put to `run_id`'s coordinator, as that seat — the
+/// ledger's `reply`, whose rules stand whole: only the seat asked answers,
+/// one question has one answer (the same words again are the retry road), and
+/// a question whose asker is gone is closed.
+pub(crate) fn reply(
+    run_id: &str,
+    message: &str,
+    body: &str,
+    retry_request: &str,
+    now_ms: i64,
+) -> Result<serde_json::Value, String> {
+    if retry_request.trim().is_empty() {
+        return Err("retryRequest is required".into());
+    }
+    if body.trim().is_empty() {
+        return Err("an answer needs words".into());
+    }
+    as_the_coordinator(
+        run_id,
+        [
+            "reply",
+            "--run",
+            run_id,
+            "--to-message",
+            message,
+            "--body",
+            body,
+            "--retry-request",
+            retry_request,
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        now_ms,
+    )
+}
+
+/// Acknowledge the batch `run_id`'s coordinator holds — the ledger's unit is
+/// the batch, never one letter of it, and the desk says how many letters it
+/// holds before the press. `--peek`: nothing new is handed over, so every
+/// letter the coordinator has not been given still reaches it. Answers only
+/// what was acknowledged; the peek's letters stay in the ledger.
+pub(crate) fn acknowledge(
+    run_id: &str,
+    delivery: &str,
+    retry_request: &str,
+    now_ms: i64,
+) -> Result<serde_json::Value, String> {
+    if retry_request.trim().is_empty() {
+        return Err("retryRequest is required".into());
+    }
+    as_the_coordinator(
+        run_id,
+        [
+            "check",
+            "--run",
+            run_id,
+            "--ack",
+            delivery,
+            "--peek",
+            "--retry-request",
+            retry_request,
+        ]
+        .map(str::to_string)
+        .to_vec(),
+        now_ms,
+    )?;
+    Ok(serde_json::json!({ "acknowledged": delivery }))
 }
 
 /// The machine strip's one answer: what `df -g`, `uptime` and `simctl` told a

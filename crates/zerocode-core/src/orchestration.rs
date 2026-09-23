@@ -1229,7 +1229,9 @@ const MESSAGE_SOURCE_FIELD: &str = "source";
 const MESSAGE_TRUST_FIELD: &str = "trust";
 const RUN_ADDRESS_PREFIX: &str = "run:";
 const HOME_ADDRESS_PREFIX: &str = "home:";
-const WORKER_ADDRESS_PREFIX: &str = "worker:";
+/// The one spelling of a worker's address head — [`worker_address`] writes
+/// it, and a reader naming the worker a letter came from strips it.
+pub const WORKER_ADDRESS_PREFIX: &str = "worker:";
 const REMOTE_ADDRESS_PREFIX: &str = "remote:";
 
 /// The address of a seat that is neither one of this run's workers nor the
@@ -2864,6 +2866,20 @@ impl Run {
     /// asks the same).
     pub fn awaiting_reply(&self, worker_id: &str) -> bool {
         awaiting_reply(self, worker_id)
+    }
+
+    /// The answer a question got, if one landed — the word in its thread from
+    /// the seat it was asked of, the one the `reply` verb refuses a second
+    /// of. The window's task board lists a question to its coordinator until
+    /// this answers (t-6588).
+    pub fn answer_to(&self, question: &Message) -> Option<&Message> {
+        thread_answer(self, question)
+    }
+
+    /// Whether a question can no longer be answered — its asker's dispatch
+    /// ended — by the rule the `reply` verb refuses by.
+    pub fn question_is_closed(&self, question: &Message) -> bool {
+        question_closed(self, question)
     }
 
     pub fn dispatch(&self, id: &str) -> Option<&Dispatch> {

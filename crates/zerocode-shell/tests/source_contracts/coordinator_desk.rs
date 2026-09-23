@@ -76,3 +76,94 @@ fn the_machine_strip_speaks_the_ledgers_disk_rule_and_reads_the_load_once() {
         );
     }
 }
+
+/// The desk answers and acknowledges through the ledger's own verbs, as the
+/// run's coordinator seat, and invents neither. A reply is `reply` (the one-
+/// answer rule stands); an acknowledgement is the named batch with `--peek`
+/// (nothing new is leased away from the coordinator); both go through the
+/// handover's native door with the seat's own capability, from the main
+/// window only. What is owed is the reply verb's own rules and the inbox's own
+/// state. And the window never takes a letter off the desk itself: after a
+/// press it asks the ledger again, and only a delivered notice offers an ack.
+#[test]
+fn the_desk_answers_and_acknowledges_through_the_ledgers_own_verbs_and_invents_neither() {
+    let desk = shell_source("orchestration/desk.rs");
+    let seat = block_after(&desk, "fn as_the_coordinator(");
+    for held in [
+        "Run::coordinator_live",
+        "crate::agent_teams::current_pane_capability(team, pane)",
+        "super::coordinator_handover::command(team, pane, capability, argv, now_ms)",
+    ] {
+        assert!(seat.contains(held), "the seat door lost `{held}`:\n{seat}");
+    }
+    let reply = block_after(&desk, "pub(crate) fn reply(");
+    for word in ["\"reply\"", "\"--to-message\"", "\"--retry-request\""] {
+        assert!(reply.contains(word), "the reply lost `{word}`:\n{reply}");
+    }
+    let acknowledge = block_after(&desk, "pub(crate) fn acknowledge(");
+    for word in [
+        "\"check\"",
+        "\"--ack\"",
+        "\"--peek\"",
+        "\"--retry-request\"",
+    ] {
+        assert!(
+            acknowledge.contains(word),
+            "the acknowledgement lost `{word}`:\n{acknowledge}"
+        );
+    }
+    let owed = block_after(&desk, "pub(crate) fn desk_mail(");
+    for rule in [
+        ".answer_to(message)",
+        ".question_is_closed(message)",
+        ".pending_messages(&address, &DESK_MAIL_KINDS)",
+        ".open_delivery(&address)",
+    ] {
+        assert!(owed.contains(rule), "what is owed lost `{rule}`:\n{owed}");
+    }
+    let board = shell_source("cmd/board.rs");
+    for door in [
+        "pub(crate) async fn desk_reply(",
+        "pub(crate) async fn desk_ack(",
+    ] {
+        let body = block_after(&board, door);
+        assert!(
+            body.contains("crate::from_the_main_webview(&webview)?")
+                && body.contains("spawn_blocking"),
+            "`{door}` is open to a popped-out board or runs on the main thread:\n{body}"
+        );
+    }
+
+    let window = window_source();
+    for (name, press) in [
+        (
+            "sendDeskReply",
+            block_after(window, "async function sendDeskReply("),
+        ),
+        (
+            "ackDeskBatch",
+            block_after(window, "async function ackDeskBatch("),
+        ),
+    ] {
+        assert!(
+            press.contains("refreshDeskLedger()"),
+            "{name} does not ask the ledger again:\n{press}"
+        );
+        for invention in [
+            "deskLedger.mail",
+            ".mail.filter",
+            ".mail.splice",
+            "deskLedger =",
+        ] {
+            assert!(
+                !press.contains(invention),
+                "{name} takes a letter off the desk the ledger still holds (`{invention}`):\n{press}"
+            );
+        }
+    }
+    let act = block_after(window, "function deskLetterAct(");
+    assert!(
+        act.contains("letter.delivery === \"delivered\"") && act.contains("isPopout"),
+        "an ack is offered for a letter the coordinator has not been handed:\n{act}"
+    );
+}

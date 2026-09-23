@@ -1053,6 +1053,133 @@ fn ledger_state_for_a_reused_seat_comes_from_its_current_worker() {
     );
 }
 
+/// The desk's mail follows the coordinator's own inbox (t-6588): a question
+/// and a notice stand `pending` until the coordinator's `check` hands them
+/// over, `delivered` in the batch it holds (named, with its size — the unit
+/// an acknowledgement takes), and after the ack the notice is gone while the
+/// question stays, `acked`, until the coordinator's `reply` answers it.
+#[test]
+fn the_desks_mail_is_the_coordinators_inbox_letter_by_letter() {
+    use zerocode_core::agent_teams::Team;
+    use zerocode_core::orchestration::{Draft, MessageKind, Priority, Text};
+    const LEADER_TERM: u32 = 9_410;
+    /// One verb from the leader's seat, as the coordinator types it.
+    fn verb(held: &mut Ledger, table: &mut Team, argv: &[String], at: i64) -> String {
+        let decided = zerocode_core::orchestration::plan(
+            held,
+            table,
+            &Catalog::new(Vec::new()),
+            argv,
+            zerocode_core::agent_teams::LEADER_PANE,
+            at,
+            Some(&test_actor(LEADER_TERM)),
+        );
+        assert_eq!(
+            decided.reply.exit_code, 0,
+            "{argv:?}: {}",
+            decided.reply.stderr
+        );
+        decided.reply.stdout
+    }
+    let mut held = Ledger::new();
+    let mut table = Team::new("team-desk-mail", TEST_CAPABILITY, LEADER_TERM);
+    let opened: serde_json::Value = serde_json::from_str(&verb(
+        &mut held,
+        &mut table,
+        &words("run-create --name desk-mail"),
+        1_000,
+    ))
+    .expect("a run");
+    let run_id = opened["runId"].as_str().expect("a run id").to_string();
+    let address = held.run(&run_id).expect("the run").address();
+    // From a teammate's seat rather than a worker row: the reply below is
+    // filed to whoever asked, and a seat is answerable without a summons.
+    let letter = |kind: MessageKind, body: &str| Draft {
+        from: "pane:team-desk-mail/%7".to_string(),
+        to: address.clone(),
+        kind,
+        body: Text::from(body),
+        subject: Text::default(),
+        priority: Priority::Normal,
+        payload: Text::default(),
+        thread: None,
+        task: None,
+        dispatch: None,
+    };
+    let question = held
+        .post(
+            &run_id,
+            letter(MessageKind::Question, "main에 올려도 될까요?"),
+            1_100,
+        )
+        .expect("a question");
+    held.post(
+        &run_id,
+        letter(
+            MessageKind::WentQuiet,
+            r#"{"workerId":"w-9","reason":"stalled"}"#,
+        ),
+        1_200,
+    )
+    .expect("a notice");
+    let mail = |ledger: &Ledger| super::desk::desk_mail(ledger.run(&run_id).expect("the run"));
+
+    let pending = mail(&held);
+    assert_eq!(pending.len(), 2, "{pending:?}");
+    assert!(pending.iter().all(|one| one.delivery == "pending"));
+    assert_eq!(pending[1].reason.as_deref(), Some("stalled"));
+    assert_eq!(pending[1].worker.as_deref(), Some("w-9"));
+
+    let looked: serde_json::Value =
+        serde_json::from_str(&verb(&mut held, &mut table, &words("check"), 1_300))
+            .expect("a delivery");
+    let delivery = looked["deliveryId"]
+        .as_str()
+        .expect("a delivery id")
+        .to_string();
+    let handed = mail(&held);
+    assert!(
+        handed.iter().all(|one| one.delivery == "delivered"
+            && one.delivery_id.as_deref() == Some(delivery.as_str())
+            && one.batch == Some(2)),
+        "{handed:?}"
+    );
+
+    verb(
+        &mut held,
+        &mut table,
+        &words(&format!("check --ack {delivery} --peek")),
+        1_400,
+    );
+    let acked = mail(&held);
+    assert_eq!(
+        acked.len(),
+        1,
+        "the notice left and the question stayed: {acked:?}"
+    );
+    assert_eq!(acked[0].id, question);
+    assert_eq!(acked[0].delivery, "acked");
+
+    verb(
+        &mut held,
+        &mut table,
+        &[
+            "reply".to_string(),
+            "--to-message".to_string(),
+            question.clone(),
+            "--body".to_string(),
+            "올리세요".to_string(),
+            "--retry-request".to_string(),
+            "desk-mail-reply".to_string(),
+        ],
+        1_500,
+    );
+    assert!(
+        mail(&held).is_empty(),
+        "an answered question is owed nothing"
+    );
+}
+
 /// The desk calls a run's coordinator seat this window's only where the pane
 /// the seat names (`team/pane`) is in this window's pane table (t-6588) —
 /// the seat a reply from the board is written as.
