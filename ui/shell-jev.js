@@ -313,17 +313,27 @@ const JEV_TRENDS = Object.freeze([
     read: (day) => (day.agreement?.compared ? day.agreement.agreed / day.agreement.compared : null) },
 ]);
 
-/* Where a feature stands, one word per state: the strip over the table
- * counts them and each row wears its own (t-6243 D1/D2), in the tone the
- * stylesheet gives the state (`--jev-tone-*`). Read off the numbers zo
- * answered, never off a mode word (`jevSeatStatus`). */
+/* Where a feature stands — one chip per row, one of four (t-6277 D8):
+ * dormant (its mode asks nothing), recording, applying, or waiting on a person, in the tone the stylesheet
+ * gives the state (`--jev-tone-*`). A feature that waits on a person wears
+ * what it waits for — the key, or a folder's consent — and the strip over
+ * the table counts the two as one (`word`). Read off what the switch does
+ * and the numbers zo answered, never off a mode word (`jevSeatStatus`). */
 const JEV_STATUSES = Object.freeze([
-  { status: "applying", key: "jev.status.applying", word: "적용 중" },
-  { status: "recording", key: "jev.status.recording", word: "기록 중" },
-  { status: "under", key: "jev.status.under", word: "기준 미달" },
-  { status: "blocked", key: "jev.status.blocked", word: "키·동의 필요" },
-  { status: "unused", key: "jev.status.unused", word: "미사용" },
+  { status: "applying", key: "jev.status.applying", word: "적용 중", counted: true },
+  { status: "recording", key: "jev.status.recording", word: "기록 중", counted: true },
+  { status: "blocked", key: "jev.status.blocked", word: "키·동의 필요", counted: true, waits: {
+    key: { key: "jev.status.needsKey", word: "키 필요" },
+    consent: { key: "jev.status.needsConsent", word: "동의 필요" },
+  } },
+  { status: "dormant", key: "jev.status.dormant", word: "꺼짐", counted: false },
 ]);
+
+/* Of the features recording, the ones a judgment measured and held under a
+ * line of their own — not a chip of its own (a feature under its bar is still
+ * recording, and its sentence says why, in the tone of a miss), but a count
+ * the strip keeps beside the states (t-6243 D1). */
+const JEV_UNDER = Object.freeze({ stat: "under", key: "jev.status.under", word: "기준 미달" });
 
 /* The strip's sums over every feature, before the states' counts. */
 const JEV_TOTALS = Object.freeze([
@@ -363,26 +373,37 @@ function jevTokenRow(token) {
   return JEV_TOKENS[family] ?? null;
 }
 
-/* Whether only a person clears `token`: a key missing or refused, or a
- * folder not consented — the day's limit clears itself tomorrow. */
-function jevWaitsOnAPerson(token) {
-  const fix = jevTokenRow(token)?.fix;
-  return fix === "key" || fix === "consent";
+/* What a feature waits on a person for — the key (missing or refused) or a
+ * folder's consent, whichever the door refused more often — when it was
+ * refused for them at least as often as anything answered; `null` when it
+ * waits on nobody. The day's limit clears itself tomorrow. */
+function jevWaitsFor(held) {
+  const fixes = { key: 0, consent: 0 };
+  for (const one of held?.week.failures ?? []) {
+    const fix = jevTokenRow(one.token)?.fix;
+    if (fix in fixes) fixes[fix] += one.rows;
+  }
+  const refused = fixes.key + fixes.consent;
+  if (refused === 0 || refused < held.week.answered) return null;
+  return fixes.key >= fixes.consent ? "key" : "consent";
 }
 
-/* Where `held` stands, given the switch's `choice` (what its mode does).
- * Nothing asked all week, or a switch that asks nothing, is unused; a feature
- * the door refused for a key or for consent at least as often as anything
- * answered waits on a person first; then it acts, or it was measured under a
- * line of its own, or it is still recording. */
+/* Where a feature stands, given the switch's `choice` (what its mode does)
+ * and what zo counted (`held`, null when it has not): dormant when its mode
+ * asks nothing; waiting on a person when the door refused it for the key or for
+ * consent; applying when it acts — a person's `on`, or `auto` its evidence
+ * raised; recording otherwise. */
 function jevSeatStatus(held, choice) {
-  if (held.week.rows === 0 || (choice && !choice.asks)) return "unused";
-  const refused = (held.week.failures ?? [])
-    .reduce((sum, one) => sum + (jevWaitsOnAPerson(one.token) ? one.rows : 0), 0);
-  if (refused > 0 && refused >= held.week.answered) return "blocked";
-  if (held.applies) return "applying";
-  if (held.verdict?.line && !JEV_LINES[held.verdict.line]?.wants) return "under";
-  return "recording";
+  if (choice && !choice.asks) return "dormant";
+  if (jevWaitsFor(held)) return "blocked";
+  return (held ? held.applies : choice?.applies) ? "applying" : "recording";
+}
+
+/* Whether a recording feature was measured and held under a line of its own
+ * rather than still counting samples (`JEV_LINES`' `wants`). */
+function jevUnderBar(held) {
+  const line = held?.verdict?.line;
+  return Boolean(line) && !JEV_LINES[line]?.wants && !held.applies;
 }
 
 /* The busiest first: today's requests, then the week's, then the card's own
@@ -445,8 +466,7 @@ function buildJevView() {
     return holder;
   };
   for (const total of JEV_TOTALS) summary.append(stat(total.stat, jevText(total.key, total.word, "dt")));
-  for (const state of JEV_STATUSES) {
-    if (state.status === "unused") continue;
+  for (const state of [...JEV_STATUSES.filter((one) => one.counted), { ...JEV_UNDER, status: JEV_UNDER.stat }]) {
     const holder = stat(state.status, jevText(state.key, state.word, "dt"));
     holder.dataset.status = state.status;
     summary.append(holder);
@@ -785,14 +805,20 @@ function paintJevCaption(view, numbers) {
 function jevStatusCell(held, choice, standing, head) {
   const status = jevSeatStatus(held, choice);
   const state = JEV_STATUSES.find((one) => one.status === status);
+  const said = state.waits?.[jevWaitsFor(held)] ?? state;
   const chip = jevNode("span", "jev-chip");
   chip.dataset.status = status;
-  chip.textContent = t(state.key, state.word);
+  chip.textContent = t(said.key, said.word);
   const owed = jevSamplesOwed(held, standing);
   const lead = jevNode("div", "jev-status-lead", chip);
   if (owed) lead.append(owed);
   const reason = jevStatusReason(held, status, choice, owed !== null);
-  if (reason) lead.append(jevNode("p", "jev-status-reason", document.createTextNode(reason)));
+  if (reason) {
+    const line = jevNode("p", "jev-status-reason", document.createTextNode(reason));
+    // A feature measured under its bar says so in the tone of a miss.
+    line.classList.toggle("is-under", status === "recording" && jevUnderBar(held));
+    lead.append(line);
+  }
   const cell = jevNode("div", "jev-status", lead);
   const other = held.model && held.model !== head
     ? t("settings.typesafe.seatVersion", "모델 {{model}}", { model: held.model }) : "";
@@ -808,10 +834,13 @@ function jevStatusCell(held, choice, standing, head) {
  * the samples still owed are `counting`: the bar says that, once. */
 function jevStatusReason(held, status, choice, counting) {
   const because = held.verdict ? jevLineWords(held.verdict.line) : "";
-  if (status === "unused") {
+  if (status === "dormant") {
     return held.week.rows > 0 ? t("jev.switchedOff", "꺼져 있어 새 판단을 요청하지 않습니다") : "";
   }
   if (status === "blocked") return jevBlockedWords(held);
+  // Switched on and asked nothing all week: the row's dashes are that, not
+  // a feature failing.
+  if (held.week.rows === 0) return t("jev.noRequests", "지난 7일 판단 요청이 없었습니다");
   if (status === "applying") {
     if (!choice?.applies) return t("jev.risen", "근거가 충분해 자동으로 켜졌습니다");
     if (!held.verdict) return t("jev.byHandNoJudge", "직접 켰습니다 — 이 기능은 자동 적용 대상이 아닙니다");
@@ -829,16 +858,12 @@ function jevStatusReason(held, status, choice, counting) {
     : t("jev.risingHeld", "기준을 넘었지만 기록만으로 설정되어 있습니다");
 }
 
-/* Why the door refused a feature that waits on a person: the key or the
- * folder's consent, whichever it refused more often. */
+/* Why the door refused a feature that waits on a person, in a sentence:
+ * the key, or the folder's consent (`jevWaitsFor`). */
 function jevBlockedWords(held) {
-  const fixes = { key: 0, consent: 0 };
-  for (const one of held.week.failures ?? []) {
-    if (jevWaitsOnAPerson(one.token)) fixes[jevTokenRow(one.token).fix] += one.rows;
-  }
-  return fixes.key >= fixes.consent
-    ? t("jev.needs.key", "API 키가 없거나 거절되어 판단을 요청하지 못했습니다")
-    : t("jev.needs.consent", "동의하지 않은 폴더라 판단을 보내지 않았습니다");
+  return jevWaitsFor(held) === "consent"
+    ? t("jev.needs.consent", "동의하지 않은 폴더라 판단을 보내지 않았습니다")
+    : t("jev.needs.key", "API 키가 없거나 거절되어 판단을 요청하지 못했습니다");
 }
 
 /* The samples a feature still owes before the judge can speak, as a bar and
@@ -1203,12 +1228,16 @@ function paintJevSummary(view, order, heldOf) {
   said("week", counted.length ? jevCount(sum((held) => held.week.rows)) : "—");
   const costs = counted.filter((held) => held.costUsd !== null && held.costUsd !== undefined);
   said("cost", costs.length ? jevCost(costs.reduce((total, held) => total + held.costUsd, 0)) : "—");
-  const standing = order.filter((id) => heldOf.has(id))
-    .map((id) => jevSeatStatus(heldOf.get(id), jevSeatChoice(typesafeState, id)));
-  for (const state of JEV_STATUSES) {
-    if (state.status === "unused") continue;
-    said(state.status, counted.length ? jevCount(standing.filter((one) => one === state.status).length) : "—");
+  // The states are counted over the features in use this week: a feature
+  // switched on that nothing asked is where its switch puts it, and is not
+  // one more feature applying (t-6277 D8).
+  const inUse = order.map((id) => [id, heldOf.get(id)]).filter(([, held]) => held?.week.rows > 0);
+  const standing = inUse.map(([id, held]) => [jevSeatStatus(held, jevSeatChoice(typesafeState, id)), held]);
+  const tally = (count) => (counted.length ? jevCount(count) : "—");
+  for (const state of JEV_STATUSES.filter((one) => one.counted)) {
+    said(state.status, tally(standing.filter(([status]) => status === state.status).length));
   }
+  said(JEV_UNDER.stat, tally(standing.filter(([status, held]) => status === "recording" && jevUnderBar(held)).length));
   const day = said("day", !jevDay ? "" : jevDay.most === null || jevDay.most === undefined
     ? t("jev.stat.dayOpen", "{{sent}} / 제한 없음", { sent: jevCount(jevDay.sent) })
     : `${jevCount(jevDay.sent)} / ${jevCount(jevDay.most)}`);

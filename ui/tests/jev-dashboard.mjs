@@ -53,6 +53,8 @@ export function jevDashboardFixture(real = null) {
   const modeOf = Object.fromEntries(seats.map((id) => [id, "on"]));
   modeOf.recall = "shadow";
   modeOf.placement = "auto";
+  // A feature a person switched off by hand in the settings file (t-6277 D8).
+  modeOf.skills = "off";
   const now = Date.now();
   const day = 24 * 60 * 60 * 1000;
   const today = now - (now % day);
@@ -425,6 +427,8 @@ export async function testJevDashboard(browser, origin, ok) {
         return {
           chip: chip?.textContent ?? null, tone: chip?.dataset.status ?? null,
           reason: holder.querySelector(".jev-status-reason")?.textContent ?? "",
+          under: holder.querySelector(".jev-status-reason")?.classList.contains("is-under") ?? false,
+          chips: holder.querySelectorAll(".jev-chip").length,
           progress: bar ? { now: bar.getAttribute("aria-valuenow"), max: bar.getAttribute("aria-valuemax"),
             label: holder.querySelector(".jev-progress-label")?.textContent ?? "" } : null,
           facts: [...holder.querySelectorAll(".jev-status-fact")].map((one) => one.textContent),
@@ -500,7 +504,7 @@ export async function testJevDashboard(browser, origin, ok) {
       JSON.stringify({ rows: opened.rowIds, names: opened.rowNames, fold: opened.fold, bodyRows: opened.bodyRows }));
     ok("the strip over the table counts today, the week, its cost, where the features stand and the day's limit",
       opened.strip.today === "44" && opened.strip.week === "1,156" && opened.strip.cost === "$0.328"
-        && opened.strip.applying === "3" && opened.strip.recording === "1" && opened.strip.under === "1"
+        && opened.strip.applying === "3" && opened.strip.recording === "2" && opened.strip.under === "1"
         && opened.strip.blocked === "1" && opened.strip.day === "247 / 500",
       JSON.stringify(opened.strip));
     ok("opening costs one settings ask, one summary ask with the recent list, and one read of the day's count",
@@ -550,13 +554,15 @@ export async function testJevDashboard(browser, origin, ok) {
     // nothing said twice (t-6243 D2).
     const st = opened.statuses;
     ok("each feature's state is one chip, one reason and, while it wants samples, how many remain until the check",
-      st.summon.chip === "적용 중" && st.summon.tone === "applying" && st.summon.reason === "직접 켰습니다 — 응답률이 기준에 못 미칩니다"
+      Object.values(st).every((one) => one.chips === 1 && ["꺼짐", "기록 중", "적용 중", "키 필요", "동의 필요"].includes(one.chip))
+        && st.summon.chip === "적용 중" && st.summon.tone === "applying" && st.summon.reason === "직접 켰습니다 — 응답률이 기준에 못 미칩니다"
         && st.summon.progress === null && st.summon.facts.join("|") === "이전 버전 jev-1.12.0의 기록은 제외"
         && st.routing.chip === "적용 중" && st.routing.reason === "직접 켰습니다"
         && st.routing.progress?.now === "35" && st.routing.progress?.max === "73" && st.routing.progress?.label === "판정까지 38건"
         && st.recall.chip === "기록 중" && st.recall.tone === "recording" && st.recall.reason === "자동 적용 대상이 아니라 기록만 합니다"
-        && st.placement.chip === "기준 미달" && st.placement.tone === "under" && st.placement.reason === "정확도가 기준에 못 미칩니다"
-        && st.notify.chip === "키·동의 필요" && st.notify.tone === "blocked"
+        && st.placement.chip === "기록 중" && st.placement.tone === "recording" && st.placement.reason === "정확도가 기준에 못 미칩니다"
+        && st.placement.under && !st.recall.under
+        && st.notify.chip === "동의 필요" && st.notify.tone === "blocked"
         && st.notify.reason === "동의하지 않은 폴더라 판단을 보내지 않았습니다",
       JSON.stringify(st));
     // A small sample says its size, not a share: a lower bound over a few
@@ -641,6 +647,11 @@ export async function testJevDashboard(browser, origin, ok) {
         chip: cell("skills", "status").querySelector(".jev-chip")?.textContent ?? null,
         tone: cell("skills", "status").querySelector(".jev-chip")?.dataset.status ?? null,
         reason: cell("skills", "status").querySelector(".jev-status-reason")?.textContent ?? "" };
+      // A feature switched on that nothing asked all week stands where its
+      // switch puts it, and says why its row is empty.
+      opened.idle = { chip: cell("desktop", "status").querySelector(".jev-chip")?.textContent ?? null,
+        tone: cell("desktop", "status").querySelector(".jev-chip")?.dataset.status ?? null,
+        reason: cell("desktop", "status").querySelector(".jev-status-reason")?.textContent ?? "" };
       return opened;
     });
     const inUse = ["summon", "placement", "recall", "routing", "notify", "browser"];
@@ -657,10 +668,12 @@ export async function testJevDashboard(browser, origin, ok) {
         && tr.browser.pictures === 0 && tr.browser.text === "1일치만 있음"
         && unfolded.quiet.pictures === 0 && unfolded.quiet.trend === "—",
       JSON.stringify({ ...tr, quiet: { pictures: unfolded.quiet.pictures, text: unfolded.quiet.trend } }));
-    ok("a seat nothing has asked yet reads as never asked, not as zero",
-      unfolded.quiet.week === "0" && unfolded.quiet.chips === 0 && unfolded.quiet.chip === "미사용"
-        && unfolded.quiet.tone === "unused" && unfolded.quiet.reason === "",
-      JSON.stringify(unfolded.quiet));
+    ok("a feature switched off says so in its one chip; one nothing asked all week says its row is empty, not zero",
+      unfolded.quiet.week === "0" && unfolded.quiet.chips === 0 && unfolded.quiet.chip === "꺼짐"
+        && unfolded.quiet.tone === "dormant" && unfolded.quiet.reason === ""
+        && unfolded.idle.chip === "적용 중" && unfolded.idle.tone === "applying"
+        && unfolded.idle.reason === "지난 7일 판단 요청이 없었습니다",
+      JSON.stringify({ quiet: unfolded.quiet, idle: unfolded.idle }));
     ok("the dashboard holds no select at all, and its drawer starts closed (t-6277 D6/D9)",
       opened.selects === 0 && opened.drawerHidden === true,
       JSON.stringify({ selects: opened.selects, drawerHidden: opened.drawerHidden }));

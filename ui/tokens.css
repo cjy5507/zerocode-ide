@@ -2580,7 +2580,7 @@
   --jev-tone-recording: var(--ink-mist);
   --jev-tone-under: var(--signal-wait-ink);
   --jev-tone-blocked: var(--signal-halt-ink);
-  --jev-tone-unused: var(--ink-mist);
+  --jev-tone-dormant: var(--ink-mist);
   /* The samples still owed, as a bar filling toward the judge's window. */
   --jev-progress-width: 72px;
   --jev-progress-height: 6px;

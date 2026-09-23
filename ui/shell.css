@@ -37873,7 +37873,7 @@ h4.knowledge-inspector-head::after {
 .jev-view [data-status="recording"] { --jev-tone: var(--jev-tone-recording); }
 .jev-view [data-status="under"] { --jev-tone: var(--jev-tone-under); }
 .jev-view [data-status="blocked"] { --jev-tone: var(--jev-tone-blocked); }
-.jev-view [data-status="unused"] { --jev-tone: var(--jev-tone-unused); }
+.jev-view [data-status="dormant"] { --jev-tone: var(--jev-tone-dormant); }
 
 /* The row the unused features fold into: one line, one press. */
 .jev-fold-row td {
@@ -38060,8 +38060,8 @@ h4.knowledge-inspector-head::after {
   background: color-mix(in srgb, var(--jev-tone) 6%, transparent);
 }
 
-/* Not in use says itself in words alone. */
-.jev-chip[data-status="unused"] {
+/* A feature that asks nothing says so in words alone. */
+.jev-chip[data-status="dormant"] {
   padding-inline: 0;
   background: none;
   font-weight: 500;
@@ -38069,6 +38069,12 @@ h4.knowledge-inspector-head::after {
 
 .jev-status-reason, .jev-status-fact {
   margin: 0;
+}
+
+/* A recording feature measured under its bar says why in the tone of a miss
+   (t-6277 D8): the chip stays one of four, the sentence carries the rest. */
+.jev-status-reason.is-under {
+  color: var(--jev-tone-under);
 }
 
 .jev-status-fact {
