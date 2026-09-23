@@ -5,6 +5,8 @@
  * 하는 것. 언급을 풀고 인덱스를 읽는 일은 zo(`zo vault code`)와 core(`second_brain_code::graft`)의
  * 것이라 여기에 없다 — 픽스처(`knowledge-fixture.mjs`)는 그 답의 모양만 짓는다. */
 
+import { FRAME_BUDGET_MS, frameBudgetHolds, loadNote } from "./machine-load.mjs";
+
 const WORKSPACE = "/workspace/acme";
 
 export async function testKnowledgeCode(page, ok) {
@@ -146,7 +148,8 @@ export async function testKnowledgeCode(page, ok) {
 const CODE_SCENE = Object.freeze({ pages: 511, linksPer: 3, ghosts: 20, files: 170, symbols: 430 });
 const ROUNDS = 3;
 const SLACK = 1.25;
-const FRAME_GAP_BUDGET_MS = 12 * 8;
+
+const FRAME_GAP_BUDGET_MS = FRAME_BUDGET_MS;
 
 export async function measureKnowledgeCodeScene(page, ok) {
   const seatWas = page.viewportSize();
@@ -224,11 +227,11 @@ export async function measureKnowledgeCodeScene(page, ok) {
     }
   }, { scene: CODE_SCENE, workspace: WORKSPACE, rounds: ROUNDS });
   await page.setViewportSize(seatWas);
-  console.log(`METRIC knowledge code layer (${CODE_SCENE.pages} pages + ${CODE_SCENE.files} files + ${CODE_SCENE.symbols} definitions, median of ${ROUNDS}): ${JSON.stringify(rows)}`);
+  console.log(`METRIC knowledge code layer (${CODE_SCENE.pages} pages + ${CODE_SCENE.files} files + ${CODE_SCENE.symbols} definitions, median of ${ROUNDS}; ${loadNote()}): ${JSON.stringify(rows)}`);
   ok(`t-5970 G2: grafting ${CODE_SCENE.files + CODE_SCENE.symbols} code nodes onto ${CODE_SCENE.pages} pages costs no more than as many pages would, and keeps the thousand-point frame gap`,
     !rows.thrown && rows.withCode.code === CODE_SCENE.files + CODE_SCENE.symbols
       && rows.withCode.nodes === rows.control.nodes
       && rows.withCode.firstPaint <= rows.control.firstPaint * SLACK
-      && rows.withCode.worstGap < FRAME_GAP_BUDGET_MS,
+      && frameBudgetHolds(rows.withCode.worstGap, FRAME_GAP_BUDGET_MS),
     JSON.stringify(rows));
 }

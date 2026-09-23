@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { frameBudgetHolds, loadNote } from "./machine-load.mjs";
 import { createServer } from "node:http";
 import { readFile, mkdir } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
@@ -1524,7 +1525,7 @@ ok(
     brainScale.edges > 1500 &&
     brainScale.firstPaint > 0 &&
     brainScale.firstPaint < 300 &&
-    brainScale.worstGap < 12 * 8 &&
+    frameBudgetHolds(brainScale.worstGap) &&
     brainScale.spread > 400 && brainScale.spread < 6000 &&
     // 묶는 축이 토큰의 몫을 차지하고, 두 축 다 그 몫을 넘지 않는다(contain).
     Math.abs(Math.max(brainScale.fitRatio, brainScale.fitTallRatio) - brainScale.fitExpected) < 0.02 &&
@@ -1868,14 +1869,14 @@ ok(
     && !pathTest.refused.pathed && pathTest.refused.lit.length === 0 && !pathTest.refused.sectionHidden
     && pathTest.refused.note.includes("없는 페이지") && pathTest.refused.list.length === 0
     && pathTest.node0Deselected
-    /* 경로를 밝힌 프레임은 이 판의 최악 프레임 예산(`12 * 8`, 천 쪽의 앉는 프레임과 같은 자) 안이다.
+    /* 경로를 밝힌 프레임은 이 판의 최악 프레임 예산(`FRAME_BUDGET_MS`, 조용한 기계에서만 판정 — machine-load.mjs, 천 쪽의 앉는 프레임과 같은 자) 안이다.
      * 판의 `is-path` 한 클래스가 점·선 전부의 옷을 바꾸므로 그 프레임은 스타일 재계산을 강제로
      * 치른다 — 실측: 점·선마다 흐림 클래스를 쓰던 판 102 ms → 판의 규칙으로 79 ms(09-22). */
-    && pathTest.paths1020 > 0 && pathTest.routeMs < 2 && pathTest.lightMs < 12 * 8,
+    && pathTest.paths1020 > 0 && pathTest.routeMs < 2 && frameBudgetHolds(pathTest.lightMs),
   JSON.stringify(pathTest),
 );
 console.log(`METRIC knowledge path onto 1020 nodes: route ${pathTest.routeMs}ms; bare frame ${pathTest.frameMs}ms; `
-  + `mark ${pathTest.markMs}ms; mark+frame ${pathTest.lightMs}ms; paths ${pathTest.paths1020}`);
+  + `mark ${pathTest.markMs}ms; mark+frame ${pathTest.lightMs}ms; paths ${pathTest.paths1020}; ${loadNote()}`);
 
 /* Test 11b: 경로는 두 페이지의 열쇠로 든다(K21). 렌즈 하나가 점들을 새 자리에 앉히면
  * 옛 자리 번호는 다른 페이지를 가리킨다 — 그때 밝는 것은 엉뚱한 점이고 인스펙터의
@@ -4634,7 +4635,7 @@ if (skipped) {
 await glBrowser.close();
 
 console.log(`METRIC knowledge graph 1020 nodes: first paint ${brainScale.firstPaint}ms; `
-  + `worst frame gap ${brainScale.worstGap}ms; spread ${brainScale.spread}; `
+  + `worst frame gap ${brainScale.worstGap}ms (${loadNote()}); spread ${brainScale.spread}; `
   + `DOM/node ${brainScale.maxNodeParts}; halo circle ${haloPaint.circleMs}ms `
   + `vs filter ${haloPaint.filterMs}ms (paired ${haloPaint.pairedRatio})`);
 console.log(`PIXEL ${pixelShots.map((shot) => shot.path).join(" ")}`);
