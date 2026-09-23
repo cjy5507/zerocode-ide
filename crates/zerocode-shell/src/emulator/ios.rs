@@ -345,7 +345,16 @@ fn boot_simulator(device: &SimulatorDevice) -> Result<(), String> {
 /// an already-shut-down device mean", and the reclaimer meets that case every
 /// time somebody shuts a device down by hand first.
 fn shutdown_simulator(udid: &str) -> Result<(), String> {
-    let mut command = simctl_command();
+    shutdown_simulator_by(simctl_command(), udid)?;
+    // Down by one of this window's own roads: whoever it was lent to, it is
+    // nobody's loan now.
+    super::loan_put_down(EmulatorPlatform::Ios, udid);
+    Ok(())
+}
+
+/// [`shutdown_simulator`] with its `simctl` handed in — the one place a fake
+/// one can answer it.
+fn shutdown_simulator_by(mut command: Command, udid: &str) -> Result<(), String> {
     command.args(["shutdown", udid]);
     // Bounded, because one caller is the window on its way out: a wedged
     // device — this module already knows of one that hangs `simctl io
@@ -1237,6 +1246,10 @@ fn ios_control(udid: &str) -> Result<Arc<SessionControl>, String> {
         .ok_or_else(|| "이 iOS 시뮬레이터 스트림은 실행 중이 아닙니다".to_string())
 }
 
+/// `borrower` is the terminal whose agent asked for this device through the
+/// emulator door (the window passes it only for an agent's `open`); none is
+/// the person. A device this start boots for a borrower is lent to it
+/// (t-6336) and goes down when that pane's work ends.
 #[tauri::command]
 pub(crate) async fn start_emulator_stream(
     app: AppHandle,
@@ -1244,6 +1257,7 @@ pub(crate) async fn start_emulator_stream(
     udid: Option<String>,
     viewport: Option<Viewport>,
     on_frame: BinaryChannel,
+    borrower: Option<u32>,
 ) -> Result<EmulatorStream, String> {
     crate::from_the_main_webview(&webview)?;
     // A device stream is a road a walk starts on, the same as a browser pane
@@ -1276,6 +1290,15 @@ pub(crate) async fn start_emulator_stream(
                         stream.stream
                     ),
                 );
+                // Up already: another pane joins a loan, or the person keeps it.
+                super::note_start(
+                    &app,
+                    EmulatorPlatform::Ios,
+                    &chosen.udid,
+                    &chosen.name,
+                    borrower,
+                    false,
+                );
                 return Ok(stream);
             }
             StartClaim::Acquired(lease) => lease,
@@ -1285,6 +1308,15 @@ pub(crate) async fn start_emulator_stream(
         // boot makes the answer yes.
         let waking = !chosen.booted;
         boot_simulator(&chosen)?;
+        // And whether this start put the device up is who it belongs to.
+        super::note_start(
+            &app,
+            EmulatorPlatform::Ios,
+            &chosen.udid,
+            &chosen.name,
+            borrower,
+            waking,
+        );
         prepare_simulator_services(&chosen.udid);
         // And then out of sight again. The person asked for a device inside
         // THIS window; a second application appearing on their desktop is not
@@ -1356,7 +1388,15 @@ pub(crate) async fn start_emulator_stream(
         );
         // This is the device the next window wakes before anybody asks (D4),
         // and the one this window is answerable for when it goes quiet (D3).
-        keeping::remember_this_device(&husk_root, &chosen.udid, &chosen.name);
+        // The next window wakes the PERSON's device, never an agent's: an
+        // audit's simulator written down here came back at the next window's
+        // boot (09-23 13:34, "last used 166 minutes ago") after its session
+        // had ended (t-6336).
+        if borrower.is_none() {
+            keeping::remember_this_device(&husk_root, &chosen.udid, &chosen.name);
+        } else {
+            keeping::this_window_owns(&chosen.udid);
+        }
         // The boot is timed beside the pictures rather than in front of them
         // (D5): the roads below draw the Simulator's own boot logo while this
         // watch says the device is still coming up, and both of the roads that
@@ -2048,9 +2088,106 @@ pub(super) fn devices_at_exit(keep_booted: bool, local_data_root: &Path) {
     keeping::shut_down_our_devices(local_data_root);
 }
 
+/// Put a lent simulator away (t-6336): the one `simctl shutdown`, and its
+/// idle clock let go — it is off, and nothing here watches it any more.
+pub(super) fn put_away(udid: &str) -> Result<(), String> {
+    shutdown_simulator(udid)?;
+    keeping::this_window_lets_go(udid);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The one `simctl shutdown`, answered by a fake `simctl` that writes down
+    /// what it was asked (t-6336): a booted device goes down, a device already
+    /// down is already where it was sent, and a device the machine no longer
+    /// has — an agent deleted it by hand — is a refusal the return reports
+    /// rather than papers over.
+    #[cfg(unix)]
+    #[test]
+    fn the_one_shutdown_reads_what_simctl_answers() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let scratch = tempfile::tempdir().expect("scratch");
+        let asked = scratch.path().join("asked");
+        let simctl = scratch.path().join("simctl");
+        std::fs::write(
+            &simctl,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\ncase \"$2\" in\n  booted-one) exit 0 ;;\n  already-off) echo 'Unable to shutdown device in current state: Shutdown' >&2; exit 149 ;;\n  *) echo \"Invalid device: $2\" >&2; exit 148 ;;\nesac\n",
+                asked.display()
+            ),
+        )
+        .expect("fake simctl");
+        std::fs::set_permissions(&simctl, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let fake = || crate::proc::quiet_command(&simctl);
+        assert_eq!(shutdown_simulator_by(fake(), "booted-one"), Ok(()));
+        assert_eq!(shutdown_simulator_by(fake(), "already-off"), Ok(()));
+        let refused = shutdown_simulator_by(fake(), "deleted-one").expect_err("a missing device");
+        assert!(refused.contains("Invalid device: deleted-one"), "{refused}");
+        assert_eq!(
+            std::fs::read_to_string(&asked).expect("what simctl was asked"),
+            "shutdown booted-one\nshutdown already-off\nshutdown deleted-one\n"
+        );
+    }
+
+    /// On a real simulator this task owns (t-6336, named by
+    /// `ZEROCODE_LIVE_SIMULATOR`): a device up and lent to nobody stays up when
+    /// a pane's work ends, and the same device lent to that pane goes down by
+    /// the one `simctl shutdown` — the book's verdict and the power road end
+    /// to end, with how long the return took. Never name a device another
+    /// session is using: the second half shuts it down.
+    #[test]
+    #[ignore = "boots a real iOS simulator and shuts it down again"]
+    fn a_lent_simulator_goes_down_with_its_borrower_and_an_unlent_one_stays_up() {
+        use super::super::session::{LoanEnd, loans};
+        let Ok(udid) = std::env::var("ZEROCODE_LIVE_SIMULATOR") else {
+            println!("LIVE: no simulator named; nothing measured");
+            return;
+        };
+        const TERM: u32 = 4_242_001;
+        let named = || {
+            list_ios_simulators()
+                .into_iter()
+                .find(|device| device.udid == udid)
+                .expect("the named simulator is on this machine")
+        };
+        boot_simulator(&named()).expect("the named simulator boots");
+        // Up, and a person's start: nobody's loan, so the pane's end leaves it.
+        loans().note_start(
+            EmulatorPlatform::Ios,
+            &udid,
+            None,
+            true,
+            crate::now_epoch_ms(),
+        );
+        super::super::borrower_gone(TERM, LoanEnd::PaneClosed);
+        std::thread::sleep(Duration::from_secs(3));
+        let kept = named().booted;
+        println!("LIVE: unlent device after its pane's end: booted={kept}");
+        assert!(kept, "a device nobody lent went down with a pane");
+        // Lent to the pane: its end puts it down.
+        loans().note_start(
+            EmulatorPlatform::Ios,
+            &udid,
+            Some(TERM),
+            true,
+            crate::now_epoch_ms(),
+        );
+        let began = Instant::now();
+        super::super::borrower_gone(TERM, LoanEnd::PaneClosed);
+        let deadline = began + Duration::from_secs(60);
+        while named().booted && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let down = !named().booted;
+        println!(
+            "LIVE: lent device after its pane's end: shut down={down} in {} ms",
+            began.elapsed().as_millis()
+        );
+        assert!(down, "a lent device outlived its borrower");
+    }
 
     fn device(name: &str, booted: bool) -> SimulatorDevice {
         SimulatorDevice {

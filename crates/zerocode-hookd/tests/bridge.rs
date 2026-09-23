@@ -910,6 +910,55 @@ async fn a_computer_command_carries_the_directory_its_caller_stands_in() {
     );
 }
 
+/// A command on the Computer Use route carries the pane that asked, when its
+/// door named one (t-6379): the emulator door's `open` is seated in that
+/// pane's checkout, the way a browser tab is. The header is the browser
+/// door's own spelling, read the same way — an empty one names nobody.
+#[tokio::test]
+async fn a_computer_command_carries_the_pane_that_asked() {
+    let (state, _events, _teams, _browser, mut computer, _federation) =
+        BridgeState::new_with_computer(TOKEN, BROWSER, COMPUTER);
+    let presented = [Some("term-7"), None, Some("")];
+    let asked = presented.len();
+    let answering = tokio::spawn(async move {
+        let mut carried = Vec::new();
+        for _ in 0..asked {
+            let request = computer.recv().await.expect("computer request");
+            carried.push(request.pane.clone());
+            let _ = request.answer.send(zerocode_hookd::TeamAnswer {
+                stdout: "{\"ok\":true}\n".into(),
+                stderr: String::new(),
+                exit_code: 0,
+            });
+        }
+        carried
+    });
+    for header in presented {
+        let mut builder = Request::post("/computer")
+            .header(HOOK_TOKEN_HEADER, TOKEN)
+            .header(zerocode_hookd::COMPUTER_TOKEN_HEADER, COMPUTER)
+            .header("content-type", "application/octet-stream");
+        if let Some(value) = header {
+            builder = builder.header(zerocode_hookd::BROWSER_PANE_HEADER, value);
+        }
+        let response = router(state.clone())
+            .oneshot(
+                builder
+                    .body(Body::from(
+                        "emulator\u{1f}open\u{1f}--platform\u{1f}ios\u{1f}",
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+    assert_eq!(
+        answering.await.expect("answered"),
+        [Some("term-7".to_string()), None, None]
+    );
+}
+
 #[tokio::test]
 async fn a_browser_command_without_the_token_is_turned_away() {
     let (state, _events, _teams, mut browser) = BridgeState::new(TOKEN, BROWSER);

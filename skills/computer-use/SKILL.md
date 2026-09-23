@@ -99,6 +99,13 @@ never print image bytes to the terminal. Omit `--out` for a private scratch
 path, or pass a destination when the artifact belongs in the worktree; the
 emulator takes a relative `--out` from the shell's own folder.
 
+The mirror `open` makes is seated in your own pane's checkout, not in front of
+whatever the person is looking at. Let `open` boot the device rather than
+booting it yourself: a device `open` boots is lent to your pane, and ZeroCode
+shuts it down when your pane closes, when you send `worker_done`, or when your
+session ends. A device that was already running is left as it was, and a
+device you created for the task is still yours to delete.
+
 Omit `--device` on `open` to let the built-in backend choose an already-running
 device or the first installed one. After opening, use the ID returned by
 `list`; Android accepts either its AVD name or its current serial. Coordinates

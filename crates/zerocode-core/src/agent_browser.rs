@@ -864,7 +864,8 @@ pub fn usage() -> String {
 /// The header the browser shim uses to say which pane asked. The window seats
 /// an agent-opened tab in that pane's checkout rather than in whichever one
 /// the person happens to be looking at (live report 2026-09-03: a tab opened
-/// for one project landed in another's stage).
+/// for one project landed in another's stage). The emulator door says it in
+/// the same spelling, for the same reason (t-6379: a device mirror did too).
 pub const PANE_HEADER: &str = "x-zerocode-pane";
 
 /// The `zerocode-browser` shim, written onto every pane's PATH.

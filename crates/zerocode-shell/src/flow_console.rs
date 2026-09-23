@@ -107,6 +107,7 @@ async fn execute(
             argv,
             cwd: Some(cwd),
             evidence: None,
+            pane: None,
             answer,
         })
         .map_err(|_| "the Computer Use bridge is no longer listening".to_string())?;

@@ -21,7 +21,7 @@ mod session;
 mod walk_bench;
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -44,7 +44,8 @@ pub(crate) use ios::{
     ios_tap_direct, ios_text, ios_text_direct, ios_touch, mobile_emulators,
     mobile_emulators_direct, open_mobile_emulator, shutdown_mobile_emulator, start_emulator_stream,
 };
-use session::{SessionControl, registry};
+use session::{Loan, SessionControl, StartVerdict, loans, registry};
+pub(crate) use session::{LoanEnd, LoanSummary};
 
 const MAX_FRAME_BYTES: u64 = 16 * 1024 * 1024;
 const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(25);
@@ -59,6 +60,25 @@ pub(crate) enum EmulatorPlatform {
     Android,
 }
 
+impl EmulatorPlatform {
+    /// The word the window log and the wire say it in.
+    const fn word(self) -> &'static str {
+        match self {
+            Self::Ios => "ios",
+            Self::Android => "android",
+        }
+    }
+}
+
+impl From<zerocode_core::computer_use::EmulatorPlatform> for EmulatorPlatform {
+    fn from(asked: zerocode_core::computer_use::EmulatorPlatform) -> Self {
+        match asked {
+            zerocode_core::computer_use::EmulatorPlatform::Ios => Self::Ios,
+            zerocode_core::computer_use::EmulatorPlatform::Android => Self::Android,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EmulatorStream {
@@ -68,6 +88,35 @@ pub(crate) struct EmulatorStream {
     pub platform: EmulatorPlatform,
     pub interactive: bool,
     pub reused: bool,
+}
+
+/// What the window hears when an agent asks for a device mirror
+/// (`zerocode-emulator open`, `emulator:agent-open`): the platform, the device
+/// when one was named, and the terminal whose agent asked, read off the pane
+/// key its door presented. The window seats the mirror in that terminal's
+/// checkout — the way `BrowserPopup.term` seats a browser tab — and a shell
+/// whose door named no pane carries no `term`, so the window opens the mirror
+/// where the person is looking and says why (t-6379).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct AgentOpen {
+    platform: zerocode_core::computer_use::EmulatorPlatform,
+    device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    term: Option<u32>,
+}
+
+impl AgentOpen {
+    pub(crate) fn asked(
+        platform: zerocode_core::computer_use::EmulatorPlatform,
+        device: Option<String>,
+        pane: Option<&str>,
+    ) -> Self {
+        Self {
+            platform,
+            device,
+            term: pane.and_then(crate::hooks::term_of_pane_key),
+        }
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -378,6 +427,7 @@ pub(crate) async fn choose_emulator_app(
 /// none of it may hold the boot up: the work runs on its own thread, and the
 /// reclaimers each start theirs.
 pub(crate) fn on_window_boot(app: &AppHandle) {
+    let _ = WINDOW.set(app.clone());
     let app = app.clone();
     // One thread for all of it: the settings read, a device listing and a
     // boot are file and process work, and a window that waits on a simulator
@@ -413,9 +463,13 @@ pub(crate) fn preboot_last_used(app: &AppHandle) {
 /// `emulator.keepBooted` (D3) is read here, at exit, because the switch may
 /// have been turned in this session: the panes always go — nothing is left
 /// pumping into a window that is gone — and the devices stay up so the next
-/// window's first pane opens on a resume rather than a cold boot.
+/// window's first pane opens on a resume rather than a cold boot. A lent
+/// device is not the person's to keep: its borrowers are panes, and they go
+/// with this window, so it goes down with them whatever the switch says
+/// (t-6336) — nothing would be left to remember whose it was.
 pub(crate) fn shutdown_all(app: &AppHandle) {
     let prefs = prefs::of(app);
+    put_away(loans().take_all(), LoanEnd::WindowExit);
     registry().shutdown_all();
     android::shutdown_all_devices(prefs.keep_booted);
     ios::devices_at_exit(
@@ -426,9 +480,216 @@ pub(crate) fn shutdown_all(app: &AppHandle) {
     ios_hid::shutdown_all();
 }
 
+/// The window the loan roads speak to: set once at boot, so the roads that
+/// end a loan — a pane closing, a worker reporting done, the idle reclaimer —
+/// need no handle of their own.
+static WINDOW: OnceLock<AppHandle> = OnceLock::new();
+
+/// Tell the window how many devices are lent (the status bar's one line).
+fn announce_loans() {
+    if let Some(app) = WINDOW.get() {
+        let _ = app.emit_to("main", "emulator:loans", loans().summary());
+    }
+}
+
+/// The loan book's line, for a window that opens — or reloads — while
+/// devices are lent.
+#[tauri::command]
+pub(crate) fn emulator_loans(webview: tauri::Webview) -> Result<LoanSummary, String> {
+    crate::from_the_main_webview(&webview)?;
+    Ok(loans().summary())
+}
+
+/// A stream start, judged for the loan book and said in the window log —
+/// both platforms' starts call this once they know whether they booted the
+/// device (`booted_here`) and which pane asked (`borrower`, none for the
+/// person).
+fn note_start(
+    app: &AppHandle,
+    platform: EmulatorPlatform,
+    device: &str,
+    name: &str,
+    borrower: Option<u32>,
+    booted_here: bool,
+) {
+    let said = match loans().note_start(
+        platform,
+        device,
+        borrower,
+        booted_here,
+        crate::now_epoch_ms(),
+    ) {
+        StartVerdict::Lend(term) => format!("lent to term {term}"),
+        StartVerdict::Join(term) => format!("also lent to term {term}"),
+        StartVerdict::Keep => "kept: the person opened it, so it is theirs now".to_string(),
+        StartVerdict::Nobody => return,
+    };
+    crate::note_window_event(
+        app.state::<crate::AppState>().local_data_root(),
+        &format!("emulator {}: {name} ({device}) {said}", platform.word()),
+    );
+    announce_loans();
+}
+
+/// The door used this device (any verb that named it): a lent one's last use
+/// moves.
+pub(crate) fn used_through_the_door(
+    platform: zerocode_core::computer_use::EmulatorPlatform,
+    device: &str,
+) {
+    loans().touch(platform.into(), device, crate::now_epoch_ms());
+}
+
+/// One of the window's own roads put this device down — its 끄기 button, the
+/// idle reclaimer, a device that left on its own: nobody's loan any more.
+fn loan_put_down(platform: EmulatorPlatform, device: &str) {
+    if loans().forget(platform, device) {
+        announce_loans();
+    }
+}
+
+/// `term`'s work ended — its pane closed, its worker reported
+/// `worker_done`, its agent said its session ended (t-6336). The devices the
+/// door put up for it and for nobody else go down, on a thread of their own:
+/// a simulator takes a second to shut down and an AVD's saved exit up to
+/// thirty, and none of the three roads that call this may wait on either.
+/// The common pane has lent nothing, and its end costs one lock.
+pub(crate) fn borrower_gone(term: u32, end: LoanEnd) {
+    let returned = loans().returned_by(term);
+    if returned.is_empty() {
+        return;
+    }
+    let _ = std::thread::Builder::new()
+        .name(format!("emulator-return-{term}"))
+        .spawn(move || put_away(returned, end));
+}
+
+/// What the window hears when a loan is returned: which device, so it takes
+/// the borrowers' mirrors of it off the strip.
+#[derive(Clone, Serialize)]
+struct LoanReturned {
+    platform: EmulatorPlatform,
+    device: String,
+}
+
+/// Put returned loans away, each in the one order that leaves nothing
+/// pointing at a device that is gone: its streams stop, the device goes down
+/// by its platform's own power road, and then the window hears — it takes the
+/// borrowers' mirrors off the strip.
+fn put_away(returned: Vec<Loan>, end: LoanEnd) {
+    if returned.is_empty() {
+        return;
+    }
+    put_away_with(
+        returned,
+        |loan| registry().stop_device(loan.platform, &loan.device),
+        |loan| match loan.platform {
+            EmulatorPlatform::Ios => ios::put_away(&loan.device),
+            EmulatorPlatform::Android => WINDOW.get().map_or(Ok(()), |app| {
+                android::put_away(
+                    app.state::<crate::AppState>().local_data_root(),
+                    &loan.device,
+                )
+            }),
+        },
+        |loan, stopped, outcome, took| {
+            let Some(app) = WINDOW.get() else {
+                return;
+            };
+            let said = match outcome {
+                Ok(()) => format!("shut down in {} ms", took.as_millis()),
+                Err(error) => format!("would not shut down: {error}"),
+            };
+            crate::note_window_event(
+                app.state::<crate::AppState>().local_data_root(),
+                &format!(
+                    "emulator {}: lent {} returned ({}) — {stopped} stream(s) stopped, {said}",
+                    loan.platform.word(),
+                    loan.device,
+                    end.word(),
+                ),
+            );
+            let _ = app.emit_to(
+                "main",
+                "emulator:loan-returned",
+                LoanReturned {
+                    platform: loan.platform,
+                    device: loan.device.clone(),
+                },
+            );
+        },
+    );
+    announce_loans();
+}
+
+/// [`put_away`]'s order, with the three hands passed in so the order is a
+/// test rather than a hope.
+fn put_away_with(
+    returned: Vec<Loan>,
+    mut stop_streams: impl FnMut(&Loan) -> usize,
+    mut shut_down: impl FnMut(&Loan) -> Result<(), String>,
+    mut tell: impl FnMut(&Loan, usize, &Result<(), String>, Duration),
+) {
+    for loan in &returned {
+        let began = Instant::now();
+        let stopped = stop_streams(loan);
+        let outcome = shut_down(loan);
+        tell(loan, stopped, &outcome, began.elapsed());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A return puts each device away in the one order that leaves nothing
+    /// pointing at a device that is gone (t-6336): its streams stop, then the
+    /// device goes down by its platform's road, then the window hears — and a
+    /// device that would not go down is still reported, with why, and does
+    /// not stop the next one.
+    #[test]
+    fn a_return_stops_the_streams_then_the_device_then_tells_the_window() {
+        let book = session::LoanBook::default();
+        book.note_start(EmulatorPlatform::Ios, "lent-sim", Some(5), true, 1);
+        book.note_start(EmulatorPlatform::Android, "lent_avd", Some(5), true, 2);
+        book.note_start(EmulatorPlatform::Ios, "persons-sim", None, true, 3);
+        let steps = std::cell::RefCell::new(Vec::new());
+        put_away_with(
+            book.returned_by(5),
+            |loan| {
+                steps.borrow_mut().push(format!("stop {}", loan.device));
+                1
+            },
+            |loan| {
+                steps.borrow_mut().push(format!("down {}", loan.device));
+                if loan.platform == EmulatorPlatform::Android {
+                    Err("the emulator process would not stop".to_string())
+                } else {
+                    Ok(())
+                }
+            },
+            |loan, stopped, outcome, _| {
+                steps.borrow_mut().push(format!(
+                    "tell {} {stopped} {}",
+                    loan.device,
+                    outcome
+                        .as_ref()
+                        .map_or_else(Clone::clone, |()| "down".to_string())
+                ));
+            },
+        );
+        assert_eq!(
+            steps.into_inner(),
+            [
+                "stop lent-sim",
+                "down lent-sim",
+                "tell lent-sim 1 down",
+                "stop lent_avd",
+                "down lent_avd",
+                "tell lent_avd 1 the emulator process would not stop",
+            ]
+        );
+    }
 
     #[test]
     fn raw_channel_payload_prefixes_one_big_endian_sequence_without_reencoding_bytes() {
@@ -442,6 +703,33 @@ mod tests {
         assert_eq!(
             serde_json::to_value(EmulatorNoteCode::FrameUnavailable).unwrap(),
             "frame-unavailable"
+        );
+    }
+
+    /// An agent's `open` names the terminal that asked, read off the pane key
+    /// its door presented (t-6379) — and nothing it cannot read: a shell whose
+    /// door named no pane, or named something that is not a pane key, asks
+    /// from nowhere the window knows, and the payload says so by carrying no
+    /// `term` at all. The rest of the wire is what it always was.
+    #[test]
+    fn an_agents_open_names_the_terminal_that_asked_and_nothing_it_cannot_read() {
+        use zerocode_core::computer_use::EmulatorPlatform as Asked;
+        let wire = |open: AgentOpen| serde_json::to_value(open).expect("serializes");
+        assert_eq!(
+            wire(AgentOpen::asked(
+                Asked::Ios,
+                Some("U1".to_string()),
+                Some(&crate::hooks::pane_key_of(7)),
+            )),
+            serde_json::json!({ "platform": "ios", "device": "U1", "term": 7 })
+        );
+        assert_eq!(
+            wire(AgentOpen::asked(Asked::Android, None, None)),
+            serde_json::json!({ "platform": "android", "device": null })
+        );
+        assert_eq!(
+            wire(AgentOpen::asked(Asked::Ios, None, Some("tab-1/leaf-2"))),
+            serde_json::json!({ "platform": "ios", "device": null })
         );
     }
 

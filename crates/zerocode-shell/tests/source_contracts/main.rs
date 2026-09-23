@@ -8862,6 +8862,91 @@ mod tests {
         );
     }
 
+    /// A device the emulator door booted for an agent's pane goes down when
+    /// that pane's work ends (t-6336), and every way it ends reaches the one
+    /// return: the pane closing (the door every terminal ending passes), its
+    /// worker's `worker_done` once the ledger took it, and its agent's
+    /// `SessionEnd`. The door's own verbs move a loan's last use, and the
+    /// status bar can ask the book when the window opens.
+    #[test]
+    fn every_end_of_a_borrowers_work_returns_what_it_borrowed() {
+        let shell = shipped_backend();
+        let closing = block_after(shell, "fn forget_term_state(");
+        assert!(
+            closing.contains(
+                "crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::PaneClosed)"
+            ),
+            "a pane that closes keeps the devices it borrowed:\n{closing}"
+        );
+        let team = block_after(shell, "fn answer_team_command(");
+        assert!(
+            team.contains("is_worker_done(&request.argv)")
+                && team.contains(
+                    "crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::WorkerDone)"
+                ),
+            "a worker that reports done keeps the devices it borrowed:\n{team}"
+        );
+        let hooks = block_after(shell, "async fn hook_loop(");
+        assert!(
+            hooks.contains("hooks::session_end_of(&envelope")
+                && hooks.contains(
+                    "crate::emulator::borrower_gone(term, crate::emulator::LoanEnd::SessionEnded)"
+                ),
+            "an agent whose session ends keeps the devices it borrowed"
+        );
+        let door = block_after(shell, "async fn answer_emulator_command(");
+        assert!(
+            door.contains("crate::emulator::used_through_the_door("),
+            "the door's verbs no longer move a loan's last use:\n{door}"
+        );
+        assert!(
+            shell.contains("emulator_loans,"),
+            "the status bar cannot ask the loan book"
+        );
+        let book = include_str!("../../src/emulator/mod.rs");
+        assert!(
+            block_after(book, "pub(crate) fn emulator_loans(")
+                .contains("from_the_main_webview(&webview)?"),
+            "the loan line's command stopped asking who is calling"
+        );
+    }
+
+    /// The window's half of a loan (t-6336): only an agent's open names the
+    /// pane it borrows for, a returned device takes that pane's mirrors off
+    /// the strip, and the status bar counts what is lent — in every catalog.
+    #[test]
+    fn an_agents_borrowed_devices_leave_the_strip_and_the_status_bar_counts_them() {
+        let window = window_source();
+        let opening = block_after(window, "async function openEmulatorTab(");
+        assert!(
+            opening.contains("borrower: caller === null ? null : from"),
+            "an agent's open no longer names the pane it borrows for:\n{opening}"
+        );
+        let switching = block_after(window, "async function switchEmulatorDevice(");
+        assert!(
+            switching.matches("...lent,").count() == 2,
+            "a stream start stopped carrying its borrower on one platform:\n{switching}"
+        );
+        let returned = block_after(window, r#"listen("emulator:loan-returned""#);
+        assert!(
+            returned.contains("one.borrower != null") && returned.contains("closeTab(tab.id)"),
+            "a returned device leaves its borrower's mirror standing:\n{returned}"
+        );
+        let markup = include_str!("../../../../ui/index.html");
+        assert!(
+            markup.contains(r#"<span class="sb-item" id="sb-loans" hidden>"#),
+            "the status bar lost its loan line, or shows it with nothing lent"
+        );
+        let i18n = include_str!("../../../../ui/shell-i18n.js");
+        for key in ["emulator.loans", "emulator.loansNow"] {
+            assert_eq!(
+                i18n.matches(&format!("\"{key}\":")).count(),
+                4,
+                "`{key}` is missing from one of the en/ja/zh/es catalogs"
+            );
+        }
+    }
+
     #[test]
     fn computer_use_routes_pages_and_devices_to_zerocodes_owned_surfaces() {
         let shell = shipped_backend();
@@ -8899,6 +8984,9 @@ mod tests {
             "mobile_emulators_direct()",
             "android_emulators_direct()",
             r#"emit_to("main", "emulator:agent-open""#,
+            // Seated in the asking pane's checkout (t-6379): the payload
+            // names the terminal the door's pane key reads as.
+            "AgentOpen::asked(platform, device, pane)",
             "ios_accessibility_tree_direct",
             "android_accessibility_tree_direct",
             "ios_tap_direct",
@@ -8959,8 +9047,29 @@ mod tests {
         let listener = block_after(window, r#"listen("emulator:agent-open""#);
         assert!(
             listener.contains(r#"platform !== "ios" && platform !== "android""#)
-                && listener.contains("openEmulatorTab(platform, device)"),
+                && listener.contains("openEmulatorTab(platform, device, { from, agent: true })"),
             "the window stopped validating and opening the built-in emulator request:\n{listener}"
+        );
+        // Seated in the asking pane's checkout (t-6379): an agent's mirror
+        // never turns the person's head from another checkout, and one whose
+        // pane is unknown says where it went, in every catalog.
+        let opening = block_after(window, "async function openEmulatorTab(");
+        for owned in [
+            "tabOfTerm(from)",
+            "standBeside(caller.pane)",
+            "{ focus: !away }",
+            "\"emulator.agentOpenUnseated\"",
+        ] {
+            assert!(
+                opening.contains(owned),
+                "an agent's mirror lost {owned}:\n{opening}"
+            );
+        }
+        let i18n = include_str!("../../../../ui/shell-i18n.js");
+        assert_eq!(
+            i18n.matches("\"emulator.agentOpenUnseated\":").count(),
+            4,
+            "`emulator.agentOpenUnseated` is missing from one of the en/ja/zh/es catalogs"
         );
         assert!(
             skill.contains("Website or web app: use `zerocode-browser")
@@ -10212,9 +10321,12 @@ mod tests {
         // the same period; the backend's table decides which knock is a check.
         // Thirteen since t-5807: the Jev dashboard's slow beat (`jevPoll`),
         // one zo process every thirty seconds while the tab is on stage.
+        // Fourteen since t-6336: the loan line's minute (`emulatorLoansTick`),
+        // an in-memory read that runs only while an agent's pane has a device
+        // lent.
         assert_eq!(
             window.matches(" = idlePoller({").count(),
-            13,
+            14,
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");
@@ -16091,12 +16203,14 @@ mod tests {
             "a nested run is registered before the envelope is known to speak \
              for the pane:\n{looping}"
         );
-        // THREE roads ask, through one door: the tool call, the helper
+        // FOUR roads ask, through one door: the tool call, the helper
         // lifecycle (which also ends in a `continue`, so an ungated child put a
-        // row on the lead's card and left), and the report itself.
+        // row on the lead's card and left), the session's end (a nested run's
+        // `SessionEnd` must not return what the pane borrowed, t-6336), and
+        // the report itself.
         assert_eq!(
             looping.matches("speaks_for_its_pane(").count(),
-            3,
+            4,
             "a road into the pane's facts stopped asking whose word it \
              is:\n{looping}"
         );

@@ -1426,10 +1426,23 @@ function emulatorBootWords(tab, now = Date.now()) {
     : t("emulator.bootingUnnamed", "부팅 중 · {{seconds}}초", { seconds });
 }
 
+/* 이 탭이 제 말을 써도 되는 쪽지 칸, 아니면 null.
+ *
+ * 한 그룹의 에뮬레이터 화면은 그 그룹의 탭들이 나눠 쓰고, 그룹 0은 모든
+ * 체크아웃의 것이다 — 다른 체크아웃에 선 거울(t-6379)도 같은 번호를 든다.
+ * 다른 탭이 잡고 있는 화면에 자막이나 쪽지를 쓰면 사람이 보는 기기 밑에
+ * 남의 기기 말이 선다. 임자가 없는 화면은 받는다 — 프레임이 그러듯
+ * (`receiveEmulatorFrame`). */
+function emulatorNoteOf(tab) {
+  const host = groupOf(tab.pane)?.emulatorView;
+  if (!host || (host._emulatorTab && host._emulatorTab !== tab)) return null;
+  return host.querySelector(".emulator-note");
+}
+
 /* 자막을 지금 한 번 쓴다 — 부팅 중인 탭에만. */
 function paintEmulatorBootCaption(tab) {
   if (tab.bootingSince == null) return;
-  const note = groupOf(tab.pane)?.emulatorView?.querySelector(".emulator-note");
+  const note = emulatorNoteOf(tab);
   if (!note) return;
   note.textContent = emulatorBootWords(tab);
   note.hidden = false;
@@ -1463,7 +1476,7 @@ function dropEmulatorBootCaption(tab) {
  * 그 소식을 덮어쓰는 것으로 나타난다. */
 function sayInEmulatorNote(tab, words) {
   dropEmulatorBootCaption(tab);
-  const note = groupOf(tab.pane)?.emulatorView?.querySelector(".emulator-note");
+  const note = emulatorNoteOf(tab);
   if (!note) return;
   note.textContent = words;
   note.hidden = false;
@@ -1965,13 +1978,23 @@ function paintEmulatorView(tab) {
 }
 
 /* 기기 갈아타기: 옛 펌프를 멈추고 고른 기기로 새 스트림 — 탭은 그대로,
- * 이름표만 그 기기의 것이 된다. */
-async function switchEmulatorDevice(tab, platform, id) {
+ * 이름표만 그 기기의 것이 된다.
+ *
+ * `focus`는 이 여는 일이 화면을 가져가도 되는가다. 다른 체크아웃에 선
+ * 에이전트의 거울(t-6379)은 안 된다: 그 탭은 화면에 없으니 그리지 않고,
+ * 같은 기기의 스트림이 이미 있어 그 탭으로 합쳐질 때도 사람의 화면을 그
+ * 탭으로 넘기지 않는다.
+ *
+ * `borrower`는 이 여는 일을 부탁한 에이전트의 판이다(t-6336) — 에이전트의
+ * open만 싣는다. 백엔드는 이 시작이 기기를 부팅했을 때만 그 판에 빌려 준
+ * 것으로 적고, 그 판의 일이 끝나면 끈다. 사람이 고른 기기, 사람이 다시 붙인
+ * 기기는 누구의 빌림도 아니다. */
+async function switchEmulatorDevice(tab, platform, id, { focus = true, borrower = null } = {}) {
   const epoch = (tab.emulatorEpoch ?? 0) + 1;
   tab.emulatorEpoch = epoch;
   tab.working = true;
   tab.live = false;
-  paintEmulatorView(tab);
+  if (stillShowing(tab)) paintEmulatorView(tab);
   // 자막은 여기서 선다(D6) — 판이 서는 것과 같은 턴이고, 기기를 갈아타도
   // 새 기기의 초부터 다시 센다.
   standEmulatorBootCaption(tab);
@@ -1990,16 +2013,19 @@ async function switchEmulatorDevice(tab, platform, id) {
   try {
     // 기기를 대지 않고 부를 수 있다 — 새 탭이 그 길로 온다. 그때 고르는 일은
     // 백엔드의 몫이고(부팅된 것 우선), 창은 그것이 답한 이름을 입는다.
+    const lent = borrower === null ? {} : { borrower };
     const said =
       platform === "android"
         ? await invoke("start_android_stream", {
             ...(id ? { avd: id } : {}),
             ...(binaryDoor ? { onFrame: binaryDoor.channel } : {}),
+            ...lent,
           })
         : await invoke("start_emulator_stream", {
             ...(id ? { udid: id } : {}),
             ...(tab.viewportLongEdge ? { viewport: { longEdgePx: tab.viewportLongEdge } } : {}),
             ...(binaryDoor ? { onFrame: binaryDoor.channel } : {}),
+            ...lent,
           });
     if (tab.emulatorEpoch !== epoch || !tabs.includes(tab)) {
       binaryDoor?.dispose();
@@ -2012,7 +2038,7 @@ async function switchEmulatorDevice(tab, platform, id) {
     if (existing) {
       binaryDoor?.dispose();
       closeTab(tab.id);
-      setActiveTab(existing.id);
+      if (focus) setActiveTab(existing.id);
       return;
     }
     tab.platform = platform;
@@ -2699,8 +2725,22 @@ let emulatorTabSeq = 0;
  * 붙는 절차 — 이진 문 만들기·스트림 시작·이미 붙어 있던 스트림을 그 탭에
  * 넘겨주기·이름표 갈아입기·H264 터널로 갈아타기 — 는 `switchEmulatorDevice`가
  * 이미 전부 들고 있다. 여기서 다시 쓰지 않는다. */
-async function openEmulatorTab(platform = "ios", device) {
-  const stood = standBesideFocused();
+async function openEmulatorTab(platform = "ios", device, { from = null, agent = false } = {}) {
+  // 에이전트가 연 거울은 부른 판의 체크아웃에 선다(t-6379): 사람이 그
+  // 체크아웃을 보고 있으면 부른 판 옆에, 다른 곳을 보고 있으면 부른 판의
+  // 그룹에 탭으로만 서고 체크아웃·탭·초점·나눔은 사람의 것 그대로다(09-23
+  // 14:14·14:34·14:49, 워커의 거울 셋이 사람이 보던 dl 스테이지에 섰다).
+  // 부른 판을 모르면 — 판 키 없는 셸, 이 창에 없는 판 — 지금처럼 초점 옆에
+  // 세우고 그렇게 됐다고 한 줄 말한다. 팔레트는 지금 그대로다.
+  const caller = from === null ? null : tabOfTerm(from);
+  const away = caller !== null && caller.worktree !== activeWorktreePath;
+  if (agent && caller === null) {
+    toast(t(
+      "emulator.agentOpenUnseated",
+      "에이전트가 에뮬레이터를 열었지만 요청한 터미널을 알 수 없어, 지금 보고 있는 화면 옆에 열었습니다.",
+    ));
+  }
+  const stood = away ? null : caller !== null ? standBeside(caller.pane) : standBesideFocused();
   if (stood !== null) optimizeRichStageGroup(stood);
   emulatorTabSeq += 1;
   const id = `emulator:${emulatorTabSeq}`;
@@ -2713,8 +2753,11 @@ async function openEmulatorTab(platform = "ios", device) {
     working: true,
     live: false,
     emulatorEpoch: 0,
+    ...(away ? { worktree: caller.worktree, pane: caller.pane } : {}),
     ...(stood === null ? {} : { pane: stood }),
-  });
+    // 누구의 거울인가(t-6336): 그 판의 일이 끝나 기기가 반납되면 이 탭이 걷힌다.
+    ...(caller === null ? {} : { borrower: from }),
+  }, { focus: !away });
   if (stood !== null) persistStageLayouts();
   const tab = tabs.find((one) => one.id === id);
   if (!tab) return;
@@ -2722,16 +2765,21 @@ async function openEmulatorTab(platform = "ios", device) {
   // 붙는 길을 막지 않고 따로 채운다.
   void refreshEmulatorFleet()
     .then(() => {
-      if (tabs.includes(tab)) paintEmulatorView(tab);
+      if (tabs.includes(tab) && stillShowing(tab)) paintEmulatorView(tab);
     })
     .catch(() => {});
-  await switchEmulatorDevice(tab, platform, device);
+  await switchEmulatorDevice(tab, platform, device, {
+    focus: !away,
+    borrower: caller === null ? null : from,
+  });
 }
 
 /* A Computer Use agent opens the exact same in-window surface as the palette.
  * Revalidate the event at the frontend boundary: emitted payloads are data,
  * never instructions or a model-specific device shortcut. The backend fleet
- * lookup decides which installed device is available when `device` is absent. */
+ * lookup decides which installed device is available when `device` is absent.
+ * `term` is the pane whose door asked (t-6379): the mirror is seated in that
+ * pane's checkout, and only a whole number names one. */
 listen("emulator:agent-open", (event) => {
   if (isPopout) return;
   const payload = event?.payload ?? {};
@@ -2739,8 +2787,70 @@ listen("emulator:agent-open", (event) => {
   if (platform !== "ios" && platform !== "android") return;
   const candidate = typeof payload.device === "string" ? payload.device : "";
   const device = candidate.trim() && candidate.length <= 512 ? candidate : undefined;
-  void openEmulatorTab(platform, device);
+  const from = Number.isInteger(payload.term) && payload.term >= 0 ? payload.term : null;
+  void openEmulatorTab(platform, device, { from, agent: true });
 });
+
+/* A device an agent borrowed was returned (t-6336): its borrower's work
+ * ended, and the backend has already stopped its streams and put it down.
+ * The mirrors that agent opened of it go with it — a mirror of a device that
+ * is off stood for three hours on 09-23 (14:49–18:00). A mirror the person
+ * opened is theirs and stays. */
+listen("emulator:loan-returned", (event) => {
+  if (isPopout) return;
+  const { platform, device } = event?.payload ?? {};
+  if (typeof device !== "string" || device === "") return;
+  for (const tab of tabs.filter((one) => one.kind === "emulator"
+    && one.borrower != null
+    && one.platform === platform
+    && (one.deviceId === device || one.udid === device))) {
+    closeTab(tab.id);
+  }
+});
+
+/* 「빌린 기기 n · 마지막 사용」 — how many devices agents' panes borrowed and
+ * when one was last used (t-6336). Standing only while something is lent,
+ * and read again once a minute while it stands, because a borrowed device's
+ * last use moves with every door verb and nothing announces that. */
+const EMULATOR_LOANS_TICK_MS = 60_000;
+let emulatorLoans = { count: 0, lastUsedMs: null };
+
+function paintEmulatorLoans(summary) {
+  const count = Number.isSafeInteger(summary?.count) && summary.count > 0 ? summary.count : 0;
+  const lastUsedMs = Number.isFinite(summary?.lastUsedMs) ? summary.lastUsedMs : null;
+  emulatorLoans = { count, lastUsedMs };
+  const chip = el("sb-loans");
+  chip.hidden = count === 0;
+  if (count > 0) {
+    say(el("sb-loans-words"), () => {
+      const now = Date.now();
+      return lastUsedMs === null || now - lastUsedMs < 60_000
+        ? t("emulator.loansNow", "빌린 기기 {{count}} · 방금 사용", { count })
+        : t("emulator.loans", "빌린 기기 {{count}} · 마지막 사용 {{ago}} 전", {
+            count,
+            ago: agoWord(lastUsedMs, now),
+          });
+    });
+  }
+  emulatorLoansTick.sync();
+}
+
+function refreshEmulatorLoans() {
+  void invoke("emulator_loans").then(paintEmulatorLoans).catch(() => {});
+}
+
+const emulatorLoansTick = idlePoller({
+  wanted: () => emulatorLoans.count > 0,
+  every: EMULATOR_LOANS_TICK_MS,
+  tick: refreshEmulatorLoans,
+  onResume: refreshEmulatorLoans,
+});
+
+listen("emulator:loans", (event) => {
+  if (isPopout) return;
+  paintEmulatorLoans(event?.payload);
+});
+if (!isPopout) refreshEmulatorLoans();
 
 /* `zerocode-ssh open` — the shell is already connected when this arrives.
  *
@@ -4592,32 +4702,42 @@ function stageRightOf(node, target) {
   return stageRightOf(node.second, target);
 }
 
-/* Add a stage neighbour on the requested layout axis. Used when Setup must
- * split beside a lane, which is a terminal surface but not a leaf in a
- * terminal tab's internal pane tree. */
-function splitStageBesideFocused(direction) {
-  if (!activeTabIn(focusedPane)) return null;
-  const box = groupOf(focusedPane)?.el?.getBoundingClientRect();
+/* Add a stage neighbour to `group` on the requested layout axis. Used when
+ * Setup must split beside a lane, which is a terminal surface but not a leaf
+ * in a terminal tab's internal pane tree. */
+function splitStageBeside(group, direction) {
+  if (!activeTabIn(group)) return null;
+  const box = groupOf(group)?.el?.getBoundingClientRect();
   if (!box || box.width === 0 || box.height === 0) return null;
   const added = nextGroupId;
   nextGroupId += 1;
   setStageTree(
-    splitStageLeaf(stageTree(), focusedPane, added, direction, "second"),
+    splitStageLeaf(stageTree(), group, added, direction, "second"),
   );
   return added;
 }
 
+function splitStageBesideFocused(direction) {
+  return splitStageBeside(focusedPane, direction);
+}
+
 /* The stage seats a newcomer the way Orca's rightSplit placement does:
- * an existing seat to the RIGHT is reused — the new surface joins that group
- * as a tab instead of carving another sliver (live report 2026-08-14:
- * "3분활로 열리는데 보기가 힘들어") — and only a rightmost group builds a
- * new split, rightward, the newcomer second. Returns the group id, or null
- * when the stage has nothing to divide — an empty stage just opens a tab. */
-function standBesideFocused() {
-  if (!activeTabIn(focusedPane)) return null;
-  const reused = stageRightOf(stageTree(), focusedPane).seat;
+ * an existing seat to the RIGHT of `group` is reused — the new surface joins
+ * that group as a tab instead of carving another sliver (live report
+ * 2026-08-14: "3분활로 열리는데 보기가 힘들어") — and only a rightmost group
+ * builds a new split, rightward, the newcomer second. Returns the group id,
+ * or null when the stage has nothing to divide — an empty stage just opens a
+ * tab. Beside the focus for what the person opens; beside the pane that
+ * asked for what an agent opens (t-6379). */
+function standBeside(group) {
+  if (!activeTabIn(group)) return null;
+  const reused = stageRightOf(stageTree(), group).seat;
   if (reused !== null) return reused;
-  return splitStageBesideFocused("horizontal");
+  return splitStageBeside(group, "horizontal");
+}
+
+function standBesideFocused() {
+  return standBeside(focusedPane);
 }
 
 const RICH_STAGE_WEIGHT = 1.7;

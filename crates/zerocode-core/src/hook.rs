@@ -143,6 +143,19 @@ pub fn subagent_step(event_name: &str) -> Option<SubagentStep> {
     }
 }
 
+/// Whether this event is the pane's agent saying its session ended —
+/// Claude's `SessionEnd`, however it is spelled.
+///
+/// A third question about the same events, and one neither table above
+/// answers: the pane's state has no word for it (the process may stay, and a
+/// person's shell outlives the agent it ran), and it is not a helper's. What
+/// hangs on it is what the session borrowed — a device the emulator door put
+/// up for it goes down when it ends (t-6336).
+#[must_use]
+pub fn ends_the_session(event_name: &str) -> bool {
+    normalized_event(event_name) == "sessionend"
+}
+
 /// What the helper is called, and which helper it is.
 ///
 /// Vendors spell both several ways and none of them is guaranteed, so the
@@ -2491,6 +2504,26 @@ mod tests {
         // word — the near-miss this whole split hangs on.
         for other in ["Stop", "stop", "PreToolUse", "", "subagent"] {
             assert_eq!(subagent_step(other), None, "{other:?}");
+        }
+    }
+
+    /// A session ending is read however its vendor spells it, and nothing
+    /// else reads as one — least of all the session STARTING, or a turn's
+    /// `Stop`, which ends a turn and not a session.
+    #[test]
+    fn a_session_ending_is_its_own_word() {
+        for spelling in ["SessionEnd", "sessionEnd", "session_end", "session-end"] {
+            assert!(ends_the_session(spelling), "{spelling}");
+        }
+        for other in [
+            "SessionStart",
+            "Stop",
+            "SubagentStop",
+            "sessionidle",
+            "",
+            "end",
+        ] {
+            assert!(!ends_the_session(other), "{other:?}");
         }
     }
 

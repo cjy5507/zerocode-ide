@@ -2184,6 +2184,26 @@ pub fn activity_of(
     Some((pane, activity))
 }
 
+/// The pane whose agent says its session ended, or nothing — the fourth road
+/// off one envelope, beside [`report_of`], [`subagent_of`] and
+/// [`activity_of`], behind the same launch-token gate: a report carrying
+/// somebody else's token is a previous occupant of the pane.
+pub fn session_end_of(
+    envelope: &zerocode_core::HookEnvelope,
+    expected_launch_token: Option<&str>,
+) -> Option<u32> {
+    let term = term_of_pane_key(&envelope.pane_key)?;
+    if let Some(expected) = expected_launch_token
+        && !envelope.launch_token.is_empty()
+        && envelope.launch_token != expected
+    {
+        return None;
+    }
+    let payload = zerocode_core::payload::HookPayload::of(&envelope.payload);
+    let event = zerocode_core::hook::envelope_event_name_parsed(envelope, &payload)?;
+    zerocode_core::hook::ends_the_session(&event).then_some(term)
+}
+
 /// Remove C0 controls from text bound for cards while retaining the two
 /// layout characters the UI deliberately supports.
 fn sanitize_card_text(text: String) -> String {
@@ -2994,6 +3014,31 @@ mod tests {
             hook_event_name: String::new(),
             payload: payload.into(),
         }
+    }
+
+    /// A pane's `SessionEnd` names the pane (t-6336) — behind the launch-token
+    /// gate every road off an envelope takes — and nothing else does: a turn's
+    /// `Stop` ends a turn, not the session that borrowed a device.
+    #[test]
+    fn a_session_ending_names_its_pane_and_only_its_own() {
+        const TERM: u32 = 9_312;
+        let key = crate::hooks::pane_key_of(TERM);
+        let ended = envelope(
+            &key,
+            "tok-1",
+            r#"{"hook_event_name":"SessionEnd","reason":"exit"}"#,
+        );
+        assert_eq!(session_end_of(&ended, Some("tok-1")), Some(TERM));
+        assert_eq!(session_end_of(&ended, None), Some(TERM));
+        assert_eq!(
+            session_end_of(&ended, Some("tok-2")),
+            None,
+            "a previous occupant's goodbye ended this pane's session"
+        );
+        let stopped = envelope(&key, "tok-1", r#"{"hook_event_name":"Stop"}"#);
+        assert_eq!(session_end_of(&stopped, Some("tok-1")), None);
+        let nameless = envelope("tab-1/leaf-2", "", r#"{"hook_event_name":"SessionEnd"}"#);
+        assert_eq!(session_end_of(&nameless, None), None);
     }
 
     /// A `Stop` the bridge answered with a continuation is not a turn that

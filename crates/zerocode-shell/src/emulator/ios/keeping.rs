@@ -2,8 +2,9 @@
 //!
 //! Three facts, one owner:
 //!
-//! * the device a pane last opened, kept across restarts so the next window
-//!   can wake it before anybody asks (D4);
+//! * the device the person last opened in a pane, kept across restarts so the
+//!   next window can wake it before anybody asks (D4) — never one an agent's
+//!   pane borrowed, which goes down with its task (t-6336);
 //! * which devices this window is answerable for at all — the ones a pane here
 //!   opened or this window prebooted, and never one the person booted in their
 //!   own Simulator;
@@ -155,6 +156,12 @@ pub(super) fn remember_this_device(local_data_root: &Path, udid: &str, name: &st
 /// This window is answerable for this device from now on.
 pub(super) fn this_window_owns(udid: &str) {
     clocks().insert(udid.to_string(), None);
+}
+
+/// And no longer: it was put away, so a person who boots it again in their
+/// own Simulator is not asking this window to watch it.
+pub(super) fn this_window_lets_go(udid: &str) {
+    clocks().remove(udid);
 }
 
 /// What the sweep decides for one device.

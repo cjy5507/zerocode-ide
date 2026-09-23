@@ -2,9 +2,10 @@
 //!
 //! Platform adapters discover and drive devices; this module owns only the
 //! process/session facts shared by both adapters: start de-duplication,
-//! cancellation, pause/resume, payload backpressure and child collection.
+//! cancellation, pause/resume, payload backpressure and child collection —
+//! and which devices a start booted for an agent's pane (the loan book).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, Weak};
@@ -691,6 +692,19 @@ impl SessionRegistry {
         }
     }
 
+    /// Stop every stream on one device, whatever its mode — the device is
+    /// about to go down, and a pump left reading it would only report that.
+    /// The device is named the way its start claimed it (a udid, an AVD).
+    pub fn stop_device(&self, platform: EmulatorPlatform, device: &str) -> usize {
+        let streams = held(&self.state)
+            .sessions
+            .iter()
+            .filter(|(_, entry)| entry.key.platform == platform && entry.key.device == device)
+            .map(|(stream, _)| stream.clone())
+            .collect::<Vec<_>>();
+        streams.iter().filter(|stream| self.stop(stream)).count()
+    }
+
     pub fn shutdown_all(&self) {
         let entries = {
             let mut state = held(&self.state);
@@ -725,6 +739,197 @@ pub(super) fn registry() -> &'static SessionRegistry {
     REGISTRY.get_or_init(SessionRegistry::default)
 }
 
+/// A device the emulator door put up for an agent — a loan (t-6336).
+///
+/// The door booted it because an agent's pane asked, so it goes down when
+/// that pane's work does, instead of holding a phone's worth of memory until
+/// somebody notices (09-23: an audit's two simulators and an AVD stayed up
+/// after their session, 18 GiB compressed). The borrower is the PANE — the
+/// terminal the door's pane key named — because all three ways its work ends
+/// arrive as that pane: it closes, its worker reports `worker_done`, its
+/// agent says its session ended.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct Loan {
+    pub(super) platform: EmulatorPlatform,
+    /// The name the power road takes: a udid (iOS) or an AVD (Android).
+    pub(super) device: String,
+    /// Every pane whose agent asked for it while it was lent. It goes down
+    /// when the last one's work ends.
+    borrowers: BTreeSet<u32>,
+    pub(super) lent_ms: i64,
+    last_used_ms: i64,
+}
+
+/// Why a borrower's work ended — the words a return's log line says.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LoanEnd {
+    /// The pane closed: its process ended, or somebody closed it.
+    PaneClosed,
+    /// The pane's worker reported `worker_done`.
+    WorkerDone,
+    /// The pane's agent said its session ended.
+    SessionEnded,
+    /// The window is going, and every pane with it.
+    WindowExit,
+}
+
+impl LoanEnd {
+    pub(super) const fn word(self) -> &'static str {
+        match self {
+            Self::PaneClosed => "pane closed",
+            Self::WorkerDone => "worker_done",
+            Self::SessionEnded => "session ended",
+            Self::WindowExit => "window exit",
+        }
+    }
+}
+
+/// What one stream start says about who put its device up.
+///
+/// Judged at the one moment it can be: a start either booted the device or
+/// found it already running, and it knows whether an agent's pane asked.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum StartVerdict {
+    /// The door booted it for this pane: a new loan.
+    Lend(u32),
+    /// Already up and lent: this pane joins the loan, and the device waits
+    /// for its work too.
+    Join(u32),
+    /// Already up and lent, and the person opened it: it is theirs now —
+    /// the loan ends without the device going down.
+    Keep,
+    /// Not the door's to put away: the person booted or opened it, or it was
+    /// up and nobody's loan when an agent asked.
+    Nobody,
+}
+
+/// The whole judgement, from the three facts it takes: which pane asked
+/// (none for the person, or for an agent whose pane the door could not name),
+/// whether this start booted the device, and whether it is already lent.
+pub(super) fn judge_start(borrower: Option<u32>, booted_here: bool, lent: bool) -> StartVerdict {
+    match (borrower, booted_here, lent) {
+        (Some(term), true, _) => StartVerdict::Lend(term),
+        (Some(term), false, true) => StartVerdict::Join(term),
+        (None, _, true) => StartVerdict::Keep,
+        (Some(_) | None, _, false) => StartVerdict::Nobody,
+    }
+}
+
+/// How many devices are lent and when one was last used — the status bar's
+/// one line.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct LoanSummary {
+    pub(crate) count: usize,
+    pub(crate) last_used_ms: Option<i64>,
+}
+
+/// The one book the loans are kept in, beside the streams they began with.
+#[derive(Default)]
+pub(super) struct LoanBook {
+    loans: Mutex<Vec<Loan>>,
+}
+
+impl LoanBook {
+    /// A stream start, judged ([`judge_start`]) and written down. Answers the
+    /// verdict so the start can say it in the window log.
+    pub fn note_start(
+        &self,
+        platform: EmulatorPlatform,
+        device: &str,
+        borrower: Option<u32>,
+        booted_here: bool,
+        now_ms: i64,
+    ) -> StartVerdict {
+        let mut loans = held(&self.loans);
+        let at = loans
+            .iter()
+            .position(|loan| loan.platform == platform && loan.device == device);
+        let verdict = judge_start(borrower, booted_here, at.is_some());
+        match verdict {
+            StartVerdict::Lend(term) => {
+                // A loan standing for a device this start had to boot is a
+                // loan whose device went down some other way; this one
+                // replaces it.
+                if let Some(at) = at {
+                    loans.remove(at);
+                }
+                loans.push(Loan {
+                    platform,
+                    device: device.to_string(),
+                    borrowers: BTreeSet::from([term]),
+                    lent_ms: now_ms,
+                    last_used_ms: now_ms,
+                });
+            }
+            StartVerdict::Join(term) => {
+                if let Some(loan) = at.and_then(|at| loans.get_mut(at)) {
+                    loan.borrowers.insert(term);
+                    loan.last_used_ms = now_ms;
+                }
+            }
+            StartVerdict::Keep => {
+                if let Some(at) = at {
+                    loans.remove(at);
+                }
+            }
+            StartVerdict::Nobody => {}
+        }
+        verdict
+    }
+
+    /// The door used a lent device (any verb that named it).
+    pub fn touch(&self, platform: EmulatorPlatform, device: &str, now_ms: i64) {
+        if let Some(loan) = held(&self.loans)
+            .iter_mut()
+            .find(|loan| loan.platform == platform && loan.device == device)
+        {
+            loan.last_used_ms = now_ms;
+        }
+    }
+
+    /// This pane's work ended. Answers the loans it was the last borrower of
+    /// — the devices to put away — and takes them out of the book; the rest
+    /// keep waiting for their other borrowers.
+    pub fn returned_by(&self, term: u32) -> Vec<Loan> {
+        let mut loans = held(&self.loans);
+        for loan in loans.iter_mut() {
+            loan.borrowers.remove(&term);
+        }
+        let (returned, standing): (Vec<Loan>, Vec<Loan>) =
+            loans.drain(..).partition(|loan| loan.borrowers.is_empty());
+        *loans = standing;
+        returned
+    }
+
+    /// One of the window's own roads put this device down (its 끄기 button,
+    /// the idle reclaimer, a return): it is nobody's loan any more.
+    pub fn forget(&self, platform: EmulatorPlatform, device: &str) -> bool {
+        let mut loans = held(&self.loans);
+        let before = loans.len();
+        loans.retain(|loan| !(loan.platform == platform && loan.device == device));
+        loans.len() != before
+    }
+
+    /// Every loan standing, taken out of the book — the window's exit.
+    pub fn take_all(&self) -> Vec<Loan> {
+        std::mem::take(&mut *held(&self.loans))
+    }
+
+    pub fn summary(&self) -> LoanSummary {
+        let loans = held(&self.loans);
+        LoanSummary {
+            count: loans.len(),
+            last_used_ms: loans.iter().map(|loan| loan.last_used_ms).max(),
+        }
+    }
+}
+
+pub(super) fn loans() -> &'static LoanBook {
+    static LOANS: OnceLock<LoanBook> = OnceLock::new();
+    LOANS.get_or_init(LoanBook::default)
+}
+
 pub(super) struct FinishSession {
     stream: String,
 }
@@ -752,6 +957,98 @@ fn held<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Who put a device up, over every start there is (t-6336): a device the
+    /// door booted for an agent's pane is that pane's loan; one that was
+    /// already up — the person's, or anybody's — is nobody's; the person
+    /// opening a lent device keeps it; a second agent's pane joins. The table
+    /// is the whole judgement, so a row is a case the report can count.
+    #[test]
+    fn a_start_is_judged_by_who_asked_whether_it_booted_and_whether_it_is_lent() {
+        use StartVerdict::{Join, Keep, Lend, Nobody};
+        let table = [
+            // (borrower, booted here, already lent) → verdict
+            ((Some(7), true, false), Lend(7)),
+            ((Some(7), false, false), Nobody),
+            ((None, true, false), Nobody),
+            ((None, false, false), Nobody),
+            ((None, false, true), Keep),
+            ((None, true, true), Keep),
+            ((Some(8), false, true), Join(8)),
+            ((Some(8), true, true), Lend(8)),
+        ];
+        for ((borrower, booted, lent), expected) in table {
+            assert_eq!(
+                judge_start(borrower, booted, lent),
+                expected,
+                "borrower {borrower:?}, booted here {booted}, lent {lent}"
+            );
+        }
+    }
+
+    /// The book over one device's life: lent to one pane, joined by another,
+    /// returned only when the last borrower's work ends, and a device nobody
+    /// lent is never answered by a return — the person's simulator stays up
+    /// whatever pane closes.
+    #[test]
+    fn a_loan_is_returned_when_its_last_borrower_ends_and_never_for_a_device_nobody_lent() {
+        let book = LoanBook::default();
+        let ios = EmulatorPlatform::Ios;
+        assert_eq!(
+            book.note_start(ios, "agents", Some(7), true, 1_000),
+            StartVerdict::Lend(7)
+        );
+        assert_eq!(
+            book.note_start(ios, "persons", Some(7), false, 1_100),
+            StartVerdict::Nobody
+        );
+        assert_eq!(
+            book.note_start(ios, "agents", Some(8), false, 1_200),
+            StartVerdict::Join(8)
+        );
+        book.touch(ios, "agents", 1_500);
+        assert_eq!(
+            book.summary(),
+            LoanSummary {
+                count: 1,
+                last_used_ms: Some(1_500)
+            }
+        );
+        assert!(book.returned_by(9).is_empty(), "pane 9 borrowed nothing");
+        assert!(book.returned_by(7).is_empty(), "pane 8 still borrows it");
+        let returned = book.returned_by(8);
+        assert_eq!(
+            returned
+                .iter()
+                .map(|loan| (loan.platform, loan.device.as_str(), loan.lent_ms))
+                .collect::<Vec<_>>(),
+            [(ios, "agents", 1_000)]
+        );
+        assert!(book.returned_by(8).is_empty(), "a return is answered once");
+        assert_eq!(book.summary(), LoanSummary::default());
+    }
+
+    /// The person opening a lent device makes it theirs: the loan ends with
+    /// nothing put away. And a device one of the window's own roads already
+    /// put down is forgotten, so a later return does not reach for it.
+    #[test]
+    fn a_kept_or_already_put_away_device_is_not_returned() {
+        let book = LoanBook::default();
+        let android = EmulatorPlatform::Android;
+        book.note_start(android, "kept", Some(3), true, 10);
+        assert_eq!(
+            book.note_start(android, "kept", None, false, 20),
+            StartVerdict::Keep
+        );
+        book.note_start(android, "reclaimed", Some(3), true, 30);
+        assert!(book.forget(android, "reclaimed"));
+        assert!(!book.forget(android, "reclaimed"));
+        assert!(book.returned_by(3).is_empty());
+        // The window's exit takes whatever still stands, all at once.
+        book.note_start(android, "left", Some(4), true, 40);
+        assert_eq!(book.take_all().len(), 1);
+        assert_eq!(book.summary().count, 0);
+    }
 
     fn descriptor(stream: &str) -> EmulatorStream {
         EmulatorStream {
@@ -796,6 +1093,39 @@ mod tests {
         let control = registry.new_control(&descriptor);
         lease.activate(descriptor, control.clone());
         control
+    }
+
+    /// A device going down takes every stream on it, in both modes, and
+    /// nothing on another device — the start's own name for it is the key.
+    #[test]
+    fn a_device_going_down_stops_its_streams_and_no_others() {
+        let registry = Box::leak(Box::<SessionRegistry>::default());
+        let frames = registered_control(
+            registry,
+            SessionKey::frames(EmulatorPlatform::Android, "lent-avd"),
+            "frames",
+        );
+        let video = registered_control(
+            registry,
+            SessionKey::video(EmulatorPlatform::Android, "lent-avd"),
+            "video",
+        );
+        let other = registered_control(
+            registry,
+            SessionKey::frames(EmulatorPlatform::Android, "persons-avd"),
+            "other",
+        );
+        assert_eq!(
+            registry.stop_device(EmulatorPlatform::Android, "lent-avd"),
+            2
+        );
+        assert!(!frames.is_alive() && !video.is_alive());
+        assert!(other.is_alive());
+        assert_eq!(
+            registry.stop_device(EmulatorPlatform::Ios, "persons-avd"),
+            0
+        );
+        assert!(other.is_alive());
     }
 
     #[test]

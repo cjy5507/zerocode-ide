@@ -117,8 +117,9 @@ pub fn is_scoped_federation_token(token: &str) -> bool {
 /// steer the browser — a build script in a plain shell reading page text
 /// with the hook token was the 1-g4 review's first finding.
 pub const BROWSER_TOKEN_HEADER: &str = "x-zerocode-browser-token";
-/// Which pane a `zerocode-browser` command came from — the shim's own
-/// `ZEROCODE_PANE_KEY`, forwarded so the window can seat what it opens.
+/// Which pane a `zerocode-browser` or `zerocode-emulator` command came from —
+/// the shim's own `ZEROCODE_PANE_KEY`, forwarded so the window can seat what
+/// it opens.
 pub const BROWSER_PANE_HEADER: &str = zerocode_core::agent_browser::PANE_HEADER;
 /// Computer Use is a larger grant than status hooks or page reading, so it
 /// has its own launched-agent-only capability token.
@@ -387,6 +388,10 @@ pub struct ComputerRequest {
     /// judged for the workspace it was asked from, and one asked from nowhere
     /// known is judged for none.
     pub cwd: Option<String>,
+    /// As on [`BrowserRequest`]: the pane key of the shell that sent this,
+    /// when its door names one (the emulator door does, so the mirror an
+    /// agent opens is seated in that pane's checkout).
+    pub pane: Option<String>,
     pub answer: tokio::sync::oneshot::Sender<TeamAnswer>,
 }
 
@@ -396,6 +401,18 @@ fn run_evidence_of(request: &Request) -> Option<String> {
     request
         .headers()
         .get(zerocode_core::computer_use::RUN_EVIDENCE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+/// The pane a shim said it was asked from, if it said one. Read before the
+/// body is taken, empty strings dropped, the way the evidence folder is: the
+/// window decides what the key names.
+fn pane_of(request: &Request) -> Option<String> {
+    request
+        .headers()
+        .get(BROWSER_PANE_HEADER)
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.is_empty())
         .map(str::to_string)
@@ -892,12 +909,7 @@ async fn receive_browser_command(State(state): State<BridgeState>, request: Requ
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let evidence = run_evidence_of(&request);
-    let pane = request
-        .headers()
-        .get(BROWSER_PANE_HEADER)
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
+    let pane = pane_of(&request);
     let body = match axum::body::to_bytes(request.into_body(), MAX_HOOK_BODY_BYTES).await {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(_) => return refused("zerocode-browser: unreadable command\n"),
@@ -939,6 +951,7 @@ async fn receive_computer_command(State(state): State<BridgeState>, request: Req
     }
     let evidence = run_evidence_of(&request);
     let cwd = cwd_of(&request);
+    let pane = pane_of(&request);
     let body = match axum::body::to_bytes(request.into_body(), MAX_HOOK_BODY_BYTES).await {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(_) => return refused(format!("{COMPUTER_CLI}: unreadable command\n")),
@@ -954,6 +967,7 @@ async fn receive_computer_command(State(state): State<BridgeState>, request: Req
             argv,
             evidence,
             cwd,
+            pane,
             answer,
         })
         .is_err()
