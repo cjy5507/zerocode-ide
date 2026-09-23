@@ -35,7 +35,7 @@ use zerocode_core::jev::{BRANCHING, BRANCHING_APPLY_DEADLINE_MS};
 use zerocode_core::screen_action::{ActionChoice, option_of};
 
 use super::{
-    ActionJudge, Barred, CONTROL_KIND, Errand, Mode, REASON, Screen, Seen, Walked, World,
+    ActionJudge, BARRED, Barred, CONTROL_KIND, Errand, Mode, REASON, Screen, Seen, Walked, World,
     control_kind, press_rule,
 };
 
@@ -235,7 +235,7 @@ fn compared(
             let (permitted, kind) = press_rule(&BRANCHING, screen, choice.mark, choice.confidence);
             said[CONTROL_KIND] = json!(kind.word());
             if !permitted {
-                said["barred"] = json!(Barred::LowConfidence.as_str());
+                said[BARRED] = json!(Barred::LowConfidence.as_str());
                 said["routeUse"] = json!(USE_FALLBACK);
                 return today;
             }
@@ -317,7 +317,7 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
     // budget is read off what the save cost.
     let forking = Instant::now();
     let Some(saved) = world.save() else {
-        said["barred"] = json!(NO_SNAPSHOT);
+        said[BARRED] = json!(NO_SNAPSHOT);
         said["routeUse"] = json!(USE_FALLBACK);
         return Stepped {
             mark: today,
@@ -331,7 +331,7 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
     said["budgetMs"] = json!(budget);
     if world.left_ms() <= budget {
         world.forget(&saved);
-        said["barred"] = json!(Barred::NoBudget.as_str());
+        said[BARRED] = json!(Barred::NoBudget.as_str());
         said["routeUse"] = json!(USE_FALLBACK);
         said["forkMs"] = json!(elapsed_ms(forking));
         return Stepped {
@@ -408,7 +408,7 @@ pub fn step(step: &Step<'_>, judge: &mut dyn ActionJudge, world: &mut dyn World)
 
     let mut pick = today;
     if explored < 2 {
-        said["barred"] = json!(ONE_EXPLORED);
+        said[BARRED] = json!(ONE_EXPLORED);
         said["routeUse"] = json!(USE_FALLBACK);
     } else {
         let tried: Vec<Candidate> = candidates

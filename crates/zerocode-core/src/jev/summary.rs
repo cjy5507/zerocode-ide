@@ -153,6 +153,21 @@ pub const MODEL: LedgerKey = LedgerKey {
     also: &[],
 };
 
+/// Why a screen walk's hand never went out although the judgment named a
+/// control — the walk's own word for the stop; the two guards' words are the
+/// core's ([`crate::screen_action::Stopped::word`], t-6187).
+pub const BARRED: LedgerKey = LedgerKey {
+    canonical: "barred",
+    also: &[],
+};
+/// The kind of control a screen judgment named
+/// ([`crate::guarded::ControlKind::word`], t-6187): what the press rule read,
+/// and what a reader counts the controls a seat handed over by.
+pub const CONTROL_KIND: LedgerKey = LedgerKey {
+    canonical: "controlKind",
+    also: &[],
+};
+
 /// Every key this module reads, so a contract can walk them.
 pub const LEDGER_KEYS: &[LedgerKey] = &[
     AT,
@@ -169,6 +184,8 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     PRESSED,
     LABEL,
     MODEL,
+    BARRED,
+    CONTROL_KIND,
 ];
 
 /// The word a row carries when its judgment answered and passed its checks.
@@ -224,6 +241,62 @@ pub struct Tally {
     /// Nearest-rank percentiles of the calls' elapsed milliseconds.
     pub p50_ms: Option<u64>,
     pub p95_ms: Option<u64>,
+    /// Presses a screen seat's two guards stopped (t-6187), off the rows'
+    /// [`BARRED`] — what the dashboard's drawer says of a screen seat
+    /// (t-6277 D6), counted here once for every reader.
+    pub guards: Guards,
+    /// The controls a screen seat's rows named ([`CONTROL_KIND`]), and the
+    /// ones a press cannot take back that it handed to the person.
+    pub controls: Controls,
+}
+
+/// Presses a screen seat's two guards stopped, by guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Guards {
+    /// The screen's own text told an assistant what to do
+    /// ([`crate::screen_action::Stopped::Injected`]).
+    pub instructed: usize,
+    /// The screen was a wall in front of the page the goal expects
+    /// ([`crate::screen_action::Stopped::Walled`]).
+    pub walled: usize,
+}
+
+/// The controls a screen seat's rows named, and the ones it handed over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Controls {
+    /// Rows that named a control at all — a seat whose rows name none is not
+    /// one that presses, which is how a reader tells the two apart without a
+    /// list of seats of its own.
+    pub named: usize,
+    /// Controls a press cannot take back that an acting seat did not press
+    /// and stepped back to the person with — under its floor, or stopped by
+    /// a guard ([`crate::jev::ROUTE_USE_FALLBACK`]). A recording seat's row
+    /// pressed nothing because it only records, and hands nothing over.
+    pub destructive_held: usize,
+}
+
+impl Controls {
+    fn count(&mut self, row: &Value) {
+        let Some(kind) = CONTROL_KIND.read(row).and_then(Value::as_str) else {
+            return;
+        };
+        self.named += 1;
+        let fell_back =
+            ROUTE_USE.read(row).and_then(Value::as_str) == Some(crate::jev::ROUTE_USE_FALLBACK);
+        self.destructive_held +=
+            usize::from(kind == crate::guarded::ControlKind::Destructive.word() && fell_back);
+    }
+}
+
+impl Guards {
+    fn count(&mut self, row: &Value) {
+        use crate::screen_action::Stopped;
+        match BARRED.read(row).and_then(Value::as_str) {
+            Some(word) if word == Stopped::Injected.word() => self.instructed += 1,
+            Some(word) if word == Stopped::Walled.word() => self.walled += 1,
+            _ => {}
+        }
+    }
 }
 
 impl Tally {
@@ -524,6 +597,8 @@ pub fn summarize_rows<'a>(rows: impl IntoIterator<Item = &'a Value>, since_ms: i
             .and_then(Value::as_u64)
             .unwrap_or(0);
         tally.input_tokens += INPUT_TOKENS.read(row).and_then(Value::as_u64).unwrap_or(0);
+        tally.guards.count(row);
+        tally.controls.count(row);
         let outcome = OUTCOME
             .read(row)
             .and_then(Value::as_str)

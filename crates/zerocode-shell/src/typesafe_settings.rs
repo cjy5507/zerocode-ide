@@ -1760,7 +1760,8 @@ mod tests {
                     "requests":1,"redactedLines":2,"inputTokens":9,"p50Ms":616,"p95Ms":616,"failures":[]},
            "week":{"rows":26,"answered":23,"answeredShare":0.8846,"answeredLowerBound":0.7102,"called":26,
                    "requests":26,"redactedLines":30,"inputTokens":90,"p50Ms":616,"p95Ms":4847,
-                   "failures":[{"token":"no_key","rows":3}]},
+                   "failures":[{"token":"no_key","rows":3}],
+                   "guards":{"instructed":2,"walled":1},"controls":{"named":7,"destructiveHeld":2}},
            "costUsd":null,"riseFloorPermille":950,"clearsRiseFloor":false,"rowsToNextJudgment":14,
            "stand":"recording","applies":true,"verdict":{"verdict":"hold","line":"answered"}},
           {"id":"summon","setting":"summonChoice","mode":"auto","ledger":"summon-choice.jsonl",
@@ -1780,6 +1781,22 @@ mod tests {
         assert_eq!(routing.week.rows, 26);
         assert_eq!(routing.week.p95_ms, Some(4_847));
         assert_eq!(routing.week.redacted_lines, 30);
+        // What a screen seat's guards stopped and the controls it handed over
+        // (t-6277 D6), as the core counted them.
+        assert_eq!(
+            routing.week.guards,
+            SeatGuards {
+                instructed: 2,
+                walled: 1
+            }
+        );
+        assert_eq!(
+            routing.week.controls,
+            SeatControls {
+                named: 7,
+                destructive_held: 2
+            }
+        );
         assert_eq!(routing.rise_floor_permille, Some(950));
         assert_eq!(routing.rows_to_next_judgment, Some(14));
         assert!(
@@ -1798,6 +1815,11 @@ mod tests {
             "never asked is not zero percent"
         );
         assert_eq!(summon.week.p95_ms, None);
+        assert_eq!(
+            (summon.week.guards, summon.week.controls),
+            (SeatGuards::default(), SeatControls::default()),
+            "a zo older than the count reads as nothing stopped"
+        );
         assert_eq!(
             summon.verdict, None,
             "a seat that never rises is never judged"
@@ -1993,6 +2015,36 @@ pub struct SeatWindow {
     /// rows `refused` counts, one token at a time.
     #[serde(default)]
     pub refusals: Vec<SeatFailure>,
+    /// What a screen seat's guards stopped (t-6187), counted by the core
+    /// (`summary::Guards`); zeros from a zo older than the count.
+    #[serde(default)]
+    pub guards: SeatGuards,
+    /// The controls a screen seat's rows named, and the ones it handed to the
+    /// person (`summary::Controls`).
+    #[serde(default)]
+    pub controls: SeatControls,
+}
+
+/// Presses a screen seat's two guards stopped: the screen's own text told an
+/// assistant what to do, or the screen was a wall in front of the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatGuards {
+    #[serde(default)]
+    pub instructed: usize,
+    #[serde(default)]
+    pub walled: usize,
+}
+
+/// The controls a screen seat's rows named, and the ones a press cannot take
+/// back that it handed to the person instead of pressing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeatControls {
+    #[serde(default)]
+    pub named: usize,
+    #[serde(default)]
+    pub destructive_held: usize,
 }
 
 /// What `zo jev summary --json` said, or `None` when it printed nothing this

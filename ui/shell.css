@@ -37674,6 +37674,126 @@ h4.knowledge-inspector-head::after {
   margin: 0;
 }
 
+/* A feature's row opens its drawer (t-6277 D6): the name is the button, and
+   the whole row answers a pointer. */
+.jev-table tbody tr[data-jev-dash-row] {
+  cursor: pointer;
+}
+
+.jev-table tbody tr[data-jev-dash-row] td {
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.jev-table tbody tr[data-jev-dash-row]:hover td {
+  background: var(--row-hover);
+}
+
+.jev-table tbody tr.is-open td {
+  background: color-mix(in srgb, var(--jev-progress-ink) 10%, transparent);
+}
+
+.jev-row-open {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* The drawer rides a dock pinned to the top of the page's window, so it
+   stays where the eye is while the table scrolls under it; the dock takes
+   no room of its own. A sticky inset is read inside the page's padding, so
+   the dock sticks where it starts, and the drawer reaches back over the
+   padding to the page's own edges. */
+.jev-drawer-dock {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  height: 0;
+  margin-block-end: calc(-1 * var(--space-4));
+}
+
+.jev-drawer {
+  position: absolute;
+  top: calc(-1 * var(--space-5));
+  right: calc(-1 * var(--space-5));
+  width: min(var(--jev-drawer-width), calc(100% + var(--space-5)));
+  height: var(--jev-drawer-height, 70vh);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-4);
+  overflow: auto;
+  border-left: var(--jev-line) solid var(--edge-rule);
+  background: var(--surface-deck);
+  box-shadow: var(--shadow-2);
+}
+
+.jev-drawer-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.jev-drawer-title {
+  margin: 0;
+  font-size: var(--jev-drawer-title-size);
+}
+
+.jev-drawer-id {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-mist);
+  font-family: var(--font-mono);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-drawer-summary, .jev-drawer-written, .jev-drawer-text {
+  margin: 0;
+  line-height: var(--leading-body);
+}
+
+.jev-drawer-written {
+  color: var(--jev-tone-under);
+  font-size: var(--jev-meta-size);
+}
+
+.jev-drawer-part {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.jev-drawer-heading {
+  margin: 0;
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+  font-weight: 600;
+}
+
+.jev-drawer-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-1) var(--space-3);
+  margin: 0;
+}
+
+.jev-drawer-facts dt {
+  color: var(--ink-mist);
+}
+
+.jev-drawer-facts dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.jev-drawer-text {
+  color: var(--ink-mist);
+  font-size: var(--jev-meta-size);
+}
+
 /* The settings card's switch, worn over the table (§6.1): the same row and
    the same line under it, on the dashboard's own panel. */
 .jev-switch {
@@ -38051,33 +38171,6 @@ button.jev-token:hover {
   fill: var(--jev-trend-accuracy);
 }
 
-.jev-recent {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.jev-recent-head {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
-}
-
-.jev-recent-title {
-  font-size: var(--jev-body-size);
-  margin: 0;
-}
-
-.jev-view select.jev-recent-seat {
-  background-color: var(--surface-well);
-  color: var(--ink-chalk);
-  border: var(--jev-line) solid var(--edge-mark);
-  border-radius: var(--radius-sm);
-  padding: var(--space-1) var(--space-2);
-  font: inherit;
-}
-
 .jev-recent-list {
   list-style: none;
   margin: 0;
@@ -38087,15 +38180,28 @@ button.jev-token:hover {
   gap: var(--space-1);
 }
 
+/* One judgment in the drawer's width: when, what became of it and its
+   marks on the first line; what it was asked, then what it answered, under
+   them. */
 .jev-decision {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 2fr) minmax(0, 1fr) auto;
-  gap: var(--space-3);
+  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-areas:
+    "when outcome marks"
+    "asked asked asked"
+    "answer answer answer";
+  gap: var(--space-1) var(--space-2);
   align-items: baseline;
   padding: var(--space-2) var(--space-3);
   border: var(--jev-line) solid var(--edge-rule);
   border-radius: var(--radius-sm);
 }
+
+.jev-decision-when { grid-area: when; }
+.jev-decision-outcome { grid-area: outcome; }
+.jev-decision-marks { grid-area: marks; text-align: right; }
+.jev-decision-asked { grid-area: asked; }
+.jev-decision-answer { grid-area: answer; }
 
 .jev-decision-outcome {
   font-weight: 600;

@@ -62,8 +62,8 @@ let jevNumbersAt = 0;
 let jevNumbersCostMs = null;
 /* What went wrong the last time zo was asked, or null. */
 let jevNumbersError = null;
-/* The seat whose recent decisions the dashboard lists. */
-let jevRecentSeat = null;
+/* The feature whose drawer stands open (t-6277 D6), or null. */
+let jevDrawerSeat = null;
 let jevSettleTimer = null;
 const jevViewsWired = new WeakSet();
 /* The day's requests from this machine against the person's limit
@@ -405,6 +405,10 @@ function buildJevView() {
   root.dataset.i18nAria = "jev.title";
   root.setAttribute("aria-label", t("jev.title", "Jev 대시보드"));
 
+  // The drawer a feature's row opens (t-6277 D6), first so it stays at the
+  // top of the page while the page scrolls under it.
+  root.append(jevNode("div", "jev-drawer-dock", jevBuildDrawer()));
+
   // The eyebrow is a name, the same in every language, so it takes no key.
   const heading = jevNode("div", "jev-heading",
     jevNode("p", "jev-eyebrow", document.createTextNode("TYPESAFE · JEV")),
@@ -469,18 +473,34 @@ function buildJevView() {
   const table = jevNode("table", "jev-table", caption, jevNode("thead", "", head), body);
   root.append(jevNode("div", "jev-table-wrap", table));
 
-  const picker = document.createElement("select");
-  picker.className = "settings-input jev-recent-seat";
-  picker.dataset.i18nAria = "jev.recent.seat";
-  picker.setAttribute("aria-label", t("jev.recent.seat", "기능 선택"));
-  const list = document.createElement("ol");
-  list.className = "jev-recent-list";
-  const empty = jevText("jev.recent.empty", "아직 판단 기록이 없습니다.", "p", "jev-recent-empty");
-  empty.hidden = true;
-  root.append(jevNode("section", "jev-recent",
-    jevNode("header", "jev-recent-head", jevText("jev.recent.title", "최근 판단", "h2", "jev-recent-title"), picker),
-    list, empty));
   return root;
+}
+
+/* The drawer's frame, built once per view: the feature's name and id, one
+ * line of what it does, and its parts — the last judgments, the comparisons,
+ * what a screen feature's guards stopped, the model its numbers come from,
+ * and what it sends (t-6277 D6). Filled by `paintJevDrawer`. */
+function jevBuildDrawer() {
+  const close = jevText("jev.drawer.close", "닫기", "button", "btn jev-drawer-close");
+  close.type = "button";
+  const head = jevNode("header", "jev-drawer-head",
+    jevNode("div", "jev-drawer-name", jevNode("h2", "jev-drawer-title"), jevNode("p", "jev-drawer-id")), close);
+  const part = (name, key, word, ...body) => {
+    const section = jevNode("section", "jev-drawer-part", jevText(key, word, "h3", "jev-drawer-heading"), ...body);
+    section.dataset.jevDrawerPart = name;
+    return section;
+  };
+  const drawer = jevNode("aside", "jev-drawer", head,
+    jevNode("p", "jev-drawer-summary"),
+    jevText("jev.drawer.written", "설정 파일에 이 기능만 따로 정해 두어 스위치를 따르지 않습니다. 스위치를 다시 켜면 권장 설정으로 돌아갑니다.", "p", "jev-drawer-written"),
+    part("recent", "jev.recent.title", "최근 판단", jevNode("ol", "jev-recent-list"),
+      jevText("jev.recent.empty", "아직 판단 기록이 없습니다.", "p", "jev-recent-empty")),
+    part("agreement", "jev.drawer.agreement", "정확도 비교", jevNode("dl", "jev-drawer-facts")),
+    part("guards", "jev.drawer.guards", "화면 안전장치", jevNode("dl", "jev-drawer-facts")),
+    part("version", "jev.drawer.version", "모델", jevNode("dl", "jev-drawer-facts")),
+    part("sends", "jev.drawer.sends", "무엇을 보내나", jevNode("p", "jev-drawer-text")));
+  drawer.hidden = true;
+  return drawer;
 }
 
 /* The hands on one host, wired once: the leaf's own clone has its own
@@ -500,14 +520,27 @@ function wireJevView(host) {
   host.querySelector("[data-jev-everywhere]")?.addEventListener("click", () => {
     void setJevEnabled(true);
   });
-  host.querySelector(".jev-recent-seat").addEventListener("change", (event) => {
-    jevRecentSeat = event.target.value;
-    paintJevViews();
-  });
   host.querySelector("[data-jev-rows]").addEventListener("click", (event) => {
     const chip = event.target.closest("[data-jev-fix]");
-    if (chip) jevFix(chip.dataset.jevFix);
+    if (chip) {
+      jevFix(chip.dataset.jevFix);
+      return;
+    }
+    const row = event.target.closest("[data-jev-dash-row]");
+    if (row) jevToggleDrawer(host, row.dataset.jevDashRow);
   });
+  host.querySelector(".jev-drawer-close").addEventListener("click", () => jevToggleDrawer(host, null));
+  host.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && jevDrawerSeat !== null) {
+      event.stopPropagation();
+      jevToggleDrawer(host, null);
+    }
+  });
+  // The drawer is as tall as the page's window onto the table, whatever the
+  // window's size: one measure per resize, none per paint.
+  new ResizeObserver(() => {
+    host.style.setProperty("--jev-drawer-height", `${host.clientHeight}px`);
+  }).observe(host);
 }
 
 /* What the dashboard says under its head: the last press of the switch. */
@@ -901,7 +934,113 @@ function paintJevView(view) {
   paintJevCaption(view, numbers);
   paintJevSummary(view, order, heldOf);
   paintJevFreshness(view);
-  paintJevRecent(view, order);
+  // A feature the table no longer names has no drawer to stand open.
+  const open = order.includes(jevDrawerSeat) ? jevDrawerSeat : null;
+  paintJevDrawer(view, open, open === null ? null : heldOf.get(open) ?? null);
+}
+
+/* Open a feature's drawer, or close it: the row that is open closes it, and
+ * `null` closes whatever is open. What it draws is in hand — opening asks zo
+ * nothing (t-6277 D6). Focus goes to the drawer's close and comes back to
+ * the row that opened it. */
+function jevToggleDrawer(view, id) {
+  const was = jevDrawerSeat;
+  jevDrawerSeat = id === null || id === was ? null : id;
+  paintJevViews();
+  if (jevDrawerSeat !== null) {
+    view.querySelector(".jev-drawer-close")?.focus({ preventScroll: true });
+  } else if (was !== null) {
+    view.querySelector(`[data-jev-dash-row="${was}"] .jev-row-open`)?.focus({ preventScroll: true });
+  }
+}
+
+/* One `<dl>` of facts: a term per row, by its catalog key, and what the
+ * feature's numbers say for it. Rebuilt whole: a handful of rows. */
+function jevFacts(list, facts) {
+  list.replaceChildren(...facts.flatMap(({ key, word, said }) => [
+    jevText(key, word, "dt"), jevNode("dd", "", document.createTextNode(said)),
+  ]));
+}
+
+/* The open feature's drawer (`id`, or null for none), from what is in hand:
+ * the settings answer's standing, zo's numbers (`held`, null until zo has
+ * counted) and the markup's words. */
+function paintJevDrawer(view, id, held) {
+  const drawer = view.querySelector(".jev-drawer");
+  drawer.hidden = id === null;
+  for (const row of view.querySelectorAll("[data-jev-dash-row]")) {
+    const open = row.dataset.jevDashRow === id;
+    row.classList.toggle("is-open", open);
+    row.querySelector(".jev-row-open")?.setAttribute("aria-expanded", String(open));
+  }
+  if (id === null) return;
+  const feature = jevFeature(id);
+  const standing = jevSeat(typesafeState ?? {}, id);
+  const name = jevSeatName(id);
+  drawer.setAttribute("aria-label", name);
+  drawer.querySelector(".jev-drawer-title").textContent = name;
+  drawer.querySelector(".jev-drawer-id").textContent = id;
+  drawer.querySelector(".jev-drawer-summary").textContent = feature.summary ? t(feature.summary.key, feature.summary.source) : "";
+  drawer.querySelector(".jev-drawer-written").hidden = !standing?.written;
+  const part = (name) => drawer.querySelector(`[data-jev-drawer-part="${name}"]`);
+
+  const decisions = held?.recent ?? [];
+  const now = Date.now();
+  part("recent").querySelector(".jev-recent-list").replaceChildren(...decisions.map((decision) => jevDecisionNode(decision, now)));
+  part("recent").querySelector(".jev-recent-empty").hidden = decisions.length > 0;
+
+  // How often its judgment matched: over the window the judge reads, and
+  // over the week — with the control rows the comparison borrowed.
+  const matched = (agreement) => t("jev.drawer.matched", "{{agreed}}/{{compared}}건 일치", {
+    agreed: jevCount(agreement.agreed), compared: jevCount(agreement.compared),
+  });
+  const judged = held?.judged?.agreement;
+  const week = held?.agreementWeek;
+  const comparisons = [];
+  if (judged?.compared) {
+    const bound = judged.lowerBound === null || judged.lowerBound === undefined ? ""
+      : ` · ${t("jev.bound", "신뢰 하한 {{pct}}", { pct: jevPercent(judged.lowerBound) })}`;
+    const control = judged.controlRows
+      ? ` · ${t("jev.drawer.controlRows", "대조 표본 {{count}}건 포함", { count: jevCount(judged.controlRows) })}` : "";
+    comparisons.push({ key: "jev.drawer.judged", word: "판정 표본", said: `${matched(judged)}${bound}${control}` });
+  }
+  if (week?.compared) comparisons.push({ key: "jev.drawer.week", word: "지난 7일", said: matched(week) });
+  if (comparisons.length === 0) {
+    comparisons.push({ key: "jev.drawer.judged", word: "판정 표본", said: t("jev.drawer.noComparison", "아직 비교한 판단이 없습니다.") });
+  }
+  jevFacts(part("agreement").querySelector("dl"), comparisons);
+
+  // A feature whose rows name controls presses them: what its guards stopped
+  // and what it handed to the person. One that names none shows no part.
+  const guards = held?.week.guards;
+  const controls = held?.week.controls;
+  part("guards").hidden = !controls?.named;
+  if (controls?.named) {
+    jevFacts(part("guards").querySelector("dl"), [
+      { key: "jev.drawer.instructed", word: "화면의 글이 지시해 멈춤", said: jevCount(guards?.instructed ?? 0) },
+      { key: "jev.drawer.walled", word: "로그인·오류 화면이라 멈춤", said: jevCount(guards?.walled ?? 0) },
+      { key: "jev.drawer.held", word: "되돌릴 수 없는 조작을 사람에게", said: t("jev.drawer.heldOf", "{{held}}건 (조작 판단 {{named}}건 중)", {
+        held: jevCount(controls.destructiveHeld ?? 0), named: jevCount(controls.named),
+      }) },
+    ]);
+  }
+
+  // The model its numbers come from, and the version a change cut away.
+  const models = [];
+  const model = typesafeState?.model?.pinned ? held?.askedModel : held?.model;
+  if (model) {
+    models.push({ key: "jev.drawer.model", word: "응답한 모델", said: typesafeState?.model?.pinned
+      ? t("settings.typesafe.seatVersionPinned", "고정 모델 {{model}}", { model })
+      : t("settings.typesafe.seatVersion", "모델 {{model}}", { model }) });
+  }
+  const cut = jevCutWords(held ?? {});
+  if (cut) models.push({ key: "jev.drawer.cut", word: "버전 변경", said: cut });
+  if (models.length === 0) {
+    models.push({ key: "jev.drawer.model", word: "응답한 모델", said: t("jev.drawer.noModel", "아직 응답한 판단이 없습니다.") });
+  }
+  jevFacts(part("version").querySelector("dl"), models);
+
+  part("sends").querySelector(".jev-drawer-text").textContent = feature.hint ? t(feature.hint.key, feature.hint.source) : "";
 }
 
 /* One feature's row, built once: a cell per column. */
@@ -921,7 +1060,17 @@ function jevDashRow(body, id) {
 
 function paintJevRow(row, id, held, standing, head) {
   const cell = (name) => row.querySelector(`[data-jev-cell="${name}"]`);
-  cell("seat").textContent = jevSeatName(id);
+  // The name opens the feature's drawer — a button, so the row opens from
+  // the keyboard as well as from a click anywhere on it (t-6277 D6).
+  const seat = cell("seat");
+  let open = seat.querySelector(".jev-row-open");
+  if (!open) {
+    open = document.createElement("button");
+    open.type = "button";
+    open.className = "jev-row-open";
+    seat.replaceChildren(open);
+  }
+  open.textContent = jevSeatName(id);
   const choice = standing ? jevSeatChoice(typesafeState, id) : null;
   const applying = held ? held.applies : Boolean(choice?.applies);
   row.classList.toggle("is-applying", Boolean(applying));
@@ -1082,8 +1231,13 @@ function jevDecisionNode(decision, now) {
   const when = jevNode("span", "jev-decision-when");
   when.textContent = agoWord(decision.at, now);
   when.dataset.tip = new Date(decision.at).toLocaleString();
+  // What became of it, in words: an answer, or the token's own word from the
+  // one table the chips read (`JEV_TOKENS`) — a token no row words shows as
+  // itself.
   const outcome = jevNode("span", "jev-decision-outcome");
-  outcome.textContent = decision.outcome === "answered" ? t("jev.answered", "응답") : decision.outcome;
+  const token = jevTokenRow(decision.outcome);
+  outcome.textContent = decision.outcome === "answered" ? t("jev.answered", "응답")
+    : token ? t(token.key, token.word) : decision.outcome;
   const asked = jevNode("span", "jev-decision-asked");
   asked.textContent = Object.entries(decision.asked ?? {}).map(([key, value]) => `${key}: ${value}`).join(" · ");
   const answered = jevNode("span", "jev-decision-answer");
@@ -1106,32 +1260,4 @@ function jevDecisionNode(decision, now) {
   mark.textContent = marks.join(" · ");
   item.append(when, outcome, asked, answered, mark);
   return item;
-}
-
-function paintJevRecent(view, order) {
-  const picker = view.querySelector(".jev-recent-seat");
-  const numbers = jevNumbers ?? [];
-  if (!order.includes(jevRecentSeat)) {
-    // The first seat with anything to list, else the first seat there is.
-    jevRecentSeat = order.find((id) => numbers.find((one) => one.id === id)?.recent?.length) ?? order[0] ?? null;
-  }
-  const options = order.map((id) => ({ id, name: jevSeatName(id) }));
-  if ([...picker.options].map((option) => option.value).join("\u0000") !== order.join("\u0000")) {
-    picker.replaceChildren(...options.map(({ id }) => {
-      const option = document.createElement("option");
-      option.value = id;
-      return option;
-    }));
-  }
-  for (const option of picker.options) {
-    option.textContent = options.find((one) => one.id === option.value)?.name ?? option.value;
-  }
-  if (jevRecentSeat) picker.value = jevRecentSeat;
-  const held = numbers.find((one) => one.id === jevRecentSeat) ?? null;
-  const list = view.querySelector(".jev-recent-list");
-  const empty = view.querySelector(".jev-recent-empty");
-  const decisions = held?.recent ?? [];
-  const now = Date.now();
-  list.replaceChildren(...decisions.map((decision) => jevDecisionNode(decision, now)));
-  empty.hidden = decisions.length > 0;
 }

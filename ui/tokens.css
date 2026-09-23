@@ -2585,6 +2585,11 @@
   --jev-progress-width: 72px;
   --jev-progress-height: 6px;
   --jev-progress-ink: var(--lane-1);
+  /* The drawer a feature's row opens (t-6277 D6): wide enough for a
+     judgment's asked facts on one or two lines, narrow enough to leave the
+     table's first columns in view beside it. */
+  --jev-drawer-width: 420px;
+  --jev-drawer-title-size: 18px;
 }
 
 /* Skill library geometry; colours inherit the semantic palette in both themes. */

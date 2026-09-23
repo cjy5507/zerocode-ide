@@ -365,3 +365,69 @@ fn an_agreement_over_rows_already_picked_out_reads_the_same_marks() {
     assert_eq!((agreement.compared, agreement.agreed), (2, 2));
     assert_eq!(agreement_since(&rows, 0), agreement_rows(rows.iter(), 0));
 }
+
+/// What a screen seat's guards stopped and what it handed to the person are
+/// counted once, here, off the rows' own words (t-6187's `barred` and
+/// `controlKind`, the dashboard's drawer, t-6277 D6): a press the screen's own
+/// text ordered is `instructed`, one a wall stood in front of is `walled`, and
+/// a control a press cannot take back that an acting seat did not press is
+/// `destructive_held` — a recording seat's row pressed nothing because it
+/// only records, which hands nothing to anybody. `named` is every row that
+/// named a control at all, so a reader can tell a seat that presses from one
+/// that never does.
+#[test]
+fn a_screen_seats_guards_and_the_controls_it_handed_over_are_counted_once_per_row() {
+    use crate::guarded::ControlKind;
+    use crate::jev::{ROUTE_USE_APPLIED, ROUTE_USE_FALLBACK};
+    use crate::screen_action::Stopped;
+    let row = |extra: Value| {
+        let mut row = json!({ "at": 5, "outcome": ANSWERED, "elapsedMs": 200, "requests": 1 });
+        for (key, value) in extra.as_object().expect("an object") {
+            row[key] = value.clone();
+        }
+        row
+    };
+    let destructive = ControlKind::Destructive.word();
+    let plain = ControlKind::Plain.word();
+    let rows = [
+        row(
+            json!({ "barred": Stopped::Injected.word(), "controlKind": plain, "routeUse": ROUTE_USE_FALLBACK }),
+        ),
+        row(
+            json!({ "barred": Stopped::Injected.word(), "controlKind": destructive, "routeUse": ROUTE_USE_FALLBACK }),
+        ),
+        row(
+            json!({ "barred": Stopped::Walled.word(), "controlKind": plain, "routeUse": ROUTE_USE_FALLBACK }),
+        ),
+        row(
+            json!({ "barred": "low_confidence", "controlKind": destructive, "routeUse": ROUTE_USE_FALLBACK }),
+        ),
+        row(json!({ "controlKind": destructive, "routeUse": ROUTE_USE_APPLIED, "pressed": true })),
+        row(json!({ "controlKind": destructive, "routeUse": crate::jev::JevMode::Shadow.key() })),
+        row(json!({ "controlKind": plain, "routeUse": ROUTE_USE_APPLIED })),
+        // A walk barred before it asked names no control and no guard.
+        json!({ "at": 5, "outcome": "barred", "barred": "no_budget", "requests": 0 }),
+        // A row from before the window is not the window's.
+        row(
+            json!({ "at": 1, "barred": Stopped::Walled.word(), "controlKind": destructive, "routeUse": ROUTE_USE_FALLBACK }),
+        ),
+    ];
+    let tally = summarize(&rows, 2);
+    assert_eq!(
+        tally.guards,
+        Guards {
+            instructed: 2,
+            walled: 1
+        }
+    );
+    assert_eq!(
+        tally.controls,
+        Controls {
+            named: 7,
+            destructive_held: 2
+        }
+    );
+    let quiet = summarize(&[json!({ "at": 5, "outcome": ANSWERED })], 0);
+    assert_eq!(quiet.guards, Guards::default());
+    assert_eq!(quiet.controls, Controls::default());
+}
