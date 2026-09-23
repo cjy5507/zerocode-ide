@@ -37943,6 +37943,44 @@ h4.knowledge-inspector-head::after {
   font-weight: 600;
 }
 
+/* What did not come back, by token (t-6243 D5): a quiet word for the wire's
+   misses, and a button in the tone of a feature waiting on a person for the
+   ones a person clears. */
+.jev-tokens {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 var(--space-1);
+  white-space: normal;
+}
+
+/* One text line tall, so a row of them costs a line and not a box. */
+.jev-token {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--space-1);
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--ink-mist);
+  font: inherit;
+  font-size: var(--jev-meta-size);
+  line-height: var(--jev-token-line);
+  white-space: nowrap;
+}
+
+button.jev-token {
+  background: color-mix(in srgb, var(--jev-tone-blocked) 12%, transparent);
+  color: var(--jev-tone-blocked);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+button.jev-token:hover {
+  background: color-mix(in srgb, var(--jev-tone-blocked) 22%, transparent);
+}
+
 .jev-spark {
   width: var(--jev-spark-width);
   height: var(--jev-spark-height);

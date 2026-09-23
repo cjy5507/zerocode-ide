@@ -1414,21 +1414,56 @@ mod tests {
         );
     }
 
-    /// The failures the pane puts into words are tokens zo's check can print.
+    /// Every outcome token a feature's week can carry has its words in the
+    /// one table the dashboard's chips and the card's key check both read
+    /// (`JEV_TOKENS`, t-6243 D5): each of zo's wire failures, and each of the
+    /// door's refusals but `off`, which is a mode word the dashboard never
+    /// spells. A token zo or the door gains turns this red until it is worded.
     #[test]
     fn the_failures_the_pane_words_are_zos_tokens() {
+        fn between<'a>(source: &'a str, from: &str, to: &str) -> &'a str {
+            let start = source.find(from).unwrap_or_else(|| panic!("no `{from}`"));
+            let rest = &source[start..];
+            let end = rest[from.len()..]
+                .find(to)
+                .unwrap_or_else(|| panic!("nothing ends `{from}` at `{to}`"));
+            &rest[..from.len() + end]
+        }
         let zo = include_str!("../../../zo-ide/crates/api/src/systemone.rs");
-        let pane = include_str!("../../../ui/shell-settings.js");
-        for token in ["unauthorized", "no_key"] {
+        let wire: Vec<&str> = between(zo, "pub const fn token(self)", "\n    }")
+            .lines()
+            .filter_map(|line| line.split_once("=> \""))
+            .filter_map(|(_, rest)| rest.split('"').next())
+            .collect();
+        assert!(
+            wire.contains(&"unauthorized") && wire.contains(&"no_key"),
+            "zo's failure tokens were not read: {wire:?}"
+        );
+        let door = zerocode_core::jev::door::Refused::ALL
+            .into_iter()
+            .filter(|refused| *refused != zerocode_core::jev::door::Refused::Off)
+            .map(zerocode_core::jev::door::Refused::token);
+        let table = between(
+            include_str!("../../../ui/shell-jev.js"),
+            "const JEV_TOKENS = Object.freeze({",
+            "\n});",
+        );
+        for token in wire.iter().copied().chain(door) {
             assert!(
-                zo.contains(&format!("=> \"{token}\"")),
-                "zo has no `{token}` failure"
-            );
-            assert!(
-                pane.contains(&format!("token === \"{token}\"")),
-                "the pane no longer words `{token}`"
+                table.contains(&format!("\n  {token}: {{")),
+                "the dashboard's token table does not word `{token}`"
             );
         }
+        // The card's key check says its failures from the same rows.
+        let check = between(
+            include_str!("../../../ui/shell-settings.js"),
+            "function typesafeCheckFailure(",
+            "\n}",
+        );
+        assert!(
+            check.contains("jevTokenRow("),
+            "the key check words its failures somewhere else"
+        );
     }
 
     /// The day's count the dashboard draws is the door's own: the file the

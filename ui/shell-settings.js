@@ -22,8 +22,11 @@ const PANE_OF = {
   "google-account-list": "provider-accounts",
   "router-provider-list": "api-routers",
   "router-preset-select": "api-routers",
-  // The Jev dashboard's "in settings" lands on the first seat's switch.
+  // The Jev dashboard's "in settings" lands on the first seat's switch, and
+  // its refusal chips on the key field and the key card's status (t-6243 D5).
   "typesafe-routing-select": "api-routers",
+  "typesafe-key-input": "api-routers",
+  "typesafe-status": "api-routers",
   "show-automations": "appearance",
   "show-tasks": "appearance",
   "worktree-prefix": "git",
@@ -5724,13 +5727,10 @@ async function checkTypeSafeKey() {
  * other is a token, which belongs under the fold beside the rest of the
  * evidence rather than in the middle of our own sentence. */
 function typesafeCheckFailure(token) {
-  if (token === "unauthorized") {
-    return t("settings.typesafe.unauthorized", "키가 거절되었습니다 — 키를 다시 확인하세요.");
-  }
-  if (token === "no_key") {
-    return t("settings.typesafe.noKey", "zo가 키를 찾지 못했습니다 — 키를 저장한 뒤 다시 확인하세요.");
-  }
-  return t("settings.typesafe.unanswered", "응답하지 않았습니다.");
+  // The one table of failure tokens (`JEV_TOKENS`, shell-jev.js): the
+  // dashboard's chips read the same rows (t-6243 D5).
+  const row = jevTokenRow(token ?? "");
+  return row?.saidKey ? t(row.saidKey, row.said) : t("settings.typesafe.unanswered", "응답하지 않았습니다.");
 }
 
 /* A refused step, in the reader's language when the backend named why — the

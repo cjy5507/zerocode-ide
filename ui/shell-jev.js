@@ -339,10 +339,43 @@ const JEV_TOTALS = Object.freeze([
   { stat: "cost", key: "jev.stat.cost", word: "7일 비용" },
 ]);
 
-/* The outcome tokens only a person can clear, and what clears them: the
- * door's `no_key` and zo's `unauthorized` are the key, the door's
- * `not_consented` the folder's consent. */
-const JEV_FIXES = Object.freeze({ no_key: "key", unauthorized: "key", not_consented: "consent" });
+/* The outcome tokens a feature's week can carry — zo's wire failures
+ * (`SystemOneFailure::token`) and the door's refusals
+ * (`zerocode_core::jev::door::Refused::token`) — each with its short word, the
+ * sentence the card's key check says for it, and what a person does to clear
+ * it: the key (`key`), the folder's consent (`consent`) or the day's limit
+ * (`budget`). One table: the dashboard's chips and the card's check read it
+ * (t-6243 D5), and `typesafe_settings.rs` holds it to zo's and the door's
+ * tokens. The door's `off` is a mode word this page never spells. */
+const JEV_TOKENS = Object.freeze({
+  no_key: { key: "jev.token.noKey", word: "API 키 없음", fix: "key", saidKey: "settings.typesafe.noKey", said: "zo가 키를 찾지 못했습니다 — 키를 저장한 뒤 다시 확인하세요." },
+  unauthorized: { key: "jev.token.unauthorized", word: "키 거절", fix: "key", saidKey: "settings.typesafe.unauthorized", said: "키가 거절되었습니다 — 키를 다시 확인하세요." },
+  not_consented: { key: "jev.token.notConsented", word: "동의 안 된 폴더", fix: "consent" },
+  budget: { key: "jev.token.budget", word: "하루 한도 초과", fix: "budget" },
+  timeout: { key: "jev.token.timeout", word: "시간 초과" },
+  schema: { key: "jev.token.schema", word: "형식 오류" },
+  transport: { key: "jev.token.transport", word: "연결 실패" },
+  overloaded: { key: "jev.token.overloaded", word: "서버 과부하" },
+  rate_limited: { key: "jev.token.rateLimited", word: "요청 제한" },
+  invalid_request: { key: "jev.token.invalidRequest", word: "잘못된 요청" },
+  http: { key: "jev.token.http", word: "서버 오류" },
+});
+
+/* A token's row: its own, or its family's — a ledger keeps an unnamed HTTP
+ * failure with its status (`http_503`, zo's `ledger_token`) and a schema
+ * refusal with the rule it broke (`schema_…`, the core's
+ * `names_a_schema_failure`). `null` for a token no row words. */
+function jevTokenRow(token) {
+  const family = token.startsWith("http_") ? "http" : token.startsWith("schema_") ? "schema" : token;
+  return JEV_TOKENS[family] ?? null;
+}
+
+/* Whether only a person clears `token`: a key missing or refused, or a
+ * folder not consented — the day's limit clears itself tomorrow. */
+function jevWaitsOnAPerson(token) {
+  const fix = jevTokenRow(token)?.fix;
+  return fix === "key" || fix === "consent";
+}
 
 /* Where `held` stands, given the switch's `choice` (what its mode does).
  * Nothing asked all week, or a switch that asks nothing, is unused; a feature
@@ -352,7 +385,7 @@ const JEV_FIXES = Object.freeze({ no_key: "key", unauthorized: "key", not_consen
 function jevSeatStatus(held, choice) {
   if (held.week.rows === 0 || (choice && !choice.asks)) return "unused";
   const refused = (held.week.failures ?? [])
-    .reduce((sum, one) => sum + (JEV_FIXES[one.token] ? one.rows : 0), 0);
+    .reduce((sum, one) => sum + (jevWaitsOnAPerson(one.token) ? one.rows : 0), 0);
   if (refused > 0 && refused >= held.week.answered) return "blocked";
   if (held.applies) return "applying";
   if (held.verdict?.line && !JEV_LINES[held.verdict.line]?.wants) return "under";
@@ -468,6 +501,10 @@ function wireJevView(host) {
   host.querySelector(".jev-recent-seat").addEventListener("change", (event) => {
     jevRecentSeat = event.target.value;
     paintJevViews();
+  });
+  host.querySelector("[data-jev-rows]").addEventListener("click", (event) => {
+    const chip = event.target.closest("[data-jev-fix]");
+    if (chip) jevFix(chip.dataset.jevFix);
   });
   host.querySelector("[data-jev-rows]").addEventListener("change", (event) => {
     const select = event.target.closest("[data-jev-dash-seat]");
@@ -763,7 +800,7 @@ function jevStatusReason(held, status, choice, counting) {
 function jevBlockedWords(held) {
   const fixes = { key: 0, consent: 0 };
   for (const one of held.week.failures ?? []) {
-    if (JEV_FIXES[one.token]) fixes[JEV_FIXES[one.token]] += one.rows;
+    if (jevWaitsOnAPerson(one.token)) fixes[jevTokenRow(one.token).fix] += one.rows;
   }
   return fixes.key >= fixes.consent
     ? t("jev.needs.key", "API 키가 없거나 거절되어 판단을 요청하지 못했습니다")
@@ -799,10 +836,34 @@ function jevSamplesOwed(held, standing) {
   return jevNode("div", "jev-owed", bar, label);
 }
 
-function jevRefusalWords(window) {
-  const refusals = window.refusals ?? [];
-  if (refusals.length === 0) return window.refused > 0 ? jevCount(window.refused) : "—";
-  return refusals.map((one) => `${one.token} ${jevCount(one.rows)}`).join(" · ");
+/* One token's chip: its words and how many rows carried it; a button to the
+ * fix when a person clears it, a word otherwise. A token no row words shows
+ * as itself. */
+function jevTokenChip(one) {
+  const row = jevTokenRow(one.token);
+  const chip = document.createElement(row?.fix ? "button" : "span");
+  chip.className = "jev-token";
+  chip.dataset.token = one.token;
+  if (row?.fix) {
+    chip.type = "button";
+    chip.dataset.jevFix = row.fix;
+  }
+  chip.textContent = `${row ? t(row.key, row.word) : one.token} ${jevCount(one.rows)}`;
+  return chip;
+}
+
+/* Take a person to where a token is cleared: the key's own field for a key
+ * missing or refused; the key card, saying what to change, for a folder not
+ * consented or a day's limit spent — neither has a field of its own. */
+function jevFix(fix) {
+  if (fix === "key") {
+    setSettingsOpen(true, "typesafe-key-input");
+    return;
+  }
+  setSettingsOpen(true, "typesafe-status");
+  paintTypeSafeStatus(fix === "consent"
+    ? t("jev.help.consent", "동의한 폴더에서만 판단을 보냅니다. zo 설정 파일(settings.json)의 smart.jev.workspaces에 이 프로젝트 폴더를 더하면 보냅니다.")
+    : t("jev.help.budget", "오늘 보낼 수 있는 판단 요청을 다 썼습니다. 하루 한도는 zo 설정 파일(settings.json)의 smart.jev.dailyRequests입니다."));
 }
 
 /* How often the judgment matched, over the judged window — or, while the
@@ -911,8 +972,13 @@ function paintJevRow(row, id, held, standing, head) {
   rows.replaceChildren(
     fact("today", jevCount(held.today.rows), "jev-fact-strong"), document.createTextNode(" · "),
     fact("week", jevCount(held.week.rows)));
-  if (held.week.refused > 0) {
-    rows.append(document.createElement("br"), fact("refusals", jevRefusalWords(held.week), "jev-fact-mist"));
+  // What did not come back, by token, in words — the ones a person clears
+  // are buttons to where they are cleared (t-6243 D5).
+  const failures = held.week.failures ?? [];
+  if (failures.length > 0) {
+    rows.append(jevNode("div", "jev-tokens", ...failures.map(jevTokenChip)));
+  } else if (held.week.refused > 0) {
+    rows.append(jevNode("div", "jev-tokens", fact("refused", t("jev.refusedCount", "거절 {{count}}건", { count: jevCount(held.week.refused) }), "jev-token")));
   }
   const share = cell("answered");
   share.replaceChildren();

@@ -102,7 +102,8 @@ function jevDashboardFixture(real = null) {
       // person's `shadow` — it records, and the why column says so.
       seat.found = "/h/state/smart-router/rerank-shadow.jsonl";
       seat.today = counted(3, 3, { p50Ms: 211, p95Ms: 232 });
-      seat.week = counted(1005, 935, { applied: 845, p50Ms: 211, p95Ms: 400 });
+      seat.week = counted(1005, 935, { applied: 845, p50Ms: 211, p95Ms: 400,
+        failures: [{ token: "schema", rows: 65 }, { token: "timeout", rows: 5 }] });
       seat.costUsd = 0.31;
       seat.days = days([1, 0.95, 0.9, 1, 0.92, 0.9, 0.93]);
     }
@@ -136,7 +137,10 @@ function jevDashboardFixture(real = null) {
     if (id === "routing") {
       seat.found = "/h/state/smart-router/decision-shadow.jsonl";
       seat.today = counted(3, 3, { p50Ms: 541, p95Ms: 600 });
-      seat.week = counted(35, 31, { refused: 0, p50Ms: 500, p95Ms: 884, applied: 23 });
+      // Three requests the door refused for want of a key, one the wire timed
+      // out on (t-6243 D5).
+      seat.week = counted(35, 31, { refused: 3, refusals: [{ token: "no_key", rows: 3 }],
+        failures: [{ token: "no_key", rows: 3 }, { token: "timeout", rows: 1 }], p50Ms: 500, p95Ms: 884, applied: 23 });
       seat.costUsd = 0.004;
       seat.riseFloorPermille = 950;
       seat.clearsRiseFloor = false;
@@ -379,7 +383,7 @@ export async function testJevDashboard(browser, origin, ok) {
       const summon = {
         today: fact("summon", "today"), week: fact("summon", "week"),
         answered: cell("summon", "answered").textContent, latency: cell("summon", "latency").textContent,
-        refusals: fact("summon", "refusals"), applied: fact("summon", "applied"),
+        applied: fact("summon", "applied"),
         agreement: fact("summon", "agreement"), cost: cell("summon", "cost").textContent,
         boundTip: view().querySelector('[data-jev-dash-row="summon"] [data-jev-fact="bound"]')?.dataset.tip ?? null,
         mode: cell("summon", "mode").querySelector("select").value,
@@ -505,7 +509,7 @@ export async function testJevDashboard(browser, origin, ok) {
     ok("a counted seat's numbers stand in its cells",
       opened.summon.today === "32" && opened.summon.week === "50" && opened.summon.answered.startsWith("96%")
         && opened.summon.answered.includes("84%")
-        && opened.summon.refusals === "not_consented 2" && opened.summon.applied === "0"
+        && opened.summon.applied === "0"
         && opened.summon.agreement === "16/44 (24%)" && opened.summon.cost === "$0.0123" && opened.summon.mode === "on"
         && opened.summon.latency === "230 ms (느릴 때 410)" && opened.recallWeek === "1,005",
       JSON.stringify(opened.summon));
@@ -533,6 +537,39 @@ export async function testJevDashboard(browser, origin, ok) {
         && small.routing.agreement === "표본 3건" && small.summon.agreement === "16/44 (24%)"
         && small.placement.agreement === "12/21 (37%)",
       JSON.stringify(small));
+    // Every failure a feature's week carries is a chip in words; the ones a
+    // person fixes are buttons that go where the fix is (t-6243 D5).
+    const chips = await page.evaluate(() => {
+      const view = document.querySelector("#jev-view");
+      const chipsOf = (id) => [...view.querySelectorAll(`[data-jev-dash-row="${id}"] [data-jev-cell="rows"] .jev-token`)]
+        .map((chip) => `${chip.dataset.token}|${chip.textContent}|${chip.tagName === "BUTTON" ? "button" : "word"}`);
+      return { routing: chipsOf("routing"), recall: chipsOf("recall"), notify: chipsOf("notify"), summon: chipsOf("summon"),
+        placement: chipsOf("placement") };
+    });
+    ok("every failure a feature's week carries is a chip in words, and the ones a person fixes are buttons",
+      chips.routing.join(",") === "no_key|API 키 없음 3|button,timeout|시간 초과 1|word"
+        && chips.recall.join(",") === "schema|형식 오류 65|word,timeout|시간 초과 5|word"
+        && chips.notify.join(",") === "not_consented|동의 안 된 폴더 2|button"
+        && chips.summon.join(",") === "not_consented|동의 안 된 폴더 2|button" && chips.placement.length === 0,
+      JSON.stringify(chips));
+    const fixed = await page.evaluate(async () => {
+      const view = document.querySelector("#jev-view");
+      view.querySelector('[data-jev-dash-row="routing"] .jev-token[data-token="no_key"]').click();
+      await window.__PAINTED__();
+      const key = { open: !settingsView.hidden, focus: document.activeElement?.id ?? null };
+      setSettingsOpen(false);
+      await window.__PAINTED__();
+      view.querySelector('[data-jev-dash-row="notify"] .jev-token[data-token="not_consented"]').click();
+      await window.__PAINTED__();
+      const consent = { open: !settingsView.hidden, said: document.querySelector("#typesafe-status")?.textContent ?? "" };
+      setSettingsOpen(false);
+      await window.__PAINTED__();
+      return { key, consent, back: activeTabId };
+    });
+    ok("a key chip opens settings on the key field, and a consent chip says where the folder is consented",
+      fixed.key.open && fixed.key.focus === "typesafe-key-input" && fixed.consent.open
+        && fixed.consent.said.includes("smart.jev.workspaces") && fixed.back === "jev",
+      JSON.stringify(fixed));
     ok("the model is named once, over the table, and a row names a version only when it is another",
       opened.caption === "모델 jev-1.13.0" && Object.values(st).every((one) => !one.facts.some((fact) => fact.startsWith("모델 ")))
         && (opened.cardLine ?? "").includes("모델 jev-1.13.0 · 판정 표본 34건 · 이전 버전 jev-1.12.0의 기록은 제외"),
@@ -561,7 +598,7 @@ export async function testJevDashboard(browser, origin, ok) {
       const again = document.querySelector("#jev-view");
       const cell = (id, name) => again.querySelector(`[data-jev-dash-row="${id}"] [data-jev-cell="${name}"]`);
       const fact = (id, name) => again.querySelector(`[data-jev-dash-row="${id}"] [data-jev-fact="${name}"]`)?.textContent ?? null;
-      opened.quiet = { week: fact("skills", "week"), refusals: fact("skills", "refusals"),
+      opened.quiet = { week: fact("skills", "week"), chips: cell("skills", "rows").querySelectorAll(".jev-token").length,
         trend: cell("skills", "trend").textContent.trim(), pictures: cell("skills", "trend").querySelectorAll("svg").length,
         chip: cell("skills", "status").querySelector(".jev-chip")?.textContent ?? null,
         tone: cell("skills", "status").querySelector(".jev-chip")?.dataset.status ?? null,
@@ -583,7 +620,7 @@ export async function testJevDashboard(browser, origin, ok) {
         && unfolded.quiet.pictures === 0 && unfolded.quiet.trend === "—",
       JSON.stringify({ ...tr, quiet: { pictures: unfolded.quiet.pictures, text: unfolded.quiet.trend } }));
     ok("a seat nothing has asked yet reads as never asked, not as zero",
-      unfolded.quiet.week === "0" && unfolded.quiet.refusals === null && unfolded.quiet.chip === "미사용"
+      unfolded.quiet.week === "0" && unfolded.quiet.chips === 0 && unfolded.quiet.chip === "미사용"
         && unfolded.quiet.tone === "unused" && unfolded.quiet.reason === "",
       JSON.stringify(unfolded.quiet));
     ok("the recent list opens on the first seat with decisions and lists the digest",
@@ -599,6 +636,8 @@ export async function testJevDashboard(browser, origin, ok) {
     const picked = await page.evaluate(async () => {
       const view = document.querySelector("#jev-view");
       const picker = view.querySelector(".jev-recent-seat");
+      // Counted from here: settings opened earlier asked for itself.
+      const before = window.__COUNTS__.jev_summary;
       picker.value = "summon";
       picker.dispatchEvent(new Event("change", { bubbles: true }));
       await window.__PAINTED__();
@@ -606,11 +645,11 @@ export async function testJevDashboard(browser, origin, ok) {
         count: view.querySelectorAll(".jev-decision").length,
         refused: view.querySelector('.jev-decision[data-outcome="not_consented"] .jev-decision-outcome')?.textContent ?? null,
         marks: [...view.querySelectorAll(".jev-decision-marks")].map((one) => one.textContent),
-        asks: window.__COUNTS__.jev_summary,
+        asks: window.__COUNTS__.jev_summary - before,
       };
     });
     ok("choosing another seat lists its decisions without asking zo again",
-      picked.count === 5 && picked.refused === "not_consented" && picked.asks === 1
+      picked.count === 5 && picked.refused === "not_consented" && picked.asks === 0
         && picked.marks[0].includes("확신도 19%") && picked.marks[0].includes("적용됨") && picked.marks[0].includes("일치")
         && picked.marks[1].includes("기록만"),
       JSON.stringify(picked));
