@@ -243,6 +243,11 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = [
     "CGWindow",
     "CGImage",
     "CGGeometry",
+    # The hang watchdog asks whether any screen is awake before it judges
+    # (`hang_watchdog::screens_awake`, t-6388): `CGGetActiveDisplayList` and
+    # the `CGError` it answers with. Both pull only features already on.
+    "CGDirectDisplay",
+    "CGError",
 ] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = [
     "std",

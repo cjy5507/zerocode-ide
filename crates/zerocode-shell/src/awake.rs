@@ -472,6 +472,37 @@ mod tests {
         );
     }
 
+    /// What a reading landing right behind a request waits for (t-6388): the
+    /// keeper finishing the `caffeinate` it is spawning or reaping before it
+    /// folds the next request in. While `computer_awake_status` ran on the
+    /// main thread that wait was the window's; it now runs on the async
+    /// runtime, and this measures what the main thread no longer pays.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "measurement: spawns and reaps caffeinate eighty times"]
+    fn measure_the_wait_a_reading_behind_a_request_pays() {
+        let service = AwakeService::default();
+        let mut waits = Vec::new();
+        for _ in 0..40 {
+            for mode in [ComputerAwakeMode::On, ComputerAwakeMode::Off] {
+                service.set_mode(mode);
+                let asked = Instant::now();
+                let _ = service.status();
+                waits.push(asked.elapsed().as_micros());
+            }
+        }
+        waits.sort_unstable();
+        let at = |share: usize| waits[(waits.len() - 1) * share / 100];
+        println!(
+            "awake_status_wait_us n={} p50={} p90={} p99={} max={}",
+            waits.len(),
+            at(50),
+            at(90),
+            at(99),
+            at(100)
+        );
+    }
+
     /// The wire spellings are Orca's own three words.
     #[test]
     fn the_mode_speaks_kebab_on_the_wire() {

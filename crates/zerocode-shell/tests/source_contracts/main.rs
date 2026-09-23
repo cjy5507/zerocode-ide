@@ -34725,6 +34725,14 @@ mod tests {
             shipped.contains("computer_awake_status,"),
             "the awake standing is not registered for the window"
         );
+        // ...off the main thread (t-6388): the reading waits for the keeper,
+        // and the window asks on every resume, when the keeper is busiest.
+        // A hang report on 2026-09-23 found the main thread 15,055 ms inside
+        // this command, waiting on a keeper a DarkWake had stopped.
+        assert!(
+            shipped.contains("#[tauri::command(async)]\npub(crate) fn computer_awake_status("),
+            "the awake standing is asked on the main thread, where it waits on the keeper"
+        );
         // ...and a push from BOTH hot gates — the settings write and the
         // pane-state note the keeper hears. One count short means a gate
         // changes the standing in silence.

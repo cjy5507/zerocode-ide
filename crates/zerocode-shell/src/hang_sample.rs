@@ -75,23 +75,63 @@ pub(crate) fn sample_main_thread() -> Result<Vec<String>, &'static str> {
     Err("sample_unsupported")
 }
 
+/// How `sample` names the main thread in a call graph header: by the main
+/// queue while every sample found it there, and `Main Thread` when it moved
+/// between queues.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+const MAIN_THREAD_MARKS: [&str; 2] = ["com.apple.main-thread", "Main Thread"];
+
+/// The main thread's call tree, as the lines under its header. A main thread
+/// inside another serial queue's `dispatch_sync` for the whole sample carries
+/// THAT queue's label and neither mark (measured 2026-09-24 with a probe
+/// process), so the root frame decides then: only the main thread grows from
+/// dyld's `start`; every other thread grows from `thread_start` or
+/// `start_wqthread`. The 2026-09-23 13:58 hang, one of the two with a screen
+/// on, ended as `sample_no_main_frames` — what the label alone answers for
+/// such a thread.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn main_thread_lines(text: &str) -> Vec<&str> {
+    let graph = text
+        .split_once("Call graph:")
+        .map_or(text, |(_, graph)| graph);
+    let mut sections: Vec<(&str, Vec<&str>)> = Vec::new();
+    for line in graph.lines() {
+        if line.contains("Thread_") {
+            sections.push((line, Vec::new()));
+        } else if let Some((_, lines)) = sections.last_mut() {
+            // The call graph ends at its first blank line; the totals that
+            // follow repeat symbols with counts and are not a stack.
+            if line.trim().is_empty() {
+                break;
+            }
+            lines.push(line);
+        }
+    }
+    let marked = |header: &str| MAIN_THREAD_MARKS.iter().any(|mark| header.contains(mark));
+    let rooted_in_dyld = |lines: &[&str]| {
+        lines.first().is_some_and(|line| {
+            line.split_once("  (in dyld)").is_some_and(|(tree, _)| {
+                matches!(
+                    tree.split_whitespace().last(),
+                    Some("start" | "_dyld_start")
+                )
+            })
+        })
+    };
+    sections
+        .iter()
+        .find(|(header, _)| marked(header))
+        .or_else(|| sections.iter().find(|(_, lines)| rooted_in_dyld(lines)))
+        .map(|(_, lines)| lines.clone())
+        .unwrap_or_default()
+}
+
 /// Keep only the main call tree's public symbols. Headers, binary paths,
 /// source locations, addresses and other threads never enter crash evidence.
 #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn main_sample_frames(text: &str) -> Vec<String> {
-    let mut main = false;
     let mut frames = std::collections::VecDeque::new();
-    for line in text.lines() {
-        if line.contains("Thread_") {
-            if main {
-                break;
-            }
-            main = line.contains("com.apple.main-thread");
-            continue;
-        }
-        if !main {
-            continue;
-        }
+    for line in main_thread_lines(text) {
         let Some((tree, _)) = line.split_once("  (in ") else {
             continue;
         };
@@ -160,6 +200,44 @@ mod tests {
         }
         assert_eq!(main_sample_frames(&sample).len(), Limits::SAMPLE_FRAMES);
         assert!(main_sample_frames("1 Thread_2 background\n + 1 wait  (in window)").is_empty());
+    }
+
+    /// `sample`'s own words for a main thread held inside another serial
+    /// queue's `dispatch_sync` the whole second (2026-09-24 probe, addresses
+    /// shortened): that queue's label, no main-thread mark — and the tree
+    /// still grows from dyld's `start`.
+    #[test]
+    fn a_main_thread_inside_another_queue_is_still_the_main_thread() {
+        let sample = "Call graph:\n    87 Thread_51463556   DispatchQueue_23: com.example.probe.serial  (serial)\n      87 start  (in dyld) + 7184  [0x1]\n        87 main  (in probe) + 36  [0x2]\n          87 _dispatch_lane_barrier_sync_invoke_and_complete  (in libdispatch.dylib) + 56  [0x3]\n            87 _dispatch_client_callout  (in libdispatch.dylib) + 16  [0x4]\n              87 sleep  (in libsystem_c.dylib) + 52  [0x5]\n    87 Thread_51463557: worker\n      87 thread_start  (in libsystem_pthread.dylib) + 8  [0x6]\n        87 work  (in probe) + 4  [0x7]\n\nTotal number in stack (recursive counted multiple, when >=5):\n        87       sleep  (in libsystem_c.dylib) + 52  [0x5]\n";
+        assert_eq!(
+            main_sample_frames(sample),
+            [
+                "0: native::samples_87::sleep",
+                "1: native::samples_87::_dispatch_client_callout",
+                "2: native::samples_87::_dispatch_lane_barrier_sync_invoke_and_complete",
+                "3: native::samples_87::main",
+                "4: native::samples_87::start",
+            ]
+        );
+    }
+
+    /// The same probe moving between the main queue and another one: the
+    /// header says `Main Thread` and `DispatchQueue_<multiple>`. The totals
+    /// after the graph's blank line are not frames even when the main
+    /// thread is the graph's last section.
+    #[test]
+    fn a_main_thread_between_queues_is_named_main_thread() {
+        let sample = "Call graph:\n    88 Thread_51466000: Main Thread   DispatchQueue_<multiple>\n      88 start  (in dyld) + 7184  [0x1]\n        54 main  (in probe) + 72  [0x2]\n        + 54 _dispatch_lane_barrier_sync_invoke_and_complete  (in libdispatch.dylib) + 56  [0x3]\n        34 main  (in probe) + 60  [0x4]\n          34 usleep  (in libsystem_c.dylib) + 68  [0x5]\n\nTotal number in stack (recursive counted multiple, when >=5):\n        88       __semwait_signal  (in libsystem_kernel.dylib) + 8  [0x6]\n";
+        assert_eq!(
+            main_sample_frames(sample),
+            [
+                "0: native::samples_34::usleep",
+                "1: native::samples_34::main",
+                "2: native::samples_54::_dispatch_lane_barrier_sync_invoke_and_complete",
+                "3: native::samples_54::main",
+                "4: native::samples_88::start",
+            ]
+        );
     }
 
     #[test]
