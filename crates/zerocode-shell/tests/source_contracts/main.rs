@@ -31201,9 +31201,10 @@ mod tests {
         let core = include_str!("../../../zerocode-core/src/orchestration.rs");
         let arm = block_after(core, "\"worker-start\" => {");
         // The alternative is cloned into the gate since t-3059: the same
-        // word is also the worker row's standing order for its own wall.
+        // word is also the worker row's standing order for its own wall —
+        // and since t-6427 only the order's alternative, never its `wait`.
         let gate = arm
-            .find("quota_gate(launcher, now_ms, requested, on_quota_wall.clone())?")
+            .find("quota_gate(launcher, now_ms, requested, alternative.clone())?")
             .expect("the quota gate left the worker-start arm");
         for later in [
             "ledger.prepare_worker_start(WorkerStartRequest {",
@@ -31240,8 +31241,8 @@ mod tests {
             "agent-list rows lost their headroom:\n{rows}"
         );
         assert!(
-            core.contains("[--on-quota-wall <agent[:model[:effort]]>]"),
-            "the verb table no longer says --on-quota-wall"
+            core.contains("[--on-quota-wall wait|<agent[:model[:effort]]>]"),
+            "the verb table no longer says --on-quota-wall and its closed word"
         );
 
         let shell = include_str!("../../src/orchestration.rs");

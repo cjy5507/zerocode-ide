@@ -1887,6 +1887,8 @@ struct AtTheWall {
     onto: Mutex<u32>,
     checkout: &'static str,
     markers: Mutex<std::collections::HashMap<u32, zerocode_core::orchestration::QuotaWallMarker>>,
+    /// Every gauge the beat asked the window to read again (t-6427).
+    asked: Mutex<Vec<String>>,
 }
 
 impl AtTheWall {
@@ -1905,6 +1907,21 @@ impl AtTheWall {
                     line: zerocode_core::orchestration::Text::from(line),
                 },
             );
+    }
+
+    /// The pane's own words moved past its wall.
+    fn screen_clears(&self, term: u32) {
+        self.markers
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .remove(&term);
+    }
+
+    fn asked(&self) -> Vec<String> {
+        self.asked
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone()
     }
 }
 
@@ -1969,6 +1986,12 @@ impl Host for AtTheWall {
     }
     fn actor_for(&self, term: u32) -> Option<String> {
         Some(test_actor(term))
+    }
+    fn ask_usage(&self, gauge: &str) {
+        self.asked
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push(gauge.to_string());
     }
 }
 
@@ -2146,6 +2169,7 @@ impl Walled {
             onto: Mutex::new(leader_term + 1),
             checkout,
             markers: Mutex::new(std::collections::HashMap::new()),
+            asked: Mutex::new(Vec::new()),
         };
         let leader = zerocode_core::agent_teams::LEADER_PANE;
         let verb = |line: &str, at: i64| {
@@ -2233,7 +2257,7 @@ impl Walled {
         let rows = super::cached_ledger(&held, &image).expect("the rows");
         rows.runs()
             .iter()
-            .find_map(zerocode_core::orchestration::next_handover)
+            .find_map(|run| zerocode_core::orchestration::next_handover(run, self.began + 20_000))
             .expect("a handover to walk")
     }
 
@@ -2674,6 +2698,7 @@ fn the_beat_writes_quota_walled_news_only_with_both_witnesses_and_settles_nothin
         onto: Mutex::new(CODEX_TERM),
         checkout: "/wt/walled",
         markers: Mutex::new(std::collections::HashMap::new()),
+        asked: Mutex::new(Vec::new()),
     };
     let leader = zerocode_core::agent_teams::LEADER_PANE;
     let verb = |line: &str, at: i64| {
@@ -2790,6 +2815,187 @@ fn the_beat_writes_quota_walled_news_only_with_both_witnesses_and_settles_nothin
         (lifecycle(&codex_worker), lifecycle(&claude_worker)),
         before
     );
+}
+
+/// A wall stands until its reset and the slack after it, and no longer
+/// (t-6427). Every worker this machine walled continued by itself a minute
+/// after its reset, and two of them later died on a network error the sweep
+/// never reported: the attempt's wall row silenced it for good (dp-6390 and
+/// dp-6393, 2026-09-23 — 42 and 77 minutes until somebody looked). While the
+/// wall stands its silence is the wall's; after it, a worker whose own words
+/// moved past the wall is a quiet worker like any other, and one walled
+/// again in the next window is walled news again.
+#[test]
+fn a_walled_attempts_later_silence_is_news_once_its_wall_stops_standing() {
+    const LEADER_TERM: u32 = 85_600;
+    const WORKER_TERM: u32 = LEADER_TERM + 1;
+    let stood = Walled::stand(LEADER_TERM, "/wt/after-the-wall", "");
+    stood.wall_it();
+    let began = stood.began;
+    let reset = began + 42 * 60_000;
+    let next_reset = reset + 5 * 60 * 60_000;
+    let stops_standing = reset + zerocode_core::orchestration::QUOTA_WAIT_POLICY.slack_ms;
+    let stalls = |at: i64| -> Vec<serde_json::Value> {
+        stood.json("check --peek --types went_quiet", at)["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| {
+                serde_json::from_str::<serde_json::Value>(message["body"].as_str().expect("a body"))
+                    .expect("json")
+            })
+            .filter(|body| body["workerId"] == stood.worker.as_str())
+            .collect()
+    };
+    let codex_at = |used: u8, updated: i64| {
+        vec![(
+            "codex",
+            usage_snapshot(
+                "codex",
+                Some((used, Some(next_reset))),
+                Some((40, None)),
+                updated,
+            ),
+        )]
+    };
+
+    // While the wall stands, the silence is the wall's.
+    notify_stalled_workers(&stood.host, stops_standing - 1);
+    assert!(stalls(stops_standing - 1).is_empty());
+
+    // It went on after its reset and stopped on something else.
+    stood.host.screen_clears(WORKER_TERM);
+    stood.window.set_usage(codex_at(3, reset + 60_000));
+    notify_stalled_workers(&stood.host, stops_standing);
+    let told = stalls(stops_standing + 1);
+    assert_eq!(
+        told.len(),
+        1,
+        "a silence after the wall was not news: {told:?}"
+    );
+    assert_eq!(told[0]["reason"], "stalled");
+
+    // And the next window's wall is news of its own.
+    stood.host.screen_says(
+        WORKER_TERM,
+        "screen",
+        "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage",
+    );
+    stood
+        .window
+        .set_usage(codex_at(98, stops_standing + 60_000));
+    notify_stalled_workers(&stood.host, stops_standing + 120_000);
+    assert_eq!(
+        stood.json(
+            "check --peek --types quota_walled",
+            stops_standing + 120_001
+        )["count"],
+        2
+    );
+}
+
+/// Under a declared wait, a worker still stopped at its wall once the wall
+/// has lifted is the coordinator's news, once (t-6427) — Claude Code
+/// continues by itself about a minute after its reset, so this is the notice
+/// for the walls nobody continued: a CLI that does not wait, or a countdown
+/// somebody cancelled. From the reset on, the beat asks the window's gauge
+/// for a reading after it; with none yet it says nothing and waits for one,
+/// and with a number under the wall it tells the lift with that number.
+#[test]
+fn a_worker_still_at_its_wall_after_the_lift_is_told_once_under_a_wait() {
+    const LEADER_TERM: u32 = 85_700;
+    let stood = Walled::stand(LEADER_TERM, "/wt/lifted", "--on-quota-wall wait");
+    stood.wall_it();
+    let began = stood.began;
+    let reset = began + 42 * 60_000;
+    let stops_standing = reset + zerocode_core::orchestration::QUOTA_WAIT_POLICY.slack_ms;
+    let notices = |at: i64| -> Vec<serde_json::Value> {
+        stood.json("check --peek --types went_quiet", at)["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| {
+                serde_json::from_str::<serde_json::Value>(message["body"].as_str().expect("a body"))
+                    .expect("json")
+            })
+            .filter(|body| body["workerId"] == stood.worker.as_str())
+            .collect()
+    };
+
+    // Before the reset nothing is asked; from it, the gauge is.
+    notify_stalled_workers(&stood.host, reset - 1_000);
+    assert!(stood.host.asked().is_empty(), "{:?}", stood.host.asked());
+    notify_stalled_workers(&stood.host, reset + 1_000);
+    assert_eq!(stood.host.asked(), vec!["codex".to_string()]);
+
+    // Past the slack, with no reading since the reset: waited for, unsaid.
+    notify_stalled_workers(&stood.host, stops_standing);
+    assert!(
+        notices(stops_standing).is_empty(),
+        "{:?}",
+        notices(stops_standing)
+    );
+    assert_eq!(stood.host.asked().len(), 2);
+
+    // The reading comes, under the wall: told once, with its number.
+    stood.window.set_usage(vec![(
+        "codex",
+        usage_snapshot(
+            "codex",
+            Some((3, Some(reset + 5 * 60 * 60_000))),
+            Some((40, None)),
+            stops_standing + 1_000,
+        ),
+    )]);
+    notify_stalled_workers(&stood.host, stops_standing + 2_000);
+    let told = notices(stops_standing + 2_001);
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert_eq!(
+        told[0]["reason"],
+        zerocode_core::orchestration::QUOTA_LIFTED_REASON
+    );
+    assert_eq!(told[0]["rung"], "wait");
+    // The binding window after the reset is the fuller one: the week's.
+    assert_eq!(told[0]["gauge"]["usedPercent"], 40);
+    assert_eq!(told[0]["gauge"]["window"], "weekly");
+    notify_stalled_workers(&stood.host, stops_standing + 3_000);
+    assert_eq!(notices(stops_standing + 3_001).len(), 1, "told twice");
+}
+
+/// The wait rung waits for a number read after the reset exactly as long as
+/// a re-read it asks for can take to be allowed (t-6427): the ledger's table
+/// and the window's refetch floor are one number.
+#[test]
+fn the_wait_rung_waits_one_refetch_floor_for_a_number_read_after_the_reset() {
+    assert_eq!(
+        zerocode_core::orchestration::QUOTA_WAIT_POLICY.lift_read_ms,
+        i64::try_from(crate::usage::MIN_REFETCH.as_millis()).expect("a floor in ms"),
+    );
+}
+
+/// Every gauge the ledger's table can name for an agent is one the beat can
+/// ask the window to read again (t-6427): a gauge with no ask would leave a
+/// lifted wall unread until the rung stopped waiting for its number.
+#[test]
+fn every_gauge_the_ledger_reads_is_one_the_window_can_ask_again() {
+    let asks: Vec<&str> = crate::cmd::usage::USAGE_ASKS
+        .iter()
+        .map(|(gauge, _)| *gauge)
+        .collect();
+    let mut named = 0;
+    for spec in zerocode_core::agent::AGENT_SPECS {
+        for model in [None, Some("claude"), Some("gpt")] {
+            if let Some(gauge) = zerocode_core::orchestration::quota_gauge_for(spec.id, model) {
+                named += 1;
+                assert!(
+                    asks.contains(&gauge),
+                    "{} names the gauge `{gauge}`, which nothing asks again",
+                    spec.id
+                );
+            }
+        }
+    }
+    assert!(named > 0, "no agent named a gauge");
 }
 
 /* ---- the transient-error continuation (t-4537) ----------------------- */
@@ -13388,6 +13594,7 @@ fn coordinator_handover_native_order_walks_once_and_persists_in_the_store() {
         onto: Mutex::new(0),
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
+        asked: Mutex::new(Vec::new()),
     });
     let answer = run(
         &host,
@@ -13487,6 +13694,7 @@ fn coordinator_handover_cli_cannot_declare_a_human_order() {
         onto: Mutex::new(0),
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
+        asked: Mutex::new(Vec::new()),
     });
     let answer = run(
         &host,
@@ -13513,6 +13721,7 @@ fn coordinator_manual_native_picker_and_claim_are_durable_and_retryable() {
         onto: Mutex::new(0),
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
+        asked: Mutex::new(Vec::new()),
     });
     let made = run(
         &host,
@@ -13593,6 +13802,7 @@ fn coordinator_manual_native_claim_is_available_when_the_source_pane_is_gone() {
         onto: Mutex::new(0),
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
+        asked: Mutex::new(Vec::new()),
     });
     let made = run(
         &host,
@@ -13641,6 +13851,7 @@ fn coordinator_handover_can_disable_after_source_capability_disappears() {
         onto: Mutex::new(0),
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
+        asked: Mutex::new(Vec::new()),
     });
     let made = run(
         &host,

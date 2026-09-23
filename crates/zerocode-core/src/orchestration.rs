@@ -1017,6 +1017,11 @@ pub struct Worker {
     /// for every row written before the flag existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_quota_wall: Option<Pinned>,
+    /// Whether this summons' own `--on-quota-wall` said `wait` (t-6427) —
+    /// with [`Self::on_quota_wall`], the whole of its order, which then wins
+    /// over the run's ([`QuotaWallOrder::standing`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quota_wait: bool,
 }
 
 impl std::fmt::Debug for Worker {
@@ -1043,6 +1048,7 @@ impl std::fmt::Debug for Worker {
             .field("archive_bytes", &self.archive.as_ref().map(String::len))
             .field("adopted_by", &self.adopted_by)
             .field("on_quota_wall", &self.on_quota_wall)
+            .field("quota_wait", &self.quota_wait)
             .finish()
     }
 }
@@ -2074,15 +2080,31 @@ pub struct HandoverPolicy {
     /// What the beat does for a worker stopped by a transient API error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_transient_error: Option<OnTransientError>,
+    /// `--on-quota-wall wait` (t-6427): the wait rung, walked before the
+    /// alternative ([`QUOTA_WALL_LADDER`]). Skipped when absent, for the
+    /// transient order's reason.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quota_wait: bool,
     pub armed_ms: i64,
 }
 
 impl HandoverPolicy {
     fn json(&self) -> serde_json::Value {
+        let order = QuotaWallOrder {
+            wait: self.quota_wait,
+            handover: self.on_quota_wall.clone(),
+        };
         serde_json::json!({
             "onQuotaWall": self.on_quota_wall.as_ref().map(Pinned::json),
             "wipCommit": self.wip_commit,
             "onTransientError": self.on_transient_error.map(OnTransientError::json),
+            // The wall's rungs as the beat walks them, and the table's numbers
+            // the wait walks under, so a coordinator sees what it armed.
+            "ladder": order.ladder(),
+            "wait": self.quota_wait.then(|| serde_json::json!({
+                "slackMs": QUOTA_WAIT_POLICY.slack_ms,
+                "maxWaitMs": QUOTA_WAIT_POLICY.max_wait_ms,
+            })),
             "armedMs": self.armed_ms,
         })
     }
@@ -2541,17 +2563,47 @@ struct HandoverCandidate<'a> {
 }
 
 fn effective_handover_order<'a>(run: &'a Run, worker: &'a Worker) -> Option<(&'a Pinned, bool)> {
-    let to = worker.on_quota_wall.as_ref().or_else(|| {
-        run.handover
-            .as_ref()
-            .and_then(|policy| policy.on_quota_wall.as_ref())
-    })?;
+    let (_, to) = standing_order(run, worker);
     Some((
-        to,
+        to?,
         run.handover
             .as_ref()
             .is_some_and(|policy| policy.wip_commit),
     ))
+}
+
+/// Why a rung earlier on the ladder than `rung` still holds `dispatch_id`'s
+/// wall, when one does: the first rung of [`QUOTA_WALL_LADDER`] before it
+/// that the standing order declares and that is not spent (t-6427). The wait
+/// is spent when the wall it waits for stops standing, or when the wall has
+/// no reset to wait for; the handover when one was walked for the attempt.
+fn ladder_holds(
+    run: &Run,
+    worker: &Worker,
+    dispatch_id: &str,
+    rung: QuotaWallRung,
+    now_ms: i64,
+) -> Option<String> {
+    let (wait, to) = standing_order(run, worker);
+    QUOTA_WALL_LADDER
+        .into_iter()
+        .take_while(|earlier| *earlier != rung)
+        .find_map(|earlier| match earlier {
+            QuotaWallRung::Wait => {
+                let wall = newest_wall(run, dispatch_id)
+                    .filter(|wall| wait && wall.reset_waitable && wall.stands(now_ms))?;
+                Some(format!(
+                    "the wait rung holds dispatch {dispatch_id}'s wall for {} min more — its \
+                     reset comes before a handover",
+                    minutes_up(wall.stands_until_ms.saturating_sub(now_ms))
+                ))
+            }
+            QuotaWallRung::Handover => (to.is_some()
+                && !run.messages.iter().any(|held| {
+                    handover_consumes_attempt(held) && held.dispatch.as_deref() == Some(dispatch_id)
+                }))
+            .then(|| format!("the handover rung comes first for dispatch {dispatch_id}")),
+        })
 }
 
 /// Whether this run can hand `dispatch_id` over right now, with the reason
@@ -2560,6 +2612,7 @@ fn effective_handover_order<'a>(run: &'a Run, worker: &'a Worker) -> Option<(&'a
 fn handover_candidate<'a>(
     run: &'a Run,
     dispatch_id: &str,
+    now_ms: i64,
 ) -> Result<HandoverCandidate<'a>, String> {
     let dispatch = run
         .dispatch(dispatch_id)
@@ -2607,6 +2660,9 @@ fn handover_candidate<'a>(
             dispatch.task
         ));
     }
+    if let Some(why) = ladder_holds(run, worker, dispatch_id, QuotaWallRung::Handover, now_ms) {
+        return Err(why);
+    }
     let (to, wip_commit) = effective_handover_order(run, worker)
         .ok_or_else(|| "no standing order names an alternative".to_string())?;
     let task = run
@@ -2634,14 +2690,15 @@ fn handover_candidate<'a>(
 /// second. Nothing else walks — news alone is the hand recipe. The seat the
 /// verbs are presented from is the run's live coordinator seat; a run whose
 /// seat is empty walks nothing until somebody sits.
-pub fn next_handover(run: &Run) -> Option<HandoverPlan> {
-    next_handover_witnessed(run, |_| true)
+pub fn next_handover(run: &Run, now_ms: i64) -> Option<HandoverPlan> {
+    next_handover_witnessed(run, now_ms, |_| true)
 }
 
 /// Search past historical walls whose workers have recovered. The host supplies
 /// current observations; eligibility and order precedence remain in one place.
 pub fn next_handover_witnessed(
     run: &Run,
+    now_ms: i64,
     mut witnessed: impl FnMut(&HandoverPlan) -> bool,
 ) -> Option<HandoverPlan> {
     let seat = run.coordinator_live()?;
@@ -2651,7 +2708,7 @@ pub fn next_handover_witnessed(
         .filter(|held| held.kind == MessageKind::QuotaWalled)
         .find_map(|news| {
             let dispatch_id = news.dispatch.as_deref()?;
-            let candidate = handover_candidate(run, dispatch_id).ok()?;
+            let candidate = handover_candidate(run, dispatch_id, now_ms).ok()?;
             let said: serde_json::Value = serde_json::from_str(news.body.as_str()).ok()?;
             let plan = HandoverPlan {
                 run: run.id.clone(),
@@ -6293,6 +6350,7 @@ impl Ledger {
             archive: None,
             adopted_by: None,
             on_quota_wall: tuning.on_quota_wall,
+            quota_wait: tuning.quota_wait,
         });
         if let (Some(task_id), Some(dispatch)) = (task, dispatch_id.as_ref()) {
             run.dispatches.push(Dispatch {
@@ -8902,15 +8960,17 @@ impl Ledger {
         notified
     }
 
-    /// Two witnesses to a worker's quota wall become news — once per
-    /// attempt, and settling nothing.
+    /// Two witnesses to a worker's quota wall become news — once per wall,
+    /// and settling nothing.
     ///
     /// The beat hands over only [`QuotaWallWitness`]es, which exist only
     /// with both halves; the ledger still revalidates what it owns — a live
     /// worker in its seat, an open dispatch, no person's hand on the pane —
-    /// and writes ONE `quota_walled` row per dispatch, whatever later beats
-    /// say about the same wall (the level-triggered posture of
-    /// [`Self::panes_missing`]). Nothing here ends the attempt or moves the
+    /// and writes ONE `quota_walled` row per wall, whatever later beats say
+    /// about it while it stands (the level-triggered posture of
+    /// [`Self::panes_missing`]). A wall seen after the attempt's last one
+    /// stopped standing ([`newest_wall`]) is the next window's, and news of
+    /// its own (t-6427). Nothing here ends the attempt or moves the
     /// task: a wall is a reason for silence, not an ending, and the ending
     /// is the explicit `worker-stop` a person or the handover beat types.
     ///
@@ -8930,13 +8990,33 @@ impl Ledger {
                 if !dispatch.is_open() {
                     return None;
                 }
-                let already = run.messages.iter().any(|held| {
-                    held.kind == MessageKind::QuotaWalled
-                        && held.dispatch.as_deref() == Some(dispatch.id.as_str())
-                });
-                if already {
+                if newest_wall(run, &dispatch.id).is_some_and(|wall| wall.stands(now_ms)) {
                     return None;
                 }
+                // Which rung the worker's standing order is on (t-6427): the
+                // declared ladder, and whether the wait holds this wall.
+                let order = QuotaWallOrder::standing(run, worker);
+                let (stands_until, waitable) = wall_window(now_ms, witness.headroom.resets_at_ms);
+                let wait = order.wait.then(|| match &waitable {
+                    Ok(()) => serde_json::json!({ "standsUntilMs": stands_until }),
+                    Err(why) => serde_json::json!({ "skipped": why }),
+                });
+                let next = if order.wait && waitable.is_ok() {
+                    "nothing was settled: the attempt is open and the task is carried, and \
+                     the wait rung holds this wall until `wait.standsUntilMs` — its agent \
+                     may continue by itself after the reset (Claude Code does, about a \
+                     minute after it), and nothing is handed over before then. If it is \
+                     still stopped at the wall once the provider's number says the wall \
+                     lifted, a `went_quiet` notice with `reason: quota_lifted` says so; \
+                     after that its silence is ordinary news"
+                } else {
+                    "nothing was settled: the attempt is open and the task is carried. Hand \
+                     it over yourself (commit the WIP in its checkout, `worker-stop \
+                     --worker <id> --reason quota-wall`, then `worker-start --agent <alt> \
+                     --task <same> --retry-of <dispatchId> --inherit-checkout`), or arm \
+                     `handover-policy --on-quota-wall <alt>` and the beat walks that road \
+                     and leaves a `handover` receipt"
+                };
                 let told = serde_json::json!({
                     "workerId": worker.id,
                     "agent": worker.agent,
@@ -8954,13 +9034,9 @@ impl Ledger {
                         "line": witness.marker.line,
                     },
                     "observedAtMs": now_ms,
-                    "next": "nothing was settled: the attempt is open and the task is \
-                             carried. Hand it over yourself (commit the WIP in its \
-                             checkout, `worker-stop --worker <id> --reason quota-wall`, \
-                             then `worker-start --agent <alt> --task <same> --retry-of \
-                             <dispatchId> --inherit-checkout`), or arm `handover-policy \
-                             --on-quota-wall <alt>` and the beat walks that road and \
-                             leaves a `handover` receipt",
+                    "ladder": order.ladder(),
+                    "wait": wait,
+                    "next": next,
                 });
                 Some((
                     run.id.clone(),
@@ -8987,6 +9063,87 @@ impl Ledger {
         told
     }
 
+    /// A wall the wait rung held lifted while its worker stayed stopped at
+    /// it: the coordinator is told, once per wall (t-6427).
+    ///
+    /// The beat hands over only [`QuotaLift`]s, which [`read_lift`] builds
+    /// with both witnesses; the ledger revalidates what it owns — a live
+    /// worker in its seat, no person's hand on the pane, an open attempt, no
+    /// answer it waits on, and the wall it names still the attempt's newest
+    /// and owed its word ([`wall_phase`]). The word is a `went_quiet` notice,
+    /// `reason: quota_lifted`: the silence the wall explained is a silence
+    /// again, and after it the ordinary road reminds as it always does.
+    /// Answers how many were told.
+    pub fn workers_quota_lifted(&mut self, lifted: &[QuotaLift], now_ms: i64) -> usize {
+        if now_ms < 0 {
+            return 0;
+        }
+        let mut told = 0;
+        for lift in lifted {
+            if lift.since_ms < 0 {
+                continue;
+            }
+            let Some((run_id, body, task, dispatch)) = self.runs.iter().find_map(|run| {
+                let worker = run.worker(&lift.worker)?;
+                if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
+                    return None;
+                }
+                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+                if !dispatch.is_open() || awaiting_reply(run, &worker.id) {
+                    return None;
+                }
+                let (wall, phase) = wall_phase(run, worker, &dispatch.id, now_ms)?;
+                if wall.wall != lift.wall || phase != WallPhase::Lifting {
+                    return None;
+                }
+                Some((
+                    run.id.clone(),
+                    serde_json::json!({
+                        "workerId": worker.id,
+                        "agent": worker.agent,
+                        "pane": worker.pane,
+                        "taskId": dispatch.task,
+                        "dispatchId": dispatch.id,
+                        "reason": QUOTA_LIFTED_REASON,
+                        "rung": QuotaWallRung::Wait.as_str(),
+                        "wallId": wall.wall,
+                        "stalledSinceMs": lift.since_ms,
+                        "observedAtMs": now_ms,
+                        "resetsAtMs": wall.resets_at_ms,
+                        "gauge": {
+                            "provider": lift.headroom.provider,
+                            "usedPercent": lift.headroom.used_percent,
+                            "window": lift.headroom.window.as_str(),
+                            "updatedAtMs": lift.headroom.updated_at_ms,
+                            "resetsAtMs": lift.headroom.resets_at_ms,
+                        },
+                        "marker": {
+                            "source": lift.marker.source,
+                            "line": lift.marker.line,
+                        },
+                        "next": "the wall lifted — the provider's number, read after its \
+                                 reset, is under it — and the worker is still stopped at it: \
+                                 its own continuation did not come. Wake it with a line of \
+                                 mail (`send --to worker:<id>`, which the pointer types into \
+                                 its composer), or hand it over",
+                        "notification": true,
+                    }),
+                    dispatch.task.clone(),
+                    dispatch.id.clone(),
+                ))
+            }) else {
+                continue;
+            };
+            if self
+                .record_quiet_observation(&run_id, body, task, dispatch, now_ms, true)
+                .is_some()
+            {
+                told += 1;
+            }
+        }
+        told
+    }
+
     /// Reserve one handover: the receipt row is written BEFORE the walk, so
     /// a window that dies between two steps leaves a row saying how far it
     /// got (§2.3), and no later beat plans the same attempt again.
@@ -9002,9 +9159,13 @@ impl Ledger {
             if !handover_order_current(run, plan, false) {
                 return Err("handover order or seat changed — plan again".into());
             }
-            let candidate = handover_candidate(run, &plan.dispatch)?;
+            let candidate = handover_candidate(run, &plan.dispatch, now_ms)?;
             serde_json::json!({
                 "status": HANDOVER_WALKING,
+                // The rung this receipt is, on the ladder the order declared
+                // (t-6427) — the same two fields a wall's news carries.
+                "rung": QuotaWallRung::Handover.as_str(),
+                "ladder": QuotaWallOrder::standing(run, candidate.worker).ladder(),
                 "from": {
                     "workerId": candidate.worker.id,
                     "agent": candidate.worker.agent,
@@ -11555,6 +11716,251 @@ pub fn quota_wall_witness(
     })
 }
 
+/* ---- how long a wall stands (t-6427) ---------------------------------- */
+
+/// The numbers a quota wall is waited out under — one table, read by
+/// [`newest_wall`], like [`QUOTA_POLICY`].
+pub struct QuotaWaitPolicy {
+    /// How long after the provider's reset the wall still explains the
+    /// worker's silence: the time its agent gets to continue by itself.
+    pub slack_ms: i64,
+    /// The longest a wall stands, from the moment its two witnesses met,
+    /// when its row names no reset — or one further away than this.
+    pub max_wait_ms: i64,
+    /// Under a declared wait, how long after the wall stops standing the
+    /// beat waits for the provider's number read after the reset, before the
+    /// silence is ordinary news without it.
+    pub lift_read_ms: i64,
+}
+
+/// The table as measured on this machine (2026-09-24, the ledger's seven
+/// `quota_walled` rows and their workers' transcripts).
+///
+/// - `slack_ms` — the stall grace. All seven walls were Claude Code
+///   2.1.270–2.1.280, which waits out its own reset and types its own
+///   continuation (a user record with `origin.kind: "auto-continuation"`):
+///   49–78 s after the reset on the four that recorded one, its first answer
+///   3–113 s after on all seven. The grace is longer than the longest of
+///   them, and it is already the window's measure of a pane that stalled.
+/// - `max_wait_ms` — six hours. A session window is five, so a session wall
+///   always resets inside it; a weekly or monthly wall never does. Traycer's
+///   fallback ladder waits the same by default (`fallback-policy.ts:365-379`).
+/// - `lift_read_ms` — one usage refetch floor (the window's `MIN_REFETCH`,
+///   five minutes; a test in the window pins the two together): the re-read
+///   the beat asks for from the reset on is never allowed sooner than that,
+///   so by then it has had its chance.
+pub const QUOTA_WAIT_POLICY: QuotaWaitPolicy = QuotaWaitPolicy {
+    slack_ms: QUIET_GRACE_MS,
+    max_wait_ms: 6 * 60 * 60 * 1000,
+    lift_read_ms: 5 * 60 * 1000,
+};
+
+/// One attempt's newest quota wall, read off its own `quota_walled` row:
+/// when its two witnesses met, the reset the provider named, and until when
+/// it explains the worker's silence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WallAt {
+    /// The `quota_walled` row.
+    pub wall: String,
+    pub observed_at_ms: i64,
+    pub resets_at_ms: Option<i64>,
+    /// Whether the reset is one to wait for: named, ahead of the witness,
+    /// and — with the slack — inside [`QUOTA_WAIT_POLICY`]`.max_wait_ms`.
+    pub reset_waitable: bool,
+    /// When the wall stops explaining the silence: its reset and the slack
+    /// when that reset is waitable, the longest wait from the witness
+    /// otherwise.
+    pub stands_until_ms: i64,
+}
+
+impl WallAt {
+    pub fn stands(&self, now_ms: i64) -> bool {
+        now_ms < self.stands_until_ms
+    }
+}
+
+/// The newest `quota_walled` row `dispatch_id` holds, as a [`WallAt`].
+///
+/// A wall is not forever. The row used to silence its attempt for good — no
+/// second wall, no quiet news — while the attempt went on: every worker this
+/// machine walled continued by itself a minute after its reset, and two of
+/// them died hours later on a network error the stall sweep never reported
+/// (dp-6390 and dp-6393, 2026-09-23: 42 and 77 minutes until somebody
+/// looked).
+pub fn newest_wall(run: &Run, dispatch_id: &str) -> Option<WallAt> {
+    let row = run.messages.iter().rev().find(|held| {
+        held.kind == MessageKind::QuotaWalled && held.dispatch.as_deref() == Some(dispatch_id)
+    })?;
+    let said: serde_json::Value = serde_json::from_str(row.body.as_str()).unwrap_or_default();
+    let observed_at_ms = said["observedAtMs"].as_i64().unwrap_or(row.created_ms);
+    let resets_at_ms = said["resetsAtMs"].as_i64();
+    let (stands_until_ms, waitable) = wall_window(observed_at_ms, resets_at_ms);
+    Some(WallAt {
+        wall: row.id.clone(),
+        observed_at_ms,
+        resets_at_ms,
+        reset_waitable: waitable.is_ok(),
+        stands_until_ms,
+    })
+}
+
+/// Until when a wall witnessed at `observed_at_ms` stands, and whether its
+/// reset is one to wait for — or why not, in a sentence. One reading for the
+/// row's news and for everything that reads the row back ([`newest_wall`]).
+fn wall_window(observed_at_ms: i64, resets_at_ms: Option<i64>) -> (i64, Result<(), String>) {
+    let longest = observed_at_ms.saturating_add(QUOTA_WAIT_POLICY.max_wait_ms);
+    let Some(at) = resets_at_ms.filter(|at| *at > observed_at_ms) else {
+        return (
+            longest,
+            Err("the wall names no reset ahead of it to wait for".into()),
+        );
+    };
+    let until = at.saturating_add(QUOTA_WAIT_POLICY.slack_ms);
+    if until > longest {
+        return (
+            longest,
+            Err(format!(
+                "its reset is {} min away, past the wait rung's {} min",
+                minutes_up(at.saturating_sub(observed_at_ms)),
+                QUOTA_WAIT_POLICY.max_wait_ms / 60_000
+            )),
+        );
+    }
+    (until, Ok(()))
+}
+
+/// What the beat owes a quiet worker's newest wall now (t-6427).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WallPhase {
+    /// The wall still explains the silence: nothing is said. `reread` asks
+    /// the window's gauge for a reading, so the lift can be judged the
+    /// moment the wall stops standing.
+    Stands { reread: bool },
+    /// The wall stopped standing, and the wait rung owes the coordinator a
+    /// word if the worker is still at it: judge the lift before the silence
+    /// is anything else.
+    Lifting,
+    /// Past: the silence is the ordinary road's again.
+    Past,
+}
+
+/// The `reason` a quiet notice carries when it is the wait rung's word
+/// about a wall that lifted while its worker stayed stopped at it.
+pub const QUOTA_LIFTED_REASON: &str = "quota_lifted";
+
+/// A wall's lift, with both witnesses (t-6427): the agent's own words still
+/// at the wall, and the provider's number read after the reset, under it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaLift {
+    pub worker: String,
+    /// The `quota_walled` row that lifted.
+    pub wall: String,
+    /// Since when the worker has been quiet, by the stall probe.
+    pub since_ms: i64,
+    pub marker: QuotaWallMarker,
+    pub headroom: Headroom,
+}
+
+/// What the provider's number and the agent's words say about a wall that
+/// stopped standing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiftReading {
+    /// Both witnesses: the wall lifted and the worker did not move.
+    Lifted(QuotaLift),
+    /// No number read since the reset: ask for one, and wait.
+    Unread,
+    /// Read after the reset and still at the wall — the next window's wall,
+    /// the wall witness's to write.
+    StillWalled,
+    /// The agent's own words moved past the wall: its silence is another.
+    MovedOn,
+}
+
+/// Where `worker`'s attempt `dispatch_id` stands against its newest wall —
+/// one reading for the beat and for the ledger's revalidation (t-6427).
+///
+/// The wait rung holds a wall only when `worker`'s standing order declares
+/// it and the wall's reset is one to wait for. It asks for the provider's
+/// number from the reset on, and once the wall stops standing it owes the
+/// coordinator one word about the lift, for [`QUOTA_WAIT_POLICY`]'s
+/// `lift_read_ms` at most — unless that word was already said.
+pub fn wall_phase(
+    run: &Run,
+    worker: &Worker,
+    dispatch_id: &str,
+    now_ms: i64,
+) -> Option<(WallAt, WallPhase)> {
+    let wall = newest_wall(run, dispatch_id)?;
+    let (waits, _) = standing_order(run, worker);
+    let held = waits && wall.reset_waitable;
+    let phase = if wall.stands(now_ms) {
+        WallPhase::Stands {
+            reread: held && wall.resets_at_ms.is_some_and(|at| now_ms >= at),
+        }
+    } else if held
+        && now_ms
+            < wall
+                .stands_until_ms
+                .saturating_add(QUOTA_WAIT_POLICY.lift_read_ms)
+        && !lift_told(run, dispatch_id, &wall.wall)
+    {
+        WallPhase::Lifting
+    } else {
+        WallPhase::Past
+    };
+    Some((wall, phase))
+}
+
+/// Whether the wait rung already told this wall's lift.
+fn lift_told(run: &Run, dispatch_id: &str, wall_id: &str) -> bool {
+    run.messages.iter().any(|held| {
+        held.kind == MessageKind::WentQuiet
+            && held.dispatch.as_deref() == Some(dispatch_id)
+            && serde_json::from_str::<serde_json::Value>(held.body.as_str()).is_ok_and(|body| {
+                body["reason"] == QUOTA_LIFTED_REASON && body["wallId"] == wall_id
+            })
+    })
+}
+
+/// Read one wall's lift off the agent's own words and the provider's number
+/// (t-6427) — two witnesses, the wall's own rule turned round. Words that
+/// moved past the wall are another silence; a number taken before the reset,
+/// or too old to act on, has not been read yet; one still at the wall is the
+/// next window's wall; one under it, beside words still at the wall, is the
+/// lift.
+pub fn read_lift(
+    worker: &str,
+    wall: &WallAt,
+    since_ms: i64,
+    marker: Option<QuotaWallMarker>,
+    headroom: Option<&Headroom>,
+    now_ms: i64,
+) -> LiftReading {
+    let Some(marker) = marker else {
+        return LiftReading::MovedOn;
+    };
+    let Some(held) = headroom.filter(|held| {
+        wall.resets_at_ms
+            .is_some_and(|at| held.updated_at_ms >= at && held.updated_at_ms <= now_ms)
+    }) else {
+        return LiftReading::Unread;
+    };
+    let reading = read_gauge(held, now_ms);
+    if reading.wall_to_act_on() {
+        return LiftReading::StillWalled;
+    }
+    if reading.stale {
+        return LiftReading::Unread;
+    }
+    LiftReading::Lifted(QuotaLift {
+        worker: worker.to_string(),
+        wall: wall.wall.clone(),
+        since_ms,
+        marker,
+        headroom: held.clone(),
+    })
+}
+
 /* ---- the transient-error continuation (t-4537) ------------------------ */
 
 /// The numbers a transient-error continuation is typed under — one table,
@@ -11691,8 +12097,8 @@ fn resume_may_have_typed(body: &serde_json::Value) -> bool {
 ///
 /// Only under a declared `--on-transient-error resume`; only for a live
 /// worker in its own seat, carrying an open dispatch, not the person's pane,
-/// not waiting on an answer it asked for, and not at a wall already written
-/// down (the wall's road wins). Then the attempt's own rows decide: one being
+/// not waiting on an answer it asked for, and not at a wall that still
+/// stands ([`newest_wall`] — the wall's road wins). Then the attempt's own rows decide: one being
 /// typed is [`NotResumed::InFlight`]; [`RESUME_POLICY`]`.attempts_max` of them
 /// is the ceiling; a marker whose words may already be on the line is never
 /// typed at again; and two continuations stand `retry_after_ms` apart.
@@ -11744,10 +12150,7 @@ pub fn resume_plan(
             worker.id
         ));
     }
-    if run.messages.iter().any(|held| {
-        held.kind == MessageKind::QuotaWalled
-            && held.dispatch.as_deref() == Some(dispatch.id.as_str())
-    }) {
+    if newest_wall(run, &dispatch.id).is_some_and(|wall| wall.stands(now_ms)) {
         return refused(format!(
             "dispatch {} is at its quota wall — the handover road answers it",
             dispatch.id
@@ -11862,6 +12265,154 @@ pub fn parse_on_quota_wall(word: &str) -> Result<Pinned, String> {
         agent: agent.to_string(),
         model: model.map(str::to_string),
         effort: effort.map(str::to_string),
+    })
+}
+
+/* ---- the quota wall's ladder (t-6427) --------------------------------- */
+
+/// One rung of a quota wall's ladder: what a declared order does when one of
+/// its workers stops at its provider's wall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaWallRung {
+    /// Wait out a reset the wall's own row can vouch for, in the same
+    /// conversation: nothing later on the ladder walks while the wall stands
+    /// ([`newest_wall`]).
+    Wait,
+    /// Hand the task to the named alternative in the same checkout (§2.3).
+    Handover,
+}
+
+impl QuotaWallRung {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Wait => "wait",
+            Self::Handover => "handover",
+        }
+    }
+
+    /// How `--on-quota-wall` spells this rung when it is a closed word — the
+    /// one table of them. A word nobody measured is refused by name, never
+    /// read as an agent id; the handover rung is spelled as its alternative,
+    /// `<agent[:model[:effort]]>`.
+    pub const fn word(self) -> Option<&'static str> {
+        match self {
+            Self::Wait => Some("wait"),
+            Self::Handover => None,
+        }
+    }
+}
+
+/// The ladder, first to last: the order a wall's declared rungs are walked
+/// in, whatever order the declaration spelled them. The same conversation
+/// comes before a different model. Traycer's ladder is `profile → tier →
+/// wait → notify` (`fallback-policy.ts:10-19`); here the wait goes first,
+/// because a handover is a new conversation while the agent every wall on
+/// this machine stopped — Claude Code — continues its own about a minute
+/// after the reset. The ladder ends where it always did: the coordinator's
+/// inbox.
+pub const QUOTA_WALL_LADDER: [QuotaWallRung; 2] = [QuotaWallRung::Wait, QuotaWallRung::Handover];
+
+/// What one `--on-quota-wall` declares, rung by rung — on a summons or on a
+/// run's `handover-policy`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuotaWallOrder {
+    /// The wait rung.
+    pub wait: bool,
+    /// The alternative the handover rung hands the task to.
+    pub handover: Option<Pinned>,
+}
+
+impl QuotaWallOrder {
+    /// `--on-quota-wall <rungs>`: closed words ([`QuotaWallRung::word`]) and
+    /// at most one `<agent[:model[:effort]]>`, comma-separated in any order —
+    /// [`QUOTA_WALL_LADDER`], not the spelling, says which is walked first.
+    /// The alternative is checked whole (`named_alternative`); anything
+    /// else is refused by name, with the words that exist.
+    pub fn named(value: &str) -> Result<Self, String> {
+        let words = QUOTA_WALL_LADDER
+            .into_iter()
+            .filter_map(QuotaWallRung::word)
+            .map(|word| format!("`{word}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let refuse = |why: String| {
+            format!(
+                "--on-quota-wall takes {words} and/or one <agent[:model[:effort]]>, \
+                 comma-separated — {why}"
+            )
+        };
+        let mut order = Self::default();
+        let mut pieces = value
+            .split(',')
+            .map(str::trim)
+            .filter(|piece| !piece.is_empty())
+            .peekable();
+        if pieces.peek().is_none() {
+            return Err(refuse(format!("`{value}` names nothing")));
+        }
+        for piece in pieces {
+            let word = QUOTA_WALL_LADDER
+                .into_iter()
+                .find(|rung| rung.word() == Some(piece));
+            match word {
+                Some(rung) if order.declares(rung) => {
+                    return Err(refuse(format!("`{piece}` is named twice")));
+                }
+                Some(QuotaWallRung::Wait) => order.wait = true,
+                // The handover rung is spelled as its alternative, never a
+                // word; an agent-shaped piece is read as one below.
+                Some(QuotaWallRung::Handover) | None => {
+                    let to = named_alternative(piece).map_err(refuse)?;
+                    if let Some(held) = order.handover.as_ref() {
+                        return Err(refuse(format!(
+                            "`{}` and `{piece}` are two, and a wall hands over to one alternative",
+                            held.spelled()
+                        )));
+                    }
+                    order.handover = Some(to);
+                }
+            }
+        }
+        Ok(order)
+    }
+
+    pub fn declares(&self, rung: QuotaWallRung) -> bool {
+        match rung {
+            QuotaWallRung::Wait => self.wait,
+            QuotaWallRung::Handover => self.handover.is_some(),
+        }
+    }
+
+    /// The declared rungs, first to last — what a receipt and `run-show`
+    /// say the order stands on.
+    pub fn ladder(&self) -> Vec<&'static str> {
+        QUOTA_WALL_LADDER
+            .into_iter()
+            .filter(|rung| self.declares(*rung))
+            .map(QuotaWallRung::as_str)
+            .collect()
+    }
+
+    /// The order standing for `worker`: its summons' own `--on-quota-wall`
+    /// when it said one, the run's `handover-policy` otherwise — whole,
+    /// never merged (§2.3: the summons' word wins).
+    pub fn standing(run: &Run, worker: &Worker) -> Self {
+        let (wait, handover) = standing_order(run, worker);
+        Self {
+            wait,
+            handover: handover.cloned(),
+        }
+    }
+}
+
+/// [`QuotaWallOrder::standing`], borrowed: whether it waits, and who it
+/// hands over to.
+fn standing_order<'a>(run: &'a Run, worker: &'a Worker) -> (bool, Option<&'a Pinned>) {
+    if worker.quota_wait || worker.on_quota_wall.is_some() {
+        return (worker.quota_wait, worker.on_quota_wall.as_ref());
+    }
+    run.handover.as_ref().map_or((false, None), |policy| {
+        (policy.quota_wait, policy.on_quota_wall.as_ref())
     })
 }
 
@@ -13011,10 +13562,11 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "handover-policy",
-        "[--on-quota-wall <agent[:model[:effort]]> [--wip-commit]] [--on-transient-error resume] \
-         | --off · when a worker is witnessed at its quota wall, hand its task to this \
-         alternative in the same checkout; when its last turn died on a transient API error, \
-         type a continuation into its composer",
+        "[--on-quota-wall wait|<agent[:model[:effort]]> [--wip-commit]] [--on-transient-error \
+         resume] | --off · when a worker is witnessed at its quota wall, wait out a verified \
+         reset first (`wait`), and hand its task to this alternative in the same checkout \
+         (`wait,<alt>` does both, the wait first); when its last turn died on a transient API \
+         error, type a continuation into its composer",
         Doing::Mutation,
     ),
     (
@@ -13057,7 +13609,7 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     (
         "worker-start",
         "--agent <a> [--task <id>] [--prompt <p>] [--model <id> [--effort <level>]] \
-         [--retry-of <dispatch> [--inherit-checkout]] [--on-quota-wall <agent[:model[:effort]]>] \
+         [--retry-of <dispatch> [--inherit-checkout]] [--on-quota-wall wait|<agent[:model[:effort]]>] \
          [--worktree] [--horizontal] [--bare] [--on <server>] · summon an \
          agent into a pane",
         Doing::Mutation,
@@ -13179,6 +13731,8 @@ pub struct Tuning {
     pub ready_by_ms: Option<i64>,
     /// The summons' own handover alternative, written on the worker row.
     pub on_quota_wall: Option<Pinned>,
+    /// And its own `wait`, beside it (t-6427).
+    pub quota_wait: bool,
 }
 
 struct WorkerStartRequest<'a> {
@@ -15150,25 +15704,26 @@ fn plan_inner(
                 run.handover = None;
                 said(serde_json::json!({ "runId": run_id, "handover": serde_json::Value::Null }))
             } else {
-                let on_quota_wall = words
+                let order = words
                     .value("--on-quota-wall")
-                    .map(named_alternative)
-                    .transpose()?;
+                    .map(QuotaWallOrder::named)
+                    .transpose()?
+                    .unwrap_or_default();
                 let on_transient_error = words
                     .value("--on-transient-error")
                     .map(parse_on_transient_error)
                     .transpose()?;
-                if on_quota_wall.is_none() && on_transient_error.is_none() {
+                if !order.wait && order.handover.is_none() && on_transient_error.is_none() {
                     return Err(
-                        "handover-policy needs --on-quota-wall <agent[:model[:effort]]> — the \
-                         alternative the wall hands over to — and/or --on-transient-error \
-                         resume, or --off"
+                        "handover-policy needs --on-quota-wall wait|<agent[:model[:effort]]> — \
+                         the wait for a verified reset, the alternative the wall hands over \
+                         to, or both — and/or --on-transient-error resume, or --off"
                             .into(),
                     );
                 }
-                // The commit is step ① of a WALL's handover; armed without a
-                // wall order it would be a flag nothing ever reads.
-                if words.has("--wip-commit") && on_quota_wall.is_none() {
+                // The commit is step ① of a WALL's handover; armed without an
+                // alternative it would be a flag nothing ever reads.
+                if words.has("--wip-commit") && order.handover.is_none() {
                     return Err(
                         "--wip-commit is step ① of a quota-wall handover — name the \
                          alternative with --on-quota-wall beside it"
@@ -15176,9 +15731,10 @@ fn plan_inner(
                     );
                 }
                 let policy = HandoverPolicy {
-                    on_quota_wall,
+                    on_quota_wall: order.handover,
                     wip_commit: words.has("--wip-commit"),
                     on_transient_error,
+                    quota_wait: order.wait,
                     armed_ms: now_ms,
                 };
                 let run = ledger
@@ -15650,9 +16206,15 @@ fn plan_inner(
              * so a flag that could never be honoured is refused before the
              * wall is reached rather than the day it is. */
             let on_quota_wall = match words.value("--on-quota-wall") {
-                Some(word) => Some(named_alternative(word)?),
+                Some(word) => Some(QuotaWallOrder::named(word)?),
                 None => None,
             };
+            // The gate redirects only to an alternative: a wait is for a
+            // wall a running worker reaches, and a summons refused at the
+            // wall is asked again.
+            let alternative = on_quota_wall
+                .as_ref()
+                .and_then(|order| order.handover.clone());
             if on_quota_wall.is_some() && words.value("--on").is_some() {
                 return Err("--on-quota-wall is this window's quota word — a federated \
                      worker's quota is the server window's to judge"
@@ -15712,7 +16274,7 @@ fn plan_inner(
                 (requested, None)
             } else {
                 let (landed, notice) =
-                    quota_gate(launcher, now_ms, requested, on_quota_wall.clone())?;
+                    quota_gate(launcher, now_ms, requested, alternative.clone())?;
                 (landed, Some(notice))
             };
             let Pinned {
@@ -15948,8 +16510,9 @@ fn plan_inner(
                         // and an alternative's alternative is itself.
                         on_quota_wall: match quota_notice.as_ref() {
                             Some(notice) if notice.redirected.is_some() => None,
-                            _ => on_quota_wall.clone(),
+                            _ => alternative.clone(),
                         },
+                        quota_wait: on_quota_wall.as_ref().is_some_and(|order| order.wait),
                     },
                     now_ms,
                 })?;
@@ -17260,8 +17823,10 @@ fn worker_json(run: &Run, worker: &Worker, team: &Team) -> serde_json::Value {
     serde_json::json!({
         "workerId": worker.id,
         "agent": worker.agent,
-        // The summons' own handover alternative, or `null`.
+        // The summons' own handover alternative, or `null`, and its own
+        // `wait` beside it (t-6427).
         "onQuotaWall": worker.on_quota_wall.as_ref().map(Pinned::json),
+        "quotaWait": worker.quota_wait,
         // The seat's team, beside the pane — the half of the address that
         // tells two leaders' `%2` apart, and the key the window resolves a
         // foreign row's terminal by.
@@ -17792,6 +18357,9 @@ pub struct WorkerRow {
     /// The summons' own `--on-quota-wall`, same posture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_quota_wall: Option<Pinned>,
+    /// And its own `wait`, same posture (t-6427).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quota_wait: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -18115,6 +18683,7 @@ impl Ledger {
                     archive: worker.archive.clone().map(Text),
                     adopted_by: worker.adopted_by,
                     on_quota_wall: worker.on_quota_wall.clone(),
+                    quota_wait: worker.quota_wait,
                 });
             }
             for attachment in &run.attachments {
@@ -18350,6 +18919,7 @@ impl Ledger {
                     archive: row.archive.map(Text::into_string),
                     adopted_by: row.adopted_by,
                     on_quota_wall: row.on_quota_wall,
+                    quota_wait: row.quota_wait,
                 });
         }
         for row in projected.messages {

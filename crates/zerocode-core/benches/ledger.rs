@@ -17,7 +17,7 @@ use std::hint::black_box;
 use zerocode_core::SessionKey;
 use zerocode_core::agent_teams::{LEADER_PANE, Team};
 use zerocode_core::orchestration::{
-    Launcher, Ledger, Message, MessageKind, next_dispatch, plan, receipt_actor,
+    Launcher, Ledger, Message, MessageKind, newest_wall, next_dispatch, plan, receipt_actor,
 };
 
 /// A launcher that knows every agent. Arming a standing order validates the
@@ -245,6 +245,42 @@ fn a_boot_validates_a_big_ledger(bench: &mut Criterion) {
     });
 }
 
+/// The stall sweep's wall question for a quiet worker whose attempt never
+/// walled (t-6427): one scan of the run's mail, newest first, that finds no
+/// `quota_walled` row. The sweep asks it once a second for every quiet
+/// worker, so on the beat with no walls this is the whole of what the wait
+/// rung costs — ten thousand rows, a month of a busy run's mail.
+fn a_wallless_attempt_reads_its_wall_in_one_scan(bench: &mut Criterion) {
+    let (mut ledger, _, run_id, _) = a_bound_run("wallless");
+    let address = format!("run:{run_id}");
+    for at in 0..10_000u32 {
+        ledger
+            .send(
+                &run_id,
+                Message {
+                    id: format!("mail{at}"),
+                    from: "worker:w-1".to_string(),
+                    to: address.clone(),
+                    kind: MessageKind::Status,
+                    body: String::from("a line of report").into(),
+                    subject: Default::default(),
+                    priority: Default::default(),
+                    payload: Default::default(),
+                    thread: None,
+                    task: None,
+                    dispatch: Some(format!("dp-{}", at % 7)),
+                    author_seat: None,
+                    created_ms: i64::from(at),
+                },
+            )
+            .expect("seeded mail");
+    }
+    let run = ledger.run(&run_id).expect("the seeded run");
+    bench.bench_function("a_wallless_attempt_reads_its_wall_in_one_scan", |timed| {
+        timed.iter(|| black_box(newest_wall(black_box(run), black_box("dp-3"))))
+    });
+}
+
 criterion_group!(
     ledger,
     an_empty_check_answers,
@@ -252,6 +288,7 @@ criterion_group!(
     a_disarmed_run_short_circuits_the_tick,
     an_armed_tick_picks_the_oldest_of_a_thousand,
     a_replayed_mutation_answers_from_its_receipt,
-    a_boot_validates_a_big_ledger
+    a_boot_validates_a_big_ledger,
+    a_wallless_attempt_reads_its_wall_in_one_scan
 );
 criterion_main!(ledger);

@@ -3788,9 +3788,16 @@ struct Stalled {
     term: u32,
     agent: String,
     model: Option<String>,
-    /// Whether this attempt's wall is already written down — a walled
-    /// worker is not asked again, and is not ALSO a quiet one.
+    /// Whether this attempt's wall is already written down and still stands
+    /// — a walled worker is not asked again, and is not ALSO a quiet one,
+    /// until its wall stops standing (t-6427).
     walled_already: bool,
+    /// Its newest wall and what the beat owes it now (t-6427): the wait
+    /// rung's gauge question while it stands, its word about the lift after.
+    wall: Option<(
+        zerocode_core::orchestration::WallAt,
+        zerocode_core::orchestration::WallPhase,
+    )>,
     /// Whether the run declared `--on-transient-error resume` — asked before
     /// a transcript is read, so an undeclared run costs nothing more.
     resume_declared: bool,
@@ -3846,9 +3853,14 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
                     .get(worker.pane.as_str())
                     .copied()?;
                 let since_ms = host.quiet_since(term, worker.started_ms, now_ms)?;
-                let walled_already = run.messages().iter().any(|held| {
-                    held.kind == zerocode_core::orchestration::MessageKind::QuotaWalled
-                        && held.dispatch.as_deref() == Some(dispatch.id.as_str())
+                let wall =
+                    zerocode_core::orchestration::wall_phase(run, worker, &dispatch.id, now_ms);
+                let walled_already = wall.as_ref().is_some_and(|(_, phase)| {
+                    matches!(
+                        phase,
+                        zerocode_core::orchestration::WallPhase::Stands { .. }
+                            | zerocode_core::orchestration::WallPhase::Lifting
+                    )
                 });
                 Some(Stalled {
                     run: run.id.clone(),
@@ -3858,6 +3870,7 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
                     agent: worker.agent.clone(),
                     model: worker.model.clone(),
                     walled_already,
+                    wall,
                     resume_declared: run
                         .handover
                         .as_ref()
@@ -3898,11 +3911,57 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
     let mut stopped: Vec<(Stalled, zerocode_core::orchestration::TransientErrorMarker)> =
         Vec::new();
     let mut unmarked: Vec<stall_cause::Silence> = Vec::new();
+    let mut lifted: Vec<zerocode_core::orchestration::QuotaLift> = Vec::new();
+    let mut asks: Vec<&'static str> = Vec::new();
     for one in stalled {
-        if one.walled_already {
-            continue;
+        use zerocode_core::orchestration::{LiftReading, WallPhase};
+        let ask = |asks: &mut Vec<&'static str>| {
+            if let Some(gauge) =
+                zerocode_core::orchestration::quota_gauge_for(&one.agent, one.model.as_deref())
+                && !asks.contains(&gauge)
+            {
+                asks.push(gauge);
+            }
+        };
+        /* The wall's own road first (t-6427): while it stands the silence is
+         * the wall's, and under a declared wait the gauge is asked for a
+         * reading from the reset on; once it stops standing the wait rung
+         * judges the lift — words still at the wall and a number read after
+         * the reset under it are told, a number not read yet is waited for,
+         * and anything else is the ordinary road below. */
+        let mut read_already = None;
+        match &one.wall {
+            Some((_, WallPhase::Stands { reread })) => {
+                if *reread {
+                    ask(&mut asks);
+                }
+                continue;
+            }
+            Some((wall, WallPhase::Lifting)) => {
+                let marker = host.quota_wall_marker(one.term, &one.agent);
+                let headroom = usage_headroom(&held.usage, &one.agent, one.model.as_deref());
+                match zerocode_core::orchestration::read_lift(
+                    &one.worker,
+                    wall,
+                    one.since_ms,
+                    marker.clone(),
+                    headroom.as_ref(),
+                    now_ms,
+                ) {
+                    LiftReading::Lifted(lift) => {
+                        lifted.push(lift);
+                        continue;
+                    }
+                    LiftReading::Unread => {
+                        ask(&mut asks);
+                        continue;
+                    }
+                    LiftReading::StillWalled | LiftReading::MovedOn => read_already = Some(marker),
+                }
+            }
+            Some((_, WallPhase::Past)) | None => {}
         }
-        let marker = host.quota_wall_marker(one.term, &one.agent);
+        let marker = read_already.unwrap_or_else(|| host.quota_wall_marker(one.term, &one.agent));
         // The wall's own words name the silence even when the provider's
         // number does not make it news.
         let wall_words = marker.is_some();
@@ -3978,6 +4037,16 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
         if let Ok((told, _)) = held.actor.quota_walls(workers.to_vec(), now_ms) {
             moved |= told;
         }
+    }
+    for lifts in lifted.chunks(zerocode_core::orchestration::MAX_LIST) {
+        if let Ok((told, _)) = held.actor.quota_lifts(lifts.to_vec(), now_ms) {
+            moved |= told;
+        }
+    }
+    // Never forced, never waited on: the answer is the cache a later beat
+    // reads (t-6427).
+    for gauge in asks {
+        host.ask_usage(gauge);
     }
     moved |= resume_stalled_workers(host, stopped, &mut quiet, now_ms);
     for workers in quiet.chunks(zerocode_core::orchestration::MAX_LIST) {
@@ -5098,7 +5167,7 @@ fn walk_handovers(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_m
     };
     let mut candidates = Vec::new();
     for run in rows.runs() {
-        let _ = zerocode_core::orchestration::next_handover_witnessed(run, |plan| {
+        let _ = zerocode_core::orchestration::next_handover_witnessed(run, now_ms, |plan| {
             candidates.push(plan.clone());
             false
         });

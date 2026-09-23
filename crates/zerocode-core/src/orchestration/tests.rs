@@ -6059,6 +6059,7 @@ fn an_agents_words_never_reach_a_debug_rendering() {
             archive: Some(secret.to_string()),
             adopted_by: None,
             on_quota_wall: None,
+            quota_wait: false,
         }
     );
     assert!(
@@ -11593,6 +11594,137 @@ fn a_taken_over_pane_is_never_quota_walled_news() {
     assert_eq!(bench.json("check --peek --types quota_walled")["count"], 0);
 }
 
+/// A wall stands until its reset and the slack its agent gets after it
+/// (t-6427), and no longer. Seen again inside that, it is the same fact;
+/// seen after it — the next window's wall — it is news of its own, so an
+/// attempt that walls twice is told about twice. A transient error the
+/// attempt stops on while the wall stands is the wall's; after it, the
+/// continuation's.
+#[test]
+fn a_quota_wall_stands_until_its_reset_and_the_next_wall_is_news_again() {
+    const NOW: i64 = 5_000_000;
+    let reset = NOW + 42 * 60_000;
+    let next_reset = reset + 5 * 60 * 60_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name episodes");
+    bench.json("handover-policy --on-transient-error resume");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/episodes", NOW);
+    let seen = |at: i64, resets: i64| {
+        quota_wall_witness(
+            &worker,
+            Some(a_wall_marker("screen", "You've hit your usage limit")),
+            Some(&gauge("codex", 98, at - 60_000, Some(resets))),
+            at,
+        )
+        .expect("two witnesses")
+    };
+    let wall = newest_wall(&bench.ledger.runs()[0], &dispatch).expect("the wall");
+    assert_eq!(wall.observed_at_ms, NOW);
+    assert_eq!(wall.resets_at_ms, Some(reset));
+    assert!(wall.reset_waitable);
+    let stops_standing = reset + QUOTA_WAIT_POLICY.slack_ms;
+    assert_eq!(wall.stands_until_ms, stops_standing);
+    assert!(wall.stands(stops_standing - 1) && !wall.stands(stops_standing));
+
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_walled(&[seen(reset - 60_000, reset)], reset - 60_000),
+        0,
+        "the same wall, before its reset, was news twice"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_walled(&[seen(stops_standing - 1, next_reset)], stops_standing - 1),
+        0,
+        "a wall inside the slack after the reset was news twice"
+    );
+    let stop = TransientErrorMarker {
+        source: "transcript".to_string(),
+        line: Text::from("API Error: Can't reach the API server"),
+        key: "dns".to_string(),
+    };
+    match resume_plan(&bench.ledger.runs()[0], &worker, &stop, stops_standing - 1) {
+        Err(NotResumed::Refused(why)) => assert!(why.contains("quota wall"), "{why}"),
+        other => panic!("a stop while the wall stands was not the wall's: {other:?}"),
+    }
+    resume_plan(&bench.ledger.runs()[0], &worker, &stop, stops_standing)
+        .expect("a stop after the wall stopped standing is the continuation's");
+
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_walled(&[seen(stops_standing, next_reset)], stops_standing),
+        1,
+        "the next window's wall was not news"
+    );
+    let walls = bench.json("check --peek --types quota_walled");
+    assert_eq!(walls["count"], 2, "{walls}");
+    let second = newest_wall(&bench.ledger.runs()[0], &dispatch).expect("the second wall");
+    assert_eq!(second.resets_at_ms, Some(next_reset));
+    assert_eq!(
+        second.stands_until_ms,
+        next_reset + QUOTA_WAIT_POLICY.slack_ms
+    );
+}
+
+/// A wall whose row names no reset stands for the table's longest wait from
+/// its witness, and so does one whose reset lies past that wait — a weekly
+/// window's (t-6427): past it, the silence is news again, never a wall
+/// forever.
+#[test]
+fn a_quota_wall_with_no_reset_to_wait_for_stands_for_the_longest_wait() {
+    const NOW: i64 = 5_000_000;
+    let longest = NOW + QUOTA_WAIT_POLICY.max_wait_ms;
+    for (name, resets) in [
+        ("unnamed", None),
+        ("weekly", Some(NOW + 3 * 24 * 60 * 60_000)),
+    ] {
+        let mut bench = Bench::new();
+        bench.json(&format!("run-create --name {name}"));
+        let task = bench.json("task-create --spec build-it")["taskId"]
+            .as_str()
+            .expect("a task")
+            .to_string();
+        let (worker, pane) = bench.seat(&format!("worker-start --agent codex --task {task}"));
+        assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/far"));
+        let seen = |at: i64| {
+            quota_wall_witness(
+                &worker,
+                Some(a_wall_marker("screen", "You've hit your usage limit")),
+                Some(&gauge("codex", 99, at - 60_000, resets)),
+                at,
+            )
+            .expect("two witnesses")
+        };
+        assert_eq!(bench.ledger.workers_quota_walled(&[seen(NOW)], NOW), 1);
+        let dispatch = bench.ledger.runs()[0]
+            .worker(&worker)
+            .and_then(|held| held.dispatch.clone())
+            .expect("the attempt");
+        let wall = newest_wall(&bench.ledger.runs()[0], &dispatch).expect("the wall");
+        assert!(!wall.reset_waitable, "{name}: {wall:?}");
+        assert_eq!(wall.stands_until_ms, longest, "{name}");
+        assert_eq!(
+            bench
+                .ledger
+                .workers_quota_walled(&[seen(longest - 1)], longest - 1),
+            0,
+            "{name}: the same wall was news twice"
+        );
+        assert_eq!(
+            bench.ledger.workers_quota_walled(&[seen(longest)], longest),
+            1,
+            "{name}: a wall past the longest wait was a wall forever"
+        );
+    }
+}
+
 /// The handover standing order is DECLARED, on the run, by name — the
 /// same alternative word a summons takes — and read back from
 /// `run-show`. Nothing is walked without one (§2.3), a refusal moves
@@ -12196,6 +12328,457 @@ fn a_summons_own_on_quota_wall_stands_on_its_worker_row() {
     assert!(bench.json(&format!("worker-show --worker {plain}"))["onQuotaWall"].is_null());
 }
 
+/// `--on-quota-wall` takes closed words beside ONE alternative (t-6427):
+/// `wait`, the one word this ledger measured, and `<agent[:model[:effort]]>`
+/// as before, comma-separated in any order — the ladder table, not the
+/// spelling, says which comes first. A word nobody measured is refused by
+/// name with the words that exist, never read as a stranger's agent id,
+/// and no word can shadow an agent the catalog knows.
+#[test]
+fn quota_wall_orders_are_closed_words_beside_one_alternative() {
+    assert_eq!(
+        QuotaWallOrder::named("wait"),
+        Ok(QuotaWallOrder {
+            wait: true,
+            handover: None
+        })
+    );
+    assert_eq!(
+        QuotaWallOrder::named("claude:fable-5-1:high"),
+        Ok(QuotaWallOrder {
+            wait: false,
+            handover: Some(pinned("claude", Some("fable-5-1"), Some("high")))
+        })
+    );
+    for spelled in ["wait,codex", "codex,wait", " wait , codex "] {
+        assert_eq!(
+            QuotaWallOrder::named(spelled),
+            Ok(QuotaWallOrder {
+                wait: true,
+                handover: Some(pinned("codex", None, None))
+            }),
+            "`{spelled}`"
+        );
+    }
+    for (spelled, says) in [
+        ("wiat", "no agent is called wiat"),
+        ("wait,wait", "twice"),
+        ("codex,claude", "one alternative"),
+        ("", "names nothing"),
+        (" , ", "names nothing"),
+    ] {
+        let why = QuotaWallOrder::named(spelled).expect_err(spelled);
+        assert!(
+            why.contains(says) && why.contains("`wait`"),
+            "`{spelled}`: {why}"
+        );
+    }
+    assert_eq!(
+        QUOTA_WALL_LADDER,
+        [QuotaWallRung::Wait, QuotaWallRung::Handover],
+        "the same conversation comes before a different model"
+    );
+    for word in QUOTA_WALL_LADDER
+        .into_iter()
+        .filter_map(QuotaWallRung::word)
+    {
+        assert!(
+            !crate::agent::AGENT_SPECS.iter().any(|spec| spec.id == word),
+            "the closed word `{word}` shadows an agent"
+        );
+    }
+}
+
+/// The wait rung is declared on the run by the same verb and flag, alone or
+/// beside an alternative, and reads back as the ladder it walks with the
+/// table's numbers (t-6427). `--wip-commit` still needs an alternative: a
+/// wait commits nothing. A policy that declares no wait reads and writes
+/// exactly as it did before the word existed.
+#[test]
+fn a_wait_rung_is_declared_on_the_run_and_read_back_as_its_ladder() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name ladder");
+    let armed = bench.json("handover-policy --on-quota-wall claude:fable-5-1,wait --wip-commit");
+    assert_eq!(
+        armed["handover"]["ladder"],
+        serde_json::json!(["wait", "handover"])
+    );
+    assert_eq!(armed["handover"]["onQuotaWall"]["agent"], "claude");
+    assert_eq!(armed["handover"]["wipCommit"], true);
+    assert_eq!(
+        armed["handover"]["wait"]["slackMs"],
+        QUOTA_WAIT_POLICY.slack_ms
+    );
+    assert_eq!(
+        armed["handover"]["wait"]["maxWaitMs"],
+        QUOTA_WAIT_POLICY.max_wait_ms
+    );
+    assert_eq!(
+        bench.json("run-show")["handover"]["ladder"],
+        armed["handover"]["ladder"]
+    );
+    let policy = bench.ledger.runs()[0].handover.clone().expect("the order");
+    assert!(policy.quota_wait);
+    assert_eq!(
+        policy.on_quota_wall,
+        Some(pinned("claude", Some("fable-5-1"), None))
+    );
+
+    let alone = bench.json("handover-policy --on-quota-wall wait");
+    assert_eq!(alone["handover"]["ladder"], serde_json::json!(["wait"]));
+    assert!(alone["handover"]["onQuotaWall"].is_null(), "{alone}");
+
+    for (line, says) in [
+        (
+            "handover-policy --on-quota-wall wait --wip-commit",
+            "--on-quota-wall",
+        ),
+        ("handover-policy --on-quota-wall wiat", "`wait`"),
+        ("handover-policy", "wait"),
+    ] {
+        let refused = bench.run(line);
+        assert_eq!(
+            refused.reply.exit_code, 1,
+            "`{line}`: {}",
+            refused.reply.stdout
+        );
+        assert!(
+            refused.reply.stderr.contains(says),
+            "`{line}`: {}",
+            refused.reply.stderr
+        );
+    }
+    assert!(
+        bench.ledger.runs()[0]
+            .handover
+            .as_ref()
+            .is_some_and(|held| held.quota_wait && held.on_quota_wall.is_none()),
+        "a refusal moved the order"
+    );
+
+    let handover_only = bench.json("handover-policy --on-quota-wall codex");
+    assert_eq!(
+        handover_only["handover"]["ladder"],
+        serde_json::json!(["handover"])
+    );
+    assert!(
+        handover_only["handover"]["wait"].is_null(),
+        "{handover_only}"
+    );
+    let stored =
+        serde_json::to_string(bench.ledger.runs()[0].handover.as_ref().expect("the order"))
+            .expect("serializes");
+    assert!(!stored.contains("quota_wait"), "{stored}");
+}
+
+/// A summons' own `--on-quota-wall` is its whole order (t-6427): `wait`
+/// alone keeps the run's alternative away from that worker — a worker
+/// pinned to its model and effort is never handed to another — and `wait`
+/// beside an alternative stands on the row with it. `worker-show` reads
+/// both back.
+#[test]
+fn a_summons_own_wait_is_its_whole_order() {
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name pinned");
+    bench.json("handover-policy --on-quota-wall claude");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _, dispatch) = a_walled_worker(
+        &mut bench,
+        &task,
+        " --on-quota-wall wait",
+        "/wt/pinned",
+        NOW,
+    );
+    let held = bench.ledger.runs()[0]
+        .worker(&worker)
+        .expect("the worker")
+        .clone();
+    assert!(held.quota_wait);
+    assert_eq!(held.on_quota_wall, None);
+    let shown = bench.json(&format!("worker-show --worker {worker}"));
+    assert_eq!(shown["quotaWait"], true);
+    assert!(shown["onQuotaWall"].is_null(), "{shown}");
+    let long_after = NOW + QUOTA_WAIT_POLICY.max_wait_ms;
+    assert!(
+        next_handover(&bench.ledger.runs()[0], long_after).is_none(),
+        "the run's alternative reached a worker whose own order was to wait"
+    );
+    assert!(newest_wall(&bench.ledger.runs()[0], &dispatch).is_some());
+
+    let other = bench.json("task-create --spec test-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (both, _) = bench.seat(&format!(
+        "worker-start --agent codex --task {other} --on-quota-wall wait,claude:fable-5-1"
+    ));
+    let held = bench.ledger.runs()[0].worker(&both).expect("the worker");
+    assert!(held.quota_wait);
+    assert_eq!(
+        held.on_quota_wall,
+        Some(pinned("claude", Some("fable-5-1"), None))
+    );
+    let refused = bench.run(&format!(
+        "worker-start --agent codex --task {other} --on-quota-wall wiat"
+    ));
+    assert_eq!(refused.reply.exit_code, 1);
+    assert!(
+        refused.reply.stderr.contains("`wait`"),
+        "{}",
+        refused.reply.stderr
+    );
+}
+
+/// A declared wait holds the handover while the wall it waits for stands
+/// (t-6427): the ladder walks the same conversation first. Claude Code
+/// waits out its own reset and continues a minute after it, and a handover
+/// walked at the wall would have ended that conversation for a new one.
+/// Once the wall stops standing the handover is planned as before — and a
+/// wall whose reset is not one to wait for (a weekly window) is handed over
+/// at once. The wall's news and the handover's receipt say which rung the
+/// order stands on.
+#[test]
+fn a_declared_wait_holds_the_handover_while_the_wall_it_waits_for_stands() {
+    const NOW: i64 = 5_000_000;
+    let reset = NOW + 42 * 60_000;
+    let stops_standing = reset + QUOTA_WAIT_POLICY.slack_ms;
+    let mut bench = Bench::new();
+    bench.json("run-create --name held");
+    bench.json("handover-policy --on-quota-wall wait,claude");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/held", NOW);
+    let news = bench.json("check --peek --types quota_walled");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["ladder"], serde_json::json!(["wait", "handover"]));
+    assert_eq!(body["wait"]["standsUntilMs"], stops_standing);
+    assert!(
+        body["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("wait")),
+        "{body}"
+    );
+
+    assert!(
+        next_handover(&bench.ledger.runs()[0], stops_standing - 1).is_none(),
+        "a handover walked past a declared wait"
+    );
+    let plan = next_handover(&bench.ledger.runs()[0], stops_standing)
+        .expect("the handover, once the wall stopped standing");
+    assert_eq!(plan.worker, worker);
+    assert_eq!(plan.dispatch, dispatch);
+    assert!(
+        bench
+            .ledger
+            .handover_begin(&plan, stops_standing - 1)
+            .is_err_and(|why| why.contains("wait")),
+        "the reservation disagreed with the plan about the wait"
+    );
+    let receipt = bench
+        .ledger
+        .handover_begin(&plan, stops_standing)
+        .expect("reserved");
+    let row = bench.ledger.runs()[0]
+        .messages()
+        .iter()
+        .find(|held| held.id == receipt)
+        .expect("the receipt");
+    let said: serde_json::Value = serde_json::from_str(row.body.as_str()).expect("json");
+    assert_eq!(said["rung"], "handover");
+    assert_eq!(said["ladder"], serde_json::json!(["wait", "handover"]));
+
+    // A weekly wall is not waited for: handed over at once, and said so.
+    let other = bench.json("task-create --spec test-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (far, pane) = bench.seat(&format!("worker-start --agent codex --task {other}"));
+    assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/far"));
+    let weekly = quota_wall_witness(
+        &far,
+        Some(a_wall_marker("screen", "You've hit your usage limit")),
+        Some(&gauge(
+            "codex",
+            99,
+            NOW - 60_000,
+            Some(NOW + 3 * 24 * 60 * 60_000),
+        )),
+        NOW,
+    )
+    .expect("two witnesses");
+    assert_eq!(bench.ledger.workers_quota_walled(&[weekly], NOW), 1);
+    let plan = next_handover(&bench.ledger.runs()[0], NOW + 1).expect("handed over at once");
+    assert_eq!(plan.worker, far);
+    let news = bench.json("check --peek --types quota_walled");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][1]["body"].as_str().expect("a body")).expect("json");
+    assert!(
+        body["wait"]["skipped"].as_str().is_some(),
+        "a wall the rung does not wait for did not say so: {body}"
+    );
+}
+
+/// A wall the wait rung held, that lifted while its worker stayed stopped at
+/// it, is told to the coordinator once (t-6427) — the wall's follow-up, on the
+/// same two-witness rule: the agent's own words still stand at the wall, and
+/// the provider's number, read after the reset, is under it. Claude Code
+/// continues by itself about a minute after its reset, so on this machine the
+/// notice is for the walls that did not: a CLI that does not wait (Codex, zo),
+/// or a countdown somebody cancelled. While the wall stands the gauge is asked
+/// for a reading from the reset on; a number not yet read after the reset is
+/// waited for, one still at the wall is the next window's wall, and words
+/// that moved past the wall are some other silence. Only under a declared
+/// wait: without one the silence is ordinary news once the wall stops standing.
+#[test]
+fn a_lifted_wall_its_worker_stayed_stopped_at_is_told_once_under_a_wait() {
+    const NOW: i64 = 5_000_000;
+    let reset = NOW + 42 * 60_000;
+    let stops_standing = reset + QUOTA_WAIT_POLICY.slack_ms;
+    let lift_read_by = stops_standing + QUOTA_WAIT_POLICY.lift_read_ms;
+    let mut bench = Bench::new();
+    bench.json("run-create --name lifted");
+    bench.json("handover-policy --on-quota-wall wait");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/lifted", NOW);
+    let phase = |bench: &Bench, at: i64| {
+        let run = &bench.ledger.runs()[0];
+        wall_phase(run, run.worker(&worker).expect("the worker"), &dispatch, at)
+            .map(|(_, phase)| phase)
+    };
+    assert_eq!(
+        phase(&bench, NOW + 1),
+        Some(WallPhase::Stands { reread: false })
+    );
+    assert_eq!(
+        phase(&bench, reset),
+        Some(WallPhase::Stands { reread: true }),
+        "the gauge was not asked for from the reset on"
+    );
+    assert_eq!(phase(&bench, stops_standing), Some(WallPhase::Lifting));
+    assert_eq!(phase(&bench, lift_read_by), Some(WallPhase::Past));
+
+    let wall = newest_wall(&bench.ledger.runs()[0], &dispatch).expect("the wall");
+    let words = || Some(a_wall_marker("screen", "You've hit your usage limit"));
+    let quiet_since = NOW - QUIET_GRACE_MS;
+    let read = |marker, headroom: Option<Headroom>| {
+        read_lift(
+            &worker,
+            &wall,
+            quiet_since,
+            marker,
+            headroom.as_ref(),
+            stops_standing,
+        )
+    };
+    let next_window = Some(reset + 5 * 60 * 60_000);
+    assert_eq!(
+        read(None, Some(gauge("codex", 3, reset + 60_000, next_window))),
+        LiftReading::MovedOn
+    );
+    assert_eq!(read(words(), None), LiftReading::Unread);
+    assert_eq!(
+        read(
+            words(),
+            Some(gauge("codex", 98, reset - 60_000, Some(reset)))
+        ),
+        LiftReading::Unread,
+        "a number read before the reset lifted the wall"
+    );
+    assert_eq!(
+        read(
+            words(),
+            Some(gauge("codex", 98, reset + 60_000, next_window))
+        ),
+        LiftReading::StillWalled
+    );
+    let LiftReading::Lifted(lift) = read(
+        words(),
+        Some(gauge("codex", 3, reset + 60_000, next_window)),
+    ) else {
+        panic!("a number under the wall, read after the reset, did not lift it");
+    };
+    assert_eq!(lift.wall, wall.wall);
+
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_lifted(std::slice::from_ref(&lift), stops_standing - 1),
+        0,
+        "a lift was told while the wall still stood"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_lifted(std::slice::from_ref(&lift), stops_standing),
+        1
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_lifted(&[lift], stops_standing + 1_000),
+        0,
+        "the same lift was told twice"
+    );
+    assert_eq!(phase(&bench, stops_standing + 1_000), Some(WallPhase::Past));
+    let told = bench.json("check --peek --types went_quiet");
+    assert_eq!(told["count"], 1, "{told}");
+    let body: serde_json::Value =
+        serde_json::from_str(told["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["reason"], QUOTA_LIFTED_REASON);
+    assert_eq!(body["rung"], "wait");
+    assert_eq!(body["workerId"], worker);
+    assert_eq!(body["dispatchId"], dispatch);
+    assert_eq!(body["wallId"], wall.wall);
+    assert_eq!(body["resetsAtMs"], reset);
+    assert_eq!(body["gauge"]["usedPercent"], 3);
+    assert_eq!(body["gauge"]["updatedAtMs"], reset + 60_000);
+    assert_eq!(body["marker"]["line"], "You've hit your usage limit");
+    assert_eq!(body["stalledSinceMs"], quiet_since);
+    assert_eq!(body["notification"], true);
+
+    // Without a declared wait the rung owes nothing: the wall stops standing
+    // and the silence is the ordinary road's.
+    let mut plain = Bench::new();
+    plain.json("run-create --name plain");
+    let task = plain.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _, dispatch) = a_walled_worker(&mut plain, &task, "", "/wt/plain", NOW);
+    let run = &plain.ledger.runs()[0];
+    assert_eq!(
+        wall_phase(
+            run,
+            run.worker(&worker).expect("the worker"),
+            &dispatch,
+            reset
+        )
+        .map(|(_, phase)| phase),
+        Some(WallPhase::Stands { reread: false }),
+        "an undeclared wait asked the gauge"
+    );
+    assert_eq!(
+        wall_phase(
+            run,
+            run.worker(&worker).expect("the worker"),
+            &dispatch,
+            stops_standing
+        )
+        .map(|(_, phase)| phase),
+        Some(WallPhase::Past)
+    );
+}
+
 /// A launcher that can say whether a checkout still exists — what the
 /// window answers from `is_dir`, handed over here.
 struct Checkouts {
@@ -12389,11 +12972,11 @@ fn next_handover_walks_one_witnessed_wall_under_a_declared_order() {
         .to_string();
     let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/walled", NOW);
     assert!(
-        next_handover(&bench.ledger.runs()[0]).is_none(),
+        next_handover(&bench.ledger.runs()[0], NOW).is_none(),
         "news with no standing order was walked"
     );
     bench.json("handover-policy --on-quota-wall claude --wip-commit");
-    let plan = next_handover(&bench.ledger.runs()[0]).expect("a plan under the order");
+    let plan = next_handover(&bench.ledger.runs()[0], NOW).expect("a plan under the order");
     assert_eq!(plan.run, run_id);
     assert_eq!(plan.worker, worker);
     assert_eq!(plan.agent, "codex");
@@ -12413,7 +12996,7 @@ fn next_handover_walks_one_witnessed_wall_under_a_declared_order() {
     // No seat, no walk — and the seat back, the walk back.
     let seat = bench.ledger.runs()[0].coordinator.clone();
     bench.ledger.run_mut(&run_id).expect("the run").coordinator = None;
-    assert!(next_handover(&bench.ledger.runs()[0]).is_none());
+    assert!(next_handover(&bench.ledger.runs()[0], NOW).is_none());
     bench.ledger.run_mut(&run_id).expect("the run").coordinator = seat;
     // Reserved once, planned never again.
     let reserved = bench
@@ -12422,7 +13005,7 @@ fn next_handover_walks_one_witnessed_wall_under_a_declared_order() {
         .expect("the reservation");
     assert!(reserved.starts_with("m-"));
     assert!(
-        next_handover(&bench.ledger.runs()[0]).is_none(),
+        next_handover(&bench.ledger.runs()[0], NOW).is_none(),
         "a reserved handover was planned again"
     );
     assert!(
@@ -12441,12 +13024,12 @@ fn next_handover_walks_one_witnessed_wall_under_a_declared_order() {
         "/wt/own",
         NOW + 3,
     );
-    let second = next_handover(&bench.ledger.runs()[0]).expect("the second wall");
+    let second = next_handover(&bench.ledger.runs()[0], NOW).expect("the second wall");
     assert_eq!(second.worker, own);
     assert_eq!(second.to, pinned("claude", Some("fable-5-1"), Some("high")));
     // A person's pane: never.
     assert!(bench.ledger.worker_taken_over(("team-1", &own_pane)));
-    assert!(next_handover(&bench.ledger.runs()[0]).is_none());
+    assert!(next_handover(&bench.ledger.runs()[0], NOW).is_none());
     assert!(bench.ledger.handover_begin(&second, NOW + 4).is_err());
 }
 
@@ -12472,7 +13055,7 @@ fn a_task_is_handed_over_at_most_handover_max_times() {
             .map_or_else(String::new, |prior| format!(" --retry-of {prior}"));
         let at = NOW + i64::try_from(round).expect("small") * 10;
         let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, &link, "/wt/again", at);
-        let plan = next_handover(&bench.ledger.runs()[0])
+        let plan = next_handover(&bench.ledger.runs()[0], NOW)
             .unwrap_or_else(|| panic!("round {round} under the ceiling was not planned"));
         let id = bench
             .ledger
@@ -12499,7 +13082,7 @@ fn a_task_is_handed_over_at_most_handover_max_times() {
     let link = format!(" --retry-of {}", previous.expect("an ended attempt"));
     a_walled_worker(&mut bench, &task, &link, "/wt/again", NOW + 100);
     assert!(
-        next_handover(&bench.ledger.runs()[0]).is_none(),
+        next_handover(&bench.ledger.runs()[0], NOW).is_none(),
         "the ceiling was walked past"
     );
     assert_eq!(
@@ -12526,7 +13109,7 @@ fn a_handover_receipt_says_every_step_and_is_delivered_when_it_settles() {
         .to_string();
     bench.json("handover-policy --on-quota-wall claude:fable-5-1 --wip-commit");
     let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/walled", NOW);
-    let plan = next_handover(&bench.ledger.runs()[0]).expect("a plan");
+    let plan = next_handover(&bench.ledger.runs()[0], NOW).expect("a plan");
     let id = bench
         .ledger
         .handover_begin(&plan, NOW + 1)
@@ -12636,7 +13219,7 @@ fn a_half_walked_handover_is_reported_after_a_restart_and_never_resumed() {
         .to_string();
     bench.json("handover-policy --on-quota-wall claude --wip-commit");
     let (_, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/walled", NOW);
-    let plan = next_handover(&bench.ledger.runs()[0]).expect("a plan");
+    let plan = next_handover(&bench.ledger.runs()[0], NOW).expect("a plan");
     let id = bench
         .ledger
         .handover_begin(&plan, NOW + 1)
@@ -12672,7 +13255,7 @@ fn a_half_walked_handover_is_reported_after_a_restart_and_never_resumed() {
     );
     assert_eq!(body["steps"].as_array().map(Vec::len), Some(1));
     // Never resumed: the attempt was walked, whatever became of it.
-    assert!(next_handover(&bench.ledger.runs()[0]).is_none());
+    assert!(next_handover(&bench.ledger.runs()[0], NOW).is_none());
     assert!(bench.ledger.handover_begin(&plan, NOW + 6).is_err());
     assert!(
         bench
@@ -19759,7 +20342,7 @@ fn handover_reservation_rejects_superseded_order_and_seat_without_spending_the_a
             .to_string();
         let (worker, _, _) = a_walled_worker(&mut bench, &task, "", "/wt/current", 5_000_000);
         bench.json("handover-policy --on-quota-wall claude --wip-commit");
-        let plan = next_handover(&bench.ledger.runs()[0]).unwrap();
+        let plan = next_handover(&bench.ledger.runs()[0], 5_000_001).unwrap();
         let run = bench.ledger.run_mut(&plan.run).unwrap();
         match change {
             "alternative" => {
@@ -19796,7 +20379,7 @@ fn handover_reservation_rejects_superseded_order_and_seat_without_spending_the_a
             before,
             "{change} spent a reservation"
         );
-        if let Some(fresh) = next_handover(&bench.ledger.runs()[0]) {
+        if let Some(fresh) = next_handover(&bench.ledger.runs()[0], 5_000_001) {
             assert!(
                 bench.ledger.handover_begin(&fresh, 5_000_003).is_ok(),
                 "{change} prevented replanning"
@@ -19821,7 +20404,7 @@ fn a_revoked_handover_retains_history_and_allows_a_current_order_to_reserve() {
         5_000_000,
     );
     bench.json("handover-policy --on-quota-wall codex --wip-commit");
-    let plan = next_handover(&bench.ledger.runs()[0]).unwrap();
+    let plan = next_handover(&bench.ledger.runs()[0], 5_000_001).unwrap();
     assert_eq!(plan.to, pinned("claude", Some("fable-5-1"), Some("high")));
     let reservation = bench.ledger.handover_begin(&plan, 5_000_001).unwrap();
     bench.json("handover-policy --off");
@@ -19834,7 +20417,7 @@ fn a_revoked_handover_retains_history_and_allows_a_current_order_to_reserve() {
         .ledger
         .handover_revoked(&plan.run, &reservation, 5_000_002)
         .unwrap();
-    let current = next_handover(&bench.ledger.runs()[0]).unwrap();
+    let current = next_handover(&bench.ledger.runs()[0], 5_000_001).unwrap();
     assert!(!current.wip_commit);
     assert_eq!(
         current.to, plan.to,

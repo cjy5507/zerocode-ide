@@ -559,11 +559,17 @@ These are the ones that cost you a run when you get them wrong.
   hit your session limit", zo's "usage limit … resets in") AND the
   provider's fresh number at the wall off the window's usage cache. A
   screen line alone is a line; a number alone says nothing about that
-  pane. It arrives once per attempt, carries the `dispatchId`, the
+  pane. It arrives once per wall, carries the `dispatchId`, the
   provider's number and reset, the `checkout` the work sits in and the
   words that were seen, and settles NOTHING — the attempt is open and the
   task carried until you (or the handover beat) say `worker-stop`. A pane
-  the person took over earns no such news.
+  the person took over earns no such news. A wall stands until its reset
+  and three minutes after it (the stall grace — Claude Code waits out its
+  own reset and types its own continuation about a minute after it), or
+  six hours from the news when the reset is unknown or further off (a
+  weekly window). While it stands the worker's silence is the wall's;
+  after it, the silence is `went_quiet` news again, and a wall in the
+  next window is `quota_walled` news again.
 - **A dropped response is not a silence either — if you say so.** A worker
   whose own transcript ends on a transient API error (claude's
   `server_error` — "The response stopped arriving", "529 Overloaded",
@@ -655,6 +661,34 @@ twice (`QUOTA_POLICY.handover_max`); past that a wall is news only. A pane
 the person took over is never handed over. If the window restarts mid-walk
 the receipt arrives `interrupted`, naming the last step that walked, and no
 later beat resumes it — read the steps and finish or undo by hand.
+
+**The same conversation comes before a different model.** `--on-quota-wall`
+also takes the closed word `wait` — alone, or beside the alternative as
+`wait,<agent[:model[:effort]]>` in either order (a word nobody measured is
+refused by name). The order is walked as a ladder, the wait first: while
+the wall's reset (named by a fresh gauge when the wall was witnessed) and
+the three minutes after it have not passed, nothing is handed over. Claude
+Code waits out its own reset and continues the same conversation about a
+minute after it — every wall on this machine did — and a handover walked at
+the wall would have ended that conversation for a new one. Once the wall
+stops standing, the handover walks as before, if the wall is witnessed
+again. A wall whose reset is unknown or more than six hours away (a weekly
+window) is not waited for: it is handed over at once. `wait` alone on a
+summons is that worker's whole order, so the run's alternative never
+reaches it — the way to keep a worker pinned to its model and effort.
+`run-show.handover.ladder` reads the rungs back in walking order; the
+`quota_walled` news carries `ladder` and `wait: {standsUntilMs}` (or
+`{skipped: <why>}`), and a `handover` receipt carries `rung: "handover"`.
+Under `wait` the beat also asks the window's usage gauge for a fresh
+reading from the reset on (never forced — the status bar's own floor and
+backoff hold), and if the worker is still stopped at its wall once the wall
+stops standing — its own words still at the wall, the provider's number
+read after the reset under it — you get ONE `went_quiet` notice with
+`reason: "quota_lifted"` and `rung: "wait"`, the `wallId`, and the `gauge`
+that says so: its own continuation did not come (a CLI that does not wait,
+or a countdown somebody cancelled), so wake it with a line of mail or hand
+it over. Nothing is typed for you. With no reading after the reset within
+five minutes, or without `wait`, the silence is ordinary `went_quiet` news.
 
 If what you were asked for is "give this to another agent" and nobody asked
 you to watch it or collect a result, you do not need this skill. Make a
