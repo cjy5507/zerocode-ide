@@ -559,11 +559,17 @@ These are the ones that cost you a run when you get them wrong.
   hit your session limit", zo's "usage limit … resets in") AND the
   provider's fresh number at the wall off the window's usage cache. A
   screen line alone is a line; a number alone says nothing about that
-  pane. It arrives once per attempt, carries the `dispatchId`, the
+  pane. It arrives once per wall, carries the `dispatchId`, the
   provider's number and reset, the `checkout` the work sits in and the
   words that were seen, and settles NOTHING — the attempt is open and the
   task carried until you (or the handover beat) say `worker-stop`. A pane
-  the person took over earns no such news.
+  the person took over earns no such news. A wall stands until its reset
+  and three minutes after it (the stall grace — Claude Code waits out its
+  own reset and types its own continuation about a minute after it), or
+  six hours from the news when the reset is unknown or further off (a
+  weekly window). While it stands the worker's silence is the wall's;
+  after it, the silence is `went_quiet` news again, and a wall in the
+  next window is `quota_walled` news again.
 - **A dropped response is not a silence either — if you say so.** A worker
   whose own transcript ends on a transient API error (claude's
   `server_error` — "The response stopped arriving", "529 Overloaded",

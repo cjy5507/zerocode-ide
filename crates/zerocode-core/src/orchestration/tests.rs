@@ -11593,6 +11593,137 @@ fn a_taken_over_pane_is_never_quota_walled_news() {
     assert_eq!(bench.json("check --peek --types quota_walled")["count"], 0);
 }
 
+/// A wall stands until its reset and the slack its agent gets after it
+/// (t-6427), and no longer. Seen again inside that, it is the same fact;
+/// seen after it — the next window's wall — it is news of its own, so an
+/// attempt that walls twice is told about twice. A transient error the
+/// attempt stops on while the wall stands is the wall's; after it, the
+/// continuation's.
+#[test]
+fn a_quota_wall_stands_until_its_reset_and_the_next_wall_is_news_again() {
+    const NOW: i64 = 5_000_000;
+    let reset = NOW + 42 * 60_000;
+    let next_reset = reset + 5 * 60 * 60_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name episodes");
+    bench.json("handover-policy --on-transient-error resume");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/episodes", NOW);
+    let seen = |at: i64, resets: i64| {
+        quota_wall_witness(
+            &worker,
+            Some(a_wall_marker("screen", "You've hit your usage limit")),
+            Some(&gauge("codex", 98, at - 60_000, Some(resets))),
+            at,
+        )
+        .expect("two witnesses")
+    };
+    let wall = newest_wall(&bench.ledger.runs()[0], &dispatch).expect("the wall");
+    assert_eq!(wall.observed_at_ms, NOW);
+    assert_eq!(wall.resets_at_ms, Some(reset));
+    assert!(wall.reset_waitable);
+    let stops_standing = reset + QUOTA_WAIT_POLICY.slack_ms;
+    assert_eq!(wall.stands_until_ms, stops_standing);
+    assert!(wall.stands(stops_standing - 1) && !wall.stands(stops_standing));
+
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_walled(&[seen(reset - 60_000, reset)], reset - 60_000),
+        0,
+        "the same wall, before its reset, was news twice"
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_walled(&[seen(stops_standing - 1, next_reset)], stops_standing - 1),
+        0,
+        "a wall inside the slack after the reset was news twice"
+    );
+    let stop = TransientErrorMarker {
+        source: "transcript".to_string(),
+        line: Text::from("API Error: Can't reach the API server"),
+        key: "dns".to_string(),
+    };
+    match resume_plan(&bench.ledger.runs()[0], &worker, &stop, stops_standing - 1) {
+        Err(NotResumed::Refused(why)) => assert!(why.contains("quota wall"), "{why}"),
+        other => panic!("a stop while the wall stands was not the wall's: {other:?}"),
+    }
+    resume_plan(&bench.ledger.runs()[0], &worker, &stop, stops_standing)
+        .expect("a stop after the wall stopped standing is the continuation's");
+
+    assert_eq!(
+        bench
+            .ledger
+            .workers_quota_walled(&[seen(stops_standing, next_reset)], stops_standing),
+        1,
+        "the next window's wall was not news"
+    );
+    let walls = bench.json("check --peek --types quota_walled");
+    assert_eq!(walls["count"], 2, "{walls}");
+    let second = newest_wall(&bench.ledger.runs()[0], &dispatch).expect("the second wall");
+    assert_eq!(second.resets_at_ms, Some(next_reset));
+    assert_eq!(
+        second.stands_until_ms,
+        next_reset + QUOTA_WAIT_POLICY.slack_ms
+    );
+}
+
+/// A wall whose row names no reset stands for the table's longest wait from
+/// its witness, and so does one whose reset lies past that wait — a weekly
+/// window's (t-6427): past it, the silence is news again, never a wall
+/// forever.
+#[test]
+fn a_quota_wall_with_no_reset_to_wait_for_stands_for_the_longest_wait() {
+    const NOW: i64 = 5_000_000;
+    let longest = NOW + QUOTA_WAIT_POLICY.max_wait_ms;
+    for (name, resets) in [
+        ("unnamed", None),
+        ("weekly", Some(NOW + 3 * 24 * 60 * 60_000)),
+    ] {
+        let mut bench = Bench::new();
+        bench.json(&format!("run-create --name {name}"));
+        let task = bench.json("task-create --spec build-it")["taskId"]
+            .as_str()
+            .expect("a task")
+            .to_string();
+        let (worker, pane) = bench.seat(&format!("worker-start --agent codex --task {task}"));
+        assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/far"));
+        let seen = |at: i64| {
+            quota_wall_witness(
+                &worker,
+                Some(a_wall_marker("screen", "You've hit your usage limit")),
+                Some(&gauge("codex", 99, at - 60_000, resets)),
+                at,
+            )
+            .expect("two witnesses")
+        };
+        assert_eq!(bench.ledger.workers_quota_walled(&[seen(NOW)], NOW), 1);
+        let dispatch = bench.ledger.runs()[0]
+            .worker(&worker)
+            .and_then(|held| held.dispatch.clone())
+            .expect("the attempt");
+        let wall = newest_wall(&bench.ledger.runs()[0], &dispatch).expect("the wall");
+        assert!(!wall.reset_waitable, "{name}: {wall:?}");
+        assert_eq!(wall.stands_until_ms, longest, "{name}");
+        assert_eq!(
+            bench
+                .ledger
+                .workers_quota_walled(&[seen(longest - 1)], longest - 1),
+            0,
+            "{name}: the same wall was news twice"
+        );
+        assert_eq!(
+            bench.ledger.workers_quota_walled(&[seen(longest)], longest),
+            1,
+            "{name}: a wall past the longest wait was a wall forever"
+        );
+    }
+}
+
 /// The handover standing order is DECLARED, on the run, by name — the
 /// same alternative word a summons takes — and read back from
 /// `run-show`. Nothing is walked without one (§2.3), a refusal moves

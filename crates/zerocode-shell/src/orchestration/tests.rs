@@ -1906,6 +1906,14 @@ impl AtTheWall {
                 },
             );
     }
+
+    /// The pane's own words moved past its wall.
+    fn screen_clears(&self, term: u32) {
+        self.markers
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .remove(&term);
+    }
 }
 
 impl Host for AtTheWall {
@@ -2789,6 +2797,83 @@ fn the_beat_writes_quota_walled_news_only_with_both_witnesses_and_settles_nothin
     assert_eq!(
         (lifecycle(&codex_worker), lifecycle(&claude_worker)),
         before
+    );
+}
+
+/// A wall stands until its reset and the slack after it, and no longer
+/// (t-6427). Every worker this machine walled continued by itself a minute
+/// after its reset, and two of them later died on a network error the sweep
+/// never reported: the attempt's wall row silenced it for good (dp-6390 and
+/// dp-6393, 2026-09-23 — 42 and 77 minutes until somebody looked). While the
+/// wall stands its silence is the wall's; after it, a worker whose own words
+/// moved past the wall is a quiet worker like any other, and one walled
+/// again in the next window is walled news again.
+#[test]
+fn a_walled_attempts_later_silence_is_news_once_its_wall_stops_standing() {
+    const LEADER_TERM: u32 = 85_600;
+    const WORKER_TERM: u32 = LEADER_TERM + 1;
+    let stood = Walled::stand(LEADER_TERM, "/wt/after-the-wall", "");
+    stood.wall_it();
+    let began = stood.began;
+    let reset = began + 42 * 60_000;
+    let next_reset = reset + 5 * 60 * 60_000;
+    let stops_standing = reset + zerocode_core::orchestration::QUOTA_WAIT_POLICY.slack_ms;
+    let stalls = |at: i64| -> Vec<serde_json::Value> {
+        stood.json("check --peek --types went_quiet", at)["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| {
+                serde_json::from_str::<serde_json::Value>(message["body"].as_str().expect("a body"))
+                    .expect("json")
+            })
+            .filter(|body| body["workerId"] == stood.worker.as_str())
+            .collect()
+    };
+    let codex_at = |used: u8, updated: i64| {
+        vec![(
+            "codex",
+            usage_snapshot(
+                "codex",
+                Some((used, Some(next_reset))),
+                Some((40, None)),
+                updated,
+            ),
+        )]
+    };
+
+    // While the wall stands, the silence is the wall's.
+    notify_stalled_workers(&stood.host, stops_standing - 1);
+    assert!(stalls(stops_standing - 1).is_empty());
+
+    // It went on after its reset and stopped on something else.
+    stood.host.screen_clears(WORKER_TERM);
+    stood.window.set_usage(codex_at(3, reset + 60_000));
+    notify_stalled_workers(&stood.host, stops_standing);
+    let told = stalls(stops_standing + 1);
+    assert_eq!(
+        told.len(),
+        1,
+        "a silence after the wall was not news: {told:?}"
+    );
+    assert_eq!(told[0]["reason"], "stalled");
+
+    // And the next window's wall is news of its own.
+    stood.host.screen_says(
+        WORKER_TERM,
+        "screen",
+        "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage",
+    );
+    stood
+        .window
+        .set_usage(codex_at(98, stops_standing + 60_000));
+    notify_stalled_workers(&stood.host, stops_standing + 120_000);
+    assert_eq!(
+        stood.json(
+            "check --peek --types quota_walled",
+            stops_standing + 120_001
+        )["count"],
+        2
     );
 }
 

@@ -3788,8 +3788,9 @@ struct Stalled {
     term: u32,
     agent: String,
     model: Option<String>,
-    /// Whether this attempt's wall is already written down — a walled
-    /// worker is not asked again, and is not ALSO a quiet one.
+    /// Whether this attempt's wall is already written down and still stands
+    /// — a walled worker is not asked again, and is not ALSO a quiet one,
+    /// until its wall stops standing (t-6427).
     walled_already: bool,
     /// Whether the run declared `--on-transient-error resume` — asked before
     /// a transcript is read, so an undeclared run costs nothing more.
@@ -3846,10 +3847,8 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
                     .get(worker.pane.as_str())
                     .copied()?;
                 let since_ms = host.quiet_since(term, worker.started_ms, now_ms)?;
-                let walled_already = run.messages().iter().any(|held| {
-                    held.kind == zerocode_core::orchestration::MessageKind::QuotaWalled
-                        && held.dispatch.as_deref() == Some(dispatch.id.as_str())
-                });
+                let walled_already = zerocode_core::orchestration::newest_wall(run, &dispatch.id)
+                    .is_some_and(|wall| wall.stands(now_ms));
                 Some(Stalled {
                     run: run.id.clone(),
                     worker: worker.id.clone(),

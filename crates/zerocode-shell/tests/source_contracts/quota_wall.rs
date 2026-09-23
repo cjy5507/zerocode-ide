@@ -48,6 +48,9 @@ fn the_wall_witness_is_asked_beside_the_stall_probe_and_outside_the_team_table()
         "held.actor.quota_walls(",
         "held.actor.quiet_sweep(",
         "walled_already",
+        // A wall silences its attempt while it stands, and no longer (t-6427).
+        "zerocode_core::orchestration::newest_wall(run, &dispatch.id)",
+        ".is_some_and(|wall| wall.stands(now_ms))",
     ] {
         assert!(
             sweep.contains(needed),
@@ -166,10 +169,27 @@ fn the_wall_witness_is_asked_beside_the_stall_probe_and_outside_the_team_table()
             "the shared quota gauge lost {needed}"
         );
     }
+    // How long a wall stands is one reading of its own row against one table
+    // (t-6427): its reset and the slack when that reset is waitable, the
+    // longest wait from its witness otherwise.
+    let wall = super::support::block_after(&core, "pub fn newest_wall(");
+    for needed in [
+        "MessageKind::QuotaWalled",
+        "QUOTA_WAIT_POLICY.slack_ms",
+        "QUOTA_WAIT_POLICY.max_wait_ms",
+    ] {
+        assert!(
+            wall.contains(needed),
+            "the wall's own reading lost `{needed}`:\n{wall}"
+        );
+    }
     let news = super::support::block_after(&core, "pub fn workers_quota_walled(");
     assert!(
-        news.contains("MessageKind::QuotaWalled") && news.contains("worker.taken_over"),
-        "the notice road lost its kind or its takeover rule:\n{news}"
+        news.contains("MessageKind::QuotaWalled")
+            && news.contains("worker.taken_over")
+            && news
+                .contains("newest_wall(run, &dispatch.id).is_some_and(|wall| wall.stands(now_ms))"),
+        "the notice road lost its kind, its takeover rule or its one wall per window:\n{news}"
     );
     assert!(
         !news.contains("end_attempt(") && !news.contains("TaskStatus::"),
@@ -430,7 +450,7 @@ fn the_transient_error_continuation_rides_the_stall_sweep_through_the_pointers_d
         "Some(OnTransientError::Resume)",
         "worker.taken_over",
         "awaiting_reply(run, &worker.id)",
-        "MessageKind::QuotaWalled",
+        "newest_wall(run, &dispatch.id).is_some_and(|wall| wall.stands(now_ms))",
         "Err(NotResumed::InFlight)",
         "RESUME_POLICY.attempts_max",
         "resume_may_have_typed(body)",

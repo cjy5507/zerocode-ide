@@ -8902,15 +8902,17 @@ impl Ledger {
         notified
     }
 
-    /// Two witnesses to a worker's quota wall become news — once per
-    /// attempt, and settling nothing.
+    /// Two witnesses to a worker's quota wall become news — once per wall,
+    /// and settling nothing.
     ///
     /// The beat hands over only [`QuotaWallWitness`]es, which exist only
     /// with both halves; the ledger still revalidates what it owns — a live
     /// worker in its seat, an open dispatch, no person's hand on the pane —
-    /// and writes ONE `quota_walled` row per dispatch, whatever later beats
-    /// say about the same wall (the level-triggered posture of
-    /// [`Self::panes_missing`]). Nothing here ends the attempt or moves the
+    /// and writes ONE `quota_walled` row per wall, whatever later beats say
+    /// about it while it stands (the level-triggered posture of
+    /// [`Self::panes_missing`]). A wall seen after the attempt's last one
+    /// stopped standing ([`newest_wall`]) is the next window's, and news of
+    /// its own (t-6427). Nothing here ends the attempt or moves the
     /// task: a wall is a reason for silence, not an ending, and the ending
     /// is the explicit `worker-stop` a person or the handover beat types.
     ///
@@ -8930,11 +8932,7 @@ impl Ledger {
                 if !dispatch.is_open() {
                     return None;
                 }
-                let already = run.messages.iter().any(|held| {
-                    held.kind == MessageKind::QuotaWalled
-                        && held.dispatch.as_deref() == Some(dispatch.id.as_str())
-                });
-                if already {
+                if newest_wall(run, &dispatch.id).is_some_and(|wall| wall.stands(now_ms)) {
                     return None;
                 }
                 let told = serde_json::json!({
@@ -11555,6 +11553,95 @@ pub fn quota_wall_witness(
     })
 }
 
+/* ---- how long a wall stands (t-6427) ---------------------------------- */
+
+/// The numbers a quota wall is waited out under — one table, read by
+/// [`newest_wall`], like [`QUOTA_POLICY`].
+pub struct QuotaWaitPolicy {
+    /// How long after the provider's reset the wall still explains the
+    /// worker's silence: the time its agent gets to continue by itself.
+    pub slack_ms: i64,
+    /// The longest a wall stands, from the moment its two witnesses met,
+    /// when its row names no reset — or one further away than this.
+    pub max_wait_ms: i64,
+}
+
+/// The table as measured on this machine (2026-09-24, the ledger's seven
+/// `quota_walled` rows and their workers' transcripts).
+///
+/// - `slack_ms` — the stall grace. All seven walls were Claude Code
+///   2.1.270–2.1.280, which waits out its own reset and types its own
+///   continuation (a user record with `origin.kind: "auto-continuation"`):
+///   49–78 s after the reset on the four that recorded one, its first answer
+///   3–113 s after on all seven. The grace is longer than the longest of
+///   them, and it is already the window's measure of a pane that stalled.
+/// - `max_wait_ms` — six hours. A session window is five, so a session wall
+///   always resets inside it; a weekly or monthly wall never does. Traycer's
+///   fallback ladder waits the same by default (`fallback-policy.ts:365-379`).
+pub const QUOTA_WAIT_POLICY: QuotaWaitPolicy = QuotaWaitPolicy {
+    slack_ms: QUIET_GRACE_MS,
+    max_wait_ms: 6 * 60 * 60 * 1000,
+};
+
+/// One attempt's newest quota wall, read off its own `quota_walled` row:
+/// when its two witnesses met, the reset the provider named, and until when
+/// it explains the worker's silence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WallAt {
+    /// The `quota_walled` row.
+    pub wall: String,
+    pub observed_at_ms: i64,
+    pub resets_at_ms: Option<i64>,
+    /// Whether the reset is one to wait for: named, ahead of the witness,
+    /// and — with the slack — inside [`QUOTA_WAIT_POLICY`]`.max_wait_ms`.
+    pub reset_waitable: bool,
+    /// When the wall stops explaining the silence: its reset and the slack
+    /// when that reset is waitable, the longest wait from the witness
+    /// otherwise.
+    pub stands_until_ms: i64,
+}
+
+impl WallAt {
+    pub fn stands(&self, now_ms: i64) -> bool {
+        now_ms < self.stands_until_ms
+    }
+}
+
+/// The newest `quota_walled` row `dispatch_id` holds, as a [`WallAt`].
+///
+/// A wall is not forever. The row used to silence its attempt for good — no
+/// second wall, no quiet news — while the attempt went on: every worker this
+/// machine walled continued by itself a minute after its reset, and two of
+/// them died hours later on a network error the stall sweep never reported
+/// (dp-6390 and dp-6393, 2026-09-23: 42 and 77 minutes until somebody
+/// looked).
+pub fn newest_wall(run: &Run, dispatch_id: &str) -> Option<WallAt> {
+    let row = run.messages.iter().rev().find(|held| {
+        held.kind == MessageKind::QuotaWalled && held.dispatch.as_deref() == Some(dispatch_id)
+    })?;
+    let said: serde_json::Value = serde_json::from_str(row.body.as_str()).unwrap_or_default();
+    let observed_at_ms = said["observedAtMs"].as_i64().unwrap_or(row.created_ms);
+    let resets_at_ms = said["resetsAtMs"].as_i64();
+    let reset_waitable = resets_at_ms.is_some_and(|at| {
+        at > observed_at_ms
+            && at
+                .saturating_add(QUOTA_WAIT_POLICY.slack_ms)
+                .saturating_sub(observed_at_ms)
+                <= QUOTA_WAIT_POLICY.max_wait_ms
+    });
+    let stands_until_ms = match resets_at_ms {
+        Some(at) if reset_waitable => at.saturating_add(QUOTA_WAIT_POLICY.slack_ms),
+        _ => observed_at_ms.saturating_add(QUOTA_WAIT_POLICY.max_wait_ms),
+    };
+    Some(WallAt {
+        wall: row.id.clone(),
+        observed_at_ms,
+        resets_at_ms,
+        reset_waitable,
+        stands_until_ms,
+    })
+}
+
 /* ---- the transient-error continuation (t-4537) ------------------------ */
 
 /// The numbers a transient-error continuation is typed under — one table,
@@ -11691,8 +11778,8 @@ fn resume_may_have_typed(body: &serde_json::Value) -> bool {
 ///
 /// Only under a declared `--on-transient-error resume`; only for a live
 /// worker in its own seat, carrying an open dispatch, not the person's pane,
-/// not waiting on an answer it asked for, and not at a wall already written
-/// down (the wall's road wins). Then the attempt's own rows decide: one being
+/// not waiting on an answer it asked for, and not at a wall that still
+/// stands ([`newest_wall`] — the wall's road wins). Then the attempt's own rows decide: one being
 /// typed is [`NotResumed::InFlight`]; [`RESUME_POLICY`]`.attempts_max` of them
 /// is the ceiling; a marker whose words may already be on the line is never
 /// typed at again; and two continuations stand `retry_after_ms` apart.
@@ -11744,10 +11831,7 @@ pub fn resume_plan(
             worker.id
         ));
     }
-    if run.messages.iter().any(|held| {
-        held.kind == MessageKind::QuotaWalled
-            && held.dispatch.as_deref() == Some(dispatch.id.as_str())
-    }) {
+    if newest_wall(run, &dispatch.id).is_some_and(|wall| wall.stands(now_ms)) {
         return refused(format!(
             "dispatch {} is at its quota wall — the handover road answers it",
             dispatch.id
