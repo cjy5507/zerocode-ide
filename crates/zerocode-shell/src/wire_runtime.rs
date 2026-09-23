@@ -224,6 +224,38 @@ pub(crate) struct WireState {
     /// meter. `None` for a wire that never reports one (ACP says nothing
     /// about tokens), and the meter then does not stand.
     pub(crate) usage: Option<WireUsage>,
+    /// The helpers the session runs, while they run — the rows at the foot
+    /// of its page (t-6323 A6).
+    pub(crate) tasks: Vec<WireTask>,
+    /// How many times the helpers moved: the page's mark for them.
+    task_moves: u64,
+}
+
+/// A helper Claude Code runs for the session — a local agent, from its
+/// `task_started` frame to its end — in the words its frames give it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub(crate) struct WireTask {
+    pub(crate) task: String,
+    /// The Agent call that spawned it (`tool_use_id`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) call: Option<String>,
+    pub(crate) description: String,
+    /// Its own account of how far it got, once it gives one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) summary: Option<String>,
+    /// Its latest step: the progress frame's own words, or the tool it
+    /// last used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) step: Option<String>,
+    pub(crate) tokens: u64,
+    pub(crate) tools: u64,
+    /// When the window heard it start, in ms since the epoch — its row's
+    /// clock.
+    pub(crate) started_ms: u64,
+    /// Whether it runs in the background: a roll call that stops listing a
+    /// background helper ends it. Provenance, kept off the wire.
+    #[serde(skip)]
+    backgrounded: Option<bool>,
 }
 
 /// What a session says about the context it carries: the tokens the last
@@ -266,6 +298,8 @@ struct WireMark {
     /// The context reading the page's meter draws: a settled fact, so a new
     /// one is news even in a turn that said nothing else.
     usage: Option<WireUsage>,
+    /// The helpers' moves: a helper that started, stepped or ended is news.
+    tasks: u64,
     live: usize,
 }
 
@@ -279,6 +313,7 @@ impl WireMark {
             && self.mode == other.mode
             && self.commands == other.commands
             && self.usage == other.usage
+            && self.tasks == other.tasks
     }
 }
 
@@ -424,6 +459,7 @@ impl WireState {
             mode: self.mode.clone(),
             commands: self.commands.len(),
             usage: self.usage,
+            tasks: self.task_moves,
             live: self.live.len()
                 + self
                     .live
@@ -1306,6 +1342,11 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
                     state.mode = Some(mode.to_string());
                 }
             }
+            Some(subtype)
+                if subtype.starts_with("task_") || subtype == "background_tasks_changed" =>
+            {
+                claude_task(state, subtype, message);
+            }
             _ => {}
         },
         Some("stream_event") => {
@@ -1387,6 +1428,112 @@ fn claude_take(state: &mut WireState, message: &serde_json::Value) -> Vec<Outgoi
         _ => {}
     }
     out
+}
+
+/// Claude Code's helper frames (2.1.280, read off a live `-p` stream on
+/// 2026-09-23): `task_started` names the Agent call that spawned a local
+/// agent (`tool_use_id`), `task_progress` its tokens, tools and latest step,
+/// `task_updated` an end in its patch, `task_notification` the end itself,
+/// and `background_tasks_changed` the helpers still running in the
+/// background. Kept as the extension keeps them (2.1.280 `handleTask*`):
+/// local agents only; the latest step is the progress frame's own words
+/// where they differ from the description, else the tool it last used, and
+/// a frame with a summary moves the summary instead.
+fn claude_task(state: &mut WireState, subtype: &str, message: &serde_json::Value) {
+    let id = text_of(message.get("task_id"));
+    if id.is_empty() && subtype != "background_tasks_changed" {
+        return;
+    }
+    let words = |key: &str| Some(text_of(message.get(key))).filter(|said| !said.is_empty());
+    match subtype {
+        "task_started" => {
+            if message.get("task_type").and_then(serde_json::Value::as_str) != Some("local_agent") {
+                return;
+            }
+            state.tasks.retain(|task| task.task != id);
+            state.tasks.push(WireTask {
+                task: id,
+                call: words("tool_use_id"),
+                description: text_of(message.get("description")),
+                summary: None,
+                step: None,
+                tokens: 0,
+                tools: 0,
+                started_ms: epoch_ms(),
+                backgrounded: message
+                    .get("is_backgrounded")
+                    .and_then(serde_json::Value::as_bool),
+            });
+        }
+        "task_progress" => {
+            let Some(task) = state.tasks.iter_mut().find(|task| task.task == id) else {
+                return;
+            };
+            let usage = message.get("usage");
+            let count = |key: &str| {
+                usage
+                    .and_then(|usage| usage.get(key))
+                    .and_then(serde_json::Value::as_u64)
+            };
+            task.tokens = count("total_tokens").unwrap_or(task.tokens);
+            task.tools = count("tool_uses").unwrap_or(task.tools);
+            match words("summary") {
+                Some(summary) => task.summary = Some(summary),
+                None => {
+                    let step = words("description")
+                        .filter(|said| *said != task.description)
+                        .or_else(|| words("last_tool_name"));
+                    if step.is_some() {
+                        task.step = step;
+                    }
+                }
+            }
+        }
+        "task_updated" => {
+            let patch = message.get("patch");
+            let status = patch
+                .and_then(|patch| patch.get("status"))
+                .and_then(serde_json::Value::as_str);
+            let background = patch
+                .and_then(|patch| patch.get("is_backgrounded"))
+                .and_then(serde_json::Value::as_bool);
+            if matches!(status, Some("completed" | "failed" | "killed")) {
+                state.tasks.retain(|task| task.task != id);
+            } else if let (Some(background), Some(task)) = (
+                background,
+                state.tasks.iter_mut().find(|task| task.task == id),
+            ) {
+                task.backgrounded = Some(background);
+            } else {
+                return;
+            }
+        }
+        "task_notification" => state.tasks.retain(|task| task.task != id),
+        "background_tasks_changed" => {
+            let listed: Vec<&str> = message
+                .get("tasks")
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|task| task.get("task_id").and_then(serde_json::Value::as_str))
+                .collect();
+            state.tasks.retain(|task| {
+                task.backgrounded != Some(true) || listed.contains(&task.task.as_str())
+            });
+        }
+        _ => return,
+    }
+    state.task_moves += 1;
+}
+
+/// Now, in ms since the epoch — a helper's clock starts when its frame
+/// arrives, as the extension's does (`startTime: Date.now()`).
+fn epoch_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| {
+            u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
+        })
 }
 
 /// The context a Claude Code `result` line reports.
@@ -2067,6 +2214,8 @@ pub(crate) struct WireLog {
     /// How full the context is, when the session said (the composer's meter).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) usage: Option<WireUsage>,
+    /// The helpers at work (t-6323 A6).
+    pub(crate) tasks: Vec<WireTask>,
 }
 
 #[derive(Default)]
@@ -2095,6 +2244,7 @@ impl WireRuntime {
             session.kill();
             if let Ok(mut state) = session.state.lock() {
                 state.status = "ended";
+                state.tasks.clear();
             }
         }
         Ok(())
@@ -2180,6 +2330,8 @@ impl WireRuntime {
                 }
                 if let Ok(mut state) = reader.state.lock() {
                     state.flush_live();
+                    // The helpers ran inside the process that just left.
+                    state.tasks.clear();
                     if state.status != "failed" {
                         state.status = "ended";
                     }
@@ -2384,6 +2536,7 @@ pub(crate) fn log_of(session: &WireSession, after: u64) -> Result<WireLog, Strin
         commands: state.commands.clone(),
         version: state.version.clone(),
         usage: state.usage,
+        tasks: state.tasks.clone(),
     })
 }
 
@@ -2992,6 +3145,89 @@ mod tests {
 
     fn claude(state: &mut WireState, message: serde_json::Value) -> Vec<Outgoing> {
         take(Protocol::ClaudeStream, state, &message)
+    }
+
+    /// Claude Code's helper frames, in the shapes a live `-p` stream sent
+    /// them (2.1.280, 2026-09-23): a local agent is kept from its
+    /// `task_started` — under the Agent call that spawned it — through its
+    /// `task_progress` (tokens, tools, and its latest step: the frame's own
+    /// words where they differ from the description, else the tool it last
+    /// used; a summary once it gives one) to its end, which `task_updated`
+    /// or `task_notification` says. A background shell is no helper, and a
+    /// roll call that no longer lists a background helper ends it.
+    #[test]
+    fn claude_keeps_a_helper_from_its_start_to_its_end_under_the_call_that_spawned_it() {
+        let mut state = WireState::default();
+        let started = |task: &str, call: &str, background: bool| serde_json::json!({"type":"system","subtype":"task_started","task_id":task,"tool_use_id":call,"description":"count md files","subagent_type":"general-purpose","is_backgrounded":background,"task_type":"local_agent","session_id":"s1"});
+        claude(&mut state, started("a1", "toolu_1", true));
+        claude(
+            &mut state,
+            serde_json::json!({"type":"system","subtype":"task_started","task_id":"b1","tool_use_id":"toolu_2","description":"npm test","task_type":"local_bash","session_id":"s1"}),
+        );
+        assert_eq!(state.tasks.len(), 1, "a background shell is no helper");
+        let task = &state.tasks[0];
+        assert_eq!(
+            (task.task.as_str(), task.call.as_deref()),
+            ("a1", Some("toolu_1"))
+        );
+        assert_eq!(task.description, "count md files");
+        assert!(task.started_ms > 0);
+        let started_ms = task.started_ms;
+        let moved = state.mark();
+        claude(
+            &mut state,
+            serde_json::json!({"type":"system","subtype":"task_progress","task_id":"a1","tool_use_id":"toolu_1","description":"Running Count .md files","usage":{"total_tokens":12842,"tool_uses":1,"duration_ms":5522},"last_tool_name":"Bash","summary":null,"session_id":"s1"}),
+        );
+        let task = &state.tasks[0];
+        assert_eq!((task.tokens, task.tools), (12842, 1));
+        assert_eq!(task.step.as_deref(), Some("Running Count .md files"));
+        assert_eq!(task.started_ms, started_ms, "progress keeps the clock");
+        assert!(
+            !state.mark().settled_as(&moved),
+            "a helper's progress is news"
+        );
+        claude(
+            &mut state,
+            serde_json::json!({"type":"system","subtype":"task_progress","task_id":"a1","description":"count md files","usage":{"total_tokens":13000,"tool_uses":2,"duration_ms":6000},"last_tool_name":"Glob","session_id":"s1"}),
+        );
+        assert_eq!(state.tasks[0].step.as_deref(), Some("Glob"));
+        claude(
+            &mut state,
+            serde_json::json!({"type":"system","subtype":"task_progress","task_id":"a1","description":"count md files","usage":{"total_tokens":13100,"tool_uses":2,"duration_ms":6100},"last_tool_name":"Glob","summary":"Counting the files","session_id":"s1"}),
+        );
+        assert_eq!(
+            state.tasks[0].summary.as_deref(),
+            Some("Counting the files")
+        );
+        let log = serde_json::to_value(&state.tasks).unwrap();
+        assert_eq!(log[0]["call"], "toolu_1");
+        assert!(
+            log[0].get("backgrounded").is_none(),
+            "provenance stays off the wire"
+        );
+        claude(
+            &mut state,
+            serde_json::json!({"type":"system","subtype":"task_updated","task_id":"a1","patch":{"status":"completed","end_time":1},"session_id":"s1"}),
+        );
+        assert!(state.tasks.is_empty(), "an end in the patch ends it");
+        claude(&mut state, started("a2", "toolu_3", false));
+        claude(
+            &mut state,
+            serde_json::json!({"type":"system","subtype":"task_notification","task_id":"a2","tool_use_id":"toolu_3","status":"completed","summary":"**2**","session_id":"s1"}),
+        );
+        assert!(state.tasks.is_empty(), "the notification ends it");
+        claude(&mut state, started("a3", "toolu_4", true));
+        claude(&mut state, started("a4", "toolu_5", false));
+        claude(
+            &mut state,
+            serde_json::json!({"type":"system","subtype":"background_tasks_changed","tasks":[],"session_id":"s1"}),
+        );
+        let left: Vec<&str> = state.tasks.iter().map(|task| task.task.as_str()).collect();
+        assert_eq!(
+            left,
+            ["a4"],
+            "an unlisted background helper ends; a foreground one stays"
+        );
     }
 
     /// Claude Code's lines (2.1.272, read off this machine 2026-09-16): the

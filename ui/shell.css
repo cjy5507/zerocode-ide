@@ -13933,9 +13933,11 @@ details.worker-command {
 }
 
 /* A call still out: the agent's accent with its halo, blinking at the
- * extension's beat (`dotProgress`: 1s, linear). */
+ * extension's beat (`dotProgress`: 1s, linear) — and a helper at work
+ * wears the same dot (t-6323 A6). */
 .helper-turn.is-tool.is-live::before,
-.helper-group.is-live::before {
+.helper-group.is-live::before,
+.helper-agent-dot {
   background: var(--chat-accent);
   box-shadow: 0 0 0 var(--chat-dot-halo) color-mix(in srgb, var(--chat-accent) 18%, transparent);
   animation: helper-live-pulse 1s linear infinite;
@@ -14297,6 +14299,43 @@ details.worker-command {
  * 같은 이유로 제 규칙을 갖는다). */
 .helper-turn[hidden] {
   display: none;
+}
+
+/* A helper at work (t-6323 A6), the extension's live helper row
+ * (`focusFoldRow` with `dotProgress`): on the step's own rule — its gutter,
+ * and its dot where the rail's dot stands — what it is doing, cut to one
+ * line, then its measure in the quiet ink. */
+.helper-agent {
+  position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--chat-row-pad) 0 var(--chat-row-pad) var(--chat-gutter);
+  font-size: var(--chat-prose-size);
+  line-height: var(--chat-prose-leading);
+  color: var(--chat-work-ink);
+}
+
+.helper-agent-dot {
+  position: absolute;
+  left: var(--chat-rail-dot-x);
+  top: calc(var(--chat-row-pad) + var(--chat-rail-dot-y));
+  width: var(--chat-dot);
+  height: var(--chat-dot);
+  border-radius: 50%;
+}
+
+.helper-agent-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink-chalk);
+}
+
+.helper-agent-meta {
+  flex: none;
 }
 
 /* 묶음 머리는 도구 행의 자를 그대로 쓴다: `.is-step`이 여백과 레일과 점을
@@ -15244,6 +15283,7 @@ button.worker-composer-pill:hover {
 
   .helper-turn.is-tool.is-live::before,
   .helper-group.is-live::before,
+  .helper-agent-dot,
   .helper-status-mark {
     animation: none;
   }

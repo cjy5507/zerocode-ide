@@ -144,6 +144,12 @@ WANTED_CONSTANTS = [
         "keys": ["followGlide"],
         "pattern": rf"var {_NAME}=(\d+);function {_NAME}\(\{{atBottom:",
     },
+    # Helpers at work stand as this many rows before one sums the rest
+    # (`sD1`, in the split `AU0` makes).
+    {
+        "keys": ["agentRowsShown"],
+        "pattern": rf"var {_NAME}=(\d+);function {_NAME}\({_NAME}\)\{{if\({_NAME}\.length<={_NAME}\+1\)return\{{visible:{_NAME},overflow:\[\]\}}",
+    },
     # A wheel, a touch or a key is the person's intent for this long (`c25`,
     # after the two key sets and before the controls that keep a Space).
     {

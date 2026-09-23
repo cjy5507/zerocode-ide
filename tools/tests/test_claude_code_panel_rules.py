@@ -41,6 +41,7 @@ SCRIPT = (
     "function lF1({atBottom:$,scrolledAway:J,settlingSince:Z,now:X}){if(J)return null}"
     'var u25=new Set(["ArrowUp","PageUp","Home"]),m25=new Set(["ArrowDown","PageDown","End"]),c25=300,'
     "l25='button, [role=\"button\"], input',cF1=new WeakMap;"
+    "var sD1=3;function AU0($){if($.length<=sD1+1)return{visible:$,overflow:[]};return{visible:$.slice(0,sD1)}}"
 )
 # The word lists that script carries, as the snapshot keeps them.
 WORDS = {
@@ -125,6 +126,7 @@ class ScriptMeasures(unittest.TestCase):
                 "followSlack": 50,
                 "followGlide": 2000,
                 "followIntent": 300,
+                "agentRowsShown": 3,
             },
         )
         self.assertEqual(rules.words_of(SCRIPT), WORDS)

@@ -7949,10 +7949,10 @@ fn a_helpers_line_counts_its_tool_uses_whoever_counted_them() {
     );
     assert_eq!(
         window.matches("toolUsesWords(").count(),
-        4,
+        5,
         "the count's word grew a second speller — the definition, the row \
-         builder, the re-dress's fit and the page head are its only \
-         mentions"
+         builder, the re-dress's fit, the page head and the conversation's \
+         helpers at work (`helperSpent`, t-6323 A6) are its only mentions"
     );
     for language in ["en", "ja", "zh", "es"] {
         let catalog = block_after(window, &format!("  {language}: {{"));
@@ -17708,6 +17708,13 @@ fn the_conversation_wears_the_extensions_own_measures() {
             words("followControls").concat().replace('"', "\\\"")
         ),
     ];
+    // Helpers at work stand as the panel's own number of rows (t-6323 A6).
+    let wanted_rows = format!("const CHAT_AGENT_ROWS = {};", constant("agentRowsShown"));
+    if !source.contains(&wanted_rows) {
+        drifted.push(format!(
+            "the helpers' rows are not the panel's number — wanted `{wanted_rows}`"
+        ));
+    }
     for wanted in wanted_follow {
         if !source.contains(&wanted) {
             drifted.push(format!(

@@ -10819,14 +10819,14 @@ function wireRunStatus(status) {
 function holdWireState(run, log) {
   const before = run.wireLog
     ? JSON.stringify([run.wireLog.status, run.wireLog.asks, run.wireLog.model, run.wireLog.mode,
-      run.wireLog.modes, run.wireLog.commands, run.wireLog.live, run.wireLog.usage ?? null])
+      run.wireLog.modes, run.wireLog.commands, run.wireLog.live, run.wireLog.usage ?? null, run.wireLog.tasks ?? []])
     : "";
   run.wireLog = log;
   run.status = wireRunStatus(log.status);
   if (log.status === "ended" && run.endedAt === null) run.endedAt = Date.now();
   run.toolCalls = run.helper.turns.filter((turn) => turn.role === "tool").length;
   return before !== JSON.stringify([log.status, log.asks, log.model, log.mode, log.modes, log.commands,
-    log.live, log.usage ?? null]);
+    log.live, log.usage ?? null, log.tasks ?? []]);
 }
 
 /* A wire session said it has something new — a delta of what it is saying, a
@@ -11999,11 +11999,12 @@ function dressLastAnswer(list, run, newest) {
   list.__lastAnswer = newest.row;
 }
 
-/* The list's fixed tail — the status line the extension's panel keeps under
- * the last row (`spinnerRow`) — that every turn and streaming row stands
- * before. `null` while the page has none. */
+/* The list's fixed tail — the helpers at work (t-6323 A6), then the status
+ * line the extension's panel keeps under the last row (`spinnerRow`) — that
+ * every turn and streaming row stands before. `null` while the page has
+ * none. */
 function helperListTail(list) {
-  return list.querySelector(":scope > .helper-status");
+  return list.querySelector(":scope > .helper-agents, :scope > .helper-status");
 }
 
 function scrollHelperToBottom(list) {
@@ -12301,6 +12302,7 @@ function syncHelperTurns(list, run) {
     clearFocusGroups(list);
     for (const row of list.querySelectorAll(":scope > [data-turn]")) row.remove();
     list.__lastAnswer = null;
+    syncHelperTasks(list, run);
     syncStreamingTurns(list, run);
     return;
   }
@@ -12381,6 +12383,7 @@ function syncHelperTurns(list, run) {
   // them again a word at a time (09-16 → 09-20) only lagged behind it. The
   // wire's page streams the words themselves (`syncStreamingTurns`).
   dressLastAnswer(list, run, newest);
+  syncHelperTasks(list, run);
   syncStreamingTurns(list, run);
   // What the person said is cut at the clip when it stands taller — measured
   // once for every new row of this paint, and on the list's first frame when

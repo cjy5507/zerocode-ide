@@ -18,6 +18,7 @@ export async function openConversation(page, history, { status = "idle", live = 
         found: true, skipped: false, next: held.turns.length, turns: held.turns.slice(args.after ?? 0),
         status: held.status, asks: held.asks ?? [], live: held.live, agent: "claude", protocol: "claude-stream",
         models: [], mode: held.mode ?? null, modes: held.modes ?? [], commands: [], version: "2.1.280",
+        tasks: held.tasks ?? [],
       };
     };
     window.__ANSWER__.wire_stop = () => null;
@@ -733,6 +734,94 @@ export async function testConversationScroll(browser, origin, ok) {
       JSON.stringify(seen),
     );
     ok("A5: the scroll raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* A6 — a helper at work. The extension's live helper rows (2.1.280 `E85`,
+ * fed by `task_started` / `task_progress`): one row per local agent while it
+ * runs — the description, and after a colon its summary or latest step
+ * (`DU0`); its tokens and tools once there are tokens (`FU0`), and its time
+ * (`MU0`): `12.8k tokens · 1 tool · 1m 3s`. Past four rows the first three
+ * stand and one more sums the rest (`sD1`, `PU0`, `jU0`). The rows stand at
+ * the list's foot over the status line, and leave with the helper. A pane's
+ * helpers (`paneSubagents`) say their name and their tool count. */
+export async function testConversationAgents(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, [
+      { role: "user", text: "시작" },
+      { role: "tool", text: "Agent · count md files", tool: { call_id: "toolu_1", name: "Agent", input: "{\"description\":\"count md files\"}", is_error: false } },
+    ], { status: "working" });
+    const seen = await page.evaluate(async () => {
+      const seen = {};
+      const face = document.querySelector("#worker-view");
+      const settle = async () => {
+        await pollHelperPages();
+        for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      };
+      const rows = () => [...face.querySelectorAll(".helper-agents > .helper-agent")].map((row) => [
+        row.querySelector(".helper-agent-label")?.textContent ?? null,
+        row.querySelector(".helper-agent-meta")?.textContent ?? null,
+      ]);
+      seen.noneAtFirst = face.querySelector(".helper-agents") === null;
+      const now = Date.now();
+      window.__CONVERSATION__.tasks = [{
+        task: "a1", call: "toolu_1", description: "count md files", step: "Running Count .md files",
+        tokens: 12842, tools: 1, started_ms: now - 62_700,
+      }];
+      await settle();
+      seen.one = rows();
+      const block = face.querySelector(".helper-agents");
+      seen.atFoot = block?.nextElementSibling?.classList.contains("helper-status") === true;
+      seen.dotBlinks = block ? getComputedStyle(block.querySelector(".helper-agent-dot")).animationName : null;
+      window.__CONVERSATION__.tasks = [{ task: "a1", call: "toolu_1", description: "count md files", summary: "count md files", tokens: 0, tools: 0, started_ms: now - 4_200 }];
+      await settle();
+      seen.fresh = rows();
+      window.__CONVERSATION__.tasks = ["a1", "a2", "a3", "a4", "a5"].map((task, at) => ({
+        task, description: `helper ${at}`, tokens: at === 4 ? 0 : 1000 * (at + 1), tools: at, started_ms: now - 5_000,
+      }));
+      await settle();
+      seen.five = rows();
+      window.__CONVERSATION__.tasks = [];
+      await settle();
+      seen.gone = face.querySelector(".helper-agents") === null;
+      // A pane's helpers, read through the same shape.
+      paneSubagents.set(7, [
+        { id: "h1", name: "code-reviewer", state: "running", tool_calls: 12 },
+        { id: "h2", name: "done-helper", state: "done", tool_calls: 3 },
+      ]);
+      const paneTasks = typeof helperTasksOf === "function"
+        ? helperTasksOf({ term: 7, helper: { id: PANE_LOG_ID } })
+        : [];
+      seen.pane = paneTasks.map((task) => [helperTaskLabel(task), helperTaskMeta(task, Date.now())]);
+      seen.helperPage = typeof helperTasksOf === "function"
+        ? helperTasksOf({ term: 7, helper: { id: "agent-1" } }).length
+        : null;
+      paneSubagents.delete(7);
+      return seen;
+    });
+    ok(
+      "A6: a helper at work stands at the list's foot over the status line with the extension's words — its description and latest step, then its tokens, tools and time — blinking the live dot, and a fresh one with no tokens says only its time",
+      seen.noneAtFirst && seen.atFoot && seen.dotBlinks === "helper-live-pulse" &&
+        seen.one.length === 1 && seen.one[0][0] === "count md files: Running Count .md files" &&
+        /^12\.8k 토큰 · 도구 1회 · 1분 [34]초$/.test(seen.one[0][1]) &&
+        seen.fresh.length === 1 && seen.fresh[0][0] === "count md files" && /^[45]초$/.test(seen.fresh[0][1]),
+      JSON.stringify(seen),
+    );
+    ok(
+      "A6: past four helpers the first three stand and one row sums the rest, and the rows leave with the helpers",
+      JSON.stringify(seen.five.map(([label]) => label)) === JSON.stringify(["helper 0", "helper 1", "helper 2", "+2개 더"]) &&
+        /^4\.0k 토큰 · 도구 7회 · 합계 1\d초$/.test(seen.five[3][1]) && seen.gone,
+      JSON.stringify(seen),
+    );
+    ok(
+      "A6: a pane's running helpers say their name and tool count, a finished one is gone, and a helper's own page lists none",
+      JSON.stringify(seen.pane) === JSON.stringify([["code-reviewer", "도구 12회"]]) && seen.helperPage === 0,
+      JSON.stringify(seen),
+    );
+    ok("A6: the helpers raised no page errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }

@@ -487,3 +487,126 @@ function keepToFoot(list) {
   });
   list.addEventListener("scroll", () => noteChatScroll(list, state), { passive: true });
 }
+
+/* ---- a helper at work (t-6323 A6) ------------------------------------------
+ *
+ * The extension's live helper rows (2.1.280 `E85`, fed by the session's
+ * `task_started` / `task_progress` frames): one row per local agent while it
+ * runs — its description, and after a colon its own summary or its latest
+ * step (`DU0`); then its tokens and tools once it has spent any (`FU0`) and
+ * its time (`MU0`) — `12.3k tokens · 5 tools · 1m 3s`, redrawn each second.
+ * Past four rows the first three stand and one more sums the rest (`sD1`,
+ * `jU0`). The extension stands them under the fold that holds the Agent call
+ * (its Focus view); this list stands them at its foot, over the status line,
+ * which is where that fold is while the turn is out, and in either view — a
+ * list that leaves a helper's own rows out, as this one does, would show
+ * nothing while it works. A wire's rows are its session's frames
+ * (`wire_log.tasks`); a pane's are its helper rows (`paneSubagents`), which
+ * know a name and a tool count and no clock. The number of rows is the
+ * panel's own, held to its snapshot. */
+const CHAT_AGENT_ROWS = 3;
+
+/* The helpers at work on `run`'s page, as one shape: `{ key, description,
+ * said, tokens, tools, startedMs }` — `said` the summary or latest step,
+ * `startedMs` null where nothing says when it began. */
+function helperTasksOf(run) {
+  if (run.wire) {
+    return (run.wireLog?.tasks ?? []).map((task) => ({
+      key: task.task,
+      description: task.description,
+      said: task.summary ?? task.step ?? null,
+      tokens: task.tokens ?? 0,
+      tools: task.tools ?? 0,
+      startedMs: task.started_ms ?? null,
+    }));
+  }
+  if (run.helper?.id !== PANE_LOG_ID) return [];
+  return (paneSubagents.get(run.term) ?? [])
+    .filter((row) => row.state === "running")
+    .map((row) => ({ key: row.id, description: row.name, said: null, tokens: 0, tools: row.tool_calls ?? 0, startedMs: null }));
+}
+
+/* `DU0`: the description, or the description and what it last said. */
+function helperTaskLabel(task) {
+  return task.said === null || task.said === task.description ? task.description : `${task.description}: ${task.said}`;
+}
+
+/* `FU0`: the tokens and tools spent, once there are tokens. A row with no
+ * clock (a pane's helper, which has no tokens to wait for) says its tools
+ * alone. */
+function helperSpent(tokens, tools, clocked) {
+  const uses = toolUsesWords(tools);
+  if (tokens > 0) return [t("worker.agentTokens", "{{count}} 토큰", { count: formatTokens(tokens) }), uses];
+  return clocked ? [] : [uses];
+}
+
+/* `MU0`: what it spent, then its time. */
+function helperTaskMeta(task, now) {
+  const clocked = task.startedMs !== null;
+  return [...helperSpent(task.tokens, task.tools, clocked), clocked ? elapsedWords(now - task.startedMs) : ""]
+    .filter(Boolean).join(" · ");
+}
+
+/* `jU0`: the rows past the first three, summed — their tokens and tools once
+ * there are tokens, and their time together. */
+function helperOverflowMeta(tasks, now) {
+  const tokens = tasks.reduce((sum, task) => sum + task.tokens, 0);
+  const tools = tasks.reduce((sum, task) => sum + task.tools, 0);
+  const clocked = tasks.filter((task) => task.startedMs !== null);
+  const time = clocked.length > 0
+    ? t("worker.agentsCombined", "합계 {{time}}", { time: elapsedWords(clocked.reduce((sum, task) => sum + now - task.startedMs, 0)) })
+    : "";
+  return [...helperSpent(tokens, tools, clocked.length > 0), time].filter(Boolean).join(" · ");
+}
+
+/* One row: the live dot, the label, the meta — written only where the words
+ * changed, so a poll that brings nothing new touches nothing. */
+function paintHelperTaskRow(row, label, meta) {
+  if (row.childElementCount === 0) {
+    row.className = "helper-agent";
+    const dot = document.createElement("span");
+    dot.className = "helper-agent-dot";
+    dot.setAttribute("aria-hidden", "true");
+    const said = document.createElement("span");
+    said.className = "helper-agent-label";
+    const measure = document.createElement("span");
+    measure.className = "helper-agent-meta";
+    row.append(dot, said, measure);
+  }
+  writeTextContent(row.children[1], label);
+  writeTextContent(row.children[2], meta);
+}
+
+/* The rows at the list's foot, kept in step with the helpers at work. The
+ * block stands only while one does. */
+function syncHelperTasks(list, run, now = Date.now()) {
+  const tasks = helperTasksOf(run);
+  let block = list.querySelector(":scope > .helper-agents");
+  if (tasks.length === 0) {
+    block?.remove();
+    return;
+  }
+  if (!block) {
+    block = document.createElement("div");
+    block.className = "helper-agents";
+    list.insertBefore(block, list.querySelector(":scope > .helper-status"));
+  }
+  const shown = tasks.length <= CHAT_AGENT_ROWS + 1 ? tasks : tasks.slice(0, CHAT_AGENT_ROWS);
+  const rest = tasks.slice(shown.length);
+  const rows = shown.map((task) => [task.key, helperTaskLabel(task), helperTaskMeta(task, now)]);
+  if (rest.length > 0) {
+    rows.push(["+", t("worker.agentsMore", "+{{count}}개 더", { count: rest.length, s: rest.length === 1 ? "" : "s" }),
+      helperOverflowMeta(rest, now)]);
+  }
+  const keep = new Set(rows.map(([key]) => key));
+  for (const row of [...block.children]) if (!keep.has(row.dataset.task)) row.remove();
+  rows.forEach(([key, label, meta], at) => {
+    let row = block.children[at];
+    if (row?.dataset.task !== key) {
+      row = [...block.children].find((one) => one.dataset.task === key) ?? document.createElement("div");
+      row.dataset.task = key;
+      block.insertBefore(row, block.children[at] ?? null);
+    }
+    paintHelperTaskRow(row, label, meta);
+  });
+}
