@@ -29711,9 +29711,10 @@ details.task-board-section > summary {
   font-weight: 600;
 }
 
-/* 답할 우편: 편지 한 통이 한 장이고, 앞 레일이 기다림(끝난 워커는 멈춤)의 잉크다.
- * 둘째 줄은 두 줄에서 접히고, 단추는 행의 다음 걸음 — 작업 행의 「확인하기」와 같은
- * 알약이다. 답 칸은 펼칠 때만 선다. */
+/* 답할 우편: 편지 한 통이 두 줄짜리 한 장이고, 앞 레일이 기다림(끝난 워커는
+ * 멈춤)의 잉크다. 첫 줄 끝의 받은편지함 낱말은 배달 전일 때 기다림의 잉크를 입고,
+ * 둘째 줄은 한 줄에서 말줄임표로 물러나며 그 끝에 다음 걸음의 알약이 선다. 답 칸과
+ * 누른 뒤의 말은 그때만 선다. */
 .board-desk-letters {
   display: grid;
   gap: var(--space-2);
@@ -29726,7 +29727,7 @@ details.task-board-section > summary {
   display: grid;
   gap: var(--space-1);
   min-width: 0;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-1) var(--space-3);
   border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius-md);
   background: var(--surface-deck);
@@ -29738,11 +29739,11 @@ details.task-board-section > summary {
 }
 
 .board-desk-letter-line,
-.board-desk-letter-foot {
+.board-desk-letter-lead {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: var(--space-1) var(--space-2);
+  gap: var(--space-2);
+  min-width: 0;
   margin: 0;
   font-size: var(--text-xs);
 }
@@ -29761,31 +29762,38 @@ details.task-board-section > summary {
   white-space: nowrap;
 }
 
+.board-desk-letter-delivery,
 .board-desk-letter-age {
+  flex: none;
   color: var(--ink-label);
   font-variant-numeric: tabular-nums;
 }
 
+.board-desk-letter.is-pending .board-desk-letter-delivery {
+  color: var(--signal-wait-ink);
+}
+
 .board-desk-letter-body {
-  display: -webkit-box;
-  margin: 0;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
   color: var(--ink-chalk);
   font-size: var(--text-sm);
-  line-height: 1.5;
+  line-height: 1.6;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-desk-letter-note,
+.board-desk-unseated {
+  margin: 0;
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
   overflow-wrap: anywhere;
 }
 
-.board-desk-letter-foot {
-  justify-content: space-between;
-  color: var(--ink-label);
-  font-size: var(--text-2xs);
-}
-
-.board-desk-letter.is-pending .board-desk-letter-delivery {
-  color: var(--signal-wait-ink);
+.board-desk-unseated {
+  margin-bottom: var(--space-2);
 }
 
 .board-desk-letter-act {
@@ -29873,6 +29881,8 @@ details.task-board-section > summary {
 
 .board-desk-letter-body[hidden],
 .board-desk-letter-act[hidden],
+.board-desk-letter-note[hidden],
+.board-desk-unseated[hidden],
 .board-desk-reply[hidden],
 .board-desk-reply-error[hidden],
 .board-desk-letters-more[hidden] {
@@ -29895,7 +29905,7 @@ details.task-board-section > summary {
   gap: var(--space-1);
   width: 100%;
   min-width: 0;
-  padding: var(--space-2) var(--space-3);
+  padding: var(--space-1) var(--space-3);
   border: var(--rule-width) solid var(--edge-rule);
   border-radius: var(--radius-md);
   background: var(--surface-deck);
@@ -29950,9 +29960,18 @@ details.task-board-section > summary {
   font-variant-numeric: tabular-nums;
 }
 
+.board-desk-worker-what {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  min-width: 0;
+}
+
 .board-desk-worker-task {
+  max-width: 100%;
   overflow: hidden;
-  font-size: var(--text-sm);
+  font-size: var(--text-xs);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -29966,11 +29985,16 @@ details.task-board-section > summary {
 /* 과업 흐름: 흐름의 다섯 단계는 작은 꺾쇠로 이어지고, 멈춰 선 셋은 한 칸 떨어져
  * 선다. 과업이 있는 멈춘 단계만 제 신호의 잉크를 입는다. 누른 단계는 필터 알약과
  * 같은 옷(보기의 색)이다. */
-.board-desk-stages {
+.board-desk-stages,
+.board-desk-stage-run {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--space-1);
+}
+
+.board-desk-stages {
+  gap: var(--space-2) var(--space-4);
 }
 
 .board-desk-stage {
@@ -30018,10 +30042,6 @@ details.task-board-section > summary {
   border-top: var(--rule-width) solid var(--ink-glyph);
   border-right: var(--rule-width) solid var(--ink-glyph);
   transform: translateY(-50%) rotate(45deg);
-}
-
-.board-desk-stage.is-flow + .board-desk-stage:not(.is-flow) {
-  margin-left: var(--space-4);
 }
 
 .board-desk-stage.is-wait {

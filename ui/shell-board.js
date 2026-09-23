@@ -24,7 +24,7 @@ const DESK = Object.freeze({
   ambientEveryMs: 60_000,
   /* 답할 우편이 접히기 전에 보이는 통 수. 나머지는 「N통 더 보기」 뒤에 선다 —
    * 우편이 스무 통이어도 작업 목록이 화면 밖으로 밀려나지 않게. */
-  mailShown: 6,
+  mailShown: 5,
 });
 
 /* 원장의 데스크 읽기(`board_desk`): 판 위의 런, 그 과업의 단계와 수. 1초
@@ -309,11 +309,20 @@ const DESK_QUIET_REASONS = Object.freeze({
   judged: { key: "board.desk.quietJudged", word: "멈춘 까닭을 따로 판정함" },
 });
 
-/* 받은편지함의 세 상태. */
+/* 받은편지함의 세 상태: 행의 첫 줄에 서는 짧은 낱말과, 그 낱말의 팁이 되는 문장. */
 const DESK_DELIVERY = Object.freeze({
-  pending: { key: "board.desk.deliveryPending", word: "배달 전 · 코디네이터가 아직 안 읽음" },
-  delivered: { key: "board.desk.deliveryDelivered", word: "받음 · 묶음 {{delivery}}" },
-  acked: { key: "board.desk.deliveryAcked", word: "받아서 확인함 · 아직 답 없음" },
+  pending: {
+    key: "board.desk.deliveryPendingShort", word: "배달 전",
+    tip: { key: "board.desk.deliveryPending", word: "배달 전 · 코디네이터가 아직 안 읽음" },
+  },
+  delivered: {
+    key: "board.desk.deliveryDeliveredShort", word: "받음 {{delivery}}",
+    tip: { key: "board.desk.deliveryDelivered", word: "받음 · 묶음 {{delivery}}" },
+  },
+  acked: {
+    key: "board.desk.deliveryAckedShort", word: "확인함",
+    tip: { key: "board.desk.deliveryAcked", word: "받아서 확인함 · 아직 답 없음" },
+  },
 });
 
 /* 편지의 둘째 줄: 질문은 제 말, 소식은 원장이 적은 사실. */
@@ -342,12 +351,15 @@ function deskLetterAct(letter, seat) {
   return letter.delivery === "delivered" && letter.delivery_id ? "ack" : null;
 }
 
+/* 편지 한 통은 두 줄이다: 종류·누구·받은편지함 상태·나이, 그 아래 둘째 줄과 다음
+ * 걸음의 단추. 보냄·확인함·실패처럼 누른 뒤의 말은 그때만 셋째 줄로 선다. */
 function deskLetterRow(view) {
   const row = deskElement("li", "board-desk-letter");
   const line = deskElement("p", "board-desk-letter-line");
   line.append(agentGraphStateMark("needs-attention"), deskElement("strong", "board-desk-letter-kind"),
-    deskElement("span", "board-desk-letter-who"), deskElement("span", "board-desk-letter-age"));
-  const foot = deskElement("p", "board-desk-letter-foot");
+    deskElement("span", "board-desk-letter-who"), deskElement("span", "board-desk-letter-delivery"),
+    deskElement("span", "board-desk-letter-age"));
+  const lead = deskElement("p", "board-desk-letter-lead");
   const act = deskElement("button", "board-desk-letter-act");
   act.type = "button";
   act.onclick = () => {
@@ -361,8 +373,8 @@ function deskLetterRow(view) {
       if (draft.open) row.querySelector(".board-desk-reply-field")?.focus();
     } else void ackDeskBatch(view, letter);
   };
-  foot.append(deskElement("span", "board-desk-letter-delivery"), act);
-  row.append(line, deskElement("p", "board-desk-letter-body"), foot);
+  lead.append(deskElement("span", "board-desk-letter-body"), act);
+  row.append(line, lead, deskElement("p", "board-desk-letter-note"));
   return row;
 }
 
@@ -471,13 +483,15 @@ function paintDeskLetter(row, letter, seat, now, view) {
   const draft = letter.kind === "question" ? deskDrafts.get(letter.id) : null;
   const ack = letter.delivery_id ? deskAcks.get(letter.delivery_id) : null;
   const delivery = DESK_DELIVERY[letter.delivery] ?? DESK_DELIVERY.pending;
-  writeTextContent(row.querySelector(".board-desk-letter-delivery"), draft?.sent
+  const where = row.querySelector(".board-desk-letter-delivery");
+  writeTextContent(where, t(delivery.key, delivery.word, { delivery: letter.delivery_id ?? "" }));
+  writeAttribute(where, "data-tip", t(delivery.tip.key, delivery.tip.word, { delivery: letter.delivery_id ?? "" }));
+  const note = row.querySelector(".board-desk-letter-note");
+  const said = ack?.error || (draft?.sent
     ? t("board.desk.replySent", "답을 보냄 · 원장에 적히면 목록에서 빠져요")
-    : ack?.sent
-      ? t("board.desk.ackSent", "묶음을 확인함 · 원장에 적히면 목록에서 빠져요")
-      : !seat && !isPopout
-        ? t("board.desk.noSeat", "이 창에 그 런의 코디네이터 자리가 없어 여기서는 답할 수 없어요")
-        : t(delivery.key, delivery.word, { delivery: letter.delivery_id ?? "" }));
+    : ack?.sent ? t("board.desk.ackSent", "묶음을 확인함 · 원장에 적히면 목록에서 빠져요") : "");
+  writeTextContent(note, said);
+  writeHidden(note, said === "");
   const act = row.querySelector(".board-desk-letter-act");
   const does = deskLetterAct(letter, seat);
   writeHidden(act, does === null || Boolean(draft?.sent) || Boolean(ack?.sent));
@@ -505,7 +519,6 @@ function paintDeskLetter(row, letter, seat, now, view) {
     writeTextContent(error, draft?.error ?? "");
     writeHidden(error, !draft?.error);
   }
-  if (ack?.error) writeTextContent(row.querySelector(".board-desk-letter-delivery"), ack.error);
 }
 
 function paintDeskMail(block, now, view) {
@@ -526,6 +539,15 @@ function paintDeskMail(block, now, view) {
   }
   const seats = new Map((deskLedger.runs ?? []).map((run) => [run.run, run.seat === true]));
   const shown = deskChoice.mailAll ? letters : letters.slice(0, DESK.mailShown);
+  let unseated = body.querySelector(":scope > .board-desk-unseated");
+  if (!unseated) {
+    unseated = deskElement("p", "board-desk-unseated");
+    body.prepend(unseated);
+  }
+  const strangers = !isPopout && shown.some((letter) => !(seats.get(letter.run) ?? false));
+  writeTextContent(unseated, strangers
+    ? t("board.desk.noSeat", "이 창에 그 런의 코디네이터 자리가 없어 여기서는 답할 수 없어요") : "");
+  writeHidden(unseated, !strangers);
   const held = new Map([...list.children].map((node) => [node.dataset.letter, node]));
   reconcileElementOrder(list, shown.map((letter) => {
     const row = held.get(deskLetterKey(letter)) ?? deskLetterRow(view);
@@ -598,7 +620,9 @@ function deskWorkerRow(view) {
   const line = deskElement("span", "board-desk-worker-line");
   line.append(agentGraphStateMark("idle"), deskElement("strong", "board-desk-worker-id"),
     deskElement("span", "board-desk-worker-health"), deskElement("span", "board-desk-worker-age"));
-  button.append(line, deskElement("span", "board-desk-worker-task"), deskElement("span", "board-desk-worker-facts"));
+  const what = deskElement("span", "board-desk-worker-what");
+  what.append(deskElement("span", "board-desk-worker-task"), deskElement("span", "board-desk-worker-facts"));
+  button.append(line, what);
   button.onclick = () => {
     const term = row.__term;
     if (term != null) selectTaskBoardMember(view, `agent:term:${term}`);
@@ -726,17 +750,22 @@ function paintDeskPipeline(block, now, view) {
   if (!strip) {
     strip = deskElement("div", "board-desk-stages");
     strip.setAttribute("role", "group");
+    // The flow and the stuck stages are two runs of chips, so a narrow block
+    // breaks between them rather than inside either.
+    strip.append(deskElement("span", "board-desk-stage-run is-flow"), deskElement("span", "board-desk-stage-run"));
     body.replaceChildren(strip, deskElement("ol", "board-desk-tasks"), deskElement("p", "board-desk-more"));
   }
   writeAttribute(strip, "aria-label", t("board.desk.pipeline", "과업 흐름 · {{count}}", { count: total }));
   let open = deskChoice.stage === undefined ? deskDefaultStage(counts) : deskChoice.stage;
   if (open && (counts.get(open) ?? 0) === 0) open = deskDefaultStage(counts);
-  const chips = DESK_STAGES.map((stage) => {
-    const chip = deskStageChip(strip, stage, counts, view);
-    writeAttribute(chip, "aria-pressed", String(open === stage.id));
-    return chip;
-  });
-  reconcileElementOrder(strip, chips);
+  const [flowRun, stuckRun] = strip.children;
+  for (const [run, flow] of [[flowRun, true], [stuckRun, false]]) {
+    reconcileElementOrder(run, DESK_STAGES.filter((stage) => stage.flow === flow).map((stage) => {
+      const chip = deskStageChip(run, stage, counts, view);
+      writeAttribute(chip, "aria-pressed", String(open === stage.id));
+      return chip;
+    }));
+  }
   const list = body.querySelector(".board-desk-tasks");
   const rows = open ? (ledger.tasks ?? []).filter((task) => task.stage === open) : [];
   const held = new Map([...list.children].map((node) => [node.dataset.task, node]));
