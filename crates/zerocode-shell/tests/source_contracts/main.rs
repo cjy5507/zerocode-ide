@@ -8911,6 +8911,42 @@ mod tests {
         );
     }
 
+    /// The window's half of a loan (t-6336): only an agent's open names the
+    /// pane it borrows for, a returned device takes that pane's mirrors off
+    /// the strip, and the status bar counts what is lent — in every catalog.
+    #[test]
+    fn an_agents_borrowed_devices_leave_the_strip_and_the_status_bar_counts_them() {
+        let window = window_source();
+        let opening = block_after(window, "async function openEmulatorTab(");
+        assert!(
+            opening.contains("borrower: caller === null ? null : from"),
+            "an agent's open no longer names the pane it borrows for:\n{opening}"
+        );
+        let switching = block_after(window, "async function switchEmulatorDevice(");
+        assert!(
+            switching.matches("...lent,").count() == 2,
+            "a stream start stopped carrying its borrower on one platform:\n{switching}"
+        );
+        let returned = block_after(window, r#"listen("emulator:loan-returned""#);
+        assert!(
+            returned.contains("one.borrower != null") && returned.contains("closeTab(tab.id)"),
+            "a returned device leaves its borrower's mirror standing:\n{returned}"
+        );
+        let markup = include_str!("../../../../ui/index.html");
+        assert!(
+            markup.contains(r#"<span class="sb-item" id="sb-loans" hidden>"#),
+            "the status bar lost its loan line, or shows it with nothing lent"
+        );
+        let i18n = include_str!("../../../../ui/shell-i18n.js");
+        for key in ["emulator.loans", "emulator.loansNow"] {
+            assert_eq!(
+                i18n.matches(&format!("\"{key}\":")).count(),
+                4,
+                "`{key}` is missing from one of the en/ja/zh/es catalogs"
+            );
+        }
+    }
+
     #[test]
     fn computer_use_routes_pages_and_devices_to_zerocodes_owned_surfaces() {
         let shell = shipped_backend();
@@ -10285,9 +10321,12 @@ mod tests {
         // the same period; the backend's table decides which knock is a check.
         // Thirteen since t-5807: the Jev dashboard's slow beat (`jevPoll`),
         // one zo process every thirty seconds while the tab is on stage.
+        // Fourteen since t-6336: the loan line's minute (`emulatorLoansTick`),
+        // an in-memory read that runs only while an agent's pane has a device
+        // lent.
         assert_eq!(
             window.matches(" = idlePoller({").count(),
-            13,
+            14,
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");

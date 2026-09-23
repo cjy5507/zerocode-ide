@@ -1983,8 +1983,13 @@ function paintEmulatorView(tab) {
  * `focus`는 이 여는 일이 화면을 가져가도 되는가다. 다른 체크아웃에 선
  * 에이전트의 거울(t-6379)은 안 된다: 그 탭은 화면에 없으니 그리지 않고,
  * 같은 기기의 스트림이 이미 있어 그 탭으로 합쳐질 때도 사람의 화면을 그
- * 탭으로 넘기지 않는다. */
-async function switchEmulatorDevice(tab, platform, id, { focus = true } = {}) {
+ * 탭으로 넘기지 않는다.
+ *
+ * `borrower`는 이 여는 일을 부탁한 에이전트의 판이다(t-6336) — 에이전트의
+ * open만 싣는다. 백엔드는 이 시작이 기기를 부팅했을 때만 그 판에 빌려 준
+ * 것으로 적고, 그 판의 일이 끝나면 끈다. 사람이 고른 기기, 사람이 다시 붙인
+ * 기기는 누구의 빌림도 아니다. */
+async function switchEmulatorDevice(tab, platform, id, { focus = true, borrower = null } = {}) {
   const epoch = (tab.emulatorEpoch ?? 0) + 1;
   tab.emulatorEpoch = epoch;
   tab.working = true;
@@ -2008,16 +2013,19 @@ async function switchEmulatorDevice(tab, platform, id, { focus = true } = {}) {
   try {
     // 기기를 대지 않고 부를 수 있다 — 새 탭이 그 길로 온다. 그때 고르는 일은
     // 백엔드의 몫이고(부팅된 것 우선), 창은 그것이 답한 이름을 입는다.
+    const lent = borrower === null ? {} : { borrower };
     const said =
       platform === "android"
         ? await invoke("start_android_stream", {
             ...(id ? { avd: id } : {}),
             ...(binaryDoor ? { onFrame: binaryDoor.channel } : {}),
+            ...lent,
           })
         : await invoke("start_emulator_stream", {
             ...(id ? { udid: id } : {}),
             ...(tab.viewportLongEdge ? { viewport: { longEdgePx: tab.viewportLongEdge } } : {}),
             ...(binaryDoor ? { onFrame: binaryDoor.channel } : {}),
+            ...lent,
           });
     if (tab.emulatorEpoch !== epoch || !tabs.includes(tab)) {
       binaryDoor?.dispose();
@@ -2747,6 +2755,8 @@ async function openEmulatorTab(platform = "ios", device, { from = null, agent = 
     emulatorEpoch: 0,
     ...(away ? { worktree: caller.worktree, pane: caller.pane } : {}),
     ...(stood === null ? {} : { pane: stood }),
+    // 누구의 거울인가(t-6336): 그 판의 일이 끝나 기기가 반납되면 이 탭이 걷힌다.
+    ...(caller === null ? {} : { borrower: from }),
   }, { focus: !away });
   if (stood !== null) persistStageLayouts();
   const tab = tabs.find((one) => one.id === id);
@@ -2758,7 +2768,10 @@ async function openEmulatorTab(platform = "ios", device, { from = null, agent = 
       if (tabs.includes(tab) && stillShowing(tab)) paintEmulatorView(tab);
     })
     .catch(() => {});
-  await switchEmulatorDevice(tab, platform, device, { focus: !away });
+  await switchEmulatorDevice(tab, platform, device, {
+    focus: !away,
+    borrower: caller === null ? null : from,
+  });
 }
 
 /* A Computer Use agent opens the exact same in-window surface as the palette.
@@ -2777,6 +2790,67 @@ listen("emulator:agent-open", (event) => {
   const from = Number.isInteger(payload.term) && payload.term >= 0 ? payload.term : null;
   void openEmulatorTab(platform, device, { from, agent: true });
 });
+
+/* A device an agent borrowed was returned (t-6336): its borrower's work
+ * ended, and the backend has already stopped its streams and put it down.
+ * The mirrors that agent opened of it go with it — a mirror of a device that
+ * is off stood for three hours on 09-23 (14:49–18:00). A mirror the person
+ * opened is theirs and stays. */
+listen("emulator:loan-returned", (event) => {
+  if (isPopout) return;
+  const { platform, device } = event?.payload ?? {};
+  if (typeof device !== "string" || device === "") return;
+  for (const tab of tabs.filter((one) => one.kind === "emulator"
+    && one.borrower != null
+    && one.platform === platform
+    && (one.deviceId === device || one.udid === device))) {
+    closeTab(tab.id);
+  }
+});
+
+/* 「빌린 기기 n · 마지막 사용」 — how many devices agents' panes borrowed and
+ * when one was last used (t-6336). Standing only while something is lent,
+ * and read again once a minute while it stands, because a borrowed device's
+ * last use moves with every door verb and nothing announces that. */
+const EMULATOR_LOANS_TICK_MS = 60_000;
+let emulatorLoans = { count: 0, lastUsedMs: null };
+
+function paintEmulatorLoans(summary) {
+  const count = Number.isSafeInteger(summary?.count) && summary.count > 0 ? summary.count : 0;
+  const lastUsedMs = Number.isFinite(summary?.lastUsedMs) ? summary.lastUsedMs : null;
+  emulatorLoans = { count, lastUsedMs };
+  const chip = el("sb-loans");
+  chip.hidden = count === 0;
+  if (count > 0) {
+    say(el("sb-loans-words"), () => {
+      const now = Date.now();
+      return lastUsedMs === null || now - lastUsedMs < 60_000
+        ? t("emulator.loansNow", "빌린 기기 {{count}} · 방금 사용", { count })
+        : t("emulator.loans", "빌린 기기 {{count}} · 마지막 사용 {{ago}} 전", {
+            count,
+            ago: agoWord(lastUsedMs, now),
+          });
+    });
+  }
+  emulatorLoansTick.sync();
+}
+
+function refreshEmulatorLoans() {
+  void invoke("emulator_loans").then(paintEmulatorLoans).catch(() => {});
+}
+
+const emulatorLoansTick = idlePoller({
+  wanted: () => emulatorLoans.count > 0,
+  every: EMULATOR_LOANS_TICK_MS,
+  tick: refreshEmulatorLoans,
+  onResume: refreshEmulatorLoans,
+});
+
+listen("emulator:loans", (event) => {
+  if (isPopout) return;
+  paintEmulatorLoans(event?.payload);
+});
+if (!isPopout) refreshEmulatorLoans();
 
 /* `zerocode-ssh open` — the shell is already connected when this arrives.
  *
