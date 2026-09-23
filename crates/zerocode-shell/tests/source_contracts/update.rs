@@ -482,3 +482,45 @@ fn zo_rides_in_the_release_bundle_and_the_boot_installs_it_beside_the_old_inode(
     );
     let _ = shipped_backend();
 }
+
+/// t-6428: leaving the window waits on the beat that already exists, and
+/// goes by the roads that already exist. The beat walks a 「끝나면」 armed or
+/// a question standing — reading a census only while a wait is armed — and
+/// a road that goes restarts through `relaunch_window`, the one restart
+/// road, or closes the main window; the four commands the window's question
+/// needs are registered.
+#[test]
+fn the_way_out_waits_on_the_beat_and_goes_by_the_one_restart_road() {
+    let backend = shipped_backend();
+    let beat = block_after(backend, "fn beat_standing_orders(");
+    assert!(
+        beat.contains("crate::cmd::appearance::beat_leaving(&beating);"),
+        "the way out is not walked on the beat:\n{beat}"
+    );
+    let watching = block_after(backend, "pub(crate) fn beat_leaving(");
+    assert!(
+        watching.contains("if !exit_runtime::watching() {")
+            && watching.contains("exit_runtime::waiting().then(|| take_census(app).busy())"),
+        "the beat reads a census when nothing waits:\n{watching}"
+    );
+    let leave = block_after(
+        backend,
+        "fn leave(app: &AppHandle, asking: exit_runtime::Asking)",
+    );
+    assert!(
+        leave.contains("relaunch_window(app.clone()") && leave.contains("window.close()"),
+        "a road that asked goes some other way:\n{leave}"
+    );
+    let main = strip_rust_comments(include_str!("../../src/main.rs"));
+    for command in [
+        "busy_census",
+        "leave_when_idle",
+        "leave_now",
+        "leave_cancel",
+    ] {
+        assert!(
+            main.contains(&format!("            {command},\n")),
+            "{command} is registered in generate_handler!"
+        );
+    }
+}

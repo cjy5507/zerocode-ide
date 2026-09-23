@@ -94,7 +94,7 @@ pub(crate) struct RestartCensus {
 
 /// The census as every asker speaks it: whether to ask at all, and the
 /// three numbers the question says.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Busy {
     pub(crate) busy: bool,
@@ -105,6 +105,29 @@ pub(crate) struct Busy {
     pub(crate) background: usize,
     /// Workers the window could not read: never heard, or no table.
     pub(crate) unknown: usize,
+    /// Commands running under every worker's pane, whatever its turn —
+    /// what 「끝나면」 waits out.
+    pub(crate) running: usize,
+    /// The first gap 「끝나면」 leaves at: nothing runs under any worker's
+    /// pane and nothing is unread. A turn under way with nothing running
+    /// under it is a gap — the cut is its reply in flight, which the
+    /// restart nudge picks up; a command cut is work done again.
+    pub(crate) gap: bool,
+}
+
+impl Default for Busy {
+    /// Nobody seated: nothing to ask about, and nothing to wait out.
+    fn default() -> Self {
+        Self {
+            busy: false,
+            workers: 0,
+            turning: 0,
+            background: 0,
+            unknown: 0,
+            running: 0,
+            gap: true,
+        }
+    }
 }
 
 impl RestartCensus {
@@ -119,8 +142,12 @@ impl RestartCensus {
                 (Turn::Unheard, _) | (Turn::Rest, None) => said.unknown += 1,
                 (Turn::Rest, Some(commands)) => said.background += commands.len(),
             }
+            said.running += one.commands.as_ref().map_or(0, Vec::len);
         }
         said.busy = said.turning + said.unknown + said.background > 0;
+        said.gap = self.workers.iter().all(|one| {
+            one.turn != Turn::Unheard && one.commands.as_ref().is_some_and(Vec::is_empty)
+        });
         said
     }
 }
@@ -308,17 +335,19 @@ fn file_name(program: &str) -> &str {
     program.rsplit(['/', '\\']).next().unwrap_or(program)
 }
 
-/// The goodbye's lines (t-6428 ①): one for the road and the census's
-/// numbers, then one per worker with its turn and what ran under it — the
+/// The goodbye's lines (t-6428 ①): one for the road, the census's numbers
+/// at the moment the window actually went and what the person chose when
+/// asked, then one per worker with its turn and what ran under it — the
 /// before-and-after measure of what leaving the window cut.
-pub(crate) fn goodbye_lines(road: &str, census: &RestartCensus) -> Vec<String> {
+pub(crate) fn goodbye_lines(road: &str, choice: &str, census: &RestartCensus) -> Vec<String> {
     let busy = census.busy();
     let mut lines = vec![format!(
-        "exit by {road} · workers {} · mid-turn {} · background {} · unknown {} · busy {} · \
-         census {} ms",
+        "exit by {road} · workers {} · mid-turn {} · background {} · running {} · unknown {} · \
+         busy {} · choice {choice} · census {} ms",
         busy.workers,
         busy.turning,
         busy.background,
+        busy.running,
         busy.unknown,
         if busy.busy { "yes" } else { "no" },
         census.took_ms
@@ -385,6 +414,34 @@ mod tests {
     }
 
     #[test]
+    fn the_gap_is_nothing_running_under_any_worker_and_nothing_unread() {
+        let census = |workers: Vec<WorkerCut>| {
+            RestartCensus {
+                workers,
+                took_ms: 0,
+            }
+            .busy()
+        };
+        // A turn under way with nothing running under it: busy, and a gap.
+        let thinking = census(vec![worker(Turn::Running, Some(&[]))]);
+        assert!(thinking.busy && thinking.gap, "{thinking:?}");
+        // A command under a turn, or under a turn at rest: no gap.
+        let gate = census(vec![
+            worker(Turn::Running, Some(&["cargo test"])),
+            worker(Turn::Rest, Some(&["just gate"])),
+        ]);
+        assert!(!gate.gap);
+        assert_eq!((gate.running, gate.background), (2, 1));
+        // Never heard, or nothing read: no gap — unknown is busy.
+        assert!(!census(vec![worker(Turn::Unheard, Some(&[]))]).gap);
+        assert!(!census(vec![worker(Turn::Running, None)]).gap);
+        // Nobody seated, or everyone at rest with nothing under them.
+        assert!(census(Vec::new()).gap);
+        let idle = census(vec![worker(Turn::Rest, Some(&[]))]);
+        assert!(idle.gap && !idle.busy);
+    }
+
+    #[test]
     fn a_command_is_said_in_a_few_words_without_its_shell_or_a_credential() {
         // Claude Code's tool shell: the command is the one it evals.
         assert_eq!(
@@ -439,13 +496,14 @@ mod tests {
             ],
             took_ms: 38,
         };
-        let lines = goodbye_lines("close", &census);
+        let lines = goodbye_lines("close", "gap", &census);
         assert_eq!(lines.len(), 3, "{lines:#?}");
         // The worker mid-turn is counted once, as a turn, whatever could be
         // read under it; its line says what could not.
         assert_eq!(
             lines[0],
-            "exit by close · workers 2 · mid-turn 1 · background 1 · unknown 0 · busy yes · census 38 ms"
+            "exit by close · workers 2 · mid-turn 1 · background 1 · running 1 · unknown 0 · \
+             busy yes · choice gap · census 38 ms"
         );
         assert_eq!(
             lines[1],
@@ -458,9 +516,10 @@ mod tests {
         );
         // Nobody seated: one line, so every exit is counted.
         assert_eq!(
-            goodbye_lines("terminate", &RestartCensus::default()),
+            goodbye_lines("terminate", "unasked", &RestartCensus::default()),
             vec![
-                "exit by terminate · workers 0 · mid-turn 0 · background 0 · unknown 0 · busy no · census 0 ms"
+                "exit by terminate · workers 0 · mid-turn 0 · background 0 · running 0 · unknown 0 · \
+                 busy no · choice unasked · census 0 ms"
                     .to_string()
             ]
         );

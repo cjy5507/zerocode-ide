@@ -1726,6 +1726,10 @@ pub(super) fn beat_standing_orders(app: &AppHandle) {
         // answer cannot go stale between the asking and the acting.
         let now_ms = now_epoch_ms();
         orchestration::tick(&window, &overrides, now_ms);
+        // The way out, on the same beat (t-6428): a 「끝나면」 armed goes at
+        // the first gap the census finds, and a question nobody answers
+        // goes when its time is up.
+        crate::cmd::appearance::beat_leaving(&beating);
         // The crash that becomes a task (t-3014 §2.4), on this same beat and
         // through the same road: it presents a seated leader's capability
         // the way the beat above presents one for `worker-start`.

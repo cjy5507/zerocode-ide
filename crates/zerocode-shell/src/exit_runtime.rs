@@ -59,7 +59,7 @@ impl RestartDoor {
             .map(|(door, _)| *door)
     }
 
-    fn word(self) -> &'static str {
+    pub(crate) fn word(self) -> &'static str {
         DOORS
             .iter()
             .find(|(door, _)| *door == self)
@@ -80,8 +80,166 @@ impl fmt::Display for ExitRoad {
     }
 }
 
-/// The road this window is leaving by, once one is named.
-static LEAVING: Mutex<Option<ExitRoad>> = Mutex::new(None);
+/// The two roads that ask before they go (t-6428): a restart button, and
+/// the main window's close. The others cannot ask — `terminate:` is heard
+/// only as the app ends — or are the window's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Asking {
+    Restart(Option<RestartDoor>),
+    Close,
+}
+
+impl Asking {
+    /// A road by the window's word for it — `restart`, with the door it
+    /// stands in, or `close`.
+    pub(crate) fn named(road: &str, door: Option<&str>) -> Option<Self> {
+        match road {
+            "restart" => Some(Self::Restart(door.and_then(RestartDoor::named))),
+            "close" => Some(Self::Close),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn patience(self) -> Patience {
+        match self {
+            Self::Restart(_) => RESTART_PATIENCE,
+            Self::Close => CLOSE_PATIENCE,
+        }
+    }
+
+    pub(crate) fn word(self) -> &'static str {
+        match self {
+            Self::Restart(_) => "restart",
+            Self::Close => "close",
+        }
+    }
+}
+
+/// How long a road that asks will wait, in one table (t-6428).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Patience {
+    /// The longest 「끝나면」 waits for the first gap: nothing running under
+    /// any worker's pane and nothing the window could not read.
+    pub(crate) gap_wait_ms: i64,
+    /// How long the question stands unanswered before the road goes anyway;
+    /// `None` stands until someone answers.
+    pub(crate) answer_ms: Option<i64>,
+    /// Whether a wait that runs out leaves anyway — the person asked to go —
+    /// or asks again.
+    pub(crate) overdue_leaves: bool,
+}
+
+/// A restart waits half an hour for the first gap, then asks again. Measured
+/// over the workers' own transcripts (09-16 – 09-24, 780 background
+/// commands): half end within 3.2 minutes, nine in ten within 14.7, and 97 %
+/// within 30 — a turn is not waited out (half run past 56 minutes), only
+/// what runs under it.
+const RESTART_PATIENCE: Patience = Patience {
+    gap_wait_ms: 30 * 60_000,
+    answer_ms: None,
+    overdue_leaves: false,
+};
+
+/// A close waits ten minutes (82 % of those commands end within it) and then
+/// goes, because closing is the person leaving; and its question stands one
+/// minute, so a close nobody is there to answer still closes.
+const CLOSE_PATIENCE: Patience = Patience {
+    gap_wait_ms: 10 * 60_000,
+    answer_ms: Some(60_000),
+    overdue_leaves: true,
+};
+
+/// What the person chose when asked, said back in the goodbye's line.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Choice {
+    /// Nothing asked: nothing was busy, or the road asks nobody.
+    #[default]
+    Unasked,
+    /// 「지금」: leave now, whatever runs.
+    Now,
+    /// 「끝나면」, and the first gap came.
+    Gap,
+    /// 「끝나면」, and the wait ran out on a road that leaves anyway.
+    Overdue,
+    /// The question stood unanswered for its whole time.
+    Unanswered,
+}
+
+/// Each choice's word in the goodbye's line, in one table.
+const CHOICES: [(Choice, &str); 5] = [
+    (Choice::Unasked, "unasked"),
+    (Choice::Now, "now"),
+    (Choice::Gap, "gap"),
+    (Choice::Overdue, "overdue"),
+    (Choice::Unanswered, "unanswered"),
+];
+
+impl Choice {
+    pub(crate) fn word(self) -> &'static str {
+        CHOICES
+            .iter()
+            .find(|(held, _)| *held == self)
+            .map_or("", |(_, word)| word)
+    }
+}
+
+/// A 「끝나면」 armed: which road, since when, and what its line last said
+/// (commands running, workers unread).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Wait {
+    asking: Asking,
+    since_ms: i64,
+    told: Option<(usize, usize)>,
+}
+
+/// The line a wait stands on the screen as: what still runs, what nobody
+/// could read, and since when — the window counts the minutes itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WaitLine {
+    pub(crate) road: &'static str,
+    pub(crate) running: usize,
+    pub(crate) unknown: usize,
+    pub(crate) since_ms: i64,
+    pub(crate) wait_ms: i64,
+}
+
+/// What the beat does about the way out, this second.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ExitBeat {
+    Nothing,
+    /// The wait's line moved.
+    Tell(WaitLine),
+    /// The wait ran out on a road that asks again.
+    AskAgain(Asking),
+    /// Go, by this road.
+    Leave(Asking),
+}
+
+/// The window's way out, as far as it has got.
+#[derive(Debug, Default)]
+struct Exiting {
+    road: Option<ExitRoad>,
+    /// A question standing, and since when.
+    question: Option<(Asking, i64)>,
+    wait: Option<Wait>,
+    choice: Choice,
+    /// The person chose to go, or the road went for them: the next close
+    /// passes without a question.
+    confirmed: bool,
+}
+
+static EXITING: Mutex<Exiting> = Mutex::new(Exiting {
+    road: None,
+    question: None,
+    wait: None,
+    choice: Choice::Unasked,
+    confirmed: false,
+});
+
+fn exiting() -> std::sync::MutexGuard<'static, Exiting> {
+    EXITING.lock().unwrap_or_else(|held| held.into_inner())
+}
 
 /// Name the road this window is leaving by, and answer the road it is.
 ///
@@ -90,19 +248,240 @@ static LEAVING: Mutex<Option<ExitRoad>> = Mutex::new(None);
 /// tauri's `Exit`: all three reach the goodbye, and the person closed the
 /// window.
 pub(crate) fn begin(road: ExitRoad) -> ExitRoad {
-    first(
-        &mut LEAVING.lock().unwrap_or_else(|held| held.into_inner()),
-        road,
-    )
+    first(&mut exiting().road, road)
 }
 
 fn first(held: &mut Option<ExitRoad>, road: ExitRoad) -> ExitRoad {
     *held.get_or_insert(road)
 }
 
+/// What the person chose on the way out, for the goodbye's line.
+pub(crate) fn choice() -> Choice {
+    exiting().choice
+}
+
+/// 「끝나면」: wait on this road for the first gap, from now.
+pub(crate) fn arm(asking: Asking, now_ms: i64) {
+    let mut state = exiting();
+    state.question = None;
+    state.wait = Some(Wait {
+        asking,
+        since_ms: now_ms,
+        told: None,
+    });
+}
+
+/// 「지금」: this road goes now, and says so.
+pub(crate) fn leave_now(asking: Asking) {
+    let _ = settle(&mut exiting(), asking, Choice::Now);
+}
+
+/// 「취소」: no question stands and nothing waits.
+pub(crate) fn cancel() {
+    let mut state = exiting();
+    state.question = None;
+    state.wait = None;
+}
+
+/// Whether anything on the way out needs the beat: a question standing or
+/// a wait armed.
+pub(crate) fn watching() -> bool {
+    let state = exiting();
+    state.question.is_some() || state.wait.is_some()
+}
+
+/// Whether a wait is armed — the one state the beat reads a census for.
+pub(crate) fn waiting() -> bool {
+    exiting().wait.is_some()
+}
+
+/// The beat's second (t-6428): `busy` is the census, read only while a wait
+/// is armed.
+pub(crate) fn beat(
+    now_ms: i64,
+    busy: Option<crate::orchestration::restart_census::Busy>,
+) -> ExitBeat {
+    step(&mut exiting(), now_ms, busy)
+}
+
+fn step(
+    state: &mut Exiting,
+    now_ms: i64,
+    busy: Option<crate::orchestration::restart_census::Busy>,
+) -> ExitBeat {
+    if let Some((asking, since_ms)) = state.question
+        && asking
+            .patience()
+            .answer_ms
+            .is_some_and(|limit| now_ms.saturating_sub(since_ms) >= limit)
+    {
+        return settle(state, asking, Choice::Unanswered);
+    }
+    let (Some(wait), Some(busy)) = (state.wait.clone(), busy) else {
+        return ExitBeat::Nothing;
+    };
+    if busy.gap {
+        return settle(state, wait.asking, Choice::Gap);
+    }
+    let patience = wait.asking.patience();
+    if now_ms.saturating_sub(wait.since_ms) >= patience.gap_wait_ms {
+        if patience.overdue_leaves {
+            return settle(state, wait.asking, Choice::Overdue);
+        }
+        state.wait = None;
+        return ExitBeat::AskAgain(wait.asking);
+    }
+    let told = (busy.running, busy.unknown);
+    if wait.told == Some(told) {
+        return ExitBeat::Nothing;
+    }
+    if let Some(held) = state.wait.as_mut() {
+        held.told = Some(told);
+    }
+    ExitBeat::Tell(WaitLine {
+        road: wait.asking.word(),
+        running: busy.running,
+        unknown: busy.unknown,
+        since_ms: wait.since_ms,
+        wait_ms: patience.gap_wait_ms,
+    })
+}
+
+fn settle(state: &mut Exiting, asking: Asking, choice: Choice) -> ExitBeat {
+    state.question = None;
+    state.wait = None;
+    state.choice = choice;
+    state.confirmed = true;
+    ExitBeat::Leave(asking)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::orchestration::restart_census::Busy;
+
+    const MINUTE: i64 = 60_000;
+
+    /// A census as the beat reads it: `running` commands under the panes,
+    /// `unknown` workers nobody could read, and whether that is a gap.
+    fn census(running: usize, unknown: usize) -> Busy {
+        Busy {
+            busy: running + unknown > 0,
+            workers: 2,
+            turning: 1,
+            background: 0,
+            running,
+            unknown,
+            gap: running == 0 && unknown == 0,
+        }
+    }
+
+    fn waiting_on(asking: Asking) -> Exiting {
+        Exiting {
+            wait: Some(Wait {
+                asking,
+                since_ms: 0,
+                told: None,
+            }),
+            ..Exiting::default()
+        }
+    }
+
+    #[test]
+    fn a_wait_leaves_at_the_first_gap_and_tells_its_line_only_when_it_moves() {
+        let toast = Asking::Restart(Some(RestartDoor::UpdateToast));
+        let mut state = waiting_on(toast);
+        assert_eq!(
+            step(&mut state, 1_000, Some(census(2, 0))),
+            ExitBeat::Tell(WaitLine {
+                road: "restart",
+                running: 2,
+                unknown: 0,
+                since_ms: 0,
+                wait_ms: 30 * MINUTE,
+            })
+        );
+        // The same numbers again: the line stands as it is.
+        assert_eq!(
+            step(&mut state, 2_000, Some(census(2, 0))),
+            ExitBeat::Nothing
+        );
+        assert!(matches!(
+            step(&mut state, 3_000, Some(census(1, 0))),
+            ExitBeat::Tell(line) if line.running == 1
+        ));
+        // A second nobody read a census for says nothing.
+        assert_eq!(step(&mut state, 4_000, None), ExitBeat::Nothing);
+        // The first gap: the road armed goes, and the goodbye says why.
+        assert_eq!(
+            step(&mut state, 5_000, Some(census(0, 0))),
+            ExitBeat::Leave(toast)
+        );
+        assert_eq!(state.choice, Choice::Gap);
+        assert!(state.confirmed && state.wait.is_none());
+    }
+
+    #[test]
+    fn a_restart_wait_that_runs_out_asks_again_and_a_close_wait_goes() {
+        let mut restart = waiting_on(Asking::Restart(None));
+        assert_eq!(
+            step(&mut restart, 30 * MINUTE, Some(census(1, 0))),
+            ExitBeat::AskAgain(Asking::Restart(None))
+        );
+        assert!(restart.wait.is_none() && !restart.confirmed);
+        assert_eq!(restart.choice, Choice::Unasked);
+        let mut close = waiting_on(Asking::Close);
+        assert_eq!(
+            step(&mut close, 10 * MINUTE, Some(census(1, 0))),
+            ExitBeat::Leave(Asking::Close)
+        );
+        assert_eq!(close.choice, Choice::Overdue);
+        // A worker nobody could read holds the gap back: unknown is busy.
+        let mut unread = waiting_on(Asking::Close);
+        assert!(matches!(
+            step(&mut unread, 1_000, Some(census(0, 1))),
+            ExitBeat::Tell(line) if line.unknown == 1 && line.running == 0
+        ));
+        assert!(unread.wait.is_some());
+    }
+
+    #[test]
+    fn a_close_question_nobody_answers_goes_when_its_minute_is_up() {
+        let mut close = Exiting {
+            question: Some((Asking::Close, 0)),
+            ..Exiting::default()
+        };
+        assert_eq!(step(&mut close, MINUTE - 1, None), ExitBeat::Nothing);
+        assert_eq!(
+            step(&mut close, MINUTE, None),
+            ExitBeat::Leave(Asking::Close)
+        );
+        assert_eq!(close.choice, Choice::Unanswered);
+        assert!(close.confirmed && close.question.is_none());
+        // A restart's question stands until somebody answers it.
+        let mut restart = Exiting {
+            question: Some((Asking::Restart(None), 0)),
+            ..Exiting::default()
+        };
+        assert_eq!(
+            step(&mut restart, 24 * 60 * MINUTE, None),
+            ExitBeat::Nothing
+        );
+    }
+
+    #[test]
+    fn the_window_names_a_road_and_the_goodbye_says_every_choice_by_one_word() {
+        assert_eq!(
+            Asking::named("restart", Some("update-toast")),
+            Some(Asking::Restart(Some(RestartDoor::UpdateToast)))
+        );
+        assert_eq!(Asking::named("close", None), Some(Asking::Close));
+        assert_eq!(Asking::named("quit", None), None);
+        for (choice, word) in CHOICES {
+            assert_eq!(choice.word(), word);
+        }
+        assert_eq!(Choice::default(), Choice::Unasked);
+    }
 
     #[test]
     fn the_first_road_named_is_the_road_the_window_left_by() {

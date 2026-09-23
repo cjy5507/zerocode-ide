@@ -3131,7 +3131,11 @@ pub(crate) fn window_exiting(
     if (first || !taken.workers.is_empty())
         && let Some(root) = BLACKBOX.get()
     {
-        for line in restart_census::goodbye_lines(&road.to_string(), &taken) {
+        for line in restart_census::goodbye_lines(
+            &road.to_string(),
+            crate::exit_runtime::choice().word(),
+            &taken,
+        ) {
             crate::note_window_event(root, &line);
         }
     }
