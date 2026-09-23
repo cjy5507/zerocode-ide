@@ -23,6 +23,9 @@ CSS = (
     ".menuButton_gGYT1w,.sendButton_gGYT1w{width:26px;height:26px}"
     ".sendButton_gGYT1w{border-radius:5px}"
     ".inputFooterV2_gGYT1w{gap:2px}"
+    ".checkbox_FvGYOg{margin:2px;width:1em}"
+    ".checkbox_FvGYOg:indeterminate:after{content:\"✽\"}"
+    ".checkbox_UxGN1Q{padding:2px;border:1px solid orange}"
     "html{--corner-radius-small:4px;--app-pill-min-height:18px;--nothing:1}"
 )
 
@@ -76,6 +79,16 @@ class RuleReading(unittest.TestCase):
             {"display": "inline-block", "width": "1.5em", "font-family": "monospace"},
         )
         self.assertEqual(rules.rule_named(self.rules, ".icon", "nowhere"), {})
+        # A state qualifies a landmark as an attribute does: of the modules
+        # that name a `.checkbox`, only the one that draws a mixed state.
+        self.assertEqual(
+            rules.rule_named(self.rules, ".checkbox", "checkbox:indeterminate"),
+            {"margin": "2px", "width": "1em"},
+        )
+        self.assertEqual(
+            rules.rule_named(self.rules, ".checkbox", "checkbox"),
+            {"margin": "2px", "width": "1em", "padding": "2px", "border": "1px solid orange"},
+        )
 
     def test_the_snapshot_names_its_source_and_refuses_a_missing_rule(self) -> None:
         with self.assertRaises(SystemExit):

@@ -11633,8 +11633,11 @@ function writeHidden(node, hidden) {
  * state turns. Every write is guarded, so a quiet poll costs no mutation. */
 function dressToolTurn(row, turn, run, spoken) {
   const words = toolWords(turn);
-  writeTextContent(row.querySelector(".helper-tool-name"), words.name);
-  writeTextContent(row.querySelector(".helper-tool-arg"), words.arg);
+  // A todo call is its list under the extension's head (A7): nothing beside
+  // the head, no result line, no generic body.
+  const todo = dressTodoRow(row, turn, run);
+  writeTextContent(row.querySelector(".helper-tool-name"), todo ? t("worker.todoHead", "할 일 갱신") : words.name);
+  writeTextContent(row.querySelector(".helper-tool-arg"), todo ? "" : words.arg);
   // A tool row is announced by the tool it ran (2.1.272) — the CLI's own
   // name for it, which the row already shows. Guarded like every other
   // write here: a quiet poll costs no mutation.
@@ -11654,7 +11657,7 @@ function dressToolTurn(row, turn, run, spoken) {
   writeClass(row, "is-live", output === undefined && run.status === "running" && turn.seq > spoken);
   writeClass(row, "is-done", output !== undefined && !failed);
   writeClass(row, "is-failed", failed);
-  if (output !== undefined) {
+  if (output !== undefined && !todo) {
     let result = row.querySelector(":scope > .helper-tool-result");
     if (!result) {
       result = document.createElement("p");
@@ -11672,6 +11675,7 @@ function dressToolTurn(row, turn, run, spoken) {
   // What the call line and the result line do not already say stands in the
   // row's body — the extension's box, each side cut at its clip with its
   // door (`dressToolBody`), never behind a fold a person must press first.
+  if (todo) return;
   dressToolBody(
     row,
     edits.length === 0 && chatFolds(words.input) ? words.input : "",
@@ -12176,7 +12180,7 @@ function attachFocusRow(list, row) {
   row.__group = group;
   group.__members += 1;
   accountFocusMember(group, row);
-  writeHidden(row, !group.__open);
+  writeHidden(row, !group.__open && !row.__standing);
   paintFocusGroup(group);
 }
 
@@ -12248,7 +12252,7 @@ function openFocusGroup(group, open) {
   group.__open = open;
   let row = group.nextElementSibling;
   while (row && row.__group === group) {
-    writeHidden(row, !open);
+    writeHidden(row, !open && !row.__standing);
     row = row.nextElementSibling;
   }
   paintFocusGroup(group);
@@ -12273,13 +12277,16 @@ function applyFocusView(list, on) {
   if (list.__focus === on) return;
   clearFocusGroups(list);
   list.__focus = on;
-  if (!on) return;
-  for (const row of [...list.children]) {
-    // 묶음 머리·스트리밍 행·상태 행은 턴이 아니다.
-    if (row.dataset.turn === undefined) continue;
-    if (isFocusActivityRow(row)) attachFocusRow(list, row);
-    else list.__focusOpen = null;
+  if (on) {
+    for (const row of [...list.children]) {
+      // 묶음 머리·스트리밍 행·상태 행은 턴이 아니다.
+      if (row.dataset.turn === undefined) continue;
+      if (isFocusActivityRow(row)) attachFocusRow(list, row);
+      else list.__focusOpen = null;
+    }
   }
+  // The newest todo list stands out of its fold, or goes back (A7).
+  standLatestTodo(list, on);
 }
 
 /* 전사를 장부에 맞춘다 — 통째로 다시 세우지 않고.
@@ -12383,6 +12390,7 @@ function syncHelperTurns(list, run) {
   // them again a word at a time (09-16 → 09-20) only lagged behind it. The
   // wire's page streams the words themselves (`syncStreamingTurns`).
   dressLastAnswer(list, run, newest);
+  standLatestTodo(list, focus);
   syncHelperTasks(list, run);
   syncStreamingTurns(list, run);
   // What the person said is cut at the clip when it stands taller — measured

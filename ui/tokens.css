@@ -2127,6 +2127,12 @@
   --chat-diff-leading: 1.5;
   --chat-user-clip-h: 60px;
   --chat-user-clip-fade: 50px;
+
+  /* A todo list's item (t-6323 A7), read off the extension's webview
+   * (2.1.280 `todoItem`): a done item at 70% (`.completed{opacity:.7}`), its
+   * box 2px off its words (`checkbox{margin:2px}`). */
+  --chat-todo-done-alpha: 0.7;
+  --chat-todo-box-gap: 2px;
 }
 
 /* The light treatment, which this product draws as GLASS.

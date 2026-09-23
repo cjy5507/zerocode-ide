@@ -826,3 +826,125 @@ export async function testConversationAgents(browser, origin, ok) {
     await page.close();
   }
 }
+
+/* A7 — the todo list. The extension draws a todo call as its list (2.1.280
+ * `qD1` / `PG0`) under the head 「Update Todos」: the items' content beside a
+ * box — ticked when done, `✽` under way, empty waiting — a done item faded
+ * and struck through, and no count, `activeForm` or result line. Every call
+ * is its own row. In the Focus view the newest call that has not failed
+ * stands out of its fold, out or back (`ew0`), and none stands when that
+ * call emptied the list. */
+export async function testConversationTodos(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const todos = (states) => JSON.stringify({
+      todos: states.map((status, at) => ({ content: `할 일 ${at + 1}`, status, activeForm: `하는 중 ${at + 1}` })),
+    }, null, 2);
+    const call = (id, states) => ({ role: "tool", text: "TodoWrite", tool: { call_id: id, name: "TodoWrite", input: todos(states), is_error: false } });
+    const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", input: "", is_error: false } });
+    await openConversation(page, [
+      { role: "user", text: "시작" },
+      call("t1", ["in_progress", "pending", "pending"]),
+      result("t1"),
+      { role: "tool", text: "Read · a.rs", tool: { call_id: "r1", name: "Read", input: "a.rs", is_error: false } },
+      { role: "tool_result", text: "fn a() {}", tool: { call_id: "r1", name: "Read", input: "", is_error: false } },
+      call("t2", ["completed", "in_progress", "pending"]),
+      result("t2"),
+      { role: "tool", text: "Read · b.rs", tool: { call_id: "r2", name: "Read", input: "b.rs", is_error: false } },
+      { role: "tool_result", text: "fn b() {}", tool: { call_id: "r2", name: "Read", input: "", is_error: false } },
+      { role: "assistant", text: "진행 중입니다." },
+    ]);
+    const seen = await page.evaluate(async () => {
+      const seen = {};
+      const call = (id, states) => ({
+        role: "tool", text: "TodoWrite",
+        tool: { call_id: id, name: "TodoWrite", input: JSON.stringify({ todos: states.map((status, at) => ({ content: `할 일 ${at + 1}`, status })) }), is_error: false },
+      });
+      const result = (id) => ({ role: "tool_result", text: "Todos have been modified successfully.", tool: { call_id: id, name: "TodoWrite", input: "", is_error: false } });
+      const face = document.querySelector("#worker-view");
+      const settle = async () => {
+        await pollHelperPages();
+        for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      };
+      const todoRows = () => [...face.querySelectorAll(".helper-turn.is-todo")];
+      const items = (row) => [...row.querySelectorAll(".helper-todo")].map((item) => {
+        const box = item.querySelector("input.helper-todo-box");
+        const content = item.querySelector(".helper-todo-content");
+        const look = getComputedStyle(content);
+        return {
+          text: content.textContent,
+          state: box.checked ? "checked" : box.indeterminate ? "mixed" : "empty",
+          disabled: box.disabled,
+          struck: look.textDecorationLine.includes("line-through"),
+          mark: getComputedStyle(box, "::after").content,
+        };
+      });
+      const rows = todoRows();
+      seen.rows = rows.length;
+      seen.second = rows[1] ? items(rows[1]) : null;
+      seen.heads = rows.map((row) => row.querySelector(".helper-tool-name")?.textContent);
+      seen.wantHead = t("worker.todoHead", "할 일 갱신");
+      seen.named = rows.map((row) => row.getAttribute("aria-label"));
+      seen.noActiveForm = !face.textContent.includes("하는 중");
+      seen.noGeneric = rows.every((row) => row.querySelector(".helper-tool-body, .helper-tool-result") === null);
+      seen.argEmpty = rows.every((row) => row.querySelector(".helper-tool-arg")?.textContent === "");
+      // The Focus view: the newest list stands out of its fold.
+      face.querySelector(".worker-focus").click();
+      await settle();
+      const shown = (row) => row && !row.hidden && row.getBoundingClientRect().height > 0;
+      const standing = () => todoRows().map(shown);
+      seen.focusFirst = shown(rows[0]);
+      seen.focusLatest = shown(rows[1]);
+      seen.readsFolded = [...face.querySelectorAll(".helper-turn.is-tool:not(.is-todo)")].every((row) => row.hidden);
+      // A newer list takes its place, and the one before goes back in.
+      const log = window.__CONVERSATION__;
+      log.turns.push(call("t3", ["completed", "completed", "in_progress"]), result("t3"));
+      await settle();
+      seen.afterThird = standing();
+      // A call still out stands already; one that failed gives way to the one
+      // before it. (A row is dressed again while it is out — while the run
+      // runs — so the turn is out for those two beats.)
+      log.status = "working";
+      log.turns.push(call("t4", ["completed", "completed", "completed"]));
+      await settle();
+      seen.whileOut = standing();
+      seen.outIsLive = todoRows().at(-1)?.classList.contains("is-live");
+      log.turns.push({ ...result("t4"), text: "InputValidationError", tool: { ...result("t4").tool, is_error: true } });
+      await settle();
+      log.status = "idle";
+      await settle();
+      seen.afterFailure = standing();
+      // A call that empties the list is a head alone, and nothing stands.
+      log.turns.push({ role: "tool", text: "TodoWrite", tool: { call_id: "t5", name: "TodoWrite", input: JSON.stringify({ todos: [] }), is_error: false } }, result("t5"));
+      await settle();
+      seen.emptied = standing();
+      seen.emptyHead = todoRows().at(-1)?.querySelector(".helper-todos") === null;
+      face.querySelector(".worker-focus").click();
+      await settle();
+      seen.allBack = todoRows().every(shown);
+      return seen;
+    });
+    ok(
+      "A7: a todo call draws its list under the extension's head — a disabled box ticked when done, mixed (`✽`) under way, empty waiting, a done item struck through — with no activeForm, no result line, no generic body and nothing beside the head, while the row is still named for its tool",
+      seen?.rows === 2 && JSON.stringify(seen.second?.map((item) => [item.text, item.state, item.disabled, item.struck])) ===
+        JSON.stringify([["할 일 1", "checked", true, true], ["할 일 2", "mixed", true, false], ["할 일 3", "empty", true, false]]) &&
+        seen.second?.[0].mark === "\"✓\"" && seen.second?.[1].mark === "\"✽\"" &&
+        seen.heads.every((head) => head === seen.wantHead) && seen.named.every((name) => name.includes("TodoWrite")) &&
+        seen.noActiveForm && seen.noGeneric && seen.argEmpty,
+      JSON.stringify(seen),
+    );
+    ok(
+      "A7: in the Focus view the newest list stands out of its fold while the older ones and the reads stay folded — a call still out stands at once, a failed one gives way to the one before it, a call that emptied the list leaves none standing — and off again every list stands",
+      seen?.focusFirst === false && seen.focusLatest === true && seen.readsFolded &&
+        JSON.stringify(seen.afterThird) === JSON.stringify([false, false, true]) &&
+        JSON.stringify(seen.whileOut) === JSON.stringify([false, false, false, true]) && seen.outIsLive === true &&
+        JSON.stringify(seen.afterFailure) === JSON.stringify([false, false, true, false]) &&
+        JSON.stringify(seen.emptied) === JSON.stringify([false, false, false, false, false]) && seen.emptyHead &&
+        seen.allBack,
+      JSON.stringify(seen),
+    );
+    ok("A7: the todo lists raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}

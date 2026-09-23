@@ -3587,6 +3587,8 @@ function agentVoice(id) {
     busy_word: row?.busy_word || t("worker.busy", "작업 중…"),
     // The verbs its spinner turns through while it works (t-6323 A4).
     spinner_verbs: Array.isArray(row?.spinner_verbs) ? row.spinner_verbs : [],
+    // The tool it keeps its todo list with (t-6323 A7).
+    todo_tool: row?.todo_tool ?? null,
   };
 }
 

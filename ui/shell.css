@@ -14338,6 +14338,76 @@ details.worker-command {
   flex: none;
 }
 
+/* A todo call's list (t-6323 A7), the extension's `todoList`: the items
+ * stacked a little apart, each a box beside its words; a done item faded
+ * and struck through in the quiet ink. The box is the extension's disabled
+ * checkbox, drawn by hand — a tick when done, `✽` a size smaller while under
+ * way, empty while it waits. */
+.helper-todos {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: 0;
+  padding: var(--space-2) 0;
+  list-style: none;
+}
+
+.helper-todo {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  border-radius: var(--radius-xs);
+  font-size: var(--chat-prose-size);
+  line-height: var(--chat-prose-leading);
+  color: var(--ink-chalk);
+}
+
+.helper-todo-box {
+  appearance: none;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 1em;
+  height: 1em;
+  margin: var(--chat-todo-box-gap);
+  border: 1px solid var(--chat-composer-edge);
+  border-radius: var(--radius-xs);
+  background: var(--chat-composer-bg);
+  font-size: inherit;
+  line-height: 1;
+  color: var(--ink-chalk);
+}
+
+.helper-todo-box:checked {
+  opacity: var(--chat-todo-done-alpha);
+}
+
+.helper-todo-box:checked::after {
+  content: "✓";
+  font-size: 0.9em;
+}
+
+.helper-todo-box:indeterminate::after {
+  content: "✽";
+  font-size: 0.8em;
+}
+
+.helper-todo-content {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+
+.helper-todo.is-completed {
+  opacity: var(--chat-todo-done-alpha);
+}
+
+.helper-todo.is-completed .helper-todo-content {
+  text-decoration: line-through;
+  color: var(--chat-work-ink);
+  opacity: var(--chat-todo-done-alpha);
+}
+
 /* 묶음 머리는 도구 행의 자를 그대로 쓴다: `.is-step`이 여백과 레일과 점을
  * 주고(위), 상태의 점은 도구 행과 같은 규칙에서 온다. 여기서 더하는 것은
  * 그 줄의 글자뿐이다. */

@@ -1172,7 +1172,7 @@ const stubBackend = ({ boot, pollers }) => {
           { mode: "bypassPermissions", reach: "bypass", label: "Bypass permissions", cycles: true, aliases: [] },
         ],
         wire: "claude-stream", wire_resumes: true, compact_command: "/compact", read_offset_base: 1, interrupt_key: "Escape",
-        spinner_verbs: boot.claude_spinner_verbs },
+        spinner_verbs: boot.claude_spinner_verbs, todo_tool: "TodoWrite" },
       { id: "codex", name: "Codex", favicon_domain: "openai.com",
         homepage_url: "https://github.com/openai/codex", installed: true,
         found_as: "codex", unsupported_here: false, missing_requirement: null,

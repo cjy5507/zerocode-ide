@@ -17584,6 +17584,9 @@ fn the_conversation_wears_the_extensions_own_measures() {
             "chat-user-clip-h",
             format!("{}px", constant("userMessageMaxHeight")),
         ),
+        // A todo call's list (t-6323 A7).
+        ("chat-todo-done-alpha", rule("todo completed", "opacity")),
+        ("chat-todo-box-gap", rule("todo checkbox", "margin")),
         ("agent-accent-claude", var("--app-claude-orange")),
         ("agent-send-claude", var("--app-claude-clay-button-orange")),
         ("chat-send-ink", var("--app-claude-ivory")),

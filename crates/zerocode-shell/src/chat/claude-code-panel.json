@@ -1,7 +1,7 @@
 {
   "source": "https://marketplace.visualstudio.com/_apis/public/gallery/publishers/anthropic/vsextensions/claude-code/2.1.280/vspackage",
   "version": "2.1.280",
-  "fetched_at": "2026-09-23T08:31:56+00:00",
+  "fetched_at": "2026-09-23T09:13:53+00:00",
   "stylesheet": "extension/webview/index.css",
   "script": "extension/webview/index.js",
   "vars": {
@@ -311,6 +311,22 @@
       "bottom": "0",
       "left": "0",
       "right": "0"
+    },
+    "todo completed": {
+      "opacity": ".7"
+    },
+    "todo checkbox": {
+      "appearance": "none",
+      "-webkit-appearance": "none",
+      "color": "var(--app-primary-foreground)",
+      "border": "1px solid var(--app-input-border)",
+      "background": "var(--app-input-background)",
+      "position": "relative",
+      "border-radius": "2px",
+      "flex-shrink": "0",
+      "width": "1em",
+      "height": "1em",
+      "margin": "2px"
     }
   },
   "constants": {

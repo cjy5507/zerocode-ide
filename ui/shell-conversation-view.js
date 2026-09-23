@@ -610,3 +610,85 @@ function syncHelperTasks(list, run, now = Date.now()) {
     paintHelperTaskRow(row, label, meta);
   });
 }
+
+/* ---- the todo list (t-6323 A7) ---------------------------------------------
+ *
+ * The extension draws a todo tool's call as its list (2.1.280 `qD1` / `PG0`):
+ * the head says 「Update Todos」 and nothing beside it, and under it each
+ * item's content beside a box — ticked when done, `✽` while under way, empty
+ * while it waits — a done item faded and struck through. Only the content:
+ * no count, no numbering, never the `activeForm`, and no result line (the
+ * list says what the result would). Every call is its own row with the whole
+ * list as that call left it; nothing is updated in place — the session's
+ * newest list (`todos`) is kept by the extension but drawn nowhere else. In
+ * the Focus view the newest list stands out of its fold (`ew0`): the newest
+ * call that has not failed — out or back — and none when that call emptied
+ * the list. Which tool is the todo tool is the catalog's fact (`todo_tool`):
+ * a CLI that names none keeps its generic row, and so does a call whose
+ * input is not a list, as the extension's falls back to its generic body. */
+function todosOf(turn, agent) {
+  const name = agentVoice(agent).todo_tool;
+  if (!name || turn.tool?.name !== name) return null;
+  let input;
+  try {
+    input = JSON.parse(turn.tool.input);
+  } catch {
+    return null;
+  }
+  return Array.isArray(input?.todos) ? input.todos.filter((todo) => typeof todo?.content === "string") : null;
+}
+
+/* The list itself — a disabled checkbox per item, so the state is read out as
+ * the box's own (checked, mixed, unchecked) rather than as a glyph. */
+function todoListNode(todos) {
+  const list = document.createElement("ul");
+  list.className = "helper-todos";
+  for (const todo of todos) {
+    const item = document.createElement("li");
+    item.className = todo.status === "completed" ? "helper-todo is-completed" : "helper-todo";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.className = "helper-todo-box";
+    box.disabled = true;
+    box.checked = todo.status === "completed";
+    box.indeterminate = todo.status === "in_progress";
+    const content = document.createElement("div");
+    content.className = "helper-todo-content";
+    content.textContent = todo.content;
+    item.append(box, content);
+    list.appendChild(item);
+  }
+  return list;
+}
+
+/* A todo call's row wears its list, once — its input never changes after the
+ * call stood; an emptied list is a head alone. True when the row is a todo
+ * row, so the generic body stays away. */
+function dressTodoRow(row, turn, run) {
+  if (row.__todos !== undefined) return row.__todos !== null;
+  row.__todos = todosOf(turn, run.agent);
+  if (row.__todos === null) return false;
+  row.classList.add("is-todo");
+  if (row.__todos.length > 0) row.appendChild(todoListNode(row.__todos));
+  return true;
+}
+
+/* In the Focus view the newest todo list stands out of its fold; the one
+ * before it goes back in. Asked once per paint, and it touches the page only
+ * when the one that stands changes. */
+function standLatestTodo(list, focus) {
+  const newest = focus ? [...list.querySelectorAll(":scope > .helper-turn.is-todo:not(.is-failed)")].at(-1) : null;
+  const latest = newest?.__todos?.length > 0 ? newest : null;
+  const before = list.__standingTodo ?? null;
+  if (before === latest) return;
+  if (before) {
+    before.__standing = false;
+    before.classList.remove("is-standing");
+    if (before.__group) writeHidden(before, !before.__group.__open);
+  }
+  list.__standingTodo = latest;
+  if (!latest) return;
+  latest.__standing = true;
+  latest.classList.add("is-standing");
+  writeHidden(latest, false);
+}

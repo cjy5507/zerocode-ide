@@ -91,6 +91,11 @@ WANTED = [
     },
     {"key": "userMessage truncationGradient", "selector": ".truncationGradient", "landmark": "expandableContainer"},
     {"key": "diff truncationGradient", "selector": ".truncationGradient", "landmark": "diffEditorWrapper"},
+    # A todo call's list (t-6323 A7): a done item's fade and the box's margin.
+    # Three modules name a `.checkbox`; the list's is the one that draws a
+    # mixed state (`✽` under way).
+    {"key": "todo completed", "selector": ".completed", "landmark": "todoList"},
+    {"key": "todo checkbox", "selector": ".checkbox", "landmark": "checkbox:indeterminate"},
 ]
 
 # The panel's measures that live in its SCRIPT: each found by a shape the
@@ -264,11 +269,16 @@ def declarations_of(body: str) -> dict[str, str]:
 
 
 def modules_with(rules: list[tuple[str, str]], landmark: str) -> set[str]:
-    """The hashes of the modules that define `landmark` as a class."""
+    """The hashes of the modules that define `landmark` as a class. A landmark
+    may carry a qualifier after its class — an attribute (`container[data-
+    permission-mode`) or a state (`checkbox:indeterminate`) — for a base name
+    every module shares: then only a module that writes the class with that
+    qualifier counts."""
+    name, qualifier = re.match(r"([\w-]+)(.*)", landmark).groups()
     found = set()
     for selector, _ in rules:
-        for match in re.finditer(r"\." + re.escape(landmark.split("[", 1)[0]) + r"_([A-Za-z0-9-]{6})\b", selector):
-            if "[" in landmark and landmark.split("[", 1)[1] not in selector:
+        for match in re.finditer(r"\." + re.escape(name) + r"_([A-Za-z0-9-]{6})\b", selector):
+            if qualifier and not selector[match.end():].startswith(qualifier):
                 continue
             found.add(match.group(1))
     return found

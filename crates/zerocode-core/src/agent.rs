@@ -1560,6 +1560,8 @@ pub struct AgentPresence {
     pub interrupt_key: Option<&'static str>,
     /// The verbs the CLI's spinner turns through ([`AgentVoice::spinner_verbs`]).
     pub spinner_verbs: &'static [&'static str],
+    /// The CLI's todo tool ([`AgentVoice::todo_tool`]).
+    pub todo_tool: Option<&'static str>,
 }
 
 /// How far a permission mode lets the agent act before it asks — the one
@@ -1691,6 +1693,11 @@ pub struct AgentVoice {
     /// and picked again as the turn goes on ([`CLAUDE_SPINNER_VERBS`]). Empty
     /// for a console that says one word (`busy_word`) the whole turn.
     pub spinner_verbs: &'static [&'static str],
+    /// The tool the CLI keeps its todo list with — a call whose input is
+    /// `{todos: [{content, status}]}` — which the conversation draws as that
+    /// list, as the extension draws `TodoWrite` (2.1.280 `qD1`). `None`
+    /// where the CLI has none or its shape was not read.
+    pub todo_tool: Option<&'static str>,
 }
 
 /// Claude Code's spinner verbs — the words its own screen and its panel say
@@ -1867,6 +1874,8 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // says it twice; the extension's Esc is the same interrupt).
             interrupt_key: Some("Escape"),
             spinner_verbs: CLAUDE_SPINNER_VERBS,
+            // The extension's own name for it (`XN="TodoWrite"`).
+            todo_tool: Some("TodoWrite"),
         },
     ),
     (
@@ -1904,6 +1913,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // The 0.156.0 binary names no interrupt key in its words.
             interrupt_key: None,
             spinner_verbs: &[],
+            todo_tool: None,
         },
     ),
     (
@@ -1932,6 +1942,9 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // Its status line: "Working (0s • esc to interrupt)" (tui/view.rs).
             interrupt_key: Some("Escape"),
             spinner_verbs: &[],
+            // zo-ide's `TodoWrite` (tools/task_tools.rs) takes the same
+            // `todos: [{content, status, activeForm}]`.
+            todo_tool: Some("TodoWrite"),
         },
     ),
     (
@@ -1960,6 +1973,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // Nor its interrupt key.
             interrupt_key: None,
             spinner_verbs: &[],
+            todo_tool: None,
         },
     ),
 ];
@@ -1979,6 +1993,7 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     read_offset_base: None,
     interrupt_key: None,
     spinner_verbs: &[],
+    todo_tool: None,
 };
 
 /// One agent's console, or the silent one for an agent the table does not
@@ -2076,6 +2091,7 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                 read_offset_base: agent_voice(spec.id).read_offset_base,
                 interrupt_key: agent_voice(spec.id).interrupt_key,
                 spinner_verbs: agent_voice(spec.id).spinner_verbs,
+                todo_tool: agent_voice(spec.id).todo_tool,
             }
         })
         .collect()
@@ -2313,6 +2329,12 @@ mod tests {
         for id in ["codex", "zo", "antigravity"] {
             assert!(super::agent_voice(id).spinner_verbs.is_empty(), "{id}");
         }
+        // The todo tool is named where its shape was read: Claude Code's and
+        // zo's `TodoWrite`; Codex's plan tool keeps another shape.
+        assert_eq!(super::agent_voice("claude").todo_tool, Some("TodoWrite"));
+        assert_eq!(super::agent_voice("zo").todo_tool, Some("TodoWrite"));
+        assert!(super::agent_voice("codex").todo_tool.is_none());
+        assert!(super::SILENT_CONSOLE.todo_tool.is_none());
     }
 
     use super::*;
