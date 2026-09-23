@@ -1,5 +1,43 @@
 # Changelog
 
+## [1.1.17] — 2026-09-23
+
+_since v1.1.16 (30 commits)_
+
+### feat
+- feat(zo): every OAuth login has a discovery row — xAI (an XAI_API_KEY or the Grok CLI's login) and Kimi Code — with one xAI credential resolution the client and the list share, and xAI's spending limit said as "no subscription or credits" (t-6248, C5)
+- feat(zo): 거부된 응답 뒤 공급자 폴백 — Anthropic 계열 refusal_fallback을 후보 목록으로, 두 번 거부면 quota와 같은 cross-provider 길로 넘기고 연속 거부 뒤 pre-arm, 폴백이 없으면 거부된 교환을 빼고 한 번 더 (t-6269)
+- feat(jev): what did not come back is a chip in words, and the ones a person clears are buttons to where they are cleared — one token table for the dashboard and the key check (t-6243 D5)
+- feat(jev): each feature's state is one chip, one sentence and the samples still owed, and the model is named once over the table (t-6243 D2)
+- feat(jev): a strip over the dashboard, the busiest features first and the unused ones folded into one row — the day's requests against the limit ride every refresh (t-6243 D1)
+- feat(orchestration): a worker briefing says its purpose first — ordinary engineering on the person's own repository, where product code may name refusals, safeguards or security tools without asking for any of them
+- feat(jev): the dashboard and the card speak a person's words — features, requests, response rate, accuracy and the bar for automatic use, not seats, rows, windows, thresholds, ledgers, probes and rising (t-6243 D0)
+- feat(jev): the challenger's row, its blind and its reservation — the day's share counts what is reserved, the judge sees two designs under no name, and a receipt outranks the comparison (t-6151, second cut)
+
+### fix
+- fix(zo): a provider client's debug line never carries its bearer, and the xAI credential tests read this machine's Grok login out of the way (t-6248 follow-up)
+- fix(zo): the pre-arm notice reads its threshold and cooldown from the runtime's constants — no "2" and no "~30m" spelled out beside REFUSAL_DRY_TURN_THRESHOLD and REFUSAL_DRY_COOLDOWN (t-6269 follow-up)
+- fix(shell): the system folder panel comes forward when it opens — the helper activates itself, raises the panel once it stands, and the window hands over activation cooperatively 350 ms after the spawn
+- fix(zo): a shipped model the provider's whole list no longer names is marked withdrawn — the picker and zo models say so, routing passes it over, and its family alias follows the living release or says there is none (t-6248, C4)
+- fix(jev): the samples bar is the reason while it counts, and a row keeps to three lines — nine features in use fit a 1080p screen with no sideways scroll (t-6243 D2 follow-up)
+- fix(jev): a small sample says its size, not a share — accuracy under half its window, a response rate under five rows, and a feature the door refused throughout (t-6243 D3)
+- fix(zo): a zo that started without a Claude login finds it at the next person's turn, or when the window's credentials change, and asks the model list again (t-6248, C3)
+- fix(zo): a skip is due the moment this process holds the credential the writer lacked, and stays quiet where nothing is configured (t-6248, C2)
+- fix(zo): a credential that is there but cannot be used is a failure, not a skip — only a machine with no login says "skipped" (t-6248, C1)
+
+### perf
+- perf(jev): the week is one picture of two lines — response rate and accuracy — drawn only from three days with values; the latency line leaves for its own column (t-6243 D4)
+
+### test
+- test(release): the flake list names the pending-steer resubmit's harness wait — it ran out under load 14 with a worker build beside it and passed alone three times
+- test(release): the flake list names the pty lane's foreground wait — it ran out under load 32 with the pty untouched and passed alone three times
+- test(shell): the folder panel's table names its raise delay, and the flake list names the headless login's wall-clock budget
+- test(release): the flake list names the session-recall search bound — it overran under load 46-120 with session_recall untouched and passed alone three times
+- test(zo): C3's stamp test takes the env lock — it points CLAUDE_CONFIG_DIR at its own login, and the next-turn test beside it read that login (t-6248, C3)
+- test(zo): the patch review replay asks the same patches under four task readings — the person's newest words, their last three, the model's plan, the turn's todo plan — and none ranks regret (t-6232)
+- test(zo): the cron registry takes its creation second as a parameter, and the wake-up test reads a known clock instead of the wall's — the one-in-sixty race at the minute boundary leaves the flake list (t-6230)
+
+
 ## [1.1.16] — 2026-09-23
 
 _since v1.1.15 (23 commits)_
