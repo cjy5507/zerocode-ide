@@ -2,7 +2,9 @@
 
 use std::path::Path;
 use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+#[cfg(any(test, not(unix)))]
+use std::time::Instant;
 
 use quick_xml::Reader;
 use quick_xml::XmlVersion;
@@ -45,6 +47,10 @@ pub(super) struct AndroidAxNode {
     focused: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bounds: Option<AndroidAxBounds>,
+    /// The display's rotation the dump was taken in (`<hierarchy
+    /// rotation="…">`, 0–3) — only the synthetic root carries it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rotation: Option<u32>,
     children: Vec<AndroidAxNode>,
 }
 
@@ -60,8 +66,14 @@ impl AndroidAxNode {
             enabled: None,
             focused: None,
             bounds: None,
+            rotation: None,
             children,
         }
+    }
+
+    /// The display's rotation the dump was taken in, when it said one.
+    pub(super) const fn rotation(&self) -> Option<u32> {
+        self.rotation
     }
 }
 
@@ -92,27 +104,16 @@ pub(super) fn run(binary: &Path, args: &[&str], max_bytes: Option<u64>) -> Resul
         uuid::Uuid::new_v4()
     ));
     let output = std::fs::File::create(&output_path).map_err(|error| error.to_string())?;
-    let mut child = crate::proc::quiet_command(binary)
+    let child = crate::proc::quiet_command(binary)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::from(output))
         .stderr(Stdio::null())
         .spawn()
         .map_err(|error| error.to_string())?;
-    let deadline = Instant::now() + COMMAND_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(25));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = std::fs::remove_file(&output_path);
-                return Err("Android 접근성 명령이 시간을 초과했습니다".to_string());
-            }
-        }
+    let Some(status) = wait_within(child, COMMAND_TIMEOUT) else {
+        let _ = std::fs::remove_file(&output_path);
+        return Err("Android 접근성 명령이 시간을 초과했습니다".to_string());
     };
     if !status.success() {
         let _ = std::fs::remove_file(&output_path);
@@ -130,6 +131,65 @@ pub(super) fn run(binary: &Path, args: &[&str], max_bytes: Option<u64>) -> Resul
     bytes
 }
 
+/// Wait for `child` to exit, at most `timeout`: its status, or `None` once
+/// the time is up and the child has been killed and reaped.
+///
+/// A thread waits on the child and hands its status over the moment it
+/// exits (t-6385). The 25 ms poll this replaces answered no sooner than its
+/// next wake: an adb call that takes 11–24 ms on an emulator waited 25, and
+/// a walk step drives a dozen of them — about 200 ms a step spent asleep.
+#[cfg(unix)]
+fn wait_within(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Option<std::process::ExitStatus> {
+    let pid = child.id();
+    let (done, exited) = std::sync::mpsc::channel();
+    let waiter = std::thread::Builder::new()
+        .name("android-ax-wait".to_string())
+        .spawn(move || {
+            let _ = done.send(child.wait());
+        });
+    if waiter.is_err() {
+        return None;
+    }
+    match exited.recv_timeout(timeout) {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(_)) => None,
+        Err(_) => {
+            // SAFETY: `pid` is this process's own child, not yet reaped —
+            // the waiter still holds it — so the id cannot name anyone else.
+            let pid = i32::try_from(pid).unwrap_or(i32::MAX);
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+            // The waiter reaps it; nothing is left behind.
+            let _ = exited.recv();
+            None
+        }
+    }
+}
+
+/// [`wait_within`] where no signal can end a child by its id: the poll.
+#[cfg(not(unix))]
+fn wait_within(
+    mut child: std::process::Child,
+    timeout: Duration,
+) -> Option<std::process::ExitStatus> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status),
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
+}
+
 pub(super) fn parse(xml: &str) -> Result<AndroidAxNode, String> {
     if xml.trim().is_empty() {
         return Err("Android 접근성 트리가 비어 있습니다".to_string());
@@ -139,6 +199,7 @@ pub(super) fn parse(xml: &str) -> Result<AndroidAxNode, String> {
     let mut stack: Vec<Option<AndroidAxNode>> = Vec::new();
     let mut roots = Vec::new();
     let mut elements = 0usize;
+    let mut rotation = None;
     loop {
         match reader.read_event() {
             Ok(Event::Start(start)) => {
@@ -149,6 +210,9 @@ pub(super) fn parse(xml: &str) -> Result<AndroidAxNode, String> {
                     count_element(&mut elements)?;
                     stack.push(Some(read_node(&start)?));
                 } else {
+                    if start.name().as_ref() == b"hierarchy" {
+                        rotation = hierarchy_rotation(&start)?;
+                    }
                     stack.push(None);
                 }
             }
@@ -175,7 +239,29 @@ pub(super) fn parse(xml: &str) -> Result<AndroidAxNode, String> {
     if !stack.is_empty() || roots.is_empty() {
         return Err("Android 접근성 XML이 완전하지 않습니다".to_string());
     }
-    Ok(AndroidAxNode::root(roots))
+    Ok(AndroidAxNode {
+        rotation,
+        ..AndroidAxNode::root(roots)
+    })
+}
+
+/// The rotation a dump's `<hierarchy>` says it was taken in (0–3), when it
+/// says one; anything else is no rotation.
+fn hierarchy_rotation(start: &BytesStart<'_>) -> Result<Option<u32>, String> {
+    for attribute in start.attributes() {
+        let attribute = attribute.map_err(|error| error.to_string())?;
+        if attribute.key.as_ref() == b"rotation" {
+            let value = attribute
+                .normalized_value(XmlVersion::Implicit1_0)
+                .map_err(|error| error.to_string())?;
+            return Ok(value
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|rotation| *rotation < 4));
+        }
+    }
+    Ok(None)
 }
 
 fn limit_exceeded(kind: &str, maximum: usize) -> String {
@@ -319,6 +405,75 @@ mod tests {
             parse(&wide)
                 .unwrap_err()
                 .contains(&format!("elements limit {MAX_ELEMENTS}"))
+        );
+    }
+
+    /// A dump says the display rotation it was taken in, and nothing else is
+    /// read as one (t-6385).
+    #[test]
+    fn a_dump_says_the_rotation_it_was_taken_in() {
+        let dump = |rotation: &str| {
+            parse(&format!(
+                r#"<?xml version='1.0'?><hierarchy rotation="{rotation}"><node text="설정" bounds="[0,0][10,10]"/></hierarchy>"#
+            ))
+            .unwrap()
+            .rotation()
+        };
+        assert_eq!(dump("1"), Some(1));
+        assert_eq!(dump("0"), Some(0));
+        assert_eq!(dump("7"), None);
+        assert_eq!(dump("sideways"), None);
+        let bare =
+            parse(r#"<hierarchy><node text="설정" bounds="[0,0][10,10]"/></hierarchy>"#).unwrap();
+        assert_eq!(bare.rotation(), None);
+        assert!(
+            !serde_json::to_value(&bare.children[0])
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("rotation"),
+            "only the dump's own root says a rotation"
+        );
+    }
+
+    /// A command is answered the moment it exits (t-6385): the 25 ms poll it
+    /// replaced answered a 30 ms command at its second wake, never before
+    /// 50 ms from its start. The clock starts once the command has started,
+    /// and the quickest of five is held to that, so a busy machine that slows
+    /// every start cannot turn a waiter into a poll.
+    #[cfg(unix)]
+    #[test]
+    fn a_finished_command_is_answered_without_waiting_for_a_poll() {
+        let millis: Vec<u128> = (0..5)
+            .map(|_| {
+                let child = crate::proc::quiet_command("/bin/sleep")
+                    .arg("0.03")
+                    .spawn()
+                    .expect("sleep starts");
+                let began = Instant::now();
+                wait_within(child, COMMAND_TIMEOUT).expect("sleep answers");
+                began.elapsed().as_millis()
+            })
+            .collect();
+        let quickest = millis.iter().min().copied().unwrap_or(u128::MAX);
+        assert!(quickest < 45, "a 30 ms command answered in {millis:?} ms");
+    }
+
+    /// A command past its time is ended and answered with nothing, however
+    /// long it meant to run.
+    #[cfg(unix)]
+    #[test]
+    fn a_command_past_its_time_is_ended_and_answers_nothing() {
+        let child = crate::proc::quiet_command("/bin/sleep")
+            .arg("5")
+            .spawn()
+            .expect("sleep starts");
+        let began = Instant::now();
+        assert!(wait_within(child, Duration::from_millis(100)).is_none());
+        assert!(
+            began.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            began.elapsed()
         );
     }
 

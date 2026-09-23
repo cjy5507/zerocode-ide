@@ -421,3 +421,122 @@ fn the_marks_a_set_of_screens_carries() {
     }
     super::ios_hid::release(&udid);
 }
+
+/// Register an Android device the way its pane does — a video session under
+/// its serial — so the door's own `android_control` answers.
+fn stand_in_for_an_android_pane(serial: &str, avd: &str) {
+    use super::session::{SessionKey, StartClaim, registry};
+    let key = SessionKey::video(super::EmulatorPlatform::Android, serial);
+    let StartClaim::Acquired(lease) = registry().claim(key).expect("a claim") else {
+        panic!("the bench's device already has a session");
+    };
+    let descriptor = super::EmulatorStream {
+        stream: format!("walk-bench-{serial}"),
+        udid: serial.to_string(),
+        name: avd.to_string(),
+        platform: super::EmulatorPlatform::Android,
+        interactive: true,
+        reused: false,
+    };
+    let control = registry().new_control(&descriptor);
+    lease.activate(descriptor, control);
+}
+
+/// The Android door's three walk verbs — a look, a check and a press by
+/// number — timed on an AVD of the measurer's own (t-6385 U3), down the road
+/// a walk's steps take in the window. `ZEROCODE_WALK_BENCH_SERIAL` and
+/// `ZEROCODE_WALK_BENCH_AVD` name a copy of an AVD started on a port of its
+/// own (t-5761's way); `ZEROCODE_WALK_BENCH_ADB` is the adb that launches
+/// Settings and goes back between rounds. Each round looks until two looks
+/// agree, then times one look, one `find` of `ZEROCODE_WALK_BENCH_UNTIL` and
+/// one press of the control labelled `ZEROCODE_WALK_BENCH_PRESS`.
+#[test]
+#[ignore = "drives an AVD of the caller's; a measurement, printed"]
+fn android_verbs_timed_on_an_avd_of_our_own() {
+    let serial = knob("ZEROCODE_WALK_BENCH_SERIAL").expect("the AVD's serial");
+    let avd = knob("ZEROCODE_WALK_BENCH_AVD").expect("the AVD's name");
+    let adb = knob("ZEROCODE_WALK_BENCH_ADB").expect("adb");
+    let out = PathBuf::from(knob("ZEROCODE_WALK_BENCH_OUT").expect("where the rows go"));
+    let rounds: usize =
+        knob("ZEROCODE_WALK_BENCH_WALKS").map_or(10, |n| n.parse().expect("rounds"));
+    let label = knob("ZEROCODE_WALK_BENCH_LABEL").unwrap_or_default();
+    let press = knob("ZEROCODE_WALK_BENCH_PRESS").unwrap_or_else(|| "Network & internet".into());
+    let until = knob("ZEROCODE_WALK_BENCH_UNTIL").unwrap_or_else(|| "Battery".into());
+    let settings = knob("ZEROCODE_WALK_BENCH_ACTIVITY")
+        .unwrap_or_else(|| "com.android.settings/.Settings".into());
+    stand_in_for_an_android_pane(&serial, &avd);
+    let verb = |words: &[&str]| -> Vec<String> {
+        let mut argv: Vec<String> = words.iter().map(|word| (*word).to_string()).collect();
+        argv.extend(["--platform", "android", "--device", &avd, "--json"].map(str::to_string));
+        argv
+    };
+    let shell = |words: &[&str]| {
+        let _ = crate::proc::quiet_command(&adb)
+            .args(["-s", &serial, "shell"])
+            .args(words)
+            .output();
+    };
+    for round in 0..rounds {
+        shell(&["am", "start", "-n", &settings]);
+        let mut last: Option<Value> = None;
+        for _ in 0..LOOKS_TO_STAND_STILL {
+            let legend = said(&drive(&verb(&["marks"])).0)
+                .pointer("/result/legend")
+                .cloned();
+            if legend.is_some() && legend == last {
+                break;
+            }
+            last = legend;
+        }
+        let (looked, look_ms) = drive(&verb(&["marks"]));
+        let look = said(&looked);
+        let (found, find_ms) = drive(&verb(&["find", "--text", &until]));
+        let mark = look
+            .pointer("/result/items")
+            .and_then(Value::as_array)
+            // A row's name on Android is its own and its descendants' words
+            // (`faces`' compound names): the control is found by how it starts.
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item["label"]
+                        .as_str()
+                        .is_some_and(|label| label.starts_with(press.as_str()))
+                })
+            })
+            .and_then(|item| item["mark"].as_u64());
+        let look_id = look
+            .pointer("/result/lookId")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let (clicked, click_ms) = match mark {
+            Some(mark) => {
+                let mark = mark.to_string();
+                let (answer, ms) = drive(&verb(&["click", "--mark", &mark, "--look", look_id]));
+                (Some(answer), ms)
+            }
+            None => (None, 0.0),
+        };
+        shell(&["input", "keyevent", "4"]);
+        std::thread::sleep(std::time::Duration::from_millis(1_000));
+        let row = json!({
+            "label": label,
+            "round": round,
+            "load": load(),
+            "lookMs": (look_ms * 10.0).round() / 10.0,
+            "lookOk": looked.exit_code == 0,
+            "items": look.pointer("/result/items").and_then(Value::as_array).map(Vec::len),
+            "findMs": (find_ms * 10.0).round() / 10.0,
+            "found": said(&found).pointer("/result/count"),
+            "clickMs": (click_ms * 10.0).round() / 10.0,
+            "clickOk": clicked.as_ref().map(|answer| answer.exit_code == 0),
+            "clickError": clicked.as_ref().and_then(|answer| said(answer).pointer("/error/message").cloned()),
+        });
+        println!("{label} round {round}: look {look_ms:.0} find {find_ms:.0} click {click_ms:.0}");
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&out)
+            .expect("the bench's rows");
+        std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).expect("a row");
+    }
+}
