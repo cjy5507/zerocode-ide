@@ -64,7 +64,7 @@ import { testComposerAttach } from "./attach.mjs";
 import { testComposerMenuPosition } from "./composer-menu-position.mjs";
 import { testImeBrokenCommit } from "./ime-broken-commit.mjs";
 import { testWorkers } from "./workers.mjs";
-import { testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths } from "./conversation-parity.mjs";
+import { testConversationFolds, testConversationFont, testConversationKeys, testConversationPaths, testConversationStatus } from "./conversation-parity.mjs";
 import { measureConversation, standingPids } from "./conversation-perf.mjs";
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
@@ -217,6 +217,7 @@ suite("conversation-font", ({ browser, origin, ok }) => testConversationFont(bro
 suite("conversation-folds", ({ browser, origin, ok }) => testConversationFolds(browser, origin, ok));
 suite("conversation-paths", ({ browser, origin, ok }) => testConversationPaths(browser, origin, ok));
 suite("conversation-keys", ({ browser, origin, ok }) => testConversationKeys(browser, origin, ok));
+suite("conversation-status", ({ browser, origin, ok }) => testConversationStatus(browser, origin, ok));
 /* 대화 뷰의 무게(t-6323 B0) — 400턴 픽스처 하나의 다섯 수. 이름으로만 돈다
  * (`WINDOW_SUITES=conversation-perf`): 숫자는 그 순간 기계의 부하를 타는
  * 자이지 게이트가 아니다. 전/후 중앙값은 `node ui/tests/conversation-perf.mjs
@@ -35713,7 +35714,10 @@ const chatFace = await page.evaluate(async () => {
   const status = face.querySelector(".helper-status");
   seen.statusShown = status ? !status.hidden : false;
   seen.statusMark = status?.querySelector(".helper-status-mark")?.textContent;
-  seen.statusWord = status?.querySelector(".helper-status-word")?.textContent;
+  // The CLI's one word is what the log says aloud; the verb the eye sees
+  // turns (t-6323 A4) and is hidden from the reader.
+  seen.statusWord = status?.querySelector(".helper-status-said")?.textContent;
+  seen.statusTurns = status?.querySelector(".helper-status-word")?.getAttribute("aria-hidden") === "true";
   seen.statusVoice = agentVoice("claude");
   // 입력줄: 부모 판이 서 있으니 composer가 서고, 보내면 부모 판으로
   // 붙여넣기 → 한 숨 → Enter가 그 순서로 간다. 상자는 비워진다.
@@ -35849,6 +35853,7 @@ ok(
     chatFace.statusShown &&
     (chatFace.statusMark === chatFace.statusVoice.glyph || chatFace.statusVoice.glyph_cycle.includes(chatFace.statusMark)) &&
     chatFace.statusWord === chatFace.statusVoice.busy_word && chatFace.statusWord === "Pondering…" &&
+    chatFace.statusTurns &&
     chatFace.focusEdge && chatFace.modelMark === chatFace.statusVoice.glyph,
   JSON.stringify(chatFace),
 );
@@ -36056,7 +36061,7 @@ const toolStates = await page.evaluate(async () => {
   const status = face.querySelector(".helper-status");
   seen.statusShown = status ? !status.hidden : false;
   seen.statusMark = status?.querySelector(".helper-status-mark")?.textContent;
-  seen.statusWord = status?.querySelector(".helper-status-word")?.textContent;
+  seen.statusWord = status?.querySelector(".helper-status-said")?.textContent;
   seen.voice = agentVoice("claude");
   // Its result joins by call id: the same row, now done, with the first
   // line under it and the rest behind the fold.
@@ -36595,8 +36600,10 @@ ok(
  * 같은 400턴이 1745 — 늘어난 것은 확장의 행뿐이다. 09-23(t-6323 A1): 긴
  * 입력의 접힘(details·summary·cue·몸·우물 둘)이 확장의 도구 몸(몸·우물 둘·
  * pre 둘·문)으로 바뀌어 같은 수이고, 60px을 넘는 브리핑이 제 「더 보기」 문
- * 하나를 얻어 1746. */
-const HELPER_LIST_NODES_CEILING = 1746;
+ * 하나를 얻어 1746. 09-23(t-6323 A4): 상태 줄의 낱말이 확장의 동사를 돌며
+ * 읽어 주기에서 빠지고(aria-hidden), 읽어 주는 한 낱말(`.sr`)이 따로 서서
+ * 1747. */
+const HELPER_LIST_NODES_CEILING = 1747;
 await page.setViewportSize({ width: 1280, height: 860 });
 const flatTranscript = await page.evaluate(async () => {
   const seen = {};

@@ -1558,6 +1558,8 @@ pub struct AgentPresence {
     pub read_offset_base: Option<u8>,
     /// The key that interrupts the CLI's turn ([`AgentVoice::interrupt_key`]).
     pub interrupt_key: Option<&'static str>,
+    /// The verbs the CLI's spinner turns through ([`AgentVoice::spinner_verbs`]).
+    pub spinner_verbs: &'static [&'static str],
 }
 
 /// How far a permission mode lets the agent act before it asks — the one
@@ -1685,7 +1687,104 @@ pub struct AgentVoice {
     /// pane's Esc and its stop button press. `None` where the CLI's screen
     /// was not read for it; the page then sends the terminal's own interrupt.
     pub interrupt_key: Option<&'static str>,
+    /// The verbs the CLI's spinner says while it works, one picked at random
+    /// and picked again as the turn goes on ([`CLAUDE_SPINNER_VERBS`]). Empty
+    /// for a console that says one word (`busy_word`) the whole turn.
+    pub spinner_verbs: &'static [&'static str],
 }
+
+/// Claude Code's spinner verbs — the words its own screen and its panel say
+/// while it works (the 2.1.280 binary carries them; the extension's webview
+/// holds the same 84, `tD1`, and picks one at random, again at 2 s, 5 s, 10 s
+/// and every 5 s after). Words read off the package, not code: the gate
+/// `the_conversation_wears_the_extensions_own_measures` holds this list to
+/// the panel snapshot's (`claude-code-panel.json` `words.spinnerVerbs`).
+pub const CLAUDE_SPINNER_VERBS: &[&str] = &[
+    "Accomplishing",
+    "Actioning",
+    "Actualizing",
+    "Baking",
+    "Booping",
+    "Brewing",
+    "Calculating",
+    "Cerebrating",
+    "Channeling",
+    "Churning",
+    "Clauding",
+    "Coalescing",
+    "Cogitating",
+    "Computing",
+    "Combobulating",
+    "Concocting",
+    "Considering",
+    "Contemplating",
+    "Cooking",
+    "Crafting",
+    "Creating",
+    "Crunching",
+    "Deciphering",
+    "Deliberating",
+    "Determining",
+    "Discombobulating",
+    "Doing",
+    "Effecting",
+    "Elucidating",
+    "Enchanting",
+    "Envisioning",
+    "Finagling",
+    "Flibbertigibbeting",
+    "Forging",
+    "Forming",
+    "Frolicking",
+    "Generating",
+    "Germinating",
+    "Hatching",
+    "Herding",
+    "Honking",
+    "Ideating",
+    "Imagining",
+    "Incubating",
+    "Inferring",
+    "Manifesting",
+    "Marinating",
+    "Meandering",
+    "Moseying",
+    "Mulling",
+    "Mustering",
+    "Musing",
+    "Noodling",
+    "Percolating",
+    "Perusing",
+    "Philosophizing",
+    "Pontificating",
+    "Pondering",
+    "Processing",
+    "Puttering",
+    "Puzzling",
+    "Reticulating",
+    "Ruminating",
+    "Scheming",
+    "Schlepping",
+    "Shimmying",
+    "Simmering",
+    "Smooshing",
+    "Spelunking",
+    "Spinning",
+    "Stewing",
+    "Sussing",
+    "Synthesizing",
+    "Thinking",
+    "Tinkering",
+    "Transmuting",
+    "Unfurling",
+    "Unraveling",
+    "Vibing",
+    "Wandering",
+    "Whirring",
+    "Wibbling",
+    "Working",
+    "Wrangling",
+];
 
 /// The consoles this catalog knows — read off each CLI's own screen and its
 /// documentation, so the conversation view's status line says what the
@@ -1767,6 +1866,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             // "esc to interrupt" on its own status line (the 2.1.280 binary
             // says it twice; the extension's Esc is the same interrupt).
             interrupt_key: Some("Escape"),
+            spinner_verbs: CLAUDE_SPINNER_VERBS,
         },
     ),
     (
@@ -1803,6 +1903,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             read_offset_base: None,
             // The 0.156.0 binary names no interrupt key in its words.
             interrupt_key: None,
+            spinner_verbs: &[],
         },
     ),
     (
@@ -1830,6 +1931,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             read_offset_base: Some(0),
             // Its status line: "Working (0s • esc to interrupt)" (tui/view.rs).
             interrupt_key: Some("Escape"),
+            spinner_verbs: &[],
         },
     ),
     (
@@ -1857,6 +1959,7 @@ const AGENT_VOICES: [(&str, AgentVoice); 4] = [
             read_offset_base: None,
             // Nor its interrupt key.
             interrupt_key: None,
+            spinner_verbs: &[],
         },
     ),
 ];
@@ -1875,6 +1978,7 @@ const SILENT_CONSOLE: AgentVoice = AgentVoice {
     compact_command: None,
     read_offset_base: None,
     interrupt_key: None,
+    spinner_verbs: &[],
 };
 
 /// One agent's console, or the silent one for an agent the table does not
@@ -1971,6 +2075,7 @@ pub fn agent_presence(path_var: Option<&std::ffi::OsStr>, os: &str) -> Vec<Agent
                 compact_command: agent_voice(spec.id).compact_command,
                 read_offset_base: agent_voice(spec.id).read_offset_base,
                 interrupt_key: agent_voice(spec.id).interrupt_key,
+                spinner_verbs: agent_voice(spec.id).spinner_verbs,
             }
         })
         .collect()
@@ -2199,6 +2304,15 @@ mod tests {
         assert_eq!(super::agent_voice("zo").interrupt_key, Some("Escape"));
         assert!(super::agent_voice("codex").interrupt_key.is_none());
         assert!(super::SILENT_CONSOLE.interrupt_key.is_none());
+        // The spinner's verbs are Claude Code's own list, and only its.
+        let verbs = super::agent_voice("claude").spinner_verbs;
+        assert_eq!(verbs.len(), 84);
+        assert_eq!((verbs[0], verbs[83]), ("Accomplishing", "Wrangling"));
+        let unique: std::collections::BTreeSet<_> = verbs.iter().collect();
+        assert_eq!(unique.len(), verbs.len(), "a verb stands twice");
+        for id in ["codex", "zo", "antigravity"] {
+            assert!(super::agent_voice(id).spinner_verbs.is_empty(), "{id}");
+        }
     }
 
     use super::*;

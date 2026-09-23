@@ -116,6 +116,39 @@ WANTED_CONSTANTS = [
         "keys": ["longTextChars", "longTextLines"],
         "pattern": rf"function {_NAME}\({_NAME}\)\{{return {_NAME}\.length>(\d+)\|\|{_NAME}\.split\(`\n`\)\.length>(\d+)\}}",
     },
+    # The spinner's verb is picked again after these, then every the last
+    # (`Ke`: `[2000,3000,5000]`, then 5000).
+    {
+        "keys": ["spinnerVerbAfter1", "spinnerVerbAfter2", "spinnerVerbAfter3", "spinnerVerbEvery"],
+        "pattern": rf"let {_NAME}=\[(\d+),(\d+),(\d+)\];return {_NAME}<{_NAME}\.length\?{_NAME}\[{_NAME}\]:(\d+)",
+    },
+    # A new verb is revealed one step every this many milliseconds (`j75`).
+    {
+        "keys": ["spinnerRevealStep"],
+        "pattern": rf"let {_NAME}=null,{_NAME}=0,{_NAME}=(\d+),{_NAME}=\({_NAME}\)=>\{{if\({_NAME}-{_NAME}<{_NAME}\)\{{{_NAME}=requestAnimationFrame",
+    },
+    # The spinner's glyph turns every this many milliseconds.
+    {
+        "keys": ["spinnerGlyphStep"],
+        "pattern": rf"setInterval\(\(\)=>\{{{_NAME}\(\({_NAME}\)=>\({_NAME}\+1\)%{_NAME}\.length\)\}},(\d+)\)",
+    },
+]
+
+# Words the panel keeps in its script — lists read whole, as JSON: the
+# spinner's verbs stand right after its glyph cycle (`·✢*✶✻✽` and back).
+WANTED_WORDS = [
+    {
+        "key": "spinnerVerbs",
+        "pattern": r'\["·","✢","\*","✶","✻","✽"\],'
+        + _NAME
+        + r"=\[\.\.\."
+        + _NAME
+        + r",\.\.\.\[\.\.\."
+        + _NAME
+        + r"\]\.reverse\(\)\],"
+        + _NAME
+        + r"=\[([^\]]+)\]",
+    },
 ]
 # The panel's own variables, read off its `html` rule.
 WANTED_VARS = [
@@ -162,6 +195,16 @@ def constants_of(script: str) -> dict[str, int]:
         numbers = hits[0] if isinstance(hits[0], tuple) else (hits[0],)
         for key, number in zip(want["keys"], numbers):
             found[key] = int(number)
+    return found
+
+
+def words_of(script: str) -> dict[str, list[str]]:
+    """The script's word lists (`WANTED_WORDS`), each found exactly once."""
+    found: dict[str, list[str]] = {}
+    for want in WANTED_WORDS:
+        hits = re.findall(want["pattern"], script)
+        if len(hits) == 1:
+            found[want["key"]] = json.loads("[" + hits[0] + "]")
     return found
 
 
@@ -214,10 +257,12 @@ def snapshot(css: str, version: str, source: str, script: str = "") -> dict:
                 if name in WANTED_VARS:
                     variables[name] = value
     constants = constants_of(script)
+    words = words_of(script)
     missing = (
         [key for key, rule in found.items() if not rule]
         + [name for name in WANTED_VARS if name not in variables]
         + [key for want in WANTED_CONSTANTS for key in want["keys"] if key not in constants]
+        + [want["key"] for want in WANTED_WORDS if want["key"] not in words]
     )
     if missing:
         raise SystemExit(f"the panel's stylesheet no longer names: {', '.join(missing)}")
@@ -230,6 +275,7 @@ def snapshot(css: str, version: str, source: str, script: str = "") -> dict:
         "vars": variables,
         "rules": found,
         "constants": constants,
+        "words": words,
     }
 
 
@@ -243,7 +289,7 @@ def installed_version() -> str | None:
 
 
 def same_measures(a: dict, b: dict) -> bool:
-    keys = ("version", "vars", "rules", "constants")
+    keys = ("version", "vars", "rules", "constants", "words")
     return tuple(a.get(key) for key in keys) == tuple(b.get(key) for key in keys)
 
 
@@ -274,7 +320,7 @@ def main() -> int:
     args.out.write_text(json.dumps(written, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(
         f"wrote {args.out} — {len(written['rules'])} rules, {len(written['vars'])} variables, "
-        f"{len(written['constants'])} script measures, version {version}"
+        f"{len(written['constants'])} script measures, {len(written['words'])} word lists, version {version}"
     )
     return 0
 

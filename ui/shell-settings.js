@@ -3585,6 +3585,8 @@ function agentVoice(id) {
     // The marks its spinner cycles through, in order; empty for a still mark.
     glyph_cycle: Array.isArray(row?.glyph_cycle) ? row.glyph_cycle : [],
     busy_word: row?.busy_word || t("worker.busy", "작업 중…"),
+    // The verbs its spinner turns through while it works (t-6323 A4).
+    spinner_verbs: Array.isArray(row?.spinner_verbs) ? row.spinner_verbs : [],
   };
 }
 

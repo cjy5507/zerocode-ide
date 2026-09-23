@@ -11732,7 +11732,14 @@ function agentMarkNode(className, glyph) {
 function helperStatusNode(run) {
   const line = document.createElement("p");
   line.className = "helper-status";
-  line.append(agentMarkNode("helper-status-mark", ""), agentMarkNode("helper-status-word", ""));
+  const mark = agentMarkNode("helper-status-mark", "");
+  const word = agentMarkNode("helper-status-word", "");
+  // The turning glyph and the turning verb are for the eye; the list is a
+  // log a screen reader reads out, so it hears the CLI's one word instead,
+  // once (the extension's own "Claude is working").
+  mark.setAttribute("aria-hidden", "true");
+  word.setAttribute("aria-hidden", "true");
+  line.append(mark, word, agentMarkNode("helper-status-said sr", ""));
   updateHelperStatus(line, run);
   return line;
 }
@@ -11749,7 +11756,16 @@ function updateHelperStatus(line, run) {
   // does (`[data-permission-mode]` on its container).
   wearReach(line, composerReachOf(run));
   const mark = line.querySelector(".helper-status-mark");
-  writeTextContent(line.querySelector(".helper-status-word"), voice.busy_word);
+  writeTextContent(line.querySelector(".helper-status-said"), voice.busy_word);
+  // A CLI with verbs turns through them while the turn is out (t-6323 A4);
+  // the rest say their one word.
+  const word = line.querySelector(".helper-status-word");
+  if (shown && voice.spinner_verbs.length > 0) {
+    turnStatusVerb(word, voice.spinner_verbs);
+  } else {
+    stopStatusVerb(word);
+    writeTextContent(word, voice.busy_word);
+  }
   // Forward and back, as the CLI plays it; a console with one mark keeps it.
   const cycle = shown && voice.glyph_cycle.length > 1
     ? [...voice.glyph_cycle, ...[...voice.glyph_cycle].reverse()]

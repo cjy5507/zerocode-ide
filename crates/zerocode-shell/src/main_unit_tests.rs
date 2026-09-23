@@ -17623,6 +17623,42 @@ fn the_conversation_wears_the_extensions_own_measures() {
             token("chat-tool-clip-fade")
         ));
     }
+    // The spinner's clock and its words are the panel's own (t-6323 A4): the
+    // page's one table of the verb's beats and sweep (`STATUS_VERB`), the
+    // glyph's step (`STATUS_CYCLE_MS`), and the catalog's verbs — Claude
+    // Code's list, which the panel carries whole.
+    let source = window_source();
+    let wanted_verb = format!(
+        "const STATUS_VERB = Object.freeze({{ after: [{}, {}, {}], every: {}, step: {}, tail: 3, suffix: \"...\" }});",
+        constant("spinnerVerbAfter1"),
+        constant("spinnerVerbAfter2"),
+        constant("spinnerVerbAfter3"),
+        constant("spinnerVerbEvery"),
+        constant("spinnerRevealStep")
+    );
+    if !source.contains(&wanted_verb) {
+        drifted.push(format!(
+            "the page's `STATUS_VERB` is not the panel's spinner — wanted `{wanted_verb}`"
+        ));
+    }
+    let wanted_cycle = format!("const STATUS_CYCLE_MS = {};", constant("spinnerGlyphStep"));
+    if !source.contains(&wanted_cycle) {
+        drifted.push(format!(
+            "the spinner's glyph does not turn at the panel's step — wanted `{wanted_cycle}`"
+        ));
+    }
+    let verbs: Vec<&str> = panel["words"]["spinnerVerbs"]
+        .as_array()
+        .expect("the snapshot has the spinner's verbs")
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .collect();
+    if zerocode_core::agent::CLAUDE_SPINNER_VERBS != verbs.as_slice() {
+        drifted.push(
+            "the catalog's spinner verbs are not the panel's list (`words.spinnerVerbs`)"
+                .to_string(),
+        );
+    }
     // What makes a tool's words long is words, not pixels: the page's one
     // table of it (`CHAT_CLIP`) says the panel's own numbers (`cN`).
     let clip = window_source();

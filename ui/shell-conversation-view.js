@@ -206,3 +206,116 @@ function dressToolFile(row, turn, run) {
     : t("worker.readFrom", "({{from}}행부터)", { from: place.line });
   arg.after(where);
 }
+
+/* ---- the spinner's verb (t-6323 A4) -----------------------------------------
+ *
+ * The extension's spinner row (`Ke`, 2.1.280): while the turn is out the word
+ * is one of the CLI's own verbs (`spinner_verbs` on its catalog row — Claude
+ * Code's 84, the list its screen says) picked at random, picked again after
+ * 2 s, 3 s more, 5 s more and every 5 s after (`cx`), and written `Verb...`;
+ * each new verb is revealed by a sweep (`j75`): every 40 ms a window four
+ * letters wide moves right — its lead is `▌`, then two of `.`/`_`/the letter,
+ * then the letter — writing the new word over the old, across a field as wide
+ * as the longest verb and its dots, which starts blank. A CLI with no verbs
+ * keeps its one word. The numbers are the panel's own, held to its snapshot
+ * by `the_conversation_wears_the_extensions_own_measures`. */
+const STATUS_VERB = Object.freeze({ after: [2000, 3000, 5000], every: 5000, step: 40, tail: 3, suffix: "..." });
+
+/* How long the verb stands after its `picks`-th pick. */
+function statusVerbDelay(picks) {
+  return STATUS_VERB.after[picks] ?? STATUS_VERB.every;
+}
+
+function randomOf(choices) {
+  return choices[Math.floor(Math.random() * choices.length)];
+}
+
+/* One step of the sweep at `at`, over `text` toward `target` (both padded to
+ * one width): the window's four letters, lead first. */
+function statusRevealAdvance(text, target, at, pick) {
+  let written = text;
+  for (let back = 0; back <= STATUS_VERB.tail; back += 1) {
+    const index = at - back;
+    if (index < 0 || index >= target.length) continue;
+    const letter = target[index];
+    const glyph = letter === " " ? " " : back === STATUS_VERB.tail ? letter : back === 0 ? "▌" : pick([".", "_", letter]);
+    written = written.slice(0, index) + glyph + written.slice(index + 1);
+  }
+  return written;
+}
+
+/* The text once the sweep from `from` to `to` has taken its steps 0…`at` —
+ * the whole reveal as one pure answer (what the page draws frame by frame) —
+ * over a field at least `width` wide. */
+function statusRevealStep(from, to, at, pick = randomOf, width = 0) {
+  width = Math.max(width, from.length, to.length);
+  const target = to.padEnd(width, " ");
+  let text = from.padEnd(width, " ");
+  for (let step = 0; step <= at; step += 1) text = statusRevealAdvance(text, target, step, pick);
+  return text;
+}
+
+/* Keep `word` turning through `verbs` while its line is out; once started it
+ * runs on its own clock and stops when the line leaves the page or is hidden
+ * (`stopStatusVerb`). */
+function turnStatusVerb(word, verbs) {
+  if (word.__verbs === verbs) return;
+  stopStatusVerb(word);
+  word.__verbs = verbs;
+  const width = Math.max(...verbs.map((verb) => verb.length)) + STATUS_VERB.suffix.length;
+  writeTextContent(word, "");
+  let picks = 0;
+  const pick = () => {
+    if (!word.isConnected) {
+      stopStatusVerb(word);
+      return;
+    }
+    revealStatusVerb(word, `${randomOf(verbs)}${STATUS_VERB.suffix}`, width);
+    word.__verbTimer = setTimeout(pick, statusVerbDelay(picks));
+    picks += 1;
+  };
+  pick();
+}
+
+function stopStatusVerb(word) {
+  clearTimeout(word.__verbTimer);
+  if (word.__revealFrame) cancelAnimationFrame(word.__revealFrame);
+  word.__verbTimer = null;
+  word.__revealFrame = null;
+  word.__verbs = null;
+}
+
+/* The sweep, one step per 40 ms on the frame clock, over a field `width`
+ * wide; a page that asks for less motion — or one nobody can see — takes the
+ * word at once. */
+function revealStatusVerb(word, to, width) {
+  if (word.__revealFrame) cancelAnimationFrame(word.__revealFrame);
+  word.__revealFrame = null;
+  if (document.hidden || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) {
+    writeTextContent(word, to);
+    return;
+  }
+  width = Math.max(width, word.textContent.length, to.length);
+  const target = to.padEnd(width, " ");
+  let text = word.textContent.padEnd(width, " ");
+  let at = 0;
+  let last = -Infinity;
+  const frame = (now) => {
+    if (!word.isConnected) return;
+    if (now - last < STATUS_VERB.step) {
+      word.__revealFrame = requestAnimationFrame(frame);
+      return;
+    }
+    last = now;
+    if (at - STATUS_VERB.tail >= width) {
+      word.__revealFrame = null;
+      writeTextContent(word, to);
+      return;
+    }
+    text = statusRevealAdvance(text, target, at, randomOf);
+    writeTextContent(word, text);
+    at += 1;
+    word.__revealFrame = requestAnimationFrame(frame);
+  };
+  word.__revealFrame = requestAnimationFrame(frame);
+}

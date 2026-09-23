@@ -543,3 +543,67 @@ export async function testConversationKeys(browser, origin, ok) {
     await page.close();
   }
 }
+
+/* A4 — while the turn is out. The extension's spinner row (`Ke`, 2.1.280):
+ * the glyph turns every 120 ms, and the word is one of the CLI's own verbs
+ * (84 of them, `tD1` — the CLI's screen carries the same list) picked at
+ * random and picked again at 2 s, 5 s, 10 s and every 5 s after, written
+ * `Verb...`; each new verb is revealed by a sweep (`j75`: every 40 ms a
+ * four-character window moves right — `▌`, two of `.`/`_`/the letter, then
+ * the letter). No elapsed time and no token count stand beside it — the head
+ * carries the time, the meter the context — and no caret trails the answer:
+ * the extension's only `▌` is this sweep. A CLI the catalog gives no verbs
+ * keeps its one word. */
+export async function testConversationStatus(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openConversation(page, [{ role: "user", text: "시작" }], { status: "working" });
+    const seen = await page.evaluate(async () => {
+      const seen = {};
+      const face = document.querySelector("#worker-view");
+      const word = () => face.querySelector(".helper-status-word")?.textContent ?? "";
+      const verbs = installedAgents().find((row) => row.id === "claude")?.spinner_verbs ?? [];
+      seen.verbCount = verbs.length;
+      // The first verb sweeps in over a blank field; wait for it to settle.
+      const isVerb = (text) => verbs.some((verb) => text === `${verb}...`);
+      for (let beat = 0; beat < 240 && !isVerb(word()); beat += 1) await window.__PAINTED__();
+      const first = word();
+      seen.firstIsVerb = isVerb(first);
+      // The sweep, as a pure step: the window's lead is the bar, its tail
+      // the target, and what the window has passed is the new word.
+      const step = (from, to, at) => (typeof statusRevealStep === "function"
+        ? statusRevealStep(from, to, at, (choices) => choices[0])
+        : null);
+      seen.sweep = [0, 1, 2, 3, 4, 7].map((at) => step("Old...", "New...", at));
+      // A new pick within the extension's first beat (2 s), revealed by the
+      // sweep — a pick may land on the same verb, as the extension's may.
+      const bars = [];
+      const started = performance.now();
+      while (performance.now() - started < 2600 && bars.length === 0) {
+        await new Promise((done) => requestAnimationFrame(done));
+        if (word().includes("▌")) bars.push(word());
+      }
+      for (let beat = 0; beat < 240 && !isVerb(word()); beat += 1) await window.__PAINTED__();
+      seen.swept = bars.length > 0;
+      seen.secondIsVerb = isVerb(word());
+      seen.delays = [0, 1, 2, 3, 9].map((picks) => (typeof statusVerbDelay === "function" ? statusVerbDelay(picks) : null));
+      // No caret trails a streaming answer.
+      window.__CONVERSATION__.live = [{ role: "assistant", text: "흐르는 답" }];
+      await pollHelperPages();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      seen.noCaret = !face.querySelector(".is-streaming")?.textContent.includes("▌");
+      return seen;
+    });
+    ok(
+      "A4: while the turn is out the status says one of Claude Code's own 84 verbs as `Verb...`, picks again at the extension's beats (2 s, 5 s, 10 s, then every 5 s) and reveals each new verb with the sweep — `▌`, two of `.`/`_`/the letter, then the letter — and no caret trails the answer",
+      seen.verbCount === 84 && seen.firstIsVerb && seen.swept && seen.secondIsVerb &&
+        JSON.stringify(seen.delays) === JSON.stringify([2000, 3000, 5000, 5000, 5000]) &&
+        JSON.stringify(seen.sweep) === JSON.stringify(["▌ld...", ".▌d...", "..▌...", "N..▌..", "Ne..▌.", "New..."]) &&
+        seen.noCaret,
+      JSON.stringify(seen),
+    );
+    ok("A4: the status raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}

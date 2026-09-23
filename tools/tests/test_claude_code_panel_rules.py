@@ -33,6 +33,10 @@ SCRIPT = (
     'return R("div",{className:C0.userMessage,children:[g,F(EV0,{content:A[i]??y,context:Y,maxHeight:60})]})'
     "function WG0($){let J=Math.max(0,Math.ceil($)),Z=Math.min(200,J+20);return{height:Z,truncated:J>Z}}"
     "function cN($){return $.length>250||$.split(`\n`).length>3}class c81 extends p2{}"
+    'o(()=>{let B=setInterval(()=>{G((K)=>(K+1)%OU0.length)},120);return()=>clearInterval(B)},[]),'
+    "cx(()=>{U(Be(Y))},(B)=>{let K=[2000,3000,5000];return B<K.length?K[B]:5000});"
+    "let Q=null,z=0,G=40,q=(U)=>{if(U-z<G){Q=requestAnimationFrame(q);return}z=U};"
+    'var wU0=["·","✢","*","✶","✻","✽"],OU0=[...wU0,...[...wU0].reverse()],tD1=["Baking","Pondering"];'
 )
 
 
@@ -73,14 +77,19 @@ class RuleReading(unittest.TestCase):
                 rules.snapshot(CSS, "0.0.0", "https://example.invalid/vsix")
             written = rules.snapshot(CSS, "0.0.0", "https://example.invalid/vsix", SCRIPT)
             rules.WANTED_CONSTANTS = []
-            bare = rules.snapshot(CSS, "0.0.0", "https://example.invalid/vsix")
+            wanted_words, rules.WANTED_WORDS = rules.WANTED_WORDS, []
+            try:
+                bare = rules.snapshot(CSS, "0.0.0", "https://example.invalid/vsix")
+            finally:
+                rules.WANTED_WORDS = wanted_words
         finally:
             rules.WANTED, rules.WANTED_VARS, rules.WANTED_CONSTANTS = wanted, wanted_vars, wanted_constants
         self.assertEqual(written["version"], "0.0.0")
         self.assertEqual(written["source"], "https://example.invalid/vsix")
         self.assertEqual(written["vars"], {"--corner-radius-small": "4px"})
         self.assertEqual(written["rules"]["sendButton"]["border-radius"], "5px")
-        self.assertEqual(bare["constants"], {})
+        self.assertEqual((bare["constants"], bare["words"]), ({}, {}))
+        self.assertEqual(written["words"], {"spinnerVerbs": ["Baking", "Pondering"]})
         self.assertTrue(rules.same_measures(written, dict(written, fetched_at="later")))
         self.assertFalse(rules.same_measures(written, dict(written, version="0.0.1")))
         self.assertFalse(rules.same_measures(written, dict(written, constants={"diffMaxHeight": 201})))
@@ -96,8 +105,15 @@ class ScriptMeasures(unittest.TestCase):
                 "diffHeightPad": 20,
                 "longTextChars": 250,
                 "longTextLines": 3,
+                "spinnerVerbAfter1": 2000,
+                "spinnerVerbAfter2": 3000,
+                "spinnerVerbAfter3": 5000,
+                "spinnerVerbEvery": 5000,
+                "spinnerRevealStep": 40,
+                "spinnerGlyphStep": 120,
             },
         )
+        self.assertEqual(rules.words_of(SCRIPT), {"spinnerVerbs": ["Baking", "Pondering"]})
         renamed = SCRIPT.replace("EV0", "Qz9").replace("WG0", "a1$").replace("cN", "zz")
         self.assertEqual(rules.constants_of(renamed)["userMessageMaxHeight"], 60)
         self.assertEqual(rules.constants_of(renamed)["longTextChars"], 250)
