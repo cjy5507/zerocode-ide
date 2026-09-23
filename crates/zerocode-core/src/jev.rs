@@ -310,6 +310,19 @@ pub struct JevUse {
     pub setting: &'static str,
     /// The modes this use offers, `off` first.
     pub modes: &'static [JevMode],
+    /// The mode this use stands at while Jev is switched on and nobody wrote
+    /// a word of the use's own (2026-09-23, docs/design/jev-settings-20260917.md
+    /// §6.1 — the one switch a person sees). `auto` where the use offers it:
+    /// it records until its own evidence stands and then acts, which is what
+    /// a person who turned Jev on without choosing seat by seat asked for.
+    /// `on` for the one use with nothing to rise on — the agent's own tool,
+    /// whose answer is whatever the agent asked.
+    ///
+    /// A column rather than a rule over [`Self::modes`], because it is a
+    /// policy a seat may one day want to differ on; a contract holds it to one
+    /// of the use's own modes and never `off`, since a switch turned on that
+    /// left a use off would be a switch that says one thing and does another.
+    pub recommended: JevMode,
     /// Every place a request carries words the product did not write itself.
     pub sends: &'static [Sent],
     /// The ledger file this use appends one row per request to.
@@ -547,6 +560,7 @@ pub const ROUTING: JevUse = JevUse {
     id: "routing",
     setting: "decisionShadow",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[Sent {
         at: "/state",
         cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
@@ -658,6 +672,7 @@ pub const RECALL: JevUse = JevUse {
     id: "recall",
     setting: "rerankShadow",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[
         Sent {
             at: "/state/request",
@@ -776,6 +791,7 @@ pub const BROWSER: JevUse = JevUse {
     id: "browser",
     setting: "browserAction",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &BROWSER_SENDS,
     ledger: "browser-action.jsonl",
     promotes: true,
@@ -812,6 +828,7 @@ pub const DESKTOP: JevUse = JevUse {
     id: "desktop",
     setting: "desktopAction",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &DESKTOP_SENDS,
     ledger: "desktop-action.jsonl",
     promotes: true,
@@ -832,6 +849,7 @@ pub const EMULATOR: JevUse = JevUse {
     id: "emulator",
     setting: "emulatorAction",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[
         Sent {
             at: "/state/where/platform",
@@ -866,6 +884,7 @@ pub const STALL: JevUse = JevUse {
     id: "stall",
     setting: "stallCause",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[
         Sent {
             at: "/state/screen",
@@ -958,6 +977,7 @@ pub const PLACEMENT: JevUse = JevUse {
     id: "placement",
     setting: "workerPlacement",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[Sent {
         at: "/state/brief",
         cap: Cap::Chars(PLACEMENT_BRIEF_CHAR_CAP),
@@ -1047,6 +1067,7 @@ pub const SUMMON: JevUse = JevUse {
     id: "summon",
     setting: "summonChoice",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[Sent {
         at: "/state/brief",
         cap: Cap::Chars(SUMMON_BRIEF_CHAR_CAP),
@@ -1102,6 +1123,7 @@ pub const STEP_EFFORT: JevUse = JevUse {
     id: "effort",
     setting: "stepEffort",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[Sent {
         at: "/state/repeated",
         cap: Cap::Chars(STEP_EFFORT_REPEATED_CHAR_CAP),
@@ -1252,6 +1274,7 @@ pub const SKILLS: JevUse = JevUse {
     id: "skills",
     setting: "skillSearch",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[
         Sent {
             at: "/state/task",
@@ -1317,6 +1340,7 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     id: "step_effort",
     setting: "zoStepEffort",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[Sent {
         at: "/state",
         cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
@@ -1465,6 +1489,7 @@ pub const COMPACTION: JevUse = JevUse {
     id: "compaction",
     setting: "jevCompaction",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[
         Sent {
             at: "/state/goal",
@@ -1564,6 +1589,7 @@ pub const AGENT_TOOL: JevUse = JevUse {
     id: "agent_tool",
     setting: "agentTool",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On],
+    recommended: JevMode::On,
     sends: &[
         Sent {
             at: "/state/question",
@@ -1742,6 +1768,7 @@ pub const BROWSER_READ: JevUse = JevUse {
     id: "browser_read",
     setting: "jevBrowserRead",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[
         Sent {
             at: "/state/title",
@@ -1903,6 +1930,7 @@ pub const NOTIFY: JevUse = JevUse {
     id: "notify",
     setting: "jevNotify",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[
         Sent {
             at: "/state/pane",
@@ -2010,6 +2038,7 @@ pub const MENTION_RERANK: JevUse = JevUse {
     id: "mention_rerank",
     setting: "jevMentionRerank",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[
         Sent {
             at: "/state/intent",
@@ -2164,6 +2193,7 @@ pub const BRANCHING: JevUse = JevUse {
     id: "branching",
     setting: "jevBranching",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[
         Sent {
             at: "/state/goal",
@@ -2249,6 +2279,7 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     id: "judgment_cache",
     setting: "jevJudgmentCache",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[],
     ledger: "judgment-cache.jsonl",
     promotes: true,
@@ -2353,6 +2384,7 @@ pub const CHALLENGER: JevUse = JevUse {
     id: "challenger",
     setting: "jevChallenger",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[
         Sent {
             at: "/state/task",
@@ -2489,6 +2521,7 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     id: "patch_review",
     setting: "jevPatchReview",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
     sends: &[
         Sent {
             at: "/state/task",
@@ -2582,13 +2615,27 @@ impl JevUse {
             .unwrap_or_default()
     }
 
-    /// This use's mode in a settings document (`smart.<setting>`).
+    /// This use's mode in a settings document: the word written under
+    /// `smart.<setting>` when a person wrote one — theirs, whatever the switch
+    /// says, and read by [`Self::mode_of`] — and otherwise the switch's
+    /// (§6.1): [`Self::recommended`] while Jev is switched on
+    /// ([`door::switched_on`]), `off` while it is off or nobody has touched
+    /// it. A machine that has never met Jev asks nothing.
     #[must_use]
     pub fn mode_in(&self, root: &Value) -> JevMode {
-        self.mode_of(
-            root.get(SMART_SETTINGS_KEY)
-                .and_then(|smart| smart.get(self.setting)),
-        )
+        match self.word_in(root) {
+            Some(word) => self.mode_of(Some(word)),
+            None if door::switched_on(root) => self.recommended,
+            None => JevMode::Off,
+        }
+    }
+
+    /// The word a settings document holds for this use under
+    /// `smart.<setting>`, as written — `None` when nobody wrote one.
+    #[must_use]
+    pub fn word_in<'root>(&self, root: &'root Value) -> Option<&'root Value> {
+        root.get(SMART_SETTINGS_KEY)
+            .and_then(|smart| smart.get(self.setting))
     }
 
     /// The mode a writer was handed, spelled exactly as this use offers it —

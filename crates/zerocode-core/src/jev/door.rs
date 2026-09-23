@@ -44,7 +44,7 @@
 use std::path::Path;
 use std::time::Instant;
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use super::{CUT_MARK, Cap, JevMode, JevUse, SMART_SETTINGS_KEY, count, memo};
 use crate::credential::{MASK, may_carry_a_credential};
@@ -56,6 +56,12 @@ pub const ENABLED_SETTING: &str = "enabled";
 /// `smart.jev.workspaces`: the workspace roots a person consented to send
 /// words from. A folder under a root is consented; a folder beside it is not.
 pub const WORKSPACES_SETTING: &str = "workspaces";
+/// The one word `smart.jev.workspaces` may hold that is not a folder: every
+/// folder (2026-09-23, docs/design/jev-settings-20260917.md §3 3항 개정) —
+/// what the settings pane's one switch writes when a person turns Jev on.
+/// Read by [`JevSettings::consents`] and nowhere else, so zo and the window
+/// hear it the same way.
+pub const EVERY_WORKSPACE: &str = "*";
 /// `smart.jev.dailyRequests`: the most requests one local day may send. Unset,
 /// every request is counted and none is refused for the count — a default is
 /// chosen from measured days, never written before there are any.
@@ -95,6 +101,81 @@ pub fn predates_the_door(row: &str) -> bool {
                 .map(|fields| !fields.contains_key(REDACTED_LINES_KEY))
         })
         .unwrap_or(false)
+}
+
+/// Whether a person turned Jev on with the switch: `smart.jev.enabled` is
+/// written, and is `true` (2026-09-23, docs/design/jev-settings-20260917.md
+/// §6.1).
+///
+/// Not [`JevSettings::enabled`], which is the door's second question and
+/// lets a request through while the key is absent — the door predates the
+/// switch, and a machine whose seats were set one by one never wrote it.
+/// This is the other half of the same key: whether a seat nobody wrote a
+/// word for asks at all ([`JevUse::mode_in`]). Absent, it does not — so a
+/// machine that has never met Jev sends nothing and writes no refusal rows,
+/// and an agent there is offered no Jev tool.
+#[must_use]
+pub fn switched_on(root: &Value) -> bool {
+    root.get(SMART_SETTINGS_KEY)
+        .and_then(|smart| smart.get(JEV_SETTINGS_KEY))
+        .and_then(|jev| jev.get(ENABLED_SETTING))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// Why a switch was not written: the value under this key of `smart` is not
+/// an object, and a writer that replaced it would lose what the person put
+/// there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NotAnObject(pub &'static str);
+
+/// Turn Jev on in a settings document's `smart` object — the one switch a
+/// person sees (§6.1): the switch `true`, consent for every folder
+/// ([`EVERY_WORKSPACE`], the list the person kept replaced by it), and every
+/// use's own word removed, so each stands at its row's recommendation
+/// ([`JevUse::mode_in`]). The day's limit, the model pin and everything else
+/// under `smart` stay as they stood. A second press changes nothing.
+///
+/// Here rather than in the window that writes it, because this is what the
+/// switch MEANS, and the readers of what it wrote — [`switched_on`],
+/// [`JevSettings::consents`], [`JevUse::mode_in`] — live beside it.
+///
+/// # Errors
+/// A `smart.jev` that is not an object; nothing is changed.
+pub fn switch_on(smart: &mut Map<String, Value>) -> Result<(), NotAnObject> {
+    let jev = jev_object(smart)?;
+    jev.insert(ENABLED_SETTING.to_string(), Value::Bool(true));
+    jev.insert(
+        WORKSPACES_SETTING.to_string(),
+        Value::Array(vec![Value::from(EVERY_WORKSPACE)]),
+    );
+    for row in &super::JEV_USES {
+        smart.remove(row.setting);
+    }
+    Ok(())
+}
+
+/// Turn Jev off in a settings document's `smart` object: the switch `false`
+/// and nothing else, so the next press on finds the day's limit, the pin
+/// and any word a person wrote by hand where they left them. The door then
+/// refuses every request with `off` ([`may_send`]), and a seat nobody wrote a
+/// word for asks nothing.
+///
+/// # Errors
+/// A `smart.jev` that is not an object; nothing is changed.
+pub fn switch_off(smart: &mut Map<String, Value>) -> Result<(), NotAnObject> {
+    jev_object(smart)?.insert(ENABLED_SETTING.to_string(), Value::Bool(false));
+    Ok(())
+}
+
+/// `smart.jev` as an object, made when it is missing and refused when it
+/// holds something else.
+fn jev_object(smart: &mut Map<String, Value>) -> Result<&mut Map<String, Value>, NotAnObject> {
+    smart
+        .entry(JEV_SETTINGS_KEY)
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or(NotAnObject(JEV_SETTINGS_KEY))
 }
 
 /// The door's settings, as the person's own settings file holds them.
@@ -209,7 +290,9 @@ impl JevSettings {
     }
 
     /// One of the consented roots IS `workspace` or holds it, compared segment
-    /// by segment (`/a/bc` is not under `/a/b`).
+    /// by segment (`/a/bc` is not under `/a/b`) — or the person consented to
+    /// every folder, and `workspace` is one a program could name: absolute,
+    /// as the relative one consents to nothing on any other road either.
     fn names(&self, workspace: &str) -> bool {
         if Path::new(workspace)
             .components()
@@ -217,9 +300,26 @@ impl JevSettings {
         {
             return false;
         }
+        (self.everywhere() && Path::new(workspace).is_absolute())
+            || self
+                .folders()
+                .any(|root| crate::vault::inside_or_equal(root, workspace))
+    }
+
+    /// Whether the person consented to every folder ([`EVERY_WORKSPACE`]) —
+    /// the switch's own consent (§6.1).
+    #[must_use]
+    pub fn everywhere(&self) -> bool {
+        self.workspaces.iter().any(|root| root == EVERY_WORKSPACE)
+    }
+
+    /// The folders the person consented to by name — every root but the
+    /// every-folder word, which is not one.
+    pub fn folders(&self) -> impl Iterator<Item = &str> + '_ {
         self.workspaces
             .iter()
-            .any(|root| crate::vault::inside_or_equal(root, workspace))
+            .map(String::as_str)
+            .filter(|root| *root != EVERY_WORKSPACE)
     }
 
     /// These settings with each root spelled as the filesystem spells it, the
@@ -228,7 +328,13 @@ impl JevSettings {
     /// written.
     #[must_use]
     pub fn resolved(mut self) -> Self {
-        for root in &mut self.workspaces {
+        // The every-folder word is not a path: resolved, it would name
+        // whatever the asking program's own directory holds under that name.
+        for root in self
+            .workspaces
+            .iter_mut()
+            .filter(|root| *root != EVERY_WORKSPACE)
+        {
             *root = resolved_path(Path::new(root.as_str()));
         }
         self

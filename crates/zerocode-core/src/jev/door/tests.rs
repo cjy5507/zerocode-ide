@@ -284,6 +284,182 @@ fn settings_of_the_wrong_shape_never_widen_what_is_sent() {
     }
 }
 
+/// The every-folder word consents to every folder a program can name, and to
+/// nothing a program cannot: a relative path or one that climbs is refused as
+/// it always was. It is a word, not a path, so it is never resolved against
+/// the asking program's own directory.
+#[test]
+fn every_folder_consents_to_every_named_workspace_and_is_never_resolved() {
+    let everywhere = JevSettings {
+        workspaces: vec![EVERY_WORKSPACE.to_string()],
+        ..settings(None)
+    };
+    assert!(everywhere.everywhere());
+    assert_eq!(everywhere.folders().count(), 0, "the word is not a folder");
+    for named in [APP, "/elsewhere/entirely", "/"] {
+        assert!(everywhere.consents(named), "{named}");
+    }
+    for unnamed in ["work/app", "", "/work/../etc"] {
+        assert!(!everywhere.consents(unnamed), "{unnamed:?}");
+    }
+    assert_eq!(
+        everywhere.clone().resolved().workspaces,
+        [EVERY_WORKSPACE],
+        "the word is kept as written"
+    );
+
+    let named = settings(None);
+    assert!(!named.everywhere());
+    assert_eq!(named.folders().collect::<Vec<_>>(), [APP]);
+    assert!(!named.consents("/elsewhere/entirely"));
+}
+
+/// The settings file of a person who set every seat by hand (2026-09-23: the
+/// twenty seat words at `auto` or `on`, four folders consented), with
+/// everything a switch must not move beside it. `enabled` is the door's
+/// switch as written: `Some(true)` as the brief shaped it, `None` as this
+/// machine's own file holds it — never written, with a key of the door's
+/// neighbours (`labelDrafts`) under the same object.
+fn a_persons_file(enabled: Option<bool>) -> Value {
+    let mut smart = serde_json::Map::new();
+    for (at, row) in JEV_USES.iter().enumerate() {
+        let word = if at % 3 == 0 || !row.modes.contains(&JevMode::Auto) {
+            JevMode::On
+        } else {
+            JevMode::Auto
+        };
+        smart.insert(row.setting.to_string(), json!(word.key()));
+    }
+    let mut jev = json!({
+        WORKSPACES_SETTING: ["/work/a", "/work/b", "/work/c", "/work/d"],
+        DAILY_REQUESTS_SETTING: 500,
+        "labelDrafts": true,
+    });
+    if let Some(enabled) = enabled {
+        jev[ENABLED_SETTING] = json!(enabled);
+    }
+    smart.insert(JEV_SETTINGS_KEY.to_string(), jev);
+    smart.insert(crate::jev::MODEL_SETTING.to_string(), json!("jev-1.13.0"));
+    smart.insert(crate::jev::CLASSIFIER_SETTING.to_string(), json!("probed"));
+    smart.insert("plan".to_string(), json!({ "minEdge": 3 }));
+    json!({ "model": "fable", "providers": [], SMART_SETTINGS_KEY: smart })
+}
+
+/// One press on, from the file a person who set every seat by hand keeps:
+/// every seat stands at its row's recommendation, every folder is consented,
+/// and nothing else of the file moved. One press off: the switch alone
+/// moves, every seat nobody wrote a word for is off, and the door refuses
+/// every one of the twenty with `off` — nothing is sent.
+#[test]
+fn one_press_on_hands_every_seat_its_recommendation_and_one_press_off_sends_nothing() {
+    for enabled in [Some(true), None] {
+        one_press_on_and_one_off(enabled);
+    }
+}
+
+fn one_press_on_and_one_off(enabled: Option<bool>) {
+    let before = a_persons_file(enabled);
+    let mut root = before.clone();
+    // Before the press, each seat stands at the word written for it, and the
+    // door sends from the four folders and nowhere else.
+    for row in &JEV_USES {
+        assert_eq!(
+            row.mode_in(&root),
+            row.mode_of(root[SMART_SETTINGS_KEY].get(row.setting)),
+            "{}",
+            row.id
+        );
+    }
+    let door = JevSettings::from_root(&root);
+    assert!(door.enabled && !door.everywhere(), "{enabled:?}");
+    assert!(door.consents("/work/c/src") && !door.consents("/a/folder/nobody/named"));
+    let smart = |root: &mut Value| {
+        root.get_mut(SMART_SETTINGS_KEY)
+            .and_then(Value::as_object_mut)
+            .expect("smart")
+            .clone()
+    };
+    let write = |root: &mut Value, smart: serde_json::Map<String, Value>| {
+        root[SMART_SETTINGS_KEY] = Value::Object(smart);
+    };
+
+    let mut on = smart(&mut root);
+    switch_on(&mut on).expect("an object");
+    write(&mut root, on);
+    for row in &JEV_USES {
+        assert_eq!(row.mode_in(&root), row.recommended, "{}", row.id);
+        assert!(
+            root[SMART_SETTINGS_KEY].get(row.setting).is_none(),
+            "{} kept its own word",
+            row.id
+        );
+    }
+    let door = JevSettings::from_root(&root);
+    assert!(door.enabled && door.everywhere());
+    assert!(door.consents("/a/folder/nobody/named"));
+    for kept in ["model", "providers"] {
+        assert_eq!(root[kept], before[kept], "{kept} moved");
+    }
+    for kept in [
+        crate::jev::MODEL_SETTING,
+        crate::jev::CLASSIFIER_SETTING,
+        "plan",
+    ] {
+        assert_eq!(
+            root[SMART_SETTINGS_KEY][kept], before[SMART_SETTINGS_KEY][kept],
+            "smart.{kept} moved"
+        );
+    }
+    for kept in [DAILY_REQUESTS_SETTING, "labelDrafts"] {
+        assert_eq!(
+            root[SMART_SETTINGS_KEY][JEV_SETTINGS_KEY][kept],
+            before[SMART_SETTINGS_KEY][JEV_SETTINGS_KEY][kept],
+            "smart.jev.{kept} moved"
+        );
+    }
+    let again = root.clone();
+    let mut twice = smart(&mut root);
+    switch_on(&mut twice).expect("an object");
+    write(&mut root, twice);
+    assert_eq!(root, again, "a second press on changes nothing");
+
+    let mut off = smart(&mut root);
+    switch_off(&mut off).expect("an object");
+    write(&mut root, off);
+    let mut expected = again.clone();
+    expected[SMART_SETTINGS_KEY][JEV_SETTINGS_KEY][ENABLED_SETTING] = json!(false);
+    assert_eq!(root, expected, "off moves the switch and nothing else");
+    let door = JevSettings::from_root(&root);
+    for row in &JEV_USES {
+        assert_eq!(row.mode_in(&root), JevMode::Off, "{}", row.id);
+        let asked = Asking {
+            key: true,
+            settings: &door,
+            workspace: Some(APP),
+            sent_today: 0,
+        };
+        assert_eq!(
+            may_send(row, &asked, json!({})).err(),
+            Some(Refused::Off),
+            "{} was let through with Jev off",
+            row.id
+        );
+    }
+}
+
+/// A `smart.jev` of another shape is the person's to fix: neither press
+/// overwrites it.
+#[test]
+fn a_press_refuses_a_jev_of_another_shape() {
+    let mut smart = serde_json::Map::new();
+    smart.insert(JEV_SETTINGS_KEY.to_string(), json!("on please"));
+    smart.insert(ROUTING.setting.to_string(), json!("shadow"));
+    let before = smart.clone();
+    assert_eq!(switch_on(&mut smart), Err(NotAnObject(JEV_SETTINGS_KEY)));
+    assert_eq!(switch_off(&mut smart), Err(NotAnObject(JEV_SETTINGS_KEY)));
+    assert_eq!(smart, before, "a refused press wrote nothing");
+}
+
 #[test]
 fn every_line_that_may_carry_a_credential_is_withheld_whole_and_counted() {
     let task = "Rename the session cache\n\

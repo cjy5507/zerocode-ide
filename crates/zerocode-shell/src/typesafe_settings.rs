@@ -205,6 +205,9 @@ pub fn read_settings(
         .is_some_and(|key| !key.trim().is_empty());
     let root = crate::api_routers::read_zo_settings_root(path)?;
     let classifier = classifier_in(&root);
+    // Read by the core's own readers, as zo and the door read it: a seat
+    // with no word of its own follows the switch (§6.1).
+    let document = Value::Object(root.clone());
     Ok(TypeSafeSettings {
         keys_kept_here,
         key_saved,
@@ -214,7 +217,7 @@ pub fn read_settings(
             .map(|row| SwitchRow {
                 id: row.id,
                 setting: row.setting,
-                mode: mode_in(&root, row).key(),
+                mode: row.mode_in(&document).key(),
                 modes: choices(row),
                 agreement_rows_wanted: row.agreement_rows_wanted,
             })
@@ -235,16 +238,6 @@ fn classifier_in(root: &Map<String, Value>) -> ClassifierMode {
     ClassifierMode::of(
         root.get(SMART_SETTINGS_KEY)
             .and_then(|smart| smart.get(CLASSIFIER_SETTING)),
-    )
-}
-
-/// A use's switch under `smart`, read by the use's own row — the parser zo's
-/// router and the window's walk call too: a word the row offers, trimmed and in
-/// any case; a typo never starts sending a task or a screen anywhere.
-fn mode_in(root: &Map<String, Value>, row: &JevUse) -> JevMode {
-    row.mode_of(
-        root.get(SMART_SETTINGS_KEY)
-            .and_then(|smart| smart.get(row.setting)),
     )
 }
 
@@ -620,8 +613,7 @@ mod tests {
     fn the_switch_reads_as_zo_reads_it_and_refuses_to_overwrite_a_stranger() {
         for row in &JEV_USES {
             let read = |value: Value| {
-                let root = serde_json::json!({ SMART_SETTINGS_KEY: { row.setting: value } });
-                mode_in(root.as_object().expect("object"), row)
+                row.mode_in(&serde_json::json!({ SMART_SETTINGS_KEY: { row.setting: value } }))
             };
             for mode in row.modes {
                 let shouted = format!(" {} ", mode.key().to_ascii_uppercase());
