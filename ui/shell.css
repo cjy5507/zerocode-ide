@@ -29652,6 +29652,124 @@ details.task-board-section > summary {
   .task-board-members, .task-board-message, .task-board-foot { padding-inline: var(--space-4); }
 }
 
+/* ---- 코디네이터 데스크 (t-6588) --------------------------------------------
+ *
+ * 작업 목록 위의 장들: 기계 띠 한 줄, 그 아래 두 칸씩(우편 | 워커, 흐름 |
+ * 레인). 목록과 같은 폭(76em)과 같은 장 머리(낱말 · 수 위의 룰)를 쓴다 —
+ * 데스크는 목록의 머리말이지 두 번째 보드가 아니다. 빈 블록은 접히고 나머지가
+ * 차례대로 자리를 채운다. 목록 티어(보드 700 미만)에서는 한 칸. 상태 표식은
+ * 다섯 상태의 것을 빌리되 돌지 않는다 — 도는 것은 작업 행의 표식 하나다(3차). */
+.task-board-desk {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4) var(--space-5);
+  max-width: 76em;
+  margin: var(--space-5) auto 0;
+}
+
+.task-board-desk[hidden],
+.board-desk-block[hidden],
+.board-desk-release-reason[hidden],
+.board-desk-release-skips[hidden] {
+  display: none;
+}
+
+.board-desk-block {
+  min-width: 0;
+}
+
+.task-board-desk .agent-graph-node-state::before {
+  animation: none;
+}
+
+.board-desk-release-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  color: var(--ink-chalk);
+  font-size: var(--text-sm);
+}
+
+.board-desk-release-version {
+  font-weight: 600;
+}
+
+.board-desk-release-sha {
+  color: var(--ink-label);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.board-desk-release-verdict {
+  font-weight: 600;
+}
+
+.board-desk-release.is-running .board-desk-release-verdict { color: var(--signal-ready); }
+.board-desk-release.is-green .board-desk-release-verdict { color: var(--signal-done); }
+.board-desk-release.is-red .board-desk-release-verdict { color: var(--signal-halt-ink); }
+
+.board-desk-release-clock {
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.board-desk-release-phases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.board-desk-release-phase {
+  padding: 0 var(--space-2);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.8;
+}
+
+.board-desk-release-phase.is-running {
+  border-color: color-mix(in srgb, var(--signal-ready) 45%, var(--edge-rule));
+  color: var(--signal-ready);
+}
+
+.board-desk-release-phase.is-failed {
+  border-color: color-mix(in srgb, var(--signal-halt) 45%, var(--edge-rule));
+  color: var(--signal-halt-ink);
+}
+
+.board-desk-release-phase.is-skipped {
+  border-style: dashed;
+}
+
+.board-desk-release-reason,
+.board-desk-release-skips {
+  margin: var(--space-2) 0 0;
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.board-desk-release-reason {
+  color: var(--signal-halt-ink);
+}
+
+.board-desk-release-skips {
+  padding-left: var(--space-4);
+}
+
+@container board (max-width: 699px) {
+  .task-board-desk { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* ---- the inspector ------------------------------------------------------ */
 
 /* The relations workbench keeps the grid's measured ports while giving the

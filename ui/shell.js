@@ -6837,6 +6837,8 @@ function paintTaskBoard(view, model) {
   if (!results.hidden) writeTextContent(results, t("board.results", "총 {{total}}개 중 {{shown}}개 표시", {
     total: tasks.groups.length, shown,
   }));
+  // The coordinator's desk above the list (t-6588, shell-board.js).
+  paintCoordinatorDesk(view);
   paintTaskBoardInspector(view, tasks);
   // The inspector's existing Escape/scrim controls apply to either view.
   wireAgentGraphCanvas(view);

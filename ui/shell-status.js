@@ -3451,6 +3451,11 @@ let releaseNotice = null;
  * app notice says so beside its button and recommends restarting after they
  * land. Zero says nothing. */
 let releaseWorkers = 0;
+/* The lane's own `status.json` as that same answer carried it — sha, version,
+ * phase, outcome — for the task board's release card (t-6588,
+ * `paintDeskRelease`). Kept here because this is the one reader of the file;
+ * the card only draws what was read. `null` is "no lane here" or "unread". */
+let releaseLane = null;
 const noticedBuilds = new Set();
 let updateToast = null;
 let updateToastKey = null;
@@ -3583,6 +3588,7 @@ function raiseUpdateToast() {
 function absorbReleaseStatus(answer) {
   releaseNotice = answer?.notice ?? null;
   releaseWorkers = Number.isInteger(answer?.workers) ? answer.workers : 0;
+  releaseLane = answer?.status && typeof answer.status === "object" ? answer.status : null;
   paintUpdateNotice();
   raiseUpdateToast();
   // A toast already standing for this pair keeps saying the truth: the

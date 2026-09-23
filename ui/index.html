@@ -55,6 +55,7 @@
     <script defer src="./shell-remote.js"></script>
     <script defer src="./shell-sftp.js"></script>
     <script defer src="./shell-conversation-view.js"></script>
+    <script defer src="./shell-board.js"></script>
     <script defer src="./shell.js"></script>
   </head>
   <body>
@@ -1678,6 +1679,10 @@
                 <h2 data-i18n="board.tasks.now">지금 진행 중인 일</h2>
                 <p class="task-board-summary" role="status" aria-live="polite"></p>
               </header>
+              <!-- 코디네이터 데스크 (t-6588): 코디네이터가 원장 CLI로 묻던 것을 판이
+                   먼저 답한다 — 기계 띠·답할 우편·워커·과업 흐름·릴리즈 레인. 블록은
+                   `paintCoordinatorDesk`(shell-board.js)가 키로 세운다. -->
+              <section class="task-board-desk" hidden data-i18n-aria="board.desk.label" aria-label="코디네이터 데스크"></section>
               <nav class="task-board-filters" data-i18n-aria="board.tasks.filter" aria-label="작업 상태 필터"></nav>
               <div class="task-board-sections"></div>
               <p class="task-board-empty" hidden></p>

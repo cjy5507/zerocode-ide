@@ -27,6 +27,7 @@ import { testArtifactCatalog, testArtifactChrome, testArtifactPages, testArtifac
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
 import { testTaskBoard } from "./task-board.mjs";
+import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
 import { testAutonomyBoard } from "./autonomy-board.mjs";
 import { testConnectedWorkbench } from "./connected-workbench.mjs";
@@ -175,6 +176,8 @@ suite("ledger-poll", ({ browser, origin, ok }) => testLedgerPoll(browser, origin
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 // Vault state stays local to this fixture, just like the explorer fixture.
 suite("task-board", ({ browser, origin, ok }) => testTaskBoard(browser, origin, ok));
+// The coordinator's desk above the task list (t-6588, docs/design/agent-board-round4.md).
+suite("coordinator-desk", ({ browser, origin, ok }) => testCoordinatorDesk(browser, origin, ok));
 suite("agent-relations", async ({ browser, origin, ok }) => {
   await testAgentRelations(browser, origin, ok);
   await testAgentRelationsForm(browser, origin, ok);
