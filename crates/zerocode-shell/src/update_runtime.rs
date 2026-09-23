@@ -811,11 +811,11 @@ pub(crate) struct ReleaseStatus {
     pub(crate) status: Value,
     pub(crate) installed: Value,
     pub(crate) notice: Option<Notice>,
-    /// How many workers are at work in this window's panes, read from the
-    /// ledger by the command (t-3058) — what the notice counts before it
-    /// recommends a restart. Zero for the pure judgement over the files.
+    /// Who a restart would cut, read by the command from the one census
+    /// (t-3058, t-6428) — what the notice says beside its button. Nobody for
+    /// the pure judgement over the files.
     #[serde(default)]
-    pub(crate) workers: usize,
+    pub(crate) busy: crate::orchestration::restart_census::Busy,
 }
 
 /// Read the lane's two files under `dir` and judge them against `running`
@@ -837,7 +837,7 @@ pub(crate) fn release_status_in(
         status: status.unwrap_or(Value::Null),
         installed: installed.unwrap_or(Value::Null),
         notice,
-        workers: 0,
+        busy: crate::orchestration::restart_census::Busy::default(),
     }
 }
 

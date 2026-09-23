@@ -938,7 +938,11 @@ fn all_ledger_image_readers_use_the_revision_cache() {
     // The background publisher and two fresh readers reach the same door. Named here
     // rather than left out, because "does not call `Ledger::rebuild`" is
     // satisfied by a reader that calls nothing at all.
-    for delegating in ["refresh_board_ledger", "ledger_agents", "seated_live_workers"] {
+    for delegating in [
+        "refresh_board_ledger",
+        "ledger_agents",
+        "seated_live_workers",
+    ] {
         let start = shipped
             .find(&format!("fn {delegating}()"))
             .unwrap_or_else(|| panic!("missing reader {delegating}"));

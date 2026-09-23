@@ -53254,7 +53254,12 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
   // The dim auxiliary: the sha, only when the sentence names a version.
   const aux = (half) => (half.change === "version" ? short(half.installed) : "");
   const spoken = (words, dim) => (dim ? `${words} ${dim}` : words);
-  const busyWords = (n) => t("update.workersBusy", "워커 {{n}}개 진행 중 — 착지 뒤 재시작 권장", { n });
+  // The census's words (t-6428): each part only when it counts.
+  const busyWords = (census) => [
+    census.turning > 0 ? t("exit.busyTurning", "워커 {{n}}명 턴 중", { n: census.turning }) : "",
+    census.background > 0 ? t("exit.busyBackground", "배경 작업 {{n}}개", { n: census.background }) : "",
+    census.unknown > 0 ? t("exit.busyUnknown", "상태를 모르는 워커 {{n}}명", { n: census.unknown }) : "",
+  ].filter(Boolean).join(" · ");
   const runningWords = () =>
     t("settings.update.running", "ZeroCode {{version}} · 빌드 {{sha}} · {{channel}}", {
       version: runningVersion,
@@ -53284,9 +53289,12 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
   const pane = settingsPane;
   const KEYS = [
     "update.readyAppVersion", "update.readyAppBuild", "update.readyZoVersion", "update.readyZoBuild",
-    "update.restart", "update.workersBusy", "settings.update.title", "settings.update.running",
+    "update.restart", "exit.busyTurning", "exit.busyBackground", "exit.busyUnknown",
+    "settings.update.title", "settings.update.running",
   ];
-  const GONE = ["update.readyApp", "update.readyZo", "settings.update.app", "settings.update.zo"];
+  const GONE = [
+    "update.readyApp", "update.readyZo", "settings.update.app", "settings.update.zo", "update.workersBusy",
+  ];
   try {
     for (const note of document.querySelectorAll(".toast")) note.remove();
     const before = window.__COUNTS__.relaunch_window ?? 0;
@@ -53421,27 +53429,30 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
     await tick();
     seen.repeatToasts = standing().length;
     seen.repeatNoticeShown = !document.getElementById("update-notice").hidden;
-    // ⑧ Workers at work (t-3058): the app toast says how many after its
-    // sentence and before the dim sha; the notice says it on its own line,
-    // and recommends restarting after they land — the button stays. Zero
-    // says nothing, in the toast or the notice.
+    // ⑧ Work a restart would cut (t-3058, t-6428): the app toast says the
+    // one census after its sentence and before the dim sha — workers
+    // mid-turn, background jobs under workers at rest, workers nobody could
+    // read — and the notice says it on its own line; the button stays.
+    // Workers at rest with nothing under them say nothing, in either.
     const busy = appDrift(`b${drift.installed.slice(1)}`, installed.app.version);
-    window.__ANSWER__.release_status = () => ({ ...answer(busy, null), workers: 2 });
+    const census = { busy: true, workers: 3, turning: 1, background: 2, unknown: 1 };
+    window.__ANSWER__.release_status = () => ({ ...answer(busy, null), busy: census });
     await askReleaseStatus();
     await tick();
     const busyToast = standing().at(-1);
     seen.busyToasts = standing().length;
     seen.busyToast = toastText(busyToast);
-    seen.busyWord = spoken(`${appWords(busy)} ${busyWords(2)}`, aux(busy));
+    seen.busyWord = spoken(`${appWords(busy)} — ${busyWords(census)}`, aux(busy));
     seen.busyAction = !!busyToast?.querySelector(".toast-action");
     seen.busyNoticeApp = noticeLine("update-notice-app").textContent === spoken(appWords(busy), aux(busy));
     seen.busyNoticeShown = !noticeLine("update-notice-workers").hidden;
     seen.busyNotice = noticeLine("update-notice-workers").textContent;
-    seen.busyNoticeWord = busyWords(2);
+    seen.busyNoticeWord = busyWords(census);
     seen.busyButtonShown = !document.getElementById("update-relaunch").hidden;
-    // The count moves while the sha stands: the standing toast follows it,
-    // and keeps its dim sha.
-    window.__ANSWER__.release_status = () => ({ ...answer(busy, null), workers: 0 });
+    // The census moves while the sha stands: the standing toast follows it,
+    // and keeps its dim sha — three workers, all at rest, cut nothing.
+    const atRest = { busy: false, workers: 3, turning: 0, background: 0, unknown: 0 };
+    window.__ANSWER__.release_status = () => ({ ...answer(busy, null), busy: atRest });
     await askReleaseStatus();
     await tick();
     seen.settledToasts = standing().length;
@@ -53451,7 +53462,7 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
     seen.settledNoticeHidden = noticeLine("update-notice-workers").hidden;
     // And a fresh sha with nobody at work carries no suffix at all.
     const quiet = appDrift(`c${drift.installed.slice(1)}`, installed.app.version);
-    window.__ANSWER__.release_status = () => ({ ...answer(quiet, null), workers: 0 });
+    window.__ANSWER__.release_status = () => ({ ...answer(quiet, null), busy: atRest });
     await askReleaseStatus();
     await tick();
     seen.quietToast = toastText(standing().at(-1));
@@ -53483,7 +53494,7 @@ const updateNotice = await page.evaluate(async ({ status, installed, running, ru
   zoRunning: ["5205ab00cccccccccccccccccccccccccccccccc"],
 });
 ok(
-  "a newer installed build is one sticky toast per sha and the settings notice saying the same sentence — 「새 버전 {{version}}이(가) 설치되었습니다」 with the sha dim beside it when the lane's version is not the running one, 「새 빌드({{sha}})가 설치되었습니다」 when it is — the notice adding t-3191's one running line, both on the one restart road, worded by t() in five catalogs with the sha-only rows gone, zo saying 「zo {{version}} 설치됨」 by the same rule without a button, gone when the builds are equal, and 「워커 N개 진행 중 — 착지 뒤 재시작 권장」 while the ledger counts workers at work",
+  "a newer installed build is one sticky toast per sha and the settings notice saying the same sentence — 「새 버전 {{version}}이(가) 설치되었습니다」 with the sha dim beside it when the lane's version is not the running one, 「새 빌드({{sha}})가 설치되었습니다」 when it is — the notice adding t-3191's one running line, both on the one restart road, worded by t() in five catalogs with the sha-only rows gone, zo saying 「zo {{version}} 설치됨」 by the same rule without a button, gone when the builds are equal, and the one census's 「워커 N명 턴 중 · 배경 작업 M개」 while a restart would cut work (t-6428)",
   !updateNotice.error &&
     !updateNotice.cleanupError &&
     updateNotice.toasts === 1 &&

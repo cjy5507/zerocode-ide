@@ -94,7 +94,7 @@ pub(crate) struct RestartCensus {
 
 /// The census as every asker speaks it: whether to ask at all, and the
 /// three numbers the question says.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Busy {
     pub(crate) busy: bool,

@@ -46,8 +46,13 @@ mod tests {
         );
         let command = block_after(backend, "pub(crate) fn release_status(");
         assert!(
-            command.contains("answer.workers = crate::orchestration::live_worker_count();"),
-            "the notice's worker count is the ledger's, read by the command (t-3058):\n{command}"
+            command.contains("answer.busy = crate::cmd::appearance::take_census(&app).busy();"),
+            "the notice's words are the one census's, read by the command (t-3058, \
+             t-6428):\n{command}"
+        );
+        assert!(
+            !backend.contains("fn live_worker_count("),
+            "a second count of the work a restart would cut (t-6428)"
         );
         assert!(
             command.contains("zo_integration_runtime::running_zo_builds(&state)")
@@ -154,15 +159,29 @@ mod tests {
             1,
             "settings.update.running is spoken from one place"
         );
-        let busy = block_after(window, "function updateWorkersWords(");
+        // The census's words are built once (t-6428): each part through
+        // t() only when it counts, nothing at all when nothing would be cut.
+        let busy = block_after(window, "function busyWords(");
         assert!(
-            busy.contains("t(\"update.workersBusy\", \"워커 {{n}}개 진행 중 — 착지 뒤 재시작 권장\", { n: releaseWorkers })")
-                && busy.contains("if (!(releaseWorkers > 0)) return \"\";"),
-            "the worker suffix is not the one t() over the ledger's count:\n{busy}"
+            busy.contains("if (!busy?.busy) return \"\";")
+                && busy.contains(
+                    "t(\"exit.busyTurning\", \"워커 {{n}}명 턴 중\", { n: busy.turning })"
+                )
+                && busy.contains(
+                    "t(\"exit.busyBackground\", \"배경 작업 {{n}}개\", { n: busy.background })"
+                )
+                && busy.contains(
+                    "t(\"exit.busyUnknown\", \"상태를 모르는 워커 {{n}}명\", { n: busy.unknown })"
+                ),
+            "the census's words lost their one builder:\n{busy}"
         );
         assert!(
-            block_after(window, "function absorbReleaseStatus(").contains("releaseWorkers = "),
-            "the worker count is not read off the release_status answer"
+            block_after(window, "function updateWorkersWords(").contains("busyWords(releaseBusy)"),
+            "the notice's suffix is not the census's words"
+        );
+        assert!(
+            block_after(window, "function absorbReleaseStatus(").contains("releaseBusy = "),
+            "the census is not read off the release_status answer"
         );
         assert!(
             !window.contains("localStorage.setItem(\"update"),
@@ -211,7 +230,9 @@ mod tests {
             "update.readyZoVersion",
             "update.readyZoBuild",
             "update.restart",
-            "update.workersBusy",
+            "exit.busyTurning",
+            "exit.busyBackground",
+            "exit.busyUnknown",
             "settings.update.title",
             "settings.update.running",
         ] {
@@ -228,6 +249,8 @@ mod tests {
             "update.readyZo",
             "settings.update.app",
             "settings.update.zo",
+            // The worker count the census replaced (t-6428).
+            "update.workersBusy",
         ] {
             assert_eq!(
                 i18n.matches(&format!("\"{key}\"")).count(),

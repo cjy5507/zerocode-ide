@@ -3445,21 +3445,33 @@ const usageAmbient = idlePoller({
  * anything (PRODUCT §10); the folder-panel toast is the shape — a toast
  * that stands for a condition and leaves with it. */
 let releaseNotice = null;
-/* How many workers are at work in this window's panes, by the ledger, as
- * `release_status` last answered (t-3058). A restart cuts every one of them
- * — they sleep and are seated again, but their turn is cut short — so the
- * app notice says so beside its button and recommends restarting after they
- * land. Zero says nothing. */
-let releaseWorkers = 0;
+/* Who a restart would cut, as the one census answered it through
+ * `release_status` (t-3058, t-6428): workers mid-turn, background jobs
+ * under workers at rest, workers the window could not read. A restart cuts
+ * every one of them — a turn sleeps and is seated again, a job dies — so
+ * the app notice says so beside its button. Nothing busy says nothing. */
+let releaseBusy = null;
 const noticedBuilds = new Set();
 let updateToast = null;
 let updateToastKey = null;
 
-/* The suffix the app notice carries while workers are at work — one t() in
- * five catalogs, shared by the toast and the settings notice. */
+/* The census in words (t-6428): each part through t() in five catalogs,
+ * and only when it counts; nothing when nothing would be cut. One builder
+ * for the notice here and for every question asked before the window is
+ * left. */
+function busyWords(busy) {
+  if (!busy?.busy) return "";
+  const parts = [];
+  if (busy.turning > 0) parts.push(t("exit.busyTurning", "워커 {{n}}명 턴 중", { n: busy.turning }));
+  if (busy.background > 0) parts.push(t("exit.busyBackground", "배경 작업 {{n}}개", { n: busy.background }));
+  if (busy.unknown > 0) parts.push(t("exit.busyUnknown", "상태를 모르는 워커 {{n}}명", { n: busy.unknown }));
+  return parts.join(" · ");
+}
+
+/* The suffix the app notice carries while a restart would cut work — the
+ * census's words, shared by the toast and the settings notice. */
 function updateWorkersWords() {
-  if (!(releaseWorkers > 0)) return "";
-  return t("update.workersBusy", "워커 {{n}}개 진행 중 — 착지 뒤 재시작 권장", { n: releaseWorkers });
+  return busyWords(releaseBusy);
 }
 
 /* The app sentence (t-3237): the change the backend named picks it. A
@@ -3518,7 +3530,7 @@ function updateReadyZoWords(zo) {
 function updateToastAppWords(app) {
   const { sentence, aux } = updateReadyAppWords(app);
   const busy = updateWorkersWords();
-  return { text: busy ? `${sentence} ${busy}` : sentence, aux };
+  return { text: busy ? `${sentence} — ${busy}` : sentence, aux };
 }
 
 /* Words with a dim auxiliary after them — the sha beside 「새 버전
@@ -3582,11 +3594,11 @@ function raiseUpdateToast() {
 
 function absorbReleaseStatus(answer) {
   releaseNotice = answer?.notice ?? null;
-  releaseWorkers = Number.isInteger(answer?.workers) ? answer.workers : 0;
+  releaseBusy = answer?.busy ?? null;
   paintUpdateNotice();
   raiseUpdateToast();
   // A toast already standing for this pair keeps saying the truth: the
-  // worker count moves while the sha does not, and the sentence follows it.
+  // census moves while the sha does not, and the sentence follows it.
   const app = releaseNotice?.app ?? null;
   if (app && updateToast?.isConnected && updateToastKey === updateNoticeKey(releaseNotice)) {
     const node = updateToast.querySelector(".toast-text");

@@ -3334,14 +3334,6 @@ fn expire_sleepers(host: &dyn Host, now_ms: i64) {
     }
 }
 
-/// How many workers are at work in THIS window's panes right now — what the
-/// 「새 빌드 준비됨」 notice reads before it recommends a restart (t-3058).
-/// A live row with a seat this window maps; sleepers, orphans nobody maps
-/// and released rows are not panes a restart would cut.
-pub(crate) fn live_worker_count() -> usize {
-    seated_live_workers().len()
-}
-
 /// The live workers seated in THIS window's panes, each with the terminal
 /// that holds it — who leaving the window would cut (t-3058, t-6428). A live
 /// row with a seat this window maps; sleepers, orphans nobody maps and
