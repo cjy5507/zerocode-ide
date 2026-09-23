@@ -75,3 +75,14 @@ root:orchestration::tests::a_working_claude_pane_is_pointed_at_through_its_own_h
 # Same gate: the growing PTY could not be spawned ("the pty slave has no name") while the other binaries ran beside it —
 # pty allocation under load; green solo x3.
 zo:e2e_grow_during_a_live_spinner_pins_the_footer_to_the_last_row
+# 2026-09-23 coordinator gate for t-6269 (zo-test, 49 binaries side by side, load 46-120 with three worker builds and a
+# container beside them): the 2,000-session search overran its time bound (`bounds.session_recall_search`) with
+# session_recall untouched by the branch; green solo x3 (1.5-1.8 s each).
+zo:misc_tools::session_recall::tests::a_search_over_2000_sessions_stays_under_the_bound
+# 2026-09-23 coordinator gate on main (shell-test, load 186 with three worker builds beside it): the headless login
+# runner returned after 6.9 s where the grace and one poll were expected — a wall-clock budget; green solo x3 (2.8-4.1 s).
+root:cli_login::tests::a_headless_login_returns_when_the_witness_lands_and_kills_the_lingering_cli
+# 2026-09-23 coordinator gate on main after the catalog merge (root test, load 32 with one worker build and a browser
+# suite beside it): the pty lane's foreground wait ran out before the shell took its terminal back after ETX, pty
+# untouched by the merge; green solo x3 (0.12 s each).
+root:one_byte_gives_the_shell_its_terminal_back

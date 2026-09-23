@@ -927,6 +927,73 @@
         let _ = fs::remove_dir_all(config_home);
     }
 
+    /// A minimal connected inventory of the given canonical ids, each on the
+    /// provider its id names — enough for the refusal-fallback resolver, which
+    /// only asks whether a candidate id is present.
+    fn inventory_of(main: &str, ids: &[&str]) -> runtime::ModelInventory {
+        use runtime::model_router::ModelSource;
+        use runtime::{ModelDescriptor, ModelInventory};
+        let provider_key = |id: &str| match api::detect_provider_kind(id) {
+            api::ProviderKind::Anthropic => "anthropic",
+            api::ProviderKind::OpenAi => "openai",
+            api::ProviderKind::Google => "google",
+            api::ProviderKind::Xai => "xai",
+            api::ProviderKind::Ollama => "ollama",
+        };
+        let models = ids
+            .iter()
+            .map(|id| {
+                ModelDescriptor::new((*id).to_string(), provider_key(id), "family")
+                    .source(ModelSource::EnabledBuiltinProvider)
+            })
+            .collect();
+        ModelInventory::new(main, models)
+    }
+
+    /// The cross-provider refusal fallback (t-6269) walks the main model's
+    /// catalog candidate list in order and picks the first candidate on another
+    /// provider that is actually connected; a same-provider head is left to the
+    /// runtime override, and an unconnected provider is skipped for the next.
+    #[test]
+    fn refusal_fallback_resolves_candidate_order_against_connected_providers() {
+        let config_home = temp_config_home("refusal-fallback-connection");
+        write_settings(&config_home, &json!({ "smart": { "enabled": true } }));
+        let openai = api::resolve_catalog_alias("openai-latest");
+        let google = api::resolve_catalog_alias("google-latest");
+        with_config_home(&config_home, || {
+            let cwd = std::env::current_dir().expect("cwd");
+            let settings = super::settings::read_smart_runtime_settings_for(&cwd);
+            let route = |ids: &[&str]| {
+                super::settings::smart_turn_routing_with(
+                    settings.clone(),
+                    "claude-opus-5",
+                    &inventory_of("claude-opus-5", ids),
+                    RouteTaskComplexity::Medium,
+                )
+                .refusal_fallback_model
+            };
+            // Opus alone: its list is [openai-latest, google-latest], both on
+            // other providers but neither connected → no host client.
+            assert_eq!(route(&["claude-opus-5"]), None);
+            // OpenAI connected: the first candidate wins.
+            assert_eq!(route(&["claude-opus-5", &openai]).as_deref(), Some(openai.as_str()));
+            // OpenAI down, Google up: the resolver skips the first and takes the
+            // next connected candidate — candidate order plus connection state.
+            assert_eq!(route(&["claude-opus-5", &google]).as_deref(), Some(google.as_str()));
+            // Fable's head is Opus, a same-provider candidate handled by the
+            // runtime override, so the host installs no cross client for it here.
+            let fable_route = super::settings::smart_turn_routing_with(
+                settings.clone(),
+                "claude-fable-5-1",
+                &inventory_of("claude-fable-5-1", &["claude-fable-5-1", "claude-opus-5"]),
+                RouteTaskComplexity::Medium,
+            )
+            .refusal_fallback_model;
+            assert_eq!(fable_route, None, "Opus is same-provider — no host client");
+        });
+        let _ = fs::remove_dir_all(config_home);
+    }
+
     /// The connected inventory the dynamic top tier is computed from — the
     /// same shape the runtime router pins: two declared frontier models on two
     /// providers, a discovered newer model whose Deep tier comes from its

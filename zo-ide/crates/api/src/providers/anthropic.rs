@@ -15,6 +15,7 @@ use serde_json::{Map, Value};
 use telemetry::{AnalyticsEvent, AnthropicRequestProfile, ClientIdentity, SessionTracer};
 
 use super::{read_env_non_empty, refresh_gate};
+use crate::credential::CredentialMiss;
 use crate::error::ApiError;
 use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 
@@ -286,7 +287,7 @@ impl AuthSource {
         }
         resolve_claude_auth_fresh_inner()
             .map(|resolved| resolved.auth)
-            .ok_or_else(|| ApiError::missing_auth_route_credentials("Anthropic", "oauth"))
+            .map_err(|_| ApiError::missing_auth_route_credentials("Anthropic", "oauth"))
     }
 
     #[must_use]
@@ -1757,14 +1758,26 @@ pub struct ResolvedClaudeAuth {
 /// network refreshes hop to a dedicated thread.
 #[must_use]
 pub fn resolve_claude_auth_fresh_detailed() -> Option<ResolvedClaudeAuth> {
+    resolve_claude_auth_fresh_explained().ok()
+}
+
+/// [`resolve_claude_auth_fresh_detailed`], and when nothing usable exists,
+/// why: [`CredentialMiss::Absent`] only when no rung holds a Claude credential
+/// at all, otherwise [`CredentialMiss::Unusable`] with the first rung's reason
+/// in chain order — a managed or keychain login that expired and would not
+/// refresh outranks a saved login that failed the same way.
+pub fn resolve_claude_auth_fresh_explained() -> Result<ResolvedClaudeAuth, CredentialMiss> {
     let resolved = resolve_claude_auth_fresh_inner();
-    if let Some(ref auth) = resolved {
+    if let Ok(ref auth) = resolved {
         // OAuth-first visibility: publish which rung of the chain answered so
         // the HUD can show a silent fall to the metered env key (the user is
         // on subscription by default and should notice paid-key usage).
         *crate::sync_bridge::lock_recovered(&LATEST_CLAUDE_AUTH_ORIGIN) = Some(auth.origin);
         crate::sync_bridge::lock_recovered(&LATEST_CLAUDE_MANAGED_STAMP)
             .clone_from(&auth.managed_file_stamp);
+        // And the credential itself, for sub-agents to inherit — whoever
+        // resolved it (a turn, a 401 recovery, a model-list refresh).
+        AuthSource::cache_resolved(&auth.auth);
     }
     resolved
 }
@@ -1794,51 +1807,93 @@ pub fn managed_claude_auth_changed() -> bool {
     previous.is_none() || current.is_none() || previous != current
 }
 
-fn resolve_claude_auth_fresh_inner() -> Option<ResolvedClaudeAuth> {
+fn resolve_claude_auth_fresh_inner() -> Result<ResolvedClaudeAuth, CredentialMiss> {
     let managed_file_stamp = keychain::managed_claude_credentials_stamp();
-    if let Some(session) = keychain::read_claude_code_keychain_session() {
-        return Some(ResolvedClaudeAuth {
-            auth: AuthSource::BearerToken(session.access_token),
-            origin: if managed_file_stamp.is_some() {
-                ClaudeAuthOrigin::ManagedFile
-            } else {
-                ClaudeAuthOrigin::Keychain
-            },
-            expires_at_ms: session.expires_at_ms,
-            managed_file_stamp,
-        });
-    }
+    let session_miss = match keychain::read_claude_code_keychain_session_explained() {
+        Ok(session) => {
+            return Ok(ResolvedClaudeAuth {
+                auth: AuthSource::BearerToken(session.access_token),
+                origin: if managed_file_stamp.is_some() {
+                    ClaudeAuthOrigin::ManagedFile
+                } else {
+                    ClaudeAuthOrigin::Keychain
+                },
+                expires_at_ms: session.expires_at_ms,
+                managed_file_stamp,
+            });
+        }
+        Err(miss) => miss,
+    };
     let config = keychain::claude_code_oauth_config();
     // Falling through on failure is deliberate — the env rung may still answer —
     // but it is no longer *silent*: `resolve_saved_oauth_token_set_with` reports
     // a dead branch once, with the re-authentication route. Before that, a user
     // whose saved login had been superseded saw only a downstream 401 and no hint
     // that `zo login claude` was the fix.
-    if let Ok(Some(token_set)) = resolve_saved_oauth_token_any_context(&config) {
-        let expires_at_ms = token_set.expires_at.map(|secs| secs.saturating_mul(1000));
-        return Some(ResolvedClaudeAuth {
-            auth: AuthSource::from(token_set),
-            origin: ClaudeAuthOrigin::SavedOauth,
-            expires_at_ms,
-            managed_file_stamp: None,
-        });
-    }
-    let auth = AuthSource::from_env().ok()?;
-    Some(ResolvedClaudeAuth {
-        auth,
-        origin: ClaudeAuthOrigin::Env,
-        expires_at_ms: None,
-        managed_file_stamp: None,
-    })
+    let saved_miss = match resolve_saved_oauth_token_any_context(&config) {
+        Ok(Some(token_set)) => {
+            let expires_at_ms = token_set.expires_at.map(|secs| secs.saturating_mul(1000));
+            return Ok(ResolvedClaudeAuth {
+                auth: AuthSource::from(token_set),
+                origin: ClaudeAuthOrigin::SavedOauth,
+                expires_at_ms,
+                managed_file_stamp: None,
+            });
+        }
+        Ok(None) => CredentialMiss::Absent,
+        Err(error) => CredentialMiss::Unusable(saved_login_unusable(&error)),
+    };
+    let env_miss = match AuthSource::from_env() {
+        Ok(auth) => {
+            return Ok(ResolvedClaudeAuth {
+                auth,
+                origin: ClaudeAuthOrigin::Env,
+                expires_at_ms: None,
+                managed_file_stamp: None,
+            });
+        }
+        Err(ApiError::MissingCredentials { .. }) => CredentialMiss::Absent,
+        Err(error) => CredentialMiss::Unusable(single_line_reason(&error)),
+    };
+    Err(session_miss.or(saved_miss).or(env_miss))
 }
 
-/// [`resolve_claude_auth_fresh_detailed`] reduced to the credential, with the
-/// result cached for sub-agent inheritance.
+/// Whether this process holds a Claude credential on any rung of the chain —
+/// configured, not necessarily usable. Offline and cheap: the environment,
+/// zo's saved login (one file read; a store that cannot be read is there all
+/// the same), the managed folder or the keychain item — no token is refreshed
+/// and no secret is read. A model list asks it to tell a skip another process
+/// wrote from this one's credential (t-6248).
+#[must_use]
+pub fn claude_credential_configured() -> bool {
+    read_env_non_empty("ANTHROPIC_API_KEY").map_or(true, |key| key.is_some())
+        || read_env_non_empty("ANTHROPIC_AUTH_TOKEN").map_or(true, |token| token.is_some())
+        || load_oauth_credentials().map_or(true, |saved| saved.is_some())
+        || keychain::claude_code_login_configured()
+}
+
+/// Why zo's own saved Claude login could not be used, for a person to read.
+/// The refresh gate's refusals already name the way out; a token without a
+/// refresh token, or a refresh the endpoint answered with an error, is said
+/// here in the same terms.
+fn saved_login_unusable(error: &ApiError) -> String {
+    match error {
+        ApiError::Auth(message) => message.clone(),
+        ApiError::ExpiredOAuthToken => {
+            "zo's saved Claude login expired and holds no refresh token — run `zo login claude`".to_string()
+        }
+        other => format!(
+            "zo's saved Claude login could not be refreshed ({}) — run `zo login claude` if it keeps failing",
+            single_line_reason(other)
+        ),
+    }
+}
+
+/// [`resolve_claude_auth_fresh_detailed`] reduced to the credential (cached
+/// for sub-agent inheritance, as every fresh resolution is).
 #[must_use]
 pub fn resolve_claude_auth_fresh() -> Option<AuthSource> {
-    let resolved = resolve_claude_auth_fresh_detailed()?;
-    AuthSource::cache_resolved(&resolved.auth);
-    Some(resolved.auth)
+    resolve_claude_auth_fresh_detailed().map(|resolved| resolved.auth)
 }
 
 static REFRESH_FLIGHT: Mutex<()> = Mutex::new(());

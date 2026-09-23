@@ -10,6 +10,7 @@ use anthropic::keychain::KeychainAnswer;
 pub mod anthropic;
 pub(crate) mod aws_sigv4;
 pub mod chatgpt_backend;
+pub mod cli_sessions;
 pub(crate) mod cloud_gateway;
 pub mod gemini_code_assist;
 pub(crate) mod google_auth;
@@ -246,6 +247,37 @@ fn install_router_priors(raw: &str) {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = installed;
 }
 
+/// An on-disk alias field that is either a single alias or an ordered list of
+/// them, so the catalog can spell `"opus"` or `["opus", "openai-latest"]` for
+/// the same key. [`Self::into_vec`] normalises both to the list the code reads.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum AliasList {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl AliasList {
+    fn to_vec(&self) -> Vec<String> {
+        match self {
+            Self::One(alias) => vec![alias.clone()],
+            Self::Many(aliases) => aliases.clone(),
+        }
+    }
+}
+
+/// An optional string-or-list alias field as the list the code reads: absent →
+/// empty, string → one, array → many. Trims each entry, dropping blanks.
+fn clone_alias_list(field: Option<&AliasList>) -> Vec<String> {
+    field
+        .map(AliasList::to_vec)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|alias| alias.trim().to_string())
+        .filter(|alias| !alias.is_empty())
+        .collect()
+}
+
 /// One alias row as the catalog file states it. Kept separate from
 /// [`ProviderCatalogEntry`] because that type is what the rest of the codebase
 /// consumes (`&'static str` fields, provider metadata helpers) while this is
@@ -261,11 +293,11 @@ struct AliasRow {
     /// Absent means "this is the bottom rung" — see [`starvation_demotion_model`].
     #[serde(default)]
     demotes_to: Option<String>,
-    /// The family alias a safety-classifier refusal on this lineup retries on
-    /// once. Absent means a refusal is surfaced (after one same-model retry)
-    /// — see [`refusal_fallback_model`].
+    /// Where a safety-classifier refusal on this lineup goes next: one alias or
+    /// an ordered list of candidates. Absent means a refusal is surfaced (after
+    /// one same-model retry) — see [`refusal_fallback_candidates`].
     #[serde(default)]
-    refusal_fallback: Option<String>,
+    refusal_fallback: Option<AliasList>,
 }
 
 fn provider_kind_from_key(key: &str) -> Option<ProviderKind> {
@@ -411,11 +443,11 @@ struct ModelContextEntry {
     /// canonical (a retired lineup); alias rows carry theirs on the alias.
     #[serde(default)]
     demotes_to: Option<String>,
-    /// The family alias a safety-classifier refusal on this id retries on
-    /// once, for an id that is not a family alias's canonical; alias rows
-    /// carry theirs on the alias.
+    /// Where a safety-classifier refusal on this id goes next (one alias or an
+    /// ordered list), for an id that is not a family alias's canonical; alias
+    /// rows carry theirs on the alias.
     #[serde(default)]
-    refusal_fallback: Option<String>,
+    refusal_fallback: Option<AliasList>,
     /// Extended OpenAI prompt-cache retention the provider verified for this
     /// model (`24h`), or absent when only the routing key may be sent.
     #[serde(default)]
@@ -588,9 +620,10 @@ impl ModelContextCatalog {
             .and_then(|entry| entry.demotes_to.clone())
     }
 
-    fn refusal_fallback_for(&self, raw_model: &str, canonical_model: &str) -> Option<String> {
+    fn refusal_fallback_for(&self, raw_model: &str, canonical_model: &str) -> Vec<String> {
         self.find_entry(raw_model, canonical_model)
-            .and_then(|entry| entry.refusal_fallback.clone())
+            .map(|entry| clone_alias_list(entry.refusal_fallback.as_ref()))
+            .unwrap_or_default()
     }
 
     fn prompt_cache_retention_for(&self, raw_model: &str, canonical_model: &str) -> Option<String> {
@@ -1529,12 +1562,12 @@ pub struct ProviderCatalogEntry {
     /// is a fact about the lineup, and keeping it here means adding a model
     /// never means editing a policy table.
     pub demotes_to: Option<&'static str>,
-    /// The family alias a safety-classifier refusal on this lineup retries on
-    /// once, or `None` when a refusal is surfaced instead. A fact about the
-    /// lineup's classifier, kept beside its identity for the same reason
-    /// `demotes_to` is: the runtime's refusal path reads it and names no
+    /// Where a safety-classifier refusal on this lineup goes next, in
+    /// preference order, or empty when a refusal is surfaced instead. A fact
+    /// about the lineup's classifier, kept beside its identity for the same
+    /// reason `demotes_to` is: the runtime's refusal path reads it and names no
     /// lineup itself.
-    pub refusal_fallback: Option<&'static str>,
+    pub refusal_fallback: &'static [&'static str],
 }
 
 impl ProviderCatalogEntry {
@@ -1555,7 +1588,7 @@ impl ProviderCatalogEntry {
             fit_hint: None,
             orchestration_rank: None,
             demotes_to: None,
-            refusal_fallback: None,
+            refusal_fallback: &[],
         }
     }
 
@@ -1810,6 +1843,20 @@ fn alias_rows_of(raw: &str) -> Vec<AliasRow> {
 /// which is what makes an override authoritative: it is concatenated ahead of
 /// the built-ins, so an alias it names shadows the shipped row instead of
 /// colliding with it.
+/// Leak an owned alias list into the `&'static [&'static str]` the catalog
+/// entries hold. Empty in, empty (`&[]`) out — no allocation for the common
+/// row that declares no refusal fallback.
+fn leak_alias_list(aliases: &[String]) -> &'static [&'static str] {
+    if aliases.is_empty() {
+        return &[];
+    }
+    let leaked: Vec<&'static str> = aliases
+        .iter()
+        .map(|alias| &*String::leak(alias.clone()))
+        .collect();
+    Vec::leak(leaked)
+}
+
 fn leak_registry(rows: Vec<AliasRow>) -> &'static [ProviderCatalogEntry] {
     let mut seen: Vec<(ProviderKind, String)> = Vec::new();
     let mut entries = Vec::with_capacity(rows.len());
@@ -1834,9 +1881,7 @@ fn leak_registry(rows: Vec<AliasRow>) -> &'static [ProviderCatalogEntry] {
             fit_hint: None,
             orchestration_rank: row.orchestration_rank,
             demotes_to: row.demotes_to.map(|to| &*String::leak(to.trim().to_string())),
-            refusal_fallback: row
-                .refusal_fallback
-                .map(|to| &*String::leak(to.trim().to_string())),
+            refusal_fallback: leak_alias_list(&clone_alias_list(row.refusal_fallback.as_ref())),
         });
     }
     Vec::leak(entries)
@@ -2728,23 +2773,41 @@ pub fn starvation_demotion_model(model: &str) -> Option<String> {
     Some(target)
 }
 
-/// Catalog-owned one-shot fallback for a safety-classifier refusal on
-/// `model`: the `refusal_fallback` its family alias declares, else the one
-/// its own row declares, resolved to the current release. `None` means the
-/// lineup has no such fallback — a refusal there is surfaced after one
+/// Catalog-owned candidate list for a safety-classifier refusal on `model`, in
+/// preference order and resolved to current releases: the `refusal_fallback`
+/// its family alias declares, else the one its own row declares. Empty means
+/// the lineup declares no fallback — a refusal there is surfaced after one
 /// same-model retry, not routed — and also covers a model no catalog row
 /// knows. The runtime's refusal path reads this and names no lineup: which
-/// classifier declines benign requests, and which family stands in for it,
+/// classifier declines benign requests, and which families stand in for it,
 /// are facts about the catalog.
+///
+/// The list mixes providers on purpose (Fable's own Opus head first, then a
+/// cross-provider escape): the runtime retries a same-provider candidate on
+/// the bound client and hands the turn to a cross-provider one like a quota
+/// fallback, skipping any whose provider is not connected.
+#[must_use]
+pub fn refusal_fallback_candidates(model: &str) -> Vec<String> {
+    let lower = resolve_catalog_alias(model).trim().to_ascii_lowercase();
+    let Some(provider) = catalog_provider_of(&lower) else {
+        return Vec::new();
+    };
+    let declared = model_family(&lower)
+        .and_then(|family| family_alias_entry(provider, &family))
+        .map(|entry| entry.refusal_fallback.iter().map(|alias| (*alias).to_string()).collect::<Vec<_>>())
+        .filter(|list: &Vec<String>| !list.is_empty())
+        .unwrap_or_else(|| catalog_fact(|catalog| {
+            let list = catalog.refusal_fallback_for(model, &lower);
+            (!list.is_empty()).then_some(list)
+        }).unwrap_or_default());
+    declared.iter().map(|alias| resolve_catalog_alias(alias)).collect()
+}
+
+/// The head of [`refusal_fallback_candidates`] — the first, most-preferred
+/// place a refusal on `model` goes. `None` when the lineup declares none.
 #[must_use]
 pub fn refusal_fallback_model(model: &str) -> Option<String> {
-    let lower = resolve_catalog_alias(model).trim().to_ascii_lowercase();
-    let provider = catalog_provider_of(&lower)?;
-    let fallback = model_family(&lower)
-        .and_then(|family| family_alias_entry(provider, &family))
-        .and_then(|entry| entry.refusal_fallback.map(str::to_string))
-        .or_else(|| catalog_fact(|catalog| catalog.refusal_fallback_for(model, &lower)))?;
-    Some(resolve_catalog_alias(&fallback))
+    refusal_fallback_candidates(model).into_iter().next()
 }
 
 /// Resolve model-authored spawn input to a registered Claude family target.
@@ -4516,27 +4579,44 @@ mod tests {
         assert_eq!(super::resolve_catalog_alias("google-latest"), "gemini-3.6-flash");
     }
 
-    /// The refusal fallback is catalog data: the lineup whose classifier
-    /// declines benign requests names the family that stands in, every other
-    /// lineup names none, and the runtime's refusal path reads this instead
-    /// of matching family substrings.
+    /// The refusal fallback is catalog data, now an ordered candidate list per
+    /// Anthropic lineup: every family names where a declined request goes next,
+    /// in preference order, and the runtime reads this instead of matching
+    /// family substrings. `refusal_fallback_model` is the head of that list.
     #[test]
     fn the_refusal_fallback_comes_from_the_catalog() {
-        use super::{refusal_fallback_model, resolve_model_alias, ANTHROPIC_OPUS_MODEL_ALIAS};
+        use super::{
+            refusal_fallback_candidates, refusal_fallback_model, resolve_catalog_alias,
+            resolve_model_alias, ANTHROPIC_OPUS_MODEL_ALIAS,
+        };
         super::reset_model_registry_for_tests();
         let opus_head = resolve_model_alias(ANTHROPIC_OPUS_MODEL_ALIAS);
-        assert_eq!(refusal_fallback_model("fable").as_deref(), Some(opus_head.as_str()));
+        let openai = resolve_catalog_alias("openai-latest");
+        let google = resolve_catalog_alias("google-latest");
+
+        // Fable: its sibling Opus head first, then a cross-provider escape.
+        assert_eq!(
+            refusal_fallback_candidates("fable"),
+            vec![opus_head.clone(), openai.clone()]
+        );
         assert_eq!(refusal_fallback_model("claude-fable-5-1").as_deref(), Some(opus_head.as_str()));
-        assert_eq!(refusal_fallback_model("claude-fable-5").as_deref(), Some(opus_head.as_str()));
         assert_eq!(refusal_fallback_model("Claude-Fable-5-1[1m]").as_deref(), Some(opus_head.as_str()));
-        // The family it falls back TO, and the rest of the ladder, name none.
-        assert_eq!(refusal_fallback_model("opus"), None);
-        assert_eq!(refusal_fallback_model("claude-sonnet-5"), None);
-        assert_eq!(refusal_fallback_model("haiku"), None);
-        // Other providers never did.
+        assert_eq!(refusal_fallback_candidates("claude-fable-5"), vec![opus_head.clone(), openai.clone()]);
+
+        // Opus itself now escapes across providers (its own head cannot stand
+        // in for it): OpenAI first, then Google.
+        assert_eq!(refusal_fallback_candidates("opus"), vec![openai.clone(), google.clone()]);
+        assert_eq!(refusal_fallback_model("claude-opus-5").as_deref(), Some(openai.as_str()));
+
+        // Sonnet and Haiku fall back to Opus first, then across providers.
+        assert_eq!(refusal_fallback_candidates("claude-sonnet-5"), vec![opus_head.clone(), openai.clone()]);
+        assert_eq!(refusal_fallback_candidates("haiku"), vec![opus_head.clone(), openai.clone()]);
+
+        // Other providers name none — a refusal there is surfaced.
+        assert!(refusal_fallback_candidates("gpt-6-astra").is_empty());
+        assert!(refusal_fallback_candidates("gemini-3.8-flash").is_empty());
+        assert!(refusal_fallback_candidates("no-such-model").is_empty());
         assert_eq!(refusal_fallback_model("gpt-6-astra"), None);
-        assert_eq!(refusal_fallback_model("gemini-3.8-flash"), None);
-        assert_eq!(refusal_fallback_model("no-such-model"), None);
     }
 
     /// The router's per-role specialty seed is catalog data too, keyed by

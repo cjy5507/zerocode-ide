@@ -321,7 +321,7 @@
       "canonical": "claude-fable-5-1",
       "provider": "anthropic",
       "orchestration_rank": 0,
-      "refusal_fallback": "opus"
+      "refusal_fallback": ["opus", "openai-latest"]
     },
     {
       "alias": "claude-fable",
@@ -337,7 +337,8 @@
       "alias": "opus",
       "canonical": "claude-opus-5",
       "provider": "anthropic",
-      "demotes_to": "sonnet"
+      "demotes_to": "sonnet",
+      "refusal_fallback": ["openai-latest", "google-latest"]
     },
     {
       "alias": "opus[1m]",
@@ -353,12 +354,14 @@
       "alias": "sonnet",
       "canonical": "claude-sonnet-5",
       "provider": "anthropic",
-      "demotes_to": "haiku"
+      "demotes_to": "haiku",
+      "refusal_fallback": ["opus", "openai-latest"]
     },
     {
       "alias": "haiku",
       "canonical": "claude-haiku-4-5-20251001",
-      "provider": "anthropic"
+      "provider": "anthropic",
+      "refusal_fallback": ["opus", "openai-latest"]
     },
     {
       "alias": "claude-opus",
@@ -560,6 +563,6 @@
     "capabilities": "imagegen: ChatGPT backend image generation on the current GPT lineup; streaming_only: Codex Spark cannot serve non-stream requests; no_vision: Model does not accept image inputs (text/code only, e.g. Codex Spark).",
     "fast_pair": "Release-specific priority-tier spelling when it is not `<id>[fast]`.",
     "demotes_to": "One-step rate-limit fallback for an id that is not a family alias's canonical.",
-    "refusal_fallback": "The family alias a safety-classifier refusal on this lineup retries on once (an alias row carries its family's; a model row carries a retired lineup's). Absent: a refusal is surfaced after one same-model retry. The runtime names no lineup for this."
+    "refusal_fallback": "Where a safety-classifier refusal on this lineup goes next, as one alias or an ordered list of them (an alias row carries its family's; a model row carries a retired lineup's). The head that shares this provider is retried on the bound client; a cross-provider candidate is handed the turn like a quota fallback, skipping any whose provider is not connected. Absent: a refusal is surfaced after one same-model retry. The runtime names no lineup for this."
   }
 }

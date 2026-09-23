@@ -1,3 +1,4 @@
+use crate::credential::CredentialMiss;
 use crate::error::ApiError;
 use crate::prompt_cache::{PromptCache, PromptCacheRecord, PromptCacheStats};
 use crate::providers::anthropic::{self, AnthropicClient, AnthropicRetryNotice, AuthSource};
@@ -209,16 +210,11 @@ impl ProviderClient {
                 anthropic_auth_for_route(auth_route, anthropic_auth)?,
             ))),
             ProviderKind::Xai => match auth_route {
-                AuthRoute::Auto => Ok(Self::Xai(openai_compat_from_env(
-                    OpenAiCompatConfig::xai(),
-                )?)),
+                AuthRoute::Auto => Ok(Self::Xai(xai_client()?)),
                 AuthRoute::ApiKey => Ok(Self::Xai(openai_compat_api_key_for_route(
                     OpenAiCompatConfig::xai(),
                 )?)),
-                AuthRoute::OAuth => Err(ApiError::unsupported_auth_route(
-                    "xAI",
-                    auth_route.as_str(),
-                )),
+                AuthRoute::OAuth => Ok(Self::Xai(xai_grok_login_client()?)),
             },
             ProviderKind::OpenAi => match auth_route {
                 AuthRoute::Auto => Ok(match load_fresh_openai_oauth() {
@@ -576,6 +572,39 @@ fn openai_compat_from_env(config: OpenAiCompatConfig) -> Result<OpenAiCompatClie
     }
 }
 
+/// The xAI client for the automatic route. A custom `XAI_BASE_URL` keeps the
+/// optional-auth path a self-hosted endpoint needs; the official endpoint
+/// takes whatever the one xAI resolution finds — the API key, else the Grok
+/// CLI's login (t-6248) — the same answer the model list gets.
+fn xai_client() -> Result<OpenAiCompatClient, ApiError> {
+    let config = OpenAiCompatConfig::xai();
+    if openai_compat::has_custom_base_url(config) {
+        return openai_compat_from_env(config);
+    }
+    providers::cli_sessions::resolve_xai_credential()
+        .map(|credential| OpenAiCompatClient::new(credential.bearer, config))
+        .map_err(|miss| match miss {
+            CredentialMiss::Absent => {
+                ApiError::missing_credentials(config.provider_name, config.credential_env_vars())
+            }
+            CredentialMiss::Unusable(why) => ApiError::Auth(why),
+        })
+}
+
+/// The xAI client for the OAuth route: the Grok CLI's own login, the rung
+/// of the same resolution that holds it.
+fn xai_grok_login_client() -> Result<OpenAiCompatClient, ApiError> {
+    let config = OpenAiCompatConfig::xai();
+    providers::cli_sessions::grok_session()
+        .map(|session| OpenAiCompatClient::new(session.bearer, config))
+        .map_err(|miss| match miss {
+            CredentialMiss::Absent => {
+                ApiError::missing_auth_route_credentials(config.provider_name, AuthRoute::OAuth.as_str())
+            }
+            CredentialMiss::Unusable(why) => ApiError::Auth(why),
+        })
+}
+
 fn openai_compat_api_key_for_route(
     config: OpenAiCompatConfig,
 ) -> Result<OpenAiCompatClient, ApiError> {
@@ -624,19 +653,66 @@ pub fn resolve_openai_oauth_fresh() -> Option<OpenAiOAuthTokens> {
     load_fresh_openai_oauth()
 }
 
+/// [`resolve_openai_oauth_fresh`] for a caller that has to say why there is
+/// no usable login: [`CredentialMiss::Absent`] when no ChatGPT login exists,
+/// [`CredentialMiss::Unusable`] when one exists and could not be read, or
+/// expired and would not refresh. The request path keeps its stale token (a
+/// clear 401 beats a quiet api-key downgrade); a model list has nothing to
+/// gain from a request it knows will be refused.
+pub fn resolve_openai_oauth_explained() -> Result<OpenAiOAuthTokens, CredentialMiss> {
+    match load_openai_login()? {
+        OpenAiLogin::Fresh(tokens) => Ok(tokens),
+        OpenAiLogin::Stale(_, why) => Err(CredentialMiss::Unusable(why)),
+    }
+}
+
+/// Whether a ChatGPT login is kept where this process reads one — the codex
+/// home the resolution table names, else zo's own store — whether or not it
+/// can be used right now. A store that cannot be read is there all the same.
+/// One file read, no refresh.
+#[must_use]
+pub fn openai_login_configured() -> bool {
+    crate::oauth_store::load_openai_oauth_with_source().map_or(true, |found| found.is_some())
+}
+
+/// The ChatGPT login as found: usable now, or expired and not refreshable —
+/// with its tokens, which the request path still sends, and why.
+enum OpenAiLogin {
+    Fresh(OpenAiOAuthTokens),
+    Stale(OpenAiOAuthTokens, String),
+}
+
 /// Load the saved ChatGPT OAuth tokens, refreshing first when expired. Returns
 /// `None` when no ChatGPT login exists so the caller falls back to the api-key
 /// path. A refresh failure yields the existing (expired) tokens so the call can
 /// surface a clear 401 rather than silently downgrading to the api-key path.
 fn load_fresh_openai_oauth() -> Option<OpenAiOAuthTokens> {
-    let (tokens, source) = crate::oauth_store::load_openai_oauth_with_source()
-        .ok()
-        .flatten()?;
+    match load_openai_login().ok()? {
+        OpenAiLogin::Fresh(tokens) | OpenAiLogin::Stale(tokens, _) => Some(tokens),
+    }
+}
+
+fn load_openai_login() -> Result<OpenAiLogin, CredentialMiss> {
+    let (tokens, source) = match crate::oauth_store::load_openai_oauth_with_source() {
+        Ok(Some(found)) => found,
+        Ok(None) => return Err(CredentialMiss::Absent),
+        Err(error) => {
+            return Err(CredentialMiss::Unusable(format!(
+                "the ChatGPT login could not be read ({error})"
+            )));
+        }
+    };
     if !openai_oauth_expired(&tokens) {
-        return Some(tokens);
+        return Ok(OpenAiLogin::Fresh(tokens));
     }
     let Some(refresh_token) = tokens.refresh_token.clone() else {
-        return Some(tokens);
+        return Ok(OpenAiLogin::Stale(
+            tokens,
+            format!(
+                "the ChatGPT login expired and holds no refresh token — {}",
+                openai_reconnect_hint(source)
+            ),
+        ));
     };
     // ChatGPT rotates refresh tokens exactly as Anthropic does, so a branch the
     // endpoint has rejected stays rejected. Without this gate an expired ChatGPT
@@ -644,7 +720,13 @@ fn load_fresh_openai_oauth() -> Option<OpenAiOAuthTokens> {
     // since the failure arm here deliberately serves the stale token so the call
     // surfaces one clear 401 instead of a confusing api-key downgrade.
     if crate::providers::refresh_gate::refresh_blocked(&refresh_token).is_some() {
-        return Some(tokens);
+        return Ok(OpenAiLogin::Stale(
+            tokens,
+            format!(
+                "the ChatGPT login expired and its refresh was refused — {}",
+                openai_reconnect_hint(source)
+            ),
+        ));
     }
     match run_blocking(crate::providers::openai_oauth::refresh_openai_tokens(
         &refresh_token,
@@ -664,7 +746,7 @@ fn load_fresh_openai_oauth() -> Option<OpenAiOAuthTokens> {
                      run `zo login openai` if the next request fails.\x1b[0m"
                 );
             }
-            Some(refreshed)
+            Ok(OpenAiLogin::Fresh(refreshed))
         }
         Err(error) => {
             if crate::providers::refresh_gate::record_failure(&refresh_token, &error) {
@@ -674,7 +756,13 @@ fn load_fresh_openai_oauth() -> Option<OpenAiOAuthTokens> {
                     openai_reconnect_hint(source)
                 );
             }
-            Some(tokens)
+            Ok(OpenAiLogin::Stale(
+                tokens,
+                format!(
+                    "the ChatGPT login expired and could not be refreshed — {}",
+                    openai_reconnect_hint(source)
+                ),
+            ))
         }
     }
 }
@@ -729,6 +817,92 @@ mod tests {
             !borrowed.contains("ZeroCode 창"),
             "the window's own account is already the one that failed: {borrowed}"
         );
+    }
+
+    /// C1 (t-6248): a model list asks the ChatGPT login whether it can be
+    /// used and hears why not. No login is `Absent`; a login that expired
+    /// with nothing to refresh it is `Unusable` and names the way back — while
+    /// the request path still gets the stale token, whose 401 is clearer than
+    /// a quiet fall to an API key.
+    #[test]
+    fn a_chatgpt_login_that_cannot_refresh_is_unusable_and_none_is_absent() {
+        let _lock = crate::test_env_lock();
+        let isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let _codex_home = EnvVarGuard::set("CODEX_HOME", None);
+        crate::managed_account::clear();
+        assert_eq!(
+            super::resolve_openai_oauth_explained().err(),
+            Some(super::CredentialMiss::Absent)
+        );
+        crate::oauth_store::save_openai_oauth(&core_types::OpenAiOAuthTokens {
+            access_token: "stale-openai-access".to_string(),
+            refresh_token: None,
+            expires_at: Some(1),
+            account_id: Some("acct".to_string()),
+            scopes: Vec::new(),
+        })
+        .unwrap();
+        let Some(super::CredentialMiss::Unusable(why)) = super::resolve_openai_oauth_explained().err() else {
+            panic!("an expired login is there, so it is not absent");
+        };
+        assert!(why.contains("expired") && why.contains("zo login openai"), "{why}");
+        assert!(!why.contains("stale-openai-access"), "no token in the words: {why}");
+        assert_eq!(
+            super::resolve_openai_oauth_fresh().map(|tokens| tokens.access_token).as_deref(),
+            Some("stale-openai-access"),
+            "the request path keeps its stale token"
+        );
+        drop(isolation);
+    }
+
+    /// C5 (t-6248): the Grok CLI's own login is an xAI credential, read
+    /// through the one xAI resolution the model list reads too — the OAuth
+    /// route speaks as it, and so does the automatic one when no key is set.
+    /// An expired session is refused with the way back in, never refreshed.
+    #[test]
+    fn a_grok_cli_login_speaks_for_xai_when_no_key_is_set() {
+        let _lock = crate::test_env_lock();
+        let isolation = crate::test_env::CredentialEnvIsolation::empty();
+        let grok_home = tempfile::tempdir().expect("a Grok home");
+        let login_file = grok_home.path().join("auth.json");
+        std::fs::write(
+            &login_file,
+            r#"{"https://auth.x.ai::acct-1":{"key":"grok-cli-session-token","expires_at":"2099-01-01T00:00:00.000000Z"}}"#,
+        )
+        .expect("a Grok login");
+        let _grok = EnvVarGuard::set("GROK_HOME", grok_home.path().to_str());
+        let _external = EnvVarGuard::set("ZO_DISABLE_EXTERNAL_CREDENTIALS", None);
+        let _key = EnvVarGuard::set("XAI_API_KEY", None);
+        let _base = EnvVarGuard::set("XAI_BASE_URL", None);
+
+        let oauth = super::ProviderClient::from_provider_kind_with_auth_route(
+            ProviderKind::Xai,
+            super::AuthRoute::OAuth,
+        )
+        .expect("the Grok login is xAI's OAuth route");
+        assert!(matches!(&oauth, super::ProviderClient::Xai(_)));
+        assert!(format!("{oauth:?}").contains("grok-cli-session-token"));
+
+        let _gate = EnvVarGuard::set(NON_CLAUDE_ADAPTERS_ENV, Some("1"));
+        let auto = super::ProviderClient::from_provider_kind_with_auth_route(
+            ProviderKind::Xai,
+            super::AuthRoute::Auto,
+        )
+        .expect("no key: the automatic route speaks as the Grok login");
+        assert!(format!("{auto:?}").contains("grok-cli-session-token"));
+
+        std::fs::write(
+            &login_file,
+            r#"{"https://auth.x.ai::acct-1":{"key":"grok-cli-session-token","expires_at":"2020-01-01T00:00:00Z"}}"#,
+        )
+        .expect("an expired Grok login");
+        let refused = super::ProviderClient::from_provider_kind_with_auth_route(
+            ProviderKind::Xai,
+            super::AuthRoute::OAuth,
+        )
+        .expect_err("an expired session is refused");
+        assert!(refused.to_string().contains("grok login"), "{refused}");
+        drop(isolation);
     }
 
     use crate::providers::{
@@ -1047,10 +1221,10 @@ mod tests {
     fn unsupported_explicit_auth_route_is_rejected() {
         let unsupported = provider_error(
             super::ProviderClient::from_provider_kind_with_auth_route(
-                ProviderKind::Xai,
+                ProviderKind::Ollama,
                 super::AuthRoute::OAuth,
             ),
-            "xAI OAuth is unsupported",
+            "Ollama OAuth is unsupported",
         );
         assert!(matches!(
             unsupported,

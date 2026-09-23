@@ -714,6 +714,28 @@ impl PlainSession {
         .await
     }
 
+    /// 턴 앞의 자격 손질([`crate::runtime_support::refresh_oauth_if_near_expiry`]).
+    /// 로그인 없이 뜬 프로세스는 여기서 로그인을 다시 찾고, 찾았는지를 상태 줄
+    /// 한 줄로 말한다(t-6248 C3) — 한 번의 무조건 찾기는 사람의 턴이 쓴다.
+    async fn refresh_credentials_for_turn(&mut self, block_tx: &tokio::sync::mpsc::Sender<RenderBlock>) {
+        let Some(inner) = self.runtime.try_runtime_mut() else {
+            return;
+        };
+        let persons_turn = !inner.is_autonomous_surface() && !crate::autonomy::wakeup::scope_active();
+        let Some(said) =
+            crate::runtime_support::refresh_oauth_if_near_expiry(inner.api_client_mut(), persons_turn).await
+        else {
+            return;
+        };
+        let _ = block_tx
+            .send(RenderBlock::System {
+                id: runtime::message_stream::BlockIdGen::default().next(),
+                level: runtime::message_stream::SystemLevel::Housekeeping,
+                text: said,
+            })
+            .await;
+    }
+
     /// 스트리밍 턴 하나를 이미지 첨부와 함께 실행한다. 이미지 쌍은 엔진의
     /// `push_user_with_images` 입력과 같은 `(media_type, base64)` 모양이다.
     pub(crate) async fn run_turn_with_images(
@@ -736,9 +758,7 @@ impl PlainSession {
         // 저장된 OAuth 토큰이 만료 버퍼 안이면 여기서 갱신한다. `build_live_client`
         // 가 bearer 를 복제해 가므로 그 **전**이어야 이번 턴이 새 토큰을 쓴다 —
         // 이 자리를 잃으면 긴 세션이 턴 도중 401 로 죽는다.
-        if let Some(inner) = self.runtime.try_runtime_mut() {
-            crate::runtime_support::refresh_oauth_if_near_expiry(inner.api_client_mut()).await;
-        }
+        self.refresh_credentials_for_turn(&block_tx).await;
         let turn_setup = TurnHarness::setup_model_led_turn(&mut self.runtime, input, true);
         let named_effort = self.effort.and_then(Effort::level);
         let effort_band_ceiling = self.effort.and_then(Effort::band_ceiling);

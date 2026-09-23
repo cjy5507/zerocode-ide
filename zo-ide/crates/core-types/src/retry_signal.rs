@@ -435,18 +435,55 @@ pub const QUIET_REASONING_LABEL: &str = "model reasoning silently — stream ali
 /// Esc out of a turn that would have resumed on its own.
 pub const QUOTA_HOLD_NOTICE_PREFIX: &str = "Main model rate-limited";
 
-/// Exact system warning emitted when a Fable/Mythos safety-classifier refusal
-/// retries the current turn on the catalog's current Opus family head. Shared
-/// so renderers can identify the transient one-turn fallback without owning a
-/// release-specific label.
-pub const REFUSAL_FALLBACK_WARN: &str =
-    "Fable safety classifier declined this request — retrying with the latest Opus model.";
+/// System warning when a safety-classifier refusal retries the current turn on
+/// the catalog's same-provider fallback (Fable/Sonnet/Haiku → the Opus head).
+/// A function, not a constant, because the target is a catalog fact: the
+/// runtime never spells a release id, and this names the one it swapped to.
+#[must_use]
+pub fn refusal_fallback_warn(target: &str) -> String {
+    format!(
+        "The model's safety classifier declined this request — retrying on {target}."
+    )
+}
 
-/// Exact system warning emitted on the first turn pre-armed by the
-/// session-scoped refusal cooldown. Kept beside [`REFUSAL_FALLBACK_WARN`] so
-/// renderers and marker-stability tests share one refusal-fallback vocabulary.
-pub const REFUSAL_DRY_PREARM_WARN: &str = "Fable safety classifier declined 2 consecutive turns — \
-parking this session on the latest Opus model for ~30m; Fable will retry automatically afterward.";
+/// System warning when a refusal has been declined twice and the catalog's
+/// refusal fallback is on another provider: this turn is handed to `target`
+/// like a quota fallback, so the reply is not lost to a sticky classifier.
+#[must_use]
+pub fn refusal_cross_provider_warn(target: &str) -> String {
+    format!(
+        "The model's safety classifier declined this request twice — handing this turn to \
+         {target} on another provider. The original model resumes automatically afterward."
+    )
+}
+
+/// System notice for the P3 last resort: no fallback is available, so the turn
+/// dropped the earlier declined exchange still in context and asked the same
+/// model once more (the classifier reads the whole conversation).
+pub const REFUSAL_CONTEXT_CLEANED_WARN: &str =
+    "No provider fallback is available — asked the same model again with the earlier declined \
+     exchange dropped from context.";
+
+/// System warning on the first turn pre-armed by the session-scoped refusal
+/// cooldown, naming the model the session now continues on (a same-provider
+/// Opus override or a cross-provider peer) — or "the refusal fallback" when
+/// none is known yet. A function so the two emitters (sync eprintln,
+/// streaming render block) share one wording, and so the threshold and the
+/// cooldown are the runtime's own constants rather than numbers repeated in
+/// prose: `turns` is the consecutive-refusal count that arms the cooldown and
+/// `cooldown` its length.
+#[must_use]
+pub fn refusal_prearm_warn(model: Option<&str>, turns: u8, cooldown: std::time::Duration) -> String {
+    let target = match model {
+        Some(model) if !model.trim().is_empty() => model,
+        _ => "the refusal fallback",
+    };
+    let minutes = cooldown.as_secs().div_ceil(60);
+    format!(
+        "Safety classifier declined {turns} consecutive turns — continuing this session on {target} \
+         for ~{minutes}m; the original model retries automatically afterward."
+    )
+}
 
 /// Prefix of both quota-fallback notices. The fallback model id follows this
 /// prefix and ends at the first `;`, allowing renderers to distinguish an
@@ -486,8 +523,9 @@ pub fn retry_notice_label(error_message: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        QUOTA_FALLBACK_ACTIVE_NOTICE_PREFIX, QUOTA_HOLD_NOTICE_PREFIX, REFUSAL_DRY_PREARM_WARN,
-        REFUSAL_FALLBACK_WARN, RetrySignal, classify_error_text, network_outage_host,
+        refusal_cross_provider_warn, refusal_fallback_warn, refusal_prearm_warn,
+        QUOTA_FALLBACK_ACTIVE_NOTICE_PREFIX, QUOTA_HOLD_NOTICE_PREFIX,
+        RetrySignal, classify_error_text, network_outage_host,
         parse_quota_fallback_model,
     };
     use std::time::Duration;
@@ -773,14 +811,16 @@ mod tests {
         let hold = format!("{QUOTA_HOLD_NOTICE_PREFIX} (claude-fable-5); holding this turn");
         assert_eq!(parse_quota_fallback_model(&hold), None);
         assert_eq!(parse_quota_fallback_model("Quota fallback active on ; malformed"), None);
+        // The refusal notices name the model they swapped to, and never the
+        // release id from code — the target is a catalog fact handed in.
         assert_eq!(
-            REFUSAL_FALLBACK_WARN,
-            "Fable safety classifier declined this request — retrying with the latest Opus model."
+            refusal_fallback_warn("claude-opus-5"),
+            "The model's safety classifier declined this request — retrying on claude-opus-5."
         );
-        assert_eq!(
-            REFUSAL_DRY_PREARM_WARN,
-            "Fable safety classifier declined 2 consecutive turns — parking this session on \
-             the latest Opus model for ~30m; Fable will retry automatically afterward."
-        );
+        assert!(refusal_cross_provider_warn("gpt-5.6-sol").contains("gpt-5.6-sol on another provider"));
+        assert!(refusal_prearm_warn(Some("gpt-5.6-sol"), 2, std::time::Duration::from_secs(30 * 60)).contains("continuing this session on gpt-5.6-sol for ~30m"));
+        // No model → the generic constant, which names no lineup.
+        assert!(refusal_prearm_warn(None, 2, std::time::Duration::from_secs(90)).contains("2 consecutive turns — continuing this session on the refusal fallback for ~2m"));
+        assert!(!refusal_prearm_warn(None, 2, std::time::Duration::from_secs(60)).contains("Fable"));
     }
 }

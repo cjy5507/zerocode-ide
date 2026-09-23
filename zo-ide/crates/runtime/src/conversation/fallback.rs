@@ -17,32 +17,46 @@ use super::{
 };
 use crate::model_router::SwitchTrigger;
 
-/// The model a safety-classifier refusal on `model` retries on once, as the
-/// catalog declares it (`refusal_fallback` on the lineup's alias row —
-/// today Fable's row names the Opus family). `None` for a lineup that
-/// declares none: a refusal there is surfaced after one same-model retry.
-/// Nothing here names a lineup; which classifier declines benign requests,
-/// and which family stands in for it, are facts about the catalog, so a new
-/// lineup is a catalog edit and never a rebuild.
+/// The SAME-provider model a safety-classifier refusal on `model` retries on,
+/// as the catalog declares it: the first candidate in the lineup's
+/// `refusal_fallback` list served by `model`'s own provider (Fable/Sonnet/Haiku
+/// → the Opus head). `None` when the lineup declares none, or when every
+/// candidate is on another provider (Opus itself) — that case is handled by the
+/// cross-provider handoff, never by a bound-client model override, since putting
+/// a foreign model id on the Anthropic client would 400. Nothing here names a
+/// lineup; which classifier declines and which family stands in are catalog
+/// facts, so a new lineup is a catalog edit and never a rebuild.
 fn refusal_fallback_for(model: &str) -> Option<String> {
-    api::refusal_fallback_model(model)
+    let provider = api::detect_provider_kind(model);
+    api::refusal_fallback_candidates(model)
+        .into_iter()
+        .find(|candidate| api::detect_provider_kind(candidate) == provider)
 }
-/// System-level warn shown when a Fable/Mythos refusal is auto-retried on the
-/// fallback model.
-pub(super) const REFUSAL_FALLBACK_WARN: &str = core_types::REFUSAL_FALLBACK_WARN;
-/// System-level warn shown once when the session first pre-arms the refusal
-/// fallback during its cooldown.
-pub(super) const REFUSAL_DRY_PREARM_WARN: &str =
-    core_types::retry_signal::REFUSAL_DRY_PREARM_WARN;
+/// System-level warn naming the same-provider model a refusal was auto-retried
+/// on (Fable/Sonnet/Haiku → the Opus head). Wraps the shared vocabulary in
+/// [`core_types::retry_signal`] so every notice lives in one place.
+pub(super) fn refusal_fallback_warn(target: &str) -> String {
+    core_types::retry_signal::refusal_fallback_warn(target)
+}
+/// System-level warn naming the cross-provider model this doubly-refused turn is
+/// handed to, like a quota fallback.
+pub(super) fn refusal_cross_provider_warn(target: &str) -> String {
+    core_types::retry_signal::refusal_cross_provider_warn(target)
+}
+/// System-level notice for the P3 context-cleaning retry (no fallback left).
+pub(super) const REFUSAL_CONTEXT_CLEANED_WARN: &str = core_types::REFUSAL_CONTEXT_CLEANED_WARN;
 /// System-level notice shown when a refusal cannot be auto-retried: the turn is
-/// already on the fallback model (the current Opus family head refused too), or the active model is
-/// not a Fable/Mythos model. Surfaced honestly instead of looping forever.
+/// already on a fallback that refused too, the active model is non-Anthropic, or
+/// every avenue (same-model retry, provider handoff, context cleaning) is spent.
+/// Surfaced honestly instead of looping forever. Names `/model` for another
+/// provider as the concrete next step, per P4.
 pub(super) const REFUSAL_SURFACED_NOTICE: &str =
-    "The model's safety classifier declined this request twice; giving up on automatic \
-     retries. Rephrasing usually clears it — on a long session, /compact can too.";
+    "The model's safety classifier declined this request; giving up on automatic \
+     retries. Rephrasing usually clears it, or /model to another provider — on a long \
+     session, /compact can too.";
 
-/// System-level warn shown when a non-Fable Anthropic refusal is retried once
-/// on the same model.
+/// System-level warn shown when an Anthropic refusal with no same-provider
+/// fallback is retried once on the same model (the classifier samples).
 pub(super) const REFUSAL_SAME_MODEL_RETRY_WARN: &str =
     "The model's safety classifier declined this response — retrying once (the \
      classifier is sampling-dependent, so an identical retry often passes).";
@@ -156,6 +170,22 @@ pub(super) fn quota_wait_hold_warn(model: &str, wait: std::time::Duration) -> St
     )
 }
 
+/// Which installed cross-provider client this turn has swapped onto, and why.
+///
+/// The swap machinery is shared: a quota-exhausted turn and a doubly-refused
+/// turn both continue on a different provider's client through the same
+/// `active_async_client` / `sync_stream_events` / wire-model path. This says
+/// which of the two armed it, so `active_async_client` picks the matching
+/// installed client and the wire badge shows the right reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CrossFallback {
+    /// The main model's quota window is exhausted (see [`QuotaEscape::Fallback`]).
+    Quota,
+    /// The model's safety classifier declined and the catalog's refusal
+    /// fallback for it is on another provider (see [`RefusalDecision::CrossProvider`]).
+    Refusal,
+}
+
 /// How the turn loop should escape a hard `RateLimit` on the main model.
 pub(super) enum QuotaEscape {
     /// Hold on the main model: its exhausted window lifts within the wait band.
@@ -201,16 +231,25 @@ pub(super) enum RefusalDecision {
     /// Not a refusal this runtime handles (non-Anthropic or unknown model) —
     /// consume the turn through the ordinary content/empty path.
     Proceed,
-    /// Fell back to the current Opus family head for this turn (the override is now set); the caller
-    /// drops the refused partial and re-requests the same turn once.
+    /// Fell back to the refused model's same-provider candidate for this turn
+    /// (the override is now set — Fable/Sonnet/Haiku → the Opus head); the
+    /// caller drops the refused partial and re-requests the same turn once.
     Retry,
     /// Re-request the same turn once on the *same* model. The classifier is
-    /// sampling-dependent, so an Opus/Sonnet/Haiku decline of a benign request
-    /// frequently passes on an identical second attempt — and for these models
-    /// there is no better family to fall back to, so the retry is the whole
-    /// recovery.
+    /// sampling-dependent, so a decline of a benign request frequently passes on
+    /// an identical second attempt — tried before any cross-provider handoff for
+    /// a model with no same-provider fallback (Opus itself), since it is free.
     RetrySameModel,
-    /// Cannot retry (both attempts declined). Surface a notice and end the turn.
+    /// Handed this turn to the installed cross-provider refusal client (the
+    /// override state is now armed): the same-model retry declined too and the
+    /// catalog's next candidate is on another provider. The caller drops the
+    /// refused partial and re-requests, which now dispatches on that client.
+    CrossProvider,
+    /// No fallback is left, but the earlier declined exchange is still in
+    /// history dragging the classifier down. Drop it and re-request the same
+    /// model once. Capped at one per turn.
+    RetryCleaned,
+    /// Cannot retry (every avenue spent). Surface a notice and end the turn.
     Surface,
 }
 
@@ -301,6 +340,28 @@ where
         self.quota_fallback_client = client;
     }
 
+    /// Install (or clear with `None`) the cross-provider client the refusal
+    /// path hands the turn to when the active model's classifier declines and
+    /// its catalog `refusal_fallback` list names a candidate on another
+    /// provider (Opus → an OpenAI/Google peer). The host resolves and installs
+    /// this every turn entry from [`api::refusal_fallback_candidates`], exactly
+    /// as it installs the quota fallback, so a model switch or a change in
+    /// connected providers never leaves a stale client. `None` leaves a
+    /// cross-provider refusal with nowhere to go — the turn then surfaces (or
+    /// takes the context-cleaning retry). Mirrors [`Self::set_quota_fallback_client`].
+    pub fn set_refusal_fallback_client(
+        &mut self,
+        client: Option<(Arc<dyn AsyncApiClient>, String)>,
+    ) {
+        self.refusal_fallback_client = client;
+    }
+
+    /// The model id of the currently installed cross-provider refusal fallback
+    /// client, or `None`. A read accessor for the host contract test.
+    pub fn refusal_fallback_client_model(&self) -> Option<&str> {
+        self.refusal_fallback_client.as_ref().map(|(_, model)| model.as_str())
+    }
+
     /// The model id of the currently installed quota fallback client, or `None`
     /// when no fallback is installed. A read accessor so a host contract test
     /// can assert that a turn-entry install set (or a `None` route cleared) the
@@ -363,22 +424,40 @@ where
         self.quota_wait_band
     }
 
-    /// The async client the current streaming request runs on: the quota
-    /// fallback when this turn has swapped to it (mid-turn exhaustion or a
-    /// cooldown pre-arm), else the natively-installed streaming client. Keeps
-    /// the swap in one place so the request-dispatch site stays a single
-    /// expression. A `quota_fallback_active` turn with no fallback client
-    /// installed (impossible today — arming requires the client) degrades to
-    /// the native client rather than panicking.
+    /// Whether this turn is riding an installed cross-provider fallback client
+    /// (quota or refusal) rather than the native client. The one predicate the
+    /// override-suppression, retry-cap and effort-stand-aside checks share, so a
+    /// new cross-provider reason is one match arm, not a scattered new bool.
+    pub(super) fn cross_fallback_active(&self) -> bool {
+        self.active_cross_fallback.is_some()
+    }
+
+    /// The installed client the active cross-provider fallback points at:
+    /// [`Self::quota_fallback_client`] for a quota swap, `refusal_fallback_client`
+    /// for a refusal handoff. `None` when no cross fallback is active or its
+    /// client was cleared mid-session.
+    fn active_cross_fallback_client(&self) -> Option<&(Arc<dyn AsyncApiClient>, String)> {
+        match self.active_cross_fallback? {
+            CrossFallback::Quota => self.quota_fallback_client.as_ref(),
+            CrossFallback::Refusal => self.refusal_fallback_client.as_ref(),
+        }
+    }
+
+    /// The async client the current streaming request runs on: the active
+    /// cross-provider fallback when this turn has swapped to one (mid-turn
+    /// exhaustion, a refusal handoff, or a cooldown pre-arm), else the
+    /// natively-installed streaming client. Keeps the swap in one place so the
+    /// request-dispatch site stays a single expression. A cross-fallback-active
+    /// turn with no client installed (impossible today — arming requires the
+    /// client) degrades to the native client rather than panicking.
     pub(super) fn active_async_client(&self) -> Option<&Arc<dyn AsyncApiClient>> {
         // A deep-gate leg's swapped client (cross-model planner/verifier or the
-        // Architect implementer) wins over the quota fallback.
+        // Architect implementer) wins over the cross-provider fallback.
         if !self.deep_plan_leg_active
             && !self.deep_verify_leg_active
             && !self.exec_impl_leg_active
-            && self.quota_fallback_active
         {
-            if let Some((client, _)) = &self.quota_fallback_client {
+            if let Some((client, _)) = self.active_cross_fallback_client() {
                 return Some(client);
             }
         }
@@ -396,7 +475,7 @@ where
     /// so an attended surface shows the wire truth, not the setting.
     pub(super) fn wire_model(&self) -> Option<(&str, WireModelSource)> {
         self.leg_wire_model()
-            .or_else(|| self.quota_wire_model())
+            .or_else(|| self.cross_wire_model())
             .or_else(|| self.ordinary_wire_model())
     }
 
@@ -426,19 +505,24 @@ where
         None
     }
 
-    /// The cross-provider quota fallback while this turn rides it — the same
-    /// condition under which `active_async_client` hands out that client.
-    fn quota_wire_model(&self) -> Option<(&str, WireModelSource)> {
-        if self.deep_plan_leg_active
-            || self.deep_verify_leg_active
-            || self.exec_impl_leg_active
-            || !self.quota_fallback_active
-        {
+    /// The active cross-provider fallback (quota or refusal) while this turn
+    /// rides it — the same condition under which `active_async_client` hands out
+    /// that client. A refusal handoff wears the refusal badge (`RefusalCooldown`
+    /// when a cooldown pre-armed it, else `RefusalFallback`); a quota swap wears
+    /// the quota badge.
+    fn cross_wire_model(&self) -> Option<(&str, WireModelSource)> {
+        if self.deep_plan_leg_active || self.deep_verify_leg_active || self.exec_impl_leg_active {
             return None;
         }
-        self.quota_fallback_client
-            .as_ref()
-            .map(|(_, model)| (model.as_str(), WireModelSource::QuotaFallback))
+        let source = match self.active_cross_fallback? {
+            CrossFallback::Quota => WireModelSource::QuotaFallback,
+            CrossFallback::Refusal if self.refusal_dry_until.is_some() => {
+                WireModelSource::RefusalCooldown
+            }
+            CrossFallback::Refusal => WireModelSource::RefusalFallback,
+        };
+        self.active_cross_fallback_client()
+            .map(|(_, model)| (model.as_str(), source))
     }
 
     /// The same-provider override riding the bound client, else the session
@@ -496,7 +580,7 @@ where
             }
             Some((model, _)) => Some(model),
             None => self
-                .quota_wire_model()
+                .cross_wire_model()
                 .or_else(|| self.ordinary_wire_model())
                 .map(|(model, _)| model),
         }
@@ -510,13 +594,23 @@ where
         self.wire_model().map(|(model, _)| model)
     }
 
-    /// Decide how to react to a `stop_reason: "refusal"`. On [`RefusalDecision::Retry`]
-    /// this arms the per-turn model override to [`REFUSAL_FALLBACK_MODEL`] as a
-    /// side effect; the caller is responsible for dropping the refused partial
-    /// (by not pushing it) and re-requesting. Anthropic-only: a non-Anthropic or
-    /// unknown model yields [`RefusalDecision::Proceed`] so those providers keep
-    /// their ordinary handling. The fallback is capped at one per turn — a second
-    /// refusal (the current Opus family head declined too) yields [`RefusalDecision::Surface`].
+    /// Decide how to react to a `stop_reason: "refusal"`, walking the catalog's
+    /// candidate ladder for the refused model in one place (P2):
+    ///
+    /// 1. A same-provider candidate not yet tried (Fable/Sonnet/Haiku → the Opus
+    ///    head) arms the per-turn model override → [`RefusalDecision::Retry`].
+    /// 2. No same-provider candidate (Opus itself): one same-model retry first,
+    ///    the classifier samples so it is the cheapest fix → [`RefusalDecision::RetrySameModel`].
+    /// 3. That having refused too, an installed cross-provider refusal client
+    ///    takes the turn like a quota fallback → [`RefusalDecision::CrossProvider`].
+    /// 4. No fallback left but an earlier declined exchange is still in context:
+    ///    drop it and ask the same model once → [`RefusalDecision::RetryCleaned`].
+    /// 5. Everything spent → [`RefusalDecision::Surface`].
+    ///
+    /// Anthropic-only: a non-Anthropic active model (including a refusal already
+    /// handed to a cross-provider client) yields [`RefusalDecision::Proceed`] so
+    /// that provider's own reply is consumed, never re-judged as our refusal.
+    /// The caller drops the refused partial (by not pushing it) and re-requests.
     pub(super) fn decide_refusal_fallback(&mut self) -> RefusalDecision {
         // Own the string so the `&self` borrow is dropped before the mutation.
         let Some(model) = self.effective_request_model().map(str::to_string) else {
@@ -525,45 +619,107 @@ where
         if !is_anthropic_model(&model) {
             return RefusalDecision::Proceed;
         }
-        if self.refusal_fallback_model.is_some() {
-            // Already swapped to the fallback this turn and it refused too.
-            return RefusalDecision::Surface;
-        }
-        if let Some(fallback) = refusal_fallback_for(&model) {
-            self.note_model_switch(SwitchTrigger::Refusal, &model, &fallback);
-            self.refusal_fallback_model = Some(fallback);
-            if !self.refusal_turn_hit {
-                self.refusal_turn_hit = true;
-                if self
-                    .refusal_consecutive_turns
-                    .saturating_add(1)
-                    >= REFUSAL_DRY_TURN_THRESHOLD
-                    && self
-                        .refusal_dry_until
-                        .is_none_or(|until| std::time::Instant::now() >= until)
-                {
-                    self.refusal_dry_until =
-                        Some(std::time::Instant::now() + REFUSAL_DRY_COOLDOWN);
-                    // The first begin that actually pre-arms owns the notice;
-                    // do not let this mid-turn retry emit it prematurely.
-                    self.refusal_prearm_notice_pending = false;
-                    self.refusal_prearm_notice_latched = false;
-                }
+        // Step 1/2: while no fallback has been applied yet this turn, try the
+        // same-provider override, else one free same-model retry.
+        if self.refusal_fallback_model.is_none() && !self.cross_fallback_active() {
+            if let Some(fallback) = refusal_fallback_for(&model) {
+                self.note_model_switch(SwitchTrigger::Refusal, &model, &fallback);
+                self.refusal_fallback_model = Some(fallback);
+                self.mark_refusal_turn_hit();
+                return RefusalDecision::Retry;
             }
-            RefusalDecision::Retry
-        } else if self.refusal_same_model_retry_used {
-            // The same-model retry declined too: surface honestly, do not loop.
-            RefusalDecision::Surface
-        } else {
-            // A refusal on a lineup whose catalog row names no fallback (the
-            // Opus family Fable falls back TO, Sonnet, Haiku): there is
-            // nowhere further to swap — but one identical retry is not
-            // hopeless, it is the most likely fix: the classifier samples,
-            // and a 700-message benign session that trips it once usually
-            // passes the second time. Exactly one per public turn.
-            self.refusal_same_model_retry_used = true;
-            RefusalDecision::RetrySameModel
+            if !self.refusal_same_model_retry_used {
+                self.refusal_same_model_retry_used = true;
+                return RefusalDecision::RetrySameModel;
+            }
         }
+        // Step 3: the same-provider override (or the same-model retry) refused
+        // too — hand the turn to an installed cross-provider refusal client,
+        // through the SAME swap machinery a quota fallback uses. Skipped when
+        // one is already riding (its own refusal fell through to Proceed above).
+        if !self.cross_fallback_active() {
+            if let Some((_, to)) = self.refusal_fallback_client.as_ref() {
+                let to = to.clone();
+                self.active_cross_fallback = Some(CrossFallback::Refusal);
+                // A same-provider override from the main model's world must
+                // never ride the cross-provider client (it has its own model).
+                self.refusal_fallback_model = None;
+                self.escalation_model_override = None;
+                self.note_model_switch(SwitchTrigger::Refusal, &model, &to);
+                self.mark_refusal_turn_hit();
+                return RefusalDecision::CrossProvider;
+            }
+        }
+        // Step 4: no fallback is available. If an earlier declined exchange is
+        // still in history — a sticky classifier reads the whole conversation —
+        // drop it and ask once more. Exactly one per public turn.
+        if !self.refusal_context_clean_used && self.has_prior_declined_exchange() {
+            self.refusal_context_clean_used = true;
+            return RefusalDecision::RetryCleaned;
+        }
+        RefusalDecision::Surface
+    }
+
+    /// Fold this refused public turn into the consecutive-refusal streak and,
+    /// on the threshold, arm the session-scoped cooldown that pre-arms the next
+    /// turns onto the fallback. Shared by the same-provider override and the
+    /// cross-provider handoff so both count toward the pre-arm.
+    fn mark_refusal_turn_hit(&mut self) {
+        if self.refusal_turn_hit {
+            return;
+        }
+        self.refusal_turn_hit = true;
+        if self.refusal_consecutive_turns.saturating_add(1) >= REFUSAL_DRY_TURN_THRESHOLD
+            && self
+                .refusal_dry_until
+                .is_none_or(|until| std::time::Instant::now() >= until)
+        {
+            self.refusal_dry_until = Some(std::time::Instant::now() + REFUSAL_DRY_COOLDOWN);
+            // The first begin that actually pre-arms owns the notice; do not let
+            // this mid-turn retry emit it prematurely.
+            self.refusal_prearm_notice_pending = false;
+            self.refusal_prearm_notice_latched = false;
+        }
+    }
+
+    /// Whether history still holds an earlier surfaced refusal — a user message
+    /// answered only by [`REFUSAL_SURFACED_NOTICE`]. That exchange is what a
+    /// sticky classifier keeps reading, so [`Self::drop_last_declined_exchange`]
+    /// removes it before the context-cleaning retry.
+    fn has_prior_declined_exchange(&self) -> bool {
+        self.last_declined_exchange_index().is_some()
+    }
+
+    /// The history index of the assistant message that surfaced a refusal, most
+    /// recent first, when the message just before it is the user turn it
+    /// declined. `None` when no such pair exists.
+    fn last_declined_exchange_index(&self) -> Option<usize> {
+        let messages = &self.session.messages;
+        messages.iter().enumerate().rev().find_map(|(idx, message)| {
+            let is_surfaced = message.role == crate::session::MessageRole::Assistant
+                && message.blocks.iter().any(|block| {
+                    matches!(block, ContentBlock::Text { text } if text == REFUSAL_SURFACED_NOTICE)
+                });
+            (is_surfaced
+                && idx > 0
+                && messages[idx - 1].role == crate::session::MessageRole::User)
+            .then_some(idx)
+        })
+    }
+
+    /// Drop the most recent surfaced-refusal exchange (the user turn and its
+    /// refusal notice) from history so the context-cleaning retry asks a clean
+    /// conversation. Returns whether anything was removed.
+    pub(super) fn drop_last_declined_exchange(&mut self) -> bool {
+        let Some(idx) = self.last_declined_exchange_index() else {
+            return false;
+        };
+        let messages = Arc::make_mut(&mut self.session.messages);
+        // Remove the assistant notice first (higher index), then the user turn.
+        messages.remove(idx);
+        messages.remove(idx - 1);
+        self.session.mark_transcript_dirty();
+        true
     }
 
     /// Fold the just-finished PUBLIC turn into the consecutive-refusal streak.
@@ -600,19 +756,62 @@ where
             self.refusal_prearm_notice_pending = false;
             self.refusal_prearm_notice_latched = false;
         }
-        // A same-provider refusal override must never ride the
-        // cross-provider quota-fallback client.
-        if self.refusal_dry_until.is_none() || self.quota_fallback_active {
+        // A refusal pre-arm must never displace an active quota fallback (that
+        // swap already runs on its own provider's client). A refusal cross
+        // pre-arm setting `active_cross_fallback = Refusal` below is fine.
+        if self.refusal_dry_until.is_none()
+            || self.active_cross_fallback == Some(CrossFallback::Quota)
+        {
             return;
         }
-        let Some(fallback) = self.effective_request_model().and_then(refusal_fallback_for) else {
+        let Some(model) = self.effective_request_model().map(str::to_string) else {
             return;
         };
-        self.refusal_fallback_model = Some(fallback);
+        // A same-provider candidate (Opus) rides the bound client as a
+        // per-turn model override — the cheap, in-provider pre-arm.
+        if let Some(fallback) = refusal_fallback_for(&model) {
+            self.refusal_fallback_model = Some(fallback);
+            self.latch_refusal_prearm_notice();
+            return;
+        }
+        // No same-provider candidate (Opus itself): pre-arm the installed
+        // cross-provider refusal client for the whole turn, exactly as the
+        // quota cooldown pre-arms its client. Silent when none is connected.
+        if self.refusal_fallback_client.is_some() {
+            self.active_cross_fallback = Some(CrossFallback::Refusal);
+            self.latch_refusal_prearm_notice();
+        }
+    }
+
+    /// Latch the one refusal pre-arm notice for this cooldown window; later dry
+    /// turns in the same window stay silent.
+    fn latch_refusal_prearm_notice(&mut self) {
         if !self.refusal_prearm_notice_latched {
             self.refusal_prearm_notice_pending = true;
             self.refusal_prearm_notice_latched = true;
         }
+    }
+
+    /// The pre-arm notice text for the model this turn is pre-armed onto: the
+    /// same-provider Opus override or the cross-provider refusal client. Named so
+    /// the two emitters (sync eprintln, streaming render block) cannot drift, and
+    /// so the cross-provider case says which provider carries the session rather
+    /// than the Fable/Opus-only wording.
+    pub(super) fn refusal_prearm_notice_text(&self) -> String {
+        let model = self
+            .refusal_fallback_model
+            .as_deref()
+            .or_else(|| match self.active_cross_fallback {
+                Some(CrossFallback::Refusal) => {
+                    self.refusal_fallback_client.as_ref().map(|(_, model)| model.as_str())
+                }
+                _ => None,
+            });
+        core_types::retry_signal::refusal_prearm_warn(
+            model,
+            REFUSAL_DRY_TURN_THRESHOLD,
+            REFUSAL_DRY_COOLDOWN,
+        )
     }
 
     /// Turn-start quota-fallback state management, called from both turn entry
@@ -671,12 +870,15 @@ where
         }
         let cooldown_active = self.quota_dry_until.is_some();
         if cooldown_active && self.quota_fallback_client.is_some() {
-            self.quota_fallback_active = true;
+            self.active_cross_fallback = Some(CrossFallback::Quota);
             self.quota_prearm_notice_pending = true;
         } else {
             // No cooldown, or the cooldown outlived its fallback client (e.g.
             // `/smart quota-fallback off` mid-session cleared it): start native.
-            self.quota_fallback_active = false;
+            // Clears any cross fallback so the refusal pre-arm (which runs after
+            // this, per the turn-begin order) sees a clean slate before it may
+            // re-arm its own.
+            self.active_cross_fallback = None;
             self.quota_prearm_notice_pending = false;
         }
     }
@@ -775,7 +977,7 @@ where
         if self.deep_leg_owns_the_wire() {
             return None;
         }
-        if self.quota_fallback_active {
+        if self.cross_fallback_active() {
             return None;
         }
         // One rung down the same provider — the overload escape, which the
@@ -816,7 +1018,7 @@ where
         if self.deep_leg_owns_the_wire() {
             return QuotaEscape::None;
         }
-        if self.quota_fallback_active {
+        if self.cross_fallback_active() {
             return QuotaEscape::None;
         }
         let Some(::api::ProviderErrorClass::RateLimit {
@@ -881,12 +1083,12 @@ where
             return QuotaEscape::None;
         };
         let model = model.clone();
-        self.quota_fallback_active = true;
+        self.active_cross_fallback = Some(CrossFallback::Quota);
         self.refusal_fallback_model = None;
         // Sister clear to the refusal one above, same invariant: a per-turn
         // wire-model override from the main model's world must never ride
         // the cross-provider fallback client (assemble_request also guards
-        // on `quota_fallback_active` — this keeps the state itself honest).
+        // on `cross_fallback_active` — this keeps the state itself honest).
         self.escalation_model_override = None;
         let cooldown = quota_fallback_cooldown(retry_after);
         self.quota_dry_until = Some(std::time::Instant::now() + cooldown);
@@ -910,10 +1112,8 @@ where
         &mut self,
         request: ApiRequest,
     ) -> Result<Vec<AssistantEvent>, RuntimeError> {
-        if self.quota_fallback_active {
-            if let Some((client, _)) = self.quota_fallback_client.clone() {
-                return block_on_async_client(client, request);
-            }
+        if let Some((client, _)) = self.active_cross_fallback_client().cloned() {
+            return block_on_async_client(client, request);
         }
         self.api_client.stream(request)
     }

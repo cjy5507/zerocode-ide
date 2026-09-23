@@ -42,8 +42,9 @@ pub use session::{
     SessionError, SessionFork, VaultRecord,
 };
 pub use retry_signal::{
-    parse_quota_fallback_model, StreamNoticeKind, StreamRetryNotice, QUIET_REASONING_LABEL,
-    QUOTA_FALLBACK_ACTIVE_NOTICE_PREFIX, QUOTA_HOLD_NOTICE_PREFIX, REFUSAL_FALLBACK_WARN,
+    parse_quota_fallback_model, refusal_cross_provider_warn, refusal_fallback_warn,
+    refusal_prearm_warn, StreamNoticeKind, StreamRetryNotice, QUIET_REASONING_LABEL,
+    QUOTA_FALLBACK_ACTIVE_NOTICE_PREFIX, QUOTA_HOLD_NOTICE_PREFIX, REFUSAL_CONTEXT_CLEANED_WARN,
 };
 pub use sse::{IncrementalSseParser, SseEvent};
 pub use usage::{

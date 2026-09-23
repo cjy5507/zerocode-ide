@@ -26,6 +26,12 @@ pub struct DeepTierModelsSetting {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SmartTurnRouting {
     pub quota_fallback_model: Option<String>,
+    /// The cross-provider model a doubly-refused turn is handed to (t-6269):
+    /// the first connected candidate on another provider in the main model's
+    /// [`api::refusal_fallback_candidates`] list. `None` when the lineup names
+    /// no cross-provider candidate or none is connected. The host builds a
+    /// client for it exactly as for the quota fallback.
+    pub refusal_fallback_model: Option<String>,
     pub quota_wait_band: std::time::Duration,
     pub deep_verify_model: Option<String>,
     pub deep_plan_model: Option<String>,
@@ -822,6 +828,7 @@ pub(super) fn smart_turn_routing_with(
     let Some(settings) = settings else {
         return SmartTurnRouting {
             quota_fallback_model: None,
+            refusal_fallback_model: None,
             quota_wait_band: std::time::Duration::from_secs(
                 DEFAULT_QUOTA_WAIT_BAND_MINUTES.saturating_mul(60),
             ),
@@ -858,6 +865,7 @@ pub(super) fn smart_turn_routing_with(
         .flatten();
     SmartTurnRouting {
         quota_fallback_model: route_quota_fallback_model(main_model, &settings, inventory),
+        refusal_fallback_model: route_refusal_fallback_model(main_model, &settings, inventory),
         quota_wait_band: std::time::Duration::from_secs(
             settings.quota_wait_band_minutes.saturating_mul(60),
         ),
@@ -976,6 +984,38 @@ fn route_quota_fallback_model(
     )
     .into_iter()
     .find(|candidate| api::detect_provider_kind(candidate) != main_provider)
+}
+
+/// The cross-provider model a doubly-refused turn is handed to (t-6269): the
+/// first candidate in the main model's catalog `refusal_fallback` list that is
+/// on ANOTHER provider AND connected (in the inventory). Same-provider
+/// candidates (Fable/Sonnet/Haiku → Opus) are the runtime's own bound-client
+/// override, not a client the host installs, so they are skipped here.
+///
+/// This is the refusal peer of [`route_quota_fallback_model`]: a different
+/// selection (the catalog's explicit order, not the router's score) feeding the
+/// SAME client role and the SAME runtime swap machinery. `None` when the lineup
+/// names no cross-provider candidate or none is connected — the refusal then
+/// surfaces (or takes the context-cleaning retry) exactly as before.
+fn route_refusal_fallback_model(
+    main_model: &str,
+    settings: &SmartRuntimeSettings,
+    inventory: &runtime::ModelInventory,
+) -> Option<String> {
+    if main_model.is_empty() || !settings.enabled {
+        return None;
+    }
+    // Like the main-model fallback, this explicit catalog fallback is not
+    // constrained by `provider_allowlist` (which shapes AUTO routing): the
+    // list is already a curated per-lineup order, and the point of the escape
+    // is to reach whatever provider is connected when the main one declines.
+    let main_provider = api::detect_provider_kind(main_model);
+    api::refusal_fallback_candidates(main_model)
+        .into_iter()
+        .find(|candidate| {
+            api::detect_provider_kind(candidate) != main_provider
+                && inventory.find(&api::resolve_catalog_alias(candidate)).is_some()
+        })
 }
 
 fn route_deep_verify_model(
