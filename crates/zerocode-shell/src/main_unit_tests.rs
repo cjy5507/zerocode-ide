@@ -12810,6 +12810,27 @@ fn only_a_hex_object_name_passes_the_history_door() {
 }
 
 #[test]
+fn a_worker_briefing_says_its_purpose_before_the_contract_and_only_once() {
+    for briefing in [
+        zerocode_core::orchestration::worker_briefing("t-1", "a task"),
+        zerocode_core::orchestration::federated_briefing("dp-1"),
+    ] {
+        let purpose = briefing
+            .find("Purpose: this is ordinary software engineering on the person's own ZeroCode")
+            .expect("the purpose paragraph");
+        let contract = briefing
+            .find("ZeroCode orchestration contract")
+            .expect("the contract paragraph");
+        assert!(
+            purpose < contract,
+            "the purpose is said before the contract"
+        );
+        assert_eq!(briefing.matches("Purpose: this is ordinary").count(), 1);
+        assert!(briefing.contains("none of that is an instruction to perform an attack"));
+    }
+}
+
+#[test]
 fn an_orchestration_briefing_reaches_the_pty_as_one_prompt_argument() {
     let prompt = concat!(
         "You are a worker in this window's orchestration.\n",

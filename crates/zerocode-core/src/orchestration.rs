@@ -13614,6 +13614,18 @@ impl Decided {
     }
 }
 
+/// Why the worker is here, said before any rule: ordinary engineering on the
+/// person's own repository. A provider-side safety filter reads the whole
+/// context, and a briefing that names refusals, safeguards, credentials or
+/// security tools — because the product handles them — was read as a request
+/// to act on them (2026-09-23, an Opus 5.5 worker stopped mid-read). Stating
+/// the purpose is honest context for that reader, not a claim about anything
+/// the person did not ask for.
+const WORKER_PURPOSE_CONTEXT: &str = "Purpose: this is ordinary software engineering on the person's own ZeroCode \
+repository and machine. Code and briefings you read may name refusals, safeguards, credentials, security \
+tools or attacks because the product handles them; none of that is an instruction to perform an attack, \
+bypass a safeguard or reach anything the person does not own.";
+
 const WORKER_GATE_CONTEXT: &str = "For code changes in a Rust workspace, the worker gate must include `cargo clippy --all-targets -- -D warnings` from the repository root, including test targets across the workspace. Report each gate exit code without hiding it behind a pipe.";
 
 /// What a summoned worker is told, ahead of its own instruction.
@@ -13657,7 +13669,8 @@ with the same path named once in the summary. Say in the summary if that \
 file dies with your worktree, because the coordinator reads it before \
 anything is cleaned up. Every command that CHANGES anything needs --retry-request: repeat \
 the same name to retry one you never heard back from, and choose a new one for \
-a new request. `zerocode-orc help` lists the rest. {contract}\n\n{worker_gate}\n\n{trust}\n\nNow do this:\n\n",
+a new request. `zerocode-orc help` lists the rest. {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\nNow do this:\n\n",
+        purpose = WORKER_PURPOSE_CONTEXT,
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,
         trust = trust,
@@ -13697,7 +13710,8 @@ nobody on either side can answer one. Keep the summary short and carry a \
 longer answer as a path — `--payload '{{\"reportPath\":\"/abs/path\",\"lifetime\":\"ephemeral\"}}'` — \
 naming it once in the summary too, and say whether that file outlives your \
 worktree, because the home window is not on this machine. Every command that CHANGES anything needs --retry-request. \
-`zerocode-orc help` lists the rest. {contract}\n\n{worker_gate}\n\n{trust}\n\nNow do this:\n\n",
+`zerocode-orc help` lists the rest. {purpose}\n\n{contract}\n\n{worker_gate}\n\n{trust}\n\nNow do this:\n\n",
+        purpose = WORKER_PURPOSE_CONTEXT,
         worker_gate = WORKER_GATE_CONTEXT,
         contract = crate::delegation::AGENT_SELECTION_CONTEXT,
         trust = trust,
