@@ -1636,14 +1636,14 @@ pub(super) async fn click_mark_direct(
                     let (x, y) = request.centre();
                     if let Some(pressed) = super::ios_hid::element_at(&udid, x, y)
                         .ok()
-                        .and_then(|answer| request.perform_at_centre_in(&input, &answer, &tap))
+                        .and_then(|answer| request.perform_at_centre_in(&input, &answer, tap))
                     {
                         return pressed.map(|()| Proof::Point);
                     }
                 }
                 let snapshot = marks_snapshot(&udid).map_err(backend_error)?;
                 request
-                    .perform_in(&input, &snapshot.faces, snapshot.screen, &tap)
+                    .perform_in(&input, &snapshot.faces, snapshot.screen, tap)
                     .map(|()| Proof::Tree)
             })?
         };
