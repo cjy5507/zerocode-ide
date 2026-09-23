@@ -2480,6 +2480,9 @@ class StatefulBackend {
       // 재시작을 건너온 판들의 부팅 질문 (P0-13) — 이 하니스의 창들은
       // 설정 화면이 주제라 지난 세션이 없다: 빈 목록이 정답이다.
       case "last_statuses": return [];
+      // 빌린 기기 한 줄의 부팅 질문(t-6336) — 이 하니스의 창에는 에이전트의
+      // 판이 없으니 빌린 기기도 없다.
+      case "emulator_loans": return { count: 0, lastUsedMs: null };
       // 카페인 세그먼트의 부팅 질문. 실제 백엔드처럼 설정된 모드를 그대로
       // 비추고, 켜 둔(on) 모드만 즉시 활동으로 친다 — keeper의 pane 추적은
       // 이 하니스 밖의 일이다.
