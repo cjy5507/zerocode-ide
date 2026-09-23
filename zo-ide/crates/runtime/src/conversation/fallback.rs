@@ -807,7 +807,11 @@ where
                 }
                 _ => None,
             });
-        core_types::retry_signal::refusal_prearm_warn(model)
+        core_types::retry_signal::refusal_prearm_warn(
+            model,
+            REFUSAL_DRY_TURN_THRESHOLD,
+            REFUSAL_DRY_COOLDOWN,
+        )
     }
 
     /// Turn-start quota-fallback state management, called from both turn entry
