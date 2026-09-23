@@ -24,10 +24,7 @@ fn evaluate(
 ) -> Result<Value, ProviderError> {
     let package = package(platform, &snapshot.raw);
     let count = match method {
-        EmulatorMethod::Find => snapshot.faces.iter().filter(|face| {
-            // The same case-insensitive fragment policy as desktop window checks.
-            face.name.as_deref().is_some_and(|name| window_title_matches(name, subject))
-        }).count(),
+        EmulatorMethod::Find => found(snapshot, subject),
         EmulatorMethod::Foreground => usize::from(package.ok_or_else(|| ProviderError::new(
             error_code::UNSUPPORTED_CAPABILITY,
             "the accessibility snapshot has no unambiguous foreground app package; iOS exports no bundle metadata",
@@ -35,11 +32,30 @@ fn evaluate(
         _ => return Err(ProviderError::invalid_argument("expected a mobile check")),
     };
     // Both check verbs use the existing find count and Flow app/package keys.
-    let mut answer = json!({"count": count});
+    let mut answer = json!({ COUNT_KEY: count });
     if let Some(package) = package {
         answer["app"] = json!({"package": package});
     }
     Ok(answer)
+}
+
+/// The key a check's count is answered under — `find`'s, and a look's that
+/// was asked to count (`marks --text`).
+pub(crate) const COUNT_KEY: &str = "count";
+
+/// How many of a snapshot's faces read `subject` — `find`'s count, and a
+/// look's own when it is asked to count (`marks --text`, t-6385): the same
+/// case-insensitive fragment policy as desktop window checks.
+pub(super) fn found(snapshot: &Snapshot, subject: &str) -> usize {
+    snapshot
+        .faces
+        .iter()
+        .filter(|face| {
+            face.name
+                .as_deref()
+                .is_some_and(|name| window_title_matches(name, subject))
+        })
+        .count()
 }
 
 /// Android's synthetic root wraps the foreground window's AX roots. Require

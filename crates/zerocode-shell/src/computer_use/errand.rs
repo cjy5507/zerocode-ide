@@ -353,6 +353,15 @@ impl Screen {
     }
 }
 
+/// What a press's screen did before the press answered, for a world whose
+/// press waits for its screen to stop changing (a phone's, t-6385).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Settled {
+    /// What the walk's row says of it under [`SETTLE`]: how long it took, in
+    /// how many reads, and how it ended.
+    pub note: Value,
+}
+
 /// What a walk does to the world, and nothing else — each a seam.
 pub trait World {
     /// The screen and the controls it is showing now, or `None` when the
@@ -370,6 +379,13 @@ pub trait World {
     /// answer this default gives.
     fn walk_from(&mut self, step: usize) -> Option<Value> {
         let _ = step;
+        None
+    }
+    /// What the last press's screen did while the press waited for it to stop
+    /// changing (t-6385). `None` for a world whose press does not wait — a
+    /// page's, the desktop's, an Android device's — and then nothing is
+    /// noted.
+    fn settled(&mut self) -> Option<Settled> {
         None
     }
     /// Whether the caller's own success condition is met — the deterministic
@@ -673,6 +689,12 @@ pub const OVERLAP_DISCARDED: &str = "discarded";
 pub const RESCUE: &str = "rescue";
 pub const RESCUED_BY: &str = "rescuedBy";
 pub const RESCUED_BY_TEAM: &str = "team";
+
+/// The key a row says how the pressed screen settled under, when the world's
+/// press waits for it to stop changing (a phone's, t-6385) — the emulator
+/// door's own word, so a click's answer and the walk's row cannot come to
+/// spell it two ways.
+pub const SETTLE: &str = zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY;
 
 /// Why this walk pressed nothing, when one of its rows says why.
 ///
@@ -1311,6 +1333,9 @@ fn walk(
         walked.pressed += 1;
         note(&mut said, "pressed", json!(true));
         note(&mut said, "routeUse", json!(USE_APPLIED));
+        if let Some(settled) = world.settled() {
+            note(&mut said, SETTLE, settled.note);
+        }
 
         match at.why {
             Why::Cleared { next, .. } => {

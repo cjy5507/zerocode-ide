@@ -913,6 +913,144 @@ fn a_point_stops_before_a_persons_guarded_step() {
     }
 }
 
+/// The settling a press waits through, read by read at the times the reads
+/// came back (t-6385), with the table's own windows.
+fn settle_through(reads: &[(u64, Option<&str>)]) -> (Settle, usize) {
+    use zerocode_core::agent_emulator::{EMULATOR_SETTLE_CEILING_MS, EMULATOR_SETTLE_QUIET_MS};
+    let mut settling = Settling::new(
+        std::time::Duration::from_millis(EMULATOR_SETTLE_QUIET_MS),
+        std::time::Duration::from_millis(EMULATOR_SETTLE_CEILING_MS),
+    );
+    for (at, shape) in reads {
+        let settle = settling.read(
+            shape.map(str::to_string),
+            std::time::Duration::from_millis(*at),
+        );
+        if settle != Settle::Reading {
+            return (settle, settling.reads());
+        }
+    }
+    (Settle::Reading, settling.reads())
+}
+
+/// A press that navigates (t-6350's Settings → General: the tree changed two
+/// to four times and stood still at 1,080 ms) settles on the first two alike
+/// reads after a change — and the first reads, alike because the press has
+/// not landed yet, settle nothing.
+#[test]
+fn a_pressed_screen_settles_on_two_alike_reads_after_it_changed() {
+    let (settle, reads) = settle_through(&[
+        (60, Some("settings")),
+        (120, Some("settings")),
+        (180, Some("settings")),
+        (340, Some("sliding 1")),
+        (400, Some("sliding 2")),
+        (1_020, Some("general")),
+        (1_080, Some("general")),
+        (1_140, Some("never read")),
+    ]);
+    assert_eq!((settle, reads), (Settle::Still, 7));
+}
+
+/// A press that moves nothing ends once the quiet window passes, not at the
+/// ceiling; one whose screen never stands still ends at the ceiling.
+#[test]
+fn a_press_that_moved_nothing_ends_quietly_and_a_screen_that_never_stands_still_at_the_ceiling() {
+    use zerocode_core::agent_emulator::{EMULATOR_SETTLE_CEILING_MS, EMULATOR_SETTLE_QUIET_MS};
+    let quiet: Vec<(u64, Option<&str>)> = (1..=20).map(|n| (n * 60, Some("inert"))).collect();
+    let (settle, reads) = settle_through(&quiet);
+    assert_eq!(settle, Settle::Unmoved);
+    assert_eq!(reads as u64, EMULATOR_SETTLE_QUIET_MS.div_ceil(60));
+
+    let labels: Vec<String> = (0..60).map(|n| format!("clock {n}")).collect();
+    let restless: Vec<(u64, Option<&str>)> = labels
+        .iter()
+        .enumerate()
+        .map(|(n, label)| ((n as u64 + 1) * 60, Some(label.as_str())))
+        .collect();
+    let (settle, reads) = settle_through(&restless);
+    assert_eq!(settle, Settle::Ceiling);
+    assert_eq!(reads as u64, EMULATOR_SETTLE_CEILING_MS.div_ceil(60));
+}
+
+/// A read without the pressed control where it stood has moved, however the
+/// reads compare: a screen that changed before its first read came back
+/// settles on two alike reads, not at the quiet window (t-6385).
+#[test]
+fn a_screen_that_changed_before_its_first_read_settles_without_waiting_the_quiet() {
+    use zerocode_core::agent_emulator::{EMULATOR_SETTLE_CEILING_MS, EMULATOR_SETTLE_QUIET_MS};
+    let mut settling = Settling::new(
+        std::time::Duration::from_millis(EMULATOR_SETTLE_QUIET_MS),
+        std::time::Duration::from_millis(EMULATOR_SETTLE_CEILING_MS),
+    );
+    // The first read already shows the screen the press led to.
+    settling.moved();
+    let at = std::time::Duration::from_millis;
+    assert_eq!(settling.read(Some("about"), at(300)), Settle::Reading);
+    assert_eq!(settling.read(Some("about"), at(360)), Settle::Still);
+}
+
+/// The pressed control stands in a read when its own identity is there with
+/// its words, in its frame within the pin; a row that slid away or was
+/// renamed does not stand.
+#[test]
+fn a_pressed_control_stands_where_the_pin_holds_it() {
+    let (table, faces) = table();
+    let request = table.request(table.platform, &table.device, 1).unwrap();
+    assert!(request.stands_in(&faces));
+    let mut slid = faces.clone();
+    slid[1].x += 120.0;
+    assert!(!request.stands_in(&slid));
+    let mut renamed = faces.clone();
+    renamed[1].name = Some("다른 항목".into());
+    assert!(!request.stands_in(&renamed));
+    assert!(!request.stands_in(&[]));
+}
+
+/// A read that failed breaks a run of alike reads and proves nothing; a
+/// screen that flashed and came back is settled like any other.
+#[test]
+fn a_failed_read_breaks_a_run_and_a_flash_that_came_back_still_settles() {
+    let (settle, reads) = settle_through(&[
+        (60, Some("list")),
+        (120, Some("detail")),
+        (180, None),
+        (240, Some("detail")),
+        (300, Some("detail")),
+    ]);
+    assert_eq!((settle, reads), (Settle::Still, 5));
+    let (settle, reads) = settle_through(&[
+        (60, Some("row")),
+        (120, Some("row pressed")),
+        (180, Some("row")),
+        (240, Some("row")),
+    ]);
+    assert_eq!((settle, reads), (Settle::Still, 4));
+}
+
+/// What a settling press compares: roles, words, whole-point frames and the
+/// centre's answer — a fraction of a point is the same screen, a row that
+/// slid is not.
+#[test]
+fn a_settling_press_compares_whole_points_and_the_centres_answer() {
+    let faces = Snapshot::ios(&ios_tree()).unwrap().faces;
+    let mut wobbled = faces.clone();
+    wobbled[1].x += 0.3;
+    assert_eq!(shape(&faces), shape(&wobbled));
+    let mut slid = faces.clone();
+    slid[1].x += 40.0;
+    assert_ne!(shape(&faces), shape(&slid));
+    // Something came to sit on its centre.
+    let mut covered = faces.clone();
+    covered[1].visible = Some(FaceFrame {
+        x: covered[1].x,
+        y: covered[1].y,
+        width: 0.0,
+        height: 0.0,
+    });
+    assert_ne!(shape(&faces), shape(&covered));
+}
+
 #[test]
 fn an_overlapping_search_field_cannot_leave_a_number_on_the_row_under_it() {
     // Observed on the iOS Settings screen with large accessibility text:

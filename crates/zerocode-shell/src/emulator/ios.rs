@@ -1610,12 +1610,11 @@ fn marks_snapshot(udid: &str) -> Result<super::marks::Snapshot, String> {
 pub(super) async fn click_mark_direct(
     udid: String,
     request: super::marks::PinnedTap,
-) -> Result<super::marks::Proof, zerocode_core::computer_use_protocol::ProviderError> {
-    use super::marks::{Proof, backend_error};
+) -> Result<super::marks::Pressed, zerocode_core::computer_use_protocol::ProviderError> {
+    use super::marks::{Pressed, Proof, backend_error};
     use zerocode_core::computer_use_protocol::ProviderError;
     tauri::async_runtime::spawn_blocking(move || {
         let control = ios_control(&udid).map_err(backend_error)?;
-        let input = control.input().map_err(backend_error)?;
         let tap = |x: f64, y: f64| -> Result<(), ProviderError> {
             #[cfg(target_os = "macos")]
             super::ios_hid::send(&udid, super::ios_hid::InputRequest::Tap { x, y })
@@ -1625,28 +1624,93 @@ pub(super) async fn click_mark_direct(
             control.notify();
             Ok(())
         };
-        request.on_device(&udid, || {
-            // The one point the press lands on is asked first — a few
-            // milliseconds against the whole tree's 633 (t-6350) — and the
-            // tree is still read for every press the point cannot prove.
-            #[cfg(target_os = "macos")]
-            {
-                let (x, y) = request.centre();
-                if let Some(pressed) = super::ios_hid::element_at(&udid, x, y)
-                    .ok()
-                    .and_then(|answer| request.perform_at_centre_in(&input, &answer, &tap))
+        let proof = {
+            let input = control.input().map_err(backend_error)?;
+            request.on_device(&udid, || {
+                // The one point the press lands on is asked first — a few
+                // milliseconds against the whole tree's 633 (t-6350) — and
+                // the tree is still read for every press the point cannot
+                // prove.
+                #[cfg(target_os = "macos")]
                 {
-                    return pressed.map(|()| Proof::Point);
+                    let (x, y) = request.centre();
+                    if let Some(pressed) = super::ios_hid::element_at(&udid, x, y)
+                        .ok()
+                        .and_then(|answer| request.perform_at_centre_in(&input, &answer, &tap))
+                    {
+                        return pressed.map(|()| Proof::Point);
+                    }
                 }
-            }
-            let snapshot = marks_snapshot(&udid).map_err(backend_error)?;
-            request
-                .perform_in(&input, &snapshot.faces, snapshot.screen, &tap)
-                .map(|()| Proof::Tree)
-        })
+                let snapshot = marks_snapshot(&udid).map_err(backend_error)?;
+                request
+                    .perform_in(&input, &snapshot.faces, snapshot.screen, &tap)
+                    .map(|()| Proof::Tree)
+            })?
+        };
+        // The device's input gate is let go of before the wait: what follows
+        // only reads, and a person's touch in the pane need not queue
+        // behind a screen settling.
+        #[cfg(target_os = "macos")]
+        let settled = Some(settle(&udid, Instant::now(), |faces| {
+            request.stands_in(faces)
+        }));
+        #[cfg(not(target_os = "macos"))]
+        let settled = None;
+        Ok(Pressed { proof, settled })
     })
     .await
     .map_err(backend_error)?
+}
+
+/// Read the pressed screen until it stops changing (t-6385,
+/// [`super::marks::Settling`]): the walk alone, every element's centre
+/// asked — the tree a look reads, less the grid — again and again from the
+/// tap until two reads after a change agree, nothing changes within the
+/// quiet window, or the ceiling passes. A look taken at once reads the screen
+/// being left: the next press was refused 5 times of 5 (t-6350). A read
+/// without the pressed control where it stood (`stands`) has moved: the
+/// screen can change before the first read comes back.
+#[cfg(target_os = "macos")]
+fn settle(
+    udid: &str,
+    tapped: Instant,
+    stands: impl Fn(&[zerocode_core::computer_use_protocol::marks::ElementFace]) -> bool,
+) -> super::marks::Settled {
+    use super::marks::{Settle, Settled, Settling, Snapshot, shape};
+    use zerocode_core::agent_emulator::{EMULATOR_SETTLE_CEILING_MS, EMULATOR_SETTLE_QUIET_MS};
+    let mut settling = Settling::new(
+        Duration::from_millis(EMULATOR_SETTLE_QUIET_MS),
+        Duration::from_millis(EMULATOR_SETTLE_CEILING_MS),
+    );
+    let mut last = None;
+    loop {
+        let read = super::ios_hid::accessibility_walk(udid)
+            .ok()
+            .and_then(|roots| Snapshot::ios(&serde_json::Value::Array(roots)).ok());
+        let seen = read.as_ref().map(|snapshot| shape(&snapshot.faces));
+        match read {
+            Some(snapshot) => {
+                if !stands(&snapshot.faces) {
+                    settling.moved();
+                }
+                last = Some(snapshot);
+            }
+            // A read that failed — an app switching, a helper replaced — is
+            // not asked again at once.
+            None => std::thread::sleep(Duration::from_millis(
+                zerocode_core::computer_use::COMPUTER_SETTLE_POLL_MS,
+            )),
+        }
+        let settle = settling.read(seen, tapped.elapsed());
+        if settle != Settle::Reading {
+            return Settled {
+                settle,
+                reads: settling.reads(),
+                ms: u64::try_from(tapped.elapsed().as_millis()).unwrap_or(u64::MAX),
+                last,
+            };
+        }
+    }
 }
 
 #[tauri::command]

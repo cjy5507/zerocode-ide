@@ -184,6 +184,9 @@ pub(super) struct FakeWorld {
     pub(super) look_ms: u64,
     /// How much of `left_ms` the world has spent — the clock a test reads.
     pub(super) spent_ms: u64,
+    /// What each press says of its screen settling (t-6385): `None` is a
+    /// world whose press does not wait for that — a page, the desktop.
+    pub(super) settles: Option<Value>,
 }
 
 impl FakeWorld {
@@ -215,6 +218,7 @@ impl FakeWorld {
             press_ms: 0,
             look_ms: 0,
             spent_ms: 0,
+            settles: None,
         }
     }
 
@@ -336,6 +340,9 @@ impl World for FakeWorld {
             return None;
         }
         Some(self.reached.remove(0))
+    }
+    fn settled(&mut self) -> Option<Settled> {
+        self.settles.clone().map(|note| Settled { note })
     }
     fn walk_from(&mut self, step: usize) -> Option<Value> {
         self.walked_from.push(step);
@@ -968,6 +975,30 @@ fn a_goal_walk_presses_step_after_step_and_never_resumes_a_document() {
     }
     // Nothing said it worked, so nothing claims it did.
     assert_eq!(walked.reached, Some(false));
+}
+
+/// A press whose world waited for its screen to stop changing (a phone's,
+/// t-6385) says on its row how that went, under the emulator door's own
+/// word; a world whose press does not wait says nothing of it.
+#[test]
+fn a_press_that_waited_for_its_screen_says_how_it_settled_on_its_row() {
+    let settled = json!({ "ms": 1_080, "reads": 18, "settle": "still" });
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    let mut world = FakeWorld::that_moves(&[1, 2]);
+    world.settles = Some(settled.clone());
+    world.reached = vec![false, true];
+    let walked = run(Mode::On, true, &goal(3), &mut judge, &mut world);
+    assert_eq!(walked.pressed, 2);
+    for row in &walked.rows {
+        assert_eq!(row[SETTLE], settled);
+    }
+    assert_eq!(SETTLE, zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY);
+
+    let mut judge = FakeJudge::chose(&[1]);
+    let mut world = FakeWorld::that_moves(&[1]);
+    world.reached = vec![true];
+    let walked = run(Mode::On, true, &goal(3), &mut judge, &mut world);
+    assert!(walked.rows[0].get(SETTLE).is_none());
 }
 
 #[test]

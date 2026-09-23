@@ -92,9 +92,21 @@ final class AccessibilityBridge: NSObject {
     /// matching the `axe describe-ui` flat-array output. Throws on
     /// framework load failure or if the simulator returns no frontmost
     /// application (e.g. SpringBoard hasn't come up yet).
-    func describeUI(udid: String) throws -> Data {
+    ///
+    /// `grid: false` is the walk alone — every element's centre still asked,
+    /// no point sampled between them: a tenth of the cost (55 of 580 ms on
+    /// Settings, t-6350), what a press reads again and again while its
+    /// screen settles (t-6385).
+    func describeUI(udid: String, grid: Bool = true) throws -> Data {
         let (token, rootElement) = try frontmostApplication(udid: udid)
         defer { unregisterToken(token) }
+
+        let screenFrame: NSRect
+        if let app = rootElement as? NSAccessibilityElement {
+            screenFrame = app.accessibilityFrame()
+        } else {
+            screenFrame = .zero
+        }
 
         // 1. Recursive walk from the application element, collecting the
         //    frames we've covered. This catches everything iOS exposes via
@@ -105,18 +117,13 @@ final class AccessibilityBridge: NSObject {
         guard case .seated(var root) = serialize(
             element: rootElement,
             token: token,
+            screen: screenFrame,
             coverage: &coverage,
             visited: &visited,
             remainingElements: &remainingElements,
             depth: 0
         ) else {
             throw AccessibilityError.noFrontmostApplication
-        }
-        let screenFrame: NSRect
-        if let app = rootElement as? NSAccessibilityElement {
-            screenFrame = app.accessibilityFrame()
-        } else {
-            screenFrame = .zero
         }
 
         // 2. Grid hit-test discovery: many iOS containers (UIScrollView,
@@ -125,7 +132,7 @@ final class AccessibilityBridge: NSObject {
         //    screen and ask the translator what's under each — anything
         //    that's still a real accessibility element shows up here. Same
         //    technique as idb's processRemoteContent path.
-        if screenFrame.width > 1, screenFrame.height > 1 {
+        if grid, screenFrame.width > 1, screenFrame.height > 1 {
             var children = (root["children"] as? [[String: Any]]) ?? []
             let discovered = discoverByGrid(
                 token: token,
@@ -377,6 +384,7 @@ final class AccessibilityBridge: NSObject {
                 if case .seated(let serialized) = serialize(
                     element: element,
                     token: token,
+                    screen: bounds,
                     coverage: &coverage,
                     visited: &visited,
                     remainingElements: &remainingElements,
@@ -415,6 +423,7 @@ final class AccessibilityBridge: NSObject {
     private func serialize(
         element: NSObject,
         token: String,
+        screen: NSRect,
         coverage: inout AccessibilityCoverage,
         visited: inout Set<ObjectIdentifier>,
         remainingElements: inout Int,
@@ -452,7 +461,8 @@ final class AccessibilityBridge: NSObject {
         // Whether the element's own centre is its to press. The walk proves
         // no z-order — a floating search field's rectangle can hold a row's
         // centre — so the exporter is asked what is on top there.
-        if let answered = centreAnswers(to: element, frame: frame, token: token) {
+        let centre = centreAnswers(to: element, frame: frame, token: token)
+        if let answered = centre?.isItsOwn {
             dict["hit_at_centre"] = answered
         }
 
@@ -473,6 +483,7 @@ final class AccessibilityBridge: NSObject {
                 tally.record(serialize(
                     element: childObj,
                     token: token,
+                    screen: screen,
                     coverage: &coverage,
                     visited: &visited,
                     remainingElements: &remainingElements,
@@ -483,15 +494,15 @@ final class AccessibilityBridge: NSObject {
             if tally.truncated { dict["truncated"] = true }
         }
 
-        // Record this element. Only true leaves block the grid — anything
-        // that looks like a container (had walked children, or is just
-        // physically too large to be a single tappable element) stays
-        // probe-able so we can discover "remote" elements iOS hid under
-        // empty-children Groups (Nav bar / Tab Bar / scroll views).
-        if !childDicts.isEmpty || isLikelyContainer(frame: frame) {
-            coverage.insertContainer(frame)
-        } else {
+        // Record this element. Only leaves block the grid — anything that
+        // may be hiding "remote" elements under it (Nav bar / Tab Bar / scroll
+        // views) stays probe-able; `AccessibilityLeaf` says which is which.
+        if AccessibilityLeaf.blocksGrid(
+            walkedChildren: childDicts.count, frame: frame, centre: centre, screen: screen
+        ) {
             coverage.insertLeaf(frame)
+        } else {
+            coverage.insertContainer(frame)
         }
         dict["children"] = childDicts
 
@@ -533,25 +544,26 @@ final class AccessibilityBridge: NSObject {
     /// What the exporter puts under this element's centre — asked with the
     /// same point query the grid walk uses — judged by the desktop's rule for
     /// a mark's hit-test (`MARK_HIT_DEPTH` in the core): the answer must be
-    /// the control, something inside it, or something around it. `true` when
-    /// it is, `false` when something else is on top there or the centre is off
-    /// the screen, `nil` when the question could not be asked (no frame, no
-    /// translator) or the answer has no frame to judge by.
+    /// the control, something inside it, or something around it. `.itself`
+    /// when the control is on top there, `.near` when something inside or
+    /// around it is, `.elsewhere` when something else is on top or the centre
+    /// is off the screen, `nil` when the question could not be asked (no
+    /// frame, no translator) or the answer has no frame to judge by.
     ///
     /// One point query per element, on top of the walk's own reads. Measured
     /// 2026-09-21 on an iPhone simulator (iOS 26.5), the `ax` request alone
     /// on a warm helper, best of three, twice: home (19 elements) 1,457 →
     /// 1,521 ms; Settings (13 elements) 1,193 → 1,255 ms — about 4 ms an
     /// element, against the grid walk's own budget of 600 such queries.
-    private func centreAnswers(to element: NSObject, frame: NSRect, token: String) -> Bool? {
+    private func centreAnswers(to element: NSObject, frame: NSRect, token: String) -> AccessibilityCentreHit? {
         guard frame.width > 0, frame.height > 0,
               let query = PointQuery(translator: translator, token: token) else { return nil }
         guard let hit = query.element(at: CGPoint(x: frame.midX, y: frame.midY)) else {
-            return false
+            return .elsewhere
         }
-        if hit === element { return true }
+        if hit === element { return .itself }
         let hitFrame: NSRect = (hit as? NSAccessibilityElement)?.accessibilityFrame() ?? .zero
-        return AccessibilityCentre.answers(frame, hitFrame: hitFrame)
+        return AccessibilityCentre.answers(frame, hitFrame: hitFrame).map { $0 ? .near : .elsewhere }
     }
 
     private func stringValue(_ obj: NSObject, key: String) -> String? {
@@ -568,15 +580,6 @@ final class AccessibilityBridge: NSObject {
     private func boolValue(_ obj: NSObject, key: String) -> Bool? {
         if let n = obj.value(forKey: key) as? NSNumber { return n.boolValue }
         return nil
-    }
-
-    /// Heuristic: anything with a dimension >= 250pt is too big to be a
-    /// single tappable element, so we treat it as a container even when
-    /// it reports no AX children. Picks up the iOS pattern where a Group
-    /// (Nav bar, Tab Bar, scroll views) hides its content from the
-    /// recursive walk but exposes it to hit-testing.
-    private func isLikelyContainer(frame: NSRect) -> Bool {
-        return max(frame.width, frame.height) >= 250
     }
 
     // MARK: - AXPTranslationTokenDelegateHelper

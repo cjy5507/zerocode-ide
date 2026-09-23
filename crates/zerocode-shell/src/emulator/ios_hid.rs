@@ -127,6 +127,10 @@ pub(super) enum InputRequest {
         rotation: u32,
     },
     Ax,
+    /// The tree without the grid's point queries — the walk from the
+    /// application down, each element's centre still asked: what a press
+    /// reads again and again while its screen settles (t-6385).
+    Walk,
     /// What is on top at one point of the screen, in the accessibility tree's
     /// own points — a press by number's last-moment check (t-6385).
     Hit {
@@ -181,6 +185,7 @@ impl InputRequest {
             Self::Button { .. } => "button",
             Self::Rotate { .. } => "rotate",
             Self::Ax => "ax",
+            Self::Walk => "walk",
             Self::Hit { .. } => "hit",
             Self::Frame { .. } => "frame",
             Self::Stream { .. } => "stream",
@@ -1217,7 +1222,17 @@ pub(super) fn accessibility_tree(udid: &str) -> Result<serde_json::Value, String
 
 /// Marks need the raw AX frame, before the display tree rounds it to 0..1.
 pub(super) fn accessibility_roots(udid: &str) -> Result<Vec<serde_json::Value>, String> {
-    let json = ask_device(udid, &InputRequest::Ax)?
+    tree_of(udid, &InputRequest::Ax)
+}
+
+/// [`accessibility_roots`] without the grid: the walk alone, a tenth of the
+/// cost (55 of 580 ms on Settings, t-6350) — what a settling press reads.
+pub(super) fn accessibility_walk(udid: &str) -> Result<Vec<serde_json::Value>, String> {
+    tree_of(udid, &InputRequest::Walk)
+}
+
+fn tree_of(udid: &str, request: &InputRequest) -> Result<Vec<serde_json::Value>, String> {
+    let json = ask_device(udid, request)?
         .data
         .ok_or("iOS 접근성 트리가 비어 있습니다")?;
     serde_json::from_str(&json)

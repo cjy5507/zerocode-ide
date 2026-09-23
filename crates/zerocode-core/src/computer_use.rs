@@ -2348,8 +2348,9 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
     let allowed: &[&str] = match method {
         EmulatorMethod::List => &["json"],
         EmulatorMethod::Open => &["json", "platform", "device"],
-        EmulatorMethod::Tree | EmulatorMethod::Marks => &["json", "platform", "device"],
-        EmulatorMethod::Click => &["json", "platform", "device", "mark", "look"],
+        EmulatorMethod::Tree => &["json", "platform", "device"],
+        EmulatorMethod::Marks => &["json", "platform", "device", "text"],
+        EmulatorMethod::Click => &["json", "platform", "device", "mark", "look", "text"],
         EmulatorMethod::Tap => &["json", "platform", "device", "x", "y"],
         EmulatorMethod::Swipe => &["json", "platform", "device", "x1", "y1", "x2", "y2", "ms"],
         EmulatorMethod::Text | EmulatorMethod::Find => &["json", "platform", "device", "text"],
@@ -2424,6 +2425,11 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
             if value.trim().is_empty() {
                 return Err("--text must not be empty".into());
             }
+        }
+        EmulatorMethod::Marks | EmulatorMethod::Click
+            if text.as_deref().is_some_and(|value| value.trim().is_empty()) =>
+        {
+            return Err("--text must not be empty".into());
         }
         EmulatorMethod::Foreground => {
             let value = app.as_deref().ok_or("missing required --app")?;
@@ -4081,12 +4087,15 @@ pub fn emulator_usage() -> String {
         "  zerocode-emulator list [--json]",
         "  zerocode-emulator open --platform ios|android [--device <id>] [--json]",
         "  zerocode-emulator tree --platform ios|android --device <id> [--json]",
-        "  zerocode-emulator marks --platform ios|android --device <id> [--json]",
+        "  zerocode-emulator marks --platform ios|android --device <id> [--text <fragment>] [--json]",
+        "    --text also counts, in the same look, what find would (count; 0 means absent).",
         "  zerocode-emulator find --platform ios|android --device <id> --text <fragment> [--json]",
         "  zerocode-emulator foreground --platform ios|android --device <id> --app <package|bundle> [--json]",
         "    Checks answer count (0 means absent). find matches a case-insensitive name fragment.",
         "    foreground requires an exported app package; unavailable metadata is an error (including iOS).",
-        "  zerocode-emulator click --platform ios|android --device <id> --mark <n> --look <id> [--json]",
+        "  zerocode-emulator click --platform ios|android --device <id> --mark <n> --look <id> [--text <fragment>] [--json]",
+        "    On iOS a click answers once the screen it led to stops changing; --text counts what find would",
+        "    in the tree it stopped on (count; 0 is not proof of absence — look with marks --text).",
         "  zerocode-emulator tap --platform ios|android --device <id> --x <0..1> --y <0..1> [--json]",
         "  zerocode-emulator swipe --platform ios|android --device <id> --x1 N --y1 N --x2 N --y2 N [--ms N] [--json]",
         "  zerocode-emulator text --platform ios|android --device <id> (--text <text>|--text-stdin) [--json]",
@@ -5887,6 +5896,56 @@ mod tests {
         for word in ["marks", "click", "--mark", "--look"] {
             assert!(usage.contains(word), "missing usage for {word}");
         }
+    }
+
+    /// A click may count a check's words in the tree it settled on (t-6385),
+    /// and refuses an empty fragment as a look does.
+    #[test]
+    fn an_emulator_click_counts_words_in_its_settled_screen_only_when_it_names_some() {
+        let click = |text: &str| {
+            parse_emulator_command(&words(&[
+                "click",
+                "--platform",
+                "ios",
+                "--device",
+                "phone",
+                "--mark",
+                "2",
+                "--look",
+                "L1",
+                "--text",
+                text,
+                "--json",
+            ]))
+        };
+        assert_eq!(click("iOS 버전").unwrap().text.as_deref(), Some("iOS 버전"));
+        assert!(click(" ").unwrap_err().contains("--text"));
+        assert!(emulator_usage().contains("--look <id> [--text <fragment>]"));
+    }
+
+    /// A look may also count a check's words in the same tree (t-6385); an
+    /// empty fragment counts nothing and is refused as `find` refuses it.
+    #[test]
+    fn an_emulator_look_counts_words_only_when_it_names_some() {
+        let look = |text: &str| {
+            parse_emulator_command(&words(&[
+                "marks",
+                "--platform",
+                "ios",
+                "--device",
+                "phone",
+                "--text",
+                text,
+                "--json",
+            ]))
+        };
+        assert_eq!(look("iOS 버전").unwrap().text.as_deref(), Some("iOS 버전"));
+        assert!(look("  ").unwrap_err().contains("--text"));
+        let plain =
+            parse_emulator_command(&words(&["marks", "--platform", "ios", "--device", "phone"]))
+                .unwrap();
+        assert_eq!(plain.text, None);
+        assert!(emulator_usage().contains("marks --platform ios|android --device <id> [--text"));
     }
 
     #[test]

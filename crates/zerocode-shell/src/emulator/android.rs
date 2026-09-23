@@ -2519,8 +2519,8 @@ pub(super) async fn marks_snapshot_direct(
 pub(super) async fn click_mark_direct(
     serial: String,
     request: super::marks::PinnedTap,
-) -> Result<super::marks::Proof, zerocode_core::computer_use_protocol::ProviderError> {
-    use super::marks::{Proof, backend_error};
+) -> Result<super::marks::Pressed, zerocode_core::computer_use_protocol::ProviderError> {
+    use super::marks::{Pressed, Proof, backend_error};
     tauri::async_runtime::spawn_blocking(move || {
         let (sdk, control) = android_control(&serial).map_err(backend_error)?;
         let input = control.input().map_err(backend_error)?;
@@ -2531,7 +2531,12 @@ pub(super) async fn click_mark_direct(
                 .perform_in(&input, &snapshot.faces, snapshot.screen, |x, y| {
                     tap_at(&sdk, &serial, x, y, size).map_err(backend_error)
                 })
-                .map(|()| Proof::Tree)
+                // Android's press does not wait for its screen yet: a walk
+                // reads that from the answer and checks the old way.
+                .map(|()| Pressed {
+                    proof: Proof::Tree,
+                    settled: None,
+                })
         })
     })
     .await

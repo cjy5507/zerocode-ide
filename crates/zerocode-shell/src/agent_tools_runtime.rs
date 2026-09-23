@@ -3613,7 +3613,9 @@ pub(super) async fn answer_emulator_observation(
             },
         };
         match command.method {
-            EmulatorMethod::Marks => marks::observe(platform, device).await,
+            EmulatorMethod::Marks => {
+                marks::observe(platform, device, command.text.as_deref()).await
+            }
             EmulatorMethod::Find | EmulatorMethod::Foreground => {
                 crate::emulator::checks::observe(
                     platform,
@@ -3634,6 +3636,7 @@ pub(super) async fn answer_emulator_observation(
                     device,
                     command.mark.unwrap_or_default(),
                     command.look.as_deref().unwrap_or_default(),
+                    command.text.as_deref(),
                 )
                 .await
             }
