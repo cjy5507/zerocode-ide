@@ -739,6 +739,23 @@ let opencodeFetching = false;
  * and settle at their own speeds; a single timer would let whichever answered
  * first cancel the other's follow-up and leave its segment saying ··· forever. */
 const usageAskTimers = new Map();
+/* 공급자마다 지금 나가 있는 읽기가 언제 나갔는지 — 다음 물음의 간격을 정한다. */
+const usageReadsOut = new Map();
+/* 읽기가 나가 있는 동안 다시 묻는 간격(t-6583).
+ *
+ * OAuth 한 왕복은 300~450 ms(2026-09-24 실측)인데 고정 2초 간격은 그 답을 1.5초
+ * 넘게 화면 밖에 세워 두었다 — 「새로 고침을 눌러도 늦다」의 절반이 여기였다. 그래서
+ * 읽기가 나간 뒤 `quickForMs` 동안은 `quickMs`마다 묻고, 그 뒤로는 통계 창과 같은
+ * `USAGE_STATS_RETRY_MS`로 돌아간다 — 읽기가 나간 시각에서 센 그 눈금에 맞춰서,
+ * 그래서 숨은 터미널처럼 긴 읽기는 예전과 같은 순간에 그려진다. 나가 있는 읽기에
+ * 대한 물음은 백엔드가 캐시로 답하는 IPC 한 번이다. */
+const USAGE_FOLLOW_UP = { quickMs: 250, quickForMs: 2000 };
+
+function usageFollowUpMs(outForMs) {
+  if (outForMs < USAGE_FOLLOW_UP.quickForMs) return USAGE_FOLLOW_UP.quickMs;
+  const toTick = USAGE_STATS_RETRY_MS - (outForMs % USAGE_STATS_RETRY_MS);
+  return Math.max(USAGE_FOLLOW_UP.quickMs, toTick);
+}
 /* Which provider the panel is showing. The bar has two segments and one panel,
  * so the panel has to remember whose it is — otherwise the refresh button
  * re-reads Claude while the person is looking at Codex. */
@@ -3337,12 +3354,20 @@ async function refreshProviderUsage(provider, force) {
   // scans run against two different CLIs, and a shared timer would let the
   // faster one cancel the slower one's follow-up.
   clearTimeout(usageAskTimers.get(provider.id));
-  if (fetching) {
-    usageAskTimers.set(
-      provider.id,
-      setTimeout(() => refreshProviderUsage(provider, false), USAGE_STATS_RETRY_MS),
-    );
+  if (!fetching) {
+    usageReadsOut.delete(provider.id);
+    return;
   }
+  // A press starts the quick asking over: it is the moment somebody is
+  // looking at this segment and waiting for it.
+  if (force || !usageReadsOut.has(provider.id)) usageReadsOut.set(provider.id, Date.now());
+  usageAskTimers.set(
+    provider.id,
+    setTimeout(
+      () => refreshProviderUsage(provider, false),
+      usageFollowUpMs(Date.now() - usageReadsOut.get(provider.id)),
+    ),
+  );
 }
 
 function refreshClaudeUsage(force) {

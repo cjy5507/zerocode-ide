@@ -26,6 +26,7 @@ import { testKnowledgeLive } from "./knowledge-live.mjs";
 import { testArtifactCatalog, testArtifactChrome, testArtifactPages, testArtifactStudio, testArtifactStudioFold, testArtifactStudioLayout, testArtifactStudioOwnership } from "./artifact-gallery.mjs";
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
+import { testUsageRefresh } from "./usage-refresh.mjs";
 import { testTaskBoard } from "./task-board.mjs";
 import { testAgentRelations, testAgentRelationsForm } from "./agent-relations.mjs";
 import { testAutonomyBoard } from "./autonomy-board.mjs";
@@ -172,6 +173,7 @@ suite("explorer", async ({ browser, origin, ok }) => {
 });
 suite("crash", ({ browser, origin, ok }) => testCrashReport(browser, origin, standBackend, ok));
 suite("ledger-poll", ({ browser, origin, ok }) => testLedgerPoll(browser, origin, standBackend, ok));
+suite("usage-refresh", ({ browser, origin, ok }) => testUsageRefresh(browser, origin, standBackend, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 // Vault state stays local to this fixture, just like the explorer fixture.
 suite("task-board", ({ browser, origin, ok }) => testTaskBoard(browser, origin, ok));
