@@ -12322,7 +12322,7 @@ impl QuotaWallOrder {
     /// `--on-quota-wall <rungs>`: closed words ([`QuotaWallRung::word`]) and
     /// at most one `<agent[:model[:effort]]>`, comma-separated in any order —
     /// [`QUOTA_WALL_LADDER`], not the spelling, says which is walked first.
-    /// The alternative is checked whole ([`named_alternative`]); anything
+    /// The alternative is checked whole (`named_alternative`); anything
     /// else is refused by name, with the words that exist.
     pub fn named(value: &str) -> Result<Self, String> {
         let words = QUOTA_WALL_LADDER
