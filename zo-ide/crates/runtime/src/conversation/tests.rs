@@ -1830,7 +1830,7 @@ fn refusal_dry_never_rides_an_active_quota_fallback_client() {
     let mut runtime = refusal_dry_test_runtime("claude-fable-5");
     runtime.refusal_dry_until =
         Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
-    runtime.quota_fallback_active = true;
+    runtime.active_cross_fallback = Some(super::fallback::CrossFallback::Quota);
 
     runtime.begin_turn_refusal_fallback();
 
@@ -1967,7 +1967,7 @@ fn deep_verify_rate_limit_does_not_arm_the_main_turn_quota_fallback() {
         QuotaEscape::None
     ));
     assert!(
-        !runtime.quota_fallback_active,
+        runtime.active_cross_fallback.is_none(),
         "a verifier-only 429 must not poison the main turn's fallback state"
     );
     assert!(runtime.quota_dry_until.is_none());
@@ -2022,7 +2022,7 @@ fn deep_exec_implementer_rate_limit_does_not_arm_main_turn_quota_fallback() {
         runtime.decide_quota_escape(&rate_limit),
         QuotaEscape::None
     ));
-    assert!(!runtime.quota_fallback_active);
+    assert!(runtime.active_cross_fallback.is_none());
     assert!(runtime.quota_dry_until.is_none());
     assert_eq!(runtime.effective_request_model(), Some("gpt-5.6-sol"));
     assert_eq!(
@@ -2078,7 +2078,7 @@ fn main_quota_escape_waits_once_then_surfaces_when_fallback_gate_is_closed() {
         runtime.decide_quota_escape_with_gate(&rate_limit, |_| false),
         QuotaEscape::None
     ));
-    assert!(!runtime.quota_fallback_active);
+    assert!(runtime.active_cross_fallback.is_none());
     assert!(runtime.quota_dry_until.is_none());
 }
 
@@ -2127,7 +2127,7 @@ fn provider_overload_escapes_to_fallback_even_below_the_utilization_gate() {
         ),
         "a shedding provider must hand the turn to the fallback model"
     );
-    assert!(runtime.quota_fallback_active);
+    assert!(runtime.active_cross_fallback.is_some());
     assert!(runtime.quota_dry_until.is_some());
     assert!(
         !runtime.quota_waited_this_turn,
@@ -2162,7 +2162,7 @@ fn provider_overload_escapes_to_fallback_even_below_the_utilization_gate() {
         throttled_runtime.decide_quota_escape_with_gate(&throttled, |_| false),
         QuotaEscape::None
     ));
-    assert!(!throttled_runtime.quota_fallback_active);
+    assert!(throttled_runtime.active_cross_fallback.is_none());
 }
 
 /// A provider overload demotes to a lighter tier of the SAME provider before
@@ -2362,7 +2362,7 @@ fn the_main_turn_caps_capacity_retries_only_when_an_escape_exists() {
         "a blocked swap is not an escape"
     );
     // Once the turn IS on the fallback there is nothing further to hand to.
-    walled.quota_fallback_active = true;
+    walled.active_cross_fallback = Some(super::fallback::CrossFallback::Quota);
     assert_eq!(
         walled.main_turn_rate_limit_retry_cap_with_gate(|_| true),
         None
@@ -2525,12 +2525,12 @@ fn measured_recovery_releases_the_quota_cooldown_at_turn_start() {
     // the turn pre-arms onto the fallback.
     runtime.quota_dry_until = Some(mid_cooldown);
     runtime.begin_turn_quota_fallback_with_gate(|_| true);
-    assert!(runtime.quota_fallback_active);
+    assert!(runtime.active_cross_fallback.is_some());
     assert!(runtime.quota_dry_until.is_some());
 
     // Fresh reading below the threshold: released immediately, native turn.
     runtime.begin_turn_quota_fallback_with_gate(|_| false);
-    assert!(!runtime.quota_fallback_active, "must start native");
+    assert!(runtime.active_cross_fallback.is_none(), "must start native");
     assert!(runtime.quota_dry_until.is_none(), "cooldown must be dropped");
     assert!(!runtime.quota_prearm_notice_pending, "no stale prearm notice");
 
@@ -2538,7 +2538,7 @@ fn measured_recovery_releases_the_quota_cooldown_at_turn_start() {
     runtime.quota_dry_until = Some(mid_cooldown);
     runtime.context_model = None;
     runtime.begin_turn_quota_fallback_with_gate(|_| false);
-    assert!(runtime.quota_fallback_active);
+    assert!(runtime.active_cross_fallback.is_some());
     assert!(runtime.quota_dry_until.is_some());
 }
 
@@ -16543,7 +16543,7 @@ fn wire_model_names_the_decision_behind_the_request_model() {
     runtime.overload_demotion_model = None;
 
     // The cross-provider quota fallback is another client entirely.
-    runtime.quota_fallback_active = true;
+    runtime.active_cross_fallback = Some(super::fallback::CrossFallback::Quota);
     runtime.quota_fallback_client =
         Some((Arc::new(SilentAsyncClient), "gpt-5.6-sol".to_string()));
     assert_eq!(
@@ -16744,7 +16744,7 @@ fn a_refusal_retry_announces_the_fallback_model_on_the_wire() {
         let warn = blocks
             .iter()
             .position(|block| {
-                matches!(block, RenderBlock::System { text, .. } if text == super::REFUSAL_FALLBACK_WARN)
+                matches!(block, RenderBlock::System { text, .. } if *text == super::fallback::refusal_fallback_warn(opus_family_head()))
             })
             .expect("the refusal warn row");
         let fallback = blocks

@@ -38,8 +38,8 @@ use super::{
     EMPTY_STREAM_CONTINUATION_REMINDER, EMPTY_STREAM_CONTINUATION_REMINDER_PREFIX,
     EMPTY_STREAM_EXHAUSTED_FALLBACK_TEXT, EMPTY_STREAM_RETRY_REMINDER,
     EMPTY_STREAM_RETRY_REMINDER_PREFIX, EMPTY_STREAM_TRUNCATION_RETRY_REMINDER,
-    MAX_EMPTY_STREAM_RETRIES, MAX_PARALLEL_SAFE_TOOL_DISPATCHES, REFUSAL_DRY_PREARM_WARN,
-    REFUSAL_FALLBACK_WARN, REFUSAL_SURFACED_NOTICE, STEERING_ECHO_PREFIX,
+    MAX_EMPTY_STREAM_RETRIES, MAX_PARALLEL_SAFE_TOOL_DISPATCHES,
+    REFUSAL_CONTEXT_CLEANED_WARN, REFUSAL_SURFACED_NOTICE, STEERING_ECHO_PREFIX,
     TRUNCATION_CONTINUATION_REMINDER,
 };
 use crate::message_stream::types::WireModel;
@@ -608,6 +608,7 @@ where
         // entry point: without this reset a streaming session would spend its
         // one retry on the first refusal ever and surface every later one.
         self.refusal_same_model_retry_used = false;
+        self.refusal_context_clean_used = false;
         // Reset the per-turn quota fallback, pre-arming onto it when the session
         // is still inside a recorded quota-dry cooldown (applies to internal
         // subturns too — a quota-dry session applies to every leg). See
@@ -1109,7 +1110,7 @@ where
                     .send(RenderBlock::System {
                         id: id_gen.next(),
                         level: SystemLevel::Warn,
-                        text: REFUSAL_DRY_PREARM_WARN.to_string(),
+                        text: self.refusal_prearm_notice_text(),
                     })
                     .await;
             }
@@ -1747,31 +1748,54 @@ where
             // Anthropic safety-classifier refusal (`stop_reason: "refusal"`):
             // drop the refused partial (never pushed to history — it stays on
             // screen as the already-streamed deltas, but the retry renders under
-            // a fresh block id) and either retry once on Opus 4.8 (Fable/Mythos)
-            // with a warn line, or surface a notice and end (already fell back,
-            // or a non-Fable model). Anthropic-only; a non-Anthropic model yields
-            // `Proceed` and falls through unchanged.
+            // a fresh block id) and walk the catalog ladder — a same-provider
+            // retry, a same-model retry, a cross-provider handoff, a
+            // context-cleaning retry, or surface — each with its warn line.
+            // Anthropic-only; a non-Anthropic active model yields `Proceed` and
+            // falls through unchanged.
             if is_refusal_stop_reason(__ba_result.stop_reason().unwrap_or_default()) {
                 let refused_usage = __ba_result.usage();
-                match self.decide_refusal_fallback() {
-                    decision @ (RefusalDecision::Retry | RefusalDecision::RetrySameModel) => {
-                        if let Some(usage) = refused_usage {
-                            self.usage_tracker.record(usage);
-                        }
-                        let text = if matches!(decision, RefusalDecision::Retry) {
-                            REFUSAL_FALLBACK_WARN
-                        } else {
-                            super::fallback::REFUSAL_SAME_MODEL_RETRY_WARN
-                        };
-                        let _ = render_tx
-                            .send(RenderBlock::System {
-                                id: id_gen.next(),
-                                level: SystemLevel::Warn,
-                                text: text.to_string(),
-                            })
-                            .await;
-                        continue 'outer;
+                let decision = self.decide_refusal_fallback();
+                // The warn line for a continuing decision, computed from the
+                // state the decision just armed (target model included). `None`
+                // for Surface/Proceed, which are handled below.
+                let retry_notice = match decision {
+                    RefusalDecision::Retry => Some((
+                        SystemLevel::Warn,
+                        super::fallback::refusal_fallback_warn(
+                            self.refusal_fallback_model.as_deref().unwrap_or_default(),
+                        ),
+                    )),
+                    RefusalDecision::RetrySameModel => Some((
+                        SystemLevel::Warn,
+                        super::fallback::REFUSAL_SAME_MODEL_RETRY_WARN.to_string(),
+                    )),
+                    RefusalDecision::CrossProvider => Some((
+                        SystemLevel::Warn,
+                        super::fallback::refusal_cross_provider_warn(
+                            self.refusal_fallback_client_model().unwrap_or_default(),
+                        ),
+                    )),
+                    RefusalDecision::RetryCleaned => {
+                        self.drop_last_declined_exchange();
+                        Some((SystemLevel::Info, REFUSAL_CONTEXT_CLEANED_WARN.to_string()))
                     }
+                    RefusalDecision::Surface | RefusalDecision::Proceed => None,
+                };
+                if let Some((level, text)) = retry_notice {
+                    if let Some(usage) = refused_usage {
+                        self.usage_tracker.record(usage);
+                    }
+                    let _ = render_tx
+                        .send(RenderBlock::System { id: id_gen.next(), level, text })
+                        .await;
+                    continue 'outer;
+                }
+                match decision {
+                    RefusalDecision::Retry
+                    | RefusalDecision::RetrySameModel
+                    | RefusalDecision::CrossProvider
+                    | RefusalDecision::RetryCleaned => unreachable!("handled by retry_notice above"),
                     RefusalDecision::Surface => {
                         if let Some(usage) = refused_usage {
                             self.usage_tracker.record(usage);

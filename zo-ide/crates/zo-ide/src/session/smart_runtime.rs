@@ -10,12 +10,14 @@ use crate::cli_args::AllowedToolSet;
 #[derive(Clone, Copy)]
 enum SmartClientRole {
     QuotaFallback,
+    RefusalFallback,
     DeepLane,
     Exec,
 }
 
 struct SmartTurnRouting {
     quota_fallback_model: Option<String>,
+    refusal_fallback_model: Option<String>,
     quota_wait_band: Duration,
     escalation_model_override: Option<String>,
     deep_verify_model: Option<String>,
@@ -41,6 +43,7 @@ impl SmartTurnRouting {
             );
         Self {
             quota_fallback_model: routing.quota_fallback_model,
+            refusal_fallback_model: routing.refusal_fallback_model,
             quota_wait_band: routing.quota_wait_band,
             // PlainSession has no confidence-cascade state. Refresh this
             // set-or-clear slot so a reused runtime cannot carry an override
@@ -65,6 +68,7 @@ impl SmartTurnRouting {
 
 struct SmartTurnWiring {
     quota_fallback_client: Option<(Arc<dyn AsyncApiClient>, String)>,
+    refusal_fallback_client: Option<(Arc<dyn AsyncApiClient>, String)>,
     quota_wait_band: Duration,
     escalation_model_override: Option<String>,
     deep_verify_client: Option<(Arc<dyn AsyncApiClient>, String)>,
@@ -84,6 +88,12 @@ impl SmartTurnWiring {
             .quota_fallback_model
             .and_then(|model| {
                 client_for(&model, SmartClientRole::QuotaFallback)
+                    .map(|client| (client, model))
+            });
+        let refusal_fallback_client = routing
+            .refusal_fallback_model
+            .and_then(|model| {
+                client_for(&model, SmartClientRole::RefusalFallback)
                     .map(|client| (client, model))
             });
         let deep_verify_client = routing
@@ -111,6 +121,7 @@ impl SmartTurnWiring {
         });
         Self {
             quota_fallback_client,
+            refusal_fallback_client,
             quota_wait_band: routing.quota_wait_band,
             escalation_model_override: routing.escalation_model_override,
             deep_verify_client,
@@ -128,6 +139,7 @@ impl SmartTurnWiring {
         T: runtime::ToolExecutor,
     {
         target.set_quota_fallback_client(self.quota_fallback_client);
+        target.set_refusal_fallback_client(self.refusal_fallback_client);
         target.set_quota_wait_band(self.quota_wait_band);
         target.set_escalation_model_override(self.escalation_model_override);
         target.set_deep_verify_client(self.deep_verify_client);
@@ -281,7 +293,7 @@ pub(crate) fn install_smart_turn(
     let routing = SmartTurnRouting::for_turn(routing, input, assessment);
     let wiring = SmartTurnWiring::resolve(routing, |model, role| {
         let (named_effort, effort_band_ceiling) = match role {
-            SmartClientRole::QuotaFallback => (None, None),
+            SmartClientRole::QuotaFallback | SmartClientRole::RefusalFallback => (None, None),
             SmartClientRole::DeepLane => (Some(api::EffortLevel::Xhigh), None),
             SmartClientRole::Exec => turn_effort,
         };
@@ -792,6 +804,7 @@ mod tests {
     fn routing() -> SmartTurnRouting {
         let routing = tools::SmartTurnRouting {
             quota_fallback_model: Some("openai-latest".to_string()),
+            refusal_fallback_model: Some("google-latest".to_string()),
             quota_wait_band: Duration::from_secs(7 * 60),
             deep_verify_model: Some("google-latest".to_string()),
             deep_plan_model: Some("claude-opus-5".to_string()),
@@ -840,6 +853,13 @@ mod tests {
         let runtime = install(routing());
 
         assert_eq!(runtime.quota_fallback_model(), Some("openai-latest"));
+    }
+
+    #[test]
+    fn refusal_fallback_setting_injects_client() {
+        let runtime = install(routing());
+
+        assert_eq!(runtime.refusal_fallback_client_model(), Some("google-latest"));
     }
 
     #[test]

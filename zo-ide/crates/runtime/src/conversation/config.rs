@@ -898,6 +898,7 @@ where
         self.refusal_dry_until = None;
         self.refusal_prearm_notice_pending = false;
         self.refusal_prearm_notice_latched = false;
+        self.refusal_context_clean_used = false;
         self.context_policy = ContextPolicy::for_model(Some(model))
             .with_full_compaction_override(self.full_compaction_override_percent);
         self.set_context_window(::api::context_window_for_model(model));

@@ -882,14 +882,16 @@ async fn refusal_on_fable_falls_back_to_opus_and_retries_once() {
     );
     assert_eq!(summary.iterations, 2);
 
-    // A System warn line announced the fallback.
+    // A System warn line announced the fallback, naming the Opus head it
+    // retried on (the notice carries the catalog target, not a hardcoded name).
+    let opus = api::latest_anthropic_model();
     assert!(
         blocks.iter().any(|block| matches!(
             block,
             RenderBlock::System { level: SystemLevel::Warn, text, .. }
-                if text.contains("latest Opus model")
+                if text.contains(opus) && text.contains("retrying on")
         )),
-        "expected an latest Opus model fallback warn, got {blocks:?}"
+        "expected an Opus fallback warn naming {opus}, got {blocks:?}"
     );
 
     // The refused partial is NOT in history; the Opus answer is.
@@ -986,9 +988,13 @@ async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
     assert_eq!(summary.iterations, 2);
 
     // The retry budget is per PUBLIC turn, not per session: a second turn on
-    // the same runtime gets its own retry (this pinned a real bug — the
-    // streaming entry point forgot the reset, so a session spent its one
-    // retry on the first refusal ever and surfaced every later one).
+    // the same runtime gets its own same-model retry (this pinned a real bug —
+    // the streaming entry point forgot the reset, so a session spent its one
+    // retry on the first refusal ever and surfaced every later one). This turn
+    // ALSO takes the P3 context-cleaning retry: turn one surfaced a refusal, so
+    // an earlier declined exchange now sits in history dragging the classifier
+    // down, and with no provider fallback installed the turn drops it and asks
+    // once more before surfacing. So turn two is three calls, not two.
     let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
     let drain = drain_task(rx);
     let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
@@ -1000,10 +1006,10 @@ async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
     let seen = client.seen_overrides.lock().expect("lock").clone();
     assert_eq!(
         seen.len(),
-        4,
-        "turn two must retry once more (2 calls per turn), got {seen:?}"
+        5,
+        "turn two: same-model retry (2) then one context-cleaning retry (1); got {seen:?}"
     );
-    assert_eq!(summary.iterations, 2);
+    assert_eq!(summary.iterations, 3);
 }
 
 #[tokio::test]
@@ -1040,6 +1046,276 @@ async fn non_refusal_stop_reason_on_fable_is_unaffected() {
         "a non-refusal turn must emit no refusal notice, got {blocks:?}"
     );
     assert!(history_text(&runtime).contains("hello from async"));
+}
+
+// --- Refusal → cross-provider handoff, pre-arm, context clean (t-6269) --------
+
+/// An async client that refuses (`stop_reason: "refusal"`) whenever the request
+/// still carries `poison` in any message, and answers cleanly once it is gone.
+/// Drives both the "always refuses" main model (the poison rides its own input)
+/// and the P3 context-clean recovery (dropping the earlier exchange removes it).
+struct RefuseWhilePoisonAsyncApi {
+    poison: String,
+    answer: String,
+    calls: AtomicUsize,
+}
+
+impl RefuseWhilePoisonAsyncApi {
+    fn new(poison: &str, answer: &str) -> Self {
+        Self {
+            poison: poison.to_string(),
+            answer: answer.to_string(),
+            calls: AtomicUsize::new(0),
+        }
+    }
+}
+
+impl AsyncApiClient for RefuseWhilePoisonAsyncApi {
+    fn stream_async<'a>(
+        &'a self,
+        request: ApiRequest,
+        render_tx: mpsc::Sender<RenderBlock>,
+        text_block_id: BlockId,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+        Box::pin(async move {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let poisoned = request.messages.iter().any(|message| {
+                message.blocks.iter().any(|block| {
+                    matches!(block, runtime::ContentBlock::Text { text } if text.contains(&self.poison))
+                })
+            });
+            if poisoned {
+                return Ok(vec![
+                    AssistantEvent::StopReason("refusal".to_string()),
+                    AssistantEvent::MessageStop,
+                ]);
+            }
+            render_tx
+                .send(RenderBlock::TextDelta {
+                    id: text_block_id,
+                    text: self.answer.clone(),
+                    done: true,
+                })
+                .await
+                .map_err(|_| RuntimeError::new("channel closed"))?;
+            Ok(vec![
+                AssistantEvent::TextDelta(self.answer.clone()),
+                AssistantEvent::StopReason("end_turn".to_string()),
+                AssistantEvent::MessageStop,
+            ])
+        })
+    }
+}
+
+fn opus_runtime() -> ConversationRuntime<ExplodingSyncApi, StaticToolExecutor> {
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        ExplodingSyncApi,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    // Opus has no same-provider fallback in the catalog — its refusal ladder is
+    // the same-model retry then the cross-provider handoff.
+    runtime.set_context_model(api::latest_anthropic_model());
+    runtime
+}
+
+/// Opus refuses, the same-model retry refuses too, and the turn is handed to the
+/// installed cross-provider refusal client — which answers. A warn line names
+/// that peer, and the wire badge shows it as a refusal fallback.
+#[tokio::test]
+async fn opus_refusal_hands_the_turn_to_the_cross_provider_client() {
+    use runtime::message_stream::WireModelSource;
+
+    let _env = hermetic_env();
+    let mut runtime = opus_runtime();
+    let main = Arc::new(AlwaysRefuseAsyncApi {
+        seen_overrides: std::sync::Mutex::new(Vec::new()),
+    });
+    runtime.set_async_api_client(main.clone());
+    let peer = Arc::new(RecordingAnswerAsyncApi::new("peer answer"));
+    runtime.set_refusal_fallback_client(Some((peer.clone(), "gpt-peer-x".to_string())));
+
+    let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
+    let drain = drain_task(rx);
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
+    let summary = runtime
+        .run_turn_streaming("hi", tx, prompter)
+        .await
+        .expect("a doubly-refused Opus turn should continue on the peer, not fail");
+    let blocks = drain.await.expect("drain");
+
+    // Opus refused twice (the initial call and its same-model retry), then the
+    // peer carried the turn once.
+    assert_eq!(main.seen_overrides.lock().expect("lock").len(), 2);
+    assert_eq!(peer.call_count(), 1, "the cross-provider refusal client answered");
+    assert_eq!(summary.iterations, 3);
+    assert!(history_text(&runtime).contains("peer answer"));
+
+    // A warn line named the peer, and the wire badge showed it as a refusal
+    // fallback (not a quota fallback).
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::System { level: SystemLevel::Warn, text, .. }
+                if text.contains("gpt-peer-x") && text.contains("another provider")
+        )),
+        "expected a cross-provider refusal warn naming the peer, got {blocks:?}"
+    );
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::WireModel(wire)
+                if wire.model == "gpt-peer-x" && wire.source == WireModelSource::RefusalFallback
+        )),
+        "expected the peer announced as a refusal fallback on the wire, got {blocks:?}"
+    );
+}
+
+/// After two consecutive refusal turns hand off cross-provider, the session
+/// pre-arms: a following short turn goes straight to the peer without hitting
+/// the refused Opus model at all (the sticky classifier never sees it).
+#[tokio::test]
+async fn consecutive_cross_provider_refusals_prearm_the_next_turn_on_the_peer() {
+    let _env = hermetic_env();
+    let mut runtime = opus_runtime();
+    let main = Arc::new(AlwaysRefuseAsyncApi {
+        seen_overrides: std::sync::Mutex::new(Vec::new()),
+    });
+    runtime.set_async_api_client(main.clone());
+    let peer = Arc::new(RecordingAnswerAsyncApi::new("peer answer"));
+    runtime.set_refusal_fallback_client(Some((peer.clone(), "gpt-peer-x".to_string())));
+
+    for turn in ["turn one", "turn two"] {
+        let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
+        let drain = drain_task(rx);
+        let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
+        runtime.run_turn_streaming(turn, tx, prompter).await.expect("turn completes on peer");
+        let _ = drain.await;
+    }
+    // Two refusal turns: Opus hit twice each (initial + same-model retry).
+    assert_eq!(main.seen_overrides.lock().expect("lock").len(), 4);
+    assert_eq!(peer.call_count(), 2);
+
+    // The follow-up pre-arms: Opus is NOT hit again, the peer takes it from the
+    // first request, and a pre-arm notice names the peer.
+    let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
+    let drain = drain_task(rx);
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
+    runtime.run_turn_streaming("why", tx, prompter).await.expect("follow-up completes on peer");
+    let blocks = drain.await.expect("drain");
+
+    assert_eq!(
+        main.seen_overrides.lock().expect("lock").len(),
+        4,
+        "the pre-armed follow-up must NOT hit the refused Opus model"
+    );
+    assert_eq!(peer.call_count(), 3, "the follow-up ran on the peer from the first request");
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::System { text, .. }
+                if text.contains("gpt-peer-x") && text.contains("continuing this session")
+        )),
+        "expected a pre-arm notice naming the peer, got {blocks:?}"
+    );
+}
+
+/// With no provider fallback, a refusal whose earlier declined exchange is still
+/// in context takes the P3 context-cleaning retry: dropping that exchange lets
+/// the same model answer, and a notice says what was dropped.
+#[tokio::test]
+async fn context_cleaning_retry_recovers_when_the_earlier_exchange_is_dropped() {
+    let _env = hermetic_env();
+    let mut runtime = opus_runtime();
+    // No refusal_fallback_client and no quota fallback: the only recovery left
+    // is dropping the poisoned exchange. The client refuses while "POISON" is in
+    // context and answers once it is gone.
+    let client = Arc::new(RefuseWhilePoisonAsyncApi::new("POISON", "clean answer"));
+    runtime.set_async_api_client(client.clone());
+
+    // Turn one carries the poison and, with no fallback, surfaces a refusal —
+    // leaving that declined exchange in history.
+    let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
+    let drain = drain_task(rx);
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
+    runtime.run_turn_streaming("please POISON this", tx, prompter).await.expect("turn one surfaces");
+    let _ = drain.await;
+    assert!(history_text(&runtime).contains("POISON"));
+
+    // The follow-up refuses (poison still in context) through the same-model
+    // retry, then the context-cleaning retry drops the earlier exchange and the
+    // clean re-ask answers.
+    let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
+    let drain = drain_task(rx);
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
+    let summary = runtime.run_turn_streaming("why not", tx, prompter).await.expect("follow-up recovers");
+    let blocks = drain.await.expect("drain");
+
+    assert!(history_text(&runtime).contains("clean answer"), "the clean re-ask must answer");
+    assert!(
+        !history_text(&runtime).contains("POISON"),
+        "the poisoned exchange must be gone from history"
+    );
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::System { text, .. } if text.contains("dropped from context")
+        )),
+        "expected a context-cleaning notice, got {blocks:?}"
+    );
+    assert_eq!(summary.iterations, 3, "initial refuse, same-model retry, clean re-ask");
+}
+
+/// The give-up path: no fallback and the context clean does not help either, so
+/// the turn surfaces after exhausting the same-model retry and the one clean.
+#[tokio::test]
+async fn a_refusal_with_no_fallback_surfaces_after_the_context_clean() {
+    let _env = hermetic_env();
+    let mut runtime = opus_runtime();
+    // Always refuses regardless of context — the clean cannot help.
+    let client = Arc::new(AlwaysRefuseAsyncApi {
+        seen_overrides: std::sync::Mutex::new(Vec::new()),
+    });
+    runtime.set_async_api_client(client.clone());
+
+    // Turn one surfaces (creating a prior declined exchange).
+    let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
+    let drain = drain_task(rx);
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
+    runtime.run_turn_streaming("one", tx, prompter).await.expect("surfaces");
+    let _ = drain.await;
+    let after_one = client.seen_overrides.lock().expect("lock").len();
+
+    // Turn two: same-model retry, then the context clean, then surface — three
+    // calls, ending in a surfaced notice.
+    let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
+    let drain = drain_task(rx);
+    let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
+    let summary = runtime.run_turn_streaming("two", tx, prompter).await.expect("surfaces, not error");
+    let blocks = drain.await.expect("drain");
+
+    assert_eq!(
+        client.seen_overrides.lock().expect("lock").len() - after_one,
+        3,
+        "turn two: same-model retry, context clean, then surface"
+    );
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::System { text, .. } if text.contains("giving up on automatic")
+        )),
+        "expected a surfaced refusal notice mentioning /model, got {blocks:?}"
+    );
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::System { text, .. } if text.contains("/model")
+        )),
+        "the surfaced notice must point at /model for another provider, got {blocks:?}"
+    );
+    assert!(!summary.assistant_messages.is_empty());
 }
 
 // --- Quota exhaustion → cross-provider fallback (P3) --------------------------
