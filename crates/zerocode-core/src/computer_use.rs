@@ -2322,8 +2322,18 @@ pub struct EmulatorCommand {
     pub out: Option<String>,
     pub mark: Option<usize>,
     pub look: Option<String>,
+    /// `click … --preview`: answer the marks the screen the press settled on
+    /// would carry ([`EMULATOR_PREVIEW_FLAG`]).
+    pub preview: bool,
     pub json: bool,
 }
+
+/// `zerocode-emulator click … --preview` (t-6385): besides the press, answer
+/// the marks the screen it settled on would carry, numbered off the tree the
+/// press waited on, under the answer's own key of the same word. Not a look —
+/// nothing in it can be pressed: a walk begins its next judgment on it while
+/// the look is taken.
+pub const EMULATOR_PREVIEW_FLAG: &str = "preview";
 
 /// Parse the built-in-emulator CLI without forwarding unknown or partial
 /// gestures. Coordinates are normalized because both pane backends speak the
@@ -2350,7 +2360,15 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         EmulatorMethod::Open => &["json", "platform", "device"],
         EmulatorMethod::Tree => &["json", "platform", "device"],
         EmulatorMethod::Marks => &["json", "platform", "device", "text"],
-        EmulatorMethod::Click => &["json", "platform", "device", "mark", "look", "text"],
+        EmulatorMethod::Click => &[
+            "json",
+            "platform",
+            "device",
+            "mark",
+            "look",
+            "text",
+            EMULATOR_PREVIEW_FLAG,
+        ],
         EmulatorMethod::Tap => &["json", "platform", "device", "x", "y"],
         EmulatorMethod::Swipe => &["json", "platform", "device", "x1", "y1", "x2", "y2", "ms"],
         EmulatorMethod::Text | EmulatorMethod::Find => &["json", "platform", "device", "text"],
@@ -2481,6 +2499,7 @@ pub fn parse_emulator_command(argv: &[String]) -> Result<EmulatorCommand, String
         out,
         mark,
         look,
+        preview: flags.contains_key(EMULATOR_PREVIEW_FLAG),
         json: flags.contains_key("json"),
     })
 }
@@ -3045,6 +3064,7 @@ fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
                 | "repeat"
                 | WALK_OVERLAP_FLAG
                 | WALK_RESCUE_FLAG
+                | EMULATOR_PREVIEW_FLAG
         );
         if flags.contains_key(name) {
             return Err(format!("duplicate --{name}"));
@@ -4093,9 +4113,10 @@ pub fn emulator_usage() -> String {
         "  zerocode-emulator foreground --platform ios|android --device <id> --app <package|bundle> [--json]",
         "    Checks answer count (0 means absent). find matches a case-insensitive name fragment.",
         "    foreground requires an exported app package; unavailable metadata is an error (including iOS).",
-        "  zerocode-emulator click --platform ios|android --device <id> --mark <n> --look <id> [--text <fragment>] [--json]",
+        "  zerocode-emulator click --platform ios|android --device <id> --mark <n> --look <id> [--text <fragment>] [--preview] [--json]",
         "    On iOS a click answers once the screen it led to stops changing; --text counts what find would",
-        "    in the tree it stopped on (count; 0 is not proof of absence — look with marks --text).",
+        "    in the tree it stopped on (count; 0 is not proof of absence — look with marks --text); --preview",
+        "    answers the marks that screen would carry (not a look: look again before pressing one).",
         "  zerocode-emulator tap --platform ios|android --device <id> --x <0..1> --y <0..1> [--json]",
         "  zerocode-emulator swipe --platform ios|android --device <id> --x1 N --y1 N --x2 N --y2 N [--ms N] [--json]",
         "  zerocode-emulator text --platform ios|android --device <id> (--text <text>|--text-stdin) [--json]",
@@ -5946,6 +5967,30 @@ mod tests {
                 .unwrap();
         assert_eq!(plain.text, None);
         assert!(emulator_usage().contains("marks --platform ios|android --device <id> [--text"));
+    }
+
+    /// A click may ask for a preview of the screen it settles on (t-6385);
+    /// a plain click asks for none.
+    #[test]
+    fn an_emulator_click_asks_for_a_preview_only_when_it_says_so() {
+        let click = |more: &[&str]| {
+            let mut line = vec![
+                "click",
+                "--platform",
+                "ios",
+                "--device",
+                "phone",
+                "--mark",
+                "2",
+                "--look",
+                "L1",
+            ];
+            line.extend_from_slice(more);
+            parse_emulator_command(&words(&line)).unwrap()
+        };
+        assert!(click(&["--preview", "--json"]).preview);
+        assert!(!click(&["--json"]).preview);
+        assert!(emulator_usage().contains("[--preview]"));
     }
 
     #[test]

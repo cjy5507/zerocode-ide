@@ -231,7 +231,8 @@ fn a_phone_walk_timed_on_a_simulator_of_our_own() {
                 until.clone(),
                 120_000,
                 0,
-            );
+            )
+            .previewing(overlap);
             errand::run_with(
                 JevMode::On,
                 true,

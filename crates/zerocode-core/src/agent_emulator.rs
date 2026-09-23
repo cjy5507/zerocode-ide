@@ -70,7 +70,7 @@ pub const EMULATOR_VERBS: [BrowserVerb; 13] = [
     verb("marks", 4, 7, EMULATOR_HOLD_MS),
     check_verb("find", 6, 7, EMULATOR_HOLD_MS),
     check_verb("foreground", 6, 7, EMULATOR_HOLD_MS),
-    act_verb("click", 8, 11, EMULATOR_CLICK_HOLD_MS),
+    act_verb("click", 8, 12, EMULATOR_CLICK_HOLD_MS),
     act_verb("tap", 8, 9, EMULATOR_HOLD_MS),
     act_verb("swipe", 12, 15, EMULATOR_HOLD_MS),
     act_verb("text", 6, 7, EMULATOR_HOLD_MS),
@@ -133,11 +133,12 @@ mod tests {
     #[test]
     fn emulator_marks_and_click_share_the_verb_table_contract() {
         // `marks … --text <words>` counts a check's words in the same look,
-        // and a click holds its screen's settling and may count them in the
-        // tree it settled on (t-6385).
+        // and a click holds its screen's settling, may count them in the tree
+        // it settled on and may answer what that screen would carry
+        // (`--preview`, t-6385).
         for (word, min, max, acts, hold) in [
             ("marks", 4, 7, false, EMULATOR_HOLD_MS),
-            ("click", 8, 11, true, EMULATOR_CLICK_HOLD_MS),
+            ("click", 8, 12, true, EMULATOR_CLICK_HOLD_MS),
         ] {
             let row = emulator_verb(word).expect("the mobile marks door is registered");
             assert_eq!((row.arity.min, row.arity.max), (min, max));

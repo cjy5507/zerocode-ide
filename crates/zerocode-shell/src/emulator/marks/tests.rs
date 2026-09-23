@@ -973,6 +973,30 @@ fn a_press_that_moved_nothing_ends_quietly_and_a_screen_that_never_stands_still_
     assert_eq!(reads as u64, EMULATOR_SETTLE_CEILING_MS.div_ceil(60));
 }
 
+/// A press's preview is the numbering a look of the same tree answers
+/// (t-6385): the question begun on it can be the very bytes the look asks.
+#[test]
+fn a_preview_numbers_the_screen_as_a_look_of_it_would() {
+    for tree in [ios_tree(), ios_settings_tree(), ios_home_tree()] {
+        let snapshot = Snapshot::ios(&tree).unwrap();
+        let table = Table {
+            platform: EmulatorPlatform::Ios,
+            device: device("phone"),
+            plan: numbered(&snapshot.faces, snapshot.screen),
+            screen: snapshot.screen,
+            made: Instant::now(),
+        };
+        let look = table.answer("look");
+        let preview = preview_of(&snapshot);
+        assert_eq!(preview[ITEMS_KEY], look[ITEMS_KEY]);
+        assert_eq!(preview[LEGEND_KEY], look[LEGEND_KEY]);
+        assert!(
+            preview.get(LOOK_ID_KEY).is_none(),
+            "a preview is not a look"
+        );
+    }
+}
+
 /// A read without the pressed control where it stood has moved, however the
 /// reads compare: a screen that changed before its first read came back
 /// settles on two alike reads, not at the quiet window (t-6385).

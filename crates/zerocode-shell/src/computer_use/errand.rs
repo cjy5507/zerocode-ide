@@ -145,6 +145,13 @@ pub struct Options {
     /// A press on a link, a screen one more stand from stuck, and a walk
     /// that clears a stop never ask ahead: those walks do not come back to
     /// the same screen.
+    ///
+    /// A phone asks after its press instead (t-6385): the screen it left is
+    /// the one a question begun before the press is about — 10 of 10 such
+    /// judgments were dropped on a Settings walk (t-6350) — so a world whose
+    /// press waits for its screen to stop changing hands back what it stopped
+    /// on ([`World::settled`]), the next question is begun there, and the
+    /// full look is taken while it is answered.
     pub overlap: bool,
     /// The second rung (t-6132 S3): when the seat's judgment is under its
     /// press floor, ask the second reader the walk was handed
@@ -360,6 +367,10 @@ pub struct Settled {
     /// What the walk's row says of it under [`SETTLE`]: how long it took, in
     /// how many reads, and how it ended.
     pub note: Value,
+    /// The screen it stopped on, numbered as a look of it would be — when
+    /// the world was asked for it: what a walk that asks ahead begins its
+    /// next judgment on while the full look is taken ([`Options::overlap`]).
+    pub screen: Option<Screen>,
 }
 
 /// What a walk does to the world, and nothing else — each a seam.
@@ -387,6 +398,14 @@ pub trait World {
     /// noted.
     fn settled(&mut self) -> Option<Settled> {
         None
+    }
+    /// Whether a judgment begun before a press can stand for the question
+    /// the next look asks ([`Options::overlap`]). A page's or a window's can
+    /// when its press leaves the screen where it was; a phone's press moves
+    /// its screen too often for that, and it asks on the screen its press
+    /// settled on instead ([`Self::settled`]).
+    fn asks_ahead_of_the_press(&self) -> bool {
+        true
     }
     /// Whether the caller's own success condition is met — the deterministic
     /// one written down before the walk started, asked of the screen and
@@ -1292,6 +1311,7 @@ fn walk(
         // nothing was begun over them, and the question begun here names the
         // number the hand goes out with.
         if options.overlap
+            && world.asks_ahead_of_the_press()
             && matches!(at.why, Why::Goal { .. })
             && attempt < at.steps()
             && still + 1 < SAME_SCREEN_LIMIT
@@ -1333,8 +1353,37 @@ fn walk(
         walked.pressed += 1;
         note(&mut said, "pressed", json!(true));
         note(&mut said, "routeUse", json!(USE_APPLIED));
-        if let Some(settled) = world.settled() {
-            note(&mut said, SETTLE, settled.note);
+        let settled = world.settled();
+        if let Some(settled) = &settled {
+            note(&mut said, SETTLE, settled.note.clone());
+        }
+        // Ask ahead on the screen the press settled on (t-6385): the next
+        // question as the loop's own head will put it — a screen that moved
+        // starts its numbers afresh, one that did not keeps what it spent —
+        // begun now, so the judgment is answered while the full look is
+        // taken. The look's question decides: the same bytes use the answer,
+        // any other drops it (an element only the full look finds, a screen
+        // still moving).
+        if options.overlap
+            && ahead.is_none()
+            && matches!(at.why, Why::Goal { .. })
+            && attempt < at.steps()
+            && let Some(screen) = settled.and_then(|settled| settled.screen)
+        {
+            let moved = !seen.same_as(&screen);
+            if moved || still + 1 < SAME_SCREEN_LIMIT {
+                let tried_next = if moved { Vec::new() } else { tried.clone() };
+                ahead = ask(&ActionLook {
+                    goal: at.goal,
+                    errand: at.asked(),
+                    at: screen.at.asked(),
+                    tried: &tried_next,
+                    items: &screen.items,
+                    pressed: &pressed_so_far,
+                    shows: &screen.shows,
+                })
+                .and_then(|question| judge.begin(&question));
+            }
         }
 
         match at.why {

@@ -25,7 +25,9 @@ use std::time::Instant;
 
 use serde_json::{Value, json};
 use zerocode_core::computer_recipe::{RecipeTool, recipe_line_holds_ms};
-use zerocode_core::computer_use::{EmulatorPlatform, FLOW_BASELINE_PROBE_MS};
+use zerocode_core::computer_use::{
+    EMULATOR_PREVIEW_FLAG, EmulatorPlatform, FLOW_BASELINE_PROBE_MS,
+};
 use zerocode_core::computer_use_protocol::marks::{ITEMS_KEY, LOOK_ID_KEY};
 use zerocode_hookd::TeamAnswer;
 
@@ -323,7 +325,11 @@ pub struct GoalWorld<'a, Road> {
     snapshots: Option<Box<dyn Snapshots>>,
     /// What the last press said of its screen settling, when its door waits
     /// for the screen to stop changing (a phone's, t-6385).
-    settled: Option<Value>,
+    settled: Option<Settled>,
+    /// Whether a press asks for a preview of the screen it settles on
+    /// (`click --preview`, t-6385) — what a walk that asks ahead begins its
+    /// next judgment on.
+    previewing: bool,
     /// How many of the caller's words that press counted in the tree it
     /// settled on — the walk alone, so a count proves they are there and a
     /// zero proves nothing.
@@ -354,9 +360,34 @@ impl<'a, Road> GoalWorld<'a, Road> {
             began: Instant::now(),
             snapshots: None,
             settled: None,
+            previewing: false,
             counted: None,
             kept: None,
         }
+    }
+
+    /// The same world, asking each press for a preview of the screen it
+    /// settles on (t-6385) — for a walk that begins its next judgment there
+    /// ([`super::Options::overlap`]). Only a phone's door answers one.
+    #[must_use]
+    pub const fn previewing(mut self, on: bool) -> Self {
+        self.previewing = on;
+        self
+    }
+
+    /// A press's preview as the screen a look of it would be.
+    fn preview_screen(&self, preview: &Value) -> Option<Screen> {
+        let Aim::Phone { platform, device } = &self.aim else {
+            return None;
+        };
+        Some(Screen {
+            at: Seen::Phone {
+                platform: *platform,
+                device: device.clone(),
+            },
+            items: preview.get(ITEMS_KEY)?.as_array()?.clone(),
+            shows: Vec::new(),
+        })
     }
 
     /// The same world, able to save and load the device it is aimed at — an
@@ -416,6 +447,9 @@ where
         if let (Aim::Phone { .. }, Some(until)) = (&self.aim, &self.until) {
             argv.extend(["--text".to_string(), until.clone()]);
         }
+        if self.previewing && matches!(self.aim, Aim::Phone { .. }) {
+            argv.push(format!("--{EMULATOR_PREVIEW_FLAG}"));
+        }
         let holds = recipe_line_holds_ms(self.aim.tool(), &argv);
         let left = self.left_ms();
         if left == 0 || left < holds {
@@ -425,8 +459,14 @@ where
         let answer = (self.road)(self.aim.tool(), &argv, &argv);
         let said = answer_value(&answer);
         self.settled = said.as_ref().and_then(|said| {
-            said.get(zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY)
-                .cloned()
+            Some(Settled {
+                note: said
+                    .get(zerocode_core::agent_emulator::EMULATOR_SETTLE_KEY)?
+                    .clone(),
+                screen: said
+                    .get(EMULATOR_PREVIEW_FLAG)
+                    .and_then(|preview| self.preview_screen(preview)),
+            })
         });
         self.counted = said
             .as_ref()
@@ -435,7 +475,11 @@ where
     }
 
     fn settled(&mut self) -> Option<Settled> {
-        self.settled.clone().map(|note| Settled { note })
+        self.settled.clone()
+    }
+
+    fn asks_ahead_of_the_press(&self) -> bool {
+        !matches!(self.aim, Aim::Phone { .. })
     }
 
     fn reached(&mut self) -> Option<bool> {

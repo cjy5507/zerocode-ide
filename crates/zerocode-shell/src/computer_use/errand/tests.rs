@@ -187,6 +187,18 @@ pub(super) struct FakeWorld {
     /// What each press says of its screen settling (t-6385): `None` is a
     /// world whose press does not wait for that — a page, the desktop.
     pub(super) settles: Option<Value>,
+    /// Whether a settled press hands back the screen it stopped on — a
+    /// phone's press asked for a preview.
+    pub(super) settles_on_screen: bool,
+    /// What that preview shows instead of the screen, when it disagrees with
+    /// the full look (an element only the grid finds).
+    pub(super) preview_items: Option<Vec<Value>>,
+    /// Whether a judgment begun before a press can stand for the next look's
+    /// question here — `false` for a phone's world.
+    pub(super) asks_before_press: bool,
+    /// How long one look holds the walk — what a judgment begun on a settled
+    /// screen runs behind.
+    pub(super) look_holds: Duration,
 }
 
 impl FakeWorld {
@@ -219,6 +231,10 @@ impl FakeWorld {
             look_ms: 0,
             spent_ms: 0,
             settles: None,
+            settles_on_screen: false,
+            preview_items: None,
+            asks_before_press: true,
+            look_holds: Duration::ZERO,
         }
     }
 
@@ -277,6 +293,7 @@ impl FakeWorld {
 impl World for FakeWorld {
     fn look(&mut self) -> Option<Screen> {
         self.spend(self.look_ms);
+        std::thread::sleep(self.look_holds);
         self.screen.clone()
     }
     fn press(&mut self, mark: usize) -> bool {
@@ -342,7 +359,21 @@ impl World for FakeWorld {
         Some(self.reached.remove(0))
     }
     fn settled(&mut self) -> Option<Settled> {
-        self.settles.clone().map(|note| Settled { note })
+        let note = self.settles.clone()?;
+        let screen = self
+            .settles_on_screen
+            .then(|| self.screen.clone())
+            .flatten()
+            .map(|mut screen| {
+                if let Some(items) = &self.preview_items {
+                    screen.items.clone_from(items);
+                }
+                screen
+            });
+        Some(Settled { note, screen })
+    }
+    fn asks_ahead_of_the_press(&self) -> bool {
+        self.asks_before_press
     }
     fn walk_from(&mut self, step: usize) -> Option<Value> {
         self.walked_from.push(step);
@@ -1657,6 +1688,163 @@ fn nothing_is_begun_ahead_where_the_next_screen_is_another_page_or_the_walk_ends
     );
     assert_eq!(judge.asked.len(), 2);
     assert_eq!((walked.overlapped, walked.discarded), (0, 0));
+}
+
+/// A phone world: its press settles and hands back the screen it stopped on,
+/// and it never asks ahead of a press (t-6385).
+fn a_phone_that_settles(world: FakeWorld) -> FakeWorld {
+    FakeWorld {
+        settles: Some(json!({ "ms": 900, "reads": 5, "settle": "still" })),
+        settles_on_screen: true,
+        asks_before_press: false,
+        ..world
+    }
+}
+
+/// A phone's walk asks its next question on the screen its press settled on
+/// (t-6385): nothing is begun before a press, the question begun after one
+/// is the very one the next look asks, and its answer is used.
+#[test]
+fn a_phone_walk_asks_its_next_question_on_the_screen_its_press_settled_on() {
+    let mut judge = FakeJudge::chose(&[1, 1, 1]);
+    let mut world = a_phone_that_settles(FakeWorld::that_moves(&[1, 2]));
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert_eq!(world.presses, vec![1, 1, 1]);
+    assert_eq!(
+        judge.asked.len(),
+        1,
+        "only the first screen is asked in turn"
+    );
+    assert_eq!(
+        judge.begun.len(),
+        2,
+        "begun after the first two presses, not the last"
+    );
+    assert_eq!(judge.finished, 2);
+    assert_eq!((walked.overlapped, walked.discarded), (2, 0));
+    assert!(walked.rows[0].get(OVERLAP).is_none());
+    assert_eq!(walked.rows[1][OVERLAP], json!(OVERLAP_USED));
+    assert_eq!(walked.rows[2][OVERLAP], json!(OVERLAP_USED));
+}
+
+/// A preview the full look disagrees with — an element only the grid finds,
+/// a screen still moving — asks another question: the answer begun on it is
+/// dropped and the look is asked in turn.
+#[test]
+fn a_preview_the_full_look_disagrees_with_is_dropped_and_the_look_asked_again() {
+    let mut judge = FakeJudge::chose(&[1, 1, 1]);
+    let mut world = a_phone_that_settles(FakeWorld::that_moves(&[1, 2]));
+    world.preview_items = Some(vec![control(1, "미리보기")]);
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(2),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert_eq!(judge.begun.len(), 1);
+    assert_eq!(judge.asked.len(), 2, "both screens asked in turn");
+    assert_eq!((walked.overlapped, walked.discarded), (0, 1));
+    assert_eq!(walked.rows[1][OVERLAP], json!(OVERLAP_DISCARDED));
+}
+
+/// A world whose press moves its screen too often to ask ahead of it (a
+/// phone's) asks nothing before a press, and — with no settled screen to ask
+/// on — nothing after one either.
+#[test]
+fn a_world_that_asks_after_its_press_never_asks_before_it() {
+    let mut judge = FakeJudge::chose(&[1, 2]);
+    let mut world = FakeWorld::showing(&[1, 2]);
+    world.asks_before_press = false;
+    let walked = run_with(
+        Mode::On,
+        true,
+        Branching::OFF,
+        &goal(3),
+        &mut judge,
+        &mut world,
+        Options {
+            overlap: true,
+            rescue: false,
+        },
+        None,
+    );
+    assert!(judge.begun.is_empty());
+    assert_eq!((walked.overlapped, walked.discarded), (0, 0));
+}
+
+/// The measurement asking on the settled screen is for: a phone walk whose
+/// looks hold the tree read's own time and whose judgments take the wire's,
+/// with and without the question begun on the screen each press settled on.
+/// Printed, and held on the count: every judgment after the first was
+/// answered while the look was taken.
+#[test]
+fn a_judgment_asked_on_the_settled_screen_hides_behind_the_look() {
+    const JUDGE_MS: u64 = 60;
+    const LOOK_MS: u64 = 80;
+    const STEPS: usize = 6;
+    let walk = |overlap: bool| {
+        let mut judge = FakeJudge::chose(&[1; STEPS]).slow(JUDGE_MS);
+        let mut world = a_phone_that_settles(FakeWorld::that_moves(&[1, 2]));
+        world.look_holds = Duration::from_millis(LOOK_MS);
+        let began = std::time::Instant::now();
+        let walked = run_with(
+            Mode::On,
+            true,
+            Branching::OFF,
+            &goal(STEPS),
+            &mut judge,
+            &mut world,
+            Options {
+                overlap,
+                rescue: false,
+            },
+            None,
+        );
+        (
+            began.elapsed().as_millis(),
+            walked,
+            judge.asked.len() + judge.begun.len(),
+        )
+    };
+    let (before_ms, plain, plain_asks) = walk(false);
+    let (after_ms, ahead, ahead_asks) = walk(true);
+    assert_eq!((plain.pressed, ahead.pressed), (STEPS, STEPS));
+    assert_eq!((plain.overlapped, plain.discarded), (0, 0));
+    assert_eq!((ahead.overlapped, ahead.discarded), (STEPS - 1, 0));
+    assert_eq!((plain_asks, ahead_asks), (STEPS, STEPS), "no question more");
+    let hidden_per_step = ahead
+        .rows
+        .iter()
+        .filter_map(|row| row["hiddenMs"].as_u64())
+        .sum::<u64>()
+        / ahead.overlapped as u64;
+    assert!(
+        hidden_per_step >= LOOK_MS,
+        "a judgment begun on the settled screen ran at least as long as the look held: {hidden_per_step} ms"
+    );
+    println!(
+        "measure: settled-screen overlap steps={STEPS} judge_ms={JUDGE_MS} look_ms={LOOK_MS} before_ms={before_ms} after_ms={after_ms} overlapped={} hidden_ms_per_used_step={hidden_per_step}",
+        ahead.overlapped
+    );
 }
 
 /// The measurement asking ahead is for: a walk whose presses hold the door's

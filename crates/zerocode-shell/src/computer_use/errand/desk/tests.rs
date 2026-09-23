@@ -328,7 +328,13 @@ fn a_settled_press_is_checked_in_the_look_the_next_step_takes() {
     );
     world.look().unwrap();
     assert!(world.press(1));
-    assert_eq!(world.settled(), Some(Settled { note: settle }));
+    assert_eq!(
+        world.settled(),
+        Some(Settled {
+            note: settle,
+            screen: None
+        })
+    );
     assert_eq!(world.reached(), Some(false));
     let calls = || road.said.borrow().len();
     assert_eq!(
@@ -394,6 +400,69 @@ fn a_settled_press_that_counted_the_words_ends_the_walk_without_a_look() {
         2,
         "a look and a press, nothing more"
     );
+}
+
+/// A press asked for a preview (a walk asking ahead, t-6385) hands back the
+/// screen it settled on, numbered as a look of it would be; a phone's world
+/// never asks ahead of its press, a page's does as before.
+#[test]
+fn a_press_asked_for_a_preview_hands_back_the_screen_it_settled_on() {
+    let road = Road::new(|verb| match verb {
+        "marks" => ok(&json!({"ok": true, "result": {
+            "lookId": "first", "items": [{"mark": 3, "role": "button", "label": "일반"}]
+        }})
+        .to_string()),
+        "click" => ok(&json!({"ok": true, "result": {
+            "settle": { "ms": 740, "reads": 3, "settle": "still" },
+            "preview": {
+                "items": [{"mark": 2, "role": "button", "label": "정보"}],
+                "legend": "2 button 정보 @201,396"
+            }
+        }})
+        .to_string()),
+        _ => refused(),
+    });
+    let mut send = road.road();
+    let mut world = GoalWorld::new(
+        &mut send,
+        Aim::Phone {
+            platform: EmulatorPlatform::Ios,
+            device: "phone".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .previewing(true);
+    assert!(!world.asks_ahead_of_the_press());
+    world.look().unwrap();
+    assert!(world.press(3));
+    assert_eq!(road.argv(1).last().map(String::as_str), Some("--preview"));
+    let screen = world.settled().and_then(|settled| settled.screen).unwrap();
+    assert_eq!(
+        screen.at,
+        Seen::Phone {
+            platform: EmulatorPlatform::Ios,
+            device: "phone".into()
+        }
+    );
+    assert_eq!(screen.items[0]["label"], json!("정보"));
+
+    let road = Road::new(|_| refused());
+    let mut send = road.road();
+    let page = GoalWorld::new(
+        &mut send,
+        Aim::Pane {
+            label: "main".into(),
+        },
+        Seen::default(),
+        None,
+        60_000,
+        0,
+    )
+    .previewing(true);
+    assert!(page.asks_ahead_of_the_press());
 }
 
 /// The count a look answers decides the check as `find`'s did.

@@ -3215,12 +3215,13 @@ pub(super) fn run_goal(
     let snapshots: Box<dyn desk::Snapshots> = Box::new(AvdSnapshots {
         device: word("device").unwrap_or_default(),
     });
-    let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0)
-        .with_snapshots(snapshots);
     let options = errand::Options {
         overlap: zerocode_core::computer_use::walk_overlaps(&command.params),
         rescue: rescue.is_some(),
     };
+    let mut world = desk::GoalWorld::new(&mut road, aim, page, word("until"), deadline_ms, 0)
+        .with_snapshots(snapshots)
+        .previewing(options.overlap);
     let walked = errand::run_with(
         mode,
         acting,
@@ -3637,6 +3638,7 @@ pub(super) async fn answer_emulator_observation(
                     command.mark.unwrap_or_default(),
                     command.look.as_deref().unwrap_or_default(),
                     command.text.as_deref(),
+                    command.preview,
                 )
                 .await
             }

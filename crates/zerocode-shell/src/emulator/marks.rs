@@ -753,15 +753,31 @@ impl Table {
     }
 
     fn answer(&self, look: &str) -> Value {
-        let items = shared::items(&self.plan);
-        let legend = items
-            .iter()
-            .filter_map(shared::legend_line)
-            .collect::<Vec<_>>()
-            .join("\n");
+        let (items, legend) = items_and_legend(&self.plan);
         json!({ LOOK_ID_KEY: look, ITEMS_KEY: items, LEGEND_KEY: legend,
             "candidates": self.plan.candidates, "omitted": self.plan.omitted })
     }
+}
+
+/// A plan's items and the legend a model reads them by — what a look
+/// answers, and what a press's preview answers of the screen it settled on.
+fn items_and_legend(plan: &MarkPlan) -> (Vec<Value>, String) {
+    let items = shared::items(plan);
+    let legend = items
+        .iter()
+        .filter_map(shared::legend_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    (items, legend)
+}
+
+/// What a press answers of the screen it settled on when asked for a
+/// preview (t-6385): the items and legend a look of that tree would answer,
+/// numbered by the same plan — with no look id, since nothing in it can be
+/// pressed.
+pub(super) fn preview_of(snapshot: &Snapshot) -> Value {
+    let (items, legend) = items_and_legend(&numbered(&snapshot.faces, snapshot.screen));
+    json!({ ITEMS_KEY: items, LEGEND_KEY: legend })
 }
 
 static TABLES: Mutex<Kept<Table>> = Mutex::new(Kept::new(MARK_LOOKS_KEPT));
@@ -831,6 +847,7 @@ pub(crate) async fn click(
     mark: usize,
     look: &str,
     count: Option<&str>,
+    preview: bool,
 ) -> Result<Value, ProviderError> {
     let (request, legend) = {
         let held = TABLES
@@ -870,6 +887,9 @@ pub(crate) async fn click(
         // proof they are absent (only a look's grid finds some elements).
         if let (Some(subject), Some(last)) = (count, &settled.last) {
             answer[super::checks::COUNT_KEY] = json!(super::checks::found(last, subject));
+        }
+        if preview && let Some(last) = &settled.last {
+            answer[zerocode_core::computer_use::EMULATOR_PREVIEW_FLAG] = preview_of(last);
         }
     }
     Ok(answer)
