@@ -2897,6 +2897,9 @@ mod oauth_refresh_tests {
     #[test]
     fn a_missing_login_is_looked_for_once_per_person_and_again_when_the_store_changes() {
         use super::{claude_login_look_due, MissingClaudeLogin};
+        // It points `CLAUDE_CONFIG_DIR` at its own folder: under the lock, or
+        // a concurrent resolution reads this test's login.
+        let _env_lock = crate::test_env_lock();
         let dir = crate::support::temp_dir("missing-login-stamp");
         let file = dir.join(".credentials.json");
         std::fs::write(&file, "{}").expect("a file");
