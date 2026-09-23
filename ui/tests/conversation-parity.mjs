@@ -1313,3 +1313,49 @@ export async function testConversationShelf(browser, origin, ok) {
     await page.close();
   }
 }
+
+/* B2 — a closed conversation leaves nothing behind. The page stands in the
+ * leaf's one worker host; closing its tab takes the page — its rows, its
+ * watchers, its dock's observer — out of that host, so the document is back
+ * to the elements it had before the conversation opened, and the next
+ * conversation in the leaf builds on a bare host. */
+export async function testConversationRelease(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    const before = await page.evaluate(() => document.getElementsByTagName("*").length);
+    await openFixtureConversation(page, conversationFixture({ blocks: 5 }));
+    const seen = await page.evaluate(async (before) => {
+      const seen = { before };
+      for (let beat = 0; beat < 4; beat += 1) await window.__PAINTED__();
+      const tabOf = () => tabs.find((one) => one.worker?.helper?.id === WIRE_LOG_ID);
+      const host = () => document.querySelector("#worker-view");
+      seen.open = document.getElementsByTagName("*").length;
+      seen.listOpen = host()?.querySelector(".helper-turns") !== null;
+      closeTab(tabOf().id);
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      seen.closed = document.getElementsByTagName("*").length;
+      seen.listGone = document.querySelectorAll(".helper-turns").length === 0;
+      seen.pageForgotten = host()?.__helperPage == null;
+      // The next conversation in the leaf stands on the bare host.
+      window.__CONVERSATION__ = { status: "idle", live: [], turns: [] };
+      window.__ANSWER__.wire_log = (args) => ({
+        found: true, skipped: false, next: 0, turns: [], status: "idle", asks: [], live: [], agent: "claude",
+        protocol: "claude-stream", models: [], modes: [], commands: [], version: "2.1.280", tasks: [],
+      });
+      await openWirePage("claude", "/tmp/zerocode-window-test", { history: [{ role: "user", text: "다시" }, { role: "assistant", text: "네." }] });
+      await pollHelperPages();
+      for (let beat = 0; beat < 3; beat += 1) await window.__PAINTED__();
+      seen.reopened = host()?.querySelectorAll(".helper-turns > .helper-turn").length ?? 0;
+      return seen;
+    }, before);
+    ok(
+      "B2: closing a conversation's tab takes its page out of the leaf's host — no list is left standing and the document is back within a few dozen elements of where it stood before the conversation opened — and the next conversation opens on the bare host",
+      seen.listOpen && seen.open - seen.before > 300 && seen.listGone && seen.pageForgotten &&
+        seen.closed - seen.before < 60 && seen.reopened === 2,
+      JSON.stringify(seen),
+    );
+    ok("B2: the release raised no page errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}

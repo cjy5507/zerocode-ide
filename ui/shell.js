@@ -13085,6 +13085,31 @@ function paintHelperPage(host, tab) {
   interruptOnEscape(host);
 }
 
+/* A closed conversation's page leaves the host it stood in (t-6323 B2). The
+ * host is the leaf's — one per leaf, whichever conversation stands in it —
+ * and it kept the last page it drew (its rows, its turns, its watchers, its
+ * dock's observer) until another page took the host: after the last
+ * conversation in a leaf closed, for the window's life. Measured on the
+ * 400-turn page: closing it left 14,000 nodes and 4.5 MB of the embedder's
+ * heap behind, every time; with the page released, the status line's verb
+ * clock still held it until its next pick, so the clocks stop here too. */
+function releaseWorkerPage(tab) {
+  const host = groups.get(tab.pane)?.workerView;
+  const held = host?.__helperPage;
+  if (!held || held.id !== tab.id) return;
+  // The status line's clocks — the verb's, which would otherwise keep the
+  // page alive up to its next pick (5 s), and the glyph's.
+  stopStatusVerb(held.status.querySelector(".helper-status-word"));
+  stopStatusCycle(held.status);
+  held.turns.__shelf?.disconnect();
+  held.turns.__imageWatch?.disconnect();
+  host.__dockWatch?.disconnect();
+  host.__dockWatch = null;
+  host.__helperPage = null;
+  host.classList.remove("is-chat-page");
+  host.replaceChildren();
+}
+
 /* The extension's dock at the foot of the conversation (`inputContainer`):
  * the composer — and the question card, when one stands — floating over the
  * list's last rows, inset by the dock's margins and no wider than its
