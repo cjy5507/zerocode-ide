@@ -2066,7 +2066,13 @@
    * neighbours and stand at .8 of the ink. Small corners are 4px
    * (`--corner-radius-small`). The chat's type is the platform's own UI
    * face, as the panel inherits VS Code's (`--vscode-chat-font-family`) —
-   * a person's chosen face still wins. */
+   * a person's chosen face still wins, and the platform's chain stands
+   * AFTER it: a `var()` fallback is taken only while the choice is unset,
+   * so `var(--font-ui-choice, <chain>)` alone was the bare choice whenever
+   * one was set — and the default choice is `Geist`, a name that ships no
+   * file, so a machine without it drew the conversation in the engine's
+   * default face (WebKit: Times, and AppleMyungjo for Hangul — the serif
+   * the person saw on 2026-09-23, t-6323 A0). */
   --chat-dock-inset: 16px;
   --chat-dock-max: 680px;
   /* The dock's watched height, written on the page by `chatDockNode`; a page
@@ -2096,7 +2102,8 @@
   --chat-meta-gap: 4px;
   --chat-meta-alpha: 0.8;
   --chat-radius-small: 4px;
-  --chat-font-ui: var(--font-ui-choice, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
+  --chat-font-ui: var(--font-ui-choice, -apple-system), -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui,
+    "Apple SD Gothic Neo", sans-serif;
 
   /* A tool turn is two rows — what was called, and what it answered — and
    * they belong to each other, so the gap between them is tighter than the
