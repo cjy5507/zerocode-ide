@@ -156,7 +156,9 @@ pub const SUMMON_CHOICE_RUBRIC_VERSION: u32 = 3;
 pub const FEWEST_OPTIONS: usize = 2;
 
 /// The row's key for why it carries no `agreed` mark
-/// ([`crate::jev::summary::AGREED`]).
+/// ([`crate::jev::summary::AGREED`]) — the summary's own key
+/// ([`crate::jev::summary::NOT_COMPARED`]), which every labeled seat writes
+/// since t-6342 and which this seat wrote first.
 ///
 /// A word rather than a flag: `agreed` is left unwritten for more than one
 /// reason — a summons the seat itself chose for has no coordinator's word to
@@ -164,7 +166,7 @@ pub const FEWEST_OPTIONS: usize = 2;
 /// which. The judge needs nothing from it: it counts the rows that carry a
 /// mark, so a row without one is already out of every comparison. This is for
 /// whoever asks WHY.
-pub const NOT_COMPARED_KEY: &str = "notCompared";
+pub const NOT_COMPARED_KEY: &str = crate::jev::summary::NOT_COMPARED.canonical;
 
 /// [`NOT_COMPARED_KEY`]'s word for a summons whose own agent was not among the
 /// options — [`SummonAsk::offered`] says whether it was.

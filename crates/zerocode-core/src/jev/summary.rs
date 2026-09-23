@@ -139,6 +139,19 @@ pub const LABEL: LedgerKey = LedgerKey {
     canonical: "label",
     also: &[],
 };
+/// Why a row that grades a request carries no [`AGREED`] mark, as a word —
+/// the side of the comparison that had nothing to say (t-6342).
+///
+/// A label rule that finds nothing to compare writes this in place of a mark
+/// it has no right to: a silence whose answer named no cause, a recall turn
+/// that touched no note, a summons whose agent was never offered. The judge
+/// reads only [`AGREED`]; this is for the reader who asks why a seat has so
+/// few marks, and it is how a label that could not say no stops passing for
+/// one that said yes.
+pub const NOT_COMPARED: LedgerKey = LedgerKey {
+    canonical: "notCompared",
+    also: &[],
+};
 
 /// The model that answered, as the response named it — the version, not the
 /// alias the request asked for (`jev-1.13.0` for `jev-latest`). Written on
@@ -198,6 +211,7 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     APPLIED,
     PRESSED,
     LABEL,
+    NOT_COMPARED,
     MODEL,
     BARRED,
     CONTROL_KIND,
