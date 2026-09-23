@@ -220,6 +220,13 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
 ] }
 objc2-foundation = { version = "0.3", default-features = false, features = [
     "std",
+    # The `zerocode-pick` helper lifts its standing panel from a timer on the
+    # modal run loop (`NSTimer` with a block, `NSRunLoop`, `NSDate` for the
+    # interval); all three classes are compiled into this binary through wry.
+    "NSTimer",
+    "NSRunLoop",
+    "NSDate",
+    "block2",
     "NSData",
     "NSDictionary",
     "NSArray",

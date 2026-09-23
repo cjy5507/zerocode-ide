@@ -173,8 +173,23 @@ pub(super) fn bring_helper_forward(pid: u32) -> bool {
             return false;
         };
         NSRunningApplication::runningApplicationWithProcessIdentifier(pid).is_some_and(|helper| {
+            // macOS 14 activates another application only cooperatively — the
+            // active one (this window) names itself as yielding; the older
+            // call is what there is before 14, and is kept as the second try.
+            use objc2::runtime::NSObjectProtocol as _;
+            let cooperative = helper
+                .respondsToSelector(objc2::sel!(activateFromApplication:options:))
+                && helper.activateFromApplication_options(
+                    &NSRunningApplication::currentApplication(),
+                    NSApplicationActivationOptions::empty(),
+                );
             #[allow(deprecated)]
-            helper.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps)
+            {
+                cooperative
+                    || helper.activateWithOptions(
+                        NSApplicationActivationOptions::ActivateIgnoringOtherApps,
+                    )
+            }
         })
     }
     #[cfg(not(target_os = "macos"))]

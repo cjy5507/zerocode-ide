@@ -36,6 +36,7 @@ fn main() -> ExitCode {
         }
     };
     come_forward();
+    raise_panel_when_it_stands();
     let answer = match ask(&request) {
         Ok(paths) => paths,
         Err(said) => {
@@ -86,15 +87,82 @@ fn ask(request: &PickRequest) -> Result<Vec<u8>, String> {
 fn come_forward() {
     use objc2::MainThreadMarker;
     use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
-
     let Some(mtm) = MainThreadMarker::new() else {
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    activate(&app);
+}
+
+/// Ask to be the active application. macOS 14 replaced the old call with a
+/// cooperative one — the process that launched us is the active one and
+/// yields — and ignores the old call from a process like this; before 14 the
+/// old call is the only one there is. Both are asked, whichever the system
+/// honors.
+#[cfg(target_os = "macos")]
+fn activate(app: &objc2_app_kit::NSApplication) {
+    use objc2::runtime::NSObjectProtocol as _;
+    if app.respondsToSelector(objc2::sel!(activate)) {
+        app.activate();
+    }
     #[allow(deprecated)]
     app.activateIgnoringOtherApps(true);
 }
+
+/// How often the timer looks for the panel, and how long it keeps looking
+/// before giving up — a dialog that never opened has nothing to raise.
+#[cfg(target_os = "macos")]
+const PANEL_LOOK_INTERVAL_SECS: f64 = 0.2;
+#[cfg(target_os = "macos")]
+const PANEL_LOOKS: u32 = 25;
+
+/// The panel is another application's window from the person's point of
+/// view: this process is an accessory, so any window of the app they were
+/// using can sit on top of the panel — on 2026-09-23 the iPhone Mirroring
+/// window covered its Cancel/Open buttons and the person read the panel as
+/// broken. Once the modal panel stands (the dialog crate runs it modally on
+/// this thread), lift it to the modal-panel level, order it front and ask for
+/// activation again. A timer on the modal run-loop mode is the one way to run
+/// on this thread while the modal loop holds it.
+#[cfg(target_os = "macos")]
+fn raise_panel_when_it_stands() {
+    use objc2::MainThreadMarker;
+    use objc2_app_kit::{NSApplication, NSModalPanelRunLoopMode, NSModalPanelWindowLevel};
+    use objc2_foundation::{NSDefaultRunLoopMode, NSRunLoop, NSTimer};
+    use std::cell::Cell;
+    use std::ptr::NonNull;
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let looks = Cell::new(0u32);
+    let block = block2::RcBlock::new(move |timer: NonNull<NSTimer>| {
+        let timer = unsafe { timer.as_ref() };
+        let app = NSApplication::sharedApplication(mtm);
+        looks.set(looks.get() + 1);
+        if let Some(panel) = app.modalWindow() {
+            panel.setLevel(NSModalPanelWindowLevel);
+            panel.orderFrontRegardless();
+            activate(&app);
+            timer.invalidate();
+        } else if looks.get() >= PANEL_LOOKS {
+            timer.invalidate();
+        }
+    });
+    // SAFETY: the timer fires on this thread's run loop only, in the modes
+    // it is added to; the block touches AppKit on the main thread alone.
+    let timer = unsafe {
+        NSTimer::timerWithTimeInterval_repeats_block(PANEL_LOOK_INTERVAL_SECS, true, &block)
+    };
+    let run_loop = NSRunLoop::mainRunLoop();
+    unsafe {
+        run_loop.addTimer_forMode(&timer, NSModalPanelRunLoopMode);
+        run_loop.addTimer_forMode(&timer, NSDefaultRunLoopMode);
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn raise_panel_when_it_stands() {}
 
 #[cfg(not(target_os = "macos"))]
 fn come_forward() {}

@@ -42,6 +42,14 @@ pub(super) const FOLDER_PANEL_OVERDUE: Duration = Duration::from_secs(8);
 /// receipt now measures only how busy the window's main thread is — past
 /// this it is written down as a stall, and a stall here is some other bug.
 pub(super) const FOLDER_PANEL_MAIN_THREAD_BUDGET: Duration = Duration::from_secs(2);
+/// How long after the helper is spawned the window brings it forward once on
+/// its own: the panel opens in another process, so the person's active
+/// application (this window) must yield activation to it, and other
+/// applications' windows may otherwise stay on top of the panel
+/// (2026-09-23, the iPhone Mirroring window covered its buttons). Long
+/// enough for the helper to have opened its panel, short enough that the
+/// person never looks for it.
+pub(super) const FOLDER_PANEL_RAISE_DELAY: Duration = Duration::from_millis(350);
 
 /// How long the helper's panel may stand before the window kills it and
 /// answers "no folder". A panel nobody answered in a quarter of an hour is
@@ -364,7 +372,29 @@ pub(super) async fn pick_paths(
         request,
         FOLDER_PANEL_HELPER_WAIT,
         cancelled,
-        move |pid| folder_panel_desk().attach_helper(generation, HelperHandle::new(pid, cancel)),
+        {
+            let app = app.clone();
+            move |pid| {
+                folder_panel_desk().attach_helper(generation, HelperHandle::new(pid, cancel));
+                // The panel is the helper's window: hand it the activation this
+                // window holds, once it has had time to open.
+                tokio::spawn(async move {
+                    tokio::time::sleep(FOLDER_PANEL_RAISE_DELAY).await;
+                    let noted = app.clone();
+                    let _ = app.run_on_main_thread(move || {
+                        let forwarded = bring_helper_forward(pid);
+                        note_folder_panel(
+                            &noted,
+                            &format!(
+                                "helper {} brought forward at spawn (cooperative activation {})",
+                                pid,
+                                if forwarded { "granted" } else { "refused" }
+                            ),
+                        );
+                    });
+                });
+            }
+        },
     ));
 
     // The receipt behind the ask. The ask no longer queues anything to the
