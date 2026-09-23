@@ -364,10 +364,11 @@ fn step_effort_config(
     }
     let (floor, ceiling) = turn_effort;
     let floor = floor?;
-    let raised = word.asks() && tools::step_effort_raised(cwd);
-    let seat: Option<Arc<dyn runtime::StepEffortSeat>> = word
-        .asks()
-        .then(|| tools::StepSeat::open(cwd) as Arc<dyn runtime::StepEffortSeat>);
+    let held = held_on(api::detect_provider_kind(main_model));
+    let asks = asks_on(word, held);
+    let raised = asks && tools::step_effort_raised(cwd);
+    let seat: Option<Arc<dyn runtime::StepEffortSeat>> =
+        asks.then(|| tools::StepSeat::open(cwd) as Arc<dyn runtime::StepEffortSeat>);
     // Rows land in the project's shadow ledger, and only for a runtime a host
     // armed for durable traces — the guard the plan shadow and the timing
     // ledger keep, so a crate test's turns never write into a person's home.
@@ -385,7 +386,6 @@ fn step_effort_config(
         }
     });
     let (heavier_model, cross_top_model) = rung_neighbours(inventory, main_model);
-    let held = held_on(api::detect_provider_kind(main_model));
     Some(runtime::StepEffortConfig {
         applies: held.is_none() && word.applies_with(raised),
         floor,
@@ -405,21 +405,24 @@ fn step_effort_config(
 pub(crate) const HELD_ANTHROPIC_CACHE_PREFIX: &str = "anthropic_cache_prefix";
 
 /// What the governor may not apply on a provider's wire, whatever the word
-/// says (docs/design/zo-step-effort-governor-20260921.md §6).
-///
-/// Anthropic's prompt cache keys the message prefix on the thinking
-/// parameters: a request whose `output_config.effort` differs from the one
-/// before it re-writes every cached message breakpoint. Measured 2026-09-21
-/// on claude-opus-5 in one session (session-1789973703305-0, turn 6): the
-/// step the governor lowered to `high` re-billed 53,400 tokens of cache
-/// write against 9,610 read, and the step back to `xhigh` another 54,894 —
-/// two rewrites of the whole conversation for one rung of thinking saved,
-/// where the steps around them read 58k–65k from cache and wrote under a
-/// thousand. On that wire the governor records and never moves a request;
-/// OpenAI's `reasoning_effort` sits outside the prompt prefix its cache is
-/// keyed on, and Gemini's `thinkingLevel` likewise, so those wires apply.
+/// says (docs/design/zo-step-effort-governor-20260921.md §6): a wire whose
+/// prompt cache keys the conversation on the request's effort — the
+/// provider catalog's fact (`api::ProviderKind::effort_keys_the_cache`,
+/// Anthropic's), where one rung of thinking saved re-wrote the whole cached
+/// conversation twice. On that wire the governor records and never moves a
+/// request.
 fn held_on(provider: api::ProviderKind) -> Option<&'static str> {
-    (provider == api::ProviderKind::Anthropic).then_some(HELD_ANTHROPIC_CACHE_PREFIX)
+    provider.effort_keys_the_cache().then_some(HELD_ANTHROPIC_CACHE_PREFIX)
+}
+
+/// Whether the governor asks its seat: a word that asks, on a wire it may
+/// move (t-6342). On a held wire the seat's answer could only ever be
+/// recorded: on 2026-09-23 this machine's ledger held 1,645 of its 1,665
+/// steps, and all 239 of the seat's questions (160 requests) were about a
+/// held step (docs/design/jev-engineering-review-20260923.md §7). So the
+/// table decides alone, files its held row, and nothing is asked.
+fn asks_on(word: tools::StepEffortWord, held: Option<&'static str>) -> bool {
+    word.asks() && held.is_none()
 }
 
 /// The rungs the governor may move the turn to, read off the connected
@@ -759,6 +762,26 @@ mod tests {
         assert_eq!(held_on(api::ProviderKind::OpenAi), None);
         assert_eq!(held_on(api::detect_provider_kind("claude-opus-5")), Some(HELD_ANTHROPIC_CACHE_PREFIX));
         assert_eq!(held_on(api::detect_provider_kind("gpt-5.6-sol")), None);
+    }
+
+    /// A wire the governor may not move asks its seat nothing (t-6342):
+    /// every one of the seat's 239 questions on this machine was about a step
+    /// held on Anthropic's wire, recorded and never applied. The table still
+    /// decides and files its held row; a word that asks asks only where the
+    /// answer can be carried.
+    #[test]
+    fn a_held_wire_asks_the_seat_nothing() {
+        use zerocode_core::jev::JevMode;
+        let anthropic = held_on(api::detect_provider_kind("claude-opus-5"));
+        let openai = held_on(api::detect_provider_kind("gpt-5.6-sol"));
+        for mode in [JevMode::Shadow, JevMode::On, JevMode::Auto] {
+            let word = tools::StepEffortWord::Set(mode);
+            assert!(!asks_on(word, anthropic), "{mode:?} on Anthropic");
+            assert!(asks_on(word, openai), "{mode:?} on OpenAI");
+        }
+        for word in [tools::StepEffortWord::Absent, tools::StepEffortWord::Set(JevMode::Off)] {
+            assert!(!asks_on(word, openai), "{word:?}");
+        }
     }
 
     /// The rungs beside the main model come from the inventory's own bands:

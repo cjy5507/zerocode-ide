@@ -178,12 +178,17 @@ fn every_use_is_off_until_a_person_says_otherwise() {
 }
 
 /// What a use stands at when a person turned Jev on and chose nothing seat by
-/// seat (2026-09-23, §6.1): one of the use's own modes, and never `off` — a
-/// switch turned on that left a use off would say one thing and do another.
-/// `auto` wherever the use offers it; the agent's own tool, which has
-/// nothing to rise on, answers the agent.
+/// seat (2026-09-23, §6.1): one of the use's own modes — `auto` wherever the
+/// use offers it, and the agent's own tool, which has nothing to rise on,
+/// answers the agent.
+///
+/// `off` only for a seat stopped on its own evidence until it is redesigned
+/// (docs/design/jev-engineering-review-20260923.md §7, t-6342): the patch
+/// review and the window's worker effort. Anywhere else a switch turned on
+/// that left a use off would say one thing and do another.
 #[test]
-fn every_use_recommends_one_of_its_own_modes_and_never_off() {
+fn every_use_recommends_one_of_its_own_modes_and_off_only_where_stopped() {
+    let stopped = [PATCH_REVIEW.id, STEP_EFFORT.id];
     for row in &JEV_USES {
         assert!(
             row.modes.contains(&row.recommended),
@@ -191,8 +196,9 @@ fn every_use_recommends_one_of_its_own_modes_and_never_off() {
             row.id,
             row.recommended
         );
-        assert_ne!(row.recommended, JevMode::Off, "{} recommends off", row.id);
-        let expected = if row.modes.contains(&JevMode::Auto) {
+        let expected = if stopped.contains(&row.id) {
+            JevMode::Off
+        } else if row.modes.contains(&JevMode::Auto) {
             JevMode::Auto
         } else {
             JevMode::On

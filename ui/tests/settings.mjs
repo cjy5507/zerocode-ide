@@ -52,7 +52,8 @@ const TYPESAFE_DECISION_MODES = Object.freeze([
    settings key a person may write by hand, the modes it offers — a labeled
    seat offers all four, a seat nothing labels offers no `auto` — and the mode
    it stands at while Jev is switched on and nobody wrote a word for it
-   (`JevUse::recommended`). `typesafe_settings.rs` holds this list against the
+   (`JevUse::recommended`) — `off` for the two seats stopped on their own
+   evidence (t-6342). `typesafe_settings.rs` holds this list against the
    table. */
 const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "routing", setting: "decisionShadow", modes: "off shadow on auto", recommended: "auto" }),
@@ -64,7 +65,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "stall", setting: "stallCause", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "placement", setting: "workerPlacement", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "summon", setting: "summonChoice", modes: "off shadow on auto", recommended: "auto" }),
-  Object.freeze({ id: "effort", setting: "stepEffort", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "effort", setting: "stepEffort", modes: "off shadow on auto", recommended: "off" }),
   Object.freeze({ id: "step_effort", setting: "zoStepEffort", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "compaction", setting: "jevCompaction", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "agent_tool", setting: "agentTool", modes: "off shadow on", recommended: "on" }),
@@ -74,7 +75,7 @@ const JEV_SEATS = Object.freeze([
   Object.freeze({ id: "branching", setting: "jevBranching", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "judgment_cache", setting: "jevJudgmentCache", modes: "off shadow on auto", recommended: "auto" }),
   Object.freeze({ id: "challenger", setting: "jevChallenger", modes: "off shadow on auto", recommended: "auto" }),
-  Object.freeze({ id: "patch_review", setting: "jevPatchReview", modes: "off shadow on auto", recommended: "auto" }),
+  Object.freeze({ id: "patch_review", setting: "jevPatchReview", modes: "off shadow on auto", recommended: "off" }),
 ]);
 /* The door's object under `smart` and the one word its folder list may hold
    that is not a folder (`zerocode_core::jev::door::JEV_SETTINGS_KEY`,

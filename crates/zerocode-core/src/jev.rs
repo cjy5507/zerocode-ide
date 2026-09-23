@@ -1393,7 +1393,12 @@ pub const STEP_EFFORT: JevUse = JevUse {
     id: "effort",
     setting: "stepEffort",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
-    recommended: JevMode::Auto,
+    // Stopped until it is redesigned (docs/design/jev-engineering-review-20260923.md
+    // §7, t-6342): this machine's ledger holds no row of it, and a Codex
+    // worker takes no effort typed at its composer, so the move could only
+    // ever be a relaunch. It comes back as a fact question — is this attempt
+    // spinning on itself — with the move left to code, once a replay says so.
+    recommended: JevMode::Off,
     sends: &[Sent {
         at: "/state/repeated",
         cap: Cap::Chars(STEP_EFFORT_REPEATED_CHAR_CAP),
@@ -2229,6 +2234,10 @@ pub const NOTIFY: JevUse = JevUse {
     id: "notify",
     setting: "jevNotify",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    // Stands until the question search (§6-8) decides (§7, t-6342): replayed
+    // twice over 1,051 calls it agreed 47.7% where today's rule agreed
+    // 54.7%. Its redesign — fact questions, the call left to code — is
+    // judged on the same replay, and it stops if that loses too.
     recommended: JevMode::Auto,
     sends: &[
         Sent {
@@ -2847,7 +2856,13 @@ pub const PATCH_REVIEW: JevUse = JevUse {
     id: "patch_review",
     setting: "jevPatchReview",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
-    recommended: JevMode::Auto,
+    // Stopped (§7, t-6342): over 1,661 replayed reviews it permitted 1.1%
+    // and agreed 21.1% where "always permit" agreed 79.2%, and its answers
+    // ranked the regretted patches at AUC 0.48–0.59, under the patch's size
+    // alone (0.688) — one request per edit, about 153 a day, all noise. It
+    // comes back when a question per hunk beats the size on labels a person
+    // left (a revert, a refusal).
+    recommended: JevMode::Off,
     sends: &[
         Sent {
             at: "/state/task",
