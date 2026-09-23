@@ -772,6 +772,221 @@ mod tests {
         }
     }
 
+    /// What a person reads about Jev — the key card, the card of features and
+    /// the dashboard — is said in the product's plain words and not in the
+    /// codebase's metaphors (t-6243 D0,
+    /// docs/design/jev-dashboard-improvement-plan-20260923.md): a person asks
+    /// how often a feature asked, how right it was and what is left before it
+    /// applies by itself, and a screen that answers in seats, rows, windows,
+    /// thresholds, ledgers, probes, walks and rising is answering a question
+    /// only the code asks.
+    ///
+    /// Read from where the words are written: the markup's Korean under every
+    /// `settings.typesafe.*` and `jev.*` key, every Korean literal in the
+    /// dashboard's script and in the card's part of the settings script, and
+    /// the English catalog under the same keys.
+    #[test]
+    fn the_jev_surfaces_speak_plain_words_not_the_codebases() {
+        /// The metaphors, each as its word and whether a use of it is
+        /// recognised anywhere inside a word (`false`) or only as a word of
+        /// its own — a noun with its particle, or a counter after a number —
+        /// because `행` is also the second syllable of 진행 and `창` the last
+        /// of 입력창.
+        const KOREAN: [(&str, bool); 11] = [
+            ("자리", false),
+            ("행", true),
+            ("창", true),
+            ("문턱", false),
+            ("원장", false),
+            ("프로브", false),
+            ("걷기", false),
+            ("오르", false),
+            ("오른", true),
+            ("물은", true),
+            ("답한", true),
+        ];
+        /// The particles a noun standing alone may carry.
+        const PARTICLES: [&str; 22] = [
+            "", "은", "는", "이", "가", "을", "를", "의", "만", "도", "에", "과", "와", "으로",
+            "로", "마다", "씩", "에서", "까지", "부터", "뿐", "안",
+        ];
+        /// The uses of a metaphor's word that mean the plain thing, each with
+        /// the reason it is plain here.
+        const PLAIN_USES: [(&str, &str, &str); 2] = [
+            (
+                "창",
+                "워커 창 배치",
+                "the worker's own pane in this app, which is a window",
+            ),
+            (
+                "창",
+                "창 제목",
+                "a desktop app's window title, sent as it is",
+            ),
+        ];
+        /// The English catalog's metaphors, matched as whole words.
+        const ENGLISH: [&str; 14] = [
+            "seat", "seats", "ledger", "ledgers", "probe", "probes", "rise", "rises", "rising",
+            "risen", "rose", "walk", "walks", "walking",
+        ];
+
+        fn hangul(text: &str) -> bool {
+            text.chars().any(|c| ('가'..='힣').contains(&c))
+        }
+        /// The double-quoted and template literals of a script, outside its
+        /// comments.
+        fn literals(source: &str) -> Vec<String> {
+            let mut found = Vec::new();
+            let mut chars = source.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '/' if chars.peek() == Some(&'/') => {
+                        for next in chars.by_ref() {
+                            if next == '\n' {
+                                break;
+                            }
+                        }
+                    }
+                    '/' if chars.peek() == Some(&'*') => {
+                        chars.next();
+                        let mut last = ' ';
+                        for next in chars.by_ref() {
+                            if last == '*' && next == '/' {
+                                break;
+                            }
+                            last = next;
+                        }
+                    }
+                    '"' | '`' | '\'' => {
+                        let mut literal = String::new();
+                        while let Some(next) = chars.next() {
+                            match next {
+                                '\\' => {
+                                    chars.next();
+                                }
+                                _ if next == c => break,
+                                _ => literal.push(next),
+                            }
+                        }
+                        found.push(literal);
+                    }
+                    _ => {}
+                }
+            }
+            found
+        }
+        fn between<'a>(source: &'a str, from: &str, to: &str) -> &'a str {
+            let start = source.find(from).unwrap_or_else(|| panic!("no `{from}`"));
+            let rest = &source[start..];
+            let end = rest[from.len()..]
+                .find(to)
+                .unwrap_or_else(|| panic!("nothing ends `{from}` at `{to}`"));
+            &rest[..from.len() + end]
+        }
+        fn metaphors_in(text: &str) -> Vec<&'static str> {
+            let mut plain = text.to_string();
+            for (_, phrase, _) in PLAIN_USES {
+                plain = plain.replace(phrase, " ");
+            }
+            let words: Vec<&str> = plain
+                .split(|c: char| !(c.is_alphanumeric() || c == '{' || c == '}'))
+                .filter(|word| !word.is_empty())
+                .collect();
+            KOREAN
+                .iter()
+                .filter(|(metaphor, alone)| {
+                    words.iter().any(|word| {
+                        word.match_indices(metaphor).any(|(at, _)| {
+                            if !alone {
+                                return true;
+                            }
+                            let before = &word[..at];
+                            let after = &word[at + metaphor.len()..];
+                            let counted = before
+                                .chars()
+                                .next_back()
+                                .is_some_and(|c| c.is_ascii_digit() || c == '}');
+                            (before.is_empty() || counted) && PARTICLES.contains(&after)
+                        })
+                    })
+                })
+                .map(|(metaphor, _)| *metaphor)
+                .collect()
+        }
+
+        let page = include_str!("../../../ui/index.html");
+        let mut said: Vec<(String, String)> = Vec::new();
+        for prefix in ["data-i18n=\"settings.typesafe.", "data-i18n=\"jev."] {
+            let mut rest = page;
+            while let Some(at) = rest.find(prefix) {
+                rest = &rest[at + "data-i18n=\"".len()..];
+                let key = rest.split('"').next().unwrap_or_default().to_string();
+                let text = rest
+                    .split_once('>')
+                    .map(|(_, body)| body.split('<').next().unwrap_or_default())
+                    .unwrap_or_default();
+                said.push((format!("index.html {key}"), text.trim().to_string()));
+            }
+        }
+        let scripts = [
+            ("shell-jev.js", include_str!("../../../ui/shell-jev.js")),
+            (
+                "shell-settings.js (TypeSafe)",
+                between(
+                    include_str!("../../../ui/shell-settings.js"),
+                    "/* ---- TypeSafe (Jev) ----",
+                    "\n/* ---- ",
+                ),
+            ),
+        ];
+        for (file, source) in scripts {
+            for literal in literals(source) {
+                if hangul(&literal) {
+                    said.push((file.to_string(), literal));
+                }
+            }
+        }
+        let mut offenders: Vec<String> = said
+            .iter()
+            .flat_map(|(from, text)| {
+                metaphors_in(text)
+                    .into_iter()
+                    .map(move |word| format!("{from}: 「{word}」 in {text}"))
+            })
+            .collect();
+
+        let i18n = include_str!("../../../ui/shell-i18n.js");
+        let english = between(i18n, "\n  en: {\n", "\n  ja: {\n");
+        for line in english.lines() {
+            let line = line.trim();
+            let Some((key, value)) = line
+                .strip_prefix('"')
+                .and_then(|rest| rest.split_once("\": \""))
+            else {
+                continue;
+            };
+            if !(key.starts_with("settings.typesafe.") || key.starts_with("jev.")) {
+                continue;
+            }
+            for word in value
+                .split(|c: char| !c.is_ascii_alphabetic())
+                .map(str::to_ascii_lowercase)
+            {
+                if ENGLISH.contains(&word.as_str()) {
+                    offenders.push(format!("en {key}: “{word}” in {value}"));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "{} Jev string(s) speak the codebase's metaphors — say what a person \
+             means (기능·판단·요청·응답·정확도·표본·기준·자동 적용), or add the \
+             plain use to PLAIN_USES with its reason:\n{}",
+            offenders.len(),
+            offenders.join("\n")
+        );
+    }
+
     /// The settings harness's fake backend answers every seat the table names,
     /// with the settings key it writes and the modes it offers, so the pane is
     /// driven by the words and meanings it will read. A seat added to the table

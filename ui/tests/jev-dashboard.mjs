@@ -339,6 +339,7 @@ export async function testJevDashboard(browser, origin, ok) {
         mode: cell("summon", "mode").querySelector("select").value,
       };
       const recallWhy = cell("recall", "why").textContent;
+      const recallWeek = fact("recall", "week");
       const quiet = { week: fact("skills", "week"), refusals: fact("skills", "refusals"), why: cell("skills", "why").textContent,
         sparks: [...cell("skills", "trend").querySelectorAll(".jev-spark")].map((svg) => Number(svg.dataset.points)) };
       const numbersLine = cell("summon", "why").textContent;
@@ -348,7 +349,7 @@ export async function testJevDashboard(browser, origin, ok) {
         ms, active: activeTabId, visible: !view().hidden, hiddenAttr: view().hidden,
         rowIds: rows.map((row) => row.dataset.jevDashRow),
         rowNames: rows.map((row) => row.querySelector('[data-jev-cell="seat"]').textContent),
-        cardNames, cardSeats: window.__JEV__.seats, summon, quiet, recallWhy, numbersLine, cardLine,
+        cardNames, cardSeats: window.__JEV__.seats, summon, quiet, recallWhy, recallWeek, numbersLine, cardLine,
         asks: window.__JEV__.asks.slice(), settingsAsks: window.__COUNTS__.typesafe_settings ?? 0,
         summaryAsks: window.__COUNTS__.jev_summary ?? 0,
         title: tabLabel(tabs.find((tab) => tab.id === "jev")),
@@ -376,25 +377,26 @@ export async function testJevDashboard(browser, origin, ok) {
       opened.ms < 200, `${opened.ms.toFixed(1)} ms`);
     ok("a counted seat's numbers stand in its cells",
       opened.summon.today === "32" && opened.summon.week === "50" && opened.summon.answered.startsWith("96%")
-        && opened.summon.answered.includes("84%") && opened.summon.latency === "230 / 410"
+        && opened.summon.answered.includes("84%")
         && opened.summon.refusals === "not_consented 2" && opened.summon.applied === "0"
-        && opened.summon.agreement === "16/44 (24%)" && opened.summon.cost === "$0.0123" && opened.summon.mode === "on",
+        && opened.summon.agreement === "16/44 (24%)" && opened.summon.cost === "$0.0123" && opened.summon.mode === "on"
+        && opened.summon.latency === "230 ms (느릴 때 410)" && opened.recallWeek === "1,005",
       JSON.stringify(opened.summon));
     ok("the why column says whose doing the acting is, what the judge said, the window it read and the rows still owed",
-      opened.summon.why.includes("34/34") && opened.summon.why.includes("900") && opened.summon.why.includes("10")
-        && opened.summon.why.includes("직접 켜서") && opened.summon.why.includes("답한 비율이 모자랍니다")
-        && opened.recallWhy.includes("승격하지 않습니다"),
+      opened.summon.why.includes("34/34") && opened.summon.why.includes("90%") && opened.summon.why.includes("10")
+        && opened.summon.why.includes("직접 켜서") && opened.summon.why.includes("응답률이 기준에 못 미칩니다")
+        && opened.recallWhy.includes("자동 적용 대상이 아니라"),
       JSON.stringify({ summon: opened.summon.why, recall: opened.recallWhy }));
     ok("the why column and the card name the id asked and the version that answered, and the version cut away",
-      opened.summon.why.includes("물은 jev-latest · 답한 jev-1.13.0") && opened.summon.why.includes("jev-1.12.0 행은 창에서 뺌")
-        && (opened.cardLine ?? "").includes("물은 jev-latest · 답한 jev-1.13.0 · 창 안 34행 · jev-1.12.0 행은 창에서 뺌")
-        && !opened.recallWhy.includes("물은"),
+      opened.summon.why.includes("모델 jev-1.13.0") && opened.summon.why.includes("이전 버전 jev-1.12.0의 기록은 제외")
+        && (opened.cardLine ?? "").includes("모델 jev-1.13.0 · 판정 표본 34건 · 이전 버전 jev-1.12.0의 기록은 제외")
+        && !opened.recallWhy.includes("모델 "),
       JSON.stringify({ why: opened.summon.why, card: opened.cardLine, recall: opened.recallWhy }));
     ok("the trend has one point per counted day and none for a day nothing was asked",
       opened.summon.sparks.join(",") === "5,5,5" && opened.quiet.sparks.join(",") === "0,0,0",
       JSON.stringify({ summon: opened.summon.sparks, quiet: opened.quiet.sparks }));
     ok("a seat nothing has asked yet reads as never asked, not as zero",
-      opened.quiet.week === "0" && opened.quiet.refusals === null && opened.quiet.why.includes("아직 아무것도 묻지 않았습니다"),
+      opened.quiet.week === "0" && opened.quiet.refusals === null && opened.quiet.why.includes("아직 사용된 적이 없습니다"),
       JSON.stringify(opened.quiet));
     ok("the recent list opens on the first seat with decisions and lists the digest",
       opened.recentSeat === "routing" && opened.recentCount === 1 && opened.recentFirst.includes("task: 68212a1194a4e327")
@@ -421,7 +423,7 @@ export async function testJevDashboard(browser, origin, ok) {
     });
     ok("choosing another seat lists its decisions without asking zo again",
       picked.count === 5 && picked.refused === "not_consented" && picked.asks === 1
-        && picked.marks[0].includes("확신 19%") && picked.marks[0].includes("적용") && picked.marks[0].includes("일치")
+        && picked.marks[0].includes("확신도 19%") && picked.marks[0].includes("적용됨") && picked.marks[0].includes("일치")
         && picked.marks[1].includes("기록만"),
       JSON.stringify(picked));
 
@@ -493,7 +495,7 @@ export async function testJevDashboard(browser, origin, ok) {
       return said;
     });
     ok("the dashboard's words are the catalog's, in the language in force",
-      english.head === "Seat" && english.title === "Jev dashboard" && english.refresh === "Refresh" && english.back === "자리",
+      english.head === "Feature" && english.title === "Jev dashboard" && english.refresh === "Refresh" && english.back === "기능",
       JSON.stringify(english));
 
     // zo that cannot count: the table still stands with the switches and says why.

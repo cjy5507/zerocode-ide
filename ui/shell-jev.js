@@ -126,14 +126,14 @@ function moveJevSeat(seat, mode, said) {
  * said once here rather than in seven rows of markup. */
 function jevLineWords(line) {
   switch (line) {
-    case "too_few_rows": return t("settings.typesafe.lineTooFewRows", "행이 더 쌓여야 합니다");
-    case "answered": return t("settings.typesafe.lineAnswered", "답한 비율이 모자랍니다");
-    case "latency": return t("settings.typesafe.lineLatency", "답이 너무 늦습니다");
-    case "schema": return t("settings.typesafe.lineSchema", "형식이 깨진 답이 있었습니다");
-    case "too_few_compared": return t("settings.typesafe.lineTooFewCompared", "프로브와 견줄 답이 더 쌓여야 합니다");
-    case "agreement": return t("settings.typesafe.lineAgreement", "프로브와 다른 답이 너무 잦습니다");
-    case "labels": return t("settings.typesafe.lineLabels", "라벨이 프로브 쪽을 가리킵니다");
-    case "fallbacks": return t("settings.typesafe.lineFallbacks", "연달아 되돌아갔습니다");
+    case "too_few_rows": return t("settings.typesafe.lineTooFewRows", "판단 기록이 더 쌓여야 합니다");
+    case "answered": return t("settings.typesafe.lineAnswered", "응답률이 기준에 못 미칩니다");
+    case "latency": return t("settings.typesafe.lineLatency", "응답이 너무 느립니다");
+    case "schema": return t("settings.typesafe.lineSchema", "형식이 잘못된 응답이 있었습니다");
+    case "too_few_compared": return t("settings.typesafe.lineTooFewCompared", "정확도를 비교할 표본이 더 필요합니다");
+    case "agreement": return t("settings.typesafe.lineAgreement", "정확도가 기준에 못 미칩니다");
+    case "labels": return t("settings.typesafe.lineLabels", "사람의 평가에서 기존 방식이 더 나았습니다");
+    case "fallbacks": return t("settings.typesafe.lineFallbacks", "연속으로 기존 방식으로 되돌아갔습니다");
     default: return "";
   }
 }
@@ -144,42 +144,44 @@ function jevLineWords(line) {
  * joined; a seat nothing has asked yet is one sentence. */
 function jevSeatWords(held) {
   if (held.week.rows === 0) {
-    return [t("settings.typesafe.seatNeverAsked", "아직 아무것도 묻지 않았습니다.")];
+    return [t("settings.typesafe.seatNeverAsked", "아직 사용된 적이 없습니다.")];
   }
-  const words = [t("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}} 답함", {
-    today: String(held.today.rows),
-    rows: String(held.week.rows),
-    answered: String(held.week.answered),
+  const words = [t("settings.typesafe.seatCounts", "오늘 {{today}}건 · 7일 {{rows}}건 중 {{answered}}건 응답", {
+    today: jevCount(held.today.rows),
+    rows: jevCount(held.week.rows),
+    answered: jevCount(held.week.answered),
   })];
   if (held.week.p95Ms !== null && held.week.p95Ms !== undefined) {
-    words.push(t("settings.typesafe.seatP95", "p95 {{ms}} ms", { ms: String(held.week.p95Ms) }));
+    words.push(t("settings.typesafe.seatP95", "느릴 때 {{ms}} ms", { ms: jevMs(held.week.p95Ms) }));
   }
   const version = jevVersionWords(held);
   if (version) words.push(version);
   if (held.verdict) {
     const because = jevLineWords(held.verdict.line);
     words.push(held.applies
-      ? t("settings.typesafe.seatApplying", "근거가 서서 적용 중입니다.")
-      : t("settings.typesafe.seatHolding", "아직 기록만 합니다 — {{because}}", { because }));
+      ? t("settings.typesafe.seatApplying", "근거가 충분해 자동 적용 중입니다.")
+      : t("settings.typesafe.seatHolding", "기록만 하는 중 — {{because}}", { because }));
   }
   return words;
 }
 
-/* Which id the seat asked with and which version answered it (t-6187): the
- * pin or the alias beside the `model` the newest answer named. Empty for a
- * seat nothing answered, or from a zo older than the pin. The card and the
- * dashboard both read it here, so the two say it the same way. */
+/* Which version the seat's judgments come from (t-6187): the pin, when the
+ * person pinned one — every request names it — and otherwise the version the
+ * newest answer named. Empty for a seat nothing answered, or from a zo older
+ * than the pin. The card and the dashboard both read it here, so the two say
+ * it the same way. */
 function jevModelWords(held) {
   if (!held.model || !held.askedModel) return "";
-  return t("settings.typesafe.seatVersion", "물은 {{asked}} · 답한 {{model}}",
-    { asked: held.askedModel, model: held.model });
+  return typesafeState?.model?.pinned
+    ? t("settings.typesafe.seatVersionPinned", "고정 모델 {{model}}", { model: held.askedModel })
+    : t("settings.typesafe.seatVersion", "모델 {{model}}", { model: held.model });
 }
 
 /* The version a change of version cut away from the judged window, when one
  * did — the reason a thin window gives for itself. */
 function jevCutWords(held) {
   if (!held.verdict?.cutModel) return "";
-  return t("settings.typesafe.seatCut", "{{cut}} 행은 창에서 뺌", { cut: held.verdict.cutModel });
+  return t("settings.typesafe.seatCut", "이전 버전 {{cut}}의 기록은 제외", { cut: held.verdict.cutModel });
 }
 
 /* The card's version line: the models, the rows the judged window holds and
@@ -189,8 +191,8 @@ function jevVersionWords(held) {
   if (!models) return "";
   const words = [models];
   if (held.judged) {
-    words.push(t("settings.typesafe.seatWindowRows", "창 안 {{rows}}행",
-      { rows: String(held.judged.window.rows) }));
+    words.push(t("settings.typesafe.seatWindowRows", "판정 표본 {{rows}}건",
+      { rows: jevCount(held.judged.window.rows) }));
   }
   const cut = jevCutWords(held);
   if (cut) words.push(cut);
@@ -246,26 +248,27 @@ function jevNode(tag, className, ...children) {
 
 /* The dashboard's columns, in order: the key each head is read under and
  * the attribute the cell is found by. One table, so the head and the row
- * cannot disagree about what stands where. */
+ * cannot disagree about what stands where. A head whose number needs its
+ * meaning said once carries that sentence as its tip (`tipKey`, `tip`). */
 const JEV_COLUMNS = Object.freeze([
-  { cell: "seat", key: "jev.col.seat", word: "자리" },
-  { cell: "mode", key: "jev.col.mode", word: "모드" },
-  { cell: "rows", key: "jev.col.rows", word: "행 (오늘 · 7일) · 거절" },
-  { cell: "answered", key: "jev.col.answered", word: "답률 (95% 하한)" },
-  { cell: "latency", key: "jev.col.latency", word: "p50 / p95 ms" },
-  { cell: "acted", key: "jev.col.acted", word: "적용 · 일치" },
+  { cell: "seat", key: "jev.col.seat", word: "기능" },
+  { cell: "mode", key: "jev.col.mode", word: "설정" },
+  { cell: "rows", key: "jev.col.rows", word: "판단 요청 (오늘 / 7일)" },
+  { cell: "answered", key: "jev.col.answered", word: "응답률 (신뢰 하한)", tipKey: "jev.col.answeredTip", tip: "응답률은 판단을 요청한 것 중 응답을 받은 비율이고, 신뢰 하한은 표본이 적을 때를 감안한 보수적인 값입니다." },
+  { cell: "latency", key: "jev.col.latency", word: "응답 시간" },
+  { cell: "acted", key: "jev.col.acted", word: "실제 적용 · 정확도", tipKey: "jev.col.actedTip", tip: "정확도는 판단이 기존 방식의 판단이나 나중에 확인된 결과와 같았던 비율입니다." },
   { cell: "cost", key: "jev.col.cost", word: "비용 (USD)" },
-  { cell: "why", key: "jev.col.why", word: "오르지 못하는 이유" },
-  { cell: "trend", key: "jev.col.trend", word: "7일 추이 (답률 · 일치율 · p50)" },
+  { cell: "why", key: "jev.col.why", word: "상태와 다음 단계" },
+  { cell: "trend", key: "jev.col.trend", word: "지난 7일 (응답률 · 정확도 · 응답 시간)" },
 ]);
 
 /* The three lines a seat's trend cell draws, each read off one day's count:
  * the share that answered, the share that agreed, and the p50. */
 const JEV_TRENDS = Object.freeze([
-  { line: "answered", key: "jev.trend.answered", word: "답률", read: (day) => day.tally.answeredShare ?? null, unit: "share" },
-  { line: "agreement", key: "jev.trend.agreement", word: "일치율",
+  { line: "answered", key: "jev.trend.answered", word: "응답률", read: (day) => day.tally.answeredShare ?? null, unit: "share" },
+  { line: "agreement", key: "jev.trend.agreement", word: "정확도",
     read: (day) => (day.agreement?.compared ? day.agreement.agreed / day.agreement.compared : null), unit: "share" },
-  { line: "p50", key: "jev.trend.p50", word: "p50", read: (day) => day.tally.p50Ms ?? null, unit: "ms" },
+  { line: "p50", key: "jev.trend.p50", word: "응답 시간", read: (day) => day.tally.p50Ms ?? null, unit: "ms" },
 ]);
 
 function buildJevView() {
@@ -282,7 +285,7 @@ function buildJevView() {
   const heading = jevNode("div", "jev-heading",
     jevNode("p", "jev-eyebrow", document.createTextNode("TYPESAFE · JEV")),
     jevText("jev.title", "Jev 대시보드", "h1", "jev-title"),
-    jevText("jev.about", "자리마다 무엇을 얼마나 물었고, 얼마나 맞았고, 왜 아직 오르지 못하는지를 원장 그대로 봅니다.", "p", "jev-about"));
+    jevText("jev.about", "기능별로 AI에게 판단을 몇 번 맡겼고, 얼마나 정확했고, 자동 적용까지 무엇이 남았는지 보여 줍니다.", "p", "jev-about"));
   const freshness = jevNode("span", "jev-freshness");
   freshness.setAttribute("role", "status");
   const refresh = jevText("jev.refresh", "새로 고침", "button", "btn jev-refresh");
@@ -303,6 +306,13 @@ function buildJevView() {
   for (const column of JEV_COLUMNS) {
     const cell = jevText(column.key, column.word, "th", `jev-col-${column.cell}`);
     cell.scope = "col";
+    if (column.tipKey) {
+      // `applyLocale` re-reads the tip from its key when the language moves,
+      // the way it re-reads the head's words.
+      cell.dataset.i18nTitle = column.tipKey;
+      cell.dataset.i18nSourcedatatip = column.tip;
+      cell.dataset.tip = t(column.tipKey, column.tip);
+    }
     head.append(cell);
   }
   const body = document.createElement("tbody");
@@ -313,13 +323,13 @@ function buildJevView() {
   const picker = document.createElement("select");
   picker.className = "settings-input jev-recent-seat";
   picker.dataset.i18nAria = "jev.recent.seat";
-  picker.setAttribute("aria-label", t("jev.recent.seat", "자리 고르기"));
+  picker.setAttribute("aria-label", t("jev.recent.seat", "기능 선택"));
   const list = document.createElement("ol");
   list.className = "jev-recent-list";
-  const empty = jevText("jev.recent.empty", "이 자리에는 아직 결정이 없습니다.", "p", "jev-recent-empty");
+  const empty = jevText("jev.recent.empty", "아직 판단 기록이 없습니다.", "p", "jev-recent-empty");
   empty.hidden = true;
   root.append(jevNode("section", "jev-recent",
-    jevNode("header", "jev-recent-head", jevText("jev.recent.title", "최근 결정", "h2", "jev-recent-title"), picker),
+    jevNode("header", "jev-recent-head", jevText("jev.recent.title", "최근 판단", "h2", "jev-recent-title"), picker),
     list, empty));
   return root;
 }
@@ -424,14 +434,52 @@ function jevPercent(share) {
   return `${Math.round(share * 100)}%`;
 }
 
-function jevMs(ms) {
-  return ms === null || ms === undefined ? "—" : String(ms);
+/* A seat's line for acting by itself, which the core keeps per thousand
+ * (`riseFloorPermille`), said as the percent a person reads; a line between
+ * two whole percents keeps its one decimal rather than being rounded across. */
+function jevFloor(permille) {
+  return `${Number((permille / 10).toFixed(1))}%`;
 }
 
-/* A week of judgments costs cents: four places under a dollar, two above. */
+/* A week of judgments costs cents, so a cost keeps three significant digits
+ * whatever its size (plan §시각화 의미 정합): $0.0173, $0.00109, $12.3. */
+const JEV_COST_DIGITS = 3;
+/* The number formats of the language in force, made once per language: a
+ * formatter is not free to build, and a paint formats every cell. */
+let jevNumbersLang = null;
+let jevCountFormat = null;
+let jevCostFormat = null;
+
+function jevFormats() {
+  const lang = document.documentElement.lang || undefined;
+  if (jevCountFormat === null || lang !== jevNumbersLang) {
+    jevNumbersLang = lang;
+    jevCountFormat = new Intl.NumberFormat(lang);
+    jevCostFormat = new Intl.NumberFormat(lang, { maximumSignificantDigits: JEV_COST_DIGITS });
+  }
+  return { count: jevCountFormat, cost: jevCostFormat };
+}
+
+/* A count as the language in force groups its digits (1,321). */
+function jevCount(value) {
+  return value === null || value === undefined ? "—" : jevFormats().count.format(value);
+}
+
+function jevMs(ms) {
+  return ms === null || ms === undefined ? "—" : jevCount(ms);
+}
+
 function jevCost(usd) {
   if (usd === null || usd === undefined) return "—";
-  return `$${usd.toFixed(usd < 1 ? 4 : 2)}`;
+  return `$${jevFormats().cost.format(usd)}`;
+}
+
+/* How long a seat's answers take: the typical wait, and the slow one beside
+ * it when there is one. */
+function jevLatencyWords(week) {
+  if (week.p50Ms === null || week.p50Ms === undefined) return "—";
+  if (week.p95Ms === null || week.p95Ms === undefined) return `${jevMs(week.p50Ms)} ms`;
+  return t("jev.latency", "{{p50}} ms (느릴 때 {{p95}})", { p50: jevMs(week.p50Ms), p95: jevMs(week.p95Ms) });
 }
 
 /* One polyline over the week's days, the newest at the right; a day with
@@ -504,11 +552,11 @@ function jevWhyCell(held, byHand) {
   const because = held.verdict ? jevLineWords(held.verdict.line) : "";
   if (held.week.rows === 0) verdict.textContent = words[0];
   else if (held.applies && byHand && held.verdict) {
-    verdict.textContent = t("jev.byHand", "직접 켜서 적용 중 — 판정은 「{{because}}」", { because });
+    verdict.textContent = t("jev.byHand", "직접 켜서 적용 중 — {{because}}", { because });
   } else if (held.applies && byHand) {
-    verdict.textContent = t("jev.byHandNoJudge", "직접 켜서 적용 중 — 이 자리는 승격하지 않습니다");
+    verdict.textContent = t("jev.byHandNoJudge", "직접 켜서 적용 중 — 이 기능은 자동 적용 대상이 아닙니다");
   } else if (!held.applies && !held.verdict) {
-    verdict.textContent = t("jev.neverRises", "이 자리는 승격하지 않습니다 — 기록만");
+    verdict.textContent = t("jev.neverRises", "자동 적용 대상이 아니라 기록만 합니다");
   } else verdict.textContent = words.at(-1) ?? "";
   cell.append(verdict);
   if (held.week.rows === 0) return cell;
@@ -516,18 +564,18 @@ function jevWhyCell(held, byHand) {
   const models = jevModelWords(held);
   if (models) facts.push(models);
   if (held.judged) {
-    facts.push(t("jev.window", "창 {{rows}}/{{wanted}}행", {
-      rows: String(held.judged.window.rows), wanted: String(held.judged.windowWanted) }));
+    facts.push(t("jev.window", "판정 표본 {{rows}}/{{wanted}}건", {
+      rows: jevCount(held.judged.window.rows), wanted: jevCount(held.judged.windowWanted) }));
   }
   const cut = jevCutWords(held);
   if (cut) facts.push(cut);
   if (held.clearsRiseFloor !== null && held.clearsRiseFloor !== undefined) {
     facts.push(held.clearsRiseFloor
-      ? t("jev.clearsFloor", "답률 하한이 문턱({{floor}}‰)을 넘음", { floor: String(held.riseFloorPermille) })
-      : t("jev.underFloor", "답률 하한이 문턱({{floor}}‰) 아래", { floor: String(held.riseFloorPermille) }));
+      ? t("jev.clearsFloor", "응답률 신뢰 하한이 자동 적용 기준({{floor}}) 이상", { floor: jevFloor(held.riseFloorPermille) })
+      : t("jev.underFloor", "응답률 신뢰 하한이 자동 적용 기준({{floor}}) 미만", { floor: jevFloor(held.riseFloorPermille) }));
   }
   if (held.rowsToNextJudgment !== null && held.rowsToNextJudgment !== undefined) {
-    facts.push(t("jev.rowsToJudgment", "다음 판정까지 {{rows}}행", { rows: String(held.rowsToNextJudgment) }));
+    facts.push(t("jev.rowsToJudgment", "다음 판정까지 {{rows}}건", { rows: jevCount(held.rowsToNextJudgment) }));
   }
   if (facts.length > 0) {
     const line = jevNode("p", "jev-why-facts");
@@ -539,14 +587,14 @@ function jevWhyCell(held, byHand) {
 
 function jevRefusalWords(window) {
   const refusals = window.refusals ?? [];
-  if (refusals.length === 0) return window.refused > 0 ? String(window.refused) : "—";
-  return refusals.map((one) => `${one.token} ${one.rows}`).join(" · ");
+  if (refusals.length === 0) return window.refused > 0 ? jevCount(window.refused) : "—";
+  return refusals.map((one) => `${one.token} ${jevCount(one.rows)}`).join(" · ");
 }
 
 function jevAgreementWords(held) {
   const agreement = held.judged?.agreement;
   if (!agreement || !agreement.compared) return "—";
-  return `${agreement.agreed}/${agreement.compared} (${jevPercent(agreement.lowerBound)})`;
+  return `${jevCount(agreement.agreed)}/${jevCount(agreement.compared)} (${jevPercent(agreement.lowerBound)})`;
 }
 
 /* Draw the table and the recent list from what is in hand: the switches
@@ -589,7 +637,7 @@ function paintJevView(view) {
       select.value = standing.mode;
       select.disabled = typesafeBusy;
       select.hidden = false;
-      select.setAttribute("aria-label", `${t("jev.col.mode", "모드")} · ${jevSeatName(id)}`);
+      select.setAttribute("aria-label", `${t("jev.col.mode", "설정")} · ${jevSeatName(id)}`);
     } else {
       select.hidden = true;
     }
@@ -614,8 +662,8 @@ function paintJevView(view) {
     };
     const rows = cell("rows");
     rows.replaceChildren(
-      fact("today", String(held.today.rows), "jev-fact-strong"), document.createTextNode(" · "),
-      fact("week", String(held.week.rows)));
+      fact("today", jevCount(held.today.rows), "jev-fact-strong"), document.createTextNode(" · "),
+      fact("week", jevCount(held.week.rows)));
     if (held.week.refused > 0) {
       rows.append(document.createElement("br"), fact("refusals", jevRefusalWords(held.week), "jev-fact-mist"));
     }
@@ -625,12 +673,12 @@ function paintJevView(view) {
       share.textContent = "—";
     } else {
       share.append(fact("share", jevPercent(held.week.answeredShare), "jev-share"), document.createTextNode(" "),
-        fact("bound", t("jev.bound", "하한 {{pct}}", { pct: jevPercent(held.week.answeredLowerBound) }), "jev-bound"));
+        fact("bound", t("jev.bound", "신뢰 하한 {{pct}}", { pct: jevPercent(held.week.answeredLowerBound) }), "jev-bound"));
     }
-    cell("latency").textContent = `${jevMs(held.week.p50Ms)} / ${jevMs(held.week.p95Ms)}`;
+    cell("latency").textContent = jevLatencyWords(held.week);
     const acted = cell("acted");
     acted.replaceChildren(
-      fact("applied", held.week.rows === 0 ? "—" : String(held.week.applied ?? 0)), document.createTextNode(" · "),
+      fact("applied", held.week.rows === 0 ? "—" : jevCount(held.week.applied ?? 0)), document.createTextNode(" · "),
       fact("agreement", jevAgreementWords(held)));
     cell("cost").textContent = jevCost(held.costUsd);
     cell("trend").replaceChildren(jevTrendCell(held));
@@ -647,22 +695,22 @@ function paintJevFreshness(view) {
   const line = view.querySelector(".jev-freshness");
   const error = view.querySelector(".jev-error");
   if (jevNumbersError) {
-    error.textContent = t("jev.unavailable", "zo가 원장을 세지 못했습니다 — {{error}}", { error: jevNumbersError });
+    error.textContent = t("jev.unavailable", "기록을 집계하지 못했습니다 — {{error}}", { error: jevNumbersError });
     error.hidden = false;
   } else {
     error.hidden = true;
     error.textContent = "";
   }
   if (jevNumbersAt === 0) {
-    line.textContent = t("jev.loading", "원장을 세는 중…");
+    line.textContent = t("jev.loading", "기록을 집계하는 중…");
     return;
   }
   // "just now" is not a distance, so it does not take "ago".
   const ago = agoWord(jevNumbersAt, Date.now());
   const ms = String(jevNumbersCostMs ?? 0);
   line.textContent = ago === t("board.justNow", "방금")
-    ? t("jev.freshNow", "방금 갱신 · zo {{ms}} ms", { ms })
-    : t("jev.fresh", "{{ago}} 전 갱신 · zo {{ms}} ms", { ago, ms });
+    ? t("jev.freshNow", "방금 갱신 · 집계 {{ms}} ms", { ms })
+    : t("jev.fresh", "{{ago}} 전 갱신 · 집계 {{ms}} ms", { ago, ms });
 }
 
 /* One decision as a line: when, what became of it, what it was asked (the
@@ -677,7 +725,7 @@ function jevDecisionNode(decision, now) {
   when.textContent = agoWord(decision.at, now);
   when.dataset.tip = new Date(decision.at).toLocaleString();
   const outcome = jevNode("span", "jev-decision-outcome");
-  outcome.textContent = decision.outcome === "answered" ? t("jev.answered", "답함") : decision.outcome;
+  outcome.textContent = decision.outcome === "answered" ? t("jev.answered", "응답") : decision.outcome;
   const asked = jevNode("span", "jev-decision-asked");
   asked.textContent = Object.entries(decision.asked ?? {}).map(([key, value]) => `${key}: ${value}`).join(" · ");
   const answered = jevNode("span", "jev-decision-answer");
@@ -688,13 +736,13 @@ function jevDecisionNode(decision, now) {
   } else answered.textContent = String(answer);
   const marks = [];
   if (decision.confidence !== null && decision.confidence !== undefined) {
-    marks.push(t("jev.confidence", "확신 {{pct}}", { pct: jevPercent(decision.confidence) }));
+    marks.push(t("jev.confidence", "확신도 {{pct}}", { pct: jevPercent(decision.confidence) }));
   }
-  if (decision.applied === true) marks.push(t("jev.applied", "적용"));
-  else if (decision.applied === false) marks.push(t("jev.recorded", "기록만"));
+  if (decision.applied === true) marks.push(t("jev.applied", "적용됨"));
+  else if (decision.applied === false) marks.push(t("jev.recorded", "기록만 (미적용)"));
   if (decision.agreed === true) marks.push(t("jev.agreed", "일치"));
   else if (decision.agreed === false) marks.push(t("jev.disagreed", "불일치"));
-  if (decision.followed) marks.push(t("jev.followed", "그 뒤 {{word}}", { word: decision.followed }));
+  if (decision.followed) marks.push(t("jev.followed", "이후 {{word}}", { word: decision.followed }));
   if (decision.elapsedMs !== null && decision.elapsedMs !== undefined) marks.push(`${decision.elapsedMs} ms`);
   const mark = jevNode("span", "jev-decision-marks");
   mark.textContent = marks.join(" · ");
