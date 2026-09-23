@@ -44,6 +44,10 @@ struct Tick {
     /// A judgment that had crossed the first threshold, withdrawn because
     /// its witness was not there for it.
     voided: Option<Voided>,
+    /// How long a hang first seen still unanswered really lasted, said on
+    /// the beat its answer arrives. The hang line's own number is only when
+    /// it was seen, which for such a hang is always the first threshold.
+    ended: Option<u64>,
 }
 
 /// One beat of the observer, as its own clocks saw it.
@@ -160,6 +164,7 @@ impl Watch {
             // Judge when the main thread answered, not when THIS thread was
             // next scheduled. A busy diagnostics thread cannot frame a healthy UI.
             let ms = answered.unwrap_or(now).saturating_sub(sent);
+            let seen_open = self.noted;
             if !self.noted && ms >= limits.first_ms {
                 self.noted = true;
                 self.count += 1;
@@ -171,6 +176,9 @@ impl Watch {
             }
             if answered.is_none() {
                 return tick;
+            }
+            if seen_open {
+                tick.ended = Some(ms);
             }
         }
         self.pending = Some(now);
@@ -246,6 +254,14 @@ impl Monitor {
             crate::note_window_event(
                 app.state::<crate::AppState>().local_data_root(),
                 &format!("hang withdrawn: {ms}ms {why}"),
+            );
+        }
+        if let Some(ms) = tick.ended {
+            // The hang's real length, the number a week of these is read by.
+            crate::crumbs::record("hang_ended", format_args!("ms={ms}"));
+            crate::note_window_event(
+                app.state::<crate::AppState>().local_data_root(),
+                &format!("hang ended: {ms}ms"),
             );
         }
         if tick.ping {
@@ -630,5 +646,41 @@ mod tests {
         };
         assert!(hang >= limits.first_ms && hang < limits.first_ms + limits.ping_ms + jitter);
         assert_eq!(watch.count, 1);
+    }
+
+    /// A hang first seen still unanswered is reported at the first
+    /// threshold, whatever its length; the beat its answer arrives on says
+    /// how long it really was, once. One answered before it was seen needs
+    /// no second line: the hang line already carries its whole length.
+    #[test]
+    fn a_hang_seen_open_says_how_long_it_really_lasted() {
+        let limits = Limits::DEFAULT;
+        let mut watch = Watch::new(0);
+        let sent = limits.warmup_ms;
+        let answered = sent + 9_000;
+        let mut now = sent;
+        assert!(watch.step(beat(now), None, limits).ping);
+        let mut seen_at = None;
+        while now + limits.ping_ms < answered {
+            now += limits.ping_ms;
+            let tick = watch.step(beat(now), None, limits);
+            assert_eq!(tick.ended, None);
+            seen_at = seen_at.or(tick.hang);
+        }
+        assert_eq!(seen_at, Some(limits.first_ms));
+        let tick = watch.step(beat(now + limits.ping_ms), Some(answered), limits);
+        assert_eq!(tick.ended, Some(9_000));
+        assert!(tick.ping);
+        assert_eq!(
+            watch
+                .step(beat(now + limits.ping_ms * 2), None, limits)
+                .ended,
+            None
+        );
+
+        let mut quick = Watch::new(0);
+        assert!(quick.step(beat(sent), None, limits).ping);
+        let tick = quick.step(beat(sent + 2_300), Some(sent + 2_266), limits);
+        assert_eq!((tick.hang, tick.ended), (Some(2_266), None));
     }
 }
