@@ -1379,10 +1379,27 @@ pub fn bash_result_exited_zero(output: &str) -> bool {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
         return false;
     };
-    value.get("stdout").is_some_and(serde_json::Value::is_string)
+    bash_result_completed(&value)
         && value
             .get("returnCodeInterpretation")
             .is_none_or(serde_json::Value::is_null)
+}
+
+/// An explicitly failed foreground bash result. A timeout or a background
+/// launch is no command's observed exit, so neither contradicts a pass claim.
+pub(super) fn bash_result_exited_nonzero(output: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return false;
+    };
+    bash_result_completed(&value)
+        && value.get("returnCodeInterpretation").and_then(serde_json::Value::as_str)
+            .and_then(|word| word.strip_prefix("exit_code:"))
+            .and_then(|code| code.parse::<i32>().ok())
+            .is_some_and(|code| code != 0)
+}
+
+fn bash_result_completed(value: &serde_json::Value) -> bool {
+    value.get("stdout").is_some_and(serde_json::Value::is_string)
         && value.get("interrupted").and_then(serde_json::Value::as_bool) != Some(true)
         && value
             .get("backgroundTaskId")

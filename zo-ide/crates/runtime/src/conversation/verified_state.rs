@@ -89,7 +89,7 @@ use crate::verified_state::{VerifiedStateEvent, VERIFIED_STATE_REMINDER_PREFIX};
 /// the `tool_use` block the turn-end fold used to join by id: a hook that
 /// rewrites a command changes what ran, and the ledger must record the command
 /// whose exit 0 was observed, not the one that was proposed.
-fn tool_verified_state_events(
+pub(super) fn tool_verified_state_events(
     result_message: &ConversationMessage,
     tool_input: &str,
 ) -> Vec<VerifiedStateEvent> {
