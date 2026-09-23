@@ -100,13 +100,160 @@ const LEGACY_OPENAI_SOURCE: &str = "codex-cache";
 pub const ANTHROPIC_SOURCE: &str = "anthropic-api";
 pub const GOOGLE_API_SOURCE: &str = "google-api";
 pub const ANTIGRAVITY_SOURCE: &str = "antigravity-registry";
-/// Every source, in report order: `(provider, source)`.
-pub const SOURCES: [(&str, &str); 4] = [
-    ("openai", OPENAI_SOURCE),
-    ("anthropic", ANTHROPIC_SOURCE),
-    ("google", GOOGLE_API_SOURCE),
-    ("google", ANTIGRAVITY_SOURCE),
+pub const XAI_SOURCE: &str = "xai-api";
+pub const KIMI_CODE_SOURCE: &str = "kimi-code";
+
+/// One source of model lists: whose rows it answers, what its credential is
+/// called, where it asks, and what it says when it cannot ask. Every source
+/// is one row of [`SOURCES`] and nowhere else — the report order, the
+/// connection rule, the fetchers and the words a report carries all read the
+/// row, so a source cannot say "skipped" in one place and fail in another.
+#[derive(Debug)]
+pub struct Source {
+    /// The catalog provider key of the rows it answers.
+    pub provider: &'static str,
+    /// The report's source key.
+    pub key: &'static str,
+    /// The credential as a failure names it: `<credential> credential present
+    /// but not usable: <why>`.
+    pub credential: &'static str,
+    /// What a skip says when nothing is configured: `skipped: <absent>`.
+    pub absent: &'static str,
+    /// Where the source lists its models — the same function its fetcher
+    /// asks, so the table and the request cannot name two endpoints.
+    pub models_url: fn() -> String,
+    /// Whether this process holds a credential for the source — configured,
+    /// not necessarily usable. Offline and cheap (an environment variable, a
+    /// file, a keychain item's existence), never a refresh: the connection
+    /// rule asks it of a skip another process may have written (t-6248).
+    pub configured: fn() -> bool,
+    /// Ask the source, blocking.
+    pub ask: fn() -> SourceAnswer,
+    /// The answer is every model the login may use — so a shipped row of the
+    /// provider it does not name was withdrawn ([`Withdrawn`]). A registry
+    /// that folds tiered ids, or a key list beside an OAuth route, is not.
+    pub lists_every_model: bool,
+    /// Refusals the endpoint spells for itself: a marker its body carries,
+    /// and the words a report says instead of the raw body — xAI's
+    /// `spending-limit` is an account without credits, not a bad key.
+    pub refusals: &'static [(&'static str, &'static str)],
+}
+
+impl Source {
+    /// The report's words for a credential this source could not use:
+    /// nothing configured is a skip, something configured that did not work
+    /// is a failure — whose rows [`carry_forward`] keeps and whose report
+    /// the next connection asks again (t-6248).
+    #[must_use]
+    pub fn miss(&self, miss: api::CredentialMiss) -> (String, String) {
+        let detail = match miss {
+            api::CredentialMiss::Absent => format!("skipped: {}", self.absent),
+            api::CredentialMiss::Unusable(why) => {
+                format!("{} credential present but not usable: {why}", self.credential)
+            }
+        };
+        (self.key.to_string(), detail)
+    }
+
+    /// The report's words for an answer that is not a success: the row's own
+    /// sentence when the body carries a marker it knows, else the status
+    /// and the head of the body.
+    #[must_use]
+    pub fn refused(&self, status: &str, body: &str) -> String {
+        self.refusals
+            .iter()
+            .find(|(marker, _)| body.contains(marker))
+            .map_or_else(
+                || format!("HTTP {status}: {}", body.chars().take(160).collect::<String>()),
+                |(_, words)| format!("HTTP {status}: {words}"),
+            )
+    }
+}
+
+/// Every source, in report order.
+pub const SOURCES: [Source; 6] = [
+    Source {
+        provider: "openai",
+        key: OPENAI_SOURCE,
+        credential: "ChatGPT",
+        absent: "no ChatGPT login",
+        models_url: chatgpt_models_url,
+        configured: api::openai_login_configured,
+        ask: openai_models,
+        lists_every_model: true,
+        refusals: &[],
+    },
+    Source {
+        provider: "anthropic",
+        key: ANTHROPIC_SOURCE,
+        credential: "claude",
+        absent: "no Anthropic credential",
+        models_url: anthropic_models_url,
+        configured: api::claude_credential_configured,
+        ask: anthropic_models,
+        lists_every_model: true,
+        refusals: &[],
+    },
+    Source {
+        provider: "google",
+        key: GOOGLE_API_SOURCE,
+        credential: "Google API key",
+        absent: "no Google API key (OAuth registries serve tiered ids)",
+        models_url: google_models_url,
+        configured: google_api_key_configured,
+        ask: google_models,
+        lists_every_model: false,
+        refusals: &[],
+    },
+    Source {
+        provider: "google",
+        key: ANTIGRAVITY_SOURCE,
+        credential: "Google (Antigravity)",
+        absent: "no Google (Antigravity) login",
+        models_url: antigravity_models_url,
+        configured: api::google_code_assist_oauth_present,
+        ask: antigravity_models,
+        lists_every_model: false,
+        refusals: &[],
+    },
+    Source {
+        provider: "xai",
+        key: XAI_SOURCE,
+        credential: "xAI",
+        absent: "no xAI key or Grok CLI login",
+        models_url: xai_models_url,
+        configured: api::xai_credential_configured,
+        ask: xai_models,
+        lists_every_model: true,
+        refusals: &[(
+            "spending-limit",
+            "no subscription or credits on this xAI account — add credits or a Grok subscription (the login itself was accepted)",
+        )],
+    },
+    Source {
+        provider: "kimi",
+        key: KIMI_CODE_SOURCE,
+        credential: "Kimi Code",
+        absent: "no Kimi Code login",
+        models_url: api::kimi_code_models_url,
+        configured: api::kimi_code_login_configured,
+        ask: kimi_code_models,
+        lists_every_model: true,
+        refusals: &[],
+    },
 ];
+
+/// The row of [`SOURCES`] keyed `key`.
+#[must_use]
+pub fn source(key: &str) -> Option<&'static Source> {
+    SOURCES.iter().find(|source| source.key == key)
+}
+
+/// The row a fetcher belongs to. Every fetcher is named by its own row, so a
+/// missing one is a table that lost a row, not a runtime condition.
+fn row(key: &str) -> &'static Source {
+    source(key).unwrap_or_else(|| unreachable!("{key} is a row of SOURCES"))
+}
 /// The report's word for rows that came from the provider just now.
 pub const ORIGIN_LIVE: &str = "live";
 /// The report's word for rows a failed refresh kept from the previous one.
@@ -271,21 +418,28 @@ pub struct SourceReport {
 
 impl SourceReport {
     /// Whether this source has to be asked again at a connection — never
-    /// answered, failed last time, or answered longer than `ttl_secs` ago.
+    /// answered, failed last time, answered longer than `ttl_secs` ago, or
+    /// skipped for a credential this process holds.
     ///
     /// A SKIP is an answer, not a failure: "no Google API key" is a fact
-    /// about this machine, dated like any other answer, and asking it again
-    /// on every connection re-stamps the cache for nothing. Left as "due",
-    /// a keyless source made every catalog publish spawn a refresh that
-    /// rewrote `discovered.json` (33 a second under a status line that
-    /// resolves an alias per paint, 2026-09-08). A failure is asked again at
-    /// the next connection, as before.
+    /// about the machine that wrote it, dated like any other answer, and
+    /// asking it again on every connection re-stamps the cache for nothing.
+    /// Left as "due", a keyless source made every catalog publish spawn a
+    /// refresh that rewrote `discovered.json` (33 a second under a status
+    /// line that resolves an alias per paint, 2026-09-08). But the cache is
+    /// shared, so the process reading a skip may hold the very credential the
+    /// writer lacked — then the skip is not its answer, and `configured`
+    /// (asked only of a skip) makes it due at once (t-6248). A failure is
+    /// asked again at the next connection, as before.
     #[must_use]
-    pub fn due(&self, now_secs: u64, ttl_secs: u64) -> bool {
+    pub fn due(&self, now_secs: u64, ttl_secs: u64, configured: impl FnOnce() -> bool) -> bool {
         if self.fetched_at == 0 || now_secs.saturating_sub(self.fetched_at) >= ttl_secs {
             return true;
         }
-        !self.ok && !self.skipped()
+        if self.ok {
+            return false;
+        }
+        !self.skipped() || configured()
     }
 
     /// A source that was deliberately not asked — no key, no login.
@@ -293,6 +447,25 @@ impl SourceReport {
     pub fn skipped(&self) -> bool {
         self.detail.starts_with("skipped:")
     }
+}
+
+/// A shipped model the provider's whole list no longer names (t-6248, C4):
+/// `gpt-5.3-codex-spark` after Codex dropped it, answering "not supported
+/// when using Codex with a ChatGPT account". The row stays — a selected
+/// model never vanishes, and the wire decides — but the picker and `zo
+/// models` say it left the list and when, automatic routing stops choosing
+/// it, and a family alias that named it moves to the newest living release
+/// of its family or says there is none.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Withdrawn {
+    /// Catalog provider key.
+    pub provider: String,
+    /// The shipped canonical id.
+    pub id: String,
+    /// The source whose list omits it.
+    pub source: String,
+    /// Unix seconds of the first answer that omitted it.
+    pub since: u64,
 }
 
 /// Everything the last refresh learned, as cached on disk.
@@ -304,6 +477,9 @@ pub struct DiscoveredCatalog {
     pub reports: Vec<SourceReport>,
     #[serde(default)]
     pub models: Vec<DiscoveredModel>,
+    /// Shipped rows the complete lists no longer name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub withdrawn: Vec<Withdrawn>,
 }
 
 impl DiscoveredCatalog {
@@ -335,6 +511,10 @@ pub struct Overlay {
     pub alias_updates: Vec<AliasUpdate>,
     /// Moves withheld by policy `notify`, for the person to act on.
     pub alias_candidates: Vec<AliasUpdate>,
+    /// Family aliases whose release left its provider's list with no living
+    /// release of the family to follow (`to` is empty): the alias stays where
+    /// it was — the wire decides — and the catalog says there is none.
+    pub orphaned: Vec<AliasUpdate>,
 }
 
 #[must_use]
@@ -431,33 +611,36 @@ pub type SourceAnswer = Result<Answered, (String, String)>;
 #[must_use]
 pub fn discover() -> DiscoveredCatalog {
     let previous = load_cached();
-    let every: Vec<&'static str> = SOURCES.iter().map(|(_, source)| *source).collect();
+    let every: Vec<&'static str> = SOURCES.iter().map(|source| source.key).collect();
     refresh_with(previous.as_ref(), &every, now_secs(), &selected_models(), ask)
 }
 
 /// Ask only the sources whose last answer is older than `ttl_secs` (or
-/// failed), and carry the others as they are — the connection rule, at a
-/// session start and when the `/model` picker opens.
+/// failed, or skipped for a credential this process holds), and carry the
+/// others as they are — the connection rule, at a session start and when the
+/// `/model` picker opens. `None` when nothing is due: there is no new answer
+/// to write.
 #[must_use]
-pub fn discover_due(now_secs: u64, ttl_secs: u64) -> DiscoveredCatalog {
+pub fn discover_due(now_secs: u64, ttl_secs: u64) -> Option<DiscoveredCatalog> {
     let previous = load_cached();
     let due = due_sources(previous.as_ref(), now_secs, ttl_secs);
-    refresh_with(previous.as_ref(), &due, now_secs, &selected_models(), ask)
+    (!due.is_empty()).then(|| refresh_with(previous.as_ref(), &due, now_secs, &selected_models(), ask))
 }
 
 /// The sources a connection at `now_secs` has to ask again: every source the
 /// previous catalog has no successful answer for that is younger than
-/// `ttl_secs`. Empty when nothing is due — the cheap case, the common one.
+/// `ttl_secs` ([`SourceReport::due`], each row's own `configured` asked of a
+/// skip). Empty when nothing is due — the cheap case, the common one.
 #[must_use]
 pub fn due_sources(previous: Option<&DiscoveredCatalog>, now_secs: u64, ttl_secs: u64) -> Vec<&'static str> {
     SOURCES
         .iter()
-        .map(|(_, source)| *source)
         .filter(|source| {
             previous
-                .and_then(|catalog| catalog.reports.iter().find(|report| report.source == *source))
-                .is_none_or(|report| report.due(now_secs, ttl_secs))
+                .and_then(|catalog| catalog.reports.iter().find(|report| report.source == source.key))
+                .is_none_or(|report| report.due(now_secs, ttl_secs, source.configured))
         })
+        .map(|source| source.key)
         .collect()
 }
 
@@ -476,7 +659,8 @@ pub fn refresh_with(
         fetched_at: now_secs,
         ..Default::default()
     };
-    for (provider, source) in SOURCES {
+    for Source { provider, key: source, .. } in &SOURCES {
+        let (provider, source) = (*provider, *source);
         if !due.contains(&source) {
             let carried = previous.and_then(|catalog| {
                 catalog
@@ -529,17 +713,95 @@ pub fn refresh_with(
         }
     }
     let catalog = carry_forward(catalog, previous);
-    keep_selected(catalog, previous, selected, now_secs)
+    let catalog = keep_selected(catalog, previous, selected, now_secs);
+    withdraw_shipped(catalog, previous, now_secs)
 }
 
-/// The real fetchers, by source key.
+/// The shipped rows each complete list ([`Source::lists_every_model`]) no
+/// longer names. An answer — live, cached or carried unchanged — decides
+/// afresh, keeping the date of the first omission; a failed source keeps
+/// the marks it had, as it keeps its rows; a skipped one knows nothing and
+/// marks nothing.
+#[must_use]
+pub fn withdraw_shipped(
+    mut fresh: DiscoveredCatalog,
+    previous: Option<&DiscoveredCatalog>,
+    now_secs: u64,
+) -> DiscoveredCatalog {
+    let mut withdrawn = Vec::new();
+    for source in SOURCES.iter().filter(|source| source.lists_every_model) {
+        let Some(report) = fresh.reports.iter().find(|report| report.source == source.key) else {
+            continue;
+        };
+        if report.ok {
+            let listed: HashSet<String> = fresh
+                .models
+                .iter()
+                .filter(|model| model.unlisted_since.is_none() && same_source(&model.source, source.key))
+                .map(|model| model.id.to_ascii_lowercase())
+                .collect();
+            let answered_at = if report.fetched_at == 0 { now_secs } else { report.fetched_at };
+            for id in shipped_canonicals(source.provider) {
+                if listed.contains(&id.to_ascii_lowercase()) {
+                    continue;
+                }
+                let since = previous
+                    .and_then(|previous| withdrawn_since_in(previous, id))
+                    .unwrap_or(answered_at);
+                withdrawn.push(Withdrawn {
+                    provider: source.provider.to_string(),
+                    id: id.to_string(),
+                    source: source.key.to_string(),
+                    since,
+                });
+            }
+        } else if !report.skipped() {
+            if let Some(previous) = previous {
+                withdrawn.extend(previous.withdrawn.iter().filter(|row| row.source == source.key).cloned());
+            }
+        }
+    }
+    fresh.withdrawn = withdrawn;
+    fresh
+}
+
+/// Every canonical id the shipped catalog carries for a provider key, once.
+fn shipped_canonicals(provider: &str) -> Vec<&'static str> {
+    let mut ids: Vec<&'static str> = Vec::new();
+    for entry in api::builtin_provider_catalog() {
+        if provider_key(entry.provider) == Some(provider)
+            && !ids.iter().any(|id| id.eq_ignore_ascii_case(entry.canonical_model_id))
+        {
+            ids.push(entry.canonical_model_id);
+        }
+    }
+    ids
+}
+
+/// When `catalog` saw `id` leave its provider's list, if it is a withdrawn
+/// shipped row.
+#[must_use]
+pub fn withdrawn_since_in(catalog: &DiscoveredCatalog, id: &str) -> Option<u64> {
+    catalog
+        .withdrawn
+        .iter()
+        .find(|row| row.id.eq_ignore_ascii_case(id))
+        .map(|row| row.since)
+}
+
+/// [`withdrawn_since_in`] over the process snapshot — what automatic routing
+/// reads before it chooses a model.
+#[must_use]
+pub fn withdrawn_since(id: &str) -> Option<u64> {
+    let catalog = current()?;
+    withdrawn_since_in(&catalog, id)
+}
+
+/// The real fetchers, by source key — each row's own.
 fn ask(source: &'static str) -> SourceAnswer {
-    match source {
-        OPENAI_SOURCE => openai_models(),
-        ANTHROPIC_SOURCE => anthropic_models(),
-        GOOGLE_API_SOURCE => google_models(),
-        ANTIGRAVITY_SOURCE => antigravity_models(),
-        other => Err((other.to_string(), "skipped: unknown source".to_string())),
+    match self::source(source) {
+        Some(row) => (row.ask)(),
+        None => Err((source.to_string(), "skipped: unknown source".to_string())),
     }
 }
 
@@ -681,15 +943,18 @@ pub fn selected_models() -> Vec<String> {
     ids
 }
 
-/// When the source stopped listing `id`, if the current catalog carries it as
-/// an unlisted row — what the picker dims.
+/// When the provider's list stopped naming `id`, if the current catalog
+/// carries it as an unlisted discovered row or a withdrawn shipped one —
+/// what the picker dims.
 #[must_use]
 pub fn unlisted_since(id: &str) -> Option<u64> {
-    current()?
+    let catalog = current()?;
+    catalog
         .models
         .iter()
         .find(|model| model.id.eq_ignore_ascii_case(id))
         .and_then(|model| model.unlisted_since)
+        .or_else(|| withdrawn_since_in(&catalog, id))
 }
 
 /// One row per id: when the OAuth registry and the API-key list both name a
@@ -884,20 +1149,23 @@ pub struct LiveModels {
     pub not_modified: bool,
 }
 
+/// Where the ChatGPT backend lists a Codex login's models.
+fn chatgpt_models_url() -> String {
+    CHATGPT_MODELS_URL.to_string()
+}
+
 /// The live OpenAI source: the ChatGPT backend's model list for the selected
 /// account, exactly as Codex asks for it, written back into that account's
 /// `models_cache.json` so Codex, the window's sync and zo read one file.
 fn chatgpt_backend_models() -> SourceAnswer {
     let source = OPENAI_SOURCE.to_string();
-    let Some(tokens) = api::resolve_openai_oauth_fresh() else {
-        return Err((source, "skipped: no ChatGPT login".to_string()));
-    };
+    let tokens = api::resolve_openai_oauth_explained().map_err(|miss| row(OPENAI_SOURCE).miss(miss))?;
     let Some(home) = codex_home() else {
         return Err((source, "skipped: no Codex home".to_string()));
     };
     let path = home.join(CODEX_MODELS_CACHE_FILE);
     let cache = read_codex_cache(&path).ok();
-    chatgpt_backend_models_at(CHATGPT_MODELS_URL, &tokens, &path, cache.as_ref(), now_secs())
+    chatgpt_backend_models_at(&chatgpt_models_url(), &tokens, &path, cache.as_ref(), now_secs())
 }
 
 /// `chatgpt_backend_models` against an explicit endpoint and cache file.
@@ -1187,14 +1455,20 @@ pub fn codex_cache_rows(document: &Value, source: &str) -> Vec<DiscoveredModel> 
 /// label adds the maker once, so it comes off here.
 const ANTHROPIC_DISPLAY_PREFIX: &str = "Claude ";
 
-fn anthropic_models() -> SourceAnswer {
-    let source = ANTHROPIC_SOURCE.to_string();
-    let Some(auth) = api::resolve_claude_auth_fresh() else {
-        return Err((source, "skipped: no Anthropic credential".to_string()));
-    };
+/// Where the Anthropic API lists models — under `ANTHROPIC_BASE_URL` when a
+/// gateway is configured, the public endpoint otherwise.
+fn anthropic_models_url() -> String {
     let base = non_empty_env("ANTHROPIC_BASE_URL")
         .unwrap_or_else(|| ANTHROPIC_DEFAULT_BASE_URL.to_string());
-    let url = format!("{}/v1/models?limit=100", base.trim_end_matches('/'));
+    format!("{}/v1/models?limit=100", base.trim_end_matches('/'))
+}
+
+fn anthropic_models() -> SourceAnswer {
+    let source = ANTHROPIC_SOURCE.to_string();
+    let auth = api::resolve_claude_auth_fresh_explained()
+        .map_err(|miss| row(ANTHROPIC_SOURCE).miss(miss))?
+        .auth;
+    let url = anthropic_models_url();
     let bearer = auth.bearer_token().is_some();
     let body = api::sync_bridge::run_blocking(async move {
         let client = reqwest::Client::builder()
@@ -1295,30 +1569,44 @@ fn date_ordinal(stamp: &str) -> u64 {
     }
 }
 
-fn google_api_key() -> Option<String> {
-    non_empty_env("GOOGLE_API_KEY")
-        .or_else(|| non_empty_env("GEMINI_API_KEY"))
-        .or_else(|| {
-            api::oauth_store::load_openai_compat_api_key("GOOGLE_API_KEY")
-                .ok()
-                .flatten()
-                .map(|key| key.trim().to_string())
-                .filter(|key| !key.is_empty())
-        })
+/// The Google API key: the environment's, else the one zo's own store keeps.
+/// A stored key that cannot be read is there all the same — a failure, not
+/// a skip.
+fn google_api_key() -> Result<String, api::CredentialMiss> {
+    if let Some(key) = non_empty_env("GOOGLE_API_KEY").or_else(|| non_empty_env("GEMINI_API_KEY")) {
+        return Ok(key);
+    }
+    match api::oauth_store::load_openai_compat_api_key("GOOGLE_API_KEY") {
+        Ok(stored) => stored
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .ok_or(api::CredentialMiss::Absent),
+        Err(error) => Err(api::CredentialMiss::Unusable(format!(
+            "the saved Google API key could not be read ({error})"
+        ))),
+    }
+}
+
+/// Whether a Google API key is configured here — read, not asked.
+fn google_api_key_configured() -> bool {
+    !matches!(google_api_key(), Err(api::CredentialMiss::Absent))
+}
+
+fn google_models_url() -> String {
+    GOOGLE_MODELS_URL.to_string()
 }
 
 fn google_models() -> SourceAnswer {
     let source = GOOGLE_API_SOURCE.to_string();
-    let Some(key) = google_api_key() else {
-        return Err((source, "skipped: no Google API key (OAuth registries serve tiered ids)".to_string()));
-    };
+    let key = google_api_key().map_err(|miss| row(GOOGLE_API_SOURCE).miss(miss))?;
+    let url = google_models_url();
     let body = api::sync_bridge::run_blocking(async move {
         let client = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
             .map_err(|error| error.to_string())?;
         let response = client
-            .get(GOOGLE_MODELS_URL)
+            .get(&url)
             .header("x-goog-api-key", key)
             .header("accept", "application/json")
             .send()
@@ -1408,13 +1696,21 @@ pub fn google_rows(document: &Value, source: &str) -> Vec<DiscoveredModel> {
     rows
 }
 
+/// Where the Antigravity backend answers the account's serving registry.
+fn antigravity_models_url() -> String {
+    api::google_code_assist_method_url(api::GOOGLE_CODE_ASSIST_FETCH_AVAILABLE_MODELS)
+}
+
 fn antigravity_models() -> SourceAnswer {
     let source = ANTIGRAVITY_SOURCE.to_string();
+    let row = row(ANTIGRAVITY_SOURCE);
     if !api::google_code_assist_oauth_present() {
-        return Err((source, "skipped: no Google (Antigravity) login".to_string()));
+        return Err(row.miss(api::CredentialMiss::Absent));
     }
     let Some(tokens) = api::google_code_assist_fresh_oauth() else {
-        return Err((source, "skipped: the Google login could not be read".to_string()));
+        return Err(row.miss(api::CredentialMiss::Unusable(
+            "the saved Google login could not be read".to_string(),
+        )));
     };
     let document = api::sync_bridge::run_blocking(async move {
         api::GeminiCodeAssistClient::new(tokens.access_token)
@@ -1424,6 +1720,109 @@ fn antigravity_models() -> SourceAnswer {
     })
     .map_err(|detail| (source.clone(), detail))?;
     Ok(live_answer(source, |source| antigravity_rows(&document, source)))
+}
+
+/// Where xAI lists models — under `XAI_BASE_URL` when one is configured, the
+/// same base the xAI client speaks to.
+fn xai_models_url() -> String {
+    format!("{}/models", api::read_xai_base_url().trim_end_matches('/'))
+}
+
+/// xAI's list, asked with the one xAI credential resolution the client uses —
+/// the API key, else the Grok CLI's login (t-6248, C5).
+fn xai_models() -> SourceAnswer {
+    let row = row(XAI_SOURCE);
+    let credential = api::resolve_xai_credential().map_err(|miss| row.miss(miss))?;
+    bearer_models(row, credential.bearer)
+}
+
+/// Kimi Code's catalog, asked with the Kimi Code CLI's login — read, never
+/// refreshed.
+fn kimi_code_models() -> SourceAnswer {
+    let row = row(KIMI_CODE_SOURCE);
+    let session = api::kimi_code_session().map_err(|miss| row.miss(miss))?;
+    bearer_models(row, session.bearer)
+}
+
+/// `GET <the row's list URL>` with a bearer, answered the OpenAI-compatible
+/// way (`{"data": [{"id", "created"}]}`). A refusal says the row's own words
+/// when it spells one ([`Source::refused`]); the bearer never reaches a
+/// report line.
+fn bearer_models(row: &'static Source, bearer: String) -> SourceAnswer {
+    let url = (row.models_url)();
+    let (status, body) = api::sync_bridge::run_blocking(async move {
+        let client = reqwest::Client::builder()
+            .timeout(HTTP_TIMEOUT)
+            .build()
+            .map_err(|error| error.to_string())?;
+        let response = client
+            .get(&url)
+            .bearer_auth(bearer)
+            .header("accept", "application/json")
+            .send()
+            .await
+            .map_err(|error| error.to_string())?;
+        let status = response.status();
+        let text = response.text().await.map_err(|error| error.to_string())?;
+        Ok::<_, String>((status, text))
+    })
+    .map_err(|detail| (row.key.to_string(), detail))?;
+    if !status.is_success() {
+        return Err((row.key.to_string(), row.refused(&status.to_string(), &body)));
+    }
+    let parsed: Value = serde_json::from_str(&body).map_err(|error| (row.key.to_string(), error.to_string()))?;
+    Ok(live_answer(row.key.to_string(), |source| {
+        openai_compatible_rows(&parsed, row.provider, source)
+    }))
+}
+
+/// Rows from an OpenAI-compatible `GET /models` document for `provider`: every
+/// `data[].id`, in the provider's order, dated from `created` (Unix seconds)
+/// when it carries one.
+#[must_use]
+pub fn openai_compatible_rows(document: &Value, provider: &str, source: &str) -> Vec<DiscoveredModel> {
+    let Some(data) = document.get("data").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut rows = Vec::new();
+    for (index, model) in data.iter().enumerate() {
+        let Some(id) = model.get("id").and_then(Value::as_str).map(str::trim) else {
+            continue;
+        };
+        if id.is_empty() {
+            continue;
+        }
+        rows.push(DiscoveredModel {
+            provider: provider.to_string(),
+            id: id.to_string(),
+            display_name: model
+                .get("display_name")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(id)
+                .to_string(),
+            released: model
+                .get("created")
+                .and_then(Value::as_i64)
+                .map_or(0, unix_date_ordinal),
+            prominence: u32::try_from(index).unwrap_or(u32::MAX),
+            source: source.to_string(),
+            ..Default::default()
+        });
+    }
+    rows
+}
+
+/// Unix seconds → `YYYYMMDD`; `0` for a time before 1970.
+fn unix_date_ordinal(secs: i64) -> u64 {
+    if secs < 0 {
+        return 0;
+    }
+    let (year, month, day) = core_types::date::civil_from_unix_days(secs.div_euclid(86_400));
+    u64::try_from(year)
+        .ok()
+        .map_or(0, |year| year * 10_000 + u64::from(month) * 100 + u64::from(day))
 }
 
 /// The reasoning-tier suffixes the Antigravity registry folds into a model id,
@@ -1727,7 +2126,8 @@ pub fn overlay(catalog: &DiscoveredCatalog, policy: UpdatePolicy) -> Overlay {
         }));
     }
 
-    let moves = family_alias_moves(&fresh, policy);
+    let mut moves = family_alias_moves(&fresh, policy);
+    let orphaned = follow_withdrawn_aliases(catalog, &fresh, policy, &mut moves, &mut models, &mut aliases);
     aliases.extend(moves.rows);
     let alias_updates = moves.updates;
     let alias_candidates = moves.candidates;
@@ -1740,7 +2140,80 @@ pub fn overlay(catalog: &DiscoveredCatalog, policy: UpdatePolicy) -> Overlay {
         new_models: fresh,
         alias_updates,
         alias_candidates,
+        orphaned,
     }
+}
+
+/// Every alias that names a withdrawn shipped release ([`Withdrawn`]) and no
+/// release itself (a versioned name is a pin, and stays): a family alias
+/// follows the newest release of its family the lists still name, a
+/// provider pointer the newest of its provider — older or newer, the living
+/// one is the answer — unless a newer release already moved it. One with
+/// nothing to follow is returned, for the catalog to say so. A target the
+/// shipped catalog does not carry and that is not news (`fresh`) gets its row
+/// here, so the alias does not name an id nothing describes.
+fn follow_withdrawn_aliases(
+    catalog: &DiscoveredCatalog,
+    fresh: &[DiscoveredModel],
+    policy: UpdatePolicy,
+    moves: &mut AliasMoves,
+    models: &mut Vec<Value>,
+    aliases: &mut Vec<Value>,
+) -> Vec<AliasUpdate> {
+    let shipped = shipped();
+    let mut orphaned: Vec<AliasUpdate> = Vec::new();
+    for entry in api::builtin_provider_catalog() {
+        let Some(provider) = provider_key(entry.provider) else {
+            continue;
+        };
+        if rank(entry.alias) > 0 || withdrawn_since_in(catalog, entry.canonical_model_id).is_none() {
+            continue;
+        }
+        let names_it = |update: &AliasUpdate| update.alias.eq_ignore_ascii_case(entry.alias);
+        if moves.updates.iter().any(names_it)
+            || moves.candidates.iter().any(names_it)
+            || orphaned.iter().any(names_it)
+        {
+            continue;
+        }
+        let is_pointer = entry.alias.to_ascii_lowercase().ends_with(PROVIDER_POINTER_SUFFIX);
+        let family = family_key(provider, entry.canonical_model_id);
+        let living = catalog
+            .models
+            .iter()
+            .filter(|model| model.provider == provider && model.unlisted_since.is_none())
+            .filter(|model| withdrawn_since_in(catalog, &model.id).is_none())
+            .filter(|model| is_pointer || family.is_some() && family_key(provider, &model.id) == family)
+            .max_by_key(|model| recency(model));
+        let Some(living) = living else {
+            orphaned.push(AliasUpdate {
+                provider: provider.to_string(),
+                alias: entry.alias.to_string(),
+                from: entry.canonical_model_id.to_string(),
+                to: String::new(),
+            });
+            continue;
+        };
+        let described = shipped.ids.contains(&living.id.to_ascii_lowercase())
+            || fresh.iter().any(|model| model.id.eq_ignore_ascii_case(&living.id));
+        if !described && policy == UpdatePolicy::Auto {
+            let living_family = family_key(provider, &living.id);
+            let head = living_family
+                .as_ref()
+                .and_then(|family| shipped.heads.get(&(provider, family.clone())).cloned());
+            let prior = head.clone().or_else(|| shipped.pointers.get(provider).cloned());
+            models.push(discovered_row(
+                living,
+                living_family.as_deref(),
+                head.as_deref(),
+                prior.as_deref(),
+                catalog.fetched_at,
+            ));
+            aliases.push(json!({"alias": living.id, "canonical": living.id, "provider": provider}));
+        }
+        moves.record(policy, entry.alias, provider, entry.canonical_model_id, living, Some(entry));
+    }
+    orphaned
 }
 
 /// One discovered release as a catalog row: what the source said, and — for
@@ -2026,7 +2499,7 @@ mod tests {
         DiscoveredModel, UpdatePolicy,
     };
     use serde_json::{json, Value};
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     fn model(provider: &str, id: &str, released: u64) -> DiscoveredModel {
         DiscoveredModel {
@@ -2044,6 +2517,7 @@ mod tests {
             fetched_at: 1_700_000_000,
             reports: Vec::new(),
             models,
+            withdrawn: Vec::new(),
         }
     }
 
@@ -2131,6 +2605,7 @@ mod tests {
             fetched_at: 1_700_000_000,
             reports: Vec::new(),
             models: vec![model("openai", "gpt-6", 0)],
+            withdrawn: Vec::new(),
         };
         assert_eq!(new_models(&newer).len(), 1);
     }
@@ -2622,13 +3097,20 @@ mod tests {
                 report(super::GOOGLE_API_SOURCE, false, now - 60),
             ],
             models: vec![row(super::OPENAI_SOURCE, "gpt-6-astra"), row(super::ANTHROPIC_SOURCE, "claude-fable-5-1")],
+            withdrawn: Vec::new(),
         };
         assert_eq!(
             super::due_sources(Some(&previous), now, ttl),
-            vec![super::ANTHROPIC_SOURCE, super::GOOGLE_API_SOURCE, super::ANTIGRAVITY_SOURCE],
+            vec![
+                super::ANTHROPIC_SOURCE,
+                super::GOOGLE_API_SOURCE,
+                super::ANTIGRAVITY_SOURCE,
+                super::XAI_SOURCE,
+                super::KIMI_CODE_SOURCE,
+            ],
             "older than the TTL, failed, and never asked are due; the young one is not"
         );
-        assert_eq!(super::due_sources(None, now, ttl).len(), 4, "no catalog: everything is due");
+        assert_eq!(super::due_sources(None, now, ttl).len(), super::SOURCES.len(), "no catalog: everything is due");
         assert!(super::due_sources(Some(&previous), now, 0).contains(&super::OPENAI_SOURCE), "a zero TTL asks every time");
         assert!(super::due_sources(Some(&previous), previous.fetched_at + ttl - 1, ttl).iter().all(|source| *source != super::OPENAI_SOURCE));
 
@@ -2655,14 +3137,15 @@ mod tests {
         assert!(openai.ok);
         let anthropic = fetched.reports.iter().find(|report| report.source == super::ANTHROPIC_SOURCE).unwrap();
         assert_eq!(anthropic.fetched_at, now);
-        assert_eq!(fetched.reports.len(), 4);
+        assert_eq!(fetched.reports.len(), super::SOURCES.len());
         assert_eq!(fetched.fetched_at, now);
 
         // A catalog younger than the TTL on every source asks nothing.
         let young = super::DiscoveredCatalog {
             fetched_at: now - 60,
-            reports: super::SOURCES.iter().map(|(_, source)| report(source, true, now - 60)).collect(),
+            reports: super::SOURCES.iter().map(|source| report(source.key, true, now - 60)).collect(),
             models: Vec::new(),
+            withdrawn: Vec::new(),
         };
         assert!(super::due_sources(Some(&young), now, ttl).is_empty());
     }
@@ -2725,12 +3208,16 @@ mod tests {
     }
 
     /// A keyless source answers "skipped" and that answer keeps for the TTL
-    /// like any other; a source that FAILED is asked again at the very next
-    /// connection; one never asked, or asked longer than the TTL ago, is due
-    /// whatever it said. (2026-09-08: `google-api` skipped for want of a key
-    /// was due on every publish, and every publish spawned a refresh.)
+    /// like any other — where nothing is configured; a source that FAILED is
+    /// asked again at the very next connection; one never asked, or asked
+    /// longer than the TTL ago, is due whatever it said. (2026-09-08:
+    /// `google-api` skipped for want of a key was due on every publish, and
+    /// every publish spawned a refresh.) A skip read by a process that holds
+    /// the credential is due at once (t-6248), and `configured` is asked of a
+    /// skip only — an answer or a failure never pays for the probe.
     #[test]
     fn a_skipped_source_is_due_at_the_ttl_and_a_failed_one_at_every_connection() {
+        use std::cell::Cell;
         let report = |ok: bool, detail: &str, fetched_at: u64| super::SourceReport {
             provider: "google".to_string(),
             source: "google-api".to_string(),
@@ -2741,17 +3228,29 @@ mod tests {
             origin: String::new(),
         };
         let ttl = 3_600;
+        let asked = Cell::new(0);
+        let nothing_here = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        let held_here = || {
+            asked.set(asked.get() + 1);
+            true
+        };
         let skipped = report(false, "skipped: no Google API key", 10_000);
         assert!(skipped.skipped());
-        assert!(!skipped.due(10_000 + ttl - 1, ttl), "a fresh skip was asked again");
-        assert!(skipped.due(10_000 + ttl, ttl), "a skip older than the TTL stands");
+        assert!(!skipped.due(10_000 + ttl - 1, ttl, nothing_here), "a fresh skip was asked again");
+        assert!(skipped.due(10_000 + ttl, ttl, nothing_here), "a skip older than the TTL stands");
+        assert!(skipped.due(10_001, ttl, held_here), "a skip this process could answer is due now");
+        assert_eq!(asked.get(), 2, "the TTL decides before the probe does");
         let failed = report(false, "http error: error sending request", 10_000);
         assert!(!failed.skipped());
-        assert!(failed.due(10_001, ttl), "a failure waits for the TTL");
+        assert!(failed.due(10_001, ttl, nothing_here), "a failure waits for no TTL");
         let answered = report(true, "5 model(s)", 10_000);
-        assert!(!answered.due(10_000 + ttl - 1, ttl));
-        assert!(answered.due(10_000 + ttl, ttl));
-        assert!(report(true, "5 model(s)", 0).due(1, ttl), "never answered is due");
+        assert!(!answered.due(10_000 + ttl - 1, ttl, held_here));
+        assert!(answered.due(10_000 + ttl, ttl, nothing_here));
+        assert!(report(true, "5 model(s)", 0).due(1, ttl, nothing_here), "never answered is due");
+        assert_eq!(asked.get(), 2, "an answer and a failure never ask");
     }
 
     /// One failed registry request must not empty the Gemini column for a
@@ -2788,6 +3287,7 @@ mod tests {
                 report("antigravity-registry", false, "http error: error sending request", 0),
             ],
             models: vec![new_openai.clone()],
+            withdrawn: Vec::new(),
         };
 
         let merged = super::carry_forward(fresh, Some(&previous));
@@ -2824,10 +3324,530 @@ mod tests {
                 fetched_at: 1,
                 reports: vec![report("antigravity-registry", false, "http error", 0)],
                 models: Vec::new(),
+                withdrawn: Vec::new(),
             },
             None,
         );
         assert!(alone.models.is_empty());
+    }
+
+    /// Sets every variable a credential lookup reads for the length of one
+    /// test, under the process env lock, and puts each back on drop — a
+    /// failing assertion must not hand the next test a redirected `HOME`.
+    struct CredentialScope {
+        _lock: std::sync::MutexGuard<'static, ()>,
+        previous: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    }
+
+    impl CredentialScope {
+        fn new(values: &[(&'static str, Option<&std::path::Path>)]) -> Self {
+            let lock = crate::test_env_lock();
+            let previous = values
+                .iter()
+                .map(|(key, _)| (*key, std::env::var_os(key)))
+                .collect();
+            for (key, value) in values {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            api::managed_account::clear();
+            Self { _lock: lock, previous }
+        }
+    }
+
+    impl Drop for CredentialScope {
+        fn drop(&mut self) {
+            for (key, value) in &self.previous {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            api::managed_account::clear();
+        }
+    }
+
+    /// A store with nothing in it, the keychain switched off, no key in the
+    /// environment, and the Anthropic endpoint pointed at a closed port — a
+    /// resolution that got past the credential would fail loudly, not dial out.
+    fn claude_scope(store: &std::path::Path, managed: Option<&std::path::Path>) -> CredentialScope {
+        CredentialScope::new(&[
+            ("HOME", Some(store)),
+            ("ZO_HOME", Some(store)),
+            ("ZO_CONFIG_HOME", Some(store)),
+            ("CLAUDE_CONFIG_DIR", managed),
+            ("ZO_DISABLE_KEYCHAIN", Some(std::path::Path::new("1"))),
+            ("ANTHROPIC_API_KEY", None),
+            ("ANTHROPIC_AUTH_TOKEN", None),
+            ("ANTHROPIC_BASE_URL", Some(std::path::Path::new("http://127.0.0.1:9"))),
+        ])
+    }
+
+    /// C1 (t-6248): a Claude login that is there but cannot be used — here
+    /// the window's managed credentials file, its session expired and no
+    /// refresh token left to renew it — is a FAILURE, not a skip. A failure
+    /// keeps the rows the source answered last time (`carry_forward`) and is
+    /// asked again at the next connection; only a machine with no Claude
+    /// credential anywhere says "skipped". (2026-09-23: a zo whose Claude Code
+    /// refresh token had been superseded wrote `skipped: no Anthropic
+    /// credential` into the shared cache, and every zo on the machine lost
+    /// Opus 5.5 for the hour.)
+    #[test]
+    fn a_claude_login_that_cannot_be_used_fails_and_only_no_login_at_all_skips() {
+        let store = scratch("c1-store");
+        let managed = scratch("c1-managed");
+        std::fs::write(
+            managed.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"expired-access-value","expiresAt":1000,"scopes":["user:inference"]}}"#,
+        )
+        .unwrap();
+        let now = 1_790_000_000;
+        let previous = DiscoveredCatalog {
+            fetched_at: now - 7_200,
+            reports: vec![super::SourceReport {
+                provider: "anthropic".to_string(),
+                source: super::ANTHROPIC_SOURCE.to_string(),
+                ok: true,
+                detail: "1 model(s)".to_string(),
+                count: 1,
+                fetched_at: now - 7_200,
+                origin: super::ORIGIN_LIVE.to_string(),
+            }],
+            models: vec![DiscoveredModel {
+                provider: "anthropic".to_string(),
+                id: "claude-opus-5-5".to_string(),
+                display_name: "Opus 5.5".to_string(),
+                source: super::ANTHROPIC_SOURCE.to_string(),
+                ..Default::default()
+            }],
+            withdrawn: Vec::new(),
+        };
+
+        let unusable = {
+            let _scope = claude_scope(&store, Some(&managed));
+            super::anthropic_models().expect_err("a login that cannot be used lists nothing")
+        };
+        assert_eq!(unusable.0, super::ANTHROPIC_SOURCE);
+        assert!(
+            unusable.1.starts_with("claude credential present but not usable: "),
+            "a configured login that fails says so: {}",
+            unusable.1
+        );
+        assert!(!unusable.1.contains("expired-access-value"), "the token never reaches a report line");
+
+        let refreshed = super::refresh_with(Some(&previous), &[super::ANTHROPIC_SOURCE], now, &[], |source| {
+            match source {
+                super::ANTHROPIC_SOURCE => Err(unusable.clone()),
+                other => Err((other.to_string(), "not asked in this test".to_string())),
+            }
+        });
+        let report = refreshed
+            .reports
+            .iter()
+            .find(|report| report.source == super::ANTHROPIC_SOURCE)
+            .expect("the anthropic report");
+        assert!(!report.ok && !report.skipped(), "{}", report.detail);
+        assert_eq!(report.origin, super::ORIGIN_PREVIOUS, "last time's rows answer for it");
+        assert!(
+            refreshed.models.iter().any(|model| model.id == "claude-opus-5-5"),
+            "Opus 5.5 stays in the catalog while the login is being fixed"
+        );
+        assert!(report.due(now + 1, super::LIVE_TTL_SECS, || false), "and the next connection asks again");
+
+        let absent = {
+            let _scope = claude_scope(&store, None);
+            super::anthropic_models().expect_err("no login lists nothing")
+        };
+        assert_eq!(absent.1, "skipped: no Anthropic credential", "nothing configured is a skip");
+        let _ = std::fs::remove_dir_all(store);
+        let _ = std::fs::remove_dir_all(managed);
+    }
+
+    /// Every source skipped a minute ago — what a process with no credential
+    /// at all leaves in the shared cache.
+    fn skipped_everywhere(now: u64) -> DiscoveredCatalog {
+        DiscoveredCatalog {
+            fetched_at: now - 60,
+            reports: super::SOURCES
+                .iter()
+                .map(|source| super::SourceReport {
+                    provider: source.provider.to_string(),
+                    source: source.key.to_string(),
+                    ok: false,
+                    detail: format!("skipped: {}", source.absent),
+                    count: 0,
+                    fetched_at: now - 60,
+                    origin: String::new(),
+                })
+                .collect(),
+            models: Vec::new(),
+            withdrawn: Vec::new(),
+        }
+    }
+
+    /// C2 (t-6248): a skip is an answer about the process that wrote it. A
+    /// process that holds the credential right now does not wait out the
+    /// TTL behind another one's "no credential" — its connection asks at
+    /// once. A process that holds nothing still trusts the skip for the TTL,
+    /// so the 2026-09-08 storm (a keyless source re-asked on every publish)
+    /// stays shut.
+    #[test]
+    fn a_skipped_source_is_due_at_once_where_its_credential_is_configured_and_not_elsewhere() {
+        let store = scratch("c2-store");
+        let now = 1_790_000_000;
+        let ttl = super::LIVE_TTL_SECS;
+        let cache = skipped_everywhere(now);
+        let quiet = |store: &std::path::Path, anthropic_key: Option<&std::path::Path>| {
+            CredentialScope::new(&[
+                ("HOME", Some(store)),
+                ("ZO_HOME", Some(store)),
+                ("ZO_CONFIG_HOME", Some(store)),
+                ("CLAUDE_CONFIG_DIR", None),
+                ("CODEX_HOME", None),
+                ("ZO_CODEX_HOME", None),
+                ("ZO_DISABLE_KEYCHAIN", Some(std::path::Path::new("1"))),
+                ("ZO_DISABLE_EXTERNAL_CREDENTIALS", Some(std::path::Path::new("1"))),
+                ("ANTHROPIC_API_KEY", anthropic_key),
+                ("ANTHROPIC_AUTH_TOKEN", None),
+                ("GOOGLE_API_KEY", None),
+                ("GEMINI_API_KEY", None),
+            ])
+        };
+        {
+            let _scope = quiet(&store, None);
+            assert!(
+                super::due_sources(Some(&cache), now, ttl).is_empty(),
+                "nothing configured here: every skip keeps for the TTL"
+            );
+            assert_eq!(
+                super::due_sources(Some(&cache), now - 60 + ttl, ttl).len(),
+                super::SOURCES.len(),
+                "and is due once the TTL has passed, as any answer is"
+            );
+            super::save_to(&super::cache_path(), &cache).unwrap();
+            assert!(
+                super::discover_due(now, ttl).is_none(),
+                "a connection with nothing due has no new answer to write"
+            );
+        }
+        {
+            let _scope = quiet(&store, Some(std::path::Path::new("sk-ant-configured-here")));
+            assert_eq!(
+                super::due_sources(Some(&cache), now, ttl),
+                vec![super::ANTHROPIC_SOURCE],
+                "this process holds an Anthropic key: that skip is due now, the others still keep"
+            );
+        }
+        let _ = std::fs::remove_dir_all(store);
+    }
+
+    /// Codex's own model list on 2026-09-23 (the window's runtime home,
+    /// `models_cache.json`, rows trimmed to what the parser reads): nine
+    /// rows, seven listed — and no `gpt-5.3-codex-spark`.
+    fn codex_list_20260923() -> Value {
+        json!({"models": [
+            {"slug": "gpt-6-astra", "display_name": "GPT-6-Astra", "visibility": "list", "priority": 1},
+            {"slug": "gpt-6-sol", "display_name": "GPT-6-Sol", "visibility": "list", "priority": 2},
+            {"slug": "gpt-6-luna", "display_name": "GPT-6-Luna", "visibility": "list", "priority": 3},
+            {"slug": "gpt-reserve", "display_name": "GPT-Reserve", "visibility": "hide", "priority": 3},
+            {"slug": "gpt-5.6-sol", "display_name": "GPT-5.6-Sol", "visibility": "list", "priority": 4},
+            {"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra", "visibility": "list", "priority": 7},
+            {"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "visibility": "list", "priority": 8},
+            {"slug": "gpt-5.5", "display_name": "GPT-5.5", "visibility": "list", "priority": 12},
+            {"slug": "codex-auto-review", "display_name": "Codex Auto Review", "visibility": "hide", "priority": 43}
+        ]})
+    }
+
+    /// What the wire answered a session that asked for spark anyway
+    /// (2026-09-23, an agent's failure record).
+    const CODEX_SPARK_REFUSAL: &str = r#"api returned 400 Bad Request: {"detail":"The 'gpt-5.3-codex-spark' model is not supported when using Codex with a ChatGPT account."}"#;
+
+    /// A refresh where the OpenAI column answers `document` at `now` and
+    /// every other source is skipped.
+    fn codex_refresh(previous: Option<&DiscoveredCatalog>, document: &Value, now: u64) -> DiscoveredCatalog {
+        super::refresh_with(previous, &[super::OPENAI_SOURCE], now, &[], |source| {
+            if source == super::OPENAI_SOURCE {
+                Ok(super::Answered {
+                    source: source.to_string(),
+                    models: codex_cache_rows(document, source),
+                    origin: super::ORIGIN_LIVE.to_string(),
+                    fetched_at: now,
+                    note: None,
+                })
+            } else {
+                Err((source.to_string(), "skipped: not in this test".to_string()))
+            }
+        })
+    }
+
+    /// C4 (t-6248): a shipped model the provider's whole list no longer
+    /// names is marked withdrawn from the first answer that omitted it — the
+    /// very model the wire refuses — and the family alias that pointed at it
+    /// says there is no living release of the family, rather than going on
+    /// naming a dead model.
+    #[test]
+    fn a_shipped_model_codexs_list_no_longer_names_is_withdrawn_and_its_alias_says_none() {
+        let refused = CODEX_SPARK_REFUSAL.split('\'').nth(1).expect("the refused id");
+        let now = 1_790_121_000;
+        let codex = codex_list_20260923();
+        let fresh = codex_refresh(None, &codex, now);
+        let withdrawn: Vec<(&str, &str, u64)> = fresh
+            .withdrawn
+            .iter()
+            .map(|row| (row.id.as_str(), row.source.as_str(), row.since))
+            .collect();
+        assert_eq!(
+            withdrawn,
+            vec![(refused, super::OPENAI_SOURCE, now)],
+            "exactly the model the wire refuses, dated from the first list without it"
+        );
+        assert_eq!(super::withdrawn_since_in(&fresh, refused), Some(now));
+        assert_eq!(super::withdrawn_since_in(&fresh, "gpt-5.6-sol"), None, "a listed model is not withdrawn");
+
+        let later = codex_refresh(Some(&fresh), &codex, now + 3_600);
+        assert_eq!(super::withdrawn_since_in(&later, refused), Some(now), "the first omission keeps its date");
+
+        let overlay = overlay(&fresh, UpdatePolicy::Auto);
+        let orphaned: Vec<(&str, &str)> = overlay
+            .orphaned
+            .iter()
+            .map(|update| (update.alias.as_str(), update.from.as_str()))
+            .collect();
+        assert_eq!(orphaned, vec![("spark", refused)], "spark names no living release; the versioned id stays a pin");
+        assert!(!overlay.alias_updates.iter().any(|update| update.alias == "spark"));
+
+        // Listed again: the mark is gone.
+        let mut back = codex.clone();
+        back["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"slug": refused, "display_name": "GPT-5.3-Codex-Spark", "visibility": "list", "priority": 20}));
+        let relisted = codex_refresh(Some(&later), &back, now + 7_200);
+        assert_eq!(super::withdrawn_since_in(&relisted, refused), None);
+    }
+
+    /// C4, the rest of the rule: the alias follows the newest living release
+    /// of its family — older than the one withdrawn, if that is what lives —
+    /// with a row that describes it; a failed list keeps its marks as it
+    /// keeps its rows; a skipped one knows nothing and marks nothing.
+    #[test]
+    fn a_withdrawn_releases_alias_follows_the_living_family_and_the_marks_follow_the_answers() {
+        let now = 1_790_121_000;
+        let mut codex = codex_list_20260923();
+        codex["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"slug": "gpt-5.2-codex-spark", "display_name": "GPT-5.2-Codex-Spark", "visibility": "list", "priority": 30}));
+        let fresh = codex_refresh(None, &codex, now);
+        let overlay = overlay(&fresh, UpdatePolicy::Auto);
+        assert!(overlay.orphaned.is_empty(), "a spark still lives: {:?}", overlay.orphaned);
+        let spark = overlay
+            .alias_updates
+            .iter()
+            .find(|update| update.alias == "spark")
+            .expect("spark follows the living release");
+        assert_eq!((spark.from.as_str(), spark.to.as_str()), ("gpt-5.3-codex-spark", "gpt-5.2-codex-spark"));
+        let value: Value = serde_json::from_str(overlay.json.as_deref().expect("an overlay")).unwrap();
+        assert!(
+            value["models"].as_array().unwrap().iter().any(|row| row["ids"][0] == "gpt-5.2-codex-spark"),
+            "the alias names an id a row describes"
+        );
+        let withheld = super::overlay(&fresh, UpdatePolicy::Notify);
+        assert!(withheld.alias_candidates.iter().any(|update| update.alias == "spark"));
+        assert!(super::overlay(&fresh, UpdatePolicy::Pinned).orphaned.is_empty());
+
+        let failed = super::refresh_with(Some(&fresh), &[super::OPENAI_SOURCE], now + 60, &[], |source| {
+            Err((source.to_string(), "HTTP 502 Bad Gateway".to_string()))
+        });
+        assert_eq!(
+            super::withdrawn_since_in(&failed, "gpt-5.3-codex-spark"),
+            Some(now),
+            "a failed list keeps its marks"
+        );
+        let skipped = super::refresh_with(Some(&fresh), &[super::OPENAI_SOURCE], now + 120, &[], |source| {
+            Err((source.to_string(), "skipped: no ChatGPT login".to_string()))
+        });
+        assert!(skipped.withdrawn.is_empty(), "a skipped list knows nothing");
+    }
+
+    /// Nothing configured anywhere a source looks: an empty home, the
+    /// keychain and every external store switched off, no key in the
+    /// environment, every endpoint at its default.
+    fn nothing_configured(store: &std::path::Path) -> CredentialScope {
+        let on = Some(std::path::Path::new("1"));
+        CredentialScope::new(&[
+            ("HOME", Some(store)),
+            ("ZO_HOME", Some(store)),
+            ("ZO_CONFIG_HOME", Some(store)),
+            ("CLAUDE_CONFIG_DIR", None),
+            ("CODEX_HOME", None),
+            ("ZO_CODEX_HOME", None),
+            ("GROK_HOME", None),
+            ("KIMI_CODE_HOME", None),
+            ("ZO_DISABLE_KEYCHAIN", on),
+            ("ZO_DISABLE_EXTERNAL_CREDENTIALS", on),
+            ("ANTHROPIC_API_KEY", None),
+            ("ANTHROPIC_AUTH_TOKEN", None),
+            ("ANTHROPIC_BASE_URL", None),
+            ("GOOGLE_API_KEY", None),
+            ("GEMINI_API_KEY", None),
+            ("CODE_ASSIST_ENDPOINT", None),
+            ("XAI_API_KEY", None),
+            ("XAI_BASE_URL", None),
+            ("KIMI_CODE_BASE_URL", None),
+        ])
+    }
+
+    /// C5 (t-6248), the table's contract: every source is one row — its
+    /// credential question, the URL it lists models at, and the words it
+    /// says — and the row's words are what its fetcher actually says. With
+    /// nothing configured, every row answers "not configured" and every
+    /// fetcher skips with exactly the row's words, without a request.
+    #[test]
+    fn every_source_is_one_row_of_credential_list_url_and_words() {
+        let store = scratch("c5-contract");
+        let _scope = nothing_configured(&store);
+        let mut keys = HashSet::new();
+        for row in &super::SOURCES {
+            assert!(keys.insert(row.key), "{} is one row", row.key);
+            assert!(!row.provider.is_empty() && !row.credential.is_empty() && !row.absent.is_empty(), "{row:?}");
+            let url = (row.models_url)();
+            assert!(url.starts_with("https://"), "{}: {url}", row.key);
+            assert!(url.to_ascii_lowercase().contains("models"), "{}: {url}", row.key);
+            assert!(!(row.configured)(), "{}: nothing is configured here", row.key);
+            let (key, detail) = (row.ask)().expect_err("no credential, no rows");
+            assert_eq!(key, row.key);
+            assert!(
+                detail.starts_with("skipped: ") && detail.contains(row.absent),
+                "{}: {detail}",
+                row.key
+            );
+            for (marker, words) in row.refusals {
+                assert!(!marker.is_empty() && !words.is_empty(), "{}", row.key);
+            }
+        }
+        let providers: HashSet<&str> = super::SOURCES.iter().map(|row| row.provider).collect();
+        for oauth in ["openai", "anthropic", "google", "xai", "kimi"] {
+            assert!(providers.contains(oauth), "{oauth} logs in, so it has a row");
+        }
+        let _ = std::fs::remove_dir_all(store);
+    }
+
+    /// C5: xAI's own answer to a Grok login without credits, replayed —
+    /// recorded once from `api.x.ai/v1/models` (2026-09-23, token not kept).
+    /// The login was accepted; the account has no credits. The report says
+    /// that in the row's words, as a failure the next connection asks again,
+    /// and the request carried the bearer to `/v1/models`.
+    const XAI_SPENDING_LIMIT: &str = r#"{"code":"personal-team-blocked:spending-limit","error":"You have run out of credits or need a Grok subscription. Add credits at https://grok.com/?_s=usage or upgrade at https://grok.com/supergrok."}"#;
+
+    #[test]
+    fn xais_spending_limit_is_said_as_no_subscription_and_a_listing_parses() {
+        let store = scratch("c5-xai");
+        let (url, server) = fake_backend(vec![
+            ("403 Forbidden", vec![("content-type", "application/json")], XAI_SPENDING_LIMIT.to_string()),
+            (
+                "200 OK",
+                vec![("content-type", "application/json")],
+                json!({"object": "list", "data": [
+                    {"id": "grok-4", "object": "model", "created": 1_752_019_200, "owned_by": "xai"},
+                    {"id": "grok-code-fast-1", "object": "model", "created": 1_756_000_000, "owned_by": "xai"}
+                ]})
+                .to_string(),
+            ),
+        ]);
+        let base = url.replace("/backend-api/codex/models", "/v1");
+        let refused = {
+            let _scope = nothing_configured(&store);
+            std::env::set_var("XAI_BASE_URL", &base);
+            std::env::set_var("XAI_API_KEY", "xai-test-key");
+            assert!((super::row(super::XAI_SOURCE).configured)());
+            let refused = super::xai_models().expect_err("no credits, no list");
+            let listed = super::xai_models().expect("the listing");
+            let ids: Vec<(&str, &str, u64)> = listed
+                .models
+                .iter()
+                .map(|model| (model.provider.as_str(), model.id.as_str(), model.released))
+                .collect();
+            assert_eq!(
+                ids,
+                vec![("xai", "grok-4", 20_250_709), ("xai", "grok-code-fast-1", 20_250_824)],
+                "rows in the provider's order, dated from `created`"
+            );
+            refused
+        };
+        assert_eq!(refused.0, super::XAI_SOURCE);
+        assert!(
+            refused.1.starts_with("HTTP 403 Forbidden: no subscription or credits on this xAI account"),
+            "{}",
+            refused.1
+        );
+        assert!(!refused.1.contains("xai-test-key"), "the key never reaches a report line");
+        let refreshed = super::refresh_with(None, &[super::XAI_SOURCE], 1_790_121_000, &[], |source| {
+            if source == super::XAI_SOURCE {
+                Err(refused.clone())
+            } else {
+                Err((source.to_string(), "skipped: not in this test".to_string()))
+            }
+        });
+        let report = refreshed
+            .reports
+            .iter()
+            .find(|report| report.source == super::XAI_SOURCE)
+            .expect("the xAI report");
+        assert!(!report.ok && !report.skipped(), "{}", report.detail);
+        assert!(report.due(1_790_121_001, super::LIVE_TTL_SECS, || false), "asked again at the next connection");
+        let heads = server.join().unwrap();
+        assert_eq!(heads.len(), 2);
+        for head in &heads {
+            assert!(head.starts_with("GET /v1/models HTTP/1.1"), "{head}");
+            assert!(head.to_ascii_lowercase().contains("authorization: bearer xai-test-key"), "{head}");
+        }
+        let _ = std::fs::remove_dir_all(store);
+    }
+
+    /// C5: with no key, the Grok CLI's login is the xAI credential the list
+    /// is asked with — the same resolution the xAI client uses; an expired
+    /// one is a failure that names `grok login`, never a refresh.
+    #[test]
+    fn a_grok_cli_login_asks_xais_list_and_an_expired_one_fails_with_the_way_back() {
+        let store = scratch("c5-grok");
+        let grok_home = store.join("grok-home");
+        std::fs::create_dir_all(&grok_home).unwrap();
+        let (url, server) = fake_backend(vec![(
+            "200 OK",
+            vec![("content-type", "application/json")],
+            json!({"data": [{"id": "grok-4", "created": 1_752_019_200}]}).to_string(),
+        )]);
+        let base = url.replace("/backend-api/codex/models", "/v1");
+        {
+            let _scope = nothing_configured(&store);
+            std::env::remove_var("ZO_DISABLE_EXTERNAL_CREDENTIALS");
+            std::env::set_var("GROK_HOME", &grok_home);
+            std::env::set_var("XAI_BASE_URL", &base);
+            assert!(!(super::row(super::XAI_SOURCE).configured)(), "no key and no Grok login yet");
+            std::fs::write(
+                grok_home.join("auth.json"),
+                r#"{"https://auth.x.ai::acct-1":{"key":"grok-session-bearer","expires_at":"2099-01-01T00:00:00Z"}}"#,
+            )
+            .unwrap();
+            assert!((super::row(super::XAI_SOURCE).configured)());
+            let listed = super::xai_models().expect("the Grok login lists xAI's models");
+            assert_eq!(listed.models.len(), 1);
+            std::fs::write(
+                grok_home.join("auth.json"),
+                r#"{"https://auth.x.ai::acct-1":{"key":"grok-session-bearer","expires_at":"2020-01-01T00:00:00Z"}}"#,
+            )
+            .unwrap();
+            let (_, detail) = super::xai_models().expect_err("an expired login lists nothing");
+            assert!(detail.starts_with("xAI credential present but not usable: "), "{detail}");
+            assert!(detail.contains("grok login"), "{detail}");
+        }
+        let heads = server.join().unwrap();
+        assert_eq!(heads.len(), 1, "the expired login asked nothing");
+        assert!(heads[0].to_ascii_lowercase().contains("authorization: bearer grok-session-bearer"), "{}", heads[0]);
+        let _ = std::fs::remove_dir_all(store);
     }
 
     #[test]

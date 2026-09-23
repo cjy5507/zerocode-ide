@@ -1920,7 +1920,7 @@ mod tests {
         let rows = vec![
             PickerRow {
                 label: "gpt-6-astra (current)".to_string(),
-                description: "출처가 목록에서 뺐음 · 09-07 23:25".to_string(),
+                description: "공급자 목록에서 빠짐 · 09-07 23:25".to_string(),
                 dim: true,
             },
             PickerRow {

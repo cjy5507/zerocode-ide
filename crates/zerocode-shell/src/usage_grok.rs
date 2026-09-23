@@ -33,9 +33,9 @@ const BILLING_DEFAULT_PATH: &str = "/billing";
 
 /// `GROK_HOME ?? ~/.grok`, the CLI's own resolution
 /// (`grok-session-paths.ts:40-46`).
-pub(crate) const HOME_VAR: &str = "GROK_HOME";
-const HOME_DIR: &str = ".grok";
-const AUTH_FILE: &str = "auth.json";
+pub(crate) const HOME_VAR: &str = zerocode_core::cli_login_files::grok::HOME_VAR;
+const HOME_DIR: &str = zerocode_core::cli_login_files::grok::HOME_DIR;
+const AUTH_FILE: &str = zerocode_core::cli_login_files::grok::AUTH_FILE;
 
 /// The header xAI checks; without it the request is rejected
 /// (`grok-fetcher.ts:27,140-148`).
@@ -43,10 +43,10 @@ const CLI_AUTH_HEADER: &str = "xai-grok-cli";
 
 /// Grok's own OAuth issuer. Entries are keyed by issuer, and one file may hold
 /// several (`grok-auth.ts:67`).
-const PREFERRED_ISSUER: &str = "https://auth.x.ai";
+const PREFERRED_ISSUER: &str = zerocode_core::cli_login_files::grok::PREFERRED_ISSUER;
 
 /// How long before expiry a token counts as gone (`grok-auth.ts:133`).
-const TOKEN_SKEW_MS: i64 = 5 * 60 * 1000;
+const TOKEN_SKEW_MS: i64 = zerocode_core::cli_login_files::grok::TOKEN_SKEW_MS;
 
 /// Grok reports a week and a month, never a session.
 const WEEKLY_WINDOW_MINUTES: u32 = 10_080;

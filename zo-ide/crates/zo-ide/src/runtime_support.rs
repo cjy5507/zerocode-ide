@@ -779,6 +779,8 @@ fn resolve_and_cache_claude_auth() -> Result<AuthSource, Box<dyn std::error::Err
                         managed_file_stamp,
                     });
                     AuthSource::cache_resolved(&recovered);
+                    drop(guard);
+                    claude_login_found();
                     return Ok(recovered);
                 }
                 return Ok(cached.auth.clone());
@@ -790,6 +792,8 @@ fn resolve_and_cache_claude_auth() -> Result<AuthSource, Box<dyn std::error::Err
     let auth = resolved.auth.clone();
     AuthSource::cache_resolved(&auth);
     *guard = Some(resolved);
+    drop(guard);
+    claude_login_found();
     Ok(auth)
 }
 
@@ -1018,6 +1022,7 @@ fn update_cached_claude_auth(
         });
     }
     AuthSource::cache_resolved(auth);
+    claude_login_found();
 }
 
 /// Refresh the long-lived OAuth bearer this many seconds before its hard expiry,
@@ -1047,7 +1052,23 @@ fn oauth_refresh_needed(env_managed: bool, expires_at: Option<u64>, now: u64) ->
 /// refresh runs on a blocking thread to avoid a nested-runtime panic inside the
 /// async turn; a refresh failure is swallowed (the existing 401 message still
 /// guides the user to `zo login`).
-pub(crate) async fn refresh_oauth_if_near_expiry(client: &mut AnthropicRuntimeClient) {
+///
+/// A process that started without a Claude login looks for it here first
+/// ([`reconnect_claude_login`]) — `persons_turn` says whether a person's
+/// prompt opened this turn, which is when the one unprompted look is spent —
+/// and the answer is the status line that says what it found.
+pub(crate) async fn refresh_oauth_if_near_expiry(
+    client: &mut AnthropicRuntimeClient,
+    persons_turn: bool,
+) -> Option<String> {
+    if let Some(said) = reconnect_claude_login(client, persons_turn).await {
+        return Some(said);
+    }
+    refresh_oauth_near_expiry(client).await;
+    None
+}
+
+async fn refresh_oauth_near_expiry(client: &mut AnthropicRuntimeClient) {
     // OAuth-backed non-Anthropic clients (Gemini Code Assist, ChatGPT) capture
     // their bearer at construction and never refresh per-request — unlike the
     // Anthropic client, whose `set_auth` swaps the bearer in place below. Rotate
@@ -1448,9 +1469,10 @@ pub fn drain_catalog_notices() -> Vec<String> {
 /// moves on every keystroke (2026-09-08).
 static LAST_ANNOUNCED_MOVES: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
-/// What a publish would announce, as one stable key: every alias move and
-/// withheld candidate, sorted, without the fetch stamp the overlay rows
-/// carry. `None` when there is nothing to say.
+/// What a publish would announce, as one stable key: every alias move,
+/// withheld candidate and alias left without a living release, sorted,
+/// without the fetch stamp the overlay rows carry. `None` when there is
+/// nothing to say.
 #[must_use]
 pub(crate) fn alias_moves_key(overlay: &runtime::model_discovery::Overlay) -> Option<String> {
     let mut lines: Vec<String> = overlay
@@ -1463,6 +1485,12 @@ pub(crate) fn alias_moves_key(overlay: &runtime::model_discovery::Overlay) -> Op
                 .iter()
                 .map(|update| format!("?{}→{}←{}", update.alias, update.to, update.from)),
         )
+        .chain(
+            overlay
+                .orphaned
+                .iter()
+                .map(|update| format!("!{}→∅←{}", update.alias, update.from)),
+        )
         .collect();
     if lines.is_empty() {
         return None;
@@ -1472,10 +1500,16 @@ pub(crate) fn alias_moves_key(overlay: &runtime::model_discovery::Overlay) -> Op
 }
 
 /// The words a move is announced with. An alias minted for a family the
-/// shipped catalog never named has no "was".
+/// shipped catalog never named has no "was"; one whose release left its
+/// provider's list with nothing living to follow has no "to" (t-6248).
 #[must_use]
 pub(crate) fn alias_move_words(update: &runtime::model_discovery::AliasUpdate) -> String {
-    if update.from.is_empty() {
+    if update.to.is_empty() {
+        format!(
+            "model catalog: {} → none ({} left the {} list and no release of its family is listed)",
+            update.alias, update.from, update.provider
+        )
+    } else if update.from.is_empty() {
         format!(
             "model catalog: {} → {} (new alias, discovered)",
             update.alias, update.to
@@ -1538,10 +1572,7 @@ pub fn publish_model_catalog() -> Option<crate::model_wire_env::Published> {
 #[allow(clippy::must_use_candidate)]
 pub fn connect_model_catalog() -> Option<crate::model_wire_env::Published> {
     let published = publish_model_catalog();
-    spawn_model_discovery_refresh(
-        runtime::model_discovery::UpdatePolicy::load(),
-        runtime::model_discovery::current().as_deref(),
-    );
+    spawn_model_discovery_refresh(runtime::model_discovery::UpdatePolicy::load());
     published
 }
 
@@ -1568,10 +1599,7 @@ pub fn model_picker_opening() {
         connect_model_catalog();
         return;
     }
-    spawn_model_discovery_refresh(
-        runtime::model_discovery::UpdatePolicy::load(),
-        current.as_deref(),
-    );
+    spawn_model_discovery_refresh(runtime::model_discovery::UpdatePolicy::load());
 }
 
 /// Say once what this publish moved — or, under `notify`, what it withheld.
@@ -1612,19 +1640,23 @@ fn announce_alias_moves(overlay: &runtime::model_discovery::Overlay) {
             update.alias, update.to, update.from
         ));
     }
+    for update in &overlay.orphaned {
+        push_catalog_notice(alias_move_words(update));
+    }
 }
 
 /// Refresh the discovery cache on a detached thread when any source's answer
 /// is missing, failed, or past the connection TTL (t-3054: every session
 /// start and every `/model` open asks the providers that have gone quiet
-/// for an hour). One thread at a time: it writes the cache and installs the
-/// snapshot, and the next catalog publish (a runtime rebuild, the next
-/// picker open, or the next launch) makes it live — the bridge writes
-/// process environment, which stays on the thread that owns the runtime.
-fn spawn_model_discovery_refresh(
-    policy: runtime::model_discovery::UpdatePolicy,
-    current: Option<&runtime::model_discovery::DiscoveredCatalog>,
-) {
+/// for an hour), or skipped for a credential this process holds (t-6248).
+/// One thread at a time: it writes the cache and installs the snapshot, and
+/// the next catalog publish (a runtime rebuild, the next picker open, or the
+/// next launch) makes it live — the bridge writes process environment, which
+/// stays on the thread that owns the runtime. Which sources are due is
+/// decided on that thread too: asking a skipped source whether its
+/// credential is here may cost a keychain lookup, and the caller can be the
+/// picker opening under the person's key.
+fn spawn_model_discovery_refresh(policy: runtime::model_discovery::UpdatePolicy) {
     use std::sync::atomic::Ordering;
     if policy == runtime::model_discovery::UpdatePolicy::Pinned
         || std::env::var_os("ZO_DISABLE_MODEL_DISCOVERY").is_some()
@@ -1633,9 +1665,6 @@ fn spawn_model_discovery_refresh(
     }
     let now = runtime::model_discovery::now_secs();
     let ttl = runtime::model_discovery::ttl_secs();
-    if runtime::model_discovery::due_sources(current, now, ttl).is_empty() {
-        return;
-    }
     if DISCOVERY_REFRESH_RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
@@ -1656,9 +1685,11 @@ fn spawn_model_discovery_refresh(
 
 /// The body of the refresh thread: ask the due sources, cache, and say on
 /// stderr (the log file, in an interactive run) what was learned and which
-/// source refused.
+/// source refused. Nothing due writes nothing.
 fn refresh_model_discovery_cache(now: u64, ttl: u64) {
-    let catalog = runtime::model_discovery::discover_due(now, ttl);
+    let Some(catalog) = runtime::model_discovery::discover_due(now, ttl) else {
+        return;
+    };
     let found = catalog.models.len();
     let failed: Vec<String> = catalog
         .reports
@@ -1802,7 +1833,8 @@ fn build_claude_runtime_client(
 
 /// 자격증명이 없어도 런타임은 선다. TUI 가 열려야 `/login` 을 칠 수 있고,
 /// 파이프 경로도 같은 오류 문구를 사람이 읽는 자리에 남기는 편이 낫다 —
-/// 모델 요청은 여전히 실패한다.
+/// 모델 요청은 여전히 실패한다. 그리고 그 사실을 적어 둔다: 턴 경계가
+/// 로그인을 다시 찾는다([`reconnect_claude_login`]).
 fn resolve_startup_auth<R>(resolve_auth: R) -> AuthSource
 where
     R: FnOnce() -> Result<AuthSource, Box<dyn std::error::Error>>,
@@ -1811,7 +1843,115 @@ where
         eprintln!(
             "[zo] Claude auth unavailable at startup: {error}. Opening TUI unauthenticated; run `/login claude` before sending Anthropic requests."
         );
+        note_claude_login_missing(false);
         AuthSource::None
+    })
+}
+
+/// A Claude login this process started without (t-6248, C3). Until one is
+/// found the turn boundary keeps looking — once at the next person's turn,
+/// and again whenever the window's managed credentials file changes — rather
+/// than leaving the session unauthenticated until a request 401s.
+static CLAUDE_LOGIN_MISSING: std::sync::Mutex<Option<MissingClaudeLogin>> =
+    std::sync::Mutex::new(None);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MissingClaudeLogin {
+    /// The managed credentials file as it stood when the login was last
+    /// found missing — metadata only, the stamp `managed_claude_auth_changed`
+    /// compares.
+    stamp: Option<api::ManagedCredentialsStamp>,
+    /// Whether a person's turn has had its one look since then.
+    looked: bool,
+}
+
+fn claude_login_missing() -> std::sync::MutexGuard<'static, Option<MissingClaudeLogin>> {
+    CLAUDE_LOGIN_MISSING
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// Remember that no Claude login could be used, and the managed file's
+/// stamp at that moment.
+fn note_claude_login_missing(looked: bool) {
+    *claude_login_missing() = Some(MissingClaudeLogin {
+        stamp: api::managed_claude_credentials_stamp(),
+        looked,
+    });
+}
+
+/// Whether this turn looks for the missing login again: the managed file
+/// changed since the last look, or this is a person's turn and none has
+/// looked yet. Nothing missing, nothing to do.
+fn claude_login_look_due(
+    missing: Option<&MissingClaudeLogin>,
+    stamp_now: Option<&api::ManagedCredentialsStamp>,
+    persons_turn: bool,
+) -> bool {
+    missing.is_some_and(|missing| {
+        missing.stamp.as_ref() != stamp_now || (persons_turn && !missing.looked)
+    })
+}
+
+/// A Claude credential is in hand again. When this process had started
+/// without one, stop looking and ask the model list again — the Anthropic
+/// column it could not answer is due now (a failure, or a skip this process
+/// can answer). Whether it had been missing is the answer.
+fn claude_login_found() -> bool {
+    let was_missing = claude_login_missing().take().is_some();
+    if was_missing {
+        spawn_model_discovery_refresh(runtime::model_discovery::UpdatePolicy::load());
+    }
+    was_missing
+}
+
+/// The status line's words when a turn finds the login the process started
+/// without, or looks and still cannot use one.
+const CLAUDE_LOGIN_FOUND: &str = "Claude login found — this turn uses it, and the model list is asked again";
+
+fn claude_login_still_missing(miss: &api::CredentialMiss) -> String {
+    match miss {
+        api::CredentialMiss::Absent => {
+            "Claude login still missing — sign in with `claude` or /login claude".to_string()
+        }
+        api::CredentialMiss::Unusable(why) => format!("Claude login still unusable — {why}"),
+    }
+}
+
+/// At a turn's start, a process that opened without a Claude login looks for
+/// it again ([`claude_login_look_due`]) down the same road a 401 recovery
+/// takes, hands the long-lived client what it found, and says in one status
+/// line what happened. `None` when there was nothing to look for.
+async fn reconnect_claude_login(
+    client: &mut AnthropicRuntimeClient,
+    persons_turn: bool,
+) -> Option<String> {
+    if !matches!(&client.client, ProviderClient::Anthropic(_))
+        || client.auth_route == AuthRoute::ApiKey
+    {
+        return None;
+    }
+    let due = {
+        let missing = claude_login_missing();
+        missing.is_some()
+            && claude_login_look_due(
+                missing.as_ref(),
+                api::managed_claude_credentials_stamp().as_ref(),
+                persons_turn,
+            )
+    };
+    if !due {
+        return None;
+    }
+    Some(match refresh_claude_oauth_explained().await {
+        Ok(auth) => {
+            client.set_auth(auth);
+            CLAUDE_LOGIN_FOUND.to_string()
+        }
+        Err(miss) => {
+            note_claude_login_missing(true);
+            claude_login_still_missing(&miss)
+        }
     })
 }
 
@@ -1971,22 +2111,31 @@ fn resolve_claude_cli_auth_source() -> Result<AuthSource, Box<dyn std::error::Er
 /// request path uses a bare snapshot and never refreshes per request, so a
 /// crossed expiry otherwise 401s every request until the process restarts.
 pub(crate) async fn refresh_claude_oauth() -> Option<AuthSource> {
+    refresh_claude_oauth_explained().await.ok()
+}
+
+/// [`refresh_claude_oauth`], and when every lane fails, why — the one road a
+/// 401 recovery and a turn that looks for a missing login both take.
+async fn refresh_claude_oauth_explained() -> Result<AuthSource, api::CredentialMiss> {
     tokio::task::spawn_blocking(|| {
         // Recovery path: the memoized keychain session is exactly what just
         // lapsed/401'd, so drop it before re-resolving.
         api::invalidate_claude_code_keychain_cache();
-        let resolved = api::resolve_claude_auth_fresh_detailed()?;
+        let resolved = api::resolve_claude_auth_fresh_explained()?;
         update_cached_claude_auth(
             &resolved.auth,
             cli_auth_origin(resolved.origin),
             resolved.expires_at_ms,
             resolved.managed_file_stamp,
         );
-        Some(resolved.auth)
+        Ok(resolved.auth)
     })
     .await
-    .ok()
-    .flatten()
+    .unwrap_or_else(|_| {
+        Err(api::CredentialMiss::Unusable(
+            "the Claude credential lookup did not finish".to_string(),
+        ))
+    })
 }
 
 /// stdout wrapper for the text one-shot path: strips the SGR/ANSI escapes the
@@ -2658,6 +2807,122 @@ mod oauth_refresh_tests {
         assert!(oauth_refresh_needed(false, Some(now - 10), now));
     }
 
+    /// C3 (t-6248): a zo that opened without a Claude login — "Claude auth
+    /// unavailable at startup" — finds it at the next turn's start once the
+    /// window's managed file holds one, instead of spending the session
+    /// unauthenticated until a request 401s.
+    #[test]
+    fn a_login_the_process_started_without_is_found_at_the_next_turn() {
+        let _env_lock = crate::test_env_lock();
+        let config_home = crate::support::temp_dir("missing-login-config");
+        let managed_home = crate::support::temp_dir("missing-login-account");
+        let _config_home = crate::support::EnvVarGuard::set(
+            "ZO_CONFIG_HOME",
+            Some(config_home.to_str().expect("utf8 config home")),
+        );
+        let _zo_home = crate::support::EnvVarGuard::set("ZO_HOME", None);
+        let _home = crate::support::EnvVarGuard::set(
+            "HOME",
+            Some(config_home.to_str().expect("utf8 home")),
+        );
+        let _claude_home = crate::support::EnvVarGuard::set(
+            "CLAUDE_CONFIG_DIR",
+            Some(managed_home.to_str().expect("utf8 managed home")),
+        );
+        let _legacy_claude_home = crate::support::EnvVarGuard::set("ZO_CLAUDE_HOME", Some(""));
+        let _disable_keychain = crate::support::EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
+        let _no_discovery = crate::support::EnvVarGuard::set("ZO_DISABLE_MODEL_DISCOVERY", Some("1"));
+        let _api_key = crate::support::EnvVarGuard::set("ANTHROPIC_API_KEY", None);
+        let _auth_token = crate::support::EnvVarGuard::set("ANTHROPIC_AUTH_TOKEN", None);
+        api::managed_account::clear();
+        api::invalidate_claude_code_keychain_cache();
+        *CACHED_AUTH
+            .get_or_init(|| std::sync::Mutex::new(None))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
+        // The start: nothing to sign in with, so the session opens without.
+        let startup = super::resolve_startup_auth(resolve_and_cache_claude_auth);
+        assert!(matches!(startup, api::AuthSource::None));
+        let mut client = AnthropicRuntimeClient {
+            client: ProviderClient::Anthropic(api::AnthropicClient::from_auth(startup)),
+            session_id: "missing-login-test".to_string(),
+            model: "claude-opus-5".to_string(),
+            auth_route: AuthRoute::Auto,
+            enable_tools: false,
+            emit_output: false,
+            allowed_tools: None,
+            tool_registry: GlobalToolRegistry::builtin(),
+            thinking: None,
+            named_effort: None,
+            effort_band_ceiling: None,
+            session_tracer: None,
+        };
+
+        // The person signs in; the window writes the managed file.
+        std::fs::write(
+            managed_home.join(".credentials.json"),
+            r#"{"claudeAiOauth":{"accessToken":"found-mid-session","scopes":["user:inference"]}}"#,
+        )
+        .expect("managed credentials");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let said = runtime.block_on(refresh_oauth_if_near_expiry(&mut client, true));
+
+        let ProviderClient::Anthropic(anthropic) = &client.client else {
+            panic!("still the Anthropic client");
+        };
+        assert_eq!(
+            anthropic.auth().bearer_token(),
+            Some("found-mid-session"),
+            "the turn found the login the process started without"
+        );
+        assert_eq!(said.as_deref(), Some(super::CLAUDE_LOGIN_FOUND), "and said so in one status line");
+        assert!(super::claude_login_missing().is_none(), "nothing is missing any more");
+        assert_eq!(
+            runtime.block_on(refresh_oauth_if_near_expiry(&mut client, true)),
+            None,
+            "the next turn has nothing to look for"
+        );
+        api::managed_account::clear();
+        std::fs::remove_dir_all(config_home).ok();
+        std::fs::remove_dir_all(managed_home).ok();
+    }
+
+    /// C3's two triggers: a person's turn looks once, and a change to the
+    /// window's managed credentials file looks again whoever's turn it is; a
+    /// look that failed is not repeated on every later turn.
+    #[test]
+    fn a_missing_login_is_looked_for_once_per_person_and_again_when_the_store_changes() {
+        use super::{claude_login_look_due, MissingClaudeLogin};
+        // It points `CLAUDE_CONFIG_DIR` at its own folder: under the lock, or
+        // a concurrent resolution reads this test's login.
+        let _env_lock = crate::test_env_lock();
+        let dir = crate::support::temp_dir("missing-login-stamp");
+        let file = dir.join(".credentials.json");
+        std::fs::write(&file, "{}").expect("a file");
+        let _claude_home = crate::support::EnvVarGuard::set(
+            "CLAUDE_CONFIG_DIR",
+            Some(dir.to_str().expect("utf8 dir")),
+        );
+        let before = api::managed_claude_credentials_stamp();
+        assert!(before.is_some());
+        let fresh = MissingClaudeLogin { stamp: before.clone(), looked: false };
+        let looked = MissingClaudeLogin { stamp: before.clone(), looked: true };
+
+        assert!(!claude_login_look_due(None, before.as_ref(), true), "nothing missing, nothing to do");
+        assert!(claude_login_look_due(Some(&fresh), before.as_ref(), true), "the next person's turn looks");
+        assert!(!claude_login_look_due(Some(&fresh), before.as_ref(), false), "a loop's turn does not spend it");
+        assert!(!claude_login_look_due(Some(&looked), before.as_ref(), true), "one look, not one per turn");
+        std::fs::write(&file, r#"{"claudeAiOauth":{"accessToken":"new"}}"#).expect("the file changed");
+        let after = api::managed_claude_credentials_stamp();
+        assert_ne!(after, before);
+        assert!(claude_login_look_due(Some(&looked), after.as_ref(), false), "a changed store is looked at again");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     #[test]
     fn refresh_oauth_if_near_expiry_skips_non_anthropic_rebuild_for_fresh_saved_token() {
         let _env_lock = crate::test_env_lock();
@@ -2704,7 +2969,7 @@ mod oauth_refresh_tests {
             .enable_all()
             .build()
             .expect("tokio runtime")
-            .block_on(refresh_oauth_if_near_expiry(&mut client));
+            .block_on(refresh_oauth_if_near_expiry(&mut client, true));
 
         let after = format!("{:?}", client.client);
         assert_eq!(
@@ -2761,7 +3026,7 @@ mod oauth_refresh_tests {
             .enable_all()
             .build()
             .expect("tokio runtime")
-            .block_on(refresh_oauth_if_near_expiry(&mut client));
+            .block_on(refresh_oauth_if_near_expiry(&mut client, true));
 
         let after = format!("{:?}", client.client);
         assert!(
@@ -3199,6 +3464,7 @@ mod tests {
             new_models: Vec::new(),
             alias_updates: vec![update("openai-latest", "gpt-6-astra", "gpt-5.6-sol"), update("astra", "gpt-6-astra", "")],
             alias_candidates: vec![update("gemini-flash", "gemini-3.8-flash", "gemini-3.6-flash")],
+            orphaned: Vec::new(),
         };
         let refreshed = runtime::model_discovery::Overlay {
             json: Some(r#"{"models":[{"source":"discovered via chatgpt-backend at 1788827387"}]}"#.to_string()),
@@ -3206,6 +3472,7 @@ mod tests {
             // The same moves in another order: still the same answer.
             alias_updates: vec![update("astra", "gpt-6-astra", ""), update("openai-latest", "gpt-6-astra", "gpt-5.6-sol")],
             alias_candidates: first.alias_candidates.clone(),
+            orphaned: Vec::new(),
         };
         assert_ne!(first.json, refreshed.json, "the stamp moved");
         let key = alias_moves_key(&first).expect("moves to announce");
@@ -3230,6 +3497,19 @@ mod tests {
         assert_eq!(
             alias_move_words(&update("openai-latest", "gpt-6-astra", "gpt-5.6-sol")),
             "model catalog: openai-latest → gpt-6-astra (was gpt-5.6-sol, discovered)"
+        );
+        // An alias whose release left the list with nothing living to follow
+        // is news once, and says there is none (t-6248).
+        let orphaned = runtime::model_discovery::Overlay {
+            orphaned: vec![update("spark", "", "gpt-5.3-codex-spark")],
+            ..first.clone()
+        };
+        let with_orphan = alias_moves_key(&orphaned).expect("news");
+        assert!(with_orphan.contains("!spark→∅←gpt-5.3-codex-spark"), "{with_orphan}");
+        assert_ne!(Some(with_orphan), alias_moves_key(&first));
+        assert_eq!(
+            alias_move_words(&update("spark", "", "gpt-5.3-codex-spark")),
+            "model catalog: spark → none (gpt-5.3-codex-spark left the openai list and no release of its family is listed)"
         );
     }
 
@@ -3270,10 +3550,13 @@ mod tests {
                 "{file} is not a connection and must only publish"
             );
         }
+        // A login the process started without, found again, is a connection
+        // too: the Anthropic column it could not answer is asked now (t-6248).
+        assert!(body_of("fn claude_login_found(").contains("spawn_model_discovery_refresh("));
         assert_eq!(
             shipped.matches("spawn_model_discovery_refresh(").count(),
-            3,
-            "the refresh is spawned from the two connection roads and its own definition"
+            4,
+            "the refresh is spawned from the two connection roads, a regained login and its own definition"
         );
     }
 
@@ -3372,11 +3655,15 @@ mod tests {
 
     #[test]
     fn startup_auth_resolution_falls_back_to_unauthenticated() {
+        // The fallback records a missing login for the turn boundary to look
+        // for; the lock keeps that process-wide note out of a concurrent test.
+        let _env_lock = crate::test_env_lock();
         let result = resolve_startup_auth(|| {
             Err(Box::new(io::Error::other("invalid_grant")) as Box<dyn std::error::Error>)
         });
 
         assert!(matches!(result, AuthSource::None));
+        assert!(super::claude_login_missing().take().is_some(), "the turn boundary will look again");
     }
 
     #[test]

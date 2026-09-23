@@ -162,6 +162,27 @@ mod main_contract {
         );
     }
 
+    /// zo reads the Grok and Kimi Code CLIs' logins where the window reads
+    /// them (t-6248): the window's spelling is the parent repository's, and
+    /// this pins zo's copy to it — a CLI that moves its file turns this red
+    /// before either side reads the wrong place.
+    #[test]
+    fn the_other_clis_logins_are_spelled_the_windows_way() {
+        use api::cli_sessions as zo;
+        use zerocode_core::cli_login_files::{grok, kimi};
+        assert_eq!(zo::GROK_HOME_ENV, grok::HOME_VAR);
+        assert_eq!(zo::GROK_HOME_DIR, grok::HOME_DIR);
+        assert_eq!(zo::GROK_AUTH_FILE, grok::AUTH_FILE);
+        assert_eq!(zo::GROK_PREFERRED_ISSUER, grok::PREFERRED_ISSUER);
+        assert_eq!(zo::GROK_TOKEN_SKEW_MS, grok::TOKEN_SKEW_MS);
+        assert_eq!(zo::KIMI_CODE_HOME_ENV, kimi::HOME_VAR);
+        assert_eq!(zo::KIMI_CODE_HOME_DIR, kimi::HOME_DIR);
+        assert_eq!(zo::KIMI_CODE_CREDENTIALS_TAIL, kimi::CREDENTIALS_TAIL);
+        assert_eq!(zo::KIMI_CODE_EXPIRY_SKEW_SECONDS, kimi::EXPIRY_SKEW_SECONDS);
+        assert_eq!(zo::KIMI_CODE_BASE_URL_ENV, kimi::BASE_URL_VAR);
+        assert_eq!(zo::KIMI_CODE_DEFAULT_BASE_URL, kimi::DEFAULT_BASE_URL);
+    }
+
     /// The TypeSafe switch the window's settings write is the one zo's router
     /// reads: every mode the Jev use table offers routing, written where the
     /// table says, reads back through zo's merged settings as itself.

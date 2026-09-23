@@ -2154,3 +2154,107 @@ async fn a_wall_hours_away_is_not_retried_at_the_ladders_cap() {
         "the hint must ride up with the error: {error}"
     );
 }
+
+/// C1 (t-6248): when no Claude credential can be used, the resolution says
+/// which of two things is true. A login that is there and cannot be used —
+/// the window's managed file, expired, its refresh token already refused by
+/// the endpoint — is `Unusable` with the way back in; a machine where no rung
+/// holds anything is `Absent`. The `Option` view every request path reads is
+/// unchanged: `None` either way.
+#[test]
+fn a_refused_managed_login_is_unusable_and_an_empty_machine_is_absent() {
+    use crate::credential::CredentialMiss;
+    let _guard = env_lock();
+    let _isolation = crate::test_env::CredentialEnvIsolation::empty();
+    let _disable_keychain = EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
+    let _no_managed = EnvVarGuard::set("CLAUDE_CONFIG_DIR", None);
+    crate::managed_account::clear();
+    super::keychain::invalidate_claude_code_keychain_cache();
+
+    assert_eq!(
+        super::resolve_claude_auth_fresh_explained().err(),
+        Some(CredentialMiss::Absent),
+        "nothing configured anywhere is absent"
+    );
+
+    let managed = tempfile::tempdir().expect("managed Claude home");
+    std::fs::write(
+        managed.path().join(".credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"expired-managed-access","refreshToken":"superseded-managed-branch","expiresAt":1000,"scopes":["user:inference"]}}"#,
+    )
+    .expect("managed credentials");
+    let refused = ApiError::Api {
+        status: reqwest::StatusCode::BAD_REQUEST,
+        error_type: None,
+        message: None,
+        body: r#"{"error": "invalid_grant", "error_description": "refresh token superseded"}"#.to_string(),
+        retryable: false,
+        retry_after: None,
+    };
+    assert!(
+        super::refresh_gate::record_failure("superseded-managed-branch", &refused),
+        "invalid_grant retires the branch"
+    );
+    let _claude_home = EnvVarGuard::set(
+        "CLAUDE_CONFIG_DIR",
+        Some(managed.path().to_str().expect("utf8 managed home")),
+    );
+
+    let miss = super::resolve_claude_auth_fresh_explained()
+        .expect_err("a refused login resolves to nothing usable");
+    let CredentialMiss::Unusable(why) = miss else {
+        panic!("a login that is there is not absent: {miss:?}");
+    };
+    assert!(why.contains("refused") && why.contains("sign in again"), "{why}");
+    assert!(!why.contains("expired-managed-access") && !why.contains("superseded-managed-branch"), "no token in the words: {why}");
+    assert!(super::resolve_claude_auth_fresh_detailed().is_none());
+    crate::managed_account::clear();
+}
+
+/// C2 (t-6248): whether this process holds a Claude credential — asked of a
+/// skip another process wrote — reads every rung the resolution reads and
+/// none of it is used: no refresh, no secret. An expired login counts: it is
+/// configured, and asking again turns the skip into an honest failure.
+#[test]
+fn a_claude_credential_is_configured_on_any_rung_and_never_refreshed_to_find_out() {
+    let _guard = env_lock();
+    let isolation = crate::test_env::CredentialEnvIsolation::empty();
+    let _disable_keychain = EnvVarGuard::set("ZO_DISABLE_KEYCHAIN", Some("1"));
+    let _no_managed = EnvVarGuard::set("CLAUDE_CONFIG_DIR", None);
+    crate::managed_account::clear();
+    assert!(!super::claude_credential_configured(), "an empty machine holds nothing");
+
+    {
+        let _key = EnvVarGuard::set("ANTHROPIC_API_KEY", Some("sk-ant-configured"));
+        assert!(super::claude_credential_configured(), "a key in the environment");
+    }
+
+    let managed = tempfile::tempdir().expect("managed Claude home");
+    std::fs::write(
+        managed.path().join(".credentials.json"),
+        r#"{"claudeAiOauth":{"accessToken":"expired","refreshToken":"never-spent-here","expiresAt":1000}}"#,
+    )
+    .expect("managed credentials");
+    {
+        let _claude_home = EnvVarGuard::set(
+            "CLAUDE_CONFIG_DIR",
+            Some(managed.path().to_str().expect("utf8 managed home")),
+        );
+        assert!(super::claude_credential_configured(), "the window's managed file, expired or not");
+        assert!(
+            super::refresh_gate::refresh_blocked("never-spent-here").is_none(),
+            "finding out spent no refresh"
+        );
+    }
+
+    save_oauth_credentials(&core_types::OAuthTokenSet {
+        access_token: "saved".to_string(),
+        refresh_token: None,
+        expires_at: Some(1),
+        scopes: Vec::new(),
+    })
+    .expect("save zo login");
+    assert!(super::claude_credential_configured(), "zo's own saved login");
+    crate::managed_account::clear();
+    drop(isolation);
+}

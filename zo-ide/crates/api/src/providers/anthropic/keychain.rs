@@ -35,8 +35,24 @@ use core_types::{OAuthConfig, OAuthRefreshRequest};
 use serde_json::Value;
 
 use super::{AnthropicClient, AuthSource, OAuthTokenSet, read_base_url};
+use crate::credential::CredentialMiss;
 use crate::error::ApiError;
 use crate::providers::refresh_gate;
+
+/// Why a Claude Code login that is there could not be used, in the words a
+/// model list shows (`zo models`) — each names the way back in.
+const EXPIRED_REFRESH_REFUSED: &str = "the Claude Code sign-in expired and its refresh token was refused \
+     (superseded or revoked) — sign in again with `claude` or `zo login claude`";
+const EXPIRED_REFRESH_COOLING: &str =
+    "the Claude Code sign-in expired and could not be refreshed a moment ago; the next connection tries again";
+const EXPIRED_NO_REFRESH_TOKEN: &str = "the Claude Code sign-in expired and holds no refresh token — \
+     sign in again with `claude` or `zo login claude`";
+const MISSING_INFERENCE_SCOPE: &str =
+    "the Claude Code sign-in lacks the user:inference scope — sign in again with `claude`";
+const KEYCHAIN_UNANSWERED: &str =
+    "the macOS keychain did not answer for the Claude Code sign-in (locked, or access refused)";
+const LOGIN_NOT_A_DOCUMENT: &str =
+    "the Claude Code sign-in on this machine is not a readable login — sign in again with `claude`";
 
 /// Keychain service name Claude Code stores its OAuth bundle under.
 const KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
@@ -86,7 +102,9 @@ fn freshest_blob(file: Option<Value>, scoped: Option<Value>) -> Option<Value> {
 
 /// Parse what `security find-generic-password -w` printed. A value that is not
 /// a document — the 128-byte cut-off a prompt-fed write left behind — is no
-/// login at all, and reads as absent rather than as an error.
+/// login at all: the resolution falls through to the next rung rather than
+/// failing, and the explanation says the item is there and unreadable
+/// ([`BlobRead::Unusable`]) rather than that nothing is kept.
 fn parse_keychain_blob(raw: &str) -> Option<Value> {
     serde_json::from_str(raw.trim()).ok()
 }
@@ -185,7 +203,10 @@ fn blob_plan(oauth: &Value) -> Option<String> {
 /// - [`invalidate_claude_code_keychain_cache`] forces the next lookup through
 ///   to the keychain (401 recovery must never be served a cached bearer).
 struct KeychainCacheEntry {
-    session: Option<KeychainSession>,
+    /// The session, or why there was none — a miss keeps its reason, so a
+    /// cached answer says "expired and refused" as the read did, not just
+    /// "nothing".
+    session: Result<KeychainSession, CredentialMiss>,
     read_at: Instant,
 }
 
@@ -217,7 +238,7 @@ enum CachedSessionShape {
 /// miss), or nothing servable — the keychain must actually be read.
 #[derive(Debug, PartialEq, Eq)]
 enum KeychainCacheLookup {
-    Fresh(Option<KeychainSession>),
+    Fresh(Result<KeychainSession, CredentialMiss>),
     Stale,
 }
 
@@ -249,8 +270,8 @@ fn cached_keychain_session() -> KeychainCacheLookup {
         return KeychainCacheLookup::Stale;
     };
     let shape = match &entry.session {
-        None => CachedSessionShape::Miss,
-        Some(session) => session
+        Err(_) => CachedSessionShape::Miss,
+        Ok(session) => session
             .expires_at_ms
             .map_or(CachedSessionShape::NoExpiry, CachedSessionShape::ExpiringAt),
     };
@@ -261,11 +282,11 @@ fn cached_keychain_session() -> KeychainCacheLookup {
     }
 }
 
-fn store_keychain_session(session: Option<&KeychainSession>) {
+fn store_keychain_session(session: &Result<KeychainSession, CredentialMiss>) {
     *KEYCHAIN_SESSION_CACHE
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(KeychainCacheEntry {
-        session: session.cloned(),
+        session: session.clone(),
         read_at: Instant::now(),
     });
 }
@@ -322,6 +343,15 @@ fn evaluate_keychain_credentials(creds: &Value, now_ms: u64) -> KeychainOutcome 
 /// has no usable bundle and refresh is impossible/failed.
 #[must_use]
 pub fn read_claude_code_keychain_session() -> Option<KeychainSession> {
+    read_claude_code_keychain_session_explained().ok()
+}
+
+/// [`read_claude_code_keychain_session`], and when there is no session, why:
+/// [`CredentialMiss::Absent`] when this source holds no login at all,
+/// [`CredentialMiss::Unusable`] when it holds one that could not be used — a
+/// session that expired and would not refresh, a login without the inference
+/// scope, a keychain that would not answer.
+pub fn read_claude_code_keychain_session_explained() -> Result<KeychainSession, CredentialMiss> {
     // `ZO_DISABLE_KEYCHAIN` disables the operating-system keychain, not an
     // explicitly handed-off credentials file. Managed files also bypass the
     // keychain memo: the runtime owns the cheaper `(mtime, len)` cache and only
@@ -333,7 +363,7 @@ pub fn read_claude_code_keychain_session() -> Option<KeychainSession> {
         return read_claude_code_keychain_session_uncached(true);
     }
     if std::env::var_os(DISABLE_KEYCHAIN_ENV).is_some() {
-        return None;
+        return Err(CredentialMiss::Absent);
     }
     if let KeychainCacheLookup::Fresh(cached) = cached_keychain_session() {
         return cached;
@@ -347,12 +377,18 @@ pub fn read_claude_code_keychain_session() -> Option<KeychainSession> {
         return cached;
     }
     let session = read_claude_code_keychain_session_uncached(false);
-    store_keychain_session(session.as_ref());
+    store_keychain_session(&session);
     session
 }
 
-fn read_claude_code_keychain_session_uncached(managed_file: bool) -> Option<KeychainSession> {
-    let blob = read_keychain_blob()?;
+fn read_claude_code_keychain_session_uncached(
+    managed_file: bool,
+) -> Result<KeychainSession, CredentialMiss> {
+    let blob = match read_keychain_blob_answer() {
+        BlobRead::Found(blob) => blob,
+        BlobRead::Absent => return Err(CredentialMiss::Absent),
+        BlobRead::Unusable(why) => return Err(CredentialMiss::Unusable(why.to_string())),
+    };
     let now_ms = now_unix_millis();
     match evaluate_keychain_credentials(&blob, now_ms) {
         KeychainOutcome::Usable(access_token) => {
@@ -364,7 +400,7 @@ fn read_claude_code_keychain_session_uncached(managed_file: bool) -> Option<Keyc
                 .get("claudeAiOauth")
                 .and_then(|oauth| oauth.get("expiresAt"))
                 .and_then(Value::as_u64);
-            Some(KeychainSession {
+            Ok(KeychainSession {
                 access_token,
                 expires_at_ms,
                 plan: blob.get("claudeAiOauth").and_then(blob_plan),
@@ -373,10 +409,10 @@ fn read_claude_code_keychain_session_uncached(managed_file: bool) -> Option<Keyc
         KeychainOutcome::Expired => {
             let refreshed = refresh_expired_keychain_blob(&blob);
             match &refreshed {
-                Some(_) => {
+                Ok(_) => {
                     eprintln!("\x1b[2mRefreshed Claude Code session credentials.\x1b[0m");
                 }
-                None => eprintln!(
+                Err(_) => eprintln!(
                     "\x1b[33mClaude Code keychain token expired and could not be refreshed, falling back to Zo auth.\x1b[0m"
                 ),
             }
@@ -386,9 +422,46 @@ fn read_claude_code_keychain_session_uncached(managed_file: bool) -> Option<Keyc
             eprintln!(
                 "\x1b[33mClaude Code keychain token lacks user:inference scope, falling back to Zo auth.\x1b[0m"
             );
-            None
+            Err(CredentialMiss::Unusable(MISSING_INFERENCE_SCOPE.to_string()))
         }
-        KeychainOutcome::Absent => None,
+        KeychainOutcome::Absent => Err(CredentialMiss::Absent),
+    }
+}
+
+/// Whether a Claude Code login is kept where this process would read one —
+/// kept, not necessarily usable. Never reads a secret and never refreshes:
+/// the managed folder's file or the CLI's scoped item for a managed launch,
+/// the machine's item for a bare one. An answer the memo already holds is
+/// reused; otherwise one `security` attribute lookup (no `-w`, so no access
+/// prompt) settles it.
+#[must_use]
+pub fn claude_code_login_configured() -> bool {
+    let keychain_allowed = std::env::var_os(DISABLE_KEYCHAIN_ENV).is_none();
+    if let Some(dir) = crate::managed_account::claude_config_dir().filter(|dir| !dir.is_empty()) {
+        return credentials_file_override().is_some()
+            || (keychain_allowed && keychain_item_kept(&scoped_keychain_service(&dir)));
+    }
+    if !keychain_allowed {
+        return false;
+    }
+    match cached_keychain_session() {
+        KeychainCacheLookup::Fresh(Ok(_) | Err(CredentialMiss::Unusable(_))) => true,
+        KeychainCacheLookup::Fresh(Err(CredentialMiss::Absent)) => false,
+        KeychainCacheLookup::Stale => keychain_item_kept(KEYCHAIN_SERVICE),
+    }
+}
+
+/// Whether the keychain keeps an item under `service`: its attributes only,
+/// which no access list guards. A keychain that does not answer may well
+/// keep one, and saying so costs one more question at the next connection;
+/// a machine without `security` keeps none.
+fn keychain_item_kept(service: &str) -> bool {
+    match Command::new("security")
+        .args(["find-generic-password", "-s", service])
+        .output()
+    {
+        Ok(output) => output.status.code() != Some(KEYCHAIN_ITEM_NOT_FOUND),
+        Err(error) => error.kind() != std::io::ErrorKind::NotFound,
     }
 }
 
@@ -499,22 +572,29 @@ fn store_holds_refresh_token(refresh_token: &str) -> bool {
 
 /// Refresh an expired keychain blob via its `refreshToken`, persist the result
 /// (keychain write-back + zo credential mirror), and return the fresh
-/// session. `None` when the blob has no refresh token, a recent attempt already
-/// failed (cool-down), or the token endpoint rejects the refresh.
-fn refresh_expired_keychain_blob(blob: &Value) -> Option<KeychainSession> {
-    let oauth = blob.get("claudeAiOauth")?;
+/// session. Unusable — with the reason — when the blob has no refresh token, a
+/// recent attempt already failed (cool-down), or the token endpoint rejects
+/// the refresh.
+fn refresh_expired_keychain_blob(blob: &Value) -> Result<KeychainSession, CredentialMiss> {
+    let unusable = |why: &str| CredentialMiss::Unusable(why.to_string());
+    let oauth = blob
+        .get("claudeAiOauth")
+        .ok_or_else(|| unusable(EXPIRED_NO_REFRESH_TOKEN))?;
     let refresh_token = oauth
         .get("refreshToken")
         .and_then(Value::as_str)
-        .filter(|token| !token.is_empty())?
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| unusable(EXPIRED_NO_REFRESH_TOKEN))?
         .to_string();
 
     // Keyed on the token, not on the clock: a branch the endpoint has already
     // rejected is retired outright (nothing but a new sign-in revives it), while
     // a transient failure only cools down. The old process-wide timestamp could
     // not tell those apart and blocked a healthy branch for a minute either way.
-    if refresh_gate::refresh_blocked(&refresh_token).is_some() {
-        return None;
+    match refresh_gate::refresh_blocked(&refresh_token) {
+        Some(refresh_gate::RefreshBlock::Retired) => return Err(unusable(EXPIRED_REFRESH_REFUSED)),
+        Some(refresh_gate::RefreshBlock::CoolingDown) => return Err(unusable(EXPIRED_REFRESH_COOLING)),
+        None => {}
     }
 
     // Re-request the original grant's scopes; an empty/absent list falls back
@@ -554,7 +634,7 @@ fn refresh_expired_keychain_blob(blob: &Value) -> Option<KeychainSession> {
                 eprintln!(
                     "\x1b[2mClaude Code credentials were refreshed by another process; using the newer copy.\x1b[0m"
                 );
-                return Some(fresh);
+                return Ok(fresh);
             }
             eprintln!("\x1b[33mClaude Code OAuth refresh failed: {error}\x1b[0m");
             if retired {
@@ -565,8 +645,12 @@ fn refresh_expired_keychain_blob(blob: &Value) -> Option<KeychainSession> {
                     "\x1b[33m  This refresh token has been superseded or revoked. \
                      Sign in again (`claude` or `zo login claude`).\x1b[0m"
                 );
+                return Err(unusable(EXPIRED_REFRESH_REFUSED));
             }
-            return None;
+            return Err(CredentialMiss::Unusable(format!(
+                "the Claude Code sign-in expired and refreshing it failed ({}); the next connection tries again",
+                super::single_line_reason(&error)
+            )));
         }
     };
 
@@ -602,7 +686,7 @@ fn refresh_expired_keychain_blob(blob: &Value) -> Option<KeychainSession> {
         scopes: refreshed.scopes.clone(),
     });
 
-    Some(KeychainSession {
+    Ok(KeychainSession {
         access_token: refreshed.access_token,
         expires_at_ms: refreshed.expires_at.map(|secs| secs.saturating_mul(1000)),
         // The refresh answers with tokens only; the plan is a property of the
@@ -684,6 +768,22 @@ fn updated_keychain_blob(blob: &Value, refreshed: &OAuthTokenSet, refresh_token:
 }
 
 fn read_keychain_blob() -> Option<Value> {
+    match read_keychain_blob_answer() {
+        BlobRead::Found(blob) => Some(blob),
+        BlobRead::Absent | BlobRead::Unusable(_) => None,
+    }
+}
+
+/// What the store that holds the Claude Code login said.
+enum BlobRead {
+    Found(Value),
+    /// No login is kept there.
+    Absent,
+    /// A login is kept there and could not be read — why.
+    Unusable(&'static str),
+}
+
+fn read_keychain_blob_answer() -> BlobRead {
     // A managed account directory keeps its login in two places — the
     // `.credentials.json` beside it and the CLI's scoped keychain item — and
     // the fresher one is the login. Never the UNSCOPED item: that copy belongs
@@ -692,22 +792,33 @@ fn read_keychain_blob() -> Option<Value> {
     // logs the other side out (measured 2026-08-27, zo-ide.log pid 78000). A
     // directory with neither is "not signed in".
     if let Some(dir) = crate::managed_account::claude_config_dir().filter(|dir| !dir.is_empty()) {
-        let file = credentials_file_override().and_then(|path| read_credentials_file(&path));
+        let file_path = credentials_file_override();
+        let file = file_path.as_deref().and_then(read_credentials_file);
         let scoped = (std::env::var_os(DISABLE_KEYCHAIN_ENV).is_none())
-            .then(|| read_keychain_service_blob(&scoped_keychain_service(&dir)))
-            .flatten();
-        return freshest_blob(file, scoped);
+            .then(|| read_keychain_service_secret(&scoped_keychain_service(&dir)));
+        let unanswered = matches!(scoped, Some(KeychainAnswer::Unanswered));
+        let scoped_raw = scoped.and_then(KeychainAnswer::found);
+        let scoped_blob = scoped_raw.as_deref().and_then(parse_keychain_blob);
+        return match freshest_blob(file, scoped_blob) {
+            Some(blob) => BlobRead::Found(blob),
+            // Something is kept for this account and none of it reads as a
+            // login: a file that is there, an item that is not a document, or
+            // a keychain that did not answer.
+            None if file_path.is_some() || scoped_raw.is_some() => BlobRead::Unusable(LOGIN_NOT_A_DOCUMENT),
+            None if unanswered => BlobRead::Unusable(KEYCHAIN_UNANSWERED),
+            None => BlobRead::Absent,
+        };
     }
     if !keychain_read_allowed(None, false) {
-        return None;
+        return BlobRead::Absent;
     }
-    read_keychain_service_blob(KEYCHAIN_SERVICE)
-}
-
-/// One keychain item's secret, parsed; absent when the item is missing,
-/// refused, or not a document.
-fn read_keychain_service_blob(service: &str) -> Option<Value> {
-    parse_keychain_blob(&read_keychain_service_secret(service).found()?)
+    match read_keychain_service_secret(KEYCHAIN_SERVICE) {
+        KeychainAnswer::Found(raw) => {
+            parse_keychain_blob(&raw).map_or(BlobRead::Unusable(LOGIN_NOT_A_DOCUMENT), BlobRead::Found)
+        }
+        KeychainAnswer::Absent => BlobRead::Absent,
+        KeychainAnswer::Unanswered => BlobRead::Unusable(KEYCHAIN_UNANSWERED),
+    }
 }
 
 /// One keychain item's secret as `security find-generic-password -w` prints
@@ -741,11 +852,15 @@ impl KeychainAnswer {
 }
 
 fn read_keychain_service_secret(service: &str) -> KeychainAnswer {
-    let Ok(output) = Command::new("security")
+    let output = match Command::new("security")
         .args(["find-generic-password", "-s", service, "-w"])
         .output()
-    else {
-        return KeychainAnswer::Unanswered;
+    {
+        Ok(output) => output,
+        // No `security` at all is a machine that keeps no keychain (Linux,
+        // Windows): settled, not a read that failed.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return KeychainAnswer::Absent,
+        Err(_) => return KeychainAnswer::Unanswered,
     };
     if !output.status.success() {
         return if output.status.code() == Some(KEYCHAIN_ITEM_NOT_FOUND) {
@@ -1276,12 +1391,12 @@ mod tests {
 
     #[test]
     fn keychain_cache_store_serve_invalidate_roundtrip() {
-        let session = Some(super::KeychainSession {
+        let session = Ok(super::KeychainSession {
             access_token: "sk-ant-oat01-cache".to_string(),
             expires_at_ms: Some(u64::MAX),
             plan: Some("max".to_string()),
         });
-        super::store_keychain_session(session.as_ref());
+        super::store_keychain_session(&session);
         assert_eq!(
             super::cached_keychain_session(),
             super::KeychainCacheLookup::Fresh(session)
@@ -1293,6 +1408,17 @@ mod tests {
             super::cached_keychain_session(),
             super::KeychainCacheLookup::Stale
         );
+        // A miss keeps its reason while it is served from the memo: a cached
+        // "expired and refused" must not come back as "nothing here".
+        let refused = Err(crate::credential::CredentialMiss::Unusable(
+            super::EXPIRED_REFRESH_REFUSED.to_string(),
+        ));
+        super::store_keychain_session(&refused);
+        assert_eq!(
+            super::cached_keychain_session(),
+            super::KeychainCacheLookup::Fresh(refused)
+        );
+        super::invalidate_claude_code_keychain_cache();
     }
 
     #[test]
