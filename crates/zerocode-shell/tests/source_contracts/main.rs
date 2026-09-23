@@ -8899,6 +8899,9 @@ mod tests {
             "mobile_emulators_direct()",
             "android_emulators_direct()",
             r#"emit_to("main", "emulator:agent-open""#,
+            // Seated in the asking pane's checkout (t-6379): the payload
+            // names the terminal the door's pane key reads as.
+            "AgentOpen::asked(platform, device, pane)",
             "ios_accessibility_tree_direct",
             "android_accessibility_tree_direct",
             "ios_tap_direct",

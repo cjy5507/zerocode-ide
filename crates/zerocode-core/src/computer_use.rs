@@ -4115,7 +4115,10 @@ pub fn emulator_shim_script(
 }
 
 /// The emulator door on the shared chassis: it says where its caller stands
-/// for the verbs that write where they are told ([`EMULATOR_CWD_VERBS`]).
+/// for the verbs that write where they are told ([`EMULATOR_CWD_VERBS`]), and
+/// which pane asked, in the browser door's own header — the mirror an agent
+/// opens is seated in that pane's checkout, not beside whatever the person
+/// happens to be looking at (t-6379).
 fn emulator_door<'a>(
     manual: &'a str,
     prefix: &'a str,
@@ -4125,6 +4128,7 @@ fn emulator_door<'a>(
 ) -> PowerShellBridgeShim<'a> {
     PowerShellBridgeShim {
         cwd_verbs: EMULATOR_CWD_VERBS,
+        pane_header: Some(crate::agent_browser::PANE_HEADER),
         ..computer_route_shim(
             "zerocode-emulator",
             manual,
@@ -4210,8 +4214,9 @@ pub(crate) struct PowerShellBridgeShim<'a> {
     pub deadline_seconds: u64,
     /// Whether `--text-stdin`/`--value-stdin` read the payload from stdin.
     pub stdin_flags: bool,
-    /// Whether the pane key rides along as a header (the browser door seats
-    /// an agent-opened tab in the asking pane's checkout).
+    /// Whether the pane key rides along as a header (the browser and
+    /// emulator doors seat an agent-opened tab in the asking pane's
+    /// checkout).
     pub pane_header: Option<&'a str>,
     /// The verbs whose request carries the shell's working directory as a
     /// header ([`CWD_HEADER`], spelled in hex) — for a window that must know
@@ -4576,7 +4581,7 @@ mod windows_shim_tests {
         );
         assert!(
             !computer.contains("x-zerocode-pane"),
-            "only the browser seats a pane"
+            "the Computer Use door opens nothing the person sees, so it seats no pane"
         );
         assert!(computer.contains("$body = ''"));
 
@@ -4584,6 +4589,11 @@ mod windows_shim_tests {
         assert!(
             emulator.contains(&format!("$body = 'emulator{ARGV_SEPARATOR}'")),
             "{emulator}"
+        );
+        assert!(
+            emulator.contains("$env:ZEROCODE_PANE_KEY")
+                && emulator.contains("'x-zerocode-pane', $pane"),
+            "the emulator door seats the mirror it opens in the asking pane's checkout:\n{emulator}"
         );
         assert!(emulator.contains("zerocode-emulator — control ZeroCode"));
         let ssh = ssh_shim_script_powershell("P", "C", "H");
@@ -6025,50 +6035,16 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn the_computer_door_says_where_a_recipe_walk_was_asked_from_whatever_the_folder_is_called() {
-        use std::os::unix::fs::PermissionsExt as _;
-        let scratch = tempfile::tempdir().expect("scratch");
-        let bin = scratch.path().join("bin");
-        std::fs::create_dir_all(&bin).expect("bin");
-        let shim = bin.join(COMPUTER_CLI);
-        std::fs::write(&shim, shim_script("PORT_V", "COMPUTER_V", "HOOK_V")).expect("shim");
-        let kept = scratch.path().join("headers");
-        let curl = bin.join("curl");
-        std::fs::write(
-            &curl,
-            format!(
-                "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = -K ]; then cp \"$2\" '{}'; fi\n  shift\ndone\ncat >/dev/null\nprintf '{{}}\\n200'\n",
-                kept.display()
-            ),
-        )
-        .expect("curl");
-        for path in [&shim, &curl] {
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        }
-        let folder = scratch.path().join(format!(
+        let rig = DoorRig::new();
+        let shim = rig.install(COMPUTER_CLI, &shim_script("PORT_V", "COMPUTER_V", "HOOK_V"));
+        let folder = rig.path().join(format!(
             "작업 \"폴더\" \\\nurl = example.invalid\n#{}",
             "a".repeat(48)
         ));
         std::fs::create_dir_all(&folder).expect("a folder with a hostile name");
         // The header file curl was handed for one call from the folder.
-        let headers_of_door = |shim: &std::path::Path, argv: &[&str]| {
-            let run = std::process::Command::new("sh")
-                .arg(shim)
-                .args(argv)
-                .current_dir(&folder)
-                .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
-                .env("PORT_V", "1")
-                .env("COMPUTER_V", "capability")
-                .env("HOOK_V", "hook")
-                .env_remove(RUN_EVIDENCE_DIR_ENV)
-                .output()
-                .expect("sh");
-            assert!(
-                run.status.success(),
-                "{}",
-                String::from_utf8_lossy(&run.stderr)
-            );
-            std::fs::read_to_string(&kept).expect("curl was handed its header file")
-        };
+        let headers_of_door =
+            |shim: &std::path::Path, argv: &[&str]| rig.headers(shim, &folder, argv, &[]);
         let headers_of = |argv: &[&str]| headers_of_door(&shim, argv);
         let prefix = format!("header = \"{CWD_HEADER}: ");
 
@@ -6111,13 +6087,10 @@ mod tests {
         // The emulator door names the folder for the one verb that writes a
         // file where it is told — `screenshot --out <relative>` — and for no
         // other.
-        let emulator = bin.join("zerocode-emulator");
-        std::fs::write(
-            &emulator,
-            emulator_shim_script("PORT_V", "COMPUTER_V", "HOOK_V"),
-        )
-        .expect("emulator shim");
-        std::fs::set_permissions(&emulator, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let emulator = rig.install(
+            "zerocode-emulator",
+            &emulator_shim_script("PORT_V", "COMPUTER_V", "HOOK_V"),
+        );
         let shot = headers_of_door(
             &emulator,
             &[
@@ -6149,6 +6122,124 @@ mod tests {
             "{powershell}"
         );
         assert_eq!(EMULATOR_CWD_VERBS, ["screenshot"]);
+    }
+
+    /// The emulator door names the pane that asked (t-6379), the way the
+    /// browser door does: the window seats the mirror an agent opens in that
+    /// pane's checkout instead of beside whatever the person is looking at
+    /// (09-23 14:14·14:34·14:49, three mirrors on another project's stage).
+    /// The name rides the guarded header file like the tokens, only when the
+    /// shell has one; the Computer Use door opens nothing the person sees
+    /// and still names no pane.
+    #[cfg(unix)]
+    #[test]
+    fn the_emulator_door_names_the_pane_that_asked_and_the_computer_door_does_not() {
+        use crate::agent_browser::PANE_HEADER;
+        let rig = DoorRig::new();
+        let emulator = rig.install(
+            "zerocode-emulator",
+            &emulator_shim_script("PORT_V", "COMPUTER_V", "HOOK_V"),
+        );
+        let computer = rig.install(COMPUTER_CLI, &shim_script("PORT_V", "COMPUTER_V", "HOOK_V"));
+        let open = [
+            EmulatorMethod::Open.verb_name(),
+            "--platform",
+            "ios",
+            "--json",
+        ];
+        let asked = [(crate::hook::PANE_KEY_ENV, "term-7")];
+
+        let seated = rig.headers(&emulator, rig.path(), &open, &asked);
+        let named = format!("header = \"{PANE_HEADER}: term-7\"");
+        assert!(
+            seated.lines().any(|line| line == named),
+            "the emulator door did not name the pane that asked:\n{seated}"
+        );
+        let nameless = rig.headers(&emulator, rig.path(), &open, &[]);
+        assert!(!nameless.contains(PANE_HEADER), "{nameless}");
+        let desktop = rig.headers(
+            &computer,
+            rig.path(),
+            &[ComputerMethod::ListApps.verb_name(), "--json"],
+            &asked,
+        );
+        assert!(!desktop.contains(PANE_HEADER), "{desktop}");
+        let powershell = emulator_shim_script_powershell("P", "C", "H");
+        assert!(
+            powershell.contains(&format!("'{PANE_HEADER}', $pane")),
+            "{powershell}"
+        );
+    }
+
+    /// A door run as what it is: `sh` against a `curl` that keeps the header
+    /// file it was handed and answers 200, with the bridge's three variables
+    /// set and nothing else a window gives a pane — no run folder, no pane
+    /// key — unless a test names it.
+    #[cfg(unix)]
+    struct DoorRig {
+        scratch: tempfile::TempDir,
+        bin: std::path::PathBuf,
+        kept: std::path::PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl DoorRig {
+        fn new() -> Self {
+            let scratch = tempfile::tempdir().expect("scratch");
+            let bin = scratch.path().join("bin");
+            std::fs::create_dir_all(&bin).expect("bin");
+            let kept = scratch.path().join("headers");
+            let rig = Self { scratch, bin, kept };
+            rig.install(
+                "curl",
+                &format!(
+                    "#!/bin/sh\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = -K ]; then cp \"$2\" '{}'; fi\n  shift\ndone\ncat >/dev/null\nprintf '{{}}\\n200'\n",
+                    rig.kept.display()
+                ),
+            );
+            rig
+        }
+
+        fn path(&self) -> &std::path::Path {
+            self.scratch.path()
+        }
+
+        fn install(&self, name: &str, script: &str) -> std::path::PathBuf {
+            use std::os::unix::fs::PermissionsExt as _;
+            let path = self.bin.join(name);
+            std::fs::write(&path, script).expect("door");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+            path
+        }
+
+        /// The header file curl was handed for one call from `cwd`.
+        fn headers(
+            &self,
+            door: &std::path::Path,
+            cwd: &std::path::Path,
+            argv: &[&str],
+            env: &[(&str, &str)],
+        ) -> String {
+            let run = std::process::Command::new("sh")
+                .arg(door)
+                .args(argv)
+                .current_dir(cwd)
+                .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()))
+                .env("PORT_V", "1")
+                .env("COMPUTER_V", "capability")
+                .env("HOOK_V", "hook")
+                .env_remove(RUN_EVIDENCE_DIR_ENV)
+                .env_remove(crate::hook::PANE_KEY_ENV)
+                .envs(env.iter().copied())
+                .output()
+                .expect("sh");
+            assert!(
+                run.status.success(),
+                "{}",
+                String::from_utf8_lossy(&run.stderr)
+            );
+            std::fs::read_to_string(&self.kept).expect("curl was handed its header file")
+        }
     }
 
     /// A working directory reads back only from the spelling a door writes:

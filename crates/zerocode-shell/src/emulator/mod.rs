@@ -68,6 +68,35 @@ pub(crate) struct EmulatorStream {
     pub reused: bool,
 }
 
+/// What the window hears when an agent asks for a device mirror
+/// (`zerocode-emulator open`, `emulator:agent-open`): the platform, the device
+/// when one was named, and the terminal whose agent asked, read off the pane
+/// key its door presented. The window seats the mirror in that terminal's
+/// checkout — the way `BrowserPopup.term` seats a browser tab — and a shell
+/// whose door named no pane carries no `term`, so the window opens the mirror
+/// where the person is looking and says why (t-6379).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub(crate) struct AgentOpen {
+    platform: zerocode_core::computer_use::EmulatorPlatform,
+    device: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    term: Option<u32>,
+}
+
+impl AgentOpen {
+    pub(crate) fn asked(
+        platform: zerocode_core::computer_use::EmulatorPlatform,
+        device: Option<String>,
+        pane: Option<&str>,
+    ) -> Self {
+        Self {
+            platform,
+            device,
+            term: pane.and_then(crate::hooks::term_of_pane_key),
+        }
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EmulatorPayload {
@@ -440,6 +469,33 @@ mod tests {
         assert_eq!(
             serde_json::to_value(EmulatorNoteCode::FrameUnavailable).unwrap(),
             "frame-unavailable"
+        );
+    }
+
+    /// An agent's `open` names the terminal that asked, read off the pane key
+    /// its door presented (t-6379) — and nothing it cannot read: a shell whose
+    /// door named no pane, or named something that is not a pane key, asks
+    /// from nowhere the window knows, and the payload says so by carrying no
+    /// `term` at all. The rest of the wire is what it always was.
+    #[test]
+    fn an_agents_open_names_the_terminal_that_asked_and_nothing_it_cannot_read() {
+        use zerocode_core::computer_use::EmulatorPlatform as Asked;
+        let wire = |open: AgentOpen| serde_json::to_value(open).expect("serializes");
+        assert_eq!(
+            wire(AgentOpen::asked(
+                Asked::Ios,
+                Some("U1".to_string()),
+                Some(&crate::hooks::pane_key_of(7)),
+            )),
+            serde_json::json!({ "platform": "ios", "device": "U1", "term": 7 })
+        );
+        assert_eq!(
+            wire(AgentOpen::asked(Asked::Android, None, None)),
+            serde_json::json!({ "platform": "android", "device": null })
+        );
+        assert_eq!(
+            wire(AgentOpen::asked(Asked::Ios, None, Some("tab-1/leaf-2"))),
+            serde_json::json!({ "platform": "ios", "device": null })
         );
     }
 
