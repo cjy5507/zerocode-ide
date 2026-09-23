@@ -127,6 +127,12 @@ pub(super) enum InputRequest {
         rotation: u32,
     },
     Ax,
+    /// What is on top at one point of the screen, in the accessibility tree's
+    /// own points — a press by number's last-moment check (t-6385).
+    Hit {
+        x: f64,
+        y: f64,
+    },
     Ping,
     Paste,
     /// One picture of the device's own framebuffer, asked for and waited on.
@@ -175,6 +181,7 @@ impl InputRequest {
             Self::Button { .. } => "button",
             Self::Rotate { .. } => "rotate",
             Self::Ax => "ax",
+            Self::Hit { .. } => "hit",
             Self::Frame { .. } => "frame",
             Self::Stream { .. } => "stream",
             Self::StreamStop => "streamstop",
@@ -1217,6 +1224,17 @@ pub(super) fn accessibility_roots(udid: &str) -> Result<Vec<serde_json::Value>, 
         .map_err(|error| format!("iOS 접근성 트리를 읽지 못했습니다: {error}"))
 }
 
+/// The element on top at one point, inside the application it is in — the
+/// `ax` answer's own shape cut to that one element (`elementAt`). Nothing
+/// reaches the device, so the pane is not nudged.
+pub(super) fn element_at(udid: &str, x: f64, y: f64) -> Result<serde_json::Value, String> {
+    let json = ask_device(udid, &InputRequest::Hit { x, y })?
+        .data
+        .ok_or("iOS 접근성 한 점 답이 비어 있습니다")?;
+    serde_json::from_str(&json)
+        .map_err(|error| format!("iOS 접근성 한 점 답을 읽지 못했습니다: {error}"))
+}
+
 #[derive(Clone, Copy)]
 struct AxFrame {
     x: f64,
@@ -1520,6 +1538,23 @@ mod tests {
         .unwrap();
         assert_eq!(multi["kind"], "multitouch");
         assert_eq!(multi["x4"], 0.7);
+    }
+
+    /// A press by number's last-moment question reaches the helper as the
+    /// kind its request loop answers (`main.swift`, `case "hit"`, a source
+    /// contract holds the other side), with the point in the tree's points.
+    #[test]
+    fn a_point_query_crosses_the_wire_as_the_helper_reads_it() {
+        let wire = serde_json::to_value(WireRequest {
+            id: 9,
+            request: &InputRequest::Hit { x: 80.0, y: 102.5 },
+        })
+        .unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({ "id": 9, "kind": "hit", "x": 80.0, "y": 102.5 })
+        );
+        assert_eq!(InputRequest::Hit { x: 0.0, y: 0.0 }.name(), "hit");
     }
 
     fn pushed(seed: u32, width: u32, height: u32, body: &[u8]) -> Vec<u8> {

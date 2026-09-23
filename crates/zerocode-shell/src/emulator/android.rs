@@ -2519,17 +2519,19 @@ pub(super) async fn marks_snapshot_direct(
 pub(super) async fn click_mark_direct(
     serial: String,
     request: super::marks::PinnedTap,
-) -> Result<(), zerocode_core::computer_use_protocol::ProviderError> {
-    use super::marks::backend_error;
+) -> Result<super::marks::Proof, zerocode_core::computer_use_protocol::ProviderError> {
+    use super::marks::{Proof, backend_error};
     tauri::async_runtime::spawn_blocking(move || {
         let (sdk, control) = android_control(&serial).map_err(backend_error)?;
         let input = control.input().map_err(backend_error)?;
         let (snapshot, size) = marks_snapshot(&sdk, &serial).map_err(backend_error)?;
         let identity = android_avd_name(&sdk.adb, &serial).map_err(backend_error)?;
         request.on_device(&identity, || {
-            request.perform_in(&input, &snapshot.faces, snapshot.screen, |x, y| {
-                tap_at(&sdk, &serial, x, y, size).map_err(backend_error)
-            })
+            request
+                .perform_in(&input, &snapshot.faces, snapshot.screen, |x, y| {
+                    tap_at(&sdk, &serial, x, y, size).map_err(backend_error)
+                })
+                .map(|()| Proof::Tree)
         })
     })
     .await

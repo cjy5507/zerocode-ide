@@ -267,8 +267,18 @@ impl Pin {
         frame: Option<Rect>,
     ) -> bool {
         signature == Some(self.signature.as_str())
-            && name.unwrap_or_default() == self.name
             && context.unwrap_or_default() == self.context
+            && self.holds_at_point(name, frame)
+    }
+
+    /// The half of [`Self::holds`] one point can answer: the same words in
+    /// the same place, within the tolerance. What a hit-test at the mark's
+    /// centre finds carries no place in the tree — no lineage, no context —
+    /// so a press proven at a point (a phone's, t-6385) holds the element to
+    /// this and to its own identity, and leaves the rest to a tree read.
+    #[must_use]
+    pub fn holds_at_point(&self, name: Option<&str>, frame: Option<Rect>) -> bool {
+        name.unwrap_or_default() == self.name
             && frame.is_some_and(|frame| frame.matches_within(&self.frame, self.tolerance))
     }
 }

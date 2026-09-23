@@ -410,6 +410,88 @@ impl PinnedTap {
         {
             return Err(broken());
         }
+        self.press(face, screen, policy, tap)
+    }
+
+    /// The point a press proven at its centre asks about: the pinned frame's
+    /// centre, in the tree's own points (the look's screen origin put back).
+    #[cfg(any(target_os = "macos", test))]
+    pub fn centre(&self) -> (f64, f64) {
+        (
+            self.screen.x + self.pin.frame.mid_x(),
+            self.screen.y + self.pin.frame.mid_y(),
+        )
+    }
+
+    /// [`Self::perform_at_centre`] inside the device gate, as
+    /// [`Self::perform_in`] is: the stream the look was taken on must still
+    /// be alive at the tap.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn perform_at_centre_in(
+        &self,
+        input: &super::session::SessionInput<'_>,
+        answer: &Value,
+        tap: impl FnOnce(f64, f64) -> Result<(), ProviderError>,
+    ) -> Option<Result<(), ProviderError>> {
+        self.perform_at_centre(answer, crate::computer_use::confirm::policy(), |x, y| {
+            if input.is_alive() {
+                tap(x, y)
+            } else {
+                Err(self.broken())
+            }
+        })
+    }
+
+    /// A press proven at the one point it lands on (t-6385) instead of on the
+    /// whole tree read again: 633 ms a press on iOS, 3.5 ms a point
+    /// (t-6350). `answer` is what the exporter found on top at
+    /// [`Self::centre`] — the application's node holding that one element,
+    /// the tree's own shape — read by the fold every tree is read by.
+    ///
+    /// The element is the control the mark was drawn on when the look's
+    /// application is still the one in front, the element's own identity is
+    /// the one the look pinned (the first and last links of the lineage), and
+    /// its words and frame hold as the whole pin holds them
+    /// ([`Pin::holds_at_point`]). The links between — the parents, the row a
+    /// star sits in — are what one point cannot show, and every press the
+    /// point cannot prove answers `None`: the tree is read and decides
+    /// exactly as it did before. A screen that turned, a look that aged and a
+    /// person's guarded step are refused here as the tree refuses them.
+    #[cfg(any(target_os = "macos", test))]
+    fn perform_at_centre(
+        &self,
+        answer: &Value,
+        policy: crate::computer_use::confirm::Policy,
+        tap: impl FnOnce(f64, f64) -> Result<(), ProviderError>,
+    ) -> Option<Result<(), ProviderError>> {
+        if cache::is_expired(self.made, Instant::now()) {
+            return Some(Err(self.broken()));
+        }
+        let found = Snapshot::ios(answer).ok()?;
+        if !self.screen.matches_within(&found.screen, 0.0) {
+            return Some(Err(self.broken()));
+        }
+        // The application is the root; the element is the one node under it.
+        let face = found.faces.iter().find(|face| face.index > 0)?;
+        let same_control = matches!(
+            (lineage_ends(&face.signature), lineage_ends(&self.pin.signature)),
+            (Some(seen), Some(pinned)) if seen == pinned
+        ) && self
+            .pin
+            .holds_at_point(Some(face.words()), Some(face.local()));
+        same_control.then(|| self.press(face, found.screen, policy, tap))
+    }
+
+    /// The press itself, once a face is proven the control its mark was
+    /// drawn on — on the tree or at its centre: a person's guarded step stops
+    /// here, and the fresh centre becomes the door's own units.
+    fn press(
+        &self,
+        face: &ElementFace,
+        screen: Rect,
+        policy: crate::computer_use::confirm::Policy,
+        tap: impl FnOnce(f64, f64) -> Result<(), ProviderError>,
+    ) -> Result<(), ProviderError> {
         if let Some(kind) = zerocode_core::computer_use::confirm_kind_of(face.words())
             .filter(|kind| policy.asks(*kind))
         {
@@ -429,11 +511,43 @@ impl PinnedTap {
         let x = face.local().mid_x() / (screen.width - edge);
         let y = face.local().mid_y() / (screen.height - edge);
         if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
-            return Err(broken());
+            return Err(self.broken());
         }
         tap(x, y)
     }
 }
+
+/// The first and last links of a face's lineage (the signature [`faces`]
+/// writes): the application the look was taken in, and the element's own
+/// identity. The links between are its parents — what one point cannot show.
+#[cfg(any(target_os = "macos", test))]
+fn lineage_ends(signature: &str) -> Option<(Value, Value)> {
+    let lineage: Value = serde_json::from_str(signature).ok()?;
+    let lineage = lineage.as_array()?;
+    Some((lineage.first()?.clone(), lineage.last()?.clone()))
+}
+
+/// Which proof a press by number went out on (t-6385), in the word its
+/// answer names it by under [`CONFIRMED_BY_KEY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Proof {
+    /// The element on top at the one point the press lands on.
+    Point,
+    /// The whole tree, read again.
+    Tree,
+}
+
+impl Proof {
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Point => "point",
+            Self::Tree => "tree",
+        }
+    }
+}
+
+/// The key a mark click's answer names its [`Proof`] under.
+pub(crate) const CONFIRMED_BY_KEY: &str = "confirmedBy";
 
 struct Table {
     platform: EmulatorPlatform,
@@ -566,13 +680,16 @@ pub(crate) async fn click(
             .unwrap_or_default();
         (request, legend)
     };
-    match platform {
+    let proof = match platform {
         EmulatorPlatform::Ios => super::ios::click_mark_direct(device.address, request).await?,
         EmulatorPlatform::Android => {
             super::android::click_mark_direct(device.address, request).await?
         }
-    }
-    Ok(json!({ "performed": true, "mark": mark, LOOK_ID_KEY: look, LEGEND_KEY: legend }))
+    };
+    Ok(
+        json!({ "performed": true, "mark": mark, LOOK_ID_KEY: look, LEGEND_KEY: legend,
+        CONFIRMED_BY_KEY: proof.word() }),
+    )
 }
 
 #[cfg(test)]

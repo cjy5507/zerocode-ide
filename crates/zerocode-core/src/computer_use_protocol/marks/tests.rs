@@ -718,6 +718,45 @@ fn a_pin_holds_across_a_window_move_and_breaks_on_a_shifted_row() {
     );
 }
 
+/// What one point can show — the words and the frame — is held by the same
+/// rule the whole pin holds them by (t-6385): a press proven at a phone's
+/// centre and a press proven on the tree cannot disagree about either.
+#[test]
+fn a_pin_at_a_point_holds_the_words_and_the_frame_and_nothing_it_cannot_see() {
+    let pin = Pin {
+        signature: "AXRow\u{1f}row".into(),
+        name: "Message 3".into(),
+        context: "Inbox".into(),
+        frame: Rect::new(200.0, 192.0, 560.0, 44.0),
+        tolerance: MARK_PIN_TOLERANCE_POINTS,
+    };
+    let frames = [
+        Some(pin.frame),
+        Some(Rect::new(202.0, 190.0, 562.0, 42.0)),
+        Some(Rect::new(202.01, 192.0, 560.0, 44.0)),
+        Some(Rect::new(200.0, 212.0, 560.0, 44.0)),
+        None,
+    ];
+    for name in [Some("Message 3"), Some("Message 4"), None] {
+        for frame in frames {
+            // A signature and a context the point cannot see: whatever the
+            // point says, the whole pin says it too once those two agree.
+            assert_eq!(
+                pin.holds(Some("AXRow\u{1f}row"), name, Some("Inbox"), frame),
+                pin.holds_at_point(name, frame),
+                "{name:?} at {frame:?}"
+            );
+            assert!(
+                !pin.holds(Some("AXRow\u{1f}other"), name, Some("Inbox"), frame),
+                "the whole pin still reads the lineage"
+            );
+        }
+    }
+    assert!(pin.holds_at_point(Some("Message 3"), Some(pin.frame)));
+    assert!(!pin.holds_at_point(Some("Message 4"), Some(pin.frame)));
+    assert!(!pin.holds_at_point(Some("Message 3"), None));
+}
+
 /// A window that moved between the look and the click leaves every mark's
 /// window-local frame — the one its pin holds — where it was.
 #[test]

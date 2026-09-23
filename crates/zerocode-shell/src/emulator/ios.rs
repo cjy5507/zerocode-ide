@@ -1610,22 +1610,39 @@ fn marks_snapshot(udid: &str) -> Result<super::marks::Snapshot, String> {
 pub(super) async fn click_mark_direct(
     udid: String,
     request: super::marks::PinnedTap,
-) -> Result<(), zerocode_core::computer_use_protocol::ProviderError> {
-    use super::marks::backend_error;
+) -> Result<super::marks::Proof, zerocode_core::computer_use_protocol::ProviderError> {
+    use super::marks::{Proof, backend_error};
+    use zerocode_core::computer_use_protocol::ProviderError;
     tauri::async_runtime::spawn_blocking(move || {
         let control = ios_control(&udid).map_err(backend_error)?;
         let input = control.input().map_err(backend_error)?;
-        let snapshot = marks_snapshot(&udid).map_err(backend_error)?;
+        let tap = |x: f64, y: f64| -> Result<(), ProviderError> {
+            #[cfg(target_os = "macos")]
+            super::ios_hid::send(&udid, super::ios_hid::InputRequest::Tap { x, y })
+                .map_err(backend_error)?;
+            #[cfg(not(target_os = "macos"))]
+            let _ = (x, y, run_ios_input(&udid, ()).map_err(backend_error)?);
+            control.notify();
+            Ok(())
+        };
         request.on_device(&udid, || {
-            request.perform_in(&input, &snapshot.faces, snapshot.screen, |x, y| {
-                #[cfg(target_os = "macos")]
-                super::ios_hid::send(&udid, super::ios_hid::InputRequest::Tap { x, y })
-                    .map_err(backend_error)?;
-                #[cfg(not(target_os = "macos"))]
-                let _ = (x, y, run_ios_input(&udid, ()).map_err(backend_error)?);
-                control.notify();
-                Ok(())
-            })
+            // The one point the press lands on is asked first — a few
+            // milliseconds against the whole tree's 633 (t-6350) — and the
+            // tree is still read for every press the point cannot prove.
+            #[cfg(target_os = "macos")]
+            {
+                let (x, y) = request.centre();
+                if let Some(pressed) = super::ios_hid::element_at(&udid, x, y)
+                    .ok()
+                    .and_then(|answer| request.perform_at_centre_in(&input, &answer, &tap))
+                {
+                    return pressed.map(|()| Proof::Point);
+                }
+            }
+            let snapshot = marks_snapshot(&udid).map_err(backend_error)?;
+            request
+                .perform_in(&input, &snapshot.faces, snapshot.screen, &tap)
+                .map(|()| Proof::Tree)
         })
     })
     .await
