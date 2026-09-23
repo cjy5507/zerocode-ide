@@ -1017,6 +1017,11 @@ pub struct Worker {
     /// for every row written before the flag existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_quota_wall: Option<Pinned>,
+    /// Whether this summons' own `--on-quota-wall` said `wait` (t-6427) —
+    /// with [`Self::on_quota_wall`], the whole of its order, which then wins
+    /// over the run's ([`QuotaWallOrder::standing`]).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quota_wait: bool,
 }
 
 impl std::fmt::Debug for Worker {
@@ -1043,6 +1048,7 @@ impl std::fmt::Debug for Worker {
             .field("archive_bytes", &self.archive.as_ref().map(String::len))
             .field("adopted_by", &self.adopted_by)
             .field("on_quota_wall", &self.on_quota_wall)
+            .field("quota_wait", &self.quota_wait)
             .finish()
     }
 }
@@ -2074,15 +2080,31 @@ pub struct HandoverPolicy {
     /// What the beat does for a worker stopped by a transient API error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_transient_error: Option<OnTransientError>,
+    /// `--on-quota-wall wait` (t-6427): the wait rung, walked before the
+    /// alternative ([`QUOTA_WALL_LADDER`]). Skipped when absent, for the
+    /// transient order's reason.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quota_wait: bool,
     pub armed_ms: i64,
 }
 
 impl HandoverPolicy {
     fn json(&self) -> serde_json::Value {
+        let order = QuotaWallOrder {
+            wait: self.quota_wait,
+            handover: self.on_quota_wall.clone(),
+        };
         serde_json::json!({
             "onQuotaWall": self.on_quota_wall.as_ref().map(Pinned::json),
             "wipCommit": self.wip_commit,
             "onTransientError": self.on_transient_error.map(OnTransientError::json),
+            // The wall's rungs as the beat walks them, and the table's numbers
+            // the wait walks under, so a coordinator sees what it armed.
+            "ladder": order.ladder(),
+            "wait": self.quota_wait.then(|| serde_json::json!({
+                "slackMs": QUOTA_WAIT_POLICY.slack_ms,
+                "maxWaitMs": QUOTA_WAIT_POLICY.max_wait_ms,
+            })),
             "armedMs": self.armed_ms,
         })
     }
@@ -2541,17 +2563,47 @@ struct HandoverCandidate<'a> {
 }
 
 fn effective_handover_order<'a>(run: &'a Run, worker: &'a Worker) -> Option<(&'a Pinned, bool)> {
-    let to = worker.on_quota_wall.as_ref().or_else(|| {
-        run.handover
-            .as_ref()
-            .and_then(|policy| policy.on_quota_wall.as_ref())
-    })?;
+    let (_, to) = standing_order(run, worker);
     Some((
-        to,
+        to?,
         run.handover
             .as_ref()
             .is_some_and(|policy| policy.wip_commit),
     ))
+}
+
+/// Why a rung earlier on the ladder than `rung` still holds `dispatch_id`'s
+/// wall, when one does: the first rung of [`QUOTA_WALL_LADDER`] before it
+/// that the standing order declares and that is not spent (t-6427). The wait
+/// is spent when the wall it waits for stops standing, or when the wall has
+/// no reset to wait for; the handover when one was walked for the attempt.
+fn ladder_holds(
+    run: &Run,
+    worker: &Worker,
+    dispatch_id: &str,
+    rung: QuotaWallRung,
+    now_ms: i64,
+) -> Option<String> {
+    let (wait, to) = standing_order(run, worker);
+    QUOTA_WALL_LADDER
+        .into_iter()
+        .take_while(|earlier| *earlier != rung)
+        .find_map(|earlier| match earlier {
+            QuotaWallRung::Wait => {
+                let wall = newest_wall(run, dispatch_id)
+                    .filter(|wall| wait && wall.reset_waitable && wall.stands(now_ms))?;
+                Some(format!(
+                    "the wait rung holds dispatch {dispatch_id}'s wall for {} min more — its \
+                     reset comes before a handover",
+                    minutes_up(wall.stands_until_ms.saturating_sub(now_ms))
+                ))
+            }
+            QuotaWallRung::Handover => (to.is_some()
+                && !run.messages.iter().any(|held| {
+                    handover_consumes_attempt(held) && held.dispatch.as_deref() == Some(dispatch_id)
+                }))
+            .then(|| format!("the handover rung comes first for dispatch {dispatch_id}")),
+        })
 }
 
 /// Whether this run can hand `dispatch_id` over right now, with the reason
@@ -2560,6 +2612,7 @@ fn effective_handover_order<'a>(run: &'a Run, worker: &'a Worker) -> Option<(&'a
 fn handover_candidate<'a>(
     run: &'a Run,
     dispatch_id: &str,
+    now_ms: i64,
 ) -> Result<HandoverCandidate<'a>, String> {
     let dispatch = run
         .dispatch(dispatch_id)
@@ -2607,6 +2660,9 @@ fn handover_candidate<'a>(
             dispatch.task
         ));
     }
+    if let Some(why) = ladder_holds(run, worker, dispatch_id, QuotaWallRung::Handover, now_ms) {
+        return Err(why);
+    }
     let (to, wip_commit) = effective_handover_order(run, worker)
         .ok_or_else(|| "no standing order names an alternative".to_string())?;
     let task = run
@@ -2634,14 +2690,15 @@ fn handover_candidate<'a>(
 /// second. Nothing else walks — news alone is the hand recipe. The seat the
 /// verbs are presented from is the run's live coordinator seat; a run whose
 /// seat is empty walks nothing until somebody sits.
-pub fn next_handover(run: &Run) -> Option<HandoverPlan> {
-    next_handover_witnessed(run, |_| true)
+pub fn next_handover(run: &Run, now_ms: i64) -> Option<HandoverPlan> {
+    next_handover_witnessed(run, now_ms, |_| true)
 }
 
 /// Search past historical walls whose workers have recovered. The host supplies
 /// current observations; eligibility and order precedence remain in one place.
 pub fn next_handover_witnessed(
     run: &Run,
+    now_ms: i64,
     mut witnessed: impl FnMut(&HandoverPlan) -> bool,
 ) -> Option<HandoverPlan> {
     let seat = run.coordinator_live()?;
@@ -2651,7 +2708,7 @@ pub fn next_handover_witnessed(
         .filter(|held| held.kind == MessageKind::QuotaWalled)
         .find_map(|news| {
             let dispatch_id = news.dispatch.as_deref()?;
-            let candidate = handover_candidate(run, dispatch_id).ok()?;
+            let candidate = handover_candidate(run, dispatch_id, now_ms).ok()?;
             let said: serde_json::Value = serde_json::from_str(news.body.as_str()).ok()?;
             let plan = HandoverPlan {
                 run: run.id.clone(),
@@ -6293,6 +6350,7 @@ impl Ledger {
             archive: None,
             adopted_by: None,
             on_quota_wall: tuning.on_quota_wall,
+            quota_wait: tuning.quota_wait,
         });
         if let (Some(task_id), Some(dispatch)) = (task, dispatch_id.as_ref()) {
             run.dispatches.push(Dispatch {
@@ -8935,6 +8993,28 @@ impl Ledger {
                 if newest_wall(run, &dispatch.id).is_some_and(|wall| wall.stands(now_ms)) {
                     return None;
                 }
+                // Which rung the worker's standing order is on (t-6427): the
+                // declared ladder, and whether the wait holds this wall.
+                let order = QuotaWallOrder::standing(run, worker);
+                let (stands_until, waitable) = wall_window(now_ms, witness.headroom.resets_at_ms);
+                let wait = order.wait.then(|| match &waitable {
+                    Ok(()) => serde_json::json!({ "standsUntilMs": stands_until }),
+                    Err(why) => serde_json::json!({ "skipped": why }),
+                });
+                let next = if order.wait && waitable.is_ok() {
+                    "nothing was settled: the attempt is open and the task is carried, and \
+                     the wait rung holds this wall until `wait.standsUntilMs` — its agent \
+                     may continue by itself after the reset (Claude Code does, about a \
+                     minute after it), and nothing is handed over before then; after it, \
+                     the worker's silence is news again"
+                } else {
+                    "nothing was settled: the attempt is open and the task is carried. Hand \
+                     it over yourself (commit the WIP in its checkout, `worker-stop \
+                     --worker <id> --reason quota-wall`, then `worker-start --agent <alt> \
+                     --task <same> --retry-of <dispatchId> --inherit-checkout`), or arm \
+                     `handover-policy --on-quota-wall <alt>` and the beat walks that road \
+                     and leaves a `handover` receipt"
+                };
                 let told = serde_json::json!({
                     "workerId": worker.id,
                     "agent": worker.agent,
@@ -8952,13 +9032,9 @@ impl Ledger {
                         "line": witness.marker.line,
                     },
                     "observedAtMs": now_ms,
-                    "next": "nothing was settled: the attempt is open and the task is \
-                             carried. Hand it over yourself (commit the WIP in its \
-                             checkout, `worker-stop --worker <id> --reason quota-wall`, \
-                             then `worker-start --agent <alt> --task <same> --retry-of \
-                             <dispatchId> --inherit-checkout`), or arm `handover-policy \
-                             --on-quota-wall <alt>` and the beat walks that road and \
-                             leaves a `handover` receipt",
+                    "ladder": order.ladder(),
+                    "wait": wait,
+                    "next": next,
                 });
                 Some((
                     run.id.clone(),
@@ -9000,9 +9076,13 @@ impl Ledger {
             if !handover_order_current(run, plan, false) {
                 return Err("handover order or seat changed — plan again".into());
             }
-            let candidate = handover_candidate(run, &plan.dispatch)?;
+            let candidate = handover_candidate(run, &plan.dispatch, now_ms)?;
             serde_json::json!({
                 "status": HANDOVER_WALKING,
+                // The rung this receipt is, on the ladder the order declared
+                // (t-6427) — the same two fields a wall's news carries.
+                "rung": QuotaWallRung::Handover.as_str(),
+                "ladder": QuotaWallOrder::standing(run, candidate.worker).ladder(),
                 "from": {
                     "workerId": candidate.worker.id,
                     "agent": candidate.worker.agent,
@@ -11622,24 +11702,39 @@ pub fn newest_wall(run: &Run, dispatch_id: &str) -> Option<WallAt> {
     let said: serde_json::Value = serde_json::from_str(row.body.as_str()).unwrap_or_default();
     let observed_at_ms = said["observedAtMs"].as_i64().unwrap_or(row.created_ms);
     let resets_at_ms = said["resetsAtMs"].as_i64();
-    let reset_waitable = resets_at_ms.is_some_and(|at| {
-        at > observed_at_ms
-            && at
-                .saturating_add(QUOTA_WAIT_POLICY.slack_ms)
-                .saturating_sub(observed_at_ms)
-                <= QUOTA_WAIT_POLICY.max_wait_ms
-    });
-    let stands_until_ms = match resets_at_ms {
-        Some(at) if reset_waitable => at.saturating_add(QUOTA_WAIT_POLICY.slack_ms),
-        _ => observed_at_ms.saturating_add(QUOTA_WAIT_POLICY.max_wait_ms),
-    };
+    let (stands_until_ms, waitable) = wall_window(observed_at_ms, resets_at_ms);
     Some(WallAt {
         wall: row.id.clone(),
         observed_at_ms,
         resets_at_ms,
-        reset_waitable,
+        reset_waitable: waitable.is_ok(),
         stands_until_ms,
     })
+}
+
+/// Until when a wall witnessed at `observed_at_ms` stands, and whether its
+/// reset is one to wait for — or why not, in a sentence. One reading for the
+/// row's news and for everything that reads the row back ([`newest_wall`]).
+fn wall_window(observed_at_ms: i64, resets_at_ms: Option<i64>) -> (i64, Result<(), String>) {
+    let longest = observed_at_ms.saturating_add(QUOTA_WAIT_POLICY.max_wait_ms);
+    let Some(at) = resets_at_ms.filter(|at| *at > observed_at_ms) else {
+        return (
+            longest,
+            Err("the wall names no reset ahead of it to wait for".into()),
+        );
+    };
+    let until = at.saturating_add(QUOTA_WAIT_POLICY.slack_ms);
+    if until > longest {
+        return (
+            longest,
+            Err(format!(
+                "its reset is {} min away, past the wait rung's {} min",
+                minutes_up(at.saturating_sub(observed_at_ms)),
+                QUOTA_WAIT_POLICY.max_wait_ms / 60_000
+            )),
+        );
+    }
+    (until, Ok(()))
 }
 
 /* ---- the transient-error continuation (t-4537) ------------------------ */
@@ -11946,6 +12041,154 @@ pub fn parse_on_quota_wall(word: &str) -> Result<Pinned, String> {
         agent: agent.to_string(),
         model: model.map(str::to_string),
         effort: effort.map(str::to_string),
+    })
+}
+
+/* ---- the quota wall's ladder (t-6427) --------------------------------- */
+
+/// One rung of a quota wall's ladder: what a declared order does when one of
+/// its workers stops at its provider's wall.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuotaWallRung {
+    /// Wait out a reset the wall's own row can vouch for, in the same
+    /// conversation: nothing later on the ladder walks while the wall stands
+    /// ([`newest_wall`]).
+    Wait,
+    /// Hand the task to the named alternative in the same checkout (§2.3).
+    Handover,
+}
+
+impl QuotaWallRung {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Wait => "wait",
+            Self::Handover => "handover",
+        }
+    }
+
+    /// How `--on-quota-wall` spells this rung when it is a closed word — the
+    /// one table of them. A word nobody measured is refused by name, never
+    /// read as an agent id; the handover rung is spelled as its alternative,
+    /// `<agent[:model[:effort]]>`.
+    pub const fn word(self) -> Option<&'static str> {
+        match self {
+            Self::Wait => Some("wait"),
+            Self::Handover => None,
+        }
+    }
+}
+
+/// The ladder, first to last: the order a wall's declared rungs are walked
+/// in, whatever order the declaration spelled them. The same conversation
+/// comes before a different model. Traycer's ladder is `profile → tier →
+/// wait → notify` (`fallback-policy.ts:10-19`); here the wait goes first,
+/// because a handover is a new conversation while the agent every wall on
+/// this machine stopped — Claude Code — continues its own about a minute
+/// after the reset. The ladder ends where it always did: the coordinator's
+/// inbox.
+pub const QUOTA_WALL_LADDER: [QuotaWallRung; 2] = [QuotaWallRung::Wait, QuotaWallRung::Handover];
+
+/// What one `--on-quota-wall` declares, rung by rung — on a summons or on a
+/// run's `handover-policy`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct QuotaWallOrder {
+    /// The wait rung.
+    pub wait: bool,
+    /// The alternative the handover rung hands the task to.
+    pub handover: Option<Pinned>,
+}
+
+impl QuotaWallOrder {
+    /// `--on-quota-wall <rungs>`: closed words ([`QuotaWallRung::word`]) and
+    /// at most one `<agent[:model[:effort]]>`, comma-separated in any order —
+    /// [`QUOTA_WALL_LADDER`], not the spelling, says which is walked first.
+    /// The alternative is checked whole ([`named_alternative`]); anything
+    /// else is refused by name, with the words that exist.
+    pub fn named(value: &str) -> Result<Self, String> {
+        let words = QUOTA_WALL_LADDER
+            .into_iter()
+            .filter_map(QuotaWallRung::word)
+            .map(|word| format!("`{word}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let refuse = |why: String| {
+            format!(
+                "--on-quota-wall takes {words} and/or one <agent[:model[:effort]]>, \
+                 comma-separated — {why}"
+            )
+        };
+        let mut order = Self::default();
+        let mut pieces = value
+            .split(',')
+            .map(str::trim)
+            .filter(|piece| !piece.is_empty())
+            .peekable();
+        if pieces.peek().is_none() {
+            return Err(refuse(format!("`{value}` names nothing")));
+        }
+        for piece in pieces {
+            let word = QUOTA_WALL_LADDER
+                .into_iter()
+                .find(|rung| rung.word() == Some(piece));
+            match word {
+                Some(rung) if order.declares(rung) => {
+                    return Err(refuse(format!("`{piece}` is named twice")));
+                }
+                Some(QuotaWallRung::Wait) => order.wait = true,
+                // The handover rung is spelled as its alternative, never a
+                // word; an agent-shaped piece is read as one below.
+                Some(QuotaWallRung::Handover) | None => {
+                    let to = named_alternative(piece).map_err(refuse)?;
+                    if let Some(held) = order.handover.as_ref() {
+                        return Err(refuse(format!(
+                            "`{}` and `{piece}` are two, and a wall hands over to one alternative",
+                            held.spelled()
+                        )));
+                    }
+                    order.handover = Some(to);
+                }
+            }
+        }
+        Ok(order)
+    }
+
+    pub fn declares(&self, rung: QuotaWallRung) -> bool {
+        match rung {
+            QuotaWallRung::Wait => self.wait,
+            QuotaWallRung::Handover => self.handover.is_some(),
+        }
+    }
+
+    /// The declared rungs, first to last — what a receipt and `run-show`
+    /// say the order stands on.
+    pub fn ladder(&self) -> Vec<&'static str> {
+        QUOTA_WALL_LADDER
+            .into_iter()
+            .filter(|rung| self.declares(*rung))
+            .map(QuotaWallRung::as_str)
+            .collect()
+    }
+
+    /// The order standing for `worker`: its summons' own `--on-quota-wall`
+    /// when it said one, the run's `handover-policy` otherwise — whole,
+    /// never merged (§2.3: the summons' word wins).
+    pub fn standing(run: &Run, worker: &Worker) -> Self {
+        let (wait, handover) = standing_order(run, worker);
+        Self {
+            wait,
+            handover: handover.cloned(),
+        }
+    }
+}
+
+/// [`QuotaWallOrder::standing`], borrowed: whether it waits, and who it
+/// hands over to.
+fn standing_order<'a>(run: &'a Run, worker: &'a Worker) -> (bool, Option<&'a Pinned>) {
+    if worker.quota_wait || worker.on_quota_wall.is_some() {
+        return (worker.quota_wait, worker.on_quota_wall.as_ref());
+    }
+    run.handover.as_ref().map_or((false, None), |policy| {
+        (policy.quota_wait, policy.on_quota_wall.as_ref())
     })
 }
 
@@ -13095,10 +13338,11 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "handover-policy",
-        "[--on-quota-wall <agent[:model[:effort]]> [--wip-commit]] [--on-transient-error resume] \
-         | --off · when a worker is witnessed at its quota wall, hand its task to this \
-         alternative in the same checkout; when its last turn died on a transient API error, \
-         type a continuation into its composer",
+        "[--on-quota-wall wait|<agent[:model[:effort]]> [--wip-commit]] [--on-transient-error \
+         resume] | --off · when a worker is witnessed at its quota wall, wait out a verified \
+         reset first (`wait`), and hand its task to this alternative in the same checkout \
+         (`wait,<alt>` does both, the wait first); when its last turn died on a transient API \
+         error, type a continuation into its composer",
         Doing::Mutation,
     ),
     (
@@ -13141,7 +13385,7 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     (
         "worker-start",
         "--agent <a> [--task <id>] [--prompt <p>] [--model <id> [--effort <level>]] \
-         [--retry-of <dispatch> [--inherit-checkout]] [--on-quota-wall <agent[:model[:effort]]>] \
+         [--retry-of <dispatch> [--inherit-checkout]] [--on-quota-wall wait|<agent[:model[:effort]]>] \
          [--worktree] [--horizontal] [--bare] [--on <server>] · summon an \
          agent into a pane",
         Doing::Mutation,
@@ -13263,6 +13507,8 @@ pub struct Tuning {
     pub ready_by_ms: Option<i64>,
     /// The summons' own handover alternative, written on the worker row.
     pub on_quota_wall: Option<Pinned>,
+    /// And its own `wait`, beside it (t-6427).
+    pub quota_wait: bool,
 }
 
 struct WorkerStartRequest<'a> {
@@ -15234,25 +15480,26 @@ fn plan_inner(
                 run.handover = None;
                 said(serde_json::json!({ "runId": run_id, "handover": serde_json::Value::Null }))
             } else {
-                let on_quota_wall = words
+                let order = words
                     .value("--on-quota-wall")
-                    .map(named_alternative)
-                    .transpose()?;
+                    .map(QuotaWallOrder::named)
+                    .transpose()?
+                    .unwrap_or_default();
                 let on_transient_error = words
                     .value("--on-transient-error")
                     .map(parse_on_transient_error)
                     .transpose()?;
-                if on_quota_wall.is_none() && on_transient_error.is_none() {
+                if !order.wait && order.handover.is_none() && on_transient_error.is_none() {
                     return Err(
-                        "handover-policy needs --on-quota-wall <agent[:model[:effort]]> — the \
-                         alternative the wall hands over to — and/or --on-transient-error \
-                         resume, or --off"
+                        "handover-policy needs --on-quota-wall wait|<agent[:model[:effort]]> — \
+                         the wait for a verified reset, the alternative the wall hands over \
+                         to, or both — and/or --on-transient-error resume, or --off"
                             .into(),
                     );
                 }
-                // The commit is step ① of a WALL's handover; armed without a
-                // wall order it would be a flag nothing ever reads.
-                if words.has("--wip-commit") && on_quota_wall.is_none() {
+                // The commit is step ① of a WALL's handover; armed without an
+                // alternative it would be a flag nothing ever reads.
+                if words.has("--wip-commit") && order.handover.is_none() {
                     return Err(
                         "--wip-commit is step ① of a quota-wall handover — name the \
                          alternative with --on-quota-wall beside it"
@@ -15260,9 +15507,10 @@ fn plan_inner(
                     );
                 }
                 let policy = HandoverPolicy {
-                    on_quota_wall,
+                    on_quota_wall: order.handover,
                     wip_commit: words.has("--wip-commit"),
                     on_transient_error,
+                    quota_wait: order.wait,
                     armed_ms: now_ms,
                 };
                 let run = ledger
@@ -15734,9 +15982,15 @@ fn plan_inner(
              * so a flag that could never be honoured is refused before the
              * wall is reached rather than the day it is. */
             let on_quota_wall = match words.value("--on-quota-wall") {
-                Some(word) => Some(named_alternative(word)?),
+                Some(word) => Some(QuotaWallOrder::named(word)?),
                 None => None,
             };
+            // The gate redirects only to an alternative: a wait is for a
+            // wall a running worker reaches, and a summons refused at the
+            // wall is asked again.
+            let alternative = on_quota_wall
+                .as_ref()
+                .and_then(|order| order.handover.clone());
             if on_quota_wall.is_some() && words.value("--on").is_some() {
                 return Err("--on-quota-wall is this window's quota word — a federated \
                      worker's quota is the server window's to judge"
@@ -15796,7 +16050,7 @@ fn plan_inner(
                 (requested, None)
             } else {
                 let (landed, notice) =
-                    quota_gate(launcher, now_ms, requested, on_quota_wall.clone())?;
+                    quota_gate(launcher, now_ms, requested, alternative.clone())?;
                 (landed, Some(notice))
             };
             let Pinned {
@@ -16032,8 +16286,9 @@ fn plan_inner(
                         // and an alternative's alternative is itself.
                         on_quota_wall: match quota_notice.as_ref() {
                             Some(notice) if notice.redirected.is_some() => None,
-                            _ => on_quota_wall.clone(),
+                            _ => alternative.clone(),
                         },
+                        quota_wait: on_quota_wall.as_ref().is_some_and(|order| order.wait),
                     },
                     now_ms,
                 })?;
@@ -17344,8 +17599,10 @@ fn worker_json(run: &Run, worker: &Worker, team: &Team) -> serde_json::Value {
     serde_json::json!({
         "workerId": worker.id,
         "agent": worker.agent,
-        // The summons' own handover alternative, or `null`.
+        // The summons' own handover alternative, or `null`, and its own
+        // `wait` beside it (t-6427).
         "onQuotaWall": worker.on_quota_wall.as_ref().map(Pinned::json),
+        "quotaWait": worker.quota_wait,
         // The seat's team, beside the pane — the half of the address that
         // tells two leaders' `%2` apart, and the key the window resolves a
         // foreign row's terminal by.
@@ -17876,6 +18133,9 @@ pub struct WorkerRow {
     /// The summons' own `--on-quota-wall`, same posture.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_quota_wall: Option<Pinned>,
+    /// And its own `wait`, same posture (t-6427).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quota_wait: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -18199,6 +18459,7 @@ impl Ledger {
                     archive: worker.archive.clone().map(Text),
                     adopted_by: worker.adopted_by,
                     on_quota_wall: worker.on_quota_wall.clone(),
+                    quota_wait: worker.quota_wait,
                 });
             }
             for attachment in &run.attachments {
@@ -18434,6 +18695,7 @@ impl Ledger {
                     archive: row.archive.map(Text::into_string),
                     adopted_by: row.adopted_by,
                     on_quota_wall: row.on_quota_wall,
+                    quota_wait: row.quota_wait,
                 });
         }
         for row in projected.messages {

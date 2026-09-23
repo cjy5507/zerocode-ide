@@ -5097,7 +5097,7 @@ fn walk_handovers(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_m
     };
     let mut candidates = Vec::new();
     for run in rows.runs() {
-        let _ = zerocode_core::orchestration::next_handover_witnessed(run, |plan| {
+        let _ = zerocode_core::orchestration::next_handover_witnessed(run, now_ms, |plan| {
             candidates.push(plan.clone());
             false
         });

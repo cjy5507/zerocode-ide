@@ -2241,7 +2241,7 @@ impl Walled {
         let rows = super::cached_ledger(&held, &image).expect("the rows");
         rows.runs()
             .iter()
-            .find_map(zerocode_core::orchestration::next_handover)
+            .find_map(|run| zerocode_core::orchestration::next_handover(run, self.began + 20_000))
             .expect("a handover to walk")
     }
 

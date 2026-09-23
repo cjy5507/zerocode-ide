@@ -6059,6 +6059,7 @@ fn an_agents_words_never_reach_a_debug_rendering() {
             archive: Some(secret.to_string()),
             adopted_by: None,
             on_quota_wall: None,
+            quota_wait: false,
         }
     );
     assert!(
@@ -12327,6 +12328,303 @@ fn a_summons_own_on_quota_wall_stands_on_its_worker_row() {
     assert!(bench.json(&format!("worker-show --worker {plain}"))["onQuotaWall"].is_null());
 }
 
+/// `--on-quota-wall` takes closed words beside ONE alternative (t-6427):
+/// `wait`, the one word this ledger measured, and `<agent[:model[:effort]]>`
+/// as before, comma-separated in any order — the ladder table, not the
+/// spelling, says which comes first. A word nobody measured is refused by
+/// name with the words that exist, never read as a stranger's agent id,
+/// and no word can shadow an agent the catalog knows.
+#[test]
+fn quota_wall_orders_are_closed_words_beside_one_alternative() {
+    assert_eq!(
+        QuotaWallOrder::named("wait"),
+        Ok(QuotaWallOrder {
+            wait: true,
+            handover: None
+        })
+    );
+    assert_eq!(
+        QuotaWallOrder::named("claude:fable-5-1:high"),
+        Ok(QuotaWallOrder {
+            wait: false,
+            handover: Some(pinned("claude", Some("fable-5-1"), Some("high")))
+        })
+    );
+    for spelled in ["wait,codex", "codex,wait", " wait , codex "] {
+        assert_eq!(
+            QuotaWallOrder::named(spelled),
+            Ok(QuotaWallOrder {
+                wait: true,
+                handover: Some(pinned("codex", None, None))
+            }),
+            "`{spelled}`"
+        );
+    }
+    for (spelled, says) in [
+        ("wiat", "no agent is called wiat"),
+        ("wait,wait", "twice"),
+        ("codex,claude", "one alternative"),
+        ("", "names nothing"),
+        (" , ", "names nothing"),
+    ] {
+        let why = QuotaWallOrder::named(spelled).expect_err(spelled);
+        assert!(
+            why.contains(says) && why.contains("`wait`"),
+            "`{spelled}`: {why}"
+        );
+    }
+    assert_eq!(
+        QUOTA_WALL_LADDER,
+        [QuotaWallRung::Wait, QuotaWallRung::Handover],
+        "the same conversation comes before a different model"
+    );
+    for word in QUOTA_WALL_LADDER
+        .into_iter()
+        .filter_map(QuotaWallRung::word)
+    {
+        assert!(
+            !crate::agent::AGENT_SPECS.iter().any(|spec| spec.id == word),
+            "the closed word `{word}` shadows an agent"
+        );
+    }
+}
+
+/// The wait rung is declared on the run by the same verb and flag, alone or
+/// beside an alternative, and reads back as the ladder it walks with the
+/// table's numbers (t-6427). `--wip-commit` still needs an alternative: a
+/// wait commits nothing. A policy that declares no wait reads and writes
+/// exactly as it did before the word existed.
+#[test]
+fn a_wait_rung_is_declared_on_the_run_and_read_back_as_its_ladder() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name ladder");
+    let armed = bench.json("handover-policy --on-quota-wall claude:fable-5-1,wait --wip-commit");
+    assert_eq!(
+        armed["handover"]["ladder"],
+        serde_json::json!(["wait", "handover"])
+    );
+    assert_eq!(armed["handover"]["onQuotaWall"]["agent"], "claude");
+    assert_eq!(armed["handover"]["wipCommit"], true);
+    assert_eq!(
+        armed["handover"]["wait"]["slackMs"],
+        QUOTA_WAIT_POLICY.slack_ms
+    );
+    assert_eq!(
+        armed["handover"]["wait"]["maxWaitMs"],
+        QUOTA_WAIT_POLICY.max_wait_ms
+    );
+    assert_eq!(
+        bench.json("run-show")["handover"]["ladder"],
+        armed["handover"]["ladder"]
+    );
+    let policy = bench.ledger.runs()[0].handover.clone().expect("the order");
+    assert!(policy.quota_wait);
+    assert_eq!(
+        policy.on_quota_wall,
+        Some(pinned("claude", Some("fable-5-1"), None))
+    );
+
+    let alone = bench.json("handover-policy --on-quota-wall wait");
+    assert_eq!(alone["handover"]["ladder"], serde_json::json!(["wait"]));
+    assert!(alone["handover"]["onQuotaWall"].is_null(), "{alone}");
+
+    for (line, says) in [
+        (
+            "handover-policy --on-quota-wall wait --wip-commit",
+            "--on-quota-wall",
+        ),
+        ("handover-policy --on-quota-wall wiat", "`wait`"),
+        ("handover-policy", "wait"),
+    ] {
+        let refused = bench.run(line);
+        assert_eq!(
+            refused.reply.exit_code, 1,
+            "`{line}`: {}",
+            refused.reply.stdout
+        );
+        assert!(
+            refused.reply.stderr.contains(says),
+            "`{line}`: {}",
+            refused.reply.stderr
+        );
+    }
+    assert!(
+        bench.ledger.runs()[0]
+            .handover
+            .as_ref()
+            .is_some_and(|held| held.quota_wait && held.on_quota_wall.is_none()),
+        "a refusal moved the order"
+    );
+
+    let handover_only = bench.json("handover-policy --on-quota-wall codex");
+    assert_eq!(
+        handover_only["handover"]["ladder"],
+        serde_json::json!(["handover"])
+    );
+    assert!(
+        handover_only["handover"]["wait"].is_null(),
+        "{handover_only}"
+    );
+    let stored =
+        serde_json::to_string(bench.ledger.runs()[0].handover.as_ref().expect("the order"))
+            .expect("serializes");
+    assert!(!stored.contains("quota_wait"), "{stored}");
+}
+
+/// A summons' own `--on-quota-wall` is its whole order (t-6427): `wait`
+/// alone keeps the run's alternative away from that worker — a worker
+/// pinned to its model and effort is never handed to another — and `wait`
+/// beside an alternative stands on the row with it. `worker-show` reads
+/// both back.
+#[test]
+fn a_summons_own_wait_is_its_whole_order() {
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name pinned");
+    bench.json("handover-policy --on-quota-wall claude");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _, dispatch) = a_walled_worker(
+        &mut bench,
+        &task,
+        " --on-quota-wall wait",
+        "/wt/pinned",
+        NOW,
+    );
+    let held = bench.ledger.runs()[0]
+        .worker(&worker)
+        .expect("the worker")
+        .clone();
+    assert!(held.quota_wait);
+    assert_eq!(held.on_quota_wall, None);
+    let shown = bench.json(&format!("worker-show --worker {worker}"));
+    assert_eq!(shown["quotaWait"], true);
+    assert!(shown["onQuotaWall"].is_null(), "{shown}");
+    let long_after = NOW + QUOTA_WAIT_POLICY.max_wait_ms;
+    assert!(
+        next_handover(&bench.ledger.runs()[0], long_after).is_none(),
+        "the run's alternative reached a worker whose own order was to wait"
+    );
+    assert!(newest_wall(&bench.ledger.runs()[0], &dispatch).is_some());
+
+    let other = bench.json("task-create --spec test-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (both, _) = bench.seat(&format!(
+        "worker-start --agent codex --task {other} --on-quota-wall wait,claude:fable-5-1"
+    ));
+    let held = bench.ledger.runs()[0].worker(&both).expect("the worker");
+    assert!(held.quota_wait);
+    assert_eq!(
+        held.on_quota_wall,
+        Some(pinned("claude", Some("fable-5-1"), None))
+    );
+    let refused = bench.run(&format!(
+        "worker-start --agent codex --task {other} --on-quota-wall wiat"
+    ));
+    assert_eq!(refused.reply.exit_code, 1);
+    assert!(
+        refused.reply.stderr.contains("`wait`"),
+        "{}",
+        refused.reply.stderr
+    );
+}
+
+/// A declared wait holds the handover while the wall it waits for stands
+/// (t-6427): the ladder walks the same conversation first. Claude Code
+/// waits out its own reset and continues a minute after it, and a handover
+/// walked at the wall would have ended that conversation for a new one.
+/// Once the wall stops standing the handover is planned as before — and a
+/// wall whose reset is not one to wait for (a weekly window) is handed over
+/// at once. The wall's news and the handover's receipt say which rung the
+/// order stands on.
+#[test]
+fn a_declared_wait_holds_the_handover_while_the_wall_it_waits_for_stands() {
+    const NOW: i64 = 5_000_000;
+    let reset = NOW + 42 * 60_000;
+    let stops_standing = reset + QUOTA_WAIT_POLICY.slack_ms;
+    let mut bench = Bench::new();
+    bench.json("run-create --name held");
+    bench.json("handover-policy --on-quota-wall wait,claude");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/held", NOW);
+    let news = bench.json("check --peek --types quota_walled");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["ladder"], serde_json::json!(["wait", "handover"]));
+    assert_eq!(body["wait"]["standsUntilMs"], stops_standing);
+    assert!(
+        body["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("wait")),
+        "{body}"
+    );
+
+    assert!(
+        next_handover(&bench.ledger.runs()[0], stops_standing - 1).is_none(),
+        "a handover walked past a declared wait"
+    );
+    let plan = next_handover(&bench.ledger.runs()[0], stops_standing)
+        .expect("the handover, once the wall stopped standing");
+    assert_eq!(plan.worker, worker);
+    assert_eq!(plan.dispatch, dispatch);
+    assert!(
+        bench
+            .ledger
+            .handover_begin(&plan, stops_standing - 1)
+            .is_err_and(|why| why.contains("wait")),
+        "the reservation disagreed with the plan about the wait"
+    );
+    let receipt = bench
+        .ledger
+        .handover_begin(&plan, stops_standing)
+        .expect("reserved");
+    let row = bench.ledger.runs()[0]
+        .messages()
+        .iter()
+        .find(|held| held.id == receipt)
+        .expect("the receipt");
+    let said: serde_json::Value = serde_json::from_str(row.body.as_str()).expect("json");
+    assert_eq!(said["rung"], "handover");
+    assert_eq!(said["ladder"], serde_json::json!(["wait", "handover"]));
+
+    // A weekly wall is not waited for: handed over at once, and said so.
+    let other = bench.json("task-create --spec test-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (far, pane) = bench.seat(&format!("worker-start --agent codex --task {other}"));
+    assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/far"));
+    let weekly = quota_wall_witness(
+        &far,
+        Some(a_wall_marker("screen", "You've hit your usage limit")),
+        Some(&gauge(
+            "codex",
+            99,
+            NOW - 60_000,
+            Some(NOW + 3 * 24 * 60 * 60_000),
+        )),
+        NOW,
+    )
+    .expect("two witnesses");
+    assert_eq!(bench.ledger.workers_quota_walled(&[weekly], NOW), 1);
+    let plan = next_handover(&bench.ledger.runs()[0], NOW + 1).expect("handed over at once");
+    assert_eq!(plan.worker, far);
+    let news = bench.json("check --peek --types quota_walled");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][1]["body"].as_str().expect("a body")).expect("json");
+    assert!(
+        body["wait"]["skipped"].as_str().is_some(),
+        "a wall the rung does not wait for did not say so: {body}"
+    );
+}
+
 /// A launcher that can say whether a checkout still exists — what the
 /// window answers from `is_dir`, handed over here.
 struct Checkouts {
@@ -12520,11 +12818,11 @@ fn next_handover_walks_one_witnessed_wall_under_a_declared_order() {
         .to_string();
     let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/walled", NOW);
     assert!(
-        next_handover(&bench.ledger.runs()[0]).is_none(),
+        next_handover(&bench.ledger.runs()[0], NOW).is_none(),
         "news with no standing order was walked"
     );
     bench.json("handover-policy --on-quota-wall claude --wip-commit");
-    let plan = next_handover(&bench.ledger.runs()[0]).expect("a plan under the order");
+    let plan = next_handover(&bench.ledger.runs()[0], NOW).expect("a plan under the order");
     assert_eq!(plan.run, run_id);
     assert_eq!(plan.worker, worker);
     assert_eq!(plan.agent, "codex");
@@ -12544,7 +12842,7 @@ fn next_handover_walks_one_witnessed_wall_under_a_declared_order() {
     // No seat, no walk — and the seat back, the walk back.
     let seat = bench.ledger.runs()[0].coordinator.clone();
     bench.ledger.run_mut(&run_id).expect("the run").coordinator = None;
-    assert!(next_handover(&bench.ledger.runs()[0]).is_none());
+    assert!(next_handover(&bench.ledger.runs()[0], NOW).is_none());
     bench.ledger.run_mut(&run_id).expect("the run").coordinator = seat;
     // Reserved once, planned never again.
     let reserved = bench
@@ -12553,7 +12851,7 @@ fn next_handover_walks_one_witnessed_wall_under_a_declared_order() {
         .expect("the reservation");
     assert!(reserved.starts_with("m-"));
     assert!(
-        next_handover(&bench.ledger.runs()[0]).is_none(),
+        next_handover(&bench.ledger.runs()[0], NOW).is_none(),
         "a reserved handover was planned again"
     );
     assert!(
@@ -12572,12 +12870,12 @@ fn next_handover_walks_one_witnessed_wall_under_a_declared_order() {
         "/wt/own",
         NOW + 3,
     );
-    let second = next_handover(&bench.ledger.runs()[0]).expect("the second wall");
+    let second = next_handover(&bench.ledger.runs()[0], NOW).expect("the second wall");
     assert_eq!(second.worker, own);
     assert_eq!(second.to, pinned("claude", Some("fable-5-1"), Some("high")));
     // A person's pane: never.
     assert!(bench.ledger.worker_taken_over(("team-1", &own_pane)));
-    assert!(next_handover(&bench.ledger.runs()[0]).is_none());
+    assert!(next_handover(&bench.ledger.runs()[0], NOW).is_none());
     assert!(bench.ledger.handover_begin(&second, NOW + 4).is_err());
 }
 
@@ -12603,7 +12901,7 @@ fn a_task_is_handed_over_at_most_handover_max_times() {
             .map_or_else(String::new, |prior| format!(" --retry-of {prior}"));
         let at = NOW + i64::try_from(round).expect("small") * 10;
         let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, &link, "/wt/again", at);
-        let plan = next_handover(&bench.ledger.runs()[0])
+        let plan = next_handover(&bench.ledger.runs()[0], NOW)
             .unwrap_or_else(|| panic!("round {round} under the ceiling was not planned"));
         let id = bench
             .ledger
@@ -12630,7 +12928,7 @@ fn a_task_is_handed_over_at_most_handover_max_times() {
     let link = format!(" --retry-of {}", previous.expect("an ended attempt"));
     a_walled_worker(&mut bench, &task, &link, "/wt/again", NOW + 100);
     assert!(
-        next_handover(&bench.ledger.runs()[0]).is_none(),
+        next_handover(&bench.ledger.runs()[0], NOW).is_none(),
         "the ceiling was walked past"
     );
     assert_eq!(
@@ -12657,7 +12955,7 @@ fn a_handover_receipt_says_every_step_and_is_delivered_when_it_settles() {
         .to_string();
     bench.json("handover-policy --on-quota-wall claude:fable-5-1 --wip-commit");
     let (worker, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/walled", NOW);
-    let plan = next_handover(&bench.ledger.runs()[0]).expect("a plan");
+    let plan = next_handover(&bench.ledger.runs()[0], NOW).expect("a plan");
     let id = bench
         .ledger
         .handover_begin(&plan, NOW + 1)
@@ -12767,7 +13065,7 @@ fn a_half_walked_handover_is_reported_after_a_restart_and_never_resumed() {
         .to_string();
     bench.json("handover-policy --on-quota-wall claude --wip-commit");
     let (_, _, dispatch) = a_walled_worker(&mut bench, &task, "", "/wt/walled", NOW);
-    let plan = next_handover(&bench.ledger.runs()[0]).expect("a plan");
+    let plan = next_handover(&bench.ledger.runs()[0], NOW).expect("a plan");
     let id = bench
         .ledger
         .handover_begin(&plan, NOW + 1)
@@ -12803,7 +13101,7 @@ fn a_half_walked_handover_is_reported_after_a_restart_and_never_resumed() {
     );
     assert_eq!(body["steps"].as_array().map(Vec::len), Some(1));
     // Never resumed: the attempt was walked, whatever became of it.
-    assert!(next_handover(&bench.ledger.runs()[0]).is_none());
+    assert!(next_handover(&bench.ledger.runs()[0], NOW).is_none());
     assert!(bench.ledger.handover_begin(&plan, NOW + 6).is_err());
     assert!(
         bench
@@ -19890,7 +20188,7 @@ fn handover_reservation_rejects_superseded_order_and_seat_without_spending_the_a
             .to_string();
         let (worker, _, _) = a_walled_worker(&mut bench, &task, "", "/wt/current", 5_000_000);
         bench.json("handover-policy --on-quota-wall claude --wip-commit");
-        let plan = next_handover(&bench.ledger.runs()[0]).unwrap();
+        let plan = next_handover(&bench.ledger.runs()[0], 5_000_001).unwrap();
         let run = bench.ledger.run_mut(&plan.run).unwrap();
         match change {
             "alternative" => {
@@ -19927,7 +20225,7 @@ fn handover_reservation_rejects_superseded_order_and_seat_without_spending_the_a
             before,
             "{change} spent a reservation"
         );
-        if let Some(fresh) = next_handover(&bench.ledger.runs()[0]) {
+        if let Some(fresh) = next_handover(&bench.ledger.runs()[0], 5_000_001) {
             assert!(
                 bench.ledger.handover_begin(&fresh, 5_000_003).is_ok(),
                 "{change} prevented replanning"
@@ -19952,7 +20250,7 @@ fn a_revoked_handover_retains_history_and_allows_a_current_order_to_reserve() {
         5_000_000,
     );
     bench.json("handover-policy --on-quota-wall codex --wip-commit");
-    let plan = next_handover(&bench.ledger.runs()[0]).unwrap();
+    let plan = next_handover(&bench.ledger.runs()[0], 5_000_001).unwrap();
     assert_eq!(plan.to, pinned("claude", Some("fable-5-1"), Some("high")));
     let reservation = bench.ledger.handover_begin(&plan, 5_000_001).unwrap();
     bench.json("handover-policy --off");
@@ -19965,7 +20263,7 @@ fn a_revoked_handover_retains_history_and_allows_a_current_order_to_reserve() {
         .ledger
         .handover_revoked(&plan.run, &reservation, 5_000_002)
         .unwrap();
-    let current = next_handover(&bench.ledger.runs()[0]).unwrap();
+    let current = next_handover(&bench.ledger.runs()[0], 5_000_001).unwrap();
     assert!(!current.wip_commit);
     assert_eq!(
         current.to, plan.to,

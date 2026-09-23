@@ -214,6 +214,7 @@ pub const LEDGER_TABLES_SQL: &str = "
         started_by TEXT,
         adopted_by INTEGER,
         on_quota_wall TEXT,
+        quota_wait INTEGER NOT NULL DEFAULT 0 CHECK (quota_wait IN (0, 1)),
         PRIMARY KEY (ledger_id, ordinal),
         UNIQUE (ledger_id, run, id),
         FOREIGN KEY (ledger_id) REFERENCES orchestration_ledger_heads(ledger_id)
@@ -459,6 +460,13 @@ pub fn ensure_ledger_columns(connection: &Connection) -> Result<(), EffectJourna
          * wall was witnessed (t-3059). */
         ("ledger_runs", "handover", "TEXT"),
         ("ledger_workers", "on_quota_wall", "TEXT"),
+        /* A summons' own `wait` beside its alternative (t-6427): a flag like
+         * `taken_over`, and false for every row written before the word. */
+        (
+            "ledger_workers",
+            "quota_wait",
+            "INTEGER NOT NULL DEFAULT 0 CHECK (quota_wait IN (0, 1))",
+        ),
         (
             "ledger_served",
             "expired",
@@ -1611,8 +1619,8 @@ fn write_rows(
                         started_ms, dispatch, model, effort, session, ready_by_ms,
                         hook_unreachable_since_ms, pane_missing_since_ms,
                         taken_over, checkout, quiet_at, archive, started_by, adopted_by,
-                        on_quota_wall
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                        on_quota_wall, quota_wait
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
                     params![
                         ledger_id,
                         ordinal(at)?,
@@ -1645,6 +1653,7 @@ fn write_rows(
                             .map(serde_json::to_string)
                             .transpose()
                             .map_err(|_| EffectJournalError::Corrupt)?,
+                        row.quota_wait,
                     ],
                 )
                 .map_err(|_| EffectJournalError::Database)?;
@@ -2369,7 +2378,7 @@ fn read_repairable_from_head(
         "SELECT run, id, team, agent, pane, state, started_ms, dispatch, model, effort,
                 session, ready_by_ms, hook_unreachable_since_ms,
                 pane_missing_since_ms, taken_over, checkout, quiet_at, archive,
-                started_by, adopted_by, on_quota_wall
+                started_by, adopted_by, on_quota_wall, quota_wait
            FROM ledger_workers WHERE ledger_id = ?1 ORDER BY ordinal",
         ledger_id,
         |row| {
@@ -2398,6 +2407,7 @@ fn read_repairable_from_head(
                     row.get::<_, Option<String>>(18)?,
                     row.get::<_, Option<i64>>(19)?,
                     row.get::<_, Option<String>>(20)?,
+                    row.get::<_, bool>(21)?,
                 ),
             ));
             Ok(())
@@ -2429,7 +2439,7 @@ fn read_repairable_from_head(
                 ),
                 state,
             )| {
-                let (started_by, adopted_by, on_quota_wall) = lineage;
+                let (started_by, adopted_by, on_quota_wall, quota_wait) = lineage;
                 /* A generation is a small positive count; a value SQLite hands
                  * back that a `u32` cannot hold was not written by this store. */
                 let adopted_by = adopted_by
@@ -2469,6 +2479,7 @@ fn read_repairable_from_head(
                     started_by,
                     adopted_by,
                     on_quota_wall,
+                    quota_wait,
                 })
             },
         )
@@ -2904,6 +2915,7 @@ mod tests {
                 started_by: None,
                 adopted_by: None,
                 on_quota_wall: None,
+                quota_wait: false,
             }],
             attachments: vec![AttachmentRow {
                 run: "run-2".to_string(),
@@ -3272,6 +3284,7 @@ mod tests {
             }),
             wip_commit: true,
             on_transient_error: None,
+            quota_wait: true,
             armed_ms: 8,
         });
         projection.workers[0].on_quota_wall = Some(Pinned {
@@ -3279,6 +3292,8 @@ mod tests {
             model: None,
             effort: None,
         });
+        // And its own `wait` beside it (t-6427).
+        projection.workers[0].quota_wait = true;
         write(&store, "one", 0, 1, &projection, 10).expect("it writes");
 
         let held = read(&store, "one", projection.schema)
@@ -3302,6 +3317,7 @@ mod tests {
             }),
             wip_commit: false,
             on_transient_error: None,
+            quota_wait: false,
             armed_ms: 1,
         });
         projection.workers[0].on_quota_wall = Some(Pinned {
@@ -3677,6 +3693,7 @@ mod tests {
                  ALTER TABLE ledger_workers DROP COLUMN adopted_by;
                  ALTER TABLE ledger_runs DROP COLUMN handover;
                  ALTER TABLE ledger_workers DROP COLUMN on_quota_wall;
+                 ALTER TABLE ledger_workers DROP COLUMN quota_wait;
                  UPDATE orchestration_ledger_heads SET bytes_held = {};",
                 bytes_held(&expected)
             ))

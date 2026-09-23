@@ -662,6 +662,24 @@ the person took over is never handed over. If the window restarts mid-walk
 the receipt arrives `interrupted`, naming the last step that walked, and no
 later beat resumes it — read the steps and finish or undo by hand.
 
+**The same conversation comes before a different model.** `--on-quota-wall`
+also takes the closed word `wait` — alone, or beside the alternative as
+`wait,<agent[:model[:effort]]>` in either order (a word nobody measured is
+refused by name). The order is walked as a ladder, the wait first: while
+the wall's reset (named by a fresh gauge when the wall was witnessed) and
+the three minutes after it have not passed, nothing is handed over. Claude
+Code waits out its own reset and continues the same conversation about a
+minute after it — every wall on this machine did — and a handover walked at
+the wall would have ended that conversation for a new one. Once the wall
+stops standing, the handover walks as before, if the wall is witnessed
+again. A wall whose reset is unknown or more than six hours away (a weekly
+window) is not waited for: it is handed over at once. `wait` alone on a
+summons is that worker's whole order, so the run's alternative never
+reaches it — the way to keep a worker pinned to its model and effort.
+`run-show.handover.ladder` reads the rungs back in walking order; the
+`quota_walled` news carries `ladder` and `wait: {standsUntilMs}` (or
+`{skipped: <why>}`), and a `handover` receipt carries `rung: "handover"`.
+
 If what you were asked for is "give this to another agent" and nobody asked
 you to watch it or collect a result, you do not need this skill. Make a
 workspace and start an agent in it; that is a window action.
