@@ -623,12 +623,12 @@ fn the_command_path_pays_microseconds_for_a_recording_guard() {
 /* ---- one rubric's evidence is not another's, at the guard's own judge ------- */
 
 /// The version that answers every request of these ledgers.
-const ANSWERING: &str = "jev-1.13.0";
+pub(super) const ANSWERING: &str = "jev-1.13.0";
 
 /// A text guard request row as `judge_text` files it, reduced to what the
 /// judge reads: its name, its rubric, the version that answered — none for a
 /// timeout — and its outcome.
-fn guard_request(at: u64, judged: u64, rubric: u32, model: Option<&str>, outcome: &str) -> Value {
+pub(super) fn guard_request(at: u64, judged: u64, rubric: u32, model: Option<&str>, outcome: &str) -> Value {
     let mut row = serde_json::json!({
         "at": at, "judged": judged, "rubricVersion": rubric, "outcome": outcome, "elapsedMs": 400, "requests": 1,
     });
@@ -658,7 +658,9 @@ fn guard_window_that_rises(rubric: u32, first: u64, at: u64) -> Vec<Value> {
     rows
 }
 
-fn guard_ledger_with(cwd: &Path, rows: &[Value]) -> PathBuf {
+/// The text guard's own ledger under `cwd`, holding `rows` as its writer
+/// appends them.
+pub(super) fn guard_ledger_with(cwd: &Path, rows: &[Value]) -> PathBuf {
     let ledger = tool_text_guard_path(cwd);
     for row in rows {
         append_shadow_row(&ledger, row, SHADOW_LEDGER_MAX_BYTES).expect("a row");
@@ -666,111 +668,99 @@ fn guard_ledger_with(cwd: &Path, rows: &[Value]) -> PathBuf {
     ledger
 }
 
-fn transitions_in(ledger: &Path) -> Vec<Value> {
+/// The transition rows the judge wrote on `ledger`.
+pub(super) fn transitions_in(ledger: &Path) -> Vec<Value> {
     read_shadow_rows::<Value>(ledger)
         .into_iter()
         .filter(|row| zerocode_core::jev::summary::TRANSITION.read(row).is_some())
         .collect()
 }
 
-/// A thick version 1 series does not judge a thin version 2 window at the
-/// guard's own judge (t-6877, astra m-7097 — the regression the audit asked
-/// for at the real entry): the ledger holds version 1's full window, its
-/// forty marks, and twenty requests under version 2 — the words the seat asks
-/// today. `judge_seat_ledger` judges nothing (twenty are not a window), writes
-/// no rise, and the guard's cached `auto` — the runtime's standing reader and
-/// the guard's own — does not act.
-#[test]
-fn a_thick_version_one_series_does_not_judge_a_thin_version_two_window() {
-    use zerocode_core::jev::promote::window_wanted_for;
-    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
-        let wanted = u64::try_from(window_wanted_for(&TOOL_TEXT_GUARD).expect("the guard rises")).expect("small");
-        let mut rows = guard_window_that_rises(1, 1, 0);
-        rows.extend((0..20).map(|n| guard_request(10_000 + n, 1_000 + n, 2, Some(ANSWERING), TOOL_GUARD_OUTCOME_ANSWERED)));
-        let ledger = guard_ledger_with(cwd, &rows);
-        let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);
-        assert_eq!(verdict, None, "twenty of version 2 are not a window of {wanted}: nothing is judged");
-        assert!(transitions_in(&ledger).is_empty(), "no rise was written on version 1's evidence");
-        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "the runtime's reader: recording");
-        refresh_standing(cwd, &TOOL_TEXT_GUARD);
-        assert!(!raised(cwd, &TEXT), "the guard's cached auto: recording");
-    });
+/// The words the guard's row asks today, and the version before them — what
+/// these tests read at the guard's own judge, whatever the row asks.
+pub(super) fn today_and_before() -> (u32, u32) {
+    let today = TOOL_TEXT_GUARD.rubric_version;
+    (today, today - 1)
 }
 
 /// A change of rubric returns a risen seat to recording at the guard's
 /// cache (t-6877, astra §2): a rise the judge wrote under version 1 — before
-/// transitions named a rubric — is not version 2's, with nothing yet asked
-/// under version 2; a rise naming version 2 is.
+/// transitions named a rubric — is not a rise of the words the guard asks
+/// today, with nothing yet asked under them; a rise naming today's words is.
 #[test]
 fn a_rubric_change_returns_a_risen_seat_to_recording() {
     use zerocode_core::jev::promote::ROSE;
     use zerocode_core::jev::summary::TRANSITION;
+    let (today, _) = today_and_before();
     machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
         let mut rows = guard_window_that_rises(1, 1, 0);
         rows.push(serde_json::json!({"at": 5_000, (TRANSITION.canonical): ROSE}));
         let ledger = guard_ledger_with(cwd, &rows);
-        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "version 1's rise is not version 2's");
+        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "version 1's rise is not today's words'");
         refresh_standing(cwd, &TOOL_TEXT_GUARD);
         assert!(!raised(cwd, &TEXT), "nor for the guard's cache");
 
         append_shadow_row(
             &ledger,
-            &serde_json::json!({"at": 6_000, (TRANSITION.canonical): ROSE, "rubricVersions": [2]}),
+            &serde_json::json!({"at": 6_000, (TRANSITION.canonical): ROSE, "rubricVersions": [today]}),
             SHADOW_LEDGER_MAX_BYTES,
         )
         .expect("a rise");
-        assert!(runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "a rise naming version 2 stands");
+        assert!(runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "a rise naming today's words stands");
         refresh_standing(cwd, &TOOL_TEXT_GUARD);
         assert!(raised(cwd, &TEXT));
     });
 }
 
-/// The second version rises again on its own sample, through the guard's
-/// judge (t-6877, the positive control): version 1's window, marks and rise
-/// on the ledger, then version 2's own — the judge is due on version 2's
-/// count, says rise, and the transition it writes names the rubric it was
-/// decided on.
+/// Today's words rise again on their own sample, through the guard's judge
+/// (t-6877, the positive control): the older words' window, marks and rise
+/// on the ledger, then today's own — the judge is due on today's count,
+/// says rise, and the transition it writes names the rubric it was decided
+/// on.
 #[test]
-fn the_second_version_rises_again_on_its_own_sample() {
+fn todays_words_rise_again_on_their_own_sample() {
     use zerocode_core::jev::promote::{Verdict, ROSE};
     use zerocode_core::jev::summary::TRANSITION;
+    let (today, before) = today_and_before();
     machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
-        let mut rows = guard_window_that_rises(1, 1, 0);
-        rows.push(serde_json::json!({"at": 5_000, (TRANSITION.canonical): ROSE}));
-        rows.extend(guard_window_that_rises(2, 1_000, 10_000));
+        let mut rows = guard_window_that_rises(before, 1, 0);
+        rows.push(serde_json::json!({"at": 5_000, (TRANSITION.canonical): ROSE, "rubricVersions": [before]}));
+        rows.extend(guard_window_that_rises(today, 1_000, 10_000));
         let ledger = guard_ledger_with(cwd, &rows);
         let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);
-        assert_eq!(verdict, Some(Verdict::Rise), "version 2's own window and marks");
+        assert_eq!(verdict, Some(Verdict::Rise), "today's own window and marks");
         let written = transitions_in(&ledger);
-        assert_eq!(written.len(), 2, "version 1's rise, and now version 2's");
+        assert_eq!(written.len(), 2, "the older words' rise, and now today's");
         assert_eq!(TRANSITION.read(&written[1]).and_then(Value::as_str), Some(ROSE));
-        assert_eq!(written[1]["rubricVersions"], serde_json::json!([2]), "the transition names its rubric");
+        assert_eq!(written[1]["rubricVersions"], serde_json::json!([today]), "the transition names its rubric");
         assert!(runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD));
     });
 }
 
 /// A timeout names no model and stays the current rubric's failure at the
-/// guard's judge (t-6877, astra m-7141): an acting version 2 that times out
-/// three times running is ended now, and the fall names the rubric.
+/// guard's judge (t-6877, astra m-7141): an acting guard on today's words
+/// that times out three times running is ended now, and the fall names the
+/// rubric.
 #[test]
 fn a_no_model_timeout_stays_in_the_current_rubrics_requests() {
     use zerocode_core::jev::promote::{Line, Verdict, FALLBACKS_THAT_END_IT, FELL, ROSE};
     use zerocode_core::jev::summary::TRANSITION;
+    let (today, _) = today_and_before();
     machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
-        let mut rows = guard_window_that_rises(2, 1_000, 10_000);
-        rows.push(serde_json::json!({"at": 15_000, (TRANSITION.canonical): ROSE, "rubricVersions": [2]}));
-        rows.extend((0..u64::from(FALLBACKS_THAT_END_IT)).map(|n| guard_request(20_000 + n, 5_000 + n, 2, None, "timeout")));
+        let mut rows = guard_window_that_rises(today, 1_000, 10_000);
+        rows.push(serde_json::json!({"at": 15_000, (TRANSITION.canonical): ROSE, "rubricVersions": [today]}));
+        rows.extend((0..u64::from(FALLBACKS_THAT_END_IT)).map(|n| guard_request(20_000 + n, 5_000 + n, today, None, "timeout")));
         let ledger = guard_ledger_with(cwd, &rows);
         assert!(runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD), "acting, until the wire fails three times");
         let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);
         assert_eq!(
             verdict,
             Some(Verdict::Fall(Line::Fallbacks { in_a_row: FALLBACKS_THAT_END_IT })),
-            "three timeouts of version 2 are version 2's failures"
+            "three timeouts of today's words are today's failures"
         );
         let written = transitions_in(&ledger);
         assert_eq!(TRANSITION.read(&written[1]).and_then(Value::as_str), Some(FELL));
-        assert_eq!(written[1]["rubricVersions"], serde_json::json!([2]));
+        assert_eq!(written[1]["rubricVersions"], serde_json::json!([today]));
         assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD));
     });
 }
@@ -802,7 +792,7 @@ fn what_a_full_ledger_costs_the_guards_judge_and_standing() {
         for n in 0..total {
             let request = serde_json::json!({
                 "at": 1_700_000_000_000_u64 + n * 1_000, "attempt": format!("turn-{}", n / 7), "judged": 10_000 + n,
-                "rubricVersion": 2, "tool": "read_file", "source": "file", "textChars": 1_024 + n % 900, "fencedBefore": n.is_multiple_of(5),
+                "rubricVersion": TOOL_TEXT_GUARD.rubric_version, "tool": "read_file", "source": "file", "textChars": 1_024 + n % 900, "fencedBefore": n.is_multiple_of(5),
                 "verdict": "plain", "fenced": false, "noted": false, "outcome": TOOL_GUARD_OUTCOME_ANSWERED,
                 "answers": {INSTRUCTED: 0.04}, "routeUse": "shadow", "applied": false, "elapsedMs": 380 + n % 200, "retries": 0,
                 "requests": 1, "redactedLines": 0, "model": ANSWERING, "inputTokens": 640 + n % 300, "requestBytes": 2_048 + n % 500,
@@ -859,8 +849,8 @@ fn what_a_full_ledger_costs_the_guards_judge_and_standing() {
 
 /// A late label of a request an older version answered is not the newer
 /// version's comparison at the guard's judge (t-6877 round 2, astra R1a):
-/// version 2's window answered by one model, then the same window again
-/// answered by the next, then the forty marks of the FIRST window's
+/// a window of today's words answered by one model, then the same window
+/// again answered by the next, then the forty marks of the FIRST window's
 /// requests arriving late — carrying no model, as the guard's labels never
 /// do. The judge is due on the second model's count and holds with nothing
 /// compared: the late marks grade the first model's requests, and the
@@ -868,13 +858,14 @@ fn what_a_full_ledger_costs_the_guards_judge_and_standing() {
 #[test]
 fn a_late_label_of_the_older_model_does_not_rise_the_newer_one() {
     use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for, Line, Verdict};
+    let (today, _) = today_and_before();
     machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
         let wanted = u64::try_from(window_wanted_for(&TOOL_TEXT_GUARD).expect("the guard rises")).expect("small");
         let misses = u64::try_from(TOOL_TEXT_GUARD.negatives_wanted.expect("negatives")).expect("small");
         let marks = u64::try_from(marks_that_can_clear(&TOOL_TEXT_GUARD).expect("a width")).expect("small");
         let mut rows: Vec<Value> =
-            (0..wanted).map(|n| guard_request(n, 1 + n, 2, Some("jev-1.12.0"), TOOL_GUARD_OUTCOME_ANSWERED)).collect();
-        rows.extend((0..wanted).map(|n| guard_request(1_000 + n, 1_000 + n, 2, Some(ANSWERING), TOOL_GUARD_OUTCOME_ANSWERED)));
+            (0..wanted).map(|n| guard_request(n, 1 + n, today, Some("jev-1.12.0"), TOOL_GUARD_OUTCOME_ANSWERED)).collect();
+        rows.extend((0..wanted).map(|n| guard_request(1_000 + n, 1_000 + n, today, Some(ANSWERING), TOOL_GUARD_OUTCOME_ANSWERED)));
         rows.extend((0..marks).map(|n| guard_label(5_000 + n, 1 + n, n >= misses)));
         let ledger = guard_ledger_with(cwd, &rows);
         let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);

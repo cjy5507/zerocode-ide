@@ -1467,16 +1467,74 @@ fn rise_on(at: usize, rubrics: &[u32]) -> Value {
     serde_json::json!({"at": at, (TRANSITION.canonical): ROSE, "rubricVersions": rubrics})
 }
 
-/// The seat the guard's version 2 is read for — its table row asks version 2
-/// today (t-6982), which is what these tests stand on.
+/// The text guard as a fixture of its history: its row asking version 2,
+/// the words it asked from t-6982 on, with version 1 behind them. Pinned
+/// here and not read off today's row, because the guard's words move on —
+/// its row asks whatever version its writer stamps now — and the tests
+/// that stand on this read a history of one rubric following another;
+/// what the row asks today is held by
+/// `todays_text_guard_stands_on_its_own_words_alone` (t-6877 round 3).
+static GUARD_ASKING_TWO: JevUse = JevUse {
+    rubric_version: 2,
+    ..crate::jev::TOOL_TEXT_GUARD
+};
+
+/// The history fixture above, as the tests hold a seat.
 fn guard() -> &'static JevUse {
+    &GUARD_ASKING_TWO
+}
+
+/// Today's text guard stands on the words its row asks now and on nothing
+/// its older words earned (t-6877 round 3, astra: the fixture above is a
+/// history, this is the row) — whatever version that is: the version before
+/// it with a full window, its marks and its rise, then twenty requests of
+/// today's words, is not due, holds on the twenty with nothing compared and
+/// stands at recording, off the rows and off the text; today's own window
+/// and marks are due and rise, and the rise names today's words.
+#[test]
+fn todays_text_guard_stands_on_its_own_words_alone() {
     let seat = &crate::jev::TOOL_TEXT_GUARD;
-    assert_eq!(
-        crate::jev::questions::TOOL_TEXT_GUARD_RUBRIC_VERSION,
-        2,
-        "the guard asks version 2: these rows are shaped for that"
+    let today = seat.rubric_version;
+    let before = today - 1;
+    let wanted = window_wanted_for(seat).expect("the guard rises");
+    let history = || {
+        let mut rows = guard_window_that_rises(seat, before, 1, 0);
+        rows.push(rise_on(5_000, &[before]));
+        rows
+    };
+    let mut thin = history();
+    thin.extend(guard_requests(JUDGED_EVERY_ROWS, today, 1_000, 10_000));
+    assert!(
+        !judgment_due(seat, &thin),
+        "twenty requests of today's words are not a window"
     );
-    seat
+    let judged = judge_seat(seat, &thin).expect("judged");
+    assert_eq!(
+        (judged.verdict, judged.agreement.compared),
+        (
+            Verdict::Hold(Line::TooFewRows {
+                rows: JUDGED_EVERY_ROWS,
+                wanted
+            }),
+            0
+        ),
+        "the older words' marks grade nothing of today's: {judged:?}"
+    );
+    assert_eq!(standing(seat, &thin), Stand::Recording);
+    assert_eq!(standing_in(seat, &text_of(&thin)), Stand::Recording);
+
+    let mut own = history();
+    own.extend(guard_window_that_rises(seat, today, 1_000, 10_000));
+    assert!(judgment_due(seat, &own), "today's own window is full");
+    let judged = judge_seat(seat, &own).expect("judged");
+    assert_eq!(judged.verdict, Verdict::Rise, "{judged:?}");
+    assert_eq!(
+        judged.agreement.compared,
+        marks_that_can_clear(seat).expect("a width"),
+        "today's own marks, and only those"
+    );
+    let rose = transition_row(seat, 20_000, judged.verdict, &judged.window).expect("a rise");
+    assert_eq!(rose[RUBRIC_VERSIONS.canonical], serde_json::json!([today]));
 }
 
 /// A thick first-rubric series does not judge a thin second-rubric window
