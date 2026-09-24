@@ -1321,6 +1321,10 @@ async function boardCards() {
   } catch (error) {
     showError(String(error));
   }
+  /* 실시간 지도가 읽는 대기 사유는 이 행들에만 있고(`hearing`·`wall`·`asking`·
+   * `quiet_at`), 카드에는 실리지 않는다. 따로 묻는 대신 **이 판이 방금 받은 그
+   * 한 벌**을 건넨다 — 두 번 물으면 한 카드에 두 시각이 실린다 (t-7288). */
+  rememberAgentGraphLedgerRows(ledger);
   const drawn = cardsFromPanes(panes);
   return [
     ...drawn,
@@ -3206,6 +3210,10 @@ function agentGraphModel(columns, places, reviews,
          * this agent running", so it is the gate, and the ring only says
          * whether the running agent has a call open right now. */
         live: entry.bucket === "working" && agentGraphIsLive(entry.card.pane),
+        /* 무엇을 기다리는가 — 원장이 적은 사유와 그 사유가 기록된 때. 실시간
+         * 지도가 꺼져 있으면 `null`이고, 주체(run/worker/dispatch)가 없는
+         * 카드는 「확인되지 않음」이다. 이 창이 짐작한 진행률은 없다 (t-7288). */
+        wait: agentGraphLiveWait(entry, now),
         wentQuiet: entry.bucket === "working" && entry.card.at > 0 &&
           now - entry.card.at >= AGENT_GRAPH_QUIET_AFTER_MS,
         hiddenByIdle: entry.state === "idle" && !entry.workspace.idleExpanded &&
@@ -3342,6 +3350,11 @@ function agentGraphModel(columns, places, reviews,
           (edge.from === agentGraphSelectedKey || edge.to === agentGraphSelectedKey))
       : [];
   const overlayLatest = agentGraphAgentKey(overlays?.latest);
+  /* 실시간 지도가 더 그리는 선 (t-7288). 오버레이 고르개는 셋 중 하나를
+   * 고르지만 이 지도는 「누가 누구에게」와 「누가 무엇을 기다리는가」를 함께
+   * 답해야 하므로 메일과 의존을 합집합으로 든다 — 이미 오버레이로 선 키는
+   * 빼고, 노드의 자리와 `topologySignature`는 건드리지 않는다. */
+  const liveEdges = agentGraphLiveEdges(mail, dependencies, overlayEdges, visibleKeys);
   return {
     nodes,
     bands,
@@ -3358,9 +3371,10 @@ function agentGraphModel(columns, places, reviews,
     edges: visibleEdges,
     allEdges: edges,
     overlayEdges,
+    liveEdges,
     overlayData: { mail, dependencies, mergeByWorkspace, latest: overlayLatest },
     overlayMode: agentGraphOverlayMode,
-    overlaySignature: overlayEdges.map((edge) =>
+    overlaySignature: [...overlayEdges, ...liveEdges].map((edge) =>
       `${edge.key}:${edge.count}:${edge.unread ?? 0}`).join("\u001e"),
     entities,
     agents,
@@ -3525,6 +3539,10 @@ function setAgentGraphScope(view, key) {
   if (key && !group) return;
   agentGraphScopeKey = key;
   agentGraphScopeLabel = group?.title ?? "";
+  /* 범위가 움직이면 실시간 장부의 세대가 올라간다 (t-7288): 옛 범위에서 떠난
+   * 갱신이 늦게 도착해도 지금의 지도·선택·근거를 덮지 못하고, 새 범위의 지금
+   * 모습이 조용한 기준선이 된다 — 범위를 옮긴 것은 사건이 아니다. */
+  agentGraphLiveScopeMoved();
   agentGraphScopeFolded.clear();
   agentGraphScopeIdleCollapsed.clear();
   agentGraphSelectedEdgeKey = null;
@@ -4105,6 +4123,10 @@ function updateAgentGraphNode(node, entity, view) {
     facts?.trail.map((tool) => `${tool.kind}:${tool.word}:${tool.target}`).join(",") ?? "",
     String(facts?.trailHidden ?? 0),
     facts?.context ? String(Math.round(facts.context.ratio * 1e4)) : "",
+    /* 기다림의 사유와 나이 (t-7288). 나이는 30초 박자에 낱말이 바뀌므로
+     * 자리에 써 넣는 쪽에 둔다 — 시계 낱말과 같은 이유로, 여기 없으면 그
+     * 칸만 옛 낱말에 굳는다. */
+    entity.wait ? [entity.wait.cause, entity.wait.ageWord, String(entity.wait.until ?? "")].join("\u001f") : "",
   ].join("\u001e");
   const stableSignature = [
     locale,
@@ -4133,6 +4155,9 @@ function updateAgentGraphNode(node, entity, view) {
     String(Boolean(entity.meta)),
     String(Boolean(entity.wentQuiet)),
     String(entity.mailUnread > 0),
+    /* 기다림의 칸은 늘 서지만 비어 있을 때 CSS가 접으므로, 서고 접히는 그
+     * 순간이 카드의 높이를 바꾼다 — 그 아래 줄이 전부 내려간다 (t-7288). */
+    String(Boolean(entity.wait)),
   ].join("\u001f");
   const geometryChanged = node.dataset.graphGeometry !== geometrySignature;
   if (node.dataset.graphSignature !== signature &&
@@ -4156,6 +4181,7 @@ function updateAgentGraphNode(node, entity, view) {
     if (clocks[1]) writeTextContent(clocks[1], entity.clock?.running ?? "");
     const doing = node.querySelector(".agent-card-doing");
     if (doing) dressAgentCardDoing(doing, facts);
+    dressAgentGraphWait(node.querySelector(".agent-graph-wait"), entity.wait);
     /* 자리에 써 넣었어도 **높이는** 바뀔 수 있다: 첫 도구 호출이 활동 줄을
      * 세우면 그 아래 줄이 전부 내려간다. 그 사실을 삼키면 간선은 카드가 한
      * 박자 전에 서 있던 자리를 가리킨 채로 남는다. */
@@ -4244,7 +4270,9 @@ function updateAgentGraphNode(node, entity, view) {
       phase.className = `agent-card-phase is-${facts.phase || "none"}`;
       phase.textContent = facts.phaseWord;
       phase.dataset.tip = facts.phaseTip;
-      status.append(agentGraphStateMark(entity.state), stateWord, phase);
+      const wait = agentGraphWaitNode();
+      dressAgentGraphWait(wait, entity.wait);
+      status.append(agentGraphStateMark(entity.state), stateWord, phase, wait);
       parts.push(status);
       const doing = agentCardDoingNode({ graph: true });
       dressAgentCardDoing(doing, facts);
@@ -5000,6 +5028,14 @@ function agentGraphRelationDetail(view, relation, model) {
       add(t("board.graph.sender", "발신 주소"), source.from);
       add(t("board.graph.recipient", "수신 주소"), source.to);
     }
+    /* 「미확인 0」은 전달도 확인도 답장도 증명하지 않는다 (t-7288). 이 판에
+     * 오는 것은 미확인 목록 하나뿐이므로, 나머지는 **모른다고 적는다** — 그
+     * 문장은 장부의 한 표에서 온다(`AGENT_GRAPH_LIVE_UNKNOWN`). */
+    if (agentGraphLiveOn()) {
+      for (const id of ["delivery", "reply"]) {
+        facts.append(taskBoardElement("p", "agent-relation-note", agentGraphLiveUnknownWord(id)));
+      }
+    }
   } else if (relation.type === "dependency") {
     block.append(taskBoardElement("p", "agent-relation-explanation", t("board.graph.dependencyEvidence", "후속 과업에 등록된 선행 조건입니다. 이 연결만으로 에이전트가 현재 멈춰 있거나 검증이 끝났다고 판단하지 않습니다.")));
     const dependencies = agentGraphDependencyFacts(model, relation);
@@ -5179,11 +5215,15 @@ function paintAgentGraphInspector(view, model) {
     const relevant = relation ? [relation] : relations.filter((edge) => edge.from === entity.key || edge.to === entity.key);
     const signature = JSON.stringify([locale, entity?.key, entity?.label, agentGraphSelectedEdgeKey, relevant,
       relevant.map((edge) => [inspection.entities.get(edge.from)?.label, inspection.entities.get(edge.to)?.label]),
-      inspection.source.overlays.task_dependencies ?? [], subject?.place, secondBrainVault, taskBoardRecallsRevision]);
+      inspection.source.overlays.task_dependencies ?? [], subject?.place, secondBrainVault, taskBoardRecallsRevision,
+      /* 실시간 사건 목록도 이 탭이 그리므로 서명에 든다 — 사건 키만 센다:
+       * 나이 낱말은 30초 박자가 다시 그릴 때 함께 움직인다 (t-7288). */
+      agentGraphLiveOn() ? agentGraphLiveRecentEvents().map((event) => event.key) : null]);
     if (parts.stamps.relations !== signature) {
       parts.stamps.relations = signature;
       const nodes = relation ? [agentGraphRelationDetail(view, relation, inspection)]
         : [agentGraphBreadcrumbNode(entity, inspection), ...relevant.map((edge) => agentGraphRelationRow(view, edge, inspection))];
+      if (agentGraphLiveOn()) nodes.unshift(agentGraphLiveEventsNode(view));
       if (!relation && relevant.length === 0) nodes.push(taskBoardElement("p", "agent-relation-note", t("board.graph.noRecordedRelations", "현재 스냅샷에 표시할 관계가 없습니다.")));
       if (subject) nodes.push(workbenchRelatedActions(subject), taskBoardRecallsNode(subject));
       parts.relations.replaceChildren(...nodes);
@@ -5924,6 +5964,11 @@ function agentGraphTuning(view) {
     lod: read("--agent-graph-lod"),
     fitFloor: read("--agent-graph-fit-floor"),
     edgeStub: read("--agent-graph-edge-stub"),
+    /* 맥박이 사는 길이와 한 판에 도는 맥박의 수 (t-7288). 둘 다 시각 수치라
+     * 토큰이 정하고, 시계를 거는 손은 이 한 곳에서만 읽는다 — 애니메이션의
+     * 길이가 CSS와 JS 두 곳에 적히면 둘 중 하나만 움직이는 날이 온다. */
+    livePulseMs: read("--agent-graph-live-pulse-ms"),
+    liveBurst: read("--agent-graph-live-burst"),
   };
   if (!Object.values(tuning).every(Number.isFinite)) return null;
   agentGraphTunings.set(view, tuning);
@@ -6148,7 +6193,7 @@ function paintAgentGraphEdges(view, { styleOnly = false } = {}) {
   }
   const { nodes, originX, originY, frameWide, frameTall, gap, stub } = geometry;
   const measured = [];
-  for (const edge of [...model.edges, ...(model.overlayEdges ?? [])]) {
+  for (const edge of [...model.edges, ...(model.overlayEdges ?? []), ...(model.liveEdges ?? [])]) {
     const from = nodes.get(edge.from);
     const to = nodes.get(edge.to);
     if (!from || !to) continue;
@@ -6177,6 +6222,10 @@ function paintAgentGraphEdges(view, { styleOnly = false } = {}) {
   }
 
   const selected = agentGraphSelectedEdges(model);
+  /* 실시간 지도가 더해 그린 선 (t-7288). 고른 오버레이의 선과 같은 옷을
+   * 입히면 사람이 고른 것과 지도가 늘 드는 것이 구별되지 않으므로, 이 선들은
+   * 조용한 옷을 입고 무한히 흐르는 맥박을 달지 않는다. */
+  const liveKeys = new Set((model.liveEdges ?? []).map((edge) => edge.key));
   /* 값이 같으면 쓰지 않고, 좌표가 그대로면 경로를 짓지도 않는다 — 그 규율은
    * `paintGraphEdges`가 들고 있다. 여기 남은 것은 이 표면만의 옷: 선의 종류와
    * 강조, 그리고 오버레이가 선 위에 얹는 낱말과 맥박이다. */
@@ -6196,10 +6245,12 @@ function paintAgentGraphEdges(view, { styleOnly = false } = {}) {
        * 있다. 선은 모델과 DOM에 남고(범례의 수, 선택 사슬) 그림에서만 물러난다. */
       const implied = edge.type === "contains" &&
         (model.entities.get(edge.to)?.depth ?? 0) > 0;
+      const liveRelation = liveKeys.has(edge.key);
       writeAttribute(line, "class", [
         "agent-graph-edge",
         `is-${edge.type}`,
         edge.overlay ? "is-overlay" : "",
+        liveRelation ? "is-live-relation" : "",
         lit ? "is-selected" : "",
         implied ? "is-implied" : "",
         searchDimmed ? "is-search-dimmed" : "",
@@ -6213,8 +6264,16 @@ function paintAgentGraphEdges(view, { styleOnly = false } = {}) {
       const verb = edge.type === "mail"
         ? t("board.graph.mailVerb", "메일")
         : t("board.graph.dependencyVerb", "선행");
-      writeTextContent(label, `${verb} · ${edge.count}`);
-      if (edge.type !== "mail") return;
+      /* 실시간 지도의 메일 선은 배달 상태를 **아는 만큼만** 말한다 (t-7288):
+       * 미확인이 있으면 그 수, 없으면 「미제공」 — 「전달됨」도 「확인됨」도
+       * 이 판이 증명하지 못한다. */
+      writeTextContent(label, liveRelation && edge.type === "mail"
+        ? `${verb} · ${edge.count} · ${agentGraphLiveDeliveryWord(edge)}`
+        : `${verb} · ${edge.count}`);
+      /* 실시간 지도의 선에는 **도는 점**을 달지 않는다 (t-7288). 이 표면의
+       * 움직임은 실제로 일어난 사건 하나에 한 번이고, 영원히 도는 점은
+       * 아무것도 일어나지 않은 판에서도 무언가 일어나는 것처럼 보인다. */
+      if (edge.type !== "mail" || liveRelation) return;
       const pulse = group.querySelector("circle")
         ?? group.appendChild(graphSvgElement("circle"));
       writeAttribute(pulse, "class", "agent-graph-mail-pulse");
@@ -6224,6 +6283,10 @@ function paintAgentGraphEdges(view, { styleOnly = false } = {}) {
     },
   });
   paintAgentGraphEdgeTargets(view, measured, [frameWide, frameTall]);
+  /* 맥박은 옷과 따로 적힌다 (t-7288): 쓰는 것이 `data-live-beat` 하나뿐이라
+   * 위의 `class` 한 손과 부딪히지 않고, 맥박이 꺼질 때 제 시계가 이 한 손만
+   * 다시 불러 배치를 한 번도 읽지 않는다. */
+  dressAgentGraphLive(view);
 }
 
 /* 머리의 칩이 무엇을 고르는지는 **누를 때**의 판에게 묻는다 (1-t385).
@@ -7039,6 +7102,21 @@ function paintAgentGraph(view, model) {
       };
     }
   }
+  /* 실시간 조율 지도의 손잡이 (t-7288). 세 번째 모드가 아니라 이 그림 위의
+   * 켜고 끄기다 — 작업 목록은 보드의 기본값 그대로이고, 끈 판은 지금까지의
+   * 관계 그림 그대로다. 켜는 판은 **조용히** 선다(`setAgentGraphLive`). */
+  const liveButton = view.querySelector(".agent-graph-live");
+  if (liveButton) {
+    writeAttribute(liveButton, "aria-pressed", String(agentGraphLiveOn()));
+    liveButton.classList.toggle("is-active", agentGraphLiveOn());
+    if (!liveButton.onclick) {
+      liveButton.onclick = () => {
+        setAgentGraphLive(view, !agentGraphLiveOn());
+        void paintBoardView(undefined, { force: true });
+      };
+    }
+  }
+  view.classList.toggle("is-live-map", agentGraphLiveOn());
   paintAgentGraphInspector(view, model);
   watchAgentGraphSize(view);
   wireAgentGraphCanvas(view);
@@ -7106,6 +7184,8 @@ function paintBoardBroken(view) {
  * 것은 같은 약속의 두 번째 사본이다. 이 손은 문만 다시 연다. */
 function retryBoardPaint() {
   boardBroken = false;
+  /* 다시 세워지는 첫 판은 재연결이지 활동이 아니다 (t-7288). */
+  agentGraphLiveScopeMoved();
   void paintBoardView();
 }
 
@@ -7162,6 +7242,10 @@ function agentGraphSaid(columns, reviews, places, now) {
     idleExpanded: [...agentGraphIdleExpanded].sort(),
     overlays: agentGraphSnapshotOverlays,
     overlayMode: agentGraphOverlayMode,
+    /* 실시간 손잡이는 그림을 바꾸므로 서명에 든다. 장부의 **사건**은 들지
+     * 않는다 — 사건이 생겼다면 그것을 실어 온 overlay나 카드가 이미 움직였고,
+     * 맥박이 꺼지는 것은 제 시계가 맡는다 (t-7288). */
+    live: agentGraphLiveOn(),
     following: agentGraphFollowing,
     draft: selectedDraft
       ? {
@@ -7184,6 +7268,10 @@ async function paintAgentGraphView(
     paintBoardBroken(view);
     return null;
   }
+  /* 이 판이 **떠날 때**의 세대. 두 번의 `await` 사이에 사람이 범위를 옮기면
+   * 세대가 올라가고, 늦게 도착한 이 답은 실시간 장부에 들지 못한다 — 옛 범위의
+   * 사실이 지금의 지도·선택·근거를 덮지 않는다 (t-7288). */
+  const liveGenerationAtAsk = agentGraphLiveGeneration();
   try {
     wireBoardHead(view);
     if (agentBoardMode === "tasks") primeCoordinatorDesk();
@@ -7240,6 +7328,10 @@ async function paintAgentGraphView(
     const said = agentGraphSaid(answer.columns, reviews, places, now);
     if (!force && view.dataset.said === said) return { cards, answer };
     view.dataset.said = said;
+    /* 서명이 움직인 판만 장부에 접힌다. 똑같은 snapshot은 위에서 이미 돌아갔고,
+     * `force`로 다시 그린 판은 장부의 신원 중복 제거가 받아 넘긴다 — 어느 쪽도
+     * 같은 사건을 두 번 세지 않는다 (t-7288). */
+    agentGraphLiveObserve(answer, places, now, liveGenerationAtAsk);
     writeHidden(view.querySelector(".agent-graph-layout"), false);
     const broken = view.querySelector(".board-broken");
     if (broken) writeHidden(broken, true);

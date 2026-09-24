@@ -762,6 +762,25 @@
   --agent-graph-edge-stroke: 1.5px;
   --agent-graph-edge-stroke-lit: 2px;
   --agent-graph-edge-stroke-pulse: 4px;
+  /* ---- 실시간 조율 지도 (t-7288) ----
+   *
+   * 맥박 하나가 **사는 길이**와 한 판에 도는 맥박의 **수**. 둘 다 시각 수치라
+   * 여기 있고, 시계를 거는 손은 `agentGraphTuning`에서 이 둘을 읽는다 —
+   * 애니메이션의 길이가 CSS와 JS 두 곳에 적히면 둘 중 하나만 움직이는 날이
+   * 온다. 단위가 없는 것은 JS가 밀리초로 읽고 CSS가 `calc()`로 `ms`를
+   * 붙이기 때문이다(배율이 길이가 아닌 것과 같은 이유).
+   *
+   * 900은 짧은 한 번이다: 눈이 방향을 읽기에 충분하고, 두 사건이 잇달아
+   * 도착해도 앞의 것이 끝나기 전에 뒤의 것이 덮어쓰지 않을 만큼만 산다.
+   * 여섯은 한 눈에 방향을 셀 수 있는 수 — 넘치면 맥박만 접히고 사건의 수와
+   * 근거는 인스펙터에 그대로 남는다. */
+  --agent-graph-live-pulse-ms: 900;
+  --agent-graph-live-burst: 6;
+  /* 지도가 서 있는 동안 선과 카드가 드는 깊이. 공전도 카메라도 없고, 깊이는
+   * 그림자 하나와 빛 한 겹이다 — 판이 조용하면 이 둘도 가만히 있는다. */
+  --agent-graph-live-glow: 0 0 0 1px color-mix(in srgb, var(--signal-ready) 45%, transparent);
+  --agent-graph-live-lift: 0 2px 10px color-mix(in srgb, var(--signal-ready) 18%, transparent);
+  --agent-graph-live-dash: 6 10;
   --radius-pill: 999px;
   --agent-graph-tick-size: 9px;
   --agent-graph-tick-gap: 3px;
