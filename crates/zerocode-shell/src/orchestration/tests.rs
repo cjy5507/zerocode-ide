@@ -12788,6 +12788,13 @@ fn a_pane_at_its_wall_is_told_once_while_it_stands_and_once_when_it_lifts() {
     let _turn = one_beat_at_a_time();
     let team = format!("team-walled-{LEADER}");
     let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    // The worker sending the letters is a working agent: its pane's hook says
+    // a turn began, as a summoned worker's does, and the first beat retires
+    // its readiness window. Unheard, that window ran on the wall clock, and a
+    // body the machine's load stretched past its minute found the ledger's
+    // `never_spoke` news among the letters — 21 handed over where 20 were
+    // sent — in parallel runs only.
+    super::pane_turn_began(WORKER);
     let host = AtItsWall::new(LEADER, crate::quota_wall::StallCause::QuotaWall, false);
     let held = crate::agent_teams::current_pane_capability(&team, &pane)
         .expect("the split minted the worker a capability");
