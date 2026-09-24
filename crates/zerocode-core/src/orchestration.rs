@@ -11312,7 +11312,7 @@ impl Ledger {
     }
 
     /// The launch words the sleeper `worker_id` comes back with (t-7812):
-    /// [`kept_worker_tuning`], asked by the window's resume road so the pane
+    /// `kept_worker_tuning`'s, asked by the window's resume road so the pane
     /// it opens for a sleeper's conversation is the launch the ledger's own
     /// reseat would have cut. A read; nothing moves.
     pub fn sleeper_resume_tuning(&self, worker_id: &str) -> Result<Vec<String>, String> {
