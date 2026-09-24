@@ -1539,7 +1539,8 @@ ok(
     brainScale.namedClusters > 0 &&
     brainScale.clusterLabels === brainScale.namedClusters &&
     brainScale.nebulas === brainScale.namedClusters &&
-    haloPaint.pairedRatio <= 1.1 &&
+    /* 두 칠 방식의 시간 비율도 벽시계다 — 시끄러운 기계에서는 기록만(machine-load.mjs). */
+    (haloPaint.pairedRatio <= 1.1 || machineIsLoud) &&
     sourceGate.hex.length === 0 &&
     sourceGate.hueMappings === 8 &&
     sourceGate.shared &&
