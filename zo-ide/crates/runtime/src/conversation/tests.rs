@@ -710,10 +710,13 @@ fn the_hint_rides_after_the_cache_breakpoint_and_labels_the_turn_edits() {
         before.messages.as_slice(),
         "the hint only appends after the prior cacheable message prefix"
     );
+    // The note is persisted inside the reminder wrapper (`<system-reminder>`),
+    // so the prefix is read through it, the way the recall hint's test reads
+    // its own line — not off the block's first byte.
     assert!(after.messages.iter().any(|message| {
         message.role == MessageRole::System
             && message.blocks.iter().any(|block| {
-                matches!(block, ContentBlock::Text { text } if text.starts_with(crate::FILE_PICK_NOTE_PREFIX))
+                matches!(block, ContentBlock::Text { text } if text.contains(crate::FILE_PICK_NOTE_PREFIX))
             })
     }));
     assert_eq!(asked.lock().expect("the seat was asked").len(), 1);
