@@ -1163,7 +1163,7 @@ const TOOL_DETAIL_CHARS: usize = 16 * 1024;
 /// handed the line over, never by nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Detail {
-    /// At most [`TOOL_DETAIL_CHARS`] characters, and `…` where more stood.
+    /// At most `TOOL_DETAIL_CHARS` characters, and `…` where more stood.
     Clipped,
     /// Every character, for a reader that masks first and cuts after.
     Whole,
