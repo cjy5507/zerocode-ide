@@ -32,7 +32,7 @@ const SETS_ENV: &str = "ZO_TOOL_GUARD_REPLAY_SETS";
 const CALL_CAP: u32 = 300;
 
 /// The tool a text case's kind of source is handed back by.
-fn tool_of(source: &str) -> &'static str {
+pub(super) fn tool_of(source: &str) -> &'static str {
     match source {
         "web" => "WebFetch",
         "browser" => SHELL_TOOL,
@@ -72,21 +72,21 @@ fn tool_output(case: &Value, repo: &Path, scratch: &Path) -> String {
 
 /// One case, built: the question it puts and what is known of it before any
 /// answer — both tests read the same cases.
-struct Case {
-    set: &'static str,
-    id: String,
+pub(super) struct Case {
+    pub(super) set: &'static str,
+    pub(super) id: String,
     guard: &'static Guard,
-    state: Value,
+    pub(super) state: Value,
     questions: BTreeMap<String, SystemOneQuestion>,
     fingerprint: String,
     should_flag: bool,
     asked_in_production: bool,
-    rule_flags: bool,
+    pub(super) rule_flags: bool,
     /// The Nouls a case that should be flagged should reach the line on.
     expected: Vec<String>,
     /// A text case's tool output as it arrives, before the view the model
     /// reads — what the guard would send if it sent the envelope.
-    raw: Option<String>,
+    pub(super) raw: Option<String>,
 }
 
 /// One case, read.
@@ -401,7 +401,7 @@ fn the_guards_on_the_synthetic_cases() {
 /// Every case of the seed, built as the guards build them in production: the
 /// command guard's state from the command, its folder and its task line; the
 /// text guard's from what the tool would hand back.
-fn cases(seed: &Value, repo: &Path, scratch: &Path) -> Vec<Case> {
+pub(super) fn cases(seed: &Value, repo: &Path, scratch: &Path) -> Vec<Case> {
     let list = |kind: &str| seed[kind].as_array().cloned().unwrap_or_default();
     let mut built = Vec::new();
     for (set, should_flag) in [("irreversible", true), ("safe", false)] {
