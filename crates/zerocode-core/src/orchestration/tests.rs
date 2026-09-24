@@ -18635,6 +18635,42 @@ fn a_bench_with_mail(how_many: usize) -> Bench {
     bench
 }
 
+/// A refused `check --ack` retires nothing. The `--types` words are read
+/// before the acknowledgement, so a delivery named beside a kind nobody
+/// spelled is still the open batch the next `check` replays — read the other
+/// way round, the acknowledgement would stand in memory behind a refusal that
+/// carries no durable receipt, for the next durable write to persist
+/// (run-6774 F1).
+#[test]
+fn a_refused_ack_leaves_the_delivery_open() {
+    let mut bench = a_bench_with_mail(1);
+    let delivery = bench.json("check")["deliveryId"]
+        .as_str()
+        .expect("a lease")
+        .to_string();
+    let refused = bench.run(&format!("check --ack {delivery} --types not-a-kind"));
+    assert_ne!(
+        refused.reply.exit_code, 0,
+        "a kind nobody spelled refuses the command: {}",
+        refused.reply.stdout
+    );
+    assert!(
+        refused.receipt.is_none() && !refused.requires_durability,
+        "a refusal carries no receipt and asks for no durable write"
+    );
+    assert_eq!(
+        bench.json("check")["deliveryId"],
+        delivery,
+        "the refused command retired nothing — the batch is still the open one the replay hands back"
+    );
+    bench.json(&format!("check --ack {delivery}"));
+    assert_eq!(
+        bench.json("check")["count"],
+        0,
+        "and the acknowledgement that was not refused drains it"
+    );
+}
+
 /// The one check receipt this ledger holds, as its question.
 fn a_check_receipt(ledger: &Ledger) -> CheckV1 {
     ledger

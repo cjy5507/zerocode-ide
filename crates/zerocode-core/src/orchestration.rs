@@ -17616,15 +17616,21 @@ fn plan_inner(
                      nothing to time"
                     .to_string());
             }
-            let acked = words.value("--ack").is_some();
-            if let Some(delivery) = words.value("--ack") {
-                ledger.acknowledge(&run_id, &address, delivery)?;
-            }
+            // Every word is read before anything is written: a refused
+            // command changes nothing, and a `--types` nobody spelled
+            // refuses this one — read after the acknowledgement, it would
+            // leave a retired delivery in memory behind a refusal that
+            // carries no durable receipt, for the next durable write to
+            // persist (run-6774 F1).
             let kinds: Vec<MessageKind> = words
                 .list("--types")
                 .iter()
                 .map(|named| named.parse::<MessageKind>())
                 .collect::<Result<_, _>>()?;
+            let acked = words.value("--ack").is_some();
+            if let Some(delivery) = words.value("--ack") {
+                ledger.acknowledge(&run_id, &address, delivery)?;
+            }
             let (mut decided, empty) = if history {
                 (history_look(ledger, &run_id, &address, &kinds)?, false)
             } else if peeking {
