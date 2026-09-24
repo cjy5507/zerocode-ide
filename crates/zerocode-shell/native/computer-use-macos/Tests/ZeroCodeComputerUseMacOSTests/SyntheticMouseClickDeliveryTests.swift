@@ -320,4 +320,28 @@ final class SyntheticMouseClickDeliveryTests: XCTestCase {
         ))
         XCTAssertEqual(posted, [.move])
     }
+
+    /// The helper posts through its one hand, where a stop ends the fence at
+    /// once: the delivery stops there and posts nothing after the press — the
+    /// stop itself let go of it.
+    func testAStopInsideTheFenceEndsTheClickWithoutPostingAgain() {
+        struct Stopped: Error {}
+        let target = SyntheticMouseClickDelivery.Recipient(ownerPID: 41, windowID: 101)
+        var posted: [SyntheticMouseClickDelivery.Step] = []
+        var pauses = 0
+        XCTAssertThrowsError(try SyntheticMouseClickDelivery.deliver(
+            clickCount: 1,
+            target: target,
+            currentObservation: { .focused(target) },
+            makeEvent: { $0 },
+            post: { posted.append($0) },
+            pause: { _ in
+                pauses += 1
+                if pauses == 2 { throw Stopped() }
+            }
+        )) { error in
+            XCTAssertTrue(error is Stopped)
+        }
+        XCTAssertEqual(posted, [.move, .buttonDown(pressIndex: 1)])
+    }
 }

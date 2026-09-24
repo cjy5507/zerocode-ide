@@ -1,0 +1,327 @@
+import CoreGraphics
+import Darwin
+import Foundation
+import ZeroCodeComputerUseMacOSCore
+
+// MARK: - Hearing everyone else's input (realtime v1 Q4)
+
+/// Hears input for a reflex run: a listen-only session tap on its own thread
+/// and run loop. The hand's own events carry its tag; anything else pauses
+/// the run. It asks the system for nothing and prompts for nothing — without
+/// the grants it cannot hear, and says so; a tap that exists has still heard
+/// nothing until the hand's own echo comes back through it (`ReflexSession`).
+final class EventTapMonitor: ReflexInputMonitor, @unchecked Sendable {
+    /// Every kind of event a person's hand makes on a Mac.
+    private static let heardTypes: [CGEventType] = [
+        .mouseMoved, .leftMouseDown, .leftMouseUp, .leftMouseDragged,
+        .rightMouseDown, .rightMouseUp, .rightMouseDragged,
+        .otherMouseDown, .otherMouseUp, .otherMouseDragged,
+        .scrollWheel, .keyDown, .keyUp, .flagsChanged,
+    ]
+
+    private let lock = NSLock()
+    private let handTag: Int64
+    private let handPid = Int64(getpid())
+    private var tap: CFMachPort?
+    private var runLoop: CFRunLoop?
+    private var retained: Unmanaged<EventTapMonitor>?
+    private var heard: (@Sendable (InputOrigin) -> Void)?
+    private var interrupted: (@Sendable (String) -> Void)?
+
+    init(handTag: Int64) {
+        self.handTag = handTag
+    }
+
+    func start(heard: @escaping @Sendable (InputOrigin) -> Void, interrupted: @escaping @Sendable (String) -> Void) throws {
+        guard CGPreflightListenEventAccess() else {
+            throw ReflexRunError.monitorDeaf("Input Monitoring is not granted: a person's keys would go unheard")
+        }
+        guard CGPreflightPostEventAccess() else {
+            throw ReflexRunError.monitorDeaf("Accessibility is not granted: the hand cannot post its echo")
+        }
+        lock.lock()
+        self.heard = heard
+        self.interrupted = interrupted
+        lock.unlock()
+        let ready = DispatchSemaphore(value: 0)
+        Thread.detachNewThread { [self] in
+            let mask = Self.heardTypes.reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << CGEventMask($1.rawValue)) }
+            let keep = Unmanaged.passRetained(self)
+            guard let tap = CGEvent.tapCreate(
+                tap: .cgSessionEventTap,
+                place: .headInsertEventTap,
+                options: .listenOnly,
+                eventsOfInterest: mask,
+                callback: eventTapHeard,
+                userInfo: keep.toOpaque()
+            ) else {
+                keep.release()
+                ready.signal()
+                return
+            }
+            let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+            let loop = CFRunLoopGetCurrent()
+            CFRunLoopAddSource(loop, source, .commonModes)
+            CGEvent.tapEnable(tap: tap, enable: true)
+            lock.lock()
+            self.tap = tap
+            self.runLoop = loop
+            self.retained = keep
+            lock.unlock()
+            ready.signal()
+            CFRunLoopRun()
+        }
+        ready.wait()
+        lock.lock()
+        let made = tap != nil
+        lock.unlock()
+        if !made { throw ReflexRunError.monitorDeaf("the event tap could not be made") }
+    }
+
+    func stop() {
+        lock.lock()
+        let tap = self.tap
+        let loop = runLoop
+        let keep = retained
+        self.tap = nil
+        runLoop = nil
+        retained = nil
+        heard = nil
+        interrupted = nil
+        lock.unlock()
+        if let tap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+        }
+        if let loop { CFRunLoopStop(loop) }
+        keep?.release()
+    }
+
+    fileprivate func receive(_ type: CGEventType, _ event: CGEvent) {
+        lock.lock()
+        let heard = self.heard
+        let interrupted = self.interrupted
+        let tap = self.tap
+        lock.unlock()
+        switch type {
+        case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            if let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            interrupted?(type == .tapDisabledByTimeout ? "the system turned the tap off: timeout" : "the system turned the tap off: user input")
+        default:
+            heard?(InputOrigin.of(
+                userData: event.getIntegerValueField(.eventSourceUserData),
+                sourcePid: event.getIntegerValueField(.eventSourceUnixProcessID),
+                handTag: handTag,
+                handPid: handPid
+            ))
+        }
+    }
+}
+
+private func eventTapHeard(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, userInfo: UnsafeMutableRawPointer?) -> Unmanaged<CGEvent>? {
+    if let userInfo {
+        Unmanaged<EventTapMonitor>.fromOpaque(userInfo).takeUnretainedValue().receive(type, event)
+    }
+    return Unmanaged.passUnretained(event)
+}
+
+// MARK: - The helper's reflex runs (realtime v1 §6)
+
+/// One reflex run at a time, started by the window's control message with
+/// the plan and both tables it validated, answering status and stop outside
+/// the provider lock. The operator's stop ends a run as it ends everything.
+enum ReflexRuntimeHost {
+    private struct Run {
+        let session: ReflexSession
+        let reader: ReflexEyeReader
+    }
+
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var run: Run?
+    nonisolated(unsafe) private static var planEpochs: UInt64 = 0
+    /// The kernel that reads a plan's detectors (R5's `Perception/`). A helper
+    /// built without one refuses every run rather than acting on nothing.
+    nonisolated(unsafe) static var kernel: (any ReflexPerceptionKernel)?
+    /// The receipts one status read hands the window at most: the whole queue.
+    private static let unlimited = Int.max
+
+    /// Start a run: the helper validates the plan again under the tables the
+    /// window sent (never numbers of its own), holds the hand for the run,
+    /// reads the display at the table's rate and proves its monitor hears.
+    static func start(
+        runId: String,
+        plan planWire: Data,
+        limits limitsWire: Data,
+        perception perceptionWire: Data,
+        eye: EyeConfig,
+        display: Int,
+        hand: OperatorHand,
+        admit: @escaping @Sendable () -> GuardAdmission
+    ) throws -> [String: Any] {
+        let limits: ReflexLimits
+        let perception: PerceptionLimits
+        let plan: ValidatedReflexPlan
+        do {
+            limits = try ReflexContract.decodeLimits(limitsWire)
+            try ReflexTable.check(limits)
+        } catch {
+            throw ProviderError.coded("invalid_argument", "the reflex table is not the window's canonical table (\(error))")
+        }
+        do {
+            perception = try PerceptionSpecs.decodeLimits(perceptionWire)
+        } catch {
+            throw ProviderError.coded("invalid_argument", "the perception table is not the window's canonical table (\(error))")
+        }
+        do {
+            plan = try ReflexContract.decodeAndValidate(planWire, limits: limits, perception: perception)
+        } catch let error as ReflexContractError {
+            throw ProviderError.coded("invalid_argument", "the reflex plan was refused: \(error.rawValue)")
+        }
+        guard plan.plan.scope.surface == .macos_desktop else {
+            throw ProviderError.coded("unsupported_capability", "this helper runs macOS desktop plans, not \(plan.plan.scope.surface.rawValue)")
+        }
+        lock.lock()
+        let kernel = Self.kernel
+        let busy = run?.session.status.runId
+        if busy == nil { planEpochs += 1 }
+        let epoch = planEpochs
+        lock.unlock()
+        guard let kernel else {
+            throw ProviderError.coded("unsupported_capability", "this helper has no perception kernel for a reflex plan yet")
+        }
+        if let busy {
+            throw ProviderError.coded("hand_busy", "reflex run \(busy) holds the hand; stop it first (reflexStop)")
+        }
+        let reader = try ScreenEye.reader(runId, config: eye, displayIndex: display, framesPerSecond: Int(clamping: limits.frames_per_second))
+        let session = ReflexSession(
+            settings: ReflexSession.Settings(runId: runId, plan: plan, limits: limits, perception: perception, planEpoch: epoch),
+            hand: hand,
+            source: reader,
+            kernel: kernel,
+            monitor: EventTapMonitor(handTag: hand.tag),
+            admit: admit,
+            fenceNs: UInt64(SyntheticMouseClickDelivery.interEventPauseMicroseconds) * 1_000
+        )
+        do {
+            try session.start()
+        } catch {
+            reader.end()
+            throw providerError(error)
+        }
+        lock.lock()
+        run = Run(session: session, reader: reader)
+        lock.unlock()
+        return render(session.status, receipts: [])
+    }
+
+    /// Where the run stands, and the receipts it kept since the last read.
+    static func status() -> [String: Any] {
+        lock.lock()
+        let current = run
+        lock.unlock()
+        guard let current else { return ["state": "none"] }
+        return render(current.session.status, receipts: current.session.receipts.drain(limit: unlimited))
+    }
+
+    /// End the run: what the hand held is let go of on this thread, then the
+    /// eye gets its rate back.
+    static func stop(reason: String) -> [String: Any] {
+        lock.lock()
+        let current = run
+        run = nil
+        lock.unlock()
+        guard let current else { return ["state": "none"] }
+        current.session.stop(reason: reason)
+        let status = render(current.session.status, receipts: current.session.receipts.drain(limit: unlimited))
+        // Giving the rate back waits on ScreenCaptureKit; the release is done.
+        DispatchQueue.global(qos: .utility).async { current.reader.end() }
+        return status
+    }
+
+    /// The operator stopped (hotkey, signal, request): a run ends with it.
+    static func operatorStopped(reason: String) {
+        _ = stop(reason: reason)
+    }
+
+    static func handshake() -> [String: Any] {
+        lock.lock()
+        let kernel = Self.kernel != nil
+        lock.unlock()
+        return ["planVersion": Int(ReflexContract.version), "kernel": kernel]
+    }
+
+    private static func providerError(_ error: Error) -> Error {
+        switch error {
+        case let refusal as OperatorHand.Refusal:
+            return OperatorHandHost.providerError(refusal, acquiring: true)
+        case let ReflexRunError.monitorDeaf(reason):
+            return ProviderError.coded("monitor_unavailable", "a reflex run acts only while it can hear a person's input: \(reason)")
+        case let error as ReflexContractError:
+            return ProviderError.coded("unsupported_capability", "the plan cannot run here: \(error.rawValue)")
+        default:
+            return error
+        }
+    }
+
+    private static func render(_ status: ReflexSession.Status, receipts: [ReflexReceipt]) -> [String: Any] {
+        var state: String
+        var reason: Any = NSNull()
+        switch status.state {
+        case .starting: state = "starting"
+        case .running: state = "running"
+        case let .paused(why):
+            state = "paused"
+            reason = why
+        case let .stopped(why):
+            state = "stopped"
+            reason = why
+        }
+        let monitor: String
+        switch status.monitor {
+        case .unproven: monitor = "unproven"
+        case .hearing: monitor = "hearing"
+        case .interrupted: monitor = "interrupted"
+        case .unavailable: monitor = "unavailable"
+        }
+        return [
+            "runId": status.runId,
+            "state": state,
+            "reason": reason,
+            "planHash": status.planHash,
+            "planEpoch": status.planEpoch,
+            "framesEvaluated": status.framesEvaluated,
+            "framesUnread": status.framesUnread,
+            "inadmissible": status.inadmissible,
+            "fires": status.fires,
+            "leaves": status.leaves,
+            "receiptsPending": status.receiptsPending,
+            "actionsRefused": status.actionsRefused,
+            "lastCapture": status.lastCapture.map { $0 as Any } ?? NSNull(),
+            "lastCaptureAgeNs": status.lastCaptureAgeNs.map { $0 as Any } ?? NSNull(),
+            "monitor": monitor,
+            "echoes": status.echoes,
+            "othersHeard": status.othersHeard,
+            "receipts": receipts.map(render),
+        ]
+    }
+
+    private static func render(_ receipt: ReflexReceipt) -> [String: Any] {
+        func time(_ value: UInt64?) -> Any { value.map { $0 as Any } ?? NSNull() }
+        return [
+            "ruleId": receipt.ruleId,
+            "actionId": receipt.actionId,
+            "leafIndex": receipt.leafIndex,
+            "outcome": receipt.outcome.rawValue,
+            "targetId": receipt.targetId.map { $0 as Any } ?? NSNull(),
+            "sourceCapture": time(receipt.sourceCapture),
+            "decidedHostNs": time(receipt.decidedHostNs),
+            "admittedHostNs": time(receipt.admittedHostNs),
+            "captureWaitNs": receipt.captureWaitNs,
+            "firstEventHostNs": time(receipt.firstEventHostNs),
+            "downHostNs": time(receipt.downHostNs),
+            "upHostNs": time(receipt.upHostNs),
+            "endedHostNs": receipt.endedHostNs,
+            "events": receipt.events,
+        ]
+    }
+}
