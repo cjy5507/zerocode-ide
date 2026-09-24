@@ -1187,3 +1187,40 @@ fn the_routing_judge_reads_the_current_rubrics_series_and_stands_on_nothing_olde
     let verdict = super::super::decision_shadow::judge_ledger(&ledger, None, 9).expect("due on its own window");
     assert!(!matches!(verdict, Verdict::Keep | Verdict::Hold(Line::TooFewRows { .. })), "{verdict:?}");
 }
+
+/// The routing door reads a fence as the rows do (t-6877 round 2, astra
+/// R2): after the seat's own rise, a request line of newer words puts the
+/// seat behind its series however the key and its colon are spaced, and a
+/// line that is not such a request — a request spelling a fraction, a label
+/// spelling a newer version, a line torn before its value ends — does not,
+/// at `raised_at`, the one standing reader `acts_here` and
+/// `active_assessments` take.
+#[test]
+fn the_routing_door_reads_a_fence_as_the_rows_do() {
+    let work = tempfile::tempdir().expect("tmp");
+    let ledger = work.path().join(zerocode_core::jev::ROUTING.ledger);
+    let seat = &zerocode_core::jev::ROUTING;
+    let newer = seat.rubric_versions[0] + 1;
+    let lines: [(String, bool); 6] = [
+        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{newer}}}"#), false),
+        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion" :{newer}}}"#), false),
+        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{newer}.5}}"#), true),
+        (format!(r#"{{"at":2,"label":"orphan","attempt":"a@1","rubricVersion":{newer},"agreed":true}}"#), true),
+        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{newer}"#), true),
+        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{}}}"#, seat.rubric_versions[0]), true),
+    ];
+    for (line, raised) in lines {
+        fs::write(&ledger, format!("{}\n{line}\n", rise_of(seat, 1))).expect("write");
+        assert_eq!(
+            super::super::decision_shadow::raised_at(&ledger),
+            raised,
+            "the text after the rise: {line}"
+        );
+        let rows = read_rows(&ledger);
+        assert_eq!(
+            promote::standing(seat, &rows) == promote::Stand::Applying,
+            raised,
+            "the rows disagree with the text on {line}"
+        );
+    }
+}

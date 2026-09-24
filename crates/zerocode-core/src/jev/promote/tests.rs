@@ -1907,3 +1907,253 @@ fn a_malformed_rubric_is_nobodys_evidence_and_an_empty_ledger_records() {
 fn text_of(rows: &[Value]) -> String {
     rows.iter().map(|row| format!("{row}\n")).collect()
 }
+
+/* ---- a label is one request's, and inherits everything from it (t-6877 round 2) ---- */
+
+/// A late label of a request an older version answered is that version's
+/// comparison and not the newer one's (t-6877 round 2, astra R1a): the
+/// guard's version 2 asked once under model A and once under model B, and
+/// a label naming A's request arrives after B's — carrying no model of its
+/// own, as the guard's labels never do. The label's version is its
+/// request's: it joins none of B's comparisons, and it cuts none of B's
+/// marks away either.
+#[test]
+fn a_late_label_of_an_older_answering_version_is_that_versions_and_not_the_newer_ones() {
+    let seat = guard();
+    let rows = vec![
+        guard_request(1, 11, 2, Some("jev-1.12.0"), "answered"),
+        guard_request(2, 22, 2, Some(ANSWERING), "answered"),
+        guard_label(3, 11, true),
+    ];
+    let version = on_the_newest_version(seat, &rows);
+    assert_eq!(
+        (version.model, version.cut, version.asked()),
+        (Some(ANSWERING), Some("jev-1.12.0"), 1),
+        "B answers now, A is where the requests were cut"
+    );
+    assert!(
+        version.marks.iter().all(|row| LABEL.read(row).is_none()),
+        "A's late label is not among B's marks: {:?}",
+        version.marks
+    );
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(
+        judged.agreement.compared, 0,
+        "a label of A's request is not a comparison of B's: {judged:?}"
+    );
+    // B's own label, written after A's late one, is B's comparison — the
+    // late label of the other version cut nothing.
+    let mut graded = rows;
+    graded.push(guard_label(4, 22, true));
+    let judged = judge_seat(seat, &graded).expect("judged");
+    assert_eq!(
+        (judged.agreement.compared, judged.agreement.agreed),
+        (1, 1),
+        "{judged:?}"
+    );
+}
+
+/// A label grades one asking of a name and guesses none (t-6877 round 2,
+/// astra R1b): a name a request carries can be asked twice — the recall and
+/// mention seats name a request by the fingerprints of what was asked — so
+/// a label names the time of the asking it grades ([`REQUEST_AT`]), and a
+/// label that names none joins a name only while exactly one request above
+/// it carries the name. Version 1 asked `5`, then version 2 asked `5`: the
+/// label with no time could mean either and grades neither; the label
+/// naming version 1's time is version 1's and not in version 2's series;
+/// the label naming version 2's time is version 2's one comparison. A label
+/// naming a time no request above it was asked at — its request trimmed
+/// away — grades nothing, whatever request of the same name remains; and a
+/// label of a name asked once joins it as it always did.
+#[test]
+fn a_label_grades_one_asking_of_a_name_and_guesses_none() {
+    use serde_json::json;
+    let seat = guard();
+    let at = |mut label: Value, when: u64| {
+        label["requestAt"] = json!(when);
+        label
+    };
+    let rows = vec![
+        guard_request(10, 5, 1, Some(ANSWERING), "answered"),
+        guard_request(20, 5, 2, Some(ANSWERING), "answered"),
+        guard_label(30, 5, true),
+        at(guard_label(31, 5, true), 10),
+        at(guard_label(32, 5, false), 20),
+        guard_request(40, 9, 2, Some(ANSWERING), "answered"),
+        at(guard_label(41, 9, true), 35),
+        guard_request(50, 7, 2, Some(ANSWERING), "answered"),
+        guard_label(51, 7, true),
+    ];
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(
+        (judged.agreement.compared, judged.agreement.agreed),
+        (2, 1),
+        "version 2's `5` once, by the label naming its time, and `7` once: {judged:?}"
+    );
+    // A time that is not a time names no request.
+    let mut spelled = rows;
+    spelled.push(at(guard_label(52, 7, false), 50));
+    let mut wrong = guard_label(53, 7, false);
+    wrong["requestAt"] = json!("50");
+    spelled.push(wrong);
+    let judged = judge_seat(seat, &spelled).expect("judged");
+    assert_eq!(
+        (judged.agreement.compared, judged.agreement.agreed),
+        (2, 0),
+        "`7` by its newest well-formed label; the misspelled time grades nothing: {judged:?}"
+    );
+}
+
+/// The text reader and the row reader agree on what fences a series
+/// (t-6877 round 2, astra R2): a request of newer words fences the seat
+/// behind it, and nothing else does — not a label spelling a newer version,
+/// not a request spelling a fraction, a word or a null, not a line torn
+/// before its value ends — however the key and its colon are spaced, and
+/// wherever a key of the same spelling sits inside a value. Read off the
+/// rows and off the text, each line kind, on a seat asking version 1 and
+/// one asking version 2.
+#[test]
+fn the_text_reader_and_the_row_reader_agree_on_what_fences_a_series() {
+    use serde_json::json;
+    let first = &crate::jev::PLACEMENT;
+    let second = guard();
+    // (a line as a writer or a hand spelled it, whether it fences a seat
+    // asking version 1, whether it fences one asking version 2)
+    let lines: [(&str, bool, bool); 10] = [
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion":2}"#,
+            true,
+            false,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion" :2}"#,
+            true,
+            false,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion": 2 }"#,
+            true,
+            false,
+        ),
+        (
+            r#"{"at":2,"outcome":"control","rubricVersion":3}"#,
+            true,
+            true,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion":2.5}"#,
+            false,
+            false,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion":null}"#,
+            false,
+            false,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion":"3"}"#,
+            false,
+            false,
+        ),
+        (
+            r#"{"at":2,"label":"orphan","rubricVersion":3,"agreed":true}"#,
+            false,
+            false,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","asked":{"rubricVersion":3},"note":"\"rubricVersion\": 9"}"#,
+            false,
+            false,
+        ),
+        (
+            r#"{"at":2,"outcome":"answered","rubricVersion":3"#,
+            false,
+            false,
+        ),
+    ];
+    for (line, fences_first, fences_second) in lines {
+        for (seat, fences) in [(first, fences_first), (second, fences_second)] {
+            let text = format!(
+                "{}\n{line}\n",
+                json!({"at": 1, (TRANSITION.canonical): ROSE, "rubricVersions": [seat.rubric_versions[0]]})
+            );
+            let rows: Vec<Value> = text
+                .lines()
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect();
+            let expected = if fences {
+                Stand::Recording
+            } else {
+                Stand::Applying
+            };
+            assert_eq!(
+                standing(seat, &rows),
+                expected,
+                "{}: the rows, on {line}",
+                seat.id
+            );
+            assert_eq!(
+                standing_in(seat, &text),
+                expected,
+                "{}: the text, on {line}",
+                seat.id
+            );
+        }
+    }
+}
+
+/// A label that names no request grades nothing (t-6877 round 2, astra
+/// R3): zo's step seat writes its progress mark naming the judgment it
+/// grades — the turn's attempt and the step the judgment was asked at — and
+/// a mark naming none, as every mark written before it named one, is not
+/// read as the nearest judgment's. The reader guesses no request.
+#[test]
+fn a_label_that_names_no_request_grades_nothing() {
+    use serde_json::json;
+    let seat = &crate::jev::ZO_STEP_EFFORT;
+    let judgment = json!({
+        "kind": "judgment", "at": 10, "attempt": "s@1", "step": 3, "outcome": "answered",
+        "elapsedMs": 5, "requests": 1, "model": ANSWERING,
+    });
+    let unnamed = json!({"kind": "label", "at": 11, "attempt": "s@1", "step": 4, "agreed": true});
+    let judged = judge_seat(seat, &[judgment.clone(), unnamed]).expect("judged");
+    assert_eq!(
+        judged.agreement.compared, 0,
+        "a mark naming no judgment grades none: {judged:?}"
+    );
+    let named = json!({"kind": "label", "at": 11, "label": "s@1:3", "attempt": "s@1", "step": 4, "agreed": true});
+    let judged = judge_seat(seat, &[judgment, named]).expect("judged");
+    assert_eq!(
+        (judged.agreement.compared, judged.agreement.agreed),
+        (1, 1),
+        "a mark naming its judgment is its comparison: {judged:?}"
+    );
+}
+
+/// The skills seat is one question (t-6877 round 2, astra R3): the search's
+/// row asks the search's words alone, and a suggestion's request — the
+/// other rubric, once written into the same ledger — is not one of its
+/// requests and fences nothing of the search's own asked since. A ledger
+/// the two questions were written into before they were two seats reads as
+/// the search's series from the last suggestion row on.
+#[test]
+fn the_skills_seat_asks_one_question_and_a_mixed_ledger_reads_as_its_own_series() {
+    use serde_json::json;
+    let seat = &crate::jev::SKILLS;
+    let asked = |at: usize, rubric: u32| json!({"at": at, "task": at, "catalog": 1, "rubricVersion": rubric, "outcome": "answered", "elapsedMs": 5, "requests": 1});
+    let mut rows: Vec<Value> = (0..20)
+        .map(|at| asked(at, crate::jev::questions::SKILL_SEARCH_RUBRIC_VERSION))
+        .collect();
+    rows.extend(
+        (20..40).map(|at| asked(at, crate::jev::questions::SKILL_SUGGESTION_RUBRIC_VERSION)),
+    );
+    rows.extend((40..43).map(|at| asked(at, crate::jev::questions::SKILL_SEARCH_RUBRIC_VERSION)));
+    let version = on_the_newest_version(seat, &rows);
+    assert_eq!(
+        version.asked(),
+        3,
+        "the search's requests since the last suggestion row, and none of the suggestion's"
+    );
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(judged.window.rows, 3, "{judged:?}");
+}

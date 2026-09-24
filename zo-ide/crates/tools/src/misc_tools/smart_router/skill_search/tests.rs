@@ -474,3 +474,87 @@ fn skill_search_request_cost() {
             * 300.0 * 0.042 / 1_000_000.0
     );
 }
+
+/* ---- two seats, two ledgers, two standings (t-6877 round 2) ------------------ */
+
+/// A skills request row as either seat's writer files it, reduced to what
+/// the judge reads: its name (the task and catalog fingerprints), its
+/// rubric, the version that answered, and its outcome.
+fn skills_request(at: u64, task: u64, rubric: u32) -> Value {
+    json!({
+        "at": at, "task": task, "catalog": 1, "rubricVersion": rubric, "outcome": SKILL_OUTCOME_ANSWERED,
+        "elapsedMs": 400, "requests": 1, "model": "jev-1.13.0",
+    })
+}
+
+/// A full window answered under `rubric`, then the marks that clear every
+/// line of the seat, each naming a request of the window and the time it
+/// was asked, as `label_row` names them.
+fn skills_window_that_rises(seat: &zerocode_core::jev::JevUse, rubric: u32, first: u64, at: u64) -> Vec<Value> {
+    use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for};
+    let wanted = u64::try_from(window_wanted_for(seat).expect("the seat rises")).expect("small");
+    let misses = u64::try_from(seat.negatives_wanted.expect("negatives")).expect("small");
+    let marks = u64::try_from(marks_that_can_clear(seat).expect("a width")).expect("small");
+    let mut rows: Vec<Value> = (0..wanted).map(|n| skills_request(at + n, first + n, rubric)).collect();
+    rows.extend((0..marks).map(|n| {
+        json!({
+            "at": at + wanted + n, "label": format!("{}:1", first + n), "requestAt": at + n, "loaded": "docx",
+            "agreed": n >= misses, "baselineAgreed": n % 2 == 0,
+        })
+    }));
+    rows
+}
+
+fn ledger_with(path: &Path, rows: &[Value]) {
+    for row in rows {
+        append_shadow_row(path, row, SHADOW_LEDGER_MAX_BYTES).expect("a row");
+    }
+}
+
+/// A rise decided on two questions at once stands for neither (t-6877
+/// round 2, astra R3): the search's ledger holds the search's full window
+/// and marks and the rise the judge wrote while the skills seat asked two
+/// rubrics into one ledger — naming both. The search's cached `auto`, read
+/// where the tool result and the prompt's index road read it, does not
+/// act on it; a rise naming the search's own words alone does.
+#[test]
+fn a_rise_decided_on_two_questions_stands_for_neither() {
+    use zerocode_core::jev::promote::ROSE;
+    use zerocode_core::jev::summary::TRANSITION;
+    let root = tempfile::tempdir().expect("a temp root");
+    let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 temp root"));
+    let cwd = root.path().canonicalize().expect("a canonical root");
+    let mut rows = skills_window_that_rises(&SKILLS, zerocode_core::jev::questions::SKILL_SEARCH_RUBRIC_VERSION, 1, 0);
+    rows.push(json!({"at": 5_000, (TRANSITION.canonical): ROSE, "rubricVersions": [
+        zerocode_core::jev::questions::SKILL_SEARCH_RUBRIC_VERSION,
+        zerocode_core::jev::questions::SKILL_SUGGESTION_RUBRIC_VERSION,
+    ]}));
+    let ledger = skill_search_path(&cwd);
+    ledger_with(&ledger, &rows);
+    assert!(
+        !runtime::jev_seat_applies(&cwd, &SKILLS),
+        "a rise decided on the search's and the suggestion's words together is not the search's"
+    );
+    append_shadow_row(
+        &ledger,
+        &json!({"at": 6_000, (TRANSITION.canonical): ROSE, "rubricVersions": [zerocode_core::jev::questions::SKILL_SEARCH_RUBRIC_VERSION]}),
+        SHADOW_LEDGER_MAX_BYTES,
+    )
+    .expect("a rise");
+    assert!(runtime::jev_seat_applies(&cwd, &SKILLS), "a rise naming the search's words alone stands");
+}
+
+/// The search's ledger the two questions were written into before they
+/// were two seats reads as the search's series from the last suggestion
+/// row on (t-6877 round 2): the suggestion's rows are not the search's
+/// requests, and the search's requests asked since are its window.
+#[test]
+fn a_legacy_mixed_ledger_reads_as_the_searchs_series_after_the_last_suggestion_row() {
+    use zerocode_core::jev::promote::{judge_seat, on_the_newest_version, Line, Verdict};
+    let mut rows: Vec<Value> = (0..20).map(|n| skills_request(n, n, zerocode_core::jev::questions::SKILL_SEARCH_RUBRIC_VERSION)).collect();
+    rows.extend((20..40).map(|n| skills_request(n, n, zerocode_core::jev::questions::SKILL_SUGGESTION_RUBRIC_VERSION)));
+    rows.extend((40..43).map(|n| skills_request(n, n, zerocode_core::jev::questions::SKILL_SEARCH_RUBRIC_VERSION)));
+    assert_eq!(on_the_newest_version(&SKILLS, &rows).asked(), 3, "the search's requests since the last suggestion row");
+    let judged = judge_seat(&SKILLS, &rows).expect("judged");
+    assert!(matches!(judged.verdict, Verdict::Hold(Line::TooFewRows { rows: 3, .. })), "{judged:?}");
+}

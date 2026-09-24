@@ -856,3 +856,37 @@ fn what_a_full_ledger_costs_the_guards_judge_and_standing() {
         );
     });
 }
+
+/// A late label of a request an older version answered is not the newer
+/// version's comparison at the guard's judge (t-6877 round 2, astra R1a):
+/// version 2's window answered by one model, then the same window again
+/// answered by the next, then the forty marks of the FIRST window's
+/// requests arriving late — carrying no model, as the guard's labels never
+/// do. The judge is due on the second model's count and holds with nothing
+/// compared: the late marks grade the first model's requests, and the
+/// first model's rise is not written on them.
+#[test]
+fn a_late_label_of_the_older_model_does_not_rise_the_newer_one() {
+    use zerocode_core::jev::promote::{marks_that_can_clear, window_wanted_for, Line, Verdict};
+    machine(&TOOL_TEXT_GUARD, JevMode::Auto.key(), "http://127.0.0.1:9", |cwd| {
+        let wanted = u64::try_from(window_wanted_for(&TOOL_TEXT_GUARD).expect("the guard rises")).expect("small");
+        let misses = u64::try_from(TOOL_TEXT_GUARD.negatives_wanted.expect("negatives")).expect("small");
+        let marks = u64::try_from(marks_that_can_clear(&TOOL_TEXT_GUARD).expect("a width")).expect("small");
+        let mut rows: Vec<Value> =
+            (0..wanted).map(|n| guard_request(n, 1 + n, 2, Some("jev-1.12.0"), TOOL_GUARD_OUTCOME_ANSWERED)).collect();
+        rows.extend((0..wanted).map(|n| guard_request(1_000 + n, 1_000 + n, 2, Some(ANSWERING), TOOL_GUARD_OUTCOME_ANSWERED)));
+        rows.extend((0..marks).map(|n| guard_label(5_000 + n, 1 + n, n >= misses)));
+        let ledger = guard_ledger_with(cwd, &rows);
+        let verdict = super::super::shadow_ledger::judge_seat_ledger(&TOOL_TEXT_GUARD, &ledger, 99_999);
+        assert_eq!(
+            verdict,
+            Some(Verdict::Hold(Line::TooFewCompared {
+                compared: 0,
+                wanted: TOOL_TEXT_GUARD.agreement_rows_wanted.expect("a sample floor")
+            })),
+            "the late marks grade the older model's requests"
+        );
+        assert!(transitions_in(&ledger).is_empty(), "no rise was written on them");
+        assert!(!runtime::jev_seat_applies(cwd, &TOOL_TEXT_GUARD));
+    });
+}
