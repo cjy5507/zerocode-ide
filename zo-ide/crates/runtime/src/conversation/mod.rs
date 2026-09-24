@@ -613,6 +613,11 @@ fn user_prompt_submit_denial_message(reason: Option<&str>) -> String {
 
 
 /// Coordinates the model loop, tool execution, hooks, and session updates.
+struct FilePickPendingTurn {
+    attempt: String,
+    message_count_before: usize,
+}
+
 #[allow(clippy::struct_excessive_bools)] // each bool is an independent feature gate threaded from settings, not a state machine
 pub struct ConversationRuntime<C, T> {
     session: Session,
@@ -696,6 +701,11 @@ pub struct ConversationRuntime<C, T> {
     /// of the patch before the model reads the result. See
     /// [`crate::PatchReviewSeat`].
     patch_review_seat: Option<Arc<dyn crate::PatchReviewSeat>>,
+    /// Seated at the public turn boundary to rank candidate files. The row
+    /// only shows a hint when its mode acts; otherwise the seat records it.
+    file_pick_seat: Option<Arc<dyn crate::FilePickSeat>>,
+    /// The start-of-turn reading awaiting its actual edited-file label.
+    file_pick_pending_turn: Option<FilePickPendingTurn>,
     max_iterations: usize,
     /// Optional wall-clock deadline for the turn. Two callers set it: spawned
     /// sub-agents bound a straggler that overran its caller's wait window, and
@@ -1689,6 +1699,8 @@ where
             recall_seat: None,
             compaction_seat: None,
             patch_review_seat: None,
+            file_pick_seat: None,
+            file_pick_pending_turn: None,
             max_iterations: default_max_iterations(),
             deadline: None,
             deadline_extension: None,
@@ -1854,6 +1866,60 @@ where
         PromptSubmitDecision::Proceed
     }
 
+    /// Ask the installed file-pick seat at the one public turn boundary. A
+    /// recording mode returns without waiting; an acting mode may give the
+    /// agent one line to consider before the request is sent.
+    fn inject_file_pick_hint(&mut self, user_input: &str) {
+        self.finish_file_pick_turn();
+        self.replace_transient_system_reminder_by_prefix(
+            crate::FILE_PICK_NOTE_PREFIX,
+            None,
+        );
+        if !crate::file_pick::is_code_edit_intent(user_input) {
+            return;
+        }
+        let Some(seat) = self.file_pick_seat.as_ref().map(Arc::clone) else {
+            return;
+        };
+        let attempt = self.next_attempt();
+        let ask = crate::FilePickAsk {
+            attempt: attempt.clone(),
+            session_id: self.session.session_id.clone(),
+            request: user_input.to_string(),
+        };
+        let hint = ::api::sync_bridge::run_blocking(seat.suggest(ask));
+        if let Some(hint) = hint {
+            self.replace_transient_system_reminder_by_prefix(
+                crate::FILE_PICK_NOTE_PREFIX,
+                Some(&hint.text),
+            );
+        }
+        self.file_pick_pending_turn = Some(FilePickPendingTurn {
+            attempt,
+            message_count_before: self.session.messages.len(),
+        });
+    }
+
+    /// Label a settled public turn with only the paths its edit results say it
+    /// changed. No edit means there is no file-match comparison to record.
+    pub(super) fn finish_file_pick_turn(&mut self) {
+        let Some(pending) = self.file_pick_pending_turn.take() else {
+            return;
+        };
+        let Some(seat) = self.file_pick_seat.as_ref() else {
+            return;
+        };
+        let Some(turn) = self.session.messages.get(pending.message_count_before..) else {
+            return;
+        };
+        let edited_paths = crate::edited_file_paths(turn);
+        seat.label(
+            &pending.attempt,
+            &edited_paths,
+            crate::file_pick::search_calls_before_first_edit(turn),
+        );
+    }
+
     /// Run the streaming user-entry lifecycle policy without recording telemetry
     /// or pushing a user message. Deep-mode orchestration calls this once for the
     /// outer, user-submitted prompt before its program-generated internal subturns;
@@ -1880,6 +1946,7 @@ where
                 // covers the whole streaming dispatcher.
                 self.inject_verified_state_reminder();
                 self.install_turn_budget_continuation_reminder();
+                self.inject_file_pick_hint(user_input);
                 Ok(())
             }
             PromptSubmitDecision::Denied { reason } => Err(StreamingTurnError::runtime(

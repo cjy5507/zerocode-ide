@@ -47,6 +47,11 @@ pub use smart_router::{
     PATCH_REVIEW_FILE, PATCH_REVIEW_OUTCOME_ANSWERED,
 };
 pub use smart_router::{
+    file_pick_path, jev_file_pick_mode_from, note_file_pick_turn, FilePickJudge,
+    FilePickLabelRow, FilePickRow, JEV_FILE_PICK_SETTING, FILE_PICK_FILE,
+    FILE_PICK_OUTCOME_ANSWERED,
+};
+pub use smart_router::{
     compaction_relevance_path, jev_compaction_mode_from, note_compaction_reread, CompactionJudge,
     CompactionLabelRow, CompactionRow, COMPACTION_JUDGMENT_DEADLINE, COMPACTION_OUTCOME_ANSWERED,
     COMPACTION_RELEVANCE_FILE, JEV_COMPACTION_SETTING,

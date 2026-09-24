@@ -534,6 +534,7 @@ fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
             PATCH_REVIEW.id,
             CLAIM.id,
             VAULT_PAIRS.id,
+            FILE_PICK.id,
         ]
     );
     for row in JEV_USES.iter().filter(|row| row.promotes) {
@@ -1419,7 +1420,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 22);
+    assert_eq!(JEV_USES.len(), 23);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1666,9 +1667,10 @@ fn the_patch_review_seat_sends_a_patch_and_its_evidence_and_rises_on_hindsight()
             .applies_with(true)
     );
     assert_eq!(PATCH_REVIEW.mode_in(&json!({})), JevMode::Off);
-    // The patch review remains before claim and the vault-pair seat.
-    assert_eq!(JEV_USES[JEV_USES.len() - 3], PATCH_REVIEW);
-    assert_eq!(JEV_USES[JEV_USES.len() - 4], CHALLENGER);
+    // The patch review remains before claim, the vault-pair seat and the
+    // file-pick seat.
+    assert_eq!(JEV_USES[JEV_USES.len() - 4], PATCH_REVIEW);
+    assert_eq!(JEV_USES[JEV_USES.len() - 5], CHALLENGER);
 }
 
 #[test]
@@ -1688,6 +1690,43 @@ fn vault_pairs_are_recorded_for_review_without_automatic_promotion() {
 }
 
 #[test]
+fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
+    use crate::jev::{FILE_PICK, FILE_PICK_ANSWER_FLOOR_PERMILLE, FILE_PICK_MATCH_FLOOR_PERMILLE};
+
+    assert_eq!(jev_use("file_pick"), Some(&FILE_PICK));
+    assert_eq!(FILE_PICK.setting, "jevFilePick");
+    assert_eq!(FILE_PICK.ledger, "file-pick.jsonl");
+    assert_eq!(FILE_PICK.recommended, JevMode::Auto);
+    assert!(FILE_PICK.promotes);
+    assert_eq!(FILE_PICK.repeat, None);
+    assert_eq!(FILE_PICK.baseline, Baseline::TodaysRule);
+    assert_eq!(FILE_PICK.negatives_wanted, Some(NEGATIVES_WANTED));
+    assert_eq!(
+        FILE_PICK.answer_floor_permille,
+        Some(FILE_PICK_ANSWER_FLOOR_PERMILLE)
+    );
+    assert_eq!(FILE_PICK.agreement_floor_permille, Some(600));
+    assert_eq!(
+        FILE_PICK.confidence_bands,
+        Some(ConfidenceBands::on_a_noul(
+            700,
+            FILE_PICK_MATCH_FLOOR_PERMILLE
+        ))
+    );
+    assert_eq!(FILE_PICK.sends.len(), 4);
+    assert_eq!(FILE_PICK.sends[0].at, "/state/request");
+    assert_eq!(FILE_PICK.sends[0].cap, Cap::Chars(2_000));
+    assert_eq!(FILE_PICK.sends[1].at, "/state/files");
+    assert_eq!(FILE_PICK.sends[1].cap, Cap::Items(30));
+    assert_eq!(FILE_PICK.sends[2].at, "/state/files/*/path");
+    assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
+    assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
+    assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
+    assert_eq!(JEV_USES.len(), 23);
+    assert_eq!(JEV_USES.last(), Some(&FILE_PICK));
+}
+
+#[test]
 fn completion_claims_are_a_recording_hindsight_seat_with_bounded_evidence() {
     assert_eq!(jev_use("claim"), Some(&CLAIM));
     assert_eq!(CLAIM.setting, "jevClaimCheck");
@@ -1699,7 +1738,7 @@ fn completion_claims_are_a_recording_hindsight_seat_with_bounded_evidence() {
     assert_eq!(CLAIM.sends[0].cap, Cap::Items(CLAIM_LIMIT));
     assert_eq!(CLAIM.sends[1].cap, Cap::Chars(CLAIM_TEXT_CHAR_CAP));
     assert_eq!(CLAIM.sends[2].cap, Cap::Bytes(CLAIM_EVIDENCE_BYTE_CAP));
-    assert_eq!(JEV_USES.get(JEV_USES.len() - 2), Some(&CLAIM));
+    assert_eq!(JEV_USES.get(JEV_USES.len() - 3), Some(&CLAIM));
 }
 
 /// A request's receipt is the whole SHA-256 of the seat, the rubric version,

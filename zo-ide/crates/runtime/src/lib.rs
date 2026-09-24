@@ -16,6 +16,7 @@ mod conversation;
 pub use conversation::claim_check;
 mod convert_messages;
 pub mod file_neighbours;
+pub mod file_pick;
 pub mod file_ops;
 pub mod file_read_registry;
 pub mod file_search;
@@ -104,6 +105,7 @@ pub fn low_disk_warning(dir: &std::path::Path) -> Option<String> {
 pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use compact::relevance as compaction_relevance;
 pub use patch_review::{PatchAsk, PatchReview, PatchReviewSeat, PATCH_REVIEW_RUBRIC_VERSION};
+pub use file_pick::{FilePickAsk, FilePickHint, FilePickSeat, FILE_PICK_NOTE_PREFIX};
 pub use compact::relevance::{
     BlockHead, CompactionAsk, CompactionJudgment, CompactionSeat, COMPACTION_RUBRIC_VERSION,
 };
