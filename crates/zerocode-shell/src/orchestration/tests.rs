@@ -1421,6 +1421,7 @@ fn the_switch_scans_cursor_moves_only_past_what_the_ledger_holds() {
             &binding,
             nowhere,
             at(700),
+            0,
             waiting(longer, 12_000),
             &mut listed
         ),
@@ -3527,6 +3528,157 @@ fn records_behind_a_hook_that_stays_working_are_told_and_planned_each_on_its_own
     );
 }
 
+/// Behind a hook that never stops saying `working`, a record ends a worker
+/// only as it would behind a hook at rest (t-7153, R4): under the exact
+/// order the run declares, on the record the pane stands at when the stop
+/// is committed, and never past the handover's own refusals. A plan whose
+/// record the pane no longer stands at by its last boundary ends nobody,
+/// and the record it stands at then is told and walked once; an order
+/// withdrawn after the dialog's notice walks nothing, its record told on
+/// the notify rung; a pane the person took is told nothing more and walked
+/// nowhere; and past the table's ceiling a record is news only. The hook
+/// stays `working` and the pty silent on every road: nothing here is the
+/// quiet sweep's.
+#[test]
+fn behind_a_working_hook_the_handovers_own_refusals_hold() {
+    const MINUTE: i64 = 60_000;
+    const ORDER: &str = "--on-classifier-decline claude:claude-opus-4-8";
+    let told = |stood: &Walled, at: i64| stood.json("check --peek --types classifier_declined", at);
+    let done = |stood: &Walled, at: i64| -> Vec<serde_json::Value> {
+        stood
+            .receipts(at)
+            .into_iter()
+            .filter(|receipt| receipt["status"] == "done")
+            .collect()
+    };
+    let paused = |leader_term: u32| {
+        let stood = Walled::stand_paused(leader_term, "/tmp", ORDER);
+        stood.host.pty_silent_for(11 * MINUTE);
+        tick(&stood.host, &[], stood.began + 20_000);
+        assert_eq!(told(&stood, stood.began + 20_001)["count"], 1);
+        assert!(stood.receipts(stood.began + 20_001).is_empty());
+        stood
+    };
+
+    // An old plan: by the stop's fence the pane stands at another record.
+    let stood = paused(86_400);
+    stood
+        .host
+        .declined(86_401, a_printed_decline(Some("cyber"), "decline-record-1"));
+    stood
+        .host
+        .read_at_the_fence(Some(a_printed_decline(Some("cyber"), "decline-record-2")));
+    tick(&stood.host, &[], stood.began + 30_000);
+    assert!(*stood.host.busy.lock().unwrap());
+    assert_eq!(told(&stood, stood.began + 30_001)["count"], 2);
+    assert!(
+        done(&stood, stood.began + 30_001).is_empty(),
+        "an old plan ended the worker"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    assert!(stood.host.closed.lock().unwrap().is_empty());
+    assert_eq!(
+        the_rows()
+            .dispatches
+            .iter()
+            .filter(|one| one.task == stood.task)
+            .count(),
+        1,
+        "an old plan opened a replacement attempt"
+    );
+    stood
+        .host
+        .declined(86_401, a_printed_decline(Some("cyber"), "decline-record-2"));
+    stood.host.read_at_the_fence(None);
+    tick(&stood.host, &[], stood.began + 40_000);
+    assert_eq!(told(&stood, stood.began + 40_001)["count"], 3);
+    let walked = done(&stood, stood.began + 40_001);
+    assert_eq!(walked.len(), 1, "{walked:?}");
+    assert_eq!(walked[0]["recordKey"], "decline-record-2", "{}", walked[0]);
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    drop(stood);
+
+    // An order withdrawn after the dialog's notice.
+    let stood = paused(86_500);
+    stood.json("handover-policy --off", stood.began + 21_000);
+    stood
+        .host
+        .declined(86_501, a_printed_decline(Some("cyber"), "decline-record-1"));
+    tick(&stood.host, &[], stood.began + 30_000);
+    let news = told(&stood, stood.began + 30_001);
+    assert_eq!(news["count"], 2, "{news}");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][1]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["record"]["key"], "decline-record-1", "{body}");
+    assert_eq!(body["rung"], "notify", "{body}");
+    assert!(
+        stood.receipts(stood.began + 30_001).is_empty(),
+        "a withdrawn order walked"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    drop(stood);
+
+    // A pane the person took after the dialog's notice.
+    let stood = paused(86_600);
+    super::pane_taken_over(86_601, stood.began + 21_000);
+    stood
+        .host
+        .declined(86_601, a_printed_decline(Some("cyber"), "decline-record-1"));
+    tick(&stood.host, &[], stood.began + 30_000);
+    assert_eq!(
+        told(&stood, stood.began + 30_001)["count"],
+        1,
+        "a pane the person took was told about"
+    );
+    assert!(
+        stood.receipts(stood.began + 30_001).is_empty(),
+        "a pane the person took was walked"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    drop(stood);
+
+    // The table's ceiling: the task walked as often as it may, and the
+    // record its last worker stands at is news only.
+    let stood = paused(86_700);
+    let mut worker = stood.worker.clone();
+    for walk in 1..=zerocode_core::orchestration::QUOTA_POLICY.handover_max {
+        let term = 86_700 + u32::try_from(walk).expect("small");
+        let at = stood.began + 20_000 + 10_000 * i64::try_from(walk).expect("small");
+        stood.host.seating_onto(term + 1);
+        stood.host.declined(
+            term,
+            a_printed_decline(Some("cyber"), &format!("decline-record-{walk}")),
+        );
+        tick(&stood.host, &[], at);
+        let walked = done(&stood, at + 1);
+        assert_eq!(walked.len(), walk, "{walked:?}");
+        assert_eq!(stood.worker_state(&worker), "Released");
+        worker = walked[walk - 1]["to"]["workerId"]
+            .as_str()
+            .expect("a replacement")
+            .to_string();
+    }
+    let last = 86_701
+        + u32::try_from(zerocode_core::orchestration::QUOTA_POLICY.handover_max).expect("small");
+    stood.host.declined(
+        last,
+        a_printed_decline(Some("cyber"), "decline-record-last"),
+    );
+    tick(&stood.host, &[], stood.began + 90_000);
+    let news = told(&stood, stood.began + 90_001);
+    assert_eq!(
+        news["count"],
+        zerocode_core::orchestration::QUOTA_POLICY.handover_max + 2,
+        "the record past the ceiling was not even news: {news}"
+    );
+    assert_eq!(
+        done(&stood, stood.began + 90_001).len(),
+        zerocode_core::orchestration::QUOTA_POLICY.handover_max,
+        "the ceiling was walked past"
+    );
+    assert_eq!(stood.worker_state(&worker), "Active");
+}
+
 /// A later decline of the same attempt is told on its own record and
 /// planned on it (t-7153, R4): the same record on the next beat is told
 /// once; another record — a later request declined — is news again; and
@@ -4983,7 +5135,7 @@ fn a_reading_the_ledger_moved_past_between_the_scan_and_the_fence_is_written_now
     let source = stood.host.transcript.to_string_lossy().into_owned();
     let first = stood.attempt();
     let held = super::runtime().expect("the runtime");
-    let scan = scan_fallbacks(&stood.host.transcript, &ScanCursor::default());
+    let scan = scan_fallbacks(&stood.host.transcript, &ScanCursor::default(), 0);
     assert_eq!(scan.switches.len(), 1);
     let binding = super::SwitchBinding {
         worker: &stood.worker,
@@ -5012,7 +5164,7 @@ fn a_reading_the_ledger_moved_past_between_the_scan_and_the_fence_is_written_now
 
     // The second attempt's own reading lands, bound to it.
     stood.appends(&switch("switch-2", stood.began + 14_000));
-    let scan = scan_fallbacks(&stood.host.transcript, &keep);
+    let scan = scan_fallbacks(&stood.host.transcript, &keep, 0);
     let binding = super::SwitchBinding {
         worker: &stood.worker,
         dispatch: &second.id,
@@ -5036,7 +5188,7 @@ fn a_reading_the_ledger_moved_past_between_the_scan_and_the_fence_is_written_now
     // the worker's CLI now writes another conversation, and the reading of
     // the file it left is written nowhere.
     stood.appends(&switch("switch-3", stood.began + 16_000));
-    let scan = scan_fallbacks(&stood.host.transcript, &keep);
+    let scan = scan_fallbacks(&stood.host.transcript, &keep, 0);
     assert_eq!(scan.switches.len(), 1);
     let (_, waiting, moved) =
         super::record_scanned_switches(&binding, scan, keep.clone(), &mut |switches| {
@@ -5181,6 +5333,7 @@ fn a_waiting_reading_is_asked_under_its_own_file_when_the_session_moves() {
         &bound(&first_source),
         &first,
         ScanCursor::default(),
+        0,
         None,
         &mut record(true),
     );
@@ -5193,6 +5346,7 @@ fn a_waiting_reading_is_asked_under_its_own_file_when_the_session_moves() {
         &bound(&second_source),
         &second,
         ScanCursor::default(),
+        1,
         waiting,
         &mut record(false),
     );
@@ -5411,6 +5565,7 @@ fn a_refused_readings_switches_wait_and_land_before_the_rotation_is_read() {
             &binding,
             &path,
             cursor.clone(),
+            0,
             pending,
             &mut |switches| {
                 if refuse {

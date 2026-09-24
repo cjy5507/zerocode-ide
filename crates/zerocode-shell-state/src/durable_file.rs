@@ -398,8 +398,11 @@ pub fn private_lock_file(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// A file's own name on its platform: device and inode on unix, volume serial
+/// number and file index on Windows — what a replacement under the same path
+/// cannot keep, whatever it keeps of the bytes. [`file_identity`] reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct FileIdentity {
+pub struct FileIdentity {
     volume: u64,
     file: u64,
 }
@@ -490,8 +493,10 @@ fn plain_path_identity(_path: &Path) -> io::Result<FileIdentity> {
     ))
 }
 
+/// This platform's name for the open `file` ([`FileIdentity`]), or why it
+/// gives none.
 #[cfg(unix)]
-fn file_identity(_file: &File, metadata: &fs::Metadata) -> io::Result<FileIdentity> {
+pub fn file_identity(_file: &File, metadata: &fs::Metadata) -> io::Result<FileIdentity> {
     file_identity_from_metadata(metadata)
 }
 
@@ -505,8 +510,10 @@ fn file_identity_from_metadata(metadata: &fs::Metadata) -> io::Result<FileIdenti
     })
 }
 
+/// This platform's name for the open `file` ([`FileIdentity`]), or why it
+/// gives none.
 #[cfg(windows)]
-fn file_identity(file: &File, _metadata: &fs::Metadata) -> io::Result<FileIdentity> {
+pub fn file_identity(file: &File, _metadata: &fs::Metadata) -> io::Result<FileIdentity> {
     use std::os::windows::io::AsRawHandle as _;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
@@ -525,8 +532,9 @@ fn file_identity(file: &File, _metadata: &fs::Metadata) -> io::Result<FileIdenti
     })
 }
 
+/// This platform names no file ([`FileIdentity`]).
 #[cfg(not(any(unix, windows)))]
-fn file_identity(_file: &File, _metadata: &fs::Metadata) -> io::Result<FileIdentity> {
+pub fn file_identity(_file: &File, _metadata: &fs::Metadata) -> io::Result<FileIdentity> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
         "plain-file identity verification is unsupported on this platform",

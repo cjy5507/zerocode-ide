@@ -31,6 +31,7 @@ use zerocode_core::orchestration::{
     ClassifierDeclineMarker, DeclineScreen, ModelDeviation, QuotaWallMarker, Text,
     TransientErrorMarker,
 };
+use zerocode_shell_state::durable_file::{FileIdentity, file_identity};
 
 /// Where the words were read.
 const SCREEN: &str = "screen";
@@ -619,84 +620,112 @@ pub(crate) struct ScanCursor {
     pub(crate) counted: Counted,
 }
 
-/// A fingerprint of the bytes a cursor counted past (t-7153, R3): of every
-/// one of them, and of the last few before the cursor. On a file the
-/// platform names ([`FileId`]) the last few are checked each beat — a file
-/// truncated and rewritten under its own inode, its first line kept, no
-/// longer holds them; on a file the platform cannot name nothing is taken
-/// on faith, and every byte the cursor counted is read again and compared
-/// before the cursor is trusted. A bare fingerprint counted nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A fingerprint of the bytes a cursor counted past (t-7153, R3): of each
+/// window of them — the scan's own reading window,
+/// [`zerocode_core::transcript::MAX_TAIL_BYTES`], counted from the file's
+/// start — and of the last few before the cursor. On a file the platform
+/// names ([`FileIdentity`]) every reading checks the last few, and one
+/// window more, each in turn: a file truncated and rewritten under its own
+/// inode, its first line kept, no longer holds them — found at once when
+/// the rewrite reached the bytes just before the cursor, and within one
+/// round of the readings (as many as the windows the cursor counted: a
+/// 12 MB transcript's 47) when it changed only a record further back, where
+/// before the last few alone were read and such a rewrite stood as the file
+/// it replaced for good. On a file the platform cannot name nothing is taken
+/// on faith, and every window is read again and compared before the cursor
+/// is trusted. A bare fingerprint counted nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Counted {
-    whole: u64,
+    /// Each whole window the cursor counted, oldest first.
+    windows: Vec<u64>,
+    /// The bytes it counted past the last whole window.
+    rest: u64,
+    /// The last [`TRANSCRIPT_FINGERPRINT_BYTES`] before the cursor.
     anchor: u64,
 }
 
 impl Default for Counted {
     fn default() -> Self {
         Self {
-            whole: FNV_EMPTY,
+            windows: Vec::new(),
+            rest: FNV_EMPTY,
             anchor: FNV_EMPTY,
         }
     }
 }
 
 impl Counted {
-    /// This fingerprint carried over `bytes`, which the cursor just counted,
-    /// with the anchor read afresh at `offset` — the cursor's new stand.
-    fn past(self, bytes: &[u8], file: &mut std::fs::File, offset: u64) -> Option<Self> {
-        Some(Self {
-            whole: fnv1a(self.whole, bytes),
-            anchor: fnv1a(FNV_EMPTY, &bytes_before(file, offset)?),
-        })
+    /// This fingerprint carried over `bytes` — the file's bytes just before
+    /// `to`, which the cursor just counted — with the anchor read afresh at
+    /// `to`, the cursor's new stand.
+    fn past(&self, bytes: &[u8], file: &mut std::fs::File, to: u64) -> Option<Self> {
+        let window = zerocode_core::transcript::MAX_TAIL_BYTES;
+        let mut counted = self.clone();
+        let mut at = to.checked_sub(bytes.len() as u64)?;
+        let mut left = bytes;
+        while !left.is_empty() {
+            let room = usize::try_from(window - at % window)
+                .map_or(left.len(), |room| room.min(left.len()));
+            let (piece, after) = left.split_at(room);
+            counted.rest = fnv1a(counted.rest, piece);
+            at += piece.len() as u64;
+            if at.is_multiple_of(window) {
+                counted
+                    .windows
+                    .push(std::mem::replace(&mut counted.rest, FNV_EMPTY));
+            }
+            left = after;
+        }
+        counted.anchor = fnv1a(FNV_EMPTY, &bytes_before(file, to)?);
+        Some(counted)
     }
 
     /// Whether what this fingerprint counted still stands before `offset`
-    /// in `file`: the last few bytes when the file is `named` by its
-    /// platform, every byte when it is not.
-    fn still_stands(&self, file: &mut std::fs::File, offset: u64, named: bool) -> bool {
-        if named {
-            return bytes_before(file, offset)
-                .is_some_and(|tail| fnv1a(FNV_EMPTY, &tail) == self.anchor);
+    /// in `file`: the last few bytes and the window `turn` names, in turn,
+    /// when the file is `named` by its platform; every window when it is
+    /// not.
+    fn still_stands(&self, file: &mut std::fs::File, offset: u64, named: bool, turn: u64) -> bool {
+        let window = zerocode_core::transcript::MAX_TAIL_BYTES;
+        let windows = offset.div_ceil(window);
+        let mut holds = |index: u64| {
+            let start = index * window;
+            let counted = usize::try_from(index)
+                .ok()
+                .and_then(|index| self.windows.get(index))
+                .copied()
+                .unwrap_or(self.rest);
+            bytes_at(file, start, window.min(offset - start))
+                .is_some_and(|bytes| fnv1a(FNV_EMPTY, &bytes) == counted)
+        };
+        if !named {
+            return (0..windows).all(holds);
         }
-        use std::io::{Read, Seek, SeekFrom};
-        if file.seek(SeekFrom::Start(0)).is_err() {
-            return false;
-        }
-        let mut whole = FNV_EMPTY;
-        let mut left = offset;
-        let mut chunk = vec![
-            0u8;
-            usize::try_from(zerocode_core::transcript::MAX_TAIL_BYTES.min(offset))
-                .unwrap_or(0)
-        ];
-        while left > 0 {
-            let want = usize::try_from(left.min(chunk.len() as u64)).unwrap_or(0);
-            let Ok(()) = file.read_exact(&mut chunk[..want]) else {
-                return false;
-            };
-            whole = fnv1a(whole, &chunk[..want]);
-            left -= want as u64;
-        }
-        whole == self.whole
+        (windows == 0 || holds(turn % windows))
+            && bytes_before(file, offset).is_some_and(|tail| fnv1a(FNV_EMPTY, &tail) == self.anchor)
     }
+}
+
+/// `len` bytes of `file` from `start`, or nothing when they cannot be read.
+/// The file's position is not kept.
+fn bytes_at(file: &mut std::fs::File, start: u64, len: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = vec![0u8; usize::try_from(len).ok()?];
+    file.read_exact(&mut bytes).ok()?;
+    Some(bytes)
 }
 
 /// The last [`TRANSCRIPT_FINGERPRINT_BYTES`] before `offset` in `file` —
 /// fewer when the file is shorter than that — or nothing when they cannot
-/// be read. The file's position is not kept.
+/// be read.
 fn bytes_before(file: &mut std::fs::File, offset: u64) -> Option<Vec<u8>> {
-    use std::io::{Read, Seek, SeekFrom};
     let len = offset.min(TRANSCRIPT_FINGERPRINT_BYTES as u64);
-    file.seek(SeekFrom::Start(offset - len)).ok()?;
-    let mut tail = vec![0u8; usize::try_from(len).ok()?];
-    file.read_exact(&mut tail).ok()?;
-    Some(tail)
+    bytes_at(file, offset - len, len)
 }
 
 /// FNV-1a, 64-bit, carried on from `seed`: a fingerprint that resumes where
-/// it stopped, so what a cursor counted over many beats is one number. The
-/// empty fingerprint is [`FNV_EMPTY`].
+/// it stopped, so what a cursor counted over many beats is one number a
+/// window. The empty fingerprint is [`FNV_EMPTY`].
 fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
     bytes.iter().fold(seed, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
@@ -718,77 +747,37 @@ impl ScanCursor {
 }
 
 /// Which file a cursor's offset counts into (t-7153, R3): the file's own
-/// name on its platform ([`FileId`]) where the platform gives one, when it
-/// was born where the file system says, and its first line's opening bytes
-/// — a Claude transcript opens on a record with the session's own uuid and
-/// timestamp. A file atomically replaced under the same path — a session
-/// id reused, a conversation rewritten, its first line kept — is another
-/// file by its name alone, read from its start whether it is shorter, as
-/// long as, or longer than the one before: before this the identity was
-/// the first line and a birth time, and a replacement that kept the first
-/// line, on a file system that gives no birth, read as unchanged. A file
-/// appended to keeps every part of its identity, so a cursor into it
+/// name on its platform ([`FileIdentity`]) where the platform gives one,
+/// when it was born where the file system says, and its first line's
+/// opening bytes — a Claude transcript opens on a record with the session's
+/// own uuid and timestamp. A file atomically replaced under the same path —
+/// a session id reused, a conversation rewritten, its first line kept — is
+/// another file by its name alone, read from its start whether it is
+/// shorter, as long as, or longer than the one before: before this the
+/// identity was the first line and a birth time, and a replacement that kept
+/// the first line, on a file system that gives no birth, read as unchanged.
+/// A file appended to keeps every part of its identity, so a cursor into it
 /// stands — once what the cursor counted is found still there
 /// ([`Counted`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct TranscriptIdentity {
-    id: Option<FileId>,
+    id: Option<FileIdentity>,
     born: Option<std::time::SystemTime>,
     opening: Vec<u8>,
-}
-
-/// A file's own name on its platform: device and inode on unix, volume
-/// serial number and file index on Windows — what an atomic replacement
-/// under the same path cannot keep, whatever it keeps of the bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct FileId {
-    device: u64,
-    index: u64,
 }
 
 /// What the platform says of an open file: its name, and when it was born
 /// — either nothing where the platform gives none. The scanner takes this
 /// as a parameter so a test can stand where a platform gives neither.
 pub(crate) type FileEvidence =
-    fn(&std::fs::File, &std::fs::Metadata) -> (Option<FileId>, Option<std::time::SystemTime>);
+    fn(&std::fs::File, &std::fs::Metadata) -> (Option<FileIdentity>, Option<std::time::SystemTime>);
 
 /// This platform's evidence: the file's name and its birth.
 fn platform_evidence(
     file: &std::fs::File,
     meta: &std::fs::Metadata,
-) -> (Option<FileId>, Option<std::time::SystemTime>) {
-    (platform_file_id(file, meta), meta.created().ok())
-}
-
-#[cfg(unix)]
-fn platform_file_id(_file: &std::fs::File, meta: &std::fs::Metadata) -> Option<FileId> {
-    use std::os::unix::fs::MetadataExt as _;
-    Some(FileId {
-        device: meta.dev(),
-        index: meta.ino(),
-    })
-}
-
-#[cfg(windows)]
-fn platform_file_id(file: &std::fs::File, _meta: &std::fs::Metadata) -> Option<FileId> {
-    use std::os::windows::io::AsRawHandle as _;
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
-    };
-    // SAFETY: an out-parameter of plain data the call fills, zeroed first.
-    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-    // SAFETY: `file` keeps its handle open for the whole call, and `info` is
-    // the properly sized, writable struct the call is documented to fill.
-    let told = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
-    (told != 0).then(|| FileId {
-        device: u64::from(info.dwVolumeSerialNumber),
-        index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
-    })
-}
-
-#[cfg(not(any(unix, windows)))]
-fn platform_file_id(_file: &std::fs::File, _meta: &std::fs::Metadata) -> Option<FileId> {
-    None
+) -> (Option<FileIdentity>, Option<std::time::SystemTime>) {
+    (file_identity(file, meta).ok(), meta.created().ok())
 }
 
 /// How much of the first line names a transcript, and how many bytes before
@@ -835,10 +824,13 @@ impl TranscriptIdentity {
 /// ([`tests::CLAUDE_FALLBACK`]) — and is stepped over; a file that is not
 /// the cursor's ([`TranscriptIdentity`]), that shrank, or that no longer
 /// holds what the cursor counted ([`Counted`]) is read again from its
-/// start. An unchanged file costs one `stat`, one read of its opening bytes
-/// and one of the bytes before the cursor.
-pub(crate) fn scan_fallbacks(path: &Path, cursor: &ScanCursor) -> DeviationScan {
-    scan_fallbacks_as(path, cursor, platform_evidence)
+/// start. `turn` is the caller's count of its readings of this file: it
+/// names the window of what the cursor counted that this reading checks
+/// again, so every window is checked in turn. An unchanged file costs one
+/// `stat`, one read of its opening bytes, one of the bytes before the
+/// cursor and one of a window it counted.
+pub(crate) fn scan_fallbacks(path: &Path, cursor: &ScanCursor, turn: u64) -> DeviationScan {
+    scan_fallbacks_as(path, cursor, turn, platform_evidence)
 }
 
 /// [`scan_fallbacks`] with the file's platform evidence read by `evidence`
@@ -846,6 +838,7 @@ pub(crate) fn scan_fallbacks(path: &Path, cursor: &ScanCursor) -> DeviationScan 
 pub(crate) fn scan_fallbacks_as(
     path: &Path,
     cursor: &ScanCursor,
+    turn: u64,
     evidence: FileEvidence,
 ) -> DeviationScan {
     use std::io::{Read, Seek, SeekFrom};
@@ -867,9 +860,9 @@ pub(crate) fn scan_fallbacks_as(
         && size >= cursor.offset
         && cursor
             .counted
-            .still_stands(&mut file, cursor.offset, identity.id.is_some());
+            .still_stands(&mut file, cursor.offset, identity.id.is_some(), turn);
     let (offset, counted) = if stands {
-        (cursor.offset, cursor.counted)
+        (cursor.offset, cursor.counted.clone())
     } else {
         (0, Counted::default())
     };
@@ -2139,7 +2132,7 @@ pub(crate) mod tests {
         let mut file = std::fs::File::create(&path).expect("a transcript");
         writeln!(file, "{CLAUDE_PLAIN_RECORD}").expect("write");
         writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
-        let first = scan_fallbacks(&path, &ScanCursor::default());
+        let first = scan_fallbacks(&path, &ScanCursor::default(), 0);
         assert_eq!(first.switches.len(), 1);
         assert_eq!(first.switches[0].key, "switch-1");
         assert_eq!(
@@ -2149,11 +2142,11 @@ pub(crate) mod tests {
         );
         assert!(first.next.file.is_some(), "the cursor knows its file");
         assert_eq!(
-            scan_fallbacks(&path, &ScanCursor::default()),
+            scan_fallbacks(&path, &ScanCursor::default(), 0),
             first,
             "the same cursor reads the same"
         );
-        let again = scan_fallbacks(&path, &first.next);
+        let again = scan_fallbacks(&path, &first.next, 0);
         assert!(again.switches.is_empty(), "read past the cursor twice");
         assert_eq!(again.next, first.next);
         // A line still being written waits for its newline, cursor unmoved.
@@ -2161,17 +2154,17 @@ pub(crate) mod tests {
         let (head, rest) = second.split_at(40);
         write!(file, "{head}").expect("write");
         file.flush().expect("flush");
-        let waiting = scan_fallbacks(&path, &first.next);
+        let waiting = scan_fallbacks(&path, &first.next, 0);
         assert!(waiting.switches.is_empty());
         assert_eq!(waiting.next, first.next);
         writeln!(file, "{rest}").expect("write");
         file.flush().expect("flush");
-        let later = scan_fallbacks(&path, &first.next);
+        let later = scan_fallbacks(&path, &first.next, 0);
         assert_eq!(later.switches.len(), 1);
         assert_eq!(later.switches[0].key, "switch-2");
         // Rewritten shorter: read again from the start.
         std::fs::write(&path, format!("{CLAUDE_FALLBACK}\n")).expect("rewrite");
-        let rewritten = scan_fallbacks(&path, &later.next);
+        let rewritten = scan_fallbacks(&path, &later.next, 0);
         assert_eq!(rewritten.switches.len(), 1);
         assert_eq!(
             rewritten.next.offset,
@@ -2179,20 +2172,27 @@ pub(crate) mod tests {
         );
     }
 
-    /// A transcript exactly `len` bytes long that opens on `first` — the
-    /// rest one padding record — for a replacement as long as the file it
-    /// replaces (t-7153, R3).
-    pub(crate) fn a_transcript_as_long_as(first: &str, len: u64) -> String {
+    /// A record exactly `len` bytes long that is no switch — padding for a
+    /// fixture that must keep every byte after it where it was (t-7153, R3).
+    pub(crate) fn a_record_as_long_as(len: usize) -> String {
         let pad = |body_len: usize| {
             format!(
                 r#"{{"type":"user","uuid":"pad","message":{{"role":"user","content":"{}"}}}}"#,
                 "x".repeat(body_len)
             )
         };
-        let bare = pad(0).len() + 1;
+        let record = pad(len - pad(0).len());
+        assert_eq!(record.len(), len, "the record's length");
+        record
+    }
+
+    /// A transcript exactly `len` bytes long that opens on `first` — the
+    /// rest one padding record — for a replacement as long as the file it
+    /// replaces (t-7153, R3).
+    pub(crate) fn a_transcript_as_long_as(first: &str, len: u64) -> String {
         let content = format!(
             "{first}\n{}\n",
-            pad(usize::try_from(len).expect("small") - first.len() - 1 - bare)
+            a_record_as_long_as(usize::try_from(len).expect("small") - first.len() - 2)
         );
         assert_eq!(content.len() as u64, len, "the fixture's length");
         content
@@ -2215,7 +2215,7 @@ pub(crate) mod tests {
             std::fs::rename(&fresh, &path).expect("atomic replace");
         };
         replace(&format!("{CLAUDE_PLAIN_RECORD}\n{CLAUDE_FALLBACK}\n"));
-        let first = scan_fallbacks(&path, &ScanCursor::default());
+        let first = scan_fallbacks(&path, &ScanCursor::default(), 0);
         assert_eq!(first.switches[0].key, "switch-1");
         let old_len = std::fs::metadata(&path).expect("size").len();
         assert_eq!(first.next.offset, old_len);
@@ -2223,7 +2223,7 @@ pub(crate) mod tests {
         // As long as the old file, a new switch first: read from the start.
         let second = CLAUDE_FALLBACK.replace("switch-1", "switch-2");
         replace(&a_transcript_as_long_as(&second, old_len));
-        let rotated = scan_fallbacks(&path, &first.next);
+        let rotated = scan_fallbacks(&path, &first.next, 0);
         assert_eq!(
             rotated
                 .switches
@@ -2241,7 +2241,7 @@ pub(crate) mod tests {
         replace(&format!(
             "{third}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n"
         ));
-        let longer = scan_fallbacks(&path, &rotated.next);
+        let longer = scan_fallbacks(&path, &rotated.next, 0);
         assert_eq!(
             longer
                 .switches
@@ -2258,7 +2258,7 @@ pub(crate) mod tests {
             .open(&path)
             .expect("append");
         writeln!(file, "{fourth}").expect("write");
-        let appended = scan_fallbacks(&path, &longer.next);
+        let appended = scan_fallbacks(&path, &longer.next, 0);
         assert_eq!(appended.next.file, longer.next.file, "the same file");
         assert_eq!(
             appended
@@ -2275,7 +2275,7 @@ pub(crate) mod tests {
         let fifth = CLAUDE_FALLBACK.replace("switch-1", "switch-5");
         let (head, rest) = fifth.split_at(60);
         replace(head);
-        let partial = scan_fallbacks(&path, &appended.next);
+        let partial = scan_fallbacks(&path, &appended.next, 0);
         assert!(partial.switches.is_empty());
         assert_eq!(partial.next.offset, 0);
         let mut file = std::fs::OpenOptions::new()
@@ -2283,7 +2283,7 @@ pub(crate) mod tests {
             .open(&path)
             .expect("append");
         writeln!(file, "{rest}").expect("write");
-        let whole = scan_fallbacks(&path, &partial.next);
+        let whole = scan_fallbacks(&path, &partial.next, 0);
         assert_eq!(whole.switches.len(), 1);
         assert_eq!(whole.switches[0].key, "switch-5");
     }
@@ -2317,7 +2317,7 @@ pub(crate) mod tests {
             "{CLAUDE_PLAIN_RECORD}\n{}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n",
             switch("switch-1")
         ));
-        let first = scan_fallbacks(&path, &ScanCursor::default());
+        let first = scan_fallbacks(&path, &ScanCursor::default(), 0);
         assert_eq!(keys(&first), ["switch-1"]);
         let old_len = std::fs::metadata(&path).expect("size").len();
         assert_eq!(first.next.offset, old_len);
@@ -2327,7 +2327,7 @@ pub(crate) mod tests {
             "{CLAUDE_PLAIN_RECORD}\n{}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n",
             switch("switch-2")
         ));
-        let longer = scan_fallbacks(&path, &first.next);
+        let longer = scan_fallbacks(&path, &first.next, 0);
         assert_eq!(
             keys(&longer),
             ["switch-2"],
@@ -2343,7 +2343,7 @@ pub(crate) mod tests {
             &format!("{CLAUDE_PLAIN_RECORD}\n{}", switch("switch-3")),
             longer.next.offset,
         ));
-        let as_long = scan_fallbacks(&path, &longer.next);
+        let as_long = scan_fallbacks(&path, &longer.next, 0);
         assert_eq!(
             keys(&as_long),
             ["switch-3"],
@@ -2357,9 +2357,9 @@ pub(crate) mod tests {
             .open(&path)
             .expect("append");
         writeln!(file, "{}", switch("switch-4")).expect("write");
-        let appended = scan_fallbacks(&path, &as_long.next);
+        let appended = scan_fallbacks(&path, &as_long.next, 0);
         assert_eq!(keys(&appended), ["switch-4"]);
-        let again = scan_fallbacks(&path, &appended.next);
+        let again = scan_fallbacks(&path, &appended.next, 0);
         assert_eq!(
             again,
             DeviationScan {
@@ -2370,13 +2370,72 @@ pub(crate) mod tests {
         );
     }
 
+    /// A transcript three of the scan's windows long whose second record is
+    /// `second` — a switch, or a record exactly as long as one
+    /// ([`a_record_as_long_as`]) — and every other byte of which is the
+    /// same whatever `second` is (t-7153, R3): a rewrite that puts a switch
+    /// there keeps the first line, the length, the bytes before any cursor
+    /// at its end, and every window but the first.
+    fn three_windows_with(second: &str) -> String {
+        let window = usize::try_from(zerocode_core::transcript::MAX_TAIL_BYTES).expect("small");
+        let plain = format!("{CLAUDE_PLAIN_RECORD}\n");
+        let head = format!("{CLAUDE_PLAIN_RECORD}\n{second}\n");
+        let fill = plain.repeat((2 * window + window / 2 - head.len()) / plain.len() + 1);
+        let content = format!("{head}{fill}");
+        assert_eq!(content.len().div_ceil(window), 3, "three windows");
+        content
+    }
+
+    /// The same transcript before and after its second record became a
+    /// switch (t-7153, R3): as long, its first line, its tail and its last
+    /// two windows kept.
+    fn a_middle_record_becomes_a_switch() -> (String, String) {
+        let switch = CLAUDE_FALLBACK.replace("switch-1", "switch-mid");
+        let before = three_windows_with(&a_record_as_long_as(switch.len()));
+        let after = three_windows_with(&switch);
+        assert_eq!(before.len(), after.len());
+        (before, after)
+    }
+
+    /// The cursor at the end of the file at `path`, read from `cursor` one
+    /// reading at a time as the platform's `evidence` names the file, and
+    /// the keys of the switches found on the way.
+    fn read_to_the_end(
+        path: &Path,
+        mut cursor: ScanCursor,
+        evidence: FileEvidence,
+    ) -> (ScanCursor, Vec<String>) {
+        let size = std::fs::metadata(path).expect("size").len();
+        let mut keys = Vec::new();
+        for turn in 0..16 {
+            if cursor.offset == size {
+                return (cursor, keys);
+            }
+            let scan = scan_fallbacks_as(path, &cursor, turn, evidence);
+            keys.extend(scan.switches.into_iter().map(|one| one.key));
+            cursor = scan.next;
+        }
+        panic!(
+            "sixteen readings did not reach the end of {}",
+            path.display()
+        );
+    }
+
+    /// The number of the scan's windows a cursor counted.
+    fn windows_of(cursor: &ScanCursor) -> u64 {
+        cursor
+            .offset
+            .div_ceil(zerocode_core::transcript::MAX_TAIL_BYTES)
+    }
+
     /// A file atomically replaced under its path by one that keeps its first
-    /// line, its length and every byte before the cursor's last few
-    /// thousand — a conversation rewritten, one record in its middle
-    /// changed — is another file by the name the platform gives it, and is
-    /// read from its start (t-7153, R3); before this the identity was the
-    /// first line and a birth time, and where the file system gives no
-    /// birth the replacement read as unchanged.
+    /// line, its length and every byte but one record's near its start — a
+    /// conversation rewritten, one record in its middle changed — is another
+    /// file by the name the platform gives it, and is read from its start at
+    /// once (t-7153, R3): on the very next reading, whose turn checks a window
+    /// the replacement did not change. Before this the identity was the first
+    /// line and a birth time, and where the file system gives no birth the
+    /// replacement read as unchanged.
     #[test]
     fn the_switch_scan_starts_over_when_a_replacement_keeps_the_first_line_and_the_tail() {
         let dir = tempfile::tempdir().expect("a dir");
@@ -2386,88 +2445,175 @@ pub(crate) mod tests {
             std::fs::write(&fresh, content).expect("the replacement");
             std::fs::rename(&fresh, &path).expect("atomic replace");
         };
-        // The tail before the cursor: more than the fingerprint's bytes,
-        // the same in both files.
-        let tail = format!("{CLAUDE_PLAIN_RECORD}\n")
-            .repeat(TRANSCRIPT_FINGERPRINT_BYTES / CLAUDE_PLAIN_RECORD.len() + 2);
-        let with = |key: &str| {
-            format!(
-                "{CLAUDE_PLAIN_RECORD}\n{}\n{tail}",
-                CLAUDE_FALLBACK.replace("switch-1", key)
-            )
-        };
-        replace(&with("switch-1"));
-        let first = scan_fallbacks(&path, &ScanCursor::default());
-        assert_eq!(first.switches.len(), 1);
-        assert_eq!(first.next.offset, with("switch-1").len() as u64);
-        replace(&with("switch-2"));
-        assert_eq!(
-            std::fs::metadata(&path).expect("size").len(),
-            first.next.offset,
-            "as long as before"
-        );
-        let rotated = scan_fallbacks(&path, &first.next);
+        let (before, after) = a_middle_record_becomes_a_switch();
+        replace(&before);
+        let (cursor, keys) = read_to_the_end(&path, ScanCursor::default(), platform_evidence);
+        assert_eq!(keys, Vec::<String>::new());
+        assert_eq!(windows_of(&cursor), 3);
+        replace(&after);
+        let rotated = scan_fallbacks(&path, &cursor, windows_of(&cursor) - 1);
         assert_eq!(
             rotated
                 .switches
                 .iter()
                 .map(|one| one.key.as_str())
                 .collect::<Vec<_>>(),
-            ["switch-2"],
+            ["switch-mid"],
             "a replacement that kept the first line and the tail was read as unchanged"
         );
+        assert_ne!(rotated.next.file, cursor.file, "another file");
+    }
+
+    /// A file rewritten IN PLACE under its own name — the same inode, the
+    /// same birth — that keeps its first line, its length and every byte
+    /// but one record's near its start is the same file by every name the
+    /// platform gives, and no longer holds what the cursor counted
+    /// (t-7153, R3): each reading checks one more window of it, in turn,
+    /// so within one round of the readings the scan starts over and reads
+    /// the switch the rewrite put there, once. Before this only the bytes
+    /// just before the cursor were checked, and such a rewrite stood as the
+    /// file it replaced for good. A file only appended to holds every
+    /// window of a round, and its cursor stands and moves on.
+    #[test]
+    fn the_switch_scan_finds_a_rewrite_in_place_that_kept_the_first_line_and_the_tail() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let rewrite = |content: &str| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .create(true)
+                .open(&path)
+                .expect("the file, truncated");
+            file.write_all(content.as_bytes()).expect("rewrite");
+        };
+        let (before, after) = a_middle_record_becomes_a_switch();
+        rewrite(&before);
+        let (cursor, keys) = read_to_the_end(&path, ScanCursor::default(), platform_evidence);
+        assert_eq!(keys, Vec::<String>::new());
+        let windows = windows_of(&cursor);
+        assert_eq!(windows, 3);
+        rewrite(&after);
+
+        // One round, from a window the rewrite did not change.
+        let mut at = cursor.clone();
+        let mut found = Vec::new();
+        let mut readings = 0;
+        for turn in windows - 1..2 * windows - 1 {
+            let scan = scan_fallbacks(&path, &at, turn);
+            readings += 1;
+            assert_eq!(
+                scan.next.file, cursor.file,
+                "the same file by every name the platform gives"
+            );
+            found.extend(scan.switches.into_iter().map(|one| one.key));
+            at = scan.next;
+            if !found.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            found,
+            ["switch-mid"],
+            "a rewrite in place that kept the first line and the tail stood a whole round"
+        );
+        assert!(readings <= windows, "{readings} readings");
+
+        // Caught up again, then appended to: every window of two rounds
+        // holds, and the appended switch is read once.
+        let (caught_up, again) = read_to_the_end(&path, at, platform_evidence);
+        assert_eq!(again, Vec::<String>::new(), "read twice");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        writeln!(file, "{}", CLAUDE_FALLBACK.replace("switch-1", "switch-4")).expect("write");
+        drop(file);
+        let mut at = caught_up;
+        let mut appended = Vec::new();
+        for turn in 0..2 * windows {
+            let scan = scan_fallbacks(&path, &at, turn);
+            assert!(
+                scan.next.offset >= at.offset,
+                "a file only appended to was read again from its start"
+            );
+            appended.extend(scan.switches.into_iter().map(|one| one.key));
+            at = scan.next;
+        }
+        assert_eq!(appended, ["switch-4"]);
+
+        // Rewritten in place once more, only its last record changed — the
+        // bytes just before the cursor: the next reading starts over, on a
+        // turn that names a window the rewrite did not change.
+        let tail_changed = format!(
+            "{after}{}\n",
+            CLAUDE_FALLBACK.replace("switch-1", "switch-6")
+        );
+        assert_eq!(tail_changed.len() as u64, at.offset, "as long as before");
+        rewrite(&tail_changed);
+        let next = scan_fallbacks(&path, &at, windows);
+        assert!(
+            next.next.offset < at.offset,
+            "a rewrite of the bytes just before the cursor was not found at once"
+        );
+        let (_, found) = read_to_the_end(&path, next.next.clone(), platform_evidence);
+        let found: Vec<String> = next
+            .switches
+            .into_iter()
+            .map(|one| one.key)
+            .chain(found)
+            .collect();
+        assert_eq!(found, ["switch-mid", "switch-6"]);
     }
 
     /// Where the platform names no file, nothing is taken on faith
-    /// (t-7153, R3): every byte the cursor counted is read again and
+    /// (t-7153, R3): every window the cursor counted is read again and
     /// compared before the cursor is trusted — a file replaced under its
-    /// path by one exactly as long, its first line and the bytes before the
-    /// cursor's last few thousand kept, whose identity without a platform
-    /// name is the same, is read from its start; a longer replacement too;
-    /// a file appended to still stands, and its cursor still moves.
+    /// path by one exactly as long, its first line, its tail and all but
+    /// its first window kept, whose identity without a platform name is the
+    /// same, is read from its start on the next reading, whatever window
+    /// its turn names; a longer replacement too; a file appended to still
+    /// stands, and its cursor still moves.
     #[test]
     fn the_switch_scan_takes_nothing_on_faith_where_the_platform_names_no_file() {
         use std::io::Write;
         let unnamed: FileEvidence = |_, _| (None, None);
         let dir = tempfile::tempdir().expect("a dir");
         let path = dir.path().join("session.jsonl");
-        let switch = |key: &str| CLAUDE_FALLBACK.replace("switch-1", key);
         let replace = |content: &str| {
             let fresh = dir.path().join("session.jsonl.next");
             std::fs::write(&fresh, content).expect("the replacement");
             std::fs::rename(&fresh, &path).expect("atomic replace");
         };
-        let scan = |cursor: &ScanCursor| scan_fallbacks_as(&path, cursor, unnamed);
         let keys = |scan: &DeviationScan| -> Vec<String> {
             scan.switches.iter().map(|one| one.key.clone()).collect()
         };
-        // More than the fingerprint's bytes after the switch, the same in
-        // every file.
-        let tail = format!("{CLAUDE_PLAIN_RECORD}\n")
-            .repeat(TRANSCRIPT_FINGERPRINT_BYTES / CLAUDE_PLAIN_RECORD.len() + 2);
-        let with = |key: &str| format!("{CLAUDE_PLAIN_RECORD}\n{}\n{tail}", switch(key));
-        replace(&with("switch-1"));
-        let first = scan(&ScanCursor::default());
-        assert_eq!(keys(&first), ["switch-1"]);
+        let (before, after) = a_middle_record_becomes_a_switch();
+        replace(&before);
+        let (first, found) = read_to_the_end(&path, ScanCursor::default(), unnamed);
+        assert_eq!(found, Vec::<String>::new());
         let old_len = std::fs::metadata(&path).expect("size").len();
-        assert_eq!(first.next.offset, old_len);
+        assert_eq!(first.offset, old_len);
 
-        // As long as before, the first line and the tail kept: the same
-        // file by every name this platform gives, and read from its start
-        // all the same.
-        replace(&with("switch-2"));
+        // As long as before, the first line, the tail and the last windows
+        // kept: the same file by every name this platform gives, and read
+        // from its start all the same, on a turn that names a window the
+        // replacement did not change.
+        replace(&after);
         assert_eq!(std::fs::metadata(&path).expect("size").len(), old_len);
-        let as_long = scan(&first.next);
+        let as_long = scan_fallbacks_as(&path, &first, windows_of(&first) - 1, unnamed);
         assert_eq!(
-            as_long.next.file, first.next.file,
+            as_long.next.file, first.file,
             "the platform told them apart"
         );
         assert_eq!(
             keys(&as_long),
-            ["switch-2"],
+            ["switch-mid"],
             "a replacement as long as the old file, its first line kept, was taken on faith"
         );
-        assert_eq!(as_long.next.offset, old_len);
+        let (caught_up, found) = read_to_the_end(&path, as_long.next, unnamed);
+        assert_eq!(found, Vec::<String>::new(), "read twice");
 
         // Appended to: what the cursor counted is still there, the cursor
         // stands and moves on.
@@ -2475,15 +2621,15 @@ pub(crate) mod tests {
             .append(true)
             .open(&path)
             .expect("append");
-        writeln!(file, "{}", switch("switch-3")).expect("write");
+        writeln!(file, "{}", CLAUDE_FALLBACK.replace("switch-1", "switch-3")).expect("write");
         drop(file);
-        let appended = scan(&as_long.next);
+        let appended = scan_fallbacks_as(&path, &caught_up, 0, unnamed);
         assert_eq!(keys(&appended), ["switch-3"]);
         assert_eq!(
             appended.next.offset,
             std::fs::metadata(&path).expect("size").len()
         );
-        let again = scan(&appended.next);
+        let again = scan_fallbacks_as(&path, &appended.next, 1, unnamed);
         assert_eq!(keys(&again), Vec::<String>::new());
         assert_eq!(
             again.next, appended.next,
@@ -2491,11 +2637,14 @@ pub(crate) mod tests {
         );
 
         // Longer than before, the first line kept: from the start too.
-        replace(&format!("{}{tail}{tail}", with("switch-4")));
-        let longer = scan(&again.next);
+        replace(&format!(
+            "{}{CLAUDE_PLAIN_RECORD}\n",
+            three_windows_with(&CLAUDE_FALLBACK.replace("switch-1", "switch-5"))
+        ));
+        let longer = scan_fallbacks_as(&path, &again.next, 2, unnamed);
         assert_eq!(
             keys(&longer),
-            ["switch-4"],
+            ["switch-5"],
             "a longer replacement, its first line kept, was read as appended to"
         );
     }
@@ -2521,13 +2670,13 @@ pub(crate) mod tests {
         writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
         let size = std::fs::metadata(&path).expect("size").len();
 
-        let first = scan_fallbacks(&path, &ScanCursor::default());
+        let first = scan_fallbacks(&path, &ScanCursor::default(), 0);
         assert!(first.switches.is_empty());
         assert_eq!(
             first.next.offset, MAX_TAIL_BYTES,
             "one window, stepped over"
         );
-        let second = scan_fallbacks(&path, &first.next);
+        let second = scan_fallbacks(&path, &first.next, 0);
         assert_eq!(second.switches.len(), 1, "the record after the long line");
         assert_eq!(second.switches[0].key, "switch-1");
         assert_eq!(second.next.offset, size);
@@ -2549,7 +2698,7 @@ pub(crate) mod tests {
         let mut beats = 0;
         let mut switches = Vec::new();
         while cursor.offset < size {
-            let scan = scan_fallbacks(&path, &cursor);
+            let scan = scan_fallbacks(&path, &cursor, 0);
             assert!(
                 scan.next.offset > cursor.offset,
                 "a beat that read nothing whole"
