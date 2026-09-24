@@ -1994,3 +1994,22 @@ fn a_requests_hangul_share_is_counted_over_its_letters() {
     );
     assert_eq!(hangul_share_permille(""), None);
 }
+
+/// A seat that never rises names no apply wall (the column's own contract,
+/// [`JevUse::apply_deadline_ms`]): the wall is the latency line a rising seat
+/// is judged against, and a number nobody is judged on only tells a screen
+/// there is a stage to time. zo's summary already held every row to it; the
+/// vault-pair seat broke it on arrival (t-6345) and no core test said so.
+#[test]
+fn a_seat_that_never_rises_names_no_apply_wall() {
+    for row in &JEV_USES {
+        assert_eq!(
+            row.apply_deadline_ms.is_some(),
+            row.promotes,
+            "{} promotes={} wall={:?}",
+            row.id,
+            row.promotes,
+            row.apply_deadline_ms
+        );
+    }
+}
