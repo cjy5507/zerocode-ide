@@ -533,8 +533,10 @@ pub const SCREEN_INSTRUCTED_NO: &str = concat!(
 /// Bumped whenever the tool text guard's words or the state they read change
 /// — or the baseline they are compared with: version 2 begins where the
 /// baseline's "fenced before" became the host's own fence rather than a
-/// phrase found in the body (t-6982), so rows judged under version 1 stand
-/// beside a different today's rule and never pool into this version's window.
+/// phrase found in the body (t-6982). The version rides every request row so
+/// a reader can tell the two series apart; the shared promotion reader
+/// (`promote::named_version`) still windows by model alone, and reading
+/// requests, labels and standing per rubric version is t-6877's contract.
 pub const TOOL_TEXT_GUARD_RUBRIC_VERSION: u32 = 2;
 /// The keys the tool text guard's state carries, in the order the use table
 /// declares them: the kind of tool the block came from, and its head.
