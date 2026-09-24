@@ -13658,10 +13658,10 @@ impl HeardSeat {
     }
 }
 
-fn recalling_parsers() -> Option<Arc<dyn crate::MemoryRetriever + Send + Sync>> {
-    Some(Arc::new(LexicalMemoryRetriever::from_index_markdown(
+fn recalling_parsers() -> Arc<dyn crate::MemoryRetriever + Send + Sync> {
+    Arc::new(LexicalMemoryRetriever::from_index_markdown(
         "# Zo memory\n\n- [parsers](parsers.md) — recall me about parser bugs\n",
-    )))
+    ))
 }
 
 /// The recall seat hears what the turn did while the turn goes: each
@@ -13738,7 +13738,7 @@ fn the_recall_seat_hears_the_turn_before_the_compaction_after_it() {
     .with_auto_compaction_input_tokens_threshold(100_000);
     let dispatch: ConcurrentDispatchFn = Arc::new(|_name, input| Ok(format!("read:{input}")));
     runtime.set_concurrent_dispatch(dispatch);
-    runtime.set_memory_retriever(recalling_parsers());
+    runtime.set_memory_retriever(Some(recalling_parsers()));
     runtime.set_recall_seat(Some(seat.clone()));
 
     let tokio_runtime = tokio::runtime::Builder::new_multi_thread()
@@ -13808,7 +13808,7 @@ fn the_recall_seat_hears_no_answer_for_a_request_that_never_left() {
         vec!["system".to_string()],
     );
     runtime.set_context_window(10_000);
-    runtime.set_memory_retriever(recalling_parsers());
+    runtime.set_memory_retriever(Some(recalling_parsers()));
     runtime.set_recall_seat(Some(seat.clone()));
 
     let tokio_runtime = tokio::runtime::Builder::new_current_thread()

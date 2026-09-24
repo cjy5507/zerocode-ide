@@ -811,7 +811,6 @@ fn body_links(body: &str) -> Vec<String> {
 /// neither. The rule this module's link reader applies to a page, and the
 /// recall seat to an answer that cites one — so the two agree on what a
 /// fence is.
-#[must_use]
 pub fn lines_outside_fences(body: &str) -> impl Iterator<Item = &str> {
     let mut fence: Option<(char, usize)> = None;
     body.lines().filter(move |line| {
