@@ -1,5 +1,29 @@
 # Changelog
 
+## [1.1.22] — 2026-09-24
+
+_since v1.1.21 (15 commits)_
+
+### feat
+- feat(jev): add file-pick shadow seat
+
+### fix
+- fix(jev): the vault pair seat names no apply deadline — a seat that never rises has no rise line to time, and the dashboard's contract (`a_seat_that_can_rise_has_a_stage_to_time_it`) reddened the v1.1.21 lane on it; the request's own wire deadline stays in the zo runner (t-6345 follow-up)
+- fix: F1 keep arbitrary usage errors out of the window log
+- fix: F4 require a successful current gauge before reporting quota lifted
+- fix: F3 elide transcript data only after proving its image context
+- fix: F2 keep vault proposal writes away from linked sources
+
+### docs
+- docs: F6 distinguish observed quota recovery from automatic continuation
+- docs: F8 remove a private link from the public worktree room contract
+
+### test
+- test(jev): the file-pick seat's promotion is read off the table's own lookup, not asserted on the constant — clippy's assertions_on_constants under `-D warnings` (t-6344 follow-up)
+- test: record independent load checks for the two shell timing flakes
+- test: F7 reject empty or unsuccessful phone speed measurements
+- test: F5 include vault pair replay validation in tools-test
+
 ## [1.1.21] — 2026-09-24
 
 _since v1.1.20 (48 commits)_
