@@ -795,21 +795,7 @@ fn unquote(value: &str) -> &str {
 /// a person can see on the page.
 fn body_links(body: &str) -> Vec<String> {
     let mut links = Vec::new();
-    let mut fence: Option<(char, usize)> = None;
-    for line in body.lines() {
-        let trimmed = line.trim_start();
-        if let Some(mark) = fence_mark(trimmed) {
-            match fence {
-                // A fence closes on its own character at its own width or more.
-                Some((open, width)) if open == mark.0 && mark.1 >= width => fence = None,
-                Some(_) => {}
-                None => fence = Some(mark),
-            }
-            continue;
-        }
-        if fence.is_some() {
-            continue;
-        }
+    for line in lines_outside_fences(body) {
         scan_line_links(line, &mut links);
         if links.len() >= MAX_PAGE_RELATIONS {
             links.truncate(MAX_PAGE_RELATIONS);
@@ -817,6 +803,29 @@ fn body_links(body: &str) -> Vec<String> {
         }
     }
     links
+}
+
+/// The lines of `body` outside its fenced blocks, in order: a backtick or
+/// tilde fence of three or more opens a block, which closes on its own
+/// character at its own width or more, and the fence lines themselves are
+/// neither. The rule this module's link reader applies to a page, and the
+/// recall seat to an answer that cites one — so the two agree on what a
+/// fence is.
+#[must_use]
+pub fn lines_outside_fences(body: &str) -> impl Iterator<Item = &str> {
+    let mut fence: Option<(char, usize)> = None;
+    body.lines().filter(move |line| {
+        if let Some(mark) = fence_mark(line.trim_start()) {
+            match fence {
+                // A fence closes on its own character at its own width or more.
+                Some((open, width)) if open == mark.0 && mark.1 >= width => fence = None,
+                Some(_) => {}
+                None => fence = Some(mark),
+            }
+            return false;
+        }
+        fence.is_none()
+    })
 }
 
 /// A backtick or tilde fence (three or more of one kind) and its width, or nothing.

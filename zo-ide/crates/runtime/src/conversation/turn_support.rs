@@ -405,6 +405,25 @@ where
         section
     }
 
+    /// Tell the recall seat what the turn appended since it last heard, from
+    /// `heard_from` on, and whether the request that carried its last recall
+    /// was `answered` — then note that it has heard all of it (t-6264).
+    ///
+    /// Called at each request's boundary before the compaction there, and
+    /// once more with `ended` when the turn ends on its own terms, before the
+    /// post-turn compaction: whatever the transcript holds by the time the
+    /// turn's labels are written, the seat has heard what the turn did. A
+    /// turn that fails or is cancelled returns before the last call, and the
+    /// seat knows its record is not whole.
+    pub(super) fn tell_recall_seat(&self, heard_from: &mut usize, answered: &mut bool, ended: bool) {
+        if let Some(seat) = &self.recall_seat {
+            let appended = self.session.messages.get(*heard_from..).unwrap_or_default();
+            seat.observe(self.attempt(), crate::TurnProgress { appended, answered: *answered, ended });
+        }
+        *heard_from = self.session.messages.len();
+        *answered = false;
+    }
+
     pub(super) fn latest_user_text(&self) -> Option<Cow<'_, str>> {
         self.session.messages.iter().rev().find_map(|message| {
             if message.role != MessageRole::User {

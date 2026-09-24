@@ -985,6 +985,13 @@ where
         // abort→re-issue→abort spin impossible no matter how fast the user
         // types.
         let mut steering_reissued = false;
+        // What the recall seat has heard of this turn (t-6264): where the
+        // messages it has not seen begin, and whether the request that
+        // carried the last recall was answered since. Told at each request's
+        // boundary, before a compaction can take any of it, and once more
+        // when the turn ends (`Self::tell_recall_seat`).
+        let mut recall_heard_from = message_count_before;
+        let mut recall_answered = false;
 
         'outer: loop {
             if self.tool_loop_break_requested {
@@ -1215,6 +1222,10 @@ where
                     .await;
             }
 
+            // What the last request's answer and its tools did, handed to the
+            // recall seat before the compaction below can summarise it away.
+            self.tell_recall_seat(&mut recall_heard_from, &mut recall_answered, false);
+
             // Proactive compaction: compact *before* building the request.
             // The first iteration must use a local request estimate rather than
             // stale provider usage from the previous turn; later iterations use
@@ -1250,6 +1261,10 @@ where
                         .await;
                 }
             }
+            // The seat has heard everything before this point, and a
+            // compaction may have just rewritten it: what it hears next begins
+            // here.
+            recall_heard_from = self.session.messages.len();
 
             // Assemble the request without re-running the synchronous overflow
             // guard: the async preflight/iteration compaction just above already
@@ -2211,6 +2226,7 @@ where
                 if let Some(msg) = self.session.messages.last().cloned() {
                     assistant_messages.push(msg);
                 }
+                recall_answered = recall_attached;
                 // Text-only turn boundary (A). The tool-result drain below is
                 // never reached on a turn the model answers with prose alone,
                 // so steering typed during it would otherwise strand in the
@@ -2326,6 +2342,7 @@ where
             if let Some(msg) = self.session.messages.last().cloned() {
                 assistant_messages.push(msg);
             }
+            recall_answered = recall_attached;
 
             // ── Pass 1: Permission checks & pre-hooks (sequential) ──
             // Hooks and permission prompts require &mut self and may
@@ -2911,6 +2928,9 @@ where
             self.fire_post_batch_lifecycle_hooks();
         }
 
+        // The turn ended on its own terms: the recall seat hears the last of
+        // it before the post-turn compaction below can take any.
+        self.tell_recall_seat(&mut recall_heard_from, &mut recall_answered, true);
         if let Some(event) = self.maybe_microcompact_streaming(&render_tx, &id_gen).await {
             microcompact.get_or_insert(event);
         }

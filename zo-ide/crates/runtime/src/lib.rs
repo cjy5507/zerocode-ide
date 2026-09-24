@@ -290,7 +290,7 @@ pub use memory::{
     record_verified_check, render_recalled_memory_section, DreamReport, Dreamer,
     LexicalMemoryRetriever,
 };
-pub use memory::recall_seat::RecallSeat;
+pub use memory::recall_seat::{RecallSeat, TurnProgress};
 pub use mcp_oauth::open_browser;
 pub use second_brain::{SecondBrain, VaultStatus};
 pub use oauth::{
