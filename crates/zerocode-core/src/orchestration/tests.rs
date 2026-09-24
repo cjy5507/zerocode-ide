@@ -18884,6 +18884,7 @@ fn a_ledger_with_one_inbox() -> LedgerProjectionV1 {
         attachments: Vec::new(),
         retention_days: RETENTION_DEFAULT_DAYS,
         swept_at_ms: 0,
+        verb_tallies: Vec::new(),
     }
 }
 
@@ -20666,6 +20667,7 @@ fn a_large_healthy_ledger_still_loads() {
         attachments: Vec::new(),
         retention_days: RETENTION_DEFAULT_DAYS,
         swept_at_ms: 0,
+        verb_tallies: Vec::new(),
     };
 
     let _ = message_rows_taken();
@@ -20794,6 +20796,7 @@ fn a_ledger_with_many_runs_and_many_receipts_still_loads() {
                     messages: carried.clone(),
                 }),
                 fingerprint: Some(Text::from("f".repeat(64))),
+                verb: Some("check".to_string()),
                 filed_ms: Some(1),
                 expired: false,
             });
@@ -20816,6 +20819,7 @@ fn a_ledger_with_many_runs_and_many_receipts_still_loads() {
         attachments: Vec::new(),
         retention_days: RETENTION_DEFAULT_DAYS,
         swept_at_ms: 0,
+        verb_tallies: Vec::new(),
     };
 
     // Whatever building the fixture cost is not what is being measured.
@@ -21266,6 +21270,7 @@ fn tombstones_stop_at_a_ceiling_and_the_oldest_go_first() {
             request: format!("r-{at}"),
             answer: ServedAnswer::Inline("old".to_string()),
             fingerprint: Some("f".to_string()),
+            verb: Some("run-use".to_string()),
             filed_ms: Some(stamp),
             expired: false,
         });
@@ -23669,4 +23674,145 @@ fn a_late_sound_never_retires_the_next_occupants_readiness() {
 
     assert!(bench.ledger.worker_spoke(seat, 7));
     assert_eq!(heard(&bench), (None, None));
+}
+
+/* ---- served rows name their verb (t-6742) ---------------------------- */
+
+/// A receipt says which VERB it answered — one word out of [`VERBS`], the
+/// structural fact a frequency table is built from — and nothing else about
+/// the request: not its argv, not its body, not its answer. A row an older
+/// window filed says `None`, which reads as "unknown" and is never inferred
+/// from the answer's shape; the word survives the strict projection, a
+/// rebuild, and the sweep that hollows a receipt into a tombstone, and a
+/// replay after the rebuild is still the first answer.
+#[test]
+fn served_rows_name_their_verb() {
+    let mut bench = Bench::new();
+    let opened = bench.json("run-create --name verbs --retry-request r-open");
+    bench.json("task-create --spec build --retry-request r-task");
+    let verbs = |ledger: &Ledger| -> Vec<Option<String>> {
+        ledger
+            .export()
+            .served
+            .iter()
+            .map(|row| row.verb.clone())
+            .collect()
+    };
+    assert_eq!(
+        verbs(&bench.ledger),
+        vec![
+            Some("run-create".to_string()),
+            Some("task-create".to_string())
+        ]
+    );
+    for row in &bench.ledger.export().served {
+        let verb = row.verb.as_deref().expect("named");
+        assert!(
+            VERBS.iter().any(|(name, _, _)| *name == verb),
+            "{verb} is not a verb of the table"
+        );
+        assert!(
+            !verb.contains("--") && !verb.contains("verbs") && !verb.contains("build"),
+            "a verb row carried more than the verb: {verb}"
+        );
+    }
+
+    let rebuilt = Ledger::rebuild(bench.ledger.export()).expect("rebuilds");
+    assert_eq!(verbs(&rebuilt), verbs(&bench.ledger));
+    let mut bench = Bench {
+        ledger: rebuilt,
+        ..Bench::new()
+    };
+    let replayed = bench.json("run-create --name verbs --retry-request r-open");
+    assert_eq!(
+        replayed["runId"], opened["runId"],
+        "the replay is the first answer"
+    );
+    assert_eq!(
+        bench.ledger.export().served.len(),
+        2,
+        "a replay filed nothing new"
+    );
+
+    // The sweep keeps the verb on the tombstone it leaves.
+    let swept = bench.ledger.sweep_retention(bench.clock + 400 * DAY_MS);
+    assert_eq!(swept.receipts_expired, 2);
+    assert_eq!(
+        verbs(&bench.ledger),
+        vec![
+            Some("run-create".to_string()),
+            Some("task-create".to_string())
+        ]
+    );
+
+    // Older shapes: no verb was written, so none is known.
+    let file = serde_json::json!({
+        "runs": [], "bound": [],
+        "served": [
+            ["r-oldest", "the first answer"],
+            { "caller": "team-1/%2", "request": "r-seat", "answer": "the seat answer" },
+        ],
+        "next_id": 3,
+    })
+    .to_string();
+    let old: Ledger = serde_json::from_str(&file).expect("an old ledger opens");
+    assert_eq!(verbs(&old), vec![None, None]);
+    let carried = Ledger::rebuild(old.export()).expect("and projects");
+    assert_eq!(verbs(&carried), vec![None, None], "unknown stays unknown");
+}
+
+/// The count `served` cannot keep (t-6742): every verb of the table, by
+/// UTC day, calls and refusals — bounded to the newest days, carried by the
+/// projection and a rebuild, absent from a ledger written before it, and
+/// never a receipt.
+#[test]
+fn every_verb_call_is_tallied_by_day_without_a_receipt() {
+    let mut ledger = Ledger::new();
+    let day_one = 1_790_208_000_000_i64; // 2026-09-24T00:00:00Z
+    ledger.note_verb("worker-read", false, day_one + 5);
+    ledger.note_verb("worker-read", false, day_one + 7);
+    ledger.note_verb("worker-read", true, day_one + 9);
+    ledger.note_verb("worker-transcript", false, day_one + DAY_MS + 1);
+    ledger.note_verb("not-a-verb", false, day_one);
+    ledger.note_verb("check", false, -1);
+    let expected = vec![
+        VerbTally {
+            verb: "worker-read".to_string(),
+            day_start_ms: day_one,
+            calls: 3,
+            refused: 1,
+        },
+        VerbTally {
+            verb: "worker-transcript".to_string(),
+            day_start_ms: day_one + DAY_MS,
+            calls: 1,
+            refused: 0,
+        },
+    ];
+    assert_eq!(ledger.verb_tallies(), expected.as_slice());
+    assert!(
+        ledger.export().served.is_empty(),
+        "a tally is not a receipt"
+    );
+    assert_eq!(ledger.export().verb_tallies, expected);
+    let rebuilt = Ledger::rebuild(ledger.export()).expect("rebuilds");
+    assert_eq!(rebuilt.verb_tallies(), expected.as_slice());
+    let file = serde_json::to_string(&ledger).expect("writes");
+    let read: Ledger = serde_json::from_str(&file).expect("reads");
+    assert_eq!(read.verb_tallies(), expected.as_slice());
+
+    let old: Ledger = serde_json::from_str(r#"{"runs":[],"bound":[],"served":[],"next_id":1}"#)
+        .expect("an old ledger opens");
+    assert!(old.verb_tallies().is_empty());
+
+    // Only the newest days stay.
+    ledger.note_verb("check", false, day_one + (VERB_TALLY_DAYS + 2) * DAY_MS);
+    assert_eq!(
+        ledger
+            .verb_tallies()
+            .iter()
+            .map(|row| row.verb.as_str())
+            .collect::<Vec<_>>(),
+        vec!["check"]
+    );
 }

@@ -4943,6 +4943,15 @@ impl RuntimeState {
         let Some(mut decided) = planned else {
             return Err(RuntimeError::UnauthorizedSeat);
         };
+        /* The count `served` cannot keep (t-6742): every verb that reached
+         * the plan, by UTC day, with its refusals — counted HERE because this
+         * is the one road every verb passes, and the ledger's plan stays the
+         * pure decision it is. A read moves no revision for it; the count
+         * rides the next durable write, so a window closed before one loses
+         * the reads counted since — a bounded loss the tally's doc states. */
+        if let Some(verb) = command.argv().first() {
+            ledger.note_verb(verb, decided.reply.exit_code != 0, command.now_ms());
+        }
         if let Effect::WorkerTerminal {
             seat,
             incarnation,
@@ -6290,6 +6299,63 @@ mod tests {
     /// on the first row insert, where the real one did; the ledger the disk
     /// holds afterwards must be the one from before, and the runtime must be
     /// able to take the disk's word and answer again once the fault is gone.
+    /// Every verb that reaches the plan is counted by UTC day with its
+    /// refusals (t-6742) — the reads too, which file no receipt and move no
+    /// revision — and the count rides the next durable write. Receipts name
+    /// their verb on the same road.
+    #[test]
+    fn a_verb_call_is_counted_by_day_and_rides_the_next_durable_write() {
+        let fixture = Fixture::new();
+        let actor = start(&fixture, RuntimeBoot::Fresh { now_ms: 10 }, 2);
+        let day = 1_790_208_000_000_i64; // 2026-09-24T00:00:00Z
+        let (_, opened) = actor
+            .plan(a_command(
+                &["run-create", "--name", "counted", "--retry-request", "r-1"],
+                day + 1,
+            ))
+            .expect("a run");
+        let (read, after_read) = actor
+            .plan(a_command(&["worker-read", "--worker", "w-404"], day + 2))
+            .expect("planned");
+        assert_ne!(read.reply.exit_code, 0, "an unknown worker is refused");
+        assert_eq!(after_read, opened, "a read moved the revision");
+        let (_, after_write) = actor
+            .plan(a_command(
+                &["task-create", "--spec", "x", "--retry-request", "r-2"],
+                day + 3,
+            ))
+            .expect("a write");
+        assert!(after_write > opened);
+
+        let connection = fixture.store.connection().expect("store connection");
+        let held = ledger_store::read(&connection, "main-ledger", PROJECTION_SCHEMA)
+            .expect("the store reads")
+            .expect("and the ledger is there");
+        let rows: Vec<(&str, i64, u64, u64)> = held
+            .projection
+            .verb_tallies
+            .iter()
+            .map(|row| (row.verb.as_str(), row.day_start_ms, row.calls, row.refused))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                ("run-create", day, 1, 0),
+                ("worker-read", day, 1, 1),
+                ("task-create", day, 1, 0),
+            ]
+        );
+        assert_eq!(
+            held.projection
+                .served
+                .iter()
+                .map(|row| row.verb.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("run-create"), Some("task-create")],
+            "a read filed no receipt, and each receipt names its verb"
+        );
+    }
+
     #[test]
     fn a_write_that_dies_half_way_leaves_the_previous_ledger_whole() {
         let fixture = Fixture::new();
@@ -8878,6 +8944,7 @@ mod tests {
                 messages: vec!["m-2".to_string()],
             }),
             fingerprint: Some(Text::from("f".repeat(64))),
+            verb: None,
             filed_ms: None,
             expired: false,
         });

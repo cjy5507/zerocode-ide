@@ -120,6 +120,7 @@ fn a_projection() -> LedgerProjectionV1 {
                 request: Text::from(format!("request-{at}")),
                 answer: ServedAnswer::Inline("benchmark answer".to_string()),
                 fingerprint: Some(Text::from(format!("fingerprint-{at:064}"))),
+                verb: Some("run-use".to_string()),
                 filed_ms: Some(at as i64),
                 expired: false,
             })
@@ -129,6 +130,7 @@ fn a_projection() -> LedgerProjectionV1 {
         attachments: Vec::new(),
         retention_days: 30,
         swept_at_ms: 0,
+        verb_tallies: Vec::new(),
     }
 }
 

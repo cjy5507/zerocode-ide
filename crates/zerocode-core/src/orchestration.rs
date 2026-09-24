@@ -4909,6 +4909,12 @@ pub struct Ledger {
     /// before this existed reads back as never swept, which is true.
     #[serde(default)]
     swept_at_ms: i64,
+    /// How often each verb was asked, by UTC day (t-6742) — see
+    /// [`VerbTally`]. Counted by the runtime that carries every verb, not
+    /// by [`plan`], so a plan stays the pure decision it is; kept here so
+    /// the count rides every durable write and comes back with the rows.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    verb_tallies: Vec<VerbTally>,
 }
 
 impl Default for Ledger {
@@ -4926,9 +4932,40 @@ impl Default for Ledger {
             next_binding_revision: 0,
             retention_days: RETENTION_DEFAULT_DAYS,
             swept_at_ms: 0,
+            verb_tallies: Vec::new(),
         }
     }
 }
+
+/// How often one verb was asked on one UTC day, and how often it was
+/// refused at the plan (t-6742).
+///
+/// The instrumentation `served` cannot be: a receipt is filed only for a
+/// verb that takes a retry name, and the reads a coordinator makes most —
+/// `worker-read`, and now `worker-transcript` — refuse one, so no receipt
+/// ever says how often a screen was asked for. This row does, for every
+/// verb of [`VERBS`], counting CALLS that reached the plan: a retry
+/// replayed from its receipt is a call; a refusal at the plan (an unknown
+/// worker, a retry name on a read, a window the verb cannot read) is a call
+/// AND a refusal; what the window did with a planned effect afterwards — a
+/// capture of a pane that vanished between plan and read — is not seen
+/// here and not claimed. `calls - refused` is therefore "reads planned",
+/// an upper bound on reads answered.
+///
+/// Bounded twice over: one row per verb per day, and only the newest
+/// [`VERB_TALLY_DAYS`] days.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VerbTally {
+    pub verb: String,
+    /// The UTC day, as the epoch milliseconds it began at.
+    pub day_start_ms: i64,
+    pub calls: u64,
+    pub refused: u64,
+}
+
+/// How many days of verb tallies a ledger keeps.
+pub const VERB_TALLY_DAYS: i64 = 31;
 
 impl std::fmt::Debug for Ledger {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -4943,6 +4980,7 @@ impl std::fmt::Debug for Ledger {
             .field("runs", &self.runs.len())
             .field("bound", &self.bound.len())
             .field("served", &self.served.len())
+            .field("verb_tallies", &self.verb_tallies.len())
             .field("next_id", &self.next_id)
             .field("retention_days", &self.retention_days)
             .finish_non_exhaustive()
@@ -5258,6 +5296,15 @@ struct Served {
     answer: ServedAnswer,
     /// Absent only in a ledger an older window wrote.
     fingerprint: Option<String>,
+    /// Which VERB this receipt answered — one word out of [`VERBS`], and
+    /// nothing else about the request (t-6742). Structural metadata for a
+    /// frequency table: how often each receipt-filing verb is asked, by
+    /// day, read off the store without opening a single answer. Never the
+    /// argv, the body or the answer — those stay where they were. Absent
+    /// on a row an older window wrote, which reads as "unknown" and is not
+    /// inferred from the answer's shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    verb: Option<String>,
     /// When this receipt was filed, so retention can tell an answer that is
     /// months old from one that is minutes old. Absent only in a ledger an
     /// older window wrote — and an unstamped row is treated as filed at the
@@ -5412,6 +5459,8 @@ impl<'de> serde::Deserialize<'de> for Served {
             #[serde(default)]
             fingerprint: Option<String>,
             #[serde(default)]
+            verb: Option<String>,
+            #[serde(default)]
             filed_ms: Option<i64>,
             #[serde(default)]
             expired: bool,
@@ -5428,6 +5477,7 @@ impl<'de> serde::Deserialize<'de> for Served {
                 request,
                 answer,
                 fingerprint,
+                verb,
                 filed_ms,
                 expired,
             }) => Self {
@@ -5435,6 +5485,7 @@ impl<'de> serde::Deserialize<'de> for Served {
                 request,
                 answer,
                 fingerprint,
+                verb,
                 filed_ms,
                 expired,
             },
@@ -5443,6 +5494,7 @@ impl<'de> serde::Deserialize<'de> for Served {
                 request,
                 answer: ServedAnswer::Inline(answer),
                 fingerprint: None,
+                verb: None,
                 filed_ms: None,
                 expired: false,
             },
@@ -5461,6 +5513,9 @@ pub struct ReceiptKey {
     caller: String,
     /// The caller's own name for this attempt.
     pub request: String,
+    /// The verb the receipt will name — the one structural fact a served
+    /// row keeps about its request (`Served::verb`).
+    verb: String,
     /// The durable, redacted name of this request.
     durable: DurableRetryIdentity,
 }
@@ -5470,6 +5525,7 @@ impl ReceiptKey {
         Self {
             caller: caller.to_string(),
             request: request.to_string(),
+            verb: verb.to_string(),
             durable: DurableRetryIdentity::of(request, caller, verb, words),
         }
     }
@@ -7024,6 +7080,7 @@ impl Ledger {
             request: key.request.clone(),
             answer,
             fingerprint: Some(key.durable.fingerprint().to_string()),
+            verb: Some(key.verb.clone()),
             /* Stamped here and nowhere else, because here is the only moment
              * that knows WHEN the answer was true. A negative clock is read as
              * "no stamp" rather than as a date before the epoch — the sweep
@@ -7043,6 +7100,51 @@ impl Ledger {
             let spill = self.served.len() - (SERVED_MAX - SERVED_PRUNE_BATCH);
             self.served.drain(..spill);
         }
+    }
+
+    /// Count one call of `verb` on the UTC day of `now_ms` — see
+    /// [`VerbTally`]. A verb the table does not know is not counted, and a
+    /// negative clock (a stamp nobody has) counts nothing rather than a day
+    /// before the epoch. Rows older than [`VERB_TALLY_DAYS`] before the
+    /// newest day go.
+    pub fn note_verb(&mut self, verb: &str, refused: bool, now_ms: i64) {
+        if now_ms < 0 || doing(verb).is_none() {
+            return;
+        }
+        let day_start_ms = now_ms.div_euclid(DAY_MS) * DAY_MS;
+        match self
+            .verb_tallies
+            .iter_mut()
+            .find(|row| row.day_start_ms == day_start_ms && row.verb == verb)
+        {
+            Some(row) => {
+                row.calls = row.calls.saturating_add(1);
+                if refused {
+                    row.refused = row.refused.saturating_add(1);
+                }
+            }
+            None => self.verb_tallies.push(VerbTally {
+                verb: verb.to_string(),
+                day_start_ms,
+                calls: 1,
+                refused: u64::from(refused),
+            }),
+        }
+        let newest = self
+            .verb_tallies
+            .iter()
+            .map(|row| row.day_start_ms)
+            .max()
+            .unwrap_or(day_start_ms);
+        let oldest_kept = newest.saturating_sub(VERB_TALLY_DAYS.saturating_mul(DAY_MS));
+        self.verb_tallies
+            .retain(|row| row.day_start_ms > oldest_kept);
+    }
+
+    /// The verb tallies as they stand, in the order they were opened.
+    #[must_use]
+    pub fn verb_tallies(&self) -> &[VerbTally] {
+        &self.verb_tallies
     }
 
     /// Write a task down.
@@ -20323,6 +20425,9 @@ pub struct LedgerProjectionV1 {
     /// back as never, which is what it was.
     #[serde(default)]
     pub swept_at_ms: i64,
+    /// See [`VerbTally`]. Empty on a store written before it was counted.
+    #[serde(default)]
+    pub verb_tallies: Vec<VerbTally>,
 }
 
 /// Turn only unverifiable **legacy** check receipts into tombstones.
@@ -20739,6 +20844,11 @@ pub struct ServedRow {
     pub request: Text,
     pub answer: ServedAnswer,
     pub fingerprint: Option<Text>,
+    /// The verb the receipt answered (`Served::verb`): a word of [`VERBS`],
+    /// public by construction, so a plain `String` rather than a [`Text`].
+    /// `None` on a row an older window wrote — unknown, never inferred.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verb: Option<String>,
     /// When the answer was filed, so retention can tell an old one from a new
     /// one. Absent on every row an older window wrote, and such a row is never
     /// expired by age — see [`Ledger::sweep_retention`].
@@ -20925,6 +21035,7 @@ impl Ledger {
                     request: Text(held.request.clone()),
                     answer: held.answer.clone(),
                     fingerprint: held.fingerprint.clone().map(Text),
+                    verb: held.verb.clone(),
                     filed_ms: held.filed_ms,
                     expired: held.expired,
                 })
@@ -20933,6 +21044,7 @@ impl Ledger {
             gates: Vec::new(),
             retention_days: self.retention_days,
             swept_at_ms: self.swept_at_ms,
+            verb_tallies: self.verb_tallies.clone(),
         };
 
         for run in &self.runs {
@@ -21105,6 +21217,7 @@ impl Ledger {
                     request: row.request.into_string(),
                     answer: row.answer,
                     fingerprint: row.fingerprint.map(Text::into_string),
+                    verb: row.verb,
                     filed_ms: row.filed_ms,
                     expired: row.expired,
                 })
@@ -21114,6 +21227,7 @@ impl Ledger {
             next_binding_revision: 0,
             retention_days: projected.retention_days,
             swept_at_ms: projected.swept_at_ms,
+            verb_tallies: projected.verb_tallies,
         };
 
         for row in projected.runs {
