@@ -1,0 +1,1 @@
+{"instant_duration_ms":1,"max_actions":128,"max_cooldown_ms":60000,"max_detectors":16,"max_expanded_actions":256,"max_frame_age_ns":50000000,"max_lease_ns":1000000000,"max_macro_depth":8,"max_macros":32,"max_pointer_duration_ms":1000,"max_predicate_depth":8,"max_roi_pixels":1048576,"max_rules":32,"max_scale_part":8,"max_work_pixels":4194304}

@@ -2882,6 +2882,16 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
     let flags = flags(&argv[1..])?;
     let json = flags.contains_key("json");
     reject_unknown(method, &flags)?;
+    if flags.contains_key("instant")
+        && !crate::computer_use_protocol::reflex::capability(
+            crate::computer_use_protocol::reflex::Surface::MacosDesktop,
+        )
+        .live_reflex
+    {
+        return Err(
+            "unsupported_capability: instant pointer style needs a live reflex provider".into(),
+        );
+    }
     let mut params = Map::new();
 
     if let Some(app) = optional_string(&flags, "app")? {
@@ -2978,6 +2988,7 @@ pub fn parse_command(argv: &[String]) -> Result<ComputerCommand, String> {
         ("reset-budget", "resetBudget"),
         ("reset", "reset"),
         ("allow-self", "allowSelf"),
+        ("instant", "instant"),
         ("pass", "pass"),
         ("fail", "fail"),
         ("diff", "diff"),
@@ -3072,6 +3083,7 @@ fn flags(argv: &[String]) -> Result<BTreeMap<String, Option<String>>, String> {
                 | "reset-budget"
                 | "reset"
                 | "allow-self"
+                | "instant"
                 | "pass"
                 | "fail"
                 | "diff"
@@ -3229,7 +3241,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
         ],
         ComputerMethod::Screenshot => &["json", "display", "region", "full-res", "viewer"],
         ComputerMethod::Zoom => &["json", "display", "region"],
-        ComputerMethod::MouseMove => &["json", "x", "y", "steps"],
+        ComputerMethod::MouseMove => &["json", "x", "y", "steps", "instant"],
         ComputerMethod::MouseClick => &[
             "json",
             "x",
@@ -3237,6 +3249,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "mouse-button",
             "click-count",
             "modifiers",
+            "instant",
             "allow-self",
             "confirming",
         ],
@@ -3247,6 +3260,7 @@ pub(crate) fn allowed(method: ComputerMethod) -> &'static [&'static str] {
             "to-x",
             "to-y",
             "steps",
+            "instant",
             "allow-self",
             "confirming",
         ],
@@ -4005,9 +4019,9 @@ pub fn usage() -> String {
         "  the desktop, no app named — screen points, the mouse and the keys where a person has them:",
         "  zerocode-computer screenshot [--display N] [--region x,y,w,h] [--full-res] [--viewer <id>] [--json]",
         "  zerocode-computer zoom --region x,y,w,h [--display N] [--json]",
-        "  zerocode-computer mouse-move --x X --y Y [--steps N] [--json]",
-        "  zerocode-computer mouse-click --x X --y Y [--mouse-button left|right|middle] [--click-count N] [--modifiers chord] [--json]",
-        "  zerocode-computer mouse-drag --from-x X --from-y Y --to-x X --to-y Y [--steps N] [--json]",
+        "  zerocode-computer mouse-move --x X --y Y [--steps N] [--instant] [--json]",
+        "  zerocode-computer mouse-click --x X --y Y [--mouse-button left|right|middle] [--click-count N] [--modifiers chord] [--instant] [--json]",
+        "  zerocode-computer mouse-drag --from-x X --from-y Y --to-x X --to-y Y [--steps N] [--instant] [--json]",
         "  zerocode-computer mouse-scroll --x X --y Y [--dx N] [--dy N] [--json]",
         "  zerocode-computer cursor-position [--json]",
         "  zerocode-computer key --key <key|modifier+key> [--json]",
@@ -7707,5 +7721,37 @@ mod tests {
             parse_command(&argv(&["screenshot", "--pane", "browser-13"])).unwrap_err(),
             "unknown flag --pane",
         );
+    }
+    #[test]
+    fn pointer_style_instant_is_a_closed_cli_flag() {
+        let words = |parts: &[&str]| {
+            parts
+                .iter()
+                .map(|part| (*part).to_string())
+                .collect::<Vec<_>>()
+        };
+        for command in [
+            vec!["mouse-move", "--x", "1", "--y", "2", "--instant"],
+            vec!["mouse-click", "--x", "1", "--y", "2", "--instant"],
+            vec![
+                "mouse-drag",
+                "--from-x",
+                "1",
+                "--from-y",
+                "2",
+                "--to-x",
+                "3",
+                "--to-y",
+                "4",
+                "--instant",
+            ],
+        ] {
+            assert!(
+                parse_command(&words(&command))
+                    .unwrap_err()
+                    .contains("unsupported_capability")
+            );
+        }
+        assert!(parse_command(&words(&["key", "--key", "a", "--instant"])).is_err());
     }
 }
