@@ -962,8 +962,9 @@ pub struct RouteLabelRow {
     /// The level that work reads as (`route_label::observed_level`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed: Option<String>,
-    /// The mark the judge counts: the level the judgment answered stood
-    /// within a band of the level the work turned out to be (t-6346).
+    /// The mark the judge counts: the router, reading the level the
+    /// judgment answered, would have picked the tier the work turned out to
+    /// need (`route_label::same_tier`, t-6346).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agreed: Option<bool>,
     /// The keyword tables' mark on the same facts
@@ -995,7 +996,7 @@ pub fn route_unseated_by(trigger: SwitchTrigger) -> bool {
 /// Write the routing seat's label for the turn `attempt` names (t-5806,
 /// t-6346): what became of its route (`followed`), and — when the turn's own
 /// words met an answered judgment — whether the level that judgment answered
-/// stood within a band of what the turn's messages say it did, beside the
+/// routes to the tier what the turn's messages say it did needed, beside the
 /// same mark for the keyword tables.
 ///
 /// Nothing is written when the ledger's tail holds no judgment of that
@@ -1070,8 +1071,8 @@ fn grade<'a>(
     let axis = runtime::COMPLEXITY_AXIS.name;
     let said = level(answered.jev.as_ref().and_then(|jev| jev.get(axis)).map(|judged| judged.choice.as_str()));
     let rule = level(answered.rule.as_ref().and_then(|rule| rule.get(axis)).map(String::as_str));
-    label.agreed = said.and_then(|said| super::route_label::within_a_band(said, observed));
-    label.baseline_agreed = rule.and_then(|rule| super::route_label::within_a_band(rule, observed));
+    label.agreed = said.and_then(|said| super::route_label::same_tier(said, observed));
+    label.baseline_agreed = rule.and_then(|rule| super::route_label::same_tier(rule, observed));
     label.not_compared = label.agreed.is_none().then(|| UNANSWERED.to_string());
 }
 

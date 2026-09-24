@@ -803,14 +803,18 @@ pub const JUDGMENT_MEMO_DEADLINE_MS: u64 = 50;
 /// probe is asked only where the answer abstains ([`JevUse::confidence_bands`]).
 ///
 /// The `agreed` rule (t-6346, after t-5806): a routing judgment agreed when
-/// the complexity it answered stood within one band of what the turn it was
-/// asked about turned out to be — the turn's own calls, the files it wrote
-/// and the agents it started, read as a level by one table (zo's
-/// `route_label`) — and disagreed when it stood two or more bands off. The
-/// first rule — the route STOOD, no wall, refusal or person moved the model —
-/// said yes ten times in ten; what became of the route is kept beside the
-/// mark as `followed`. The label is one row per turn, keyed by the turn's
-/// attempt, written by the host when the turn ends
+/// the router, reading the complexity it answered, would have picked the
+/// tier the turn it was asked about turned out to need — the turn's own
+/// calls, the files it wrote and the agents it started, read as a level by
+/// one table (zo's `route_label`), and both levels read through the router's
+/// own complexity-to-tier table (zo's `runtime::default_difficulty_tier`:
+/// trivial and small the fast tier, medium the balanced, large the strong).
+/// "Within one band of the work" was the rule first written and was dropped
+/// on the replay: a reader that always said small agreed on 401 of 488
+/// turns. The first rule — the route STOOD, no wall, refusal or person moved
+/// the model — said yes ten times in ten; what became of the route is kept
+/// beside the mark as `followed`. The label is one row per turn, keyed by
+/// the turn's attempt, written by the host when the turn ends
 /// (`decision_shadow::note_route_followed`); a turn the person cancelled is
 /// not judged, and a turn the seat was never asked about leaves no label.
 /// The judge counts it beside the probe's axis agreement, one comparison per

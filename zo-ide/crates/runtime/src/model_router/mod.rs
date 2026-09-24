@@ -68,7 +68,7 @@ pub use outcome::{
     OUTCOME_COMPLETED, OUTCOME_FAILED, OUTCOME_STOPPED,
 };
 pub use policy::{
-    deep_tier_model_matches, default_deep_tier_models, dynamic_deep_tier_models,
+    deep_tier_model_matches, default_deep_tier_models, default_difficulty_tier, dynamic_deep_tier_models,
     escalate_complexity, exploration_slot_for_route,
     implementation_escalation_allowed, implementation_route_model_allowed, is_deep_tier_model, is_reserved_orchestrator_model,
     recommended_effort_for,

@@ -796,6 +796,7 @@ fn a_turn_label_grades_the_turns_own_judgment_on_what_the_turn_did() {
             judged(1, "s@1", "fix the typo", "large", "trivial"),
             judged(2, "s@2", "trace the slow start", "medium", "trivial"),
             judged(3, "s@3", "words nobody typed", "small", "small"),
+            judged(4, "s@4", "port the settings page", "medium", "large"),
         ],
     );
     let edited = |path: &str| {
@@ -822,13 +823,19 @@ fn a_turn_label_grades_the_turns_own_judgment_on_what_the_turn_did() {
         ConversationMessage::user_text("trace the slow start"),
         ConversationMessage::assistant(vec![call("bash"), call("read_file"), call("read_file"), call("bash")]),
     ];
+    // An agent started: work across parts.
+    let fanned = vec![
+        ConversationMessage::user_text("port the settings page"),
+        ConversationMessage::assistant(vec![call("Agent")]),
+    ];
 
     // A turn nobody routed leaves no label; an empty attempt asks nothing.
     assert!(!note_route_followed(work.path(), "s@9", None, Some(&typo)), "a turn the seat never judged was labeled");
     assert!(!note_route_followed(work.path(), "  ", None, Some(&typo)));
 
-    // Judged large, and it was one small edit: two bands off, the label says
-    // no — while the tables' trivial sat within a band of it. Written once.
+    // Judged large, and it was one small edit: the strong tier for the fast
+    // tier's work, the label says no — while the tables' trivial routed to
+    // the tier it needed. Written once.
     assert!(note_route_followed(work.path(), "s@1", None, Some(&typo)));
     assert!(!note_route_followed(work.path(), "s@1", None, Some(&typo)), "a second label for one turn");
     // Judged medium, and it was an investigation: the label agrees, the
@@ -836,9 +843,12 @@ fn a_turn_label_grades_the_turns_own_judgment_on_what_the_turn_did() {
     assert!(note_route_followed(work.path(), "s@2", Some(runtime::SwitchTrigger::Quota), Some(&trace)));
     // A turn whose words the judgment never read compares nothing, and says why.
     assert!(note_route_followed(work.path(), "s@3", None, Some(&typo)));
+    // Judged medium, and it started an agent: one band off, but the ordinary
+    // tier for work across parts — the label says no; the tables' large agrees.
+    assert!(note_route_followed(work.path(), "s@4", None, Some(&fanned)));
 
     let labels: Vec<RouteLabelRow> = super::super::shadow_ledger::read_shadow_rows(&ledger);
-    assert_eq!(labels.len(), 3, "{labels:?}");
+    assert_eq!(labels.len(), 4, "{labels:?}");
     assert_eq!((labels[0].label.as_str(), labels[0].attempt.as_str()), ("s@1", "s@1"));
     assert_eq!(labels[0].followed, ROUTE_STOOD);
     assert_eq!(labels[0].observed.as_deref(), Some("small"));
@@ -848,9 +858,11 @@ fn a_turn_label_grades_the_turns_own_judgment_on_what_the_turn_did() {
     assert_eq!(labels[1].observed.as_deref(), Some("medium"));
     assert_eq!((labels[1].agreed, labels[1].baseline_agreed), (Some(true), Some(false)));
     assert_eq!((labels[2].agreed, labels[2].not_compared.as_deref()), (None, Some("unanswered")));
+    assert_eq!(labels[3].observed.as_deref(), Some("large"));
+    assert_eq!((labels[3].agreed, labels[3].baseline_agreed), (Some(false), Some(true)));
     // A label is not a request: the counter leaves it out of every window.
     let rows = read_rows(&ledger);
-    assert_eq!(rows.iter().filter(|row| asked_something(row).is_some()).count(), 3);
+    assert_eq!(rows.iter().filter(|row| asked_something(row).is_some()).count(), 4);
     for key in zerocode_core::jev::summary::LEDGER_KEYS {
         let row = rows.last().expect("the label");
         if let Some(read) = key.read(row) {

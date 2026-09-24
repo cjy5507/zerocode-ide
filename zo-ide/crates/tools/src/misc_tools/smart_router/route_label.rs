@@ -7,9 +7,10 @@
 //! one reads what the turn DID, off its own messages — how many tools it
 //! called, how many files its edits wrote, whether it started agents — as
 //! the level of the routing Score the judgment answered
-//! (`zerocode_core::jev::questions::ROUTING_COMPLEXITY_LEVELS`). The same
-//! facts grade the keyword tables beside it, so the seat is held against its
-//! baseline on one set of marks.
+//! (`zerocode_core::jev::questions::ROUTING_COMPLEXITY_LEVELS`), and marks
+//! the judgment by whether the router, reading its level, would have picked
+//! the tier that work needed. The same facts grade the keyword tables beside
+//! it, so the seat is held against its baseline on one set of marks.
 
 use runtime::{ContentBlock, ConversationMessage, RouteTaskComplexity};
 use serde::{Deserialize, Serialize};
@@ -87,25 +88,26 @@ pub fn observed_level(work: &TurnWork) -> RouteTaskComplexity {
         .map_or(RouteTaskComplexity::Trivial, |rung| rung.level)
 }
 
-/// How many bands a mark may stand from the work and still agree: one — the
-/// most fusion ever moves a route (`runtime::fuse_probe_assessment`), so an
-/// answer one band off routed within what applying it could have changed,
-/// and one two or more off is the miss the label exists to catch.
-pub const WORK_BAND_TOLERANCE: usize = 1;
-
-/// Whether `said` stands within [`WORK_BAND_TOLERANCE`] of what the work
-/// `was`; `None` where either side has no band (`Unknown`).
+/// Whether the router, reading `said`, would have picked the tier the work
+/// `was` needed (`runtime::default_difficulty_tier`); `None` where either
+/// side has no tier (`Unknown`).
+///
+/// The tier, not the band: "within one band of the work" agreed with a
+/// reader that always said small on 401 of the 488 person turns this
+/// machine's transcripts held for the thirty days to 2026-09-24 — the
+/// keyword tables on 392 — so it could hardly say no. By the tier the same
+/// reader agrees on 204 and the tables on 193: a constant answer is held to
+/// the share of turns that were its tier's work.
 #[must_use]
-pub fn within_a_band(said: RouteTaskComplexity, was: RouteTaskComplexity) -> Option<bool> {
-    let band = |complexity: RouteTaskComplexity| runtime::COMPLEXITY_AXIS.position(complexity.as_label());
-    Some(band(said)?.abs_diff(band(was)?) <= WORK_BAND_TOLERANCE)
+pub fn same_tier(said: RouteTaskComplexity, was: RouteTaskComplexity) -> Option<bool> {
+    Some(runtime::default_difficulty_tier(said)? == runtime::default_difficulty_tier(was)?)
 }
 
 #[cfg(test)]
 mod tests {
     use runtime::{ContentBlock, ConversationMessage, RouteTaskComplexity as C};
 
-    use super::{observed_level, turn_work, within_a_band, TurnWork};
+    use super::{observed_level, same_tier, turn_work, TurnWork};
 
     fn call(name: &str) -> ContentBlock {
         ContentBlock::ToolUse { id: format!("toolu-{name}"), name: name.to_string(), input: "{}".to_string() }
@@ -159,15 +161,18 @@ mod tests {
         assert_eq!(at(1, 0, 1), C::Large, "a started agent is work across parts");
     }
 
-    /// A mark within one band of what the turn turned out to be agrees —
-    /// fusion never moves a route further than that — and one further off
-    /// says no. A side that could not say has no mark.
+    /// A mark agrees when the router, reading it, would have picked the tier
+    /// the work turned out to need: trivial and small are both the fast
+    /// tier's work, so a trivial mark on a small turn agrees, and a medium
+    /// mark on a turn that started an agent does not. A side that could not
+    /// say has no mark.
     #[test]
-    fn a_turn_label_can_say_no() {
-        assert_eq!(within_a_band(C::Medium, C::Large), Some(true));
-        assert_eq!(within_a_band(C::Small, C::Small), Some(true));
-        assert_eq!(within_a_band(C::Trivial, C::Medium), Some(false), "a quick answer that became an investigation");
-        assert_eq!(within_a_band(C::Large, C::Trivial), Some(false), "a brief that turned out to need nothing");
-        assert_eq!(within_a_band(C::Unknown, C::Small), None, "the tables could not say");
+    fn a_turn_label_agrees_on_the_tier_the_router_would_pick() {
+        assert_eq!(same_tier(C::Trivial, C::Small), Some(true), "both are the fast tier's work");
+        assert_eq!(same_tier(C::Large, C::Large), Some(true));
+        assert_eq!(same_tier(C::Medium, C::Large), Some(false), "the ordinary tier for work across parts");
+        assert_eq!(same_tier(C::Small, C::Medium), Some(false), "a quick answer that became an investigation");
+        assert_eq!(same_tier(C::Large, C::Trivial), Some(false), "a brief that turned out to need nothing");
+        assert_eq!(same_tier(C::Unknown, C::Small), None, "the tables could not say");
     }
 }

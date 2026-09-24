@@ -2268,7 +2268,12 @@ pub(super) fn same_main_bonus(role: RouteRole) -> i32 {
 /// quick work to a cheap (Fast) tier, ordinary work to Balanced, heavy work to a
 /// Strong tier. `Unknown` (an empty/uninferable task) yields `None`, leaving such
 /// agents on the parent model rather than guessing a tier.
-const fn default_difficulty_tier(complexity: RouteTaskComplexity) -> Option<ModelTier> {
+///
+/// The three places the router tells complexity apart — the same three the
+/// implementation rungs walk from — so the routing seat's label reads a
+/// judgment's level through this table rather than a copy of it.
+#[must_use]
+pub const fn default_difficulty_tier(complexity: RouteTaskComplexity) -> Option<ModelTier> {
     match complexity {
         RouteTaskComplexity::Trivial | RouteTaskComplexity::Small => Some(ModelTier::Fast),
         RouteTaskComplexity::Medium => Some(ModelTier::Balanced),
