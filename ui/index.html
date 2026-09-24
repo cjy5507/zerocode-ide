@@ -4203,6 +4203,11 @@
             <span data-jev-summary data-i18n="settings.typesafe.patch_reviewSummary">편집 도구가 쓴 코드 수정을 모델이 결과를 읽기 전에 네 가지 질문으로 검토합니다. 켜면 통과하지 못한 수정에 무엇을 할지 한 줄을 붙입니다.</span>
             <p data-jev-hint data-i18n="settings.typesafe.patch_reviewHint">zo의 편집 도구(edit_file·write_file·MultiEdit)가 파일을 고치면, 모델이 그 결과를 읽기 전에 네 가지를 판단합니다: 과업을 다루는가, 근거가 뒷받침하는가, 과업이 청하지 않은 변경이 섞였는가, 먼저 사람에게 물었어야 했는가. 네 답이 모두 수정을 두는 쪽으로 0.8 이상 기울면 허용, 아니면 제안으로 판정하지만 어느 쪽도 편집을 막지 않습니다. 켜면 허용받지 못한 수정의 결과에 어느 질문이 얼마나 기울었고 무엇을 할지 한 줄을 붙이고, 1.5초 안에 응답이 없으면 붙이지 않습니다. 「기록만」은 판정을 기록만 하고 결과와 그 시간은 그대로 둡니다. 「자동」은 나중 결과(같은 줄을 다섯 턴 안에 다시 고치거나 되돌렸는지, 턴의 마지막 편집 뒤 검사가 통과했는지)로 잰 응답률이 열에 아홉, 판정 정확도가 다섯에 넷을 신뢰 하한으로 넘은 뒤에만 그 한 줄을 붙입니다. 보내는 것은 사람의 최근 말 앞 2,000자, 수정에서 바뀐 줄(8 KiB까지), 편집 직전 도구 출력의 끝 4 KiB, 파일 경로의 지문뿐이고 파일 자체는 보내지 않습니다. 보내기는 동의한 폴더에서만 하고, 비밀번호·키일 수 있는 줄은 보내기 전에 가립니다.</p>
           </div>
+          <div data-jev-feature="file_pick">
+            <span data-jev-name data-i18n="settings.typesafe.file_pick">고칠 파일 미리 알리기</span>
+            <span data-jev-summary data-i18n="settings.typesafe.file_pickSummary">코드 요청에서 검색·최근 편집·코드 그래프로 후보를 모아 다시 정렬합니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.file_pickHint">구현·디버깅 요청에 최대 30개 파일 경로와 첫 설명 줄(200바이트)을 보냅니다. 파일마다 하나씩, 후보가 하나라도 맞는지도 따로 묻습니다. 확신도가 0.7보다 낮으면 안내를 생략합니다. 「기록만」은 안내 없이 답과 실제 편집된 파일을 기록합니다. 「자동」은 실제 편집 파일을 라벨로 삼아 최근 편집 순서보다 나은 근거가 쌓인 뒤 안내합니다. 파일 본문은 보내지 않습니다.</p>
+          </div>
         </template>
         </section>
 

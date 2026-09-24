@@ -2882,6 +2882,23 @@ pub const PATCH_REVIEW_APPLY_DEADLINE_MS: u64 = 1_500;
 /// last edit settles the label first — the harness's own receipt (r43).
 pub const PATCH_REVIEW_REGRET_TURNS: u32 = 5;
 
+/// The file-pick seat asks about at most this many candidates in one batch.
+pub const FILE_PICK_CANDIDATE_CAP: usize = 30;
+/// The request head carried beside the candidates.
+pub const FILE_PICK_REQUEST_CHAR_CAP: usize = ROUTING_TASK_CHAR_CAP;
+/// The first descriptive line sent beside a candidate path.
+pub const FILE_PICK_ABOUT_BYTE_CAP: usize = 200;
+/// The hint names no more than this many candidates.
+pub const FILE_PICK_HINT_FILE_CAP: usize = 3;
+/// A candidate needs this yes probability before it can be shown.
+pub const FILE_PICK_MATCH_FLOOR_PERMILLE: u16 = 700;
+/// A file-pick batch must answer nine times in ten before `auto` can rise.
+pub const FILE_PICK_ANSWER_FLOOR_PERMILLE: u16 = 900;
+/// The top-three hindsight match must clear this line and today's recent-edit order.
+pub const FILE_PICK_AGREEMENT_FLOOR_PERMILLE: u16 = 600;
+/// An applied hint can wait this long for the one batched answer.
+pub const FILE_PICK_APPLY_DEADLINE_MS: u64 = 1_500;
+
 /// zo's patch review: every patch an edit tool has just written — `edit_file`,
 /// `write_file`, `MultiEdit`, anything whose result carries a structured
 /// patch — put to four Noul questions before the model reads the result
@@ -2966,7 +2983,53 @@ pub const PATCH_REVIEW: JevUse = JevUse {
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 20] = [
+/// Re-rank likely files for a code task, with one Noul for each candidate.
+///
+/// A future label is the file set the same turn actually edited. The baseline
+/// is the same turn's recent-edit order. During evidence collection the default
+/// is `shadow`; the judge alone decides whether `auto` may show an answer.
+pub const FILE_PICK: JevUse = JevUse {
+    id: "file_pick",
+    setting: "jevFilePick",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Shadow,
+    repeat: None,
+    sends: &[
+        Sent {
+            at: "/state/request",
+            cap: Cap::Chars(FILE_PICK_REQUEST_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/files",
+            cap: Cap::Items(FILE_PICK_CANDIDATE_CAP),
+        },
+        Sent {
+            at: "/state/files/*/path",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/files/*/about",
+            cap: Cap::Bytes(FILE_PICK_ABOUT_BYTE_CAP),
+        },
+    ],
+    ledger: "file-pick.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(FILE_PICK_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(FILE_PICK_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(FILE_PICK_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Hindsight,
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::on_a_noul(
+        NOUL_UNCERTAIN_TO_PERMILLE,
+        FILE_PICK_MATCH_FLOOR_PERMILLE,
+    )),
+};
+
+pub static JEV_USES: [JevUse; 21] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -2987,6 +3050,7 @@ pub static JEV_USES: [JevUse; 20] = [
     JUDGMENT_CACHE,
     CHALLENGER,
     PATCH_REVIEW,
+    FILE_PICK,
 ];
 
 impl JevUse {

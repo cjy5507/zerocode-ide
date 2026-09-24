@@ -540,6 +540,7 @@ where
         self.replace_transient_system_reminder_by_prefix(TEAM_INBOX_REMINDER_PREFIX, None);
         self.replace_transient_system_reminder_by_prefix(RECALL_HINT_REMINDER_PREFIX, None);
         self.replace_transient_system_reminder_by_prefix(GOAL_CLARIFY_REMINDER_PREFIX, None);
+        self.replace_transient_system_reminder_by_prefix(crate::FILE_PICK_NOTE_PREFIX, None);
         self.replace_transient_system_reminder_by_prefix(
             super::budget_wrap_up::BUDGET_WRAP_UP_REMINDER_PREFIX,
             None,

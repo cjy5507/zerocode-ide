@@ -24,6 +24,8 @@ pub(crate) struct RuntimePluginState {
     /// before the model reads the result. Built here for the reason the
     /// recall seat is.
     pub(crate) patch_review_seat: Option<Arc<dyn runtime::PatchReviewSeat>>,
+    /// Seated at the public turn boundary to rank files for code requests.
+    pub(crate) file_pick_seat: Option<Arc<dyn runtime::FilePickSeat>>,
     pub(crate) mcp_state: Option<Arc<Mutex<RuntimeMcpState>>>,
     pub(crate) lsp_state: Option<Arc<Mutex<RuntimeLspState>>>,
 }

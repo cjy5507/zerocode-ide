@@ -466,6 +466,38 @@ fn recall_hint_runtime(session: Session) -> ConversationRuntime<StopApiClient, S
     )
 }
 
+type FilePickLabelObservations = Arc<Mutex<Vec<(String, Vec<String>, Option<usize>)>>>;
+
+#[derive(Clone)]
+struct FixedFilePickSeat {
+    asked: Arc<Mutex<Vec<crate::FilePickAsk>>>,
+    labels: FilePickLabelObservations,
+    hint: Option<crate::FilePickHint>,
+}
+
+impl crate::FilePickSeat for FixedFilePickSeat {
+    fn suggest(
+        &self,
+        ask: crate::FilePickAsk,
+    ) -> futures_util::future::BoxFuture<'_, Option<crate::FilePickHint>> {
+        if let Ok(mut asked) = self.asked.lock() {
+            asked.push(ask);
+        }
+        let hint = self.hint.clone();
+        Box::pin(async move { hint })
+    }
+
+    fn label(&self, attempt: &str, edited_paths: &[String], search_calls_before_first_edit: Option<usize>) {
+        if let Ok(mut labels) = self.labels.lock() {
+            labels.push((
+                attempt.to_string(),
+                edited_paths.to_vec(),
+                search_calls_before_first_edit,
+            ));
+        }
+    }
+}
+
 #[test]
 fn verify_intent_defaults_to_other_and_is_installed_per_turn() {
     // Every host that never installs a probed intent — headless, serve,
@@ -600,6 +632,92 @@ fn recall_hint_injects_on_past_reference_and_clears_per_turn() {
             "hint is cleared at turn start for {input:?}"
         );
     }
+}
+
+#[test]
+fn the_hint_rides_after_the_cache_breakpoint_and_labels_the_turn_edits() {
+    let mut runtime = recall_hint_runtime(Session::new());
+    runtime
+        .session
+        .push_user_text("Earlier request")
+        .expect("prior message");
+    let before = runtime.build_request(None).expect("request before the hint");
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let labels = Arc::new(Mutex::new(Vec::new()));
+    runtime.set_file_pick_seat(Some(Arc::new(FixedFilePickSeat {
+        asked: Arc::clone(&asked),
+        labels: Arc::clone(&labels),
+        hint: Some(crate::FilePickHint {
+            text: "[zo:file-pick] Likely files for this request: \"src/target.rs\" (suggestions; verify or ignore).".to_string(),
+        }),
+    })));
+
+    runtime.inject_file_pick_hint("Please fix the parser in src/target.rs");
+    let after = runtime.build_request(None).expect("request with the hint");
+
+    assert_eq!(
+        after.system_prompt.as_ref(),
+        before.system_prompt.as_ref(),
+        "the base system prompt is byte-identical"
+    );
+    assert!(after.wire_reminders.is_empty());
+    assert_eq!(
+        &after.messages[..before.messages.len()],
+        before.messages.as_slice(),
+        "the hint only appends after the prior cacheable message prefix"
+    );
+    assert!(after.messages.iter().any(|message| {
+        message.role == MessageRole::System
+            && message.blocks.iter().any(|block| {
+                matches!(block, ContentBlock::Text { text } if text.starts_with(crate::FILE_PICK_NOTE_PREFIX))
+            })
+    }));
+    assert_eq!(asked.lock().expect("the seat was asked").len(), 1);
+
+    runtime
+        .session
+        .push_message(ConversationMessage::tool_result(
+            "read-1",
+            "Read",
+            "{}".to_string(),
+            false,
+        ))
+        .expect("search result");
+    runtime
+        .session
+        .push_message(ConversationMessage::tool_result(
+            "edit-1",
+            "edit_file",
+            serde_json::json!({
+                "filePath": "src/target.rs",
+                "structuredPatch": [{"oldStart": 1, "oldLines": 0, "newStart": 1, "newLines": 1, "lines": ["+fn target() {}"]}]
+            })
+            .to_string(),
+            false,
+        ))
+        .expect("edit result");
+    runtime.finish_file_pick_turn();
+    let labels = labels.lock().expect("the turn was labeled");
+    assert_eq!(labels.len(), 1);
+    assert_eq!(labels[0].1, ["src/target.rs"]);
+    assert_eq!(labels[0].2, Some(1));
+}
+
+#[test]
+fn an_unseated_file_pick_keeps_the_request_byte_identical() {
+    let mut runtime = recall_hint_runtime(Session::new());
+    runtime
+        .session
+        .push_user_text("Earlier request")
+        .expect("prior message");
+    let before = runtime.build_request(None).expect("request before file pick");
+
+    runtime.inject_file_pick_hint("Please fix the parser");
+    let after = runtime.build_request(None).expect("request after off file pick");
+
+    assert_eq!(after.system_prompt.as_ref(), before.system_prompt.as_ref());
+    assert_eq!(after.messages, before.messages);
+    assert_eq!(after.wire_reminders, before.wire_reminders);
 }
 
 #[test]

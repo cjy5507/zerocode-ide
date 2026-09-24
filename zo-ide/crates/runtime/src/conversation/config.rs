@@ -324,6 +324,12 @@ where
         self.patch_review_seat = seat;
     }
 
+    /// Seat a file-pick judgment beside each public user turn. It records in
+    /// shadow and gives the agent a hint only when the mode acts.
+    pub fn set_file_pick_seat(&mut self, seat: Option<Arc<dyn crate::FilePickSeat>>) {
+        self.file_pick_seat = seat;
+    }
+
     pub fn set_auto_compaction_enabled(&mut self, enabled: bool) {
         self.auto_compaction_enabled = enabled;
         if !enabled {
