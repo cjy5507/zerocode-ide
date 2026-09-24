@@ -14,35 +14,37 @@
  * 호출도, 모델 호출도, 메일 확인/답장도 없다. 보는 일이 우편을 소비하면
  * 코디네이터의 받은함이 보는 것만으로 비워진다. 그리고 원장에 없는 사실은
  * 그리지 않는다: 없는 것은 `unknown`이고, 잘린 snapshot은 「완료」가 아니다.
+ * 원장의 행도 전역으로 들고 있지 않는다 — 판 하나가 물은 한 벌(`boardCards`)이
+ * 카드와 함께 이 파일로 건너오고, 그 판의 모델이 그 한 벌을 제 `source`에 든다.
  *
  * **자리는 신원이 아니다.** `term:N`은 이 화면 안에서 노드를 찾는 **탐색키**일
- * 뿐이고, 주체는 `run/worker/dispatch` 셋이다. 판이 다시 앉거나 시도가 바뀌면
- * 그 자리의 주체가 바뀐 것이므로, 앞 주체가 남긴 맥박·watermark·수의 기준선을
- * 그 자리에서 **버린다**(아래 `liveSubjects`) — 앞사람의 사건이 뒷사람의
- * 사건으로 넘어가지 않게. 셋 중 하나라도 없는 카드는 `unverified`이고, 그런
- * 카드는 배정·결과 사건을 만들지 않는다.
+ * 뿐이고, 주체는 `run/worker/dispatch` 셋이다. 그래서 사건과 맥박은 제가 일어난
+ * 때의 주체를 적어 두고(`seats`), 수의 기준선은 같은 두 주체 사이에서만 잇는다
+ * (`ends`). 판이 다시 앉거나 시도가 바뀌면 그 자리의 새 주체는 앞 주체의 맥박도,
+ * 수의 기준선도, 사건의 근거도 물려받지 않는다. 셋 중 하나라도 없는 카드는
+ * `unverified`이고, 그런 카드는 배정·결과 사건을 만들지 않는다.
  *
  * **revision이 없는 스트림.** `GraphOverlaySnapshot`에는 revision 필드가
  * 없다. 그래서 여기서도 만들지 않는다. 최신성은 셋을 **함께** 써서 판정한다 —
- * 실제 event id, 관계마다의 stamp watermark, 그리고 범위가 움직일 때 올라가는
- * 세대 빗장. stamp 하나만으로는 같은 시각의 두 사건을 가릴 수 없으므로,
- * watermark는 **엄격히 옛것**만 버리고 같은 시각의 다른 id는 서로 다른 실제
- * 사건으로 받는다. */
+ * 실제 event id, 관계마다의 stamp watermark, 그리고 판이 물은 차례와 범위의
+ * 세대(`boardCommit`, shell.js). stamp 하나만으로는 같은 시각의 두 사건을 가릴
+ * 수 없으므로, watermark는 **엄격히 옛것**만 버리고 같은 시각의 다른 id는 서로
+ * 다른 실제 사건으로 받는다. */
 
 /* 손잡이. 기본은 꺼짐 — 실시간 지도는 고르는 그림이지 기본 그림이 아니다. */
 let agentGraphLive = false;
 
-/* 상한과 양. 둘 다 **데이터의 양**이라 토큰이 아니라 상수다(맥박이 사는
+/* 상한과 양. 셋 다 **데이터의 양**이라 토큰이 아니라 상수다(맥박이 사는
  * 길이와 한 판의 맥박 수는 시각 수치라 토큰이 든다 — `agentGraphTuning`). */
 const AGENT_GRAPH_LIVE = Object.freeze({
   /* 기억하는 관계의 수. 세션 내내 무한히 쌓이면 이것이 두 번째 원장이 된다.
-   * 넘치면 오래 손대지 않은 관계부터 버리고, 버린 관계가 다시 나타나면
-   * **조용히 다시 맞춘다**(아래 `adopt`) — 맥박 하나를 놓치는 쪽을 고른다. */
+   * 넘치면 오래 손대지 않은 관계부터 잊고, 잊은 것이 다시 나타나면 **조용히
+   * 다시 맞춘다**(아래 `liveForgetFloor`) — 맥박 하나를 놓치는 쪽을 고른다. */
   laneKeep: 256,
   /* 한 관계에서 **같은 밀리초**에 일어난 서로 다른 사건을 몇 개까지 기억하는가.
    * 완전한 중복 제거가 성립하는 것은 이 수 안에서다. 넘으면 그 관계는
-   * `truncated`가 되고 조용한 재동기화로 넘어간다 — 그 창의 사건은 맥박이
-   * 되지 않을 수 있고, 화면은 그 사실을 숨기지 않는다. */
+   * `truncated`가 되고, 그 시각이 지나갈 때까지 같은 시각의 모르는 사건은
+   * 새 것도 옛것도 아닌 채로 조용히 맞춘다 — 화면은 그 사실을 숨기지 않는다. */
   sameStampKeep: 16,
   /* 인스펙터가 그리는 최근 사건 줄 수. 근거 보존은 원장의 일이고 이 목록은
    * 그 원장으로 가는 손잡이일 뿐이다. */
@@ -51,7 +53,7 @@ const AGENT_GRAPH_LIVE = Object.freeze({
 
 /* ---- 장부 ------------------------------------------------------------------ */
 
-/* 관계 하나가 지금까지 말한 것: `{ stamp, keys, count, truncated }`.
+/* 관계 하나가 지금까지 말한 것: `{ stamp, keys, count, ends, truncated }`.
  *
  * 중복 제거의 **경계를 여기 한 곳에 적는다**. 사건 키의 전역 목록 하나로는
  * 이 일을 할 수 없다: A@T와 B@T가 지나간 뒤 상한이 A를 밀어내면, 마지막 키는
@@ -60,38 +62,40 @@ const AGENT_GRAPH_LIVE = Object.freeze({
  *
  *   · `evStamp < stamp` — 옛 사건. 버린다. 집합을 보지 않아도 된다.
  *   · `evStamp === stamp` — `keys`에 있으면 같은 사건, 없으면 같은 시각의
- *     **다른 실제 사건**이다. 합치지 않는다.
+ *     **다른 실제 사건**이다. 합치지 않는다. 다만 그 시각의 집합이 온전하지
+ *     않으면(`truncated`) 그 판정을 내릴 수 없으므로 조용히 맞춘다.
  *   · `evStamp > stamp` — 새 사건. watermark가 올라가고 집합은 그 하나로
  *     다시 시작한다.
  *
- * 이것으로 「새 사건 누락」과 「옛 사건 재생」이 **동시에** 풀리는 것은 아니다.
  * 성립하는 범위는 둘이다 — 한 밀리초에 같은 관계에서 `sameStampKeep`개까지,
  * 그리고 `laneKeep`개까지의 관계. 그 밖에서는 완전한 중복 제거를 주장하지
  * 않고 **조용한 재동기화**로 물러난다(`adopt`): 지금 상태를 본 것으로 적고
  * 맥박은 내지 않는다. 놓친 맥박은 아무것도 거짓말하지 않지만, 지어낸 맥박은
  * 없던 사건을 만든다.
  *
- * `count`는 같은 주체·같은 관계에서의 **실제 증가**만 세기 위한 기준선이다. */
+ * `count`는 같은 두 주체(`ends`) 사이의 **실제 증가**만 세기 위한 기준선이다. */
 const liveLanes = new Map();
-/* 상한에 밀려난 관계의 이름표. 이것이 있어야 「처음 보는 관계」와 「기억을
- * 잃은 관계」를 가릴 수 있다. 이 표까지 넘치면 그 구별이 끝나므로, 그 사실을
- * 적어 두고(`liveDropTruncated`) 그 뒤로는 모든 낯선 관계를 조용히 다시
- * 맞춘다 — 놓친 맥박은 아무것도 거짓말하지 않는다. */
-const liveDropped = new Set();
-let liveDropTruncated = false;
 
-/* 자리마다의 주체 — `run/worker/dispatch`. 이것이 바뀌면 그 자리의 모든 기억을
- * 버린다.
+/* 잊은 것의 바닥. 상한에 밀려난 관계는 이름표를 남기지 않는다 — 밀려난 이름을
+ * 모아 두는 표는 그 자체로 두 번째 장부가 되어, 되돌아오지 않는 관계의 수만큼
+ * 끝없이 자란다. 대신 **밀려난 관계들이 마지막으로 본 시각의 최댓값** 하나만
+ * 든다.
  *
- * 사라진 자리를 **솎아 내지 않는다**. 판이 풀렸다가 같은 번호로 다시 열리는
- * 것이 바로 앞사람의 사건을 뒷사람이 물려받는 길이고, 그 자리의 주체를 잊으면
- * 다음 판에서 「처음 보는 자리」로 읽혀 버릴 것을 버리지 못한다. 키는 이 창이
- * 연 터미널 번호이므로 한 세션 동안의 수는 그 자체로 상한이다. */
-const liveSubjects = new Map();
-/* 지금 뛰는 맥박: 키(노드 또는 간선) → { beat, eventKey, untilMs }. */
+ * 기록이 없는 관계의 사건이 이 바닥 이하라면, 그것이 잊은 관계의 옛 사건인지
+ * 처음 보는 관계의 사건인지 가릴 수 없으므로 조용히 맞춘다. 바닥보다 늦은
+ * 사건은 어느 쪽이든 이 창이 본 적 없는 사건이다 — 잊은 관계였다면 그 관계의
+ * 마지막 기억보다 뒤이고, 처음 보는 관계라면 말 그대로 처음이다. 아무것도
+ * 잊지 않은 판에는 바닥이 없다. */
+let liveForgetFloor = -Infinity;
+/* 몇 번 잊었는가. 수 하나라 상한이 필요 없고, 화면이 「잊은 관계가 있다」를
+ * 말하는 근거다. */
+let liveForgotten = 0;
+/* 지금 뛰는 맥박: 키(노드 또는 간선) → { beat, eventKey, untilMs, seats }. */
 const livePulses = new Map();
 /* 인스펙터가 읽는 최근 사건, 새 것이 앞. */
 let liveEvents = [];
+/* 사람이 목록에서 누른 사건의 키. 그 줄이 제 근거를 편다. */
+let liveSelectedEventKey = null;
 /* 맥박이 꺼질 때를 기다리는 시계 하나. */
 let livePulseTimer = null;
 /* 다음 판을 **조용히 삼킨다**: 첫 snapshot·손잡이를 켠 순간·범위 이동·부서진
@@ -99,31 +103,18 @@ let livePulseTimer = null;
  * 않는다. */
 let liveBaselineDue = true;
 /* 범위가 움직일 때 올라가는 빗장. 이보다 낮은 세대에서 떠난 비동기 갱신은
- * 지금의 지도·선택·근거를 덮지 못한다. revision 주장이 아니다. */
+ * 지금의 지도·선택·근거를 덮지 못한다(`boardCommit`). revision 주장이 아니다. */
 let liveGeneration = 0;
-
-/* 판이 마지막으로 읽은 원장 행, 카드의 자리마다. `boardCards()`가 이미 물은
- * 그 한 벌을 그대로 들고 있는다 — 같은 순간의 같은 답이라야 노드의 대기 사유와
- * 그 노드의 카드가 같은 snapshot을 말한다. 따로 물으면 두 시각이 한 카드에
- * 실린다. */
-const liveLedgerRows = new Map();
-
-function rememberAgentGraphLedgerRows(rows) {
-  liveLedgerRows.clear();
-  for (const row of Array.isArray(rows) ? rows : []) {
-    if (!row?.worker) continue;
-    liveLedgerRows.set(
-      typeof row.term === "number" ? `term:${row.term}` : `worker:${row.worker}`,
-      row,
-    );
-  }
-}
-
-function agentGraphLedgerRow(pane) {
-  return liveLedgerRows.get(pane) ?? null;
-}
+/* 이 파일이 문서에 건 귀의 수. 거는 손이 하나라 세는 곳도 하나다. */
+let liveListeners = 0;
 
 /* ---- 주체 ------------------------------------------------------------------- */
+
+/* 자리에 지금 앉은 것의 신원 — `run/worker/dispatch` 셋을 그대로 잇는다. 빈
+ * 칸이 있어도 신원은 신원이다: 빈 칸은 같은 빈 칸끼리만 같다. */
+function agentGraphLiveSeat(place) {
+  return [place?.run ?? "", place?.workerId ?? "", place?.dispatchId ?? ""].join("\u001f");
+}
 
 /* 이 자리에 지금 앉아 있는 **주체**. 셋 다 있어야 주체이고, 하나라도 없으면
  * `null`이다 — 그런 카드는 확인되지 않은 것(`unverified`)이지 「배정 없음」이
@@ -132,25 +123,7 @@ function agentGraphLiveSubject(place) {
   const run = place?.run ?? "";
   const worker = place?.workerId ?? "";
   const dispatch = place?.dispatchId ?? "";
-  return run && worker && dispatch ? `${run}\u001f${worker}\u001f${dispatch}` : null;
-}
-
-/* 자리의 주체가 바뀌었으면 그 자리의 기억을 버린다. 판이 다시 앉았든, 새
- * 시도가 같은 판을 물려받았든, 화면의 키는 같아도 **사건의 주인이 다른
- * 사람**이다. */
-function agentGraphLiveReseat(pane, subject) {
-  const held = liveSubjects.get(pane);
-  if (held === subject) return false;
-  if (subject === null) liveSubjects.delete(pane);
-  else liveSubjects.set(pane, subject);
-  if (held === undefined) return false;
-  livePulses.delete(`agent:${pane}`);
-  /* 이 자리를 끝점으로 들고 있던 관계만. 이름으로 부분 일치를 보면
-   * `term:30`이 `term:301`을 함께 지우므로, 관계는 제 끝점을 적어 둔다. */
-  for (const [lane, value] of [...liveLanes]) {
-    if (value.panes?.includes(pane)) liveLanes.delete(lane);
-  }
-  return true;
+  return run && worker && dispatch ? agentGraphLiveSeat(place) : null;
 }
 
 /* ---- 무엇이 실시간인가 ------------------------------------------------------ */
@@ -180,62 +153,61 @@ function agentGraphLiveEventKey(kind, parts) {
 /* 관계 하나가 말한 것을 장부에 접는다. 돌려주는 답은 셋이다:
  *
  *   `"seen"`  — 이미 아는 사건이거나 watermark보다 옛것. 아무 일도 없다.
- *   `"adopt"` — 이 관계를 **조용히 다시 맞춘다**. 기억이 없거나(처음 보는
- *               관계, 상한에 밀려났던 관계) 같은 시각의 기억이 상한을 넘었다.
- *               지금 상태를 적고 맥박은 내지 않는다.
+ *   `"adopt"` — 이 관계를 **조용히 다시 맞춘다**. 잊었을지 모르는 관계이거나,
+ *               그 시각의 기억이 온전하지 않다. 지금 상태를 적고 맥박은 내지
+ *               않는다.
  *   `"new"`   — 처음 보는 실제 사건. 맥박의 후보다.
  *
  * `laneKeep`은 다시 넣는 것으로 최근 순서를 지킨다 — Map은 넣은 차례를
  * 기억하므로, 손댄 관계를 지웠다 다시 넣으면 첫 키가 늘 가장 오래 손대지 않은
  * 관계다. */
-function agentGraphLiveLane(lane, stamp, key, panes = []) {
+function agentGraphLiveLane(lane, stamp, key, ends = "") {
   const held = liveLanes.get(lane);
   if (held === undefined) {
-    /* 처음 보는 관계인가, 상한에 밀려났던 관계인가. 그 둘은 **다른 답**을
-     * 받는다: 처음 보는 관계에서 일어난 일은 실제로 처음 보는 사건이고,
-     * 밀려났던 관계는 이 창이 그 사이의 기억을 잃었으므로 조용히 다시
-     * 맞춘다. 셋째 경우 — 밀려난 관계의 이름표까지 넘쳤을 때 — 는 둘을 가릴
-     * 수 없으므로 보수적인 쪽으로 간다. */
-    const dropped = liveDropped.delete(lane) || liveDropTruncated;
-    agentGraphLiveKeepLane(lane,
-      { stamp, keys: new Set([key]), count: null, truncated: dropped, panes });
-    return dropped ? "adopt" : "new";
+    if (stamp > liveForgetFloor) {
+      agentGraphLiveKeepLane(lane,
+        { stamp, keys: new Set([key]), count: null, ends, truncated: false });
+      return "new";
+    }
+    /* 잊었을지 모르는 관계. watermark는 바닥까지 올린다 — 이 관계의 옛 사건이
+     * 바닥 아래 어디에 있었는지 모르므로, 바닥 이하의 무엇도 뒤늦게 새 사건이
+     * 되지 못하게. 그 시각에 본 키의 집합도 모르므로 온전하지 않다. */
+    const watermark = Math.max(stamp, liveForgetFloor);
+    agentGraphLiveKeepLane(lane, { stamp: watermark,
+      keys: new Set(watermark === stamp ? [key] : []), count: null, ends, truncated: true });
+    return "adopt";
   }
   liveLanes.delete(lane);
-  if (stamp < held.stamp) {
-    liveLanes.set(lane, held);
-    return "seen";
-  }
+  liveLanes.set(lane, held);
+  if (stamp < held.stamp) return "seen";
   if (stamp > held.stamp) {
-    agentGraphLiveKeepLane(lane,
-      { stamp, keys: new Set([key]), count: held.count, truncated: false, panes });
+    held.stamp = stamp;
+    held.keys = new Set([key]);
+    held.truncated = false;
     return "new";
   }
-  if (held.keys.has(key)) {
-    liveLanes.set(lane, held);
-    return "seen";
-  }
+  if (held.keys.has(key)) return "seen";
+  /* 같은 밀리초의 기억이 온전하지 않다. 모르는 키가 그 시각의 새 사건인지,
+   * 기억에서 밀려난 옛 사건인지 이제는 가릴 수 없다 — 새 것으로 세면 옛 사건이
+   * 방금 일어난 일처럼 다시 뛴다. 시각이 지나갈 때까지(위의 `stamp >`) 조용히
+   * 맞추고, 키도 더 쌓지 않는다. */
+  if (held.truncated) return "adopt";
   if (held.keys.size >= AGENT_GRAPH_LIVE.sameStampKeep) {
-    /* 같은 밀리초의 기억이 상한을 넘었다. 여기서부터는 이 관계의 그 시각에
-     * 대해 완전한 중복 제거를 말할 수 없으므로, 주장하는 대신 물러난다. */
-    agentGraphLiveKeepLane(lane,
-      { stamp, keys: new Set([key]), count: held.count, truncated: true, panes });
+    held.truncated = true;
     return "adopt";
   }
   held.keys.add(key);
-  held.panes = panes;
-  liveLanes.set(lane, held);
   return "new";
 }
 
 function agentGraphLiveKeepLane(lane, value) {
   liveLanes.set(lane, value);
   while (liveLanes.size > AGENT_GRAPH_LIVE.laneKeep) {
-    const [oldest] = liveLanes.keys();
+    const [oldest, gone] = liveLanes.entries().next().value;
     if (oldest === lane) break;
     liveLanes.delete(oldest);
-    liveDropped.add(oldest);
-    if (liveDropped.size > AGENT_GRAPH_LIVE.laneKeep) liveDropTruncated = true;
+    liveForgetFloor = Math.max(liveForgetFloor, gone.stamp);
+    liveForgotten += 1;
   }
 }
 
@@ -248,8 +220,8 @@ function agentGraphLiveNote(event) {
 }
 
 /* 중복 제거가 **어디까지** 성립하는가. 화면과 보고가 같은 낱말로 말하도록
- * 장부가 스스로 답한다 — 상한에 밀려 조용히 다시 맞춘 관계가 있으면 그 수를
- * 함께 든다. */
+ * 장부가 스스로 답한다 — 그 시각의 기억이 온전하지 않은 관계의 수와, 상한에
+ * 밀려 잊은 적이 있는지. */
 function agentGraphLiveCoverage() {
   let truncated = 0;
   for (const lane of liveLanes.values()) if (lane.truncated) truncated += 1;
@@ -257,10 +229,9 @@ function agentGraphLiveCoverage() {
     lanes: liveLanes.size,
     laneKeep: AGENT_GRAPH_LIVE.laneKeep,
     sameStampKeep: AGENT_GRAPH_LIVE.sameStampKeep,
-    dropped: liveDropped.size,
-    droppedTruncated: liveDropTruncated,
     truncated,
-    complete: truncated === 0 && liveDropped.size === 0 && !liveDropTruncated,
+    forgotten: liveForgotten,
+    complete: truncated === 0 && liveForgotten === 0,
   };
 }
 
@@ -270,13 +241,12 @@ function agentGraphLiveCoverage() {
  * 그리는 손이 그 장부를 읽는다.
  *
  * `places`는 카드마다의 run/task/dispatch/worker 신원이고, `overlays`는
- * 백엔드가 이미 투영한 관계다. 이 함수는 그 둘과 원장 행만 읽는다.
+ * 백엔드가 이미 투영한 관계이며, `ledger`는 **이 판이 카드와 함께 물은** 원장
+ * 행이다(자리 → 행). 이 함수는 그 셋만 읽는다.
  *
- * `generation`은 이 snapshot이 떠날 때의 세대다. 그 사이 범위가 움직였으면
- * 늦게 도착한 이 답은 **통째로 버린다** — 지금의 지도를 옛 범위의 사실로
- * 덮지 않는다. */
-function agentGraphLiveObserve(answer, places, now = Date.now(), generation = liveGeneration) {
-  if (generation !== liveGeneration) return;
+ * 늦게 도착한 답을 거르는 것은 이 함수의 일이 아니다: 부르는 쪽이 답을 쓰기
+ * 전에 차례와 세대를 묻고(`boardCommit`), 거절된 답은 여기까지 오지 않는다. */
+function agentGraphLiveObserve(answer, places, now = Date.now(), { ledger = null } = {}) {
   if (!agentGraphLive) {
     /* 꺼져 있는 동안에도 baseline은 빚으로 남는다: 다시 켜는 판이 그동안의
      * backlog를 한꺼번에 터뜨리지 않도록. 지도가 서 있지 않은 판에서 이
@@ -285,18 +255,23 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), generation = li
     return;
   }
   const overlays = answer?.overlays ?? {};
+  const rows = ledger ?? new Map();
   /* 이 판의 카드, 자리마다. 대기 판정은 원장의 행과 **이 판의** 카드를 함께
    * 묻는다(`deskWorkerHealth`) — 지난 판의 모델에서 카드를 꺼내 오면 한 박자
    * 뒤진 상태로 사유를 고르게 된다. */
   const cards = new Map((answer?.columns ?? [])
     .flatMap((column) => (column.cards ?? []).map((card) => [card.pane, card])));
+  const seatOf = (pane) => agentGraphLiveSeat(places?.get(pane));
   const fresh = [];
 
-  /* ⓪ 자리마다의 주체를 먼저 맞춘다. 주체가 바뀐 자리는 이 판을 읽기 **전에**
-   *    제 기억을 버리므로, 앞 주체의 watermark가 새 주체의 첫 사건을 삼키지
-   *    않는다. */
-  for (const [pane, place] of places ?? []) {
-    agentGraphLiveReseat(pane, agentGraphLiveSubject(place));
+  /* ⓪ 주체가 바뀐 자리의 맥박은 내린다. 판이 다시 앉았든, 새 시도가 같은 판을
+   *    물려받았든, 화면의 키는 같아도 **사건의 주인이 다른 사람**이다 — 앞
+   *    주체의 사건이 새 주체의 자리에서 빛나지 않게. 이 판에 없는 자리는 주체에
+   *    대해 아무것도 말하지 않으므로 그 맥박은 제 수명대로 둔다. */
+  for (const [key, pulse] of [...livePulses]) {
+    if (pulse.seats.some(([pane, seat]) => places?.has(pane) && seatOf(pane) !== seat)) {
+      livePulses.delete(key);
+    }
   }
 
   /* ① 배정과 교신 — 실제 메일 행. `MessageKind::Dispatch`가 배정이고, 두
@@ -314,23 +289,36 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), generation = li
      * 적어 둔 그 키로 앉는다. 둘을 하나로 쓰면 그림이 키를 바꾸는 날 장부가
      * 모든 관계를 처음 보는 것으로 읽는다. */
     const edgeKey = `overlay:mail:${agentGraphAgentKey(edge.from)}>${agentGraphAgentKey(edge.to)}`;
-    const before = liveLanes.get(lane)?.count ?? null;
-    const verdict = agentGraphLiveLane(lane, stamp, key, [edge.from, edge.to]);
-    /* 이 관계에서 **몇 통이 늘었는가**. 기준선이 없으면(처음 보는 관계, 자리가
-     * 새 주체로 바뀐 판, 상한에 밀려 다시 맞춘 관계, 다시 켠 판) 증가가 아니라
-     * baseline이다 — 재연결을 활동으로 읽지 않는다. */
+    /* 두 끝의 주체. 같은 두 자리라도 앉은 사람이 바뀌면 그 사이의 통 수는 다른
+     * 두 사람의 수다 — 기준선은 같은 두 주체 사이에서만 잇는다. */
+    const ends = `${seatOf(edge.from)}\u001e${seatOf(edge.to)}`;
+    const prior = liveLanes.get(lane);
+    const baseline = prior !== undefined && prior.ends === ends ? prior.count : null;
+    const verdict = agentGraphLiveLane(lane, stamp, key, ends);
+    /* 이 관계에서 **몇 통이 늘었는가**. 기준선이 없으면(처음 보는 관계, 끝의
+     * 주체가 바뀐 판, 다시 맞춘 관계, 다시 켠 판) 증가가 아니라 baseline이다 —
+     * 재연결을 활동으로 읽지 않는다.
+     *
+     * 그리고 기준선은 **watermark와 함께만** 움직인다. 옛 stamp의 판이 늦게 와서
+     * 「본 것」으로 걸러져도 그 판의 수를 기준선으로 삼으면, 수는 과거로 돌아가고
+     * 다음 새 사건이 그 사이의 통을 모두 「이번 판에 늘었다」고 말한다. */
     const count = Number(edge.count) || 0;
-    const added = verdict === "new" && before !== null ? Math.max(0, count - before) : null;
-    liveLanes.get(lane).count = count;
+    const held = liveLanes.get(lane);
+    if (stamp >= held.stamp) {
+      held.count = count;
+      held.ends = ends;
+    }
     if (verdict !== "new") continue;
     const event = {
       key,
       kind: "message",
       at: stamp,
+      observedAt: now,
       from: agentGraphAgentKey(edge.from),
       to: agentGraphAgentKey(edge.to),
       edgeKey,
-      added,
+      added: baseline !== null ? Math.max(0, count - baseline) : null,
+      seats: [[edge.from, seatOf(edge.from)], [edge.to, seatOf(edge.to)]],
       /* 근거는 원장의 것이다. 여기 드는 것은 그 원장으로 가는 식별자뿐 —
        * 본문도 과업 산문도 담지 않는다. */
       evidence: {
@@ -351,23 +339,31 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), generation = li
     const state = `${fact.task_state ?? ""}>${fact.dependency_state ?? ""}`;
     const key = agentGraphLiveEventKey("dep",
       [fact.run ?? "", fact.task ?? "", fact.dependency ?? "", state]);
-    if (agentGraphLiveLane(lane, stamp, key, [fact.from, fact.to].filter(Boolean)) !== "new") continue;
+    if (agentGraphLiveLane(lane, stamp, key) !== "new") continue;
+    const ends = [fact.from, fact.to].filter(Boolean);
     const event = {
       key,
       kind: "dependency",
-      at: stamp,
+      /* 전이가 **언제** 일어났는지는 이 판에 없다. `task_created_ms`는 후속
+       * 과업이 생긴 때이지 선행 조건의 상태가 바뀐 때가 아니므로, 그 시각을
+       * 이 사건의 나이로 빌려 쓰지 않는다 — 발생 시각은 모름이고, 이 창이 본
+       * 때를 따로 든다. 과업이 생긴 때는 근거의 한 칸으로 남는다. */
+      at: 0,
+      observedAt: now,
       from: fact.from ? agentGraphAgentKey(fact.from) : null,
       to: agentGraphAgentKey(fact.to),
       edgeKey: fact.from
         ? `overlay:dependency:${agentGraphAgentKey(fact.from)}>${agentGraphAgentKey(fact.to)}`
         : null,
       added: null,
+      seats: ends.map((pane) => [pane, seatOf(pane)]),
       evidence: {
         run: fact.run ?? "",
         taskId: fact.task ?? "",
         dependencyId: fact.dependency ?? "",
         taskState: fact.task_state ?? "",
         dependencyState: fact.dependency_state ?? null,
+        taskCreated: stamp,
       },
     };
     if (agentGraphLiveNote(event)) fresh.push(event);
@@ -376,7 +372,7 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), generation = li
   /* ③ 시도와 결과 — 카드의 dispatch 신원과 t-6815의 권위 seam. 워커의 주장
    *    (`reported`)과 코디네이터의 사실(검증/병합/배포)은 **다른 사건**이고,
    *    키가 달라 서로를 덮지 않는다. 재시도는 `dispatch_id`가 다르므로 그
-   *    자체로 다른 시도이고, 위 ⓪에서 이미 자리의 기억을 새로 받았다.
+   *    자체로 다른 시도이고, 관계의 이름부터 다르다.
    *
    *    셋 중 하나라도 없는 카드는 주체가 없다 — 사건을 만들지 않는다. */
   for (const [pane, place] of places ?? []) {
@@ -384,18 +380,23 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), generation = li
     if (subject === null) continue;
     const lane = `work:${subject}`;
     const started = Number(place.dispatchStarted) || 0;
-    const row = agentGraphLedgerRow(pane);
-    const stage = ledgerReviewStage(place, row);
+    const stage = ledgerReviewStage(place, rows.get(pane) ?? null);
     const key = agentGraphLiveEventKey("work", [subject, stage]);
-    if (agentGraphLiveLane(lane, started, key, [pane]) !== "new") continue;
+    if (agentGraphLiveLane(lane, started, key) !== "new") continue;
+    const assignment = stage === "dispatched";
     const event = {
       key,
-      kind: stage === "dispatched" ? "assignment" : "result",
-      at: started,
+      kind: assignment ? "assignment" : "result",
+      /* 배정의 시각은 배차가 시작된 때 그 자체다. 결과(보고·검증·병합·배포)가
+       * **언제** 적혔는지는 이 판에 없다 — 원장 행은 그 단계에 이르렀다는
+       * 사실만 싣는다. 그러니 결과의 나이를 배차의 시작으로 빌리지 않는다. */
+      at: assignment ? started : 0,
+      observedAt: now,
       from: null,
       to: `agent:${pane}`,
       edgeKey: null,
       added: null,
+      seats: [[pane, agentGraphLiveSeat(place)]],
       evidence: {
         run: place.run ?? "",
         taskId: place.taskId ?? "",
@@ -403,6 +404,7 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), generation = li
         dispatchId: place.dispatchId,
         retryOf: place.retryOf ?? null,
         stage,
+        dispatchStarted: started,
       },
     };
     if (agentGraphLiveNote(event)) fresh.push(event);
@@ -411,22 +413,26 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), generation = li
   /* ④ 기다림의 **사유가 바뀐** 판. 나이가 흐르는 것은 사건이 아니다 —
    *    사유와 그 사유가 기록된 stamp가 키를 이루므로, 30초 박자가 나이 낱말을
    *    바꾸어도 맥박은 없다. */
-  for (const [pane, row] of liveLedgerRows) {
+  for (const [pane, row] of rows) {
     const wait = agentGraphLiveWaitOf(row, cards.get(pane) ?? null, now);
     if (!wait) continue;
     const lane = `wait:${row.run ?? ""}\u001f${row.worker ?? ""}`;
     const key = agentGraphLiveEventKey("wait",
       [row.run ?? "", row.worker ?? "", wait.cause, String(wait.since)]);
-    if (agentGraphLiveLane(lane, wait.since, key, [pane]) !== "new") continue;
+    if (agentGraphLiveLane(lane, wait.since, key) !== "new") continue;
+    const place = places?.get(pane);
     const event = {
       key,
       kind: "wait",
       at: wait.since,
+      observedAt: now,
       from: null,
       to: `agent:${pane}`,
       edgeKey: null,
       added: null,
-      evidence: { run: row.run ?? "", workerId: row.worker ?? "", cause: wait.cause, since: wait.since },
+      seats: [[pane, agentGraphLiveSeat(place)]],
+      evidence: { run: row.run ?? "", workerId: row.worker ?? "",
+        dispatchId: place?.dispatchId ?? "", cause: wait.cause, since: wait.since },
     };
     if (agentGraphLiveNote(event)) fresh.push(event);
   }
@@ -442,6 +448,13 @@ function agentGraphLiveObserve(answer, places, now = Date.now(), generation = li
 
 /* ---- 맥박 -------------------------------------------------------------------- */
 
+/* 맥박을 접을 때 쓰는 최근의 차례. 발생 시각을 아는 사건은 그 시각으로, 모르는
+ * 사건은 이 창이 본 때로 — 차례를 매길 뿐, 어느 쪽도 화면에 시각으로 서지
+ * 않는다. */
+function agentGraphLiveRecency(event) {
+  return event.at > 0 ? event.at : event.observedAt;
+}
+
 /* 방금 본 사건들을 짧은 한 번의 맥박으로. 한 판에 도는 맥박의 수에는 상한이
  * 있고(토큰), 넘친 것은 **애니메이션만** 접는다 — 사건 목록과 간선의 실제
  * 수는 그대로 다 보인다. 근거를 숨기지도, 사건 수를 새로 만들지도 않는다. */
@@ -452,10 +465,10 @@ function agentGraphLiveStartPulses(fresh, now) {
   const until = now + tuning.pulseMs;
   /* 상한을 넘길 때 **무엇을 접는가**. 장부가 쌓는 차례(메일 → 의존 → 시도 →
    * 기다림)로 자르면 메일이 늘 이기고 기다림은 한 번도 뛰지 못한다 — 종류로
-   * 우열을 매긴 적이 없는데 그리는 차례가 우열을 만든 셈이다. 기록된 시각이
-   * 늦은 것부터 든다: 접히는 것은 언제나 **더 오래된 사건**이다. */
+   * 우열을 매긴 적이 없는데 그리는 차례가 우열을 만든 셈이다. 늦은 것부터
+   * 든다: 접히는 것은 언제나 **더 오래된 사건**이다. */
   const ordered = [...fresh]
-    .sort((left, right) => (right.at || 0) - (left.at || 0))
+    .sort((left, right) => agentGraphLiveRecency(right) - agentGraphLiveRecency(left))
     .slice(0, tuning.burst)
     /* 넣는 차례는 **오래된 것부터**다. `Map`은 넣은 차례를 기억하므로, 그렇게
      * 넣어야 아래의 잘라내기가 앞에서부터 「가장 오래 전에 뛴 것」을 집는다. */
@@ -467,9 +480,11 @@ function agentGraphLiveStartPulses(fresh, now) {
      * 한 판을 건너뛴 자리가 두 판 만에 같은 글자를 다시 받고, 같은 글자를 다시
      * 쓰는 것은 쓰기가 아니므로(값이 같으면 안 쓴다) 그 맥박은 뛰지 않는다. */
     const beat = livePulses.get(key)?.beat === "a" ? "b" : "a";
-    /* 지웠다 다시 넣어 차례를 맨 뒤로 옮긴다 — 다시 뛴 자리는 가장 최근이다. */
+    /* 지웠다 다시 넣어 차례를 맨 뒤로 옮긴다 — 다시 뛴 자리는 가장 최근이다.
+     * 맥박도 제가 누구의 사건인지 적어 둔다(`seats`): 주체가 바뀐 자리에서
+     * 앞사람의 맥박이 계속 빛나지 않게. */
     livePulses.delete(key);
-    livePulses.set(key, { beat, eventKey: event.key, untilMs: until });
+    livePulses.set(key, { beat, eventKey: event.key, untilMs: until, seats: event.seats });
   }
   /* 상한은 **한 번에 화면에서 뛰는 수**다. 판 하나에 들어오는 수만 자르면
    * 맥박이 900 ms를 사는 동안 판이 여러 번 오고, 판마다 여섯씩 쌓여 눈앞에는
@@ -497,32 +512,58 @@ function agentGraphLiveArmExpiry(now) {
   if (!Number.isFinite(next)) return;
   livePulseTimer = window.setTimeout(() => {
     livePulseTimer = null;
+    /* 그 사이 지도를 보일 판이 모두 사라졌으면(닫힘·숨김·작업 목록) 남은 맥박도
+     * 함께 거둔다 — 아무도 보지 못할 맥박을 위해 시계를 다시 걸지 않는다. */
+    const views = agentGraphLiveViews();
+    if (views.length === 0) {
+      agentGraphLiveStop();
+      return;
+    }
     const at = Date.now();
     for (const [key, pulse] of [...livePulses]) {
       if (pulse.untilMs <= at) livePulses.delete(key);
     }
-    for (const view of agentGraphLiveViews()) dressAgentGraphLive(view);
+    for (const view of views) dressAgentGraphLive(view);
     agentGraphLiveArmExpiry(at);
   }, Math.max(1, next - now));
 }
 
 /* 뷰를 떠나거나 손잡이를 끄거나 판이 숨으면 — 시계도 맥박도 남기지 않는다.
- * 들어갔다 나오기를 되풀이해도 활성 핸들이 늘지 않는 것은 이 한 손 때문이다. */
+ * 들어갔다 나오기를 되풀이해도 활성 핸들이 늘지 않는 것은 이 한 손 때문이다.
+ *
+ * 지우는 판은 **보이는 판만이 아니다**. 숨은 판의 노드에 남은 박자는 그 판이
+ * 다시 보이는 순간 CSS 애니메이션을 처음부터 다시 틀고, 그것은 숨김에서 돌아온
+ * 판이 backlog를 방금 일처럼 뛰게 하는 길이다. 박자를 적은 적이 있는 판만
+ * 실제로 훑는다(`liveDressedViews`). */
 function agentGraphLiveStop() {
   if (livePulseTimer !== null) clearTimeout(livePulseTimer);
   livePulseTimer = null;
   livePulses.clear();
-  for (const view of agentGraphLiveViews()) dressAgentGraphLive(view);
+  for (const view of document.querySelectorAll(".agent-board")) dressAgentGraphLive(view);
 }
 
-/* 지금 서 있는 시계와 맥박의 수 — 들어갔다 나오기를 되풀이해도 늘지 않는다는
- * 것을 시험이 실제 scheduler 경계에서 세기 위한 한 줄. */
+/* 지도를 보일 판이 하나도 남지 않았으면 시계와 맥박을 **지금** 거둔다. 판을
+ * 닫든, 작업 목록으로 돌리든, 판을 품은 자리가 숨든 — 보드가 이미 판의 크기를
+ * 재는 관찰자(`watchAgentGraphSize`)와 그리기(`paintAgentGraph`)가 그 문을
+ * 지나며 이 손을 부른다. 맥박이 없으면 아무것도 묻지 않는다. */
+function agentGraphLiveSettle() {
+  if (livePulseTimer === null && livePulses.size === 0) return;
+  if (agentGraphLiveViews().length === 0) agentGraphLiveStop();
+}
+
+/* 지금 이 장부가 들고 있는 모든 것의 수 — 들어갔다 나오기를 되풀이해도, 관계와
+ * 판이 끝없이 바뀌어도 늘지 않는다는 것을 시험이 실제 scheduler 경계에서 세기
+ * 위한 한 줄. 잊은 관계의 바닥과 횟수는 수 둘이라 여기 크기가 없다. */
 function agentGraphLiveHandles() {
+  let keys = 0;
+  for (const lane of liveLanes.values()) keys += lane.keys.size;
   return {
     timers: livePulseTimer === null ? 0 : 1,
     pulses: livePulses.size,
     lanes: liveLanes.size,
-    listeners: 1,
+    keys,
+    events: liveEvents.length,
+    listeners: liveListeners,
   };
 }
 
@@ -536,7 +577,9 @@ function agentGraphLiveTuning() {
     : null;
 }
 
-/* 지금 그림이 서 있는 보드 판. 작업 목록으로 서 있는 판은 관계 그림이 아니다.
+/* 지금 그림이 서 있는 보드 판. 작업 목록으로 서 있는 판은 관계 그림이 아니고,
+ * 제 자신이나 품은 자리가 숨은 판은 아무에게도 보이지 않는다(탭을 옮기면 판이,
+ * 무대가 다른 쪽으로 가면 그 위의 자리가 `hidden`을 받는다).
  *
  * 탭 장부가 아니라 **문서**에게 묻는다. 팝아웃으로 보드를 빼면 본창의
  * `boardTab()`은 빈손이 되고(그 탭이 저쪽으로 갔다), 그러면 이 손이 판을 찾지
@@ -544,7 +587,7 @@ function agentGraphLiveTuning() {
  * 묻는 쪽은 본창·팝아웃·복제된 판을 모두 같은 규칙으로 답한다. */
 function agentGraphLiveViews() {
   return [...document.querySelectorAll(".agent-board")]
-    .filter((view) => !view.hidden && !view.classList.contains("is-task-board"));
+    .filter((view) => !view.classList.contains("is-task-board") && view.closest("[hidden]") === null);
 }
 
 /* 맥박 하나를 노드·간선에 적는 유일한 손. 쓰는 것은 `data-live-beat` 하나뿐이라
@@ -622,20 +665,60 @@ function agentGraphLiveWaitOf(row, card, now = Date.now()) {
   };
 }
 
-/* 노드 하나가 그릴 대기 사실. 모델이 부르고, 없으면 `null`이라 배지가 서지
- * 않는다 — 「모름」을 「없음」으로 읽지 않도록, 사유를 아는 카드만 배지를 든다.
+/* 카드 한 장이 그릴 기다림. 노드의 칸과 판의 서명이 **같은 이 한 손**으로
+ * 묻는다 — 둘이 따로 지으면 칸이 바뀐 판을 서명이 모르고, 그 칸만 옛 낱말에
+ * 굳는다. 원장의 행은 이 판이 카드와 함께 물은 한 벌(`ledger`)에서만 온다.
  *
- * 주체가 없는 카드(`run/worker/dispatch` 중 하나라도 없는)는 `unverified`다:
- * 원장이 이 자리를 누구의 것이라고 말하지 않았으므로, 사유도 말하지 않는다. */
-function agentGraphLiveWait(entry, now = Date.now()) {
+ * 없으면 `null`이라 배지가 서지 않는다 — 「모름」을 「없음」으로 읽지 않도록,
+ * 사유를 아는 카드만 배지를 든다. 주체가 없는 카드(`run/worker/dispatch` 중
+ * 하나라도 없는)는 `unverified`다: 원장이 이 자리를 누구의 것이라고 말하지
+ * 않았으므로, 사유도 말하지 않는다. */
+function agentGraphLiveWaitFor(card, place, ledger, now = Date.now()) {
   if (!agentGraphLive) return null;
-  if (agentGraphLiveSubject(entry.place) === null) {
-    return { cause: "unverified", key: "board.live.unverified", word: "확인되지 않음",
-      state: "idle", since: 0, until: null, ageWord: "" };
+  if (agentGraphLiveSubject(place) === null) {
+    return agentGraphLiveWaitWords({ cause: "unverified", key: "board.live.unverified",
+      word: "확인되지 않음", state: "idle", since: 0, until: null }, now);
   }
-  const wait = agentGraphLiveWaitOf(agentGraphLedgerRow(entry.card.pane), entry.card, now);
-  if (!wait) return null;
-  return { ...wait, ageWord: wait.since > 0 ? agoWord(wait.since, now) : "" };
+  const wait = agentGraphLiveWaitOf(ledger?.get(card.pane) ?? null, card, now);
+  return wait ? agentGraphLiveWaitWords(wait, now) : null;
+}
+
+/* 모델이 노드마다 부르는 문. */
+function agentGraphLiveWait(entry, now = Date.now(), ledger = null) {
+  return agentGraphLiveWaitFor(entry.card, entry.place, ledger, now);
+}
+
+/* 기다림이 화면에 서는 낱말, 한 번만 짓는다. 낱말은 코디네이터 데스크가 이미
+ * 쓰는 그 표의 것이고(`DESK_HEALTH`의 `key`/`word`), 나이는 **기록된 stamp**
+ * 에서만 나온다. 나이를 모르는 기다림은 **모른다고 말한다** — 곁의 다른
+ * 시각으로 메우면 그것이 곧 추측이다. */
+function agentGraphLiveWaitWords(wait, now) {
+  const text = t(wait.key, wait.word);
+  const stands = wait.until !== null && Number.isFinite(wait.until)
+    ? usageCountdown(wait.until - now)
+    : "";
+  const said = stands
+    || (wait.since > 0 ? t("board.desk.mailAge", "{{time}} 전", { time: agoWord(wait.since, now) }) : "");
+  const tip = said
+    ? `${text} · ${said}`
+    : `${text} · ${t("board.live.sinceUnknown", "기록된 시작 시각 없음")}`;
+  return { ...wait, text, said, tip };
+}
+
+/* 판의 서명에 드는 기다림의 낱말들. 나이 낱말은 시계가 흐르면 바뀌는데 카드의
+ * 어느 필드도 움직이지 않으므로, 서명이 이것을 세지 않으면 박자가 와도 판이
+ * 그대로라 칸만 옛 나이에 굳는다. 지도가 꺼진 판(보드의 기본값)은 아무것도
+ * 더하지 않는다. */
+function agentGraphLiveWaitSaid(columns, places, ledger, now) {
+  if (!agentGraphLive) return null;
+  const said = [];
+  for (const column of columns) {
+    for (const card of column.cards) {
+      const wait = agentGraphLiveWaitFor(card, places.get(card.pane), ledger, now);
+      if (wait) said.push(`${card.pane}\u001f${wait.cause}\u001f${wait.said}`);
+    }
+  }
+  return said.join("\u001e");
 }
 
 /* 노드가 늘 드는 한 칸. **조건부 자식으로 두지 않는다** — 조건이 바뀔 때마다
@@ -652,10 +735,9 @@ function agentGraphWaitNode() {
   return chip;
 }
 
-/* 그 칸을 채우는 유일한 손. 낱말은 코디네이터 데스크가 이미 쓰는 그 표의
- * 것이고(`DESK_HEALTH`의 `key`/`word`), 나이는 **기록된 stamp**에서만 나온다 —
- * stamp가 없는 사유는 나이를 말하지 않는다. */
-function dressAgentGraphWait(chip, wait, now = Date.now()) {
+/* 그 칸을 채우는 유일한 손. 쓰는 낱말은 모델이 이미 지은 것이다
+ * (`agentGraphLiveWaitWords`) — 칸과 서명이 같은 시각의 같은 낱말을 읽는다. */
+function dressAgentGraphWait(chip, wait) {
   if (!chip) return;
   const cause = chip.querySelector(".agent-graph-wait-cause");
   const age = chip.querySelector(".agent-graph-wait-age");
@@ -667,37 +749,36 @@ function dressAgentGraphWait(chip, wait, now = Date.now()) {
     if (chip.hasAttribute("aria-label")) chip.removeAttribute("aria-label");
     return;
   }
-  const word = t(wait.key, wait.word);
-  const stands = wait.until !== null && Number.isFinite(wait.until)
-    ? usageCountdown(wait.until - now)
-    : "";
-  const said = stands
-    || (wait.ageWord ? t("board.desk.mailAge", "{{time}} 전", { time: wait.ageWord }) : "");
   writeClassName(chip, `agent-graph-wait is-${wait.cause} is-${wait.state}`);
-  writeTextContent(cause, word);
-  writeTextContent(age, said);
-  /* 나이를 모르는 기다림은 **모른다고 말한다**. 곁의 다른 시각으로 메우면
-   * 그것이 곧 추측이다. */
-  const tip = said
-    ? `${word} · ${said}`
-    : `${word} · ${t("board.live.sinceUnknown", "기록된 시작 시각 없음")}`;
-  writeAttribute(chip, "data-tip", tip);
-  writeAttribute(chip, "aria-label", tip);
+  writeTextContent(cause, wait.text);
+  writeTextContent(age, wait.said);
+  writeAttribute(chip, "data-tip", wait.tip);
+  writeAttribute(chip, "aria-label", wait.tip);
 }
 
 /* ---- 권위 -------------------------------------------------------------------- */
 
+/* 단계의 이름과 그 낱말, 한 표. 사건 줄이 단계를 말할 때와 원장의 판정을
+ * 단계로 되읽을 때가 같은 표를 읽는다. 낱말은 t-6815의 seam
+ * (`ledgerReviewWord`)이 쓰는 그 키들이다. */
+const AGENT_GRAPH_LIVE_STAGES = Object.freeze([
+  { stage: "deployed", key: "board.deployed", word: "배포됨" },
+  { stage: "merged", key: "board.merged", word: "병합됨" },
+  { stage: "verified", key: "board.verified", word: "검증됨" },
+  { stage: "reported", key: "board.awaitingReview", word: "검증 대기" },
+]);
+
 /* 「어디까지 왔는가」를 **원장이 적은 만큼만**. 판정은 t-6815의 한 손
- * (`ledgerReviewWord`)이 하고, 여기서는 그 손이 답한 낱말을 단계 이름으로
- * 되읽을 뿐이다 — 워커의 주장(`reported`)이 검증·병합·배포 배지가 되는 길은
- * 이 파일에 없다. */
+ * (`ledgerReviewWord`)이 하고, 여기서는 그 손이 답한 낱말을 위의 표로 단계
+ * 이름으로 되읽을 뿐이다 — 워커의 주장(`reported`)이 검증·병합·배포 배지가
+ * 되는 길은 이 파일에 없고, 그 seam이 권위를 바꾸면 이 지도도 따라 바뀐다. */
 function ledgerReviewStage(place, row) {
-  const review = row?.review ?? {};
-  if (review.deployed) return "deployed";
-  if (review.merged) return "merged";
-  if (review.verified) return "verified";
-  if (place?.reported === true || row?.reported === true) return "reported";
-  return "dispatched";
+  const said = ledgerReviewWord({
+    reported: place?.reported === true || row?.reported === true,
+    review: row?.review ?? null,
+  });
+  return AGENT_GRAPH_LIVE_STAGES.find((one) => t(one.key, one.word) === said)?.stage
+    ?? "dispatched";
 }
 
 /* ---- 간선 -------------------------------------------------------------------- */
@@ -780,11 +861,15 @@ function agentGraphLiveKindWord(kind) {
 }
 
 function agentGraphLiveStageWord(stage) {
-  if (stage === "deployed") return t("board.deployed", "배포됨");
-  if (stage === "merged") return t("board.merged", "병합됨");
-  if (stage === "verified") return t("board.verified", "검증됨");
-  if (stage === "reported") return t("board.awaitingReview", "검증 대기");
-  return t("board.desk.stageDispatched", "진행");
+  const held = AGENT_GRAPH_LIVE_STAGES.find((one) => one.stage === stage);
+  return held ? t(held.key, held.word) : t("board.desk.stageDispatched", "진행");
+}
+
+/* 기다림의 사유를 코디네이터 데스크가 쓰는 그 표의 낱말로 — 한 화면이 같은
+ * 기다림을 두 낱말로 부르지 않도록. */
+function agentGraphLiveCauseWord(cause) {
+  const health = DESK_HEALTH.find((one) => one.id === cause);
+  return health ? t(health.key, health.word) : cause;
 }
 
 /* 사건 하나가 **무엇을 근거로 하는가**, 실제 식별자만. 없는 것은 쓰지 않는다. */
@@ -798,15 +883,133 @@ function agentGraphLiveEventFacts(event) {
       agentGraphTaskStateWord(source.taskState)].filter(Boolean).join(" · ");
   }
   if (event.kind === "wait") {
-    /* 사유의 낱말은 코디네이터 데스크가 쓰는 그 표에서 온다 — 한 화면이 같은
-     * 기다림을 두 낱말로 부르지 않도록. 줄이 사유를 말하지 않으면 「대기」라는
-     * 종류만 남고, 그것은 이 줄이 답해야 할 질문에 답하지 않는다. */
-    const health = DESK_HEALTH.find((one) => one.id === source.cause);
-    return [source.run, source.workerId, health ? t(health.key, health.word) : source.cause]
+    /* 줄이 사유를 말하지 않으면 「대기」라는 종류만 남고, 그것은 이 줄이 답해야
+     * 할 질문에 답하지 않는다. */
+    return [source.run, source.workerId, agentGraphLiveCauseWord(source.cause)]
       .filter(Boolean).join(" · ");
   }
   return [source.run, source.taskId, source.dispatchId,
     agentGraphLiveStageWord(source.stage)].filter(Boolean).join(" · ");
+}
+
+/* 사건 한 줄의 「언제」. 발생 시각을 아는 사건은 그 나이를, 모르는 사건은
+ * **모른다고** 말하고 이 창이 본 때를 따로 적는다 — 곁의 다른 시각(과업이 생긴
+ * 때, 배차가 시작된 때)을 사건의 나이로 빌려 쓰면 그것이 곧 추측이다. */
+function agentGraphLiveWhenWord(event, now) {
+  if (event.at > 0) return t("board.desk.mailAge", "{{time}} 전", { time: agoWord(event.at, now) });
+  return `${t("board.live.occurredUnknown", "발생 시각 미제공")} · ${
+    t("board.live.observedAgo", "관측 {{time}} 전", { time: agoWord(event.observedAt, now) })}`;
+}
+
+/* 누른 사건의 근거가 **지금 어디에 있는가**. 답은 셋이다:
+ *
+ *   `"current"` — 지금의 관계·판이 바로 이 사건의 근거를 든다. 이미 있는 문
+ *                 (관계 선택, 노드 선택)으로 가면 같은 식별자가 선다.
+ *   `"past"`    — 끝점은 그대로이지만 그곳의 근거는 이제 다른 것이다: 같은 두
+ *                 자리 사이에 더 새 메시지가 왔거나, 같은 판에 다른 시도가
+ *                 앉았거나, 의존의 상태가 그 뒤로 바뀌었다.
+ *   `"outside"` — 이 사건의 끝점이 지금 스냅샷에 없다.
+ *
+ * 둘째와 셋째에서 지금의 관계나 판으로 가면, 그곳이 보여 주는 것은 이 사건의
+ * 근거가 아니라 그 뒤의 것이다 — 누른 줄과 열린 근거가 서로 다른 사건을
+ * 말하게 된다. */
+function agentGraphLiveEventReach(view, event) {
+  const model = agentGraphFullModel(view);
+  if (!model) return "outside";
+  const source = event.evidence ?? {};
+  if (event.kind === "message") {
+    const relation = agentGraphRelations(model).find((edge) => edge.key === event.edgeKey);
+    if (!relation) return "outside";
+    return relation.evidence?.id === source.messageId && (relation.evidence?.run ?? "") === source.run
+      ? "current" : "past";
+  }
+  if (event.kind === "dependency") {
+    const fact = (model.source.overlays.task_dependencies ?? []).find((one) =>
+      (one.run ?? "") === source.run && (one.task ?? "") === source.taskId
+      && (one.dependency ?? "") === source.dependencyId);
+    if (!fact) return "outside";
+    if ((fact.task_state ?? "") !== source.taskState
+      || (fact.dependency_state ?? null) !== source.dependencyState) return "past";
+    const reachable = event.edgeKey
+      ? agentGraphRelations(model).some((edge) => edge.key === event.edgeKey)
+      : model.agents.some((entry) => entry.key === event.to);
+    return reachable ? "current" : "outside";
+  }
+  const entry = model.agents.find((one) => one.key === event.to);
+  if (!entry) return "outside";
+  const [, seat] = event.seats?.[0] ?? [];
+  return agentGraphLiveSeat(entry.place) === seat ? "current" : "past";
+}
+
+/* 사건 한 줄을 누른다. 근거가 지금도 같은 자리에 있으면 이 표면이 이미 가진
+ * 문으로 간다. 아니면 **가지 않는다** — 그 줄이 제 근거(원장의 식별자)를 펴고,
+ * 왜 지금의 관계로 대신 열지 않는지를 말한다. */
+function agentGraphLiveOpenEvent(view, event) {
+  liveSelectedEventKey = event.key;
+  if (agentGraphLiveEventReach(view, event) === "current") {
+    if (event.edgeKey) selectAgentGraphRelation(view, event.edgeKey);
+    else selectAgentGraphEntity(view, event.to, { focus: true });
+    return;
+  }
+  const model = agentGraphModels.get(view);
+  if (model) paintAgentGraphInspector(view, model);
+}
+
+/* 편 줄의 근거: 이 사건이 일어났을 때 원장이 적은 식별자, 그대로. 낱말은
+ * 인스펙터가 이미 쓰는 이름표들이다. */
+function agentGraphLiveEventDetail(event, reach) {
+  const block = taskBoardElement("div", "agent-live-event-detail");
+  block.append(taskBoardElement("p", "agent-relation-note", reach === "outside"
+    ? t("board.live.eventOutside",
+      "이 사건의 끝점은 지금 스냅샷에 없습니다. 아래 식별자로 원장에서 확인합니다.")
+    : t("board.live.eventNotLatest",
+      "이 사건의 근거는 지금 스냅샷의 최신 기록이 아닙니다. 지금 기록으로 대신 열지 않고, 아래 식별자로 원장에서 확인합니다.")));
+  const source = event.evidence ?? {};
+  const fields = [[t("board.graph.run", "런"), source.run]];
+  if (event.kind === "message") {
+    fields.push(
+      [t("board.graph.messageId", "메시지 ID"), source.messageId],
+      [t("board.graph.sender", "발신 주소"), source.address?.from],
+      [t("board.graph.recipient", "수신 주소"), source.address?.to]);
+  } else if (event.kind === "dependency") {
+    fields.push(
+      [t("board.graph.upstreamTask", "선행 과업"),
+        `${source.dependencyId} · ${agentGraphTaskStateWord(source.dependencyState)}`],
+      [t("board.graph.downstreamTask", "후속 과업"),
+        `${source.taskId} · ${agentGraphTaskStateWord(source.taskState)}`],
+      [t("board.graph.taskCreated", "후속 과업 생성"), agentGraphTimeWord(source.taskCreated)]);
+  } else if (event.kind === "wait") {
+    fields.push(
+      [t("board.graph.workerId", "워커 ID"), source.workerId],
+      [t("board.graph.dispatchId", "배차 ID"), source.dispatchId],
+      [t("board.live.wait", "대기"), agentGraphLiveCauseWord(source.cause)]);
+  } else {
+    fields.push(
+      [t("board.graph.taskId", "과업 ID"), source.taskId],
+      [t("board.graph.workerId", "워커 ID"), source.workerId],
+      [t("board.graph.dispatchId", "배차 ID"), source.dispatchId],
+      [t("board.graph.retryOf", "이전 시도"), source.retryOf],
+      [t("board.graph.attemptStarted", "시도 시작"), agentGraphTimeWord(source.dispatchStarted)]);
+  }
+  fields.push(
+    [t("board.live.occurredAt", "발생 시각"), event.at > 0
+      ? agentGraphTimeWord(event.at) : t("board.live.occurredUnknown", "발생 시각 미제공")],
+    [t("board.live.observedAt", "관측 시각"), agentGraphTimeWord(event.observedAt)]);
+  for (const [label, value] of fields) {
+    const row = agentGraphDetailField(label, value);
+    if (row) block.append(row);
+  }
+  return block;
+}
+
+/* 인스펙터가 사건 목록을 다시 지을지 묻는 서명. 사건의 키와 나이 낱말(시계가
+ * 흐르면 바뀐다), 그리고 사람이 편 줄과 그 줄의 근거가 지금 어디에 있는가. */
+function agentGraphLiveEventsSaid(view, now = Date.now()) {
+  const selected = liveEvents.find((event) => event.key === liveSelectedEventKey);
+  return [
+    liveEvents.map((event) => `${event.key}\u001f${agentGraphLiveWhenWord(event, now)}`),
+    selected ? [selected.key, agentGraphLiveEventReach(view, selected)] : null,
+  ];
 }
 
 /* 인스펙터의 관계 탭 머리에 서는 한 구역. **새 문을 만들지 않는다** — 줄을
@@ -821,11 +1024,16 @@ function agentGraphLiveEventsNode(view, now = Date.now()) {
     t("board.live.eventsScope",
       "관계마다 원장이 실어 온 마지막 메시지까지만 셉니다. 전문과 나머지 통은 원장에 있습니다.")));
   const coverage = agentGraphLiveCoverage();
-  if (!coverage.complete) {
+  if (coverage.truncated > 0) {
     block.append(taskBoardElement("p", "agent-live-events-note",
       t("board.live.coverageTruncated",
         "중복 제거 범위가 끊긴 관계 {{count}}개 — 그 구간의 사건은 표시되지 않을 수 있습니다.",
         { count: coverage.truncated })));
+  }
+  if (coverage.forgotten > 0) {
+    block.append(taskBoardElement("p", "agent-live-events-note",
+      t("board.live.coverageForgotten",
+        "기억 상한을 넘어 잊은 관계가 있습니다 — 그 관계의 사건은 표시되지 않을 수 있습니다.")));
   }
   /* 매핑되지 않아 백엔드가 버린 끝점의 **수**는 이 판에 오지 않는다. 지어내는
    * 대신 미제공이라 적는다 — 문장은 위의 한 표에서 온다. */
@@ -837,22 +1045,23 @@ function agentGraphLiveEventsNode(view, now = Date.now()) {
     const button = taskBoardElement("button", `agent-live-event-main is-${event.kind}`);
     button.type = "button";
     button.dataset.liveEvent = event.key;
+    const selected = event.key === liveSelectedEventKey;
+    writeAttribute(button, "aria-pressed", String(selected));
     button.append(
       taskBoardElement("strong", "agent-live-event-kind", agentGraphLiveKindWord(event.kind)),
       taskBoardElement("span", "agent-live-event-facts", agentGraphLiveEventFacts(event)),
-      taskBoardElement("span", "agent-live-event-when",
-        event.at > 0 ? t("board.desk.mailAge", "{{time}} 전", { time: agoWord(event.at, now) })
-          : t("board.live.sinceUnknown", "기록된 시작 시각 없음")),
+      taskBoardElement("span", "agent-live-event-when", agentGraphLiveWhenWord(event, now)),
     );
     if (Number.isFinite(event.added) && event.added > 1) {
       button.append(taskBoardElement("span", "agent-live-event-added",
         t("board.live.added", "이번 판에 {{count}}통 늘었습니다", { count: event.added })));
     }
-    button.onclick = () => {
-      if (event.edgeKey) selectAgentGraphRelation(view, event.edgeKey);
-      else if (event.to) selectAgentGraphEntity(view, event.to, { focus: true });
-    };
+    button.onclick = () => agentGraphLiveOpenEvent(view, event);
     row.append(button);
+    if (selected) {
+      const reach = agentGraphLiveEventReach(view, event);
+      if (reach !== "current") row.append(agentGraphLiveEventDetail(event, reach));
+    }
     list.append(row);
   }
   if (list.childElementCount === 0) {
@@ -875,6 +1084,7 @@ function setAgentGraphLive(view, on) {
   } else {
     agentGraphLiveStop();
     liveEvents = [];
+    liveSelectedEventKey = null;
   }
 }
 
@@ -886,7 +1096,26 @@ function agentGraphLiveScopeMoved() {
   /* 사건 목록도 함께 내려놓는다: 그 줄들은 **떠나온 범위**에서 일어난 일이고,
    * 누르면 지금 화면에 없는 관계로 가려 든다. 근거는 원장에 그대로 남는다. */
   liveEvents = [];
+  liveSelectedEventKey = null;
   agentGraphLiveStop();
+}
+
+/* 고른 범위가 스냅샷에서 **사라진** 판. 사람이 범위를 옮긴 것은 아니지만, 지도가
+ * 서 있던 자리가 없어졌으므로 범위를 떠난 것과 같이 다룬다 — 떠나온 범위의 맥박과
+ * 사건 줄을 내리고, 그 사이 떠난 답이 덮지 못하게 세대를 올린다. 같은 범위가
+ * 사라져 있는 동안 판마다 다시 떠나지는 않는다: 한 번 사라진 범위를 기억하고,
+ * 그 범위가 돌아오면 잊는다. */
+let liveScopeGone = null;
+
+function agentGraphLiveScopePresent(key, present) {
+  if (present) {
+    if (liveScopeGone === key) liveScopeGone = null;
+    return;
+  }
+  /* 지도가 꺼진 판은 기준선이 이미 빚으로 남아 있다 — 켜는 판이 조용히 선다. */
+  if (!agentGraphLive || liveScopeGone === key) return;
+  liveScopeGone = key;
+  agentGraphLiveScopeMoved();
 }
 
 function agentGraphLiveGeneration() {
@@ -894,7 +1123,12 @@ function agentGraphLiveGeneration() {
 }
 
 /* 부서진 판이 다시 서거나 창이 숨었다 돌아오면 — backlog는 사건이 아니다. */
-document.addEventListener("visibilitychange", () => {
+function agentGraphLiveListen(target, type, handler) {
+  target.addEventListener(type, handler);
+  liveListeners += 1;
+}
+
+agentGraphLiveListen(document, "visibilitychange", () => {
   if (document.hidden) agentGraphLiveStop();
   else liveBaselineDue = true;
 });

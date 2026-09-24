@@ -27893,6 +27893,21 @@ input[type="search"]::-webkit-search-cancel-button {
   color: var(--signal-wait-ink);
 }
 
+/* 사람이 누른 사건 줄. 눌렀다는 표시는 이 목록이 hover에 이미 입히는 그 옷이다
+ * — 새 색은 없다. */
+.agent-live-event-main[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--signal-ready) 12%, var(--surface-well));
+}
+
+/* 편 줄의 근거 — 그 사건이 일어났을 때 원장이 적은 식별자. 줄 바로 아래에
+ * 서고, 칸은 인스펙터의 근거 칸(`.agent-relation-fact`)을 그대로 쓴다. */
+.agent-live-event-detail {
+  display: grid;
+  gap: var(--agent-graph-gap-tight);
+  padding: var(--agent-graph-chip-inset);
+  font-size: var(--text-3xs);
+}
+
 /* ---- the lane strip ----------------------------------------------------- */
 
 /* Sticks to the top of the scrollport, which is the scroll container's PADDING

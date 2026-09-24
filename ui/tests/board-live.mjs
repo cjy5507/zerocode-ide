@@ -5,12 +5,20 @@
  * 왕복을 지나 `places`까지 살아남는지가 실제로 재어진다(카드에 값을 직접 박는
  * 픽스처는 그 왕복이 키를 버리므로 거짓 초록이다).
  *
- * 여기서 고정하는 계약 넷:
+ * 여기서 고정하는 계약:
  *   ① 실시간은 **고르는** 그림이다 — 작업 목록이 보드의 기본값이다.
  *   ② 맥박은 **실제로 기록된 사건** 하나에 한 번이다 — 같은 판을 두 번 읽어도,
- *      숨겼다 돌아와도, 옛 snapshot이 늦게 와도 수가 늘지 않는다.
- *   ③ 없는 사실은 **없다고 말한다** — 배달 상태·답장·소환자·보기 밖 끝점 수.
+ *      숨겼다 돌아와도, 옛 snapshot이 늦게 와도, 기억의 상한을 넘은 뒤에도
+ *      옛 사건이 새 사건이 되지 않는다.
+ *   ③ 없는 사실은 **없다고 말한다** — 배달 상태·답장·소환자·보기 밖 끝점 수,
+ *      그리고 결과와 의존 전이의 발생 시각.
+ *   ③′ 사건을 누르면 **그 사건의** 근거로 간다 — 더 새 메시지나 새 시도로
+ *      대신 가지 않는다.
  *   ④ 보는 일은 아무것도 **소비하지 않는다** — 메일 확인도, 모델 호출도 없다.
+ *   ⑤ 오래 사는 창에서도 장부는 **유계**이고, 수명 문을 지나면 시계·맥박이
+ *      남지 않는다(둘째 창).
+ *   ⑥ 늦게 도착한 답은 **아무것도 쓰지 않는다**, 한 판은 제가 물은 원장 행만
+ *      읽는다(셋째 창).
  *
  *   node ui/tests/board-live.mjs
  */
@@ -162,7 +170,16 @@ const liveState = (page) => page.evaluate(() => ({
   pulsing: [...document.querySelectorAll("#board-view [data-live-beat]")].length,
 }));
 
+/* 세 창, 한 suite. 둘째와 셋째는 제 창에서 돈다 — 상한을 몇 배로 넘기는 흐름과
+ * 붙잡은 답은 장부의 기억을 크게 움직이므로, 첫 창의 사례들과 섞이면 한쪽의
+ * 빨강이 다른 쪽이 남긴 자국이 된다. */
 export async function testBoardLive(browser, origin, ok) {
+  await testLiveMap(browser, origin, ok);
+  await testLiveLedgerBounds(browser, origin, ok);
+  await testLateAnswers(browser, origin, ok);
+}
+
+async function testLiveMap(browser, origin, ok) {
   const { page, faults } = await openWindowTestPage(browser, origin);
   try {
     await installBoardWaits(page);
@@ -371,74 +388,65 @@ export async function testBoardLive(browser, origin, ok) {
       JSON.stringify(sameStamp.again));
 
     /* 상한을 넘기면 완전한 중복 제거를 주장하지 않고 조용히 다시 맞춘다 —
-     * 그 사실을 장부가 스스로 말한다. */
+     * 그 사실을 장부가 스스로 말한다. 그리고 「조용히」는 말 그대로다: 그 시각의
+     * 기억이 온전하지 않은 동안 그 시각의 모르는 사건은 새 것도 옛것도 아닌 채로
+     * 맞추고, 시각이 지나가야 다시 센다. 포화 **뒤**에 옛 사건이 다시 와도 목록의
+     * 머리에 서지 않고 실제 맥박도 뛰지 않는다 — 길이가 아니라 머리의 신원과
+     * 켜진 맥박을 본다. 상한 **안**의 두 사건이 각각 한 번이라는 양성은 위의
+     * `two_real_events_at_one_timestamp_are_not_merged`가 그대로 지킨다. */
     const saturated = await page.evaluate(async () => {
       const now = window.__LIVE_NOW__;
       const T = now + 9_000;
-      const step = async (id) => {
+      const edgeKey = "overlay:mail:agent:term:306>agent:term:301";
+      const step = async (id, at = T) => {
         window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
-          { from: "term:306", to: "term:301", count: 1, unread: 0, at: T, verb: "mail",
+          { from: "term:306", to: "term:301", count: 1, unread: 0, at, verb: "mail",
             last_message: { id, run: "run-1", from: "worker:w-parent", to: "run:run-1",
-              kind: "status", created_ms: T } },
+              kind: "status", created_ms: at } },
         ] });
         await paintBoardView(undefined, { force: true });
         await window.__BOARD_SETTLED__();
       };
       for (let at = 0; at < 20; at += 1) await step(`m-burst-${at}`);
       const coverage = agentGraphLiveCoverage();
-      const before = agentGraphLiveRecentEvents().length;
+      /* 켜진 맥박이 모두 꺼진 뒤에 되돌린다 — 그래야 재생이 **새로** 켠 맥박을
+       * 셀 수 있다. */
+      await window.__UNTIL__(() => agentGraphLiveHandles().pulses === 0, "pulses expire", 5_000);
+      const head = () => agentGraphLiveRecentEvents()[0]?.key ?? null;
+      const lit = () => ({ pulses: agentGraphLiveHandles().pulses,
+        beats: document.querySelectorAll(
+          `#board-view .agent-graph-edges [data-graph-edge="${edgeKey}"] path[data-live-beat]`).length });
+      const before = head();
+      /* 포화 전에 본 사건 하나와, 포화 뒤에 온 사건 하나를 다시 보낸다. */
       await step("m-burst-0");
-      return { coverage, before, after: agentGraphLiveRecentEvents().length };
-    });
-    /* 상한을 넘긴 관계에서 옛 사건이 다시 오면 맥박이 될 수 있다 — 그것이 이
-     * 설계가 **인정하는 한계**다. 시험이 고정하는 것은 「그런 일이 없다」가
-     * 아니라 「그런 일이 있을 수 있다고 장부가 말한다」이다. 한 이름표로
-     * 누락과 재생을 동시에 풀었다는 주장은 여기 없다. */
-    ok("a_saturated_relation_says_its_dedupe_coverage_broke_instead_of_claiming_it",
-      saturated.coverage.truncated > 0 && saturated.coverage.complete === false,
-      JSON.stringify(saturated));
-    ok("past_the_same_timestamp_limit_the_ledger_admits_a_replay_is_possible",
-      saturated.after >= saturated.before, JSON.stringify(saturated));
-    ok("the_inspector_repeats_that_limit_in_words", await page.evaluate(() => {
+      const first = { head: head(), ...lit() };
+      await step("m-burst-17");
+      const second = { head: head(), ...lit() };
+      /* 인스펙터가 그 한계를 같은 낱말로 되풀이하는가 — 시각이 지나가 그 관계가
+       * 다시 온전해지기 **전에** 읽는다. */
       const view = document.querySelector("#board-view");
       selectAgentGraphEntity(view, "agent:term:301");
       const notes = [...view.querySelectorAll(".agent-live-events-note")]
         .map((node) => node.textContent).join(" ");
-      return notes.includes(t("board.live.coverageTruncated", "중복 제거 범위가 끊긴 관계 {{count}}개 — 그 구간의 사건은 표시되지 않을 수 있습니다.",
+      const said = notes.includes(t("board.live.coverageTruncated", "중복 제거 범위가 끊긴 관계 {{count}}개 — 그 구간의 사건은 표시되지 않을 수 있습니다.",
         { count: agentGraphLiveCoverage().truncated }));
-    }));
-
-    /* 처음 보는 관계와 기억을 잃은 관계는 서로 다른 답을 받는다. 앞의 것은
-     * 실제로 처음 보는 사건이고, 뒤의 것은 조용히 다시 맞춘다 — 둘을 한
-     * 이름표로 가릴 수는 없으므로 장부가 그 둘을 따로 적는다. */
-    const evicted = await page.evaluate(() => {
-        const now = window.__LIVE_NOW__;
-        const overlays = (id, from) => ({ columns: [], overlays: { mail: [
-          { from, to: "term:301", count: 1, unread: 0, at: now + 30_000, verb: "mail",
-            last_message: { id, run: "run-1", from: `worker:${from}`, to: "run:run-1",
-              kind: "status", created_ms: now + 30_000 } },
-        ] } });
-        /* 목록에는 상한이 있어 길이로는 아무것도 못 센다 — **맨 앞의 사건이
-         * 무엇인가**를 본다. 처음 보는 관계는 실제로 처음 보는 사건이다. */
-        const head = () => agentGraphLiveRecentEvents()[0]?.key ?? null;
-        const before = head();
-        agentGraphLiveObserve(overlays("m-fresh", "term:401"), new Map(), Date.now());
-        const firstSight = head();
-        // 상한을 넘겨 그 관계를 밀어낸 뒤 다시 오면 조용히 다시 맞춘다.
-        for (let at = 0; at < 300; at += 1) {
-          agentGraphLiveObserve(overlays(`m-push-${at}`, `term:5${at}`), new Map(), Date.now());
-        }
-        const pushed = head();
-        agentGraphLiveObserve(overlays("m-fresh-2", "term:401"), new Map(), Date.now());
-        return { before, firstSight, pushed, after: head(), coverage: agentGraphLiveCoverage() };
-      });
-    ok("a_relation_evicted_by_the_cap_resyncs_quietly_instead_of_pulsing",
-      // 처음 보는 관계는 사건이 되고 …
-      evicted.firstSight !== evicted.before && evicted.firstSight.endsWith("m-fresh")
-      // … 상한에 밀려났다 돌아온 같은 관계는 조용하다.
-      && evicted.after === evicted.pushed && !evicted.after.endsWith("m-fresh-2")
-      && (evicted.coverage.dropped > 0 || evicted.coverage.droppedTruncated),
-      JSON.stringify(evicted));
+      /* 시각이 지나가면 그 관계는 다시 온전하다 — 다음 실제 사건은 뛴다. */
+      await step("m-burst-next", T + 1);
+      const next = { head: head(), ...lit() };
+      return { coverage, before, first, second, said, next };
+    });
+    ok("a_saturated_relation_says_its_dedupe_coverage_broke_instead_of_claiming_it",
+      saturated.coverage.truncated > 0 && saturated.coverage.complete === false,
+      JSON.stringify(saturated));
+    ok("past_the_same_timestamp_limit_an_old_event_does_not_return_as_new",
+      saturated.first.head === saturated.before && saturated.second.head === saturated.before
+      && saturated.first.pulses === 0 && saturated.first.beats === 0
+      && saturated.second.pulses === 0 && saturated.second.beats === 0,
+      JSON.stringify(saturated));
+    ok("after_the_saturated_timestamp_passes_the_next_real_event_pulses",
+      saturated.next.head?.endsWith("m-burst-next") === true && saturated.next.pulses > 0,
+      JSON.stringify(saturated));
+    ok("the_inspector_repeats_that_limit_in_words", saturated.said, JSON.stringify(saturated));
 
     /* 같은 자리가 판을 하나 건너뛰고 다시 뛸 때도 실제로 뛴다. 박자를 판마다
      * 하나로 번갈아 적으면 건너뛴 자리가 두 판 만에 같은 글자를 다시 받고,
@@ -475,35 +483,49 @@ export async function testBoardLive(browser, origin, ok) {
         return first !== null && between === first && third !== null && third !== first;
       }), await page.evaluate(() => JSON.stringify(window.__SKIP__ ?? null)));
 
-    /* out-of-order: 옛 stamp 는 상태를 과거로 돌리지 않는다. */
+    /* out-of-order: 옛 stamp 의 판은 상태를 과거로 돌리지 않는다 — 목록의 머리도,
+     * 수의 기준선도, 인스펙터의 줄도. 목록의 **길이**는 상한(24)에 닿은 뒤로는
+     * 새 사건이 와도 그대로라 아무것도 증명하지 못하므로, 머리의 신원과 실제로
+     * 센 증가분과 그 줄이 화면에 쓴 낱말을 본다.
+     *
+     *   200/8통 → (옛) 100/3통 → 201/9통
+     *
+     * 옛 판이 기준선을 3으로 되돌리면 마지막 판은 「이번 판에 6통」이라 말한다.
+     * 최신 관측 8 이후 실제로 늘어난 것은 1통이다. */
     const reordered = await page.evaluate(async () => {
       const now = window.__LIVE_NOW__;
-      const before = agentGraphLiveRecentEvents().length;
-      window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
-        { from: "term:306", to: "term:301", count: 1, unread: 0, at: now - 999_000, verb: "mail",
-          last_message: { id: "m-ancient", run: "run-1", from: "worker:w-parent",
-            to: "run:run-1", kind: "status", created_ms: now - 999_000 } },
-      ] });
-      await paintBoardView(undefined, { force: true });
-      await window.__BOARD_SETTLED__();
-      return { before, after: agentGraphLiveRecentEvents().length };
+      const view = document.querySelector("#board-view");
+      const T = now + 10_000;
+      const step = async (id, at, count) => {
+        window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
+          { from: "term:311", to: "term:312", count, unread: 0, at, verb: "mail",
+            last_message: { id, run: "run-2", from: "run:run-2", to: "worker:w-other",
+              kind: "status", created_ms: at } },
+        ] });
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+        const [head] = agentGraphLiveRecentEvents();
+        return head ? { key: head.key, added: head.added } : null;
+      };
+      const seen = await step("m-order-199", T + 199, 7);
+      const latest = await step("m-order-200", T + 200, 8);
+      const stale = await step("m-order-100", T + 100, 3);
+      const next = await step("m-order-201", T + 201, 9);
+      /* 그 줄이 화면에 쓴 낱말 — 증가분이 1이면 「늘었습니다」 줄은 서지 않는다. */
+      selectAgentGraphEntity(view, "agent:term:311");
+      const row = [...view.querySelectorAll(".agent-live-event-main")]
+        .find((one) => one.dataset.liveEvent.endsWith("m-order-201"));
+      return { seen, latest, stale, next,
+        said: row?.querySelector(".agent-live-event-added")?.textContent ?? null, drawn: Boolean(row) };
     });
     ok("an_out_of_order_snapshot_does_not_move_state_backwards",
-      reordered.before === reordered.after, JSON.stringify(reordered));
-
-    /* 늦게 도착한 응답은 지금의 지도를 덮지 못한다. */
-    ok("a_late_response_from_an_earlier_scope_is_dropped", await page.evaluate(async () => {
-      const now = window.__LIVE_NOW__;
-      const stale = agentGraphLiveGeneration();
-      agentGraphLiveScopeMoved();
-      const before = agentGraphLiveRecentEvents().length;
-      agentGraphLiveObserve({ columns: [], overlays: window.__LIVE_OVERLAYS__(now, { mail: [
-        { from: "term:307", to: "term:301", count: 1, unread: 0, at: now + 20_000, verb: "mail",
-          last_message: { id: "m-stale", run: "run-1", from: "worker:w-child", to: "run:run-1",
-            kind: "status", created_ms: now + 20_000 } },
-      ] }) }, new Map(), Date.now(), stale);
-      return agentGraphLiveRecentEvents().length === before;
-    }));
+      reordered.latest?.key.endsWith("m-order-200") === true
+      && reordered.stale?.key === reordered.latest.key,
+      JSON.stringify(reordered));
+    ok("a_stale_snapshot_does_not_rewind_the_count_baseline",
+      reordered.latest?.added === 1 && reordered.next?.key.endsWith("m-order-201") === true
+      && reordered.next.added === 1 && reordered.drawn && reordered.said === null,
+      JSON.stringify(reordered));
 
     /* 재시작·처음 판은 활동이 아니다. */
     ok("old_initial_snapshot_and_restart_do_not_invent_events", await page.evaluate(async () => {
@@ -684,6 +706,198 @@ export async function testBoardLive(browser, origin, ok) {
         return said.includes(agentGraphLiveUnknownWord("summoner"));
       }));
 
+    /* ---- ③′ 사건이 가리키는 근거 -----------------------------------------
+     *
+     * 사건 줄을 누르면 **그 사건의** 근거로 간다. 같은 두 자리 사이에 더 새
+     * 메시지가 왔거나, 같은 판에 다른 시도가 앉았거나, 끝점이 사라졌으면 지금의
+     * 관계·판으로 대신 가지 않는다 — 그곳이 보여 주는 것은 그 뒤의 사건이다.
+     * 누른 줄이 제 식별자와 까닭을 편다. 음성마다 양성 하나: 가장 새 사건은
+     * 이미 있는 문으로 그대로 간다. */
+    await page.evaluate(() => {
+      /* 누르는 손 하나. 목록은 고른 관계가 없을 때 머리에 서므로 코디네이터를
+       * 골라 둔 뒤, 조건에 맞는 줄을 **실제로** 누른다. */
+      window.__PRESS_EVENT__ = (match) => {
+        const view = document.querySelector("#board-view");
+        selectAgentGraphEntity(view, "agent:term:301");
+        const events = agentGraphLiveRecentEvents();
+        const target = events.find(match);
+        const button = target && [...view.querySelectorAll(".agent-live-event-main")]
+          .find((one) => one.dataset.liveEvent === target.key);
+        if (!button) return { found: false, listed: events.map((event) => event.key) };
+        button.click();
+        const row = [...view.querySelectorAll(".agent-live-event-main")]
+          .find((one) => one.dataset.liveEvent === target.key)?.closest(".agent-live-event");
+        return {
+          found: true,
+          selectedKey: agentGraphSelectedKey,
+          selectedEdge: agentGraphSelectedEdgeKey,
+          evidence: view.querySelector(".agent-relation-evidence")?.textContent ?? "",
+          detail: row?.querySelector(".agent-live-event-detail")?.textContent ?? "",
+          pressed: row?.querySelector(".agent-live-event-main")?.getAttribute("aria-pressed") ?? null,
+          when: row?.querySelector(".agent-live-event-when")?.textContent ?? "",
+          at: target.at,
+        };
+      };
+      window.__LIVE_WORDS__ = () => ({
+        notLatest: t("board.live.eventNotLatest",
+          "이 사건의 근거는 지금 스냅샷의 최신 기록이 아닙니다. 지금 기록으로 대신 열지 않고, 아래 식별자로 원장에서 확인합니다."),
+        outside: t("board.live.eventOutside",
+          "이 사건의 끝점은 지금 스냅샷에 없습니다. 아래 식별자로 원장에서 확인합니다."),
+        unknown: t("board.live.occurredUnknown", "발생 시각 미제공"),
+      });
+    });
+
+    /* 같은 두 자리 사이에 m1 → m2. m1 을 누르면 m2 의 근거가 열리면 안 된다. */
+    const pastMessage = await page.evaluate(async () => {
+      const now = window.__LIVE_NOW__;
+      const mail = (id, at) => ({ mail: [
+        { from: "term:312", to: "term:301", count: 1, unread: 0, at, verb: "mail",
+          last_message: { id, run: "run-2", from: "worker:w-other", to: "run:run-1",
+            kind: "status", created_ms: at } },
+      ] });
+      for (const [id, at] of [["m-past-1", now + 61_000], ["m-past-2", now + 62_000]]) {
+        window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, mail(id, at));
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+      }
+      return {
+        old: window.__PRESS_EVENT__((event) => event.evidence?.messageId === "m-past-1"),
+        latest: window.__PRESS_EVENT__((event) => event.evidence?.messageId === "m-past-2"),
+        words: window.__LIVE_WORDS__(),
+      };
+    });
+    ok("a_past_message_event_opens_its_own_evidence_not_the_newer_message",
+      pastMessage.old.found && pastMessage.old.selectedEdge === null
+      && !pastMessage.old.evidence.includes("m-past-2")
+      && pastMessage.old.detail.includes("m-past-1") && !pastMessage.old.detail.includes("m-past-2")
+      && pastMessage.old.detail.includes(pastMessage.words.notLatest)
+      && pastMessage.old.pressed === "true",
+      JSON.stringify(pastMessage));
+    ok("the_latest_message_event_opens_the_relation_that_carries_it",
+      pastMessage.latest.found
+      && pastMessage.latest.selectedEdge === "overlay:mail:agent:term:312>agent:term:301"
+      && pastMessage.latest.evidence.includes("m-past-2") && pastMessage.latest.detail === "",
+      JSON.stringify(pastMessage));
+
+    /* 같은 판(term:312)에 W1/D1 → W2/D2. D1 의 배정을 누르면 W2 의 실행 상세로
+     * 가면 안 된다 — 같은 탐색키일 뿐 다른 사람이다. */
+    const reseated = await page.evaluate(async () => {
+      const now = window.__LIVE_NOW__;
+      const at = window.__LEDGER__.findIndex((one) => one.term === 312);
+      const held = window.__LEDGER__[at];
+      const seat = async (worker, dispatch, started) => {
+        window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at
+          ? { ...held, worker, dispatch_id: dispatch, dispatch_started_ms: started,
+            task_id: `t-${dispatch}`, task: `자리 ${dispatch}` }
+          : row);
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+      };
+      await seat("w-seat-1", "dp-seat-1", now + 63_000);
+      await seat("w-seat-2", "dp-seat-2", now + 64_000);
+      const old = window.__PRESS_EVENT__((event) => event.evidence?.dispatchId === "dp-seat-1");
+      const latest = window.__PRESS_EVENT__((event) => event.evidence?.dispatchId === "dp-seat-2");
+      window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at ? held : row);
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      return { old, latest, words: window.__LIVE_WORDS__() };
+    });
+    ok("an_old_attempts_event_does_not_open_the_new_workers_details",
+      reseated.old.found && reseated.old.selectedKey === "agent:term:301"
+      && reseated.old.detail.includes("dp-seat-1") && reseated.old.detail.includes("w-seat-1")
+      && !reseated.old.detail.includes("dp-seat-2")
+      && reseated.old.detail.includes(reseated.words.notLatest),
+      JSON.stringify(reseated));
+    ok("the_current_attempts_event_opens_its_seat",
+      reseated.latest.found && reseated.latest.selectedKey === "agent:term:312"
+      && reseated.latest.detail === "",
+      JSON.stringify(reseated));
+
+    /* 끝점이 스냅샷을 떠난 사건은 **범위 밖**이라고 말한다 — 조용히 아무 데도
+     * 가지 않는 것도, 비슷한 다른 판으로 가는 것도 아니다. */
+    const departed = await page.evaluate(async () => {
+      const now = window.__LIVE_NOW__;
+      const pane = { term: 322, agent: "codex", state: "working", at: now, state_started_at: now,
+        resumable: false };
+      window.__PANES__ = [...window.__PANES__, pane];
+      window.__LEDGER__ = [...window.__LEDGER__, { ...window.__LEDGER__[0], worker: "w-leaving",
+        task: "곧 떠날 일", task_id: "t-leaving", dispatch_id: "dp-leaving",
+        dispatch_started_ms: now + 65_000, term: 322, reported: false, review: null }];
+      window.__COLUMNS__[0].cards = [...window.__COLUMNS__[0].cards, {
+        ...window.__COLUMNS__[0].cards[1], pane: "term:322", heading: "곧 떠날 일",
+        task: "곧 떠날 일", parent: "" }];
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      const listed = agentGraphLiveRecentEvents().some((event) => event.evidence?.dispatchId === "dp-leaving");
+      window.__PANES__ = window.__PANES__.filter((one) => one.term !== 322);
+      window.__LEDGER__ = window.__LEDGER__.filter((one) => one.worker !== "w-leaving");
+      window.__COLUMNS__[0].cards = window.__COLUMNS__[0].cards.filter((one) => one.pane !== "term:322");
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      const pressed = window.__PRESS_EVENT__((event) => event.evidence?.dispatchId === "dp-leaving");
+      return { listed, pressed, words: window.__LIVE_WORDS__() };
+    });
+    ok("an_event_whose_endpoint_left_the_snapshot_says_it_is_outside",
+      departed.listed && departed.pressed.found && departed.pressed.selectedKey === "agent:term:301"
+      && departed.pressed.detail.includes(departed.words.outside)
+      && departed.pressed.detail.includes("dp-leaving"),
+      JSON.stringify(departed));
+
+    /* 결과와 의존 전이의 **발생 시각**은 이 판에 없다. 배차가 시작된 때나 후속
+     * 과업이 생긴 때를 그 사건의 나이로 빌리면, 방금 온 보고가 「5분 전」이
+     * 된다. 모르는 것은 모른다고 적고, 이 창이 본 때를 따로 적는다. 발생
+     * 시각이 기록된 사건(메시지·배정)은 그 시각을 쓴다. */
+    const timed = await page.evaluate(async () => {
+      const now = window.__LIVE_NOW__;
+      const view = document.querySelector("#board-view");
+      /* 벽 앞의 워커가 방금 보고했다 — 배차는 5분 전에 시작됐다. */
+      const at = window.__LEDGER__.findIndex((one) => one.worker === "w-wall");
+      const held = window.__LEDGER__[at];
+      window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at
+        ? { ...held, reported: true } : row);
+      /* 선행 조건 t-impl 이 끝나 t-verify 가 실행 대기로 넘어갔다 — 과업은 3분 전에 생겼다. */
+      const overlays = window.__LIVE_OVERLAYS__(now);
+      overlays.task_dependencies = overlays.task_dependencies.map((fact) => fact.task === "t-verify"
+        ? { ...fact, task_state: "ready", dependency_state: "done" } : fact);
+      window.__OVERLAYS__ = overlays;
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      selectAgentGraphEntity(view, "agent:term:301");
+      const when = (match) => {
+        const event = agentGraphLiveRecentEvents().find(match);
+        const row = event && [...view.querySelectorAll(".agent-live-event-main")]
+          .find((one) => one.dataset.liveEvent === event.key);
+        return event ? { at: event.at, said: row?.querySelector(".agent-live-event-when")?.textContent ?? null }
+          : null;
+      };
+      const clock = Date.now();
+      const ago = (stamp) => t("board.desk.mailAge", "{{time}} 전", { time: agoWord(stamp, clock) });
+      const result = when((event) => event.kind === "result" && event.evidence?.dispatchId === "dp-retry-2");
+      const dependency = when((event) => event.kind === "dependency" && event.evidence?.taskId === "t-verify");
+      const assignment = when((event) => event.kind === "assignment" && event.evidence?.dispatchId === "dp-seat-2");
+      const message = when((event) => event.kind === "message" && event.evidence?.messageId === "m-past-2");
+      window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at ? held : row);
+      window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now);
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      return { result, dependency, assignment, message,
+        borrowed: { result: ago(held.dispatch_started_ms), dependency: ago(now - 180_000) },
+        recorded: { assignment: assignment ? ago(assignment.at) : null, message: message ? ago(message.at) : null },
+        unknown: window.__LIVE_WORDS__().unknown };
+    });
+    ok("a_result_and_a_dependency_transition_do_not_borrow_a_start_time_as_their_age",
+      timed.result !== null && timed.result.at === 0 && timed.result.said !== timed.borrowed.result
+      && timed.result.said?.includes(timed.unknown) === true
+      && timed.dependency !== null && timed.dependency.at === 0
+      && timed.dependency.said !== timed.borrowed.dependency
+      && timed.dependency.said?.includes(timed.unknown) === true,
+      JSON.stringify(timed));
+    ok("a_message_and_an_assignment_keep_their_recorded_time",
+      timed.message !== null && timed.message.said === timed.recorded.message
+      && timed.assignment !== null && timed.assignment.at > 0
+      && timed.assignment.said === timed.recorded.assignment,
+      JSON.stringify(timed));
+
     /* ---- ④ 보는 일은 아무것도 소비하지 않는다 --------------------------- */
 
     const doors = await page.evaluate(async () => {
@@ -717,29 +931,35 @@ export async function testBoardLive(browser, origin, ok) {
     const quiet = await page.evaluate(async () => {
       const view = document.querySelector("#board-view");
       await window.__BOARD_SETTLED__();
-      await new Promise((done) => setTimeout(done, 1_200)); // 맥박이 다 꺼질 때까지
+      /* 맥박이 다 꺼질 때까지 — 실제 시계로. 맥박의 시계는 제가 켜진 때와
+       * 지금을 견주므로, 시계를 멈춘 채로는 영영 꺼지지 않는다. */
+      await window.__UNTIL__(() => agentGraphLiveHandles().pulses === 0, "pulses expire", 5_000);
       await window.__BOARD_SETTLED__();
-      const firstRow = view.querySelector(".agent-graph-node")?.getBoundingClientRect().top ?? 0;
+      /* **같은 시계**로 잰다 — 인수 조건이 그렇게 적혀 있고, 그래야 이 수가
+       * 「아무것도 안 바뀌었는데 그렸다」를 뜻한다. 비교하는 두 그림을 **둘 다**
+       * 멈춘 시계로 그린다: 기준 그림을 실제 시계로 그리면 카드와 기다림의 나이
+       * 낱말이 두 그림 사이에서 분 경계를 넘는 판이 있고, 그때 올라오는 것은
+       * 렌더러의 결함이 아니라 **옳게 움직인 그림**이다.
+       *
+       * 이것이 시간을 멈춰 얻은 0을 실시간의 0으로 파는 일이 되지 않는 것은,
+       * 시계가 실제로 흐를 때 그 낱말이 바뀌는지를 아래 사례가 따로 — 원장은
+       * 그대로 두고 제품의 박자로 — 확인하기 때문이다. 멈춤은 이 측정 안에서만이다. */
+      const trueNow = Date.now;
+      const pinned = trueNow.call(Date);
+      Date.now = () => pinned;
+      let taken;
+      let firstRow = 0;
       let mutations = 0;
       /* 재는 것은 **그림**이다 — 판의 머리와 툴바는 이 표면보다 오래된 손들이
        * 지나는 자리이고, 여기서 고정하려는 계약은 「아무 일도 없는 판에서
        * 렌더러가 DOM을 건드리지 않는다」이다. */
       const watch = new MutationObserver((records) => { mutations += records.length; });
-      watch.observe(view.querySelector(".agent-graph-layout"),
-        { subtree: true, childList: true, attributes: true, characterData: true });
-      /* **같은 시계**로 잰다 — 인수 조건이 그렇게 적혀 있고, 그래야 이 수가
-       * 「아무것도 안 바뀌었는데 그렸다」를 뜻한다. 시계를 놓아 두면 카드의
-       * 나이 낱말이 두 그림 사이에서 분 경계를 넘는 판이 있고, 그때 올라오는
-       * 것은 렌더러의 결함이 아니라 **옳게 움직인 그림**이다.
-       *
-       * 이것이 시간을 멈춰 얻은 0을 실시간의 0으로 파는 일이 되지 않는 것은,
-       * 시계가 실제로 흐를 때 그 낱말이 바뀌는지를 바로 아래 사례가 따로
-       * 확인하기 때문이다. 멈춤은 이 한 번의 측정 안에서만이다. */
-      const trueNow = Date.now;
-      const pinned = trueNow.call(Date);
-      Date.now = () => pinned;
-      let taken;
       try {
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+        firstRow = view.querySelector(".agent-graph-node")?.getBoundingClientRect().top ?? 0;
+        watch.observe(view.querySelector(".agent-graph-layout"),
+          { subtree: true, childList: true, attributes: true, characterData: true });
         const before = [agentGraphNodeCreations, agentGraphLayoutRuns, agentGraphEdgeMeasureRuns];
         await paintBoardView(undefined, { force: false });
         await window.__BOARD_SETTLED__();
@@ -779,19 +999,50 @@ export async function testBoardLive(browser, origin, ok) {
     }), await page.evaluate(() => JSON.stringify(window.__LIVE_SPUN__ ?? [])));
 
     /* 시계는 **멈추지 않는다**: 나이 낱말은 박자마다 바뀌어야 한다. 시간을
-     * 멈추고 얻은 0을 실시간의 0으로 파는 일을 막는 한 줄이다. */
-    ok("the_elapsed_age_clock_still_ticks_while_the_rest_is_quiet",
-      await page.evaluate(async () => {
-        const view = document.querySelector("#board-view");
-        const read = () => view.querySelector(
-          '.agent-graph-node[data-graph-key="agent:worker:w-gone"] .agent-graph-wait-age')?.textContent;
-        const before = read();
-        const row = window.__LEDGER__.find((one) => one.worker === "w-gone");
-        row.pane_missing_since_ms -= 10 * 60_000;
+     * 멈추고 얻은 0을 실시간의 0으로 파는 일을 막는 한 줄이다.
+     *
+     * 원장의 행은 **한 칸도 바꾸지 않는다** — 바꾸면 이 사례는 「데이터가 바뀌면
+     * 다시 그린다」를 재게 된다. 흐르는 것은 시계뿐이고, 다시 그리게 하는 것은
+     * 제품의 시계가 박자마다 하는 그 일(`agentGraphClockBeat`의 콜백이 부르는
+     * `scheduleAgentPaint(["board"])`, 강제 없음)이다. 카드의 나이 낱말이 같은
+     * 분에 함께 바뀌면 판이 다시 그려진 까닭을 가릴 수 없으므로, 카드와 다른
+     * 시각은 하루 전으로 두어 한 분이 흘러도 그대로이게 한다. */
+    const ticked = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const read = () => view.querySelector(
+        '.agent-graph-node[data-graph-key="agent:worker:w-gone"] .agent-graph-wait-age')?.textContent ?? null;
+      const trueNow = Date.now;
+      const base = trueNow.call(Date);
+      const dayAgo = base - 26 * 3_600_000;
+      const held = { columns: structuredClone(window.__COLUMNS__), ledger: structuredClone(window.__LEDGER__) };
+      for (const column of window.__COLUMNS__) {
+        for (const card of column.cards) Object.assign(card, { at: dayAgo, changed_at: dayAgo });
+      }
+      window.__LEDGER__ = window.__LEDGER__.map((row) => ({ ...row, at: dayAgo, hearing_at: dayAgo,
+        ...(row.worker === "w-gone" ? { pane_missing_since_ms: base - 4 * 60_000 - 5_000 } : {}) }));
+      const ledger = JSON.stringify(window.__LEDGER__);
+      Date.now = () => base;
+      try {
         await paintBoardView(undefined, { force: true });
         await window.__BOARD_SETTLED__();
-        return typeof before === "string" && before !== "" && read() !== before;
-      }));
+        const before = read();
+        Date.now = () => base + 60_000;
+        scheduleAgentPaint(["board"]);
+        await window.__BOARD_SETTLED__();
+        return { before, after: read(), untouched: JSON.stringify(window.__LEDGER__) === ledger,
+          expected: t("board.desk.mailAge", "{{time}} 전", { time: agoWord(base - 4 * 60_000 - 5_000, base + 60_000) }) };
+      } finally {
+        Date.now = trueNow;
+        window.__COLUMNS__ = held.columns;
+        window.__LEDGER__ = held.ledger;
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+      }
+    });
+    ok("the_elapsed_age_clock_ticks_on_the_products_beat_with_the_ledger_unchanged",
+      typeof ticked.before === "string" && ticked.before !== "" && ticked.untouched
+      && ticked.after !== ticked.before && ticked.after === ticked.expected,
+      JSON.stringify(ticked));
 
     /* ---- 숨김과 움직임 줄이기 -------------------------------------------- */
 
@@ -974,6 +1225,501 @@ export async function testBoardLive(browser, origin, ok) {
     }
 
     ok("the live map raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* 지도를 켠 관계 그림 한 판 — 둘째·셋째 창의 출발점. */
+async function openLiveMap(page) {
+  await installBoardWaits(page);
+  await page.evaluate(liveFixture);
+  await page.waitForSelector(".task-board-row");
+  await page.evaluate(async () => {
+    document.querySelector('[data-board-mode="graph"]').click();
+    await paintBoardView(undefined, { force: true });
+    await window.__BOARD_SETTLED__();
+    document.querySelector(".agent-graph-live").click();
+    await window.__BOARD_SETTLED__();
+  });
+}
+
+/* ---- 오래 사는 창의 상한과 수명 문 -----------------------------------------
+ *
+ * 한 범위를 그대로 둔 채 관계와 판을 상한의 몇 배로 흘려보내고, 장부가 드는
+ * 모든 것의 수를 잰다. 그리고 실제 수명 문 — 손잡이, 작업 목록, 판 닫기, 범위
+ * 거두기와 사라진 범위, 판을 품은 자리의 숨김 — 을 지나며 시계·맥박·박자·프레임이
+ * 남지 않고 귀가 늘지 않는지 본다. */
+async function testLiveLedgerBounds(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openLiveMap(page);
+    /* 이 창의 맥박은 오래 산다 — 수명 문을 지나는 사이 맥박이 제 수명으로
+     * 꺼져서, 문이 거둔 것처럼 보이지 않도록. 토큰 하나를 판에서 덮는다. */
+    await page.evaluate(() => {
+      const view = document.querySelector("#board-view");
+      view.style.setProperty("--agent-graph-live-pulse-ms", "60000");
+      agentGraphTunings.delete(view);
+    });
+
+    /* 처음 보는 관계와 기억을 잃은 관계는 서로 다른 답을 받는다. 앞의 것은
+     * 실제로 처음 보는 사건이고, 뒤의 것은 조용히 다시 맞춘다. */
+    const evicted = await page.evaluate(() => {
+      const now = window.__LIVE_NOW__;
+      const overlays = (id, from, at) => ({ columns: [], overlays: { mail: [
+        { from, to: "term:301", count: 1, unread: 0, at, verb: "mail",
+          last_message: { id, run: "run-1", from: `worker:${from}`, to: "run:run-1",
+            kind: "status", created_ms: at } },
+      ] } });
+      /* 목록에는 상한이 있어 길이로는 아무것도 못 센다 — **맨 앞의 사건이
+       * 무엇인가**를 본다. */
+      const head = () => agentGraphLiveRecentEvents()[0]?.key ?? null;
+      const before = head();
+      agentGraphLiveObserve(overlays("m-fresh", "term:401", now + 30_000), new Map(), Date.now());
+      const firstSight = head();
+      // 상한을 넘겨 그 관계를 밀어낸다.
+      const laneKeep = agentGraphLiveCoverage().laneKeep;
+      for (let at = 0; at < laneKeep + 44; at += 1) {
+        agentGraphLiveObserve(overlays(`m-push-${at}`, `term:5${at}`, now + 30_001 + at),
+          new Map(), Date.now());
+      }
+      const pushed = head();
+      /* 밀려났던 관계가 **돌아온다** — 처음에는 더 옛 사건을 들고(늦게 온
+       * 판), 그 다음에 한때 보았던 그 사건을 다시 들고. 둘 다 새 사건이
+       * 아니다: 앞의 것은 옛것이고, 뒤의 것은 이미 본 것이다. */
+      agentGraphLiveObserve(overlays("m-older", "term:401", now + 29_000), new Map(), Date.now());
+      const staleReturn = head();
+      agentGraphLiveObserve(overlays("m-fresh", "term:401", now + 30_000), new Map(), Date.now());
+      const replay = head();
+      /* 잊은 것보다 늦은 실제 사건은 여전히 새 사건이다. */
+      agentGraphLiveObserve(overlays("m-fresh-late", "term:401", now + 90_000), new Map(), Date.now());
+      return { before, firstSight, pushed, staleReturn, replay, after: head(),
+        coverage: agentGraphLiveCoverage() };
+    });
+    ok("a_relation_evicted_by_the_cap_resyncs_quietly_instead_of_pulsing",
+      // 처음 보는 관계는 사건이 되고 …
+      evicted.firstSight !== evicted.before && evicted.firstSight?.endsWith("m-fresh") === true
+      // … 상한에 밀려났다 돌아온 같은 관계는 조용하고, 장부는 그 사실을 말한다.
+      && evicted.staleReturn === evicted.pushed && evicted.coverage.complete === false,
+      JSON.stringify(evicted));
+    ok("an_evicted_relation_that_returns_older_first_does_not_replay_what_it_had_seen",
+      evicted.replay === evicted.pushed, JSON.stringify(evicted));
+    ok("after_forgetting_a_later_real_event_still_counts",
+      evicted.after?.endsWith("m-fresh-late") === true, JSON.stringify(evicted));
+
+    /* 한 범위 안에서 판이 하나씩 앉았다 떠나기를 상한의 네 배. 판마다 제 관계와
+     * 제 시도를 들고 오고 다시는 돌아오지 않는다 — 오래 사는 창에서 되돌아오지
+     * 않는 관계와 떠난 판이 쌓이는 모양 그대로다. 잴 때마다 장부가 드는 모든 것의
+     * 최댓값을 본다: 관계, 관계마다의 같은 시각 키, 사건 목록, 맥박, 시계. 옛 판이
+     * 따로 들던 두 보조 기억(밀려난 관계의 이름표, 자리마다의 주체)이 다시 생기면
+     * 그 이름으로 함께 센다. */
+    const churn = await page.evaluate(() => {
+      const now = window.__LIVE_NOW__ + 100_000;
+      const coverage = agentGraphLiveCoverage();
+      const view = document.querySelector("#board-view");
+      const burst = agentGraphTuning(view).liveBurst;
+      const held = () => {
+        let keys = 0;
+        for (const lane of liveLanes.values()) keys += lane.keys.size;
+        const handles = agentGraphLiveHandles();
+        return { lanes: liveLanes.size, keys, events: agentGraphLiveRecentEvents().length,
+          pulses: handles.pulses, timers: handles.timers,
+          tombstones: typeof liveDropped === "undefined" ? 0 : liveDropped.size,
+          seats: typeof liveSubjects === "undefined" ? 0 : liveSubjects.size };
+      };
+      const rounds = coverage.laneKeep * 4;
+      const peak = {};
+      for (let at = 0; at < rounds; at += 1) {
+        const pane = `term:${9000 + at}`;
+        const places = new Map([[pane, { run: "run-9", workerId: `w-${at}`,
+          dispatchId: `dp-${at}`, taskId: `t-${at}`, dispatchStarted: now + at,
+          reported: false, retryOf: null }]]);
+        agentGraphLiveObserve({ columns: [], overlays: { mail: [
+          { from: pane, to: "term:301", count: 1, unread: 0, at: now + at, verb: "mail",
+            last_message: { id: `m-churn-${at}`, run: "run-9", from: `worker:w-${at}`,
+              to: "run:run-1", kind: "status", created_ms: now + at } },
+        ] } }, places, now + at);
+        for (const [name, value] of Object.entries(held())) peak[name] = Math.max(peak[name] ?? 0, value);
+      }
+      return { rounds, peak, final: held(), laneKeep: coverage.laneKeep,
+        sameStampKeep: coverage.sameStampKeep, eventKeep: 24, burst };
+    });
+    ok("the_live_ledger_state_stays_bounded_under_relation_and_pane_churn",
+      churn.peak.lanes <= churn.laneKeep
+      && churn.peak.keys <= churn.laneKeep * churn.sameStampKeep
+      && churn.peak.events <= churn.eventKeep
+      && churn.peak.pulses <= churn.burst && churn.peak.timers <= 1
+      && churn.peak.tombstones <= churn.laneKeep && churn.peak.seats <= churn.laneKeep,
+      JSON.stringify(churn));
+
+    /* 실제 수명 문. 문마다 먼저 실제 사건 하나로 맥박을 켜고(켜졌는지 확인한다),
+     * 문을 지난 **직후** 시계·맥박·화면의 박자·그림 프레임을 센다. 판을 닫는
+     * 문과 판을 품은 자리를 숨기는 문은 판의 크기를 재는 관찰자가 알리므로
+     * 프레임 둘을 기다린다. */
+    const doors = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const now = window.__LIVE_NOW__;
+      let stamp = now + 400_000;
+      const frames = () => new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      const light = async () => {
+        stamp += 1_000;
+        window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
+          { from: "term:302", to: "term:303", count: 1, unread: 0, at: stamp, verb: "mail",
+            last_message: { id: `m-door-${stamp}`, run: "run-1", from: "worker:w-impl",
+              to: "worker:w-verify", kind: "status", created_ms: stamp } },
+        ] });
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+        const handles = agentGraphLiveHandles();
+        return { timers: handles.timers, pulses: handles.pulses };
+      };
+      const left = async ({ settle = true } = {}) => {
+        if (settle) await window.__BOARD_SETTLED__();
+        await frames();
+        const handles = agentGraphLiveHandles();
+        return { timers: handles.timers, pulses: handles.pulses,
+          beats: document.querySelectorAll(".agent-board [data-live-beat]").length,
+          frames: agentGraphEdgeFrames.has(view) || agentGraphFitFrames.has(view) };
+      };
+      /* 문을 지나는 동안 문서와 창에 새로 걸리는 귀. */
+      let heard = 0;
+      const listen = EventTarget.prototype.addEventListener;
+      EventTarget.prototype.addEventListener = function (...args) {
+        if (this === document || this === window) heard += 1;
+        return listen.apply(this, args);
+      };
+      const listeners = agentGraphLiveHandles().listeners;
+      const record = {};
+      const scope = () => view.querySelector(".agent-graph-scope");
+      /* 범위를 옮긴 판은 다음 판을 기준선으로 삼킨다 — 그 한 판을 받아 두어야
+       * 뒤의 사건이 실제 사건으로 선다. */
+      const choose = async (key) => {
+        scope().value = key;
+        scope().dispatchEvent(new Event("change"));
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+      };
+      try {
+        for (let cycle = 0; cycle < 2; cycle += 1) {
+          const at = {};
+          /* ① 손잡이를 끄고 다시 켠다. */
+          at.offLit = await light();
+          view.querySelector(".agent-graph-live").click();
+          at.off = await left();
+          view.querySelector(".agent-graph-live").click();
+          at.on = await left();
+          /* ② 작업 목록으로 갔다 관계로 돌아온다. */
+          at.tasksLit = await light();
+          view.querySelector('[data-board-mode="tasks"]').click();
+          at.tasks = await left();
+          view.querySelector('[data-board-mode="graph"]').click();
+          await window.__BOARD_SETTLED__();
+          /* ③ 판을 닫았다 다시 연다. */
+          at.closeLit = await light();
+          dropTab("board");
+          at.closed = await left({ settle: false });
+          openBoard();
+          await window.__BOARD_SETTLED__();
+          /* ④ 범위를 골랐다 거둔다 — 범위 고르개 그 손으로. */
+          const key = [...scope().options].map((option) => option.value).find((value) => value !== "");
+          await choose(key);
+          at.scopeLit = await light();
+          await choose("");
+          at.scopeCleared = await left();
+          /* ⑤ 고른 범위가 스냅샷에서 **사라진다** — 그 범위의 판들이 떠났다. */
+          await choose(key);
+          at.goneLit = await light();
+          const full = agentGraphFullModel(view);
+          const members = new Set(agentGraphTasksFor(view, full).groups
+            .find((one) => one.key === key)?.members.map((entry) => entry.card.pane) ?? []);
+          const fixture = { panes: window.__PANES__, ledger: window.__LEDGER__,
+            columns: structuredClone(window.__COLUMNS__) };
+          window.__PANES__ = window.__PANES__.filter((one) => !members.has(`term:${one.term}`));
+          window.__LEDGER__ = window.__LEDGER__.filter((row) =>
+            !members.has(row.term == null ? `worker:${row.worker}` : `term:${row.term}`));
+          for (const column of window.__COLUMNS__) {
+            column.cards = column.cards.filter((card) => !members.has(card.pane));
+          }
+          await paintBoardView(undefined, { force: true });
+          at.gone = await left();
+          at.goneMembers = members.size;
+          window.__PANES__ = fixture.panes;
+          window.__LEDGER__ = fixture.ledger;
+          window.__COLUMNS__ = fixture.columns;
+          await choose("");
+          await paintBoardView(undefined, { force: true });
+          await window.__BOARD_SETTLED__();
+          /* ⑥ 판을 품은 자리가 숨는다. */
+          at.hideLit = await light();
+          view.parentElement.hidden = true;
+          at.hidden = await left({ settle: false });
+          view.parentElement.hidden = false;
+          await window.__BOARD_SETTLED__();
+          at.heard = heard;
+          record[`cycle${cycle}`] = at;
+        }
+      } finally {
+        EventTarget.prototype.addEventListener = listen;
+      }
+      return { record, listeners: { before: listeners, after: agentGraphLiveHandles().listeners } };
+    });
+    const doorNames = [["off", "offLit"], ["tasks", "tasksLit"], ["closed", "closeLit"],
+      ["scopeCleared", "scopeLit"], ["gone", "goneLit"], ["hidden", "hideLit"]];
+    for (const [door, lit] of doorNames) {
+      const passed = ["cycle0", "cycle1"].every((cycle) => {
+        const at = doors.record[cycle];
+        return at[lit].timers === 1 && at[lit].pulses > 0
+          && at[door].timers === 0 && at[door].pulses === 0 && at[door].beats === 0
+          && at[door].frames === false;
+      });
+      ok(`the_${door}_door_leaves_no_timer_pulse_or_frame_behind`, passed,
+        JSON.stringify(Object.fromEntries(["cycle0", "cycle1"].map((cycle) =>
+          [cycle, { lit: doors.record[cycle][lit], door: doors.record[cycle][door] }]))));
+    }
+    ok("turning_the_map_back_on_after_a_door_stays_quiet",
+      ["cycle0", "cycle1"].every((cycle) => doors.record[cycle].on.timers === 0
+        && doors.record[cycle].on.pulses === 0),
+      JSON.stringify(doors.record.cycle1.on));
+    ok("passing_the_doors_twice_adds_no_listener",
+      doors.listeners.before === doors.listeners.after
+      && doors.record.cycle1.heard === doors.record.cycle0.heard,
+      JSON.stringify({ listeners: doors.listeners,
+        heard: [doors.record.cycle0.heard, doors.record.cycle1.heard] }));
+
+    ok("the bounded ledger page raises no browser errors", faults.length === 0, faults.join("\n"));
+  } finally {
+    await page.close();
+  }
+}
+
+/* ---- 늦게 도착한 답 ----------------------------------------------------------
+ *
+ * 실제 입구(`paintBoardView` → `boardCards` → `board_snapshot`)를 지나는 두 판을
+ * 겹쳐 세운다. `board_snapshot`을 붙잡아 앞 판 A를 세워 두고, 그 사이 범위를
+ * 옮기거나 판의 시도를 바꾸고, 뒤 판 B를 먼저 들여보낸 뒤 A를 늦게 도착시킨다.
+ * 늦은 A는 **아무것도** 쓰지 않아야 한다 — 배지, 초안, 펼친 타임라인, 오버레이,
+ * 서명, 실시간 장부, 모델, 선택. 그리고 한 판은 제가 물은 원장 행만 읽는다. */
+async function testLateAnswers(browser, origin, ok) {
+  const { page, faults } = await openWindowTestPage(browser, origin);
+  try {
+    await openLiveMap(page);
+    await page.evaluate(() => {
+      /* 붙잡는 문. 판이 `board_snapshot`을 묻는 **그 순간**의 답을 하네스에게서
+       * 빌려 굳혀 두고, 풀어 줄 때 돌려준다. 하네스의 `invoke`는 답을 짓는 손을
+       * 곧바로(첫 `await` 전에) 부르므로, 붙잡는 문을 잠깐 비키는 사이 다른 답이
+       * 끼지 못한다. */
+      window.__PARKED_SNAPSHOTS__ = [];
+      const held = (args) => {
+        delete window.__ANSWER__.board_snapshot;
+        const asked = window.__TAURI__.core.invoke("board_snapshot", args);
+        window.__ANSWER__.board_snapshot = held;
+        return asked.then((answer) => {
+          const frozen = structuredClone(answer);
+          return new Promise((release) => {
+            window.__PARKED_SNAPSHOTS__.push({ release: () => release(frozen) });
+          });
+        });
+      };
+      window.__HOLD_SNAPSHOTS__ = (on) => {
+        if (on) window.__ANSWER__.board_snapshot = held;
+        else delete window.__ANSWER__.board_snapshot;
+      };
+      window.__RELEASE_SNAPSHOT__ = (index) => window.__PARKED_SNAPSHOTS__[index].release();
+      /* 지금 화면이 무엇을 쓰고 있는가 — 늦은 답이 쓸 수 있는 모든 자리. */
+      window.__BOARD_WROTE__ = () => {
+        const view = document.querySelector("#board-view");
+        const model = agentGraphModels.get(view);
+        return {
+          badge: el("board-badge")?.textContent ?? null,
+          drafts: [...askDrafts.keys()].sort(),
+          timelines: [...agentGraphExpandedTimelines].sort(),
+          overlays: JSON.stringify(agentGraphSnapshotOverlays),
+          said: view.dataset.said ?? null,
+          events: agentGraphLiveRecentEvents().map((event) => event.key),
+          pulses: agentGraphLiveHandles().pulses,
+          model,
+          selected: [agentGraphSelectedKey, agentGraphSelectedEdgeKey],
+          scope: agentGraphScopeKey,
+          ledger: model?.source.ledger ?? null,
+        };
+      };
+      window.__SAME_WRITES__ = (left, right) => Object.keys(left).filter((name) =>
+        (name === "model" || name === "ledger") ? left[name] !== right[name]
+          : JSON.stringify(left[name]) !== JSON.stringify(right[name]));
+      window.__FRAMES__ = () => new Promise((done) =>
+        requestAnimationFrame(() => requestAnimationFrame(done)));
+    });
+
+    /* ① 범위를 옮긴 사이 늦게 온 답. A는 옛 범위에서 떠났고, 그 답에는 지금은
+     *    없는 사실들이 실려 있다: 확인할 카드 둘(배지 2), 아직 묻지 않은 카드,
+     *    아직 없던 카드, 그리고 새 메시지 하나. */
+    const moved = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const now = window.__LIVE_NOW__;
+      const base = { columns: structuredClone(window.__COLUMNS__), overlays: window.__OVERLAYS__ };
+      const card = (pane, over = {}) => ({ ...base.columns[0].cards.find((one) => one.pane === pane), ...over });
+      window.__COLUMNS__ = [
+        { bucket: "attention", cards: [card("term:305"), card("term:307")] },
+        { bucket: "working", cards: base.columns[0].cards.filter((one) =>
+          one.pane !== "term:305" && one.pane !== "term:307") },
+      ];
+      window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
+        { from: "term:307", to: "term:306", count: 1, unread: 1, at: now + 50_000, verb: "mail",
+          last_message: { id: "m-late-a", run: "run-1", from: "worker:w-child",
+            to: "worker:w-parent", kind: "status", created_ms: now + 50_000 } },
+      ] });
+      window.__HOLD_SNAPSHOTS__(true);
+      window.__A__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 1, "A parked", 5_000);
+      /* 사람이 범위를 옮긴다 — 범위 고르개 그 손으로. */
+      const scope = view.querySelector(".agent-graph-scope");
+      const key = [...scope.options].map((option) => option.value).find((value) => value !== "");
+      scope.value = key;
+      scope.dispatchEvent(new Event("change"));
+      /* 그 사이 세상은 이렇게 됐다: 확인할 카드는 하나(묻는 판 term:303), 새
+       * 카드 term:330, 메시지는 그대로. */
+      window.__COLUMNS__ = [
+        { bucket: "attention", cards: [card("term:303", { state: "needs-attention", ask: "계속할까요?",
+          ask_prompt: { questions: [{ question: "계속할까요?", multi_select: false,
+            options: [{ label: "예", description: "계속합니다." }] }] } })] },
+        { bucket: "working", cards: [...base.columns[0].cards.filter((one) => one.pane !== "term:303"),
+          card("term:302", { pane: "term:330", heading: "새 카드", task: "새 카드" })] },
+      ];
+      window.__OVERLAYS__ = base.overlays;
+      window.__B__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 2, "B parked", 5_000);
+      window.__RELEASE_SNAPSHOT__(1);
+      await window.__B__;
+      await window.__FRAMES__();
+      /* 사람이 B 위에서 손댄 것: 묻는 카드의 초안, 새 카드의 펼친 타임라인. */
+      const asking = agentGraphFullModel(view).agents.find((entry) => entry.card.pane === "term:303");
+      if (asking) askDraftFor(asking.card);
+      agentGraphExpandedTimelines.add("term:330");
+      const committed = window.__BOARD_WROTE__();
+      window.__RELEASE_SNAPSHOT__(0);
+      const late = await window.__A__;
+      const after = window.__BOARD_WROTE__();
+      const changed = window.__SAME_WRITES__(committed, after);
+      /* 버린 답의 몫 — 사람이 누른 다시 그리기는 **지금의** 답으로 한 번 더. */
+      window.__HOLD_SNAPSHOTS__(false);
+      await window.__FRAMES__();
+      for (const parked of window.__PARKED_SNAPSHOTS__.splice(0)) parked.release();
+      await window.__BOARD_SETTLED__();
+      const again = window.__BOARD_WROTE__();
+      const out = {
+        late, changed, scope: key,
+        committed: { ...committed, model: undefined, ledger: undefined, said: undefined },
+        after: { ...after, model: undefined, ledger: undefined, said: undefined },
+        again: { badge: again.badge, events: again.events, scope: again.scope,
+          lateMessage: again.overlays.includes("m-late-a"),
+          drafts: again.drafts, timelines: again.timelines },
+        answered: window.__COUNTS__.board_snapshot ?? 0,
+      };
+      window.__COLUMNS__ = base.columns;
+      scope.value = "";
+      scope.dispatchEvent(new Event("change"));
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      return out;
+    });
+    ok("a_late_answer_from_before_a_scope_move_writes_nothing",
+      moved.late === null && moved.changed.length === 0
+      && moved.committed.badge === "1" && moved.committed.drafts.includes("term:303")
+      && moved.committed.timelines.includes("term:330"),
+      JSON.stringify(moved));
+    ok("the_dropped_answers_repaint_is_asked_again_from_the_present",
+      moved.again.badge === "1" && moved.again.lateMessage === false
+      && moved.again.scope === moved.scope && moved.again.drafts.includes("term:303"),
+      JSON.stringify(moved.again));
+
+    /* ② 같은 판에 새 시도가 앉은 사이 늦게 온 답. B가 먼저 새 시도(dp-next)를
+     *    그렸고, 그보다 **먼저 떠난** A가 옛 시도(dp-other)를 들고 늦게 온다. */
+    const attempt = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const now = window.__LIVE_NOW__;
+      const at = window.__LEDGER__.findIndex((one) => one.term === 312);
+      const held = window.__LEDGER__[at];
+      window.__HOLD_SNAPSHOTS__(true);
+      window.__A__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 1, "A parked", 5_000);
+      window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at
+        ? { ...held, worker: "w-next", dispatch_id: "dp-next", dispatch_started_ms: now + 70_000,
+          task_id: "t-next", task: "다음 시도", retry_of: "dp-other" }
+        : row);
+      window.__B__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 2, "B parked", 5_000);
+      window.__RELEASE_SNAPSHOT__(1);
+      await window.__B__;
+      await window.__FRAMES__();
+      const seat = () => agentGraphModels.get(view)?.source.places.get("term:312")?.dispatchId ?? null;
+      const committed = { ...window.__BOARD_WROTE__(), seat: seat() };
+      window.__RELEASE_SNAPSHOT__(0);
+      const late = await window.__A__;
+      const after = { ...window.__BOARD_WROTE__(), seat: seat() };
+      const changed = window.__SAME_WRITES__(committed, after);
+      window.__HOLD_SNAPSHOTS__(false);
+      await window.__FRAMES__();
+      for (const parked of window.__PARKED_SNAPSHOTS__.splice(0)) parked.release();
+      await window.__BOARD_SETTLED__();
+      const out = { late, changed, committedSeat: committed.seat, afterSeat: after.seat,
+        assigned: agentGraphLiveRecentEvents().some((event) => event.evidence?.dispatchId === "dp-next") };
+      window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at ? held : row);
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      return out;
+    });
+    ok("an_answer_asked_before_an_attempt_change_does_not_repaint_the_old_attempt",
+      attempt.late === null && attempt.changed.length === 0
+      && attempt.committedSeat === "dp-next" && attempt.afterSeat === "dp-next" && attempt.assigned,
+      JSON.stringify(attempt));
+
+    /* ③ 두 판이 겹칠 때 한 판은 **제가 물은** 원장 행만 읽는다. A가 물을 때
+     *    w-impl 은 한도 벽 앞이었고, B가 물을 때는 벽이 걷혔다. A가 먼저 들어가면
+     *    그 판의 노드는 A의 행(벽)을 말해야 한다 — 나중에 떠난 B의 행이 아니라. */
+    const bundle = await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const now = Date.now();
+      const at = window.__LEDGER__.findIndex((one) => one.worker === "w-impl");
+      const held = window.__LEDGER__[at];
+      const chip = () => {
+        const node = view.querySelector('.agent-graph-node[data-graph-key="agent:term:302"] .agent-graph-wait');
+        return { classes: node?.className ?? null, said: node?.textContent ?? null };
+      };
+      window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at
+        ? { ...held, wall: { wall: "m-wall-a", observed_at_ms: now - 60_000, resets_at_ms: now + 600_000,
+          reset_waitable: true, stands_until_ms: now + 600_000 } }
+        : row);
+      window.__HOLD_SNAPSHOTS__(true);
+      window.__A__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 1, "A parked", 5_000);
+      window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at ? { ...held, wall: null } : row);
+      window.__B__ = paintBoardView(undefined, { force: true });
+      await window.__UNTIL__(() => window.__PARKED_SNAPSHOTS__.length === 2, "B parked", 5_000);
+      window.__RELEASE_SNAPSHOT__(0);
+      const first = await window.__A__;
+      await window.__FRAMES__();
+      const asA = { chip: chip(),
+        wall: agentGraphModels.get(view)?.source.ledger?.get("term:302")?.wall?.wall ?? null };
+      window.__RELEASE_SNAPSHOT__(1);
+      const second = await window.__B__;
+      await window.__FRAMES__();
+      const asB = { chip: chip(),
+        wall: agentGraphModels.get(view)?.source.ledger?.get("term:302")?.wall?.wall ?? null };
+      window.__HOLD_SNAPSHOTS__(false);
+      for (const parked of window.__PARKED_SNAPSHOTS__.splice(0)) parked.release();
+      await window.__BOARD_SETTLED__();
+      window.__LEDGER__ = window.__LEDGER__.map((row, index) => index === at ? held : row);
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      return { painted: [first !== null, second !== null], asA, asB };
+    });
+    ok("a_paint_reads_the_ledger_rows_of_its_own_snapshot_bundle",
+      bundle.painted.every(Boolean)
+      && bundle.asA.chip.classes?.includes("is-walled") === true && bundle.asA.wall === "m-wall-a"
+      && bundle.asB.chip.classes?.includes("is-walled") === false && bundle.asB.wall === null,
+      JSON.stringify(bundle));
+
+    ok("the late answers page raises no browser errors", faults.length === 0, faults.join("\n"));
   } finally {
     await page.close();
   }

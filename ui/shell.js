@@ -1229,6 +1229,15 @@ function boardLedgerIdentity(row) {
   };
 }
 
+/* Where a ledger row lands on the board: the seat's pane card when this
+ * window drew one, else a card of its own under the worker's id. One rule for
+ * both the card and the row that travels beside it (`boardCards`). */
+function boardLedgerPane(row, drawn) {
+  return row.term != null && drawn.has(`term:${row.term}`)
+    ? `term:${row.term}`
+    : `worker:${row.worker}`;
+}
+
 function cardsFromLedger(rows, drawn) {
   const cards = [];
   for (const row of rows) {
@@ -1243,7 +1252,8 @@ function cardsFromLedger(rows, drawn) {
      * the missing location. Complete it before deduplicating; otherwise the
      * graph files a worker under 범위 밖 while the sidebar files it under its
      * real workspace. */
-    const held = row.term == null ? null : drawn.get(`term:${row.term}`);
+    const pane = boardLedgerPane(row, drawn);
+    const held = drawn.get(pane);
     if (held) {
       if (!held.checkout && row.checkout) Object.assign(held, boardCardPlace(row.checkout));
       if (!held.ledger && row.ledger) held.ledger = row.ledger;
@@ -1257,7 +1267,6 @@ function cardsFromLedger(rows, drawn) {
     // Its own id, spelled the way every other card's is: the kind, then the
     // thing. `worker:` is also the fact that this card has no screen in this
     // window, which is what `openBoardCard` reads it for.
-    const pane = `worker:${row.worker}`;
     cards.push({
       pane,
       agent: row.agent,
@@ -1310,27 +1319,78 @@ function cardsFromLedger(rows, drawn) {
   return cards;
 }
 
+/* The board's cards, and the ledger rows they were built from — one bundle.
+ *
+ * 실시간 지도가 읽는 대기 사유는 원장 행에만 있고(`wall`·`asking`·`quiet_at`·
+ * `pane_missing_since_ms`), 카드에는 실리지 않는다 (t-7288). 그 행을 전역에
+ * 적어 두면 두 판이 겹칠 때 늦게 물은 판의 행이 먼저 물은 판의 카드 위에
+ * 실린다 — 한 노드가 두 시각을 말한다. 그래서 행은 **카드와 함께** 돌아가고,
+ * 그 판을 그리는 손이 그 한 벌을 모델까지 들고 간다. 행의 자리는 카드가 앉은
+ * 자리 그대로다(`boardLedgerPane`). */
 async function boardCards() {
   let panes = [];
-  let ledger = [];
+  let listed = [];
   try {
     // Asked together: they are two halves of one paint, and asking them in
     // series puts a whole round trip between the cards that describe the same
     // agent.
-    [panes, ledger] = await Promise.all([invoke("pane_agents"), readLedgerAgents()]);
+    [panes, listed] = await Promise.all([invoke("pane_agents"), readLedgerAgents()]);
   } catch (error) {
     showError(String(error));
   }
-  /* 실시간 지도가 읽는 대기 사유는 이 행들에만 있고(`hearing`·`wall`·`asking`·
-   * `quiet_at`), 카드에는 실리지 않는다. 따로 묻는 대신 **이 판이 방금 받은 그
-   * 한 벌**을 건넨다 — 두 번 물으면 한 카드에 두 시각이 실린다 (t-7288). */
-  rememberAgentGraphLedgerRows(ledger);
   const drawn = cardsFromPanes(panes);
-  return [
-    ...drawn,
-    ...cardsFromLedger(ledger, new Map(drawn.map((card) => [card.pane, card]))),
-    ...cardsFromLanes(),
-  ];
+  const byPane = new Map(drawn.map((card) => [card.pane, card]));
+  const cards = [...drawn, ...cardsFromLedger(listed, byPane), ...cardsFromLanes()];
+  const ledger = new Map();
+  for (const row of Array.isArray(listed) ? listed : []) {
+    if (row?.worker) ledger.set(boardLedgerPane(row, byPane), row);
+  }
+  return { cards, ledger };
+}
+
+/* 판 하나가 떠날 때 받는 표 (t-7288).
+ *
+ * 보드는 여러 문에서 겹쳐 묻는다 — 훅의 박자(`refreshAgentGraphSurfaces`),
+ * 사람의 누름(`paintBoardView`), 배지만 묻는 손(`refreshBoardBadge`). 답은 물은
+ * 차례대로 오지 않는다. 그래서 답을 **쓰기 전에** 묻는다: 이 답보다 나중에 떠난
+ * 답이 이미 그 표면에 들어갔는가, 그 사이 범위가 움직였는가. 그렇다면 이 답은
+ * 그 표면에 아무것도 쓰지 않는다 — 배지도, 초안 정리도, 오버레이도, 모델도,
+ * 선택도, 실시간 장부도. 번호는 이 창이 물은 차례이지 revision이 아니다:
+ * 백엔드에 없는 번호를 지어내지 않는다.
+ *
+ * 표면은 둘이다. 배지만 묻는 손이 먼저 들어갔다고 그보다 앞서 떠난 그림이
+ * 버려지면, 그림은 다음 박자까지 한 판 뒤에 선다 — 그래서 차례는 표면마다
+ * 따로 센다. 범위의 세대는 그림에만 걸린다: 배지의 수는 범위와 무관하다. */
+let boardAsked = 0;
+const boardCommitted = { badge: 0, graph: 0 };
+
+function boardAsk() {
+  boardAsked += 1;
+  return { seq: boardAsked, generation: agentGraphLiveGeneration() };
+}
+
+/* 이 답이 그 표면에 쓸 수 있는가. 쓸 수 있으면 그 자리에서 표면의 차례를
+ * 가져간다 — 묻는 일과 차지하는 일이 한 손이라야 둘 사이에 다른 답이 끼지
+ * 못한다. */
+function boardCommit(ask, surface) {
+  if (ask.seq <= boardCommitted[surface]) return false;
+  if (surface === "graph" && ask.generation !== agentGraphLiveGeneration()) return false;
+  boardCommitted[surface] = ask.seq;
+  return true;
+}
+
+/* 버린 그림 답의 몫. 사람이 누른 다시 그리기(`force`)는 서명에 없는 것 — 고른
+ * 노드, 편 묶음 — 을 그리라는 말이라, 답을 버린다고 그 말까지 버리면 누른
+ * 것이 화면에 서지 않는다. 범위가 움직여 버린 답은 새 범위의 지금 답을 다시
+ * 묻는다. 어느 쪽이든 **지금의** 답으로 한 번 더 그리고, 버린 답의 내용은 쓰지
+ * 않는다. */
+let agentGraphForceDue = false;
+
+function boardPaintAgain(force, ask) {
+  const moved = ask.generation !== agentGraphLiveGeneration();
+  if (!force && !moved) return;
+  agentGraphForceDue ||= force;
+  scheduleAgentPaint(["board"]);
 }
 
 /* ---- the review a card's checkout is on (1-g78a) ---------------------------
@@ -1514,13 +1574,14 @@ window.addEventListener("keydown", (event) => {
 });
 
 async function refreshBoardBadge() {
+  const ask = boardAsk();
   try {
-    const cards = await boardCards();
+    const { cards } = await boardCards();
     const answer = await invoke("board_snapshot", {
       cards,
       query: agentGraphSnapshotQuery(),
     });
-    applyBoardBadge(answer);
+    if (boardCommit(ask, "badge")) applyBoardBadge(answer);
   } catch {
     // A badge is a best-effort interruption hint. The graph itself owns the
     // recoverable error surface when the same snapshot cannot be built.
@@ -2819,7 +2880,10 @@ function agentGraphModel(columns, places, reviews,
   catalog = projects,
   search = boardQuery,
   overlays = {},
-  { scoped = false } = {},
+  /* `ledger` is the ledger rows the same paint asked beside its cards (pane →
+   * row, `boardCards`). The model keeps it in `source` so every rebuild from
+   * this snapshot reads the same bundle, never a later paint's rows. */
+  { scoped = false, ledger = null } = {},
 ) {
   const counts = new Map(columns.map((column) => [column.bucket, column.cards.length]));
   const agents = columns.flatMap((column) =>
@@ -3213,7 +3277,7 @@ function agentGraphModel(columns, places, reviews,
         /* 무엇을 기다리는가 — 원장이 적은 사유와 그 사유가 기록된 때. 실시간
          * 지도가 꺼져 있으면 `null`이고, 주체(run/worker/dispatch)가 없는
          * 카드는 「확인되지 않음」이다. 이 창이 짐작한 진행률은 없다 (t-7288). */
-        wait: agentGraphLiveWait(entry, now),
+        wait: agentGraphLiveWait(entry, now, ledger),
         wentQuiet: entry.bucket === "working" && entry.card.at > 0 &&
           now - entry.card.at >= AGENT_GRAPH_QUIET_AFTER_MS,
         hiddenByIdle: entry.state === "idle" && !entry.workspace.idleExpanded &&
@@ -3409,7 +3473,7 @@ function agentGraphModel(columns, places, reviews,
     },
     layoutRecomputed: cachedLayout === null,
     scoped,
-    source: { columns, places, reviews, catalog: knownCatalog, search, overlays },
+    source: { columns, places, reviews, catalog: knownCatalog, search, overlays, ledger },
   };
 }
 
@@ -3508,7 +3572,7 @@ function selectAgentGraphRelation(view, key) {
   }
   const source = full.source;
   const model = agentGraphModel(source.columns, source.places, source.reviews, Date.now(), full,
-    source.catalog, source.search, source.overlays);
+    source.catalog, source.search, source.overlays, { ledger: source.ledger });
   paintAgentGraph(view, model);
   void syncPreviewedTerms();
 }
@@ -3516,6 +3580,9 @@ function selectAgentGraphRelation(view, key) {
 function agentGraphScopedModel(view, full) {
   if (agentGraphScopeKey === "") return full;
   const group = agentGraphTasksFor(view, full).groups.find((one) => one.key === agentGraphScopeKey);
+  /* 고른 범위가 스냅샷에서 사라졌는가 (t-7288) — 실시간 지도는 그 판을 범위를
+   * 떠난 판처럼 다룬다(`agentGraphLiveScopePresent`). */
+  agentGraphLiveScopePresent(agentGraphScopeKey, group !== undefined);
   if (group) agentGraphScopeLabel = group.title;
   const members = group?.members ?? [];
   const panes = new Set(members.map((entry) => entry.card.pane));
@@ -3527,7 +3594,8 @@ function agentGraphScopedModel(view, full) {
     worktrees: (project.worktrees ?? []).filter((workspace) => workspaces.has(workspace.path)) }))
     .filter((project) => project.worktrees.length > 0 || members.some((entry) => entry.project.path === project.path));
   const scoped = agentGraphModel(columns, source.places, source.reviews, Date.now(),
-    agentGraphModels.get(view), catalog, source.search, source.overlays, { scoped: true });
+    agentGraphModels.get(view), catalog, source.search, source.overlays,
+    { scoped: true, ledger: source.ledger });
   agentGraphScopeSources.set(scoped, full);
   return scoped;
 }
@@ -3673,6 +3741,7 @@ function agentGraphToggleIdle(view, workspaceKey) {
     source.catalog,
     source.search,
     source.overlays,
+    { ledger: source.ledger },
   );
   paintAgentGraph(view, model);
 }
@@ -3692,6 +3761,7 @@ function agentGraphSetOverlay(view, mode) {
     source.catalog,
     source.search,
     source.overlays,
+    { ledger: source.ledger },
   );
   paintAgentGraph(view, model);
   return true;
@@ -4123,10 +4193,10 @@ function updateAgentGraphNode(node, entity, view) {
     facts?.trail.map((tool) => `${tool.kind}:${tool.word}:${tool.target}`).join(",") ?? "",
     String(facts?.trailHidden ?? 0),
     facts?.context ? String(Math.round(facts.context.ratio * 1e4)) : "",
-    /* 기다림의 사유와 나이 (t-7288). 나이는 30초 박자에 낱말이 바뀌므로
-     * 자리에 써 넣는 쪽에 둔다 — 시계 낱말과 같은 이유로, 여기 없으면 그
-     * 칸만 옛 낱말에 굳는다. */
-    entity.wait ? [entity.wait.cause, entity.wait.ageWord, String(entity.wait.until ?? "")].join("\u001f") : "",
+    /* 기다림의 사유와 칸이 **실제로 쓰는 낱말** (t-7288). 나이와 벽의 남은 때는
+     * 시계가 흐르면 바뀌므로 자리에 써 넣는 쪽에 둔다 — 시계 낱말과 같은
+     * 이유로, 여기 없으면 그 칸만 옛 낱말에 굳는다. */
+    entity.wait ? [entity.wait.cause, entity.wait.text, entity.wait.said].join("\u001f") : "",
   ].join("\u001e");
   const stableSignature = [
     locale,
@@ -5225,9 +5295,10 @@ function paintAgentGraphInspector(view, model) {
     const signature = JSON.stringify([locale, entity?.key, entity?.label, agentGraphSelectedEdgeKey, relevant,
       relevant.map((edge) => [inspection.entities.get(edge.from)?.label, inspection.entities.get(edge.to)?.label]),
       inspection.source.overlays.task_dependencies ?? [], subject?.place, secondBrainVault, taskBoardRecallsRevision,
-      /* 실시간 사건 목록도 이 탭이 그리므로 서명에 든다 — 사건 키만 센다:
-       * 나이 낱말은 30초 박자가 다시 그릴 때 함께 움직인다 (t-7288). */
-      agentGraphLiveOn() ? agentGraphLiveRecentEvents().map((event) => event.key) : null]);
+      /* 실시간 사건 목록도 이 탭이 그리므로 서명에 든다 (t-7288) — 사건의 키와
+       * 나이 낱말, 그리고 사람이 편 줄과 그 근거가 지금 어디에 있는가. 나이를
+       * 빼면 시계의 박자가 와도 목록만 옛 나이에 굳는다. */
+      agentGraphLiveOn() ? agentGraphLiveEventsSaid(view) : null]);
     if (parts.stamps.relations !== signature) {
       parts.stamps.relations = signature;
       const nodes = relation ? [agentGraphRelationDetail(view, relation, inspection)]
@@ -5305,7 +5376,7 @@ function selectAgentGraphEntity(view, key, { focus = false } = {}) {
     agentGraphDormantExpanded.add(entry.project.key);
     const source = model.source;
     model = agentGraphModel(source.columns, source.places, source.reviews, Date.now(), model,
-      source.catalog, source.search, source.overlays);
+      source.catalog, source.search, source.overlays, { ledger: source.ledger });
   }
   agentGraphSelectedEdgeKey = null;
   agentGraphSelectedKey = key;
@@ -6049,6 +6120,10 @@ function watchAgentGraphSize(view) {
    * 캔버스는 그림만큼 넓고, 판이 좁아져도 캔버스는 그대로라 알림이 오지
    * 않았다 — 파일 패널을 편 사람의 그림은 좁아진 판에 맞춰 앉지 않았다. */
   watchGraphResize(view.querySelector(".agent-graph-scroll"), (scroll) => {
+    /* 판이 숨으면 — 탭을 옮기든 닫든, 판을 품은 자리가 숨든 — 이 관찰자가 크기
+     * 0을 들고 온다. 실시간 지도의 시계와 맥박은 그 자리에서 거둔다 (t-7288):
+     * 아무도 보지 못할 맥박을 위해 시계가 제 수명까지 돌지 않게. */
+    agentGraphLiveSettle();
     const owner = scroll.closest(".file-view");
     if (!owner || !agentGraphModels.has(owner)) return;
     /* 폭을 이미 재고 있는 자리가 여기다 — 티어를 묻기에 가장 싼 자리이기도
@@ -6979,6 +7054,9 @@ function paintAgentGraph(view, model) {
   view.classList.toggle("is-detailed-relations", agentGraphCardDetails);
   writeHidden(view.querySelector(".task-board-surface"), !taskMode);
   writeHidden(view.querySelector(".agent-graph-surface"), taskMode);
+  /* 작업 목록으로 돌아간 판에는 지도가 없다 — 다른 판도 지도를 보이지 않으면
+   * 맥박의 시계를 지금 거둔다 (t-7288). */
+  agentGraphLiveSettle();
   const heading = view.querySelector(".board-title");
   writeAttribute(heading, "data-i18n", taskMode ? "board.tasks.heading" : "board.graph.heading");
   writeTextContent(heading, taskMode
@@ -7234,7 +7312,7 @@ function retryBoardPaint() {
 
 let agentGraphSnapshotOverlays = {};
 
-function agentGraphSaid(columns, reviews, places, now) {
+function agentGraphSaid(columns, reviews, places, now, ledger = null) {
   const cards = columns.flatMap((column) => column.cards.map((card) => {
     const { at, changed_at, ...visible } = card;
     const clock = cardClock(card, column.bucket, now);
@@ -7289,6 +7367,11 @@ function agentGraphSaid(columns, reviews, places, now) {
      * 않는다 — 사건이 생겼다면 그것을 실어 온 overlay나 카드가 이미 움직였고,
      * 맥박이 꺼지는 것은 제 시계가 맡는다 (t-7288). */
     live: agentGraphLiveOn(),
+    /* 그리고 지도가 그리는 기다림의 낱말 (t-7288). 나이와 벽의 남은 때는 시계가
+     * 흐르면 바뀌는데 카드의 어느 필드도 움직이지 않으므로, 여기 없으면 시계의
+     * 박자가 와도 판이 그대로라 그 칸만 옛 낱말에 굳는다. 지도가 꺼진 판에는
+     * 아무것도 더하지 않는다. */
+    waits: agentGraphLiveWaitSaid(columns, places, ledger, now),
     following: agentGraphFollowing,
     draft: selectedDraft
       ? {
@@ -7311,14 +7394,19 @@ async function paintAgentGraphView(
     paintBoardBroken(view);
     return null;
   }
-  /* 이 판이 **떠날 때**의 세대. 두 번의 `await` 사이에 사람이 범위를 옮기면
-   * 세대가 올라가고, 늦게 도착한 이 답은 실시간 장부에 들지 못한다 — 옛 범위의
-   * 사실이 지금의 지도·선택·근거를 덮지 않는다 (t-7288). */
-  const liveGenerationAtAsk = agentGraphLiveGeneration();
+  /* 이 판이 **떠날 때**의 표 (t-7288). 훅의 박자가 대신 물어 온 답은 그 손이
+   * 묻기 전에 받은 표를 함께 들고 온다 — 표를 여기서 받으면 그 손의 두 번의
+   * `await` 동안 움직인 범위를 이 답이 모른다. */
+  const ask = snapshot?.ask ?? boardAsk();
+  let committed = false;
   try {
     wireBoardHead(view);
     if (agentBoardMode === "tasks") primeCoordinatorDesk();
-    const cards = snapshot?.cards ?? await boardCards();
+    const bundle = snapshot ?? await boardCards();
+    const { cards } = bundle;
+    /* 이 판의 카드를 지은 그 원장 행. 모델이 `source`에 들고 가므로, 다시 짓는
+     * 판(선택·접기·오버레이)도 같은 한 벌을 읽는다. */
+    const ledger = bundle.ledger ?? new Map();
     const reviews = new Map();
     const checkouts = new Set();
     const places = new Map();
@@ -7343,7 +7431,20 @@ async function paintAgentGraphView(
       cards,
       query: agentGraphSnapshotQuery(),
     });
-    applyBoardBadge(answer);
+    /* commit 문 (t-7288). 아래의 모든 쓰기 — 배지, 초안과 펼친 타임라인의 정리,
+     * 오버레이, 서명, 실시간 장부, 모델과 선택 — 는 이 줄을 지난 답만 한다. 이
+     * 답보다 늦게 떠난 답이 이미 그림에 들어갔거나 그 사이 범위가 움직였으면, 이
+     * 답은 옛것이다: 아무것도 쓰지 않고 물러난다. */
+    if (!boardCommit(ask, "graph")) {
+      boardPaintAgain(force, ask);
+      return null;
+    }
+    committed = true;
+    if (agentGraphForceDue) {
+      force = true;
+      agentGraphForceDue = false;
+    }
+    if (boardCommit(ask, "badge")) applyBoardBadge(answer);
 
     /* 정리할 초안이 있을 때만 (1-t353). 이 줄들은 아래 서명 비교 — 그림이
      * 그대로면 빠져나가는 문 — **앞**에 서 있으므로, 여는 판마다 모든 열의
@@ -7368,13 +7469,13 @@ async function paintAgentGraphView(
     }
     const now = Date.now();
     agentGraphSnapshotOverlays = answer.overlays ?? {};
-    const said = agentGraphSaid(answer.columns, reviews, places, now);
+    const said = agentGraphSaid(answer.columns, reviews, places, now, ledger);
     if (!force && view.dataset.said === said) return { cards, answer };
     view.dataset.said = said;
     /* 서명이 움직인 판만 장부에 접힌다. 똑같은 snapshot은 위에서 이미 돌아갔고,
      * `force`로 다시 그린 판은 장부의 신원 중복 제거가 받아 넘긴다 — 어느 쪽도
      * 같은 사건을 두 번 세지 않는다 (t-7288). */
-    agentGraphLiveObserve(answer, places, now, liveGenerationAtAsk);
+    agentGraphLiveObserve(answer, places, now, { ledger });
     writeHidden(view.querySelector(".agent-graph-layout"), false);
     const broken = view.querySelector(".board-broken");
     if (broken) writeHidden(broken, true);
@@ -7387,6 +7488,7 @@ async function paintAgentGraphView(
       projects,
       boardQuery,
       answer.overlays ?? {},
+      { ledger },
     );
     paintAgentGraph(view, model, { selectDefault });
 
@@ -7408,6 +7510,9 @@ async function paintAgentGraphView(
     void syncPreviewedTerms();
     return { cards, answer };
   } catch (error) {
+    /* 문을 지나기 전에 넘어진 답이 이미 옛것이면, 그 실패도 옛것이다 (t-7288):
+     * 더 늦게 떠난 답이 벌써 그린 판을 「그리다 멈춤」으로 덮지 않는다. */
+    if (!committed && ask.seq <= boardCommitted.graph) return null;
     console.error("agent graph paint failed", error);
     boardBroken = true;
     paintBoardBroken(view);
@@ -10168,13 +10273,16 @@ async function refreshAgentGraphSurfaces({ badge, graph }) {
   }
   agentGraphRefreshing = true;
   try {
-    const cards = await boardCards();
+    /* 표는 **묻기 전에** 받는다 (t-7288): 답이 오는 사이 범위가 움직이거나 더
+     * 늦게 떠난 답이 먼저 들어가면, 이 답은 그 표면에 쓰지 않는다. */
+    const ask = boardAsk();
+    const { cards, ledger } = await boardCards();
     const answer = await invoke("board_snapshot", {
       cards,
       query: agentGraphSnapshotQuery(),
     });
-    if (badge) applyBoardBadge(answer);
-    if (graph) await paintAgentGraphView(boardTab(), { snapshot: { cards, answer } });
+    if (badge && boardCommit(ask, "badge")) applyBoardBadge(answer);
+    if (graph) await paintAgentGraphView(boardTab(), { snapshot: { cards, ledger, answer, ask } });
   } catch (error) {
     if (graph) showError(String(error));
   } finally {
