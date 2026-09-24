@@ -1333,6 +1333,53 @@ pub(crate) struct Witness<'a> {
     login: LoginIn<'a>,
 }
 
+/// The login inside `file` as the runner reads it — `None` when the file is
+/// missing, unreadable, or holds no login.
+fn login_in(file: &Path, login: &LoginIn<'_>) -> Option<String> {
+    let text = std::fs::read_to_string(file).ok()?;
+    login(&text)
+}
+
+/// The login slice as it stood at a moment the caller names — taken BEFORE
+/// the window runs the CLI, so a session the CLI renews on start, faster
+/// than the window's next call, still reads as a change when the watch
+/// begins (t-7170 R2). Owned, so the command layer can hold it between two
+/// calls; the text a witness compares never leaves this process, and the
+/// baseline is dropped once a watch has taken it.
+#[derive(Debug)]
+pub(crate) struct Baseline {
+    before: Option<String>,
+    /// When it was taken, so a baseline nobody came back for can be let go.
+    taken_ms: i64,
+}
+
+impl Baseline {
+    /// Whether a wait could still be coming for this baseline: a login road
+    /// is bounded by [`LOGIN_TIMEOUT`], and one older than that has no wait
+    /// behind it.
+    pub(crate) fn current_at(&self, now_ms: i64) -> bool {
+        let ceiling = i64::try_from(LOGIN_TIMEOUT.as_millis()).unwrap_or(i64::MAX);
+        now_ms.saturating_sub(self.taken_ms) <= ceiling
+    }
+}
+
+/// Take a row's baseline now. `None` for a row proven by no file — a status
+/// command, or nothing — which has no snapshot to carry: the watch on such a
+/// row asks its own question.
+pub(crate) fn baseline(row: &CliLogin, now_ms: i64) -> Result<Option<Baseline>, String> {
+    let home = row.home()?;
+    Ok(baseline_in(row, &home, now_ms))
+}
+
+fn baseline_in(row: &CliLogin, home: &Path, now_ms: i64) -> Option<Baseline> {
+    let file = row.witness_in(home)?;
+    let login: LoginIn<'_> = Box::new(|text| row.login_in_text(text, now_ms));
+    Some(Baseline {
+        before: login_in(&file, &login),
+        taken_ms: now_ms,
+    })
+}
+
 impl<'a> Witness<'a> {
     /// Snapshot `file` now. `holds` judges the text a login leaves; the
     /// runner calls the login complete only when the file has CHANGED and
@@ -1346,9 +1393,15 @@ impl<'a> Witness<'a> {
     /// the credential (`crush.json`, `~/.copilot/config.json`), and a state
     /// write during a login is not somebody signing in.
     fn sliced(file: &'a Path, login: LoginIn<'a>) -> Self {
-        let before = std::fs::read_to_string(file)
-            .ok()
-            .and_then(|text| login(&text));
+        let before = login_in(file, &login);
+        Self::from_before(file, login, before)
+    }
+
+    /// The same witness against a snapshot taken EARLIER — a [`Baseline`]
+    /// from before the CLI was run. A renewal that landed between the run
+    /// and the watch is a change against that snapshot, and invisible to
+    /// one taken now.
+    fn from_before(file: &'a Path, login: LoginIn<'a>, before: Option<String>) -> Self {
         Self {
             file,
             before,
@@ -1357,8 +1410,7 @@ impl<'a> Witness<'a> {
     }
 
     fn now(&self) -> Option<String> {
-        let text = std::fs::read_to_string(self.file).ok()?;
-        (self.login)(&text)
+        login_in(self.file, &self.login)
     }
 
     /// Has a login landed since the snapshot?
@@ -1657,12 +1709,16 @@ fn logout_headless_in(
 
 /// Watch this machine's proof until it holds a login (`signed_in`) or stops
 /// holding one — the pane roads, after the window has opened the CLI in one
-/// of its panes and typed the row's verb or command.
+/// of its panes and typed the row's verb or command. With a [`Baseline`],
+/// the file is judged against that earlier snapshot rather than against
+/// its shape now: the window took it before the run, and a renewal that
+/// has already landed is an arrival, not the starting point.
 pub(crate) fn watch(
     row: &CliLogin,
     program: Option<&str>,
     signed_in: bool,
     now_ms: i64,
+    taken: Option<Baseline>,
 ) -> Result<(), String> {
     let home = row.home()?;
     watch_in(
@@ -1673,9 +1729,16 @@ pub(crate) fn watch(
         now_ms,
         LOGIN_TIMEOUT,
         STATUS_POLL,
+        taken,
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the row, the machine's program, the home, the direction, the clock, \
+              the wait's two bounds and the baseline the window took; a struct \
+              for one call site would hide them"
+)]
 fn watch_in(
     row: &CliLogin,
     program: Option<&str>,
@@ -1684,14 +1747,19 @@ fn watch_in(
     now_ms: i64,
     timeout: Duration,
     status_poll: Duration,
+    taken: Option<Baseline>,
 ) -> Result<(), String> {
     match row.proof {
         Proof::Gauge { .. } | Proof::File { .. } => {
             let file = row
                 .witness_in(home)
                 .ok_or_else(|| "이 행에는 기다릴 자격 증명 파일이 없습니다".to_string())?;
-            let taken = Witness::sliced(&file, Box::new(|text| row.login_in_text(text, now_ms)));
-            wait_for_witness_within(&taken, signed_in, timeout)
+            let login: LoginIn<'_> = Box::new(|text| row.login_in_text(text, now_ms));
+            let witness = match taken {
+                Some(baseline) => Witness::from_before(&file, login, baseline.before),
+                None => Witness::sliced(&file, login),
+            };
+            wait_for_witness_within(&witness, signed_in, timeout)
         }
         Proof::Status { args, says } => {
             let program = program
@@ -1754,6 +1822,12 @@ pub(crate) struct Standing {
     /// The shell line a road that needs a screen types into a plain shell.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) pane_command: Option<String>,
+    /// The bare shell line — the home in the CLI's own variable, then the
+    /// program and nothing else — for a run that renews a session (t-7170):
+    /// typed into a plain shell of this window, or at a pane the program has
+    /// left. Absent while the CLI is not on this machine.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) run_command: Option<String>,
     /// `verb`, `pane-verb`, `tui` or `none`.
     pub(crate) logout_road: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1843,6 +1917,7 @@ fn standing(
         road: row.login.word(),
         tui_login: row.login.tui_command(),
         pane_command: program.and_then(|program| row.pane_command(program, home)),
+        run_command: program.map(|program| row.shell_line(program, home, &[])),
         logout_road: row.logout.word(),
         tui_logout: row.logout.tui_command(),
         logout_command: program.and_then(|program| row.logout_command(program, home)),
@@ -2469,7 +2544,7 @@ mod tests {
                 if readable {
                     let person = typed_when(go.clone(), line);
                     std::fs::write(&go, b"").expect("the go-ahead");
-                    watch_in(row, Some(&cli), &home, true, NOW_MS, WAIT, POLL)
+                    watch_in(row, Some(&cli), &home, true, NOW_MS, WAIT, POLL, None)
                         .unwrap_or_else(|why| panic!("{agent}: the login never landed: {why}"));
                     let said = person.join().expect("the shell");
                     assert!(
@@ -2494,7 +2569,7 @@ mod tests {
                 if readable {
                     let person = typed_when(go.clone(), line);
                     std::fs::write(&go, b"").expect("the go-ahead");
-                    watch_in(row, Some(&cli), &home, true, NOW_MS, WAIT, POLL)
+                    watch_in(row, Some(&cli), &home, true, NOW_MS, WAIT, POLL, None)
                         .unwrap_or_else(|why| panic!("{agent}: the login never landed: {why}"));
                     assert!(person.join().expect("the shell").status.success());
                     std::fs::remove_file(&go).expect("the go-ahead");
@@ -2510,7 +2585,7 @@ mod tests {
                 let line = tui_line(row, &cli, &home, "");
                 let person = typed_when(go.clone(), line);
                 std::fs::write(&go, b"").expect("the go-ahead");
-                watch_in(row, Some(&cli), &home, true, NOW_MS, WAIT, POLL)
+                watch_in(row, Some(&cli), &home, true, NOW_MS, WAIT, POLL, None)
                     .unwrap_or_else(|why| panic!("{agent}: the login never landed: {why}"));
                 assert!(person.join().expect("the shell").status.success());
                 std::fs::remove_file(&go).expect("the go-ahead");
@@ -2546,7 +2621,7 @@ mod tests {
         );
         if !readable {
             assert!(
-                watch_in(row, Some(&cli), &home, true, NOW_MS, POLL, POLL)
+                watch_in(row, Some(&cli), &home, true, NOW_MS, POLL, POLL, None)
                     .is_err_and(|why| why.contains("읽지 못합니다")),
                 "{agent}: a login this window cannot read was waited on anyway"
             );
@@ -2571,7 +2646,7 @@ mod tests {
                 if readable {
                     let person = typed_when(go.clone(), line);
                     std::fs::write(&go, b"").expect("the go-ahead");
-                    watch_in(row, Some(&cli), &home, false, NOW_MS, WAIT, POLL)
+                    watch_in(row, Some(&cli), &home, false, NOW_MS, WAIT, POLL, None)
                         .unwrap_or_else(|why| panic!("{agent}: the logout never landed: {why}"));
                     assert!(person.join().expect("the shell").status.success());
                     std::fs::remove_file(&go).expect("the go-ahead");
@@ -2585,7 +2660,7 @@ mod tests {
                 if readable {
                     let person = typed_when(go.clone(), line);
                     std::fs::write(&go, b"").expect("the go-ahead");
-                    watch_in(row, Some(&cli), &home, false, NOW_MS, WAIT, POLL)
+                    watch_in(row, Some(&cli), &home, false, NOW_MS, WAIT, POLL, None)
                         .unwrap_or_else(|why| panic!("{agent}: the logout never landed: {why}"));
                     assert!(person.join().expect("the shell").status.success());
                     std::fs::remove_file(&go).expect("the go-ahead");
@@ -2969,7 +3044,8 @@ mod tests {
             std::fs::write(&writer_witness, text).expect("write");
             std::fs::write(&stamp, b"").expect("stamp");
         });
-        watch_in(kimi, None, &home, true, NOW_MS, WAIT, STATUS_POLL).expect("the login landed");
+        watch_in(kimi, None, &home, true, NOW_MS, WAIT, STATUS_POLL, None)
+            .expect("the login landed");
         let latency = since(&wrote_at);
         writer.join().expect("writer");
         eprintln!("measured: watch noticed the witness {latency:?} after the write");
@@ -2984,7 +3060,8 @@ mod tests {
             std::thread::sleep(Duration::from_millis(100));
             std::fs::remove_file(gone).expect("remove");
         });
-        watch_in(kimi, None, &home, false, NOW_MS, WAIT, STATUS_POLL).expect("the logout landed");
+        watch_in(kimi, None, &home, false, NOW_MS, WAIT, STATUS_POLL, None)
+            .expect("the logout landed");
 
         // And a wait with nothing to see runs out and says so.
         assert_eq!(
@@ -2995,7 +3072,8 @@ mod tests {
                 true,
                 NOW_MS,
                 Duration::from_millis(300),
-                STATUS_POLL
+                STATUS_POLL,
+                None
             ),
             Err("로그인이 완료되지 않았습니다".to_string())
         );
@@ -3044,6 +3122,103 @@ mod tests {
             watching.arrived(),
             "a new token was not read as a new login"
         );
+    }
+
+    /// The pane roads' race (t-7170 R2): the window runs the CLI first and
+    /// asks for the watch second, and a CLI that renews its session on start
+    /// can land the new file between the two. A watch that snapshots when it
+    /// BEGINS then waits for a change that has already happened, and runs
+    /// out. The baseline has to be taken before the run.
+    #[test]
+    fn a_refresh_that_lands_before_the_watch_is_still_seen() {
+        let root = tempfile::tempdir().expect("sandbox");
+        let grok = row("grok").expect("grok row");
+        let (home, witness) = sandboxed_places(grok, root.path());
+        let (_, text) = fake("grok").witness.expect("a grok witness");
+        std::fs::write(&witness, text).expect("held login");
+        // The window takes the baseline, runs the CLI, and only then asks
+        // for the watch — and the CLI renews in between.
+        let taken = baseline_in(grok, &home, NOW_MS).expect("a row proven by a file");
+        std::fs::write(&witness, text.replace("fixture-token", "renewed-token"))
+            .expect("renewed before the watch");
+        let began = Instant::now();
+        assert_eq!(
+            watch_in(
+                grok,
+                None,
+                &home,
+                true,
+                NOW_MS,
+                Duration::from_millis(600),
+                POLL,
+                Some(taken)
+            ),
+            Ok(()),
+            "a renewal that landed before the watch began was not seen"
+        );
+        let latency = began.elapsed();
+        eprintln!("measured: the watch saw the earlier renewal after {latency:?}");
+        assert!(
+            latency < WITNESS_POLL,
+            "the earlier renewal was seen only after {latency:?} — a poll, not the first look"
+        );
+        // A renewal that lands AFTER the watch began is the ordinary arrival,
+        // against the same baseline.
+        let taken = baseline_in(grok, &home, NOW_MS).expect("a row proven by a file");
+        let later_witness = witness.clone();
+        let later = text.replace("fixture-token", "later-token");
+        let writer = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            std::fs::write(&later_witness, later).expect("renewed after the watch");
+        });
+        assert_eq!(
+            watch_in(grok, None, &home, true, NOW_MS, WAIT, POLL, Some(taken)),
+            Ok(())
+        );
+        writer.join().expect("writer");
+        // No change against the baseline runs the wait out — a baseline is not
+        // an arrival, and the unchanged file is not one either.
+        let taken = baseline_in(grok, &home, NOW_MS).expect("a row proven by a file");
+        assert_eq!(
+            watch_in(
+                grok,
+                None,
+                &home,
+                true,
+                NOW_MS,
+                Duration::from_millis(300),
+                POLL,
+                Some(taken)
+            ),
+            Err("로그인이 완료되지 않았습니다".to_string())
+        );
+        // Without a baseline the watch snapshots as it begins — the road every
+        // other caller still takes — and the same renewed file is the starting
+        // point, not an arrival.
+        assert_eq!(
+            watch_in(
+                grok,
+                None,
+                &home,
+                true,
+                NOW_MS,
+                Duration::from_millis(300),
+                POLL,
+                None
+            ),
+            Err("로그인이 완료되지 않았습니다".to_string())
+        );
+        // A baseline is let go once the road it was taken for has run out.
+        let ceiling = i64::try_from(LOGIN_TIMEOUT.as_millis()).expect("fits");
+        let fresh = baseline_in(grok, &home, NOW_MS).expect("a row proven by a file");
+        assert!(fresh.current_at(NOW_MS + ceiling));
+        assert!(!fresh.current_at(NOW_MS + ceiling + 1));
+        // And a row proven by no file has none to take.
+        let unreadable = CLI_LOGINS
+            .iter()
+            .find(|row| matches!(row.proof, Proof::Unreadable))
+            .expect("a row this window cannot read");
+        assert!(baseline_in(unreadable, &home, NOW_MS).is_none());
     }
 
     /// Logging out is the CLI's verb, judged by the proof.
@@ -3165,6 +3340,7 @@ mod tests {
             NOW_MS,
             WAIT,
             POLL,
+            None,
         )
         .expect("the status flipped");
         eprintln!(

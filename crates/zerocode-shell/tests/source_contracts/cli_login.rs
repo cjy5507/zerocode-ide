@@ -155,6 +155,7 @@ fn the_login_doors_branch_on_the_row_and_never_on_an_agents_name() {
         "fn cli_login_start(",
         "fn cli_login_logout(",
         "fn cli_login_wait(",
+        "fn cli_login_witness(",
     ] {
         let body = block_after(&usage, door);
         for branch in &branches {
@@ -206,29 +207,55 @@ fn the_window_paints_the_rows_off_the_table_and_types_the_rows_own_commands() {
         "invoke(\"cli_login_list\")",
         "invoke(\"cli_login_start\", { agent: row.agent })",
         "invoke(\"cli_login_logout\", { agent: row.agent })",
-        "invoke(\"cli_login_wait\", { agent: row.agent, signedIn: true })",
+        "invoke(\"cli_login_witness\", { agent: row.agent })",
+        "invoke(\"cli_login_witness_drop\", { witness })",
+        "invoke(\"cli_login_wait\", { agent: row.agent, signedIn: true, witness })",
         "invoke(\"cli_login_wait\", { agent: row.agent, signedIn: false })",
     ] {
         assert!(window.contains(road), "the window no longer walks {road}");
     }
     // The TUI road opens the agent's own pane through the one launch door
     // and types the ROW's slash command — never a literal of its own.
+    let opening = block_after(&window, "async function openCliPane(row) {");
+    assert!(
+        opening.contains("launchAgentTab({ agent: row.agent, prompt: \"\""),
+        "the CLI login roads stopped opening the agent's pane through the launch door:\n{opening}"
+    );
     let typing = block_after(
         &window,
         "async function typeCliLoginCommand(row, command) {",
     );
     assert!(
-        typing.contains("launchAgentTab({ agent: row.agent, prompt: \"\"")
+        typing.contains("openCliPane(row)")
             && typing.contains(
                 "invoke(\"send_prompt\", { term, text: command, submit: true, agent: row.agent })"
             ),
         "the TUI login road stopped going through the launch door and send_prompt:\n{typing}"
     );
+    // The run that renews a session (t-7170) is a process START: a pane the
+    // program is still in is never typed at, and the pane table — not a
+    // name — says which pane the program has left.
+    let running = block_after(&window, "async function runCliBare(row) {");
+    assert!(
+        running.contains("cliPanesOf(row)")
+            && running.contains("typeCliLoginShellLine(row, row.run_command, left)")
+            && running.contains("openCliPane(row)")
+            && !running.contains("send_prompt"),
+        "the run-once road no longer decides by the pane table:\n{running}"
+    );
+    let panes = block_after(&window, "function cliPanesOf(row) {");
+    assert!(
+        panes.contains("paneProgramLeft(term)"),
+        "the pane split no longer reads the pane table's word:\n{panes}"
+    );
     for block in [
         "function cliLoginRow(row) {",
-        "async function startCliLogin(row, button) {",
+        "function startCliLogin(row, button) {",
+        "function runCliOnce(row, button) {",
+        "async function runCliBare(row) {",
         "async function logoutCliLogin(row) {",
         "async function typeCliLoginCommand(row, command) {",
+        "async function openCliPane(row) {",
     ] {
         let body = block_after(&window, block);
         for spec in zerocode_core::AGENT_SPECS {
@@ -242,7 +269,7 @@ fn the_window_paints_the_rows_off_the_table_and_types_the_rows_own_commands() {
             "{block} spells a slash command the row already carries:\n{body}"
         );
     }
-    let starting = block_after(&window, "async function startCliLogin(row, button) {");
+    let starting = block_after(&window, "function startCliLogin(row, button) {");
     assert!(
         starting.contains("row.road")
             && starting.contains("row.tui_login")
@@ -252,7 +279,10 @@ fn the_window_paints_the_rows_off_the_table_and_types_the_rows_own_commands() {
     // The pane-verb road is the GitLab card's: a plain shell of this window
     // with the backend's line typed into it, so a device code printed to
     // stderr lands in front of the person.
-    let shelling = block_after(&window, "async function typeCliLoginShellLine(row, line) {");
+    let shelling = block_after(
+        &window,
+        "async function typeCliLoginShellLine(row, line, at = null) {",
+    );
     assert!(
         shelling.contains("invoke(\"open_term_tab\", { rows: 24, cols: 96, plain: true })")
             && shelling.contains("invoke(\"term_text\", { term, text: `${line}\\r` })"),
@@ -264,20 +294,24 @@ fn the_window_paints_the_rows_off_the_table_and_types_the_rows_own_commands() {
 fn the_status_bar_learns_its_sign_in_roads_from_the_table() {
     let window = strip_comments(window_source());
     let row = block_after(&window, "function usageRosterRow(provider) {");
+    // The hand stands for a confirmed sign-out and for an expired session
+    // (t-7170), and only where the table gives it a road.
     assert!(
         row.contains("const signIn = usageSignIn(provider);")
-            && row.contains("if (state.kind === \"sign-in\" && signIn) {")
+            && row.contains("const offer = state.kind === \"sign-in\"")
+            && row.contains("if (offer !== null && signIn) {")
             && !row.contains("provider.signIn()"),
         "the roster's sign-in button reads the provider record directly again:\n{row}"
     );
     let asking = block_after(&window, "function usageSignIn(provider) {");
     assert!(
-        asking.contains("cliSignIns.has(provider.id)"),
+        asking.contains("cliLoginPrograms.has(provider.id)"),
         "the sign-in road no longer consults the CLI login table:\n{asking}"
     );
     let learning = block_after(&window, "function noteCliLoginRows(rows) {");
     assert!(
-        learning.contains("cliSignIns.clear();") && learning.contains("cliSignIns.add(row.agent)"),
+        learning.contains("cliLoginPrograms.clear();")
+            && learning.contains("cliLoginPrograms.set(row.agent, row.program ?? row.agent)"),
         "the table's rows no longer teach the status bar its sign-in roads:\n{learning}"
     );
     let painting = block_after(&window, "async function refreshCliLogins() {");

@@ -5055,7 +5055,7 @@ function cliLoginExpired(row) {
  * A row with neither has no 「한 번 실행」 — a button that could only fail
  * is worse than none. */
 function cliLoginRunsBare(row) {
-  return row.opens === "agent" || Boolean(row.pane_command);
+  return row.opens === "agent" || Boolean(row.run_command);
 }
 
 /* The verbs a row offers: the vendor's install page while the CLI is
@@ -5114,30 +5114,67 @@ function cliLoginActions(row) {
  * command the caption names, walk it, and on the far side re-read the gauge
  * and the agent list. The report is re-read by every road (the backend
  * answers with the table after the file moved), and a login the person
- * abandoned leaves the rows exactly as they were. */
+ * abandoned leaves the rows exactly as they were. A walk that failed — the
+ * wait ran out, a door would not open — re-reads the rows itself, and the
+ * gauge is asked past its floor on that road too (t-7170 R2): the CLI may
+ * have renewed the session in a way the watch does not count as a change,
+ * and the gauge is the one reader that knows. */
 async function walkCliLoginRoad(row, button, { road, command, walk }) {
   if (cliLoginBusy.has(row.agent)) return;
   button.disabled = true;
   cliLoginBusy.set(row.agent, { road, command });
   paintCliLogins();
+  let landed = true;
   try {
     await walk();
   } catch (error) {
     showError(String(error));
-    cliLoginBusy.delete(row.agent);
-    await refreshCliLogins();
-    return;
+    landed = false;
   }
   cliLoginBusy.delete(row.agent);
+  if (!landed) await refreshCliLogins();
   cliLoginMoved(row);
 }
 
-/* And then the backend watches the credential file — unless the row has
- * nothing to watch, where waiting would be waiting for an answer that never
- * comes. */
-async function waitForCliLogin(row) {
+/* The credential file as it stands BEFORE the CLI runs (t-7170 R2), kept by
+ * the backend under a number this window carries into the wait: a CLI that
+ * renews on start, faster than the window's next call, is a change against
+ * that snapshot and invisible to one taken when the wait begins. Nothing to
+ * take for a row whose login this window cannot read. */
+async function takeCliLoginWitness(row) {
+  if (row.proof === "none") return null;
+  return (await invoke("cli_login_witness", { agent: row.agent })) ?? null;
+}
+
+/* And then the backend watches the credential file against that witness —
+ * unless the row has nothing to watch, where waiting would be waiting for
+ * an answer that never comes. */
+async function waitForCliLogin(row, witness) {
   if (row.proof === "none") return;
-  cliLogins = await invoke("cli_login_wait", { agent: row.agent, signedIn: true });
+  cliLogins = await invoke("cli_login_wait", { agent: row.agent, signedIn: true, witness });
+}
+
+/* A witness nobody will wait on — the run it was taken for would not start
+ * — is let go, so the backend holds nothing for a wait that is not coming. */
+async function dropCliLoginWitness(witness) {
+  if (witness === null) return;
+  await invoke("cli_login_witness_drop", { witness });
+}
+
+/* The pane roads' order (t-7170 R2): the witness, then the run, then the
+ * wait against that witness. A witness the backend would not take means no
+ * run at all — a run nobody is watching is the hole this order closes —
+ * and a run that would not start lets the witness go before the error
+ * travels on. */
+async function runThenWait(row, run) {
+  const witness = await takeCliLoginWitness(row);
+  try {
+    await run();
+  } catch (error) {
+    await dropCliLoginWitness(witness);
+    throw error;
+  }
+  await waitForCliLogin(row, witness);
 }
 
 /* Sign in, or sign in again — the row's road decides how. */
@@ -5151,68 +5188,108 @@ function startCliLogin(row, button) {
         return;
       }
       // `pane-verb` types the row's shell line into a plain shell; `tui`
-      // types the row's slash command at its CLI; `first-run` opens it bare.
-      if (row.road === "pane-verb") await typeCliLoginShellLine(row, row.pane_command);
-      else await typeCliLoginCommand(row, row.tui_login ?? null);
-      await waitForCliLogin(row);
+      // types the row's slash command at its CLI; `first-run` opens it bare
+      // — each between the witness and the wait.
+      await runThenWait(row, async () => {
+        if (row.road === "pane-verb") await typeCliLoginShellLine(row, row.pane_command);
+        else await typeCliLoginCommand(row, row.tui_login ?? null);
+      });
     },
   });
 }
 
 /* Run the CLI once, bare, so it renews the session it holds (t-7170): the
- * same door the first-run road opens, nothing typed, and the same watch on
- * the file — a renewed session is a changed file, which is what the watch
- * calls arrival — and then the gauge is re-read past its floor. */
+ * witness first, then the run — a new pane through the launch door, or the
+ * table's bare line at a pane the program has left — then the same watch
+ * on the file; a renewed session is a changed file, which is what the
+ * watch calls arrival, and then the gauge is re-read past its floor. */
 function runCliOnce(row, button) {
   return walkCliLoginRoad(row, button, {
     road: "run-once",
     command: null,
-    walk: async () => {
-      await typeCliLoginCommand(row, null);
-      await waitForCliLogin(row);
-    },
+    walk: () => runThenWait(row, () => runCliBare(row)),
   });
 }
 
+/* A run is a process START, not a word to a running program (astra m-7239
+ * R1). A pane the program is still in is left alone — the renewal is the
+ * CLI's next start, which a program at its composer will not do, and the
+ * only words this window could type there would be a prompt to the
+ * person's own session — and a new pane opens beside it. A pane the
+ * program has LEFT is a shell at its prompt, and the table's bare line typed
+ * at it is the same run. The pane table says which is which
+ * (`cliPanesOf`); a CLI the launch catalog does not know runs in a plain
+ * shell either way. */
+async function runCliBare(row) {
+  if (row.opens === "shell") return typeCliLoginShellLine(row, row.run_command);
+  const { left } = cliPanesOf(row);
+  if (left !== null) return typeCliLoginShellLine(row, row.run_command, left);
+  return openCliPane(row);
+}
+
 /* Open the CLI in a pane of this window and type `command` at it — or open
- * it bare when there is nothing to type. The one launch door every agent
- * takes (`launchAgentTab`), with an EMPTY prompt: a launch prompt has the
- * orchestration contract appended to it, which would turn a slash command
- * into a paragraph. The words go through `send_prompt` instead, whose
- * readiness wait lands them in the composer rather than in the CLI's boot
- * banner. A pane the agent already holds is reused and brought to the
- * front: the command is a word to a running program, not a reason to start
- * a second one. */
+ * it bare when there is nothing to type. A pane the agent already holds and
+ * is still in is reused and brought to the front: the command is a word to
+ * a running program, not a reason to start a second one — and a pane the
+ * program has left is not that pane. */
 async function typeCliLoginCommand(row, command) {
   // A CLI the launch catalog does not know has no agent pane to open: the
   // window types its line into a plain shell instead, and the caption names
   // the command for the person to type at it.
   if (row.opens === "shell") return typeCliLoginShellLine(row, row.pane_command);
-  let term = [...paneAgents].find(([, agent]) => agent === row.agent)?.[0] ?? null;
-  const held = term === null ? null : tabOfTerm(term);
-  if (held === null) {
-    term = await launchAgentTab({ agent: row.agent, prompt: "", ...spawnGrid() });
-    mountTermTab(term, { agent: row.name }, {});
-  } else {
-    setActiveTab(held.id);
-  }
+  let { running: term } = cliPanesOf(row);
+  if (term === null) term = await openCliPane(row);
+  else setActiveTab(tabOfTerm(term).id);
   if (command) {
     await invoke("send_prompt", { term, text: command, submit: true, agent: row.agent });
   }
   return term;
 }
 
+/* The one launch door every agent takes (`launchAgentTab`), with an EMPTY
+ * prompt: a launch prompt has the orchestration contract appended to it,
+ * which would turn a slash command into a paragraph. The words go through
+ * `send_prompt` instead, whose readiness wait lands them in the composer
+ * rather than in the CLI's boot banner. */
+async function openCliPane(row) {
+  const term = await launchAgentTab({ agent: row.agent, prompt: "", ...spawnGrid() });
+  mountTermTab(term, { agent: row.name }, {});
+  return term;
+}
+
+/* The panes this window holds for the row's agent, by what the pane table
+ * says of them: one the program is still in (`running`), and one it has
+ * left (`left`) — a shell at its prompt, which the backend reports as
+ * `idle` once the foreground group is the shell's own again
+ * (`paneProgramLeft`). A pane no tab holds is neither: it was detached, and
+ * a word typed at it lands where nobody looks. */
+function cliPanesOf(row) {
+  const held = [...paneAgents]
+    .filter(([term, agent]) => agent === row.agent && tabOfTerm(term) !== null)
+    .map(([term]) => term);
+  return {
+    running: held.find((term) => !paneProgramLeft(term)) ?? null,
+    left: held.find((term) => paneProgramLeft(term)) ?? null,
+  };
+}
+
 /* A verb that needs a screen — a device code on stderr, or a CLI that
  * refuses a pipe — typed into a plain shell of this window, the way the
- * GitLab card types `glab auth login` (`openGitlabLoginTerminal`). The line
- * is the backend's: the home in the CLI's own variable, then the verb, so
- * the CLI writes where the gauge reads. The settings panel steps aside so
- * the person can see the code they are being asked to enter. */
-async function typeCliLoginShellLine(row, line) {
+ * GitLab card types `glab auth login` (`openGitlabLoginTerminal`): a new
+ * one, or the pane `at` that the program has left. The line is the
+ * backend's: the home in the CLI's own variable, then the verb, so the CLI
+ * writes where the gauge reads. The settings panel steps aside from a new
+ * shell so the person can see the code they are being asked to enter. */
+async function typeCliLoginShellLine(row, line, at = null) {
   if (!line) throw new Error(t("settings.cliLogins.noLine", "이 행에는 입력할 명령이 없습니다"));
-  setSettingsOpen(false);
-  const term = await invoke("open_term_tab", { rows: 24, cols: 96, plain: true });
-  mountTermTab(term);
+  let term = at;
+  if (term === null) {
+    setSettingsOpen(false);
+    term = await invoke("open_term_tab", { rows: 24, cols: 96, plain: true });
+    mountTermTab(term);
+  } else {
+    setActiveTab(tabOfTerm(term).id);
+  }
   await invoke("term_text", { term, text: `${line}\r` });
   return term;
 }
