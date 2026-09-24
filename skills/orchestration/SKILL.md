@@ -747,6 +747,30 @@ For code changes in a Rust workspace, the worker gate must include
 test targets across the workspace. Report each gate exit code without hiding it
 behind a pipe. A package-only clippy run does not cover this gate.
 
+### Finish once — the briefing carries the acceptance, not the review
+
+A landing that needs a second pass is a briefing that was missing something,
+not a worker that was careless. On 2026-09-24 four of five landings came back
+from the closing partner's review for criteria that could have been written
+first: transient-state assertions instead of end-state ones, a pinned model's
+contract, whether a "run once" actually runs, one series per rubric version.
+So:
+
+- Write the definition of done into the briefing before summoning: the
+  red-first test names, the measurement table, and every contract, boundary
+  and negative case the reviewer will hold the work to.
+- Have the closing partner (the adversarial reviewer) read that briefing
+  first — ten minutes — and fold what it adds. A rejection after
+  implementation is the briefing's failure.
+- `worker_done` is accepted only with red (failing before the fix) and green
+  (passing after) receipts — command, sha, exit code, log path — and the
+  briefing's acceptance items ticked in the report.
+- Close in the same task: review findings are fixed by the same worker in the
+  same checkout and merged once. "Accept with follow-ups" spawns no new task
+  unless the follow-up is a different unit by design.
+- The coordinator writes no claims of effect into comments or docs; it writes
+  what the code does and what was measured.
+
 Copy into each implementation briefing:
 
 ```text
