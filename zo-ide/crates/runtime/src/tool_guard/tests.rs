@@ -69,18 +69,19 @@ fn the_text_guard_reads_files_the_web_mcp_and_the_windows_fenced_answers_only() 
 }
 
 /// A text ask carries the head at the use table's cap, the whole's length and
-/// whether the window already fenced it — never more of the text than the
-/// door would send.
+/// the runtime's own word on the fence — bare for its own tools, unknown for
+/// a shell answer that looks like the window's — never more of the text than
+/// the door would send.
 #[test]
 fn a_text_ask_carries_the_head_at_the_tables_cap() {
     let long = "가".repeat(TOOL_TEXT_GUARD_TEXT_CHAR_CAP + 50);
     let ask = text_ask("attempt-1", "read-1", "read_file", &long).expect("a file is read");
     assert_eq!(ask.head.chars().count(), TOOL_TEXT_GUARD_TEXT_CHAR_CAP);
     assert_eq!(ask.chars, TOOL_TEXT_GUARD_TEXT_CHAR_CAP + 50);
-    assert!(!ask.fenced);
+    assert_eq!(ask.framing, HostFraming::Unfenced);
     assert_eq!((ask.attempt.as_str(), ask.tool_use_id.as_str()), ("attempt-1", "read-1"));
     let fenced = untrusted::fence("browser-3", "Sign in", usize::MAX);
-    assert!(!text_ask("a", "b", SHELL_TOOL, &fenced).expect("a browser answer").fenced);
+    assert_eq!(text_ask("a", "b", SHELL_TOOL, &fenced).expect("a browser answer").framing, HostFraming::Unknown);
     assert_eq!(text_ask("a", "b", "read_file", "  \n"), None, "an empty answer");
     assert_eq!(text_ask("a", "b", "grep_search", "x"), None);
 }
@@ -157,8 +158,11 @@ fn a_marker_phrase_inside_tool_data_does_not_claim_a_host_fence() {
     let envelope = serde_json::json!({"type":"text", "file": {"filePath":"/ws/notes.md", "content":words}}).to_string();
     for (tool, output) in [("read_file", envelope.as_str()), ("mcp__notes__read", words.as_str()), ("WebFetch", words.as_str())] {
         let ask = text_ask("turn", "read", tool, output).expect("external text");
-        assert!(!ask.fenced, "{tool}: text cannot attest to host framing");
+        assert_eq!(ask.framing, HostFraming::Unfenced, "{tool}: text cannot attest to host framing");
     }
+    let shell = format!("{words}\n{}", untrusted::open_marker("browser-1"));
+    let ask = text_ask("turn", "read", SHELL_TOOL, &shell).expect("a browser candidate");
+    assert_eq!(ask.framing, HostFraming::Unknown, "a marker in shell bytes is nobody's word");
 }
 
 #[test]

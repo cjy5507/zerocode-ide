@@ -17530,7 +17530,7 @@ fn the_tool_guards_leave_every_result_to_the_byte_unless_they_act() {
         assert_eq!(texts[0].tool_use_id, "read-1");
         assert_eq!(texts[0].source, crate::TextSource::File);
         assert_eq!(texts[0].head, GUARDED_READ_OUTPUT);
-        assert!(!texts[0].fenced);
+        assert_eq!(texts[0].framing, crate::tool_guard::HostFraming::Unfenced);
     }
 
     let (guard, command_note) = acting_guard();

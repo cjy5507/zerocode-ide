@@ -531,13 +531,17 @@ pub const SCREEN_INSTRUCTED_NO: &str = concat!(
 /* ---- the tool text guard (t-6348) ------------------------------------------- */
 
 /// Bumped whenever the tool text guard's words or the state they read change
-/// — or the baseline they are compared with: version 2 begins where the
-/// baseline's "fenced before" became the host's own fence rather than a
-/// phrase found in the body (t-6982). The version rides every request row so
-/// a reader can tell the two series apart; the shared promotion reader
-/// (`promote::named_version`) still windows by model alone, and reading
-/// requests, labels and standing per rubric version is t-6877's contract.
-pub const TOOL_TEXT_GUARD_RUBRIC_VERSION: u32 = 2;
+/// — or the baseline they are compared with. Version 1 read "fenced before"
+/// off a phrase in the block's own bytes; version 2 held it at `false` for
+/// every block, one constant-plain mark whether the runtime had handed the
+/// block over bare or the window had wrapped it (t-6982); version 3 grades
+/// the rule on the host's own word and marks nothing where the host cannot
+/// say (t-7058, `tool_guard::todays_text_rule` in the tools crate). The
+/// version rides every request row so a reader can tell the series apart;
+/// the shared promotion reader (`promote::named_version`) still windows by
+/// model alone, and reading requests, labels and standing per rubric version
+/// is t-6877's contract.
+pub const TOOL_TEXT_GUARD_RUBRIC_VERSION: u32 = 3;
 /// The keys the tool text guard's state carries, in the order the use table
 /// declares them: the kind of tool the block came from, and its head.
 pub const TOOL_TEXT_GUARD_STATE_KEYS: [&str; 2] = ["source", "text"];
@@ -784,7 +788,7 @@ mod tests {
 
     #[test]
     fn tool_text_guard_version_names_its_exact_words() {
-        assert_eq!(TOOL_TEXT_GUARD_RUBRIC_VERSION, 2);
+        assert_eq!(TOOL_TEXT_GUARD_RUBRIC_VERSION, 3);
         assert_eq!(tool_text_guard_rubric_fingerprint(), "27929c87aaf3df85");
     }
 

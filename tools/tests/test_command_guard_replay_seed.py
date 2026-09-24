@@ -30,7 +30,10 @@ class ConstantsMatchTheirSource(unittest.TestCase):
 
     def test_the_sources_are_the_runtimes_words(self):
         guard = (REPO / "zo-ide" / "crates" / "runtime" / "src" / "tool_guard.rs").read_text()
-        words = re.findall(r'Self::\w+ => "(\w+)",', guard)
+        # The kinds are one impl block; the host's framing words next to it
+        # (`HostFraming`) are not kinds of source.
+        sources = guard.split("impl TextSource {", 1)[1].split("\nimpl ", 1)[0]
+        words = re.findall(r'Self::\w+ => "(\w+)",', sources)
         self.assertEqual(tuple(words), seed.SOURCES)
 
 
