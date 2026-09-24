@@ -3054,33 +3054,36 @@ fn pane_attention() -> &'static Mutex<std::collections::HashMap<u32, Option<i64>
 
 /// A hook report said whether this terminal is waiting on the person.
 ///
-/// Answers whether this report BEGAN a wait — the value changed to
-/// `Some(since)` — which is the one moment the ledger is told (t-6740):
-/// a waiting stretch produces dozens of tool events that all say the same
-/// `since`, and whoever asked this seat a question is owed the fact once.
-pub(crate) fn pane_attention_noted(term: u32, waiting_since: Option<i64>, now_ms: i64) -> bool {
-    let began = {
-        let mut held = pane_attention()
-            .lock()
-            .unwrap_or_else(|held| held.into_inner());
-        let before = held.insert(term, waiting_since);
-        waiting_since.is_some() && before.flatten() != waiting_since
+/// The map records what the window SAW; it is not the record of what the
+/// ledger was TOLD (t-6740). Every sighting of a wait goes to the actor, and
+/// the ledger's own lines decide whether it is news: the same wait — the
+/// same seat, word and `since` — is one line however often it is seen
+/// ([`zerocode_core::orchestration::ReceiverNews`]). So a sighting the
+/// ledger could not write down — a degraded window, a runtime not up yet, a
+/// store that refused the write — is told on the next sighting of the same
+/// wait, with nothing in this window's memory standing in its way. Only a
+/// report that says the pane waits on the person reaches the actor — that
+/// wait's own events (the question, its permission request, its
+/// notification), never a working turn's tool events — and a look at a
+/// fact already told writes nothing.
+pub(crate) fn pane_attention_noted(term: u32, waiting_since: Option<i64>, now_ms: i64) {
+    pane_attention()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(term, waiting_since);
+    let Some(since_ms) = waiting_since else {
+        return;
     };
-    if !began {
-        return false;
-    }
     // A hook event, not a verb: as in [`pane_turn_ended`], a degraded
-    // window has nobody to refuse and simply does not tell.
+    // window has nobody to refuse and simply does not tell — this time.
     if unavailable().is_some() {
-        return true;
+        return;
     }
     if let Some(held) = runtime()
-        && let Some(since_ms) = waiting_since
         && let Ok((moved, _)) = held.actor.pane_attention(term, since_ms, now_ms)
     {
         rang(moved);
     }
-    true
 }
 
 /// The terminal is gone; its number's next life starts unevaluated.
@@ -3591,7 +3594,11 @@ pub(crate) fn pane_turn_began(term: u32) {
 /// settled") is structural there, and reports arrive for every pane in the
 /// window — most of them nobody's worker — so a seat that resolves to nothing
 /// is the ordinary case and not a failure.
-pub(crate) fn pane_turn_ended(term: u32, turn_started_ms: i64, interrupted: bool, now_ms: i64) {
+///
+/// `turn_ended_ms` is the pane's own clock for the rest it came to
+/// ([`zerocode_core::hook::state_clock`]): when the turn ended, unmoved
+/// while the rest is reported again.
+pub(crate) fn pane_turn_ended(term: u32, turn_ended_ms: i64, interrupted: bool, now_ms: i64) {
     // A sound is a sound: the actor road below also retires the readiness
     // window, but it does not run in a degraded window — the beat's sweep
     // still must not report a pane the window plainly heard.
@@ -3620,7 +3627,7 @@ pub(crate) fn pane_turn_ended(term: u32, turn_started_ms: i64, interrupted: bool
         return;
     };
     let actor = &held.actor;
-    if let Ok((moved, _)) = actor.pane_turn_ended(term, turn_started_ms, interrupted, now_ms) {
+    if let Ok((moved, _)) = actor.pane_turn_ended(term, turn_ended_ms, interrupted, now_ms) {
         rang(moved);
     }
 }
@@ -6987,6 +6994,34 @@ fn carried(
                         Err(why) => return refused_by_runtime(why),
                     }
                     if std::time::Instant::now() >= deadline {
+                        /* A question's deadline is settled by ONE look
+                         * (t-6740): the woken look once more — an answer
+                         * that landed after the last empty look above is
+                         * the answer, then a closing, then a receiver
+                         * gone — and only a question still waiting goes
+                         * home timed out, with the last word about its
+                         * receiver. What that look answers is what this
+                         * caller goes home with AND what its receipt
+                         * holds, filed in the same transition: a replay of
+                         * the same ask says what the caller was told, never
+                         * the first look this wait began from. */
+                        if waiting.thread.is_some() {
+                            match actor.deadline_look(
+                                waiting.clone(),
+                                decided.receipt.clone(),
+                                now_ms,
+                            ) {
+                                Ok((Some(settled), _)) => {
+                                    rang(decided.receipt.is_some());
+                                    return answer(settled.reply);
+                                }
+                                // The question is not in the ledger any more
+                                // (its run went away): the first answer
+                                // stands, as for any other wait.
+                                Ok((None, _)) => {}
+                                Err(why) => return refused_by_runtime(why),
+                            }
+                        }
                         // Silence is not failure — the ninth invariant, and
                         // the reason this is the answer the first look
                         // already wrote rather than a refusal. A coordinator
@@ -6997,21 +7032,6 @@ fn carried(
                         match actor.serve_receipt(Box::new(decided.clone()), now_ms) {
                             Ok((moved, _)) => rang(moved),
                             Err(why) => return refused_by_runtime(why),
-                        }
-                        /* A question's deadline goes home with the last
-                         * word about its receiver (t-6740) — read now, at
-                         * the deadline, rather than the line the first
-                         * look wrote before anything had been observed.
-                         * The receipt above stays the first answer: a
-                         * replay of the same ask reads its way back the
-                         * same way, and the timed-out word is this
-                         * caller's, now. A wait that is not a question's
-                         * answers as it always did. */
-                        if waiting.thread.is_some()
-                            && let Ok((Some(timed), _)) =
-                                actor.ask_timed_out(waiting.clone(), now_ms)
-                        {
-                            return answer(timed.reply);
                         }
                         return answer(decided.reply);
                     }

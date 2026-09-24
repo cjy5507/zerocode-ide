@@ -1135,11 +1135,12 @@ pub(super) fn note_pane_state(
         let now = epoch_ms_now();
         // The state's own clock moves only when the STATE does — a repeated
         // `working` is the same stretch of work, however many tool events
-        // arrive inside it.
-        let state_started_at = match prior {
-            Some(held) if held.state == report.state => held.state_started_at,
-            _ => now,
-        };
+        // arrive inside it, and on a `done` it is when the turn ENDED.
+        let state_started_at = zerocode_core::hook::state_clock(
+            prior.map(|held| (held.state, held.state_started_at)),
+            report.state,
+            now,
+        );
         // 도우미의 기다림은 리드의 말을 **밀어낸다**. 그리고 리드는 제
         // 도우미가 답을 받았다는 이유로 다시 말하지 않으므로, 밀려나는 이
         // 순간을 놓치면 되돌릴 말이 남지 않는다. 규칙은 코어가 쥔다
@@ -1286,8 +1287,8 @@ pub(super) fn note_pane_state(
     // news — an interrupted turn is not, and neither is a worker waiting on an
     // answer it asked for.
     match ended {
-        Some((turn_started_ms, interrupted, now)) => {
-            orchestration::pane_turn_ended(report.term, turn_started_ms, interrupted, now);
+        Some((turn_ended_ms, interrupted, now)) => {
+            orchestration::pane_turn_ended(report.term, turn_ended_ms, interrupted, now);
         }
         // Anything but a finished turn means the pane is NOT at rest: an
         // agent working, or one stopped at a question of its own — and the

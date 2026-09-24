@@ -4081,16 +4081,18 @@ fn quiet_rollup(episode: QuietEpisode) -> serde_json::Value {
 /// machine's ledger): an asker learned NOTHING about its receiver until the
 /// answer came or its own budget ran out. The turn facts the ledger kept
 /// (`went_quiet`) are written only for a worker carrying an open dispatch,
-/// and 42 of the 45 worker receivers carried none; a receiver its
-/// coordinator had stopped left one asker waiting 9,238 s on the gone.
+/// and 42 of the 45 worker receivers carried none; one question stood
+/// unanswered for as long as the ledger ran on after its receiver's attempt
+/// had ended, and nothing in its thread ever said so.
 ///
 /// So the asker is told, one line per change in the ledger's own voice,
-/// threaded on the question — [`Ledger::receivers_told`] — and the words
-/// are this table. Two kinds of word: a **final** one means no road will
-/// ever sign the receiver's address again, so the blocked `ask` wakes on it
-/// ([`thread_look`]) and a resume answers it at once; every other word is
-/// news the asker reads at its own pace, and the deadline answer carries the
-/// last of them ([`ask_timed_out`]). Neither kind closes the question,
+/// threaded on the question — `Ledger::receivers_told`, under the one rule
+/// `notice_owed` — and the words are this table. Two kinds of word: a
+/// **final** one means no road will ever sign the receiver's address again,
+/// so the blocked `ask` wakes on it (the woken look, `thread_look`) and a
+/// resume answers it at once; every other word is news the asker reads at
+/// its own pace, and the deadline answer carries the last of them
+/// ([`deadline_look`]). Neither kind closes the question,
 /// answers it, spends an attempt or summons anybody: the observation is the
 /// ledger's, what to do with it is the asker's, and a replacement is its
 /// coordinator's call alone.
@@ -4177,21 +4179,24 @@ pub const RECEIVER_CANCELLED_ADVICE: &str = "the seat this question was asked of
 /// How many non-final lines one question's thread may carry.
 ///
 /// Derived from the two clocks the lines already keep: a state seen again
-/// inside [`QUIET_REMINDER_MS`] is the same line, so the longest `ask`
+/// inside `QUIET_REMINDER_MS` is the same line, so the longest `ask`
 /// budget ([`ASK_BUDGET_MAX_MS`]) can earn one line per cadence plus the
 /// first, plus one for a change of state on either edge. Past the bound a
 /// question nobody is waiting on stops costing rows; a final word still
 /// lands, because it is the one that ends the waiting.
 pub const RECEIVER_NOTICE_CAP: usize = (ASK_BUDGET_MAX_MS as i64 / QUIET_REMINDER_MS) as usize + 2;
 
-/// The seat a question was asked of, as the ledger can name it right now —
-/// the generation the observation is about, so an event from a pane's
-/// former occupant, or a run's former coordinator, is never pinned on the
-/// current one.
+/// The seat a question was asked of, as it stood when the observed fact
+/// BEGAN — the generation the observation is about, so an event from a
+/// pane's former occupant, a run's former coordinator, or an attempt that
+/// has since ended is never pinned on the current one. A hook report can
+/// reach the ledger after its seat changed hands; the stamp it carries is
+/// what says whose it is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReceiverSeat {
-    /// A worker: its id is minted once per summons, and the attempt it
-    /// carries (if any) tells a re-dispatched seat from its earlier self.
+    /// A worker: its id is minted once per summons, and the attempt it was
+    /// carrying when the fact began (if any) tells a re-dispatched seat
+    /// from its earlier self.
     Worker {
         id: String,
         dispatch: Option<String>,
@@ -4201,6 +4206,15 @@ enum ReceiverSeat {
 }
 
 impl ReceiverSeat {
+    /// A worker as it stood at `fact_ms`: the attempt it carried then, not
+    /// the one it carries when the report lands.
+    fn of_worker(run: &Run, worker: &Worker, fact_ms: i64) -> Self {
+        Self::Worker {
+            id: worker.id.clone(),
+            dispatch: carried_at(run, &worker.id, fact_ms),
+        }
+    }
+
     fn json(&self) -> serde_json::Value {
         match self {
             Self::Worker { id, dispatch } => {
@@ -4213,22 +4227,44 @@ impl ReceiverSeat {
     }
 }
 
-/// Whom a question addressed in this run reaches at `team/pane` right now:
-/// the worker occupying the pane, and the run's coordinator when that pane
-/// is its seat. A pane that is neither is nobody's receiver.
-fn receivers_at(run: &Run, team: &str, pane: &str) -> Vec<(String, ReceiverSeat)> {
+/// The attempt a worker was carrying at `at_ms`: begun by then and not
+/// ended before it — the latest such, since one attempt can end in the
+/// very millisecond the next begins.
+fn carried_at(run: &Run, worker_id: &str, at_ms: i64) -> Option<String> {
+    run.dispatches
+        .iter()
+        .filter(|one| {
+            one.worker == worker_id
+                && one.started_ms <= at_ms
+                && one.ended_ms.is_none_or(|ended| at_ms <= ended)
+        })
+        .max_by_key(|one| one.started_ms)
+        .map(|one| one.id.clone())
+}
+
+/// Whom a fact that began at `fact_ms` in `team/pane` is about, in this
+/// run: the worker occupying the pane, and the run's coordinator when that
+/// pane is its chair — each only if it already held the seat when the fact
+/// began. A worker summoned after that moment, or a chair taken after it,
+/// is not that fact's receiver: the next occupant never inherits the last
+/// one's late turn end or late wait on the person. A pane that is neither
+/// is nobody's receiver.
+fn receivers_at(run: &Run, team: &str, pane: &str, fact_ms: i64) -> Vec<(String, ReceiverSeat)> {
     let mut held = Vec::new();
-    if let Some(worker) = run.worker_in_pane(team, pane) {
+    if let Some(worker) = run
+        .worker_in_pane(team, pane)
+        .filter(|worker| worker.started_ms <= fact_ms)
+    {
         held.push((
             worker_address(&worker.id),
-            ReceiverSeat::Worker {
-                id: worker.id.clone(),
-                dispatch: worker.dispatch.clone(),
-            },
+            ReceiverSeat::of_worker(run, worker, fact_ms),
         ));
     }
     let seat = format!("{team}/{pane}");
-    if let Some(chair) = run.coordinator_live().filter(|chair| chair.seat == seat) {
+    if let Some(chair) = run
+        .coordinator_live()
+        .filter(|chair| chair.seat == seat && chair.since_ms <= fact_ms)
+    {
         held.push((
             run.address(),
             ReceiverSeat::Coordinator {
@@ -4241,15 +4277,15 @@ fn receivers_at(run: &Run, team: &str, pane: &str) -> Vec<(String, ReceiverSeat)
 }
 
 /// The same for a worker named by id — the stall sweep and the endings
-/// know the worker, not the pane.
-fn receiver_of_worker(run: &Run, worker_id: &str) -> Option<(String, ReceiverSeat)> {
-    let worker = run.worker(worker_id)?;
+/// know the worker, not the pane — under the same rule: a fact that began
+/// before the worker was summoned is not about it.
+fn receiver_of_worker(run: &Run, worker_id: &str, fact_ms: i64) -> Option<(String, ReceiverSeat)> {
+    let worker = run
+        .worker(worker_id)
+        .filter(|worker| worker.started_ms <= fact_ms)?;
     Some((
         worker_address(&worker.id),
-        ReceiverSeat::Worker {
-            id: worker.id.clone(),
-            dispatch: worker.dispatch.clone(),
-        },
+        ReceiverSeat::of_worker(run, worker, fact_ms),
     ))
 }
 
@@ -4291,9 +4327,10 @@ fn receiver_notices<'a>(
 
 /// What the ledger last observed about a question's receiver, for the
 /// asker's deadline answer and the woken look: the last line in the
-/// thread — or, derived rather than stored, a worker receiver that no
-/// longer reads mail and was never written up, which is final all the
-/// same. `None` when nothing has been observed.
+/// thread — which [`notice_owed`] keeps the last state OBSERVED, never an
+/// earlier fact seen again — or, derived rather than stored, a worker
+/// receiver that no longer reads mail and was never written up, which is
+/// final all the same. `None` when nothing has been observed.
 fn receiver_standing(run: &Run, question: &Message) -> Option<serde_json::Value> {
     let last = receiver_notices(run, question).last().map(|(_, body)| body);
     if last.as_ref().is_some_and(|body| body["final"] == true) {
@@ -4317,18 +4354,70 @@ fn receiver_standing(run: &Run, question: &Message) -> Option<serde_json::Value>
     last
 }
 
+/// Whether a question whose thread already carries `told` is owed a line
+/// saying `news` about `seat` — a fact that began at `fact_ms`, seen at
+/// `now_ms`. The whole rule, here and nowhere else:
+///
+/// 1. A final line ends the telling: nothing is written after it.
+/// 2. A final word is written once, past the bound too — it is the line
+///    that ends the waiting.
+/// 3. The same fact — the same seat, word and `factMs` — anywhere in the
+///    record is the same line, however late it comes again and whatever
+///    was told in between. The stall sweep hands over the same silence
+///    every beat and the stall seat's judged cause lands between two beats;
+///    a turn's end can be reported twice with another word between. A line
+///    of another word does not make the second sighting of a fact news.
+/// 4. The same word about the same seat inside [`QUIET_REMINDER_MS`] of the
+///    last line is the same line: a fresh fact of the word just said waits
+///    out the cadence.
+/// 5. At most [`RECEIVER_NOTICE_CAP`] lines that are not final.
+///
+/// What that makes the thread mean: its lines stand in the order the ledger
+/// OBSERVED them and each fact stands once, so the last line is the last
+/// state the ledger saw the receiver in — never an earlier fact seen again.
+/// `factMs` is when that state BEGAN, which is what identifies it; it does
+/// not order the thread, because a later state can have begun earlier (a
+/// stall's quiet starts at the pane's last output, which can come a hair
+/// before the hook reports the turn end it follows — and the stall is still
+/// the newer thing to know).
+fn notice_owed(
+    told: &[(&Message, serde_json::Value)],
+    seat: &serde_json::Value,
+    news: &ReceiverNews,
+    fact_ms: i64,
+    now_ms: i64,
+) -> bool {
+    if told.iter().any(|(_, body)| body["final"] == true) {
+        return false;
+    }
+    if news.is_final() {
+        return true;
+    }
+    let same_word =
+        |body: &serde_json::Value| body["reason"] == news.word() && body["receiverSeat"] == *seat;
+    if told
+        .iter()
+        .any(|(_, body)| same_word(body) && body["factMs"] == fact_ms)
+    {
+        return false;
+    }
+    if let Some((last, body)) = told.last()
+        && same_word(body)
+        && now_ms >= last.created_ms
+        && now_ms - last.created_ms < QUIET_REMINDER_MS
+    {
+        return false;
+    }
+    told.len() < RECEIVER_NOTICE_CAP
+}
+
 impl Ledger {
     /// Tell every asker with an open question to `receiver` what the ledger
     /// just observed about it — one line each, threaded on the question, in
-    /// the ledger's voice. Answers how many lines were written.
-    ///
-    /// What keeps it one line: the same word about the same seat inside
-    /// [`QUIET_REMINDER_MS`] is the same line, the same fact stamp is the
-    /// same line whenever it arrives (a turn's end reported twice, a stall
-    /// sweep every beat), a final word is said once and ends the telling,
-    /// and a question carries at most [`RECEIVER_NOTICE_CAP`] lines that are
-    /// not final. An asker with no reader left is told nothing, silently —
-    /// the post refuses the address, and there is nobody to refuse to.
+    /// the ledger's voice, where [`notice_owed`] says one is owed. Answers
+    /// how many lines were written. An asker with no reader left is told
+    /// nothing, silently — the post refuses the address, and there is
+    /// nobody to refuse to.
     fn receivers_told(
         &mut self,
         run_id: &str,
@@ -4345,26 +4434,12 @@ impl Ledger {
             };
             open_questions_to(run, address)
                 .into_iter()
-                .filter_map(|question| {
+                .filter(|question| {
                     let told: Vec<(&Message, serde_json::Value)> =
                         receiver_notices(run, question).collect();
-                    if told.iter().any(|(_, body)| body["final"] == true) {
-                        return None;
-                    }
-                    if !news.is_final() {
-                        if told.len() >= RECEIVER_NOTICE_CAP {
-                            return None;
-                        }
-                        if let Some((last, body)) = told.last()
-                            && body["reason"] == news.word()
-                            && body["receiverSeat"] == seat_json
-                            && (body["factMs"] == fact_ms
-                                || (now_ms >= last.created_ms
-                                    && now_ms - last.created_ms < QUIET_REMINDER_MS))
-                        {
-                            return None;
-                        }
-                    }
+                    notice_owed(&told, &seat_json, news, fact_ms, now_ms)
+                })
+                .map(|question| {
                     let body = serde_json::json!({
                         "questionId": question.id,
                         "receiver": address,
@@ -4376,7 +4451,7 @@ impl Ledger {
                         "observedAtMs": now_ms,
                         "notification": true,
                     });
-                    Some(Draft {
+                    Draft {
                         from: LEDGER_ITSELF.to_string(),
                         to: question.from.clone(),
                         kind: MessageKind::Status,
@@ -4387,7 +4462,7 @@ impl Ledger {
                         thread: Some(question.id.clone()),
                         task: question.task.clone(),
                         dispatch: question.dispatch.clone(),
-                    })
+                    }
                 })
                 .collect()
         };
@@ -4398,7 +4473,8 @@ impl Ledger {
     }
 
     /// The same, for whoever a `team/pane` seat is the receiver of, in every
-    /// run — the worker in the pane, the coordinator whose chair it is.
+    /// run — the worker in the pane, the coordinator whose chair it is — as
+    /// the seat stood when the fact began ([`receivers_at`]).
     fn receivers_at_seat_told(
         &mut self,
         seat: (&str, &str),
@@ -4411,7 +4487,7 @@ impl Ledger {
             .runs
             .iter()
             .flat_map(|run| {
-                receivers_at(run, team, pane)
+                receivers_at(run, team, pane, fact_ms)
                     .into_iter()
                     .map(move |receiver| (run.id.clone(), receiver))
             })
@@ -4431,7 +4507,7 @@ impl Ledger {
         now_ms: i64,
     ) -> usize {
         let Some((run_id, receiver)) = self.runs.iter().find_map(|run| {
-            receiver_of_worker(run, worker_id).map(|receiver| (run.id.clone(), receiver))
+            receiver_of_worker(run, worker_id, fact_ms).map(|receiver| (run.id.clone(), receiver))
         }) else {
             return 0;
         };
@@ -4444,6 +4520,13 @@ impl Ledger {
     /// silence and stays quiet for a worker carrying nothing — while a
     /// receiver carrying nothing is exactly the one the baseline found
     /// unobserved.
+    ///
+    /// `turn_ended_ms` is the moment the turn ENDED — the pane's own clock
+    /// for the rest it came to ([`crate::hook::state_clock`]), which starts
+    /// when the rest does and stands still while the rest is reported again.
+    /// So it is the fact's time and, with the seat and the word, the same
+    /// fact's identity however often the rest is reported; the turn's start
+    /// is not carried, and nothing here would read it.
     pub fn receivers_told_turn_ended(
         &mut self,
         seat: (&str, &str),
@@ -9794,12 +9877,16 @@ impl Ledger {
     /// frequent mail. A worker-authored message or a dispatch ending closes
     /// the episode. Silence alone never ends work or spends an attempt.
     ///
+    /// `turn_ended_ms` is the moment the turn ended — the pane's clock for
+    /// the rest it came to ([`crate::hook::state_clock`]) — which is what
+    /// `turnEndedMs` says and what the [`Worker::quiet_at`] watermark keeps.
+    ///
     /// Answers the id of the fact it recorded, or `None` when it recorded
     /// nothing.
     pub fn worker_fell_silent(
         &mut self,
         seat: (&str, &str),
-        turn_started_ms: i64,
+        turn_ended_ms: i64,
         interrupted: bool,
         now_ms: i64,
     ) -> Option<String> {
@@ -9815,7 +9902,7 @@ impl Ledger {
         let (told, task_id, dispatch_id) = {
             let run = self.run(&run_id)?;
             let worker = run.worker_in_pane(team, pane)?;
-            if worker.quiet_at == Some(turn_started_ms) {
+            if worker.quiet_at == Some(turn_ended_ms) {
                 return None;
             }
             let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
@@ -9824,7 +9911,7 @@ impl Ledger {
             }
             let episode = quiet_episode(run, &worker.id, &dispatch.id);
             let turns = episode.map_or(1, |held| held.turns + 1);
-            let episode_started = episode.map_or(turn_started_ms, |held| held.first_turn_ms);
+            let episode_started = episode.map_or(turn_ended_ms, |held| held.first_turn_ms);
             let suppressed = episode.map_or(1, |held| {
                 held.turns.saturating_sub(held.notified_through) + 1
             });
@@ -9834,9 +9921,9 @@ impl Ledger {
                 "pane": worker.pane,
                 "taskId": dispatch.task,
                 "dispatchId": dispatch.id,
-                "turnEndedMs": turn_started_ms,
+                "turnEndedMs": turn_ended_ms,
                 "episodeStartedMs": episode_started,
-                "lastTurnEndedMs": turn_started_ms,
+                "lastTurnEndedMs": turn_ended_ms,
                 "quietTurns": turns,
                 "suppressedTurns": suppressed,
                 "notification": false,
@@ -9861,7 +9948,7 @@ impl Ledger {
             })?;
             &mut run.workers[at]
         };
-        worker.quiet_at = Some(turn_started_ms);
+        worker.quiet_at = Some(turn_ended_ms);
         self.record_quiet_observation(&run_id, told, task_id, dispatch_id, now_ms, false)
     }
 
@@ -16502,15 +16589,29 @@ fn thread_look(ledger: &Ledger, run_id: &str, question: &str) -> Option<Decided>
     None
 }
 
-/// The deadline's answer for a blocking `ask` (t-6740): the question is not
-/// answered, here is how to come back to it, and here is the LAST thing the
-/// ledger observed about its receiver — stamped with when it was seen,
-/// never restated as current. `None` for a wait that is not a question's,
-/// and the caller answers that the way it always did.
+/// The deadline's answer for a blocking `ask` (t-6740): the woken look once
+/// more, and only a question still waiting times out.
 ///
-/// A read, like the woken look: nothing is leased and nothing moves.
-pub fn ask_timed_out(ledger: &Ledger, waiting: &Waiting) -> Option<Decided> {
+/// One read settles the deadline, in the woken look's own order — an answer
+/// that landed after the sleeper's last empty look outranks the clock, then
+/// the question closing, then a receiver that is gone — because the wait
+/// looks before it checks the clock, and a reply that beat the deadline by
+/// a hair is a reply, never a timeout said over an answer already in the
+/// log. Only then is the question still open, and the answer says so: not
+/// answered, how to come back to it, and the LAST thing the ledger observed
+/// about its receiver — stamped with when it was seen, never restated as
+/// current. `None` for a wait that is not a question's, and the caller
+/// answers that the way it always did.
+///
+/// A read, like the woken look: nothing is leased and nothing moves. What
+/// it answers is what the caller goes home with, so the window files THIS
+/// as the ask's receipt, in the same transition — a replay of the same
+/// named ask says the same thing the first caller was told.
+pub fn deadline_look(ledger: &Ledger, waiting: &Waiting) -> Option<Decided> {
     let question = waiting.thread.as_deref()?;
+    if let Some(settled) = thread_look(ledger, &waiting.run, question) {
+        return Some(settled);
+    }
     let run = ledger.run(&waiting.run)?;
     let asked = run.message(question)?;
     Some(said(serde_json::json!({
@@ -18929,8 +19030,8 @@ fn plan_inner(
                 // Not yet. The id IS the resume handle: the answer arrives
                 // as a reply in this thread, and `check --types status` will
                 // not hide it because a question is its own type. The
-                // deadline answers through `ask_timed_out`, which reads
-                // the same line back with the last word about the receiver
+                // deadline answers through `deadline_look`, which looks
+                // once more and reads the last word about the receiver
                 // — and a resume reads that word here, stamped, rather
                 // than sleeping on it as if nothing had been seen.
                 let standing = ledger

@@ -18657,3 +18657,200 @@ fn a_workers_claimed_merge_reaches_the_roster_row_as_a_claim() {
         );
     }
 }
+
+/// What the window SAW is not what the ledger was TOLD (astra R1a,
+/// t-6740 r2). A wait on the person that the disk refused to write down is
+/// told on the next sighting of the same wait — the window's map of what it
+/// saw no longer stands between that sighting and the actor — and it is
+/// told ONCE: the ledger's own record of the fact, not the window's memory,
+/// answers every sighting after that.
+#[test]
+fn a_refused_attention_notice_is_told_on_the_next_sighting() {
+    const LEADER: u32 = 11_116;
+    const WORKER: u32 = 11_117;
+    let (window, store) = PrivateWindow::boot();
+    let team = format!("team-attention-retry-{LEADER}");
+    let (_run, worker, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    // The coordinator asks the worker; the shortest budget runs out and the
+    // question stands, unanswered.
+    let asked = run(
+        &Nowhere,
+        Vec::new(),
+        &team,
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+        &words(&format!(
+            "ask --to worker:{worker} --body which-branch --timeout-ms {}",
+            zerocode_core::orchestration::WAIT_BUDGET_MIN_MS
+        )),
+        clock(),
+    );
+    assert_eq!(asked.exit_code, 0, "{}", asked.stderr);
+    let asked: serde_json::Value = serde_json::from_str(&asked.stdout).expect("an answer");
+    let question = asked["questionId"]
+        .as_str()
+        .expect("a question")
+        .to_string();
+    let told = || -> Vec<serde_json::Value> {
+        the_rows()
+            .messages
+            .iter()
+            .filter(|row| {
+                row.from == zerocode_core::orchestration::LEDGER_ITSELF
+                    && row.thread.as_deref() == Some(question.as_str())
+            })
+            .map(|row| serde_json::from_str(row.body.as_str()).expect("a notice is JSON"))
+            .collect()
+    };
+
+    let connection = store
+        .fault_connection_for_tests()
+        .expect("fault connection");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER refuse_attention_write
+                    AFTER UPDATE OF revision ON orchestration_ledger_heads
+                    BEGIN SELECT RAISE(ABORT, 'injected attention refusal'); END;",
+        )
+        .expect("the disk refuses the notice");
+    let since = clock();
+    super::pane_attention_noted(WORKER, Some(since), since + 1);
+    assert!(
+        told().is_empty(),
+        "a notice the disk refused stood in the rows"
+    );
+
+    connection
+        .execute_batch("DROP TRIGGER refuse_attention_write;")
+        .expect("the disk comes back");
+    super::pane_attention_noted(WORKER, Some(since), since + 2);
+    let lines = told();
+    assert_eq!(
+        lines.len(),
+        1,
+        "a wait the disk refused was never told: {lines:?}"
+    );
+    assert_eq!(
+        lines[0]["reason"],
+        zerocode_core::orchestration::ReceiverNews::AwaitingInput.word()
+    );
+    assert_eq!(lines[0]["factMs"], since);
+    // Seen again: the ledger's record answers, and nothing is added.
+    super::pane_attention_noted(WORKER, Some(since), since + 3);
+    assert_eq!(told().len(), 1, "one wait was told twice");
+
+    // The terminal changes hands: its worker is stopped and the terminal is
+    // gone, and another worker is seated in a pane that reuses the number.
+    // The last owner's wait, sighted again late, is not the new owner's —
+    // and the new owner's own wait is its asker's news.
+    let host = Splitting::onto(WORKER);
+    let leader = zerocode_core::agent_teams::LEADER_PANE;
+    let stopped = run(
+        &host,
+        Vec::new(),
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &words(&format!("worker-stop --worker {worker} --reason moved")),
+        clock(),
+    );
+    assert_eq!(stopped.exit_code, 0, "{}", stopped.stderr);
+    crate::agent_teams::forget_term(WORKER);
+    let started = run(
+        &host,
+        Vec::new(),
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &words("worker-start --agent claude"),
+        clock(),
+    );
+    assert_eq!(started.exit_code, 0, "{}", started.stderr);
+    let started: serde_json::Value = serde_json::from_str(&started.stdout).expect("a worker");
+    let next = started["workerId"].as_str().expect("a worker id");
+    let asked = run(
+        &Nowhere,
+        Vec::new(),
+        &team,
+        leader,
+        TEST_CAPABILITY,
+        &words(&format!(
+            "ask --to worker:{next} --body which-tag --timeout-ms {}",
+            zerocode_core::orchestration::WAIT_BUDGET_MIN_MS
+        )),
+        clock(),
+    );
+    assert_eq!(asked.exit_code, 0, "{}", asked.stderr);
+    let asked: serde_json::Value = serde_json::from_str(&asked.stdout).expect("an answer");
+    let next_question = asked["questionId"]
+        .as_str()
+        .expect("a question")
+        .to_string();
+    let told_next = || {
+        the_rows()
+            .messages
+            .iter()
+            .filter(|row| {
+                row.from == zerocode_core::orchestration::LEDGER_ITSELF
+                    && row.thread.as_deref() == Some(next_question.as_str())
+            })
+            .count()
+    };
+    super::pane_attention_noted(WORKER, Some(since), clock());
+    assert_eq!(
+        told_next(),
+        0,
+        "the new owner was told the last owner's wait"
+    );
+    let own = clock();
+    super::pane_attention_noted(WORKER, Some(own), own + 1);
+    assert_eq!(told_next(), 1, "the new owner's own wait was not told");
+
+    super::forget_pane_attention(WORKER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+    drop(window);
+}
+
+/// The deadline's answer and the ask's receipt are ONE result (astra R2,
+/// t-6740 r2): the caller went home with the timed-out answer, so the same
+/// request asked again replays those bytes — never the first empty look the
+/// wait began from, which said nothing about a deadline.
+#[test]
+fn a_timed_out_ask_replays_the_answer_it_went_home_with() {
+    const LEADER: u32 = 11_118;
+    const WORKER: u32 = 11_119;
+    let (window, _store) = PrivateWindow::boot();
+    let team = format!("team-ask-deadline-{LEADER}");
+    let (_run, worker, _pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let line = format!(
+        "ask --to worker:{worker} --body which-branch --timeout-ms {} \
+         --retry-request ask-deadline-{LEADER}",
+        zerocode_core::orchestration::WAIT_BUDGET_MIN_MS
+    );
+    let ask = || {
+        run(
+            &Nowhere,
+            Vec::new(),
+            &team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words(&line),
+            clock(),
+        )
+    };
+    let first = ask();
+    assert_eq!(first.exit_code, 0, "{}", first.stderr);
+    let said: serde_json::Value = serde_json::from_str(&first.stdout).expect("an answer");
+    assert_eq!(said["timedOut"], true, "{said}");
+    let again = ask();
+    assert_eq!(again.exit_code, 0, "{}", again.stderr);
+    assert_eq!(
+        again.stdout, first.stdout,
+        "the same request replayed another answer than the one its caller went home with"
+    );
+
+    crate::agent_teams::forget_term(WORKER);
+    crate::agent_teams::forget_term(LEADER);
+    drop(window);
+}

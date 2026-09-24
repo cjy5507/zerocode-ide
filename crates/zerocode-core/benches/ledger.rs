@@ -17,7 +17,7 @@ use std::hint::black_box;
 use zerocode_core::SessionKey;
 use zerocode_core::agent_teams::{LEADER_PANE, Team};
 use zerocode_core::orchestration::{
-    Draft, Ending, Launcher, Ledger, Message, MessageKind, Priority, Waiting, ask_timed_out,
+    Draft, Ending, Launcher, Ledger, Message, MessageKind, Priority, Waiting, deadline_look,
     look_again, newest_wall, next_dispatch, plan, receipt_actor, worker_address,
 };
 
@@ -411,13 +411,13 @@ fn a_gone_receiver_wakes_the_asker_in_one_look(bench: &mut Criterion) {
     });
 }
 
-/// The deadline answer of a blocked `ask`: the last word about the
-/// receiver, read off the thread.
+/// The deadline answer of a blocked `ask`: the woken look once more, then
+/// the last word about the receiver, read off the thread.
 fn a_timed_out_ask_reads_its_receivers_last_word(bench: &mut Criterion) {
     let (mut ledger, seat, _, waiting) = a_busy_run_with_one_open_question();
     ledger.receivers_told_turn_ended((&seat.0, &seat.1), 20_000, false, 20_001);
     bench.bench_function("a_timed_out_ask_reads_its_receivers_last_word", |timed| {
-        timed.iter(|| black_box(ask_timed_out(&ledger, black_box(&waiting))))
+        timed.iter(|| black_box(deadline_look(&ledger, black_box(&waiting))))
     });
 }
 
