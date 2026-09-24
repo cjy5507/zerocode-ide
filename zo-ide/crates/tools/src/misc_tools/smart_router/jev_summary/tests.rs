@@ -1116,11 +1116,12 @@ fn the_dashboard_counts_the_same_series_the_judge_reads() {
     use zerocode_core::jev::summary::TRANSITION;
     let seat = &zerocode_core::jev::TOOL_TEXT_GUARD;
     let wanted = window_wanted_for(seat).expect("the guard rises");
+    let wanted_at = i64::try_from(wanted).expect("fits");
     let request = |at: i64, judged: i64, rubric: u32, outcome: &str| {
         json!({"at": at, "judged": judged, "rubricVersion": rubric, "model": "jev-1.13.0", "outcome": outcome, "elapsedMs": 400, "requests": 1})
     };
-    let mut rows: Vec<Value> = (0..wanted).map(|n| request(n as i64, 1 + n as i64, 1, "answered")).collect();
-    rows.extend((0..40).map(|n| json!({"kind": "label", "at": wanted as i64 + n, "label": (1 + n).to_string(), "agreed": n >= 3, "baselineAgreed": n % 2 == 0})));
+    let mut rows: Vec<Value> = (0..wanted_at).map(|n| request(n, 1 + n, 1, "answered")).collect();
+    rows.extend((0..40).map(|n| json!({"kind": "label", "at": wanted_at + n, "label": (1 + n).to_string(), "agreed": n >= 3, "baselineAgreed": n % 2 == 0})));
     rows.push(json!({"at": 5_000, (TRANSITION.canonical): ROSE}));
     rows.extend((0..20).map(|n| request(10_000 + n, 1_000 + n, 2, "answered")));
     let home = tempfile::tempdir().expect("tmp");
