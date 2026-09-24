@@ -498,6 +498,50 @@ impl crate::FilePickSeat for FixedFilePickSeat {
     }
 }
 
+struct FixedSkillSuggestionSeat {
+    asked: Arc<Mutex<Vec<String>>>,
+    finished: Arc<Mutex<usize>>,
+    note: Option<String>,
+}
+
+impl crate::skill_rank::SkillSuggestionSeat for FixedSkillSuggestionSeat {
+    fn suggest(&self, request: String) -> futures_util::future::BoxFuture<'_, Option<String>> {
+        self.asked.lock().expect("asked lock").push(request);
+        let note = self.note.clone();
+        Box::pin(async move { note })
+    }
+
+    fn finish(&self, _turn: &[crate::session::ConversationMessage]) {
+        *self.finished.lock().expect("finished lock") += 1;
+    }
+}
+
+#[test]
+fn a_skill_hint_rides_after_the_cache_breakpoint() {
+    let mut runtime = recall_hint_runtime(Session::new());
+    runtime.session.push_user_text("Earlier request").expect("prior message");
+    let before = runtime.build_request(None).expect("request before hint");
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let finished = Arc::new(Mutex::new(0));
+    runtime.set_skill_suggestion_seat(Some(Arc::new(FixedSkillSuggestionSeat {
+        asked: Arc::clone(&asked),
+        finished: Arc::clone(&finished),
+        note: Some("[zo:skill-routing] <system-reminder>Relevant to this request: docx.</system-reminder>".into()),
+    })));
+    runtime.inject_skill_suggestion("Create a Word document");
+    let after = runtime.build_request(None).expect("request after hint");
+    assert_eq!(after.system_prompt.as_ref(), before.system_prompt.as_ref());
+    assert_eq!(&after.messages[..before.messages.len()], before.messages.as_slice());
+    assert!(after.messages.iter().any(|message| {
+        message.role == MessageRole::System && message.blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text } if text.starts_with("[zo:skill-routing]"))
+        })
+    }));
+    assert_eq!(asked.lock().expect("asked lock").as_slice(), ["Create a Word document"]);
+    runtime.finish_skill_suggestion_turn();
+    assert_eq!(*finished.lock().expect("finished lock"), 1);
+}
+
 #[test]
 fn verify_intent_defaults_to_other_and_is_installed_per_turn() {
     // Every host that never installs a probed intent — headless, serve,

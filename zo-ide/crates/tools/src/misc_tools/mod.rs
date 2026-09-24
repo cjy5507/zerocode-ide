@@ -73,7 +73,7 @@ pub use smart_router::{
     AGENT_TOOL_SETTING,
 };
 pub use smart_router::{
-    note_loaded_skill, note_search_answer, skill_search, skill_search_mode_from,
+    note_loaded_skill, note_search_answer, skill_search, skill_search_mode_from, SkillSuggestionJudge,
     skill_search_path,
     Chosen, Searched, SkillLabelRow, SkillSearchRow,
     SKILL_OUTCOME_ANSWERED, SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE, SKILL_SEARCH_SETTING,

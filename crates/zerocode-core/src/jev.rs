@@ -1484,6 +1484,18 @@ pub const SKILL_TASK_CHAR_CAP: usize = ROUTING_TASK_CHAR_CAP;
 /// `skill_load` hands back.
 pub const SKILL_DESCRIPTION_CHAR_CAP: usize = 1_200;
 
+/// The second pass reads only the first part of each shortlisted SKILL.md.
+pub const SKILL_EXCERPT_CHAR_CAP: usize = 700;
+pub const SKILL_DETAIL_CHAR_CAP: usize = SKILL_DESCRIPTION_CHAR_CAP + SKILL_EXCERPT_CHAR_CAP + 3;
+pub const SKILL_FITS_INSTRUCTIONS_CHAR_CAP: usize = SKILL_DESCRIPTION_CHAR_CAP + 200;
+/// A single Choice is documented at this catalog size. Larger catalogs keep
+/// the existing search path until they have their own measured split policy.
+pub const SKILL_SUGGESTION_CATALOG_CAP: usize = 240;
+/// The cookbook's shortlist and separate request-specific probability floors.
+pub const SKILL_SUGGESTION_SHORTLIST: usize = 3;
+pub const SKILL_GATE_FLOOR_PERMILLE: u16 = 300;
+pub const SKILL_FITS_FLOOR_PERMILLE: u16 = 300;
+
 /// Skills one request asks about ([`shard::even_shards`]'s target).
 ///
 /// The reference build this seat is borrowed from sends 137 skills as three
@@ -1575,8 +1587,7 @@ pub const SKILL_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 /// what the word match ranked and says so on the row.
 pub const SKILL_SEARCH_APPLY_DEADLINE_MS: u64 = 10_000;
 
-/// zo's skill search: how much each installed skill covers the task a turn
-/// describes, one score question per skill (t-5629).
+/// zo's skill search and turn-start suggestion (t-5629, t-6347).
 ///
 /// The seat exists to take the skill index out of the system prompt. Today
 /// every installed skill's name and compacted description is rendered on
@@ -1591,10 +1602,10 @@ pub const SKILL_SEARCH_APPLY_DEADLINE_MS: u64 = 10_000;
 /// `shadow` leaves the index exactly where it is and records what the search
 /// would have handed back, which is what makes the two readable side by side.
 ///
-/// What is sent is the task, and the name and description of each installed
-/// skill. A skill's BODY is never sent: it is read from the disk this machine
-/// already holds it on and handed to the model as a tool result, so the
-/// judgment prices a line and the turn reads a document.
+/// The first turn-start request sends the task and each installed skill's name
+/// and description. When the gate says a skill may help, a second request
+/// sends the first 700 characters of three shortlisted SKILL.md files under
+/// the same switch. The full body remains local and is read by Skill only.
 pub const SKILLS: JevUse = JevUse {
     id: "skills",
     setting: "skillSearch",
@@ -1608,7 +1619,7 @@ pub const SKILLS: JevUse = JevUse {
         },
         Sent {
             at: "/state/skills",
-            cap: Cap::Items(SKILL_SHARD_TARGET),
+            cap: Cap::Items(SKILL_SUGGESTION_CATALOG_CAP),
         },
         Sent {
             at: "/state/skills/*/name",
@@ -1617,6 +1628,26 @@ pub const SKILLS: JevUse = JevUse {
         Sent {
             at: "/state/skills/*/description",
             cap: Cap::Chars(SKILL_DESCRIPTION_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/candidates",
+            cap: Cap::Items(SKILL_SUGGESTION_SHORTLIST),
+        },
+        Sent {
+            at: "/state/candidates/*/excerpt",
+            cap: Cap::Chars(SKILL_EXCERPT_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/candidates/*/description",
+            cap: Cap::Chars(SKILL_DESCRIPTION_CHAR_CAP),
+        },
+        Sent {
+            at: "/questions/which/criteria/*",
+            cap: Cap::Chars(SKILL_DETAIL_CHAR_CAP),
+        },
+        Sent {
+            at: "/questions/*/instructions",
+            cap: Cap::Chars(SKILL_FITS_INSTRUCTIONS_CHAR_CAP),
         },
     ],
     ledger: "skill-search.jsonl",
@@ -1628,8 +1659,9 @@ pub const SKILLS: JevUse = JevUse {
     window_forgives: Some(FORGIVES_A_BAD_MINUTE),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
-    // The word match that ranks the skills without a judgment. Its writer
-    // stamps no baseline mark yet: the seat holds at `too_few_baseline`.
+    // Today's turn lets the agent choose from the index on its own. A
+    // validated gold label is needed to compare that baseline with the hint;
+    // the live first-load observation alone is not such a label.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),

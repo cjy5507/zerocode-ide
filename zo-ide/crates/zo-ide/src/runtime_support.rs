@@ -388,6 +388,7 @@ pub(crate) fn build_runtime_with_plugin_state(
         compaction_seat,
         patch_review_seat,
         file_pick_seat,
+        skill_suggestion_seat,
         mcp_state,
         lsp_state,
     } = runtime_plugin_state;
@@ -493,6 +494,7 @@ pub(crate) fn build_runtime_with_plugin_state(
     runtime.set_compaction_seat(compaction_seat);
     runtime.set_patch_review_seat(patch_review_seat);
     runtime.set_file_pick_seat(file_pick_seat);
+    runtime.set_skill_suggestion_seat(skill_suggestion_seat);
     // Wire up parallel tool execution: concurrency-safe tools (Read,
     // Glob, Grep, …) will run via spawn_blocking instead of serially.
     let dispatch_registry = tool_registry.clone();

@@ -101,6 +101,7 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         // Seated at every public prompt boundary; its default mode records
         // candidate rankings until the same turn's edited files label them.
         file_pick_seat: Some(Arc::new(tools::FilePickJudge::at(cwd))),
+        skill_suggestion_seat: Some(Arc::new(tools::SkillSuggestionJudge::at(cwd))),
         mcp_state,
         lsp_state,
     })

@@ -2993,7 +2993,7 @@ where
                 }
             }
         };
-        self.finish_file_pick_turn();
+        self.finish_turn_seats();
         self.settle_team_inbox_turn_for_result(&result);
         result
     }

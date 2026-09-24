@@ -86,7 +86,7 @@ pub use mention_rerank::{
 };
 pub use skill_search::{
     note_loaded_skill, note_search_answer, search as skill_search,
-    skill_search_path, Chosen, Searched, SkillLabelRow, SkillSearchRow, SKILL_OUTCOME_ANSWERED,
+    skill_search_path, Chosen, Searched, SkillLabelRow, SkillSearchRow, SkillSuggestionJudge, SKILL_OUTCOME_ANSWERED,
     SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE,
 };
 pub use shadow_ledger::read_shadow_rows;

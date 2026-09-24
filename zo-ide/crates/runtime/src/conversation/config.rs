@@ -330,6 +330,13 @@ where
         self.file_pick_seat = seat;
     }
 
+    pub fn set_skill_suggestion_seat(
+        &mut self,
+        seat: Option<Arc<dyn crate::skill_rank::SkillSuggestionSeat>>,
+    ) {
+        self.skill_suggestion_seat = seat;
+    }
+
     pub fn set_auto_compaction_enabled(&mut self, enabled: bool) {
         self.auto_compaction_enabled = enabled;
         if !enabled {

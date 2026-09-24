@@ -677,7 +677,8 @@ fn the_builders_cut_at_the_tables_caps() {
     assert!(caps(&PLACEMENT).contains(&Cap::Chars(PLACEMENT_BRIEF_CHAR_CAP)));
     assert!(caps(&SUMMON).contains(&Cap::Chars(SUMMON_BRIEF_CHAR_CAP)));
     assert!(caps(&SKILLS).contains(&Cap::Chars(SKILL_TASK_CHAR_CAP)));
-    assert!(caps(&SKILLS).contains(&Cap::Items(SKILL_SHARD_TARGET)));
+    assert!(caps(&SKILLS).contains(&Cap::Items(SKILL_SUGGESTION_CATALOG_CAP)));
+    assert!(caps(&SKILLS).contains(&Cap::Items(SKILL_SUGGESTION_SHORTLIST)));
     assert!(caps(&SKILLS).contains(&Cap::Chars(SKILL_DESCRIPTION_CHAR_CAP)));
     assert!(caps(&ZO_STEP_EFFORT).contains(&Cap::Chars(ROUTING_TASK_CHAR_CAP)));
     assert!(caps(&BROWSER_READ).contains(&Cap::Chars(BROWSER_READ_TITLE_CHAR_CAP)));
@@ -760,12 +761,9 @@ fn the_browser_read_seat_folds_on_its_own_line_and_sends_no_body() {
     );
 }
 
-/// The skill seat sends a name and a line about each skill, and never a
-/// skill's body: the body is read off this machine's own disk and handed to
-/// the model as a tool result, so what leaves is a list and what the turn
-/// reads is a document.
+/// The second pass sends a bounded instruction excerpt for three candidates.
 #[test]
-fn the_skill_seat_sends_names_and_descriptions_and_never_a_body() {
+fn the_skill_seat_discloses_the_bounded_second_pass() {
     let sent: Vec<&str> = SKILLS.sends.iter().map(|sent| sent.at).collect();
     assert_eq!(
         sent,
@@ -774,14 +772,14 @@ fn the_skill_seat_sends_names_and_descriptions_and_never_a_body() {
             "/state/skills",
             "/state/skills/*/name",
             "/state/skills/*/description",
+            "/state/candidates",
+            "/state/candidates/*/excerpt",
+            "/state/candidates/*/description",
+            "/questions/which/criteria/*",
+            "/questions/*/instructions",
         ]
     );
-    assert!(
-        !sent
-            .iter()
-            .any(|at| at.contains("body") || at.contains("prompt")),
-        "a skill's body never leaves: {sent:?}"
-    );
+    assert!(!sent.iter().any(|at| at.contains("prompt")));
 }
 
 /// The skill search's own floor is a line under one skill's relevance, and

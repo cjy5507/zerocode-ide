@@ -704,6 +704,8 @@ pub struct ConversationRuntime<C, T> {
     /// Seated at the public turn boundary to rank candidate files. The row
     /// only shows a hint when its mode acts; otherwise the seat records it.
     file_pick_seat: Option<Arc<dyn crate::FilePickSeat>>,
+    skill_suggestion_seat: Option<Arc<dyn crate::skill_rank::SkillSuggestionSeat>>,
+    skill_suggestion_turn_start: Option<usize>,
     /// The start-of-turn reading awaiting its actual edited-file label.
     file_pick_pending_turn: Option<FilePickPendingTurn>,
     max_iterations: usize,
@@ -1700,6 +1702,8 @@ where
             compaction_seat: None,
             patch_review_seat: None,
             file_pick_seat: None,
+            skill_suggestion_seat: None,
+            skill_suggestion_turn_start: None,
             file_pick_pending_turn: None,
             max_iterations: default_max_iterations(),
             deadline: None,
@@ -1900,6 +1904,36 @@ where
         });
     }
 
+    /// Ask about skills at the public turn boundary, including turns whose
+    /// prompt index fits. Recording mode keeps the existing hint unchanged.
+    fn inject_skill_suggestion(&mut self, user_input: &str) {
+        self.finish_skill_suggestion_turn();
+        let Some(seat) = self.skill_suggestion_seat.as_ref().map(Arc::clone) else {
+            return;
+        };
+        self.skill_suggestion_turn_start = Some(self.session.messages.len());
+        if let Some(note) = ::api::sync_bridge::run_blocking(seat.suggest(user_input.to_string())) {
+            self.replace_transient_system_reminder_by_prefix(
+                crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX,
+                Some(&note),
+            );
+        }
+    }
+
+    pub(super) fn finish_skill_suggestion_turn(&mut self) {
+        let Some(start) = self.skill_suggestion_turn_start.take() else {
+            return;
+        };
+        if let Some(seat) = &self.skill_suggestion_seat {
+            seat.finish(self.session.messages.get(start..).unwrap_or_default());
+        }
+    }
+
+    pub(super) fn finish_turn_seats(&mut self) {
+        self.finish_file_pick_turn();
+        self.finish_skill_suggestion_turn();
+    }
+
     /// Label a settled public turn with only the paths its edit results say it
     /// changed. No edit means there is no file-match comparison to record.
     pub(super) fn finish_file_pick_turn(&mut self) {
@@ -1947,6 +1981,7 @@ where
                 self.inject_verified_state_reminder();
                 self.install_turn_budget_continuation_reminder();
                 self.inject_file_pick_hint(user_input);
+                self.inject_skill_suggestion(user_input);
                 Ok(())
             }
             PromptSubmitDecision::Denied { reason } => Err(StreamingTurnError::runtime(
@@ -2017,6 +2052,7 @@ where
             }
         };
         self.settle_team_inbox_turn_for_result(&result);
+        self.finish_skill_suggestion_turn();
         result
     }
 
@@ -2097,6 +2133,9 @@ where
         // report.
         self.inject_verified_state_reminder();
         self.install_turn_budget_continuation_reminder();
+        if !is_continuation {
+            self.inject_skill_suggestion(&user_input);
+        }
         // Before the user message is pushed: the ordinal this mints counts the
         // turns already taken, and this one is the next.
         self.begin_attempt();

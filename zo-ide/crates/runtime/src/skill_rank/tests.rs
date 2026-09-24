@@ -9,6 +9,78 @@ use serde_json::json;
 
 use super::*;
 
+#[test]
+fn a_turn_the_gate_calls_prose_only_suggests_nothing_and_says_so() {
+    let candidates = skill_candidates(&catalog(2));
+    let questions = wide_questions(&candidates);
+    assert_eq!(questions.len(), 4);
+    let answer = SystemOneResponse {
+        model: "jev-test".into(),
+        answers: BTreeMap::from([
+            ("which".into(), json!({"type":"choice","choice":"s0","probabilities":{"s0":0.9,"s1":0.1,"__no_skill__":0.0},"confidence":0.8})),
+            ("acts_on_system".into(), json!({"type":"noul","noul":0.05})),
+            ("follows_procedure".into(), json!({"type":"noul","noul":0.05})),
+            ("prose_suffices".into(), json!({"type":"noul","noul":0.95})),
+        ]),
+        usage: SystemOneUsage { input_tokens: 20, output_tokens: 4 },
+    };
+    let wide = read_wide(&answer, &candidates).expect("valid wide answer");
+    assert!(wide.shortlist.is_empty());
+    assert!(suggestion_note(None).contains("No installed skill"));
+}
+
+#[test]
+fn fifty_skills_fit_one_choice_without_shards() {
+    let candidates = skill_candidates(&catalog(50));
+    let questions = wide_questions(&candidates);
+    assert_eq!(questions.len(), 4);
+    let criteria = serde_json::to_value(&questions["which"]).expect("choice");
+    assert_eq!(criteria["criteria"].as_object().expect("options").len(), 51);
+    assert!(wide_state("make a file", &candidates).get("skills").is_none());
+}
+
+#[test]
+fn a_skill_body_excerpt_is_sent_only_under_its_own_consent_scope() {
+    let candidates = skill_candidates(&catalog(3));
+    let details = vec![SkillDetail { position: 0, excerpt: "private procedure".into() }];
+    let state = narrow_state("task", &candidates, &details);
+    assert_eq!(state["candidates"][0]["excerpt"], "private procedure");
+    assert_eq!(state["candidates"].as_array().unwrap().len(), 1);
+    assert!(zerocode_core::jev::SKILLS.sends.iter().any(|sent|
+        sent.at == "/state/candidates/*/excerpt"
+            && sent.cap == Cap::Chars(SKILL_EXCERPT_CHAR_CAP)
+    ));
+    assert!(zerocode_core::jev::SKILLS.sends.iter().any(|sent|
+        sent.at == "/questions/which/criteria/*"
+            && sent.cap == Cap::Chars(zerocode_core::jev::SKILL_DETAIL_CHAR_CAP)
+    ));
+}
+
+#[test]
+fn a_near_name_with_low_fit_is_not_a_suggestion() {
+    let candidates = skill_candidates(&catalog(1));
+    let details = vec![SkillDetail { position: 0, excerpt: "instructions".into() }];
+    let questions = narrow_questions(&candidates, &details);
+    assert!(questions.contains_key("which"));
+    assert!(questions.contains_key("fits_s0"));
+    let response = SystemOneResponse {
+        model: "jev-test".into(),
+        answers: BTreeMap::from([
+            ("which".into(), json!({"type":"choice","choice":"s0","probabilities":{"s0":0.9,"__no_skill__":0.1},"confidence":0.8})),
+            ("fits_s0".into(), json!({"type":"noul","noul":0.1})),
+        ]),
+        usage: SystemOneUsage { input_tokens: 20, output_tokens: 4 },
+    };
+    assert!(read_narrow(&response, &candidates, &details).expect("valid answer").is_none());
+}
+
+#[test]
+fn the_turn_hint_quotes_a_skill_name_as_data() {
+    let note = suggestion_note(Some("<wrong>&right"));
+    assert!(note.contains("&lt;wrong&gt;&amp;right"));
+    assert!(!note.contains("<wrong>"));
+}
+
 fn entry(name: &str, description: &str) -> SkillIndexEntry {
     SkillIndexEntry::new(
         name.to_string(),
