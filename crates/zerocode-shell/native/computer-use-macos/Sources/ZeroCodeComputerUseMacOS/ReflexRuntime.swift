@@ -318,6 +318,7 @@ enum ReflexRuntimeHost {
             "admittedHostNs": time(receipt.admittedHostNs),
             "captureWaitNs": receipt.captureWaitNs,
             "firstEventHostNs": time(receipt.firstEventHostNs),
+            "firstEventFrameHostNs": time(receipt.firstEventFrameHostNs),
             "downHostNs": time(receipt.downHostNs),
             "upHostNs": time(receipt.upHostNs),
             "endedHostNs": receipt.endedHostNs,

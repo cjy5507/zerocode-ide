@@ -355,6 +355,9 @@ public struct ReflexReceipt: Equatable, Sendable {
     /// lease came from — kept apart from the rest of the first-event delay.
     public let captureWaitNs: UInt64
     public let firstEventHostNs: UInt64?
+    /// The capture time of the frame that permitted the first event — the
+    /// newer capture the lease waited for.
+    public let firstEventFrameHostNs: UInt64?
     public let downHostNs: UInt64?
     public let upHostNs: UInt64?
     public let endedHostNs: UInt64
@@ -448,6 +451,7 @@ struct ReflexLeafRunner {
         var admittedHostNs: UInt64?
         var captureWaitNs: UInt64 = 0
         var firstEventHostNs: UInt64?
+        var firstEventFrameHostNs: UInt64?
         var downHostNs: UInt64?
         var upHostNs: UInt64?
         var events: UInt64 = 0
@@ -457,7 +461,8 @@ struct ReflexLeafRunner {
                 ruleId: leaf.ruleId, actionId: leaf.actionId, leafIndex: index, outcome: outcome,
                 targetId: targetId, sourceCapture: sourceCapture, decidedHostNs: decidedHostNs,
                 admittedHostNs: admittedHostNs, captureWaitNs: captureWaitNs,
-                firstEventHostNs: firstEventHostNs, downHostNs: downHostNs, upHostNs: upHostNs,
+                firstEventHostNs: firstEventHostNs, firstEventFrameHostNs: firstEventFrameHostNs,
+                downHostNs: downHostNs, upHostNs: upHostNs,
                 endedHostNs: endedHostNs, events: events
             )
         }
@@ -521,7 +526,10 @@ struct ReflexLeafRunner {
             let share = style.instant || index == path.count - 1 ? 1 : style.share(Double(index + 1) / Double(path.count))
             let point = SmoothPointerPath.Point(x: start.x + (aim.x - start.x) * share, y: start.y + (aim.y - start.y) * share)
             try hand.post(HandEvent(.pointerMove, x: point.x, y: point.y), by: token)
-            if draft.firstEventHostNs == nil { draft.firstEventHostNs = hand.nowNs() }
+            if draft.firstEventHostNs == nil {
+                draft.firstEventHostNs = hand.nowNs()
+                draft.firstEventFrameHostNs = frame.frame.captured_host_ns
+            }
             draft.events += 1
             lease = lease.spent()
             posted = index
@@ -541,7 +549,10 @@ struct ReflexLeafRunner {
         guard lease.permits(frame.frame, now_host_ns: now, input: .left_click, limits: limits) else { throw Halt.outcome(.lease) }
         try hand.post(HandEvent(.buttonDown(.left, clickState: 1), x: pointer.x, y: pointer.y), by: token)
         draft.downHostNs = hand.nowNs()
-        if draft.firstEventHostNs == nil { draft.firstEventHostNs = draft.downHostNs }
+        if draft.firstEventHostNs == nil {
+            draft.firstEventHostNs = draft.downHostNs
+            draft.firstEventFrameHostNs = frame.frame.captured_host_ns
+        }
         draft.events += 1
         lease = lease.spent()
         // The fence the window server needs between a press and its release;

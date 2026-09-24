@@ -392,6 +392,8 @@ final class ReflexRuntimeTests: XCTestCase {
         XCTAssertEqual(done.outcome, .done)
         XCTAssertEqual(whole.admissions.admitted, 1)
         XCTAssertEqual(done.events, 12, "ten waypoints, a press and its release")
+        XCTAssertNotNil(done.firstEventFrameHostNs, "the newer capture that let the first event go is on the receipt")
+        XCTAssertGreaterThan(done.firstEventFrameHostNs ?? 0, done.decidedHostNs ?? .max)
         XCTAssertEqual(whole.poster.moves.count, 10)
 
         // Taken back after four waypoints.
@@ -590,7 +592,7 @@ final class ReflexRuntimeTests: XCTestCase {
             ran.append(leaf.actionId)
             return ReflexReceipt(ruleId: leaf.ruleId, actionId: leaf.actionId, leafIndex: index, outcome: .done, targetId: nil,
                                  sourceCapture: nil, decidedHostNs: nil, admittedHostNs: nil, captureWaitNs: 0,
-                                 firstEventHostNs: nil, downHostNs: nil, upHostNs: nil, endedHostNs: 0, events: 1)
+                                 firstEventHostNs: nil, firstEventFrameHostNs: nil, downHostNs: nil, upHostNs: nil, endedHostNs: 0, events: 1)
         }
         XCTAssertLessThan(Date().timeIntervalSince(started), 1, "never waited on the reader")
         XCTAssertEqual(count, 2)

@@ -73,15 +73,22 @@ final class TimingPoster: HandPoster, @unchecked Sendable {
 }
 
 /// Captures at a fixed rate on the host clock, each published and woken the
-/// way the eye's callback publishes one; its pixels are never read.
+/// way the eye's callback publishes one. Every capture lends the same blank
+/// BGRA buffer of the capture's extent; the probe's kernel does not read it.
 final class PacedFrames: ReflexFrameSource, @unchecked Sendable {
+    private static let width = 800
+    private static let height = 500
     private let lock = NSLock()
     private var capture: ReflexCapture?
     private var wake: (@Sendable () -> Void)?
     private var running = true
+    private let blank = UnsafeMutableRawPointer.allocate(byteCount: PacedFrames.width * PacedFrames.height * 4, alignment: 16)
     let periodNs: UInt64
 
-    init(framesPerSecond: UInt64) { periodNs = 1_000_000_000 / framesPerSecond }
+    init(framesPerSecond: UInt64) {
+        periodNs = 1_000_000_000 / framesPerSecond
+        blank.initializeMemory(as: UInt8.self, repeating: 0, count: Self.width * Self.height * 4)
+    }
 
     func start() {
         Thread.detachNewThread { [self] in
@@ -96,8 +103,8 @@ final class PacedFrames: ReflexFrameSource, @unchecked Sendable {
                 let at = nowNs()
                 let next = ReflexCapture(
                     displayId: "probe",
-                    region: ReflexRoi(x: 0, y: 0, width: 800, height: 500, space: .pixel),
-                    pixelExtent: ReflexPixelExtent(width: 800, height: 500),
+                    region: ReflexRoi(x: 0, y: 0, width: Int64(Self.width), height: Int64(Self.height), space: .pixel),
+                    pixelExtent: ReflexPixelExtent(width: UInt32(Self.width), height: UInt32(Self.height)),
                     pointTransform: ReflexPointTransform(origin_x: 0, origin_y: 0, points_per_pixel: ReflexScale(numerator: 1, denominator: 1)),
                     orientation: .up, colorSpace: .srgb, status: .ready, dirty: true, captureGap: 0,
                     deliveredHostNs: at, captureSeq: seq, repaintSeq: seq, streamEpoch: 1, geometryEpoch: 1,
@@ -124,7 +131,11 @@ final class PacedFrames: ReflexFrameSource, @unchecked Sendable {
     func newest() -> ReflexFrameLoan? {
         lock.lock()
         defer { lock.unlock() }
-        return capture.map { ReflexFrameLoan(capture: $0) { _ in true } }
+        let pixels = ReflexPixels(base: UnsafeRawPointer(blank), width: Self.width, height: Self.height, bytesPerRow: Self.width * 4)
+        return capture.map { ReflexFrameLoan(capture: $0) { body in
+            body(pixels)
+            return true
+        } }
     }
 
     func onCapture(_ wake: (@Sendable () -> Void)?) {
@@ -135,7 +146,8 @@ final class PacedFrames: ReflexFrameSource, @unchecked Sendable {
 }
 
 /// Sees the ball for `present` captures, then nothing for `absent` — an edge
-/// every cycle, so a rule fires again and again at a known pace.
+/// every cycle, so a rule fires again and again at a known pace — and puts it
+/// in the other corner of the ROI each cycle, so every move leaf glides.
 struct BlinkingBall: ReflexPerceptionKernel {
     let present: UInt64
     let absent: UInt64
@@ -150,11 +162,13 @@ struct BlinkingBall: ReflexPerceptionKernel {
 
         func observe(frame: ReflexFrameFacts, pixels: ReflexPixels, budget: inout ReflexPerceptionBudget) -> [ReflexObservation] {
             guard budget.spend(64), let ref = ReflexFrameRef(frame) else { return [] }
+            let cycle = frame.capture_seq / (present + absent)
             let shown = frame.capture_seq % (present + absent) < present
-            let box = ReflexRoi(x: 8, y: 8, width: 16, height: 16, space: .pixel)
+            let corner: Int64 = cycle % 2 == 0 ? 0 : 18
+            let box = ReflexRoi(x: corner, y: corner, width: 12, height: 12, space: .pixel)
             return [ReflexObservation(
                 detector_id: "ball", frame: ref, unknown: nil, value: shown ? 1 : 0,
-                target: shown ? ReflexTarget(track_id: 1, roi: box, point_x: 16, point_y: 16, velocity_x: 0, velocity_y: 0, uncertainty: 1) : nil,
+                target: shown ? ReflexTarget(track_id: cycle + 1, roi: box, point_x: corner + 6, point_y: corner + 6, velocity_x: 0, velocity_y: 0, uncertainty: 1) : nil,
                 scale: ReflexScale(numerator: 1, denominator: 1), cells: nil, samples: 64
             )]
         }
@@ -278,6 +292,10 @@ func sustainedRun(fixtures: Fixtures, seconds: Double, warmup: Double) throws ->
         settled.filter { $0.actionId.hasPrefix(kind) && $0.outcome == .done }
             .compactMap { receipt in receipt.firstEventHostNs.flatMap { at in receipt.decidedHostNs.map { at >= $0 ? at - $0 : 0 } } }
     }
+    func permitted(_ kind: String) -> [UInt64] {
+        settled.filter { $0.actionId.hasPrefix(kind) && $0.outcome == .done }
+            .compactMap { receipt in receipt.firstEventHostNs.flatMap { at in receipt.firstEventFrameHostNs.map { at >= $0 ? at - $0 : 0 } } }
+    }
     var outcomes: [String: Int] = [:]
     for receipt in receipts { outcomes[receipt.outcome.rawValue, default: 0] += 1 }
     return [
@@ -289,10 +307,13 @@ func sustainedRun(fixtures: Fixtures, seconds: Double, warmup: Double) throws ->
         "loadAfter": loadAverages(),
         "framesPerSecondAsked": limits.frames_per_second,
         "framesEvaluated": status.framesEvaluated,
+        "framesUnread": status.framesUnread,
+        "inadmissible": status.inadmissible,
         "fires": status.fires,
         "leaves": receipts.count,
         "outcomes": outcomes,
         "decisionToFirstEvent": ["move": summary(first("move")), "click": summary(first("click"))],
+        "permittingFrameToFirstEvent": ["move": summary(permitted("move")), "click": summary(permitted("click"))],
         "captureWait": summary(settled.filter { $0.outcome == .done }.map(\.captureWaitNs)),
         "decisionToAdmission": summary(settled.compactMap { receipt in receipt.admittedHostNs.flatMap { at in receipt.decidedHostNs.map { at >= $0 ? at - $0 : 0 } } }),
         "leafAPM": Double(settled.filter { $0.outcome == .done }.count) / max(wall - warmup, 1e-9) * 60,

@@ -25,12 +25,15 @@ swiftc -O -swift-version 6 -parse-as-library -module-name ReflexProbe \
 ## What it reports
 
 - `sustained`: one run of `valid_basic`'s plan (its rule firing on the ball,
-  `max_fires` the plan's whole action budget over the macro's two leaves) for
+  `max_fires` the plan's whole action budget over the macro's two leaves; the
+  ball changes corner every cycle, so each move leaf glides) for
   `--seconds`, captures at the reflex table's `frames_per_second`. From each
   receipt after `--warmup`: the decision frame's publish to the leaf's first
   event (`decisionToFirstEvent`, by leaf), the part of that spent waiting for
   a capture newer than the lease's source (`captureWait`, kept apart as the
-  contract asks), the decision frame to the leaf's admission, the outcomes,
+  contract asks), the publish of that newer capture — the one that let the
+  first event go — to the event (`permittingFrameToFirstEvent`), the decision
+  frame to the leaf's admission, the outcomes,
   the leaves a minute, CPU of this process (one core = 100%) and the load
   averages before and after.
 - `stopToRelease`: ABBA, `--trials` each. Arm B is the product's hand — a key
