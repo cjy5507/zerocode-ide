@@ -96,9 +96,20 @@ NEWTON_STEPS = 40
 # them the same every run.
 BOOTSTRAP = 2_000
 BOOTSTRAP_SEED = 6349
-# The fewest held-out rows of each class a judgment may rest on; fewer is
-# `not_evaluable`.
+# The fewest rows of each class, on each side of the split, a judgment may
+# rest on; fewer is `not_evaluable`.
 JUDGEABLE_PER_CLASS = 3
+# The brief's two lines on one run — requests over every round together, and
+# Jev dollars. The asking stage holds the same pair as its own ceiling on any
+# one call (`REQUEST_CAP`, `SPEND_CAP_USD` in `question_discovery.rs`; the
+# test `test_the_run_lines_are_the_asking_stages_own` keeps them one pair).
+REQUEST_CAP = 300
+SPEND_CAP_USD = 4.0
+# Whether a seat's rows carry the moment each decision was made, so that a
+# split by time is a split by what was known then. A patch row carries only
+# its transcript's creation time — the patch's own moment is not recovered —
+# so the patch cohort is enumerable and never judged (`unevaluable`).
+TIME_ORDERED = {"patch_review": False, "notify": True}
 # The model the proposer runs as, through zo's headless road, and the one
 # tool its session is given — zo refuses an empty or unknown list, and the
 # todo list touches nothing outside the session — so no file is read and
@@ -154,6 +165,15 @@ class SealedLabel(RuntimeError):
 
 class AlreadyJudged(RuntimeError):
     """The held-out set was judged once already; the candidate is frozen."""
+
+
+class NotEvaluable(RuntimeError):
+    """The study may not be judged (`unevaluable`); no held-out label was read."""
+
+
+class UnsettledBill(RuntimeError):
+    """A purchase's bill is not known (`Search._unsettled`): nothing more is
+    bought, and nothing is judged, until it is reconciled."""
 
 
 # ---- rows and features --------------------------------------------------------
@@ -295,6 +315,49 @@ class HeldOut:
     def unseal(self) -> list[bool]:
         self.unsealed += 1
         return list(self._labels)
+
+    def classes(self) -> tuple[int, int]:
+        """How many held-out rows are positive and how many negative: the
+        counts the manifest writes down and `unevaluable` reads — never a
+        row's own label."""
+        positives = sum(1 for label in self._labels if label)
+        return positives, len(self._labels) - positives
+
+
+def untimed(seat: str) -> str | None:
+    """Why no row of this seat may be judged or asked a paid question at
+    all, whatever the sample: its rows carry no decision time
+    (`TIME_ORDERED`). None for a seat whose rows do."""
+    if TIME_ORDERED.get(seat, False):
+        return None
+    return f"the {seat} rows carry no decision time, so no split of them is by time"
+
+
+def unevaluable(seat: str, dev: list[Row], held: HeldOut | None) -> str | None:
+    """Why a study may not be judged, or None when it may: the one
+    eligibility the manifest writes down (`judgeable`), `Search.run` reads
+    before its first paid round and `Search.judge` reads before it opens a
+    held-out label — whoever built the sets, and whatever road reached the
+    judgment. Its first rule (`untimed`) also stands before every paid
+    question (`Search._ask`)."""
+    if held is None:
+        return "no sealed held-out set: enumerate the sample first"
+    seat_rule = untimed(seat)
+    if seat_rule is not None:
+        return seat_rule
+    ids = [row.id for row in dev + held.rows]
+    if len(ids) != len(set(ids)):
+        return "duplicate row ids"
+    # What `split` guarantees by its purge, asked of whoever built the sets.
+    bundles = bundle_ids(dev + held.rows)
+    if set(bundles[:len(dev)]) & set(bundles[len(dev):]):
+        return "a held-out row shares a bundle (a session, a pane or the same state) with a development row"
+    dev_positives = sum(1 for row in dev if row.label)
+    if min(dev_positives, len(dev) - dev_positives, *held.classes()) < JUDGEABLE_PER_CLASS:
+        return f"fewer than {JUDGEABLE_PER_CLASS} positive or negative labels on a side of the split"
+    if len(set(bundle_ids(dev))) < FOLDS:
+        return f"fewer than {FOLDS} independent development bundles"
+    return None
 
 
 # ---- the classic model ---------------------------------------------------------
@@ -633,7 +696,10 @@ class Search:
                  model: str = "jev", proposer_model: str | None = None, spend_cap_usd: float | None = None, dry_run: bool = False):
         if seat not in LABELS or cap <= 0 or rounds < 0 or (sample is not None and sample <= 0):
             raise ValueError("supported seat, positive sample/cap, and nonnegative rounds required")
-        if spend_cap_usd is not None and (not math.isfinite(spend_cap_usd) or spend_cap_usd <= 0):
+        # No stated line is the brief's line, never no line: the asking stage
+        # spends against a number either way, and the manifest says which.
+        spend_cap_usd = SPEND_CAP_USD if spend_cap_usd is None else spend_cap_usd
+        if not math.isfinite(spend_cap_usd) or spend_cap_usd <= 0:
             raise ValueError("spend cap must be a positive finite number")
         self.seat, self.source, self.workdir = seat, source, workdir
         self.asker, self.proposer, self.dry_run = asker, proposer, dry_run
@@ -668,6 +734,31 @@ class Search:
                     spent += float(row.get("costUsd") or 0.0)
         return claimed, spent, uncertain
 
+    def _unsettled(self) -> str | None:
+        """What of the study's bill is not known, or None when all of it is:
+        a row reserved for the wire with no saved answer, a sent row with no
+        wire receipt, an answer whose cost came back unknown or past its
+        reservation, a proposal claimed with no reply saved. Every purchase
+        (`_may_buy`) and the judgment's first label read stand behind this
+        one reading, whatever the dollar line."""
+        _, _, uncertain = self._reservations()
+        found = [f"{uncertain} request(s) whose cost is uncertain"] if uncertain else []
+        found += [f"{claim.name} (a proposal with no saved reply)" for claim in sorted(self.workdir.glob("proposal-*.pending"))
+                  if not claim.with_suffix(".txt").is_file()]
+        return "; ".join(found) or None
+
+    def _may_buy(self, what: str) -> tuple[int, float]:
+        """Stand at a purchase: refused while any bill is uncertain, and once
+        the run's dollar line is spent. The requests claimed and the dollars
+        known to be spent otherwise."""
+        unsettled = self._unsettled()
+        if unsettled is not None:
+            raise UnsettledBill(f"the run's bill is uncertain ({unsettled}); reconcile the billing journal before {what}")
+        claimed, spent, _ = self._reservations()
+        if spent >= self.spend_cap_usd:
+            raise RuntimeError(f"run spend cap ${self.spend_cap_usd:.2f} reached (${spent:.6f} spent); {what} was refused")
+        return claimed, spent
+
     # -- the asking stage, cached --
 
     def _ask(self, number: int | str, questions, rows: list[str] | None, states: bool) -> tuple[list[Row], dict]:
@@ -691,11 +782,15 @@ class Search:
         summary: dict = {}
         if missing is None or missing:
             if missing and questions:
-                claimed, spent, uncertain = self._reservations()
+                # Before a row is reserved: a reservation for a question the
+                # asking stage refuses to send would stand as an uncertain
+                # bill with nothing behind it.
+                seat_rule = untimed(self.seat)
+                if seat_rule is not None:
+                    raise NotEvaluable(f"{seat_rule}; no paid question is asked of them")
+                claimed, spent = self._may_buy(f"{len(missing)} more request(s)")
                 if claimed + len(missing) > self.cap:
                     raise RuntimeError(f"run request cap {self.cap} would be exceeded: {claimed} claimed + {len(missing)} new")
-                if self.spend_cap_usd is not None and (spent >= self.spend_cap_usd or uncertain):
-                    raise RuntimeError("run has exhausted its spend cap or has uncertain prior calls; inspect the billing journal")
                 # Durable before the subprocess starts. After an interruption
                 # the caller must review these rows; replay never bills them.
                 with cache.open("a", encoding="utf-8") as held:
@@ -703,9 +798,10 @@ class Search:
                         held.write(json.dumps({"row": rid, "reserved": True}) + "\n")
                     held.flush()
                     os.fsync(held.fileno())
+            else:
+                _, spent, _ = self._reservations()
             fresh = self.workdir / f"rows-{number}.fresh.jsonl"
-            remaining_spend = (self.spend_cap_usd if self.spend_cap_usd is not None else 4.0) - self._reservations()[1]
-            summary = self.asker(dict(spec, rows=missing, remainingSpendUsd=remaining_spend), fresh, states_path) or {}
+            summary = self.asker(dict(spec, rows=missing, remainingSpendUsd=max(self.spend_cap_usd - spent, 0.0)), fresh, states_path) or {}
             got, written = read_lines(fresh)
             summary = dict(written, **summary)
             with cache.open("a", encoding="utf-8") as held:
@@ -735,15 +831,15 @@ class Search:
 
     # -- the manifest --
 
-    def manifest(self, rows: list[Row], dev: list[Row], held: list[Row], summary: dict) -> dict:
+    def manifest(self, rows: list[Row], summary: dict) -> dict:
+        """The plan, from the sample and the sealed split `enumerate` made."""
+        dev, held = self.dev, self.held.rows
         labeled = len(rows)
         positives = sum(1 for row in rows if row.label)
-        held_pos = sum(1 for row in held if row.label)
+        held_pos, held_neg = self.held.classes()
         dev_pos = sum(1 for row in dev if row.label)
         duplicate_ids = labeled - len({row.id for row in rows})
-        judgeable = (duplicate_ids == 0 and dev_pos >= JUDGEABLE_PER_CLASS and len(dev) - dev_pos >= JUDGEABLE_PER_CLASS
-                     and held_pos >= JUDGEABLE_PER_CLASS and len(held) - held_pos >= JUDGEABLE_PER_CLASS
-                     and len(set(bundle_ids(dev))) >= FOLDS)
+        by_time = TIME_ORDERED.get(self.seat, False)
         written = {
             "seat": self.seat,
             "source": self.source,
@@ -768,15 +864,15 @@ class Search:
                 "devNegatives": len(dev) - dev_pos,
                 "held": len(held),
                 "heldPositives": held_pos,
-                "heldNegatives": len(held) - held_pos,
+                "heldNegatives": held_neg,
                 "heldPurged": purged(rows),
                 "transcriptsRead": summary.get("transcriptsRead"),
                 "transcriptsSkipped": summary.get("transcriptsSkipped"),
             },
-            "split": {"devShare": DEV_SHARE, "byTime": self.seat != "patch_review", "patchTimeUnrecovered": self.seat == "patch_review",
+            "split": {"devShare": DEV_SHARE, "byTime": by_time, "patchTimeUnrecovered": not by_time,
                       "cutAtBundle": True, "purgeBundlesSeenInDev": True, "folds": FOLDS, "fingerprint": split_fingerprint(dev, held)},
             "bootstrap": {"resamples": BOOTSTRAP, "seed": BOOTSTRAP_SEED},
-            "judgeable": judgeable and self.seat != "patch_review",
+            "judgeable": unevaluable(self.seat, dev, self.held) is None,
             "finalEvaluated": False,
         }
         path = self.workdir / "manifest.json"
@@ -797,7 +893,7 @@ class Search:
         rows, summary = self._ask("enumerate", {}, None, states=False)
         dev, held = split(rows)
         self.dev, self.held = dev, HeldOut(held)
-        return self.manifest(rows, dev, held, summary)
+        return self.manifest(rows, summary)
 
     def round_zero(self) -> dict:
         """The shipped questions asked of the sample the manifest fixed."""
@@ -927,17 +1023,15 @@ class Search:
         manifest = self.enumerate()
         if self.dry_run:
             return {"seat": self.seat, "verdict": "dry_run", "manifest": manifest}
-        if not manifest["judgeable"]:
-            return {"seat": self.seat, "verdict": NOT_EVALUABLE, "manifest": manifest, "requests": 0,
-                    "reason": "duplicate ids, too few positive/negative labels, or too few independent development bundles"}
+        reason = unevaluable(self.seat, self.dev, self.held)
+        if reason is not None:
+            return {"seat": self.seat, "verdict": NOT_EVALUABLE, "manifest": manifest, "requests": 0, "reason": reason}
         self.round_zero()
         states = read_states(self.workdir / "states.jsonl")
         for number in range(1, self.max_rounds + 1):
             if self.proposer is None:
                 break
-            _, spent, uncertain = self._reservations()
-            if self.spend_cap_usd is not None and (spent >= self.spend_cap_usd or uncertain):
-                raise RuntimeError("spend cap reached or an earlier call is uncertain; no new proposal was bought")
+            self._may_buy(f"proposal {number}")
             prompt = self.prompt(states)
             prompt_path = self.workdir / f"prompt-{number}.txt"
             proposal_path = self.workdir / f"proposal-{number}.txt"
@@ -948,10 +1042,10 @@ class Search:
                 answer = proposal_path.read_text(encoding="utf-8")
             else:
                 # Claim the proposal before invoking the model. If it exits
-                # without a reply, a retry cannot silently buy it again.
-                claim = self.workdir / f"proposal-{number}.pending"
-                if claim.is_file():
-                    raise RuntimeError("the prior proposal call has an uncertain bill; inspect it before resuming")
+                # without a reply, the claim is an unsettled bill
+                # (`_unsettled`): a retry cannot silently buy it again, and
+                # nothing is judged until a person reconciles it.
+                claim = proposal_path.with_suffix(".pending")
                 claim.write_text(hashlib.sha256(prompt.encode()).hexdigest() + "\n", encoding="utf-8")
                 answer = self.proposer(prompt)
                 proposal_path.write_text(answer, encoding="utf-8")
@@ -967,11 +1061,19 @@ class Search:
         """Once: the candidate frozen, the final model fitted on every dev
         row and scored on the held-out rows, whose labels are unsealed here
         and nowhere else; every baseline on the same rows, with the paired
-        difference and its interval."""
-        assert self.held is not None
-        if self.held.unsealed:
+        difference and its interval. Before anything is frozen or unsealed,
+        on every road here — `run`'s or a caller's own sets — a study that
+        may not be judged (`unevaluable`) is `NotEvaluable`, and one whose
+        bill is uncertain (`_unsettled`) is `UnsettledBill`."""
+        if self.held is not None and self.held.unsealed:
             raise AlreadyJudged("the held-out set was judged once; the candidate is frozen")
         self._check_inputs()
+        reason = unevaluable(self.seat, self.dev, self.held)
+        if reason is not None:
+            raise NotEvaluable(f"{reason}; no held-out label was read")
+        unsettled = self._unsettled()
+        if unsettled is not None:
+            raise UnsettledBill(f"the run's bill is uncertain ({unsettled}); the final evaluation is withheld and no held-out label was read")
         names = feature_names(self.questions, self.dev)
         held = self.held.rows
         chosen = cross_validate(self.dev, names)
@@ -993,12 +1095,9 @@ class Search:
         labels = self.held.unseal()
         dev_labels = [row.label for row in self.dev]
         positives = sum(1 for label in labels if label)
-        judgeable = positives >= JUDGEABLE_PER_CLASS and len(labels) - positives >= JUDGEABLE_PER_CLASS
-        picks = resamples(len(held)) if judgeable else []
+        picks = resamples(len(held))
 
         def reader(scores: list[float], calls: list[bool] | None = None) -> dict:
-            if not judgeable:
-                return {"verdict": NOT_EVALUABLE}
             drawn = bootstrap_auc(scores, labels, picks)
             held_auc = auc(scores, labels)
             found = {"auc": held_auc, "auc95": interval([v for v in drawn if v is not None]), "draws": drawn}
@@ -1009,8 +1108,7 @@ class Search:
         model = fit(self.dev, dev_labels, names, ridge) if names else None
         scores = [model.predict(row.features) for row in held] if model else [0.5] * len(held)
         final = reader(scores, [s >= 0.5 for s in scores])
-        if judgeable:
-            final.update({"ridge": ridge, "devLogloss": chosen["logloss"], "devAuc": chosen["auc"]})
+        final.update({"ridge": ridge, "devLogloss": chosen["logloss"], "devAuc": chosen["auc"]})
         shipped_names = feature_names({qid: {} for qid in self.shipped_ids}, self.dev)
         shipped_ridge = cross_validate(self.dev, shipped_names)["ridge"] if shipped_names else RIDGES[0]
         shipped_model = fit(self.dev, dev_labels, shipped_names, shipped_ridge) if shipped_names else None
@@ -1027,18 +1125,15 @@ class Search:
             baselines["todaysRule"] = reader([1.0] * len(held), [True] * len(held))
         for name, scorer in SIZE_BASELINES.get(self.seat, {}).items():
             baselines[name] = reader([scorer(row) for row in held])
-        if judgeable:
-            for base in baselines.values():
-                deltas = [f - b for f, b in zip(final["draws"], base["draws"]) if f is not None and b is not None]
-                base["pairedDelta"] = {"auc": (final["auc"] or 0.0) - (base["auc"] or 0.0), "auc95": interval(deltas)}
-            for base in list(baselines.values()) + [final]:
-                base.pop("draws", None)
-        billed_requests, billed_cost, uncertain = self._reservations()
-        if uncertain:
-            raise RuntimeError("a request's bill is uncertain; final evaluation is withheld")
+        for base in baselines.values():
+            deltas = [f - b for f, b in zip(final["draws"], base["draws"]) if f is not None and b is not None]
+            base["pairedDelta"] = {"auc": (final["auc"] or 0.0) - (base["auc"] or 0.0), "auc95": interval(deltas)}
+        for base in list(baselines.values()) + [final]:
+            base.pop("draws", None)
+        billed_requests, billed_cost, _ = self._reservations()
         result = {
             "seat": self.seat,
-            "verdict": "judged" if judgeable else NOT_EVALUABLE,
+            "verdict": "judged",
             "questions": self.questions,
             "features": names,
             "dev": len(self.dev),
@@ -1098,9 +1193,11 @@ def cargo_asker(cap: int, log: Path) -> Asker:
         env[ASKER_ENV_ROUND] = str(round_file)
         env[ASKER_ENV_OUT] = str(out)
         env[ASKER_ENV_CAP] = str(cap)
-        # Rust also stops between batches on this remaining Jev allowance.
-        # The loop checks the whole run before reserving any new row.
-        env[ASKER_ENV_SPEND] = str(spec.get("remainingSpendUsd", 4.0))
+        # Rust also stops between rows on this remaining Jev allowance. The
+        # loop checks the whole run before reserving any new row; a round
+        # handed over without a line is handed no money, never the stage's
+        # own ceiling.
+        env[ASKER_ENV_SPEND] = str(spec.get("remainingSpendUsd", 0.0))
         if states is not None:
             env[ASKER_ENV_STATES] = str(states)
         else:
@@ -1193,8 +1290,8 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--sample", type=int, default=None)
     run.add_argument("--workdir", type=Path, required=True)
     run.add_argument("--rounds", type=int, default=3, help="proposal rounds after round 0")
-    run.add_argument("--cap", type=int, default=300, help="requests the asking stage may send per round")
-    run.add_argument("--spend-cap-usd", type=float, default=4.0, help="the manifest's line on dollars, for the record")
+    run.add_argument("--cap", type=int, default=REQUEST_CAP, help="wire requests the whole run may send, every round together")
+    run.add_argument("--spend-cap-usd", type=float, default=SPEND_CAP_USD, help="Jev dollars the whole run may spend; no row is sent past it")
     run.add_argument("--proposer", default="zo", help="zo | none | file:<path>[,<path>...]")
     run.add_argument("--model", default=PROPOSER_MODEL)
     run.add_argument("--dry-run", action="store_true", help="enumerate the rows and write the manifest; no request leaves")

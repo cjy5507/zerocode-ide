@@ -16,10 +16,12 @@ import contextlib
 import io
 import json
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -82,6 +84,31 @@ def sample(n: int = 40) -> list[tuple[str, bool]]:
     """Twenty bundles of two rows; the label alternates inside a bundle
     pattern so both classes sit on both sides of any cut."""
     return [(f"g{i // 2}", (i * 7) % 3 == 0) for i in range(n)]
+
+
+# The two ways the asking stage leaves a row's bill unsettled
+# (`question_discovery.rs`, `ask`): a response lost after the wire, which
+# the provider may have billed, and server usage past the row's reservation.
+UNSETTLED = {
+    "lostResponse": {"outcome": "timeout", "answers": {}, "requests": 1, "costUsd": None, "costUnknown": True},
+    "overReservation": {"requests": 1, "costUsd": 0.5, "budgetExceeded": True},
+}
+
+
+def unsettle_last_row(asker: FakeAsker, change: dict):
+    """The asking stage whose paid round leaves its LAST row unsettled — so
+    no later row is capped, and the round comes back whole."""
+
+    def ask(spec: dict, out: Path, states: Path | None) -> dict:
+        asker(spec, out, states)
+        if spec["questions"] == {}:
+            return {}
+        lines = [json.loads(line) for line in out.read_text().splitlines()]
+        [line for line in lines if "summary" not in line][-1].update(change)
+        out.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+        return {}
+
+    return ask
 
 
 def informative(qid: str, i: int, label: bool):
@@ -206,6 +233,103 @@ class RoundRules(unittest.TestCase):
             self.assertEqual(result["verdict"], loop.NOT_EVALUABLE)
             self.assertFalse(result["manifest"]["split"]["byTime"])
             self.assertEqual(len(asker.calls), 1)
+
+    def test_a_patch_cohort_is_never_judged_even_by_a_direct_judge(self):
+        """The patch cohort's hold is the eligibility `run` and `judge` share,
+        not a check on `run`'s road alone: a caller who enumerates and calls
+        `judge` — with no question, or with features restored the way the
+        external validation restores them — opens no label and writes no
+        judgment, though each class has rows enough that a count would."""
+        for restored in (False, True):
+            with self.subTest(restored=restored), tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                asker = FakeAsker(sample(), informative)
+                search = loop.Search("patch_review", "seed.json", tmp, asker, None, None, 300, 0)
+                manifest = search.enumerate()
+                counts = manifest["counts"]
+                self.assertGreaterEqual(min(counts["devPositives"], counts["devNegatives"], counts["heldPositives"], counts["heldNegatives"]),
+                                        loop.JUDGEABLE_PER_CLASS, "each class has rows enough that a count alone would judge")
+                self.assertFalse(manifest["judgeable"])
+                if restored:
+                    for row in search.dev + search.held.rows:
+                        row.features = {"restored": (row.seq % 5) / 4.0}
+                    search.questions = {"restored": {"type": "noul", "instructions": "x", "yes": "y", "no": "n"}}
+                with self.assertRaises(RuntimeError) as refused:
+                    search.judge()
+                self.assertEqual(search.held.unsealed, 0, "no held-out label was read")
+                self.assertFalse((tmp / "freeze.json").exists(), "nothing was frozen")
+                self.assertFalse((tmp / "result.json").exists(), "no judgment was written")
+                self.assertFalse(json.loads((tmp / "manifest.json").read_text())["finalEvaluated"])
+                self.assertEqual([call["questions"] for call in asker.calls], [{}], "and nothing was asked")
+                self.assertIsInstance(refused.exception, loop.NotEvaluable)
+
+    def test_a_patch_cohort_is_never_asked_a_paid_question_by_any_road(self):
+        """A caller who enumerates a patch cohort and asks round 0 or a round
+        of its own directly is refused before a row is reserved: nothing
+        reaches the asking stage, and no reservation is left standing as an
+        uncertain bill for a question that was never sent."""
+        for road in ("round_zero", "step"):
+            with self.subTest(road=road), tempfile.TemporaryDirectory() as raw:
+                tmp = Path(raw)
+                asker = FakeAsker(sample(), informative)
+                search = loop.Search("patch_review", "seed.json", tmp, asker, None, None, 300, 0)
+                search.enumerate()
+                with self.assertRaises(RuntimeError) as refused:
+                    if road == "round_zero":
+                        search.round_zero()
+                    else:
+                        search.step(1, loop.Proposal(add={"q": {"type": "noul", "instructions": "x", "yes": "y", "no": "n"}}))
+                self.assertEqual([call["questions"] for call in asker.calls], [{}], "only the enumeration reached the asking stage")
+                reserved = [line for cache in tmp.glob("cache-*.jsonl") for line in cache.read_text().splitlines() if '"reserved"' in line]
+                self.assertEqual(reserved, [], "nothing was reserved for a question that is never sent")
+                self.assertIsInstance(refused.exception, loop.NotEvaluable)
+                self.assertIsNone(search._unsettled(), "and the study's bill stays settled")
+
+    def test_a_direct_judge_refuses_a_held_set_sharing_a_bundle_with_development(self):
+        """`split` purges from the held-out set every bundle the development
+        set holds. A caller's own sets meet the same rule before a label is
+        read: a pane learned from and judged on is no judgment."""
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            asker = FakeAsker(sample(), informative)
+            loop.Search("notify", "seed.json", tmp / "plan", asker, None, None, 300, 0).enumerate()
+            dev, held = loop.split(loop.read_rows(tmp / "plan" / "rows-enumerate.jsonl")[0])
+            twin = dev[0]
+            leaked = loop.Row(id="notify:leaked", at=held[-1].at + 1, seq=held[-1].seq + 1, group=twin.group, label=not twin.label, baseline={})
+            direct = loop.Search("notify", "seed.json", tmp / "direct", asker, None, None, 300, 0)
+            direct.dev, direct.held = dev, loop.HeldOut(held + [leaked])
+            with self.assertRaises(RuntimeError) as refused:
+                direct.judge()
+            self.assertEqual(direct.held.unsealed, 0, "no held-out label was read")
+            self.assertFalse((tmp / "direct" / "freeze.json").exists())
+            self.assertIsInstance(refused.exception, loop.NotEvaluable)
+            self.assertIn("bundle", str(refused.exception))
+            clean = loop.Search("notify", "seed.json", tmp / "clean", asker, None, None, 300, 0)
+            clean.dev, clean.held = dev, loop.HeldOut(held)
+            self.assertEqual(clean.judge()["verdict"], "judged", "the split's own sets pass the same rule")
+
+    def test_a_direct_judge_stands_on_the_runs_own_eligibility(self):
+        """Five bundles of eight: the development set holds four — fewer than
+        `FOLDS` — while each held-out class has three rows. `run` stops at
+        the manifest; `judge`, called directly, stops at the same judgment
+        before a label is read, instead of re-deciding on class counts."""
+        rows = [(f"g{i // 8}", (i * 7) % 3 == 0) for i in range(40)]
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            asker = FakeAsker(rows, informative)
+            direct = loop.Search("notify", "seed.json", tmp / "direct", asker, None, None, 300, 0)
+            counts = direct.enumerate()["counts"]
+            self.assertGreaterEqual(min(counts["heldPositives"], counts["heldNegatives"]), loop.JUDGEABLE_PER_CLASS)
+            with self.assertRaises(RuntimeError) as refused:
+                direct.judge()
+            self.assertEqual(direct.held.unsealed, 0)
+            self.assertFalse((tmp / "direct" / "freeze.json").exists())
+            self.assertFalse((tmp / "direct" / "result.json").exists())
+            ran = loop.Search("notify", "seed.json", tmp / "run", asker, None, None, 300, 0).run()
+            self.assertEqual(ran["verdict"], loop.NOT_EVALUABLE)
+            self.assertIsInstance(refused.exception, loop.NotEvaluable)
+            self.assertEqual(str(refused.exception).split(";")[0], ran["reason"], "one judgment, one reason, on both roads")
+            self.assertRegex(ran["reason"], rf"\b{loop.FOLDS}\b.*bundles", "the reason names the rule that failed")
 
     def test_a_changed_patch_transcript_refuses_before_paid_ask(self):
         with tempfile.TemporaryDirectory() as raw:
@@ -387,6 +511,123 @@ class RoundRules(unittest.TestCase):
         self.assertEqual(loop.Proposal.parse("no json here").add, {})
 
 
+class Billing(unittest.TestCase):
+    def test_an_unsettled_last_row_stops_every_purchase_and_the_judgment_whatever_the_dollar_line(self):
+        """The last row of a paid round leaves its bill unsettled, so the
+        round comes back whole with nothing capped. With the default dollar
+        line and with a stated one, with a proposal round ahead and with the
+        judgment next: no other row is sent, no proposal is bought, no
+        held-out label is read, nothing is judged — and a restart on the
+        same directory resends nothing and stops at the same place."""
+        lean = json.dumps({"add": {"q_lean": {"type": "noul", "instructions": "x", "yes": "y", "no": "n"}}})
+        for fault, change in UNSETTLED.items():
+            for cap in (None, 2.0):
+                for rounds in (0, 1):
+                    with self.subTest(fault=fault, cap=cap, rounds=rounds), tempfile.TemporaryDirectory() as raw:
+                        tmp = Path(raw)
+                        asker = FakeAsker(sample(), informative)
+                        bought: list[str] = []
+
+                        def propose(prompt: str) -> str:
+                            bought.append(prompt)
+                            return lean
+
+                        def study() -> loop.Search:
+                            return loop.Search("notify", "seed.json", tmp, unsettle_last_row(asker, change), propose, None, 300, rounds, spend_cap_usd=cap)
+
+                        first = study()
+                        with self.assertRaisesRegex(RuntimeError, "uncertain"):
+                            first.run()
+                        self.assertEqual([call["questions"] for call in asker.calls], [{}, loop.SHIPPED], "round 0 was the last request sent")
+                        self.assertEqual(bought, [], "no proposal was bought after the unsettled row")
+                        self.assertEqual(first.held.unsealed, 0, "no held-out label was read")
+                        self.assertFalse((tmp / "freeze.json").exists(), "nothing was frozen")
+                        self.assertFalse((tmp / "result.json").exists(), "nothing was judged")
+                        again = study()
+                        with self.assertRaisesRegex(RuntimeError, "uncertain"):
+                            again.run()
+                        with self.assertRaisesRegex(RuntimeError, "uncertain") as refused:
+                            again.judge()
+                        self.assertEqual(len(asker.calls), 2, "a restart resends nothing")
+                        self.assertEqual(bought, [])
+                        self.assertEqual(again.held.unsealed, 0)
+                        self.assertFalse((tmp / "freeze.json").exists())
+                        self.assertFalse(json.loads((tmp / "manifest.json").read_text())["finalEvaluated"])
+                        self.assertIsInstance(refused.exception, loop.UnsettledBill)
+
+    def test_a_proposal_bought_with_no_saved_reply_stops_the_next_purchase_and_the_judgment(self):
+        """The proposer's bill is a bill too: a proposal claimed and never
+        answered stops every later purchase, and the judgment before a label
+        is read; a claim whose reply was saved beside it is settled."""
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            asker = FakeAsker(sample(), informative)
+
+            def dies(_prompt: str) -> str:
+                raise RuntimeError("the proposer exited without a reply")
+
+            with self.assertRaisesRegex(RuntimeError, "without a reply"):
+                loop.Search("notify", "seed.json", tmp, asker, dies, None, 300, 1).run()
+            self.assertTrue((tmp / "proposal-1.pending").is_file())
+            again = loop.Search("notify", "seed.json", tmp, asker, None, None, 300, 1)
+            again.enumerate()
+            again.round_zero()
+            paid = len(asker.calls)
+            with self.assertRaisesRegex(RuntimeError, "uncertain") as refused:
+                again.judge()
+            self.assertEqual(again.held.unsealed, 0, "no held-out label was read")
+            self.assertFalse((tmp / "freeze.json").exists())
+            with self.assertRaisesRegex(RuntimeError, "uncertain"):
+                again.step(2, loop.Proposal(add={"q": {"type": "noul", "instructions": "x", "yes": "y", "no": "n"}}))
+            self.assertEqual(len(asker.calls), paid, "no row is sent behind an unsettled proposal")
+            self.assertIsInstance(refused.exception, loop.UnsettledBill)
+            (tmp / "proposal-1.txt").write_text("{}")
+            self.assertEqual(again.judge()["verdict"], "judged", "a claim with its reply saved is settled")
+
+    def test_an_unstated_dollar_line_is_the_briefs_and_the_manifest_says_so(self):
+        """No stated dollar line is the brief's line, not none: the manifest
+        writes the number in effect, a settled bill that reached it stops
+        the next paid row, and the asking stage is handed what is left."""
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            asker = FakeAsker(sample(), informative)
+            search = loop.Search("notify", "seed.json", tmp, asker, None, None, 300, 0)
+            self.assertEqual(search.enumerate()["caps"]["spendUsd"], loop.SPEND_CAP_USD)
+            spent = tmp / "cache-spent.jsonl"
+            spent.write_text(json.dumps({"row": "notify:0", "outcome": "answered", "requests": 1, "retries": 0, "costUsd": 1.0}) + "\n")
+            search.round_zero()
+            self.assertAlmostEqual(asker.calls[-1]["remainingSpendUsd"], loop.SPEND_CAP_USD - 1.0)
+            spent.write_text(json.dumps({"row": "notify:0", "outcome": "answered", "requests": 1, "retries": 0, "costUsd": loop.SPEND_CAP_USD}) + "\n")
+            paid = len(asker.calls)
+            with self.assertRaisesRegex(RuntimeError, "spend"):
+                search.step(1, loop.Proposal(add={"q": {"type": "noul", "instructions": "x", "yes": "y", "no": "n"}}))
+            self.assertEqual(len(asker.calls), paid, "the row past the line never reaches the asker")
+
+    def test_the_asking_stage_is_handed_no_money_nobody_budgeted(self):
+        """A round handed to the Rust stage without the loop's remaining line
+        spends nothing: the stage's own ceiling is never the default."""
+        seen: list[dict] = []
+
+        def recorded(argv, **kwargs):
+            seen.append(kwargs["env"])
+            return subprocess.CompletedProcess(argv, 0)
+
+        with tempfile.TemporaryDirectory() as raw, mock.patch.object(loop.subprocess, "run", recorded):
+            tmp = Path(raw)
+            ask = loop.cargo_asker(5, tmp / "asker.log")
+            ask({"seat": "notify", "source": "seed.json", "sample": None, "rows": None, "questions": {}}, tmp / "rows.jsonl", None)
+            ask({"seat": "notify", "source": "seed.json", "sample": None, "rows": ["notify:1"], "questions": loop.SHIPPED, "remainingSpendUsd": 1.25},
+                tmp / "rows.jsonl", None)
+        self.assertEqual([float(env[loop.ASKER_ENV_SPEND]) for env in seen], [0.0, 1.25])
+
+    def test_the_run_lines_are_the_asking_stages_own(self):
+        """The loop's two run lines and the Rust stage's ceilings are one pair
+        of numbers, written twice only because two languages read them."""
+        rust = (REPO / "zo-ide/crates/tools/src/misc_tools/smart_router/question_discovery.rs").read_text()
+        self.assertEqual(float(re.search(r"const SPEND_CAP_USD: f64 = ([0-9.]+);", rust).group(1)), loop.SPEND_CAP_USD)
+        self.assertEqual(int(re.search(r"const REQUEST_CAP: usize = ([0-9_]+);", rust).group(1).replace("_", "")), loop.REQUEST_CAP)
+
+
 class SplitsAndFolds(unittest.TestCase):
     def rows(self, groups: list[str]) -> list:
         return [loop.Row(id=f"r{i}", at=i, seq=0, group=g, label=i % 2 == 0, baseline={}) for i, g in enumerate(groups)]
@@ -483,7 +724,8 @@ class Judgment(unittest.TestCase):
             self.assertEqual(manifest["counts"]["sampled"], 40)
             self.assertEqual(manifest["counts"]["unlabeledInSource"], 0)
             self.assertEqual(manifest["counts"]["dev"] + manifest["counts"]["held"], 40)
-            self.assertEqual(manifest["caps"], {"rounds": 2, "requestsTotal": 300, "spendUsd": None, "proposalsPerRound": loop.PROPOSALS_PER_ROUND})
+            self.assertEqual(manifest["caps"], {"rounds": 2, "requestsTotal": 300, "spendUsd": loop.SPEND_CAP_USD, "proposalsPerRound": loop.PROPOSALS_PER_ROUND},
+                             "no stated dollar line is the brief's, and the manifest writes the number in effect")
             self.assertIn("writer", manifest["label"])
             self.assertFalse(manifest["finalEvaluated"])
             self.assertFalse((tmp / "rows-0.jsonl").exists())

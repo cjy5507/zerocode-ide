@@ -426,8 +426,21 @@ pub(super) struct Summary {
 /// labels and outcomes, never a word of the state.
 #[allow(clippy::too_many_lines)]
 pub(super) fn run(round: &Round, door: &JevDoor, client: Option<&SystemOneClient>, cap: usize, out: &Path, states: Option<&Path>) -> Summary {
-    let spend_cap = std::env::var(SPEND_ENV).ok().and_then(|raw| raw.parse::<f64>().ok()).filter(|cap| cap.is_finite() && *cap >= 0.0).unwrap_or(SPEND_CAP_USD).min(SPEND_CAP_USD);
-    run_with_spend(round, door, client, cap, spend_cap, out, states)
+    run_with_spend(round, door, client, cap, spend_line(std::env::var_os(SPEND_ENV).as_deref()), out, states)
+}
+
+/// The dollars one asking stage may spend: the line the loop handed over in
+/// [`SPEND_ENV`], never above [`SPEND_CAP_USD`]. Only a line nobody handed
+/// over — a person running the stage by hand — is the brief's; one handed
+/// over that does not read as a non-negative number is no money at all,
+/// never a fresh ceiling.
+fn spend_line(handed: Option<&std::ffi::OsStr>) -> f64 {
+    let Some(handed) = handed else { return SPEND_CAP_USD };
+    handed
+        .to_str()
+        .and_then(|raw| raw.parse::<f64>().ok())
+        .filter(|line| line.is_finite() && *line >= 0.0)
+        .map_or(0.0, |line| line.min(SPEND_CAP_USD))
 }
 
 #[allow(clippy::too_many_lines)]
@@ -781,6 +794,29 @@ mod tests {
         assert_eq!((summary.asked, summary.capped), (1, 1));
         assert_eq!(summary.budget_exceeded, 0);
         assert_eq!(rows[1]["outcome"], CAPPED);
+    }
+
+    /// The loop hands the stage what is left of the run's dollars. A line
+    /// that was handed over but does not read as a non-negative number is
+    /// no money at all — never the stage's own fresh ceiling; only a line
+    /// nobody handed over (a person running the stage by hand) is the
+    /// brief's, and no line reaches above it.
+    #[test]
+    fn a_handed_spend_line_that_does_not_read_is_no_money_and_only_an_absent_one_is_the_briefs() {
+        for (handed, want, why) in [
+            (None, SPEND_CAP_USD, "nobody handed a line over"),
+            (Some("1.25"), 1.25, "the loop's remaining line"),
+            (Some("0.0"), 0.0, "nothing is left"),
+            (Some("9"), SPEND_CAP_USD, "never above the stage's own ceiling"),
+            (Some("-0.5"), 0.0, "a negative line is no money, not a fresh ceiling"),
+            (Some("four dollars"), 0.0, "an unreadable line is no money"),
+            (Some(""), 0.0, "an empty line is no money"),
+            (Some("NaN"), 0.0, "not a number is no money"),
+            (Some("inf"), 0.0, "an endless line is no money"),
+        ] {
+            let got = spend_line(handed.map(std::ffi::OsStr::new));
+            assert!((got - want).abs() < f64::EPSILON, "{handed:?} read as {got}: {why}");
+        }
     }
 
     #[test]
