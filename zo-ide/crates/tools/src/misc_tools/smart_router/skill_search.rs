@@ -420,8 +420,12 @@ pub fn search(cwd: &Path, task: &str, skills: &[SkillIndexEntry]) -> Searched {
 /// whether THIS turn went on to load what THIS search named, and a name read
 /// back from a ledger row could be a search somebody else's session made an
 /// hour ago.
-fn last_answer() -> &'static Mutex<HashMap<PathBuf, (Vec<String>, SkillRequestName)>> {
-    static ANSWERED: OnceLock<Mutex<HashMap<PathBuf, (Vec<String>, SkillRequestName)>>> = OnceLock::new();
+/// Per project: the names the last search's judgment handed back, and the
+/// request it answered.
+type AnswerBook = HashMap<PathBuf, (Vec<String>, SkillRequestName)>;
+
+fn last_answer() -> &'static Mutex<AnswerBook> {
+    static ANSWERED: OnceLock<Mutex<AnswerBook>> = OnceLock::new();
     ANSWERED.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

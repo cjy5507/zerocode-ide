@@ -1214,14 +1214,14 @@ pub fn standing(seat: &JevUse, rows: &[Value]) -> Stand {
 /// [`standing`] read off a ledger's text, newest line first, parsing only
 /// the lines that can say something: the lines that carry a transition's
 /// key, and the lines that could be a request of newer words than the
-/// seat's ([`fences`] — the one reader the rows are read with, so the text
+/// seat's (`fences` — the one reader the rows are read with, so the text
 /// and the rows cannot disagree on what a fence is). An `auto` seat reads
 /// its standing on every turn it is asked about, and a full ledger is
 /// thousands of request rows around a transition or two: parsing every row
 /// cost 35.6 ms at the 8 MiB cap (4,720 routing rows of the second
 /// version, 2026-09-24, t-6346). A request line whose rubric is spelled as
 /// a plain integer no newer than the seat's — every request line of a
-/// seat's own rubric — is never parsed ([`may_fence`]), which is what keeps
+/// seat's own rubric — is never parsed (`may_fence`), which is what keeps
 /// the read at the cost of the transition lines alone on a ledger the seat
 /// wrote itself; a line spelling anything else there is parsed and read as
 /// the rows are.
