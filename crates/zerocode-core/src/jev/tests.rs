@@ -535,6 +535,8 @@ fn every_seat_waits_for_a_window_of_marks_whatever_kind_they_are() {
             CLAIM.id,
             VAULT_PAIRS.id,
             FILE_PICK.id,
+            COMMAND_GUARD.id,
+            TOOL_TEXT_GUARD.id,
         ]
     );
     for row in JEV_USES.iter().filter(|row| row.promotes) {
@@ -1483,7 +1485,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 23);
+    assert_eq!(JEV_USES.len(), 25);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1730,10 +1732,10 @@ fn the_patch_review_seat_sends_a_patch_and_its_evidence_and_rises_on_hindsight()
             .applies_with(true)
     );
     assert_eq!(PATCH_REVIEW.mode_in(&json!({})), JevMode::Off);
-    // The patch review remains before claim, the vault-pair seat and the
-    // file-pick seat.
-    assert_eq!(JEV_USES[JEV_USES.len() - 4], PATCH_REVIEW);
-    assert_eq!(JEV_USES[JEV_USES.len() - 5], CHALLENGER);
+    // The patch review remains before claim, the vault-pair seat, the
+    // file-pick seat and the two guards.
+    assert_eq!(JEV_USES[JEV_USES.len() - 6], PATCH_REVIEW);
+    assert_eq!(JEV_USES[JEV_USES.len() - 7], CHALLENGER);
 }
 
 #[test]
@@ -1785,8 +1787,8 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
     assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
     assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
-    assert_eq!(JEV_USES.len(), 23);
-    assert_eq!(JEV_USES.last(), Some(&FILE_PICK));
+    assert_eq!(JEV_USES.len(), 25);
+    assert_eq!(JEV_USES.get(JEV_USES.len() - 3), Some(&FILE_PICK));
 }
 
 #[test]
@@ -1801,7 +1803,130 @@ fn completion_claims_are_a_recording_hindsight_seat_with_bounded_evidence() {
     assert_eq!(CLAIM.sends[0].cap, Cap::Items(CLAIM_LIMIT));
     assert_eq!(CLAIM.sends[1].cap, Cap::Chars(CLAIM_TEXT_CHAR_CAP));
     assert_eq!(CLAIM.sends[2].cap, Cap::Bytes(CLAIM_EVIDENCE_BYTE_CAP));
-    assert_eq!(JEV_USES.get(JEV_USES.len() - 3), Some(&CLAIM));
+    assert_eq!(JEV_USES.get(JEV_USES.len() - 5), Some(&CLAIM));
+}
+
+/// The command guard (t-6348): right before zo runs a shell command, the
+/// command, the folder it runs in and the first line of the person's newest
+/// words are put to two Nouls in one request — cannot it be undone, does it
+/// change something outside the project. It records first, is graded by
+/// what became of the command, and is held to today's rule: the destructive
+/// and path tables zo already warns from, and the Computer Use table of
+/// words a control that cannot be taken back carries.
+#[test]
+fn the_command_guard_sends_a_command_its_folder_and_a_task_line_and_rises_on_hindsight() {
+    use crate::jev::questions::COMMAND_GUARD_STATE_KEYS;
+
+    assert_eq!(jev_use("command_guard"), Some(&COMMAND_GUARD));
+    assert_eq!(COMMAND_GUARD.setting, "jevCommandGuard");
+    assert_eq!(COMMAND_GUARD.ledger, "command-guard.jsonl");
+    assert_eq!(COMMAND_GUARD.modes, &JevMode::ALL[..]);
+    assert_eq!(COMMAND_GUARD.recommended, JevMode::Auto);
+    assert_eq!(COMMAND_GUARD.repeat, None);
+    assert!(jev_use("command_guard").is_some_and(|row| row.promotes));
+    assert_eq!(COMMAND_GUARD.agreement_kind, AgreementKind::Hindsight);
+    assert_eq!(COMMAND_GUARD.baseline, Baseline::TodaysRule);
+    assert_eq!(COMMAND_GUARD.negatives_wanted, Some(NEGATIVES_WANTED));
+    assert_eq!(COMMAND_GUARD.press_floor_permille, None);
+    assert_eq!(
+        COMMAND_GUARD.answer_floor_permille,
+        Some(COMMAND_GUARD_ANSWER_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        COMMAND_GUARD.agreement_floor_permille,
+        Some(COMMAND_GUARD_AGREEMENT_FLOOR_PERMILLE)
+    );
+    assert_eq!(
+        COMMAND_GUARD.apply_deadline_ms,
+        Some(COMMAND_GUARD_APPLY_DEADLINE_MS)
+    );
+    assert_eq!(
+        COMMAND_GUARD.confidence_bands,
+        Some(ConfidenceBands::on_a_noul(
+            NOUL_UNCERTAIN_TO_PERMILLE,
+            COMMAND_GUARD_FLAG_FLOOR_PERMILLE
+        ))
+    );
+    let sent: Vec<(&str, Cap)> = COMMAND_GUARD
+        .sends
+        .iter()
+        .map(|sent| (sent.at, sent.cap))
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            ("/state/command", Cap::Chars(COMMAND_GUARD_COMMAND_CHAR_CAP)),
+            ("/state/cwd", Cap::Uncut),
+            ("/state/task", Cap::Chars(COMMAND_GUARD_TASK_CHAR_CAP)),
+        ]
+    );
+    // The pointers are the catalog's own state keys, in its order.
+    for (sent, key) in COMMAND_GUARD.sends.iter().zip(COMMAND_GUARD_STATE_KEYS) {
+        assert_eq!(sent.at, format!("/state/{key}"));
+    }
+    // A thousand characters holds 91.0% of this machine's 2,318 commands of a
+    // week whole; the task line is a goal's sentence or two.
+    assert_eq!(COMMAND_GUARD_COMMAND_CHAR_CAP, RECALL_REQUEST_CHAR_CAP);
+    assert_eq!(COMMAND_GUARD_TASK_CHAR_CAP, GOAL_CHAR_CAP);
+    assert_eq!(COMMAND_GUARD.mode_in(&json!({})), JevMode::Off);
+    assert_eq!(JEV_USES.get(JEV_USES.len() - 2), Some(&COMMAND_GUARD));
+}
+
+/// The tool text guard (t-6348): the screen's instructions guard asked of
+/// every block a file read, a web fetch, the window's browser or an MCP tool
+/// hands back — the head of the block and the kind of tool, one Noul, the
+/// screen's own line. It records first, is graded by whether the agent's next
+/// call carried out what the block said, and is held to today's rule: the
+/// fence the window already puts around the words it did not write.
+#[test]
+fn the_tool_text_guard_sends_a_block_head_and_its_source_and_rises_on_hindsight() {
+    use crate::jev::questions::TOOL_TEXT_GUARD_STATE_KEYS;
+
+    assert_eq!(jev_use("tool_text_guard"), Some(&TOOL_TEXT_GUARD));
+    assert_eq!(TOOL_TEXT_GUARD.setting, "jevToolTextGuard");
+    assert_eq!(TOOL_TEXT_GUARD.ledger, "tool-text-guard.jsonl");
+    assert_eq!(TOOL_TEXT_GUARD.modes, &JevMode::ALL[..]);
+    assert_eq!(TOOL_TEXT_GUARD.recommended, JevMode::Auto);
+    assert_eq!(TOOL_TEXT_GUARD.repeat, None);
+    assert!(jev_use("tool_text_guard").is_some_and(|row| row.promotes));
+    assert_eq!(TOOL_TEXT_GUARD.agreement_kind, AgreementKind::Hindsight);
+    assert_eq!(TOOL_TEXT_GUARD.baseline, Baseline::TodaysRule);
+    assert_eq!(TOOL_TEXT_GUARD.negatives_wanted, Some(NEGATIVES_WANTED));
+    assert_eq!(TOOL_TEXT_GUARD.press_floor_permille, None);
+    assert_eq!(
+        TOOL_TEXT_GUARD.apply_deadline_ms,
+        Some(TOOL_TEXT_GUARD_APPLY_DEADLINE_MS)
+    );
+    // The screen's question asked of another text is held to the screen's line.
+    assert_eq!(
+        TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE,
+        SCREEN_INSTRUCTED_FLOOR_PERMILLE
+    );
+    assert_eq!(
+        TOOL_TEXT_GUARD.confidence_bands,
+        Some(ConfidenceBands::on_a_noul(
+            NOUL_UNCERTAIN_TO_PERMILLE,
+            TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE
+        ))
+    );
+    let sent: Vec<(&str, Cap)> = TOOL_TEXT_GUARD
+        .sends
+        .iter()
+        .map(|sent| (sent.at, sent.cap))
+        .collect();
+    assert_eq!(
+        sent,
+        vec![
+            ("/state/source", Cap::Uncut),
+            ("/state/text", Cap::Chars(TOOL_TEXT_GUARD_TEXT_CHAR_CAP)),
+        ]
+    );
+    for (sent, key) in TOOL_TEXT_GUARD.sends.iter().zip(TOOL_TEXT_GUARD_STATE_KEYS) {
+        assert_eq!(sent.at, format!("/state/{key}"));
+    }
+    assert_eq!(TOOL_TEXT_GUARD_TEXT_CHAR_CAP, ROUTING_TASK_CHAR_CAP);
+    assert_eq!(TOOL_TEXT_GUARD.mode_in(&json!({})), JevMode::Off);
+    assert_eq!(JEV_USES.last(), Some(&TOOL_TEXT_GUARD));
 }
 
 /// A request's receipt is the whole SHA-256 of the seat, the rubric version,

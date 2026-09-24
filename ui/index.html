@@ -4226,6 +4226,16 @@
             <span data-jev-summary data-i18n="settings.typesafe.file_pickSummary">코드 요청에서 검색·최근 편집·코드 그래프로 후보를 모아 다시 정렬합니다.</span>
             <p data-jev-hint data-i18n="settings.typesafe.file_pickHint">구현·디버깅 요청에 최대 30개 파일 경로와 첫 설명 줄(200바이트)을 보냅니다. 파일마다 하나씩, 후보가 하나라도 맞는지도 따로 묻습니다. 확신도가 0.7보다 낮으면 안내를 생략합니다. 「기록만」은 안내 없이 답과 실제 편집된 파일을 기록합니다. 「자동」은 실제 편집 파일을 라벨로 삼아 최근 편집 순서보다 나은 근거가 쌓인 뒤 안내합니다. 파일 본문은 보내지 않습니다.</p>
           </div>
+          <div data-jev-feature="command_guard">
+            <span data-jev-name data-i18n="settings.typesafe.command_guard">되돌릴 수 없는 명령 살피기</span>
+            <span data-jev-summary data-i18n="settings.typesafe.command_guardSummary">셸 명령을 실행하기 직전에, 되돌릴 수 없는 명령인지와 프로젝트 폴더 밖을 바꾸는지 기록합니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.command_guardHint">코드 규칙이 읽기 전용으로 증명하지 못한 셸 명령마다 명령(최대 1,000자), 실행 폴더, 사람의 최근 요청 첫 줄(최대 400자)을 보냅니다. 한 요청에서 두 가지를 묻습니다: 삭제·강제 push·히스토리 재작성·디스크·서비스처럼 되돌릴 수 없는지, 홈·시스템 폴더·다른 저장소처럼 프로젝트 밖을 바꾸는지. 「기록만」은 명령을 붙잡지 않고 답만 기록합니다. 사람이 멈췄는지, 프로젝트 밖 파일이 바뀌었는지, 뒤의 git 명령이 되돌렸는지를 결과 라벨로 삼고, 지금 코드 규칙보다 나은 근거가 쌓인 뒤에만 「자동」이 결과에 한 줄 표시를 붙입니다. 명령을 막지는 않습니다.</p>
+          </div>
+          <div data-jev-feature="tool_text_guard">
+            <span data-jev-name data-i18n="settings.typesafe.tool_text_guard">도구 결과 속 지시 살피기</span>
+            <span data-jev-summary data-i18n="settings.typesafe.tool_text_guardSummary">파일·웹·브라우저·MCP 도구가 돌려준 글에 에이전트를 향한 지시가 들어 있는지 기록합니다.</span>
+            <p data-jev-hint data-i18n="settings.typesafe.tool_text_guardHint">파일 읽기, 웹 가져오기·검색, ZeroCode가 이미 「신뢰 안 함」 표시로 감싼 브라우저 읽기, MCP 도구 결과마다 앞부분 최대 2,000자와 도구 종류를 보냅니다. 글이 에이전트에게 무엇을 하라고 시키는지 한 가지를 묻습니다(화면 판단과 같은 질문). 「기록만」은 결과를 바꾸지 않고 답만 기록합니다. 다음 단계에서 에이전트가 그 글에 적힌 명령을 그대로 실행했는지를 결과 라벨로 삼고, 근거가 쌓인 뒤에만 「자동」이 그 결과를 「신뢰 안 함」 표시로 감싸고 한 줄을 붙입니다. 읽기를 막지는 않습니다.</p>
+          </div>
         </template>
         </section>
 
