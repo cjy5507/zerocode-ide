@@ -177,6 +177,10 @@ impl SubagentToolExecutor {
 }
 
 impl ToolExecutor for SubagentToolExecutor {
+    fn execution_cwd(&self) -> Option<&std::path::Path> {
+        self.context.cwd.as_deref()
+    }
+
     fn begin_user_turn(&mut self) {
         self.context.begin_skill_turn();
     }

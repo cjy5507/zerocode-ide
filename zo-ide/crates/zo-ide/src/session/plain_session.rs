@@ -929,7 +929,7 @@ impl PlainSession {
             let _ = tools::note_compaction_reread(&self.cwd, None);
             let _ = tools::note_patch_review_turn(&self.cwd, None);
             // A turn the person stopped stops the commands it ran (t-6348).
-            let _ = tools::note_tool_guard_turn(&self.cwd, None);
+            let _ = tools::note_tool_guard_turn(&self.cwd, &inner.session().session_id, None);
             return;
         }
         let messages = Arc::clone(&inner.session().messages);
@@ -953,7 +953,7 @@ impl PlainSession {
         let _ = tools::note_patch_review_turn(&self.cwd, Some(&messages[from..]));
         // And the tool guards': what became of each guarded command, and
         // whether the next step carried out a guarded text (t-6348).
-        let _ = tools::note_tool_guard_turn(&self.cwd, Some(&messages[from..]));
+        let _ = tools::note_tool_guard_turn(&self.cwd, &inner.session().session_id, Some(&messages[from..]));
         // The same turn's completion claims and tool lines meet beside r43;
         // the next person's turn labels the preceding answer.
         tools::note_claim_turn(&self.cwd, &self.handle.path, &attempt, &messages[from..]);

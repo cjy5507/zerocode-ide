@@ -17445,6 +17445,26 @@ fn the_tool_guards_leave_every_result_to_the_byte_unless_they_act() {
     assert_eq!(guarded_outputs(&runtime.session.messages), acting_outputs());
 }
 
+#[test]
+fn a_command_guard_observes_the_cwd_the_bash_executor_uses() {
+    struct PinnedExecutor(std::path::PathBuf);
+    impl ToolExecutor for PinnedExecutor {
+        fn execution_cwd(&self) -> Option<&std::path::Path> { Some(&self.0) }
+        fn execute(&mut self, _: &str, _: &str) -> Result<String, ToolError> { Ok(String::new()) }
+    }
+    let seat = Arc::new(RecordingGuard::answering(None, crate::TextGuard::default()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(), GuardedOnceClient { calls: 0 }, PinnedExecutor("/work/context".into()),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess), vec!["system".to_string()],
+    );
+    runtime.set_tool_guard_seat(Some(Arc::clone(&seat) as Arc<dyn crate::ToolGuardSeat>));
+    runtime.guard_command("shell-context", "bash", r#"{"command":"rm -rf build"}"#);
+    runtime.guard_command("shell-pinned", "bash", r#"{"command":"rm -rf build","cwd":"/work/pinned"}"#);
+    let commands = seat.commands.lock().expect("commands");
+    assert_eq!(commands[0].cwd, std::path::Path::new("/work/context"));
+    assert_eq!(commands[1].cwd, std::path::Path::new("/work/pinned"));
+}
+
 /// The streaming loop's seam — where a tool is dispatched, and the one place
 /// every result is finalized — makes the same promise.
 #[test]

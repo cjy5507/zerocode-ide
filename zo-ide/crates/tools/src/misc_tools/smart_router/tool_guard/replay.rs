@@ -408,6 +408,7 @@ fn cases(seed: &Value, repo: &Path, scratch: &Path) -> Vec<Case> {
         for case in list(set) {
             let ask = CommandAsk {
                 attempt: "replay".to_string(),
+                owner: "replay".to_string(),
                 tool_use_id: case["id"].as_str().expect("an id").to_string(),
                 command: case["command"].as_str().expect("a command").to_string(),
                 cwd: PathBuf::from(case["cwd"].as_str().expect("a folder")),

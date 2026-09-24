@@ -771,6 +771,7 @@ pub fn restores(later: &str, named: &[PathBuf], cwd: &Path) -> bool {
 #[allow(clippy::struct_excessive_bools)] // each bool is an independent fact about one command, not a state machine
 struct CommandWaiting {
     judged: u64,
+    owner: String,
     tool_use_id: String,
     cwd: PathBuf,
     /// Every place the command named, as paths — what a restore is matched on.
@@ -796,7 +797,7 @@ fn command_book() -> &'static Mutex<CommandBook> {
     BOOK.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-type Pending = HashMap<(PathBuf, String), (Instant, Shared<BoxFuture<'static, Option<String>>>)>;
+type Pending = HashMap<(PathBuf, String, String), (Instant, Shared<BoxFuture<'static, Option<String>>>)>;
 
 /// The judgments an acting command guard will want its line from once the
 /// command has run, by project and call.
@@ -840,6 +841,7 @@ fn guard_command(project: &Path, ask: CommandAsk) {
             project,
             CommandWaiting {
                 judged,
+                owner: ask.owner.clone(),
                 tool_use_id: ask.tool_use_id.clone(),
                 cwd: ask.cwd.clone(),
                 named,
@@ -871,7 +873,7 @@ fn guard_command(project: &Path, ask: CommandAsk) {
         noted: false,
         asked: Asked::default(),
     };
-    let key = (project.to_path_buf(), ask.tool_use_id.clone());
+    let key = (project.to_path_buf(), ask.owner.clone(), ask.tool_use_id.clone());
     let judgment = judge_command(project.to_path_buf(), ask, row, mode, acting).boxed().shared();
     if acting {
         if let Ok(mut waiting) = pending().lock() {
@@ -924,7 +926,7 @@ async fn command_ran(project: PathBuf, ran: CommandRan) -> Option<String> {
     if let Ok(mut book) = command_book().lock() {
         if let Some(one) = book
             .get_mut(&project)
-            .and_then(|waiting| waiting.iter_mut().find(|one| one.tool_use_id == ran.tool_use_id))
+            .and_then(|waiting| waiting.iter_mut().find(|one| one.owner == ran.owner && one.tool_use_id == ran.tool_use_id))
         {
             one.failed = ran.failed;
             one.cancelled = ran.cancelled;
@@ -934,7 +936,7 @@ async fn command_ran(project: PathBuf, ran: CommandRan) -> Option<String> {
                 .any(|(path, before)| stamp(path).is_some_and(|after| after != *before));
         }
     }
-    let (asked_at, judgment) = pending().lock().ok()?.remove(&(project, ran.tool_use_id))?;
+    let (asked_at, judgment) = pending().lock().ok()?.remove(&(project, ran.owner, ran.tool_use_id))?;
     let wall = COMMAND.deadline.saturating_sub(asked_at.elapsed());
     tokio::time::timeout(wall, judgment).await.ok().flatten()
 }
@@ -1036,7 +1038,7 @@ fn shell_calls(turn: &[ConversationMessage]) -> Vec<(String, String)> {
 
 /// Settle the commands of `project` still waiting against the turn that just
 /// ended; answer the label rows written.
-fn label_commands(project: &Path, turn: Option<&[ConversationMessage]>) -> usize {
+fn label_commands(project: &Path, owner: &str, turn: Option<&[ConversationMessage]>) -> usize {
     let done = {
         let Ok(mut book) = command_book().lock() else {
             return 0;
@@ -1049,13 +1051,13 @@ fn label_commands(project: &Path, turn: Option<&[ConversationMessage]>) -> usize
             // of an earlier one does not move — a stopped turn is none of its
             // turns.
             None => {
-                for one in waiting.iter_mut().filter(|one| one.turns == 0 && one.decided.is_none()) {
+                for one in waiting.iter_mut().filter(|one| one.owner == owner && one.turns == 0 && one.decided.is_none()) {
                     one.decided = Some(CommandHindsight::Stopped);
                 }
             }
             Some(turn) => {
                 let calls = shell_calls(turn);
-                for one in waiting.iter_mut().filter(|one| one.decided.is_none()) {
+                for one in waiting.iter_mut().filter(|one| one.owner == owner && one.decided.is_none()) {
                     // Only what ran after it: its own call, if this turn holds it,
                     // and every call after that.
                     let from = calls
@@ -1080,7 +1082,7 @@ fn label_commands(project: &Path, turn: Option<&[ConversationMessage]>) -> usize
         }
         let (done, still): (Vec<CommandWaiting>, Vec<CommandWaiting>) = waiting
             .drain(..)
-            .partition(|one| one.decided.is_some() && one.verdict.is_some());
+            .partition(|one| one.owner == owner && one.decided.is_some() && one.verdict.is_some());
         *waiting = still;
         if waiting.is_empty() {
             book.remove(project);
@@ -1148,6 +1150,7 @@ pub const IGNORED: &str = "ignored";
 #[derive(Debug, Clone)]
 struct TextWaiting {
     judged: u64,
+    owner: String,
     tool_use_id: String,
     fenced_before: bool,
     verdict: Option<Verdict>,
@@ -1179,6 +1182,7 @@ async fn guard_text(project: PathBuf, ask: TextAsk) -> TextGuard {
             &project,
             TextWaiting {
                 judged,
+                owner: ask.owner.clone(),
                 tool_use_id: ask.tool_use_id.clone(),
                 fenced_before: ask.fenced,
                 verdict: None,
@@ -1357,7 +1361,7 @@ pub fn followed_in(turn: &[ConversationMessage], tool_use_id: &str) -> Option<(b
 /// ended; answer the label rows written. A block the turn does not hold with
 /// a step after it — a stopped turn, a block of another runtime's — leaves
 /// the book unlabeled: nothing says what came after it.
-fn label_texts(project: &Path, turn: Option<&[ConversationMessage]>) -> usize {
+fn label_texts(project: &Path, owner: &str, turn: Option<&[ConversationMessage]>) -> usize {
     let done = {
         let Ok(mut book) = text_book().lock() else {
             return 0;
@@ -1365,15 +1369,15 @@ fn label_texts(project: &Path, turn: Option<&[ConversationMessage]>) -> usize {
         let Some(waiting) = book.get_mut(project) else {
             return 0;
         };
-        for one in waiting.iter_mut().filter(|one| one.decided.is_none()) {
+        for one in waiting.iter_mut().filter(|one| one.owner == owner && one.decided.is_none()) {
             one.decided = turn.and_then(|turn| followed_in(turn, &one.tool_use_id));
         }
         let (done, still): (Vec<TextWaiting>, Vec<TextWaiting>) = waiting
             .drain(..)
-            .partition(|one| one.decided.is_some() && one.verdict.is_some());
+            .partition(|one| one.owner == owner && one.decided.is_some() && one.verdict.is_some());
         // A block still waiting on its verdict keeps its hindsight; one with
         // no hindsight after its turn ended never gets one.
-        *waiting = still.into_iter().filter(|one| one.decided.is_some()).collect();
+        *waiting = still.into_iter().filter(|one| one.owner != owner || one.decided.is_some()).collect();
         if waiting.is_empty() {
             book.remove(project);
         }
@@ -1386,8 +1390,8 @@ fn label_texts(project: &Path, turn: Option<&[ConversationMessage]>) -> usize {
 /// — the messages the turn appended, already in memory. `None` is a turn the
 /// person stopped. Answers how many label rows were written.
 #[must_use]
-pub fn note_tool_guard_turn(cwd: &Path, turn: Option<&[ConversationMessage]>) -> usize {
-    label_commands(cwd, turn) + label_texts(cwd, turn)
+pub fn note_tool_guard_turn(cwd: &Path, owner: &str, turn: Option<&[ConversationMessage]>) -> usize {
+    label_commands(cwd, owner, turn) + label_texts(cwd, owner, turn)
 }
 
 /// Both books and every pending line for `cwd`, emptied — for a test that
@@ -1401,7 +1405,7 @@ fn forget_waiting(cwd: &Path) {
         book.remove(cwd);
     }
     if let Ok(mut waiting) = pending().lock() {
-        waiting.retain(|(project, _), _| project != cwd);
+        waiting.retain(|(project, _, _), _| project != cwd);
     }
 }
 

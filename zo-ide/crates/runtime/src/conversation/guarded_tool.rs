@@ -13,24 +13,28 @@ use std::sync::Arc;
 
 use super::ConversationRuntime;
 use crate::tool_cancel::CANCELLED_TOOL_RESULT;
-use crate::tool_guard::{command_of, guarded_output, task_line, text_ask, CommandAsk, CommandRan, TextAsk, SHELL_TOOL};
+use crate::tool_guard::{command_with_cwd, guarded_output, task_line, text_ask, CommandAsk, CommandRan, TextAsk, SHELL_TOOL};
 
 impl<C, T> ConversationRuntime<C, T> {
     /// Hand a shell command to the command guard, right before it runs. Never
     /// waits; a runtime with no seat, another tool, and a command today's rule
     /// proves read-only pay nothing here.
-    pub(super) fn guard_command(&self, tool_use_id: &str, tool_name: &str, input: &str) {
+    pub(super) fn guard_command(&self, tool_use_id: &str, tool_name: &str, input: &str)
+    where
+        T: super::ToolExecutor,
+    {
         let Some(seat) = self.tool_guard_seat.as_ref() else {
             return;
         };
-        let Some(command) = command_of(tool_name, input) else {
+        let Some((command, cwd)) = command_with_cwd(tool_name, input, self.tool_executor.execution_cwd()) else {
             return;
         };
         seat.command(CommandAsk {
             attempt: self.attempt.clone(),
+            owner: self.session.session_id.clone(),
             tool_use_id: tool_use_id.to_string(),
             command,
-            cwd: std::env::current_dir().unwrap_or_default(),
+            cwd,
             task: task_line(&self.session.messages),
         });
     }
@@ -49,7 +53,10 @@ impl<C, T> ConversationRuntime<C, T> {
         if is_error {
             return None;
         }
-        text_ask(&self.attempt, tool_use_id, tool_name, output).map(|ask| (ask, output.to_string()))
+        text_ask(&self.attempt, tool_use_id, tool_name, output).map(|mut ask| {
+            ask.owner.clone_from(&self.session.session_id);
+            (ask, output.to_string())
+        })
     }
 
     /// The model-facing `output` once both guards have had their say: the text
@@ -76,6 +83,7 @@ impl<C, T> ConversationRuntime<C, T> {
         }
         if tool_name == SHELL_TOOL {
             let ran = CommandRan {
+                owner: self.session.session_id.clone(),
                 tool_use_id: tool_use_id.to_string(),
                 failed: is_error,
                 cancelled: output.starts_with(CANCELLED_TOOL_RESULT),

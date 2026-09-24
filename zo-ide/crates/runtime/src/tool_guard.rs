@@ -19,7 +19,7 @@
 //! refuses a read: this product is not a sandbox, and a guard that claimed to
 //! have stopped something would be claiming what it cannot do.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use futures_util::future::BoxFuture;
 use serde::Deserialize;
@@ -97,14 +97,9 @@ pub fn text_source_of(tool_name: &str, output: &str) -> Option<TextSource> {
     if tool_name.starts_with(MCP_TOOL_PREFIX) {
         return Some(TextSource::Mcp);
     }
-    (tool_name == SHELL_TOOL && is_fenced(output)).then_some(TextSource::Browser)
-}
-
-/// Whether a text already carries the window's fence — today's rule for a
-/// block's words (`untrusted::PHRASE` on its marker lines).
-#[must_use]
-pub fn is_fenced(text: &str) -> bool {
-    text.contains(untrusted::PHRASE)
+    // A shell answer with this marker is a candidate browser result. This is
+    // source classification only: its bytes cannot attest to host framing.
+    (tool_name == SHELL_TOOL && output.contains(untrusted::PHRASE)).then_some(TextSource::Browser)
 }
 
 /// What the command guard is handed right before a shell command runs.
@@ -112,13 +107,14 @@ pub fn is_fenced(text: &str) -> bool {
 pub struct CommandAsk {
     /// The turn the command runs inside, as the runtime names it.
     pub attempt: String,
+    /// The runtime session whose future turns can settle this command.
+    pub owner: String,
     /// The call that runs it.
     pub tool_use_id: String,
     /// The command, whole — the seat's door cuts what is sent to the use
     /// table's cap; the label reads the whole.
     pub command: String,
-    /// The folder the command runs in: the live process folder, where the
-    /// shell tool runs unless a host pins another.
+    /// The folder the shell executor uses, after its input/context fallback.
     pub cwd: PathBuf,
     /// The first line of the person's newest words ([`task_line`]).
     pub task: String,
@@ -127,6 +123,7 @@ pub struct CommandAsk {
 /// What became of a command the guard was asked about, once it ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandRan {
+    pub owner: String,
     pub tool_use_id: String,
     /// The tool handed back an error.
     pub failed: bool,
@@ -139,6 +136,8 @@ pub struct CommandRan {
 pub struct TextAsk {
     /// The turn the read ran inside.
     pub attempt: String,
+    /// The runtime session whose next step can settle this text.
+    pub owner: String,
     /// The call whose answer this is.
     pub tool_use_id: String,
     pub tool_name: String,
@@ -148,7 +147,8 @@ pub struct TextAsk {
     pub head: String,
     /// Characters of all the model reads of it.
     pub chars: usize,
-    /// Whether the whole output already carries the window's fence.
+    /// Whether a trusted host explicitly attested that this result is fenced.
+    /// Tool output bytes never set this field.
     pub fenced: bool,
 }
 
@@ -180,6 +180,33 @@ pub trait ToolGuardSeat: Send + Sync {
 #[derive(Deserialize)]
 struct ShellInput {
     command: String,
+    #[serde(default)]
+    cwd: Option<PathBuf>,
+}
+
+fn guarded_shell_input(tool_name: &str, input: &str) -> Option<ShellInput> {
+    if tool_name != SHELL_TOOL {
+        return None;
+    }
+    let shell = serde_json::from_str::<ShellInput>(input).ok()?;
+    let proven_read_only = classify_command(&shell.command) == CommandIntent::ReadOnly
+        && required_mode_for_command(&shell.command) == PermissionMode::ReadOnly;
+    (!shell.command.trim().is_empty() && !proven_read_only).then_some(shell)
+}
+
+/// The command and effective cwd the Bash executor will use. A server-supplied
+/// input cwd wins over its tool context; only then does Bash inherit the live
+/// process cwd. Relative pinned paths are resolved from that process cwd too.
+#[must_use]
+pub fn command_with_cwd(tool_name: &str, input: &str, context_cwd: Option<&Path>) -> Option<(String, PathBuf)> {
+    let shell = guarded_shell_input(tool_name, input)?;
+    let selected = shell.cwd.as_deref().or(context_cwd);
+    let cwd = match selected {
+        Some(path) if path.is_absolute() => path.to_path_buf(),
+        Some(path) => std::env::current_dir().ok()?.join(path),
+        None => std::env::current_dir().ok()?,
+    };
+    Some((shell.command, cwd))
 }
 
 /// The command a call asks the shell to run, when the guard asks about it —
@@ -193,13 +220,7 @@ struct ShellInput {
 /// exactly the command the guard is for.
 #[must_use]
 pub fn command_of(tool_name: &str, input: &str) -> Option<String> {
-    if tool_name != SHELL_TOOL {
-        return None;
-    }
-    let command = serde_json::from_str::<ShellInput>(input).ok()?.command;
-    let proven_read_only = classify_command(&command) == CommandIntent::ReadOnly
-        && required_mode_for_command(&command) == PermissionMode::ReadOnly;
-    (!command.trim().is_empty() && !proven_read_only).then_some(command)
+    guarded_shell_input(tool_name, input).map(|shell| shell.command)
 }
 
 /// The task line a command is judged for: the first line with words of the
@@ -221,21 +242,24 @@ pub fn task_line(messages: &[ConversationMessage]) -> String {
 /// in a request is handed over ([`wire_tool_output`], lossless) — a file's
 /// lines, a shell answer's own words — and not its envelope. The envelope
 /// holds a whole file in one JSON line, and the door withholds a whole line
-/// that may carry a credential: 59 of 64 of this repository's files asked
-/// that way reached the judgment as nothing but the withheld mark (t-6348
-/// replay).
+/// that may carry a credential: 20 of 64 of this repository's files asked
+/// that way reached the judgment with under 5% of the text (t-6348 replay).
 #[must_use]
 pub fn text_ask(attempt: &str, tool_use_id: &str, tool_name: &str, output: &str) -> Option<TextAsk> {
     let source = text_source_of(tool_name, output)?;
     let read = wire_tool_output(output, tool_name, false, WireRewrite::Lossless);
     (!read.trim().is_empty()).then(|| TextAsk {
         attempt: attempt.to_string(),
+        owner: attempt.to_string(),
         tool_use_id: tool_use_id.to_string(),
         tool_name: tool_name.to_string(),
         source,
         head: cut(&read, Cap::Chars(TOOL_TEXT_GUARD_TEXT_CHAR_CAP)),
         chars: read.chars().count(),
-        fenced: is_fenced(output),
+        // The runtime has no out-of-band host-framing receipt for these tool
+        // results. Even a browser CLI's inner marker arrives as shell bytes;
+        // an acting guard places one verified outer fence around those bytes.
+        fenced: false,
     })
 }
 

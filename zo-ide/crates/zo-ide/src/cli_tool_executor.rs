@@ -251,6 +251,10 @@ pub(crate) fn check_disallowed_tools(
 }
 
 impl ToolExecutor for CliToolExecutor {
+    fn execution_cwd(&self) -> Option<&std::path::Path> {
+        self.tool_registry.context().cwd.as_deref()
+    }
+
     fn begin_user_turn(&mut self) {
         self.tool_registry.context().begin_skill_turn();
     }

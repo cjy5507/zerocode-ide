@@ -16,6 +16,7 @@
 //!    seam.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,6 +44,9 @@ pub type LongRunningPredicate = Arc<dyn Fn(&str) -> bool + Send + Sync>;
 pub trait ToolExecutor {
     /// Reset evidence scoped to one user turn; internal continuations keep it.
     fn begin_user_turn(&mut self) {}
+
+    /// Server-pinned working directory used by Bash when input has no cwd.
+    fn execution_cwd(&self) -> Option<&Path> { None }
 
     fn execute(&mut self, tool_name: &str, input: &str) -> Result<String, ToolError>;
 
