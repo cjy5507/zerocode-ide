@@ -19,7 +19,7 @@ use zerocode_core::jev::summary::{
 };
 use zerocode_core::jev::{
     Band, JevUse, AGENT_TOOL, CLAIM, COMMAND_GUARD, COMPACTION, FILE_PICK, JEV_USES, MENTION_RERANK, NOTIFY, PATCH_REVIEW,
-    PLACEMENT, PLACEMENT_SEEN_DWELL_MS, RECALL, ROUTING, SKILLS, STALL, SUMMON, TOOL_TEXT_GUARD, VAULT_PAIRS,
+    PLACEMENT, PLACEMENT_SEEN_DWELL_MS, RECALL, ROUTING, SKILLS, SKILL_SUGGESTION, STALL, SUMMON, TOOL_TEXT_GUARD, VAULT_PAIRS,
     ZO_STEP_EFFORT,
 };
 use zerocode_core::{notify_call, orchestration, stall_cause, step_effort, worker_placement};
@@ -38,9 +38,9 @@ const OUT_ENV: &str = "ZEROCODE_LABEL_AUDIT_OUT";
 /// is the window's, under the zo home's `jev/`. A name alone is not a seat:
 /// zo's step governor wrote the window effort seat's file name before it had
 /// a ledger of its own.
-const ZO_WRITES: [&JevUse; 13] = [
-    &ROUTING, &RECALL, &SKILLS, &ZO_STEP_EFFORT, &COMPACTION, &AGENT_TOOL, &MENTION_RERANK, &PATCH_REVIEW, &CLAIM, &VAULT_PAIRS,
-    &FILE_PICK, &COMMAND_GUARD, &TOOL_TEXT_GUARD,
+const ZO_WRITES: [&JevUse; 14] = [
+    &ROUTING, &RECALL, &SKILLS, &SKILL_SUGGESTION, &ZO_STEP_EFFORT, &COMPACTION, &AGENT_TOOL, &MENTION_RERANK, &PATCH_REVIEW,
+    &CLAIM, &VAULT_PAIRS, &FILE_PICK, &COMMAND_GUARD, &TOOL_TEXT_GUARD,
 ];
 
 /// Marks counted one way.

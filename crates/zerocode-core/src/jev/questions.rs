@@ -2,7 +2,7 @@
 //! these words; the same rubric must not be repeated in a runner.
 //!
 //! Every seat's row names the version of the words it asks now
-//! ([`crate::jev::JevUse::rubric_versions`], t-6877) by one of these
+//! ([`crate::jev::JevUse::rubric_version`], t-6877) by one of these
 //! constants or by the one that lives beside its words in another module —
 //! never by a number of its own. The versions of the questions zo's runtime
 //! and tools ask are spelled here too, and those crates read them from here:

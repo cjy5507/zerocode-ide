@@ -21,7 +21,7 @@ fn one(
 /// every request row, and what the card and the judge read a seat's series by
 /// (t-6877).
 fn asked_by(seat: &JevUse, mut row: Value) -> Value {
-    row["rubricVersion"] = json!(seat.rubric_versions[0]);
+    row["rubricVersion"] = json!(seat.rubric_version);
     row
 }
 
@@ -29,7 +29,7 @@ fn asked_by(seat: &JevUse, mut row: Value) -> Value {
 fn rise_of(seat: &JevUse, at: i64) -> Value {
     use zerocode_core::jev::promote::ROSE;
     use zerocode_core::jev::summary::TRANSITION;
-    json!({"at": at, (TRANSITION.canonical): ROSE, "rubricVersions": seat.rubric_versions})
+    json!({"at": at, (TRANSITION.canonical): ROSE, "rubricVersions": [seat.rubric_version]})
 }
 
 fn write(dir: &std::path::Path, name: &str, rows: &[Value]) {
@@ -377,7 +377,7 @@ fn the_routing_seat_reads_its_standing_from_the_ledger_it_writes() {
     assert!(super::super::decision_shadow::raised_at(&ledger));
     fs::write(
         &ledger,
-        format!("{}\n{}\n", rise_of(seat, 1), json!({"at": 2, (TRANSITION.canonical): FELL, "rubricVersions": seat.rubric_versions})),
+        format!("{}\n{}\n", rise_of(seat, 1), json!({"at": 2, (TRANSITION.canonical): FELL, "rubricVersions": [seat.rubric_version]})),
     )
     .expect("write");
     assert!(!super::super::decision_shadow::raised_at(&ledger), "a fall takes it back");
@@ -397,7 +397,7 @@ fn the_routing_seat_reads_its_standing_from_the_ledger_it_writes() {
         format!(
             "{}\n{}\n",
             rise_of(seat, 1),
-            json!({"at": 2, "outcome": "answered", "elapsedMs": 5, "rubricVersion": seat.rubric_versions[0] + 1})
+            json!({"at": 2, "outcome": "answered", "elapsedMs": 5, "rubricVersion": seat.rubric_version + 1})
         ),
     )
     .expect("write");
@@ -1161,9 +1161,9 @@ fn the_routing_judge_reads_the_current_rubrics_series_and_stands_on_nothing_olde
         row["rubricVersion"] = json!(rubric);
         row
     };
-    let mut rows: Vec<Value> = (0..wanted).map(|at| under(at, seat.rubric_versions[0] - 1)).collect();
+    let mut rows: Vec<Value> = (0..wanted).map(|at| under(at, seat.rubric_version - 1)).collect();
     rows.push(json!({"at": wanted, (TRANSITION.canonical): ROSE}));
-    rows.extend((0..20).map(|n| under(1_000 + n, seat.rubric_versions[0])));
+    rows.extend((0..20).map(|n| under(1_000 + n, seat.rubric_version)));
     let work = tempfile::tempdir().expect("tmp");
     let ledger = ledger_with(work.path(), &rows);
     assert_eq!(
@@ -1182,7 +1182,7 @@ fn the_routing_judge_reads_the_current_rubrics_series_and_stands_on_nothing_olde
 
     // Filled, the second rubric's window is judged on its own rows: due,
     // and no longer holding for want of rows.
-    rows.extend((20..wanted).map(|n| under(1_000 + n, seat.rubric_versions[0])));
+    rows.extend((20..wanted).map(|n| under(1_000 + n, seat.rubric_version)));
     let ledger = ledger_with(work.path(), &rows);
     let verdict = super::super::decision_shadow::judge_ledger(&ledger, None, 9).expect("due on its own window");
     assert!(!matches!(verdict, Verdict::Keep | Verdict::Hold(Line::TooFewRows { .. })), "{verdict:?}");
@@ -1200,14 +1200,14 @@ fn the_routing_door_reads_a_fence_as_the_rows_do() {
     let work = tempfile::tempdir().expect("tmp");
     let ledger = work.path().join(zerocode_core::jev::ROUTING.ledger);
     let seat = &zerocode_core::jev::ROUTING;
-    let newer = seat.rubric_versions[0] + 1;
+    let newer = seat.rubric_version + 1;
     let lines: [(String, bool); 6] = [
         (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{newer}}}"#), false),
         (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion" :{newer}}}"#), false),
         (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{newer}.5}}"#), true),
         (format!(r#"{{"at":2,"label":"orphan","attempt":"a@1","rubricVersion":{newer},"agreed":true}}"#), true),
         (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{newer}"#), true),
-        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{}}}"#, seat.rubric_versions[0]), true),
+        (format!(r#"{{"at":2,"outcome":"answered","elapsedMs":5,"rubricVersion":{}}}"#, seat.rubric_version), true),
     ];
     for (line, raised) in lines {
         fs::write(&ledger, format!("{}\n{line}\n", rise_of(seat, 1))).expect("write");

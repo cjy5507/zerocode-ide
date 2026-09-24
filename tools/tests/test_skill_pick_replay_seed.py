@@ -36,10 +36,14 @@ def test_paired_gold_counts_fixes_and_harms():
 def test_ledger_reads_disagreement_and_unused_proxy_separately():
     with tempfile.TemporaryDirectory() as folder:
         root = Path(folder)
-        ledger = root / "project" / "state" / "smart-router" / "skill-search.jsonl"
-        ledger.parent.mkdir(parents=True)
-        ledger.write_text("\n".join(json.dumps(row) for row in [
+        # The suggestion's own ledger, and the search's it shared before (t-6877).
+        own = root / "project" / "state" / "smart-router" / "skill-suggestion.jsonl"
+        own.parent.mkdir(parents=True)
+        own.write_text("\n".join(json.dumps(row) for row in [
             {"at": 100, "agreed": False, "unusedLoad": True, "baselineUnusedLoad": True},
+        ]) + "\n")
+        shared = own.with_name("skill-search.jsonl")
+        shared.write_text("\n".join(json.dumps(row) for row in [
             {"at": 101, "agreed": True, "unusedLoad": False},
         ]) + "\n")
         result = MODULE.observed_labels(root, 100)

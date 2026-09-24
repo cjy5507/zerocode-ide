@@ -173,18 +173,22 @@ fn a_search_nothing_answered_says_which_rule_refused_it() {
 #[test]
 fn the_agreed_mark_says_whether_the_turn_loaded_what_the_search_named() {
     let named: Vec<String> = ["dataviz", "docx", "pdf"].into_iter().map(str::to_string).collect();
-    let agreed = label_row("docx", &named);
+    let request = SkillRequestName { task: 7, catalog: 11, at: 1_700_000_000_000 };
+    let agreed = label_row("docx", &named, request);
     assert!(agreed.agreed);
     assert_eq!(agreed.rank, Some(1));
-    let disagreed = label_row("second-brain", &named);
+    let disagreed = label_row("second-brain", &named, request);
     assert!(!disagreed.agreed);
     assert_eq!(disagreed.rank, None);
     // The judge reads the mark off the row without knowing anything about
-    // skills — it is the column every rising seat writes.
+    // skills — it is the column every rising seat writes — and the request
+    // it grades by the name and the time the row repeats (t-6877).
     let value = serde_json::to_value(&agreed).expect("a label row");
     assert_eq!(summary::AGREED.read(&value), Some(&json!(true)));
-    assert!(label_row("", &[]).agreed, "no suggestion followed by no load is a negative match");
-    assert!(!label_row("", &[String::from("docx")]).agreed,
+    assert_eq!(summary::LABEL.read(&value), Some(&json!("7:11")));
+    assert_eq!(summary::REQUEST_AT.read(&value), Some(&json!(1_700_000_000_000_u64)));
+    assert!(label_row("", &[], request).agreed, "no suggestion followed by no load is a negative match");
+    assert!(!label_row("", &[String::from("docx")], request).agreed,
         "a suggestion ignored by the turn must be able to say no");
 }
 
@@ -224,13 +228,14 @@ fn a_loaded_skill_with_no_following_tool_or_body_quote_is_an_unused_proxy() {
     assert_eq!(skill_used_after_load(&only_more_loading, "docx"), Some(false));
     assert_eq!(skill_used_after_load(&[], "docx"), None);
 
+    let request = SkillRequestName { task: 1, catalog: 2, at: 3 };
     let label = label_turn(PendingSuggestion {
         generation: 0,
         suggested: Some("docx".into()),
         loaded: Some("docx".into()),
         acting: false,
-        judged: true,
-    }, &idle);
+        judged: Some(request),
+    }, request, &idle);
     assert!(label.agreed);
     assert_eq!(label.baseline_loaded.as_deref(), Some("docx"));
     assert_eq!(label.unused_load, Some(true));
@@ -247,7 +252,7 @@ fn a_turn_whose_judgment_never_landed_writes_no_label() {
     let cwd = root.path().canonicalize().expect("a canonical root");
     turn_pending().lock().expect("pending lock").insert(
         cwd.clone(),
-        PendingSuggestion { generation: 0, suggested: None, loaded: None, acting: false, judged: false },
+        PendingSuggestion { generation: 0, suggested: None, loaded: None, acting: false, judged: None },
     );
     note_loaded_skill(&cwd, "docx");
     let unjudged = turn_pending()
@@ -258,16 +263,18 @@ fn a_turn_whose_judgment_never_landed_writes_no_label() {
     assert_eq!(unjudged.loaded.as_deref(), Some("docx"), "the early load is kept");
     assert!(judged_label(unjudged, &[]).is_none(), "no judgment, no label");
 
+    let request = SkillRequestName { task: 1, catalog: 2, at: 3 };
     let judged = PendingSuggestion {
         generation: 0,
         suggested: Some("docx".into()),
         loaded: Some("docx".into()),
         acting: false,
-        judged: true,
+        judged: Some(request),
     };
     let row = judged_label(judged, &[]).expect("the judged turn's label");
     assert!(row.agreed);
     assert_eq!(row.baseline_loaded.as_deref(), Some("docx"));
+    assert_eq!((row.label.as_str(), row.request_at), ("1:2", 3), "the label names the judgment it grades");
 }
 
 #[test]
@@ -282,7 +289,7 @@ fn a_late_judgment_of_an_ended_turn_does_not_label_the_next_turn() {
     let delayed_cwd = cwd.clone();
     super::super::patch_review::detach(async move {
         waiting.await.expect("release first judgment");
-        mark_pending_suggestion_judged(&delayed_cwd, first, Some("docx"));
+        mark_pending_suggestion_judged(&delayed_cwd, first, Some("docx"), SkillRequestName { task: 1, catalog: 2, at: 3 });
         landed.send(()).expect("signal settled judgment");
     });
 
@@ -295,13 +302,13 @@ fn a_late_judgment_of_an_ended_turn_does_not_label_the_next_turn() {
     let pending = turn_pending().lock().expect("pending lock");
     let current = pending.get(&cwd).expect("next turn pending");
     assert_eq!(current.generation, next);
-    assert!(!current.judged, "the next turn has received no judgment");
+    assert!(current.judged.is_none(), "the next turn has received no judgment");
     assert!(current.suggested.is_none());
     assert_eq!(current.loaded.as_deref(), Some("pdf"));
     assert!(LATE_SUGGESTION_JUDGMENTS.load(Ordering::Relaxed) > late_before);
     drop(pending);
     finish_turn_suggestion(&cwd, &[]);
-    assert!(!skill_search_path(&cwd).exists(), "neither turn gets a label row");
+    assert!(!skill_suggestion_path(&cwd).exists(), "neither turn gets a label row");
 }
 
 #[test]
@@ -315,7 +322,7 @@ fn a_judgment_that_lands_in_its_own_turn_still_labels_it() {
     let delayed_cwd = cwd.clone();
     super::super::patch_review::detach(async move {
         waiting.await.expect("release judgment");
-        mark_pending_suggestion_judged(&delayed_cwd, generation, Some("docx"));
+        mark_pending_suggestion_judged(&delayed_cwd, generation, Some("docx"), SkillRequestName { task: 1, catalog: 2, at: 3 });
         landed.send(()).expect("signal settled judgment");
     });
 
@@ -323,9 +330,10 @@ fn a_judgment_that_lands_in_its_own_turn_still_labels_it() {
     release.send(()).expect("release judgment");
     done.recv_timeout(Duration::from_secs(5)).expect("detached judgment completed");
     finish_turn_suggestion(&cwd, &[]);
-    let rows = super::super::jev_summary::read_rows(&skill_search_path(&cwd));
-    assert_eq!(rows.len(), 1);
+    let rows = super::super::jev_summary::read_rows(&skill_suggestion_path(&cwd));
+    assert_eq!(rows.len(), 1, "the suggestion's label goes to the suggestion's ledger (t-6877)");
     assert_eq!(summary::AGREED.read(&rows[0]), Some(&json!(true)));
+    assert!(!skill_search_path(&cwd).exists(), "and not to the search's");
 }
 
 /// The `agreed` mark shares a file with the rows it is about, so it has to be
@@ -335,23 +343,26 @@ fn a_judgment_that_lands_in_its_own_turn_still_labels_it() {
 fn a_label_row_is_not_counted_as_a_request() {
     let root = tempfile::tempdir().expect("a temp root");
     let held = candidates(1);
-    let mut answered = SkillSearchRow::new(key(&held), 1, 1, SKILL_OUTCOME_ANSWERED.to_string());
-    answered.at = 1_700_000_000_000;
     let ledger = root.path().join(SKILL_SEARCH_FILE);
-    append_shadow_row(&ledger, &answered, SHADOW_LEDGER_MAX_BYTES).expect("the search row");
-    for loaded in ["skill-000", "somewhere-else", "skill-000"] {
+    // Three searches, each labelled by the load that followed it — a label
+    // names the search it grades (t-6877), so three labels of one search
+    // would be one comparison, the newest.
+    for (n, loaded) in ["skill-000", "somewhere-else", "skill-000"].into_iter().enumerate() {
+        let mut answered = SkillSearchRow::new(key(&held), 1, 1, SKILL_OUTCOME_ANSWERED.to_string());
+        answered.at = 1_700_000_000_000 + n as u64;
+        append_shadow_row(&ledger, &answered, SHADOW_LEDGER_MAX_BYTES).expect("the search row");
         append_shadow_row(
             &ledger,
-            &label_row(loaded, &["skill-000".to_string()]),
+            &label_row(loaded, &["skill-000".to_string()], SkillRequestName::of(&answered)),
             SHADOW_LEDGER_MAX_BYTES,
         )
         .expect("a label row");
     }
     let rows = super::super::jev_summary::read_rows(&ledger);
-    assert_eq!(rows.len(), 4, "the file holds both kinds");
+    assert_eq!(rows.len(), 6, "the file holds both kinds");
     let tally = summary::summarize(&rows, 0);
-    assert_eq!(tally.rows, 1, "one request, three labels");
-    assert_eq!(tally.answered, 1);
+    assert_eq!(tally.rows, 3, "three requests, three labels");
+    assert_eq!(tally.answered, 3);
     // And the judge still reads every mark.
     let judged = zerocode_core::jev::promote::judge_seat(&SKILLS, &rows).expect("a rising seat");
     assert_eq!(judged.agreement.compared, 3);
@@ -542,6 +553,47 @@ fn a_rise_decided_on_two_questions_stands_for_neither() {
     )
     .expect("a rise");
     assert!(runtime::jev_seat_applies(&cwd, &SKILLS), "a rise naming the search's words alone stands");
+}
+
+/// The suggestion rises on its own ledger and names its rubric, and the
+/// search's ledger says nothing about it (t-6877 round 2, astra R3): the
+/// search's window, marks and rise on the search's ledger and nothing on
+/// the suggestion's — the suggestion's cached `auto`, read where the turn
+/// boundary reads it, records. Its own window and marks on its own ledger
+/// take it up through the one judge, and the rise it writes names its
+/// words alone.
+#[test]
+fn the_suggestion_rises_on_its_own_ledger_and_stands_on_nothing_of_the_searchs() {
+    use zerocode_core::jev::promote::{Verdict, ROSE};
+    use zerocode_core::jev::summary::TRANSITION;
+    let root = tempfile::tempdir().expect("a temp root");
+    let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 temp root"));
+    let cwd = root.path().canonicalize().expect("a canonical root");
+    let mut search = skills_window_that_rises(&SKILLS, SKILLS.rubric_version, 1, 0);
+    search.push(json!({"at": 5_000, (TRANSITION.canonical): ROSE, "rubricVersions": [SKILLS.rubric_version]}));
+    ledger_with(&skill_search_path(&cwd), &search);
+    assert!(runtime::jev_seat_applies(&cwd, &SKILLS));
+    assert!(
+        !runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION),
+        "the search's rise is not the suggestion's, and the suggestion has no ledger yet"
+    );
+    // Twenty of the suggestion's own: not a window, nothing judged.
+    let thin: Vec<Value> = (0..20).map(|n| skills_request(10_000 + n, 1_000 + n, SKILL_SUGGESTION.rubric_version)).collect();
+    let ledger = skill_suggestion_path(&cwd);
+    ledger_with(&ledger, &thin);
+    assert_eq!(super::super::shadow_ledger::judge_seat_ledger(&SKILL_SUGGESTION, &ledger, 99_999), None);
+    assert!(!runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION));
+    // Its own full window and marks: judged, and up.
+    std::fs::remove_file(&ledger).expect("start over");
+    ledger_with(&ledger, &skills_window_that_rises(&SKILL_SUGGESTION, SKILL_SUGGESTION.rubric_version, 1_000, 10_000));
+    let verdict = super::super::shadow_ledger::judge_seat_ledger(&SKILL_SUGGESTION, &ledger, 99_999);
+    assert_eq!(verdict, Some(Verdict::Rise), "the suggestion's own window and marks");
+    let rows = super::super::jev_summary::read_rows(&ledger);
+    let written: Vec<&Value> = rows.iter().filter(|row| TRANSITION.read(row).is_some()).collect();
+    assert_eq!(written.len(), 1);
+    assert_eq!(written[0]["rubricVersions"], json!([SKILL_SUGGESTION.rubric_version]), "the rise names the suggestion's words");
+    assert!(runtime::jev_seat_applies(&cwd, &SKILL_SUGGESTION));
+    assert!(runtime::jev_seat_applies(&cwd, &SKILLS), "and the search stands where it stood");
 }
 
 /// The search's ledger the two questions were written into before they

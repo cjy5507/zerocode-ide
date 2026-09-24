@@ -664,6 +664,9 @@ struct ShownPath {
 /// The last reading settled for one attempt: the judgment's order, which the
 /// seat's mark grades.
 struct Settled {
+    /// When the reading's row was made — the label's `requestAt`, so it
+    /// grades this asking of `query` over `notes` and no other (t-6877).
+    at: u64,
     query: u64,
     notes: u64,
     applied: bool,
@@ -785,7 +788,8 @@ fn note_settled(slot: &ReadingSlot, row: &RerankShadowRow, hits: &[MemoryHit]) {
     }
     let recall_first = hits.first().map(|hit| (hit.entry.slug.clone(), hit.entry.path.clone()));
     if let Ok(mut reading) = slot.lock() {
-        reading.settled = Some(Settled { query: row.query, notes: row.notes, applied: row.applied, proposed, recall_first });
+        reading.settled =
+            Some(Settled { at: row.at, query: row.query, notes: row.notes, applied: row.applied, proposed, recall_first });
     }
 }
 
@@ -818,6 +822,16 @@ pub struct RerankLabelRow {
     /// The reading this row grades, spelled `<query>:<notes>` — the two
     /// fingerprints the answered row is named by.
     pub label: String,
+    /// When the reading this row grades was asked — its row's time, which
+    /// the settled reading carries (`zerocode_core::jev::summary::REQUEST_AT`,
+    /// t-6877): the same words asked over the same notes again carry the
+    /// same name, and the judge joins a label to one asking by the time.
+    /// Never the showing's time (`shown_at`), which is when the model was
+    /// shown the notes and not when the reading was asked. Absent on a row
+    /// that grades no settled reading, and on every row from before t-6877:
+    /// such a row grades no asking.
+    #[serde(default, rename = "requestAt", skip_serializing_if = "Option::is_none")]
+    pub request_at: Option<u64>,
     pub query: u64,
     pub notes: u64,
     pub applied: bool,
@@ -954,6 +968,7 @@ fn label_row(reading: &Reading) -> RerankLabelRow {
     let mut row = RerankLabelRow {
         at: unix_millis(),
         label: format!("{query}:{notes}"),
+        request_at: graded.map(|settled| settled.at),
         query,
         notes,
         applied: false,
@@ -3012,6 +3027,7 @@ mod tests {
         RerankLabelRow {
             at: 1_000 + at,
             label: format!("{at}:{at}"),
+            request_at: None,
             query: at,
             notes: at,
             applied: false,
@@ -3113,6 +3129,7 @@ mod tests {
         let row = |vault: Option<u64>, shown: Vec<ShownNote>| RerankLabelRow {
             at: 1,
             label: "1:1".to_string(),
+            request_at: None,
             query: 1,
             notes: 1,
             applied: false,

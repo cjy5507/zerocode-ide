@@ -228,8 +228,8 @@ pub(crate) fn execute_skill_search(
     // JUDGMENT gave are remembered before any skill is loaded — not the ones
     // the turn was handed, which under a recording mode are the word match's
     // and say nothing about the seat.
-    if let Some(judged) = searched.judged_names.as_deref() {
-        crate::misc_tools::note_search_answer(cwd, judged);
+    if let (Some(judged), Some(request)) = (searched.judged_names.as_deref(), searched.judged_request) {
+        crate::misc_tools::note_search_answer(cwd, judged, request);
     }
 
     let mut skills = Vec::new();

@@ -139,6 +139,19 @@ pub const LABEL: LedgerKey = LedgerKey {
     canonical: "label",
     also: &[],
 };
+/// When the request a label row grades was made — that request row's
+/// [`AT`], copied by the writer that knows which request it graded
+/// (t-6877). A name alone ([`LABEL`]) picks out one request only while it
+/// is asked once: the recall and mention seats name a request by the
+/// fingerprints of what was asked, and the same words asked again carry
+/// the same name. With the time beside the name a label grades one
+/// occurrence of a request and no other; a label that carries none joins
+/// a name only while exactly one request on the ledger carries it
+/// ([`crate::jev::promote::on_the_newest_version`]).
+pub const REQUEST_AT: LedgerKey = LedgerKey {
+    canonical: "requestAt",
+    also: &[],
+};
 /// Why a row that grades a request carries no [`AGREED`] mark, as a word —
 /// the side of the comparison that had nothing to say (t-6342).
 ///
@@ -207,7 +220,7 @@ pub const CONTROL_KIND: LedgerKey = LedgerKey {
 };
 
 /// The version of the words that asked a request — the seat's rubric as its
-/// row names it ([`crate::jev::JevUse::rubric_versions`]), written by the
+/// row names it ([`crate::jev::JevUse::rubric_version`]), written by the
 /// writer that asked, on every request and control row. Read by the judge
 /// to keep one rubric's evidence apart from another's (t-6877): a request
 /// asked under other words answered another question, and its answer, its
@@ -248,6 +261,7 @@ pub const LEDGER_KEYS: &[LedgerKey] = &[
     APPLIED,
     PRESSED,
     LABEL,
+    REQUEST_AT,
     NOT_COMPARED,
     BASELINE_AGREED,
     MODEL,

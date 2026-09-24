@@ -1485,7 +1485,7 @@ fn the_agent_tool_seat_names_the_wires_bounds_and_never_rises() {
     );
     assert_eq!(AGENT_TOOL_DEADLINE_MS, SKILL_SEARCH_APPLY_DEADLINE_MS);
     assert_eq!(AGENT_TOOL_ASK_OPTIONS, ["yes", "no"]);
-    assert_eq!(JEV_USES.len(), 25);
+    assert_eq!(JEV_USES.len(), 26);
 }
 
 /// The branching seat (t-6044) forks one phone step — the emulator seat's
@@ -1787,7 +1787,7 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.sends[2].cap, Cap::Uncut);
     assert_eq!(FILE_PICK.sends[3].at, "/state/files/*/about");
     assert_eq!(FILE_PICK.sends[3].cap, Cap::Bytes(200));
-    assert_eq!(JEV_USES.len(), 25);
+    assert_eq!(JEV_USES.len(), 26);
     assert_eq!(JEV_USES.get(JEV_USES.len() - 3), Some(&FILE_PICK));
 }
 
@@ -2168,10 +2168,11 @@ fn a_seat_that_never_rises_names_no_apply_wall() {
 }
 
 /// Every seat's row names the words it asks now and how its labels name a
-/// request (t-6877): at least one rubric version, each a version (never
-/// zero, never twice), and naming keys that are plain words — the judge
-/// reads a seat's ledger as one rubric's series by these two columns, and
-/// a row that named none would be a seat the judge could not read.
+/// request (t-6877): one rubric version — a version, never zero — and
+/// naming keys that are plain words. The judge reads a seat's ledger as
+/// one rubric's series by these two columns; a seat is one question, so no
+/// two seats write one ledger, and the skills seat's two questions are two
+/// rows, each pointing at the constant its writer stamps.
 #[test]
 fn every_seat_names_its_rubric_and_how_its_labels_name_a_request() {
     use crate::jev::questions::UNVERSIONED_RUBRIC;
@@ -2180,20 +2181,8 @@ fn every_seat_names_its_rubric_and_how_its_labels_name_a_request() {
         "a row that names no version is the first rubric's"
     );
     for row in &JEV_USES {
-        assert!(!row.rubric_versions.is_empty(), "{}: asks no words", row.id);
-        let mut versions = row.rubric_versions.to_vec();
-        versions.sort_unstable();
-        versions.dedup();
-        assert_eq!(
-            versions.len(),
-            row.rubric_versions.len(),
-            "{}: names a version twice",
-            row.id
-        );
         assert!(
-            versions
-                .iter()
-                .all(|version| *version >= UNVERSIONED_RUBRIC),
+            row.rubric_version >= UNVERSIONED_RUBRIC,
             "{}: zero is not a version",
             row.id
         );
@@ -2205,26 +2194,32 @@ fn every_seat_names_its_rubric_and_how_its_labels_name_a_request() {
             );
         }
     }
-    // The one seat that asks two questions into one ledger, and the rows
-    // that point at the constants their writers stamp.
     assert_eq!(
-        SKILLS.rubric_versions,
-        &[
-            questions::SKILL_SEARCH_RUBRIC_VERSION,
-            questions::SKILL_SUGGESTION_RUBRIC_VERSION
-        ]
+        SKILLS.rubric_version,
+        questions::SKILL_SEARCH_RUBRIC_VERSION
     );
     assert_eq!(
-        TOOL_TEXT_GUARD.rubric_versions,
-        &[questions::TOOL_TEXT_GUARD_RUBRIC_VERSION]
+        SKILL_SUGGESTION.rubric_version,
+        questions::SKILL_SUGGESTION_RUBRIC_VERSION
+    );
+    assert_ne!(
+        SKILLS.rubric_version, SKILL_SUGGESTION.rubric_version,
+        "two questions, two rubrics"
+    );
+    assert_ne!(SKILLS.ledger, SKILL_SUGGESTION.ledger, "and two ledgers");
+    assert_eq!(SKILLS.sends, SKILL_SUGGESTION.sends, "cut at one door");
+    assert_eq!(SKILLS.request_name, &["task", "catalog"]);
+    assert_eq!(SKILL_SUGGESTION.request_name, SKILLS.request_name);
+    assert_eq!(
+        TOOL_TEXT_GUARD.rubric_version,
+        questions::TOOL_TEXT_GUARD_RUBRIC_VERSION
     );
     assert_eq!(TOOL_TEXT_GUARD.request_name, &["judged"]);
-    assert_eq!(
-        ROUTING.rubric_versions,
-        &[questions::ROUTING_RUBRIC_VERSION]
-    );
+    assert_eq!(ROUTING.rubric_version, questions::ROUTING_RUBRIC_VERSION);
     assert_eq!(RECALL.request_name, &["query", "notes"]);
-    for row in JEV_USES.iter().filter(|row| row.rubric_versions.len() > 1) {
-        assert_eq!(row.id, SKILLS.id, "only the skills seat asks two questions");
-    }
+    assert_eq!(
+        ZO_STEP_EFFORT.request_name,
+        &["attempt", "step"],
+        "a progress mark names the judgment it grades by the turn and the step it was asked at"
+    );
 }

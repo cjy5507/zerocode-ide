@@ -116,8 +116,8 @@ pub use mention_rerank::{
 };
 pub use skill_search::{
     note_loaded_skill, note_search_answer, search as skill_search,
-    skill_search_path, Chosen, Searched, SkillLabelRow, SkillSearchRow, SkillSuggestionJudge, SKILL_OUTCOME_ANSWERED,
-    SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE,
+    skill_search_path, Chosen, Searched, SkillLabelRow, SkillRequestName, SkillSearchRow,
+    SkillSuggestionJudge, SKILL_OUTCOME_ANSWERED, SKILL_SEARCH_DEADLINE, SKILL_SEARCH_FILE,
 };
 pub use shadow_ledger::read_shadow_rows;
 pub use step_effort::{
@@ -138,7 +138,7 @@ pub use settings::{
     skill_search_mode_from, DecisionShadowMode, AGENT_TOOL_SETTING, DECISION_SHADOW_SETTING,
     JEV_CHALLENGER_SETTING, JEV_COMMAND_GUARD_SETTING, JEV_COMPACTION_SETTING, JEV_FILE_PICK_SETTING,
     JEV_MENTION_RERANK_SETTING, JEV_PATCH_REVIEW_SETTING, JEV_TOOL_TEXT_GUARD_SETTING,
-    RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING,
+    RERANK_SHADOW_SETTING, SKILL_SEARCH_SETTING, SKILL_SUGGESTION_SETTING,
     conversation_anchor_ttl_for, conversation_anchor_ttl_from_root, CACHE_ANCHOR_TTL_ENV,
     smart_deep_tier_models, smart_deep_tier_models_for, smart_exec_swap, smart_setting_defaults,
     smart_turn_routing_and_inventory_for, smart_turn_routing_for, DeepTierModelsSetting,

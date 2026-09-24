@@ -439,29 +439,33 @@ pub struct JevUse {
     /// ([`ConfidenceBands`], t-6342). Recorded, not yet read. `None` for a
     /// seat that never rises.
     pub confidence_bands: Option<ConfidenceBands>,
-    /// The versions of the words this use asks now (t-6877) — the
+    /// The version of the words this use asks now (t-6877) — the
     /// `*_RUBRIC_VERSION` its writer stamps on every request row
     /// ([`summary::RUBRIC_VERSION`]), named here by that constant and never
-    /// by a number of the row's own. One for every seat but the skills
-    /// seat, which asks two questions into one ledger. The judge reads a
-    /// seat's ledger as this rubric's series alone
+    /// by a number of the row's own. One version for one seat: a seat is
+    /// one question, and two questions asked into one ledger were two seats
+    /// counted as one (the skills seat, until this column was one number —
+    /// its turn-boundary suggestion is [`SKILL_SUGGESTION`] now). The judge
+    /// reads a seat's ledger as this rubric's series alone
     /// ([`promote::on_the_newest_version`]): a request asked under other
     /// words, the marks that grade it and the rise they earned are another
     /// question's evidence, and a seat whose words moved on records again
     /// until its own words have earned their place. A seat whose writer has
     /// never versioned its words asks [`questions::UNVERSIONED_RUBRIC`],
     /// which is what a row that names none is read as.
-    pub rubric_versions: &'static [u32],
+    pub rubric_version: u32,
     /// The keys a request row of this use carries its own name under — what
     /// a label row repeats under [`summary::LABEL`] to say which request it
     /// grades, joined by `:` when there are two (`query:notes`). The judge
-    /// joins a label to its request by it (t-6877): the request's rubric is
-    /// the label's, a label that names no request on the ledger grades
-    /// nothing, and of two labels naming one request the newest counts.
-    /// Empty for a use whose marks sit on the request row itself, whose
-    /// labels name no request (the skills seat's, the step seat's), or
-    /// that writes none: such a label is read as the rubric that was asking
-    /// when it was written, and as a window's by its own time.
+    /// joins a label to its request by it and by the request's time when
+    /// the label carries it ([`summary::REQUEST_AT`], t-6877): the request
+    /// is the authority on the label's rubric and on the version that
+    /// answered it, a label that names no request — none on the ledger, or
+    /// more than one it could mean — grades nothing, and of two labels
+    /// naming one request the newest counts. Empty for a use whose marks
+    /// sit on the request row itself (the screen seats', the summons') or
+    /// that writes none: a label row of such a use names nothing and grades
+    /// nothing.
     pub request_name: &'static [&'static str],
 }
 
@@ -878,7 +882,7 @@ pub const ROUTING: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
-    rubric_versions: &[questions::ROUTING_RUBRIC_VERSION],
+    rubric_version: questions::ROUTING_RUBRIC_VERSION,
     request_name: &["attempt"],
 };
 
@@ -1034,7 +1038,7 @@ pub const RECALL: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
-    rubric_versions: &[questions::RECALL_RUBRIC_VERSION],
+    rubric_version: questions::RECALL_RUBRIC_VERSION,
     request_name: &["query", "notes"],
 };
 
@@ -1140,7 +1144,7 @@ pub const BROWSER: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
-    rubric_versions: &[crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION],
+    rubric_version: crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION,
     request_name: &[],
 };
 
@@ -1184,7 +1188,7 @@ pub const DESKTOP: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
-    rubric_versions: &[crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION],
+    rubric_version: crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION,
     request_name: &[],
 };
 
@@ -1225,7 +1229,7 @@ pub const EMULATOR: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
-    rubric_versions: &[crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION],
+    rubric_version: crate::screen_action::SCREEN_ACTION_RUBRIC_VERSION,
     request_name: &[],
 };
 
@@ -1263,7 +1267,7 @@ pub const STALL: JevUse = JevUse {
     baseline: Baseline::AlwaysSame(crate::stall_cause::Cause::LongRunningTool.word()),
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
-    rubric_versions: &[crate::stall_cause::STALL_CAUSE_RUBRIC_VERSION],
+    rubric_version: crate::stall_cause::STALL_CAUSE_RUBRIC_VERSION,
     request_name: &["stall"],
 };
 
@@ -1365,7 +1369,7 @@ pub const PLACEMENT: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
-    rubric_versions: &[crate::worker_placement::WORKER_PLACEMENT_RUBRIC_VERSION],
+    rubric_version: crate::worker_placement::WORKER_PLACEMENT_RUBRIC_VERSION,
     request_name: &["placement"],
 };
 
@@ -1462,7 +1466,7 @@ pub const SUMMON: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
-    rubric_versions: &[crate::summon_choice::SUMMON_CHOICE_RUBRIC_VERSION],
+    rubric_version: crate::summon_choice::SUMMON_CHOICE_RUBRIC_VERSION,
     request_name: &[],
 };
 
@@ -1533,7 +1537,7 @@ pub const STEP_EFFORT: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
-    rubric_versions: &[crate::step_effort::STEP_EFFORT_RUBRIC_VERSION],
+    rubric_version: crate::step_effort::STEP_EFFORT_RUBRIC_VERSION,
     request_name: &["move"],
 };
 
@@ -1660,7 +1664,58 @@ pub const SKILL_AGREEMENT_FLOOR_PERMILLE: u16 = 800;
 /// what the word match ranked and says so on the row.
 pub const SKILL_SEARCH_APPLY_DEADLINE_MS: u64 = 10_000;
 
-/// zo's skill search and turn-start suggestion (t-5629, t-6347).
+/// What both skills seats send off the machine, cut where the door cuts it
+/// (t-6877): the task, and each installed skill's name and description —
+/// the explicit search's whole catalog in shards, the turn-start
+/// suggestion's catalog in one request and then three shortlisted skills'
+/// first 700 characters of SKILL.md. One list for two seats, because the
+/// two questions read the same catalog and a cap named twice is a cap that
+/// drifts.
+const SKILL_SENDS: &[Sent] = &[
+    Sent {
+        at: "/state/task",
+        cap: Cap::Chars(SKILL_TASK_CHAR_CAP),
+    },
+    Sent {
+        at: "/state/skills",
+        cap: Cap::Items(SKILL_SUGGESTION_CATALOG_CAP),
+    },
+    Sent {
+        at: "/state/skills/*/name",
+        cap: Cap::Uncut,
+    },
+    Sent {
+        at: "/state/skills/*/description",
+        cap: Cap::Chars(SKILL_DESCRIPTION_CHAR_CAP),
+    },
+    Sent {
+        at: "/state/candidates",
+        cap: Cap::Items(SKILL_SUGGESTION_SHORTLIST),
+    },
+    Sent {
+        at: "/state/candidates/*/excerpt",
+        cap: Cap::Chars(SKILL_EXCERPT_CHAR_CAP),
+    },
+    Sent {
+        at: "/state/candidates/*/description",
+        cap: Cap::Chars(SKILL_DESCRIPTION_CHAR_CAP),
+    },
+    Sent {
+        at: "/questions/which/criteria/*",
+        cap: Cap::Chars(SKILL_DETAIL_CHAR_CAP),
+    },
+    Sent {
+        at: "/questions/*/instructions",
+        cap: Cap::Chars(SKILL_FITS_INSTRUCTIONS_CHAR_CAP),
+    },
+];
+
+/// The keys a skills request row carries its name under, and a label of
+/// either skills seat repeats (t-6877): the fingerprint of the task and the
+/// fingerprint of the catalog it was ranked against.
+const SKILL_REQUEST_NAME: &[&str] = &["task", "catalog"];
+
+/// zo's skill search (t-5629): the `skill_search` tool an agent calls.
 ///
 /// The seat exists to take the skill index out of the system prompt. Today
 /// every installed skill's name and compacted description is rendered on
@@ -1675,54 +1730,19 @@ pub const SKILL_SEARCH_APPLY_DEADLINE_MS: u64 = 10_000;
 /// `shadow` leaves the index exactly where it is and records what the search
 /// would have handed back, which is what makes the two readable side by side.
 ///
-/// The first turn-start request sends the task and each installed skill's name
-/// and description. When the gate says a skill may help, a second request
-/// sends the first 700 characters of three shortlisted SKILL.md files under
-/// the same switch. The full body remains local and is read by Skill only.
+/// The turn-start suggestion that once shared this row's ledger and standing
+/// is a seat of its own ([`SKILL_SUGGESTION`], t-6877): it asks other words
+/// ([`questions::SKILL_SUGGESTION_RUBRIC_VERSION`] against this seat's
+/// [`questions::SKILL_SEARCH_RUBRIC_VERSION`]), and a seat is judged on one
+/// question's evidence and stands on its own — a rise the search earned is
+/// not a rise for the suggestion, nor the other way round.
 pub const SKILLS: JevUse = JevUse {
     id: "skills",
     setting: "skillSearch",
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
     repeat: None,
-    sends: &[
-        Sent {
-            at: "/state/task",
-            cap: Cap::Chars(SKILL_TASK_CHAR_CAP),
-        },
-        Sent {
-            at: "/state/skills",
-            cap: Cap::Items(SKILL_SUGGESTION_CATALOG_CAP),
-        },
-        Sent {
-            at: "/state/skills/*/name",
-            cap: Cap::Uncut,
-        },
-        Sent {
-            at: "/state/skills/*/description",
-            cap: Cap::Chars(SKILL_DESCRIPTION_CHAR_CAP),
-        },
-        Sent {
-            at: "/state/candidates",
-            cap: Cap::Items(SKILL_SUGGESTION_SHORTLIST),
-        },
-        Sent {
-            at: "/state/candidates/*/excerpt",
-            cap: Cap::Chars(SKILL_EXCERPT_CHAR_CAP),
-        },
-        Sent {
-            at: "/state/candidates/*/description",
-            cap: Cap::Chars(SKILL_DESCRIPTION_CHAR_CAP),
-        },
-        Sent {
-            at: "/questions/which/criteria/*",
-            cap: Cap::Chars(SKILL_DETAIL_CHAR_CAP),
-        },
-        Sent {
-            at: "/questions/*/instructions",
-            cap: Cap::Chars(SKILL_FITS_INSTRUCTIONS_CHAR_CAP),
-        },
-    ],
+    sends: SKILL_SENDS,
     ledger: "skill-search.jsonl",
     promotes: true,
     answer_floor_permille: Some(SKILL_ANSWER_FLOOR_PERMILLE),
@@ -1738,11 +1758,50 @@ pub const SKILLS: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
-    rubric_versions: &[
-        questions::SKILL_SEARCH_RUBRIC_VERSION,
-        questions::SKILL_SUGGESTION_RUBRIC_VERSION,
-    ],
-    request_name: &[],
+    rubric_version: questions::SKILL_SEARCH_RUBRIC_VERSION,
+    request_name: SKILL_REQUEST_NAME,
+};
+
+/// zo's turn-start skill suggestion (t-6347): the two-stage question asked
+/// at the boundary of every turn, whether or not the agent ever searches.
+///
+/// The first request sends the task and each installed skill's name and
+/// description. When the gate says a skill may help, a second request sends
+/// the first 700 characters of three shortlisted SKILL.md files under the
+/// same switch. The full body remains local and is read by Skill only. `on`
+/// and a risen `auto` hand the turn a note naming the skill; `shadow` and
+/// a recording `auto` write the row and hand the turn nothing.
+///
+/// Its own row and its own ledger (t-6877): until then it wrote into the
+/// search's ledger under the search's switch, and the one judge read the
+/// two questions' rows as one series — the search's thick first-rubric
+/// sample would have carried the suggestion up, and a rise either earned
+/// stood for both. Its lines are the search's: the same floors, the same
+/// wall, the same window, because the two questions are asked of the same
+/// catalog and answered by the same door.
+pub const SKILL_SUGGESTION: JevUse = JevUse {
+    id: "skill_suggestion",
+    setting: "skillSuggestion",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    recommended: JevMode::Auto,
+    repeat: None,
+    sends: SKILL_SENDS,
+    ledger: "skill-suggestion.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(SKILL_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(SKILL_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(SKILL_SEARCH_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Comparison,
+    // The turn's first load, against what the suggestion named — the
+    // search's baseline, for the same reason.
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::LOW_STAKES),
+    rubric_version: questions::SKILL_SUGGESTION_RUBRIC_VERSION,
+    request_name: SKILL_REQUEST_NAME,
 };
 
 /// The wall zo's step effort governor holds a step judgment to, in
@@ -1804,8 +1863,11 @@ pub const ZO_STEP_EFFORT: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
-    rubric_versions: &[questions::UNVERSIONED_RUBRIC],
-    request_name: &[],
+    rubric_version: questions::UNVERSIONED_RUBRIC,
+    // A progress mark names the judgment it grades by the turn's attempt and
+    // the step that judgment was asked at (t-6877): the label's own `step`
+    // is the one the answer was consulted at, which is later.
+    request_name: &["attempt", "step"],
 };
 
 /// Characters of the person's last request one compaction judgment reads
@@ -1983,7 +2045,7 @@ pub const COMPACTION: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
-    rubric_versions: &[questions::COMPACTION_RUBRIC_VERSION],
+    rubric_version: questions::COMPACTION_RUBRIC_VERSION,
     request_name: &["judged"],
 };
 
@@ -2085,7 +2147,7 @@ pub const AGENT_TOOL: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: None,
     confidence_bands: None,
-    rubric_versions: &[questions::AGENT_TOOL_RUBRIC_VERSION],
+    rubric_version: questions::AGENT_TOOL_RUBRIC_VERSION,
     request_name: &[],
 };
 
@@ -2267,7 +2329,7 @@ pub const BROWSER_READ: JevUse = JevUse {
     baseline: Baseline::None,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(BROWSER_READ_FOLD_FLOOR_PERMILLE)),
-    rubric_versions: &[crate::browser_read::BROWSER_READ_RUBRIC_VERSION],
+    rubric_version: crate::browser_read::BROWSER_READ_RUBRIC_VERSION,
     request_name: &["read"],
 };
 
@@ -2436,7 +2498,7 @@ pub const NOTIFY: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
-    rubric_versions: &[crate::notify_call::NOTIFY_CALL_RUBRIC_VERSION],
+    rubric_version: crate::notify_call::NOTIFY_CALL_RUBRIC_VERSION,
     request_name: &["notify"],
 };
 
@@ -2562,7 +2624,7 @@ pub const MENTION_RERANK: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::LOW_STAKES),
-    rubric_versions: &[questions::MENTION_RERANK_RUBRIC_VERSION],
+    rubric_version: questions::MENTION_RERANK_RUBRIC_VERSION,
     request_name: &["query", "notes"],
 };
 
@@ -2742,7 +2804,7 @@ pub const BRANCHING: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
-    rubric_versions: &[crate::branching::BRANCHING_RUBRIC_VERSION],
+    rubric_version: crate::branching::BRANCHING_RUBRIC_VERSION,
     request_name: &[],
 };
 
@@ -2800,7 +2862,7 @@ pub const JUDGMENT_CACHE: JevUse = JevUse {
     negatives_wanted: Some(NEGATIVES_WANTED),
     // The screen seats' line: the answer it hands back is pressed under theirs.
     confidence_bands: Some(ConfidenceBands::pressing(SCREEN_PRESS_FLOOR_PERMILLE)),
-    rubric_versions: &[questions::UNVERSIONED_RUBRIC],
+    rubric_version: questions::UNVERSIONED_RUBRIC,
     request_name: &[],
 };
 
@@ -2954,7 +3016,7 @@ pub const CHALLENGER: JevUse = JevUse {
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
-    rubric_versions: &[questions::UNVERSIONED_RUBRIC],
+    rubric_version: questions::UNVERSIONED_RUBRIC,
     request_name: &[challenger::ATTEMPT.canonical],
 };
 
@@ -3138,7 +3200,7 @@ pub const PATCH_REVIEW: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         PATCH_REVIEW_PERMIT_FLOOR_PERMILLE,
     )),
-    rubric_versions: &[questions::PATCH_REVIEW_RUBRIC_VERSION],
+    rubric_version: questions::PATCH_REVIEW_RUBRIC_VERSION,
     request_name: &["judged"],
 };
 
@@ -3201,7 +3263,7 @@ pub const CLAIM: JevUse = JevUse {
         abstain_below_permille: 600,
         act_from_permille: CLAIM_CHOICE_FLOOR_PERMILLE,
     }),
-    rubric_versions: &[questions::CLAIM_RUBRIC_VERSION],
+    rubric_version: questions::CLAIM_RUBRIC_VERSION,
     request_name: &["judged"],
 };
 
@@ -3272,7 +3334,7 @@ pub const VAULT_PAIRS: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         VAULT_PAIR_OPPOSITE_FLOOR_PERMILLE,
     )),
-    rubric_versions: &[questions::VAULT_PAIR_RUBRIC_VERSION],
+    rubric_version: questions::VAULT_PAIR_RUBRIC_VERSION,
     request_name: &[],
 };
 
@@ -3323,7 +3385,7 @@ pub const FILE_PICK: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         FILE_PICK_MATCH_FLOOR_PERMILLE,
     )),
-    rubric_versions: &[questions::FILE_PICK_RUBRIC_VERSION],
+    rubric_version: questions::FILE_PICK_RUBRIC_VERSION,
     request_name: &["judged"],
 };
 
@@ -3435,7 +3497,7 @@ pub const COMMAND_GUARD: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         COMMAND_GUARD_FLAG_FLOOR_PERMILLE,
     )),
-    rubric_versions: &[questions::COMMAND_GUARD_RUBRIC_VERSION],
+    rubric_version: questions::COMMAND_GUARD_RUBRIC_VERSION,
     request_name: &["judged"],
 };
 
@@ -3521,15 +3583,16 @@ pub const TOOL_TEXT_GUARD: JevUse = JevUse {
         NOUL_UNCERTAIN_TO_PERMILLE,
         TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE,
     )),
-    rubric_versions: &[questions::TOOL_TEXT_GUARD_RUBRIC_VERSION],
+    rubric_version: questions::TOOL_TEXT_GUARD_RUBRIC_VERSION,
     request_name: &["judged"],
 };
 
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 25] = [
+pub static JEV_USES: [JevUse; 26] = [
     ROUTING,
     RECALL,
     SKILLS,
+    SKILL_SUGGESTION,
     BROWSER,
     DESKTOP,
     EMULATOR,
