@@ -552,7 +552,7 @@ impl Shot {
 /// routing seat's baseline, today's rule (t-6342) — in the tokens a probe
 /// cell and a judged axis carry, so a later fact grades all three on one
 /// spelling.
-fn todays_rule(description: &str, prompt: &str) -> BTreeMap<String, String> {
+pub(super) fn todays_rule(description: &str, prompt: &str) -> BTreeMap<String, String> {
     let (complexity, risk, intent) = super::turn::todays_rule(description, prompt);
     ProbeAssessment { complexity, risk, confidence: RouteConfidence::Low, intent }
         .tokens()

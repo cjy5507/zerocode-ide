@@ -389,6 +389,16 @@ fn turn_gate(read: BandRead) -> &'static TurnGate {
     TURN_GATES.iter().find(|gate| gate.read == read).unwrap_or(&NOBODY)
 }
 
+/// Whether the chat probe's own gate admits a turn's words by band — its
+/// cost gate alone, before a reader is asked about (the routing replay reads
+/// the probe's calls by it).
+#[cfg(test)]
+pub(super) fn probe_gate_admits(user_text: &str) -> bool {
+    let input = TaskMetadataInput::new(None, "", user_text);
+    let metadata = classify_task_metadata(&input, infer_route_role(None, "", user_text));
+    turn_gate(band_read(metadata.complexity, &input, user_text)).probe != ProbeAdmission::Declined
+}
+
 /// How the tables read a turn: the band, and for a `Medium` whether an
 /// implementation verb put it there without a design mention.
 fn band_read(
