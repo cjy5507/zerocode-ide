@@ -273,7 +273,9 @@ fn a_turn_whose_judgment_never_landed_writes_no_label() {
 #[test]
 fn a_late_judgment_of_an_ended_turn_does_not_label_the_next_turn() {
     let root = tempfile::tempdir().expect("a temp root");
+    let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 temp root"));
     let cwd = root.path().canonicalize().expect("a canonical root");
+    let late_before = LATE_SUGGESTION_JUDGMENTS.load(Ordering::Relaxed);
     let first = start_pending_suggestion(&cwd, false).expect("first turn");
     let (release, waiting) = tokio::sync::oneshot::channel::<()>();
     let (landed, done) = std::sync::mpsc::channel();
@@ -286,6 +288,7 @@ fn a_late_judgment_of_an_ended_turn_does_not_label_the_next_turn() {
 
     finish_turn_suggestion(&cwd, &[]);
     let next = start_pending_suggestion(&cwd, false).expect("next turn");
+    note_loaded_skill(&cwd, "pdf");
     release.send(()).expect("release judgment");
     done.recv_timeout(Duration::from_secs(5)).expect("detached judgment completed");
 
@@ -294,6 +297,8 @@ fn a_late_judgment_of_an_ended_turn_does_not_label_the_next_turn() {
     assert_eq!(current.generation, next);
     assert!(!current.judged, "the next turn has received no judgment");
     assert!(current.suggested.is_none());
+    assert_eq!(current.loaded.as_deref(), Some("pdf"));
+    assert!(LATE_SUGGESTION_JUDGMENTS.load(Ordering::Relaxed) > late_before);
     drop(pending);
     finish_turn_suggestion(&cwd, &[]);
     assert!(!skill_search_path(&cwd).exists(), "neither turn gets a label row");
@@ -302,6 +307,7 @@ fn a_late_judgment_of_an_ended_turn_does_not_label_the_next_turn() {
 #[test]
 fn a_judgment_that_lands_in_its_own_turn_still_labels_it() {
     let root = tempfile::tempdir().expect("a temp root");
+    let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 temp root"));
     let cwd = root.path().canonicalize().expect("a canonical root");
     let generation = start_pending_suggestion(&cwd, false).expect("turn");
     let (release, waiting) = tokio::sync::oneshot::channel::<()>();
