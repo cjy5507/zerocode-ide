@@ -5257,6 +5257,14 @@ function paintAgentGraphInspector(view, model) {
         agentGraphDetailField(t("board.graph.retryOf", "이전 시도"), subject.place.retryOf),
         agentGraphBacktraceNode(subject, full),
       ].filter(Boolean) : [];
+      /* 이 창이 판을 들고 있지 않은 워커는 **누가 불렀는지**를 말할 수 없다
+       * (t-7288): `WorkerRow.started_by`가 이 판에 오지 않으므로, 부모가
+       * 없다는 뜻이 아니라 모른다는 뜻이다. 빈칸으로 두면 「아무도 부르지
+       * 않았다」로 읽힌다. */
+      if (agentGraphLiveOn() && subject && !subject.card.parent
+          && subject.card.pane.startsWith("worker:")) {
+        nodes.push(taskBoardElement("p", "agent-relation-note", agentGraphLiveUnknownWord("summoner")));
+      }
       if (subject?.card.agent === "zo") nodes.push(zoIntegrationNode(subject.card.pane));
       parts.details.replaceChildren(...nodes);
     }
@@ -6942,6 +6950,9 @@ function paintAgentGraph(view, model) {
   const taskMode = agentBoardMode === "tasks";
   model = taskMode ? full : agentGraphScopedModel(view, full);
   view.classList.toggle("is-task-board", taskMode);
+  /* 실시간 지도는 관계 그림 위의 것이다 (t-7288). 작업 목록으로 돌아간 판에서
+   * 이 클래스를 남겨 두면 지도가 없는 판이 지도가 선 판의 옷을 입는다. */
+  view.classList.toggle("is-live-map", !taskMode && agentGraphLiveOn());
   view.classList.toggle("is-scoped-relations", !taskMode && agentGraphScopeKey !== "");
   view.classList.toggle("is-detailed-relations", agentGraphCardDetails);
   writeHidden(view.querySelector(".task-board-surface"), !taskMode);
@@ -7116,7 +7127,6 @@ function paintAgentGraph(view, model) {
       };
     }
   }
-  view.classList.toggle("is-live-map", agentGraphLiveOn());
   paintAgentGraphInspector(view, model);
   watchAgentGraphSize(view);
   wireAgentGraphCanvas(view);
@@ -7153,6 +7163,9 @@ let boardBroken = false;
  * 한 그림이 아니라 그리는 일이므로, 남은 그림을 반쯤 세워 두면 화면은 어느 쪽이
  * 지금인지 말하지 않는다. */
 function paintBoardBroken(view) {
+  /* 시계도 함께 내려놓는다 (t-7288): 그리는 일이 멈춘 판 위에서 맥박의
+   * 시계만 계속 도는 것은 없는 그림에 옷을 입히는 일이다. */
+  agentGraphLiveStop();
   // 부서진 판은 지난 그림의 기억도 버린다 — 남겨 두면 고쳐진 첫 판이 지난
   // 서명과 같아서 건너뛰고, 숨겨 둔 표면이 영영 다시 서지 않는다.
   delete view.dataset.said;

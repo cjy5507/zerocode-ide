@@ -27714,11 +27714,11 @@ input[type="search"]::-webkit-search-cancel-button {
  * 규칙인 이유가 그것이다: 아무 일도 없는 판에서 도는 점은 무언가 일어나는
  * 중이라고 말한다. */
 
-.board-view.is-live-map .agent-graph-edge.is-mail {
+.is-live-map .agent-graph-edge.is-mail {
   animation: none;
 }
 
-.board-view.is-live-map .agent-graph-mail-pulse {
+.is-live-map .agent-graph-mail-pulse {
   animation: none;
 }
 
@@ -29497,6 +29497,9 @@ input[type="search"]::-webkit-search-cancel-button {
 .is-task-board .agent-graph-run,
 .is-task-board .agent-graph-overlays,
 .is-task-board .agent-graph-follow,
+/* 실시간 지도의 손잡이도 관계 그림의 것이다 (t-7288): 작업 목록에는 그릴
+ * 지도가 없으므로 그 판에서는 서지 않는다 — 따라감·초점·범례와 같은 줄. */
+.is-task-board .agent-graph-live,
 .is-task-board .agent-graph-legend-toggle,
 .is-task-board .agent-graph-focus,
 .agent-graph-surface[hidden],

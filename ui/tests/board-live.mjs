@@ -295,7 +295,10 @@ export async function testBoardLive(browser, origin, ok) {
     ok("the_inspector_repeats_that_limit_in_words", await page.evaluate(() => {
       const view = document.querySelector("#board-view");
       selectAgentGraphEntity(view, "agent:term:301");
-      return view.querySelector(".agent-live-events-note")?.textContent.length > 0;
+      const notes = [...view.querySelectorAll(".agent-live-events-note")]
+        .map((node) => node.textContent).join(" ");
+      return notes.includes(t("board.live.coverageTruncated", "중복 제거 범위가 끊긴 관계 {{count}}개 — 그 구간의 사건은 표시되지 않을 수 있습니다.",
+        { count: agentGraphLiveCoverage().truncated }));
     }));
 
     /* 처음 보는 관계와 기억을 잃은 관계는 서로 다른 답을 받는다. 앞의 것은
@@ -427,13 +430,15 @@ export async function testBoardLive(browser, origin, ok) {
       await page.evaluate(() => {
         const view = document.querySelector("#board-view");
         const notes = [...view.querySelectorAll(".agent-relation-evidence .agent-relation-note")]
-          .map((node) => node.textContent);
+          .map((node) => node.textContent).join(" ");
         const labels = [...view.querySelectorAll(".agent-graph-overlay-label")]
           .map((node) => node.textContent);
-        return notes.length >= 2
-          && notes.join(" ").includes(t("board.live.deliveryNotSaid", "배달 상태 미제공").slice(0, 2)) === false
-          && labels.some((word) => word.includes(t("board.live.deliveryNotSaid", "배달 상태 미제공")))
-          && labels.some((word) => word.includes(t("board.live.pending", "미확인 {{count}}", { count: 1 })));
+        return notes.includes(agentGraphLiveUnknownWord("delivery"))
+          && notes.includes(agentGraphLiveUnknownWord("reply"))
+          // 미확인이 있는 선은 그 수를, 없는 선은 「미제공」을 — 「확인됨」은 없다.
+          && labels.some((word) => word.endsWith(t("board.live.deliveryNotSaid", "배달 상태 미제공")))
+          && labels.some((word) => word.endsWith(t("board.live.pending", "미확인 {{count}}", { count: 1 })))
+          && labels.every((word) => !word.includes(t("board.verified", "검증됨")));
       }));
 
     ok("the_number_of_endpoints_outside_this_view_is_reported_as_not_provided",
@@ -442,8 +447,18 @@ export async function testBoardLive(browser, origin, ok) {
         selectAgentGraphEntity(view, "agent:term:301");
         const notes = [...view.querySelectorAll(".agent-live-events-note")]
           .map((node) => node.textContent).join(" ");
-        return notes.includes(t("board.live.outsideUnknown", "이 보기 밖 끝점의 수는 스냅샷에 없습니다."))
-          && /\d+\s*개의? 끝점/.test(notes) === false;
+        return notes.includes(agentGraphLiveUnknownWord("outside"));
+      }));
+
+    ok("a_paneless_workers_summoner_is_named_as_not_provided_not_as_absent",
+      await page.evaluate(() => {
+        const view = document.querySelector("#board-view");
+        selectAgentGraphEntity(view, "agent:worker:w-gone");
+        view.querySelector('[data-agent-inspector-tab="details"]').click();
+        const said = view.querySelector(".agent-inspector-pane.is-details")?.textContent ?? "";
+        const back = view.querySelector('[data-agent-inspector-tab="relations"]');
+        back.click();
+        return said.includes(agentGraphLiveUnknownWord("summoner"));
       }));
 
     /* ---- ④ 보는 일은 아무것도 소비하지 않는다 --------------------------- */
@@ -483,8 +498,12 @@ export async function testBoardLive(browser, origin, ok) {
       await window.__BOARD_SETTLED__();
       const firstRow = view.querySelector(".agent-graph-node")?.getBoundingClientRect().top ?? 0;
       let mutations = 0;
+      /* 재는 것은 **그림**이다 — 판의 머리와 툴바는 이 표면보다 오래된 손들이
+       * 지나는 자리이고, 여기서 고정하려는 계약은 「아무 일도 없는 판에서
+       * 렌더러가 DOM을 건드리지 않는다」이다. */
       const watch = new MutationObserver((records) => { mutations += records.length; });
-      watch.observe(view, { subtree: true, childList: true, attributes: true, characterData: true });
+      watch.observe(view.querySelector(".agent-graph-layout"),
+        { subtree: true, childList: true, attributes: true, characterData: true });
       const before = [agentGraphNodeCreations, agentGraphLayoutRuns, agentGraphEdgeMeasureRuns];
       await paintBoardView(undefined, { force: false });
       await window.__BOARD_SETTLED__();

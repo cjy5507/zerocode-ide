@@ -74,7 +74,12 @@ const AGENT_GRAPH_LIVE = Object.freeze({
  * `count`는 같은 주체·같은 관계에서의 **실제 증가**만 세기 위한 기준선이다. */
 const liveLanes = new Map();
 /* 자리마다의 주체 — `run/worker/dispatch`. 이것이 바뀌면 그 자리의 모든 기억을
- * 버린다. */
+ * 버린다.
+ *
+ * 사라진 자리를 **솎아 내지 않는다**. 판이 풀렸다가 같은 번호로 다시 열리는
+ * 것이 바로 앞사람의 사건을 뒷사람이 물려받는 길이고, 그 자리의 주체를 잊으면
+ * 다음 판에서 「처음 보는 자리」로 읽혀 버릴 것을 버리지 못한다. 키는 이 창이
+ * 연 터미널 번호이므로 한 세션 동안의 수는 그 자체로 상한이다. */
 const liveSubjects = new Map();
 /* 지금 뛰는 맥박: 키(노드 또는 간선) → { beat, eventKey, untilMs }. */
 const livePulses = new Map();
@@ -276,18 +281,19 @@ function agentGraphLiveCoverage() {
  * 덮지 않는다. */
 function agentGraphLiveObserve(answer, places, now = Date.now(), generation = liveGeneration) {
   if (generation !== liveGeneration) return;
+  if (!agentGraphLive) {
+    /* 꺼져 있는 동안에도 baseline은 빚으로 남는다: 다시 켜는 판이 그동안의
+     * backlog를 한꺼번에 터뜨리지 않도록. 지도가 서 있지 않은 판에서 이
+     * 함수가 하는 일은 이 한 줄뿐이다. */
+    liveBaselineDue = true;
+    return;
+  }
   const overlays = answer?.overlays ?? {};
   /* 이 판의 카드, 자리마다. 대기 판정은 원장의 행과 **이 판의** 카드를 함께
    * 묻는다(`deskWorkerHealth`) — 지난 판의 모델에서 카드를 꺼내 오면 한 박자
    * 뒤진 상태로 사유를 고르게 된다. */
   const cards = new Map((answer?.columns ?? [])
     .flatMap((column) => (column.cards ?? []).map((card) => [card.pane, card])));
-  if (!agentGraphLive) {
-    /* 꺼져 있는 동안에도 baseline은 빚으로 남는다: 다시 켜는 판이 그동안의
-     * backlog를 한꺼번에 터뜨리지 않도록. */
-    liveBaselineDue = true;
-    return;
-  }
   const fresh = [];
 
   /* ⓪ 자리마다의 주체를 먼저 맞춘다. 주체가 바뀐 자리는 이 판을 읽기 **전에**
@@ -831,6 +837,9 @@ function setAgentGraphLive(view, on) {
 function agentGraphLiveScopeMoved() {
   liveGeneration += 1;
   liveBaselineDue = true;
+  /* 사건 목록도 함께 내려놓는다: 그 줄들은 **떠나온 범위**에서 일어난 일이고,
+   * 누르면 지금 화면에 없는 관계로 가려 든다. 근거는 원장에 그대로 남는다. */
+  liveEvents = [];
   agentGraphLiveStop();
 }
 
