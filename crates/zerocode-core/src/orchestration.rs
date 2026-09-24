@@ -441,6 +441,15 @@ pub enum MessageKind {
     /// how long the CLI keeps the switch, and why. The road that writes it is
     /// [`Ledger::workers_model_deviated`].
     ModelDeviated,
+    /// Nobody said this either: the LEDGER's receipt that the window moved
+    /// a Claude account (t-7538) — the default every NEW launch runs as,
+    /// or one walled worker seated again on another account with the same
+    /// worker id, dispatch and conversation. Written only from the window's
+    /// own switch road, never from a peer's `send`: a body wearing this
+    /// kind from a worker would be a switch nobody made. The row carries
+    /// account ids, percentages and the reason; never a credential, never
+    /// an email. The road that writes it is [`Ledger::account_switched`].
+    AccountSwitched,
 }
 
 impl MessageKind {
@@ -463,6 +472,7 @@ impl MessageKind {
             Self::Resumed => "resumed",
             Self::ClassifierDeclined => "classifier_declined",
             Self::ModelDeviated => "model_deviated",
+            Self::AccountSwitched => "account_switched",
         }
     }
 
@@ -487,6 +497,7 @@ impl MessageKind {
                 | Self::Resumed
                 | Self::ClassifierDeclined
                 | Self::ModelDeviated
+                | Self::AccountSwitched
         )
     }
 }
@@ -513,6 +524,7 @@ impl std::str::FromStr for MessageKind {
             "resumed" => Self::Resumed,
             "classifier_declined" => Self::ClassifierDeclined,
             "model_deviated" => Self::ModelDeviated,
+            "account_switched" => Self::AccountSwitched,
             _ => return Err(format!("unknown message type: {word}")),
         })
     }
@@ -12420,6 +12432,210 @@ impl Ledger {
         Ok(state)
     }
 
+    /// Put a walled worker to sleep so the window can seat it again on
+    /// another account — same worker id, same dispatch, same conversation
+    /// (t-7538).
+    ///
+    /// The transition a window restart makes for every live worker
+    /// ([`Self::window_exiting`]), made for ONE worker on the window's word
+    /// that its pane is about to close: the row goes `Sleeping` with its
+    /// attempt open and its task carried, the pane's exit then finds an
+    /// empty seat ([`Run::worker_in_pane`] never answers a sleeper) and
+    /// settles nothing — no attempt spent, no `worker_died` — and the
+    /// coordinator's ordinary restore road ([`Self::prepare_worker_reseat`],
+    /// [`Self::worker_reseated`]) opens the replacement pane with
+    /// `--resume`, the row's model and effort, in the row's checkout.
+    ///
+    /// The ledger is the authority on WHETHER, not the caller: only a live
+    /// worker in its own seat, carrying an open attempt with a checkout to
+    /// return to, whose newest `quota_walled` row still stands, may be
+    /// rested — the wall's two witnesses are the reason this is not a
+    /// restart of a working pane. A person's pane is refused, as every
+    /// road that would reopen a person's conversation is. Refusals name
+    /// the state; a caller that hears one closes nothing.
+    ///
+    /// Answers the dispatch the worker keeps, so the receipt can name it.
+    pub fn worker_rested_for_account_switch(
+        &mut self,
+        worker_id: &str,
+        now_ms: i64,
+    ) -> Result<String, String> {
+        let at = self.locate(worker_id)?;
+        let run = &self.runs[at.0];
+        let worker = &run.workers[at.1];
+        if !worker.state.is_live() || !worker.state.may_occupy_pane() {
+            return Err(format!(
+                "worker {worker_id} is {}, and only a live worker in its seat can be rested \
+                 for an account switch",
+                worker.state.as_str()
+            ));
+        }
+        if worker.taken_over {
+            return Err(format!(
+                "worker {worker_id}'s pane was taken over by the person — a person's \
+                 conversation is not the ledger's to move to another account"
+            ));
+        }
+        if run
+            .worker_in_pane(&worker.team, &worker.pane)
+            .is_none_or(|current| current.id != worker_id)
+        {
+            return Err(format!(
+                "worker {worker_id} is not the worker in its own pane any more"
+            ));
+        }
+        if worker.checkout.is_none() {
+            return Err(format!(
+                "worker {worker_id} reported no checkout, so there is nowhere to seat it again"
+            ));
+        }
+        let dispatch_id = worker
+            .dispatch
+            .as_deref()
+            .ok_or_else(|| format!("worker {worker_id} carries no attempt"))?
+            .to_string();
+        let dispatch = run
+            .dispatch(&dispatch_id)
+            .ok_or_else(|| format!("worker {worker_id} names an unknown dispatch"))?;
+        if !dispatch.is_open() || dispatch.remote.is_some() {
+            return Err(format!(
+                "dispatch {dispatch_id} is not an open attempt of this window's own"
+            ));
+        }
+        if run.task(&dispatch.task).map(|task| task.status) != Some(TaskStatus::Dispatched) {
+            return Err(format!(
+                "the task dispatch {dispatch_id} carries is not dispatched"
+            ));
+        }
+        if !newest_wall(run, &dispatch_id).is_some_and(|wall| wall.stands(now_ms)) {
+            return Err(format!(
+                "worker {worker_id} stands at no quota wall the ledger has witnessed — only a \
+                 walled worker is moved to another account; a working one keeps its own"
+            ));
+        }
+        self.runs[at.0].workers[at.1].state = WorkerState::Sleeping;
+        self.runs[at.0].workers[at.1].quiet_at = None;
+        Ok(dispatch_id)
+    }
+
+    /// The model and effort a live worker's pane is REALLY running, as its
+    /// own hook reported them (t-7538): a person's `/model` inside the pane
+    /// changed what the row said at summons, and a restore that read the
+    /// row would put the old model back. Written only for a live worker in
+    /// its seat; `None` leaves a field as it is (a hook that did not say is
+    /// not a hook that said "default"). Answers whether anything changed.
+    pub fn worker_tuning_observed(
+        &mut self,
+        worker_id: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+    ) -> Result<bool, String> {
+        let at = self.locate(worker_id)?;
+        let worker = &mut self.runs[at.0].workers[at.1];
+        if !worker.state.is_live() {
+            return Err(format!(
+                "worker {worker_id} is {}, and only a live worker's tuning is observed",
+                worker.state.as_str()
+            ));
+        }
+        let mut changed = false;
+        if let Some(model) = model.map(str::trim).filter(|word| !word.is_empty())
+            && worker.model.as_deref() != Some(model)
+        {
+            worker.model = Some(model.to_string());
+            changed = true;
+        }
+        if let Some(effort) = effort.map(str::trim).filter(|word| !word.is_empty())
+            && worker.effort.as_deref() != Some(effort)
+        {
+            worker.effort = Some(effort.to_string());
+            changed = true;
+        }
+        Ok(changed)
+    }
+
+    /// The receipt for one account move (t-7538), in the ledger's own voice,
+    /// to every run it concerns — once per `key`, however many times the
+    /// window asks: a retry after a crash finds its row and writes nothing.
+    ///
+    /// A DEFAULT move concerns every run holding a live worker of the
+    /// provider (their next summons runs as the new account); a PANE move
+    /// concerns the run whose worker moved. A window with no run to tell
+    /// writes nothing and answers an empty list, which is not a failure —
+    /// the switch itself is the window's fact, and its own log keeps it.
+    /// Answers the rows written.
+    pub fn account_switched(
+        &mut self,
+        receipt: &AccountSwitchReceipt,
+        now_ms: i64,
+    ) -> Result<Vec<String>, String> {
+        if receipt.key.trim().is_empty() {
+            return Err("an account switch receipt needs a key".to_string());
+        }
+        let concerned: Vec<(String, Option<String>, Option<String>)> = match &receipt.moved {
+            AccountMove::Default => self
+                .runs
+                .iter()
+                .filter(|run| {
+                    run.workers
+                        .iter()
+                        .any(|worker| worker.state.is_live() && worker.agent == receipt.agent)
+                })
+                .map(|run| (run.id.clone(), None, None))
+                .collect(),
+            AccountMove::Pane { worker, .. } => self
+                .runs
+                .iter()
+                .find_map(|run| {
+                    let seat = run.worker(worker)?;
+                    let dispatch = seat.dispatch.clone();
+                    let task = dispatch
+                        .as_deref()
+                        .and_then(|id| run.dispatch(id))
+                        .map(|held| held.task.clone());
+                    Some((run.id.clone(), task, dispatch))
+                })
+                .into_iter()
+                .collect(),
+        };
+        let mut written = Vec::new();
+        for (run_id, task, dispatch) in concerned {
+            let already = self.run(&run_id).is_some_and(|run| {
+                run.messages.iter().any(|row| {
+                    row.kind == MessageKind::AccountSwitched
+                        && serde_json::from_str::<serde_json::Value>(row.body.as_str())
+                            .ok()
+                            .and_then(|body| body["key"].as_str().map(str::to_string))
+                            .as_deref()
+                            == Some(receipt.key.as_str())
+                })
+            });
+            if already {
+                continue;
+            }
+            let Some(to) = self.run(&run_id).map(Run::address) else {
+                continue;
+            };
+            let body = receipt.body(now_ms);
+            let draft = Draft {
+                from: LEDGER_ITSELF.to_string(),
+                to,
+                kind: MessageKind::AccountSwitched,
+                body: body.to_string().into(),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: Text::default(),
+                thread: None,
+                task,
+                dispatch,
+            };
+            if let Ok(id) = self.post(&run_id, draft, now_ms) {
+                written.push(id);
+            }
+        }
+        Ok(written)
+    }
+
     /// A sleeping worker cannot be seated again, and this is the end of it.
     ///
     /// [`Self::end_attempt`] refuses this worker — it asks `is_live`, and a
@@ -13616,6 +13832,98 @@ pub enum WallPhase {
 /// The `reason` a quiet notice carries when it is the wait rung's word
 /// about a wall that lifted while its worker stayed stopped at it.
 pub const QUOTA_LIFTED_REASON: &str = "quota_lifted";
+
+/// Which of the two things an account switch moved (t-7538).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum AccountMove {
+    /// The account every new launch runs as. No pane was touched.
+    Default,
+    /// One walled worker, seated again on the new account — the same
+    /// worker id and dispatch, the old pane and the new one.
+    Pane {
+        worker: String,
+        from_pane: String,
+        to_pane: String,
+    },
+}
+
+/// One account move, as the window reports it for the receipt row.
+///
+/// Ids and numbers only. The window builds it from the account store's ids
+/// and the usage cache's percentages; nothing here can hold a token or an
+/// address, and the body is written with exactly these fields.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AccountSwitchReceipt {
+    /// The window's own idempotency key for this move — the same move asked
+    /// twice writes one row.
+    pub key: String,
+    /// `claude` — the agent whose launches the account serves.
+    pub agent: String,
+    pub moved: AccountMove,
+    /// The account ids, the store's own; `None` for the machine's own login.
+    pub from_account: Option<String>,
+    pub to_account: String,
+    /// `person` for the settings picker, `auto` for the beat, `ask` for a
+    /// proposal the person accepted.
+    pub by: String,
+    /// The table's reason word (`near_limit`, `walled`, `picked`).
+    pub reason: String,
+    /// The source's fullest window and its percentage when the decision
+    /// was made, when the window had a reading.
+    pub observed_percent: Option<u8>,
+    pub observed_window: Option<String>,
+    /// The coordinator generation the decision was made under, when the
+    /// window knew one — a late answer to an older proposal is refused by
+    /// the window, and the receipt says which one it was.
+    pub generation: Option<u32>,
+    /// How many panes the move touched: 0 for a default move.
+    pub panes_moved: u32,
+}
+
+impl AccountSwitchReceipt {
+    fn body(&self, now_ms: i64) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "key": self.key,
+            "agent": self.agent,
+            "fromAccount": self.from_account,
+            "toAccount": self.to_account,
+            "by": self.by,
+            "reason": self.reason,
+            "observedPercent": self.observed_percent,
+            "observedWindow": self.observed_window,
+            "generation": self.generation,
+            "panesMoved": self.panes_moved,
+            "policy": "CLAUDE_ACCOUNT_AUTOSWITCH.v1",
+            "switchedAtMs": now_ms,
+        });
+        match &self.moved {
+            AccountMove::Default => {
+                body["moved"] = serde_json::json!("default");
+                body["next"] = serde_json::json!(
+                    "your panes keep running on the login they were started with; every \
+                     new summons runs as `toAccount`"
+                );
+            }
+            AccountMove::Pane {
+                worker,
+                from_pane,
+                to_pane,
+            } => {
+                body["moved"] = serde_json::json!("pane");
+                body["workerId"] = serde_json::json!(worker);
+                body["fromPane"] = serde_json::json!(from_pane);
+                body["toPane"] = serde_json::json!(to_pane);
+                body["next"] = serde_json::json!(
+                    "the same worker id and dispatch continue in `toPane` with their \
+                     conversation resumed as `toAccount`; nothing was settled and no \
+                     replacement is needed"
+                );
+            }
+        }
+        body
+    }
+}
 
 /// A wall's lift, with both witnesses (t-6427): the agent's own words still
 /// at the wall, and the provider's number read after the reset, under it.

@@ -3811,6 +3811,26 @@
         </div>
         <div class="agent-list" id="account-list"></div>
         <p class="settings-hint" id="account-note"></p>
+        <!-- The switch the window may make by itself (t-7538): off, ask (a
+             line and a button below, for the proposal the beat made), auto
+             (it switches and says so). Every account's own gauge is read as
+             that account, and only a pane standing at its quota wall ever
+             moves — a working pane keeps the login it was started with. -->
+        <div class="settings-grid">
+          <label class="settings-field">
+            <span data-i18n="settings.accounts.autoSwitch">한도 앞에서 계정 자동 전환</span>
+            <select class="settings-input" id="account-autoswitch">
+              <option value="off" data-i18n="settings.accounts.autoSwitchOff">끔</option>
+              <option value="ask" data-i18n="settings.accounts.autoSwitchAsk">물어보기</option>
+              <option value="auto" data-i18n="settings.accounts.autoSwitchAuto">자동</option>
+            </select>
+          </label>
+        </div>
+        <p class="settings-hint" data-i18n="settings.accounts.autoSwitchHint">계정마다 사용량을 따로 읽어, 고른 계정이 한도에 가까워지면 남은 몫이 가장 큰 계정으로 다음 소환을 보냅니다. 일하는 판은 제 로그인으로 계속하고, 한도 벽에 선 판만 같은 대화·같은 자리로 새 계정에서 이어집니다.</p>
+        <p class="settings-hint account-switch-note" id="account-switch-note" hidden>
+          <span id="account-switch-said"></span>
+          <button class="btn" id="account-switch-now" type="button" data-i18n="settings.accounts.switchNow">지금 바꾸기</button>
+        </p>
 
         <!-- And the same for Codex, by its own mechanism: `CODEX_HOME` names a
              whole home rather than a credential file, so a managed one inherits
@@ -6895,6 +6915,10 @@
         <span class="sb-claude-ico" id="sb-claude-ico"></span>
         <span class="sb-usage-bar" id="sb-claude-bar" hidden><span class="sb-usage-fill" id="sb-claude-fill"></span></span>
         <span class="sb-figure sb-claude-pct" id="sb-claude-pct" hidden></span>
+        <!-- The next account and its room, beside the selected one's figure,
+             with the auto-switch word (t-7538). Hidden while there is no
+             second account or nothing to say. -->
+        <span class="sb-figure sb-claude-next" id="sb-claude-next" hidden></span>
         <svg class="icon sb-claude-warn" id="sb-claude-warn" hidden aria-hidden="true"><use href="#i-alert"></use></svg>
       </span>
       <!-- Codex sits immediately after Claude. Same anatomy, different screen: this

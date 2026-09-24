@@ -1512,6 +1512,7 @@ impl WakeWindow for ResumeDoor<'_> {
             state.team_envs().insert(term, env.clone());
         }
         state.agent_terms().insert(term, kind.slug());
+        note_pane_account(state, term, &env);
         state.launch_tokens().insert(term, launch_token);
         let reported = zo_channel
             .as_ref()

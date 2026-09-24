@@ -485,8 +485,10 @@ pub(crate) fn reseat_sleeping(
         }
         // The same words a resumed pane's witness road carries (t-3058), by
         // the same policy (t-7812 E): nothing unless the goodbye cut its turn
-        // or the commands under its pane (t-6428 ⑤).
-        let nudge = reseat_nudge(&worker, checkout.as_deref());
+        // or the commands under its pane (t-6428 ⑤). The account-switch road
+        // leaves its own words for the worker it rested (t-7538).
+        let nudge = take_switch_nudge(&worker)
+            .unwrap_or_else(|| reseat_nudge(&worker, checkout.as_deref()));
         let decided = match held.actor.prepare_worker_reseat(
             &run_id,
             &worker,
@@ -701,6 +703,190 @@ pub(crate) fn sleeper_launch_tuning(worker: &str) -> Result<Vec<String>, String>
     let ledger = cached_ledger(&held, &image)
         .map_err(|_| "the orchestration ledger could not be read".to_string())?;
     ledger.sleeper_resume_tuning(worker)
+}
+
+/* ---- the account switch's half of the ledger (t-7538) ------------------ */
+
+/// The words left for one worker's restore by the account-switch road,
+/// read once by [`reseat_sleeping`] in place of the restart's: the pane
+/// was cut to move the conversation to another login, and an agent told
+/// "the window restarted" would look for a restart that never happened.
+fn switch_nudges() -> &'static Mutex<std::collections::HashMap<String, String>> {
+    static HELD: std::sync::OnceLock<Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+pub(crate) fn leave_switch_nudge(worker: &str, words: String) {
+    switch_nudges()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .insert(worker.to_string(), words);
+}
+
+fn take_switch_nudge(worker: &str) -> Option<String> {
+    switch_nudges()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .remove(worker)
+}
+
+/// One Claude worker standing at its quota wall, as the ledger holds it —
+/// a live worker in its own seat, an open attempt, its newest
+/// `quota_walled` row still standing (the two witnesses met and the reset
+/// has not come). The switch road moves these and nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct WalledWorker {
+    pub(crate) run: String,
+    pub(crate) worker: String,
+    pub(crate) team: String,
+    pub(crate) pane: String,
+    pub(crate) term: u32,
+    pub(crate) dispatch: String,
+    pub(crate) generation: Option<u32>,
+    pub(crate) checkout: Option<String>,
+}
+
+/// Every walled Claude worker the ledger knows right now, with the terminal
+/// its seat resolves to. Empty for a window with no durable runtime.
+pub(crate) fn walled_claude_workers(now_ms: i64) -> Vec<WalledWorker> {
+    let Some(held) = runtime() else {
+        return Vec::new();
+    };
+    let Ok(image) = held.actor.view() else {
+        return Vec::new();
+    };
+    let Ok(ledger) = cached_ledger(&held, &image) else {
+        return Vec::new();
+    };
+    let teams = crate::agent_teams::teams();
+    let seats = index_team_seats(&teams);
+    drop(teams);
+    ledger
+        .runs()
+        .iter()
+        .flat_map(|run| {
+            let seats = &seats;
+            run.workers.iter().filter_map(move |worker| {
+                if worker.agent != "claude"
+                    || !worker.state.is_live()
+                    || !worker.state.may_occupy_pane()
+                    || worker.taken_over
+                {
+                    return None;
+                }
+                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+                if !dispatch.is_open()
+                    || run
+                        .worker_in_pane(&worker.team, &worker.pane)
+                        .is_none_or(|current| current.id != worker.id)
+                    || !zerocode_core::orchestration::newest_wall(run, &dispatch.id)
+                        .is_some_and(|wall| wall.stands(now_ms))
+                {
+                    return None;
+                }
+                let term = seats
+                    .get(worker.team.as_str())?
+                    .get(worker.pane.as_str())
+                    .copied()?;
+                Some(WalledWorker {
+                    run: run.id.clone(),
+                    worker: worker.id.clone(),
+                    team: worker.team.clone(),
+                    pane: worker.pane.clone(),
+                    term,
+                    dispatch: dispatch.id.clone(),
+                    generation: run.coordinator_live().map(|seat| seat.generation),
+                    checkout: worker.checkout.clone(),
+                })
+            })
+        })
+        .collect()
+}
+
+/// Put one walled worker to sleep so its pane may close without settling
+/// it — the ledger's own guard decides (`worker_rested_for_account_switch`).
+pub(crate) fn rest_worker_for_switch(worker: &str, now_ms: i64) -> Result<(), String> {
+    if let Some(why) = unavailable() {
+        return Err(why);
+    }
+    let held = runtime().ok_or_else(|| "이 창에는 열린 원장이 없습니다".to_string())?;
+    held.actor
+        .worker_rested_for_switch(worker, now_ms)
+        .map(|_| ())
+        .map_err(|why| format!("원장이 {worker}의 쉼을 거절했습니다: {why:?}"))
+}
+
+/// The model a pane's own hook last reported, onto its worker's row, so a
+/// restore continues on what the pane really ran (t-7538). Best effort: a
+/// row the ledger will not change (not live, unknown) leaves the restore on
+/// the summons' word, and the caller says nothing more about it.
+pub(crate) fn observe_worker_tuning(
+    worker: &str,
+    model: Option<&str>,
+    effort: Option<&str>,
+    now_ms: i64,
+) -> bool {
+    if unavailable().is_some() {
+        return false;
+    }
+    let Some(held) = runtime() else {
+        return false;
+    };
+    held.actor
+        .worker_tuning_observed(
+            worker,
+            model.map(str::to_string),
+            effort.map(str::to_string),
+            now_ms,
+        )
+        .map(|(moved, _)| moved)
+        .unwrap_or(false)
+}
+
+/// The receipt for one account move, in the ledger's own voice. Answers
+/// whether a row was written (the same key again writes none).
+pub(crate) fn record_account_switch(
+    receipt: zerocode_core::orchestration::AccountSwitchReceipt,
+    now_ms: i64,
+) -> Result<bool, String> {
+    if let Some(why) = unavailable() {
+        return Err(why);
+    }
+    let held = runtime().ok_or_else(|| "이 창에는 열린 원장이 없습니다".to_string())?;
+    held.actor
+        .account_switched(receipt, now_ms)
+        .map(|(moved, _)| moved)
+        .map_err(|why| format!("원장이 전환 영수증을 거절했습니다: {why:?}"))
+}
+
+/// Where one worker sits now — its team, pane, the terminal that pane
+/// resolves to (when it does), and its state — read off the ledger after a
+/// restore, so the switch road can name the pane it landed in.
+pub(crate) fn worker_seat_now(
+    worker_id: &str,
+) -> Option<(String, String, Option<u32>, WorkerState)> {
+    let held = runtime()?;
+    let image = held.actor.view().ok()?;
+    let ledger = cached_ledger(&held, &image).ok()?;
+    let teams = crate::agent_teams::teams();
+    let seats = index_team_seats(&teams);
+    drop(teams);
+    ledger.runs().iter().find_map(|run| {
+        let worker = run.worker(worker_id)?;
+        let term = seats
+            .get(worker.team.as_str())
+            .and_then(|team| team.get(worker.pane.as_str()))
+            .copied();
+        Some((worker.team.clone(), worker.pane.clone(), term, worker.state))
+    })
+}
+
+/// The leader terminal of one team, for the restore road.
+pub(crate) fn leader_term_of_team(team: &str) -> Option<u32> {
+    crate::agent_teams::teams()
+        .get(team)
+        .map(|held| held.leader_term)
 }
 
 /// Renderer-safe view of current orchestration state. Message bodies, task
@@ -2232,6 +2418,30 @@ fn with_usage_headroom<R>(
     model: Option<&str>,
     read: impl FnOnce(Option<zerocode_core::orchestration::Headroom>) -> R,
 ) -> R {
+    with_usage_headroom_of_account(usage, agent, model, None, read)
+}
+
+/// The gauge of the ACCOUNT a pane runs as (t-7538), for the wall witness:
+/// a pane the window launched as account A keeps A's login after the
+/// default moves to B, so its wall is A's number and not B's. With no
+/// account recorded — a pane opened before the record existed, or one this
+/// window did not launch — the provider's gauge answers as it always has.
+fn usage_headroom_of_account(
+    usage: &UsageSource,
+    agent: &str,
+    model: Option<&str>,
+    account: Option<&str>,
+) -> Option<zerocode_core::orchestration::Headroom> {
+    with_usage_headroom_of_account(usage, agent, model, account, |headroom| headroom)
+}
+
+fn with_usage_headroom_of_account<R>(
+    usage: &UsageSource,
+    agent: &str,
+    model: Option<&str>,
+    account: Option<&str>,
+    read: impl FnOnce(Option<zerocode_core::orchestration::Headroom>) -> R,
+) -> R {
     let Some(gauge) = zerocode_core::orchestration::quota_gauge_for(agent, model) else {
         return read(None);
     };
@@ -2243,14 +2453,33 @@ fn with_usage_headroom<R>(
             let snapshot = cache
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            read(snapshot.as_ref().and_then(headroom_of))
+            let Some(account) = account.filter(|_| gauge == "claude") else {
+                return read(snapshot.as_ref().and_then(headroom_of));
+            };
+            // This account's own number: the provider gauge when it was
+            // read as this account, else the account map's row, else
+            // nothing — never another account's reading.
+            if snapshot
+                .as_ref()
+                .is_some_and(|held| held.account.as_deref() == Some(account))
+            {
+                return read(snapshot.as_ref().and_then(headroom_of));
+            }
+            drop(snapshot);
+            let map = crate::usage_runtime::claude_account_usage_cache(local_data_root)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            read(map.get(account).and_then(headroom_of))
         }
         #[cfg(test)]
         UsageSource::Fixed(rows) => {
             let rows = rows.lock().unwrap_or_else(|held| held.into_inner());
             read(
                 rows.iter()
-                    .find(|(named, _)| *named == gauge)
+                    .filter(|(named, _)| *named == gauge)
+                    .find(|(_, snapshot)| {
+                        account.is_none_or(|account| snapshot.account.as_deref() == Some(account))
+                    })
                     .and_then(|(_, snapshot)| headroom_of(snapshot)),
             )
         }
@@ -4243,6 +4472,10 @@ struct Stalled {
     term: u32,
     agent: String,
     model: Option<String>,
+    /// The managed account this pane was launched as, when the window
+    /// recorded one (t-7538): its wall is judged against THAT account's
+    /// gauge, not against whichever account is selected by now.
+    account: Option<String>,
     /// Whether this attempt's wall is already written down and still stands
     /// — a walled worker is not asked again, and is not ALSO a quiet one,
     /// until its wall stops standing (t-6427).
@@ -4329,6 +4562,7 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
                     term,
                     agent: worker.agent.clone(),
                     model: worker.model.clone(),
+                    account: host.pane_account(term),
                     walled_already,
                     wall,
                     resume_declared: run
@@ -4401,7 +4635,12 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
             }
             Some((wall, WallPhase::Lifting)) => {
                 let marker = host.quota_wall_marker(one.term, &one.agent);
-                let headroom = usage_headroom(&held.usage, &one.agent, one.model.as_deref());
+                let headroom = usage_headroom_of_account(
+                    &held.usage,
+                    &one.agent,
+                    one.model.as_deref(),
+                    one.account.as_deref(),
+                );
                 match zerocode_core::orchestration::read_lift(
                     &one.worker,
                     wall,
@@ -4428,7 +4667,12 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
         // number does not make it news.
         let wall_words = marker.is_some();
         let witness = marker.and_then(|marker| {
-            let headroom = usage_headroom(&held.usage, &one.agent, one.model.as_deref());
+            let headroom = usage_headroom_of_account(
+                &held.usage,
+                &one.agent,
+                one.model.as_deref(),
+                one.account.as_deref(),
+            );
             zerocode_core::orchestration::quota_wall_witness(
                 &one.worker,
                 Some(marker),

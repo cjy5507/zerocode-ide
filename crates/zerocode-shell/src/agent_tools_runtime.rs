@@ -752,6 +752,16 @@ impl agent_teams::Host for TeamWindow {
         held.map(str::to_string)
     }
 
+    /// Which managed account this pane was launched as — the record every
+    /// Claude launch road writes beside `agent_terms` (t-7538).
+    fn pane_account(&self, term: TermId) -> Option<String> {
+        self.app
+            .state::<AppState>()
+            .pane_accounts()
+            .get(&term)
+            .cloned()
+    }
+
     /// The checkout this window put the pane in, read off the same two
     /// records `answer_team_command` already resolves a caller's tree from:
     /// the pane's launch environment first, its reported seat second.
@@ -1134,6 +1144,7 @@ impl agent_teams::Host for TeamWindow {
         if let Some(agent) = named {
             state.agent_terms().insert(term, agent);
         }
+        note_pane_account(&state, term, &env);
         if let Some(error) = codex_route_error {
             let _ = self.app.emit(
                 "codex-route:degraded",

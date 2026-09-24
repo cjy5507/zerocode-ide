@@ -35,6 +35,353 @@ pub(super) fn forget_claude_usage(local_data_root: &Path) {
 pub(super) static CLAUDE_USAGE_SCANNING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/* ---- every managed Claude account's own reading (t-7538) ---------------- */
+
+pub(super) fn claude_account_usage_file(local_data_root: &Path) -> PathBuf {
+    local_data_root.join(artifact_file::CLAUDE_ACCOUNT_USAGE)
+}
+
+/// One reading per managed account, by id — the selected account's
+/// included when its own gauge has landed, so the switch table compares
+/// every account by the same kind of number. Loaded once from disk like the
+/// provider gauges; a window that restarts keeps what it knew.
+pub(super) fn claude_account_usage_cache(
+    local_data_root: &Path,
+) -> &'static Mutex<HashMap<String, usage::ProviderUsage>> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, usage::ProviderUsage>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| {
+        Mutex::new(
+            std::fs::read_to_string(claude_account_usage_file(local_data_root))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default(),
+        )
+    })
+}
+
+/// Which accounts have a read out right now — one per account, so a slow
+/// endpoint cannot be asked twice for the same login while the first answer
+/// is still in the air.
+fn claude_account_scanning() -> &'static Mutex<std::collections::HashSet<String>> {
+    static OUT: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    OUT.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Whether one account's own read is out right now.
+pub(super) fn claude_account_scanning_now(id: &str) -> bool {
+    claude_account_scanning()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(id)
+}
+
+/// Drop one account's reading — the account was removed, or re-logged, so
+/// its number is about a login that is gone.
+pub(super) fn forget_claude_account_usage(local_data_root: &Path, id: &str) {
+    let mut held = claude_account_usage_cache(local_data_root)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if held.remove(id).is_some() {
+        write_account_usage_file(local_data_root, &held);
+    }
+}
+
+fn write_account_usage_file(local_data_root: &Path, held: &HashMap<String, usage::ProviderUsage>) {
+    if let Ok(text) = serde_json::to_string_pretty(held) {
+        let _ = durable_file::replace_bytes(
+            &claude_account_usage_file(local_data_root),
+            text.as_bytes(),
+        );
+    }
+}
+
+/// The backoff key one account's reads are counted under — the provider
+/// and the account, so a 429 on account B does not hold account A's poll
+/// and A's healthy streak does not let B be asked past its `Retry-After`.
+fn account_backoff_key(id: &str) -> String {
+    format!("claude:{id}")
+}
+
+/// Read one account's plan usage as THAT account — the OAuth road only.
+///
+/// No hidden terminal behind it, on purpose: the terminal road runs the CLI
+/// in the runtime home, which is the SELECTED account's, so a fallback there
+/// would read A for B (astra A1). An account whose own store holds no login
+/// answers `unavailable` with no request made; a refused or failed request
+/// answers `error` with the endpoint's own classification, and the number
+/// stays unknown — never 0%, never somebody else's.
+pub(super) fn scan_claude_account_usage_now(account: &zerocode_core::ClaudeAccount) -> Scanned {
+    let whose = Some(account.id.clone());
+    let failed = |status: &str,
+                  error: String,
+                  kind: Option<zerocode_core::usage_limit::FailureKind>,
+                  retry_at_ms: Option<i64>| usage::ProviderUsage {
+        provider: "claude".to_string(),
+        session: None,
+        weekly: None,
+        fable_weekly: None,
+        monthly: None,
+        buckets: None,
+        updated_at: epoch_ms_now(),
+        error: Some(error),
+        status: status.to_string(),
+        failure_kind: kind,
+        retry_at_ms,
+        plan_type: None,
+        reset_credits: None,
+        account: whose.clone(),
+    };
+    let Some((login, from)) = accounts::usage_login_of_account(account) else {
+        return Scanned {
+            usage: failed(
+                "unavailable",
+                "이 계정의 저장소에 로그인이 없습니다".to_string(),
+                None,
+                None,
+            ),
+            road: UsageRoad::Local,
+        };
+    };
+    let road = UsageRoad::Oauth { login: Some(from) };
+    match usage_oauth::claude(Some(login.as_str()), epoch_ms_now()) {
+        Ok(read) => Scanned {
+            usage: usage::ProviderUsage {
+                provider: "claude".to_string(),
+                session: read.session.map(oauth_usage_window),
+                weekly: read.weekly.map(oauth_usage_window),
+                fable_weekly: read.fable_weekly.map(oauth_usage_window),
+                monthly: None,
+                buckets: None,
+                updated_at: epoch_ms_now(),
+                error: None,
+                status: "ok".to_string(),
+                failure_kind: None,
+                retry_at_ms: None,
+                plan_type: None,
+                reset_credits: None,
+                account: whose,
+            },
+            road,
+        },
+        Err(failure) => Scanned {
+            usage: failed(
+                "error",
+                failure.message.clone(),
+                Some(failure.recovery.kind),
+                failure.retry_at_ms,
+            ),
+            road,
+        },
+    }
+}
+
+/// Land one account's reading — only if the account is still the account
+/// it was when the read began (astra A1): the same id still in the store
+/// with the same directory. A read whose account was removed, re-added
+/// under the same id elsewhere, or re-logged mid-flight is dropped, and a
+/// late answer never overwrites a newer one. Answers whether it landed.
+pub(super) fn land_claude_account_usage(
+    config_root: &Path,
+    local_data_root: &Path,
+    began_as: &zerocode_core::ClaudeAccount,
+    fresh: usage::ProviderUsage,
+) -> bool {
+    let still = accounts::read_store(config_root)
+        .accounts
+        .into_iter()
+        .any(|account| {
+            account.id == began_as.id
+                && account.config_dir == began_as.config_dir
+                && account.account_uuid == began_as.account_uuid
+                && account.organization_uuid == began_as.organization_uuid
+        });
+    if !still {
+        return false;
+    }
+    let now = epoch_ms_now();
+    let mut held = claude_account_usage_cache(local_data_root)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let landed = match held.remove(&began_as.id) {
+        Some(previous) if previous.updated_at > fresh.updated_at => previous,
+        Some(previous) => usage_through_failure(previous, fresh, now),
+        None => fresh,
+    };
+    note_usage_attempt(&account_backoff_key(&began_as.id), &landed.status, now);
+    held.insert(began_as.id.clone(), landed);
+    write_account_usage_file(local_data_root, &held);
+    true
+}
+
+/// Why an account is being read, which decides how old a reading may be
+/// before it is read again — three floors, none of them new (astra 3):
+/// the ambient poll's own cadence for the beat, the refetch floor when a
+/// switch is about to choose this account, and none for a person's press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AccountPoll {
+    Ambient,
+    Candidate,
+    Person,
+}
+
+impl AccountPoll {
+    fn floor_ms(self) -> i64 {
+        match self {
+            Self::Ambient => i64::from(usage::AMBIENT_POLL_MINUTES) * 60_000,
+            Self::Candidate => usage::MIN_REFETCH.as_millis() as i64,
+            Self::Person => 0,
+        }
+    }
+}
+
+/// Ask every managed account that is NOT the selected one for its own
+/// reading, off the command thread, one read per account at a time, under
+/// the floor `why` names and each account's own backoff. The selected
+/// account is read by its own gauge (`claude_usage`) and not here — one
+/// request per login per floor, however many roads ask.
+///
+/// Answers how many reads went out.
+pub(super) fn refresh_inactive_claude_accounts(
+    config_root: &Path,
+    local_data_root: &Path,
+    why: AccountPoll,
+) -> usize {
+    let store = accounts::read_store(config_root);
+    let active = zerocode_core::active_account(&store.accounts, &store.selection)
+        .map(|account| account.id.clone());
+    let now = epoch_ms_now();
+    let mut sent = 0;
+    for account in store.accounts {
+        if active.as_deref() == Some(account.id.as_str()) {
+            continue;
+        }
+        let held = claude_account_usage_cache(local_data_root)
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&account.id)
+            .cloned();
+        let young = held
+            .as_ref()
+            .is_some_and(|snapshot| now - snapshot.updated_at < why.floor_ms());
+        if young
+            || usage_scan_holds_for(
+                held.as_ref(),
+                &account_backoff_key(&account.id),
+                why == AccountPoll::Person,
+                now,
+            )
+        {
+            continue;
+        }
+        if !claude_account_scanning()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(account.id.clone())
+        {
+            continue;
+        }
+        sent += 1;
+        let config_root = config_root.to_path_buf();
+        let local_data_root = local_data_root.to_path_buf();
+        std::thread::spawn(move || {
+            let started = Instant::now();
+            let result = scan_claude_account_usage_now(&account);
+            let line = usage_read_line(
+                "claude-account",
+                result.road,
+                started.elapsed().as_millis(),
+                Some(&result.usage),
+                why == AccountPoll::Person,
+            );
+            let landed =
+                land_claude_account_usage(&config_root, &local_data_root, &account, result.usage);
+            claude_account_scanning()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&account.id);
+            note_window_event(
+                &local_data_root,
+                &format!("{line} account={} landed={landed}", account.id),
+            );
+        });
+    }
+    sent
+}
+
+/// Every managed account's latest reading as the switch table wants it —
+/// the selected account's from its own gauge when that gauge names it and
+/// is the newer, every other account's from the account map. An account
+/// with no reading is a row with no windows, which the table calls
+/// unknown.
+pub(super) fn claude_account_gauges(
+    config_root: &Path,
+    local_data_root: &Path,
+) -> Vec<zerocode_core::account_autoswitch::AccountGauge> {
+    let store = accounts::read_store(config_root);
+    let active = zerocode_core::active_account(&store.accounts, &store.selection)
+        .map(|account| account.id.clone());
+    let main = claude_usage_cache(local_data_root)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let map = claude_account_usage_cache(local_data_root)
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    store
+        .accounts
+        .iter()
+        .map(|account| {
+            let own = map.get(&account.id);
+            let snapshot = match &main {
+                Some(main)
+                    if active.as_deref() == Some(account.id.as_str())
+                        && main.account.as_deref() == Some(account.id.as_str())
+                        && own.is_none_or(|own| own.updated_at <= main.updated_at) =>
+                {
+                    Some(main)
+                }
+                _ => own,
+            };
+            account_gauge_of(account, snapshot)
+        })
+        .collect()
+}
+
+/// One snapshot as the switch table's row — windows and status only.
+pub(super) fn account_gauge_of(
+    account: &zerocode_core::ClaudeAccount,
+    snapshot: Option<&usage::ProviderUsage>,
+) -> zerocode_core::account_autoswitch::AccountGauge {
+    use zerocode_core::account_autoswitch::{AccountGauge, GaugeWindow};
+    let window = |kind: &str, held: Option<&usage::UsageWindow>| {
+        held.map(|held| GaugeWindow {
+            kind: kind.to_string(),
+            used_percent: held.used_percent,
+            resets_at_ms: held.resets_at,
+        })
+    };
+    AccountGauge {
+        id: account.id.clone(),
+        org_type: account.organization_type.clone(),
+        windows: snapshot
+            .into_iter()
+            .flat_map(|held| {
+                [
+                    window("session", held.session.as_ref()),
+                    window("weekly", held.weekly.as_ref()),
+                    window("fable_weekly", held.fable_weekly.as_ref()),
+                ]
+            })
+            .flatten()
+            .collect(),
+        observed_at_ms: snapshot.map_or(0, |held| held.updated_at),
+        status: snapshot.map_or_else(|| "unknown".to_string(), |held| held.status.clone()),
+    }
+}
+
 pub(super) fn epoch_ms_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -592,6 +939,21 @@ pub(super) fn active_claude_account_id(config_root: &Path) -> Option<String> {
         .map(|account| account.id.clone())
 }
 
+/// Write down which managed Claude account a pane was launched as, read
+/// off the environment the launch really got (t-7538). Every Claude launch
+/// road calls this beside its `agent_terms` write; a launch that names no
+/// managed store leaves no row, which is "unknown", not "the selected one".
+pub(super) fn note_pane_account(state: &AppState, term: TermId, env: &[(String, String)]) {
+    match accounts::account_of_env(state.config_root(), env) {
+        Some(id) => {
+            state.pane_accounts().insert(term, id);
+        }
+        None => {
+            state.pane_accounts().remove(&term);
+        }
+    }
+}
+
 /// The account environment a launch of `agent` gets.
 ///
 /// The one door every named launch goes through, so an agent that grows an
@@ -885,6 +1247,21 @@ pub(super) fn usage_scan_holds(
     force: bool,
     now_ms: i64,
 ) -> bool {
+    let key = held
+        .map(|snapshot| snapshot.provider.clone())
+        .unwrap_or_default();
+    usage_scan_holds_for(held, &key, force, now_ms)
+}
+
+/// The same gate, with the backoff streak read under `key` — the provider
+/// for a provider gauge, `claude:<account>` for one account's own read
+/// (t-7538), so two logins' failures are two streaks.
+pub(super) fn usage_scan_holds_for(
+    held: Option<&usage::ProviderUsage>,
+    key: &str,
+    force: bool,
+    now_ms: i64,
+) -> bool {
     if force {
         return false;
     }
@@ -903,7 +1280,7 @@ pub(super) fn usage_scan_holds(
     let run = usage_failure_runs()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&snapshot.provider)
+        .get(key)
         .copied()
         .unwrap_or_default();
     if run.streak == 0 {

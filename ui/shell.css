@@ -19759,6 +19759,26 @@ button.worker-composer-pill:hover {
   gap: var(--space-2);
 }
 
+/* The account's own gauge under its name (t-7538): the same quiet line the
+ * subtitle uses, so the row reads name → state → numbers. */
+.account-gauge:empty {
+  display: none;
+}
+
+/* The proposal line: a sentence and its one button on one line. */
+.account-switch-note {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* The next account's word beside the selected one's figure: dimmer, so the
+ * selected account's number stays the figure a glance reads. */
+.sb-claude-next {
+  opacity: 0.7;
+}
+
 .account-pick {
   display: flex;
   flex: 1;

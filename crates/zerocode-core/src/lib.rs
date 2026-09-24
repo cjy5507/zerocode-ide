@@ -10,6 +10,7 @@
 //! body, and in the TypeScript mirror.
 
 pub mod account;
+pub mod account_autoswitch;
 pub mod advertised_url;
 pub mod agent;
 pub mod agent_browser;

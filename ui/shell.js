@@ -10618,9 +10618,6 @@ listen("hook:agent", (event) => {
   // When it moved, for the row's elapsed word — state changes only, so a
   // busy turn's dozens of events do not pin the clock at "now".
   hookStamps.set(term, heard);
-  // 계정 전환을 기다리던 판이 쉼에 들었다 — 갈아탈 숨이다. 큐가 비어 있으면
-  // 셋 조회 하나로 끝나는 길이라 바쁜 턴의 수십 이벤트에 얹혀도 무게가 없다.
-  if (state === "done" && accountHandoffQueue.has(term)) void drainAccountHandoffs();
   // The layout file must know whether this pane is MID-TURN, because that
   // file is what a restart reads — and a window can die at any moment, so
   // waiting for the next tab-shaped persist would store yesterday's answer.

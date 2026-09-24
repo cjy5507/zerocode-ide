@@ -27,6 +27,7 @@ import { testArtifactCatalog, testArtifactChrome, testArtifactPages, testArtifac
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
 import { testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
+import { testAccountSwitch } from "./account-switch.mjs";
 import { testTaskBoard } from "./task-board.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
@@ -180,6 +181,7 @@ suite("usage-refresh", async ({ browser, origin, ok }) => {
   await testUsageRefresh(browser, origin, standBackend, ok);
   await testUsageWords(browser, origin, standBackend, ok);
 });
+suite("account-switch", ({ browser, origin, ok }) => testAccountSwitch(browser, origin, standBackend, ok));
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 // Vault state stays local to this fixture, just like the explorer fixture.
 suite("task-board", ({ browser, origin, ok }) => testTaskBoard(browser, origin, ok));

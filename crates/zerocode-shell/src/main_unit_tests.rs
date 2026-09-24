@@ -13919,8 +13919,16 @@ fn the_plan_segment_walks_the_measured_cadence() {
         "nothing keeps a mashed refresh from five scans:\n{commanding}"
     );
     // And that one door is where the debounce and the failure backoff both
-    // live, so the three providers cannot drift apart on either.
-    let holding = block_after(shipped_backend(), "fn usage_scan_holds(");
+    // live, so the three providers cannot drift apart on either. The door
+    // is `usage_scan_holds_for` since each Claude account's own read keeps
+    // its own backoff streak (t-7538); the provider gauges step through it
+    // under their provider's name.
+    let delegating = block_after(shipped_backend(), "fn usage_scan_holds(");
+    assert!(
+        delegating.contains("usage_scan_holds_for("),
+        "the provider gate stopped going through the one door:\n{delegating}"
+    );
+    let holding = block_after(shipped_backend(), "fn usage_scan_holds_for(");
     assert!(
         holding.contains("usage::MIN_REFETCH")
             && holding.contains("retry_at_ms")

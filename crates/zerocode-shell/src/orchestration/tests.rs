@@ -19434,3 +19434,325 @@ mod restore;
 mod restore_door;
 /// t-7812: the host seams those roads added (`tests/restore_seams.rs`).
 mod restore_seams;
+
+/* ---- account switch: the same seat, another login (t-7538) --------------- */
+
+/// A private window with one CLAUDE worker at its wall in `checkout`: the
+/// two witnesses written by the stall sweep, the coordinator seated. What
+/// the switch road starts from.
+struct WalledClaude {
+    _window: PrivateWindow,
+    _store: zerocode_orchestrator::workflow_store::WorkflowStore,
+    _beat: std::sync::MutexGuard<'static, ()>,
+    host: AtTheWall,
+    team: String,
+    task: String,
+    worker: String,
+    dispatch: String,
+    /// A second claude worker summoned BEFORE the wall, busy in its own
+    /// pane (`leader_term + 5`) with no wall words — when asked for.
+    working: Option<String>,
+    began: i64,
+}
+
+impl WalledClaude {
+    fn stand(leader_term: u32, checkout: &'static str, with_working: bool) -> Self {
+        let began = clock();
+        let gauges = |claude_used: u8| {
+            vec![(
+                "claude",
+                usage_snapshot(
+                    "claude",
+                    Some((claude_used, Some(began + 3 * 60 * 60_000))),
+                    Some((40, None)),
+                    began - 60_000,
+                ),
+            )]
+        };
+        let (window, store) = PrivateWindow::boot_with_usage(gauges(40));
+        let beat = one_beat_at_a_time();
+        let team = format!("team-switch-{leader_term}");
+        seat_a_team(&team, leader_term);
+        let host = AtTheWall {
+            closed: Mutex::new(Vec::new()),
+            busy: Mutex::new(false),
+            onto: Mutex::new(leader_term + 1),
+            checkout,
+            markers: Mutex::new(std::collections::HashMap::new()),
+            asked: Mutex::new(Vec::new()),
+        };
+        let leader = zerocode_core::agent_teams::LEADER_PANE;
+        let verb = |line: &str, at: i64| {
+            let said = run(
+                &host,
+                Vec::new(),
+                &team,
+                leader,
+                TEST_CAPABILITY,
+                &words(line),
+                at,
+            );
+            assert_eq!(said.exit_code, 0, "`{line}`: {}", said.stderr);
+            serde_json::from_str::<serde_json::Value>(&said.stdout).expect("json")
+        };
+        verb("run-create --name switching", began);
+        let task = verb("task-create --spec keep-going", began + 1)["taskId"]
+            .as_str()
+            .expect("a task")
+            .to_string();
+        let started = verb(
+            &format!("worker-start --agent claude --task {task}"),
+            began + 2,
+        );
+        let worker = started["workerId"].as_str().expect("a worker").to_string();
+        let dispatch = started["dispatchId"]
+            .as_str()
+            .expect("a dispatch")
+            .to_string();
+        // Summoned while the gauge still had room: at 98% the summons gate
+        // itself refuses a new claude worker, which is the product's own
+        // answer and not this scenario.
+        let working = with_working.then(|| {
+            host.seating_onto(leader_term + 5);
+            let other = verb("task-create --spec keep-working", began + 3)["taskId"]
+                .as_str()
+                .expect("a task")
+                .to_string();
+            verb(
+                &format!("worker-start --agent claude --task {other}"),
+                began + 4,
+            )["workerId"]
+                .as_str()
+                .expect("a worker")
+                .to_string()
+        });
+        host.screen_says(leader_term + 1, "screen", "You've hit your limit");
+        window.set_usage(gauges(98));
+        notify_stalled_workers(&host, began + 10_000);
+        Self {
+            _window: window,
+            _store: store,
+            _beat: beat,
+            host,
+            team,
+            task,
+            worker,
+            dispatch,
+            working,
+            began,
+        }
+    }
+
+    fn json(&self, line: &str, at: i64) -> serde_json::Value {
+        let said = run(
+            &self.host,
+            Vec::new(),
+            &self.team,
+            zerocode_core::agent_teams::LEADER_PANE,
+            TEST_CAPABILITY,
+            &words(line),
+            at,
+        );
+        assert_eq!(said.exit_code, 0, "`{line}`: {}", said.stderr);
+        serde_json::from_str(&said.stdout).expect("json")
+    }
+
+    fn worker_row(&self) -> zerocode_core::orchestration::WorkerRow {
+        the_rows()
+            .workers
+            .into_iter()
+            .find(|one| one.id == self.worker)
+            .expect("the worker")
+    }
+}
+
+/// The RED this closes, at the window's own boundary: the old road closed
+/// the walled pane first (the account handoff's `close_term`), and the
+/// terminal's exit reached the ledger as a death — attempt spent, task
+/// back to `ready`, `worker_died` in the inbox — so the pane resumed
+/// beside it had to be a NEW worker (2026-09-24 21:2x, five times).
+#[test]
+fn closing_a_walled_pane_first_still_settles_its_worker() {
+    const LEADER_TERM: u32 = 87_000;
+    let repo = tempfile::tempdir().expect("a checkout");
+    let checkout: &'static str =
+        Box::leak(repo.path().to_string_lossy().into_owned().into_boxed_str());
+    let stood = WalledClaude::stand(LEADER_TERM, checkout, false);
+    assert_eq!(
+        stood.json("check --peek --types quota_walled", stood.began + 10_001)["count"],
+        1
+    );
+    terminal_gone(LEADER_TERM + 1, stood.began + 10_002);
+    assert_eq!(
+        stood.json("check --peek --types worker_died", stood.began + 10_003)["count"],
+        1,
+        "the old road's death"
+    );
+    assert_ne!(stood.worker_row().state, WorkerState::Active);
+    crate::agent_teams::forget_term(LEADER_TERM);
+    crate::agent_teams::forget_term(LEADER_TERM + 1);
+}
+
+/// GREEN, on the same boundary: the switch road rests the walled worker
+/// through the ledger, closes its pane — nothing settles, nobody dies —
+/// and the coordinator's restore road seats the SAME worker id, on the
+/// same dispatch and task, in a new pane of the same checkout. A working
+/// worker is not on the walled list and is not rested; the receipt is one
+/// row per key with ids only.
+#[test]
+fn an_auto_switch_relaunches_no_working_pane_and_reseats_only_the_walled_one() {
+    const LEADER_TERM: u32 = 87_100;
+    let repo = tempfile::tempdir().expect("a checkout");
+    let checkout: &'static str =
+        Box::leak(repo.path().to_string_lossy().into_owned().into_boxed_str());
+    let stood = WalledClaude::stand(LEADER_TERM, checkout, true);
+    let now = stood.began + 10_001;
+    // A second, WORKING claude worker beside it: summoned before the wall,
+    // no wall words on its screen.
+    let working = stood.working.clone().expect("the working worker");
+    // The ledger's walled list names the walled one and only it.
+    let walled = super::walled_claude_workers(now + 2);
+    assert_eq!(walled.len(), 1, "{walled:?}");
+    assert_eq!(walled[0].worker, stood.worker);
+    assert_eq!(walled[0].term, LEADER_TERM + 1);
+    assert_eq!(walled[0].dispatch, stood.dispatch);
+    assert_eq!(walled[0].checkout.as_deref(), Some(checkout));
+    // The working worker is refused a rest — it stands at no wall.
+    assert!(super::rest_worker_for_switch(&working, now + 2).is_err());
+    // ① rest, ② close: the exit settles nothing.
+    let began = std::time::Instant::now();
+    super::rest_worker_for_switch(&stood.worker, now + 3).expect("rested");
+    assert_eq!(stood.worker_row().state, WorkerState::Sleeping);
+    terminal_gone(LEADER_TERM + 1, now + 4);
+    assert_eq!(
+        stood.json("check --peek --types worker_died", now + 5)["count"],
+        0,
+        "the switch road announced a death"
+    );
+    // ③ the restore road: the same worker, in a new pane of the same tree.
+    stood.host.seating_onto(LEADER_TERM + 2);
+    let restored = super::reseat_sleeping(
+        &stood.host,
+        Vec::new(),
+        LEADER_TERM,
+        Some(&test_actor(LEADER_TERM)),
+    );
+    let ms = began.elapsed().as_millis();
+    assert_eq!(restored, 1, "the walled worker was not seated again");
+    let row = stood.worker_row();
+    assert_eq!(row.state, WorkerState::Active);
+    assert_eq!(row.dispatch.as_deref(), Some(stood.dispatch.as_str()));
+    assert_eq!(row.checkout.as_deref(), Some(checkout));
+    let (_, _, term, _) = super::worker_seat_now(&stood.worker).expect("a seat");
+    assert_eq!(term, Some(LEADER_TERM + 2));
+    let rows = the_rows();
+    assert_eq!(
+        rows.workers
+            .iter()
+            .filter(|one| one.id == stood.worker)
+            .count(),
+        1,
+        "the switch made a second row"
+    );
+    let task = rows
+        .tasks
+        .iter()
+        .find(|one| one.id == stood.task)
+        .expect("the task");
+    assert_eq!(
+        task.status,
+        zerocode_core::orchestration::TaskStatus::Dispatched
+    );
+    assert_eq!(task.failures, 0);
+    // The working worker never moved.
+    assert_eq!(
+        rows.workers
+            .iter()
+            .find(|one| one.id == working)
+            .expect("the working worker")
+            .state,
+        WorkerState::Active
+    );
+    assert_eq!(
+        stood.json("check --peek --types worker_died", now + 6)["count"],
+        0
+    );
+    // ④ the receipt, once per key, ids only.
+    let receipt = zerocode_core::orchestration::AccountSwitchReceipt {
+        key: format!("pane-{}-{}", stood.dispatch, LEADER_TERM + 1),
+        agent: "claude".to_string(),
+        moved: zerocode_core::orchestration::AccountMove::Pane {
+            worker: stood.worker.clone(),
+            from_pane: "%1".to_string(),
+            to_pane: "%2".to_string(),
+        },
+        from_account: Some("a-fixture".to_string()),
+        to_account: "b-fixture".to_string(),
+        by: "auto".to_string(),
+        reason: "walled".to_string(),
+        observed_percent: Some(98),
+        observed_window: Some("session".to_string()),
+        generation: Some(1),
+        panes_moved: 1,
+    };
+    assert_eq!(
+        super::record_account_switch(receipt.clone(), now + 7),
+        Ok(true)
+    );
+    assert_eq!(
+        super::record_account_switch(receipt, now + 8),
+        Ok(false),
+        "the same switch left two receipts"
+    );
+    let mail = stood.json("check --peek --types account_switched", now + 9);
+    assert_eq!(mail["count"], 1, "{mail}");
+    let told = &mail["messages"][0];
+    assert_eq!(told["from"], "ledger");
+    assert_eq!(told["trust"], "observation");
+    assert!(!told.to_string().contains('@'), "{told}");
+    eprintln!("ACCOUNT_SWITCH_RESEAT rest+close+reseat={ms}ms");
+    crate::agent_teams::forget_term(LEADER_TERM);
+    crate::agent_teams::forget_term(LEADER_TERM + 1);
+    crate::agent_teams::forget_term(LEADER_TERM + 2);
+    crate::agent_teams::forget_term(LEADER_TERM + 5);
+}
+
+/// The wall witness reads the gauge of the account the PANE runs as, not
+/// the selected account's (astra A4): a pane launched as A after the
+/// default moved to B is judged by A's number, and a pane the window
+/// cannot attribute is judged by the provider gauge as before.
+#[test]
+fn a_panes_wall_is_judged_by_its_own_accounts_gauge() {
+    let began = clock();
+    let mut b = usage_snapshot(
+        "claude",
+        Some((98, Some(began + 60 * 60_000))),
+        None,
+        began - 60_000,
+    );
+    b.account = Some("b-fixture".to_string());
+    let mut a = usage_snapshot(
+        "claude",
+        Some((40, Some(began + 60 * 60_000))),
+        None,
+        began - 60_000,
+    );
+    a.account = Some("a-fixture".to_string());
+    let usage = super::UsageSource::fixed(vec![("claude", b), ("claude", a)]);
+    // The selected account (B) is at the wall; the pane runs as A.
+    let as_a = super::usage_headroom_of_account(&usage, "claude", None, Some("a-fixture"))
+        .expect("A's number");
+    assert_eq!(as_a.used_percent, 40);
+    let as_b = super::usage_headroom_of_account(&usage, "claude", None, Some("b-fixture"))
+        .expect("B's number");
+    assert_eq!(as_b.used_percent, 98);
+    // An account nobody read is unknown — never a neighbour's number.
+    assert!(super::usage_headroom_of_account(&usage, "claude", None, Some("c-fixture")).is_none());
+    // No attribution: the provider gauge, first row, as it always was.
+    assert_eq!(
+        super::usage_headroom_of_account(&usage, "claude", None, None)
+            .expect("the provider gauge")
+            .used_percent,
+        98
+    );
+}

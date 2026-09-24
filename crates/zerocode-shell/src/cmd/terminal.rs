@@ -1319,6 +1319,7 @@ pub(crate) fn launch_agent_tab(
         state.team_envs().insert(term, env.clone());
     }
     state.agent_terms().insert(term, spec.id);
+    note_pane_account(&state, term, &env);
     state.launch_tokens().insert(term, launch_token);
     if let Some((addr, token, session_id, observation)) = zo_channel {
         // `session.info` is the durable identity the old bare launch never

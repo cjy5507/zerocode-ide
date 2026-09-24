@@ -237,6 +237,118 @@ pub(crate) fn claude_usage(state: State<'_, AppState>, force: bool) -> UsageRepo
     )
 }
 
+/// One managed Claude account's row for the accounts pane and the status
+/// bar (t-7538): its own reading, whether a read is out, and what the switch
+/// table makes of it.
+#[derive(serde::Serialize)]
+pub(crate) struct AccountUsageRow {
+    pub(crate) id: String,
+    pub(crate) label: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) organization_type: Option<String>,
+    pub(crate) active: bool,
+    pub(crate) usage: Option<usage::ProviderUsage>,
+    pub(crate) fetching: bool,
+}
+
+/// Every managed account's reading and the beat's plan, in one answer.
+#[derive(serde::Serialize)]
+pub(crate) struct AccountUsageReport {
+    pub(crate) accounts: Vec<AccountUsageRow>,
+    pub(crate) plan: crate::account_switch::SwitchPlan,
+    /// How many reads this ask sent out; the window asks again while any is.
+    pub(crate) sent: usize,
+    pub(crate) fetching: bool,
+}
+
+/// Every managed Claude account's own gauge and what the switch table says
+/// about them (t-7538). The selected account is read by `claude_usage` as
+/// before; the others are read here, as themselves, no sooner than the
+/// ambient cadence — or the refetch floor while a switch is being chosen,
+/// or at once for a person's press (`force`).
+#[tauri::command(async)]
+pub(crate) fn claude_account_usage(
+    state: State<'_, AppState>,
+    force: bool,
+) -> Result<AccountUsageReport, String> {
+    let mode = load_settings(state.settings())?
+        .document
+        .claude_autoswitch_mode;
+    let now_ms = epoch_ms_now();
+    let first = crate::account_switch::plan(&state, mode, now_ms);
+    let why = if force {
+        AccountPoll::Person
+    } else if matches!(
+        first.decision,
+        zerocode_core::account_autoswitch::Decision::Switch { .. }
+            | zerocode_core::account_autoswitch::Decision::Wait { .. }
+    ) {
+        AccountPoll::Candidate
+    } else {
+        AccountPoll::Ambient
+    };
+    let sent = refresh_inactive_claude_accounts(state.config_root(), state.local_data_root(), why);
+    let plan = first;
+    let store = accounts::read_store(state.config_root());
+    let map = claude_account_usage_cache(state.local_data_root())
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let main = claude_usage_cache(state.local_data_root())
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    let accounts = store
+        .accounts
+        .iter()
+        .map(|account| {
+            let active = plan.active.as_deref() == Some(account.id.as_str());
+            let usage = match &main {
+                Some(main) if active && main.account.as_deref() == Some(account.id.as_str()) => {
+                    Some(main.clone())
+                }
+                _ => map.get(&account.id).cloned(),
+            };
+            AccountUsageRow {
+                id: account.id.clone(),
+                label: account.label(),
+                organization_type: account.organization_type.clone(),
+                active,
+                usage,
+                fetching: !active && claude_account_scanning_now(&account.id),
+            }
+        })
+        .collect::<Vec<_>>();
+    let fetching = accounts.iter().any(|row| row.fetching);
+    Ok(AccountUsageReport {
+        accounts,
+        plan,
+        sent,
+        fetching,
+    })
+}
+
+/// Apply the plan the window was shown — by its token, so a `yes` given to
+/// a proposal that has since changed is refused (t-7538). `by` is `auto`
+/// for the beat's own move and `ask` for a person's acceptance.
+///
+/// `models` is the window's record of what each pane's hook last said it
+/// runs, keyed by terminal — the restore continues on it.
+#[tauri::command(async)]
+pub(crate) fn claude_autoswitch_apply(
+    app: AppHandle,
+    token: String,
+    by: String,
+    models: Option<HashMap<u32, String>>,
+) -> Result<crate::account_switch::Applied, String> {
+    if by != "auto" && by != "ask" {
+        return Err(format!(
+            "{by}는 전환의 주체로 아는 낱말이 아닙니다 (auto|ask)"
+        ));
+    }
+    crate::account_switch::apply(&app, &token, &by, &models.unwrap_or_default())
+}
+
 /// One gauge's ask, as the status bar makes it.
 type AskUsage = for<'a> fn(State<'a, AppState>, bool) -> UsageReport;
 
@@ -898,6 +1010,7 @@ pub(crate) fn remove_claude_account(
     id: String,
 ) -> Result<AccountsReport, String> {
     accounts::remove_account(state.config_root(), state.local_data_root(), &id)?;
+    forget_claude_account_usage(state.local_data_root(), &id);
     readiness_runtime::login_moved(Provider::Anthropic);
     Ok(accounts_report(
         state.config_root(),

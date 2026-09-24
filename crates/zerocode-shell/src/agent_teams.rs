@@ -972,6 +972,12 @@ pub trait Host {
     /// while nobody looks at the window. Test and tmux-only hosts read
     /// nothing.
     fn ask_usage(&self, _gauge: &str) {}
+    /// The managed account this pane was launched as, when the window
+    /// recorded one (t-7538) — the wall witness judges the pane against
+    /// THAT account's gauge. `None` is "unknown", never "the selected one".
+    fn pane_account(&self, _term: u32) -> Option<String> {
+        None
+    }
 
     /// Publish a restored worker only after its durable seat has moved. Fake
     /// hosts need no renderer surface and therefore default to doing nothing.

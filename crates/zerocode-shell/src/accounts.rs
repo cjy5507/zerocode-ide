@@ -2052,19 +2052,28 @@ pub fn select_account(config_root: &Path, program: &str, id: &str) -> Result<Acc
     })
 }
 
+/// A refusal about one account, said by the account's ID and never by its
+/// email (t-7538, astra C1).
+///
+/// These sentences travel: the settings dialog shows them, the auto-switch
+/// road writes them into its receipt and the window's log, and a worker
+/// may quote one back in its report. An address in them was an address in
+/// every one of those places. The id is the window's own, stable, and the
+/// accounts pane already knows how to draw a label for it.
+pub(crate) fn account_refusal(account: &ClaudeAccount, what: &str) -> String {
+    format!("선택한 Claude 계정({})의 {what}", account.id)
+}
+
 fn require_live_account(
     account: &ClaudeAccount,
     probe: &mut impl FnMut(&Path) -> Option<bool>,
 ) -> Result<(), String> {
     match probe(Path::new(&account.config_dir)) {
         Some(true) => Ok(()),
-        Some(false) => Err(format!(
-            "선택한 Claude 계정 {}의 로그인이 만료되었습니다",
-            account.email
-        )),
-        None => Err(format!(
-            "선택한 Claude 계정 {}의 로그인 상태를 확인하지 못했습니다",
-            account.email
+        Some(false) => Err(account_refusal(account, "로그인이 만료되었습니다")),
+        None => Err(account_refusal(
+            account,
+            "로그인 상태를 확인하지 못했습니다",
         )),
     }
 }
@@ -2076,13 +2085,13 @@ fn require_live_runtime(
 ) -> Result<(), String> {
     match status {
         Some(true) => Ok(()),
-        Some(false) => Err(format!(
-            "선택한 Claude 계정 {}을 앱 런타임에 {action}하지 못했습니다",
-            account.email
+        Some(false) => Err(account_refusal(
+            account,
+            &format!("로그인을 앱 런타임에 {action}하지 못했습니다"),
         )),
-        None => Err(format!(
-            "선택한 Claude 계정 {}의 앱 런타임 상태를 확인하지 못했습니다",
-            account.email
+        None => Err(account_refusal(
+            account,
+            "앱 런타임 상태를 확인하지 못했습니다",
         )),
     }
 }
@@ -2309,16 +2318,70 @@ pub(crate) fn usage_login(env: &[(String, String)]) -> Option<(String, LoginFrom
             .find(|(key, _)| key == var)
             .map(|(_, value)| PathBuf::from(value))
     };
+    usage_login_in(
+        named(zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR).as_deref(),
+        named(zerocode_core::account::CONFIG_DIR_VAR).as_deref(),
+    )
+}
+
+/// The same walk for ONE account that is not the selected one (t-7538).
+///
+/// Its own store, and only its own: the keychain item scoped to the
+/// account's directory, then the credentials file IN that directory. Never
+/// the runtime home — the runtime home's file is the copy [`materialize`]
+/// wrote for the SELECTED account, and a read of account B that fell back
+/// to it would ask the endpoint with A's token and file the answer under
+/// B's name (astra A1). A read that finds nothing answers `None`, and the
+/// caller reports the account as unreadable rather than as anybody's
+/// number.
+///
+/// A look, and only a look, like [`usage_login`]: nothing is seeded or
+/// written for an inactive account — the scan's [`prepare_selected_store`]
+/// seeds the selected store only, and a poll that wrote every account's
+/// keychain item on a timer is the dialog storm this file has already paid
+/// for once.
+pub(crate) fn usage_login_of_account(account: &ClaudeAccount) -> Option<(String, LoginFrom)> {
+    let dir = Path::new(&account.config_dir);
+    usage_login_in(Some(dir), Some(dir))
+}
+
+/// [`USAGE_LOGIN_ORDER`], walked over the two places a login can be: the
+/// keychain item scoped to `store`, then the credentials file under
+/// `file_home`. The one statement of the walk; both readers above are it.
+fn usage_login_in(store: Option<&Path>, file_home: Option<&Path>) -> Option<(String, LoginFrom)> {
     USAGE_LOGIN_ORDER.into_iter().find_map(|from| {
         let login = match from {
-            LoginFrom::Keychain => named(zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR)
-                .and_then(|store| keychain_says(&store).login().map(str::to_string)),
-            LoginFrom::File => named(zerocode_core::account::CONFIG_DIR_VAR)
+            LoginFrom::Keychain => {
+                store.and_then(|store| keychain_says(store).login().map(str::to_string))
+            }
+            LoginFrom::File => file_home
                 .and_then(|home| std::fs::read_to_string(home.join(CREDENTIALS_FILE)).ok())
                 .filter(|text| holds_login(text)),
         };
         login.map(|text| (text, from))
     })
+}
+
+/// Which managed account a launch environment runs as, read back off the
+/// secure-storage directory it names (t-7538).
+///
+/// The window records this beside every Claude pane it opens, so a wall
+/// witnessed in that pane is judged against THAT account's gauge and not
+/// against whichever account is selected by then (astra A4). `None` for an
+/// environment that names no managed store — the machine's own login, or a
+/// pane this window did not launch — which is "unknown", never "the
+/// active one".
+pub(crate) fn account_of_env(config_root: &Path, env: &[(String, String)]) -> Option<String> {
+    let store = env
+        .iter()
+        .rev()
+        .find(|(key, _)| key == zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR)
+        .map(|(_, value)| Path::new(value.as_str()))?;
+    read_store(config_root)
+        .accounts
+        .into_iter()
+        .find(|account| Path::new(&account.config_dir) == store)
+        .map(|account| account.id)
 }
 
 /// Which home a LOOK at the Claude login reads (t-3996), and whose it is.
@@ -2357,10 +2420,7 @@ pub fn launch_env_for(config_root: &Path, agent: &str) -> Result<Vec<(String, St
     // send the launch back to an external terminal home either.
     let dir = Path::new(&account.config_dir);
     if !signed_in(dir) {
-        return Err(format!(
-            "선택한 Claude 계정 {}의 로그인이 유효하지 않습니다",
-            account.email
-        ));
+        return Err(account_refusal(&account, "로그인이 유효하지 않습니다"));
     }
     // Its login into the one home, before the launch reads that home. On the
     // launch road and not only on the switch, because the directories that need
@@ -2371,9 +2431,9 @@ pub fn launch_env_for(config_root: &Path, agent: &str) -> Result<Vec<(String, St
     materialize(config_root, &account)?;
     let home = runtime_home(config_root);
     if !signed_in(&home) {
-        return Err(format!(
-            "선택한 Claude 계정 {}을 앱 런타임에 준비하지 못했습니다",
-            account.email
+        return Err(account_refusal(
+            &account,
+            "로그인을 앱 런타임에 준비하지 못했습니다",
         ));
     }
     Ok(isolated)
@@ -3257,6 +3317,131 @@ JSON
         store.accounts.push(account.clone());
         write_store(config_root, &store).expect("store");
         account
+    }
+
+    /// An inactive account's usage read asks with THAT account's own login —
+    /// its scoped keychain item, then the file in its own directory — and
+    /// never with the selected account's, whose copy sits in the runtime
+    /// home (t-7538, astra A1). The window used to have one reader, keyed by
+    /// the launch environment, which names the runtime home: a read of B
+    /// through it was a read of A wearing B's name.
+    #[test]
+    fn an_inactive_accounts_usage_is_read_with_its_own_login_and_never_the_active_ones() {
+        let root = tempfile::tempdir().unwrap();
+        let a = one_account(
+            root.path(),
+            "a-fixture",
+            "a@example.test",
+            "TOKEN-A-FIXTURE",
+        );
+        let b = one_account(
+            root.path(),
+            "b-fixture",
+            "b@example.test",
+            "TOKEN-B-FIXTURE",
+        );
+        // A is selected and materialized: the runtime home holds A's copy.
+        let mut store = read_store(root.path());
+        store.selection.active = Some(a.id.clone());
+        write_store(root.path(), &store).unwrap();
+        materialize(root.path(), &a).expect("materialized");
+        let active = usage_login(&reading_env_for(root.path(), "claude")).expect("A's login");
+        assert!(
+            active.0.contains("TOKEN-A-FIXTURE"),
+            "the active read is not A's"
+        );
+        // B, read as itself: B's own file (no keychain item yet).
+        let (text, from) = usage_login_of_account(&b).expect("B's login");
+        assert!(
+            text.contains("TOKEN-B-FIXTURE"),
+            "B's read came back as somebody else's"
+        );
+        assert!(!text.contains("TOKEN-A-FIXTURE"));
+        assert_eq!(from, LoginFrom::File);
+        // The CLI refreshed B's token in B's scoped item: the keychain wins,
+        // as it does for the selected account (t-6583).
+        #[cfg(target_os = "macos")]
+        {
+            let refreshed = r#"{"claudeAiOauth":{"accessToken":"TOKEN-B-REFRESHED"}}"#;
+            write_keychain(Path::new(&b.config_dir), refreshed).unwrap();
+            let (text, from) = usage_login_of_account(&b).expect("B's refreshed login");
+            assert!(text.contains("TOKEN-B-REFRESHED"));
+            assert_eq!(from, LoginFrom::Keychain);
+        }
+        // B's directory lost its login: the answer is NOTHING — not A's copy
+        // in the runtime home, which is a byte away in the old reader.
+        std::fs::remove_file(Path::new(&b.config_dir).join(CREDENTIALS_FILE)).unwrap();
+        #[cfg(target_os = "macos")]
+        delete_keychain_service(&keychain_services(Path::new(&b.config_dir)).remove(0)).unwrap();
+        assert_eq!(usage_login_of_account(&b), None);
+        assert!(
+            usage_login(&reading_env_for(root.path(), "claude"))
+                .is_some_and(|(text, _)| text.contains("TOKEN-A-FIXTURE")),
+            "the selected account's read moved"
+        );
+        // And the runtime home never learned B: only the selected account is
+        // materialized there.
+        let home = std::fs::read_to_string(runtime_home(root.path()).join(CREDENTIALS_FILE))
+            .unwrap_or_default();
+        assert!(!home.contains("TOKEN-B"));
+    }
+
+    /// A launch environment names the account it runs as — by the secure
+    /// store it points at — and an environment that names none is unknown,
+    /// never "the active one" (astra A4).
+    #[test]
+    fn a_pane_is_attributed_to_the_account_its_environment_names_or_to_nobody() {
+        let root = tempfile::tempdir().unwrap();
+        let a = one_account(root.path(), "a-fixture", "a@example.test", "TOKEN-A");
+        let b = one_account(root.path(), "b-fixture", "b@example.test", "TOKEN-B");
+        let mut store = read_store(root.path());
+        store.selection.active = Some(a.id.clone());
+        write_store(root.path(), &store).unwrap();
+        let env = reading_env_for(root.path(), "claude");
+        assert_eq!(
+            account_of_env(root.path(), &env).as_deref(),
+            Some("a-fixture")
+        );
+        let env_b = zerocode_core::launch_env(
+            None,
+            runtime_home(root.path()).to_str(),
+            Some(b.config_dir.as_str()),
+        );
+        assert_eq!(
+            account_of_env(root.path(), &env_b).as_deref(),
+            Some("b-fixture")
+        );
+        assert_eq!(account_of_env(root.path(), &[]), None);
+        let elsewhere = vec![(
+            zerocode_core::account::SECURE_STORAGE_CONFIG_DIR_VAR.to_string(),
+            "/nowhere/fixture".to_string(),
+        )];
+        assert_eq!(account_of_env(root.path(), &elsewhere), None);
+    }
+
+    /// Every refusal about an account names it by id. The email used to be
+    /// in the sentence, and the sentence reaches the dialog, the receipt,
+    /// the log and a worker's report (astra C1).
+    #[test]
+    fn an_account_refusal_never_carries_the_email() {
+        let root = tempfile::tempdir().unwrap();
+        let a = one_account(root.path(), "a-fixture", "somebody@example.test", "TOKEN-A");
+        for said in [
+            require_live_account(&a, &mut |_| Some(false)).unwrap_err(),
+            require_live_account(&a, &mut |_| None).unwrap_err(),
+            require_live_runtime(&a, Some(false), "적용").unwrap_err(),
+            require_live_runtime(&a, None, "적용").unwrap_err(),
+            account_refusal(&a, "x"),
+        ] {
+            assert!(said.contains("a-fixture"), "{said}");
+            assert!(!said.contains('@'), "an address in a refusal: {said}");
+        }
+        std::fs::remove_dir_all(&a.config_dir).unwrap();
+        let mut store = read_store(root.path());
+        store.selection.active = Some(a.id.clone());
+        write_store(root.path(), &store).unwrap();
+        let said = launch_env_for(root.path(), "claude").unwrap_err();
+        assert!(said.contains("a-fixture") && !said.contains('@'), "{said}");
     }
 
     fn cli_writes_credentials(dir: &Path, credentials: &str) {

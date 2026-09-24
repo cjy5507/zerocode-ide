@@ -56,6 +56,7 @@ use zerocode_pty::{
 };
 use zerocode_shell_state::AppState;
 
+mod account_switch;
 mod accounts;
 mod agent_teams;
 mod agent_tools_runtime;
@@ -229,8 +230,9 @@ use cmd::{
     browser_menu_take, browser_navigate, browser_network, browser_place, browser_profiles,
     browser_read, browser_reload, browser_scroll, browser_snapshot, browser_stop, browser_type,
     browser_wait, browser_zoom, build_stamp, busy_census, cancel_folder_panel, cancel_google_login,
-    check_typesafe_key, choose_paths, choose_project, claude_accounts, claude_token_usage,
-    claude_usage, claude_usage_stats, clear_delivered_diff_notes, clear_diff_notes, cli_login_list,
+    check_typesafe_key, choose_paths, choose_project, claude_account_usage, claude_accounts,
+    claude_autoswitch_apply, claude_autoswitch_mode, claude_token_usage, claude_usage,
+    claude_usage_stats, clear_delivered_diff_notes, clear_diff_notes, cli_login_list,
     cli_login_logout, cli_login_start, cli_login_wait, cli_login_witness, cli_login_witness_drop,
     clipboard_has_image, clone_repository, clone_target_name, close_browser_pane, close_lane,
     close_onboarding, close_term, codex_account_list, codex_token_usage, codex_usage,
@@ -301,11 +303,11 @@ use cmd::{
     set_agent_activity_display, set_agent_permission_mode, set_agent_teams_mode,
     set_app_font_family, set_browser_default_profile, set_browser_default_zoom,
     set_browser_home_page, set_browser_open_tabs, set_browser_restore_tabs,
-    set_browser_search_engine, set_browser_visits, set_clipboard_image, set_compact_worktree_cards,
-    set_computer_awake_mode, set_computer_confirm, set_confirm_close_pinned,
-    set_conversation_focus_view, set_crash_watchdog, set_ctrl_tab_order_mode, set_default_agent,
-    set_default_task_source, set_diff_side_by_side, set_dock_badge,
-    set_external_worktree_visibility, set_guide_dismissed, set_hidden_shortcuts,
+    set_browser_search_engine, set_browser_visits, set_claude_autoswitch_mode, set_clipboard_image,
+    set_compact_worktree_cards, set_computer_awake_mode, set_computer_confirm,
+    set_confirm_close_pinned, set_conversation_focus_view, set_crash_watchdog,
+    set_ctrl_tab_order_mode, set_default_agent, set_default_task_source, set_diff_side_by_side,
+    set_dock_badge, set_external_worktree_visibility, set_guide_dismissed, set_hidden_shortcuts,
     set_hidden_task_sources, set_hide_agent_scratch_workspaces, set_hide_automation_workspaces,
     set_hide_default_branch_workspaces, set_hide_detached_head_workspaces,
     set_hide_sleeping_workspaces, set_hooks_enabled, set_jev_enabled, set_jev_model,
@@ -978,6 +980,12 @@ struct ShellRuntime {
     /// launched", and the send path still waits for the agent to actually
     /// listen before typing at it.
     agent_terms: Mutex<HashMap<TermId, &'static str>>,
+    /// Which managed Claude account each launched pane runs as (t-7538) —
+    /// read off the launch environment's secure store at spawn, beside
+    /// `agent_terms`. A pane with no row is unknown, never the selected one:
+    /// its wall is judged by the provider gauge as before, and the switch
+    /// road moves only panes it can attribute.
+    pane_accounts: Mutex<HashMap<TermId, String>>,
     /// The nonce each launched agent was handed, by the shell it runs in.
     ///
     /// A hook event carries the token its agent was started with. Relaunching a
@@ -1459,6 +1467,12 @@ impl ShellRuntime {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn pane_accounts(&self) -> MutexGuard<'_, HashMap<TermId, String>> {
+        self.pane_accounts
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn launch_tokens(&self) -> MutexGuard<'_, HashMap<TermId, String>> {
         self.launch_tokens
             .lock()
@@ -1764,6 +1778,7 @@ trait ShellStateExt {
     fn isolated_worker_terms(&self) -> MutexGuard<'_, HashMap<TermId, IsolatedWorkerCheckout>>;
     fn prompt_queue(&self) -> MutexGuard<'_, HashMap<TermId, VecDeque<QueuedPrompt>>>;
     fn agent_terms(&self) -> MutexGuard<'_, HashMap<TermId, &'static str>>;
+    fn pane_accounts(&self) -> MutexGuard<'_, HashMap<TermId, String>>;
     fn launch_tokens(&self) -> MutexGuard<'_, HashMap<TermId, String>>;
     fn untitled_markdowns(&self) -> MutexGuard<'_, std::collections::HashSet<String>>;
     fn browser_panes(&self) -> MutexGuard<'_, std::collections::HashSet<String>>;
@@ -1941,6 +1956,10 @@ impl ShellStateExt for AppState {
 
     fn agent_terms(&self) -> MutexGuard<'_, HashMap<TermId, &'static str>> {
         self.shell_runtime().agent_terms()
+    }
+
+    fn pane_accounts(&self) -> MutexGuard<'_, HashMap<TermId, String>> {
+        self.shell_runtime().pane_accounts()
     }
 
     fn launch_tokens(&self) -> MutexGuard<'_, HashMap<TermId, String>> {
@@ -2304,6 +2323,7 @@ fn build_app_state(paths: app_paths::AppPaths, root: PathBuf) -> AppState {
         completed_worker_cleanups: Mutex::new(HashMap::new()),
         isolated_worker_terms: Mutex::new(HashMap::new()),
         agent_terms: Mutex::new(HashMap::new()),
+        pane_accounts: Mutex::new(HashMap::new()),
         launch_tokens: Mutex::new(HashMap::new()),
         untitled_markdowns: Mutex::new(std::collections::HashSet::new()),
         browser_panes: Mutex::new(std::collections::HashSet::new()),
@@ -2721,6 +2741,8 @@ fn main() -> ExitCode {
             launch_agent_tab,
             list_claude_sessions,
             claude_usage,
+            claude_account_usage,
+            claude_autoswitch_apply,
             claude_usage_stats,
             codex_usage_stats,
             opencode_usage_stats,
@@ -2990,6 +3012,8 @@ fn main() -> ExitCode {
             set_workspace_board_column_width,
             set_agent_teams_mode,
             agent_teams_mode,
+            set_claude_autoswitch_mode,
+            claude_autoswitch_mode,
             set_confirm_close_pinned,
             set_computer_confirm,
             computer_confirm_answer,

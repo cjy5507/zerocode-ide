@@ -6489,6 +6489,7 @@ fn a_worker_cannot_speak_as_the_ledger_by_naming_its_notice() {
         MessageKind::Resumed,
         MessageKind::ClassifierDeclined,
         MessageKind::ModelDeviated,
+        MessageKind::AccountSwitched,
     ] {
         assert!(kind.is_the_ledgers_own(), "{}", kind.as_str());
         let typed = bench.at(
@@ -24039,4 +24040,318 @@ fn a_worker_with_no_transcript_is_unavailable_never_its_screen() {
         "{}",
         refused.reply.stderr
     );
+}
+
+/* ---- account switch: the same seat, another login (t-7538) --------------- */
+
+/// A walled Claude worker, seated in a checkout, with its `quota_walled`
+/// row standing — the one shape the switch road may move.
+fn a_walled_claude_worker(bench: &mut Bench, now_ms: i64) -> (String, String, String, String) {
+    bench.json("run-create --name switching");
+    let task = bench.json("task-create --spec keep-going")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    assert!(
+        bench
+            .ledger
+            .worker_seated(("team-1", &pane), "/wt/switching")
+    );
+    let witness = quota_wall_witness(
+        &worker,
+        Some(a_wall_marker("screen", "You've hit your limit")),
+        Some(&gauge(
+            "claude",
+            98,
+            now_ms - 60_000,
+            Some(now_ms + 3 * 60 * 60_000),
+        )),
+        now_ms,
+    )
+    .expect("two witnesses");
+    assert_eq!(bench.ledger.workers_quota_walled(&[witness], now_ms), 1);
+    let dispatch = bench.ledger.runs()[0]
+        .worker(&worker)
+        .and_then(|held| held.dispatch.clone())
+        .expect("the dispatch");
+    (worker, pane, task, dispatch)
+}
+
+/// The old product's road, kept as the RED this closes: a walled pane
+/// closed for a switch settled its worker — attempt spent, task back at
+/// `ready`, a `worker_died` in the coordinator's inbox — and the pane
+/// resumed beside it had to be a NEW worker (2026-09-24 21:2x, five of
+/// them, "함정 410"). The switch road rests the worker first, so the same
+/// pane's exit settles nothing and the same worker id is seated again.
+#[test]
+fn a_switch_reseats_the_same_worker_id() {
+    const NOW: i64 = 5_000_000;
+    // RED, on the road as it stood: close first, and the worker dies.
+    {
+        let mut bench = Bench::new();
+        let (worker, pane, task, _) = a_walled_claude_worker(&mut bench, NOW);
+        assert_eq!(
+            bench
+                .ledger
+                .terminal_gone("team-1", &pane, NOW + 1)
+                .as_deref(),
+            Some(worker.as_str())
+        );
+        assert_eq!(bench.json("check --peek --types worker_died")["count"], 1);
+        let run = &bench.ledger.runs()[0];
+        assert_eq!(run.task(&task).expect("the task").failures, 1);
+        assert_ne!(
+            run.worker(&worker).expect("the worker").state,
+            WorkerState::Active
+        );
+    }
+    // GREEN: rest, then close, then seat again — the same id.
+    let mut bench = Bench::new();
+    let (worker, pane, task, dispatch) = a_walled_claude_worker(&mut bench, NOW);
+    assert_eq!(
+        bench
+            .ledger
+            .worker_rested_for_account_switch(&worker, NOW + 1)
+            .as_deref(),
+        Ok(dispatch.as_str())
+    );
+    {
+        let run = &bench.ledger.runs()[0];
+        let held = run.worker(&worker).expect("the worker");
+        assert_eq!(held.state, WorkerState::Sleeping);
+        assert_eq!(held.dispatch.as_deref(), Some(dispatch.as_str()));
+        assert!(run.dispatch(&dispatch).is_some_and(Dispatch::is_open));
+        assert_eq!(
+            run.task(&task).expect("the task").status,
+            TaskStatus::Dispatched
+        );
+    }
+    // The old pane closes: an empty seat, nothing settles, nobody dies.
+    assert_eq!(bench.ledger.terminal_gone("team-1", &pane, NOW + 2), None);
+    assert_eq!(bench.json("check --peek --types worker_died")["count"], 0);
+    // A second rest of a sleeper is refused — it is not live any more.
+    assert!(
+        bench
+            .ledger
+            .worker_rested_for_account_switch(&worker, NOW + 3)
+            .is_err()
+    );
+    // The restore road seats the SAME worker in the new pane: same id,
+    // same dispatch, the task still dispatched, no attempt spent.
+    bench.team.record_split(
+        "%9",
+        909,
+        agent_teams::LEADER_PANE,
+        agent_teams::Direction::Vertical,
+    );
+    bench
+        .ledger
+        .worker_reseated(&worker, ("team-1", "%9"), NOW + 4)
+        .expect("reseated");
+    let run = &bench.ledger.runs()[0];
+    let held = run.worker(&worker).expect("the worker");
+    assert_eq!(held.state, WorkerState::Active);
+    assert_eq!(held.pane, "%9");
+    assert_eq!(held.dispatch.as_deref(), Some(dispatch.as_str()));
+    assert_eq!(held.checkout.as_deref(), Some("/wt/switching"));
+    assert_eq!(run.task(&task).expect("the task").failures, 0);
+    assert_eq!(
+        run.workers.iter().filter(|one| one.id == worker).count(),
+        1,
+        "the switch made a second row for one worker"
+    );
+    assert_eq!(bench.json("check --peek --types worker_died")["count"], 0);
+}
+
+/// Only a walled worker is moved. A working pane at 97% is left exactly
+/// where it is (the two-witness contract), a person's pane is never the
+/// ledger's to move, and a worker with no checkout has nowhere to go.
+#[test]
+fn a_switch_rests_only_a_walled_worker_in_its_own_seat() {
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name working");
+    let task = bench.json("task-create --spec keep-going")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    // No checkout yet: refused for that.
+    let refused = bench
+        .ledger
+        .worker_rested_for_account_switch(&worker, NOW)
+        .unwrap_err();
+    assert!(refused.contains("checkout"), "{refused}");
+    assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/working"));
+    // Seated, working, no wall: refused for that — the number alone is not
+    // a wall, and this road does not even read the number.
+    let refused = bench
+        .ledger
+        .worker_rested_for_account_switch(&worker, NOW)
+        .unwrap_err();
+    assert!(refused.contains("quota wall"), "{refused}");
+    assert_eq!(
+        bench.ledger.runs()[0]
+            .worker(&worker)
+            .expect("the worker")
+            .state,
+        WorkerState::Active
+    );
+    // Walled, but a person's hand is on it: refused for that.
+    let witness = quota_wall_witness(
+        &worker,
+        Some(a_wall_marker("screen", "You've hit your limit")),
+        Some(&gauge("claude", 98, NOW - 60_000, Some(NOW + 60 * 60_000))),
+        NOW,
+    )
+    .expect("two witnesses");
+    assert_eq!(bench.ledger.workers_quota_walled(&[witness], NOW), 1);
+    {
+        let at = bench.ledger.locate(&worker).expect("the worker");
+        bench.ledger.runs[at.0].workers[at.1].taken_over = true;
+    }
+    let refused = bench
+        .ledger
+        .worker_rested_for_account_switch(&worker, NOW + 1)
+        .unwrap_err();
+    assert!(refused.contains("taken over"), "{refused}");
+    // An unknown worker is unknown.
+    assert!(
+        bench
+            .ledger
+            .worker_rested_for_account_switch("w-nobody", NOW + 1)
+            .is_err()
+    );
+}
+
+/// Every switch leaves ONE receipt in the ledger's own voice, keyed so a
+/// retry after a crash writes nothing more; the body names accounts by
+/// id and says what moved, and no peer can type the kind. The fixture's
+/// credential sentinel never reaches the row: the receipt has no field a
+/// token could ride in, and the test reads the whole row to say so.
+#[test]
+fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
+    const NOW: i64 = 5_000_000;
+    const SENTINEL: &str = "sk-ant-oat01-SENTINEL-NEVER-IN-A-ROW";
+    let mut bench = Bench::new();
+    let (worker, pane, task, dispatch) = a_walled_claude_worker(&mut bench, NOW);
+    let receipt = AccountSwitchReceipt {
+        key: format!("switch-{dispatch}-1"),
+        agent: "claude".to_string(),
+        moved: AccountMove::Pane {
+            worker: worker.clone(),
+            from_pane: pane.clone(),
+            to_pane: "%9".to_string(),
+        },
+        from_account: Some("a1-fixture".to_string()),
+        to_account: "a2-fixture".to_string(),
+        by: "auto".to_string(),
+        reason: "walled".to_string(),
+        observed_percent: Some(98),
+        observed_window: Some("weekly".to_string()),
+        generation: Some(1),
+        panes_moved: 1,
+    };
+    let written = bench
+        .ledger
+        .account_switched(&receipt, NOW + 5)
+        .expect("a receipt");
+    assert_eq!(written.len(), 1, "{written:?}");
+    // Asked again — a crash between the row and the window's own record —
+    // and nothing more is written.
+    assert_eq!(
+        bench
+            .ledger
+            .account_switched(&receipt, NOW + 6)
+            .expect("a repeat")
+            .len(),
+        0
+    );
+    let mail = bench.json("check --peek --types account_switched");
+    assert_eq!(mail["count"], 1, "{mail}");
+    let told = &mail["messages"][0];
+    assert_eq!(told["from"], LEDGER_ITSELF);
+    assert_eq!(told[MESSAGE_SOURCE_FIELD], "ledger");
+    assert_eq!(told[MESSAGE_TRUST_FIELD], "observation");
+    assert_eq!(told["taskId"], task);
+    assert_eq!(told["dispatchId"], dispatch);
+    let body: serde_json::Value =
+        serde_json::from_str(told["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["moved"], "pane");
+    assert_eq!(body["workerId"], worker);
+    assert_eq!(body["fromPane"], pane);
+    assert_eq!(body["toPane"], "%9");
+    assert_eq!(body["fromAccount"], "a1-fixture");
+    assert_eq!(body["toAccount"], "a2-fixture");
+    assert_eq!(body["by"], "auto");
+    assert_eq!(body["reason"], "walled");
+    assert_eq!(body["observedPercent"], 98);
+    assert_eq!(body["panesMoved"], 1);
+    assert_eq!(body["generation"], 1);
+    assert_eq!(body["switchedAtMs"], NOW + 5);
+    let whole = told.to_string();
+    assert!(!whole.contains(SENTINEL));
+    assert!(!whole.contains('@'), "an address reached the row: {whole}");
+    assert!(
+        !whole.to_ascii_lowercase().contains("token"),
+        "a credential word reached the row: {whole}"
+    );
+
+    // A default move concerns the runs holding live workers of the agent:
+    // this run has one, so one row; and the same key again writes none.
+    let moved_default = AccountSwitchReceipt {
+        key: "default-1".to_string(),
+        moved: AccountMove::Default,
+        panes_moved: 0,
+        reason: "near_limit".to_string(),
+        ..receipt.clone()
+    };
+    assert_eq!(
+        bench
+            .ledger
+            .account_switched(&moved_default, NOW + 7)
+            .expect("a receipt")
+            .len(),
+        1
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .account_switched(&moved_default, NOW + 8)
+            .expect("a repeat")
+            .len(),
+        0
+    );
+    let bodies: Vec<serde_json::Value> =
+        bench.json("check --peek --types account_switched")["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|told| serde_json::from_str(told["body"].as_str().expect("a body")).expect("json"))
+            .collect();
+    assert_eq!(bodies.len(), 2, "{bodies:?}");
+    let body = bodies
+        .iter()
+        .find(|body| body["moved"] == "default")
+        .expect("the default move's receipt");
+    assert_eq!(body["panesMoved"], 0);
+    // An empty key is refused; a peer typing the kind is refused.
+    assert!(
+        bench
+            .ledger
+            .account_switched(
+                &AccountSwitchReceipt {
+                    key: " ".to_string(),
+                    ..receipt.clone()
+                },
+                NOW + 9
+            )
+            .is_err()
+    );
+    let typed = bench.at(
+        &pane,
+        "send --type account_switched --body {\"toAccount\":\"x\"}",
+    );
+    assert_eq!(typed.reply.exit_code, 1, "{}", typed.reply.stdout);
 }

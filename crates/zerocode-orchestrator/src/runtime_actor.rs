@@ -591,6 +591,25 @@ pub enum RuntimeRequest {
         reason: String,
         now_ms: i64,
     },
+    /// The window is about to close a WALLED worker's pane to seat it again
+    /// on another account (t-7538): the row sleeps with its attempt open,
+    /// so the pane's exit settles nothing and the restore road seats the
+    /// same worker. The ledger revalidates the wall.
+    WorkerRestedForSwitch { worker: String, now_ms: i64 },
+    /// A pane's own hook said which model and effort it runs; the row
+    /// follows (t-7538), so a restore continues on what the pane really ran.
+    WorkerTuningObserved {
+        worker: String,
+        model: Option<String>,
+        effort: Option<String>,
+        now_ms: i64,
+    },
+    /// The window moved a Claude account — the default, or one walled pane —
+    /// and the ledger writes its receipt once per key (t-7538).
+    AccountSwitched {
+        receipt: Box<zerocode_core::orchestration::AccountSwitchReceipt>,
+        now_ms: i64,
+    },
     /// A pane the plan asked for never opened: the worker row it minted
     /// goes back, durably — the third host fact, and the rollback half of
     /// the effect round trip.
@@ -985,6 +1004,28 @@ impl std::fmt::Debug for RuntimeRequest {
                 .field("worker_bytes", &worker.len())
                 .field("team_bytes", &team.len())
                 .field("pane_bytes", &pane.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::WorkerRestedForSwitch { worker, now_ms } => formatter
+                .debug_struct("RuntimeRequest::WorkerRestedForSwitch")
+                .field("worker_bytes", &worker.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::AccountSwitched { receipt, now_ms } => formatter
+                .debug_struct("RuntimeRequest::AccountSwitched")
+                .field("key_bytes", &receipt.key.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::WorkerTuningObserved {
+                worker,
+                model,
+                effort,
+                now_ms,
+            } => formatter
+                .debug_struct("RuntimeRequest::WorkerTuningObserved")
+                .field("worker_bytes", &worker.len())
+                .field("model", model)
+                .field("effort", effort)
                 .field("now_ms", now_ms)
                 .finish(),
             Self::FinishSleepingReseat {
@@ -2304,6 +2345,60 @@ impl RuntimeActor {
         }
     }
 
+    /// Put a walled worker to sleep ahead of closing its pane, so the same
+    /// worker can be seated again on another account (t-7538). The
+    /// ledger's refusal — no wall, a person's pane, no checkout — comes
+    /// back as `AuthorityRejected` and nothing moves.
+    pub fn worker_rested_for_switch(
+        &self,
+        worker: impl Into<String>,
+        now_ms: i64,
+    ) -> Result<u64, RuntimeError> {
+        match self.request(RuntimeRequest::WorkerRestedForSwitch {
+            worker: worker.into(),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { revision, .. } => Ok(revision),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// A pane's hook-reported model and effort, onto its worker's row
+    /// (t-7538). Answers whether the row changed.
+    pub fn worker_tuning_observed(
+        &self,
+        worker: impl Into<String>,
+        model: Option<String>,
+        effort: Option<String>,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::WorkerTuningObserved {
+            worker: worker.into(),
+            model,
+            effort,
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// The receipt for one account move (t-7538). Answers whether a row was
+    /// written — the same key again writes none — and the revision.
+    pub fn account_switched(
+        &self,
+        receipt: zerocode_core::orchestration::AccountSwitchReceipt,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::AccountSwitched {
+            receipt: Box::new(receipt),
+            now_ms,
+        })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
     /// A pane the plan asked for never opened; the worker row goes back.
     pub fn seat_never_opened(
         &self,
@@ -3101,6 +3196,18 @@ impl RuntimeState {
                 reason,
                 now_ms,
             } => self.finish_sleeping_reseat(&worker, &reason, now_ms),
+            RuntimeRequest::WorkerRestedForSwitch { worker, now_ms } => {
+                self.worker_rested_for_switch(&worker, now_ms)
+            }
+            RuntimeRequest::AccountSwitched { receipt, now_ms } => {
+                self.account_switched(&receipt, now_ms)
+            }
+            RuntimeRequest::WorkerTuningObserved {
+                worker,
+                model,
+                effort,
+                now_ms,
+            } => self.worker_tuning_observed(&worker, model.as_deref(), effort.as_deref(), now_ms),
             RuntimeRequest::SeatNeverOpened { worker, now_ms } => {
                 self.seat_never_opened(&worker, now_ms)
             }
@@ -3866,6 +3973,94 @@ impl RuntimeState {
         self.ledger
             .finish_sleeping_reseat(worker, reason, now_ms)
             .map_err(|_| RuntimeError::AuthorityRejected)?;
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn worker_rested_for_switch(
+        &mut self,
+        worker: &str,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if worker.is_empty() || worker.len() > MAX_NAME || now_ms < 0 {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        self.ledger
+            .worker_rested_for_account_switch(worker, now_ms)
+            .map_err(|_| RuntimeError::AuthorityRejected)?;
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn worker_tuning_observed(
+        &mut self,
+        worker: &str,
+        model: Option<&str>,
+        effort: Option<&str>,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if worker.is_empty()
+            || worker.len() > MAX_NAME
+            || model.is_some_and(|word| word.len() > MAX_NAME)
+            || effort.is_some_and(|word| word.len() > MAX_NAME)
+            || now_ms < 0
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let changed = self
+            .ledger
+            .worker_tuning_observed(worker, model, effort)
+            .map_err(|_| RuntimeError::AuthorityRejected)?;
+        if !changed {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn account_switched(
+        &mut self,
+        receipt: &zerocode_core::orchestration::AccountSwitchReceipt,
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || receipt.key.is_empty()
+            || receipt.key.len() > MAX_NAME
+            || receipt.to_account.len() > MAX_NAME
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let written = self
+            .ledger
+            .account_switched(receipt, now_ms)
+            .map_err(|_| RuntimeError::AuthorityRejected)?;
+        if written.is_empty() {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
         let revision = self.write_through(now_ms)?;
         Ok(RuntimeReply::Settled {
             moved: true,
