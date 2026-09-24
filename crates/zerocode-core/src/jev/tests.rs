@@ -1697,7 +1697,7 @@ fn the_file_pick_seat_rises_only_by_the_judge_and_compares_with_recent_edits() {
     assert_eq!(FILE_PICK.setting, "jevFilePick");
     assert_eq!(FILE_PICK.ledger, "file-pick.jsonl");
     assert_eq!(FILE_PICK.recommended, JevMode::Auto);
-    assert!(FILE_PICK.promotes);
+    assert!(jev_use("file_pick").is_some_and(|row| row.promotes));
     assert_eq!(FILE_PICK.repeat, None);
     assert_eq!(FILE_PICK.baseline, Baseline::TodaysRule);
     assert_eq!(FILE_PICK.negatives_wanted, Some(NEGATIVES_WANTED));
