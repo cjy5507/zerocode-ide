@@ -29715,17 +29715,62 @@ details.task-board-section > summary {
 
 /* ---- 코디네이터 데스크 (t-6588) --------------------------------------------
  *
- * 작업 목록 위의 장들: 기계 띠 한 줄, 그 아래 두 칸씩(우편 | 워커, 흐름 |
- * 레인). 목록과 같은 폭(76em)과 같은 장 머리(낱말 · 수 위의 룰)를 쓴다 —
- * 데스크는 목록의 머리말이지 두 번째 보드가 아니다. 빈 블록은 접히고 나머지가
- * 차례대로 자리를 채운다. 목록 티어(보드 700 미만)에서는 한 칸. 상태 표식은
- * 다섯 상태의 것을 빌리되 돌지 않는다 — 도는 것은 작업 행의 표식 하나다(3차). */
+ * 작업 목록 위의 장들: 기계 띠 한 줄, 그 아래 두 열 — 왼쪽에 우편, 오른쪽에 워커,
+ * 흐름과 레인은 잰 높이가 고른 자리. 목록과 같은 폭(76em)과 같은 장 머리(낱말 ·
+ * 수 위의 룰)를 쓴다 — 데스크는 목록의 머리말이지 두 번째 보드가 아니다. 빈 블록은
+ * 접히고 나머지가 차례대로 자리를 채운다. 목록 티어(보드 700 미만)에서는 한 칸.
+ * 상태 표식은 다섯 상태의 것을 빌리되 돌지 않는다 — 도는 것은 작업 행의 표식
+ * 하나다(3차).
+ *
+ * 두 열은 이름 붙인 영역이다 (t-7448). 자동 배치는 한 행의 높이를 그 행에서 가장
+ * 긴 블록에 맞췄다 — 우편 세 통 옆에 워커 여덟 행이 서면 우편 아래 화면 절반이
+ * 비고, 흐름과 레인은 다음 행이라 접힌 아래로 밀렸다(실측 1920×1080: 흐름의 머리가
+ * 우편의 발에서 352px 아래, 1280×800에서는 첫 화면 밖). 배치는 셋이고 그 중 하나를
+ * 그리는 손이 잰 높이로 고른다(`placeDeskColumns`, 블록의 `data-desk-column`):
+ * 흐름·레인이 둘 다 왼쪽이면 워커가 왼쪽 행들을 걸치고, 둘 다 오른쪽이면 우편이
+ * 걸치고, 나눠 넣으면 한 행에 나란히 선다. 걸치는 블록은 다섯째 행(`1fr`)까지
+ * 걸친다: 걸친 행이 auto뿐이면 그 높이가 걸친 행들에 나뉘어 들어가 다른 열의 블록
+ * 사이가 벌어지지만, 유연한 트랙을 걸친 항목은 auto 행을 키우지 않고 남는 높이는
+ * 그 `1fr` 행이 다 받는다(CSS Grid §12.5·§12.7 — 실측: 워커 2·8행에서 우편→흐름·
+ * 흐름→레인이 16px 그대로). 행 사이 간격은 `row-gap`이 아니라 블록의 위 여백이다 —
+ * 숨은 블록(`display: none`)의 빈 트랙에도 `gap`은 남아 앞·중간·뒤에 빈 행이
+ * 서지만, 여백은 블록과 함께 사라진다; 그래서 데스크의 위 여백은 그만큼을 뺀다.
+ * 배치 규칙은 `:where()`로 무게를 지워 아래 목록 티어의 한 줄이 그대로 이긴다.
+ * DOM 차례(`DESK_BLOCKS`)와 노드는 그대로이고 배치는 여기의 일이다
+ * (`coordinator-desk-layout.mjs`가 실제 박스로 잰다). */
 .task-board-desk {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-4) var(--space-5);
+  grid-template:
+    "machine  machine" auto
+    "mail     workers" auto
+    "pipeline workers" auto
+    "release  workers" auto
+    ".        workers" 1fr
+    / minmax(0, 1fr) minmax(0, 1fr);
+  align-items: start;
+  column-gap: var(--space-5);
   max-width: 76em;
-  margin: var(--space-5) auto 0;
+  margin: calc(var(--space-5) - var(--space-4)) auto 0;
+}
+
+/* 나눠 넣기: 흐름은 왼쪽, 레인은 오른쪽, 한 행에 나란히. */
+.task-board-desk:where(:has(> [data-desk-block="pipeline"][data-desk-column="left"]):has(> [data-desk-block="release"][data-desk-column="right"])) {
+  grid-template:
+    "machine  machine" auto
+    "mail     workers" auto
+    "pipeline release" auto
+    / minmax(0, 1fr) minmax(0, 1fr);
+}
+
+/* 둘 다 오른쪽: 우편이 오른쪽 행들을 걸치고 남는 높이는 1fr 행이 받는다. */
+.task-board-desk:where(:has(> [data-desk-block="pipeline"][data-desk-column="right"]):has(> [data-desk-block="release"][data-desk-column="right"])) {
+  grid-template:
+    "machine machine" auto
+    "mail    workers" auto
+    "mail    pipeline" auto
+    "mail    release" auto
+    "mail    ." 1fr
+    / minmax(0, 1fr) minmax(0, 1fr);
 }
 
 .task-board-desk[hidden],
@@ -29737,7 +29782,13 @@ details.task-board-section > summary {
 
 .board-desk-block {
   min-width: 0;
+  margin-top: var(--space-4);
 }
+
+.board-desk-block[data-desk-block="mail"] { grid-area: mail; }
+.board-desk-block[data-desk-block="workers"] { grid-area: workers; }
+.board-desk-block[data-desk-block="pipeline"] { grid-area: pipeline; }
+.board-desk-block[data-desk-block="release"] { grid-area: release; }
 
 .task-board-desk .agent-graph-node-state::before {
   animation: none;
@@ -29746,7 +29797,7 @@ details.task-board-section > summary {
 /* 기계 띠: 한 줄, 조각마다 제 말. 붐빔·빠듯은 기다림의 잉크, 거절은 멈춤의 잉크 —
  * 보드의 색 어휘 그대로다. */
 .board-desk-block[data-desk-block="machine"] {
-  grid-column: 1 / -1;
+  grid-area: machine;
 }
 
 .board-desk-machine {
@@ -30255,7 +30306,15 @@ details.task-board-section > summary {
 }
 
 @container board (max-width: 699px) {
-  .task-board-desk { grid-template-columns: minmax(0, 1fr); }
+  /* 목록 티어: 한 열, DOM 차례. 영역 이름과 걸침도 함께 풀어야 둘째 열이 암묵적으로
+   * 남지 않는다 (t-7448). */
+  .task-board-desk {
+    grid-template: none / minmax(0, 1fr);
+  }
+
+  .task-board-desk > .board-desk-block {
+    grid-area: auto;
+  }
 }
 
 /* ---- the inspector ------------------------------------------------------ */
