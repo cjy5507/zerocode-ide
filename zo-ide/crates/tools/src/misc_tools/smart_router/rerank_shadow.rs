@@ -4040,12 +4040,15 @@ mod tests {
         /// turn added is ranked at that time too, since the row says the
         /// turn saw it and not when.
         named: Population,
-        /// Older labels on a run of one request: that request was the
+        /// Older labels on a run of one request that no earlier request of
+        /// their reading may still have owed a label: that request was the
         /// showing, confirmed.
         confirmed: Population,
-        /// Older labels on a run of several requests, ranked at the run's
-        /// first as though the run were one turn's — which a turn that was
-        /// cancelled or failed, and wrote no label, makes untrue. The
+        /// Older labels on a run of several requests, or on a run of one an
+        /// earlier request of their reading may still have owed a label,
+        /// ranked at the run's first as though every run of the reading were
+        /// one turn's — which a turn that was cancelled or failed, and wrote
+        /// no label, or ran on past another turn's label, makes untrue. The
         /// assumption's replay, counted apart from the confirmed.
         conditional: Population,
         /// Runs of one reading's requests.
@@ -4071,6 +4074,11 @@ mod tests {
         /// (`elapsed_ms`), and another label was written inside that latency
         /// — the rank read at the row may have seen it.
         unsure: usize,
+        /// Older labels on a run of one request that an earlier run of their
+        /// reading may still have owed a label — a turn of it running on past
+        /// another's label: that turn's late label or the request's, which
+        /// cannot be told, so none is confirmed.
+        crossed: usize,
         /// Pages unaddressed at the end, of those observed.
         unaddressed: usize,
         observed: usize,
@@ -4090,10 +4098,11 @@ mod tests {
                 self.bundles, self.repeated, self.unlabeled, self.ambiguous, self.undetermined, self.orphan, self.unmarked
             );
             println!("    confirmed older showings a label may have come between the showing and its request row: {}", self.unsure);
+            println!("    older labels on one request an earlier run of their reading may still have owed a label (not confirmed): {}", self.crossed);
             for (name, counted) in [
                 ("named showings (at the turn's first showing)", &self.named),
                 ("older labels, one request's showing (confirmed)", &self.confirmed),
-                ("older labels, a run of requests taken for one turn's (conditional — an assumption, not a result)", &self.conditional),
+                ("older labels, a run of requests taken for one turn's, or one request a run before may owe (conditional — an assumption, not a result)", &self.conditional),
             ] {
                 println!("    {name}: {} (complete {}, partial {})", counted.exposures, counted.complete, counted.partial);
                 println!(
@@ -4121,10 +4130,12 @@ mod tests {
     enum Footing {
         /// A label that names its own showing, timed by its turn's first.
         Named,
-        /// An older label on a run of one request: that request was it.
+        /// An older label on a run of one request, nothing earlier owed a
+        /// label: that request was it.
         Confirmed,
-        /// An older label on a run of several requests, taken for one
-        /// turn's: an assumption, ranked apart.
+        /// An older label on a run of several requests, or of one an earlier
+        /// run may still have owed a label, taken for one turn's: an
+        /// assumption, ranked apart.
         Conditional,
     }
 
@@ -4148,11 +4159,18 @@ mod tests {
     /// counts the showings another label came inside it. A run of several is
     /// ranked only on the assumption that it was one turn's, at its first
     /// request, and apart (`conditional`); a run two labels claim is not
-    /// ranked at all, and both labels are ambiguous. What an older label
-    /// says is folded when every request of its run agrees on what its marks
-    /// point at — the notes shown, the judgment's order, recall's first — so
-    /// it reads the same whichever request was its showing; a run judged in
-    /// different orders leaves the pages its marks name unknown
+    /// ranked at all, and both labels are ambiguous. A label closes its run,
+    /// but not every turn of it: a turn of the run may run on past another's
+    /// label, and its own may come after the next run's request. So what a
+    /// run's requests outnumber its labels by is carried to the reading's
+    /// next run as owed — each later label answering one at most — and while
+    /// any is owed, a label on the next run may be that turn's late label:
+    /// no confirmed showing, and ranked only as the assumption (t-6264 r4).
+    /// What an older label says is folded when every request it may answer
+    /// agrees on what its marks point at — the notes shown, the judgment's
+    /// order, recall's first — its run's and those of every run still owing,
+    /// so it reads the same whichever request was its showing; requests
+    /// judged in different orders leave the pages its marks name unknown
     /// (`undetermined`), and nothing it says is folded.
     #[expect(clippy::too_many_lines, reason = "one replay, read top to bottom")]
     fn replay_at(rows: &[serde_json::Value], window: u32) -> Replayed {
@@ -4160,7 +4178,7 @@ mod tests {
         use std::collections::{BTreeMap, BTreeSet};
         /// What one request of a run showed, and the judgment it carried:
         /// what an older label's marks point into.
-        #[derive(PartialEq)]
+        #[derive(Clone, PartialEq)]
         struct Asked {
             shown: Vec<String>,
             recalled_first: Option<String>,
@@ -4178,6 +4196,11 @@ mod tests {
             asked: Vec<Asked>,
             requests: usize,
             claims: usize,
+            /// How many requests of the reading's earlier runs may still have
+            /// owed a label when it began, and what those runs asked — any of
+            /// their requests may be the one owed.
+            owed: usize,
+            owed_asked: Vec<Asked>,
         }
         /// What a label says of the notes it speaks of: `Some(opened)`
         /// where it says, `None` where it cannot.
@@ -4248,10 +4271,25 @@ mod tests {
                     }
                     continue;
                 }
+                // What the reading's closed runs may still owe: each label
+                // answers one request at least, and none it has no request for.
+                let (owed, owed_asked) = latest.get(&key).map_or((0, Vec::new()), |&before| {
+                    let before = &runs[before];
+                    let owed = (before.owed + before.requests).saturating_sub(before.claims);
+                    let mut owed_asked: Vec<Asked> = Vec::new();
+                    if owed > 0 {
+                        for reading in before.owed_asked.iter().chain(&before.asked) {
+                            if !owed_asked.contains(reading) {
+                                owed_asked.push(reading.clone());
+                            }
+                        }
+                    }
+                    (owed, owed_asked)
+                });
                 open.insert(key, runs.len());
                 latest.insert(key, runs.len());
                 let latency = if applied { 0 } else { row["elapsed_ms"].as_u64().unwrap_or(0) };
-                runs.push(Run { at: at(row), latency, asked: vec![asked], requests: 1, claims: 0 });
+                runs.push(Run { at: at(row), latency, asked: vec![asked], requests: 1, claims: 0, owed, owed_asked });
                 continue;
             }
             if row.get("label").is_none() {
@@ -4295,9 +4333,16 @@ mod tests {
                 replayed.unmarked += 1;
                 continue;
             }
-            // What the marks say under each reading the run asked: one
-            // answer, or none that can be told.
-            let readings: Vec<_> = run.asked.iter().map(|asked| (&asked.shown, marks_read(asked, row, rank, untouched))).collect();
+            replayed.crossed += usize::from((run.claims, run.requests) == (1, 1) && run.owed > 0);
+            // What the marks say under each reading the label may answer —
+            // its run's and the owing runs' — one answer, or none that can be
+            // told.
+            let readings: Vec<_> = run
+                .owed_asked
+                .iter()
+                .chain(&run.asked)
+                .map(|asked| (&asked.shown, marks_read(asked, row, rank, untouched)))
+                .collect();
             if readings.windows(2).any(|pair| pair[0] != pair[1]) {
                 replayed.undetermined += 1;
                 continue;
@@ -4305,9 +4350,9 @@ mod tests {
             let Some((shown, (known, whole, outside))) = readings.into_iter().next() else {
                 continue;
             };
-            let ranked = match (run.claims, run.requests) {
-                (1, 1) => Some((run.at, Footing::Confirmed)),
-                (1, _) => Some((run.at, Footing::Conditional)),
+            let ranked = match (run.claims, run.requests, run.owed) {
+                (1, 1, 0) => Some((run.at, Footing::Confirmed)),
+                (1, _, _) => Some((run.at, Footing::Conditional)),
                 _ => None,
             };
             replayed.ambiguous += usize::from(ranked.is_none());
