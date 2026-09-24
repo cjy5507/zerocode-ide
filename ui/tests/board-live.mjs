@@ -257,8 +257,19 @@ export async function testBoardLive(browser, origin, ok) {
      * 이 맥박을 먹어도 초록이다 — 메일 선의 무한 흐름을 세우는 규칙이 바로 그
      * 자리에 서 있고, 한 단만 더 구체적이면 animation:none 이 이긴다. */
     ok("the_pulse_actually_runs_and_is_not_eaten_by_the_flow_stop_rule",
-      await page.evaluate(() => {
-        const beaten = document.querySelector("#board-view [data-live-beat]");
+      await page.evaluate(async () => {
+        /* 제 사건을 스스로 낸다 — 앞 사례의 맥박을 빌려 읽으면 그 사이의 왕복이
+         * 맥박의 수명(900 ms)보다 길어지는 날 이 사례가 이유 없이 빨개진다. */
+        const now = window.__LIVE_NOW__;
+        window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
+          { from: "term:312", to: "term:311", count: 1, unread: 1, at: now + 2_000, verb: "mail",
+            last_message: { id: "m-runs", run: "run-2", from: "worker:w-other",
+              to: "run:run-2", kind: "status", created_ms: now + 2_000 } },
+        ] });
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+        const beaten = document.querySelector(
+          '#board-view [data-graph-edge="overlay:mail:agent:term:312>agent:term:311"] path[data-live-beat]');
         if (!beaten) return false;
         const dress = getComputedStyle(beaten);
         return ["zc-live-edge-a", "zc-live-edge-b"].includes(dress.animationName)
@@ -272,8 +283,11 @@ export async function testBoardLive(browser, origin, ok) {
       await window.__BOARD_SETTLED__();
       return { before, after: agentGraphLiveRecentEvents().length };
     });
+    /* 같은 판을 두 번 더 읽어도 사건의 수는 그대로다. 절대값을 못 박지 않는
+     * 것은 이 사례의 요점이 「몇 건인가」가 아니라 「다시 세지 않는가」이기
+     * 때문이다 — 앞 사례가 하나를 더 내면 그 수는 따라 움직인다. */
     ok("duplicate_snapshot_does_not_replay_pulses",
-      again.before === again.after && again.after === 1, JSON.stringify(again));
+      again.before === again.after && again.before > 0, JSON.stringify(again));
 
     /* 처음 서는 카드의 첫 배정도 맥박을 받는다. 장부는 사건을 본 자리에서
      * 한 번 얹지만 그때 그 카드는 아직 없었다 — 카드가 다 선 뒤에 한 번 더
