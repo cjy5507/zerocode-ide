@@ -11175,13 +11175,15 @@ impl Ledger {
     /// The new seat is bound to the same run in the same write, so the first
     /// bare verb the restored agent sends lands back in its own run.
     ///
-    /// A person's hand on the pane does not stop it (t-7812). The window never
-    /// writes a ledger-seated tab into its own layout, so the person's window
-    /// had no record to bring a taken-over worker back from, and the grace
-    /// ended every one of them (2026-09-25 01:13: w-7570 and w-7631, both
-    /// `takenOver`). The mark stays on the row — the hand is still the
-    /// person's — and one conversation is still one process, which the reseat
-    /// road asks the window before it cuts the pane.
+    /// A person's hand on the pane does not stop a SLEEPER (t-7812). The
+    /// window never writes a ledger-seated tab into its own layout, so the
+    /// person's window had no record to bring a taken-over worker back from,
+    /// and the grace ended every one of them (2026-09-25 01:13: w-7570 and
+    /// w-7631, both `takenOver`). The mark stays on the row — the hand is
+    /// still the person's — and one conversation is still one process, which
+    /// the reseat road asks the window before it cuts the pane. A taken-over
+    /// ORPHAN is still refused: its pane may be running with the person in
+    /// it, and a second pane would be a second process on their conversation.
     pub fn worker_reseated(
         &mut self,
         worker_id: &str,
@@ -11202,6 +11204,12 @@ impl Ledger {
                 "worker {worker_id} is {}, and only a worker that kept its attempt — one a \
                  restart put to sleep, or one a leader's exit orphaned — can be reseated",
                 worker.state.as_str()
+            ));
+        }
+        if worker.taken_over && worker.state == WorkerState::Orphaned {
+            return Err(format!(
+                "worker {worker_id}'s pane was taken over by the person — a person's \
+                 conversation is not the ledger's to reopen in another pane"
             ));
         }
         if self.runs.iter().any(|run| {

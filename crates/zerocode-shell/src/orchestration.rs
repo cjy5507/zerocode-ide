@@ -449,11 +449,12 @@ pub(crate) fn reseat_sleeping(
          * proved gone and whose row never learned a checkout has nowhere to
          * be seated — that is the row a leader's exit used to abandon on the
          * spot, and it is retired now, after the proof, not before. */
-        /* A person's hand on the pane no longer keeps the ledger out
-         * (t-7812): the window never kept this tab to reopen. What still
-         * does is the conversation already coming back in another pane, or
-         * no conversation at all — `reseat_admission` asks both, and holds
-         * the conversation for this reseat until its pane answers for it. */
+        /* A person's hand on a sleeper's pane no longer keeps the ledger
+         * out (t-7812): the window never kept this tab to reopen. What still
+         * does is the conversation already coming back in another pane, no
+         * conversation at all, or an orphan the person may still be typing
+         * in — `reseat_admission` asks all three, and holds the conversation
+         * for this reseat until its pane answers for it. */
         let Some(_hold) = reseat_admission(host, &worker) else {
             continue;
         };
@@ -536,17 +537,25 @@ pub(crate) struct ReseatHold {
 /// id a `--retry-of` needs ([`NO_SESSION_RECORDED`]) — rather than find.
 /// An orphan without one keeps the road it had: its process may still be
 /// running, and the ledger has not lost it the way a restart loses a pane.
+/// A taken-over orphan is not reseated at all, as before.
 pub(crate) fn reseat_admission(host: &dyn Host, worker: &str) -> Option<ReseatHold> {
     let held = runtime()?;
     let image = held.actor.view().ok()?;
     let ledger = cached_ledger(&held, &image).ok()?;
     let row = ledger.runs().iter().find_map(|run| run.worker(worker))?;
-    let (agent, session, sleeping) = (
+    let (agent, session, sleeping, persons) = (
         row.agent.clone(),
         row.session.clone(),
         row.state == WorkerState::Sleeping,
+        row.taken_over,
     );
     drop(ledger);
+    // A person's orphan stays where it stands: its pane may still be running
+    // with the person in it (`worker_reseated` refuses it for that reason),
+    // and a tab that never comes back is the grace's to end.
+    if persons && !sleeping {
+        return None;
+    }
     let Some(session) = session else {
         if !sleeping {
             return Some(ReseatHold { _claim: None });
