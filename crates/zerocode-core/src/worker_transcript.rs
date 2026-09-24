@@ -158,7 +158,10 @@ pub struct Scan {
     /// stops there, so a file appended to meanwhile is answered as it stood
     /// then, and every number below is of that one file.
     pub file_bytes: u64,
-    /// The bytes the call read, all its reads together.
+    /// The bytes the call read, all its reads together — over every open
+    /// it made, a read that came up short at a cut included. Never more
+    /// than the call's one budget: a file cut in place is read again on what
+    /// the first open left of it, not on a budget of its own.
     pub read_bytes: u64,
     /// Where the whole lines the answer was read out of begin in the file…
     pub covered_from: u64,
