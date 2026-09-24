@@ -1401,4 +1401,6 @@ fn forget_waiting(cwd: &Path) {
 }
 
 #[cfg(test)]
+mod replay;
+#[cfg(test)]
 mod tests;
