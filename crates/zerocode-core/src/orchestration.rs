@@ -13238,7 +13238,7 @@ impl QuotaWallOrder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClassifierDeclineRung {
     /// The worker's own CLI answers the declined turn on its fallback model —
-    /// told so at launch by [`DECLINE_CONTINUE_WORDS`]. Nothing waits and
+    /// told so at launch by `DECLINE_CONTINUE_WORDS`. Nothing waits and
     /// nothing is typed; the conversation goes on and the ledger hears
     /// nothing, because nothing stopped.
     Fallback,
