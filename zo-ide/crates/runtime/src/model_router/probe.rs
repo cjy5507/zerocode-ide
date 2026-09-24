@@ -122,7 +122,7 @@ impl RubricAxis {
 }
 
 pub const COMPLEXITY_AXIS: RubricAxis = RubricAxis {
-    name: "complexity",
+    name: zerocode_core::jev::questions::ROUTING_COMPLEXITY_ID,
     question: "how much reasoning/context the task needs end to end",
     tokens: &[
         RouteTaskComplexity::Trivial.as_label(),
@@ -142,7 +142,7 @@ pub const COMPLEXITY_AXIS: RubricAxis = RubricAxis {
 };
 
 pub const RISK_AXIS: RubricAxis = RubricAxis {
-    name: "risk",
+    name: zerocode_core::jev::questions::ROUTING_RISK_ID,
     question: "blast radius of a wrong edit (credentials, deletion, security = high+)",
     tokens: &[
         RouteTaskRisk::Low.as_label(),
@@ -169,7 +169,7 @@ pub const CONFIDENCE_AXIS: RubricAxis = RubricAxis {
 };
 
 pub const INTENT_AXIS: RubricAxis = RubricAxis {
-    name: "intent",
+    name: zerocode_core::jev::questions::ROUTING_INTENT_ID,
     question: "what the task asks you to PRODUCE, in any language",
     tokens: &[
         RouteTaskIntent::Design.as_str(),
