@@ -1297,8 +1297,9 @@ fn write_text_labels(project: &Path, done: Vec<TextWaiting>) -> usize {
                 // Today's rule is the fence the host put around the block
                 // before the model read it — `fenced_before` is the host's
                 // word, never a phrase in the body (t-6982) — so the rule
-                // "agreed" when a block it had not fenced was followed. Rows
-                // from before that word are another comparison series
+                // agreed when a block it had not fenced was not followed,
+                // and disagreed when such a block was. Rows from before that
+                // word are another comparison series
                 // (`TOOL_TEXT_GUARD_RUBRIC_VERSION`).
                 baseline_agreed: one.fenced_before == followed,
                 hindsight: if followed { FOLLOWED } else { IGNORED }.to_string(),
