@@ -2876,10 +2876,55 @@ impl Run {
         thread_answer(self, question)
     }
 
-    /// Whether a question can no longer be answered — its asker's dispatch
-    /// ended — by the rule the `reply` verb refuses by.
+    /// Whether the asker's dispatch ended. This narrower fact remains
+    /// available to callers that need dispatch closure; use
+    /// [`Self::question_is_answerable`] before offering a new reply.
     pub fn question_is_closed(&self, question: &Message) -> bool {
         question_closed(self, question)
+    }
+
+    /// Whether a new answer can reach this question's asker. A standing
+    /// answer is handled before this check by `reply` so retries still work.
+    pub fn question_is_answerable(&self, question: &Message) -> Result<(), String> {
+        if question_closed(self, question) {
+            return Err(format!(
+                "question {} is closed — its dispatch ended \
+                 before an answer landed, and the asker is gone",
+                question.id
+            ));
+        }
+        self.direct_address(&question.from, &question.to)
+            .unwrap_or_else(|| Err(format!("unroutable address: {}", question.from)))
+            .map(|_| ())
+    }
+
+    /// The direct mail reader shared by routing and answerability. Groups
+    /// have their own membership rule; a question has one direct asker.
+    fn direct_address(&self, to: &str, from: &str) -> Option<Result<Vec<String>, String>> {
+        if to == self.address() || to == format!("run:{}", self.id) {
+            return Some(Ok(vec![self.address()]));
+        }
+        if let Some(id) = to.strip_prefix(WORKER_ADDRESS_PREFIX) {
+            return Some(match self.worker(id) {
+                Some(worker) if worker.state.reads_mail() => Ok(vec![to.to_string()]),
+                Some(worker) => Err(format!(
+                    "worker {id} is {} — its inbox has no reader left, and mail \
+                     filed there would be delivered to nobody",
+                    worker.state.as_str()
+                )),
+                None => Err(format!("unknown worker: {id}")),
+            });
+        }
+        if to.starts_with(PANE_ADDRESS_PREFIX) {
+            let spoken = self.messages.iter().any(|held| held.from == to);
+            return Some(match spoken || from == LEDGER_ITSELF {
+                true => Ok(vec![to.to_string()]),
+                false => Err(format!(
+                    "unroutable address: {to} — a seat is answerable once it has spoken"
+                )),
+            });
+        }
+        None
     }
 
     pub fn dispatch(&self, id: &str) -> Option<&Dispatch> {
@@ -5431,61 +5476,8 @@ impl Ledger {
         let run = self
             .run(run_id)
             .ok_or_else(|| format!("unknown run: {run_id}"))?;
-        if to == run.address() || to == format!("run:{run_id}") {
-            return Ok(vec![run.address()]);
-        }
-        /* A worker's own address, and only while somebody is behind it.
-         *
-         * This resolved whatever had become of the worker, so a coordinator
-         * could file a dispatch into a released seat's inbox and be told
-         * "Sent" — the message stood in the log addressed to nobody, and the
-         * sender had no way to know. That is the same lie the two refusals
-         * around it already name, and it is refused the same way: the group
-         * road will not deliver to an empty crowd, and the seat road will not
-         * deliver to a pane that has never spoken.
-         *
-         * [`WorkerState::reads_mail`] rather than `is_live`, because the
-         * question here is whether a reader will ever open the inbox — not
-         * whether a process is running right now. A `Sleeping` worker has no
-         * pane and is still read the moment its coordinator seats it again.
-         * That is not a quarrel with the group rule below: a group is who to
-         * ASK, and asking a seat that cannot answer now is pointless, while a
-         * direct address is a deliberate choice to leave mail for a seat that
-         * is coming back.
-         */
-        if let Some(id) = to.strip_prefix(WORKER_ADDRESS_PREFIX) {
-            return match run.worker(id) {
-                Some(worker) if worker.state.reads_mail() => Ok(vec![to.to_string()]),
-                Some(worker) => Err(format!(
-                    "worker {id} is {} — its inbox has no reader left, and mail \
-                     filed there would be delivered to nobody",
-                    worker.state.as_str()
-                )),
-                None => Err(format!("unknown worker: {id}")),
-            };
-        }
-        /* A seat that is nobody's worker — a teammate pane, a seat whose
-         * worker went to sleep. It is answerable, because a question asked
-         * from one takes an answer like any other, and the ledger holds no
-         * seat table to check it against: what it holds is whether this seat
-         * has ever SPOKEN here. That is the right question anyway. An address
-         * nobody has used names an inbox nobody reads, and "Sent" over one is
-         * the same lie as "Sent" over an empty group. */
-        if to.starts_with(PANE_ADDRESS_PREFIX) {
-            /* The one exception is the ledger writing to a seat it has just
-             * unseated (`take_over_coordinator`): that pane spoke as `run:`
-             * for as long as it held the chair, so its own pane address has
-             * never appeared as a `from` — and its own pane inbox is exactly
-             * where its next `check` reads. A receipt that could not be filed
-             * would leave the former coordinator reading an empty inbox with
-             * no sentence saying why. */
-            let spoken = run.messages.iter().any(|held| held.from == to);
-            return match spoken || from == LEDGER_ITSELF {
-                true => Ok(vec![to.to_string()]),
-                false => Err(format!(
-                    "unroutable address: {to} — a seat is answerable once it has spoken"
-                )),
-            };
+        if let Some(address) = run.direct_address(to, from) {
+            return address;
         }
         if let Some(group) = to.strip_prefix('@') {
             // The original's fourth group resolves against the seat report:
@@ -17472,12 +17464,7 @@ fn plan_inner(
                         held.body.as_str() == words.value("--body").unwrap_or_default(),
                     )),
                     None => {
-                        if question_closed(run, answered) {
-                            return Err(format!(
-                                "question {thread} is closed — its dispatch ended \
-                                 before an answer landed, and the asker is gone"
-                            ));
-                        }
+                        run.question_is_answerable(answered)?;
                         None
                     }
                 },

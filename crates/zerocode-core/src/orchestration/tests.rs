@@ -10282,11 +10282,19 @@ fn a_question_takes_one_answer_and_closes_with_its_dispatch() {
     );
     let late = bench.run(&format!("reply --to-message {orphaned} --body too-late"));
     assert_eq!(late.reply.exit_code, 1);
+    let run = &bench.ledger.runs()[0];
+    let closed_reason = run
+        .question_is_answerable(run.message(&orphaned).expect("question"))
+        .expect_err("closed dispatch");
+    assert!(late.reply.stderr.contains(&closed_reason));
     assert!(
         late.reply.stderr.contains("closed"),
         "{}",
         late.reply.stderr
     );
+    let same_after_close = bench.json(&format!("reply --to-message {question} --body left"));
+    assert_eq!(same_after_close["messageId"], standing);
+    assert_eq!(same_after_close["already"], true);
 
     // Closure is an answer to `--resume` too — said at once, not slept to
     // the deadline.
@@ -10324,6 +10332,108 @@ fn a_question_takes_one_answer_and_closes_with_its_dispatch() {
         "{}",
         smuggled.reply.stderr
     );
+}
+
+#[test]
+fn a_question_reader_uses_the_direct_mail_rule_at_reply_time() {
+    let mut bench = Bench::new();
+    let run_id = bench.json("run-create --name reader")["runId"]
+        .as_str()
+        .expect("run")
+        .to_string();
+    let (_worker, pane) = bench.seat("worker-start --agent codex");
+    let question = bench.json_at(&pane, "ask --body answer-me")["questionId"]
+        .as_str()
+        .expect("question")
+        .to_string();
+    let answered = bench.json_at(&pane, "ask --body answered-before-release")["questionId"]
+        .as_str()
+        .expect("question")
+        .to_string();
+    let answer_id = bench.json(&format!("reply --to-message {answered} --body yes"))["messageId"]
+        .as_str()
+        .expect("answer")
+        .to_string();
+    let run = bench.ledger.run(&run_id).expect("run");
+    let asked = run.message(&question).expect("question");
+    assert_eq!(run.question_is_answerable(asked), Ok(()));
+    let mut missing = asked.clone();
+    missing.from = "worker:w-missing".into();
+    assert_eq!(
+        run.question_is_answerable(&missing),
+        Err("unknown worker: w-missing".into())
+    );
+
+    for (state, readable) in [
+        (WorkerState::ReleasePending, true),
+        (WorkerState::Orphaned, true),
+        (WorkerState::Sleeping, true),
+        (WorkerState::ReleaseUnknown, false),
+        (WorkerState::Released, false),
+    ] {
+        bench.ledger.runs[0].workers[0].state = state;
+        let run = bench.ledger.run(&run_id).expect("run");
+        let asked = run.message(&question).expect("question");
+        assert_eq!(
+            run.question_is_answerable(asked).is_ok(),
+            readable,
+            "{state:?}"
+        );
+    }
+    let run = bench.ledger.run(&run_id).expect("run");
+    let reason = run
+        .question_is_answerable(run.message(&question).expect("question"))
+        .expect_err("released reader");
+    let before = run.messages().len();
+    let refused = bench.run(&format!("reply --to-message {question} --body too-late"));
+    assert_eq!(refused.reply.exit_code, 1);
+    assert!(
+        refused.reply.stderr.contains(&reason),
+        "{}",
+        refused.reply.stderr
+    );
+    assert_eq!(
+        bench.ledger.run(&run_id).expect("run").messages().len(),
+        before
+    );
+    let retried = bench.json(&format!("reply --to-message {answered} --body yes"));
+    assert_eq!(retried["messageId"], answer_id);
+    assert_eq!(retried["already"], true);
+    let different = bench.run(&format!("reply --to-message {answered} --body no"));
+    assert!(different.reply.stderr.contains("different answer"));
+    assert_eq!(
+        bench.ledger.run(&run_id).expect("run").messages().len(),
+        before
+    );
+
+    // A pane that spoke in the run remains a direct reader even without a
+    // worker row or a task dispatch.
+    let pane_question = bench
+        .ledger
+        .post(
+            &run_id,
+            Draft {
+                from: "pane:team-1/%9".into(),
+                to: format!("run:{run_id}"),
+                kind: MessageKind::Question,
+                body: "pane?".into(),
+                subject: "".into(),
+                priority: Priority::Normal,
+                payload: "".into(),
+                thread: None,
+                task: None,
+                dispatch: None,
+            },
+            4,
+        )
+        .expect("pane question");
+    let run = bench.ledger.run(&run_id).expect("run");
+    assert_eq!(
+        run.question_is_answerable(run.message(&pane_question).expect("pane")),
+        Ok(())
+    );
+    let delivered = bench.run(&format!("reply --to-message {pane_question} --body here"));
+    assert_eq!(delivered.reply.exit_code, 0, "{}", delivered.reply.stderr);
 }
 
 /// A question binds its ANSWERER, not just its delivery.
