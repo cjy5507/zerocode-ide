@@ -29652,6 +29652,551 @@ details.task-board-section > summary {
   .task-board-members, .task-board-message, .task-board-foot { padding-inline: var(--space-4); }
 }
 
+/* ---- 코디네이터 데스크 (t-6588) --------------------------------------------
+ *
+ * 작업 목록 위의 장들: 기계 띠 한 줄, 그 아래 두 칸씩(우편 | 워커, 흐름 |
+ * 레인). 목록과 같은 폭(76em)과 같은 장 머리(낱말 · 수 위의 룰)를 쓴다 —
+ * 데스크는 목록의 머리말이지 두 번째 보드가 아니다. 빈 블록은 접히고 나머지가
+ * 차례대로 자리를 채운다. 목록 티어(보드 700 미만)에서는 한 칸. 상태 표식은
+ * 다섯 상태의 것을 빌리되 돌지 않는다 — 도는 것은 작업 행의 표식 하나다(3차). */
+.task-board-desk {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-4) var(--space-5);
+  max-width: 76em;
+  margin: var(--space-5) auto 0;
+}
+
+.task-board-desk[hidden],
+.board-desk-block[hidden],
+.board-desk-release-reason[hidden],
+.board-desk-release-skips[hidden] {
+  display: none;
+}
+
+.board-desk-block {
+  min-width: 0;
+}
+
+.task-board-desk .agent-graph-node-state::before {
+  animation: none;
+}
+
+/* 기계 띠: 한 줄, 조각마다 제 말. 붐빔·빠듯은 기다림의 잉크, 거절은 멈춤의 잉크 —
+ * 보드의 색 어휘 그대로다. */
+.board-desk-block[data-desk-block="machine"] {
+  grid-column: 1 / -1;
+}
+
+.board-desk-machine {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-4);
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.board-desk-machine-segment.is-wait {
+  color: var(--signal-wait-ink);
+}
+
+.board-desk-machine-segment.is-halt {
+  color: var(--signal-halt-ink);
+  font-weight: 600;
+}
+
+/* 답할 우편: 편지 한 통이 두 줄짜리 한 장이고, 앞 레일이 기다림(끝난 워커는
+ * 멈춤)의 잉크다. 첫 줄 끝의 받은편지함 낱말은 배달 전일 때 기다림의 잉크를 입고,
+ * 둘째 줄은 한 줄에서 말줄임표로 물러나며 그 끝에 다음 걸음의 알약이 선다. 답 칸과
+ * 누른 뒤의 말은 그때만 선다. */
+.board-desk-letters {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.board-desk-letter {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding: var(--space-1) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  box-shadow: inset var(--rail-width) 0 0 var(--signal-wait);
+}
+
+.board-desk-letter.is-worker_died {
+  box-shadow: inset var(--rail-width) 0 0 var(--signal-halt);
+}
+
+.board-desk-letter-line,
+.board-desk-letter-lead {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+.board-desk-letter-kind {
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.board-desk-letter-who {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-label);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-desk-letter-delivery,
+.board-desk-letter-age {
+  flex: none;
+  color: var(--ink-label);
+  font-variant-numeric: tabular-nums;
+}
+
+.board-desk-letter.is-pending .board-desk-letter-delivery {
+  color: var(--signal-wait-ink);
+}
+
+.board-desk-letter-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink-chalk);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-desk-letter-note,
+.board-desk-unseated {
+  margin: 0;
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+  overflow-wrap: anywhere;
+}
+
+.board-desk-unseated {
+  margin-bottom: var(--space-2);
+}
+
+.board-desk-letter-act {
+  flex: none;
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: var(--rule-width) solid color-mix(in srgb, var(--signal-wait) 55%, var(--edge-rule));
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--signal-wait-ink);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.board-desk-letter-act:disabled {
+  color: var(--ink-disabled);
+  cursor: default;
+}
+
+.board-desk-reply {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.board-desk-reply-field {
+  width: 100%;
+  min-height: calc(var(--control-height-sm) * 2);
+  padding: var(--space-2);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-sm);
+  background: var(--surface-well);
+  color: var(--ink-chalk);
+  font: inherit;
+  font-size: var(--text-sm);
+  resize: vertical;
+}
+
+.board-desk-reply-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.board-desk-reply-error {
+  flex: 1 1 auto;
+  color: var(--signal-halt-ink);
+  font-size: var(--text-2xs);
+  overflow-wrap: anywhere;
+}
+
+.board-desk-reply-send,
+.board-desk-reply-cancel {
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-label);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.board-desk-reply-send {
+  border-color: var(--workbench-edge);
+  background: var(--workbench-tint);
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.board-desk-letters-more {
+  justify-self: start;
+  margin-top: var(--space-2);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--workbench-accent-ink);
+  font: inherit;
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+
+.board-desk-letter-body[hidden],
+.board-desk-letter-act[hidden],
+.board-desk-letter-note[hidden],
+.board-desk-unseated[hidden],
+.board-desk-reply[hidden],
+.board-desk-reply-error[hidden],
+.board-desk-letters-more[hidden] {
+  display: none;
+}
+
+/* 워커: 한 사람 한 장, 두 줄 반. 건강 낱말만 제 상태의 잉크를 입고(판 없음은
+ * 멈춤, 한도 벽·답 기다림은 기다림, 턴 중은 준비의 초록), 나머지 사실은 조용한
+ * 셋째 줄이다. 판을 든 워커는 누르면 그 작업을 인스펙터에 연다. */
+.board-desk-workers {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.board-desk-worker-main {
+  display: grid;
+  gap: var(--space-1);
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-1) var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-md);
+  background: var(--surface-deck);
+  color: var(--ink-chalk);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+
+.board-desk-worker-main:hover:not(:disabled) {
+  border-color: var(--edge-mark);
+}
+
+.board-desk-worker-main:disabled {
+  cursor: default;
+}
+
+.board-desk-worker-line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  font-size: var(--text-xs);
+}
+
+.board-desk-worker-id {
+  color: var(--ink-label);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-weight: 400;
+}
+
+.board-desk-worker-health {
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-desk-worker.is-gone .board-desk-worker-health { color: var(--signal-halt-ink); }
+.board-desk-worker.is-walled .board-desk-worker-health,
+.board-desk-worker.is-asking .board-desk-worker-health { color: var(--signal-wait-ink); }
+.board-desk-worker.is-turn .board-desk-worker-health { color: var(--signal-ready); }
+.board-desk-worker.is-idle .board-desk-worker-health,
+.board-desk-worker.is-asleep .board-desk-worker-health { color: var(--ink-label); }
+
+.board-desk-worker-age {
+  flex: none;
+  margin-left: auto;
+  color: var(--ink-label);
+  font-variant-numeric: tabular-nums;
+}
+
+.board-desk-worker-what {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  min-width: 0;
+}
+
+.board-desk-worker-task {
+  max-width: 100%;
+  overflow: hidden;
+  font-size: var(--text-xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-desk-worker-facts {
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+  overflow-wrap: anywhere;
+}
+
+/* 과업 흐름: 흐름의 다섯 단계는 작은 꺾쇠로 이어지고, 멈춰 선 셋은 한 칸 떨어져
+ * 선다. 과업이 있는 멈춘 단계만 제 신호의 잉크를 입는다. 누른 단계는 필터 알약과
+ * 같은 옷(보기의 색)이다. */
+.board-desk-stages,
+.board-desk-stage-run {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.board-desk-stages {
+  gap: var(--space-2) var(--space-4);
+}
+
+.board-desk-stage {
+  position: relative;
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-3);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  background: transparent;
+  color: var(--ink-label);
+  font: inherit;
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.board-desk-stage:hover {
+  border-color: var(--edge-mark);
+  color: var(--ink-chalk);
+}
+
+.board-desk-stage-count {
+  color: var(--ink-chalk);
+  font-weight: 600;
+}
+
+.board-desk-stage.is-flow + .board-desk-stage.is-flow {
+  margin-left: var(--space-3);
+}
+
+.board-desk-stage.is-flow + .board-desk-stage.is-flow::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  right: calc(100% + var(--space-2) - var(--space-1));
+  width: var(--space-1);
+  height: var(--space-1);
+  border-top: var(--rule-width) solid var(--ink-glyph);
+  border-right: var(--rule-width) solid var(--ink-glyph);
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.board-desk-stage.is-wait {
+  border-color: color-mix(in srgb, var(--signal-wait) 55%, var(--edge-rule));
+  color: var(--signal-wait-ink);
+}
+
+.board-desk-stage.is-halt {
+  border-color: color-mix(in srgb, var(--signal-halt) 55%, var(--edge-rule));
+  color: var(--signal-halt-ink);
+}
+
+.board-desk-stage[aria-pressed="true"] {
+  border-color: var(--workbench-edge);
+  background: var(--workbench-tint);
+  color: var(--ink-chalk);
+}
+
+.board-desk-tasks {
+  display: grid;
+  gap: var(--space-1);
+  max-height: calc(var(--control-height-sm) * 8);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  overflow: auto;
+  list-style: none;
+}
+
+.board-desk-task {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 0 var(--space-2);
+  color: var(--ink-chalk);
+  font-size: var(--text-xs);
+}
+
+.board-desk-task-id {
+  color: var(--ink-label);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+}
+
+.board-desk-task-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.board-desk-task-note {
+  grid-column: 2;
+  color: var(--ink-label);
+  overflow-wrap: anywhere;
+}
+
+.board-desk-more {
+  margin: var(--space-1) 0 0;
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+}
+
+.board-desk-tasks[hidden],
+.board-desk-task-note[hidden],
+.board-desk-more[hidden] {
+  display: none;
+}
+
+.board-desk-release-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  margin: 0;
+  color: var(--ink-chalk);
+  font-size: var(--text-sm);
+}
+
+.board-desk-release-version {
+  font-weight: 600;
+}
+
+.board-desk-release-sha {
+  color: var(--ink-label);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.board-desk-release-verdict {
+  font-weight: 600;
+}
+
+.board-desk-release.is-running .board-desk-release-verdict { color: var(--signal-ready); }
+.board-desk-release.is-green .board-desk-release-verdict { color: var(--signal-done); }
+.board-desk-release.is-red .board-desk-release-verdict { color: var(--signal-halt-ink); }
+
+.board-desk-release-clock {
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.board-desk-release-phases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.board-desk-release-phase {
+  padding: 0 var(--space-2);
+  border: var(--rule-width) solid var(--edge-rule);
+  border-radius: var(--radius-pill);
+  color: var(--ink-label);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.8;
+}
+
+.board-desk-release-phase.is-running {
+  border-color: color-mix(in srgb, var(--signal-ready) 45%, var(--edge-rule));
+  color: var(--signal-ready);
+}
+
+.board-desk-release-phase.is-failed {
+  border-color: color-mix(in srgb, var(--signal-halt) 45%, var(--edge-rule));
+  color: var(--signal-halt-ink);
+}
+
+.board-desk-release-phase.is-skipped {
+  border-style: dashed;
+}
+
+.board-desk-release-reason,
+.board-desk-release-skips {
+  margin: var(--space-2) 0 0;
+  color: var(--ink-label);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.board-desk-release-reason {
+  color: var(--signal-halt-ink);
+}
+
+.board-desk-release-skips {
+  padding-left: var(--space-4);
+}
+
+@container board (max-width: 699px) {
+  .task-board-desk { grid-template-columns: minmax(0, 1fr); }
+}
+
 /* ---- the inspector ------------------------------------------------------ */
 
 /* The relations workbench keeps the grid's measured ports while giving the

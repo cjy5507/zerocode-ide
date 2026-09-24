@@ -60,7 +60,9 @@ pub(crate) fn status(host: &dyn Host, run_id: &str) -> Result<serde_json::Value,
 
 /// Internal native door. Never exposed through the CLI bridge: that bridge
 /// supplies a provider session, and cannot declare a human's standing order.
-fn command(
+/// The task board's desk answers and acknowledges its coordinator's mail
+/// through it too (t-6588, `super::desk`): the person, at the seat.
+pub(super) fn command(
     team: &str,
     pane: &str,
     capability: String,

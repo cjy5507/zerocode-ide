@@ -2,6 +2,7 @@ mod agent_capabilities;
 mod bundle_resources;
 mod cli_login;
 mod computer_use_mirrors;
+mod coordinator_desk;
 mod crash_report;
 mod fixture_cases;
 mod quiet_children;
@@ -10381,9 +10382,12 @@ mod tests {
         // Fourteen since t-6336: the loan line's minute (`emulatorLoansTick`),
         // an in-memory read that runs only while an agent's pane has a device
         // lent.
+        // Fifteen since t-6588: the task board desk's minute (`deskAmbient`),
+        // the release lane and the machine strip, only while the desk is on
+        // screen.
         assert_eq!(
             window.matches(" = idlePoller({").count(),
-            14,
+            15,
             "a background beat was added or removed without this pin moving with it"
         );
         let poller = block_after(window, "function idlePoller(");

@@ -1491,6 +1491,19 @@ fn reconcile_managed_devices_now(local_data_root: &Path) {
 /// listed — and therefore mirrored, tapped and read — on a machine whose SDK
 /// has no emulator package at all. Only when that leaves nothing does the
 /// missing package become the answer.
+/// How many Android emulators `adb devices` lists as up, whoever booted them —
+/// the task board's machine strip (t-6588), counted the way the device list
+/// counts a booted AVD. `None` where this machine has no Android SDK.
+pub(super) fn booted_emulators() -> Option<usize> {
+    let sdk = android_sdk().ok()?;
+    Some(
+        android_running(&sdk.adb)
+            .iter()
+            .filter(|(_, avd)| !avd.is_empty())
+            .count(),
+    )
+}
+
 fn list_android_devices() -> Result<Vec<AndroidDevice>, String> {
     let sdk = android_sdk().map_err(|search| search.to_string())?;
     let running = android_running(&sdk.adb);

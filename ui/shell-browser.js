@@ -2815,23 +2815,27 @@ listen("emulator:loan-returned", (event) => {
 const EMULATOR_LOANS_TICK_MS = 60_000;
 let emulatorLoans = { count: 0, lastUsedMs: null };
 
+/* The loan book's one sentence, for the status bar's chip and for the task
+ * board's machine strip (t-6588) — one state, one sentence, two places it
+ * stands. Empty while nothing is lent. */
+function emulatorLoansWords(now) {
+  const { count, lastUsedMs } = emulatorLoans;
+  if (count === 0) return "";
+  return lastUsedMs === null || now - lastUsedMs < 60_000
+    ? t("emulator.loansNow", "빌린 기기 {{count}} · 방금 사용", { count })
+    : t("emulator.loans", "빌린 기기 {{count}} · 마지막 사용 {{ago}} 전", {
+        count,
+        ago: agoWord(lastUsedMs, now),
+      });
+}
+
 function paintEmulatorLoans(summary) {
   const count = Number.isSafeInteger(summary?.count) && summary.count > 0 ? summary.count : 0;
   const lastUsedMs = Number.isFinite(summary?.lastUsedMs) ? summary.lastUsedMs : null;
   emulatorLoans = { count, lastUsedMs };
   const chip = el("sb-loans");
   chip.hidden = count === 0;
-  if (count > 0) {
-    say(el("sb-loans-words"), () => {
-      const now = Date.now();
-      return lastUsedMs === null || now - lastUsedMs < 60_000
-        ? t("emulator.loansNow", "빌린 기기 {{count}} · 방금 사용", { count })
-        : t("emulator.loans", "빌린 기기 {{count}} · 마지막 사용 {{ago}} 전", {
-            count,
-            ago: agoWord(lastUsedMs, now),
-          });
-    });
-  }
+  if (count > 0) say(el("sb-loans-words"), () => emulatorLoansWords(Date.now()));
   emulatorLoansTick.sync();
 }
 

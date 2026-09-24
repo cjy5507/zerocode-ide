@@ -95,6 +95,7 @@ pub(crate) const WINDOW_PARTS: &[(&str, &str)] = &[
         "shell-conversation-view.js",
         include_str!("../../../ui/shell-conversation-view.js"),
     ),
+    ("shell-board.js", include_str!("../../../ui/shell-board.js")),
     ("shell.js", include_str!("../../../ui/shell.js")),
 ];
 

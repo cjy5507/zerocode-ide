@@ -145,6 +145,7 @@ const UI_FILES: &[&str] = &[
     "shell-explorer-search.js",
     "shell-explorer-tree.js",
     "shell-attach.js",
+    "shell-board.js",
     "shell-composer.js",
     "shell-conversation-view.js",
     "shell-path-browser.js",

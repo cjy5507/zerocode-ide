@@ -253,6 +253,99 @@ pub(crate) fn ledger_agents() -> std::sync::Arc<Vec<crate::orchestration::Ledger
     std::sync::Arc::clone(&crate::orchestration::board_ledger_snapshot().agents)
 }
 
+/// The task board's coordinator desk (t-6588): the runs in play and their
+/// tasks by pipeline stage, as the standing-order beat last published them
+/// — the same board snapshot `ledger_agents` reads, so no actor request,
+/// revision rebuild or pane-table walk runs on this thread.
+#[tauri::command]
+pub(crate) fn board_desk() -> std::sync::Arc<crate::orchestration::desk::DeskSnapshot> {
+    let _crumb = crate::crumbs::Command::enter("board_desk");
+    std::sync::Arc::clone(&crate::orchestration::board_ledger_snapshot().desk)
+}
+
+/// Answer, from the task board, a question put to a run's coordinator —
+/// as that seat, which this window must hold (t-6588, `desk::reply`). The
+/// main window only: a popped-out board shows the letter and leaves the
+/// answering to the window that holds the seat.
+#[tauri::command]
+pub(crate) async fn desk_reply(
+    webview: tauri::Webview,
+    run: String,
+    message: String,
+    body: String,
+    retry_request: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::desk::reply(
+            &run,
+            &message,
+            &body,
+            &retry_request,
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Acknowledge, from the task board, the batch a run's coordinator holds —
+/// the whole batch, as that seat (t-6588, `desk::acknowledge`).
+#[tauri::command]
+pub(crate) async fn desk_ack(
+    webview: tauri::Webview,
+    run: String,
+    delivery: String,
+    retry_request: String,
+) -> Result<serde_json::Value, String> {
+    crate::from_the_main_webview(&webview)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::orchestration::desk::acknowledge(
+            &run,
+            &delivery,
+            &retry_request,
+            crate::now_epoch_ms(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// The task board's worker roster's git facts (t-6588): commits past the
+/// base and changed files for each worker checkout this window catalogues
+/// (`desk_checkout_facts`). git is a process, so the blocking pool.
+#[tauri::command]
+pub(crate) async fn desk_checkouts(
+    state: State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<Vec<DeskCheckout>, String> {
+    let here = state.active();
+    let active_project = here
+        .orchestrator
+        .map_or_else(|| here.root.clone(), |open| open.repo_root().to_path_buf());
+    let config_root = state.config_root().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || {
+        desk_checkout_facts(&config_root, &active_project, &paths)
+    })
+    .await
+    .map_err(|error| error.to_string())
+}
+
+/// The task board's machine strip (t-6588): the ledger's volume with the
+/// verdict the next `--worktree` summons would meet, the load against the
+/// cores, and the booted simulators and emulators — what `df -g`, `uptime`
+/// and `xcrun simctl list` were typed for. `simctl` and `adb` are processes,
+/// so the answer is read on the blocking pool.
+#[tauri::command]
+pub(crate) async fn machine_load(
+    state: State<'_, AppState>,
+) -> Result<crate::orchestration::desk::MachineLoad, String> {
+    let volume = state.local_data_root().to_path_buf();
+    tauri::async_runtime::spawn_blocking(move || crate::orchestration::desk::machine_load(&volume))
+        .await
+        .map_err(|error| error.to_string())
+}
+
 /// Bounded recent active/pending runs for the manual coordinator picker.
 #[tauri::command]
 pub(crate) async fn coordinator_seat_runs(

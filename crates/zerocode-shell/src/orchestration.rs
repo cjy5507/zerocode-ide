@@ -26,6 +26,7 @@
 //! [`RuntimeActor`]: zerocode_orchestrator::runtime_actor::RuntimeActor
 
 pub(crate) mod coordinator_handover;
+pub(crate) mod desk;
 pub(crate) mod restart_census;
 mod stall_cause;
 mod step_effort;
@@ -984,6 +985,26 @@ pub(crate) struct LedgerAgent {
     /// rather than drawing the agent twice.
     pub(crate) term: Option<u32>,
     pub(crate) at: i64,
+    /// What the summons asked it to run as — the launch receipt `worker-list`
+    /// prints, `None` where the agent's own default was taken. The task
+    /// board's worker roster reads these and the facts below (t-6588).
+    pub(crate) model: Option<String>,
+    pub(crate) effort: Option<String>,
+    /// The pane id inside its team (`%3`) — the half of the seat a person
+    /// types `worker-read` with when this window holds no terminal for it.
+    pub(crate) pane: String,
+    /// Whether it asked a question nobody has answered yet
+    /// (`Run::awaiting_reply`, the silence the stall sweep keeps quiet).
+    pub(crate) asking: bool,
+    /// The newest quota wall its current attempt met, as the ledger reads it
+    /// back (`newest_wall`): the reset the provider named and until when the
+    /// wall explains its silence. Standing is the reader's `now` against
+    /// `stands_until_ms`.
+    pub(crate) wall: Option<zerocode_core::orchestration::WallAt>,
+    /// The last quiet turn its hook reported (`Worker::quiet_at`).
+    pub(crate) quiet_at: Option<i64>,
+    /// The reconciler's proof that its pane is gone (`Worker::pane_missing_since_ms`).
+    pub(crate) pane_missing_since_ms: Option<i64>,
 }
 
 /// Volatile relations layered over the board's two permanent graph edges.
@@ -1256,6 +1277,13 @@ pub(crate) struct BoardLedgerSnapshot {
     pub(crate) agents: Arc<Vec<LedgerAgent>>,
     states: Arc<std::collections::HashMap<u32, LedgerPaneState>>,
     overlays: Arc<GraphOverlaySnapshot>,
+    /// The checkouts live workers hold, counted the way a `--worktree`
+    /// summons counts them ([`zerocode_core::orchestration::held_checkouts`]) —
+    /// what the task board's machine strip judges the disk beside (t-6588).
+    pub(crate) held_checkouts: usize,
+    /// The task board's coordinator desk: the runs in play, their tasks by
+    /// pipeline stage (t-6588, [`desk::desk_snapshot`]).
+    pub(crate) desk: Arc<desk::DeskSnapshot>,
 }
 
 pub(crate) fn board_ledger_snapshot() -> Arc<BoardLedgerSnapshot> {
@@ -1273,6 +1301,10 @@ pub(crate) fn refresh_board_ledger() {
         agents: Arc::new(ledger_agents_for_seats(ledger, seats)),
         states: Arc::new(ledger_states_for_seats(ledger, seats)),
         overlays: Arc::new(graph_overlay_snapshot_for_seats(ledger, seats)),
+        held_checkouts: zerocode_core::orchestration::held_checkouts(ledger).len(),
+        desk: Arc::new(desk::desk_snapshot(ledger, |seat| {
+            seat_is_held(seats, seat)
+        })),
     }) else {
         return;
     };
@@ -1399,6 +1431,14 @@ fn ledger_agents_for_seats(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<Ledger
                 review,
                 term,
                 at: worker.started_ms,
+                model: worker.model.clone(),
+                effort: worker.effort.clone(),
+                pane: worker.pane.clone(),
+                asking: run.awaiting_reply(&worker.id),
+                wall: dispatch
+                    .and_then(|one| zerocode_core::orchestration::newest_wall(run, &one.id)),
+                quiet_at: worker.quiet_at,
+                pane_missing_since_ms: worker.pane_missing_since_ms,
             });
         }
     }
@@ -1416,6 +1456,15 @@ pub(crate) fn ledger_revision() -> Option<u64> {
 }
 
 type TeamSeatIndex = std::collections::HashMap<String, std::collections::HashMap<String, u32>>;
+
+/// Whether this window holds the pane a seat names (`team/pane`).
+fn seat_is_held(seats: &TeamSeatIndex, seat: &str) -> bool {
+    seat.split_once('/').is_some_and(|(team, pane)| {
+        seats
+            .get(team)
+            .is_some_and(|panes| panes.contains_key(pane))
+    })
+}
 
 fn index_team_seats(
     teams: &std::collections::HashMap<String, zerocode_core::agent_teams::Team>,
@@ -1993,7 +2042,7 @@ fn with_usage_headroom<R>(
 ///
 /// `None` is "nobody looked": a path that does not exist, a NUL in it, a
 /// platform with no `statvfs` — all answered as unmeasured, never as empty.
-fn free_bytes_at(path: &Path) -> Option<u64> {
+pub(crate) fn free_bytes_at(path: &Path) -> Option<u64> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;

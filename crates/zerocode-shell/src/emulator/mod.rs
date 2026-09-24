@@ -492,6 +492,16 @@ fn announce_loans() {
     }
 }
 
+/// The booted simulators and emulators on this machine, for the task board's
+/// machine strip (t-6588): iOS off `simctl` (macOS only — elsewhere nobody
+/// can say), Android off `adb`. Processes both, so never on the main thread.
+pub(crate) fn booted_devices() -> (Option<usize>, Option<usize>) {
+    (
+        cfg!(target_os = "macos").then(ios::booted_simulators),
+        android::booted_emulators(),
+    )
+}
+
 /// The loan book's line, for a window that opens — or reloads — while
 /// devices are lent.
 #[tauri::command]
