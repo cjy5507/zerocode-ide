@@ -594,7 +594,14 @@ struct ControlShot {
     description: String,
     prompt: String,
     jev: BTreeMap<String, JudgedAxis>,
+    /// The keyword tables' reading, copied like the judgment: the control
+    /// row marks today's rule on the probe's answer too.
+    rule: Option<BTreeMap<String, String>>,
 }
+
+/// What a sampled task's control row copies from the row it was drawn
+/// from: the judgment, and the keyword tables' reading beside it.
+type SampledJudgment = (BTreeMap<String, JudgedAxis>, Option<BTreeMap<String, String>>);
 
 /// Everything one active batch's control sample carries off the calling
 /// thread. As with `ShadowBatch`, every path is resolved before it detaches.
@@ -749,7 +756,7 @@ pub(super) fn active_assessments(
     // The sample is drawn from what was judged, not from what was asked: a
     // control row compares the probe with a judgment, and a task the judgment
     // failed on has nothing for it to stand beside.
-    let mut sampled: HashMap<u64, BTreeMap<String, JudgedAxis>> = HashMap::new();
+    let mut sampled: HashMap<u64, SampledJudgment> = HashMap::new();
     let rows: Vec<DecisionShadowRow> = judgments
         .into_iter()
         .map(|judgment| {
@@ -759,7 +766,7 @@ pub(super) fn active_assessments(
             // — the probe already ran for it, on the routing road.
             if control_sampled(judgment.task) && judgment.row.route_use == DecisionRouteUse::Applied {
                 if let Some(jev) = judgment.row.jev.clone() {
-                    sampled.insert(judgment.task, jev);
+                    sampled.insert(judgment.task, (jev, judgment.row.rule.clone()));
                 }
             }
             judgment.row
@@ -782,12 +789,13 @@ pub(super) fn active_assessments(
         .iter()
         .filter_map(|(description, prompt)| {
             let task = super::probe_exec::task_fingerprint(description, prompt);
-            let jev = sampled.remove(&task)?;
+            let (jev, rule) = sampled.remove(&task)?;
             Some(ControlShot {
                 task,
                 description: (*description).to_string(),
                 prompt: (*prompt).to_string(),
                 jev,
+                rule,
             })
         })
         .collect();
@@ -889,6 +897,7 @@ async fn run_control_batch(
                 DecisionRouteUse::Control,
             );
             row.jev = Some(shot.jev);
+            row.rule = shot.rule;
             Some(row)
         })
         .collect();
@@ -940,10 +949,37 @@ pub struct RouteLabelRow {
     pub attempt: String,
     /// [`ROUTE_STOOD`], or the door the wire left through
     /// (`SwitchTrigger::as_str`): `quota`, `refusal`, `starvation`, `person`.
+    /// What became of the route — kept beside the mark, no longer the mark:
+    /// it said yes ten times in ten (t-6324 §3).
     pub followed: String,
-    /// The mark the judge counts: the route stood.
-    pub agreed: bool,
+    /// The judgment the mark grades: the turn's own, by the fingerprint of
+    /// the words it was asked about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// What the turn did (`route_label::turn_work`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work: Option<super::route_label::TurnWork>,
+    /// The level that work reads as (`route_label::observed_level`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed: Option<String>,
+    /// The mark the judge counts: the level the judgment answered stood
+    /// within a band of the level the work turned out to be (t-6346).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agreed: Option<bool>,
+    /// The keyword tables' mark on the same facts
+    /// ([`zerocode_core::jev::summary::BASELINE_AGREED`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub baseline_agreed: Option<bool>,
+    /// Why the label compares nothing
+    /// ([`zerocode_core::jev::summary::NOT_COMPARED`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_compared: Option<String>,
 }
+
+/// The word a label writes when the turn's own words met no answered
+/// judgment — a refusal, a failure, or a turn whose words the host changed
+/// before it ran.
+const UNANSWERED: &str = "unanswered";
 
 /// Whether a model switch says the route the judgment took part in did not
 /// stand: the model it routed to could not serve ([`SwitchTrigger::forced`]
@@ -956,15 +992,23 @@ pub fn route_unseated_by(trigger: SwitchTrigger) -> bool {
     trigger.forced() || trigger == SwitchTrigger::Person
 }
 
-/// Write the routing seat's `agreed` mark for the turn `attempt` names: the
-/// route stood, or `unseated` moved the wire off it first.
+/// Write the routing seat's label for the turn `attempt` names (t-5806,
+/// t-6346): what became of its route (`followed`), and — when the turn's own
+/// words met an answered judgment — whether the level that judgment answered
+/// stood within a band of what the turn's messages say it did, beside the
+/// same mark for the keyword tables.
 ///
 /// Nothing is written when the ledger's tail holds no judgment of that
 /// attempt — a turn the seat was never asked about is not one it agreed or
-/// disagreed with — and nothing is written twice: a label already standing
-/// for the attempt is left as it is. Answers whether a row was written.
+/// disagreed with — and nothing is written twice. Answers whether a row was
+/// written.
 #[must_use]
-pub fn note_route_followed(cwd: &Path, attempt: &str, unseated: Option<SwitchTrigger>) -> bool {
+pub fn note_route_followed(
+    cwd: &Path,
+    attempt: &str,
+    unseated: Option<SwitchTrigger>,
+    turn: Option<&[runtime::ConversationMessage]>,
+) -> bool {
     let attempt = attempt.trim();
     if attempt.is_empty() {
         return false;
@@ -980,14 +1024,68 @@ pub fn note_route_followed(cwd: &Path, attempt: &str, unseated: Option<SwitchTri
     if !judged || labeled {
         return false;
     }
-    let row = RouteLabelRow {
+    let mut row = RouteLabelRow {
         at: u64::try_from(now_ms()).unwrap_or_default(),
         label: attempt.to_string(),
         attempt: attempt.to_string(),
         followed: unseated.map_or(ROUTE_STOOD, SwitchTrigger::as_str).to_string(),
-        agreed: unseated.is_none(),
+        task: None,
+        work: None,
+        observed: None,
+        agreed: None,
+        baseline_agreed: None,
+        not_compared: Some(UNANSWERED.to_string()),
     };
+    if let Some(turn) = turn {
+        grade(&mut row, turn, tail.iter().filter(|row| of_attempt(row)));
+    }
     append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).is_ok()
+}
+
+/// Grade `label` on what `turn` did: the turn's own judgment — the answered
+/// row among `rows` asked about the turn's first words — against the level
+/// its work reads as, and the keyword tables' reading on that row against
+/// the same level.
+fn grade<'a>(
+    label: &mut RouteLabelRow,
+    turn: &[runtime::ConversationMessage],
+    rows: impl Iterator<Item = &'a serde_json::Value>,
+) {
+    let work = super::route_label::turn_work(turn);
+    let observed = super::route_label::observed_level(&work);
+    label.work = Some(work);
+    label.observed = Some(observed.as_label().to_string());
+    let Some(words) = first_words(turn) else {
+        return;
+    };
+    let task = format!("{:016x}", super::probe_exec::task_fingerprint("", words));
+    let answered = rows
+        .filter_map(|row| serde_json::from_value::<DecisionShadowRow>(row.clone()).ok())
+        .find(|row| row.task == task && row.answered() && row.jev.is_some());
+    label.task = Some(task);
+    let Some(answered) = answered else {
+        return;
+    };
+    let level = |token: Option<&str>| token.and_then(runtime::RouteTaskComplexity::from_label);
+    let axis = runtime::COMPLEXITY_AXIS.name;
+    let said = level(answered.jev.as_ref().and_then(|jev| jev.get(axis)).map(|judged| judged.choice.as_str()));
+    let rule = level(answered.rule.as_ref().and_then(|rule| rule.get(axis)).map(String::as_str));
+    label.agreed = said.and_then(|said| super::route_label::within_a_band(said, observed));
+    label.baseline_agreed = rule.and_then(|rule| super::route_label::within_a_band(rule, observed));
+    label.not_compared = label.agreed.is_none().then(|| UNANSWERED.to_string());
+}
+
+/// The words a turn was asked about: its person's first message, as the
+/// host handed it to the routing readers.
+fn first_words(turn: &[runtime::ConversationMessage]) -> Option<&str> {
+    turn.iter()
+        .find(|message| message.role == runtime::MessageRole::User)?
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            runtime::ContentBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
 }
 
 /// The routing row's attempt column, as the row spells it.
@@ -1198,7 +1296,7 @@ fn with_control_rows<'a>(
             }
             continue;
         }
-        let is_label = jev_ledger::LABEL.read(row).is_some() && jev_ledger::AGREED.read(row).is_some();
+        let is_label = jev_ledger::LABEL.read(row).is_some();
         if is_label
             && row
                 .get(ATTEMPT)
@@ -1229,6 +1327,14 @@ pub fn agreement_in(rows: &[&serde_json::Value]) -> promote::Agreement {
         if let Some(agreed) = jev_ledger::AGREED.read(row).and_then(serde_json::Value::as_bool) {
             agreement.compared += 1;
             agreement.agreed += usize::from(agreed);
+            if let Some(baseline) = jev_ledger::BASELINE_AGREED.read(row).and_then(serde_json::Value::as_bool) {
+                agreement.baseline_compared += 1;
+                agreement.baseline_agreed += usize::from(baseline);
+            }
+            continue;
+        }
+        if jev_ledger::NOT_COMPARED.read(row).is_some() {
+            agreement.not_compared += 1;
             continue;
         }
         let Ok(row) = serde_json::from_value::<DecisionShadowRow>((*row).clone()) else {
@@ -1243,6 +1349,12 @@ pub fn agreement_in(rows: &[&serde_json::Value]) -> promote::Agreement {
             };
             agreement.compared += 1;
             agreement.agreed += usize::from(judged.choice == probe);
+            // Today's rule on the same answer of the probe's, where the row
+            // carries the tables' reading (every second-version row does).
+            if let Some(rule) = row.rule.as_ref().and_then(|rule| rule.get(axis.name)) {
+                agreement.baseline_compared += 1;
+                agreement.baseline_agreed += usize::from(rule == probe);
+            }
         }
     }
     agreement

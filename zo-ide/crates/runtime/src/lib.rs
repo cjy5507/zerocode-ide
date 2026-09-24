@@ -139,7 +139,7 @@ pub use config::{
     TRUSTED_MCP_SERVERS_FILE, ZO_SETTINGS_SCHEMA_NAME,
     persist_allow_always_rules, remove_mcp_server, trust_mcp_server, write_mcp_server,
 };
-pub use conversation::{ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
+pub use conversation::{is_fan_out_tool, ModelSwitch, SteeringObserver, SteeringQueue, SwitchObserver};
 pub use conversation::{
     decide_step_effort, shift_step_effort, EffortStep, RungMove, StepAsk, StepAskContext,
     StepBatch, StepDecision, StepEffortConfig, StepEffortObserver, StepEffortSeat, StepEvent,

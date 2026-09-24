@@ -802,15 +802,19 @@ pub const JUDGMENT_MEMO_DEADLINE_MS: u64 = 50;
 /// the seat is asked about, whatever the chat probe's own gate says; the
 /// probe is asked only where the answer abstains ([`JevUse::confidence_bands`]).
 ///
-/// The `agreed` rule (t-5806): a routing judgment agreed when the turn it
-/// routed STOOD — no quota wall, refusal fallback or overload demotion moved
-/// the wire to another model, and the person did not name one themselves —
-/// and disagreed when any of those unseated the route before the turn ended.
-/// The label is one row per turn, keyed by the turn's attempt, written by
-/// the host when the turn ends (`decision_shadow::note_route_followed`); a
-/// turn the person cancelled is not judged, and a turn the seat was never
-/// asked about leaves no label. The judge counts it beside the probe's axis
-/// agreement, one comparison per label row.
+/// The `agreed` rule (t-6346, after t-5806): a routing judgment agreed when
+/// the complexity it answered stood within one band of what the turn it was
+/// asked about turned out to be — the turn's own calls, the files it wrote
+/// and the agents it started, read as a level by one table (zo's
+/// `route_label`) — and disagreed when it stood two or more bands off. The
+/// first rule — the route STOOD, no wall, refusal or person moved the model —
+/// said yes ten times in ten; what became of the route is kept beside the
+/// mark as `followed`. The label is one row per turn, keyed by the turn's
+/// attempt, written by the host when the turn ends
+/// (`decision_shadow::note_route_followed`); a turn the person cancelled is
+/// not judged, and a turn the seat was never asked about leaves no label.
+/// The judge counts it beside the probe's axis agreement, one comparison per
+/// label row, and marks the keyword tables on the same facts.
 pub const ROUTING: JevUse = JevUse {
     id: "routing",
     setting: "decisionShadow",
@@ -839,9 +843,10 @@ pub const ROUTING: JevUse = JevUse {
     window_forgives: Some(FORGIVES_NOTHING),
     agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
     agreement_kind: AgreementKind::Comparison,
-    // The keyword tables that route a turn with no judgment at all; the
-    // chat probe is the second reader both are graded by. Its writer stamps
-    // no baseline mark yet, so the seat holds at `too_few_baseline`.
+    // The keyword tables that route a turn with no judgment at all, graded
+    // on every mark the seat is (t-6346): the chat probe's answer, axis by
+    // axis, on a row that carries the tables' reading, and the turn's work
+    // on its label row.
     baseline: Baseline::TodaysRule,
     negatives_wanted: Some(NEGATIVES_WANTED),
     confidence_bands: Some(ConfidenceBands::ROUTED),
