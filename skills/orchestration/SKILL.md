@@ -590,13 +590,34 @@ These are the ones that cost you a run when you get them wrong.
   typed nothing; tries stand the stall grace apart; one attempt is resumed
   at most three times, and the last says `ceilingReached` — after it the
   silence is `went_quiet` news again and the resume is yours.
+- **A classifier's decline is not a silence either.** The provider's safety
+  classifier can decline a request (`stop_reason: "refusal"`, with a
+  category: `cyber`, `bio`, `frontier_llm`, `reasoning_extraction`, …) —
+  Claude Code says "<Model>'s safeguards flagged this message". Fable 5.x
+  and Opus 5/5.5 carry these classifiers; Opus 4.8 does not. A summoned
+  Claude worker is launched so its own CLI continues the declined turn on
+  the model the provider routes the category to (`cyber` → Opus 4.8) instead
+  of pausing — the flag rides that worker's launch only; the person's
+  settings, their panes and yours are untouched. A worker that still stops
+  is `classifier_declined` news — written only on TWO witnesses: the
+  sentence on its screen AND its transcript's last record saying the same;
+  or, for the pause dialog (which writes no record until a key answers it),
+  the dialog on screen AND the pane quiet ten minutes, longer than any dialog
+  a person answered here. It arrives once per attempt with the `category`,
+  whether the provider routes it anywhere (`routed`), the `rung` it stands
+  on and the `dispatchId`, and settles nothing. Every switch of model a
+  worker's CLI made for a decline is a `model_deviated` row — the bound
+  model, `from` → `to`, the category, how long the switch lasts (Claude Code
+  keeps it for the rest of that conversation) — because the model you
+  summoned with is binding and leaving it, however well, is yours to read.
 - **A silence the markers cannot name may be asked about, and only written
   down.** With `smart.stallCause` at `shadow` or `auto` in zo's
   `settings.json` and the worker's checkout consented under
   `smart.jev.workspaces`, the beat puts each such silence to Jev once — the
   pane's screen tail and its transcript tail, through the Jev door — and
   appends a row to `jev/stall-cause.jsonl` in zo's config home: the cause it
-  chose (`transient_api_error`, `quota_wall`, `waiting_on_own_cli_question`,
+  chose (`transient_api_error`, `quota_wall`, `auth_failure`,
+  `classifier_decline`, `waiting_on_own_cli_question`,
   `finished_without_report`, `long_running_tool`, `human_took_over`,
   `unknown`) and, later, what you did next (`mail`, `resumed`,
   `worker_done`, `worker_stop`, `worker_died`, or `none` within two hours).
@@ -689,6 +710,33 @@ that says so: its own continuation did not come (a CLI that does not wait,
 or a countdown somebody cancelled), so wake it with a line of mail or hand
 it over. Nothing is typed for you. With no reading after the reset within
 five minutes, or without `wait`, the silence is ordinary `went_quiet` news.
+
+**A decline goes to the provider's route first, and to another worker only
+under a declared order.** The ladder is one table, walked in order: ① the
+worker's own CLI continues the declined turn on the category's route — no
+wait, nothing typed, and a `model_deviated` row says so; ② for a routed
+category (`cyber`, `bio`, `frontier_llm`) that still stopped, the handover
+you declared with `handover-policy --on-classifier-decline
+<agent[:model[:effort]]> [--wip-commit]` (a part you leave out is the
+declined worker's own) — the same three steps as a wall's, with `worker-stop
+--reason classifier-decline`, and a `handover` receipt that names the
+deviation; ③ the notice, for everything else. Not a retry on the same model
+first: here the request after a decline went through on the same model 6
+times in 15 and on the route 15 times in 15, and the provider's own guide
+says a refused request re-sent unchanged usually earns another refusal.
+A category the provider routes nowhere (`reasoning_extraction`, and a
+decline with no category) is news only: nobody is handed the declined
+request. Do not rewrite a brief to slip past the classifier, and do not
+grep briefs for "risky" words — neither predicted a decline here (a brief
+carrying such words was declined 2 times in 46, one without 1 in 106).
+Read a declined pane's words (`worker-read`); never paste a picture of the
+declined screen into a conversation — on this machine a refused message
+that carried a screenshot was declined again for as long as the picture
+stayed in the conversation. zo takes the same ladder in-process under
+`smart.classifierFallback` (`off`, `ask` — the default: it asks before a
+turn continues on the route — or `auto`), announces every switch, and asks
+before it sends a declined request's images again; a summoned zo worker
+runs `auto`, because nobody answers a worker's questions.
 
 If what you were asked for is "give this to another agent" and nobody asked
 you to watch it or collect a result, you do not need this skill. Make a

@@ -3,13 +3,16 @@
 //! window's stall sweep asks Jev about one silence, what makes an answer one,
 //! and what happened after — the label an answer is later graded against.
 //!
-//! The marker table (`crates/zerocode-shell/src/quota_wall.rs`) names two
+//! The marker table (`crates/zerocode-shell/src/quota_wall.rs`) names three
 //! causes from an agent's own words, measured one CLI at a time: its quota
-//! wall and a transient API error. Every other silence is `went_quiet` news,
-//! and a coordinator reads the pane to learn why. This module puts that same
-//! reading to Jev as a closed choice — the two measured causes (in words the
-//! table has not measured), five more ways a worker's silence reads on this
-//! machine, and `unknown` — and says what came of the silence afterwards.
+//! wall, a transient API error and a safety classifier's decline. Every other
+//! silence is `went_quiet` news, and a coordinator reads the pane to learn
+//! why. This module puts that same reading to Jev as a closed choice — the
+//! three measured causes (in words the table has not measured, or before the
+//! table's two witnesses agree), five more ways a worker's silence reads on
+//! this machine, and `unknown` — and says what came of the silence
+//! afterwards. The answer is a label and never a witness: a decline is told
+//! on the table's two witnesses alone (t-6747).
 //! Under `on`, or an `auto` its own evidence raised, the seat acts on the
 //! answer (`crate::jev::STALL`, docs/design/jev-every-seat-acts-20260920.md).
 //!
@@ -35,7 +38,7 @@ const QUESTION: &str = "cause";
 
 /// The words of the question. The screen and the record reach the model as
 /// state, never as an instruction.
-const INSTRUCTIONS: &str = "A worker agent running in a terminal has printed nothing for `quietSeconds` seconds, and nothing the window has measured for a quota wall or a transient API error ends its conversation. `screen` is the bottom of its terminal as it stands now and `transcript` the last records of its conversation, oldest first, one per line. Choose why the worker stopped.";
+const INSTRUCTIONS: &str = "A worker agent running in a terminal has printed nothing for `quietSeconds` seconds, and nothing the window has measured for a quota wall, a transient API error or a safety classifier's decline ends its conversation. `screen` is the bottom of its terminal as it stands now and `transcript` the last records of its conversation, oldest first, one per line. Choose why the worker stopped.";
 
 /// The state's keys, in the order the fingerprint reads them.
 const STATE_KEYS: [&str; 4] = ["agent", "quietSeconds", "screen", "transcript"];
@@ -43,7 +46,7 @@ const STATE_KEYS: [&str; 4] = ["agent", "quietSeconds", "screen", "transcript"];
 /// The version of the words in this module. Bump it when any of them changes:
 /// a judgment read under one wording is not evidence about another. The test
 /// `the_version_is_pinned_to_the_words` holds it to [`crate::jev::rubric_fingerprint`].
-pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 2;
+pub const STALL_CAUSE_RUBRIC_VERSION: u32 = 3;
 
 /// How long after a silence was asked about its label waits for what
 /// followed ([`followed`]).
@@ -63,6 +66,7 @@ pub enum Cause {
     TransientApiError,
     QuotaWall,
     AuthFailure,
+    ClassifierDecline,
     WaitingOnOwnCliQuestion,
     FinishedWithoutReport,
     LongRunningTool,
@@ -72,10 +76,11 @@ pub enum Cause {
 
 impl Cause {
     /// Every cause, in the order the question offers them.
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::TransientApiError,
         Self::QuotaWall,
         Self::AuthFailure,
+        Self::ClassifierDecline,
         Self::WaitingOnOwnCliQuestion,
         Self::FinishedWithoutReport,
         Self::LongRunningTool,
@@ -90,6 +95,7 @@ impl Cause {
             Self::TransientApiError => "transient_api_error",
             Self::QuotaWall => "quota_wall",
             Self::AuthFailure => "auth_failure",
+            Self::ClassifierDecline => "classifier_decline",
             Self::WaitingOnOwnCliQuestion => "waiting_on_own_cli_question",
             Self::FinishedWithoutReport => "finished_without_report",
             Self::LongRunningTool => "long_running_tool",
@@ -110,6 +116,12 @@ impl Cause {
     ///   w-5479, 2026-09-20, t-5498) and a Claude turn's error in the same
     ///   verification (`Refresh token not found or invalid`, t-5499) — the
     ///   silence the first rubric read as `unknown` with 0.95.
+    /// - decline: the 18 Claude records of a decline no fallback answered
+    ///   (2026-09-10..24, t-6747: Fable 5.1's 14 and Opus 5's 4), and the
+    ///   pause dialog a coordinator read off w-5770's pane on 2026-09-21 —
+    ///   the person's `switchModelsOnFlag: false`, which writes nothing until
+    ///   a key answers it. A box, but no question of the work's: named here
+    ///   so it is not read as one.
     /// - question: a Claude question box as a coordinator read it off a pane
     ///   (transcript `e4d2cde0-…`), and `AskUserQuestion` calls in 31 Claude
     ///   transcripts.
@@ -129,6 +141,9 @@ impl Cause {
             }
             Self::AuthFailure => {
                 "The agent's login to its provider no longer works, so every request is refused until somebody signs it in again, in words like `Token refresh failed: 401`, `Refresh token not found or invalid`, `401 Unauthorized`, `authentication_error`, `Not logged in`, or a prompt to run its own login command. Waiting, retrying and typing a continuation do not help: another agent, or a person, has to take the work."
+            }
+            Self::ClassifierDecline => {
+                "The provider's safety classifier declined the conversation's last request, and the turn ended on it or waits on it: `API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup).` as the last record, or a box over the conversation reading `Session paused`, `Details: [cyber]`, `1. Switch to Opus 4.8` and `2. Edit prompt and retry`, which waits for a key and is not a question the work asked. Sending the same request to the same model usually meets the same decline: another model, or a person, has to take the turn."
             }
             Self::WaitingOnOwnCliQuestion => {
                 "The agent's own program has a question or a confirmation on the screen and waits for a key: a box like `Do you want to continue?` over `1. Yes` and `2. No` with `Enter to select · ↑/↓ to navigate · Esc to cancel`, or an `AskUserQuestion` call as the conversation's last record with no answer after it."
@@ -300,9 +315,9 @@ pub enum Hand {
 
 impl Cause {
     /// What this cause says about the silence's end. A wall, a transient
-    /// error, a dead login, a question box and a worker that finished without
-    /// saying so all wait for somebody — the last one until it is asked for
-    /// its report. A command still running and a person at the keyboard end
+    /// error, a dead login, a classifier's decline, a question box and a
+    /// worker that finished without saying so all wait for somebody — the
+    /// last one until it is asked for its report. A command still running and a person at the keyboard end
     /// on their own. `Unknown` says nothing either way.
     #[must_use]
     pub const fn predicts(self) -> Option<Hand> {
@@ -310,6 +325,7 @@ impl Cause {
             Self::TransientApiError
             | Self::QuotaWall
             | Self::AuthFailure
+            | Self::ClassifierDecline
             | Self::WaitingOnOwnCliQuestion
             | Self::FinishedWithoutReport => Some(Hand::Needed),
             Self::LongRunningTool | Self::HumanTookOver => Some(Hand::NotNeeded),

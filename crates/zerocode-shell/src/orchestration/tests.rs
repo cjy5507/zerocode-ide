@@ -1184,6 +1184,63 @@ fn the_desks_mail_is_the_coordinators_inbox_letter_by_letter() {
     );
 }
 
+/// A classifier's decline and the switch of model it caused reach the desk
+/// as letters owed an acknowledgement (t-6747), with the facts their second
+/// lines are written from: the category, whether it is routed and on which
+/// rung the notice stands, and the model that answered in the bound one's
+/// place, for how long.
+#[test]
+fn a_decline_and_a_switch_of_model_are_owed_on_the_desk() {
+    use zerocode_core::orchestration::{Draft, MessageKind, Priority, Text};
+    let mut held = Ledger::new();
+    let run_id = held.create_run("desk-decline", 1);
+    let address = held.run(&run_id).expect("the run").address();
+    let notice = |kind: MessageKind, body: &str| Draft {
+        from: zerocode_core::orchestration::LEDGER_ITSELF.to_string(),
+        to: address.clone(),
+        kind,
+        body: Text::from(body),
+        subject: Text::default(),
+        priority: Priority::Normal,
+        payload: Text::default(),
+        thread: None,
+        task: None,
+        dispatch: None,
+    };
+    held.post(
+        &run_id,
+        notice(
+            MessageKind::ClassifierDeclined,
+            r#"{"workerId":"w-9","category":"reasoning_extraction","routed":false,"rung":"notify"}"#,
+        ),
+        1_100,
+    )
+    .expect("a decline");
+    held.post(
+        &run_id,
+        notice(
+            MessageKind::ModelDeviated,
+            r#"{"workerId":"w-8","category":"cyber","from":"claude-fable-5-1","to":"claude-opus-4-8","scope":"session","rung":"fallback"}"#,
+        ),
+        1_200,
+    )
+    .expect("a switch");
+
+    let mail = super::desk::desk_mail(held.run(&run_id).expect("the run"));
+
+    assert_eq!(mail.len(), 2, "{mail:?}");
+    assert_eq!(mail[0].kind, "classifier_declined");
+    assert_eq!(mail[0].worker.as_deref(), Some("w-9"));
+    assert_eq!(mail[0].category.as_deref(), Some("reasoning_extraction"));
+    assert_eq!(mail[0].routed, Some(false));
+    assert_eq!(mail[0].rung.as_deref(), Some("notify"));
+    assert_eq!(mail[1].kind, "model_deviated");
+    assert_eq!(mail[1].category.as_deref(), Some("cyber"));
+    assert_eq!(mail[1].switched_to.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(mail[1].scope.as_deref(), Some("session"));
+    assert!(mail.iter().all(|one| one.delivery == "pending"));
+}
+
 /// A worker's row carries what the task board's roster reads its health from
 /// (t-6588): the question it is waiting on (`Run::awaiting_reply`), the newest
 /// quota wall its attempt met as the ledger reads it back (`newest_wall`), and
@@ -2099,6 +2156,11 @@ struct AtTheWall {
     markers: Mutex<std::collections::HashMap<u32, zerocode_core::orchestration::QuotaWallMarker>>,
     /// Every gauge the beat asked the window to read again (t-6427).
     asked: Mutex<Vec<String>>,
+    /// What each pane shows and records of a classifier decline (t-6747).
+    declines: Mutex<std::collections::HashMap<u32, crate::quota_wall::DeclineReading>>,
+    /// How long the pty has been silent while the hook still says `working`
+    /// — a pause dialog's pane (t-6747); `None` is a pty that just wrote.
+    pty_quiet_ms: Mutex<Option<i64>>,
 }
 
 impl AtTheWall {
@@ -2117,6 +2179,20 @@ impl AtTheWall {
                     line: zerocode_core::orchestration::Text::from(line),
                 },
             );
+    }
+
+    /// The pane's pty has been silent `quiet_ms` while its hook may still
+    /// say `working`.
+    fn pty_silent_for(&self, quiet_ms: i64) {
+        *self.pty_quiet_ms.lock().unwrap() = Some(quiet_ms);
+    }
+
+    /// The pane stands at a classifier decline: what it shows and records.
+    fn declined(&self, term: u32, reading: crate::quota_wall::DeclineReading) {
+        self.declines
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(term, reading);
     }
 
     /// The pane's own words moved past its wall.
@@ -2161,6 +2237,22 @@ impl Host for AtTheWall {
         }
         Some(now_ms - zerocode_core::orchestration::QUIET_GRACE_MS)
     }
+    fn decline_quiet_since(
+        &self,
+        term: u32,
+        worker_started_ms: i64,
+        now_ms: i64,
+        hook_outlived_ms: i64,
+    ) -> Option<i64> {
+        self.quiet_since(term, worker_started_ms, now_ms)
+            .or_else(|| {
+                self.pty_quiet_ms
+                    .lock()
+                    .unwrap()
+                    .filter(|quiet| *quiet >= hook_outlived_ms)
+                    .map(|quiet| now_ms - quiet)
+            })
+    }
     fn quota_wall_marker(
         &self,
         term: u32,
@@ -2183,6 +2275,40 @@ impl Host for AtTheWall {
         let markers = self.markers.lock().unwrap();
         if !*busy && let Some(marker) = markers.get(&term) {
             commit(marker.clone());
+        }
+    }
+    fn classifier_decline_reading(
+        &self,
+        term: u32,
+        _agent: &str,
+    ) -> Option<crate::quota_wall::DeclineReading> {
+        self.declines
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&term)
+            .cloned()
+    }
+    fn with_classifier_decline_observation(
+        &self,
+        term: u32,
+        _worker_started_ms: i64,
+        _agent: &str,
+        commit: &mut dyn FnMut(crate::quota_wall::DeclineReading, i64),
+    ) {
+        let busy = self.busy.lock().unwrap();
+        let pty_quiet = self.pty_quiet_ms.lock().unwrap();
+        let declines = self.declines.lock().unwrap();
+        // Quiet as the window's fence reads it: a hook at rest, or a pty
+        // silent past the dialog's term whatever the hook says.
+        let quiet_ms = if *busy {
+            pty_quiet.filter(|quiet| {
+                *quiet >= zerocode_core::orchestration::DECLINE_DIALOG_UNANSWERED_MS
+            })
+        } else {
+            Some(zerocode_core::orchestration::QUIET_GRACE_MS)
+        };
+        if let (Some(quiet_ms), Some(reading)) = (quiet_ms, declines.get(&term)) {
+            commit(reading.clone(), crate::now_epoch_ms() - quiet_ms);
         }
     }
     fn capture(&self, _term: u32) -> Option<String> {
@@ -2380,6 +2506,8 @@ impl Walled {
             checkout,
             markers: Mutex::new(std::collections::HashMap::new()),
             asked: Mutex::new(Vec::new()),
+            declines: Mutex::new(std::collections::HashMap::new()),
+            pty_quiet_ms: Mutex::new(None),
         };
         let leader = zerocode_core::agent_teams::LEADER_PANE;
         let verb = |line: &str, at: i64| {
@@ -2578,6 +2706,261 @@ fn the_beat_walks_a_handover_through_git_and_the_one_door_and_leaves_a_receipt()
     // Once: the next tick has nothing to walk.
     tick(&stood.host, &[], stood.began + 11_000);
     assert_eq!(stood.receipts(stood.began + 11_001).len(), 1);
+}
+
+impl Walled {
+    /// A claude worker stopped at a safety classifier's decline (t-6747):
+    /// its screen shows Claude Code's own sentence and its transcript's last
+    /// record is the decline, in `category`.
+    fn stand_declined(
+        leader_term: u32,
+        checkout: &'static str,
+        category: &str,
+        policy: &str,
+    ) -> Self {
+        let said = "API Error: Fable 5.1's safeguards flagged this message \
+                    (https://www.anthropic.com/legal/aup).";
+        Self::stand_declined_with(
+            leader_term,
+            checkout,
+            policy,
+            crate::quota_wall::DeclineReading {
+                screen: Some(zerocode_core::orchestration::DeclineScreen {
+                    line: zerocode_core::orchestration::Text::from(said),
+                    dialog: false,
+                    category: None,
+                }),
+                record: Some(zerocode_core::orchestration::ClassifierDeclineMarker {
+                    source: "transcript".to_string(),
+                    line: zerocode_core::orchestration::Text::from(said),
+                    category: Some(category.to_string()),
+                    key: "decline-record-1".to_string(),
+                }),
+                fallbacks: Vec::new(),
+            },
+        )
+    }
+
+    /// The worker stands at Claude Code's pause dialog (t-6747): the dialog
+    /// on its screen, no record — the dialog writes none until a key answers
+    /// it — and a hook that still says `working`, because the dialog ended
+    /// no turn. How long its pty has been silent is the test's to say.
+    fn stand_paused(leader_term: u32, checkout: &'static str, policy: &str) -> Self {
+        let stood = Self::stand_declined_with(
+            leader_term,
+            checkout,
+            policy,
+            crate::quota_wall::DeclineReading {
+                screen: Some(zerocode_core::orchestration::DeclineScreen {
+                    line: zerocode_core::orchestration::Text::from(
+                        "Fable 5.1's safeguards flagged this message.",
+                    ),
+                    dialog: true,
+                    category: Some("cyber".to_string()),
+                }),
+                record: None,
+                fallbacks: Vec::new(),
+            },
+        );
+        *stood.host.busy.lock().unwrap() = true;
+        stood
+    }
+
+    fn stand_declined_with(
+        leader_term: u32,
+        checkout: &'static str,
+        policy: &str,
+        reading: crate::quota_wall::DeclineReading,
+    ) -> Self {
+        let began = clock();
+        let (window, store) = PrivateWindow::boot();
+        let beat = one_beat_at_a_time();
+        let team = format!("team-decline-{leader_term}");
+        seat_a_team(&team, leader_term);
+        let host = AtTheWall {
+            closed: Mutex::new(Vec::new()),
+            busy: Mutex::new(false),
+            onto: Mutex::new(leader_term + 1),
+            checkout,
+            markers: Mutex::new(std::collections::HashMap::new()),
+            asked: Mutex::new(Vec::new()),
+            declines: Mutex::new(std::collections::HashMap::new()),
+            pty_quiet_ms: Mutex::new(None),
+        };
+        let verb = |line: &str, at: i64| {
+            let said = run(
+                &host,
+                Vec::new(),
+                &team,
+                zerocode_core::agent_teams::LEADER_PANE,
+                TEST_CAPABILITY,
+                &words(line),
+                at,
+            );
+            assert_eq!(said.exit_code, 0, "`{line}`: {}", said.stderr);
+            serde_json::from_str::<serde_json::Value>(&said.stdout).expect("json")
+        };
+        verb("run-create --name declined", began);
+        let task = verb("task-create --spec build-it", began + 1)["taskId"]
+            .as_str()
+            .expect("a task")
+            .to_string();
+        let claude = verb(
+            &format!("worker-start --agent claude --model fable --effort max --task {task}"),
+            began + 2,
+        );
+        let worker = claude["workerId"].as_str().expect("a worker").to_string();
+        let dispatch = claude["dispatchId"]
+            .as_str()
+            .expect("a dispatch")
+            .to_string();
+        if !policy.is_empty() {
+            verb(&format!("handover-policy {policy}"), began + 3);
+        }
+        host.seating_onto(leader_term + 2);
+        host.declined(leader_term + 1, reading);
+        Self {
+            window,
+            _store: store,
+            _beat: beat,
+            host,
+            team,
+            task,
+            worker,
+            dispatch,
+            began,
+        }
+    }
+}
+
+/// A worker whose provider's classifier declined it in a routed category,
+/// and whose CLI could not continue, is handed on in one tick (t-6747): the
+/// two witnesses become one notice, and under the run's declared
+/// `--on-classifier-decline` the task goes to a fresh worker in the SAME
+/// checkout on a dispatch linked to the ended one — the declared model, the
+/// effort the declaration left out the worker's own — and the receipt names
+/// the category and the model binding the replacement leaves.
+#[test]
+fn a_declined_worker_is_resummoned_on_the_declared_rung_with_its_checkout() {
+    const LEADER_TERM: u32 = 85_300;
+    let stood = Walled::stand_declined(
+        LEADER_TERM,
+        "/tmp",
+        "cyber",
+        "--on-classifier-decline claude:claude-opus-4-8",
+    );
+    tick(&stood.host, &[], stood.began + 10_000);
+    let news = stood.json(
+        "check --peek --types classifier_declined",
+        stood.began + 10_001,
+    );
+    assert_eq!(news["count"], 1, "{news}");
+    let receipts = stood.receipts(stood.began + 10_001);
+    assert_eq!(receipts.len(), 1, "{receipts:?}");
+    let receipt = &receipts[0];
+    assert_eq!(receipt["status"], "done", "{receipt}");
+    assert_eq!(receipt["reason"], "classifier-decline");
+    assert_eq!(receipt["category"], "cyber");
+    assert_eq!(receipt["rung"], "handover");
+    assert_eq!(receipt["to"]["model"], "claude-opus-4-8");
+    assert_eq!(receipt["to"]["effort"], "max");
+    assert_eq!(receipt["modelDeviation"]["from"]["model"], "fable");
+    assert_eq!(receipt["modelDeviation"]["to"]["model"], "claude-opus-4-8");
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    let replacement = receipt["to"]["workerId"].as_str().expect("a replacement");
+    let rows = the_rows();
+    let seated = rows
+        .workers
+        .iter()
+        .find(|one| one.id == replacement)
+        .expect("the replacement");
+    assert_eq!(seated.agent, "claude");
+    assert_eq!(seated.model.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(seated.effort.as_deref(), Some("max"));
+    assert_eq!(seated.checkout.as_deref(), Some("/tmp"));
+    let linked = rows
+        .dispatches
+        .iter()
+        .find(|one| Some(one.id.as_str()) == seated.dispatch.as_deref())
+        .expect("the replacement's attempt");
+    assert_eq!(linked.retry_of.as_deref(), Some(stood.dispatch.as_str()));
+    assert_eq!(linked.task, stood.task);
+    // Once: the next tick has nothing to walk.
+    tick(&stood.host, &[], stood.began + 11_000);
+    assert_eq!(stood.receipts(stood.began + 11_001).len(), 1);
+}
+
+/// A pause dialog stands behind a hook that still says `working` (t-6747):
+/// Claude Code ends no turn while its dialog waits, and says so only through
+/// a `Notification` hook this window does not install, so the stall sweep
+/// never reads the pane. Once its pty has been silent past every dialog a
+/// person answered here, the dialog on screen and that silence are the two
+/// witnesses — told once, and walked under the run's declared order. A
+/// shorter silence is nothing: a person may be about to answer.
+#[test]
+fn a_pause_dialog_behind_a_working_hook_is_told_once_it_outlasts_every_answered_one() {
+    const LEADER_TERM: u32 = 85_500;
+    const MINUTE: i64 = 60_000;
+    let stood = Walled::stand_paused(
+        LEADER_TERM,
+        "/tmp",
+        "--on-classifier-decline claude:claude-opus-4-8",
+    );
+    let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
+
+    stood.host.pty_silent_for(9 * MINUTE);
+    tick(&stood.host, &[], stood.began + 10_000);
+    assert_eq!(told(stood.began + 10_001)["count"], 0);
+    assert!(stood.receipts(stood.began + 10_001).is_empty());
+
+    stood.host.pty_silent_for(11 * MINUTE);
+    tick(&stood.host, &[], stood.began + 20_000);
+    let news = told(stood.began + 20_001);
+    assert_eq!(news["count"], 1, "{news}");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(
+        body["record"]["source"],
+        zerocode_core::orchestration::DECLINE_DIALOG_SOURCE,
+        "{body}"
+    );
+    assert_eq!(body["category"], "cyber", "{body}");
+    assert_eq!(body["rung"], "handover", "{body}");
+    let receipts = stood.receipts(stood.began + 20_001);
+    assert_eq!(receipts.len(), 1, "{receipts:?}");
+    assert_eq!(receipts[0]["status"], "done", "{}", receipts[0]);
+    assert_eq!(receipts[0]["reason"], "classifier-decline");
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+
+    // Told once: the next beat has nothing to tell or walk.
+    tick(&stood.host, &[], stood.began + 30_000);
+    assert_eq!(told(stood.began + 30_001)["count"], 1);
+    assert_eq!(stood.receipts(stood.began + 30_001).len(), 1);
+}
+
+/// A category the provider routes nowhere is news and walks nowhere, even
+/// under a declared order: the provider's answer stands (t-6747).
+#[test]
+fn an_unrouted_decline_is_told_and_walked_nowhere() {
+    const LEADER_TERM: u32 = 85_400;
+    let stood = Walled::stand_declined(
+        LEADER_TERM,
+        "/tmp",
+        "reasoning_extraction",
+        "--on-classifier-decline claude:claude-opus-4-8",
+    );
+    tick(&stood.host, &[], stood.began + 10_000);
+    let news = stood.json(
+        "check --peek --types classifier_declined",
+        stood.began + 10_001,
+    );
+    assert_eq!(news["count"], 1, "{news}");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["routed"], false, "{body}");
+    assert_eq!(body["rung"], "notify", "{body}");
+    assert!(stood.receipts(stood.began + 10_001).is_empty());
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
 }
 
 /// The three steps in order, through the door, each named to the
@@ -2909,6 +3292,8 @@ fn the_beat_writes_quota_walled_news_only_with_both_witnesses_and_settles_nothin
         checkout: "/wt/walled",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
     };
     let leader = zerocode_core::agent_teams::LEADER_PANE;
     let verb = |line: &str, at: i64| {
@@ -14250,6 +14635,8 @@ fn coordinator_handover_native_order_walks_once_and_persists_in_the_store() {
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
     });
     let answer = run(
         &host,
@@ -14350,6 +14737,8 @@ fn coordinator_handover_cli_cannot_declare_a_human_order() {
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
     });
     let answer = run(
         &host,
@@ -14377,6 +14766,8 @@ fn coordinator_manual_native_picker_and_claim_are_durable_and_retryable() {
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
     });
     let made = run(
         &host,
@@ -14458,6 +14849,8 @@ fn coordinator_manual_native_claim_is_available_when_the_source_pane_is_gone() {
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
     });
     let made = run(
         &host,
@@ -14507,6 +14900,8 @@ fn coordinator_handover_can_disable_after_source_capability_disappears() {
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
     });
     let made = run(
         &host,

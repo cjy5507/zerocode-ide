@@ -3964,6 +3964,9 @@ struct Stalled {
     /// Whether the run declared `--on-transient-error resume` — asked before
     /// a transcript is read, so an undeclared run costs nothing more.
     resume_declared: bool,
+    /// Whether this attempt's decline was told already (t-6747): its silence
+    /// is ordinary quiet news after that, reminded as any other.
+    declined_already: bool,
     /// The attempt it carries, and that attempt's task.
     dispatch: String,
     task: String,
@@ -4038,6 +4041,11 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
                         .handover
                         .as_ref()
                         .is_some_and(|policy| policy.on_transient_error.is_some()),
+                    declined_already: zerocode_core::orchestration::newest_decline(
+                        run,
+                        &dispatch.id,
+                    )
+                    .is_some(),
                     dispatch: dispatch.id.clone(),
                     task: dispatch.task.clone(),
                     checkout: worker.checkout.clone(),
@@ -4071,6 +4079,7 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
     );
     let mut quiet: Vec<(String, i64)> = Vec::new();
     let mut walled: Vec<zerocode_core::orchestration::QuotaWallWitness> = Vec::new();
+    let mut declined: Vec<zerocode_core::orchestration::ClassifierDeclineWitness> = Vec::new();
     let mut stopped: Vec<(Stalled, zerocode_core::orchestration::TransientErrorMarker)> =
         Vec::new();
     let mut unmarked: Vec<stall_cause::Silence> = Vec::new();
@@ -4141,6 +4150,30 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
             walled.push(witness);
             continue;
         }
+        /* No wall: a decline, next (t-6747). The CLI's sentence on the
+         * screen AND its record as the conversation's last word — or its
+         * pause dialog, stood past every dialog a person answered here. Both
+         * or nothing, the pure function decides; a pane at a decline is not
+         * quiet news until its notice is told, and ordinary quiet news after
+         * that. */
+        if !wall_words && !one.declined_already {
+            let witness = host
+                .classifier_decline_reading(one.term, &one.agent)
+                .and_then(|reading| {
+                    zerocode_core::orchestration::classifier_decline_witness(
+                        &one.worker,
+                        &one.dispatch,
+                        reading.screen,
+                        reading.record,
+                        one.since_ms,
+                        now_ms,
+                    )
+                });
+            if let Some(witness) = witness {
+                declined.push(witness);
+                continue;
+            }
+        }
         /* No wall: under a declared `--on-transient-error resume`, ask the
          * table's second cause of the same transcript tail (t-4537). The wall
          * was asked first and wins; a pane with neither stays quiet, and a
@@ -4206,6 +4239,11 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
             moved |= told;
         }
     }
+    for workers in declined.chunks(zerocode_core::orchestration::MAX_LIST) {
+        if let Ok((told, _)) = held.actor.classifier_declines(workers.to_vec(), now_ms) {
+            moved |= told;
+        }
+    }
     // Never forced, never waited on: the answer is the cache a later beat
     // reads (t-6427).
     for gauge in asks {
@@ -4227,6 +4265,172 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
      * stall switch — after the news is written, so a question changes
      * nothing the coordinator hears, and off the beat (t-4538). */
     stall_cause::ask_about(host, &held.stalls, unmarked, &still_quiet, now_ms);
+}
+
+/* ---- a classifier decline's switch of model (t-6747) ------------------ */
+
+/// A live worker this window seats in its pane now, with the open attempt it
+/// carries — one reading of a ledger image ([`with_ledger_seats`]) for the
+/// beats that ask each such pane a question of their own (t-6747).
+struct SeatedAttempt {
+    worker: String,
+    agent: String,
+    started_ms: i64,
+    term: u32,
+    dispatch: String,
+    taken_over: bool,
+    /// Whether this attempt's classifier decline was told already.
+    declined_already: bool,
+}
+
+fn seated_open_attempts(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<SeatedAttempt> {
+    ledger
+        .runs()
+        .iter()
+        .flat_map(|run| {
+            run.workers.iter().filter_map(|worker| {
+                if !worker.state.is_live() {
+                    return None;
+                }
+                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+                if !dispatch.is_open()
+                    || run
+                        .worker_in_pane(&worker.team, &worker.pane)
+                        .is_none_or(|current| current.id != worker.id)
+                {
+                    return None;
+                }
+                let term = seats
+                    .get(worker.team.as_str())?
+                    .get(worker.pane.as_str())
+                    .copied()?;
+                Some(SeatedAttempt {
+                    worker: worker.id.clone(),
+                    agent: worker.agent.clone(),
+                    started_ms: worker.started_ms,
+                    term,
+                    dispatch: dispatch.id.clone(),
+                    taken_over: worker.taken_over,
+                    declined_already: zerocode_core::orchestration::newest_decline(
+                        run,
+                        &dispatch.id,
+                    )
+                    .is_some(),
+                })
+            })
+        })
+        .collect()
+}
+
+/// Tell a classifier decline its pause dialog is hiding behind a stale
+/// `working` hook (t-6747). Claude Code's pause dialog ends no turn, so the
+/// stall sweep — which reads quiet panes only — never sees the pane; but its
+/// pty goes still, where a turn that is working redraws its spinner
+/// (measured on 2.1.281 against a local stand-in for the API: a pane waiting
+/// on a slow answer wrote 135 times in 20 s; the dialog's pane wrote once in
+/// the 75 s after it, and nothing after its 17th second). The dialog on
+/// screen and a pty silent past every dialog a person answered here are the
+/// two witnesses ([`zerocode_core::orchestration::classifier_decline_witness`]);
+/// a pane the sweep can read is the sweep's, and a told decline is not told
+/// again.
+fn note_paused_declines(host: &dyn Host, now_ms: i64) {
+    let (Some(seated), Some(held)) = (with_ledger_seats(seated_open_attempts), runtime()) else {
+        return;
+    };
+    let mut declined = Vec::new();
+    for one in seated {
+        if one.taken_over
+            || one.declined_already
+            || !crate::quota_wall::has_rule(
+                &one.agent,
+                crate::quota_wall::StallCause::ClassifierDecline,
+            )
+            || host.quiet_since(one.term, one.started_ms, now_ms).is_some()
+        {
+            continue;
+        }
+        let Some(since_ms) = host.decline_quiet_since(
+            one.term,
+            one.started_ms,
+            now_ms,
+            zerocode_core::orchestration::DECLINE_DIALOG_UNANSWERED_MS,
+        ) else {
+            continue;
+        };
+        let witness = host
+            .classifier_decline_reading(one.term, &one.agent)
+            .and_then(|reading| {
+                zerocode_core::orchestration::classifier_decline_witness(
+                    &one.worker,
+                    &one.dispatch,
+                    reading.screen,
+                    reading.record,
+                    since_ms,
+                    now_ms,
+                )
+            });
+        declined.extend(witness);
+    }
+    let mut moved = false;
+    for chunk in declined.chunks(zerocode_core::orchestration::MAX_LIST) {
+        if let Ok((told, _)) = held.actor.classifier_declines(chunk.to_vec(), now_ms) {
+            moved |= told;
+        }
+    }
+    rang(moved);
+}
+
+/// Where each worker transcript's switch scan stands: the bytes already
+/// read. In memory on purpose — the ledger keys each row by its record, so a
+/// restart that reads a file again from the start writes nothing twice.
+fn deviation_scans() -> &'static Mutex<std::collections::HashMap<String, u64>> {
+    static READ: OnceLock<Mutex<std::collections::HashMap<String, u64>>> = OnceLock::new();
+    READ.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Write down every switch of model a live worker's CLI made to answer a
+/// classifier decline on the category's route (t-6747). A summons' model is
+/// a binding choice; leaving it, however well, is the coordinator's to read —
+/// the two models, the category, how long the CLI keeps the switch, why.
+///
+/// Read off each worker's own transcript from where the last beat stopped
+/// ([`crate::quota_wall::fallbacks_since`]), outside every lock but the scan
+/// table's own, for every live worker whose CLI records such switches.
+fn note_model_deviations(host: &dyn Host, now_ms: i64) {
+    let (Some(seated), Some(held)) = (with_ledger_seats(seated_open_attempts), runtime()) else {
+        return;
+    };
+    let mut switches = Vec::new();
+    for SeatedAttempt { worker, term, .. } in seated
+        .into_iter()
+        .filter(|one| crate::quota_wall::reads_fallbacks(&one.agent))
+    {
+        let Some(path) = host
+            .provider_session(term)
+            .and_then(|session| session.transcript_path)
+        else {
+            continue;
+        };
+        let mut scans = deviation_scans()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner());
+        let offset = scans.entry(path.clone()).or_insert(0);
+        switches.extend(
+            crate::quota_wall::fallbacks_since(Path::new(&path), offset)
+                .into_iter()
+                .map(|mut switch| {
+                    switch.worker = worker.clone();
+                    switch
+                }),
+        );
+    }
+    let mut moved = false;
+    for chunk in switches.chunks(zerocode_core::orchestration::MAX_LIST) {
+        if let Ok((told, _)) = held.actor.model_deviations(chunk.to_vec(), now_ms) {
+            moved |= told;
+        }
+    }
+    rang(moved);
 }
 
 /* ---- the transient-error continuation (t-4537) ------------------------ */
@@ -4477,6 +4681,12 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // A turn ending is only a row. The existing beat revisits it after the
     // grace interval and is the sole producer of quiet notifications.
     notify_stalled_workers(host, now_ms);
+    // A decline whose pause dialog stands behind a stale `working` hook, which
+    // the sweep cannot see, is told on its own two witnesses (t-6747).
+    note_paused_declines(host, now_ms);
+    // Every switch of model a worker's CLI made to answer a classifier
+    // decline is written down, whether or not the worker went quiet (t-6747).
+    note_model_deviations(host, now_ms);
     // And a wall with a standing order behind it is walked — one handover
     // per beat, outside every lock, through the one door (§2.3).
     walk_handovers(host, overrides, now_ms);
@@ -5130,7 +5340,15 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
 pub(crate) struct HandoverWall {
     term: u32,
     capability: String,
-    witness: zerocode_core::orchestration::QuotaWallWitness,
+    witness: HandoverWitness,
+}
+
+/// The two witnesses a walk re-reads before each step, for its cause: the
+/// wall's (§2.2) or the decline's (t-6747).
+#[derive(Clone, Debug)]
+pub(crate) enum HandoverWitness {
+    Quota(zerocode_core::orchestration::QuotaWallWitness),
+    Decline(zerocode_core::orchestration::ClassifierDeclineWitness),
 }
 
 fn current_handover_wall(
@@ -5155,18 +5373,47 @@ fn current_handover_wall(
             crate::agent_teams::current_pane_capability(&plan.worker_team, &plan.worker_pane)?;
         (term, capability)
     };
-    host.quiet_since(term, plan.worker_started_ms, now_ms)?;
-    let marker = host.quota_wall_marker(term, &plan.agent)?;
-    let headroom = usage_headroom(&held.usage, &plan.agent, model.as_deref());
-    let witness = zerocode_core::orchestration::quota_wall_witness(
-        &plan.worker,
-        Some(marker),
-        headroom.as_ref(),
-        now_ms,
-    )?;
+    // A decline's pause dialog stands behind a stale `working` hook: its
+    // pane is quiet by the decline's own rule (t-6747).
+    let quiet = || match &plan.cause {
+        zerocode_core::orchestration::HandoverCause::QuotaWall { .. } => {
+            host.quiet_since(term, plan.worker_started_ms, now_ms)
+        }
+        zerocode_core::orchestration::HandoverCause::ClassifierDecline { .. } => host
+            .decline_quiet_since(
+                term,
+                plan.worker_started_ms,
+                now_ms,
+                zerocode_core::orchestration::DECLINE_DIALOG_UNANSWERED_MS,
+            ),
+    };
+    let since_ms = quiet()?;
+    let witness = match &plan.cause {
+        zerocode_core::orchestration::HandoverCause::QuotaWall { .. } => {
+            let marker = host.quota_wall_marker(term, &plan.agent)?;
+            let headroom = usage_headroom(&held.usage, &plan.agent, model.as_deref());
+            HandoverWitness::Quota(zerocode_core::orchestration::quota_wall_witness(
+                &plan.worker,
+                Some(marker),
+                headroom.as_ref(),
+                now_ms,
+            )?)
+        }
+        zerocode_core::orchestration::HandoverCause::ClassifierDecline { .. } => {
+            let reading = host.classifier_decline_reading(term, &plan.agent)?;
+            HandoverWitness::Decline(zerocode_core::orchestration::classifier_decline_witness(
+                &plan.worker,
+                &plan.dispatch,
+                reading.screen,
+                reading.record,
+                since_ms,
+                now_ms,
+            )?)
+        }
+    };
     // Activity and respawn may race the marker/cache reads. Ask quiet again
     // and prove both host and ledger identities after the probes return.
-    host.quiet_since(term, plan.worker_started_ms, now_ms)?;
+    quiet()?;
     let image = held.actor.view().ok()?;
     let rows = cached_ledger(&held, &image).ok()?;
     if !zerocode_core::orchestration::handover_order_current(rows.run(&plan.run)?, plan, false) {
@@ -5207,27 +5454,57 @@ fn settle_handover_terminal(
         .clone();
     drop(rows);
     actor.worker_terminal_settled_fenced(decided.effect.clone(), None, now_ms, |commit| {
-        host.with_quota_wall_observation(
-            term,
-            plan.worker_started_ms,
-            &plan.agent,
-            &mut |marker| {
-                with_usage_headroom(&held.usage, &plan.agent, model.as_deref(), |headroom| {
-                    // Time of use, after the actor mailbox and the witness locks.
-                    let at_ms = crate::now_epoch_ms();
-                    if zerocode_core::orchestration::quota_wall_witness(
-                        &plan.worker,
-                        Some(marker),
-                        headroom.as_ref(),
-                        at_ms,
-                    )
-                    .is_some()
-                    {
-                        commit(at_ms);
-                    }
-                });
-            },
-        );
+        match &plan.cause {
+            zerocode_core::orchestration::HandoverCause::QuotaWall { .. } => host
+                .with_quota_wall_observation(
+                    term,
+                    plan.worker_started_ms,
+                    &plan.agent,
+                    &mut |marker| {
+                        with_usage_headroom(
+                            &held.usage,
+                            &plan.agent,
+                            model.as_deref(),
+                            |headroom| {
+                                // Time of use, after the actor mailbox and the
+                                // witness locks.
+                                let at_ms = crate::now_epoch_ms();
+                                if zerocode_core::orchestration::quota_wall_witness(
+                                    &plan.worker,
+                                    Some(marker),
+                                    headroom.as_ref(),
+                                    at_ms,
+                                )
+                                .is_some()
+                                {
+                                    commit(at_ms);
+                                }
+                            },
+                        );
+                    },
+                ),
+            zerocode_core::orchestration::HandoverCause::ClassifierDecline { .. } => host
+                .with_classifier_decline_observation(
+                    term,
+                    plan.worker_started_ms,
+                    &plan.agent,
+                    &mut |reading, since_ms| {
+                        let at_ms = crate::now_epoch_ms();
+                        if zerocode_core::orchestration::classifier_decline_witness(
+                            &plan.worker,
+                            &plan.dispatch,
+                            reading.screen,
+                            reading.record,
+                            since_ms,
+                            at_ms,
+                        )
+                        .is_some()
+                        {
+                            commit(at_ms);
+                        }
+                    },
+                ),
+        }
     })
 }
 
@@ -5439,9 +5716,25 @@ pub(crate) fn walk_handover(
     // Receipt/briefing describe today's witness, while the retained mail is
     // left exactly as it was. The declaration and seats remain unchanged.
     let mut current = plan.clone();
-    current.provider = wall.witness.headroom.provider.clone();
-    current.used_percent = wall.witness.headroom.used_percent;
-    current.resets_at_ms = wall.witness.headroom.resets_at_ms;
+    match &wall.witness {
+        HandoverWitness::Quota(witness) => {
+            current.cause = zerocode_core::orchestration::HandoverCause::QuotaWall {
+                provider: witness.headroom.provider.clone(),
+                used_percent: witness.headroom.used_percent,
+                resets_at_ms: witness.headroom.resets_at_ms,
+            };
+        }
+        // A decline read again in a category the provider routes nowhere is
+        // no handover's (t-6747); one the reading cannot name keeps the
+        // category its notice said.
+        HandoverWitness::Decline(witness) => {
+            if witness.record.category.as_deref().is_some_and(|category| {
+                !zerocode_core::orchestration::decline_is_routed(Some(category))
+            }) {
+                return Walked::Nothing;
+            }
+        }
+    }
     let plan = &current;
     // The reservation: refused, nothing moved and the next beat plans again.
     let Ok((Some(handover), _)) = actor.handover_begin(plan.clone(), now_ms) else {
@@ -5479,7 +5772,7 @@ pub(crate) fn walk_handover(
         step(
             at,
             false,
-            "current handover order, seat, or quota witness changed".into(),
+            "current handover order, seat, or witness changed".into(),
         );
         let _ = actor.handover_revoke(plan.run.clone(), handover.clone(), current_time());
         Walked::Failed {
@@ -5494,8 +5787,7 @@ pub(crate) fn walk_handover(
     let wip_sha = if plan.wip_commit {
         let message = crate::quota_wall::wip_message(
             &plan.worker,
-            &plan.provider,
-            plan.resets_at_ms,
+            &plan.cause,
             crate::automation_runtime::local_offset_secs(),
         );
         match door.wip_commit(Path::new(&plan.checkout), &message) {
@@ -5540,7 +5832,7 @@ pub(crate) fn walk_handover(
             "--worker".to_string(),
             plan.worker.clone(),
             "--reason".to_string(),
-            "quota-wall".to_string(),
+            plan.cause.reason().to_string(),
             "--retry-request".to_string(),
             format!("handover-{}-stop", plan.dispatch),
         ],

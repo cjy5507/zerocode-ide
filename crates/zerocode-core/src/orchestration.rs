@@ -420,6 +420,27 @@ pub enum MessageKind {
     /// continuation typed on its behalf is not a silence nor a handover. The
     /// road that writes it is `Ledger::resume_begin`.
     Resumed,
+    /// Nobody said this either: the LEDGER was handed TWO witnesses that a
+    /// worker's last request was declined by its provider's safety
+    /// classifier and the worker stopped there (t-6747) — the CLI's own
+    /// decline sentence still standing on the pane's screen, AND the
+    /// conversation's own record of the decline: its error kind and, when
+    /// the provider named one, its category.
+    ///
+    /// Its own kind, for [`Self::QuotaWalled`]'s reason: a declined worker is
+    /// neither silent nor walled — nothing lifts by itself, and waiting,
+    /// retyping and a person's "continue" meet the same classifier — and a
+    /// coordinator has to be able to ASK for it. News, never a settlement;
+    /// the road that writes it is [`Ledger::workers_classifier_declined`].
+    ClassifierDeclined,
+    /// Nobody said this either: the LEDGER read in a worker's own record
+    /// that its CLI answered a classifier decline on another model — the
+    /// category's route — so the worker left the model its summons bound
+    /// (t-6747). A summons' model is a binding choice; leaving it is written
+    /// down where the coordinator reads, with the two models, the category,
+    /// how long the CLI keeps the switch, and why. The road that writes it is
+    /// [`Ledger::workers_model_deviated`].
+    ModelDeviated,
 }
 
 impl MessageKind {
@@ -440,6 +461,8 @@ impl MessageKind {
             Self::QuotaWalled => "quota_walled",
             Self::Handover => "handover",
             Self::Resumed => "resumed",
+            Self::ClassifierDeclined => "classifier_declined",
+            Self::ModelDeviated => "model_deviated",
         }
     }
 
@@ -462,6 +485,8 @@ impl MessageKind {
                 | Self::QuotaWalled
                 | Self::Handover
                 | Self::Resumed
+                | Self::ClassifierDeclined
+                | Self::ModelDeviated
         )
     }
 }
@@ -486,6 +511,8 @@ impl std::str::FromStr for MessageKind {
             "quota_walled" => Self::QuotaWalled,
             "handover" => Self::Handover,
             "resumed" => Self::Resumed,
+            "classifier_declined" => Self::ClassifierDeclined,
+            "model_deviated" => Self::ModelDeviated,
             _ => return Err(format!("unknown message type: {word}")),
         })
     }
@@ -2257,6 +2284,14 @@ pub struct HandoverPolicy {
     /// transient order's reason.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub quota_wait: bool,
+    /// `--on-classifier-decline <agent[:model[:effort]]>` (t-6747): the
+    /// handover rung of [`CLASSIFIER_DECLINE_LADDER`] — who a worker whose
+    /// request its provider's safety classifier declined hands its task to,
+    /// in the same checkout. A part the declaration leaves out is the
+    /// declined worker's own. Skipped when absent, for the transient order's
+    /// reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_classifier_decline: Option<Pinned>,
     pub armed_ms: i64,
 }
 
@@ -2270,6 +2305,13 @@ impl HandoverPolicy {
             "onQuotaWall": self.on_quota_wall.as_ref().map(Pinned::json),
             "wipCommit": self.wip_commit,
             "onTransientError": self.on_transient_error.map(OnTransientError::json),
+            "onClassifierDecline": self.on_classifier_decline.as_ref().map(|to| {
+                serde_json::json!({
+                    "to": to.json(),
+                    "ladder": CLASSIFIER_DECLINE_LADDER.map(ClassifierDeclineRung::as_str),
+                    "routedCategories": ROUTED_DECLINE_CATEGORIES,
+                })
+            }),
             // The wall's rungs as the beat walks them, and the table's numbers
             // the wait walks under, so a coordinator sees what it armed.
             "ladder": order.ladder(),
@@ -2353,8 +2395,69 @@ impl WorkerSeat {
     }
 }
 
+/// Why a handover walks — the news row it follows, and what that row said.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandoverCause {
+    /// A `quota_walled` row (§2.3): the provider's number, as it said it.
+    QuotaWall {
+        provider: String,
+        used_percent: u8,
+        resets_at_ms: Option<i64>,
+    },
+    /// A `classifier_declined` row (t-6747): the category the provider
+    /// declined the request under — always a routed one
+    /// ([`decline_is_routed`]); an unrouted decline plans no handover.
+    ClassifierDecline { category: String },
+}
+
+impl HandoverCause {
+    /// The news row a handover of this cause follows.
+    pub const fn news(&self) -> MessageKind {
+        match self {
+            Self::QuotaWall { .. } => MessageKind::QuotaWalled,
+            Self::ClassifierDecline { .. } => MessageKind::ClassifierDeclined,
+        }
+    }
+
+    /// The word `worker-stop --reason` carries for it, and a receipt.
+    pub const fn reason(&self) -> &'static str {
+        match self {
+            Self::QuotaWall { .. } => "quota-wall",
+            Self::ClassifierDecline { .. } => "classifier-decline",
+        }
+    }
+
+    /// The cause as a receipt carries it.
+    fn json(&self) -> serde_json::Value {
+        match self {
+            Self::QuotaWall {
+                provider,
+                used_percent,
+                resets_at_ms,
+            } => serde_json::json!({
+                "reason": self.reason(),
+                "provider": provider,
+                "usedPercent": used_percent,
+                "resetsAtMs": resets_at_ms,
+            }),
+            Self::ClassifierDecline { category } => serde_json::json!({
+                "reason": self.reason(),
+                "category": category,
+            }),
+        }
+    }
+
+    fn bytes_held(&self) -> usize {
+        match self {
+            Self::QuotaWall { provider, .. } => provider.len(),
+            Self::ClassifierDecline { category } => category.len(),
+        }
+    }
+}
+
 /// One handover the beat is to walk — what [`next_handover`] makes of a
-/// `quota_walled` row under a declared standing order (§2.3).
+/// `quota_walled` row (§2.3) or a `classifier_declined` one (t-6747) under a
+/// declared standing order.
 ///
 /// A plan and not an action, for [`Dispatchable`]'s reason: the window walks
 /// it OUTSIDE the ledger's locks — a git commit, two verbs through the one
@@ -2364,21 +2467,21 @@ impl WorkerSeat {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandoverPlan {
     pub run: String,
-    /// The walled worker, its agent, and the open attempt it carries.
+    /// The stopped worker, its agent, and the open attempt it carries.
     pub worker: String,
     pub agent: String,
     pub dispatch: String,
     pub task: String,
     pub spec: Text,
     /// The checkout the replacement inherits — reported by the window when
-    /// the walled pane was seated; a worker with none is not handed over.
+    /// the stopped pane was seated; a worker with none is not handed over.
     pub checkout: String,
-    /// The provider's number, as the `quota_walled` row said it.
-    pub provider: String,
-    pub used_percent: u8,
-    pub resets_at_ms: Option<i64>,
-    /// Exactly who the task goes to: the summons' own `--on-quota-wall`, or
-    /// the run's policy.
+    /// Why it walks, as the news row said it.
+    pub cause: HandoverCause,
+    /// Exactly who the task goes to: for a wall, the summons' own
+    /// `--on-quota-wall` or the run's policy; for a decline, the run's
+    /// `--on-classifier-decline`, the parts it left out filled from the
+    /// declined worker's own.
     pub to: Pinned,
     /// Whether step ① may commit the tree (`handover-policy --wip-commit`).
     pub wip_commit: bool,
@@ -2411,7 +2514,6 @@ impl HandoverPlan {
             &self.task,
             self.spec.as_str(),
             &self.checkout,
-            &self.provider,
             &self.team,
             &self.pane,
             &self.worker_team,
@@ -2420,12 +2522,15 @@ impl HandoverPlan {
         .iter()
         .map(|value| value.len())
         .sum::<usize>()
+            + self.cause.bytes_held()
             + pinned(&self.to)
-            + self
-                .policy
-                .as_ref()
-                .and_then(|policy| policy.on_quota_wall.as_ref())
-                .map_or(0, pinned)
+            + self.policy.as_ref().map_or(0, |policy| {
+                [&policy.on_quota_wall, &policy.on_classifier_decline]
+                    .into_iter()
+                    .flatten()
+                    .map(pinned)
+                    .sum()
+            })
     }
 }
 
@@ -2587,13 +2692,28 @@ pub fn handover_paragraph(
     recap: Option<&HandoverRecap>,
     now_ms: i64,
 ) -> String {
-    let resets = plan
-        .resets_at_ms
-        .map(|at| at.saturating_sub(now_ms))
-        .filter(|remaining| *remaining > 0)
-        .map_or_else(String::new, |remaining| {
-            format!(", resets in {} min", minutes_up(remaining))
-        });
+    let stopped = match &plan.cause {
+        HandoverCause::QuotaWall {
+            provider,
+            used_percent,
+            resets_at_ms,
+        } => {
+            let resets = resets_at_ms
+                .map(|at| at.saturating_sub(now_ms))
+                .filter(|remaining| *remaining > 0)
+                .map_or_else(String::new, |remaining| {
+                    format!(", resets in {} min", minutes_up(remaining))
+                });
+            format!("stopped at the {provider} quota wall ({used_percent}% used{resets})")
+        }
+        // The declined request itself is not repeated here, and its words
+        // are not in the recap (`speaks_in_a_recap`): the replacement
+        // continues the task, in a conversation of its own.
+        HandoverCause::ClassifierDecline { category } => format!(
+            "stopped when its provider's safety classifier declined a request (`{category}`) \
+             and its own CLI could not continue on a fallback model"
+        ),
+    };
     let tree = match wip_sha {
         Some(sha) => format!(
             "its uncommitted work was committed for you as wip(handover) {sha} — read that \
@@ -2605,14 +2725,12 @@ pub fn handover_paragraph(
     };
     let mut said = format!(
         "Handover: you are taking over task {task} from worker {worker} ({agent}), which \
-         stopped at the {provider} quota wall ({used}% used{resets}). You sit in its checkout \
-         {checkout} — the same tree it worked in; {tree}. Read `git status` and `git log -3`, \
-         then CONTINUE the task below from where it stands; do not start over.\n\n",
+         {stopped}. You sit in its checkout {checkout} — the same tree it worked in; {tree}. \
+         Read `git status` and `git log -3`, then CONTINUE the task below from where it \
+         stands; do not start over.\n\n",
         task = plan.task,
         worker = plan.worker,
         agent = plan.agent,
-        provider = plan.provider,
-        used = plan.used_percent,
         checkout = plan.checkout,
     );
     if let Some(recap) = recap {
@@ -2734,14 +2852,48 @@ struct HandoverCandidate<'a> {
     wip_commit: bool,
 }
 
-fn effective_handover_order<'a>(run: &'a Run, worker: &'a Worker) -> Option<(&'a Pinned, bool)> {
-    let (_, to) = standing_order(run, worker);
+/// Who a stopped worker's task goes to for the `news` it stopped on, and
+/// whether step ① may commit its tree: a wall's standing order
+/// ([`standing_order`]), or the run's `--on-classifier-decline` with the
+/// parts it left out filled from the declined worker's own ([`inherited`]).
+fn effective_handover_order(
+    run: &Run,
+    worker: &Worker,
+    news: MessageKind,
+) -> Option<(Pinned, bool)> {
+    let to = match news {
+        MessageKind::QuotaWalled => standing_order(run, worker).1?.clone(),
+        MessageKind::ClassifierDeclined => inherited(
+            run.handover.as_ref()?.on_classifier_decline.as_ref()?,
+            worker,
+        ),
+        _ => return None,
+    };
     Some((
-        to?,
+        to,
         run.handover
             .as_ref()
             .is_some_and(|policy| policy.wip_commit),
     ))
+}
+
+/// A declaration's missing parts, filled from the worker it stands for —
+/// the same agent keeps its own model and effort unless the declaration
+/// names others; another agent's are nothing to this one. An effort rides
+/// only beside a model, the rule `--effort` follows on a summons.
+fn inherited(declared: &Pinned, worker: &Worker) -> Pinned {
+    if declared.agent != worker.agent {
+        return declared.clone();
+    }
+    let model = declared.model.clone().or_else(|| worker.model.clone());
+    let effort = model
+        .as_ref()
+        .and(declared.effort.clone().or_else(|| worker.effort.clone()));
+    Pinned {
+        agent: declared.agent.clone(),
+        model,
+        effort,
+    }
 }
 
 /// Why a rung earlier on the ladder than `rung` still holds `dispatch_id`'s
@@ -2784,6 +2936,7 @@ fn ladder_holds(
 fn handover_candidate<'a>(
     run: &'a Run,
     dispatch_id: &str,
+    news: MessageKind,
     now_ms: i64,
 ) -> Result<HandoverCandidate<'a>, String> {
     let dispatch = run
@@ -2832,10 +2985,13 @@ fn handover_candidate<'a>(
             dispatch.task
         ));
     }
-    if let Some(why) = ladder_holds(run, worker, dispatch_id, QuotaWallRung::Handover, now_ms) {
+    // The wait rung is a wall's own; a decline has nothing to wait out.
+    if news == MessageKind::QuotaWalled
+        && let Some(why) = ladder_holds(run, worker, dispatch_id, QuotaWallRung::Handover, now_ms)
+    {
         return Err(why);
     }
-    let (to, wip_commit) = effective_handover_order(run, worker)
+    let (to, wip_commit) = effective_handover_order(run, worker, news)
         .ok_or_else(|| "no standing order names an alternative".to_string())?;
     let task = run
         .task(&dispatch.task)
@@ -2845,23 +3001,47 @@ fn handover_candidate<'a>(
         dispatch,
         task,
         checkout,
-        to: to.clone(),
+        to,
         wip_commit,
     })
 }
 
+/// What a news row says a handover would follow — `None` for a row no
+/// handover follows: another kind, or a decline in a category the provider
+/// routes nowhere ([`decline_is_routed`]), whose answer stands.
+fn handover_cause(news: &Message) -> Option<HandoverCause> {
+    let said: serde_json::Value = serde_json::from_str(news.body.as_str()).ok()?;
+    match news.kind {
+        MessageKind::QuotaWalled => Some(HandoverCause::QuotaWall {
+            provider: said["provider"].as_str().unwrap_or_default().to_string(),
+            used_percent: u8::try_from(said["usedPercent"].as_u64().unwrap_or(0))
+                .unwrap_or(u8::MAX),
+            resets_at_ms: said["resetsAtMs"].as_i64(),
+        }),
+        MessageKind::ClassifierDeclined => {
+            let category = said["category"].as_str()?;
+            decline_is_routed(Some(category)).then(|| HandoverCause::ClassifierDecline {
+                category: category.to_string(),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// The handover this run's beat should walk now, if any (§2.3).
 ///
-/// Pure, for [`next_dispatch`]'s reason. Reads the `quota_walled` rows oldest
-/// first and answers the first whose attempt is still open, whose worker is
-/// live, not the person's, and seated in a known checkout, that no earlier
-/// walk has touched (one handover per attempt — a walk the window died
-/// inside of is reported by the restart, never resumed here), whose task is
-/// under the table's ceiling, and for which somebody DECLARED an alternative:
-/// the summons' own `--on-quota-wall` first, the run's `handover-policy`
-/// second. Nothing else walks — news alone is the hand recipe. The seat the
-/// verbs are presented from is the run's live coordinator seat; a run whose
-/// seat is empty walks nothing until somebody sits.
+/// Pure, for [`next_dispatch`]'s reason. Reads the `quota_walled` and
+/// `classifier_declined` rows oldest first and answers the first whose
+/// attempt is still open, whose worker is live, not the person's, and seated
+/// in a known checkout, that no earlier walk has touched (one handover per
+/// attempt — a walk the window died inside of is reported by the restart,
+/// never resumed here), whose task is under the table's ceiling, and for
+/// which somebody DECLARED an alternative: for a wall the summons' own
+/// `--on-quota-wall` first, the run's `handover-policy` second; for a
+/// decline in a routed category, the run's `--on-classifier-decline`.
+/// Nothing else walks — news alone is the hand recipe. The seat the verbs
+/// are presented from is the run's live coordinator seat; a run whose seat
+/// is empty walks nothing until somebody sits.
 pub fn next_handover(run: &Run, now_ms: i64) -> Option<HandoverPlan> {
     next_handover_witnessed(run, now_ms, |_| true)
 }
@@ -2875,37 +3055,31 @@ pub fn next_handover_witnessed(
 ) -> Option<HandoverPlan> {
     let seat = run.coordinator_live()?;
     let (team, pane) = seat.seat.split_once('/')?;
-    run.messages
-        .iter()
-        .filter(|held| held.kind == MessageKind::QuotaWalled)
-        .find_map(|news| {
-            let dispatch_id = news.dispatch.as_deref()?;
-            let candidate = handover_candidate(run, dispatch_id, now_ms).ok()?;
-            let said: serde_json::Value = serde_json::from_str(news.body.as_str()).ok()?;
-            let plan = HandoverPlan {
-                run: run.id.clone(),
-                worker: candidate.worker.id.clone(),
-                agent: candidate.worker.agent.clone(),
-                dispatch: candidate.dispatch.id.clone(),
-                task: candidate.task.id.clone(),
-                spec: candidate.task.spec.clone(),
-                checkout: candidate.checkout,
-                provider: said["provider"].as_str().unwrap_or_default().to_string(),
-                used_percent: u8::try_from(said["usedPercent"].as_u64().unwrap_or(0))
-                    .unwrap_or(u8::MAX),
-                resets_at_ms: said["resetsAtMs"].as_i64(),
-                to: candidate.to,
-                wip_commit: candidate.wip_commit,
-                team: team.to_string(),
-                pane: pane.to_string(),
-                worker_team: candidate.worker.team.clone(),
-                worker_pane: candidate.worker.pane.clone(),
-                worker_started_ms: candidate.worker.started_ms,
-                policy: run.handover.clone(),
-                coordinator_generation: seat.generation,
-            };
-            witnessed(&plan).then_some(plan)
-        })
+    run.messages.iter().find_map(|news| {
+        let cause = handover_cause(news)?;
+        let dispatch_id = news.dispatch.as_deref()?;
+        let candidate = handover_candidate(run, dispatch_id, news.kind, now_ms).ok()?;
+        let plan = HandoverPlan {
+            run: run.id.clone(),
+            worker: candidate.worker.id.clone(),
+            agent: candidate.worker.agent.clone(),
+            dispatch: candidate.dispatch.id.clone(),
+            task: candidate.task.id.clone(),
+            spec: candidate.task.spec.clone(),
+            checkout: candidate.checkout,
+            cause,
+            to: candidate.to,
+            wip_commit: candidate.wip_commit,
+            team: team.to_string(),
+            pane: pane.to_string(),
+            worker_team: candidate.worker.team.clone(),
+            worker_pane: candidate.worker.pane.clone(),
+            worker_started_ms: candidate.worker.started_ms,
+            policy: run.handover.clone(),
+            coordinator_generation: seat.generation,
+        };
+        witnessed(&plan).then_some(plan)
+    })
 }
 
 fn handover_consumes_attempt(message: &Message) -> bool {
@@ -2929,14 +3103,14 @@ pub fn handover_order_current(run: &Run, plan: &HandoverPlan, stopped: bool) -> 
     let Some(task) = run.task(&plan.task) else {
         return false;
     };
-    let Some((to, wip_commit)) = effective_handover_order(run, worker) else {
+    let Some((to, wip_commit)) = effective_handover_order(run, worker, plan.cause.news()) else {
         return false;
     };
     run.id == plan.run
         && seat.seat == format!("{}/{}", plan.team, plan.pane)
         && seat.generation == plan.coordinator_generation
         && run.handover == plan.policy
-        && to == &plan.to
+        && to == plan.to
         && wip_commit == plan.wip_commit
         && worker.team == plan.worker_team
         && worker.pane == plan.worker_pane
@@ -9333,6 +9507,189 @@ impl Ledger {
         told
     }
 
+    /// Workers whose provider's safety classifier declined their last
+    /// request and who stopped there, each with BOTH witnesses (t-6747): one
+    /// `classifier_declined` notice per attempt, to the run's coordinator.
+    ///
+    /// The ledger revalidates what it owns — a live worker in its seat, no
+    /// person's hand on the pane, an open attempt, not told already — and
+    /// says which rung comes next ([`CLASSIFIER_DECLINE_LADDER`]): the
+    /// handover when the run declared one and the category is routed, the
+    /// coordinator otherwise. Answers how many were told.
+    pub fn workers_classifier_declined(
+        &mut self,
+        declined: &[ClassifierDeclineWitness],
+        now_ms: i64,
+    ) -> usize {
+        if now_ms < 0 {
+            return 0;
+        }
+        let mut told = 0;
+        for witness in declined {
+            let Some((run_id, draft)) = self.runs.iter().find_map(|run| {
+                let worker = run.worker(&witness.worker)?;
+                if !worker.state.is_live() || !worker.state.may_occupy_pane() || worker.taken_over {
+                    return None;
+                }
+                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+                if !dispatch.is_open() || newest_decline(run, &dispatch.id).is_some() {
+                    return None;
+                }
+                let category = witness.record.category.as_deref();
+                let routed = decline_is_routed(category);
+                let declared = run
+                    .handover
+                    .as_ref()
+                    .and_then(|policy| policy.on_classifier_decline.as_ref());
+                let (rung, next) = match (routed, declared) {
+                    (true, Some(_)) => (
+                        ClassifierDeclineRung::Handover,
+                        "nothing was settled: the run's `handover-policy \
+                         --on-classifier-decline` hands this task to a fresh worker in the \
+                         same checkout, and the beat leaves a `handover` receipt",
+                    ),
+                    (true, None) => (
+                        ClassifierDeclineRung::Notify,
+                        "nothing was settled: the attempt is open and the task is carried. \
+                         Its CLI could not continue the declined turn on a fallback model. \
+                         Hand it over yourself (`worker-stop --worker <id> --reason \
+                         classifier-decline`, then `worker-start --agent <alt> --task <same> \
+                         --retry-of <dispatchId> --inherit-checkout`), or arm `handover-policy \
+                         --on-classifier-decline <agent[:model[:effort]]>` and the beat walks \
+                         that road",
+                    ),
+                    (false, _) => (
+                        ClassifierDeclineRung::Notify,
+                        "nothing was settled: the provider routes this category nowhere, so \
+                         its answer stands — no worker is handed the declined request. Read \
+                         the task with the person; do not paste a picture of the declined \
+                         screen into a conversation, read its words",
+                    ),
+                };
+                let body = serde_json::json!({
+                    "workerId": worker.id,
+                    "agent": worker.agent,
+                    "model": worker.model,
+                    "pane": worker.pane,
+                    "taskId": dispatch.task,
+                    "dispatchId": dispatch.id,
+                    "checkout": worker.checkout,
+                    "category": category,
+                    "routed": routed,
+                    "screen": witness.screen,
+                    "record": {
+                        "source": witness.record.source,
+                        "line": witness.record.line,
+                        "key": witness.record.key,
+                    },
+                    "observedAtMs": now_ms,
+                    "rung": rung.as_str(),
+                    "ladder": CLASSIFIER_DECLINE_LADDER.map(ClassifierDeclineRung::as_str),
+                    "next": next,
+                });
+                Some((
+                    run.id.clone(),
+                    Draft {
+                        from: LEDGER_ITSELF.to_string(),
+                        to: run.address(),
+                        kind: MessageKind::ClassifierDeclined,
+                        body: body.to_string().into(),
+                        subject: Text::default(),
+                        priority: Priority::Normal,
+                        payload: Text::default(),
+                        thread: None,
+                        task: Some(dispatch.task.clone()),
+                        dispatch: Some(dispatch.id.clone()),
+                    },
+                ))
+            }) else {
+                continue;
+            };
+            if self.post(&run_id, draft, now_ms).is_ok() {
+                told += 1;
+            }
+        }
+        told
+    }
+
+    /// Switches a worker's own CLI recorded — a classifier decline answered
+    /// on the category's route instead of the model its summons bound
+    /// (t-6747): one `model_deviated` row per switch, to the run's
+    /// coordinator. A summons' model is a binding choice, so leaving it is
+    /// written where it is read, whoever left it and however well: the two
+    /// models, the category, how long the CLI keeps the switch, and why.
+    /// Answers how many were written.
+    pub fn workers_model_deviated(&mut self, deviated: &[ModelDeviation], now_ms: i64) -> usize {
+        if now_ms < 0 {
+            return 0;
+        }
+        let mut told = 0;
+        for deviation in deviated {
+            let Some((run_id, draft)) = self.runs.iter().find_map(|run| {
+                let worker = run.worker(&deviation.worker)?;
+                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+                if !dispatch.is_open()
+                    || run.messages.iter().any(|held| {
+                        held.kind == MessageKind::ModelDeviated
+                            && held.dispatch.as_deref() == Some(dispatch.id.as_str())
+                            && serde_json::from_str::<serde_json::Value>(held.body.as_str())
+                                .is_ok_and(|body| body["key"] == deviation.key.as_str())
+                    })
+                {
+                    return None;
+                }
+                let category = deviation.category.as_deref();
+                let summary = format!(
+                    "model binding left: {} → {} for {} — the provider's safety classifier \
+                     declined a request on {}, and the CLI continued on the category's route \
+                     instead of stopping",
+                    category.unwrap_or("an unnamed category"),
+                    deviation.to,
+                    deviation.lasts(),
+                    deviation.from,
+                );
+                let body = serde_json::json!({
+                    "workerId": worker.id,
+                    "agent": worker.agent,
+                    "taskId": dispatch.task,
+                    "dispatchId": dispatch.id,
+                    "boundModel": worker.model,
+                    "from": deviation.from,
+                    "to": deviation.to,
+                    "category": category,
+                    "scope": deviation.scope,
+                    "lasts": deviation.lasts(),
+                    "key": deviation.key,
+                    "sinceMs": deviation.at_ms,
+                    "observedAtMs": now_ms,
+                    "rung": ClassifierDeclineRung::Fallback.as_str(),
+                    "summary": summary,
+                });
+                Some((
+                    run.id.clone(),
+                    Draft {
+                        from: LEDGER_ITSELF.to_string(),
+                        to: run.address(),
+                        kind: MessageKind::ModelDeviated,
+                        body: body.to_string().into(),
+                        subject: Text::default(),
+                        priority: Priority::Normal,
+                        payload: Text::default(),
+                        thread: None,
+                        task: Some(dispatch.task.clone()),
+                        dispatch: Some(dispatch.id.clone()),
+                    },
+                ))
+            }) else {
+                continue;
+            };
+            if self.post(&run_id, draft, now_ms).is_ok() {
+                told += 1;
+            }
+        }
+        told
+    }
+
     /// A wall the wait rung held lifted while its worker stayed stopped at
     /// it: the coordinator is told, once per wall (t-6427).
     ///
@@ -9442,13 +9799,25 @@ impl Ledger {
             if !handover_order_current(run, plan, false) {
                 return Err("handover order or seat changed — plan again".into());
             }
-            let candidate = handover_candidate(run, &plan.dispatch, now_ms)?;
-            serde_json::json!({
+            let candidate = handover_candidate(run, &plan.dispatch, plan.cause.news(), now_ms)?;
+            // The rung this receipt is, on the ladder its cause walks
+            // (t-6427, t-6747) — the same two fields the news carries.
+            let (rung, ladder) = match &plan.cause {
+                HandoverCause::QuotaWall { .. } => (
+                    QuotaWallRung::Handover.as_str(),
+                    QuotaWallOrder::standing(run, candidate.worker).ladder(),
+                ),
+                HandoverCause::ClassifierDecline { .. } => (
+                    ClassifierDeclineRung::Handover.as_str(),
+                    CLASSIFIER_DECLINE_LADDER
+                        .map(ClassifierDeclineRung::as_str)
+                        .to_vec(),
+                ),
+            };
+            let mut body = serde_json::json!({
                 "status": HANDOVER_WALKING,
-                // The rung this receipt is, on the ladder the order declared
-                // (t-6427) — the same two fields a wall's news carries.
-                "rung": QuotaWallRung::Handover.as_str(),
-                "ladder": QuotaWallOrder::standing(run, candidate.worker).ladder(),
+                "rung": rung,
+                "ladder": ladder,
                 "from": {
                     "workerId": candidate.worker.id,
                     "agent": candidate.worker.agent,
@@ -9466,15 +9835,37 @@ impl Ledger {
                     "dispatchId": serde_json::Value::Null,
                 },
                 "taskId": candidate.task.id,
-                "provider": plan.provider,
-                "usedPercent": plan.used_percent,
-                "resetsAtMs": plan.resets_at_ms,
                 "wipCommit": plan.wip_commit,
                 "coordinatorGeneration": plan.coordinator_generation,
                 "policy": plan.policy.as_ref().map(HandoverPolicy::json),
                 "steps": [],
                 "beganMs": now_ms,
-            })
+            });
+            // The cause's own fields beside the rest, where a wall's receipt
+            // always carried its provider's number.
+            if let (Some(fields), serde_json::Value::Object(cause)) =
+                (body.as_object_mut(), plan.cause.json())
+            {
+                fields.extend(cause);
+                // A replacement that runs another agent or model than the
+                // summons bound leaves that binding, and says so (t-6747).
+                if plan.to.agent != candidate.worker.agent
+                    || plan.to.model != candidate.worker.model
+                {
+                    fields.insert(
+                        "modelDeviation".to_string(),
+                        serde_json::json!({
+                            "from": {
+                                "agent": candidate.worker.agent,
+                                "model": candidate.worker.model,
+                            },
+                            "to": { "agent": plan.to.agent, "model": plan.to.model },
+                            "reason": plan.cause.reason(),
+                        }),
+                    );
+                }
+            }
+            body
         };
         let id = self.mint("m-");
         let run = self
@@ -10272,6 +10663,9 @@ impl Ledger {
         if let Some(peer) = provider_peer(&worker.agent, run_id, worker_id) {
             peer.append_launch_tuning(&mut tuning);
         }
+        // A restored worker carries a dispatch, so it is told what its first
+        // launch was (t-6747).
+        continue_past_classifier_declines(&worker.agent, &mut tuning);
         /* Resume the conversation without starting the interrupted work yet.
          *
          * The host has to spawn the process before `worker_reseated` can prove
@@ -12589,21 +12983,29 @@ impl Pinned {
 /// An effort needs a model beside it, the same rule `--effort` follows on the
 /// summons itself: `agent::high` is an effort with nothing to dial.
 pub fn parse_on_quota_wall(word: &str) -> Result<Pinned, String> {
+    parse_alternative("--on-quota-wall", word)
+}
+
+/// One `<agent[:model[:effort]]>` as the flag that carried it spells it —
+/// `--on-quota-wall`'s, and `--on-classifier-decline`'s (t-6747).
+fn parse_alternative(flag: &str, word: &str) -> Result<Pinned, String> {
     let parts: Vec<&str> = word.split(':').collect();
     if parts.len() > 3 {
         return Err(format!(
-            "--on-quota-wall takes <agent[:model[:effort]]>, and `{word}` has more than three parts"
+            "{flag} takes <agent[:model[:effort]]>, and `{word}` has more than three parts"
         ));
     }
     let agent = parts.first().copied().unwrap_or_default();
     if agent.is_empty() {
-        return Err("--on-quota-wall names no agent — write <agent[:model[:effort]]>".to_string());
+        return Err(format!(
+            "{flag} names no agent — write <agent[:model[:effort]]>"
+        ));
     }
     let model = parts.get(1).copied().filter(|held| !held.is_empty());
     let effort = parts.get(2).copied().filter(|held| !held.is_empty());
     if effort.is_some() && model.is_none() {
         return Err(format!(
-            "--on-quota-wall `{word}` names an effort with no model — an effort needs a model \
+            "{flag} `{word}` names an effort with no model — an effort needs a model \
              beside it, write <agent:model:effort>"
         ));
     }
@@ -12749,6 +13151,211 @@ impl QuotaWallOrder {
             handover: handover.cloned(),
         }
     }
+}
+
+/* ---- the classifier decline's ladder (t-6747) ------------------------- */
+
+/// One rung of a safety classifier's decline: what happens when a worker's
+/// provider declines its request (`stop_reason: "refusal"`) in words like
+/// "Fable 5.1's safeguards flagged this message".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClassifierDeclineRung {
+    /// The worker's own CLI answers the declined turn on its fallback model —
+    /// told so at launch by [`DECLINE_CONTINUE_WORDS`]. Nothing waits and
+    /// nothing is typed; the conversation goes on and the ledger hears
+    /// nothing, because nothing stopped.
+    Fallback,
+    /// A fresh worker takes the task in the same checkout, under a declared
+    /// `--on-classifier-decline` — only for a category the provider routes to
+    /// another model ([`ROUTED_DECLINE_CATEGORIES`]).
+    Handover,
+    /// The coordinator's inbox: the `classifier_declined` notice, and the
+    /// person behind it.
+    Notify,
+}
+
+impl ClassifierDeclineRung {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fallback => "fallback",
+            Self::Handover => "handover",
+            Self::Notify => "notify",
+        }
+    }
+}
+
+/// The ladder, first to last — the one table a decline is walked by.
+///
+/// Measured on this machine's own records, 2026-09-10..24: 33 declines in
+/// Claude Code transcripts (cyber 23, reasoning_extraction 10) and none in
+/// 95 Codex rollouts. The request after a decline went through on the SAME
+/// model 6 times in 15, and on the CLI's fallback model 15 times in 15 — and
+/// the provider's own guide says a refused request re-sent to the same model
+/// "usually earns another refusal". So the first rung is the fallback, not a
+/// retry; the CLI does it inside the turn, before anything is quiet. Opus 5
+/// and 5.5 carry the same classifiers (10 of the 33 declines were theirs),
+/// so "the fallback" is the model the CLI routes the category to, never a
+/// family name. What still stops — a category routed nowhere, or a route
+/// the CLI could not take — is the coordinator's to hear, and to hand over
+/// when it declared who takes it.
+pub const CLASSIFIER_DECLINE_LADDER: [ClassifierDeclineRung; 3] = [
+    ClassifierDeclineRung::Fallback,
+    ClassifierDeclineRung::Handover,
+    ClassifierDeclineRung::Notify,
+];
+
+/// The decline categories the provider continues on another model — the
+/// categories Claude Code 2.1.281 routes anywhere (its per-model table:
+/// `cyber` → Opus 4.8 from every lineup, `bio` and `frontier_llm` → Opus 5
+/// from the lineups that route them). Every other category — the provider
+/// names `reasoning_extraction` and `general_harms`, and a decline may name
+/// none — the provider leaves standing, so a handover would only route
+/// around its own answer: the notice is the whole ladder for it.
+pub const ROUTED_DECLINE_CATEGORIES: [&str; 3] = ["cyber", "bio", "frontier_llm"];
+
+/// Whether a decline of `category` has a handover rung at all.
+#[must_use]
+pub fn decline_is_routed(category: Option<&str>) -> bool {
+    category.is_some_and(|word| ROUTED_DECLINE_CATEGORIES.contains(&word))
+}
+
+/// The attempt's `classifier_declined` notice, when one was written — one
+/// per attempt: the same decline seen on the next beat is the same fact, and
+/// a replacement is a new attempt with a notice of its own.
+#[must_use]
+pub fn newest_decline<'a>(run: &'a Run, dispatch_id: &str) -> Option<&'a Message> {
+    run.messages.iter().rev().find(|held| {
+        held.kind == MessageKind::ClassifierDeclined
+            && held.dispatch.as_deref() == Some(dispatch_id)
+    })
+}
+
+/// A worker's OWN record that its provider's safety classifier declined its
+/// last request, as the window's marker table read it off the transcript
+/// tail — the conversation's last word, never a line the worker quoted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassifierDeclineMarker {
+    /// Where it was read: `transcript`, or [`DECLINE_DIALOG_SOURCE`] for a
+    /// pause dialog that stood past [`DECLINE_DIALOG_UNANSWERED_MS`].
+    pub source: String,
+    /// The CLI's own sentence about the decline.
+    pub line: Text,
+    /// The provider's category word, when the record names one.
+    pub category: Option<String>,
+    /// The record's own identity, so one decline is told once.
+    pub key: String,
+}
+
+/// What a quiet worker's screen shows of a decline: the CLI's own sentence,
+/// and whether it stands in the CLI's pause dialog (its choices on screen,
+/// waiting for a key) rather than printed as the turn's error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclineScreen {
+    pub line: Text,
+    pub dialog: bool,
+    /// The category the dialog names (`Details: [cyber]`), when it does.
+    pub category: Option<String>,
+}
+
+/// The marker source for a decline witnessed by a pause dialog that stood
+/// unanswered, rather than by a record: the dialog writes none until
+/// somebody answers it.
+pub const DECLINE_DIALOG_SOURCE: &str = "screen-dialog";
+
+/// How long a pause dialog stands before it is a dialog nobody is watching —
+/// the second witness for a decline whose CLI wrote no record yet.
+///
+/// Measured on this machine's three declined workers (t-6747): the dialogs a
+/// person answered stood about 104 s (w-5797, 2026-09-21) and at most 551 s
+/// (w-6270, 2026-09-23 — the bound includes the declined request's own
+/// time); the one nobody answered stood 136 minutes (w-5770) until its
+/// coordinator read the pane. Ten minutes is the first whole ten minutes
+/// past every answered dialog.
+pub const DECLINE_DIALOG_UNANSWERED_MS: i64 = 10 * 60 * 1000;
+
+/// A switch a worker's own CLI recorded: a classifier decline it answered on
+/// the category's route rather than on the model its summons bound (t-6747)
+/// — read off the worker's transcript, one per record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelDeviation {
+    pub worker: String,
+    /// The record's own identity, so one switch is written once.
+    pub key: String,
+    /// The model the declined request was sent to, and the one that answered.
+    pub from: String,
+    pub to: String,
+    pub category: Option<String>,
+    /// How long the CLI keeps the switch, in its own word: `session` or
+    /// `local`, or nothing from a CLI older than the field.
+    pub scope: Option<String>,
+    pub at_ms: Option<i64>,
+}
+
+impl ModelDeviation {
+    /// How long the switch lasts. Claude Code 2.1.281's own schema: "When
+    /// `scope` is "session" (or absent — older CLIs), the swap is made
+    /// persistent for the session; when `scope` is "local", only that
+    /// subagent/side-question response came from the fallback model".
+    #[must_use]
+    pub fn lasts(&self) -> &'static str {
+        match self.scope.as_deref() {
+            Some("local") => "one response",
+            _ => "the rest of this conversation",
+        }
+    }
+}
+
+/// Both witnesses to one worker's decline. Only
+/// [`classifier_decline_witness`] builds one, and only
+/// [`Ledger::workers_classifier_declined`] reads one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassifierDeclineWitness {
+    pub worker: String,
+    /// The CLI's decline sentence, standing on the pane's screen now.
+    pub screen: Text,
+    pub record: ClassifierDeclineMarker,
+}
+
+/// Two witnesses or nothing.
+///
+/// The screen alone is a worker that reads, quotes or was briefed with the
+/// words — this task's own briefing carries them. The record alone is a
+/// decline the worker may already have moved past: the CLI's fallback
+/// answers inside the turn, and a person may have typed. The screen says the
+/// pane still stands at a decline; the record says it is this conversation's
+/// last request that was declined, and what for. A pause dialog writes no
+/// record until somebody answers it, so for a dialog the second witness is
+/// time: the dialog on screen, and the pane quiet longer than any dialog a
+/// person answered here ([`DECLINE_DIALOG_UNANSWERED_MS`]).
+#[must_use]
+pub fn classifier_decline_witness(
+    worker: &str,
+    dispatch: &str,
+    screen: Option<DeclineScreen>,
+    record: Option<ClassifierDeclineMarker>,
+    quiet_since_ms: i64,
+    now_ms: i64,
+) -> Option<ClassifierDeclineWitness> {
+    let screen = screen.filter(|seen| !seen.line.as_str().trim().is_empty())?;
+    let record = match record.filter(|record| !record.key.is_empty()) {
+        Some(record) => record,
+        None if screen.dialog
+            && now_ms.saturating_sub(quiet_since_ms) >= DECLINE_DIALOG_UNANSWERED_MS =>
+        {
+            ClassifierDeclineMarker {
+                source: DECLINE_DIALOG_SOURCE.to_string(),
+                line: screen.line.clone(),
+                category: screen.category.clone(),
+                key: format!("{DECLINE_DIALOG_SOURCE}:{dispatch}@{quiet_since_ms}"),
+            }
+        }
+        None => return None,
+    };
+    Some(ClassifierDeclineWitness {
+        worker: worker.to_string(),
+        screen: screen.line,
+        record,
+    })
 }
 
 /// [`QuotaWallOrder::standing`], borrowed: whether it waits, and who it
@@ -13073,7 +13680,12 @@ pub fn quota_verdict(
 /// catalog and dials, so a name nobody knows or an effort its CLI does not
 /// take is refused at the flag rather than the day the wall is reached.
 fn named_alternative(word: &str) -> Result<Pinned, String> {
-    let named = parse_on_quota_wall(word)?;
+    named_alternative_for("--on-quota-wall", word)
+}
+
+/// [`named_alternative`], for whichever flag carried it.
+fn named_alternative_for(flag: &str, word: &str) -> Result<Pinned, String> {
+    let named = parse_alternative(flag, word)?;
     if !crate::agent::AGENT_SPECS
         .iter()
         .any(|spec| spec.id == named.agent)
@@ -13500,6 +14112,42 @@ pub fn provider_peer(agent: &str, run_id: &str, worker_id: &str) -> Option<Provi
     })
 }
 
+/// What a summoned worker's own CLI is told so a safety classifier's decline
+/// is answered on its fallback model rather than at a question nobody is
+/// watching (t-6747) — rung ① of [`CLASSIFIER_DECLINE_LADDER`], one row per
+/// CLI and measured one CLI at a time, like [`TUNABLE`]:
+///
+/// - claude 2.1.281: `switchModelsOnFlag`, whose own schema says "When
+///   safeguards flag a message, automatically switch to a different model to
+///   keep chatting. When off, your session will pause instead." The window's
+///   Claude home carries the person's `false`, so a flagged worker stood at
+///   the `Session paused` dialog — a dialog ends no turn and writes no
+///   record, so w-5770 (2026-09-21) stood there 136 minutes with no
+///   `went_quiet` until its coordinator read the pane. `--settings` is
+///   Claude's flag layer, merged over the user file (user, project, local,
+///   flag, policy), so only the summons changes and every pane a person
+///   opens keeps the person's choice. The CLI then continues THAT turn on its
+///   own per-category route (cyber → Opus 4.8 on every one of the 15 switches
+///   it recorded here in fourteen days) and leaves the categories it routes
+///   nowhere to stand.
+/// - zo: `--classifier-fallback auto` — the flag layer over the
+///   `smart.classifierFallback` setting, whose `ask` waits for a person.
+///
+/// Only a summons that carries a task: a bare pane is a person's to answer.
+const DECLINE_CONTINUE_WORDS: &[(&str, &[&str])] = &[
+    ("zo", &["--classifier-fallback", "auto"]),
+    ("claude", &["--settings", r#"{"switchModelsOnFlag":true}"#]),
+];
+
+/// Append [`DECLINE_CONTINUE_WORDS`]' row for `agent`, when it has one — on
+/// both launch roads, the fresh summons and the restored one, so a worker a
+/// restart seats again is told what its first launch was.
+fn continue_past_classifier_declines(agent: &str, words: &mut Vec<String>) {
+    if let Some((_, said)) = DECLINE_CONTINUE_WORDS.iter().find(|(id, _)| *id == agent) {
+        words.extend(said.iter().map(|word| (*word).to_string()));
+    }
+}
+
 /// Assemble a reserved worker's command or put the reservation back exactly.
 ///
 /// The stable peer name needs the worker id, and the worker id exists only
@@ -13514,6 +14162,9 @@ fn command_for_reserved_worker(
 ) -> Result<String, String> {
     if let Some(peer) = provider_peer(&prepared.agent, &prepared.run, &prepared.worker) {
         peer.append_launch_tuning(&mut words);
+    }
+    if prepared.task.is_some() {
+        continue_past_classifier_declines(&prepared.agent, &mut words);
     }
     match launcher.command_for(&prepared.agent, "", &words) {
         Ok(command) => Ok(command),
@@ -13911,10 +14562,13 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     (
         "handover-policy",
         "[--on-quota-wall wait|<agent[:model[:effort]]> [--wip-commit]] [--on-transient-error \
-         resume] | --off · when a worker is witnessed at its quota wall, wait out a verified \
-         reset first (`wait`), and hand its task to this alternative in the same checkout \
-         (`wait,<alt>` does both, the wait first); when its last turn died on a transient API \
-         error, type a continuation into its composer",
+         resume] [--on-classifier-decline <agent[:model[:effort]]>] | --off · when a worker is \
+         witnessed at its quota wall, wait out a verified reset first (`wait`), and hand its \
+         task to this alternative in the same checkout (`wait,<alt>` does both, the wait \
+         first); when its last turn died on a transient API error, type a continuation into its \
+         composer; when its provider's safety classifier declined a request in a category the \
+         provider routes elsewhere and its CLI could not continue, hand its task to this \
+         alternative (a part left out is the worker's own)",
         Doing::Mutation,
     ),
     (
@@ -16069,20 +16723,32 @@ fn plan_inner(
                     .value("--on-transient-error")
                     .map(parse_on_transient_error)
                     .transpose()?;
-                if !order.wait && order.handover.is_none() && on_transient_error.is_none() {
+                let on_classifier_decline = words
+                    .value("--on-classifier-decline")
+                    .map(|word| named_alternative_for("--on-classifier-decline", word))
+                    .transpose()?;
+                if !order.wait
+                    && order.handover.is_none()
+                    && on_transient_error.is_none()
+                    && on_classifier_decline.is_none()
+                {
                     return Err(
                         "handover-policy needs --on-quota-wall wait|<agent[:model[:effort]]> — \
                          the wait for a verified reset, the alternative the wall hands over \
-                         to, or both — and/or --on-transient-error resume, or --off"
+                         to, or both — and/or --on-transient-error resume, and/or \
+                         --on-classifier-decline <agent[:model[:effort]]>, or --off"
                             .into(),
                     );
                 }
-                // The commit is step ① of a WALL's handover; armed without an
+                // The commit is step ① of a handover; armed without an
                 // alternative it would be a flag nothing ever reads.
-                if words.has("--wip-commit") && order.handover.is_none() {
+                if words.has("--wip-commit")
+                    && order.handover.is_none()
+                    && on_classifier_decline.is_none()
+                {
                     return Err(
-                        "--wip-commit is step ① of a quota-wall handover — name the \
-                         alternative with --on-quota-wall beside it"
+                        "--wip-commit is step ① of a handover — name the alternative with \
+                         --on-quota-wall or --on-classifier-decline beside it"
                             .into(),
                     );
                 }
@@ -16091,6 +16757,7 @@ fn plan_inner(
                     wip_commit: words.has("--wip-commit"),
                     on_transient_error,
                     quota_wait: order.wait,
+                    on_classifier_decline,
                     armed_ms: now_ms,
                 };
                 let run = ledger

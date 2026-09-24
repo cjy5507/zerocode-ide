@@ -27,7 +27,10 @@
 
 use std::path::Path;
 
-use zerocode_core::orchestration::{QuotaWallMarker, Text, TransientErrorMarker};
+use zerocode_core::orchestration::{
+    ClassifierDeclineMarker, DeclineScreen, ModelDeviation, QuotaWallMarker, Text,
+    TransientErrorMarker,
+};
 
 /// Where the words were read.
 const SCREEN: &str = "screen";
@@ -50,6 +53,10 @@ pub(crate) enum StallCause {
     /// The agent's login is gone: every prompt is answered by the CLI itself
     /// until somebody signs it in again (t-6560).
     LoginWall,
+    /// The provider's safety classifier declined the conversation's last
+    /// request and the agent's CLI stopped there rather than continue on a
+    /// fallback model (t-6747).
+    ClassifierDecline,
 }
 
 impl StallCause {
@@ -58,9 +65,11 @@ impl StallCause {
     /// A continuation ACTS on the composer, so its witness has to be the last
     /// word of the conversation: a person's line, a mail pointer, a queued
     /// message after the error is a turn somebody already started. A wall is
-    /// news, and a person typing into a wall does not lift it.
+    /// news, and a person typing into a wall does not lift it. A decline is
+    /// the first kind: a prompt after it is a new request, which the
+    /// classifier judges again.
     const fn needs_the_last_word(self) -> bool {
-        matches!(self, Self::TransientApiError)
+        matches!(self, Self::TransientApiError | Self::ClassifierDecline)
     }
 
     /// Whether the next prompt meets this cause again for certain — the walls
@@ -76,6 +85,7 @@ impl StallCause {
             Self::QuotaWall => "quota",
             Self::TransientApiError => "transient-error",
             Self::LoginWall => "login",
+            Self::ClassifierDecline => "classifier-decline",
         }
     }
 }
@@ -169,6 +179,23 @@ struct StallMarkerRule {
 ///   Nine of them came two seconds apart on 2026-09-20 12:10, each after a
 ///   mail pointer. The word, not the sentence, is the marker.
 /// - codex, zo: no row — no expired login in their records on this machine.
+///
+/// Classifier decline (t-6747, both Claude project roots and 95 Codex
+/// rollouts, 2026-09-10..24):
+/// - claude: the CLI's own sentence, "<Model>'s safeguards flagged this
+///   message", on screen and in the `isApiErrorMessage` assistant record a
+///   decline with no fallback writes (18 records, all `error:
+///   "invalid_request"` — Fable 5.1's 14 and Opus 5's 4; the `system`
+///   record beside it, `model_refusal_no_fallback`, names the category).
+///   The sentence, not the error word: `invalid_request` is also any other
+///   400. A decline the CLI answered on its fallback writes
+///   `model_refusal_fallback` and goes on — no stop, so no row here; its
+///   switch of model is read by [`fallbacks_in`]. The pause dialog (the
+///   person's `switchModelsOnFlag: false`) writes nothing until answered,
+///   and shows its choices: [`DECLINE_DIALOG_CHOICE`].
+/// - codex: no row — no decline in its records on this machine.
+/// - zo: no row — zo walks its own ladder in-process and says so on its own
+///   screen; the window reads no zo transcript.
 const STALL_MARKERS: &[StallMarkerRule] = &[
     StallMarkerRule {
         agent: "codex",
@@ -232,7 +259,33 @@ const STALL_MARKERS: &[StallMarkerRule] = &[
             says: &[],
         },
     },
+    StallMarkerRule {
+        agent: "claude",
+        cause: StallCause::ClassifierDecline,
+        screen: &[&[DECLINE_SENTENCE]],
+        transcript: TranscriptRule::ClaudeJsonl {
+            errors: &[],
+            says: &[&[DECLINE_SENTENCE]],
+        },
+    },
 ];
+
+/// Claude Code's own words for a decline, in every spelling 2.1.281 has
+/// ("<Model>'s safeguards flagged this message", "This model's safeguards
+/// flagged this message") and in all 18 records on this machine.
+const DECLINE_SENTENCE: &str = "safeguards flagged this message";
+
+/// The choice Claude Code's pause dialog offers beside its fallback —
+/// "Edit prompt and retry", alone or "… with <Model>" (2.1.281's labels, and
+/// the screen a coordinator read off w-5770 on 2026-09-21). A screen that
+/// shows it is a dialog waiting for a key, not a printed error.
+const DECLINE_DIALOG_CHOICE: &str = "Edit prompt and retry";
+
+/// The system record a decline with no fallback writes beside its error,
+/// naming the category (`apiRefusalCategory`), and the one a decline the
+/// CLI answered on its fallback writes instead.
+const CLAUDE_NO_FALLBACK_RECORD: &str = "model_refusal_no_fallback";
+const CLAUDE_FALLBACK_RECORD: &str = "model_refusal_fallback";
 
 fn rule_for(agent: &str, cause: StallCause) -> Option<&'static StallMarkerRule> {
     STALL_MARKERS
@@ -320,6 +373,180 @@ pub(crate) fn transient_error_in(agent: &str, lines: &[String]) -> Option<Transi
         line: found.line,
         key: found.key?,
     })
+}
+
+/// What a quiet pane shows and records of a safety classifier's decline
+/// (t-6747): the screen and the transcript's last record — the two
+/// witnesses `classifier_decline_witness` needs — and every switch of model
+/// its CLI recorded answering a decline on a fallback.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeclineReading {
+    pub(crate) screen: Option<DeclineScreen>,
+    pub(crate) record: Option<ClassifierDeclineMarker>,
+    /// The switches, oldest first, with no worker named yet — the sweep
+    /// knows whose pane it read.
+    pub(crate) fallbacks: Vec<ModelDeviation>,
+}
+
+/// The decline reading for `agent`, off its screen and the bounded tail of
+/// its transcript at `transcript_path` — the production road, one file read,
+/// and nothing at all for an agent the table has no row for.
+pub(crate) fn decline_reading_for(
+    agent: &str,
+    screen: Option<&str>,
+    transcript_path: Option<&Path>,
+) -> Option<DeclineReading> {
+    if !has_rule(agent, StallCause::ClassifierDecline) {
+        return None;
+    }
+    let lines = transcript_path.and_then(zerocode_core::transcript::tail_lines);
+    Some(decline_reading_in(agent, screen, lines.as_deref()))
+}
+
+/// The decline reading in what the window holds. Pure.
+pub(crate) fn decline_reading_in(
+    agent: &str,
+    screen: Option<&str>,
+    transcript_lines: Option<&[String]>,
+) -> DeclineReading {
+    let Some(rule) = rule_for(agent, StallCause::ClassifierDecline) else {
+        return DeclineReading::default();
+    };
+    let claude = matches!(rule.transcript, TranscriptRule::ClaudeJsonl { .. });
+    DeclineReading {
+        screen: screen.and_then(|screen| decline_screen(rule, screen)),
+        record: transcript_lines.and_then(|lines| decline_record(rule, lines)),
+        fallbacks: transcript_lines
+            .filter(|_| claude)
+            .map(fallbacks_in)
+            .unwrap_or_default(),
+    }
+}
+
+/// The decline sentence as the pane's screen shows it, whether it stands in
+/// the pause dialog, and the category the dialog's detail line names.
+fn decline_screen(rule: &StallMarkerRule, screen: &str) -> Option<DeclineScreen> {
+    let lines: Vec<&str> = screen.lines().map(str::trim).collect();
+    let line = lines.iter().rev().find(|line| {
+        rule.screen
+            .iter()
+            .any(|group| group.iter().all(|phrase| line.contains(phrase)))
+    })?;
+    Some(DeclineScreen {
+        line: clipped(line),
+        dialog: lines
+            .iter()
+            .any(|line| line.contains(DECLINE_DIALOG_CHOICE)),
+        category: lines.iter().find_map(|line| details_category(line)),
+    })
+}
+
+/// The category in Claude Code's own detail line — "Details: `[cyber]`"
+/// (2.1.281 prints the category word between the brackets). A word that is
+/// not one is no category.
+fn details_category(line: &str) -> Option<String> {
+    let after = line.split("Details:").nth(1)?;
+    let start = after.find('[')? + 1;
+    let end = after[start..].find(']')? + start;
+    let word = after[start..end].trim();
+    (!word.is_empty()
+        && word
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'))
+    .then(|| word.to_string())
+}
+
+/// The conversation's last record, when it is a decline its CLI stopped at:
+/// the error record the table's row names, as the last word, and the
+/// category off the system record the CLI wrote beside it.
+fn decline_record(rule: &StallMarkerRule, lines: &[String]) -> Option<ClassifierDeclineMarker> {
+    let found = read_transcript(rule, lines)?;
+    let key = found.key?;
+    let category = lines.iter().rev().find_map(|line| {
+        if !line.contains(CLAUDE_NO_FALLBACK_RECORD) {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+        (value["type"] == "system" && value["subtype"] == CLAUDE_NO_FALLBACK_RECORD)
+            .then(|| value["apiRefusalCategory"].as_str().map(str::to_string))
+            .flatten()
+    });
+    Some(ClassifierDeclineMarker {
+        source: found.source.to_string(),
+        line: found.line,
+        category,
+        key,
+    })
+}
+
+/// Whether the table reads switches of model in `agent`'s records — a
+/// decline its CLI answered on a fallback. Claude's transcripts only.
+pub(crate) fn reads_fallbacks(agent: &str) -> bool {
+    rule_for(agent, StallCause::ClassifierDecline)
+        .is_some_and(|rule| matches!(rule.transcript, TranscriptRule::ClaudeJsonl { .. }))
+}
+
+/// The switches of model recorded in the transcript at `path` since
+/// `offset`, which moves past every whole line read — so a switch early in a
+/// long turn is read however far the file has grown since, where a tail
+/// would have scrolled past it (a worker transcript here ran p50 3.8 MB and
+/// up to 11.8 MB over fourteen days, against a 256 KiB tail). A line still
+/// being written waits for the next read; a file that shrank was rewritten
+/// and is read again from its start. An unchanged file costs one `stat`.
+pub(crate) fn fallbacks_since(path: &Path, offset: &mut u64) -> Vec<ModelDeviation> {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Vec::new();
+    };
+    let Ok(size) = file.metadata().map(|meta| meta.len()) else {
+        return Vec::new();
+    };
+    if size < *offset {
+        *offset = 0;
+    }
+    if size == *offset || file.seek(SeekFrom::Start(*offset)).is_err() {
+        return Vec::new();
+    }
+    let mut fresh = Vec::new();
+    if file.take(size - *offset).read_to_end(&mut fresh).is_err() {
+        return Vec::new();
+    }
+    let Some(end) = fresh.iter().rposition(|byte| *byte == b'\n') else {
+        return Vec::new();
+    };
+    *offset += end as u64 + 1;
+    let lines: Vec<String> = String::from_utf8_lossy(&fresh[..end])
+        .lines()
+        .filter(|line| line.contains(CLAUDE_FALLBACK_RECORD))
+        .map(str::to_string)
+        .collect();
+    fallbacks_in(&lines)
+}
+
+/// Every switch of model a Claude transcript tail records — a decline its
+/// CLI answered on the category's route (`model_refusal_fallback`: 15 on
+/// this machine, 2026-09-10..24, every one to `claude-opus-4-8`) — oldest
+/// first, decided on parsed fields, never on the bytes a tool result quoted.
+pub(crate) fn fallbacks_in(lines: &[String]) -> Vec<ModelDeviation> {
+    lines
+        .iter()
+        .filter(|line| line.contains(CLAUDE_FALLBACK_RECORD))
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+            if value["type"] != "system" || value["subtype"] != CLAUDE_FALLBACK_RECORD {
+                return None;
+            }
+            Some(ModelDeviation {
+                worker: String::new(),
+                key: value["uuid"].as_str()?.to_string(),
+                from: value["originalModel"].as_str()?.to_string(),
+                to: value["fallbackModel"].as_str()?.to_string(),
+                category: value["apiRefusalCategory"].as_str().map(str::to_string),
+                scope: value["scope"].as_str().map(str::to_string),
+                at_ms: written_at(&value),
+            })
+        })
+        .collect()
 }
 
 /// A wall the pane's own conversation last ended at, as the mail pointer
@@ -621,18 +848,29 @@ pub(crate) fn clock_hhmm(at_ms: i64, local_offset_secs: i64) -> String {
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
-/// The WIP commit's message: who stopped, at which wall, and when it lifts.
+/// The WIP commit's message: who stopped, and why — at which wall and when
+/// it lifts, or at which category of decline (t-6747).
 pub(crate) fn wip_message(
     worker: &str,
-    provider: &str,
-    resets_at_ms: Option<i64>,
+    cause: &zerocode_core::orchestration::HandoverCause,
     local_offset_secs: i64,
 ) -> String {
-    let resets = resets_at_ms.map_or_else(
-        || "unknown".to_string(),
-        |at| clock_hhmm(at, local_offset_secs),
-    );
-    format!("wip(handover): {worker} stopped at {provider} wall, resets {resets}")
+    match cause {
+        zerocode_core::orchestration::HandoverCause::QuotaWall {
+            provider,
+            resets_at_ms,
+            ..
+        } => {
+            let resets = resets_at_ms.map_or_else(
+                || "unknown".to_string(),
+                |at| clock_hhmm(at, local_offset_secs),
+            );
+            format!("wip(handover): {worker} stopped at {provider} wall, resets {resets}")
+        }
+        zerocode_core::orchestration::HandoverCause::ClassifierDecline { category } => {
+            format!("wip(handover): {worker} stopped at a {category} classifier decline")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -676,7 +914,7 @@ pub(crate) mod tests {
 ",
         )
         .expect("write");
-        let message = wip_message("w-3", "codex", Some(1_788_478_149_000), 9 * 3600);
+        let message = wip_message("w-3", &wall("codex", Some(1_788_478_149_000)), 9 * 3600);
         let sha = wip_commit(&repo, &message)
             .expect("committed")
             .expect("a sha");
@@ -697,13 +935,35 @@ pub(crate) mod tests {
         assert_eq!(clock_hhmm(1_788_478_149_000, 9 * 3600), "08:29");
         assert_eq!(clock_hhmm(1_788_478_149_000, 0), "23:29");
         assert_eq!(
-            wip_message("w-3", "codex", Some(1_788_478_149_000), 9 * 3600),
+            wip_message("w-3", &wall("codex", Some(1_788_478_149_000)), 9 * 3600),
             "wip(handover): w-3 stopped at codex wall, resets 08:29"
         );
         assert_eq!(
-            wip_message("w-3", "claude", None, 0),
+            wip_message("w-3", &wall("claude", None), 0),
             "wip(handover): w-3 stopped at claude wall, resets unknown"
         );
+        // A decline names its category (t-6747).
+        assert_eq!(
+            wip_message(
+                "w-5",
+                &zerocode_core::orchestration::HandoverCause::ClassifierDecline {
+                    category: "cyber".to_string(),
+                },
+                0,
+            ),
+            "wip(handover): w-5 stopped at a cyber classifier decline"
+        );
+    }
+
+    fn wall(
+        provider: &str,
+        resets_at_ms: Option<i64>,
+    ) -> zerocode_core::orchestration::HandoverCause {
+        zerocode_core::orchestration::HandoverCause::QuotaWall {
+            provider: provider.to_string(),
+            used_percent: 98,
+            resets_at_ms,
+        }
     }
 
     fn lines(held: &[&str]) -> Vec<String> {
@@ -1320,5 +1580,171 @@ pub(crate) mod tests {
         let all: usize = bursts.iter().map(|burst| burst.typed).sum();
         let kept: usize = bursts.iter().map(|burst| burst.kept_typed).sum();
         println!("MEASURE every typed pointer={all} kept by the hold's rule={kept}");
+    }
+
+    /* ---- the classifier decline (t-6747) ------------------------------ */
+
+    /// A decline with no fallback as the real file carries it (the
+    /// coordinator transcript, 2026-09-24 04:29:48, 2.1.281, ids scrubbed):
+    /// the partial the declined request streamed, the CLI's category record,
+    /// its error record, and the turn's end — in that order in the file.
+    const CLAUDE_DECLINED_PARTIAL: &str = r#"{"parentUuid":"a","isSidechain":false,"type":"assistant","uuid":"part","timestamp":"2026-09-24T04:29:48.706Z","message":{"id":"m","model":"claude-fable-5-1","role":"assistant","type":"message","content":[{"type":"thinking","thinking":""}]},"requestId":"req_d"}"#;
+    const CLAUDE_NO_FALLBACK: &str = r#"{"parentUuid":"part","isSidechain":false,"type":"system","subtype":"model_refusal_no_fallback","content":"","level":"warning","originalModel":"claude-fable-5-1","requestId":"req_d","apiRefusalCategory":"cyber","apiRefusalExplanation":"This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy.","refusedUserMessageUuid":"q","isMeta":false,"uuid":"sys","timestamp":"2026-09-24T04:29:48.712Z","version":"2.1.281"}"#;
+    const CLAUDE_DECLINE_ERROR: &str = r#"{"parentUuid":"sys","isSidechain":false,"type":"assistant","uuid":"declined","timestamp":"2026-09-24T04:29:48.711Z","message":{"id":"e","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup). Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate coding and cybersecurity tasks."}]},"requestId":"req_d","error":"invalid_request","isApiErrorMessage":true}"#;
+    const CLAUDE_TURN_END: &str = r#"{"parentUuid":"declined","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":2400,"uuid":"end","timestamp":"2026-09-24T04:29:48.735Z"}"#;
+    const CLAUDE_PERSON_TYPED: &str = r#"{"parentUuid":"end","isSidechain":false,"type":"user","uuid":"typed","timestamp":"2026-09-24T04:30:08.774Z","message":{"role":"user","content":"continue"}}"#;
+    const CLAUDE_TOOL_QUOTING_THE_DECLINE: &str = r#"{"parentUuid":"x","isSidechain":false,"type":"user","uuid":"quote","timestamp":"2026-09-24T05:00:00.000Z","message":{"role":"user","content":[{"type":"tool_result","content":"grep: API Error: Fable 5.1's safeguards flagged this message"}]}}"#;
+    /// A decline the CLI answered on its fallback, as w-5797's transcript
+    /// carries it (2026-09-21 14:06:16, 2.1.278, ids scrubbed).
+    const CLAUDE_FALLBACK: &str = r#"{"parentUuid":"b","isSidechain":false,"type":"system","subtype":"model_refusal_fallback","content":"Fable 5.1's safeguards flagged this message. Switched to Opus 4.8.\n\nDetails: `[cyber]`","level":"warning","trigger":"refusal","direction":"retry","scope":"session","originalModel":"claude-fable-5-1","fallbackModel":"claude-opus-4-8","requestId":"req_f","apiRefusalCategory":"cyber","retractedMessageUuids":["r"],"refusedUserMessageUuid":"q","isMeta":false,"uuid":"switch-1","timestamp":"2026-09-21T14:06:16.566Z","version":"2.1.278"}"#;
+    /// Claude Code's pause dialog as a coordinator read it off w-5770 on
+    /// 2026-09-21, in 2.1.281's own labels.
+    const CLAUDE_DIALOG_SCREEN: &str = "\
+ Session paused
+ Fable 5.1's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster.
+   Details: `[cyber]`
+ ❯ 1. Switch to Opus 4.8
+   2. Edit prompt and retry
+";
+    const CLAUDE_PRINTED_DECLINE_SCREEN: &str = "\
+⎿  API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup).
+   Double press esc to edit your last message, or try a different model with /model.
+❯ ";
+
+    /// The decline its CLI stopped at is the conversation's last record,
+    /// keyed by that record, with the category off the record beside it;
+    /// its screen shows the sentence, and a dialog shows its choices.
+    #[test]
+    fn a_decline_the_cli_stopped_at_is_read_with_its_category_and_its_screen() {
+        let transcript = lines(&[
+            CLAUDE_PLAIN_RECORD,
+            CLAUDE_DECLINED_PARTIAL,
+            CLAUDE_NO_FALLBACK,
+            CLAUDE_DECLINE_ERROR,
+            CLAUDE_TURN_END,
+        ]);
+        let reading = decline_reading_in(
+            "claude",
+            Some(CLAUDE_PRINTED_DECLINE_SCREEN),
+            Some(&transcript),
+        );
+        let record = reading.record.expect("the decline record");
+        assert_eq!(record.source, TRANSCRIPT);
+        assert_eq!(record.key, "declined");
+        assert_eq!(record.category.as_deref(), Some("cyber"));
+        assert!(
+            record
+                .line
+                .as_str()
+                .contains("safeguards flagged this message")
+        );
+        let screen = reading.screen.expect("the screen's sentence");
+        assert!(!screen.dialog, "a printed error is no dialog");
+        assert!(
+            screen
+                .line
+                .as_str()
+                .contains("safeguards flagged this message")
+        );
+        let dialog = decline_reading_in("claude", Some(CLAUDE_DIALOG_SCREEN), None)
+            .screen
+            .expect("the dialog's sentence");
+        assert!(dialog.dialog);
+        assert_eq!(dialog.category.as_deref(), Some("cyber"));
+        // Nobody measured another agent's decline: it reads nothing.
+        assert_eq!(
+            decline_reading_in("codex", Some(CLAUDE_DIALOG_SCREEN), Some(&transcript)),
+            DeclineReading::default()
+        );
+    }
+
+    /// A decline somebody answered, one a tool result quotes, and one the
+    /// CLI answered on its fallback are not a decline it stopped at.
+    #[test]
+    fn a_decline_answered_quoted_or_fallen_back_from_is_no_record() {
+        let answered = lines(&[
+            CLAUDE_NO_FALLBACK,
+            CLAUDE_DECLINE_ERROR,
+            CLAUDE_TURN_END,
+            CLAUDE_PERSON_TYPED,
+        ]);
+        assert_eq!(
+            decline_reading_in("claude", None, Some(&answered)).record,
+            None
+        );
+        let quoted = lines(&[CLAUDE_TOOL_QUOTING_THE_DECLINE, CLAUDE_PLAIN_RECORD]);
+        assert_eq!(
+            decline_reading_in("claude", None, Some(&quoted)).record,
+            None
+        );
+        let fell_back = lines(&[CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD]);
+        let reading = decline_reading_in("claude", None, Some(&fell_back));
+        assert_eq!(reading.record, None);
+        // …but its switch of model is read, for the binding it left.
+        assert_eq!(
+            reading.fallbacks,
+            vec![ModelDeviation {
+                worker: String::new(),
+                key: "switch-1".to_string(),
+                from: "claude-fable-5-1".to_string(),
+                to: "claude-opus-4-8".to_string(),
+                category: Some("cyber".to_string()),
+                scope: Some("session".to_string()),
+                at_ms: zerocode_core::civil::epoch_ms_of_iso("2026-09-21T14:06:16.566Z"),
+            }]
+        );
+    }
+
+    /// What 2.1.281 writes after a turn's last record (a print-mode run of
+    /// the hermetic `--settings` probe, t-6747, ids scrubbed): bookkeeping,
+    /// not conversation.
+    const CLAUDE_BOOKKEEPING: [&str; 3] = [
+        r#"{"type":"last-prompt","lastPrompt":"probe","leafUuid":"declined","sessionId":"s"}"#,
+        r#"{"type":"atis-latch","atis":"","sessionId":"s"}"#,
+        r#"{"type":"cost-state","sessionId":"s","totalCostUSD":0.00015,"totalAPIDuration":13,"modelUsage":{"claude-fable-5-1":{"inputTokens":10,"outputTokens":1}}}"#,
+    ];
+
+    /// The bookkeeping the CLI writes after a turn is no input: the decline
+    /// before it is still the conversation's last word.
+    #[test]
+    fn a_decline_is_read_past_the_bookkeeping_its_cli_writes_after_it() {
+        let mut held = vec![CLAUDE_NO_FALLBACK, CLAUDE_DECLINE_ERROR];
+        held.extend(CLAUDE_BOOKKEEPING);
+        let record = decline_reading_in("claude", None, Some(&lines(&held)))
+            .record
+            .expect("the decline is still the last word");
+        assert_eq!(record.key, "declined");
+        assert_eq!(record.category.as_deref(), Some("cyber"));
+    }
+
+    /// The switch scan reads on from where it stopped: whole lines only, an
+    /// unchanged file nothing, a rewritten file from its start.
+    #[test]
+    fn the_switch_scan_reads_on_from_where_it_stopped() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let mut file = std::fs::File::create(&path).expect("a transcript");
+        writeln!(file, "{CLAUDE_PLAIN_RECORD}").expect("write");
+        writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
+        let mut offset = 0;
+        let first = fallbacks_since(&path, &mut offset);
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].key, "switch-1");
+        assert!(fallbacks_since(&path, &mut offset).is_empty(), "read twice");
+        // A line still being written waits for its newline.
+        let second = CLAUDE_FALLBACK.replace("switch-1", "switch-2");
+        let (head, rest) = second.split_at(40);
+        write!(file, "{head}").expect("write");
+        file.flush().expect("flush");
+        assert!(fallbacks_since(&path, &mut offset).is_empty());
+        writeln!(file, "{rest}").expect("write");
+        file.flush().expect("flush");
+        let later = fallbacks_since(&path, &mut offset);
+        assert_eq!(later.len(), 1);
+        assert_eq!(later[0].key, "switch-2");
+        // Rewritten shorter: read again from the start.
+        std::fs::write(&path, format!("{CLAUDE_FALLBACK}\n")).expect("rewrite");
+        assert_eq!(fallbacks_since(&path, &mut offset).len(), 1);
     }
 }

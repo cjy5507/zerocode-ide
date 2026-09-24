@@ -6487,6 +6487,8 @@ fn a_worker_cannot_speak_as_the_ledger_by_naming_its_notice() {
         MessageKind::QuotaWalled,
         MessageKind::Handover,
         MessageKind::Resumed,
+        MessageKind::ClassifierDeclined,
+        MessageKind::ModelDeviated,
     ] {
         assert!(kind.is_the_ledgers_own(), "{}", kind.as_str());
         let typed = bench.at(
@@ -10904,6 +10906,74 @@ fn a_non_claude_worker_receives_no_provider_peer_name_flag() {
     );
 }
 
+/// A summoned worker never stops at a classifier-decline question nobody is
+/// watching (t-6747): the task-carrying summons carries the measured words
+/// that make the agent's own CLI continue on its fallback, the person's bare
+/// pane does not, and an agent nobody measured is told nothing.
+#[test]
+fn a_task_carrying_summons_is_told_to_continue_past_a_classifier_decline() {
+    let mut bench = Bench::new();
+    bench.launcher = Catalog(&["claude", "codex", "zo"]);
+    bench.json("run-create --name decline-words");
+    let summoned = |bench: &mut Bench, line: &str| {
+        let planned = bench.run(line);
+        assert_eq!(
+            planned.reply.exit_code, 0,
+            "{line}: {}",
+            planned.reply.stderr
+        );
+        let Effect::Split { command, .. } = planned.effect else {
+            panic!("{line} did not plan a split: {:?}", planned.effect);
+        };
+        command
+    };
+    let task = |bench: &mut Bench| {
+        bench.json("task-create --spec decline")["taskId"]
+            .as_str()
+            .expect("an id")
+            .to_string()
+    };
+
+    let claude_task = task(&mut bench);
+    let claude = summoned(
+        &mut bench,
+        &format!("worker-start --agent claude --task {claude_task}"),
+    );
+    let zo_task = task(&mut bench);
+    let zo = summoned(
+        &mut bench,
+        &format!("worker-start --agent zo --task {zo_task}"),
+    );
+    let codex_task = task(&mut bench);
+    let codex = summoned(
+        &mut bench,
+        &format!("worker-start --agent codex --task {codex_task}"),
+    );
+    let bare = summoned(&mut bench, "worker-start --agent claude");
+
+    assert_eq!(
+        command_flag(&claude, "--settings"),
+        Some(r#"{"switchModelsOnFlag":true}"#),
+        "{claude}"
+    );
+    assert_eq!(
+        command_flag(&zo, "--classifier-fallback"),
+        Some("auto"),
+        "{zo}"
+    );
+    assert_eq!(command_flag(&codex, "--settings"), None, "{codex}");
+    assert_eq!(
+        command_flag(&codex, "--classifier-fallback"),
+        None,
+        "{codex}"
+    );
+    assert_eq!(
+        command_flag(&bare, "--settings"),
+        None,
+        "a bare pane is the person's: {bare}"
+    );
+}
+
 #[test]
 fn claude_provider_peer_views_hide_private_provider_state() {
     let mut bench = Bench::new();
@@ -13103,6 +13173,272 @@ fn a_walled_worker(
     (worker, pane, dispatch)
 }
 
+/* ---- the classifier decline (t-6747) ---------------------------------- */
+
+/// Claude Code's own sentence, as the 18 decline records on this machine
+/// carry it (2026-09-10..24).
+const DECLINED: &str = "API Error: Fable 5.1's safeguards flagged this message \
+                        (https://www.anthropic.com/legal/aup).";
+
+fn a_decline_record(category: Option<&str>, key: &str) -> ClassifierDeclineMarker {
+    ClassifierDeclineMarker {
+        source: "transcript".to_string(),
+        line: Text::from(DECLINED),
+        category: category.map(str::to_string),
+        key: key.to_string(),
+    }
+}
+
+fn a_decline_screen(dialog: bool, category: Option<&str>) -> DeclineScreen {
+    DeclineScreen {
+        line: Text::from("Fable 5.1's safeguards flagged this message."),
+        dialog,
+        category: category.map(str::to_string),
+    }
+}
+
+/// Two witnesses or nothing: the CLI's sentence on the screen AND its
+/// record as the conversation's last word — or, for the pause dialog that
+/// writes no record until answered, the dialog on screen and a silence
+/// longer than any dialog a person answered here.
+#[test]
+fn a_classifier_decline_is_judged_by_two_witnesses() {
+    const NOW: i64 = 90_000_000;
+    let quiet = NOW - 60_000;
+    let judged = |screen, record, since| {
+        classifier_decline_witness("w-1", "dp-1", screen, record, since, NOW)
+    };
+    // One witness is none: a worker reading or briefed with the words, or a
+    // decline its CLI answered and moved past.
+    assert!(judged(Some(a_decline_screen(false, None)), None, quiet).is_none());
+    assert!(judged(None, Some(a_decline_record(Some("cyber"), "u-1")), quiet).is_none());
+    // Both: the record's category and key ride on.
+    let both = judged(
+        Some(a_decline_screen(false, None)),
+        Some(a_decline_record(Some("cyber"), "u-1")),
+        quiet,
+    )
+    .expect("two witnesses");
+    assert_eq!(both.worker, "w-1");
+    assert_eq!(both.record.category.as_deref(), Some("cyber"));
+    assert_eq!(both.record.key, "u-1");
+    // A record with no identity cannot be told once.
+    assert!(
+        judged(
+            Some(a_decline_screen(false, None)),
+            Some(a_decline_record(Some("cyber"), "")),
+            quiet
+        )
+        .is_none()
+    );
+    // The dialog: its second witness is time, measured.
+    let dialog = || Some(a_decline_screen(true, Some("cyber")));
+    let answered_here = NOW - DECLINE_DIALOG_UNANSWERED_MS + 1;
+    assert!(judged(dialog(), None, answered_here).is_none());
+    let unanswered = judged(dialog(), None, NOW - DECLINE_DIALOG_UNANSWERED_MS)
+        .expect("a dialog nobody answered");
+    assert_eq!(unanswered.record.source, DECLINE_DIALOG_SOURCE);
+    assert_eq!(unanswered.record.category.as_deref(), Some("cyber"));
+    assert_eq!(
+        unanswered.record.key,
+        format!(
+            "{DECLINE_DIALOG_SOURCE}:dp-1@{}",
+            NOW - DECLINE_DIALOG_UNANSWERED_MS
+        )
+    );
+    // A printed error with no record is no dialog, however long it stands.
+    assert!(judged(Some(a_decline_screen(false, None)), None, 0).is_none());
+    // The table's number is the measurement's: past the longest dialog a
+    // person answered here (551 s), short of the one nobody did (136 min).
+    assert!(DECLINE_DIALOG_UNANSWERED_MS > 551_000);
+    assert!(DECLINE_DIALOG_UNANSWERED_MS < 136 * 60_000);
+}
+
+/// A declined worker's notice is written once per attempt, names the rung
+/// that comes next, and a routed decline under a declared order plans a
+/// handover to the declared alternative — the parts it left out the
+/// worker's own — in the same checkout. A category the provider routes
+/// nowhere is news and nothing more.
+#[test]
+fn a_declined_worker_is_told_once_and_a_routed_decline_plans_the_declared_handover() {
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name declines");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!(
+        "worker-start --agent claude --model fable --effort max --task {task}"
+    ));
+    assert!(
+        bench
+            .ledger
+            .worker_seated(("team-1", &pane), "/wt/declined")
+    );
+    let witness = |worker: &str, dispatch: &str, category: &str, key: &str| {
+        classifier_decline_witness(
+            worker,
+            dispatch,
+            Some(a_decline_screen(false, None)),
+            Some(a_decline_record(Some(category), key)),
+            NOW - 60_000,
+            NOW,
+        )
+        .expect("two witnesses")
+    };
+    let dispatch = bench.ledger.runs()[0]
+        .worker(&worker)
+        .and_then(|held| held.dispatch.clone())
+        .expect("the attempt");
+    let cyber = witness(&worker, &dispatch, "cyber", "u-1");
+    assert_eq!(
+        bench
+            .ledger
+            .workers_classifier_declined(&[cyber.clone()], NOW),
+        1
+    );
+    // The same decline on the next beat is the same fact.
+    assert_eq!(
+        bench.ledger.workers_classifier_declined(&[cyber], NOW + 1),
+        0
+    );
+    let news = bench.json("check --peek --types classifier_declined");
+    assert_eq!(news["count"], 1, "{news}");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["category"], "cyber");
+    assert_eq!(body["routed"], true);
+    assert_eq!(body["rung"], "notify", "no order declared yet: {body}");
+    assert_eq!(body["dispatchId"], dispatch.as_str());
+    // News alone walks nothing.
+    assert!(next_handover(&bench.ledger.runs()[0], NOW).is_none());
+    bench.json("handover-policy --on-classifier-decline claude:claude-opus-4-8");
+    let plan = next_handover(&bench.ledger.runs()[0], NOW).expect("a plan under the order");
+    assert_eq!(
+        plan.cause,
+        HandoverCause::ClassifierDecline {
+            category: "cyber".to_string()
+        }
+    );
+    assert_eq!(
+        plan.to,
+        pinned("claude", Some("claude-opus-4-8"), Some("max")),
+        "the effort the declaration left out is the worker's own"
+    );
+    assert_eq!(plan.checkout, "/wt/declined");
+    assert_eq!(plan.dispatch, dispatch);
+    assert!(handover_order_current(
+        &bench.ledger.runs()[0],
+        &plan,
+        false
+    ));
+    assert!(handover_paragraph(&plan, None, None, NOW).contains("safety classifier declined"));
+    // An unrouted category is told, and walks nothing.
+    let other = bench.json("task-create --spec read-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (held, held_pane) = bench.seat(&format!("worker-start --agent claude --task {other}"));
+    assert!(
+        bench
+            .ledger
+            .worker_seated(("team-1", &held_pane), "/wt/reasoning")
+    );
+    let held_dispatch = bench.ledger.runs()[0]
+        .worker(&held)
+        .and_then(|one| one.dispatch.clone())
+        .expect("the attempt");
+    let reasoning = witness(&held, &held_dispatch, "reasoning_extraction", "u-2");
+    assert_eq!(
+        bench.ledger.workers_classifier_declined(&[reasoning], NOW),
+        1
+    );
+    let told = bench.json("check --peek --types classifier_declined");
+    let newest: serde_json::Value = serde_json::from_str(
+        told["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .find(|message| message["dispatchId"] == held_dispatch.as_str())
+            .expect("the unrouted notice")["body"]
+            .as_str()
+            .expect("a body"),
+    )
+    .expect("json");
+    assert_eq!(newest["routed"], false);
+    assert_eq!(newest["rung"], "notify");
+    assert!(
+        next_handover_witnessed(&bench.ledger.runs()[0], NOW, |plan| {
+            plan.dispatch == held_dispatch
+        })
+        .is_none(),
+        "an unrouted decline was planned"
+    );
+}
+
+/// A switch of model a worker's CLI recorded is written once, with the
+/// binding it left: the two models, the category, how long the CLI keeps
+/// it, and why.
+#[test]
+fn a_switch_of_model_is_written_once_with_the_binding_it_left() {
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name switches");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!(
+        "worker-start --agent claude --model fable --effort max --task {task}"
+    ));
+    assert!(
+        bench
+            .ledger
+            .worker_seated(("team-1", &pane), "/wt/switched")
+    );
+    let switch = ModelDeviation {
+        worker: worker.clone(),
+        key: "uuid-fallback".to_string(),
+        from: "claude-fable-5-1".to_string(),
+        to: "claude-opus-4-8".to_string(),
+        category: Some("cyber".to_string()),
+        scope: Some("session".to_string()),
+        at_ms: Some(NOW - 5_000),
+    };
+    assert_eq!(
+        bench.ledger.workers_model_deviated(&[switch.clone()], NOW),
+        1
+    );
+    assert_eq!(
+        bench
+            .ledger
+            .workers_model_deviated(&[switch.clone()], NOW + 1),
+        0
+    );
+    let rows = bench.json("check --peek --types model_deviated");
+    assert_eq!(rows["count"], 1, "{rows}");
+    let body: serde_json::Value =
+        serde_json::from_str(rows["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["boundModel"], "fable");
+    assert_eq!(body["from"], "claude-fable-5-1");
+    assert_eq!(body["to"], "claude-opus-4-8");
+    assert_eq!(body["category"], "cyber");
+    assert_eq!(body["lasts"], "the rest of this conversation");
+    assert!(
+        body["summary"]
+            .as_str()
+            .is_some_and(|said| said.starts_with("model binding left: cyber → claude-opus-4-8")),
+        "{body}"
+    );
+    let local = ModelDeviation {
+        key: "uuid-local".to_string(),
+        scope: Some("local".to_string()),
+        ..switch
+    };
+    assert_eq!(local.lasts(), "one response");
+}
+
 /// The beat walks a handover only under a DECLARED order — the summons'
 /// own `--on-quota-wall` first, the run's policy second — from the run's
 /// live coordinator seat, once per attempt, never for a person's pane,
@@ -13133,9 +13469,14 @@ fn next_handover_walks_one_witnessed_wall_under_a_declared_order() {
     assert_eq!(plan.task, task);
     assert_eq!(plan.spec.as_str(), "build-it");
     assert_eq!(plan.checkout, "/wt/walled");
-    assert_eq!(plan.provider, "codex");
-    assert_eq!(plan.used_percent, 98);
-    assert_eq!(plan.resets_at_ms, Some(NOW + 42 * 60_000));
+    assert_eq!(
+        plan.cause,
+        HandoverCause::QuotaWall {
+            provider: "codex".to_string(),
+            used_percent: 98,
+            resets_at_ms: Some(NOW + 42 * 60_000),
+        }
+    );
     assert_eq!(plan.to, pinned("claude", None, None));
     assert!(plan.wip_commit);
     assert_eq!(
@@ -13441,9 +13782,11 @@ fn handover_paragraph_names_the_worker_the_wall_the_checkout_and_the_wip() {
         task: "t-7".to_string(),
         spec: Text::from("build-it"),
         checkout: "/wt/t-7".to_string(),
-        provider: "codex".to_string(),
-        used_percent: 98,
-        resets_at_ms: Some(NOW + 42 * 60_000),
+        cause: HandoverCause::QuotaWall {
+            provider: "codex".to_string(),
+            used_percent: 98,
+            resets_at_ms: Some(NOW + 42 * 60_000),
+        },
         to: pinned("claude", Some("fable-5-1"), None),
         wip_commit: true,
         team: "team-1".to_string(),
@@ -13473,7 +13816,11 @@ fn handover_paragraph_names_the_worker_the_wall_the_checkout_and_the_wip() {
     );
     let bare = handover_paragraph(
         &HandoverPlan {
-            resets_at_ms: None,
+            cause: HandoverCause::QuotaWall {
+                provider: "codex".to_string(),
+                used_percent: 98,
+                resets_at_ms: None,
+            },
             ..plan
         },
         None,
@@ -13498,9 +13845,11 @@ fn walled_plan() -> HandoverPlan {
         task: "t-7".to_string(),
         spec: Text::from("build-it"),
         checkout: "/wt/t-7".to_string(),
-        provider: "codex".to_string(),
-        used_percent: 98,
-        resets_at_ms: None,
+        cause: HandoverCause::QuotaWall {
+            provider: "codex".to_string(),
+            used_percent: 98,
+            resets_at_ms: None,
+        },
         to: pinned("claude", Some("fable-5-1"), None),
         wip_commit: false,
         team: "team-1".to_string(),

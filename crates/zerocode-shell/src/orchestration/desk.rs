@@ -52,6 +52,17 @@ pub(crate) struct DeskMail {
     pub(crate) reason: Option<String>,
     /// When the provider said a quota wall resets.
     pub(crate) resets_at_ms: Option<i64>,
+    /// A classifier decline's category (`cyber`, `reasoning_extraction`,
+    /// …), on a decline and on a switch of model it caused (t-6747).
+    pub(crate) category: Option<String>,
+    /// Whether the provider routes that category to another model, and the
+    /// decline ladder's rung the notice stands on (`handover`, `notify`).
+    pub(crate) routed: Option<bool>,
+    pub(crate) rung: Option<String>,
+    /// A switch of model: the model that answered in the bound one's place,
+    /// and how long its CLI keeps it (`session`, `local`).
+    pub(crate) switched_to: Option<String>,
+    pub(crate) scope: Option<String>,
     pub(crate) created_ms: i64,
     /// Where the letter stands in the coordinator's inbox: `pending` (not
     /// yet handed over), `delivered` (in the batch the coordinator holds,
@@ -67,15 +78,18 @@ pub(crate) struct DeskMail {
 
 /// The letters a coordinator owes something, one table: a question put to it
 /// (owed an answer until one lands, however it was delivered), and the
-/// ledger's news that a worker stopped — at its quota wall, dead, quiet, or
-/// waiting in a ring (owed an acknowledgement until the batch holding it is
-/// acknowledged).
-const DESK_MAIL_KINDS: [MessageKind; 5] = [
+/// ledger's news that a worker stopped — at its quota wall, dead, quiet,
+/// waiting in a ring, or at a classifier's decline — or went on under a model
+/// its summons did not bind (owed an acknowledgement until the batch holding
+/// it is acknowledged).
+const DESK_MAIL_KINDS: [MessageKind; 7] = [
     MessageKind::Question,
     MessageKind::QuotaWalled,
     MessageKind::WorkerDied,
     MessageKind::WentQuiet,
     MessageKind::Deadlocked,
+    MessageKind::ClassifierDeclined,
+    MessageKind::ModelDeviated,
 ];
 
 /// Where one letter stands in the inbox that holds it.
@@ -162,6 +176,11 @@ fn mail_row(
         },
         reason: said["reason"].as_str().map(str::to_string),
         resets_at_ms: said["resetsAtMs"].as_i64(),
+        category: said["category"].as_str().map(str::to_string),
+        routed: said["routed"].as_bool(),
+        rung: said["rung"].as_str().map(str::to_string),
+        switched_to: said["to"].as_str().map(str::to_string),
+        scope: said["scope"].as_str().map(str::to_string),
         created_ms: message.created_ms,
         delivery,
         delivery_id: batch.filter(|_| delivered).map(|held| held.id.clone()),

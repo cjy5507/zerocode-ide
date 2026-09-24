@@ -385,6 +385,21 @@ pub enum RuntimeRequest {
         lifted: Vec<zerocode_core::orchestration::QuotaLift>,
         now_ms: i64,
     },
+    /// Workers the window found stopped at a safety classifier's decline —
+    /// with BOTH witnesses already in hand (`classifier_decline_witness`
+    /// builds nothing with one, t-6747). The ledger revalidates lifecycle and
+    /// writes one notice per attempt.
+    ClassifierDeclines {
+        declined: Vec<zerocode_core::orchestration::ClassifierDeclineWitness>,
+        now_ms: i64,
+    },
+    /// Switches of model the window read in workers' own records — declines
+    /// their CLIs answered on the category's route (t-6747). The ledger
+    /// writes one row per switch.
+    ModelDeviations {
+        deviated: Vec<zerocode_core::orchestration::ModelDeviation>,
+        now_ms: i64,
+    },
     /// What the stall seat read off quiet panes this beat, when the seat
     /// acts. The ledger revalidates lifecycle and writes one notice per
     /// silence.
@@ -683,6 +698,17 @@ impl std::fmt::Debug for RuntimeRequest {
             Self::QuotaLifts { lifted, now_ms } => formatter
                 .debug_struct("RuntimeRequest::QuotaLifts")
                 .field("workers", &lifted.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            // Counts, for the same reason: both carry the agent's words.
+            Self::ClassifierDeclines { declined, now_ms } => formatter
+                .debug_struct("RuntimeRequest::ClassifierDeclines")
+                .field("workers", &declined.len())
+                .field("now_ms", now_ms)
+                .finish(),
+            Self::ModelDeviations { deviated, now_ms } => formatter
+                .debug_struct("RuntimeRequest::ModelDeviations")
+                .field("switches", &deviated.len())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::StallCauses { judged, now_ms } => formatter
@@ -1700,6 +1726,33 @@ impl RuntimeActor {
         now_ms: i64,
     ) -> Result<(bool, u64), RuntimeError> {
         match self.request(RuntimeRequest::QuotaLifts { lifted, now_ms })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// The beat's classifier-decline witnesses (t-6747). Answers whether a
+    /// notice was written, and the revision that answer speaks for; the same
+    /// decline on the next beat is the same fact and moves nothing.
+    pub fn classifier_declines(
+        &self,
+        declined: Vec<zerocode_core::orchestration::ClassifierDeclineWitness>,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::ClassifierDeclines { declined, now_ms })? {
+            RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
+            _ => Err(RuntimeError::AuthorityRejected),
+        }
+    }
+
+    /// The switches of model the beat read (t-6747). Answers whether a row
+    /// was written; a switch already written moves nothing.
+    pub fn model_deviations(
+        &self,
+        deviated: Vec<zerocode_core::orchestration::ModelDeviation>,
+        now_ms: i64,
+    ) -> Result<(bool, u64), RuntimeError> {
+        match self.request(RuntimeRequest::ModelDeviations { deviated, now_ms })? {
             RuntimeReply::Settled { moved, revision } => Ok((moved, revision)),
             _ => Err(RuntimeError::AuthorityRejected),
         }
@@ -2776,6 +2829,12 @@ impl RuntimeState {
             RuntimeRequest::QuietSweep { stalled, now_ms } => self.quiet_swept(&stalled, now_ms),
             RuntimeRequest::QuotaWalls { walled, now_ms } => self.quota_walled(&walled, now_ms),
             RuntimeRequest::QuotaLifts { lifted, now_ms } => self.quota_lifted(&lifted, now_ms),
+            RuntimeRequest::ClassifierDeclines { declined, now_ms } => {
+                self.classifier_declined(&declined, now_ms)
+            }
+            RuntimeRequest::ModelDeviations { deviated, now_ms } => {
+                self.model_deviated(&deviated, now_ms)
+            }
             RuntimeRequest::StallCauses { judged, now_ms } => {
                 self.stall_causes_judged(&judged, now_ms)
             }
@@ -3778,6 +3837,81 @@ impl RuntimeState {
             return Err(RuntimeError::RecoveryRequired);
         }
         let told = self.ledger.workers_quota_lifted(lifted, now_ms);
+        if told == 0 {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn classifier_declined(
+        &mut self,
+        declined: &[zerocode_core::orchestration::ClassifierDeclineWitness],
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || declined.len() > MAX_LIST
+            || declined.iter().any(|one| {
+                [&one.worker, &one.record.source, &one.record.key]
+                    .iter()
+                    .any(|name| name.is_empty() || name.len() > MAX_NAME)
+                    || one
+                        .record
+                        .category
+                        .as_ref()
+                        .is_some_and(|word| word.len() > MAX_NAME)
+                    || [&one.screen, &one.record.line]
+                        .iter()
+                        .any(|line| line.as_str().len() > MAX_PROSE)
+            })
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let told = self.ledger.workers_classifier_declined(declined, now_ms);
+        if told == 0 {
+            return Ok(RuntimeReply::Settled {
+                moved: false,
+                revision: self.revision,
+            });
+        }
+        let revision = self.write_through(now_ms)?;
+        Ok(RuntimeReply::Settled {
+            moved: true,
+            revision,
+        })
+    }
+
+    fn model_deviated(
+        &mut self,
+        deviated: &[zerocode_core::orchestration::ModelDeviation],
+        now_ms: i64,
+    ) -> Result<RuntimeReply, RuntimeError> {
+        if now_ms < 0
+            || deviated.len() > MAX_LIST
+            || deviated.iter().any(|one| {
+                [&one.worker, &one.key, &one.from, &one.to]
+                    .iter()
+                    .any(|name| name.is_empty() || name.len() > MAX_NAME)
+                    || [&one.category, &one.scope]
+                        .iter()
+                        .any(|word| word.as_ref().is_some_and(|held| held.len() > MAX_NAME))
+            })
+        {
+            return Err(RuntimeError::InvalidInput);
+        }
+        if !self.recovery_permits.is_empty() {
+            return Err(RuntimeError::RecoveryRequired);
+        }
+        let told = self.ledger.workers_model_deviated(deviated, now_ms);
         if told == 0 {
             return Ok(RuntimeReply::Settled {
                 moved: false,
@@ -7179,9 +7313,11 @@ mod tests {
             task: task.id.clone(),
             spec: task.spec.clone(),
             checkout: "/tmp".to_string(),
-            provider: "codex".to_string(),
-            used_percent: 98,
-            resets_at_ms: Some(60),
+            cause: zerocode_core::orchestration::HandoverCause::QuotaWall {
+                provider: "codex".to_string(),
+                used_percent: 98,
+                resets_at_ms: Some(60),
+            },
             to: policy.on_quota_wall.clone().unwrap(),
             wip_commit: policy.wip_commit,
             team: "team-1".to_string(),
