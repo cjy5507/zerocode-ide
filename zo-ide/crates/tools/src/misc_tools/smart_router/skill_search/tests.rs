@@ -225,6 +225,7 @@ fn a_loaded_skill_with_no_following_tool_or_body_quote_is_an_unused_proxy() {
     assert_eq!(skill_used_after_load(&[], "docx"), None);
 
     let label = label_turn(PendingSuggestion {
+        generation: 0,
         suggested: Some("docx".into()),
         loaded: Some("docx".into()),
         acting: false,
@@ -246,7 +247,7 @@ fn a_turn_whose_judgment_never_landed_writes_no_label() {
     let cwd = root.path().canonicalize().expect("a canonical root");
     turn_pending().lock().expect("pending lock").insert(
         cwd.clone(),
-        PendingSuggestion { suggested: None, loaded: None, acting: false, judged: false },
+        PendingSuggestion { generation: 0, suggested: None, loaded: None, acting: false, judged: false },
     );
     note_loaded_skill(&cwd, "docx");
     let unjudged = turn_pending()
@@ -258,6 +259,7 @@ fn a_turn_whose_judgment_never_landed_writes_no_label() {
     assert!(judged_label(unjudged, &[]).is_none(), "no judgment, no label");
 
     let judged = PendingSuggestion {
+        generation: 0,
         suggested: Some("docx".into()),
         loaded: Some("docx".into()),
         acting: false,
@@ -266,6 +268,64 @@ fn a_turn_whose_judgment_never_landed_writes_no_label() {
     let row = judged_label(judged, &[]).expect("the judged turn's label");
     assert!(row.agreed);
     assert_eq!(row.baseline_loaded.as_deref(), Some("docx"));
+}
+
+#[test]
+fn a_late_judgment_of_an_ended_turn_does_not_label_the_next_turn() {
+    let root = tempfile::tempdir().expect("a temp root");
+    let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 temp root"));
+    let cwd = root.path().canonicalize().expect("a canonical root");
+    let late_before = LATE_SUGGESTION_JUDGMENTS.load(Ordering::Relaxed);
+    let first = start_pending_suggestion(&cwd, false).expect("first turn");
+    let (release, waiting) = tokio::sync::oneshot::channel::<()>();
+    let (landed, done) = std::sync::mpsc::channel();
+    let delayed_cwd = cwd.clone();
+    super::super::patch_review::detach(async move {
+        waiting.await.expect("release first judgment");
+        mark_pending_suggestion_judged(&delayed_cwd, first, Some("docx"));
+        landed.send(()).expect("signal settled judgment");
+    });
+
+    finish_turn_suggestion(&cwd, &[]);
+    let next = start_pending_suggestion(&cwd, false).expect("next turn");
+    note_loaded_skill(&cwd, "pdf");
+    release.send(()).expect("release judgment");
+    done.recv_timeout(Duration::from_secs(5)).expect("detached judgment completed");
+
+    let pending = turn_pending().lock().expect("pending lock");
+    let current = pending.get(&cwd).expect("next turn pending");
+    assert_eq!(current.generation, next);
+    assert!(!current.judged, "the next turn has received no judgment");
+    assert!(current.suggested.is_none());
+    assert_eq!(current.loaded.as_deref(), Some("pdf"));
+    assert!(LATE_SUGGESTION_JUDGMENTS.load(Ordering::Relaxed) > late_before);
+    drop(pending);
+    finish_turn_suggestion(&cwd, &[]);
+    assert!(!skill_search_path(&cwd).exists(), "neither turn gets a label row");
+}
+
+#[test]
+fn a_judgment_that_lands_in_its_own_turn_still_labels_it() {
+    let root = tempfile::tempdir().expect("a temp root");
+    let _env = crate::tests::EnvGuard::set("ZO_CONFIG_HOME", root.path().to_str().expect("UTF-8 temp root"));
+    let cwd = root.path().canonicalize().expect("a canonical root");
+    let generation = start_pending_suggestion(&cwd, false).expect("turn");
+    let (release, waiting) = tokio::sync::oneshot::channel::<()>();
+    let (landed, done) = std::sync::mpsc::channel();
+    let delayed_cwd = cwd.clone();
+    super::super::patch_review::detach(async move {
+        waiting.await.expect("release judgment");
+        mark_pending_suggestion_judged(&delayed_cwd, generation, Some("docx"));
+        landed.send(()).expect("signal settled judgment");
+    });
+
+    note_loaded_skill(&cwd, "docx");
+    release.send(()).expect("release judgment");
+    done.recv_timeout(Duration::from_secs(5)).expect("detached judgment completed");
+    finish_turn_suggestion(&cwd, &[]);
+    let rows = super::super::jev_summary::read_rows(&skill_search_path(&cwd));
+    assert_eq!(rows.len(), 1);
+    assert_eq!(summary::AGREED.read(&rows[0]), Some(&json!(true)));
 }
 
 /// The `agreed` mark shares a file with the rows it is about, so it has to be

@@ -542,6 +542,81 @@ fn a_skill_hint_rides_after_the_cache_breakpoint() {
     assert_eq!(*finished.lock().expect("finished lock"), 1);
 }
 
+fn request_has_current_turn_skill_note(runtime: &mut ConversationRuntime<StopApiClient, StaticToolExecutor>) -> bool {
+    let request = runtime.build_request(None).expect("request");
+    let current_turn_start = request.messages.iter().rposition(|message| message.role == MessageRole::User)
+        .expect("a user turn") + 1;
+    request.messages.iter().skip(current_turn_start).any(|message| {
+        message.role == MessageRole::System && message.blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text }
+                if text.starts_with(crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX))
+        })
+    })
+}
+
+fn assert_no_transient_skill_note(runtime: &ConversationRuntime<StopApiClient, StaticToolExecutor>) {
+    assert!(
+        runtime
+            .transient_reminders
+            .iter()
+            .all(|reminder| !reminder.starts_with(crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX)),
+        "a previous turn's skill note remains in the current reminder set: {:?}",
+        runtime.transient_reminders
+    );
+}
+
+#[test]
+fn a_skill_note_from_the_last_turn_is_gone_when_this_turn_has_none() {
+    let mut runtime = recall_hint_runtime(Session::new());
+    runtime.session.push_user_text("Earlier request").expect("first turn message");
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let finished = Arc::new(Mutex::new(0));
+    runtime.set_skill_suggestion_seat(Some(Arc::new(FixedSkillSuggestionSeat {
+        asked: Arc::clone(&asked),
+        finished: Arc::clone(&finished),
+        note: Some(crate::skill_rank::suggestion_note(Some("docx"))),
+    })));
+    runtime.inject_skill_suggestion("Create a document");
+    assert!(request_has_current_turn_skill_note(&mut runtime));
+
+    runtime.set_skill_suggestion_seat(Some(Arc::new(FixedSkillSuggestionSeat {
+        asked,
+        finished,
+        note: None,
+    })));
+    runtime.session.push_user_text("Next request").expect("second turn message");
+    runtime.clear_turn_start_transient_reminders();
+    runtime.inject_skill_suggestion("Create another document");
+    assert_no_transient_skill_note(&runtime);
+    assert!(runtime.session.messages.iter().any(|message| {
+        message.role == MessageRole::System && message.blocks.iter().any(|block| {
+            matches!(block, ContentBlock::Text { text }
+                if text.contains(crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX))
+        })
+    }), "the earlier System note remains in the append-only transcript");
+    assert!(!request_has_current_turn_skill_note(&mut runtime));
+}
+
+#[test]
+fn an_unseated_turn_clears_a_note_the_seat_left() {
+    let mut runtime = recall_hint_runtime(Session::new());
+    runtime.session.push_user_text("Earlier request").expect("first turn message");
+    runtime.set_skill_suggestion_seat(Some(Arc::new(FixedSkillSuggestionSeat {
+        asked: Arc::new(Mutex::new(Vec::new())),
+        finished: Arc::new(Mutex::new(0)),
+        note: Some(crate::skill_rank::suggestion_note(Some("docx"))),
+    })));
+    runtime.inject_skill_suggestion("Create a document");
+    assert!(request_has_current_turn_skill_note(&mut runtime));
+
+    runtime.set_skill_suggestion_seat(None);
+    runtime.session.push_user_text("Next request").expect("second turn message");
+    runtime.clear_turn_start_transient_reminders();
+    runtime.inject_skill_suggestion("Another turn");
+    assert_no_transient_skill_note(&runtime);
+    assert!(!request_has_current_turn_skill_note(&mut runtime));
+}
+
 #[test]
 fn verify_intent_defaults_to_other_and_is_installed_per_turn() {
     // Every host that never installs a probed intent — headless, serve,
@@ -6502,6 +6577,26 @@ fn user_prompt_submit_denial_blocks_without_pushing_user_message() {
         runtime.session().messages.is_empty(),
         "denied user prompt must not be pushed to the session"
     );
+}
+
+#[test]
+fn a_turn_the_hook_refuses_carries_no_stale_skill_note() {
+    let mut runtime = user_prompt_hook_runtime(shell_snippet(
+        r#"printf '{"decision":"block","reason":"nope"}'"#,
+    ));
+    runtime.session.push_user_text("Earlier request").expect("first turn message");
+    runtime.set_skill_suggestion_seat(Some(Arc::new(FixedSkillSuggestionSeat {
+        asked: Arc::new(Mutex::new(Vec::new())),
+        finished: Arc::new(Mutex::new(0)),
+        note: Some(crate::skill_rank::suggestion_note(Some("docx"))),
+    })));
+    runtime.inject_skill_suggestion("Create a document");
+    assert!(request_has_current_turn_skill_note(&mut runtime));
+
+    runtime.run_turn("blocked input", None).expect_err("hook denies the next turn");
+    runtime.session.push_user_text("Following request").expect("following turn message");
+    assert_no_transient_skill_note(&runtime);
+    assert!(!request_has_current_turn_skill_note(&mut runtime));
 }
 
 #[test]
