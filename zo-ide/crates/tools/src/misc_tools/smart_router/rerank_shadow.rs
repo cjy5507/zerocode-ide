@@ -430,7 +430,7 @@ fn seat_acts(cwd: &Path, mode: zerocode_core::jev::JevMode) -> bool {
 /// while the common reader read it: one replaced between the two looks may
 /// have been read as either, and is read again next time (t-6264).
 fn raised_now(cwd: &Path) -> bool {
-    static STAND: OnceLock<Mutex<HashMap<PathBuf, (Option<LedgerLook>, bool)>>> = OnceLock::new();
+    static STAND: OnceLock<Mutex<StandingBook>> = OnceLock::new();
     let ledger = rerank_shadow_path(cwd);
     let before = LedgerLook::of(&ledger);
     let memo = STAND.get_or_init(|| Mutex::new(HashMap::new()));
@@ -450,6 +450,9 @@ fn raised_now(cwd: &Path) -> bool {
     }
     raised
 }
+
+/// Each ledger's standing as last read, beside the look it was read under.
+type StandingBook = HashMap<PathBuf, (Option<LedgerLook>, bool)>;
 
 /// Judge the seat on what it has just written — a reading or a label — and
 /// write down a rise or a fall in this same ledger (§4), through the one
