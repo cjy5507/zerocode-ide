@@ -3097,7 +3097,11 @@ pub const VAULT_PAIRS: JevUse = JevUse {
     answer_floor_permille: None,
     press_floor_permille: None,
     agreement_floor_permille: None,
-    apply_deadline_ms: Some(VAULT_PAIR_DEADLINE_MS),
+    // A seat that never rises names no apply deadline (the dashboard's
+    // contract: a rise line is timed, a record-only seat has no rise line);
+    // the request's own wire deadline is `VAULT_PAIR_DEADLINE_MS`, read by
+    // the zo runner.
+    apply_deadline_ms: None,
     window_forgives: None,
     agreement_rows_wanted: None,
     agreement_kind: AgreementKind::Hindsight,
