@@ -1729,9 +1729,11 @@ mod tests {
             window.contains("if (!force && view.dataset.said === said) return { cards, answer };"),
             "every ledger beat rebuilds every card — the flicker report"
         );
+        // The live map's wait words ride the same signature (t-7288), so the
+        // function also takes the ledger rows its paint asked beside the cards.
         let said = block_after(
             window,
-            "function agentGraphSaid(columns, reviews, places, now) {",
+            "function agentGraphSaid(columns, reviews, places, now, ledger = null) {",
         );
         assert!(
             said.contains("const { at, changed_at, ...visible } = card;")
