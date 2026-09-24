@@ -217,6 +217,13 @@ export async function testBoardLive(browser, origin, ok) {
       const view = document.querySelector("#board-view");
       const rows = () => [...view.querySelectorAll(".task-board-row")]
         .map((row) => row.textContent).join("\u001e");
+      /* 두 목록을 **같은 시계**로 견준다: 행이 나이를 낱말로 들고 있어서, 분
+       * 경계가 두 읽기 사이에 끼면 옳게 움직인 낱말이 다름으로 읽힌다. 이
+       * 사례가 묻는 것은 지도가 목록을 바꾸는가이지 시간이 흐르는가가 아니다. */
+      const trueNow = Date.now;
+      const pinned = trueNow.call(Date);
+      Date.now = () => pinned;
+      try {
       view.querySelector('[data-board-mode="tasks"]').click();
       await paintBoardView(undefined, { force: true });
       await window.__BOARD_SETTLED__();
@@ -234,6 +241,7 @@ export async function testBoardLive(browser, origin, ok) {
       await window.__BOARD_SETTLED__();
       return withMap.rows === without && withMap.rows !== ""
         && !withMap.live && withMap.beats === 0 && withMap.waits === 0 && withMap.events === 0;
+      } finally { Date.now = trueNow; }
     }));
 
     /* 그리고 손잡이 하나가 그 셋을 실제로 붙였다 뗀다 — 카드가 다시 지어지지
@@ -653,16 +661,35 @@ export async function testBoardLive(browser, origin, ok) {
       const watch = new MutationObserver((records) => { mutations += records.length; });
       watch.observe(view.querySelector(".agent-graph-layout"),
         { subtree: true, childList: true, attributes: true, characterData: true });
-      const before = [agentGraphNodeCreations, agentGraphLayoutRuns, agentGraphEdgeMeasureRuns];
-      await paintBoardView(undefined, { force: false });
-      await window.__BOARD_SETTLED__();
-      await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+      /* **같은 시계**로 잰다 — 인수 조건이 그렇게 적혀 있고, 그래야 이 수가
+       * 「아무것도 안 바뀌었는데 그렸다」를 뜻한다. 시계를 놓아 두면 카드의
+       * 나이 낱말이 두 그림 사이에서 분 경계를 넘는 판이 있고, 그때 올라오는
+       * 것은 렌더러의 결함이 아니라 **옳게 움직인 그림**이다.
+       *
+       * 이것이 시간을 멈춰 얻은 0을 실시간의 0으로 파는 일이 되지 않는 것은,
+       * 시계가 실제로 흐를 때 그 낱말이 바뀌는지를 바로 아래 사례가 따로
+       * 확인하기 때문이다. 멈춤은 이 한 번의 측정 안에서만이다. */
+      const trueNow = Date.now;
+      const pinned = trueNow.call(Date);
+      Date.now = () => pinned;
+      let taken;
+      try {
+        const before = [agentGraphNodeCreations, agentGraphLayoutRuns, agentGraphEdgeMeasureRuns];
+        await paintBoardView(undefined, { force: false });
+        await window.__BOARD_SETTLED__();
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+        taken = { before, after: [agentGraphNodeCreations, agentGraphLayoutRuns, agentGraphEdgeMeasureRuns] };
+      } finally {
+        Date.now = trueNow;
+      }
       watch.disconnect();
-      return { mutations, before, after: [agentGraphNodeCreations, agentGraphLayoutRuns, agentGraphEdgeMeasureRuns],
+      return { mutations, ...taken, pinnedClock: true,
         firstRow, nowRow: view.querySelector(".agent-graph-node")?.getBoundingClientRect().top ?? 0,
         handles: agentGraphLiveHandles() };
     });
     ok("quiet_poll_has_zero_dom_mutations", quiet.mutations === 0, JSON.stringify(quiet));
+    ok("the_quiet_poll_reused_dom_layout_and_measured_edges",
+      quiet.before.join() === quiet.after.join(), JSON.stringify(quiet));
     ok("settled_poll_keeps_first_row_at_same_position",
       quiet.firstRow === quiet.nowRow, JSON.stringify(quiet));
     ok("a_finished_pulse_returns_to_idle",
