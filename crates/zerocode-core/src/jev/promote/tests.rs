@@ -1255,3 +1255,394 @@ fn a_seat_whose_rows_all_compare_nothing_has_no_label() {
         "a fresh window with nothing to grade is not evidence against an acting seat"
     );
 }
+
+/* ---- one rubric's evidence is not another's (t-6877) ------------------------ */
+
+/// A tool text guard request as its writer files it: `judged` is the name a
+/// label repeats, `rubricVersion` says which words asked, and `model` which
+/// version answered — none when nothing did.
+fn guard_request(at: usize, judged: u64, rubric: u32, model: Option<&str>, outcome: &str) -> Value {
+    use serde_json::json;
+    let mut row = json!({
+        "at": at,
+        "judged": judged,
+        "rubricVersion": rubric,
+        "outcome": outcome,
+        "elapsedMs": 400,
+        "requests": 1,
+    });
+    if let Some(model) = model {
+        row[crate::jev::summary::MODEL.canonical] = json!(model);
+    }
+    row
+}
+
+/// The guard's label row for the request named `judged`, shaped as
+/// `write_text_labels` shapes it: no version of its own — the request it
+/// names carries that.
+fn guard_label(at: usize, judged: u64, agreed: bool) -> Value {
+    use serde_json::json;
+    json!({
+        "kind": "label",
+        "at": at,
+        "label": judged.to_string(),
+        "agreed": agreed,
+        "baselineAgreed": at % 2 == 0,
+    })
+}
+
+/// The version that answers every request here.
+const ANSWERING: &str = "jev-1.13.0";
+
+/// A full window of answered requests under `rubric`, named from `first`
+/// on, at `at`.. — and the marks that clear every line of `seat`, each
+/// naming its own request.
+fn guard_window_that_rises(seat: &JevUse, rubric: u32, first: u64, at: usize) -> Vec<Value> {
+    let wanted = window_wanted_for(seat).expect("the guard rises");
+    let misses = seat.negatives_wanted.expect("the guard asks for negatives");
+    let marks = marks_that_can_clear(seat).expect("a width the line can be cleared on");
+    assert!(marks <= wanted, "every mark names a request of the window");
+    let mut rows: Vec<Value> = (0..wanted)
+        .map(|n| {
+            guard_request(
+                at + n,
+                first + n as u64,
+                rubric,
+                Some(ANSWERING),
+                "answered",
+            )
+        })
+        .collect();
+    rows.extend((0..marks).map(|n| guard_label(at + wanted + n, first + n as u64, n >= misses)));
+    rows
+}
+
+/// `n` answered requests under `rubric`, named from `first` on, at `at`..
+fn guard_requests(n: usize, rubric: u32, first: u64, at: usize) -> Vec<Value> {
+    (0..n)
+        .map(|k| {
+            guard_request(
+                at + k,
+                first + k as u64,
+                rubric,
+                Some(ANSWERING),
+                "answered",
+            )
+        })
+        .collect()
+}
+
+/// A rise as the judge wrote it before transitions named a rubric.
+fn unversioned_rise(at: usize) -> Value {
+    serde_json::json!({"at": at, (TRANSITION.canonical): ROSE})
+}
+
+/// A rise the judge writes now: naming the rubric it was decided on.
+fn rise_on(at: usize, rubrics: &[u32]) -> Value {
+    serde_json::json!({"at": at, (TRANSITION.canonical): ROSE, "rubricVersions": rubrics})
+}
+
+/// The seat the guard's version 2 is read for — its table row asks version 2
+/// today (t-6982), which is what these tests stand on.
+fn guard() -> &'static JevUse {
+    let seat = &crate::jev::TOOL_TEXT_GUARD;
+    assert_eq!(
+        crate::jev::questions::TOOL_TEXT_GUARD_RUBRIC_VERSION,
+        2,
+        "the guard asks version 2: these rows are shaped for that"
+    );
+    seat
+}
+
+/// A thick first-rubric series does not judge a thin second-rubric window
+/// (t-6877, astra m-7097): the guard's words moved from version 1 to 2 with a
+/// full window and forty marks behind version 1 and twenty requests under
+/// version 2 — the judge is not due (twenty of version 2 are not a window),
+/// and asked anyway it holds on version 2's twenty rows with nothing
+/// compared, never on version 1's evidence.
+#[test]
+fn a_thick_version_one_series_does_not_judge_a_thin_version_two_window() {
+    let seat = guard();
+    let wanted = window_wanted_for(seat).expect("the guard rises");
+    let mut rows = guard_window_that_rises(seat, 1, 1, 0);
+    let thin = JUDGED_EVERY_ROWS;
+    rows.extend(guard_requests(thin, 2, 1_000, 10_000));
+    assert!(
+        !judgment_due(seat, &rows),
+        "twenty second-version requests are not a window, whatever the first version left"
+    );
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(
+        judged.verdict,
+        Verdict::Hold(Line::TooFewRows { rows: thin, wanted }),
+        "{judged:?}"
+    );
+    assert_eq!(judged.window.rows, thin, "the window is version 2's own");
+    assert_eq!(
+        judged.agreement.compared, 0,
+        "version 1's marks grade nothing of version 2"
+    );
+    assert_eq!(judged.model.as_deref(), Some(ANSWERING));
+    assert_eq!(
+        judged.cut, None,
+        "a change of rubric is not a change of model"
+    );
+}
+
+/// A late label on an old request stays in its own series (t-6877): the
+/// label of a version 1 request, written after version 2's window, grades
+/// version 1 — it neither joins version 2's comparisons nor, when it names
+/// the older model that answered its request, cuts version 2's marks away.
+#[test]
+fn a_late_label_on_an_old_request_stays_in_its_own_series() {
+    let seat = guard();
+    let wanted = window_wanted_for(seat).expect("the guard rises");
+    let graded = 5;
+    let mut rows = vec![guard_request(0, 1, 1, Some(ANSWERING), "answered")];
+    rows.extend(guard_requests(wanted, 2, 100, 10));
+    rows.extend((0..graded).map(|n| guard_label(10 + wanted + n, 100 + n as u64, true)));
+    let late_at = 10 + wanted + graded;
+    let mut late = rows.clone();
+    late.push(guard_label(late_at, 1, false));
+    let judged = judge_seat(seat, &late).expect("judged");
+    assert_eq!(
+        (judged.agreement.compared, judged.agreement.agreed),
+        (graded, graded),
+        "the late label grades version 1, not version 2: {judged:?}"
+    );
+    assert_eq!(
+        judged.verdict,
+        Verdict::Hold(Line::TooFewCompared {
+            compared: graded,
+            wanted: seat.agreement_rows_wanted.expect("a sample floor")
+        })
+    );
+    // Naming the version that answered its own request — an older one —
+    // it is still version 1's label, and version 2's marks stand.
+    let mut older = rows;
+    let mut label = guard_label(late_at, 1, false);
+    label[crate::jev::summary::MODEL.canonical] = serde_json::json!("jev-1.12.0");
+    older.push(label);
+    let judged = judge_seat(seat, &older).expect("judged");
+    assert_eq!(
+        (judged.agreement.compared, judged.cut.as_deref()),
+        (graded, None),
+        "version 2's five comparisons are not cut by version 1's late label: {judged:?}"
+    );
+}
+
+/// A row that names no rubric version is version 1's (t-6877): every row
+/// written before versions were recorded, and every seat whose writer never
+/// versioned its words. A seat asking version 1 counts them and stands on
+/// their rise; a seat asking version 2 counts none of them, and their rise is
+/// not its rise.
+#[test]
+fn an_unversioned_row_reads_as_version_one() {
+    use serde_json::json;
+    let answered =
+        |at: usize| json!({"at": at, "outcome": "answered", "elapsedMs": 1, "requests": 1});
+    let rows: Vec<Value> = (0..3)
+        .map(answered)
+        .chain(std::iter::once(unversioned_rise(3)))
+        .chain((4..7).map(answered))
+        .collect();
+    let first = &crate::jev::PLACEMENT;
+    assert_eq!(
+        crate::worker_placement::WORKER_PLACEMENT_RUBRIC_VERSION,
+        1,
+        "placement asks version 1: its rows may name none"
+    );
+    let judged = judge_seat(first, &rows).expect("judged");
+    assert_eq!(
+        judged.window.rows, 6,
+        "unversioned rows are version 1's requests"
+    );
+    assert_eq!(
+        judged.verdict,
+        Verdict::Keep,
+        "and their rise stands for it: {judged:?}"
+    );
+
+    let second = guard();
+    let wanted = window_wanted_for(second).expect("the guard rises");
+    let judged = judge_seat(second, &rows).expect("judged");
+    assert_eq!(
+        judged.window.rows, 0,
+        "version 1's rows are not version 2's"
+    );
+    assert_eq!(
+        judged.verdict,
+        Verdict::Hold(Line::TooFewRows { rows: 0, wanted }),
+        "and version 1's rise is not version 2's: {judged:?}"
+    );
+}
+
+/// A change of rubric returns a risen seat to recording (t-6877, the
+/// contract of run-6774's audit m-6856): a rise earned under version 1 does
+/// not stand under version 2 — with nothing yet asked under version 2, with
+/// three requests, and the other way round, a version 2 rise does not stand
+/// for a seat whose words went back to version 1 (a rollback starts
+/// recording; it revives nothing). Only a rise naming the rubric the seat
+/// asks now stands.
+#[test]
+fn a_rubric_change_returns_a_risen_seat_to_recording() {
+    let seat = guard();
+    let wanted = window_wanted_for(seat).expect("the guard rises");
+    let mut rows = guard_window_that_rises(seat, 1, 1, 0);
+    rows.push(unversioned_rise(5_000));
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(
+        judged.verdict,
+        Verdict::Hold(Line::TooFewRows { rows: 0, wanted }),
+        "nothing asked under version 2 yet, and version 1's rise is not version 2's: {judged:?}"
+    );
+    rows.extend(guard_requests(3, 2, 1_000, 10_000));
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(
+        judged.verdict,
+        Verdict::Hold(Line::TooFewRows { rows: 3, wanted }),
+        "three requests under version 2, still recording: {judged:?}"
+    );
+    // A rise that names version 1 is the same rise, read the same way.
+    let named = rows.len() - 4;
+    rows[named] = rise_on(5_000, &[1]);
+    assert_eq!(
+        judge_seat(seat, &rows).expect("judged").verdict,
+        Verdict::Hold(Line::TooFewRows { rows: 3, wanted })
+    );
+    // And a rise that names the rubric the seat asks now stands.
+    rows[named] = rise_on(5_000, &[2]);
+    assert_eq!(
+        judge_seat(seat, &rows).expect("judged").verdict,
+        Verdict::Keep
+    );
+
+    // Rolled back: a seat asking version 1 does not stand on version 2's rise.
+    let first = &crate::jev::PLACEMENT;
+    let answered = |at: usize| serde_json::json!({"at": at, "outcome": "answered", "elapsedMs": 1, "requests": 1});
+    let rolled_back: Vec<Value> = (0..3)
+        .map(answered)
+        .chain(std::iter::once(rise_on(3, &[2])))
+        .chain((4..7).map(answered))
+        .collect();
+    let judged = judge_seat(first, &rolled_back).expect("judged");
+    assert!(
+        matches!(
+            judged.verdict,
+            Verdict::Hold(Line::TooFewRows { rows: 6, .. })
+        ),
+        "a rollback starts recording: {judged:?}"
+    );
+}
+
+/// The second version rises again on its own sample (t-6877, the positive
+/// control): version 1's window, marks and rise on the ledger, then version
+/// 2's own full window and its own forty marks — the judge is due, and it
+/// says rise, on version 2's evidence alone.
+#[test]
+fn the_second_version_rises_again_on_its_own_sample() {
+    let seat = guard();
+    let mut rows = guard_window_that_rises(seat, 1, 1, 0);
+    rows.push(unversioned_rise(5_000));
+    rows.extend(guard_window_that_rises(seat, 2, 1_000, 10_000));
+    assert!(judgment_due(seat, &rows), "version 2's window is full");
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(judged.verdict, Verdict::Rise, "{judged:?}");
+    assert_eq!(
+        judged.window.rows,
+        window_wanted_for(seat).expect("the guard rises")
+    );
+    assert_eq!(
+        judged.agreement.compared,
+        marks_that_can_clear(seat).expect("a width"),
+        "version 2's own marks, and only those"
+    );
+}
+
+/// A timeout names no model and belongs to the rubric that asked it (t-6877,
+/// astra m-7141): three of them after version 2's answers are version 2's
+/// failures — an acting seat is ended now, through the same cadence — while
+/// three late timeouts of version 1 are not version 2's; and a version 2 that
+/// has only timed out so far is a window of three failures, not a seat
+/// standing on version 1.
+#[test]
+fn a_no_model_timeout_stays_in_the_current_rubrics_requests() {
+    let seat = guard();
+    let wanted = window_wanted_for(seat).expect("the guard rises");
+    let mut acting = guard_window_that_rises(seat, 2, 1_000, 10_000);
+    acting.push(rise_on(15_000, &[2]));
+    let timeouts = |rubric: u32| -> Vec<Value> {
+        (0..FALLBACKS_THAT_END_IT as usize)
+            .map(|n| guard_request(20_000 + n, 5_000 + n as u64, rubric, None, "timeout"))
+            .collect()
+    };
+    let mut ended = acting.clone();
+    ended.extend(timeouts(2));
+    assert!(
+        judgment_due(seat, &ended),
+        "three fallbacks running end an acting seat now"
+    );
+    let judged = judge_seat(seat, &ended).expect("judged");
+    assert_eq!(
+        judged.verdict,
+        Verdict::Fall(Line::Fallbacks {
+            in_a_row: FALLBACKS_THAT_END_IT
+        }),
+        "{judged:?}"
+    );
+    assert_eq!(
+        judged.window.failures,
+        vec![("timeout".to_string(), FALLBACKS_THAT_END_IT as usize)],
+        "the timeouts are in version 2's window, not dropped from it"
+    );
+
+    let mut late = acting;
+    late.extend(timeouts(1));
+    assert!(
+        !judgment_due(seat, &late),
+        "version 1's late timeouts are not version 2's failures"
+    );
+    assert_eq!(
+        judge_seat(seat, &late).expect("judged").verdict,
+        Verdict::Keep
+    );
+
+    let mut only_timeouts = guard_window_that_rises(seat, 1, 1, 0);
+    only_timeouts.push(unversioned_rise(5_000));
+    only_timeouts.extend(timeouts(2));
+    let judged = judge_seat(seat, &only_timeouts).expect("judged");
+    assert_eq!(
+        judged.verdict,
+        Verdict::Hold(Line::TooFewRows { rows: 3, wanted }),
+        "a version that has only timed out borrows nothing: {judged:?}"
+    );
+    assert_eq!(judged.model, None, "nothing of version 2 has answered");
+}
+
+/// A label joins the request it names, and only that (t-6877, astra §3): a
+/// label naming no request on the ledger compares nothing, two labels naming
+/// one request are one comparison (the newest), and a label that spells a
+/// rubric its request does not carry compares nothing either — the request
+/// is the authority, and the reader guesses no version.
+#[test]
+fn an_orphan_a_duplicate_and_a_contradicting_label_are_not_compared() {
+    let seat = guard();
+    let wanted = window_wanted_for(seat).expect("the guard rises");
+    let mut rows = guard_requests(wanted, 2, 100, 0);
+    let at = wanted;
+    rows.push(guard_label(at, 100, true));
+    rows.push(guard_label(at + 1, 100, false));
+    rows.push(guard_label(at + 2, 999, true));
+    let mut contradicting = guard_label(at + 3, 101, true);
+    contradicting["rubricVersion"] = serde_json::json!(1);
+    rows.push(contradicting);
+    let mut agreeing = guard_label(at + 4, 102, true);
+    agreeing["rubricVersion"] = serde_json::json!(2);
+    rows.push(agreeing);
+    let judged = judge_seat(seat, &rows).expect("judged");
+    assert_eq!(
+        (judged.agreement.compared, judged.agreement.agreed),
+        (2, 1),
+        "request 100 once, by its newest label; 102 once; 999 and the contradicting 101 never: {judged:?}"
+    );
+}

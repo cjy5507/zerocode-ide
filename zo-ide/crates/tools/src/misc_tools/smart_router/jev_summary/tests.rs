@@ -1044,3 +1044,39 @@ fn measure_what_a_label_and_a_judge_cost_on_this_machines_ledgers() {
         );
     }));
 }
+
+/// The card counts the series the judge reads (t-6877, astra §4): the
+/// guard's version 1 window, marks and rise on the ledger and twenty requests
+/// under version 2 — the countdown, the verdict, the version and the
+/// standing on the card are version 2's, from the one reader the judge uses.
+#[test]
+fn the_dashboard_counts_the_same_series_the_judge_reads() {
+    use zerocode_core::jev::promote::{window_wanted_for, Line, Stand, Verdict, ROSE};
+    use zerocode_core::jev::summary::TRANSITION;
+    let seat = &zerocode_core::jev::TOOL_TEXT_GUARD;
+    let wanted = window_wanted_for(seat).expect("the guard rises");
+    let request = |at: i64, judged: i64, rubric: u32, outcome: &str| {
+        json!({"at": at, "judged": judged, "rubricVersion": rubric, "model": "jev-1.13.0", "outcome": outcome, "elapsedMs": 400, "requests": 1})
+    };
+    let mut rows: Vec<Value> = (0..wanted).map(|n| request(n as i64, 1 + n as i64, 1, "answered")).collect();
+    rows.extend((0..40).map(|n| json!({"kind": "label", "at": wanted as i64 + n, "label": (1 + n).to_string(), "agreed": n >= 3, "baselineAgreed": n % 2 == 0})));
+    rows.push(json!({"at": 5_000, (TRANSITION.canonical): ROSE}));
+    rows.extend((0..20).map(|n| request(10_000 + n, 1_000 + n, 2, "answered")));
+    let home = tempfile::tempdir().expect("tmp");
+    write(home.path(), seat.ledger, &rows);
+    let roots = [home.path().to_path_buf()];
+    let auto = json!({ "smart": { seat.setting: "auto" } });
+    let report = one(seat, &roots, None, Some(&auto), 20_000, 0);
+    assert_eq!(report.asked_toward_judgment, 20, "version 2's twenty, not the whole ledger");
+    assert_eq!(report.rows_to_next_judgment(), Some(wanted - 20));
+    assert_eq!(
+        report.verdict(),
+        Some(Verdict::Hold(Line::TooFewRows { rows: 20, wanted })),
+        "{:?}",
+        report.judged
+    );
+    assert_eq!(report.judged.as_ref().map(|judged| judged.agreement.compared), Some(0));
+    assert_eq!((report.model.as_deref(), report.cut.as_deref()), (Some("jev-1.13.0"), None));
+    assert_eq!(report.stand, Stand::Recording, "version 1's rise is not version 2's");
+    assert!(!report.applies);
+}
