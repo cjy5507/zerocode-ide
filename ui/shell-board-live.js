@@ -538,16 +538,32 @@ function agentGraphLiveViews() {
  * 간선의 `class`를 쓰는 손(`paintAgentGraphEdges`의 옷)과 부딪히지 않는다.
  * 배치를 읽지 않고, 값이 같으면 쓰지 않는다 — 조용한 판에서 이 손은 DOM을
  * 한 번도 건드리지 않는다. */
+/* 지금 화면에 맥박 표시가 적혀 있는 판들. 판마다 기억하는 것은 손잡이를 끈
+ * 판에서 이 손이 **아예 아무것도 하지 않게** 하기 위해서다 — 지도가 없는 판은
+ * 보드의 기본값이고, 거기서 매 그리기마다 노드와 간선을 훑는 것은 아무도 보지
+ * 못할 것을 찾는 값이다. 지울 것이 남은 판만 예외로 한 번 더 지난다. */
+const liveDressedViews = new WeakSet();
+
 function dressAgentGraphLive(view) {
   const running = agentGraphLiveAnimating();
+  /* 적을 것도 지울 것도 없으면 훑지 않는다. 손잡이가 켜져 있어도 마찬가지다 —
+   * 아무 사건도 없는 판에서 노드와 간선을 지나는 것은 언제나 빈손이다. */
+  if (livePulses.size === 0 && !liveDressedViews.has(view)) return;
+  let wrote = false;
   for (const node of view.querySelectorAll(".agent-graph-node[data-graph-key]")) {
-    writeLiveBeat(node, running ? livePulses.get(node.dataset.graphKey)?.beat ?? "" : "");
+    const beat = running ? livePulses.get(node.dataset.graphKey)?.beat ?? "" : "";
+    if (beat !== "") wrote = true;
+    writeLiveBeat(node, beat);
   }
   for (const group of view.querySelectorAll(".agent-graph-edges [data-graph-edge]")) {
     const line = group.querySelector("path");
     if (!line) continue;
-    writeLiveBeat(line, running ? livePulses.get(group.getAttribute("data-graph-edge"))?.beat ?? "" : "");
+    const beat = running ? livePulses.get(group.getAttribute("data-graph-edge"))?.beat ?? "" : "";
+    if (beat !== "") wrote = true;
+    writeLiveBeat(line, beat);
   }
+  if (wrote) liveDressedViews.add(view);
+  else liveDressedViews.delete(view);
 }
 
 function writeLiveBeat(node, beat) {
