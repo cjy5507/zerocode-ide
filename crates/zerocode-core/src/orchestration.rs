@@ -15571,8 +15571,8 @@ impl Doing {
                  again is the same as asking once",
             ),
             Self::HostRead => Some(
-                "it reads a pane's screen and writes nothing down, so there is \
-                 no answer to file and nothing to repeat",
+                "it reads a pane's screen or transcript and writes nothing down, so \
+                 there is no answer to file and nothing to repeat",
             ),
             Self::Mutation | Self::Inbox | Self::Attach | Self::Policy => None,
         }
@@ -15591,6 +15591,10 @@ fn doing(verb: &str) -> Option<Doing> {
 /// arm and the window's carrying of it all say it, and a verb spelled three
 /// times is a verb that is one typo away from answering nobody.
 pub const WORKTREE_EVIDENCE_VERB: &str = "worktree-evidence";
+
+/// The read of a worker's conversation as structured turns (t-6742).
+/// Named once, for the same reason as [`WORKTREE_EVIDENCE_VERB`].
+pub const WORKER_TRANSCRIPT_VERB: &str = "worker-transcript";
 
 /// A refusal of [`WORKTREE_EVIDENCE_VERB`] in the one shape that verb answers
 /// failures in: `{code, message, retryable}` and nothing else. Every other
@@ -15763,6 +15767,13 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     (
         "worker-read",
         "--worker <id> [--lines <n>] · that worker's screen, as bytes",
+        Doing::HostRead,
+    ),
+    (
+        WORKER_TRANSCRIPT_VERB,
+        "--worker <id> [--turns <n> | --since <ms>] [--json] · that worker's conversation as \
+         structured turns — who spoke, what ran and what came back, when — out of the transcript \
+         its agent reported; never its screen",
         Doing::HostRead,
     ),
     (
@@ -16262,6 +16273,7 @@ impl std::fmt::Debug for Decided {
             Effect::Capture { .. } => "capture",
             Effect::CaptureSeat { .. } => "capture-seat",
             Effect::WorktreeEvidence { .. } => "worktree-evidence",
+            Effect::WorkerTranscript { .. } => "worker-transcript",
             Effect::WorkerTerminal { .. } => "worker-terminal",
             Effect::Focus { .. } => "focus",
             Effect::Close { .. } => "close",
@@ -17092,6 +17104,41 @@ fn formatted_over(decided: &mut Decided) {
     };
     answer["formatted"] = serde_json::Value::String(frame);
     decided.reply.stdout = format!("{answer}\n");
+}
+
+/// The transcript `worker-transcript` reads for `worker`: the row's OWN
+/// reported session's file, or why there is none. Three absences, each
+/// opening with [`crate::worker_transcript::UNAVAILABLE`] so a caller can
+/// branch on the word: an agent that reports no session at all, a row whose
+/// agent will report one and has not yet, and a session reported without a
+/// transcript file. None of them is answered from anything else.
+fn transcript_source_of(worker: &Worker) -> Result<String, String> {
+    use crate::worker_transcript::UNAVAILABLE;
+    match worker.session.as_ref() {
+        Some(session) => match session
+            .transcript_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+        {
+            Some(path) => Ok(path.to_string()),
+            None => Err(format!(
+                "{UNAVAILABLE}: worker {} reported a session but no transcript file — {} \
+                 keeps none this window can read; `worker-read` shows its screen",
+                worker.id, worker.agent
+            )),
+        },
+        None if !crate::provider_session::session_will_come(&worker.agent) => Err(format!(
+            "{UNAVAILABLE}: worker {} runs {}, which reports no session and no transcript; \
+             `worker-read` shows its screen",
+            worker.id, worker.agent
+        )),
+        None => Err(format!(
+            "{UNAVAILABLE}: worker {} ({}) has not reported its session yet — ask again after \
+             its first hook, or read its screen with `worker-read`",
+            worker.id, worker.agent
+        )),
+    }
 }
 
 fn said(value: serde_json::Value) -> Decided {
@@ -19312,6 +19359,44 @@ fn plan_inner(
                 planned.effect = Effect::Capture { term, lines };
             }
             Decided::said(planned)
+        }
+
+        /* A worker's conversation as structured turns (t-6742).
+         *
+         * A read, like `worker-read`, and answered the same way — the plan
+         * names the source and the NUL placeholder, the window reads and
+         * fills. What the ledger's half decides is WHICH file: the worker
+         * row's own reported session and nothing else. Not the pane's
+         * current session (a pane is reused, a row is not), not the newest
+         * file in some home, and never the screen a release archived — a
+         * screen is not a transcript, and the archived road `worker-read`
+         * keeps is exactly the fallback this verb refuses. A row with no
+         * file says which absence it is, so the caller can tell
+         * "unavailable" from "wrong". */
+        WORKER_TRANSCRIPT_VERB => {
+            let run_id = bound(ledger, &words, &caller, &seat)?;
+            let id = words
+                .value("--worker")
+                .ok_or("worker-transcript needs --worker")?;
+            let ask = crate::worker_transcript::TranscriptAsk::of(
+                words.value("--turns"),
+                words.value("--since"),
+                words.has("--json"),
+            )?;
+            let run = ledger.run(&run_id).ok_or_else(|| unknown_run(&run_id))?;
+            let worker = run
+                .worker(id)
+                .ok_or_else(|| format!("unknown worker: {id}"))?;
+            let path = transcript_source_of(worker)?;
+            let mut planned = said(serde_json::Value::Null);
+            planned.reply = Reply::ok("\u{0}");
+            planned.effect = Effect::WorkerTranscript {
+                worker: id.to_string(),
+                agent: worker.agent.clone(),
+                path,
+                ask,
+            };
+            planned
         }
 
         /* What one CHECKOUT can prove about itself.

@@ -7793,6 +7793,34 @@ fn carried(
                 )),
             }
         }
+        /* A worker's conversation as structured turns (t-6742).
+         *
+         * The plan named the file: the worker ROW's own reported session,
+         * never the pane's current one (a pane is reused; a row is not) and
+         * never the screen a release archived. The window reads it with the
+         * conversation view's own reader, walking back a bounded number of
+         * chunks, and core shapes what was read — masked, cut at its caps,
+         * the newest turns kept. Nothing is written and nothing remembered:
+         * a read, like `worker-read`, and no receipt for the same reason.
+         * A file the window cannot open is said as unavailable, without
+         * the path — the row's session is private (`worker-show` hides it
+         * for the same reason). */
+        Effect::WorkerTranscript {
+            worker,
+            agent,
+            path,
+            ask,
+        } => match crate::cmd::terminal::transcript_turns_back(std::path::Path::new(&path), &ask) {
+            Ok((records, scan)) => {
+                let shaped =
+                    zerocode_core::worker_transcript::shape(&worker, &agent, &records, scan, &ask);
+                answer(capture_reply_of(&decided, &shaped.render(ask.json)))
+            }
+            Err(why) => refused(format!(
+                "{}: worker {worker}'s transcript could not be read — {why}",
+                zerocode_core::worker_transcript::UNAVAILABLE
+            )),
+        },
         Effect::Capture { term, lines } => {
             let Some(worker) = decided.releasing.clone() else {
                 // An ordinary read. No lock is held across it: a capture

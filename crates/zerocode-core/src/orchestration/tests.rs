@@ -23816,3 +23816,209 @@ fn every_verb_call_is_tallied_by_day_without_a_receipt() {
         vec!["check"]
     );
 }
+
+/* ---- worker-transcript (t-6742) --------------------------------------- */
+
+fn a_session_at(path: Option<&str>) -> ProviderSession {
+    ProviderSession {
+        key: SessionKey::SessionId,
+        id: "session-of-the-row".to_string(),
+        transcript_path: path.map(str::to_string),
+    }
+}
+
+/// `worker-transcript` is a read answered from the worker ROW's own
+/// reported transcript: the plan names that file and the NUL placeholder
+/// the window fills, files no receipt, moves nothing — and keeps naming
+/// the file after the worker is released with a screen archived, because
+/// a screen is not a transcript and the archived road is `worker-read`'s.
+#[test]
+fn a_worker_transcript_answers_structured_turns_not_screen_bytes() {
+    let mut bench = Bench::new();
+    bench.json("run-create --name transcripts");
+    let (worker, pane) = bench.seat("worker-start --agent claude");
+    assert!(bench.ledger.worker_session_reported(
+        ("team-1", &pane),
+        a_session_at(Some("/transcripts/w.jsonl"))
+    ));
+    let before = bench.ledger.export();
+
+    let read = bench.run(&format!("worker-transcript --worker {worker}"));
+    assert_eq!(read.reply.exit_code, 0, "{}", read.reply.stderr);
+    assert_eq!(
+        read.effect,
+        Effect::WorkerTranscript {
+            worker: worker.clone(),
+            agent: "claude".to_string(),
+            path: "/transcripts/w.jsonl".to_string(),
+            ask: crate::worker_transcript::TranscriptAsk {
+                window: crate::worker_transcript::Window::LastTurns(
+                    crate::worker_transcript::TURNS_DEFAULT
+                ),
+                json: false,
+            },
+        }
+    );
+    assert_eq!(
+        read.reply.stdout, "\u{0}",
+        "the plan hands the window the capture placeholder, never bytes of its own"
+    );
+    assert!(read.receipt.is_none() && !read.requires_durability);
+    assert_eq!(bench.ledger.export(), before, "a read moved the ledger");
+
+    let json = bench.run(&format!(
+        "worker-transcript --worker {worker} --turns 5 --json"
+    ));
+    let Effect::WorkerTranscript { ask, .. } = json.effect else {
+        panic!("{:?}", json.reply);
+    };
+    assert_eq!(ask.window, crate::worker_transcript::Window::LastTurns(5));
+    assert!(ask.json);
+    let since = bench.run(&format!(
+        "worker-transcript --worker {worker} --since 1790251200000"
+    ));
+    let Effect::WorkerTranscript { ask, .. } = since.effect else {
+        panic!("{:?}", since.reply);
+    };
+    assert_eq!(
+        ask.window,
+        crate::worker_transcript::Window::Since(1_790_251_200_000)
+    );
+
+    for (line, why) in [
+        (
+            format!("worker-transcript --worker {worker} --turns 2 --since 3"),
+            "two different windows",
+        ),
+        (
+            format!("worker-transcript --worker {worker} --turns 0"),
+            "asks for nothing",
+        ),
+        (
+            format!("worker-transcript --worker {worker} --retry-request t-1"),
+            "writes nothing down",
+        ),
+        ("worker-transcript".to_string(), "needs --worker"),
+        (
+            "worker-transcript --worker w-404".to_string(),
+            "unknown worker",
+        ),
+    ] {
+        let refused = bench.run(&line);
+        assert_ne!(refused.reply.exit_code, 0, "{line} was answered");
+        assert!(refused.reply.stdout.is_empty(), "bytes escaped a refusal");
+        assert!(
+            refused.reply.stderr.contains(why),
+            "{line}: {}",
+            refused.reply.stderr
+        );
+    }
+
+    // Released with a screen archived: `worker-read` answers the archive,
+    // `worker-transcript` still names the row's file and never the screen.
+    bench
+        .ledger
+        .begin_release(&worker)
+        .expect("the release begins");
+    bench
+        .ledger
+        .finish_release(&worker, Some("the archived screen".to_string()));
+    let screen = bench.run(&format!("worker-read --worker {worker}"));
+    assert_eq!(screen.reply.stdout, "the archived screen\n");
+    let after = bench.run(&format!("worker-transcript --worker {worker}"));
+    assert_eq!(after.reply.exit_code, 0, "{}", after.reply.stderr);
+    assert!(
+        matches!(&after.effect, Effect::WorkerTranscript { path, .. } if path == "/transcripts/w.jsonl"),
+        "{:?}",
+        after.effect
+    );
+    assert!(!after.reply.stdout.contains("archived screen"));
+}
+
+/// A row with no transcript to read says so — one of three absences, each
+/// opening with the same word — and is never answered from the screen a
+/// release archived, from the pane's current session, or from another
+/// row's file: the pane a released worker sat in may carry a new worker
+/// with a session of its own, and each row names its own.
+#[test]
+fn a_worker_with_no_transcript_is_unavailable_never_its_screen() {
+    use crate::worker_transcript::UNAVAILABLE;
+    let mut bench = Bench {
+        launcher: Catalog(&["claude", "codex", "amp"]),
+        ..Bench::new()
+    };
+    bench.json("run-create --name absences");
+
+    // Not reported yet.
+    let (unreported, pane) = bench.seat("worker-start --agent claude");
+    let refused = bench.run(&format!("worker-transcript --worker {unreported}"));
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(
+        refused.reply.stderr.contains(UNAVAILABLE)
+            && refused.reply.stderr.contains("has not reported"),
+        "{}",
+        refused.reply.stderr
+    );
+    // Released with a screen: still unavailable, and the screen stays out.
+    bench
+        .ledger
+        .begin_release(&unreported)
+        .expect("the release begins");
+    bench
+        .ledger
+        .finish_release(&unreported, Some("a screen nobody asked for".to_string()));
+    let refused = bench.run(&format!("worker-transcript --worker {unreported}"));
+    assert_ne!(refused.reply.exit_code, 0);
+    assert!(refused.reply.stdout.is_empty());
+    assert!(
+        refused.reply.stderr.contains(UNAVAILABLE)
+            && !refused.reply.stderr.contains("nobody asked for"),
+        "{}",
+        refused.reply.stderr
+    );
+
+    // A new worker with a file of its own answers its file; the old row is
+    // still unavailable and never borrows the newer one.
+    let (reused, reused_pane) = bench.seat("worker-start --agent codex");
+    assert!(bench.ledger.worker_session_reported(
+        ("team-1", &reused_pane),
+        a_session_at(Some("/rollouts/new.jsonl"))
+    ));
+    let new = bench.run(&format!("worker-transcript --worker {reused}"));
+    assert!(
+        matches!(&new.effect, Effect::WorkerTranscript { path, agent, .. } if path == "/rollouts/new.jsonl" && agent == "codex"),
+        "{:?}",
+        new.reply
+    );
+    let old = bench.run(&format!("worker-transcript --worker {unreported}"));
+    assert!(
+        old.reply.stderr.contains(UNAVAILABLE) && !old.reply.stderr.contains("new.jsonl"),
+        "{}",
+        old.reply.stderr
+    );
+
+    // A session reported without a file.
+    let (fileless, pane) = bench.seat("worker-start --agent claude");
+    assert!(
+        bench
+            .ledger
+            .worker_session_reported(("team-1", &pane), a_session_at(None))
+    );
+    let refused = bench.run(&format!("worker-transcript --worker {fileless}"));
+    assert!(
+        refused.reply.stderr.contains(UNAVAILABLE)
+            && refused.reply.stderr.contains("no transcript file"),
+        "{}",
+        refused.reply.stderr
+    );
+
+    // An agent that reports no session at all.
+    let (silent, _) = bench.seat("worker-start --agent amp");
+    let refused = bench.run(&format!("worker-transcript --worker {silent}"));
+    assert!(
+        refused.reply.stderr.contains(UNAVAILABLE)
+            && refused.reply.stderr.contains("reports no session"),
+        "{}",
+        refused.reply.stderr
+    );
+}

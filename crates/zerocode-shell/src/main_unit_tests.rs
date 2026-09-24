@@ -19909,6 +19909,247 @@ fn an_absolute_missing_vault_draft_selects_the_vault_root() {
     assert!(!path.exists(), "choosing a missing vault draft created it");
 }
 
+/// The measurement half of t-6742, run by hand: `ZC_TRANSCRIPT_PROBE=<a
+/// transcript on this machine> cargo test -p zerocode-shell --bins
+/// worker_transcript_probe -- --ignored --nocapture` reads that file the
+/// way `worker-transcript` does, `n` times, and prints the bytes each
+/// rendering answers and the wall time of each read — beside a
+/// `worker-read` of the same worker taken by hand, that is the report's
+/// table. Prints numbers only: no text of the file, no path.
+#[test]
+#[ignore = "a measurement over a local transcript, run by hand with ZC_TRANSCRIPT_PROBE"]
+fn worker_transcript_probe_reads_a_local_file() {
+    use zerocode_core::worker_transcript::{TranscriptAsk, Window, shape};
+    let Ok(path) = std::env::var("ZC_TRANSCRIPT_PROBE") else {
+        eprintln!("ZC_TRANSCRIPT_PROBE names no file; nothing measured");
+        return;
+    };
+    let path = std::path::PathBuf::from(path);
+    let runs: usize = std::env::var("ZC_TRANSCRIPT_PROBE_N")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(10);
+    let windows: Vec<usize> = std::env::var("ZC_TRANSCRIPT_PROBE_TURNS")
+        .unwrap_or_else(|_| "5,20,50".to_string())
+        .split(',')
+        .filter_map(|n| n.trim().parse().ok())
+        .collect();
+    // The report's token estimate, one formula for both answers: a quarter
+    // token per ASCII byte, one per other character.
+    let tokens = |said: &str| {
+        let ascii = said.bytes().filter(u8::is_ascii).count();
+        ascii.div_ceil(4) + said.chars().filter(|c| !c.is_ascii()).count()
+    };
+    for turns in windows {
+        let ask = TranscriptAsk {
+            window: Window::LastTurns(turns),
+            json: true,
+        };
+        let mut wall = Vec::with_capacity(runs);
+        let mut read_ms = Vec::with_capacity(runs);
+        let mut said = None;
+        for _ in 0..runs {
+            let started = std::time::Instant::now();
+            let (records, scan) =
+                crate::cmd::terminal::transcript_turns_back(&path, &ask).expect("the walk");
+            read_ms.push(started.elapsed().as_secs_f64() * 1_000.0);
+            let shaped = shape("probe", "claude", &records, scan, &ask);
+            let json = shaped.render(true);
+            let text = shaped.render(false);
+            wall.push(started.elapsed().as_secs_f64() * 1_000.0);
+            said = Some((
+                (json.len(), tokens(&json)),
+                (text.len(), tokens(&text)),
+                shaped.turns.len(),
+                shaped.found,
+                shaped.dropped,
+                shaped.truncated,
+                shaped.turns.iter().map(|t| t.tools.len()).sum::<usize>(),
+                shaped
+                    .turns
+                    .iter()
+                    .flat_map(|t| t.tools.iter())
+                    .filter(|c| c.result.is_none())
+                    .count(),
+                shaped
+                    .turns
+                    .iter()
+                    .flat_map(|t| t.tools.iter())
+                    .filter(|c| c.is_error)
+                    .count(),
+                scan,
+            ));
+        }
+        wall.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        read_ms.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let (
+            (json, json_tokens),
+            (text, text_tokens),
+            kept,
+            found,
+            dropped,
+            truncated,
+            tools,
+            open,
+            errors,
+            scan,
+        ) = said.expect("measured");
+        eprintln!(
+            "probe turns={turns} n={runs} json_bytes={json} json_tokens~{json_tokens} text_bytes={text} text_tokens~{text_tokens} kept={kept} found={found} dropped={dropped} truncated={truncated} tool_calls={tools} without_result={open} errors={errors} file_bytes={} scanned_bytes={} cut_above={} p50_ms={:.2} min_ms={:.2} max_ms={:.2} read_p50_ms={:.2}",
+            scan.file_bytes,
+            scan.scanned_bytes,
+            scan.cut_above,
+            wall[wall.len() / 2],
+            wall[0],
+            wall[wall.len() - 1],
+            read_ms[read_ms.len() / 2]
+        );
+    }
+}
+
+/// `worker-transcript` walks the conversation view's own reader
+/// (t-6742): for a file inside one chunk the walk hands back exactly the
+/// turns `transcript_log_at` hands the page, for each of the three
+/// providers' shapes; for a file past one chunk it steps back until the
+/// window is inside what it read, losing and doubling no line at a chunk
+/// edge; and past the scan's bound it stops and says the file goes on.
+#[test]
+fn a_worker_transcript_walks_the_conversation_views_reader_for_every_provider() {
+    use zerocode_core::worker_transcript::{SCAN_CHUNKS, TranscriptAsk, Window, shape};
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let ask = |window: Window| TranscriptAsk { window, json: true };
+    let fixtures: [(&str, &str, Vec<&str>); 3] = [
+        (
+            "claude",
+            "claude.jsonl",
+            vec![
+                r#"{"type":"user","timestamp":"2026-09-24T12:00:00.000Z","message":{"role":"user","content":"go"}}"#,
+                r#"{"type":"assistant","timestamp":"2026-09-24T12:00:01.000Z","message":{"role":"assistant","content":[{"type":"tool_use","id":"call-a","name":"Bash","input":{"command":"printf hi"}}]}}"#,
+                r#"{"type":"user","timestamp":"2026-09-24T12:00:02.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-a","content":"hi"}]}}"#,
+                r#"{"type":"assistant","timestamp":"2026-09-24T12:00:03.000Z","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}"#,
+            ],
+        ),
+        (
+            "codex",
+            "rollout.jsonl",
+            vec![
+                r#"{"type":"response_item","timestamp":"2026-09-24T12:00:00.000Z","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"go"}]}}"#,
+                r#"{"type":"response_item","timestamp":"2026-09-24T12:00:01.000Z","payload":{"type":"custom_tool_call","id":"record-a","call_id":"call-a","name":"functions.exec","input":"printf hi"}}"#,
+                r#"{"type":"response_item","timestamp":"2026-09-24T12:00:02.000Z","payload":{"type":"custom_tool_call_output","id":"record-b","call_id":"call-a","output":"hi"}}"#,
+                r#"{"type":"response_item","timestamp":"2026-09-24T12:00:03.000Z","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"done"}]}}"#,
+            ],
+        ),
+        (
+            "zo",
+            "session.jsonl",
+            vec![
+                r#"{"type":"message","updated_at_ms":1790251200000,"message":{"role":"user","blocks":[{"type":"text","text":"go"}]}}"#,
+                r#"{"type":"message","updated_at_ms":1790251201000,"message":{"role":"assistant","blocks":[{"type":"tool_use","id":"call-a","name":"bash","input":"{\"command\":\"printf hi\"}"}]}}"#,
+                r#"{"type":"message","updated_at_ms":1790251202000,"message":{"role":"tool","blocks":[{"type":"tool_result","tool_use_id":"call-a","tool_name":"bash","output":"hi","is_error":false}]}}"#,
+                r#"{"type":"message","updated_at_ms":1790251203000,"message":{"role":"assistant","blocks":[{"type":"text","text":"done"}]}}"#,
+            ],
+        ),
+    ];
+    for (agent, file, lines) in fixtures {
+        let path = temp.path().join(file);
+        std::fs::write(&path, format!("{}\n", lines.join("\n"))).expect("written");
+        let view = crate::cmd::terminal::transcript_log_at(&path, None).expect("the view's read");
+        let (walked, scan) =
+            crate::cmd::terminal::transcript_turns_back(&path, &ask(Window::LastTurns(20)))
+                .expect("the walk");
+        assert_eq!(
+            walked, view.turns,
+            "{agent}: the walk read what the view reads"
+        );
+        assert!(!scan.cut_above && !scan.skipped, "{agent}: {scan:?}");
+        assert_eq!(scan.file_bytes, scan.scanned_bytes);
+        let shaped = shape("w", agent, &walked, scan, &ask(Window::LastTurns(20)));
+        // The same three steps out of all three shapes: the prompt, the call
+        // with its result joined by id, and the words after it.
+        assert_eq!(shaped.turns.len(), 3, "{agent}: {:#?}", shaped.turns);
+        assert_eq!(shaped.turns[0].role, "user");
+        assert_eq!(shaped.turns[0].text.text, "go");
+        assert_eq!(shaped.turns[0].at_ms, Some(1_790_251_200_000), "{agent}");
+        let step = &shaped.turns[1];
+        assert_eq!(step.role, "assistant");
+        assert_eq!(step.tools.len(), 1, "{agent}");
+        assert_eq!(step.tools[0].call_id, "call-a");
+        assert!(step.tools[0].input.text.contains("printf hi"), "{agent}");
+        assert_eq!(
+            step.tools[0].result.as_ref().map(|r| r.text.as_str()),
+            Some("hi"),
+            "{agent}"
+        );
+        assert_eq!(step.at_ms, Some(1_790_251_201_000), "{agent}");
+        assert_eq!(step.until_ms, Some(1_790_251_202_000), "{agent}");
+        assert!(!step.open);
+        assert_eq!(shaped.turns[2].text.text, "done", "{agent}");
+        assert_eq!(shaped.turns[2].at_ms, Some(1_790_251_203_000), "{agent}");
+    }
+
+    // Past one chunk: the walk steps back until the window is inside, and
+    // a line at a chunk edge is neither lost nor doubled.
+    let long = temp.path().join("long.jsonl");
+    let line = |at: usize| {
+        format!(
+            "{{\"type\":\"user\",\"timestamp\":\"2026-09-24T12:00:00.000Z\",\"message\":{{\"role\":\"user\",\"content\":\"prompt {at:05} {}\"}}}}\n",
+            "x".repeat(80)
+        )
+    };
+    let lines = 2_500;
+    std::fs::write(&long, (0..lines).map(line).collect::<String>()).expect("written");
+    let size = std::fs::metadata(&long).expect("size").len();
+    assert!(
+        size > crate::shell_runtime::SUBAGENT_LOG_CHUNK
+            && size < 2 * crate::shell_runtime::SUBAGENT_LOG_CHUNK,
+        "the fixture spans one chunk edge: {size} bytes"
+    );
+    let (tail, scan) =
+        crate::cmd::terminal::transcript_turns_back(&long, &ask(Window::LastTurns(20)))
+            .expect("the walk");
+    assert!(scan.cut_above, "twenty turns are inside the last chunk");
+    assert_eq!(scan.scanned_bytes, crate::shell_runtime::SUBAGENT_LOG_CHUNK);
+    assert!(tail.len() > 20 && tail.len() < lines);
+    let (whole, scan) = crate::cmd::terminal::transcript_turns_back(&long, &ask(Window::Since(0)))
+        .expect("the walk");
+    assert!(
+        !scan.cut_above,
+        "a moment before every stamp walks to the file's start"
+    );
+    assert_eq!(scan.scanned_bytes, size);
+    assert_eq!(
+        whole.len(),
+        lines,
+        "a line at the chunk edge was lost or doubled"
+    );
+    let prompts: Vec<String> = whole
+        .iter()
+        .map(|turn| turn.text[..12].to_string())
+        .collect();
+    let expected: Vec<String> = (0..lines).map(|at| format!("prompt {at:05}")).collect();
+    assert_eq!(prompts, expected);
+
+    // Past the scan's bound: the walk stops and says the file goes on.
+    let huge = temp.path().join("huge.jsonl");
+    let lines = 12_000;
+    std::fs::write(&huge, (0..lines).map(line).collect::<String>()).expect("written");
+    let size = std::fs::metadata(&huge).expect("size").len();
+    assert!(size > (SCAN_CHUNKS + 1) * crate::shell_runtime::SUBAGENT_LOG_CHUNK);
+    let (bounded, scan) =
+        crate::cmd::terminal::transcript_turns_back(&huge, &ask(Window::Since(0)))
+            .expect("the walk");
+    assert!(scan.cut_above);
+    assert_eq!(
+        scan.scanned_bytes,
+        SCAN_CHUNKS * crate::shell_runtime::SUBAGENT_LOG_CHUNK
+    );
+    assert!(bounded.len() < lines && !bounded.is_empty());
+    assert_eq!(
+        bounded.last().map(|turn| turn.text[..12].to_string()),
+        Some(format!("prompt {:05}", lines - 1))
+    );
+}
+
 /// A transcript read says whether the file goes on past the cursor, so a
 /// page opened late on a long transcript reads on at once instead of one
 /// chunk a poll — and the reads, followed to the end, cover every line.

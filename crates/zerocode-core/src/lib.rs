@@ -111,6 +111,7 @@ pub mod usage_stats_opencode;
 pub mod vault;
 pub mod vault_opencode;
 pub mod worker_placement;
+pub mod worker_transcript;
 pub mod workitem;
 pub mod workspace_cleanup;
 pub mod workspace_space;

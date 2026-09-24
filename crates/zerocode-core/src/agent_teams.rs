@@ -362,6 +362,17 @@ pub enum Effect {
     /// means "the tree the asking pane is sitting in", which only the window
     /// knows — a coordinator's pane is nobody's worker row.
     WorktreeEvidence { checkout: Option<String> },
+    /// A worker's conversation as structured turns, out of the transcript
+    /// its ledger row reported (t-6742). The window reads `path` with the
+    /// conversation view's own reader and answers what core shapes
+    /// (`worker_transcript::shape`); the plan's reply is the NUL placeholder
+    /// a capture leaves, filled the same way.
+    WorkerTranscript {
+        worker: String,
+        agent: String,
+        path: String,
+        ask: crate::worker_transcript::TranscriptAsk,
+    },
     /// Move the keyboard. The ONE road by which a teammate pane takes focus.
     Focus { term: u32 },
     /// End one pane.

@@ -1290,7 +1290,8 @@ pub fn run(
         // knows nothing about worktrees.
         Effect::CaptureSeat { .. }
         | Effect::WorkerTerminal { .. }
-        | Effect::WorktreeEvidence { .. } => answer(zerocode_core::agent_teams::Reply::refused(
+        | Effect::WorktreeEvidence { .. }
+        | Effect::WorkerTranscript { .. } => answer(zerocode_core::agent_teams::Reply::refused(
             "the tmux road reads its own panes only",
         )),
         Effect::Focus { term } => {

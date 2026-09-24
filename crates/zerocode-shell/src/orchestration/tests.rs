@@ -15569,6 +15569,144 @@ fn a_release_interrupted_by_a_respawn_retires_nothing() {
 /// shell's bytes forever. Term and capability generation are checked as
 /// separate cases: accepting either mutation would still cross an
 /// incarnation boundary.
+/// `worker-transcript` answers the worker ROW's own transcript as
+/// structured turns (t-6742): the file its pane reported, read by the
+/// conversation view's reader and shaped by core — the screen is never
+/// captured, the path never printed, a credential in the file never
+/// answered, and the read moves nothing: not the rows, not the file, and
+/// no receipt. A file the window cannot open is said as unavailable.
+#[test]
+fn a_worker_transcript_reads_the_rows_own_file_and_never_the_screen() {
+    const LEADER_TERM: u32 = 90_140;
+    const WORKER_TERM: u32 = 90_141;
+    let _window = the_window();
+    let team = format!("team-transcript-{LEADER_TERM}");
+    let (run_id, worker, _pane) = a_worker_in_a_pane(&team, LEADER_TERM, WORKER_TERM);
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let path = temp.path().join("w.jsonl");
+    std::fs::write(
+        &path,
+        [
+            r#"{"type":"user","timestamp":"2026-09-24T12:00:00.000Z","message":{"role":"user","content":"run the tests with --password hunter2"}}"#,
+            r#"{"type":"assistant","timestamp":"2026-09-24T12:00:01.000Z","message":{"role":"assistant","content":[{"type":"text","text":"Running them."},{"type":"tool_use","id":"call-1","name":"Bash","input":{"command":"cargo test -p x"}}]}}"#,
+            r#"{"type":"user","timestamp":"2026-09-24T12:00:09.000Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"ok · 12 passed"}]}}"#,
+            r#"{"type":"assistant","timestamp":"2026-09-24T12:00:10.000Z","message":{"role":"assistant","content":[{"type":"text","text":"All green."}]}}"#,
+            "",
+        ]
+        .join("\n"),
+    )
+    .expect("the transcript");
+    let written = std::fs::metadata(&path).expect("stat");
+    super::pane_session_reported(
+        WORKER_TERM,
+        &zerocode_core::ProviderSession {
+            key: zerocode_core::provider_session::SessionKey::SessionId,
+            id: "session-of-the-row".to_string(),
+            transcript_path: Some(path.to_string_lossy().into_owned()),
+        },
+        clock(),
+    );
+    let host = Reading::quiet("THE SCREEN NOBODY ASKED FOR");
+    let shadow = a_runs_shadow(&run_id);
+    let receipts = the_rows().served.len();
+
+    let answered = run(
+        &host,
+        Vec::new(),
+        &team,
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+        &words(&format!(
+            "worker-transcript --run {run_id} --worker {worker} --json"
+        )),
+        clock(),
+    );
+    assert_eq!(answered.exit_code, 0, "{}", answered.stderr);
+    let json: serde_json::Value = serde_json::from_str(&answered.stdout).expect("a record");
+    assert_eq!(json["worker"], worker);
+    assert_eq!(json["agent"], "claude");
+    assert_eq!(
+        json["found"], 3,
+        "the prompt, the call's step, the words after"
+    );
+    assert_eq!(json["turns"][0]["role"], "user");
+    assert_eq!(json["turns"][1]["role"], "assistant");
+    assert_eq!(json["turns"][2]["text"]["text"], "All green.");
+    assert_eq!(json["turns"][1]["tools"][0]["name"], "Bash");
+    assert_eq!(json["turns"][1]["tools"][0]["callId"], "call-1");
+    assert_eq!(
+        json["turns"][1]["tools"][0]["result"]["text"],
+        "ok · 12 passed"
+    );
+    assert_eq!(json["turns"][1]["atMs"], 1_790_251_201_000_i64);
+    assert_eq!(json["scan"]["fileBytes"], written.len());
+    assert!(
+        !answered.stdout.contains("hunter2"),
+        "a credential was answered"
+    );
+    assert!(answered.stdout.contains("[redacted]"));
+    assert!(
+        !answered
+            .stdout
+            .contains(temp.path().to_str().expect("utf8")),
+        "the path escaped"
+    );
+    assert!(!answered.stdout.contains("NOBODY ASKED FOR"));
+    assert_eq!(host.captures(), 0, "the screen was captured");
+
+    let text = run(
+        &host,
+        Vec::new(),
+        &team,
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+        &words(&format!(
+            "worker-transcript --run {run_id} --worker {worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(text.exit_code, 0, "{}", text.stderr);
+    assert!(
+        text.stdout
+            .contains("↳ Bash · cargo test -p x → ok · 12 passed"),
+        "{}",
+        text.stdout
+    );
+    assert!(!text.stdout.contains("hunter2"));
+
+    // A read: the rows did not move, no receipt was filed, the file was
+    // not touched.
+    assert_eq!(a_runs_shadow(&run_id), shadow, "a read moved the run");
+    assert_eq!(the_rows().served.len(), receipts, "a read filed a receipt");
+    let after = std::fs::metadata(&path).expect("stat");
+    assert_eq!(after.len(), written.len());
+    assert_eq!(after.modified().ok(), written.modified().ok());
+
+    // The file gone: unavailable, said without the path, never the screen.
+    std::fs::remove_file(&path).expect("gone");
+    let gone = run(
+        &host,
+        Vec::new(),
+        &team,
+        zerocode_core::agent_teams::LEADER_PANE,
+        TEST_CAPABILITY,
+        &words(&format!(
+            "worker-transcript --run {run_id} --worker {worker}"
+        )),
+        clock(),
+    );
+    assert_eq!(gone.exit_code, 1, "{gone:?}");
+    assert!(gone.stdout.is_empty());
+    assert!(
+        gone.stderr
+            .contains(zerocode_core::worker_transcript::UNAVAILABLE),
+        "{}",
+        gone.stderr
+    );
+    assert!(!gone.stderr.contains(temp.path().to_str().expect("utf8")));
+    assert_eq!(host.captures(), 0);
+}
+
 #[test]
 fn a_worker_read_interrupted_by_a_seat_change_files_nothing() {
     for (case, move_caller, replacement_term, replacement_generation, retry_capability) in [
