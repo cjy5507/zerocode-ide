@@ -5,7 +5,7 @@
  * 하는 것. 언급을 풀고 인덱스를 읽는 일은 zo(`zo vault code`)와 core(`second_brain_code::graft`)의
  * 것이라 여기에 없다 — 픽스처(`knowledge-fixture.mjs`)는 그 답의 모양만 짓는다. */
 
-import { FRAME_BUDGET_MS, frameBudgetHolds, loadNote, machineIsLoudNow } from "./machine-load.mjs";
+import { loadNote, machineIsLoudNow } from "./machine-load.mjs";
 
 const WORKSPACE = "/workspace/acme";
 
@@ -149,7 +149,6 @@ const CODE_SCENE = Object.freeze({ pages: 511, linksPer: 3, ghosts: 20, files: 1
 const ROUNDS = 3;
 const SLACK = 1.25;
 
-const FRAME_GAP_BUDGET_MS = FRAME_BUDGET_MS;
 
 export async function measureKnowledgeCodeScene(page, ok) {
   const seatWas = page.viewportSize();
@@ -234,6 +233,9 @@ export async function measureKnowledgeCodeScene(page, ok) {
       /* 첫 그림의 비율도 벽시계다 — 시끄러운 기계(machine-load.mjs)에서는 기록만 하고 판정하지 않는다;
        * 접목된 노드 수·노드 동일성은 늘 판정한다. */
       && (rows.withCode.firstPaint <= rows.control.firstPaint * SLACK || machineIsLoudNow())
-      && frameBudgetHolds(rows.withCode.worstGap, FRAME_GAP_BUDGET_MS),
+      /* 프레임 간격도 같은 수의 페이지(대조군)와 견준다 — 1,131점 장면은 조용한 기계에서도 최악 간격이
+       * 천 점 예산(96 ms) 언저리(97~105 ms)이고 대조군 자체가 113 ms라, 절대 예산은 접목의 값이 아니라
+       * 장면의 크기를 재고 있었다(09-24). 절대 예산은 천 점 장면(시험 9)이 지킨다. */
+      && (rows.withCode.worstGap <= rows.control.worstGap * SLACK || machineIsLoudNow()),
     JSON.stringify(rows));
 }
