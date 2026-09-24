@@ -1656,6 +1656,54 @@ fn note_pointer_uncollected(run: &str, address: &str, term: u32) {
     );
 }
 
+/// Mail is waiting for a pane whose own last answer was a wall, and the
+/// pointer holds its line back (t-6560).
+///
+/// Said when the hold begins — for this mail, at this pane — and not once a
+/// beat: the reader looking for why a coordinator at its limit was not told
+/// about its mail needs the wall's own words and how long the window will
+/// wait on them, once.
+fn note_pointer_walled(
+    run: &str,
+    address: &str,
+    term: u32,
+    wall: &crate::quota_wall::PaneWall,
+    now_ms: i64,
+) {
+    let Some(root) = BLACKBOX.get() else { return };
+    let minutes =
+        zerocode_core::orchestration::minutes_up(wall.stands_until_ms.saturating_sub(now_ms));
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: mail waiting for {address} in {run} is held at terminal \
+             {term}: its last answer was its {} wall (\"{}\"), and a line typed there \
+             would only meet it again — nothing is typed until it answers again, or \
+             for {minutes} min at most",
+            wall.cause.word(),
+            wall.line.as_str()
+        ),
+    );
+}
+
+/// A held pointer's wall stopped standing: the pane is pointed at again, once.
+fn note_pointer_wall_lifted(
+    run: &str,
+    address: &str,
+    term: u32,
+    cause: crate::quota_wall::StallCause,
+) {
+    let Some(root) = BLACKBOX.get() else { return };
+    crate::note_window_event(
+        root,
+        &format!(
+            "orchestration: terminal {term}'s {} wall stopped standing; the pointer \
+             for {address} in {run} is offered again",
+            cause.word()
+        ),
+    );
+}
+
 fn note_pointer_silent(run: &str, address: &str, term: u32, why: &str) {
     let Some(root) = BLACKBOX.get() else { return };
     crate::note_window_event(
@@ -2731,6 +2779,21 @@ enum Standing {
     /// terminal to try. Only `check` can reach this mail now, and only from a
     /// pane that comes back.
     Seatless,
+    /// The pane's own last answer was a wall that answers every prompt the
+    /// same way — a quota, an expired login (t-6560) — and the window has
+    /// said so once. Nothing is typed: a line typed there opens a turn the
+    /// CLI ends at once, that turn's own start strikes these marks out, and
+    /// the next beat at rest used to type the same line again — every two to
+    /// five seconds, 1,391 times on the coordinator's pane in four days.
+    ///
+    /// Held until `until_ms`, the wall's own window (`QUOTA_WAIT_POLICY`,
+    /// through `wall_stands_until`), and looked at again only then: a pane
+    /// that answers again or new mail strikes the mark out and is looked at
+    /// afresh, and a wall still standing at its deadline is held anew.
+    Walled {
+        until_ms: i64,
+        cause: crate::quota_wall::StallCause,
+    },
 }
 
 fn pointed() -> &'static Mutex<std::collections::HashMap<(String, String), Pointed>> {
@@ -4517,6 +4580,16 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
 /// the same line about the same message into the same composer again: that
 /// was the pointer's one repeated cost, and a window that restarts several
 /// times a day paid it several times a day.
+///
+/// And one refusal about the pane's own last answer (t-6560). A pane whose
+/// CLI answered its last prompt with a wall — a quota, an expired login —
+/// answers the next one the same way, at once, without asking any model: a
+/// line typed there is a turn that ends before the next beat, and that turn's
+/// own start strikes the marks this pass keeps. The coordinator's pane took
+/// the same line 1,391 times in four days that way, every two to five
+/// seconds. So a fresh line is not typed at a pane standing at its wall
+/// ([`Standing::Walled`]): the window says so once, and speaks again when the
+/// pane answers again or the wall's own window runs out.
 fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
     let Some(held) = runtime() else {
         return;
@@ -4892,6 +4965,8 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                             }
                         }
                     }
+                    // Held at a wall whose own window has not run out.
+                    Some(Standing::Walled { until_ms, .. }) if now_ms < until_ms => continue,
                     /* New mail, a new pane, nothing yet — or an advice line
                      * that no road would carry, which is the same beat over
                      * again minus the black-box line it has already earned.
@@ -4902,14 +4977,57 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
                      * there was a different line about a different failure.
                      * `Withheld` is the same beat over again too: what the
                      * guard refused clears on its own, and the guard is the
-                     * door that will know. */
+                     * door that will know. A wall whose window ran out lands
+                     * here as well, to be looked at again. */
                     Some(
                         Standing::Unreachable
                         | Standing::Withheld
                         | Standing::Unattended
-                        | Standing::Seatless,
+                        | Standing::Seatless
+                        | Standing::Walled { .. },
                     )
                     | None => {
+                        /* The wall's door (t-6560), asked where this pass
+                         * would type a FRESH line — new mail, a pane just
+                         * become pointable, a wall whose window ran out — and
+                         * never on a retry of a line the guard or the roads
+                         * refused, which this same look already let through:
+                         * the pane's record moves only with a turn, and a
+                         * turn strikes the mark out. One bounded read of the
+                         * pane's transcript, never once a beat. */
+                        let was_walled = match standing {
+                            Some(Standing::Walled { cause, .. }) => Some(cause),
+                            _ => None,
+                        };
+                        let fresh = matches!(
+                            standing,
+                            None | Some(Standing::Unattended | Standing::Walled { .. })
+                        );
+                        if fresh
+                            && let Some(wall) = host
+                                .agent_of(term)
+                                .and_then(|agent| host.pane_wall(term, &agent))
+                                .filter(|wall| wall.stands(now_ms))
+                        {
+                            if was_walled.is_none() {
+                                note_pointer_walled(&run.id, &address, term, &wall, now_ms);
+                            }
+                            marks.insert(
+                                key,
+                                Pointed {
+                                    newest,
+                                    term: Some(term),
+                                    standing: Standing::Walled {
+                                        until_ms: wall.stands_until_ms,
+                                        cause: wall.cause,
+                                    },
+                                },
+                            );
+                            continue;
+                        }
+                        if let Some(cause) = was_walled {
+                            note_pointer_wall_lifted(&run.id, &address, term, cause);
+                        }
                         let notice = crate::orchestration_notify::has_route(term)
                             .then(|| {
                                 zerocode_hookd::session_notify::PointerNotice::new(

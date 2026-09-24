@@ -11773,7 +11773,7 @@ pub fn quota_wall_witness(
 /* ---- how long a wall stands (t-6427) ---------------------------------- */
 
 /// The numbers a quota wall is waited out under — one table, read by
-/// [`newest_wall`], like [`QUOTA_POLICY`].
+/// [`newest_wall`] and [`wall_stands_until`], like [`QUOTA_POLICY`].
 pub struct QuotaWaitPolicy {
     /// How long after the provider's reset the wall still explains the
     /// worker's silence: the time its agent gets to continue by itself.
@@ -11803,6 +11803,11 @@ pub struct QuotaWaitPolicy {
 ///   five minutes; a test in the window pins the two together): the re-read
 ///   the beat asks for from the reset on is never allowed sooner than that,
 ///   so by then it has had its chance.
+///
+/// The first two also bound how long the mail pointer holds its line back
+/// from a pane whose own last answer was a wall (t-6560), counted from the
+/// moment that answer was written: a pane that stays at the wall past them is
+/// told once more, and meets the wall again or not.
 pub const QUOTA_WAIT_POLICY: QuotaWaitPolicy = QuotaWaitPolicy {
     slack_ms: QUIET_GRACE_MS,
     max_wait_ms: 6 * 60 * 60 * 1000,
@@ -11856,6 +11861,20 @@ pub fn newest_wall(run: &Run, dispatch_id: &str) -> Option<WallAt> {
         reset_waitable: waitable.is_ok(),
         stands_until_ms,
     })
+}
+
+/// Until when a wall a pane's own conversation met at `observed_at_ms`
+/// stands — the reading [`newest_wall`] gives a ledger row, for a wall that
+/// has no row (t-6560).
+///
+/// The mail pointer asks it about any pane it would type at, the
+/// coordinator's included, and a coordinator is nobody's attempt: there is no
+/// `quota_walled` row to read back. The record the agent wrote at the wall
+/// carries the moment and, for a provider window, the reset — so the window
+/// is the same one the row would have been given, from the same table.
+#[must_use]
+pub fn wall_stands_until(observed_at_ms: i64, resets_at_ms: Option<i64>) -> i64 {
+    wall_window(observed_at_ms, resets_at_ms).0
 }
 
 /// Until when a wall witnessed at `observed_at_ms` stands, and whether its
@@ -12594,8 +12613,10 @@ impl GaugeReading {
 }
 
 /// Milliseconds as whole minutes, rounded up — "resets in 1 min" for forty
-/// seconds, never "resets in 0 min".
-fn minutes_up(ms: i64) -> u64 {
+/// seconds, never "resets in 0 min". The window's own log says a wall's wait
+/// the same way (t-6560).
+#[must_use]
+pub fn minutes_up(ms: i64) -> u64 {
     u64::try_from(ms.max(0)).unwrap_or(0).div_ceil(60_000)
 }
 

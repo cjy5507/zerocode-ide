@@ -10374,6 +10374,369 @@ fn a_working_claude_pane_is_pointed_at_through_its_own_hook_and_never_its_compos
     crate::orchestration_pointer_mailbox::forget_term(LEADER);
 }
 
+/// A coordinator's pane as a CLI at its wall keeps it (t-6560): every line
+/// typed there opens a turn, and the CLI answers that turn itself, at once,
+/// with the wall — no model is asked.
+///
+/// The order is the real window's, and the loop lives in it: the prompt's
+/// own report (`pane_turn_began`) arrives before any beat has read the
+/// pump's receipt, and it strikes the pointer's marks out; the turn ends
+/// (`StopFailure`, measured as an ordinary end); and the next beat at rest
+/// finds nothing written down about the line it typed a moment ago.
+struct AtItsWall {
+    term: u32,
+    /// Every line typed, by terminal: a beat walks every run in the
+    /// process's ledger, and another scenario's pane is not this one's.
+    typed: Mutex<Vec<(u32, String)>>,
+    /// The receipt of the line in flight, answered when the pane hears it.
+    in_flight: Mutex<Option<std::sync::mpsc::SyncSender<zerocode_pty::DeliveryOutcome>>>,
+    /// Whether the pane's last answer is a wall — and the next one will be.
+    walled: std::sync::atomic::AtomicBool,
+    cause: crate::quota_wall::StallCause,
+}
+
+impl AtItsWall {
+    /// How long each look at the wall says it still stands. Short, so a
+    /// hold's own deadline passes during the test and is looked at again.
+    const STANDS_FOR_MS: i64 = 1_500;
+
+    fn new(term: u32, cause: crate::quota_wall::StallCause, walled: bool) -> Self {
+        Self {
+            term,
+            typed: Mutex::new(Vec::new()),
+            in_flight: Mutex::new(None),
+            walled: std::sync::atomic::AtomicBool::new(walled),
+            cause,
+        }
+    }
+
+    fn typed(&self) -> usize {
+        self.typed
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .iter()
+            .filter(|(term, _)| *term == self.term)
+            .count()
+    }
+
+    fn wall_lifts(&self) {
+        self.walled
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// What the pane does with the line in flight, if any: the prompt's
+    /// report, the pump's receipt, and the turn's end — at the wall, when a
+    /// wall answers every prompt here.
+    fn answers(&self, meets_the_wall: bool) {
+        let Some(settle) = self
+            .in_flight
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .take()
+        else {
+            return;
+        };
+        super::pane_turn_began(self.term);
+        let _ = settle.send(zerocode_pty::DeliveryOutcome::Delivered);
+        super::pane_turn_ended(self.term, clock(), false, clock());
+        if meets_the_wall {
+            self.walled.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
+impl Host for AtItsWall {
+    fn split(
+        &self,
+        _team: &str,
+        _leader_term: u32,
+        _from_term: u32,
+        _pane: &str,
+        _direction: zerocode_core::agent_teams::Direction,
+        _command: &str,
+        _token: &str,
+    ) -> Option<u32> {
+        None
+    }
+    fn send(&self, _term: u32, _text: &str) -> bool {
+        true
+    }
+    fn point(
+        &self,
+        term: u32,
+        line: &str,
+        _submit: bool,
+    ) -> Option<std::sync::mpsc::Receiver<zerocode_pty::DeliveryOutcome>> {
+        self.typed
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .push((term, line.to_string()));
+        let (settle, receipt) = std::sync::mpsc::sync_channel(1);
+        if term == self.term {
+            *self
+                .in_flight
+                .lock()
+                .unwrap_or_else(|held| held.into_inner()) = Some(settle);
+        }
+        Some(receipt)
+    }
+    fn capture(&self, _term: u32) -> Option<String> {
+        None
+    }
+    fn focus(&self, _term: u32) -> bool {
+        false
+    }
+    fn close(&self, _term: u32) {}
+    fn actor_for(&self, term: u32) -> Option<String> {
+        Some(test_actor(term))
+    }
+    fn agent_of(&self, _term: u32) -> Option<String> {
+        Some(zerocode_core::AgentKind::Claude.slug().to_string())
+    }
+    fn pane_wall(&self, term: u32, agent: &str) -> Option<crate::quota_wall::PaneWall> {
+        assert_eq!(agent, zerocode_core::AgentKind::Claude.slug());
+        // The CLI's own sentences, as the coordinator's transcript has them.
+        let said = match self.cause {
+            crate::quota_wall::StallCause::LoginWall => "Login expired · Please run /login",
+            _ => "You've hit your session limit · resets 6:30pm (Asia/Seoul)",
+        };
+        (term == self.term && self.walled.load(std::sync::atomic::Ordering::SeqCst)).then(|| {
+            crate::quota_wall::PaneWall {
+                cause: self.cause,
+                line: zerocode_core::orchestration::Text::from(said.to_string()),
+                stands_until_ms: clock() + Self::STANDS_FOR_MS,
+            }
+        })
+    }
+}
+
+/// Twenty letters to a pane standing at its wall: the pointer is typed at
+/// most once while the wall stands — the line that found it — and once when
+/// it stops standing (t-6560).
+///
+/// Before, every beat at rest typed the same line again: the coordinator's
+/// pane took it 1,391 times in four days, every two to five seconds, and
+/// each one that met a quota wall was a request the provider refused. The
+/// wall is read off the pane's own last answer and held for as long as the
+/// wall's own window (`QUOTA_WAIT_POLICY`) says; a hold whose window runs
+/// out looks again, and a wall that no longer answers is the lift.
+#[test]
+fn a_pane_at_its_wall_is_told_once_while_it_stands_and_once_when_it_lifts() {
+    const LEADER: u32 = 11_560;
+    const WORKER: u32 = 11_561;
+    const LETTERS: usize = 20;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let team = format!("team-walled-{LEADER}");
+    let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let host = AtItsWall::new(LEADER, crate::quota_wall::StallCause::QuotaWall, false);
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    let post = |n: usize| {
+        let posted = run(
+            &host,
+            Vec::new(),
+            &team,
+            &pane,
+            &held,
+            &words(&format!(
+                "send --type status --body letter-{n} --retry-request walled-{worker}-{n}"
+            )),
+            clock(),
+        );
+        assert_eq!(posted.exit_code, 0, "{}", posted.stderr);
+    };
+    // Three beats a letter, the pane answering at its wall between them.
+    let beats = |host: &AtItsWall| {
+        for _ in 0..3 {
+            super::tick(host, &[], clock());
+            host.answers(true);
+        }
+    };
+    let blackbox = super::BLACKBOX
+        .get()
+        .expect("the bench window's black box")
+        .join("window-errors.log");
+    let counted = |needle: &str| -> usize {
+        std::fs::read_to_string(&blackbox)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| line.contains(needle))
+            .count()
+    };
+    let held_line =
+        format!("mail waiting for run:{run_id} in {run_id} is held at terminal {LEADER}");
+    let lifted_line = format!("terminal {LEADER}'s quota wall stopped standing");
+
+    // The coordinator finished a turn in the ordinary way; nothing walls it.
+    super::pane_turn_began(LEADER);
+    super::pane_turn_ended(LEADER, clock(), false, clock());
+
+    // The first letter finds a pane nobody knows is walled — and the line
+    // typed about it is the turn that meets the wall.
+    post(1);
+    beats(&host);
+    assert_eq!(
+        host.typed(),
+        1,
+        "the first letter, before any wall, was not pointed at exactly once"
+    );
+    for n in 2..=LETTERS {
+        post(n);
+        beats(&host);
+    }
+    let while_it_stood = host.typed();
+    assert!(
+        while_it_stood <= 1,
+        "the pointer was typed {while_it_stood} times at a pane standing at its wall, \
+         for {LETTERS} letters"
+    );
+    assert!(
+        counted(&held_line) >= 1,
+        "the black box never said why nothing was typed"
+    );
+
+    // The wall stops standing: its window ran out and the pane's last answer,
+    // looked at again, is no wall. One line — and only one.
+    host.wall_lifts();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while host.typed() == while_it_stood && std::time::Instant::now() < deadline {
+        super::tick(&host, &[], clock());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert_eq!(
+        host.typed(),
+        while_it_stood + 1,
+        "the pane was not told about its mail once its wall had lifted"
+    );
+    assert_eq!(
+        counted(&lifted_line),
+        1,
+        "the lift was not written down once"
+    );
+
+    /* The agent reads what the line pointed at: its turn is a real one now.
+     * The mail is acknowledged, and nothing is typed after it. */
+    host.answers(false);
+    let leader_seat = zerocode_core::agent_teams::LEADER_PANE;
+    let read = run(
+        &host,
+        Vec::new(),
+        &team,
+        leader_seat,
+        TEST_CAPABILITY,
+        &words("check"),
+        clock(),
+    );
+    assert_eq!(read.exit_code, 0, "{}", read.stderr);
+    let read: serde_json::Value = serde_json::from_str(&read.stdout).expect("a delivery");
+    assert_eq!(
+        read["count"], LETTERS,
+        "the letters were not all handed over"
+    );
+    let delivery = read["deliveryId"].as_str().expect("a delivery id");
+    let acked = run(
+        &host,
+        Vec::new(),
+        &team,
+        leader_seat,
+        TEST_CAPABILITY,
+        &words(&format!("check --ack {delivery}")),
+        clock(),
+    );
+    assert_eq!(acked.exit_code, 0, "{}", acked.stderr);
+    for _ in 0..3 {
+        super::tick(&host, &[], clock());
+    }
+    assert_eq!(
+        host.typed(),
+        while_it_stood + 1,
+        "read mail was pointed at again"
+    );
+
+    super::pane_turn_began(LEADER);
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::orchestration_pointer_mailbox::forget_term(LEADER);
+}
+
+/// A pane whose last answer was already its login wall is not typed at
+/// when mail comes — not even once — and is told the moment it answers
+/// again (t-6560).
+///
+/// The login that expired on 2026-09-20 12:10 took nine lines in twenty
+/// seconds, each answered by the CLI itself with `Login expired · Please
+/// run /login`. The person signs in, their own turn goes through, and that
+/// turn's end is where the pointer speaks — once.
+#[test]
+fn mail_for_a_pane_already_at_its_login_wall_waits_for_its_next_answer() {
+    const LEADER: u32 = 11_562;
+    const WORKER: u32 = 11_563;
+    let _window = the_window();
+    let _turn = one_beat_at_a_time();
+    let team = format!("team-login-wall-{LEADER}");
+    let (run_id, worker, pane) = a_worker_carrying_work(&team, LEADER, WORKER);
+    let host = AtItsWall::new(LEADER, crate::quota_wall::StallCause::LoginWall, true);
+    let held = crate::agent_teams::current_pane_capability(&team, &pane)
+        .expect("the split minted the worker a capability");
+    super::pane_turn_began(LEADER);
+    super::pane_turn_ended(LEADER, clock(), false, clock());
+
+    for n in 1..=5 {
+        let posted = run(
+            &host,
+            Vec::new(),
+            &team,
+            &pane,
+            &held,
+            &words(&format!(
+                "send --type status --body login-{n} --retry-request login-wall-{worker}-{n}"
+            )),
+            clock(),
+        );
+        assert_eq!(posted.exit_code, 0, "{}", posted.stderr);
+        for _ in 0..3 {
+            super::tick(&host, &[], clock());
+            host.answers(true);
+        }
+    }
+    assert_eq!(
+        host.typed(),
+        0,
+        "the pointer was typed at a pane whose own last answer was its login wall"
+    );
+    let blackbox = super::BLACKBOX
+        .get()
+        .expect("the bench window's black box")
+        .join("window-errors.log");
+    let log = std::fs::read_to_string(&blackbox).unwrap_or_default();
+    assert!(
+        log.lines().any(|line| line.contains(&format!(
+            "mail waiting for run:{run_id} in {run_id} is held at terminal {LEADER}"
+        )) && line.contains("login wall")),
+        "the black box never named the login wall"
+    );
+
+    // The person signs in and their own turn goes through: the turn begins,
+    // ends, and its last answer is no wall. The next beat at rest speaks.
+    host.wall_lifts();
+    super::pane_turn_began(LEADER);
+    super::pane_turn_ended(LEADER, clock(), false, clock());
+    for _ in 0..3 {
+        super::tick(&host, &[], clock());
+    }
+    assert_eq!(
+        host.typed(),
+        1,
+        "the pane was not told once its login answered again"
+    );
+
+    super::pane_turn_began(LEADER);
+    crate::agent_teams::forget_term(LEADER);
+    crate::agent_teams::forget_term(WORKER);
+    crate::orchestration_pointer_mailbox::forget_term(LEADER);
+}
+
 /// A pane a person interrupted is theirs, and stays theirs until they
 /// finish a turn in it — so its door, like an unheard pane's, is one no
 /// beat opens on its own. The pointer must not type there either, and the

@@ -867,6 +867,18 @@ pub trait Host {
         None
     }
 
+    /// The wall this pane's own conversation last ended at, when it ended at
+    /// one: a quota or a login that the next prompt would only meet again
+    /// (t-6560, `quota_wall.rs`).
+    ///
+    /// Asked by the mail pointer at the moment it would type a fresh line,
+    /// never once a beat: the real window reads the tail of the pane's
+    /// transcript here. Test and tmux-only hosts default to no observation
+    /// rather than inventing a wall.
+    fn pane_wall(&self, _term: u32, _agent: &str) -> Option<crate::quota_wall::PaneWall> {
+        None
+    }
+
     /// Observe a quiet worker's own quota marker while holding the activity
     /// locks that can invalidate it. Call `commit` at most once, and keep the
     /// locks until it returns. This is asked after the actor dequeues terminal

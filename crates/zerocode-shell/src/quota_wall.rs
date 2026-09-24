@@ -1,7 +1,16 @@
 //! The agent's OWN words about why it stopped — the measured stall-cause
-//! table. Two causes today: the quota wall, the first of the two witnesses a
+//! table. Three causes today: the quota wall, the first of the two witnesses a
 //! `quota_walled` notice needs (`docs/design/quota-aware-summoning-and-handover.md`
-//! §2.2), and the transient API error a declared continuation answers (t-4537).
+//! §2.2), the transient API error a declared continuation answers (t-4537),
+//! and the expired login, which answers every prompt the way a wall does.
+//!
+//! The two walls have a second reader (t-6560): the mail pointer, which asks
+//! whether the pane it is about to type at ended its last turn at one. Any
+//! prompt typed there only meets the same wall again — on 2026-09-20..23 the
+//! coordinator's pane was retyped at 1,391 times that way — so the pointer
+//! holds its line until the wall stops standing. It reads the conversation's
+//! record and never the screen: the record says when it was written, and a
+//! hold needs to know until when.
 //!
 //! A table of measured markers, one row per CLI and cause, the way `TUNABLE`
 //! is a table of measured launch dials: nothing here is guessed from
@@ -38,6 +47,9 @@ pub(crate) enum StallCause {
     /// A provider or transport failure that ended the turn and that the next
     /// request may well not meet (t-4537).
     TransientApiError,
+    /// The agent's login is gone: every prompt is answered by the CLI itself
+    /// until somebody signs it in again (t-6560).
+    LoginWall,
 }
 
 impl StallCause {
@@ -49,6 +61,22 @@ impl StallCause {
     /// news, and a person typing into a wall does not lift it.
     const fn needs_the_last_word(self) -> bool {
         matches!(self, Self::TransientApiError)
+    }
+
+    /// Whether the next prompt meets this cause again for certain — the walls
+    /// the mail pointer holds its line back from. A transient error is the
+    /// opposite: the next prompt is the cure.
+    const fn answers_every_prompt(self) -> bool {
+        matches!(self, Self::QuotaWall | Self::LoginWall)
+    }
+
+    /// The cause as the window's own log names it.
+    pub(crate) const fn word(self) -> &'static str {
+        match self {
+            Self::QuotaWall => "quota",
+            Self::TransientApiError => "transient-error",
+            Self::LoginWall => "login",
+        }
     }
 }
 
@@ -132,6 +160,15 @@ struct StallMarkerRule {
 ///   and `compaction` records and nothing a provider error ends (987 files),
 ///   the window reads no zo transcript, and zo reconnects a dropped stream
 ///   itself (`waiting` / `reconnecting` on its status line).
+///
+/// Login wall (2026-09-24, the coordinator transcript `68b2661a-…`, 2.1.263
+/// through 2.1.280):
+/// - claude: "Login expired · Please run /login", all thirteen records the
+///   `isApiErrorMessage` assistant record with `error: "authentication_failed"`
+///   and no `requestId` — the CLI answers the prompt itself and asks nobody.
+///   Nine of them came two seconds apart on 2026-09-20 12:10, each after a
+///   mail pointer. The word, not the sentence, is the marker.
+/// - codex, zo: no row — no expired login in their records on this machine.
 const STALL_MARKERS: &[StallMarkerRule] = &[
     StallMarkerRule {
         agent: "codex",
@@ -183,6 +220,15 @@ const STALL_MARKERS: &[StallMarkerRule] = &[
         screen: &[],
         transcript: TranscriptRule::ClaudeJsonl {
             errors: &["server_error"],
+            says: &[],
+        },
+    },
+    StallMarkerRule {
+        agent: "claude",
+        cause: StallCause::LoginWall,
+        screen: &[],
+        transcript: TranscriptRule::ClaudeJsonl {
+            errors: &["authentication_failed"],
             says: &[],
         },
     },
@@ -276,12 +322,89 @@ pub(crate) fn transient_error_in(agent: &str, lines: &[String]) -> Option<Transi
     })
 }
 
-/// What one transcript reader found: where, the words, and the record's own
-/// identity when it carries one.
+/// A wall the pane's own conversation last ended at, as the mail pointer
+/// reads it (t-6560): which wall, the agent's words, and until when it
+/// stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PaneWall {
+    pub(crate) cause: StallCause,
+    pub(crate) line: Text,
+    /// The reset the record names and the grace after it, or the longest a
+    /// wall with no reset stands — `QUOTA_WAIT_POLICY`, the one table.
+    pub(crate) stands_until_ms: i64,
+}
+
+impl PaneWall {
+    pub(crate) const fn stands(&self, now_ms: i64) -> bool {
+        now_ms < self.stands_until_ms
+    }
+}
+
+/// Whether any wall row of `agent`'s reads a record — asked before a
+/// transcript is opened, so an agent whose walls are screen words only (zo)
+/// or that nobody measured costs no file read.
+fn reads_pane_walls(agent: &str) -> bool {
+    STALL_MARKERS.iter().any(|rule| {
+        rule.agent == agent
+            && rule.cause.answers_every_prompt()
+            && !matches!(rule.transcript, TranscriptRule::None)
+    })
+}
+
+/// The wall `agent`'s conversation last ended at, read off the bounded tail
+/// of its transcript at `transcript_path` — the production road, one file
+/// read.
+pub(crate) fn pane_wall_for(agent: &str, transcript_path: &Path) -> Option<PaneWall> {
+    if !reads_pane_walls(agent) {
+        return None;
+    }
+    let lines = zerocode_core::transcript::tail_lines(transcript_path)?;
+    pane_wall_in(agent, &lines)
+}
+
+/// The wall `agent`'s conversation last ended at, in its transcript's tail
+/// lines (oldest first). Pure.
+///
+/// The newest answer decides, as it does for the wall's first witness: an
+/// ordinary answer after the wall is a conversation that went on, and a prompt
+/// after it — the pointer's own, a person's — is not an answer. A record with
+/// no time of its own is no wall here: a hold that cannot say until when would
+/// stand for as long as the record does.
+pub(crate) fn pane_wall_in(agent: &str, lines: &[String]) -> Option<PaneWall> {
+    STALL_MARKERS
+        .iter()
+        .filter(|rule| rule.agent == agent && rule.cause.answers_every_prompt())
+        .find_map(|rule| {
+            let found = read_transcript(rule, lines)?;
+            let at_ms = found.at_ms?;
+            Some(PaneWall {
+                cause: rule.cause,
+                line: found.line,
+                stands_until_ms: zerocode_core::orchestration::wall_stands_until(
+                    at_ms,
+                    found.resets_at_ms,
+                ),
+            })
+        })
+}
+
+/// What one transcript reader found: where, the words, the record's own
+/// identity, when it was written and the reset it names, when it carries them.
 struct Found {
     source: &'static str,
     line: Text,
     key: Option<String>,
+    at_ms: Option<i64>,
+    resets_at_ms: Option<i64>,
+}
+
+/// When a record was written, off its own `timestamp` field — the same field
+/// in a Claude transcript and a Codex rollout.
+fn written_at(record: &serde_json::Value) -> Option<i64> {
+    record
+        .get("timestamp")
+        .and_then(|v| v.as_str())
+        .and_then(zerocode_core::civil::epoch_ms_of_iso)
 }
 
 fn read_transcript(rule: &StallMarkerRule, lines: &[String]) -> Option<Found> {
@@ -349,6 +472,10 @@ fn codex_rollout_marker(lines: &[String], errors: &[CodexError]) -> Option<Found
                 .get("turn_id")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            at_ms: written_at(&value),
+            // The reset is in the sentence ("try again at Sep 7th, 2026
+            // 11:27 AM"), in words nobody here has measured a parser for.
+            resets_at_ms: None,
         });
     }
     None
@@ -428,6 +555,16 @@ fn claude_transcript_marker(
                 .get("uuid")
                 .and_then(|v| v.as_str())
                 .map(str::to_string),
+            at_ms: written_at(&value),
+            // The provider's own answer to the refused request, in epoch
+            // seconds: `quotaLimits.resetsAt` rides every session and weekly
+            // wall on this machine (2.1.280). A model's own cap and a monthly
+            // spend cap carry no `quotaLimits`, and a login has no reset.
+            resets_at_ms: value
+                .get("quotaLimits")
+                .and_then(|limits| limits.get("resetsAt"))
+                .and_then(serde_json::Value::as_i64)
+                .map(|seconds| seconds.saturating_mul(1000)),
         });
     }
     None
@@ -905,5 +1042,283 @@ pub(crate) mod tests {
         assert_eq!(found.key, "8ff6adcf-19c1-45a5-b351-c3aa70bd37b7");
         assert!(transient_error_for("claude", &dir.path().join("gone.jsonl")).is_none());
         assert!(transient_error_for("zo", &transcript).is_none());
+    }
+
+    /* ---- the pane's own wall, as the mail pointer reads it (t-6560) ---- */
+
+    /// The walls the coordinator's pane met, as its transcript carries them
+    /// (`68b2661a-…`, ids scrubbed): a session wall and a weekly one with the
+    /// provider's `quotaLimits` beside them, a model's own cap with none, and
+    /// an expired login the CLI answered itself.
+    const CLAUDE_SESSION_WALL_RECORD: &str = r#"{"type":"assistant","uuid":"s","timestamp":"2026-09-23T08:55:23.536Z","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You've hit your session limit · resets 6:30pm (Asia/Seoul)"}]},"requestId":"req_s","error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429,"quotaLimits":{"status":"rejected","resetsAt":1790155800,"rateLimitType":"five_hour"}}"#;
+    const CLAUDE_WEEKLY_WALL_RECORD: &str = r#"{"type":"assistant","uuid":"w","timestamp":"2026-09-20T02:19:15.811Z","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"You've hit your weekly limit · resets 11am (Asia/Seoul)"}]},"requestId":"req_w","error":"rate_limit","isApiErrorMessage":true,"apiErrorStatus":429,"quotaLimits":{"status":"rejected","resetsAt":1789956000,"rateLimitType":"seven_day"}}"#;
+    const CLAUDE_LOGIN_EXPIRED_RECORD: &str = r#"{"type":"assistant","uuid":"l","timestamp":"2026-09-20T03:10:33.349Z","message":{"model":"<synthetic>","role":"assistant","content":[{"type":"text","text":"Login expired · Please run /login"}]},"error":"authentication_failed","isApiErrorMessage":true}"#;
+
+    fn at(iso: &str) -> i64 {
+        zerocode_core::civil::epoch_ms_of_iso(iso).expect("a stamp")
+    }
+
+    /// Each wall is read off the pane's last answer with the window the wall
+    /// table gives it: the reset the provider named and the grace after it,
+    /// or — no reset, or one further than the longest wait — the longest wait
+    /// from the moment the answer was written.
+    #[test]
+    fn a_pane_wall_stands_for_the_window_its_own_record_gives_it() {
+        let policy = zerocode_core::orchestration::QUOTA_WAIT_POLICY;
+        let read = |held: &[&str]| pane_wall_in("claude", &lines(held));
+
+        let session =
+            read(&[CLAUDE_PLAIN_RECORD, CLAUDE_SESSION_WALL_RECORD]).expect("a session wall");
+        assert_eq!(session.cause, StallCause::QuotaWall);
+        assert_eq!(
+            session.stands_until_ms,
+            1_790_155_800_000 + policy.slack_ms,
+            "the session wall stands until its reset and the grace after it"
+        );
+        assert!(session.stands(at("2026-09-23T09:30:00.000Z")));
+        assert!(!session.stands(at("2026-09-23T09:33:00.000Z")));
+
+        // Reset 23.7 hours away: past the longest wait, which then decides.
+        let weekly = read(&[CLAUDE_WEEKLY_WALL_RECORD]).expect("a weekly wall");
+        assert_eq!(
+            weekly.stands_until_ms,
+            at("2026-09-20T02:19:15.811Z") + policy.max_wait_ms
+        );
+
+        let cap = read(&[CLAUDE_MODEL_CAP_RECORD]).expect("a model's own cap");
+        assert_eq!(cap.cause, StallCause::QuotaWall);
+        assert_eq!(
+            cap.stands_until_ms,
+            at("2026-09-21T21:08:12.346Z") + policy.max_wait_ms,
+            "a cap that names no reset stands for the longest wait"
+        );
+
+        let login =
+            read(&[CLAUDE_PLAIN_RECORD, CLAUDE_LOGIN_EXPIRED_RECORD]).expect("a login wall");
+        assert_eq!(login.cause, StallCause::LoginWall);
+        assert_eq!(login.line.as_str(), "Login expired · Please run /login");
+        assert_eq!(
+            login.stands_until_ms,
+            at("2026-09-20T03:10:33.349Z") + policy.max_wait_ms
+        );
+
+        // A prompt after the wall — the pointer's own line — is no answer.
+        assert!(read(&[CLAUDE_SESSION_WALL_RECORD, CLAUDE_POINTER_PROMPT]).is_some());
+
+        let codex = pane_wall_in("codex", &lines(&[CODEX_CLEAN_EDGE, CODEX_WALL_EDGE]))
+            .expect("codex's rollout edge");
+        assert_eq!(codex.cause, StallCause::QuotaWall);
+        assert_eq!(
+            codex.stands_until_ms,
+            at("2026-09-03T23:29:11.434Z") + policy.max_wait_ms
+        );
+        assert!(reads_pane_walls("claude") && reads_pane_walls("codex"));
+    }
+
+    /// No wall where the conversation went on, where the stop is one the
+    /// next prompt cures, where the record cannot say when it was written,
+    /// or where the only words are on a screen.
+    #[test]
+    fn a_pane_that_answered_since_or_stopped_on_something_else_is_not_walled() {
+        let read = |held: &[&str]| pane_wall_in("claude", &lines(held));
+        for (why, held) in [
+            (
+                "an answer after the wall",
+                vec![
+                    CLAUDE_SESSION_WALL_RECORD,
+                    CLAUDE_POINTER_PROMPT,
+                    CLAUDE_PLAIN_RECORD,
+                ],
+            ),
+            (
+                "an answer after the login",
+                vec![CLAUDE_LOGIN_EXPIRED_RECORD, CLAUDE_PLAIN_RECORD],
+            ),
+            ("a transient error", vec![CLAUDE_TRANSIENT_RECORD]),
+            ("a safeguard", vec![CLAUDE_SAFEGUARD_RECORD]),
+            ("a login record with no time", vec![CLAUDE_LOGIN_RECORD]),
+            (
+                "a tool result quoting a wall",
+                vec![CLAUDE_PLAIN_RECORD, CLAUDE_USER_QUOTING_THE_WALL],
+            ),
+        ] {
+            assert!(read(&held).is_none(), "claude: {why} was a wall");
+        }
+        assert!(
+            pane_wall_in("codex", &lines(&[CODEX_WALL_EDGE, CODEX_CLEAN_EDGE])).is_none(),
+            "a recovered codex session was still walled"
+        );
+        // zo's wall is screen words only: the pointer never guesses from a
+        // screen, which cannot say when its line was written.
+        assert!(!reads_pane_walls("zo") && !reads_pane_walls("cursor"));
+        assert!(pane_wall_in("zo", &lines(&[CLAUDE_SESSION_WALL_RECORD])).is_none());
+    }
+
+    /// The production road: the table first, then one bounded tail read.
+    #[test]
+    fn the_pane_wall_road_reads_the_tail_of_a_real_file() {
+        let dir = tempfile::tempdir().expect("a transcript dir");
+        let transcript = dir.path().join("session.jsonl");
+        std::fs::write(
+            &transcript,
+            format!(
+                "{CLAUDE_PLAIN_RECORD}\n{CLAUDE_POINTER_PROMPT}\n{CLAUDE_SESSION_WALL_RECORD}\n"
+            ),
+        )
+        .expect("write");
+        let wall = pane_wall_for("claude", &transcript).expect("the wall");
+        assert_eq!(wall.cause, StallCause::QuotaWall);
+        assert!(pane_wall_for("claude", &dir.path().join("gone.jsonl")).is_none());
+        assert!(pane_wall_for("zo", &transcript).is_none());
+    }
+
+    /// The coordinator's typed pointers replayed through the reader the hold
+    /// uses (t-6560): how many the window typed, how many met a wall and a
+    /// refused request, and how many the hold would have let through.
+    ///
+    /// The replay walks a Claude transcript in order and keeps the last
+    /// answer the pane gave; a typed pointer the hold keeps back takes the
+    /// answer it caused out of the replay with it, so the next pointer is
+    /// judged against the pane as the hold would have left it. It adds
+    /// nothing the record does not hold: an auto-continuation a typed line
+    /// cancelled stays cancelled here, and a hold still standing when a burst
+    /// ends is counted as the one line owed at its lift.
+    ///
+    /// ```sh
+    /// ZEROCODE_POINTER_WALL_REPLAY=<transcript.jsonl> cargo test -p zerocode-shell \
+    ///   --bin zerocode-shell quota_wall::tests::the_typed_pointers_a_wall_hold_would_have_kept_back \
+    ///   -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "a measurement over a transcript on this machine, not a rule"]
+    fn the_typed_pointers_a_wall_hold_would_have_kept_back() {
+        use std::io::BufRead;
+        let Some(path) = std::env::var_os("ZEROCODE_POINTER_WALL_REPLAY") else {
+            println!("MEASURE skipped: set ZEROCODE_POINTER_WALL_REPLAY to a transcript");
+            return;
+        };
+        /// Pointers closer than this are one burst.
+        const BURST_GAP_MS: i64 = 10_000;
+        #[derive(Default)]
+        struct Burst {
+            first_ms: i64,
+            last_ms: i64,
+            typed: usize,
+            refused: usize,
+            kept_typed: usize,
+            kept_refused: usize,
+            held_at_end: bool,
+        }
+        let pointer = |text: &str| -> bool {
+            let bare = text
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("<pasted_content"))
+                .filter(|line| !line.trim_start().starts_with("</pasted_content"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            (1..=64).any(|count| {
+                bare.trim() == zerocode_core::orchestration::pointer_text(count).trim()
+            })
+        };
+        let file = std::fs::File::open(&path).expect("the transcript");
+        let mut bursts: Vec<Burst> = Vec::new();
+        let mut last_answer: Option<String> = None;
+        let mut swallow_next_answer = false;
+        let mut last_kept_pointer = false;
+        let mut last_pointer_ms = i64::MIN;
+        let mut held_now = false;
+        for line in std::io::BufReader::new(file).lines() {
+            let Ok(line) = line else { continue };
+            let is_user = line.contains("\"type\":\"user\"");
+            let is_answer = line.contains("\"type\":\"assistant\"");
+            if !is_user && !is_answer {
+                continue;
+            }
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            let written = written_at(&value).unwrap_or_default();
+            if is_user {
+                let typed = value.get("promptSource").and_then(|v| v.as_str()) == Some("typed");
+                let text = value
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                if !typed || !pointer(text) {
+                    continue;
+                }
+                if written.saturating_sub(last_pointer_ms) > BURST_GAP_MS {
+                    if let Some(open) = bursts.last_mut() {
+                        open.held_at_end = held_now;
+                    }
+                    bursts.push(Burst {
+                        first_ms: written,
+                        ..Burst::default()
+                    });
+                }
+                last_pointer_ms = written;
+                let burst = bursts.last_mut().expect("a burst");
+                burst.last_ms = written;
+                burst.typed += 1;
+                let wall = last_answer
+                    .as_ref()
+                    .and_then(|answer| pane_wall_in("claude", std::slice::from_ref(answer)));
+                held_now = wall.is_some_and(|wall| wall.stands(written));
+                last_kept_pointer = !held_now;
+                if last_kept_pointer {
+                    burst.kept_typed += 1;
+                }
+                swallow_next_answer = held_now;
+                continue;
+            }
+            // An answer: the one a pointer caused, or anybody else's turn.
+            let refused = value.get("isApiErrorMessage").and_then(|v| v.as_bool()) == Some(true)
+                && value.get("requestId").is_some();
+            if let Some(burst) = bursts.last_mut()
+                && written.saturating_sub(burst.last_ms) <= BURST_GAP_MS
+                && refused
+            {
+                burst.refused += 1;
+                if last_kept_pointer && !swallow_next_answer {
+                    burst.kept_refused += 1;
+                }
+            }
+            if std::mem::take(&mut swallow_next_answer) {
+                continue;
+            }
+            last_kept_pointer = false;
+            last_answer = Some(line);
+        }
+        if let Some(open) = bursts.last_mut() {
+            open.held_at_end = held_now;
+        }
+        let mut totals = (0, 0, 0, 0, 0);
+        println!("MEASURE burst start(UTC) end typed refused | kept refused owed-at-lift");
+        for burst in bursts.iter().filter(|burst| burst.typed >= 3) {
+            let owed = usize::from(burst.held_at_end);
+            println!(
+                "MEASURE {} {} {} {} | {} {} {}",
+                zerocode_core::civil::iso_utc_of(burst.first_ms),
+                zerocode_core::civil::iso_utc_of(burst.last_ms),
+                burst.typed,
+                burst.refused,
+                burst.kept_typed,
+                burst.kept_refused,
+                owed
+            );
+            totals.0 += burst.typed;
+            totals.1 += burst.refused;
+            totals.2 += burst.kept_typed;
+            totals.3 += burst.kept_refused;
+            totals.4 += owed;
+        }
+        println!(
+            "MEASURE bursts>=3 typed={} refused={} | kept={} kept_refused={} owed_at_lift={}",
+            totals.0, totals.1, totals.2, totals.3, totals.4
+        );
+        let all: usize = bursts.iter().map(|burst| burst.typed).sum();
+        let kept: usize = bursts.iter().map(|burst| burst.kept_typed).sum();
+        println!("MEASURE every typed pointer={all} kept by the hold's rule={kept}");
     }
 }

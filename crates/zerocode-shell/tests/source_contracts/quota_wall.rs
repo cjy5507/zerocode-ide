@@ -531,3 +531,69 @@ fn the_orchestration_guide_teaches_the_transient_error_order() {
         );
     }
 }
+
+/// The mail pointer's hold at a pane standing at its wall (t-6560): the
+/// pane's own record is read in ONE place, where the pass would type a fresh
+/// line — after the running-turn road, after a held wall's own deadline — so
+/// a held pane costs no read a beat, and the window it holds for is the one
+/// wall table's. The real host reads the transcript's bounded tail, and the
+/// table is asked before the file is opened.
+#[test]
+fn the_pointer_reads_a_panes_wall_once_where_it_would_type_a_fresh_line() {
+    let orchestration = shell_source("orchestration.rs");
+    let pass = super::support::block_after(&orchestration, "fn point_at_waiting_mail(");
+    let at = |needle: &str| {
+        pass.find(needle)
+            .unwrap_or_else(|| panic!("the pointer pass lost `{needle}`:\n{pass}"))
+    };
+    let running = at("matches!(heard, Some(PaneTurn::Running))");
+    let deadline = at("Some(Standing::Walled { until_ms, .. }) if now_ms < until_ms => continue");
+    let asked = at(".pane_wall(term, &agent)");
+    assert!(
+        running < deadline && deadline < asked,
+        "the wall is read before the running road or a held wall's deadline:\n{pass}"
+    );
+    assert_eq!(
+        pass.matches(".pane_wall(").count(),
+        1,
+        "the pass reads a pane's wall in more than one place"
+    );
+    assert!(
+        pass.contains(".filter(|wall| wall.stands(now_ms))"),
+        "the hold stopped asking whether the wall still stands"
+    );
+
+    let tools = shell_source("agent_tools_runtime.rs");
+    let host = super::support::block_after(
+        &tools,
+        "fn pane_wall(&self, term: TermId, agent: &str) -> Option<crate::quota_wall::PaneWall> {",
+    );
+    assert!(
+        host.contains("transcript_path") && host.contains("quota_wall::pane_wall_for("),
+        "the real host does not read the pane's own transcript:\n{host}"
+    );
+    let table = shell_source("quota_wall.rs");
+    let road = super::support::block_after(&table, "pub(crate) fn pane_wall_for(");
+    let table_first = road
+        .find("reads_pane_walls(agent)")
+        .expect("the road asks the marker table");
+    let file_read = road
+        .find("tail_lines(")
+        .expect("the road reads the transcript's tail");
+    assert!(
+        table_first < file_read,
+        "the transcript is opened before the table is asked:\n{road}"
+    );
+    let reader = super::support::block_after(&table, "pub(crate) fn pane_wall_in(");
+    assert!(
+        reader.contains("zerocode_core::orchestration::wall_stands_until("),
+        "the hold's window left the one wall table:\n{reader}"
+    );
+
+    let core = core_source("orchestration.rs");
+    let window = super::support::block_after(&core, "pub fn wall_stands_until(");
+    assert!(
+        window.contains("wall_window(observed_at_ms, resets_at_ms)"),
+        "the pane's wall no longer reads the ledger row's window:\n{window}"
+    );
+}

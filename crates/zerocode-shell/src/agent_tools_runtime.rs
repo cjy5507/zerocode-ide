@@ -1514,6 +1514,14 @@ impl agent_teams::Host for TeamWindow {
         crate::quota_wall::marker_for(agent, screen.as_deref(), transcript.as_deref())
     }
 
+    fn pane_wall(&self, term: TermId, agent: &str) -> Option<crate::quota_wall::PaneWall> {
+        // The table is asked inside, before the file is opened: an agent
+        // whose walls are screen words only, or that nobody measured, costs
+        // a map lookup and no read.
+        let transcript = self.provider_session(term)?.transcript_path?;
+        crate::quota_wall::pane_wall_for(agent, std::path::Path::new(&transcript))
+    }
+
     fn with_quota_wall_observation(
         &self,
         term: TermId,
