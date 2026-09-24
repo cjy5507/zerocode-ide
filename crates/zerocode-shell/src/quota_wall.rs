@@ -602,11 +602,74 @@ pub(crate) fn reads_fallbacks(agent: &str) -> bool {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct DeviationScan {
     pub(crate) switches: Vec<ModelDeviation>,
-    pub(crate) next: u64,
+    pub(crate) next: ScanCursor,
+}
+
+/// Where a switch scan stands: `offset` bytes into the file that was at its
+/// path when it last read — THAT file, by its identity, not whatever stands
+/// at the path now (t-7153, R3). A cursor that knows no file yet reads from
+/// the start of the one it finds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScanCursor {
+    pub(crate) file: Option<TranscriptIdentity>,
+    pub(crate) offset: u64,
+}
+
+impl ScanCursor {
+    /// The cursor standing at `offset` in `file`.
+    const fn at(file: TranscriptIdentity, offset: u64) -> Self {
+        Self {
+            file: Some(file),
+            offset,
+        }
+    }
+}
+
+/// Which file a cursor's offset counts into: its first line's opening bytes
+/// — a Claude transcript opens on a record with the session's own uuid and
+/// timestamp — and when it was born, where the file system says. A file
+/// atomically replaced under the same path — a session id reused, a
+/// conversation rewritten — is another file, read from its start, whether
+/// it is shorter, as long as, or longer than the one before: before this an
+/// offset counted into the PATH, so a replacement as long as the old file
+/// read as unchanged and a longer one as appended to, and a switch in
+/// either's first bytes was never read. A file appended to keeps its first
+/// line and its birth, so a cursor into it stands.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TranscriptIdentity {
+    opening: Vec<u8>,
+    born: Option<std::time::SystemTime>,
+}
+
+/// How much of the first line names a transcript: a Claude record's `uuid`
+/// and `timestamp` ride in its first few hundred bytes, and a
+/// `file-history-snapshot` opens on its `messageId`.
+const TRANSCRIPT_OPENING_MAX: usize = 4 * 1024;
+
+impl TranscriptIdentity {
+    /// The identity of the open `file`, whose metadata is `meta`: its first
+    /// line's opening bytes (fewer than a line, when the line is still
+    /// being written — a file that has no whole first line yet is an empty
+    /// one, read from its start on every beat until it has), and its birth.
+    fn of(file: &mut std::fs::File, meta: &std::fs::Metadata) -> Option<Self> {
+        use std::io::{Read, Seek, SeekFrom};
+        file.seek(SeekFrom::Start(0)).ok()?;
+        let mut opening = Vec::with_capacity(TRANSCRIPT_OPENING_MAX.min(meta.len() as usize));
+        file.take(TRANSCRIPT_OPENING_MAX as u64)
+            .read_to_end(&mut opening)
+            .ok()?;
+        if let Some(end) = opening.iter().position(|byte| *byte == b'\n') {
+            opening.truncate(end);
+        }
+        Some(Self {
+            opening,
+            born: meta.created().ok(),
+        })
+    }
 }
 
 /// The switches of model recorded in the transcript at `path` past
-/// `offset` — whole lines only, and at most
+/// `cursor` — whole lines only, and at most
 /// [`zerocode_core::transcript::MAX_TAIL_BYTES`] of them a reading, so an
 /// 11.8 MB transcript is read in beats rather than on one (before this the
 /// first reading took the whole file into memory at once). A switch early
@@ -615,40 +678,51 @@ pub(crate) struct DeviationScan {
 /// 3.8 MB and up to 11.8 MB over fourteen days, against a 256 KiB tail). A
 /// line still being written waits for the next reading; a line longer than
 /// the window is a tool result — a switch record is about 700 bytes
-/// ([`tests::CLAUDE_FALLBACK`]) — and is stepped over; a file that shrank
-/// was rewritten and is read again from its start. An unchanged file costs
-/// one `stat`.
-pub(crate) fn scan_fallbacks(path: &Path, offset: u64) -> DeviationScan {
+/// ([`tests::CLAUDE_FALLBACK`]) — and is stepped over; a file that is not
+/// the cursor's ([`TranscriptIdentity`]), or that shrank, is read again
+/// from its start. An unchanged file costs one `stat` and one read of its
+/// opening bytes.
+pub(crate) fn scan_fallbacks(path: &Path, cursor: &ScanCursor) -> DeviationScan {
     use std::io::{Read, Seek, SeekFrom};
-    let standing = |next: u64| DeviationScan {
+    let standing = |next: ScanCursor| DeviationScan {
         switches: Vec::new(),
         next,
     };
     let Ok(mut file) = std::fs::File::open(path) else {
-        return standing(offset);
+        return standing(cursor.clone());
     };
-    let Ok(size) = file.metadata().map(|meta| meta.len()) else {
-        return standing(offset);
+    let Ok(meta) = file.metadata() else {
+        return standing(cursor.clone());
     };
-    let offset = if size < offset { 0 } else { offset };
+    let size = meta.len();
+    let Some(identity) = TranscriptIdentity::of(&mut file, &meta) else {
+        return standing(cursor.clone());
+    };
+    let same_file = cursor.file.as_ref() == Some(&identity);
+    let offset = if same_file && size >= cursor.offset {
+        cursor.offset
+    } else {
+        0
+    };
+    let at = |offset: u64| ScanCursor::at(identity.clone(), offset);
     if size == offset || file.seek(SeekFrom::Start(offset)).is_err() {
-        return standing(offset);
+        return standing(at(offset));
     }
     let window = zerocode_core::transcript::MAX_TAIL_BYTES.min(size - offset);
     let mut fresh = Vec::new();
     if file.take(window).read_to_end(&mut fresh).is_err() {
-        return standing(offset);
+        return standing(at(offset));
     }
     let Some(end) = fresh.iter().rposition(|byte| *byte == b'\n') else {
         // No whole line in the window: a full window is a line longer than
         // it, stepped over; anything shorter is a line still being written.
         let longer_than_the_window =
             fresh.len() as u64 == window && window == zerocode_core::transcript::MAX_TAIL_BYTES;
-        return standing(if longer_than_the_window {
+        return standing(at(if longer_than_the_window {
             offset + window
         } else {
             offset
-        });
+        }));
     };
     let lines: Vec<String> = String::from_utf8_lossy(&fresh[..end])
         .lines()
@@ -657,7 +731,7 @@ pub(crate) fn scan_fallbacks(path: &Path, offset: u64) -> DeviationScan {
         .collect();
     DeviationScan {
         switches: fallbacks_in(&lines),
-        next: offset + end as u64 + 1,
+        next: at(offset + end as u64 + 1),
     }
 }
 
@@ -1751,7 +1825,7 @@ pub(crate) mod tests {
     const CLAUDE_TOOL_QUOTING_THE_DECLINE: &str = r#"{"parentUuid":"x","isSidechain":false,"type":"user","uuid":"quote","timestamp":"2026-09-24T05:00:00.000Z","message":{"role":"user","content":[{"type":"tool_result","content":"grep: API Error: Fable 5.1's safeguards flagged this message"}]}}"#;
     /// A decline the CLI answered on its fallback, as w-5797's transcript
     /// carries it (2026-09-21 14:06:16, 2.1.278, ids scrubbed).
-    const CLAUDE_FALLBACK: &str = r#"{"parentUuid":"b","isSidechain":false,"type":"system","subtype":"model_refusal_fallback","content":"Fable 5.1's safeguards flagged this message. Switched to Opus 4.8.\n\nDetails: `[cyber]`","level":"warning","trigger":"refusal","direction":"retry","scope":"session","originalModel":"claude-fable-5-1","fallbackModel":"claude-opus-4-8","requestId":"req_f","apiRefusalCategory":"cyber","retractedMessageUuids":["r"],"refusedUserMessageUuid":"q","isMeta":false,"uuid":"switch-1","timestamp":"2026-09-21T14:06:16.566Z","version":"2.1.278"}"#;
+    pub(crate) const CLAUDE_FALLBACK: &str = r#"{"parentUuid":"b","isSidechain":false,"type":"system","subtype":"model_refusal_fallback","content":"Fable 5.1's safeguards flagged this message. Switched to Opus 4.8.\n\nDetails: `[cyber]`","level":"warning","trigger":"refusal","direction":"retry","scope":"session","originalModel":"claude-fable-5-1","fallbackModel":"claude-opus-4-8","requestId":"req_f","apiRefusalCategory":"cyber","retractedMessageUuids":["r"],"refusedUserMessageUuid":"q","isMeta":false,"uuid":"switch-1","timestamp":"2026-09-21T14:06:16.566Z","version":"2.1.278"}"#;
     /// Claude Code's pause dialog as a coordinator read it off w-5770 on
     /// 2026-09-21, in 2.1.281's own labels.
     const CLAUDE_DIALOG_SCREEN: &str = "\
@@ -1885,20 +1959,21 @@ pub(crate) mod tests {
         let mut file = std::fs::File::create(&path).expect("a transcript");
         writeln!(file, "{CLAUDE_PLAIN_RECORD}").expect("write");
         writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
-        let first = scan_fallbacks(&path, 0);
+        let first = scan_fallbacks(&path, &ScanCursor::default());
         assert_eq!(first.switches.len(), 1);
         assert_eq!(first.switches[0].key, "switch-1");
         assert_eq!(
-            first.next,
+            first.next.offset,
             std::fs::metadata(&path).expect("size").len(),
             "the cursor stands after the last whole line"
         );
+        assert!(first.next.file.is_some(), "the cursor knows its file");
         assert_eq!(
-            scan_fallbacks(&path, 0),
+            scan_fallbacks(&path, &ScanCursor::default()),
             first,
             "the same cursor reads the same"
         );
-        let again = scan_fallbacks(&path, first.next);
+        let again = scan_fallbacks(&path, &first.next);
         assert!(again.switches.is_empty(), "read past the cursor twice");
         assert_eq!(again.next, first.next);
         // A line still being written waits for its newline, cursor unmoved.
@@ -1906,22 +1981,131 @@ pub(crate) mod tests {
         let (head, rest) = second.split_at(40);
         write!(file, "{head}").expect("write");
         file.flush().expect("flush");
-        let waiting = scan_fallbacks(&path, first.next);
+        let waiting = scan_fallbacks(&path, &first.next);
         assert!(waiting.switches.is_empty());
         assert_eq!(waiting.next, first.next);
         writeln!(file, "{rest}").expect("write");
         file.flush().expect("flush");
-        let later = scan_fallbacks(&path, first.next);
+        let later = scan_fallbacks(&path, &first.next);
         assert_eq!(later.switches.len(), 1);
         assert_eq!(later.switches[0].key, "switch-2");
         // Rewritten shorter: read again from the start.
         std::fs::write(&path, format!("{CLAUDE_FALLBACK}\n")).expect("rewrite");
-        let rewritten = scan_fallbacks(&path, later.next);
+        let rewritten = scan_fallbacks(&path, &later.next);
         assert_eq!(rewritten.switches.len(), 1);
         assert_eq!(
-            rewritten.next,
+            rewritten.next.offset,
             u64::try_from(CLAUDE_FALLBACK.len() + 1).expect("small")
         );
+    }
+
+    /// A transcript exactly `len` bytes long that opens on `first` — the
+    /// rest one padding record — for a replacement as long as the file it
+    /// replaces (t-7153, R3).
+    pub(crate) fn a_transcript_as_long_as(first: &str, len: u64) -> String {
+        let pad = |body_len: usize| {
+            format!(
+                r#"{{"type":"user","uuid":"pad","message":{{"role":"user","content":"{}"}}}}"#,
+                "x".repeat(body_len)
+            )
+        };
+        let bare = pad(0).len() + 1;
+        let content = format!(
+            "{first}\n{}\n",
+            pad(usize::try_from(len).expect("small") - first.len() - 1 - bare)
+        );
+        assert_eq!(content.len() as u64, len, "the fixture's length");
+        content
+    }
+
+    /// A cursor counts into the FILE it read, not the path (t-7153, R3): a
+    /// transcript replaced under its path by another — as long as the old
+    /// one, or longer, with a switch in its first bytes — is read from its
+    /// start, where before the old offset stood and the switch was never
+    /// read; a partial first line names no file yet, and the whole line
+    /// then does. The file appended to keeps its identity.
+    #[test]
+    fn the_switch_scan_starts_over_when_the_file_at_its_path_is_another() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let replace = |content: &str| {
+            let fresh = dir.path().join("session.jsonl.next");
+            std::fs::write(&fresh, content).expect("the replacement");
+            std::fs::rename(&fresh, &path).expect("atomic replace");
+        };
+        replace(&format!("{CLAUDE_PLAIN_RECORD}\n{CLAUDE_FALLBACK}\n"));
+        let first = scan_fallbacks(&path, &ScanCursor::default());
+        assert_eq!(first.switches[0].key, "switch-1");
+        let old_len = std::fs::metadata(&path).expect("size").len();
+        assert_eq!(first.next.offset, old_len);
+
+        // As long as the old file, a new switch first: read from the start.
+        let second = CLAUDE_FALLBACK.replace("switch-1", "switch-2");
+        replace(&a_transcript_as_long_as(&second, old_len));
+        let rotated = scan_fallbacks(&path, &first.next);
+        assert_eq!(
+            rotated
+                .switches
+                .iter()
+                .map(|one| one.key.as_str())
+                .collect::<Vec<_>>(),
+            ["switch-2"],
+            "a replacement as long as the old file was read as unchanged"
+        );
+        assert_eq!(rotated.next.offset, old_len);
+        assert_ne!(rotated.next.file, first.next.file, "another file");
+
+        // Longer than the old file, a new switch first: from the start too.
+        let third = CLAUDE_FALLBACK.replace("switch-1", "switch-3");
+        replace(&format!(
+            "{third}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n"
+        ));
+        let longer = scan_fallbacks(&path, &rotated.next);
+        assert_eq!(
+            longer
+                .switches
+                .iter()
+                .map(|one| one.key.as_str())
+                .collect::<Vec<_>>(),
+            ["switch-3"],
+            "a longer replacement was read as appended to"
+        );
+        // Appended to, the file is the same file: the cursor stands.
+        let fourth = CLAUDE_FALLBACK.replace("switch-1", "switch-4");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        writeln!(file, "{fourth}").expect("write");
+        let appended = scan_fallbacks(&path, &longer.next);
+        assert_eq!(appended.next.file, longer.next.file, "the same file");
+        assert_eq!(
+            appended
+                .switches
+                .iter()
+                .map(|one| one.key.as_str())
+                .collect::<Vec<_>>(),
+            ["switch-4"],
+            "an appended file was read from its start again"
+        );
+
+        // A first line still being written names no whole file yet; once
+        // whole, the file is read from its start.
+        let fifth = CLAUDE_FALLBACK.replace("switch-1", "switch-5");
+        let (head, rest) = fifth.split_at(60);
+        replace(head);
+        let partial = scan_fallbacks(&path, &appended.next);
+        assert!(partial.switches.is_empty());
+        assert_eq!(partial.next.offset, 0);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        writeln!(file, "{rest}").expect("write");
+        let whole = scan_fallbacks(&path, &partial.next);
+        assert_eq!(whole.switches.len(), 1);
+        assert_eq!(whole.switches[0].key, "switch-5");
     }
 
     /// A reading is bounded (t-7153, P2): at most the tail window's bytes a
@@ -1945,13 +2129,16 @@ pub(crate) mod tests {
         writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
         let size = std::fs::metadata(&path).expect("size").len();
 
-        let first = scan_fallbacks(&path, 0);
+        let first = scan_fallbacks(&path, &ScanCursor::default());
         assert!(first.switches.is_empty());
-        assert_eq!(first.next, MAX_TAIL_BYTES, "one window, stepped over");
-        let second = scan_fallbacks(&path, first.next);
+        assert_eq!(
+            first.next.offset, MAX_TAIL_BYTES,
+            "one window, stepped over"
+        );
+        let second = scan_fallbacks(&path, &first.next);
         assert_eq!(second.switches.len(), 1, "the record after the long line");
         assert_eq!(second.switches[0].key, "switch-1");
-        assert_eq!(second.next, size);
+        assert_eq!(second.next.offset, size);
 
         // Many short lines: one window a beat, whole lines only, until caught up.
         let mut file = std::fs::File::create(&path).expect("a transcript");
@@ -1966,14 +2153,17 @@ pub(crate) mod tests {
         }
         writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
         let size = std::fs::metadata(&path).expect("size").len();
-        let mut cursor = 0;
+        let mut cursor = ScanCursor::default();
         let mut beats = 0;
         let mut switches = Vec::new();
-        while cursor < size {
-            let scan = scan_fallbacks(&path, cursor);
-            assert!(scan.next > cursor, "a beat that read nothing whole");
+        while cursor.offset < size {
+            let scan = scan_fallbacks(&path, &cursor);
             assert!(
-                scan.next - cursor <= MAX_TAIL_BYTES,
+                scan.next.offset > cursor.offset,
+                "a beat that read nothing whole"
+            );
+            assert!(
+                scan.next.offset - cursor.offset <= MAX_TAIL_BYTES,
                 "a beat read past its window"
             );
             switches.extend(scan.switches);

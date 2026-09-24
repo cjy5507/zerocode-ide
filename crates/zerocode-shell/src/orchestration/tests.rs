@@ -1246,32 +1246,65 @@ fn a_decline_and_a_switch_of_model_are_owed_on_the_desk() {
 /// the next beat reads the same lines again and the ledger — which keys a
 /// row by its record — writes each once; nothing to hold moves the cursor
 /// at once; a refusal after some chunks landed keeps the cursor too, and
-/// the landed rows dedupe on the second reading.
+/// the landed rows dedupe on the second reading. And a switch is written
+/// only for the worker whose attempt was open when it was written (R3): one
+/// dated before the summons, or undated, is asked of nobody, and the cursor
+/// moves past it.
 #[test]
 fn the_switch_scans_cursor_moves_only_past_what_the_ledger_holds() {
+    use crate::quota_wall::{DeviationScan, ScanCursor};
     use zerocode_core::orchestration::{MAX_LIST, ModelDeviation};
-    let switch = |key: &str| ModelDeviation {
+    const SUMMONED_MS: i64 = 1_000_000;
+    let switch_at = |key: &str, at_ms: Option<i64>| ModelDeviation {
         worker: String::new(),
         key: key.to_string(),
         from: "claude-fable-5-1".to_string(),
         to: "claude-opus-4-8".to_string(),
         category: Some("cyber".to_string()),
         scope: Some("session".to_string()),
-        at_ms: None,
+        at_ms,
     };
-    let scan = |keys: &[&str], next: u64| crate::quota_wall::DeviationScan {
-        switches: keys.iter().map(|key| switch(key)).collect(),
-        next,
+    let switch = |key: &str| switch_at(key, Some(SUMMONED_MS + 1));
+    let at = |offset: u64| ScanCursor { file: None, offset };
+    let scan = |switches: Vec<ModelDeviation>, next: u64| DeviationScan {
+        switches,
+        next: at(next),
     };
+    let record_scanned =
+        |scan: DeviationScan,
+         held_at: u64,
+         record: &mut dyn FnMut(Vec<ModelDeviation>) -> Result<bool, super::RuntimeError>| {
+            super::record_scanned_switches("w-1", SUMMONED_MS, scan, at(held_at), record)
+        };
 
     // Nothing to hold: the cursor moves, and nobody is asked.
     let mut asked = 0;
     assert_eq!(
-        super::record_scanned_switches("w-1", scan(&[], 40), 10, &mut |_| {
+        record_scanned(scan(Vec::new(), 40), 10, &mut |_| {
             asked += 1;
             Ok(true)
         }),
-        (40, false)
+        (at(40), false)
+    );
+    // Nothing of this worker's to hold — a switch dated before its summons,
+    // one with no date — moves the cursor too, and asks nobody.
+    assert_eq!(
+        record_scanned(
+            scan(
+                vec![
+                    switch_at("s-earlier", Some(SUMMONED_MS - 1)),
+                    switch_at("s-undated", None),
+                ],
+                90
+            ),
+            40,
+            &mut |_| {
+                asked += 1;
+                Ok(true)
+            }
+        ),
+        (at(90), false),
+        "another worker's switch was asked of the ledger"
     );
     assert_eq!(asked, 0);
 
@@ -1293,20 +1326,21 @@ fn the_switch_scans_cursor_moves_only_past_what_the_ledger_holds() {
         Ok(told)
     };
     assert_eq!(
-        super::record_scanned_switches("w-1", scan(&["s-1"], 700), 0, &mut record),
-        (0, false),
+        record_scanned(scan(vec![switch("s-1")], 700), 0, &mut record),
+        (at(0), false),
         "a refused row moved the cursor"
     );
     assert_eq!(
-        super::record_scanned_switches("w-1", scan(&["s-1"], 700), 0, &mut record),
-        (700, true)
+        record_scanned(scan(vec![switch("s-1")], 700), 0, &mut record),
+        (at(700), true)
     );
     assert_eq!(held.len(), 1);
 
     // Two chunks, the second refused: the cursor stays; asked again, the
     // first chunk dedupes and the second lands — each switch once.
-    let many: Vec<String> = (0..=MAX_LIST).map(|index| format!("m-{index}")).collect();
-    let keys: Vec<&str> = many.iter().map(String::as_str).collect();
+    let many: Vec<ModelDeviation> = (0..=MAX_LIST)
+        .map(|index| switch(&format!("m-{index}")))
+        .collect();
     let mut chunks = 0;
     let mut record = |switches: Vec<ModelDeviation>| -> Result<bool, super::RuntimeError> {
         chunks += 1;
@@ -1320,13 +1354,13 @@ fn the_switch_scans_cursor_moves_only_past_what_the_ledger_holds() {
         Ok(told)
     };
     assert_eq!(
-        super::record_scanned_switches("w-1", scan(&keys, 9_000), 700, &mut record),
-        (700, true),
+        record_scanned(scan(many.clone(), 9_000), 700, &mut record),
+        (at(700), true),
         "a partly refused reading moved the cursor"
     );
     assert_eq!(
-        super::record_scanned_switches("w-1", scan(&keys, 9_000), 700, &mut record),
-        (9_000, true)
+        record_scanned(scan(many, 9_000), 700, &mut record),
+        (at(9_000), true)
     );
     assert_eq!(held.len(), 1 + MAX_LIST + 1, "each switch once");
 }
@@ -4429,6 +4463,218 @@ fn a_worker_stopped_by_a_transient_api_error_is_typed_at_once_under_a_declared_o
         stood.news("went_quiet", stood.began + 12_001),
         Vec::<serde_json::Value>::new(),
         "a stop the beat answered was also a silence"
+    );
+}
+
+/// A switch of model is read off the FILE the cursor counted into, and is
+/// the worker's whose attempt was open when it was written (t-7153, R3).
+/// A transcript replaced under its path by another — as long as the old
+/// one, with a switch in its first bytes; or longer — is read from its
+/// start and the switch written, where before the old offset stood and a
+/// same-length replacement read as unchanged; a switch dated before the
+/// worker's summons is not written for it; and a worker seated later at the
+/// same path — a session resumed — is written only the switches after its
+/// own summons, never the earlier worker's as its own. A restart that
+/// forgets the cursors reads the file again and writes nothing twice.
+#[test]
+fn a_switch_in_a_transcript_replaced_under_its_path_is_written_and_an_earlier_workers_is_not() {
+    use crate::quota_wall::tests::{CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD, a_transcript_as_long_as};
+    use zerocode_core::civil::iso_utc_of;
+    const LEADER_TERM: u32 = 97_300;
+    let stood = StoppedWorker::stand(LEADER_TERM, "", Vec::new());
+    let switch = |key: &str, at_ms: i64| {
+        CLAUDE_FALLBACK
+            .replace("switch-1", key)
+            .replace("2026-09-21T14:06:16.566Z", &iso_utc_of(at_ms))
+    };
+    let replace = |content: &str| {
+        let fresh = stood._dir.path().join("next.jsonl");
+        std::fs::write(&fresh, content).expect("the replacement");
+        std::fs::rename(&fresh, &stood.host.transcript).expect("atomic replace");
+    };
+    let keys = |worker: &str, at: i64| -> Vec<String> {
+        stood.json("check --peek --types model_deviated", at)["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| {
+                serde_json::from_str::<serde_json::Value>(message["body"].as_str().expect("a body"))
+                    .expect("json")
+            })
+            .filter(|body| body["workerId"] == worker)
+            .map(|body| body["key"].as_str().expect("a key").to_string())
+            .collect()
+    };
+
+    replace(&format!(
+        "{CLAUDE_PLAIN_RECORD}\n{}\n",
+        switch("switch-1", stood.began + 5_000)
+    ));
+    tick(&stood.host, &[], stood.began + 10_000);
+    tick(&stood.host, &[], stood.began + 11_000);
+    assert_eq!(keys(&stood.worker, stood.began + 11_001), ["switch-1"]);
+    let old_len = std::fs::metadata(&stood.host.transcript)
+        .expect("size")
+        .len();
+
+    // Replaced under its path, as long as before, a new switch first.
+    replace(&a_transcript_as_long_as(
+        &switch("switch-2", stood.began + 12_000),
+        old_len,
+    ));
+    tick(&stood.host, &[], stood.began + 13_000);
+    assert_eq!(
+        keys(&stood.worker, stood.began + 13_001),
+        ["switch-1", "switch-2"],
+        "a switch in a transcript replaced as long as the old one was never read"
+    );
+
+    // Replaced by a longer one, a new switch first.
+    replace(&format!(
+        "{}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n",
+        switch("switch-3", stood.began + 14_000)
+    ));
+    tick(&stood.host, &[], stood.began + 15_000);
+    assert_eq!(
+        keys(&stood.worker, stood.began + 15_001),
+        ["switch-1", "switch-2", "switch-3"],
+        "a switch in a longer replacement's first bytes was never read"
+    );
+
+    // A switch dated before the summons is not this worker's.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&stood.host.transcript)
+        .expect("append");
+    use std::io::Write;
+    writeln!(file, "{}", switch("switch-0", stood.began - 60_000)).expect("write");
+    drop(file);
+    tick(&stood.host, &[], stood.began + 16_000);
+    assert_eq!(
+        keys(&stood.worker, stood.began + 16_001),
+        ["switch-1", "switch-2", "switch-3"],
+        "a switch written before the worker's summons was written as its own"
+    );
+
+    // Another worker seated at the same path: only what follows its summons.
+    let earlier = stood.worker.clone();
+    stood.json(
+        &format!("worker-stop --worker {earlier} --reason done --retry-request stop-{earlier}"),
+        stood.began + 17_000,
+    );
+    let task = stood.json("task-create --spec build-it-again", stood.began + 17_001)["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let later = stood.json(
+        &format!("worker-start --agent claude --task {task}"),
+        stood.began + 18_000,
+    )["workerId"]
+        .as_str()
+        .expect("a worker")
+        .to_string();
+    tick(&stood.host, &[], stood.began + 19_000);
+    tick(&stood.host, &[], stood.began + 20_000);
+    assert_eq!(
+        keys(&later, stood.began + 20_001),
+        Vec::<String>::new(),
+        "an earlier worker's switches were written as the later worker's own"
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&stood.host.transcript)
+        .expect("append");
+    writeln!(file, "{}", switch("switch-4", stood.began + 21_000)).expect("write");
+    drop(file);
+    tick(&stood.host, &[], stood.began + 22_000);
+    tick(&stood.host, &[], stood.began + 23_000);
+    assert_eq!(keys(&later, stood.began + 23_001), ["switch-4"]);
+    assert_eq!(
+        keys(&earlier, stood.began + 23_001),
+        ["switch-1", "switch-2", "switch-3"],
+        "the ended worker was written more"
+    );
+
+    // A window restart forgets every cursor: the same attempt's file is
+    // read again from its start, and the ledger — not the scan — writes
+    // nothing twice.
+    super::deviation_scans()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clear();
+    tick(&stood.host, &[], stood.began + 24_000);
+    tick(&stood.host, &[], stood.began + 25_000);
+    assert_eq!(
+        keys(&later, stood.began + 25_001),
+        ["switch-4"],
+        "a switch read again after a restart was written twice"
+    );
+    assert_eq!(
+        keys(&earlier, stood.began + 25_001),
+        ["switch-1", "switch-2", "switch-3"]
+    );
+}
+
+/// A refused scan holds the cursor into its OWN file, and a rotation after
+/// the refusal is still read whole (t-7153, R3): the ledger refuses a beat's
+/// rows, the cursor stays where the ledger holds rows of the old file; the
+/// file is then replaced under its path by one exactly as long as that
+/// cursor, a switch first — the next beat reads the new file from its start
+/// and the switch lands once, where an offset into the path read the
+/// replacement as unchanged. The refused switch was the old file's, and is
+/// gone with it.
+#[test]
+fn a_rotation_after_a_refused_scan_is_read_from_the_new_files_start() {
+    use crate::quota_wall::tests::{CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD, a_transcript_as_long_as};
+    use crate::quota_wall::{ScanCursor, scan_fallbacks};
+    use std::io::Write;
+    let dir = tempfile::tempdir().expect("a dir");
+    let path = dir.path().join("session.jsonl");
+    let switch = |key: &str| CLAUDE_FALLBACK.replace("switch-1", key);
+    let replace = |content: &str| {
+        let fresh = dir.path().join("session.jsonl.next");
+        std::fs::write(&fresh, content).expect("the replacement");
+        std::fs::rename(&fresh, &path).expect("atomic replace");
+    };
+    let mut held: Vec<String> = Vec::new();
+    let mut beat = |cursor: &ScanCursor, refuse: bool| -> ScanCursor {
+        let scan = scan_fallbacks(&path, cursor);
+        super::record_scanned_switches("w-1", 0, scan, cursor.clone(), &mut |switches| {
+            if refuse {
+                return Err(super::RuntimeError::RecoveryRequired);
+            }
+            held.extend(switches.into_iter().map(|one| one.key));
+            Ok(true)
+        })
+        .0
+    };
+
+    replace(&format!("{CLAUDE_PLAIN_RECORD}\n{}\n", switch("switch-1")));
+    let first = beat(&ScanCursor::default(), false);
+    let old_len = std::fs::metadata(&path).expect("size").len();
+    assert_eq!(first.offset, old_len);
+
+    // A switch appended, and refused: the cursor stays in the old file.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .expect("append");
+    writeln!(file, "{}", switch("switch-refused")).expect("write");
+    drop(file);
+    let refused = beat(&first, true);
+    assert_eq!(refused, first, "a refused beat moved the cursor");
+
+    // Replaced by a file as long as the cursor's offset, a switch first.
+    replace(&a_transcript_as_long_as(&switch("switch-2"), old_len));
+    let rotated = beat(&refused, false);
+    assert_eq!(rotated.offset, old_len);
+    assert_ne!(rotated.file, first.file, "another file");
+    let after = beat(&rotated, false);
+    assert_eq!(after, rotated, "an unchanged file moved the cursor");
+    assert_eq!(
+        held,
+        ["switch-1", "switch-2"],
+        "a rotation after a refused beat was not read from its start"
     );
 }
 

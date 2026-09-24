@@ -4384,13 +4384,25 @@ fn note_paused_declines(host: &dyn Host, now_ms: i64) {
     rang(moved);
 }
 
-/// Where each worker transcript's switch scan stands: the bytes the LEDGER
-/// holds the switches of (t-7153) — moved only after the rows are durable,
-/// never on the read. In memory on purpose — the ledger keys each row by its
-/// record, so a restart that reads a file again from the start writes
-/// nothing twice.
-fn deviation_scans() -> &'static Mutex<std::collections::HashMap<String, u64>> {
-    static READ: OnceLock<Mutex<std::collections::HashMap<String, u64>>> = OnceLock::new();
+/// Where a live worker's switch scan stands (t-7153): the transcript path
+/// its pane reported, and the cursor into THAT file — the bytes the LEDGER
+/// holds the switches of, moved only after the rows are durable, never on
+/// the read.
+struct HeldScan {
+    path: String,
+    cursor: crate::quota_wall::ScanCursor,
+}
+
+/// Each live worker's switch scan, by worker (t-7153, R3): a cursor is a
+/// worker's own and dies with its seat — a worker seated later at the same
+/// path, a session another summons resumed, begins its own count, and
+/// reads as its own only what was written after its attempt began
+/// ([`record_scanned_switches`]); a path that changed under a worker — its
+/// CLI began another session — begins a fresh cursor too. In memory on
+/// purpose — the ledger keys each row by its record, so a restart that
+/// reads a file again from the start writes nothing twice.
+fn deviation_scans() -> &'static Mutex<std::collections::HashMap<String, HeldScan>> {
+    static READ: OnceLock<Mutex<std::collections::HashMap<String, HeldScan>>> = OnceLock::new();
     READ.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
@@ -4404,16 +4416,23 @@ fn deviation_scans() -> &'static Mutex<std::collections::HashMap<String, u64>> {
 /// every lock — the scan table is taken to read a cursor and again to keep
 /// one, never across the file or the actor — for every live worker whose CLI
 /// records such switches; the cursor moves as [`record_scanned_switches`]
-/// says.
+/// says, and the cursors of workers no longer seated are let go.
 fn note_model_deviations(host: &dyn Host, now_ms: i64) {
     let (Some(seated), Some(held)) = (with_ledger_seats(seated_open_attempts), runtime()) else {
         return;
     };
     let mut moved = false;
-    for SeatedAttempt { worker, term, .. } in seated
+    let mut live = std::collections::HashSet::new();
+    for SeatedAttempt {
+        worker,
+        term,
+        started_ms,
+        ..
+    } in seated
         .into_iter()
         .filter(|one| crate::quota_wall::reads_fallbacks(&one.agent))
     {
+        live.insert(worker.clone());
         let Some(path) = host
             .provider_session(term)
             .and_then(|session| session.transcript_path)
@@ -4423,21 +4442,27 @@ fn note_model_deviations(host: &dyn Host, now_ms: i64) {
         let held_at = deviation_scans()
             .lock()
             .unwrap_or_else(|held| held.into_inner())
-            .get(&path)
-            .copied()
-            .unwrap_or(0);
-        let scan = crate::quota_wall::scan_fallbacks(Path::new(&path), held_at);
-        let (keep, moved_here) = record_scanned_switches(&worker, scan, held_at, &mut |switches| {
-            held.actor
-                .model_deviations(switches, now_ms)
-                .map(|(told, _)| told)
-        });
+            .get(&worker)
+            .filter(|held| held.path == path)
+            .map(|held| held.cursor.clone())
+            .unwrap_or_default();
+        let scan = crate::quota_wall::scan_fallbacks(Path::new(&path), &held_at);
+        let (keep, moved_here) =
+            record_scanned_switches(&worker, started_ms, scan, held_at, &mut |switches| {
+                held.actor
+                    .model_deviations(switches, now_ms)
+                    .map(|(told, _)| told)
+            });
         moved |= moved_here;
         deviation_scans()
             .lock()
             .unwrap_or_else(|held| held.into_inner())
-            .insert(path, keep);
+            .insert(worker, HeldScan { path, cursor: keep });
     }
+    deviation_scans()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .retain(|worker, _| live.contains(worker));
     rang(moved);
 }
 
@@ -4448,26 +4473,35 @@ fn note_model_deviations(host: &dyn Host, now_ms: i64) {
 /// next beat reads the same lines again, and the ledger writes each switch
 /// once (`workers_model_deviated` keys a row by its record's uuid). Before
 /// this the cursor moved on the read, and a refused row was gone until a
-/// restart. Answers the cursor to keep, and whether a row moved.
+/// restart.
+///
+/// A switch is the worker's whose attempt was open when the CLI wrote it
+/// (t-7153, R3): one dated before `started_ms` — an earlier worker's, in a
+/// session this one resumed — is not written for this worker, and a record
+/// with no time of its own cannot say whose it is and is not written
+/// either; the cursor moves past both, since neither will ever be this
+/// worker's. Answers the cursor to keep, and whether a row moved.
 fn record_scanned_switches(
     worker: &str,
+    started_ms: i64,
     scan: crate::quota_wall::DeviationScan,
-    held_at: u64,
+    held_at: crate::quota_wall::ScanCursor,
     record: &mut dyn FnMut(
         Vec<zerocode_core::orchestration::ModelDeviation>,
     ) -> Result<bool, RuntimeError>,
-) -> (u64, bool) {
+) -> (crate::quota_wall::ScanCursor, bool) {
     let crate::quota_wall::DeviationScan { switches, next } = scan;
-    if switches.is_empty() {
-        return (next, false);
-    }
     let named: Vec<zerocode_core::orchestration::ModelDeviation> = switches
         .into_iter()
+        .filter(|switch| switch.at_ms.is_some_and(|at_ms| at_ms >= started_ms))
         .map(|mut switch| {
             switch.worker = worker.to_string();
             switch
         })
         .collect();
+    if named.is_empty() {
+        return (next, false);
+    }
     let mut moved = false;
     for chunk in named.chunks(zerocode_core::orchestration::MAX_LIST) {
         match record(chunk.to_vec()) {
