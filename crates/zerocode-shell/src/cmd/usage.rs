@@ -662,14 +662,49 @@ pub(crate) async fn cli_login_logout(agent: String) -> Result<cli_login::Report,
     Ok(cli_login::report(&cli_login_programs(), epoch_ms_now()))
 }
 
+/// Baselines taken for a wait that has not begun — the pane roads take one
+/// BEFORE they open the CLI, so a session renewed on start is still a change
+/// when the watch begins (t-7170 R2). What a number stands for — one row,
+/// one file, one attempt, taken out once — is the store's own rule
+/// (`cli_login::Baselines`); the login text a baseline holds never leaves
+/// this process.
+fn cli_login_baselines() -> &'static Mutex<cli_login::Baselines> {
+    static HELD: OnceLock<Mutex<cli_login::Baselines>> = OnceLock::new();
+    HELD.get_or_init(|| Mutex::new(cli_login::Baselines::default()))
+}
+
+/// Take a provider's witness as it stands now, before the window runs the
+/// CLI: the number answered names the baseline `cli_login_wait` compares
+/// against. `None` for a row proven by no file, which has nothing to
+/// snapshot — the wait on such a row asks its own question. A file that
+/// could not be read is an error, and the window runs nothing on one
+/// (t-7170 R2c).
+#[tauri::command(async)]
+pub(crate) fn cli_login_witness(agent: String) -> Result<Option<u64>, String> {
+    let row = cli_login::row(&agent)
+        .ok_or_else(|| format!("{agent}은(는) 로그인 표에 없는 에이전트입니다"))?;
+    cli_login::hold_witness(cli_login_baselines(), row, epoch_ms_now())
+}
+
+/// Let a baseline go without waiting on it — the run it was taken for would
+/// not start, so no wait is coming. A number nobody holds is nothing to do.
+#[tauri::command(async)]
+pub(crate) fn cli_login_witness_drop(witness: u64) {
+    cli_login::witness_drop(cli_login_baselines(), witness);
+}
+
 /// Watch a provider's witness until it holds a login (`signed_in`) or stops
 /// holding one — the TUI roads, after the window has opened the CLI in one
 /// of its panes and typed the row's command. Long: a person is reading a
-/// device code off one screen and typing it into another.
+/// device code off one screen and typing it into another. `witness` is the
+/// number `cli_login_witness` answered before the run, and the store it
+/// names decides whether it may be compared against at all (t-7170 R2b):
+/// a number it refuses ends this wait there.
 #[tauri::command]
 pub(crate) async fn cli_login_wait(
     agent: String,
     signed_in: bool,
+    witness: Option<u64>,
 ) -> Result<cli_login::Report, String> {
     let row = cli_login::row(&agent)
         .ok_or_else(|| format!("{agent}은(는) 로그인 표에 없는 에이전트입니다"))?;
@@ -677,7 +712,14 @@ pub(crate) async fn cli_login_wait(
     // asks it; a row proven by a file needs nobody.
     let program = cli_login_programs()(row);
     tauri::async_runtime::spawn_blocking(move || {
-        cli_login::watch(row, program.as_deref(), signed_in, epoch_ms_now())
+        cli_login::wait(
+            cli_login_baselines(),
+            row,
+            program.as_deref(),
+            signed_in,
+            witness,
+            epoch_ms_now(),
+        )
     })
     .await
     .map_err(|error| error.to_string())??;

@@ -77,13 +77,13 @@ pub(crate) use fs::{
 pub(crate) use usage::{
     add_claude_account, add_codex_account, antigravity_usage, cancel_google_login, claude_accounts,
     claude_token_usage, claude_usage, claude_usage_stats, cli_login_list, cli_login_logout,
-    cli_login_start, cli_login_wait, codex_account_list, codex_token_usage, codex_usage,
-    codex_usage_stats, google_account, google_login_finish, google_login_start, google_logout,
-    grok_usage, kimi_usage, logout_codex_login, opencode_usage, opencode_usage_stats,
-    relogin_claude_account, relogin_codex_account, relogin_codex_login, remove_claude_account,
-    remove_codex_account, resolve_claude_account_identity, select_claude_account,
-    select_codex_account, set_opencode_cookie, set_opencode_workspace, stats_summary,
-    use_system_claude_login, verify_claude_accounts, verify_codex_accounts,
+    cli_login_start, cli_login_wait, cli_login_witness, cli_login_witness_drop, codex_account_list,
+    codex_token_usage, codex_usage, codex_usage_stats, google_account, google_login_finish,
+    google_login_start, google_logout, grok_usage, kimi_usage, logout_codex_login, opencode_usage,
+    opencode_usage_stats, relogin_claude_account, relogin_codex_account, relogin_codex_login,
+    remove_claude_account, remove_codex_account, resolve_claude_account_identity,
+    select_claude_account, select_codex_account, set_opencode_cookie, set_opencode_workspace,
+    stats_summary, use_system_claude_login, verify_claude_accounts, verify_codex_accounts,
 };
 
 pub(crate) use appearance::{

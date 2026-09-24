@@ -7836,6 +7836,20 @@ function detachedStillWorking(term) {
   return !hookStates.has(term) && (paneAgents.has(term) || paneSessions.has(term));
 }
 
+/* 이 판의 프로그램이 판을 **떠났는가** — 셸만 남아 프롬프트를 그리는 판. 훅
+ * 어휘 가운데 `idle` 한 낱말이 그 사실이다: 에이전트는 그 말을 보내지 않고,
+ * 백엔드가 전경 그룹이 셸의 것으로 돌아온 것을 보고 적는다(`HOOK_STATE_CLASS`
+ * 위 주석, `zerocode_core::agent_exit`). `done`은 다르다 — 턴이 끝났을 뿐
+ * 프로그램은 제 작성기에 서 있다. 아무 말도 없는 판은 갓 뜬 판이고, 프로그램이
+ * 안에 있다는 쪽으로 읽는다(`detachedStillWorking`과 같은 판정). 계정 화면의
+ * 로그인 길이 이 한 판정으로 슬래시 명령을 칠 판을 고른다 — 떠난 판(셸
+ * 프롬프트)에는 치지 않는다. 이 말은 과거의 관측이라 「지금 셸이 빈 입력줄로
+ * 앞에 있다」는 증명이 아니므로, 「한 번 실행」은 어떤 기존 판에도 치지 않고
+ * 언제나 새 판을 연다(t-7170 R1b). */
+function paneProgramLeft(term) {
+  return hookStates.get(term) === "idle";
+}
+
 function closePaneLeaf(tab, going) {
   const staying = paneLeaves(tab.layout).filter((term) => term !== going);
   if (staying.length === 0) return;

@@ -26,7 +26,7 @@ import { testKnowledgeLive } from "./knowledge-live.mjs";
 import { testArtifactCatalog, testArtifactChrome, testArtifactPages, testArtifactStudio, testArtifactStudioFold, testArtifactStudioLayout, testArtifactStudioOwnership } from "./artifact-gallery.mjs";
 
 import { testLedgerPoll } from "./ledger-poll.mjs";
-import { testUsageRefresh } from "./usage-refresh.mjs";
+import { testUsageRefresh, testUsageWords } from "./usage-refresh.mjs";
 import { testTaskBoard } from "./task-board.mjs";
 import { testCoordinatorDesk } from "./coordinator-desk.mjs";
 import { testCoordinatorDeskLayout } from "./coordinator-desk-layout.mjs";
@@ -175,7 +175,10 @@ suite("explorer", async ({ browser, origin, ok }) => {
 });
 suite("crash", ({ browser, origin, ok }) => testCrashReport(browser, origin, standBackend, ok));
 suite("ledger-poll", ({ browser, origin, ok }) => testLedgerPoll(browser, origin, standBackend, ok));
-suite("usage-refresh", ({ browser, origin, ok }) => testUsageRefresh(browser, origin, standBackend, ok));
+suite("usage-refresh", async ({ browser, origin, ok }) => {
+  await testUsageRefresh(browser, origin, standBackend, ok);
+  await testUsageWords(browser, origin, standBackend, ok);
+});
 suite("board-waits", ({ browser, origin, ok }) => testBoardWaits(browser, origin, ok));
 // Vault state stays local to this fixture, just like the explorer fixture.
 suite("task-board", ({ browser, origin, ok }) => testTaskBoard(browser, origin, ok));
@@ -23145,7 +23148,9 @@ const planFaces = await page.evaluate(async () => {
     quiet: await face(26, 12),
     warn: await face(65, 12),
     hot: await face(30, 88),
-    waiting: document.getElementById("sb-claude-wait").hidden,
+    // The 「···」 span is gone (t-7170): the one figure slot carries a figure
+    // or a word, and a settled read shows no 「확인 중…」 in it.
+    settled: document.getElementById("sb-claude-pct").textContent !== t("usage.loading", "확인 중…"),
   };
 });
 ok(
@@ -23155,7 +23160,7 @@ ok(
     planFaces.warn.tone === undefined && planFaces.warn.figure === "65% used 4h 28m · 12% used wk" &&
     planFaces.hot.width === "88%" && planFaces.hot.tone === undefined &&
     planFaces.hot.figure === "30% used 4h 28m · 88% used wk" &&
-    planFaces.hot.figureTone === undefined && planFaces.waiting &&
+    planFaces.hot.figureTone === undefined && planFaces.settled &&
     planFaces.hot.box > 0 &&
     planFaces.hot.paint === planFaces.quiet.paint &&
     planFaces.warn.paint === planFaces.hot.paint &&

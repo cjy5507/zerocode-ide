@@ -25613,13 +25613,23 @@ mod tests {
         for spelled in [
             "command: \"antigravity_usage\",",
             "{ id: \"antigravity\" },",
-            "usage?.status === USAGE_SIGNED_OUT",
         ] {
             assert!(
                 window.contains(spelled),
                 "the window lost its Antigravity gauge: {spelled}"
             );
         }
+        // Its signed-out answer is known by the bar's ONE judgment of a
+        // reading (t-7170): the segment asks `usageRosterState`, as the
+        // roster beside it does, and that judgment is what reads `signed_out`.
+        let judging = block_after(window, "function usageRosterState(");
+        let painting = block_after(window, "function paintProviderSegment(provider) {");
+        assert!(
+            judging.contains("if (usage.status === USAGE_SIGNED_OUT) {")
+                && painting.contains("usageRosterState(usage, fetching, providerSections(usage))")
+                && painting.contains("state.kind === \"sign-in\""),
+            "the window no longer knows the Antigravity gauge's signed-out answer:\n{judging}\n{painting}"
+        );
         assert!(
             markup.contains(r#"id="sb-antigravity""#),
             "the Antigravity surface fell out of the markup"

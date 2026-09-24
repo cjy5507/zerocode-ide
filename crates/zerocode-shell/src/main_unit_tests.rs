@@ -12262,6 +12262,174 @@ fn every_usage_read_leaves_its_line_and_a_poll_leaves_none() {
     assert_eq!(lines().len(), 2, "{:?}", lines());
 }
 
+/// A failed read leaves the same one line a successful one does — the road,
+/// the elapsed time, the status and the typed kind — and never the sentence
+/// the failure carried, which may name a home or a URL. Pinned on the Grok
+/// read the 2026-09-24 report was about: the coordinator grepped
+/// `window-errors.log` for `usage grok` and found nothing, because the
+/// installed v1.1.20 predates the line (78ffb20a); the line itself was whole
+/// (t-7170).
+#[test]
+fn a_usage_read_leaves_one_closed_line_in_the_window_log() {
+    use std::sync::atomic::Ordering;
+    static CACHE: Mutex<Option<usage::ProviderUsage>> = Mutex::new(None);
+    static SCANNING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    let directory = tempfile::tempdir().expect("data root");
+    let gauge = UsageGauge {
+        provider: "grok",
+        cache: &CACHE,
+        file: directory.path().join("grok-usage.json"),
+        scanning: &SCANNING,
+        log_root: directory.path().to_path_buf(),
+    };
+    let sentence =
+        "Grok 로그인이 만료되었습니다 — /Users/person/.grok 에서 grok을 한 번 실행하세요";
+    let expired = usage::ProviderUsage {
+        provider: "grok".to_string(),
+        session: None,
+        weekly: None,
+        fable_weekly: None,
+        monthly: None,
+        buckets: None,
+        updated_at: epoch_ms_now(),
+        error: Some(sentence.to_string()),
+        status: "error".to_string(),
+        failure_kind: Some(zerocode_core::usage_limit::FailureKind::DelegatedRefreshRequired),
+        retry_at_ms: None,
+        plan_type: None,
+        reset_credits: None,
+        account: None,
+    };
+    let report = usage_report(gauge, |_| true, false, move || Scanned::api(expired));
+    assert!(report.fetching, "the first read did not go out");
+    while SCANNING.load(Ordering::SeqCst) {
+        std::thread::yield_now();
+    }
+    let log =
+        std::fs::read_to_string(directory.path().join("window-errors.log")).unwrap_or_default();
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(
+        lines[0].contains(" usage grok road=api ms=")
+            && lines[0].ends_with(" status=error kind=delegated-refresh-required"),
+        "the failed read's line does not name its road, status and kind: {lines:?}"
+    );
+    assert!(
+        !log.contains("/Users") && !log.contains("만료"),
+        "the failure's sentence reached the durable log: {log}"
+    );
+    // The reading kept its sentence — the bar and the roster show it; only
+    // the log does without.
+    let held = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+        .expect("the read landed");
+    assert_eq!(held.error.as_deref(), Some(sentence));
+}
+
+/// The bar's segment never stands without a word (t-7170): when a reading
+/// has no figures, the segment's word comes off ONE table keyed by the
+/// reading's failure kind, the paint reads that table, the roster's offer and
+/// the accounts pane's button share one key, and the four catalogs carry
+/// every key the words need — Japanese in its own sentence, not the English
+/// one.
+#[test]
+fn the_bar_segment_words_come_off_one_table_in_every_catalog() {
+    let window = window_source();
+    let table = block_after(window, "const USAGE_FAILURE_WORDS = {");
+    for kind in [
+        "delegated-refresh-required",
+        "stale-token",
+        "missing-credentials",
+        "refreshable-credentials-without-token",
+        "missing-scope",
+        "keychain-unavailable",
+    ] {
+        assert!(
+            table.contains(&format!("\"{kind}\":")),
+            "`{kind}` has no word in the failure table:\n{table}"
+        );
+    }
+    assert!(
+        table.contains("USAGE_EXPIRED_RUN_WORD") && table.contains("USAGE_RELOGIN_WORD"),
+        "the table does not name the two repair words:\n{table}"
+    );
+    // Each word is one data row — `key: "…", said: "…"` on one line — which
+    // is the shape `no_label_reaches_the_window_hardcoded` reads as routed
+    // through the catalog.
+    for (name, key) in [
+        ("USAGE_EXPIRED_RUN_WORD", "usage.expiredRunOf"),
+        ("USAGE_RELOGIN_WORD", "usage.reloginOf"),
+        ("USAGE_READ_FAILED_WORD", "usage.readFailedOf"),
+    ] {
+        assert!(
+            window.lines().any(|line| {
+                line.starts_with(&format!("const {name} = {{"))
+                    && line.contains(&format!("key: \"{key}\""))
+            }),
+            "`{name}` is not one row carrying `{key}`"
+        );
+    }
+    let word = block_after(
+        window,
+        "function usageSegmentWord(provider, usage, state) {",
+    );
+    assert!(
+        word.contains("USAGE_FAILURE_WORDS[usage.failure_kind] ?? USAGE_READ_FAILED_WORD"),
+        "the segment's word is not read off the table with the read-failed fallback:\n{word}"
+    );
+    let paint = block_after(window, "function paintProviderSegment(provider) {");
+    assert!(
+        paint.contains("usageSegmentWord(") && !paint.contains("\"usage.signedOutOf\""),
+        "the segment paints a word beside the table:\n{paint}"
+    );
+    // The roster's offer and the accounts pane's button are one word.
+    assert_eq!(
+        window.matches("t(\"usage.runOnce\",").count(),
+        2,
+        "the run-once word is spelled other than in the roster row and the CLI login card"
+    );
+    let keys = [
+        "usage.expiredRunOf",
+        "usage.reloginOf",
+        "usage.readFailedOf",
+        "usage.runOnce",
+        "settings.cliLogins.expired",
+        "settings.cliLogins.waitingRefresh",
+    ];
+    let value = |catalog: &str, key: &str| -> String {
+        let line = catalog
+            .lines()
+            .find(|line| line.contains(&format!("\"{key}\":")))
+            .unwrap_or_else(|| panic!("`{key}` is missing from a catalog"));
+        line.split_once(": ")
+            .map(|(_, said)| said.trim().to_string())
+            .unwrap_or_default()
+    };
+    let mut english = std::collections::HashMap::new();
+    for language in ["en", "ja", "zh", "es"] {
+        let catalog = block_after(window, &format!("  {language}: {{"));
+        for key in keys {
+            assert!(
+                catalog.contains(&format!("\"{key}\":")),
+                "`{key}` is missing from the {language} catalog"
+            );
+            let said = value(catalog, key);
+            if language == "en" {
+                english.insert(key, said);
+            } else if language == "ja" {
+                assert_ne!(
+                    Some(&said),
+                    english.get(key),
+                    "the Japanese `{key}` is the English sentence"
+                );
+            }
+        }
+    }
+}
+
 /// An editor is asked for by the name its BUNDLE carries, which is not
 /// always the name on the button.
 ///

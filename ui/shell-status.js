@@ -1080,12 +1080,17 @@ function usageProvider(id) {
  * gains its button here, with no second list to forget. Claude, Codex and
  * Antigravity keep the `signIn` hand on their own records — their cards are
  * hand-made. */
-const cliSignIns = new Set();
+/* The CLI login table's rows, by agent id, carrying the name this machine
+ * has the program under: a row here is a road for a signed-out gauge, and
+ * its name is the word an expired gauge tells the person to run. */
+const cliLoginPrograms = new Map();
 
 function noteCliLoginRows(rows) {
-  cliSignIns.clear();
-  for (const row of rows) cliSignIns.add(row.agent);
+  cliLoginPrograms.clear();
+  for (const row of rows) cliLoginPrograms.set(row.agent, row.program ?? row.agent);
   paintUsagePanel();
+  // The bar's words name the program too.
+  paintUsageSegments();
 }
 
 /* Where a signed-out gauge sends a person, or `null` when this window has no
@@ -1093,7 +1098,72 @@ function noteCliLoginRows(rows) {
  * does nothing is worse than none. */
 function usageSignIn(provider) {
   if (provider.signIn) return provider.signIn;
-  return cliSignIns.has(provider.id) ? showProviderAccounts : null;
+  return cliLoginPrograms.has(provider.id) ? showProviderAccounts : null;
+}
+
+/* 수치가 없을 때 조각이 서는 낱말 — 읽기가 실패한 **종류**마다 하나, 표 한 곳.
+ *
+ * 실보고(2026-09-24, t-7170 「지금 계속 claude는 사용량 표시가 안됨」「그록도」):
+ * 계정 전환 직후 Claude 읽기가 낡은 사본의 401로 끝나면 조각은 아이콘과 삼각형만
+ * 남았고, Grok 세션이 만료되면 「···」 뒤에 아무 말도 없었다 — 이유는 툴팁에만
+ * 있었고, 사람은 「표시가 안 된다」고 읽었다. 낱말은 백엔드가 적은 실패의 종류로
+ * 고른다(`FailureKind`의 wire 철자, 스냅샷 파일과 같은 것 — usage_limit.rs):
+ * 갱신이 다른 프로세스의 몫이면 무엇을 실행할지, 자격 증명이 낡았으면 다시
+ * 로그인, 그 밖의 실패는 다시 시도. 문장 전체는 호버가 든다. 로그인이 풀린 것은
+ * 실패가 아니라 상태라 그 낱말(`usage.signedOutOf`)은 이 표 밖에 산다. */
+const USAGE_EXPIRED_RUN_WORD = { key: "usage.expiredRunOf", said: "{{provider}} 로그인 만료 — {{program}} 실행" };
+const USAGE_RELOGIN_WORD = { key: "usage.reloginOf", said: "{{provider}} 다시 로그인" };
+const USAGE_READ_FAILED_WORD = { key: "usage.readFailedOf", said: "{{provider}} 읽기 실패 — 다시 시도" };
+const USAGE_SIGNED_OUT_WORD = { key: "usage.signedOutOf", said: "{{provider}} 로그인 필요" };
+const USAGE_DELEGATED_REFRESH = "delegated-refresh-required";
+const USAGE_FAILURE_WORDS = {
+  "delegated-refresh-required": USAGE_EXPIRED_RUN_WORD,
+  "stale-token": USAGE_RELOGIN_WORD,
+  "missing-credentials": USAGE_RELOGIN_WORD,
+  "refreshable-credentials-without-token": USAGE_RELOGIN_WORD,
+  "missing-scope": USAGE_RELOGIN_WORD,
+  "keychain-unavailable": USAGE_RELOGIN_WORD,
+};
+
+/* 갱신이 CLI의 다음 실행에 달린 읽기(Grok: `usage_grok.rs`의
+ * `DelegatedRefreshRequired`). 창이 로그인도 갱신도 대신 하지 않는 설계에서 사람이
+ * 할 일은 그 프로그램을 한 번 띄우는 것이고, 로스터의 손과 계정 화면의 단추가
+ * 같은 낱말(`usage.runOnce`)로 그 일을 든다. */
+function usageNeedsRun(usage) {
+  return usage?.status === "error" && usage.failure_kind === USAGE_DELEGATED_REFRESH;
+}
+
+/* 낱말에 든 프로그램의 이름: CLI 로그인 표의 행이 든 이름(별칭으로 깔린 기계는
+ * 그 이름으로 답한다), 행이 없으면 공급자 id. */
+function usageProgramName(provider) {
+  return cliLoginPrograms.get(provider.id) ?? provider.id;
+}
+
+/* 수치가 없는 조각의 낱말과 호버.
+ *
+ * 판정은 로스터의 것(`usageRosterState`)과 같은 함수에서 나오고, 여기는 그 판정을
+ * 조각의 한 줄로 옮긴다 — 공급자 이름을 든 짧은 문장. 「로그인 필요」가 둘 나란히
+ * 서면 어느 것이 어느 공급자인지는 12px 아이콘 하나가 말해야 했다(실보고
+ * 2026-09-02 「가독성이 떨어짐」)는 교훈이 여기 모든 낱말에 든다. */
+function usageSegmentWord(provider, usage, state) {
+  const vars = { provider: provider.name, program: usageProgramName(provider) };
+  const word = (held) => t(held.key, held.said, vars);
+  switch (state.kind) {
+    case "loading":
+      return { said: state.says, tip: state.says };
+    case "sign-in":
+      // 왜인지는 호버가 말한다. 스캔이 읽은 화면의 문장을 그대로 옮긴다.
+      return { said: word(USAGE_SIGNED_OUT_WORD), tip: usage.error ?? t("usage.signedOut", "로그인 필요") };
+    case "error":
+      return {
+        said: word(USAGE_FAILURE_WORDS[usage.failure_kind] ?? USAGE_READ_FAILED_WORD),
+        tip: state.says,
+      };
+    default:
+      // `unavailable` and an answer with no window: rare, and the roster's own
+      // sentence for them is the word.
+      return { said: state.says, tip: usage?.error ?? state.says };
+  }
 }
 
 function usageProviderDomain(provider) {
@@ -1133,8 +1203,8 @@ function paintProviderGlyph(provider) {
 function paintProviderSegment(provider) {
   paintProviderGlyph(provider);
   const { usage, fetching } = provider.read();
-  const tight = tightestUsage(usage);
-  const signedOut = usage?.status === USAGE_SIGNED_OUT;
+  const state = usageRosterState(usage, fetching, providerSections(usage));
+  const signedOut = state.kind === "sign-in";
   const segment = el(provider.prefix);
   segment.dataset.usageMode = statusBarUsageMode;
   // A segment for an agent this machine does not have would be a permanently
@@ -1148,11 +1218,13 @@ function paintProviderSegment(provider) {
   segment.hidden =
     !statusBarItemEnabled(provider.id) ||
     (!provider.alwaysShown && ((!usage && !fetching) || usage?.status === "unavailable"));
-  el(`${provider.prefix}-wait`).hidden = !(fetching && !tight);
-  el(`${provider.prefix}-bar`).hidden = !tight || statusBarUsageMode === "compact";
-  // 숫자가 없어도 낱말은 있다: 로그인이 풀린 공급자는 읽을 수치가 없지만 사람이
-  // 할 일이 있으므로, 수치가 서는 그 자리에 낱말이 선다.
-  el(`${provider.prefix}-pct`).hidden = !tight && !signedOut;
+  el(`${provider.prefix}-bar`).hidden = state.kind !== "usage" || statusBarUsageMode === "compact";
+  // 숫자가 없어도 낱말은 있다: 수치가 서는 그 자리에 낱말이 선다 — 읽는 중이거나
+  // 아직 아무 것도 읽지 않은 조각(「···」 글리프 하나는 「표시가 안 된다」로
+  // 읽혔다), 로그인이 풀린 공급자, 읽기가 실패한 공급자, 세운 적 없는 공급자,
+  // 빈 답 모두. 보이는 조각은 낱말 없이 서지 않는다.
+  const figure = el(`${provider.prefix}-pct`);
+  figure.hidden = false;
   // Stale is a fact about time, error a fact about the last scan — either
   // one earns the triangle, with the numbers still shown when they exist.
   // `unavailable` is neither: not signed in is a state, not a failure, and a
@@ -1165,23 +1237,16 @@ function paintProviderSegment(provider) {
   // 여기서는 정말로 손이 필요하다(설정의 그 행이 「다시 로그인」을 들고 있다).
   const stale = usage && Date.now() - usage.updated_at > USAGE_STALE_MS && !fetching;
   el(`${provider.prefix}-warn`).hidden = !(usage?.status === "error" || stale || signedOut);
-  if (!tight) {
-    if (signedOut) {
-      const said = el(`${provider.prefix}-pct`);
-      // 공급자의 이름을 든 낱말: 「로그인 필요」가 둘 나란히 서면 어느 것이
-      // 어느 공급자인지는 12px 아이콘 하나가 말해야 했다(실보고 2026-09-02
-      // 「가독성이 떨어짐」). 수치가 있을 때는 아이콘과 막대가 그 일을 한다.
-      said.textContent = t("usage.signedOutOf", "{{provider}} 로그인 필요", {
-        provider: provider.name,
-      });
-      // 색조는 사용량의 것이다 — 여기엔 사용량이 없으므로 앞 스캔이 남긴 색을
-      // 들고 있어서는 안 된다.
-      delete said.dataset.tone;
-      // 왜인지는 호버가 말한다. 스캔이 읽은 화면의 문장을 그대로 옮긴다.
-      segment.dataset.tip = usage.error ?? t("usage.signedOut", "로그인 필요");
-    }
+  if (state.kind !== "usage") {
+    const { said, tip } = usageSegmentWord(provider, usage, state);
+    figure.textContent = said;
+    // 색조는 사용량의 것이다 — 여기엔 사용량이 없으므로 앞 스캔이 남긴 색을
+    // 들고 있어서는 안 된다.
+    delete figure.dataset.tone;
+    segment.dataset.tip = tip;
     return;
   }
+  const tight = tightestUsage(usage);
   const usedPct = tight.window.used_percent;
   const displayedPct = displayedUsagePercentage(usedPct);
   const fill = el(`${provider.prefix}-fill`);
@@ -1190,7 +1255,6 @@ function paintProviderSegment(provider) {
   // deliberately neutral so a healthy quota does not turn the whole footer
   // into an alert surface as it approaches a reset.
   delete fill.dataset.tone;
-  const figure = el(`${provider.prefix}-pct`);
   // 신판 실측(Image #81): verbose의 창 하나는 「N% 사용 <리셋 카운트다운>」이고
   // (Fable 창만 제 이름), 창들은 ·로 나란하다 — 창 라벨(wk·5h)이 아니라
   // 카운트다운이 꼬리인 것이 실측이 우리와 갈리던 자리다.
@@ -1497,14 +1561,21 @@ function usageRosterRow(provider) {
   head.addEventListener("click", () => showUsageDetails(provider.id));
   row.appendChild(head);
 
-  // 로그인 단추는 **확인된 로그아웃**에만, 그리고 갈 길이 있을 때만 선다 —
-  // 기록 자신의 손이거나, 백엔드의 CLI 로그인 표가 이 공급자를 알 때.
+  // 손은 **확인된 로그아웃**과 **만료된 세션**에만, 그리고 갈 길이 있을 때만
+  // 선다 — 기록 자신의 손이거나, 백엔드의 CLI 로그인 표가 이 공급자를 알 때.
+  // 만료된 세션의 손은 로그인이 아니라 그 프로그램을 한 번 띄우는 것이고, 그
+  // 단추는 계정 화면에 있다(같은 낱말로).
   const signIn = usageSignIn(provider);
-  if (state.kind === "sign-in" && signIn) {
+  const offer = state.kind === "sign-in"
+    ? t("usage.signIn", "로그인")
+    : usageNeedsRun(usage)
+      ? t("usage.runOnce", "{{program}} 한 번 실행", { program: usageProgramName(provider) })
+      : null;
+  if (offer !== null && signIn) {
     const enter = document.createElement("button");
     enter.className = "usage-roster-signin";
     enter.type = "button";
-    enter.textContent = t("usage.signIn", "로그인");
+    enter.textContent = offer;
     enter.addEventListener("click", () => signIn());
     row.appendChild(enter);
   }
@@ -3349,6 +3420,13 @@ async function refreshProviderUsage(provider, force) {
   paintUsageRefresh();
   paintUsagePanel();
   paintStatsUsage();
+  // The accounts pane's row for this CLI reads the gauge too — its caption
+  // and its 「한 번 실행」 — so a read that lands while the pane is open
+  // repaints the card; a closed pane re-reads on arrival.
+  if (!fetching && cliLoginPrograms.has(provider.id) && !settingsView.hidden &&
+      settingsPane === "provider-accounts") {
+    paintCliLogins();
+  }
   // While the backend scans, keep asking — its answer changes once, and the
   // backend's own floor makes the asking free. One timer per provider: two
   // scans run against two different CLIs, and a shared timer would let the
