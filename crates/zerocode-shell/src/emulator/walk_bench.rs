@@ -147,6 +147,43 @@ fn stand_in_for_a_pane(udid: &str) {
     super::ios_hid::retain(udid).expect("this build's helper");
 }
 
+/// A failed or empty walk is a recorded failure, never a faster sample.
+fn a_speed_sample(looks: Option<usize>, walked: &errand::Walked) -> bool {
+    looks.is_some() && walked.pressed > 0 && walked.reached == Some(true)
+}
+
+#[test]
+fn a_phone_speed_sample_requires_readiness_a_press_and_its_goal() {
+    let done = errand::Walked {
+        pressed: 2,
+        reached: Some(true),
+        ..Default::default()
+    };
+    assert!(a_speed_sample(Some(2), &done));
+    assert!(!a_speed_sample(None, &done));
+    assert!(!a_speed_sample(
+        Some(2),
+        &errand::Walked {
+            pressed: 0,
+            ..done.clone()
+        }
+    ));
+    assert!(!a_speed_sample(
+        Some(2),
+        &errand::Walked {
+            reached: Some(false),
+            ..done.clone()
+        }
+    ));
+    assert!(!a_speed_sample(
+        Some(2),
+        &errand::Walked {
+            reached: None,
+            ..done
+        }
+    ));
+}
+
 #[test]
 #[ignore = "drives a booted simulator of the caller's and spends a real key; a measurement, printed"]
 fn a_phone_walk_timed_on_a_simulator_of_our_own() {
@@ -155,6 +192,7 @@ fn a_phone_walk_timed_on_a_simulator_of_our_own() {
     let out = PathBuf::from(knob("ZEROCODE_WALK_BENCH_OUT").expect("where the rows go"));
     let walks: usize = knob("ZEROCODE_WALK_BENCH_WALKS").map_or(10, |n| n.parse().expect("walks"));
     let steps: usize = knob("ZEROCODE_WALK_BENCH_STEPS").map_or(4, |n| n.parse().expect("steps"));
+    assert!(walks > 0, "a speed measurement needs at least one walk");
     let goal = knob("ZEROCODE_WALK_BENCH_GOAL").unwrap_or_else(|| GOAL.to_string());
     // An empty value is a walk given no `--until`.
     let until = match std::env::var("ZEROCODE_WALK_BENCH_UNTIL") {
@@ -197,6 +235,7 @@ fn a_phone_walk_timed_on_a_simulator_of_our_own() {
     // The helper's first tree pays for loading the accessibility framework.
     let _ = drive(&look_argv(&udid));
 
+    let mut all_measured = true;
     for walk in 0..walks {
         let looks = to_the_first_screen(&udid);
         let calls = RefCell::new(Vec::new());
@@ -250,6 +289,7 @@ fn a_phone_walk_timed_on_a_simulator_of_our_own() {
             )
         };
         let walk_ms = began.elapsed().as_secs_f64() * 1_000.0;
+        all_measured &= a_speed_sample(looks, &walked);
         let now = crate::project_runtime::now_epoch_ms();
         errand::write_rows(&EMULATOR, judge.wire(), None, &walked.rows, now);
         judge.write_memo_rows(None, now);
@@ -284,6 +324,10 @@ fn a_phone_walk_timed_on_a_simulator_of_our_own() {
         std::io::Write::write_all(&mut file, format!("{row}\n").as_bytes()).expect("a row");
     }
     super::ios_hid::release(&udid);
+    assert!(
+        all_measured,
+        "a walk did not start ready, make a press and reach its goal; inspect the recorded rows"
+    );
 }
 
 /// The screens [`the_marks_a_set_of_screens_carries`] looks at when it is
