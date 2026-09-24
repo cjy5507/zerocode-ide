@@ -386,26 +386,36 @@ fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
     use zerocode_core::jev::promote::{
         ROSE, Stand, marks_that_can_clear, stand_from, window_wanted_for,
     };
+    use zerocode_core::jev::summary::JUDGED_EVERY_ROWS;
     use zerocode_core::jev::{JevMode, PLACEMENT};
 
     let home = tempfile::tempdir().expect("a zo home");
     let ledger = home.path().join(PLACEMENT.ledger);
     let wanted = window_wanted_for(&PLACEMENT).expect("placement rises");
-    let answered = |at: i64| json!({"at": at, "outcome": "answered", "elapsedMs": 300, "requests": 1, "applied": true});
-
-    // One short of the window: nothing is judged, because nothing could be.
-    for at in 0..wanted as i64 - 1 {
-        record_rows(&PLACEMENT, &ledger, &[answered(at)], at);
-    }
-    // The marks the seat's own later facts wrote, dated inside the window:
-    // the three the label said no to (t-6342), enough agreeing ones to bound
-    // above its budget with those inside, and today's room beside each.
+    // A request as the window's writer files it: named by the worker it
+    // placed, the name its later label repeats (t-6877).
+    let answered = |at: i64| {
+        json!({"at": at, "placement": format!("placement-{at}"), "outcome": "answered",
+               "elapsedMs": 300, "requests": 1, "applied": true})
+    };
     let misses = PLACEMENT.negatives_wanted.expect("placement rises");
     let marks = marks_that_can_clear(&PLACEMENT).expect("a width the budget can be cleared on");
+    // Enough requests for every mark to name its own, the count one short of
+    // a judgment boundary: judged at the window's first boundary with no mark
+    // in yet, the seat held and wrote nothing.
+    let asked =
+        wanted + marks.saturating_sub(wanted).div_ceil(JUDGED_EVERY_ROWS) * JUDGED_EVERY_ROWS;
+    for at in 0..asked as i64 - 1 {
+        record_rows(&PLACEMENT, &ledger, &[answered(at)], at);
+    }
+    // The marks the seat's own later facts wrote, each naming the placement
+    // it grades and dated inside the window: the three the label said no to
+    // (t-6342), enough agreeing ones to bound above its budget with those
+    // inside, and today's room beside each.
     let labels: Vec<serde_json::Value> = (0..marks)
-        .map(|n| json!({"at": 1, "label": format!("placement-{n}"), "agreed": n >= misses, "baselineAgreed": n % 2 == 0}))
+        .map(|n| json!({"at": asked, "label": format!("placement-{n}"), "agreed": n >= misses, "baselineAgreed": n % 2 == 0}))
         .collect();
-    record_rows(&PLACEMENT, &ledger, &labels, 1);
+    record_rows(&PLACEMENT, &ledger, &labels, asked as i64);
     assert_eq!(
         stand_from(&read_rows(&ledger)),
         Stand::Recording,
@@ -418,13 +428,13 @@ fn a_seat_on_auto_rises_on_its_own_rows_and_is_read_back_as_acting() {
             .any(|row| row["transition"] == json!(ROSE))
     );
 
-    // The row that fills it: the writer judges, and the rise is written
-    // beside the rows it was decided on.
+    // The row that lands on the boundary: the writer judges, and the rise is
+    // written beside the rows it was decided on.
     record_rows(
         &PLACEMENT,
         &ledger,
-        &[answered(wanted as i64)],
-        wanted as i64,
+        &[answered(asked as i64 - 1)],
+        asked as i64,
     );
     let rows = read_rows(&ledger);
     let rose = rows
