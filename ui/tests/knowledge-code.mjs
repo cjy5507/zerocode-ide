@@ -5,7 +5,7 @@
  * 하는 것. 언급을 풀고 인덱스를 읽는 일은 zo(`zo vault code`)와 core(`second_brain_code::graft`)의
  * 것이라 여기에 없다 — 픽스처(`knowledge-fixture.mjs`)는 그 답의 모양만 짓는다. */
 
-import { FRAME_BUDGET_MS, frameBudgetHolds, loadNote, machineIsLoud } from "./machine-load.mjs";
+import { FRAME_BUDGET_MS, frameBudgetHolds, loadNote, machineIsLoudNow } from "./machine-load.mjs";
 
 const WORKSPACE = "/workspace/acme";
 
@@ -233,7 +233,7 @@ export async function measureKnowledgeCodeScene(page, ok) {
       && rows.withCode.nodes === rows.control.nodes
       /* 첫 그림의 비율도 벽시계다 — 시끄러운 기계(machine-load.mjs)에서는 기록만 하고 판정하지 않는다;
        * 접목된 노드 수·노드 동일성은 늘 판정한다. */
-      && (rows.withCode.firstPaint <= rows.control.firstPaint * SLACK || machineIsLoud)
+      && (rows.withCode.firstPaint <= rows.control.firstPaint * SLACK || machineIsLoudNow())
       && frameBudgetHolds(rows.withCode.worstGap, FRAME_GAP_BUDGET_MS),
     JSON.stringify(rows));
 }
