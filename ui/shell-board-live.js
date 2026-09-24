@@ -523,12 +523,15 @@ function agentGraphLiveTuning() {
     : null;
 }
 
-/* 지금 그림이 서 있는 보드 판. 작업 목록으로 서 있는 판은 관계 그림이 아니다. */
+/* 지금 그림이 서 있는 보드 판. 작업 목록으로 서 있는 판은 관계 그림이 아니다.
+ *
+ * 탭 장부가 아니라 **문서**에게 묻는다. 팝아웃으로 보드를 빼면 본창의
+ * `boardTab()`은 빈손이 되고(그 탭이 저쪽으로 갔다), 그러면 이 손이 판을 찾지
+ * 못해 맥박이 아예 서지 않는다 — 판은 저쪽 문서에 멀쩡히 서 있는데. 문서에
+ * 묻는 쪽은 본창·팝아웃·복제된 판을 모두 같은 규칙으로 답한다. */
 function agentGraphLiveViews() {
-  const tab = typeof boardTab === "function" ? boardTab() : null;
-  if (!tab) return [];
-  const view = docHost(tab.pane, "board");
-  return view && !view.hidden && !view.classList.contains("is-task-board") ? [view] : [];
+  return [...document.querySelectorAll(".agent-board")]
+    .filter((view) => !view.hidden && !view.classList.contains("is-task-board"));
 }
 
 /* 맥박 하나를 노드·간선에 적는 유일한 손. 쓰는 것은 `data-live-beat` 하나뿐이라

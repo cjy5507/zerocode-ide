@@ -487,6 +487,36 @@ export async function testBoardLive(browser, origin, ok) {
         && document.querySelectorAll("#board-view [data-live-beat]").length === 0;
     }));
 
+    /* 판이 둘일 때도 둘 다 맥박을 받는다. 보드를 팝아웃으로 빼면 본창의 탭
+     * 장부는 빈손이 되지만 그림은 저쪽 문서에 멀쩡히 서 있다 — 그래서 판을
+     * 찾는 손은 탭이 아니라 문서에게 묻는다. 복제된 판이 그 계약의 대역이다. */
+    ok("a_second_board_surface_is_dressed_by_the_same_ledger",
+      await page.evaluate(async () => {
+        const original = document.querySelector("#board-view");
+        const copy = original.cloneNode(true);
+        copy.removeAttribute("id");
+        original.parentNode.append(copy);
+        try {
+          paintAgentGraph(copy, agentGraphFullModel(original));
+          const found = agentGraphLiveViews().length;
+          const now = window.__LIVE_NOW__;
+          window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
+            { from: "term:307", to: "term:306", count: 1, unread: 0, at: now + 3_000,
+              verb: "mail",
+              last_message: { id: "m-two-surfaces", run: "run-1", from: "worker:w-child",
+                to: "worker:w-parent", kind: "status", created_ms: now + 3_000 } },
+          ] });
+          await paintBoardView(undefined, { force: true });
+          await window.__BOARD_SETTLED__();
+          paintAgentGraph(copy, agentGraphFullModel(original));
+          return found >= 2
+            && original.querySelectorAll("[data-live-beat]").length > 0
+            && copy.querySelectorAll("[data-live-beat]").length > 0;
+        } finally {
+          copy.remove();
+        }
+      }));
+
     /* ---- 자리는 신원이 아니다 ------------------------------------------- */
 
     ok("a_reused_pane_does_not_inherit_the_previous_subjects_events",
