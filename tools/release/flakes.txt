@@ -101,3 +101,8 @@ root:orchestration::tests::a_pane_the_window_never_heard_is_told_apart_from_one_
 root:orchestration::tests::the_beat_points_an_idle_coordinator_at_its_mail_and_enters_once
 zo:misc_tools::smart_router::probe_exec::live_path_tests::decision_shadow::actual_use_timeout_falls_back_with_one_short_total_wait
 zo:misc_tools::smart_router::probe_exec::live_path_tests::decision_shadow::the_funnel_returns_in_the_probes_time_while_a_slow_judgment_is_still_out
+# 2026-09-24 t-6560 worker gate (load 24-33 while the coordinator's gate and other worker builds ran beside it):
+# the artifact store's lock test (crates/zerocode-core/src/artifact_publish.rs:591) held its lock for a 40 ms sleep
+# that outlasted the lock's patience and read "artifact store busy … retry publish" in one full `-p zerocode-core`
+# run; green solo ×3. Untouched by the branch; a wall-clock sleep against a loaded machine, like the families above.
+root:artifact_publish::tests::a_store_lock_held_for_a_moment_is_waited_out_and_one_held_on_is_busy
