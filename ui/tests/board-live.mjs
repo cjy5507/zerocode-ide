@@ -9,16 +9,16 @@
  *   ① 실시간은 **고르는** 그림이다 — 작업 목록이 보드의 기본값이다.
  *   ② 맥박은 **실제로 기록된 사건** 하나에 한 번이다 — 같은 판을 두 번 읽어도,
  *      숨겼다 돌아와도, 옛 snapshot이 늦게 와도, 기억의 상한을 넘은 뒤에도
- *      옛 사건이 새 사건이 되지 않는다.
+ *      옛 사건이 새 사건이 되지 않는다. 수의 기준선도 새 사건과 함께만 움직인다.
  *   ③ 없는 사실은 **없다고 말한다** — 배달 상태·답장·소환자·보기 밖 끝점 수,
  *      그리고 결과와 의존 전이의 발생 시각.
- *   ③′ 사건을 누르면 **그 사건의** 근거로 간다 — 더 새 메시지나 새 시도로
- *      대신 가지 않는다.
+ *   ③′ 사건을 누르면 **그 사건의** 근거로 간다 — 더 새 메시지나 새 시도로,
+ *      같은 시도의 바뀐 사유나 철회된 사실로 대신 가지 않는다.
  *   ④ 보는 일은 아무것도 **소비하지 않는다** — 메일 확인도, 모델 호출도 없다.
  *   ⑤ 오래 사는 창에서도 장부는 **유계**이고, 수명 문을 지나면 시계·맥박이
- *      남지 않는다(둘째 창).
- *   ⑥ 늦게 도착한 답은 **아무것도 쓰지 않는다**, 한 판은 제가 물은 원장 행만
- *      읽는다(셋째 창).
+ *      남지 않으며, 떠났다 돌아온 첫 판은 조용한 기준선이다(둘째 창).
+ *   ⑥ 늦게 도착한 답은 성공이든 실패든 **아무것도 쓰지 않는다**, 지금의 실패는
+ *      복구 카드를 세운다, 한 판은 제가 물은 원장 행만 읽는다(셋째 창).
  *
  *   node ui/tests/board-live.mjs
  */
@@ -791,10 +791,20 @@ async function testLiveMap(browser, origin, ok) {
         { claimed_deployed: true }, { claimed_merged: true }, { claimed_verified: true }, {}];
       const unread = reviews.filter((review) =>
         ledgerReviewStage({ reported: true }, { reported: true, review }) === "dispatched");
+      /* 표의 `flag`가 그 seam이 그 낱말을 고를 때 읽는 칸인가 — 그 칸 하나만 선
+       * 행을 seam이 그 줄의 낱말로 읽어야 하고, 지난 결과 사건이 「그 사실이 지금도
+       * 서 있는가」를 물을 때(`agentGraphLiveStageHolds`) 그 행에서 참이어야 한다. */
+      const misnamed = AGENT_GRAPH_LIVE_STAGES.filter((one) => {
+        const row = one.flag === "reported"
+          ? { reported: true, review: null }
+          : { reported: false, review: { [one.flag]: true } };
+        return ledgerReviewWord(row) !== t(one.key, one.word)
+          || !agentGraphLiveStageHolds(one.stage, null, row);
+      }).map((one) => one.stage);
       window.__LEDGER__ = held;
       await paintBoardView(undefined, { force: true });
       await window.__BOARD_SETTLED__();
-      return { claim, fact, unread,
+      return { claim, fact, unread, misnamed,
         words: { claimed: t("board.claimedVerified", "검증됐다 함"), verified: t("board.verified", "검증됨"),
           merged: t("board.merged", "병합됨") } };
     });
@@ -807,6 +817,8 @@ async function testLiveMap(browser, origin, ok) {
       JSON.stringify(authority));
     ok("every_word_the_review_seam_answers_reads_back_as_a_stage",
       authority.unread.length === 0, JSON.stringify(authority.unread));
+    ok("each_stage_names_the_ledger_field_the_review_seam_reads_for_its_word",
+      authority.misnamed.length === 0, JSON.stringify(authority.misnamed));
 
     ok("a_recorded_dispatch_and_message_point_to_their_exact_evidence",
       await page.evaluate(() => {
