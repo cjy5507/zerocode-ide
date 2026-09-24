@@ -354,7 +354,7 @@ listen("emulator:loans", () => scheduleDeskPaint());
  *
  * `check --peek`의 자리: 판 위의 런의 코디네이터가 빚진 편지(`desk_mail`) — 답을
  * 기다리는 질문, 그리고 워커가 멈췄다는 원장의 소식(한도 벽·끝남·조용해짐·서로
- * 기다림). 오래된 것이 먼저이고, 행마다 받은편지함의 상태(배달 전·받음·확인함)와
+ * 기다림·분류기 거절)과 소환 때 정한 모델을 벗어났다는 기록(t-6747). 오래된 것이 먼저이고, 행마다 받은편지함의 상태(배달 전·받음·확인함)와
  * 나이를 적는다.
  *
  * 답하기와 확인은 원장의 뜻 그대로다(2026-09-24 코디네이터 지시). 질문에는 그
@@ -373,7 +373,27 @@ const DESK_MAIL = Object.freeze({
   worker_died: { state: "failed", key: "board.desk.mailDied", word: "워커 끝남" },
   went_quiet: { state: "needs-attention", key: "board.desk.mailQuiet", word: "조용해짐" },
   deadlocked: { state: "needs-attention", key: "board.desk.mailDeadlocked", word: "서로 기다림" },
+  classifier_declined: { state: "needs-attention", key: "board.desk.mailDeclined", word: "분류기 거절" },
+  model_deviated: { state: "needs-attention", key: "board.desk.mailDeviated", word: "모델 바뀜" },
 });
+
+/* 분류기 거절 뒤에 무엇이 서 있는가(t-6747): 선언된 워커에게 넘기는 중, 넘길 곳을
+ * 선언하지 않음, 또는 다른 모델로 가지 않는 분류라 거절이 그대로임. */
+const DESK_DECLINE_STEPS = Object.freeze({
+  handover: { key: "board.desk.declineHandover", word: "{{category}} · 선언된 워커에게 넘기는 중" },
+  notify: { key: "board.desk.declineNotify", word: "{{category}} · 넘길 워커를 선언하지 않았어요" },
+  stands: { key: "board.desk.declineStands", word: "{{category}} · 다른 모델로 가지 않는 분류라 거절이 그대로예요" },
+});
+
+/* 모델이 바뀐 동안 — CLI가 적은 범위마다. */
+const DESK_SWITCH_SCOPES = Object.freeze({
+  session: { key: "board.desk.switchSession", word: "{{category}} → {{model}} · 이 대화 끝까지" },
+  local: { key: "board.desk.switchLocal", word: "{{category}} → {{model}} · 응답 하나만" },
+});
+
+function deskCategory(letter) {
+  return letter.category || t("board.desk.declineNoCategory", "분류 없음");
+}
 
 /* 조용해진 까닭, 원장의 낱말마다. 표에 없는 낱말은 원장의 말 그대로 선다. */
 const DESK_QUIET_REASONS = Object.freeze({
@@ -412,6 +432,14 @@ function deskLetterDetail(letter, now) {
   }
   if (letter.kind === "worker_died") return t("board.desk.mailDiedCopy", "보고 전에 판이 끝났어요");
   if (letter.kind === "deadlocked") return t("board.desk.mailDeadlockedCopy", "서로의 답을 기다리는 고리에 들었어요");
+  if (letter.kind === "classifier_declined") {
+    const step = DESK_DECLINE_STEPS[letter.routed === false ? "stands" : letter.rung] ?? DESK_DECLINE_STEPS.notify;
+    return t(step.key, step.word, { category: deskCategory(letter) });
+  }
+  if (letter.kind === "model_deviated") {
+    const scope = DESK_SWITCH_SCOPES[letter.scope] ?? DESK_SWITCH_SCOPES.session;
+    return t(scope.key, scope.word, { category: deskCategory(letter), model: letter.switched_to ?? "" });
+  }
   return "";
 }
 

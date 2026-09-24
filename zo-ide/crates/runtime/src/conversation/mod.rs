@@ -36,7 +36,7 @@ mod verified_state;
 mod verify_treadmill;
 
 pub use api::{
-    flush_pending_tool_events, prompt_cache_record_to_event, record_non_anthropic_prompt_cache_usage, push_output_block, redacted_thinking_data_to_string, response_to_events, ApiClient, ApiRequest,
+    flush_pending_tool_events, prompt_cache_record_to_event, record_non_anthropic_prompt_cache_usage, push_output_block, push_refusal_category, redacted_thinking_data_to_string, refusal_category_of, response_to_events, ApiClient, ApiRequest,
     AssistantEvent, AsyncApiClient, PromptCacheEvent, ProviderStateBlob,
     DEFAULT_STREAMING_CHANNEL_CAPACITY,
 };
@@ -47,8 +47,9 @@ pub use compaction::{
     TurnSummary,
 };
 pub use config::{
-    declare_attendance, declared_attendance, env_deadline_extension, env_turn_budgets, Attendance,
-    DEFAULT_TURN_DEADLINE_SECS,
+    declare_attendance, declare_classifier_fallback, declared_attendance,
+    declared_classifier_fallback, env_deadline_extension, env_turn_budgets, Attendance,
+    ClassifierFallback, DEFAULT_TURN_DEADLINE_SECS,
     DEFAULT_TURN_INPUT_TOKEN_BUDGET, DEFAULT_TURN_OUTPUT_TOKEN_BUDGET,
 };
 #[allow(unused_imports)]
@@ -1072,6 +1073,29 @@ pub struct ConversationRuntime<C, T> {
     /// turn and reset at every public turn begin, like the same-model retry.
     /// See [`RefusalDecision::RetryCleaned`].
     refusal_context_clean_used: bool,
+    /// The refusal ladder's switching mode — `smart.classifierFallback`, under
+    /// the launch's `--classifier-fallback` (t-6747). See [`ClassifierFallback`].
+    classifier_fallback: ClassifierFallback,
+    /// Whether the person answered a refusal's switch question "this turn and
+    /// from now on" in this model world: later refusals switch without asking
+    /// again, and the session cooldown may pre-arm. Cleared with the model.
+    refusal_switch_consented_for_session: bool,
+    /// Whether the person answered it for THIS public turn — a later rung of
+    /// the same turn (the cross-provider handoff) switches without asking twice.
+    refusal_switch_consented_for_turn: bool,
+    /// Whether the person answered "stay" this turn: no rung switches again
+    /// until the next public turn, as under `off`.
+    refusal_switch_refused_for_turn: bool,
+    /// The route a switching rung would have taken this turn had somebody
+    /// been at the keyboard to ask (t-7153, `ask` unattended): named when
+    /// the decline is surfaced, so the turn says why it stayed.
+    refusal_switch_unasked_to: Option<String>,
+    /// Whether this public turn already asked about the declined request's
+    /// images — asked once, whatever the answer.
+    refusal_images_asked_for_turn: bool,
+    /// The category of the refusal that armed [`Self::refusal_dry_until`]:
+    /// the pre-arm routes that category, and only a routed one arms it.
+    refusal_dry_category: Option<String>,
     /// Per-turn wire-model ESCALATION plumbed onto [`ApiRequest`] as
     /// `model_override` (below the refusal fallback in precedence — a refusal
     /// on the escalated model must still swap to the safe fallback). Installed
@@ -1566,6 +1590,9 @@ pub struct ModelSwitch {
     pub context_tokens: u64,
     /// The attempt key the switched requests will bill to.
     pub attempt: String,
+    /// The category a safety classifier named for the refusal that moved the
+    /// turn (t-6747); `None` for every other switch.
+    pub category: Option<String>,
 }
 
 /// Told each model switch the runtime makes or lends out — the quota and
@@ -1791,6 +1818,13 @@ where
             refusal_prearm_notice_pending: false,
             refusal_prearm_notice_latched: false,
             refusal_context_clean_used: false,
+            classifier_fallback: declared_classifier_fallback().unwrap_or_default(),
+            refusal_switch_consented_for_session: false,
+            refusal_switch_consented_for_turn: false,
+            refusal_switch_refused_for_turn: false,
+            refusal_switch_unasked_to: None,
+            refusal_images_asked_for_turn: false,
+            refusal_dry_category: None,
             escalation_model_override: None,
             escalation_armed_fresh: false,
             quota_fallback_client: None,
@@ -2179,6 +2213,10 @@ where
         self.refusal_fallback_model = None;
         self.refusal_same_model_retry_used = false;
         self.refusal_context_clean_used = false;
+        self.refusal_switch_consented_for_turn = false;
+        self.refusal_switch_refused_for_turn = false;
+        self.refusal_switch_unasked_to = None;
+        self.refusal_images_asked_for_turn = false;
         // Reset the per-turn quota fallback, pre-arming onto it when the session
         // is still inside a recorded quota-dry cooldown. See
         // [`Self::begin_turn_quota_fallback`].
@@ -2546,6 +2584,9 @@ where
                 }
             };
             self.check_sync_turn_cancelled(iterations)?;
+            // The category a refusal names rides as its own event; read it
+            // before the build consumes the events (t-6747).
+            let refusal_category = refusal_category_of(&events);
             let assistant_turn = build_assistant_message(normalize_empty_assistant_stream(events));
             // Anthropic safety-classifier refusal (`stop_reason: "refusal"`):
             // drop the refused partial (never pushed) and walk the catalog
@@ -2556,10 +2597,45 @@ where
             // `decide_refusal_fallback`.
             if is_refusal_stop_reason(assistant_turn.stop_reason().unwrap_or_default()) {
                 let refused_usage = assistant_turn.usage();
-                match self.decide_refusal_fallback() {
-                    RefusalDecision::Retry | RefusalDecision::RetrySameModel => {
+                let category = refusal_category.as_deref();
+                let from_model = self
+                    .effective_request_model()
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                // The headless loop has nobody to ask (t-7153): a question it
+                // cannot put is not answered — the turn stays on the chosen
+                // model and says why, as an unattended turn's does.
+                let decision = loop {
+                    match self.decide_refusal_fallback(category) {
+                        RefusalDecision::Ask { to } => {
+                            self.refuse_refusal_switch();
+                            eprintln!(
+                                "[zo] {}",
+                                core_types::retry_signal::refusal_switch_unasked_notice(
+                                    &from_model,
+                                    &to
+                                )
+                            );
+                        }
+                        other => break other,
+                    }
+                };
+                match decision {
+                    RefusalDecision::RetrySameModel => {
                         if let Some(usage) = refused_usage {
                             self.usage_tracker.record(usage);
+                        }
+                        continue;
+                    }
+                    RefusalDecision::Retry => {
+                        if let Some(usage) = refused_usage {
+                            self.usage_tracker.record(usage);
+                        }
+                        if let Some(to) = self.refusal_fallback_model.as_deref() {
+                            eprintln!(
+                                "[zo] {}",
+                                core_types::retry_signal::refusal_route_warn(&from_model, to, category)
+                            );
                         }
                         continue;
                     }
@@ -2587,6 +2663,21 @@ where
                         if let Some(usage) = refused_usage {
                             self.usage_tracker.record(usage);
                         }
+                        // A route nobody could be asked about is said so (t-7153).
+                        if let Some(to) = self.refusal_switch_unasked_to.take() {
+                            eprintln!(
+                                "[zo] {}",
+                                core_types::retry_signal::refusal_switch_unasked_notice(
+                                    &from_model,
+                                    &to
+                                )
+                            );
+                        }
+                        if let Some(word) = category.filter(|_| {
+                            ::api::refusal_route_candidates(&from_model, category).is_empty()
+                        }) {
+                            eprintln!("[zo] {}", core_types::retry_signal::refusal_stands_notice(word));
+                        }
                         let assistant_message = refusal_surfaced_message();
                         self.record_assistant_iteration(iterations, &assistant_message, 0);
                         self.session
@@ -2597,6 +2688,7 @@ where
                         }
                         break;
                     }
+                    RefusalDecision::Ask { .. } => unreachable!("answered above"),
                     RefusalDecision::Proceed => {}
                 }
             }

@@ -842,6 +842,23 @@ pub trait Host {
     fn quiet_since(&self, _term: u32, _worker_started_ms: i64, _now_ms: i64) -> Option<i64> {
         None
     }
+
+    /// When this worker pane went quiet, for a classifier decline's reading
+    /// (t-6747): quiet by [`Self::quiet_since`], or — whatever its hook last
+    /// said — silent on its pty for at least `hook_outlived_ms`. Claude
+    /// Code's pause dialog ends no turn and says so only through a
+    /// `Notification` hook this window does not install, so the pane's last
+    /// word stays `working` for as long as the dialog stands, while its pty
+    /// goes still. Test and tmux-only hosts default to the ordinary rule.
+    fn decline_quiet_since(
+        &self,
+        term: u32,
+        worker_started_ms: i64,
+        now_ms: i64,
+        _hook_outlived_ms: i64,
+    ) -> Option<i64> {
+        self.quiet_since(term, worker_started_ms, now_ms)
+    }
     fn capture(&self, term: u32) -> Option<String>;
     fn focus(&self, term: u32) -> bool;
     fn close(&self, term: u32);
@@ -890,6 +907,40 @@ pub trait Host {
         _worker_started_ms: i64,
         _agent: &str,
         _commit: &mut dyn FnMut(zerocode_core::orchestration::QuotaWallMarker),
+    ) {
+    }
+
+    /// What this pane shows and records of a safety classifier's decline
+    /// (t-6747, `quota_wall.rs`): its screen and its transcript's last
+    /// record — the two witnesses a `classifier_declined` notice needs — and
+    /// the switches of model its CLI recorded answering declines on a
+    /// fallback, for `model_deviated` rows.
+    ///
+    /// Asked only about a pane the stall probe already found quiet, and
+    /// never under the team table. Test and tmux-only hosts default to no
+    /// observation rather than inventing a decline.
+    fn classifier_decline_reading(
+        &self,
+        _term: u32,
+        _agent: &str,
+    ) -> Option<crate::quota_wall::DeclineReading> {
+        None
+    }
+
+    /// The same reading, observed while holding the activity locks that can
+    /// invalidate it — the decline's half of
+    /// [`Self::with_quota_wall_observation`], for a handover's stop — with
+    /// the moment the pane went quiet, which a pause dialog's witness is
+    /// timed from. Quiet as [`Self::decline_quiet_since`] reads it, with
+    /// [`zerocode_core::orchestration::DECLINE_DIALOG_UNANSWERED_MS`] as the
+    /// hook's term. Call `commit` at most once, and keep the locks until it
+    /// returns.
+    fn with_classifier_decline_observation(
+        &self,
+        _term: u32,
+        _worker_started_ms: i64,
+        _agent: &str,
+        _commit: &mut dyn FnMut(crate::quota_wall::DeclineReading, i64),
     ) {
     }
 

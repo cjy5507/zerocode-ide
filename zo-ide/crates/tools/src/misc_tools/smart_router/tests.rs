@@ -749,6 +749,29 @@
         let _ = fs::remove_dir_all(config_home);
     }
 
+    /// `smart.classifierFallback` is the refusal ladder's switching mode
+    /// (t-6747): `ask` when absent or misspelled, the word otherwise — and it
+    /// reaches the turn's routing, where the host installs it.
+    #[test]
+    fn classifier_fallback_defaults_to_ask_and_reads_the_word() {
+        for (value, expected) in [
+            (None, runtime::ClassifierFallback::Ask),
+            (Some("auto"), runtime::ClassifierFallback::Auto),
+            (Some("off"), runtime::ClassifierFallback::Off),
+            (Some("ASK"), runtime::ClassifierFallback::Ask),
+            (Some("sometimes"), runtime::ClassifierFallback::Ask),
+        ] {
+            let config_home = temp_config_home("classifier-fallback");
+            let smart = value.map_or_else(
+                || json!({ "enabled": true }),
+                |word| json!({ "enabled": true, "classifierFallback": word }),
+            );
+            let routing = architect_routing(&config_home, &smart, "claude-fable-5");
+            assert_eq!(routing.classifier_fallback, expected, "{value:?}");
+            let _ = fs::remove_dir_all(config_home);
+        }
+    }
+
     #[test]
     fn exec_swap_defaults_never_and_reads_the_merged_settings_overlay() {
         let config_home = temp_config_home("exec-swap-merged-default");

@@ -1164,6 +1164,7 @@ impl ResponsesStreamState {
                 model: self.model.clone(),
                 stop_reason: None,
                 stop_sequence: None,
+                stop_details: None,
                 usage: zero_usage(),
                 request_id: None,
                 thought_signature: None,
@@ -1464,6 +1465,7 @@ impl ResponsesStreamState {
                 delta: MessageDelta {
                     stop_reason: Some(stop_reason.to_string()),
                     stop_sequence: None,
+                    stop_details: None,
                     thought_signature: None,
                     reasoning_replay: self.reasoning_replay.take(),
                 },
@@ -3153,6 +3155,7 @@ fn complete_response_events(response: MessageResponse) -> VecDeque<StreamEvent> 
             delta: MessageDelta {
                 stop_reason,
                 stop_sequence,
+                stop_details: None,
                 thought_signature: None,
                 reasoning_replay: None,
             },
@@ -3287,6 +3290,7 @@ fn parse_responses_response(value: &Value, model: &str, session_id: &str) -> Mes
         model: model.to_string(),
         stop_reason: Some(stop_reason.to_string()),
         stop_sequence: None,
+        stop_details: None,
         usage: {
             let cache_read_input_tokens = usage_cached_tokens(usage);
             Usage {

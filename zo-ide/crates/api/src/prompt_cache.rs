@@ -6445,6 +6445,7 @@ mod tests {
             model: "claude-3-7-sonnet-latest".to_string(),
             stop_reason: Some("end_turn".to_string()),
             stop_sequence: None,
+            stop_details: None,
             usage: Usage {
                 input_tokens: 10,
                 cache_creation_input_tokens: 5,

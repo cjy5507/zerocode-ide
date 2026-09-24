@@ -1013,6 +1013,7 @@ impl StreamState {
                     model: chunk.model.clone().unwrap_or_else(|| self.model.clone()),
                     stop_reason: None,
                     stop_sequence: None,
+                    stop_details: None,
                     usage: Usage {
                         input_tokens: 0,
                         cache_creation_input_tokens: 0,
@@ -1156,6 +1157,7 @@ impl StreamState {
                             .unwrap_or_else(|| "end_turn".to_string()),
                     ),
                     stop_sequence: None,
+                    stop_details: None,
                     thought_signature: None,
                     reasoning_replay: None,
                 },
@@ -1782,6 +1784,7 @@ fn normalize_response(
             .finish_reason
             .map(|value| normalize_finish_reason(&value)),
         stop_sequence: None,
+        stop_details: None,
         usage: Usage {
             input_tokens: response
                 .usage

@@ -32,6 +32,9 @@ pub struct SmartTurnRouting {
     /// no cross-provider candidate or none is connected. The host builds a
     /// client for it exactly as for the quota fallback.
     pub refusal_fallback_model: Option<String>,
+    /// What the refusal ladder does at its model-switching rungs
+    /// (`smart.classifierFallback`, t-6747; default `ask`).
+    pub classifier_fallback: runtime::ClassifierFallback,
     pub quota_wait_band: std::time::Duration,
     pub deep_verify_model: Option<String>,
     pub deep_plan_model: Option<String>,
@@ -298,6 +301,10 @@ pub(super) struct SmartRuntimeSettings {
     /// implementer (`smart.execSwap`, default `always`). This does not affect
     /// spawn routing or verifier selection.
     pub exec_swap: SmartExecSwap,
+    /// `smart.classifierFallback`: `off`, `ask` (the default) or `auto` — see
+    /// [`runtime::ClassifierFallback`]. A word that is none of them reads as
+    /// the default, like every other malformed smart value.
+    pub classifier_fallback: runtime::ClassifierFallback,
     /// Who orchestrates a turn's sub-agents (`smart.orchestration`, default
     /// `auto`): the host may pre-analyse a `Large` turn in parallel before
     /// the model turn, or leave every spawn to the model.
@@ -659,6 +666,11 @@ pub(super) fn read_smart_runtime_settings_for(cwd: &Path) -> Option<SmartRuntime
         None => RouteAutoClassifierMode::Probed,
         value @ Some(_) => RouteAutoClassifierMode::from_settings_value(value),
     };
+    let classifier_fallback = smart
+        .and_then(|smart| smart.get("classifierFallback"))
+        .and_then(Value::as_str)
+        .and_then(runtime::ClassifierFallback::from_word)
+        .unwrap_or_default();
     let fallback_candidate_limit = smart
         .and_then(|smart| smart.get("fallbackCandidateLimit"))
         .and_then(Value::as_u64)
@@ -740,6 +752,7 @@ pub(super) fn read_smart_runtime_settings_for(cwd: &Path) -> Option<SmartRuntime
         headroom_penalty_threshold,
         policy,
         exec_swap,
+        classifier_fallback,
         orchestration,
         plan,
     })
@@ -864,6 +877,7 @@ pub(super) fn smart_turn_routing_with(
         return SmartTurnRouting {
             quota_fallback_model: None,
             refusal_fallback_model: None,
+            classifier_fallback: runtime::ClassifierFallback::default(),
             quota_wait_band: std::time::Duration::from_secs(
                 DEFAULT_QUOTA_WAIT_BAND_MINUTES.saturating_mul(60),
             ),
@@ -901,6 +915,7 @@ pub(super) fn smart_turn_routing_with(
     SmartTurnRouting {
         quota_fallback_model: route_quota_fallback_model(main_model, &settings, inventory),
         refusal_fallback_model: route_refusal_fallback_model(main_model, &settings, inventory),
+        classifier_fallback: settings.classifier_fallback,
         quota_wait_band: std::time::Duration::from_secs(
             settings.quota_wait_band_minutes.saturating_mul(60),
         ),

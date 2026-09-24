@@ -3964,6 +3964,11 @@ struct Stalled {
     /// Whether the run declared `--on-transient-error resume` — asked before
     /// a transcript is read, so an undeclared run costs nothing more.
     resume_declared: bool,
+    /// The record keys of this attempt's declines told already (t-6747):
+    /// the same decline's silence is ordinary quiet news after that,
+    /// reminded as any other — and a decline on another record of the same
+    /// attempt is news again (t-7153, R4).
+    declines_told: Vec<String>,
     /// The attempt it carries, and that attempt's task.
     dispatch: String,
     task: String,
@@ -4038,6 +4043,7 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
                         .handover
                         .as_ref()
                         .is_some_and(|policy| policy.on_transient_error.is_some()),
+                    declines_told: zerocode_core::orchestration::declines_told(run, &dispatch.id),
                     dispatch: dispatch.id.clone(),
                     task: dispatch.task.clone(),
                     checkout: worker.checkout.clone(),
@@ -4071,6 +4077,7 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
     );
     let mut quiet: Vec<(String, i64)> = Vec::new();
     let mut walled: Vec<zerocode_core::orchestration::QuotaWallWitness> = Vec::new();
+    let mut declined: Vec<zerocode_core::orchestration::ClassifierDeclineWitness> = Vec::new();
     let mut stopped: Vec<(Stalled, zerocode_core::orchestration::TransientErrorMarker)> =
         Vec::new();
     let mut unmarked: Vec<stall_cause::Silence> = Vec::new();
@@ -4141,6 +4148,33 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
             walled.push(witness);
             continue;
         }
+        /* No wall: a decline, next (t-6747). The CLI's sentence on the
+         * screen AND its record as the conversation's last word — or its
+         * pause dialog, stood past every dialog a person answered here. Both
+         * or nothing, the pure function decides; a pane at a decline is not
+         * quiet news until its notice is told, and ordinary quiet news after
+         * that — told by the RECORD (t-7153, R4): the pane is read again
+         * every beat, and a decline on a record not told yet is news, where
+         * the one told already is the silence it was. */
+        if !wall_words {
+            let witness = host
+                .classifier_decline_reading(one.term, &one.agent)
+                .and_then(|reading| {
+                    zerocode_core::orchestration::classifier_decline_witness(
+                        &one.worker,
+                        &one.dispatch,
+                        reading.screen,
+                        reading.record,
+                        one.since_ms,
+                        now_ms,
+                    )
+                })
+                .filter(|witness| !one.declines_told.contains(&witness.record.key));
+            if let Some(witness) = witness {
+                declined.push(witness);
+                continue;
+            }
+        }
         /* No wall: under a declared `--on-transient-error resume`, ask the
          * table's second cause of the same transcript tail (t-4537). The wall
          * was asked first and wins; a pane with neither stays quiet, and a
@@ -4206,6 +4240,11 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
             moved |= told;
         }
     }
+    for workers in declined.chunks(zerocode_core::orchestration::MAX_LIST) {
+        if let Ok((told, _)) = held.actor.classifier_declines(workers.to_vec(), now_ms) {
+            moved |= told;
+        }
+    }
     // Never forced, never waited on: the answer is the cache a later beat
     // reads (t-6427).
     for gauge in asks {
@@ -4227,6 +4266,426 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
      * stall switch — after the news is written, so a question changes
      * nothing the coordinator hears, and off the beat (t-4538). */
     stall_cause::ask_about(host, &held.stalls, unmarked, &still_quiet, now_ms);
+}
+
+/* ---- a classifier decline's switch of model (t-6747) ------------------ */
+
+/// A live worker this window seats in its pane now, with the open attempt it
+/// carries — one reading of a ledger image ([`with_ledger_seats`]) for the
+/// beats that ask each such pane a question of their own (t-6747).
+struct SeatedAttempt {
+    worker: String,
+    agent: String,
+    started_ms: i64,
+    term: u32,
+    dispatch: String,
+    /// When the attempt began — the interval a switch of model is read
+    /// against, never the worker's summons (t-7153, R3).
+    dispatch_started_ms: i64,
+    /// Where the LEDGER holds this worker's conversation is written, when
+    /// it has heard (t-7153, R3).
+    transcript: Option<String>,
+    taken_over: bool,
+    /// The record keys of this attempt's classifier declines told already.
+    declines_told: Vec<String>,
+}
+
+fn seated_open_attempts(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<SeatedAttempt> {
+    ledger
+        .runs()
+        .iter()
+        .flat_map(|run| {
+            run.workers.iter().filter_map(|worker| {
+                if !worker.state.is_live() {
+                    return None;
+                }
+                let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
+                if !dispatch.is_open()
+                    || run
+                        .worker_in_pane(&worker.team, &worker.pane)
+                        .is_none_or(|current| current.id != worker.id)
+                {
+                    return None;
+                }
+                let term = seats
+                    .get(worker.team.as_str())?
+                    .get(worker.pane.as_str())
+                    .copied()?;
+                Some(SeatedAttempt {
+                    worker: worker.id.clone(),
+                    agent: worker.agent.clone(),
+                    started_ms: worker.started_ms,
+                    term,
+                    dispatch: dispatch.id.clone(),
+                    dispatch_started_ms: dispatch.started_ms,
+                    transcript: worker
+                        .session
+                        .as_ref()
+                        .and_then(|session| session.transcript_path.clone()),
+                    taken_over: worker.taken_over,
+                    declines_told: zerocode_core::orchestration::declines_told(run, &dispatch.id),
+                })
+            })
+        })
+        .collect()
+}
+
+/// Tell a classifier decline its pause dialog is hiding behind a stale
+/// `working` hook (t-6747). Claude Code's pause dialog ends no turn, so the
+/// stall sweep — which reads quiet panes only — never sees the pane; but its
+/// pty goes still, where a turn that is working redraws its spinner
+/// (measured on 2.1.281 against a local stand-in for the API: a pane waiting
+/// on a slow answer wrote 135 times in 20 s; the dialog's pane wrote once in
+/// the 75 s after it, and nothing after its 17th second). The dialog on
+/// screen and a pty silent past every dialog a person answered here are the
+/// two witnesses ([`zerocode_core::orchestration::classifier_decline_witness`]);
+/// a pane the sweep can read is the sweep's. A notice is one RECORD's
+/// (t-7153, R4): a told dialog — one notice per attempt, its key the
+/// attempt's — is not told again, and a record the reading finds, told
+/// already, is not told again either; but the pane is read again every
+/// beat it stands behind the stale hook, because the record the CLI writes
+/// once a key answers the dialog — or another request declined — is news
+/// of its own, told and planned on its own key. Before this a told dialog
+/// closed the reading, and a record behind a hook that stayed `working`
+/// was never seen by either sweep.
+fn note_paused_declines(host: &dyn Host, now_ms: i64) {
+    let (Some(seated), Some(held)) = (with_ledger_seats(seated_open_attempts), runtime()) else {
+        return;
+    };
+    let mut declined = Vec::new();
+    for one in seated {
+        if one.taken_over
+            || !crate::quota_wall::has_rule(
+                &one.agent,
+                crate::quota_wall::StallCause::ClassifierDecline,
+            )
+            || host.quiet_since(one.term, one.started_ms, now_ms).is_some()
+        {
+            continue;
+        }
+        let Some(since_ms) = host.decline_quiet_since(
+            one.term,
+            one.started_ms,
+            now_ms,
+            zerocode_core::orchestration::DECLINE_DIALOG_UNANSWERED_MS,
+        ) else {
+            continue;
+        };
+        let witness = host
+            .classifier_decline_reading(one.term, &one.agent)
+            .and_then(|reading| {
+                zerocode_core::orchestration::classifier_decline_witness(
+                    &one.worker,
+                    &one.dispatch,
+                    reading.screen,
+                    reading.record,
+                    since_ms,
+                    now_ms,
+                )
+            })
+            .filter(|witness| !one.declines_told.contains(&witness.record.key));
+        declined.extend(witness);
+    }
+    let mut moved = false;
+    for chunk in declined.chunks(zerocode_core::orchestration::MAX_LIST) {
+        if let Ok((told, _)) = held.actor.classifier_declines(chunk.to_vec(), now_ms) {
+            moved |= told;
+        }
+    }
+    rang(moved);
+}
+
+/// Where a live worker's switch scan stands (t-7153): the transcript path
+/// its pane reported, the attempt it read under, the cursor into THAT file
+/// — the bytes the LEDGER holds the switches of, moved only after the rows
+/// are durable, never on the read — and what it read that the ledger has
+/// not yet held.
+#[derive(Clone)]
+struct HeldScan {
+    path: String,
+    /// The attempt the scan is bound to: the cursor and what waits on it
+    /// are this attempt's, and die with it (t-7153, R3).
+    dispatch: String,
+    cursor: crate::quota_wall::ScanCursor,
+    /// A beat's switches the ledger refused to hold — recovering, its store
+    /// full — with where the cursor stands once it does: kept here, bound to
+    /// this file and attempt, asked again first on the next beat, and
+    /// nothing more is read while they wait (t-7153, R3). Before this a
+    /// refused beat's switches were let go and read again from the file —
+    /// which a rotation could have replaced by then, and the switch was in
+    /// the ledger never.
+    pending: Option<PendingSwitches>,
+}
+
+/// Switches read and not yet held, each bound to the attempt and the file
+/// it was read under, and the cursor into THAT file that follows them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingSwitches {
+    switches: Vec<zerocode_core::orchestration::ModelDeviation>,
+    /// The file they were read from.
+    source: String,
+    next: crate::quota_wall::ScanCursor,
+}
+
+/// Each live worker's switch scan, by worker (t-7153, R3): a scan is an
+/// ATTEMPT's own and dies with it — a worker seated later at the same path,
+/// a session another summons resumed, the same worker handed a second task,
+/// begins its own count, and reads as its own only what was written inside
+/// its attempt ([`record_scanned_switches`]), and what the ended attempt's
+/// scan still held waiting is let go with it, never written for the next.
+/// A path that changed under the same attempt — its CLI began another
+/// session — begins a fresh cursor, and what waits, bound to the file it
+/// was read from, is still asked first; the ledger's fence says whether
+/// that file is still the worker's. In memory on purpose — the ledger keys
+/// each row by its record, so a restart that reads a file again from the
+/// start writes nothing twice.
+fn deviation_scans() -> &'static Mutex<std::collections::HashMap<String, HeldScan>> {
+    static READ: OnceLock<Mutex<std::collections::HashMap<String, HeldScan>>> = OnceLock::new();
+    READ.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// What a beat's reading of a worker's transcript is bound to (t-7153, R3):
+/// the worker, the attempt that was open when it read, the file it read
+/// and when that attempt began. Every switch carries the first three to
+/// the ledger's fence ([`zerocode_core::orchestration::ModelDeviation::is_bound_to`]),
+/// which re-reads them against its own rows as it writes.
+struct SwitchBinding<'a> {
+    worker: &'a str,
+    dispatch: &'a str,
+    source: &'a str,
+    attempt_started_ms: i64,
+}
+
+/// Write down every switch of model a live worker's CLI made to answer a
+/// classifier decline on the category's route (t-6747). A summons' model is
+/// a binding choice; leaving it, however well, is the coordinator's to read —
+/// the two models, the category, how long the CLI keeps the switch, why.
+///
+/// Read off each worker's own transcript from where the ledger's holdings
+/// end ([`crate::quota_wall::scan_fallbacks`]), one window a beat, outside
+/// every lock — the scan table is taken to read a cursor and again to keep
+/// one, never across the file or the actor — for every live worker whose CLI
+/// records such switches; each beat is [`scan_switches_a_beat`]'s, and the
+/// scans of workers no longer seated, or seated on another attempt, are let
+/// go. The file read is the one the LEDGER holds the worker's conversation
+/// is written in, and the pane's own report only while the ledger has heard
+/// none (t-7153, R3): the ledger's fence writes a switch only for the file
+/// it names, so a reading of a file the pane reported first — a session
+/// the ledger has not yet heard of — would be refused there and its cursor
+/// moved past it; read once the ledger names it, it is read from its start
+/// and lands.
+fn note_model_deviations(host: &dyn Host, now_ms: i64) {
+    let (Some(seated), Some(held)) = (with_ledger_seats(seated_open_attempts), runtime()) else {
+        return;
+    };
+    let mut moved = false;
+    let mut live = std::collections::HashSet::new();
+    for SeatedAttempt {
+        worker,
+        term,
+        dispatch,
+        dispatch_started_ms,
+        transcript,
+        ..
+    } in seated
+        .into_iter()
+        .filter(|one| crate::quota_wall::reads_fallbacks(&one.agent))
+    {
+        live.insert(worker.clone());
+        let Some(path) = transcript.or_else(|| {
+            host.provider_session(term)
+                .and_then(|session| session.transcript_path)
+        }) else {
+            continue;
+        };
+        let (cursor, pending) = deviation_scans()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&worker)
+            .filter(|standing| standing.dispatch == dispatch)
+            .map_or_else(
+                || (crate::quota_wall::ScanCursor::default(), None),
+                |standing| {
+                    let cursor = if standing.path == path {
+                        standing.cursor.clone()
+                    } else {
+                        crate::quota_wall::ScanCursor::default()
+                    };
+                    (cursor, standing.pending.clone())
+                },
+            );
+        let binding = SwitchBinding {
+            worker: &worker,
+            dispatch: &dispatch,
+            source: &path,
+            attempt_started_ms: dispatch_started_ms,
+        };
+        let (cursor, pending, moved_here) = scan_switches_a_beat(
+            &binding,
+            Path::new(&path),
+            cursor,
+            pending,
+            &mut |switches| {
+                held.actor
+                    .model_deviations(switches, now_ms)
+                    .map(|(told, _)| told)
+            },
+        );
+        moved |= moved_here;
+        deviation_scans()
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(
+                worker,
+                HeldScan {
+                    path,
+                    dispatch,
+                    cursor,
+                    pending,
+                },
+            );
+    }
+    deviation_scans()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .retain(|worker, _| live.contains(worker));
+    rang(moved);
+}
+
+/// One beat of one worker's switch scan (t-7153): what an earlier beat read
+/// and the ledger refused is asked of `record` again FIRST, and the beat
+/// reads nothing more until it is held — so what waits is ever one beat's
+/// reading, never a file's; once held, the cursor stands where that reading
+/// ended, in the file it read, and the beat reads on from there — the file
+/// at `path` now, when it is another, from its start
+/// ([`crate::quota_wall::scan_fallbacks`]), its own cursor untouched by a
+/// reading of another path. Answers the cursor to keep — with the round of
+/// its checks the reading walked on — what still waits, and whether a row
+/// moved.
+fn scan_switches_a_beat(
+    binding: &SwitchBinding<'_>,
+    path: &Path,
+    cursor: crate::quota_wall::ScanCursor,
+    pending: Option<PendingSwitches>,
+    record: &mut dyn FnMut(
+        Vec<zerocode_core::orchestration::ModelDeviation>,
+    ) -> Result<bool, RuntimeError>,
+) -> (crate::quota_wall::ScanCursor, Option<PendingSwitches>, bool) {
+    let mut moved = false;
+    let cursor = match pending {
+        Some(waiting) => {
+            let (unheld, told) = hold_switches(waiting.switches, record);
+            moved |= told;
+            if !unheld.is_empty() {
+                return (
+                    cursor,
+                    Some(PendingSwitches {
+                        switches: unheld,
+                        ..waiting
+                    }),
+                    moved,
+                );
+            }
+            if waiting.source == binding.source {
+                waiting.next
+            } else {
+                cursor
+            }
+        }
+        None => cursor,
+    };
+    let scan = crate::quota_wall::scan_fallbacks(path, &cursor);
+    let (keep, pending, moved_here) = record_scanned_switches(binding, scan, cursor, record);
+    (keep, pending, moved || moved_here)
+}
+
+/// Ask `record` to hold `switches`, a list's worth at a time: answers the
+/// switches it has not held — every one from the first chunk it refused —
+/// and whether a row moved.
+fn hold_switches(
+    switches: Vec<zerocode_core::orchestration::ModelDeviation>,
+    record: &mut dyn FnMut(
+        Vec<zerocode_core::orchestration::ModelDeviation>,
+    ) -> Result<bool, RuntimeError>,
+) -> (Vec<zerocode_core::orchestration::ModelDeviation>, bool) {
+    let mut moved = false;
+    let mut chunks = switches.chunks(zerocode_core::orchestration::MAX_LIST);
+    while let Some(chunk) = chunks.next() {
+        match record(chunk.to_vec()) {
+            Ok(told) => moved |= told,
+            Err(_) => {
+                return (
+                    chunk.iter().chain(chunks.flatten()).cloned().collect(),
+                    moved,
+                );
+            }
+        }
+    }
+    (Vec::new(), moved)
+}
+
+/// Where a switch scan's cursor may stand after `record` was asked to hold
+/// its switches (t-7153, P2): at `scan.next` when every chunk was answered —
+/// or when there was nothing to hold — and back at `held_at`, where it was,
+/// when any chunk was refused (the actor recovering, its store full): the
+/// chunks not yet held are answered as PENDING, with `scan.next` for the
+/// cursor to take once they are, and [`scan_switches_a_beat`] asks them
+/// again first on the next beat; the ledger writes each switch once
+/// (`workers_model_deviated` keys a row by its record's uuid). Before this
+/// the cursor moved on the read, and a refused row was gone until a
+/// restart.
+///
+/// A switch is the ATTEMPT's that was open when the CLI wrote it (t-7153,
+/// R3): one dated before the attempt began — an earlier worker's, in a
+/// session this one resumed; the same worker's, on the task it carried
+/// before — is not this attempt's, and a record with no time of its own
+/// cannot say whose it is; neither is asked of the ledger, and the cursor
+/// moves past both, since neither will ever be this attempt's — nor is a
+/// row the ledger could never hold ([`zerocode_core::orchestration::ModelDeviation::fits`]).
+/// What is asked carries the binding it was read under, for the ledger's
+/// own fence. Answers the cursor to keep, what waits, and whether a row
+/// moved.
+fn record_scanned_switches(
+    binding: &SwitchBinding<'_>,
+    scan: crate::quota_wall::DeviationScan,
+    held_at: crate::quota_wall::ScanCursor,
+    record: &mut dyn FnMut(
+        Vec<zerocode_core::orchestration::ModelDeviation>,
+    ) -> Result<bool, RuntimeError>,
+) -> (crate::quota_wall::ScanCursor, Option<PendingSwitches>, bool) {
+    let crate::quota_wall::DeviationScan { switches, next } = scan;
+    let named: Vec<zerocode_core::orchestration::ModelDeviation> = switches
+        .into_iter()
+        .filter(|switch| {
+            zerocode_core::orchestration::switch_is_the_attempts(
+                switch.at_ms,
+                binding.attempt_started_ms,
+            )
+        })
+        .map(|mut switch| {
+            switch.worker = binding.worker.to_string();
+            switch.dispatch = binding.dispatch.to_string();
+            switch.source = binding.source.to_string();
+            switch
+        })
+        .filter(zerocode_core::orchestration::ModelDeviation::fits)
+        .collect();
+    if named.is_empty() {
+        return (next, None, false);
+    }
+    let (unheld, moved) = hold_switches(named, record);
+    if unheld.is_empty() {
+        return (next, None, moved);
+    }
+    (
+        held_at,
+        Some(PendingSwitches {
+            switches: unheld,
+            source: binding.source.to_string(),
+            next,
+        }),
+        moved,
+    )
 }
 
 /* ---- the transient-error continuation (t-4537) ------------------------ */
@@ -4477,6 +4936,12 @@ pub(crate) fn tick(host: &dyn Host, overrides: &[(String, LaunchOverride)], now_
     // A turn ending is only a row. The existing beat revisits it after the
     // grace interval and is the sole producer of quiet notifications.
     notify_stalled_workers(host, now_ms);
+    // A decline whose pause dialog stands behind a stale `working` hook, which
+    // the sweep cannot see, is told on its own two witnesses (t-6747).
+    note_paused_declines(host, now_ms);
+    // Every switch of model a worker's CLI made to answer a classifier
+    // decline is written down, whether or not the worker went quiet (t-6747).
+    note_model_deviations(host, now_ms);
     // And a wall with a standing order behind it is walked — one handover
     // per beat, outside every lock, through the one door (§2.3).
     walk_handovers(host, overrides, now_ms);
@@ -5130,7 +5595,18 @@ fn point_at_waiting_mail(host: &dyn Host, now_ms: i64) {
 pub(crate) struct HandoverWall {
     term: u32,
     capability: String,
-    witness: zerocode_core::orchestration::QuotaWallWitness,
+    witness: HandoverWitness,
+}
+
+/// The two witnesses a walk re-reads before each step, for its cause: the
+/// wall's (§2.2), whose numbers the receipt carries as read today, or the
+/// decline's (t-6747) — which IS the plan's cause, re-proven the same at
+/// every reading (`HandoverCause::is_witnessed_by`, t-7153), so nothing of
+/// it travels here.
+#[derive(Clone, Debug)]
+pub(crate) enum HandoverWitness {
+    Quota(zerocode_core::orchestration::QuotaWallWitness),
+    Decline,
 }
 
 fn current_handover_wall(
@@ -5155,18 +5631,53 @@ fn current_handover_wall(
             crate::agent_teams::current_pane_capability(&plan.worker_team, &plan.worker_pane)?;
         (term, capability)
     };
-    host.quiet_since(term, plan.worker_started_ms, now_ms)?;
-    let marker = host.quota_wall_marker(term, &plan.agent)?;
-    let headroom = usage_headroom(&held.usage, &plan.agent, model.as_deref());
-    let witness = zerocode_core::orchestration::quota_wall_witness(
-        &plan.worker,
-        Some(marker),
-        headroom.as_ref(),
-        now_ms,
-    )?;
+    // A decline's pause dialog stands behind a stale `working` hook: its
+    // pane is quiet by the decline's own rule (t-6747).
+    let quiet = || match &plan.cause {
+        zerocode_core::orchestration::HandoverCause::QuotaWall { .. } => {
+            host.quiet_since(term, plan.worker_started_ms, now_ms)
+        }
+        zerocode_core::orchestration::HandoverCause::ClassifierDecline { .. } => host
+            .decline_quiet_since(
+                term,
+                plan.worker_started_ms,
+                now_ms,
+                zerocode_core::orchestration::DECLINE_DIALOG_UNANSWERED_MS,
+            ),
+    };
+    let since_ms = quiet()?;
+    let witness = match &plan.cause {
+        zerocode_core::orchestration::HandoverCause::QuotaWall { .. } => {
+            let marker = host.quota_wall_marker(term, &plan.agent)?;
+            let headroom = usage_headroom(&held.usage, &plan.agent, model.as_deref());
+            HandoverWitness::Quota(zerocode_core::orchestration::quota_wall_witness(
+                &plan.worker,
+                Some(marker),
+                headroom.as_ref(),
+                now_ms,
+            )?)
+        }
+        zerocode_core::orchestration::HandoverCause::ClassifierDecline { .. } => {
+            let reading = host.classifier_decline_reading(term, &plan.agent)?;
+            let witness = zerocode_core::orchestration::classifier_decline_witness(
+                &plan.worker,
+                &plan.dispatch,
+                reading.screen,
+                reading.record,
+                since_ms,
+                now_ms,
+            )?;
+            // The decline the plan was made on, and no other (t-7153): the
+            // same record, the same routed category, never the screen alone.
+            if !plan.cause.is_witnessed_by(&witness) {
+                return None;
+            }
+            HandoverWitness::Decline
+        }
+    };
     // Activity and respawn may race the marker/cache reads. Ask quiet again
     // and prove both host and ledger identities after the probes return.
-    host.quiet_since(term, plan.worker_started_ms, now_ms)?;
+    quiet()?;
     let image = held.actor.view().ok()?;
     let rows = cached_ledger(&held, &image).ok()?;
     if !zerocode_core::orchestration::handover_order_current(rows.run(&plan.run)?, plan, false) {
@@ -5207,27 +5718,63 @@ fn settle_handover_terminal(
         .clone();
     drop(rows);
     actor.worker_terminal_settled_fenced(decided.effect.clone(), None, now_ms, |commit| {
-        host.with_quota_wall_observation(
-            term,
-            plan.worker_started_ms,
-            &plan.agent,
-            &mut |marker| {
-                with_usage_headroom(&held.usage, &plan.agent, model.as_deref(), |headroom| {
-                    // Time of use, after the actor mailbox and the witness locks.
-                    let at_ms = crate::now_epoch_ms();
-                    if zerocode_core::orchestration::quota_wall_witness(
-                        &plan.worker,
-                        Some(marker),
-                        headroom.as_ref(),
-                        at_ms,
-                    )
-                    .is_some()
-                    {
-                        commit(at_ms);
-                    }
-                });
-            },
-        );
+        match &plan.cause {
+            zerocode_core::orchestration::HandoverCause::QuotaWall { .. } => host
+                .with_quota_wall_observation(
+                    term,
+                    plan.worker_started_ms,
+                    &plan.agent,
+                    &mut |marker| {
+                        with_usage_headroom(
+                            &held.usage,
+                            &plan.agent,
+                            model.as_deref(),
+                            |headroom| {
+                                // Time of use, after the actor mailbox and the
+                                // witness locks.
+                                let at_ms = crate::now_epoch_ms();
+                                if zerocode_core::orchestration::quota_wall_witness(
+                                    &plan.worker,
+                                    Some(marker),
+                                    headroom.as_ref(),
+                                    at_ms,
+                                )
+                                .is_some()
+                                {
+                                    commit(at_ms);
+                                }
+                            },
+                        );
+                    },
+                ),
+            zerocode_core::orchestration::HandoverCause::ClassifierDecline { .. } => host
+                .with_classifier_decline_observation(
+                    term,
+                    plan.worker_started_ms,
+                    &plan.agent,
+                    &mut |reading, since_ms| {
+                        let at_ms = crate::now_epoch_ms();
+                        // The last boundary re-proves the SAME decline the
+                        // plan was made on (t-7153): a witness that changed
+                        // — its category gone or another, another request's
+                        // record, the screen alone — commits nothing, and the
+                        // beat plans again from what it reads next.
+                        if let Some(witness) =
+                            zerocode_core::orchestration::classifier_decline_witness(
+                                &plan.worker,
+                                &plan.dispatch,
+                                reading.screen,
+                                reading.record,
+                                since_ms,
+                                at_ms,
+                            )
+                            && plan.cause.is_witnessed_by(&witness)
+                        {
+                            commit(at_ms);
+                        }
+                    },
+                ),
+        }
     })
 }
 
@@ -5439,9 +5986,19 @@ pub(crate) fn walk_handover(
     // Receipt/briefing describe today's witness, while the retained mail is
     // left exactly as it was. The declaration and seats remain unchanged.
     let mut current = plan.clone();
-    current.provider = wall.witness.headroom.provider.clone();
-    current.used_percent = wall.witness.headroom.used_percent;
-    current.resets_at_ms = wall.witness.headroom.resets_at_ms;
+    match &wall.witness {
+        HandoverWitness::Quota(witness) => {
+            current.cause = zerocode_core::orchestration::HandoverCause::QuotaWall {
+                provider: witness.headroom.provider.clone(),
+                used_percent: witness.headroom.used_percent,
+                resets_at_ms: witness.headroom.resets_at_ms,
+            };
+        }
+        // A decline's witness is the plan's own or the wall above answered
+        // nothing (`HandoverCause::is_witnessed_by`, t-7153): the same
+        // record in the same routed category, so the cause stands as read.
+        HandoverWitness::Decline => {}
+    }
     let plan = &current;
     // The reservation: refused, nothing moved and the next beat plans again.
     let Ok((Some(handover), _)) = actor.handover_begin(plan.clone(), now_ms) else {
@@ -5479,7 +6036,7 @@ pub(crate) fn walk_handover(
         step(
             at,
             false,
-            "current handover order, seat, or quota witness changed".into(),
+            "current handover order, seat, or witness changed".into(),
         );
         let _ = actor.handover_revoke(plan.run.clone(), handover.clone(), current_time());
         Walked::Failed {
@@ -5494,8 +6051,7 @@ pub(crate) fn walk_handover(
     let wip_sha = if plan.wip_commit {
         let message = crate::quota_wall::wip_message(
             &plan.worker,
-            &plan.provider,
-            plan.resets_at_ms,
+            &plan.cause,
             crate::automation_runtime::local_offset_secs(),
         );
         match door.wip_commit(Path::new(&plan.checkout), &message) {
@@ -5540,7 +6096,7 @@ pub(crate) fn walk_handover(
             "--worker".to_string(),
             plan.worker.clone(),
             "--reason".to_string(),
-            "quota-wall".to_string(),
+            plan.cause.reason().to_string(),
             "--retry-request".to_string(),
             format!("handover-{}-stop", plan.dispatch),
         ],

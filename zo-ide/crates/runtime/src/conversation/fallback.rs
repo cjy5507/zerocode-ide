@@ -12,31 +12,31 @@ use crate::message_stream::types::{BlockIdGen, RenderBlock, WireModelSource};
 use crate::session::{ContentBlock, ConversationMessage};
 
 use super::{
-    ApiClient, ApiRequest, AssistantEvent, AsyncApiClient, ConversationRuntime, ModelSwitch,
-    RuntimeError, ToolExecutor, DEFAULT_STREAMING_CHANNEL_CAPACITY,
+    ApiClient, ApiRequest, AssistantEvent, AsyncApiClient, Attendance, ClassifierFallback,
+    ConversationRuntime, ModelSwitch, RuntimeError, ToolExecutor,
+    DEFAULT_STREAMING_CHANNEL_CAPACITY,
 };
 use crate::model_router::SwitchTrigger;
 
-/// The SAME-provider model a safety-classifier refusal on `model` retries on,
-/// as the catalog declares it: the first candidate in the lineup's
-/// `refusal_fallback` list served by `model`'s own provider (Fable/Sonnet/Haiku
-/// → the Opus head). `None` when the lineup declares none, or when every
-/// candidate is on another provider (Opus itself) — that case is handled by the
-/// cross-provider handoff, never by a bound-client model override, since putting
-/// a foreign model id on the Anthropic client would 400. Nothing here names a
-/// lineup; which classifier declines and which family stands in are catalog
-/// facts, so a new lineup is a catalog edit and never a rebuild.
-fn refusal_fallback_for(model: &str) -> Option<String> {
+/// The SAME-provider model the catalog routes a refusal on `model` in
+/// `category` to — the first candidate on `model`'s own provider that is not
+/// `model` itself (cyber on Fable 5.1 or Opus 5 → Opus 4.8). `None` when the
+/// category is routed nowhere or only across providers — the latter is the
+/// cross-provider handoff, never a bound-client override, since a foreign
+/// model id on the Anthropic client would 400. Nothing here names a lineup:
+/// which classifier declines which category, and who stands in, are catalog
+/// facts (`refusal_routes`), so a new lineup is a catalog edit.
+fn refusal_route_for(model: &str, category: Option<&str>) -> Option<String> {
     let provider = api::detect_provider_kind(model);
-    api::refusal_fallback_candidates(model)
+    api::refusal_route_candidates(model, category)
         .into_iter()
-        .find(|candidate| api::detect_provider_kind(candidate) == provider)
+        .find(|candidate| api::detect_provider_kind(candidate) == provider && candidate != model)
 }
-/// System-level warn naming the same-provider model a refusal was auto-retried
-/// on (Fable/Sonnet/Haiku → the Opus head). Wraps the shared vocabulary in
-/// [`core_types::retry_signal`] so every notice lives in one place.
-pub(super) fn refusal_fallback_warn(target: &str) -> String {
-    core_types::retry_signal::refusal_fallback_warn(target)
+/// The receipt for a turn the ladder moved off the chosen model — which model
+/// it left, which it continues on, why, and for how long. Wraps the shared
+/// vocabulary in [`core_types::retry_signal`] so every notice lives in one place.
+pub(super) fn refusal_route_warn(from: &str, to: &str, category: Option<&str>) -> String {
+    core_types::retry_signal::refusal_route_warn(from, to, category)
 }
 /// System-level warn naming the cross-provider model this doubly-refused turn is
 /// handed to, like a quota fallback.
@@ -60,6 +60,59 @@ pub(super) const REFUSAL_SURFACED_NOTICE: &str =
 pub(super) const REFUSAL_SAME_MODEL_RETRY_WARN: &str =
     "The model's safety classifier declined this response — retrying once (the \
      classifier is sampling-dependent, so an identical retry often passes).";
+
+/// One rung of zo's ladder for a safety-classifier refusal (t-6747) — the one
+/// table both turn loops walk, first to last; what no rung answers is
+/// surfaced.
+///
+/// Measured on this machine's own records, 2026-09-10..24: after a decline
+/// the next request on the SAME model went through 6 times in 15, and on the
+/// category's route (every one Opus 4.8) 15 times in 15, while Opus 5 and 5.5
+/// were declined 10 times themselves. So the same model gets one try — it
+/// keeps the model the person chose — and then the route, never the family
+/// head.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RefusalRung {
+    /// The same model, once.
+    SameModel,
+    /// The model the catalog routes the refusal's category to on the same
+    /// provider, for this turn — as [`ClassifierFallback`] says.
+    Route,
+    /// The category's cross-provider candidate, handed the turn through the
+    /// quota swap machinery — under the same consent.
+    CrossProvider,
+    /// The earlier declined exchange dropped from history and the same model
+    /// asked once more — for a routed category only.
+    Cleaned,
+}
+
+/// The ladder, first to last.
+pub(super) const REFUSAL_LADDER: [RefusalRung; 4] = [
+    RefusalRung::SameModel,
+    RefusalRung::Route,
+    RefusalRung::CrossProvider,
+    RefusalRung::Cleaned,
+];
+
+/// What the switching mode says before a rung leaves the model the person
+/// chose.
+enum SwitchGate {
+    /// Switch.
+    Go,
+    /// `off`: no rung switches models.
+    Skip,
+    /// `ask`, a person at the keyboard, and no yes yet this turn or session.
+    Ask,
+    /// `ask`, nobody at the keyboard to ask (t-7153): a question that cannot
+    /// be put is not answered — no switch, and the route it would have
+    /// taken is noted so the turn can say why it stayed.
+    Unasked,
+}
+
+/// The text a withheld image leaves in its place (t-6747): the conversation
+/// keeps saying something was there and why it went.
+pub(super) const DECLINED_IMAGE_PLACEHOLDER: &str =
+    "[image withheld after a safety-classifier decline, with the person's consent]";
 
 /// Consecutive public turns that must hit the refusal fallback before the
 /// session stops probing Fable/Mythos on every new turn. Two catches a sticky
@@ -249,6 +302,10 @@ pub(super) enum RefusalDecision {
     /// history dragging the classifier down. Drop it and re-request the same
     /// model once. Capped at one per turn.
     RetryCleaned,
+    /// The next rung would leave the model the person chose, and the mode is
+    /// `ask` with a person at the keyboard: ask before switching to `to`
+    /// (t-6747). A yes is recorded and the ladder decided again.
+    Ask { to: String },
     /// Cannot retry (every avenue spent). Surface a notice and end the turn.
     Surface,
 }
@@ -594,24 +651,24 @@ where
         self.wire_model().map(|(model, _)| model)
     }
 
-    /// Decide how to react to a `stop_reason: "refusal"`, walking the catalog's
-    /// candidate ladder for the refused model in one place (P2):
+    /// Decide how to react to a `stop_reason: "refusal"` in `category`,
+    /// walking [`REFUSAL_LADDER`] in order (t-6747):
     ///
-    /// 1. A same-provider candidate not yet tried (Fable/Sonnet/Haiku → the Opus
-    ///    head) arms the per-turn model override → [`RefusalDecision::Retry`].
-    /// 2. No same-provider candidate (Opus itself): one same-model retry first,
-    ///    the classifier samples so it is the cheapest fix → [`RefusalDecision::RetrySameModel`].
-    /// 3. That having refused too, an installed cross-provider refusal client
-    ///    takes the turn like a quota fallback → [`RefusalDecision::CrossProvider`].
-    /// 4. No fallback left but an earlier declined exchange is still in context:
-    ///    drop it and ask the same model once → [`RefusalDecision::RetryCleaned`].
-    /// 5. Everything spent → [`RefusalDecision::Surface`].
+    /// 1. [`RefusalRung::SameModel`] — one free retry on the model the person
+    ///    chose → [`RefusalDecision::RetrySameModel`].
+    /// 2. [`RefusalRung::Route`] — the category's same-provider route for this
+    ///    turn → [`RefusalDecision::Retry`], or [`RefusalDecision::Ask`] first.
+    /// 3. [`RefusalRung::CrossProvider`] — the installed cross-provider client,
+    ///    when the category routes to it → [`RefusalDecision::CrossProvider`].
+    /// 4. [`RefusalRung::Cleaned`] — a routed category with an earlier declined
+    ///    exchange still in history → [`RefusalDecision::RetryCleaned`].
+    /// 5. Everything spent, or a category routed nowhere → [`RefusalDecision::Surface`].
     ///
     /// Anthropic-only: a non-Anthropic active model (including a refusal already
     /// handed to a cross-provider client) yields [`RefusalDecision::Proceed`] so
     /// that provider's own reply is consumed, never re-judged as our refusal.
     /// The caller drops the refused partial (by not pushing it) and re-requests.
-    pub(super) fn decide_refusal_fallback(&mut self) -> RefusalDecision {
+    pub(super) fn decide_refusal_fallback(&mut self, category: Option<&str>) -> RefusalDecision {
         // Own the string so the `&self` borrow is dropped before the mutation.
         let Some(model) = self.effective_request_model().map(str::to_string) else {
             return RefusalDecision::Proceed;
@@ -619,52 +676,200 @@ where
         if !is_anthropic_model(&model) {
             return RefusalDecision::Proceed;
         }
-        // Step 1/2: while no fallback has been applied yet this turn, try the
-        // same-provider override, else one free same-model retry.
-        if self.refusal_fallback_model.is_none() && !self.cross_fallback_active() {
-            if let Some(fallback) = refusal_fallback_for(&model) {
-                self.note_model_switch(SwitchTrigger::Refusal, &model, &fallback);
-                self.refusal_fallback_model = Some(fallback);
-                self.mark_refusal_turn_hit();
-                return RefusalDecision::Retry;
+        let routes = api::refusal_route_candidates(&model, category);
+        for rung in REFUSAL_LADDER {
+            let fresh = self.refusal_fallback_model.is_none() && !self.cross_fallback_active();
+            match rung {
+                RefusalRung::SameModel => {
+                    if fresh && !self.refusal_same_model_retry_used {
+                        self.refusal_same_model_retry_used = true;
+                        return RefusalDecision::RetrySameModel;
+                    }
+                }
+                RefusalRung::Route => {
+                    let Some(to) = refusal_route_for(&model, category).filter(|_| fresh) else {
+                        continue;
+                    };
+                    match self.refusal_switch_gate() {
+                        SwitchGate::Skip => continue,
+                        SwitchGate::Unasked => {
+                            self.refusal_switch_unasked_to = Some(to);
+                            continue;
+                        }
+                        SwitchGate::Ask => return RefusalDecision::Ask { to },
+                        SwitchGate::Go => {}
+                    }
+                    self.note_model_switch_for(SwitchTrigger::Refusal, &model, &to, category);
+                    self.refusal_fallback_model = Some(to);
+                    self.mark_refusal_turn_hit(category);
+                    return RefusalDecision::Retry;
+                }
+                RefusalRung::CrossProvider => {
+                    if self.cross_fallback_active() {
+                        continue;
+                    }
+                    let Some(to) = self
+                        .refusal_fallback_client
+                        .as_ref()
+                        .map(|(_, to)| to.clone())
+                        .filter(|to| routes.contains(to))
+                    else {
+                        continue;
+                    };
+                    match self.refusal_switch_gate() {
+                        SwitchGate::Skip => continue,
+                        SwitchGate::Unasked => {
+                            self.refusal_switch_unasked_to = Some(to);
+                            continue;
+                        }
+                        SwitchGate::Ask => return RefusalDecision::Ask { to },
+                        SwitchGate::Go => {}
+                    }
+                    self.active_cross_fallback = Some(CrossFallback::Refusal);
+                    // A same-provider override from the main model's world must
+                    // never ride the cross-provider client (it has its own model).
+                    self.refusal_fallback_model = None;
+                    self.escalation_model_override = None;
+                    self.note_model_switch_for(SwitchTrigger::Refusal, &model, &to, category);
+                    self.mark_refusal_turn_hit(category);
+                    return RefusalDecision::CrossProvider;
+                }
+                RefusalRung::Cleaned => {
+                    if !routes.is_empty()
+                        && !self.refusal_context_clean_used
+                        && self.has_prior_declined_exchange()
+                    {
+                        self.refusal_context_clean_used = true;
+                        return RefusalDecision::RetryCleaned;
+                    }
+                }
             }
-            if !self.refusal_same_model_retry_used {
-                self.refusal_same_model_retry_used = true;
-                return RefusalDecision::RetrySameModel;
-            }
-        }
-        // Step 3: the same-provider override (or the same-model retry) refused
-        // too — hand the turn to an installed cross-provider refusal client,
-        // through the SAME swap machinery a quota fallback uses. Skipped when
-        // one is already riding (its own refusal fell through to Proceed above).
-        if !self.cross_fallback_active() {
-            if let Some((_, to)) = self.refusal_fallback_client.as_ref() {
-                let to = to.clone();
-                self.active_cross_fallback = Some(CrossFallback::Refusal);
-                // A same-provider override from the main model's world must
-                // never ride the cross-provider client (it has its own model).
-                self.refusal_fallback_model = None;
-                self.escalation_model_override = None;
-                self.note_model_switch(SwitchTrigger::Refusal, &model, &to);
-                self.mark_refusal_turn_hit();
-                return RefusalDecision::CrossProvider;
-            }
-        }
-        // Step 4: no fallback is available. If an earlier declined exchange is
-        // still in history — a sticky classifier reads the whole conversation —
-        // drop it and ask once more. Exactly one per public turn.
-        if !self.refusal_context_clean_used && self.has_prior_declined_exchange() {
-            self.refusal_context_clean_used = true;
-            return RefusalDecision::RetryCleaned;
         }
         RefusalDecision::Surface
+    }
+
+    /// Whether a rung may leave the model the person chose (t-6747): never
+    /// under `off`; under `ask`, only after a yes this turn or for the session
+    /// — and a yes takes a person at the keyboard: a turn nobody attends
+    /// cannot be asked, so nothing is answered for it and the model stays
+    /// (t-7153: silence is not consent; the window launches a summoned zo
+    /// worker with `auto` when it pinned no model, `off` when it did); at
+    /// once under `auto`.
+    fn refusal_switch_gate(&self) -> SwitchGate {
+        if self.refusal_switch_refused_for_turn {
+            return SwitchGate::Skip;
+        }
+        match self.classifier_fallback {
+            ClassifierFallback::Off => SwitchGate::Skip,
+            ClassifierFallback::Ask
+                if self.refusal_switch_consented_for_turn
+                    || self.refusal_switch_consented_for_session =>
+            {
+                SwitchGate::Go
+            }
+            ClassifierFallback::Ask if self.attendance == Attendance::Attended => SwitchGate::Ask,
+            ClassifierFallback::Ask => SwitchGate::Unasked,
+            ClassifierFallback::Auto => SwitchGate::Go,
+        }
+    }
+
+    /// Record the person's answer to [`RefusalDecision::Ask`]: yes for this
+    /// turn, or yes from now on in this model world.
+    pub(super) fn consent_to_refusal_switch(&mut self, for_the_session: bool) {
+        self.refusal_switch_consented_for_turn = true;
+        self.refusal_switch_consented_for_session |= for_the_session;
+    }
+
+    /// Record the person's "stay" — or a question nobody answered (t-7153:
+    /// a prompt ceiling passed, a headless loop with nobody to ask), which
+    /// is the same for the model: no rung leaves the chosen one again this
+    /// turn; a same-model rung still may.
+    pub(super) fn refuse_refusal_switch(&mut self) {
+        self.refusal_switch_refused_for_turn = true;
+    }
+
+    /// The declined request's images, when the ladder should ask about them
+    /// now: at the first refusal of a turn a person attends, once. A turn
+    /// nobody attends keeps them — nobody can say yes, and they are the
+    /// person's.
+    pub(super) fn declined_images_to_ask_about(&mut self) -> Option<usize> {
+        if self.refusal_images_asked_for_turn || self.attendance != Attendance::Attended {
+            return None;
+        }
+        let count = self.declined_request_images();
+        if count == 0 {
+            return None;
+        }
+        self.refusal_images_asked_for_turn = true;
+        Some(count)
+    }
+
+    /// The images the declined request carried — every image in the messages
+    /// after the last assistant message, a pasted screenshot or a tool's
+    /// (t-6747). A picture of a declined screen re-declines whoever reads it
+    /// (2026-09-21: three of a coordinator's answers in a row until the
+    /// screenshot left the context), so the ladder asks before sending them
+    /// again.
+    pub(super) fn declined_request_images(&self) -> usize {
+        let messages = &self.session.messages;
+        let since = messages
+            .iter()
+            .rposition(|message| message.role == crate::session::MessageRole::Assistant)
+            .map_or(0, |at| at + 1);
+        messages[since..]
+            .iter()
+            .flat_map(|message| message.blocks.iter())
+            .map(|block| match block {
+                ContentBlock::Image { .. } => 1,
+                ContentBlock::ToolResult { images, .. } => images.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    /// Withhold the declined request's images from the conversation, each
+    /// replaced by [`DECLINED_IMAGE_PLACEHOLDER`], so no later request in this
+    /// session carries them again. Only on the person's yes. Answers how many
+    /// went.
+    pub(super) fn withhold_declined_request_images(&mut self) -> usize {
+        let since = self
+            .session
+            .messages
+            .iter()
+            .rposition(|message| message.role == crate::session::MessageRole::Assistant)
+            .map_or(0, |at| at + 1);
+        let messages = Arc::make_mut(&mut self.session.messages);
+        let mut withheld = 0;
+        for message in &mut messages[since..] {
+            for block in &mut message.blocks {
+                match block {
+                    ContentBlock::Image { .. } => {
+                        *block = ContentBlock::Text {
+                            text: DECLINED_IMAGE_PLACEHOLDER.to_string(),
+                        };
+                        withheld += 1;
+                    }
+                    ContentBlock::ToolResult { images, output, .. } if !images.is_empty() => {
+                        withheld += images.len();
+                        images.clear();
+                        output.push('\n');
+                        output.push_str(DECLINED_IMAGE_PLACEHOLDER);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if withheld > 0 {
+            self.session.mark_transcript_dirty();
+        }
+        withheld
     }
 
     /// Fold this refused public turn into the consecutive-refusal streak and,
     /// on the threshold, arm the session-scoped cooldown that pre-arms the next
     /// turns onto the fallback. Shared by the same-provider override and the
     /// cross-provider handoff so both count toward the pre-arm.
-    fn mark_refusal_turn_hit(&mut self) {
+    fn mark_refusal_turn_hit(&mut self, category: Option<&str>) {
         if self.refusal_turn_hit {
             return;
         }
@@ -675,6 +880,7 @@ where
                 .is_none_or(|until| std::time::Instant::now() >= until)
         {
             self.refusal_dry_until = Some(std::time::Instant::now() + REFUSAL_DRY_COOLDOWN);
+            self.refusal_dry_category = category.map(str::to_string);
             // The first begin that actually pre-arms owns the notice; do not let
             // this mid-turn retry emit it prematurely.
             self.refusal_prearm_notice_pending = false;
@@ -767,17 +973,27 @@ where
         let Some(model) = self.effective_request_model().map(str::to_string) else {
             return;
         };
-        // A same-provider candidate (Opus) rides the bound client as a
-        // per-turn model override — the cheap, in-provider pre-arm.
-        if let Some(fallback) = refusal_fallback_for(&model) {
+        // A pre-arm leaves the chosen model before this turn was declined at
+        // all, so only a switch that would go without asking may pre-arm
+        // (t-6747) — and only onto the route of the category that cooled it.
+        if !matches!(self.refusal_switch_gate(), SwitchGate::Go) {
+            return;
+        }
+        let category = self.refusal_dry_category.clone();
+        // A same-provider route rides the bound client as a per-turn model
+        // override — the cheap, in-provider pre-arm.
+        if let Some(fallback) = refusal_route_for(&model, category.as_deref()) {
             self.refusal_fallback_model = Some(fallback);
             self.latch_refusal_prearm_notice();
             return;
         }
-        // No same-provider candidate (Opus itself): pre-arm the installed
-        // cross-provider refusal client for the whole turn, exactly as the
-        // quota cooldown pre-arms its client. Silent when none is connected.
-        if self.refusal_fallback_client.is_some() {
+        // No same-provider route: pre-arm the installed cross-provider refusal
+        // client for the whole turn, exactly as the quota cooldown pre-arms its
+        // client — when the category routes to it. Silent otherwise.
+        let routed_across = self.refusal_fallback_client.as_ref().is_some_and(|(_, to)| {
+            api::refusal_route_candidates(&model, category.as_deref()).contains(to)
+        });
+        if routed_across {
             self.active_cross_fallback = Some(CrossFallback::Refusal);
             self.latch_refusal_prearm_notice();
         }
@@ -1130,6 +1346,18 @@ impl<C, T> ConversationRuntime<C, T> {
     /// model rewrites nothing). The observer must not fail the turn, so
     /// nothing here returns an error.
     pub(super) fn note_model_switch(&self, trigger: SwitchTrigger, from: &str, to: &str) {
+        self.note_model_switch_for(trigger, from, to, None);
+    }
+
+    /// [`Self::note_model_switch`], naming the refusal category that moved the
+    /// turn (t-6747) — the ledger row a classifier's switch leaves.
+    pub(super) fn note_model_switch_for(
+        &self,
+        trigger: SwitchTrigger,
+        from: &str,
+        to: &str,
+        category: Option<&str>,
+    ) {
         let Some(observer) = self.switch_observer.as_ref() else {
             return;
         };
@@ -1142,6 +1370,7 @@ impl<C, T> ConversationRuntime<C, T> {
             to: to.to_string(),
             context_tokens: u64::try_from(crate::estimate_session_tokens(&self.session)).unwrap_or(u64::MAX),
             attempt: self.attempt.clone(),
+            category: category.map(str::to_string),
         });
     }
 }

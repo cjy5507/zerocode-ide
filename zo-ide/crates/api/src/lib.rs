@@ -124,7 +124,8 @@ pub use providers::{
     preserved_thinking_generation, rejects_forced_tool_choice, resolve_catalog_alias,
     resolve_effort_band,
     exact_model_reference, resolve_model_alias,
-    refusal_fallback_candidates, refusal_fallback_model, resolve_registered_model_alias,
+    refusal_fallback_candidates, refusal_fallback_model, refusal_route_candidates,
+    resolve_registered_model_alias,
     starvation_demotion_model,
     thinking_always_on,
     uses_adaptive_thinking,
@@ -142,9 +143,9 @@ pub use types::{
     CacheControl, ContentBlockDelta, ContentBlockDeltaEvent, ContentBlockStartEvent,
     ContentBlockStopEvent, DocumentSource, EffortLevel, ImageSource, InputContentBlock,
     InputMessage, MessageDelta, MessageDeltaEvent, MessageRequest, MessageResponse,
-    MessageStartEvent, MessageStopEvent, OutputConfig, OutputContentBlock, StreamEvent,
-    SystemBlock, ThinkingConfig, ToolChoice, ToolDefinition, ToolResultContentBlock, Usage,
-    system_from_string,
+    MessageStartEvent, MessageStopEvent, OutputConfig, OutputContentBlock, StopDetails,
+    StreamEvent, SystemBlock, ThinkingConfig, ToolChoice, ToolDefinition,
+    ToolResultContentBlock, Usage, system_from_string,
 };
 
 

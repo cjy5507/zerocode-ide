@@ -16,7 +16,7 @@ const MAX_RETRIES: u32 = 4;
 /// Polling slice for [`cancellable_sleep`]. Short enough that a cooperative
 /// cancel during a multi-second backoff is observed promptly, long enough to
 /// stay effectively free when no cancel arrives.
-const CANCEL_POLL_SLICE: Duration = Duration::from_millis(100);
+pub(crate) const CANCEL_POLL_SLICE: Duration = Duration::from_millis(100);
 
 /// Base delay for the first retry (doubles each subsequent attempt).
 const BASE_DELAY: Duration = Duration::from_millis(500);

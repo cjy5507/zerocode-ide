@@ -1184,6 +1184,280 @@ fn the_desks_mail_is_the_coordinators_inbox_letter_by_letter() {
     );
 }
 
+/// A classifier's decline and the switch of model it caused reach the desk
+/// as letters owed an acknowledgement (t-6747), with the facts their second
+/// lines are written from: the category, whether it is routed and on which
+/// rung the notice stands, and the model that answered in the bound one's
+/// place, for how long.
+#[test]
+fn a_decline_and_a_switch_of_model_are_owed_on_the_desk() {
+    use zerocode_core::orchestration::{Draft, MessageKind, Priority, Text};
+    let mut held = Ledger::new();
+    let run_id = held.create_run("desk-decline", 1);
+    let address = held.run(&run_id).expect("the run").address();
+    let notice = |kind: MessageKind, body: &str| Draft {
+        from: zerocode_core::orchestration::LEDGER_ITSELF.to_string(),
+        to: address.clone(),
+        kind,
+        body: Text::from(body),
+        subject: Text::default(),
+        priority: Priority::Normal,
+        payload: Text::default(),
+        thread: None,
+        task: None,
+        dispatch: None,
+    };
+    held.post(
+        &run_id,
+        notice(
+            MessageKind::ClassifierDeclined,
+            r#"{"workerId":"w-9","category":"reasoning_extraction","routed":false,"rung":"notify"}"#,
+        ),
+        1_100,
+    )
+    .expect("a decline");
+    held.post(
+        &run_id,
+        notice(
+            MessageKind::ModelDeviated,
+            r#"{"workerId":"w-8","category":"cyber","from":"claude-fable-5-1","to":"claude-opus-4-8","scope":"session","rung":"fallback"}"#,
+        ),
+        1_200,
+    )
+    .expect("a switch");
+
+    let mail = super::desk::desk_mail(held.run(&run_id).expect("the run"));
+
+    assert_eq!(mail.len(), 2, "{mail:?}");
+    assert_eq!(mail[0].kind, "classifier_declined");
+    assert_eq!(mail[0].worker.as_deref(), Some("w-9"));
+    assert_eq!(mail[0].category.as_deref(), Some("reasoning_extraction"));
+    assert_eq!(mail[0].routed, Some(false));
+    assert_eq!(mail[0].rung.as_deref(), Some("notify"));
+    assert_eq!(mail[1].kind, "model_deviated");
+    assert_eq!(mail[1].category.as_deref(), Some("cyber"));
+    assert_eq!(mail[1].switched_to.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(mail[1].scope.as_deref(), Some("session"));
+    assert!(mail.iter().all(|one| one.delivery == "pending"));
+}
+
+/// The switch scan's cursor moves only past switches the ledger holds
+/// (t-7153, P2): a chunk the actor refuses keeps the cursor where it was
+/// and answers the chunks not held as WAITING, with the cursor they earn
+/// once held; nothing to hold moves the cursor at once; a refusal after
+/// some chunks landed keeps the cursor and holds back only what did not
+/// land, and the landed rows dedupe when the same lines are asked again.
+/// And a switch is asked only for the attempt that was open when it was
+/// written (R3): one dated before the attempt began, or undated, is asked
+/// of nobody, and the cursor moves past it; what is asked carries the
+/// worker, the attempt and the file it was read from.
+#[test]
+fn the_switch_scans_cursor_moves_only_past_what_the_ledger_holds() {
+    use crate::quota_wall::{DeviationScan, ScanCursor};
+    use zerocode_core::orchestration::{MAX_LIST, ModelDeviation};
+    const ATTEMPT_MS: i64 = 1_000_000;
+    let binding = super::SwitchBinding {
+        worker: "w-1",
+        dispatch: "dp-1",
+        source: "/t/w-1.jsonl",
+        attempt_started_ms: ATTEMPT_MS,
+    };
+    let switch_at = |key: &str, at_ms: Option<i64>| ModelDeviation {
+        worker: String::new(),
+        dispatch: String::new(),
+        source: String::new(),
+        key: key.to_string(),
+        from: "claude-fable-5-1".to_string(),
+        to: "claude-opus-4-8".to_string(),
+        category: Some("cyber".to_string()),
+        scope: Some("session".to_string()),
+        at_ms,
+    };
+    let switch = |key: &str| switch_at(key, Some(ATTEMPT_MS + 1));
+    let at = |offset: u64| ScanCursor {
+        offset,
+        ..ScanCursor::default()
+    };
+    let scan = |switches: Vec<ModelDeviation>, next: u64| DeviationScan {
+        switches,
+        next: at(next),
+    };
+    let bound = |switch: ModelDeviation| ModelDeviation {
+        worker: "w-1".to_string(),
+        dispatch: "dp-1".to_string(),
+        source: "/t/w-1.jsonl".to_string(),
+        ..switch
+    };
+    let waiting = |switches: Vec<ModelDeviation>, next: u64| {
+        Some(super::PendingSwitches {
+            switches: switches.into_iter().map(bound).collect(),
+            source: "/t/w-1.jsonl".to_string(),
+            next: at(next),
+        })
+    };
+    let record_scanned =
+        |scan: DeviationScan,
+         held_at: u64,
+         record: &mut dyn FnMut(Vec<ModelDeviation>) -> Result<bool, super::RuntimeError>| {
+            super::record_scanned_switches(&binding, scan, at(held_at), record)
+        };
+
+    // Nothing to hold: the cursor moves, and nobody is asked.
+    let mut asked = 0;
+    assert_eq!(
+        record_scanned(scan(Vec::new(), 40), 10, &mut |_| {
+            asked += 1;
+            Ok(true)
+        }),
+        (at(40), None, false)
+    );
+    // Nothing of this attempt's to hold — a switch dated before it began,
+    // one with no date — moves the cursor too, and asks nobody.
+    assert_eq!(
+        record_scanned(
+            scan(
+                vec![
+                    switch_at("s-earlier", Some(ATTEMPT_MS - 1)),
+                    switch_at("s-undated", None),
+                ],
+                90
+            ),
+            40,
+            &mut |_| {
+                asked += 1;
+                Ok(true)
+            }
+        ),
+        (at(90), None, false),
+        "another attempt's switch was asked of the ledger"
+    );
+    assert_eq!(asked, 0);
+
+    // The ledger's own dedupe stands in for the ledger: a key it holds
+    // answers false. Refused once, the cursor stays and the reading waits;
+    // asked again with the same lines, the switch lands and the cursor
+    // moves.
+    let mut held: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut refuse_next = true;
+    let mut record = |switches: Vec<ModelDeviation>| -> Result<bool, super::RuntimeError> {
+        if refuse_next {
+            refuse_next = false;
+            return Err(super::RuntimeError::RecoveryRequired);
+        }
+        let mut told = false;
+        for one in switches {
+            assert_eq!(
+                (
+                    one.worker.as_str(),
+                    one.dispatch.as_str(),
+                    one.source.as_str()
+                ),
+                ("w-1", "dp-1", "/t/w-1.jsonl"),
+                "named for its worker, its attempt and its file"
+            );
+            told |= held.insert(one.key);
+        }
+        Ok(told)
+    };
+    assert_eq!(
+        record_scanned(scan(vec![switch("s-1")], 700), 0, &mut record),
+        (at(0), waiting(vec![switch("s-1")], 700), false),
+        "a refused row moved the cursor, or was let go"
+    );
+    assert_eq!(
+        record_scanned(scan(vec![switch("s-1")], 700), 0, &mut record),
+        (at(700), None, true)
+    );
+    assert_eq!(held.len(), 1);
+
+    // Two chunks, the second refused: the cursor stays and the second
+    // chunk waits; asked again, the first chunk dedupes and the second
+    // lands — each switch once.
+    let many: Vec<ModelDeviation> = (0..=MAX_LIST)
+        .map(|index| switch(&format!("m-{index}")))
+        .collect();
+    let mut chunks = 0;
+    let mut record = |switches: Vec<ModelDeviation>| -> Result<bool, super::RuntimeError> {
+        chunks += 1;
+        if chunks == 2 {
+            return Err(super::RuntimeError::Closed);
+        }
+        let mut told = false;
+        for one in switches {
+            told |= held.insert(one.key);
+        }
+        Ok(told)
+    };
+    assert_eq!(
+        record_scanned(scan(many.clone(), 9_000), 700, &mut record),
+        (at(700), waiting(many[MAX_LIST..].to_vec(), 9_000), true),
+        "a partly refused reading moved the cursor, or held back what landed"
+    );
+    assert_eq!(
+        record_scanned(scan(many, 9_000), 700, &mut record),
+        (at(9_000), None, true)
+    );
+    assert_eq!(held.len(), 1 + MAX_LIST + 1, "each switch once");
+
+    // What waits is asked a list's worth at a time — the actor refuses a
+    // longer request for good — and lands whole; the cursor then stands
+    // where the waiting reading ended.
+    let longer: Vec<ModelDeviation> = (0..=MAX_LIST)
+        .map(|index| switch(&format!("p-{index}")))
+        .collect();
+    let mut listed = |switches: Vec<ModelDeviation>| -> Result<bool, super::RuntimeError> {
+        if switches.len() > MAX_LIST {
+            return Err(super::RuntimeError::InvalidInput);
+        }
+        let mut told = false;
+        for one in switches {
+            told |= held.insert(one.key);
+        }
+        Ok(told)
+    };
+    let nowhere = std::path::Path::new("/nonexistent/t-7153/w-1.jsonl");
+    assert_eq!(
+        super::scan_switches_a_beat(
+            &binding,
+            nowhere,
+            at(700),
+            waiting(longer, 12_000),
+            &mut listed
+        ),
+        (at(12_000), None, true),
+        "a waiting reading longer than a list was never held"
+    );
+    assert_eq!(held.len(), 2 * (MAX_LIST + 1) + 1, "each switch once");
+
+    // A row the ledger could never hold — a switch naming no model it went
+    // to — is asked of nobody and holds nothing back: the rows beside it
+    // land and the cursor moves.
+    let unfit = ModelDeviation {
+        to: String::new(),
+        ..switch("s-unfit")
+    };
+    let mut fitting = |switches: Vec<ModelDeviation>| -> Result<bool, super::RuntimeError> {
+        if switches.iter().any(|one| !one.fits()) {
+            return Err(super::RuntimeError::InvalidInput);
+        }
+        let mut told = false;
+        for one in switches {
+            told |= held.insert(one.key);
+        }
+        Ok(told)
+    };
+    assert_eq!(
+        record_scanned(
+            scan(vec![unfit, switch("s-fit")], 13_000),
+            12_000,
+            &mut fitting
+        ),
+        (at(13_000), None, true),
+        "a row the ledger can never hold held back the rows read with it"
+    );
+    assert!(held.contains("s-fit") && !held.contains("s-unfit"));
+}
+
 /// A worker's row carries what the task board's roster reads its health from
 /// (t-6588): the question it is waiting on (`Run::awaiting_reply`), the newest
 /// quota wall its attempt met as the ledger reads it back (`newest_wall`), and
@@ -2099,6 +2373,19 @@ struct AtTheWall {
     markers: Mutex<std::collections::HashMap<u32, zerocode_core::orchestration::QuotaWallMarker>>,
     /// Every gauge the beat asked the window to read again (t-6427).
     asked: Mutex<Vec<String>>,
+    /// What each pane shows and records of a classifier decline (t-6747).
+    declines: Mutex<std::collections::HashMap<u32, crate::quota_wall::DeclineReading>>,
+    /// How long the pty has been silent while the hook still says `working`
+    /// — a pause dialog's pane (t-6747); `None` is a pty that just wrote.
+    pty_quiet_ms: Mutex<Option<i64>>,
+    /// A pane's visible text, when a test hands the real screen reader a
+    /// screen instead of a reading (t-7153): the decline reading is then
+    /// `quota_wall::decline_reading_in`'s, off these words.
+    screens: Mutex<std::collections::HashMap<u32, String>>,
+    /// What the retirement fence reads, when it is to read something OTHER
+    /// than the beat did (t-7153): the change between a plan and its last
+    /// boundary, made deterministic.
+    fence_reading: Mutex<Option<crate::quota_wall::DeclineReading>>,
 }
 
 impl AtTheWall {
@@ -2117,6 +2404,60 @@ impl AtTheWall {
                     line: zerocode_core::orchestration::Text::from(line),
                 },
             );
+    }
+
+    /// The pane's pty has been silent `quiet_ms` while its hook may still
+    /// say `working`.
+    fn pty_silent_for(&self, quiet_ms: i64) {
+        *self.pty_quiet_ms.lock().unwrap() = Some(quiet_ms);
+    }
+
+    /// The pane stands at a classifier decline: what it shows and records.
+    fn declined(&self, term: u32, reading: crate::quota_wall::DeclineReading) {
+        self.declines
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(term, reading);
+    }
+
+    /// The pane's screen shows exactly these words (t-7153): the decline
+    /// reading is the real reader's, off them, with no transcript.
+    fn shows(&self, term: u32, screen: &str) {
+        self.screens
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .insert(term, screen.to_string());
+    }
+
+    /// What the retirement fence reads instead of the beat's reading
+    /// (t-7153); `None` puts the fence back on the beat's reading.
+    fn read_at_the_fence(&self, reading: Option<crate::quota_wall::DeclineReading>) {
+        *self
+            .fence_reading
+            .lock()
+            .unwrap_or_else(|held| held.into_inner()) = reading;
+    }
+
+    /// The beat's reading of `term`: the real reader over a screen a test
+    /// handed it, else the reading a test handed it.
+    fn decline_reading_of(&self, term: u32) -> Option<crate::quota_wall::DeclineReading> {
+        if let Some(screen) = self
+            .screens
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&term)
+        {
+            return Some(crate::quota_wall::decline_reading_in(
+                "claude",
+                Some(screen),
+                None,
+            ));
+        }
+        self.declines
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .get(&term)
+            .cloned()
     }
 
     /// The pane's own words moved past its wall.
@@ -2161,6 +2502,22 @@ impl Host for AtTheWall {
         }
         Some(now_ms - zerocode_core::orchestration::QUIET_GRACE_MS)
     }
+    fn decline_quiet_since(
+        &self,
+        term: u32,
+        worker_started_ms: i64,
+        now_ms: i64,
+        hook_outlived_ms: i64,
+    ) -> Option<i64> {
+        self.quiet_since(term, worker_started_ms, now_ms)
+            .or_else(|| {
+                self.pty_quiet_ms
+                    .lock()
+                    .unwrap()
+                    .filter(|quiet| *quiet >= hook_outlived_ms)
+                    .map(|quiet| now_ms - quiet)
+            })
+    }
     fn quota_wall_marker(
         &self,
         term: u32,
@@ -2183,6 +2540,43 @@ impl Host for AtTheWall {
         let markers = self.markers.lock().unwrap();
         if !*busy && let Some(marker) = markers.get(&term) {
             commit(marker.clone());
+        }
+    }
+    fn classifier_decline_reading(
+        &self,
+        term: u32,
+        _agent: &str,
+    ) -> Option<crate::quota_wall::DeclineReading> {
+        self.decline_reading_of(term)
+    }
+    fn with_classifier_decline_observation(
+        &self,
+        term: u32,
+        _worker_started_ms: i64,
+        _agent: &str,
+        commit: &mut dyn FnMut(crate::quota_wall::DeclineReading, i64),
+    ) {
+        let busy = self.busy.lock().unwrap();
+        let pty_quiet = self.pty_quiet_ms.lock().unwrap();
+        // Quiet as the window's fence reads it: a hook at rest, or a pty
+        // silent past the dialog's term whatever the hook says.
+        let quiet_ms = if *busy {
+            pty_quiet.filter(|quiet| {
+                *quiet >= zerocode_core::orchestration::DECLINE_DIALOG_UNANSWERED_MS
+            })
+        } else {
+            Some(zerocode_core::orchestration::QUIET_GRACE_MS)
+        };
+        // The fence reads what the beat read — unless a test moved the
+        // world between the plan and this boundary (t-7153).
+        let reading = self
+            .fence_reading
+            .lock()
+            .unwrap_or_else(|held| held.into_inner())
+            .clone()
+            .or_else(|| self.decline_reading_of(term));
+        if let (Some(quiet_ms), Some(reading)) = (quiet_ms, reading) {
+            commit(reading, crate::now_epoch_ms() - quiet_ms);
         }
     }
     fn capture(&self, _term: u32) -> Option<String> {
@@ -2380,6 +2774,10 @@ impl Walled {
             checkout,
             markers: Mutex::new(std::collections::HashMap::new()),
             asked: Mutex::new(Vec::new()),
+            declines: Mutex::new(std::collections::HashMap::new()),
+            pty_quiet_ms: Mutex::new(None),
+            screens: Mutex::new(std::collections::HashMap::new()),
+            fence_reading: Mutex::new(None),
         };
         let leader = zerocode_core::agent_teams::LEADER_PANE;
         let verb = |line: &str, at: i64| {
@@ -2578,6 +2976,928 @@ fn the_beat_walks_a_handover_through_git_and_the_one_door_and_leaves_a_receipt()
     // Once: the next tick has nothing to walk.
     tick(&stood.host, &[], stood.began + 11_000);
     assert_eq!(stood.receipts(stood.began + 11_001).len(), 1);
+}
+
+impl Walled {
+    /// A claude worker stopped at a safety classifier's decline (t-6747):
+    /// its screen shows Claude Code's own sentence and its transcript's last
+    /// record is the decline, in `category`.
+    fn stand_declined(
+        leader_term: u32,
+        checkout: &'static str,
+        category: &str,
+        policy: &str,
+    ) -> Self {
+        let said = "API Error: Fable 5.1's safeguards flagged this message \
+                    (https://www.anthropic.com/legal/aup).";
+        Self::stand_declined_with(
+            leader_term,
+            checkout,
+            policy,
+            crate::quota_wall::DeclineReading {
+                screen: Some(zerocode_core::orchestration::DeclineScreen {
+                    line: zerocode_core::orchestration::Text::from(said),
+                    dialog: false,
+                    category: None,
+                }),
+                record: Some(zerocode_core::orchestration::ClassifierDeclineMarker {
+                    source: "transcript".to_string(),
+                    line: zerocode_core::orchestration::Text::from(said),
+                    category: Some(category.to_string()),
+                    key: "decline-record-1".to_string(),
+                }),
+                fallbacks: Vec::new(),
+            },
+        )
+    }
+
+    /// The worker stands at Claude Code's pause dialog (t-6747): the dialog
+    /// on its screen, no record — the dialog writes none until a key answers
+    /// it — and a hook that still says `working`, because the dialog ended
+    /// no turn. How long its pty has been silent is the test's to say.
+    fn stand_paused(leader_term: u32, checkout: &'static str, policy: &str) -> Self {
+        let stood = Self::stand_declined_with(
+            leader_term,
+            checkout,
+            policy,
+            crate::quota_wall::DeclineReading {
+                screen: Some(zerocode_core::orchestration::DeclineScreen {
+                    line: zerocode_core::orchestration::Text::from(
+                        "Fable 5.1's safeguards flagged this message.",
+                    ),
+                    dialog: true,
+                    category: Some("cyber".to_string()),
+                }),
+                record: None,
+                fallbacks: Vec::new(),
+            },
+        );
+        *stood.host.busy.lock().unwrap() = true;
+        stood
+    }
+
+    /// A claude worker whose pane shows exactly `screen` under a hook that
+    /// still says `working` (t-7153): what the pane is at is the real screen
+    /// reader's to say, with no transcript record behind it.
+    fn stand_showing(leader_term: u32, checkout: &'static str, policy: &str, screen: &str) -> Self {
+        let stood = Self::stand_declined_with(
+            leader_term,
+            checkout,
+            policy,
+            crate::quota_wall::DeclineReading::default(),
+        );
+        stood.host.shows(leader_term + 1, screen);
+        *stood.host.busy.lock().unwrap() = true;
+        stood
+    }
+
+    fn stand_declined_with(
+        leader_term: u32,
+        checkout: &'static str,
+        policy: &str,
+        reading: crate::quota_wall::DeclineReading,
+    ) -> Self {
+        let began = clock();
+        let (window, store) = PrivateWindow::boot();
+        let beat = one_beat_at_a_time();
+        let team = format!("team-decline-{leader_term}");
+        seat_a_team(&team, leader_term);
+        let host = AtTheWall {
+            closed: Mutex::new(Vec::new()),
+            busy: Mutex::new(false),
+            onto: Mutex::new(leader_term + 1),
+            checkout,
+            markers: Mutex::new(std::collections::HashMap::new()),
+            asked: Mutex::new(Vec::new()),
+            declines: Mutex::new(std::collections::HashMap::new()),
+            pty_quiet_ms: Mutex::new(None),
+            screens: Mutex::new(std::collections::HashMap::new()),
+            fence_reading: Mutex::new(None),
+        };
+        let verb = |line: &str, at: i64| {
+            let said = run(
+                &host,
+                Vec::new(),
+                &team,
+                zerocode_core::agent_teams::LEADER_PANE,
+                TEST_CAPABILITY,
+                &words(line),
+                at,
+            );
+            assert_eq!(said.exit_code, 0, "`{line}`: {}", said.stderr);
+            serde_json::from_str::<serde_json::Value>(&said.stdout).expect("json")
+        };
+        verb("run-create --name declined", began);
+        let task = verb("task-create --spec build-it", began + 1)["taskId"]
+            .as_str()
+            .expect("a task")
+            .to_string();
+        let claude = verb(
+            &format!("worker-start --agent claude --model fable --effort max --task {task}"),
+            began + 2,
+        );
+        let worker = claude["workerId"].as_str().expect("a worker").to_string();
+        let dispatch = claude["dispatchId"]
+            .as_str()
+            .expect("a dispatch")
+            .to_string();
+        if !policy.is_empty() {
+            verb(&format!("handover-policy {policy}"), began + 3);
+        }
+        host.seating_onto(leader_term + 2);
+        host.declined(leader_term + 1, reading);
+        Self {
+            window,
+            _store: store,
+            _beat: beat,
+            host,
+            team,
+            task,
+            worker,
+            dispatch,
+            began,
+        }
+    }
+}
+
+/// A worker whose provider's classifier declined it in a routed category,
+/// and whose CLI could not continue, is handed on in one tick (t-6747): the
+/// two witnesses become one notice, and under the run's declared
+/// `--on-classifier-decline` the task goes to a fresh worker in the SAME
+/// checkout on a dispatch linked to the ended one — the declared model, the
+/// effort the declaration left out the worker's own — and the receipt names
+/// the category and the model binding the replacement leaves.
+#[test]
+fn a_declined_worker_is_resummoned_on_the_declared_rung_with_its_checkout() {
+    const LEADER_TERM: u32 = 85_300;
+    let stood = Walled::stand_declined(
+        LEADER_TERM,
+        "/tmp",
+        "cyber",
+        "--on-classifier-decline claude:claude-opus-4-8",
+    );
+    tick(&stood.host, &[], stood.began + 10_000);
+    let news = stood.json(
+        "check --peek --types classifier_declined",
+        stood.began + 10_001,
+    );
+    assert_eq!(news["count"], 1, "{news}");
+    let receipts = stood.receipts(stood.began + 10_001);
+    assert_eq!(receipts.len(), 1, "{receipts:?}");
+    let receipt = &receipts[0];
+    assert_eq!(receipt["status"], "done", "{receipt}");
+    assert_eq!(receipt["reason"], "classifier-decline");
+    assert_eq!(receipt["category"], "cyber");
+    assert_eq!(receipt["rung"], "handover");
+    assert_eq!(receipt["to"]["model"], "claude-opus-4-8");
+    assert_eq!(receipt["to"]["effort"], "max");
+    assert_eq!(receipt["modelDeviation"]["from"]["model"], "fable");
+    assert_eq!(receipt["modelDeviation"]["to"]["model"], "claude-opus-4-8");
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    let replacement = receipt["to"]["workerId"].as_str().expect("a replacement");
+    let rows = the_rows();
+    let seated = rows
+        .workers
+        .iter()
+        .find(|one| one.id == replacement)
+        .expect("the replacement");
+    assert_eq!(seated.agent, "claude");
+    assert_eq!(seated.model.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(seated.effort.as_deref(), Some("max"));
+    assert_eq!(seated.checkout.as_deref(), Some("/tmp"));
+    let linked = rows
+        .dispatches
+        .iter()
+        .find(|one| Some(one.id.as_str()) == seated.dispatch.as_deref())
+        .expect("the replacement's attempt");
+    assert_eq!(linked.retry_of.as_deref(), Some(stood.dispatch.as_str()));
+    assert_eq!(linked.task, stood.task);
+    // Once: the next tick has nothing to walk.
+    tick(&stood.host, &[], stood.began + 11_000);
+    assert_eq!(stood.receipts(stood.began + 11_001).len(), 1);
+}
+
+/// A pause dialog stands behind a hook that still says `working` (t-6747):
+/// Claude Code ends no turn while its dialog waits, and says so only through
+/// a `Notification` hook this window does not install, so the stall sweep
+/// never reads the pane. Once its pty has been silent past every dialog a
+/// person answered here, the dialog on screen and that silence are told —
+/// once, as DIAGNOSTIC news (t-7153, P1-3): a screen is not a witness that
+/// ends a worker, so even under the run's declared order nothing is walked;
+/// the notice says so and names the hand road. A shorter silence is
+/// nothing: a person may be about to answer.
+#[test]
+fn a_pause_dialog_behind_a_working_hook_is_diagnostic_news_once_and_ends_no_worker() {
+    const LEADER_TERM: u32 = 85_500;
+    const MINUTE: i64 = 60_000;
+    let stood = Walled::stand_paused(
+        LEADER_TERM,
+        "/tmp",
+        "--on-classifier-decline claude:claude-opus-4-8",
+    );
+    let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
+
+    stood.host.pty_silent_for(9 * MINUTE);
+    tick(&stood.host, &[], stood.began + 10_000);
+    assert_eq!(told(stood.began + 10_001)["count"], 0);
+    assert!(stood.receipts(stood.began + 10_001).is_empty());
+
+    stood.host.pty_silent_for(11 * MINUTE);
+    tick(&stood.host, &[], stood.began + 20_000);
+    let news = told(stood.began + 20_001);
+    assert_eq!(news["count"], 1, "{news}");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(
+        body["record"]["source"],
+        zerocode_core::orchestration::DECLINE_DIALOG_SOURCE,
+        "{body}"
+    );
+    assert_eq!(body["category"], "cyber", "{body}");
+    assert_eq!(body["screenOnly"], true, "{body}");
+    assert_eq!(
+        body["rung"], "notify",
+        "a screen-only decline armed a stop: {body}"
+    );
+    assert!(
+        body["next"]
+            .as_str()
+            .is_some_and(|next| next.contains("worker-read")),
+        "{body}"
+    );
+    assert!(
+        stood.receipts(stood.began + 20_001).is_empty(),
+        "a screen-only decline was walked to a handover"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    assert!(stood.host.closed.lock().unwrap().is_empty());
+
+    // Told once: the next beat has nothing to tell, and still nothing to walk.
+    tick(&stood.host, &[], stood.began + 30_000);
+    assert_eq!(told(stood.began + 30_001)["count"], 1);
+    assert!(stood.receipts(stood.began + 30_001).is_empty());
+}
+
+/// The dialog's words, quoted — a tool result a worker read, under the
+/// turn's own spinner — are no dialog (t-7153, P1-3): the real screen
+/// reader finds no CLI dialog in them, so a pane showing them under a
+/// `working` hook, silent past the dialog's term, is told about nothing and
+/// nothing is walked. The same pane showing the CLI's own dialog is
+/// diagnostic news, and still walks nowhere.
+#[test]
+fn a_screen_quoting_the_dialogs_words_is_nothing_and_the_cli_dialog_is_diagnostic_news() {
+    const MINUTE: i64 = 60_000;
+    const QUOTED: &str = "\
+⏺ Read(notes/declines.md)
+  ⎿  Read 5 lines
+     Session paused
+     Fable 5.1's safeguards flagged this message. Our intentionally broad safeguards…
+     Details: `[cyber]`
+     1. Switch to Opus 4.8
+     2. Edit prompt and retry
+
+✻ Thinking… (esc to interrupt)
+";
+    const DIALOG: &str = "\
+ Session paused
+ Fable 5.1's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster.
+   Details: `[cyber]`
+ ❯ 1. Switch to Opus 4.8
+   2. Edit prompt and retry
+";
+    for (leader_term, screen, told_count) in [(85_600, QUOTED, 0), (85_700, DIALOG, 1)] {
+        let stood = Walled::stand_showing(
+            leader_term,
+            "/tmp",
+            "--on-classifier-decline claude:claude-opus-4-8",
+            screen,
+        );
+        stood.host.pty_silent_for(11 * MINUTE);
+        tick(&stood.host, &[], stood.began + 20_000);
+        let news = stood.json(
+            "check --peek --types classifier_declined",
+            stood.began + 20_001,
+        );
+        assert_eq!(news["count"], told_count, "{screen}\n{news}");
+        if told_count == 1 {
+            let body: serde_json::Value =
+                serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body"))
+                    .expect("json");
+            assert_eq!(body["rung"], "notify", "{body}");
+            assert_eq!(body["screenOnly"], true, "{body}");
+        }
+        assert!(
+            stood.receipts(stood.began + 20_001).is_empty(),
+            "{screen}\nwas walked to a handover"
+        );
+        assert_eq!(stood.worker_state(&stood.worker), "Active");
+    }
+}
+
+/// A handover ends a worker only on the decline it was planned for (t-7153,
+/// P1-4): the plan carries the record that witnessed it, and the last
+/// boundary — inside the actor's fence, where the stop is committed —
+/// re-reads the pane and commits only when the SAME record, in the SAME
+/// routed category, still stands. A category that reads as none, another
+/// request's record, or a category the provider routes nowhere at that
+/// boundary settles nothing: the attempt stays open, the pane stays, the
+/// receipt says the witness changed, and no replacement is summoned. When
+/// the boundary reads the same decline again, the walk lands.
+#[test]
+fn a_decline_that_reads_differently_at_the_last_boundary_ends_no_worker() {
+    let changed = [
+        (85_800, a_printed_decline(None, "decline-record-1")),
+        (85_900, a_printed_decline(Some("cyber"), "decline-record-2")),
+        (
+            86_000,
+            a_printed_decline(Some("reasoning_extraction"), "decline-record-1"),
+        ),
+    ];
+    for (leader_term, at_the_fence) in changed {
+        let stood = Walled::stand_declined(
+            leader_term,
+            "/tmp",
+            "cyber",
+            "--on-classifier-decline claude:claude-opus-4-8",
+        );
+        stood.host.read_at_the_fence(Some(at_the_fence.clone()));
+        tick(&stood.host, &[], stood.began + 10_000);
+        let receipts = stood.receipts(stood.began + 10_001);
+        assert!(
+            receipts.iter().all(|receipt| receipt["status"] != "done"),
+            "{at_the_fence:?}\nwas settled: {receipts:?}"
+        );
+        assert_eq!(
+            stood.worker_state(&stood.worker),
+            "Active",
+            "{at_the_fence:?}\nended the worker"
+        );
+        assert!(stood.host.closed.lock().unwrap().is_empty());
+        let rows = the_rows();
+        assert_eq!(
+            rows.dispatches
+                .iter()
+                .filter(|one| one.task == stood.task)
+                .count(),
+            1,
+            "a replacement attempt was opened: {:?}",
+            rows.dispatches
+        );
+        // The same decline again at the boundary: the walk lands.
+        stood.host.read_at_the_fence(None);
+        tick(&stood.host, &[], stood.began + 20_000);
+        let receipts = stood.receipts(stood.began + 20_001);
+        assert!(
+            receipts.iter().any(|receipt| receipt["status"] == "done"),
+            "{receipts:?}"
+        );
+        assert_eq!(stood.worker_state(&stood.worker), "Released");
+    }
+}
+
+/// A pane at a printed decline: the CLI's sentence on screen, and its
+/// transcript's last record the decline, in `category`, keyed `key`.
+fn a_printed_decline(category: Option<&str>, key: &str) -> crate::quota_wall::DeclineReading {
+    const SAID: &str = "API Error: Fable 5.1's safeguards flagged this message.";
+    crate::quota_wall::DeclineReading {
+        screen: Some(zerocode_core::orchestration::DeclineScreen {
+            line: zerocode_core::orchestration::Text::from(SAID),
+            dialog: false,
+            category: None,
+        }),
+        record: Some(zerocode_core::orchestration::ClassifierDeclineMarker {
+            source: "transcript".to_string(),
+            line: zerocode_core::orchestration::Text::from(SAID),
+            category: category.map(str::to_string),
+            key: key.to_string(),
+        }),
+        fallbacks: Vec::new(),
+    }
+}
+
+/// A dialog's diagnostic notice closes nothing (t-7153, R4): once the same
+/// attempt's pane stands at a RECORD — the CLI printed the error, its
+/// transcript's last record is the decline in a routed category — that
+/// record is news of its own, told on the handover rung under the declared
+/// order and walked exactly once, while the hook STILL says `working` and
+/// the pty is still silent: the pane never becomes the quiet sweep's.
+/// Before this one notice, whatever witnessed it, closed the paused
+/// sweep's reading of the attempt, and a record behind a hook that stayed
+/// `working` was never told nor planned by either sweep.
+/// The hook's two roads both lead there: a hook that comes to rest hands
+/// the pane to the quiet sweep, and one that stays `working` leaves it to
+/// the paused sweep, which reads it again.
+#[test]
+fn a_dialogs_diagnostic_notice_does_not_hide_the_record_that_follows_it() {
+    const MINUTE: i64 = 60_000;
+    for (leader_term, hook_rests) in [(86_100, false), (86_150, true)] {
+        let stood = Walled::stand_paused(
+            leader_term,
+            "/tmp",
+            "--on-classifier-decline claude:claude-opus-4-8",
+        );
+        let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
+        stood.host.pty_silent_for(11 * MINUTE);
+        tick(&stood.host, &[], stood.began + 20_000);
+        assert_eq!(told(stood.began + 20_001)["count"], 1);
+        assert!(stood.receipts(stood.began + 20_001).is_empty());
+
+        // The record, on the same open attempt.
+        stood.host.declined(
+            leader_term + 1,
+            a_printed_decline(Some("cyber"), "decline-record-1"),
+        );
+        *stood.host.busy.lock().unwrap() = !hook_rests;
+        tick(&stood.host, &[], stood.began + 30_000);
+        let news = told(stood.began + 30_001);
+        assert_eq!(
+            news["count"], 2,
+            "hook at rest {hook_rests}: the record after the dialog's notice was not told: {news}"
+        );
+        let receipts = stood.receipts(stood.began + 30_001);
+        assert_eq!(receipts.len(), 1, "hook at rest {hook_rests}: {receipts:?}");
+        assert_eq!(receipts[0]["status"], "done", "{}", receipts[0]);
+        assert_eq!(receipts[0]["reason"], "classifier-decline");
+        assert_eq!(
+            receipts[0]["recordKey"], "decline-record-1",
+            "{}",
+            receipts[0]
+        );
+        assert_eq!(stood.worker_state(&stood.worker), "Released");
+
+        // Once: the next beat tells nothing more and walks nothing more.
+        tick(&stood.host, &[], stood.began + 40_000);
+        assert_eq!(told(stood.began + 40_001)["count"], 2);
+        assert_eq!(stood.receipts(stood.began + 40_001).len(), 1);
+    }
+}
+
+/// Behind a hook that never stops saying `working`, every record is news
+/// of its own (t-7153, R4): the dialog's diagnostic notice, then a record
+/// once a key answered it, then another request's record — each told once
+/// on its own key, none twice, with no order declared and the pane's pty
+/// silent throughout; and under an order declared after all three, the
+/// walk lands on the record the pane stands at now, exactly once. The
+/// hook stays `working` for the whole road: nothing here is the quiet
+/// sweep's.
+#[test]
+fn records_behind_a_hook_that_stays_working_are_told_and_planned_each_on_its_own_key() {
+    const LEADER_TERM: u32 = 86_300;
+    const MINUTE: i64 = 60_000;
+    let stood = Walled::stand_paused(LEADER_TERM, "/tmp", "");
+    let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
+    let keys = |news: &serde_json::Value| -> Vec<String> {
+        news["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| {
+                serde_json::from_str::<serde_json::Value>(message["body"].as_str().expect("a body"))
+                    .expect("json")["record"]["key"]
+                    .as_str()
+                    .expect("a key")
+                    .to_string()
+            })
+            .collect()
+    };
+    stood.host.pty_silent_for(11 * MINUTE);
+    tick(&stood.host, &[], stood.began + 20_000);
+    assert_eq!(told(stood.began + 20_001)["count"], 1);
+
+    stood.host.declined(
+        LEADER_TERM + 1,
+        a_printed_decline(Some("cyber"), "decline-record-1"),
+    );
+    assert!(*stood.host.busy.lock().unwrap());
+    tick(&stood.host, &[], stood.began + 30_000);
+    let news = told(stood.began + 30_001);
+    assert_eq!(
+        news["count"], 2,
+        "the record behind the working hook was not told: {news}"
+    );
+    tick(&stood.host, &[], stood.began + 31_000);
+    assert_eq!(
+        told(stood.began + 31_001)["count"],
+        2,
+        "the same record was told twice"
+    );
+
+    stood.host.declined(
+        LEADER_TERM + 1,
+        a_printed_decline(Some("cyber"), "decline-record-2"),
+    );
+    tick(&stood.host, &[], stood.began + 40_000);
+    let news = told(stood.began + 40_001);
+    assert_eq!(news["count"], 3, "{news}");
+    assert_eq!(
+        keys(&news),
+        [
+            zerocode_core::orchestration::decline_dialog_key(&stood.dispatch),
+            "decline-record-1".to_string(),
+            "decline-record-2".to_string()
+        ]
+    );
+    assert!(
+        stood.receipts(stood.began + 40_001).is_empty(),
+        "no order declared"
+    );
+
+    stood.json(
+        "handover-policy --on-classifier-decline claude:claude-opus-4-8",
+        stood.began + 41_000,
+    );
+    tick(&stood.host, &[], stood.began + 50_000);
+    let receipts = stood.receipts(stood.began + 50_001);
+    let done: Vec<&serde_json::Value> = receipts
+        .iter()
+        .filter(|receipt| receipt["status"] == "done")
+        .collect();
+    assert_eq!(done.len(), 1, "{receipts:?}");
+    assert_eq!(done[0]["recordKey"], "decline-record-2", "{}", done[0]);
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    tick(&stood.host, &[], stood.began + 60_000);
+    assert_eq!(
+        stood
+            .receipts(stood.began + 60_001)
+            .iter()
+            .filter(|receipt| receipt["status"] == "done")
+            .count(),
+        1,
+        "walked twice"
+    );
+}
+
+/// Behind a hook that never stops saying `working`, a record ends a worker
+/// only as it would behind a hook at rest (t-7153, R4): under the exact
+/// order the run declares, on the record the pane stands at when the stop
+/// is committed, and never past the handover's own refusals. A plan whose
+/// record the pane no longer stands at by its last boundary ends nobody,
+/// and the record it stands at then is told and walked once; an order
+/// withdrawn after the dialog's notice walks nothing, its record told on
+/// the notify rung; a pane the person took is told nothing more and walked
+/// nowhere; and past the table's ceiling a record is news only. The hook
+/// stays `working` and the pty silent on every road: nothing here is the
+/// quiet sweep's.
+#[test]
+fn behind_a_working_hook_the_handovers_own_refusals_hold() {
+    const MINUTE: i64 = 60_000;
+    const ORDER: &str = "--on-classifier-decline claude:claude-opus-4-8";
+    let told = |stood: &Walled, at: i64| stood.json("check --peek --types classifier_declined", at);
+    let done = |stood: &Walled, at: i64| -> Vec<serde_json::Value> {
+        stood
+            .receipts(at)
+            .into_iter()
+            .filter(|receipt| receipt["status"] == "done")
+            .collect()
+    };
+    let paused = |leader_term: u32| {
+        let stood = Walled::stand_paused(leader_term, "/tmp", ORDER);
+        stood.host.pty_silent_for(11 * MINUTE);
+        tick(&stood.host, &[], stood.began + 20_000);
+        assert_eq!(told(&stood, stood.began + 20_001)["count"], 1);
+        assert!(stood.receipts(stood.began + 20_001).is_empty());
+        stood
+    };
+
+    // An old plan: by the stop's fence the pane stands at another record.
+    let stood = paused(86_400);
+    stood
+        .host
+        .declined(86_401, a_printed_decline(Some("cyber"), "decline-record-1"));
+    stood
+        .host
+        .read_at_the_fence(Some(a_printed_decline(Some("cyber"), "decline-record-2")));
+    tick(&stood.host, &[], stood.began + 30_000);
+    assert!(*stood.host.busy.lock().unwrap());
+    assert_eq!(told(&stood, stood.began + 30_001)["count"], 2);
+    assert!(
+        done(&stood, stood.began + 30_001).is_empty(),
+        "an old plan ended the worker"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    assert!(stood.host.closed.lock().unwrap().is_empty());
+    assert_eq!(
+        the_rows()
+            .dispatches
+            .iter()
+            .filter(|one| one.task == stood.task)
+            .count(),
+        1,
+        "an old plan opened a replacement attempt"
+    );
+    stood
+        .host
+        .declined(86_401, a_printed_decline(Some("cyber"), "decline-record-2"));
+    stood.host.read_at_the_fence(None);
+    tick(&stood.host, &[], stood.began + 40_000);
+    assert_eq!(told(&stood, stood.began + 40_001)["count"], 3);
+    let walked = done(&stood, stood.began + 40_001);
+    assert_eq!(walked.len(), 1, "{walked:?}");
+    assert_eq!(walked[0]["recordKey"], "decline-record-2", "{}", walked[0]);
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    drop(stood);
+
+    // An order withdrawn after the dialog's notice.
+    let stood = paused(86_500);
+    stood.json("handover-policy --off", stood.began + 21_000);
+    stood
+        .host
+        .declined(86_501, a_printed_decline(Some("cyber"), "decline-record-1"));
+    tick(&stood.host, &[], stood.began + 30_000);
+    let news = told(&stood, stood.began + 30_001);
+    assert_eq!(news["count"], 2, "{news}");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][1]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["record"]["key"], "decline-record-1", "{body}");
+    assert_eq!(body["rung"], "notify", "{body}");
+    assert!(
+        stood.receipts(stood.began + 30_001).is_empty(),
+        "a withdrawn order walked"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    drop(stood);
+
+    // A pane the person took after the dialog's notice.
+    let stood = paused(86_600);
+    super::pane_taken_over(86_601, stood.began + 21_000);
+    stood
+        .host
+        .declined(86_601, a_printed_decline(Some("cyber"), "decline-record-1"));
+    tick(&stood.host, &[], stood.began + 30_000);
+    assert_eq!(
+        told(&stood, stood.began + 30_001)["count"],
+        1,
+        "a pane the person took was told about"
+    );
+    assert!(
+        stood.receipts(stood.began + 30_001).is_empty(),
+        "a pane the person took was walked"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    drop(stood);
+
+    // The table's ceiling: the task walked as often as it may, and the
+    // record its last worker stands at is news only.
+    let stood = paused(86_700);
+    let mut worker = stood.worker.clone();
+    for walk in 1..=zerocode_core::orchestration::QUOTA_POLICY.handover_max {
+        let term = 86_700 + u32::try_from(walk).expect("small");
+        let at = stood.began + 20_000 + 10_000 * i64::try_from(walk).expect("small");
+        stood.host.seating_onto(term + 1);
+        stood.host.declined(
+            term,
+            a_printed_decline(Some("cyber"), &format!("decline-record-{walk}")),
+        );
+        tick(&stood.host, &[], at);
+        let walked = done(&stood, at + 1);
+        assert_eq!(walked.len(), walk, "{walked:?}");
+        assert_eq!(stood.worker_state(&worker), "Released");
+        worker = walked[walk - 1]["to"]["workerId"]
+            .as_str()
+            .expect("a replacement")
+            .to_string();
+    }
+    let last = 86_701
+        + u32::try_from(zerocode_core::orchestration::QUOTA_POLICY.handover_max).expect("small");
+    stood.host.declined(
+        last,
+        a_printed_decline(Some("cyber"), "decline-record-last"),
+    );
+    tick(&stood.host, &[], stood.began + 90_000);
+    let news = told(&stood, stood.began + 90_001);
+    assert_eq!(
+        news["count"],
+        zerocode_core::orchestration::QUOTA_POLICY.handover_max + 2,
+        "the record past the ceiling was not even news: {news}"
+    );
+    assert_eq!(
+        done(&stood, stood.began + 90_001).len(),
+        zerocode_core::orchestration::QUOTA_POLICY.handover_max,
+        "the ceiling was walked past"
+    );
+    assert_eq!(stood.worker_state(&worker), "Active");
+}
+
+/// A later decline of the same attempt is told on its own record and
+/// planned on it (t-7153, R4): the same record on the next beat is told
+/// once; another record — a later request declined — is news again; and
+/// under an order declared after both, the walk lands on the record the
+/// pane stands at now, exactly once, never on the one it left behind.
+#[test]
+fn a_later_decline_of_the_same_attempt_is_told_and_planned_on_its_own_record() {
+    const LEADER_TERM: u32 = 86_200;
+    let stood = Walled::stand_declined(LEADER_TERM, "/tmp", "cyber", "");
+    let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
+    tick(&stood.host, &[], stood.began + 10_000);
+    assert_eq!(told(stood.began + 10_001)["count"], 1);
+    tick(&stood.host, &[], stood.began + 11_000);
+    assert_eq!(
+        told(stood.began + 11_001)["count"],
+        1,
+        "the same record was told twice"
+    );
+
+    stood.host.declined(
+        LEADER_TERM + 1,
+        a_printed_decline(Some("cyber"), "decline-record-2"),
+    );
+    tick(&stood.host, &[], stood.began + 20_000);
+    let news = told(stood.began + 20_001);
+    assert_eq!(
+        news["count"], 2,
+        "a later decline on another record was not told: {news}"
+    );
+    let keys: Vec<String> = news["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|message| {
+            serde_json::from_str::<serde_json::Value>(message["body"].as_str().expect("a body"))
+                .expect("json")["record"]["key"]
+                .as_str()
+                .expect("a key")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(keys, ["decline-record-1", "decline-record-2"]);
+    tick(&stood.host, &[], stood.began + 21_000);
+    assert_eq!(
+        told(stood.began + 21_001)["count"],
+        2,
+        "the second record was told twice"
+    );
+    assert!(
+        stood.receipts(stood.began + 21_001).is_empty(),
+        "no order declared"
+    );
+
+    stood.json(
+        "handover-policy --on-classifier-decline claude:claude-opus-4-8",
+        stood.began + 22_000,
+    );
+    tick(&stood.host, &[], stood.began + 30_000);
+    let receipts = stood.receipts(stood.began + 30_001);
+    let done: Vec<&serde_json::Value> = receipts
+        .iter()
+        .filter(|receipt| receipt["status"] == "done")
+        .collect();
+    assert_eq!(done.len(), 1, "{receipts:?}");
+    assert_eq!(done[0]["recordKey"], "decline-record-2", "{}", done[0]);
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    tick(&stood.host, &[], stood.began + 40_000);
+    assert_eq!(
+        stood
+            .receipts(stood.began + 40_001)
+            .iter()
+            .filter(|receipt| receipt["status"] == "done")
+            .count(),
+        1,
+        "walked twice"
+    );
+}
+
+/// A category the provider routes nowhere is news and walks nowhere, even
+/// under a declared order: the provider's answer stands (t-6747).
+#[test]
+fn an_unrouted_decline_is_told_and_walked_nowhere() {
+    const LEADER_TERM: u32 = 85_400;
+    let stood = Walled::stand_declined(
+        LEADER_TERM,
+        "/tmp",
+        "reasoning_extraction",
+        "--on-classifier-decline claude:claude-opus-4-8",
+    );
+    tick(&stood.host, &[], stood.began + 10_000);
+    let news = stood.json(
+        "check --peek --types classifier_declined",
+        stood.began + 10_001,
+    );
+    assert_eq!(news["count"], 1, "{news}");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(body["routed"], false, "{body}");
+    assert_eq!(body["rung"], "notify", "{body}");
+    assert!(stood.receipts(stood.began + 10_001).is_empty());
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+}
+
+/// The category the beat and the fence read is joined on BOTH of the
+/// error record's ids (t-7153, R1), through the real transcript reader: a
+/// category record the error's request names but whose uuid is not the
+/// parent the error names is a contradiction — no category, so the decline
+/// is unrouted news and nothing walks, where before the request's word was
+/// borrowed and the worker handed over on it; the same contradiction read
+/// at the last boundary, under the same record key, settles nothing; and
+/// the record both ids name is this decline's, walked once.
+#[test]
+fn a_declines_category_is_joined_on_both_ids_at_the_beat_and_at_the_fence() {
+    const SCREEN: &str = "\
+⎿  API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup).
+❯ ";
+    let system = |uuid: &str, request: &str| {
+        format!(
+            r#"{{"parentUuid":"p","isSidechain":false,"type":"system","subtype":"model_refusal_no_fallback","content":"","level":"warning","originalModel":"claude-fable-5-1","requestId":"{request}","apiRefusalCategory":"cyber","refusedUserMessageUuid":"q","isMeta":false,"uuid":"{uuid}","timestamp":"2026-09-24T04:29:48.712Z","version":"2.1.281"}}"#
+        )
+    };
+    let error = |uuid: &str, request: &str, parent: &str| {
+        format!(
+            r#"{{"parentUuid":"{parent}","isSidechain":false,"type":"assistant","uuid":"{uuid}","timestamp":"2026-09-24T04:29:48.711Z","message":{{"id":"e","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup)."}}]}},"requestId":"{request}","error":"invalid_request","isApiErrorMessage":true}}"#
+        )
+    };
+    let reading =
+        |held: &[String]| crate::quota_wall::decline_reading_in("claude", Some(SCREEN), Some(held));
+    let earlier = [
+        system("sys-1", "req_1"),
+        error("declined-1", "req_1", "sys-1"),
+    ];
+    // Both ids agree: `sys-2` answers `req_2`, and `declined-2` names it.
+    let agreeing: Vec<String> = earlier
+        .iter()
+        .cloned()
+        .chain([
+            system("sys-2", "req_2"),
+            error("declined-2", "req_2", "sys-2"),
+        ])
+        .collect();
+    // The request agrees, the parent disputes: `declined-3` is `req_2`'s
+    // but names `sys-1` — an earlier request's record — as its parent.
+    let disputing: Vec<String> = earlier
+        .iter()
+        .cloned()
+        .chain([
+            system("sys-2", "req_2"),
+            error("declined-3", "req_2", "sys-1"),
+        ])
+        .collect();
+    // The same record key as `agreeing`, but a later category record on
+    // the same request whose uuid is not the parent named.
+    let disputing_at_the_fence: Vec<String> = agreeing
+        .iter()
+        .cloned()
+        .chain([system("sys-3", "req_2")])
+        .collect();
+    let policy = "--on-classifier-decline claude:claude-opus-4-8";
+    let category_of = |held: &[String]| reading(held).record.expect("the decline").category;
+    assert_eq!(category_of(&agreeing).as_deref(), Some("cyber"));
+    assert_eq!(category_of(&disputing), None);
+    assert_eq!(category_of(&disputing_at_the_fence), None);
+    assert_eq!(
+        reading(&disputing_at_the_fence)
+            .record
+            .expect("the decline")
+            .key,
+        "declined-2"
+    );
+
+    // At the beat: a contradiction is unrouted news, and walks nowhere.
+    let stood = Walled::stand_declined_with(86_300, "/tmp", policy, reading(&disputing));
+    tick(&stood.host, &[], stood.began + 10_000);
+    let news = stood.json(
+        "check --peek --types classifier_declined",
+        stood.began + 10_001,
+    );
+    assert_eq!(news["count"], 1, "{news}");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(
+        body["category"],
+        serde_json::Value::Null,
+        "a category was borrowed: {body}"
+    );
+    assert_eq!(body["routed"], false, "{body}");
+    assert!(
+        stood.receipts(stood.began + 10_001).is_empty(),
+        "a decline with a contradicted category was walked"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    drop(stood);
+
+    // At the fence: the same key, the category now contradicted — nothing
+    // settles; read the same again, the walk lands.
+    let stood = Walled::stand_declined_with(86_400, "/tmp", policy, reading(&agreeing));
+    stood
+        .host
+        .read_at_the_fence(Some(reading(&disputing_at_the_fence)));
+    tick(&stood.host, &[], stood.began + 10_000);
+    assert!(
+        stood
+            .receipts(stood.began + 10_001)
+            .iter()
+            .all(|receipt| receipt["status"] != "done"),
+        "settled on a category the fence read as contradicted"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    stood.host.read_at_the_fence(None);
+    tick(&stood.host, &[], stood.began + 20_000);
+    let receipts = stood.receipts(stood.began + 20_001);
+    let done: Vec<&serde_json::Value> = receipts
+        .iter()
+        .filter(|receipt| receipt["status"] == "done")
+        .collect();
+    assert_eq!(done.len(), 1, "{receipts:?}");
+    assert_eq!(done[0]["category"], "cyber");
+    assert_eq!(done[0]["recordKey"], "declined-2");
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
 }
 
 /// The three steps in order, through the door, each named to the
@@ -2909,6 +4229,10 @@ fn the_beat_writes_quota_walled_news_only_with_both_witnesses_and_settles_nothin
         checkout: "/wt/walled",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     };
     let leader = zerocode_core::agent_teams::LEADER_PANE;
     let verb = |line: &str, at: i64| {
@@ -3438,6 +4762,85 @@ impl StoppedWorker {
             .filter(|body| body["workerId"] == self.worker.as_str())
             .collect()
     }
+
+    /// The attempt this worker carries now, as the ledger holds it.
+    fn attempt(&self) -> zerocode_core::orchestration::DispatchRow {
+        let rows = the_rows();
+        let held = rows
+            .workers
+            .iter()
+            .find(|one| one.id == self.worker)
+            .expect("the worker");
+        let open = held.dispatch.as_deref().expect("an open attempt");
+        rows.dispatches
+            .iter()
+            .find(|one| one.id == open)
+            .expect("the attempt")
+            .clone()
+    }
+
+    /// The worker reports done, and its pane is handed a second task —
+    /// the same worker, its summons time standing, on a new attempt
+    /// (t-7153, R3). Answers the new attempt.
+    fn handed_a_second_task(&self, at: i64) -> zerocode_core::orchestration::DispatchRow {
+        let pane = the_rows()
+            .workers
+            .iter()
+            .find(|one| one.id == self.worker)
+            .expect("the worker")
+            .pane
+            .clone();
+        let held = crate::agent_teams::current_pane_capability(&self.team, &pane)
+            .expect("the worker's capability");
+        let done = run(
+            &self.host,
+            Vec::new(),
+            &self.team,
+            &pane,
+            &held,
+            &words(&format!(
+                "send --type worker_done --body {{\"ok\":true}} --retry-request done-{}-{at}",
+                self.worker
+            )),
+            at,
+        );
+        assert_eq!(done.exit_code, 0, "{}", done.stderr);
+        let task = self.json("task-create --spec build-it-again", at + 1)["taskId"]
+            .as_str()
+            .expect("a task")
+            .to_string();
+        self.json(
+            &format!("dispatch --task {task} --to {pane} --inject --retry-request re-{task}"),
+            at + 2,
+        );
+        let attempt = self.attempt();
+        assert_eq!(attempt.started_ms, at + 2, "the second attempt's own start");
+        attempt
+    }
+
+    /// One more record at the end of the worker's transcript.
+    fn appends(&self, line: &str) {
+        use std::io::Write;
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&self.host.transcript)
+            .expect("append");
+        writeln!(file, "{line}").expect("write");
+    }
+
+    /// This worker's `model_deviated` rows: the attempt each was written
+    /// for, and the switch's key, oldest first.
+    fn switches_written(&self, at: i64) -> Vec<(String, String)> {
+        self.news("model_deviated", at)
+            .iter()
+            .map(|body| {
+                (
+                    body["dispatchId"].as_str().expect("an attempt").to_string(),
+                    body["key"].as_str().expect("a key").to_string(),
+                )
+            })
+            .collect()
+    }
 }
 
 /// The same stop, a later error: w-4525's record under a new identity.
@@ -3484,6 +4887,862 @@ fn a_worker_stopped_by_a_transient_api_error_is_typed_at_once_under_a_declared_o
         stood.news("went_quiet", stood.began + 12_001),
         Vec::<serde_json::Value>::new(),
         "a stop the beat answered was also a silence"
+    );
+}
+
+/// A switch of model is read off the FILE the cursor counted into, and is
+/// the worker's whose attempt was open when it was written (t-7153, R3).
+/// A transcript replaced under its path by another — as long as the old
+/// one, with a switch in its first bytes; or longer — is read from its
+/// start and the switch written, where before the old offset stood and a
+/// same-length replacement read as unchanged; a switch dated before the
+/// worker's summons is not written for it; and a worker seated later at the
+/// same path — a session resumed — is written only the switches after its
+/// own summons, never the earlier worker's as its own. A restart that
+/// forgets the cursors reads the file again and writes nothing twice.
+#[test]
+fn a_switch_in_a_transcript_replaced_under_its_path_is_written_and_an_earlier_workers_is_not() {
+    use crate::quota_wall::tests::{CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD, a_transcript_as_long_as};
+    use zerocode_core::civil::iso_utc_of;
+    const LEADER_TERM: u32 = 97_300;
+    let stood = StoppedWorker::stand(LEADER_TERM, "", Vec::new());
+    let switch = |key: &str, at_ms: i64| {
+        CLAUDE_FALLBACK
+            .replace("switch-1", key)
+            .replace("2026-09-21T14:06:16.566Z", &iso_utc_of(at_ms))
+    };
+    let replace = |content: &str| {
+        let fresh = stood._dir.path().join("next.jsonl");
+        std::fs::write(&fresh, content).expect("the replacement");
+        std::fs::rename(&fresh, &stood.host.transcript).expect("atomic replace");
+    };
+    let keys = |worker: &str, at: i64| -> Vec<String> {
+        stood.json("check --peek --types model_deviated", at)["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| {
+                serde_json::from_str::<serde_json::Value>(message["body"].as_str().expect("a body"))
+                    .expect("json")
+            })
+            .filter(|body| body["workerId"] == worker)
+            .map(|body| body["key"].as_str().expect("a key").to_string())
+            .collect()
+    };
+
+    replace(&format!(
+        "{CLAUDE_PLAIN_RECORD}\n{}\n",
+        switch("switch-1", stood.began + 5_000)
+    ));
+    tick(&stood.host, &[], stood.began + 10_000);
+    tick(&stood.host, &[], stood.began + 11_000);
+    assert_eq!(keys(&stood.worker, stood.began + 11_001), ["switch-1"]);
+    let old_len = std::fs::metadata(&stood.host.transcript)
+        .expect("size")
+        .len();
+
+    // Replaced under its path, as long as before, a new switch first.
+    replace(&a_transcript_as_long_as(
+        &switch("switch-2", stood.began + 12_000),
+        old_len,
+    ));
+    tick(&stood.host, &[], stood.began + 13_000);
+    assert_eq!(
+        keys(&stood.worker, stood.began + 13_001),
+        ["switch-1", "switch-2"],
+        "a switch in a transcript replaced as long as the old one was never read"
+    );
+
+    // Replaced by a longer one, a new switch first.
+    replace(&format!(
+        "{}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n",
+        switch("switch-3", stood.began + 14_000)
+    ));
+    tick(&stood.host, &[], stood.began + 15_000);
+    assert_eq!(
+        keys(&stood.worker, stood.began + 15_001),
+        ["switch-1", "switch-2", "switch-3"],
+        "a switch in a longer replacement's first bytes was never read"
+    );
+
+    // A switch dated before the summons is not this worker's.
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&stood.host.transcript)
+        .expect("append");
+    use std::io::Write;
+    writeln!(file, "{}", switch("switch-0", stood.began - 60_000)).expect("write");
+    drop(file);
+    tick(&stood.host, &[], stood.began + 16_000);
+    assert_eq!(
+        keys(&stood.worker, stood.began + 16_001),
+        ["switch-1", "switch-2", "switch-3"],
+        "a switch written before the worker's summons was written as its own"
+    );
+
+    // Another worker seated at the same path: only what follows its summons.
+    let earlier = stood.worker.clone();
+    stood.json(
+        &format!("worker-stop --worker {earlier} --reason done --retry-request stop-{earlier}"),
+        stood.began + 17_000,
+    );
+    let task = stood.json("task-create --spec build-it-again", stood.began + 17_001)["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let later = stood.json(
+        &format!("worker-start --agent claude --task {task}"),
+        stood.began + 18_000,
+    )["workerId"]
+        .as_str()
+        .expect("a worker")
+        .to_string();
+    tick(&stood.host, &[], stood.began + 19_000);
+    tick(&stood.host, &[], stood.began + 20_000);
+    assert_eq!(
+        keys(&later, stood.began + 20_001),
+        Vec::<String>::new(),
+        "an earlier worker's switches were written as the later worker's own"
+    );
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&stood.host.transcript)
+        .expect("append");
+    writeln!(file, "{}", switch("switch-4", stood.began + 21_000)).expect("write");
+    drop(file);
+    tick(&stood.host, &[], stood.began + 22_000);
+    tick(&stood.host, &[], stood.began + 23_000);
+    assert_eq!(keys(&later, stood.began + 23_001), ["switch-4"]);
+    assert_eq!(
+        keys(&earlier, stood.began + 23_001),
+        ["switch-1", "switch-2", "switch-3"],
+        "the ended worker was written more"
+    );
+
+    // A window restart forgets every cursor: the same attempt's file is
+    // read again from its start, and the ledger — not the scan — writes
+    // nothing twice.
+    super::deviation_scans()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clear();
+    tick(&stood.host, &[], stood.began + 24_000);
+    tick(&stood.host, &[], stood.began + 25_000);
+    assert_eq!(
+        keys(&later, stood.began + 25_001),
+        ["switch-4"],
+        "a switch read again after a restart was written twice"
+    );
+    assert_eq!(
+        keys(&earlier, stood.began + 25_001),
+        ["switch-1", "switch-2", "switch-3"]
+    );
+}
+
+/// A transcript that grows a window every beat is still checked whole
+/// (t-7153 r4, R3a, after astra t-6963 on 2e4ea291): its MIDDLE window
+/// rewritten in place — the same inode, its first line, its length and the
+/// bytes before the cursor kept, a switch where a record as long stood —
+/// is found within `2N − 1` readings for the `N` windows the scan had
+/// counted, the file growing a window a beat all the while; the switch is
+/// read on the next reading and written once; and a file only appended to
+/// is never read again from its start. Rewritten on the beat the scan
+/// caught up, and again after three beats of growth, when the round under
+/// way had passed the middle window. Before this a reading checked its
+/// count over the windows counted NOW, both moving one a beat, and the
+/// middle window was never checked again. Through the real beat and the
+/// real ledger.
+#[test]
+fn a_middle_window_rewritten_in_place_is_found_while_the_transcript_grows_a_window_a_beat() {
+    use crate::quota_wall::tests::{CLAUDE_FALLBACK, SLOT_AT, overwrite_at, records_with_a_slot};
+    use zerocode_core::civil::iso_utc_of;
+    use zerocode_core::transcript::MAX_TAIL_BYTES;
+    let window = usize::try_from(MAX_TAIL_BYTES).expect("small");
+    for (leader_term, grown_first) in [(97_830, 0), (97_840, 3)] {
+        let stood = StoppedWorker::stand(leader_term, "", Vec::new());
+        let switch = CLAUDE_FALLBACK
+            .replace("switch-1", "switch-mid")
+            .replace("2026-09-21T14:06:16.566Z", &iso_utc_of(stood.began + 5_000));
+        let run = records_with_a_slot(window, switch.len());
+        std::fs::write(&stood.host.transcript, run.repeat(3)).expect("three windows");
+        let grow = || {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&stood.host.transcript)
+                .expect("append")
+                .write_all(run.as_bytes())
+                .expect("a window more");
+        };
+        let cursor = || {
+            super::deviation_scans()
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .get(&stood.worker)
+                .map_or(0, |held| held.cursor.offset)
+        };
+        let mut now = stood.began + 10_000;
+        let mut beat = || {
+            now += 1_000;
+            tick(&stood.host, &[], now);
+            now
+        };
+
+        // Read to its end, a window a beat.
+        for _ in 0..8 {
+            if cursor() == 3 * MAX_TAIL_BYTES {
+                break;
+            }
+            beat();
+        }
+        assert_eq!(cursor(), 3 * MAX_TAIL_BYTES, "not read to its end");
+        // Grown a window a beat, never rewritten: read on, a window a beat.
+        for _ in 0..grown_first {
+            let was = cursor();
+            grow();
+            beat();
+            assert_eq!(
+                cursor(),
+                was + MAX_TAIL_BYTES,
+                "a file only appended to was read again from its start, or not read on"
+            );
+        }
+
+        // The middle window's slot becomes the switch, in place; the file
+        // grows on, a window a beat.
+        let counted = cursor().div_ceil(MAX_TAIL_BYTES);
+        let bound = 2 * counted - 1;
+        overwrite_at(
+            &stood.host.transcript,
+            MAX_TAIL_BYTES + SLOT_AT as u64,
+            &switch,
+        );
+        let (mut started_over, mut written, mut readings) = (None, None, 0);
+        while written.is_none() && readings < 2 * bound {
+            let was = cursor();
+            grow();
+            let at = beat();
+            readings += 1;
+            if started_over.is_none() && cursor() < was {
+                started_over = Some(readings);
+            }
+            if !stood.switches_written(at + 1).is_empty() {
+                written = Some(readings);
+            }
+        }
+        assert!(
+            started_over.is_some_and(|after| after <= bound),
+            "grown {grown_first} beats first: the middle of {counted} windows, rewritten in place, \
+             was checked after {started_over:?} of {readings} readings of a file growing a window \
+             a beat — the bound is {bound}"
+        );
+        assert_eq!(
+            written,
+            started_over.map(|after| after + 1),
+            "its switch was not read on the next reading"
+        );
+        let attempt = stood.attempt().id;
+        beat();
+        let at = beat();
+        assert_eq!(
+            stood.switches_written(at + 1),
+            [(attempt, "switch-mid".to_string())],
+            "written other than once"
+        );
+    }
+}
+
+/// A switch is written for the ATTEMPT it was read under, and the same
+/// worker's next attempt begins its own count (t-7153, R3): a worker
+/// reports done and its pane is handed a second task — its summons time
+/// stands, so a time filter on the summons would take the first attempt's
+/// switch as the second's; a window restart then forgets the cursors and
+/// the file is read again from its start. The first attempt's switch is
+/// not written for the second; the second attempt's own switch lands once,
+/// under the second. Through the real beat and the real ledger.
+#[test]
+fn a_switch_of_a_workers_earlier_attempt_is_never_written_as_its_next_attempts() {
+    use crate::quota_wall::tests::{CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD};
+    use zerocode_core::civil::iso_utc_of;
+    const LEADER_TERM: u32 = 97_400;
+    let stood = StoppedWorker::stand(LEADER_TERM, "", Vec::new());
+    let switch = |key: &str, at_ms: i64| {
+        CLAUDE_FALLBACK
+            .replace("switch-1", key)
+            .replace("2026-09-21T14:06:16.566Z", &iso_utc_of(at_ms))
+    };
+    std::fs::write(
+        &stood.host.transcript,
+        format!(
+            "{CLAUDE_PLAIN_RECORD}\n{}\n",
+            switch("switch-1", stood.began + 5_000)
+        ),
+    )
+    .expect("the transcript");
+    tick(&stood.host, &[], stood.began + 10_000);
+    tick(&stood.host, &[], stood.began + 11_000);
+    let first = stood.attempt();
+    assert_eq!(
+        stood.switches_written(stood.began + 11_001),
+        [(first.id.clone(), "switch-1".to_string())]
+    );
+
+    let second = stood.handed_a_second_task(stood.began + 12_000);
+    assert_ne!(second.id, first.id);
+
+    // A restart forgets every cursor: the file is read again from its
+    // start, and what it holds of the first attempt is not the second's.
+    super::deviation_scans()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .clear();
+    tick(&stood.host, &[], stood.began + 14_000);
+    tick(&stood.host, &[], stood.began + 15_000);
+    assert_eq!(
+        stood.switches_written(stood.began + 15_001),
+        [(first.id.clone(), "switch-1".to_string())],
+        "the first attempt's switch was written as the second attempt's"
+    );
+
+    // The second attempt's own switch: once, under the second.
+    stood.appends(&switch("switch-2", stood.began + 16_000));
+    tick(&stood.host, &[], stood.began + 17_000);
+    tick(&stood.host, &[], stood.began + 18_000);
+    assert_eq!(
+        stood.switches_written(stood.began + 18_001),
+        [
+            (first.id.clone(), "switch-1".to_string()),
+            (second.id.clone(), "switch-2".to_string())
+        ]
+    );
+}
+
+/// A reading the ledger moved past between the scan and the fence is
+/// written nowhere (t-7153, R3): the beat read the file under the first
+/// attempt; before the ledger was asked, the worker reported done and its
+/// pane was handed a second task. The reading carries the attempt it was
+/// read under, and the ledger's fence — the real actor — writes it for
+/// neither: not for the ended attempt, not for the one the worker carries
+/// now. The second attempt's own reading, bound to it, lands.
+#[test]
+fn a_reading_the_ledger_moved_past_between_the_scan_and_the_fence_is_written_nowhere() {
+    use crate::quota_wall::tests::{CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD};
+    use crate::quota_wall::{ScanCursor, scan_fallbacks};
+    use zerocode_core::civil::iso_utc_of;
+    const LEADER_TERM: u32 = 97_500;
+    let stood = StoppedWorker::stand(LEADER_TERM, "", Vec::new());
+    let switch = |key: &str, at_ms: i64| {
+        CLAUDE_FALLBACK
+            .replace("switch-1", key)
+            .replace("2026-09-21T14:06:16.566Z", &iso_utc_of(at_ms))
+    };
+    std::fs::write(
+        &stood.host.transcript,
+        format!(
+            "{CLAUDE_PLAIN_RECORD}\n{}\n",
+            switch("switch-1", stood.began + 5_000)
+        ),
+    )
+    .expect("the transcript");
+    let source = stood.host.transcript.to_string_lossy().into_owned();
+    let first = stood.attempt();
+    let held = super::runtime().expect("the runtime");
+    let scan = scan_fallbacks(&stood.host.transcript, &ScanCursor::default());
+    assert_eq!(scan.switches.len(), 1);
+    let binding = super::SwitchBinding {
+        worker: &stood.worker,
+        dispatch: &first.id,
+        source: &source,
+        attempt_started_ms: first.started_ms,
+    };
+    let mut second = None;
+    let (keep, waiting, moved) =
+        super::record_scanned_switches(&binding, scan, ScanCursor::default(), &mut |switches| {
+            // Between the reading and the fence: the attempt ends and the
+            // pane is handed another task.
+            second = Some(stood.handed_a_second_task(stood.began + 12_000));
+            held.actor
+                .model_deviations(switches, stood.began + 13_000)
+                .map(|(told, _)| told)
+        });
+    let second = second.expect("the second attempt");
+    assert!(!moved, "a reading of the ended attempt was written");
+    assert_eq!(waiting, None, "the ledger answered; nothing waits");
+    assert_eq!(
+        stood.switches_written(stood.began + 13_001),
+        Vec::<(String, String)>::new(),
+        "a reading of the first attempt was written as the second's"
+    );
+
+    // The second attempt's own reading lands, bound to it.
+    stood.appends(&switch("switch-2", stood.began + 14_000));
+    let scan = scan_fallbacks(&stood.host.transcript, &keep);
+    let binding = super::SwitchBinding {
+        worker: &stood.worker,
+        dispatch: &second.id,
+        source: &source,
+        attempt_started_ms: second.started_ms,
+    };
+    let (keep, waiting, moved) =
+        super::record_scanned_switches(&binding, scan, keep.clone(), &mut |switches| {
+            held.actor
+                .model_deviations(switches, stood.began + 15_000)
+                .map(|(told, _)| told)
+        });
+    assert!(moved);
+    assert_eq!(waiting, None);
+    assert_eq!(
+        stood.switches_written(stood.began + 15_001),
+        [(second.id.clone(), "switch-2".to_string())]
+    );
+
+    // The file swapped between the reading and the fence: the ledger learns
+    // the worker's CLI now writes another conversation, and the reading of
+    // the file it left is written nowhere.
+    stood.appends(&switch("switch-3", stood.began + 16_000));
+    let scan = scan_fallbacks(&stood.host.transcript, &keep);
+    assert_eq!(scan.switches.len(), 1);
+    let (_, waiting, moved) =
+        super::record_scanned_switches(&binding, scan, keep.clone(), &mut |switches| {
+            let (moved, _) = held
+                .actor
+                .worker_session_reported(
+                    stood.host.worker_term,
+                    zerocode_core::ProviderSession {
+                        key: zerocode_core::provider_session::SessionKey::SessionId,
+                        id: "another-conversation".to_string(),
+                        transcript_path: Some(format!("{source}.another")),
+                    },
+                    stood.began + 16_500,
+                )
+                .expect("the session report");
+            assert!(moved, "the ledger learned the new file");
+            held.actor
+                .model_deviations(switches, stood.began + 17_000)
+                .map(|(told, _)| told)
+        });
+    assert!(!moved, "a reading of a file the worker left was written");
+    assert_eq!(waiting, None);
+    assert_eq!(
+        stood.switches_written(stood.began + 17_001),
+        [(second.id.clone(), "switch-2".to_string())],
+        "a reading of another file was written as this conversation's"
+    );
+}
+
+/// A worker's switches are read off the file the LEDGER names for its
+/// conversation, and off the pane's own report only while the ledger has
+/// heard none (t-7153, R3): the ledger's fence writes a switch only for
+/// the file it names, so a file the pane reported first — a session the
+/// ledger has not heard of yet — is not read, and once the ledger names it
+/// it is read from its start and its switch lands, once. Read before the
+/// ledger named it, the switch would have been refused at the fence and
+/// its cursor moved past it for good.
+#[test]
+fn a_switch_is_read_off_the_file_the_ledger_names_and_lands_once_it_names_it() {
+    use crate::quota_wall::tests::{CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD};
+    use zerocode_core::civil::iso_utc_of;
+    const LEADER_TERM: u32 = 97_800;
+    let stood = StoppedWorker::stand(LEADER_TERM, "", Vec::new());
+    let held = super::runtime().expect("the runtime");
+    let named = |path: &std::path::Path, at: i64| {
+        held.actor
+            .worker_session_reported(
+                stood.host.worker_term,
+                zerocode_core::ProviderSession {
+                    key: zerocode_core::provider_session::SessionKey::SessionId,
+                    id: "d4e81823-3b9a-4bf1-a54b-b4366117b514".to_string(),
+                    transcript_path: Some(path.to_string_lossy().into_owned()),
+                },
+                at,
+            )
+            .expect("the session report")
+            .0
+    };
+    let elsewhere = stood._dir.path().join("elsewhere.jsonl");
+    std::fs::write(&elsewhere, format!("{CLAUDE_PLAIN_RECORD}\n")).expect("the named file");
+    assert!(
+        named(&elsewhere, stood.began + 1_000),
+        "the ledger named a file"
+    );
+    std::fs::write(
+        &stood.host.transcript,
+        format!(
+            "{CLAUDE_PLAIN_RECORD}\n{}\n",
+            CLAUDE_FALLBACK
+                .replace("switch-1", "switch-pane")
+                .replace("2026-09-21T14:06:16.566Z", &iso_utc_of(stood.began + 5_000))
+        ),
+    )
+    .expect("the pane's file");
+    tick(&stood.host, &[], stood.began + 10_000);
+    tick(&stood.host, &[], stood.began + 11_000);
+    assert_eq!(
+        stood.switches_written(stood.began + 11_001),
+        Vec::<(String, String)>::new()
+    );
+
+    assert!(named(&stood.host.transcript, stood.began + 12_000));
+    tick(&stood.host, &[], stood.began + 13_000);
+    tick(&stood.host, &[], stood.began + 14_000);
+    assert_eq!(
+        stood.switches_written(stood.began + 14_001),
+        [(stood.attempt().id, "switch-pane".to_string())],
+        "a switch read before the ledger named its file was lost at the fence"
+    );
+}
+
+/// What waits on the ledger is bound to the file it was read from, and a
+/// session that moves under the same attempt neither drops it nor lends it
+/// the new file's cursor (t-7153, R3): the refused reading of file A is
+/// asked first on the beat that finds the CLI writing file B, under its own
+/// file; B is then read from its start, and its cursor is B's.
+#[test]
+fn a_waiting_reading_is_asked_under_its_own_file_when_the_session_moves() {
+    use crate::quota_wall::ScanCursor;
+    use crate::quota_wall::tests::{CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD};
+    let dir = tempfile::tempdir().expect("a dir");
+    let first = dir.path().join("first.jsonl");
+    let second = dir.path().join("second.jsonl");
+    let switch = |key: &str| CLAUDE_FALLBACK.replace("switch-1", key);
+    std::fs::write(
+        &first,
+        format!("{CLAUDE_PLAIN_RECORD}\n{}\n", switch("switch-a")),
+    )
+    .expect("a");
+    std::fs::write(
+        &second,
+        format!("{}\n{CLAUDE_PLAIN_RECORD}\n", switch("switch-b")),
+    )
+    .expect("b");
+    let (first_source, second_source) = (
+        first.to_string_lossy().into_owned(),
+        second.to_string_lossy().into_owned(),
+    );
+    fn bound(source: &str) -> super::SwitchBinding<'_> {
+        super::SwitchBinding {
+            worker: "w-1",
+            dispatch: "dp-1",
+            source,
+            attempt_started_ms: 0,
+        }
+    }
+    let asked: std::cell::RefCell<Vec<(String, String)>> = std::cell::RefCell::new(Vec::new());
+    let record = |refuse: bool| {
+        let asked = &asked;
+        move |switches: Vec<zerocode_core::orchestration::ModelDeviation>| {
+            if refuse {
+                return Err(super::RuntimeError::RecoveryRequired);
+            }
+            asked
+                .borrow_mut()
+                .extend(switches.into_iter().map(|one| (one.source, one.key)));
+            Ok(true)
+        }
+    };
+
+    let (held_at, waiting, _) = super::scan_switches_a_beat(
+        &bound(&first_source),
+        &first,
+        ScanCursor::default(),
+        None,
+        &mut record(true),
+    );
+    assert_eq!(held_at, ScanCursor::default());
+    assert!(waiting.is_some(), "the refused reading was let go");
+
+    // The session moved: the beat reads B with a fresh cursor, and asks the
+    // waiting reading of A first, under A.
+    let (keep, waiting, moved) = super::scan_switches_a_beat(
+        &bound(&second_source),
+        &second,
+        ScanCursor::default(),
+        waiting,
+        &mut record(false),
+    );
+    assert!(moved);
+    assert_eq!(waiting, None);
+    assert_eq!(
+        *asked.borrow(),
+        [
+            (first_source.clone(), "switch-a".to_string()),
+            (second_source.clone(), "switch-b".to_string())
+        ],
+        "the waiting reading was dropped, or asked under the new file"
+    );
+    assert_eq!(
+        keep.offset,
+        std::fs::metadata(&second).expect("size").len(),
+        "the new file's cursor is not its own"
+    );
+}
+
+/// A switch the ledger refused is held over and lands once the ledger can
+/// hold it, even when the file it was read from is gone by then (t-7153,
+/// R3): the disk refuses the beat's row; the file is replaced under its
+/// path — as long as the cursor, a new switch first — and the disk comes
+/// back; the next beat writes the refused switch, then reads the new file
+/// from its start. Each switch once, through the real beat and the real
+/// ledger. Before this the refused switch went with the old file.
+#[test]
+fn a_switch_the_ledger_refused_lands_once_after_the_file_it_was_read_from_is_replaced() {
+    use crate::quota_wall::tests::{CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD, a_transcript_as_long_as};
+    use zerocode_core::civil::iso_utc_of;
+    const LEADER_TERM: u32 = 97_600;
+    let stood = StoppedWorker::stand(LEADER_TERM, "", Vec::new());
+    let switch = |key: &str, at_ms: i64| {
+        CLAUDE_FALLBACK
+            .replace("switch-1", key)
+            .replace("2026-09-21T14:06:16.566Z", &iso_utc_of(at_ms))
+    };
+    let keys = |at: i64| -> Vec<String> {
+        stood
+            .switches_written(at)
+            .into_iter()
+            .map(|(_, key)| key)
+            .collect()
+    };
+    std::fs::write(
+        &stood.host.transcript,
+        format!(
+            "{CLAUDE_PLAIN_RECORD}\n{}\n",
+            switch("switch-1", stood.began + 5_000)
+        ),
+    )
+    .expect("the transcript");
+    tick(&stood.host, &[], stood.began + 10_000);
+    tick(&stood.host, &[], stood.began + 11_000);
+    assert_eq!(keys(stood.began + 11_001), ["switch-1"]);
+    let old_len = std::fs::metadata(&stood.host.transcript)
+        .expect("size")
+        .len();
+
+    // The disk refuses the beat that reads the next switch.
+    stood.appends(&switch("switch-refused", stood.began + 12_000));
+    let connection = stood
+        ._store
+        .fault_connection_for_tests()
+        .expect("fault connection");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER refuse_switches
+                    AFTER UPDATE OF revision ON orchestration_ledger_heads
+                    BEGIN SELECT RAISE(ABORT, 'injected disk refusal'); END;",
+        )
+        .expect("a disk that refuses");
+    tick(&stood.host, &[], stood.began + 13_000);
+    connection
+        .execute_batch("DROP TRIGGER refuse_switches;")
+        .expect("the disk comes back");
+    assert_eq!(
+        keys(stood.began + 13_001),
+        ["switch-1"],
+        "the refused row landed"
+    );
+
+    // Replaced under its path before the next beat, as long as the cursor.
+    let fresh = stood._dir.path().join("next.jsonl");
+    std::fs::write(
+        &fresh,
+        a_transcript_as_long_as(&switch("switch-2", stood.began + 14_000), old_len),
+    )
+    .expect("the replacement");
+    std::fs::rename(&fresh, &stood.host.transcript).expect("atomic replace");
+    tick(&stood.host, &[], stood.began + 15_000);
+    tick(&stood.host, &[], stood.began + 16_000);
+    assert_eq!(
+        keys(stood.began + 16_001),
+        ["switch-1", "switch-refused", "switch-2"],
+        "a switch the ledger refused was lost with the file it was read from"
+    );
+    tick(&stood.host, &[], stood.began + 17_000);
+    assert_eq!(
+        keys(stood.began + 17_001),
+        ["switch-1", "switch-refused", "switch-2"],
+        "written twice"
+    );
+}
+
+/// A reading that waits on the ledger dies with its attempt (t-7153, R3):
+/// the disk refuses the beat's row, the worker reports done and its pane is
+/// handed a second task before the disk comes back — the waiting reading
+/// was the first attempt's, and is written for neither the ended attempt
+/// nor the new one; the new attempt's own switch lands once.
+#[test]
+fn a_waiting_reading_dies_with_its_attempt_and_is_never_the_next_attempts() {
+    use crate::quota_wall::tests::{CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD};
+    use zerocode_core::civil::iso_utc_of;
+    const LEADER_TERM: u32 = 97_700;
+    let stood = StoppedWorker::stand(LEADER_TERM, "", Vec::new());
+    let switch = |key: &str, at_ms: i64| {
+        CLAUDE_FALLBACK
+            .replace("switch-1", key)
+            .replace("2026-09-21T14:06:16.566Z", &iso_utc_of(at_ms))
+    };
+    std::fs::write(
+        &stood.host.transcript,
+        format!(
+            "{CLAUDE_PLAIN_RECORD}\n{}\n",
+            switch("switch-1", stood.began + 5_000)
+        ),
+    )
+    .expect("the transcript");
+    tick(&stood.host, &[], stood.began + 10_000);
+    tick(&stood.host, &[], stood.began + 11_000);
+    let first = stood.attempt();
+    assert_eq!(
+        stood.switches_written(stood.began + 11_001),
+        [(first.id.clone(), "switch-1".to_string())]
+    );
+
+    stood.appends(&switch("switch-waiting", stood.began + 12_000));
+    let connection = stood
+        ._store
+        .fault_connection_for_tests()
+        .expect("fault connection");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER refuse_switches
+                    AFTER UPDATE OF revision ON orchestration_ledger_heads
+                    BEGIN SELECT RAISE(ABORT, 'injected disk refusal'); END;",
+        )
+        .expect("a disk that refuses");
+    tick(&stood.host, &[], stood.began + 13_000);
+    connection
+        .execute_batch("DROP TRIGGER refuse_switches;")
+        .expect("the disk comes back");
+
+    let second = stood.handed_a_second_task(stood.began + 14_000);
+    tick(&stood.host, &[], stood.began + 15_000);
+    tick(&stood.host, &[], stood.began + 16_000);
+    assert_eq!(
+        stood.switches_written(stood.began + 16_001),
+        [(first.id.clone(), "switch-1".to_string())],
+        "a reading of the ended attempt was written as the next attempt's"
+    );
+    stood.appends(&switch("switch-2", stood.began + 17_000));
+    tick(&stood.host, &[], stood.began + 18_000);
+    tick(&stood.host, &[], stood.began + 19_000);
+    assert_eq!(
+        stood.switches_written(stood.began + 19_001),
+        [
+            (first.id.clone(), "switch-1".to_string()),
+            (second.id.clone(), "switch-2".to_string())
+        ]
+    );
+}
+
+/// A refused beat's switches wait, bound to their file, and are held before
+/// anything more is read (t-7153, R3): the ledger refuses a beat's rows —
+/// the cursor stays where the ledger holds rows of the old file and the
+/// beat's reading waits beside it, and while it waits the beat reads
+/// nothing more, so what waits is ever one beat's reading; the file is then
+/// replaced under its path by one exactly as long as that cursor, a switch
+/// first — the next beat asks the waiting reading first, and only once it
+/// is held reads the new file from its start. Each switch lands once.
+/// Before this the refused reading was let go to be read again from the
+/// file, and the rotation took it with it.
+#[test]
+fn a_refused_readings_switches_wait_and_land_before_the_rotation_is_read() {
+    use crate::quota_wall::ScanCursor;
+    use crate::quota_wall::tests::{
+        CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD, a_transcript_as_long_as, placed,
+    };
+    use std::io::Write;
+    let dir = tempfile::tempdir().expect("a dir");
+    let path = dir.path().join("session.jsonl");
+    let switch = |key: &str| CLAUDE_FALLBACK.replace("switch-1", key);
+    let replace = |content: &str| {
+        let fresh = dir.path().join("session.jsonl.next");
+        std::fs::write(&fresh, content).expect("the replacement");
+        std::fs::rename(&fresh, &path).expect("atomic replace");
+    };
+    let append = |line: &str| {
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        writeln!(file, "{line}").expect("write");
+    };
+    let source = path.to_string_lossy().into_owned();
+    let binding = super::SwitchBinding {
+        worker: "w-1",
+        dispatch: "dp-1",
+        source: &source,
+        attempt_started_ms: 0,
+    };
+    let held: std::cell::RefCell<Vec<String>> = std::cell::RefCell::new(Vec::new());
+    let beat = |cursor: &ScanCursor, pending: Option<super::PendingSwitches>, refuse: bool| {
+        let (keep, pending, _) = super::scan_switches_a_beat(
+            &binding,
+            &path,
+            cursor.clone(),
+            pending,
+            &mut |switches| {
+                if refuse {
+                    return Err(super::RuntimeError::RecoveryRequired);
+                }
+                held.borrow_mut()
+                    .extend(switches.into_iter().map(|one| one.key));
+                Ok(true)
+            },
+        );
+        (keep, pending)
+    };
+
+    replace(&format!("{CLAUDE_PLAIN_RECORD}\n{}\n", switch("switch-1")));
+    let (first, nothing) = beat(&ScanCursor::default(), None, false);
+    let old_len = std::fs::metadata(&path).expect("size").len();
+    assert_eq!(first.offset, old_len);
+    assert_eq!(nothing, None);
+
+    // A switch appended, and refused: the cursor stays in the old file and
+    // the reading waits, bound to it.
+    append(&switch("switch-refused"));
+    let (refused, waiting) = beat(&first, None, true);
+    assert_eq!(refused, first, "a refused beat moved the cursor");
+    let waiting_keys = |waiting: &Option<super::PendingSwitches>| -> Vec<String> {
+        waiting
+            .as_ref()
+            .map(|held| held.switches.iter().map(|one| one.key.clone()).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        waiting_keys(&waiting),
+        ["switch-refused"],
+        "the refused reading was let go"
+    );
+    assert_eq!(*held.borrow(), ["switch-1"]);
+
+    // Refused again: still one beat's reading waits, and nothing more is
+    // read behind it — a switch written to the old file meanwhile is not
+    // taken up until the waiting one is held.
+    append(&switch("switch-later"));
+    let (still, waiting) = beat(&refused, waiting, true);
+    assert_eq!(still, first);
+    assert_eq!(
+        waiting_keys(&waiting),
+        ["switch-refused"],
+        "the beat read on while a reading waited"
+    );
+
+    // Replaced by a file as long as the cursor's offset, a switch first:
+    // the waiting reading lands first, then the new file from its start.
+    replace(&a_transcript_as_long_as(&switch("switch-2"), old_len));
+    let (rotated, nothing) = beat(&refused, waiting, false);
+    assert_eq!(rotated.offset, old_len);
+    assert_ne!(rotated.file, first.file, "another file");
+    assert_eq!(nothing, None);
+    assert_eq!(
+        *held.borrow(),
+        ["switch-1", "switch-refused", "switch-2"],
+        "a switch the ledger refused was lost with the file it was read from"
+    );
+    let (after, nothing) = beat(&rotated, None, false);
+    assert_eq!(
+        (placed(&after), nothing),
+        (placed(&rotated), None),
+        "an unchanged file moved the cursor"
     );
 }
 
@@ -14250,6 +16509,10 @@ fn coordinator_handover_native_order_walks_once_and_persists_in_the_store() {
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     });
     let answer = run(
         &host,
@@ -14350,6 +16613,10 @@ fn coordinator_handover_cli_cannot_declare_a_human_order() {
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     });
     let answer = run(
         &host,
@@ -14377,6 +16644,10 @@ fn coordinator_manual_native_picker_and_claim_are_durable_and_retryable() {
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     });
     let made = run(
         &host,
@@ -14458,6 +16729,10 @@ fn coordinator_manual_native_claim_is_available_when_the_source_pane_is_gone() {
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     });
     let made = run(
         &host,
@@ -14507,6 +16782,10 @@ fn coordinator_handover_can_disable_after_source_capability_disappears() {
         checkout: "/unused",
         markers: Mutex::new(std::collections::HashMap::new()),
         asked: Mutex::new(Vec::new()),
+        declines: Mutex::new(std::collections::HashMap::new()),
+        pty_quiet_ms: Mutex::new(None),
+        screens: Mutex::new(std::collections::HashMap::new()),
+        fence_reading: Mutex::new(None),
     });
     let made = run(
         &host,

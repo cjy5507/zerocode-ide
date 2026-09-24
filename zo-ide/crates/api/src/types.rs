@@ -735,6 +735,20 @@ impl ContextManagementResponse {
     }
 }
 
+/// Why a response stopped, beyond the stop reason's own word — for a
+/// `stop_reason: "refusal"`, the policy area the provider's safety classifier
+/// declined under (`cyber`, `bio`, `frontier_llm`, `reasoning_extraction`,
+/// `general_harms`). Both fields are absent or `null` when a refusal names no
+/// category, which is a normal, permanent value (platform.claude.com,
+/// "Refusals and fallback", 2026-09-24).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StopDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MessageResponse {
     pub id: String,
@@ -747,6 +761,9 @@ pub struct MessageResponse {
     pub stop_reason: Option<String>,
     #[serde(default)]
     pub stop_sequence: Option<String>,
+    /// The refusal's category, when the stop was one (t-6747).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_details: Option<StopDetails>,
     pub usage: Usage,
     #[serde(default)]
     pub request_id: Option<String>,
@@ -859,6 +876,9 @@ pub struct MessageDelta {
     pub stop_reason: Option<String>,
     #[serde(default)]
     pub stop_sequence: Option<String>,
+    /// The refusal's category, when the stop was one (t-6747).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_details: Option<StopDetails>,
     /// End-of-turn reasoning signature (Gemini `thoughtSignature`), surfaced on
     /// the closing delta when the backend streams incrementally — at
     /// `message_start` time the signature isn't known yet because it rides on the
@@ -1325,6 +1345,7 @@ mod tests {
             model: "claude-sonnet-4-20250514".to_string(),
             stop_reason: Some("end_turn".to_string()),
             stop_sequence: None,
+            stop_details: None,
             usage: Usage {
                 input_tokens: 1_000_000,
                 cache_creation_input_tokens: 100_000,

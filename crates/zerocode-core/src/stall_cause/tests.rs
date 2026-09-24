@@ -132,10 +132,10 @@ fn an_answer_is_read_only_through_the_causes_offered() {
 fn the_version_is_pinned_to_the_words() {
     // Changing a word of the question without bumping the version turns this
     // red: a judgment read under one wording is not evidence about another.
-    assert_eq!(STALL_CAUSE_RUBRIC_VERSION, 2);
+    assert_eq!(STALL_CAUSE_RUBRIC_VERSION, 3);
     assert_eq!(
         crate::jev::rubric_fingerprint(rubric_words),
-        "f75306aaa8d3cf97"
+        "27c6daa20ba4e267"
     );
 }
 
@@ -330,4 +330,50 @@ fn a_dead_login_is_offered_and_labeled_as_the_end_of_the_attempt() {
     assert_eq!(Cause::from_word("auth_failure"), Some(Cause::AuthFailure));
     assert_eq!(mark(Cause::AuthFailure, Followed::WorkerStop), Ok(true));
     assert_eq!(mark(Cause::AuthFailure, Followed::WorkerDone), Ok(false));
+}
+
+/// A classifier's decline is its own answer (t-6747): the pause box it can
+/// stand behind waits for a key like a question box does, but no question of
+/// the work's is on it, and what ends it is a coordinator's hand — another
+/// model, or the attempt handed over. The answer is a label only: the
+/// ledger's `classifier_declined` news is told on the table's two witnesses
+/// and never on this.
+#[test]
+fn a_classifier_decline_is_offered_and_labeled_as_needing_a_hand() {
+    let look = StallLook {
+        agent: "claude",
+        quiet_ms: 180_000,
+        screen: "Session paused\nDetails: [cyber]\n❯ 1. Switch to Opus 4.8\n  2. Edit prompt and retry",
+        transcript: &[],
+    };
+    let asked = ask(&look).expect("a screen with words is a question");
+    let offered = asked.questions["cause"]["criteria"]
+        .as_object()
+        .expect("criteria");
+    let means = offered["classifier_decline"]
+        .as_str()
+        .expect("the decline is offered");
+    for measured in [
+        "safeguards flagged this message",
+        "Session paused",
+        "Edit prompt and retry",
+    ] {
+        assert!(
+            means.contains(measured),
+            "the criterion quotes the words this machine showed: {measured}"
+        );
+    }
+    assert_eq!(
+        Cause::from_word("classifier_decline"),
+        Some(Cause::ClassifierDecline)
+    );
+    assert_eq!(Cause::ClassifierDecline.predicts(), Some(Hand::Needed));
+    assert_eq!(
+        mark(Cause::ClassifierDecline, Followed::WorkerStop),
+        Ok(true)
+    );
+    assert_eq!(
+        mark(Cause::ClassifierDecline, Followed::WorkerDone),
+        Ok(false)
+    );
 }

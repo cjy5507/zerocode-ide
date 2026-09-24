@@ -298,6 +298,13 @@ struct AliasRow {
     /// one same-model retry) — see [`refusal_fallback_candidates`].
     #[serde(default)]
     refusal_fallback: Option<AliasList>,
+    /// Where a refusal goes per the category the classifier names (`cyber`,
+    /// `bio`, …): the provider's own routing, category by category. A category
+    /// absent here is one the provider routes nowhere — its refusal stands.
+    /// Absent altogether, [`Self::refusal_fallback`] answers for every
+    /// category — see [`refusal_route_candidates`] (t-6747).
+    #[serde(default)]
+    refusal_routes: BTreeMap<String, AliasList>,
 }
 
 fn provider_kind_from_key(key: &str) -> Option<ProviderKind> {
@@ -1592,6 +1599,9 @@ pub struct ProviderCatalogEntry {
     /// reason `demotes_to` is: the runtime's refusal path reads it and names no
     /// lineup itself.
     pub refusal_fallback: &'static [&'static str],
+    /// The same, per refusal category (t-6747) — `(category, candidates)`,
+    /// empty when the lineup declares no routes.
+    pub refusal_routes: &'static [(&'static str, &'static [&'static str])],
 }
 
 impl ProviderCatalogEntry {
@@ -1613,6 +1623,7 @@ impl ProviderCatalogEntry {
             orchestration_rank: None,
             demotes_to: None,
             refusal_fallback: &[],
+            refusal_routes: &[],
         }
     }
 
@@ -1870,6 +1881,28 @@ fn alias_rows_of(raw: &str) -> Vec<AliasRow> {
 /// Leak an owned alias list into the `&'static [&'static str]` the catalog
 /// entries hold. Empty in, empty (`&[]`) out — no allocation for the common
 /// row that declares no refusal fallback.
+/// A row's per-category routes as the static pairs an entry carries: the
+/// category word lowercased, each list trimmed, an empty list dropped.
+fn leak_refusal_routes(
+    routes: &BTreeMap<String, AliasList>,
+) -> &'static [(&'static str, &'static [&'static str])] {
+    if routes.is_empty() {
+        return &[];
+    }
+    Vec::leak(
+        routes
+            .iter()
+            .map(|(category, list)| {
+                (
+                    &*String::leak(category.trim().to_ascii_lowercase()),
+                    leak_alias_list(&clone_alias_list(Some(list))),
+                )
+            })
+            .filter(|(category, list)| !category.is_empty() && !list.is_empty())
+            .collect(),
+    )
+}
+
 fn leak_alias_list(aliases: &[String]) -> &'static [&'static str] {
     if aliases.is_empty() {
         return &[];
@@ -1906,6 +1939,7 @@ fn leak_registry(rows: Vec<AliasRow>) -> &'static [ProviderCatalogEntry] {
             orchestration_rank: row.orchestration_rank,
             demotes_to: row.demotes_to.map(|to| &*String::leak(to.trim().to_string())),
             refusal_fallback: leak_alias_list(&clone_alias_list(row.refusal_fallback.as_ref())),
+            refusal_routes: leak_refusal_routes(&row.refusal_routes),
         });
     }
     Vec::leak(entries)
@@ -2832,6 +2866,40 @@ pub fn refusal_fallback_candidates(model: &str) -> Vec<String> {
 #[must_use]
 pub fn refusal_fallback_model(model: &str) -> Option<String> {
     refusal_fallback_candidates(model).into_iter().next()
+}
+
+/// Where a safety-classifier refusal on `model` in `category` goes next, in
+/// preference order, resolved to current releases (t-6747).
+///
+/// A lineup that declares `refusal_routes` answers per category — the
+/// provider's own routing, which sends a `cyber` refusal on Fable 5.1 or Opus 5
+/// to Opus 4.8 (the model every one of this machine's 15 recorded switches
+/// landed on, 2026-09-10..24) and routes other categories elsewhere or nowhere.
+/// A category it routes nowhere, or a refusal that names none, answers empty:
+/// the provider's answer stands, and nothing here walks around it. A lineup
+/// that declares no routes answers [`refusal_fallback_candidates`] for every
+/// category, as before. Nothing here names a lineup.
+#[must_use]
+pub fn refusal_route_candidates(model: &str, category: Option<&str>) -> Vec<String> {
+    let lower = resolve_catalog_alias(model).trim().to_ascii_lowercase();
+    let Some(provider) = catalog_provider_of(&lower) else {
+        return Vec::new();
+    };
+    let routed = model_family(&lower)
+        .and_then(|family| family_alias_entry(provider, &family))
+        .filter(|entry| !entry.refusal_routes.is_empty());
+    let Some(entry) = routed else {
+        return refusal_fallback_candidates(model);
+    };
+    let Some(category) = category.map(|word| word.trim().to_ascii_lowercase()) else {
+        return Vec::new();
+    };
+    entry
+        .refusal_routes
+        .iter()
+        .find(|(named, _)| *named == category)
+        .map(|(_, list)| list.iter().map(|alias| resolve_catalog_alias(alias)).collect())
+        .unwrap_or_default()
 }
 
 /// Resolve model-authored spawn input to a registered Claude family target.
@@ -4641,6 +4709,66 @@ mod tests {
         assert!(refusal_fallback_candidates("gemini-3.8-flash").is_empty());
         assert!(refusal_fallback_candidates("no-such-model").is_empty());
         assert_eq!(refusal_fallback_model("gpt-6-astra"), None);
+    }
+
+    /// A refusal goes where its CATEGORY routes (t-6747): the provider's own
+    /// routing, per lineup — `cyber` on Fable and on Opus 5 to Opus 4.8, the
+    /// model every one of this machine's 15 recorded switches landed on (Opus
+    /// 5 carries the same classifiers, so the family head is no route); `bio`
+    /// on Fable to the Opus head. A category routed nowhere, or a refusal
+    /// naming none, stands; a lineup declaring no routes keeps its one list.
+    #[test]
+    fn a_refusal_goes_where_its_category_routes() {
+        use super::{
+            refusal_fallback_candidates, refusal_route_candidates, resolve_catalog_alias,
+            resolve_model_alias, ANTHROPIC_OPUS_MODEL_ALIAS,
+        };
+        super::reset_model_registry_for_tests();
+        let opus_head = resolve_model_alias(ANTHROPIC_OPUS_MODEL_ALIAS);
+        let openai = resolve_catalog_alias("openai-latest");
+        let google = resolve_catalog_alias("google-latest");
+        let route = resolve_catalog_alias("claude-opus-4-8");
+        let opus_5 = resolve_catalog_alias("claude-opus-5");
+        assert_ne!(route, opus_head, "the cyber route is not the family head");
+
+        for fable in ["fable", "claude-fable-5-1", "Claude-Fable-5-1[1m]", "claude-fable-5"] {
+            assert_eq!(
+                refusal_route_candidates(fable, Some("cyber")),
+                vec![route.clone(), openai.clone()],
+                "{fable}"
+            );
+            assert_eq!(
+                refusal_route_candidates(fable, Some("bio")),
+                vec![opus_5.clone(), openai.clone()],
+                "{fable}"
+            );
+            for stands in [Some("reasoning_extraction"), Some("general_harms"), None] {
+                assert!(refusal_route_candidates(fable, stands).is_empty(), "{fable} {stands:?}");
+            }
+        }
+        assert_eq!(
+            refusal_route_candidates("claude-opus-5", Some("CYBER ")),
+            vec![route.clone(), openai.clone(), google.clone()],
+            "the category word is read as the classifier spells it, case and space aside"
+        );
+        // Opus 5.5 sends bio and frontier_llm to Opus 5, as Claude Code does;
+        // Opus 5's own such refusal skips itself and goes across providers.
+        for opus in ["claude-opus-5-5", "claude-opus-5"] {
+            for category in ["bio", "frontier_llm"] {
+                assert_eq!(
+                    refusal_route_candidates(opus, Some(category)),
+                    vec![opus_5.clone(), openai.clone(), google.clone()],
+                    "{opus} {category}"
+                );
+            }
+            assert!(refusal_route_candidates(opus, Some("reasoning_extraction")).is_empty());
+        }
+        // No routes declared: the one list answers every category, as before.
+        assert_eq!(
+            refusal_route_candidates("claude-sonnet-5", Some("reasoning_extraction")),
+            refusal_fallback_candidates("claude-sonnet-5")
+        );
+        assert!(refusal_route_candidates("gpt-6-astra", Some("cyber")).is_empty());
     }
 
     /// The router's per-role specialty seed is catalog data too, keyed by

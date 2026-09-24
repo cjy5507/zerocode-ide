@@ -64,6 +64,7 @@ fn fake_message_start() -> StreamEvent {
             model: "claude-test".into(),
             stop_reason: None,
             stop_sequence: None,
+            stop_details: None,
             usage: Usage {
                 input_tokens: 7,
                 cache_creation_input_tokens: 0,
@@ -106,6 +107,7 @@ fn message_delta(stop_reason: &str, output_tokens: u32) -> StreamEvent {
         delta: MessageDelta {
             stop_reason: Some(stop_reason.to_string()),
             stop_sequence: None,
+            stop_details: None,
             thought_signature: None,
             reasoning_replay: None,
         },

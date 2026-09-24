@@ -127,6 +127,7 @@ pub(super) fn normalize_empty_assistant_stream(
         | AssistantEvent::ProviderState(_)
         | AssistantEvent::ReasoningReplay(_)
         | AssistantEvent::Model(_)
+        | AssistantEvent::RefusalCategory(_)
         | AssistantEvent::MessageStop => false,
     });
 
@@ -191,7 +192,8 @@ pub(super) fn build_assistant_message(events: Vec<AssistantEvent>) -> AssistantT
             }
             AssistantEvent::ReasoningReplay(value) => reasoning_replay = Some(value),
             AssistantEvent::Model(value) => model = Some(value),
-            AssistantEvent::MessageStop => {}
+            // Read before the build by the refusal ladder; no block of its own.
+            AssistantEvent::RefusalCategory(_) | AssistantEvent::MessageStop => {}
         }
     }
 

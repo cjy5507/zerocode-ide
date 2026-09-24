@@ -27,7 +27,11 @@
 
 use std::path::Path;
 
-use zerocode_core::orchestration::{QuotaWallMarker, Text, TransientErrorMarker};
+use zerocode_core::orchestration::{
+    ClassifierDeclineMarker, DeclineScreen, ModelDeviation, QuotaWallMarker, Text,
+    TransientErrorMarker,
+};
+use zerocode_shell_state::durable_file::{FileIdentity, file_identity};
 
 /// Where the words were read.
 const SCREEN: &str = "screen";
@@ -50,6 +54,10 @@ pub(crate) enum StallCause {
     /// The agent's login is gone: every prompt is answered by the CLI itself
     /// until somebody signs it in again (t-6560).
     LoginWall,
+    /// The provider's safety classifier declined the conversation's last
+    /// request and the agent's CLI stopped there rather than continue on a
+    /// fallback model (t-6747).
+    ClassifierDecline,
 }
 
 impl StallCause {
@@ -58,9 +66,11 @@ impl StallCause {
     /// A continuation ACTS on the composer, so its witness has to be the last
     /// word of the conversation: a person's line, a mail pointer, a queued
     /// message after the error is a turn somebody already started. A wall is
-    /// news, and a person typing into a wall does not lift it.
+    /// news, and a person typing into a wall does not lift it. A decline is
+    /// the first kind: a prompt after it is a new request, which the
+    /// classifier judges again.
     const fn needs_the_last_word(self) -> bool {
-        matches!(self, Self::TransientApiError)
+        matches!(self, Self::TransientApiError | Self::ClassifierDecline)
     }
 
     /// Whether the next prompt meets this cause again for certain — the walls
@@ -76,6 +86,7 @@ impl StallCause {
             Self::QuotaWall => "quota",
             Self::TransientApiError => "transient-error",
             Self::LoginWall => "login",
+            Self::ClassifierDecline => "classifier-decline",
         }
     }
 }
@@ -169,6 +180,23 @@ struct StallMarkerRule {
 ///   Nine of them came two seconds apart on 2026-09-20 12:10, each after a
 ///   mail pointer. The word, not the sentence, is the marker.
 /// - codex, zo: no row — no expired login in their records on this machine.
+///
+/// Classifier decline (t-6747, both Claude project roots and 95 Codex
+/// rollouts, 2026-09-10..24):
+/// - claude: the CLI's own sentence, "<Model>'s safeguards flagged this
+///   message", on screen and in the `isApiErrorMessage` assistant record a
+///   decline with no fallback writes (18 records, all `error:
+///   "invalid_request"` — Fable 5.1's 14 and Opus 5's 4; the `system`
+///   record beside it, `model_refusal_no_fallback`, names the category).
+///   The sentence, not the error word: `invalid_request` is also any other
+///   400. A decline the CLI answered on its fallback writes
+///   `model_refusal_fallback` and goes on — no stop, so no row here; its
+///   switch of model is read by [`fallbacks_in`]. The pause dialog (the
+///   person's `switchModelsOnFlag: false`) writes nothing until answered,
+///   and shows its choices: [`DECLINE_DIALOG_CHOICE`].
+/// - codex: no row — no decline in its records on this machine.
+/// - zo: no row — zo walks its own ladder in-process and says so on its own
+///   screen; the window reads no zo transcript.
 const STALL_MARKERS: &[StallMarkerRule] = &[
     StallMarkerRule {
         agent: "codex",
@@ -232,7 +260,49 @@ const STALL_MARKERS: &[StallMarkerRule] = &[
             says: &[],
         },
     },
+    StallMarkerRule {
+        agent: "claude",
+        cause: StallCause::ClassifierDecline,
+        screen: &[&[DECLINE_SENTENCE]],
+        transcript: TranscriptRule::ClaudeJsonl {
+            errors: &[],
+            says: &[&[DECLINE_SENTENCE]],
+        },
+    },
 ];
+
+/// Claude Code's own words for a decline, in every spelling 2.1.281 has
+/// ("<Model>'s safeguards flagged this message", "This model's safeguards
+/// flagged this message") and in all 18 records on this machine.
+const DECLINE_SENTENCE: &str = "safeguards flagged this message";
+
+/// The choice Claude Code's pause dialog offers beside its fallback —
+/// "Edit prompt and retry", alone or "… with <Model>" (2.1.281's labels, and
+/// the screen a coordinator read off w-5770 on 2026-09-21). A screen that
+/// shows it IN THE DIALOG'S OWN LAYOUT ([`dialog_stands_in`]) is a dialog
+/// waiting for a key, not a printed error; the words alone are anything a
+/// tool result or a brief quoted.
+const DECLINE_DIALOG_CHOICE: &str = "Edit prompt and retry";
+
+/// The pause dialog's header (2.1.281), the first line of its box.
+const DECLINE_DIALOG_HEADER: &str = "Session paused";
+
+/// The glyph Claude Code's menus put before the highlighted choice
+/// (`❯  1.  Switch to Opus 4.8` on w-5770's screen and on the hermetic
+/// probe's pty, t-6747 `d-dialog`).
+const DECLINE_DIALOG_CURSOR: char = '❯';
+
+/// How many lines above the retry choice the dialog's header stands, at
+/// most: measured 5 on the probe's 118-column pty (the sentence wrapped over
+/// three lines, then the detail line, then the first choice) and 3 on
+/// w-5770's screen; a narrower pane wraps the sentence further.
+const DECLINE_DIALOG_LINES: usize = 8;
+
+/// The system record a decline with no fallback writes beside its error,
+/// naming the category (`apiRefusalCategory`), and the one a decline the
+/// CLI answered on its fallback writes instead.
+const CLAUDE_NO_FALLBACK_RECORD: &str = "model_refusal_no_fallback";
+const CLAUDE_FALLBACK_RECORD: &str = "model_refusal_fallback";
 
 fn rule_for(agent: &str, cause: StallCause) -> Option<&'static StallMarkerRule> {
     STALL_MARKERS
@@ -322,6 +392,596 @@ pub(crate) fn transient_error_in(agent: &str, lines: &[String]) -> Option<Transi
     })
 }
 
+/// What a quiet pane shows and records of a safety classifier's decline
+/// (t-6747): the screen and the transcript's last record — the two
+/// witnesses `classifier_decline_witness` needs — and every switch of model
+/// its CLI recorded answering a decline on a fallback.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeclineReading {
+    pub(crate) screen: Option<DeclineScreen>,
+    pub(crate) record: Option<ClassifierDeclineMarker>,
+    /// The switches, oldest first, with no worker named yet — the sweep
+    /// knows whose pane it read.
+    pub(crate) fallbacks: Vec<ModelDeviation>,
+}
+
+/// The decline reading for `agent`, off its screen and the bounded tail of
+/// its transcript at `transcript_path` — the production road, one file read,
+/// and nothing at all for an agent the table has no row for.
+pub(crate) fn decline_reading_for(
+    agent: &str,
+    screen: Option<&str>,
+    transcript_path: Option<&Path>,
+) -> Option<DeclineReading> {
+    if !has_rule(agent, StallCause::ClassifierDecline) {
+        return None;
+    }
+    let lines = transcript_path.and_then(zerocode_core::transcript::tail_lines);
+    Some(decline_reading_in(agent, screen, lines.as_deref()))
+}
+
+/// The decline reading in what the window holds. Pure.
+pub(crate) fn decline_reading_in(
+    agent: &str,
+    screen: Option<&str>,
+    transcript_lines: Option<&[String]>,
+) -> DeclineReading {
+    let Some(rule) = rule_for(agent, StallCause::ClassifierDecline) else {
+        return DeclineReading::default();
+    };
+    let claude = matches!(rule.transcript, TranscriptRule::ClaudeJsonl { .. });
+    DeclineReading {
+        screen: screen.and_then(|screen| decline_screen(rule, screen)),
+        record: transcript_lines.and_then(|lines| decline_record(rule, lines)),
+        fallbacks: transcript_lines
+            .filter(|_| claude)
+            .map(fallbacks_in)
+            .unwrap_or_default(),
+    }
+}
+
+/// The decline sentence as the pane's screen shows it, whether it stands in
+/// the pause dialog, and the category the dialog's detail line names — the
+/// dialog's own, read within its box; a screen that is no dialog names none.
+fn decline_screen(rule: &StallMarkerRule, screen: &str) -> Option<DeclineScreen> {
+    let lines: Vec<&str> = screen.lines().map(str::trim).collect();
+    let line = lines.iter().rev().find(|line| {
+        rule.screen
+            .iter()
+            .any(|group| group.iter().all(|phrase| line.contains(phrase)))
+    })?;
+    let dialog = dialog_stands_in(&lines);
+    Some(DeclineScreen {
+        line: clipped(line),
+        dialog: dialog.is_some(),
+        category: dialog.and_then(|(header, choice)| {
+            lines[header..choice]
+                .iter()
+                .find_map(|line| details_category(line))
+        }),
+    })
+}
+
+/// Where Claude Code's pause dialog stands on the screen, when it does
+/// (t-7153, P1-3): the line range from its header to its retry choice.
+///
+/// The dialog is a LAYOUT, not a phrase — its header, then the sentence and
+/// the detail line, then a numbered choice under the menu cursor, then the
+/// retry choice, numbered, within [`DECLINE_DIALOG_LINES`] of the header
+/// (both real dialogs read here: w-5770's screen, the probe's pty). A tool
+/// result or a brief that quotes the words shows them indented under the
+/// tool's own mark, with no menu cursor on a numbered line, under the turn's
+/// own spinner. A quote that reproduced the whole layout, cursor and all,
+/// would still read as a dialog: which is why a dialog is diagnostic news
+/// and ends no worker (`decline_source_may_stop`).
+fn dialog_stands_in(lines: &[&str]) -> Option<(usize, usize)> {
+    let numbered = |line: &str| {
+        let mut rest = line.trim_start_matches(DECLINE_DIALOG_CURSOR).trim_start();
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        if digits == 0 {
+            return false;
+        }
+        rest = &rest[digits..];
+        rest.starts_with('.')
+    };
+    let choice = lines
+        .iter()
+        .rposition(|line| numbered(line) && line.contains(DECLINE_DIALOG_CHOICE))?;
+    let box_top = choice.saturating_sub(DECLINE_DIALOG_LINES);
+    let header = lines[box_top..choice]
+        .iter()
+        .rposition(|line| line.contains(DECLINE_DIALOG_HEADER))
+        .map(|at| box_top + at)?;
+    lines[header..=choice]
+        .iter()
+        .any(|line| line.starts_with(DECLINE_DIALOG_CURSOR) && numbered(line))
+        .then_some((header, choice))
+}
+
+/// The category in Claude Code's own detail line — "Details: `[cyber]`"
+/// (2.1.281 prints the category word between the brackets). A word that is
+/// not one is no category.
+fn details_category(line: &str) -> Option<String> {
+    let after = line.split("Details:").nth(1)?;
+    let start = after.find('[')? + 1;
+    let end = after[start..].find(']')? + start;
+    let word = after[start..end].trim();
+    (!word.is_empty()
+        && word
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_'))
+    .then(|| word.to_string())
+}
+
+/// The conversation's last record, when it is a decline its CLI stopped at:
+/// the error record the table's row names, as the last word, and the
+/// category off the system record the CLI wrote beside it — THIS error's
+/// own record, never an earlier request's (t-7153, P1-4).
+fn decline_record(rule: &StallMarkerRule, lines: &[String]) -> Option<ClassifierDeclineMarker> {
+    let found = read_transcript(rule, lines)?;
+    let key = found.key?;
+    Some(ClassifierDeclineMarker {
+        source: found.source.to_string(),
+        line: found.line,
+        category: declines_own_category(lines, found.request.as_deref(), found.parent.as_deref()),
+        key,
+    })
+}
+
+/// The category the CLI wrote beside THIS decline: the
+/// `model_refusal_no_fallback` system record the error record's two ids
+/// both name — the same request (`requestId`) and the record the error
+/// names as its parent (`parentUuid`, the system record's `uuid`); 2.1.281
+/// writes both, the system record first and the error record after it.
+/// The first record either id names decides, category or none: a decline
+/// whose own record names no category HAS none, and an earlier request's
+/// word is never borrowed for it (before this, a `null` category read the
+/// tail on and took the previous decline's `cyber`). A record one id names
+/// and the other DISPUTES — the request's record, whose uuid is not the
+/// parent the error names, or the parent record, answering another request
+/// — is a contradiction the table does not guess its way out of: no
+/// category (t-7153, R1; before this either id alone was taken). An id a
+/// record does not carry disputes nothing (a CLI older than the field), and
+/// an empty id is no key at all. No record of its own, no category.
+fn declines_own_category(
+    lines: &[String],
+    request: Option<&str>,
+    parent: Option<&str>,
+) -> Option<String> {
+    /// An id as a join key: trimmed, and none when empty.
+    fn key(id: Option<&str>) -> Option<&str> {
+        id.map(str::trim).filter(|id| !id.is_empty())
+    }
+    /// Whether a record's id agrees with ours: none when either side is
+    /// silent, which neither agrees nor disputes.
+    fn agrees(ours: Option<&str>, theirs: Option<&str>) -> Option<bool> {
+        Some(ours? == key(theirs)?)
+    }
+    let (request, parent) = (key(request), key(parent));
+    if request.is_none() && parent.is_none() {
+        return None;
+    }
+    lines
+        .iter()
+        .rev()
+        .find_map(|line| {
+            if !line.contains(CLAUDE_NO_FALLBACK_RECORD) {
+                return None;
+            }
+            let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+            if value["type"] != "system" || value["subtype"] != CLAUDE_NO_FALLBACK_RECORD {
+                return None;
+            }
+            let joins = [
+                agrees(request, value["requestId"].as_str()),
+                agrees(parent, value["uuid"].as_str()),
+            ];
+            if !joins.contains(&Some(true)) {
+                // Another request's record: read on.
+                return None;
+            }
+            let disputed = joins.contains(&Some(false));
+            Some((!disputed).then(|| value["apiRefusalCategory"].as_str().map(str::to_string)))
+        })
+        .flatten()
+        .flatten()
+}
+
+/// Whether the table reads switches of model in `agent`'s records — a
+/// decline its CLI answered on a fallback. Claude's transcripts only.
+pub(crate) fn reads_fallbacks(agent: &str) -> bool {
+    rule_for(agent, StallCause::ClassifierDecline)
+        .is_some_and(|rule| matches!(rule.transcript, TranscriptRule::ClaudeJsonl { .. }))
+}
+
+/// One reading of a worker transcript's switch scan (t-7153, P2): the
+/// switches found past the cursor it was given, and where the cursor would
+/// stand once the ledger HOLDS them. Nothing here moves a cursor: the caller
+/// commits `next` after the rows are durable and not before
+/// (`orchestration::note_model_deviations`), so a row the actor refused —
+/// recovering, its store full — is read again next beat, and written once.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct DeviationScan {
+    pub(crate) switches: Vec<ModelDeviation>,
+    pub(crate) next: ScanCursor,
+}
+
+/// Where a switch scan stands: `offset` bytes into the file that was at its
+/// path when it last read — THAT file, by its identity, not whatever stands
+/// at the path now (t-7153, R3) — and a fingerprint of what those bytes
+/// were, so a file rewritten in place under the same identity is read
+/// again from its start. A cursor that knows no file yet reads from the
+/// start of the one it finds.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ScanCursor {
+    pub(crate) file: Option<TranscriptIdentity>,
+    pub(crate) offset: u64,
+    /// What the `offset` counted, as the scan read it.
+    pub(crate) counted: Counted,
+}
+
+/// A fingerprint of the bytes a cursor counted past (t-7153, R3): of each
+/// window of them — the scan's own reading window,
+/// [`zerocode_core::transcript::MAX_TAIL_BYTES`], counted from the file's
+/// start — and of the last few before the cursor. On a file the platform
+/// names ([`FileIdentity`]) every reading checks the last few, and one
+/// window more, in rounds ([`Round`]): a file truncated and rewritten under
+/// its own inode, its first line kept, no longer holds them — found at once
+/// when the rewrite reached the bytes just before the cursor, and within
+/// `2N − 1` readings for the `N` windows the cursor counted when it changed
+/// only a record further back, however fast the file grows (46 windows for
+/// the 11.8 MB transcript a worker wrote here: 91 readings at most), where
+/// before the last few alone were read and such a rewrite stood as the
+/// file it replaced for good. On a file the platform cannot name nothing is
+/// taken on faith, and every window is read again and compared before the
+/// cursor is trusted. A bare fingerprint counted nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Counted {
+    /// Each whole window the cursor counted, oldest first.
+    windows: Vec<u64>,
+    /// The bytes it counted past the last whole window.
+    rest: u64,
+    /// The last [`TRANSCRIPT_FINGERPRINT_BYTES`] before the cursor.
+    anchor: u64,
+    /// Which window the next reading checks again.
+    round: Round,
+}
+
+impl Default for Counted {
+    fn default() -> Self {
+        Self {
+            windows: Vec::new(),
+            rest: FNV_EMPTY,
+            anchor: FNV_EMPTY,
+            round: Round::default(),
+        }
+    }
+}
+
+/// A round of the checks a cursor's readings make of what it counted
+/// (t-7153 r4, R3a): its end fixed as it begins — the windows the cursor
+/// had counted then — and walked a window a reading; a window counted since
+/// waits for the next round. It is the cursor's own, and begins again with
+/// the cursor's count when the cursor does. So a window `i` of the `N` a
+/// cursor has counted is checked within `2N − 1` readings however fast the
+/// file grows: what is left of the round under way, its end no more than
+/// `N`, then `i + 1` readings of the next. Before this the window a reading
+/// checked was its caller's count of readings over the windows counted NOW,
+/// and a file growing a window a reading moved both by one: the same window
+/// was named on every reading for as long as the file grew, and the others
+/// never again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Round {
+    /// The window the next reading checks.
+    next: u64,
+    /// How many windows the cursor had counted when the round began.
+    end: u64,
+}
+
+impl Round {
+    /// The window a reading checks, of the `windows` the cursor counts now,
+    /// and the round after it: a round walked to its end — or one that
+    /// names a window the cursor does not count — begins again, its end
+    /// fixed at `windows`. Nothing to check before a window is counted.
+    const fn step(self, windows: u64) -> (Option<u64>, Self) {
+        let round = if self.next < self.end && self.end <= windows {
+            self
+        } else {
+            Self {
+                next: 0,
+                end: windows,
+            }
+        };
+        if round.end == 0 {
+            return (None, round);
+        }
+        (
+            Some(round.next),
+            Self {
+                next: round.next + 1,
+                end: round.end,
+            },
+        )
+    }
+}
+
+impl Counted {
+    /// This fingerprint carried over `bytes` — the file's bytes just before
+    /// `to`, which the cursor just counted — with the anchor read afresh at
+    /// `to`, the cursor's new stand.
+    fn past(&self, bytes: &[u8], file: &mut std::fs::File, to: u64) -> Option<Self> {
+        let window = zerocode_core::transcript::MAX_TAIL_BYTES;
+        let mut counted = self.clone();
+        let mut at = to.checked_sub(bytes.len() as u64)?;
+        let mut left = bytes;
+        while !left.is_empty() {
+            let room = usize::try_from(window - at % window)
+                .map_or(left.len(), |room| room.min(left.len()));
+            let (piece, after) = left.split_at(room);
+            counted.rest = fnv1a(counted.rest, piece);
+            at += piece.len() as u64;
+            if at.is_multiple_of(window) {
+                counted
+                    .windows
+                    .push(std::mem::replace(&mut counted.rest, FNV_EMPTY));
+            }
+            left = after;
+        }
+        counted.anchor = fnv1a(FNV_EMPTY, &bytes_before(file, to)?);
+        Some(counted)
+    }
+
+    /// Whether what this fingerprint counted still stands before `offset`
+    /// in `file`: the last few bytes and the window its round names
+    /// ([`Round`]), the round walked on by one, when the file is `named` by
+    /// its platform; every window when it is not.
+    fn still_stands(&mut self, file: &mut std::fs::File, offset: u64, named: bool) -> bool {
+        let window = zerocode_core::transcript::MAX_TAIL_BYTES;
+        let windows = offset.div_ceil(window);
+        let holds = |index: u64| {
+            let start = index * window;
+            let counted = usize::try_from(index)
+                .ok()
+                .and_then(|index| self.windows.get(index))
+                .copied()
+                .unwrap_or(self.rest);
+            bytes_at(file, start, window.min(offset - start))
+                .is_some_and(|bytes| fnv1a(FNV_EMPTY, &bytes) == counted)
+        };
+        if !named {
+            return (0..windows).all(holds);
+        }
+        let (check, round) = self.round.step(windows);
+        self.round = round;
+        check.is_none_or(holds)
+            && bytes_before(file, offset).is_some_and(|tail| fnv1a(FNV_EMPTY, &tail) == self.anchor)
+    }
+}
+
+/// `len` bytes of `file` from `start`, or nothing when they cannot be read.
+/// The file's position is not kept.
+fn bytes_at(file: &mut std::fs::File, start: u64, len: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = vec![0u8; usize::try_from(len).ok()?];
+    file.read_exact(&mut bytes).ok()?;
+    Some(bytes)
+}
+
+/// The last [`TRANSCRIPT_FINGERPRINT_BYTES`] before `offset` in `file` —
+/// fewer when the file is shorter than that — or nothing when they cannot
+/// be read.
+fn bytes_before(file: &mut std::fs::File, offset: u64) -> Option<Vec<u8>> {
+    let len = offset.min(TRANSCRIPT_FINGERPRINT_BYTES as u64);
+    bytes_at(file, offset - len, len)
+}
+
+/// FNV-1a, 64-bit, carried on from `seed`: a fingerprint that resumes where
+/// it stopped, so what a cursor counted over many beats is one number a
+/// window. The empty fingerprint is [`FNV_EMPTY`].
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(seed, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// FNV-1a's offset basis: the fingerprint of nothing.
+const FNV_EMPTY: u64 = 0xcbf2_9ce4_8422_2325;
+
+impl ScanCursor {
+    /// The cursor standing at `offset` in `file`, having counted `counted`.
+    const fn at(file: TranscriptIdentity, offset: u64, counted: Counted) -> Self {
+        Self {
+            file: Some(file),
+            offset,
+            counted,
+        }
+    }
+}
+
+/// Which file a cursor's offset counts into (t-7153, R3): the file's own
+/// name on its platform ([`FileIdentity`]) where the platform gives one,
+/// when it was born where the file system says, and its first line's
+/// opening bytes — a Claude transcript opens on a record with the session's
+/// own uuid and timestamp. A file atomically replaced under the same path —
+/// a session id reused, a conversation rewritten, its first line kept — is
+/// another file by its name alone, read from its start whether it is
+/// shorter, as long as, or longer than the one before: before this the
+/// identity was the first line and a birth time, and a replacement that kept
+/// the first line, on a file system that gives no birth, read as unchanged.
+/// A file appended to keeps every part of its identity, so a cursor into it
+/// stands — once what the cursor counted is found still there
+/// ([`Counted`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TranscriptIdentity {
+    id: Option<FileIdentity>,
+    born: Option<std::time::SystemTime>,
+    opening: Vec<u8>,
+}
+
+/// What the platform says of an open file: its name, and when it was born
+/// — either nothing where the platform gives none. The scanner takes this
+/// as a parameter so a test can stand where a platform gives neither.
+pub(crate) type FileEvidence =
+    fn(&std::fs::File, &std::fs::Metadata) -> (Option<FileIdentity>, Option<std::time::SystemTime>);
+
+/// This platform's evidence: the file's name and its birth.
+fn platform_evidence(
+    file: &std::fs::File,
+    meta: &std::fs::Metadata,
+) -> (Option<FileIdentity>, Option<std::time::SystemTime>) {
+    (file_identity(file, meta).ok(), meta.created().ok())
+}
+
+/// How much of the first line names a transcript, and how many bytes before
+/// the cursor its fingerprint anchors on: a Claude record's `uuid` and
+/// `timestamp` ride in its first few hundred bytes, and a
+/// `file-history-snapshot` opens on its `messageId`.
+const TRANSCRIPT_FINGERPRINT_BYTES: usize = 4 * 1024;
+
+impl TranscriptIdentity {
+    /// The identity of the open `file`, whose metadata is `meta`, as
+    /// `evidence` names it: its platform name and birth, and its first
+    /// line's opening bytes (fewer than a line, when the line is still
+    /// being written — a file that has no whole first line yet is an empty
+    /// one, read from its start on every beat until it has).
+    fn of(
+        file: &mut std::fs::File,
+        meta: &std::fs::Metadata,
+        evidence: FileEvidence,
+    ) -> Option<Self> {
+        use std::io::{Read, Seek, SeekFrom};
+        file.seek(SeekFrom::Start(0)).ok()?;
+        let mut opening = Vec::with_capacity(TRANSCRIPT_FINGERPRINT_BYTES.min(meta.len() as usize));
+        file.take(TRANSCRIPT_FINGERPRINT_BYTES as u64)
+            .read_to_end(&mut opening)
+            .ok()?;
+        if let Some(end) = opening.iter().position(|byte| *byte == b'\n') {
+            opening.truncate(end);
+        }
+        let (id, born) = evidence(file, meta);
+        Some(Self { id, born, opening })
+    }
+}
+
+/// The switches of model recorded in the transcript at `path` past
+/// `cursor` — whole lines only, and at most
+/// [`zerocode_core::transcript::MAX_TAIL_BYTES`] of them a reading, so an
+/// 11.8 MB transcript is read in beats rather than on one (before this the
+/// first reading took the whole file into memory at once). A switch early
+/// in a long turn is still read however far the file has grown since, where
+/// a tail would have scrolled past it (a worker transcript here ran p50
+/// 3.8 MB and up to 11.8 MB over fourteen days, against a 256 KiB tail). A
+/// line still being written waits for the next reading; a line longer than
+/// the window is a tool result — a switch record is about 700 bytes
+/// ([`tests::CLAUDE_FALLBACK`]) — and is stepped over; a file that is not
+/// the cursor's ([`TranscriptIdentity`]), that shrank, or that no longer
+/// holds what the cursor counted ([`Counted`]) is read again from its
+/// start — each reading checks one window of what the cursor counted
+/// again, in the rounds the cursor carries ([`Round`]). An unchanged file
+/// costs one `stat`, one read of its opening bytes, one of the bytes before
+/// the cursor and one of a window it counted.
+pub(crate) fn scan_fallbacks(path: &Path, cursor: &ScanCursor) -> DeviationScan {
+    scan_fallbacks_as(path, cursor, platform_evidence)
+}
+
+/// [`scan_fallbacks`] with the file's platform evidence read by `evidence`
+/// — the production road passes this platform's.
+pub(crate) fn scan_fallbacks_as(
+    path: &Path,
+    cursor: &ScanCursor,
+    evidence: FileEvidence,
+) -> DeviationScan {
+    use std::io::{Read, Seek, SeekFrom};
+    let standing = |next: ScanCursor| DeviationScan {
+        switches: Vec::new(),
+        next,
+    };
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return standing(cursor.clone());
+    };
+    let Ok(meta) = file.metadata() else {
+        return standing(cursor.clone());
+    };
+    let size = meta.len();
+    let Some(identity) = TranscriptIdentity::of(&mut file, &meta, evidence) else {
+        return standing(cursor.clone());
+    };
+    let mut counted = cursor.counted.clone();
+    let stands = cursor.file.as_ref() == Some(&identity)
+        && size >= cursor.offset
+        && counted.still_stands(&mut file, cursor.offset, identity.id.is_some());
+    let (offset, counted) = if stands {
+        (cursor.offset, counted)
+    } else {
+        (0, Counted::default())
+    };
+    let at = |offset: u64, counted: Counted| ScanCursor::at(identity.clone(), offset, counted);
+    if size == offset || file.seek(SeekFrom::Start(offset)).is_err() {
+        return standing(at(offset, counted));
+    }
+    let window = zerocode_core::transcript::MAX_TAIL_BYTES.min(size - offset);
+    let mut fresh = Vec::new();
+    if file.by_ref().take(window).read_to_end(&mut fresh).is_err() {
+        return standing(at(offset, counted));
+    }
+    let Some(end) = fresh.iter().rposition(|byte| *byte == b'\n') else {
+        // No whole line in the window: a full window is a line longer than
+        // it, stepped over; anything shorter is a line still being written.
+        let longer_than_the_window =
+            fresh.len() as u64 == window && window == zerocode_core::transcript::MAX_TAIL_BYTES;
+        if !longer_than_the_window {
+            return standing(at(offset, counted));
+        }
+        let past = offset + window;
+        return standing(match counted.past(&fresh, &mut file, past) {
+            Some(counted) => at(past, counted),
+            None => at(offset, counted),
+        });
+    };
+    let past = offset + end as u64 + 1;
+    let Some(counted) = counted.past(&fresh[..=end], &mut file, past) else {
+        return standing(at(offset, counted));
+    };
+    let lines: Vec<String> = String::from_utf8_lossy(&fresh[..end])
+        .lines()
+        .filter(|line| line.contains(CLAUDE_FALLBACK_RECORD))
+        .map(str::to_string)
+        .collect();
+    DeviationScan {
+        switches: fallbacks_in(&lines),
+        next: at(past, counted),
+    }
+}
+
+/// Every switch of model a Claude transcript tail records — a decline its
+/// CLI answered on the category's route (`model_refusal_fallback`: 15 on
+/// this machine, 2026-09-10..24, every one to `claude-opus-4-8`) — oldest
+/// first, decided on parsed fields, never on the bytes a tool result quoted.
+pub(crate) fn fallbacks_in(lines: &[String]) -> Vec<ModelDeviation> {
+    lines
+        .iter()
+        .filter(|line| line.contains(CLAUDE_FALLBACK_RECORD))
+        .filter_map(|line| {
+            let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+            if value["type"] != "system" || value["subtype"] != CLAUDE_FALLBACK_RECORD {
+                return None;
+            }
+            Some(ModelDeviation {
+                worker: String::new(),
+                dispatch: String::new(),
+                source: String::new(),
+                key: value["uuid"].as_str()?.to_string(),
+                from: value["originalModel"].as_str()?.to_string(),
+                to: value["fallbackModel"].as_str()?.to_string(),
+                category: value["apiRefusalCategory"].as_str().map(str::to_string),
+                scope: value["scope"].as_str().map(str::to_string),
+                at_ms: written_at(&value),
+            })
+        })
+        .collect()
+}
+
 /// A wall the pane's own conversation last ended at, as the mail pointer
 /// reads it (t-6560): which wall, the agent's words, and until when it
 /// stands.
@@ -396,6 +1056,12 @@ struct Found {
     key: Option<String>,
     at_ms: Option<i64>,
     resets_at_ms: Option<i64>,
+    /// The request the record answers (`requestId`) and the record it
+    /// follows (`parentUuid`), in a Claude transcript — what binds a
+    /// decline's category record to its error record (t-7153). A rollout
+    /// carries neither.
+    request: Option<String>,
+    parent: Option<String>,
 }
 
 /// When a record was written, off its own `timestamp` field — the same field
@@ -476,6 +1142,8 @@ fn codex_rollout_marker(lines: &[String], errors: &[CodexError]) -> Option<Found
             // The reset is in the sentence ("try again at Sep 7th, 2026
             // 11:27 AM"), in words nobody here has measured a parser for.
             resets_at_ms: None,
+            request: None,
+            parent: None,
         });
     }
     None
@@ -565,6 +1233,14 @@ fn claude_transcript_marker(
                 .and_then(|limits| limits.get("resetsAt"))
                 .and_then(serde_json::Value::as_i64)
                 .map(|seconds| seconds.saturating_mul(1000)),
+            request: value
+                .get("requestId")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
+            parent: value
+                .get("parentUuid")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
         });
     }
     None
@@ -621,18 +1297,29 @@ pub(crate) fn clock_hhmm(at_ms: i64, local_offset_secs: i64) -> String {
     format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
-/// The WIP commit's message: who stopped, at which wall, and when it lifts.
+/// The WIP commit's message: who stopped, and why — at which wall and when
+/// it lifts, or at which category of decline (t-6747).
 pub(crate) fn wip_message(
     worker: &str,
-    provider: &str,
-    resets_at_ms: Option<i64>,
+    cause: &zerocode_core::orchestration::HandoverCause,
     local_offset_secs: i64,
 ) -> String {
-    let resets = resets_at_ms.map_or_else(
-        || "unknown".to_string(),
-        |at| clock_hhmm(at, local_offset_secs),
-    );
-    format!("wip(handover): {worker} stopped at {provider} wall, resets {resets}")
+    match cause {
+        zerocode_core::orchestration::HandoverCause::QuotaWall {
+            provider,
+            resets_at_ms,
+            ..
+        } => {
+            let resets = resets_at_ms.map_or_else(
+                || "unknown".to_string(),
+                |at| clock_hhmm(at, local_offset_secs),
+            );
+            format!("wip(handover): {worker} stopped at {provider} wall, resets {resets}")
+        }
+        zerocode_core::orchestration::HandoverCause::ClassifierDecline { category, .. } => {
+            format!("wip(handover): {worker} stopped at a {category} classifier decline")
+        }
+    }
 }
 
 #[cfg(test)]
@@ -676,7 +1363,7 @@ pub(crate) mod tests {
 ",
         )
         .expect("write");
-        let message = wip_message("w-3", "codex", Some(1_788_478_149_000), 9 * 3600);
+        let message = wip_message("w-3", &wall("codex", Some(1_788_478_149_000)), 9 * 3600);
         let sha = wip_commit(&repo, &message)
             .expect("committed")
             .expect("a sha");
@@ -697,13 +1384,36 @@ pub(crate) mod tests {
         assert_eq!(clock_hhmm(1_788_478_149_000, 9 * 3600), "08:29");
         assert_eq!(clock_hhmm(1_788_478_149_000, 0), "23:29");
         assert_eq!(
-            wip_message("w-3", "codex", Some(1_788_478_149_000), 9 * 3600),
+            wip_message("w-3", &wall("codex", Some(1_788_478_149_000)), 9 * 3600),
             "wip(handover): w-3 stopped at codex wall, resets 08:29"
         );
         assert_eq!(
-            wip_message("w-3", "claude", None, 0),
+            wip_message("w-3", &wall("claude", None), 0),
             "wip(handover): w-3 stopped at claude wall, resets unknown"
         );
+        // A decline names its category (t-6747).
+        assert_eq!(
+            wip_message(
+                "w-5",
+                &zerocode_core::orchestration::HandoverCause::ClassifierDecline {
+                    category: "cyber".to_string(),
+                    record_key: "declined".to_string(),
+                },
+                0,
+            ),
+            "wip(handover): w-5 stopped at a cyber classifier decline"
+        );
+    }
+
+    fn wall(
+        provider: &str,
+        resets_at_ms: Option<i64>,
+    ) -> zerocode_core::orchestration::HandoverCause {
+        zerocode_core::orchestration::HandoverCause::QuotaWall {
+            provider: provider.to_string(),
+            used_percent: 98,
+            resets_at_ms,
+        }
     }
 
     fn lines(held: &[&str]) -> Vec<String> {
@@ -1320,5 +2030,1234 @@ pub(crate) mod tests {
         let all: usize = bursts.iter().map(|burst| burst.typed).sum();
         let kept: usize = bursts.iter().map(|burst| burst.kept_typed).sum();
         println!("MEASURE every typed pointer={all} kept by the hold's rule={kept}");
+    }
+
+    /* ---- the classifier decline (t-6747) ------------------------------ */
+
+    /// A decline with no fallback as the real file carries it (the
+    /// coordinator transcript, 2026-09-24 04:29:48, 2.1.281, ids scrubbed):
+    /// the partial the declined request streamed, the CLI's category record,
+    /// its error record, and the turn's end — in that order in the file.
+    const CLAUDE_DECLINED_PARTIAL: &str = r#"{"parentUuid":"a","isSidechain":false,"type":"assistant","uuid":"part","timestamp":"2026-09-24T04:29:48.706Z","message":{"id":"m","model":"claude-fable-5-1","role":"assistant","type":"message","content":[{"type":"thinking","thinking":""}]},"requestId":"req_d"}"#;
+    const CLAUDE_NO_FALLBACK: &str = r#"{"parentUuid":"part","isSidechain":false,"type":"system","subtype":"model_refusal_no_fallback","content":"","level":"warning","originalModel":"claude-fable-5-1","requestId":"req_d","apiRefusalCategory":"cyber","apiRefusalExplanation":"This request triggered restrictions on violative cyber content and was blocked under Anthropic's Usage Policy.","refusedUserMessageUuid":"q","isMeta":false,"uuid":"sys","timestamp":"2026-09-24T04:29:48.712Z","version":"2.1.281"}"#;
+    const CLAUDE_DECLINE_ERROR: &str = r#"{"parentUuid":"sys","isSidechain":false,"type":"assistant","uuid":"declined","timestamp":"2026-09-24T04:29:48.711Z","message":{"id":"e","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup). Our intentionally broad safeguards allow us to deliver more capabilities faster, but can sometimes flag legitimate coding and cybersecurity tasks."}]},"requestId":"req_d","error":"invalid_request","isApiErrorMessage":true}"#;
+    const CLAUDE_TURN_END: &str = r#"{"parentUuid":"declined","isSidechain":false,"type":"system","subtype":"turn_duration","durationMs":2400,"uuid":"end","timestamp":"2026-09-24T04:29:48.735Z"}"#;
+    const CLAUDE_PERSON_TYPED: &str = r#"{"parentUuid":"end","isSidechain":false,"type":"user","uuid":"typed","timestamp":"2026-09-24T04:30:08.774Z","message":{"role":"user","content":"continue"}}"#;
+    const CLAUDE_TOOL_QUOTING_THE_DECLINE: &str = r#"{"parentUuid":"x","isSidechain":false,"type":"user","uuid":"quote","timestamp":"2026-09-24T05:00:00.000Z","message":{"role":"user","content":[{"type":"tool_result","content":"grep: API Error: Fable 5.1's safeguards flagged this message"}]}}"#;
+    /// A decline the CLI answered on its fallback, as w-5797's transcript
+    /// carries it (2026-09-21 14:06:16, 2.1.278, ids scrubbed).
+    pub(crate) const CLAUDE_FALLBACK: &str = r#"{"parentUuid":"b","isSidechain":false,"type":"system","subtype":"model_refusal_fallback","content":"Fable 5.1's safeguards flagged this message. Switched to Opus 4.8.\n\nDetails: `[cyber]`","level":"warning","trigger":"refusal","direction":"retry","scope":"session","originalModel":"claude-fable-5-1","fallbackModel":"claude-opus-4-8","requestId":"req_f","apiRefusalCategory":"cyber","retractedMessageUuids":["r"],"refusedUserMessageUuid":"q","isMeta":false,"uuid":"switch-1","timestamp":"2026-09-21T14:06:16.566Z","version":"2.1.278"}"#;
+    /// Claude Code's pause dialog as a coordinator read it off w-5770 on
+    /// 2026-09-21, in 2.1.281's own labels.
+    const CLAUDE_DIALOG_SCREEN: &str = "\
+ Session paused
+ Fable 5.1's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more capabilities faster.
+   Details: `[cyber]`
+ ❯ 1. Switch to Opus 4.8
+   2. Edit prompt and retry
+";
+    const CLAUDE_PRINTED_DECLINE_SCREEN: &str = "\
+⎿  API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup).
+   Double press esc to edit your last message, or try a different model with /model.
+❯ ";
+
+    /// The decline its CLI stopped at is the conversation's last record,
+    /// keyed by that record, with the category off the record beside it;
+    /// its screen shows the sentence, and a dialog shows its choices.
+    #[test]
+    fn a_decline_the_cli_stopped_at_is_read_with_its_category_and_its_screen() {
+        let transcript = lines(&[
+            CLAUDE_PLAIN_RECORD,
+            CLAUDE_DECLINED_PARTIAL,
+            CLAUDE_NO_FALLBACK,
+            CLAUDE_DECLINE_ERROR,
+            CLAUDE_TURN_END,
+        ]);
+        let reading = decline_reading_in(
+            "claude",
+            Some(CLAUDE_PRINTED_DECLINE_SCREEN),
+            Some(&transcript),
+        );
+        let record = reading.record.expect("the decline record");
+        assert_eq!(record.source, TRANSCRIPT);
+        assert_eq!(record.key, "declined");
+        assert_eq!(record.category.as_deref(), Some("cyber"));
+        assert!(
+            record
+                .line
+                .as_str()
+                .contains("safeguards flagged this message")
+        );
+        let screen = reading.screen.expect("the screen's sentence");
+        assert!(!screen.dialog, "a printed error is no dialog");
+        assert!(
+            screen
+                .line
+                .as_str()
+                .contains("safeguards flagged this message")
+        );
+        let dialog = decline_reading_in("claude", Some(CLAUDE_DIALOG_SCREEN), None)
+            .screen
+            .expect("the dialog's sentence");
+        assert!(dialog.dialog);
+        assert_eq!(dialog.category.as_deref(), Some("cyber"));
+        // Nobody measured another agent's decline: it reads nothing.
+        assert_eq!(
+            decline_reading_in("codex", Some(CLAUDE_DIALOG_SCREEN), Some(&transcript)),
+            DeclineReading::default()
+        );
+    }
+
+    /// A decline somebody answered, one a tool result quotes, and one the
+    /// CLI answered on its fallback are not a decline it stopped at.
+    #[test]
+    fn a_decline_answered_quoted_or_fallen_back_from_is_no_record() {
+        let answered = lines(&[
+            CLAUDE_NO_FALLBACK,
+            CLAUDE_DECLINE_ERROR,
+            CLAUDE_TURN_END,
+            CLAUDE_PERSON_TYPED,
+        ]);
+        assert_eq!(
+            decline_reading_in("claude", None, Some(&answered)).record,
+            None
+        );
+        let quoted = lines(&[CLAUDE_TOOL_QUOTING_THE_DECLINE, CLAUDE_PLAIN_RECORD]);
+        assert_eq!(
+            decline_reading_in("claude", None, Some(&quoted)).record,
+            None
+        );
+        let fell_back = lines(&[CLAUDE_FALLBACK, CLAUDE_PLAIN_RECORD]);
+        let reading = decline_reading_in("claude", None, Some(&fell_back));
+        assert_eq!(reading.record, None);
+        // …but its switch of model is read, for the binding it left.
+        assert_eq!(
+            reading.fallbacks,
+            vec![ModelDeviation {
+                worker: String::new(),
+                dispatch: String::new(),
+                source: String::new(),
+                key: "switch-1".to_string(),
+                from: "claude-fable-5-1".to_string(),
+                to: "claude-opus-4-8".to_string(),
+                category: Some("cyber".to_string()),
+                scope: Some("session".to_string()),
+                at_ms: zerocode_core::civil::epoch_ms_of_iso("2026-09-21T14:06:16.566Z"),
+            }]
+        );
+    }
+
+    /// What 2.1.281 writes after a turn's last record (a print-mode run of
+    /// the hermetic `--settings` probe, t-6747, ids scrubbed): bookkeeping,
+    /// not conversation.
+    const CLAUDE_BOOKKEEPING: [&str; 3] = [
+        r#"{"type":"last-prompt","lastPrompt":"probe","leafUuid":"declined","sessionId":"s"}"#,
+        r#"{"type":"atis-latch","atis":"","sessionId":"s"}"#,
+        r#"{"type":"cost-state","sessionId":"s","totalCostUSD":0.00015,"totalAPIDuration":13,"modelUsage":{"claude-fable-5-1":{"inputTokens":10,"outputTokens":1}}}"#,
+    ];
+
+    /// The bookkeeping the CLI writes after a turn is no input: the decline
+    /// before it is still the conversation's last word.
+    #[test]
+    fn a_decline_is_read_past_the_bookkeeping_its_cli_writes_after_it() {
+        let mut held = vec![CLAUDE_NO_FALLBACK, CLAUDE_DECLINE_ERROR];
+        held.extend(CLAUDE_BOOKKEEPING);
+        let record = decline_reading_in("claude", None, Some(&lines(&held)))
+            .record
+            .expect("the decline is still the last word");
+        assert_eq!(record.key, "declined");
+        assert_eq!(record.category.as_deref(), Some("cyber"));
+    }
+
+    /// The switch scan reads on from the cursor it is given and moves
+    /// nothing itself (t-7153, P2): whole lines only, an unchanged file
+    /// nothing, a rewritten file from its start — and the same cursor read
+    /// twice answers the same switches twice, which is what lets a row the
+    /// ledger refused be read again.
+    #[test]
+    fn the_switch_scan_reads_on_from_the_cursor_it_is_given_and_moves_nothing() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let mut file = std::fs::File::create(&path).expect("a transcript");
+        writeln!(file, "{CLAUDE_PLAIN_RECORD}").expect("write");
+        writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
+        let first = scan_fallbacks(&path, &ScanCursor::default());
+        assert_eq!(first.switches.len(), 1);
+        assert_eq!(first.switches[0].key, "switch-1");
+        assert_eq!(
+            first.next.offset,
+            std::fs::metadata(&path).expect("size").len(),
+            "the cursor stands after the last whole line"
+        );
+        assert!(first.next.file.is_some(), "the cursor knows its file");
+        assert_eq!(
+            scan_fallbacks(&path, &ScanCursor::default()),
+            first,
+            "the same cursor reads the same"
+        );
+        let again = scan_fallbacks(&path, &first.next);
+        assert!(again.switches.is_empty(), "read past the cursor twice");
+        assert_eq!(placed(&again.next), placed(&first.next));
+        // A line still being written waits for its newline, cursor unmoved.
+        let second = CLAUDE_FALLBACK.replace("switch-1", "switch-2");
+        let (head, rest) = second.split_at(40);
+        write!(file, "{head}").expect("write");
+        file.flush().expect("flush");
+        let waiting = scan_fallbacks(&path, &first.next);
+        assert!(waiting.switches.is_empty());
+        assert_eq!(placed(&waiting.next), placed(&first.next));
+        writeln!(file, "{rest}").expect("write");
+        file.flush().expect("flush");
+        let later = scan_fallbacks(&path, &first.next);
+        assert_eq!(later.switches.len(), 1);
+        assert_eq!(later.switches[0].key, "switch-2");
+        // Rewritten shorter: read again from the start.
+        std::fs::write(&path, format!("{CLAUDE_FALLBACK}\n")).expect("rewrite");
+        let rewritten = scan_fallbacks(&path, &later.next);
+        assert_eq!(rewritten.switches.len(), 1);
+        assert_eq!(
+            rewritten.next.offset,
+            u64::try_from(CLAUDE_FALLBACK.len() + 1).expect("small")
+        );
+    }
+
+    /// A record exactly `len` bytes long that is no switch — padding for a
+    /// fixture that must keep every byte after it where it was (t-7153, R3).
+    pub(crate) fn a_record_as_long_as(len: usize) -> String {
+        let pad = |body_len: usize| {
+            format!(
+                r#"{{"type":"user","uuid":"pad","message":{{"role":"user","content":"{}"}}}}"#,
+                "x".repeat(body_len)
+            )
+        };
+        let record = pad(len - pad(0).len());
+        assert_eq!(record.len(), len, "the record's length");
+        record
+    }
+
+    /// A transcript exactly `len` bytes long that opens on `first` — the
+    /// rest one padding record — for a replacement as long as the file it
+    /// replaces (t-7153, R3).
+    pub(crate) fn a_transcript_as_long_as(first: &str, len: u64) -> String {
+        let content = format!(
+            "{first}\n{}\n",
+            a_record_as_long_as(usize::try_from(len).expect("small") - first.len() - 2)
+        );
+        assert_eq!(content.len() as u64, len, "the fixture's length");
+        content
+    }
+
+    /// A cursor counts into the FILE it read, not the path (t-7153, R3): a
+    /// transcript replaced under its path by another — as long as the old
+    /// one, or longer, with a switch in its first bytes — is read from its
+    /// start, where before the old offset stood and the switch was never
+    /// read; a partial first line names no file yet, and the whole line
+    /// then does. The file appended to keeps its identity.
+    #[test]
+    fn the_switch_scan_starts_over_when_the_file_at_its_path_is_another() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let replace = |content: &str| {
+            let fresh = dir.path().join("session.jsonl.next");
+            std::fs::write(&fresh, content).expect("the replacement");
+            std::fs::rename(&fresh, &path).expect("atomic replace");
+        };
+        replace(&format!("{CLAUDE_PLAIN_RECORD}\n{CLAUDE_FALLBACK}\n"));
+        let first = scan_fallbacks(&path, &ScanCursor::default());
+        assert_eq!(first.switches[0].key, "switch-1");
+        let old_len = std::fs::metadata(&path).expect("size").len();
+        assert_eq!(first.next.offset, old_len);
+
+        // As long as the old file, a new switch first: read from the start.
+        let second = CLAUDE_FALLBACK.replace("switch-1", "switch-2");
+        replace(&a_transcript_as_long_as(&second, old_len));
+        let rotated = scan_fallbacks(&path, &first.next);
+        assert_eq!(
+            rotated
+                .switches
+                .iter()
+                .map(|one| one.key.as_str())
+                .collect::<Vec<_>>(),
+            ["switch-2"],
+            "a replacement as long as the old file was read as unchanged"
+        );
+        assert_eq!(rotated.next.offset, old_len);
+        assert_ne!(rotated.next.file, first.next.file, "another file");
+
+        // Longer than the old file, a new switch first: from the start too.
+        let third = CLAUDE_FALLBACK.replace("switch-1", "switch-3");
+        replace(&format!(
+            "{third}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n"
+        ));
+        let longer = scan_fallbacks(&path, &rotated.next);
+        assert_eq!(
+            longer
+                .switches
+                .iter()
+                .map(|one| one.key.as_str())
+                .collect::<Vec<_>>(),
+            ["switch-3"],
+            "a longer replacement was read as appended to"
+        );
+        // Appended to, the file is the same file: the cursor stands.
+        let fourth = CLAUDE_FALLBACK.replace("switch-1", "switch-4");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        writeln!(file, "{fourth}").expect("write");
+        let appended = scan_fallbacks(&path, &longer.next);
+        assert_eq!(appended.next.file, longer.next.file, "the same file");
+        assert_eq!(
+            appended
+                .switches
+                .iter()
+                .map(|one| one.key.as_str())
+                .collect::<Vec<_>>(),
+            ["switch-4"],
+            "an appended file was read from its start again"
+        );
+
+        // A first line still being written names no whole file yet; once
+        // whole, the file is read from its start.
+        let fifth = CLAUDE_FALLBACK.replace("switch-1", "switch-5");
+        let (head, rest) = fifth.split_at(60);
+        replace(head);
+        let partial = scan_fallbacks(&path, &appended.next);
+        assert!(partial.switches.is_empty());
+        assert_eq!(partial.next.offset, 0);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        writeln!(file, "{rest}").expect("write");
+        let whole = scan_fallbacks(&path, &partial.next);
+        assert_eq!(whole.switches.len(), 1);
+        assert_eq!(whole.switches[0].key, "switch-5");
+    }
+
+    /// A file truncated and rewritten under its own name — the same inode,
+    /// the same birth, its first line kept — no longer holds what the cursor
+    /// counted, and is read again from its start (t-7153, R3): longer than
+    /// before, or exactly as long; before this the identity was the first
+    /// line and the birth, both kept, and the rewrite read as unchanged or
+    /// as appended to. Appended to after, it is the same file and the
+    /// cursor stands.
+    #[test]
+    fn the_switch_scan_starts_over_when_the_file_is_rewritten_under_its_own_name() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let switch = |key: &str| CLAUDE_FALLBACK.replace("switch-1", key);
+        let rewrite = |content: &str| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .create(true)
+                .open(&path)
+                .expect("the file, truncated");
+            file.write_all(content.as_bytes()).expect("rewrite");
+        };
+        let keys = |scan: &DeviationScan| -> Vec<String> {
+            scan.switches.iter().map(|one| one.key.clone()).collect()
+        };
+        rewrite(&format!(
+            "{CLAUDE_PLAIN_RECORD}\n{}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n",
+            switch("switch-1")
+        ));
+        let first = scan_fallbacks(&path, &ScanCursor::default());
+        assert_eq!(keys(&first), ["switch-1"]);
+        let old_len = std::fs::metadata(&path).expect("size").len();
+        assert_eq!(first.next.offset, old_len);
+
+        // Rewritten longer, the first line kept, a new switch second.
+        rewrite(&format!(
+            "{CLAUDE_PLAIN_RECORD}\n{}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n",
+            switch("switch-2")
+        ));
+        let longer = scan_fallbacks(&path, &first.next);
+        assert_eq!(
+            keys(&longer),
+            ["switch-2"],
+            "a file rewritten under its own name was read as appended to"
+        );
+        assert_eq!(
+            longer.next.file, first.next.file,
+            "the same file by every name the platform gives"
+        );
+
+        // Rewritten exactly as long, the first line kept, a new switch second.
+        rewrite(&a_transcript_as_long_as(
+            &format!("{CLAUDE_PLAIN_RECORD}\n{}", switch("switch-3")),
+            longer.next.offset,
+        ));
+        let as_long = scan_fallbacks(&path, &longer.next);
+        assert_eq!(
+            keys(&as_long),
+            ["switch-3"],
+            "a file rewritten as long as before under its own name was read as unchanged"
+        );
+        assert_eq!(as_long.next.offset, longer.next.offset);
+
+        // Appended to: the same file, and the cursor stands.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        writeln!(file, "{}", switch("switch-4")).expect("write");
+        let appended = scan_fallbacks(&path, &as_long.next);
+        assert_eq!(keys(&appended), ["switch-4"]);
+        let again = scan_fallbacks(&path, &appended.next);
+        assert_eq!(keys(&again), Vec::<String>::new());
+        assert_eq!(
+            placed(&again.next),
+            placed(&appended.next),
+            "an unchanged file moved the cursor"
+        );
+    }
+
+    /// A transcript three of the scan's windows long whose second record is
+    /// `second` — a switch, or a record exactly as long as one
+    /// ([`a_record_as_long_as`]) — and every other byte of which is the
+    /// same whatever `second` is (t-7153, R3): a rewrite that puts a switch
+    /// there keeps the first line, the length, the bytes before any cursor
+    /// at its end, and every window but the first.
+    fn three_windows_with(second: &str) -> String {
+        let window = usize::try_from(zerocode_core::transcript::MAX_TAIL_BYTES).expect("small");
+        let plain = format!("{CLAUDE_PLAIN_RECORD}\n");
+        let head = format!("{CLAUDE_PLAIN_RECORD}\n{second}\n");
+        let fill = plain.repeat((2 * window + window / 2 - head.len()) / plain.len() + 1);
+        let content = format!("{head}{fill}");
+        assert_eq!(content.len().div_ceil(window), 3, "three windows");
+        content
+    }
+
+    /// The same transcript before and after its second record became a
+    /// switch (t-7153, R3): as long, its first line, its tail and its last
+    /// two windows kept.
+    fn a_middle_record_becomes_a_switch() -> (String, String) {
+        let switch = CLAUDE_FALLBACK.replace("switch-1", "switch-mid");
+        let before = three_windows_with(&a_record_as_long_as(switch.len()));
+        let after = three_windows_with(&switch);
+        assert_eq!(before.len(), after.len());
+        (before, after)
+    }
+
+    /// The cursor at the end of the file at `path`, read from `cursor` one
+    /// reading at a time as the platform's `evidence` names the file, and
+    /// the keys of the switches found on the way.
+    fn read_to_the_end(
+        path: &Path,
+        mut cursor: ScanCursor,
+        evidence: FileEvidence,
+    ) -> (ScanCursor, Vec<String>) {
+        let size = std::fs::metadata(path).expect("size").len();
+        let mut keys = Vec::new();
+        for _ in 0..16 {
+            if cursor.offset == size {
+                return (cursor, keys);
+            }
+            let scan = scan_fallbacks_as(path, &cursor, evidence);
+            keys.extend(scan.switches.into_iter().map(|one| one.key));
+            cursor = scan.next;
+        }
+        panic!(
+            "sixteen readings did not reach the end of {}",
+            path.display()
+        );
+    }
+
+    /// The number of the scan's windows a cursor counted.
+    fn windows_of(cursor: &ScanCursor) -> u64 {
+        cursor
+            .offset
+            .div_ceil(zerocode_core::transcript::MAX_TAIL_BYTES)
+    }
+
+    /// The window of what `cursor` counted that its next reading checks,
+    /// on a file its platform names (t-7153 r4).
+    fn checks_next(cursor: &ScanCursor) -> Option<u64> {
+        cursor.counted.round.step(windows_of(cursor)).0
+    }
+
+    /// Where a cursor stands — its file, its offset, what it counted —
+    /// without the round its readings walk: a reading of an unchanged file
+    /// walks the round on by a window and moves the cursor nowhere
+    /// (t-7153 r4).
+    pub(crate) fn placed(cursor: &ScanCursor) -> ScanCursor {
+        ScanCursor {
+            counted: Counted {
+                round: Round::default(),
+                ..cursor.counted.clone()
+            },
+            ..cursor.clone()
+        }
+    }
+
+    /// A file atomically replaced under its path by one that keeps its first
+    /// line, its length and every byte but one record's near its start — a
+    /// conversation rewritten, one record in its middle changed — is another
+    /// file by the name the platform gives it, and is read from its start at
+    /// once (t-7153, R3): on the very next reading, whose round checks a
+    /// window the replacement did not change. Before this the identity was
+    /// the first line and a birth time, and where the file system gives no
+    /// birth the replacement read as unchanged.
+    #[test]
+    fn the_switch_scan_starts_over_when_a_replacement_keeps_the_first_line_and_the_tail() {
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let replace = |content: &str| {
+            let fresh = dir.path().join("session.jsonl.next");
+            std::fs::write(&fresh, content).expect("the replacement");
+            std::fs::rename(&fresh, &path).expect("atomic replace");
+        };
+        let (before, after) = a_middle_record_becomes_a_switch();
+        replace(&before);
+        let (cursor, keys) = read_to_the_end(&path, ScanCursor::default(), platform_evidence);
+        assert_eq!(keys, Vec::<String>::new());
+        assert_eq!(windows_of(&cursor), 3);
+        assert_ne!(checks_next(&cursor), Some(0), "the window replaced");
+        replace(&after);
+        let rotated = scan_fallbacks(&path, &cursor);
+        assert_eq!(
+            rotated
+                .switches
+                .iter()
+                .map(|one| one.key.as_str())
+                .collect::<Vec<_>>(),
+            ["switch-mid"],
+            "a replacement that kept the first line and the tail was read as unchanged"
+        );
+        assert_ne!(rotated.next.file, cursor.file, "another file");
+
+        // Longer than before, the first line and every byte before the
+        // cursor kept: another file too, read from its start at once.
+        let (cursor, _) = read_to_the_end(&path, rotated.next, platform_evidence);
+        replace(&format!(
+            "{}{CLAUDE_PLAIN_RECORD}\n",
+            three_windows_with(&CLAUDE_FALLBACK.replace("switch-1", "switch-7"))
+        ));
+        let longer = scan_fallbacks(&path, &cursor);
+        assert_eq!(
+            longer
+                .switches
+                .iter()
+                .map(|one| one.key.as_str())
+                .collect::<Vec<_>>(),
+            ["switch-7"],
+            "a longer replacement that kept the first line and the tail was read as appended to"
+        );
+    }
+
+    /// A file rewritten IN PLACE under its own name — the same inode, the
+    /// same birth — that keeps its first line, its length and every byte
+    /// but one record's near its start is the same file by every name the
+    /// platform gives, and no longer holds what the cursor counted
+    /// (t-7153, R3): each reading checks one more window of it, in rounds
+    /// ([`Round`]), so within `2N − 1` readings for the `N` windows the
+    /// cursor counted the scan starts over and reads the switch the rewrite
+    /// put there, once. Before this only the bytes just before the cursor
+    /// were checked, and such a rewrite stood as the file it replaced for
+    /// good. A file only appended to holds every window of a round, and its
+    /// cursor stands and moves on.
+    #[test]
+    fn the_switch_scan_finds_a_rewrite_in_place_that_kept_the_first_line_and_the_tail() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let rewrite = |content: &str| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .create(true)
+                .open(&path)
+                .expect("the file, truncated");
+            file.write_all(content.as_bytes()).expect("rewrite");
+        };
+        let (before, after) = a_middle_record_becomes_a_switch();
+        rewrite(&before);
+        let (cursor, keys) = read_to_the_end(&path, ScanCursor::default(), platform_evidence);
+        assert_eq!(keys, Vec::<String>::new());
+        let windows = windows_of(&cursor);
+        assert_eq!(windows, 3);
+        rewrite(&after);
+
+        // From a window the rewrite did not change, within the bound.
+        assert_ne!(checks_next(&cursor), Some(0), "the window rewritten");
+        let bound = 2 * windows - 1;
+        let mut at = cursor.clone();
+        let mut found = Vec::new();
+        let mut readings = 0;
+        for _ in 0..bound {
+            let scan = scan_fallbacks(&path, &at);
+            readings += 1;
+            assert_eq!(
+                scan.next.file, cursor.file,
+                "the same file by every name the platform gives"
+            );
+            found.extend(scan.switches.into_iter().map(|one| one.key));
+            at = scan.next;
+            if !found.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(
+            found,
+            ["switch-mid"],
+            "a rewrite in place that kept the first line and the tail stood past its bound"
+        );
+        assert!(readings <= bound, "{readings} readings");
+
+        // Caught up again, then appended to: every window of two rounds
+        // holds, and the appended switch is read once.
+        let (caught_up, again) = read_to_the_end(&path, at, platform_evidence);
+        assert_eq!(again, Vec::<String>::new(), "read twice");
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        writeln!(file, "{}", CLAUDE_FALLBACK.replace("switch-1", "switch-4")).expect("write");
+        drop(file);
+        let mut at = caught_up;
+        let mut appended = Vec::new();
+        for _ in 0..2 * windows {
+            let scan = scan_fallbacks(&path, &at);
+            assert!(
+                scan.next.offset >= at.offset,
+                "a file only appended to was read again from its start"
+            );
+            appended.extend(scan.switches.into_iter().map(|one| one.key));
+            at = scan.next;
+        }
+        assert_eq!(appended, ["switch-4"]);
+
+        // Rewritten in place once more, only its last record changed — the
+        // bytes just before the cursor: the next reading starts over, when
+        // its round names the first window, which the rewrite did not
+        // change.
+        let tail_changed = format!(
+            "{after}{}\n",
+            CLAUDE_FALLBACK.replace("switch-1", "switch-6")
+        );
+        assert_eq!(tail_changed.len() as u64, at.offset, "as long as before");
+        for _ in 0..windows {
+            if checks_next(&at) == Some(0) {
+                break;
+            }
+            at = scan_fallbacks(&path, &at).next;
+        }
+        assert_eq!(checks_next(&at), Some(0));
+        rewrite(&tail_changed);
+        let next = scan_fallbacks(&path, &at);
+        assert!(
+            next.next.offset < at.offset,
+            "a rewrite of the bytes just before the cursor was not found at once"
+        );
+        let (_, found) = read_to_the_end(&path, next.next.clone(), platform_evidence);
+        let found: Vec<String> = next
+            .switches
+            .into_iter()
+            .map(|one| one.key)
+            .chain(found)
+            .collect();
+        assert_eq!(found, ["switch-mid", "switch-6"]);
+    }
+
+    /// `len` bytes of whole records that open on a plain record and then a
+    /// SLOT — a record `slot` bytes long that is no switch, [`SLOT_AT`]
+    /// bytes in — so a rewrite in place can put a switch as long there and
+    /// move no byte after it (t-7153 r4).
+    pub(crate) fn records_with_a_slot(len: usize, slot: usize) -> String {
+        let plain = format!("{CLAUDE_PLAIN_RECORD}\n");
+        let head = format!("{plain}{}\n", a_record_as_long_as(slot));
+        let fill = plain.repeat((len - head.len()) / plain.len() - 1);
+        let content = format!(
+            "{head}{fill}{}\n",
+            a_record_as_long_as(len - head.len() - fill.len() - 1)
+        );
+        assert_eq!(content.len(), len, "the run's length");
+        content
+    }
+
+    /// How far into a run of [`records_with_a_slot`] its slot stands: past
+    /// the plain record it opens on.
+    pub(crate) const SLOT_AT: usize = CLAUDE_PLAIN_RECORD.len() + 1;
+
+    /// `bytes` written over the file at `path` from `at` — in place: the
+    /// same inode, the same birth, its length kept (t-7153 r4).
+    pub(crate) fn overwrite_at(path: &Path, at: u64, bytes: &str) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the file");
+        file.seek(SeekFrom::Start(at)).expect("seek");
+        file.write_all(bytes.as_bytes()).expect("rewrite in place");
+    }
+
+    /// Every window a cursor counted is checked within a bound however the
+    /// file grows (t-7153 r4, R3a, after astra t-6963 on 2e4ea291). A round
+    /// of checks is fixed as it begins — the windows the cursor had counted
+    /// then — each reading checks the next of them, and a window counted
+    /// since waits for the next round; so a rewrite in place of window `i`
+    /// of the `N` a cursor counted when the file was rewritten — its first
+    /// line, its length and the bytes before the cursor kept — is found
+    /// within `2N − 1` readings however fast the file grows: what is left
+    /// of the round under way (its end fixed at no more than `N`), then
+    /// `i + 1` readings of the next. The first, the middle and the last of
+    /// the windows, rewritten at every phase of the rounds — 0 to `2N`
+    /// readings after the scan caught up with a three-window file — the
+    /// file not growing, or growing half a window, a window or two windows
+    /// a reading all the while: each found within the bound, read from its
+    /// start, and its switch read once on the readings that follow; a file
+    /// only appended to is never read again from its start. Before this
+    /// the window a reading checked was the reading's count over the
+    /// windows counted NOW, and a file growing a window a reading, both
+    /// moving one a reading, named the same window on every reading for as
+    /// long as it grew: the others were never checked again.
+    #[test]
+    fn every_window_a_cursor_counted_is_checked_within_its_bound_however_the_file_grows() {
+        use zerocode_core::transcript::MAX_TAIL_BYTES;
+        const WINDOWS: u64 = 3;
+        let window = usize::try_from(MAX_TAIL_BYTES).expect("small");
+        let switch = CLAUDE_FALLBACK.replace("switch-1", "switch-rewritten");
+        let dir = tempfile::tempdir().expect("a dir");
+        let (mut cases, mut misses) = (0, Vec::new());
+        for growth in [&[][..], &[window / 2], &[window], &[window, window]] {
+            for phase in 0..=2 * WINDOWS {
+                for which in ["first", "middle", "last"] {
+                    cases += 1;
+                    let case = format!(
+                        "{} bytes a reading, {phase} readings in, the {which}",
+                        growth.iter().sum::<usize>()
+                    );
+                    let path = dir.path().join("session.jsonl");
+                    let mut slots = Vec::new();
+                    let append = |slots: &mut Vec<u64>, runs: &[usize]| {
+                        use std::io::Write;
+                        let mut file = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)
+                            .expect("append");
+                        for len in runs {
+                            let at = file.metadata().expect("size").len();
+                            slots.push(at + SLOT_AT as u64);
+                            file.write_all(records_with_a_slot(*len, switch.len()).as_bytes())
+                                .expect("write");
+                        }
+                    };
+                    let grow = |slots: &mut Vec<u64>| append(slots, growth);
+                    append(&mut slots, &[window; WINDOWS as usize]);
+                    let read = |cursor: &ScanCursor| scan_fallbacks(&path, cursor);
+
+                    // Caught up, a window a reading.
+                    let size = std::fs::metadata(&path).expect("size").len();
+                    let mut cursor = ScanCursor::default();
+                    while cursor.offset < size {
+                        let scan = read(&cursor);
+                        assert!(scan.switches.is_empty() && scan.next.offset > cursor.offset);
+                        cursor = scan.next;
+                    }
+                    // Grown, never rewritten: the cursor never starts over.
+                    for _ in 0..phase {
+                        grow(&mut slots);
+                        let scan = read(&cursor);
+                        assert!(
+                            scan.next.offset >= cursor.offset,
+                            "{case}: a file only appended to was read again from its start"
+                        );
+                        cursor = scan.next;
+                    }
+
+                    // Rewritten in place: a slot of the window named, clear
+                    // of the bytes just before the cursor.
+                    let counted = cursor.offset.div_ceil(MAX_TAIL_BYTES);
+                    let target = match which {
+                        "first" => 0,
+                        "middle" => counted / 2,
+                        _ => counted - 1,
+                    };
+                    let len = switch.len() as u64;
+                    let slot = slots
+                        .iter()
+                        .copied()
+                        .find(|at| {
+                            at / MAX_TAIL_BYTES == target
+                                && (at + len - 1) / MAX_TAIL_BYTES == target
+                                && at + len <= cursor.offset - TRANSCRIPT_FINGERPRINT_BYTES as u64
+                        })
+                        .unwrap_or_else(|| panic!("{case}: no slot in window {target}"));
+                    overwrite_at(&path, slot, &switch);
+                    let bound = 2 * counted - 1;
+                    let mut found = Vec::new();
+                    let mut readings = 0;
+                    let started_over = loop {
+                        if readings == 2 * bound {
+                            break None;
+                        }
+                        readings += 1;
+                        grow(&mut slots);
+                        let scan = read(&cursor);
+                        let over = scan.next.offset < cursor.offset;
+                        found.extend(scan.switches.into_iter().map(|one| one.key));
+                        cursor = scan.next;
+                        if over {
+                            break Some(readings);
+                        }
+                    };
+                    // Read from its start: window `target` on the reading
+                    // `target` after the one that started over.
+                    if started_over.is_some() {
+                        for _ in 0..target {
+                            grow(&mut slots);
+                            let scan = read(&cursor);
+                            found.extend(scan.switches.into_iter().map(|one| one.key));
+                            cursor = scan.next;
+                        }
+                    }
+                    match started_over {
+                        Some(readings) if readings <= bound && found == ["switch-rewritten"] => {}
+                        _ => misses.push(format!(
+                            "{case} (window {target} of {counted}): started over after {started_over:?} readings, bound {bound}; found {found:?}"
+                        )),
+                    }
+                    std::fs::remove_file(&path).expect("the case's file");
+                }
+            }
+        }
+        assert_eq!(cases, 4 * 7 * 3);
+        assert!(
+            misses.is_empty(),
+            "{} of {cases} rewrites stood past their bound: {misses:#?}",
+            misses.len()
+        );
+    }
+
+    /// Where the platform names no file, nothing is taken on faith
+    /// (t-7153, R3): every window the cursor counted is read again and
+    /// compared before the cursor is trusted — a file replaced under its
+    /// path by one exactly as long, its first line, its tail and all but
+    /// its first window kept, whose identity without a platform name is the
+    /// same, is read from its start on the next reading, whatever window
+    /// its round names; a longer replacement too; a file appended to still
+    /// stands, and its cursor still moves.
+    #[test]
+    fn the_switch_scan_takes_nothing_on_faith_where_the_platform_names_no_file() {
+        use std::io::Write;
+        let unnamed: FileEvidence = |_, _| (None, None);
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let replace = |content: &str| {
+            let fresh = dir.path().join("session.jsonl.next");
+            std::fs::write(&fresh, content).expect("the replacement");
+            std::fs::rename(&fresh, &path).expect("atomic replace");
+        };
+        let keys = |scan: &DeviationScan| -> Vec<String> {
+            scan.switches.iter().map(|one| one.key.clone()).collect()
+        };
+        let (before, after) = a_middle_record_becomes_a_switch();
+        replace(&before);
+        let (first, found) = read_to_the_end(&path, ScanCursor::default(), unnamed);
+        assert_eq!(found, Vec::<String>::new());
+        let old_len = std::fs::metadata(&path).expect("size").len();
+        assert_eq!(first.offset, old_len);
+
+        // As long as before, the first line, the tail and the last windows
+        // kept: the same file by every name this platform gives, and read
+        // from its start all the same, on a turn that names a window the
+        // replacement did not change.
+        replace(&after);
+        assert_eq!(std::fs::metadata(&path).expect("size").len(), old_len);
+        let as_long = scan_fallbacks_as(&path, &first, unnamed);
+        assert_eq!(
+            as_long.next.file, first.file,
+            "the platform told them apart"
+        );
+        assert_eq!(
+            keys(&as_long),
+            ["switch-mid"],
+            "a replacement as long as the old file, its first line kept, was taken on faith"
+        );
+        let (caught_up, found) = read_to_the_end(&path, as_long.next, unnamed);
+        assert_eq!(found, Vec::<String>::new(), "read twice");
+
+        // Appended to: what the cursor counted is still there, the cursor
+        // stands and moves on.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        writeln!(file, "{}", CLAUDE_FALLBACK.replace("switch-1", "switch-3")).expect("write");
+        drop(file);
+        let appended = scan_fallbacks_as(&path, &caught_up, unnamed);
+        assert_eq!(keys(&appended), ["switch-3"]);
+        assert_eq!(
+            appended.next.offset,
+            std::fs::metadata(&path).expect("size").len()
+        );
+        let again = scan_fallbacks_as(&path, &appended.next, unnamed);
+        assert_eq!(keys(&again), Vec::<String>::new());
+        assert_eq!(
+            again.next, appended.next,
+            "an unchanged file moved the cursor"
+        );
+
+        // Longer than before, the first line kept: from the start too.
+        replace(&format!(
+            "{}{CLAUDE_PLAIN_RECORD}\n",
+            three_windows_with(&CLAUDE_FALLBACK.replace("switch-1", "switch-5"))
+        ));
+        let longer = scan_fallbacks_as(&path, &again.next, unnamed);
+        assert_eq!(
+            keys(&longer),
+            ["switch-5"],
+            "a longer replacement, its first line kept, was read as appended to"
+        );
+    }
+
+    /// What a reading of an unchanged long transcript costs (t-7153, R3):
+    /// a file as long as the longest a worker wrote here in fourteen days
+    /// (11.8 MB), read to its end, then read again unchanged, each reading
+    /// from where the last one left the cursor — the stat, the opening, the
+    /// anchor and the one window the cursor's round names. Prints the
+    /// median of the readings; run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, printed; not a check"]
+    fn measure_a_reading_of_an_unchanged_long_transcript() {
+        const LONGEST_BYTES: usize = 11_800_000;
+        const READINGS: u64 = 2_000;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let plain = format!("{CLAUDE_PLAIN_RECORD}\n");
+        std::fs::write(&path, plain.repeat(LONGEST_BYTES / plain.len())).expect("a transcript");
+        let size = std::fs::metadata(&path).expect("size").len();
+        let mut cursor = ScanCursor::default();
+        while cursor.offset < size {
+            cursor = scan_fallbacks(&path, &cursor).next;
+        }
+        let mut took: Vec<std::time::Duration> = (0..READINGS)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let scan = scan_fallbacks(&path, &cursor);
+                let took = started.elapsed();
+                assert_eq!(scan.next.offset, size, "an unchanged file moved");
+                cursor = scan.next;
+                took
+            })
+            .collect();
+        took.sort();
+        println!(
+            "an unchanged {} byte transcript, {} windows: median {:?}, p90 {:?} a reading over {READINGS}",
+            cursor.offset,
+            cursor
+                .offset
+                .div_ceil(zerocode_core::transcript::MAX_TAIL_BYTES),
+            took[took.len() / 2],
+            took[took.len() * 9 / 10],
+        );
+    }
+
+    /// A reading is bounded (t-7153, P2): at most the tail window's bytes a
+    /// beat, so a long transcript is read in beats; a line longer than the
+    /// window — a tool result, never a switch record — is stepped over, and
+    /// the record after it is read on the next beat.
+    #[test]
+    fn the_switch_scan_reads_at_most_one_window_a_beat_and_steps_over_a_longer_line() {
+        use std::io::Write;
+        use zerocode_core::transcript::MAX_TAIL_BYTES;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let mut file = std::fs::File::create(&path).expect("a transcript");
+        let long = usize::try_from(MAX_TAIL_BYTES).expect("small") + 4_096;
+        writeln!(
+            file,
+            r#"{{"type":"user","uuid":"big","message":{{"role":"user","content":"{}"}}}}"#,
+            "x".repeat(long)
+        )
+        .expect("write");
+        writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
+        let size = std::fs::metadata(&path).expect("size").len();
+
+        let first = scan_fallbacks(&path, &ScanCursor::default());
+        assert!(first.switches.is_empty());
+        assert_eq!(
+            first.next.offset, MAX_TAIL_BYTES,
+            "one window, stepped over"
+        );
+        let second = scan_fallbacks(&path, &first.next);
+        assert_eq!(second.switches.len(), 1, "the record after the long line");
+        assert_eq!(second.switches[0].key, "switch-1");
+        assert_eq!(second.next.offset, size);
+
+        // Many short lines: one window a beat, whole lines only, until caught up.
+        let mut file = std::fs::File::create(&path).expect("a transcript");
+        let rows = usize::try_from(MAX_TAIL_BYTES / 64).expect("small") + 8;
+        for row in 0..rows {
+            writeln!(
+                file,
+                "{}",
+                CLAUDE_PLAIN_RECORD.replace("\"uuid\":\"v\"", &format!("\"uuid\":\"v{row}\""))
+            )
+            .expect("write");
+        }
+        writeln!(file, "{CLAUDE_FALLBACK}").expect("write");
+        let size = std::fs::metadata(&path).expect("size").len();
+        let mut cursor = ScanCursor::default();
+        let mut beats = 0;
+        let mut switches = Vec::new();
+        while cursor.offset < size {
+            let scan = scan_fallbacks(&path, &cursor);
+            assert!(
+                scan.next.offset > cursor.offset,
+                "a beat that read nothing whole"
+            );
+            assert!(
+                scan.next.offset - cursor.offset <= MAX_TAIL_BYTES,
+                "a beat read past its window"
+            );
+            switches.extend(scan.switches);
+            cursor = scan.next;
+            beats += 1;
+        }
+        assert!(
+            beats > 1,
+            "a transcript longer than the window was read in one beat"
+        );
+        assert_eq!(switches.len(), 1);
+    }
+
+    /* ---- t-7153: the decline's identity and its screen ----------------- */
+
+    /// An earlier decline of the same conversation, answered by a person
+    /// (ids scrubbed): its own category record, its own error, both on
+    /// request `req_1`.
+    const CLAUDE_OLD_NO_FALLBACK: &str = r#"{"parentUuid":"p0","isSidechain":false,"type":"system","subtype":"model_refusal_no_fallback","content":"","level":"warning","originalModel":"claude-fable-5-1","requestId":"req_1","apiRefusalCategory":"cyber","refusedUserMessageUuid":"q0","isMeta":false,"uuid":"sys-1","timestamp":"2026-09-24T04:00:00.000Z","version":"2.1.281"}"#;
+    const CLAUDE_OLD_DECLINE_ERROR: &str = r#"{"parentUuid":"sys-1","isSidechain":false,"type":"assistant","uuid":"declined-1","timestamp":"2026-09-24T04:00:00.010Z","message":{"id":"e1","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup)."}]},"requestId":"req_1","error":"invalid_request","isApiErrorMessage":true}"#;
+    /// The newest decline, on request `req_2`: its own category record names
+    /// NO category, and its error record names that record as its parent.
+    const CLAUDE_NEW_NO_FALLBACK_UNNAMED: &str = r#"{"parentUuid":"part-2","isSidechain":false,"type":"system","subtype":"model_refusal_no_fallback","content":"","level":"warning","originalModel":"claude-fable-5-1","requestId":"req_2","apiRefusalCategory":null,"refusedUserMessageUuid":"q2","isMeta":false,"uuid":"sys-2","timestamp":"2026-09-24T04:29:48.712Z","version":"2.1.281"}"#;
+    const CLAUDE_NEW_DECLINE_ERROR: &str = r#"{"parentUuid":"sys-2","isSidechain":false,"type":"assistant","uuid":"declined-2","timestamp":"2026-09-24T04:29:48.711Z","message":{"id":"e2","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup)."}]},"requestId":"req_2","error":"invalid_request","isApiErrorMessage":true}"#;
+    /// An error record whose request and parent match no category record in
+    /// the tail (the CLI wrote the category record of another request).
+    const CLAUDE_STRAY_DECLINE_ERROR: &str = r#"{"parentUuid":"elsewhere","isSidechain":false,"type":"assistant","uuid":"declined-3","timestamp":"2026-09-24T05:29:48.711Z","message":{"id":"e3","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup)."}]},"requestId":"req_3","error":"invalid_request","isApiErrorMessage":true}"#;
+
+    /// The category rides with its own request (t-7153, P1-4): a decline
+    /// whose category record names none is a decline with NO category, and
+    /// an earlier request's `cyber` is never borrowed for it; a record that
+    /// matches neither the error's request nor its parent names nothing.
+    #[test]
+    fn a_declines_category_is_read_off_its_own_request_and_never_an_earlier_one() {
+        let borrowed = lines(&[
+            CLAUDE_OLD_NO_FALLBACK,
+            CLAUDE_OLD_DECLINE_ERROR,
+            CLAUDE_PERSON_TYPED,
+            CLAUDE_NEW_NO_FALLBACK_UNNAMED,
+            CLAUDE_NEW_DECLINE_ERROR,
+            CLAUDE_TURN_END,
+        ]);
+        let record = decline_reading_in("claude", None, Some(&borrowed))
+            .record
+            .expect("the newest decline is the last word");
+        assert_eq!(record.key, "declined-2");
+        assert_eq!(
+            record.category, None,
+            "an earlier request's category was borrowed for the newest decline"
+        );
+
+        let stray = lines(&[
+            CLAUDE_OLD_NO_FALLBACK,
+            CLAUDE_STRAY_DECLINE_ERROR,
+            CLAUDE_TURN_END,
+        ]);
+        let record = decline_reading_in("claude", None, Some(&stray))
+            .record
+            .expect("the stray decline is the last word");
+        assert_eq!(record.key, "declined-3");
+        assert_eq!(
+            record.category, None,
+            "a category record of another request was taken for this decline"
+        );
+
+        // The real order, both ids agreeing: the category is this decline's.
+        let own = lines(&[
+            CLAUDE_OLD_NO_FALLBACK,
+            CLAUDE_OLD_DECLINE_ERROR,
+            CLAUDE_PERSON_TYPED,
+            CLAUDE_DECLINED_PARTIAL,
+            CLAUDE_NO_FALLBACK,
+            CLAUDE_DECLINE_ERROR,
+            CLAUDE_TURN_END,
+        ]);
+        let record = decline_reading_in("claude", None, Some(&own))
+            .record
+            .expect("the decline");
+        assert_eq!(record.key, "declined");
+        assert_eq!(record.category.as_deref(), Some("cyber"));
+    }
+
+    /// The newest decline's own category record, named: `sys-2` answers
+    /// `req_2` under `cyber`.
+    const CLAUDE_NEW_NO_FALLBACK_NAMED: &str = r#"{"parentUuid":"part-2","isSidechain":false,"type":"system","subtype":"model_refusal_no_fallback","content":"","level":"warning","originalModel":"claude-fable-5-1","requestId":"req_2","apiRefusalCategory":"cyber","refusedUserMessageUuid":"q2","isMeta":false,"uuid":"sys-2","timestamp":"2026-09-24T04:29:48.712Z","version":"2.1.281"}"#;
+
+    /// An error record on request `request` naming `parent` as its parent
+    /// — the two ids a category record is joined on. An empty id is written
+    /// as an empty string; `None` leaves the field out, as an older CLI
+    /// would.
+    fn decline_error(request: Option<&str>, parent: Option<&str>) -> String {
+        let field = |name: &str, value: Option<&str>| {
+            value.map_or(String::new(), |value| format!(r#""{name}":"{value}","#))
+        };
+        format!(
+            r#"{{{}"isSidechain":false,"type":"assistant","uuid":"declined-x","timestamp":"2026-09-24T04:29:48.711Z","message":{{"id":"ex","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup)."}}]}},{}"error":"invalid_request","isApiErrorMessage":true}}"#,
+            field("parentUuid", parent),
+            field("requestId", request),
+        )
+    }
+
+    /// The category is joined on BOTH of the error record's ids (t-7153,
+    /// R1): a category record the request names but whose uuid is not the
+    /// parent the error names, or the parent record answering another
+    /// request, is a contradiction — no category, and no guess between
+    /// the two — where before either id alone borrowed the category. An
+    /// empty id is no key. An id the category record does not carry, as an
+    /// older CLI writes it, disputes nothing, so the one it carries decides;
+    /// and both agreeing is this decline's category.
+    #[test]
+    fn a_category_record_one_id_names_and_the_other_disputes_names_nothing() {
+        let category_of = |held: &[String]| {
+            let record = decline_reading_in("claude", None, Some(held))
+                .record
+                .expect("the decline is the last word");
+            assert_eq!(record.key, "declined-x");
+            record.category
+        };
+        let old_and_new = |error: String| {
+            lines(&[
+                CLAUDE_OLD_NO_FALLBACK,
+                CLAUDE_OLD_DECLINE_ERROR,
+                CLAUDE_PERSON_TYPED,
+                CLAUDE_NEW_NO_FALLBACK_NAMED,
+                &error,
+            ])
+        };
+        // The request's record, whose uuid is not the parent named: `sys-2`
+        // answers `req_2`, but the error names `sys-1` as its parent.
+        assert_eq!(
+            category_of(&old_and_new(decline_error(Some("req_2"), Some("sys-1")))),
+            None,
+            "the request's category was taken over a parent that disputes it"
+        );
+        // The parent record, answering another request: `sys-2` is the
+        // parent named, but it answered `req_2` and the error is `req_3`'s.
+        assert_eq!(
+            category_of(&old_and_new(decline_error(Some("req_3"), Some("sys-2")))),
+            None,
+            "the parent's category was taken over a request that disputes it"
+        );
+        // Both agreeing: this decline's category.
+        assert_eq!(
+            category_of(&old_and_new(decline_error(Some("req_2"), Some("sys-2")))).as_deref(),
+            Some("cyber")
+        );
+        // Empty ids are no keys, even against a record whose id is as empty.
+        let blank_record =
+            CLAUDE_NEW_NO_FALLBACK_NAMED.replace(r#""requestId":"req_2""#, r#""requestId":"""#);
+        assert_eq!(
+            category_of(&lines(&[&blank_record, &decline_error(Some(""), Some(""))])),
+            None,
+            "an empty id joined a category record"
+        );
+        assert_eq!(
+            category_of(&lines(&[
+                CLAUDE_NEW_NO_FALLBACK_NAMED,
+                &decline_error(None, None)
+            ])),
+            None,
+            "a record with no ids joined a category record"
+        );
+        // An older CLI's error carries one id: the one it carries decides.
+        assert_eq!(
+            category_of(&old_and_new(decline_error(Some("req_2"), None))).as_deref(),
+            Some("cyber"),
+            "a request id alone, agreeing, named nothing"
+        );
+        assert_eq!(
+            category_of(&old_and_new(decline_error(None, Some("sys-2")))).as_deref(),
+            Some("cyber"),
+            "a parent id alone, agreeing, named nothing"
+        );
+        // A category record that carries no request id (older still) is
+        // silent on the request, and the parent it carries decides.
+        let unrequested = CLAUDE_NEW_NO_FALLBACK_NAMED.replace(r#""requestId":"req_2","#, "");
+        assert_eq!(
+            category_of(&lines(&[
+                &unrequested,
+                &decline_error(Some("req_2"), Some("sys-2"))
+            ]))
+            .as_deref(),
+            Some("cyber"),
+            "a record silent on the request was read as disputing it"
+        );
+    }
+
+    /// A tool result that quotes the dialog's words, under a turn that is
+    /// still working — the screen a worker reading about declines shows.
+    const CLAUDE_QUOTED_DIALOG_SCREEN: &str = "\
+⏺ Read(notes/declines.md)
+  ⎿  Read 5 lines
+     Session paused
+     Fable 5.1's safeguards flagged this message. Our intentionally broad safeguards…
+     Details: `[cyber]`
+     1. Switch to Opus 4.8
+     2. Edit prompt and retry
+
+✻ Thinking… (esc to interrupt)
+";
+    /// The dialog as the hermetic probe's pty carried it on 2.1.281
+    /// (t-6747 `d-dialog`, 2026-09-24): the header, the sentence wrapped over
+    /// three lines, the detail line, the cursor on the first choice.
+    const CLAUDE_PROBE_DIALOG_SCREEN: &str = "\
+    Session paused
+    Fable 5.1's safeguards flagged this message. Our intentionally broad safeguards allow us to deliver more
+  capabilities faster, but can sometimes flag legitimate coding and cybersecurity tasks. You can learn more:
+  https://support.claude.com/en/articles/15363606
+  Details: `[cyber]`
+   ❯  1.  Switch to Opus 4.8
+   2.  Edit prompt and retry with Fable 5.1
+
+  ✻ Waiting for API response · will retry in 2m 40s · check your network
+";
+
+    /// Quoted words are not a dialog (t-7153, P1-3): the pause dialog is the
+    /// CLI's own layout — its header, then the sentence, then the cursor on
+    /// a numbered choice beside the retry choice — and a tool result that
+    /// quotes every one of its lines stands under the turn's own spinner,
+    /// with no cursor on a choice. Both real dialogs read here are dialogs.
+    #[test]
+    fn a_screen_that_quotes_the_dialogs_words_is_no_dialog() {
+        let quoted = decline_reading_in("claude", Some(CLAUDE_QUOTED_DIALOG_SCREEN), None)
+            .screen
+            .expect("the quoted sentence is still on the screen");
+        assert!(!quoted.dialog, "a quoted dialog was read as the CLI's own");
+        assert_eq!(
+            quoted.category, None,
+            "a quoted category was read as the dialog's"
+        );
+
+        for real in [CLAUDE_DIALOG_SCREEN, CLAUDE_PROBE_DIALOG_SCREEN] {
+            let dialog = decline_reading_in("claude", Some(real), None)
+                .screen
+                .expect("the dialog's sentence");
+            assert!(dialog.dialog, "a real dialog was not read as one:\n{real}");
+            assert_eq!(dialog.category.as_deref(), Some("cyber"));
+        }
+        // The printed error is no dialog either, as before.
+        let printed = decline_reading_in("claude", Some(CLAUDE_PRINTED_DECLINE_SCREEN), None)
+            .screen
+            .expect("the printed sentence");
+        assert!(!printed.dialog);
     }
 }

@@ -19,6 +19,7 @@ zo [--model <alias>] [--permission-mode <mode>] [--effort <level>]
        [--resume [<id|latest|path>]] [--continue] [--mcp-config <file>] [--cwd <dir>]
        [--no-spawn] [--allowed-tools <names>] [--render-markdown] [--show-thinking] [--verbose-stderr]
        [--teammate <dir> [--resume-transcript <path>]] [--launch-contract <version>]
+       [--classifier-fallback off|ask|auto]
        [--events-bind <addr>] [-p|--plain] [--json] [--last-message <file>]
        [--loop-every <duration>|--loop-until <command>] [--loop-max <runs>]
        [--status] [--prompt-input] [--orchestration-accuracy] [--version] [--help]
@@ -47,6 +48,13 @@ zo decision-shadow check [--json]
                      Computer): nothing else is advertised, and a call to any
                      other tool is refused before it runs. A deferred tool
                      named here is advertised from the first request
+  --classifier-fallback
+                     when a provider's safety classifier declines a turn twice,
+                     off: never switch models; ask (default): ask before this
+                     turn continues on the category's route; auto: switch and
+                     say so. Over the setting smart.classifierFallback; a
+                     question nobody answers or nobody can be asked is not a
+                     yes — the turn stays on the chosen model
   --launch-contract  exact launch (version 1): validate --model/--effort
                      against the published catalog before the session opens
                      and either launch exactly as asked or exit 4 with a named
@@ -184,6 +192,12 @@ pub struct Launch {
     /// `--launch-contract <version>`, raw. The one flag door of
     /// [`crate::launch_contract`]; the env and settings doors are read there.
     pub launch_contract: Option<String>,
+    /// `--classifier-fallback <off|ask|auto>` (t-6747): the refusal ladder's
+    /// switching mode for this process, over `smart.classifierFallback`. A
+    /// window summons a zo worker with `auto` when it pinned no model —
+    /// nobody answers a worker's questions — and `off` when it did (t-7153):
+    /// a pinned model is a binding.
+    pub classifier_fallback: Option<runtime::ClassifierFallback>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -216,6 +230,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
     let mut loop_trigger: Option<HeadlessLoopTrigger> = None;
     let mut loop_max: Option<u32> = None;
     let mut launch_contract: Option<String> = None;
+    let mut classifier_fallback: Option<runtime::ClassifierFallback> = None;
     let mut action = Action::Repl;
 
     let mut index = 0;
@@ -257,6 +272,17 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
                     )
                 })?;
                 permission_mode = Some(permission_mode_from_label(label));
+                index += 2;
+            }
+            "--classifier-fallback" => {
+                let raw = value("--classifier-fallback")?;
+                classifier_fallback =
+                    Some(runtime::ClassifierFallback::from_word(&raw).ok_or_else(|| {
+                        let words = runtime::ClassifierFallback::ALL
+                            .map(runtime::ClassifierFallback::word)
+                            .join(", ");
+                        format!("unsupported classifier fallback '{raw}'. Use {words}.")
+                    })?);
                 index += 2;
             }
             "--effort" | "-e" => {
@@ -458,6 +484,7 @@ pub fn parse(args: &[String]) -> Result<Launch, String> {
         teammate,
         headless_loop,
         launch_contract,
+        classifier_fallback,
     })
 }
 
@@ -621,6 +648,22 @@ mod tests {
         assert!(!launch.render.render_markdown);
         assert!(!launch.render.verbose_stderr);
         assert!(launch.open.resume.is_none());
+    }
+
+    /// The refusal ladder's switching mode is a closed word, over the setting
+    /// for this process (t-6747); a word nobody defined is refused at launch.
+    #[test]
+    fn the_classifier_fallback_flag_is_a_closed_word() {
+        assert_eq!(parse(&args(&[])).expect("parse").classifier_fallback, None);
+        for mode in runtime::ClassifierFallback::ALL {
+            let launch = parse(&args(&["--classifier-fallback", mode.word()])).expect("parse");
+            assert_eq!(launch.classifier_fallback, Some(mode));
+        }
+        let refused = parse(&args(&["--classifier-fallback", "sometimes"]))
+            .err()
+            .expect("an unknown word is refused");
+        assert!(refused.contains("off, ask, auto"), "{refused}");
+        assert!(super::USAGE.contains("--classifier-fallback"));
     }
 
     #[test]

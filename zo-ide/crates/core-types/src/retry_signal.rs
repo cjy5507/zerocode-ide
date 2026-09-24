@@ -435,14 +435,78 @@ pub const QUIET_REASONING_LABEL: &str = "model reasoning silently — stream ali
 /// Esc out of a turn that would have resumed on its own.
 pub const QUOTA_HOLD_NOTICE_PREFIX: &str = "Main model rate-limited";
 
-/// System warning when a safety-classifier refusal retries the current turn on
-/// the catalog's same-provider fallback (Fable/Sonnet/Haiku → the Opus head).
-/// A function, not a constant, because the target is a catalog fact: the
-/// runtime never spells a release id, and this names the one it swapped to.
+/// The receipt a turn the refusal ladder moved off the chosen model leaves
+/// (t-6747): which category, the model it left, the one it continues on, and
+/// for how long — a model a person chose is a binding, so leaving it is said
+/// every time. A function, because both models are catalog facts handed in.
 #[must_use]
-pub fn refusal_fallback_warn(target: &str) -> String {
+pub fn refusal_route_warn(from: &str, to: &str, category: Option<&str>) -> String {
+    let category = category.map_or_else(String::new, |word| format!(" ({word})"));
     format!(
-        "The model's safety classifier declined this request — retrying on {target}."
+        "The model's safety classifier declined this request{category} — this turn continues on \
+         {to} instead of {from}, the category's route; the next turn starts on {from} again."
+    )
+}
+
+/// The notice beside a refusal the ladder leaves standing because the
+/// provider routes its category nowhere (t-6747): no model is switched to
+/// answer what the provider declined.
+#[must_use]
+pub fn refusal_stands_notice(category: &str) -> String {
+    format!(
+        "The provider routes `{category}` declines to no other model, so this refusal stands — \
+         nothing is retried on another model."
+    )
+}
+
+/// What the ladder asks the person before leaving the model they chose
+/// (t-6747, `smart.classifierFallback: ask`).
+#[must_use]
+pub fn refusal_switch_question(from: &str, to: &str, category: Option<&str>) -> String {
+    let category = category.map_or_else(String::new, |word| format!(" ({word})"));
+    format!(
+        "The safety classifier declined {from}'s answer twice{category}. Continue this turn on \
+         {to}, the category's route? Always: switch without asking for this model."
+    )
+}
+
+/// What the ladder says when its switch question closed unanswered (t-7153):
+/// the prompt ceiling bounds the wait and decides nothing, so the turn stays
+/// on the chosen model — in the permission prompt's own words for the same
+/// fact ("a timeout, not a decision").
+#[must_use]
+pub fn refusal_switch_unanswered_notice(from: &str, to: &str, ceiling_secs: u64) -> String {
+    format!(
+        "The switch question ({from} → {to}) expired after {ceiling_secs}s with no answer. This \
+         is a timeout, not a decision: this turn stays on {from} and the decline stands. Answer \
+         it next time, or set `smart.classifierFallback` to `auto` (`--classifier-fallback \
+         auto`) to switch without asking."
+    )
+}
+
+/// What the ladder says when nobody was at the keyboard to ask (t-7153):
+/// `ask` cannot be answered by an absent person, so the turn stays; a session
+/// that should switch unattended is run with `auto`.
+#[must_use]
+pub fn refusal_switch_unasked_notice(from: &str, to: &str) -> String {
+    format!(
+        "The category's route is {to}, but `smart.classifierFallback` is `ask` and nobody is at \
+         the keyboard to answer — a question nobody can be asked is not a yes: this turn stays \
+         on {from} and the decline stands. Run with `--classifier-fallback auto` (or set the \
+         setting) to switch without asking."
+    )
+}
+
+/// What the ladder asks when the declined request carried images (t-6747): a
+/// picture of a declined screen re-declines whoever reads it, so they are
+/// sent again only if the person keeps them.
+#[must_use]
+pub fn declined_images_question(count: usize) -> String {
+    let what = if count == 1 { "an image" } else { "images" };
+    format!(
+        "The declined request carried {what} ({count}). A picture of a declined screen is \
+         declined again by whoever reads it. Retry without the {count}? (the conversation keeps \
+         a note where each was)"
     )
 }
 
@@ -523,7 +587,9 @@ pub fn retry_notice_label(error_message: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{
-        refusal_cross_provider_warn, refusal_fallback_warn, refusal_prearm_warn,
+        declined_images_question, refusal_cross_provider_warn, refusal_prearm_warn,
+        refusal_route_warn, refusal_stands_notice, refusal_switch_question,
+        refusal_switch_unanswered_notice, refusal_switch_unasked_notice,
         QUOTA_FALLBACK_ACTIVE_NOTICE_PREFIX, QUOTA_HOLD_NOTICE_PREFIX,
         RetrySignal, classify_error_text, network_outage_host,
         parse_quota_fallback_model,
@@ -811,12 +877,27 @@ mod tests {
         let hold = format!("{QUOTA_HOLD_NOTICE_PREFIX} (claude-fable-5); holding this turn");
         assert_eq!(parse_quota_fallback_model(&hold), None);
         assert_eq!(parse_quota_fallback_model("Quota fallback active on ; malformed"), None);
-        // The refusal notices name the model they swapped to, and never the
-        // release id from code — the target is a catalog fact handed in.
+        // The refusal notices name the models they left and swapped to, and
+        // never a release id from code — both are catalog facts handed in.
         assert_eq!(
-            refusal_fallback_warn("claude-opus-5"),
-            "The model's safety classifier declined this request — retrying on claude-opus-5."
+            refusal_route_warn("claude-fable-5-1", "claude-opus-4-8", Some("cyber")),
+            "The model's safety classifier declined this request (cyber) — this turn continues \
+             on claude-opus-4-8 instead of claude-fable-5-1, the category's route; the next turn \
+             starts on claude-fable-5-1 again."
         );
+        assert!(refusal_stands_notice("reasoning_extraction").contains("this refusal stands"));
+        assert!(
+            refusal_switch_question("claude-fable-5-1", "claude-opus-4-8", Some("cyber"))
+                .contains("Continue this turn on claude-opus-4-8")
+        );
+        assert!(declined_images_question(1).contains("carried an image (1)"));
+        // Silence is not consent (t-7153): both notices name the model the
+        // turn stays on and say the question was not answered.
+        let expired = refusal_switch_unanswered_notice("claude-fable-5-1", "claude-opus-4-8", 45);
+        assert!(expired.contains("a timeout, not a decision") && expired.contains("45s"));
+        assert!(expired.contains("stays on claude-fable-5-1"));
+        let unasked = refusal_switch_unasked_notice("claude-fable-5-1", "claude-opus-4-8");
+        assert!(unasked.contains("not a yes") && unasked.contains("stays on claude-fable-5-1"));
         assert!(refusal_cross_provider_warn("gpt-5.6-sol").contains("gpt-5.6-sol on another provider"));
         assert!(refusal_prearm_warn(Some("gpt-5.6-sol"), 2, std::time::Duration::from_secs(30 * 60)).contains("continuing this session on gpt-5.6-sol for ~30m"));
         // No model → the generic constant, which names no lineup.

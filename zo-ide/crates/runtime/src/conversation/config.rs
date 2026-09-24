@@ -463,6 +463,14 @@ where
         self.attendance = attendance;
     }
 
+    /// The refusal ladder's switching mode for the turns this runtime runs
+    /// ([`ClassifierFallback`]) — the setting, under the launch's declared
+    /// mode when there is one. The host sets it every turn, beside the
+    /// refusal fallback client.
+    pub fn set_classifier_fallback(&mut self, setting: ClassifierFallback) {
+        self.classifier_fallback = declared_classifier_fallback().unwrap_or(setting);
+    }
+
     /// Set or clear the session goal (`/goal`). Mirrored into the persisted
     /// session header immediately — goal flips are rare and a crash before the
     /// next message append would otherwise lose the goal a resume should
@@ -921,6 +929,10 @@ where
         self.refusal_prearm_notice_pending = false;
         self.refusal_prearm_notice_latched = false;
         self.refusal_context_clean_used = false;
+        // A new model world answers its own refusals: what the person agreed
+        // to, and which category cooled the old one, were about that model.
+        self.refusal_dry_category = None;
+        self.refusal_switch_consented_for_session = false;
         self.context_policy = ContextPolicy::for_model(Some(model))
             .with_full_compaction_override(self.full_compaction_override_percent);
         self.set_context_window(::api::context_window_for_model(model));
@@ -1326,6 +1338,81 @@ pub fn declared_attendance() -> Attendance {
         1 => Attendance::Attended,
         _ => Attendance::Unattended,
     }
+}
+
+/// What the refusal ladder does at its model-switching rungs when a
+/// provider's safety classifier declines a turn (t-6747) —
+/// `smart.classifierFallback`, and the `--classifier-fallback` flag over it.
+///
+/// The same choice Claude Code puts behind `switchModelsOnFlag` ("When
+/// safeguards flag a message, automatically switch to a different model to
+/// keep chatting. When off, your session will pause instead."), in three
+/// words: a model a person chose is a binding, so the default asks the person
+/// before this turn leaves it — and a question nobody answers, or nobody can
+/// be asked, is NOT a yes (t-7153): the turn stays on the chosen model and
+/// says why. A session that should switch with nobody watching is run with
+/// `auto` — what the window gives a summoned zo worker whose model it did
+/// not pin (`off` when it did). The pause that stood w-5770 still for 136
+/// minutes (2026-09-21) was Claude Code's dialog, which the window reads.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClassifierFallback {
+    /// Never switch models for a refusal: one same-model retry, then the
+    /// refusal is surfaced.
+    Off,
+    /// Ask the person at the keyboard before a switch; unattended, stay.
+    #[default]
+    Ask,
+    /// Switch to the category's route at once, and say so.
+    Auto,
+}
+
+impl ClassifierFallback {
+    /// Every mode, in the order a setting or flag spells them.
+    pub const ALL: [Self; 3] = [Self::Off, Self::Ask, Self::Auto];
+
+    /// The word the setting and the flag carry.
+    #[must_use]
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Ask => "ask",
+            Self::Auto => "auto",
+        }
+    }
+
+    /// The mode a word names, when it names one.
+    #[must_use]
+    pub fn from_word(word: &str) -> Option<Self> {
+        let word = word.trim();
+        Self::ALL
+            .into_iter()
+            .find(|mode| mode.word().eq_ignore_ascii_case(word))
+    }
+}
+
+/// The mode this process was launched with (`--classifier-fallback`), which
+/// wins over the setting for every runtime the process builds — a window
+/// summons a zo worker with `auto` because nobody answers its questions.
+/// `0` is none declared.
+static DECLARED_CLASSIFIER_FALLBACK: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+/// Declare the process's classifier-fallback mode (the launch flag).
+pub fn declare_classifier_fallback(mode: ClassifierFallback) {
+    let slot = ClassifierFallback::ALL
+        .iter()
+        .position(|held| *held == mode)
+        .map_or(0, |at| u8::try_from(at + 1).unwrap_or(0));
+    DECLARED_CLASSIFIER_FALLBACK.store(slot, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The mode the launch declared, if it declared one.
+#[must_use]
+pub fn declared_classifier_fallback() -> Option<ClassifierFallback> {
+    let slot = DECLARED_CLASSIFIER_FALLBACK.load(std::sync::atomic::Ordering::Relaxed);
+    usize::from(slot)
+        .checked_sub(1)
+        .and_then(|at| ClassifierFallback::ALL.get(at).copied())
 }
 
 /// Default wall-clock budget of an UNATTENDED turn: 60 minutes. Generous

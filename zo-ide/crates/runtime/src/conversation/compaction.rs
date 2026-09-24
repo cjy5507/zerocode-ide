@@ -2142,7 +2142,8 @@ impl<C: ApiClient, T: ToolExecutor> ConversationRuntime<C, T> {
                 | AssistantEvent::ThoughtSignature(_)
                 | AssistantEvent::ProviderState(_)
                 | AssistantEvent::ReasoningReplay(_)
-                | AssistantEvent::Model(_) => {}
+                | AssistantEvent::Model(_)
+                | AssistantEvent::RefusalCategory(_) => {}
             }
         }
 

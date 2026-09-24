@@ -84,17 +84,40 @@ fn the_wall_witness_is_asked_beside_the_stall_probe_and_outside_the_team_table()
     }
     let quiet = super::support::block_after(&tools, "fn quiet_since_output(");
     assert!(quiet.contains("QUIET_GRACE_MS") && quiet.contains("worker_started_ms"));
-    let fenced = super::support::block_after(&tools, "fn with_quota_wall_observation(");
+    // The retirement fence is one helper both witnesses are read under — the
+    // wall's and the classifier decline's (t-6747).
+    let fence = super::support::block_after(&tools, "fn with_quiet_screen(");
     for evidence in [
         "pane_states()",
         "lock_pty(&held)",
         "quiet_since_output(",
+        "observe(&screen, since_ms)",
+    ] {
+        assert!(
+            fence.contains(evidence),
+            "the retirement fence lost {evidence}"
+        );
+    }
+    let fenced = super::support::block_after(&tools, "fn with_quota_wall_observation(");
+    for evidence in [
+        "self.with_quiet_screen(",
         "quota_wall::marker_for(",
         "commit(marker)",
     ] {
         assert!(
             fenced.contains(evidence),
-            "the retirement fence lost {evidence}"
+            "the wall's fenced reading lost {evidence}"
+        );
+    }
+    let declined = super::support::block_after(&tools, "fn with_classifier_decline_observation(");
+    for evidence in [
+        "self.with_quiet_screen(",
+        "quota_wall::decline_reading_for(",
+        "commit(reading, since_ms)",
+    ] {
+        assert!(
+            declined.contains(evidence),
+            "the decline's fenced reading lost {evidence}"
         );
     }
     let marker = super::support::block_after(&tools, "fn quota_wall_marker(");
@@ -244,7 +267,7 @@ fn the_handover_walk_is_three_argv_steps_through_the_one_door_in_order() {
         "\"--retry-of\".to_string()",
         "\"--inherit-checkout\".to_string()",
         "\"--reason\".to_string()",
-        "\"quota-wall\".to_string()",
+        "plan.cause.reason().to_string()",
         "\"--retry-request\".to_string()",
         "handover_paragraph(plan,",
         "actor.handover_step(",
@@ -291,15 +314,25 @@ fn the_handover_walk_is_three_argv_steps_through_the_one_door_in_order() {
         "the walk runs before the wall is witnessed"
     );
     let core = core_source("orchestration.rs");
+    // The stop's reason is the cause's own word, one per cause (t-6747).
+    let reasons =
+        super::support::block_after(&core, "pub const fn reason(&self) -> &'static str {");
+    assert!(
+        reasons.contains("Self::QuotaWall { .. } => \"quota-wall\"")
+            && reasons.contains("Self::ClassifierDecline { .. } => \"classifier-decline\""),
+        "a handover's stop lost its cause's word:\n{reasons}"
+    );
     let plan = super::support::block_after(&core, "fn handover_candidate<");
     for needed in [
         "dispatch.is_open()",
         "worker.taken_over",
         "handover_consumes_attempt",
         "QUOTA_POLICY.handover_max",
-        // The ladder's earlier rungs hold it (t-6427).
+        // The ladder's earlier rungs hold it (t-6427) — the wait rung is a
+        // wall's own, so a classifier decline skips it (t-6747).
+        "news == MessageKind::QuotaWalled",
         "ladder_holds(run, worker, dispatch_id, QuotaWallRung::Handover, now_ms)",
-        "effective_handover_order(run, worker)",
+        "effective_handover_order(run, worker, news)",
     ] {
         assert!(
             plan.contains(needed),
@@ -524,6 +557,41 @@ fn the_orchestration_guide_teaches_the_transient_error_order() {
         "`interrupted`",
         "at most three",
         "went_quiet",
+    ] {
+        assert!(
+            skill.contains(needed),
+            "the orchestration guide no longer teaches `{needed}`"
+        );
+    }
+}
+
+/// The guide teaches the classifier decline's ladder in the words the
+/// ledger uses (t-6747): its news and its row, the order a coordinator
+/// declares, the stop's own reason, and what never to do about a decline.
+#[test]
+fn the_orchestration_guide_teaches_the_classifier_decline_order() {
+    let skill = include_str!("../../../../skills/orchestration/SKILL.md");
+    for needed in [
+        "`classifier_declined`",
+        "`model_deviated`",
+        "handover-policy --on-classifier-decline",
+        "--reason classifier-decline`",
+        "TWO witnesses",
+        "15 times in 15",
+        "nobody is handed the declined",
+        "never paste a picture of the",
+        "`smart.classifierFallback`",
+        // t-7153: a pinned worker's CLI never switches by itself, a screen
+        // alone is diagnostic news, the walk ends the worker only on the
+        // decline it was planned for, and silence is not a yes.
+        "summoned with `--model` is pinned",
+        "`screenOnly: true`",
+        "only on the decline it was planned",
+        "is NOT a yes",
+        // t-7153 round 3: a notice is a record's, and a switch is the
+        // attempt's it was made in.
+        "arrives once per record",
+        "for the attempt it was",
     ] {
         assert!(
             skill.contains(needed),

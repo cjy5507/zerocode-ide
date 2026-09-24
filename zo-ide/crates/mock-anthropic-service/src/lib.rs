@@ -775,6 +775,7 @@ fn text_message_response(id: &str, text: &str) -> MessageResponse {
         model: DEFAULT_MODEL.to_string(),
         stop_reason: Some("end_turn".to_string()),
         stop_sequence: None,
+        stop_details: None,
         usage: Usage {
             input_tokens: 10,
             cache_creation_input_tokens: 0,
@@ -805,6 +806,7 @@ fn text_message_response_with_usage(
         model: DEFAULT_MODEL.to_string(),
         stop_reason: Some("end_turn".to_string()),
         stop_sequence: None,
+        stop_details: None,
         usage: Usage {
             input_tokens,
             cache_creation_input_tokens: 0,
@@ -857,6 +859,7 @@ fn tool_message_response_many(id: &str, tool_uses: &[ToolUseMessage<'_>]) -> Mes
         model: DEFAULT_MODEL.to_string(),
         stop_reason: Some("tool_use".to_string()),
         stop_sequence: None,
+        stop_details: None,
         usage: Usage {
             input_tokens: 10,
             cache_creation_input_tokens: 0,

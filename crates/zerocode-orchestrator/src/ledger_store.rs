@@ -601,11 +601,13 @@ fn bytes_held(projection: &LedgerProjectionV1) -> u64 {
                     seat.seat.len() as u64
                         + seat.actor.as_ref().map_or(0, |actor| actor.len() as u64)
                 })
-                + row
-                    .handover
-                    .as_ref()
-                    .and_then(|policy| policy.on_quota_wall.as_ref())
-                    .map_or(0, pinned_bytes)
+                + row.handover.as_ref().map_or(0, |policy| {
+                    [&policy.on_quota_wall, &policy.on_classifier_decline]
+                        .into_iter()
+                        .flatten()
+                        .map(pinned_bytes)
+                        .sum::<u64>()
+                })
         })
         .sum();
     let tasks: u64 = projection
@@ -3380,6 +3382,11 @@ mod tests {
             wip_commit: true,
             on_transient_error: None,
             quota_wait: true,
+            on_classifier_decline: Some(Pinned {
+                agent: "claude".to_string(),
+                model: Some("claude-opus-4-8".to_string()),
+                effort: None,
+            }),
             armed_ms: 8,
         });
         projection.workers[0].on_quota_wall = Some(Pinned {
@@ -3413,6 +3420,11 @@ mod tests {
             wip_commit: false,
             on_transient_error: None,
             quota_wait: false,
+            on_classifier_decline: Some(Pinned {
+                agent: "zo".to_string(),
+                model: None,
+                effort: None,
+            }),
             armed_ms: 1,
         });
         projection.workers[0].on_quota_wall = Some(Pinned {
@@ -3422,8 +3434,12 @@ mod tests {
         });
         assert_eq!(
             bytes_held(&projection) - without,
-            ("claude".len() + "fable-5-1".len() + "codex".len() + "gpt-5".len() + "high".len())
-                as u64,
+            ("claude".len()
+                + "fable-5-1".len()
+                + "zo".len()
+                + "codex".len()
+                + "gpt-5".len()
+                + "high".len()) as u64,
             "handover text is invisible to bytes_held"
         );
     }

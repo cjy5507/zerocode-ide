@@ -36,6 +36,7 @@ fn message_start() -> StreamEvent {
             model: "claude-test".into(),
             stop_reason: None,
             stop_sequence: None,
+            stop_details: None,
             usage: Usage {
                 input_tokens: 11,
                 cache_creation_input_tokens: 0,
@@ -78,6 +79,7 @@ fn message_delta(output_tokens: u32) -> StreamEvent {
         delta: MessageDelta {
             stop_reason: Some("end_turn".into()),
             stop_sequence: None,
+            stop_details: None,
             thought_signature: None,
             reasoning_replay: None,
         },
@@ -162,6 +164,7 @@ fn message_start_with_content(content: Vec<OutputContentBlock>) -> StreamEvent {
             model: "gemini-test".into(),
             stop_reason: None,
             stop_sequence: None,
+            stop_details: None,
             usage: Usage {
                 input_tokens: 7,
                 cache_creation_input_tokens: 0,
@@ -237,6 +240,7 @@ async fn message_delta_thought_signature_emits_provider_state_event() {
             delta: MessageDelta {
                 stop_reason: Some("end_turn".into()),
                 stop_sequence: None,
+                stop_details: None,
                 thought_signature: Some("SIG_STREAM".into()),
                 reasoning_replay: None,
             },
@@ -398,6 +402,7 @@ async fn assistant_events_preserve_anthropic_output_tokens_details() {
             delta: MessageDelta {
                 stop_reason: Some("end_turn".into()),
                 stop_sequence: None,
+                stop_details: None,
                 thought_signature: None,
                 reasoning_replay: None,
             },

@@ -1318,12 +1318,13 @@ async fn streaming_stop_hook_followup_reinjects_until_bounded() {
 }
 
 /// Sync/headless `run_turn` path: a Fable safety-classifier refusal
-/// (`stop_reason: "refusal"`) must fall back once to the current Opus catalog head, drop the refused
-/// partial from history, and record the fallback model's answer. This mirrors
-/// the streaming-seam coverage for the non-TUI loop (headless `-p` and
-/// spawned sub-agents both drive `run_turn`).
+/// (`stop_reason: "refusal"`, category `cyber`) is retried once on the same
+/// model, then continued on the category's route, the refused partial dropped
+/// from history and the route's answer recorded (t-6747). This mirrors the
+/// streaming-seam coverage for the non-TUI loop (headless `-p` and spawned
+/// sub-agents both drive `run_turn`), where nobody is asked.
 #[test]
-fn sync_refusal_on_fable_falls_back_to_opus_and_retries_once() {
+fn sync_refusal_on_fable_retries_once_then_continues_on_the_route() {
     struct SyncRefusalThenAnswerApi {
         seen_overrides: Arc<Mutex<Vec<Option<String>>>>,
     }
@@ -1334,10 +1335,11 @@ fn sync_refusal_on_fable_falls_back_to_opus_and_retries_once() {
                 seen.push(request.model_override.clone());
                 seen.len()
             };
-            if call == 1 {
+            if call <= 2 {
                 Ok(vec![
                     AssistantEvent::TextDelta("REFUSED-SYNC-PARTIAL".to_string()),
                     AssistantEvent::StopReason("refusal".to_string()),
+                    AssistantEvent::RefusalCategory("cyber".to_string()),
                     AssistantEvent::MessageStop,
                 ])
             } else {
@@ -1361,19 +1363,25 @@ fn sync_refusal_on_fable_falls_back_to_opus_and_retries_once() {
         vec!["system".to_string()],
     );
     runtime.set_context_model("claude-fable-5");
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
 
     let summary = runtime
         .run_turn("hi", None)
         .expect("fable refusal should fall back to opus and complete");
 
-    // Two calls: the refused Fable turn, then the current Opus-head retry.
+    // Three calls: the declined Fable turn, its same-model retry, the route.
+    let route = api::refusal_route_candidates("claude-fable-5", Some("cyber"))
+        .into_iter()
+        .next()
+        .expect("the catalog routes a cyber decline on Fable");
     let seen = seen_overrides.lock().expect("lock").clone();
     assert_eq!(
         seen,
-        vec![None, Some(api::latest_anthropic_model().to_string())],
-        "the retry must carry the current Opus catalog override; got {seen:?}"
+        vec![None, None, Some(route)],
+        "the same model once, then the route's override; got {seen:?}"
     );
-    assert_eq!(summary.iterations, 2);
+    assert_eq!(summary.iterations, 3);
 
     // Refused partial dropped; Opus answer recorded.
     let history: String = runtime

@@ -738,12 +738,32 @@ async fn async_truncated_text_only_turn_is_continued_not_ended() {
     )));
 }
 
-// --- Refusal → latest Opus model fallback (Anthropic client-side fallback guidance) ---
+// --- Refusal → the same model once, then the category's route (t-6747) ---
 
 const REFUSED_PARTIAL: &str = "REFUSED-PARTIAL-must-not-persist";
 
+/// Where the catalog routes a `cyber` decline on `model` on its own provider —
+/// read from the catalog, never spelled here.
+fn cyber_route(model: &str) -> String {
+    let provider = api::detect_provider_kind(model);
+    api::refusal_route_candidates(model, Some("cyber"))
+        .into_iter()
+        .find(|candidate| api::detect_provider_kind(candidate) == provider)
+        .expect("the catalog routes a cyber decline on this lineup")
+}
+
+/// Where it routes the same decline across providers, first.
+fn cyber_route_across(model: &str) -> String {
+    let provider = api::detect_provider_kind(model);
+    api::refusal_route_candidates(model, Some("cyber"))
+        .into_iter()
+        .find(|candidate| api::detect_provider_kind(candidate) != provider)
+        .expect("the catalog routes a cyber decline across providers too")
+}
+
 /// Records the `model_override` on every request, streams a refused partial on
-/// the first call (`stop_reason: "refusal"`), and a clean answer on later calls.
+/// the first two calls (`stop_reason: "refusal"`, category `cyber`) — the
+/// declined request and its same-model retry — and a clean answer after.
 /// The refused partial lets a test prove it is dropped from history.
 struct RefusalThenAnswerAsyncApi {
     seen_overrides: std::sync::Mutex<Vec<Option<String>>>,
@@ -762,9 +782,9 @@ impl AsyncApiClient for RefusalThenAnswerAsyncApi {
                 seen.push(request.model_override.clone());
                 seen.len() - 1
             };
-            if call == 0 {
+            if call < 2 {
                 // Stream a partial, then a refusal stop reason: the runtime must
-                // drop this partial and retry on the fallback model.
+                // drop this partial and retry — the same model, then the route.
                 render_tx
                     .send(RenderBlock::TextDelta {
                         id: text_block_id,
@@ -776,6 +796,7 @@ impl AsyncApiClient for RefusalThenAnswerAsyncApi {
                 Ok(vec![
                     AssistantEvent::TextDelta(REFUSED_PARTIAL.to_string()),
                     AssistantEvent::StopReason("refusal".to_string()),
+                    AssistantEvent::RefusalCategory("cyber".to_string()),
                     AssistantEvent::MessageStop,
                 ])
             } else {
@@ -797,9 +818,11 @@ impl AsyncApiClient for RefusalThenAnswerAsyncApi {
     }
 }
 
-/// Refuses on every call regardless of the model, recording each override.
+/// Refuses on every call regardless of the model, recording each override —
+/// in `category`, when the test names one.
 struct AlwaysRefuseAsyncApi {
     seen_overrides: std::sync::Mutex<Vec<Option<String>>>,
+    category: Option<&'static str>,
 }
 
 impl AsyncApiClient for AlwaysRefuseAsyncApi {
@@ -814,10 +837,10 @@ impl AsyncApiClient for AlwaysRefuseAsyncApi {
                 .lock()
                 .expect("lock")
                 .push(request.model_override.clone());
-            Ok(vec![
-                AssistantEvent::StopReason("refusal".to_string()),
-                AssistantEvent::MessageStop,
-            ])
+            let mut events = vec![AssistantEvent::StopReason("refusal".to_string())];
+            runtime::push_refusal_category(&mut events, self.category);
+            events.push(AssistantEvent::MessageStop);
+            Ok(events)
         })
     }
 }
@@ -849,7 +872,7 @@ fn history_text(runtime: &ConversationRuntime<ExplodingSyncApi, StaticToolExecut
 }
 
 #[tokio::test]
-async fn refusal_on_fable_falls_back_to_opus_and_retries_once() {
+async fn refusal_on_fable_retries_once_then_continues_on_the_categorys_route() {
     let _env = hermetic_env();
     let mut runtime = ConversationRuntime::new(
         Session::new(),
@@ -859,6 +882,8 @@ async fn refusal_on_fable_falls_back_to_opus_and_retries_once() {
         vec!["system".to_string()],
     );
     runtime.set_context_model("claude-fable-5");
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
     let client = Arc::new(RefusalThenAnswerAsyncApi {
         seen_overrides: std::sync::Mutex::new(Vec::new()),
     });
@@ -870,28 +895,29 @@ async fn refusal_on_fable_falls_back_to_opus_and_retries_once() {
     let summary = runtime
         .run_turn_streaming("hi", tx, prompter)
         .await
-        .expect("fable refusal should fall back to opus and complete");
+        .expect("fable refusal should continue on the route and complete");
     let blocks = drain.await.expect("drain");
 
-    // Exactly two model calls: the refused Fable turn, then the Opus retry.
+    // Three calls: the declined Fable turn, its same-model retry, then the
+    // category's route.
+    let route = cyber_route("claude-fable-5");
     let seen = client.seen_overrides.lock().expect("lock").clone();
     assert_eq!(
         seen,
-        vec![None, Some(api::latest_anthropic_model().to_string())],
-        "the retry must carry the latest Opus model model override; got {seen:?}"
+        vec![None, None, Some(route.clone())],
+        "the same model once, then the route's override; got {seen:?}"
     );
-    assert_eq!(summary.iterations, 2);
+    assert_eq!(summary.iterations, 3);
 
-    // A System warn line announced the fallback, naming the Opus head it
-    // retried on (the notice carries the catalog target, not a hardcoded name).
-    let opus = api::latest_anthropic_model();
+    // The receipt names the model it left and the one it continues on (the
+    // notice carries the catalog's route, not a hardcoded name).
     assert!(
         blocks.iter().any(|block| matches!(
             block,
             RenderBlock::System { level: SystemLevel::Warn, text, .. }
-                if text.contains(opus) && text.contains("retrying on")
+                if text.contains(&route) && text.contains("instead of claude-fable-5")
         )),
-        "expected an Opus fallback warn naming {opus}, got {blocks:?}"
+        "expected a route receipt naming {route}, got {blocks:?}"
     );
 
     // The refused partial is NOT in history; the Opus answer is.
@@ -917,8 +943,11 @@ async fn refusal_after_fallback_is_surfaced_not_looped() {
         vec!["system".to_string()],
     );
     runtime.set_context_model("claude-fable-5");
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
     let client = Arc::new(AlwaysRefuseAsyncApi {
         seen_overrides: std::sync::Mutex::new(Vec::new()),
+        category: Some("cyber"),
     });
     runtime.set_async_api_client(client.clone());
 
@@ -931,15 +960,15 @@ async fn refusal_after_fallback_is_surfaced_not_looped() {
         .expect("a doubly-refused turn should end with a notice, not error");
     let blocks = drain.await.expect("drain");
 
-    // Fable refused, we fell back to Opus, Opus refused too — exactly two calls,
-    // then the fallback is capped (no infinite loop).
+    // Fable refused, the same model refused again, the route refused too —
+    // exactly three calls, then the ladder is spent (no infinite loop).
     let seen = client.seen_overrides.lock().expect("lock").clone();
     assert_eq!(
         seen,
-        vec![None, Some(api::latest_anthropic_model().to_string())],
-        "the fallback must fire once; a second refusal must not loop, got {seen:?}"
+        vec![None, None, Some(cyber_route("claude-fable-5"))],
+        "each rung fires once; a refusal on the route must not loop, got {seen:?}"
     );
-    assert_eq!(summary.iterations, 2);
+    assert_eq!(summary.iterations, 3);
     assert!(
         blocks.iter().any(|block| matches!(
             block,
@@ -965,8 +994,12 @@ async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
     // Already on Opus: one retry on the same model (no override), then the
     // refusal is surfaced honestly rather than looping or swapping models.
     runtime.set_context_model(api::latest_anthropic_model());
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
+    // A refusal that names no category: it stands after the one retry.
     let client = Arc::new(AlwaysRefuseAsyncApi {
         seen_overrides: std::sync::Mutex::new(Vec::new()),
+        category: None,
     });
     runtime.set_async_api_client(client.clone());
 
@@ -990,11 +1023,10 @@ async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
     // The retry budget is per PUBLIC turn, not per session: a second turn on
     // the same runtime gets its own same-model retry (this pinned a real bug —
     // the streaming entry point forgot the reset, so a session spent its one
-    // retry on the first refusal ever and surfaced every later one). This turn
-    // ALSO takes the P3 context-cleaning retry: turn one surfaced a refusal, so
-    // an earlier declined exchange now sits in history dragging the classifier
-    // down, and with no provider fallback installed the turn drops it and asks
-    // once more before surfacing. So turn two is three calls, not two.
+    // retry on the first refusal ever and surfaced every later one). A refusal
+    // naming no category takes no context-cleaning retry (t-6747): only a
+    // category the provider routes is walked past its first answer. So turn
+    // two is two calls.
     let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
     let drain = drain_task(rx);
     let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
@@ -1006,10 +1038,10 @@ async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
     let seen = client.seen_overrides.lock().expect("lock").clone();
     assert_eq!(
         seen.len(),
-        5,
-        "turn two: same-model retry (2) then one context-cleaning retry (1); got {seen:?}"
+        4,
+        "turn two: the declined request and its same-model retry; got {seen:?}"
     );
-    assert_eq!(summary.iterations, 3);
+    assert_eq!(summary.iterations, 2);
 }
 
 #[tokio::test]
@@ -1023,6 +1055,8 @@ async fn non_refusal_stop_reason_on_fable_is_unaffected() {
         vec!["system".to_string()],
     );
     runtime.set_context_model("claude-fable-5");
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
     // Reuse RefusalThenAnswer but never reach call 0's refusal path: a clean
     // end_turn on the first call proves the refusal gate does not misfire.
     let client = Arc::new(ScriptedAsyncApi::new());
@@ -1087,6 +1121,7 @@ impl AsyncApiClient for RefuseWhilePoisonAsyncApi {
             if poisoned {
                 return Ok(vec![
                     AssistantEvent::StopReason("refusal".to_string()),
+                    AssistantEvent::RefusalCategory("cyber".to_string()),
                     AssistantEvent::MessageStop,
                 ]);
             }
@@ -1115,15 +1150,20 @@ fn opus_runtime() -> ConversationRuntime<ExplodingSyncApi, StaticToolExecutor> {
         PermissionPolicy::new(PermissionMode::DangerFullAccess),
         vec!["system".to_string()],
     );
-    // Opus has no same-provider fallback in the catalog — its refusal ladder is
-    // the same-model retry then the cross-provider handoff.
+    // Opus carries Fable's classifiers: its `cyber` ladder is the same model,
+    // the category's route on its own provider, then the cross-provider
+    // handoff (t-6747).
     runtime.set_context_model(api::latest_anthropic_model());
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
     runtime
 }
 
-/// Opus refuses, the same-model retry refuses too, and the turn is handed to the
-/// installed cross-provider refusal client — which answers. A warn line names
-/// that peer, and the wire badge shows it as a refusal fallback.
+/// Opus refuses, the same-model retry refuses, the category's route on its
+/// own provider refuses too, and the turn is handed to the installed
+/// cross-provider refusal client the category routes to — which answers. A
+/// warn line names that peer, and the wire badge shows it as a refusal
+/// fallback.
 #[tokio::test]
 async fn opus_refusal_hands_the_turn_to_the_cross_provider_client() {
     use runtime::message_stream::WireModelSource;
@@ -1132,10 +1172,12 @@ async fn opus_refusal_hands_the_turn_to_the_cross_provider_client() {
     let mut runtime = opus_runtime();
     let main = Arc::new(AlwaysRefuseAsyncApi {
         seen_overrides: std::sync::Mutex::new(Vec::new()),
+        category: Some("cyber"),
     });
     runtime.set_async_api_client(main.clone());
     let peer = Arc::new(RecordingAnswerAsyncApi::new("peer answer"));
-    runtime.set_refusal_fallback_client(Some((peer.clone(), "gpt-peer-x".to_string())));
+    let across = cyber_route_across(api::latest_anthropic_model());
+    runtime.set_refusal_fallback_client(Some((peer.clone(), across.clone())));
 
     let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
     let drain = drain_task(rx);
@@ -1146,11 +1188,14 @@ async fn opus_refusal_hands_the_turn_to_the_cross_provider_client() {
         .expect("a doubly-refused Opus turn should continue on the peer, not fail");
     let blocks = drain.await.expect("drain");
 
-    // Opus refused twice (the initial call and its same-model retry), then the
-    // peer carried the turn once.
-    assert_eq!(main.seen_overrides.lock().expect("lock").len(), 2);
+    // The main client was asked three times (the declined request, its
+    // same-model retry, the route), then the peer carried the turn once.
+    assert_eq!(
+        *main.seen_overrides.lock().expect("lock"),
+        vec![None, None, Some(cyber_route(api::latest_anthropic_model()))]
+    );
     assert_eq!(peer.call_count(), 1, "the cross-provider refusal client answered");
-    assert_eq!(summary.iterations, 3);
+    assert_eq!(summary.iterations, 4);
     assert!(history_text(&runtime).contains("peer answer"));
 
     // A warn line named the peer, and the wire badge showed it as a refusal
@@ -1159,7 +1204,7 @@ async fn opus_refusal_hands_the_turn_to_the_cross_provider_client() {
         blocks.iter().any(|block| matches!(
             block,
             RenderBlock::System { level: SystemLevel::Warn, text, .. }
-                if text.contains("gpt-peer-x") && text.contains("another provider")
+                if text.contains(&across) && text.contains("another provider")
         )),
         "expected a cross-provider refusal warn naming the peer, got {blocks:?}"
     );
@@ -1167,25 +1212,28 @@ async fn opus_refusal_hands_the_turn_to_the_cross_provider_client() {
         blocks.iter().any(|block| matches!(
             block,
             RenderBlock::WireModel(wire)
-                if wire.model == "gpt-peer-x" && wire.source == WireModelSource::RefusalFallback
+                if wire.model == across && wire.source == WireModelSource::RefusalFallback
         )),
         "expected the peer announced as a refusal fallback on the wire, got {blocks:?}"
     );
 }
 
-/// After two consecutive refusal turns hand off cross-provider, the session
-/// pre-arms: a following short turn goes straight to the peer without hitting
-/// the refused Opus model at all (the sticky classifier never sees it).
+/// After two consecutive refusal turns, the session pre-arms the category's
+/// route: a following short turn never sends the refused Opus model its
+/// request (the sticky classifier never sees it) — its first request rides the
+/// route, and a pre-arm notice names it.
 #[tokio::test]
-async fn consecutive_cross_provider_refusals_prearm_the_next_turn_on_the_peer() {
+async fn consecutive_refusal_turns_prearm_the_next_turn_on_the_categorys_route() {
     let _env = hermetic_env();
     let mut runtime = opus_runtime();
     let main = Arc::new(AlwaysRefuseAsyncApi {
         seen_overrides: std::sync::Mutex::new(Vec::new()),
+        category: Some("cyber"),
     });
     runtime.set_async_api_client(main.clone());
     let peer = Arc::new(RecordingAnswerAsyncApi::new("peer answer"));
-    runtime.set_refusal_fallback_client(Some((peer.clone(), "gpt-peer-x".to_string())));
+    let across = cyber_route_across(api::latest_anthropic_model());
+    runtime.set_refusal_fallback_client(Some((peer.clone(), across)));
 
     for turn in ["turn one", "turn two"] {
         let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
@@ -1194,31 +1242,34 @@ async fn consecutive_cross_provider_refusals_prearm_the_next_turn_on_the_peer() 
         runtime.run_turn_streaming(turn, tx, prompter).await.expect("turn completes on peer");
         let _ = drain.await;
     }
-    // Two refusal turns: Opus hit twice each (initial + same-model retry).
-    assert_eq!(main.seen_overrides.lock().expect("lock").len(), 4);
+    // Two refusal turns: the main client asked three times each (declined,
+    // same-model retry, route), the peer once each.
+    assert_eq!(main.seen_overrides.lock().expect("lock").len(), 6);
     assert_eq!(peer.call_count(), 2);
 
-    // The follow-up pre-arms: Opus is NOT hit again, the peer takes it from the
-    // first request, and a pre-arm notice names the peer.
+    // The follow-up pre-arms the route: its first request carries the route's
+    // override — the refused Opus model is never sent it — and a pre-arm notice
+    // names the route.
     let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
     let drain = drain_task(rx);
     let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
     runtime.run_turn_streaming("why", tx, prompter).await.expect("follow-up completes on peer");
     let blocks = drain.await.expect("drain");
 
+    let route = cyber_route(api::latest_anthropic_model());
+    let seen = main.seen_overrides.lock().expect("lock").clone();
     assert_eq!(
-        main.seen_overrides.lock().expect("lock").len(),
-        4,
-        "the pre-armed follow-up must NOT hit the refused Opus model"
+        seen.get(6),
+        Some(&Some(route.clone())),
+        "the pre-armed follow-up's first request rides the route: {seen:?}"
     );
-    assert_eq!(peer.call_count(), 3, "the follow-up ran on the peer from the first request");
     assert!(
         blocks.iter().any(|block| matches!(
             block,
             RenderBlock::System { text, .. }
-                if text.contains("gpt-peer-x") && text.contains("continuing this session")
+                if text.contains(&route) && text.contains("continuing this session")
         )),
-        "expected a pre-arm notice naming the peer, got {blocks:?}"
+        "expected a pre-arm notice naming the route, got {blocks:?}"
     );
 }
 
@@ -1245,8 +1296,8 @@ async fn context_cleaning_retry_recovers_when_the_earlier_exchange_is_dropped() 
     assert!(history_text(&runtime).contains("POISON"));
 
     // The follow-up refuses (poison still in context) through the same-model
-    // retry, then the context-cleaning retry drops the earlier exchange and the
-    // clean re-ask answers.
+    // retry and the route, then the context-cleaning retry drops the earlier
+    // exchange and the clean re-ask answers.
     let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
     let drain = drain_task(rx);
     let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
@@ -1265,7 +1316,10 @@ async fn context_cleaning_retry_recovers_when_the_earlier_exchange_is_dropped() 
         )),
         "expected a context-cleaning notice, got {blocks:?}"
     );
-    assert_eq!(summary.iterations, 3, "initial refuse, same-model retry, clean re-ask");
+    assert_eq!(
+        summary.iterations, 4,
+        "initial refuse, same-model retry, the route, clean re-ask"
+    );
 }
 
 /// The give-up path: no fallback and the context clean does not help either, so
@@ -1277,6 +1331,7 @@ async fn a_refusal_with_no_fallback_surfaces_after_the_context_clean() {
     // Always refuses regardless of context — the clean cannot help.
     let client = Arc::new(AlwaysRefuseAsyncApi {
         seen_overrides: std::sync::Mutex::new(Vec::new()),
+        category: Some("cyber"),
     });
     runtime.set_async_api_client(client.clone());
 
@@ -1288,8 +1343,9 @@ async fn a_refusal_with_no_fallback_surfaces_after_the_context_clean() {
     let _ = drain.await;
     let after_one = client.seen_overrides.lock().expect("lock").len();
 
-    // Turn two: same-model retry, then the context clean, then surface — three
-    // calls, ending in a surfaced notice.
+    // Turn two: the declined request, the same-model retry, the route, then
+    // the context clean, then surface — four calls, ending in a surfaced
+    // notice.
     let (tx, rx) = mpsc::channel(DEFAULT_STREAMING_CHANNEL_CAPACITY);
     let drain = drain_task(rx);
     let prompter: Arc<dyn PermissionPrompter> = Arc::new(DenyPrompter);
@@ -1298,8 +1354,8 @@ async fn a_refusal_with_no_fallback_surfaces_after_the_context_clean() {
 
     assert_eq!(
         client.seen_overrides.lock().expect("lock").len() - after_one,
-        3,
-        "turn two: same-model retry, context clean, then surface"
+        4,
+        "turn two: declined, same-model retry, route, context clean, then surface"
     );
     assert!(
         blocks.iter().any(|block| matches!(

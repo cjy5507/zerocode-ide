@@ -440,6 +440,7 @@ mod tests {
                     delta: MessageDelta {
                         stop_reason: Some("tool_use".to_string()),
                         stop_sequence: None,
+                        stop_details: None,
                         thought_signature: None,
                         reasoning_replay: None,
                     },

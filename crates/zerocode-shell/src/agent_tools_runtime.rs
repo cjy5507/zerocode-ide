@@ -682,6 +682,48 @@ pub(super) fn shell_in_front_of(state: &AppState, term: TermId) -> bool {
     front == Some(true)
 }
 
+impl TeamWindow {
+    /// Hand `observe` a quiet worker pane's screen, read under the activity
+    /// locks that can invalidate it — the fence a handover's stop is judged
+    /// in. The actor holds the team incarnation before asking; hook state
+    /// and PTY output stay unchanged until `observe` returns (and, inside
+    /// it, whatever it commits answers). A pane that is working, or that
+    /// printed since the worker started, is observed as nothing — unless
+    /// `hook_outlived_ms` says how long a silent pty outlives the hook's
+    /// `working` ([`agent_teams::Host::decline_quiet_since`]).
+    fn with_quiet_screen(
+        &self,
+        term: TermId,
+        worker_started_ms: i64,
+        hook_outlived_ms: Option<i64>,
+        observe: &mut dyn FnMut(&str, i64),
+    ) {
+        let state = self.app.state::<AppState>();
+        let Some(held) = state.terminals().handle(term) else {
+            return;
+        };
+        let states = state.pane_states();
+        let working = states
+            .get(&term)
+            .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Working);
+        if working && hook_outlived_ms.is_none() {
+            return;
+        }
+        let pty = lock_pty(&held);
+        let now_ms = now_epoch_ms();
+        let Some(since_ms) =
+            quiet_since_output(pty.last_output_epoch_ms(), worker_started_ms, now_ms)
+        else {
+            return;
+        };
+        if working && hook_outlived_ms.is_some_and(|term| now_ms.saturating_sub(since_ms) < term) {
+            return;
+        }
+        let screen = pty.terminal().grid().visible_text();
+        observe(&screen, since_ms);
+    }
+}
+
 impl agent_teams::Host for TeamWindow {
     /// Who the agent in this terminal is, asked by the ledger road under its
     /// own guard. See [`receipt_actor_of`] for why the answer is a digest of
@@ -1485,6 +1527,26 @@ impl agent_teams::Host for TeamWindow {
         quiet_since_output(last_output, worker_started_ms, now_ms)
     }
 
+    fn decline_quiet_since(
+        &self,
+        term: TermId,
+        worker_started_ms: i64,
+        now_ms: i64,
+        hook_outlived_ms: i64,
+    ) -> Option<i64> {
+        if let Some(since) = self.quiet_since(term, worker_started_ms, now_ms) {
+            return Some(since);
+        }
+        // The hook says `working`: only a pty silent past its term outranks
+        // it — a turn that is really working redraws its spinner
+        // (`orchestration::note_paused_declines` has the numbers).
+        let state = self.app.state::<AppState>();
+        let held = state.terminals().handle(term)?;
+        let last_output = lock_pty(&held).last_output_epoch_ms();
+        quiet_since_output(last_output, worker_started_ms, now_ms)
+            .filter(|since| now_ms.saturating_sub(*since) >= hook_outlived_ms)
+    }
+
     fn capture(&self, term: TermId) -> Option<String> {
         let state = self.app.state::<AppState>();
         let held = state.terminals().handle(term)?;
@@ -1536,36 +1598,62 @@ impl agent_teams::Host for TeamWindow {
             .provider_session(term)
             .and_then(|session| session.transcript_path)
             .map(std::path::PathBuf::from);
-        let state = self.app.state::<AppState>();
-        let Some(held) = state.terminals().handle(term) else {
-            return;
-        };
-        // The actor holds the team incarnation before asking us. Keep hook
-        // state, PTY output and (inside commit) the usage cache unchanged
-        // until its durable settlement answers. Close runs after these drop.
-        let states = state.pane_states();
-        if states
-            .get(&term)
-            .is_some_and(|pane| pane.state == zerocode_core::hook::HookState::Working)
-        {
+        self.with_quiet_screen(term, worker_started_ms, None, &mut |screen, _| {
+            if let Some(marker) =
+                crate::quota_wall::marker_for(agent, Some(screen), transcript.as_deref())
+            {
+                commit(marker);
+            }
+        });
+    }
+
+    fn classifier_decline_reading(
+        &self,
+        term: TermId,
+        agent: &str,
+    ) -> Option<crate::quota_wall::DeclineReading> {
+        // The table is asked before the grid is copied: an agent nobody
+        // measured costs nothing per beat.
+        if !crate::quota_wall::has_rule(agent, crate::quota_wall::StallCause::ClassifierDecline) {
+            return None;
+        }
+        let transcript = self
+            .provider_session(term)
+            .and_then(|session| session.transcript_path)
+            .map(std::path::PathBuf::from);
+        let screen = self.capture(term);
+        crate::quota_wall::decline_reading_for(agent, screen.as_deref(), transcript.as_deref())
+    }
+
+    fn with_classifier_decline_observation(
+        &self,
+        term: TermId,
+        worker_started_ms: i64,
+        agent: &str,
+        commit: &mut dyn FnMut(crate::quota_wall::DeclineReading, i64),
+    ) {
+        if !crate::quota_wall::has_rule(agent, crate::quota_wall::StallCause::ClassifierDecline) {
             return;
         }
-        let pty = lock_pty(&held);
-        if quiet_since_output(
-            pty.last_output_epoch_ms(),
+        let transcript = self
+            .provider_session(term)
+            .and_then(|session| session.transcript_path)
+            .map(std::path::PathBuf::from);
+        let hook_outlived = Some(zerocode_core::orchestration::DECLINE_DIALOG_UNANSWERED_MS);
+        self.with_quiet_screen(
+            term,
             worker_started_ms,
-            now_epoch_ms(),
-        )
-        .is_none()
-        {
-            return;
-        }
-        let screen = pty.terminal().grid().visible_text();
-        if let Some(marker) =
-            crate::quota_wall::marker_for(agent, Some(&screen), transcript.as_deref())
-        {
-            commit(marker);
-        }
+            hook_outlived,
+            &mut |screen, since_ms| {
+                if let Some(reading) = crate::quota_wall::decline_reading_for(
+                    agent,
+                    Some(screen),
+                    transcript.as_deref(),
+                ) {
+                    commit(reading, since_ms);
+                }
+            },
+        );
     }
 
     fn focus(&self, term: TermId) -> bool {

@@ -1319,6 +1319,7 @@ impl GeminiStreamState {
                 model: self.model.clone(),
                 stop_reason: None,
                 stop_sequence: None,
+                stop_details: None,
                 usage: Usage {
                     input_tokens: 0,
                     cache_creation_input_tokens: 0,
@@ -1463,6 +1464,7 @@ impl GeminiStreamState {
                     .clone()
                     .or_else(|| Some("end_turn".to_string())),
                 stop_sequence: None,
+                stop_details: None,
                 thought_signature: encode_thought_signatures(&self.fc_signatures),
                 reasoning_replay: None,
             },
@@ -2517,6 +2519,7 @@ fn normalize_generate_content_response(
             .and_then(Value::as_str)
             .map(normalize_finish_reason),
         stop_sequence: None,
+        stop_details: None,
         usage: usage_from_response(response),
         request_id: Some(trace_id),
         thought_signature,

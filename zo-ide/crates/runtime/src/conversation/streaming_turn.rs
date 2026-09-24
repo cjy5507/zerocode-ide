@@ -169,6 +169,43 @@ fn permission_prompt_expired_reason(tool_name: &str, budget: std::time::Duration
     )
 }
 
+/// What came of a refusal question ([`ConversationRuntime::ask_refusal_question`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RefusalAnswer {
+    /// The person decided.
+    Decided(AsyncPermissionDecision),
+    /// Nobody answered within the prompt ceiling: a bound on the wait, not
+    /// a decision.
+    Unanswered,
+    /// The turn's abort rose while the question stood — or before its
+    /// answer was taken (t-7153): a question the person cancelled is
+    /// closed, and an answer that lands after the cancel — the prompt's
+    /// yes typed a moment too late, a responder released after the turn was
+    /// stopped — is an answer to a question that no longer stands, and
+    /// consents to nothing for this turn or the session.
+    Cancelled,
+}
+
+/// `asked`'s answer, unless the turn's abort flag rises first — or by the
+/// time the answer lands (t-7153): a decision is taken only while the
+/// question it answers still stands. Polled on the same slice as
+/// [`crate::retry::cancellable_sleep`], the way every wait of this turn
+/// watches its cancel flag.
+async fn until_answered_or_aborted<F: std::future::Future>(
+    asked: F,
+    abort: &crate::hooks::HookAbortSignal,
+) -> Option<F::Output> {
+    tokio::pin!(asked);
+    loop {
+        if abort.is_aborted() {
+            return None;
+        }
+        if let Ok(answered) = tokio::time::timeout(crate::retry::CANCEL_POLL_SLICE, &mut asked).await {
+            return (!abort.is_aborted()).then_some(answered);
+        }
+    }
+}
+
 // ============================================================================
 // Mid-generation steering re-issue (gen-abort)
 // ============================================================================
@@ -609,6 +646,9 @@ where
         // one retry on the first refusal ever and surface every later one.
         self.refusal_same_model_retry_used = false;
         self.refusal_context_clean_used = false;
+        self.refusal_switch_consented_for_turn = false;
+        self.refusal_switch_refused_for_turn = false;
+        self.refusal_images_asked_for_turn = false;
         // Reset the per-turn quota fallback, pre-arming onto it when the session
         // is still inside a recorded quota-dry cooldown (applies to internal
         // subturns too — a quota-dry session applies to every leg). See
@@ -790,6 +830,65 @@ where
         self.hook_abort_signal
             .is_aborted()
             .then(|| self.settle_streaming_abort(iteration, reason))
+    }
+
+    /// Put one question of the refusal ladder to the person (t-6747) through
+    /// the prompt every permission question uses — with the Notification hook
+    /// that pings them, and the prompt ceiling — and hear what came of it
+    /// ([`RefusalAnswer`]): their decision, nobody's within the ceiling, or
+    /// the turn's abort closing the question while it stood.
+    async fn ask_refusal_question(
+        &mut self,
+        question: crate::permission::PermissionRequest,
+        prompter: &dyn AsyncPermissionPrompter,
+    ) -> Result<RefusalAnswer, crate::permission::PermissionError> {
+        self.fire_lifecycle_hook(
+            HookEvent::Notification,
+            &serde_json::json!({
+                "message": format!("Zo asks: {}", question.reasoning),
+                "tool_name": question.tool,
+            }),
+        );
+        let abort = self.hook_abort_signal.clone();
+        let asked = until_answered_or_aborted(prompter.decide(question), &abort);
+        let answered = match permission_prompt_timeout() {
+            Some(budget) => match tokio::time::timeout(budget, asked).await {
+                Ok(answered) => answered,
+                Err(_) => return Ok(RefusalAnswer::Unanswered),
+            },
+            None => asked.await,
+        };
+        match answered {
+            None => Ok(RefusalAnswer::Cancelled),
+            Some(answered) => answered.map(RefusalAnswer::Decided),
+        }
+    }
+
+    /// A refusal question the turn's abort closed while it stood (t-7153):
+    /// the person's cancellation, settled as one — with nothing of the
+    /// question's answer, if one came, kept.
+    fn refusal_question_cancelled(&mut self, iteration: usize) -> StreamingTurnError {
+        self.settle_streaming_abort(iteration, "refusal question cancelled by abort signal")
+    }
+
+    /// A refusal question the host abandoned: an abort is the person's
+    /// cancellation; anything else ends the turn as the permission prompt's
+    /// abandonment does, with the turn's messages put back.
+    fn refusal_question_abandoned(
+        &mut self,
+        error: crate::permission::PermissionError,
+        iteration: usize,
+        message_count_before: usize,
+    ) -> StreamingTurnError {
+        if let Some(cancelled) =
+            self.cancel_streaming_turn_if_aborted(iteration, "refusal question interrupted by abort signal")
+        {
+            return cancelled;
+        }
+        self.record_turn_host_failure(iteration, "refusal question abandoned");
+        Arc::make_mut(&mut self.session.messages).truncate(message_count_before);
+        self.session.mark_transcript_dirty();
+        StreamingTurnError::Permission(error)
     }
 
     /// Cancel a streaming turn at an explicit user/host boundary while the
@@ -1738,6 +1837,9 @@ where
                 };
 
             let __ba_t = std::time::Instant::now();
+            // The category a refusal names rides as its own event; read it
+            // before the build consumes the events (t-6747).
+            let refusal_category = super::refusal_category_of(&events_for_build);
             let __ba_result =
                 build_assistant_message(normalize_empty_assistant_stream(events_for_build));
             if __ba_t.elapsed().as_millis() >= 50 && crate::turn_profiling_enabled() {
@@ -1756,15 +1858,129 @@ where
             // falls through unchanged.
             if is_refusal_stop_reason(__ba_result.stop_reason().unwrap_or_default()) {
                 let refused_usage = __ba_result.usage();
-                let decision = self.decide_refusal_fallback();
-                // The warn line for a continuing decision, computed from the
-                // state the decision just armed (target model included). `None`
-                // for Surface/Proceed, which are handled below.
-                let retry_notice = match decision {
+                let category = refusal_category.as_deref();
+                let from_model = self
+                    .effective_request_model()
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                // The declined request's images first, once a turn and only
+                // for a person at the keyboard (t-6747): a picture of a
+                // declined screen re-declines whoever reads it, so it is sent
+                // again only if the person keeps it.
+                if let Some(count) = self.declined_images_to_ask_about() {
+                    let question = super::streaming::refusal_question(
+                        format!("{count} image(s) in the declined request"),
+                        core_types::retry_signal::declined_images_question(count),
+                        super::streaming::declined_images_choices(),
+                    );
+                    let answer = match self.ask_refusal_question(question, prompter.as_ref()).await {
+                        Ok(answer) => answer,
+                        Err(error) => {
+                            return Err(self.refusal_question_abandoned(
+                                error,
+                                iterations,
+                                message_count_before,
+                            ));
+                        }
+                    };
+                    match answer {
+                        RefusalAnswer::Decided(
+                            AsyncPermissionDecision::Allow | AsyncPermissionDecision::AllowOnce,
+                        ) => {
+                            let withheld = self.withhold_declined_request_images();
+                            if let Some(usage) = refused_usage {
+                                self.usage_tracker.record(usage);
+                            }
+                            let _ = render_tx
+                                .send(RenderBlock::System {
+                                    id: id_gen.next(),
+                                    level: SystemLevel::Info,
+                                    text: format!(
+                                        "Withheld {withheld} image(s) from the declined request; \
+                                         asking {from_model} again without them."
+                                    ),
+                                })
+                                .await;
+                            continue 'outer;
+                        }
+                        RefusalAnswer::Decided(AsyncPermissionDecision::Deny) | RefusalAnswer::Unanswered => {}
+                        RefusalAnswer::Cancelled => {
+                            return Err(self.refusal_question_cancelled(iterations));
+                        }
+                    }
+                }
+                // The ladder, with the person asked before a rung leaves the
+                // model they chose (`smart.classifierFallback: ask`).
+                let decision = loop {
+                    match self.decide_refusal_fallback(category) {
+                        RefusalDecision::Ask { to } => {
+                            let question = super::streaming::refusal_question(
+                                format!("{from_model} → {to}"),
+                                core_types::retry_signal::refusal_switch_question(
+                                    &from_model,
+                                    &to,
+                                    category,
+                                ),
+                                super::streaming::refusal_switch_choices(&from_model),
+                            );
+                            let answer =
+                                match self.ask_refusal_question(question, prompter.as_ref()).await {
+                                    Ok(answer) => answer,
+                                    Err(error) => {
+                                        return Err(self.refusal_question_abandoned(
+                                            error,
+                                            iterations,
+                                            message_count_before,
+                                        ));
+                                    }
+                                };
+                            match answer {
+                                RefusalAnswer::Decided(AsyncPermissionDecision::Allow) => {
+                                    self.consent_to_refusal_switch(true);
+                                }
+                                RefusalAnswer::Decided(AsyncPermissionDecision::AllowOnce) => {
+                                    self.consent_to_refusal_switch(false);
+                                }
+                                // Nobody answered within the prompt ceiling
+                                // (t-7153): the ceiling bounds the wait, it
+                                // decides nothing — the turn stays on the
+                                // model the person chose, and says why.
+                                RefusalAnswer::Unanswered => {
+                                    self.refuse_refusal_switch();
+                                    let _ = render_tx
+                                        .send(RenderBlock::System {
+                                            id: id_gen.next(),
+                                            level: SystemLevel::Warn,
+                                            text: core_types::retry_signal::refusal_switch_unanswered_notice(
+                                                &from_model,
+                                                &to,
+                                                permission_prompt_timeout()
+                                                    .map_or(0, |budget| budget.as_secs()),
+                                            ),
+                                        })
+                                        .await;
+                                }
+                                RefusalAnswer::Decided(AsyncPermissionDecision::Deny) => {
+                                    self.refuse_refusal_switch();
+                                }
+                                RefusalAnswer::Cancelled => {
+                                    return Err(self.refusal_question_cancelled(iterations));
+                                }
+                            }
+                        }
+                        other => break other,
+                    }
+                };
+                // The receipt for a continuing decision, computed from the
+                // state the decision just armed. `None` for Surface/Proceed,
+                // which are handled below.
+                let retry_notice = match &decision {
                     RefusalDecision::Retry => Some((
                         SystemLevel::Warn,
-                        super::fallback::refusal_fallback_warn(
+                        super::fallback::refusal_route_warn(
+                            &from_model,
                             self.refusal_fallback_model.as_deref().unwrap_or_default(),
+                            category,
                         ),
                     )),
                     RefusalDecision::RetrySameModel => Some((
@@ -1781,7 +1997,9 @@ where
                         self.drop_last_declined_exchange();
                         Some((SystemLevel::Info, REFUSAL_CONTEXT_CLEANED_WARN.to_string()))
                     }
-                    RefusalDecision::Surface | RefusalDecision::Proceed => None,
+                    RefusalDecision::Surface
+                    | RefusalDecision::Proceed
+                    | RefusalDecision::Ask { .. } => None,
                 };
                 if let Some((level, text)) = retry_notice {
                     if let Some(usage) = refused_usage {
@@ -1796,7 +2014,8 @@ where
                     RefusalDecision::Retry
                     | RefusalDecision::RetrySameModel
                     | RefusalDecision::CrossProvider
-                    | RefusalDecision::RetryCleaned => unreachable!("handled by retry_notice above"),
+                    | RefusalDecision::RetryCleaned
+                    | RefusalDecision::Ask { .. } => unreachable!("handled above"),
                     RefusalDecision::Surface => {
                         if let Some(usage) = refused_usage {
                             self.usage_tracker.record(usage);
@@ -1808,6 +2027,33 @@ where
                                 text: REFUSAL_SURFACED_NOTICE.to_string(),
                             })
                             .await;
+                        // A route nobody could be asked about is said so
+                        // (t-7153): `ask` with nobody at the keyboard.
+                        if let Some(to) = self.refusal_switch_unasked_to.take() {
+                            let _ = render_tx
+                                .send(RenderBlock::System {
+                                    id: id_gen.next(),
+                                    level: SystemLevel::Info,
+                                    text: core_types::retry_signal::refusal_switch_unasked_notice(
+                                        &from_model,
+                                        &to,
+                                    ),
+                                })
+                                .await;
+                        }
+                        // A category the provider routes nowhere is said so:
+                        // the refusal stands, and nothing walked around it.
+                        if let Some(word) = category.filter(|_| {
+                            api::refusal_route_candidates(&from_model, category).is_empty()
+                        }) {
+                            let _ = render_tx
+                                .send(RenderBlock::System {
+                                    id: id_gen.next(),
+                                    level: SystemLevel::Info,
+                                    text: core_types::retry_signal::refusal_stands_notice(word),
+                                })
+                                .await;
+                        }
                         let assistant_message = refusal_surfaced_message();
                         self.record_assistant_iteration(iterations, &assistant_message, 0);
                         self.session
