@@ -1128,14 +1128,13 @@ impl Observation {
         if self.scale != scale {
             return false;
         }
-        if let Some(target) = &self.target {
-            if self.value.is_none_or(|value| value == 0)
+        if let Some(target) = &self.target
+            && (self.value.is_none_or(|value| value == 0)
                 || target.track_id == 0
                 || !roi_within(&target.roi, &placed)
-                || !roi_holds(&target.roi, target.point_x, target.point_y)
-            {
-                return false;
-            }
+                || !roi_holds(&target.roi, target.point_x, target.point_y))
+        {
+            return false;
         }
         if let Some(cells) = &self.cells {
             let Layout::Cells { rows, columns, .. } = color.layout else {

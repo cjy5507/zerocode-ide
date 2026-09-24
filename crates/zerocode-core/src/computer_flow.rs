@@ -2343,10 +2343,12 @@ mod tests {
         .unwrap();
         let base = format!("{}{}", document("dry"), plan.written_sections());
         assert!(parse_flow_with_reflex(&base).is_ok());
+        // The header line the plan's own version writes (t-6765 moved it to 2).
+        let version = format!("- version: {}", reflex::VERSION);
         for bad in [
-            format!("{base}\n{}\n\n- version: 1\n", reflex::HEADING_REFLEX),
-            base.replace("- version: 1", "- version: 1\n- version: 1"),
-            base.replace("- version: 1", "- version: 1\n- unknown: x"),
+            format!("{base}\n{}\n\n{version}\n", reflex::HEADING_REFLEX),
+            base.replace(&version, &format!("{version}\n{version}")),
+            base.replace(&version, &format!("{version}\n- unknown: x")),
             base.replace("- detector: {", "- detector: {\"bogus\":1,"),
             base.replace(reflex::HEADING_RULES, "## Other Rules"),
         ] {
