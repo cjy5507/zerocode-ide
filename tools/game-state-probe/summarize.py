@@ -16,36 +16,48 @@ def rank(values, fraction):
     return ordered[max(0, math.ceil(len(ordered) * fraction) - 1)]
 
 
+def line(name, rows):
+    """One series under one QoS: every block's warm samples pooled; each block's load kept."""
+    ns = [value for row in rows for value in row["ns"]]
+    work = max(row["work"] for row in rows)
+    summary = {
+        "series": name,
+        "qos": rows[0].get("qos"),
+        "n": len(ns),
+        "blocks": sorted({row.get("block") for row in rows}, key=str),
+        "p50_ms": rank(ns, 0.5) / 1e6,
+        "p95_ms": rank(ns, 0.95) / 1e6,
+        "max_ms": max(ns) / 1e6,
+        "work": work,
+        "load": [[row["load_before"], row["load_after"]] for row in rows],
+    }
+    for key in ("detectors", "frame"):
+        if key in rows[0]:
+            summary[key] = rows[0][key]
+    colds = [row["cold_ns"] for row in rows if "cold_ns" in row]
+    if colds:
+        summary["cold_max_ms"] = max(colds) / 1e6
+    if work:
+        summary["ns_per_sample_p50"] = rank(ns, 0.5) / work
+        summary["ns_per_sample_p95"] = rank(ns, 0.95) / work
+    return summary
+
+
 def summarize(report):
-    series = []
+    groups = {}
     for row in report["rows"]:
-        ns = row["ns"]
-        line = {
-            "series": row["series"],
-            "n": len(ns),
-            "p50_ms": rank(ns, 0.5) / 1e6,
-            "p95_ms": rank(ns, 0.95) / 1e6,
-            "max_ms": max(ns) / 1e6,
-            "work": row["work"],
-            "load": [row["load_before"], row["load_after"]],
-        }
-        for key in ("scene", "detectors", "frame"):
-            if key in row:
-                line[key] = row[key]
-        if "cold_ns" in row:
-            line["cold_ms"] = row["cold_ns"] / 1e6
-        if row["work"]:
-            line["ns_per_sample_p50"] = rank(ns, 0.5) / row["work"]
-            line["ns_per_sample_p95"] = rank(ns, 0.95) / row["work"]
-        series.append(line)
-    cells = [line for line in series if line["series"] == "cells"]
-    worst = max(cells, key=lambda line: line["p95_ms"]) if cells else None
+        groups.setdefault((row["series"], row.get("qos")), []).append(row)
+    series = [line(name, rows) for (name, _), rows in groups.items()]
+    worst = {}
+    for row in report["rows"]:
+        if row["series"] == "cells":
+            p95 = rank(row["ns"], 0.95) / 1e6
+            if p95 > worst.get(row.get("qos"), (0, None))[0]:
+                worst[row.get("qos")] = (p95, row.get("scene"))
     return {
         "limits": report["limits"],
         "series": series,
-        "cells_scenes": len(cells),
-        "cells_worst_p95_ms": worst["p95_ms"] if worst else None,
-        "cells_worst_scene": worst.get("scene") if worst else None,
+        "cells_worst_scene_p95_ms": {str(qos): value for qos, value in worst.items()},
     }
 
 

@@ -39,9 +39,12 @@ pub struct PerceptionLimits {
     pub max_gate: u64,
     /// Samples along one axis of a cell.
     pub max_lattice: u64,
-    /// Host nanoseconds one tick's observations may take together.
+    /// Host nanoseconds one tick's observations may take together: the
+    /// perception share of a 16.6 ms frame.
     pub max_tick_ns: u64,
-    /// Samples one tick's observations may read together.
+    /// Samples one tick's observations may read together: as many as the
+    /// game-state probe read within `max_tick_ns` at p95 on a loaded machine
+    /// (`tools/game-state-probe`). Twice as many did not fit.
     pub max_tick_samples: u64,
     /// Chebyshev distance a class may accept on each channel.
     pub max_tolerance: u64,
@@ -59,7 +62,7 @@ pub const LIMITS: PerceptionLimits = PerceptionLimits {
     max_gate: 256,
     max_lattice: 8,
     max_tick_ns: 5_000_000,
-    max_tick_samples: 1_048_576,
+    max_tick_samples: 262_144,
     max_tolerance: 64,
     min_cell_samples: 4,
 };

@@ -305,9 +305,27 @@ struct Measure {
         ]) { current, _ in current }
     }
 
+    /// The whole suite four times in one process, the thread's QoS in ABBA order — the default
+    /// class, then user-interactive, the class a frame-rate evaluation thread can ask for — so both
+    /// are read under the same machine state. The QoS the process started with is recorded apart.
     func run() throws -> [String: Any] {
         let limits = try PerceptionSpecs.decodeLimits(
             Data(try Data(contentsOf: pictures.deletingLastPathComponent().appendingPathComponent("limits.json")).dropLast()))
+        let started = qos_class_self()
+        var rows: [[String: Any]] = []
+        for (block, qos) in [(0, QOS_CLASS_DEFAULT), (1, QOS_CLASS_USER_INTERACTIVE), (2, QOS_CLASS_USER_INTERACTIVE),
+                             (3, QOS_CLASS_DEFAULT)] {
+            guard pthread_set_qos_class_self_np(qos, 0) == 0, qos_class_self() == qos else {
+                throw ProbeError(description: "cannot set QoS \(qos.rawValue)")
+            }
+            let name = qos == QOS_CLASS_USER_INTERACTIVE ? "user_interactive" : "default"
+            rows += try suite(limits).map { $0.merging(["block": block, "qos": name]) { current, _ in current } }
+        }
+        return ["limits": try JSONSerialization.jsonObject(with: JSONEncoder().encode(limits)), "rows": rows,
+                "timed": timed, "warm": warm, "started_qos": started.rawValue]
+    }
+
+    func suite(_ limits: PerceptionLimits) throws -> [[String: Any]] {
         var rows: [[String: Any]] = []
         // The fixture game's board on every clean held-out scene.
         for scene in fixture.scenes where scene.split == "heldout" && scene.id.range(of: #"^heldout-(\d\d|twice-.|three-quarters)$"#,
@@ -343,8 +361,7 @@ struct Measure {
                                                                limits: limits), frame, limits: limits, extra: ["detectors": detectors]))
         // Template and motion: kernels no plan runs yet, timed over fixed ROIs and patches.
         rows.append(contentsOf: try kernels(frame))
-        return ["limits": try JSONSerialization.jsonObject(with: JSONEncoder().encode(limits)), "rows": rows,
-                "timed": timed, "warm": warm]
+        return rows
     }
 
     func kernels(_ frame: Frame) throws -> [[String: Any]] {
