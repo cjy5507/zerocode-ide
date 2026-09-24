@@ -3271,6 +3271,125 @@ fn an_unrouted_decline_is_told_and_walked_nowhere() {
     assert_eq!(stood.worker_state(&stood.worker), "Active");
 }
 
+/// The category the beat and the fence read is joined on BOTH of the
+/// error record's ids (t-7153, R1), through the real transcript reader: a
+/// category record the error's request names but whose uuid is not the
+/// parent the error names is a contradiction — no category, so the decline
+/// is unrouted news and nothing walks, where before the request's word was
+/// borrowed and the worker handed over on it; the same contradiction read
+/// at the last boundary, under the same record key, settles nothing; and
+/// the record both ids name is this decline's, walked once.
+#[test]
+fn a_declines_category_is_joined_on_both_ids_at_the_beat_and_at_the_fence() {
+    const SCREEN: &str = "\
+⎿  API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup).
+❯ ";
+    let system = |uuid: &str, request: &str| {
+        format!(
+            r#"{{"parentUuid":"p","isSidechain":false,"type":"system","subtype":"model_refusal_no_fallback","content":"","level":"warning","originalModel":"claude-fable-5-1","requestId":"{request}","apiRefusalCategory":"cyber","refusedUserMessageUuid":"q","isMeta":false,"uuid":"{uuid}","timestamp":"2026-09-24T04:29:48.712Z","version":"2.1.281"}}"#
+        )
+    };
+    let error = |uuid: &str, request: &str, parent: &str| {
+        format!(
+            r#"{{"parentUuid":"{parent}","isSidechain":false,"type":"assistant","uuid":"{uuid}","timestamp":"2026-09-24T04:29:48.711Z","message":{{"id":"e","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup)."}}]}},"requestId":"{request}","error":"invalid_request","isApiErrorMessage":true}}"#
+        )
+    };
+    let reading =
+        |held: &[String]| crate::quota_wall::decline_reading_in("claude", Some(SCREEN), Some(held));
+    let earlier = [
+        system("sys-1", "req_1"),
+        error("declined-1", "req_1", "sys-1"),
+    ];
+    // Both ids agree: `sys-2` answers `req_2`, and `declined-2` names it.
+    let agreeing: Vec<String> = earlier
+        .iter()
+        .cloned()
+        .chain([
+            system("sys-2", "req_2"),
+            error("declined-2", "req_2", "sys-2"),
+        ])
+        .collect();
+    // The request agrees, the parent disputes: `declined-3` is `req_2`'s
+    // but names `sys-1` — an earlier request's record — as its parent.
+    let disputing: Vec<String> = earlier
+        .iter()
+        .cloned()
+        .chain([
+            system("sys-2", "req_2"),
+            error("declined-3", "req_2", "sys-1"),
+        ])
+        .collect();
+    // The same record key as `agreeing`, but a later category record on
+    // the same request whose uuid is not the parent named.
+    let disputing_at_the_fence: Vec<String> = agreeing
+        .iter()
+        .cloned()
+        .chain([system("sys-3", "req_2")])
+        .collect();
+    let policy = "--on-classifier-decline claude:claude-opus-4-8";
+    let category_of = |held: &[String]| reading(held).record.expect("the decline").category;
+    assert_eq!(category_of(&agreeing).as_deref(), Some("cyber"));
+    assert_eq!(category_of(&disputing), None);
+    assert_eq!(category_of(&disputing_at_the_fence), None);
+    assert_eq!(
+        reading(&disputing_at_the_fence)
+            .record
+            .expect("the decline")
+            .key,
+        "declined-2"
+    );
+
+    // At the beat: a contradiction is unrouted news, and walks nowhere.
+    let stood = Walled::stand_declined_with(86_300, "/tmp", policy, reading(&disputing));
+    tick(&stood.host, &[], stood.began + 10_000);
+    let news = stood.json(
+        "check --peek --types classifier_declined",
+        stood.began + 10_001,
+    );
+    assert_eq!(news["count"], 1, "{news}");
+    let body: serde_json::Value =
+        serde_json::from_str(news["messages"][0]["body"].as_str().expect("a body")).expect("json");
+    assert_eq!(
+        body["category"],
+        serde_json::Value::Null,
+        "a category was borrowed: {body}"
+    );
+    assert_eq!(body["routed"], false, "{body}");
+    assert!(
+        stood.receipts(stood.began + 10_001).is_empty(),
+        "a decline with a contradicted category was walked"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    drop(stood);
+
+    // At the fence: the same key, the category now contradicted — nothing
+    // settles; read the same again, the walk lands.
+    let stood = Walled::stand_declined_with(86_400, "/tmp", policy, reading(&agreeing));
+    stood
+        .host
+        .read_at_the_fence(Some(reading(&disputing_at_the_fence)));
+    tick(&stood.host, &[], stood.began + 10_000);
+    assert!(
+        stood
+            .receipts(stood.began + 10_001)
+            .iter()
+            .all(|receipt| receipt["status"] != "done"),
+        "settled on a category the fence read as contradicted"
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Active");
+    stood.host.read_at_the_fence(None);
+    tick(&stood.host, &[], stood.began + 20_000);
+    let receipts = stood.receipts(stood.began + 20_001);
+    let done: Vec<&serde_json::Value> = receipts
+        .iter()
+        .filter(|receipt| receipt["status"] == "done")
+        .collect();
+    assert_eq!(done.len(), 1, "{receipts:?}");
+    assert_eq!(done[0]["category"], "cyber");
+    assert_eq!(done[0]["recordKey"], "declined-2");
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+}
+
 /// The three steps in order, through the door, each named to the
 /// ledger: a clean tree is a skipped ① (said so), ② ends the attempt,
 /// and ③ carries `--retry-of` + `--inherit-checkout` + the handover

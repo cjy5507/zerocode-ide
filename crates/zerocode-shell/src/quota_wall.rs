@@ -528,19 +528,38 @@ fn decline_record(rule: &StallMarkerRule, lines: &[String]) -> Option<Classifier
 }
 
 /// The category the CLI wrote beside THIS decline: the
-/// `model_refusal_no_fallback` system record of the same request
-/// (`requestId`), or the one the error record names as its parent
-/// (`parentUuid`) — 2.1.281 writes both, the system record first and the
-/// error record with the system record's uuid as its parent. The first such
-/// record decides, category or none: a decline whose own record names no
-/// category HAS none, and an earlier request's word is never borrowed for
-/// it (before this, a `null` category read the tail on and took the
-/// previous decline's `cyber`). No record of its own, no category.
+/// `model_refusal_no_fallback` system record the error record's two ids
+/// both name — the same request (`requestId`) and the record the error
+/// names as its parent (`parentUuid`, the system record's `uuid`); 2.1.281
+/// writes both, the system record first and the error record after it.
+/// The first record either id names decides, category or none: a decline
+/// whose own record names no category HAS none, and an earlier request's
+/// word is never borrowed for it (before this, a `null` category read the
+/// tail on and took the previous decline's `cyber`). A record one id names
+/// and the other DISPUTES — the request's record, whose uuid is not the
+/// parent the error names, or the parent record, answering another request
+/// — is a contradiction the table does not guess its way out of: no
+/// category (t-7153, R1; before this either id alone was taken). An id a
+/// record does not carry disputes nothing (a CLI older than the field), and
+/// an empty id is no key at all. No record of its own, no category.
 fn declines_own_category(
     lines: &[String],
     request: Option<&str>,
     parent: Option<&str>,
 ) -> Option<String> {
+    /// An id as a join key: trimmed, and none when empty.
+    fn key(id: Option<&str>) -> Option<&str> {
+        id.map(str::trim).filter(|id| !id.is_empty())
+    }
+    /// Whether a record's id agrees with ours: none when either side is
+    /// silent, which neither agrees nor disputes.
+    fn agrees(ours: Option<&str>, theirs: Option<&str>) -> Option<bool> {
+        Some(ours? == key(theirs)?)
+    }
+    let (request, parent) = (key(request), key(parent));
+    if request.is_none() && parent.is_none() {
+        return None;
+    }
     lines
         .iter()
         .rev()
@@ -552,11 +571,18 @@ fn declines_own_category(
             if value["type"] != "system" || value["subtype"] != CLAUDE_NO_FALLBACK_RECORD {
                 return None;
             }
-            let same_request = request.is_some() && value["requestId"].as_str() == request;
-            let its_parent = parent.is_some() && value["uuid"].as_str() == parent;
-            (same_request || its_parent)
-                .then(|| value["apiRefusalCategory"].as_str().map(str::to_string))
+            let joins = [
+                agrees(request, value["requestId"].as_str()),
+                agrees(parent, value["uuid"].as_str()),
+            ];
+            if !joins.contains(&Some(true)) {
+                // Another request's record: read on.
+                return None;
+            }
+            let disputed = joins.contains(&Some(false));
+            Some((!disputed).then(|| value["apiRefusalCategory"].as_str().map(str::to_string)))
         })
+        .flatten()
         .flatten()
 }
 
@@ -2028,6 +2054,111 @@ pub(crate) mod tests {
             .expect("the decline");
         assert_eq!(record.key, "declined");
         assert_eq!(record.category.as_deref(), Some("cyber"));
+    }
+
+    /// The newest decline's own category record, named: `sys-2` answers
+    /// `req_2` under `cyber`.
+    const CLAUDE_NEW_NO_FALLBACK_NAMED: &str = r#"{"parentUuid":"part-2","isSidechain":false,"type":"system","subtype":"model_refusal_no_fallback","content":"","level":"warning","originalModel":"claude-fable-5-1","requestId":"req_2","apiRefusalCategory":"cyber","refusedUserMessageUuid":"q2","isMeta":false,"uuid":"sys-2","timestamp":"2026-09-24T04:29:48.712Z","version":"2.1.281"}"#;
+
+    /// An error record on request `request` naming `parent` as its parent
+    /// — the two ids a category record is joined on. An empty id is written
+    /// as an empty string; `None` leaves the field out, as an older CLI
+    /// would.
+    fn decline_error(request: Option<&str>, parent: Option<&str>) -> String {
+        let field = |name: &str, value: Option<&str>| {
+            value.map_or(String::new(), |value| format!(r#""{name}":"{value}","#))
+        };
+        format!(
+            r#"{{{}"isSidechain":false,"type":"assistant","uuid":"declined-x","timestamp":"2026-09-24T04:29:48.711Z","message":{{"id":"ex","model":"<synthetic>","role":"assistant","stop_reason":"stop_sequence","type":"message","content":[{{"type":"text","text":"API Error: Fable 5.1's safeguards flagged this message (https://www.anthropic.com/legal/aup)."}}]}},{}"error":"invalid_request","isApiErrorMessage":true}}"#,
+            field("parentUuid", parent),
+            field("requestId", request),
+        )
+    }
+
+    /// The category is joined on BOTH of the error record's ids (t-7153,
+    /// R1): a category record the request names but whose uuid is not the
+    /// parent the error names, or the parent record answering another
+    /// request, is a contradiction — no category, and no guess between
+    /// the two — where before either id alone borrowed the category. An
+    /// empty id is no key. An id the category record does not carry, as an
+    /// older CLI writes it, disputes nothing, so the one it carries decides;
+    /// and both agreeing is this decline's category.
+    #[test]
+    fn a_category_record_one_id_names_and_the_other_disputes_names_nothing() {
+        let category_of = |held: &[String]| {
+            let record = decline_reading_in("claude", None, Some(held))
+                .record
+                .expect("the decline is the last word");
+            assert_eq!(record.key, "declined-x");
+            record.category
+        };
+        let old_and_new = |error: String| {
+            lines(&[
+                CLAUDE_OLD_NO_FALLBACK,
+                CLAUDE_OLD_DECLINE_ERROR,
+                CLAUDE_PERSON_TYPED,
+                CLAUDE_NEW_NO_FALLBACK_NAMED,
+                &error,
+            ])
+        };
+        // The request's record, whose uuid is not the parent named: `sys-2`
+        // answers `req_2`, but the error names `sys-1` as its parent.
+        assert_eq!(
+            category_of(&old_and_new(decline_error(Some("req_2"), Some("sys-1")))),
+            None,
+            "the request's category was taken over a parent that disputes it"
+        );
+        // The parent record, answering another request: `sys-2` is the
+        // parent named, but it answered `req_2` and the error is `req_3`'s.
+        assert_eq!(
+            category_of(&old_and_new(decline_error(Some("req_3"), Some("sys-2")))),
+            None,
+            "the parent's category was taken over a request that disputes it"
+        );
+        // Both agreeing: this decline's category.
+        assert_eq!(
+            category_of(&old_and_new(decline_error(Some("req_2"), Some("sys-2")))).as_deref(),
+            Some("cyber")
+        );
+        // Empty ids are no keys, even against a record whose id is as empty.
+        let blank_record =
+            CLAUDE_NEW_NO_FALLBACK_NAMED.replace(r#""requestId":"req_2""#, r#""requestId":"""#);
+        assert_eq!(
+            category_of(&lines(&[&blank_record, &decline_error(Some(""), Some(""))])),
+            None,
+            "an empty id joined a category record"
+        );
+        assert_eq!(
+            category_of(&lines(&[
+                CLAUDE_NEW_NO_FALLBACK_NAMED,
+                &decline_error(None, None)
+            ])),
+            None,
+            "a record with no ids joined a category record"
+        );
+        // An older CLI's error carries one id: the one it carries decides.
+        assert_eq!(
+            category_of(&old_and_new(decline_error(Some("req_2"), None))).as_deref(),
+            Some("cyber"),
+            "a request id alone, agreeing, named nothing"
+        );
+        assert_eq!(
+            category_of(&old_and_new(decline_error(None, Some("sys-2")))).as_deref(),
+            Some("cyber"),
+            "a parent id alone, agreeing, named nothing"
+        );
+        // A category record that carries no request id (older still) is
+        // silent on the request, and the parent it carries decides.
+        let unrequested = CLAUDE_NEW_NO_FALLBACK_NAMED.replace(r#""requestId":"req_2","#, "");
+        assert_eq!(
+            category_of(&lines(&[
+                &unrequested,
+                &decline_error(Some("req_2"), Some("sys-2"))
+            ]))
+            .as_deref(),
+            Some("cyber"),
+            "a record silent on the request was read as disputing it"
+        );
     }
 
     /// A tool result that quotes the dialog's words, under a turn that is
