@@ -14,19 +14,33 @@ import { cpus, loadavg } from "node:os";
 /** The worst frame gap a scene may show on a quiet machine, in ms: twelve frames of eight. */
 export const FRAME_BUDGET_MS = 12 * 8;
 
-const LOAD_1_MIN = loadavg()[0];
 const CORES = cpus().length;
 
-/** True when the one-minute load exceeds the core count — a budget cannot be judged. */
-export const machineIsLoud = LOAD_1_MIN > CORES;
+/** The one-minute load right now — read when a budget is judged, not once at
+ * import: a suite that runs for minutes beside worker builds sees the load
+ * move (11 → 37 within one knowledge run, 2026-09-24), and a reading taken at
+ * import judged a 100 ms frame against a quiet-machine budget that no longer
+ * applied. */
+export function loadNow() {
+  return loadavg()[0];
+}
+
+/** True when the one-minute load exceeds the core count right now — a budget cannot be judged. */
+export function machineIsLoudNow() {
+  return loadNow() > CORES;
+}
+
+/** The import-time reading, for a runner that judges a whole run by the load it started under. */
+export const machineIsLoud = machineIsLoudNow();
 
 /** A budget holds when it is met, or when the machine is too loud to judge it. */
 export function frameBudgetHolds(ms, limitMs = FRAME_BUDGET_MS) {
-  return ms < limitMs || machineIsLoud;
+  return ms < limitMs || machineIsLoudNow();
 }
 
 /** The load reading, for a METRIC line: `load 3.2/12` or `load 41.0/12 (loud — budget unjudged)`. */
 export function loadNote() {
-  const reading = `load ${LOAD_1_MIN.toFixed(1)}/${CORES}`;
-  return machineIsLoud ? `${reading} (loud — budget unjudged)` : reading;
+  const load = loadNow();
+  const reading = `load ${load.toFixed(1)}/${CORES}`;
+  return load > CORES ? `${reading} (loud — budget unjudged)` : reading;
 }

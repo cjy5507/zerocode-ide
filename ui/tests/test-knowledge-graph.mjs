@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { frameBudgetHolds, loadNote, machineIsLoud } from "./machine-load.mjs";
+import { frameBudgetHolds, loadNote, machineIsLoudNow } from "./machine-load.mjs";
 import { createServer } from "node:http";
 import { readFile, mkdir } from "node:fs/promises";
 import { dirname, extname, join, resolve } from "node:path";
@@ -1540,7 +1540,7 @@ ok(
     brainScale.clusterLabels === brainScale.namedClusters &&
     brainScale.nebulas === brainScale.namedClusters &&
     /* 두 칠 방식의 시간 비율도 벽시계다 — 시끄러운 기계에서는 기록만(machine-load.mjs). */
-    (haloPaint.pairedRatio <= 1.1 || machineIsLoud) &&
+    (haloPaint.pairedRatio <= 1.1 || machineIsLoudNow()) &&
     sourceGate.hex.length === 0 &&
     sourceGate.hueMappings === 8 &&
     sourceGate.shared &&
@@ -1874,7 +1874,7 @@ ok(
      * 판의 `is-path` 한 클래스가 점·선 전부의 옷을 바꾸므로 그 프레임은 스타일 재계산을 강제로
      * 치른다 — 실측: 점·선마다 흐림 클래스를 쓰던 판 102 ms → 판의 규칙으로 79 ms(09-22). */
     /* 경로 계산 시간도 벽시계다 — 시끄러운 기계에서는 기록만(machine-load.mjs). */
-    && pathTest.paths1020 > 0 && (pathTest.routeMs < 2 || machineIsLoud) && frameBudgetHolds(pathTest.lightMs),
+    && pathTest.paths1020 > 0 && (pathTest.routeMs < 2 || machineIsLoudNow()) && frameBudgetHolds(pathTest.lightMs),
   JSON.stringify(pathTest),
 );
 console.log(`METRIC knowledge path onto 1020 nodes: route ${pathTest.routeMs}ms; bare frame ${pathTest.frameMs}ms; `
