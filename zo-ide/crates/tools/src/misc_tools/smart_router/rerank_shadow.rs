@@ -2996,12 +2996,10 @@ mod tests {
             let _vault = VaultEnv::point_at(&vault);
             let ledger = rerank_shadow_path(cwd);
             std::fs::create_dir_all(ledger.parent().expect("a ledger dir")).expect("a ledger dir");
-            let source = match std::env::var_os("ZO_RERANK_REPLAY_LEDGER") {
-                Some(real) => {
-                    std::fs::copy(&real, &ledger).expect("a copy of the real ledger");
-                    "this machine's ledger".to_string()
-                }
-                None => {
+            let source = if let Some(real) = std::env::var_os("ZO_RERANK_REPLAY_LEDGER") {
+                std::fs::copy(&real, &ledger).expect("a copy of the real ledger");
+                "this machine's ledger".to_string()
+            } else {
                     for at in 0..900u64 {
                         let row = serde_json::json!({
                             "at": 1_000 + at, "query": at, "notes": at, "rubric_version": RERANK_RUBRIC_VERSION,
@@ -3018,7 +3016,6 @@ mod tests {
                         append_shadow_row(&ledger, &row, SHADOW_LEDGER_MAX_BYTES).expect("a label");
                     }
                     "1,300 synthetic rows".to_string()
-                }
             };
             let bytes = std::fs::metadata(&ledger).map(|meta| meta.len()).unwrap_or(0);
             let rows = std::fs::read_to_string(&ledger).map(|text| text.lines().count()).unwrap_or(0);
@@ -3098,7 +3095,6 @@ mod tests {
     #[ignore = "replays this machine's real ledger; run deliberately"]
     fn what_the_readers_answered_about_the_pages_recall_kept_showing() {
         use serde_json::Value;
-        use std::collections::BTreeSet;
         let ledger = std::env::var_os("ZO_RERANK_REPLAY_LEDGER")
             .map(PathBuf::from)
             .expect("point ZO_RERANK_REPLAY_LEDGER at a rerank-shadow.jsonl");

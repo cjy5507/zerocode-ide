@@ -2024,8 +2024,8 @@ pub fn load_memory_retriever(
     if entries.is_empty() && corpus.pages.is_empty() {
         return None;
     }
-    let seated = |lexical: LexicalMemoryRetriever| match &demand {
-        Some(source) => lexical.with_demand_source(Arc::clone(source)),
+    let seated = move |lexical: LexicalMemoryRetriever| match demand {
+        Some(source) => lexical.with_demand_source(source),
         None => lexical,
     };
     #[cfg(feature = "memory-embed")]
@@ -2769,7 +2769,6 @@ mod tests {
     fn a_seated_source_is_asked_on_every_recall_and_none_ranks_as_before() {
         use crate::second_brain::corpus::RelationKind;
         use std::sync::{Arc, Mutex};
-        let _lock = crate::test_env_lock();
 
         #[derive(Debug, Default)]
         struct Switch(Mutex<Option<Arc<RecallDemand>>>);
@@ -2779,6 +2778,7 @@ mod tests {
             }
         }
 
+        let _lock = crate::test_env_lock();
         let pages: [FixturePage<'_>; 6] = [
             (
                 "wiki/seed",
