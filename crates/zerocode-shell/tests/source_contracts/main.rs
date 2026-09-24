@@ -34500,7 +34500,22 @@ mod tests {
                 && pane.contains("transcript_log_at(&path, after)"),
             "the pane's conversation door names a file, or reads it down another road:\n{pane}"
         );
-        let reading = block_after(shipped, "fn transcript_log_at(");
+        // `transcript_log_at` is the page's chunk of the one windowed reader,
+        // and `worker-transcript` reads down that same reader (t-6742) —
+        // never a walk of its own over the file.
+        let door = block_after(shipped, "fn transcript_log_at(");
+        assert!(
+            door.contains("transcript_log_window(path.as_ref(), after, SUBAGENT_LOG_CHUNK)"),
+            "the page's read no longer goes down the windowed reader:\n{door}"
+        );
+        let walk = block_after(shipped, "fn transcript_turns_back(");
+        assert!(
+            walk.contains("transcript_log_window(path, Some(from), window)")
+                && !walk.contains("File::open")
+                && !walk.contains("turns_in("),
+            "worker-transcript reads a transcript down a road of its own:\n{walk}"
+        );
+        let reading = block_after(shipped, "fn transcript_log_window(");
         // Core owns complete byte records and the bounded oversized-line
         // escape. The shell must decode and advance from that same answer.
         // The payloads step aside before the words are read, leaving their
@@ -34528,8 +34543,7 @@ mod tests {
         // the last chunk — and the answer says what stood above it is folded.
         assert!(
             reading.contains("Some(after) => (if after > size { 0 } else { after }, false),")
-                && reading.contains("size.saturating_sub(SUBAGENT_LOG_CHUNK),")
-                && reading.contains("size > SUBAGENT_LOG_CHUNK,"),
+                && reading.contains("None => (size.saturating_sub(window), size > window),"),
             "a replaced transcript is read from a stale offset, or a cursorless read no longer opens at the tail:\n{reading}"
         );
 

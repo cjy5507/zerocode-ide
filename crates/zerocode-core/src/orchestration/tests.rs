@@ -19400,10 +19400,11 @@ fn a_retry_name_on_a_read_is_refused_with_a_reason_and_moves_nothing() {
         .filter(|(_, _, what)| what.why_a_name_is_pointless().is_some())
         .map(|(name, _, _)| *name)
         .collect();
-    /* Thirteen, not twelve: `worktree-evidence` joined the read verbs. The
-     * number is written down so a verb added to the table without answering
-     * the retry-name question shows up here. */
-    assert_eq!(reads.len(), 13, "{reads:?}");
+    /* Fourteen: `worktree-evidence` joined the read verbs, then
+     * `worker-transcript` (t-6742). The number is written down so a verb
+     * added to the table without answering the retry-name question shows up
+     * here. */
+    assert_eq!(reads.len(), 14, "{reads:?}");
 
     for verb in reads {
         let refused = bench.at("%1", &format!("{verb} --retry-request r-1"));
@@ -23950,7 +23951,7 @@ fn a_worker_with_no_transcript_is_unavailable_never_its_screen() {
     bench.json("run-create --name absences");
 
     // Not reported yet.
-    let (unreported, pane) = bench.seat("worker-start --agent claude");
+    let (unreported, _) = bench.seat("worker-start --agent claude");
     let refused = bench.run(&format!("worker-transcript --worker {unreported}"));
     assert_ne!(refused.reply.exit_code, 0);
     assert!(
