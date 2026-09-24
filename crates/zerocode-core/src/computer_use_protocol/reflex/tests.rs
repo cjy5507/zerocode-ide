@@ -21,22 +21,22 @@ fn shared_golden_runs_through_the_real_validator() {
     ))
     .unwrap();
     let cases = manifest["semantic"].as_array().unwrap();
+    // Every case is judged before the assertion, so a failure names them all.
+    let mut mismatches = Vec::new();
     for name in cases {
         let name = name.as_str().unwrap();
         let row = golden(name);
         let bytes = serde_json::to_vec(&row.plan).unwrap();
-        let got = decode_wire(&bytes);
-        if row.expected == "ok" {
-            assert!(got.is_ok(), "{name}: {got:?}");
-        } else {
-            assert_eq!(
-                format!("{:?}", got.unwrap_err()).to_lowercase(),
-                row.expected,
-                "{name}"
-            );
+        let got = match decode_wire(&bytes) {
+            Ok(_) => "ok".to_string(),
+            Err(err) => format!("{err:?}").to_lowercase(),
+        };
+        if got != row.expected {
+            mismatches.push(format!("{name}: expected {}, got {got}", row.expected));
         }
     }
-    assert_eq!(cases.len(), 21);
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    assert_eq!(cases.len(), 31);
     for name in manifest["wire_negative"].as_array().unwrap() {
         let name = name.as_str().unwrap();
         let path = format!(
@@ -50,6 +50,64 @@ fn shared_golden_runs_through_the_real_validator() {
         );
     }
     assert_eq!(manifest["wire_negative"].as_array().unwrap().len(), 9);
+}
+
+#[test]
+fn shared_lease_cases_exercise_permits_and_frame_cursor() {
+    let fixture: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../fixtures/reflex-contract/lease_cases.json"
+    ))
+    .unwrap();
+    // A case replaces top-level fields of the shared base frame or lease.
+    let patched = |base: &serde_json::Value, patch: &serde_json::Value| {
+        let mut value = base.clone();
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        value
+    };
+    let mut mismatches = Vec::new();
+    for case in fixture["cases"].as_array().unwrap() {
+        let frame: FrameFacts =
+            serde_json::from_value(patched(&fixture["frame"], &case["frame"])).unwrap();
+        let lease: ActionLease =
+            serde_json::from_value(patched(&fixture["lease"], &case["lease"])).unwrap();
+        let input: LeaseInput = serde_json::from_value(case["input"].clone()).unwrap();
+        let got = lease.permits(&frame, case["now_host_ns"].as_u64().unwrap(), input);
+        if got != case["expected"].as_bool().unwrap() {
+            mismatches.push(format!(
+                "permits {}: got {got}",
+                case["name"].as_str().unwrap()
+            ));
+        }
+    }
+    for case in fixture["cursor_cases"].as_array().unwrap() {
+        let name = case["name"].as_str().unwrap();
+        let frames = case["frames"].as_array().unwrap();
+        let expected: Vec<bool> = case["expected"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|verdict| verdict.as_bool().unwrap())
+            .collect();
+        assert_eq!(frames.len(), expected.len(), "{name}");
+        let mut cursor = FrameCursor::default();
+        let got: Vec<bool> = frames
+            .iter()
+            .map(|patch| {
+                let frame: FrameFacts =
+                    serde_json::from_value(patched(&fixture["frame"], patch)).unwrap();
+                cursor.observe(&frame)
+            })
+            .collect();
+        if got != expected {
+            mismatches.push(format!(
+                "observe {name}: got {got:?}, expected {expected:?}"
+            ));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
 }
 
 #[test]

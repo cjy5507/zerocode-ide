@@ -250,6 +250,11 @@ public enum ReflexContract {
             if total > limits.max_expanded_actions { throw ReflexContractError.budget }
             return total
         }
+        // Every declaration must be a bounded, referentially valid DAG, even if
+        // no rule currently reaches it. Rule max_fires is accounted for below.
+        for item in plan.macros {
+            _ = try expanded(item.id, [], 0)
+        }
         var ruleIds = Set<String>()
         var total: UInt64 = 0
         for rule in plan.rules {
@@ -320,8 +325,14 @@ public struct ReflexActionLease: Codable {
     public let max_children: UInt64
     public let used_children: UInt64
 
+    /// The same contract as Rust `ActionLease::permits`, pinned for both by the shared
+    /// `fixtures/reflex-contract/lease_cases.json`. The frame must be ready and nonempty,
+    /// share the lease's nonempty run and its epochs, and be a newer capture than
+    /// `source_capture_seq`: the capture that issued the lease never satisfies it. An
+    /// unknown capture time is never replaced by the delivery time. Expiry and proof ends
+    /// are exclusive; the frame age and lease length limits are inclusive.
     public func permits(_ frame: ReflexFrameFacts, now_host_ns: UInt64, input: ReflexLeaseInput, limits: ReflexLimits) -> Bool {
-        run_id == frame.run_id && allowed_inputs.contains(input) &&
+        !run_id.isEmpty && run_id == frame.run_id && allowed_inputs.contains(input) &&
             frame.status == .ready && frame.pixel_extent.width > 0 && frame.pixel_extent.height > 0 &&
             frame.captured_host_ns.map({ $0 <= now_host_ns && now_host_ns - $0 <= limits.max_frame_age_ns }) == true &&
             issued_host_ns <= now_host_ns && valid_until_host_ns > issued_host_ns &&
@@ -330,7 +341,7 @@ public struct ReflexActionLease: Codable {
             !target_id.isEmpty && target_roi.width > 0 && target_roi.height > 0 &&
             owner_epoch == frame.owner_epoch && stream_epoch == frame.stream_epoch &&
             geometry_epoch == frame.geometry_epoch && plan_epoch == frame.plan_epoch &&
-            clock_domain == frame.clock_domain && frame.captured_host_ns != nil &&
+            clock_domain == frame.clock_domain &&
             frame.capture_seq > source_capture_seq && now_host_ns < valid_until_host_ns &&
             now_host_ns < target_proof_until_host_ns && used_children < max_children &&
             max_children <= limits.max_expanded_actions
@@ -349,7 +360,14 @@ public extension ReflexContract {
     }
 }
 
+/// The same contract as Rust `FrameCursor`. One cursor belongs to one run: a frame from
+/// another run is refused, so a new run needs a new cursor. Stream epochs never go back;
+/// within an epoch the capture sequence advances and the repaint sequence does not
+/// regress, and a later epoch starts a new sequence. Only ready, nonempty frames with a
+/// known capture time are observed. The cursor has no clock and grants no input:
+/// `ReflexActionLease.permits` checks capture age and expiry at action time.
 public struct ReflexFrameCursor {
+    private var runId: String?
     private var streamEpoch: UInt64?
     private var captureSeq: UInt64 = 0
     private var repaintSeq: UInt64 = 0
@@ -357,9 +375,13 @@ public struct ReflexFrameCursor {
     public init() {}
 
     public mutating func observe(_ frame: ReflexFrameFacts) -> Bool {
-        if frame.capture_seq == 0 { return false }
+        if frame.run_id.isEmpty || (runId != nil && runId != frame.run_id) ||
+            frame.status != .ready || frame.pixel_extent.width == 0 || frame.pixel_extent.height == 0 ||
+            frame.captured_host_ns == nil || frame.capture_seq == 0 ||
+            streamEpoch.map({ frame.stream_epoch < $0 }) == true { return false }
         if streamEpoch == frame.stream_epoch &&
             (frame.capture_seq <= captureSeq || frame.repaint_seq < repaintSeq) { return false }
+        runId = frame.run_id
         streamEpoch = frame.stream_epoch
         captureSeq = frame.capture_seq
         repaintSeq = frame.repaint_seq

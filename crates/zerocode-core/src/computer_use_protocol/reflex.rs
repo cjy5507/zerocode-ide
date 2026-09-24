@@ -475,6 +475,11 @@ pub fn validate(plan: ReflexPlan) -> Result<ValidatedPlan, ReflexError> {
         }
         Ok(total)
     }
+    // Every declaration must be a bounded, referentially valid DAG, even if
+    // no rule currently reaches it. Rule max_fires is accounted for below.
+    for item in &plan.macros {
+        expanded(&item.id, &by_id, &mut BTreeSet::new(), 0)?;
+    }
     let mut rule_ids = BTreeSet::new();
     let mut total = 0_u64;
     for rule in &plan.rules {
@@ -614,10 +619,28 @@ pub struct ActionLease {
 }
 
 impl ActionLease {
+    /// The frame must be ready and nonempty, share the lease's nonempty run
+    /// and its epochs, and be a newer capture than `source_capture_seq`: the
+    /// capture that issued the lease never satisfies it. An unknown capture
+    /// time is never replaced by the delivery time. Expiry and proof ends are
+    /// exclusive; the frame age and lease length limits in `LIMITS` are
+    /// inclusive. Swift checks the same contract, pinned for both by the
+    /// shared `fixtures/reflex-contract/lease_cases.json`.
     #[must_use]
     pub fn permits(&self, frame: &FrameFacts, now_host_ns: u64, input: LeaseInput) -> bool {
-        self.run_id == frame.run_id
+        !self.run_id.is_empty()
+            && self.run_id == frame.run_id
             && self.allowed_inputs.contains(&input)
+            && frame.status == FrameStatus::Ready
+            && frame.pixel_extent.width > 0
+            && frame.pixel_extent.height > 0
+            && frame.captured_host_ns.is_some_and(|captured| {
+                captured <= now_host_ns && now_host_ns - captured <= LIMITS.max_frame_age_ns
+            })
+            && self.issued_host_ns <= now_host_ns
+            && self.valid_until_host_ns > self.issued_host_ns
+            && self.valid_until_host_ns - self.issued_host_ns <= LIMITS.max_lease_ns
+            && self.target_proof_until_host_ns <= self.valid_until_host_ns
             && !self.target_id.is_empty()
             && self.target_roi.width > 0
             && self.target_roi.height > 0
@@ -626,7 +649,6 @@ impl ActionLease {
             && self.geometry_epoch == frame.geometry_epoch
             && self.plan_epoch == frame.plan_epoch
             && self.clock_domain == frame.clock_domain
-            && frame.captured_host_ns.is_some()
             && frame.capture_seq > self.source_capture_seq
             && now_host_ns < self.valid_until_host_ns
             && now_host_ns < self.target_proof_until_host_ns
@@ -778,10 +800,15 @@ impl ReflexPlan {
 #[cfg(test)]
 mod tests;
 
-/// Stream health is tracked independently of repaint changes. Replayed or
-/// regressed capture callbacks never become a new observation.
+/// One cursor belongs to one run: a frame from another run is refused, so a
+/// new run needs a new cursor. Stream epochs never go back; within an epoch
+/// the capture sequence advances and the repaint sequence does not regress,
+/// and a later epoch starts a new sequence. Only ready, nonempty frames with
+/// a known capture time are observed. The cursor has no clock and grants no
+/// input: `ActionLease::permits` checks capture age and expiry at action time.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct FrameCursor {
+    run_id: Option<String>,
     stream_epoch: Option<u64>,
     capture_seq: u64,
     repaint_seq: u64,
@@ -789,7 +816,17 @@ pub struct FrameCursor {
 
 impl FrameCursor {
     pub fn observe(&mut self, frame: &FrameFacts) -> bool {
-        if frame.capture_seq == 0 {
+        if frame.run_id.is_empty()
+            || self.run_id.as_ref().is_some_and(|run| run != &frame.run_id)
+            || frame.status != FrameStatus::Ready
+            || frame.pixel_extent.width == 0
+            || frame.pixel_extent.height == 0
+            || frame.captured_host_ns.is_none()
+            || frame.capture_seq == 0
+            || self
+                .stream_epoch
+                .is_some_and(|epoch| frame.stream_epoch < epoch)
+        {
             return false;
         }
         if self.stream_epoch == Some(frame.stream_epoch)
@@ -797,6 +834,7 @@ impl FrameCursor {
         {
             return false;
         }
+        self.run_id = Some(frame.run_id.clone());
         self.stream_epoch = Some(frame.stream_epoch);
         self.capture_seq = frame.capture_seq;
         self.repaint_seq = frame.repaint_seq;

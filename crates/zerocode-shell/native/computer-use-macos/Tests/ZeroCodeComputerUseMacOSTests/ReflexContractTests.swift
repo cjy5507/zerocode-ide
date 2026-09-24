@@ -41,7 +41,7 @@ final class ReflexContractTests: XCTestCase {
                 }
             }
         }
-        XCTAssertEqual(names.count, 21)
+        XCTAssertEqual(names.count, 31)
         let wireNames = try XCTUnwrap(manifest["wire_negative"] as? [String])
         for name in wireNames {
             let data = try Data(contentsOf: fixtureRoot.appendingPathComponent("\(name).txt"))
@@ -50,6 +50,37 @@ final class ReflexContractTests: XCTestCase {
             }
         }
         XCTAssertEqual(wireNames.count, 9)
+    }
+
+    func testSharedLeaseCasesExercisePermitsAndFrameCursor() throws {
+        let fixture = try XCTUnwrap(JSONSerialization.jsonObject(with: self.fixture("lease_cases")) as? [String: Any])
+        let baseFrame = try XCTUnwrap(fixture["frame"] as? [String: Any])
+        let baseLease = try XCTUnwrap(fixture["lease"] as? [String: Any])
+        let limits = try contractLimits()
+        let cases = try XCTUnwrap(fixture["cases"] as? [[String: Any]])
+        for row in cases {
+            let name = try XCTUnwrap(row["name"] as? String)
+            let frameData = try JSONSerialization.data(withJSONObject: baseFrame.merging(try XCTUnwrap(row["frame"] as? [String: Any])) { _, new in new })
+            let leaseData = try JSONSerialization.data(withJSONObject: baseLease.merging(try XCTUnwrap(row["lease"] as? [String: Any])) { _, new in new })
+            let frame = try JSONDecoder().decode(ReflexFrameFacts.self, from: frameData)
+            let lease = try JSONDecoder().decode(ReflexActionLease.self, from: leaseData)
+            let input = try XCTUnwrap(ReflexLeaseInput(rawValue: try XCTUnwrap(row["input"] as? String)))
+            XCTAssertEqual(lease.permits(frame, now_host_ns: try XCTUnwrap(row["now_host_ns"] as? UInt64), input: input, limits: limits),
+                try XCTUnwrap(row["expected"] as? Bool), name)
+        }
+        let cursorCases = try XCTUnwrap(fixture["cursor_cases"] as? [[String: Any]])
+        for row in cursorCases {
+            let name = try XCTUnwrap(row["name"] as? String)
+            let frames = try XCTUnwrap(row["frames"] as? [[String: Any]])
+            let expected = try XCTUnwrap(row["expected"] as? [Bool])
+            XCTAssertEqual(frames.count, expected.count, name)
+            var cursor = ReflexFrameCursor()
+            for (patch, verdict) in zip(frames, expected) {
+                let data = try JSONSerialization.data(withJSONObject: baseFrame.merging(patch) { _, new in new })
+                let frame = try JSONDecoder().decode(ReflexFrameFacts.self, from: data)
+                XCTAssertEqual(cursor.observe(frame), verdict, name)
+            }
+        }
     }
 
     func testPointerAndMacroBudgetsComeFromOneTable() throws {

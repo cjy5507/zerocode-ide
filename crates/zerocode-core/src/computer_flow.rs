@@ -2282,6 +2282,55 @@ mod tests {
         );
         assert_eq!(legacy, parse_flow(&document("dry")).unwrap().unwrap());
     }
+
+    #[test]
+    fn every_legacy_flow_reads_and_writes_the_same_through_the_reflex_parser() {
+        let emulator = |verb: &str, flag: &str, value: &str| {
+            format!(
+                "{}{FLOW_HEADING_CHECKS}\n\n1. `zerocode-emulator {verb} --platform android --device phone {flag} {value}` — state, required\n",
+                document("dry").split(FLOW_HEADING_CHECKS).next().unwrap()
+            )
+        };
+        // Each valid shape the Flow tests above read: plain, triggered,
+        // guarded money (two steps, person or capped confirm) and emulator.
+        let corpus = [
+            document("dry"),
+            format!(
+                "{}\n{FLOW_HEADING_TRIGGER}\n\n1. `zerocode-browser find browser-1 \"입금\"` — event, required\n",
+                document("dry")
+            ),
+            money_document("guarded", None, &[3]),
+            money_document("guarded", None, &[2]),
+            money_document(
+                "guarded",
+                Some(&format!("{FLOW_CONFIRM_AUTO} {FLOW_CONFIRM_CAP}=50000")),
+                &[3],
+            ),
+            emulator("find", "--text", "완료"),
+            emulator("foreground", "--app", "com.example.app"),
+        ];
+        for text in &corpus {
+            let legacy = parse_flow(text).unwrap().unwrap();
+            let parsed = parse_flow_with_reflex(text).unwrap().unwrap();
+            assert!(parsed.reflex.is_none(), "{text}");
+            assert_eq!(parsed.flow, legacy, "{text}");
+            assert_eq!(parsed.written(), legacy.written(), "{text}");
+            let rewritten = format!(
+                "{}{}",
+                text.split(FLOW_HEADING).next().unwrap(),
+                parsed.written()
+            );
+            assert_eq!(
+                parse_flow(&rewritten).unwrap().as_ref(),
+                Some(&legacy),
+                "{rewritten}"
+            );
+            let again = parse_flow_with_reflex(&rewritten).unwrap().unwrap();
+            assert!(again.reflex.is_none(), "{rewritten}");
+            assert_eq!(again.flow, legacy, "{rewritten}");
+        }
+    }
+
     #[test]
     fn reflex_flow_sections_have_strict_whole_document_grammar() {
         let plan: reflex::ReflexPlan = serde_json::from_value(
