@@ -1466,36 +1466,49 @@ mod tests {
         assert!(!kept.contains(SENTINEL), "{kept}");
         assert!(!kept.contains("example.test"), "{kept}");
         // The refused keychain is held until a person asks: a beat sends
-        // nothing for it, a press does.
+        // nothing for it, a press does. On an account of its own, whose
+        // only reading is the refusal — no failure streak to hold it too.
+        let config_c = tempfile::tempdir().unwrap();
+        let data_c = tempfile::tempdir().unwrap();
+        let c = inactive_fixture(config_c.path(), "t7538-denied-c");
+        let refused_c = scan_claude_account_usage_with(
+            &c,
+            |_| accounts::AccountLogin::Refused,
+            |_, _| panic!("a refused keychain's read asked the server"),
+        );
         assert!(land_claude_account_usage(
-            config.path(),
-            data.path(),
-            &b,
-            refused.usage
+            config_c.path(),
+            data_c.path(),
+            &c,
+            refused_c.usage
         ));
         {
-            let mut held = claude_account_usage_cache(data.path())
+            let mut held = claude_account_usage_cache(data_c.path())
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(row) = held.get_mut("t7538-sentinel-b") {
-                // Past every floor, so only the refusal can hold it.
-                row.updated_at -= 24 * 60 * 60_000;
-            }
+            let row = held.get_mut("t7538-denied-c").expect("C's refusal");
+            assert_eq!(row.status, ACCOUNT_LOGIN_REFUSED);
+            // Past every floor, so only the refusal can hold it.
+            row.updated_at -= 24 * 60 * 60_000;
         }
         assert_eq!(
-            refresh_inactive_claude_accounts(config.path(), data.path(), AccountPoll::Ambient),
+            refresh_inactive_claude_accounts(config_c.path(), data_c.path(), AccountPoll::Ambient),
             0
         );
         assert_eq!(
-            refresh_inactive_claude_accounts(config.path(), data.path(), AccountPoll::Candidate),
+            refresh_inactive_claude_accounts(
+                config_c.path(),
+                data_c.path(),
+                AccountPoll::Candidate
+            ),
             0
         );
         assert_eq!(
-            refresh_inactive_claude_accounts(config.path(), data.path(), AccountPoll::Person),
+            refresh_inactive_claude_accounts(config_c.path(), data_c.path(), AccountPoll::Person),
             1
         );
         let began = Instant::now();
-        while claude_account_scanning_now("t7538-sentinel-b")
+        while claude_account_scanning_now("t7538-denied-c")
             && began.elapsed() < Duration::from_secs(10)
         {
             std::thread::sleep(Duration::from_millis(10));
