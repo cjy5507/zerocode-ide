@@ -800,7 +800,7 @@ impl ReviewFacts {
 }
 
 /// The key a worker's report names the commit it hands in under — read by
-/// the ledger when the report lands ([`handed_in_source`]) and spelled in the
+/// the ledger when the report lands (`handed_in_source`) and spelled in the
 /// briefing that asks for it ([`worker_briefing`]), from this one place.
 pub const HANDED_IN_HEAD: &str = "head";
 
@@ -915,7 +915,7 @@ pub struct Dispatch {
     /// dispatch written before federation existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<RemoteSeat>,
-    /// What this attempt handed in for review — [`handed_in_source`] of the
+    /// What this attempt handed in for review — `handed_in_source` of the
     /// report that ended it: the commit it named, or the report's own id.
     /// `None` while nothing has been handed in (open, or ended without a
     /// report), and on every row written before hand-ins were recorded. A
