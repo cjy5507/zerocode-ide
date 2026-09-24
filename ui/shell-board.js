@@ -181,6 +181,7 @@ function paintCoordinatorDesk(view) {
     desk.replaceChildren();
     deskPainted.add(view);
     refreshDeskLedger();
+    watchDeskRoom(view, desk);
   }
   deskAmbient.sync();
   const now = Date.now();
@@ -192,6 +193,70 @@ function paintCoordinatorDesk(view) {
   });
   reconcileElementOrder(desk, blocks);
   writeHidden(desk, blocks.every((block) => block.hidden));
+  placeDeskColumns(desk, blocks);
+}
+
+/* 데스크의 두 열은 잰 높이로 정한다 (t-7448). 우편은 왼쪽, 워커는 오른쪽에 고정이고
+ * 흐름과 레인은 셋 중 하나다 — 둘 다 왼쪽(워커가 왼쪽 행들을 걸치고 남는 높이는
+ * 스타일시트의 `1fr` 행이 받는다), 나눠 넣기(흐름 왼쪽 · 레인 오른쪽, 한 행에
+ * 나란히), 둘 다 오른쪽(우편이 걸친다). 고정 2열은 어느 경우엔 한 열 아래를 비운다:
+ * 우편 세 통 옆에 워커 여덟 행이면 걸침이 낮고(실측 657 대 799), 우편 다섯 통 옆에
+ * 워커 다섯이면 나눠 넣기가 낮다(599 대 807). 그래서 그릴 때마다 네 블록의 높이를
+ * 한 번 읽고(한 레이아웃 — 조용한 폴은 아무것도 더럽히지 않았으므로 공짜다) 격자가
+ * 실제로 낼 높이를 셈해 가장 낮은 배치를 고른다: 걸침은 두 열이 독립이고, 나눠
+ * 넣기는 행마다 긴 쪽에 맞춘다(`grid-column`만으로는 행 높이가 열끼리 묶여 걸침의
+ * 독립이 없으므로 배치는 블록의 `data-desk-column`을 읽는 스타일시트의 영역 이름이
+ * 한다). 같은 높이면 앞의 것(읽는 차례)이고, 같은 값은 다시 쓰지 않는다. 목록
+ * 티어(한 열)에서는 쓰지 않는다 — 그 폭의 높이로 고른 배치가 넓어진 뒤 한 폴 동안
+ * 서지 않게. */
+const DESK_LAYOUTS = Object.freeze([
+  { id: "stack-left", columns: { pipeline: "left", release: "left" },
+    height: (h, gap) => Math.max(deskStack([h.mail, h.pipeline, h.release], gap), h.workers) },
+  { id: "split", columns: { pipeline: "left", release: "right" },
+    height: (h, gap) => deskStack([Math.max(h.mail, h.workers), Math.max(h.pipeline, h.release)], gap) },
+  { id: "stack-right", columns: { pipeline: "right", release: "right" },
+    height: (h, gap) => Math.max(h.mail, deskStack([h.workers, h.pipeline, h.release], gap)) },
+]);
+
+/* 한 열에 차곡차곡: 숨은 블록(높이 0)은 자리도 간격도 없다. */
+function deskStack(heights, gap) {
+  return heights.filter((height) => height > 0).reduce((sum, height, at) => sum + height + (at > 0 ? gap : 0), 0);
+}
+
+function placeDeskColumns(desk, blocks) {
+  if (desk.hidden) return;
+  const by = new Map(blocks.map((block) => [block.dataset.deskBlock, block]));
+  const room = desk.clientWidth;
+  const heights = {};
+  for (const id of ["mail", "workers", "pipeline", "release"]) {
+    const block = by.get(id);
+    if (!block) return;
+    const box = block.hidden ? null : block.getBoundingClientRect();
+    heights[id] = box ? box.height : 0;
+    if (box && box.width >= room - 1) return;
+  }
+  const gap = parseFloat(getComputedStyle(by.get("pipeline")).marginTop) || 0;
+  let chosen = DESK_LAYOUTS[0];
+  let lowest = Infinity;
+  for (const layout of DESK_LAYOUTS) {
+    const height = layout.height(heights, gap);
+    if (height < lowest - 0.5) {
+      lowest = height;
+      chosen = layout;
+    }
+  }
+  for (const [id, column] of Object.entries(chosen.columns)) writeAttribute(by.get(id), "data-desk-column", column);
+}
+
+/* 보드의 폭이 바뀌면(창·사이드바·인스펙터·목록 티어를 벗어남) 배치를 다시 고른다 —
+ * 높이는 폭의 함수라 좁은 판에서 고른 배치가 넓은 판에서는 틀리다. 재는 것은 데스크가
+ * 아니라 스크롤 판이다: 데스크를 재면 배치가 바꾼 제 높이가 같은 프레임의 관찰을 다시
+ * 불러 고리가 된다(undelivered notifications). 판은 스크롤 상자라 내용의 높이에
+ * 움직이지 않는다. 콜백은 레이아웃 뒤에 돌므로 읽기는 공짜고, 같은 배치면 쓰지 않는다. */
+function watchDeskRoom(view, desk) {
+  const surface = view.querySelector(".task-board-surface");
+  if (!surface || typeof ResizeObserver !== "function") return;
+  new ResizeObserver(() => placeDeskColumns(desk, [...desk.children])).observe(surface);
 }
 
 /* ---- 기계 띠 ---------------------------------------------------------------
