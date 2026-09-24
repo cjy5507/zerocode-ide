@@ -1914,16 +1914,14 @@ where
     /// prompt index fits. Recording mode keeps the existing hint unchanged.
     fn inject_skill_suggestion(&mut self, user_input: &str) {
         self.finish_skill_suggestion_turn();
-        let Some(seat) = self.skill_suggestion_seat.as_ref().map(Arc::clone) else {
-            return;
-        };
-        self.skill_suggestion_turn_start = Some(self.session.messages.len());
-        if let Some(note) = ::api::sync_bridge::run_blocking(seat.suggest(user_input.to_string())) {
-            self.replace_transient_system_reminder_by_prefix(
-                crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX,
-                Some(&note),
-            );
-        }
+        let note = self.skill_suggestion_seat.as_ref().map(Arc::clone).and_then(|seat| {
+            self.skill_suggestion_turn_start = Some(self.session.messages.len());
+            ::api::sync_bridge::run_blocking(seat.suggest(user_input.to_string()))
+        });
+        self.replace_transient_system_reminder_by_prefix(
+            crate::skills::SKILL_RECOMMENDATION_REMINDER_PREFIX,
+            note.as_deref(),
+        );
     }
 
     pub(super) fn finish_skill_suggestion_turn(&mut self) {

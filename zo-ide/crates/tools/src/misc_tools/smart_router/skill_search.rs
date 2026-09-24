@@ -25,6 +25,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -466,15 +467,46 @@ impl SkillSuggestionSeat for SkillSuggestionJudge {
 /// compare the load with.
 #[derive(Debug)]
 struct PendingSuggestion {
+    generation: u64,
     suggested: Option<String>,
     loaded: Option<String>,
     acting: bool,
     judged: bool,
 }
 
+static NEXT_SUGGESTION_GENERATION: AtomicU64 = AtomicU64::new(1);
+static LATE_SUGGESTION_JUDGMENTS: AtomicU64 = AtomicU64::new(0);
+
 fn turn_pending() -> &'static Mutex<HashMap<PathBuf, PendingSuggestion>> {
     static PENDING: OnceLock<Mutex<HashMap<PathBuf, PendingSuggestion>>> = OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn start_pending_suggestion(cwd: &Path, acting: bool) -> Option<u64> {
+    let mut pending = turn_pending().lock().ok()?;
+    let generation = NEXT_SUGGESTION_GENERATION.fetch_add(1, Ordering::Relaxed);
+    pending.insert(cwd.to_path_buf(), PendingSuggestion {
+        generation,
+        suggested: None,
+        loaded: None,
+        acting,
+        judged: false,
+    });
+    Some(generation)
+}
+
+fn mark_pending_suggestion_judged(cwd: &Path, generation: u64, suggested: Option<&str>) {
+    if let Ok(mut pending) = turn_pending().lock() {
+        match pending.get_mut(cwd) {
+            Some(turn) if turn.generation == generation => {
+                turn.suggested = suggested.map(str::to_string);
+                turn.judged = true;
+            }
+            _ => {
+                LATE_SUGGESTION_JUDGMENTS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 fn finish_turn_suggestion(cwd: &Path, turn: &[ConversationMessage]) {
@@ -620,13 +652,8 @@ async fn suggest_at(cwd: PathBuf, task: String) -> Option<String> {
     if candidates.len() > zerocode_core::jev::SKILL_SUGGESTION_CATALOG_CAP {
         return None;
     }
-    if let Ok(mut pending) = turn_pending().lock() {
-        pending.insert(
-            cwd.clone(),
-            PendingSuggestion { suggested: None, loaded: None, acting, judged: false },
-        );
-    }
-    let judged = judge_suggestion(cwd, task, skills, candidates, mode, acting);
+    let generation = start_pending_suggestion(&cwd, acting);
+    let judged = judge_suggestion(cwd, task, skills, candidates, mode, acting, generation);
     if acting {
         judged.await
     } else {
@@ -647,6 +674,7 @@ async fn judge_suggestion(
     candidates: Vec<SkillCandidate>,
     mode: JevMode,
     acting: bool,
+    generation: Option<u64>,
 ) -> Option<String> {
     let opened = cwd.clone();
     let door = tokio::task::spawn_blocking(move || JevDoor::open(&opened)).await.ok()?;
@@ -690,11 +718,8 @@ async fn judge_suggestion(
     let _ = append_shadow_row(&skill_search_path(&cwd), &row, SHADOW_LEDGER_MAX_BYTES);
     // The absence of a skill is a prediction too. It stays until this turn
     // ends so a no-load turn contributes a negative label.
-    if let Ok(mut pending) = turn_pending().lock() {
-        if let Some(turn) = pending.get_mut(&cwd) {
-            turn.suggested = winner.as_ref().map(|choice| choice.name.clone());
-            turn.judged = true;
-        }
+    if let Some(generation) = generation {
+        mark_pending_suggestion_judged(&cwd, generation, winner.as_ref().map(|choice| choice.name.as_str()));
     }
     acting.then(|| suggestion_note(winner.as_ref().map(|choice| choice.name.as_str())))
 }
