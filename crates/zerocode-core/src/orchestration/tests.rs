@@ -13248,10 +13248,6 @@ fn a_classifier_decline_is_judged_by_two_witnesses() {
     );
     // A printed error with no record is no dialog, however long it stands.
     assert!(judged(Some(a_decline_screen(false, None)), None, 0).is_none());
-    // The table's number is the measurement's: past the longest dialog a
-    // person answered here (551 s), short of the one nobody did (136 min).
-    assert!(DECLINE_DIALOG_UNANSWERED_MS > 551_000);
-    assert!(DECLINE_DIALOG_UNANSWERED_MS < 136 * 60_000);
 }
 
 /// A declined worker's notice is written once per attempt, names the rung
@@ -13295,7 +13291,7 @@ fn a_declined_worker_is_told_once_and_a_routed_decline_plans_the_declared_handov
     assert_eq!(
         bench
             .ledger
-            .workers_classifier_declined(&[cyber.clone()], NOW),
+            .workers_classifier_declined(std::slice::from_ref(&cyber), NOW),
         1
     );
     // The same decline on the next beat is the same fact.
@@ -13407,13 +13403,15 @@ fn a_switch_of_model_is_written_once_with_the_binding_it_left() {
         at_ms: Some(NOW - 5_000),
     };
     assert_eq!(
-        bench.ledger.workers_model_deviated(&[switch.clone()], NOW),
+        bench
+            .ledger
+            .workers_model_deviated(std::slice::from_ref(&switch), NOW),
         1
     );
     assert_eq!(
         bench
             .ledger
-            .workers_model_deviated(&[switch.clone()], NOW + 1),
+            .workers_model_deviated(std::slice::from_ref(&switch), NOW + 1),
         0
     );
     let rows = bench.json("check --peek --types model_deviated");

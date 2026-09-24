@@ -13272,6 +13272,10 @@ pub const DECLINE_DIALOG_SOURCE: &str = "screen-dialog";
 /// coordinator read the pane. Ten minutes is the first whole ten minutes
 /// past every answered dialog.
 pub const DECLINE_DIALOG_UNANSWERED_MS: i64 = 10 * 60 * 1000;
+// The table's number is the measurement's: past the longest dialog a person
+// answered here (551 s), short of the one nobody did (136 min).
+const _: () =
+    assert!(DECLINE_DIALOG_UNANSWERED_MS > 551_000 && DECLINE_DIALOG_UNANSWERED_MS < 136 * 60_000);
 
 /// A switch a worker's own CLI recorded: a classifier decline it answered on
 /// the category's route rather than on the model its summons bound (t-6747)
