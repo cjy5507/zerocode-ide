@@ -1001,7 +1001,8 @@ fn segment_git_escape(segment: &str, root: &Path) -> Option<String> {
 
 /// Whether `candidate` (resolved against `root` when relative) stays within
 /// `root` after lexically folding `.`/`..`. No filesystem access.
-fn path_within_root(root: &Path, candidate: &str) -> bool {
+#[must_use]
+pub fn path_within_root(root: &Path, candidate: &str) -> bool {
     let candidate = candidate.trim_matches(|c| c == '"' || c == '\'');
     if candidate.is_empty() {
         return true;
@@ -1066,6 +1067,22 @@ pub fn validate_mode(command: &str, mode: PermissionMode) -> ValidationResult {
             ValidationResult::Allow
         }
     }
+}
+
+/// Whether today's rules read `command` as reaching outside `workspace`: a
+/// write aimed at a system path (the workspace-write mode's own check, on every
+/// segment once its wrappers are off), a traversal or a home reference
+/// ([`validate_paths`]), or a git redirect out of it
+/// ([`git_worktree_escape_reason`]). One reading of the rules already here,
+/// for a reader that asks the question whole — the command guard's baseline
+/// (t-6348) — rather than per permission mode.
+#[must_use]
+pub fn reaches_outside_workspace(command: &str, workspace: &Path) -> bool {
+    split_command_segments(command)
+        .into_iter()
+        .any(|segment| command_targets_outside_workspace(strip_command_wrappers(segment)))
+        || validate_paths(command, workspace) != ValidationResult::Allow
+        || git_worktree_escape_reason(command, workspace).is_some()
 }
 
 /// Heuristic: does the command reference absolute paths outside typical workspace dirs?

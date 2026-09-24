@@ -72,6 +72,7 @@ pub mod team_cron_registry;
 pub mod todo_progress;
 pub mod todo_store;
 pub mod tool_cancel;
+pub mod tool_guard;
 pub mod trust_resolver;
 pub mod verified_state;
 pub mod worker_boot;
@@ -106,6 +107,7 @@ pub use bootstrap::{BootstrapPhase, BootstrapPlan};
 pub use compact::relevance as compaction_relevance;
 pub use patch_review::{PatchAsk, PatchReview, PatchReviewSeat, PATCH_REVIEW_RUBRIC_VERSION};
 pub use file_pick::{FilePickAsk, FilePickHint, FilePickSeat, FILE_PICK_NOTE_PREFIX};
+pub use tool_guard::{CommandAsk, CommandRan, TextAsk, TextGuard, TextSource, ToolGuardSeat};
 pub use compact::relevance::{
     BlockHead, CompactionAsk, CompactionJudgment, CompactionSeat, COMPACTION_RUBRIC_VERSION,
 };

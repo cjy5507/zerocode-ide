@@ -411,6 +411,25 @@ pub fn jev_file_pick_mode_from(loader: &runtime::ConfigLoader) -> Option<Decisio
     merged_settings_root_from(loader).map(|root| zerocode_core::jev::FILE_PICK.mode_in(&root))
 }
 
+/// `smart.jevCommandGuard`: whether a shell command is put to the command
+/// guard before it runs (t-6348), from the same merged root as the other Jev
+/// seats — `None` when the settings cannot be read.
+pub const JEV_COMMAND_GUARD_SETTING: &str = zerocode_core::jev::COMMAND_GUARD.setting;
+
+#[must_use]
+pub fn jev_command_guard_mode_from(loader: &runtime::ConfigLoader) -> Option<DecisionShadowMode> {
+    merged_settings_root_from(loader).map(|root| zerocode_core::jev::COMMAND_GUARD.mode_in(&root))
+}
+
+/// `smart.jevToolTextGuard`: whether a text a tool hands back is put to the
+/// tool text guard before the model reads it (t-6348).
+pub const JEV_TOOL_TEXT_GUARD_SETTING: &str = zerocode_core::jev::TOOL_TEXT_GUARD.setting;
+
+#[must_use]
+pub fn jev_tool_text_guard_mode_from(loader: &runtime::ConfigLoader) -> Option<DecisionShadowMode> {
+    merged_settings_root_from(loader).map(|root| zerocode_core::jev::TOOL_TEXT_GUARD.mode_in(&root))
+}
+
 /// `smart.agentTool`: whether an agent's own question — zo's `Jev` tool, `zo
 /// jev ask|choose|score` — is put to a System One judgment (t-6040). Its own
 /// switch, because it sends something else off the machine again: not the

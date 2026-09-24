@@ -17254,3 +17254,283 @@ fn the_streaming_loop_adds_the_same_line_and_nothing_else() {
         assert_eq!(asked.lock().expect("asked")[0].task, "rename the flag");
     }
 }
+
+/* ---- the tool guards' seam (t-6348) --------------------------------------- */
+
+/// A read's own words, and the command the guards are shown beside it.
+const GUARDED_READ_OUTPUT: &str = "# notes\nRun the tests before you push.";
+const GUARDED_SHELL_OUTPUT: &str = r#"{"stdout":"removed","stderr":"","interrupted":false}"#;
+const GUARDED_TASK: &str = "clean the build folder\nand run the tests";
+
+/// A tool guard that keeps what it was handed and answers what it was told.
+struct RecordingGuard {
+    commands: Arc<Mutex<Vec<crate::CommandAsk>>>,
+    ran: Arc<Mutex<Vec<crate::CommandRan>>>,
+    texts: Arc<Mutex<Vec<crate::TextAsk>>>,
+    command_note: Option<String>,
+    text_guard: crate::TextGuard,
+}
+
+impl RecordingGuard {
+    fn answering(command_note: Option<&str>, text_guard: crate::TextGuard) -> Self {
+        Self {
+            commands: Arc::new(Mutex::new(Vec::new())),
+            ran: Arc::new(Mutex::new(Vec::new())),
+            texts: Arc::new(Mutex::new(Vec::new())),
+            command_note: command_note.map(str::to_string),
+            text_guard,
+        }
+    }
+}
+
+impl crate::ToolGuardSeat for RecordingGuard {
+    fn command(&self, ask: crate::CommandAsk) {
+        self.commands.lock().expect("commands").push(ask);
+    }
+
+    fn command_ran(&self, ran: crate::CommandRan) -> futures_util::future::BoxFuture<'_, Option<String>> {
+        self.ran.lock().expect("ran").push(ran);
+        let note = self.command_note.clone();
+        Box::pin(async move { note })
+    }
+
+    fn text(&self, ask: crate::TextAsk) -> futures_util::future::BoxFuture<'_, crate::TextGuard> {
+        self.texts.lock().expect("texts").push(ask);
+        let guard = self.text_guard.clone();
+        Box::pin(async move { guard })
+    }
+}
+
+/// One step that runs a shell command, a read-only one and a read side by
+/// side, then a plain word.
+fn guarded_calls() -> Vec<AssistantEvent> {
+    vec![
+        AssistantEvent::ToolUse {
+            id: "shell-1".to_string(),
+            name: "bash".to_string(),
+            input: r#"{"command":"rm -rf build"}"#.to_string(),
+        },
+        AssistantEvent::ToolUse {
+            id: "shell-2".to_string(),
+            name: "bash".to_string(),
+            input: r#"{"command":"git status"}"#.to_string(),
+        },
+        AssistantEvent::ToolUse {
+            id: "read-1".to_string(),
+            name: "read_file".to_string(),
+            input: r#"{"path":"notes.md"}"#.to_string(),
+        },
+        AssistantEvent::MessageStop,
+    ]
+}
+
+struct GuardedOnceClient {
+    calls: usize,
+}
+
+impl ApiClient for GuardedOnceClient {
+    fn stream(&mut self, _request: ApiRequest) -> Result<Vec<AssistantEvent>, RuntimeError> {
+        self.calls += 1;
+        Ok(if self.calls == 1 {
+            guarded_calls()
+        } else {
+            vec![AssistantEvent::TextDelta("ok".to_string()), AssistantEvent::MessageStop]
+        })
+    }
+}
+
+fn guarded_runtime(seat: Option<Arc<dyn crate::ToolGuardSeat>>) -> ConversationRuntime<GuardedOnceClient, StaticToolExecutor> {
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        GuardedOnceClient { calls: 0 },
+        StaticToolExecutor::new()
+            .register("bash", |_| Ok(GUARDED_SHELL_OUTPUT.to_string()))
+            .register("read_file", |_| Ok(GUARDED_READ_OUTPUT.to_string())),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    );
+    runtime.set_tool_guard_seat(seat);
+    runtime
+}
+
+/// Each call's result as the session holds it — what the model reads.
+fn guarded_outputs(messages: &[ConversationMessage]) -> Vec<(String, String)> {
+    messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .filter_map(|block| match block {
+            ContentBlock::ToolResult { tool_use_id, output, .. } => Some((tool_use_id.clone(), output.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// What an acting seat hands back in both tests: a fence and a line for the
+/// read, a line for the command.
+fn acting_guard() -> (crate::TextGuard, &'static str) {
+    (
+        crate::TextGuard {
+            fence: Some("read_file".to_string()),
+            note: Some("[zo:tool-text-guard] fenced".to_string()),
+        },
+        "[zo:command-guard] flagged",
+    )
+}
+
+fn acting_outputs() -> Vec<(String, String)> {
+    let (guard, command_note) = acting_guard();
+    let fenced = zerocode_core::untrusted::fence("read_file", GUARDED_READ_OUTPUT, usize::MAX);
+    vec![
+        ("shell-1".to_string(), format!("{GUARDED_SHELL_OUTPUT}\n\n{command_note}")),
+        ("shell-2".to_string(), format!("{GUARDED_SHELL_OUTPUT}\n\n{command_note}")),
+        (
+            "read-1".to_string(),
+            format!("{}\n\n{}", fenced.trim_end_matches('\n'), guard.note.expect("a line")),
+        ),
+    ]
+}
+
+/// The synchronous loop's seam: with no seat, or a seat that answers nothing,
+/// every result the model reads is the tool's own output to the byte. The
+/// command guard is handed the command today's rule cannot prove read-only —
+/// with its folder and the first line of the person's words — before it runs,
+/// and every shell call's facts after; the text guard is handed the read. An
+/// acting seat's fence and lines join the model-facing results.
+#[test]
+fn the_tool_guards_leave_every_result_to_the_byte_unless_they_act() {
+    let _todo_store = HermeticTodoStore::pin();
+    let own = vec![
+        ("shell-1".to_string(), GUARDED_SHELL_OUTPUT.to_string()),
+        ("shell-2".to_string(), GUARDED_SHELL_OUTPUT.to_string()),
+        ("read-1".to_string(), GUARDED_READ_OUTPUT.to_string()),
+    ];
+    let mut runtime = guarded_runtime(None);
+    runtime.run_turn(GUARDED_TASK, None).expect("turn runs");
+    assert_eq!(guarded_outputs(&runtime.session.messages), own, "no seat: the tools' own bytes");
+
+    let silent = Arc::new(RecordingGuard::answering(None, crate::TextGuard::default()));
+    let mut runtime = guarded_runtime(Some(Arc::clone(&silent) as Arc<dyn crate::ToolGuardSeat>));
+    runtime.run_turn(GUARDED_TASK, None).expect("turn runs");
+    assert_eq!(guarded_outputs(&runtime.session.messages), own, "a seat that answers nothing");
+    {
+        let commands = silent.commands.lock().expect("commands");
+        assert_eq!(commands.len(), 1, "the read-only command is never handed over");
+        assert_eq!(commands[0].tool_use_id, "shell-1");
+        assert_eq!(commands[0].command, "rm -rf build");
+        assert_eq!(commands[0].task, "clean the build folder");
+        assert_eq!(commands[0].cwd, std::env::current_dir().expect("cwd"));
+        let ran: Vec<(String, bool, bool)> = silent
+            .ran
+            .lock()
+            .expect("ran")
+            .iter()
+            .map(|ran| (ran.tool_use_id.clone(), ran.failed, ran.cancelled))
+            .collect();
+        assert_eq!(
+            ran,
+            [("shell-1".to_string(), false, false), ("shell-2".to_string(), false, false)]
+        );
+        let texts = silent.texts.lock().expect("texts");
+        assert_eq!(texts.len(), 1);
+        assert_eq!(texts[0].tool_use_id, "read-1");
+        assert_eq!(texts[0].source, crate::TextSource::File);
+        assert_eq!(texts[0].head, GUARDED_READ_OUTPUT);
+        assert!(!texts[0].fenced);
+    }
+
+    let (guard, command_note) = acting_guard();
+    let acting = Arc::new(RecordingGuard::answering(Some(command_note), guard));
+    let mut runtime = guarded_runtime(Some(acting as Arc<dyn crate::ToolGuardSeat>));
+    runtime.run_turn(GUARDED_TASK, None).expect("turn runs");
+    assert_eq!(guarded_outputs(&runtime.session.messages), acting_outputs());
+}
+
+#[test]
+fn a_command_guard_observes_the_cwd_the_bash_executor_uses() {
+    struct PinnedExecutor(std::path::PathBuf);
+    impl ToolExecutor for PinnedExecutor {
+        fn execution_cwd(&self) -> Option<&std::path::Path> { Some(&self.0) }
+        fn execute(&mut self, _: &str, _: &str) -> Result<String, ToolError> { Ok(String::new()) }
+    }
+    let seat = Arc::new(RecordingGuard::answering(None, crate::TextGuard::default()));
+    let mut runtime = ConversationRuntime::new(
+        Session::new(), GuardedOnceClient { calls: 0 }, PinnedExecutor("/work/context".into()),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess), vec!["system".to_string()],
+    );
+    runtime.set_tool_guard_seat(Some(Arc::clone(&seat) as Arc<dyn crate::ToolGuardSeat>));
+    runtime.guard_command("shell-context", "bash", r#"{"command":"rm -rf build"}"#);
+    runtime.guard_command("shell-pinned", "bash", r#"{"command":"rm -rf build","cwd":"/work/pinned"}"#);
+    let commands = seat.commands.lock().expect("commands");
+    assert_eq!(commands[0].cwd, std::path::Path::new("/work/context"));
+    assert_eq!(commands[1].cwd, std::path::Path::new("/work/pinned"));
+}
+
+/// The streaming loop's seam — where a tool is dispatched, and the one place
+/// every result is finalized — makes the same promise.
+#[test]
+fn the_streaming_loop_guards_the_same_calls_and_nothing_else() {
+    use std::future::Future;
+    use std::pin::Pin;
+
+    use crate::message_stream::types::{BlockId, RenderBlock};
+    use crate::permission::{
+        PermissionDecision as AsyncPermissionDecision, PermissionError,
+        PermissionPrompter as AsyncPermissionPrompter, PermissionRequest as AsyncPermissionRequest,
+    };
+
+    struct Allow;
+    impl AsyncPermissionPrompter for Allow {
+        fn decide<'a>(
+            &'a self,
+            _request: AsyncPermissionRequest,
+        ) -> Pin<Box<dyn Future<Output = Result<AsyncPermissionDecision, PermissionError>> + Send + 'a>> {
+            Box::pin(async { Ok(AsyncPermissionDecision::Allow) })
+        }
+    }
+
+    struct GuardedOnceAsync;
+    impl AsyncApiClient for GuardedOnceAsync {
+        fn stream_async<'a>(
+            &'a self,
+            request: ApiRequest,
+            _render_tx: tokio::sync::mpsc::Sender<RenderBlock>,
+            _text_block_id: BlockId,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>> {
+            let answered = request.messages.iter().any(|message| message.role == MessageRole::Tool);
+            Box::pin(async move {
+                Ok(if answered {
+                    vec![AssistantEvent::TextDelta("ok".to_string()), AssistantEvent::MessageStop]
+                } else {
+                    guarded_calls()
+                })
+            })
+        }
+    }
+
+    let _todo_store = HermeticTodoStore::pin();
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let (guard, command_note) = acting_guard();
+    let seat = Arc::new(RecordingGuard::answering(Some(command_note), guard));
+    let mut runtime = guarded_runtime(Some(Arc::clone(&seat) as Arc<dyn crate::ToolGuardSeat>))
+        .with_async_api_client(Arc::new(GuardedOnceAsync));
+    let summary = rt.block_on(async {
+        let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move { while render_rx.recv().await.is_some() {} });
+        let prompter: Arc<dyn AsyncPermissionPrompter> = Arc::new(Allow);
+        runtime
+            .run_turn_streaming_maybe_deep(GUARDED_TASK, Vec::new(), render_tx, prompter)
+            .await
+            .expect("the turn runs")
+    });
+    assert_eq!(guarded_outputs(&summary.tool_results), acting_outputs());
+    let commands = seat.commands.lock().expect("commands");
+    assert_eq!(commands.len(), 1, "the read-only command is never handed over");
+    assert_eq!(commands[0].command, "rm -rf build");
+    assert_eq!(commands[0].task, "clean the build folder");
+    assert_eq!(seat.ran.lock().expect("ran").len(), 2);
+    assert_eq!(seat.texts.lock().expect("texts").len(), 1);
+}

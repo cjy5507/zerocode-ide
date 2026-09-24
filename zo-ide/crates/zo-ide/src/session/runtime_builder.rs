@@ -98,6 +98,10 @@ pub(crate) fn build_runtime_plugin_state_with_loader(
         // Seated always; what it may do per patch — record, or add a line to
         // the result — is `smart.jevPatchReview`, read at the edit.
         patch_review_seat: Some(Arc::new(tools::PatchReviewJudge::at(cwd))),
+        // Seated always; what the two guards may do per call — record, or add
+        // a line and a fence — is `smart.jevCommandGuard` and
+        // `smart.jevToolTextGuard`, read at the call.
+        tool_guard_seat: Some(Arc::new(tools::ToolGuardJudge::at(cwd))),
         // Seated at every public prompt boundary; its default mode records
         // candidate rankings until the same turn's edited files label them.
         file_pick_seat: Some(Arc::new(tools::FilePickJudge::at(cwd))),

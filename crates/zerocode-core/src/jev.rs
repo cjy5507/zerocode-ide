@@ -3225,8 +3225,200 @@ pub const FILE_PICK: JevUse = JevUse {
     )),
 };
 
+/// Characters of a shell command one command-guard question carries (t-6348).
+///
+/// Measured over this machine's zo transcripts of the seven days to
+/// 2026-09-24 — 2,318 `bash` calls: p50 226, p90 919, p99 3,490 characters. A
+/// thousand holds 91.0% of them whole and the head of the rest, which is where
+/// the program and its first arguments stand; it is the recall seat's request
+/// line, one text a judgment reads.
+pub const COMMAND_GUARD_COMMAND_CHAR_CAP: usize = RECALL_REQUEST_CHAR_CAP;
+
+/// Characters of the task line beside the command: the first line of the
+/// person's newest words, which says what the command is for. A goal's
+/// sentence or two ([`GOAL_CHAR_CAP`]): 89.2% of the 362 first lines of the
+/// same week fit whole.
+pub const COMMAND_GUARD_TASK_CHAR_CAP: usize = GOAL_CHAR_CAP;
+
+/// The probability of yes, per thousand, at which either of the command
+/// guard's two Nouls names a command `flagged` — the guardrails cookbook's
+/// strict action line (review from 0.35, act from 0.70), a policy line and not
+/// a calibrated accuracy claim, like [`SCREEN_INSTRUCTED_FLOOR_PERMILLE`].
+pub const COMMAND_GUARD_FLAG_FLOOR_PERMILLE: u16 = 700;
+
+/// What the command guard's answers must bound above before `auto` rises to
+/// marking (§4): nine in ten — the patch review's reasoning, reached from this
+/// seat's side: a question that does not come back costs the command nothing,
+/// since it was asked beside the command and the command runs either way.
+pub const COMMAND_GUARD_ANSWER_FLOOR_PERMILLE: u16 = PATCH_REVIEW_ANSWER_FLOOR_PERMILLE;
+
+/// The command guard's route-change budget (§4): four marks in five must be
+/// the ones hindsight then gave — a command it flagged that was stopped,
+/// restored or changed something outside the project, and a command it let
+/// pass that none of those befell.
+pub const COMMAND_GUARD_AGREEMENT_FLOOR_PERMILLE: u16 = PATCH_REVIEW_AGREEMENT_FLOOR_PERMILLE;
+
+/// The wall an acting command guard waits for its answer, in milliseconds,
+/// counted from the moment it asked — which is before the command started, so
+/// the command's own run is inside the wall. A tool result is what the model
+/// is waiting on: the patch review's wall, for the patch review's reason.
+pub const COMMAND_GUARD_APPLY_DEADLINE_MS: u64 = PATCH_REVIEW_APPLY_DEADLINE_MS;
+
+/// Turns after a guarded command inside which a restore of a path it named
+/// counts as the command's regret — the patch review's window, drawn the same
+/// way: long enough for the turns that notice and repair, short enough that
+/// the same path restored an hour later for another reason is not charged to
+/// this command.
+pub const COMMAND_GUARD_REGRET_TURNS: u32 = PATCH_REVIEW_REGRET_TURNS;
+
+/// zo's command guard (t-6348): right before zo runs a shell command the
+/// product's own read-only rule cannot prove harmless, two Nouls in one request
+/// — would running it destroy or replace something no ordinary next step can
+/// bring back, does it change something outside the project's folder.
+///
+/// What is sent is the command, the folder it runs in, and the first line of
+/// the person's newest words. Nothing blocks: under `shadow` — and under an
+/// `auto` its evidence has not raised — the question is asked beside the
+/// command and only recorded; an acting guard adds one line to the result the
+/// model reads. It never claims to have stopped anything.
+///
+/// The `agreed` rule is hindsight, one label per answered command, written
+/// when its turn ends or its window of turns closes: the command was regretted
+/// when the person stopped it (Esc while it ran, or the turn it ran in),
+/// when a path it named outside the project changed under it, or when a later
+/// command restored a path it named ([`COMMAND_GUARD_REGRET_TURNS`]); it stood
+/// otherwise. A failed command is recorded, not graded. `flagged` agreed when
+/// the command was regretted, `plain` when it stood. The baseline is today's
+/// rule: zo's destructive and path tables, its shared-tree table, and the
+/// Computer Use words a control that cannot be taken back carries
+/// ([`crate::guarded::kind_of`]).
+pub const COMMAND_GUARD: JevUse = JevUse {
+    id: "command_guard",
+    setting: "jevCommandGuard",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    // `auto`, like every seat that promotes: it records until the judge
+    // raises it, and with no regret label yet on this machine it cannot.
+    recommended: JevMode::Auto,
+    repeat: None,
+    sends: &[
+        Sent {
+            at: "/state/command",
+            cap: Cap::Chars(COMMAND_GUARD_COMMAND_CHAR_CAP),
+        },
+        // The folder the command runs in, as the filesystem spells it — the
+        // line the second Noul draws "outside" from.
+        Sent {
+            at: "/state/cwd",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/task",
+            cap: Cap::Chars(COMMAND_GUARD_TASK_CHAR_CAP),
+        },
+    ],
+    ledger: "command-guard.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(COMMAND_GUARD_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(COMMAND_GUARD_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(COMMAND_GUARD_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Hindsight,
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    // Two Nouls: abstain inside the cookbook's uncertain middle, act from the
+    // flag line's lean (a 700‰ yes is a 400‰ lean).
+    confidence_bands: Some(ConfidenceBands::on_a_noul(
+        NOUL_UNCERTAIN_TO_PERMILLE,
+        COMMAND_GUARD_FLAG_FLOOR_PERMILLE,
+    )),
+};
+
+/// Characters of a tool block's head one tool-text question carries
+/// (t-6348): routing's one text a judgment reads. Of the 640 file, web,
+/// window-browser and MCP blocks of this machine's seven days to 2026-09-24,
+/// 60.2% fit whole and the rest are asked about their head — where a page's
+/// banner, a file's header and a result's first lines stand. An order further
+/// down is not seen; the replay says so.
+pub const TOOL_TEXT_GUARD_TEXT_CHAR_CAP: usize = ROUTING_TASK_CHAR_CAP;
+
+/// The probability of yes, per thousand, at which the tool text guard names a
+/// block `instructed`: the screen guard's own line, because it is the screen
+/// guard's question asked of another text.
+pub const TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE: u16 = SCREEN_INSTRUCTED_FLOOR_PERMILLE;
+
+/// The wall an acting tool text guard holds a block before the model reads
+/// it, in milliseconds — the patch review's, for the patch review's reason.
+pub const TOOL_TEXT_GUARD_APPLY_DEADLINE_MS: u64 = PATCH_REVIEW_APPLY_DEADLINE_MS;
+
+/// What the tool text guard's answers must bound above before `auto` rises to
+/// fencing (§4): the command guard's line, reached the same way — a block
+/// whose question never came back reaches the model as it did before.
+pub const TOOL_TEXT_GUARD_ANSWER_FLOOR_PERMILLE: u16 = COMMAND_GUARD_ANSWER_FLOOR_PERMILLE;
+
+/// The tool text guard's route-change budget (§4): four marks in five must be
+/// the ones hindsight then gave — a block it named `instructed` whose order the
+/// next step carried out, and a block it let pass whose words nothing did.
+pub const TOOL_TEXT_GUARD_AGREEMENT_FLOOR_PERMILLE: u16 = COMMAND_GUARD_AGREEMENT_FLOOR_PERMILLE;
+
+/// zo's tool text guard (t-6348): the screen's instructions guard asked of
+/// every block a file read, a web fetch or search, the window's browser (an
+/// answer that arrives inside the window's fence) or an MCP tool hands back —
+/// does any of it address an assistant and tell it what to do.
+///
+/// What is sent is the block's head and the kind of tool it came from. Nothing
+/// blocks and no read is refused: under `shadow` — and under an `auto` its
+/// evidence has not raised — the question is asked beside the read and only
+/// recorded; an acting guard puts a block it flags inside the one fence for
+/// words an agent did not write (`crate::untrusted`) and adds one line. A
+/// filter for the model, not a security boundary.
+///
+/// The `agreed` rule is hindsight, one label per answered block, written when
+/// the turn ends: the block was followed when a call in the agent's next step
+/// carried out a command or wrote a file the block spelled and the person's
+/// words did not; it was not when that step made no such call. `instructed`
+/// agreed when the block was followed, `plain` when it was not. The baseline
+/// is today's rule: the block arrived already fenced.
+pub const TOOL_TEXT_GUARD: JevUse = JevUse {
+    id: "tool_text_guard",
+    setting: "jevToolTextGuard",
+    modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
+    // `auto`, like every seat that promotes.
+    recommended: JevMode::Auto,
+    repeat: None,
+    sends: &[
+        // A word the product wrote (`file`, `web`, `browser`, `mcp`), cleared
+        // like everything else the door reads: declared so a reader of this
+        // table sees every key the state carries.
+        Sent {
+            at: "/state/source",
+            cap: Cap::Uncut,
+        },
+        Sent {
+            at: "/state/text",
+            cap: Cap::Chars(TOOL_TEXT_GUARD_TEXT_CHAR_CAP),
+        },
+    ],
+    ledger: "tool-text-guard.jsonl",
+    promotes: true,
+    answer_floor_permille: Some(TOOL_TEXT_GUARD_ANSWER_FLOOR_PERMILLE),
+    press_floor_permille: None,
+    agreement_floor_permille: Some(TOOL_TEXT_GUARD_AGREEMENT_FLOOR_PERMILLE),
+    apply_deadline_ms: Some(TOOL_TEXT_GUARD_APPLY_DEADLINE_MS),
+    window_forgives: Some(FORGIVES_A_BAD_MINUTE),
+    agreement_rows_wanted: Some(A_WINDOW_OF_COMPARISONS),
+    agreement_kind: AgreementKind::Hindsight,
+    baseline: Baseline::TodaysRule,
+    negatives_wanted: Some(NEGATIVES_WANTED),
+    confidence_bands: Some(ConfidenceBands::on_a_noul(
+        NOUL_UNCERTAIN_TO_PERMILLE,
+        TOOL_TEXT_INSTRUCTED_FLOOR_PERMILLE,
+    )),
+};
+
 /// Every place this product asks Jev something.
-pub static JEV_USES: [JevUse; 23] = [
+pub static JEV_USES: [JevUse; 25] = [
     ROUTING,
     RECALL,
     SKILLS,
@@ -3250,6 +3442,8 @@ pub static JEV_USES: [JevUse; 23] = [
     CLAIM,
     VAULT_PAIRS,
     FILE_PICK,
+    COMMAND_GUARD,
+    TOOL_TEXT_GUARD,
 ];
 
 impl JevUse {
