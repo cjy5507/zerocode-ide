@@ -18,8 +18,8 @@ import ZeroCodeComputerUseMacOSCore
 /// asks for its own rate — the stream's rate changes in place, never a restart,
 /// so the repaint numbers, the encoded look and every other reader's cursor
 /// carry on — keeps the stream open past the idle time, and is woken on every
-/// capture with the newest frame's facts.
-final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Sendable {
+/// capture with the newest frame's facts (`ReflexCaptureBook`).
+final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, EyeFeed, @unchecked Sendable {
     private static let lock = NSLock()
     nonisolated(unsafe) private static var eyes: [CGDirectDisplayID: ScreenEye] = [:]
     /// Every eye opened gets the next number: a reopened eye numbers its
@@ -56,11 +56,8 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
     private var unitsPerPoint: CGFloat?
     /// The window's table and the runs reading beside it.
     private var readers = EyeReaders()
-    /// Captures delivered (a complete frame, or an idle one of the same
-    /// pixels) and the ones that were neither since the last.
-    private var captureSeq: UInt64 = 0
-    private var captureGap: UInt64 = 0
-    private var capture: ReflexCapture?
+    /// Every frame the stream delivered, as a capture a run reads.
+    private var book: ReflexCaptureBook
     private var wakes: [String: @Sendable () -> Void] = [:]
 
     /// Which eye this is, among every eye this helper opened.
@@ -68,7 +65,7 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
     /// Survives repeated reads, changes on reopen and across helper restarts.
     private let streamId = UUID().uuidString
 
-    private init(config: EyeConfig, display: DesktopScreen.Display, displayIndex: Int) {
+    private init(config: EyeConfig, display: DesktopScreen.Display, geometry: EyeGeometry, displayIndex: Int) {
         Self.lock.lock()
         Self.opened += 1
         self.generation = Self.opened
@@ -77,6 +74,7 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
         self.display = display
         self.displayIndex = displayIndex
         self.ring = EyeRing(config: config)
+        self.book = ReflexCaptureBook(opened: geometry, generation: UInt64(generation))
         super.init()
         _ = readers.start(config)
     }
@@ -102,7 +100,10 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
             return running.state(after: nil, fromMs: nil)
         }
         if let running { stop(ifCurrent: running) }
-        let eye = ScreenEye(config: config, display: display, displayIndex: index)
+        guard let geometry = DesktopScreen.geometry(of: display.id) else {
+            throw ProviderError.coded("not_watching", "display \(index) is gone")
+        }
+        let eye = ScreenEye(config: config, display: display, geometry: geometry, displayIndex: index)
         try eye.begin()
         lock.lock()
         eyes[display.id] = eye
@@ -221,6 +222,14 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
         if same { eye.end() }
     }
 
+    /// Whether this eye is still the one open on its display.
+    private static func isOpen(_ eye: ScreenEye) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return eyes[eye.display.id] === eye
+    }
+
+
     // MARK: the stream
 
     private var alive: Bool {
@@ -292,7 +301,6 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
         self.stream = nil
         newest = nil
         encoded = nil
-        capture = nil
         wakes.removeAll()
         readers.closed()
         stateLock.unlock()
@@ -307,7 +315,7 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
     /// A run reads at `framesPerSecond`: the rate goes up in place if it is
     /// more than the stream runs at, and the stream delivers sRGB while any
     /// run reads it.
-    fileprivate func add(_ reader: String, framesPerSecond: Int) throws {
+    private func add(_ reader: String, framesPerSecond: Int) throws {
         stateLock.lock()
         let wasHeld = readers.held
         let change = readers.add(reader, framesPerSecond: framesPerSecond)
@@ -326,7 +334,7 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
 
     /// A run is done reading: its rate and its colour space are given back in
     /// place, and it is woken no more.
-    fileprivate func remove(_ reader: String) {
+    func remove(_ reader: String) {
         stateLock.lock()
         wakes[reader] = nil
         let change = readers.remove(reader)
@@ -338,7 +346,7 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
         }
     }
 
-    fileprivate func wake(_ reader: String, _ wake: (@Sendable () -> Void)?) {
+    func wake(_ reader: String, _ wake: (@Sendable () -> Void)?) {
         stateLock.lock()
         wakes[reader] = wake
         stateLock.unlock()
@@ -359,10 +367,12 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
     }
 
     /// The newest frame and its capture facts, for a run's evaluating thread.
-    fileprivate func newestCapture() -> (pixels: CVPixelBuffer, capture: ReflexCapture)? {
+    func readerCapture() -> (pixels: CVPixelBuffer?, capture: ReflexCapture)? {
+        let now = DesktopScreen.geometry(of: display.id)
+        let open = Self.isOpen(self)
         stateLock.lock()
         defer { stateLock.unlock() }
-        guard let newest, let capture else { return nil }
+        guard let capture = book.read(open: open && stream != nil && failure == nil, now: now) else { return nil }
         return (newest, capture)
     }
 
@@ -384,8 +394,9 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
             idle(capturedNs: capturedNs, deliveredNs: deliveredNs)
         default:
             stateLock.lock()
-            captureGap += 1
+            let woken = book.interrupted(capturedNs: capturedNs, deliveredNs: deliveredNs) == nil ? [] : Array(wakes.values)
             stateLock.unlock()
+            for wake in woken { wake() }
         }
     }
 
@@ -395,6 +406,7 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
         let dirty = Self.rects(info[.dirtyRects])
         let atMs = Self.nowMs()
         let space = Self.colorSpace(pixels)
+        let now = DesktopScreen.geometry(of: display.id)
         stateLock.lock()
         let per = unitsPerPoint ?? EyeFrameSize.unitsPerPoint(
             firstExtent: dirty.map(\.maxX).max(),
@@ -416,15 +428,16 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
         newest = pixels
         let first = !sawFrame
         sawFrame = true
-        let woken = captured(width: width, height: height, space: space, dirty: !dirty.isEmpty, capturedNs: capturedNs, deliveredNs: deliveredNs)
+        let woken = captured(width: width, height: height, space: space, dirty: !dirty.isEmpty, capturedNs: capturedNs, deliveredNs: deliveredNs, now: now)
         stateLock.unlock()
         if first { firstFrame.signal() }
         for wake in woken { wake() }
     }
 
     private func idle(capturedNs: UInt64?, deliveredNs: UInt64) {
+        let now = DesktopScreen.geometry(of: display.id)
         stateLock.lock()
-        guard let held = newest, let last = capture else {
+        guard let held = newest, let last = book.newest else {
             stateLock.unlock()
             return
         }
@@ -434,54 +447,31 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
             space: last.colorSpace,
             dirty: false,
             capturedNs: capturedNs,
-            deliveredNs: deliveredNs
+            deliveredNs: deliveredNs,
+            now: now
         )
         stateLock.unlock()
         for wake in woken { wake() }
     }
 
-    /// Note one capture's facts (under `stateLock`) and answer whom to wake.
-    private func captured(width: Int, height: Int, space: ReflexColorSpace, dirty: Bool, capturedNs: UInt64?, deliveredNs: UInt64) -> [@Sendable () -> Void] {
-        captureSeq += 1
-        let points = UInt64(max(0, display.bounds.width.rounded()))
-        let common = Self.gcd(points, UInt64(max(1, width)))
-        capture = ReflexCapture(
-            displayId: String(display.id),
-            region: ReflexRoi(x: 0, y: 0, width: Int64(width), height: Int64(height), space: .pixel),
-            pixelExtent: ReflexPixelExtent(width: UInt32(clamping: width), height: UInt32(clamping: height)),
-            pointTransform: ReflexPointTransform(
-                origin_x: Int64(display.bounds.minX.rounded()),
-                origin_y: Int64(display.bounds.minY.rounded()),
-                points_per_pixel: ReflexScale(numerator: points / max(common, 1), denominator: UInt64(max(1, width)) / max(common, 1))
-            ),
-            orientation: Self.orientation(display.id),
+    /// Note one capture (under `stateLock`) with the display as it stood when
+    /// it came, and answer whom to wake.
+    private func captured(width: Int, height: Int, space: ReflexColorSpace, dirty: Bool, capturedNs: UInt64?, deliveredNs: UInt64, now: EyeGeometry?) -> [@Sendable () -> Void] {
+        book.delivered(
+            extent: ReflexPixelExtent(width: UInt32(clamping: width), height: UInt32(clamping: height)),
             colorSpace: space,
-            status: .ready,
             dirty: dirty,
-            captureGap: captureGap,
-            deliveredHostNs: deliveredNs,
-            captureSeq: captureSeq,
             repaintSeq: UInt64(ring.latest),
-            streamEpoch: UInt64(generation),
-            // An eye never outlives its display's geometry: a display that
-            // changed closes the eye (`running`), and the next is another.
-            geometryEpoch: UInt64(generation),
-            clockDomain: ReflexContract.hostUptimeClockDomain,
-            capturedHostNs: capturedNs
+            capturedNs: capturedNs,
+            deliveredNs: deliveredNs,
+            now: now
         )
-        captureGap = 0
         return Array(wakes.values)
     }
 
     private static func nanoseconds(_ ticks: UInt64) -> UInt64 {
         let product = ticks.multipliedFullWidth(by: UInt64(timebase.numer))
         return UInt64(timebase.denom).dividingFullWidth(product).quotient
-    }
-
-    private static func gcd(_ a: UInt64, _ b: UInt64) -> UInt64 {
-        var (a, b) = (a, b)
-        while b != 0 { (a, b) = (b, a % b) }
-        return a
     }
 
     /// The colour space a frame's pixels are in, when the buffer says; unknown
@@ -493,15 +483,6 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
         if name == CGColorSpace.sRGB { return .srgb }
         if name == CGColorSpace.displayP3 { return .display_p3 }
         return .unknown
-    }
-
-    private static func orientation(_ id: CGDirectDisplayID) -> ReflexOrientation {
-        switch Int(CGDisplayRotation(id).rounded()) {
-        case 90: return .right
-        case 180: return .down
-        case 270: return .left
-        default: return .up
-        }
     }
 
     /// The repaints of a frame: CGRects in NSValues, as the header says, or
@@ -608,22 +589,33 @@ final class ScreenEye: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Se
     }
 }
 
+/// What a run's reader asks of an eye (`ScreenEye`): its newest capture, read
+/// against the display as it stands, the run's wake, and its leaving.
+protocol EyeFeed: AnyObject, Sendable {
+    func readerCapture() -> (pixels: CVPixelBuffer?, capture: ReflexCapture)?
+    func wake(_ reader: String, _ wake: (@Sendable () -> Void)?)
+    func remove(_ reader: String)
+}
+
 /// A run's hold on one display's eye: the frame source its evaluating thread
 /// reads. Ending it gives the run's rate back; nothing restarts.
-final class ReflexEyeReader: ReflexFrameSource {
-    private let eye: ScreenEye
+final class ReflexEyeReader: ReflexRunSource, @unchecked Sendable {
+    private let eye: any EyeFeed
     private let reader: String
+    private let lock = NSLock()
+    private var ended = false
 
-    fileprivate init(eye: ScreenEye, reader: String) {
+    init(eye: any EyeFeed, reader: String) {
         self.eye = eye
         self.reader = reader
     }
 
     func newest() -> ReflexFrameLoan? {
-        guard let (pixels, capture) = eye.newestCapture() else { return nil }
+        guard let (pixels, capture) = eye.readerCapture() else { return nil }
         return ReflexFrameLoan(capture: capture) { body in
             // Only the buffer the facts describe is lent: BGRA, the extent they name.
-            guard CVPixelBufferGetPixelFormatType(pixels) == kCVPixelFormatType_32BGRA,
+            guard let pixels,
+                  CVPixelBufferGetPixelFormatType(pixels) == kCVPixelFormatType_32BGRA,
                   CVPixelBufferGetWidth(pixels) == Int(capture.pixelExtent.width),
                   CVPixelBufferGetHeight(pixels) == Int(capture.pixelExtent.height),
                   CVPixelBufferLockBaseAddress(pixels, .readOnly) == kCVReturnSuccess
@@ -641,8 +633,13 @@ final class ReflexEyeReader: ReflexFrameSource {
         eye.wake(reader, wake)
     }
 
+    /// Give the run's rate back, once.
     func end() {
-        eye.remove(reader)
+        lock.lock()
+        let first = !ended
+        ended = true
+        lock.unlock()
+        if first { eye.remove(reader) }
     }
 }
 

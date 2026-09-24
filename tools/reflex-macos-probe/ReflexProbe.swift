@@ -214,6 +214,12 @@ final class EchoingMonitor: ReflexInputMonitor, @unchecked Sendable {
     }
 }
 
+/// Every point of the synthetic fixture is the run's to act on: the probe
+/// has no windows, and no event reaches the system.
+struct WholeFixture: ReflexInputBoundary {
+    func refusal(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point) -> String? { nil }
+}
+
 // MARK: - The plan and tables, from the shared fixtures
 
 struct Fixtures {
@@ -273,7 +279,8 @@ func sustainedRun(fixtures: Fixtures, seconds: Double, warmup: Double) throws ->
         hand: hand, source: frames, kernel: kernel,
         monitor: EchoingMonitor(poster: poster, handTag: hand.tag),
         admit: { .admitted },
-        fenceNs: UInt64(SyntheticMouseClickDelivery.interEventPauseMicroseconds) * 1_000
+        fenceNs: UInt64(SyntheticMouseClickDelivery.interEventPauseMicroseconds) * 1_000,
+        boundary: WholeFixture()
     )
     frames.start()
     let load0 = loadAverages()

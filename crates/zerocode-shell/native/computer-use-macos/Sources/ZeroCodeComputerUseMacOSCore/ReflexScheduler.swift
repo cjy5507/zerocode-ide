@@ -104,6 +104,114 @@ public extension ReflexFrameFacts {
     }
 }
 
+// MARK: - One eye's captures
+
+/// Where a display sits and how fine it is when an eye reads it: its desktop
+/// rectangle in points, its pixels a point and its rotation.
+public struct EyeGeometry: Equatable, Sendable {
+    public let displayId: String
+    public let originX: Double
+    public let originY: Double
+    public let width: Double
+    public let height: Double
+    public let scale: Double
+    public let orientation: ReflexOrientation
+
+    public init(displayId: String, originX: Double, originY: Double, width: Double, height: Double, scale: Double, orientation: ReflexOrientation) {
+        self.displayId = displayId
+        self.originX = originX
+        self.originY = originY
+        self.width = width
+        self.height = height
+        self.scale = scale
+        self.orientation = orientation
+    }
+}
+
+/// One eye's captures (realtime v1 §5.1) as its platform adapter reports
+/// them: every complete or idle frame is the next capture, with the point
+/// transform of the display the eye opened on; a frame that is neither only
+/// counts toward the next capture's gap. Pure — the adapter reads the stream
+/// and the display, the book keeps the facts.
+public struct ReflexCaptureBook: Sendable {
+    public let opened: EyeGeometry
+    public let generation: UInt64
+    public private(set) var captureSeq: UInt64 = 0
+    public private(set) var newest: ReflexCapture?
+    private var gap: UInt64 = 0
+
+    public init(opened: EyeGeometry, generation: UInt64) {
+        self.opened = opened
+        self.generation = generation
+    }
+
+    /// A complete frame, or an idle one of the pixels already held, delivered
+    /// with the display standing at `now`.
+    @discardableResult
+    public mutating func delivered(
+        extent: ReflexPixelExtent,
+        colorSpace: ReflexColorSpace,
+        dirty: Bool,
+        repaintSeq: UInt64,
+        capturedNs: UInt64?,
+        deliveredNs: UInt64,
+        now: EyeGeometry?
+    ) -> ReflexCapture {
+        captureSeq += 1
+        let capture = ReflexCapture(
+            displayId: opened.displayId,
+            region: ReflexRoi(x: 0, y: 0, width: Int64(extent.width), height: Int64(extent.height), space: .pixel),
+            pixelExtent: extent,
+            pointTransform: Self.transform(opened, pixelWidth: extent.width),
+            orientation: opened.orientation,
+            colorSpace: colorSpace,
+            status: .ready,
+            dirty: dirty,
+            captureGap: gap,
+            deliveredHostNs: deliveredNs,
+            captureSeq: captureSeq,
+            repaintSeq: repaintSeq,
+            streamEpoch: generation,
+            // An eye never outlives its display's geometry: a display that
+            // changed closes the eye (`ScreenEye.running`), and the next is another.
+            geometryEpoch: generation,
+            clockDomain: ReflexContract.hostUptimeClockDomain,
+            capturedHostNs: capturedNs
+        )
+        gap = 0
+        newest = capture
+        return capture
+    }
+
+    /// A frame that was neither complete nor idle: counted toward the next
+    /// capture's gap.
+    @discardableResult
+    public mutating func interrupted(capturedNs: UInt64?, deliveredNs: UInt64?) -> ReflexCapture? {
+        gap += 1
+        return nil
+    }
+
+    /// The newest capture for a run's reader.
+    public mutating func read(open: Bool, now: EyeGeometry?) -> ReflexCapture? {
+        newest
+    }
+
+    /// A capture's pixels on the desktop: the display's origin, and its
+    /// points over the buffer's pixels as a reduced fraction.
+    static func transform(_ geometry: EyeGeometry, pixelWidth: UInt32) -> ReflexPointTransform {
+        let points = UInt64(max(0, geometry.width.rounded()))
+        let pixels = UInt64(max(1, pixelWidth))
+        var (a, b) = (points, pixels)
+        while b != 0 { (a, b) = (b, a % b) }
+        let common = max(a, 1)
+        return ReflexPointTransform(
+            origin_x: Int64(geometry.originX.rounded()),
+            origin_y: Int64(geometry.originY.rounded()),
+            points_per_pixel: ReflexScale(numerator: points / common, denominator: pixels / common)
+        )
+    }
+}
+
 /// One capture with its pixels on loan to the evaluating thread. It holds
 /// the platform's buffer, so it stays on the thread that asked for it.
 public struct ReflexFrameLoan {
@@ -441,6 +549,8 @@ struct ReflexLeafRunner {
     let admit: @Sendable () -> GuardAdmission
     /// The pause between a press and its release (`SyntheticMouseClickDelivery`).
     let fenceNs: UInt64
+    /// What the run may act on (`ReflexInputBoundary`).
+    let boundary: any ReflexInputBoundary
 
     private struct Draft {
         let leaf: ReflexLeaf
@@ -678,6 +788,40 @@ public protocol ReflexInputMonitor: AnyObject, Sendable {
     func stop()
 }
 
+/// What one reflex run may act on — the baton its start hands the run: the
+/// plan's own scope and the app that scope's target resolved to when the run
+/// began. The window names the target in the plan it hashed; the helper
+/// resolves it once, never to ZeroCode itself (`ReflexInputBoundary`).
+public struct ReflexActingScope: Equatable, Sendable {
+    public let surface: ReflexSurface
+    public let target: String
+    public let pid: Int32
+
+    public init(surface: ReflexSurface, target: String, pid: Int32) {
+        self.surface = surface
+        self.target = target
+        self.pid = pid
+    }
+}
+
+/// Whether a point is a reflex run's to act on: the helper's answer is the
+/// verbs' own policy (never ZeroCode's own window) held to the run's
+/// `ReflexActingScope`; nothing here widens what a verb may do.
+public protocol ReflexInputBoundary: Sendable {
+    /// Why `input` may not go at `point`, or nil when it may.
+    func refusal(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point) -> String?
+}
+
+/// Why a run paused or ended on its own, in the words its status reports.
+public enum ReflexRunReason {
+    /// Someone else's input was heard.
+    public static let externalInput = "external_input"
+    /// The system turned the monitor off: what came between is unknown.
+    public static let monitorInterrupted = "monitor_interrupted"
+    /// The run could not start.
+    public static let startFailed = "start_failed"
+}
+
 /// A run of one validated plan on the hand (realtime v1 §4): an evaluating
 /// thread takes the newest frame, reads the kernel's sightings and picks a
 /// rule; a hand thread runs its leaves. The run holds the hand from start to
@@ -736,6 +880,7 @@ public final class ReflexSession: @unchecked Sendable {
     private let monitor: any ReflexInputMonitor
     private let admit: @Sendable () -> GuardAdmission
     private let fenceNs: UInt64
+    private let boundary: any ReflexInputBoundary
     public let receipts: ReflexReceipts
     public let sightings = ReflexSightings()
 
@@ -762,7 +907,8 @@ public final class ReflexSession: @unchecked Sendable {
         kernel: any ReflexPerceptionKernel,
         monitor: any ReflexInputMonitor,
         admit: @escaping @Sendable () -> GuardAdmission,
-        fenceNs: UInt64
+        fenceNs: UInt64,
+        boundary: any ReflexInputBoundary
     ) {
         self.settings = settings
         self.hand = hand
@@ -771,6 +917,7 @@ public final class ReflexSession: @unchecked Sendable {
         self.monitor = monitor
         self.admit = admit
         self.fenceNs = fenceNs
+        self.boundary = boundary
         receipts = ReflexReceipts(capacity: Int(clamping: settings.limits.max_expanded_actions))
     }
 
@@ -787,7 +934,7 @@ public final class ReflexSession: @unchecked Sendable {
             try proveMonitor(token)
             try startThreads(token: token, style: style)
         } catch {
-            finish(.stopped("start_failed"))
+            finish(.stopped(ReflexRunReason.startFailed))
             throw error
         }
         lock.lock()
@@ -904,7 +1051,7 @@ public final class ReflexSession: @unchecked Sendable {
         let nowHearing = wasUnproven && watch.health == .hearing
         lock.unlock()
         if nowHearing { echo.signal() }
-        if pausing { pause(reason: "external_input") }
+        if pausing { pause(reason: ReflexRunReason.externalInput) }
     }
 
     private func interrupted(_ reason: String) {
@@ -912,7 +1059,7 @@ public final class ReflexSession: @unchecked Sendable {
         watch.interrupted(reason)
         lock.unlock()
         echo.signal()
-        pause(reason: "monitor_interrupted")
+        pause(reason: ReflexRunReason.monitorInterrupted)
     }
 
     private var ending: Bool {
@@ -991,7 +1138,7 @@ public final class ReflexSession: @unchecked Sendable {
     private func runLeaves(token: OperatorHand.Token, style: PointerStyle) {
         let runner = ReflexLeafRunner(
             runId: settings.runId, hand: hand, token: token, limits: settings.limits, style: style,
-            sightings: sightings, admit: admit, fenceNs: fenceNs
+            sightings: sightings, admit: admit, fenceNs: fenceNs, boundary: boundary
         )
         var index: UInt64 = 0
         while true {

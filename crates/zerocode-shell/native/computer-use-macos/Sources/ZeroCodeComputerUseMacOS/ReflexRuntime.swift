@@ -127,13 +127,72 @@ private func eventTapHeard(proxy: CGEventTapProxy, type: CGEventType, event: CGE
 
 // MARK: - The helper's reflex runs (realtime v1 §6)
 
+/// A run's frames as the helper hands them to it: a source the run reads,
+/// given back when the run ends (the eye gets its rate back).
+protocol ReflexRunSource: ReflexFrameSource {
+    func end()
+}
+
+/// What a reflex run's press may land on (`ReflexInputBoundary`): the verbs'
+/// own policy — never ZeroCode's own window (`DesktopSelf.refuseOwn`) — and
+/// only a window of the app the run was started for. Whose window is under a
+/// point is the window server's answer (`DesktopSelf.ownerPid`); a test hands
+/// its own.
+struct DesktopRunBoundary: ReflexInputBoundary {
+    let scope: ReflexActingScope
+    let owner: @Sendable (CGPoint) -> pid_t?
+    let isOwn: @Sendable (pid_t) -> Bool
+
+    init(
+        scope: ReflexActingScope,
+        owner: @escaping @Sendable (CGPoint) -> pid_t? = { DesktopSelf.ownerPid(at: $0) },
+        isOwn: @escaping @Sendable (pid_t) -> Bool = { DesktopSelf.isOwn($0) }
+    ) {
+        self.scope = scope
+        self.owner = owner
+        self.isOwn = isOwn
+    }
+
+    func refusal(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point) -> String? {
+        let at = CGPoint(x: point.x, y: point.y)
+        let pid = owner(at)
+        do {
+            try DesktopSelf.refuseOwn(pid, at: at, isOwn: isOwn)
+        } catch let error as ProviderError {
+            return error.message
+        } catch {
+            return "\(error)"
+        }
+        guard pid == scope.pid else {
+            return "(\(Int(at.x)), \(Int(at.y))) is not on a window of \(scope.target), the app this run acts in"
+        }
+        return nil
+    }
+}
+
 /// One reflex run at a time, started by the window's control message with
 /// the plan and both tables it validated, answering status and stop outside
 /// the provider lock. The operator's stop ends a run as it ends everything.
 enum ReflexRuntimeHost {
+    /// The platform's parts of a run; a test hands its own.
+    struct Parts: Sendable {
+        /// The display's frames at the run's rate (`ScreenEye.reader`).
+        var reader: @Sendable (_ runId: String, _ eye: EyeConfig, _ display: Int, _ framesPerSecond: Int) throws -> any ReflexRunSource
+        /// Hears everyone else's input (`EventTapMonitor`).
+        var monitor: @Sendable (_ handTag: Int64) -> any ReflexInputMonitor
+        /// What the run's presses may land on (`DesktopRunBoundary`).
+        var boundary: @Sendable (ReflexActingScope) -> any ReflexInputBoundary
+
+        static let platform = Parts(
+            reader: { try ScreenEye.reader($0, config: $1, displayIndex: $2, framesPerSecond: $3) },
+            monitor: { EventTapMonitor(handTag: $0) },
+            boundary: { DesktopRunBoundary(scope: $0) }
+        )
+    }
+
     private struct Run {
         let session: ReflexSession
-        let reader: ReflexEyeReader
+        let source: any ReflexRunSource
     }
 
     private static let lock = NSLock()
@@ -142,12 +201,15 @@ enum ReflexRuntimeHost {
     /// The kernel that reads a plan's detectors (R5's `Perception/`). A helper
     /// built without one refuses every run rather than acting on nothing.
     nonisolated(unsafe) static var kernel: (any ReflexPerceptionKernel)?
+    nonisolated(unsafe) static var parts = Parts.platform
     /// The receipts one status read hands the window at most: the whole queue.
     private static let unlimited = Int.max
 
     /// Start a run: the helper validates the plan again under the tables the
-    /// window sent (never numbers of its own), holds the hand for the run,
-    /// reads the display at the table's rate and proves its monitor hears.
+    /// window sent (never numbers of its own), resolves what it acts on
+    /// (`actingScope`: the plan's own target, never ZeroCode itself), holds
+    /// the hand for the run, reads the display at the table's rate and proves
+    /// its monitor hears.
     static func start(
         runId: String,
         plan planWire: Data,
@@ -156,7 +218,8 @@ enum ReflexRuntimeHost {
         eye: EyeConfig,
         display: Int,
         hand: OperatorHand,
-        admit: @escaping @Sendable () -> GuardAdmission
+        admit: @escaping @Sendable () -> GuardAdmission,
+        actingScope: (ReflexScope) throws -> ReflexActingScope
     ) throws -> [String: Any] {
         let limits: ReflexLimits
         let perception: PerceptionLimits
@@ -182,6 +245,7 @@ enum ReflexRuntimeHost {
         }
         lock.lock()
         let kernel = Self.kernel
+        let parts = Self.parts
         let busy = run?.session.status.runId
         if busy == nil { planEpochs += 1 }
         let epoch = planEpochs
@@ -192,24 +256,26 @@ enum ReflexRuntimeHost {
         if let busy {
             throw ProviderError.coded("hand_busy", "reflex run \(busy) holds the hand; stop it first (reflexStop)")
         }
-        let reader = try ScreenEye.reader(runId, config: eye, displayIndex: display, framesPerSecond: Int(clamping: limits.frames_per_second))
+        let boundary = parts.boundary(try actingScope(plan.plan.scope))
+        let source = try parts.reader(runId, eye, display, Int(clamping: limits.frames_per_second))
         let session = ReflexSession(
             settings: ReflexSession.Settings(runId: runId, plan: plan, limits: limits, perception: perception, planEpoch: epoch),
             hand: hand,
-            source: reader,
+            source: source,
             kernel: kernel,
-            monitor: EventTapMonitor(handTag: hand.tag),
+            monitor: parts.monitor(hand.tag),
             admit: admit,
-            fenceNs: UInt64(SyntheticMouseClickDelivery.interEventPauseMicroseconds) * 1_000
+            fenceNs: UInt64(SyntheticMouseClickDelivery.interEventPauseMicroseconds) * 1_000,
+            boundary: boundary
         )
         do {
             try session.start()
         } catch {
-            reader.end()
+            source.end()
             throw providerError(error)
         }
         lock.lock()
-        run = Run(session: session, reader: reader)
+        run = Run(session: session, source: source)
         lock.unlock()
         return render(session.status, receipts: [])
     }
@@ -234,7 +300,7 @@ enum ReflexRuntimeHost {
         current.session.stop(reason: reason)
         let status = render(current.session.status, receipts: current.session.receipts.drain(limit: unlimited))
         // Giving the rate back waits on ScreenCaptureKit; the release is done.
-        DispatchQueue.global(qos: .utility).async { current.reader.end() }
+        DispatchQueue.global(qos: .utility).async { current.source.end() }
         return status
     }
 

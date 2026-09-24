@@ -254,7 +254,8 @@ struct LeafRig {
             runId: "run", hand: hand, token: token, limits: limits,
             style: try PointerStyle(plan.plan.pointer, limits: limits),
             sightings: sightings, admit: { admissions.admit() },
-            fenceNs: UInt64(SyntheticMouseClickDelivery.interEventPauseMicroseconds) * 1_000
+            fenceNs: UInt64(SyntheticMouseClickDelivery.interEventPauseMicroseconds) * 1_000,
+            boundary: PermitEverywhere()
         )
     }
 
@@ -749,7 +750,15 @@ struct SessionRig {
             settings: ReflexSession.Settings(runId: "run", plan: try ReflexFixtures.plan(), limits: try ReflexFixtures.limits(),
                                              perception: try ReflexFixtures.perception(), planEpoch: 1),
             hand: hand, source: ScriptedFrames(), kernel: SilentKernel(), monitor: monitor,
-            admit: { .admitted }, fenceNs: UInt64(SyntheticMouseClickDelivery.interEventPauseMicroseconds) * 1_000
+            admit: { .admitted }, fenceNs: UInt64(SyntheticMouseClickDelivery.interEventPauseMicroseconds) * 1_000,
+            boundary: PermitEverywhere()
         )
     }
+}
+
+/// A boundary that asks nothing: for runs whose test is about the hand, the
+/// frames or the stop, never about where a press may land. Tests only — the
+/// helper's runs always carry `DesktopRunBoundary`.
+struct PermitEverywhere: ReflexInputBoundary {
+    func refusal(_ input: ReflexLeaseInput, at point: SmoothPointerPath.Point) -> String? { nil }
 }

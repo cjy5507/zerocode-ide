@@ -351,7 +351,8 @@ final class Provider {
                 eye: eye,
                 display: try requiredInteger(params, "display"),
                 hand: OperatorHandHost.hand,
-                admit: { OperatorGuardHost.admission() }
+                admit: { OperatorGuardHost.admission() },
+                actingScope: { try actingScope($0) }
             )
         case "resume":
             OperatorGuardHost.resume(resetBudget: params["resetBudget"]?.bool == true)
@@ -825,7 +826,7 @@ final class Provider {
             }
             throw ProviderError.coded("app_not_found", "app '\(trimmed)' not found")
         }
-        if blockedBundleIds.contains(trimmed) {
+        if BlockedApps.bundleIds.contains(trimmed) {
             throw ProviderError.coded("app_blocked", "app '\(trimmed)' is blocked for safety")
         }
         if let app = listApps().first(where: { matches($0, query: trimmed) }) {
@@ -836,16 +837,33 @@ final class Provider {
     }
 
     private func refuseOwnTarget(_ params: [String: JSONValue]) throws {
-        if let query = params["app"]?.string, let app = try? resolveApp(query), isTrustedZeroCodeApplication(app.pid) {
-            throw ProviderError.coded("app_blocked", "'\(query)' is ZeroCode itself; the operator does not drive the app it lives in")
+        if let query = params["app"]?.string, let app = try? resolveApp(query) {
+            try refuseOwn(app, named: query)
         }
         if let id = params["windowId"]?.number, let owner = DesktopWindows.ownerPid(windowId: CGWindowID(id)), isTrustedZeroCodeApplication(owner) {
             throw ProviderError.coded("app_blocked", "window \(Int(id)) is ZeroCode's own; the operator does not drive the app it lives in")
         }
     }
 
+    /// ZeroCode's own app is never the operator's target (§1.6).
+    private func refuseOwn(_ app: AppDescriptor, named query: String) throws {
+        if isTrustedZeroCodeApplication(app.pid) {
+            throw ProviderError.coded("app_blocked", "'\(query)' is ZeroCode itself; the operator does not drive the app it lives in")
+        }
+    }
+
+    /// What a reflex plan acts in: its scope's target, resolved the way every
+    /// verb names an app (`resolveApp`, blocked apps refused), and never
+    /// ZeroCode itself — once, when the run starts; every press is held to it
+    /// (`DesktopRunBoundary`).
+    private func actingScope(_ scope: ReflexScope) throws -> ReflexActingScope {
+        let app = try resolveApp(scope.target)
+        try refuseOwn(app, named: scope.target)
+        return ReflexActingScope(surface: scope.surface, target: scope.target, pid: app.pid)
+    }
+
     private func rejectBlockedApp(_ app: AppDescriptor) throws {
-        if let bundle = app.bundleId, blockedBundleIds.contains(bundle) {
+        if let bundle = app.bundleId, BlockedApps.bundleIds.contains(bundle) {
             throw ProviderError.coded("app_blocked", "app '\(bundle)' is blocked for safety")
         }
     }
@@ -1508,16 +1526,22 @@ final class Provider {
     }
 }
 
-private let blockedBundleIds: Set<String> = [
-    "com.1password.1password",
-    "com.1password.safari",
-    "com.bitwarden.desktop",
-    "com.dashlane.dashlanephonefinal",
-    "com.lastpass.LastPass",
-    "com.nordsec.nordpass",
-    "me.proton.pass.electron",
-    "me.proton.pass.catalyst",
-]
+/// The apps the operator never drives. A static rather than a top-level
+/// constant: main.swift's constants are set only as the helper's own start
+/// runs through them, so code that a test reaches (`resolveApp`) must not
+/// read one.
+private enum BlockedApps {
+    static let bundleIds: Set<String> = [
+        "com.1password.1password",
+        "com.1password.safari",
+        "com.bitwarden.desktop",
+        "com.dashlane.dashlanephonefinal",
+        "com.lastpass.LastPass",
+        "com.nordsec.nordpass",
+        "me.proton.pass.electron",
+        "me.proton.pass.catalyst",
+    ]
+}
 
 private func requiredString(_ params: [String: JSONValue], _ key: String) throws -> String {
     guard let value = params[key]?.string, !value.isEmpty else {
@@ -5206,6 +5230,31 @@ enum DesktopScreen {
         return found.sorted { lhs, rhs in lhs.main && !rhs.main }
     }
 
+    /// Where display `id` sits and how fine it is now — its bounds, its mode's
+    /// pixels a point and its turn — from CoreGraphics alone, so the eye's
+    /// stream queue and a run's evaluating thread can ask it; nil once the
+    /// display is gone.
+    static func geometry(of id: CGDirectDisplayID) -> EyeGeometry? {
+        guard CGDisplayIsActive(id) != 0, let mode = CGDisplayCopyDisplayMode(id), mode.width > 0 else { return nil }
+        let bounds = CGDisplayBounds(id)
+        let orientation: ReflexOrientation
+        switch Int(CGDisplayRotation(id).rounded()) {
+        case 90: orientation = .right
+        case 180: orientation = .down
+        case 270: orientation = .left
+        default: orientation = .up
+        }
+        return EyeGeometry(
+            displayId: String(id),
+            originX: bounds.minX,
+            originY: bounds.minY,
+            width: bounds.width,
+            height: bounds.height,
+            scale: Double(mode.pixelWidth) / Double(mode.width),
+            orientation: orientation
+        )
+    }
+
     static func render(_ display: Display, index: Int) -> [String: Any] {
         [
             "index": index,
@@ -6200,8 +6249,19 @@ enum DesktopSelf {
     }
 
     static func refuseOwnWindow(at point: CGPoint) throws {
-        guard let pid = ownerPid(at: point), isTrustedZeroCodeApplication(pid) else { return }
+        try refuseOwn(ownerPid(at: point), at: point)
+    }
+
+    /// The policy itself, for whoever already knows whose window is under the
+    /// point (a reflex run's press asks it too, `DesktopRunBoundary`).
+    static func refuseOwn(_ pid: pid_t?, at point: CGPoint, isOwn: (pid_t) -> Bool = DesktopSelf.isOwn) throws {
+        guard let pid, isOwn(pid) else { return }
         throw ProviderError.coded("app_blocked", "(\(Int(point.x)), \(Int(point.y))) lands on ZeroCode's own window; the operator does not drive the app it lives in")
+    }
+
+    /// Whether `pid` is ZeroCode itself.
+    static func isOwn(_ pid: pid_t) -> Bool {
+        isTrustedZeroCodeApplication(pid)
     }
 
     static func refuseOwnFrontmost() throws {
