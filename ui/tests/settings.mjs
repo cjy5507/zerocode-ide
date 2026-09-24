@@ -1947,6 +1947,28 @@ class StatefulBackend {
         return this.grokUsage ? clone(this.grokUsage) : { usage: null, fetching: false };
       case "opencode_usage":
         return { usage: null, fetching: false };
+      // 계정마다 제 게이지와 전환 표의 판정(t-7538) — 계정이 없는 이 픽스처에서는
+      // 「혼자」이고 아무것도 나가지 않는다. 모드는 설정 문서의 것.
+      case "claude_account_usage":
+        return {
+          accounts: [],
+          plan: {
+            mode: this.settings.claude_autoswitch_mode,
+            active: null,
+            decision: { kind: "stay", why: "alone" },
+            landing: null,
+            fitness: [],
+            next: null,
+            walled: [],
+            last_switch_ms: null,
+            cooldown_until_ms: null,
+            failed_recently: [],
+            token: "settings-fixture",
+            now_ms: 0,
+          },
+          sent: 0,
+          fetching: false,
+        };
       // 토큰 원장은 게이지와 다른 물음이라 답의 모양도 다르다 — 아직 스캔이
       // 없는 상태가 이 픽스처의 기본값이다.
       // 머리의 세 figure는 파생이 아니라 센 값이라 자기 문으로 온다.
@@ -3026,6 +3048,7 @@ const controlValue = async (page, kind) => page.evaluate((name) => {
     opacity: () => Number(document.getElementById("window-opacity")?.value),
     blur: () => document.getElementById("window-blur")?.checked,
     teams: () => document.getElementById("orch-teams-mode")?.value,
+    claude_autoswitch: () => document.getElementById("account-autoswitch")?.value,
     setup_script_launch_mode: () => document.querySelector(
       "[data-setup-launch-mode][aria-pressed='true']",
     )?.dataset.setupLaunchMode,
@@ -7589,6 +7612,7 @@ for (const row of ROLLBACKS) {
           delete_worktree_confirm: () => document.getElementById("ask-before-delete-worktree")?.checked,
           delete_automation_confirm: () => document.getElementById("ask-before-delete-automation")?.checked,
     artifacts_retention: () => Number(document.getElementById("artifacts-retention-days")?.value),
+          claude_autoswitch: () => document.getElementById("account-autoswitch")?.value,
           default_agent: () => ({ auto: pressed("auto"), blank: pressed("blank"), codex: pressed("codex") }),
         }[kind]();
         return JSON.stringify(actual) === JSON.stringify(canonical);
