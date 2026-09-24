@@ -18,6 +18,7 @@ enum SmartClientRole {
 struct SmartTurnRouting {
     quota_fallback_model: Option<String>,
     refusal_fallback_model: Option<String>,
+    classifier_fallback: runtime::ClassifierFallback,
     quota_wait_band: Duration,
     escalation_model_override: Option<String>,
     deep_verify_model: Option<String>,
@@ -44,6 +45,7 @@ impl SmartTurnRouting {
         Self {
             quota_fallback_model: routing.quota_fallback_model,
             refusal_fallback_model: routing.refusal_fallback_model,
+            classifier_fallback: routing.classifier_fallback,
             quota_wait_band: routing.quota_wait_band,
             // PlainSession has no confidence-cascade state. Refresh this
             // set-or-clear slot so a reused runtime cannot carry an override
@@ -69,6 +71,7 @@ impl SmartTurnRouting {
 struct SmartTurnWiring {
     quota_fallback_client: Option<(Arc<dyn AsyncApiClient>, String)>,
     refusal_fallback_client: Option<(Arc<dyn AsyncApiClient>, String)>,
+    classifier_fallback: runtime::ClassifierFallback,
     quota_wait_band: Duration,
     escalation_model_override: Option<String>,
     deep_verify_client: Option<(Arc<dyn AsyncApiClient>, String)>,
@@ -122,6 +125,7 @@ impl SmartTurnWiring {
         Self {
             quota_fallback_client,
             refusal_fallback_client,
+            classifier_fallback: routing.classifier_fallback,
             quota_wait_band: routing.quota_wait_band,
             escalation_model_override: routing.escalation_model_override,
             deep_verify_client,
@@ -140,6 +144,7 @@ impl SmartTurnWiring {
     {
         target.set_quota_fallback_client(self.quota_fallback_client);
         target.set_refusal_fallback_client(self.refusal_fallback_client);
+        target.set_classifier_fallback(self.classifier_fallback);
         target.set_quota_wait_band(self.quota_wait_band);
         target.set_escalation_model_override(self.escalation_model_override);
         target.set_deep_verify_client(self.deep_verify_client);
@@ -510,6 +515,8 @@ struct PlanShadowSubject<'a> {
     actual: tools::PlanShadowActual,
     /// `None` for the turn-start row, the door for a switch row.
     trigger: Option<runtime::SwitchTrigger>,
+    /// The refusal category a classifier's switch named (t-6747).
+    category: Option<&'a str>,
 }
 
 /// Build and append one shadow row for `subject` from the shadow's inputs:
@@ -587,6 +594,7 @@ fn file_plan_shadow(
         cache: &warm,
         actual: subject.actual,
         trigger: subject.trigger,
+        category: subject.category,
     });
     let _ = tools::record_plan_shadow(&shadow.cwd, &row);
 }
@@ -634,6 +642,7 @@ pub(crate) fn record_plan_shadow_turn(
                 verify: verify.as_str().to_string(),
             },
             trigger: None,
+            category: None,
         },
     );
 }
@@ -671,6 +680,7 @@ fn record_plan_switch(
                 verify: verify.as_str().to_string(),
             },
             trigger: Some(switch.trigger),
+            category: switch.category.as_deref(),
         },
     );
 }
@@ -712,6 +722,7 @@ pub(crate) fn record_person_model_switch(
         to: to.to_string(),
         context_tokens: u64::try_from(inner.estimated_tokens()).unwrap_or(u64::MAX),
         attempt: inner.next_attempt(),
+        category: None,
     };
     record_plan_switch(&shadow, session_id, complexity, &switch);
 }
@@ -828,6 +839,7 @@ mod tests {
         let routing = tools::SmartTurnRouting {
             quota_fallback_model: Some("openai-latest".to_string()),
             refusal_fallback_model: Some("google-latest".to_string()),
+            classifier_fallback: runtime::ClassifierFallback::Auto,
             quota_wait_band: Duration::from_secs(7 * 60),
             deep_verify_model: Some("google-latest".to_string()),
             deep_plan_model: Some("claude-opus-5".to_string()),

@@ -161,6 +161,8 @@ pub struct ProviderRequest {
 pub struct TurnSummary {
     /// Provider-declared stop reason (e.g. `"end_turn"`, `"tool_use"`).
     pub stop_reason: Option<String>,
+    /// The category a `refusal` stop's details named (t-6747).
+    pub refusal_category: Option<String>,
     /// Tokens consumed on input.
     pub input_tokens: u32,
     /// Tokens consumed on output.

@@ -202,6 +202,10 @@ pub struct PlanShadowRow {
     /// (`docs/design/zo-autonomous-routing-review-20260915.md` §5 P2).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<String>,
+    /// The category a safety classifier named for a `refusal` switch
+    /// (t-6747) — which policy area moved the turn off the chosen model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
 }
 
 /// The models a switch may be scored against. A forced switch — a quota
@@ -245,6 +249,8 @@ pub struct PlanShadowInputs<'a> {
     /// `None` for a turn-start row; the door for a switch row. The caller
     /// has already narrowed `models` with [`switch_candidates`].
     pub trigger: Option<SwitchTrigger>,
+    /// The refusal category a classifier's switch named (t-6747).
+    pub category: Option<&'a str>,
 }
 
 /// Score the turn's alternatives and lay the result next to what the turn
@@ -322,6 +328,7 @@ pub fn build_plan_shadow(inputs: PlanShadowInputs<'_>) -> PlanShadowRow {
         actual: inputs.actual,
         agreed,
         trigger: inputs.trigger.map(|trigger| trigger.as_str().to_string()),
+        category: inputs.category.map(str::to_string),
     }
 }
 
@@ -463,6 +470,7 @@ mod tests {
             cache: &[],
             actual: actual("a"),
             trigger: None,
+            category: None,
         });
         // 3 models × (2+1+1 efforts) × 2 shapes (solo, delegate) × 1 verify (model judge).
         assert_eq!(row.candidate_count, 8);
@@ -503,6 +511,7 @@ mod tests {
                 cache: &[],
                 actual: actual("a"),
                 trigger: None,
+                category: None,
             })
         };
         for n in 1..=6 {
@@ -566,6 +575,7 @@ mod tests {
                 verify: VerifyMode::None.as_str().to_string(),
             },
             trigger: Some(SwitchTrigger::Quota),
+            category: None,
         });
         assert_eq!(row.trigger.as_deref(), Some("quota"));
         // With the walled model gone there is no stay bar: the pick is the
@@ -589,6 +599,7 @@ mod tests {
             cache: &[],
             actual: actual("claude-opus-5"),
             trigger: None,
+            category: None,
         });
         assert!(!serde_json::to_string(&turn).unwrap().contains("trigger"));
     }

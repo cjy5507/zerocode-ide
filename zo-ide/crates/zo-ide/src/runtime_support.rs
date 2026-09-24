@@ -2444,6 +2444,14 @@ impl ApiClient for AnthropicRuntimeClient {
                         {
                             events.push(AssistantEvent::StopReason(reason.to_string()));
                         }
+                        runtime::push_refusal_category(
+                            &mut events,
+                            delta
+                                .delta
+                                .stop_details
+                                .as_ref()
+                                .and_then(|details| details.category.as_deref()),
+                        );
                     }
                     ApiStreamEvent::MessageStop(_) => {
                         saw_stop = true;

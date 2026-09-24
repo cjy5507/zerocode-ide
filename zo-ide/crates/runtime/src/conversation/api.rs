@@ -179,7 +179,31 @@ pub enum AssistantEvent {
     /// model billed which usage record. Emitted at most once per turn; absent
     /// when the provider reports no model id.
     Model(String),
+    /// The category a provider's safety classifier named for this turn's
+    /// refusal — `stop_details.category` beside a `stop_reason: "refusal"`
+    /// (t-6747). Emitted at most once per turn, only when the refusal names
+    /// one: the refusal ladder routes by it, and a category routed nowhere
+    /// stands. See [`push_refusal_category`].
+    RefusalCategory(String),
     MessageStop,
+}
+
+/// Push the refusal category a stop's details name, beside the stop reason —
+/// the one spelling every provider path emits it in (t-6747). A blank or
+/// absent category pushes nothing: the refusal names none.
+pub fn push_refusal_category(events: &mut Vec<AssistantEvent>, category: Option<&str>) {
+    if let Some(category) = category.map(str::trim).filter(|word| !word.is_empty()) {
+        events.push(AssistantEvent::RefusalCategory(category.to_string()));
+    }
+}
+
+/// The refusal category a turn's events carry, when they carry one.
+#[must_use]
+pub fn refusal_category_of(events: &[AssistantEvent]) -> Option<String> {
+    events.iter().find_map(|event| match event {
+        AssistantEvent::RefusalCategory(category) => Some(category.clone()),
+        _ => None,
+    })
 }
 
 /// Lower a streamed `redacted_thinking` block's `data` (an opaque JSON value —
@@ -294,6 +318,13 @@ pub fn response_to_events(response: ::api::MessageResponse) -> Vec<AssistantEven
     {
         events.push(AssistantEvent::StopReason(reason.to_string()));
     }
+    push_refusal_category(
+        &mut events,
+        response
+            .stop_details
+            .as_ref()
+            .and_then(|details| details.category.as_deref()),
+    );
     events.push(AssistantEvent::MessageStop);
     events
 }
@@ -491,6 +522,7 @@ mod helper_tests {
             model: "test-model".to_string(),
             stop_reason: stop_reason.map(str::to_string),
             stop_sequence: None,
+            stop_details: None,
             usage: usage(7),
             request_id: None,
             thought_signature: thought_signature.map(str::to_string),

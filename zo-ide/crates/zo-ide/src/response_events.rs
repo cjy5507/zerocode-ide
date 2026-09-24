@@ -86,6 +86,13 @@ pub(crate) fn response_to_events(
     {
         events.push(AssistantEvent::StopReason(reason.to_string()));
     }
+    runtime::push_refusal_category(
+        &mut events,
+        response
+            .stop_details
+            .as_ref()
+            .and_then(|details| details.category.as_deref()),
+    );
     events.push(AssistantEvent::MessageStop);
     Ok(events)
 }

@@ -100,6 +100,11 @@ fn run(
     if let Some(done) = run_without_a_session(&launch)? {
         return Ok(done);
     }
+    // The refusal ladder's switching mode, declared for every runtime this
+    // process builds, before the first one is (t-6747).
+    if let Some(mode) = launch.classifier_fallback {
+        runtime::declare_classifier_fallback(mode);
+    }
 
     std::env::set_current_dir(&launch.open.cwd)?;
     // The exact launch guard, decided here and nowhere later: before the

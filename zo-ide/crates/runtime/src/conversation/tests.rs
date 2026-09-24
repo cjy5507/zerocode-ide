@@ -1947,30 +1947,38 @@ fn begin_public_refusal_test_turn(
         .expect("public refusal test turn should begin");
 }
 
+/// A `cyber` decline walked up the ladder to its route in one turn (t-6747):
+/// the same model once, then the category's route.
+fn decline_to_the_route<C: ApiClient, T: ToolExecutor>(runtime: &mut ConversationRuntime<C, T>) {
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        super::RefusalDecision::RetrySameModel
+    ));
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        super::RefusalDecision::Retry
+    ));
+}
+
+/// Where the catalog routes a `cyber` decline on the Fable and Opus lineups —
+/// every one of this machine's recorded switches landed there (t-6747).
+const CYBER_ROUTE: &str = "claude-opus-4-8";
+
 #[test]
-fn two_consecutive_refusal_turns_prearm_the_next_turn_on_opus() {
+fn two_consecutive_refusal_turns_prearm_the_next_turn_on_the_categorys_route() {
     let mut runtime = refusal_dry_test_runtime("claude-fable-5");
 
     begin_public_refusal_test_turn(&mut runtime, "turn one");
-    assert!(matches!(
-        runtime.decide_refusal_fallback(),
-        super::RefusalDecision::Retry
-    ));
+    decline_to_the_route(&mut runtime);
     assert!(runtime.refusal_dry_until.is_none());
 
     begin_public_refusal_test_turn(&mut runtime, "turn two");
     assert_eq!(runtime.refusal_consecutive_turns, 1);
-    assert!(matches!(
-        runtime.decide_refusal_fallback(),
-        super::RefusalDecision::Retry
-    ));
+    decline_to_the_route(&mut runtime);
     assert!(runtime.refusal_dry_until.is_some());
 
     begin_public_refusal_test_turn(&mut runtime, "turn three");
-    assert_eq!(
-        runtime.effective_request_model(),
-        Some(api::latest_anthropic_model())
-    );
+    assert_eq!(runtime.effective_request_model(), Some(CYBER_ROUTE));
     assert!(
         !runtime.refusal_turn_hit,
         "pre-arming skips the refused Fable request entirely"
@@ -1982,20 +1990,14 @@ fn clean_turn_resets_the_consecutive_refusal_streak() {
     let mut runtime = refusal_dry_test_runtime("claude-fable-5");
 
     begin_public_refusal_test_turn(&mut runtime, "refused");
-    assert!(matches!(
-        runtime.decide_refusal_fallback(),
-        super::RefusalDecision::Retry
-    ));
+    decline_to_the_route(&mut runtime);
     begin_public_refusal_test_turn(&mut runtime, "clean");
     assert_eq!(runtime.refusal_consecutive_turns, 1);
 
     // No refusal in the clean turn: its next public boundary folds a reset.
     begin_public_refusal_test_turn(&mut runtime, "refused again");
     assert_eq!(runtime.refusal_consecutive_turns, 0);
-    assert!(matches!(
-        runtime.decide_refusal_fallback(),
-        super::RefusalDecision::Retry
-    ));
+    decline_to_the_route(&mut runtime);
     assert!(runtime.refusal_dry_until.is_none());
 }
 
@@ -2083,6 +2085,7 @@ fn refusal_dry_prearm_notice_latches_only_once_across_turns() {
     let mut runtime = refusal_dry_test_runtime("claude-fable-5");
     runtime.refusal_dry_until =
         Some(std::time::Instant::now() + std::time::Duration::from_secs(60));
+    runtime.refusal_dry_category = Some("cyber".to_string());
 
     runtime
         .begin_streaming_turn("first dry turn".to_string(), Vec::new(), false)
@@ -2100,10 +2103,7 @@ fn refusal_dry_prearm_notice_latches_only_once_across_turns() {
         .begin_streaming_turn("later dry turn".to_string(), Vec::new(), false)
         .expect("later dry turn should begin");
     assert!(!runtime.refusal_prearm_notice_pending);
-    assert_eq!(
-        runtime.effective_request_model(),
-        Some(api::latest_anthropic_model())
-    );
+    assert_eq!(runtime.effective_request_model(), Some(CYBER_ROUTE));
 }
 
 #[test]
@@ -2111,19 +2111,13 @@ fn internal_refusal_subturns_do_not_double_count_the_public_turn() {
     let mut runtime = refusal_dry_test_runtime("claude-fable-5");
 
     begin_public_refusal_test_turn(&mut runtime, "public turn");
-    assert!(matches!(
-        runtime.decide_refusal_fallback(),
-        super::RefusalDecision::Retry
-    ));
+    decline_to_the_route(&mut runtime);
     runtime
         .begin_streaming_turn("internal leg".to_string(), Vec::new(), true)
         .expect("internal leg should begin");
     assert_eq!(runtime.refusal_consecutive_turns, 0);
     assert!(runtime.refusal_turn_hit);
-    assert!(matches!(
-        runtime.decide_refusal_fallback(),
-        super::RefusalDecision::Retry
-    ));
+    decline_to_the_route(&mut runtime);
     assert!(runtime.refusal_dry_until.is_none());
 
     begin_public_refusal_test_turn(&mut runtime, "next public turn");
@@ -2701,20 +2695,14 @@ fn every_switch_the_turn_makes_reaches_the_switch_observer_with_its_door() {
     let mut refusing = refusal_dry_test_runtime("claude-fable-5");
     refusing.set_switch_observer(Some(observer));
     begin_public_refusal_test_turn(&mut refusing, "turn one");
-    assert!(matches!(
-        refusing.decide_refusal_fallback(),
-        super::RefusalDecision::Retry
-    ));
+    decline_to_the_route(&mut refusing);
     let seen = seen.lock().unwrap();
-    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert_eq!(seen.len(), 3, "the same-model retry is no switch: {seen:?}");
     let refusal = &seen[2];
     assert_eq!(refusal.trigger, SwitchTrigger::Refusal);
     assert_eq!(refusal.from, "claude-fable-5");
-    assert_eq!(
-        refusal.to,
-        api::latest_anthropic_family_model(api::ANTHROPIC_OPUS_MODEL_ALIAS).unwrap(),
-        "the refusal fallback is the catalog's Opus head"
-    );
+    assert_eq!(refusal.to, CYBER_ROUTE, "the refusal goes where its category routes");
+    assert_eq!(refusal.category.as_deref(), Some("cyber"), "the row names the category");
     assert_eq!(refusal.attempt, refusing.attempt(), "a begun turn's switch bills to its attempt");
     assert!(refusal.attempt.contains('@'), "{}", refusal.attempt);
 }
@@ -16500,37 +16488,34 @@ fn an_opus_refusal_gets_one_same_model_retry_then_surfaces() {
     let mut runtime = refusal_dry_test_runtime("claude-opus-5");
     begin_public_refusal_test_turn(&mut runtime, "turn one");
 
+    // A refusal naming no category stands after the one retry.
     assert!(matches!(
-        runtime.decide_refusal_fallback(),
+        runtime.decide_refusal_fallback(None),
         super::RefusalDecision::RetrySameModel
     ));
     // The retry keeps the session on its own model — no silent swap.
     assert_eq!(runtime.effective_request_model(), Some("claude-opus-5"));
     assert!(matches!(
-        runtime.decide_refusal_fallback(),
+        runtime.decide_refusal_fallback(None),
         super::RefusalDecision::Surface
     ));
 
-    // The budget is per public turn, not per session.
+    // The budget is per public turn, not per session — and Opus 5 carries
+    // the same classifiers as Fable, so its `cyber` decline has a route too.
     begin_public_refusal_test_turn(&mut runtime, "turn two");
-    assert!(matches!(
-        runtime.decide_refusal_fallback(),
-        super::RefusalDecision::RetrySameModel
-    ));
+    decline_to_the_route(&mut runtime);
+    assert_eq!(runtime.effective_request_model(), Some(CYBER_ROUTE));
 }
 
-/// Fable 경로는 기존 계약 그대로다: Fable→Opus 폴백 후 그 Opus 도 거절하면
-/// 표면화 — 폴백 뒤에 same-model 재시도를 얹어 3중 요청을 만들지 않는다.
+/// Fable의 사다리는 같은 모델 한 번 → 범주 경로 한 번 → 표면화다 (t-6747):
+/// 경로 모델도 거절하면 거기서 멈추고, 네 번째 요청을 만들지 않는다.
 #[test]
 fn a_fable_fallback_refusal_still_surfaces_without_a_third_attempt() {
     let mut runtime = refusal_dry_test_runtime("claude-fable-5");
     begin_public_refusal_test_turn(&mut runtime, "turn one");
+    decline_to_the_route(&mut runtime);
     assert!(matches!(
-        runtime.decide_refusal_fallback(),
-        super::RefusalDecision::Retry
-    ));
-    assert!(matches!(
-        runtime.decide_refusal_fallback(),
+        runtime.decide_refusal_fallback(Some("cyber")),
         super::RefusalDecision::Surface
     ));
 }
@@ -16720,8 +16705,10 @@ impl AsyncApiClient for SilentAsyncClient {
 }
 
 /// Declines the first request with a `refusal` stop reason, answers the second.
+/// Refuses its first `refusals` calls with a `cyber` category, then answers.
 struct RefuseOnceAsyncClient {
     calls: AtomicUsize,
+    refusals: usize,
 }
 impl AsyncApiClient for RefuseOnceAsyncClient {
     fn stream_async<'a>(
@@ -16733,9 +16720,10 @@ impl AsyncApiClient for RefuseOnceAsyncClient {
         Box<dyn std::future::Future<Output = Result<Vec<AssistantEvent>, RuntimeError>> + Send + 'a>,
     > {
         Box::pin(async move {
-            if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            if self.calls.fetch_add(1, Ordering::SeqCst) < self.refusals {
                 return Ok(vec![
                     AssistantEvent::StopReason("refusal".to_string()),
+                    AssistantEvent::RefusalCategory("cyber".to_string()),
                     AssistantEvent::MessageStop,
                 ]);
             }
@@ -16754,9 +16742,237 @@ impl AsyncApiClient for RefuseOnceAsyncClient {
     }
 }
 
-fn opus_family_head() -> &'static str {
-    api::latest_anthropic_family_model(api::ANTHROPIC_OPUS_MODEL_ALIAS)
-        .expect("catalog defines an Opus family head")
+/// A prompter that answers every question with `answer` and keeps what it
+/// was asked (t-6747).
+struct RecordingPrompter {
+    answer: crate::permission::PermissionDecision,
+    asked: std::sync::Mutex<Vec<crate::permission::PermissionRequest>>,
+}
+
+impl crate::permission::PermissionPrompter for RecordingPrompter {
+    fn decide<'a>(
+        &'a self,
+        request: crate::permission::PermissionRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        crate::permission::PermissionDecision,
+                        crate::permission::PermissionError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        self.asked.lock().expect("lock").push(request);
+        let answer = self.answer;
+        Box::pin(async move { Ok(answer) })
+    }
+}
+
+/// A zo turn a provider's classifier declines twice is offered the ladder's
+/// fallback rung (t-6747): the same model once, then — a person at the
+/// keyboard and the mode `ask` — the question whether this turn continues on
+/// the category's route, which it does only on a yes. `auto` switches without
+/// asking, an unattended turn is answered as `auto`, `off` never switches, and
+/// a category the provider routes nowhere stands.
+#[test]
+fn a_zo_turn_declined_twice_offers_the_fallback_rung() {
+    use super::fallback::REFUSAL_LADDER;
+    use super::RefusalDecision;
+    use crate::ClassifierFallback;
+
+    assert_eq!(REFUSAL_LADDER.len(), 4, "the one table: same model, route, across, cleaned");
+    let mut runtime = refusal_dry_test_runtime("claude-fable-5-1");
+    runtime.set_attendance(crate::Attendance::Attended);
+    runtime.set_classifier_fallback(ClassifierFallback::Ask);
+
+    begin_public_refusal_test_turn(&mut runtime, "turn one");
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::RetrySameModel
+    ));
+    let RefusalDecision::Ask { to } = runtime.decide_refusal_fallback(Some("cyber")) else {
+        panic!("the second decline asks before leaving the chosen model");
+    };
+    assert_eq!(to, CYBER_ROUTE);
+    assert_eq!(
+        runtime.effective_request_model(),
+        Some("claude-fable-5-1"),
+        "nothing switched before the yes"
+    );
+    runtime.consent_to_refusal_switch(false);
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::Retry
+    ));
+    assert_eq!(runtime.effective_request_model(), Some(CYBER_ROUTE));
+
+    // A yes for this turn is not a yes for the next: it asks again.
+    begin_public_refusal_test_turn(&mut runtime, "turn two");
+    assert_eq!(runtime.effective_request_model(), Some("claude-fable-5-1"));
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::RetrySameModel
+    ));
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::Ask { .. }
+    ));
+    // "Stay": nothing switches this turn, and with nothing else to try the
+    // decline is surfaced.
+    runtime.refuse_refusal_switch();
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::Surface
+    ));
+
+    // Unattended, `ask` is answered as `auto`: a question nobody sees is a pause.
+    runtime.set_attendance(crate::Attendance::Unattended);
+    begin_public_refusal_test_turn(&mut runtime, "turn three");
+    decline_to_the_route(&mut runtime);
+
+    // `off` never leaves the chosen model.
+    let mut off = refusal_dry_test_runtime("claude-fable-5-1");
+    off.set_classifier_fallback(ClassifierFallback::Off);
+    begin_public_refusal_test_turn(&mut off, "off");
+    assert!(matches!(
+        off.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::RetrySameModel
+    ));
+    assert!(matches!(
+        off.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::Surface
+    ));
+    assert_eq!(off.effective_request_model(), Some("claude-fable-5-1"));
+
+    // A category the provider routes nowhere stands, whatever the mode — and
+    // so does a refusal that names none.
+    for category in [Some("reasoning_extraction"), None] {
+        let mut stands = refusal_dry_test_runtime("claude-fable-5-1");
+        stands.set_classifier_fallback(ClassifierFallback::Auto);
+        begin_public_refusal_test_turn(&mut stands, "stands");
+        assert!(matches!(
+            stands.decide_refusal_fallback(category),
+            RefusalDecision::RetrySameModel
+        ));
+        assert!(matches!(
+            stands.decide_refusal_fallback(category),
+            RefusalDecision::Surface
+        ));
+        assert_eq!(stands.effective_request_model(), Some("claude-fable-5-1"));
+    }
+}
+
+/// And the streaming turn puts that question to the person through the
+/// prompt, and continues on the route on their yes, with the receipt that
+/// says which model it left.
+#[test]
+fn a_declined_streaming_turn_asks_the_person_before_the_route() {
+    use crate::message_stream::types::RenderBlock;
+
+    let _todo_store = HermeticTodoStore::pin();
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        StopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_async_api_client(Arc::new(RefuseOnceAsyncClient {
+        calls: AtomicUsize::new(0),
+        refusals: 2,
+    }));
+    runtime.set_context_model("claude-fable-5-1");
+    runtime.set_attendance(crate::Attendance::Attended);
+    runtime.set_classifier_fallback(crate::ClassifierFallback::Ask);
+    let prompter = Arc::new(RecordingPrompter {
+        answer: crate::permission::PermissionDecision::AllowOnce,
+        asked: std::sync::Mutex::new(Vec::new()),
+    });
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let blocks = rt.block_on(async {
+        let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+        runtime
+            .run_turn_streaming_maybe_deep("say hello", Vec::new(), render_tx, prompter.clone())
+            .await
+            .expect("the declined turn continues on the route");
+        let mut blocks = Vec::new();
+        while let Ok(block) = render_rx.try_recv() {
+            blocks.push(block);
+        }
+        blocks
+    });
+    let asked = prompter.asked.lock().expect("lock");
+    assert_eq!(asked.len(), 1, "one question, on the second decline: {asked:?}");
+    assert_eq!(asked[0].tool, super::streaming::REFUSAL_QUESTION_TOOL);
+    assert_eq!(asked[0].input_summary, format!("claude-fable-5-1 → {CYBER_ROUTE}"));
+    let receipt = super::fallback::refusal_route_warn("claude-fable-5-1", CYBER_ROUTE, Some("cyber"));
+    assert!(
+        blocks
+            .iter()
+            .any(|block| matches!(block, RenderBlock::System { text, .. } if *text == receipt)),
+        "the receipt names the model it left: {blocks:?}"
+    );
+}
+
+/// A picture of a declined screen is sent again only if the person keeps it
+/// (t-6747): the declined request's images are asked about once, a person
+/// at the keyboard, and on the yes they leave the conversation for good —
+/// every later request of the session is built without them, a note where
+/// each was. A turn nobody attends keeps them, and asks nothing.
+#[test]
+fn a_decline_screenshot_is_never_reattached() {
+    use crate::session::{ContentBlock, ConversationMessage};
+
+    let mut runtime = refusal_dry_test_runtime("claude-fable-5-1");
+    runtime.session.messages = Arc::new(vec![
+        ConversationMessage::user_text("earlier question"),
+        ConversationMessage::assistant(vec![ContentBlock::Text {
+            text: "earlier answer".to_string(),
+        }]),
+        ConversationMessage::user_with_images(
+            "why was this declined?",
+            vec![("image/png".to_string(), "c2NyZWVuc2hvdA==".to_string())],
+        ),
+    ]);
+    assert_eq!(runtime.declined_request_images(), 1);
+
+    // Unattended: nobody can say yes, so nothing is asked and nothing goes.
+    assert_eq!(runtime.declined_images_to_ask_about(), None);
+    assert_eq!(runtime.declined_request_images(), 1);
+
+    runtime.set_attendance(crate::Attendance::Attended);
+    assert_eq!(runtime.declined_images_to_ask_about(), Some(1));
+    assert_eq!(runtime.declined_images_to_ask_about(), None, "asked once a turn");
+    assert_eq!(runtime.withhold_declined_request_images(), 1);
+    assert_eq!(runtime.declined_request_images(), 0);
+    let held: Vec<&ContentBlock> = runtime
+        .session
+        .messages
+        .iter()
+        .flat_map(|message| message.blocks.iter())
+        .collect();
+    assert!(
+        !held.iter().any(|block| matches!(block, ContentBlock::Image { .. })),
+        "the image is gone from the conversation every later request is built from"
+    );
+    assert!(held.iter().any(|block| matches!(
+        block,
+        ContentBlock::Text { text } if text == super::fallback::DECLINED_IMAGE_PLACEHOLDER
+    )));
+    // The earlier, answered exchange is not the declined request's: untouched.
+    assert!(held.iter().any(|block| matches!(
+        block,
+        ContentBlock::Text { text } if text == "earlier question"
+    )));
+    // Nothing brings it back: the next turn's request has no image to send.
+    begin_public_refusal_test_turn(&mut runtime, "and now?");
+    assert_eq!(runtime.declined_request_images(), 0);
 }
 
 /// The resolver's precedence is the request's precedence: a leg's swapped
@@ -16776,13 +16992,10 @@ fn wire_model_names_the_decision_behind_the_request_model() {
     );
     assert_eq!(runtime.bound_client_model_override(), None);
 
-    // A Fable refusal retried on the Opus head, this turn.
+    // A Fable refusal retried on its category's route, this turn.
     begin_public_refusal_test_turn(&mut runtime, "turn one");
-    assert!(matches!(
-        runtime.decide_refusal_fallback(),
-        super::RefusalDecision::Retry
-    ));
-    let opus = opus_family_head();
+    decline_to_the_route(&mut runtime);
+    let opus = CYBER_ROUTE;
     assert_eq!(
         runtime.wire_model(),
         Some((opus, WireModelSource::RefusalFallback))
@@ -16855,10 +17068,7 @@ fn wire_model_names_the_decision_behind_the_request_model() {
     let mut parked = refusal_dry_test_runtime("claude-fable-5");
     for input in ["one", "two"] {
         begin_public_refusal_test_turn(&mut parked, input);
-        assert!(matches!(
-            parked.decide_refusal_fallback(),
-            super::RefusalDecision::Retry
-        ));
+        decline_to_the_route(&mut parked);
     }
     begin_public_refusal_test_turn(&mut parked, "three");
     assert_eq!(
@@ -16976,6 +17186,8 @@ fn a_refusal_retry_announces_the_fallback_model_on_the_wire() {
     )
     .with_async_api_client(Arc::new(RefuseOnceAsyncClient {
         calls: AtomicUsize::new(0),
+        // The same model once, then the category's route (t-6747).
+        refusals: 2,
     }));
     runtime.set_context_model("claude-fable-5");
 
@@ -16994,17 +17206,22 @@ fn a_refusal_retry_announces_the_fallback_model_on_the_wire() {
                     model: "claude-fable-5".to_string(),
                     source: WireModelSource::Session,
                 },
+                // The same-model retry is a request of its own, on the same model.
                 &WireModel {
-                    model: opus_family_head().to_string(),
+                    model: "claude-fable-5".to_string(),
+                    source: WireModelSource::Session,
+                },
+                &WireModel {
+                    model: CYBER_ROUTE.to_string(),
                     source: WireModelSource::RefusalFallback,
                 },
             ],
-            "session model first, then the retried request on the Opus head: {blocks:?}"
+            "the session model twice, then the retried request on the category's route: {blocks:?}"
         );
         let warn = blocks
             .iter()
             .position(|block| {
-                matches!(block, RenderBlock::System { text, .. } if *text == super::fallback::refusal_fallback_warn(opus_family_head()))
+                matches!(block, RenderBlock::System { text, .. } if *text == super::fallback::refusal_route_warn("claude-fable-5", CYBER_ROUTE, Some("cyber")))
             })
             .expect("the refusal warn row");
         let fallback = blocks

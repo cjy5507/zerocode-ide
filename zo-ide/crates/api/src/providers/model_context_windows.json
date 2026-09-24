@@ -321,7 +321,11 @@
       "canonical": "claude-fable-5-1",
       "provider": "anthropic",
       "orchestration_rank": 0,
-      "refusal_fallback": ["opus", "openai-latest"]
+      "refusal_fallback": ["opus", "openai-latest"],
+      "refusal_routes": {
+        "cyber": ["claude-opus-4-8", "openai-latest"],
+        "bio": ["claude-opus-5", "openai-latest"]
+      }
     },
     {
       "alias": "claude-fable",
@@ -338,7 +342,12 @@
       "canonical": "claude-opus-5",
       "provider": "anthropic",
       "demotes_to": "sonnet",
-      "refusal_fallback": ["openai-latest", "google-latest"]
+      "refusal_fallback": ["openai-latest", "google-latest"],
+      "refusal_routes": {
+        "cyber": ["claude-opus-4-8", "openai-latest", "google-latest"],
+        "bio": ["claude-opus-5", "openai-latest", "google-latest"],
+        "frontier_llm": ["claude-opus-5", "openai-latest", "google-latest"]
+      }
     },
     {
       "alias": "opus[1m]",
@@ -563,6 +572,7 @@
     "capabilities": "imagegen: ChatGPT backend image generation on the current GPT lineup; streaming_only: Codex Spark cannot serve non-stream requests; no_vision: Model does not accept image inputs (text/code only, e.g. Codex Spark).",
     "fast_pair": "Release-specific priority-tier spelling when it is not `<id>[fast]`.",
     "demotes_to": "One-step rate-limit fallback for an id that is not a family alias's canonical.",
-    "refusal_fallback": "Where a safety-classifier refusal on this lineup goes next, as one alias or an ordered list of them (an alias row carries its family's; a model row carries a retired lineup's). The head that shares this provider is retried on the bound client; a cross-provider candidate is handed the turn like a quota fallback, skipping any whose provider is not connected. Absent: a refusal is surfaced after one same-model retry. The runtime names no lineup for this."
+    "refusal_fallback": "Where a safety-classifier refusal on this lineup goes next, as one alias or an ordered list of them (an alias row carries its family's; a model row carries a retired lineup's). The head that shares this provider is retried on the bound client; a cross-provider candidate is handed the turn like a quota fallback, skipping any whose provider is not connected. Absent: a refusal is surfaced after one same-model retry. The runtime names no lineup for this.",
+    "refusal_routes": "Where a safety-classifier refusal on this lineup goes, per the category the classifier names (cyber, bio, frontier_llm, reasoning_extraction, general_harms): the provider's own routing, by model id and never by a family alias that moves (Claude Code 2.1.281 routes cyber from Fable 5.1, Opus 5 and Opus 5.5 to Opus 4.8, and bio from Fable 5.1 and Opus 5.5 — and frontier_llm from Opus 5.5 — to Opus 5; a route naming the refusing model itself is skipped, so Opus 5's own bio refusal goes on across providers). A category absent here is routed nowhere and its refusal stands; a refusal naming no category stands too. Absent altogether: refusal_fallback answers for every category. Measured t-6747."
   }
 }

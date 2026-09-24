@@ -1353,6 +1353,14 @@ impl ApiClient for ProviderRuntimeClient {
                             {
                                 events.push(AssistantEvent::StopReason(reason.to_string()));
                             }
+                            runtime::push_refusal_category(
+                                &mut events,
+                                delta
+                                    .delta
+                                    .stop_details
+                                    .as_ref()
+                                    .and_then(|details| details.category.as_deref()),
+                            );
                         }
                         ApiStreamEvent::MessageStop(_) => {
                             saw_stop = true;
@@ -2053,6 +2061,7 @@ mod tests {
             }],
             stop_reason: Some("end_turn".to_string()),
             stop_sequence: None,
+            stop_details: None,
             usage: Usage {
                 input_tokens: 1,
                 output_tokens: 1,

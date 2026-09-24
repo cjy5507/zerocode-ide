@@ -81,6 +81,67 @@ pub(crate) fn default_permission_choices() -> Vec<AsyncPermissionChoice> {
     ]
 }
 
+/// The name a refusal's questions carry (t-6747) — not a tool but a choice
+/// the refusal ladder puts to the person, named so the prompt says what it
+/// asks about.
+pub(crate) const REFUSAL_QUESTION_TOOL: &str = "safety-classifier decline";
+
+/// One question the refusal ladder asks the person, in the prompt every
+/// permission question uses (t-6747).
+pub(crate) fn refusal_question(
+    summary: String,
+    reasoning: String,
+    choices: Vec<AsyncPermissionChoice>,
+) -> AsyncPermissionRequest {
+    AsyncPermissionRequest {
+        tool: REFUSAL_QUESTION_TOOL.to_string(),
+        input_hash: format!("{:x}", Sha256::digest(summary.as_bytes())),
+        input_summary: summary,
+        reasoning,
+        choices,
+        risk_level: AsyncRiskLevel::Low,
+    }
+}
+
+/// The answers to leaving the chosen model: for this turn, from now on for
+/// this model, or not at all.
+pub(crate) fn refusal_switch_choices(from: &str) -> Vec<AsyncPermissionChoice> {
+    vec![
+        AsyncPermissionChoice {
+            key: 'y',
+            label: "Switch, and from now on".to_string(),
+            decision: AsyncPermissionDecision::Allow,
+        },
+        AsyncPermissionChoice {
+            key: 'o',
+            label: "Switch for this turn".to_string(),
+            decision: AsyncPermissionDecision::AllowOnce,
+        },
+        AsyncPermissionChoice {
+            key: 'n',
+            label: format!("Stay on {from}"),
+            decision: AsyncPermissionDecision::Deny,
+        },
+    ]
+}
+
+/// The answers to the declined request's images: send it again without them,
+/// or keep them.
+pub(crate) fn declined_images_choices() -> Vec<AsyncPermissionChoice> {
+    vec![
+        AsyncPermissionChoice {
+            key: 'o',
+            label: "Retry without them".to_string(),
+            decision: AsyncPermissionDecision::AllowOnce,
+        },
+        AsyncPermissionChoice {
+            key: 'n',
+            label: "Keep them".to_string(),
+            decision: AsyncPermissionDecision::Deny,
+        },
+    ]
+}
+
 pub(crate) fn risk_from_tool_name(tool_name: &str) -> AsyncRiskLevel {
     let lower = tool_name.to_ascii_lowercase();
     if lower.contains("write")

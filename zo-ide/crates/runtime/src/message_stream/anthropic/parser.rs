@@ -379,6 +379,7 @@ pub async fn parse_stream_async_with_events<S: EventSource>(
     {
         events.push(AssistantEvent::StopReason(reason.to_string()));
     }
+    crate::conversation::push_refusal_category(&mut events, summary.refusal_category.as_deref());
     Ok(StreamOutputs { summary, events })
 }
 
@@ -442,6 +443,7 @@ fn terminal_stream_failure_can_preserve_partial_text(
         | AssistantEvent::ProviderState(_)
         | AssistantEvent::ReasoningReplay(_)
         | AssistantEvent::Model(_)
+        | AssistantEvent::RefusalCategory(_)
         | AssistantEvent::MessageStop => false,
     });
     let has_tool_use = events
@@ -740,6 +742,10 @@ impl StreamParser {
             }
             StreamEvent::MessageDelta(MessageDeltaEvent { delta, usage, .. }) => {
                 self.summary.stop_reason.clone_from(&delta.stop_reason);
+                self.summary.refusal_category = delta
+                    .stop_details
+                    .as_ref()
+                    .and_then(|details| details.category.clone());
                 self.summary.output_tokens = usage.output_tokens;
             }
             StreamEvent::MessageStop(_) => {
