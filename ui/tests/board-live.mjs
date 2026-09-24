@@ -207,6 +207,32 @@ export async function testBoardLive(browser, origin, ok) {
         && view.querySelectorAll(".agent-graph-edge.is-live-relation").length >= 3;
     }));
 
+    /* 그리고 지도가 **켜져 있는 채로** 작업 목록으로 돌아가도 그 목록은 지도가
+     * 없던 때와 같은 목록이다 — 기본 보기를 바꾸지 않는다는 약속은 손잡이를
+     * 끈 판이 아니라 켠 판에서 지켜져야 한다. */
+    ok("the_task_list_is_unchanged_while_the_live_map_is_on", await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      const rows = () => [...view.querySelectorAll(".task-board-row")]
+        .map((row) => row.textContent).join("\u001e");
+      view.querySelector('[data-board-mode="tasks"]').click();
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      const withMap = { rows: rows(), live: view.classList.contains("is-live-map"),
+        beats: view.querySelectorAll("[data-live-beat]").length,
+        waits: [...view.querySelectorAll(".agent-graph-wait")].filter((chip) => chip.textContent !== "").length,
+        events: view.querySelectorAll(".agent-live-events").length };
+      setAgentGraphLive(view, false);
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      const without = rows();
+      setAgentGraphLive(view, true);
+      view.querySelector('[data-board-mode="graph"]').click();
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+      return withMap.rows === without && withMap.rows !== ""
+        && !withMap.live && withMap.beats === 0 && withMap.waits === 0 && withMap.events === 0;
+    }));
+
     /* ---- ② 맥박은 실제 사건 하나에 한 번 ------------------------------- */
 
     const pulsed = await page.evaluate(async () => {

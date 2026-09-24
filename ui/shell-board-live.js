@@ -73,6 +73,13 @@ const AGENT_GRAPH_LIVE = Object.freeze({
  *
  * `count`는 같은 주체·같은 관계에서의 **실제 증가**만 세기 위한 기준선이다. */
 const liveLanes = new Map();
+/* 상한에 밀려난 관계의 이름표. 이것이 있어야 「처음 보는 관계」와 「기억을
+ * 잃은 관계」를 가릴 수 있다. 이 표까지 넘치면 그 구별이 끝나므로, 그 사실을
+ * 적어 두고(`liveDropTruncated`) 그 뒤로는 모든 낯선 관계를 조용히 다시
+ * 맞춘다 — 놓친 맥박은 아무것도 거짓말하지 않는다. */
+const liveDropped = new Set();
+let liveDropTruncated = false;
+
 /* 자리마다의 주체 — `run/worker/dispatch`. 이것이 바뀌면 그 자리의 모든 기억을
  * 버린다.
  *
@@ -224,13 +231,6 @@ function agentGraphLiveLane(lane, stamp, key, panes = []) {
   liveLanes.set(lane, held);
   return "new";
 }
-
-/* 상한에 밀려난 관계의 이름표. 이것이 있어야 「처음 보는 관계」와 「기억을
- * 잃은 관계」를 가릴 수 있다. 이 표까지 넘치면 그 구별이 끝나므로, 그 사실을
- * 적어 두고(`liveDropTruncated`) 그 뒤로는 모든 낯선 관계를 조용히 다시
- * 맞춘다 — 놓친 맥박은 아무것도 거짓말하지 않는다. */
-const liveDropped = new Set();
-let liveDropTruncated = false;
 
 function agentGraphLiveKeepLane(lane, value) {
   liveLanes.set(lane, value);
