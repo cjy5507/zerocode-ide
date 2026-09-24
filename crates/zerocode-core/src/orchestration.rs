@@ -584,10 +584,77 @@ pub struct Task {
     /// fourth into the same wall.
     pub failures: u32,
     pub created_ms: i64,
+    /// Who wrote `result` last — see [`ResultAuthor`]. `None` for every row
+    /// written before authorship was recorded, which [`Run::review_of`] reads
+    /// as "nobody known": the keys in such a result are claims, not facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_author: Option<ResultAuthor>,
+}
+
+/// Who wrote a task's `result` last — the provenance [`ReviewFacts`] asks
+/// about before it believes a key.
+///
+/// The independent audit of 2026-09-24 (t-6780, F3) found the review labels
+/// read out of `Task::result` without asking who wrote it: a worker's own
+/// `worker_done` body saying `"verified": true` drew as 검증됨, the word the
+/// board reserves for a coordinator's judgement, with no coordinator having
+/// looked. So every road that writes `result` now says which seat it was —
+/// and only the coordinator's road makes a fact.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ResultAuthor {
+    /// The worker carrying the task wrote it — its `worker_done` body, the
+    /// one road a worker has onto `result`. Its own claim. `worker` is the
+    /// ledger's worker id where the dispatch resolved to one, and otherwise
+    /// the address the report was signed with.
+    Worker {
+        worker: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatch: Option<String>,
+    },
+    /// The run's coordinator seat wrote it by `task-update`. `generation` is
+    /// the seat's sitting, `None` for a run coordinated under the legacy
+    /// leader-pane rule; `attempt` is the newest dispatch the task had when
+    /// the correction was written, so a review is bound to the attempt it
+    /// reviewed and a later attempt does not inherit it.
+    Coordinator {
+        seat: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        generation: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<String>,
+    },
+    /// The ledger's own note — a stop, an abandon, a death it witnessed.
+    Ledger,
+}
+
+impl ResultAuthor {
+    /// The one word a reader needs: which kind of seat wrote it.
+    #[must_use]
+    pub fn kind(&self) -> ReviewAuthor {
+        match self {
+            Self::Worker { .. } => ReviewAuthor::Worker,
+            Self::Coordinator { .. } => ReviewAuthor::Coordinator,
+            Self::Ledger => ReviewAuthor::Ledger,
+        }
+    }
+}
+
+/// Which kind of seat wrote the result a [`ReviewFacts`] was read from.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewAuthor {
+    Coordinator,
+    Worker,
+    Ledger,
+    /// A row written before authorship was recorded.
+    #[default]
+    Unknown,
 }
 
 /// What a COORDINATOR has written about a task's outcome, beyond the worker's
-/// own word — read out of [`Task::result`].
+/// own word — read out of [`Task::result`], and believed only where
+/// [`Task::result_author`] is the coordinator seat ([`Self::written_by`]).
 ///
 /// A provider's turn ending is not a task finishing; a `worker_done` is the
 /// worker's claim, not a verification; and neither is a merge. The ledger has
@@ -617,9 +684,57 @@ pub struct ReviewFacts {
     /// The coordinator wrote at least one of the keys above — the difference
     /// between "unverified" and "nobody has said".
     pub written: bool,
+    /// The same three keys as a WORKER wrote them — or as somebody nobody
+    /// knows wrote them — read as its claim, which the board shows in the
+    /// claim's own words and never as the fact (t-6815).
+    #[serde(default)]
+    pub claimed_verified: bool,
+    #[serde(default)]
+    pub claimed_merged: bool,
+    #[serde(default)]
+    pub claimed_deployed: bool,
+    /// Who wrote the result these were read from.
+    #[serde(default)]
+    pub author: ReviewAuthor,
+    /// The attempt a coordinator's review was written against, when the
+    /// task had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempt: Option<String>,
+    /// The task's newest attempt, when it is not the one the review was
+    /// written against — the facts above are then withheld, because a
+    /// review of one attempt says nothing about the next
+    /// ([`Run::review_of`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 impl ReviewFacts {
+    /// The keys as facts or as claims, by who wrote the result.
+    ///
+    /// Only the coordinator seat's writing makes `verified`, `merged` and
+    /// `deployed` true. A worker's — and a row nobody is known to have
+    /// written — keeps the same keys under `claimed_*`, so a board can say
+    /// "the worker says merged" without ever saying "merged". A `false`
+    /// from a worker is still nothing: a claim of NOT is not a review.
+    #[must_use]
+    pub fn written_by(result: &str, author: Option<&ResultAuthor>) -> Self {
+        let read = Self::from_result(result);
+        match author {
+            Some(ResultAuthor::Coordinator { attempt, .. }) => Self {
+                author: ReviewAuthor::Coordinator,
+                attempt: attempt.clone(),
+                ..read
+            },
+            other => Self {
+                claimed_verified: read.verified,
+                claimed_merged: read.merged,
+                claimed_deployed: read.deployed,
+                author: other.map_or(ReviewAuthor::Unknown, ResultAuthor::kind),
+                ..Self::default()
+            },
+        }
+    }
+
     /// Read the coordinator's keys out of a result the worker or the
     /// coordinator wrote. Anything that is not a JSON object answers the
     /// default: nothing written.
@@ -668,18 +783,12 @@ impl ReviewFacts {
             merge_head,
             deployed,
             written,
+            ..Self::default()
         }
     }
 }
 
 impl Task {
-    /// What a coordinator has written about this task's outcome, beyond the
-    /// worker's own word. See [`ReviewFacts`].
-    #[must_use]
-    pub fn review(&self) -> ReviewFacts {
-        ReviewFacts::from_result(&self.result)
-    }
-
     /// The name a roster row shows. Never empty, so a row cannot render blank.
     pub fn display_name(&self) -> &str {
         if !self.title.is_empty() {
@@ -2839,6 +2948,42 @@ struct TakenBack {
 impl Run {
     pub fn task(&self, id: &str) -> Option<&Task> {
         self.tasks.iter().find(|task| task.id == id)
+    }
+
+    /// The task's newest attempt, open or ended — the one a review is
+    /// written against, and the one a review is measured against.
+    pub fn newest_attempt(&self, task_id: &str) -> Option<&Dispatch> {
+        self.dispatches.iter().rev().find(|one| one.task == task_id)
+    }
+
+    /// What stands about a task's outcome NOW: the coordinator's facts while
+    /// the attempt they were written against is still the task's newest, the
+    /// worker's claims kept apart from them, and nothing inherited across
+    /// attempts — a task id staying the same is not a reason for a review of
+    /// one attempt to dress the next ([`ReviewFacts::written_by`], t-6815).
+    ///
+    /// The one reader. `Task` alone cannot answer, because the attempts are
+    /// the run's rows; a reading that skipped them would be the inheritance
+    /// this exists to refuse.
+    #[must_use]
+    pub fn review_of(&self, task: &Task) -> ReviewFacts {
+        let facts = ReviewFacts::written_by(&task.result, task.result_author.as_ref());
+        let newest = self.newest_attempt(&task.id).map(|one| one.id.as_str());
+        if facts.author == ReviewAuthor::Coordinator
+            && newest.is_some()
+            && facts.attempt.as_deref() != newest
+        {
+            return ReviewFacts {
+                verified: false,
+                merged: false,
+                merge_head: None,
+                deployed: false,
+                written: false,
+                superseded_by: newest.map(str::to_string),
+                ..facts
+            };
+        }
+        facts
     }
 
     /// The seat somebody is sitting in right now, or `None` for a run whose
@@ -5162,11 +5307,24 @@ impl Ledger {
         let id = message.id.clone();
         if let Some(ok) = worker_done {
             let ended = message.created_ms;
+            /* The body is the WORKER's writing, whatever keys it carries: the
+             * dispatch names the worker where it resolves, and the signature
+             * the report wore stands in where it does not (t-6815). */
+            let author = match message.dispatch.as_deref().and_then(|id| run.dispatch(id)) {
+                Some(held) => ResultAuthor::Worker {
+                    worker: held.worker.clone(),
+                    dispatch: Some(held.id.clone()),
+                },
+                None => ResultAuthor::Worker {
+                    worker: message.from.clone(),
+                    dispatch: message.dispatch.clone(),
+                },
+            };
             if let Some(dispatch_id) = message.dispatch.clone() {
                 Self::close_dispatch(run, &dispatch_id, Some(ok), ended);
             }
             if let Some(task_id) = message.task.clone() {
-                Self::finish_task(run, &task_id, ok, &message.body);
+                Self::finish_task(run, &task_id, ok, &message.body, author);
             }
         }
         /* Asked AFTER the completion above has shut the dispatch, and that
@@ -5403,8 +5561,10 @@ impl Ledger {
         }
     }
 
-    /// Write a task's ending, and free whatever was waiting on it.
-    fn finish_task(run: &mut Run, task_id: &str, ok: bool, result: &str) {
+    /// Write a task's ending, and free whatever was waiting on it. `author`
+    /// is who wrote the result — the worker whose report this is, or the
+    /// ledger for an ending it witnessed itself.
+    fn finish_task(run: &mut Run, task_id: &str, ok: bool, result: &str, author: ResultAuthor) {
         let Some(at) = run.tasks.iter().position(|task| task.id == task_id) else {
             return;
         };
@@ -5412,6 +5572,7 @@ impl Ledger {
             return;
         }
         run.tasks[at].result = result.into();
+        run.tasks[at].result_author = Some(author);
         if ok {
             run.tasks[at].status = TaskStatus::Completed;
             run.tasks[at].failures = 0;
@@ -5902,6 +6063,7 @@ impl Ledger {
             result: Text::from(String::new()),
             failures: 0,
             created_ms: now_ms,
+            result_author: None,
         };
         let status = if run.deps_met(&task) {
             TaskStatus::Ready
@@ -5918,12 +6080,18 @@ impl Ledger {
     /// is a worker saying so — this is for the cases a worker cannot speak to:
     /// a run abandoned by a person, a status set wrong, work done outside a
     /// dispatch entirely.
+    ///
+    /// `author` is who is writing, and is written down beside a `result` so
+    /// [`Run::review_of`] can tell a coordinator's judgement from a worker's
+    /// claim. Who MAY write is the verb's question — `correction_author`
+    /// answers it for `task-update` — and this road trusts its caller.
     pub fn update_task(
         &mut self,
         run_id: &str,
         task_id: &str,
         status: Option<TaskStatus>,
         result: Option<String>,
+        author: ResultAuthor,
     ) -> Result<TaskStatus, String> {
         let run = self.run_mut(run_id).ok_or_else(|| unknown_run(run_id))?;
         let at = run
@@ -5960,6 +6128,7 @@ impl Ledger {
         }
         if let Some(result) = result {
             run.tasks[at].result = result.into();
+            run.tasks[at].result_author = Some(author);
         }
         if let Some(status) = status {
             run.tasks[at].status = status;
@@ -10722,7 +10891,7 @@ impl Ledger {
                 // we stopped watching are both attempts nothing can be
                 // harvested from, and a task that did not count them would be
                 // dispatched forever.
-                Self::finish_task(run, &task_id, false, &note);
+                Self::finish_task(run, &task_id, false, &note, ResultAuthor::Ledger);
             }
         }
         // Written after the dispatch closes: `close_dispatch` hands a live
@@ -10837,7 +11006,7 @@ impl Ledger {
                 .find(|one| one.id == dispatch_id)
                 .map(|one| one.task.clone());
             if let Some(task_id) = task {
-                Self::finish_task(run, &task_id, false, &note);
+                Self::finish_task(run, &task_id, false, &note, ResultAuthor::Ledger);
             }
         }
         run.workers[at].state = ending.leaves();
@@ -13666,7 +13835,9 @@ pub const VERBS: &[(&str, &str, Doing)] = &[
     ),
     (
         "task-update",
-        "--task <id> [--status <s>] [--result <json>] · correct the record",
+        "--task <id> [--status <s>] [--result <json>] [--attempt <dispatch>] · correct the \
+         record, as the run's coordinator; --attempt names the attempt the correction was \
+         made against and is refused when the task has moved past it",
         Doing::Mutation,
     ),
     (
@@ -16025,7 +16196,14 @@ fn plan_inner(
             // Never acknowledge a field this mutation cannot apply. In
             // particular, --deps belongs to task-create; ignoring it can
             // launch dependent work before its supposed prerequisites.
-            let accepted = ["--task", "--status", "--result", "--run", "--retry-request"];
+            let accepted = [
+                "--task",
+                "--status",
+                "--result",
+                "--attempt",
+                "--run",
+                "--retry-request",
+            ];
             if let Some(flag) = words
                 .values
                 .iter()
@@ -16050,8 +16228,23 @@ fn plan_inner(
                 None => None,
             };
             let result = words.value("--result").map(str::to_string);
-            let now = ledger.update_task(&run_id, task_id, status, result)?;
-            said(serde_json::json!({ "taskId": task_id, "status": now.as_str() }))
+            // Asked before anything moves: a refusal here leaves the run
+            // exactly as it found it, and files no receipt.
+            let author = correction_author(
+                ledger,
+                &team.leader_pane,
+                &run_id,
+                task_id,
+                (&team.id, pane),
+                words.value("--attempt"),
+            )?;
+            let signed = author.kind();
+            let now = ledger.update_task(&run_id, task_id, status, result, author)?;
+            said(serde_json::json!({
+                "taskId": task_id,
+                "status": now.as_str(),
+                "author": signed,
+            }))
         }
 
         // The sixth noun's three verbs. Opening and answering a decision are
@@ -17836,6 +18029,97 @@ fn inbox_of(ledger: &Ledger, leader_pane: &str, run_id: &str, seat: (&str, &str)
     sender(ledger, leader_pane, run_id, seat)
 }
 
+/// Who may correct a task's record with `task-update`, and as whom.
+///
+/// The independent audit of 2026-09-24 (t-6780, F2) found the verb read
+/// `bound` and wrote: any pane that could name the run — a worker of it, a
+/// worker of another run, a former coordinator whose pane outlived a
+/// takeover — could settle somebody else's attempt and free its dependents.
+/// The record is the coordinator's, so the correction is the coordinator's
+/// verb and nobody else's: the seat [`sender`] signs `run:` for, which is
+/// the run's live seat where it has one and the leader pane under the
+/// legacy rule where it does not. A worker — even the one carrying the task
+/// — has one road onto the record, its `worker_done`; once its attempt has
+/// ended it says what it has to say in a status mail, and the coordinator
+/// corrects. Everybody else is refused by name, before anything moves, and
+/// the refusal files no receipt (the acceptance of m-7276: the audit's
+/// "without mutation or receipt").
+///
+/// One identity rule, not two: this asks [`sender`] rather than repeating
+/// its seat arithmetic, so a pane that cannot sign as the coordinator cannot
+/// correct as one either.
+///
+/// `expected` is the attempt the coordinator made its correction against,
+/// when it names one. A review is of an attempt, and a coordinator that read
+/// the result while a retry was starting would otherwise approve the new
+/// attempt with its observation of the old — so the correction is refused
+/// when the task's newest attempt is not the named one.
+fn correction_author(
+    ledger: &Ledger,
+    leader_pane: &str,
+    run_id: &str,
+    task_id: &str,
+    seat: (&str, &str),
+    expected: Option<&str>,
+) -> Result<ResultAuthor, String> {
+    let run = ledger.run(run_id).ok_or_else(|| unknown_run(run_id))?;
+    if run.task(task_id).is_none() {
+        return Err(format!("unknown task: {task_id}"));
+    }
+    let signed = sender(ledger, leader_pane, run_id, seat);
+    let newest = run.newest_attempt(task_id).map(|one| one.id.clone());
+    if signed == run.address() {
+        if let Some(named) = expected
+            && newest.as_deref() != Some(named)
+        {
+            return Err(format!(
+                "task-update names attempt {named}, and task {task_id}'s newest attempt is {} \
+                 — a correction made against an attempt the task has moved past would dress \
+                 the new attempt in the old observation; look at the newest attempt and \
+                 correct against that",
+                newest.as_deref().unwrap_or("none")
+            ));
+        }
+        return Ok(ResultAuthor::Coordinator {
+            seat: format!("{}/{}", seat.0, seat.1),
+            generation: run.coordinator_live().map(|held| held.generation),
+            attempt: newest,
+        });
+    }
+    let carrier = run
+        .dispatches
+        .iter()
+        .find(|one| one.task == task_id && one.is_open());
+    let coordinated = match run.coordinator_live() {
+        Some(held) => format!(
+            "coordinated from {} (generation {})",
+            held.seat, held.generation
+        ),
+        None => "coordinated from its leader pane, having no seat".to_string(),
+    };
+    let carried = match carrier {
+        Some(held) => format!(
+            "carried by worker {} under dispatch {}",
+            held.worker, held.id
+        ),
+        None => "carried by nobody".to_string(),
+    };
+    let who = match signed.strip_prefix(WORKER_ADDRESS_PREFIX) {
+        Some(worker) if carrier.is_some_and(|held| held.worker == worker) => format!(
+            "worker {worker}, which is carrying it and reports it with `send --type \
+             worker_done`"
+        ),
+        Some(worker) => format!("worker {worker}"),
+        None => format!("pane {}/{}", seat.0, seat.1),
+    };
+    Err(format!(
+        "task-update is the coordinator's verb: run {run_id} is {coordinated}, task {task_id} is \
+         {carried}, and {who} is not that seat — a worker's word on its own work is its \
+         `worker_done` (a status mail once its attempt has ended), and the coordinator corrects \
+         the record"
+    ))
+}
+
 /// The task and dispatch the pane's worker is currently carrying.
 ///
 /// `(None, None)` for the coordinator's own pane, and for a worker between
@@ -17872,6 +18156,10 @@ fn task_json(run: &Run, task: &Task) -> serde_json::Value {
         "blockedBy": run.blocked_by(task),
         "parent": task.parent,
         "result": task.result,
+        // Who wrote that result, and what it amounts to: a coordinator's
+        // facts, or a worker's claims kept apart from them (t-6815).
+        "resultAuthor": task.result_author,
+        "review": run.review_of(task),
         "failures": task.failures,
     })
 }
@@ -18373,6 +18661,10 @@ pub struct TaskRow {
     pub result: Text,
     pub failures: u32,
     pub created_ms: i64,
+    /// Absent from every store written before authorship was recorded, read
+    /// back as nobody known (t-6815).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_author: Option<ResultAuthor>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -18731,6 +19023,7 @@ impl Ledger {
                     result: task.result.clone(),
                     failures: task.failures,
                     created_ms: task.created_ms,
+                    result_author: task.result_author.clone(),
                 });
             }
             for dispatch in &run.dispatches {
@@ -18938,6 +19231,7 @@ impl Ledger {
                 result: row.result,
                 failures: row.failures,
                 created_ms: row.created_ms,
+                result_author: row.result_author,
             });
         }
         for row in projected.dispatches {

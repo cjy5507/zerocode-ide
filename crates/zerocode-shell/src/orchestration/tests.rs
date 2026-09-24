@@ -14547,6 +14547,7 @@ fn an_open_task_is_found_by_the_words_its_title_carries_and_a_final_one_is_not()
             &done,
             Some(zerocode_core::orchestration::TaskStatus::Completed),
             None,
+            zerocode_core::orchestration::ResultAuthor::Ledger,
         )
         .expect("completed");
     assert_eq!(
@@ -15354,7 +15355,13 @@ fn relation_dependencies_keep_completed_task_facts_after_its_latest_worker_is_re
         )
         .unwrap();
     ledger
-        .update_task(&run, &upstream, Some(TaskStatus::Ready), None)
+        .update_task(
+            &run,
+            &upstream,
+            Some(TaskStatus::Ready),
+            None,
+            zerocode_core::orchestration::ResultAuthor::Ledger,
+        )
         .unwrap();
     let latest = ledger
         .start_worker(&run, "claude", ("team", "%3"), Some(&upstream), 5)
@@ -16272,4 +16279,93 @@ fn a_codex_workers_move_is_recorded_under_relaunch_and_nothing_is_typed() {
     assert_eq!(rows[1]["followed"], "progressed");
     assert_eq!(rows[1]["landed"], "medium");
     assert!(stood.sent_at_worker().is_empty());
+}
+
+/// The roster row the board draws reads a worker's `merged`/`verified` as
+/// its claim, and only a coordinator's correction as the fact (t-6815) —
+/// through the real road: the worker's `worker_done` posted, the ledger
+/// exported and rebuilt as a restart would, the row built from that.
+#[test]
+fn a_workers_claimed_merge_reaches_the_roster_row_as_a_claim() {
+    use zerocode_core::orchestration::{
+        Draft, Ledger, MessageKind, Priority, ResultAuthor, Text, worker_address,
+    };
+    let mut ledger = Ledger::new();
+    let run = ledger.create_run("claims", 1);
+    let task = ledger
+        .create_task(&run, "ship".into(), "ship it".into(), vec![], None, 2)
+        .expect("a task");
+    let started = ledger
+        .start_worker(&run, "codex", ("team-claims", "%2"), Some(&task), 3)
+        .expect("a worker");
+    ledger
+        .post(
+            &run,
+            Draft {
+                from: worker_address(&started.worker),
+                to: ledger.run(&run).expect("the run").address(),
+                kind: MessageKind::WorkerDone,
+                body: Text::from(
+                    r#"{"ok":true,"merged":true,"verified":true,"deployed":true}"#.to_string(),
+                ),
+                subject: Text::default(),
+                priority: Priority::Normal,
+                payload: Text::default(),
+                thread: None,
+                task: Some(task.clone()),
+                dispatch: started.dispatch.clone(),
+            },
+            4,
+        )
+        .expect("the worker's report");
+    let row = |ledger: &Ledger| {
+        super::ledger_agents_for_seats(ledger, &super::TeamSeatIndex::new())
+            .into_iter()
+            .find(|one| one.worker == started.worker)
+            .expect("the worker's row")
+    };
+    let rebuilt = Ledger::rebuild(ledger.export()).expect("a readable ledger");
+    for (which, held) in [("live", &ledger), ("rebuilt", &rebuilt)] {
+        let claimed = row(held);
+        assert!(claimed.reported, "{which}: the report closed the attempt");
+        assert!(
+            !claimed.review.verified && !claimed.review.merged && !claimed.review.deployed,
+            "{which}: a worker's keys reached the row as the coordinator's facts: {:?}",
+            claimed.review
+        );
+        assert!(
+            claimed.review.claimed_merged && claimed.review.claimed_verified,
+            "{which}: the claim was dropped rather than kept apart: {:?}",
+            claimed.review
+        );
+    }
+
+    // The coordinator's correction, against the attempt it reviewed, is the fact.
+    ledger
+        .update_task(
+            &run,
+            &task,
+            None,
+            Some(r#"{"merged":true,"mergeHead":"3a0a289bb5f3"}"#.to_string()),
+            ResultAuthor::Coordinator {
+                seat: "team-claims/%1".to_string(),
+                generation: Some(1),
+                attempt: started.dispatch.clone(),
+            },
+        )
+        .expect("the coordinator corrects");
+    let rebuilt = Ledger::rebuild(ledger.export()).expect("a readable ledger");
+    for (which, held) in [("live", &ledger), ("rebuilt", &rebuilt)] {
+        let accepted = row(held);
+        assert!(
+            accepted.review.merged && !accepted.review.claimed_merged,
+            "{which}: {:?}",
+            accepted.review
+        );
+        assert_eq!(
+            accepted.review.merge_head.as_deref(),
+            Some("3a0a289bb5f3"),
+            "{which}"
+        );
+    }
 }

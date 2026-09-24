@@ -613,7 +613,10 @@ impl<'a> LedgerSource<'a> {
                         continue;
                     }
                     reported_tasks.push(key);
-                    let review: ReviewFacts = task.review();
+                    // The coordinator's facts as they stand for the task's
+                    // newest attempt; a worker's claims are not a
+                    // coordinator report (t-6815).
+                    let review: ReviewFacts = run.review_of(task);
                     reports.push(ReportRow {
                         kind: COORDINATOR_REPORT,
                         run_id: run.id.clone(),

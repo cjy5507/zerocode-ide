@@ -49,7 +49,12 @@ export function coordinatorDeskFixture({ tasks = 60, workers = 5, mail = 20, now
       checkout: checkout(n), task: title, task_id: `t-${n}`,
       reported: word === "idle", dispatch_id: `dp-${n}`, dispatch_started_ms: now - (30 + n) * minute,
       retry_of: null,
-      review: { verified: false, merged: false, deployed: false, written: false },
+      /* The first worker's report carried its own `merged: true`: the
+       * ledger keeps that as the worker's claim (t-6815), never the fact. */
+      review: n === 1
+        ? { verified: false, merged: false, deployed: false, written: false,
+          claimed_verified: true, claimed_merged: true, claimed_deployed: false, author: "worker" }
+        : { verified: false, merged: false, deployed: false, written: false },
       term: seated ? term : null, at: now - (40 + n) * minute,
       model: models[(n - 1) % models.length], effort: n % 2 ? "max" : "xhigh", pane: `%${n}`,
       asking: word === "asking",
@@ -455,10 +460,12 @@ export async function testCoordinatorDesk(browser, origin, ok) {
       roster.rows["w-3"].health === "답 기다림" && roster.rows["w-5"].health === "잠듦" &&
       roster.rows["w-1"].health === "턴 중" && roster.rows["w-2"].health === "유휴" &&
       /^\d+분 전$/.test(roster.rows["w-1"].age), JSON.stringify(roster.rows));
-    ok("each worker says its agent, model and effort, pane, checkout, commits ahead and changed files, and the ledger's review word",
+    ok("each worker says its agent, model and effort, pane, checkout, commits ahead and changed files, and the ledger's review word — a worker's own claim in the claim's words",
       roster.rows["w-1"].facts === "Claude · claude-opus-5-5 · max · 판 201 · t-1 · 커밋 1개 앞섬 · 바뀐 파일 2" &&
       roster.rows["w-5"].facts.includes("%5") && roster.rows["w-5"].facts.includes("t-5") &&
-      roster.rows["w-2"].task === "데스크 과업 2 · 검증 대기" && roster.rows["w-5"].disabled && !roster.rows["w-3"].disabled,
+      roster.rows["w-2"].task === "데스크 과업 2 · 검증 대기" &&
+      roster.rows["w-1"].task === "데스크 과업 1 · 병합됐다 함" &&
+      roster.rows["w-5"].disabled && !roster.rows["w-3"].disabled,
       JSON.stringify(roster.rows));
     await page.click('#board-view [data-worker="run-desk/w-3"] .board-desk-worker-main');
     const picked = await page.evaluate(() => ({

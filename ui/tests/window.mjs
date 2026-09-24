@@ -47572,6 +47572,21 @@ const activeHistory = await page.evaluate(async () => {
     seen.mergedFromLedger =
       merged.querySelector(".wt-agent-state")?.textContent === t("board.merged", "병합됨") &&
       merged.classList.contains("is-verified");
+    // A worker's own keys are its claim (t-6815): the word says the worker
+    // says so, and the check stays quiet — verified/merged/deployed are the
+    // coordinator's alone.
+    paneLedger.set(7912, {
+      run: "run-1", worker: "w-1", task: "navigator cleanup", taskId: "t-9",
+      ledger: "active", reported: true,
+      review: { verified: false, merged: false, deployed: false, written: false,
+        claimed_verified: true, claimed_merged: true, claimed_deployed: false, author: "worker" },
+    });
+    const claimed = makeAgentRow(rows.find((row) => row.term === 7912 && !row.sub), true);
+    // The observed word rides in the report, so a miss says what stood there.
+    seen.claimWord = claimed.querySelector(".wt-agent-state")?.textContent ?? null;
+    seen.claimExpected = t("board.claimedMerged", "병합됐다 함");
+    seen.claimIsNotVerified =
+      seen.claimWord === seen.claimExpected && !claimed.classList.contains("is-verified");
     // A pane the ledger never seated keeps the vendor as its second word
     // and its done turn says nothing about review.
     paneLedger.delete(7912);
@@ -47611,13 +47626,13 @@ const activeHistory = await page.evaluate(async () => {
   return seen;
 });
 ok(
-  "a live descendant survives its parent's fold, settled history folds to an exact count, and verified/merged come only from the ledger",
+  "a live descendant survives its parent's fold, settled history folds to an exact count, and verified/merged come only from the ledger — a worker's claim is a claim",
   activeHistory.historyFolded && activeHistory.historyDrawn && activeHistory.historyOpens &&
     activeHistory.signatureSeesHistory && activeHistory.flipRemembers &&
     activeHistory.liveSurvivesFold && activeHistory.ancestryDrawn &&
     activeHistory.groupLiveByMembers && activeHistory.taskTitleFirst &&
     activeHistory.mergedFromLedger && activeHistory.doneIsNotVerified &&
-    activeHistory.ledgerFollows,
+    activeHistory.claimIsNotVerified && activeHistory.ledgerFollows,
   JSON.stringify(activeHistory),
 );
 

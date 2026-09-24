@@ -262,6 +262,11 @@ function ledgerReviewWord(facts) {
   if (review.deployed) return t("board.deployed", "배포됨");
   if (review.merged) return t("board.merged", "병합됨");
   if (review.verified) return t("board.verified", "검증됨");
+  // The worker's own keys, kept apart by the ledger as its claim (t-6815):
+  // the row says the worker SAYS so, in words that are never the fact's.
+  if (review.claimed_deployed) return t("board.claimedDeployed", "배포됐다 함");
+  if (review.claimed_merged) return t("board.claimedMerged", "병합됐다 함");
+  if (review.claimed_verified) return t("board.claimedVerified", "검증됐다 함");
   if (facts.reported) return t("board.awaitingReview", "검증 대기");
   return "";
 }

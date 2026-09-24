@@ -7394,6 +7394,7 @@ mod tests {
                 &task,
                 None,
                 Some(r#"{"note":"original","ok":false}"#.into()),
+                zerocode_core::orchestration::ResultAuthor::Ledger,
             )
             .expect("prior result");
         let other = ledger
