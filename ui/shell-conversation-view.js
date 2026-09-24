@@ -464,9 +464,10 @@ function chatFootDoorNode(list) {
   door.append(iconNode("arrow-down"), said);
   door.addEventListener("click", () => {
     returnToFoot(list);
-    // The button hides under the hand that pressed it; the keys stay on
-    // the list it brought home.
-    list.focus({ preventScroll: true });
+    // Pressed from the keyboard, the button hides under the focus: the keys
+    // go on to the list it brought home. A pointer's press leaves the focus
+    // where it was (the composer, as often as not).
+    if (document.activeElement === door) list.focus({ preventScroll: true });
   });
   list.__door = door;
   paintFootDoor(list);
