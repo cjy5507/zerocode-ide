@@ -24044,8 +24044,12 @@ fn a_worker_with_no_transcript_is_unavailable_never_its_screen() {
 
 /* ---- account switch: the same seat, another login (t-7538) --------------- */
 
-/// A walled Claude worker, seated in a checkout, with its `quota_walled`
-/// row standing — the one shape the switch road may move.
+/// The conversation the walled worker's pane is in.
+const SWITCHING_SESSION: &str = "the-walled-panes-session";
+
+/// A walled Claude worker, seated in a checkout, with its conversation
+/// reported and its `quota_walled` row standing — the one shape the switch
+/// road may move.
 fn a_walled_claude_worker(bench: &mut Bench, now_ms: i64) -> (String, String, String, String) {
     bench.json("run-create --name switching");
     let task = bench.json("task-create --spec keep-going")["taskId"]
@@ -24058,6 +24062,14 @@ fn a_walled_claude_worker(bench: &mut Bench, now_ms: i64) -> (String, String, St
             .ledger
             .worker_seated(("team-1", &pane), "/wt/switching")
     );
+    assert!(bench.ledger.worker_session_reported(
+        ("team-1", &pane),
+        ProviderSession {
+            key: SessionKey::SessionId,
+            id: SWITCHING_SESSION.to_string(),
+            transcript_path: None,
+        }
+    ));
     let witness = quota_wall_witness(
         &worker,
         Some(a_wall_marker("screen", "You've hit your limit")),
@@ -24112,7 +24124,7 @@ fn a_switch_reseats_the_same_worker_id() {
     assert_eq!(
         bench
             .ledger
-            .worker_rested_for_account_switch(&worker, NOW + 1)
+            .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW + 1)
             .as_deref(),
         Ok(dispatch.as_str())
     );
@@ -24134,7 +24146,7 @@ fn a_switch_reseats_the_same_worker_id() {
     assert!(
         bench
             .ledger
-            .worker_rested_for_account_switch(&worker, NOW + 3)
+            .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW + 3)
             .is_err()
     );
     // The restore road seats the SAME worker in the new pane: same id,
@@ -24180,15 +24192,37 @@ fn a_switch_rests_only_a_walled_worker_in_its_own_seat() {
     // No checkout yet: refused for that.
     let refused = bench
         .ledger
-        .worker_rested_for_account_switch(&worker, NOW)
+        .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW)
         .unwrap_err();
     assert!(refused.contains("checkout"), "{refused}");
     assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/working"));
+    // No conversation reported: a restore would start it EMPTY, which is a
+    // restart's last resort and not a move (astra B4).
+    let refused = bench
+        .ledger
+        .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW)
+        .unwrap_err();
+    assert!(refused.contains("no conversation"), "{refused}");
+    assert!(bench.ledger.worker_session_reported(
+        ("team-1", &pane),
+        ProviderSession {
+            key: SessionKey::SessionId,
+            id: SWITCHING_SESSION.to_string(),
+            transcript_path: None,
+        }
+    ));
+    // The pane is in ANOTHER conversation than the row names (a `/clear`
+    // the hook has not reported): the restore would resume the wrong one.
+    let refused = bench
+        .ledger
+        .worker_rested_for_account_switch(&worker, "a-newer-conversation", NOW)
+        .unwrap_err();
+    assert!(refused.contains("not the one its pane is in"), "{refused}");
     // Seated, working, no wall: refused for that — the number alone is not
     // a wall, and this road does not even read the number.
     let refused = bench
         .ledger
-        .worker_rested_for_account_switch(&worker, NOW)
+        .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW)
         .unwrap_err();
     assert!(refused.contains("quota wall"), "{refused}");
     assert_eq!(
@@ -24213,14 +24247,14 @@ fn a_switch_rests_only_a_walled_worker_in_its_own_seat() {
     }
     let refused = bench
         .ledger
-        .worker_rested_for_account_switch(&worker, NOW + 1)
+        .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW + 1)
         .unwrap_err();
     assert!(refused.contains("taken over"), "{refused}");
     // An unknown worker is unknown.
     assert!(
         bench
             .ledger
-            .worker_rested_for_account_switch("w-nobody", NOW + 1)
+            .worker_rested_for_account_switch("w-nobody", SWITCHING_SESSION, NOW + 1)
             .is_err()
     );
 }
@@ -24245,7 +24279,7 @@ fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
             to_pane: "%9".to_string(),
         },
         from_account: Some("a1-fixture".to_string()),
-        to_account: "a2-fixture".to_string(),
+        to_account: Some("a2-fixture".to_string()),
         by: "auto".to_string(),
         reason: "walled".to_string(),
         observed_percent: Some(98),

@@ -2341,8 +2341,46 @@ pub(crate) fn usage_login(env: &[(String, String)]) -> Option<(String, LoginFrom
 /// keychain item on a timer is the dialog storm this file has already paid
 /// for once.
 pub(crate) fn usage_login_of_account(account: &ClaudeAccount) -> Option<(String, LoginFrom)> {
+    match account_login(account) {
+        AccountLogin::Found(login, from) => Some((login, from)),
+        AccountLogin::Refused | AccountLogin::Missing => None,
+    }
+}
+
+/// What one inactive account's own store answered (t-7538, astra A2): a
+/// login, a keychain that would not say, or nothing there. The two
+/// failures are two repairs — a locked or refusing keychain is asked again
+/// only when a person asks (a timer that asked would be a password dialog
+/// every poll), a missing login is a sign-in — so they stay two words.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AccountLogin {
+    Found(String, LoginFrom),
+    /// The scoped item's keychain refused, was locked, or did not answer
+    /// inside its bound — and the account's own file held nothing either.
+    Refused,
+    /// Neither the scoped item nor the account's file holds a login.
+    Missing,
+}
+
+/// [`usage_login_of_account`], with the refusal kept apart from the
+/// absence.
+pub(crate) fn account_login(account: &ClaudeAccount) -> AccountLogin {
     let dir = Path::new(&account.config_dir);
-    usage_login_in(Some(dir), Some(dir))
+    let said = keychain_says(dir);
+    if let Some(login) = said.login() {
+        return AccountLogin::Found(login.to_string(), LoginFrom::Keychain);
+    }
+    if let Some((login, from)) = usage_login_in(None, Some(dir)) {
+        return AccountLogin::Found(login, from);
+    }
+    match said {
+        // Only a keychain can refuse: elsewhere `NoAnswer` is "there is no
+        // keychain", and the file was the whole story.
+        KeychainSays::NoAnswer | KeychainSays::UnknownUser if cfg!(target_os = "macos") => {
+            AccountLogin::Refused
+        }
+        _ => AccountLogin::Missing,
+    }
 }
 
 /// [`USAGE_LOGIN_ORDER`], walked over the two places a login can be: the

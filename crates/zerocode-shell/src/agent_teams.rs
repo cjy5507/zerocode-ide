@@ -862,6 +862,18 @@ pub trait Host {
     fn capture(&self, term: u32) -> Option<String>;
     fn focus(&self, term: u32) -> bool;
     fn close(&self, term: u32);
+    /// Close a pane and answer only once the program that was in it is
+    /// gone — its whole process group (t-7538). The account switch resumes
+    /// the same conversation in a new pane right after, and a CLI still
+    /// flushing the old pane's last lines is a second writer on the same
+    /// transcript. `false` is a group that outlived the wait: the caller
+    /// must not start the conversation again.
+    ///
+    /// Hosts without processes of their own close and answer at once.
+    fn close_gone(&self, term: u32) -> bool {
+        self.close(term);
+        true
+    }
 
     /// The provider conversation already observed in a new terminal, when
     /// one raced ahead of the durable worker reseat.

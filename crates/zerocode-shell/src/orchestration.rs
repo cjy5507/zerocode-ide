@@ -329,6 +329,28 @@ pub(crate) fn bound_run(team: &str, pane: &str, actor: Option<&str>) -> Option<S
         .map(str::to_string)
 }
 
+/// One restore at a time: every road that seats a sleeper again, the
+/// grace's expiry of the ones nothing seated, and the account switch's
+/// rest → close → reseat (t-7538), which must not let either of the others
+/// in between — a restore walking a worker the switch has just rested
+/// would open a second pane on a conversation whose first process is still
+/// alive, and the grace would end it outright.
+static RESTORE_LINE: Mutex<()> = Mutex::new(());
+
+/// Proof that the caller holds [`RESTORE_LINE`] — what the in-line reseat
+/// asks for instead of taking the (non-reentrant) lock a second time.
+pub(crate) struct RestoreLine<'a> {
+    _held: std::sync::MutexGuard<'a, ()>,
+}
+
+/// Run `walk` holding the restore line.
+pub(crate) fn in_restore_line<R>(walk: impl FnOnce(&RestoreLine<'_>) -> R) -> R {
+    let line = RestoreLine {
+        _held: RESTORE_LINE.lock().unwrap_or_else(|held| held.into_inner()),
+    };
+    walk(&line)
+}
+
 /// Restore every sleeping worker belonging to the run bound to this
 /// coordinator leader, one at a time.
 ///
@@ -342,8 +364,31 @@ pub(crate) fn reseat_sleeping(
     leader_term: u32,
     actor: Option<&str>,
 ) -> usize {
-    static RESTORE_LINE: Mutex<()> = Mutex::new(());
-    let _line = RESTORE_LINE.lock().unwrap_or_else(|held| held.into_inner());
+    in_restore_line(|line| reseat_sleeping_in_line(line, host, overrides, leader_term, actor, None))
+}
+
+/// Seat ONE sleeping worker again, the caller already holding the restore
+/// line — the account switch's reseat of the worker it rested, and no other
+/// sleeper of the run (t-7538).
+pub(crate) fn reseat_one_in_line(
+    line: &RestoreLine<'_>,
+    host: &dyn Host,
+    overrides: Vec<(String, LaunchOverride)>,
+    leader_term: u32,
+    actor: Option<&str>,
+    worker: &str,
+) -> usize {
+    reseat_sleeping_in_line(line, host, overrides, leader_term, actor, Some(worker))
+}
+
+fn reseat_sleeping_in_line(
+    _line: &RestoreLine<'_>,
+    host: &dyn Host,
+    overrides: Vec<(String, LaunchOverride)>,
+    leader_term: u32,
+    actor: Option<&str>,
+    only: Option<&str>,
+) -> usize {
     if unavailable().is_some() {
         return 0;
     }
@@ -421,6 +466,7 @@ pub(crate) fn reseat_sleeping(
     let mut sleeping: Vec<(i64, String, String, Option<String>, bool)> = run
         .workers
         .iter()
+        .filter(|worker| only.is_none_or(|only| worker.id == only))
         .filter(|worker| match worker.state {
             WorkerState::Sleeping => true,
             WorkerState::Orphaned => worker.pane_missing_since_ms.is_some(),
@@ -487,7 +533,8 @@ pub(crate) fn reseat_sleeping(
         // the same policy (t-7812 E): nothing unless the goodbye cut its turn
         // or the commands under its pane (t-6428 ⑤). The account-switch road
         // leaves its own words for the worker it rested (t-7538).
-        let nudge = take_switch_nudge(&worker)
+        let nudge = switch_mark(&worker)
+            .map(|mark| mark.nudge)
             .unwrap_or_else(|| reseat_nudge(&worker, checkout.as_deref()));
         let decided = match held.actor.prepare_worker_reseat(
             &run_id,
@@ -504,6 +551,7 @@ pub(crate) fn reseat_sleeping(
         let answered = carried(host, &held.actor, decided, &team, &pane, "", now_ms);
         if answered.exit_code == 0 {
             restored += 1;
+            forget_switch_mark(&worker);
         }
     }
     restored
@@ -707,28 +755,51 @@ pub(crate) fn sleeper_launch_tuning(worker: &str) -> Result<Vec<String>, String>
 
 /* ---- the account switch's half of the ledger (t-7538) ------------------ */
 
-/// The words left for one worker's restore by the account-switch road,
-/// read once by [`reseat_sleeping`] in place of the restart's: the pane
-/// was cut to move the conversation to another login, and an agent told
-/// "the window restarted" would look for a restart that never happened.
-fn switch_nudges() -> &'static Mutex<std::collections::HashMap<String, String>> {
-    static HELD: std::sync::OnceLock<Mutex<std::collections::HashMap<String, String>>> =
+/// What the account-switch road leaves for the restore of the worker it
+/// rested (t-7538), read by every restore of that worker until one lands.
+#[derive(Debug, Clone)]
+pub(crate) struct SwitchMark {
+    /// The words the resumed pane is told in place of the restart's: the
+    /// pane was cut to move the conversation to another login, and an
+    /// agent told "the window restarted" would look for a restart that
+    /// never happened.
+    pub(crate) nudge: String,
+    /// The switch's own key, mixed into the reseat's effect identity. The
+    /// restore journal allows one reseat per worker per window incarnation
+    /// — right for a restart, which happens once — and a worker the window
+    /// restored this morning and a switch moves this afternoon would meet
+    /// that morning's operation as "already carried out" and be left
+    /// asleep with its pane closed. One switch, one operation; the same
+    /// switch retried reconciles the same one.
+    pub(crate) occasion: String,
+}
+
+fn switch_marks() -> &'static Mutex<std::collections::HashMap<String, SwitchMark>> {
+    static HELD: std::sync::OnceLock<Mutex<std::collections::HashMap<String, SwitchMark>>> =
         std::sync::OnceLock::new();
     HELD.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-pub(crate) fn leave_switch_nudge(worker: &str, words: String) {
-    switch_nudges()
+pub(crate) fn leave_switch_mark(worker: &str, mark: SwitchMark) {
+    switch_marks()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
-        .insert(worker.to_string(), words);
+        .insert(worker.to_string(), mark);
 }
 
-fn take_switch_nudge(worker: &str) -> Option<String> {
-    switch_nudges()
+fn switch_mark(worker: &str) -> Option<SwitchMark> {
+    switch_marks()
         .lock()
         .unwrap_or_else(|held| held.into_inner())
-        .remove(worker)
+        .get(worker)
+        .cloned()
+}
+
+pub(crate) fn forget_switch_mark(worker: &str) {
+    switch_marks()
+        .lock()
+        .unwrap_or_else(|held| held.into_inner())
+        .remove(worker);
 }
 
 /// One Claude worker standing at its quota wall, as the ledger holds it —
@@ -745,6 +816,9 @@ pub(crate) struct WalledWorker {
     pub(crate) dispatch: String,
     pub(crate) generation: Option<u32>,
     pub(crate) checkout: Option<String>,
+    /// The model the row says the worker runs — the summons' word, or the
+    /// pane's own once observed.
+    pub(crate) model: Option<String>,
 }
 
 /// Every walled Claude worker the ledger knows right now, with the terminal
@@ -798,6 +872,7 @@ pub(crate) fn walled_claude_workers(now_ms: i64) -> Vec<WalledWorker> {
                     dispatch: dispatch.id.clone(),
                     generation: run.coordinator_live().map(|seat| seat.generation),
                     checkout: worker.checkout.clone(),
+                    model: worker.model.clone(),
                 })
             })
         })
@@ -805,16 +880,68 @@ pub(crate) fn walled_claude_workers(now_ms: i64) -> Vec<WalledWorker> {
 }
 
 /// Put one walled worker to sleep so its pane may close without settling
-/// it — the ledger's own guard decides (`worker_rested_for_account_switch`).
-pub(crate) fn rest_worker_for_switch(worker: &str, now_ms: i64) -> Result<(), String> {
+/// it — the ledger's own guard decides (`worker_rested_for_account_switch`),
+/// `session` being the conversation the window sees in the pane.
+pub(crate) fn rest_worker_for_switch(
+    worker: &str,
+    session: &str,
+    now_ms: i64,
+) -> Result<(), String> {
     if let Some(why) = unavailable() {
         return Err(why);
     }
     let held = runtime().ok_or_else(|| "이 창에는 열린 원장이 없습니다".to_string())?;
     held.actor
-        .worker_rested_for_switch(worker, now_ms)
+        .worker_rested_for_switch(worker, session, now_ms)
         .map(|_| ())
         .map_err(|why| format!("원장이 {worker}의 쉼을 거절했습니다: {why:?}"))
+}
+
+/// Everything the switch must know holds BEFORE it touches a pane
+/// (t-7538, astra B2): the ledger would rest this worker (its own guard,
+/// read off the image, in its own words), and the restore road that seats
+/// it again would take it — the run's coordinator sits in the worker's
+/// team's leader pane, the checkout is still there, the agent is still
+/// installed. Anything else is found out after the old pane is gone, when
+/// the only road left is the grace's.
+pub(crate) fn switch_move_ready(worker: &str, session: &str, now_ms: i64) -> Result<(), String> {
+    if let Some(why) = unavailable() {
+        return Err(why);
+    }
+    let held = runtime().ok_or_else(|| "이 창에는 열린 원장이 없습니다".to_string())?;
+    let image = held
+        .actor
+        .view()
+        .map_err(|why| format!("원장을 읽지 못했습니다: {why:?}"))?;
+    let ledger = cached_ledger(&held, &image).map_err(|why| format!("{why:?}"))?;
+    ledger.may_rest_for_account_switch(worker, session, now_ms)?;
+    let (run, row) = ledger
+        .runs()
+        .iter()
+        .find_map(|run| run.worker(worker).map(|row| (run, row)))
+        .ok_or_else(|| format!("unknown worker: {worker}"))?;
+    let leader_pane = crate::agent_teams::teams()
+        .get(&row.team)
+        .map(|team| team.leader_pane.clone())
+        .ok_or_else(|| format!("worker {worker}'s team has no leader pane in this window"))?;
+    if run.seat_is_coordinator(&format!("{}/{leader_pane}", row.team)) != Some(true) {
+        return Err(format!(
+            "run {}'s coordinator does not sit in worker {worker}'s team, so nothing here \
+             could seat it again",
+            run.id
+        ));
+    }
+    let checkout = row.checkout.as_deref().unwrap_or_default();
+    if !Path::new(checkout).is_dir() {
+        return Err(format!("worker {worker}'s checkout is gone"));
+    }
+    if !crate::detected_agents(false)
+        .into_iter()
+        .any(|agent| agent.installed && agent.id == row.agent)
+    {
+        return Err(format!("{} is not installed on this machine", row.agent));
+    }
+    Ok(())
 }
 
 /// The model a pane's own hook last reported, onto its worker's row, so a
@@ -880,6 +1007,19 @@ pub(crate) fn worker_seat_now(
             .copied();
         Some((worker.team.clone(), worker.pane.clone(), term, worker.state))
     })
+}
+
+/// The model word one worker's row carries now — the summons' spelling, or
+/// the pane's own once observed.
+pub(crate) fn worker_model_now(worker_id: &str) -> Option<String> {
+    let held = runtime()?;
+    let image = held.actor.view().ok()?;
+    let ledger = cached_ledger(&held, &image).ok()?;
+    ledger
+        .runs()
+        .iter()
+        .find_map(|run| run.worker(worker_id))
+        .and_then(|worker| worker.model.clone())
 }
 
 /// The leader terminal of one team, for the restore road.
@@ -3953,6 +4093,11 @@ fn expire_sleepers(host: &dyn Host, now_ms: i64) {
         return;
     };
     seat_what_the_grace_would_kill(host, &held);
+    // The overdue read and the endings in the restore line: an account
+    // switch holds it from the rest of its worker to that worker's new
+    // pane (t-7538), and a sleeper read between the two is a worker in
+    // the middle of moving, not one nothing seated.
+    let _line = RESTORE_LINE.lock().unwrap_or_else(|held| held.into_inner());
     let Ok(image) = held.actor.view() else {
         return;
     };
@@ -7664,11 +7809,24 @@ fn carried(
                     // One restore attempt per worker per host incarnation. A
                     // later window has a new epoch and may try the sleeping
                     // row again; two calls in this window reconcile the same
-                    // journaled split instead of opening siblings.
-                    let restore = digest(
-                        b"zerocode.orchestration.worker-reseat.v1",
-                        &[prepared.worker.as_bytes(), epoch.as_bytes()],
-                    );
+                    // journaled split instead of opening siblings. A worker
+                    // an account switch rested is restored once per SWITCH
+                    // (its mark's occasion, t-7538): the same window may
+                    // have restored it once already.
+                    let restore = match switch_mark(&prepared.worker) {
+                        Some(mark) => digest(
+                            b"zerocode.orchestration.worker-reseat-for-switch.v1",
+                            &[
+                                prepared.worker.as_bytes(),
+                                epoch.as_bytes(),
+                                mark.occasion.as_bytes(),
+                            ],
+                        ),
+                        None => digest(
+                            b"zerocode.orchestration.worker-reseat.v1",
+                            &[prepared.worker.as_bytes(), epoch.as_bytes()],
+                        ),
+                    };
                     (restore.clone(), restore)
                 }
                 (None, None) => {

@@ -242,8 +242,10 @@ pub(crate) fn claude_usage(state: State<'_, AppState>, force: bool) -> UsageRepo
 /// table makes of it.
 #[derive(serde::Serialize)]
 pub(crate) struct AccountUsageRow {
+    /// The id and the plan type are the whole face this answer gives an
+    /// account: its email stays in the accounts list the person manages, and
+    /// out of the bar, the proposal and the toast (t-7538).
     pub(crate) id: String,
-    pub(crate) label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) organization_type: Option<String>,
     pub(crate) active: bool,
@@ -268,14 +270,13 @@ pub(crate) struct AccountUsageReport {
 /// or at once for a person's press (`force`).
 #[tauri::command(async)]
 pub(crate) fn claude_account_usage(
+    app: AppHandle,
     state: State<'_, AppState>,
     force: bool,
 ) -> Result<AccountUsageReport, String> {
-    let mode = load_settings(state.settings())?
-        .document
-        .claude_autoswitch_mode;
     let now_ms = epoch_ms_now();
-    let first = crate::account_switch::plan(&state, mode, now_ms);
+    let window = TeamWindow { app: app.clone() };
+    let first = crate::account_switch::plan(&state, &window, now_ms)?;
     let why = if force {
         AccountPoll::Person
     } else if matches!(
@@ -311,7 +312,6 @@ pub(crate) fn claude_account_usage(
             };
             AccountUsageRow {
                 id: account.id.clone(),
-                label: account.label(),
                 organization_type: account.organization_type.clone(),
                 active,
                 usage,
@@ -330,23 +330,21 @@ pub(crate) fn claude_account_usage(
 
 /// Apply the plan the window was shown — by its token, so a `yes` given to
 /// a proposal that has since changed is refused (t-7538). `by` is `auto`
-/// for the beat's own move and `ask` for a person's acceptance.
-///
-/// `models` is the window's record of what each pane's hook last said it
-/// runs, keyed by terminal — the restore continues on it.
+/// for the beat's own move and `ask` for a person's acceptance. What each
+/// moved pane runs is read off its own transcript by the backend, never
+/// handed over by the page.
 #[tauri::command(async)]
 pub(crate) fn claude_autoswitch_apply(
     app: AppHandle,
     token: String,
     by: String,
-    models: Option<HashMap<u32, String>>,
 ) -> Result<crate::account_switch::Applied, String> {
     if by != "auto" && by != "ask" {
         return Err(format!(
             "{by}는 전환의 주체로 아는 낱말이 아닙니다 (auto|ask)"
         ));
     }
-    crate::account_switch::apply(&app, &token, &by, &models.unwrap_or_default())
+    crate::account_switch::apply(&app, &token, &by)
 }
 
 /// One gauge's ask, as the status bar makes it.
@@ -956,11 +954,14 @@ pub(crate) async fn relogin_claude_account(
 ) -> Result<AccountsReport, String> {
     let program = claude_program().ok_or("이 기계에서 claude를 찾지 못했습니다")?;
     let config = state.config_root().to_path_buf();
+    let id_for_usage = id.clone();
     tauri::async_runtime::spawn_blocking(move || accounts::relogin_account(&config, &program, &id))
         .await
         .map_err(|error| error.to_string())??;
-    // The scan's verdict was about the credentials that just changed.
+    // The scan's verdict was about the credentials that just changed — the
+    // selected gauge's, and this account's own reading (t-7538).
     forget_claude_usage(state.local_data_root());
+    forget_claude_account_usage(state.local_data_root(), &id_for_usage);
     readiness_runtime::login_moved(Provider::Anthropic);
     Ok(accounts_report(
         state.config_root(),
@@ -968,36 +969,42 @@ pub(crate) async fn relogin_claude_account(
     ))
 }
 
+/// The person's pick. The one switch road (`account_switch::switch_by_person`):
+/// the verified selection, the zo panes' login reload, one `account_switched`
+/// receipt `by: person` — and no pane touched, working or resting (t-7538).
+/// Selection and verified runtime materialization have completed before the
+/// UI receives success, so the next worker and the usage bar cannot observe
+/// different accounts.
 #[tauri::command]
 pub(crate) async fn select_claude_account(
-    state: State<'_, AppState>,
+    app: AppHandle,
     id: String,
 ) -> Result<AccountsReport, String> {
-    let program = claude_program().ok_or("이 기계에서 claude를 찾지 못했습니다")?;
-    let config = state.config_root().to_path_buf();
-    tauri::async_runtime::spawn_blocking(move || accounts::select_account(&config, &program, &id))
-        .await
-        .map_err(|error| error.to_string())??;
-    // Selection and verified runtime materialization have completed before the
-    // UI receives success, so the next worker and the usage bar cannot observe
-    // different accounts.
-    forget_claude_usage(state.local_data_root());
-    readiness_runtime::login_moved(Provider::Anthropic);
-    announce_account_switch(&state, zerocode_core::account::Provider::Anthropic);
-    Ok(accounts_report(
-        state.config_root(),
-        state.local_data_root(),
-    ))
+    person_switched(app, Some(id)).await
 }
 
 /// Back to this machine's own Claude login — the original's 「시스템 기본값」 row.
-#[tauri::command(async)]
-pub(crate) fn use_system_claude_login(
-    state: State<'_, AppState>,
-) -> Result<AccountsReport, String> {
-    accounts::use_system_default(state.config_root())?;
-    readiness_runtime::login_moved(Provider::Anthropic);
-    announce_account_switch(&state, zerocode_core::account::Provider::Anthropic);
+/// The same road as a pick, to the login no store holds.
+#[tauri::command]
+pub(crate) async fn use_system_claude_login(app: AppHandle) -> Result<AccountsReport, String> {
+    person_switched(app, None).await
+}
+
+async fn person_switched(app: AppHandle, to: Option<String>) -> Result<AccountsReport, String> {
+    let moved = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = moved.state::<AppState>();
+        let window = TeamWindow { app: moved.clone() };
+        crate::account_switch::switch_by_person(
+            &window,
+            &crate::account_switch::WindowDoors { state: &state },
+            to.as_deref(),
+            epoch_ms_now(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let state = app.state::<AppState>();
     Ok(accounts_report(
         state.config_root(),
         state.local_data_root(),

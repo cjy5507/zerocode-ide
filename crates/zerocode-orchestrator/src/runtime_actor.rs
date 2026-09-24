@@ -594,8 +594,13 @@ pub enum RuntimeRequest {
     /// The window is about to close a WALLED worker's pane to seat it again
     /// on another account (t-7538): the row sleeps with its attempt open,
     /// so the pane's exit settles nothing and the restore road seats the
-    /// same worker. The ledger revalidates the wall.
-    WorkerRestedForSwitch { worker: String, now_ms: i64 },
+    /// same worker. The ledger revalidates the wall, and that `session` is
+    /// the conversation its row would resume.
+    WorkerRestedForSwitch {
+        worker: String,
+        session: String,
+        now_ms: i64,
+    },
     /// A pane's own hook said which model and effort it runs; the row
     /// follows (t-7538), so a restore continues on what the pane really ran.
     WorkerTuningObserved {
@@ -1006,9 +1011,14 @@ impl std::fmt::Debug for RuntimeRequest {
                 .field("pane_bytes", &pane.len())
                 .field("now_ms", now_ms)
                 .finish(),
-            Self::WorkerRestedForSwitch { worker, now_ms } => formatter
+            Self::WorkerRestedForSwitch {
+                worker,
+                session,
+                now_ms,
+            } => formatter
                 .debug_struct("RuntimeRequest::WorkerRestedForSwitch")
                 .field("worker_bytes", &worker.len())
+                .field("session_bytes", &session.len())
                 .field("now_ms", now_ms)
                 .finish(),
             Self::AccountSwitched { receipt, now_ms } => formatter
@@ -2352,10 +2362,12 @@ impl RuntimeActor {
     pub fn worker_rested_for_switch(
         &self,
         worker: impl Into<String>,
+        session: impl Into<String>,
         now_ms: i64,
     ) -> Result<u64, RuntimeError> {
         match self.request(RuntimeRequest::WorkerRestedForSwitch {
             worker: worker.into(),
+            session: session.into(),
             now_ms,
         })? {
             RuntimeReply::Settled { revision, .. } => Ok(revision),
@@ -3196,9 +3208,11 @@ impl RuntimeState {
                 reason,
                 now_ms,
             } => self.finish_sleeping_reseat(&worker, &reason, now_ms),
-            RuntimeRequest::WorkerRestedForSwitch { worker, now_ms } => {
-                self.worker_rested_for_switch(&worker, now_ms)
-            }
+            RuntimeRequest::WorkerRestedForSwitch {
+                worker,
+                session,
+                now_ms,
+            } => self.worker_rested_for_switch(&worker, &session, now_ms),
             RuntimeRequest::AccountSwitched { receipt, now_ms } => {
                 self.account_switched(&receipt, now_ms)
             }
@@ -3983,16 +3997,22 @@ impl RuntimeState {
     fn worker_rested_for_switch(
         &mut self,
         worker: &str,
+        session: &str,
         now_ms: i64,
     ) -> Result<RuntimeReply, RuntimeError> {
-        if worker.is_empty() || worker.len() > MAX_NAME || now_ms < 0 {
+        if worker.is_empty()
+            || worker.len() > MAX_NAME
+            || session.is_empty()
+            || session.len() > MAX_NAME
+            || now_ms < 0
+        {
             return Err(RuntimeError::InvalidInput);
         }
         if !self.recovery_permits.is_empty() {
             return Err(RuntimeError::RecoveryRequired);
         }
         self.ledger
-            .worker_rested_for_account_switch(worker, now_ms)
+            .worker_rested_for_account_switch(worker, session, now_ms)
             .map_err(|_| RuntimeError::AuthorityRejected)?;
         let revision = self.write_through(now_ms)?;
         Ok(RuntimeReply::Settled {
@@ -4044,7 +4064,14 @@ impl RuntimeState {
         if now_ms < 0
             || receipt.key.is_empty()
             || receipt.key.len() > MAX_NAME
-            || receipt.to_account.len() > MAX_NAME
+            || receipt
+                .to_account
+                .as_ref()
+                .is_some_and(|to| to.len() > MAX_NAME)
+            || receipt
+                .from_account
+                .as_ref()
+                .is_some_and(|from| from.len() > MAX_NAME)
         {
             return Err(RuntimeError::InvalidInput);
         }

@@ -4137,7 +4137,9 @@ async function pickClaudeAccount(id) {
  * `claude_autoswitch_apply`가 한다 — 창은 그 결과를 그리기만 한다. */
 
 /* 계정별 사용량과 자동 전환 계획(t-7538): `claude_account_usage`의 답을 들고
- * 계정 목록의 게이지 칸, 아래의 제안 줄, 상태 바의 「다음」 낱말을 그린다. */
+ * 계정 목록의 게이지 칸, 아래의 제안 줄, 상태 바의 「다음」 낱말을 그린다.
+ * 판정은 전부 백엔드의 표(`CLAUDE_ACCOUNT_AUTOSWITCH`)가 하고 — 다음 후보도
+ * `plan.next`로 온다 — 여기서는 낱말만 고른다. */
 let accountUsageReport = null;
 let claudeAutoSwitchMode = "ask";
 let applyingAccountSwitch = false;
@@ -4155,16 +4157,20 @@ function accountFitness(id) {
   return accountUsageReport?.plan?.fitness?.find((row) => row.id === id) ?? null;
 }
 
-function accountLabelOf(id) {
-  return (
-    accountReport.accounts?.find((row) => row.id === id)?.label ??
-    accountUsageRow(id)?.label ??
-    id
-  );
+/* 새 표면(상태 바·제안 줄·토스트)이 계정을 부르는 이름 — 요금제 낱말과 계정 id.
+ * 이메일은 사람이 관리하는 계정 목록 줄에만 있다(t-7538: 토큰·이메일은 로그·
+ * UI·원장에 싣지 않는다). */
+function accountBadge(id) {
+  const kind = (
+    accountUsageRow(id)?.organization_type ??
+    accountReport.accounts?.find((row) => row.id === id)?.organization_type
+  )?.replace(/^claude_/, "");
+  const type = CLAUDE_ORGANIZATION_TYPES.get(kind)?.() ?? "";
+  return [type, id].filter(Boolean).join(" ");
 }
 
-/* 한 계정의 게이지 낱말: 창마다 「이름 N%」, 뒤에 표의 판정(남은 몫·한도·읽지
- * 못함·오래됨). 숫자는 백엔드의 것이고 여기서는 낱말만 고른다. */
+/* 한 계정의 게이지 낱말: 창마다 「이름 N% · 리셋까지」, 뒤에 표의 판정(남은 몫·
+ * 한도·읽지 못함·오래됨·거절). 숫자는 백엔드의 것이고 여기서는 낱말만 고른다. */
 function accountGaugeWords(id) {
   const held = accountUsageRow(id);
   const fit = accountFitness(id);
@@ -4177,9 +4183,12 @@ function accountGaugeWords(id) {
   ]) {
     const window = usage?.[key];
     if (!window) continue;
-    parts.push(`${label} ${Math.round(window.used_percent)}%`);
+    const reset = window.resets_at == null ? null : statusUsageDuration(window.resets_at - Date.now());
+    parts.push(reset ? `${label} ${Math.round(window.used_percent)}% (${reset})` : `${label} ${Math.round(window.used_percent)}%`);
   }
-  if (fit?.unfit === "blocked") parts.push(t("settings.accounts.gaugeBlocked", "한도"));
+  if (usage?.status === "denied") parts.push(t("settings.accounts.gaugeDenied", "키체인 거절 — 눌러서 다시"));
+  else if (usage?.status === "signed_out") parts.push(t("settings.accounts.gaugeSignedOut", "로그인 없음"));
+  else if (fit?.unfit === "blocked") parts.push(t("settings.accounts.gaugeBlocked", "한도"));
   else if (fit?.unfit === "stale") parts.push(t("settings.accounts.gaugeStale", "오래됨"));
   else if (fit?.unfit || !usage) parts.push(t("settings.accounts.gaugeUnknown", "읽지 못함"));
   else if (typeof fit?.room_percent === "number") {
@@ -4189,35 +4198,80 @@ function accountGaugeWords(id) {
   return parts.join(" · ");
 }
 
-/* 제안 줄 — `ask`에서 표가 「바꾸자」고 할 때만 서고, 단추는 바로 그 계획의
- * 토큰으로만 적용한다. 늦은 「예」는 백엔드가 토큰 비교로 거절한다. */
+/* 계획이 옮길 벽 판. */
+function accountSwitchMoves(plan) {
+  return (plan?.walled ?? []).filter((row) => row.verdict?.kind === "switch");
+}
+
+/* 제안 줄 — `ask`에서 표가 「바꾸자」거나 벽 판을 옮기자고 할 때만 서고, 단추는
+ * 바로 그 계획의 토큰으로만 적용한다. 늦은 「예」는 백엔드가 토큰 비교로
+ * 거절한다. `wait`는 어느 모드에서든 그 분(分)을 말하고 단추를 내놓지 않는다. */
 function paintAccountSwitchNote() {
   const note = el("account-switch-note");
   const plan = accountUsageReport?.plan ?? null;
   const decision = plan?.decision ?? null;
   const said = el("account-switch-said");
-  if (!plan || !decision) {
+  const button = el("account-switch-now");
+  if (!plan || !decision || plan.mode === "off") {
     note.hidden = true;
     return;
   }
   if (decision.kind === "wait") {
     note.hidden = false;
-    el("account-switch-now").hidden = true;
+    button.hidden = true;
     said.textContent = t("settings.accounts.switchWait", "리셋까지 {{minutes}}분 — 기다립니다", {
       minutes: decision.minutes,
     });
     return;
   }
-  if (decision.kind !== "switch" || plan.mode !== "ask") {
+  const moves = accountSwitchMoves(plan);
+  if (plan.mode !== "ask" || (decision.kind !== "switch" && moves.length === 0)) {
     note.hidden = true;
     return;
   }
   note.hidden = false;
-  el("account-switch-now").hidden = false;
-  el("account-switch-now").disabled = applyingAccountSwitch;
-  said.textContent = t("settings.accounts.switchAsk", "계정을 {{to}}(으)로 바꿀까요? {{why}}", {
-    to: accountLabelOf(decision.to),
-    why: switchReasonWords(decision.reason),
+  button.hidden = false;
+  button.disabled = applyingAccountSwitch;
+  said.textContent = accountSwitchProposal(plan);
+}
+
+/* 제안 한 문장 — 설정 화면의 줄과 알림이 같은 말을 한다. */
+function accountSwitchProposal(plan) {
+  const decision = plan.decision;
+  const moves = accountSwitchMoves(plan);
+  const to = decision.kind === "switch" ? decision.to : plan.landing;
+  const parts = [
+    decision.kind === "switch"
+      ? t("settings.accounts.switchAsk", "계정을 {{to}}(으)로 바꿀까요? {{why}}", {
+          to: accountBadge(to),
+          why: switchReasonWords(decision.reason),
+        })
+      : t("settings.accounts.switchAskPanes", "벽에 선 판을 {{to}}(으)로 옮길까요?", { to: accountBadge(to) }),
+  ];
+  if (moves.length > 0) {
+    parts.push(t("settings.accounts.switchPanes", "벽에 선 판 {{count}}개는 같은 대화로 이어집니다", { count: moves.length }));
+  }
+  return parts.join(" ");
+}
+
+/* `ask`의 알림 — 상태 바를 보는 사람에게 같은 한 줄과 단추를, 제안(토큰)마다 한 번.
+ * 같은 제안에 다시 뜨지 않고, 단추는 그 제안의 토큰으로만 적용한다. 설정 화면의
+ * 줄과 상태 바의 「확인 기다림」은 알림이 사라진 뒤에도 남는다. */
+let proposedSwitchToken = null;
+
+function offerAccountSwitch() {
+  const plan = accountUsageReport?.plan ?? null;
+  const decision = plan?.decision ?? null;
+  const proposes =
+    plan?.mode === "ask" &&
+    (decision?.kind === "switch" || accountSwitchMoves(plan).length > 0);
+  if (!proposes || applyingAccountSwitch || plan.token === proposedSwitchToken) return;
+  proposedSwitchToken = plan.token;
+  toast(accountSwitchProposal(plan), "", {
+    action: {
+      label: t("settings.accounts.switchNow", "지금 바꾸기"),
+      run: () => void applyAccountSwitch("ask"),
+    },
   });
 }
 
@@ -4230,42 +4284,52 @@ function switchReasonWords(reason) {
   });
 }
 
-/* 상태 바: 활성 조각 옆의 「다음 계정 · 남은 몫 · 자동 전환 낱말」. */
+/* 상태 바: 활성 조각 옆의 「다음 계정 · 남은 몫 · 자동 전환 낱말」. 표의 판정이
+ * 숫자를 못 내는 때(후보 없음·쉼·읽지 못함·리셋 대기·확인 기다림)는 그 낱말을
+ * 말한다 — 0%나 빈칸으로 감추지 않는다. */
 function paintClaudeNext() {
   const next = document.getElementById("sb-claude-next");
   if (!next) return;
   const plan = accountUsageReport?.plan ?? null;
-  const rows = plan?.fitness ?? [];
-  if (!plan || rows.length < 2) {
+  if (!plan || (plan.fitness ?? []).length < 2) {
     next.hidden = true;
     return;
   }
-  const decision = plan.decision;
-  let words = "";
-  if (decision?.kind === "wait") {
-    words = t("usage.nextWait", "리셋 {{minutes}}분", { minutes: decision.minutes });
+  const decision = plan.decision ?? {};
+  const moves = accountSwitchMoves(plan);
+  const parts = [];
+  if (decision.kind === "wait") {
+    parts.push(t("usage.nextWait", "리셋 {{minutes}}분", { minutes: decision.minutes }));
+  } else if (decision.kind === "switch") {
+    parts.push(t("usage.nextSwitch", "→ {{account}} {{room}}%", {
+      account: accountBadge(decision.to),
+      room: accountFitness(decision.to)?.room_percent ?? "?",
+    }));
+  } else if (decision.why === "unread") {
+    parts.push(t("usage.nextUnread", "사용량 읽지 못함"));
+  } else if (plan.next) {
+    parts.push(t("usage.nextAccount", "다음 {{account}} {{room}}%", {
+      account: accountBadge(plan.next.id),
+      room: plan.next.room_percent,
+    }));
   } else {
-    const candidate =
-      (decision?.kind === "switch" ? rows.find((row) => row.id === decision.to) : null) ??
-      rows
-        .filter((row) => row.id !== plan.active && !row.unfit && typeof row.room_percent === "number")
-        .sort((a, b) => b.room_percent - a.room_percent)[0] ??
-      null;
-    if (!candidate) {
-      next.hidden = true;
-      return;
-    }
-    words = t("usage.nextAccount", "다음 {{label}} {{room}}%", {
-      label: accountLabelOf(candidate.id),
-      room: candidate.room_percent,
-    });
+    parts.push(t("usage.nextNone", "다음 계정 없음"));
   }
-  const modeWord = {
+  if (decision.why === "cooldown" && plan.cooldown_until_ms) {
+    parts.push(t("usage.nextCooldown", "전환 쉼 {{minutes}}분", {
+      minutes: Math.max(1, Math.ceil((plan.cooldown_until_ms - Date.now()) / 60000)),
+    }));
+  }
+  if (moves.length > 0) parts.push(t("usage.nextWalled", "벽 판 {{count}}", { count: moves.length }));
+  parts.push({
     off: t("settings.accounts.autoSwitchOff", "끔"),
     ask: t("settings.accounts.autoSwitchAsk", "물어보기"),
     auto: t("settings.accounts.autoSwitchAuto", "자동"),
-  }[plan.mode] ?? plan.mode;
-  next.textContent = `${words} · ${modeWord}`;
+  }[plan.mode] ?? plan.mode);
+  if (plan.mode === "ask" && (decision.kind === "switch" || moves.length > 0)) {
+    parts.push(t("usage.nextAsk", "확인 기다림"));
+  }
+  next.textContent = parts.join(" · ");
   next.hidden = false;
 }
 
@@ -4282,6 +4346,7 @@ async function refreshClaudeAccountUsage(force = false) {
   paintClaudeAccounts();
   paintAccountSwitchNote();
   paintClaudeNext();
+  offerAccountSwitch();
   // 읽기가 나가 있는 동안은 다시 묻는다 — 백엔드의 마루가 물음을 공짜로 만든다.
   clearTimeout(accountUsageAskTimer.handle);
   if (report?.fetching) {
@@ -4293,8 +4358,9 @@ async function refreshClaudeAccountUsage(force = false) {
   } else {
     accountUsageAskTimer.outAt = null;
   }
-  // `auto`: 표가 바꾸자면 바로 — 그 계획의 토큰으로. 한 번에 하나.
-  if (report?.plan?.mode === "auto" && report?.plan?.decision?.kind === "switch") {
+  // `auto`: 표가 바꾸자면(기본 계정이든 벽 판이든) 바로 — 그 계획의 토큰으로. 한 번에 하나.
+  const plan = report?.plan;
+  if (plan?.mode === "auto" && (plan.decision?.kind === "switch" || accountSwitchMoves(plan).length > 0)) {
     void applyAccountSwitch("auto");
   }
 }
@@ -4307,13 +4373,7 @@ async function applyAccountSwitch(by) {
   paintAccountSwitchNote();
   let applied;
   try {
-    applied = await invoke("claude_autoswitch_apply", {
-      token,
-      by,
-      // 판마다 hook이 마지막으로 말한 model — 재세움이 소환 때 값이 아니라 이
-      // 값으로 이어진다.
-      models: Object.fromEntries([...paneModels].map(([term, model]) => [String(term), model])),
-    });
+    applied = await invoke("claude_autoswitch_apply", { token, by });
   } catch (error) {
     showError(error);
     applyingAccountSwitch = false;
@@ -4328,13 +4388,24 @@ async function applyAccountSwitch(by) {
     // The report is re-read below anyway.
   }
   claudeLoginMoved();
+  // 원장이 영수증을 거절했으면 성공처럼 말하지 않는다 — 전환은 일어났고, 그 사실을
+  // 오류로 알린다.
+  if (applied?.receipt_error) {
+    showError(t("settings.accounts.switchUnrecorded", "전환은 했지만 원장에 적지 못했습니다: {{why}}", {
+      why: applied.receipt_error,
+    }));
+    return;
+  }
   const moved = (applied?.panes ?? []).filter((pane) => pane.ok).length;
-  toast(
-    t("settings.accounts.switched", "계정을 {{to}}(으)로 바꿨습니다 · 벽에 선 판 {{count}}개 이어짐", {
-      to: accountLabelOf(applied?.to ?? ""),
-      count: moved,
-    }),
-  );
+  const stuck = (applied?.panes ?? []).length - moved;
+  const words = [
+    applied?.switched_default
+      ? t("settings.accounts.switched", "계정을 {{to}}(으)로 바꿨습니다", { to: accountBadge(applied?.to ?? "") })
+      : t("settings.accounts.switchedPanes", "벽에 선 판을 {{to}}(으)로 옮겼습니다", { to: accountBadge(applied?.to ?? "") }),
+    t("settings.accounts.switchedMoved", "판 {{count}}개 이어짐", { count: moved }),
+  ];
+  if (stuck > 0) words.push(t("settings.accounts.switchedStuck", "{{count}}개는 그대로", { count: stuck }));
+  toast(words.join(" · "));
 }
 
 el("account-switch-now").addEventListener("click", () => void applyAccountSwitch("ask"));

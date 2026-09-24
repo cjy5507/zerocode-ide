@@ -73,12 +73,12 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
   );
 
   // ---- 2. ask / off / auto / wait -------------------------------------
-  const plan = (mode, decision, token) => ({
+  const plan = (mode, decision, token, extra = {}) => ({
     accounts: [
-      { id: "a-fixture", label: "a@example.test", organization_type: "claude_max", active: true,
+      { id: "a-fixture", organization_type: "claude_max", active: true,
         usage: { provider: "claude", session: { used_percent: 95, window_minutes: 300, resets_at: Date.now() + 3_600_000 }, weekly: { used_percent: 96, window_minutes: 10080, resets_at: Date.now() + 6 * 86_400_000 }, fable_weekly: null, updated_at: Date.now(), error: null, status: "ok", account: "a-fixture" },
         fetching: false },
-      { id: "b-fixture", label: "b@example.test", organization_type: "claude_team", active: false,
+      { id: "b-fixture", organization_type: "claude_team", active: false,
         usage: { provider: "claude", session: { used_percent: 10, window_minutes: 300, resets_at: Date.now() + 3_600_000 }, weekly: { used_percent: 20, window_minutes: 10080, resets_at: Date.now() + 6 * 86_400_000 }, fable_weekly: null, updated_at: Date.now(), error: null, status: "ok", account: "b-fixture" },
         fetching: false },
     ],
@@ -86,12 +86,20 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
       mode,
       active: "a-fixture",
       decision,
+      landing: decision.kind === "switch" ? decision.to : "a-fixture",
       fitness: [
         { id: "a-fixture", room_percent: 4, unfit: null, next_reset_ms: Date.now() + 3_600_000 },
         { id: "b-fixture", room_percent: 80, unfit: null, next_reset_ms: null },
       ],
-      walled: [{ worker: "w-1", term: 4242, account: "a-fixture", dispatch: "dp-1", generation: 1 }],
-      last_switch_ms: null,
+      next: { id: "b-fixture", room_percent: 80, unfit: null, next_reset_ms: null },
+      walled: [{
+        worker: "w-1", term: 4242, account: "a-fixture", model: "claude-opus-5-5", dispatch: "dp-1", generation: 1,
+        verdict: decision.kind === "switch"
+          ? { kind: "switch", from: "a-fixture", to: decision.to, reason: "walled" }
+          : { kind: "stay", why: decision.why ?? "off" },
+      }],
+      last_switch_ms: extra.lastSwitchMs ?? null,
+      cooldown_until_ms: extra.cooldownUntilMs ?? null,
       failed_recently: [],
       token,
       now_ms: Date.now(),
@@ -113,12 +121,17 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
     };
     window.__LAUNCHES__ = 0;
     window.__CLOSED__ = [];
-    paneModels.set(4242, "claude-fable-5-1");
     showSettingsPane("provider-accounts");
     await refreshClaudeAccountUsage(false);
     const note = document.getElementById("account-switch-note");
     const button = document.getElementById("account-switch-now");
+    // The same proposal read again offers no second notice.
+    await refreshClaudeAccountUsage(false);
+    const notices = [...document.querySelectorAll(".toast")]
+      .filter((one) => one.querySelector(".toast-action") && one.textContent.includes("b-fixture"));
     const before = {
+      notices: notices.length,
+      noticeSaid: notices[0]?.querySelector(".toast-text")?.textContent ?? "",
       noteShown: !note.hidden,
       buttonShown: !button.hidden,
       said: document.getElementById("account-switch-said").textContent,
@@ -136,23 +149,31 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
       applies: window.__SWITCH_APPLIES__.length,
       by: applied?.by ?? null,
       token: applied?.token ?? null,
-      model: applied?.models?.["4242"] ?? null,
+      carried: Object.keys(applied ?? {}).sort().join(","),
       launches: window.__LAUNCHES__,
       closed: window.__CLOSED__.length,
       active: accountReport.active,
+      toast: document.querySelector(".toast:last-of-type")?.textContent ?? "",
     };
   }, { report: plan("ask", switching, "tok-ask-1") });
   ok(
-    "ask mode proposes with the plan's words and applies only on the press — by its token, with the panes' models, and the window launches and closes nothing",
+    "ask mode proposes with the plan's words — in the accounts pane and once as a notice with its button — and applies only on the press, by its token and nothing else (what the panes run is the backend's to read); the window launches and closes nothing",
     asked.before.noteShown && asked.before.buttonShown && asked.before.applies === 0 &&
-      asked.before.said.includes("b@example.test") &&
+      asked.before.said.includes("b-fixture") &&
+      asked.before.notices === 1 && asked.before.noticeSaid === asked.before.said &&
       asked.before.gaugeB.includes("10%") && asked.before.gaugeB.includes("80%") &&
       asked.before.gaugeA.includes("96%") &&
-      asked.before.nextShown && asked.before.next.includes("b@example.test") && asked.before.next.includes("80%") &&
+      asked.before.nextShown && asked.before.next.includes("b-fixture") && asked.before.next.includes("80%") &&
       asked.applies === 1 && asked.by === "ask" && asked.token === "tok-ask-1" &&
-      asked.model === "claude-fable-5-1" &&
+      asked.carried === "by,token" &&
       asked.launches === 0 && asked.closed === 0,
     JSON.stringify(asked),
+  );
+  ok(
+    "the new surfaces name an account by its plan type and id — no address in the proposal, the bar or the gauge line",
+    !asked.before.said.includes("@") && !asked.before.next.includes("@") &&
+      !asked.before.gaugeB.includes("@") && asked.before.said.includes("b-fixture"),
+    JSON.stringify(asked.before),
   );
 
   const off = await page.evaluate(async ({ report }) => {
@@ -216,6 +237,41 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
     waiting.noteShown && !waiting.buttonShown && waiting.said.includes("5") &&
       waiting.applies === 0 && waiting.next.includes("5"),
     JSON.stringify(waiting),
+  );
+
+  // The words the table says when it has no number to show: nobody to move
+  // to, a switch resting, a reading that could not be trusted — each said,
+  // never a 0% or an empty chip (astra C2).
+  const words = await page.evaluate(async ({ none, cooling, unread }) => {
+    const read = async (report) => {
+      window.__ACCOUNT_USAGE__ = report;
+      window.__SWITCH_APPLIES__ = [];
+      await refreshClaudeAccountUsage(false);
+      return {
+        next: document.getElementById("sb-claude-next").textContent,
+        shown: !document.getElementById("sb-claude-next").hidden,
+        applies: window.__SWITCH_APPLIES__.length,
+      };
+    };
+    const noneReport = { ...none, plan: { ...none.plan, next: null } };
+    return {
+      none: await read(noneReport),
+      cooling: await read(cooling),
+      unread: await read(unread),
+    };
+  }, {
+    none: plan("ask", { kind: "stay", why: "no_candidate" }, "tok-none"),
+    cooling: plan("auto", { kind: "stay", why: "cooldown" }, "tok-cool", {
+      lastSwitchMs: Date.now() - 60_000, cooldownUntilMs: Date.now() + 4 * 60_000,
+    }),
+    unread: plan("ask", { kind: "stay", why: "unread" }, "tok-unread"),
+  });
+  ok(
+    "no candidate, a resting switch and an unread gauge are each said in words, with nothing applied",
+    words.none.shown && /없음|none|no next/i.test(words.none.next) && !/\d+%/.test(words.none.next) &&
+      words.cooling.shown && /4/.test(words.cooling.next) && words.cooling.applies === 0 &&
+      words.unread.shown && /읽지 못함|unread/i.test(words.unread.next) && words.unread.applies === 0,
+    JSON.stringify(words),
   );
 
   // A refused apply (the situation changed) surfaces as an error and the

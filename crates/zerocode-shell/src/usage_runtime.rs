@@ -109,10 +109,25 @@ fn account_backoff_key(id: &str) -> String {
 /// No hidden terminal behind it, on purpose: the terminal road runs the CLI
 /// in the runtime home, which is the SELECTED account's, so a fallback there
 /// would read A for B (astra A1). An account whose own store holds no login
-/// answers `unavailable` with no request made; a refused or failed request
-/// answers `error` with the endpoint's own classification, and the number
-/// stays unknown — never 0%, never somebody else's.
+/// answers `signed_out`, one whose keychain would not say answers `denied`,
+/// both with no request made; a refused or failed request answers `error`
+/// with the endpoint's own classification, and the number stays unknown —
+/// never 0%, never somebody else's.
 pub(super) fn scan_claude_account_usage_now(account: &zerocode_core::ClaudeAccount) -> Scanned {
+    scan_claude_account_usage_with(account, accounts::account_login, |login, now_ms| {
+        usage_oauth::claude(Some(login), now_ms)
+    })
+}
+
+/// The same read with its two doors handed in — the account's own login and
+/// the endpoint — so the suite can stand a fake keychain and a fake server
+/// where the real ones are (astra A1, C1). Only the login `read_login`
+/// found for THIS account ever reaches `ask`.
+pub(super) fn scan_claude_account_usage_with(
+    account: &zerocode_core::ClaudeAccount,
+    read_login: impl FnOnce(&zerocode_core::ClaudeAccount) -> accounts::AccountLogin,
+    ask: impl FnOnce(&str, i64) -> Result<usage_oauth::OauthUsage, usage_http::Failure>,
+) -> Scanned {
     let whose = Some(account.id.clone());
     let failed = |status: &str,
                   error: String,
@@ -133,19 +148,34 @@ pub(super) fn scan_claude_account_usage_now(account: &zerocode_core::ClaudeAccou
         reset_credits: None,
         account: whose.clone(),
     };
-    let Some((login, from)) = accounts::usage_login_of_account(account) else {
-        return Scanned {
-            usage: failed(
-                "unavailable",
-                "이 계정의 저장소에 로그인이 없습니다".to_string(),
-                None,
-                None,
-            ),
-            road: UsageRoad::Local,
-        };
+    let (login, from) = match read_login(account) {
+        accounts::AccountLogin::Found(login, from) => (login, from),
+        accounts::AccountLogin::Refused => {
+            return Scanned {
+                usage: failed(
+                    ACCOUNT_LOGIN_REFUSED,
+                    "이 계정의 키체인 항목이 답하지 않았습니다 — 눌러서 다시 읽을 때만 묻습니다"
+                        .to_string(),
+                    None,
+                    None,
+                ),
+                road: UsageRoad::Local,
+            };
+        }
+        accounts::AccountLogin::Missing => {
+            return Scanned {
+                usage: failed(
+                    "signed_out",
+                    "이 계정의 저장소에 로그인이 없습니다".to_string(),
+                    None,
+                    None,
+                ),
+                road: UsageRoad::Local,
+            };
+        }
     };
     let road = UsageRoad::Oauth { login: Some(from) };
-    match usage_oauth::claude(Some(login.as_str()), epoch_ms_now()) {
+    match ask(login.as_str(), epoch_ms_now()) {
         Ok(read) => Scanned {
             usage: usage::ProviderUsage {
                 provider: "claude".to_string(),
@@ -215,6 +245,10 @@ pub(super) fn land_claude_account_usage(
     true
 }
 
+/// The status of an account whose keychain would not answer — held until a
+/// person asks again (t-7538, astra A2).
+pub(super) const ACCOUNT_LOGIN_REFUSED: &str = "denied";
+
 /// Why an account is being read, which decides how old a reading may be
 /// before it is read again — three floors, none of them new (astra 3):
 /// the ambient poll's own cadence for the beat, the refetch floor when a
@@ -265,7 +299,14 @@ pub(super) fn refresh_inactive_claude_accounts(
         let young = held
             .as_ref()
             .is_some_and(|snapshot| now - snapshot.updated_at < why.floor_ms());
+        // A keychain that refused is asked again by a person's press and by
+        // nothing else: every automated ask would be one more dialog.
+        let refused = why != AccountPoll::Person
+            && held
+                .as_ref()
+                .is_some_and(|snapshot| snapshot.status == ACCOUNT_LOGIN_REFUSED);
         if young
+            || refused
             || usage_scan_holds_for(
                 held.as_ref(),
                 &account_backoff_key(&account.id),
@@ -366,6 +407,13 @@ pub(super) fn account_gauge_of(
     AccountGauge {
         id: account.id.clone(),
         org_type: account.organization_type.clone(),
+        // Which login the row is, for the table's "one login twice" rule —
+        // compared there, never shown. Unknown when either half is.
+        identity: account
+            .account_uuid
+            .as_deref()
+            .zip(account.organization_uuid.as_deref())
+            .map(|(person, organization)| format!("{person}/{organization}")),
         windows: snapshot
             .into_iter()
             .flat_map(|held| {

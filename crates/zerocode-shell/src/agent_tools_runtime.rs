@@ -1688,6 +1688,26 @@ impl agent_teams::Host for TeamWindow {
         self.app.emit("term:focus-pane", term).is_ok()
     }
 
+    /// The pane's process group read before the close and watched after it,
+    /// on the clock the hand-over already keeps for a pane's CLI leaving
+    /// (`HAND_OVER_EXIT_WAIT`, polled every `HAND_OVER_EXIT_POLL`).
+    fn close_gone(&self, term: TermId) -> bool {
+        let root = self
+            .app
+            .state::<AppState>()
+            .terminals()
+            .handle(term)
+            .and_then(|held| lock_pty(&held).pid());
+        self.close(term);
+        root.is_none_or(|root| {
+            crate::cmd::wait_process_group_gone(
+                root,
+                crate::cmd::HAND_OVER_EXIT_WAIT,
+                crate::cmd::HAND_OVER_EXIT_POLL,
+            )
+        })
+    }
+
     fn close(&self, term: TermId) {
         let state = self.app.state::<AppState>();
         // Through the same door the tab close uses, whole: the process is

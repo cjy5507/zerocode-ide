@@ -12454,10 +12454,37 @@ impl Ledger {
     /// road that would reopen a person's conversation is. Refusals name
     /// the state; a caller that hears one closes nothing.
     ///
+    /// And only a worker whose conversation the restore road can RESUME:
+    /// [`Self::prepare_worker_reseat`] starts a worker with no session on a
+    /// fresh, empty conversation with the task's preamble, which is a
+    /// restart's last resort and not a move (astra B4). `session_id` is the
+    /// conversation the window sees in the pane right now; a row that names
+    /// another — a `/clear` the hook has not reported yet — would resume
+    /// the wrong one, and is refused too.
+    ///
     /// Answers the dispatch the worker keeps, so the receipt can name it.
     pub fn worker_rested_for_account_switch(
         &mut self,
         worker_id: &str,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<String, String> {
+        let dispatch_id = self.may_rest_for_account_switch(worker_id, session_id, now_ms)?;
+        let at = self.locate(worker_id)?;
+        self.runs[at.0].workers[at.1].state = WorkerState::Sleeping;
+        self.runs[at.0].workers[at.1].quiet_at = None;
+        Ok(dispatch_id)
+    }
+
+    /// Whether [`Self::worker_rested_for_account_switch`] would rest this
+    /// worker, asked without moving anything — the window reads it off its
+    /// ledger image before it touches a pane, so a refusal reaches the
+    /// person in the ledger's own words (the actor's refusal is a kind, not
+    /// a sentence). Answers the dispatch the worker keeps.
+    pub fn may_rest_for_account_switch(
+        &self,
+        worker_id: &str,
+        session_id: &str,
         now_ms: i64,
     ) -> Result<String, String> {
         let at = self.locate(worker_id)?;
@@ -12489,6 +12516,21 @@ impl Ledger {
                 "worker {worker_id} reported no checkout, so there is nowhere to seat it again"
             ));
         }
+        match worker.session.as_ref() {
+            None => {
+                return Err(format!(
+                    "worker {worker_id} reported no conversation, so a restore would start it \
+                     empty — not moved"
+                ));
+            }
+            Some(held) if held.id != session_id => {
+                return Err(format!(
+                    "worker {worker_id}'s recorded conversation is not the one its pane is in \
+                     now — not moved"
+                ));
+            }
+            Some(_) => {}
+        }
         let dispatch_id = worker
             .dispatch
             .as_deref()
@@ -12513,8 +12555,6 @@ impl Ledger {
                  walled worker is moved to another account; a working one keeps its own"
             ));
         }
-        self.runs[at.0].workers[at.1].state = WorkerState::Sleeping;
-        self.runs[at.0].workers[at.1].quiet_at = None;
         Ok(dispatch_id)
     }
 
@@ -12903,7 +12943,7 @@ impl Ledger {
     }
 
     /// Which run and which slot a worker sits in.
-    fn locate(&mut self, worker_id: &str) -> Result<(usize, usize), String> {
+    fn locate(&self, worker_id: &str) -> Result<(usize, usize), String> {
         for (run_at, run) in self.runs.iter().enumerate() {
             if let Some(at) = run.workers.iter().position(|one| one.id == worker_id) {
                 return Ok((run_at, at));
@@ -13863,7 +13903,7 @@ pub struct AccountSwitchReceipt {
     pub moved: AccountMove,
     /// The account ids, the store's own; `None` for the machine's own login.
     pub from_account: Option<String>,
-    pub to_account: String,
+    pub to_account: Option<String>,
     /// `person` for the settings picker, `auto` for the beat, `ask` for a
     /// proposal the person accepted.
     pub by: String,
@@ -13894,7 +13934,7 @@ impl AccountSwitchReceipt {
             "observedWindow": self.observed_window,
             "generation": self.generation,
             "panesMoved": self.panes_moved,
-            "policy": "CLAUDE_ACCOUNT_AUTOSWITCH.v1",
+            "policy": crate::account_autoswitch::POLICY_WORD,
             "switchedAtMs": now_ms,
         });
         match &self.moved {

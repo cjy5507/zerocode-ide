@@ -155,9 +155,42 @@ fn stand_wire(
 /// How long the pane's CLI gets to leave after its exit command. A TUI
 /// unmounts in well under a second; the wait is for the machine, not the
 /// program — and a screen still standing past it is an answer, not a delay.
-const HAND_OVER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
+/// The account switch waits the same time for a closed pane's process group
+/// before it resumes the conversation elsewhere (t-7538).
+pub(crate) const HAND_OVER_EXIT_WAIT: std::time::Duration = std::time::Duration::from_secs(8);
 /// How often the wait looks for the pane's leaving.
-const HAND_OVER_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+pub(crate) const HAND_OVER_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Wait until no process of the group `root` leads is left, up to `wait`,
+/// looking every `poll`. A pane's child is spawned through `setsid`
+/// (`zerocode_pty`), so its pid is its group's id and the agent CLI —
+/// whether the child itself or a shell's child — is in that group. Answers
+/// whether the group is gone.
+///
+/// Windows has no process groups to ask; the close there is the kill, and
+/// the answer is yes.
+pub(crate) fn wait_process_group_gone(
+    root: u32,
+    wait: std::time::Duration,
+    poll: std::time::Duration,
+) -> bool {
+    #[cfg(unix)]
+    {
+        let began = std::time::Instant::now();
+        while crate::codex_queue::process_group_exists(root) {
+            if began.elapsed() >= wait {
+                return false;
+            }
+            std::thread::sleep(poll);
+        }
+        true
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, wait, poll);
+        true
+    }
+}
 
 /// End the pane's screen session with the CLI's own exit command, typed the
 /// way a person types a line (`ask::line_keys`: the text, then its Enter —
