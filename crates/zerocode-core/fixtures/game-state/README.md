@@ -23,7 +23,10 @@ field). A valid case names its `cost`: the samples one observation reads.
    accepts more than `max_tolerance` on a channel (`budget`); and no two of
    them, ground included, can hold the same sample — on some channel they lie
    further apart than their tolerances reach together (`overlap`).
-3. `confirm` is 1 to `max_confirm` (`budget`).
+3. `confirm` is 1 to `max_confirm` (`budget`). There are at most
+   `max_anchors` anchors (`budget`), each inside the reference extent
+   (`geometry`) and naming an existing class, or the ground (class 0) only
+   when the spec has one (`reference`).
 4. Cells: at least one row and column and at most `max_cells` cells
    (`budget`); tiles of 1 to 1000 permille of their pitch and an inset under
    500 permille (`geometry`); a lattice of 1 to `max_lattice` giving at least
@@ -36,7 +39,12 @@ field). A valid case names its `cost`: the samples one observation reads.
 5. Blobs: an existing class (`reference`); a step of 1 to the ROI's shorter
    side (`geometry`); at least one sample per blob (`threshold`); a gate of 1
    to `max_gate` and 1 to `max_blobs` blobs (`budget`).
-6. The cost is at most `max_detector_samples` (`budget`).
+6. The cost — the layout's samples plus one per anchor — is at most
+   `max_detector_samples` (`budget`).
+
+An optional field is left out or written in full: `ground` is never `null`
+and `anchors` is never an empty list, so both decoders read the same set of
+wires (`wire`).
 
 Pitch boxes split the ROI's span at `floor(i × span / count)`, so every pitch
 along an axis is the floor or the ceiling of `span / count`; checking both
@@ -45,7 +53,9 @@ the spare split `floor(spare / 2)` before and the rest after; its inset is
 `floor(tile × inset / 1000)` on each side. A cells observation reads
 `lattice²` samples per cell, plus `lattice` gap samples on each side that has
 a gap when the spec has ground. A blobs observation reads
-`ceil(width / step) × ceil(height / step)` samples.
+`ceil(width / step) × ceil(height / step)` samples. An anchor at `(x, y)` is
+read at `(floor(x × frame_width / reference_width), floor(y × frame_height /
+reference_height))`; when one misses its class, the detector reads nothing.
 
 ## Frame ROI
 

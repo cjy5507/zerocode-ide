@@ -797,6 +797,118 @@
    }
   },
   {
+   "cost": 338,
+   "expected": "ok",
+   "name": "valid_with_anchors",
+   "patch": {
+    "anchors": [
+     {
+      "class": 0,
+      "x": 5,
+      "y": 5
+     },
+     {
+      "class": 1,
+      "x": 30,
+      "y": 200
+     }
+    ]
+   }
+  },
+  {
+   "expected": "budget",
+   "name": "anchors_over_limit",
+   "patch": {
+    "anchors": [
+     {
+      "class": 0,
+      "x": 0,
+      "y": 5
+     },
+     {
+      "class": 0,
+      "x": 1,
+      "y": 5
+     },
+     {
+      "class": 0,
+      "x": 2,
+      "y": 5
+     },
+     {
+      "class": 0,
+      "x": 3,
+      "y": 5
+     },
+     {
+      "class": 0,
+      "x": 4,
+      "y": 5
+     },
+     {
+      "class": 0,
+      "x": 5,
+      "y": 5
+     },
+     {
+      "class": 0,
+      "x": 6,
+      "y": 5
+     },
+     {
+      "class": 0,
+      "x": 7,
+      "y": 5
+     },
+     {
+      "class": 0,
+      "x": 8,
+      "y": 5
+     }
+    ]
+   }
+  },
+  {
+   "expected": "geometry",
+   "name": "anchor_outside_reference",
+   "patch": {
+    "anchors": [
+     {
+      "class": 0,
+      "x": 400,
+      "y": 5
+     }
+    ]
+   }
+  },
+  {
+   "expected": "reference",
+   "name": "anchor_class_past",
+   "patch": {
+    "anchors": [
+     {
+      "class": 5,
+      "x": 5,
+      "y": 5
+     }
+    ]
+   }
+  },
+  {
+   "expected": "reference",
+   "name": "anchor_ground_without_ground",
+   "patch": {
+    "anchors": [
+     {
+      "class": 0,
+      "x": 5,
+      "y": 5
+     }
+    ],
+    "ground": null
+   }
+  },
+  {
    "expected": "geometry",
    "name": "reference_zero",
    "patch": {
@@ -1057,6 +1169,27 @@
      "g": 0,
      "r": 0
     }
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_empty_anchors",
+   "patch": {
+    "anchors": []
+   }
+  },
+  {
+   "expected": "wire",
+   "name": "wire_anchor_unknown_key",
+   "patch": {
+    "anchors": [
+     {
+      "class": 0,
+      "hue": 1,
+      "x": 5,
+      "y": 5
+     }
+    ]
    }
   }
  ],

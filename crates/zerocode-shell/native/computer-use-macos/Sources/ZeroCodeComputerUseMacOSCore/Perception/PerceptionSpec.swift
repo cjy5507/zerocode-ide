@@ -3,6 +3,7 @@ import Foundation
 /// The one table of perception limits (`zerocode_core::computer_use_protocol::game_state::LIMITS`).
 /// The window sends it with the plan; the helper keeps no copy.
 public struct PerceptionLimits: Codable, Equatable, Sendable {
+    public let max_anchors: UInt64
     public let max_blobs: UInt64
     public let max_cells: UInt64
     public let max_classes: UInt64
@@ -171,6 +172,23 @@ public enum PerceptionLayout: Codable, Equatable, Sendable {
     }
 }
 
+/// A point, in reference pixels, that must show a colour for the frame to be the scene the plan was
+/// written for (`game_state::Anchor`); `class` 0 names the ground.
+public struct PerceptionAnchor: Codable, Equatable, Sendable {
+    public let x: UInt32
+    public let y: UInt32
+    public let `class`: UInt64
+}
+
+extension PerceptionAnchor {
+    public init(from decoder: Decoder) throws {
+        let fields = try decoder.container(keyedBy: PerceptionWireKey.self)
+        try fields.only(["x", "y", "class"])
+        self.init(x: try fields.decode(UInt32.self, forKey: "x"), y: try fields.decode(UInt32.self, forKey: "y"),
+                  class: try fields.decode(UInt64.self, forKey: "class"))
+    }
+}
+
 /// A colour detector's configuration (`game_state::ColorSpec`), carried by the plan and
 /// covered by its hash. The ROI it reads is the detector's, written against the reference
 /// extent.
@@ -184,19 +202,42 @@ public struct PerceptionColorSpec: Codable, Equatable, Sendable {
     public let layout: PerceptionLayout
     /// Fresh captures of one scene that must agree before a value is known.
     public let confirm: UInt64
+    /// Points that must all show their colour before anything is read; the wire leaves the key out
+    /// when there are none, as the window's serde type does.
+    public let anchors: [PerceptionAnchor]
 }
 
 extension PerceptionColorSpec {
     public init(from decoder: Decoder) throws {
         let fields = try decoder.container(keyedBy: PerceptionWireKey.self)
-        try fields.only(["space", "classes", "ground", "reference_width", "reference_height", "layout", "confirm"])
+        try fields.only(["space", "classes", "ground", "reference_width", "reference_height", "layout", "confirm",
+                         "anchors"])
+        // An optional field is left out or written in full — never `null`, never an empty list —
+        // so the helper reads exactly what the window's serde type reads.
+        let anchors = try fields.contains("anchors") ? fields.decode([PerceptionAnchor].self, forKey: "anchors") : []
+        if fields.contains("anchors") && anchors.isEmpty {
+            throw DecodingError.dataCorruptedError(forKey: "anchors", in: fields, debugDescription: "empty anchors")
+        }
         self.init(space: try fields.decode(PerceptionPaletteSpace.self, forKey: "space"),
                   classes: try fields.decode([PerceptionColorClass].self, forKey: "classes"),
-                  ground: try fields.decodeIfPresent(PerceptionColorClass.self, forKey: "ground"),
+                  ground: try fields.contains("ground") ? fields.decode(PerceptionColorClass.self, forKey: "ground") : nil,
                   reference_width: try fields.decode(UInt32.self, forKey: "reference_width"),
                   reference_height: try fields.decode(UInt32.self, forKey: "reference_height"),
                   layout: try fields.decode(PerceptionLayout.self, forKey: "layout"),
-                  confirm: try fields.decode(UInt64.self, forKey: "confirm"))
+                  confirm: try fields.decode(UInt64.self, forKey: "confirm"),
+                  anchors: anchors)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var fields = encoder.container(keyedBy: PerceptionWireKey.self)
+        try fields.encode(space, forKey: "space")
+        try fields.encode(classes, forKey: "classes")
+        try fields.encodeIfPresent(ground, forKey: "ground")
+        try fields.encode(reference_width, forKey: "reference_width")
+        try fields.encode(reference_height, forKey: "reference_height")
+        try fields.encode(layout, forKey: "layout")
+        try fields.encode(confirm, forKey: "confirm")
+        if !anchors.isEmpty { try fields.encode(anchors, forKey: "anchors") }
     }
 }
 
@@ -253,6 +294,19 @@ struct PerceptionAxis {
 }
 
 public enum PerceptionSpecs {
+    /// The palette rules every spec and every learned candidate meets (`game_state::check_palette`):
+    /// 1 to `max_classes` classes, no tolerance over `max_tolerance`, and no two of them, ground
+    /// included, able to hold the same sample.
+    public static func checkPalette(_ classes: [PerceptionColorClass], ground: PerceptionColorClass?,
+                                    limits: PerceptionLimits) throws {
+        if classes.isEmpty || UInt64(classes.count) > limits.max_classes { throw PerceptionSpecError.budget }
+        let palette = classes + (ground.map { [$0] } ?? [])
+        if palette.contains(where: { UInt64($0.tolerance) > limits.max_tolerance }) { throw PerceptionSpecError.budget }
+        for (at, item) in palette.enumerated() where palette[(at + 1)...].contains(where: { !item.apart($0) }) {
+            throw PerceptionSpecError.overlap
+        }
+    }
+
     /// Checks a colour detector's spec against its ROI in the order the window does
     /// (`game_state::validate_color`) and answers how many samples one observation reads.
     public static func validate(_ spec: PerceptionColorSpec, roi: ReflexRoi, limits: PerceptionLimits) throws -> UInt64 {
@@ -263,14 +317,16 @@ public enum PerceptionSpecs {
             UInt64(roi.x) + width > referenceWidth || UInt64(roi.y) + height > referenceHeight {
             throw PerceptionSpecError.geometry
         }
-        if spec.classes.isEmpty || UInt64(spec.classes.count) > limits.max_classes { throw PerceptionSpecError.budget }
-        let palette = spec.classes + (spec.ground.map { [$0] } ?? [])
-        if palette.contains(where: { UInt64($0.tolerance) > limits.max_tolerance }) { throw PerceptionSpecError.budget }
-        for (at, item) in palette.enumerated() where palette[(at + 1)...].contains(where: { !item.apart($0) }) {
-            throw PerceptionSpecError.overlap
-        }
+        try checkPalette(spec.classes, ground: spec.ground, limits: limits)
         if spec.confirm == 0 || spec.confirm > limits.max_confirm { throw PerceptionSpecError.budget }
         let classes = UInt64(spec.classes.count)
+        if UInt64(spec.anchors.count) > limits.max_anchors { throw PerceptionSpecError.budget }
+        if spec.anchors.contains(where: { $0.x >= spec.reference_width || $0.y >= spec.reference_height }) {
+            throw PerceptionSpecError.geometry
+        }
+        if spec.anchors.contains(where: { $0.class > classes || ($0.class == 0 && spec.ground == nil) }) {
+            throw PerceptionSpecError.reference
+        }
         let cost: UInt64
         switch spec.layout {
         case .cells(let layout):
@@ -329,8 +385,9 @@ public enum PerceptionSpecs {
             }
             cost = ((width + layout.step - 1) / layout.step) * ((height + layout.step - 1) / layout.step)
         }
-        if cost > limits.max_detector_samples { throw PerceptionSpecError.budget }
-        return cost
+        let (total, overflow) = cost.addingReportingOverflow(UInt64(spec.anchors.count))
+        if overflow || total > limits.max_detector_samples { throw PerceptionSpecError.budget }
+        return total
     }
 
     /// The detector's ROI placed in a frame's pixel extent, with the frame's scale over the

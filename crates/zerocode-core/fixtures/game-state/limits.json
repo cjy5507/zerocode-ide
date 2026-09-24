@@ -1,1 +1,1 @@
-{"max_blobs":16,"max_cells":256,"max_classes":8,"max_confirm":8,"max_detector_samples":262144,"max_gate":256,"max_lattice":8,"max_tick_ns":5000000,"max_tick_samples":1048576,"max_tolerance":64,"min_cell_samples":4}
+{"max_anchors":8,"max_blobs":16,"max_cells":256,"max_classes":8,"max_confirm":8,"max_detector_samples":262144,"max_gate":256,"max_lattice":8,"max_tick_ns":5000000,"max_tick_samples":1048576,"max_tolerance":64,"min_cell_samples":4}
