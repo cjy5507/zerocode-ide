@@ -13800,8 +13800,14 @@ fn a_switch_of_model_is_written_once_with_the_binding_it_left() {
             .ledger
             .worker_seated(("team-1", &pane), "/wt/switched")
     );
+    let dispatch = bench.ledger.runs()[0]
+        .worker(&worker)
+        .and_then(|held| held.dispatch.clone())
+        .expect("the attempt");
     let switch = ModelDeviation {
         worker: worker.clone(),
+        dispatch,
+        source: "/transcripts/switched.jsonl".to_string(),
         key: "uuid-fallback".to_string(),
         from: "claude-fable-5-1".to_string(),
         to: "claude-opus-4-8".to_string(),
@@ -13842,6 +13848,195 @@ fn a_switch_of_model_is_written_once_with_the_binding_it_left() {
         ..switch
     };
     assert_eq!(local.lasts(), "one response");
+}
+
+/// A switch is written for the ATTEMPT it was read under, or for nobody
+/// (t-7153, R3): the ledger's fence re-reads the binding the reading
+/// carries — the dispatch, its interval, the file — against its own rows
+/// as it writes. A reading bound to another dispatch, dated before the
+/// attempt began, or undated, is written nowhere; a file the ledger knows
+/// the worker writes disputes a reading of another file, and a file it does
+/// not know disputes nothing. The same worker handed a second task keeps
+/// its summons time, and its first attempt's switch — read again after a
+/// restart, or held over from before the hand — is never the second's.
+#[test]
+fn a_switch_is_written_for_the_attempt_it_was_read_under_or_for_nobody() {
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name bindings");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!("worker-start --agent claude --task {task}"));
+    assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/bound"));
+    let attempt = |bench: &Bench| {
+        let run = &bench.ledger.runs()[0];
+        let held = run.worker(&worker).expect("the worker");
+        run.dispatch(held.dispatch.as_deref().expect("an open attempt"))
+            .expect("the dispatch")
+            .clone()
+    };
+    let first = attempt(&bench);
+    let reading = |dispatch: &str, source: &str, key: &str, at_ms: Option<i64>| ModelDeviation {
+        worker: worker.clone(),
+        dispatch: dispatch.to_string(),
+        source: source.to_string(),
+        key: key.to_string(),
+        from: "claude-fable-5-1".to_string(),
+        to: "claude-opus-4-8".to_string(),
+        category: Some("cyber".to_string()),
+        scope: Some("session".to_string()),
+        at_ms,
+    };
+    let written = |bench: &mut Bench, switch: ModelDeviation, at: i64| {
+        bench
+            .ledger
+            .workers_model_deviated(std::slice::from_ref(&switch), at)
+    };
+    let rows = |bench: &mut Bench| -> Vec<(String, String)> {
+        bench.json("check --peek --types model_deviated")["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|message| {
+                let body: serde_json::Value =
+                    serde_json::from_str(message["body"].as_str().expect("a body")).expect("json");
+                (
+                    body["dispatchId"].as_str().expect("a dispatch").to_string(),
+                    body["key"].as_str().expect("a key").to_string(),
+                )
+            })
+            .collect()
+    };
+    let inside = Some(first.started_ms + 1);
+
+    // Another attempt's reading, an earlier or undated switch: nobody's.
+    assert_eq!(
+        written(
+            &mut bench,
+            reading("dp-elsewhere", "/t/a.jsonl", "s-other", inside),
+            NOW
+        ),
+        0,
+        "a reading bound to another attempt was written as this one's"
+    );
+    assert_eq!(
+        written(
+            &mut bench,
+            reading(
+                &first.id,
+                "/t/a.jsonl",
+                "s-early",
+                Some(first.started_ms - 1)
+            ),
+            NOW
+        ),
+        0,
+        "a switch dated before the attempt began was written as its own"
+    );
+    assert_eq!(
+        written(
+            &mut bench,
+            reading(&first.id, "/t/a.jsonl", "s-undated", None),
+            NOW
+        ),
+        0,
+        "an undated switch was written"
+    );
+    // A file the ledger does not know disputes nothing.
+    assert_eq!(
+        written(
+            &mut bench,
+            reading(&first.id, "/t/a.jsonl", "s-1", inside),
+            NOW
+        ),
+        1
+    );
+    // A file it knows disputes another.
+    assert!(bench.ledger.worker_session_reported(
+        ("team-1", &pane),
+        crate::ProviderSession {
+            key: crate::provider_session::SessionKey::SessionId,
+            id: "session-1".to_string(),
+            transcript_path: Some("/t/a.jsonl".to_string()),
+        },
+    ));
+    assert_eq!(
+        written(
+            &mut bench,
+            reading(&first.id, "/t/b.jsonl", "s-2", inside),
+            NOW + 1
+        ),
+        0,
+        "a reading of another file was written as this conversation's"
+    );
+    assert_eq!(
+        written(
+            &mut bench,
+            reading(&first.id, "/t/a.jsonl", "s-2", inside),
+            NOW + 2
+        ),
+        1
+    );
+    assert_eq!(
+        rows(&mut bench),
+        [
+            (first.id.clone(), "s-1".to_string()),
+            (first.id.clone(), "s-2".to_string())
+        ]
+    );
+
+    // The same worker, handed a second task: its summons time stands, the
+    // first attempt's switches are not the second's.
+    bench.json_at(
+        &pane,
+        &format!("send --type worker_done --body {{\"ok\":true}} --retry-request done-{worker}"),
+    );
+    let again = bench.json("task-create --spec build-it-again")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    bench.json(&format!("dispatch --task {again} --to {pane}"));
+    let second = attempt(&bench);
+    assert_ne!(second.id, first.id);
+    assert!(second.started_ms > first.started_ms);
+    let then = second.started_ms + 10;
+    assert_eq!(
+        written(
+            &mut bench,
+            reading(&first.id, "/t/a.jsonl", "s-3", inside),
+            then
+        ),
+        0,
+        "a reading of the ended attempt was written as the next one's"
+    );
+    assert_eq!(
+        written(
+            &mut bench,
+            reading(&second.id, "/t/a.jsonl", "s-1", Some(first.started_ms + 2)),
+            then
+        ),
+        0,
+        "the first attempt's switch, read again, was written as the second's"
+    );
+    assert_eq!(
+        written(
+            &mut bench,
+            reading(&second.id, "/t/a.jsonl", "s-4", Some(second.started_ms)),
+            then
+        ),
+        1,
+        "the second attempt's own switch was refused"
+    );
+    assert_eq!(
+        rows(&mut bench),
+        [
+            (first.id.clone(), "s-1".to_string()),
+            (first.id.clone(), "s-2".to_string()),
+            (second.id.clone(), "s-4".to_string())
+        ]
+    );
 }
 
 /// The beat walks a handover only under a DECLARED order — the summons'

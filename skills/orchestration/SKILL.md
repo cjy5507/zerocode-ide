@@ -614,13 +614,17 @@ These are the ones that cost you a run when you get them wrong.
   (`screenOnly: true`, rung `notify`): a screen's words can be quoted by a
   tool result, so a screen alone ends no worker and walks no handover,
   whatever you declared; read the pane and hand it over yourself. The news
-  arrives once per attempt with the `category`, whether the provider routes
-  it anywhere (`routed`), the `rung` it stands on and the `dispatchId`, and
-  settles nothing. Every switch of model a worker's CLI made for a decline
-  is a `model_deviated` row — the bound model, `from` → `to`, the category,
-  how long the switch lasts (Claude Code keeps it for the rest of that
-  conversation) — because the model you summoned with is binding and
-  leaving it, however well, is yours to read.
+  arrives once per record — a dialog once per attempt, and each decline
+  record the pane stands at after it once more, whether its hook came to
+  rest or still says `working` — with the `category`, whether the provider
+  routes it anywhere (`routed`), the `rung` it stands on and the
+  `dispatchId`, and settles nothing. Every switch of model a worker's CLI
+  made for a decline is a `model_deviated` row — the bound model, `from` →
+  `to`, the category, how long the switch lasts (Claude Code keeps it for
+  the rest of that conversation) — written once, for the attempt it was
+  made in and never for the next task the same pane is handed, and kept
+  until the ledger can hold it — because the model you summoned with is
+  binding and leaving it, however well, is yours to read.
 - **A silence the markers cannot name may be asked about, and only written
   down.** With `smart.stallCause` at `shadow` or `auto` in zo's
   `settings.json` and the worker's checkout consented under

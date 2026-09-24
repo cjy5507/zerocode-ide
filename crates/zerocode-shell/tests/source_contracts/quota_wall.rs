@@ -588,6 +588,10 @@ fn the_orchestration_guide_teaches_the_classifier_decline_order() {
         "`screenOnly: true`",
         "only on the decline it was planned",
         "is NOT a yes",
+        // t-7153 round 3: a notice is a record's, and a switch is the
+        // attempt's it was made in.
+        "arrives once per record",
+        "for the attempt it was",
     ] {
         assert!(
             skill.contains(needed),

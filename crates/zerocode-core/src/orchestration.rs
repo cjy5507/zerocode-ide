@@ -9691,6 +9691,16 @@ impl Ledger {
     /// coordinator. A summons' model is a binding choice, so leaving it is
     /// written where it is read, whoever left it and however well: the two
     /// models, the category, how long the CLI keeps the switch, and why.
+    ///
+    /// A row is the ATTEMPT's the switch was read under, or nobody's
+    /// (t-7153, R3, [`ModelDeviation::is_bound_to`]): the ledger writes it
+    /// only while the worker still carries that very dispatch, the switch is
+    /// dated inside it, and the file it was read from is the one the ledger
+    /// knows the worker writes — a reading the ledger moved past between the
+    /// scan and this fence (the attempt ended, the pane handed a second
+    /// task) is written nowhere, where before the row was written for
+    /// whatever dispatch the worker carried NOW, and a switch of a worker's
+    /// first attempt, read again after a restart, landed as its second's.
     /// Answers how many were written.
     pub fn workers_model_deviated(&mut self, deviated: &[ModelDeviation], now_ms: i64) -> usize {
         if now_ms < 0 {
@@ -9701,7 +9711,7 @@ impl Ledger {
             let Some((run_id, draft)) = self.runs.iter().find_map(|run| {
                 let worker = run.worker(&deviation.worker)?;
                 let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
-                if !dispatch.is_open()
+                if !deviation.is_bound_to(worker, dispatch)
                     || run.messages.iter().any(|held| {
                         held.kind == MessageKind::ModelDeviated
                             && held.dispatch.as_deref() == Some(dispatch.id.as_str())
@@ -9733,6 +9743,7 @@ impl Ledger {
                     "scope": deviation.scope,
                     "lasts": deviation.lasts(),
                     "key": deviation.key,
+                    "source": deviation.source,
                     "sinceMs": deviation.at_ms,
                     "observedAtMs": now_ms,
                     "rung": ClassifierDeclineRung::Fallback.as_str(),
@@ -13407,10 +13418,21 @@ const _: () =
 
 /// A switch a worker's own CLI recorded: a classifier decline it answered on
 /// the category's route rather than on the model its summons bound (t-6747)
-/// — read off the worker's transcript, one per record.
+/// — read off the worker's transcript, one per record, and bound to the
+/// ATTEMPT it was read under (t-7153, R3): the reading names the worker,
+/// the dispatch that was open when it read, and the file it read, and the
+/// ledger writes the row only while that binding still holds
+/// ([`Ledger::workers_model_deviated`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelDeviation {
     pub worker: String,
+    /// The attempt that was open when the switch was read: a row is that
+    /// attempt's or nobody's — never the next attempt's of the same worker,
+    /// however the ledger moved between the reading and the writing.
+    pub dispatch: String,
+    /// The transcript the switch was read from — the provider session's
+    /// path — so a reading of one conversation is never written as another's.
+    pub source: String,
     /// The record's own identity, so one switch is written once.
     pub key: String,
     /// The model the declined request was sent to, and the one that answered.
@@ -13435,6 +13457,57 @@ impl ModelDeviation {
             _ => "the rest of this conversation",
         }
     }
+
+    /// Whether the ledger can hold this row at all: every name it is keyed
+    /// and read by present and within [`MAX_NAME`], and its words within it
+    /// too. The one rule the actor refuses a request on, and the beat drops
+    /// a switch on — a row the ledger would refuse forever is never asked,
+    /// so it cannot hold back the switches read after it.
+    #[must_use]
+    pub fn fits(&self) -> bool {
+        [
+            &self.worker,
+            &self.dispatch,
+            &self.key,
+            &self.from,
+            &self.to,
+        ]
+        .iter()
+        .all(|name| !name.is_empty() && name.len() <= MAX_NAME)
+            && [&self.category, &self.scope]
+                .iter()
+                .all(|word| word.as_ref().is_none_or(|held| held.len() <= MAX_NAME))
+    }
+
+    /// Whether this switch is `dispatch`'s to write (t-7153, R3): the
+    /// attempt it was read under, still open, dated inside that attempt
+    /// ([`switch_is_the_attempts`]), and — when the ledger knows where that
+    /// worker's conversation is written — read from that very file. A file
+    /// the ledger does not know disputes nothing; a dispatch or a file it
+    /// knows to be another does. The ledger's fence: the beat, which has
+    /// no rows to read, filters on the time rule alone and names the rest.
+    #[must_use]
+    pub fn is_bound_to(&self, worker: &Worker, dispatch: &Dispatch) -> bool {
+        dispatch.is_open()
+            && dispatch.id == self.dispatch
+            && switch_is_the_attempts(self.at_ms, dispatch.started_ms)
+            && worker
+                .session
+                .as_ref()
+                .and_then(|session| session.transcript_path.as_deref())
+                .is_none_or(|known| known == self.source)
+    }
+}
+
+/// Whether a switch written at `at_ms` belongs to the attempt that began at
+/// `attempt_started_ms` (t-7153, R3): the time is the attempt's own
+/// interval's, never the worker's summons — a worker handed a second task
+/// (`dispatch --to`) keeps its summons time, and the first attempt's switches
+/// read again after a restart are dated before the second began. A record
+/// with no time of its own cannot say whose it is, and is nobody's.
+#[must_use]
+pub fn switch_is_the_attempts(at_ms: Option<i64>, attempt_started_ms: i64) -> bool {
+    at_ms.is_some_and(|at_ms| at_ms >= attempt_started_ms)
 }
 
 /// Both witnesses to one worker's decline. Only

@@ -3895,17 +3895,7 @@ impl RuntimeState {
         deviated: &[zerocode_core::orchestration::ModelDeviation],
         now_ms: i64,
     ) -> Result<RuntimeReply, RuntimeError> {
-        if now_ms < 0
-            || deviated.len() > MAX_LIST
-            || deviated.iter().any(|one| {
-                [&one.worker, &one.key, &one.from, &one.to]
-                    .iter()
-                    .any(|name| name.is_empty() || name.len() > MAX_NAME)
-                    || [&one.category, &one.scope]
-                        .iter()
-                        .any(|word| word.as_ref().is_some_and(|held| held.len() > MAX_NAME))
-            })
-        {
+        if now_ms < 0 || deviated.len() > MAX_LIST || deviated.iter().any(|one| !one.fits()) {
             return Err(RuntimeError::InvalidInput);
         }
         if !self.recovery_permits.is_empty() {

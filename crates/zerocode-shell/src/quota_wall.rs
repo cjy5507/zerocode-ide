@@ -607,64 +607,218 @@ pub(crate) struct DeviationScan {
 
 /// Where a switch scan stands: `offset` bytes into the file that was at its
 /// path when it last read — THAT file, by its identity, not whatever stands
-/// at the path now (t-7153, R3). A cursor that knows no file yet reads from
-/// the start of the one it finds.
+/// at the path now (t-7153, R3) — and a fingerprint of what those bytes
+/// were, so a file rewritten in place under the same identity is read
+/// again from its start. A cursor that knows no file yet reads from the
+/// start of the one it finds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct ScanCursor {
     pub(crate) file: Option<TranscriptIdentity>,
     pub(crate) offset: u64,
+    /// What the `offset` counted, as the scan read it.
+    pub(crate) counted: Counted,
 }
 
-impl ScanCursor {
-    /// The cursor standing at `offset` in `file`.
-    const fn at(file: TranscriptIdentity, offset: u64) -> Self {
+/// A fingerprint of the bytes a cursor counted past (t-7153, R3): of every
+/// one of them, and of the last few before the cursor. On a file the
+/// platform names ([`FileId`]) the last few are checked each beat — a file
+/// truncated and rewritten under its own inode, its first line kept, no
+/// longer holds them; on a file the platform cannot name nothing is taken
+/// on faith, and every byte the cursor counted is read again and compared
+/// before the cursor is trusted. A bare fingerprint counted nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Counted {
+    whole: u64,
+    anchor: u64,
+}
+
+impl Default for Counted {
+    fn default() -> Self {
         Self {
-            file: Some(file),
-            offset,
+            whole: FNV_EMPTY,
+            anchor: FNV_EMPTY,
         }
     }
 }
 
-/// Which file a cursor's offset counts into: its first line's opening bytes
-/// — a Claude transcript opens on a record with the session's own uuid and
-/// timestamp — and when it was born, where the file system says. A file
-/// atomically replaced under the same path — a session id reused, a
-/// conversation rewritten — is another file, read from its start, whether
-/// it is shorter, as long as, or longer than the one before: before this an
-/// offset counted into the PATH, so a replacement as long as the old file
-/// read as unchanged and a longer one as appended to, and a switch in
-/// either's first bytes was never read. A file appended to keeps its first
-/// line and its birth, so a cursor into it stands.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct TranscriptIdentity {
-    opening: Vec<u8>,
-    born: Option<std::time::SystemTime>,
+impl Counted {
+    /// This fingerprint carried over `bytes`, which the cursor just counted,
+    /// with the anchor read afresh at `offset` — the cursor's new stand.
+    fn past(self, bytes: &[u8], file: &mut std::fs::File, offset: u64) -> Option<Self> {
+        Some(Self {
+            whole: fnv1a(self.whole, bytes),
+            anchor: fnv1a(FNV_EMPTY, &bytes_before(file, offset)?),
+        })
+    }
+
+    /// Whether what this fingerprint counted still stands before `offset`
+    /// in `file`: the last few bytes when the file is `named` by its
+    /// platform, every byte when it is not.
+    fn still_stands(&self, file: &mut std::fs::File, offset: u64, named: bool) -> bool {
+        if named {
+            return bytes_before(file, offset)
+                .is_some_and(|tail| fnv1a(FNV_EMPTY, &tail) == self.anchor);
+        }
+        use std::io::{Read, Seek, SeekFrom};
+        if file.seek(SeekFrom::Start(0)).is_err() {
+            return false;
+        }
+        let mut whole = FNV_EMPTY;
+        let mut left = offset;
+        let mut chunk = vec![
+            0u8;
+            usize::try_from(zerocode_core::transcript::MAX_TAIL_BYTES.min(offset))
+                .unwrap_or(0)
+        ];
+        while left > 0 {
+            let want = usize::try_from(left.min(chunk.len() as u64)).unwrap_or(0);
+            let Ok(()) = file.read_exact(&mut chunk[..want]) else {
+                return false;
+            };
+            whole = fnv1a(whole, &chunk[..want]);
+            left -= want as u64;
+        }
+        whole == self.whole
+    }
 }
 
-/// How much of the first line names a transcript: a Claude record's `uuid`
-/// and `timestamp` ride in its first few hundred bytes, and a
+/// The last [`TRANSCRIPT_FINGERPRINT_BYTES`] before `offset` in `file` —
+/// fewer when the file is shorter than that — or nothing when they cannot
+/// be read. The file's position is not kept.
+fn bytes_before(file: &mut std::fs::File, offset: u64) -> Option<Vec<u8>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let len = offset.min(TRANSCRIPT_FINGERPRINT_BYTES as u64);
+    file.seek(SeekFrom::Start(offset - len)).ok()?;
+    let mut tail = vec![0u8; usize::try_from(len).ok()?];
+    file.read_exact(&mut tail).ok()?;
+    Some(tail)
+}
+
+/// FNV-1a, 64-bit, carried on from `seed`: a fingerprint that resumes where
+/// it stopped, so what a cursor counted over many beats is one number. The
+/// empty fingerprint is [`FNV_EMPTY`].
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(seed, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    })
+}
+
+/// FNV-1a's offset basis: the fingerprint of nothing.
+const FNV_EMPTY: u64 = 0xcbf2_9ce4_8422_2325;
+
+impl ScanCursor {
+    /// The cursor standing at `offset` in `file`, having counted `counted`.
+    const fn at(file: TranscriptIdentity, offset: u64, counted: Counted) -> Self {
+        Self {
+            file: Some(file),
+            offset,
+            counted,
+        }
+    }
+}
+
+/// Which file a cursor's offset counts into (t-7153, R3): the file's own
+/// name on its platform ([`FileId`]) where the platform gives one, when it
+/// was born where the file system says, and its first line's opening bytes
+/// — a Claude transcript opens on a record with the session's own uuid and
+/// timestamp. A file atomically replaced under the same path — a session
+/// id reused, a conversation rewritten, its first line kept — is another
+/// file by its name alone, read from its start whether it is shorter, as
+/// long as, or longer than the one before: before this the identity was
+/// the first line and a birth time, and a replacement that kept the first
+/// line, on a file system that gives no birth, read as unchanged. A file
+/// appended to keeps every part of its identity, so a cursor into it
+/// stands — once what the cursor counted is found still there
+/// ([`Counted`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TranscriptIdentity {
+    id: Option<FileId>,
+    born: Option<std::time::SystemTime>,
+    opening: Vec<u8>,
+}
+
+/// A file's own name on its platform: device and inode on unix, volume
+/// serial number and file index on Windows — what an atomic replacement
+/// under the same path cannot keep, whatever it keeps of the bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FileId {
+    device: u64,
+    index: u64,
+}
+
+/// What the platform says of an open file: its name, and when it was born
+/// — either nothing where the platform gives none. The scanner takes this
+/// as a parameter so a test can stand where a platform gives neither.
+pub(crate) type FileEvidence =
+    fn(&std::fs::File, &std::fs::Metadata) -> (Option<FileId>, Option<std::time::SystemTime>);
+
+/// This platform's evidence: the file's name and its birth.
+fn platform_evidence(
+    file: &std::fs::File,
+    meta: &std::fs::Metadata,
+) -> (Option<FileId>, Option<std::time::SystemTime>) {
+    (platform_file_id(file, meta), meta.created().ok())
+}
+
+#[cfg(unix)]
+fn platform_file_id(_file: &std::fs::File, meta: &std::fs::Metadata) -> Option<FileId> {
+    use std::os::unix::fs::MetadataExt as _;
+    Some(FileId {
+        device: meta.dev(),
+        index: meta.ino(),
+    })
+}
+
+#[cfg(windows)]
+fn platform_file_id(file: &std::fs::File, _meta: &std::fs::Metadata) -> Option<FileId> {
+    use std::os::windows::io::AsRawHandle as _;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    // SAFETY: an out-parameter of plain data the call fills, zeroed first.
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    // SAFETY: `file` keeps its handle open for the whole call, and `info` is
+    // the properly sized, writable struct the call is documented to fill.
+    let told = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) };
+    (told != 0).then(|| FileId {
+        device: u64::from(info.dwVolumeSerialNumber),
+        index: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    })
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_file_id(_file: &std::fs::File, _meta: &std::fs::Metadata) -> Option<FileId> {
+    None
+}
+
+/// How much of the first line names a transcript, and how many bytes before
+/// the cursor its fingerprint anchors on: a Claude record's `uuid` and
+/// `timestamp` ride in its first few hundred bytes, and a
 /// `file-history-snapshot` opens on its `messageId`.
-const TRANSCRIPT_OPENING_MAX: usize = 4 * 1024;
+const TRANSCRIPT_FINGERPRINT_BYTES: usize = 4 * 1024;
 
 impl TranscriptIdentity {
-    /// The identity of the open `file`, whose metadata is `meta`: its first
+    /// The identity of the open `file`, whose metadata is `meta`, as
+    /// `evidence` names it: its platform name and birth, and its first
     /// line's opening bytes (fewer than a line, when the line is still
     /// being written — a file that has no whole first line yet is an empty
-    /// one, read from its start on every beat until it has), and its birth.
-    fn of(file: &mut std::fs::File, meta: &std::fs::Metadata) -> Option<Self> {
+    /// one, read from its start on every beat until it has).
+    fn of(
+        file: &mut std::fs::File,
+        meta: &std::fs::Metadata,
+        evidence: FileEvidence,
+    ) -> Option<Self> {
         use std::io::{Read, Seek, SeekFrom};
         file.seek(SeekFrom::Start(0)).ok()?;
-        let mut opening = Vec::with_capacity(TRANSCRIPT_OPENING_MAX.min(meta.len() as usize));
-        file.take(TRANSCRIPT_OPENING_MAX as u64)
+        let mut opening = Vec::with_capacity(TRANSCRIPT_FINGERPRINT_BYTES.min(meta.len() as usize));
+        file.take(TRANSCRIPT_FINGERPRINT_BYTES as u64)
             .read_to_end(&mut opening)
             .ok()?;
         if let Some(end) = opening.iter().position(|byte| *byte == b'\n') {
             opening.truncate(end);
         }
-        Some(Self {
-            opening,
-            born: meta.created().ok(),
-        })
+        let (id, born) = evidence(file, meta);
+        Some(Self { id, born, opening })
     }
 }
 
@@ -679,10 +833,21 @@ impl TranscriptIdentity {
 /// line still being written waits for the next reading; a line longer than
 /// the window is a tool result — a switch record is about 700 bytes
 /// ([`tests::CLAUDE_FALLBACK`]) — and is stepped over; a file that is not
-/// the cursor's ([`TranscriptIdentity`]), or that shrank, is read again
-/// from its start. An unchanged file costs one `stat` and one read of its
-/// opening bytes.
+/// the cursor's ([`TranscriptIdentity`]), that shrank, or that no longer
+/// holds what the cursor counted ([`Counted`]) is read again from its
+/// start. An unchanged file costs one `stat`, one read of its opening bytes
+/// and one of the bytes before the cursor.
 pub(crate) fn scan_fallbacks(path: &Path, cursor: &ScanCursor) -> DeviationScan {
+    scan_fallbacks_as(path, cursor, platform_evidence)
+}
+
+/// [`scan_fallbacks`] with the file's platform evidence read by `evidence`
+/// — the production road passes this platform's.
+pub(crate) fn scan_fallbacks_as(
+    path: &Path,
+    cursor: &ScanCursor,
+    evidence: FileEvidence,
+) -> DeviationScan {
     use std::io::{Read, Seek, SeekFrom};
     let standing = |next: ScanCursor| DeviationScan {
         switches: Vec::new(),
@@ -695,34 +860,45 @@ pub(crate) fn scan_fallbacks(path: &Path, cursor: &ScanCursor) -> DeviationScan 
         return standing(cursor.clone());
     };
     let size = meta.len();
-    let Some(identity) = TranscriptIdentity::of(&mut file, &meta) else {
+    let Some(identity) = TranscriptIdentity::of(&mut file, &meta, evidence) else {
         return standing(cursor.clone());
     };
-    let same_file = cursor.file.as_ref() == Some(&identity);
-    let offset = if same_file && size >= cursor.offset {
-        cursor.offset
+    let stands = cursor.file.as_ref() == Some(&identity)
+        && size >= cursor.offset
+        && cursor
+            .counted
+            .still_stands(&mut file, cursor.offset, identity.id.is_some());
+    let (offset, counted) = if stands {
+        (cursor.offset, cursor.counted)
     } else {
-        0
+        (0, Counted::default())
     };
-    let at = |offset: u64| ScanCursor::at(identity.clone(), offset);
+    let at = |offset: u64, counted: Counted| ScanCursor::at(identity.clone(), offset, counted);
     if size == offset || file.seek(SeekFrom::Start(offset)).is_err() {
-        return standing(at(offset));
+        return standing(at(offset, counted));
     }
     let window = zerocode_core::transcript::MAX_TAIL_BYTES.min(size - offset);
     let mut fresh = Vec::new();
-    if file.take(window).read_to_end(&mut fresh).is_err() {
-        return standing(at(offset));
+    if file.by_ref().take(window).read_to_end(&mut fresh).is_err() {
+        return standing(at(offset, counted));
     }
     let Some(end) = fresh.iter().rposition(|byte| *byte == b'\n') else {
         // No whole line in the window: a full window is a line longer than
         // it, stepped over; anything shorter is a line still being written.
         let longer_than_the_window =
             fresh.len() as u64 == window && window == zerocode_core::transcript::MAX_TAIL_BYTES;
-        return standing(at(if longer_than_the_window {
-            offset + window
-        } else {
-            offset
-        }));
+        if !longer_than_the_window {
+            return standing(at(offset, counted));
+        }
+        let past = offset + window;
+        return standing(match counted.past(&fresh, &mut file, past) {
+            Some(counted) => at(past, counted),
+            None => at(offset, counted),
+        });
+    };
+    let past = offset + end as u64 + 1;
+    let Some(counted) = counted.past(&fresh[..=end], &mut file, past) else {
+        return standing(at(offset, counted));
     };
     let lines: Vec<String> = String::from_utf8_lossy(&fresh[..end])
         .lines()
@@ -731,7 +907,7 @@ pub(crate) fn scan_fallbacks(path: &Path, cursor: &ScanCursor) -> DeviationScan 
         .collect();
     DeviationScan {
         switches: fallbacks_in(&lines),
-        next: at(offset + end as u64 + 1),
+        next: at(past, counted),
     }
 }
 
@@ -750,6 +926,8 @@ pub(crate) fn fallbacks_in(lines: &[String]) -> Vec<ModelDeviation> {
             }
             Some(ModelDeviation {
                 worker: String::new(),
+                dispatch: String::new(),
+                source: String::new(),
                 key: value["uuid"].as_str()?.to_string(),
                 from: value["originalModel"].as_str()?.to_string(),
                 to: value["fallbackModel"].as_str()?.to_string(),
@@ -1914,6 +2092,8 @@ pub(crate) mod tests {
             reading.fallbacks,
             vec![ModelDeviation {
                 worker: String::new(),
+                dispatch: String::new(),
+                source: String::new(),
                 key: "switch-1".to_string(),
                 from: "claude-fable-5-1".to_string(),
                 to: "claude-opus-4-8".to_string(),
@@ -2106,6 +2286,218 @@ pub(crate) mod tests {
         let whole = scan_fallbacks(&path, &partial.next);
         assert_eq!(whole.switches.len(), 1);
         assert_eq!(whole.switches[0].key, "switch-5");
+    }
+
+    /// A file truncated and rewritten under its own name — the same inode,
+    /// the same birth, its first line kept — no longer holds what the cursor
+    /// counted, and is read again from its start (t-7153, R3): longer than
+    /// before, or exactly as long; before this the identity was the first
+    /// line and the birth, both kept, and the rewrite read as unchanged or
+    /// as appended to. Appended to after, it is the same file and the
+    /// cursor stands.
+    #[test]
+    fn the_switch_scan_starts_over_when_the_file_is_rewritten_under_its_own_name() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let switch = |key: &str| CLAUDE_FALLBACK.replace("switch-1", key);
+        let rewrite = |content: &str| {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .create(true)
+                .open(&path)
+                .expect("the file, truncated");
+            file.write_all(content.as_bytes()).expect("rewrite");
+        };
+        let keys = |scan: &DeviationScan| -> Vec<String> {
+            scan.switches.iter().map(|one| one.key.clone()).collect()
+        };
+        rewrite(&format!(
+            "{CLAUDE_PLAIN_RECORD}\n{}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n",
+            switch("switch-1")
+        ));
+        let first = scan_fallbacks(&path, &ScanCursor::default());
+        assert_eq!(keys(&first), ["switch-1"]);
+        let old_len = std::fs::metadata(&path).expect("size").len();
+        assert_eq!(first.next.offset, old_len);
+
+        // Rewritten longer, the first line kept, a new switch second.
+        rewrite(&format!(
+            "{CLAUDE_PLAIN_RECORD}\n{}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n{CLAUDE_PLAIN_RECORD}\n",
+            switch("switch-2")
+        ));
+        let longer = scan_fallbacks(&path, &first.next);
+        assert_eq!(
+            keys(&longer),
+            ["switch-2"],
+            "a file rewritten under its own name was read as appended to"
+        );
+        assert_eq!(
+            longer.next.file, first.next.file,
+            "the same file by every name the platform gives"
+        );
+
+        // Rewritten exactly as long, the first line kept, a new switch second.
+        rewrite(&a_transcript_as_long_as(
+            &format!("{CLAUDE_PLAIN_RECORD}\n{}", switch("switch-3")),
+            longer.next.offset,
+        ));
+        let as_long = scan_fallbacks(&path, &longer.next);
+        assert_eq!(
+            keys(&as_long),
+            ["switch-3"],
+            "a file rewritten as long as before under its own name was read as unchanged"
+        );
+        assert_eq!(as_long.next.offset, longer.next.offset);
+
+        // Appended to: the same file, and the cursor stands.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        writeln!(file, "{}", switch("switch-4")).expect("write");
+        let appended = scan_fallbacks(&path, &as_long.next);
+        assert_eq!(keys(&appended), ["switch-4"]);
+        let again = scan_fallbacks(&path, &appended.next);
+        assert_eq!(
+            again,
+            DeviationScan {
+                switches: Vec::new(),
+                next: appended.next.clone(),
+            },
+            "an unchanged file moved the cursor"
+        );
+    }
+
+    /// A file atomically replaced under its path by one that keeps its first
+    /// line, its length and every byte before the cursor's last few
+    /// thousand — a conversation rewritten, one record in its middle
+    /// changed — is another file by the name the platform gives it, and is
+    /// read from its start (t-7153, R3); before this the identity was the
+    /// first line and a birth time, and where the file system gives no
+    /// birth the replacement read as unchanged.
+    #[test]
+    fn the_switch_scan_starts_over_when_a_replacement_keeps_the_first_line_and_the_tail() {
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let replace = |content: &str| {
+            let fresh = dir.path().join("session.jsonl.next");
+            std::fs::write(&fresh, content).expect("the replacement");
+            std::fs::rename(&fresh, &path).expect("atomic replace");
+        };
+        // The tail before the cursor: more than the fingerprint's bytes,
+        // the same in both files.
+        let tail = format!("{CLAUDE_PLAIN_RECORD}\n")
+            .repeat(TRANSCRIPT_FINGERPRINT_BYTES / CLAUDE_PLAIN_RECORD.len() + 2);
+        let with = |key: &str| {
+            format!(
+                "{CLAUDE_PLAIN_RECORD}\n{}\n{tail}",
+                CLAUDE_FALLBACK.replace("switch-1", key)
+            )
+        };
+        replace(&with("switch-1"));
+        let first = scan_fallbacks(&path, &ScanCursor::default());
+        assert_eq!(first.switches.len(), 1);
+        assert_eq!(first.next.offset, with("switch-1").len() as u64);
+        replace(&with("switch-2"));
+        assert_eq!(
+            std::fs::metadata(&path).expect("size").len(),
+            first.next.offset,
+            "as long as before"
+        );
+        let rotated = scan_fallbacks(&path, &first.next);
+        assert_eq!(
+            rotated
+                .switches
+                .iter()
+                .map(|one| one.key.as_str())
+                .collect::<Vec<_>>(),
+            ["switch-2"],
+            "a replacement that kept the first line and the tail was read as unchanged"
+        );
+    }
+
+    /// Where the platform names no file, nothing is taken on faith
+    /// (t-7153, R3): every byte the cursor counted is read again and
+    /// compared before the cursor is trusted — a file replaced under its
+    /// path by one exactly as long, its first line and the bytes before the
+    /// cursor's last few thousand kept, whose identity without a platform
+    /// name is the same, is read from its start; a longer replacement too;
+    /// a file appended to still stands, and its cursor still moves.
+    #[test]
+    fn the_switch_scan_takes_nothing_on_faith_where_the_platform_names_no_file() {
+        use std::io::Write;
+        let unnamed: FileEvidence = |_, _| (None, None);
+        let dir = tempfile::tempdir().expect("a dir");
+        let path = dir.path().join("session.jsonl");
+        let switch = |key: &str| CLAUDE_FALLBACK.replace("switch-1", key);
+        let replace = |content: &str| {
+            let fresh = dir.path().join("session.jsonl.next");
+            std::fs::write(&fresh, content).expect("the replacement");
+            std::fs::rename(&fresh, &path).expect("atomic replace");
+        };
+        let scan = |cursor: &ScanCursor| scan_fallbacks_as(&path, cursor, unnamed);
+        let keys = |scan: &DeviationScan| -> Vec<String> {
+            scan.switches.iter().map(|one| one.key.clone()).collect()
+        };
+        // More than the fingerprint's bytes after the switch, the same in
+        // every file.
+        let tail = format!("{CLAUDE_PLAIN_RECORD}\n")
+            .repeat(TRANSCRIPT_FINGERPRINT_BYTES / CLAUDE_PLAIN_RECORD.len() + 2);
+        let with = |key: &str| format!("{CLAUDE_PLAIN_RECORD}\n{}\n{tail}", switch(key));
+        replace(&with("switch-1"));
+        let first = scan(&ScanCursor::default());
+        assert_eq!(keys(&first), ["switch-1"]);
+        let old_len = std::fs::metadata(&path).expect("size").len();
+        assert_eq!(first.next.offset, old_len);
+
+        // As long as before, the first line and the tail kept: the same
+        // file by every name this platform gives, and read from its start
+        // all the same.
+        replace(&with("switch-2"));
+        assert_eq!(std::fs::metadata(&path).expect("size").len(), old_len);
+        let as_long = scan(&first.next);
+        assert_eq!(
+            as_long.next.file, first.next.file,
+            "the platform told them apart"
+        );
+        assert_eq!(
+            keys(&as_long),
+            ["switch-2"],
+            "a replacement as long as the old file, its first line kept, was taken on faith"
+        );
+        assert_eq!(as_long.next.offset, old_len);
+
+        // Appended to: what the cursor counted is still there, the cursor
+        // stands and moves on.
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .expect("append");
+        writeln!(file, "{}", switch("switch-3")).expect("write");
+        drop(file);
+        let appended = scan(&as_long.next);
+        assert_eq!(keys(&appended), ["switch-3"]);
+        assert_eq!(
+            appended.next.offset,
+            std::fs::metadata(&path).expect("size").len()
+        );
+        let again = scan(&appended.next);
+        assert_eq!(keys(&again), Vec::<String>::new());
+        assert_eq!(
+            again.next, appended.next,
+            "an unchanged file moved the cursor"
+        );
+
+        // Longer than before, the first line kept: from the start too.
+        replace(&format!("{}{tail}{tail}", with("switch-4")));
+        let longer = scan(&again.next);
+        assert_eq!(
+            keys(&longer),
+            ["switch-4"],
+            "a longer replacement, its first line kept, was read as appended to"
+        );
     }
 
     /// A reading is bounded (t-7153, P2): at most the tail window's bytes a
