@@ -9560,10 +9560,17 @@ impl Ledger {
     /// `classifier_declined` notice per attempt, to the run's coordinator.
     ///
     /// The ledger revalidates what it owns — a live worker in its seat, no
-    /// person's hand on the pane, an open attempt, not told already — and
-    /// says which rung comes next ([`CLASSIFIER_DECLINE_LADDER`]): the
-    /// handover when the run declared one and the category is routed, the
-    /// coordinator otherwise. Answers how many were told.
+    /// person's hand on the pane, an open attempt, THIS record not told
+    /// already — and says which rung comes next
+    /// ([`CLASSIFIER_DECLINE_LADDER`]): the handover when the run declared
+    /// one and the category is routed, the coordinator otherwise. A notice
+    /// is one record's (t-7153, R4): the same record on the next beat is
+    /// the same fact and is not told again; a later record of the same
+    /// attempt — another request declined, or the record a dialog leaves
+    /// once a key answers it — is news of its own, told and planned from
+    /// what the pane shows now, where before one notice, whatever it
+    /// witnessed, closed the attempt to every reading after it. Answers how
+    /// many were told.
     pub fn workers_classifier_declined(
         &mut self,
         declined: &[ClassifierDeclineWitness],
@@ -9580,7 +9587,7 @@ impl Ledger {
                     return None;
                 }
                 let dispatch = run.dispatch(worker.dispatch.as_deref()?)?;
-                if !dispatch.is_open() || newest_decline(run, &dispatch.id).is_some() {
+                if !dispatch.is_open() || decline_told(run, &dispatch.id, &witness.record.key) {
                     return None;
                 }
                 let category = witness.record.category.as_deref();
@@ -13289,15 +13296,45 @@ pub fn decline_is_routed(category: Option<&str>) -> bool {
     category.is_some_and(|word| ROUTED_DECLINE_CATEGORIES.contains(&word))
 }
 
-/// The attempt's `classifier_declined` notice, when one was written — one
-/// per attempt: the same decline seen on the next beat is the same fact, and
-/// a replacement is a new attempt with a notice of its own.
+/// The record keys of the attempt's `classifier_declined` notices — one
+/// notice per record (t-7153, R4): the same decline seen on the next beat
+/// is the same fact, a decline on another record of the same attempt is
+/// news of its own, and a replacement is a new attempt with notices of its
+/// own. A notice written before the key rode in the body names none.
 #[must_use]
-pub fn newest_decline<'a>(run: &'a Run, dispatch_id: &str) -> Option<&'a Message> {
-    run.messages.iter().rev().find(|held| {
-        held.kind == MessageKind::ClassifierDeclined
-            && held.dispatch.as_deref() == Some(dispatch_id)
-    })
+pub fn declines_told(run: &Run, dispatch_id: &str) -> Vec<String> {
+    run.messages
+        .iter()
+        .filter(|held| {
+            held.kind == MessageKind::ClassifierDeclined
+                && held.dispatch.as_deref() == Some(dispatch_id)
+        })
+        .filter_map(|held| {
+            serde_json::from_str::<serde_json::Value>(held.body.as_str())
+                .ok()?
+                .get("record")?
+                .get("key")?
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect()
+}
+
+/// Whether the attempt's decline on `record_key` was told already
+/// ([`declines_told`]).
+#[must_use]
+pub fn decline_told(run: &Run, dispatch_id: &str, record_key: &str) -> bool {
+    declines_told(run, dispatch_id)
+        .iter()
+        .any(|told| told == record_key)
+}
+
+/// The key of a decline the pause dialog alone witnessed: the attempt's,
+/// one dialog notice per attempt — two readings of one dialog are one fact
+/// however the pty's clock moved between them.
+#[must_use]
+pub fn decline_dialog_key(dispatch: &str) -> String {
+    format!("{DECLINE_DIALOG_SOURCE}:{dispatch}")
 }
 
 /// A worker's OWN record that its provider's safety classifier declined its
@@ -13423,8 +13460,7 @@ pub struct ClassifierDeclineWitness {
 /// time: the dialog on screen, and the pane quiet longer than any dialog a
 /// person answered here ([`DECLINE_DIALOG_UNANSWERED_MS`]) — a witness that
 /// is told, and that ends no worker ([`decline_source_may_stop`]): its key
-/// is the attempt's, one dialog notice per attempt, since two readings of
-/// one dialog are one fact however the pty's clock moved between them.
+/// is the attempt's ([`decline_dialog_key`]), one dialog notice per attempt.
 #[must_use]
 pub fn classifier_decline_witness(
     worker: &str,
@@ -13444,7 +13480,7 @@ pub fn classifier_decline_witness(
                 source: DECLINE_DIALOG_SOURCE.to_string(),
                 line: screen.line.clone(),
                 category: screen.category.clone(),
-                key: format!("{DECLINE_DIALOG_SOURCE}:{dispatch}"),
+                key: decline_dialog_key(dispatch),
             }
         }
         None => return None,

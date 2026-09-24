@@ -13672,6 +13672,114 @@ fn a_screen_only_decline_is_diagnostic_news_and_plans_no_handover() {
     );
 }
 
+/// A notice is one record's (t-7153, R4): the same witness on the next
+/// beat is told nothing again; a decline the screen alone witnessed, told,
+/// closes the attempt to nothing — the record that follows it is told and
+/// planned; and a later record of the same attempt is told and planned on
+/// its own key, where the earlier plan still stands for its own.
+#[test]
+fn a_declined_attempt_is_told_again_on_a_new_record_and_never_twice_on_one() {
+    const NOW: i64 = 7_000_000;
+    let mut bench = Bench::new();
+    bench.json("run-create --name records");
+    bench.json("handover-policy --on-classifier-decline claude:claude-opus-4-8");
+    let task = bench.json("task-create --spec build-it")["taskId"]
+        .as_str()
+        .expect("a task")
+        .to_string();
+    let (worker, pane) = bench.seat(&format!(
+        "worker-start --agent claude --model fable --effort max --task {task}"
+    ));
+    assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/records"));
+    let dispatch = bench.ledger.runs()[0]
+        .worker(&worker)
+        .and_then(|held| held.dispatch.clone())
+        .expect("the attempt");
+    let dialog = classifier_decline_witness(
+        &worker,
+        &dispatch,
+        Some(a_decline_screen(true, Some("cyber"))),
+        None,
+        NOW - DECLINE_DIALOG_UNANSWERED_MS,
+        NOW,
+    )
+    .expect("the dialog and its silence");
+    let record = |category: Option<&str>, key: &str, at: i64| {
+        classifier_decline_witness(
+            &worker,
+            &dispatch,
+            Some(a_decline_screen(false, None)),
+            Some(a_decline_record(category, key)),
+            at - 60_000,
+            at,
+        )
+        .expect("two witnesses")
+    };
+    let told = |bench: &mut Bench, witness: &ClassifierDeclineWitness, at: i64| {
+        bench
+            .ledger
+            .workers_classifier_declined(std::slice::from_ref(witness), at)
+    };
+    assert_eq!(told(&mut bench, &dialog, NOW), 1);
+    assert_eq!(
+        told(&mut bench, &dialog, NOW + 1),
+        0,
+        "the same dialog told twice"
+    );
+    assert!(next_handover(&bench.ledger.runs()[0], NOW + 1).is_none());
+
+    let first = record(Some("cyber"), "u-1", NOW + 2);
+    assert_eq!(
+        told(&mut bench, &first, NOW + 2),
+        1,
+        "the record after the dialog's notice was not told"
+    );
+    assert_eq!(
+        told(&mut bench, &first, NOW + 3),
+        0,
+        "the same record told twice"
+    );
+    let plan = next_handover(&bench.ledger.runs()[0], NOW + 3).expect("a plan on the record");
+    assert_eq!(
+        plan.cause,
+        HandoverCause::ClassifierDecline {
+            category: "cyber".to_string(),
+            record_key: "u-1".to_string(),
+        }
+    );
+
+    let second = record(Some("cyber"), "u-2", NOW + 4);
+    assert_eq!(
+        told(&mut bench, &second, NOW + 4),
+        1,
+        "a later record of the same attempt was not told"
+    );
+    let news = bench.json("check --peek --types classifier_declined");
+    assert_eq!(news["count"], 3, "{news}");
+    let planned = |key: &str| {
+        next_handover_witnessed(&bench.ledger.runs()[0], NOW + 5, |plan| {
+            plan.cause
+                == HandoverCause::ClassifierDecline {
+                    category: "cyber".to_string(),
+                    record_key: key.to_string(),
+                }
+        })
+        .is_some()
+    };
+    assert!(
+        planned("u-2"),
+        "the later record was not planned on its own key"
+    );
+    assert!(
+        planned("u-1"),
+        "the earlier record's plan, for its own key, was lost"
+    );
+    assert!(
+        !planned(&dialog.record.key),
+        "a screen-only notice was planned"
+    );
+}
+
 /// A switch of model a worker's CLI recorded is written once, with the
 /// binding it left: the two models, the category, how long the CLI keeps
 /// it, and why.

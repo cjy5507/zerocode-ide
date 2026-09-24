@@ -3178,30 +3178,12 @@ fn a_screen_quoting_the_dialogs_words_is_nothing_and_the_cli_dialog_is_diagnosti
 /// the boundary reads the same decline again, the walk lands.
 #[test]
 fn a_decline_that_reads_differently_at_the_last_boundary_ends_no_worker() {
-    let printed = |category: Option<&str>, key: &str| crate::quota_wall::DeclineReading {
-        screen: Some(zerocode_core::orchestration::DeclineScreen {
-            line: zerocode_core::orchestration::Text::from(
-                "API Error: Fable 5.1's safeguards flagged this message.",
-            ),
-            dialog: false,
-            category: None,
-        }),
-        record: Some(zerocode_core::orchestration::ClassifierDeclineMarker {
-            source: "transcript".to_string(),
-            line: zerocode_core::orchestration::Text::from(
-                "API Error: Fable 5.1's safeguards flagged this message.",
-            ),
-            category: category.map(str::to_string),
-            key: key.to_string(),
-        }),
-        fallbacks: Vec::new(),
-    };
     let changed = [
-        (85_800, printed(None, "decline-record-1")),
-        (85_900, printed(Some("cyber"), "decline-record-2")),
+        (85_800, a_printed_decline(None, "decline-record-1")),
+        (85_900, a_printed_decline(Some("cyber"), "decline-record-2")),
         (
             86_000,
-            printed(Some("reasoning_extraction"), "decline-record-1"),
+            a_printed_decline(Some("reasoning_extraction"), "decline-record-1"),
         ),
     ];
     for (leader_term, at_the_fence) in changed {
@@ -3244,6 +3226,155 @@ fn a_decline_that_reads_differently_at_the_last_boundary_ends_no_worker() {
         );
         assert_eq!(stood.worker_state(&stood.worker), "Released");
     }
+}
+
+/// A pane at a printed decline: the CLI's sentence on screen, and its
+/// transcript's last record the decline, in `category`, keyed `key`.
+fn a_printed_decline(category: Option<&str>, key: &str) -> crate::quota_wall::DeclineReading {
+    const SAID: &str = "API Error: Fable 5.1's safeguards flagged this message.";
+    crate::quota_wall::DeclineReading {
+        screen: Some(zerocode_core::orchestration::DeclineScreen {
+            line: zerocode_core::orchestration::Text::from(SAID),
+            dialog: false,
+            category: None,
+        }),
+        record: Some(zerocode_core::orchestration::ClassifierDeclineMarker {
+            source: "transcript".to_string(),
+            line: zerocode_core::orchestration::Text::from(SAID),
+            category: category.map(str::to_string),
+            key: key.to_string(),
+        }),
+        fallbacks: Vec::new(),
+    }
+}
+
+/// A dialog's diagnostic notice closes nothing (t-7153, R4): once the same
+/// attempt's pane stands at a RECORD — the CLI printed the error, its
+/// transcript's last record is the decline in a routed category, the hook
+/// at rest — that record is news of its own, told on the handover rung
+/// under the declared order and walked exactly once; before this one
+/// notice, whatever witnessed it, closed the attempt to every reading
+/// after it, and the record was never told nor planned.
+#[test]
+fn a_dialogs_diagnostic_notice_does_not_hide_the_record_that_follows_it() {
+    const LEADER_TERM: u32 = 86_100;
+    const MINUTE: i64 = 60_000;
+    let stood = Walled::stand_paused(
+        LEADER_TERM,
+        "/tmp",
+        "--on-classifier-decline claude:claude-opus-4-8",
+    );
+    let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
+    stood.host.pty_silent_for(11 * MINUTE);
+    tick(&stood.host, &[], stood.began + 20_000);
+    assert_eq!(told(stood.began + 20_001)["count"], 1);
+    assert!(stood.receipts(stood.began + 20_001).is_empty());
+
+    // The record, on the same open attempt.
+    stood.host.declined(
+        LEADER_TERM + 1,
+        a_printed_decline(Some("cyber"), "decline-record-1"),
+    );
+    *stood.host.busy.lock().unwrap() = false;
+    tick(&stood.host, &[], stood.began + 30_000);
+    let news = told(stood.began + 30_001);
+    assert_eq!(
+        news["count"], 2,
+        "the record after the dialog's notice was not told: {news}"
+    );
+    let receipts = stood.receipts(stood.began + 30_001);
+    assert_eq!(receipts.len(), 1, "{receipts:?}");
+    assert_eq!(receipts[0]["status"], "done", "{}", receipts[0]);
+    assert_eq!(receipts[0]["reason"], "classifier-decline");
+    assert_eq!(
+        receipts[0]["recordKey"], "decline-record-1",
+        "{}",
+        receipts[0]
+    );
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+
+    // Once: the next beat tells nothing more and walks nothing more.
+    tick(&stood.host, &[], stood.began + 40_000);
+    assert_eq!(told(stood.began + 40_001)["count"], 2);
+    assert_eq!(stood.receipts(stood.began + 40_001).len(), 1);
+}
+
+/// A later decline of the same attempt is told on its own record and
+/// planned on it (t-7153, R4): the same record on the next beat is told
+/// once; another record — a later request declined — is news again; and
+/// under an order declared after both, the walk lands on the record the
+/// pane stands at now, exactly once, never on the one it left behind.
+#[test]
+fn a_later_decline_of_the_same_attempt_is_told_and_planned_on_its_own_record() {
+    const LEADER_TERM: u32 = 86_200;
+    let stood = Walled::stand_declined(LEADER_TERM, "/tmp", "cyber", "");
+    let told = |at: i64| stood.json("check --peek --types classifier_declined", at);
+    tick(&stood.host, &[], stood.began + 10_000);
+    assert_eq!(told(stood.began + 10_001)["count"], 1);
+    tick(&stood.host, &[], stood.began + 11_000);
+    assert_eq!(
+        told(stood.began + 11_001)["count"],
+        1,
+        "the same record was told twice"
+    );
+
+    stood.host.declined(
+        LEADER_TERM + 1,
+        a_printed_decline(Some("cyber"), "decline-record-2"),
+    );
+    tick(&stood.host, &[], stood.began + 20_000);
+    let news = told(stood.began + 20_001);
+    assert_eq!(
+        news["count"], 2,
+        "a later decline on another record was not told: {news}"
+    );
+    let keys: Vec<String> = news["messages"]
+        .as_array()
+        .expect("messages")
+        .iter()
+        .map(|message| {
+            serde_json::from_str::<serde_json::Value>(message["body"].as_str().expect("a body"))
+                .expect("json")["record"]["key"]
+                .as_str()
+                .expect("a key")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(keys, ["decline-record-1", "decline-record-2"]);
+    tick(&stood.host, &[], stood.began + 21_000);
+    assert_eq!(
+        told(stood.began + 21_001)["count"],
+        2,
+        "the second record was told twice"
+    );
+    assert!(
+        stood.receipts(stood.began + 21_001).is_empty(),
+        "no order declared"
+    );
+
+    stood.json(
+        "handover-policy --on-classifier-decline claude:claude-opus-4-8",
+        stood.began + 22_000,
+    );
+    tick(&stood.host, &[], stood.began + 30_000);
+    let receipts = stood.receipts(stood.began + 30_001);
+    let done: Vec<&serde_json::Value> = receipts
+        .iter()
+        .filter(|receipt| receipt["status"] == "done")
+        .collect();
+    assert_eq!(done.len(), 1, "{receipts:?}");
+    assert_eq!(done[0]["recordKey"], "decline-record-2", "{}", done[0]);
+    assert_eq!(stood.worker_state(&stood.worker), "Released");
+    tick(&stood.host, &[], stood.began + 40_000);
+    assert_eq!(
+        stood
+            .receipts(stood.began + 40_001)
+            .iter()
+            .filter(|receipt| receipt["status"] == "done")
+            .count(),
+        1,
+        "walked twice"
+    );
 }
 
 /// A category the provider routes nowhere is news and walks nowhere, even

@@ -3964,9 +3964,11 @@ struct Stalled {
     /// Whether the run declared `--on-transient-error resume` — asked before
     /// a transcript is read, so an undeclared run costs nothing more.
     resume_declared: bool,
-    /// Whether this attempt's decline was told already (t-6747): its silence
-    /// is ordinary quiet news after that, reminded as any other.
-    declined_already: bool,
+    /// The record keys of this attempt's declines told already (t-6747):
+    /// the same decline's silence is ordinary quiet news after that,
+    /// reminded as any other — and a decline on another record of the same
+    /// attempt is news again (t-7153, R4).
+    declines_told: Vec<String>,
     /// The attempt it carries, and that attempt's task.
     dispatch: String,
     task: String,
@@ -4041,11 +4043,7 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
                         .handover
                         .as_ref()
                         .is_some_and(|policy| policy.on_transient_error.is_some()),
-                    declined_already: zerocode_core::orchestration::newest_decline(
-                        run,
-                        &dispatch.id,
-                    )
-                    .is_some(),
+                    declines_told: zerocode_core::orchestration::declines_told(run, &dispatch.id),
                     dispatch: dispatch.id.clone(),
                     task: dispatch.task.clone(),
                     checkout: worker.checkout.clone(),
@@ -4155,8 +4153,10 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
          * pause dialog, stood past every dialog a person answered here. Both
          * or nothing, the pure function decides; a pane at a decline is not
          * quiet news until its notice is told, and ordinary quiet news after
-         * that. */
-        if !wall_words && !one.declined_already {
+         * that — told by the RECORD (t-7153, R4): the pane is read again
+         * every beat, and a decline on a record not told yet is news, where
+         * the one told already is the silence it was. */
+        if !wall_words {
             let witness = host
                 .classifier_decline_reading(one.term, &one.agent)
                 .and_then(|reading| {
@@ -4168,7 +4168,8 @@ fn notify_stalled_workers(host: &dyn Host, now_ms: i64) {
                         one.since_ms,
                         now_ms,
                     )
-                });
+                })
+                .filter(|witness| !one.declines_told.contains(&witness.record.key));
             if let Some(witness) = witness {
                 declined.push(witness);
                 continue;
@@ -4279,8 +4280,8 @@ struct SeatedAttempt {
     term: u32,
     dispatch: String,
     taken_over: bool,
-    /// Whether this attempt's classifier decline was told already.
-    declined_already: bool,
+    /// The record keys of this attempt's classifier declines told already.
+    declines_told: Vec<String>,
 }
 
 fn seated_open_attempts(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<SeatedAttempt> {
@@ -4311,11 +4312,7 @@ fn seated_open_attempts(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<SeatedAtt
                     term,
                     dispatch: dispatch.id.clone(),
                     taken_over: worker.taken_over,
-                    declined_already: zerocode_core::orchestration::newest_decline(
-                        run,
-                        &dispatch.id,
-                    )
-                    .is_some(),
+                    declines_told: zerocode_core::orchestration::declines_told(run, &dispatch.id),
                 })
             })
         })
@@ -4331,8 +4328,10 @@ fn seated_open_attempts(ledger: &Ledger, seats: &TeamSeatIndex) -> Vec<SeatedAtt
 /// the 75 s after it, and nothing after its 17th second). The dialog on
 /// screen and a pty silent past every dialog a person answered here are the
 /// two witnesses ([`zerocode_core::orchestration::classifier_decline_witness`]);
-/// a pane the sweep can read is the sweep's, and a told decline is not told
-/// again.
+/// a pane the sweep can read is the sweep's, and a told dialog — one notice
+/// per attempt, its key the attempt's — is not told again, nor read again
+/// for it; a record the reading finds, told already, is not told again
+/// either (t-7153, R4).
 fn note_paused_declines(host: &dyn Host, now_ms: i64) {
     let (Some(seated), Some(held)) = (with_ledger_seats(seated_open_attempts), runtime()) else {
         return;
@@ -4340,7 +4339,11 @@ fn note_paused_declines(host: &dyn Host, now_ms: i64) {
     let mut declined = Vec::new();
     for one in seated {
         if one.taken_over
-            || one.declined_already
+            || one
+                .declines_told
+                .contains(&zerocode_core::orchestration::decline_dialog_key(
+                    &one.dispatch,
+                ))
             || !crate::quota_wall::has_rule(
                 &one.agent,
                 crate::quota_wall::StallCause::ClassifierDecline,
@@ -4368,7 +4371,8 @@ fn note_paused_declines(host: &dyn Host, now_ms: i64) {
                     since_ms,
                     now_ms,
                 )
-            });
+            })
+            .filter(|witness| !one.declines_told.contains(&witness.record.key));
         declined.extend(witness);
     }
     let mut moved = false;
