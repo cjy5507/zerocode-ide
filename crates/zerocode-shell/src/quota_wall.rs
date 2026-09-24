@@ -2586,6 +2586,183 @@ pub(crate) mod tests {
         assert_eq!(found, ["switch-mid", "switch-6"]);
     }
 
+    /// `len` bytes of whole records that open on a plain record and then a
+    /// SLOT — a record `slot` bytes long that is no switch, [`SLOT_AT`]
+    /// bytes in — so a rewrite in place can put a switch as long there and
+    /// move no byte after it (t-7153 r4).
+    pub(crate) fn records_with_a_slot(len: usize, slot: usize) -> String {
+        let plain = format!("{CLAUDE_PLAIN_RECORD}\n");
+        let head = format!("{plain}{}\n", a_record_as_long_as(slot));
+        let fill = plain.repeat((len - head.len()) / plain.len() - 1);
+        let content = format!(
+            "{head}{fill}{}\n",
+            a_record_as_long_as(len - head.len() - fill.len() - 1)
+        );
+        assert_eq!(content.len(), len, "the run's length");
+        content
+    }
+
+    /// How far into a run of [`records_with_a_slot`] its slot stands: past
+    /// the plain record it opens on.
+    pub(crate) const SLOT_AT: usize = CLAUDE_PLAIN_RECORD.len() + 1;
+
+    /// `bytes` written over the file at `path` from `at` — in place: the
+    /// same inode, the same birth, its length kept (t-7153 r4).
+    pub(crate) fn overwrite_at(path: &Path, at: u64, bytes: &str) {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("the file");
+        file.seek(SeekFrom::Start(at)).expect("seek");
+        file.write_all(bytes.as_bytes()).expect("rewrite in place");
+    }
+
+    /// Every window a cursor counted is checked within a bound however the
+    /// file grows (t-7153 r4, R3a, after astra t-6963 on 2e4ea291). A round
+    /// of checks is fixed as it begins — the windows the cursor had counted
+    /// then — each reading checks the next of them, and a window counted
+    /// since waits for the next round; so a rewrite in place of window `i`
+    /// of the `N` a cursor counted when the file was rewritten — its first
+    /// line, its length and the bytes before the cursor kept — is found
+    /// within `2N − 1` readings however fast the file grows: what is left
+    /// of the round under way (its end fixed at no more than `N`), then
+    /// `i + 1` readings of the next. The first, the middle and the last of
+    /// the windows, rewritten at every phase of the rounds — 0 to `2N`
+    /// readings after the scan caught up with a three-window file — the
+    /// file not growing, or growing half a window, a window or two windows
+    /// a reading all the while: each found within the bound, read from its
+    /// start, and its switch read once on the readings that follow; a file
+    /// only appended to is never read again from its start. Before this
+    /// the window a reading checked was the reading's count over the
+    /// windows counted NOW, and a file growing a window a reading, both
+    /// moving one a reading, named the same window on every reading for as
+    /// long as it grew: the others were never checked again.
+    #[test]
+    fn every_window_a_cursor_counted_is_checked_within_its_bound_however_the_file_grows() {
+        use zerocode_core::transcript::MAX_TAIL_BYTES;
+        const WINDOWS: u64 = 3;
+        let window = usize::try_from(MAX_TAIL_BYTES).expect("small");
+        let switch = CLAUDE_FALLBACK.replace("switch-1", "switch-rewritten");
+        let dir = tempfile::tempdir().expect("a dir");
+        let (mut cases, mut misses) = (0, Vec::new());
+        for growth in [&[][..], &[window / 2], &[window], &[window, window]] {
+            for phase in 0..=2 * WINDOWS {
+                for which in ["first", "middle", "last"] {
+                    cases += 1;
+                    let case = format!(
+                        "{} bytes a reading, {phase} readings in, the {which}",
+                        growth.iter().sum::<usize>()
+                    );
+                    let path = dir.path().join("session.jsonl");
+                    let mut slots = Vec::new();
+                    let append = |slots: &mut Vec<u64>, runs: &[usize]| {
+                        use std::io::Write;
+                        let mut file = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&path)
+                            .expect("append");
+                        for len in runs {
+                            let at = file.metadata().expect("size").len();
+                            slots.push(at + SLOT_AT as u64);
+                            file.write_all(records_with_a_slot(*len, switch.len()).as_bytes())
+                                .expect("write");
+                        }
+                    };
+                    let grow = |slots: &mut Vec<u64>| append(slots, growth);
+                    append(&mut slots, &[window; WINDOWS as usize]);
+                    // The caller's own count of its readings (t-7153, R3).
+                    let mut turn = 0;
+                    let mut read = |cursor: &ScanCursor| {
+                        let scan = scan_fallbacks(&path, cursor, turn);
+                        turn += 1;
+                        scan
+                    };
+
+                    // Caught up, a window a reading.
+                    let size = std::fs::metadata(&path).expect("size").len();
+                    let mut cursor = ScanCursor::default();
+                    while cursor.offset < size {
+                        let scan = read(&cursor);
+                        assert!(scan.switches.is_empty() && scan.next.offset > cursor.offset);
+                        cursor = scan.next;
+                    }
+                    // Grown, never rewritten: the cursor never starts over.
+                    for _ in 0..phase {
+                        grow(&mut slots);
+                        let scan = read(&cursor);
+                        assert!(
+                            scan.next.offset >= cursor.offset,
+                            "{case}: a file only appended to was read again from its start"
+                        );
+                        cursor = scan.next;
+                    }
+
+                    // Rewritten in place: a slot of the window named, clear
+                    // of the bytes just before the cursor.
+                    let counted = cursor.offset.div_ceil(MAX_TAIL_BYTES);
+                    let target = match which {
+                        "first" => 0,
+                        "middle" => counted / 2,
+                        _ => counted - 1,
+                    };
+                    let len = switch.len() as u64;
+                    let slot = slots
+                        .iter()
+                        .copied()
+                        .find(|at| {
+                            at / MAX_TAIL_BYTES == target
+                                && (at + len - 1) / MAX_TAIL_BYTES == target
+                                && at + len <= cursor.offset - TRANSCRIPT_FINGERPRINT_BYTES as u64
+                        })
+                        .unwrap_or_else(|| panic!("{case}: no slot in window {target}"));
+                    overwrite_at(&path, slot, &switch);
+                    let bound = 2 * counted - 1;
+                    let mut found = Vec::new();
+                    let mut readings = 0;
+                    let started_over = loop {
+                        if readings == 2 * bound {
+                            break None;
+                        }
+                        readings += 1;
+                        grow(&mut slots);
+                        let scan = read(&cursor);
+                        let over = scan.next.offset < cursor.offset;
+                        found.extend(scan.switches.into_iter().map(|one| one.key));
+                        cursor = scan.next;
+                        if over {
+                            break Some(readings);
+                        }
+                    };
+                    // Read from its start: window `target` on the reading
+                    // `target` after the one that started over.
+                    if started_over.is_some() {
+                        for _ in 0..target {
+                            grow(&mut slots);
+                            let scan = read(&cursor);
+                            found.extend(scan.switches.into_iter().map(|one| one.key));
+                            cursor = scan.next;
+                        }
+                    }
+                    match started_over {
+                        Some(readings) if readings <= bound && found == ["switch-rewritten"] => {}
+                        _ => misses.push(format!(
+                            "{case} (window {target} of {counted}): started over after {started_over:?} readings, bound {bound}; found {found:?}"
+                        )),
+                    }
+                    std::fs::remove_file(&path).expect("the case's file");
+                }
+            }
+        }
+        assert_eq!(cases, 4 * 7 * 3);
+        assert!(
+            misses.is_empty(),
+            "{} of {cases} rewrites stood past their bound: {misses:#?}",
+            misses.len()
+        );
+    }
+
     /// Where the platform names no file, nothing is taken on faith
     /// (t-7153, R3): every window the cursor counted is read again and
     /// compared before the cursor is trusted — a file replaced under its

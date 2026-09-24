@@ -5040,6 +5040,119 @@ fn a_switch_in_a_transcript_replaced_under_its_path_is_written_and_an_earlier_wo
     );
 }
 
+/// A transcript that grows a window every beat is still checked whole
+/// (t-7153 r4, R3a, after astra t-6963 on 2e4ea291): its MIDDLE window
+/// rewritten in place — the same inode, its first line, its length and the
+/// bytes before the cursor kept, a switch where a record as long stood —
+/// is found within `2N − 1` readings for the `N` windows the scan had
+/// counted, the file growing a window a beat all the while; the switch is
+/// read on the next reading and written once; and a file only appended to
+/// is never read again from its start. Rewritten on the beat the scan
+/// caught up, and again after three beats of growth, when the round under
+/// way had passed the middle window. Before this a reading checked its
+/// count over the windows counted NOW, both moving one a beat, and the
+/// middle window was never checked again. Through the real beat and the
+/// real ledger.
+#[test]
+fn a_middle_window_rewritten_in_place_is_found_while_the_transcript_grows_a_window_a_beat() {
+    use crate::quota_wall::tests::{CLAUDE_FALLBACK, SLOT_AT, overwrite_at, records_with_a_slot};
+    use zerocode_core::civil::iso_utc_of;
+    use zerocode_core::transcript::MAX_TAIL_BYTES;
+    let window = usize::try_from(MAX_TAIL_BYTES).expect("small");
+    for (leader_term, grown_first) in [(97_830, 0), (97_840, 3)] {
+        let stood = StoppedWorker::stand(leader_term, "", Vec::new());
+        let switch = CLAUDE_FALLBACK
+            .replace("switch-1", "switch-mid")
+            .replace("2026-09-21T14:06:16.566Z", &iso_utc_of(stood.began + 5_000));
+        let run = records_with_a_slot(window, switch.len());
+        std::fs::write(&stood.host.transcript, run.repeat(3)).expect("three windows");
+        let grow = || {
+            use std::io::Write;
+            std::fs::OpenOptions::new()
+                .append(true)
+                .open(&stood.host.transcript)
+                .expect("append")
+                .write_all(run.as_bytes())
+                .expect("a window more");
+        };
+        let cursor = || {
+            super::deviation_scans()
+                .lock()
+                .unwrap_or_else(|held| held.into_inner())
+                .get(&stood.worker)
+                .map_or(0, |held| held.cursor.offset)
+        };
+        let mut now = stood.began + 10_000;
+        let mut beat = || {
+            now += 1_000;
+            tick(&stood.host, &[], now);
+            now
+        };
+
+        // Read to its end, a window a beat.
+        for _ in 0..8 {
+            if cursor() == 3 * MAX_TAIL_BYTES {
+                break;
+            }
+            beat();
+        }
+        assert_eq!(cursor(), 3 * MAX_TAIL_BYTES, "not read to its end");
+        // Grown a window a beat, never rewritten: read on, a window a beat.
+        for _ in 0..grown_first {
+            let was = cursor();
+            grow();
+            beat();
+            assert_eq!(
+                cursor(),
+                was + MAX_TAIL_BYTES,
+                "a file only appended to was read again from its start, or not read on"
+            );
+        }
+
+        // The middle window's slot becomes the switch, in place; the file
+        // grows on, a window a beat.
+        let counted = cursor().div_ceil(MAX_TAIL_BYTES);
+        let bound = 2 * counted - 1;
+        overwrite_at(
+            &stood.host.transcript,
+            MAX_TAIL_BYTES + SLOT_AT as u64,
+            &switch,
+        );
+        let (mut started_over, mut written, mut readings) = (None, None, 0);
+        while written.is_none() && readings < 2 * bound {
+            let was = cursor();
+            grow();
+            let at = beat();
+            readings += 1;
+            if started_over.is_none() && cursor() < was {
+                started_over = Some(readings);
+            }
+            if !stood.switches_written(at + 1).is_empty() {
+                written = Some(readings);
+            }
+        }
+        assert!(
+            started_over.is_some_and(|after| after <= bound),
+            "grown {grown_first} beats first: the middle of {counted} windows, rewritten in place, \
+             was checked after {started_over:?} of {readings} readings of a file growing a window \
+             a beat — the bound is {bound}"
+        );
+        assert_eq!(
+            written,
+            started_over.map(|after| after + 1),
+            "its switch was not read on the next reading"
+        );
+        let attempt = stood.attempt().id;
+        beat();
+        let at = beat();
+        assert_eq!(
+            stood.switches_written(at + 1),
+            [(attempt, "switch-mid".to_string())],
+            "written other than once"
+        );
+    }
+}
+
 /// A switch is written for the ATTEMPT it was read under, and the same
 /// worker's next attempt begins its own count (t-7153, R3): a worker
 /// reports done and its pane is handed a second task — its summons time
