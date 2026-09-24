@@ -12446,33 +12446,31 @@ impl Ledger {
     /// [`Self::worker_reseated`]) opens the replacement pane with
     /// `--resume`, the row's model and effort, in the row's checkout.
     ///
-    /// The ledger is the authority on WHETHER, not the caller: only a live
-    /// worker in its own seat, carrying an open attempt with a checkout to
-    /// return to, whose newest `quota_walled` row still stands, may be
-    /// rested — the wall's two witnesses are the reason this is not a
-    /// restart of a working pane. A person's pane is refused, as every
-    /// road that would reopen a person's conversation is. Refusals name
-    /// the state; a caller that hears one closes nothing.
+    /// The ledger is the authority on WHETHER, not the caller
+    /// ([`Self::may_rest_for_account_switch`]): only the worker, attempt and
+    /// coordinator generation the switch was approved for, live in its own
+    /// seat, with a checkout to return to, whose newest `quota_walled` row
+    /// still stands. Refusals name the state; a caller that hears one closes
+    /// nothing.
     ///
-    /// And only a worker whose conversation the restore road can RESUME:
-    /// [`Self::prepare_worker_reseat`] starts a worker with no session on a
-    /// fresh, empty conversation with the task's preamble, which is a
-    /// restart's last resort and not a move (astra B4). `session_id` is the
-    /// conversation the window sees in the pane right now; a row that names
-    /// another — a `/clear` the hook has not reported yet — would resume
-    /// the wrong one, and is refused too.
+    /// The pane's model and effort ride in the SAME transition (astra R5):
+    /// the row the restore launches from carries what the pane really ran,
+    /// or the worker was not rested at all — there is no state in which the
+    /// pane is gone and the row still names the summons' values.
     ///
     /// Answers the dispatch the worker keeps, so the receipt can name it.
     pub fn worker_rested_for_account_switch(
         &mut self,
-        worker_id: &str,
-        session_id: &str,
+        rest: &SwitchRest,
         now_ms: i64,
     ) -> Result<String, String> {
-        let dispatch_id = self.may_rest_for_account_switch(worker_id, session_id, now_ms)?;
-        let at = self.locate(worker_id)?;
-        self.runs[at.0].workers[at.1].state = WorkerState::Sleeping;
-        self.runs[at.0].workers[at.1].quiet_at = None;
+        let dispatch_id = self.may_rest_for_account_switch(rest, now_ms)?;
+        let at = self.locate(&rest.worker)?;
+        let worker = &mut self.runs[at.0].workers[at.1];
+        worker.model = Some(rest.model.trim().to_string());
+        worker.effort = Some(rest.effort.trim().to_string());
+        worker.state = WorkerState::Sleeping;
+        worker.quiet_at = None;
         Ok(dispatch_id)
     }
 
@@ -12481,12 +12479,24 @@ impl Ledger {
     /// ledger image before it touches a pane, so a refusal reaches the
     /// person in the ledger's own words (the actor's refusal is a kind, not
     /// a sentence). Answers the dispatch the worker keeps.
+    ///
+    /// Everything the switch was APPROVED on is compared with the row as it
+    /// stands (astra R2): the attempt it carries and the generation of its
+    /// run's coordinator seat — a worker dispatched again, or a coordinator
+    /// taken over, since the plan is another situation, and the approval
+    /// was not for it. The conversation is the one the window sees in the
+    /// pane now: a row with none would start empty (a restart's last
+    /// resort, not a move — astra B4), and a row naming another — a
+    /// `/clear` the hook has not reported yet — would resume the wrong one.
+    /// And the model and effort are words a launch can carry: a relaunch
+    /// the restore road would refuse after the pane is gone is refused
+    /// here, before it closes.
     pub fn may_rest_for_account_switch(
         &self,
-        worker_id: &str,
-        session_id: &str,
+        rest: &SwitchRest,
         now_ms: i64,
     ) -> Result<String, String> {
+        let worker_id = rest.worker.as_str();
         let at = self.locate(worker_id)?;
         let run = &self.runs[at.0];
         let worker = &run.workers[at.1];
@@ -12523,7 +12533,7 @@ impl Ledger {
                      empty — not moved"
                 ));
             }
-            Some(held) if held.id != session_id => {
+            Some(held) if held.id != rest.session => {
                 return Err(format!(
                     "worker {worker_id}'s recorded conversation is not the one its pane is in \
                      now — not moved"
@@ -12536,6 +12546,13 @@ impl Ledger {
             .as_deref()
             .ok_or_else(|| format!("worker {worker_id} carries no attempt"))?
             .to_string();
+        if dispatch_id != rest.dispatch {
+            return Err(format!(
+                "worker {worker_id} carries attempt {dispatch_id} now, not {} the switch was \
+                 approved for — not moved",
+                rest.dispatch
+            ));
+        }
         let dispatch = run
             .dispatch(&dispatch_id)
             .ok_or_else(|| format!("worker {worker_id} names an unknown dispatch"))?;
@@ -12549,6 +12566,24 @@ impl Ledger {
                 "the task dispatch {dispatch_id} carries is not dispatched"
             ));
         }
+        if run.coordinator_live().map(|seat| seat.generation) != rest.generation {
+            return Err(format!(
+                "run {}'s coordinator seat is not the one the switch was approved under — not \
+                 moved",
+                run.id
+            ));
+        }
+        launch_tuning(
+            &worker.agent,
+            Some(rest.model.trim()),
+            Some(rest.effort.trim()),
+        )
+        .map_err(|why| {
+            format!(
+                "worker {worker_id}'s pane runs a model or effort no relaunch can carry \
+                 ({why}) — not moved"
+            )
+        })?;
         if !newest_wall(run, &dispatch_id).is_some_and(|wall| wall.stands(now_ms)) {
             return Err(format!(
                 "worker {worker_id} stands at no quota wall the ledger has witnessed — only a \
@@ -12556,42 +12591,6 @@ impl Ledger {
             ));
         }
         Ok(dispatch_id)
-    }
-
-    /// The model and effort a live worker's pane is REALLY running, as its
-    /// own hook reported them (t-7538): a person's `/model` inside the pane
-    /// changed what the row said at summons, and a restore that read the
-    /// row would put the old model back. Written only for a live worker in
-    /// its seat; `None` leaves a field as it is (a hook that did not say is
-    /// not a hook that said "default"). Answers whether anything changed.
-    pub fn worker_tuning_observed(
-        &mut self,
-        worker_id: &str,
-        model: Option<&str>,
-        effort: Option<&str>,
-    ) -> Result<bool, String> {
-        let at = self.locate(worker_id)?;
-        let worker = &mut self.runs[at.0].workers[at.1];
-        if !worker.state.is_live() {
-            return Err(format!(
-                "worker {worker_id} is {}, and only a live worker's tuning is observed",
-                worker.state.as_str()
-            ));
-        }
-        let mut changed = false;
-        if let Some(model) = model.map(str::trim).filter(|word| !word.is_empty())
-            && worker.model.as_deref() != Some(model)
-        {
-            worker.model = Some(model.to_string());
-            changed = true;
-        }
-        if let Some(effort) = effort.map(str::trim).filter(|word| !word.is_empty())
-            && worker.effort.as_deref() != Some(effort)
-        {
-            worker.effort = Some(effort.to_string());
-            changed = true;
-        }
-        Ok(changed)
     }
 
     /// The receipt for one account move (t-7538), in the ledger's own voice,
@@ -13888,6 +13887,24 @@ pub enum AccountMove {
     },
 }
 
+/// What an account switch was approved to move (t-7538), carried to the
+/// ledger's rest of ONE walled worker so the rest is of exactly that: the
+/// worker, the attempt it carried and the coordinator generation its run
+/// had when the plan was made (astra R2), the conversation the window sees
+/// in its pane, and the model and effort the pane really runs — read off
+/// the pane's own transcript at the move, never filled in from the summons
+/// (astra R5), and written onto the row in the same transition that rests
+/// it ([`Ledger::worker_rested_for_account_switch`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SwitchRest {
+    pub worker: String,
+    pub dispatch: String,
+    pub generation: Option<u32>,
+    pub session: String,
+    pub model: String,
+    pub effort: String,
+}
+
 /// One account move, as the window reports it for the receipt row.
 ///
 /// Ids and numbers only. The window builds it from the account store's ids
@@ -13919,6 +13936,11 @@ pub struct AccountSwitchReceipt {
     pub generation: Option<u32>,
     /// How many panes the move touched: 0 for a default move.
     pub panes_moved: u32,
+    /// The walled panes this switch set out to move that are still asleep
+    /// for the restore road when the receipt is written — each writes a
+    /// receipt of its own when it lands, so a default's receipt counts what
+    /// has moved so far and says how many are still coming (astra R4).
+    pub panes_pending: u32,
 }
 
 impl AccountSwitchReceipt {
@@ -13934,6 +13956,7 @@ impl AccountSwitchReceipt {
             "observedWindow": self.observed_window,
             "generation": self.generation,
             "panesMoved": self.panes_moved,
+            "panesPending": self.panes_pending,
             "policy": crate::account_autoswitch::POLICY_WORD,
             "switchedAtMs": now_ms,
         });

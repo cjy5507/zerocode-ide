@@ -3282,6 +3282,10 @@ fn main() -> ExitCode {
             // a pane that is not there.
             crumbs::record("boot", format_args!("ledger"));
             let swept = orchestration::open(&local_data_root, now_epoch_ms());
+            // A pane an account switch closed whose program outlived the wait
+            // holds its worker's restore again, before any restore road runs
+            // (t-7538).
+            account_switch::hold_lingering_exits(&local_data_root);
             if swept.ended > 0 {
                 note_window_event(
                     &local_data_root,

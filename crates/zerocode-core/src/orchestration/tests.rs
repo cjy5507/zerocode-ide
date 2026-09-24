@@ -24090,6 +24090,24 @@ fn a_walled_claude_worker(bench: &mut Bench, now_ms: i64) -> (String, String, St
     (worker, pane, task, dispatch)
 }
 
+/// The approval a switch plan would carry for `worker` as it stands — its
+/// attempt and its run's coordinator generation — with the conversation
+/// the window sees in its pane and the tuning the pane's transcript said.
+fn approval(bench: &Bench, worker: &str, session: &str) -> SwitchRest {
+    let run = &bench.ledger.runs()[0];
+    SwitchRest {
+        worker: worker.to_string(),
+        dispatch: run
+            .worker(worker)
+            .and_then(|held| held.dispatch.clone())
+            .unwrap_or_default(),
+        generation: run.coordinator_live().map(|seat| seat.generation),
+        session: session.to_string(),
+        model: "claude-opus-5-5".to_string(),
+        effort: "xhigh".to_string(),
+    }
+}
+
 /// The old product's road, kept as the RED this closes: a walled pane
 /// closed for a switch settled its worker — attempt spent, task back at
 /// `ready`, a `worker_died` in the coordinator's inbox — and the pane
@@ -24124,7 +24142,10 @@ fn a_switch_reseats_the_same_worker_id() {
     assert_eq!(
         bench
             .ledger
-            .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW + 1)
+            .worker_rested_for_account_switch(
+                &approval(&bench, &worker, SWITCHING_SESSION),
+                NOW + 1
+            )
             .as_deref(),
         Ok(dispatch.as_str())
     );
@@ -24146,7 +24167,10 @@ fn a_switch_reseats_the_same_worker_id() {
     assert!(
         bench
             .ledger
-            .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW + 3)
+            .worker_rested_for_account_switch(
+                &approval(&bench, &worker, SWITCHING_SESSION),
+                NOW + 3
+            )
             .is_err()
     );
     // The restore road seats the SAME worker in the new pane: same id,
@@ -24192,7 +24216,7 @@ fn a_switch_rests_only_a_walled_worker_in_its_own_seat() {
     // No checkout yet: refused for that.
     let refused = bench
         .ledger
-        .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW)
+        .worker_rested_for_account_switch(&approval(&bench, &worker, SWITCHING_SESSION), NOW)
         .unwrap_err();
     assert!(refused.contains("checkout"), "{refused}");
     assert!(bench.ledger.worker_seated(("team-1", &pane), "/wt/working"));
@@ -24200,7 +24224,7 @@ fn a_switch_rests_only_a_walled_worker_in_its_own_seat() {
     // restart's last resort and not a move (astra B4).
     let refused = bench
         .ledger
-        .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW)
+        .worker_rested_for_account_switch(&approval(&bench, &worker, SWITCHING_SESSION), NOW)
         .unwrap_err();
     assert!(refused.contains("no conversation"), "{refused}");
     assert!(bench.ledger.worker_session_reported(
@@ -24215,14 +24239,14 @@ fn a_switch_rests_only_a_walled_worker_in_its_own_seat() {
     // the hook has not reported): the restore would resume the wrong one.
     let refused = bench
         .ledger
-        .worker_rested_for_account_switch(&worker, "a-newer-conversation", NOW)
+        .worker_rested_for_account_switch(&approval(&bench, &worker, "a-newer-conversation"), NOW)
         .unwrap_err();
     assert!(refused.contains("not the one its pane is in"), "{refused}");
     // Seated, working, no wall: refused for that — the number alone is not
     // a wall, and this road does not even read the number.
     let refused = bench
         .ledger
-        .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW)
+        .worker_rested_for_account_switch(&approval(&bench, &worker, SWITCHING_SESSION), NOW)
         .unwrap_err();
     assert!(refused.contains("quota wall"), "{refused}");
     assert_eq!(
@@ -24247,16 +24271,105 @@ fn a_switch_rests_only_a_walled_worker_in_its_own_seat() {
     }
     let refused = bench
         .ledger
-        .worker_rested_for_account_switch(&worker, SWITCHING_SESSION, NOW + 1)
+        .worker_rested_for_account_switch(&approval(&bench, &worker, SWITCHING_SESSION), NOW + 1)
         .unwrap_err();
     assert!(refused.contains("taken over"), "{refused}");
     // An unknown worker is unknown.
     assert!(
         bench
             .ledger
-            .worker_rested_for_account_switch("w-nobody", SWITCHING_SESSION, NOW + 1)
+            .worker_rested_for_account_switch(
+                &approval(&bench, "w-nobody", SWITCHING_SESSION),
+                NOW + 1
+            )
             .is_err()
     );
+}
+
+/// The rest is of exactly what the switch was approved for (astra R2) and
+/// carries what the pane really runs (astra R5). Another attempt than the
+/// plan saw, another coordinator generation, or a model or effort nobody
+/// read is refused, and the worker stays exactly where it is; the approval
+/// as it stands rests the worker AND writes the pane's model and effort in
+/// the one transition, so the restore that follows launches them — there
+/// is no moment at which the pane is gone and the row still names the
+/// summons' values.
+#[test]
+fn a_rest_is_the_approved_attempt_under_the_approved_coordinator_with_the_panes_own_tuning() {
+    const NOW: i64 = 5_000_000;
+    let mut bench = Bench::new();
+    let (worker, _pane, _task, dispatch) = a_walled_claude_worker(&mut bench, NOW);
+    let approved = approval(&bench, &worker, SWITCHING_SESSION);
+    assert_eq!(approved.dispatch, dispatch);
+    let row = |bench: &Bench| {
+        bench.ledger.runs()[0]
+            .worker(&worker)
+            .expect("the worker")
+            .clone()
+    };
+    let summoned = row(&bench);
+    let untouched = |bench: &Bench, why: &str| {
+        let now = row(bench);
+        assert_eq!(now.state, WorkerState::Active, "{why}");
+        assert_eq!(now.model, summoned.model, "{why}");
+        assert_eq!(now.effort, summoned.effort, "{why}");
+    };
+    // Another attempt than the plan saw.
+    let refused = bench
+        .ledger
+        .worker_rested_for_account_switch(
+            &SwitchRest {
+                dispatch: "dp-another-attempt".to_string(),
+                ..approved.clone()
+            },
+            NOW + 1,
+        )
+        .unwrap_err();
+    assert!(refused.contains("approved for"), "{refused}");
+    untouched(&bench, &refused);
+    // Another coordinator generation than the plan saw.
+    let refused = bench
+        .ledger
+        .worker_rested_for_account_switch(
+            &SwitchRest {
+                generation: Some(approved.generation.map_or(1, |at| at + 1)),
+                ..approved.clone()
+            },
+            NOW + 1,
+        )
+        .unwrap_err();
+    assert!(refused.contains("coordinator"), "{refused}");
+    untouched(&bench, &refused);
+    // A model or an effort the pane's transcript never said.
+    for unknown in [
+        SwitchRest {
+            model: " ".to_string(),
+            ..approved.clone()
+        },
+        SwitchRest {
+            effort: String::new(),
+            ..approved.clone()
+        },
+    ] {
+        let refused = bench
+            .ledger
+            .worker_rested_for_account_switch(&unknown, NOW + 1)
+            .unwrap_err();
+        assert!(refused.contains("no relaunch can carry"), "{refused}");
+        untouched(&bench, &refused);
+    }
+    // The approval as it stands: asleep, and on the pane's own tuning.
+    assert_eq!(
+        bench
+            .ledger
+            .worker_rested_for_account_switch(&approved, NOW + 1)
+            .as_deref(),
+        Ok(dispatch.as_str())
+    );
+    let rested = row(&bench);
+    assert_eq!(rested.state, WorkerState::Sleeping);
+    assert_eq!(rested.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(rested.effort.as_deref(), Some("xhigh"));
 }
 
 /// Every switch leaves ONE receipt in the ledger's own voice, keyed so a
@@ -24286,6 +24399,7 @@ fn a_switch_leaves_one_receipt_and_no_credential_anywhere() {
         observed_window: Some("weekly".to_string()),
         generation: Some(1),
         panes_moved: 1,
+        panes_pending: 0,
     };
     let written = bench
         .ledger

@@ -41,23 +41,62 @@ pub(super) fn claude_account_usage_file(local_data_root: &Path) -> PathBuf {
     local_data_root.join(artifact_file::CLAUDE_ACCOUNT_USAGE)
 }
 
+/// One account's reading, and WHICH login it was read as (astra R6): the
+/// store directory and the identity the account row named when the read
+/// began. An id is a row in the person's list, and a row can come to name
+/// another login — re-logged, re-added elsewhere, or a changed
+/// organisation applied — so a reading is only ever the account's while the
+/// row still names the login it was read as ([`claude_login_key`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct AccountReading {
+    pub(super) login: String,
+    pub(super) usage: usage::ProviderUsage,
+}
+
+/// Which login an account row names: its store directory and its identity
+/// (account and organisation uuids). Compared, never shown or logged.
+pub(super) fn claude_login_key(account: &zerocode_core::ClaudeAccount) -> String {
+    [
+        account.config_dir.as_str(),
+        account.account_uuid.as_deref().unwrap_or_default(),
+        account.organization_uuid.as_deref().unwrap_or_default(),
+    ]
+    .join("\u{1f}")
+}
+
 /// One reading per managed account, by id — the selected account's
 /// included when its own gauge has landed, so the switch table compares
 /// every account by the same kind of number. Loaded once from disk like the
-/// provider gauges; a window that restarts keeps what it knew.
+/// provider gauges; a window that restarts keeps what it knew, and reads it
+/// under the same login rule as a window that never stopped. A file of the
+/// first round's shape — readings with no login — loads as nothing, and the
+/// accounts are read again.
 pub(super) fn claude_account_usage_cache(
     local_data_root: &Path,
-) -> &'static Mutex<HashMap<String, usage::ProviderUsage>> {
-    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, usage::ProviderUsage>>> =
+) -> &'static Mutex<HashMap<String, AccountReading>> {
+    static CACHE: std::sync::OnceLock<Mutex<HashMap<String, AccountReading>>> =
         std::sync::OnceLock::new();
-    CACHE.get_or_init(|| {
-        Mutex::new(
-            std::fs::read_to_string(claude_account_usage_file(local_data_root))
-                .ok()
-                .and_then(|text| serde_json::from_str(&text).ok())
-                .unwrap_or_default(),
-        )
-    })
+    CACHE.get_or_init(|| Mutex::new(load_account_readings(local_data_root)))
+}
+
+/// The readings file as it stands on disk.
+pub(super) fn load_account_readings(local_data_root: &Path) -> HashMap<String, AccountReading> {
+    std::fs::read_to_string(claude_account_usage_file(local_data_root))
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default()
+}
+
+/// `account`'s own reading — only while its row still names the login the
+/// reading was taken as (astra R6).
+pub(super) fn reading_of<'a>(
+    readings: &'a HashMap<String, AccountReading>,
+    account: &zerocode_core::ClaudeAccount,
+) -> Option<&'a usage::ProviderUsage> {
+    readings
+        .get(&account.id)
+        .filter(|held| held.login == claude_login_key(account))
+        .map(|held| &held.usage)
 }
 
 /// Which accounts have a read out right now — one per account, so a slow
@@ -88,7 +127,7 @@ pub(super) fn forget_claude_account_usage(local_data_root: &Path, id: &str) {
     }
 }
 
-fn write_account_usage_file(local_data_root: &Path, held: &HashMap<String, usage::ProviderUsage>) {
+fn write_account_usage_file(local_data_root: &Path, held: &HashMap<String, AccountReading>) {
     if let Ok(text) = serde_json::to_string_pretty(held) {
         let _ = durable_file::replace_bytes(
             &claude_account_usage_file(local_data_root),
@@ -176,6 +215,28 @@ pub(super) fn scan_claude_account_usage_with(
     };
     let road = UsageRoad::Oauth { login: Some(from) };
     match ask(login.as_str(), epoch_ms_now()) {
+        // A figure outside 0–100 is no reading at all (astra R6). The
+        // status bar clamps what it shows (`oauth_usage_window`), and a
+        // clamped figure is not a number an account may be chosen by: the
+        // read is `invalid`, its windows are left out, and the switch table
+        // calls the account unknown.
+        Ok(read)
+            if [&read.session, &read.weekly, &read.fable_weekly]
+                .into_iter()
+                .flatten()
+                .any(|window| !(0.0..=100.0).contains(&window.used_percent)) =>
+        {
+            Scanned {
+                usage: failed(
+                    ACCOUNT_READING_INVALID,
+                    "사용량 수치가 0–100 밖으로 왔습니다 — 이 읽기로는 계정을 고르지 않습니다"
+                        .to_string(),
+                    None,
+                    None,
+                ),
+                road,
+            }
+        }
         Ok(read) => Scanned {
             usage: usage::ProviderUsage {
                 provider: "claude".to_string(),
@@ -231,16 +292,28 @@ pub(super) fn land_claude_account_usage(
         return false;
     }
     let now = epoch_ms_now();
+    let login = claude_login_key(began_as);
     let mut held = claude_account_usage_cache(local_data_root)
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let landed = match held.remove(&began_as.id) {
-        Some(previous) if previous.updated_at > fresh.updated_at => previous,
-        Some(previous) => usage_through_failure(previous, fresh, now),
+    // A reading of another login under the same id is not an earlier
+    // reading of this one: it goes, whatever its age.
+    let landed = match held
+        .remove(&began_as.id)
+        .filter(|previous| previous.login == login)
+    {
+        Some(previous) if previous.usage.updated_at > fresh.updated_at => previous.usage,
+        Some(previous) => usage_through_failure(previous.usage, fresh, now),
         None => fresh,
     };
     note_usage_attempt(&account_backoff_key(&began_as.id), &landed.status, now);
-    held.insert(began_as.id.clone(), landed);
+    held.insert(
+        began_as.id.clone(),
+        AccountReading {
+            login,
+            usage: landed,
+        },
+    );
     write_account_usage_file(local_data_root, &held);
     true
 }
@@ -248,6 +321,9 @@ pub(super) fn land_claude_account_usage(
 /// The status of an account whose keychain would not answer — held until a
 /// person asks again (t-7538, astra A2).
 pub(super) const ACCOUNT_LOGIN_REFUSED: &str = "denied";
+
+/// The status of a read whose figures were outside 0–100 (astra R6).
+pub(super) const ACCOUNT_READING_INVALID: &str = "invalid";
 
 /// Why an account is being read, which decides how old a reading may be
 /// before it is read again — three floors, none of them new (astra 3):
@@ -291,11 +367,13 @@ pub(super) fn refresh_inactive_claude_accounts(
         if active.as_deref() == Some(account.id.as_str()) {
             continue;
         }
-        let held = claude_account_usage_cache(local_data_root)
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&account.id)
-            .cloned();
+        let held = reading_of(
+            &claude_account_usage_cache(local_data_root)
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &account,
+        )
+        .cloned();
         let young = held
             .as_ref()
             .is_some_and(|snapshot| now - snapshot.updated_at < why.floor_ms());
@@ -353,14 +431,14 @@ pub(super) fn refresh_inactive_claude_accounts(
 
 /// Every managed account's latest reading as the switch table wants it —
 /// the selected account's from its own gauge when that gauge names it and
-/// is the newer, every other account's from the account map. An account
-/// with no reading is a row with no windows, which the table calls
-/// unknown.
-pub(super) fn claude_account_gauges(
-    config_root: &Path,
+/// is the newer, every other account's from the account map, and only a
+/// reading of the login the row names now (astra R6). An account with no
+/// such reading is a row with no windows, which the table calls unknown.
+/// Read over the store the caller already holds.
+pub(super) fn claude_account_gauges_of(
+    store: &accounts::AccountStore,
     local_data_root: &Path,
 ) -> Vec<zerocode_core::account_autoswitch::AccountGauge> {
-    let store = accounts::read_store(config_root);
     let active = zerocode_core::active_account(&store.accounts, &store.selection)
         .map(|account| account.id.clone());
     let main = claude_usage_cache(local_data_root)
@@ -375,7 +453,7 @@ pub(super) fn claude_account_gauges(
         .accounts
         .iter()
         .map(|account| {
-            let own = map.get(&account.id);
+            let own = reading_of(&map, account);
             let snapshot = match &main {
                 Some(main)
                     if active.as_deref() == Some(account.id.as_str())
@@ -2091,6 +2169,11 @@ pub(super) struct AccountsReport {
     /// False when this machine has no `claude` to log in with, so the window
     /// can say that instead of offering a button that cannot work.
     pub(super) can_add: bool,
+    /// A person's pick that happened but whose receipt the ledger refused —
+    /// said beside the list the pick moved, never as a success and never
+    /// dropped (t-7538, astra R4). Only the pick road sets it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) switch_unrecorded: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2165,6 +2248,7 @@ pub(super) fn accounts_report(config_root: &Path, local_data_root: &Path) -> Acc
             .collect(),
         active,
         can_add: claude_program().is_some(),
+        switch_unrecorded: None,
     }
 }
 

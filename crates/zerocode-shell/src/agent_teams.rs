@@ -724,6 +724,28 @@ pub fn forget_term(term: u32) {
     }
 }
 
+/// How a closed pane's program left (t-7538).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PaneExit {
+    /// Its whole process group is gone.
+    Gone,
+    /// Something of it outlived the wait.
+    Lingering(ExitWitness),
+}
+
+/// What a later look asks about a program that outlived its pane's close:
+/// its process group, and its leader's start identity when the process
+/// table could read it — so a pid the system has since handed to another
+/// program is never taken for the one that did not leave. Ids only; kept
+/// in the switch journal so a window that restarts asks the same question.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExitWitness {
+    pub group: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<String>,
+}
+
 /// What [`run`] needs from the window, kept behind a trait so the whole
 /// protocol can be driven in a test without a pty or a Tauri handle.
 ///
@@ -866,12 +888,22 @@ pub trait Host {
     /// gone — its whole process group (t-7538). The account switch resumes
     /// the same conversation in a new pane right after, and a CLI still
     /// flushing the old pane's last lines is a second writer on the same
-    /// transcript. `false` is a group that outlived the wait: the caller
-    /// must not start the conversation again.
+    /// transcript. [`PaneExit::Lingering`] is a group that outlived the
+    /// wait, with what a later look asks about it
+    /// ([`Self::exit_seen`]): the caller must not start the conversation
+    /// again, and no restore may either, until a look sees it gone.
     ///
     /// Hosts without processes of their own close and answer at once.
-    fn close_gone(&self, term: u32) -> bool {
+    fn close_gone(&self, term: u32) -> PaneExit {
         self.close(term);
+        PaneExit::Gone
+    }
+
+    /// Whether the program a lingering close left behind has left since
+    /// (t-7538, astra R3) — asked by every restore of that worker before it
+    /// opens the conversation again. Hosts without processes of their own
+    /// never leave one behind.
+    fn exit_seen(&self, _witness: &ExitWitness) -> bool {
         true
     }
 

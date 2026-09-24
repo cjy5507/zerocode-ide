@@ -304,11 +304,12 @@ pub(crate) fn claude_account_usage(
         .iter()
         .map(|account| {
             let active = plan.active.as_deref() == Some(account.id.as_str());
+            // Only a reading of the login the row names now (astra R6).
             let usage = match &main {
                 Some(main) if active && main.account.as_deref() == Some(account.id.as_str()) => {
                     Some(main.clone())
                 }
-                _ => map.get(&account.id).cloned(),
+                _ => reading_of(&map, account).cloned(),
             };
             AccountUsageRow {
                 id: account.id.clone(),
@@ -930,12 +931,16 @@ pub(crate) async fn resolve_claude_account_identity(
 ) -> Result<AccountsReport, String> {
     let config = state.config_root().to_path_buf();
     let local = state.local_data_root().to_path_buf();
+    let resolved = id.clone();
     tauri::async_runtime::spawn_blocking(move || {
         accounts::resolve_identity(&config, &local, &id, &choice, epoch_ms_now())
     })
     .await
     .map_err(|error| error.to_string())??;
+    // Both readings were about the login the row named before: the
+    // selected gauge's, and the account's own (astra R6).
     forget_claude_usage(state.local_data_root());
+    forget_claude_account_usage(state.local_data_root(), &resolved);
     announce_account_switch(&state, zerocode_core::account::Provider::Anthropic);
     Ok(accounts_report(
         state.config_root(),
@@ -992,7 +997,7 @@ pub(crate) async fn use_system_claude_login(app: AppHandle) -> Result<AccountsRe
 
 async fn person_switched(app: AppHandle, to: Option<String>) -> Result<AccountsReport, String> {
     let moved = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let applied = tauri::async_runtime::spawn_blocking(move || {
         let state = moved.state::<AppState>();
         let window = TeamWindow { app: moved.clone() };
         crate::account_switch::switch_by_person(
@@ -1005,10 +1010,11 @@ async fn person_switched(app: AppHandle, to: Option<String>) -> Result<AccountsR
     .await
     .map_err(|error| error.to_string())??;
     let state = app.state::<AppState>();
-    Ok(accounts_report(
-        state.config_root(),
-        state.local_data_root(),
-    ))
+    let mut report = accounts_report(state.config_root(), state.local_data_root());
+    // The pick happened; a receipt the ledger refused is said with it, not
+    // dropped here (astra R4) — the journal keeps it owed.
+    report.switch_unrecorded = applied.receipt_error;
+    Ok(report)
 }
 
 #[tauri::command(async)]

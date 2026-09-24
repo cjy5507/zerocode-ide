@@ -192,6 +192,36 @@ pub(crate) fn wait_process_group_gone(
     }
 }
 
+/// Whether the program a pane's close left behind has left since (t-7538,
+/// astra R3): no process of its group is left, or the pid that led it now
+/// names another program — a pid is not handed out again while a group of
+/// that id still has members, so a new leader under it means the group
+/// ended. A group whose leader is gone and whose members remain is still
+/// the program's; and whatever the process table cannot say answers "not
+/// yet", so the next look asks again rather than a restore guessing.
+///
+/// Windows has no process groups to ask; the close there is the kill.
+pub(crate) fn program_left(witness: &crate::agent_teams::ExitWitness) -> bool {
+    #[cfg(unix)]
+    {
+        if !crate::codex_queue::process_group_exists(witness.group) {
+            return true;
+        }
+        match (
+            witness.started.as_deref(),
+            crate::resource_usage::process_start_identity(witness.group),
+        ) {
+            (Some(started), Ok(now)) => now != started,
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = witness;
+        true
+    }
+}
+
 /// End the pane's screen session with the CLI's own exit command, typed the
 /// way a person types a line (`ask::line_keys`: the text, then its Enter —
 /// the walk `answer_ask` takes), and WAIT for the screen to leave: the pane

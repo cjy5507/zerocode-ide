@@ -3695,21 +3695,68 @@ async function verifyClaudeAccounts() {
 
 function paintClaudeAccounts() {
   const rows = accountReport.accounts ?? [];
-  el("account-count").textContent = String(rows.length);
+  const count = el("account-count");
+  const total = String(rows.length);
+  if (count.textContent !== total) count.textContent = total;
   const host = el("account-list");
-  host.replaceChildren();
-  // The original's 「시스템 기본값」, first and always — a ROW, not the absence of
-  // one (설정 → AI 제공자 계정, above the managed list). It is what makes the
-  // managed accounts 선택 사항: this machine's own Claude login, with this window
-  // staying out of it entirely. Somebody who wants that back should be able to
-  // click it rather than delete every account to achieve it by subtraction.
-  host.appendChild(systemDefaultRow());
   const counts = new Map();
   for (const row of rows) {
     const key = claudeLoginKey(row);
     if (key) counts.set(key, (counts.get(key) ?? 0) + 1);
   }
-  for (const row of rows) host.appendChild(accountRow(row, (counts.get(claudeLoginKey(row)) ?? 0) > 1));
+  const shown = locale === "system" ? systemLocale : locale;
+  /* Every row this paint wants, each with the shape it is drawn from. A row
+   * whose shape did not move is the row already standing — kept, not rebuilt:
+   * the usage answer repaints this list on every beat, and the same rows made
+   * again were DOM mutations for nothing and rows whose identity was thrown
+   * away (t-7538 E1). Its gauge line is written in place below, so a figure
+   * or a countdown that moved rewrites that one line and nothing else. */
+  const wanted = [
+    // The original's 「시스템 기본값」, first and always — a ROW, not the
+    // absence of one (설정 → AI 제공자 계정, above the managed list). It is
+    // what makes the managed accounts 선택 사항: this machine's own Claude
+    // login, with this window staying out of it entirely. Somebody who wants
+    // that back should be able to click it rather than delete every account
+    // to achieve it by subtraction.
+    {
+      key: "",
+      shape: JSON.stringify([shown, !accountReport.active]),
+      make: () => systemDefaultRow(),
+    },
+    ...rows.map((row) => {
+      const duplicate = (counts.get(claudeLoginKey(row)) ?? 0) > 1;
+      return {
+        key: row.id,
+        shape: JSON.stringify([
+          shown, row, duplicate, row.id === accountReport.active,
+          row.id === switchingAccount, addingAccount,
+        ]),
+        make: () => accountRow(row, duplicate),
+      };
+    }),
+  ];
+  const standing = new Map([...host.children].map((line) => [line.dataset.accountRow, line]));
+  const lines = wanted.map(({ key, shape, make }) => {
+    const held = standing.get(key);
+    if (held && held.dataset.accountShape === shape) return held;
+    const line = make();
+    line.dataset.accountRow = key;
+    line.dataset.accountShape = shape;
+    return line;
+  });
+  const keep = new Set(lines);
+  lines.forEach((line, at) => {
+    const there = host.children[at] ?? null;
+    if (there === line) return;
+    if (there && !keep.has(there)) there.replaceWith(line);
+    else host.insertBefore(line, there);
+  });
+  while (host.children.length > lines.length) host.lastElementChild.remove();
+  for (const row of rows) {
+    const gauge = host.querySelector(`.account-gauge[data-account="${CSS.escape(row.id)}"]`);
+    const words = accountGaugeWords(row.id);
+    if (gauge && gauge.textContent !== words) gauge.textContent = words;
+  }
   paintAccountAdd();
   // Also recorded rather than written: which of the three sentences applies is
   // state, so a language change has to ask again rather than replay one of them.
@@ -3727,7 +3774,8 @@ function paintAccountAdd() {
   // element from being written behind its key matches by VARIABLE NAME across
   // the whole file, so a common local shadows every other one that shares it.
   const accountAdd = el("account-add");
-  accountAdd.disabled = addingAccount || !accountReport.can_add;
+  const closed = addingAccount || !accountReport.can_add;
+  if (accountAdd.disabled !== closed) accountAdd.disabled = closed;
   // Said through `say` rather than written straight in. The words depend on
   // state, so the key in the markup cannot produce them on its own — and a
   // language change redraws a keyed element FROM its key, which would put
@@ -3809,6 +3857,15 @@ async function pickSystemClaudeLogin() {
     return;
   }
   claudeLoginMoved();
+  sayUnrecordedPick();
+}
+
+/* 사람의 전환은 일어났는데 원장이 그 영수증을 거절했다면 — 성공처럼 조용히 넘기지 않고
+ * 자동 전환과 같은 말로 알린다(astra R4). 영수증은 일지에 남아 다음 조회가 적는다. */
+function sayUnrecordedPick() {
+  const why = accountReport?.switch_unrecorded;
+  if (!why) return;
+  showError(t("settings.accounts.switchUnrecorded", "전환은 했지만 원장에 적지 못했습니다: {{why}}", { why }));
 }
 
 function claudeLoginKey(row) {
@@ -4119,6 +4176,7 @@ async function pickClaudeAccount(id) {
   }
   switchingAccount = null;
   claudeLoginMoved();
+  sayUnrecordedPick();
   // And nothing else: the panes already running claude keep the login they
   // were started with (see the block below). A person who wants a pane on
   // the new account opens a new one.
@@ -4212,27 +4270,35 @@ function paintAccountSwitchNote() {
   const decision = plan?.decision ?? null;
   const said = el("account-switch-said");
   const button = el("account-switch-now");
+  // Only what moved is written: the note repaints on every usage answer
+  // (t-7538 E1).
+  const paint = (shown, offered, words = "") => {
+    if (note.hidden !== !shown) note.hidden = !shown;
+    if (!shown) return;
+    if (button.hidden !== !offered) button.hidden = !offered;
+    if (said.textContent !== words) said.textContent = words;
+    if (!offered) return;
+    if (button.disabled !== applyingAccountSwitch) button.disabled = applyingAccountSwitch;
+    // The button applies the plan whose words stand beside it, and no
+    // other (astra R1): its token is the one this paint read.
+    if (button.dataset.token !== plan.token) button.dataset.token = plan.token;
+  };
   if (!plan || !decision || plan.mode === "off") {
-    note.hidden = true;
+    paint(false, false);
     return;
   }
   if (decision.kind === "wait") {
-    note.hidden = false;
-    button.hidden = true;
-    said.textContent = t("settings.accounts.switchWait", "리셋까지 {{minutes}}분 — 기다립니다", {
+    paint(true, false, t("settings.accounts.switchWait", "리셋까지 {{minutes}}분 — 기다립니다", {
       minutes: decision.minutes,
-    });
+    }));
     return;
   }
   const moves = accountSwitchMoves(plan);
   if (plan.mode !== "ask" || (decision.kind !== "switch" && moves.length === 0)) {
-    note.hidden = true;
+    paint(false, false);
     return;
   }
-  note.hidden = false;
-  button.hidden = false;
-  button.disabled = applyingAccountSwitch;
-  said.textContent = accountSwitchProposal(plan);
+  paint(true, true, accountSwitchProposal(plan));
 }
 
 /* 제안 한 문장 — 설정 화면의 줄과 알림이 같은 말을 한다. */
@@ -4255,9 +4321,12 @@ function accountSwitchProposal(plan) {
 }
 
 /* `ask`의 알림 — 상태 바를 보는 사람에게 같은 한 줄과 단추를, 제안(토큰)마다 한 번.
- * 같은 제안에 다시 뜨지 않고, 단추는 그 제안의 토큰으로만 적용한다. 설정 화면의
- * 줄과 상태 바의 「확인 기다림」은 알림이 사라진 뒤에도 남는다. */
+ * 같은 제안에 다시 뜨지 않고, 단추는 **그 알림을 만든 제안의 토큰**으로만 적용한다
+ * (astra R1): 누를 때의 최신 계획을 읽지 않는다. 제안이 바뀌거나 사라지면 옛 알림은
+ * 걷고, 걷히기 전에 눌린 옛 단추는 새 계획을 고르지 못한다. 설정 화면의 줄과 상태
+ * 바의 「확인 기다림」은 알림이 사라진 뒤에도 남는다. */
 let proposedSwitchToken = null;
+let proposedSwitchNote = null;
 
 function offerAccountSwitch() {
   const plan = accountUsageReport?.plan ?? null;
@@ -4265,12 +4334,21 @@ function offerAccountSwitch() {
   const proposes =
     plan?.mode === "ask" &&
     (decision?.kind === "switch" || accountSwitchMoves(plan).length > 0);
-  if (!proposes || applyingAccountSwitch || plan.token === proposedSwitchToken) return;
-  proposedSwitchToken = plan.token;
-  toast(accountSwitchProposal(plan), "", {
+  if (proposedSwitchNote && (!proposes || plan.token !== proposedSwitchToken)) {
+    proposedSwitchNote.remove();
+    proposedSwitchNote = null;
+  }
+  if (!proposes) {
+    proposedSwitchToken = null;
+    return;
+  }
+  if (applyingAccountSwitch || plan.token === proposedSwitchToken) return;
+  const token = plan.token;
+  proposedSwitchToken = token;
+  proposedSwitchNote = toast(accountSwitchProposal(plan), "", {
     action: {
       label: t("settings.accounts.switchNow", "지금 바꾸기"),
-      run: () => void applyAccountSwitch("ask"),
+      run: () => void applyAccountSwitch("ask", token),
     },
   });
 }
@@ -4292,7 +4370,7 @@ function paintClaudeNext() {
   if (!next) return;
   const plan = accountUsageReport?.plan ?? null;
   if (!plan || (plan.fitness ?? []).length < 2) {
-    next.hidden = true;
+    if (!next.hidden) next.hidden = true;
     return;
   }
   const decision = plan.decision ?? {};
@@ -4329,8 +4407,9 @@ function paintClaudeNext() {
   if (plan.mode === "ask" && (decision.kind === "switch" || moves.length > 0)) {
     parts.push(t("usage.nextAsk", "확인 기다림"));
   }
-  next.textContent = parts.join(" · ");
-  next.hidden = false;
+  const words = parts.join(" · ");
+  if (next.textContent !== words) next.textContent = words;
+  if (next.hidden) next.hidden = false;
 }
 
 async function refreshClaudeAccountUsage(force = false) {
@@ -4361,13 +4440,20 @@ async function refreshClaudeAccountUsage(force = false) {
   // `auto`: 표가 바꾸자면(기본 계정이든 벽 판이든) 바로 — 그 계획의 토큰으로. 한 번에 하나.
   const plan = report?.plan;
   if (plan?.mode === "auto" && (plan.decision?.kind === "switch" || accountSwitchMoves(plan).length > 0)) {
-    void applyAccountSwitch("auto");
+    void applyAccountSwitch("auto", plan.token);
   }
 }
 
-async function applyAccountSwitch(by) {
-  const token = accountUsageReport?.plan?.token;
+/* 적용은 늘 **어느 제안의** 토큰으로 한다(astra R1) — 알림 단추는 그 알림의 토큰,
+ * 설정 줄의 단추는 그 줄을 그린 계획의 토큰, `auto`는 그 박자의 계획의 토큰. 창이
+ * 이미 다른 계획을 들고 있으면 그 옛 토큰은 보내지도 않고 「제안이 바뀌었다」고
+ * 말한다. 보낸 토큰도 백엔드가 지금 계획과 다시 대조해 다르면 거절한다. */
+async function applyAccountSwitch(by, token) {
   if (!token || applyingAccountSwitch || token === appliedSwitchToken) return;
+  if (token !== accountUsageReport?.plan?.token) {
+    showError(t("settings.accounts.switchStale", "제안이 바뀌어 그 제안으로는 바꾸지 않았습니다 — 지금 제안을 확인하세요"));
+    return;
+  }
   applyingAccountSwitch = true;
   appliedSwitchToken = token;
   paintAccountSwitchNote();
@@ -4408,7 +4494,8 @@ async function applyAccountSwitch(by) {
   toast(words.join(" · "));
 }
 
-el("account-switch-now").addEventListener("click", () => void applyAccountSwitch("ask"));
+el("account-switch-now").addEventListener("click", () =>
+  void applyAccountSwitch("ask", el("account-switch-now").dataset.token));
 el("account-autoswitch").addEventListener("change", (event) => {
   claudeAutoSwitchMode = event.target.value;
   void commitSetting("claude_autoswitch_mode", "set_claude_autoswitch_mode", {

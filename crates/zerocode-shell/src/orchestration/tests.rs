@@ -924,9 +924,9 @@ fn all_ledger_image_readers_use_the_revision_cache() {
         // switch's own readers take the same door.
         "reseat_sleeping_in_line(",
         "walled_claude_workers(",
+        "rest_worker_for_switch(",
         "switch_move_ready(",
-        "worker_seat_now(",
-        "worker_model_now(",
+        "worker_now(",
         "last_agent_in_checkout(",
         "settled_checkouts(",
         "runtime_report(",
@@ -19455,8 +19455,12 @@ struct Switching {
     closed: Mutex<Vec<u32>>,
     onto: Mutex<u32>,
     checkout: &'static str,
-    markers: Mutex<std::collections::HashMap<u32, zerocode_core::orchestration::QuotaWallMarker>>,
-    busy: Mutex<std::collections::HashSet<u32>>,
+    /// The screens' wall words and the busy panes — shared, so a test can
+    /// move them from inside the switch (`SwitchWorld::after_select`).
+    markers: std::sync::Arc<
+        Mutex<std::collections::HashMap<u32, zerocode_core::orchestration::QuotaWallMarker>>,
+    >,
+    busy: std::sync::Arc<Mutex<std::collections::HashSet<u32>>>,
     sessions: Mutex<std::collections::HashMap<u32, zerocode_core::ProviderSession>>,
     accounts: Mutex<std::collections::HashMap<u32, String>>,
     /// The account a pane opened NOW runs as — the window's selection.
@@ -19479,8 +19483,8 @@ impl Switching {
             closed: Mutex::new(Vec::new()),
             onto: Mutex::new(first_term),
             checkout,
-            markers: Mutex::new(std::collections::HashMap::new()),
-            busy: Mutex::new(std::collections::HashSet::new()),
+            markers: std::sync::Arc::new(Mutex::new(std::collections::HashMap::new())),
+            busy: std::sync::Arc::new(Mutex::new(std::collections::HashSet::new())),
             sessions: Mutex::new(std::collections::HashMap::new()),
             accounts: Mutex::new(std::collections::HashMap::new()),
             selected: std::sync::Arc::new(Mutex::new(Some("a-fixture".to_string()))),
@@ -19603,8 +19607,19 @@ impl Host for Switching {
         self.closed.lock().unwrap().push(term);
         terminal_gone(term, clock());
     }
-    fn close_gone(&self, term: u32) -> bool {
+    fn close_gone(&self, term: u32) -> crate::agent_teams::PaneExit {
         self.close(term);
+        if *self.lingering.lock().unwrap() {
+            crate::agent_teams::PaneExit::Lingering(crate::agent_teams::ExitWitness {
+                group: term,
+                started: Some(format!("fixture-start-{term}")),
+            })
+        } else {
+            crate::agent_teams::PaneExit::Gone
+        }
+    }
+    /// A lingering program leaves when the test says so.
+    fn exit_seen(&self, _witness: &crate::agent_teams::ExitWitness) -> bool {
         !*self.lingering.lock().unwrap()
     }
     fn provider_session(&self, term: u32) -> Option<zerocode_core::ProviderSession> {
@@ -19634,6 +19649,18 @@ struct SwitchWorld {
     failures: Mutex<Vec<(String, i64)>>,
     journal: tempfile::TempDir,
     lines: Mutex<Vec<String>>,
+    /// The clock the switch commits by — the last moment the situation was
+    /// read, unless a test moves it.
+    now: Mutex<i64>,
+    /// Which login each account id names, when a test says it names
+    /// another than the gauges' own (astra R6).
+    logins: Mutex<std::collections::HashMap<String, String>>,
+    /// Run once, right after a select lands — the world moving under the
+    /// switch between its selection and its panes (astra R2).
+    after_select: Mutex<Option<Box<dyn FnOnce(&SwitchWorld) + Send>>>,
+    /// Run once, right before the first receipt is written — the ledger's
+    /// disk refusing writes from there on (astra R4).
+    before_receipt: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl SwitchWorld {
@@ -19649,6 +19676,10 @@ impl SwitchWorld {
             failures: Mutex::new(Vec::new()),
             journal: tempfile::tempdir().expect("a journal directory"),
             lines: Mutex::new(Vec::new()),
+            now: Mutex::new(0),
+            logins: Mutex::new(std::collections::HashMap::new()),
+            after_select: Mutex::new(None),
+            before_receipt: Mutex::new(None),
         }
     }
 
@@ -19688,12 +19719,27 @@ impl SwitchWorld {
 
 impl crate::account_switch::SwitchDoors for SwitchWorld {
     fn situation(&self, now_ms: i64) -> Result<crate::account_switch::Situation, String> {
+        *self.now.lock().unwrap() = now_ms;
+        let gauges = self.gauges.lock().unwrap().clone();
+        let named = self.logins.lock().unwrap().clone();
+        let logins = gauges
+            .iter()
+            .map(|gauge| {
+                let login = named
+                    .get(&gauge.id)
+                    .cloned()
+                    .or_else(|| gauge.identity.clone())
+                    .unwrap_or_default();
+                (gauge.id.clone(), login)
+            })
+            .collect();
         Ok(crate::account_switch::Situation {
             mode: *self.mode.lock().unwrap(),
             active: self.selected.lock().unwrap().clone(),
-            gauges: self.gauges.lock().unwrap().clone(),
+            gauges,
             last_switch_ms: *self.last_switch.lock().unwrap(),
             failures: self.failures.lock().unwrap().clone(),
+            logins,
             now_ms,
         })
     }
@@ -19703,7 +19749,25 @@ impl crate::account_switch::SwitchDoors for SwitchWorld {
         }
         self.selects.lock().unwrap().push(to.map(str::to_string));
         *self.selected.lock().unwrap() = to.map(str::to_string);
+        let moving = self.after_select.lock().unwrap().take();
+        if let Some(moving) = moving {
+            moving(self);
+        }
         Ok(())
+    }
+    fn now_ms(&self) -> i64 {
+        *self.now.lock().unwrap()
+    }
+    fn record(
+        &self,
+        receipt: zerocode_core::orchestration::AccountSwitchReceipt,
+        now_ms: i64,
+    ) -> Result<bool, String> {
+        let refusing = self.before_receipt.lock().unwrap().take();
+        if let Some(refusing) = refusing {
+            refusing();
+        }
+        super::record_account_switch(receipt, now_ms)
     }
     fn selected(&self, _to: Option<&str>, at_ms: i64) {
         *self.followed.lock().unwrap() += 1;
@@ -19761,7 +19825,7 @@ fn digest_of(path: &Path) -> String {
 /// of their own. What every switch test starts from.
 struct WalledClaude {
     _window: PrivateWindow,
-    _store: zerocode_orchestrator::workflow_store::WorkflowStore,
+    store: zerocode_orchestrator::workflow_store::WorkflowStore,
     _beat: std::sync::MutexGuard<'static, ()>,
     _dir: tempfile::TempDir,
     host: Switching,
@@ -19933,7 +19997,7 @@ impl WalledClaude {
         host.asks.lock().unwrap().clear();
         Self {
             _window: window,
-            _store: store,
+            store,
             _beat: beat,
             _dir: dir,
             host,
@@ -19983,15 +20047,77 @@ impl WalledClaude {
         use crate::account_switch::SwitchDoors as _;
         crate::account_switch::plan_with(&self.host, self.world.situation(at).expect("a situation"))
     }
+
+    /// The ledger's disk refuses every write from now — the trigger
+    /// `a_disk_that_refuses_a_write_still_answers_a_look_from_the_disks_word`
+    /// puts on the revision head — until [`Self::disk_takes_writes`].
+    fn disk_refuses_writes(&self) {
+        self.store
+            .fault_connection_for_tests()
+            .expect("a fault connection")
+            .execute_batch(REFUSE_LEDGER_WRITES)
+            .expect("a disk that refuses");
+    }
+
+    fn disk_takes_writes(&self) {
+        self.store
+            .fault_connection_for_tests()
+            .expect("a fault connection")
+            .execute_batch("DROP TRIGGER refuse_writes;")
+            .expect("the disk comes back");
+    }
+
+    /// The disk starts refusing at the switch's first receipt: every effect
+    /// before it — the selection, the rest, the close, the new pane — has
+    /// landed, and the receipts meet a ledger that will not take them.
+    fn disk_refuses_from_the_first_receipt(&self) {
+        let fault = self
+            .store
+            .fault_connection_for_tests()
+            .expect("a fault connection");
+        *self.world.before_receipt.lock().unwrap() = Some(Box::new(move || {
+            fault
+                .execute_batch(REFUSE_LEDGER_WRITES)
+                .expect("a disk that refuses");
+        }));
+    }
+
+    fn journal_text(&self) -> String {
+        std::fs::read_to_string(
+            self.world
+                .journal
+                .path()
+                .join(crate::app_paths::artifact_file::CLAUDE_ACCOUNT_SWITCH),
+        )
+        .unwrap_or_default()
+    }
+
+    fn receipts(&self, at: i64) -> Vec<serde_json::Value> {
+        self.json("check --peek --types account_switched", at)["messages"]
+            .as_array()
+            .expect("messages")
+            .iter()
+            .map(|told| serde_json::from_str(told["body"].as_str().expect("a body")).expect("json"))
+            .collect()
+    }
 }
+
+/// The trigger a test puts on the ledger's revision head so every write
+/// is refused, as a full or read-only disk refuses one.
+const REFUSE_LEDGER_WRITES: &str = "CREATE TRIGGER refuse_writes
+    AFTER UPDATE OF revision ON orchestration_ledger_heads
+    BEGIN SELECT RAISE(ABORT, 'injected disk refusal'); END;";
 
 impl Drop for WalledClaude {
     fn drop(&mut self) {
-        // A move that stopped halfway leaves its mark for the restore road;
-        // the next test's worker of the same id is not that worker.
+        // A move that stopped halfway leaves its mark and its hold for the
+        // restore road; the next test's worker of the same id is not that
+        // worker.
         super::forget_switch_mark(&self.worker);
+        super::forget_lingering_exit(&self.worker);
         for (worker, _) in &self.walled_more {
             super::forget_switch_mark(worker);
+            super::forget_lingering_exit(worker);
         }
         for term in [
             self.leader,
@@ -20540,14 +20666,21 @@ fn off_does_nothing_ask_waits_for_a_yes_and_a_cooldown_holds() {
 
 /// A window that dies between an effect and its receipt finishes the
 /// receipt on its next look — once — and never the effect: a default that
-/// landed gets its row; a worker seated again gets its row; the journal
-/// goes (astra B2).
+/// landed gets its row; a select that never landed owes nothing; the
+/// first round's one-switch file is read as a book of one; the journal
+/// goes once nothing is owed (astra B2).
 #[test]
 fn a_switch_that_died_halfway_finishes_its_receipts_once() {
     let stood = WalledClaude::stand(87_800, 0);
     let at = stood.began + 20_000;
+    let journal_path = stood
+        .world
+        .journal
+        .path()
+        .join(crate::app_paths::artifact_file::CLAUDE_ACCOUNT_SWITCH);
     // As if the window died right after the select: the store names B, the
-    // journal says a default was owed, no receipt was written.
+    // journal says a default was owed, no receipt was written. Written in
+    // the first round's shape — one switch, not a book.
     let journal = crate::account_switch::Journal {
         key: "switch-halfway".to_string(),
         by: "auto".to_string(),
@@ -20555,18 +20688,16 @@ fn a_switch_that_died_halfway_finishes_its_receipts_once() {
         from: Some("a-fixture".to_string()),
         to: Some("b-fixture".to_string()),
         default: true,
+        landed: false,
         observed_percent: Some(95),
         observed_window: Some("session".to_string()),
         generation: None,
         panes: Vec::new(),
+        moved: 0,
         began_ms: at,
     };
     std::fs::write(
-        stood
-            .world
-            .journal
-            .path()
-            .join(crate::app_paths::artifact_file::CLAUDE_ACCOUNT_SWITCH),
+        &journal_path,
         serde_json::to_string(&journal).expect("json"),
     )
     .expect("the journal");
@@ -20580,19 +20711,18 @@ fn a_switch_that_died_halfway_finishes_its_receipts_once() {
         0,
         "the journal was read twice"
     );
+    assert!(!journal_path.exists(), "a settled journal stayed");
     let mail = stood.json("check --peek --types account_switched", at + 3);
     assert_eq!(mail["count"], 1, "{mail}");
     // A select that never landed owes nothing.
     std::fs::write(
-        stood
-            .world
-            .journal
-            .path()
-            .join(crate::app_paths::artifact_file::CLAUDE_ACCOUNT_SWITCH),
-        serde_json::to_string(&crate::account_switch::Journal {
-            key: "switch-never-landed".to_string(),
-            to: Some("c-fixture".to_string()),
-            ..journal
+        &journal_path,
+        serde_json::to_string(&crate::account_switch::JournalBook {
+            switches: vec![crate::account_switch::Journal {
+                key: "switch-never-landed".to_string(),
+                to: Some("c-fixture".to_string()),
+                ..journal
+            }],
         })
         .expect("json"),
     )
@@ -20605,6 +20735,7 @@ fn a_switch_that_died_halfway_finishes_its_receipts_once() {
         stood.json("check --peek --types account_switched", at + 5)["count"],
         1
     );
+    assert!(!journal_path.exists());
 }
 
 /// Two applies of one plan at once — two windows, or a press and a beat —
@@ -20647,6 +20778,516 @@ fn two_applies_of_one_plan_move_once() {
         stood.json("check --peek --types account_switched", at + 10)["count"],
         2
     );
+}
+
+/// A `quota_walled` row says the two witnesses met ONCE (astra R2). A
+/// worker that went back to work after its wall — its pane busy again, or
+/// its own words past the wall — keeps that row until the wall's time runs
+/// out, and the old plan listed it and moved it on the row alone. Now the
+/// plan asks the pane now: busy with the words still on screen, quiet with
+/// the words gone, or both, the worker is not on the moving list; the
+/// default still moves on its own numbers, and nothing is rested, closed
+/// or seated. And a pane that goes back to work WHILE the default is being
+/// selected is not moved either: its last door reads the plan again. The
+/// same wall still standing moves — the green road above.
+#[test]
+fn a_pane_back_at_work_after_its_wall_is_not_moved_by_the_wall_it_left() {
+    let unmoved = |stood: &WalledClaude, seat: &str, case: &str, at: i64| {
+        assert!(
+            stood.host.closed().is_empty(),
+            "{case}: {:?}",
+            stood.host.closed()
+        );
+        assert!(stood.host.splits.lock().unwrap().is_empty(), "{case}");
+        let row = stood.row(&stood.worker);
+        assert_eq!(row.state, WorkerState::Active, "{case}");
+        assert_eq!(row.pane, seat, "{case}");
+        assert_eq!(row.model.as_deref(), Some("claude-fable-5-1"), "{case}");
+        assert_eq!(stood.died(at + 10), 0, "{case}");
+    };
+    for (leader, busy, words_gone) in [
+        (89_000, true, true),
+        (89_100, true, false),
+        (89_200, false, true),
+    ] {
+        let stood = WalledClaude::stand(leader, 0);
+        let at = stood.began + 20_000;
+        let walled_term = stood.leader + 1;
+        let seat = stood.row(&stood.worker).pane;
+        if busy {
+            stood.host.working(walled_term);
+        }
+        if words_gone {
+            stood.host.markers.lock().unwrap().remove(&walled_term);
+        }
+        let case = format!("busy={busy} words_gone={words_gone}");
+        let plan = stood.plan(at);
+        assert!(plan.walled.is_empty(), "{case}: {:?}", plan.walled);
+        stood.host.seating_onto(stood.leader + 2);
+        let applied =
+            crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+                .expect("the default moves on its own numbers");
+        assert!(applied.switched_default, "{case}: {applied:?}");
+        assert!(applied.panes.is_empty(), "{case}: {applied:?}");
+        unmoved(&stood, &seat, &case, at);
+    }
+    // Back to work while the default is being selected.
+    let stood = WalledClaude::stand(89_250, 0);
+    let at = stood.began + 20_000;
+    let walled_term = stood.leader + 1;
+    let seat = stood.row(&stood.worker).pane;
+    let plan = stood.plan(at);
+    assert_eq!(plan.moves().count(), 1, "{:?}", plan.walled);
+    let busy = std::sync::Arc::clone(&stood.host.busy);
+    *stood.world.after_select.lock().unwrap() = Some(Box::new(move |_: &SwitchWorld| {
+        busy.lock().unwrap().insert(walled_term);
+    }));
+    stood.host.seating_onto(stood.leader + 2);
+    let applied =
+        crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+            .expect("the default moved");
+    assert!(!applied.panes[0].ok, "{applied:?}");
+    assert!(
+        applied.panes[0]
+            .why
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no longer sends"),
+        "{applied:?}"
+    );
+    unmoved(&stood, &seat, "back to work during the selection", at);
+}
+
+/// The rest itself — at the actor and the host, the last door of all (astra
+/// R2). The ledger rests a walled worker only at the fence, on the window's
+/// CURRENT observation: a pane busy again, words that left the screen, or
+/// its account's number that fell back under the wall is refused there, and
+/// so is an approval for another attempt or another coordinator generation
+/// — each time with the worker left exactly where it is. The approval as it
+/// stands, on a wall that still stands, rests it with the pane's tuning.
+#[test]
+fn a_rest_is_written_only_while_the_window_sees_the_wall_now() {
+    let stood = WalledClaude::stand(89_260, 0);
+    let at = stood.began + 20_000;
+    let walled_term = stood.leader + 1;
+    let row = stood.row(&stood.worker);
+    let approved = zerocode_core::orchestration::SwitchRest {
+        worker: stood.worker.clone(),
+        dispatch: stood.dispatch.clone(),
+        generation: super::worker_now(&stood.worker).and_then(|now| now.generation),
+        session: SWITCH_SESSION.to_string(),
+        model: "claude-opus-5-5".to_string(),
+        effort: "xhigh".to_string(),
+    };
+    let rest = |approval: &zerocode_core::orchestration::SwitchRest| {
+        super::rest_worker_for_switch(&stood.host, approval, "a-fixture", &|| at, at)
+    };
+    let untouched = |why: &str| {
+        let now = stood.row(&stood.worker);
+        assert_eq!(now.state, WorkerState::Active, "{why}");
+        assert_eq!(now.model, row.model, "{why}");
+        assert_eq!(now.effort, row.effort, "{why}");
+    };
+    // Busy again.
+    stood.host.working(walled_term);
+    let refused = rest(&approved).unwrap_err();
+    assert!(refused.contains("not at its wall now"), "{refused}");
+    untouched(&refused);
+    stood.host.busy.lock().unwrap().clear();
+    // Quiet, but its words left the screen.
+    let words = stood
+        .host
+        .markers
+        .lock()
+        .unwrap()
+        .remove(&walled_term)
+        .expect("the wall words");
+    let refused = rest(&approved).unwrap_err();
+    assert!(refused.contains("not at its wall now"), "{refused}");
+    untouched(&refused);
+    stood
+        .host
+        .markers
+        .lock()
+        .unwrap()
+        .insert(walled_term, words);
+    // Words on screen, but its account's number fell back under the wall.
+    let gauges = |used: u8| {
+        let mut snapshot = usage_snapshot(
+            "claude",
+            Some((used, Some(stood.began + 3 * 60 * 60_000))),
+            Some((40, None)),
+            stood.began - 60_000,
+        );
+        snapshot.account = Some("a-fixture".to_string());
+        vec![("claude", snapshot)]
+    };
+    stood._window.set_usage(gauges(40));
+    let refused = rest(&approved).unwrap_err();
+    assert!(refused.contains("not at its wall now"), "{refused}");
+    untouched(&refused);
+    stood._window.set_usage(gauges(98));
+    // Another attempt, another coordinator generation.
+    for (other, said) in [
+        (
+            zerocode_core::orchestration::SwitchRest {
+                dispatch: "dp-another-attempt".to_string(),
+                ..approved.clone()
+            },
+            "approved for",
+        ),
+        (
+            zerocode_core::orchestration::SwitchRest {
+                generation: Some(approved.generation.map_or(1, |at| at + 1)),
+                ..approved.clone()
+            },
+            "coordinator",
+        ),
+    ] {
+        let refused = rest(&other).unwrap_err();
+        assert!(refused.contains(said), "{refused}");
+        untouched(&refused);
+    }
+    // The approval as it stands, on a wall that still stands.
+    rest(&approved).expect("rested");
+    let rested = stood.row(&stood.worker);
+    assert_eq!(rested.state, WorkerState::Sleeping);
+    assert_eq!(rested.model.as_deref(), Some("claude-opus-5-5"));
+    assert_eq!(rested.effort.as_deref(), Some("xhigh"));
+    assert!(stood.host.closed().is_empty(), "the rest closes nothing");
+    assert_eq!(stood.died(at + 10), 0);
+}
+
+/// The selection and the checks before a pane moves take time, and the
+/// world moves under them (astra R2): the person turns the switch off, or
+/// the landing fills past the blocked line, between the plan and the pane.
+/// The pane is moved only by the policy as it stands at its last door —
+/// read again there, the plan no longer sends it anywhere — so nothing is
+/// rested, closed or seated. The default had already moved; its receipt
+/// says so, and says no pane moved with it.
+#[test]
+fn a_pane_moves_only_by_the_policy_as_it_stands_at_its_last_door() {
+    use zerocode_core::account_autoswitch::AutoSwitchMode;
+    let cases: [(u32, &str, Box<dyn FnOnce(&SwitchWorld) + Send>); 2] = [
+        (
+            89_300,
+            "turned off",
+            Box::new(|world: &SwitchWorld| {
+                *world.mode.lock().unwrap() = AutoSwitchMode::Off;
+            }),
+        ),
+        (
+            89_400,
+            "no longer sends",
+            Box::new(|world: &SwitchWorld| {
+                let now = *world.now.lock().unwrap();
+                world.reads(98, 98, now);
+            }),
+        ),
+    ];
+    for (leader, said, moving) in cases {
+        let stood = WalledClaude::stand(leader, 0);
+        let at = stood.began + 20_000;
+        let seat = stood.row(&stood.worker).pane;
+        let plan = stood.plan(at);
+        assert_eq!(plan.moves().count(), 1, "{:?}", plan.walled);
+        *stood.world.after_select.lock().unwrap() = Some(moving);
+        stood.host.seating_onto(stood.leader + 2);
+        let applied =
+            crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+                .expect("the default moved");
+        assert!(applied.switched_default, "{applied:?}");
+        assert!(!applied.panes[0].ok, "{applied:?}");
+        assert!(
+            applied.panes[0]
+                .why
+                .as_deref()
+                .unwrap_or_default()
+                .contains(said),
+            "{applied:?}"
+        );
+        assert!(stood.host.closed().is_empty(), "{:?}", stood.host.closed());
+        assert!(stood.host.splits.lock().unwrap().is_empty());
+        let row = stood.row(&stood.worker);
+        assert_eq!(row.state, WorkerState::Active);
+        assert_eq!(row.pane, seat);
+        let bodies = stood.receipts(at + 10);
+        assert_eq!(bodies.len(), 1, "{bodies:?}");
+        assert_eq!(bodies[0]["moved"], "default");
+        assert_eq!(bodies[0]["panesMoved"], 0);
+        assert_eq!(bodies[0]["panesPending"], 0);
+        assert_eq!(stood.died(at + 20), 0);
+    }
+}
+
+/// A pane whose program outlives its close (astra R3): the switch rested
+/// the worker and closed the pane, and the process group is still there
+/// after the wait. No restore opens the conversation beside it — not the
+/// coordinator's own restore, not the grace's, not a window that boots
+/// again and reads the journal — and the grace does not end the worker
+/// either: its attempt stays open. Once a look sees the program gone, the
+/// next restore seats the SAME worker on the SAME attempt, once, and the
+/// switch's pane receipt follows once.
+#[test]
+fn a_program_that_outlived_its_close_holds_every_restore_until_it_is_gone() {
+    let stood = WalledClaude::stand(89_500, 0);
+    let at = stood.began + 20_000;
+    *stood.host.lingering.lock().unwrap() = true;
+    let plan = stood.plan(at);
+    stood.host.seating_onto(stood.leader + 2);
+    let applied =
+        crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+            .expect("applied");
+    assert!(!applied.panes[0].ok, "{applied:?}");
+    assert_eq!(stood.host.closed(), vec![stood.leader + 1]);
+    let splits = || stood.host.splits.lock().unwrap().len();
+    assert_eq!(splits(), 0);
+    assert_eq!(stood.row(&stood.worker).state, WorkerState::Sleeping);
+    assert!(
+        stood.journal_text().contains("fixture-start"),
+        "the witness is not on disk for a window that restarts: {}",
+        stood.journal_text()
+    );
+    let actor = test_actor(stood.leader);
+    let restore = || super::reseat_sleeping(&stood.host, Vec::new(), stood.leader, Some(&actor));
+    // The coordinator's own restore opens nothing beside the program.
+    assert_eq!(restore(), 0);
+    assert_eq!(
+        splits(),
+        0,
+        "a restore opened the conversation beside its lingering program"
+    );
+    // The grace, past its time: seats nothing, and ends nothing.
+    {
+        let _old = BootedHere::at(clock() - RESEAT_GRACE_MS - 1);
+        super::expire_sleepers(&stood.host, clock());
+    }
+    assert_eq!(splits(), 0);
+    assert_eq!(stood.row(&stood.worker).state, WorkerState::Sleeping);
+    assert_eq!(stood.died(at + 10), 0);
+    // A window that boots again holds the same witness from the journal.
+    super::forget_lingering_exit(&stood.worker);
+    crate::account_switch::hold_lingering_exits(stood.world.journal.path());
+    assert!(super::lingering_exit(&stood.worker).is_some());
+    assert_eq!(restore(), 0);
+    assert_eq!(splits(), 0);
+    // The program leaves: the next restore seats the same worker on the
+    // same attempt, once.
+    *stood.host.lingering.lock().unwrap() = false;
+    assert_eq!(restore(), 1);
+    assert_eq!(splits(), 1);
+    let row = stood.row(&stood.worker);
+    assert_eq!(row.state, WorkerState::Active);
+    assert_eq!(row.dispatch.as_deref(), Some(stood.dispatch.as_str()));
+    assert_eq!(restore(), 0);
+    assert_eq!(splits(), 1, "seated twice");
+    assert_eq!(stood.died(at + 20), 0);
+    // The switch's own receipt for the pane, on the next look, once.
+    assert_eq!(
+        crate::account_switch::reconcile(&stood.host, &stood.world, at + 30),
+        1
+    );
+    assert_eq!(
+        crate::account_switch::reconcile(&stood.host, &stood.world, at + 31),
+        0
+    );
+    let panes: Vec<serde_json::Value> = stood
+        .receipts(at + 40)
+        .into_iter()
+        .filter(|body| body["moved"] == "pane")
+        .collect();
+    assert_eq!(panes.len(), 1, "{panes:?}");
+    assert_eq!(panes[0]["workerId"], stood.worker);
+    assert!(stood.journal_text().is_empty(), "{}", stood.journal_text());
+}
+
+/// Every receipt a switch owes stays owed until the ledger takes it
+/// (astra R4). The ledger's disk refuses writes from the switch's first
+/// receipt on — every effect has already landed — for the beat's own
+/// switch, for the look that settles a journal, and for a person's pick
+/// made on top of the unfinished switch: nothing leaves the journal, each
+/// answer says the switch happened unrecorded, and the pick is written
+/// BESIDE the unfinished switch, never over it. Once the disk takes writes
+/// again, one look writes each owed receipt exactly once; the next look —
+/// and a window reading the journal fresh — writes none.
+#[test]
+fn a_refused_receipt_stays_owed_until_the_ledger_takes_it_once() {
+    let stood = WalledClaude::stand(89_600, 0);
+    let at = stood.began + 20_000;
+    let plan = stood.plan(at);
+    stood.host.seating_onto(stood.leader + 2);
+    stood.disk_refuses_from_the_first_receipt();
+    let applied =
+        crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+            .expect("every effect landed");
+    assert!(applied.switched_default, "{applied:?}");
+    assert!(applied.panes[0].ok, "{applied:?}");
+    assert_eq!(applied.receipts, 0, "{applied:?}");
+    assert!(applied.receipt_error.is_some(), "{applied:?}");
+    let owed = stood.journal_text();
+    assert!(
+        owed.contains(&stood.worker) && owed.contains("\"default\": true"),
+        "{owed}"
+    );
+    // The look that settles it meets the same disk: still owed.
+    assert_eq!(
+        crate::account_switch::reconcile(&stood.host, &stood.world, at + 1),
+        0
+    );
+    assert_eq!(
+        stood.journal_text(),
+        owed,
+        "a refused look changed the journal"
+    );
+    // A person's pick on top of the unfinished switch.
+    let picked = crate::account_switch::switch_by_person(
+        &stood.host,
+        &stood.world,
+        Some("a-fixture"),
+        at + 2,
+    )
+    .expect("the pick landed");
+    assert!(picked.receipt_error.is_some(), "{picked:?}");
+    let book: crate::account_switch::JournalBook =
+        serde_json::from_str(&stood.journal_text()).expect("a book");
+    assert_eq!(book.switches.len(), 2, "{book:?}");
+    stood.disk_takes_writes();
+    assert_eq!(
+        crate::account_switch::reconcile(&stood.host, &stood.world, at + 3),
+        3
+    );
+    assert_eq!(
+        crate::account_switch::reconcile(&stood.host, &stood.world, at + 4),
+        0
+    );
+    assert!(stood.journal_text().is_empty(), "{}", stood.journal_text());
+    let bodies = stood.receipts(at + 5);
+    assert_eq!(bodies.len(), 3, "{bodies:?}");
+    let pane: Vec<&serde_json::Value> = bodies
+        .iter()
+        .filter(|body| body["moved"] == "pane")
+        .collect();
+    assert_eq!(pane.len(), 1, "{bodies:?}");
+    assert_eq!(pane[0]["workerId"], stood.worker);
+    assert_eq!(pane[0]["toAccount"], "b-fixture");
+    let auto = bodies
+        .iter()
+        .find(|body| body["moved"] == "default" && body["by"] == "auto")
+        .expect("the beat's default");
+    assert_eq!(auto["panesMoved"], 1);
+    assert_eq!(auto["panesPending"], 0);
+    assert!(
+        bodies
+            .iter()
+            .any(|body| body["moved"] == "default" && body["by"] == "person"),
+        "{bodies:?}"
+    );
+    assert_eq!(stood.died(at + 6), 0);
+}
+
+/// Rewrite a switch test's transcript row by row.
+fn rewrite_transcript(path: &Path, change: impl Fn(&mut serde_json::Value)) {
+    let text = std::fs::read_to_string(path).expect("the transcript");
+    let rows: String = text
+        .lines()
+        .map(|line| {
+            let mut row: serde_json::Value = serde_json::from_str(line).expect("a row");
+            change(&mut row);
+            format!("{row}\n")
+        })
+        .collect();
+    std::fs::write(path, rows).expect("rewritten");
+}
+
+/// What a pane runs is read off its own transcript, or the pane is not
+/// moved (astra R5): a transcript whose newest words are behind a tool
+/// output longer than the tail, and a CLI that never wrote its effort,
+/// leave the pane where it is — the row keeps the summons' words and no
+/// relaunch is made on them. And the pane's tuning rides in the rest
+/// itself: a rest the ledger's disk refuses writes neither, and nothing is
+/// closed.
+#[test]
+fn a_pane_whose_tuning_is_not_read_or_not_written_stays_where_it_is() {
+    let refused = |stood: &WalledClaude, needle: &str| {
+        let at = stood.began + 20_000;
+        let plan = stood.plan(at);
+        stood.host.seating_onto(stood.leader + 2);
+        let applied =
+            crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+                .expect("the default still moves");
+        assert!(!applied.panes[0].ok, "{applied:?}");
+        assert!(
+            applied.panes[0]
+                .why
+                .as_deref()
+                .unwrap_or_default()
+                .contains(needle),
+            "{applied:?}"
+        );
+        assert!(stood.host.closed().is_empty(), "{:?}", stood.host.closed());
+        assert!(stood.host.splits.lock().unwrap().is_empty());
+        let row = stood.row(&stood.worker);
+        assert_eq!(row.state, WorkerState::Active);
+        assert_eq!(row.model.as_deref(), Some("claude-fable-5-1"));
+        assert_eq!(row.effort.as_deref(), Some("max"));
+        assert_eq!(stood.died(at + 10), 0);
+    };
+    // The newest model, effort and mode are behind a tool output longer
+    // than the tail.
+    {
+        let stood = WalledClaude::stand(89_700, 0);
+        let mut text = std::fs::read_to_string(&stood.transcript).expect("the transcript");
+        let long = "x".repeat(
+            usize::try_from(zerocode_core::transcript::MAX_TAIL_BYTES).expect("a size") + 4_096,
+        );
+        text.push_str(
+            &serde_json::json!({"type": "user", "uuid": "u-3",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu-2", "content": long}]}})
+            .to_string(),
+        );
+        text.push('\n');
+        std::fs::write(&stood.transcript, text).expect("rewritten");
+        refused(
+            &stood,
+            "does not say its current model, effort, permission mode",
+        );
+    }
+    // A CLI that never wrote its effort.
+    {
+        let stood = WalledClaude::stand(89_800, 0);
+        rewrite_transcript(&stood.transcript, |row| {
+            if let Some(held) = row.as_object_mut() {
+                held.remove("effort");
+                held.remove("perTurnEffort");
+            }
+        });
+        refused(&stood, "does not say its current effort");
+    }
+    // A rest the disk refuses: the row's tuning and its sleep are one
+    // transition, and neither landed.
+    {
+        let stood = WalledClaude::stand(89_900, 0);
+        stood.disk_refuses_writes();
+        let at = stood.began + 20_000;
+        let plan = stood.plan(at);
+        stood.host.seating_onto(stood.leader + 2);
+        let applied =
+            crate::account_switch::apply_with(&stood.host, &stood.world, &plan.token, "auto", at)
+                .expect("the default still moves");
+        assert!(!applied.panes[0].ok, "{applied:?}");
+        assert!(stood.host.closed().is_empty(), "{:?}", stood.host.closed());
+        assert!(stood.host.splits.lock().unwrap().is_empty());
+        stood.disk_takes_writes();
+        let row = stood.row(&stood.worker);
+        assert_eq!(row.state, WorkerState::Active);
+        assert_eq!(
+            row.model.as_deref(),
+            Some("claude-fable-5-1"),
+            "the row names a tuning the refused rest never wrote"
+        );
+        assert_eq!(stood.died(at + 10), 0);
+    }
 }
 
 /// The wall witness reads the gauge of the account the PANE runs as, not

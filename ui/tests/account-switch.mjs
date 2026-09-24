@@ -292,5 +292,159 @@ export async function testAccountSwitch(browser, origin, standBackend, ok) {
     JSON.stringify(refused),
   );
 
+  // ---- 4. a proposal's button applies that proposal and no other (astra R1) ----
+  // The notice for proposal B is still on screen when the next beat brings
+  // proposal C. B's button must not apply C: it carries B's token, and the
+  // window — which already holds C — sends nothing for it. B's notice is
+  // withdrawn when C arrives; C's own button applies C, once. A mode change
+  // retires C's button the same way.
+  const bound = await page.evaluate(async ({ b, c, off }) => {
+    const noticeOf = (who) => [...document.querySelectorAll(".toast")]
+      .find((one) => one.querySelector(".toast-action") && one.textContent.includes(who)) ?? null;
+    window.__SWITCH_APPLIES__ = [];
+    const errors = [];
+    const showing = window.showError;
+    window.showError = (error) => errors.push(String(error));
+    try {
+      window.__ACCOUNT_USAGE__ = b;
+      await refreshClaudeAccountUsage(false);
+      const noticeB = noticeOf("b-fixture");
+      const buttonB = noticeB?.querySelector(".toast-action") ?? null;
+      window.__ACCOUNT_USAGE__ = c;
+      await refreshClaudeAccountUsage(false);
+      const noticeC = noticeOf("c-fixture");
+      const buttonC = noticeC?.querySelector(".toast-action") ?? null;
+      const withdrawn = Boolean(noticeB) && !noticeB.isConnected;
+      buttonB?.click();
+      await new Promise((done) => setTimeout(done, 60));
+      const afterB = window.__SWITCH_APPLIES__.map((one) => one.token);
+      const refusedSaid = errors.length;
+      buttonC?.click();
+      await new Promise((done) => setTimeout(done, 60));
+      const afterC = window.__SWITCH_APPLIES__.map((one) => one.token);
+      // The mode moves to `off`: C's notice goes, and its button retires too.
+      window.__ACCOUNT_USAGE__ = off;
+      window.__SWITCH_APPLIES__ = [];
+      await refreshClaudeAccountUsage(false);
+      buttonC?.click();
+      await new Promise((done) => setTimeout(done, 60));
+      return {
+        hadB: Boolean(buttonB), hadC: Boolean(buttonC), withdrawn,
+        afterB, refusedSaid, afterC,
+        cWithdrawn: Boolean(noticeC) && !noticeC.isConnected,
+        afterOff: window.__SWITCH_APPLIES__.map((one) => one.token),
+      };
+    } finally {
+      window.showError = showing;
+    }
+  }, {
+    b: plan("ask", { kind: "switch", from: "a-fixture", to: "b-fixture", reason: "walled" }, "tok-proposal-b"),
+    c: plan("ask", { kind: "switch", from: "a-fixture", to: "c-fixture", reason: "walled" }, "tok-proposal-c"),
+    off: plan("off", { kind: "stay", why: "off" }, "tok-proposal-off"),
+  });
+  ok(
+    "a proposal's button applies that proposal and no other: B's button pressed after C arrived applies nothing and says the proposal changed, B's notice is withdrawn, C's button applies C once, and a mode change retires C's button too",
+    bound.hadB && bound.hadC && bound.withdrawn &&
+      bound.afterB.length === 0 && bound.refusedSaid === 1 &&
+      bound.afterC.length === 1 && bound.afterC[0] === "tok-proposal-c" &&
+      bound.cWithdrawn && bound.afterOff.length === 0,
+    JSON.stringify(bound),
+  );
+
+  // ---- 5. a quiet poll is quiet on screen too (astra E1) ----------------
+  // The backend's quiet poll writes nothing; the window's answer to the
+  // same report must change nothing on screen either. The same meaning read
+  // again: zero DOM mutations in the accounts list, its count and note, the
+  // proposal line and the bar's "next". A figure that moved rewrites its
+  // gauge line; a countdown that crossed a minute rewrites its gauge line;
+  // neither throws a row away.
+  const quiet = await page.evaluate(async ({ report, moved, sooner }) => {
+    showSettingsPane("provider-accounts");
+    window.__ACCOUNT_USAGE__ = report;
+    // Whatever the earlier sections set moving lands first.
+    await new Promise((done) => setTimeout(done, 250));
+    await refreshClaudeAccountUsage(false);
+    await new Promise((done) => setTimeout(done, 250));
+    const watched = ["account-list", "account-count", "account-note", "account-switch-note", "sb-claude-next", "account-add"]
+      .map((id) => document.getElementById(id))
+      .filter(Boolean);
+    const seen = [];
+    const watcher = new MutationObserver((records) => seen.push(...records));
+    for (const node of watched) {
+      watcher.observe(node, { subtree: true, childList: true, attributes: true, characterData: true });
+    }
+    const flush = async () => {
+      await new Promise((done) => setTimeout(done, 30));
+      const taken = seen.length + watcher.takeRecords().length;
+      seen.length = 0;
+      return taken;
+    };
+    const rowOf = (id) => document.querySelector(`#account-list [data-account-row="${id}"]`);
+    const gaugeOf = (id) => document.querySelector(`#account-list .account-gauge[data-account="${id}"]`)?.textContent ?? "";
+    const rowsBefore = [rowOf("a-fixture"), rowOf("b-fixture")];
+    await refreshClaudeAccountUsage(false);
+    await refreshClaudeAccountUsage(false);
+    const same = await flush();
+    window.__ACCOUNT_USAGE__ = moved;
+    await refreshClaudeAccountUsage(false);
+    const figure = await flush();
+    const figureSaid = gaugeOf("b-fixture");
+    window.__ACCOUNT_USAGE__ = sooner;
+    await refreshClaudeAccountUsage(false);
+    const countdown = await flush();
+    const countdownSaid = gaugeOf("a-fixture");
+    watcher.disconnect();
+    const rowsAfter = [rowOf("a-fixture"), rowOf("b-fixture")];
+    return {
+      same, figure, figureSaid, countdown, countdownSaid,
+      rowsKept: rowsBefore.every(Boolean) && rowsBefore.every((row, at) => row === rowsAfter[at]),
+    };
+  }, (() => {
+    // Half a minute into each countdown's minute, so the test itself never
+    // crosses one.
+    const at = Date.now() + 30_000;
+    const report = plan("ask", { kind: "stay", why: "room" }, "tok-quiet");
+    for (const row of report.accounts) {
+      row.usage.session.resets_at = at + 3 * 3_600_000;
+      row.usage.weekly.resets_at = at + 6 * 86_400_000;
+    }
+    const moved = structuredClone(report);
+    moved.accounts[1].usage.session.used_percent = 11;
+    const sooner = structuredClone(moved);
+    sooner.accounts[0].usage.session.resets_at -= 60_000;
+    return { report, moved, sooner };
+  })());
+  ok(
+    "the same report read again changes nothing on screen — zero mutations in the accounts list, its count and note, the proposal line and the bar — while a figure or a countdown that moved rewrites its own gauge line and keeps every row",
+    quiet.same === 0 && quiet.figure > 0 && quiet.figureSaid.includes("11%") &&
+      quiet.countdown > 0 && quiet.countdownSaid.includes("2h 59m") && quiet.rowsKept,
+    JSON.stringify(quiet),
+  );
+
+  // ---- 6. a person's pick the ledger did not record is said (astra R4) ----
+  const unrecorded = await page.evaluate(async (accounts) => {
+    const errors = [];
+    const showing = window.showError;
+    window.showError = (error) => errors.push(String(error));
+    try {
+      window.__ACCOUNTS__ = { ...accounts, active: "a-fixture", switch_unrecorded: "원장이 전환 영수증을 거절했습니다: NotDurable" };
+      accountReport = window.__ACCOUNTS__;
+      await pickClaudeAccount("b-fixture");
+      await pickSystemClaudeLogin();
+      window.__ACCOUNTS__ = { ...accounts, active: "a-fixture" };
+      accountReport = window.__ACCOUNTS__;
+      await pickClaudeAccount("b-fixture");
+      return { errors };
+    } finally {
+      window.showError = showing;
+    }
+  }, accounts);
+  ok(
+    "a person's pick the ledger refused to record is said as such — for a managed account and for the machine's own login — and a recorded pick says nothing",
+    unrecorded.errors.length === 2 &&
+      unrecorded.errors.every((said) => said.includes("NotDurable")),
+    JSON.stringify(unrecorded),
+  );
+
   await page.close();
 }

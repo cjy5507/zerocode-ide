@@ -1690,22 +1690,39 @@ impl agent_teams::Host for TeamWindow {
 
     /// The pane's process group read before the close and watched after it,
     /// on the clock the hand-over already keeps for a pane's CLI leaving
-    /// (`HAND_OVER_EXIT_WAIT`, polled every `HAND_OVER_EXIT_POLL`).
-    fn close_gone(&self, term: TermId) -> bool {
+    /// (`HAND_OVER_EXIT_WAIT`, polled every `HAND_OVER_EXIT_POLL`). The
+    /// leader's start identity is read while it still stands, so a later
+    /// look at a group that outlived the wait can tell it from a program
+    /// that took its pid afterwards.
+    fn close_gone(&self, term: TermId) -> agent_teams::PaneExit {
         let root = self
             .app
             .state::<AppState>()
             .terminals()
             .handle(term)
             .and_then(|held| lock_pty(&held).pid());
+        let started =
+            root.and_then(|root| crate::resource_usage::process_start_identity(root).ok());
         self.close(term);
-        root.is_none_or(|root| {
-            crate::cmd::wait_process_group_gone(
-                root,
-                crate::cmd::HAND_OVER_EXIT_WAIT,
-                crate::cmd::HAND_OVER_EXIT_POLL,
-            )
-        })
+        match root {
+            Some(root)
+                if !crate::cmd::wait_process_group_gone(
+                    root,
+                    crate::cmd::HAND_OVER_EXIT_WAIT,
+                    crate::cmd::HAND_OVER_EXIT_POLL,
+                ) =>
+            {
+                agent_teams::PaneExit::Lingering(agent_teams::ExitWitness {
+                    group: root,
+                    started,
+                })
+            }
+            _ => agent_teams::PaneExit::Gone,
+        }
+    }
+
+    fn exit_seen(&self, witness: &agent_teams::ExitWitness) -> bool {
+        crate::cmd::program_left(witness)
     }
 
     fn close(&self, term: TermId) {

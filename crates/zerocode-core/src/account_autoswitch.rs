@@ -168,6 +168,19 @@ pub struct GaugeWindow {
     pub resets_at_ms: Option<i64>,
 }
 
+impl GaugeWindow {
+    /// Whether this window is a number an account may be chosen by (astra
+    /// R6): a percentage inside 0–100, and — for a window that has counted
+    /// anything — the reset that frees it. A window at 0% names no reset
+    /// because nothing has started it; one that has counted something and
+    /// names none says nothing about when its room comes back, and is
+    /// unknown rather than room.
+    #[must_use]
+    pub fn is_a_reading(&self) -> bool {
+        self.used_percent <= 100 && (self.used_percent == 0 || self.resets_at_ms.is_some())
+    }
+}
+
 /// One account's reading, id and numbers only.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AccountGauge {
@@ -236,7 +249,10 @@ pub struct Fitness {
 fn fitness(gauge: &AccountGauge, model: Option<&str>, now_ms: i64) -> Fitness {
     let policy = &CLAUDE_ACCOUNT_AUTOSWITCH;
     let limiting: Vec<&GaugeWindow> = gauge.limiting(model).collect();
-    let unfit = if gauge.status != "ok" || limiting.is_empty() {
+    let unfit = if gauge.status != "ok"
+        || limiting.is_empty()
+        || limiting.iter().any(|window| !window.is_a_reading())
+    {
         Some(Unfit::Unknown)
     } else if gauge.observed_at_ms > now_ms {
         Some(Unfit::FutureRead)
@@ -679,6 +695,50 @@ mod tests {
                 from: "a".into(),
                 to: "c".into(),
                 reason: SwitchReason::Walled,
+            }
+        );
+    }
+
+    /// A number an account may be chosen by (astra R6): a window outside
+    /// 0–100, or one that has counted something and names no reset to free
+    /// it, is unknown — never room; a window nothing has started (0%, no
+    /// reset) is room. As a candidate the unknown one is passed over.
+    #[test]
+    fn a_window_out_of_range_or_counting_with_no_reset_is_unknown_never_room() {
+        let fit = |windows: &[(&str, u8, Option<i64>)]| {
+            fitness(&gauge("b", "claude_team", windows), None, NOW)
+        };
+        let unreset = fit(&[("session", 30, None), ("weekly", 20, DAYS6)]);
+        assert_eq!(unreset.unfit, Some(Unfit::Unknown));
+        assert_eq!(unreset.room_percent, None);
+        let over = fit(&[("session", 101, HOUR), ("weekly", 20, DAYS6)]);
+        assert_eq!(over.unfit, Some(Unfit::Unknown));
+        assert_eq!(over.room_percent, None);
+        let unstarted = fit(&[("session", 0, None), ("weekly", 20, DAYS6)]);
+        assert_eq!(unstarted.unfit, None);
+        assert_eq!(unstarted.room_percent, Some(80));
+        let gauges = [
+            gauge(
+                "a",
+                "claude_max",
+                &[("session", 95, HOUR), ("weekly", 50, DAYS6)],
+            ),
+            gauge(
+                "b",
+                "claude_team",
+                &[("session", 5, None), ("weekly", 10, DAYS6)],
+            ),
+        ];
+        assert_eq!(
+            decide(&ask("a", &gauges)),
+            Decision::Stay {
+                why: "no_candidate"
+            }
+        );
+        assert_eq!(
+            judge_pane("a", None, "b", &gauges, NOW),
+            Decision::Stay {
+                why: "no_candidate"
             }
         );
     }
