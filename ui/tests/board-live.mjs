@@ -518,14 +518,23 @@ export async function testBoardLive(browser, origin, ok) {
       quiet.firstRow === quiet.nowRow, JSON.stringify(quiet));
     ok("a_finished_pulse_returns_to_idle",
       quiet.handles.timers === 0 && quiet.handles.pulses === 0, JSON.stringify(quiet.handles));
+    /* 이 표면 위에서 **영원히 도는 것**이 하나도 없다. 카드의 빛은 그 위의
+     * 한 겹에 얹히므로 의사 요소까지 함께 센다. */
     ok("no_perpetual_orbit", await page.evaluate(() => {
       const view = document.querySelector("#board-view");
-      return [...view.querySelectorAll(".agent-graph-edge, .agent-graph-node, .agent-graph-mail-pulse")]
-        .every((node) => {
-          const dress = getComputedStyle(node);
-          return dress.animationIterationCount === "" || !dress.animationIterationCount.includes("infinite");
-        });
-    }));
+      const spun = [];
+      for (const node of view.querySelectorAll(
+        ".agent-graph-edge, .agent-graph-node, .agent-graph-mail-pulse")) {
+        for (const part of [null, "::before", "::after"]) {
+          const dress = getComputedStyle(node, part);
+          if (dress.animationName !== "none" && dress.animationIterationCount.includes("infinite")) {
+            spun.push(`${node.getAttribute("class")}${part ?? ""}:${dress.animationName}`);
+          }
+        }
+      }
+      window.__LIVE_SPUN__ = spun;
+      return spun.length === 0;
+    }), await page.evaluate(() => JSON.stringify(window.__LIVE_SPUN__ ?? [])));
 
     /* 시계는 **멈추지 않는다**: 나이 낱말은 박자마다 바뀌어야 한다. 시간을
      * 멈추고 얻은 0을 실시간의 0으로 파는 일을 막는 한 줄이다. */
@@ -579,9 +588,12 @@ export async function testBoardLive(browser, origin, ok) {
       ] });
       await paintBoardView(undefined, { force: true });
       await window.__BOARD_SETTLED__();
+      /* 카드의 빛은 그 위의 한 겹(`::after`)에 얹히므로 거기서 읽는다 —
+       * 선은 제 위에서 직접. 둘 다 이름이 `none`이어야 한다. */
       const marked = [...document.querySelectorAll("#board-view [data-live-beat]")];
       return { marked: marked.length,
-        animations: marked.map((node) => getComputedStyle(node).animationName) };
+        animations: marked.map((node) => getComputedStyle(node,
+          node.classList.contains("agent-graph-node") ? "::after" : null).animationName) };
     });
     ok("reduced_motion_does_not_run_animations_and_still_shows_what_happened",
       reduced.marked > 0 && reduced.animations.every((name) => name === "none"),
