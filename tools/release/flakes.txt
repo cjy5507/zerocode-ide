@@ -110,3 +110,8 @@ zo:misc_tools::smart_router::probe_exec::live_path_tests::decision_shadow::the_f
 # that outlasted the lock's patience and read "artifact store busy … retry publish" in one full `-p zerocode-core`
 # run; green solo ×3. Untouched by the branch; a wall-clock sleep against a loaded machine, like the families above.
 root:artifact_publish::tests::a_store_lock_held_for_a_moment_is_waited_out_and_one_held_on_is_busy
+# 2026-09-24 coordinator gate for v1.1.22 (load 25–40 while a lane build and three worker builds ran beside it):
+# the live-path decision-shadow test read `None` for its third probe under `off` — the mock probe's answer missed the
+# funnel's deadline — and passed solo ×3 (load 25). The same mock-Codex live-path timing family as the two
+# `decision_shadow` lines above; the routing and shadow code are unchanged since v1.1.21.
+zo:misc_tools::smart_router::probe_exec::live_path_tests::decision_shadow::routing_is_the_same_with_the_shadow_on_or_off
