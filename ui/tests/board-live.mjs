@@ -227,10 +227,15 @@ export async function testBoardLive(browser, origin, ok) {
       view.querySelector('[data-board-mode="tasks"]').click();
       await paintBoardView(undefined, { force: true });
       await window.__BOARD_SETTLED__();
+      /* 세는 자리는 **보이는 작업 표면**이다. 숨은 관계 그림은 지난 판의 DOM을
+       * 그대로 들고 있고(다시 열 때 쓰라고), 그것은 작업 목록이 달라진 것이
+       * 아니다 — 여기서 고정하려는 약속은 「사람이 보는 기본 화면이 그대로인가」다. */
+      const surface = view.querySelector(".task-board-surface");
       const withMap = { rows: rows(), live: view.classList.contains("is-live-map"),
-        beats: view.querySelectorAll("[data-live-beat]").length,
-        waits: [...view.querySelectorAll(".agent-graph-wait")].filter((chip) => chip.textContent !== "").length,
-        events: view.querySelectorAll(".agent-live-events").length };
+        beats: surface.querySelectorAll("[data-live-beat]").length,
+        waits: surface.querySelectorAll(".agent-graph-wait").length,
+        events: surface.querySelectorAll(".agent-live-events").length,
+        graphHidden: view.querySelector(".agent-graph-surface").hidden };
       setAgentGraphLive(view, false);
       await paintBoardView(undefined, { force: true });
       await window.__BOARD_SETTLED__();
@@ -239,10 +244,11 @@ export async function testBoardLive(browser, origin, ok) {
       view.querySelector('[data-board-mode="graph"]').click();
       await paintBoardView(undefined, { force: true });
       await window.__BOARD_SETTLED__();
-      return withMap.rows === without && withMap.rows !== ""
+      window.__TASKLIST__ = { ...withMap, rows: undefined, same: withMap.rows === without };
+      return withMap.rows === without && withMap.rows !== "" && withMap.graphHidden
         && !withMap.live && withMap.beats === 0 && withMap.waits === 0 && withMap.events === 0;
       } finally { Date.now = trueNow; }
-    }));
+    }), await page.evaluate(() => JSON.stringify(window.__TASKLIST__ ?? null)));
 
     /* 그리고 손잡이 하나가 그 셋을 실제로 붙였다 뗀다 — 카드가 다시 지어지지
      * 않으면 켠 판에도 칸이 서지 않고, 끈 판에서도 칸이 남는다. */
@@ -405,28 +411,34 @@ export async function testBoardLive(browser, origin, ok) {
     /* 처음 보는 관계와 기억을 잃은 관계는 서로 다른 답을 받는다. 앞의 것은
      * 실제로 처음 보는 사건이고, 뒤의 것은 조용히 다시 맞춘다 — 둘을 한
      * 이름표로 가릴 수는 없으므로 장부가 그 둘을 따로 적는다. */
-    ok("a_relation_evicted_by_the_cap_resyncs_quietly_instead_of_pulsing",
-      await page.evaluate(() => {
+    const evicted = await page.evaluate(() => {
         const now = window.__LIVE_NOW__;
         const overlays = (id, from) => ({ columns: [], overlays: { mail: [
           { from, to: "term:301", count: 1, unread: 0, at: now + 30_000, verb: "mail",
             last_message: { id, run: "run-1", from: `worker:${from}`, to: "run:run-1",
               kind: "status", created_ms: now + 30_000 } },
         ] } });
-        // 처음 보는 관계: 실제로 처음 보는 사건이다.
-        const before = agentGraphLiveRecentEvents().length;
+        /* 목록에는 상한이 있어 길이로는 아무것도 못 센다 — **맨 앞의 사건이
+         * 무엇인가**를 본다. 처음 보는 관계는 실제로 처음 보는 사건이다. */
+        const head = () => agentGraphLiveRecentEvents()[0]?.key ?? null;
+        const before = head();
         agentGraphLiveObserve(overlays("m-fresh", "term:401"), new Map(), Date.now());
-        const firstSight = agentGraphLiveRecentEvents().length;
+        const firstSight = head();
         // 상한을 넘겨 그 관계를 밀어낸 뒤 다시 오면 조용히 다시 맞춘다.
         for (let at = 0; at < 300; at += 1) {
           agentGraphLiveObserve(overlays(`m-push-${at}`, `term:5${at}`), new Map(), Date.now());
         }
-        const pushed = agentGraphLiveRecentEvents().length;
+        const pushed = head();
         agentGraphLiveObserve(overlays("m-fresh-2", "term:401"), new Map(), Date.now());
-        return { grew: firstSight === before + 1,
-          quiet: agentGraphLiveRecentEvents().length === pushed,
-          coverage: agentGraphLiveCoverage() };
-      }).then((seen) => seen.grew && seen.quiet && seen.coverage.dropped > 0));
+        return { before, firstSight, pushed, after: head(), coverage: agentGraphLiveCoverage() };
+      });
+    ok("a_relation_evicted_by_the_cap_resyncs_quietly_instead_of_pulsing",
+      // 처음 보는 관계는 사건이 되고 …
+      evicted.firstSight !== evicted.before && evicted.firstSight.endsWith("m-fresh")
+      // … 상한에 밀려났다 돌아온 같은 관계는 조용하다.
+      && evicted.after === evicted.pushed && !evicted.after.endsWith("m-fresh-2")
+      && (evicted.coverage.dropped > 0 || evicted.coverage.droppedTruncated),
+      JSON.stringify(evicted));
 
     /* 같은 자리가 판을 하나 건너뛰고 다시 뛸 때도 실제로 뛴다. 박자를 판마다
      * 하나로 번갈아 적으면 건너뛴 자리가 두 판 만에 같은 글자를 다시 받고,
@@ -434,25 +446,34 @@ export async function testBoardLive(browser, origin, ok) {
     ok("a_relation_that_skips_a_snapshot_still_pulses_when_it_returns",
       await page.evaluate(async () => {
         const now = window.__LIVE_NOW__;
+        const key = "overlay:mail:agent:term:304>agent:term:301";
+        /* 맞히기용 겹(`.agent-graph-edge-targets`)도 같은 키를 들고 있으므로
+         * 선을 그리는 겹을 이름으로 집는다 — 그러지 않으면 맥박이 제대로
+         * 적혀 있어도 엉뚱한 요소를 읽고 빨개진다. */
         const beat = () => document.querySelector(
-          '#board-view [data-graph-edge="overlay:mail:agent:term:304>agent:term:301"] path')
+          `#board-view .agent-graph-edges [data-graph-edge="${key}"] path`)
           ?.getAttribute("data-live-beat") ?? null;
-        const step = async (id, from, at) => {
-          window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
-            { from, to: "term:301", count: 1, unread: 0, at, verb: "mail",
-              last_message: { id, run: "run-1", from: `worker:${from}`, to: "run:run-1",
-                kind: "status", created_ms: at } },
-          ] });
-          await paintBoardView(undefined, { force: true });
-          await window.__BOARD_SETTLED__();
-        };
-        await step("m-skip-1", "term:304", now + 40_000);   // 이 자리가 뛴다
+        const mail = (id, from, at) => ({ columns: [], overlays: { mail: [
+          { from, to: "term:301", count: 1, unread: 0, at, verb: "mail",
+            last_message: { id, run: "run-1", from: `worker:${from}`, to: "run:run-1",
+              kind: "status", created_ms: at } },
+        ] } });
+        /* 선이 서 있어야 맥박이 앉을 자리가 있으므로 한 번은 실제로 그린다. */
+        window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, mail("m-skip-1", "term:304", now + 40_000).overlays);
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
         const first = beat();
-        await step("m-skip-2", "term:306", now + 41_000);   // 다른 자리가 뛴다
-        await step("m-skip-3", "term:304", now + 42_000);   // 같은 자리가 다시
+        /* 나머지 둘은 장부에 바로 먹인다 — 판을 세 번 다시 그리면 그 사이에
+         * 맥박이 수명을 다해, 이 사례가 재려는 「아직 빛나는 자리가 다시
+         * 뛴다」가 아니라 「꺼졌다가 새로 뛴다」를 재게 된다. */
+        agentGraphLiveObserve(mail("m-skip-2", "term:306", now + 41_000), new Map(), Date.now());
+        const between = beat();
+        agentGraphLiveObserve(mail("m-skip-3", "term:304", now + 42_000), new Map(), Date.now());
         const third = beat();
-        return first !== null && third !== null && third !== first;
-      }));
+        window.__SKIP__ = { first, between, third,
+          pulses: agentGraphLiveHandles().pulses };
+        return first !== null && between === first && third !== null && third !== first;
+      }), await page.evaluate(() => JSON.stringify(window.__SKIP__ ?? null)));
 
     /* out-of-order: 옛 stamp 는 상태를 과거로 돌리지 않는다. */
     const reordered = await page.evaluate(async () => {
@@ -562,17 +583,48 @@ export async function testBoardLive(browser, origin, ok) {
     }));
 
     /* 사건 줄은 **무엇을 기다리는지**까지 말한다. 종류만 「대기」라고 적고
-     * 사유를 빼면, 그 줄은 제가 답해야 할 질문에 답하지 않는다. */
+     * 사유를 빼면, 그 줄은 제가 답해야 할 질문에 답하지 않는다.
+     *
+     * 「대기 사건이 없으면 통과」하는 탈출구를 두지 않는다 — 그런 조건은
+     * 아무것도 하지 않은 판에서도 초록이라 아무것도 고정하지 못한다. 실제로
+     * 대기를 하나 **만들고** 그 문장을 읽는다. */
     ok("a_wait_event_row_names_its_cause_in_the_desks_own_word",
-      await page.evaluate(() => {
+      await page.evaluate(async () => {
+        const now = window.__LIVE_NOW__;
+        /* 새 사유를 실제로 기록한다: 이 워커의 판이 방금 사라졌다. */
+        const row = window.__LEDGER__.find((one) => one.worker === "w-impl");
+        row.hearing = "gone";
+        row.pane_missing_since_ms = now + 70_000;
+        row.term = null;
+        window.__PANES__ = window.__PANES__.filter((one) => one.term !== 302);
+        const card = window.__COLUMNS__[0].cards.find((one) => one.pane === "term:302");
+        card.pane = "worker:w-impl";
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
         const view = document.querySelector("#board-view");
-        selectAgentGraphEntity(view, "agent:term:304");
-        const rows = [...view.querySelectorAll(".agent-live-event")]
-          .map((row) => row.textContent);
-        const walled = DESK_HEALTH.find((one) => one.id === "walled");
-        return rows.some((said) => said.includes(t(walled.key, walled.word)))
-          || agentGraphLiveRecentEvents().every((event) => event.kind !== "wait");
-      }));
+        selectAgentGraphEntity(view, "agent:worker:w-impl");
+        const rows = [...view.querySelectorAll(".agent-live-event")].map((one) => one.textContent);
+        const gone = DESK_HEALTH.find((one) => one.id === "gone");
+        const kind = t("board.live.wait", "대기");
+        const waits = rows.filter((said) => said.includes(kind));
+        window.__WAIT_ROWS__ = rows;
+        /* 대기 줄이 실제로 하나 있고, 그 줄이 사유를 데스크의 낱말로 적는다.
+         * 둘 중 하나라도 없으면 빨강이다. */
+        const held = waits.length > 0 && waits.some((said) => said.includes(t(gone.key, gone.word)));
+        /* 그리고 픽스처를 **되돌린다**. 이 사례는 판 하나를 없애 보는 것이고,
+         * 뒤의 사례들은 그 판이 서 있는 것을 전제한다 — 없애 둔 채로 넘기면
+         * 뒤에서 나는 빨강은 그 사례의 결함이 아니라 이 사례가 남긴 자국이다. */
+        row.hearing = "pending";
+        row.pane_missing_since_ms = null;
+        row.term = 302;
+        window.__PANES__ = [...window.__PANES__,
+          { term: 302, agent: "codex", state: "working", at: now - 10_000,
+            state_started_at: now - 10_000, resumable: false }];
+        card.pane = "term:302";
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+        return held;
+      }), await page.evaluate(() => JSON.stringify(window.__WAIT_ROWS__ ?? [])));
 
     ok("worker_claim_is_not_verified_or_merged", await page.evaluate(() => {
       const view = document.querySelector("#board-view");
@@ -603,13 +655,14 @@ export async function testBoardLive(browser, origin, ok) {
           .map((node) => node.textContent).join(" ");
         const labels = [...view.querySelectorAll(".agent-graph-overlay-label")]
           .map((node) => node.textContent);
+        window.__DELIV__ = { notes: notes.slice(0, 300), labels };
         return notes.includes(agentGraphLiveUnknownWord("delivery"))
           && notes.includes(agentGraphLiveUnknownWord("reply"))
           // 미확인이 있는 선은 그 수를, 없는 선은 「미제공」을 — 「확인됨」은 없다.
           && labels.some((word) => word.endsWith(t("board.live.deliveryNotSaid", "배달 상태 미제공")))
           && labels.some((word) => word.endsWith(t("board.live.pending", "미확인 {{count}}", { count: 1 })))
           && labels.every((word) => !word.includes(t("board.verified", "검증됨")));
-      }));
+      }), await page.evaluate(() => JSON.stringify(window.__DELIV__ ?? null)));
 
     ok("the_number_of_endpoints_outside_this_view_is_reported_as_not_provided",
       await page.evaluate(() => {
@@ -800,7 +853,107 @@ export async function testBoardLive(browser, origin, ok) {
       return japanese !== korean && japanese.length > 0 && scope.length > 0;
     }));
 
+    /* 상한은 **한 번에 화면에서 뛰는 수**다. 판 하나의 들어오는 수만 자르면
+     * 맥박이 살아 있는 동안 판이 여러 번 와서 눈앞의 수는 상한을 훌쩍 넘는다.
+     *
+     * 이 사례가 맨 뒤에 서는 이유: 여기서 먹이는 시각이 한참 앞선 미래라
+     * 여러 관계의 watermark 를 그리로 끌어올린다. 앞에 두면 뒤의 사례들이
+     * 보내는 「새 사건」이 그보다 옛것이 되어 조용히 삼켜지고, 그때 나는
+     * 빨강은 그 사례의 결함이 아니라 이 사례가 남긴 자국이다. */
+    ok("the_burst_cap_counts_what_is_lit_at_once_not_what_arrived_in_one_snapshot",
+      await page.evaluate(async () => {
+        const view = document.querySelector("#board-view");
+        const token = agentGraphTuning(view).liveBurst;
+        const now = window.__LIVE_NOW__;
+        const pairs = [["term:301", "term:302"], ["term:302", "term:303"],
+          ["term:303", "term:301"], ["term:304", "term:301"],
+          ["term:306", "term:301"], ["term:307", "term:306"],
+          ["term:311", "term:312"], ["term:312", "term:311"]];
+        /* 판을 잇달아 넷 먹인다 — 맥박이 다 꺼지기 전에. */
+        for (let round = 0; round < 4; round += 1) {
+          agentGraphLiveObserve({ columns: [], overlays: { mail: pairs.map(([from, to], at) => ({
+            from, to, count: 1, unread: 0, at: now + 800_000 + round * 100 + at, verb: "mail",
+            last_message: { id: `m-cap-${round}-${at}`, run: "run-1", from: `worker:w-${at}`,
+              to: `worker:w-${at + 1}`, kind: "status",
+              created_ms: now + 800_000 + round * 100 + at },
+          })) } }, new Map(), Date.now());
+        }
+        const lit = agentGraphLiveHandles().pulses;
+        window.__CAP__ = { token, lit, rounds: 4, pairs: pairs.length,
+          listed: agentGraphLiveRecentEvents().length };
+        /* 뛰는 것은 상한 안, 그러나 사건 목록은 접히지 않는다. */
+        return lit <= token && agentGraphLiveRecentEvents().length > token;
+      }), await page.evaluate(() => JSON.stringify(window.__CAP__ ?? null)));
+
+    /* ---- 브리핑이 청한 네 장 ------------------------------------------- */
     await mkdir("output/playwright/board-live", { recursive: true });
+    await page.setViewportSize({ width: 1440, height: 960 });
+    const shot = async (name) => {
+      await page.evaluate(() => window.__BOARD_SETTLED__());
+      await page.locator("#board-view").screenshot({
+        path: `output/playwright/board-live/state-${name}.png` });
+    };
+
+    /* ① 조용한 판 — 지도는 서 있고 아무것도 뛰지 않는다. */
+    await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      selectAgentGraphEntity(view, "agent:term:302");
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+    });
+    await page.waitForFunction(() => agentGraphLiveHandles().pulses === 0);
+    await shot("calm");
+
+    /* ② 방금 일어난 일 — 실제 메시지 하나가 맥박 한 번으로. */
+    await page.evaluate(async () => {
+      const now = window.__LIVE_NOW__;
+      window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
+        { from: "term:303", to: "term:301", count: 3, unread: 2, at: now + 900_000, verb: "mail",
+          last_message: { id: "m-shot-live", run: "run-1", from: "worker:w-verify",
+            to: "run:run-1", kind: "worker_done", created_ms: now + 900_000 } },
+      ] });
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+    });
+    ok("the active-event screenshot has a live beat to show",
+      await page.evaluate(() => document.querySelectorAll("#board-view [data-live-beat]").length > 0));
+    await page.locator("#board-view").screenshot({
+      path: "output/playwright/board-live/state-active-event.png" });
+
+    /* ③ 기다리는 판 — 사유와 나이를 원장의 낱말로. */
+    await page.evaluate(async () => {
+      const view = document.querySelector("#board-view");
+      selectAgentGraphEntity(view, "agent:term:304");
+      await paintBoardView(undefined, { force: true });
+      await window.__BOARD_SETTLED__();
+    });
+    ok("the waiting screenshot has a recorded cause to show",
+      await page.evaluate(() => [...document.querySelectorAll("#board-view .agent-graph-wait")]
+        .some((chip) => chip.textContent.trim() !== "")));
+    await shot("waiting");
+
+    /* ④ 고른 선의 근거 — 실제 메시지 ID 가 인스펙터에 선다. */
+    await page.evaluate(() => {
+      const view = document.querySelector("#board-view");
+      setAgentGraphInspectorOpen(view, true);
+      selectAgentGraphRelation(view, "overlay:mail:agent:term:301>agent:term:302");
+    });
+    ok("the evidence screenshot shows the real message id",
+      await page.evaluate(() => (document.querySelector("#board-view .agent-relation-evidence")
+        ?.textContent ?? "").includes("m-dispatch-1")));
+    /* 그리고 그 근거가 사건 목록보다 **위**에 선다: 목록은 스물넷까지 서므로
+     * 머리에 두면 방금 누른 선의 ID 가 화면 밖으로 밀린다. */
+    ok("a_selected_edges_evidence_stands_above_the_event_list",
+      await page.evaluate(() => {
+        const pane = document.querySelector("#board-view .agent-inspector-pane.is-relations");
+        const detail = pane?.querySelector(".agent-relation-detail");
+        const events = pane?.querySelector(".agent-live-events");
+        if (!detail || !events) return false;
+        return (detail.compareDocumentPosition(events) & Node.DOCUMENT_POSITION_FOLLOWING) !== 0;
+      }));
+    await shot("edge-evidence");
+
+
     for (const width of [1440, 900, 560, 360]) {
       await page.setViewportSize({ width, height: 960 });
       await page.evaluate(async () => {

@@ -5232,7 +5232,14 @@ function paintAgentGraphInspector(view, model) {
       parts.stamps.relations = signature;
       const nodes = relation ? [agentGraphRelationDetail(view, relation, inspection)]
         : [agentGraphBreadcrumbNode(entity, inspection), ...relevant.map((edge) => agentGraphRelationRow(view, edge, inspection))];
-      if (agentGraphLiveOn()) nodes.unshift(agentGraphLiveEventsNode(view));
+      /* 고른 관계가 있으면 **근거가 먼저**다 (t-7288). 사건 목록은 스물넷까지
+       * 서므로, 머리에 두면 사람이 방금 누른 선의 메시지 ID 가 그 아래로 밀려
+       * 화면 밖에 선다 — 누른 이유가 보이지 않는 인스펙터가 된다. 고른 것이
+       * 없을 때만 목록이 머리에 선다. */
+      if (agentGraphLiveOn()) {
+        if (relation) nodes.push(agentGraphLiveEventsNode(view));
+        else nodes.unshift(agentGraphLiveEventsNode(view));
+      }
       if (!relation && relevant.length === 0) nodes.push(taskBoardElement("p", "agent-relation-note", t("board.graph.noRecordedRelations", "현재 스냅샷에 표시할 관계가 없습니다.")));
       if (subject) nodes.push(workbenchRelatedActions(subject), taskBoardRecallsNode(subject));
       parts.relations.replaceChildren(...nodes);
@@ -6283,14 +6290,20 @@ function paintAgentGraphEdges(view, { styleOnly = false } = {}) {
         : t("board.graph.dependencyVerb", "선행");
       /* 실시간 지도의 메일 선은 배달 상태를 **아는 만큼만** 말한다 (t-7288):
        * 미확인이 있으면 그 수, 없으면 「미제공」 — 「전달됨」도 「확인됨」도
-       * 이 판이 증명하지 못한다. */
-      writeTextContent(label, liveRelation && edge.type === "mail"
+       * 이 판이 증명하지 못한다.
+       *
+       * 판정은 지도가 켜졌는가이지 이 선을 어느 목록이 그렸는가가 아니다.
+       * 사람이 메일 오버레이를 고르면 그 선들은 지도의 조용한 덤이 아니라
+       * 고른 오버레이가 되는데, 그렇다고 같은 선이 배달 상태를 갑자기 말하지
+       * 않게 되는 것은 아니다 — 정직함은 고르기에 딸린 것이 아니다. */
+      writeTextContent(label, agentGraphLiveOn() && edge.type === "mail"
         ? `${verb} · ${edge.count} · ${agentGraphLiveDeliveryWord(edge)}`
         : `${verb} · ${edge.count}`);
-      /* 실시간 지도의 선에는 **도는 점**을 달지 않는다 (t-7288). 이 표면의
-       * 움직임은 실제로 일어난 사건 하나에 한 번이고, 영원히 도는 점은
-       * 아무것도 일어나지 않은 판에서도 무언가 일어나는 것처럼 보인다. */
-      if (edge.type !== "mail" || liveRelation) return;
+      /* 지도가 선 판에는 **도는 점**을 달지 않는다 (t-7288). 이 표면의 움직임은
+       * 실제로 일어난 사건 하나에 한 번이고, 영원히 도는 점은 아무것도 일어나지
+       * 않은 판에서도 무언가 일어나는 것처럼 보인다. 위와 같은 이유로 판정은
+       * 지도가 켜졌는가이지 어느 목록이 그렸는가가 아니다. */
+      if (edge.type !== "mail" || agentGraphLiveOn()) return;
       const pulse = group.querySelector("circle")
         ?? group.appendChild(graphSvgElement("circle"));
       writeAttribute(pulse, "class", "agent-graph-mail-pulse");

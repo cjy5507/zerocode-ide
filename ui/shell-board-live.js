@@ -454,18 +454,31 @@ function agentGraphLiveStartPulses(fresh, now) {
    * 기다림)로 자르면 메일이 늘 이기고 기다림은 한 번도 뛰지 못한다 — 종류로
    * 우열을 매긴 적이 없는데 그리는 차례가 우열을 만든 셈이다. 기록된 시각이
    * 늦은 것부터 든다: 접히는 것은 언제나 **더 오래된 사건**이다. */
-  const ordered = [...fresh].sort((left, right) => (right.at || 0) - (left.at || 0));
-  let room = tuning.burst;
+  const ordered = [...fresh]
+    .sort((left, right) => (right.at || 0) - (left.at || 0))
+    .slice(0, tuning.burst)
+    /* 넣는 차례는 **오래된 것부터**다. `Map`은 넣은 차례를 기억하므로, 그렇게
+     * 넣어야 아래의 잘라내기가 앞에서부터 「가장 오래 전에 뛴 것」을 집는다. */
+    .reverse();
   for (const event of ordered) {
-    if (room <= 0) break;
     const key = event.edgeKey ?? event.to;
     if (!key) continue;
     /* 박자는 **그 자리의 지난 박자**를 뒤집는다. 판마다 하나로 번갈아 적으면
      * 한 판을 건너뛴 자리가 두 판 만에 같은 글자를 다시 받고, 같은 글자를 다시
      * 쓰는 것은 쓰기가 아니므로(값이 같으면 안 쓴다) 그 맥박은 뛰지 않는다. */
     const beat = livePulses.get(key)?.beat === "a" ? "b" : "a";
+    /* 지웠다 다시 넣어 차례를 맨 뒤로 옮긴다 — 다시 뛴 자리는 가장 최근이다. */
+    livePulses.delete(key);
     livePulses.set(key, { beat, eventKey: event.key, untilMs: until });
-    room -= 1;
+  }
+  /* 상한은 **한 번에 화면에서 뛰는 수**다. 판 하나에 들어오는 수만 자르면
+   * 맥박이 900 ms를 사는 동안 판이 여러 번 오고, 판마다 여섯씩 쌓여 눈앞에는
+   * 스물이 뛴다 — 상한이 있다는 말이 무색해진다. 넘친 것은 가장 오래 전에 뛴
+   * 것부터 접고, 접히는 것은 **애니메이션뿐**이다: 사건 목록도 간선의 수도
+   * 그대로 남는다. */
+  while (livePulses.size > tuning.burst) {
+    const [oldest] = livePulses.keys();
+    livePulses.delete(oldest);
   }
   agentGraphLiveArmExpiry(now);
   for (const view of agentGraphLiveViews()) dressAgentGraphLive(view);
