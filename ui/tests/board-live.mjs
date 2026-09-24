@@ -372,6 +372,32 @@ export async function testBoardLive(browser, origin, ok) {
           coverage: agentGraphLiveCoverage() };
       }).then((seen) => seen.grew && seen.quiet && seen.coverage.dropped > 0));
 
+    /* 같은 자리가 판을 하나 건너뛰고 다시 뛸 때도 실제로 뛴다. 박자를 판마다
+     * 하나로 번갈아 적으면 건너뛴 자리가 두 판 만에 같은 글자를 다시 받고,
+     * 같은 값을 다시 쓰는 것은 쓰기가 아니므로 그 맥박은 조용히 사라진다. */
+    ok("a_relation_that_skips_a_snapshot_still_pulses_when_it_returns",
+      await page.evaluate(async () => {
+        const now = window.__LIVE_NOW__;
+        const beat = () => document.querySelector(
+          '#board-view [data-graph-edge="overlay:mail:agent:term:304>agent:term:301"] path')
+          ?.getAttribute("data-live-beat") ?? null;
+        const step = async (id, from, at) => {
+          window.__OVERLAYS__ = window.__LIVE_OVERLAYS__(now, { mail: [
+            { from, to: "term:301", count: 1, unread: 0, at, verb: "mail",
+              last_message: { id, run: "run-1", from: `worker:${from}`, to: "run:run-1",
+                kind: "status", created_ms: at } },
+          ] });
+          await paintBoardView(undefined, { force: true });
+          await window.__BOARD_SETTLED__();
+        };
+        await step("m-skip-1", "term:304", now + 40_000);   // 이 자리가 뛴다
+        const first = beat();
+        await step("m-skip-2", "term:306", now + 41_000);   // 다른 자리가 뛴다
+        await step("m-skip-3", "term:304", now + 42_000);   // 같은 자리가 다시
+        const third = beat();
+        return first !== null && third !== null && third !== first;
+      }));
+
     /* out-of-order: 옛 stamp 는 상태를 과거로 돌리지 않는다. */
     const reordered = await page.evaluate(async () => {
       const now = window.__LIVE_NOW__;

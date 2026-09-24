@@ -98,10 +98,6 @@ let livePulseTimer = null;
  * 판의 복구·숨김에서 돌아온 첫 판. 놓친 backlog가 방금 생긴 활동처럼 터지지
  * 않는다. */
 let liveBaselineDue = true;
-/* 맥박의 박자를 번갈아 적는다. 같은 이름의 애니메이션을 다시 걸면 브라우저는
- * 그것을 「이미 돌고 있다」로 읽으므로, 새 사건은 반드시 다른 이름을 얻어야
- * 한다 — 배치를 읽지 않고 애니메이션을 다시 시작하는 유일한 길이다. */
-let liveBeat = "a";
 /* 범위가 움직일 때 올라가는 빗장. 이보다 낮은 세대에서 떠난 비동기 갱신은
  * 지금의 지도·선택·근거를 덮지 못한다. revision 주장이 아니다. */
 let liveGeneration = 0;
@@ -453,35 +449,48 @@ function agentGraphLiveStartPulses(fresh, now) {
   if (fresh.length === 0 || !agentGraphLiveAnimating()) return;
   const tuning = agentGraphLiveTuning();
   if (!tuning) return;
-  liveBeat = liveBeat === "a" ? "b" : "a";
   const until = now + tuning.pulseMs;
+  /* 상한을 넘길 때 **무엇을 접는가**. 장부가 쌓는 차례(메일 → 의존 → 시도 →
+   * 기다림)로 자르면 메일이 늘 이기고 기다림은 한 번도 뛰지 못한다 — 종류로
+   * 우열을 매긴 적이 없는데 그리는 차례가 우열을 만든 셈이다. 기록된 시각이
+   * 늦은 것부터 든다: 접히는 것은 언제나 **더 오래된 사건**이다. */
+  const ordered = [...fresh].sort((left, right) => (right.at || 0) - (left.at || 0));
   let room = tuning.burst;
-  for (const event of fresh) {
+  for (const event of ordered) {
     if (room <= 0) break;
     const key = event.edgeKey ?? event.to;
     if (!key) continue;
-    livePulses.set(key, { beat: liveBeat, eventKey: event.key, untilMs: until });
+    /* 박자는 **그 자리의 지난 박자**를 뒤집는다. 판마다 하나로 번갈아 적으면
+     * 한 판을 건너뛴 자리가 두 판 만에 같은 글자를 다시 받고, 같은 글자를 다시
+     * 쓰는 것은 쓰기가 아니므로(값이 같으면 안 쓴다) 그 맥박은 뛰지 않는다. */
+    const beat = livePulses.get(key)?.beat === "a" ? "b" : "a";
+    livePulses.set(key, { beat, eventKey: event.key, untilMs: until });
     room -= 1;
   }
-  agentGraphLiveArmExpiry(until - now);
+  agentGraphLiveArmExpiry(now);
   for (const view of agentGraphLiveViews()) dressAgentGraphLive(view);
 }
 
 /* 맥박이 꺼지는 때를 기다리는 시계 하나. 시계가 **하나**인 것은 맥박마다
  * 시계를 두면 판 하나에 수십 개의 타이머가 서기 때문이다. */
-function agentGraphLiveArmExpiry(inMs) {
+function agentGraphLiveArmExpiry(now) {
+  /* **가장 먼저** 꺼질 맥박에 맞춘다. 마지막으로 켜진 것에 맞추면, 앞서 켜진
+   * 맥박이 제 창을 넘겨 계속 빛난다 — 「짧은 한 번」의 길이를 토큰이 정하는데
+   * 화면은 그보다 오래 뛰는 셈이다. */
+  let next = Infinity;
+  for (const pulse of livePulses.values()) next = Math.min(next, pulse.untilMs);
   if (livePulseTimer !== null) clearTimeout(livePulseTimer);
+  livePulseTimer = null;
+  if (!Number.isFinite(next)) return;
   livePulseTimer = window.setTimeout(() => {
     livePulseTimer = null;
-    const now = Date.now();
-    let next = Infinity;
+    const at = Date.now();
     for (const [key, pulse] of [...livePulses]) {
-      if (pulse.untilMs <= now) livePulses.delete(key);
-      else next = Math.min(next, pulse.untilMs);
+      if (pulse.untilMs <= at) livePulses.delete(key);
     }
     for (const view of agentGraphLiveViews()) dressAgentGraphLive(view);
-    if (Number.isFinite(next)) agentGraphLiveArmExpiry(Math.max(1, next - now));
-  }, Math.max(1, inMs));
+    agentGraphLiveArmExpiry(at);
+  }, Math.max(1, next - now));
 }
 
 /* 뷰를 떠나거나 손잡이를 끄거나 판이 숨으면 — 시계도 맥박도 남기지 않는다.
