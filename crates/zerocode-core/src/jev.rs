@@ -3493,5 +3493,24 @@ pub fn rubric_fingerprint(words: impl FnOnce() -> String) -> String {
     fingerprint_of(&words())
 }
 
+/// Hangul's share of a text's letters, per thousand — the language column a
+/// seat's rows carry so its agreement can be read apart by language (the
+/// vendor's models page: CJK scripts "are handled but not equally well";
+/// t-6324 §6-1). Counted by code on the words a request carries, which are
+/// never kept. `None` for a text with no letters at all.
+#[must_use]
+pub fn hangul_share_permille(text: &str) -> Option<u16> {
+    let (letters, hangul) = text.chars().filter(|glyph| glyph.is_alphabetic()).fold(
+        (0_u64, 0_u64),
+        |(letters, hangul), glyph| {
+            (
+                letters + 1,
+                hangul + u64::from(crate::second_brain_related::is_hangul(glyph)),
+            )
+        },
+    );
+    (letters > 0).then(|| u16::try_from(hangul * 1_000 / letters).unwrap_or(1_000))
+}
+
 #[cfg(test)]
 mod tests;

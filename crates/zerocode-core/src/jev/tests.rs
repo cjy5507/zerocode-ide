@@ -1929,3 +1929,31 @@ fn an_answer_falls_in_one_band_by_its_confidence() {
     // A seat that never rises reads no band.
     assert_eq!(AGENT_TOOL.band_of(0.99), None);
 }
+
+/// The language column (t-6324 §6-1, t-6346): how much of a request's
+/// letters are Hangul, per thousand — counted by code, so a seat's agreement
+/// can be read apart by language without keeping a word of the text.
+#[test]
+fn a_requests_hangul_share_is_counted_over_its_letters() {
+    assert_eq!(
+        hangul_share_permille("이 함수의 버그를 수정해줘"),
+        Some(1_000)
+    );
+    assert_eq!(hangul_share_permille("fix the bug"), Some(0));
+    assert_eq!(
+        hangul_share_permille("fix 버그"),
+        Some(400),
+        "two of five letters"
+    );
+    assert_eq!(
+        hangul_share_permille("ㄱㄴ ab"),
+        Some(500),
+        "jamo are Hangul too"
+    );
+    assert_eq!(
+        hangul_share_permille("123 !? -"),
+        None,
+        "no letters, no share"
+    );
+    assert_eq!(hangul_share_permille(""), None);
+}
