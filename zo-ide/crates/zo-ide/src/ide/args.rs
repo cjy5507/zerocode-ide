@@ -52,8 +52,9 @@ zo decision-shadow check [--json]
                      when a provider's safety classifier declines a turn twice,
                      off: never switch models; ask (default): ask before this
                      turn continues on the category's route; auto: switch and
-                     say so. Over the setting smart.classifierFallback; a turn
-                     nobody attends is answered as auto
+                     say so. Over the setting smart.classifierFallback; a
+                     question nobody answers or nobody can be asked is not a
+                     yes — the turn stays on the chosen model
   --launch-contract  exact launch (version 1): validate --model/--effort
                      against the published catalog before the session opens
                      and either launch exactly as asked or exit 4 with a named
@@ -193,8 +194,9 @@ pub struct Launch {
     pub launch_contract: Option<String>,
     /// `--classifier-fallback <off|ask|auto>` (t-6747): the refusal ladder's
     /// switching mode for this process, over `smart.classifierFallback`. A
-    /// window summons a zo worker with `auto`, because nobody answers a
-    /// worker's questions.
+    /// window summons a zo worker with `auto` when it pinned no model —
+    /// nobody answers a worker's questions — and `off` when it did (t-7153):
+    /// a pinned model is a binding.
     pub classifier_fallback: Option<runtime::ClassifierFallback>,
 }
 

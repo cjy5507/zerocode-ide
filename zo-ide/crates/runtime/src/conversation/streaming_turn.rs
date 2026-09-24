@@ -1882,11 +1882,27 @@ where
                                 Some(AsyncPermissionDecision::Allow) => {
                                     self.consent_to_refusal_switch(true);
                                 }
-                                // Nobody answered within the prompt ceiling:
-                                // an unanswered switch question continues on
-                                // the route, as Claude Code's does.
-                                Some(AsyncPermissionDecision::AllowOnce) | None => {
+                                Some(AsyncPermissionDecision::AllowOnce) => {
                                     self.consent_to_refusal_switch(false);
+                                }
+                                // Nobody answered within the prompt ceiling
+                                // (t-7153): the ceiling bounds the wait, it
+                                // decides nothing — the turn stays on the
+                                // model the person chose, and says why.
+                                None => {
+                                    self.refuse_refusal_switch();
+                                    let _ = render_tx
+                                        .send(RenderBlock::System {
+                                            id: id_gen.next(),
+                                            level: SystemLevel::Warn,
+                                            text: core_types::retry_signal::refusal_switch_unanswered_notice(
+                                                &from_model,
+                                                &to,
+                                                permission_prompt_timeout()
+                                                    .map_or(0, |budget| budget.as_secs()),
+                                            ),
+                                        })
+                                        .await;
                                 }
                                 Some(AsyncPermissionDecision::Deny) => self.refuse_refusal_switch(),
                             }
@@ -1950,6 +1966,20 @@ where
                                 text: REFUSAL_SURFACED_NOTICE.to_string(),
                             })
                             .await;
+                        // A route nobody could be asked about is said so
+                        // (t-7153): `ask` with nobody at the keyboard.
+                        if let Some(to) = self.refusal_switch_unasked_to.take() {
+                            let _ = render_tx
+                                .send(RenderBlock::System {
+                                    id: id_gen.next(),
+                                    level: SystemLevel::Info,
+                                    text: core_types::retry_signal::refusal_switch_unasked_notice(
+                                        &from_model,
+                                        &to,
+                                    ),
+                                })
+                                .await;
+                        }
                         // A category the provider routes nowhere is said so:
                         // the refusal stands, and nothing walked around it.
                         if let Some(word) = category.filter(|_| {

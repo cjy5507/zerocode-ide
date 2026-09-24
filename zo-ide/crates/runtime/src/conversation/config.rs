@@ -1348,15 +1348,18 @@ pub fn declared_attendance() -> Attendance {
 /// safeguards flag a message, automatically switch to a different model to
 /// keep chatting. When off, your session will pause instead."), in three
 /// words: a model a person chose is a binding, so the default asks the person
-/// before this turn leaves it — and a turn nobody attends is answered as
-/// `auto`, because a question nobody can see is the pause that stood w-5770
-/// still for 136 minutes (2026-09-21).
+/// before this turn leaves it — and a question nobody answers, or nobody can
+/// be asked, is NOT a yes (t-7153): the turn stays on the chosen model and
+/// says why. A session that should switch with nobody watching is run with
+/// `auto` — what the window gives a summoned zo worker whose model it did
+/// not pin (`off` when it did). The pause that stood w-5770 still for 136
+/// minutes (2026-09-21) was Claude Code's dialog, which the window reads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ClassifierFallback {
     /// Never switch models for a refusal: one same-model retry, then the
     /// refusal is surfaced.
     Off,
-    /// Ask the person at the keyboard before a switch; unattended, switch.
+    /// Ask the person at the keyboard before a switch; unattended, stay.
     #[default]
     Ask,
     /// Switch to the category's route at once, and say so.

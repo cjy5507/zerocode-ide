@@ -882,6 +882,8 @@ async fn refusal_on_fable_retries_once_then_continues_on_the_categorys_route() {
         vec!["system".to_string()],
     );
     runtime.set_context_model("claude-fable-5");
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
     let client = Arc::new(RefusalThenAnswerAsyncApi {
         seen_overrides: std::sync::Mutex::new(Vec::new()),
     });
@@ -941,6 +943,8 @@ async fn refusal_after_fallback_is_surfaced_not_looped() {
         vec!["system".to_string()],
     );
     runtime.set_context_model("claude-fable-5");
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
     let client = Arc::new(AlwaysRefuseAsyncApi {
         seen_overrides: std::sync::Mutex::new(Vec::new()),
         category: Some("cyber"),
@@ -990,6 +994,8 @@ async fn refusal_on_opus_retries_the_same_model_once_then_surfaces() {
     // Already on Opus: one retry on the same model (no override), then the
     // refusal is surfaced honestly rather than looping or swapping models.
     runtime.set_context_model(api::latest_anthropic_model());
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
     // A refusal that names no category: it stands after the one retry.
     let client = Arc::new(AlwaysRefuseAsyncApi {
         seen_overrides: std::sync::Mutex::new(Vec::new()),
@@ -1049,6 +1055,8 @@ async fn non_refusal_stop_reason_on_fable_is_unaffected() {
         vec!["system".to_string()],
     );
     runtime.set_context_model("claude-fable-5");
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
     // Reuse RefusalThenAnswer but never reach call 0's refusal path: a clean
     // end_turn on the first call proves the refusal gate does not misfire.
     let client = Arc::new(ScriptedAsyncApi::new());
@@ -1146,6 +1154,8 @@ fn opus_runtime() -> ConversationRuntime<ExplodingSyncApi, StaticToolExecutor> {
     // the category's route on its own provider, then the cross-provider
     // handoff (t-6747).
     runtime.set_context_model(api::latest_anthropic_model());
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
     runtime
 }
 

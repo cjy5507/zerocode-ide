@@ -1924,6 +1924,10 @@ impl ApiClient for NoopApiClient {
     }
 }
 
+/// A runtime for the ladder's route mechanics: nobody at the keyboard, and
+/// `auto` declared — since t-7153 a question nobody can answer switches
+/// nothing, so a test of the route says it wants the route (a test of the
+/// question sets `ask` itself).
 fn refusal_dry_test_runtime(
     model: &str,
 ) -> ConversationRuntime<NoopApiClient, StaticToolExecutor> {
@@ -1935,6 +1939,7 @@ fn refusal_dry_test_runtime(
         vec!["system".to_string()],
     );
     runtime.set_context_model(model);
+    runtime.set_classifier_fallback(crate::ClassifierFallback::Auto);
     runtime
 }
 
@@ -2653,6 +2658,8 @@ fn every_switch_the_turn_makes_reaches_the_switch_observer_with_its_door() {
         vec!["system".to_string()],
     );
     runtime.set_context_model("claude-opus-5");
+    // The route without a question (t-7153): this test counts switches.
+    runtime.set_classifier_fallback(crate::ClassifierFallback::Auto);
     runtime.set_quota_fallback_client(Some((
         Arc::new(NoopAsyncApiClient),
         "gpt-5.6-sol".to_string(),
@@ -16774,7 +16781,7 @@ impl crate::permission::PermissionPrompter for RecordingPrompter {
 /// fallback rung (t-6747): the same model once, then — a person at the
 /// keyboard and the mode `ask` — the question whether this turn continues on
 /// the category's route, which it does only on a yes. `auto` switches without
-/// asking, an unattended turn is answered as `auto`, `off` never switches, and
+/// asking, an unattended turn under `ask` stays (t-7153), `off` never switches, and
 /// a category the provider routes nowhere stands.
 #[test]
 fn a_zo_turn_declined_twice_offers_the_fallback_rung() {
@@ -16827,10 +16834,21 @@ fn a_zo_turn_declined_twice_offers_the_fallback_rung() {
         RefusalDecision::Surface
     ));
 
-    // Unattended, `ask` is answered as `auto`: a question nobody sees is a pause.
+    // Unattended, `ask` cannot be asked, and an unasked question is not a
+    // yes (t-7153): the same model once, then the decline stands — and the
+    // route nobody could be asked about is named for the notice.
     runtime.set_attendance(crate::Attendance::Unattended);
     begin_public_refusal_test_turn(&mut runtime, "turn three");
-    decline_to_the_route(&mut runtime);
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::RetrySameModel
+    ));
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::Surface
+    ));
+    assert_eq!(runtime.effective_request_model(), Some("claude-fable-5-1"));
+    assert_eq!(runtime.refusal_switch_unasked_to.as_deref(), Some(CYBER_ROUTE));
 
     // `off` never leaves the chosen model.
     let mut off = refusal_dry_test_runtime("claude-fable-5-1");
@@ -16918,6 +16936,151 @@ fn a_declined_streaming_turn_asks_the_person_before_the_route() {
             .any(|block| matches!(block, RenderBlock::System { text, .. } if *text == receipt)),
         "the receipt names the model it left: {blocks:?}"
     );
+}
+
+/// A prompter nobody answers (t-7153): the question stands until the
+/// ceiling, and the prompter counts how often it was put.
+struct NobodyPrompter {
+    asked: std::sync::Mutex<usize>,
+}
+
+impl crate::permission::PermissionPrompter for NobodyPrompter {
+    fn decide<'a>(
+        &'a self,
+        _request: crate::permission::PermissionRequest,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        crate::permission::PermissionDecision,
+                        crate::permission::PermissionError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        *self.asked.lock().expect("lock") += 1;
+        Box::pin(std::future::pending())
+    }
+}
+
+/// Silence is not consent (t-7153, P1-2): a switch question the prompt
+/// ceiling closes unanswered — `ZO_PERMISSION_PROMPT_TIMEOUT_SECS` armed, a
+/// person at the keyboard who never chose — leaves the turn on the model
+/// the person chose. No request goes to the route, nothing is recorded as
+/// consented, and the notice names the timeout for what it is: a ceiling on
+/// the wait, not a decision.
+#[test]
+fn a_switch_question_nobody_answers_expires_without_a_switch() {
+    use crate::message_stream::types::{RenderBlock, WireModel, WireModelSource};
+
+    // The store's pin holds the env lock for the test; the ceiling is set
+    // under it and restored before it is released.
+    let _todo_store = HermeticTodoStore::pin();
+    let _ceiling = EnvVarGuard::set("ZO_PERMISSION_PROMPT_TIMEOUT_SECS", "1");
+    let mut runtime = ConversationRuntime::new(
+        Session::new(),
+        StopApiClient,
+        StaticToolExecutor::new(),
+        PermissionPolicy::new(PermissionMode::DangerFullAccess),
+        vec!["system".to_string()],
+    )
+    .with_async_api_client(Arc::new(RefuseOnceAsyncClient {
+        calls: AtomicUsize::new(0),
+        refusals: 2,
+    }));
+    runtime.set_context_model("claude-fable-5-1");
+    runtime.set_attendance(crate::Attendance::Attended);
+    runtime.set_classifier_fallback(crate::ClassifierFallback::Ask);
+    let prompter = Arc::new(NobodyPrompter {
+        asked: std::sync::Mutex::new(0),
+    });
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("tokio runtime");
+    let blocks = rt.block_on(async {
+        let (render_tx, mut render_rx) = tokio::sync::mpsc::channel(64);
+        runtime
+            .run_turn_streaming_maybe_deep("say hello", Vec::new(), render_tx, prompter.clone())
+            .await
+            .expect("the declined turn ends on the chosen model, surfaced");
+        let mut blocks = Vec::new();
+        while let Ok(block) = render_rx.try_recv() {
+            blocks.push(block);
+        }
+        blocks
+    });
+    assert_eq!(
+        *prompter.asked.lock().expect("lock"),
+        1,
+        "one question, on the second decline"
+    );
+    let wire: Vec<&WireModel> = blocks
+        .iter()
+        .filter_map(|block| match block {
+            RenderBlock::WireModel(wire) => Some(wire),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !wire.is_empty()
+            && wire.iter().all(|wire| {
+                wire.model == "claude-fable-5-1" && wire.source == WireModelSource::Session
+            }),
+        "a request went to another model with no answer: {blocks:?}"
+    );
+    assert!(
+        !runtime.refusal_switch_consented_for_turn && !runtime.refusal_switch_consented_for_session,
+        "silence was recorded as consent"
+    );
+    assert!(
+        blocks.iter().any(|block| matches!(
+            block,
+            RenderBlock::System { text, .. } if text.contains("a timeout, not a decision")
+        )),
+        "the expired question is named as a timeout: {blocks:?}"
+    );
+}
+
+/// A question nobody can be asked is not answered (t-7153, P1-2): under
+/// `ask`, a turn nobody attends leaves the chosen model where it is and
+/// surfaces the decline; `auto` — the word a summoned worker is launched
+/// with — is the only road that switches unattended.
+#[test]
+fn an_unattended_ask_leaves_the_chosen_model_where_it_is() {
+    use super::RefusalDecision;
+    use crate::ClassifierFallback;
+
+    let mut runtime = refusal_dry_test_runtime("claude-fable-5-1");
+    runtime.set_attendance(crate::Attendance::Unattended);
+    runtime.set_classifier_fallback(ClassifierFallback::Ask);
+    begin_public_refusal_test_turn(&mut runtime, "turn one");
+    assert!(matches!(
+        runtime.decide_refusal_fallback(Some("cyber")),
+        RefusalDecision::RetrySameModel
+    ));
+    assert!(
+        matches!(
+            runtime.decide_refusal_fallback(Some("cyber")),
+            RefusalDecision::Surface
+        ),
+        "a question nobody could be asked was answered yes"
+    );
+    assert_eq!(runtime.effective_request_model(), Some("claude-fable-5-1"));
+    assert!(!runtime.refusal_switch_consented_for_turn);
+    assert_eq!(
+        runtime.refusal_switch_unasked_to.as_deref(),
+        Some(CYBER_ROUTE),
+        "the route nobody could be asked about is named"
+    );
+
+    let mut auto = refusal_dry_test_runtime("claude-fable-5-1");
+    auto.set_attendance(crate::Attendance::Unattended);
+    auto.set_classifier_fallback(ClassifierFallback::Auto);
+    begin_public_refusal_test_turn(&mut auto, "auto");
+    decline_to_the_route(&mut auto);
 }
 
 /// A picture of a declined screen is sent again only if the person keeps it
@@ -17190,6 +17353,8 @@ fn a_refusal_retry_announces_the_fallback_model_on_the_wire() {
         refusals: 2,
     }));
     runtime.set_context_model("claude-fable-5");
+    // The route without a question (t-7153): this test reads the wire.
+    runtime.set_classifier_fallback(crate::ClassifierFallback::Auto);
 
     collect_stream_blocks(&mut runtime, "say hello", |blocks| {
         let wire: Vec<&WireModel> = blocks

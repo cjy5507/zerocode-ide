@@ -103,6 +103,10 @@ enum SwitchGate {
     Skip,
     /// `ask`, a person at the keyboard, and no yes yet this turn or session.
     Ask,
+    /// `ask`, nobody at the keyboard to ask (t-7153): a question that cannot
+    /// be put is not answered — no switch, and the route it would have
+    /// taken is noted so the turn can say why it stayed.
+    Unasked,
 }
 
 /// The text a withheld image leaves in its place (t-6747): the conversation
@@ -688,6 +692,10 @@ where
                     };
                     match self.refusal_switch_gate() {
                         SwitchGate::Skip => continue,
+                        SwitchGate::Unasked => {
+                            self.refusal_switch_unasked_to = Some(to);
+                            continue;
+                        }
                         SwitchGate::Ask => return RefusalDecision::Ask { to },
                         SwitchGate::Go => {}
                     }
@@ -710,6 +718,10 @@ where
                     };
                     match self.refusal_switch_gate() {
                         SwitchGate::Skip => continue,
+                        SwitchGate::Unasked => {
+                            self.refusal_switch_unasked_to = Some(to);
+                            continue;
+                        }
                         SwitchGate::Ask => return RefusalDecision::Ask { to },
                         SwitchGate::Go => {}
                     }
@@ -738,9 +750,11 @@ where
 
     /// Whether a rung may leave the model the person chose (t-6747): never
     /// under `off`; under `ask`, only after a yes this turn or for the session
-    /// while a person is at the keyboard — a turn nobody attends is answered
-    /// as `auto`, because a question nobody sees is a pause; at once under
-    /// `auto`.
+    /// — and a yes takes a person at the keyboard: a turn nobody attends
+    /// cannot be asked, so nothing is answered for it and the model stays
+    /// (t-7153: silence is not consent; the window launches a summoned zo
+    /// worker with `auto` when it pinned no model, `off` when it did); at
+    /// once under `auto`.
     fn refusal_switch_gate(&self) -> SwitchGate {
         if self.refusal_switch_refused_for_turn {
             return SwitchGate::Skip;
@@ -748,13 +762,14 @@ where
         match self.classifier_fallback {
             ClassifierFallback::Off => SwitchGate::Skip,
             ClassifierFallback::Ask
-                if self.attendance == Attendance::Attended
-                    && !self.refusal_switch_consented_for_turn
-                    && !self.refusal_switch_consented_for_session =>
+                if self.refusal_switch_consented_for_turn
+                    || self.refusal_switch_consented_for_session =>
             {
-                SwitchGate::Ask
+                SwitchGate::Go
             }
-            ClassifierFallback::Ask | ClassifierFallback::Auto => SwitchGate::Go,
+            ClassifierFallback::Ask if self.attendance == Attendance::Attended => SwitchGate::Ask,
+            ClassifierFallback::Ask => SwitchGate::Unasked,
+            ClassifierFallback::Auto => SwitchGate::Go,
         }
     }
 
@@ -765,7 +780,9 @@ where
         self.refusal_switch_consented_for_session |= for_the_session;
     }
 
-    /// Record the person's "stay": no rung leaves the chosen model again this
+    /// Record the person's "stay" — or a question nobody answered (t-7153:
+    /// a prompt ceiling passed, a headless loop with nobody to ask), which
+    /// is the same for the model: no rung leaves the chosen one again this
     /// turn; a same-model rung still may.
     pub(super) fn refuse_refusal_switch(&mut self) {
         self.refusal_switch_refused_for_turn = true;

@@ -1363,6 +1363,8 @@ fn sync_refusal_on_fable_retries_once_then_continues_on_the_route() {
         vec!["system".to_string()],
     );
     runtime.set_context_model("claude-fable-5");
+    // The route without a question (t-7153): nobody is at this keyboard.
+    runtime.set_classifier_fallback(runtime::ClassifierFallback::Auto);
 
     let summary = runtime
         .run_turn("hi", None)

@@ -1086,6 +1086,10 @@ pub struct ConversationRuntime<C, T> {
     /// Whether the person answered "stay" this turn: no rung switches again
     /// until the next public turn, as under `off`.
     refusal_switch_refused_for_turn: bool,
+    /// The route a switching rung would have taken this turn had somebody
+    /// been at the keyboard to ask (t-7153, `ask` unattended): named when
+    /// the decline is surfaced, so the turn says why it stayed.
+    refusal_switch_unasked_to: Option<String>,
     /// Whether this public turn already asked about the declined request's
     /// images — asked once, whatever the answer.
     refusal_images_asked_for_turn: bool,
@@ -1818,6 +1822,7 @@ where
             refusal_switch_consented_for_session: false,
             refusal_switch_consented_for_turn: false,
             refusal_switch_refused_for_turn: false,
+            refusal_switch_unasked_to: None,
             refusal_images_asked_for_turn: false,
             refusal_dry_category: None,
             escalation_model_override: None,
@@ -2210,6 +2215,7 @@ where
         self.refusal_context_clean_used = false;
         self.refusal_switch_consented_for_turn = false;
         self.refusal_switch_refused_for_turn = false;
+        self.refusal_switch_unasked_to = None;
         self.refusal_images_asked_for_turn = false;
         // Reset the per-turn quota fallback, pre-arming onto it when the session
         // is still inside a recorded quota-dry cooldown. See
@@ -2596,11 +2602,21 @@ where
                     .effective_request_model()
                     .map(str::to_string)
                     .unwrap_or_default();
-                // The headless loop has nobody to ask: a switch question is
-                // answered for this turn, as an unattended turn's is.
+                // The headless loop has nobody to ask (t-7153): a question it
+                // cannot put is not answered — the turn stays on the chosen
+                // model and says why, as an unattended turn's does.
                 let decision = loop {
                     match self.decide_refusal_fallback(category) {
-                        RefusalDecision::Ask { .. } => self.consent_to_refusal_switch(false),
+                        RefusalDecision::Ask { to } => {
+                            self.refuse_refusal_switch();
+                            eprintln!(
+                                "[zo] {}",
+                                core_types::retry_signal::refusal_switch_unasked_notice(
+                                    &from_model,
+                                    &to
+                                )
+                            );
+                        }
                         other => break other,
                     }
                 };
@@ -2646,6 +2662,16 @@ where
                     RefusalDecision::Surface => {
                         if let Some(usage) = refused_usage {
                             self.usage_tracker.record(usage);
+                        }
+                        // A route nobody could be asked about is said so (t-7153).
+                        if let Some(to) = self.refusal_switch_unasked_to.take() {
+                            eprintln!(
+                                "[zo] {}",
+                                core_types::retry_signal::refusal_switch_unasked_notice(
+                                    &from_model,
+                                    &to
+                                )
+                            );
                         }
                         if let Some(word) = category.filter(|_| {
                             ::api::refusal_route_candidates(&from_model, category).is_empty()
