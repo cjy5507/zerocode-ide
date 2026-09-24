@@ -34522,7 +34522,26 @@ mod tests {
                 && walk.contains("transcript_turns_through("),
             "worker-transcript opens its transcript more than once, or measures it apart from the file it reads:\n{walk}"
         );
+        // Every open of the call reads through one meter, and every meter
+        // counts into the call's one budget — a retry reads on what the
+        // first open left, and the answer's count is the meter's (R2).
+        let through = block_after(shipped, "fn transcript_turns_through<");
+        let metered = through.find("let mut spent = 0;");
+        let opens = through.find("for _ in 0..TRANSCRIPT_OPENS");
+        assert!(
+            metered.is_some_and(|metered| opens.is_some_and(|opens| metered < opens))
+                && through.contains("spent: &mut spent,")
+                && through.contains("budget: TRANSCRIPT_READ_BUDGET,")
+                && through.contains("transcript_turns_in(&mut file, size, ask)"),
+            "worker-transcript gives an open a budget of its own, or reads past the meter:\n{through}"
+        );
         let reads = block_after(shipped, "fn transcript_turns_in<");
+        assert!(
+            reads.contains("file: &mut Metered<'_, F>,")
+                && reads.contains("read_bytes: *file.spent,")
+                && reads.contains("tail_window_within(TRANSCRIPT_WIDEST, size, file.left())"),
+            "worker-transcript's answer counts apart from the meter, or its wider read ignores what is left:\n{reads}"
+        );
         assert!(
             reads.contains("transcript_log_window(")
                 && reads.contains("zerocode_core::transcript::Detail::Whole")

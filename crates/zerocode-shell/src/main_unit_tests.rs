@@ -20395,11 +20395,15 @@ fn a_long_transcript_line_cannot_spend_outside_the_commands_read_budget() {
 /// length, shorter, longer — is never read; a file cut in place under the
 /// read is read again, whole, as it now stands; one cut under every read is
 /// said, never half answered; and a file rewritten in place between the reads
-/// is answered out of one read alone.
+/// is answered out of one read alone. Whichever it was, the reads over every
+/// open stay inside the call's one budget, and an answer's `readBytes` is
+/// what the file was read for — the bytes a cut read took before it ended
+/// short included (R2).
 #[test]
 fn a_transcript_read_keeps_one_source_and_one_end_across_its_windows() {
-    use zerocode_core::worker_transcript::{TranscriptAsk, Window};
+    use zerocode_core::worker_transcript::{SCAN_CHUNKS, TranscriptAsk, Window};
     let chunk = crate::shell_runtime::SUBAGENT_LOG_CHUNK;
+    let budget = chunk + 1 + SCAN_CHUNKS * chunk + 1;
     let temp = tempfile::tempdir().expect("a transcript folder");
     // A moment before every stamp: the last chunk never holds it, so every
     // call below makes both reads.
@@ -20476,7 +20480,7 @@ fn a_transcript_read_keeps_one_source_and_one_end_across_its_windows() {
         ("shorter", lines("them", 100)),
         ("longer", lines("them", 2 * count)),
     ] {
-        let (answer, _, opens) = read_transcript_watched(&path, &ask, |open| {
+        let (answer, read, opens) = read_transcript_watched(&path, &ask, |open| {
             let path = path.clone();
             let other = other.clone();
             (open == 0).then(|| {
@@ -20499,13 +20503,14 @@ fn a_transcript_read_keeps_one_source_and_one_end_across_its_windows() {
         );
         assert_eq!(spoken(&turns, "mine"), count, "{name}");
         assert_eq!(scan.file_bytes, size, "{name}");
+        assert_eq!(scan.read_bytes, read, "{name}");
         reset();
     }
 
     // Cut in place under the wider read: read again from a fresh open, as
     // the file now stands — never the half the first open left.
     let half = size / 2;
-    let (answer, _, opens) = read_transcript_watched(&path, &ask, |open| {
+    let (answer, read, opens) = read_transcript_watched(&path, &ask, |open| {
         let path = path.clone();
         (open == 0).then(|| {
             (
@@ -20524,6 +20529,14 @@ fn a_transcript_read_keeps_one_source_and_one_end_across_its_windows() {
     let (turns, scan) = answer.expect("answered after a fresh open");
     assert_eq!(opens, 2, "the cut file was not opened again");
     assert_eq!(scan.file_bytes, half);
+    assert!(
+        read <= budget,
+        "two opens read {read} bytes, past the call's {budget}"
+    );
+    assert_eq!(
+        scan.read_bytes, read,
+        "the answer forgot the bytes the cut read took"
+    );
     assert_eq!(
         spoken(&turns, "mine"),
         original[..half as usize].matches('\n').count()
@@ -20546,17 +20559,18 @@ fn a_transcript_read_keeps_one_source_and_one_end_across_its_windows() {
             }) as Box<dyn FnOnce()>,
         ))
     });
-    let (answer, _, opens) = refused;
+    let (answer, read, opens) = refused;
     let why = answer.expect_err("a file cut under every read was answered");
     assert!(why.contains("cut in place"), "{why}");
     assert_eq!(opens, 2);
+    assert!(read <= budget, "{read} bytes read, past {budget}");
     reset();
 
     // Rewritten in place, the same length, between the reads: the answer is
     // one read's — never the first read's lines beside the second's.
     let rewritten = original.replace("mine", "ours");
     assert_eq!(rewritten.len(), original.len());
-    let (answer, _, opens) = read_transcript_watched(&path, &ask, |open| {
+    let (answer, read, opens) = read_transcript_watched(&path, &ask, |open| {
         let path = path.clone();
         let rewritten = rewritten.clone();
         (open == 0).then(|| {
@@ -20574,13 +20588,142 @@ fn a_transcript_read_keeps_one_source_and_one_end_across_its_windows() {
             )
         })
     });
-    let (turns, _) = answer.expect("answered");
+    let (turns, scan) = answer.expect("answered");
     assert_eq!(opens, 1);
     assert_eq!(
         (spoken(&turns, "mine"), spoken(&turns, "ours")),
         (0, count),
         "two reads' lines were answered together"
     );
+    assert_eq!(scan.read_bytes, read);
+}
+
+/// A `worker-transcript` call has ONE read budget, whatever it opens
+/// (t-6742 R2): a file cut in place under a read is read again from a fresh
+/// open on what the first open LEFT of the budget — the retry never gets a
+/// budget of its own — and the bytes the cut read took before it came up
+/// short are spent, not forgotten. Counted on the file itself, every open
+/// watched: cut one byte short under the wider read (the first open spends
+/// all but one byte of the budget, and the call says it cannot read again
+/// instead of reading a second budget), and cut one byte short under the
+/// first read (the fresh open answers inside what is left — its wider read
+/// only as wide as that — or out of its first read alone). Every answer's
+/// `readBytes` is the bytes read over every open.
+#[test]
+fn a_transcript_read_retries_inside_the_one_budget_its_call_was_given() {
+    use zerocode_core::worker_transcript::{SCAN_CHUNKS, TranscriptAsk, Window};
+    let chunk = crate::shell_runtime::SUBAGENT_LOG_CHUNK;
+    let widest = SCAN_CHUNKS * chunk;
+    let budget = chunk + 1 + widest + 1;
+    let temp = tempfile::tempdir().expect("a transcript folder");
+    let count = 30_000;
+    let line = |at: usize| {
+        format!(
+            "{{\"type\":\"user\",\"message\":{{\"role\":\"user\",\"content\":\"prompt {at:07}\"}}}}\n"
+        )
+    };
+    let original = (0..count).map(line).collect::<String>();
+    let path = temp.path().join("w.jsonl");
+    let reset = || std::fs::write(&path, &original).expect("written");
+    reset();
+    let size = original.len() as u64;
+    assert!(
+        size > widest + 1,
+        "the wider read opens inside the file, the byte before it too"
+    );
+    // One byte off the file's end — its last line loses its line end — at
+    // the first open's first seek below `below`.
+    let cut_one_byte_below = |below: u64| {
+        let path = path.clone();
+        move |open: usize| {
+            let path = path.clone();
+            (open == 0).then(|| {
+                (
+                    below,
+                    Box::new(move || {
+                        let file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .open(&path)
+                            .expect("open to cut");
+                        let now = file.metadata().expect("stat").len();
+                        file.set_len(now - 1).expect("cut");
+                    }) as Box<dyn FnOnce()>,
+                )
+            })
+        }
+    };
+    let since = TranscriptAsk {
+        window: Window::Since(0),
+        json: true,
+    };
+    let newest = |turns: &[zerocode_core::transcript::TranscriptTurn]| {
+        turns.last().map(|turn| turn.text.clone())
+    };
+
+    // Cut under the wider read, whose first seek is the first below the
+    // first read's: the first open's reads take all but one byte of the
+    // budget before they come up short. What is left cannot read the file
+    // again, and the call says so.
+    let (answer, read, opens) =
+        read_transcript_watched(&path, &since, cut_one_byte_below(size - chunk - 1));
+    assert!(
+        read <= budget,
+        "{opens} opens read {read} bytes, past the call's {budget}"
+    );
+    assert_eq!(read, budget - 1, "the first open's reads, short by the cut");
+    let why = answer.expect_err("a call answered past its budget");
+    assert!(why.contains("budget"), "{why}");
+    assert_eq!(opens, 2);
+    reset();
+
+    // Cut under the first read: it takes one chunk and comes up short. The
+    // fresh open reads its chunk, then a wider read only as wide as the
+    // budget left — the whole budget spent, never more — and says so.
+    let (answer, read, opens) =
+        read_transcript_watched(&path, &since, cut_one_byte_below(u64::MAX));
+    let (turns, scan) = answer.expect("answered after a fresh open");
+    assert_eq!(opens, 2);
+    assert!(
+        read <= budget,
+        "{opens} opens read {read} bytes, past the call's {budget}"
+    );
+    assert_eq!(read, budget, "a chunk, a chunk again, and what was left");
+    assert_eq!(scan.read_bytes, read, "{scan:?}");
+    assert_eq!(scan.file_bytes, size - 1, "the file as it now stands");
+    // What the fresh open's wider read had left: the budget, less the cut
+    // read's chunk and the fresh open's first read — and the byte before
+    // the wider read comes out of it too.
+    let left = budget - chunk - (chunk + 1);
+    let from = size - 1 - (left - 1);
+    let width = line(0).len() as u64;
+    assert_eq!(
+        scan.covered_from,
+        from.div_ceil(width) * width,
+        "the wider read opened where the budget left reached: {scan:?}"
+    );
+    assert!(scan.cut_above && !scan.skipped, "{scan:?}");
+    assert_eq!(
+        newest(&turns),
+        Some(format!("prompt {:07}", count - 2)),
+        "the cut line has no end, and is not answered"
+    );
+    reset();
+
+    // The same cut, and a window the fresh open's first read holds: two
+    // chunks read, and the answer says two.
+    let last = TranscriptAsk {
+        window: Window::LastTurns(5),
+        json: true,
+    };
+    let (answer, read, opens) = read_transcript_watched(&path, &last, cut_one_byte_below(u64::MAX));
+    let (turns, scan) = answer.expect("answered after a fresh open");
+    assert_eq!(opens, 2);
+    assert_eq!(read, chunk + chunk + 1);
+    assert_eq!(
+        scan.read_bytes, read,
+        "the answer forgot the bytes the cut read took"
+    );
+    assert_eq!(newest(&turns), Some(format!("prompt {:07}", count - 2)));
 }
 
 /// A transcript read says whether the file goes on past the cursor, so a
