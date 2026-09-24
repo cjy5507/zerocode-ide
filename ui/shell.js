@@ -7128,6 +7128,14 @@ function paintAgentGraph(view, model) {
     }
   }
   paintAgentGraphInspector(view, model);
+  /* 맥박을 노드에 다시 얹는다 (t-7288).
+   *
+   * 장부는 사건을 본 그 자리에서 한 번 얹지만, 그 판이 **처음 서는 카드**의
+   * 사건이면 그때 얹을 노드가 아직 없다 — 새 워커의 첫 배정이 꼭 그 경우다.
+   * 여기는 카드가 다 선 뒤이므로 그 맥박이 제 자리를 찾는다. 간선 쪽은
+   * `paintAgentGraphEdges`의 끝이 같은 일을 한다. 쓰는 것이 `data-live-beat`
+   * 하나뿐이고 값이 같으면 쓰지 않으므로, 조용한 판에서 이 줄의 값은 0이다. */
+  dressAgentGraphLive(view);
   watchAgentGraphSize(view);
   wireAgentGraphCanvas(view);
   wireAgentGraphKeys(view);

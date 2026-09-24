@@ -263,6 +263,25 @@ export async function testBoardLive(browser, origin, ok) {
     ok("duplicate_snapshot_does_not_replay_pulses",
       again.before === again.after && again.after === 1, JSON.stringify(again));
 
+    /* 처음 서는 카드의 첫 배정도 맥박을 받는다. 장부는 사건을 본 자리에서
+     * 한 번 얹지만 그때 그 카드는 아직 없었다 — 카드가 다 선 뒤에 한 번 더
+     * 얹지 않으면 새 워커의 첫 사건만 조용히 사라진다. */
+    ok("a_card_that_first_appears_with_its_assignment_still_pulses",
+      await page.evaluate(async () => {
+        const now = window.__LIVE_NOW__;
+        window.__PANES__ = [...window.__PANES__,
+          { term: 321, agent: "codex", state: "working", at: now, state_started_at: now, resumable: false }];
+        window.__LEDGER__ = [...window.__LEDGER__, {
+          ...window.__LEDGER__[0], worker: "w-fresh", task: "갓 온 일", task_id: "t-fresh",
+          dispatch_id: "dp-fresh", term: 321, reported: false, review: null }];
+        window.__COLUMNS__[0].cards.push({ ...window.__COLUMNS__[0].cards[1],
+          pane: "term:321", heading: "갓 온 일", task: "갓 온 일", parent: "" });
+        await paintBoardView(undefined, { force: true });
+        await window.__BOARD_SETTLED__();
+        return document.querySelector(
+          '#board-view .agent-graph-node[data-graph-key="agent:term:321"][data-live-beat]') !== null;
+      }));
+
     /* 같은 밀리초의 서로 다른 두 사건은 합쳐지지 않는다. A@T → B@T → A@T 를
      * 그 차례로 먹인다: 둘째는 새 사건, 셋째는 이미 본 것이다. */
     const sameStamp = await page.evaluate(async () => {
