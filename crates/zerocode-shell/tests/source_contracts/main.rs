@@ -28112,6 +28112,8 @@ mod tests {
         );
         // 사이드바의 두 행은 한 문을 지나고, 그 문은 제 활성화가 시작한 복원이
         // 끝난 뒤에 묻는다 — 답이 가리키는 판이 탭에 서 있어야 갈 수 있다.
+        // 그 활성화는 첫 터미널을 세우지 않는다(t-7812 A): 문이 여는 대화가
+        // 그 체크아웃의 첫 터미널이고, 세웠다면 빈 에이전트가 그 옆에 선다.
         let reopening = block_after(window, "async function reopenConversationIn(path, known) {");
         let settled = reopening
             .find("storedWakesSettled(path)")
@@ -28120,9 +28122,11 @@ mod tests {
             .find("resumeSession(known)")
             .expect("the door no longer opens through the judged road");
         assert!(
-            reopening.contains("activateWorktree(path)") && settled < asked,
+            reopening.contains("activateWorktree(path, { firstTerminal: false })")
+                && settled < asked,
             "a sidebar row for an absent conversation opens it in the wrong \
-             checkout, or asks while its own restore is still waking it:\n{reopening}"
+             checkout, starts an empty agent beside it, or asks while its own \
+             restore is still waking it:\n{reopening}"
         );
         for row in [
             "function makeSurvivorRow(one) {",

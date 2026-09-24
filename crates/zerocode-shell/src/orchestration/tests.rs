@@ -14148,15 +14148,15 @@ fn a_restored_worker_reports_done_through_the_live_verb_after_durable_reseat() {
             clock(),
         )
         .expect("store the resumable session");
-    assert_eq!(
-        held.actor
-            .window_restarted(clock())
-            .expect("sleep the worker")
-            .0
-            .sleeping,
-        1
-    );
-    crate::agent_teams::forget_term(OLD_WORKER);
+    // The window goes with this worker's turn under way, so its reseat
+    // carries a continuation (t-7812 E) — the words this worker answers with
+    // its report. A worker the goodbye found at rest is typed nothing.
+    super::pane_turn_began(OLD_WORKER);
+    restore::the_window_goes(&restore::census_without_commands, &[OLD_WORKER]);
+    assert_eq!(restore::row(&worker).state, WorkerState::Sleeping);
+    held.actor
+        .window_restarted(clock())
+        .expect("the next boot's sweep");
     crate::agent_teams::forget_term(OLD_LEADER);
 
     let new_team = format!("team-live-report-new-{NEW_LEADER}");

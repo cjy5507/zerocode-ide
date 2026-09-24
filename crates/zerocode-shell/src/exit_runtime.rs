@@ -320,7 +320,7 @@ pub(crate) fn terminate(steps: &dyn Terminating) {
 }
 
 /// A restart button's way out (`relaunch_window`), which tauri follows with
-/// no exit event at all — `app.restart()` replaces the process — so what the
+/// no exit event at all — tauri's restart replaces the process — so what the
 /// next window restores from is written here or nowhere (t-7812 D): the
 /// goodbye, then the screens and the statuses. The panes and the browser end
 /// with the process it replaces.
@@ -702,7 +702,7 @@ mod tests {
     }
 
     /// The restart button's road: the goodbye and what the next window
-    /// restores from, before `app.restart()` replaces the process — which
+    /// restores from, before tauri's restart replaces the process — which
     /// no exit event follows.
     #[test]
     fn a_restart_button_says_goodbye_and_keeps_the_list_before_it_restarts() {
