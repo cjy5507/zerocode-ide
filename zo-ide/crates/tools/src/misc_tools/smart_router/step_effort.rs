@@ -116,12 +116,7 @@ pub fn step_effort_word(cwd: &Path) -> Option<StepEffortWord> {
 /// the ledger it writes.
 #[must_use]
 pub fn step_effort_raised(cwd: &Path) -> bool {
-    raised_at(&step_effort_path(cwd))
-}
-
-fn raised_at(ledger: &Path) -> bool {
-    let rows = super::jev_summary::read_rows(ledger);
-    promote::stand_from(&rows) == promote::Stand::Applying
+    super::jev_summary::raised_in(&step_effort_path(cwd))
 }
 
 /// Append one of the governor's events — a decision, or a progress mark —
@@ -509,7 +504,7 @@ mod tests {
         assert_eq!(asked[0]["kind"], JUDGMENT_ROW_KIND);
         let agreement = zerocode_core::jev::summary::agreement_since(&rows, i64::MIN);
         assert_eq!((agreement.compared, agreement.agreed), (1, 1));
-        assert!(!raised_at(&ledger));
+        assert!(!super::super::jev_summary::raised_in(&ledger));
     }
 
     /// The seat's summary reads its judgments and labels whole, whatever

@@ -315,3 +315,95 @@ fn a_routing_rows_route_use_words_are_the_tables() {
     assert_eq!(word(DecisionRouteUse::Fallback), zerocode_core::jev::ROUTE_USE_FALLBACK);
     assert_eq!(word(DecisionRouteUse::Abstained), zerocode_core::jev::ROUTE_USE_ABSTAINED);
 }
+
+/// What each word of the seat adds to a turn's start — the time
+/// [`super::assess_turn_probed`] holds the turn before its first request —
+/// on a fake System One that answers at once, so what is printed is this
+/// side's own cost; the wire's own time is the replay's
+/// (`tools/routing-replay/README.md`). A measurement, not a check: run with
+/// `--ignored --nocapture`.
+#[test]
+#[ignore = "a measurement: prints what each word adds to a turn's start"]
+fn what_each_word_adds_to_a_turns_start() {
+    const TURNS: usize = 200;
+    for word in ["off", "shadow", "auto", "on"] {
+        let judgment = answering(answer(2, 0.9));
+        let chat = probe();
+        let machine = Machine::new(json!({ "decisionShadow": word }), &judgment, &chat);
+        let mut took: Vec<u128> = (0..TURNS)
+            .map(|_| {
+                let text = unique("이 함수의 버그를 수정해줘");
+                let started = Instant::now();
+                let _ = turn(&text, true);
+                started.elapsed().as_micros()
+            })
+            .collect();
+        // A recording judgment lands after the turn has gone on: wait for
+        // it, so the next word's machine starts on a quiet port.
+        let landed = if word == "off" { 0 } else { machine.rows_after(TURNS).len() };
+        took.sort_unstable();
+        let at = |share: f64| {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+            let index = ((took.len() - 1) as f64 * share).round() as usize;
+            took[index]
+        };
+        println!(
+            "{word}: p50 {} µs · p95 {} µs · max {} µs · rows {landed} · requests {}",
+            at(0.5),
+            at(0.95),
+            took[took.len() - 1],
+            judgment.requests().len()
+        );
+    }
+}
+
+/// What reading the seat's standing costs once its ledger is full — `auto`
+/// reads it on every turn the seat asks about, to know whether it may act
+/// ([`super::decision_shadow::acts_here`]). The rows are the second
+/// version's own, repeated to the ledger's cap. A measurement, not a check.
+#[test]
+#[ignore = "a measurement: prints what the standing read costs on a full ledger"]
+fn what_a_full_ledger_costs_the_seats_standing() {
+    const TURNS: usize = 20;
+    let judgment = answering(answer(2, 0.9));
+    let chat = probe();
+    let machine = Machine::new(json!({ "decisionShadow": "shadow" }), &judgment, &chat);
+    for _ in 0..TURNS {
+        let _ = turn(&unique("이 함수의 버그를 수정해줘"), true);
+    }
+    let lines: Vec<String> = machine.rows_after(TURNS).iter().map(Value::to_string).collect();
+    let row_bytes = lines.iter().map(String::len).sum::<usize>() / lines.len().max(1);
+    let cap = usize::try_from(super::shadow_ledger::SHADOW_LEDGER_MAX_BYTES).expect("the cap fits");
+    let mut text = String::with_capacity(cap + row_bytes * TURNS);
+    while text.len() < cap {
+        for line in &lines {
+            text.push_str(line);
+            text.push('\n');
+        }
+    }
+    let full = tempfile::NamedTempFile::new().expect("a ledger file");
+    std::fs::write(full.path(), &text).expect("the ledger writes");
+    let every_row = || {
+        let rows = super::jev_summary::read_rows(full.path());
+        zerocode_core::jev::promote::stand_from(&rows) == zerocode_core::jev::promote::Stand::Applying
+    };
+    let timed = |read: &dyn Fn() -> bool| {
+        let mut took: Vec<u128> = (0..20)
+            .map(|_| {
+                let started = Instant::now();
+                let _ = read();
+                started.elapsed().as_micros()
+            })
+            .collect();
+        took.sort_unstable();
+        (took[took.len() / 2], took[took.len() - 1])
+    };
+    assert_eq!(super::decision_shadow::raised_at(full.path()), every_row(), "both reads stand the seat alike");
+    let (whole_p50, whole_max) = timed(&every_row);
+    let (lines_p50, lines_max) = timed(&|| super::decision_shadow::raised_at(full.path()));
+    println!(
+        "row {row_bytes} B · ledger {} B, {} rows · every row parsed p50 {whole_p50} µs (max {whole_max}) · transition lines only p50 {lines_p50} µs (max {lines_max})",
+        text.len(),
+        text.lines().count(),
+    );
+}

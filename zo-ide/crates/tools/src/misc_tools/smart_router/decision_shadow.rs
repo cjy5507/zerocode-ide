@@ -43,7 +43,7 @@ use zerocode_core::jev::questions::ROUTING_RUBRIC_VERSION;
 
 use super::jev_gate::{self, JevDoor};
 use super::probe_exec::{remember_bounded, ProbeSlot, ProbeUse, PROBE_TIMEOUT};
-use super::settings::decision_shadow_mode_from;
+use super::settings::{decision_shadow_mode_from, DecisionShadowMode};
 use zerocode_core::jev::ROUTING;
 use zerocode_core::jev::promote::{self, Verdict};
 use zerocode_core::jev::summary::{self as jev_ledger};
@@ -133,20 +133,34 @@ pub fn raised_here(cwd: &Path) -> bool {
 /// pin that would be racing every other test in this binary for it.
 #[must_use]
 pub fn raised_at(ledger: &Path) -> bool {
-    let rows = super::jev_summary::read_rows(ledger);
-    zerocode_core::jev::promote::stand_from(&rows) == zerocode_core::jev::promote::Stand::Applying
+    super::jev_summary::raised_in(ledger)
 }
 
-/// Whether the routing seat asks anything under the working directory's
-/// settings — every mode but `off` (t-6346). Read where a caller decides
-/// whether a judgment is worth reading anything for at all; a settings file
-/// that cannot be read asks nothing.
+/// The routing seat's word under the working directory's settings (t-6346),
+/// read where a caller decides whether a judgment is worth reading anything
+/// for at all; `None` where the settings cannot be read.
 #[must_use]
-pub(super) fn asks_here() -> bool {
+pub(super) fn mode_here() -> Option<DecisionShadowMode> {
     std::env::current_dir()
         .ok()
         .and_then(|cwd| decision_shadow_mode_from(&runtime::ConfigLoader::default_for(&cwd)))
-        .is_some_and(zerocode_core::jev::JevMode::asks)
+}
+
+/// Whether the routing seat asks anything here — every word but `off`; a
+/// settings file that cannot be read asks nothing.
+#[must_use]
+pub(super) fn asks_here() -> bool {
+    mode_here().is_some_and(DecisionShadowMode::asks)
+}
+
+/// Whether the seat's word lets its answer act here: a person's `on`, or an
+/// `auto` its own ledger raised — the ledger read only for `auto`.
+#[must_use]
+pub(super) fn acts_here(mode: DecisionShadowMode) -> bool {
+    match mode {
+        DecisionShadowMode::Auto => std::env::current_dir().is_ok_and(|cwd| raised_here(&cwd)),
+        other => other.applies(),
+    }
 }
 
 /// Where a project's decision shadow ledger lives.

@@ -776,6 +776,49 @@ fn a_seat_stands_where_its_last_transition_left_it() {
     assert_eq!(stand_from(&rows), Stand::Recording, "the last one decides");
 }
 
+/// The standing read off a ledger's text is the one read off its parsed rows
+/// — only the lines that carry a transition's key are parsed, so a row that
+/// merely names the word in a value and a torn last line are passed over
+/// without changing what the last transition says.
+#[test]
+fn a_ledgers_text_stands_where_its_rows_do() {
+    use serde_json::json;
+    let rows = [
+        json!({"at": 1, "outcome": "answered", "note": "a \"transition\" named in a value"}),
+        json!({"at": 2, (TRANSITION.canonical): ROSE}),
+        json!({"at": 3, "outcome": "answered"}),
+    ];
+    let text = |rows: &[Value]| {
+        rows.iter()
+            .map(|row| format!("{row}\n"))
+            .collect::<String>()
+    };
+    assert_eq!(stand_in(""), Stand::Recording, "an empty ledger never rose");
+    assert_eq!(stand_in(&text(&rows)), stand_from(&rows));
+    assert_eq!(stand_in(&text(&rows)), Stand::Applying);
+    let torn = format!("{}{{\"at\": 9, \"transition\": \"fa", text(&rows));
+    assert_eq!(
+        stand_in(&torn),
+        Stand::Applying,
+        "a torn last line is passed over"
+    );
+    let fell = [
+        rows[1].clone(),
+        json!({"at": 4, (TRANSITION.canonical): FELL, ON_LINE: "latency"}),
+        rows[2].clone(),
+    ];
+    assert_eq!(
+        stand_in(&text(&fell)),
+        Stand::Recording,
+        "the last one decides"
+    );
+    assert_eq!(
+        stand_in(&text(&rows[..1])),
+        Stand::Recording,
+        "a word in a value is not a transition"
+    );
+}
+
 #[test]
 fn only_a_change_is_written_down() {
     let held = window(200, 200, Some(600));

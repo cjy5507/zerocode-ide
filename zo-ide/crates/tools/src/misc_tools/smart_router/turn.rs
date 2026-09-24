@@ -284,10 +284,11 @@ pub struct AssessmentReaders {
 }
 
 /// Whether anyone reads the verdict this turn: an armed deep gate, or an exec
-/// contract the settings arm for this main model.
+/// contract the settings arm for this main model — asked second, because
+/// asking it builds the model list.
 #[must_use]
-fn assessment_has_a_reader(readers: AssessmentReaders, exec_contract_armed: bool) -> bool {
-    readers.verify_leg || exec_contract_armed
+fn assessment_has_a_reader(readers: AssessmentReaders, exec_contract_armed: impl FnOnce() -> bool) -> bool {
+    readers.verify_leg || exec_contract_armed()
 }
 
 /// Any admission is worth its round-trip only when someone reads the verdict.
@@ -509,9 +510,10 @@ pub fn assess_turn_probed(
     // odd one out: nothing chose that, so it escalates as a failure.
     let gate = turn_gate(band_read(metadata.complexity, &input, user_text));
     let admission = gate.probe;
-    // The seat's column, then its mode: a turn nobody would ask about pays
+    // The seat's column, then its word: a turn nobody would ask about pays
     // one settings read and nothing else.
-    let seat_asks = gate.seat && super::decision_shadow::asks_here();
+    let seat = if gate.seat { super::decision_shadow::mode_here() } else { None };
+    let seat_asks = seat.is_some_and(zerocode_core::jev::JevMode::asks);
     if admission == ProbeAdmission::Declined && !seat_asks {
         note_gate(ProbeGate::NotWorthIt);
         return deterministic;
@@ -528,18 +530,32 @@ pub fn assess_turn_probed(
     }
     // The verdict is read by the deep-gate verify leg and the exec contract
     // only; with neither armed the probe's round-trip is pure first-token
-    // latency, and an acting judgment records instead of routing.
-    let verdict_read = assessment_has_a_reader(
-        readers,
-        super::settings::exec_impl_model_armed(parent_model, &settings),
-    );
+    // latency, and an acting judgment records instead of routing. Whether
+    // they read is asked only where an answer could be bought — a probe the
+    // gate admits, or a seat whose word lets it act.
+    let seat_acts = seat.is_some_and(super::decision_shadow::acts_here);
+    let verdict_read = (admission != ProbeAdmission::Declined || seat_acts)
+        && assessment_has_a_reader(readers, || super::settings::exec_impl_model_armed(parent_model, &settings));
     let probe = admission_for_readers(admission, verdict_read);
     note_gate(match (admission, probe) {
         (ProbeAdmission::Declined, _) => ProbeGate::NotWorthIt,
         (_, ProbeAdmission::Declined) => ProbeGate::VerdictUnread,
         _ => ProbeGate::Admitted,
     });
-    if probe == ProbeAdmission::Declined && !seat_asks {
+    // Nothing on this turn reads an answer and no probe is bought: the
+    // seat's question leaves detached, and the turn pays for neither the
+    // exec contract's check nor the model list — 15.1 ms at the start of
+    // every such turn when it did (t-6346, `roads_tests`).
+    if probe == ProbeAdmission::Declined && !(seat_acts && verdict_read) {
+        if seat_asks {
+            let _ = super::decision_shadow::fire(
+                &[("", user_text)],
+                &[runtime::RoutingFacts::default()],
+                &[],
+                attempt,
+                super::decision_shadow::DECISION_SHADOW_DEADLINE,
+            );
+        }
         return deterministic;
     }
     let inventory = runtime::connected_model_inventory(parent_model);
@@ -1065,9 +1081,10 @@ mod probe_gate_tests {
     fn a_probe_runs_only_when_something_reads_its_verdict() {
         let none = AssessmentReaders::default();
         let verify = AssessmentReaders { verify_leg: true };
-        assert!(!assessment_has_a_reader(none, false));
-        assert!(assessment_has_a_reader(verify, false));
-        assert!(assessment_has_a_reader(none, true));
+        assert!(!assessment_has_a_reader(none, || false));
+        assert!(assessment_has_a_reader(verify, || false));
+        assert!(assessment_has_a_reader(none, || true));
+        assert!(assessment_has_a_reader(verify, || unreachable!("an armed gate already reads it")));
         assert_eq!(
             admission_for_readers(ProbeAdmission::IntentOnly, false),
             ProbeAdmission::Declined

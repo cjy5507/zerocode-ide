@@ -61,6 +61,21 @@ ZEROCODE_ROUTING_REPLAY_OUT=/tmp/routing-replay/out.json \
 | `routeOutcomes` | 결과 원장의 키워드 등급별 완료·실패·중단, 턴과 이어지는 행 수 |
 | `curveAgainstTheWork` | 판마다 복잡도 확신도 다섯 구간별 등급 일치 — 구간 선을 읽는 곡선 |
 
+## 우리 쪽 비용 — 턴 시작과 원장 상태 읽기
+
+재생의 지연은 통신 왕복이다. 턴을 붙잡는 우리 쪽 몫은 `smart_router::roads_tests` 의 `#[ignore]` 측정 둘이 가짜 System One
+(즉시 답함)으로 잰다 — 키도 엔드포인트도 쓰지 않는다.
+
+```sh
+cd zo-ide
+cargo test -p tools --lib smart_router::roads_tests::what_each_word_adds_to_a_turns_start -- --ignored --nocapture
+cargo test -p tools --lib smart_router::roads_tests::what_a_full_ledger_costs_the_seats_standing -- --ignored --nocapture
+```
+
+첫째는 `off`·`shadow`·`auto`·`on` 마다 200턴에서 `assess_turn_probed` 가 턴을 붙잡은 시간(p50·p95)을, 둘째는 2판 행을 원장 상한
+(`SHADOW_LEDGER_MAX_BYTES`)까지 채운 원장에서 `auto` 가 턴마다 읽는 상태 읽기 시간을 — 모든 행을 푸는 읽기와 오르내림 줄만 푸는
+읽기(`promote::stand_in`) 둘로 — 찍는다.
+
 ## 한계
 
 - **스폰에는 라벨이 없다.** 스폰의 일은 자식 세션의 것이라 이 전사로는 채점하지 않는다(묻기와 지연·비용에는 들어간다).
