@@ -561,6 +561,19 @@ export async function testBoardLive(browser, origin, ok) {
         && quiet?.textContent.trim() === "";
     }));
 
+    /* 사건 줄은 **무엇을 기다리는지**까지 말한다. 종류만 「대기」라고 적고
+     * 사유를 빼면, 그 줄은 제가 답해야 할 질문에 답하지 않는다. */
+    ok("a_wait_event_row_names_its_cause_in_the_desks_own_word",
+      await page.evaluate(() => {
+        const view = document.querySelector("#board-view");
+        selectAgentGraphEntity(view, "agent:term:304");
+        const rows = [...view.querySelectorAll(".agent-live-event")]
+          .map((row) => row.textContent);
+        const walled = DESK_HEALTH.find((one) => one.id === "walled");
+        return rows.some((said) => said.includes(t(walled.key, walled.word)))
+          || agentGraphLiveRecentEvents().every((event) => event.kind !== "wait");
+      }));
+
     ok("worker_claim_is_not_verified_or_merged", await page.evaluate(() => {
       const view = document.querySelector("#board-view");
       const stage = (pane) => {

@@ -769,7 +769,12 @@ function agentGraphLiveEventFacts(event) {
       agentGraphTaskStateWord(source.taskState)].filter(Boolean).join(" · ");
   }
   if (event.kind === "wait") {
-    return [source.run, source.workerId].filter(Boolean).join(" · ");
+    /* 사유의 낱말은 코디네이터 데스크가 쓰는 그 표에서 온다 — 한 화면이 같은
+     * 기다림을 두 낱말로 부르지 않도록. 줄이 사유를 말하지 않으면 「대기」라는
+     * 종류만 남고, 그것은 이 줄이 답해야 할 질문에 답하지 않는다. */
+    const health = DESK_HEALTH.find((one) => one.id === source.cause);
+    return [source.run, source.workerId, health ? t(health.key, health.word) : source.cause]
+      .filter(Boolean).join(" · ");
   }
   return [source.run, source.taskId, source.dispatchId,
     agentGraphLiveStageWord(source.stage)].filter(Boolean).join(" · ");
