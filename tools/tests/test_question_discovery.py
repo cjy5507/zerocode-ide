@@ -39,7 +39,9 @@ seed = load("question_discovery_seed", REPO / "tools" / "question-discovery" / "
 def row_line(i: int, group: str, label: bool, answers: dict | None = None, outcome: str = "answered", at: int | None = None) -> str:
     return json.dumps({"row": f"notify:{i}", "at": at if at is not None else 1_000 + i, "seq": i, "group": group, "label": label,
                        "shippedPredicts": label if answers else None,
-                       "baseline": {"waitingPanes": i % 3, "patchBytes": 10 * i}, "outcome": outcome, "answers": answers or {}})
+                       "baseline": {"waitingPanes": i % 3, "patchBytes": 10 * i}, "outcome": outcome, "answers": answers or {},
+                       "requests": 0 if outcome == "unasked" else 1, "retries": 0,
+                       "costUsd": None if outcome == "unasked" else 0.001})
 
 
 class FakeAsker:
@@ -157,8 +159,109 @@ class HeldOutSealing(unittest.TestCase):
             with self.assertRaises(loop.AlreadyJudged):
                 again.run()
 
+    def test_a_new_object_cannot_judge_over_an_existing_freeze(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            first = self.search(tmp, sample(), informative, [], rounds=0)
+            first.run()
+            frozen = (tmp / "freeze.json").read_bytes()
+            result = (tmp / "result.json").read_bytes()
+            self.assertEqual(loop.read_result(tmp)["evaluationId"], json.loads(result)["evaluationId"])
+            again = self.search(tmp, sample(), informative, [], rounds=0)
+            again.dev = first.dev
+            again.held = loop.HeldOut([loop.Row(id=row.id, at=row.at, seq=row.seq, group=row.group,
+                                                label=label, baseline=row.baseline, duplicate=row.duplicate,
+                                                shipped_predicts=row.shipped_predicts, features=row.features)
+                                       for row, label in zip(first.held.rows, first.held.labels())])
+            again.questions = first.questions
+            again.shipped_ids = first.shipped_ids
+            with self.assertRaises(loop.AlreadyJudged):
+                again.judge()
+            self.assertEqual((tmp / "freeze.json").read_bytes(), frozen)
+            self.assertEqual((tmp / "result.json").read_bytes(), result)
+
+    def test_completed_result_replay_rejects_changed_result(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            self.search(tmp, sample(), informative, [], rounds=0).run()
+            result = tmp / "result.json"
+            result.write_text(result.read_text() + " ")
+            with self.assertRaisesRegex(RuntimeError, "result changed"):
+                loop.read_result(tmp)
+
 
 class RoundRules(unittest.TestCase):
+    def test_a_patch_cohort_with_inverted_session_and_patch_order_is_not_paid(self):
+        with tempfile.TemporaryDirectory() as raw:
+            # A begins at 09:00 but patches at 12:00; B begins at 10:00
+            # and patches at 10:05. Session creation order is reversed.
+            a = loop.Row("patch_review:a", 9 * 3600, 0, "a", True, {})
+            b = loop.Row("patch_review:b", 10 * 3600, 0, "b", False, {})
+            self.assertEqual([row.id for row in loop.ordered([a, b])], [a.id, b.id])
+            actual_patch_at = {a.id: 12 * 3600, b.id: 10 * 3600 + 5 * 60}
+            self.assertEqual(sorted(actual_patch_at, key=actual_patch_at.get), [b.id, a.id])
+            asker = FakeAsker(sample(), informative)
+            search = loop.Search("patch_review", "seed.json", Path(raw), asker, None, None, 300, 0)
+            result = search.run()
+            self.assertEqual(result["verdict"], loop.NOT_EVALUABLE)
+            self.assertFalse(result["manifest"]["split"]["byTime"])
+            self.assertEqual(len(asker.calls), 1)
+
+    def test_a_changed_patch_transcript_refuses_before_paid_ask(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            transcript = tmp / "session.jsonl"
+            transcript.write_text('{"type":"message","value":1}\n')
+            source = tmp / "seed.json"
+            source.write_text(json.dumps({"transcripts": [{"path": str(transcript)}]}))
+            asker = FakeAsker(sample(), informative)
+            search = loop.Search("patch_review", str(source), tmp / "study", asker, None, None, 300, 0)
+            search.enumerate()
+            transcript.write_text('{"type":"message","value":2}\n')
+            with self.assertRaisesRegex(RuntimeError, "source input changed"):
+                search.round_zero()
+            self.assertEqual(len(asker.calls), 1)
+
+    def test_wire_attempts_and_unknown_cost_survive_reservation_replacement(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            asker = FakeAsker(sample(), informative)
+            search = loop.Search("notify", "seed.json", tmp, asker, None, None, 1, 0)
+            cache = tmp / "cache-test.jsonl"
+            cache.write_text(json.dumps({"row": "notify:0", "reserved": True}) + "\n" +
+                             json.dumps({"row": "notify:0", "outcome": "timeout", "requests": 1,
+                                         "retries": 0, "costUsd": None, "costUnknown": True}) + "\n")
+            self.assertEqual(search._reservations(), (1, 0.0, 1))
+            cache.write_text(json.dumps({"row": "notify:0", "outcome": "answered", "requests": 1,
+                                         "costUsd": 0.001, "budgetExceeded": True}) + "\n")
+            self.assertEqual(search._reservations(), (1, 0.001, 1))
+            cache.write_text(json.dumps({"row": "notify:0", "outcome": "answered", "costUsd": 0.001}) + "\n")
+            self.assertEqual(search._reservations(), (1, 0.001, 1), "legacy rows lack a wire receipt")
+
+    def test_a_partly_capped_batch_is_not_judged_or_resent_on_restart(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            asker = FakeAsker(sample(), informative)
+            search = loop.Search("notify", "seed.json", tmp, asker, None, None, 40, 0)
+            search.enumerate()
+
+            def partly_capped(spec, out, states):
+                asker(spec, out, states)
+                lines = [json.loads(line) for line in out.read_text().splitlines()]
+                lines[1].update(outcome="capped", requests=None, costUsd=None)
+                out.write_text("\n".join(json.dumps(line) for line in lines) + "\n")
+                return {}
+
+            search.asker = partly_capped
+            with self.assertRaisesRegex(RuntimeError, "reserved request has no saved response"):
+                search.round_zero()
+            paid = len(asker.calls)
+            again = loop.Search("notify", "seed.json", tmp, asker, None, None, 40, 0)
+            again.enumerate()
+            with self.assertRaisesRegex(RuntimeError, "reserved request has no saved response"):
+                again.round_zero()
+            self.assertEqual(len(asker.calls), paid)
+
     def test_a_revise_is_kept_only_when_dev_error_drops(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)

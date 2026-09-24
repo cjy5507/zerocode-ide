@@ -115,9 +115,10 @@ ASKER_ENV_SPEND = "ZEROCODE_QUESTION_DISCOVERY_SPEND_CAP_USD"
 # The answer word the asking stage writes for a row every question of which
 # came back readable.
 ANSWERED = "answered"
+CAPPED = "capped"
 SHIPPED = "shipped"
 NOT_EVALUABLE = "not_evaluable"
-ASKER_SCHEMA_VERSION = 3
+ASKER_SCHEMA_VERSION = 4
 
 # What a seat's label means, said to the proposer; and the seat's label
 # writer as the manifest names it (the shipped function, not a copy).
@@ -567,6 +568,43 @@ def identity_of(spec: dict, model: str) -> str:
     return hashlib.sha256(json.dumps({"spec": keyed, "model": model}, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
+def source_inputs(source: str, seat: str) -> list[dict]:
+    """Pin the seed and every transcript it names, including bytes and size."""
+    path = Path(source)
+    if not path.is_file():
+        return [{"path": source, "sha256": hashlib.sha256(source.encode()).hexdigest(), "bytes": None}]
+    paths = [path]
+    if seat == "patch_review":
+        seed = json.loads(path.read_bytes())
+        paths += [Path(entry["path"]) for entry in seed.get("transcripts", [])]
+    found = []
+    for one in paths:
+        raw = one.read_bytes()
+        found.append({"path": str(one), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)})
+    return found
+
+
+def read_result(workdir: Path) -> dict:
+    """Replay a completed evaluation without opening its held-out labels."""
+    freeze = json.loads((workdir / "freeze.json").read_text(encoding="utf-8"))
+    if not freeze.get("finalEvaluated") or not freeze.get("resultSha256"):
+        raise RuntimeError("evaluation has no completed, verified result")
+    if source_inputs(freeze["source"], freeze["seat"]) != freeze["sourceInputs"]:
+        raise RuntimeError("source input changed; completed result cannot be replayed")
+    candidate = {key: value for key, value in freeze.items() if key not in ("evaluationId", "resultSha256")}
+    candidate["finalEvaluated"] = False
+    identity = hashlib.sha256(json.dumps(candidate, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+    if identity != freeze["evaluationId"]:
+        raise RuntimeError("candidate changed; completed evaluation identity does not match")
+    result_bytes = (workdir / "result.json").read_bytes()
+    if hashlib.sha256(result_bytes).hexdigest() != freeze["resultSha256"]:
+        raise RuntimeError("result changed; completed evaluation identity does not match")
+    result = json.loads(result_bytes)
+    if result.get("evaluationId") != freeze["evaluationId"] or result.get("questions") != freeze["questions"]:
+        raise RuntimeError("candidate changed; completed evaluation identity does not match")
+    return result
+
+
 def read_lines(path: Path) -> tuple[list[dict], dict]:
     """A rows file as raw records: the rows, then the summary."""
     rows, summary = [], {}
@@ -609,6 +647,11 @@ class Search:
         self.summaries: list[dict] = []
         self.proposer_tokens: list[int] = []
         self.workdir.mkdir(parents=True, exist_ok=True)
+        self.inputs = source_inputs(source, seat)
+
+    def _check_inputs(self) -> None:
+        if source_inputs(self.source, self.seat) != self.inputs:
+            raise RuntimeError("source input changed; start a new study before paying or judging")
 
     def _reservations(self) -> tuple[int, float, int]:
         """Count every row claimed for a wire call, including an uncertain
@@ -618,9 +661,9 @@ class Search:
             rows, _ = read_lines(cache)
             by_id = {row["row"]: row for row in rows}
             for row in by_id.values():
-                if row.get("reserved") or row.get("outcome") not in (None, "unasked"):
-                    claimed += 1
-                    if row.get("reserved"):
+                if row.get("reserved") or row.get("outcome") not in (None, "unasked", CAPPED):
+                    claimed += int(row.get("requests") if row.get("requests") is not None else 1)
+                    if row.get("reserved") or row.get("requests") is None or row.get("costUnknown") or row.get("budgetExceeded") or row.get("costUsd") is None:
                         uncertain += 1
                     spent += float(row.get("costUsd") or 0.0)
         return claimed, spent, uncertain
@@ -633,7 +676,9 @@ class Search:
         rest go to the asking stage, and the round's rows file is composed
         from both. A round that names no rows (the enumeration) is cached
         whole."""
-        spec = {"seat": self.seat, "source": self.source, "sample": self.sample, "rows": rows, "questions": questions}
+        self._check_inputs()
+        spec = {"seat": self.seat, "source": self.source, "sourceInputs": self.inputs,
+                "sample": self.sample, "rows": rows, "questions": questions}
         identity = identity_of(spec, self.model)
         round_file = self.workdir / f"round-{number}.json"
         out = self.workdir / f"rows-{number}.jsonl"
@@ -665,11 +710,13 @@ class Search:
             summary = dict(written, **summary)
             with cache.open("a", encoding="utf-8") as held:
                 for row in got:
-                    held.write(json.dumps(row, ensure_ascii=False) + "\n")
+                    if row.get("outcome") != CAPPED:
+                        held.write(json.dumps(row, ensure_ascii=False) + "\n")
                 if rows is None:
                     held.write(json.dumps({"summary": written}, ensure_ascii=False) + "\n")
             for row in got:
-                by_id[row["row"]] = row
+                if row.get("outcome") != CAPPED:
+                    by_id[row["row"]] = row
         else:
             summary = dict(known_summary, asked=0, answered=0, inputTokens=0, costUsd=0.0)
         composed = [by_id[rid] for rid in rows if rid in by_id and not by_id[rid].get("reserved")] if rows is not None else list(by_id.values())
@@ -701,6 +748,7 @@ class Search:
             "seat": self.seat,
             "source": self.source,
             "sourceSha256": hashlib.sha256(Path(self.source).read_bytes() if Path(self.source).is_file() else self.source.encode()).hexdigest(),
+            "sourceInputs": self.inputs,
             "label": LABELS.get(self.seat, {}),
             "model": self.model,
             "askerSchemaVersion": ASKER_SCHEMA_VERSION,
@@ -725,9 +773,10 @@ class Search:
                 "transcriptsRead": summary.get("transcriptsRead"),
                 "transcriptsSkipped": summary.get("transcriptsSkipped"),
             },
-            "split": {"devShare": DEV_SHARE, "byTime": True, "cutAtBundle": True, "purgeBundlesSeenInDev": True, "folds": FOLDS, "fingerprint": split_fingerprint(dev, held)},
+            "split": {"devShare": DEV_SHARE, "byTime": self.seat != "patch_review", "patchTimeUnrecovered": self.seat == "patch_review",
+                      "cutAtBundle": True, "purgeBundlesSeenInDev": True, "folds": FOLDS, "fingerprint": split_fingerprint(dev, held)},
             "bootstrap": {"resamples": BOOTSTRAP, "seed": BOOTSTRAP_SEED},
-            "judgeable": judgeable,
+            "judgeable": judgeable and self.seat != "patch_review",
             "finalEvaluated": False,
         }
         path = self.workdir / "manifest.json"
@@ -922,15 +971,25 @@ class Search:
         assert self.held is not None
         if self.held.unsealed:
             raise AlreadyJudged("the held-out set was judged once; the candidate is frozen")
+        self._check_inputs()
         names = feature_names(self.questions, self.dev)
         held = self.held.rows
         chosen = cross_validate(self.dev, names)
         ridge = chosen["ridge"]
-        frozen = {"seat": self.seat, "questions": self.questions, "features": names, "ridge": ridge, "rounds": len(self.history) - 1, "model": self.model,
+        frozen = {"seat": self.seat, "source": self.source, "sourceInputs": self.inputs,
+                  "questions": self.questions, "features": names, "ridge": ridge, "rounds": len(self.history) - 1, "model": self.model,
                   "proposerModel": self.proposer_model, "bootstrapSeed": BOOTSTRAP_SEED,
                   "split": split_fingerprint(self.dev, held), "finalEvaluated": False}
+        frozen["evaluationId"] = hashlib.sha256(json.dumps(frozen, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         freeze = self.workdir / "freeze.json"
-        freeze.write_text(json.dumps(frozen, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        try:
+            handle = os.open(freeze, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError as error:
+            raise AlreadyJudged(f"{freeze} already seals this work directory") from error
+        with os.fdopen(handle, "w", encoding="utf-8") as sealed:
+            sealed.write(json.dumps(frozen, indent=1, ensure_ascii=False) + "\n")
+            sealed.flush()
+            os.fsync(sealed.fileno())
         labels = self.held.unseal()
         dev_labels = [row.label for row in self.dev]
         positives = sum(1 for label in labels if label)
@@ -996,15 +1055,20 @@ class Search:
             "proposerTokens": sum(self.proposer_tokens),
             "summaries": self.summaries,
             "freeze": frozen["split"],
+            "evaluationId": frozen["evaluationId"],
         }
+        result_bytes = (json.dumps(result, indent=1, ensure_ascii=False) + "\n").encode("utf-8")
+        (self.workdir / "result.json").write_bytes(result_bytes)
+        frozen["resultSha256"] = hashlib.sha256(result_bytes).hexdigest()
         frozen["finalEvaluated"] = True
-        freeze.write_text(json.dumps(frozen, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        complete = freeze.with_suffix(".complete")
+        complete.write_text(json.dumps(frozen, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
+        os.replace(complete, freeze)
         manifest = self.workdir / "manifest.json"
         if manifest.is_file():
             written = json.loads(manifest.read_text(encoding="utf-8"))
             written["finalEvaluated"] = True
             manifest.write_text(json.dumps(written, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-        (self.workdir / "result.json").write_text(json.dumps(result, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         return result
 
 

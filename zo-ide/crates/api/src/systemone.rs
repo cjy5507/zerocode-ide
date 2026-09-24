@@ -562,6 +562,22 @@ impl SystemOneClient {
         deadline: Duration,
         hedge: Option<Duration>,
     ) -> SystemOneCall {
+        self.decide_body_with_retries(body, deadline, hedge, SYSTEMONE_MAX_RETRIES).await
+    }
+
+    /// The research harness reserves exactly one wire attempt before sending.
+    /// A 429 or 529 is returned to it without an unreserved resend.
+    pub async fn decide_body_once(&self, body: Vec<u8>, deadline: Duration) -> SystemOneCall {
+        self.decide_body_with_retries(body, deadline, None, 0).await
+    }
+
+    async fn decide_body_with_retries(
+        &self,
+        body: Vec<u8>,
+        deadline: Duration,
+        hedge: Option<Duration>,
+        max_retries: u32,
+    ) -> SystemOneCall {
         let opened = Instant::now();
         // Shared, because a loser is dropped without being read: a copy that
         // is thrown away has still spent what it sent, and the count of what
@@ -574,7 +590,7 @@ impl SystemOneClient {
             requests: requests.load(Ordering::Relaxed),
             hedge: ran,
         };
-        let first = self.attempts(&body, deadline, opened, &requests);
+        let first = self.attempts(&body, deadline, opened, &requests, max_retries);
         tokio::pin!(first);
         let Some(delay) = hedge else {
             return done(first.await, None);
@@ -589,7 +605,7 @@ impl SystemOneClient {
         } {
             return done(run, None);
         }
-        let second = self.attempts(&body, deadline, opened, &requests);
+        let second = self.attempts(&body, deadline, opened, &requests, max_retries);
         tokio::pin!(second);
         // Whichever answers first is the call's answer. The loser is then
         // read once without waiting: already finished, its latency is worth a
@@ -623,6 +639,7 @@ impl SystemOneClient {
         deadline: Duration,
         opened: Instant,
         requests: &AtomicU32,
+        max_retries: u32,
     ) -> Attempted {
         let began = Instant::now();
         let finish = |outcome, retries| Attempted { outcome, retries, elapsed: began.elapsed() };
@@ -639,7 +656,7 @@ impl SystemOneClient {
             };
             let backoff = SYSTEMONE_RETRY_BASE_DELAY.saturating_mul(2u32.saturating_pow(retries));
             if !failure.retryable()
-                || retries >= SYSTEMONE_MAX_RETRIES
+                || retries >= max_retries
                 || opened.elapsed() + backoff >= deadline
             {
                 return finish(Err(failure), retries);
@@ -999,6 +1016,24 @@ mod tests {
         assert_eq!(call.requests, 2, "a re-send is a request that left");
         assert_eq!(mock.seen().len(), 2);
         assert!(call.elapsed >= SYSTEMONE_RETRY_BASE_DELAY, "the retry waited: {:?}", call.elapsed);
+    }
+
+    #[tokio::test]
+    async fn a_reserved_single_attempt_never_retries_and_counts_a_lost_response() {
+        for (status, failure) in [(429, SystemOneFailure::RateLimited), (529, SystemOneFailure::Overloaded)] {
+            let mock = MockSystemOne::serving(vec![Reply::now(status, "{}"), Reply::now(200, contract_answer())]).await;
+            let call = SystemOneClient::new(&mock.base_url, "test-key")
+                .decide_body_once(b"{}".to_vec(), UNHURRIED)
+                .await;
+            assert_eq!(call.outcome, Err(failure));
+            assert_eq!((call.requests, call.retries, mock.seen().len()), (1, 0, 1));
+        }
+        let mock = MockSystemOne::serving(vec![slow(Duration::from_millis(200))]).await;
+        let call = SystemOneClient::new(&mock.base_url, "test-key")
+            .decide_body_once(b"{}".to_vec(), Duration::from_millis(50))
+            .await;
+        assert_eq!(call.outcome, Err(SystemOneFailure::Timeout));
+        assert_eq!((call.requests, call.retries, mock.seen().len()), (1, 0, 1));
     }
 
     #[tokio::test]

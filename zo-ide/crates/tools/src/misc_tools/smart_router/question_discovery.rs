@@ -47,8 +47,9 @@ const REQUEST_CAP: usize = 300;
 /// The brief's other line, in dollars, so a runaway round stops on money
 /// as well as on count.
 const SPEND_CAP_USD: f64 = 4.0;
-/// Requests out at once — far under the wire's 1,200 a minute.
-const IN_FLIGHT: usize = 6;
+/// Conservative headroom above UTF-8 body bytes for server-side framing.
+/// If observed usage exceeds this reservation, the study stops for audit.
+const TOKEN_RESERVE_OVERHEAD: u64 = 8_192;
 /// The wall each request waits: the chat probe's, so a slow answer is
 /// measured rather than cut.
 const WALL: Duration = super::probe_exec::PROBE_TIMEOUT;
@@ -331,6 +332,10 @@ struct Asked {
     outcome: String,
     answers: BTreeMap<String, Value>,
     input_tokens: u64,
+    requests: u32,
+    retries: u32,
+    cost_unknown: bool,
+    budget_exceeded: bool,
     elapsed_ms: u64,
     model: Option<String>,
     /// The state as the door cleared it — what the wire saw.
@@ -364,8 +369,13 @@ async fn ask(door: &JevDoor, client: &SystemOneClient, seat: Seat, row: &Row, qu
     let state_sent = keep_state
         .then(|| serde_json::from_slice::<Value>(cleared.bytes()).ok().map(|sent| sent["state"].clone()))
         .flatten();
-    let call = jev_gate::send(client, cleared, WALL, None).await;
-    let mut asked = Asked { elapsed_ms: jev_gate::millis(call.elapsed), state_sent, ..Asked::default() };
+    let call = client.decide_body_once(cleared.into_bytes(), WALL).await;
+    let mut asked = Asked {
+        elapsed_ms: jev_gate::millis(call.elapsed), state_sent,
+        requests: call.requests, retries: call.retries,
+        cost_unknown: call.requests > 0 && call.outcome.is_err(),
+        ..Asked::default()
+    };
     match call.outcome {
         Err(failure) => asked.outcome = failure.ledger_token(),
         Ok(response) => {
@@ -402,6 +412,8 @@ pub(super) struct Summary {
     pub(super) questions: usize,
     pub(super) input_tokens: u64,
     pub(super) cost_usd: f64,
+    pub(super) cost_unknown: usize,
+    pub(super) budget_exceeded: usize,
     pub(super) wall_ms_p50: u64,
     pub(super) wall_ms_p95: u64,
     pub(super) cap: usize,
@@ -414,6 +426,12 @@ pub(super) struct Summary {
 /// labels and outcomes, never a word of the state.
 #[allow(clippy::too_many_lines)]
 pub(super) fn run(round: &Round, door: &JevDoor, client: Option<&SystemOneClient>, cap: usize, out: &Path, states: Option<&Path>) -> Summary {
+    let spend_cap = std::env::var(SPEND_ENV).ok().and_then(|raw| raw.parse::<f64>().ok()).filter(|cap| cap.is_finite() && *cap >= 0.0).unwrap_or(SPEND_CAP_USD).min(SPEND_CAP_USD);
+    run_with_spend(round, door, client, cap, spend_cap, out, states)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_with_spend(round: &Round, door: &JevDoor, client: Option<&SystemOneClient>, cap: usize, spend_cap: f64, out: &Path, states: Option<&Path>) -> Summary {
     let seat = Seat::named(&round.seat).unwrap_or_else(|| panic!("{} is not a seat the search asks about", round.seat));
     let seed: Value =
         serde_json::from_str(&std::fs::read_to_string(&round.source).expect("the source seed reads")).expect("the source seed parses");
@@ -439,28 +457,31 @@ pub(super) fn run(round: &Round, door: &JevDoor, client: Option<&SystemOneClient
 
     let mut asked: Vec<Option<Asked>> = (0..rows.len()).map(|_| None).collect();
     let mut spent = 0.0;
-    let spend_cap = std::env::var(SPEND_ENV).ok().and_then(|raw| raw.parse::<f64>().ok()).filter(|cap| cap.is_finite() && *cap >= 0.0).unwrap_or(SPEND_CAP_USD).min(SPEND_CAP_USD);
+    let mut cost_unknown = 0usize;
+    let mut budget_exceeded = 0usize;
     let mut requests_sent = 0usize;
     if !asks_nothing {
+        assert_ne!(seat, Seat::PatchReview, "patch decision time is unavailable; time-ordered paid evaluation is disabled");
         // A round that asks needs the wire; one that only enumerates never
         // touches it, so a dry run stands without a key.
         let client = client.expect("TYPESAFE_API_KEY in this command's environment");
-        for chunk in (0..rows.len()).collect::<Vec<_>>().chunks(IN_FLIGHT) {
-            let room = cap.saturating_sub(requests_sent);
-            if room == 0 || spent >= spend_cap {
+        for (at, row) in rows.iter().enumerate() {
+            if requests_sent >= cap || cost_unknown > 0 || budget_exceeded > 0 {
                 break;
             }
-            let chunk = &chunk[..chunk.len().min(room)];
-            let answered: Vec<(usize, Asked)> = api::sync_bridge::run_blocking(futures_util::future::join_all(chunk.iter().map(|at| {
-                let row = &rows[*at];
-                let questions = questions_of(&round.questions, &row.shipped).expect("the round's words make questions");
-                async move { (*at, ask(door, client, seat, row, &questions, uses_current_questions, states.is_some()).await) }
-            })));
-            requests_sent += answered.len();
-            for (at, one) in answered {
-                spent += rate.input_cost_usd(one.input_tokens);
-                asked[at] = Some(one);
+            let questions = questions_of(&round.questions, &row.shipped).expect("the round's words make questions");
+            let body = json!({"state": row.state, "model": SYSTEMONE_MODEL, "questions": questions});
+            let reserve_tokens = u64::try_from(body.to_string().len()).unwrap_or(u64::MAX).saturating_add(TOKEN_RESERVE_OVERHEAD);
+            if spent + rate.input_cost_usd(reserve_tokens) > spend_cap {
+                break;
             }
+            let mut one = api::sync_bridge::run_blocking(ask(door, client, seat, row, &questions, uses_current_questions, states.is_some()));
+            requests_sent += usize::try_from(one.requests).unwrap_or(usize::MAX);
+            spent += rate.input_cost_usd(one.input_tokens);
+            one.budget_exceeded = one.input_tokens > reserve_tokens || spent > spend_cap;
+            cost_unknown += usize::from(one.cost_unknown);
+            budget_exceeded += usize::from(one.budget_exceeded);
+            asked[at] = Some(one);
         }
     }
 
@@ -469,7 +490,7 @@ pub(super) fn run(round: &Round, door: &JevDoor, client: Option<&SystemOneClient
     let (mut answered, mut capped, mut input_tokens) = (0usize, 0usize, 0u64);
     let mut walls: Vec<u64> = Vec::new();
     for (row, one) in rows.iter().zip(&asked) {
-        let (outcome, answers, tokens, elapsed, model, predicts) = match one {
+        let (outcome, answers, tokens, elapsed, model, predicts, requests, retries, unknown, overrun) = match one {
             Some(one) => {
                 answered += usize::from(one.outcome == ANSWERED);
                 input_tokens += one.input_tokens;
@@ -477,12 +498,13 @@ pub(super) fn run(round: &Round, door: &JevDoor, client: Option<&SystemOneClient
                 if let (Some(state), true) = (&one.state_sent, states.is_some()) {
                     state_lines.push(json!({"row": row.id, "state": state}).to_string());
                 }
-                (one.outcome.as_str(), json!(one.answers), Some(one.input_tokens), Some(one.elapsed_ms), one.model.clone(), one.shipped_predicts)
+                (one.outcome.as_str(), json!(one.answers), Some(one.input_tokens), Some(one.elapsed_ms), one.model.clone(), one.shipped_predicts,
+                 Some(one.requests), Some(one.retries), one.cost_unknown, one.budget_exceeded)
             }
-            None if asks_nothing => ("unasked", json!({}), None, None, None, None),
+            None if asks_nothing => ("unasked", json!({}), None, None, None, None, None, None, false, false),
             None => {
                 capped += 1;
-                (CAPPED, json!({}), None, None, None, None)
+                (CAPPED, json!({}), None, None, None, None, None, None, false, false)
             }
         };
         lines.push(
@@ -500,7 +522,11 @@ pub(super) fn run(round: &Round, door: &JevDoor, client: Option<&SystemOneClient
                 "answers": answers,
                 "inputTokens": tokens,
                 "elapsedMs": elapsed,
-                "costUsd": tokens.map(|tokens| rate.input_cost_usd(tokens)),
+                "costUsd": tokens.filter(|_| !unknown).map(|tokens| rate.input_cost_usd(tokens)),
+                "costUnknown": unknown,
+                "budgetExceeded": overrun,
+                "requests": requests,
+                "retries": retries,
                 "model": model,
             })
             .to_string(),
@@ -519,6 +545,8 @@ pub(super) fn run(round: &Round, door: &JevDoor, client: Option<&SystemOneClient
         questions: question_count,
         input_tokens,
         cost_usd: spent,
+        cost_unknown,
+        budget_exceeded,
         wall_ms_p50: percentile(&walls, 0.5).unwrap_or(0),
         wall_ms_p95: percentile(&walls, 0.95).unwrap_or(0),
         cap,
@@ -641,7 +669,11 @@ mod tests {
     /// A wire that answers every question a request carries with a Noul of
     /// one half, or the choice's first option, or a score of one.
     fn answering_every_question() -> Mock {
-        Mock::answering(|body| {
+        answering_every_question_with_tokens(300)
+    }
+
+    fn answering_every_question_with_tokens(input_tokens: u64) -> Mock {
+        Mock::answering(move |body| {
             let request: Value = serde_json::from_str(body).unwrap_or(Value::Null);
             let mut answers = serde_json::Map::new();
             for (id, question) in request["questions"].as_object().into_iter().flatten() {
@@ -655,7 +687,7 @@ mod tests {
                 };
                 answers.insert(id.clone(), answer);
             }
-            (200, json!({"model": "jev-test", "answers": answers, "usage": {"input_tokens": 300, "output_tokens": 3}}).to_string())
+            (200, json!({"model": "jev-test", "answers": answers, "usage": {"input_tokens": input_tokens, "output_tokens": 3}}).to_string())
         })
     }
 
@@ -716,6 +748,59 @@ mod tests {
     }
 
     #[test]
+    fn retryable_failures_use_one_reserved_wire_attempt_and_leave_cost_unknown() {
+        for status in [429, 529] {
+            let dir = tempfile::tempdir().expect("a dir");
+            let source = notify_seed(dir.path(), "done");
+            let mock = Mock::serving(status, "{}".to_string());
+            let round = Round { seat: NOTIFY.id.to_string(), source: source.display().to_string(), sample: None, rows: None, questions: three_nouls() };
+            let out = dir.path().join("rows.jsonl");
+            let summary = run(&round, &door(dir.path()), Some(&SystemOneClient::new(&mock.base_url, "k")), 1, &out, None);
+            let (rows, _) = rows_of(&out);
+            assert_eq!(mock.requests().len(), 1, "status {status}: no unreserved retry");
+            assert_eq!((summary.asked, summary.cost_unknown), (1, 1));
+            assert_eq!((rows[0]["requests"].as_u64(), rows[0]["retries"].as_u64()), (Some(1), Some(0)));
+            assert_eq!(rows[0]["costUsd"], Value::Null);
+            assert_eq!(rows[0]["costUnknown"], true);
+            assert_eq!(rows[1]["outcome"], CAPPED);
+        }
+    }
+
+    #[test]
+    fn a_second_batch_row_is_not_sent_when_its_spend_reservation_would_exceed_the_balance() {
+        let dir = tempfile::tempdir().expect("a dir");
+        let source = notify_seed(dir.path(), "done");
+        let mock = answering_every_question_with_tokens(8_000);
+        let round = Round { seat: NOTIFY.id.to_string(), source: source.display().to_string(), sample: None, rows: None, questions: three_nouls() };
+        let out = dir.path().join("rows.jsonl");
+        let rate = api::systemone_rate(SYSTEMONE_MODEL).expect("rate");
+        let balance = rate.input_cost_usd(16_000);
+        let summary = run_with_spend(&round, &door(dir.path()), Some(&SystemOneClient::new(&mock.base_url, "k")), 2, balance, &out, None);
+        let (rows, _) = rows_of(&out);
+        assert_eq!(mock.requests().len(), 1);
+        assert_eq!((summary.asked, summary.capped), (1, 1));
+        assert_eq!(summary.budget_exceeded, 0);
+        assert_eq!(rows[1]["outcome"], CAPPED);
+    }
+
+    #[test]
+    fn server_usage_above_the_reservation_stops_for_reconciliation() {
+        let dir = tempfile::tempdir().expect("a dir");
+        let source = notify_seed(dir.path(), "done");
+        let mock = answering_every_question_with_tokens(20_000);
+        let round = Round { seat: NOTIFY.id.to_string(), source: source.display().to_string(), sample: None, rows: None, questions: three_nouls() };
+        let out = dir.path().join("rows.jsonl");
+        let rate = api::systemone_rate(SYSTEMONE_MODEL).expect("rate");
+        let balance = rate.input_cost_usd(18_000);
+        let summary = run_with_spend(&round, &door(dir.path()), Some(&SystemOneClient::new(&mock.base_url, "k")), 2, balance, &out, None);
+        let (rows, _) = rows_of(&out);
+        assert_eq!(mock.requests().len(), 1);
+        assert_eq!((summary.asked, summary.budget_exceeded), (1, 1));
+        assert_eq!(rows[0]["budgetExceeded"], true);
+        assert_eq!(rows[1]["outcome"], CAPPED);
+    }
+
+    #[test]
     fn an_empty_round_asks_nothing_and_writes_every_gradable_row_with_its_label_and_baseline() {
         let dir = tempfile::tempdir().expect("a dir");
         let source = notify_seed(dir.path(), "done");
@@ -770,32 +855,28 @@ mod tests {
     }
 
     #[test]
-    fn the_patch_seat_asks_its_own_questions_through_its_own_row_and_is_graded_by_hindsight() {
+    fn patch_rows_are_enumerable_but_paid_time_ordered_evaluation_is_refused() {
         let dir = tempfile::tempdir().expect("a dir");
         let task = "rename the flag to new ".repeat(400);
         assert!(task.chars().count() > PATCH_REVIEW_TASK_CHAR_CAP);
         let source = patch_seed(dir.path(), &task);
         let mock = answering_every_question();
-        let round = Round { seat: PATCH_REVIEW.id.to_string(), source: source.display().to_string(), sample: None, rows: None, questions: SHIPPED.into() };
+        let round = Round { seat: PATCH_REVIEW.id.to_string(), source: source.display().to_string(), sample: None, rows: None, questions: json!({}) };
         let out = dir.path().join("rows.jsonl");
         let summary = run(&round, &door(dir.path()), Some(&SystemOneClient::new(&mock.base_url, "k")), REQUEST_CAP, &out, None);
-        let requests = mock.requests();
-        assert_eq!(requests.len(), 1);
-        let body: Value = serde_json::from_str(&requests[0]).expect("a body");
-        let asked: Vec<&String> = body["questions"].as_object().expect("questions").keys().collect();
-        let shipped: Vec<&str> = runtime::patch_review::REVIEW_QUESTIONS.iter().map(|question| question.id).collect();
-        let mut expected: Vec<&str> = shipped.clone();
-        expected.sort_unstable();
-        assert_eq!(asked, expected, "\"shipped\" asks the seat's own four questions");
-        assert!(body["state"]["task"].as_str().map_or(0, |task| task.chars().count()) <= PATCH_REVIEW_TASK_CHAR_CAP, "the seat's row cut the task");
+        assert!(mock.requests().is_empty());
         let (rows, _) = rows_of(&out);
         assert_eq!(rows.len(), 1);
         assert_eq!((rows[0]["label"].as_bool(), rows[0]["labelWord"].as_str()), (Some(false), Some("receipt")), "a green check after the edit is a patch that stood");
         assert_eq!(rows[0]["baseline"]["linesAdded"], 1);
-        assert_eq!(rows[0]["answers"].as_object().map_or(0, serde_json::Map::len), 4);
-        assert_eq!(rows[0]["shippedPredicts"], true, "four answers of one half are no permit: the seat itself predicts regret");
+        assert_eq!(rows[0]["outcome"], "unasked");
         assert_eq!(rows[0]["group"], "0", "a transcript's patches are one bundle");
-        assert_eq!((summary.transcripts_read, summary.questions), (1, 4));
+        assert_eq!((summary.transcripts_read, summary.questions), (1, 0));
+        let paid = Round { questions: SHIPPED.into(), ..round };
+        let stopped = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run(&paid, &door(dir.path()), Some(&SystemOneClient::new(&mock.base_url, "k")), REQUEST_CAP, &out, None)
+        }));
+        assert!(stopped.is_err() && mock.requests().is_empty());
     }
 
     #[test]
