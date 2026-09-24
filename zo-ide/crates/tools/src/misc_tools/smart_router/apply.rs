@@ -553,6 +553,16 @@ fn member_route_role(agent: &Value) -> RouteRole {
     infer_route_role(subagent_type, description, prompt)
 }
 
+/// Whether a spawn's task is read by anyone before its model is routed: the
+/// chat probe under the person's probing classifier word, or the routing
+/// seat whenever its mode asks and automatic routing runs at all (t-4727,
+/// t-6346) — the judgment no longer waits on the probe's word.
+fn spawn_is_read(context: &SmartRouteContext, probes: bool) -> bool {
+    probes
+        || (context.settings.auto_classifier != RouteAutoClassifierMode::Off
+            && super::decision_shadow::asks_here())
+}
+
 pub(crate) fn smart_parent_model_for_agent(
     parent_model: Option<&str>,
     input: &AgentInput,
@@ -570,19 +580,22 @@ pub(crate) fn smart_parent_model_for_agent_with_auto_type(
     }
     let parent_model = parent_model.map(str::trim).filter(|model| !model.is_empty())?;
     let context = SmartRouteContext::load(parent_model)?;
-    let probe = (context.settings.auto_classifier == RouteAutoClassifierMode::Probed)
+    let probes = context.settings.auto_classifier == RouteAutoClassifierMode::Probed;
+    let probe = spawn_is_read(&context, probes)
         .then(|| {
             super::probe_exec::route_probe_assessment(
                 &context.inventory,
                 parent_model,
                 &input.description,
                 &input.prompt,
+                runtime::RoutingFacts { retry_of_failed_attempt: input.prior_failures > 0 },
                 // The probe is spent deciding THIS spawn's model, so its tax
                 // is billed to the turn that asked for the spawn.
                 &crate::misc_tools::agent_tools::served_turn_attempt(
                     input.parent_session_id.as_deref(),
                 )
                 .unwrap_or_default(),
+                super::probe_exec::Admitted::spawn(probes),
             )
         })
         .flatten();
@@ -651,8 +664,9 @@ pub(crate) fn apply_smart_models_to_spawn_input_with_auto_types(
     // probe of wall-clock, memoized per task fingerprint), instead of one
     // blocking probe per member inside the routing loop below. Members that
     // carry an explicit model never probe — they never route.
+    let probes = context.settings.auto_classifier == RouteAutoClassifierMode::Probed;
     let member_probes: Vec<Option<runtime::ProbeAssessment>> =
-        if context.settings.auto_classifier == RouteAutoClassifierMode::Probed {
+        if spawn_is_read(&context, probes) {
             // Single borrowed pass: members carrying an explicit model never
             // route, so they contribute an empty task (skipped by the probe
             // executor) instead of paying a probe.
@@ -684,6 +698,7 @@ pub(crate) fn apply_smart_models_to_spawn_input_with_auto_types(
                     input.parent_session_id.as_deref(),
                 )
                 .unwrap_or_default(),
+                super::probe_exec::Admitted::spawn(probes),
             )
         } else {
             vec![None; input.agents.len()]

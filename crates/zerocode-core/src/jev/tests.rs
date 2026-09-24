@@ -845,6 +845,28 @@ fn the_skill_seat_rises_on_its_own_lines() {
     }
 }
 
+/// The routing seat sends the head of the task under its cap, by the
+/// pointer the catalog's own state key makes, and the facts code wrote whole
+/// (t-6346) — the door cuts a string only where a pointer names it.
+#[test]
+fn the_routing_seat_sends_the_task_under_its_cap_and_its_facts_whole() {
+    use crate::jev::questions::{ROUTING_STATE_FACTS, ROUTING_STATE_TASK};
+    let sent: Vec<(&str, Cap)> = ROUTING
+        .sends
+        .iter()
+        .map(|sent| (sent.at, sent.cap))
+        .collect();
+    let task = format!("/state/{ROUTING_STATE_TASK}");
+    let facts = format!("/state/{ROUTING_STATE_FACTS}");
+    assert_eq!(
+        sent,
+        vec![
+            (task.as_str(), Cap::Chars(ROUTING_TASK_CHAR_CAP)),
+            (facts.as_str(), Cap::Uncut),
+        ]
+    );
+}
+
 /// The step governor's seat sends the same head of a turn the routing seat
 /// sends, rises on its own progress marks, and offers every word — a seat
 /// whose answer moves a request field is one a person can switch on and one
@@ -852,7 +874,22 @@ fn the_skill_seat_rises_on_its_own_lines() {
 #[test]
 fn the_step_effort_seat_reads_the_turn_like_routing_and_rises_on_its_own_marks() {
     assert_eq!(jev_use("step_effort"), Some(&ZO_STEP_EFFORT));
-    assert_eq!(ZO_STEP_EFFORT.sends, ROUTING.sends);
+    // The same head of the turn under the same cap — as the probe rubric's
+    // plain string, where the routing seat's second version sends it inside
+    // an object beside its facts (t-6346).
+    assert_eq!(
+        ZO_STEP_EFFORT.sends,
+        &[Sent {
+            at: "/state",
+            cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
+        }]
+    );
+    assert!(
+        ROUTING
+            .sends
+            .iter()
+            .any(|sent| sent.cap == Cap::Chars(ROUTING_TASK_CHAR_CAP))
+    );
     const { assert!(ZO_STEP_EFFORT.promotes) };
     assert_eq!(
         ZO_STEP_EFFORT.answer_floor_permille,

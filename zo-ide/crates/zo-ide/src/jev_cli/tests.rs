@@ -357,17 +357,20 @@ fn the_text_answer_names_every_seat_once() {
 }
 
 /// The routing seat with one active row and its control row: the judgment
-/// named what the probe named on every axis.
+/// named what the probe named on every axis. Both rows are the rubric that
+/// asks now — the judge windows the seat by it (t-6346).
 fn routing_ledger_with_a_control_row(home: &std::path::Path) {
+    use zerocode_core::jev::questions::ROUTING_RUBRIC_VERSION;
     use zerocode_core::jev::summary::CONTROL;
     let axis = |choice: &str| serde_json::json!({"choice": choice, "probabilities": {}, "confidence": 0.9});
     let jev = serde_json::json!({"complexity": axis("large"), "risk": axis("low"), "intent": axis("analysis")});
     let active = serde_json::json!({
-        "at": 1, "task": "0000000000000005", "rubricVersion": 1, "outcome": "answered", "elapsedMs": 400,
-        "retries": 0, "cached": false, "requests": 1, "routeUse": "applied", "probe": "not_run", "jev": jev,
+        "at": 1, "task": "0000000000000005", "rubricVersion": ROUTING_RUBRIC_VERSION, "outcome": "answered",
+        "elapsedMs": 400, "retries": 0, "cached": false, "requests": 1, "routeUse": "applied", "probe": "not_run",
+        "jev": jev,
     });
     let control = serde_json::json!({
-        "at": 2, "task": "0000000000000005", "rubricVersion": 1, "outcome": CONTROL, "elapsedMs": 0,
+        "at": 2, "task": "0000000000000005", "rubricVersion": ROUTING_RUBRIC_VERSION, "outcome": CONTROL, "elapsedMs": 0,
         "retries": 0, "cached": false, "requests": 0, "routeUse": CONTROL,
         "probe": {"complexity": "large", "risk": "low", "intent": "analysis", "confidence": "high"}, "jev": jev,
     });

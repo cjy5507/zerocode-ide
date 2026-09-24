@@ -94,6 +94,32 @@ impl ProbeUse {
     }
 }
 
+/// What one batch's routing admits (t-6346): whether the chat probe may run
+/// for its tasks, and whether anything reads the verdict. The routing seat's
+/// judgment needs neither to be asked — its own mode decides that — but an
+/// acting seat routes only where something reads what it said.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Admitted {
+    /// The chat probe may run: the turn's gate table admits the task and a
+    /// reader is armed, or the person's classifier word probes a spawn. A
+    /// task it may not run for keeps the keyword tables' verdict wherever the
+    /// judgment does not act.
+    pub(super) probe: bool,
+    /// Something reads the verdict: a spawn's model always does, a turn's is
+    /// read by an armed verify leg or exec contract. With no reader an acting
+    /// seat records instead — a verdict nobody reads is not worth holding
+    /// the first request for.
+    pub(super) read: bool,
+}
+
+impl Admitted {
+    /// A spawn's: its model reads the verdict; the probe runs under the
+    /// person's probing classifier word alone.
+    pub(super) const fn spawn(probe: bool) -> Self {
+        Self { probe, read: true }
+    }
+}
+
 /// What the probe said about one non-empty task — its assessment, or the
 /// failure token of why it said nothing — beside the task's fingerprint. The
 /// routing results are these verdicts with the failures dropped; the decision
@@ -334,16 +360,18 @@ fn probe_model(inventory: &ModelInventory, parent_model: &str) -> String {
     route_model(&request, inventory).resolved_model
 }
 
-/// Run (or recall) the routing probe for one task. Returns `None` on any
+/// Run (or recall) the routing readers for one task. Returns `None` on any
 /// failure — the caller stays on the deterministic classification.
 pub(super) fn route_probe_assessment(
     inventory: &ModelInventory,
     parent_model: &str,
     description: &str,
     prompt: &str,
+    facts: runtime::RoutingFacts,
     attempt: &str,
+    admitted: Admitted,
 ) -> Option<ProbeAssessment> {
-    route_probe_assessment_judged(inventory, parent_model, description, prompt, attempt)
+    route_probe_assessment_judged(inventory, parent_model, description, prompt, facts, attempt, admitted)
         .map(|probed| probed.assessment)
 }
 
@@ -363,14 +391,18 @@ pub(super) fn route_probe_assessment_judged(
     parent_model: &str,
     description: &str,
     prompt: &str,
+    facts: runtime::RoutingFacts,
     attempt: &str,
+    admitted: Admitted,
 ) -> Option<ProbedTask> {
     probe_and_shadow_judged(
         inventory,
         parent_model,
         &[(description, prompt)],
+        &[facts],
         attempt,
         super::decision_shadow::DECISION_SHADOW_DEADLINE,
+        admitted,
     )
     .0
     .first()
@@ -392,13 +424,16 @@ pub(super) fn route_probe_assessments(
     parent_model: &str,
     tasks: &[(&str, &str)],
     attempt: &str,
+    admitted: Admitted,
 ) -> Vec<Option<ProbeAssessment>> {
     probe_and_shadow(
         inventory,
         parent_model,
         tasks,
+        &[],
         attempt,
         super::decision_shadow::DECISION_SHADOW_DEADLINE,
+        admitted,
     )
     .0
 }
@@ -411,10 +446,13 @@ pub(super) fn probe_and_shadow(
     inventory: &ModelInventory,
     parent_model: &str,
     tasks: &[(&str, &str)],
+    facts: &[runtime::RoutingFacts],
     attempt: &str,
     shadow_deadline: Duration,
+    admitted: Admitted,
 ) -> (Vec<Option<ProbeAssessment>>, Option<tokio::task::JoinHandle<()>>) {
-    let (probed, shadow) = probe_and_shadow_judged(inventory, parent_model, tasks, attempt, shadow_deadline);
+    let (probed, shadow) =
+        probe_and_shadow_judged(inventory, parent_model, tasks, facts, attempt, shadow_deadline, admitted);
     (
         probed
             .into_iter()
@@ -425,12 +463,21 @@ pub(super) fn probe_and_shadow(
 }
 
 /// [`probe_and_shadow`] with each verdict's seat kept ([`ProbedTask`]).
+///
+/// Two roads (t-6346). An acting seat whose verdict something reads is asked
+/// first, every unique task at once under its short wall; the chat probe
+/// then runs only for the tasks it abstained or failed on, and only where
+/// `admitted.probe` lets it. Everywhere else the probe routes as its own gate
+/// allows and the judgment records, detached — asked about every task the
+/// batch names, the ones the probe was not asked about included.
 fn probe_and_shadow_judged(
     inventory: &ModelInventory,
     parent_model: &str,
     tasks: &[(&str, &str)],
+    facts: &[runtime::RoutingFacts],
     attempt: &str,
     shadow_deadline: Duration,
+    admitted: Admitted,
 ) -> (Vec<Option<ProbedTask>>, Option<tokio::task::JoinHandle<()>>) {
     // The ablation arm bails out HERE rather than discarding the verdict
     // further down, so the control arm pays none of the probe's latency or
@@ -441,11 +488,17 @@ fn probe_and_shadow_judged(
         return (vec![None; tasks.len()], None);
     }
     let active_deadline = shadow_deadline.min(super::decision_shadow::DECISION_ACTIVE_DEADLINE);
-    if let Some(active) = super::decision_shadow::active_assessments(tasks, attempt, active_deadline) {
+    let active = admitted
+        .read
+        .then(|| super::decision_shadow::active_assessments(tasks, facts, attempt, active_deadline))
+        .flatten();
+    if let Some(active) = active {
+        // An abstained or failed slot asks the probe in the judgment's place,
+        // where the probe may run; any other slot is left empty for it.
         let fallback_tasks: Vec<(&str, &str)> = tasks
             .iter()
             .zip(&active.assessments)
-            .map(|(task, assessment)| if assessment.is_some() { ("", "") } else { *task })
+            .map(|(task, assessment)| if assessment.is_some() || !admitted.probe { ("", "") } else { *task })
             .collect();
         let fallback = probe_slots(inventory, parent_model, &fallback_tasks, attempt, ProbeUse::Routing);
         let results = active
@@ -468,8 +521,10 @@ fn probe_and_shadow_judged(
             .map(|batch| super::decision_shadow::fire_control(batch, inventory, parent_model));
         return (results, control);
     }
-    let slots = probe_slots(inventory, parent_model, tasks, attempt, ProbeUse::Routing);
-    let shadow = super::decision_shadow::fire(tasks, &slots, attempt, shadow_deadline);
+    let probed_tasks: Vec<(&str, &str)> =
+        tasks.iter().map(|task| if admitted.probe { *task } else { ("", "") }).collect();
+    let slots = probe_slots(inventory, parent_model, &probed_tasks, attempt, ProbeUse::Routing);
+    let shadow = super::decision_shadow::fire(tasks, facts, &slots, attempt, shadow_deadline);
     let results = slots
         .iter()
         .map(|slot| {
@@ -693,7 +748,15 @@ mod live_path_tests {
         description: &str,
         prompt: &str,
     ) -> Option<super::ProbeAssessment> {
-        super::route_probe_assessment(inventory, parent_model, description, prompt, "")
+        super::route_probe_assessment(
+            inventory,
+            parent_model,
+            description,
+            prompt,
+            runtime::RoutingFacts::default(),
+            "",
+            super::Admitted { probe: true, read: true },
+        )
     }
 
     use std::io::{BufRead, BufReader, Read, Write};
@@ -1046,23 +1109,60 @@ mod live_path_tests {
             judgment_answer_with("large", "high", "design")
         }
 
+        /// The routing seat's second version answering `complexity`, `risk`
+        /// and `intent` in the router's words — the two Scores at the level
+        /// each token names, the intent as the first of the ten that folds to
+        /// it — every answer in the confirm band (the router's `Medium`), so
+        /// what acts is what applied before the bands, and every fact a no.
         fn judgment_answer_with(complexity: &str, risk: &str, intent: &str) -> String {
-            let distribution = |tokens: &[&str], choice: &str| {
-                tokens
+            judgment_answer_at(complexity, risk, intent, CONFIRMING)
+        }
+
+        /// The confidence every axis of [`judgment_answer_with`] carries:
+        /// inside the seat's confirm band.
+        const CONFIRMING: f64 = 0.7;
+
+        fn judgment_answer_at(complexity: &str, risk: &str, intent: &str, confidence: f64) -> String {
+            use zerocode_core::jev::questions::{ROUTING_FACTS, ROUTING_INTENTS, ROUTING_REASONING};
+            let levels = |axis: &runtime::RubricAxis, token: &str| {
+                let at = axis.position(token).expect("a token the axis offers");
+                // Peaked enough that the position rounds to the level it names.
+                let spread: Vec<f64> = (0..axis.tokens.len()).map(|level| if level == at { 0.94 } else { 0.02 }).collect();
+                #[allow(clippy::cast_precision_loss)]
+                let score: f64 = spread.iter().enumerate().map(|(level, share)| level as f64 * share).sum();
+                serde_json::json!({
+                    "type": "score", "score": (score * 100.0).round() / 100.0, "confidence": confidence,
+                    "legend": {"0": "a", "1": "b", "2": "c", "3": "d"},
+                    "probabilities": {"0": spread[0], "1": spread[1], "2": spread[2], "3": spread[3]},
+                })
+            };
+            let options = |words: &[&str], chosen: &str| {
+                #[allow(clippy::cast_precision_loss)]
+                let rest = 0.3 / (words.len() - 1) as f64;
+                words
                     .iter()
-                    .map(|token| ((*token).to_string(), serde_json::json!(if *token == choice { 0.7 } else { 0.1 })))
+                    .map(|word| ((*word).to_string(), serde_json::json!(if *word == chosen { 0.7 } else { rest })))
                     .collect::<serde_json::Map<String, serde_json::Value>>()
             };
+            let intents: Vec<&str> = ROUTING_INTENTS.iter().map(|option| option.option.word).collect();
+            let chosen = ROUTING_INTENTS
+                .iter()
+                .find(|option| option.folds_to == intent)
+                .map(|option| option.option.word)
+                .expect("an intent folds to every router word");
+            let kinds: Vec<&str> = ROUTING_REASONING.iter().map(|kind| kind.word).collect();
+            let mut answers = serde_json::json!({
+                "complexity": levels(&runtime::COMPLEXITY_AXIS, complexity),
+                "risk": levels(&runtime::RISK_AXIS, risk),
+                "intent": {"type": "choice", "choice": chosen, "confidence": 0.8, "probabilities": options(&intents, chosen)},
+                "reasoning": {"type": "choice", "choice": "search", "confidence": 0.8, "probabilities": options(&kinds, "search")},
+            });
+            for fact in &ROUTING_FACTS {
+                answers[fact.id] = serde_json::json!({"type": "noul", "noul": 0.05});
+            }
             serde_json::json!({
                 "model": "jev-latest",
-                "answers": {
-                    "complexity": {"type": "choice", "choice": complexity, "confidence": 0.58,
-                        "probabilities": distribution(runtime::COMPLEXITY_AXIS.tokens, complexity)},
-                    "risk": {"type": "choice", "choice": risk, "confidence": 0.52,
-                        "probabilities": distribution(runtime::RISK_AXIS.tokens, risk)},
-                    "intent": {"type": "choice", "choice": intent, "confidence": 0.8,
-                        "probabilities": distribution(runtime::INTENT_AXIS.tokens, intent)},
-                },
+                "answers": answers,
                 "usage": {"input_tokens": 431, "output_tokens": 0},
             })
             .to_string()
@@ -1190,7 +1290,15 @@ mod live_path_tests {
         /// its end.
         fn funnel(tasks: &[(&str, &str)], deadline: Duration) -> (Vec<Option<ProbeAssessment>>, Duration) {
             let started = Instant::now();
-            let (results, shadow) = probe_and_shadow(&inventory(), "gpt-5.5-codex", tasks, "turn-7@1", deadline);
+            let (results, shadow) = probe_and_shadow(
+                &inventory(),
+                "gpt-5.5-codex",
+                tasks,
+                &[],
+                "turn-7@1",
+                deadline,
+                super::super::Admitted { probe: true, read: true },
+            );
             let returned = started.elapsed();
             if let Some(shadow) = shadow {
                 api::sync_bridge::run_blocking(shadow).expect("the shadow batch ran to its end");
@@ -1238,10 +1346,11 @@ mod live_path_tests {
             let requests = judgment.requests();
             assert_eq!(requests.len(), 1, "one task, one judgment");
             let body: serde_json::Value = serde_json::from_str(&requests[0]).expect("a JSON request");
-            assert_eq!(body["state"], runtime::rubric_task_text("a description", &task));
+            assert_eq!(body["state"]["task"], runtime::rubric_task_whole("a description", &task));
+            assert_eq!(body["state"]["facts"], serde_json::json!({"retry_of_failed_attempt": false}));
             assert_eq!(body["model"], api::SYSTEMONE_MODEL);
             let asked: Vec<&str> = body["questions"].as_object().expect("questions").keys().map(String::as_str).collect();
-            let rubric: Vec<&str> = runtime::decision_questions().keys().map(String::as_str).collect();
+            let rubric: Vec<&str> = runtime::routing_questions().keys().map(String::as_str).collect();
             assert_eq!(asked, rubric);
 
             let rows = env.rows();
@@ -1249,7 +1358,7 @@ mod live_path_tests {
             let row = &rows[0];
             assert_eq!(row.task, format!("{:016x}", task_fingerprint("a description", &task)));
             assert_eq!(row.attempt.as_deref(), Some("turn-7@1"));
-            assert_eq!(row.rubric_version, runtime::DECISION_RUBRIC_VERSION);
+            assert_eq!(row.rubric_version, zerocode_core::jev::questions::ROUTING_RUBRIC_VERSION);
             assert_eq!(row.model.as_deref(), Some("jev-latest"));
             assert!(row.answered() && row.called() && !row.cached, "{row:?}");
             assert_eq!((row.retries, row.input_tokens), (0, Some(431)));
@@ -1261,7 +1370,7 @@ mod live_path_tests {
             assert_eq!(row.probe.token(&runtime::CONFIDENCE_AXIS), Some(RouteConfidence::High.as_label()));
             let jev = row.jev.as_ref().expect("the judgment");
             assert_eq!(jev[runtime::COMPLEXITY_AXIS.name].choice, RouteTaskComplexity::Large.as_label());
-            assert!((jev[runtime::RISK_AXIS.name].probabilities[RouteTaskRisk::High.as_label()] - 0.7).abs() < f64::EPSILON);
+            assert!((jev[runtime::RISK_AXIS.name].probabilities[RouteTaskRisk::High.as_label()] - 0.94).abs() < f64::EPSILON);
             assert!((jev[runtime::INTENT_AXIS.name].confidence - 0.8).abs() < f64::EPSILON);
 
             // The ledger keeps the fingerprint, never the task's words.
@@ -1375,7 +1484,7 @@ mod live_path_tests {
             assert_eq!(requests.len(), 1);
             assert!(!requests[0].contains("SENTINEL"), "a credential reached the wire: {}", requests[0]);
             let body: serde_json::Value = serde_json::from_str(&requests[0]).expect("a JSON request");
-            assert!(body["state"].as_str().is_some_and(|state| state.contains("keep going")));
+            assert!(body["state"]["task"].as_str().is_some_and(|state| state.contains("keep going")));
             let rows = env.rows();
             assert_eq!(rows[0].redacted_lines, Some(2));
             assert_eq!(rows[0].requests, Some(1));
@@ -1490,6 +1599,33 @@ mod live_path_tests {
             assert_eq!(rows[0].probe, ProbeCell::Failed("not_run".to_string()));
         }
 
+        /// An answer sure enough to act alone has the router's `High`: one
+        /// band either way, where a confirming answer could only raise.
+        #[test]
+        fn an_act_band_answer_moves_one_band_either_way() {
+            let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
+            let judgment = judging(judgment_answer_at("trivial", "low", "analysis", 0.9));
+            let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
+            env.set_mode(Some("on"));
+
+            let task = unique("act-band");
+            let (results, _) = funnel(&[("", task.as_str())], UNHURRIED);
+            let assessment = results[0].expect("an acting answer");
+            assert_eq!(assessment.confidence, RouteConfidence::High);
+            let fused = runtime::fuse_probe_assessment(
+                RouteTaskComplexity::Medium,
+                RouteTaskRisk::High,
+                RouteTaskIntent::Other,
+                &assessment,
+            );
+            assert_eq!(fused.complexity, RouteTaskComplexity::Small, "one band down, never two");
+            assert_eq!(fused.risk, RouteTaskRisk::High, "risk only ever rises");
+            assert!(probe.requests().is_empty());
+            assert_eq!(env.rows()[0].band.as_deref(), Some("act"));
+        }
+
+        /// A confirming answer has the router's `Medium`: it raises, and the
+        /// keyword tables stand against anything lower.
         #[test]
         fn actual_use_cannot_lower_deterministic_complexity_or_risk() {
             let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
@@ -1554,7 +1690,7 @@ mod live_path_tests {
             }
             {
                 let mut broken: serde_json::Value = serde_json::from_str(&judgment_answer()).expect("json");
-                broken["answers"]["risk"]["choice"] = serde_json::json!("severe");
+                broken["answers"]["intent"]["choice"] = serde_json::json!("severe");
                 let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
                 let judgment = judging(broken.to_string());
                 let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
@@ -1818,7 +1954,7 @@ mod live_path_tests {
                 let task = unique(&format!("latency-fire-{index}"));
                 let slot = ProbeSlot { fingerprint: task_fingerprint("", &task), verdict: Ok(verdict) };
                 let started = Instant::now();
-                let batch = fire(&[("", task.as_str())], &[Some(slot)], "turn-7@1", WALL);
+                let batch = fire(&[("", task.as_str())], &[], &[Some(slot)], "turn-7@1", WALL);
                 fired.push(started.elapsed());
                 batches.push(batch.expect("a probed task fires a batch"));
             }
@@ -1834,7 +1970,15 @@ mod live_path_tests {
                 let task = unique(&format!("latency-{mode}-{round}"));
                 let before = env.rows().len();
                 let started = Instant::now();
-                let (_, shadow) = probe_and_shadow(&inventory(), "gpt-5.5-codex", &[("", task.as_str())], "turn-7@1", WALL);
+                let (_, shadow) = probe_and_shadow(
+                    &inventory(),
+                    "gpt-5.5-codex",
+                    &[("", task.as_str())],
+                    &[],
+                    "turn-7@1",
+                    WALL,
+                    super::super::Admitted { probe: true, read: true },
+                );
                 let returned = started.elapsed();
                 let written = env.rows().len() - before;
                 if let Some(shadow) = shadow {
@@ -1894,7 +2038,7 @@ mod live_path_tests {
         #[test]
         fn an_answer_that_breaks_the_rubric_is_a_schema_row_that_still_counts_its_tokens() {
             let mut broken: serde_json::Value = serde_json::from_str(&judgment_answer()).expect("json");
-            broken["answers"]["risk"]["choice"] = serde_json::json!("severe");
+            broken["answers"]["intent"]["choice"] = serde_json::json!("severe");
             let probe = MockCodex::sse(responses_sse(PROBE_ANSWER));
             let judgment = judging(broken.to_string());
             let env = ShadowEnv::new(probe.addr, judgment.addr, Some("test-key"));
@@ -1927,10 +2071,10 @@ mod live_path_tests {
             let requests = judgment.requests();
             assert_eq!(requests.len(), 1, "one call");
             let body: serde_json::Value = serde_json::from_str(&requests[0]).expect("a JSON request");
-            assert_eq!(body["state"], runtime::rubric_task_text("", KEY_CHECK_TASK));
+            assert_eq!(body["state"]["task"], runtime::rubric_task_whole("", KEY_CHECK_TASK));
             assert_eq!(body["model"], api::SYSTEMONE_MODEL);
             let asked: Vec<&str> = body["questions"].as_object().expect("questions").keys().map(String::as_str).collect();
-            let rubric: Vec<&str> = runtime::decision_questions().keys().map(String::as_str).collect();
+            let rubric: Vec<&str> = runtime::routing_questions().keys().map(String::as_str).collect();
             assert_eq!(asked, rubric, "the shadow's own questions");
             assert!(env.rows().is_empty(), "a check writes no ledger row");
         }

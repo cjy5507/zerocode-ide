@@ -212,6 +212,13 @@ pub const ROUTE_USE_APPLIED: &str = "applied";
 /// answer that did not clear the seat's floor.
 pub const ROUTE_USE_FALLBACK: &str = "fallback";
 
+/// The word a row's `routeUse` carries when the seat answered, well formed
+/// and in time, and its own confidence put the answer under the abstain line
+/// ([`Band::Abstain`], t-6346): the product asked its own reader instead, as
+/// if the seat had not been asked. Not a failure — the answer is counted as
+/// answered — and not an act.
+pub const ROUTE_USE_ABSTAINED: &str = "abstained";
+
 /// What a person set a use to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JevMode {
@@ -789,6 +796,12 @@ pub const JUDGMENT_MEMO_DEADLINE_MS: u64 = 50;
 /// zo's routing judgment: a task's complexity, risk and intent beside the
 /// chat probe's (docs/design/jev-decision-shadow-20260917.md).
 ///
+/// The second version (t-6346) asks the catalog's words
+/// ([`questions::ROUTING_RUBRIC_VERSION`]) — two Scores, two contrastive
+/// Choices and six facts in one request — about every turn and every spawn
+/// the seat is asked about, whatever the chat probe's own gate says; the
+/// probe is asked only where the answer abstains ([`JevUse::confidence_bands`]).
+///
 /// The `agreed` rule (t-5806): a routing judgment agreed when the turn it
 /// routed STOOD — no quota wall, refusal fallback or overload demotion moved
 /// the wire to another model, and the person did not name one themselves —
@@ -804,10 +817,19 @@ pub const ROUTING: JevUse = JevUse {
     modes: &[JevMode::Off, JevMode::Shadow, JevMode::On, JevMode::Auto],
     recommended: JevMode::Auto,
     repeat: None,
-    sends: &[Sent {
-        at: "/state",
-        cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
-    }],
+    // The second version's state is an object (t-6346): the task's head,
+    // cut here by its own pointer, and the facts code wrote — booleans,
+    // nothing a person typed (`questions::ROUTING_STATE_*`).
+    sends: &[
+        Sent {
+            at: "/state/task",
+            cap: Cap::Chars(ROUTING_TASK_CHAR_CAP),
+        },
+        Sent {
+            at: "/state/facts",
+            cap: Cap::Uncut,
+        },
+    ],
     ledger: "decision-shadow.jsonl",
     promotes: true,
     answer_floor_permille: Some(950),

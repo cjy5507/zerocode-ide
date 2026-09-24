@@ -1,9 +1,11 @@
-//! Why the routing judgment did not run, written down where it can be read
+//! Why the chat probe did not run, written down where it can be read
 //! tomorrow.
 //!
 //! Three gates in [`super::turn`] can send a turn back with the deterministic
-//! verdict before anything reaches the wire, and each already attests its
-//! reason to `telemetry::attest_declined`. That attestation is what
+//! verdict before the probe reaches the wire, and each already attests its
+//! reason to `telemetry::attest_declined`. They are the probe's alone: the
+//! routing seat's judgment is asked about every turn its mode asks about,
+//! whatever this ledger says (t-6346) — its own rows say what it did. That attestation is what
 //! `assess_turn_probed`'s own comment says makes the question answerable —
 //! *"a table showing `not_worth_it` on every turn says the cost gate is the
 //! reason a probe-owned axis never armed, which is not a conclusion the
@@ -87,15 +89,17 @@ impl ProbeGate {
     #[must_use]
     pub const fn means(self) -> &'static str {
         match self {
-            Self::Admitted => "the routing judgment is running",
+            Self::Admitted => "the chat probe may run for this turn",
             Self::NotWorthIt => {
-                "this turn's band is already the one a verdict would choose, so nothing was asked"
+                "this turn's band is already the one a probe verdict would choose, so the probe was \
+                 not asked"
             }
             Self::ClassifierOff => "smart.autoClassifier is off",
             Self::SettingsUnavailable => "the settings file could not be read",
             Self::VerdictUnread => {
                 "nothing this turn would read the verdict: no verify leg is armed, and the \
-                 settings arm no exec implementer for this main model"
+                 settings arm no exec implementer for this main model — the probe was not asked, \
+                 and an acting routing seat records instead"
             }
         }
     }

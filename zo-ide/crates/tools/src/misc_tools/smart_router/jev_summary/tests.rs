@@ -274,7 +274,8 @@ fn a_thin_window_holds_and_says_which_line_it_is_short_of() {
 fn compared(at: i64, jev: [&str; 3], probe: Option<[&str; 3]>) -> Value {
     let axis = |choice: &str| json!({"choice": choice, "probabilities": {}, "confidence": 0.9});
     let mut row = json!({
-        "at": at, "task": format!("{at:016x}"), "rubricVersion": 1, "outcome": "answered",
+        "at": at, "task": format!("{at:016x}"),
+        "rubricVersion": zerocode_core::jev::questions::ROUTING_RUBRIC_VERSION, "outcome": "answered",
         "elapsedMs": 400, "retries": 0, "cached": false, "requests": 1,
         "jev": {"complexity": axis(jev[0]), "risk": axis(jev[1]), "intent": axis(jev[2])},
     });
