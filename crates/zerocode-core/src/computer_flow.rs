@@ -22,7 +22,10 @@ use crate::computer_recipe::{
     section,
 };
 use crate::computer_use::{COMPUTER_USE_PROTOCOL_VERSION, parse_command, verb_method};
-use crate::computer_use_protocol::AppIdentity;
+use crate::computer_use_protocol::{
+    AppIdentity,
+    reflex::{self, ValidatedPlan},
+};
 
 /// The grammar of a Flow's two sections — the one table its reader
 /// (`parse_flow`) and its writer (`FlowSpec::written`) share. A key, a word
@@ -771,6 +774,47 @@ fn check_line(check: &Check) -> String {
 /// A `## Trigger` is optional, and belongs to a Flow: one event line
 /// (`read_trigger`).
 pub fn parse_flow(text: &str) -> Result<Option<FlowSpec>, String> {
+    if reflex::read_sections(text)?.is_some() {
+        return Err("a reflex Flow requires parse_flow_with_reflex".into());
+    }
+    parse_flow_legacy(text)
+}
+
+/// The complete versioned document. A validated reflex plan cannot be
+/// silently reduced to a legacy Flow by a caller using `parse_flow`.
+#[derive(Debug, Clone)]
+pub struct ParsedFlow {
+    pub flow: FlowSpec,
+    pub reflex: Option<ValidatedPlan>,
+}
+
+impl ParsedFlow {
+    #[must_use]
+    pub fn written(&self) -> String {
+        let mut text = self.flow.written();
+        if let Some(reflex) = &self.reflex {
+            text.push_str(&reflex.plan().written_sections());
+        }
+        text
+    }
+}
+
+pub fn parse_flow_with_reflex(text: &str) -> Result<Option<ParsedFlow>, String> {
+    let reflex = reflex::read_sections(text)?;
+    let flow = parse_flow_legacy(text)?;
+    if reflex.is_some() && flow.is_none() {
+        return Err("reflex sections require a Flow".into());
+    }
+    Ok(flow.map(|flow| ParsedFlow { flow, reflex }))
+}
+
+fn parse_flow_legacy(text: &str) -> Result<Option<FlowSpec>, String> {
+    let duplicate = [FLOW_HEADING, FLOW_HEADING_CHECKS, FLOW_HEADING_TRIGGER]
+        .into_iter()
+        .find(|heading| text.lines().filter(|line| line.trim() == *heading).count() > 1);
+    if let Some(heading) = duplicate {
+        return Err(format!("duplicate `{heading}` section"));
+    }
     let trigger = section(text, FLOW_HEADING_TRIGGER);
     match (
         section(text, FLOW_HEADING),
@@ -2188,5 +2232,125 @@ mod tests {
             .is_err(),
             "a trigger without a Flow has no round to start"
         );
+    }
+    #[test]
+    fn reflex_sections_must_never_be_silently_ignored() {
+        let base = document("dry");
+        assert!(parse_flow(&base).is_ok());
+        for suffix in [
+            "\n## Reflex Perception\n\n- version: 1\n",
+            "\n## Flow\n\n- policy: dry\n",
+        ] {
+            assert!(
+                parse_flow(&format!("{base}{suffix}")).is_err(),
+                "accepted {suffix}"
+            );
+        }
+    }
+
+    #[test]
+    fn flow_round_trip_preserves_all_reflex_sections() {
+        let mut plan: crate::computer_use_protocol::reflex::ReflexPlan = serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../fixtures/reflex-contract/valid_basic.json"
+            ))
+            .unwrap()["plan"]
+                .clone(),
+        )
+        .unwrap();
+        plan.plan_hash = crate::computer_use_protocol::reflex::plan_hash(&plan);
+        let reflex_document = format!("{}{}", document("dry"), plan.written_sections());
+        assert!(parse_flow(&reflex_document).is_err());
+        let first = parse_flow_with_reflex(&reflex_document).unwrap().unwrap();
+        assert_eq!(first.reflex.as_ref().map(ValidatedPlan::plan), Some(&plan));
+        let second = parse_flow_with_reflex(&format!(
+            "{}\n{}",
+            document("dry").split(FLOW_HEADING).next().unwrap(),
+            first.written()
+        ))
+        .unwrap()
+        .unwrap();
+        assert_eq!(first.flow, second.flow);
+        assert_eq!(first.reflex.unwrap().plan(), second.reflex.unwrap().plan());
+        let legacy = parse_flow(&document("dry")).unwrap().unwrap();
+        assert!(
+            parse_flow_with_reflex(&document("dry"))
+                .unwrap()
+                .unwrap()
+                .reflex
+                .is_none()
+        );
+        assert_eq!(legacy, parse_flow(&document("dry")).unwrap().unwrap());
+    }
+
+    #[test]
+    fn every_legacy_flow_reads_and_writes_the_same_through_the_reflex_parser() {
+        let emulator = |verb: &str, flag: &str, value: &str| {
+            format!(
+                "{}{FLOW_HEADING_CHECKS}\n\n1. `zerocode-emulator {verb} --platform android --device phone {flag} {value}` — state, required\n",
+                document("dry").split(FLOW_HEADING_CHECKS).next().unwrap()
+            )
+        };
+        // Each valid shape the Flow tests above read: plain, triggered,
+        // guarded money (two steps, person or capped confirm) and emulator.
+        let corpus = [
+            document("dry"),
+            format!(
+                "{}\n{FLOW_HEADING_TRIGGER}\n\n1. `zerocode-browser find browser-1 \"입금\"` — event, required\n",
+                document("dry")
+            ),
+            money_document("guarded", None, &[3]),
+            money_document("guarded", None, &[2]),
+            money_document(
+                "guarded",
+                Some(&format!("{FLOW_CONFIRM_AUTO} {FLOW_CONFIRM_CAP}=50000")),
+                &[3],
+            ),
+            emulator("find", "--text", "완료"),
+            emulator("foreground", "--app", "com.example.app"),
+        ];
+        for text in &corpus {
+            let legacy = parse_flow(text).unwrap().unwrap();
+            let parsed = parse_flow_with_reflex(text).unwrap().unwrap();
+            assert!(parsed.reflex.is_none(), "{text}");
+            assert_eq!(parsed.flow, legacy, "{text}");
+            assert_eq!(parsed.written(), legacy.written(), "{text}");
+            let rewritten = format!(
+                "{}{}",
+                text.split(FLOW_HEADING).next().unwrap(),
+                parsed.written()
+            );
+            assert_eq!(
+                parse_flow(&rewritten).unwrap().as_ref(),
+                Some(&legacy),
+                "{rewritten}"
+            );
+            let again = parse_flow_with_reflex(&rewritten).unwrap().unwrap();
+            assert!(again.reflex.is_none(), "{rewritten}");
+            assert_eq!(again.flow, legacy, "{rewritten}");
+        }
+    }
+
+    #[test]
+    fn reflex_flow_sections_have_strict_whole_document_grammar() {
+        let plan: reflex::ReflexPlan = serde_json::from_value(
+            serde_json::from_str::<serde_json::Value>(include_str!(
+                "../fixtures/reflex-contract/valid_basic.json"
+            ))
+            .unwrap()["plan"]
+                .clone(),
+        )
+        .unwrap();
+        let base = format!("{}{}", document("dry"), plan.written_sections());
+        assert!(parse_flow_with_reflex(&base).is_ok());
+        for bad in [
+            format!("{base}\n{}\n\n- version: 1\n", reflex::HEADING_REFLEX),
+            base.replace("- version: 1", "- version: 1\n- version: 1"),
+            base.replace("- version: 1", "- version: 1\n- unknown: x"),
+            base.replace("- detector: {", "- detector: {\"bogus\":1,"),
+            base.replace(reflex::HEADING_RULES, "## Other Rules"),
+        ] {
+            assert!(parse_flow_with_reflex(&bad).is_err(), "accepted {bad}");
+        }
     }
 }
