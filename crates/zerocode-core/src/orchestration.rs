@@ -10664,8 +10664,12 @@ impl Ledger {
             peer.append_launch_tuning(&mut tuning);
         }
         // A restored worker carries a dispatch, so it is told what its first
-        // launch was (t-6747).
-        continue_past_classifier_declines(&worker.agent, &mut tuning);
+        // launch was (t-6747) — the pinned column for a pinned one (t-7153).
+        continue_past_classifier_declines(
+            &worker.agent,
+            summons_pins_a_model(worker.model.as_deref()),
+            &mut tuning,
+        );
         /* Resume the conversation without starting the interrupted work yet.
          *
          * The host has to spawn the process before `worker_reseated` can prove
@@ -14138,16 +14142,56 @@ pub fn provider_peer(agent: &str, run_id: &str, worker_id: &str) -> Option<Provi
 ///   `smart.classifierFallback` setting, whose `ask` waits for a person.
 ///
 /// Only a summons that carries a task: a bare pane is a person's to answer.
-const DECLINE_CONTINUE_WORDS: &[(&str, &[&str])] = &[
-    ("zo", &["--classifier-fallback", "auto"]),
-    ("claude", &["--settings", r#"{"switchModelsOnFlag":true}"#]),
+///
+/// And only a summons that pinned nothing (t-7153, P1-1; the coordinator's
+/// ruling m-7091): a `--model` or `--effort` on the summons is a binding
+/// choice, and the CLI's own route (cyber → Opus 4.8, for the rest of the
+/// conversation) is neither the model that was bound nor a rung anybody
+/// declared. A pinned worker's CLI is told the opposite, in the same flag
+/// layer — Claude's switch OFF, zo's ladder `off` — whatever the person's
+/// file says, so the pin holds however the file is set; where its task goes
+/// when its request is declined is the run's `handover-policy
+/// --on-classifier-decline <agent[:model[:effort]]>`, walked by the ledger
+/// to that exact rung on the conversation's own record, or the coordinator's
+/// hand on the `classifier_declined` notice. A declaration never turns the
+/// CLI's switch back on: it names where the LEDGER hands the task, not a
+/// licence for the CLI to pick a model of its own.
+const DECLINE_CONTINUE_WORDS: &[DeclineWords] = &[
+    DeclineWords {
+        agent: "zo",
+        unpinned: &["--classifier-fallback", "auto"],
+        pinned: &["--classifier-fallback", "off"],
+    },
+    DeclineWords {
+        agent: "claude",
+        unpinned: &["--settings", r#"{"switchModelsOnFlag":true}"#],
+        pinned: &["--settings", r#"{"switchModelsOnFlag":false}"#],
+    },
 ];
 
-/// Append [`DECLINE_CONTINUE_WORDS`]' row for `agent`, when it has one — on
-/// both launch roads, the fresh summons and the restored one, so a worker a
-/// restart seats again is told what its first launch was.
-fn continue_past_classifier_declines(agent: &str, words: &mut Vec<String>) {
-    if let Some((_, said)) = DECLINE_CONTINUE_WORDS.iter().find(|(id, _)| *id == agent) {
+/// One CLI's row of [`DECLINE_CONTINUE_WORDS`]: what a summons that pinned
+/// nothing is told, and what one that pinned a model or an effort is told.
+struct DeclineWords {
+    agent: &'static str,
+    unpinned: &'static [&'static str],
+    pinned: &'static [&'static str],
+}
+
+/// Whether a summons pinned the worker to a model: a pinned worker's CLI
+/// never leaves it by itself ([`DECLINE_CONTINUE_WORDS`]). The `--model` is
+/// the pin; an `--effort` rides only beside one (`--effort requires
+/// --model`, refused at the verb), so it never pins alone.
+fn summons_pins_a_model(model: Option<&str>) -> bool {
+    model.is_some()
+}
+
+/// Append [`DECLINE_CONTINUE_WORDS`]' row for `agent`, when it has one — the
+/// pinned column or the unpinned one — on both launch roads, the fresh
+/// summons and the restored one, so a worker a restart seats again is told
+/// what its first launch was.
+fn continue_past_classifier_declines(agent: &str, pinned: bool, words: &mut Vec<String>) {
+    if let Some(row) = DECLINE_CONTINUE_WORDS.iter().find(|row| row.agent == agent) {
+        let said = if pinned { row.pinned } else { row.unpinned };
         words.extend(said.iter().map(|word| (*word).to_string()));
     }
 }
@@ -14163,12 +14207,13 @@ fn command_for_reserved_worker(
     launcher: &dyn Launcher,
     prepared: &PreparedWorkerStart,
     mut words: Vec<String>,
+    pinned: bool,
 ) -> Result<String, String> {
     if let Some(peer) = provider_peer(&prepared.agent, &prepared.run, &prepared.worker) {
         peer.append_launch_tuning(&mut words);
     }
     if prepared.task.is_some() {
-        continue_past_classifier_declines(&prepared.agent, &mut words);
+        continue_past_classifier_declines(&prepared.agent, pinned, &mut words);
     }
     match launcher.command_for(&prepared.agent, "", &words) {
         Ok(command) => Ok(command),
@@ -17654,8 +17699,13 @@ fn plan_inner(
             // it through process listings and let startup/login screens consume
             // it as positional arguments. If the provider catalog refuses the
             // command, the helper uses this reservation's exact rollback.
-            let command =
-                command_for_reserved_worker(ledger, launcher, &prepared_worker_start, tuning)?;
+            let command = command_for_reserved_worker(
+                ledger,
+                launcher,
+                &prepared_worker_start,
+                tuning,
+                summons_pins_a_model(model.as_deref()),
+            )?;
             let provider_peer = provider_peer(&agent, &run_id, &started.worker);
             Decided {
                 answered_from: None,

@@ -10974,6 +10974,180 @@ fn a_task_carrying_summons_is_told_to_continue_past_a_classifier_decline() {
     );
 }
 
+/// A summons that pins a model is a binding choice (t-7153, P1-1): its CLI
+/// is told NOT to leave the model by itself on a classifier decline —
+/// Claude's switch off, zo's ladder `off` — whether or not the run declared
+/// `--on-classifier-decline`, because the declaration names the exact rung
+/// the LEDGER hands the task to, never a licence for the CLI's own route.
+/// An unpinned summons keeps the switch on (an `--effort` never pins alone:
+/// the verb refuses it without a `--model`). Both launch roads say the
+/// same: the fresh summons and the restart's reseat.
+#[test]
+fn a_pinned_summons_is_never_told_to_switch_models_by_itself() {
+    const OFF: &str = r#"{"switchModelsOnFlag":false}"#;
+    const ON: &str = r#"{"switchModelsOnFlag":true}"#;
+    let mut bench = Bench::new();
+    bench.launcher = Catalog(&["claude", "codex", "zo"]);
+    bench.json("run-create --name pinned-words");
+    let task = |bench: &mut Bench| {
+        bench.json("task-create --spec decline")["taskId"]
+            .as_str()
+            .expect("an id")
+            .to_string()
+    };
+    let summoned = |bench: &mut Bench, line: &str| {
+        let planned = bench.run(line);
+        assert_eq!(
+            planned.reply.exit_code, 0,
+            "{line}: {}",
+            planned.reply.stderr
+        );
+        let Effect::Split { command, .. } = planned.effect else {
+            panic!("{line} did not plan a split: {:?}", planned.effect);
+        };
+        command
+    };
+
+    for declared in [false, true] {
+        if declared {
+            bench.json("handover-policy --on-classifier-decline claude:claude-opus-4-8");
+        }
+        let why = if declared {
+            "under a declared order"
+        } else {
+            "with no order declared"
+        };
+        let model_task = task(&mut bench);
+        let by_model = summoned(
+            &mut bench,
+            &format!("worker-start --agent claude --model fable --task {model_task}"),
+        );
+        assert_eq!(
+            command_flag(&by_model, "--settings"),
+            Some(OFF),
+            "a model pin {why}: {by_model}"
+        );
+        let effort_task = task(&mut bench);
+        let by_effort = summoned(
+            &mut bench,
+            &format!("worker-start --agent claude --model fable --effort max --task {effort_task}"),
+        );
+        assert_eq!(
+            command_flag(&by_effort, "--settings"),
+            Some(OFF),
+            "a model pin with its effort {why}: {by_effort}"
+        );
+        let zo_task = task(&mut bench);
+        let zo = summoned(
+            &mut bench,
+            &format!("worker-start --agent zo --model fable --effort high --task {zo_task}"),
+        );
+        assert_eq!(
+            command_flag(&zo, "--classifier-fallback"),
+            Some("off"),
+            "a pinned zo {why}: {zo}"
+        );
+        let free_task = task(&mut bench);
+        let free = summoned(
+            &mut bench,
+            &format!("worker-start --agent claude --task {free_task}"),
+        );
+        assert_eq!(
+            command_flag(&free, "--settings"),
+            Some(ON),
+            "an unpinned summons {why}: {free}"
+        );
+        let bare = summoned(&mut bench, "worker-start --agent claude --model fable");
+        assert_eq!(
+            command_flag(&bare, "--settings"),
+            None,
+            "a bare pane is the person's, pinned or not: {bare}"
+        );
+    }
+
+    // The restart's road: a pinned sleeper is reseated with the switch off,
+    // an unpinned one with it on.
+    let mut restored = Bench::new();
+    restored.launcher = Catalog(&["claude", "codex", "zo"]);
+    let run = restored.json("run-create --name pinned-reseat")["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    let mut seated = Vec::new();
+    for (index, line) in [
+        "worker-start --agent claude --model fable --effort max --task",
+        "worker-start --agent claude --task",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let task = task(&mut restored);
+        let fresh = restored.run(&format!("{line} {task}"));
+        assert_eq!(fresh.reply.exit_code, 0, "{}", fresh.reply.stderr);
+        let said: serde_json::Value =
+            serde_json::from_str(&fresh.reply.stdout).expect("a start receipt");
+        let worker = said["workerId"].as_str().expect("a worker id").to_string();
+        let Effect::Split {
+            pane,
+            from,
+            direction,
+            ..
+        } = &fresh.effect
+        else {
+            panic!("the worker did not plan a split: {:?}", fresh.effect);
+        };
+        restored.team.record_split(
+            pane,
+            71 + u32::try_from(index).expect("small"),
+            from,
+            *direction,
+        );
+        assert!(
+            restored
+                .ledger
+                .worker_seated(("team-1", pane), "/wt/pinned")
+        );
+        let at = restored.ledger.locate(&worker).expect("the worker");
+        restored.ledger.runs[at.0].workers[at.1].session = Some(ProviderSession {
+            key: SessionKey::SessionId,
+            id: format!("claude-session-{index}"),
+            transcript_path: None,
+        });
+        seated.push(worker);
+    }
+    assert_eq!(restored.ledger.window_restarted(2_000).sleeping, 2);
+    let mut replacement_team = Team::new("team-after-restart", "token", 80);
+    assert!(
+        restored
+            .ledger
+            .coordinator_returned(&run, "team-after-restart/%1", None, 2_001)
+    );
+    for (worker, expected) in seated.iter().zip([OFF, ON]) {
+        let resumed = restored
+            .ledger
+            .prepare_worker_reseat(
+                &run,
+                worker,
+                &mut replacement_team,
+                agent_teams::LEADER_PANE,
+                &restored.launcher,
+                "continue",
+            )
+            .expect("a resume split");
+        let Effect::Split { command, .. } = &resumed.effect else {
+            panic!(
+                "the worker did not plan a resume split: {:?}",
+                resumed.effect
+            );
+        };
+        assert_eq!(
+            command_flag(command, "--settings"),
+            Some(expected),
+            "the reseat of {worker}: {command}"
+        );
+    }
+}
+
 #[test]
 fn claude_provider_peer_views_hide_private_provider_state() {
     let mut bench = Bench::new();
