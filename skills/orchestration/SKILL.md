@@ -388,7 +388,15 @@ hour at most). A timeout is not a failure: the answer names the question, and
 `ask --resume <questionId>` walks back to it without asking twice. One
 question takes ONE answer — a reply that repeats the standing answer lands AS
 it, a different one is refused with its name — and a question whose dispatch
-ended is closed. On the answering side you are just reading mail:
+ended is closed. While you wait, the ledger tells you how the RECEIVER stands
+— one `status` line from `ledger` threaded on your question in your inbox,
+`reason: turn_ended | interrupted | awaiting_input | stalled | <stall cause> |
+quota_walled | taken_over | finished | seat_vacated | cancelled | exited` —
+and the timed-out answer carries the last of them under `receiver`. None of
+those is an answer, and `cancelled`/`exited` are final: the seat will never
+answer, the blocked `ask` wakes on them, and `cancelled` says in so many words
+not to ask again and not to summon a replacement — that is its coordinator's
+decision. On the answering side you are just reading mail:
 `check --types question`, then `reply --to-message <id> --body '<answer>'`.
 `worker-start` also takes launch tuning where the agent's own CLI does —
 `--model <id>` (an opaque provider id, passed through unread), `--effort`
